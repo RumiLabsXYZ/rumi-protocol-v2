@@ -1,9 +1,9 @@
 import { Principal } from "@dfinity/principal";
 import { CONFIG, CANISTER_IDS, LOCAL_CANISTER_IDS, vault_frontend } from '../config';
-import { idlFactory as rumi_backendIDL } from '../../../../declarations/rumi_protocol_backend/rumi_protocol_backend.did.js';
-import { idlFactory as icp_ledgerIDL } from '../../../../declarations/icp_ledger/icp_ledger.did.js';
-import { idlFactory as icusd_ledgerIDL } from '../../../../declarations/icusd_ledger/icusd_ledger.did.js';
-import { idlFactory as stabilityPoolIDL } from '../../../../declarations/rumi_stability_pool/rumi_stability_pool.did.js';
+import { idlFactory as rumi_backendIDL } from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did.js';
+import { idlFactory as icp_ledgerIDL } from '$declarations/icp_ledger/icp_ledger.did.js';
+import { idlFactory as icusd_ledgerIDL } from '$declarations/icusd_ledger/icusd_ledger.did.js';
+import { idlFactory as stabilityPoolIDL } from '$declarations/rumi_stability_pool/rumi_stability_pool.did.js';
 import { createPNP, type PNP } from '@windoge98/plug-n-play';
 
 // Define types for supported canisters

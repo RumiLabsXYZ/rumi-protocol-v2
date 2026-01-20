@@ -29,7 +29,7 @@ const config = {
       assets: process.env.NODE_ENV === 'production' ? '' : '',
     },
     alias: {
-      '$declarations': '../declarations',
+      '$declarations': path.resolve('../../declarations'),
       '$lib': path.resolve('./src/lib'),
       '$services': path.resolve('./src/lib/services'),
       '$components': path.resolve('./src/lib/components'),

@@ -3,7 +3,7 @@ import { Actor, HttpAgent } from '@dfinity/agent';
 import { canisterIDLs, pnp } from './pnp';
 import { CONFIG } from '../config';
 import { ICRC1_IDL } from '../idls/ledger.idl';
-import type { _SERVICE } from '../../../../declarations/icp_ledger/icp_ledger.did';
+import type { _SERVICE } from '$declarations/icp_ledger/icp_ledger.did';
 import { walletStore as wallet } from '../stores/wallet';
 
 // Constants for token handling

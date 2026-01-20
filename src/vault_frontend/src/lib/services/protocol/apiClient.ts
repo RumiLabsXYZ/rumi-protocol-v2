@@ -1,10 +1,10 @@
 import { Actor, HttpAgent } from '@dfinity/agent';
 import { Principal } from '@dfinity/principal';
 import { BigIntUtils } from '../../utils/bigintUtils';
-import { idlFactory as rumi_backendIDL } from '../../../../../declarations/rumi_protocol_backend/rumi_protocol_backend.did.js';
-import { idlFactory as icp_ledgerIDL } from '../../../../../declarations/icp_ledger/icp_ledger.did.js';
-import { idlFactory as icusd_ledgerIDL } from '../../../../../declarations/icusd_ledger/icusd_ledger.did.js';
-import { idlFactory as treasuryIDL } from '../../../../../declarations/rumi_treasury/rumi_treasury.did.js';
+import { idlFactory as rumi_backendIDL } from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did.js';
+import { idlFactory as icp_ledgerIDL } from '$declarations/icp_ledger/icp_ledger.did.js';
+import { idlFactory as icusd_ledgerIDL } from '$declarations/icusd_ledger/icusd_ledger.did.js';
+import { idlFactory as treasuryIDL } from '$declarations/rumi_treasury/rumi_treasury.did.js';
 import { CANISTER_IDS, CONFIG, LOCAL_CANISTER_IDS  } from '../../config';
 import { walletStore } from '../../stores/wallet';
 import type {
@@ -16,7 +16,7 @@ import type {
     SuccessWithFee,
     ProtocolError,
     OpenVaultSuccess
-  } from '../../../../../declarations/rumi_protocol_backend/rumi_protocol_backend.did.js';
+  } from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did.js';
 import { walletOperations } from './walletOperations';
 import { get } from 'svelte/store';
 import { vaultStore } from '$lib/stores/vaultStore';

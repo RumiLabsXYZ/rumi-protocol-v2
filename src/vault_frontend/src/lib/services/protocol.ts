@@ -8,7 +8,7 @@ import type {
   SuccessWithFee,
   ProtocolError,
   OpenVaultSuccess,
-} from '../../../../declarations/rumi_protocol_backend/rumi_protocol_backend.did';
+} from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did';
 
 import { ApiClient} from './protocol/apiClient';
 import { QueryOperations } from './protocol/queryOperations';

@@ -3,7 +3,7 @@ import type { FeesInfo, ProtocolStatus, FeesDTO, ProtocolStatusDTO } from '../ty
 import type {
     ProtocolStatus as CanisterProtocolStatus,
     Fees
-  } from '../../../../../declarations/rumi_protocol_backend/rumi_protocol_backend.did';
+  } from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did';
 import { CONFIG } from '../../config';
 import { RequestDeduplicator } from '../RequestDeduplicator';
 

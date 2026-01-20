@@ -1,26 +1,20 @@
 {
-  "icp_ledger": {
-    "ic": "4nfpw-byaaa-aaaai-q3tqa-cai"
-  },
   "icusd_ledger": {
-    "ic": "4kejc-maaaa-aaaai-q3tqq-cai"
+    "ic": "t6bor-paaaa-aaaap-qrd5q-cai"
   },
   "rumi_protocol_backend": {
-    "ic": "aakb7-rqaaa-aaaai-q3oua-cai"
+    "ic": "tfesu-vyaaa-aaaap-qrd7a-cai"
   },
   "rumi_protocol_frontend": {
-    "ic": "ahlhl-4iaaa-aaaai-q3ouq-cai"
+    "ic": "t2xrh-2aaaa-aaaap-qreaa-cai"
   },
   "rumi_stability_pool": {
-    "ic": "jgwkf-3yaaa-aaaai-q34na-cai"
+    "ic": "tmhzi-dqaaa-aaaap-qrd6q-cai"
   },
   "rumi_treasury": {
-    "ic": "mgjkr-hqaaa-aaaai-q34qq-cai"
-  },
-  "rumi_vault": {
-    "ic": "vskjr-6yaaa-aaaai-q3sca-cai"
+    "ic": "tlg74-oiaaa-aaaap-qrd6a-cai"
   },
   "vault_frontend": {
-    "ic": "stm54-gyaaa-aaaai-q3ssa-cai"
+    "ic": "tcfua-yaaaa-aaaap-qrd7q-cai"
   }
 }

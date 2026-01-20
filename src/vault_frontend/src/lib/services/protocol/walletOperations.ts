@@ -16,7 +16,7 @@ import type {
   SuccessWithFee,
   ProtocolError,
   OpenVaultSuccess,
-} from '../../../../../declarations/rumi_protocol_backend/rumi_protocol_backend.did';
+} from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did';
 
 export const E8S = 100_000_000;
 
