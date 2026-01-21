@@ -406,7 +406,8 @@ function createWalletStore() {
 
     async getActor(canisterId: string, idl: any) {
       try {
-        return await pnp.getActor(canisterId, idl);
+        // Use auth.getActor which properly handles both Plug and Internet Identity
+        return await auth.getActor(canisterId, idl);
       } catch (err) {
         console.error('Failed to get actor:', err);
         throw err;
