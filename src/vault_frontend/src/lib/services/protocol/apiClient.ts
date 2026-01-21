@@ -911,11 +911,12 @@ static async repayToVault(vaultId: number, icusdAmount: number): Promise<VaultOp
         ApiClient.vaultCache.loading = true;
         
         const actor = await ApiClient.getAuthenticatedActor();
-        // Use a plain object with toString() to avoid Principal type mismatches between different @dfinity/principal instances
-        const principalParam = { _type: 'Principal', toString: () => principalStr } as any;
+        // Use the actual Principal from wallet state, or reconstruct from string if needed
+        // The Principal must be a proper @dfinity/principal instance for Candid serialization
+        const principalForQuery = userPrincipal || Principal.fromText(principalStr);
         
         console.log(`Fetching vaults for principal: ${principalStr}`);
-        const canisterVaults = await actor.get_vaults([principalParam]);
+        const canisterVaults = await actor.get_vaults([principalForQuery]);
         console.log('Raw canister vaults data:', canisterVaults);
         
         // Get protocol status for ICP price calculation
@@ -1099,10 +1100,9 @@ static async repayToVault(vaultId: number, icusdAmount: number): Promise<VaultOp
           }
           
           const actor = await ApiClient.getAuthenticatedActor();
-          // Convert principal to string and back to avoid type mismatch between different Principal implementations
-          const principalStr = principal.toString();
-          const principalParam = { _type: 'Principal', toString: () => principalStr } as any;
-          return actor.get_liquidity_status(principalParam);
+          // Use the actual Principal or reconstruct from string for proper Candid serialization
+          const principalForQuery = Principal.fromText(principal.toString());
+          return actor.get_liquidity_status(principalForQuery);
         } catch (err) {
           console.error('Error getting liquidity status:', err);
           throw new Error('Failed to get liquidity status');
