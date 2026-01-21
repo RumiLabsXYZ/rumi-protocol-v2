@@ -12,23 +12,25 @@
     },
     "rumi_protocol_frontend": {
       "source": [
-        "src/rumi_protocol_frontend/dist"
+        "src/rumi_protocol_frontend/dist",
+        "src/rumi_protocol_frontend/assets"
       ],
       "type": "assets",
       "workspace": "rumi_protocol_frontend"
     },
     "vault_frontend": {
       "source": [
-        "src/vault_frontend/dist"
+        "src/vault_frontend/dist",
+        "src/vault_frontend/assets"
       ],
       "type": "assets",
       "workspace": "vault_frontend"
     },
     "icusd_ledger": {
-        "candid": "src/ledger/ledger.did",
-        "type": "custom",
-        "wasm": "src/ledger/ic-icrc1-ledger.wasm",
-        "shrink": false
+      "candid": "src/ledger/ledger.did",
+      "type": "custom",
+      "wasm": "src/ledger/ic-icrc1-ledger.wasm",
+      "shrink": false
     },
     "icp_ledger_canister": {
       "candid": "src/ledger/ledger.did",
@@ -106,7 +108,7 @@
   },
   "networks": {
     "local": {
-      "bind": "localhost:4943", 
+      "bind": "localhost:4943",
       "type": "ephemeral",
       "canister_http": {
         "enabled": true,
@@ -114,7 +116,9 @@
       }
     },
     "ic": {
-      "providers": ["https://ic0.app"],
+      "providers": [
+        "https://ic0.app"
+      ],
       "type": "persistent"
     }
   },
