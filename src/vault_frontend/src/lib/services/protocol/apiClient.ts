@@ -1746,7 +1746,7 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
 
 // Add treasury service for accessing fee data
 export class TreasuryService {
-  private static readonly TREASURY_CANISTER_ID = 'i5ige-naaaa-aaaai-q33ua-cai';
+  private static readonly TREASURY_CANISTER_ID = CANISTER_IDS.TREASURY;
   
   // Get treasury status and balances
   static async getTreasuryStatus(): Promise<{

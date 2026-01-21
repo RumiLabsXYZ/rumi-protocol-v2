@@ -27,7 +27,7 @@ export const REQUIRED_CANISTERS = {
   protocol: CONFIG.currentCanisterId,
   icpLedger: CONFIG.currentIcpLedgerId,
   icusdLedger: CONFIG.currentIcusdLedgerId,
-  stabilityPool: "jgwkf-3yaaa-aaaai-q34na-cai"
+  stabilityPool: CANISTER_IDS.STABILITY_POOL
 };
 
 // COMPREHENSIVE PERMISSION SYSTEM - Request ALL permissions at once during wallet connection
@@ -46,7 +46,7 @@ export async function connectWithComprehensivePermissions(walletId: string): Pro
           CONFIG.currentCanisterId,      // Protocol canister
           CONFIG.currentIcpLedgerId,     // ICP Ledger  
           CONFIG.currentIcusdLedgerId,   // icUSD Ledger
-          "jgwkf-3yaaa-aaaai-q34na-cai"  // Stability Pool canister
+          CANISTER_IDS.STABILITY_POOL    // Stability Pool canister
         ],
         host: CONFIG.isLocal ? 'http://localhost:4943' : 'https://icp0.io',
         timeout: 60000

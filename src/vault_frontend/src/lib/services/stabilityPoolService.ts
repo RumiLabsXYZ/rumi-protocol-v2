@@ -26,8 +26,8 @@ export interface LiquidationRecord {
   liquidation_bonus: bigint;
 }
 
-// Add stability pool canister ID to config
-const STABILITY_POOL_CANISTER_ID = "jgwkf-3yaaa-aaaai-q34na-cai";
+// Use stability pool canister ID from config
+const STABILITY_POOL_CANISTER_ID = CANISTER_IDS.STABILITY_POOL;
 
 class StabilityPoolService {
   private async getActor() {

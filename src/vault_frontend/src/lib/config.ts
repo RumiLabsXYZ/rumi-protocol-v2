@@ -2,23 +2,27 @@ import { idlFactory as rumi_backendIDL } from '$declarations/rumi_protocol_backe
 import { idlFactory as icp_ledgerIDL } from '$declarations/icp_ledger/icp_ledger.did.js';
 import { idlFactory as icusd_ledgerIDL } from '$declarations/icusd_ledger/icusd_ledger.did.js';
 
-// Canister IDs for production (from canister_ids.json)
+// Canister IDs for production (Rumi Protocol v2 - mainnet)
 export const CANISTER_IDS = {
-  PROTOCOL: "aakb7-rqaaa-aaaai-q3oua-cai",
+  PROTOCOL: "tfesu-vyaaa-aaaap-qrd7a-cai",
   ICP_LEDGER: "ryjl3-tyaaa-aaaaa-aaaba-cai",
-  ICUSD_LEDGER: "4kejc-maaaa-aaaai-q3tqq-cai",
+  ICUSD_LEDGER: "t6bor-paaaa-aaaap-qrd5q-cai",
+  TREASURY: "tlg74-oiaaa-aaaap-qrd6a-cai",
+  STABILITY_POOL: "tmhzi-dqaaa-aaaap-qrd6q-cai",
 } as const;
 
 // Canister IDs for local development
 export const LOCAL_CANISTER_IDS = {
-  PROTOCOL: "aakb7-rqaaa-aaaai-q3oua-cai",
+  PROTOCOL: "tfesu-vyaaa-aaaap-qrd7a-cai",
   ICP_LEDGER: "ryjl3-tyaaa-aaaaa-aaaba-cai",
-  ICUSD_LEDGER: "4kejc-maaaa-aaaai-q3tqq-cai",
+  ICUSD_LEDGER: "t6bor-paaaa-aaaap-qrd5q-cai",
+  TREASURY: "tlg74-oiaaa-aaaap-qrd6a-cai",
+  STABILITY_POOL: "tmhzi-dqaaa-aaaap-qrd6q-cai",
   INTERNET_IDENTITY: "rdmx6-jaaaa-aaaaa-aaadq-cai", // Local II canister
 } as const;
 
 // Frontend canister ID
-export const vault_frontend = "stm54-gyaaa-aaaai-q3ssa-cai";
+export const vault_frontend = "tcfua-yaaaa-aaaap-qrd7q-cai";
 
 // Add this to your config file if it doesn't exist
 export const isDevelopment = process.env.NODE_ENV === 'development' || import.meta.env.DEV;
