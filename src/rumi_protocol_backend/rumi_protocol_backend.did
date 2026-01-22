@@ -6,6 +6,8 @@ type InitArg = record {
   developer_principal : principal;
   treasury_principal : opt principal;
   stability_pool_principal : opt principal;
+  ckusdt_ledger_principal : opt principal;
+  ckusdc_ledger_principal : opt principal;
 };
 type Event = variant {
   claim_liquidity_returns : record {
@@ -141,6 +143,10 @@ type CandidVault = record {
 type SuccessWithFee = record { block_index : nat64; fee_amount_paid : nat64 };
 type VaultArg = record { vault_id : nat64; amount : nat64 };
 
+// Stable token types for repayment (ckUSDT/ckUSDC)
+type StableTokenType = variant { CKUSDT; CKUSDC };
+type VaultArgWithToken = record { vault_id : nat64; amount : nat64; token_type : StableTokenType };
+
 // Add HTTP types
 type HttpRequest = record {
   url : text;
@@ -162,6 +168,7 @@ service : (ProtocolArg) -> {
   add_margin_to_vault : (VaultArg) -> (variant { Ok : nat64; Err : ProtocolError });
   borrow_from_vault : (VaultArg) -> (variant { Ok : SuccessWithFee; Err : ProtocolError });
   repay_to_vault : (VaultArg) -> (variant { Ok : nat64; Err : ProtocolError });
+  repay_to_vault_with_stable : (VaultArgWithToken) -> (variant { Ok : nat64; Err : ProtocolError });
   close_vault : (nat64) -> (variant { Ok : opt nat64; Err : ProtocolError });
 
   // Liquidity related operations
@@ -187,4 +194,5 @@ service : (ProtocolArg) -> {
   withdraw_and_close_vault: (nat64) -> (variant { Ok: opt nat64; Err: ProtocolError });
   liquidate_vault : (nat64) -> (variant { Ok : SuccessWithFee; Err : ProtocolError });
   liquidate_vault_partial : (nat64, nat64) -> (variant { Ok : SuccessWithFee; Err : ProtocolError });
+  liquidate_vault_partial_with_stable : (nat64, nat64, StableTokenType) -> (variant { Ok : SuccessWithFee; Err : ProtocolError });
 }

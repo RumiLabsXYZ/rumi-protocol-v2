@@ -9,6 +9,7 @@ use rumi_protocol_backend::{
     state::{read_state, replace_state, Mode, State},
     vault::{CandidVault, OpenVaultSuccess, VaultArg},
     Fees, GetEventsArg, ProtocolArg, ProtocolError, ProtocolStatus, SuccessWithFee,
+    VaultArgWithToken, StableTokenType,
 };
 use rumi_protocol_backend::logs::DEBUG;
 use rumi_protocol_backend::state::mutate_state;
@@ -313,6 +314,14 @@ async fn repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
     check_postcondition(rumi_protocol_backend::vault::repay_to_vault(arg).await)
 }
 
+/// Repay vault debt using ckUSDT or ckUSDC (1:1 with icUSD)
+#[candid_method(update)]
+#[update]
+async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, ProtocolError> {
+    validate_call()?;
+    check_postcondition(rumi_protocol_backend::vault::repay_to_vault_with_stable(arg).await)
+}
+
 #[candid_method(update)]
 #[update]
 async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
@@ -353,6 +362,13 @@ async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolError>
 #[candid_method(update)]
 async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result<SuccessWithFee, ProtocolError> {
     check_postcondition(rumi_protocol_backend::vault::liquidate_vault_partial(vault_id, icusd_amount).await)
+}
+
+/// Liquidate a vault using ckUSDT or ckUSDC (1:1 with icUSD)
+#[update]
+#[candid_method(update)]
+async fn liquidate_vault_partial_with_stable(vault_id: u64, amount: u64, token_type: StableTokenType) -> Result<SuccessWithFee, ProtocolError> {
+    check_postcondition(rumi_protocol_backend::vault::liquidate_vault_partial_with_stable(vault_id, amount, token_type).await)
 }
 
 // Stability Pool Integration - allows stability pool to execute liquidations
