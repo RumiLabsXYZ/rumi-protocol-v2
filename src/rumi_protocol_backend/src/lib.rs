@@ -53,6 +53,22 @@ pub const MIN_ICUSD_AMOUNT: ICUSD = ICUSD::new(10_000_000); // 0.10 icUSD (10 ce
 pub const RECOVERY_COLLATERAL_RATIO: Ratio = Ratio::new(dec!(1.5));  // 150%
 pub const MINIMUM_COLLATERAL_RATIO: Ratio = Ratio::new(dec!(1.33));  // 133%
 
+/// Stable token types accepted for vault repayment (1:1 with icUSD)
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StableTokenType {
+    /// ckUSDT stablecoin
+    CKUSDT,
+    /// ckUSDC stablecoin
+    CKUSDC,
+}
+
+/// Arguments for repaying vault with a stable token
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultArgWithToken {
+    pub vault_id: u64,
+    pub amount: u64,
+    pub token_type: StableTokenType,
+}
 
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProtocolArg {
@@ -69,6 +85,8 @@ pub struct InitArg {
     pub developer_principal: Principal,
     pub treasury_principal: Option<Principal>,
     pub stability_pool_principal: Option<Principal>,
+    pub ckusdt_ledger_principal: Option<Principal>,
+    pub ckusdc_ledger_principal: Option<Principal>,
 }
 
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
