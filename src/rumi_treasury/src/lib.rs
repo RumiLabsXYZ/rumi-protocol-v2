@@ -104,6 +104,8 @@ async fn withdraw(args: WithdrawArgs) -> Result<WithdrawResult, String> {
             AssetType::ICUSD => Some(config.icusd_ledger),
             AssetType::ICP => Some(config.icp_ledger),
             AssetType::CKBTC => config.ckbtc_ledger,
+            AssetType::CKUSDT => config.ckusdt_ledger,
+            AssetType::CKUSDC => config.ckusdc_ledger,
         }
     }).ok_or("Ledger not configured for this asset type")?;
 
