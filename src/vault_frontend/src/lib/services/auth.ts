@@ -306,7 +306,9 @@ function createAuthStore() {
         }) as T;
       } else {
         // Use Plug wallet
-        if (!pnp.isConnected()) {
+        // Use async check for Plug wallet connection status
+        const isPlugConnected = await pnp.isConnectedAsync();
+        if (!isPlugConnected) {
           throw new Error('Plug wallet not connected');
         }
 
@@ -324,7 +326,7 @@ function createAuthStore() {
       if (state.walletType === WALLET_TYPES.INTERNET_IDENTITY) {
         return authClient ? await authClient.isAuthenticated() : false;
       } else {
-        return pnp.isConnected();
+        return await pnp.isConnectedAsync();
       }
     },
     

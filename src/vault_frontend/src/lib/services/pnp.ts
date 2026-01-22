@@ -149,6 +149,31 @@ export const pnp = {
   // Override connect to use our comprehensive method
   connect: connectWithComprehensivePermissions,
   
+  // Add isConnected method that was lost in the spread
+  // This is a synchronous check - for async, use isConnectedAsync
+  isConnected(): boolean {
+    // Check if Plug wallet exists and has an agent (indicates connected state)
+    if (window.ic?.plug?.agent) {
+      return true;
+    }
+    // Fall back to PNP's isConnected if available
+    if (globalPnp && typeof globalPnp.isConnected === 'function') {
+      return globalPnp.isConnected();
+    }
+    return false;
+  },
+
+  // Async version for when we need to verify with Plug directly
+  async isConnectedAsync(): Promise<boolean> {
+    if (window.ic?.plug) {
+      return await window.ic.plug.isConnected();
+    }
+    if (globalPnp && typeof globalPnp.isConnected === 'function') {
+      return globalPnp.isConnected();
+    }
+    return false;
+  },
+  
   // Override getActor to use Plug directly when possible to avoid permission prompts
   async getActor(canisterId: string, idl: any) {
     try {

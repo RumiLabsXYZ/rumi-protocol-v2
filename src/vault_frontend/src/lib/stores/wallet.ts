@@ -9,6 +9,7 @@ import { TokenService } from '../services/tokenService';
 import { auth, WALLET_TYPES } from '../services/auth';
 import { RequestDeduplicator } from '../services/RequestDeduplicator';
 import { appDataStore } from './appDataStore';
+import { ApiClient } from '../services/protocol/apiClient';
 
 interface WalletState {
   isConnected: boolean;
@@ -315,6 +316,10 @@ function createWalletStore() {
         
         await cleanupPendingOperations();
         
+        // CRITICAL: Clear the vault cache before connecting a new wallet
+        // This ensures we don't show stale vaults from a previous wallet session
+        ApiClient.clearVaultCache();
+        
         const account = await auth.connect(walletId);
         
         if (!account) throw new Error('No account returned from wallet');
@@ -378,6 +383,10 @@ function createWalletStore() {
         authenticatedActor = null;
         
         stopBalanceRefresh();
+
+        // CRITICAL: Clear the vault cache to prevent stale data from being shown
+        // when switching between wallets (e.g., from Internet Identity to Plug)
+        ApiClient.clearVaultCache();
 
         appDataStore.setWalletState(false, null);
 
