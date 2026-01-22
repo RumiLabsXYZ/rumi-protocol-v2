@@ -457,12 +457,21 @@ export class ProtocolManager {
         // Pre-checks - validation is now handled in ApiClient
         await walletOperations.checkSufficientBalance(icusdAmount);
         
+        // IMPORTANT: Refresh wallet connection before checking allowance to prevent stale actor errors
+        try {
+          console.log('🔄 Refreshing wallet connection before repayment...');
+          await walletStore.refreshWallet();
+          await new Promise(resolve => setTimeout(resolve, 500)); // Brief delay for connection to settle
+        } catch (refreshErr) {
+          console.warn('Wallet refresh failed, attempting to continue:', refreshErr);
+        }
+        
         // Ensure proper icUSD allowance for the repayment
         const amountE8s = BigInt(Math.floor(icusdAmount * 100_000_000));
         const spenderCanisterId = CONFIG.currentCanisterId;
         
         try {
-          // Check current allowance
+          // Check current allowance (walletOperations.checkIcusdAllowance now has built-in retry)
           const currentAllowance = await walletOperations.checkIcusdAllowance(spenderCanisterId);
           console.log(`💰 Repay pre-check: Current icUSD allowance: ${Number(currentAllowance) / 100_000_000}`);
           console.log(`💰 Repay pre-check: Required icUSD amount: ${icusdAmount}`);
@@ -474,7 +483,7 @@ export class ProtocolManager {
             processingStore.setStage(ProcessingStage.APPROVING);
             console.log(`🔐 Setting icUSD approval - insufficient allowance (have: ${Number(currentAllowance) / 100_000_000}, need: ${Number(requiredAllowance) / 100_000_000})`);
             
-            // Approve with the buffered amount
+            // Approve with the buffered amount (approveIcusdTransfer now has built-in retry)
             const approvalResult = await walletOperations.approveIcusdTransfer(requiredAllowance, spenderCanisterId);
             
             if (!approvalResult.success) {
