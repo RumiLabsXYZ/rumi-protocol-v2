@@ -254,11 +254,87 @@ pub async fn transfer_icusd(amount: ICUSD, to: Principal) -> Result<u64, Transfe
         })
         .await
         .map_err(|e| TransferError::GenericError {
-            error_code: Nat::from(e.0.max(0) as u64), 
+            error_code: Nat::from(e.0.max(0) as u64),
             message: e.1,
         })??;
 
     Ok(block_index.0.to_u64().unwrap())
+}
+
+/// Transfer ckUSDT from a user to the protocol (for vault repayment)
+pub async fn transfer_ckusdt_from(amount: u64, caller: Principal) -> Result<u64, TransferFromError> {
+    let ledger_principal = read_state(|s| s.ckusdt_ledger_principal)
+        .ok_or_else(|| TransferFromError::GenericError {
+            error_code: Nat::from(0u64),
+            message: "ckUSDT ledger not configured".to_string(),
+        })?;
+
+    let client = ICRC1Client {
+        runtime: CdkRuntime,
+        ledger_canister_id: ledger_principal,
+    };
+    let protocol_id = ic_cdk::id();
+    let block_index = client
+        .transfer_from(TransferFromArgs {
+            spender_subaccount: None,
+            from: Account {
+                owner: caller,
+                subaccount: None,
+            },
+            to: Account {
+                owner: protocol_id,
+                subaccount: None,
+            },
+            amount: Nat::from(amount),
+            fee: None,
+            created_at_time: None,
+            memo: None,
+        })
+        .await
+        .map_err(|e| TransferFromError::GenericError {
+            error_code: Nat::from(e.0.max(0) as u64),
+            message: e.1,
+        })?;
+
+    Ok(block_index.unwrap().0.to_u64().unwrap())
+}
+
+/// Transfer ckUSDC from a user to the protocol (for vault repayment)
+pub async fn transfer_ckusdc_from(amount: u64, caller: Principal) -> Result<u64, TransferFromError> {
+    let ledger_principal = read_state(|s| s.ckusdc_ledger_principal)
+        .ok_or_else(|| TransferFromError::GenericError {
+            error_code: Nat::from(0u64),
+            message: "ckUSDC ledger not configured".to_string(),
+        })?;
+
+    let client = ICRC1Client {
+        runtime: CdkRuntime,
+        ledger_canister_id: ledger_principal,
+    };
+    let protocol_id = ic_cdk::id();
+    let block_index = client
+        .transfer_from(TransferFromArgs {
+            spender_subaccount: None,
+            from: Account {
+                owner: caller,
+                subaccount: None,
+            },
+            to: Account {
+                owner: protocol_id,
+                subaccount: None,
+            },
+            amount: Nat::from(amount),
+            fee: None,
+            created_at_time: None,
+            memo: None,
+        })
+        .await
+        .map_err(|e| TransferFromError::GenericError {
+            error_code: Nat::from(e.0.max(0) as u64),
+            message: e.1,
+        })?;
+
+    Ok(block_index.unwrap().0.to_u64().unwrap())
 }
 
 
