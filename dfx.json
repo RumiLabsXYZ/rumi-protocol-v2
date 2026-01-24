@@ -32,6 +32,12 @@
       "wasm": "src/ledger/ic-icrc1-ledger.wasm",
       "shrink": false
     },
+    "icusd_index": {
+      "candid": "src/ledger/index-ng.did",
+      "type": "custom",
+      "wasm": "src/ledger/ic-icrc1-index-ng.wasm.gz",
+      "shrink": false
+    },
     "icp_ledger_canister": {
       "candid": "src/ledger/ledger.did",
       "type": "custom",
