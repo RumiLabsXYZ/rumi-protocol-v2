@@ -310,8 +310,63 @@ function createWalletStore() {
 
   return {
     subscribe,
-    pnp,  
+    pnp,
     getAuthenticatedActor: () => authenticatedActor,
+
+    // Initialize and sync wallet state from auth service (for auto-reconnect)
+    async initialize() {
+      try {
+        await auth.initialize();
+
+        const authState = get(auth);
+
+        if (authState.isConnected && authState.account?.owner) {
+          const principal = authState.account.owner;
+
+          appDataStore.setWalletState(true, principal);
+
+          const { icpBalance, icusdBalance } = await appDataStore.fetchBalances(principal);
+          const protocolStatus = await appDataStore.fetchProtocolStatus();
+          const icpPriceValue = protocolStatus?.lastIcpRate || 0;
+
+          let icon = '';
+          if (authState.walletType === WALLET_TYPES.INTERNET_IDENTITY) {
+            icon = 'https://internetcomputer.org/img/IC_logo_horizontal.svg';
+          } else if (authState.walletType === WALLET_TYPES.PLUG) {
+            icon = '/wallets/plug.svg';
+          }
+
+          update(s => ({
+            ...s,
+            isConnected: true,
+            principal: principal,
+            balance: icpBalance,
+            tokenBalances: {
+              ICP: {
+                raw: icpBalance,
+                formatted: TokenService.formatBalance(icpBalance),
+                usdValue: icpPriceValue ? Number(TokenService.formatBalance(icpBalance)) * icpPriceValue : null
+              },
+              ICUSD: {
+                raw: icusdBalance,
+                formatted: TokenService.formatBalance(icusdBalance),
+                usdValue: Number(TokenService.formatBalance(icusdBalance))
+              }
+            },
+            loading: false,
+            icon: icon
+          }));
+
+          startBalanceRefresh();
+          return true;
+        }
+
+        return false;
+      } catch (err) {
+        console.error('WalletStore initialize failed:', err);
+        return false;
+      }
+    },
 
     async connect(walletId: string) {
       try {
