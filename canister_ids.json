@@ -1,4 +1,7 @@
 {
+  "icusd_index": {
+    "ic": "6niqu-siaaa-aaaap-qrjeq-cai"
+  },
   "icusd_ledger": {
     "ic": "t6bor-paaaa-aaaap-qrd5q-cai"
   },
@@ -13,6 +16,9 @@
   },
   "rumi_treasury": {
     "ic": "tlg74-oiaaa-aaaap-qrd6a-cai"
+  },
+  "test_icp_ledger_canister": {
+    "ic": "pspic-iaaaa-aaaap-qrkna-cai"
   },
   "vault_frontend": {
     "ic": "tcfua-yaaaa-aaaap-qrd7q-cai"

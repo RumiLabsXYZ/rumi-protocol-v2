@@ -263,15 +263,11 @@
         successMessage = `Successfully withdrew ${currentVault.icpMargin} ICP and closed the vault`;
         closeSuccess = true;
         
-        // Notify parent component
-        dispatch('close', { vaultId: currentVault.vaultId });
-
-        // Force refresh all vaults to reflect the closure
+        // Refresh vaults first to remove the closed vault from store
         await vaultStore.refreshVaults();
-
-        setTimeout(() => {
-          goto('/vaults'); 
-        }, 1500);
+        
+        // Use hard redirect - goto() may not work reliably after async operations
+        window.location.href = '/vaults';
 
       } else {
         errorMessage = result.error || "Failed to withdraw and close vault";

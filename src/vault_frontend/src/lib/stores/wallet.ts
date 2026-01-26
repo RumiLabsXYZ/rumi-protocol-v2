@@ -1,6 +1,5 @@
 import { writable, derived, get } from 'svelte/store';
-import { createPNP, type PNP, type PNPWallet, walletsList as PNPWalletsList } from '@windoge98/plug-n-play';
-const walletsList = PNPWalletsList as ExtendedPNPWallet[];
+import { createPNP, type PNP } from '@windoge98/plug-n-play';
 import type { Principal } from '@dfinity/principal';
 import { CONFIG, CANISTER_IDS, LOCAL_CANISTER_IDS } from '../config';
 import { pnp, canisterIDLs } from '../services/pnp';
@@ -9,6 +8,16 @@ import { TokenService } from '../services/tokenService';
 import { auth, WALLET_TYPES } from '../services/auth';
 import { RequestDeduplicator } from '../services/RequestDeduplicator';
 import { appDataStore } from './appDataStore';
+import { ApiClient } from '../services/protocol/apiClient';
+
+// Define our own wallet list for icons
+const walletsList = [
+  { id: 'plug', name: 'Plug', icon: '/wallets/plug.svg' },
+  { id: 'ii', name: 'Internet Identity', icon: '/wallets/ii.svg' },
+  { id: 'stoic', name: 'Stoic', icon: '/wallets/stoic.svg' },
+  { id: 'nfid', name: 'NFID', icon: '/wallets/nfid.svg' },
+  { id: 'oisy', name: 'Oisy', icon: '/wallets/oisy.svg' },
+];
 
 interface WalletState {
   isConnected: boolean;
@@ -29,11 +38,6 @@ interface WalletState {
       usdValue: number | null;
     };
   };
-}
-
-// Add interface for wallet info with icon
-interface ExtendedPNPWallet extends PNPWallet {
-  icon?: string;
 }
 
 // Helper to extract the proper Principal value.
@@ -315,6 +319,10 @@ function createWalletStore() {
         
         await cleanupPendingOperations();
         
+        // CRITICAL: Clear the vault cache before connecting a new wallet
+        // This ensures we don't show stale vaults from a previous wallet session
+        ApiClient.clearVaultCache();
+        
         const account = await auth.connect(walletId);
         
         if (!account) throw new Error('No account returned from wallet');
@@ -378,6 +386,10 @@ function createWalletStore() {
         authenticatedActor = null;
         
         stopBalanceRefresh();
+
+        // CRITICAL: Clear the vault cache to prevent stale data from being shown
+        // when switching between wallets (e.g., from Internet Identity to Plug)
+        ApiClient.clearVaultCache();
 
         appDataStore.setWalletState(false, null);
 

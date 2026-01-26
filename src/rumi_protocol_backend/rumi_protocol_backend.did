@@ -161,6 +161,68 @@ type HttpResponse = record {
   status_code : nat16;
 };
 
+// ICRC-21 Consent Message Types
+type Icrc21ConsentMessageMetadata = record {
+  language : text;
+  utc_offset_minutes : opt int16;
+};
+
+type Icrc21DeviceSpec = variant {
+  GenericDisplay;
+  LineDisplay : record {
+    characters_per_line : nat16;
+    lines_per_page : nat16;
+  };
+};
+
+type Icrc21ConsentMessageSpec = record {
+  metadata : Icrc21ConsentMessageMetadata;
+  device_spec : opt Icrc21DeviceSpec;
+};
+
+type Icrc21ConsentMessageRequest = record {
+  method : text;
+  arg : blob;
+  user_preferences : Icrc21ConsentMessageSpec;
+};
+
+type Icrc21LineDisplayPage = record {
+  lines : vec text;
+};
+
+type Icrc21ConsentMessage = variant {
+  GenericDisplayMessage : text;
+  LineDisplayMessage : record {
+    pages : vec Icrc21LineDisplayPage;
+  };
+};
+
+type Icrc21ConsentInfo = record {
+  metadata : Icrc21ConsentMessageMetadata;
+  consent_message : Icrc21ConsentMessage;
+};
+
+type Icrc21ErrorInfo = record {
+  description : text;
+};
+
+type Icrc21Error = variant {
+  GenericError : record { error_code : nat64; description : text };
+  UnsupportedCanisterCall : Icrc21ErrorInfo;
+  ConsentMessageUnavailable : Icrc21ErrorInfo;
+};
+
+// ICRC-28 Trusted Origins
+type Icrc28TrustedOriginsResponse = record {
+  trusted_origins : vec text;
+};
+
+// ICRC-10 Supported Standards
+type StandardRecord = record {
+  name : text;
+  url : text;
+};
+
 service : (ProtocolArg) -> {
   // Vault related operations
   redeem_icp : (nat64) -> (variant { Ok : SuccessWithFee; Err : ProtocolError });
@@ -195,4 +257,13 @@ service : (ProtocolArg) -> {
   liquidate_vault : (nat64) -> (variant { Ok : SuccessWithFee; Err : ProtocolError });
   liquidate_vault_partial : (nat64, nat64) -> (variant { Ok : SuccessWithFee; Err : ProtocolError });
   liquidate_vault_partial_with_stable : (nat64, nat64, StableTokenType) -> (variant { Ok : SuccessWithFee; Err : ProtocolError });
+  
+  // ICRC-21 Consent Message (for wallet integration like Oisy)
+  icrc21_canister_call_consent_message : (Icrc21ConsentMessageRequest) -> (variant { Ok : Icrc21ConsentInfo; Err : Icrc21Error });
+  
+  // ICRC-28 Trusted Origins
+  icrc28_trusted_origins : () -> (Icrc28TrustedOriginsResponse) query;
+  
+  // ICRC-10 Supported Standards
+  icrc10_supported_standards : () -> (vec StandardRecord) query;
 }

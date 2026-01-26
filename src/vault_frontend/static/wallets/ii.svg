@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
+  <defs>
+    <linearGradient id="ii-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#29ABE2;stop-opacity:1" />
+      <stop offset="50%" style="stop-color:#522785;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#ED1E79;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <path d="M50 5 C75 5 95 25 95 50 C95 75 75 95 50 95 C25 95 5 75 5 50 C5 25 25 5 50 5 Z M50 25 C35 25 25 35 25 50 C25 65 35 75 50 75 C65 75 75 65 75 50 C75 35 65 25 50 25 Z" fill="url(#ii-gradient)"/>
+</svg>

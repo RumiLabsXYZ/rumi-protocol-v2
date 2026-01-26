@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { browser } from "$app/environment";
   import { walletStore as wallet } from "../lib/stores/wallet";
+  import { auth } from "../lib/services/auth";
   import { permissionStore } from "../lib/stores/permissionStore";
   import WalletConnector from "../lib/components/wallet/WalletConnector.svelte";
   import PriceDebug from "../lib/components/debug/PriceDebug.svelte";
@@ -51,6 +52,14 @@
       window.addEventListener("popstate", () => {
         currentPath = window.location.pathname;
       });
+    }
+    
+    // Auto-reconnect wallet if previously connected
+    try {
+      console.log('Mount: attempting wallet auto-reconnect...');
+      await auth.initialize();
+    } catch (err) {
+      console.error('Failed to auto-reconnect wallet:', err);
     }
     
     // FIXED: Only initialize permissions if wallet is connected AND permissions not already being initialized

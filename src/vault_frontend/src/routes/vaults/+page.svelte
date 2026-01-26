@@ -127,12 +127,7 @@
     {#if !$isConnected}
       <div class="text-center p-12 bg-gray-900/50 rounded-lg backdrop-blur-sm">
         <p class="text-xl text-gray-300 mb-4">Please connect your wallet to view your vaults</p>
-        <button 
-          on:click={() => walletStore.connect('plug')}
-          class="inline-block px-6 py-3 bg-purple-600 rounded-lg hover:bg-purple-500"
-        >
-          Connect Wallet
-        </button>
+        <p class="text-gray-400">Use the wallet button in the top right corner to connect</p>
       </div>
     {:else if $isLoadingVaults && $userVaults.length === 0}
       <div class="flex justify-center p-12">
