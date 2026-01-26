@@ -17,6 +17,9 @@
   "rumi_treasury": {
     "ic": "tlg74-oiaaa-aaaap-qrd6a-cai"
   },
+  "test_icp_ledger_canister": {
+    "ic": "pspic-iaaaa-aaaap-qrkna-cai"
+  },
   "vault_frontend": {
     "ic": "tcfua-yaaaa-aaaap-qrd7q-cai"
   }

@@ -211,7 +211,7 @@ export class TokenService {
         
         // Use wallet store for approval as fallback
         console.log(`Requesting PnP approval for ${amount} ICP to ${spender}`);
-        const pnpActor = await wallet.getActor(CONFIG.currentIcpLedgerId, canisterIDLs.icp_ledger);
+        const pnpActor = await wallet.getActor(CONFIG.currentIcpLedgerId, canisterIDLs.icp_ledger) as unknown as _SERVICE;
         const result = await pnpActor.icrc2_approve({
           amount: amountE8s,
           spender: { 
@@ -266,7 +266,7 @@ export class TokenService {
     }
     
     try {
-      const pnpActor = await wallet.getActor(CONFIG.currentIcpLedgerId, canisterIDLs.icp_ledger);
+      const pnpActor = await wallet.getActor(CONFIG.currentIcpLedgerId, canisterIDLs.icp_ledger) as unknown as _SERVICE;
       const result = await pnpActor.icrc2_allowance({
         account: { 
           owner, 

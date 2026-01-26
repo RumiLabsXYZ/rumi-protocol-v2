@@ -4,7 +4,7 @@ import { idlFactory as rumi_backendIDL } from '$declarations/rumi_protocol_backe
 import { idlFactory as icp_ledgerIDL } from '$declarations/icp_ledger/icp_ledger.did.js';
 import { idlFactory as icusd_ledgerIDL } from '$declarations/icusd_ledger/icusd_ledger.did.js';
 import { idlFactory as stabilityPoolIDL } from '$declarations/rumi_stability_pool/rumi_stability_pool.did.js';
-import { createPNP, type PNP } from '@windoge98/plug-n-play';
+import { createPNP, type PNP, ConfigBuilder } from '@windoge98/plug-n-play';
 
 // Define types for supported canisters
 export type CanisterType =
@@ -30,6 +30,16 @@ export const REQUIRED_CANISTERS = {
   stabilityPool: CANISTER_IDS.STABILITY_POOL
 };
 
+// All delegation targets for comprehensive permissions
+const getAllDelegationTargets = (): string[] => {
+  return [
+    CONFIG.currentCanisterId,      // Protocol canister
+    CONFIG.currentIcpLedgerId,     // ICP Ledger  
+    CONFIG.currentIcusdLedgerId,   // icUSD Ledger
+    CANISTER_IDS.STABILITY_POOL    // Stability Pool canister
+  ].filter(Boolean); // Filter out any undefined values
+};
+
 // COMPREHENSIVE PERMISSION SYSTEM - Request ALL permissions at once during wallet connection
 // Custom connect function that ensures comprehensive permissions for Plug
 export async function connectWithComprehensivePermissions(walletId: string): Promise<any> {
@@ -42,12 +52,7 @@ export async function connectWithComprehensivePermissions(walletId: string): Pro
       
       // Request ALL canister permissions upfront for Plug
       const comprehensivePermissions = {
-        whitelist: [
-          CONFIG.currentCanisterId,      // Protocol canister
-          CONFIG.currentIcpLedgerId,     // ICP Ledger  
-          CONFIG.currentIcusdLedgerId,   // icUSD Ledger
-          CANISTER_IDS.STABILITY_POOL    // Stability Pool canister
-        ],
+        whitelist: getAllDelegationTargets(),
         host: CONFIG.isLocal ? 'http://localhost:4943' : 'https://icp0.io',
         timeout: 60000
       };
@@ -67,8 +72,38 @@ export async function connectWithComprehensivePermissions(walletId: string): Pro
       return { owner: principal };
     }
     
-    // For other wallets, use standard PNP connection
-    return await globalPnp?.connect(walletId);
+    // For Oisy and other wallets, use standard PNP connection with beta API
+    // The beta properly supports ICRC-25/ICRC-21 standards
+    console.log('🔧 Using PNP beta connection for:', walletId);
+    const result = await globalPnp?.connect(walletId);
+    console.log('✅ PNP connection result:', result);
+    
+    // Normalize the owner principal - OISY and other wallets may return different formats
+    // The owner might be: a string, a Principal object, or an object with toString()/toText()
+    if (result?.owner) {
+      let normalizedPrincipal: Principal;
+      
+      if (typeof result.owner === 'string') {
+        // Owner is already a string, convert to Principal
+        normalizedPrincipal = Principal.fromText(result.owner);
+      } else if (result.owner instanceof Principal) {
+        // Already a proper Principal object
+        normalizedPrincipal = result.owner;
+      } else if (typeof result.owner.toText === 'function') {
+        // Has toText method (standard Principal interface)
+        normalizedPrincipal = Principal.fromText(result.owner.toText());
+      } else if (typeof result.owner.toString === 'function') {
+        // Fallback to toString
+        normalizedPrincipal = Principal.fromText(result.owner.toString());
+      } else {
+        throw new Error('Unable to extract principal from wallet connection result');
+      }
+      
+      console.log('✅ Normalized principal:', normalizedPrincipal.toText());
+      return { ...result, owner: normalizedPrincipal };
+    }
+    
+    return result;
   } catch (err) {
     console.error('❌ Failed to connect with comprehensive permissions:', err);
     throw err;
@@ -88,46 +123,38 @@ export function initializePNP(): PNP {
       return globalPnp;
     }
 
-    const protocolId = CONFIG.isLocal ? LOCAL_CANISTER_IDS.PROTOCOL : CANISTER_IDS.PROTOCOL;
-    
-    console.log('🔍 Debug: protocolId being used for Principal.fromText:', protocolId);
-    console.log('🔍 Debug: CONFIG.isLocal:', CONFIG.isLocal);
-    
-    try {
-      const delegationTargets = [Principal.fromText(protocolId)];
-    } catch (error) {
-      console.error('❌ Error parsing protocolId as Principal:', error);
-      console.error('❌ Problematic protocolId value:', protocolId);
-      throw new Error(`Invalid protocolId for Principal parsing: ${protocolId}. Error: ${String(error)}`);
-    }
-    
-    const delegationTargets = [Principal.fromText(protocolId)];
+    const delegationTargets = getAllDelegationTargets();
+    const network = CONFIG.isLocal ? 'local' : 'ic';
 
-    const isDev = import.meta.env.DEV;
-    const derivationOrigin = () => {
-      if (isDev || CONFIG.isLocal) {
-        return "http://localhost:5173";
-      }
-      
-      // For IC deployment, use the proper canister URL
-      return `https://${vault_frontend}.icp0.io`;
-    };
+    console.log('🔧 Initializing PNP beta with configuration...');
+    console.log('🔍 Network:', network);
+    console.log('🔍 Delegation targets:', delegationTargets);
 
-    console.log('🔧 Initializing PNP with comprehensive configuration...');
+    // Create PNP with beta API configuration using ConfigBuilder
+    globalPnp = createPNP(
+      ConfigBuilder.create()
+        .withEnvironment(network, CONFIG.isLocal ? { replica: 4943, frontend: 5173 } : undefined)
+        .withDelegation({
+          timeout: BigInt(86400000000000), // 24 hours in nanoseconds
+          targets: delegationTargets
+        })
+        .withSecurity(CONFIG.isLocal, true) // fetchRootKey for local, verify signatures
+        .withIcAdapters({
+          // Enable all IC wallets including Oisy
+          ii: { enabled: true },
+          plug: { 
+            enabled: true,
+            whitelist: delegationTargets // Plug-specific whitelist
+          },
+          oisy: { enabled: true }, // Oisy with ICRC-25/ICRC-21 support
+          nfid: { enabled: true },
+          stoic: { enabled: true }
+        })
+        .build()
+    );
 
-    // Create PNP with comprehensive configuration for all wallets
-    globalPnp = createPNP({
-      hostUrl: CONFIG.isLocal
-        ? "http://localhost:4943"
-        : "https://icp0.io",
-      isDev: CONFIG.isLocal,
-      delegationTargets,
-      delegationTimeout: BigInt(86400000000000), // 24 hours
-      // Note: Individual wallet configurations (like Plug whitelist) are handled
-      // by the PNP library during the connect() call based on wallet type
-    });
-
-    console.log('✅ PNP initialized with comprehensive permissions');
+    console.log('✅ PNP beta initialized with comprehensive permissions');
+    console.log('✅ Enabled wallets:', globalPnp.getEnabledWallets().map(w => w.id));
     return globalPnp;
   } catch (error) {
     console.error("Error initializing PNP:", error);
@@ -144,23 +171,46 @@ export function getPnpInstance(): PNP {
 
 // Enhanced PNP wrapper that uses Plug directly when connected
 export const pnp = {
-  ...getPnpInstance(),
+  // Spread the PNP instance methods
+  get config() { return getPnpInstance().config; },
+  get adapter() { return getPnpInstance().adapter; },
+  get provider() { return getPnpInstance().provider; },
+  get account() { return getPnpInstance().account; },
+  get status() { return getPnpInstance().status; },
   
   // Override connect to use our comprehensive method
   connect: connectWithComprehensivePermissions,
   
-  // Add isConnected method that was lost in the spread
-  // This is a synchronous check - for async, use isConnectedAsync
-  isConnected(): boolean {
+  // Disconnect method
+  async disconnect(): Promise<void> {
+    // Disconnect from Plug if connected
+    if (window.ic?.plug) {
+      try {
+        await window.ic.plug.disconnect();
+      } catch (e) {
+        console.warn('Plug disconnect warning:', e);
+      }
+    }
+    // Also disconnect from PNP
+    await globalPnp?.disconnect();
+  },
+  
+  // Check if authenticated (sync check)
+  isAuthenticated(): boolean {
     // Check if Plug wallet exists and has an agent (indicates connected state)
     if (window.ic?.plug?.agent) {
       return true;
     }
-    // Fall back to PNP's isConnected if available
-    if (globalPnp && typeof globalPnp.isConnected === 'function') {
-      return globalPnp.isConnected();
+    // Fall back to PNP's isAuthenticated
+    if (globalPnp) {
+      return globalPnp.isAuthenticated();
     }
     return false;
+  },
+
+  // Legacy isConnected method for backward compatibility
+  isConnected(): boolean {
+    return this.isAuthenticated();
   },
 
   // Async version for when we need to verify with Plug directly
@@ -168,13 +218,13 @@ export const pnp = {
     if (window.ic?.plug) {
       return await window.ic.plug.isConnected();
     }
-    if (globalPnp && typeof globalPnp.isConnected === 'function') {
-      return globalPnp.isConnected();
+    if (globalPnp) {
+      return globalPnp.isAuthenticated();
     }
     return false;
   },
   
-  // Override getActor to use Plug directly when possible to avoid permission prompts
+  // Override getActor to use Plug directly when possible and beta API format
   async getActor(canisterId: string, idl: any) {
     try {
       // For Plug wallet, use the direct Plug API to avoid permission prompts
@@ -186,23 +236,27 @@ export const pnp = {
         });
       }
       
-      // For other wallets, use standard PNP
-      return await globalPnp?.getActor(canisterId, idl);
+      // For other wallets (including Oisy), use PNP beta API with options object
+      console.log('🔧 Using PNP beta getActor for:', canisterId);
+      return globalPnp?.getActor({ canisterId, idl });
     } catch (err) {
       console.error('Error getting actor for canister', canisterId, err);
       throw err;
     }
+  },
+
+  // New method: Get ICRC actor for token operations (beta feature)
+  getIcrcActor(canisterId: string, options?: { anon?: boolean; requiresSigning?: boolean }) {
+    return globalPnp?.getIcrcActor(canisterId, options);
+  },
+
+  // Get enabled wallets list
+  getEnabledWallets() {
+    return globalPnp?.getEnabledWallets() || [];
+  },
+
+  // Open channel for Safari compatibility (beta feature)
+  async openChannel(): Promise<void> {
+    await globalPnp?.openChannel();
   }
 };
-
-
-
-
-
-
-
-
-
-
-
-

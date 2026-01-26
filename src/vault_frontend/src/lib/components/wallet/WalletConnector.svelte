@@ -1,42 +1,63 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { walletsList, type PNPWallet } from '@windoge98/plug-n-play';
+  import { pnp, initializePNP } from '../../services/pnp';
   import { walletStore } from '../../stores/wallet';
   import { get } from 'svelte/store';
   import { permissionManager } from '../../services/PermissionManager';
   import { WALLET_TYPES } from '../../services/auth';
 
-  interface WalletInfo extends Omit<PNPWallet, 'adapter' | 'logo'> {
+  interface WalletInfo {
     id: string;
     name: string;
     icon?: string;
-    description?: string;
-    recommended?: boolean;
-    logo?: string; // Add optional logo property for compatibility
   }
 
-  console.log("Available wallets:", walletsList);
+  // Whitelist: only include these wallet IDs from PNP library
+  const ALLOWED_PNP_WALLETS = ['plug', 'oisy'];
   
-  // Filter out OISY wallet from the list and add Internet Identity
-  const walletList: WalletInfo[] = [
-    // Add Internet Identity first
-    {
-      id: WALLET_TYPES.INTERNET_IDENTITY,
-      name: 'Internet Identity',
-      icon: '/main-icp-logo.png',
-      description: 'Powered by Internet Computer',
-      recommended: true
-    },
-    // Add filtered Plug wallets
-    ...walletsList
-      .filter(wallet => !wallet.name.toLowerCase().includes('oisy'))
-      .filter(wallet => !wallet.name.includes('NFID'))
-      .filter(wallet => !wallet.name.includes('Internet Identity'))
-      .map(wallet => ({
-        ...wallet,
-        description: wallet.id === 'nfid' ? 'Sign in with Google' : undefined
-      }))
-  ];
+  // Internet Identity is always available (hardcoded, doesn't need PNP)
+  const internetIdentityWallet: WalletInfo = {
+    id: WALLET_TYPES.INTERNET_IDENTITY,
+    name: 'Internet Identity',
+    icon: '/main-icp-logo.png'
+  };
+
+  // Reactive wallet list - starts with just II, PNP wallets added on mount
+  let walletList: WalletInfo[] = [internetIdentityWallet];
+  let walletsLoading = true;
+
+  // Helper function to build wallet list from PNP
+  function buildWalletList(): WalletInfo[] {
+    const pnpWallets = pnp.getEnabledWallets();
+    console.log("🔍 Available wallets from PNP:", pnpWallets);
+    console.log("🔍 PNP wallet IDs:", pnpWallets.map(w => w.id));
+    
+    // Define proper display names and icons for each wallet
+    const walletDisplayConfig: Record<string, { name: string; icon: string }> = {
+      'plug': { name: 'Plug', icon: '/wallets/plug.svg' },
+      'oisy': { name: 'Oisy', icon: '/wallets/oisy.svg' }
+    };
+    
+    const filteredWallets = pnpWallets
+      .filter(wallet => {
+        const walletIdLower = wallet.id?.toLowerCase();
+        const isAllowed = ALLOWED_PNP_WALLETS.includes(walletIdLower);
+        console.log(`🔍 Wallet "${wallet.id}" (lowercase: "${walletIdLower}") - allowed: ${isAllowed}`);
+        return isAllowed;
+      })
+      .map(wallet => {
+        const walletIdLower = wallet.id?.toLowerCase();
+        const config = walletDisplayConfig[walletIdLower];
+        return {
+          id: wallet.id,
+          name: config?.name || wallet.name,
+          icon: config?.icon || wallet.icon || `/wallets/${wallet.id}.svg`
+        };
+      });
+    
+    console.log("✅ Final filtered PNP wallets:", filteredWallets);
+    return [internetIdentityWallet, ...filteredWallets];
+  }
 
   let error: string | null = null;
   let showWalletDialog = false;
@@ -117,6 +138,18 @@
   // Setup click handler on mount
   onMount(() => {
     document.addEventListener('click', handleClickOutside);
+    
+    // Initialize PNP and build wallet list
+    try {
+      console.log("🚀 WalletConnector onMount: Initializing PNP...");
+      initializePNP();
+      walletList = buildWalletList();
+      console.log("✅ Wallet list built:", walletList.map(w => w.id));
+    } catch (err) {
+      console.error("❌ Failed to initialize PNP:", err);
+    } finally {
+      walletsLoading = false;
+    }
     
     // Perform an initial balance refresh if connected
     if ($walletStore.isConnected && $walletStore.principal) {
@@ -203,9 +236,15 @@
           </div>
           
           <div class="flex flex-col gap-3">
-            {#each walletList as wallet (wallet.id)}
+            {#if walletsLoading}
+              <div class="flex items-center justify-center py-4">
+                <div class="w-6 h-6 border-2 border-purple-500 border-t-transparent rounded-full animate-spin mr-2"></div>
+                <span class="text-gray-400">Loading wallets...</span>
+              </div>
+            {:else}
+              {#each walletList as wallet (wallet.id)}
               <button
-                class="flex items-center justify-between w-full px-4 py-3 text-white rounded-xl border transition-all duration-200 {wallet.recommended ? 'bg-gradient-to-r from-purple-900/50 to-blue-900/50 border-purple-500/30 hover:border-purple-400/50' : 'bg-gray-800/50 border-purple-500/10 hover:bg-purple-900/20 hover:border-purple-500/30'}"
+                class="flex items-center justify-between w-full px-4 py-3 text-white rounded-xl border transition-all duration-200 bg-gray-800/50 border-purple-500/10 hover:bg-purple-900/20 hover:border-purple-500/30"
                 on:click|stopPropagation={() => connectWallet(wallet.id)}
                 disabled={connecting}
               >
@@ -221,23 +260,20 @@
                       <span>{wallet.name[0]}</span>
                     </div>
                   {/if}
-                  <div class="flex-col">
-                    <div class="flex items-center gap-2">
-                      <span class="text-lg">{wallet.name}</span>
-                      {#if wallet.recommended}
-                        <span class="px-2 py-1 text-xs bg-purple-500/20 text-purple-300 rounded-full">Recommended</span>
-                      {/if}
-                    </div>
-                    {#if wallet.description}
-                      <span class="flex-col text-sm text-gray-400">{wallet.description}</span>
-                    {/if}
-                  </div>
+                  <span class="text-lg">{wallet.name}</span>
                 </div>
                 <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M9 18l6-6-6-6"/>
                 </svg>
               </button>
             {/each}
+              
+            {#if walletList.length === 1}
+              <p class="text-sm text-yellow-400 text-center mt-2">
+                ⚠️ Only Internet Identity available. Plug and Oisy may not have loaded.
+              </p>
+            {/if}
+            {/if}
           </div>
 
           {#if connecting}

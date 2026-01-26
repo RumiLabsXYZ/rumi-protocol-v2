@@ -18,6 +18,9 @@ import type {
   OpenVaultSuccess,
 } from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did';
 
+import type { _SERVICE as IcpLedgerService } from '$declarations/icp_ledger/icp_ledger.did';
+import type { _SERVICE as IcusdLedgerService } from '$declarations/icusd_ledger/icusd_ledger.did';
+
 export const E8S = 100_000_000;
 
 /**
@@ -63,7 +66,7 @@ export class walletOperations {
       console.log(`Approving ${amount.toString()} e8s ICP for ${spenderCanisterId}`);
       
       // Get the ICP ledger actor
-      const icpActor = await walletStore.getActor(CONFIG.currentIcpLedgerId, CONFIG.icp_ledgerIDL);
+      const icpActor = await walletStore.getActor(CONFIG.currentIcpLedgerId, CONFIG.icp_ledgerIDL) as unknown as IcpLedgerService;
       
       // Request approval
       const approvalResult = await icpActor.icrc2_approve({
@@ -111,7 +114,7 @@ export class walletOperations {
           return BigInt(0);
         }
         
-        const icpActor = await walletStore.getActor(CONFIG.currentIcpLedgerId, CONFIG.icp_ledgerIDL);
+        const icpActor = await walletStore.getActor(CONFIG.currentIcpLedgerId, CONFIG.icp_ledgerIDL) as IcpLedgerService;
         const result = await icpActor.icrc2_allowance({
           account: { 
             owner: walletState.principal, 
@@ -192,7 +195,7 @@ export class walletOperations {
           }
         }
         
-        const icusdActor = await walletStore.getActor(CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL);
+        const icusdActor = await walletStore.getActor(CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL) as IcusdLedgerService;
         const result = await icusdActor.icrc2_allowance({
           account: { 
             owner: walletState.principal, 
@@ -243,7 +246,7 @@ export class walletOperations {
 
         console.log(`Approving ${amount.toString()} e8s icUSD for ${spenderCanisterId}`);
         
-        const icusdActor = await walletStore.getActor(CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL);
+        const icusdActor = await walletStore.getActor(CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL) as IcusdLedgerService;
         
         const approvalResult = await icusdActor.icrc2_approve({
           amount,
@@ -319,7 +322,7 @@ export class walletOperations {
           }
         }
         
-        const icusdActor = await walletStore.getActor(CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL);
+        const icusdActor = await walletStore.getActor(CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL) as IcusdLedgerService;
         const balance = await icusdActor.icrc1_balance_of({
           owner: walletState.principal,
           subaccount: []
@@ -377,7 +380,7 @@ export class walletOperations {
         // Fetch from ledger if not available in tokenBalances
         if (icpBalance === 0) {
           try {
-            const icpActor = await walletStore.getActor(CONFIG.currentIcpLedgerId, CONFIG.icp_ledgerIDL);
+            const icpActor = await walletStore.getActor(CONFIG.currentIcpLedgerId, CONFIG.icp_ledgerIDL) as IcpLedgerService;
             const balance = await icpActor.icrc1_balance_of({
               owner: walletState.principal,
               subaccount: []
@@ -393,7 +396,7 @@ export class walletOperations {
         
         if (icusdBalance === 0) {
           try {
-            const icusdActor = await walletStore.getActor(CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL);
+            const icusdActor = await walletStore.getActor(CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL) as IcusdLedgerService;
             const balance = await icusdActor.icrc1_balance_of({
               owner: walletState.principal,
               subaccount: []

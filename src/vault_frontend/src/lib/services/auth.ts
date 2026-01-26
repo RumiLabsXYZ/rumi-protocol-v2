@@ -1,6 +1,6 @@
 import { writable, get } from 'svelte/store';
 import { browser } from '$app/environment';
-import { pnp, connectWithComprehensivePermissions } from './pnp';
+import { pnp, connectWithComprehensivePermissions, getPnpInstance } from './pnp';
 import { TokenService } from './tokenService';
 import { CONFIG, CANISTER_IDS, LOCAL_CANISTER_IDS } from '../config';
 import { canisterIDLs } from './pnp';
@@ -19,7 +19,8 @@ const STORAGE_KEYS = {
 // Wallet types
 export const WALLET_TYPES = {
   PLUG: 'plug',
-  INTERNET_IDENTITY: 'internet-identity'
+  INTERNET_IDENTITY: 'internet-identity',
+  OISY: 'oisy'
 } as const;
 
 export type WalletType = typeof WALLET_TYPES[keyof typeof WALLET_TYPES];
@@ -103,21 +104,217 @@ function createAuthStore() {
     async initialize(): Promise<void> {
       if (!browser) return;
       
-      // Initialize Internet Identity client
-      await this.initAuthClient();
-      
       const lastWallet = storage.get("LAST_WALLET");
-      if (!lastWallet) return;
-
-      const hasAttempted = sessionStorage.getItem(STORAGE_KEYS.AUTO_CONNECT_ATTEMPTED);
       const wasConnected = storage.get("WAS_CONNECTED");
       
-      if (hasAttempted && !wasConnected) return;
+      if (!lastWallet || !wasConnected) return;
+
+      const hasAttempted = sessionStorage.getItem(STORAGE_KEYS.AUTO_CONNECT_ATTEMPTED);
+      if (hasAttempted) return;
+
+      console.log('🔄 Attempting to restore session for:', lastWallet);
 
       try {
-        await this.connect(lastWallet);
+        if (lastWallet === WALLET_TYPES.INTERNET_IDENTITY) {
+          // For II, check if already authenticated
+          const client = await this.initAuthClient();
+          const isAuthenticated = await client.isAuthenticated();
+          
+          if (isAuthenticated) {
+            console.log('✅ II session still valid, restoring...');
+            const identity = client.getIdentity();
+            const principal = identity.getPrincipal();
+            
+            // Create agent for Internet Identity
+            agent = new HttpAgent({
+              identity: identity as any,
+              host: CONFIG.isLocal ? 'http://localhost:4943' : 'https://ic0.app'
+            });
+            
+            if (CONFIG.isLocal) {
+              await agent.fetchRootKey();
+            }
+
+            const principalText = principal.toString();
+            const convertedPrincipal = Principal.fromText(principalText);
+            const balance = await refreshWalletBalance(convertedPrincipal);
+
+            set({
+              isConnected: true,
+              account: { owner: convertedPrincipal, balance },
+              isInitialized: true,
+              walletType: WALLET_TYPES.INTERNET_IDENTITY
+            });
+
+            selectedWalletId.set(lastWallet);
+            currentWalletType.set(WALLET_TYPES.INTERNET_IDENTITY);
+            console.log('🎉 II session restored successfully');
+          } else {
+            console.log('⚠️ II session expired, clearing storage');
+            storage.clear();
+          }
+        } else if (lastWallet === WALLET_TYPES.PLUG) {
+          // For Plug, try multiple methods to restore session silently
+          console.log('🔄 Attempting Plug session restore...');
+          
+          // Wait for Plug wallet extension to be ready (it may load after page script)
+          const waitForPlug = async (maxAttempts = 20, interval = 100): Promise<boolean> => {
+            for (let i = 0; i < maxAttempts; i++) {
+              if (window.ic?.plug) {
+                console.log(`✅ Plug wallet detected after ${i * interval}ms`);
+                return true;
+              }
+              await new Promise(resolve => setTimeout(resolve, interval));
+            }
+            return false;
+          };
+
+          const plugAvailable = await waitForPlug();
+          
+          if (!plugAvailable) {
+            console.log('⚠️ Plug wallet not available after waiting');
+            storage.clear();
+            return;
+          }
+
+          // Method 1: Check if already connected
+          const isPlugConnected = await window.ic?.plug?.isConnected();
+          
+          if (isPlugConnected) {
+            console.log('✅ Plug already connected, restoring session...');
+            const principal = await window.ic?.plug?.agent?.getPrincipal();
+            
+            if (principal) {
+              const convertedPrincipal = Principal.fromText(principal.toString());
+              const balance = await refreshWalletBalance(convertedPrincipal);
+
+              set({
+                isConnected: true,
+                account: { owner: convertedPrincipal, balance },
+                isInitialized: true,
+                walletType: WALLET_TYPES.PLUG
+              });
+
+              selectedWalletId.set(lastWallet);
+              currentWalletType.set(WALLET_TYPES.PLUG);
+              console.log('🎉 Plug session restored successfully');
+              return;
+            }
+          }
+
+          // Method 2: Try to create agent silently (this can restore session without popup)
+          console.log('🔄 Trying silent agent creation...');
+          try {
+            const whitelist = [
+              CONFIG.currentCanisterId,
+              CONFIG.currentIcpLedgerId,
+              CONFIG.currentIcusdLedgerId,
+              CANISTER_IDS.STABILITY_POOL
+            ];
+            const host = CONFIG.isLocal ? 'http://localhost:4943' : 'https://icp0.io';
+            
+            // createAgent can restore session silently if user previously approved
+            await (window.ic?.plug as any)?.createAgent?.({ whitelist, host });
+            
+            // Check if we now have a valid agent and principal
+            const principal = await window.ic?.plug?.agent?.getPrincipal();
+            
+            if (principal && principal.toString() !== '2vxsx-fae') {
+              console.log('✅ Plug session restored via createAgent');
+              const convertedPrincipal = Principal.fromText(principal.toString());
+              const balance = await refreshWalletBalance(convertedPrincipal);
+
+              set({
+                isConnected: true,
+                account: { owner: convertedPrincipal, balance },
+                isInitialized: true,
+                walletType: WALLET_TYPES.PLUG
+              });
+
+              selectedWalletId.set(lastWallet);
+              currentWalletType.set(WALLET_TYPES.PLUG);
+              console.log('🎉 Plug session restored successfully');
+              return;
+            }
+          } catch (agentError) {
+            console.log('⚠️ Silent agent creation failed:', agentError);
+          }
+
+          // Method 3: Check if agent already exists from previous session
+          if (window.ic?.plug?.agent) {
+            try {
+              const principal = await window.ic.plug.agent.getPrincipal();
+              if (principal && principal.toString() !== '2vxsx-fae') {
+                console.log('✅ Found existing Plug agent');
+                const convertedPrincipal = Principal.fromText(principal.toString());
+                const balance = await refreshWalletBalance(convertedPrincipal);
+
+                set({
+                  isConnected: true,
+                  account: { owner: convertedPrincipal, balance },
+                  isInitialized: true,
+                  walletType: WALLET_TYPES.PLUG
+                });
+
+                selectedWalletId.set(lastWallet);
+                currentWalletType.set(WALLET_TYPES.PLUG);
+                console.log('🎉 Plug session restored from existing agent');
+                return;
+              }
+            } catch (e) {
+              console.log('⚠️ Existing agent check failed:', e);
+            }
+          }
+
+          // If all silent methods fail, don't trigger popup - just clear and let user reconnect manually
+          console.log('⚠️ Could not restore Plug session silently, user must reconnect');
+          storage.clear();
+        } else if (lastWallet === WALLET_TYPES.OISY || lastWallet.toLowerCase().includes('oisy')) {
+          // For Oisy and other PNP wallets, try to restore session via PNP library
+          console.log('🔄 Attempting Oisy/PNP session restore...');
+          
+          try {
+            // Check if PNP has an active connection
+            const pnpInstance = getPnpInstance();
+            
+            if (pnpInstance && typeof pnpInstance.isConnected === 'function' && await pnpInstance.isConnected()) {
+              console.log('✅ PNP session still active, checking principal...');
+              
+              // Try to get the principal from PNP account
+              const account = pnpInstance.account;
+              
+              if (account?.owner) {
+                const convertedPrincipal = Principal.fromText(account.owner.toString());
+                const balance = await refreshWalletBalance(convertedPrincipal);
+                
+                set({
+                  isConnected: true,
+                  account: { owner: convertedPrincipal, balance },
+                  isInitialized: true,
+                  walletType: WALLET_TYPES.OISY
+                });
+                
+                selectedWalletId.set(lastWallet);
+                currentWalletType.set(WALLET_TYPES.OISY);
+                console.log('🎉 Oisy session restored successfully');
+                return;
+              }
+            }
+            
+            // If PNP session not active, clear storage
+            console.log('⚠️ Oisy session not found, user must reconnect');
+            storage.clear();
+          } catch (oisyError) {
+            console.log('⚠️ Oisy session restore failed:', oisyError);
+            storage.clear();
+          }
+        } else {
+          // Unknown wallet type, clear storage
+          console.log('⚠️ Unknown wallet type:', lastWallet);
+          storage.clear();
+        }
       } catch (error) {
-        console.warn("Auto-connect failed:", error);
+        console.warn("Session restore failed:", error);
         storage.clear();
         connectionError.set(error instanceof Error ? error.message : String(error));
       } finally {
@@ -131,13 +328,53 @@ function createAuthStore() {
         
         if (walletId === WALLET_TYPES.INTERNET_IDENTITY) {
           return await this.connectInternetIdentity();
-        } else {
+        } else if (walletId === WALLET_TYPES.PLUG) {
           return await this.connectPlug(walletId);
+        } else {
+          // For Oisy and other PNP wallets
+          return await this.connectPNPWallet(walletId);
         }
       } catch (error) {
         this.handleConnectionError(error);
         throw error;
       }
+    },
+
+    async connectPNPWallet(walletId: string): Promise<{owner: Principal} | null> {
+      // Use standard PNP connection for Oisy and other wallets
+      console.log('🔗 Connecting PNP wallet:', walletId);
+      
+      const result = await connectWithComprehensivePermissions(walletId);
+      
+      if (!result?.owner) {
+        throw new Error("Invalid connection result");
+      }
+
+      // Get initial balance after connection
+      const balance = await refreshWalletBalance(result.owner);
+      console.log('Initial balance:', balance.toString());
+
+      // Determine wallet type for storage
+      const walletType = walletId.toLowerCase().includes('oisy') ? WALLET_TYPES.OISY : walletId;
+
+      set({ 
+        isConnected: true, 
+        account: {
+          ...result,
+          balance
+        }, 
+        isInitialized: true,
+        walletType: walletType as WalletType
+      });
+
+      // Update storage
+      selectedWalletId.set(walletId);
+      currentWalletType.set(walletType as WalletType);
+      storage.set("LAST_WALLET", walletId);
+      storage.set("WAS_CONNECTED", "true");
+
+      console.log(`🎉 ${walletId} wallet connected successfully`);
+      return result;
     },
 
     async connectPlug(walletId: string): Promise<{owner: Principal} | null> {
@@ -304,19 +541,16 @@ function createAuthStore() {
           agent,
           canisterId
         }) as T;
+      } else if (state.walletType === WALLET_TYPES.OISY || state.walletType === WALLET_TYPES.PLUG) {
+        // Use PNP for both Oisy and Plug wallets
+        // Trust the state.isConnected flag which was set during connection
+        // The pnp.isConnectedAsync() check doesn't work reliably for all PNP wallets
+        
+        return pnp.getActor(canisterId, idl) as unknown as T;
       } else {
-        // Use Plug wallet
-        // Use async check for Plug wallet connection status
-        const isPlugConnected = await pnp.isConnectedAsync();
-        if (!isPlugConnected) {
-          throw new Error('Plug wallet not connected');
-        }
-
-        // FIXED: Remove permission check that causes "Permission request was denied" errors
-        // Permissions are handled by the wallet connection itself, not by explicit requests
-        // The wallet will prompt for permissions only when actually needed for transactions
-
-        return pnp.getActor(canisterId, idl);
+        // Fallback for any other PNP-based wallets
+        // Trust state.isConnected since it was validated during connection
+        return pnp.getActor(canisterId, idl) as unknown as T;
       }
     },
 
@@ -325,7 +559,11 @@ function createAuthStore() {
       
       if (state.walletType === WALLET_TYPES.INTERNET_IDENTITY) {
         return authClient ? await authClient.isAuthenticated() : false;
+      } else if (state.walletType === WALLET_TYPES.OISY) {
+        // For Oisy, trust the state.isConnected flag
+        return state.isConnected;
       } else {
+        // For Plug and other PNP wallets
         return await pnp.isConnectedAsync();
       }
     },
@@ -336,8 +574,8 @@ function createAuthStore() {
       if (!isConnected) return false;
       
       const state = get(store);
-      if (state.walletType === WALLET_TYPES.INTERNET_IDENTITY) {
-        return true; // Internet Identity is authenticated if connected
+      if (state.walletType === WALLET_TYPES.INTERNET_IDENTITY || state.walletType === WALLET_TYPES.OISY) {
+        return true; // Internet Identity and Oisy are authenticated if connected
       } else {
         return permissionManager.hasPermissions();
       }
@@ -349,8 +587,8 @@ function createAuthStore() {
       if (!isConnected) return false;
       
       const state = get(store);
-      if (state.walletType === WALLET_TYPES.INTERNET_IDENTITY) {
-        return true; // Internet Identity doesn't need additional permissions
+      if (state.walletType === WALLET_TYPES.INTERNET_IDENTITY || state.walletType === WALLET_TYPES.OISY) {
+        return true; // Internet Identity and Oisy don't need additional permissions
       } else {
         return await permissionManager.ensurePermissions();
       }

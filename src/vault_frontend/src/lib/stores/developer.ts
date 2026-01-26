@@ -1,58 +1,34 @@
 import { writable } from 'svelte/store';
 
 function createDeveloperAccessStore() {
-  const { subscribe, set } = writable(false);
-  
-  // Developer passkey - in production this would be a more secure mechanism
-  const validPasskeys = ['rumi-dev8', 'rumi-admin8'];
+  // Beta mode: Always grant access to everyone
+  const { subscribe, set } = writable(true);
   
   return {
     subscribe,
     
+    // Legacy method - now always returns true for beta
     checkPasskey(passkey: string): boolean {
-      const isValid = validPasskeys.includes(passkey);
-      
-      if (isValid) {
-        set(true);
-        
-        // Store in session storage so it persists during the session
-        if (typeof sessionStorage !== 'undefined') {
-          sessionStorage.setItem('rumi-dev-access', 'true');
-        }
-      }
-      
-      return isValid;
+      return true;
     },
     
-    // Check if developer access is stored in session
+    // Check if developer access is stored in session - always true for beta
     checkStoredAccess(): boolean {
-      if (typeof sessionStorage !== 'undefined') {
-        const hasAccess = sessionStorage.getItem('rumi-dev-access') === 'true';
-        
-        if (hasAccess) {
-          set(true);
-        }
-        
-        return hasAccess;
-      }
-      
-      return false;
+      set(true);
+      return true;
     },
     
-    // Clear developer access
+    // Clear developer access - no-op for beta since access is always granted
     clearAccess() {
-      set(false);
-      
-      if (typeof sessionStorage !== 'undefined') {
-        sessionStorage.removeItem('rumi-dev-access');
-      }
+      // In beta mode, we don't actually revoke access
+      // This is kept for API compatibility
     }
   };
 }
 
 export const developerAccess = createDeveloperAccessStore();
 
-// Check for stored access on module initialization
+// In beta mode, access is always granted
 if (typeof window !== 'undefined') {
   setTimeout(() => {
     developerAccess.checkStoredAccess();
