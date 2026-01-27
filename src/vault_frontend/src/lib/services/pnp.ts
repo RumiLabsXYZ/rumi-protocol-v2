@@ -224,11 +224,15 @@ export const pnp = {
     return false;
   },
   
-  // Override getActor to use Plug directly when possible and beta API format
+  // Override getActor to use the correct wallet based on current connection
   async getActor(canisterId: string, idl: any) {
     try {
+      // Check which wallet type is actually connected via localStorage
+      const currentWalletType = localStorage.getItem('rumi_last_wallet');
+      
       // For Plug wallet, use the direct Plug API to avoid permission prompts
-      if (window.ic?.plug && await window.ic.plug.isConnected()) {
+      // But ONLY if Plug is the currently selected wallet
+      if (currentWalletType === 'plug' && window.ic?.plug && await window.ic.plug.isConnected()) {
         console.log('🔧 Using Plug direct API for actor:', canisterId);
         return await window.ic.plug.createActor({
           canisterId,
@@ -237,7 +241,7 @@ export const pnp = {
       }
       
       // For other wallets (including Oisy), use PNP beta API with options object
-      console.log('🔧 Using PNP beta getActor for:', canisterId);
+      console.log('🔧 Using PNP beta getActor for:', canisterId, '(wallet:', currentWalletType, ')');
       return globalPnp?.getActor({ canisterId, idl });
     } catch (err) {
       console.error('Error getting actor for canister', canisterId, err);

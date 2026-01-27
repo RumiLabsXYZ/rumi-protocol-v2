@@ -190,6 +190,23 @@ private static async refreshVaultData(): Promise<void> {
     }
 
   /**
+   * Get an actor for read-only queries (no signing required)
+   * This avoids the Oisy signer popup issue for query operations
+   */
+  private static async getQueryActor(): Promise<_SERVICE> {
+    if (USE_MOCK_DATA) {
+      return publicActor;
+    }
+    
+    try {
+      return walletStore.getQueryActor(CONFIG.currentCanisterId, rumi_backendIDL);
+    } catch (err) {
+      console.error('Failed to get query actor:', err);
+      throw new Error('Failed to initialize query actor');
+    }
+  }
+
+  /**
    * Stop the cleanup interval
    */
   static stopCleanupInterval(): void {
@@ -209,8 +226,9 @@ private static async refreshVaultData(): Promise<void> {
     error?: string;
   }> {
     try {
-      // Get actor first to ensure we're authenticated
-      const actor = await this.getAuthenticatedActor();
+      // Get query actor for read operations (fixes Oisy signer popup issue)
+      // We'll get the authenticated actor separately if write operations are needed
+      const actor = await this.getQueryActor();
       
       // Then check if vault exists
       const vault = await this.getVaultById(vaultId);
@@ -282,7 +300,8 @@ private static async refreshVaultData(): Promise<void> {
    */
     static async triggerPendingTransfers(): Promise<boolean> {
         try {
-          const actor = await ApiClient.getAuthenticatedActor();
+          // Use query actor for read-only operations (fixes Oisy signer popup issue)
+          const actor = await ApiClient.getQueryActor();
           
           // The backend doesn't have a direct trigger, so we make a series of calls
           // that should indirectly cause the backend to process transfers
@@ -378,13 +397,23 @@ private static async refreshVaultData(): Promise<void> {
 
     /**
      * Open a new vault with ICP collateral
+     * @param icpAmount - Amount of ICP collateral (in ICP, not e8s)
+     * @param icusdAmount - Optional initial icUSD loan amount (in icUSD, not e8s), defaults to 0
      */
-    static async openVault(icpAmount: number): Promise<VaultOperationResult> {
+    static async openVault(icpAmount: number, icusdAmount: number = 0): Promise<VaultOperationResult> {
         // Keep track of ongoing request
         let abortController: AbortController | null = null;
         
         try {
           console.log(`Creating vault with ${icpAmount} ICP`);
+          
+          // Check if using Oisy - use push-deposit flow instead of ICRC-2
+          const walletType = localStorage.getItem('rumi_last_wallet');
+          if (walletType === 'oisy') {
+            const amountE8s = BigInt(Math.floor(icpAmount * E8S));
+            const borrowE8s = BigInt(Math.floor(icusdAmount * E8S));
+            return ApiClient.openVaultWithPushDeposit(amountE8s, borrowE8s);
+          }
           
           if (icpAmount * E8S < MIN_ICP_AMOUNT) {
             return {
@@ -521,6 +550,101 @@ private static async refreshVaultData(): Promise<void> {
         }
       }
 
+/**
+ * Opens a vault using the push-deposit flow (for Oisy wallet).
+ * User transfers ICP to their deposit address, then we create the vault.
+ * @param icpAmountE8s - Amount of ICP collateral in e8s
+ * @param borrowAmountE8s - Amount of icUSD to borrow initially (in e8s), defaults to 0
+ */
+static async openVaultWithPushDeposit(icpAmountE8s: bigint, borrowAmountE8s: bigint = 0n): Promise<{ success: boolean; vaultId?: bigint; error?: string }> {
+    try {
+        console.log('[openVaultWithPushDeposit] Starting push deposit flow for', icpAmountE8s, 'e8s, borrow:', borrowAmountE8s, 'e8s');
+
+        const actor = await ApiClient.getAuthenticatedActor();
+
+        // 1. Get deposit address from backend
+        const depositAccount = await actor.get_icp_deposit_account();
+        console.log('[openVaultWithPushDeposit] Deposit account:', depositAccount);
+
+        // 2. Transfer ICP to deposit address
+        const icpLedgerActor = await ApiClient.getIcpLedgerActor();
+        const transferResult = await icpLedgerActor.icrc1_transfer({
+            to: depositAccount,
+            amount: icpAmountE8s,
+            fee: [10_000n],
+            memo: [],
+            from_subaccount: [],
+            created_at_time: [],
+        });
+
+        if ('Err' in transferResult) {
+            console.error('[openVaultWithPushDeposit] Transfer failed:', transferResult.Err);
+            return { success: false, error: `ICP transfer failed: ${JSON.stringify(transferResult.Err)}` };
+        }
+
+        console.log('[openVaultWithPushDeposit] Transfer successful, block:', transferResult.Ok);
+
+        // 3. Call backend to create vault with deposited ICP and optional initial borrow
+        const vaultResult = await actor.open_vault_with_deposit(borrowAmountE8s);
+
+        if ('Err' in vaultResult) {
+            console.error('[openVaultWithPushDeposit] Vault creation failed:', vaultResult.Err);
+            return { success: false, error: `Vault creation failed: ${JSON.stringify(vaultResult.Err)}` };
+        }
+
+        console.log('[openVaultWithPushDeposit] Vault created:', vaultResult.Ok);
+        return { success: true, vaultId: vaultResult.Ok.vault_id };
+
+    } catch (error) {
+        console.error('[openVaultWithPushDeposit] Error:', error);
+        return { success: false, error: String(error) };
+    }
+}
+
+/**
+ * Gets an authenticated actor for the ICP ledger canister.
+ * Uses the connected wallet's identity for signing transfers.
+ */
+private static async getIcpLedgerActor(): Promise<any> {
+    const ICP_LEDGER_ID = 'ryjl3-tyaaa-aaaaa-aaaba-cai';
+    
+    // Minimal IDL for icrc1_transfer
+    const icpLedgerIdl = ({ IDL }: any) => {
+        const Account = IDL.Record({
+            owner: IDL.Principal,
+            subaccount: IDL.Opt(IDL.Vec(IDL.Nat8)),
+        });
+        const TransferArg = IDL.Record({
+            to: Account,
+            fee: IDL.Opt(IDL.Nat),
+            memo: IDL.Opt(IDL.Vec(IDL.Nat8)),
+            from_subaccount: IDL.Opt(IDL.Vec(IDL.Nat8)),
+            created_at_time: IDL.Opt(IDL.Nat64),
+            amount: IDL.Nat,
+        });
+        const TransferError = IDL.Variant({
+            BadFee: IDL.Record({ expected_fee: IDL.Nat }),
+            BadBurn: IDL.Record({ min_burn_amount: IDL.Nat }),
+            InsufficientFunds: IDL.Record({ balance: IDL.Nat }),
+            TooOld: IDL.Null,
+            CreatedInFuture: IDL.Record({ ledger_time: IDL.Nat64 }),
+            Duplicate: IDL.Record({ duplicate_of: IDL.Nat }),
+            TemporarilyUnavailable: IDL.Null,
+            GenericError: IDL.Record({ error_code: IDL.Nat, message: IDL.Text }),
+        });
+        const TransferResult = IDL.Variant({
+            Ok: IDL.Nat,
+            Err: TransferError,
+        });
+        return IDL.Service({
+            icrc1_transfer: IDL.Func([TransferArg], [TransferResult], []),
+        });
+    };
+
+    // Use wallet store to get authenticated actor (respects current wallet type)
+    return walletStore.getActor(ICP_LEDGER_ID, icpLedgerIdl);
+}
+
 
 /**
  * Borrow icUSD from an existing vault
@@ -529,6 +653,9 @@ static async borrowFromVault(vaultId: number, icusdAmount: number): Promise<Vaul
   return ApiClient.executeSequentialOperation(async () => {
     try {
       console.log(`Borrowing ${icusdAmount} icUSD from vault #${vaultId}`);
+      
+      // NOTE: Borrowing does NOT require ICRC-2 approval because the backend MINTS icUSD
+      // to the user's account. No approve/transfer_from needed. Works with all wallets including Oisy.
       
       // Validate input is finite before any calculations
       if (!isFinite(icusdAmount) || icusdAmount <= 0) {
@@ -588,6 +715,15 @@ static async addMarginToVault(vaultId: number, icpAmount: number): Promise<Vault
   return ApiClient.executeSequentialOperation(async () => {
     try {
       console.log(`Adding ${icpAmount} ICP to vault #${vaultId}`);
+      
+      // Early check for wallet compatibility - Oisy doesn't support vault operations
+      if (!walletOperations.supportsVaultOperations()) {
+        const limitationMessage = walletOperations.getWalletLimitationMessage();
+        return {
+          success: false,
+          error: limitationMessage || "Your wallet does not support vault operations. Please use Plug Wallet or Internet Identity."
+        };
+      }
       
       if (icpAmount * E8S < MIN_ICP_AMOUNT) {
         return {
@@ -738,6 +874,17 @@ static async repayToVault(vaultId: number, icusdAmount: number): Promise<VaultOp
     try {
       console.log(`Repaying ${icusdAmount} icUSD to vault #${vaultId}`);
       
+      // TEST: Allow Oisy through to test ICRC-2 support
+      // Original check commented out for testing:
+      // if (!walletOperations.supportsVaultOperations()) {
+      //   const limitationMessage = walletOperations.getWalletLimitationMessage();
+      //   return {
+      //     success: false,
+      //     error: limitationMessage || "Your wallet does not support vault operations. Please use Plug Wallet or Internet Identity."
+      //   };
+      // }
+      console.log('[TEST] Oisy wallet check bypassed for repayToVault - testing ICRC-2 support');
+      
       // Validate input is finite before any calculations
       if (!isFinite(icusdAmount) || icusdAmount <= 0) {
         return {
@@ -795,6 +942,10 @@ static async repayToVault(vaultId: number, icusdAmount: number): Promise<VaultOp
       
       try {
         console.log(`Closing vault #${vaultId}`);
+        
+        // NOTE: Closing a vault does NOT require ICRC-2 approval because the backend
+        // sends any remaining ICP back to the user. No approve/transfer_from needed.
+        // Works with all wallets including Oisy.
         
         // Verify vault access first
         const { vault, actor, error } = await ApiClient.verifyVaultAccess(vaultId);
@@ -910,7 +1061,8 @@ static async repayToVault(vaultId: number, icusdAmount: number): Promise<VaultOp
         // Set loading flag to prevent duplicate requests
         ApiClient.vaultCache.loading = true;
         
-        const actor = await ApiClient.getAuthenticatedActor();
+        // Use query actor for read-only operations (fixes Oisy signer popup issue)
+        const actor = await ApiClient.getQueryActor();
         // Use the actual Principal from wallet state, or reconstruct from string if needed
         // The Principal must be a proper @dfinity/principal instance for Candid serialization
         const principalForQuery = userPrincipal || Principal.fromText(principalStr);
@@ -985,6 +1137,10 @@ static async repayToVault(vaultId: number, icusdAmount: number): Promise<VaultOp
       try {
         console.log(`Withdrawing collateral from vault #${vaultId}`);
         
+        // NOTE: Withdrawing collateral does NOT require ICRC-2 approval because the backend
+        // sends ICP back to the user. No approve/transfer_from needed.
+        // Works with all wallets including Oisy.
+        
         // Get the authenticated actor
         const actor = await ApiClient.getAuthenticatedActor();
         
@@ -1023,7 +1179,8 @@ static async repayToVault(vaultId: number, icusdAmount: number): Promise<VaultOp
      */
     static async getVaultHistory(vaultId: number): Promise<any[]> {
       try {
-        const actor = await ApiClient.getAuthenticatedActor();
+        // Use query actor for read-only operations (fixes Oisy signer popup issue)
+        const actor = await ApiClient.getQueryActor();
         const history = await actor.get_vault_history(BigInt(vaultId));
         return history.map((event: any) => event);
       } catch (err) {
@@ -1099,7 +1256,8 @@ static async repayToVault(vaultId: number, icusdAmount: number): Promise<VaultOp
             };
           }
           
-          const actor = await ApiClient.getAuthenticatedActor();
+          // Use query actor for read-only operations (fixes Oisy signer popup issue)
+          const actor = await ApiClient.getQueryActor();
           // Use the actual Principal or reconstruct from string for proper Candid serialization
           const principalForQuery = Principal.fromText(principal.toString());
           return actor.get_liquidity_status(principalForQuery);
@@ -1434,6 +1592,10 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
   return ApiClient.executeSequentialOperation(async () => {
     try {
       console.log(`Withdrawing collateral and closing vault #${vaultId} in one operation`);
+      
+      // NOTE: Withdrawing collateral and closing vault does NOT require ICRC-2 approval
+      // because the backend sends ICP back to the user. No approve/transfer_from needed.
+      // Works with all wallets including Oisy.
       
       // First ensure the vault exists
       const vault = await ApiClient.getVaultById(vaultId);

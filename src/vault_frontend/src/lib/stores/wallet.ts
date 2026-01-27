@@ -424,6 +424,16 @@ function createWalletStore() {
         console.error('Failed to get actor:', err);
         throw err;
       }
+    },
+
+    async getQueryActor(canisterId: string, idl: any) {
+      try {
+        // Use auth.getQueryActor for read-only operations (doesn't trigger signer popup)
+        return await auth.getQueryActor(canisterId, idl);
+      } catch (err) {
+        console.error('Failed to get query actor:', err);
+        throw err;
+      }
     }
   };
 }

@@ -193,6 +193,167 @@ pub async fn open_vault(icp_margin: u64) -> Result<OpenVaultSuccess, ProtocolErr
     }
 }
 
+/// Opens a vault using ICP that was pre-deposited to the user's deposit subaccount.
+/// This bypasses ICRC-2 approve/transfer_from, enabling Oisy wallet support.
+/// If borrow_amount > 0, also mints icUSD to the caller.
+pub async fn open_vault_with_deposit(borrow_amount: u64) -> Result<OpenVaultSuccess, ProtocolError> {
+    use crate::management::{compute_deposit_subaccount, icp_balance_of};
+    use icrc_ledger_types::icrc1::account::Account;
+    
+    let caller = ic_cdk::api::caller();
+    let guard_principal = match GuardPrincipal::new(caller, "open_vault_with_deposit") {
+        Ok(guard) => guard,
+        Err(GuardError::AlreadyProcessing) => {
+            log!(INFO, "[open_vault_with_deposit] Principal {:?} already has an ongoing operation", caller);
+            return Err(ProtocolError::AlreadyProcessing);
+        },
+        Err(GuardError::StaleOperation) => {
+            log!(INFO, "[open_vault_with_deposit] Principal {:?} has a stale operation being cleaned up", caller);
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "Previous operation is being cleaned up. Please try again.".to_string()
+            ));
+        },
+        Err(err) => return Err(err.into()),
+    };
+
+    log!(INFO, "[open_vault_with_deposit] Starting for caller {:?}, borrow_amount: {}", caller, borrow_amount);
+
+    // 1. Compute deposit account
+    let subaccount = compute_deposit_subaccount(caller);
+    let deposit_account = Account {
+        owner: ic_cdk::id(),
+        subaccount: Some(subaccount),
+    };
+
+    // 2. Query current balance at deposit address
+    let current_balance = match icp_balance_of(deposit_account).await {
+        Ok(bal) => bal,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(e);
+        }
+    };
+
+    // 3. Get previously credited amount
+    let previously_credited = read_state(|s| {
+        s.credited_icp_e8s.get(&caller).copied().unwrap_or(0)
+    });
+
+    // 4. Calculate new deposit
+    let new_deposit = current_balance.saturating_sub(previously_credited);
+    let icp_margin_amount: ICP = new_deposit.into();
+
+    if icp_margin_amount < MIN_ICP_AMOUNT {
+        guard_principal.fail();
+        return Err(ProtocolError::AmountTooLow {
+            minimum_amount: MIN_ICP_AMOUNT.to_u64(),
+        });
+    }
+
+    // 5. Update credited amount to prevent double-crediting
+    mutate_state(|s| {
+        s.credited_icp_e8s.insert(caller, current_balance);
+    });
+
+    // Convert borrow amount to ICUSD type
+    let borrow_icusd: ICUSD = borrow_amount.into();
+    
+    // 6. If borrowing, validate the collateral ratio
+    if borrow_amount > 0 {
+        let icp_rate = read_state(|s| s.last_icp_rate.expect("no icp rate"));
+        let min_collateral_ratio = read_state(|s| s.mode.get_minimum_liquidation_collateral_ratio());
+        let max_borrowable_amount = icp_margin_amount * icp_rate / min_collateral_ratio;
+        
+        log!(INFO, "[open_vault_with_deposit] Collateral: {} e8s, ICP rate: {}, Max borrowable: {}", 
+             new_deposit, icp_rate, max_borrowable_amount);
+        
+        if borrow_icusd > max_borrowable_amount {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "Borrow amount {} exceeds max borrowable {} for collateral {}",
+                borrow_icusd, max_borrowable_amount, icp_margin_amount
+            )));
+        }
+    }
+
+    // 7. Create the vault
+    let vault_id = mutate_state(|s| {
+        let vault_id = s.increment_vault_id();
+        record_open_vault(
+            s,
+            Vault {
+                owner: caller,
+                borrowed_icusd_amount: 0.into(), // Start with 0, will add borrow separately
+                icp_margin_amount,
+                vault_id,
+            },
+            0, // block_index = 0 since we're not doing a transfer here
+        );
+        vault_id
+    });
+
+    log!(INFO, "[open_vault_with_deposit] Created vault {} with {} e8s collateral", vault_id, new_deposit);
+
+    // 8. If borrow_amount > 0, mint icUSD to the caller
+    if borrow_amount > 0 {
+        let fee: ICUSD = read_state(|s| borrow_icusd * s.get_borrowing_fee());
+        
+        log!(INFO, "[open_vault_with_deposit] Minting {} icUSD (fee: {}) for vault {}", 
+             borrow_icusd, fee, vault_id);
+        
+        match mint_icusd(borrow_icusd - fee, caller).await {
+            Ok(mint_block_index) => {
+                // Record the borrow on the vault
+                mutate_state(|s| {
+                    record_borrow_from_vault(s, vault_id, borrow_icusd, fee, mint_block_index);
+                });
+                
+                // Schedule treasury fee routing (async - don't block on failure)
+                if fee.to_u64() > 0 {
+                    let fee_amount = fee.to_u64();
+                    ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), move || {
+                        ic_cdk::spawn(route_minting_fee_to_treasury(
+                            vault_id,
+                            fee_amount,
+                            mint_block_index
+                        ));
+                    });
+                }
+                
+                log!(INFO, "[open_vault_with_deposit] Successfully minted {} icUSD for vault {}", 
+                     borrow_icusd - fee, vault_id);
+            }
+            Err(mint_error) => {
+                // Vault is created but minting failed - log error but don't fail the whole operation
+                // User can borrow later via borrow_from_vault
+                log!(INFO, "[open_vault_with_deposit] Warning: Vault {} created but minting failed: {:?}", 
+                     vault_id, mint_error);
+            }
+        }
+    }
+
+    guard_principal.complete();
+
+    Ok(OpenVaultSuccess {
+        vault_id,
+        block_index: 0,
+    })
+}
+
+/// Returns the deposit account for the caller to send ICP to.
+pub fn get_icp_deposit_account() -> icrc_ledger_types::icrc1::account::Account {
+    use crate::management::compute_deposit_subaccount;
+    use icrc_ledger_types::icrc1::account::Account;
+    
+    let caller = ic_cdk::api::caller();
+    let subaccount = compute_deposit_subaccount(caller);
+    
+    Account {
+        owner: ic_cdk::id(),
+        subaccount: Some(subaccount),
+    }
+}
+
 pub async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = match GuardPrincipal::new(caller, &format!("borrow_vault_{}", arg.vault_id)) {

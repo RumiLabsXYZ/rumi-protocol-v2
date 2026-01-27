@@ -1,5 +1,6 @@
 use crate::numeric::{ICUSD, ICP};
 use crate::state::read_state;
+use crate::ProtocolError;
 use candid::{Nat, Principal};
 use ic_xrc_types::{Asset, AssetClass, GetExchangeRateRequest, GetExchangeRateResult};
 use icrc_ledger_types::icrc1::account::Account;
@@ -7,6 +8,7 @@ use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
 use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromError};
 use icrc_ledger_client_cdk::{CdkRuntime, ICRC1Client};
 use num_traits::ToPrimitive;
+use sha2::{Sha256, Digest};
 use std::fmt;
 use crate::log;
 use crate::DEBUG;
@@ -261,5 +263,37 @@ pub async fn transfer_icusd(amount: ICUSD, to: Principal) -> Result<u64, Transfe
     Ok(block_index.0.to_u64().unwrap())
 }
 
+/// Derives a deposit subaccount for a given caller principal.
+/// Used for the push-deposit flow where users transfer ICP directly
+/// to a per-user subaccount owned by this canister.
+pub fn compute_deposit_subaccount(caller: Principal) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"rumi-deposit");
+    hasher.update(caller.as_slice());
+    hasher.finalize().into()
+}
+
+/// Queries the ICP ledger for the balance of a given account.
+/// Returns the balance in e8s, or a ProtocolError if the call fails
+/// or the balance exceeds u64::MAX.
+pub async fn icp_balance_of(account: Account) -> Result<u64, ProtocolError> {
+    let client = ICRC1Client {
+        runtime: CdkRuntime,
+        ledger_canister_id: read_state(|s| s.icp_ledger_principal),
+    };
+    let balance: Nat = client
+        .balance_of(account)
+        .await
+        .map_err(|(code, msg)| {
+            ProtocolError::GenericError(format!(
+                "Failed to query ICP balance: code={:?}, msg={}",
+                code, msg
+            ))
+        })?;
+    
+    balance.0.to_u64().ok_or_else(|| {
+        ProtocolError::GenericError("ICP balance exceeds u64::MAX".to_string())
+    })
+}
 
 

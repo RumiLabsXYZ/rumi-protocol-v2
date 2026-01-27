@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { browser } from "$app/environment";
+  import { page } from "$app/stores";
   import { walletStore as wallet } from "../lib/stores/wallet";
   import { auth } from "../lib/services/auth";
   import { permissionStore } from "../lib/stores/permissionStore";

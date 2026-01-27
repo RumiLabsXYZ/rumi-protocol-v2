@@ -540,10 +540,13 @@ pub fn icrc21_canister_call_consent_message(
 pub fn icrc28_trusted_origins() -> Icrc28TrustedOriginsResponse {
     Icrc28TrustedOriginsResponse {
         trusted_origins: vec![
+            // Production domains
+            "https://rumiprotocol.io".to_string(),
+            "https://www.rumiprotocol.io".to_string(),
+            "https://app.rumiprotocol.io".to_string(),
+            // Canister URLs (for testing)
             "https://tcfua-yaaaa-aaaap-qrd7q-cai.icp0.io".to_string(),
             "https://tcfua-yaaaa-aaaap-qrd7q-cai.raw.icp0.io".to_string(),
-            "https://rumi.finance".to_string(),
-            "https://www.rumi.finance".to_string(),
         ],
     }
 }

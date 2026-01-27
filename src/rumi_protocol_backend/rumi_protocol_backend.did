@@ -7,6 +7,12 @@ type InitArg = record {
   treasury_principal : opt principal;
   stability_pool_principal : opt principal;
 };
+
+type Account = record {
+  owner : principal;
+  subaccount : opt blob;
+};
+
 type Event = variant {
   claim_liquidity_returns : record {
     block_index : nat64;
@@ -221,6 +227,8 @@ service : (ProtocolArg) -> {
   // Vault related operations
   redeem_icp : (nat64) -> (variant { Ok : SuccessWithFee; Err : ProtocolError });
   open_vault : (nat64) -> (variant { Ok : OpenVaultSuccess; Err : ProtocolError });
+  open_vault_with_deposit : (nat64) -> (variant { Ok : OpenVaultSuccess; Err : ProtocolError });
+  get_icp_deposit_account : () -> (Account) query;
   add_margin_to_vault : (VaultArg) -> (variant { Ok : nat64; Err : ProtocolError });
   borrow_from_vault : (VaultArg) -> (variant { Ok : SuccessWithFee; Err : ProtocolError });
   repay_to_vault : (VaultArg) -> (variant { Ok : nat64; Err : ProtocolError });

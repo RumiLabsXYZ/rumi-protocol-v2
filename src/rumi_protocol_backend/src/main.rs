@@ -300,6 +300,19 @@ async fn open_vault(icp_margin: u64) -> Result<OpenVaultSuccess, ProtocolError> 
 
 #[candid_method(update)]
 #[update]
+async fn open_vault_with_deposit(borrow_amount: u64) -> Result<OpenVaultSuccess, ProtocolError> {
+    validate_call()?;
+    check_postcondition(rumi_protocol_backend::vault::open_vault_with_deposit(borrow_amount).await)
+}
+
+#[candid_method(query)]
+#[query]
+fn get_icp_deposit_account() -> icrc_ledger_types::icrc1::account::Account {
+    rumi_protocol_backend::vault::get_icp_deposit_account()
+}
+
+#[candid_method(update)]
+#[update]
 async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {
     validate_call()?;
     validate_mode()?;

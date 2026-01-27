@@ -4,6 +4,7 @@ import { get } from 'svelte/store';
 import { walletStore } from '../../stores/wallet';
 import { CONFIG } from '../../config';
 import { permissionManager } from '../PermissionManager';
+import { currentWalletType, WALLET_TYPES } from '../auth';
 import type { UserBalances } from '../types';
 
 // Import types from declarations
@@ -24,6 +25,27 @@ import type { _SERVICE as IcusdLedgerService } from '$declarations/icusd_ledger/
 export const E8S = 100_000_000;
 
 /**
+ * Check if the current wallet is Oisy (which doesn't support ICRC-2 canister calls through its signer)
+ */
+function isOisyWallet(): boolean {
+  const walletType = get(currentWalletType);
+  // Also check localStorage as a fallback
+  const storedWallet = typeof window !== 'undefined' 
+    ? localStorage.getItem('rumi_last_wallet') 
+    : null;
+  return walletType === WALLET_TYPES.OISY || storedWallet === 'oisy';
+}
+
+/**
+ * Check if the current wallet supports ICRC-2 canister calls (allowance/approve)
+ * Plug and Internet Identity work with ICRC-2 calls
+ * Oisy wallet signer doesn't support arbitrary canister calls to the ICP ledger
+ */
+export function supportsIcrc2CanisterCalls(): boolean {
+  return !isOisyWallet();
+}
+
+/**
  * Helper to check if an error is a stale actor/read state error
  */
 function isStaleActorError(err: any): boolean {
@@ -41,6 +63,24 @@ function isStaleActorError(err: any): boolean {
  */
 export class walletOperations {
   /**
+   * Check if the current wallet supports vault operations (ICRC-2)
+   * Returns false for Oisy wallet which doesn't support icrc2_approve through its signer
+   */
+  static supportsVaultOperations(): boolean {
+    return supportsIcrc2CanisterCalls();
+  }
+
+  /**
+   * Get a user-friendly message explaining wallet limitations
+   */
+  static getWalletLimitationMessage(): string | null {
+    if (!supportsIcrc2CanisterCalls()) {
+      return 'Oisy wallet does not currently support vault operations. Please use Plug Wallet or Internet Identity to create vaults and mint icUSD.';
+    }
+    return null;
+  }
+
+  /**
    * Reset wallet signer state after errors
    */
   static async resetWalletSignerState(): Promise<void> {
@@ -57,8 +97,18 @@ export class walletOperations {
 
   /**
    * Approve ICP transfer - now streamlined with automatic permission handling
+   * Note: Oisy wallet doesn't support icrc2_approve calls - returns user-friendly error
    */
   static async approveIcpTransfer(amount: bigint, spenderCanisterId: string): Promise<{success: boolean, error?: string}> {
+    // Oisy wallet doesn't support ICRC-2 canister calls through its signer
+    if (!supportsIcrc2CanisterCalls()) {
+      console.warn('Oisy wallet does not support icrc2_approve - ICRC-2 not available through signer');
+      return {
+        success: false,
+        error: 'Oisy wallet does not currently support vault operations. Please use Plug Wallet or Internet Identity to create vaults and mint icUSD.'
+      };
+    }
+    
     try {
       // FIXED: Remove permission check that causes "Permission request was denied" errors
       // The wallet will handle permissions automatically when the transaction is attempted
@@ -103,8 +153,16 @@ export class walletOperations {
 
   /**
    * Check ICP allowance with retry on stale actor
+   * Note: Oisy wallet doesn't support icrc2_allowance calls - returns 0 to trigger approval flow
    */
   static async checkIcpAllowance(spenderCanisterId: string): Promise<bigint> {
+    // Oisy wallet doesn't support ICRC-2 canister calls through its signer
+    // Return 0 to trigger the approval flow, which will show a user-friendly error
+    if (!supportsIcrc2CanisterCalls()) {
+      console.log('Wallet does not support ICRC-2 canister calls, skipping allowance check');
+      return BigInt(0);
+    }
+    
     const maxRetries = 2;
     
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -173,8 +231,13 @@ export class walletOperations {
 
   /**
    * Check icUSD allowance with retry on stale actor
+   * TEST: Attempting icrc2_allowance for ALL wallets including Oisy to verify actual support
    */
   static async checkIcusdAllowance(spenderCanisterId: string): Promise<bigint> {
+    // TEST: Log wallet type but attempt the call anyway
+    const walletType = isOisyWallet() ? 'Oisy' : 'other';
+    console.log(`[TEST] checkIcusdAllowance called for ${walletType} wallet - attempting ICRC-2 call...`);
+    
     const maxRetries = 2;
     
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -227,8 +290,13 @@ export class walletOperations {
   
   /**
    * Approve icUSD transfer - now streamlined with retry on stale actor
+   * TEST: Attempting icrc2_approve for ALL wallets including Oisy to verify actual support
    */
   static async approveIcusdTransfer(amount: bigint, spenderCanisterId: string): Promise<{success: boolean, error?: string}> {
+    // TEST: Log wallet type but attempt the call anyway
+    const walletType = isOisyWallet() ? 'Oisy' : 'other';
+    console.log(`[TEST] approveIcusdTransfer called for ${walletType} wallet - attempting ICRC-2 approve...`);
+    
     const maxRetries = 2;
     
     for (let attempt = 0; attempt <= maxRetries; attempt++) {

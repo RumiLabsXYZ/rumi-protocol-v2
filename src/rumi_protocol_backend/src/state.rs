@@ -154,6 +154,9 @@ pub struct State {
     pub is_fetching_rate: bool,
     pub treasury_principal: Option<Principal>, // Add treasury principal
     pub stability_pool_canister: Option<Principal>, // Add stability pool canister
+    /// Tracks total ICP (in e8s) already credited from deposit subaccounts per user.
+    /// Used to prevent double-crediting the same deposit.
+    pub credited_icp_e8s: BTreeMap<Principal, u64>,
 }
 
 impl From<InitArg> for State {
@@ -187,6 +190,7 @@ impl From<InitArg> for State {
             is_fetching_rate: false,
             treasury_principal: args.treasury_principal, // Initialize treasury principal from args
             stability_pool_canister: args.stability_pool_principal, // Initialize stability pool canister from args
+            credited_icp_e8s: BTreeMap::new(),
         }
     }
 }

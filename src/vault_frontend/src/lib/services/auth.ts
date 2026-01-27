@@ -598,6 +598,30 @@ function createAuthStore() {
     getPrincipal(): Principal | null {
       const state = get(store);
       return state.account?.owner || null;
+    },
+
+    /**
+     * Get an actor for READ-ONLY query operations.
+     * Uses anonymous HttpAgent - no wallet signing required.
+     * Use this for: get_vaults, get_protocol_status, get_vault, etc.
+     * This avoids the Oisy signer popup issue for query operations.
+     */
+    async getQueryActor<T>(canisterId: string, idl: any): Promise<T> {
+      const { Actor, HttpAgent } = await import('@dfinity/agent');
+      
+      const queryAgent = new HttpAgent({
+        host: CONFIG.isLocal ? 'http://localhost:4943' : 'https://icp0.io'
+      });
+      
+      // Fetch root key for local development
+      if (CONFIG.isLocal) {
+        await queryAgent.fetchRootKey();
+      }
+      
+      return Actor.createActor(idl, {
+        agent: queryAgent,
+        canisterId
+      }) as T;
     }
   };
 }

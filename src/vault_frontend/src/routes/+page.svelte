@@ -129,31 +129,55 @@
     successMessage = '';
 
     try {
-      const openResult = await protocolService.openVault(icpAmount);
-
-      if (!openResult.success) {
-        errorMessage = openResult.error || 'Failed to open vault';
-        return;
-      }
-
-      const borrowResult = await protocolService.borrowFromVault(
-        openResult.vaultId!,
-        icusdAmount
-      );
-
-      if (borrowResult.success) {
-        successMessage = `Successfully created vault #${openResult.vaultId} and borrowed ${icusdAmount} icUSD!`;
+      // Check if using Oisy wallet - use single-call vault creation with initial borrow
+      const walletType = localStorage.getItem('rumi_last_wallet');
+      
+      if (walletType === 'oisy') {
+        // Oisy: Single call that creates vault AND mints initial icUSD
+        const openResult = await protocolService.openVault(icpAmount, icusdAmount);
         
-        // Refresh all data after successful operation
-        if ($principal) {
-          await appDataStore.refreshAll($principal);
+        if (openResult.success) {
+          successMessage = `Successfully created vault #${openResult.vaultId} and borrowed ${icusdAmount} icUSD!`;
+          
+          // Refresh all data after successful operation
+          if ($principal) {
+            await appDataStore.refreshAll($principal);
+          }
+          
+          // Reset form
+          icpAmount = 1;
+          icusdAmount = 5;
+        } else {
+          errorMessage = openResult.error || 'Failed to open vault';
         }
-        
-        // Reset form
-        icpAmount = 1;
-        icusdAmount = 5;
       } else {
-        errorMessage = borrowResult.error || 'Failed to borrow from vault';
+        // Plug/II: Two-step process - create vault, then borrow
+        const openResult = await protocolService.openVault(icpAmount);
+
+        if (!openResult.success) {
+          errorMessage = openResult.error || 'Failed to open vault';
+          return;
+        }
+
+        const borrowResult = await protocolService.borrowFromVault(
+          openResult.vaultId!,
+          icusdAmount
+        );
+
+        if (borrowResult.success) {
+          successMessage = `Successfully created vault #${openResult.vaultId} and borrowed ${icusdAmount} icUSD!`;
+          
+          // Refresh all data after successful operation
+          if ($principal) {
+            await appDataStore.refreshAll($principal);
+          }
+          
+          // Reset form
+          icpAmount = 1;
+          icusdAmount = 5;
+        } else {
+          errorMessage = borrowResult.error || 'Failed to borrow from vault';
+        }
       }
     } catch (error) {
       console.error('Error creating vault:', error);
