@@ -234,9 +234,14 @@ export class walletOperations {
    * TEST: Attempting icrc2_allowance for ALL wallets including Oisy to verify actual support
    */
   static async checkIcusdAllowance(spenderCanisterId: string): Promise<bigint> {
-    // TEST: Log wallet type but attempt the call anyway
+    // TEST: Enhanced logging for Oisy ICRC-2 test
     const walletType = isOisyWallet() ? 'Oisy' : 'other';
-    console.log(`[TEST] checkIcusdAllowance called for ${walletType} wallet - attempting ICRC-2 call...`);
+    console.log(`[TEST-ICRC2] checkIcusdAllowance:`, {
+      walletType,
+      icusdLedgerCanisterId: CONFIG.currentIcusdLedgerId,
+      spenderCanisterId,
+      method: 'icrc2_allowance'
+    });
     
     const maxRetries = 2;
     
@@ -270,9 +275,20 @@ export class walletOperations {
           }
         });
         
+        console.log(`[TEST-ICRC2] icrc2_allowance SUCCESS:`, { allowance: result.allowance.toString() });
         return result.allowance;
-      } catch (err) {
-        console.error(`Failed to check icUSD allowance (attempt ${attempt + 1}/${maxRetries + 1}):`, err);
+      } catch (err: any) {
+        // TEST: Enhanced error logging
+        console.error(`[TEST-ICRC2] icrc2_allowance FAILED (attempt ${attempt + 1}/${maxRetries + 1}):`, {
+          walletType,
+          icusdLedgerCanisterId: CONFIG.currentIcusdLedgerId,
+          spenderCanisterId,
+          method: 'icrc2_allowance',
+          errorMessage: err?.message || String(err),
+          errorName: err?.name,
+          errorStack: err?.stack,
+          fullError: err
+        });
         
         // If this is a stale actor error and we have retries left, continue to retry
         if (isStaleActorError(err) && attempt < maxRetries) {
@@ -293,9 +309,15 @@ export class walletOperations {
    * TEST: Attempting icrc2_approve for ALL wallets including Oisy to verify actual support
    */
   static async approveIcusdTransfer(amount: bigint, spenderCanisterId: string): Promise<{success: boolean, error?: string}> {
-    // TEST: Log wallet type but attempt the call anyway
+    // TEST: Enhanced logging for Oisy ICRC-2 test
     const walletType = isOisyWallet() ? 'Oisy' : 'other';
-    console.log(`[TEST] approveIcusdTransfer called for ${walletType} wallet - attempting ICRC-2 approve...`);
+    console.log(`[TEST-ICRC2] approveIcusdTransfer:`, {
+      walletType,
+      icusdLedgerCanisterId: CONFIG.currentIcusdLedgerId,
+      spenderCanisterId,
+      method: 'icrc2_approve',
+      amount: amount.toString()
+    });
     
     const maxRetries = 2;
     
@@ -331,26 +353,38 @@ export class walletOperations {
         });
         
         if ('Ok' in approvalResult) {
-          console.log('icUSD approval successful');
+          console.log(`[TEST-ICRC2] icrc2_approve SUCCESS:`, { blockIndex: approvalResult.Ok.toString() });
           return { success: true };
         } else {
+          console.error(`[TEST-ICRC2] icrc2_approve returned Err:`, approvalResult.Err);
           return { 
             success: false, 
             error: `icUSD approval failed: ${JSON.stringify(approvalResult.Err)}` 
           };
         }
-      } catch (error) {
-        console.error(`icUSD approval failed (attempt ${attempt + 1}/${maxRetries + 1}):`, error);
+      } catch (err: any) {
+        // TEST: Enhanced error logging
+        console.error(`[TEST-ICRC2] icrc2_approve FAILED (attempt ${attempt + 1}/${maxRetries + 1}):`, {
+          walletType,
+          icusdLedgerCanisterId: CONFIG.currentIcusdLedgerId,
+          spenderCanisterId,
+          method: 'icrc2_approve',
+          amount: amount.toString(),
+          errorMessage: err?.message || String(err),
+          errorName: err?.name,
+          errorStack: err?.stack,
+          fullError: err
+        });
         
         // If this is a stale actor error and we have retries left, continue to retry
-        if (isStaleActorError(error) && attempt < maxRetries) {
+        if (isStaleActorError(err) && attempt < maxRetries) {
           console.log('Detected stale actor error during icUSD approval, will refresh and retry...');
           continue;
         }
         
         return { 
           success: false, 
-          error: error instanceof Error ? error.message : 'Failed to approve icUSD transfer' 
+          error: err instanceof Error ? err.message : 'Failed to approve icUSD transfer' 
         };
       }
     }

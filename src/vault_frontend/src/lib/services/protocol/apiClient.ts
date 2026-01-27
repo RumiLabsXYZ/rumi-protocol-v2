@@ -874,16 +874,11 @@ static async repayToVault(vaultId: number, icusdAmount: number): Promise<VaultOp
     try {
       console.log(`Repaying ${icusdAmount} icUSD to vault #${vaultId}`);
       
-      // TEST: Allow Oisy through to test ICRC-2 support
-      // Original check commented out for testing:
-      // if (!walletOperations.supportsVaultOperations()) {
-      //   const limitationMessage = walletOperations.getWalletLimitationMessage();
-      //   return {
-      //     success: false,
-      //     error: limitationMessage || "Your wallet does not support vault operations. Please use Plug Wallet or Internet Identity."
-      //   };
-      // }
-      console.log('[TEST] Oisy wallet check bypassed for repayToVault - testing ICRC-2 support');
+      // TEST: Intentionally bypassing Oisy check to test if ICRC-2 works on icUSD ledger
+      // This test determines if Oisy can actually do icrc2_allowance/icrc2_approve calls
+      // The original block was: if (!walletOperations.supportsVaultOperations()) { return error; }
+      console.log('[TEST-ICRC2] repayToVault: Oisy wallet check BYPASSED - intentionally attempting ICRC-2 flow');
+      console.log('[TEST-ICRC2] repayToVault: If this fails, capture the exact error from walletOperations logs above');
       
       // Validate input is finite before any calculations
       if (!isFinite(icusdAmount) || icusdAmount <= 0) {
