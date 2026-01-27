@@ -23,6 +23,10 @@ pub enum AssetType {
     ICP,
     /// ckBTC collateral (for future Bitcoin support)
     CKBTC,
+    /// ckUSDT stablecoin (for vault repayment/liquidation)
+    CKUSDT,
+    /// ckUSDC stablecoin (for vault repayment/liquidation)
+    CKUSDC,
 }
 
 /// A record of a deposit to the treasury
@@ -75,10 +79,14 @@ pub struct TreasuryInitArgs {
     pub controller: Principal,
     /// icUSD ledger principal
     pub icusd_ledger: Principal,
-    /// ICP ledger principal  
+    /// ICP ledger principal
     pub icp_ledger: Principal,
     /// ckBTC ledger principal (for future use)
     pub ckbtc_ledger: Option<Principal>,
+    /// ckUSDT ledger principal (for vault repayment)
+    pub ckusdt_ledger: Option<Principal>,
+    /// ckUSDC ledger principal (for vault repayment)
+    pub ckusdc_ledger: Option<Principal>,
 }
 
 /// Arguments for making a deposit

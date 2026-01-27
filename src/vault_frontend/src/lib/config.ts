@@ -9,6 +9,9 @@ export const CANISTER_IDS = {
   ICUSD_LEDGER: "t6bor-paaaa-aaaap-qrd5q-cai",
   TREASURY: "tlg74-oiaaa-aaaap-qrd6a-cai",
   STABILITY_POOL: "tmhzi-dqaaa-aaaap-qrd6q-cai",
+  // ckUSDT and ckUSDC ledgers on ICP mainnet
+  CKUSDT_LEDGER: "cngnf-vqaaa-aaaar-qag4q-cai",
+  CKUSDC_LEDGER: "xevnm-gaaaa-aaaar-qafnq-cai",
 } as const;
 
 // Canister IDs for local development

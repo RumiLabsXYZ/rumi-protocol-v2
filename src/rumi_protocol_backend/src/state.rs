@@ -154,6 +154,8 @@ pub struct State {
     pub is_fetching_rate: bool,
     pub treasury_principal: Option<Principal>, // Add treasury principal
     pub stability_pool_canister: Option<Principal>, // Add stability pool canister
+    pub ckusdt_ledger_principal: Option<Principal>, // ckUSDT ledger for stable repayments
+    pub ckusdc_ledger_principal: Option<Principal>, // ckUSDC ledger for stable repayments
 }
 
 impl From<InitArg> for State {
@@ -187,6 +189,8 @@ impl From<InitArg> for State {
             is_fetching_rate: false,
             treasury_principal: args.treasury_principal, // Initialize treasury principal from args
             stability_pool_canister: args.stability_pool_principal, // Initialize stability pool canister from args
+            ckusdt_ledger_principal: args.ckusdt_ledger_principal,
+            ckusdc_ledger_principal: args.ckusdc_ledger_principal,
         }
     }
 }

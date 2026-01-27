@@ -2,6 +2,8 @@ type AssetType = variant {
   ICUSD;
   ICP;
   CKBTC;
+  CKUSDT;
+  CKUSDC;
 };
 
 type DepositType = variant {
@@ -39,6 +41,8 @@ type TreasuryInitArgs = record {
   icusd_ledger: principal;
   icp_ledger: principal;
   ckbtc_ledger: opt principal;
+  ckusdt_ledger: opt principal;
+  ckusdc_ledger: opt principal;
 };
 
 type DepositArgs = record {

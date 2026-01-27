@@ -30,6 +30,10 @@ pub struct TreasuryConfig {
     pub icp_ledger: Principal,
     /// ckBTC ledger canister (optional)
     pub ckbtc_ledger: Option<Principal>,
+    /// ckUSDT ledger canister (for vault repayment)
+    pub ckusdt_ledger: Option<Principal>,
+    /// ckUSDC ledger canister (for vault repayment)
+    pub ckusdc_ledger: Option<Principal>,
     /// Whether treasury accepts new deposits
     pub is_paused: bool,
 }
@@ -78,6 +82,8 @@ impl TreasuryState {
                 icusd_ledger: args.icusd_ledger,
                 icp_ledger: args.icp_ledger,
                 ckbtc_ledger: args.ckbtc_ledger,
+                ckusdt_ledger: args.ckusdt_ledger,
+                ckusdc_ledger: args.ckusdc_ledger,
                 is_paused: false,
             };
 
@@ -85,6 +91,8 @@ impl TreasuryState {
             balances.insert(AssetType::ICUSD, AssetBalance::default());
             balances.insert(AssetType::ICP, AssetBalance::default());
             balances.insert(AssetType::CKBTC, AssetBalance::default());
+            balances.insert(AssetType::CKUSDT, AssetBalance::default());
+            balances.insert(AssetType::CKUSDC, AssetBalance::default());
 
             Self {
                 deposits: StableBTreeMap::init(memory_manager.get(MemoryId::new(0))),
