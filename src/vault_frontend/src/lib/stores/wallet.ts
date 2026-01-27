@@ -356,7 +356,7 @@ function createWalletStore() {
           },
           loading: false,
           icon: walletId === WALLET_TYPES.INTERNET_IDENTITY 
-            ? 'https://internetcomputer.org/img/IC_logo_horizontal.svg'
+            ? '/wallets/01InfinityMarkHEX.svg'
             : walletsList.find(w => w.id === walletId)?.icon ?? ''
         }));
 
