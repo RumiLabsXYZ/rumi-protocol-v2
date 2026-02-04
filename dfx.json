@@ -48,6 +48,17 @@
         }
       }
     },
+    "internet_identity": {
+      "type": "custom",
+      "candid": "https://github.com/dfinity/internet-identity/releases/latest/download/internet_identity.did",
+      "wasm": "https://github.com/dfinity/internet-identity/releases/latest/download/internet_identity_dev.wasm.gz",
+      "remote": {
+        "id": {
+          "ic": "rdmx6-jaaaa-aaaaa-aaadq-cai"
+        }
+      },
+      "frontend": {}
+    },
     "test_vault_frontend": {
       "source": [
         "src/test_vault_frontend/dist"
@@ -88,7 +99,7 @@
       ]
     },
     "rumi_stability_pool": {
-      "candid": "src/rumi_stability_pool/rumi_stability_pool.did",
+      "candid": "src/stability_pool/stability_pool.did",
       "package": "rumi_stability_pool",
       "type": "rust",
       "metadata": [
@@ -96,6 +107,10 @@
           "name": "candid:service"
         }
       ]
+    },
+    "xrc": {
+      "type": "pull",
+      "id": "uf6dk-hyaaa-aaaaq-qaaaq-cai"
     }
   },
   "defaults": {
