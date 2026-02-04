@@ -98,6 +98,12 @@ fn validate_mode() -> Result<(), ProtocolError> {
     }
 }
 
+/// Validates price freshness for liquidation operations.
+/// Liquidations are critical for protocol solvency, so we require fresh prices.
+fn validate_price_for_liquidation() -> Result<(), ProtocolError> {
+    read_state(|s| s.check_price_not_too_old())
+}
+
 fn setup_timers() {
     ic_cdk_timers::set_timer_interval(rumi_protocol_backend::xrc::FETCHING_ICP_RATE_INTERVAL, || {
         ic_cdk::spawn(rumi_protocol_backend::xrc::fetch_icp_rate())
@@ -346,12 +352,14 @@ async fn withdraw_and_close_vault(vault_id: u64) -> Result<Option<u64>, Protocol
 #[update]
 #[candid_method(update)]
 async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolError> {
+    validate_price_for_liquidation()?;
     check_postcondition(rumi_protocol_backend::vault::liquidate_vault(vault_id).await)
 }
 
 #[update]
 #[candid_method(update)]
 async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result<SuccessWithFee, ProtocolError> {
+    validate_price_for_liquidation()?;
     check_postcondition(rumi_protocol_backend::vault::liquidate_vault_partial(vault_id, icusd_amount).await)
 }
 
@@ -359,6 +367,7 @@ async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result<Suc
 #[update]
 #[candid_method(update)]
 async fn stability_pool_liquidate(vault_id: u64, max_debt_to_liquidate: u64) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
+    validate_price_for_liquidation()?;
     let caller = ic_cdk::api::caller();
     
     // TODO: Add proper authorization check - only allow registered stability pool
