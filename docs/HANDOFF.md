@@ -14,12 +14,13 @@
 ## Team & Controllers
 
 ### Principals (Add as canister controllers)
-| Name | GitHub | Principal |
-|------|--------|-----------|
-| Rob (Lead) | RobRipley | `fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae` |
-| Agnes | agneskoinange | `wrppb-amng2-jzskb-wcmam-mwrmi-ci52r-bkkre-tzu35-hjfpb-dnl4p-6qe` |
-| Gurleen | Gurleenkdhaliwal | `bsu7v-jz2ty-tyonm-dmkdj-nir27-num7e-dtlff-4vmjj-gagxl-xiljg-lqe` |
-| CycleOps | - | `cpbhu-5iaaa-aaaad-aalta-cai` |
+| Name | GitHub | Principal | Notes |
+|------|--------|-----------|-------|
+| Rob (Lead) | RobRipley | `fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae` | |
+| Agnes (NEW) | agneskoinange | `jtqeo-qixuv-xsygz-jhhre-zht42-iiop6-icktm-f7oeg-horay-dl4ao-dae` | Current identity |
+| Agnes (OLD) | agneskoinange | `wrppb-amng2-jzskb-wcmam-mwrmi-ci52r-bkkre-tzu35-hjfpb-dnl4p-6qe` | Lost identity - DO NOT USE |
+| Gurleen | Gurleenkdhaliwal | `bsu7v-jz2ty-tyonm-dmkdj-nir27-num7e-dtlff-4vmjj-gagxl-xiljg-lqe` | |
+| CycleOps | - | `cpbhu-5iaaa-aaaad-aalta-cai` | Balance checker |
 
 ---
 
