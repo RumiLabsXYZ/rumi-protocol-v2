@@ -1,7 +1,9 @@
 /* ============================================
-   RUMI PROTOCOL — Design System
-   Color: Purple base + teal accent
-   Font: Circular Std (headings) + Inter (body)
+   RUMI PROTOCOL — Design System Implementation
+   See /docs/DESIGN_SYSTEM.md for principles
+   
+   Color: Deep cool purple base + teal accent (earned)
+   Font: Circular Std (headings) + Inter (body/numbers)
    ============================================ */
 
 /* Fonts */
@@ -20,48 +22,60 @@
 @tailwind utilities;
 
 /* ============================================
-   CSS Custom Properties — Color System
+   CSS Custom Properties
+   Purple is the MATERIAL. Teal is the SIGNAL.
    ============================================ */
 :root {
-  /* Primary palette — dark purples as the base */
-  --rumi-bg-primary: #0d0a14;
-  --rumi-bg-secondary: #110e1a;
-  --rumi-bg-card: #161221;
-  --rumi-bg-card-hover: #1c1729;
-  --rumi-bg-elevated: #1e1830;
+  /* Background surfaces — unmistakably cool purple */
+  --rumi-bg-primary: #0c0a14;
+  --rumi-bg-surface1: #13101e;
+  --rumi-bg-surface2: #1a1528;
+  --rumi-bg-surface3: #221c32;
+  /* Aliases for hyphenated refs */
+  --rumi-bg-secondary: #13101e;
+  --rumi-bg-surface-1: #13101e;
+  --rumi-bg-surface-2: #1a1528;
+  --rumi-bg-surface-3: #221c32;
+  --rumi-bg-card: #13101e;
+  --rumi-bg-card-hover: #1a1528;
+  --rumi-bg-elevated: #1a1528;
 
-  /* Purple — the base DNA, present everywhere */
+  /* Purple — structural, ever-present */
   --rumi-purple-deep: #1a1030;
   --rumi-purple-muted: #2d1f54;
   --rumi-purple-base: #522785;
   --rumi-purple-light: #7c3aed;
-  --rumi-purple-glow: rgba(124, 58, 237, 0.15);
 
-  /* Teal — the star accent */
+  /* Teal — earned accent, interactive + key values only */
   --rumi-teal: #2DD4BF;
   --rumi-teal-bright: #14F0C5;
   --rumi-teal-muted: #1a9e8f;
-  --rumi-teal-dim: rgba(45, 212, 191, 0.12);
-  --rumi-teal-glow: rgba(45, 212, 191, 0.25);
+  --rumi-teal-dim: rgba(45, 212, 191, 0.10);
 
-  /* Text */
-  --rumi-text-primary: #f0eef5;
+  /* Identity gradient — ONLY for RUMI wordmark/logo, not headlines */
+  --rumi-identity-gradient: linear-gradient(135deg, var(--rumi-purple-light), var(--rumi-teal));
+
+  /* Text hierarchy */
+  --rumi-text-primary: #e8e4f0;
   --rumi-text-secondary: #a09bb5;
   --rumi-text-muted: #605a75;
 
-  /* Borders — tinted purple */
-  --rumi-border: rgba(124, 58, 237, 0.12);
-  --rumi-border-hover: rgba(124, 58, 237, 0.25);
-  --rumi-border-accent: rgba(45, 212, 191, 0.3);
+  /* Borders — purple-tinted */
+  --rumi-border: rgba(124, 58, 237, 0.10);
+  --rumi-border-hover: rgba(124, 58, 237, 0.22);
+  --rumi-border-accent: rgba(45, 212, 191, 0.25);
+  --rumi-border-teal: rgba(45, 212, 191, 0.25);
+
+  /* Risk states — the LOUDEST elements */
+  --rumi-safe: #2DD4BF;
+  --rumi-caution: #f59e0b;
+  --rumi-danger: #ef4444;
+  --rumi-critical: #f87171;
 
   /* Status */
   --rumi-green: #10b981;
   --rumi-red: #ef4444;
   --rumi-yellow: #f59e0b;
-
-  /* Gradients */
-  --rumi-headline-gradient: linear-gradient(135deg, var(--rumi-purple-light), var(--rumi-teal));
-  --rumi-card-border-gradient: linear-gradient(135deg, rgba(124, 58, 237, 0.25), rgba(45, 212, 191, 0.15));
 }
 
 /* ============================================
@@ -78,47 +92,72 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* Subtle purple-teal ambient glow */
+/* Very subtle ambient glow — purple only, no teal */
 body::before {
   content: '';
   position: fixed;
   top: -300px;
   left: 50%;
   transform: translateX(-50%);
-  width: 1000px;
-  height: 700px;
-  background: radial-gradient(ellipse, rgba(82, 39, 133, 0.12) 0%, rgba(45, 212, 191, 0.05) 40%, transparent 70%);
+  width: 900px;
+  height: 600px;
+  background: radial-gradient(ellipse, rgba(82, 39, 133, 0.10) 0%, transparent 65%);
   pointer-events: none;
   z-index: 0;
 }
 
-/* Headings use Circular Std */
+/* Headings — Circular Std, solid color, no gradient */
 h1, h2, h3, h4, h5, h6 {
   font-family: 'Circular Std', 'Inter', system-ui, sans-serif;
+  color: var(--rumi-text-primary);
   letter-spacing: -0.02em;
 }
 
-/* ============================================
-   Headline gradient — purple to teal
-   ============================================ */
+/* Page titles — PRIMARY BRAND: solid off-white, confident */
 .page-title {
   font-family: 'Circular Std', 'Inter', sans-serif;
-  font-size: 2.25rem;
+  font-size: 1.75rem;
   font-weight: 500;
+  color: var(--rumi-text-primary);
   letter-spacing: -0.02em;
-  background: var(--rumi-headline-gradient);
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
+  margin-bottom: 0.5rem;
+}
+
+/* Section headers */
+.section-title {
+  font-family: 'Circular Std', 'Inter', sans-serif;
+  font-size: 1.25rem;
+  font-weight: 500;
+  color: var(--rumi-text-primary);
+  letter-spacing: -0.02em;
+}
+
+/* Key numbers — visually dominant per principle #3 */
+.key-number {
+  font-family: 'Inter', sans-serif;
+  font-weight: 700;
+  font-size: 1.75rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--rumi-text-primary);
+}
+
+/* Labels — quiet, structural */
+.field-label {
+  font-family: 'Inter', sans-serif;
+  font-weight: 400;
+  font-size: 0.8125rem;
+  color: var(--rumi-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
 }
 
 /* ============================================
-   Cards — purple-tinted with subtle borders
+   Cards — purple-tinted, no decorative borders
    ============================================ */
 .glass-panel,
 .glass-card,
 .icp-card {
-  background: var(--rumi-bg-card);
+  background: var(--rumi-bg-surface1);
   border: 1px solid var(--rumi-border);
   border-radius: 0.75rem;
   padding: 1.5rem;
@@ -131,19 +170,17 @@ h1, h2, h3, h4, h5, h6 {
   border-color: var(--rumi-border-hover);
 }
 
-/* Featured card — teal border accent */
+/* Price card — slightly more visible border, still purple */
 .price-card {
-  background: var(--rumi-bg-card);
-  border: 1px solid var(--rumi-border-accent);
+  background: var(--rumi-bg-surface1);
+  border: 1px solid var(--rumi-border-hover);
   border-radius: 0.75rem;
   padding: 1.5rem;
-  box-shadow: 0 0 30px rgba(45, 212, 191, 0.04);
 }
 
 /* ============================================
-   Buttons
+   Buttons — teal is for interaction
    ============================================ */
-/* Primary — teal, for main CTAs */
 .icp-button,
 .btn-primary {
   padding: 0.625rem 1.25rem;
@@ -160,7 +197,7 @@ h1, h2, h3, h4, h5, h6 {
 .icp-button:hover,
 .btn-primary:hover {
   background: var(--rumi-teal-bright);
-  box-shadow: 0 0 20px rgba(45, 212, 191, 0.2);
+  box-shadow: 0 0 20px rgba(45, 212, 191, 0.15);
 }
 
 .icp-button:disabled,
@@ -170,10 +207,9 @@ h1, h2, h3, h4, h5, h6 {
   box-shadow: none;
 }
 
-/* Secondary — subtle purple border */
 .btn-secondary {
   padding: 0.625rem 1.25rem;
-  background: var(--rumi-bg-elevated);
+  background: var(--rumi-bg-surface2);
   border: 1px solid var(--rumi-border-hover);
   color: var(--rumi-text-primary);
   font-family: 'Circular Std', 'Inter', sans-serif;
@@ -188,7 +224,6 @@ h1, h2, h3, h4, h5, h6 {
   color: var(--rumi-teal);
 }
 
-/* Danger — red */
 .btn-danger {
   padding: 0.625rem 1.25rem;
   background: rgba(239, 68, 68, 0.8);
@@ -206,11 +241,11 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 /* ============================================
-   Input fields
+   Inputs
    ============================================ */
 .icp-input {
   padding: 0.625rem 1rem;
-  background: var(--rumi-bg-secondary);
+  background: var(--rumi-bg-surface2);
   border: 1px solid var(--rumi-border);
   border-radius: 0.5rem;
   color: var(--rumi-text-primary);
@@ -225,7 +260,7 @@ h1, h2, h3, h4, h5, h6 {
 .icp-input:focus {
   outline: none;
   border-color: var(--rumi-teal);
-  box-shadow: 0 0 0 1px rgba(45, 212, 191, 0.15);
+  box-shadow: 0 0 0 1px rgba(45, 212, 191, 0.12);
 }
 
 /* ============================================

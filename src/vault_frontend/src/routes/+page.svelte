@@ -215,7 +215,7 @@
 <div class="container mx-auto px-4 max-w-6xl">
   <section class="mb-12">
     <div class="text-center mb-10">
-      <h1 class="page-title mb-4">
+      <h1 class="page-title text-center mb-4">
         Borrow icUSD with your ICP
       </h1>
       <p class="text-lg max-w-2xl mx-auto" style="color: var(--rumi-text-secondary)">
@@ -447,19 +447,19 @@
 
       <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div class="glass-card h-full">
-          <div class="text-teal-400 text-3xl font-bold mb-2">1</div>
+          <div class="text-3xl font-bold mb-2" style="color: var(--rumi-text-muted)">1</div>
           <h3 class="text-lg font-medium mb-2">Deposit Collateral</h3>
           <p class="text-gray-300">Deposit your ICP tokens as collateral to secure your position.</p>
         </div>
 
         <div class="glass-card h-full">
-          <div class="text-teal-400 text-3xl font-bold mb-2">2</div>
+          <div class="text-3xl font-bold mb-2" style="color: var(--rumi-text-muted)">2</div>
           <h3 class="text-lg font-medium mb-2">Borrow icUSD</h3>
           <p class="text-gray-300">Borrow icUSD stablecoin against your collateral at a minimum ratio of 130%.</p>
         </div>
 
         <div class="glass-card h-full">
-          <div class="text-teal-400 text-3xl font-bold mb-2">3</div>
+          <div class="text-3xl font-bold mb-2" style="color: var(--rumi-text-muted)">3</div>
           <h3 class="text-lg font-medium mb-2">Manage Your Vault</h3>
           <p class="text-gray-300">Add more collateral, borrow more, or repay your icUSD to maintain a healthy position.</p>
         </div>
@@ -472,7 +472,7 @@
 
 <style>
   .glass-card {
-    background: var(--rumi-bg-card);
+    background: var(--rumi-bg-surface1);
     border: 1px solid var(--rumi-border);
     border-radius: 0.75rem;
     padding: 1.5rem;

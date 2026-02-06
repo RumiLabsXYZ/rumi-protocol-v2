@@ -163,32 +163,16 @@
 
 <style>
   .price-card {
-    background: var(--rumi-bg-card);
-    border: 1px solid var(--rumi-border-teal);
+    background: var(--rumi-bg-surface1);
+    border: 1px solid var(--rumi-border-hover);
     border-radius: 0.75rem;
     padding: 1.5rem;
   }
 
-  .btn-primary {
-    background: var(--rumi-teal);
-    color: var(--rumi-bg-primary);
-    font-family: 'Circular Std', 'Inter', sans-serif;
-    font-weight: 500;
-  }
-
-  .btn-primary:hover {
-    background: var(--rumi-teal-bright);
-  }
-
-  .btn-secondary {
-    background: var(--rumi-bg-elevated);
-    border: 1px solid var(--rumi-border-hover);
-    color: var(--rumi-text-primary);
-    font-family: 'Circular Std', 'Inter', sans-serif;
-  }
-
-  .btn-secondary:hover {
-    border-color: var(--rumi-teal);
-    color: var(--rumi-teal);
+  .glass-card {
+    background: var(--rumi-bg-surface1);
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.75rem;
+    padding: 1.5rem;
   }
 </style>

@@ -354,7 +354,7 @@ async function partialLiquidateVault(vaultId: number, liquidateAmount: number) {
 <div class="container mx-auto px-4 max-w-6xl">
   <section class="mb-8">
     <div class="text-center mb-8">
-      <h1 class="page-title mb-4">
+      <h1 class="page-title text-center mb-4">
         Market Liquidations
       </h1>
       <p class="text-lg max-w-3xl mx-auto" style="color: var(--rumi-text-secondary)">
@@ -537,19 +537,19 @@ async function partialLiquidateVault(vaultId: number, liquidateAmount: number) {
 
       <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div class="glass-card h-full">
-          <div class="text-teal-400 text-3xl font-bold mb-2">1</div>
+          <div class="text-3xl font-bold mb-2" style="color: var(--rumi-text-muted)">1</div>
           <h3 class="text-lg font-medium mb-2">Find Opportunities</h3>
           <p class="text-gray-400">Browse vaults with collateral ratios below the required threshold (133% in normal mode, 150% in recovery mode).</p>
         </div>
 
         <div class="glass-card h-full">
-          <div class="text-teal-400 text-3xl font-bold mb-2">2</div>
+          <div class="text-3xl font-bold mb-2" style="color: var(--rumi-text-muted)">2</div>
           <h3 class="text-lg font-medium mb-2">Pay the Debt</h3>
           <p class="text-gray-400">Pay the debt amount in icUSD to liquidate the vault. You can liquidate partially (any amount up to the full debt) or fully liquidate the entire vault.</p>
         </div>
 
         <div class="glass-card h-full">
-          <div class="text-teal-400 text-3xl font-bold mb-2">3</div>
+          <div class="text-3xl font-bold mb-2" style="color: var(--rumi-text-muted)">3</div>
           <h3 class="text-lg font-medium mb-2">Receive Collateral</h3>
           <p class="text-gray-400">Get the vault's ICP collateral with a 10% discount compared to the current market price, generating profit.</p>
         </div>
@@ -560,7 +560,7 @@ async function partialLiquidateVault(vaultId: number, liquidateAmount: number) {
 
 <style>
   .glass-card {
-    background: var(--rumi-bg-card);
+    background: var(--rumi-bg-surface1);
     border: 1px solid var(--rumi-border);
     border-radius: 0.75rem;
     padding: 1.5rem;

@@ -262,7 +262,7 @@
     {#if showWalletDialog}
       <div class="fixed inset-0 z-50 flex items-center justify-center p-4 min-h-screen">
         <div class="absolute inset-0 bg-black/50 backdrop-blur-sm" on:click|stopPropagation={() => showWalletDialog = false}></div>
-        <div id="wallet-dialog" class="relative w-full max-w-md p-6 rounded-xl border shadow-xl transform transition-all" style="background: var(--rumi-bg-elevated); border-color: var(--rumi-border)">
+        <div id="wallet-dialog" class="relative w-full max-w-md p-6 rounded-xl border shadow-xl transform transition-all" style="background: var(--rumi-bg-surface2); border-color: var(--rumi-border)">
           <div class="flex justify-between mb-6">
             <h2 class="text-xl font-semibold text-white">Connect Wallet</h2>
             <button 
@@ -283,7 +283,7 @@
             {:else}
               {#each walletList as wallet (wallet.id)}
               <button
-                class="flex items-center justify-between w-full px-4 py-3 text-white rounded-xl border transition-all duration-200" style="background: var(--rumi-bg-card); border-color: var(--rumi-border); hover: var(--rumi-bg-card-hover)"
+                class="flex items-center justify-between w-full px-4 py-3 text-white rounded-xl border transition-all duration-200" style="background: var(--rumi-bg-surface1); border-color: var(--rumi-border)"
                 on:click|stopPropagation={() => connectWallet(wallet.id)}
                 disabled={connecting}
               >

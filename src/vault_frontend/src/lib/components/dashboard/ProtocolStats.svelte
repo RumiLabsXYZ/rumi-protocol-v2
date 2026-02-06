@@ -141,7 +141,7 @@
 
 <style>
   .stat-card {
-    background: var(--rumi-bg-card);
+    background: var(--rumi-bg-surface1);
     border: 1px solid var(--rumi-border);
     border-radius: 0.75rem;
     padding: 1rem;
