@@ -1,121 +1,180 @@
+/* ============================================
+   RUMI PROTOCOL — Design System
+   Color: Muted purple base + teal accent
+   Font: Circular Std (headings) + Inter (body)
+   ============================================ */
+
+/* Fonts */
+@font-face {
+  font-family: 'Circular Std';
+  src: url('/fonts/CircularStd-Medium.ttf') format('truetype');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+/* ============================================
+   CSS Custom Properties — Color System
+   ============================================ */
 :root {
-  --icp-purple: #522785;
-  --icp-blue: #29abe2;
-  --icp-dark: #1c1c1c;
-  --accent-gradient: linear-gradient(45deg, var(--icp-purple), var(--icp-blue));
-  --gradient-end: #1b1c22;
-  --gradient-start: #1a2f53;
+  /* Primary palette — muted purples */
+  --rumi-bg-primary: #0a0b0f;
+  --rumi-bg-secondary: #111219;
+  --rumi-bg-card: #16171f;
+  --rumi-bg-card-hover: #1c1d27;
+  --rumi-bg-elevated: #1e1f2a;
+
+  /* Purple — subdued, used for backgrounds and depth */
+  --rumi-purple-deep: #1a1030;
+  --rumi-purple-muted: #2d1f54;
+  --rumi-purple-base: #3D2066;
+  --rumi-purple-light: #5a3d8a;
+
+  /* Teal — the star accent color */
+  --rumi-teal: #2DD4BF;
+  --rumi-teal-bright: #14F0C5;
+  --rumi-teal-muted: #1a9e8f;
+  --rumi-teal-dim: rgba(45, 212, 191, 0.15);
+  --rumi-teal-glow: rgba(45, 212, 191, 0.3);
+
+  /* Text */
+  --rumi-text-primary: #f0f0f4;
+  --rumi-text-secondary: #9ca3b0;
+  --rumi-text-muted: #5c6170;
+
+  /* Borders */
+  --rumi-border: rgba(255, 255, 255, 0.06);
+  --rumi-border-hover: rgba(255, 255, 255, 0.12);
+  --rumi-border-teal: rgba(45, 212, 191, 0.2);
+
+  /* Status */
+  --rumi-green: #10b981;
+  --rumi-red: #ef4444;
+  --rumi-yellow: #f59e0b;
+
+  /* Gradients */
+  --rumi-glow: radial-gradient(ellipse at 50% 0%, rgba(45, 212, 191, 0.08) 0%, transparent 60%);
+  --rumi-accent-gradient: linear-gradient(135deg, var(--rumi-teal-muted), var(--rumi-teal));
 }
 
+/* ============================================
+   Global Styles
+   ============================================ */
 body {
   min-height: 100vh;
   margin: 0;
-  font-family: 'Inter', sans-serif;
-  background: linear-gradient(135deg, #29024f 0%, #522785 50%, #1a237e 100%);
-  background-size: 400% 400%;
-  animation: gradientMove 15s ease infinite;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  background: var(--rumi-bg-primary);
+  color: var(--rumi-text-primary);
+  color-scheme: dark;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-.glass-panel {
-  background-color: rgba(255, 255, 255, 0.05);
-  backdrop-filter: blur(16px);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+/* Subtle top glow — replaces the animated gradient */
+body::before {
+  content: '';
+  position: fixed;
+  top: -200px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 800px;
+  height: 600px;
+  background: radial-gradient(ellipse, rgba(45, 212, 191, 0.06) 0%, rgba(61, 32, 102, 0.04) 40%, transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Headings use Circular Std */
+h1, h2, h3, h4, h5, h6 {
+  font-family: 'Circular Std', 'Inter', system-ui, sans-serif;
+  letter-spacing: -0.02em;
+}
+
+/* ============================================
+   Reusable Component Classes
+   ============================================ */
+
+/* Cards — flat, subtle borders, no glow rings */
+.glass-panel,
+.glass-card,
+.icp-card {
+  background: var(--rumi-bg-card);
+  border: 1px solid var(--rumi-border);
   border-radius: 0.75rem;
+  padding: 1.5rem;
+  transition: border-color 0.2s ease;
 }
 
+.glass-panel:hover,
+.glass-card:hover,
+.icp-card:hover {
+  border-color: var(--rumi-border-hover);
+}
+
+/* Primary button — teal accent */
 .icp-button {
-  padding: 0.5rem 1rem;
-  background-color: #522785;
-  color: white;
+  padding: 0.625rem 1.25rem;
+  background: var(--rumi-teal);
+  color: var(--rumi-bg-primary);
+  font-family: 'Circular Std', 'Inter', sans-serif;
+  font-weight: 500;
+  border: none;
   border-radius: 0.5rem;
-  transition: all 0.3s;
+  cursor: pointer;
+  transition: all 0.2s ease;
 }
 
 .icp-button:hover {
-  background-color: #29abe2;
+  background: var(--rumi-teal-bright);
+  box-shadow: 0 0 20px rgba(45, 212, 191, 0.2);
 }
 
 .icp-button:disabled {
-  opacity: 0.5;
+  opacity: 0.4;
   cursor: not-allowed;
+  box-shadow: none;
 }
 
+/* Input fields */
 .icp-input {
-  padding: 0.5rem 1rem;
-  background-color: rgba(0, 0, 0, 0.2);
-  border: 1px solid rgba(82, 39, 133, 0.3);
+  padding: 0.625rem 1rem;
+  background: var(--rumi-bg-secondary);
+  border: 1px solid var(--rumi-border);
   border-radius: 0.5rem;
-  color: white;
+  color: var(--rumi-text-primary);
+  font-family: 'Inter', sans-serif;
+  transition: border-color 0.2s ease;
 }
 
 .icp-input::placeholder {
-  color: rgba(156, 163, 175, 1);
+  color: var(--rumi-text-muted);
 }
 
 .icp-input:focus {
   outline: none;
-  border-color: #29abe2;
+  border-color: var(--rumi-teal);
+  box-shadow: 0 0 0 1px rgba(45, 212, 191, 0.15);
 }
 
-.icp-card {
-  background-color: rgba(0, 0, 0, 0.3);
-  backdrop-filter: blur(12px);
-  border: 1px solid rgba(82, 39, 133, 0.2);
-  border-radius: 0.75rem;
-  padding: 1.5rem;
-  transition: all 0.3s;
-}
-
-.icp-card:hover {
-  border-color: rgba(41, 171, 226, 0.3);
-}
-
-@keyframes gradientMove {
-  0% { background-position: 0% 50%; }
-  50% { background-position: 100% 50%; }
-  100% { background-position: 0% 50%; }
-}
-
+/* ============================================
+   Utility Animations (keep only what's needed)
+   ============================================ */
 @keyframes spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
 
-@keyframes bounceHigher {
-  0%, 100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(-60px); 
-  }
-}
-
-.bounce-higher {
-  animation: bounceHigher 4s infinite;
-}
-
-@keyframes bounceNormal {
-  0%, 100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(-30px); 
-  }
-}
-
-.bounce-normal {
-  animation: bounceHigher 5s infinite;
-}
-
 @keyframes fadeSlideIn {
   0% {
     opacity: 0;
-    transform: translateY(+30px);
+    transform: translateY(12px);
   }
   100% {
     opacity: 1;
@@ -124,7 +183,7 @@ body {
 }
 
 .animate-title {
-  animation: fadeSlideIn 2.5s ease-out;
+  animation: fadeSlideIn 0.6s ease-out;
 }
 
 .background-clip-text {

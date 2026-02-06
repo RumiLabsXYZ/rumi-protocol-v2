@@ -141,6 +141,9 @@
 
 <style>
   .stat-card {
-    @apply bg-gray-800/60 backdrop-blur-lg p-4 rounded-lg border border-gray-700;
+    background: var(--rumi-bg-card);
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.75rem;
+    padding: 1rem;
   }
 </style>

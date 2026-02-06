@@ -1,0 +1,1027 @@
+Goal: implement real "Receive" and "Send" from the wallet dropdown for Internet Identity users, so they can get funds out without needing CLI tools. Keep scope to functionality first (basic UI is fine, polish later). This work is only for the wallet dropdown, not the whole app.
+
+Context:
+- We already show a wallet dropdown with:
+  - connected wallet provider icon + principal
+  - balances list (ICP and icUSD) with token logos (these are now fixed)
+  - Refresh Balance button
+  - Disconnect Wallet
+- Wallet options exist (Internet Identity, Oisy, Plug), but for this task:
+  - Implement Send/Receive for Internet Identity (II) first.
+  - For Plug/Oisy, show Send/Receive but disabled with a tooltip like "Use your wallet app to send/receive." (We can refine later.)
+
+Functional requirements:
+
+1) Principal display + copy (do this now, it supports Receive)
+- Display principal truncated everywhere in dropdown, format: first 5 chars + "…" + last 3 chars (example: "4alqm…vqe").
+- Make the principal row clickable to copy the FULL principal to clipboard.
+- On copy success, show a small toast "Principal copied" for ~2 seconds.
+- Do not show the full principal by default. (Optional: on hover, show full in tooltip, but not required.)
+
+2) Receive
+- Add a "Receive" action in the dropdown.
+- For II: clicking Receive opens a small modal or popover that shows:
+  - "Receive" title
+  - the truncated principal (click to copy full principal)
+  - a clear "Copy principal" button (redundant is fine)
+  - (No QR code for now. Keep it simple.)
+- For Plug/Oisy: Receive disabled with tooltip "Use your wallet app to receive."
+
+3) Send (Internet Identity only)
+- Add a "Send" action in the dropdown.
+- Clicking Send opens a modal with:
+  - Token selector: ICP or icUSD (default to icUSD if user has icUSD > 0 else ICP).
+  - Recipient input: principal text input (validate basic principal format).
+  - Amount input: numeric, validate > 0 and <= available balance.
+  - For ICP, consider leaving a little headroom for fees if applicable, but keep it simple: just prevent sending > balance.
+  - Submit button: "Send"
+  - Cancel button
+  - Status area for progress + errors
+
+- On submit:
+  - Disable the button and show "Sending…" state.
+  - Perform the transfer using the authenticated Internet Identity actor/agent (same auth path we already use when connected with II).
+  - On success:
+    - Show toast "Transfer sent"
+    - Close modal
+    - Trigger refresh of balances (same as Refresh Balance action)
+  - On failure:
+    - Show readable error message in the modal
+    - Keep modal open so user can retry
+
+4) How to execute transfers (important)
+- For ICP:
+  - Use the ICP ledger transfer method that matches our setup (whatever we already use elsewhere in the codebase for ICP sends, or implement a direct ledger call via authenticated actor).
+- For icUSD:
+  - This is our icUSD ledger canister (ICRC-1 / ICRC-2 style). Implement an ICRC-1 transfer from the user's wallet to the recipient principal:
+    - Use icrc1_transfer (not approve/transfer_from). This is the user sending their own tokens.
+  - Use correct decimals for icUSD (8 decimals).
+  - Build amount as Nat in base units.
+  - Set fee if required by ledger, otherwise omit or set to ledger default. (Check how our ledger expects it.)
+
+Notes:
+- Keep this working for Internet Identity only. If the connected wallet is Plug or Oisy, disable Send/Receive with tooltip; do not implement transfer flows for them in this task.
+- Use existing balance fetching + auth utilities; avoid creating a parallel auth stack.
+- Keep UI minimal but functional. Polish (spacing, typography, animations) comes later.
+
+Deliverables:
+- Updated wallet dropdown with Send + Receive actions
+- Receive modal (II only) with copy principal + toast
+- Send modal (II only) supporting ICP and icUSD sends
+- Transfers actually broadcast on-chain using the user's II identity
+- Balance refresh after successful send
+
+After implementing:
+- Add a short manual test checklist in your response:
+  - Connect with II, open dropdown, copy principal works + toast
+  - Receive modal opens, copy works
+  - Send icUSD to a test principal (small amount), see success toast, balances update
+  - Send ICP (small amount), see success toast, balances update
+  - Connect with Plug/Oisy, Send/Receive disabled with tooltip
+
+---
+
+## CODEBASE RESEARCH NOTES (for faster implementation)
+
+### Key Files
+
+**Main component to modify:**
+- `/src/vault_frontend/src/lib/components/wallet/WalletConnector.svelte` (469 lines)
+  - Current dropdown with balances, Refresh Balance, Disconnect
+  - Has `formatAddress()` function that currently returns full principal (needs truncation)
+  - Uses `walletStore` for state and `WALLET_TYPES` from auth service
+  - Already has `handleRefreshBalance()` function to reuse pattern
+
+**Services:**
+- `/src/vault_frontend/src/lib/services/auth.ts` (615 lines)
+  - `WALLET_TYPES` = `{ PLUG: 'plug', INTERNET_IDENTITY: 'internet-identity', OISY: 'oisy' }`
+  - `currentWalletType` store - use to detect which wallet is connected
+  - Has `AuthClient` from `@dfinity/auth-client` for II
+
+- `/src/vault_frontend/src/lib/stores/wallet.ts` (435 lines)
+  - `walletStore` with `isConnected`, `principal`, `tokenBalances`
+  - `tokenBalances.ICP` and `tokenBalances.ICUSD` each have `{ raw: bigint, formatted: string, usdValue: number | null }`
+  - `refreshBalance()` method to call after transfers
+
+- `/src/vault_frontend/src/lib/services/tokenService.ts`
+  - `TokenService.getTokenBalance(canisterId, principal)` 
+  - `TokenService.formatBalance(rawBalance)` - converts from e8s
+  - Uses `E8S = 100_000_000n` (8 decimals)
+
+- `/src/vault_frontend/src/lib/services/pnp.ts`
+  - `pnp.getActor(canisterId, idl)` - gets authenticated actor for canister calls
+
+- `/src/vault_frontend/src/lib/config.ts`
+  - `CANISTER_IDS.ICP_LEDGER`, `CANISTER_IDS.ICUSD_LEDGER`, `CANISTER_IDS.PROTOCOL`
+  - `LOCAL_CANISTER_IDS` for local dev
+  - `CONFIG.isLocal` to check environment
+
+**IDLs:**
+- `/src/vault_frontend/src/lib/idls/ledger.idl.js` - ICP ledger IDL
+- `canisterIDLs` from pnp.ts has `icp_ledger` and `icusd_ledger`
+
+### Components to Create
+
+1. **Toast.svelte** in `/src/vault_frontend/src/lib/components/common/`
+   - Props: message, duration (default 2000ms), type (success/error)
+   - Auto-dismiss with fade animation
+   - Position: fixed bottom-right
+
+2. **Modal.svelte** in `/src/vault_frontend/src/lib/components/common/`
+   - Props: title, onClose
+   - Backdrop with blur, centered, close on X or backdrop click
+
+3. **ReceiveModal.svelte** in `/src/vault_frontend/src/lib/components/wallet/`
+   - Props: principal (string), onClose
+   - Show truncated principal, copy button, use Toast
+
+4. **SendModal.svelte** in `/src/vault_frontend/src/lib/components/wallet/`
+   - Props: principal, tokenBalances, walletType, onClose, onSuccess
+   - Token selector (ICP/icUSD), recipient input, amount input
+   - Validation: principal format, amount > 0 and <= balance
+
+5. **transferService.ts** in `/src/vault_frontend/src/lib/services/`
+   - `transferICP(recipient: Principal, amount: bigint)` - ICP ledger transfer
+   - `transferICUSD(recipient: Principal, amount: bigint)` - ICRC-1 icrc1_transfer
+
+### Existing Patterns to Follow
+
+- Balance formatting: `TokenService.formatBalance(rawBalance)` 
+- Actor creation: `pnp.getActor(canisterId, canisterIDLs.xxx)`
+- Wallet type check: Compare against `WALLET_TYPES.INTERNET_IDENTITY`
+- Loading states: See `isRefreshingBalance` pattern in WalletConnector
+- Click outside handling: Already implemented in WalletConnector
+
+### Principal Truncation Format
+
+`first 5 chars + "…" + last 3 chars`
+Example: `4alqm-baaaa-aaaaa-qaaa-cai` → `4alqm…cai`
+
+### Transfer Notes
+
+- ICP ledger uses standard `transfer` method
+- icUSD uses ICRC-1 `icrc1_transfer` method
+- Both use 8 decimals (e8s)
+- Fee for ICP is typically 10000 e8s (0.0001 ICP)
+
+---
+
+## ADDITIONAL CODEBASE RESEARCH (January 2026)
+
+### Directory Structure Confirmed
+
+```
+/src/vault_frontend/src/lib/
+├── components/
+│   ├── common/
+│   │   └── LoadingSpinner.svelte  (only existing common component)
+│   ├── wallet/
+│   │   └── WalletConnector.svelte (469 lines - main file to modify)
+│   ├── vault/
+│   ├── stability-pool/
+│   ├── dashboard/
+│   └── debug/
+├── services/
+│   ├── auth.ts (615 lines)
+│   ├── pnp.ts
+│   ├── tokenService.ts
+│   ├── transferService.ts  (TO CREATE)
+│   └── protocol/
+│       ├── apiClient.ts
+│       ├── queryOperations.ts
+│       └── walletOperations.ts
+├── stores/
+│   ├── wallet.ts (435 lines)
+│   └── ...
+├── utils/
+│   ├── principalHelpers.ts (EXISTS - may need updates)
+│   ├── format.ts
+│   └── bigintUtils.ts
+├── idls/
+│   └── ledger.idl.js
+└── config.ts
+```
+
+### WalletConnector.svelte Key Code Patterns
+
+**Imports used:**
+```typescript
+import { pnp, initializePNP } from '../../services/pnp';
+import { walletStore } from '../../stores/wallet';
+import { get } from 'svelte/store';
+import { permissionManager } from '../../services/PermissionManager';
+import { WALLET_TYPES } from '../../services/auth';
+```
+
+**Wallet type definitions:**
+```typescript
+interface WalletInfo {
+  id: string;
+  name: string;
+  icon?: string;
+}
+
+const ALLOWED_PNP_WALLETS = ['plug', 'oisy'];
+
+const internetIdentityWallet: WalletInfo = {
+  id: WALLET_TYPES.INTERNET_IDENTITY,
+  name: 'Internet Identity',
+  icon: '/main-icp-logo.png'
+};
+```
+
+**State variables pattern:**
+```typescript
+let error: string | null = null;
+let showWalletDialog = false;
+let connecting = false;
+let abortController = new AbortController();
+let isRefreshingBalance = false;
+```
+
+### Auth Service Key Details
+
+**WALLET_TYPES constant:**
+```typescript
+export const WALLET_TYPES = {
+  PLUG: 'plug',
+  INTERNET_IDENTITY: 'internet-identity',
+  OISY: 'oisy'
+} as const;
+
+export type WalletType = typeof WALLET_TYPES[keyof typeof WALLET_TYPES];
+```
+
+**Stores exported:**
+```typescript
+export const selectedWalletId = writable<string | null>(null);
+export const connectionError = writable<string | null>(null);
+export const currentWalletType = writable<WalletType | null>(null);
+```
+
+**AuthState interface:**
+```typescript
+interface AuthState {
+  isConnected: boolean;
+  account: {
+    owner: Principal;
+    balance: bigint;
+    [key: string]: any;
+  } | null;
+  isInitialized: boolean;
+  walletType: WalletType | null;
+}
+```
+
+**Auth client initialization pattern:**
+```typescript
+let authClient: AuthClient | null = null;
+let agent: HttpAgent | null = null;
+
+async initAuthClient(): Promise<AuthClient> {
+  if (!authClient) {
+    authClient = await AuthClient.create({
+      idleOptions: {
+        disableIdle: true
+      }
+    });
+  }
+  // ...
+}
+```
+
+---
+
+## IMPLEMENTATION PLAN OF ACTION
+
+### Overview
+Implement real "Receive" and "Send" functionality from the wallet dropdown for Internet Identity users, with proper disabling for Plug/Oisy wallets.
+
+---
+
+### Phase 1: Utility Components (Foundation)
+
+#### 1.1 Create Toast Component
+**File:** `/src/vault_frontend/src/lib/components/common/Toast.svelte`
+
+- Simple notification component with auto-dismiss
+- Props: `message`, `duration` (default 2000ms), `type` (success/error/info)
+- Fixed position (bottom-right)
+- Fade in/out animation
+- Export a toast store/function for triggering from anywhere
+
+#### 1.2 Create Modal Component
+**File:** `/src/vault_frontend/src/lib/components/common/Modal.svelte`
+
+- Reusable modal wrapper with backdrop
+- Props: `title`, `onClose`, `showClose` (boolean)
+- Backdrop click to close (optional)
+- Escape key to close
+- Centered, with blur backdrop
+- Slot for content
+
+---
+
+### Phase 2: Transfer Service
+
+#### 2.1 Create Transfer Service
+**File:** `/src/vault_frontend/src/lib/services/transferService.ts`
+
+**Functions to implement:**
+
+```typescript
+// Transfer ICP using the ICP ledger
+async function transferICP(
+  recipient: string,  // Principal as string
+  amountE8s: bigint   // Amount in e8s (8 decimals)
+): Promise<{ success: boolean; blockIndex?: bigint; error?: string }>
+
+// Transfer icUSD using ICRC-1 icrc1_transfer
+async function transferICUSD(
+  recipient: string,  // Principal as string
+  amountE8s: bigint   // Amount in e8s (8 decimals)  
+): Promise<{ success: boolean; blockIndex?: bigint; error?: string }>
+
+// Validate principal string format
+function isValidPrincipal(principalStr: string): boolean
+```
+
+**Implementation notes:**
+- Use existing `pnp.getActor()` pattern for getting authenticated actors
+- Use `CANISTER_IDS.ICP_LEDGER` and `CANISTER_IDS.ICUSD_LEDGER` from config
+- Handle fee deduction (ICP fee is typically 10,000 e8s)
+- Wrap all calls in try/catch with user-friendly error messages
+- Use existing IDLs from `canisterIDLs` in pnp.ts
+
+---
+
+### Phase 3: Principal Utilities
+
+#### 3.1 Update/Create Principal Helper
+**File:** `/src/vault_frontend/src/lib/utils/principalHelpers.ts`
+
+**Functions to add/verify:**
+
+```typescript
+// Truncate principal for display: first 5 + "…" + last 3
+function truncatePrincipal(principal: string): string
+
+// Copy text to clipboard with promise
+async function copyToClipboard(text: string): Promise<boolean>
+```
+
+---
+
+### Phase 4: Receive Modal
+
+#### 4.1 Create Receive Modal Component
+**File:** `/src/vault_frontend/src/lib/components/wallet/ReceiveModal.svelte`
+
+**Props:**
+- `principal: string` - The user's full principal
+- `onClose: () => void` - Close handler
+
+**Features:**
+- Title: "Receive"
+- Display truncated principal
+- Full principal on hover (tooltip) - optional
+- "Copy Principal" button
+- On copy: show toast "Principal copied"
+- Simple instructions text: "Send ICP or icUSD to this address"
+
+---
+
+### Phase 5: Send Modal
+
+#### 5.1 Create Send Modal Component
+**File:** `/src/vault_frontend/src/lib/components/wallet/SendModal.svelte`
+
+**Props:**
+- `principal: string` - Sender's principal
+- `tokenBalances: { ICP: TokenBalance; ICUSD: TokenBalance }` - Current balances
+- `walletType: string` - To verify II
+- `onClose: () => void`
+- `onSuccess: () => void` - Callback to refresh balances
+
+**UI Elements:**
+1. **Token Selector** (dropdown/toggle)
+   - Options: ICP, icUSD
+   - Default: icUSD if balance > 0, else ICP
+   - Show token icons
+
+2. **Recipient Input**
+   - Text input for principal
+   - Validation: check valid principal format
+   - Error message if invalid
+
+3. **Amount Input**
+   - Numeric input
+   - "Max" button to fill available balance (minus fee for ICP)
+   - Show available balance below
+   - Validation: > 0 and <= available
+
+4. **Fee Display**
+   - Show estimated fee (0.0001 ICP for ICP, check icUSD fee)
+
+5. **Action Buttons**
+   - "Send" - disabled until valid
+   - "Cancel"
+
+6. **Status Area**
+   - Loading state: "Sending..."
+   - Error display
+   - Success triggers onSuccess callback + toast
+
+**Validation Flow:**
+1. Validate recipient is valid principal format
+2. Validate amount > 0
+3. Validate amount <= available balance
+4. For ICP: ensure amount + fee <= balance
+
+---
+
+### Phase 6: WalletConnector Integration
+
+#### 6.1 Update WalletConnector.svelte
+**File:** `/src/vault_frontend/src/lib/components/wallet/WalletConnector.svelte`
+
+**Changes needed:**
+
+1. **Import new components:**
+   - Toast system
+   - ReceiveModal
+   - SendModal
+
+2. **Update `formatAddress()` function:**
+   - Change from full principal to truncated format
+   - Use `truncatePrincipal()` helper
+
+3. **Add principal copy functionality:**
+   - Make principal display clickable
+   - On click: copy full principal, show toast
+
+4. **Add Send/Receive buttons to dropdown:**
+   - Position after balances, before Refresh Balance
+   - Icons: arrow-up for Send, arrow-down for Receive
+
+5. **Add wallet type detection:**
+   - Import `currentWalletType` from auth service
+   - Check if `walletType === WALLET_TYPES.INTERNET_IDENTITY`
+
+6. **Conditional enabling:**
+   - If II: buttons are clickable, open modals
+   - If Plug/Oisy: buttons appear disabled with tooltip "Use your wallet app"
+
+7. **State management:**
+   ```typescript
+   let showReceiveModal: boolean = false;
+   let showSendModal: boolean = false;
+   ```
+
+8. **Event handlers:**
+   ```typescript
+   function openReceiveModal() { ... }
+   function openSendModal() { ... }
+   function handleSendSuccess() {
+     showSendModal = false;
+     walletStore.refreshBalance();
+   }
+   ```
+
+---
+
+### Phase 7: Testing Checklist
+
+After implementation, manually verify:
+
+#### Internet Identity Flow
+- [ ] Connect with II
+- [ ] Open dropdown - see truncated principal
+- [ ] Click principal - copies full principal, toast appears
+- [ ] Click Receive - modal opens with principal info
+- [ ] Click "Copy Principal" in Receive modal - copies, toast appears
+- [ ] Close Receive modal
+- [ ] Click Send - modal opens
+- [ ] Select ICP, enter valid recipient, enter amount
+- [ ] Send small ICP amount - success toast, balances update
+- [ ] Select icUSD, enter valid recipient, enter amount
+- [ ] Send small icUSD amount - success toast, balances update
+- [ ] Try invalid principal - see error
+- [ ] Try amount > balance - see error
+
+#### Plug/Oisy Flow
+- [ ] Connect with Plug
+- [ ] Open dropdown
+- [ ] See Send/Receive buttons disabled
+- [ ] Hover over disabled buttons - see tooltip "Use your wallet app"
+- [ ] Repeat for Oisy
+
+---
+
+### File Summary
+
+**New files to create:**
+1. `/src/vault_frontend/src/lib/components/common/Toast.svelte`
+2. `/src/vault_frontend/src/lib/components/common/Modal.svelte`
+3. `/src/vault_frontend/src/lib/components/wallet/ReceiveModal.svelte`
+4. `/src/vault_frontend/src/lib/components/wallet/SendModal.svelte`
+5. `/src/vault_frontend/src/lib/services/transferService.ts`
+
+**Files to modify:**
+1. `/src/vault_frontend/src/lib/components/wallet/WalletConnector.svelte`
+2. `/src/vault_frontend/src/lib/utils/principalHelpers.ts` (if not already complete)
+
+---
+
+### Implementation Order
+
+1. **Toast Component** - Used by everything else
+2. **Modal Component** - Foundation for both modals
+3. **Principal utilities** - Truncation and copy
+4. **Transfer Service** - Backend logic for sends
+5. **Receive Modal** - Simpler, good warmup
+6. **Send Modal** - More complex, depends on transfer service
+7. **WalletConnector updates** - Wire everything together
+8. **Testing** - Manual verification per checklist
+
+---
+
+### Risks & Considerations
+
+1. **ICP Ledger vs ICRC-1**: Verify which transfer method the ICP ledger canister expects in this codebase (standard `transfer` vs `icrc1_transfer`)
+
+2. **Fee handling**: Need to confirm exact fees for both ICP and icUSD ledgers
+
+3. **Actor authentication**: Ensure the actor created for transfers uses the II identity properly (may need to trace through pnp.ts)
+
+4. **Error messages**: Map canister errors to user-friendly messages (e.g., "Insufficient funds" instead of raw canister error)
+
+5. **Decimal handling**: Both ICP and icUSD use 8 decimals (e8s), but verify icUSD ledger configuration
+
+---
+
+This plan provides a clear path from foundation components through to full integration, with each phase building on the previous one. The implementation order ensures dependencies are satisfied before dependent code is written.
+
+
+---
+
+## PHASE 1 COMPLETION REPORT
+
+**Status:** ✅ COMPLETED  
+**Date:** January 27, 2026
+
+### Summary
+
+Phase 1 established the foundational utility components required by all subsequent phases. Four files were created following the existing codebase patterns (particularly the styling conventions from `LoadingSpinner.svelte`).
+
+---
+
+### Files Created
+
+#### 1. Toast.svelte
+**Path:** `/src/vault_frontend/src/lib/components/common/Toast.svelte`  
+**Lines:** 113
+
+**Purpose:** Individual toast notification component with auto-dismiss functionality.
+
+**Implementation Details:**
+- **Props:**
+  - `message: string` - The notification text
+  - `duration: number = 2000` - Auto-dismiss delay in milliseconds
+  - `type: 'success' | 'error' | 'info' = 'info'` - Determines color scheme and icon
+  
+- **Features:**
+  - Auto-dismisses after specified duration using `onMount` with `setTimeout`
+  - Manual close button (× icon) on right side
+  - Svelte transitions: `fade` for wrapper, `fly` (slides in from right) for content
+  - Color-coded by type:
+    - `success`: green background (#10B981), checkmark icon (✓)
+    - `error`: red background (#EF4444), X icon (✕)
+    - `info`: blue background (#3B82F6), info icon (ℹ)
+  - Fixed position: `bottom-right` with appropriate z-index (50)
+  - Dark theme styling consistent with existing UI (dark backgrounds, white text)
+  - Rounded corners, shadow, backdrop blur
+
+- **Event Dispatching:**
+  - Dispatches `'close'` event when dismissed (either by timeout or manual close)
+  - Parent component (ToastContainer) listens for this to remove toast from store
+
+**Code Pattern:**
+```svelte
+<script lang="ts">
+  import { createEventDispatcher, onMount } from 'svelte';
+  import { fade, fly } from 'svelte/transition';
+  
+  export let message: string;
+  export let duration: number = 2000;
+  export let type: 'success' | 'error' | 'info' = 'info';
+  
+  const dispatch = createEventDispatcher();
+  
+  onMount(() => {
+    const timeout = setTimeout(() => dispatch('close'), duration);
+    return () => clearTimeout(timeout);
+  });
+</script>
+```
+
+---
+
+#### 2. toast.ts (Toast Store)
+**Path:** `/src/vault_frontend/src/lib/stores/toast.ts`  
+**Lines:** 36
+
+**Purpose:** Svelte writable store managing multiple active toasts with convenience methods.
+
+**Implementation Details:**
+- **Store Structure:**
+  ```typescript
+  interface Toast {
+    id: number;
+    message: string;
+    type: 'success' | 'error' | 'info';
+    duration: number;
+  }
+  ```
+
+- **Internal State:**
+  - Uses Svelte `writable<Toast[]>([])` 
+  - Auto-incrementing `id` counter for unique toast identification
+
+- **Public API:**
+  - `toastStore.subscribe()` - Standard Svelte store subscription
+  - `toastStore.success(message, duration?)` - Show green success toast
+  - `toastStore.error(message, duration?)` - Show red error toast  
+  - `toastStore.info(message, duration?)` - Show blue info toast
+  - `toastStore.remove(id)` - Remove specific toast by ID
+
+- **Default Duration:** 2000ms for all toast types
+
+**Usage Example:**
+```typescript
+import { toastStore } from '$lib/stores/toast';
+
+// In component
+toastStore.success('Principal copied!');
+toastStore.error('Transfer failed: insufficient funds');
+toastStore.info('Processing...');
+```
+
+---
+
+#### 3. ToastContainer.svelte
+**Path:** `/src/vault_frontend/src/lib/components/common/ToastContainer.svelte`  
+**Lines:** 32
+
+**Purpose:** Container component that renders all active toasts from the store.
+
+**Implementation Details:**
+- **Behavior:**
+  - Subscribes to `toastStore` using Svelte's `$` auto-subscription
+  - Renders each toast using `{#each $toastStore as toast (toast.id)}`
+  - Keyed by `toast.id` for proper Svelte list reconciliation
+  - Listens for `close` event from each Toast and calls `toastStore.remove(toast.id)`
+
+- **Positioning:**
+  - Fixed position: `bottom-4 right-4`
+  - Flex column with `gap-2` for spacing between multiple toasts
+  - `z-50` to appear above other UI elements
+  - `pointer-events-none` on container, `pointer-events-auto` on toasts (allows clicking through gaps)
+
+- **Integration Requirement:**
+  - Must be added ONCE to the app's root layout (e.g., `+layout.svelte`)
+  - Placed outside main content flow, typically at end of body
+
+**Usage:**
+```svelte
+<!-- In +layout.svelte -->
+<script>
+  import ToastContainer from '$lib/components/common/ToastContainer.svelte';
+</script>
+
+<slot />
+<ToastContainer />
+```
+
+---
+
+#### 4. Modal.svelte
+**Path:** `/src/vault_frontend/src/lib/components/common/Modal.svelte`  
+**Lines:** 135
+
+**Purpose:** Reusable modal wrapper component with backdrop and standard behaviors.
+
+**Implementation Details:**
+- **Props:**
+  - `title: string = ''` - Modal header title (optional)
+  - `onClose: () => void` - Required callback when modal should close
+  - `showClose: boolean = true` - Whether to show X button in header
+  - `closeOnBackdrop: boolean = true` - Close when clicking backdrop
+  - `closeOnEscape: boolean = true` - Close when pressing Escape key
+  - `maxWidth: string = 'max-w-md'` - Tailwind max-width class for modal width
+
+- **Features:**
+  - **Backdrop:** Semi-transparent black (`bg-black/50`) with blur (`backdrop-blur-sm`)
+  - **Centering:** Flexbox centering with padding for small screens
+  - **Transitions:** 
+    - Backdrop: `fade` in/out
+    - Modal content: `fade` + `fly` (slides up from y=20)
+  - **Escape key handling:** `svelte:window on:keydown` listener
+  - **Backdrop click handling:** Checks `event.target === event.currentTarget` to only close on actual backdrop click, not bubbled events
+  - **Scroll lock:** Sets `document.body.style.overflow = 'hidden'` on mount, restores on destroy
+
+- **Structure:**
+  ```
+  ┌─────────────────────────────────┐
+  │ Backdrop (click to close)       │
+  │  ┌───────────────────────────┐  │
+  │  │ Header: Title + X button  │  │
+  │  ├───────────────────────────┤  │
+  │  │ Content (slot)            │  │
+  │  │                           │  │
+  │  └───────────────────────────┘  │
+  └─────────────────────────────────┘
+  ```
+
+- **Styling:**
+  - Dark theme: `bg-gray-800` modal, `bg-gray-700/50` header
+  - Rounded corners (`rounded-xl`), shadow
+  - Header with border bottom
+  - Consistent with existing UI components
+
+**Usage Example:**
+```svelte
+<script>
+  import Modal from '$lib/components/common/Modal.svelte';
+  let showModal = false;
+</script>
+
+{#if showModal}
+  <Modal 
+    title="Receive" 
+    onClose={() => showModal = false}
+    maxWidth="max-w-sm"
+  >
+    <p>Modal content goes here</p>
+    <button on:click={() => showModal = false}>Close</button>
+  </Modal>
+{/if}
+```
+
+---
+
+### Design Decisions
+
+1. **Followed LoadingSpinner.svelte patterns:**
+   - Same TypeScript lang annotation in script tags
+   - Similar Tailwind utility class approach
+   - Consistent dark theme color palette
+
+2. **Toast positioning:**
+   - Bottom-right chosen for visibility without obstructing main UI
+   - Multiple toasts stack vertically with gap
+
+3. **Modal scroll locking:**
+   - Prevents background content from scrolling while modal is open
+   - Properly cleans up on component destroy
+
+4. **Toast store pattern:**
+   - Centralized store allows any component to trigger toasts
+   - No prop drilling required
+   - Simple API with `success()`, `error()`, `info()` methods
+
+5. **Separation of concerns:**
+   - `Toast.svelte`: Single toast rendering and auto-dismiss logic
+   - `toast.ts`: State management for all toasts
+   - `ToastContainer.svelte`: Orchestrates rendering of all toasts
+
+---
+
+### Integration Notes (for Phase 6)
+
+**ToastContainer must be added to the app layout:**
+```svelte
+<!-- /src/vault_frontend/src/routes/+layout.svelte -->
+<script>
+  import ToastContainer from '$lib/components/common/ToastContainer.svelte';
+</script>
+
+<!-- existing layout content -->
+<slot />
+
+<!-- Add at end -->
+<ToastContainer />
+```
+
+**Using toasts in WalletConnector:**
+```typescript
+import { toastStore } from '$lib/stores/toast';
+
+// When principal is copied
+toastStore.success('Principal copied!');
+
+// When transfer succeeds
+toastStore.success('Transfer sent!');
+
+// When transfer fails
+toastStore.error('Transfer failed: ' + errorMessage);
+```
+
+---
+
+### Files Ready for Next Phases
+
+| Component | Path | Ready For |
+|-----------|------|-----------|
+| Toast.svelte | `/src/vault_frontend/src/lib/components/common/Toast.svelte` | All phases |
+| toast.ts | `/src/vault_frontend/src/lib/stores/toast.ts` | All phases |
+| ToastContainer.svelte | `/src/vault_frontend/src/lib/components/common/ToastContainer.svelte` | Phase 6 layout integration |
+| Modal.svelte | `/src/vault_frontend/src/lib/components/common/Modal.svelte` | Phase 4 (ReceiveModal), Phase 5 (SendModal) |
+
+---
+
+### Next Phase: Phase 2 - Transfer Service
+
+Create `/src/vault_frontend/src/lib/services/transferService.ts` with:
+- `transferICP(recipient, amountE8s)` - ICP ledger transfer
+- `transferICUSD(recipient, amountE8s)` - ICRC-1 icrc1_transfer  
+- `isValidPrincipal(principalStr)` - Principal validation
+- Use `pnp.getActor()` pattern from existing codebase
+- Return `{ success, blockIndex?, error? }` result objects
+
+
+
+---
+
+## PHASE 2 COMPLETION REPORT
+
+**Status:** ✅ COMPLETED  
+**Date:** January 27, 2026
+
+### Summary
+
+Phase 2 created the transfer service that handles actual on-chain ICP and icUSD transfers using the ICRC-1 standard. This service will be used by the SendModal component in Phase 5.
+
+---
+
+### File Created
+
+#### transferService.ts
+**Path:** `/src/vault_frontend/src/lib/services/transferService.ts`  
+**Lines:** 260
+
+**Purpose:** Service for executing ICP and icUSD token transfers using authenticated actors.
+
+---
+
+### Implementation Details
+
+#### Constants Defined
+
+```typescript
+export const ICP_TRANSFER_FEE = BigInt(10_000);   // 0.0001 ICP
+export const ICUSD_TRANSFER_FEE = BigInt(10_000); // 0.0001 icUSD (may need adjustment)
+```
+
+#### Types Exported
+
+```typescript
+export interface TransferResult {
+  success: boolean;
+  blockIndex?: bigint;
+  error?: string;
+}
+```
+
+#### Functions Exported
+
+**1. `isValidPrincipal(principalStr: string): boolean`**
+- Validates principal string format using `@dfinity/principal` library
+- Returns `false` for empty strings, whitespace, or invalid format
+- Uses try/catch around `Principal.fromText()` for validation
+
+**2. `toE8s(amount: number): bigint`**
+- Converts decimal token amount to e8s (8 decimal places)
+- Example: `toE8s(1.5)` returns `150_000_000n`
+- Uses Math.round to handle floating point precision
+
+**3. `fromE8s(e8s: bigint): number`**
+- Converts e8s back to decimal for display
+- Example: `fromE8s(150_000_000n)` returns `1.5`
+
+**4. `transferICP(recipient: string, amountE8s: bigint): Promise<TransferResult>`**
+- Validates recipient principal format
+- Gets authenticated actor via `pnp.getActor(canisterId, canisterIDLs.icp_ledger)`
+- Executes ICRC-1 transfer: `actor.icrc1_transfer({ to, amount, fee, memo, from_subaccount, created_at_time })`
+- Handles ICRC-1 error variants with user-friendly messages
+- Returns `{ success: true, blockIndex }` or `{ success: false, error }`
+
+**5. `transferICUSD(recipient: string, amountE8s: bigint): Promise<TransferResult>`**
+- Same pattern as `transferICP` but uses icUSD ledger canister
+- Uses `canisterIDLs.icusd_ledger` for the actor IDL
+
+---
+
+### ICRC-1 Transfer Arguments Structure
+
+```typescript
+const transferArgs = {
+  to: {
+    owner: Principal.fromText(recipient),
+    subaccount: []  // No subaccount
+  },
+  amount: amountE8s,
+  fee: [],              // Use ledger default fee
+  memo: [],             // No memo
+  from_subaccount: [],  // No source subaccount
+  created_at_time: []   // Use current time
+};
+```
+
+---
+
+### Error Handling
+
+The service handles all ICRC-1 transfer error variants:
+
+| Error Variant | User-Friendly Message |
+|---------------|----------------------|
+| `InsufficientFunds` | "Insufficient funds. Available: X" |
+| `BadFee` | "Invalid fee. Expected: X" |
+| `BadBurn` | "Invalid burn amount" |
+| `InsufficientAllowance` | "Insufficient allowance" |
+| `TooOld` | "Transaction too old, please try again" |
+| `CreatedInFuture` | "Transaction timestamp in future" |
+| `Duplicate` | "Duplicate transaction" |
+| `TemporarilyUnavailable` | "Ledger temporarily unavailable" |
+| `GenericError` | Shows error message from ledger |
+| Unknown | "Transfer failed: Unknown error" |
+
+---
+
+### Integration Pattern
+
+**Usage in SendModal (Phase 5):**
+
+```typescript
+import { transferICP, transferICUSD, isValidPrincipal, toE8s } from '$lib/services/transferService';
+import { toastStore } from '$lib/stores/toast';
+
+// Validate before transfer
+if (!isValidPrincipal(recipientInput)) {
+  toastStore.error('Invalid principal format');
+  return;
+}
+
+// Execute transfer
+const amountE8s = toE8s(parseFloat(amountInput));
+const result = selectedToken === 'ICP' 
+  ? await transferICP(recipientInput, amountE8s)
+  : await transferICUSD(recipientInput, amountE8s);
+
+if (result.success) {
+  toastStore.success('Transfer sent!');
+  onSuccess(); // Refresh balances
+} else {
+  toastStore.error(result.error || 'Transfer failed');
+}
+```
+
+---
+
+### Dependencies Used
+
+- `@dfinity/principal` - Principal validation and conversion
+- `$lib/services/pnp` - `pnp` object and `canisterIDLs` for actor creation
+- `$lib/config` - `CONFIG.currentIcpLedgerId` and `CONFIG.currentIcusdLedgerId`
+
+---
+
+### Key Design Decisions
+
+1. **ICRC-1 Standard:** Both ICP and icUSD ledgers support ICRC-1, so we use `icrc1_transfer` for both rather than the legacy ICP transfer method.
+
+2. **Empty Options Arrays:** Using `[]` for optional fields (fee, memo, from_subaccount, created_at_time) lets the ledger use its defaults.
+
+3. **Separate Functions:** `transferICP` and `transferICUSD` are separate functions (not a single generic function) for clarity and to allow future token-specific logic.
+
+4. **Console Logging:** Added `console.log` statements for debugging during development. These can be removed or converted to a proper logger later.
+
+5. **Error Message Formatting:** ICRC-1 errors are converted to user-friendly messages rather than exposing raw canister error structures.
+
+---
+
+### Testing Notes
+
+Before Phase 5 testing, verify:
+- [ ] `pnp.getActor()` returns authenticated actor when II is connected
+- [ ] `canisterIDLs.icp_ledger` and `canisterIDLs.icusd_ledger` are correctly defined in pnp.ts
+- [ ] `CONFIG.currentIcpLedgerId` returns correct canister ID for current environment
+
+---
+
+### Next Phase: Phase 3 - Principal Utilities
+
+Update `/src/vault_frontend/src/lib/utils/principalHelpers.ts` with:
+- `truncatePrincipal(principal: string): string` - Format as "xxxxx…xxx"
+- `copyToClipboard(text: string): Promise<boolean>` - Clipboard API wrapper

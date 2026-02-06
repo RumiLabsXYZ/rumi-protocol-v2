@@ -354,10 +354,10 @@ async function partialLiquidateVault(vaultId: number, liquidateAmount: number) {
 <div class="container mx-auto px-4 max-w-6xl">
   <section class="mb-8">
     <div class="text-center mb-8">
-      <h1 class="text-4xl font-bold mb-4 bg-clip-text text-transparent bg-gradient-to-r from-pink-400 to-purple-600">
+      <h1 class="page-title">
         Market Liquidations
       </h1>
-      <p class="text-xl text-gray-300 max-w-3xl mx-auto">
+      <p class="text-lg text-gray-400 max-w-3xl mx-auto">
         Earn profits by liquidating undercollateralized vaults. Pay the debt in icUSD, receive the collateral with a 10% discount.
       </p>
     </div>
@@ -366,7 +366,7 @@ async function partialLiquidateVault(vaultId: number, liquidateAmount: number) {
   </section>
   
   <!-- Current ICP Price Display -->
-  <div class="mb-8 bg-gray-900/50 p-6 rounded-lg shadow-lg backdrop-blur-sm ring-2 ring-purple-400">
+  <div class="mb-8 price-card">
     <div class="flex justify-between items-center mb-4">
       <h2 class="text-2xl font-bold">Current ICP Price</h2>
       <div class="flex items-center gap-2">
@@ -382,7 +382,7 @@ async function partialLiquidateVault(vaultId: number, liquidateAmount: number) {
           </svg>
         </button>
         {#if isPriceLoading}
-          <div class="w-4 h-4 border-2 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
+          <div class="w-4 h-4 border-2 border-teal-400 border-t-transparent rounded-full animate-spin"></div>
         {/if}
       </div>
     </div>
@@ -393,7 +393,7 @@ async function partialLiquidateVault(vaultId: number, liquidateAmount: number) {
       </div>
     {:else if isPriceLoading}
       <div class="flex items-center gap-2">
-        <div class="w-5 h-5 border-2 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
+        <div class="w-5 h-5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin"></div>
         <span>Loading price...</span>
       </div>
     {:else}
@@ -407,7 +407,7 @@ async function partialLiquidateVault(vaultId: number, liquidateAmount: number) {
       <div class="flex justify-between items-center mb-6">
         <h2 class="text-2xl font-semibold">Liquidatable Vaults</h2>
         <button 
-          class="px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-500 transition-colors"
+          class="px-4 py-2 btn-secondary text-white rounded hover:opacity-80 transition-colors"
           on:click={loadLiquidatableVaults}
           disabled={isLoading}
         >
@@ -435,7 +435,7 @@ async function partialLiquidateVault(vaultId: number, liquidateAmount: number) {
       
       {#if isLoading}
         <div class="flex justify-center items-center py-12">
-          <div class="w-10 h-10 border-4 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
+          <div class="w-10 h-10 border-4 border-teal-400 border-t-transparent rounded-full animate-spin"></div>
         </div>
       {:else if liquidatableVaults.length === 0}
         <div class="text-center py-12 bg-gray-800/30 rounded-lg">
@@ -489,7 +489,7 @@ async function partialLiquidateVault(vaultId: number, liquidateAmount: number) {
                           class="w-24 px-2 py-1 bg-gray-800 text-white text-sm rounded border border-gray-700"
                         />
                         <button 
-                          class="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          class="px-3 py-1 btn-secondary text-white text-sm rounded hover:opacity-80 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                           on:click={() => partialLiquidationAmounts[vault.vault_id] && partialLiquidateVault(vault.vault_id, partialLiquidationAmounts[vault.vault_id])}
                           disabled={processingVaultId !== null || !isConnected || isApprovingAllowance || !partialLiquidationAmounts[vault.vault_id] || partialLiquidationAmounts[vault.vault_id] <= 0}
                         >
@@ -499,7 +499,7 @@ async function partialLiquidateVault(vaultId: number, liquidateAmount: number) {
                       
                       <!-- Full Liquidation Button -->
                       <button 
-                        class="px-4 py-2 bg-pink-600 text-white rounded hover:bg-pink-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        class="px-4 py-2 btn-danger text-white rounded hover:opacity-80 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                         on:click={() => liquidateVault(vault.vault_id)}
                         disabled={processingVaultId !== null || !isConnected || isApprovingAllowance}
                       >
@@ -537,21 +537,21 @@ async function partialLiquidateVault(vaultId: number, liquidateAmount: number) {
 
       <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div class="glass-card h-full">
-          <div class="text-pink-400 text-3xl font-bold mb-2">1</div>
+          <div class="text-teal-400 text-3xl font-bold mb-2">1</div>
           <h3 class="text-lg font-medium mb-2">Find Opportunities</h3>
-          <p class="text-gray-300">Browse vaults with collateral ratios below the required threshold (133% in normal mode, 150% in recovery mode).</p>
+          <p class="text-gray-400">Browse vaults with collateral ratios below the required threshold (133% in normal mode, 150% in recovery mode).</p>
         </div>
 
         <div class="glass-card h-full">
-          <div class="text-pink-400 text-3xl font-bold mb-2">2</div>
+          <div class="text-teal-400 text-3xl font-bold mb-2">2</div>
           <h3 class="text-lg font-medium mb-2">Pay the Debt</h3>
-          <p class="text-gray-300">Pay the debt amount in icUSD to liquidate the vault. You can liquidate partially (any amount up to the full debt) or fully liquidate the entire vault.</p>
+          <p class="text-gray-400">Pay the debt amount in icUSD to liquidate the vault. You can liquidate partially (any amount up to the full debt) or fully liquidate the entire vault.</p>
         </div>
 
         <div class="glass-card h-full">
-          <div class="text-pink-400 text-3xl font-bold mb-2">3</div>
+          <div class="text-teal-400 text-3xl font-bold mb-2">3</div>
           <h3 class="text-lg font-medium mb-2">Receive Collateral</h3>
-          <p class="text-gray-300">Get the vault's ICP collateral with a 10% discount compared to the current market price, generating profit.</p>
+          <p class="text-gray-400">Get the vault's ICP collateral with a 10% discount compared to the current market price, generating profit.</p>
         </div>
       </div>
     </div>
@@ -559,12 +559,42 @@ async function partialLiquidateVault(vaultId: number, liquidateAmount: number) {
 </div>
 
 <style>
-  /* Add glass card styling */
-  .glass-card {
-    background-color: rgba(31, 41, 55, 0.4);
-    backdrop-filter: blur(16px);
-    border: 1px solid rgba(75, 85, 99, 0.5);
-    border-radius: 0.5rem;
+  .page-title {
+    font-family: 'Circular Std', 'Inter', sans-serif;
+    font-size: 2.25rem;
+    font-weight: 500;
+    color: var(--rumi-text-primary);
+    margin-bottom: 0.75rem;
+    letter-spacing: -0.02em;
+    text-align: center;
+  }
+
+  .price-card {
+    background: var(--rumi-bg-card);
+    border: 1px solid var(--rumi-border-teal);
+    border-radius: 0.75rem;
     padding: 1.5rem;
+  }
+
+  .glass-card {
+    background: var(--rumi-bg-card);
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.75rem;
+    padding: 1.5rem;
+  }
+
+  .btn-secondary {
+    background: var(--rumi-bg-elevated);
+    border: 1px solid var(--rumi-border-hover);
+    font-family: 'Circular Std', 'Inter', sans-serif;
+  }
+
+  .btn-danger {
+    background: rgba(239, 68, 68, 0.8);
+    font-family: 'Circular Std', 'Inter', sans-serif;
+  }
+
+  .btn-danger:hover {
+    background: rgba(239, 68, 68, 1);
   }
 </style>

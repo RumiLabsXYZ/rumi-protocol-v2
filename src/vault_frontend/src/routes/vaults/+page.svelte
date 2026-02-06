@@ -70,9 +70,9 @@
 <div class="max-w-4xl mx-auto p-6">
   {#if !canViewVaults}
     <!-- Developer Access Required Section -->
-    <div class="bg-gray-900/50 p-6 rounded-lg shadow-lg backdrop-blur-sm border border-purple-500/30 mb-8">
+    <div class="glass-card mb-8">
       <div class="flex items-center gap-2 mb-4">
-        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-teal-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
         </svg>
         <h2 class="text-2xl font-semibold">Developer Access Required</h2>
@@ -84,18 +84,18 @@
     </div>
   {:else}
     <!-- ICP Price Display -->
-    <div class="mb-8 bg-gray-900/50 p-6 rounded-lg shadow-lg backdrop-blur-sm ring-2 ring-purple-400">
+    <div class="mb-8 price-card">
       <div class="flex justify-between items-center mb-2">
         <h2 class="text-2xl font-bold">Current ICP Price</h2>
-        <div class="bg-purple-900/30 px-3 py-1 rounded-full text-xs text-purple-300 flex items-center gap-2">
-          <span class="w-2 h-2 bg-purple-400 rounded-full animate-pulse"></span>
+        <div class="bg-purple-900/20 px-3 py-1 rounded-full text-xs text-teal-400 flex items-center gap-2">
+          <span class="w-2 h-2 bg-teal-400 rounded-full animate-pulse"></span>
           Developer Mode
         </div>
       </div>
       
       {#if $isLoadingVaults && !icpPrice}
         <div class="flex items-center gap-2">
-          <div class="w-5 h-5 border-2 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
+          <div class="w-5 h-5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin"></div>
           <span>Loading price...</span>
         </div>
       {:else}
@@ -114,7 +114,7 @@
         {#if $isConnected}
           <button 
             on:click={() => loadUserVaults()}
-            class="px-4 py-2 bg-purple-600 hover:bg-purple-500 rounded-md text-sm"
+            class="px-4 py-2 btn-secondary rounded-md text-sm"
             disabled={$isLoadingVaults}
           >
             {$isLoadingVaults ? 'Refreshing...' : 'Refresh'}
@@ -131,14 +131,14 @@
       </div>
     {:else if $isLoadingVaults && $userVaults.length === 0}
       <div class="flex justify-center p-12">
-        <div class="w-8 h-8 border-4 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
+        <div class="w-8 h-8 border-4 border-teal-400 border-t-transparent rounded-full animate-spin"></div>
       </div>
     {:else if $userVaults.length === 0}
       <div class="text-center p-12 bg-gray-900/50 rounded-lg backdrop-blur-sm">
         <p class="text-xl text-gray-300 mb-4">You don't have any vaults yet</p>
         <a 
           href="/"
-          class="inline-block px-6 py-3 bg-purple-600 rounded-lg hover:bg-purple-500"
+          class="inline-block px-6 py-3 btn-primary rounded-lg"
         >
           Create Your First Vault
         </a>
@@ -160,3 +160,35 @@
     </div>
   {/if}
 </div>
+
+<style>
+  .price-card {
+    background: var(--rumi-bg-card);
+    border: 1px solid var(--rumi-border-teal);
+    border-radius: 0.75rem;
+    padding: 1.5rem;
+  }
+
+  .btn-primary {
+    background: var(--rumi-teal);
+    color: var(--rumi-bg-primary);
+    font-family: 'Circular Std', 'Inter', sans-serif;
+    font-weight: 500;
+  }
+
+  .btn-primary:hover {
+    background: var(--rumi-teal-bright);
+  }
+
+  .btn-secondary {
+    background: var(--rumi-bg-elevated);
+    border: 1px solid var(--rumi-border-hover);
+    color: var(--rumi-text-primary);
+    font-family: 'Circular Std', 'Inter', sans-serif;
+  }
+
+  .btn-secondary:hover {
+    border-color: var(--rumi-teal);
+    color: var(--rumi-teal);
+  }
+</style>

@@ -355,21 +355,34 @@ get_icp_price : () -> (nat64) query
 **Tried**: Event dispatch, direct `goto()`, even `window.location.href` - none worked
 **Status**: Needs investigation - deployed code may not match source
 
-### 2. Plug Wallet Auto-Reconnect
-**File**: `src/vault_frontend/src/lib/services/auth.ts`
-**Problem**: Plug sessions don't persist across page refresh
-**Status**: Added `waitForPlug()` polling but still failing silently
+### ~~2. Plug Wallet Auto-Reconnect~~ ✅ RESOLVED
 
 ### 3. Left Nav Active Highlight Doesn't Track Page
 **Problem**: The highlight/active indicator in the left sidebar navigation doesn't move when the user navigates to a different page
-**Status**: Not investigated yet
+**Status**: Being addressed in `feature/ui-updates` branch
 
 ---
 
-## UI Exploration
+## UI Rebrand (February 6, 2026)
 
-- **Font**: `circular-std-medium-500.ttf` is in the repo root — Rob wants to try this font across the UI to see how it looks
-- **Vault cards**: Want to explore making vault list/detail views sleeker
+**Branch:** `feature/ui-updates`
+
+**Goal:** Elevate the UI from template-feeling to a sleek, modern DeFi product ready for public launch. Make it feel like crypto people built it.
+
+### In Scope
+- Left nav active highlight fix
+- Font exploration (`circular-std-medium-500.ttf` in repo root)
+- Overall design rebrand: colors, typography, buttons, fields, spacing, vibe
+- Vault list/detail views — make sleeker
+- General cleanup of template-ish design patterns
+
+### Deferred
+- Vault close navigation bug (bigger task, saved for later)
+- ckToken support in Send modal (post-rebrand)
+
+### Testing Completed ✅
+- ICP and icUSD transfers with Internet Identity
+- `id.ai` portal authentication flow
 
 ---
 
@@ -463,4 +476,4 @@ dfx deploy vault_frontend --network ic
 
 ---
 
-*Last updated: February 5, 2026*
+*Last updated: February 6, 2026*

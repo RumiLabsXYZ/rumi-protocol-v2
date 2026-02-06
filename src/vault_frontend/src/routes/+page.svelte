@@ -215,10 +215,10 @@
 <div class="container mx-auto px-4 max-w-6xl">
   <section class="mb-12">
     <div class="text-center mb-10">
-      <h1 class="text-4xl font-bold mb-4 bg-clip-text text-transparent bg-gradient-to-r from-pink-400 to-purple-600">
+      <h1 class="page-title">
         Borrow icUSD with your ICP
       </h1>
-      <p class="text-xl text-gray-300 max-w-2xl mx-auto">
+      <p class="page-subtitle">
         Create a vault, deposit ICP as collateral, and borrow the icUSD stablecoin
       </p>
     </div>
@@ -226,7 +226,7 @@
     <ProtocolStats />
   </section>
 
-  <div class="mb-8 bg-gray-900/50 p-6 rounded-lg shadow-lg backdrop-blur-sm ring-2 ring-purple-400">
+  <div class="mb-8 price-card">
     <div class="flex justify-between items-center mb-4">
       <h2 class="text-2xl font-bold">Current ICP Price</h2>
       <div class="flex items-center gap-2">
@@ -245,7 +245,7 @@
           </svg>
         </button>
         {#if isPriceLoading}
-          <div class="w-4 h-4 border-2 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
+          <div class="w-4 h-4 border-2 border-teal-400 border-t-transparent rounded-full animate-spin"></div>
         {/if}
       </div>
     </div>
@@ -273,7 +273,7 @@
       <div class="flex justify-between items-center text-xs text-gray-400 mt-1">
         <span>Updated at {lastPriceUpdateTime} · Auto-refreshes every 30s</span>
         {#if priceRefreshCount > 0}
-          <span class="text-green-500">Live</span>
+          <span class="text-teal-400">Live</span>
         {/if}
       </div>
     {:else if isPriceLoading}
@@ -402,7 +402,7 @@
 
           <div>
             <button
-              class="w-full py-3 px-6 bg-gradient-to-r from-pink-500 to-purple-600 hover:from-pink-600 hover:to-purple-700 rounded-lg text-white font-medium transition-colors"
+              class="w-full py-3 px-6 btn-primary rounded-lg text-white font-medium transition-colors"
               on:click={createVault}
               disabled={actionInProgress || !$isConnected}
             >
@@ -430,7 +430,7 @@
               Vault creation is currently in developer mode and requires special access.
             </p>
             <button 
-              class="px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-500 transition-colors"
+              class="px-4 py-2 btn-primary rounded transition-colors"
               on:click={() => showDevInput = true}
             >
               Enable Developer Mode
@@ -447,19 +447,19 @@
 
       <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div class="glass-card h-full">
-          <div class="text-pink-400 text-3xl font-bold mb-2">1</div>
+          <div class="text-teal-400 text-3xl font-bold mb-2">1</div>
           <h3 class="text-lg font-medium mb-2">Deposit Collateral</h3>
           <p class="text-gray-300">Deposit your ICP tokens as collateral to secure your position.</p>
         </div>
 
         <div class="glass-card h-full">
-          <div class="text-pink-400 text-3xl font-bold mb-2">2</div>
+          <div class="text-teal-400 text-3xl font-bold mb-2">2</div>
           <h3 class="text-lg font-medium mb-2">Borrow icUSD</h3>
           <p class="text-gray-300">Borrow icUSD stablecoin against your collateral at a minimum ratio of 130%.</p>
         </div>
 
         <div class="glass-card h-full">
-          <div class="text-pink-400 text-3xl font-bold mb-2">3</div>
+          <div class="text-teal-400 text-3xl font-bold mb-2">3</div>
           <h3 class="text-lg font-medium mb-2">Manage Your Vault</h3>
           <p class="text-gray-300">Add more collateral, borrow more, or repay your icUSD to maintain a healthy position.</p>
         </div>
@@ -471,13 +471,51 @@
 
 
 <style>
-  /* Fix Tailwind @apply rule by converting to standard CSS */
-  .glass-card {
-    background-color: rgba(31, 41, 55, 0.4);
-    backdrop-filter: blur(16px);
-    border: 1px solid rgba(75, 85, 99, 0.5);
-    border-radius: 0.5rem;
+  .page-title {
+    font-family: 'Circular Std', 'Inter', sans-serif;
+    font-size: 2.25rem;
+    font-weight: 500;
+    color: var(--rumi-text-primary);
+    margin-bottom: 0.75rem;
+    letter-spacing: -0.02em;
+  }
+
+  .page-subtitle {
+    font-size: 1.125rem;
+    color: var(--rumi-text-secondary);
+    max-width: 36rem;
+    margin: 0 auto;
+  }
+
+  .price-card {
+    background: var(--rumi-bg-card);
+    border: 1px solid var(--rumi-border-teal);
+    border-radius: 0.75rem;
     padding: 1.5rem;
+  }
+
+  .glass-card {
+    background: var(--rumi-bg-card);
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.75rem;
+    padding: 1.5rem;
+  }
+
+  .btn-primary {
+    background: var(--rumi-teal);
+    color: var(--rumi-bg-primary);
+    font-family: 'Circular Std', 'Inter', sans-serif;
+    font-weight: 500;
+  }
+
+  .btn-primary:hover {
+    background: var(--rumi-teal-bright);
+    box-shadow: 0 0 20px rgba(45, 212, 191, 0.15);
+  }
+
+  .btn-primary:disabled {
+    opacity: 0.4;
+    box-shadow: none;
   }
 
   input::-webkit-outer-spin-button,
@@ -489,14 +527,5 @@
   input[type=number] {
     -moz-appearance: textfield;
     appearance: textfield;
-  }
-
-  @keyframes bounce {
-    0%, 100% {
-      transform: translateY(0);
-    }
-    50% {
-      transform: translateY(-20px);
-    }
   }
 </style>
