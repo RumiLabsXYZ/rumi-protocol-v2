@@ -82,22 +82,28 @@ The `feature/liquidation-price-check` branch has one remaining commit that was N
 
 ---
 
-## Next Steps After Staging Merge
+## Development Workflow (Agreed Feb 5, 2026)
 
-1. **Build and test locally:**
-   ```bash
-   cd /Users/robertripley/coding/rumi-protocol-v2
-   npm install
-   npm run build
-   ```
+### Roles
+- **Rob**: UI/UX improvements, cleanup, testing. Submits PRs.
+- **Agnes**: Feature development, PR review, merge authority.
 
-2. **Deploy to mainnet** (when ready):
-   ```bash
-   dfx deploy vault_frontend --network ic
-   dfx deploy rumi_protocol_backend --network ic
-   ```
+### Git Flow
+1. Work on feature branches
+2. Deploy to **staging canister** for validation
+3. Submit PR to `main`, Agnes reviews and merges
+4. Deploy `main` to **production canister**
 
-3. **Merge price validation fix** (in separate session):
+### Staging Deployment — PENDING SETUP
+Agnes proposed deploying to staging before production. Details TBD:
+- Need a separate frontend canister on mainnet for staging
+- Unclear if a `staging` git branch is needed or if feature branches deploy directly
+- **Rob messaged Agnes to clarify** (Feb 6) — waiting on response
+- Until staging is set up, deployments go straight to production (current behavior)
+
+### Remaining Merge Tasks
+
+1. **Merge price validation fix** (in separate session):
    ```bash
    git checkout main
    git cherry-pick 4169380
@@ -105,7 +111,7 @@ The `feature/liquidation-price-check` branch has one remaining commit that was N
    git push origin main
    ```
 
-4. **Clean up branches** (optional):
+2. **Clean up branches** (optional):
    ```bash
    git push origin --delete staging  # If no longer needed
    git branch -d main-backup-feb4    # After confirming stability
