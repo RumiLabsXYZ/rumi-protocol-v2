@@ -9,7 +9,7 @@ use rust_decimal::prelude::FromPrimitive;
 use rust_decimal_macros::dec;
 use std::time::Duration;
 
-pub const FETCHING_ICP_RATE_INTERVAL_SECS: u64 = 60;
+pub const FETCHING_ICP_RATE_INTERVAL_SECS: u64 = 300;
 pub const FETCHING_ICP_RATE_INTERVAL: Duration = Duration::from_secs(FETCHING_ICP_RATE_INTERVAL_SECS);
 
 pub async fn fetch_icp_rate() {
