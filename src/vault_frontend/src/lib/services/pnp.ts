@@ -40,6 +40,48 @@ const getAllDelegationTargets = (): string[] => {
   ].filter(Boolean); // Filter out any undefined values
 };
 
+export async function silentPlugReconnect(): Promise<{owner: Principal} | null> {
+  try {
+    if (!window.ic?.plug) {
+      return null;
+    }
+
+    const isConnected = await window.ic.plug.isConnected();
+    if (!isConnected) {
+      return null;
+    }
+
+    // Session exists - try to get the principal from existing agent
+    if (window.ic.plug.agent) {
+      try {
+        const principal = await window.ic.plug.agent.getPrincipal();
+        return { owner: principal };
+      } catch (err) {
+        console.warn('Failed to get principal from existing Plug agent:', err);
+      }
+    }
+
+    // If agent doesn't exist or getPrincipal failed, try createAgent silently
+    // This reconnects using stored credentials without showing a popup
+    try {
+      const targets = getAllDelegationTargets();
+      await (window.ic.plug as any).createAgent({
+        whitelist: targets,
+        host: CONFIG.isLocal ? 'http://localhost:4943' : 'https://icp0.io'
+      });
+
+      const principal = await window.ic.plug.agent.getPrincipal();
+      return { owner: principal };
+    } catch (err) {
+      // Silent reconnect failed - user will need to reconnect manually
+      return null;
+    }
+  } catch (err) {
+    console.error('Silent Plug reconnect failed:', err);
+    return null;
+  }
+}
+
 // COMPREHENSIVE PERMISSION SYSTEM - Request ALL permissions at once during wallet connection
 // Custom connect function that ensures comprehensive permissions for Plug
 export async function connectWithComprehensivePermissions(walletId: string): Promise<any> {

@@ -56,8 +56,7 @@
     
     // Auto-reconnect wallet if previously connected
     try {
-      console.log('Mount: attempting wallet auto-reconnect...');
-      await auth.initialize();
+      await wallet.initialize();
     } catch (err) {
       console.error('Failed to auto-reconnect wallet:', err);
     }
