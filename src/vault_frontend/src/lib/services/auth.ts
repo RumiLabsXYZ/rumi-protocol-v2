@@ -1,6 +1,6 @@
 import { writable, get } from 'svelte/store';
 import { browser } from '$app/environment';
-import { pnp, connectWithComprehensivePermissions, getPnpInstance } from './pnp';
+import { pnp, connectWithComprehensivePermissions, getPnpInstance, silentPlugReconnect } from './pnp';
 import { TokenService } from './tokenService';
 import { CONFIG, CANISTER_IDS, LOCAL_CANISTER_IDS } from '../config';
 import { canisterIDLs } from './pnp';
@@ -103,14 +103,14 @@ function createAuthStore() {
 
     async initialize(): Promise<void> {
       if (!browser) return;
-      
+
+      // Clear the auto-connect flag on each page load to allow fresh reconnect attempts
+      sessionStorage.removeItem(STORAGE_KEYS.AUTO_CONNECT_ATTEMPTED);
+
       const lastWallet = storage.get("LAST_WALLET");
       const wasConnected = storage.get("WAS_CONNECTED");
-      
-      if (!lastWallet || !wasConnected) return;
 
-      const hasAttempted = sessionStorage.getItem(STORAGE_KEYS.AUTO_CONNECT_ATTEMPTED);
-      if (hasAttempted) return;
+      if (!lastWallet || !wasConnected) return;
 
       console.log('🔄 Attempting to restore session for:', lastWallet);
 
@@ -154,9 +154,9 @@ function createAuthStore() {
             storage.clear();
           }
         } else if (lastWallet === WALLET_TYPES.PLUG) {
-          // For Plug, try multiple methods to restore session silently
+          // For Plug, use silent reconnect function
           console.log('🔄 Attempting Plug session restore...');
-          
+
           // Wait for Plug wallet extension to be ready (it may load after page script)
           const waitForPlug = async (maxAttempts = 20, interval = 100): Promise<boolean> => {
             for (let i = 0; i < maxAttempts; i++) {
@@ -170,103 +170,40 @@ function createAuthStore() {
           };
 
           const plugAvailable = await waitForPlug();
-          
+
           if (!plugAvailable) {
             console.log('⚠️ Plug wallet not available after waiting');
             storage.clear();
             return;
           }
 
-          // Method 1: Check if already connected
-          const isPlugConnected = await window.ic?.plug?.isConnected();
-          
-          if (isPlugConnected) {
-            console.log('✅ Plug already connected, restoring session...');
-            const principal = await window.ic?.plug?.agent?.getPrincipal();
-            
-            if (principal) {
-              const convertedPrincipal = Principal.fromText(principal.toString());
-              const balance = await refreshWalletBalance(convertedPrincipal);
+          // Use the silentPlugReconnect function for clean session restore
+          const result = await silentPlugReconnect();
 
-              set({
-                isConnected: true,
-                account: { owner: convertedPrincipal, balance },
-                isInitialized: true,
-                walletType: WALLET_TYPES.PLUG
-              });
+          if (result?.owner) {
+            console.log('✅ Plug session restored:', result.owner.toText());
 
-              selectedWalletId.set(lastWallet);
-              currentWalletType.set(WALLET_TYPES.PLUG);
-              console.log('🎉 Plug session restored successfully');
-              return;
-            }
-          }
-
-          // Method 2: Try to create agent silently (this can restore session without popup)
-          console.log('🔄 Trying silent agent creation...');
-          try {
-            const whitelist = [
-              CONFIG.currentCanisterId,
-              CONFIG.currentIcpLedgerId,
-              CONFIG.currentIcusdLedgerId,
-              CANISTER_IDS.STABILITY_POOL
-            ];
-            const host = CONFIG.isLocal ? 'http://localhost:4943' : 'https://icp0.io';
-            
-            // createAgent can restore session silently if user previously approved
-            await (window.ic?.plug as any)?.createAgent?.({ whitelist, host });
-            
-            // Check if we now have a valid agent and principal
-            const principal = await window.ic?.plug?.agent?.getPrincipal();
-            
-            if (principal && principal.toString() !== '2vxsx-fae') {
-              console.log('✅ Plug session restored via createAgent');
-              const convertedPrincipal = Principal.fromText(principal.toString());
-              const balance = await refreshWalletBalance(convertedPrincipal);
-
-              set({
-                isConnected: true,
-                account: { owner: convertedPrincipal, balance },
-                isInitialized: true,
-                walletType: WALLET_TYPES.PLUG
-              });
-
-              selectedWalletId.set(lastWallet);
-              currentWalletType.set(WALLET_TYPES.PLUG);
-              console.log('🎉 Plug session restored successfully');
-              return;
-            }
-          } catch (agentError) {
-            console.log('⚠️ Silent agent creation failed:', agentError);
-          }
-
-          // Method 3: Check if agent already exists from previous session
-          if (window.ic?.plug?.agent) {
+            let balance = BigInt(0);
             try {
-              const principal = await window.ic.plug.agent.getPrincipal();
-              if (principal && principal.toString() !== '2vxsx-fae') {
-                console.log('✅ Found existing Plug agent');
-                const convertedPrincipal = Principal.fromText(principal.toString());
-                const balance = await refreshWalletBalance(convertedPrincipal);
-
-                set({
-                  isConnected: true,
-                  account: { owner: convertedPrincipal, balance },
-                  isInitialized: true,
-                  walletType: WALLET_TYPES.PLUG
-                });
-
-                selectedWalletId.set(lastWallet);
-                currentWalletType.set(WALLET_TYPES.PLUG);
-                console.log('🎉 Plug session restored from existing agent');
-                return;
-              }
+              balance = await refreshWalletBalance(result.owner);
             } catch (e) {
-              console.log('⚠️ Existing agent check failed:', e);
+              console.warn('Balance fetch failed during restore:', e);
             }
+
+            set({
+              isConnected: true,
+              account: { owner: result.owner, balance },
+              isInitialized: true,
+              walletType: WALLET_TYPES.PLUG
+            });
+
+            selectedWalletId.set(lastWallet);
+            currentWalletType.set(WALLET_TYPES.PLUG);
+            console.log('🎉 Plug session restored successfully');
+            return;
           }
 
-          // If all silent methods fail, don't trigger popup - just clear and let user reconnect manually
+          // If silent reconnect fails, don't trigger popup - just clear and let user reconnect manually
           console.log('⚠️ Could not restore Plug session silently, user must reconnect');
           storage.clear();
         } else if (lastWallet === WALLET_TYPES.OISY || lastWallet.toLowerCase().includes('oisy')) {
