@@ -238,12 +238,112 @@ These items were discussed but NOT yet implemented:
 
 | Branch | Status | Action |
 |--------|--------|--------|
-| `main` | ✅ Contains staging merge + LICENSE | Production branch |
-| `feature/ii-wallet-send-receive` | ✅ **Active** — deployed to mainnet | Merge to main when stable |
+| `main` | ⚠️ Backend doesn't build (33 errors) | Fix build errors before next backend deploy |
+| `feature/ii-wallet-send-receive` | ✅ **Active** — deployed to mainnet (frontend only) | Merge to main when stable |
+| `feature/liquidation-price-check` | Has XRC interval change + price validation | PR #3 open for Agnes — superseded by main already having staleness checks |
+| `feature/plug-wallet-reconnect` | ✅ Merged via PR #2 | Can delete |
 | `staging` | ✅ Merged into main | Can delete |
 | `main-backup-feb4` | Backup of main before staging merge | Keep for safety |
-| `feature/liquidation-price-check` | Has 1 unmerged commit (price validation) | Merge separately |
 | `test/oisy-icrc2-repayment` | Test branch for Oisy icUSD ICRC-2 | DO NOT MERGE — test only |
+
+---
+
+## 🚨 CRITICAL: Backend Build Errors (33 errors on main)
+
+### Summary
+
+The backend (`rumi_protocol_backend`) does not compile on `main`. This was introduced by the staging merge (`1cb0034`) which brought in Agnes's guard refactoring code that references State fields that were never added. **Production is not affected** — the currently deployed backend was built before the staging merge and is still running fine. But no backend changes can be deployed until this is fixed.
+
+### Error Breakdown
+
+| Error Type | Count | Source File | Description |
+|------------|-------|-------------|-------------|
+| `E0609: no field operation_guards` | 8 | `guard.rs` | `State` has no `operation_guards: BTreeSet<String>` field |
+| `E0609: no field operation_details` | 8 | `guard.rs` | `State` has no `operation_details: BTreeMap<String, (Principal, String)>` field |
+| `E0609: no field operation_guard_timestamps` | 7 | `guard.rs` | `State` has no `operation_guard_timestamps: BTreeMap<String, u64>` field |
+| `E0308: mismatched types` | 6 | `guard.rs` | Cascade from missing fields (type inference failures) |
+| `E0282: type annotations needed` | 4 | `guard.rs`, `lib.rs` | Cascade from missing fields |
+
+### Root Cause
+
+Agnes's staging branch refactored the guard system from **principal-based** guards to **operation-key-based** guards. The old system uses:
+- `principal_guards: BTreeSet<Principal>` ✅ exists in State
+- `principal_guard_timestamps: BTreeMap<Principal, u64>` ✅ exists in State
+- `operation_states: BTreeMap<Principal, OperationState>` ✅ exists in State
+- `operation_names: BTreeMap<Principal, String>` ✅ exists in State
+
+The new guard code in `guard.rs` expects:
+- `operation_guards: BTreeSet<String>` ❌ MISSING — keyed by `"principal:operation_name"` strings
+- `operation_guard_timestamps: BTreeMap<String, u64>` ❌ MISSING — same string keys
+- `operation_details: BTreeMap<String, (Principal, String)>` ❌ MISSING — maps key → (principal, operation_name)
+
+The guard.rs was merged from staging but the corresponding State struct updates were lost in conflict resolution (we kept main's state.rs during the merge).
+
+### How guard.rs Works (New System)
+
+The refactored guard creates composite operation keys like `"fd7h3-mgmok...:open_vault"` combining principal + operation name. This allows a single principal to have multiple concurrent operations of different types (e.g., opening a vault while also doing a repayment), which the old principal-only system didn't support.
+
+Key functions in `guard.rs`:
+- `create_operation_key(principal, operation_name) → String` — creates the composite key
+- `VaultGuard::new(principal, operation_name)` — acquires guard, cleans stale guards (5-min timeout)
+- `VaultGuard::complete(self)` — marks operation as completed
+- `Drop for VaultGuard` — cleanup on drop, removes guard from all tracking maps
+- `MAX_CONCURRENT = 100` — max concurrent operations
+- `GUARD_TIMEOUT_NANOS = 5 * 60 * 1_000_000_000` — 5-minute timeout
+
+### Fix Required
+
+Add three fields to `State` struct in `state.rs` (around line 127):
+
+```rust
+// Operation-key-based guards (from guard.rs refactor)
+pub operation_guards: BTreeSet<String>,
+pub operation_guard_timestamps: BTreeMap<String, u64>,
+pub operation_details: BTreeMap<String, (Principal, String)>,
+```
+
+And initialize them in `impl From<InitArg> for State` (around line 165):
+
+```rust
+operation_guards: BTreeSet::new(),
+operation_guard_timestamps: BTreeMap::new(),
+operation_details: BTreeMap::new(),
+```
+
+**Decision needed:** Should the old principal-based guard fields (`principal_guards`, `principal_guard_timestamps`, `operation_states`, `operation_names`) be removed, or kept for backward compatibility? The new guard.rs code doesn't use them, but removing them may affect state deserialization on upgrade.
+
+### What This Blocks
+
+- ❌ Backend deployment to mainnet (any changes)
+- ❌ XRC interval reduction (PR #3 — would save ~$46/month in oracle costs)
+- ❌ Price freshness validation on liquidation endpoints
+- ❌ Any future backend feature work
+
+### What Still Works
+
+- ✅ Frontend-only deploys (`dfx deploy vault_frontend --network ic`)
+- ✅ Currently running backend on mainnet (old build, pre-merge)
+- ✅ All user-facing functionality (vaults, transfers, wallet integration)
+
+---
+
+## XRC Cost Reduction — Pending Build Fix
+
+### Current Cost
+- ICP/USD fetched every **60 seconds** via XRC
+- 1,440 calls/day × 1B cycles/call = ~1.44T cycles/day ≈ **$1.95/day ($58.50/month)**
+
+### Planned Change (on `feature/liquidation-price-check`, PR #3)
+- Increase `FETCHING_ICP_RATE_INTERVAL_SECS` from 60 → 300 (5 minutes)
+- Reduces to 288 calls/day ≈ **$0.39/day ($11.70/month)** — 80% savings
+- Safe because `check_price_not_too_old()` in state.rs uses a **10-minute** staleness threshold (`TEN_MINS_NANOS`), giving 2x buffer over the 5-minute fetch interval
+- Note: `validate_call()` already calls `check_price_not_too_old()` on ALL endpoints including liquidations, so the separate `validate_price_for_liquidation()` in the PR is redundant but harmless
+
+### Future: USDT/USDC Price Feeds
+- For ckUSDT/ckUSDC repayment support, will need USDT/USD and USDC/USD prices
+- Recommended approach: **on-demand fetching only** during liquidation/repayment operations, not polling
+- Depeg threshold: reject if rate < $0.95 or > $1.05
+- This avoids tripling the XRC bill from constant polling
 
 ---
 
