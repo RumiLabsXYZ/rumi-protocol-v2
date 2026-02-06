@@ -146,6 +146,10 @@
     border-radius: 0.75rem;
     padding: 1rem;
     transition: border-color 0.2s ease;
+    box-shadow:
+      inset 0 1px 0 0 rgba(232, 228, 240, 0.03),
+      0 2px 8px -2px rgba(12, 10, 20, 0.5),
+      0 1px 3px -1px rgba(26, 16, 48, 0.4);
   }
 
   .stat-card:hover {

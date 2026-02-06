@@ -92,6 +92,22 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* ── TECHNIQUE 1: Faint global noise / grain ──
+   SVG feTurbulence noise at very low opacity.
+   Should NOT be consciously visible — only felt.
+   If you can point at it and say "grain," it's too strong. */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  pointer-events: none;
+  opacity: 0.030;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 256px 256px;
+}
+
 /* Very subtle ambient glow — purple only, no teal */
 body::before {
   content: '';
@@ -152,7 +168,12 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 /* ============================================
-   Cards — purple-tinted, no decorative borders
+   Cards — purple-tinted with local depth cues
+   
+   TECHNIQUE 2: Surfaces feel embedded, not pasted.
+   - Faint top-edge inner highlight (light falloff from above)
+   - Subtle purple-tinted shadow beneath (depth, not decoration)
+   - No gradients, no glow, no glassmorphism
    ============================================ */
 .glass-panel,
 .glass-card,
@@ -162,6 +183,10 @@ h1, h2, h3, h4, h5, h6 {
   border-radius: 0.75rem;
   padding: 1.5rem;
   transition: border-color 0.2s ease;
+  box-shadow:
+    inset 0 1px 0 0 rgba(232, 228, 240, 0.03),
+    0 2px 8px -2px rgba(12, 10, 20, 0.5),
+    0 1px 3px -1px rgba(26, 16, 48, 0.4);
 }
 
 .glass-panel:hover,
@@ -170,12 +195,16 @@ h1, h2, h3, h4, h5, h6 {
   border-color: var(--rumi-border-hover);
 }
 
-/* Price card — slightly more visible border, still purple */
+/* Price card — same depth treatment, slightly stronger border */
 .price-card {
   background: var(--rumi-bg-surface1);
   border: 1px solid var(--rumi-border-hover);
   border-radius: 0.75rem;
   padding: 1.5rem;
+  box-shadow:
+    inset 0 1px 0 0 rgba(232, 228, 240, 0.03),
+    0 2px 8px -2px rgba(12, 10, 20, 0.5),
+    0 1px 3px -1px rgba(26, 16, 48, 0.4);
 }
 
 /* ============================================
