@@ -4,7 +4,11 @@
   import { walletStore } from '../../stores/wallet';
   import { get } from 'svelte/store';
   import { permissionManager } from '../../services/PermissionManager';
-  import { WALLET_TYPES } from '../../services/auth';
+  import { WALLET_TYPES, currentWalletType } from '../../services/auth';
+  import { truncatePrincipal, copyToClipboard } from '../../utils/principalHelpers';
+  import Toast from '../common/Toast.svelte';
+  import ReceiveModal from './ReceiveModal.svelte';
+  import SendModal from './SendModal.svelte';
 
   interface WalletInfo {
     id: string;
@@ -65,6 +69,38 @@
   let abortController = new AbortController();
   let isRefreshingBalance = false;
 
+  // Send/Receive modal state
+  let showReceiveModal = false;
+  let showSendModal = false;
+  let toasts: Array<{ id: number; message: string; type: 'success' | 'error' | 'info' }> = [];
+  let toastId = 0;
+
+  function addToast(message: string, type: 'success' | 'error' | 'info' = 'success') {
+    const id = toastId++;
+    toasts = [...toasts, { id, message, type }];
+  }
+
+  function removeToast(id: number) {
+    toasts = toasts.filter(t => t.id !== id);
+  }
+
+  // Check if current wallet is II (only II gets send/receive)
+  $: isInternetIdentity = $currentWalletType === WALLET_TYPES.INTERNET_IDENTITY;
+
+  async function handleCopyPrincipal(e: MouseEvent) {
+    e.stopPropagation();
+    if (!account) return;
+    const success = await copyToClipboard(account);
+    if (success) {
+      addToast('Principal copied', 'success');
+    }
+  }
+
+  function handleSendSuccess() {
+    showSendModal = false;
+    walletStore.refreshBalance();
+  }
+
   onDestroy(() => {
     if (connecting) {
       connecting = false;
@@ -117,13 +153,16 @@
 
   function formatAddress(addr: string | null): string {
     if (!addr) return '';
-    return addr; // Return the full principal ID
+    return truncatePrincipal(addr);
   }
 
   // Handle clicks outside the wallet dialog to close it
   function handleClickOutside(event: MouseEvent) {
     const target = event.target as HTMLElement;
     if (!showWalletDialog) return;
+    
+    // Don't close dropdown if a modal is open
+    if (showReceiveModal || showSendModal) return;
     
     const walletDialog = document.getElementById('wallet-dialog');
     const walletButton = document.getElementById('wallet-button');
@@ -200,7 +239,7 @@
   <!-- Add any necessary script imports here -->
 </svelte:head>
 
-<div class="relative" id="wallet-container">
+<div id="wallet-container">
   {#if !isConnected}
     <button
       id="wallet-button"
@@ -303,136 +342,158 @@
     <div class="relative">
       <button
         id="wallet-button"
-        class="bg-gray-900/80 backdrop-blur-sm border border-purple-500/20 hover:border-purple-400/40 hover:bg-gray-800/80 px-4 py-2.5 rounded-xl flex items-center gap-3 transition-all duration-200 shadow-lg"
-        on:click|stopPropagation={() => { showWalletDialog = !showWalletDialog; console.log("Toggle wallet dropdown:", showWalletDialog); }}
+        class="wallet-pill"
+        on:click|stopPropagation={() => { showWalletDialog = !showWalletDialog; }}
         aria-expanded={showWalletDialog}
         aria-controls="wallet-dialog"
       >
-        <div class="flex items-center gap-3">
-          <!-- Wallet Icon -->
-          {#if currentIcon}
-            <img
-              src={currentIcon}
-              alt="Wallet Icon"
-              class="w-6 h-6 rounded-full"
-            />
-          {:else}
-            <div class="w-6 h-6 bg-gradient-to-br from-purple-500 to-blue-500 rounded-full flex items-center justify-center">
-              <div class="w-2 h-2 bg-white rounded-full"></div>
-            </div>
+        <!-- Wallet Icon -->
+        {#if currentIcon}
+          <img src={currentIcon} alt="" class="pill-icon" />
+        {:else}
+          <div class="pill-icon-fallback">
+            <div class="pill-icon-dot"></div>
+          </div>
+        {/if}
+
+        <!-- Balances: icUSD primary, ICP secondary -->
+        <div class="pill-balances">
+          {#if tokenBalances.ICUSD && Number(tokenBalances.ICUSD.formatted) > 0}
+            <span class="pill-balance-primary">{tokenBalances.ICUSD.formatted} icUSD</span>
           {/if}
-          
-          <!-- Principal ID -->
-          <div class="flex flex-col items-start">
-            <span class="text-xs text-gray-400 font-mono">{formatAddress(account)}</span>
-            <div class="flex items-center gap-3">
-              {#if tokenBalances.ICP}
-                <div class="flex items-center gap-1">
-                  <span class="font-medium text-white text-sm">{tokenBalances.ICP.formatted} ICP</span>
-                  {#if tokenBalances.ICP.usdValue}
-                    <span class="text-gray-400 text-xs">(${tokenBalances.ICP.usdValue.toFixed(2)})</span>
-                  {/if}
-                </div>
-              {/if}
-              {#if tokenBalances.ICUSD && Number(tokenBalances.ICUSD.formatted) > 0}
-                <span class="text-purple-300 text-sm font-medium">{tokenBalances.ICUSD.formatted} icUSD</span>
-              {/if}
-            </div>
-          </div>
-          
-          <!-- Refresh Button -->
-          <div
-            class="p-1.5 text-gray-400 hover:text-white hover:bg-gray-700/50 rounded-lg cursor-pointer transition-colors duration-200"
-            on:click|stopPropagation={handleRefreshBalance}
-            on:keydown={e => e.key === 'Enter' && handleRefreshBalance(e)}
-            role="button"
-            tabindex="0"
-            title="Refresh balance"
-          >
-            <svg class:animate-spin={isRefreshingBalance} class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-          </div>
-          
-          <!-- Dropdown Arrow -->
-          <svg 
-            class="w-4 h-4 text-gray-400 transition-transform duration-200 {showWalletDialog ? 'transform rotate-180' : ''}" 
-            fill="none" 
-            stroke="currentColor" 
-            viewBox="0 0 24 24"
-          >
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+          {#if tokenBalances.ICP}
+            <span class="pill-balance-secondary">{tokenBalances.ICP.formatted} ICP</span>
+          {/if}
+        </div>
+
+        <!-- Principal (metadata) -->
+        <span class="pill-principal">{formatAddress(account)}</span>
+
+        <!-- Controls separator + icons -->
+        <span class="pill-divider"></span>
+
+        <div
+          class="pill-control"
+          on:click|stopPropagation={handleRefreshBalance}
+          on:keydown={e => e.key === 'Enter' && handleRefreshBalance(e)}
+          role="button"
+          tabindex="0"
+          title="Refresh balance"
+        >
+          <svg class:animate-spin={isRefreshingBalance} class="pill-control-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
         </div>
+
+        <svg
+          class="pill-control-icon pill-caret {showWalletDialog ? 'pill-caret-open' : ''}"
+          fill="none"
+          stroke="currentColor"
+          viewBox="0 0 24 24"
+        >
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+        </svg>
       </button>
 
       {#if showWalletDialog}
         <div 
-          class="absolute right-0 mt-2 w-80 bg-gray-900/95 backdrop-blur-lg border border-purple-500/20 rounded-xl shadow-2xl p-0 z-50" 
+          class="dropdown"
           id="wallet-dialog"
           role="dialog"
           aria-label="Wallet options"
         >
-          <!-- Header with wallet info -->
-          <div class="p-4 border-b border-gray-800/50">
-            <div class="flex items-center gap-3 mb-3">
+          <!-- Principal header -->
+          <div class="dropdown-header">
+            <div class="dropdown-identity">
               {#if currentIcon}
-                <img
-                  src={currentIcon}
-                  alt="Wallet Icon"
-                  class="w-8 h-8 rounded-full"
-                />
+                <img src={currentIcon} alt="" class="dropdown-wallet-icon" />
               {:else}
-                <div class="w-8 h-8 bg-gradient-to-br from-purple-500 to-blue-500 rounded-full flex items-center justify-center">
+                <div class="dropdown-wallet-icon-fallback">
                   <svg class="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 20 20">
                     <path d="M4 4a2 2 0 00-2 2v1h16V6a2 2 0 00-2-2H4zM18 9H2v5a2 2 0 002 2h12a2 2 0 002-2V9zM4 13a1 1 0 011-1h1a1 1 0 110 2H5a1 1 0 01-1-1zm5-1a1 1 0 100 2h1a1 1 0 100-2H9z"></path>
                   </svg>
                 </div>
               {/if}
-              <div>
-                <p class="text-sm font-medium text-white">Connected Wallet</p>
-                <p class="text-xs text-gray-400 font-mono break-all">{formatAddress(account)}</p>
+              <div class="dropdown-identity-text">
+                <p class="dropdown-label">Connected</p>
+                <p
+                  class="dropdown-principal"
+                  on:click|stopPropagation={handleCopyPrincipal}
+                  title="Click to copy full principal"
+                >{formatAddress(account)}</p>
               </div>
             </div>
-            
-            <!-- Balances -->
-            <div class="space-y-2">
-              <h3 class="text-sm font-medium text-gray-300 mb-2">Balances</h3>
-              {#if tokenBalances.ICP}
-                <div class="flex items-center justify-between bg-gray-800/30 rounded-lg p-3">
-                  <div class="flex items-center gap-2">
-                    <img src="/icp_logo.png" alt="ICP" class="w-5 h-5 rounded-full" />
-                    <span class="font-medium text-white">{tokenBalances.ICP.formatted} ICP</span>
-                  </div>
-                  {#if tokenBalances.ICP.usdValue}
-                    <span class="text-gray-400 text-sm">${tokenBalances.ICP.usdValue.toFixed(2)}</span>
-                  {/if}
+          </div>
+
+          <!-- Balances -->
+          <div class="dropdown-balances">
+            {#if tokenBalances.ICP}
+              <div class="dropdown-balance-row">
+                <div class="dropdown-balance-left">
+                  <img src="/icp_logo.png" alt="ICP" class="dropdown-token-icon" />
+                  <span class="dropdown-balance-amount">{tokenBalances.ICP.formatted} ICP</span>
                 </div>
-              {/if}
-              
-              {#if tokenBalances.ICUSD && Number(tokenBalances.ICUSD.formatted) > 0}
-                <div class="flex items-center justify-between bg-gray-800/30 rounded-lg p-3">
-                  <div class="flex items-center gap-2">
-                    <img src="/icUSD-logo.png" alt="icUSD" class="w-5 h-5 rounded-full" />
-                    <span class="font-medium text-white">{tokenBalances.ICUSD.formatted} icUSD</span>
-                  </div>
+                {#if tokenBalances.ICP.usdValue}
+                  <span class="dropdown-balance-usd">${tokenBalances.ICP.usdValue.toFixed(2)}</span>
+                {/if}
+              </div>
+            {/if}
+
+            {#if tokenBalances.ICUSD}
+              <div class="dropdown-balance-row">
+                <div class="dropdown-balance-left">
+                  <img src="/icUSD-logo.png" alt="icUSD" class="dropdown-token-icon" />
+                  <span class="dropdown-balance-amount">{tokenBalances.ICUSD.formatted} icUSD</span>
                 </div>
-              {/if}
-              
-              {#if (!tokenBalances.ICP || Number(tokenBalances.ICP.formatted) === 0) && (!tokenBalances.ICUSD || Number(tokenBalances.ICUSD.formatted) === 0)}
-                <div class="text-center py-4">
-                  <p class="text-gray-400 text-sm">No balances found</p>
-                  <p class="text-gray-500 text-xs mt-1">Try refreshing your balance</p>
-                </div>
-              {/if}
-            </div>
+              </div>
+            {/if}
+
+            {#if (!tokenBalances.ICP || Number(tokenBalances.ICP.formatted) === 0) && (!tokenBalances.ICUSD || Number(tokenBalances.ICUSD.formatted) === 0)}
+              <div class="dropdown-empty">
+                <p>No balances found</p>
+                <p class="dropdown-empty-hint">Try refreshing your balance</p>
+              </div>
+            {/if}
           </div>
           
           <!-- Actions -->
-          <div class="p-2">
-            <!-- Refresh Balance Button -->
+          <div class="dropdown-actions">
+            {#if isInternetIdentity}
+              <div class="dropdown-action-pair">
+                <button
+                  class="dropdown-btn dropdown-btn-receive"
+                  on:click|stopPropagation={() => { showReceiveModal = true; showWalletDialog = false; }}
+                >
+                  <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 5v14M5 12l7 7 7-7"/>
+                  </svg>
+                  Receive
+                </button>
+                <button
+                  class="dropdown-btn dropdown-btn-send"
+                  on:click|stopPropagation={() => { showSendModal = true; showWalletDialog = false; }}
+                >
+                  <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 19V5M5 12l7-7 7 7"/>
+                  </svg>
+                  Send
+                </button>
+              </div>
+            {:else}
+              <div class="dropdown-action-pair" title="Use your wallet app to send and receive">
+                <button class="dropdown-btn dropdown-btn-disabled" disabled>
+                  <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+                  Receive
+                </button>
+                <button class="dropdown-btn dropdown-btn-disabled" disabled>
+                  <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+                  Send
+                </button>
+              </div>
+            {/if}
+
             <button 
-              class="flex items-center w-full gap-3 px-4 py-3 text-sm text-blue-400 hover:bg-blue-900/20 hover:text-blue-300 rounded-lg transition-colors duration-200 mb-1"
+              class="dropdown-action-row dropdown-action-refresh"
               on:click|stopPropagation={handleRefreshBalance}
               disabled={isRefreshingBalance}
             >
@@ -442,9 +503,8 @@
               <span>{isRefreshingBalance ? 'Refreshing...' : 'Refresh Balance'}</span>
             </button>
             
-            <!-- Disconnect Button -->
             <button
-              class="flex items-center w-full gap-3 px-4 py-3 text-sm text-red-400 hover:bg-red-900/20 hover:text-red-300 rounded-lg transition-colors duration-200"
+              class="dropdown-action-row dropdown-action-disconnect"
               on:click|stopPropagation={disconnectWallet}
             >
               <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -452,7 +512,7 @@
                 <polyline points="16 17 21 12 16 7" />
                 <line x1="21" y1="12" x2="9" y2="12" />
               </svg>
-              <span>Disconnect Wallet</span>
+              <span>Disconnect</span>
             </button>
           </div>
         </div>
@@ -467,3 +527,340 @@
     <button class="ml-2" on:click={() => error = null}>✕</button>
   </div>
 {/if}
+
+{#if showReceiveModal && account}
+  <ReceiveModal
+    principal={account}
+    onClose={() => showReceiveModal = false}
+    onToast={addToast}
+  />
+{/if}
+
+{#if showSendModal}
+  <SendModal
+    onClose={() => showSendModal = false}
+    onSuccess={handleSendSuccess}
+    onToast={addToast}
+    icpBalance={tokenBalances.ICP?.formatted ?? '0'}
+    icusdBalance={tokenBalances.ICUSD?.formatted ?? '0'}
+  />
+{/if}
+
+{#if toasts.length > 0}
+  <div class="toast-container">
+    {#each toasts as toast (toast.id)}
+      <Toast
+        message={toast.message}
+        type={toast.type}
+        onClose={() => removeToast(toast.id)}
+      />
+    {/each}
+  </div>
+{/if}
+
+<style>
+  /* ── Header Pill ── */
+  .wallet-pill {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.6rem 0.4rem 0.5rem;
+    background: rgba(15, 15, 25, 0.85);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(139, 92, 246, 0.15);
+    border-radius: 0.75rem;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+    color: white;
+    font-family: inherit;
+  }
+  .wallet-pill:hover {
+    border-color: rgba(139, 92, 246, 0.35);
+    background: rgba(20, 20, 35, 0.9);
+  }
+
+  .pill-icon {
+    width: 1.375rem;
+    height: 1.375rem;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .pill-icon-fallback {
+    width: 1.375rem;
+    height: 1.375rem;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #7c3aed, #3b82f6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .pill-icon-dot {
+    width: 0.35rem;
+    height: 0.35rem;
+    background: white;
+    border-radius: 50%;
+  }
+
+  .pill-balances {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+  }
+  .pill-balance-primary {
+    font-size: 0.825rem;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.95);
+    white-space: nowrap;
+  }
+  .pill-balance-secondary {
+    font-size: 0.75rem;
+    font-weight: 400;
+    color: rgba(255, 255, 255, 0.45);
+    white-space: nowrap;
+  }
+
+  .pill-principal {
+    font-size: 0.65rem;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    color: rgba(255, 255, 255, 0.3);
+    white-space: nowrap;
+  }
+
+  .pill-divider {
+    width: 1px;
+    height: 1rem;
+    background: rgba(255, 255, 255, 0.1);
+    margin: 0 0.1rem;
+    flex-shrink: 0;
+  }
+
+  .pill-control {
+    padding: 0.25rem;
+    border-radius: 0.25rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background 0.12s ease;
+  }
+  .pill-control:hover {
+    background: rgba(255, 255, 255, 0.08);
+  }
+
+  .pill-control-icon {
+    width: 0.875rem;
+    height: 0.875rem;
+    color: rgba(255, 255, 255, 0.35);
+    flex-shrink: 0;
+  }
+
+  .pill-caret {
+    transition: transform 0.2s ease;
+  }
+  .pill-caret-open {
+    transform: rotate(180deg);
+  }
+
+  /* ── Dropdown ── */
+  .dropdown {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 0.5rem);
+    width: 19rem;
+    background: rgba(12, 12, 22, 0.97);
+    backdrop-filter: blur(16px);
+    border: 1px solid rgba(139, 92, 246, 0.15);
+    border-radius: 0.75rem;
+    box-shadow: 0 20px 40px -8px rgba(0, 0, 0, 0.6);
+    z-index: 50;
+    overflow: hidden;
+  }
+
+  .dropdown-header {
+    padding: 0.875rem 1rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  }
+  .dropdown-identity {
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+  }
+  .dropdown-wallet-icon {
+    width: 1.75rem;
+    height: 1.75rem;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .dropdown-wallet-icon-fallback {
+    width: 1.75rem;
+    height: 1.75rem;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #7c3aed, #3b82f6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  .dropdown-identity-text {
+    min-width: 0;
+  }
+  .dropdown-label {
+    margin: 0;
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.5);
+    line-height: 1;
+  }
+  .dropdown-principal {
+    margin: 0.2rem 0 0;
+    font-size: 0.7rem;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    color: rgba(255, 255, 255, 0.6);
+    cursor: pointer;
+    transition: color 0.12s ease;
+  }
+  .dropdown-principal:hover {
+    color: rgba(167, 139, 250, 0.9);
+  }
+
+  /* ── Dropdown balances ── */
+  .dropdown-balances {
+    padding: 0.625rem 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  }
+  .dropdown-balance-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.5rem 0.5rem;
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 0.5rem;
+  }
+  .dropdown-balance-left {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .dropdown-token-icon {
+    width: 1.125rem;
+    height: 1.125rem;
+    border-radius: 50%;
+  }
+  .dropdown-balance-amount {
+    font-size: 0.825rem;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.9);
+  }
+  .dropdown-balance-usd {
+    font-size: 0.7rem;
+    color: rgba(255, 255, 255, 0.35);
+  }
+  .dropdown-empty {
+    text-align: center;
+    padding: 1rem 0;
+    font-size: 0.8rem;
+    color: rgba(255, 255, 255, 0.4);
+  }
+  .dropdown-empty-hint {
+    font-size: 0.7rem;
+    color: rgba(255, 255, 255, 0.25);
+    margin-top: 0.2rem;
+  }
+
+  /* ── Dropdown actions ── */
+  .dropdown-actions {
+    padding: 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+  .dropdown-action-pair {
+    display: flex;
+    gap: 0.375rem;
+    margin-bottom: 0.25rem;
+  }
+  .dropdown-btn {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.375rem;
+    padding: 0.5rem;
+    font-size: 0.8rem;
+    font-weight: 500;
+    border-radius: 0.5rem;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: all 0.12s ease;
+  }
+  .dropdown-btn-receive {
+    color: rgba(74, 222, 128, 0.9);
+    background: rgba(34, 197, 94, 0.08);
+    border-color: rgba(34, 197, 94, 0.15);
+  }
+  .dropdown-btn-receive:hover {
+    background: rgba(34, 197, 94, 0.15);
+  }
+  .dropdown-btn-send {
+    color: rgba(167, 139, 250, 0.9);
+    background: rgba(139, 92, 246, 0.08);
+    border-color: rgba(139, 92, 246, 0.15);
+  }
+  .dropdown-btn-send:hover {
+    background: rgba(139, 92, 246, 0.15);
+  }
+  .dropdown-btn-disabled {
+    color: rgba(255, 255, 255, 0.25);
+    background: rgba(255, 255, 255, 0.03);
+    border-color: rgba(255, 255, 255, 0.06);
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
+  .dropdown-action-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    padding: 0.5rem 0.625rem;
+    font-size: 0.8rem;
+    border: none;
+    border-radius: 0.375rem;
+    background: transparent;
+    cursor: pointer;
+    transition: background 0.12s ease;
+  }
+  .dropdown-action-refresh {
+    color: rgba(96, 165, 250, 0.85);
+  }
+  .dropdown-action-refresh:hover {
+    background: rgba(59, 130, 246, 0.08);
+  }
+  .dropdown-action-disconnect {
+    color: rgba(248, 113, 113, 0.85);
+  }
+  .dropdown-action-disconnect:hover {
+    background: rgba(239, 68, 68, 0.08);
+  }
+
+  /* ── Toast container ── */
+  .toast-container {
+    position: fixed;
+    top: 4.5rem; /* header height + 14px offset */
+    right: 1rem;
+    z-index: 8000; /* above content, below modals (9000) */
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    pointer-events: none;
+    max-width: 340px;
+  }
+  .toast-container > :global(*) {
+    pointer-events: auto;
+  }
+</style>

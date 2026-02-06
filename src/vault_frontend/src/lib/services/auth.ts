@@ -357,7 +357,7 @@ function createAuthStore() {
         client.login({
           identityProvider: CONFIG.isLocal 
             ? `http://localhost:4943/?canisterId=${LOCAL_CANISTER_IDS.INTERNET_IDENTITY}` 
-            : "https://identity.ic0.app",
+            : "https://id.ai",
           onSuccess: async () => {
             try {
               const identity = client.getIdentity();

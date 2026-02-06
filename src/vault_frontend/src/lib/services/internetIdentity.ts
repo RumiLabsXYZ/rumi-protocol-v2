@@ -8,7 +8,7 @@ import { CONFIG } from '../config';
 const II_CANISTER_ID = 'rdmx6-jaaaa-aaaaa-aaadq-cai';
 const II_URL = CONFIG.isLocal
   ? `http://uxrrr-q7777-77774-qaaaq-cai.localhost:4943`
-  : 'https://identity.ic0.app';
+  : 'https://id.ai';
 
 export interface IIAuthService {
   authClient: AuthClient | null;
