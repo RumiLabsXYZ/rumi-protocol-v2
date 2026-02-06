@@ -215,10 +215,10 @@
 <div class="container mx-auto px-4 max-w-6xl">
   <section class="mb-12">
     <div class="text-center mb-10">
-      <h1 class="page-title">
+      <h1 class="page-title mb-4">
         Borrow icUSD with your ICP
       </h1>
-      <p class="page-subtitle">
+      <p class="text-lg max-w-2xl mx-auto" style="color: var(--rumi-text-secondary)">
         Create a vault, deposit ICP as collateral, and borrow the icUSD stablecoin
       </p>
     </div>
@@ -471,51 +471,11 @@
 
 
 <style>
-  .page-title {
-    font-family: 'Circular Std', 'Inter', sans-serif;
-    font-size: 2.25rem;
-    font-weight: 500;
-    color: var(--rumi-text-primary);
-    margin-bottom: 0.75rem;
-    letter-spacing: -0.02em;
-  }
-
-  .page-subtitle {
-    font-size: 1.125rem;
-    color: var(--rumi-text-secondary);
-    max-width: 36rem;
-    margin: 0 auto;
-  }
-
-  .price-card {
-    background: var(--rumi-bg-card);
-    border: 1px solid var(--rumi-border-teal);
-    border-radius: 0.75rem;
-    padding: 1.5rem;
-  }
-
   .glass-card {
     background: var(--rumi-bg-card);
     border: 1px solid var(--rumi-border);
     border-radius: 0.75rem;
     padding: 1.5rem;
-  }
-
-  .btn-primary {
-    background: var(--rumi-teal);
-    color: var(--rumi-bg-primary);
-    font-family: 'Circular Std', 'Inter', sans-serif;
-    font-weight: 500;
-  }
-
-  .btn-primary:hover {
-    background: var(--rumi-teal-bright);
-    box-shadow: 0 0 20px rgba(45, 212, 191, 0.15);
-  }
-
-  .btn-primary:disabled {
-    opacity: 0.4;
-    box-shadow: none;
   }
 
   input::-webkit-outer-spin-button,

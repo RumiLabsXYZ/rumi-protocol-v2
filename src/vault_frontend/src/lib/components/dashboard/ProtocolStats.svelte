@@ -145,5 +145,10 @@
     border: 1px solid var(--rumi-border);
     border-radius: 0.75rem;
     padding: 1rem;
+    transition: border-color 0.2s ease;
+  }
+
+  .stat-card:hover {
+    border-color: var(--rumi-border-hover);
   }
 </style>

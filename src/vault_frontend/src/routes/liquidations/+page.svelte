@@ -354,10 +354,10 @@ async function partialLiquidateVault(vaultId: number, liquidateAmount: number) {
 <div class="container mx-auto px-4 max-w-6xl">
   <section class="mb-8">
     <div class="text-center mb-8">
-      <h1 class="page-title">
+      <h1 class="page-title mb-4">
         Market Liquidations
       </h1>
-      <p class="text-lg text-gray-400 max-w-3xl mx-auto">
+      <p class="text-lg max-w-3xl mx-auto" style="color: var(--rumi-text-secondary)">
         Earn profits by liquidating undercollateralized vaults. Pay the debt in icUSD, receive the collateral with a 10% discount.
       </p>
     </div>
@@ -559,42 +559,10 @@ async function partialLiquidateVault(vaultId: number, liquidateAmount: number) {
 </div>
 
 <style>
-  .page-title {
-    font-family: 'Circular Std', 'Inter', sans-serif;
-    font-size: 2.25rem;
-    font-weight: 500;
-    color: var(--rumi-text-primary);
-    margin-bottom: 0.75rem;
-    letter-spacing: -0.02em;
-    text-align: center;
-  }
-
-  .price-card {
-    background: var(--rumi-bg-card);
-    border: 1px solid var(--rumi-border-teal);
-    border-radius: 0.75rem;
-    padding: 1.5rem;
-  }
-
   .glass-card {
     background: var(--rumi-bg-card);
     border: 1px solid var(--rumi-border);
     border-radius: 0.75rem;
     padding: 1.5rem;
-  }
-
-  .btn-secondary {
-    background: var(--rumi-bg-elevated);
-    border: 1px solid var(--rumi-border-hover);
-    font-family: 'Circular Std', 'Inter', sans-serif;
-  }
-
-  .btn-danger {
-    background: rgba(239, 68, 68, 0.8);
-    font-family: 'Circular Std', 'Inter', sans-serif;
-  }
-
-  .btn-danger:hover {
-    background: rgba(239, 68, 68, 1);
   }
 </style>

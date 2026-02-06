@@ -1,6 +1,6 @@
 /* ============================================
    RUMI PROTOCOL — Design System
-   Color: Muted purple base + teal accent
+   Color: Purple base + teal accent
    Font: Circular Std (headings) + Inter (body)
    ============================================ */
 
@@ -23,35 +23,36 @@
    CSS Custom Properties — Color System
    ============================================ */
 :root {
-  /* Primary palette — muted purples */
-  --rumi-bg-primary: #0a0b0f;
-  --rumi-bg-secondary: #111219;
-  --rumi-bg-card: #16171f;
-  --rumi-bg-card-hover: #1c1d27;
-  --rumi-bg-elevated: #1e1f2a;
+  /* Primary palette — dark purples as the base */
+  --rumi-bg-primary: #0d0a14;
+  --rumi-bg-secondary: #110e1a;
+  --rumi-bg-card: #161221;
+  --rumi-bg-card-hover: #1c1729;
+  --rumi-bg-elevated: #1e1830;
 
-  /* Purple — subdued, used for backgrounds and depth */
+  /* Purple — the base DNA, present everywhere */
   --rumi-purple-deep: #1a1030;
   --rumi-purple-muted: #2d1f54;
-  --rumi-purple-base: #3D2066;
-  --rumi-purple-light: #5a3d8a;
+  --rumi-purple-base: #522785;
+  --rumi-purple-light: #7c3aed;
+  --rumi-purple-glow: rgba(124, 58, 237, 0.15);
 
-  /* Teal — the star accent color */
+  /* Teal — the star accent */
   --rumi-teal: #2DD4BF;
   --rumi-teal-bright: #14F0C5;
   --rumi-teal-muted: #1a9e8f;
-  --rumi-teal-dim: rgba(45, 212, 191, 0.15);
-  --rumi-teal-glow: rgba(45, 212, 191, 0.3);
+  --rumi-teal-dim: rgba(45, 212, 191, 0.12);
+  --rumi-teal-glow: rgba(45, 212, 191, 0.25);
 
   /* Text */
-  --rumi-text-primary: #f0f0f4;
-  --rumi-text-secondary: #9ca3b0;
-  --rumi-text-muted: #5c6170;
+  --rumi-text-primary: #f0eef5;
+  --rumi-text-secondary: #a09bb5;
+  --rumi-text-muted: #605a75;
 
-  /* Borders */
-  --rumi-border: rgba(255, 255, 255, 0.06);
-  --rumi-border-hover: rgba(255, 255, 255, 0.12);
-  --rumi-border-teal: rgba(45, 212, 191, 0.2);
+  /* Borders — tinted purple */
+  --rumi-border: rgba(124, 58, 237, 0.12);
+  --rumi-border-hover: rgba(124, 58, 237, 0.25);
+  --rumi-border-accent: rgba(45, 212, 191, 0.3);
 
   /* Status */
   --rumi-green: #10b981;
@@ -59,8 +60,8 @@
   --rumi-yellow: #f59e0b;
 
   /* Gradients */
-  --rumi-glow: radial-gradient(ellipse at 50% 0%, rgba(45, 212, 191, 0.08) 0%, transparent 60%);
-  --rumi-accent-gradient: linear-gradient(135deg, var(--rumi-teal-muted), var(--rumi-teal));
+  --rumi-headline-gradient: linear-gradient(135deg, var(--rumi-purple-light), var(--rumi-teal));
+  --rumi-card-border-gradient: linear-gradient(135deg, rgba(124, 58, 237, 0.25), rgba(45, 212, 191, 0.15));
 }
 
 /* ============================================
@@ -77,16 +78,16 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* Subtle top glow — replaces the animated gradient */
+/* Subtle purple-teal ambient glow */
 body::before {
   content: '';
   position: fixed;
-  top: -200px;
+  top: -300px;
   left: 50%;
   transform: translateX(-50%);
-  width: 800px;
-  height: 600px;
-  background: radial-gradient(ellipse, rgba(45, 212, 191, 0.06) 0%, rgba(61, 32, 102, 0.04) 40%, transparent 70%);
+  width: 1000px;
+  height: 700px;
+  background: radial-gradient(ellipse, rgba(82, 39, 133, 0.12) 0%, rgba(45, 212, 191, 0.05) 40%, transparent 70%);
   pointer-events: none;
   z-index: 0;
 }
@@ -98,10 +99,22 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 /* ============================================
-   Reusable Component Classes
+   Headline gradient — purple to teal
    ============================================ */
+.page-title {
+  font-family: 'Circular Std', 'Inter', sans-serif;
+  font-size: 2.25rem;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  background: var(--rumi-headline-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
 
-/* Cards — flat, subtle borders, no glow rings */
+/* ============================================
+   Cards — purple-tinted with subtle borders
+   ============================================ */
 .glass-panel,
 .glass-card,
 .icp-card {
@@ -118,8 +131,21 @@ h1, h2, h3, h4, h5, h6 {
   border-color: var(--rumi-border-hover);
 }
 
-/* Primary button — teal accent */
-.icp-button {
+/* Featured card — teal border accent */
+.price-card {
+  background: var(--rumi-bg-card);
+  border: 1px solid var(--rumi-border-accent);
+  border-radius: 0.75rem;
+  padding: 1.5rem;
+  box-shadow: 0 0 30px rgba(45, 212, 191, 0.04);
+}
+
+/* ============================================
+   Buttons
+   ============================================ */
+/* Primary — teal, for main CTAs */
+.icp-button,
+.btn-primary {
   padding: 0.625rem 1.25rem;
   background: var(--rumi-teal);
   color: var(--rumi-bg-primary);
@@ -131,18 +157,57 @@ h1, h2, h3, h4, h5, h6 {
   transition: all 0.2s ease;
 }
 
-.icp-button:hover {
+.icp-button:hover,
+.btn-primary:hover {
   background: var(--rumi-teal-bright);
   box-shadow: 0 0 20px rgba(45, 212, 191, 0.2);
 }
 
-.icp-button:disabled {
+.icp-button:disabled,
+.btn-primary:disabled {
   opacity: 0.4;
   cursor: not-allowed;
   box-shadow: none;
 }
 
-/* Input fields */
+/* Secondary — subtle purple border */
+.btn-secondary {
+  padding: 0.625rem 1.25rem;
+  background: var(--rumi-bg-elevated);
+  border: 1px solid var(--rumi-border-hover);
+  color: var(--rumi-text-primary);
+  font-family: 'Circular Std', 'Inter', sans-serif;
+  font-weight: 500;
+  border-radius: 0.5rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-secondary:hover {
+  border-color: var(--rumi-teal);
+  color: var(--rumi-teal);
+}
+
+/* Danger — red */
+.btn-danger {
+  padding: 0.625rem 1.25rem;
+  background: rgba(239, 68, 68, 0.8);
+  color: white;
+  font-family: 'Circular Std', 'Inter', sans-serif;
+  font-weight: 500;
+  border: none;
+  border-radius: 0.5rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-danger:hover {
+  background: rgba(239, 68, 68, 1);
+}
+
+/* ============================================
+   Input fields
+   ============================================ */
 .icp-input {
   padding: 0.625rem 1rem;
   background: var(--rumi-bg-secondary);
@@ -164,7 +229,7 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 /* ============================================
-   Utility Animations (keep only what's needed)
+   Utility Animations
    ============================================ */
 @keyframes spin {
   from { transform: rotate(0deg); }
@@ -172,14 +237,8 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 @keyframes fadeSlideIn {
-  0% {
-    opacity: 0;
-    transform: translateY(12px);
-  }
-  100% {
-    opacity: 1;
-    transform: translateY(0);
-  }
+  0% { opacity: 0; transform: translateY(12px); }
+  100% { opacity: 1; transform: translateY(0); }
 }
 
 .animate-title {
