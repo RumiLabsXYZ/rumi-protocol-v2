@@ -11,6 +11,7 @@
   import { isDevelopment } from "../lib/config";
   import { developerAccess } from "../lib/stores/developer";
   let permissionInitialized = false;
+  let showDebug = false;
   $: currentPath = $page.url.pathname;
   $: ({ isConnected } = $wallet);
   $: isDeveloperMode = isDevelopment || ($permissionStore.initialized && $permissionStore.isDeveloper);
@@ -22,6 +23,10 @@
     try { await wallet.initialize(); } catch (e) { console.error('Wallet init failed:', e); }
     if (isConnected && !permissionInitialized) { try { if (await permissionStore.init()) permissionInitialized = true; } catch (e) { permissionInitialized = true; } }
     protocolService.getICPPrice().catch(() => {});
+    // Ctrl+D toggles debug panels in dev mode
+    const handleKey = (e: KeyboardEvent) => { if (e.ctrlKey && e.key === 'd') { e.preventDefault(); showDebug = !showDebug; } };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
   });
 </script>
 <aside class="sidebar">
@@ -54,7 +59,7 @@
   <a href="/liquidations" class="mob-item" class:active={currentPath === '/liquidations'}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg><span>Liquidate</span></a>
   <a href="/stability-pool" class="mob-item" class:active={currentPath === '/stability-pool'}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg><span>Stability</span></a>
 </nav>
-{#if isDevelopment}<div class="fixed bottom-4 right-4 z-50"><div class="flex flex-col gap-2"><PriceDebug /><WalletDebug /></div></div>{/if}
+{#if isDevelopment && showDebug}<div class="fixed bottom-4 right-4 z-50"><div class="flex flex-col gap-2"><PriceDebug /><WalletDebug /></div></div>{/if}
 <style>
   .sidebar { position:fixed;top:0;left:0;width:180px;height:100vh;background:var(--rumi-bg-surface-1);border-right:1px solid var(--rumi-border);z-index:100;display:flex;flex-direction:column;padding:1.25rem 0; }
   .sidebar-brand { display:flex;align-items:center;gap:0.625rem;padding:0 1.25rem;margin-bottom:2rem;text-decoration:none; }

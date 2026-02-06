@@ -46,6 +46,12 @@
   --rumi-purple-base: #522785;
   --rumi-purple-light: #7c3aed;
 
+  /* Expressive purple — secondary accent, rare and intentional.
+     Warm violet-magenta: ICP-native energy without neon.
+     Used for: page titles, section headers, icons, dividers.
+     NOT for: numbers, balances, risk indicators, buttons. */
+  --rumi-purple-accent: #d176e8;
+
   /* Teal — earned accent, interactive + key values only */
   --rumi-teal: #2DD4BF;
   --rumi-teal-bright: #14F0C5;
@@ -129,12 +135,12 @@ h1, h2, h3, h4, h5, h6 {
   letter-spacing: -0.02em;
 }
 
-/* Page titles — PRIMARY BRAND: solid off-white, confident */
+/* Page titles — PRIMARY BRAND: expressive purple accent, confident */
 .page-title {
   font-family: 'Circular Std', 'Inter', sans-serif;
   font-size: 1.75rem;
   font-weight: 500;
-  color: var(--rumi-text-primary);
+  color: var(--rumi-purple-accent);
   letter-spacing: -0.02em;
   margin-bottom: 0.5rem;
 }
