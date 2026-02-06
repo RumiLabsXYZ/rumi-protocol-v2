@@ -147,9 +147,9 @@
     padding: 1rem;
     transition: border-color 0.2s ease;
     box-shadow:
-      inset 0 1px 0 0 rgba(232, 228, 240, 0.03),
-      0 2px 8px -2px rgba(12, 10, 20, 0.5),
-      0 1px 3px -1px rgba(26, 16, 48, 0.4);
+      inset 0 1px 0 0 rgba(200, 210, 240, 0.03),
+      0 2px 8px -2px rgba(8, 11, 22, 0.6),
+      0 1px 3px -1px rgba(14, 18, 40, 0.4);
   }
 
   .stat-card:hover {
