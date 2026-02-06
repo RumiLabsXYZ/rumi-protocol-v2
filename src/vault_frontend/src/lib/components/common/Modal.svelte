@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import { fade, scale } from 'svelte/transition';
   
   export let title: string = '';
@@ -9,6 +9,9 @@
   export let closeOnEscape: boolean = true;
   export let maxWidth: string = '28rem';
   
+  let portalTarget: HTMLDivElement;
+  let backdropEl: HTMLDivElement;
+  
   function handleKeydown(event: KeyboardEvent) {
     if (closeOnEscape && event.key === 'Escape') {
       onClose();
@@ -16,57 +19,64 @@
   }
   
   function handleBackdropClick(event: MouseEvent) {
-    if (closeOnBackdrop && event.target === event.currentTarget) {
+    if (closeOnBackdrop && event.target === backdropEl) {
       onClose();
     }
   }
   
-  onMount(() => {
+  onMount(async () => {
+    // Portal: move modal to document.body to escape stacking contexts
+    document.body.appendChild(portalTarget);
     document.addEventListener('keydown', handleKeydown);
-    // Prevent body scroll when modal is open
     document.body.style.overflow = 'hidden';
+    await tick();
   });
   
   onDestroy(() => {
     document.removeEventListener('keydown', handleKeydown);
     document.body.style.overflow = '';
+    // Clean up portal element
+    if (portalTarget && portalTarget.parentNode) {
+      portalTarget.parentNode.removeChild(portalTarget);
+    }
   });
 </script>
 
-<div 
-  class="modal-backdrop" 
-  on:click={handleBackdropClick}
-  transition:fade={{ duration: 150 }}
-  role="dialog"
-  aria-modal="true"
-  aria-labelledby={title ? 'modal-title' : undefined}
->
+<div bind:this={portalTarget} class="modal-portal-root">
   <div 
-    class="modal-content"
-    style="--max-width: {maxWidth}"
-    transition:scale={{ duration: 200, start: 0.95 }}
+    class="modal-backdrop" 
+    bind:this={backdropEl}
+    on:click={handleBackdropClick}
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby={title ? 'modal-title' : undefined}
   >
-    {#if title || showClose}
-      <div class="modal-header">
-        {#if title}
-          <h2 id="modal-title" class="modal-title">{title}</h2>
-        {/if}
-        {#if showClose}
-          <button 
-            class="modal-close" 
-            on:click={onClose}
-            aria-label="Close modal"
-          >
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M18 6L6 18M6 6l12 12" />
-            </svg>
-          </button>
-        {/if}
+    <div 
+      class="modal-content"
+      style="--max-width: {maxWidth}"
+    >
+      {#if title || showClose}
+        <div class="modal-header">
+          {#if title}
+            <h2 id="modal-title" class="modal-title">{title}</h2>
+          {/if}
+          {#if showClose}
+            <button 
+              class="modal-close" 
+              on:click={onClose}
+              aria-label="Close modal"
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M18 6L6 18M6 6l12 12" />
+              </svg>
+            </button>
+          {/if}
+        </div>
+      {/if}
+      
+      <div class="modal-body">
+        <slot />
       </div>
-    {/if}
-    
-    <div class="modal-body">
-      <slot />
     </div>
   </div>
 </div>

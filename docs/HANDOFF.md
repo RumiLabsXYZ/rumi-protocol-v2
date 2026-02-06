@@ -82,17 +82,7 @@ The `feature/liquidation-price-check` branch has one remaining commit that was N
 
 ---
 
-## Git Branch Status (Updated)
-
-| Branch | Status | Action |
-|--------|--------|--------|
-| `main` | ✅ **Up to date** - Contains all staging work + LICENSE/ACKNOWLEDGMENTS | Production branch |
-| `staging` | ✅ **Merged** | Can be deleted or kept for reference |
-| `main-backup-feb4` | Backup of main before merge | Keep for safety, delete after confirming stability |
-| `feature/liquidation-price-check` | Has 1 unmerged commit (price validation) | Merge separately |
-| `test/oisy-icrc2-repayment` | Test branch (currently deployed to mainnet) | DO NOT MERGE - test only |
-
-### Next Steps After Merge
+## Next Steps After Staging Merge
 
 1. **Build and test locally:**
    ```bash
@@ -120,6 +110,134 @@ The `feature/liquidation-price-check` branch has one remaining commit that was N
    git push origin --delete staging  # If no longer needed
    git branch -d main-backup-feb4    # After confirming stability
    ```
+
+---
+
+## ✅ COMPLETED: Send/Receive Feature + UI Polish (February 5, 2026)
+
+### Branch: `feature/ii-wallet-send-receive`
+
+Planned Jan 27, Phase 1 built Jan 27, completed and deployed to mainnet Feb 5.
+All changes deployed on vault_frontend canister `tcfua-yaaaa-aaaap-qrd7q-cai`.
+
+### New Files Created (Jan 27 – Feb 5)
+
+| File | Purpose |
+|------|---------|
+| `components/common/Toast.svelte` | Auto-dismiss notification component |
+| `components/common/Modal.svelte` | Reusable modal with DOM portal pattern |
+| `components/wallet/ReceiveModal.svelte` | QR code + principal display for receiving |
+| `components/wallet/SendModal.svelte` | ICP/icUSD transfer UI for II users |
+| `services/transferService.ts` | ICRC-1 transfer logic for ICP and icUSD |
+| `utils/principalHelpers.ts` | `truncatePrincipal()` and `copyToClipboard()` |
+
+### 1. Transfer Service Fix
+
+**File:** `transferService.ts`
+- Changed `pnp.getActor()` → `walletStore.getActor()` for creating ledger actors
+- `walletStore.getActor()` (in `auth.ts`) detects II and uses delegation identity agent
+- Fixed "Cannot create signed actor. No wallet provider connected." error
+- ICP and icUSD transfers now work for II users via `icrc1_transfer`
+
+### 2. Internet Identity Portal URL
+
+**Files:** `internetIdentity.ts` and `auth.ts`
+- Changed II provider from `https://identity.ic0.app` to `https://id.ai`
+
+### 3. Modal Portal Fix
+
+**File:** `Modal.svelte`
+- DOM portal pattern: modal `onMount` appends to `document.body`
+- Fixes stacking context issues (modals were rendering above viewport)
+- Fixes click-outside-to-close (backdrop click checks `event.target === backdropEl`)
+- Removed Svelte transitions that conflicted with portal approach
+
+### 4. Header Wallet Pill Redesign
+
+**File:** `WalletConnector.svelte`
+
+| Before | After |
+|--------|-------|
+| USD values in header | Removed (kept in dropdown only) |
+| All balances equal weight | icUSD primary (bright, bold), ICP secondary (muted) |
+| Principal same size as balances | Tiny mono metadata text (30% opacity) |
+| Controls mixed with data | Vertical divider separates data from controls |
+
+Reading order: Wallet icon → icUSD balance → ICP balance → controls
+
+### 5. Wallet Dropdown Polish
+
+- Truncated principal at top, clickable to copy (hover turns purple)
+- Balance rows with token icons, USD values muted
+- icUSD always shown (even at 0)
+- Action buttons: Receive, Send (II only), Refresh Balance, Disconnect
+- Disabled Send/Receive for non-II wallets with tooltip
+
+### 6. Receive Modal with QR Code
+
+- QR code as visual anchor (via `qrcode` npm v1.5.4)
+- Principal below in mono block
+- Helper text: "Use this address to receive ICP or icUSD."
+- Copy Principal button
+
+### 7. Toast Repositioning
+
+- Container: `position: fixed; top: 4.5rem; right: 1rem`
+- Below header, never overlaps wallet pill
+- `z-index: 8000` (above content, below modals at 9000)
+- Multiple toasts stack downward, auto-dismiss 3.5s
+
+### 8. GitHub Icon in Header
+
+**File:** `+layout.svelte`
+- GitHub SVG icon added next to email and Twitter social links
+- Links to `https://github.com/RumiLabsXYZ/rumi-protocol-v2`
+
+### 9. WalletConnector Click-Outside Fix
+
+- Removed `class="relative"` from `#wallet-container` (was creating stacking context)
+- `handleClickOutside()` skips when modals are open
+
+### npm Dependencies Added
+- `qrcode` v1.5.4
+- `@types/qrcode`
+
+### Deferred / Future Work from Send/Receive Design Sessions (Feb 5)
+
+These items were discussed but NOT yet implemented:
+
+1. **ckToken support in Send modal** — Rob wants to expand beyond ICP/icUSD to include:
+   - ckBTC, ckETH, ckXAUT, ckLINK, ckDOGE, ckWSTETH
+   - NO stablecoins (ckUSDT, ckUSDC excluded from quick-select)
+   - UI: quick-select icons for common tokens + dropdown for full list
+   - Requires adding ledger canister IDs to config
+
+2. **Token ledger canister IDs researched** (mainnet):
+   - ckBTC: `mxzaz-hqaaa-aaaar-qaada-cai`
+   - ckETH: `ss2fx-dyaaa-aaaar-qacoq-cai`
+   - ckUSDT: `cngnf-vqaaa-aaaar-qag4q-cai`
+   - ckUSDC: `xevnm-gaaaa-aaaar-qafnq-cai`
+   - (ckXAUT, ckLINK, ckDOGE, ckWSTETH — IDs need to be looked up)
+
+3. **Testing checklist still outstanding:**
+   - [ ] Test ICP transfer with Internet Identity
+   - [ ] Test icUSD transfer with Internet Identity
+   - [ ] Verify new `id.ai` portal authentication flow
+   - [ ] Test Plug/Oisy disabled buttons and tooltip
+   - [ ] Test QR code renders correctly in Receive modal
+
+---
+
+## Git Branch Status (Updated Feb 5)
+
+| Branch | Status | Action |
+|--------|--------|--------|
+| `main` | ✅ Contains staging merge + LICENSE | Production branch |
+| `feature/ii-wallet-send-receive` | ✅ **Active** — deployed to mainnet | Merge to main when stable |
+| `staging` | ✅ Merged into main | Can delete |
+| `main-backup-feb4` | Backup of main before staging merge | Keep for safety |
+| `feature/liquidation-price-check` | Has 1 unmerged commit (price validation) | Merge separately |
+| `test/oisy-icrc2-repayment` | Test branch for Oisy icUSD ICRC-2 | DO NOT MERGE — test only |
 
 ---
 
@@ -205,7 +323,7 @@ get_icp_price : () -> (nat64) query
 | Wallet | Status | Notes |
 |--------|--------|-------|
 | **Plug** | ✅ Working | Primary testing wallet |
-| **Internet Identity** | ⚠️ Needs Testing | II 2.0 uses `https://id.ai` |
+| **Internet Identity** | ✅ Working | Send/Receive implemented, uses `https://id.ai` portal |
 | **Oisy** | 🔴 Partially Blocked | ICP ICRC-2 fails; icUSD under test |
 
 ### Oisy Wallet - Current Status
@@ -235,6 +353,17 @@ get_icp_price : () -> (nat64) query
 **File**: `src/vault_frontend/src/lib/services/auth.ts`
 **Problem**: Plug sessions don't persist across page refresh
 **Status**: Added `waitForPlug()` polling but still failing silently
+
+### 3. Left Nav Active Highlight Doesn't Track Page
+**Problem**: The highlight/active indicator in the left sidebar navigation doesn't move when the user navigates to a different page
+**Status**: Not investigated yet
+
+---
+
+## UI Exploration
+
+- **Font**: `circular-std-medium-500.ttf` is in the repo root — Rob wants to try this font across the UI to see how it looks
+- **Vault cards**: Want to explore making vault list/detail views sleeker
 
 ---
 
@@ -328,4 +457,4 @@ dfx deploy vault_frontend --network ic
 
 ---
 
-*Last updated: February 4, 2026*
+*Last updated: February 5, 2026*

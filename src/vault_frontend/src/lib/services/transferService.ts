@@ -2,11 +2,12 @@
  * Transfer Service for ICP and icUSD tokens
  * 
  * Handles ICRC-1 transfers for Internet Identity users.
- * Uses pnp.getActor() to create authenticated actors.
+ * Uses walletStore.getActor() which properly handles II delegation auth.
  */
 
 import { Principal } from '@dfinity/principal';
-import { pnp, canisterIDLs } from './pnp';
+import { canisterIDLs } from './pnp';
+import { walletStore } from '../stores/wallet';
 import { CONFIG } from '../config';
 
 // Transfer fee in e8s (0.0001 ICP = 10,000 e8s)
@@ -104,7 +105,7 @@ export async function transferICP(
     const icpLedgerId = CONFIG.currentIcpLedgerId;
     console.log('📤 Creating ICP ledger actor for:', icpLedgerId);
     
-    const actor = await pnp.getActor(icpLedgerId, canisterIDLs.icp_ledger);
+    const actor = await walletStore.getActor(icpLedgerId, canisterIDLs.icp_ledger);
     
     if (!actor) {
       return { success: false, error: 'Failed to create ICP ledger actor. Please reconnect your wallet.' };
@@ -185,7 +186,7 @@ export async function transferICUSD(
     const icusdLedgerId = CONFIG.currentIcusdLedgerId;
     console.log('📤 Creating icUSD ledger actor for:', icusdLedgerId);
     
-    const actor = await pnp.getActor(icusdLedgerId, canisterIDLs.icusd_ledger);
+    const actor = await walletStore.getActor(icusdLedgerId, canisterIDLs.icusd_ledger);
     
     if (!actor) {
       return { success: false, error: 'Failed to create icUSD ledger actor. Please reconnect your wallet.' };

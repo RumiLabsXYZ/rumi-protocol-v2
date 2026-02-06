@@ -3,7 +3,7 @@
   import { fade, fly } from 'svelte/transition';
   
   export let message: string;
-  export let duration: number = 2000;
+  export let duration: number = 3500;
   export let type: 'success' | 'error' | 'info' = 'success';
   export let onClose: () => void = () => {};
   
@@ -51,7 +51,7 @@
   <div 
     class="toast"
     style="--bg: {style.bg}; --border: {style.border}"
-    transition:fly={{ y: 50, duration: 300 }}
+    transition:fly={{ y: -20, duration: 250 }}
     role="alert"
     aria-live="polite"
   >
@@ -65,9 +65,6 @@
 
 <style>
   .toast {
-    position: fixed;
-    bottom: 1.5rem;
-    right: 1.5rem;
     display: flex;
     align-items: center;
     gap: 0.75rem;
@@ -76,8 +73,8 @@
     border: 1px solid var(--border);
     border-radius: 0.5rem;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-    z-index: 10000;
-    max-width: 320px;
+    max-width: 340px;
+    width: 100%;
     backdrop-filter: blur(8px);
   }
   
