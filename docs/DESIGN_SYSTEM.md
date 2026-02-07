@@ -105,15 +105,27 @@ If compared side-by-side with a neutral dark UI, Rumi must clearly look purple.
 
 **NO** flat black. **NO** gray masquerading as purple. **NO** warm desaturation.
 
-### Accent Color: Teal — Earned, Not Sprayed
+### Accent Color: Emerald — Action, Earned
 
-Teal (`#2DD4BF`) is Rumi's voice inside the ICP ecosystem.
+Emerald (`#34d399`) is Rumi's action color. It means: do something now.
 
-**Teal means:** interactivity, key protocol values, success.
+**Emerald is used for:** primary buttons (white text on fill), active nav underline, primary CTAs, interactive affordances.
 
-**Teal must NOT be used for:** headlines by default, decoration, card borders, step numbers, ambient accents.
+**Emerald must NOT be used for:** headlines, decoration, card borders, ambient accents, status indicators.
 
-Fewer teal moments = stronger teal signal.
+**Button text is always white** on emerald fills. Dark text on emerald fails contrast.
+
+Fewer emerald moments = stronger emerald signal.
+
+### Teal — Quiet Accent
+
+Teal (`#2DD4BF`) is Rumi's subtle accent. It means: something is responding to you.
+
+**Teal is used for:** input focus rings, success state borders, quiet interactive feedback.
+
+**Teal must NOT be used for:** primary buttons, CTAs, headlines, or anywhere emerald belongs.
+
+Teal is calming. Emerald is commanding. They must not be confused.
 
 ### Risk Color System (The Most Expressive Element)
 
