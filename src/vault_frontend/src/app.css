@@ -142,11 +142,11 @@ h1, h2, h3, h4, h5, h6 {
   letter-spacing: -0.02em;
 }
 
-/* Page titles — PRIMARY BRAND: expressive purple accent, confident */
+/* Page titles — IDENTITY color, bold, authoritative */
 .page-title {
   font-family: 'Circular Std', 'Inter', sans-serif;
-  font-size: 1.75rem;
-  font-weight: 500;
+  font-size: 2rem;
+  font-weight: 700;
   color: var(--rumi-purple-accent);
   letter-spacing: -0.02em;
   margin-bottom: 0.5rem;

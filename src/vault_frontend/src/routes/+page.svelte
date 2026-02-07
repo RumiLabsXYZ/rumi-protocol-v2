@@ -4,488 +4,244 @@
   import { formatNumber } from '$lib/utils/format';
   import { tweened } from 'svelte/motion';
   import { cubicOut } from 'svelte/easing';
-  import { selectedWalletId } from '../lib/services/auth';
-  import { get } from 'svelte/store';
   import { appDataStore, protocolStatus, isLoadingProtocol } from '$lib/stores/appDataStore';
   import { walletStore, isConnected, principal } from '$lib/stores/wallet';
   import { protocolService } from '$lib/services/protocol';
   import { MINIMUM_COLLATERAL_RATIO } from '$lib/services/protocol/apiClient';
   import ProtocolStats from '$lib/components/dashboard/ProtocolStats.svelte';
 
-  // Form variables
   let icpAmount = 1;
   let icusdAmount = 5;
   let errorMessage = '';
   let successMessage = '';
   let actionInProgress = false;
+  let showDevInput = false;
 
-  // Price tracking variables
   let isPriceLoading = true;
-  let animatedPrice = tweened(0, {
-    duration: 600,
-    easing: cubicOut
-  });
+  let animatedPrice = tweened(0, { duration: 600, easing: cubicOut });
   let previousPrice = 0;
   let priceRefreshInterval: ReturnType<typeof setInterval>;
-  let lastPriceUpdateTime = '';
   let priceUpdateError = false;
-  let priceRefreshCount = 0;
 
-  // Reactive data from centralized store
   $: icpPrice = $protocolStatus?.lastIcpRate || 0;
-  $: isLoadingStatus = $isLoadingProtocol;
-
-  // Price calculations
   $: collateralValue = icpAmount * icpPrice;
   $: collateralRatio = collateralValue > 0 ? collateralValue / icusdAmount : 0;
   $: isValidCollateralRatio = collateralRatio >= MINIMUM_COLLATERAL_RATIO;
 
-  // Borrowing fee calculations
-  const borrowingFee = 0.005; // 0.5% borrowing fee
+  const borrowingFee = 0.005;
   $: calculatedBorrowFee = icusdAmount * borrowingFee;
   $: calculatedIcusdAmount = icusdAmount - calculatedBorrowFee;
   $: calculatedCollateralRatio = icpAmount > 0 && icusdAmount >= 0.001 
-    ? ((icpAmount * icpPrice) / icusdAmount) * 100 
-    : icpAmount > 0 ? Infinity : 0;
-
-  // Add a formatted display version that caps extremely large values
+    ? ((icpAmount * icpPrice) / icusdAmount) * 100 : icpAmount > 0 ? Infinity : 0;
   $: formattedCollateralRatio = calculatedCollateralRatio === Infinity 
-    ? '∞' 
-    : calculatedCollateralRatio > 1000000 
-      ? '>1,000,000' 
-      : formatNumber(calculatedCollateralRatio);
+    ? '∞' : calculatedCollateralRatio > 1000000 ? '>1,000,000' : formatNumber(calculatedCollateralRatio);
 
-  // Price trend tracking
-  $: priceTrend = icpPrice > previousPrice 
-    ? 'up' : icpPrice < previousPrice 
-    ? 'down' : '';
-
-  // Update animated price whenever icpPrice changes
   $: if (icpPrice > 0) {
-    console.log('Price updated to:', icpPrice, 'Previous:', previousPrice);
-    if (previousPrice === 0) {
-      // First load, set without animation
-      animatedPrice.set(icpPrice, { duration: 0 });
-    } else {
-      // Normal update with animation
-      animatedPrice.set(icpPrice);
-    }
+    if (previousPrice === 0) { animatedPrice.set(icpPrice, { duration: 0 }); }
+    else { animatedPrice.set(icpPrice); }
   }
 
-  // Auto-load protocol data on mount
   onMount(() => {
-    console.log('🚀 Main page mounted - fetching protocol status...');
     loadProtocolData();
     refreshIcpPrice();
-    resetPriceRefreshTimer();
-    
-    return () => {
-      if (priceRefreshInterval) {
-        clearInterval(priceRefreshInterval);
-        console.log('Price refresh interval cleared on unmount');
-      }
-    };
-  });
-  
-  onDestroy(() => {
-    if (priceRefreshInterval) {
-      clearInterval(priceRefreshInterval);
-      console.log('Price refresh interval cleared on destroy');
-    }
+    priceRefreshInterval = setInterval(refreshIcpPrice, 30000);
+    return () => { if (priceRefreshInterval) clearInterval(priceRefreshInterval); };
   });
 
+  onDestroy(() => { if (priceRefreshInterval) clearInterval(priceRefreshInterval); });
+
   async function loadProtocolData() {
+    try { await appDataStore.fetchProtocolStatus(); }
+    catch (error) { console.error('Error loading protocol data:', error); errorMessage = 'Failed to load protocol data'; }
+  }
+
+  async function refreshIcpPrice() {
     try {
-      await appDataStore.fetchProtocolStatus();
-    } catch (error) {
-      console.error('Error loading protocol data:', error);
-      errorMessage = 'Failed to load protocol data';
-    }
+      isPriceLoading = true; priceUpdateError = false;
+      if (icpPrice > 0) previousPrice = icpPrice;
+      await appDataStore.fetchProtocolStatus(true);
+    } catch (error) { console.error('Failed to refresh ICP price:', error); priceUpdateError = true; }
+    finally { isPriceLoading = false; }
   }
 
   async function createVault() {
-    if (!$isConnected) {
-      errorMessage = 'Please connect your wallet first';
-      return;
-    }
-
-    if (icpAmount <= 0) {
-      errorMessage = 'Please enter a valid ICP amount';
-      return;
-    }
-
-    if (icusdAmount <= 0) {
-      errorMessage = 'Please enter a valid icUSD amount to borrow';
-      return;
-    }
-
-    if (!isValidCollateralRatio) {
-      errorMessage = 'Collateral ratio must be at least 130%';
-      return;
-    }
-
-    actionInProgress = true;
-    errorMessage = '';
-    successMessage = '';
-
+    if (!$isConnected) { errorMessage = 'Please connect your wallet first'; return; }
+    if (icpAmount <= 0) { errorMessage = 'Please enter a valid ICP amount'; return; }
+    if (icusdAmount <= 0) { errorMessage = 'Please enter a valid icUSD amount to borrow'; return; }
+    if (!isValidCollateralRatio) { errorMessage = 'Collateral ratio must be at least 130%'; return; }
+    actionInProgress = true; errorMessage = ''; successMessage = '';
     try {
       const openResult = await protocolService.openVault(icpAmount);
-
-      if (!openResult.success) {
-        errorMessage = openResult.error || 'Failed to open vault';
-        return;
-      }
-
-      const borrowResult = await protocolService.borrowFromVault(
-        openResult.vaultId!,
-        icusdAmount
-      );
-
+      if (!openResult.success) { errorMessage = openResult.error || 'Failed to open vault'; return; }
+      const borrowResult = await protocolService.borrowFromVault(openResult.vaultId!, icusdAmount);
       if (borrowResult.success) {
         successMessage = `Successfully created vault #${openResult.vaultId} and borrowed ${icusdAmount} icUSD!`;
-        
-        // Refresh all data after successful operation
-        if ($principal) {
-          await appDataStore.refreshAll($principal);
-        }
-        
-        // Reset form
-        icpAmount = 1;
-        icusdAmount = 5;
-      } else {
-        errorMessage = borrowResult.error || 'Failed to borrow from vault';
-      }
+        if ($principal) await appDataStore.refreshAll($principal);
+        icpAmount = 1; icusdAmount = 5;
+      } else { errorMessage = borrowResult.error || 'Failed to borrow from vault'; }
     } catch (error) {
       console.error('Error creating vault:', error);
       errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-    } finally {
-      actionInProgress = false;
-    }
-  }
-
-  // More reliable fetch implementation
-  async function refreshIcpPrice() {
-    try {
-      console.log('Fetching fresh ICP price...');
-      isPriceLoading = true;
-      priceUpdateError = false;
-      
-      // Store previous price for comparison
-      if (icpPrice > 0) {
-        previousPrice = icpPrice;
-      }
-      
-      // Get price from centralized store
-      const protocolStatus = await appDataStore.fetchProtocolStatus(true);
-      const newPrice = protocolStatus?.lastIcpRate || 0;
-      console.log(`Price received: ${newPrice}, previous: ${previousPrice}`);
-      
-      if (newPrice > 0) {
-        priceRefreshCount++;
-        lastPriceUpdateTime = new Date().toLocaleTimeString();
-      } else {
-        console.warn('Received invalid price (0 or less)');
-        priceUpdateError = true;
-      }
-    } catch (error) {
-      console.error('Failed to refresh ICP price:', error);
-      priceUpdateError = true;
-    } finally {
-      isPriceLoading = false;
-    }
-  }
-  
-  // Clean up old timers and establish new refresh cycle
-  function resetPriceRefreshTimer() {
-    // Clear any existing interval
-    if (priceRefreshInterval) {
-      clearInterval(priceRefreshInterval);
-    }
-    
-    // Create a new interval
-    priceRefreshInterval = setInterval(refreshIcpPrice, 30000);
-    console.log('Price refresh interval set: refresh every 30s');
+    } finally { actionInProgress = false; }
   }
 </script>
 
-<svelte:head>
-  <title>RUMI Protocol - Borrow icUSD</title>
-</svelte:head>
+<svelte:head><title>RUMI Protocol - Borrow icUSD</title></svelte:head>
 
-<div class="container mx-auto px-4 max-w-6xl">
-  <section class="mb-12">
-    <div class="text-center mb-10">
-      <h1 class="page-title text-center mb-4">
-        Borrow icUSD with your ICP
-      </h1>
-      <p class="text-lg max-w-2xl mx-auto" style="color: var(--rumi-text-secondary)">
-        Create a vault, deposit ICP as collateral, and borrow the icUSD stablecoin
-      </p>
-    </div>
+<div class="page-container">
+  <h1 class="page-title">Borrow icUSD with your ICP</h1>
 
-    <ProtocolStats />
-  </section>
+  <div class="page-layout">
+    <!-- LEFT: Action card (primary) -->
+    <div class="action-column">
+      <div class="action-card">
+        <!-- ICP Price inline -->
+        <div class="price-inline">
+          <span class="price-label">ICP Price</span>
+          <span class="price-value">
+            {#if icpPrice > 0}${$animatedPrice.toFixed(2)}{:else if isPriceLoading}…{:else}—{/if}
+          </span>
+          {#if priceUpdateError}<span class="price-error">stale</span>{/if}
+        </div>
 
-  <div class="mb-8 price-card">
-    <div class="flex justify-between items-center mb-4">
-      <h2 class="text-2xl font-bold" style="color: var(--rumi-purple-accent)">Current ICP Price</h2>
-      <div class="flex items-center gap-2">
-        <button 
-          class="p-1 bg-gray-800/50 rounded-full hover:bg-gray-800 transition-colors"
-          on:click={() => {
-            refreshIcpPrice();
-            resetPriceRefreshTimer();
-          }}
-          disabled={isPriceLoading}
-          title="Refresh price"
-          aria-label="Refresh ICP price"
-        >
-          <svg class="w-4 h-4 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-            <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        <div class="beta-badge">
+          <svg xmlns="http://www.w3.org/2000/svg" class="badge-icon" viewBox="0 0 20 20" fill="currentColor">
+            <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
           </svg>
-        </button>
-        {#if isPriceLoading}
-          <div class="w-4 h-4 border-2 border-green-400 border-t-transparent rounded-full animate-spin"></div>
-        {/if}
-      </div>
-    </div>
-    
-    {#if icpPrice > 0}
-      <div class="flex items-baseline gap-2">
-        <p class="text-3xl font-semibold tracking-tight">${$animatedPrice.toFixed(2)}</p>
-        
-        {#if priceTrend && previousPrice > 0}
-          <div class={`flex items-center text-sm ${priceTrend === 'up' ? 'text-green-400' : 'text-red-400'}`}>
-            {#if priceTrend === 'up'}
-              <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-                <path fill-rule="evenodd" d="M5.293 9.707a1 1 0 010-1.414l4-4a1 1 011.414 0l4 4a1 1 01-1.414 1.414L11 7.414V15a1 1 011-2 0V7.414L6.707 9.707a1 1 01-1.414 0z" clip-rule="evenodd"></path>
-              </svg>
-              <span>+${(icpPrice - previousPrice).toFixed(3)}</span>
-            {:else}
-              <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-                <path fill-rule="evenodd" d="M14.707 10.293a1 1 0 010 1.414l-4 4a1 1 01-1.414 0l-4-4a1 1 111.414-1.414L9 12.586V5a1 1 012 0v7.586l2.293-2.293a1 1 011.414 0z" clip-rule="evenodd"></path>
-              </svg>
-              <span>${(icpPrice - previousPrice).toFixed(3)}</span>
-            {/if}
-          </div>
-        {/if}
-      </div>
-      <div class="flex justify-between items-center text-xs text-gray-400 mt-1">
-        <span>Updated at {lastPriceUpdateTime} · Auto-refreshes every 30s</span>
-        {#if priceRefreshCount > 0}
-          <span class="text-green-400">Live</span>
-        {/if}
-      </div>
-    {:else if isPriceLoading}
-      <div class="flex items-center gap-2">
-        <div class="w-5 h-5 border-2 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
-        <span>Loading price...</span>
-      </div>
-    {:else}
-      <p class="text-xl text-yellow-500">Price unavailable</p>
-      {#if priceUpdateError}
-        <p class="text-sm text-red-400 mt-1">Failed to fetch latest price. Please try refreshing.</p>
-      {/if}
-    {/if}
-  </div>
+          <span>Beta — use at own risk</span>
+        </div>
 
-  <div class="mb-4 flex justify-center">
-    <div class="bg-yellow-900/30 border border-yellow-600/50 rounded-lg px-4 py-2 flex items-center gap-2">
-      <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-yellow-500" viewBox="0 0 20 20" fill="currentColor">
-        <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
-      </svg>
-      <span class="text-yellow-200 text-sm">This app is in beta — please be aware of the risks</span>
-    </div>
-  </div>
-
-  <section class="mb-12">
-    <div class="glass-card max-w-2xl mx-auto">
-      <h2 class="text-2xl font-semibold mb-6" style="color: var(--rumi-purple-accent)">Create a New Vault</h2>
-
-      {#if $developerAccess}
-        <!-- Original vault creation form only shown to developers -->
-        <div class="space-y-6">
-          <div>
-            <label for="icp-amount" class="block text-sm font-medium text-gray-300 mb-1">
-              ICP Collateral Amount
-            </label>
-            <div class="relative">
-              <input
-                id="icp-amount"
-                type="number"
-                bind:value={icpAmount}
-                min="0"
-                step="0.01"
-                class="w-full bg-gray-800/50 border border-gray-700 rounded-lg px-4 py-3 text-white"
-                placeholder="0.00"
-                disabled={actionInProgress}
-              />
-              <div class="absolute inset-y-0 right-0 flex items-center pr-4 pointer-events-none">
-                <span class="text-gray-400">ICP</span>
+        {#if $developerAccess}
+          <div class="form-stack">
+            <div class="form-field">
+              <label for="icp-amount" class="form-label">ICP Collateral</label>
+              <div class="input-wrap">
+                <input id="icp-amount" type="number" bind:value={icpAmount} min="0" step="0.01"
+                  class="icp-input form-input" placeholder="0.00" disabled={actionInProgress} />
+                <span class="input-suffix">ICP</span>
               </div>
-            </div>
-            {#if icpAmount > 0}
-              <p class="text-sm text-gray-400 mt-1">Value: ≈ ${formatNumber(icpAmount * icpPrice)}</p>
-            {/if}
-          </div>
-
-          <div>
-            <label for="icusd-amount" class="block text-sm font-medium text-gray-300 mb-1">
-              icUSD Amount to Borrow
-            </label>
-            <div class="relative">
-              <input
-                id="icusd-amount"
-                type="number"
-                bind:value={icusdAmount}
-                min="0"
-                step="0.01"
-                class="w-full bg-gray-800/50 border border-gray-700 rounded-lg px-4 py-3 text-white"
-                placeholder="0.00"
-                disabled={actionInProgress}
-              />
-              <div class="absolute inset-y-0 right-0 flex items-center pr-4 pointer-events-none">
-                <span class="text-gray-400">icUSD</span>
-              </div>
-            </div>
-            {#if icusdAmount > 0}
-              <div class="flex justify-between text-sm text-gray-400 mt-1">
-                <span>Borrowing Fee ({(borrowingFee * 100).toFixed(2)}%):</span>
-                <span>{formatNumber(calculatedBorrowFee)} icUSD</span>
-              </div>
-              <div class="flex justify-between text-sm text-gray-400">
-                <span>You will receive:</span>
-                <span>{formatNumber(calculatedIcusdAmount)} icUSD</span>
-              </div>
-            {/if}
-          </div>
-
-          {#if icpAmount > 0 && icusdAmount > 0}
-            <div class="p-3 bg-gray-800/70 rounded-lg">
-              <div class="flex justify-between text-sm mb-1">
-                <span class="text-gray-300">Collateral Ratio:</span>
-                <span class:text-red-500={!isValidCollateralRatio} class:text-green-500={isValidCollateralRatio}>
-                  {formattedCollateralRatio}%
-                </span>
-              </div>
-
-              <div class="w-full h-2 bg-gray-700 rounded-full overflow-hidden">
-                <div 
-                  class="h-full rounded-full" 
-                  class:bg-red-500={!isValidCollateralRatio}
-                  class:bg-green-500={isValidCollateralRatio}
-                  style="width: {Math.min(calculatedCollateralRatio, 300)}%"
-                ></div>
-              </div>
-
-              <div class="text-xs mt-1 text-gray-400">
-                {#if isValidCollateralRatio}
-                  Safe! A higher collateral ratio means lower liquidation risk.
-                {:else}
-                  Warning: Collateral ratio too low. Minimum required is 130%.
-                {/if}
-              </div>
-            </div>
-          {/if}
-
-          {#if errorMessage}
-            <div class="p-3 bg-red-900/30 border border-red-800 rounded-lg text-red-200 text-sm">
-              {errorMessage}
-            </div>
-          {/if}
-
-          {#if successMessage}
-            <div class="p-3 bg-green-900/30 border border-green-800 rounded-lg text-green-200 text-sm">
-              {successMessage}
-            </div>
-          {/if}
-
-          <div>
-            <button
-              class="w-full py-3 px-6 btn-primary rounded-lg text-white font-medium transition-colors"
-              on:click={createVault}
-              disabled={actionInProgress || !$isConnected}
-            >
-              {#if !$isConnected}
-                Connect Wallet to Continue
-              {:else if actionInProgress}
-                Creating Vault...
-              {:else}
-                Create Vault & Borrow icUSD
+              {#if icpAmount > 0}
+                <p class="form-hint">≈ ${formatNumber(icpAmount * icpPrice)}</p>
               {/if}
-            </button>
-          </div>
-        </div>
-      {:else}
-        <!-- Developer mode access required message -->
-        <div class="p-6 bg-gray-800/50 rounded-lg">
-          <div class="flex flex-col items-center justify-center text-center">
-            <div class="w-12 h-12 rounded-full bg-purple-800/50 flex items-center justify-center mb-4">
-              <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-              </svg>
             </div>
-            <h3 class="text-xl font-semibold mb-3">Developer Access Required</h3>
-            <p class="text-gray-300 mb-4">
-              Vault creation is currently in developer mode and requires special access.
-            </p>
-            <button 
-              class="px-4 py-2 btn-primary rounded transition-colors"
-              on:click={() => showDevInput = true}
-            >
-              Enable Developer Mode
+
+            <div class="form-field">
+              <label for="icusd-amount" class="form-label">icUSD to Borrow</label>
+              <div class="input-wrap">
+                <input id="icusd-amount" type="number" bind:value={icusdAmount} min="0" step="0.01"
+                  class="icp-input form-input" placeholder="0.00" disabled={actionInProgress} />
+                <span class="input-suffix">icUSD</span>
+              </div>
+              {#if icusdAmount > 0}
+                <div class="fee-row"><span>Fee ({(borrowingFee * 100).toFixed(1)}%)</span><span>{formatNumber(calculatedBorrowFee)} icUSD</span></div>
+                <div class="fee-row"><span>You receive</span><span>{formatNumber(calculatedIcusdAmount)} icUSD</span></div>
+              {/if}
+            </div>
+
+            {#if icpAmount > 0 && icusdAmount > 0}
+              <div class="ratio-bar">
+                <div class="ratio-header">
+                  <span>Collateral Ratio</span>
+                  <span class:ratio-safe={isValidCollateralRatio} class:ratio-danger={!isValidCollateralRatio}>
+                    {formattedCollateralRatio}%
+                  </span>
+                </div>
+                <div class="ratio-track">
+                  <div class="ratio-fill" class:ratio-safe={isValidCollateralRatio} class:ratio-danger={!isValidCollateralRatio}
+                    style="width:{Math.min(calculatedCollateralRatio / 3, 100)}%"></div>
+                </div>
+                <p class="form-hint">
+                  {isValidCollateralRatio ? 'Healthy. Higher ratio = lower liquidation risk.' : 'Below 130% minimum.'}
+                </p>
+              </div>
+            {/if}
+
+            {#if errorMessage}<div class="msg-error">{errorMessage}</div>{/if}
+            {#if successMessage}<div class="msg-success">{successMessage}</div>{/if}
+
+            <button class="btn-primary cta-button" on:click={createVault} disabled={actionInProgress || !$isConnected}>
+              {#if !$isConnected}Connect Wallet to Continue
+              {:else if actionInProgress}Creating Vault…
+              {:else}Create Vault & Borrow icUSD{/if}
             </button>
           </div>
-        </div>
-      {/if}
-    </div>
-  </section>
-
-  <section class="mb-16">
-    <div class="max-w-4xl mx-auto">
-      <h2 class="text-2xl font-semibold mb-6 text-center" style="color: var(--rumi-purple-accent)">How It Works</h2>
-
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div class="glass-card h-full">
-          <div class="text-3xl font-bold mb-2" style="color: var(--rumi-text-muted)">1</div>
-          <h3 class="text-lg font-medium mb-2">Deposit Collateral</h3>
-          <p class="text-gray-300">Deposit your ICP tokens as collateral to secure your position.</p>
-        </div>
-
-        <div class="glass-card h-full">
-          <div class="text-3xl font-bold mb-2" style="color: var(--rumi-text-muted)">2</div>
-          <h3 class="text-lg font-medium mb-2">Borrow icUSD</h3>
-          <p class="text-gray-300">Borrow icUSD stablecoin against your collateral at a minimum ratio of 130%.</p>
-        </div>
-
-        <div class="glass-card h-full">
-          <div class="text-3xl font-bold mb-2" style="color: var(--rumi-text-muted)">3</div>
-          <h3 class="text-lg font-medium mb-2">Manage Your Vault</h3>
-          <p class="text-gray-300">Add more collateral, borrow more, or repay your icUSD to maintain a healthy position.</p>
-        </div>
+        {:else}
+          <div class="dev-gate">
+            <p class="dev-gate-text">Vault creation requires developer access during beta.</p>
+            <button class="btn-primary" on:click={() => showDevInput = true}>Enable Developer Mode</button>
+          </div>
+        {/if}
       </div>
     </div>
-  </section>
+
+    <!-- RIGHT: Protocol context (secondary) -->
+    <div class="context-column">
+      <ProtocolStats />
+    </div>
+  </div>
 </div>
 
-
-
 <style>
-  .glass-card {
+  .page-container { max-width: 1100px; margin: 0 auto; }
+  .page-layout { display: grid; grid-template-columns: 1fr 280px; gap: 1.5rem; align-items: start; }
+
+  /* Action card — primary surface */
+  .action-column { min-width: 0; }
+  .action-card {
     background: var(--rumi-bg-surface1);
     border: 1px solid var(--rumi-border);
     border-radius: 0.75rem;
     padding: 1.5rem;
   }
 
-  input::-webkit-outer-spin-button,
-  input::-webkit-inner-spin-button {
-    -webkit-appearance: none;
-    margin: 0;
-  }
+  /* Context column — subordinate */
+  .context-column { position: sticky; top: 5rem; }
 
-  input[type=number] {
-    -moz-appearance: textfield;
-    appearance: textfield;
+  /* ICP price inline */
+  .price-inline { display: flex; align-items: baseline; gap: 0.5rem; margin-bottom: 1.25rem; }
+  .price-label { font-size: 0.8125rem; color: var(--rumi-text-muted); }
+  .price-value { font-family: 'Inter', sans-serif; font-size: 0.875rem; font-weight: 600; color: var(--rumi-text-secondary); font-variant-numeric: tabular-nums; }
+  .price-error { font-size: 0.6875rem; color: var(--rumi-caution); }
+
+  /* Beta badge — minimal */
+  .beta-badge { display: inline-flex; align-items: center; gap: 0.375rem; font-size: 0.75rem; color: var(--rumi-caution); margin-bottom: 1.5rem; opacity: 0.8; }
+  .badge-icon { width: 0.875rem; height: 0.875rem; }
+
+  /* Form */
+  .form-stack { display: flex; flex-direction: column; gap: 1.25rem; }
+  .form-field { display: flex; flex-direction: column; gap: 0.25rem; }
+  .form-label { font-size: 0.8125rem; font-weight: 500; color: var(--rumi-text-secondary); }
+  .input-wrap { position: relative; }
+  .form-input { width: 100%; padding-right: 3.5rem; }
+  .input-suffix { position: absolute; right: 1rem; top: 50%; transform: translateY(-50%); font-size: 0.8125rem; color: var(--rumi-text-muted); pointer-events: none; }
+  .form-hint { font-size: 0.75rem; color: var(--rumi-text-muted); margin-top: 0.125rem; }
+  .fee-row { display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--rumi-text-muted); }
+
+  /* Collateral ratio */
+  .ratio-bar { padding: 0.75rem; background: var(--rumi-bg-surface2); border-radius: 0.5rem; }
+  .ratio-header { display: flex; justify-content: space-between; font-size: 0.8125rem; color: var(--rumi-text-secondary); margin-bottom: 0.375rem; }
+  .ratio-track { height: 4px; background: var(--rumi-bg-surface3); border-radius: 2px; overflow: hidden; }
+  .ratio-fill { height: 100%; border-radius: 2px; transition: width 0.3s ease; }
+  .ratio-safe { color: var(--rumi-safe); background: var(--rumi-safe); }
+  .ratio-danger { color: var(--rumi-danger); background: var(--rumi-danger); }
+
+  /* Messages */
+  .msg-error { padding: 0.625rem; background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.2); border-radius: 0.5rem; font-size: 0.8125rem; color: #fca5a5; }
+  .msg-success { padding: 0.625rem; background: rgba(16,185,129,0.1); border: 1px solid rgba(16,185,129,0.2); border-radius: 0.5rem; font-size: 0.8125rem; color: #6ee7b7; }
+
+  /* CTA */
+  .cta-button { width: 100%; padding: 0.75rem; }
+
+  /* Dev gate */
+  .dev-gate { text-align: center; padding: 2rem 1rem; }
+  .dev-gate-text { font-size: 0.875rem; color: var(--rumi-text-secondary); margin-bottom: 1rem; }
+
+  /* Number input cleanup */
+  input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  input[type=number] { -moz-appearance: textfield; appearance: textfield; }
+
+  @media (max-width: 768px) {
+    .page-layout { grid-template-columns: 1fr; }
+    .context-column { position: static; }
   }
 </style>

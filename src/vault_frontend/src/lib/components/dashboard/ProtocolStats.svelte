@@ -13,17 +13,12 @@
   };
   
   let isLoading = true;
-  let formattedTimestamp = '';
   let refreshInterval: NodeJS.Timeout;
   
-  // Function to fetch protocol status including live price
   async function fetchProtocolStatus() {
     isLoading = true;
     try {
-      // Get protocol status with real price from logs
       const status = await protocolService.getProtocolStatus();
-      console.log('Protocol status with live price:', status);
-
       protocolStatus = {
         mode: status.mode || 'GeneralAvailability',
         totalIcpMargin: Number(status.totalIcpMargin || 0),
@@ -32,51 +27,29 @@
         lastIcpTimestamp: Number(status.lastIcpTimestamp || 0),
         totalCollateralRatio: Number(status.totalCollateralRatio || 0)
       };
-
-      // For local testing, if no valid price is available, use mock price
       if (protocolStatus.lastIcpRate === 0) {
-        console.log('No ICP price available, using mock price for local testing');
         protocolStatus.lastIcpRate = 10.0;
-        protocolStatus.lastIcpTimestamp = Date.now() * 1000000; // Convert to nanoseconds
+        protocolStatus.lastIcpTimestamp = Date.now() * 1000000;
       }
-
-      updateTimestamp();
     } catch (error) {
       console.error('Error fetching protocol status:', error);
-      // Set default values for local testing
       protocolStatus = {
         mode: 'GeneralAvailability',
         totalIcpMargin: 0,
         totalIcusdBorrowed: 0,
-        lastIcpRate: 10.0, // Mock price
+        lastIcpRate: 10.0,
         lastIcpTimestamp: Date.now() * 1000000,
         totalCollateralRatio: 0
       };
-      updateTimestamp();
     } finally {
       isLoading = false;
     }
   }
   
-  function updateTimestamp() {
-    if (protocolStatus.lastIcpTimestamp) {
-      const date = new Date(protocolStatus.lastIcpTimestamp);
-      formattedTimestamp = date.toLocaleString();
-    } else {
-      formattedTimestamp = 'Unknown';
-    }
-  }
-  
   onMount(() => {
-    // Initial fetch
     fetchProtocolStatus();
-    
-    // Refresh every 15 seconds to get the latest price
     refreshInterval = setInterval(fetchProtocolStatus, 15000);
-    
-    return () => {
-      if (refreshInterval) clearInterval(refreshInterval);
-    };
+    return () => { if (refreshInterval) clearInterval(refreshInterval); };
   });
   
   onDestroy(() => {
@@ -86,78 +59,64 @@
   $: icpValueInUsd = protocolStatus.totalIcpMargin * protocolStatus.lastIcpRate;
   $: collateralPercent = protocolStatus.totalIcusdBorrowed > 0
     ? protocolStatus.totalCollateralRatio * 100
-    : protocolStatus.totalIcpMargin > 0 
-      ? Infinity 
-      : 0;
-
-  // Create a formatted version for display
+    : protocolStatus.totalIcpMargin > 0 ? Infinity : 0;
   $: formattedCollateralPercent = collateralPercent === Infinity 
-    ? '∞'
-    : collateralPercent > 1000000
-      ? '>1,000,000'
-      : formatNumber(collateralPercent);
-
-  $: modeDisplay = {
-    'ReadOnly': 'Read Only',
-    'GeneralAvailability': 'General Availability',
-    'Recovery': 'Recovery Mode'
-  }[protocolStatus.mode] || 'Unknown Mode';
-  
-  $: modeColor = {
-    'ReadOnly': 'text-yellow-500',
-    'GeneralAvailability': 'text-green-500',
-    'Recovery': 'text-orange-500'
-  }[protocolStatus.mode] || 'text-gray-500';
+    ? '∞' : collateralPercent > 1000000 ? '>1M' : formatNumber(collateralPercent);
 </script>
 
-<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-  <div class="stat-card">
-    <div class="text-sm text-gray-400">Total Collateral (ICP)</div>
-    <div class="text-xl font-bold">{formatNumber(protocolStatus.totalIcpMargin)} ICP</div>
-    <div class="text-sm text-gray-400">≈ ${formatNumber(icpValueInUsd)}</div>
-  </div>
-  
-  <div class="stat-card">
-    <div class="text-sm text-gray-400">Total icUSD Borrowed</div>
-    <div class="text-xl font-bold">{formatNumber(protocolStatus.totalIcusdBorrowed)} icUSD</div>
-  </div>
-  
-  <div class="stat-card">
-    <div class="text-sm text-gray-400">Current ICP Price</div>
-    <div class="text-xl font-bold">
-      {#if isLoading}
-        <div class="animate-pulse bg-gray-700 h-6 w-24 rounded"></div>
-      {:else}
-        ${formatNumber(protocolStatus.lastIcpRate)}
-      {/if}
+<div class="protocol-stats">
+  <h3 class="stats-heading">Protocol</h3>
+  <div class="stats-stack">
+    <div class="stat-row">
+      <span class="stat-label">Total Collateral</span>
+      <span class="stat-value">{formatNumber(protocolStatus.totalIcpMargin)} ICP</span>
     </div>
-  </div>
-  
-  <div class="stat-card">
-    <div class="text-sm text-gray-400">Total Collateral Ratio</div>
-    <div class="text-xl font-bold">{formattedCollateralPercent}%</div>
+    <div class="stat-row">
+      <span class="stat-label">Total Borrowed</span>
+      <span class="stat-value">{formatNumber(protocolStatus.totalIcusdBorrowed)} icUSD</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Collateral Ratio</span>
+      <span class="stat-value">{formattedCollateralPercent}%</span>
+    </div>
   </div>
 </div>
 
 <style>
-  .stat-card {
+  .protocol-stats {
     background: var(--rumi-bg-surface1);
     border: 1px solid var(--rumi-border);
     border-radius: 0.75rem;
-    padding: 1rem;
-    transition: box-shadow 0.2s ease, border-color 0.2s ease;
-    box-shadow:
-      inset 0 1px 0 0 rgba(200, 210, 240, 0.03),
-      0 2px 8px -2px rgba(8, 11, 22, 0.6),
-      0 1px 3px -1px rgba(14, 18, 40, 0.4);
+    padding: 1.25rem;
   }
-
-  .stat-card:hover {
-    border-color: rgba(209, 118, 232, 0.08);
-    box-shadow:
-      inset 0 0 20px 0 rgba(209, 118, 232, 0.06),
-      inset 0 1px 0 0 rgba(200, 210, 240, 0.03),
-      0 2px 8px -2px rgba(8, 11, 22, 0.6),
-      0 1px 3px -1px rgba(14, 18, 40, 0.4);
+  .stats-heading {
+    font-family: 'Circular Std', 'Inter', sans-serif;
+    font-size: 0.6875rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--rumi-text-muted);
+    margin-bottom: 1rem;
+  }
+  .stats-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+  .stat-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+  }
+  .stat-label {
+    font-size: 0.8125rem;
+    color: var(--rumi-text-secondary);
+  }
+  .stat-value {
+    font-family: 'Inter', sans-serif;
+    font-size: 0.875rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--rumi-text-primary);
   }
 </style>
