@@ -97,7 +97,7 @@
 <div class="container mx-auto px-4 max-w-6xl">
   <section class="mb-12">
     <div class="text-center mb-10">
-      <h1 class="text-4xl font-bold mb-4 bg-clip-text text-transparent bg-gradient-to-r from-pink-400 to-purple-600">
+      <h1 class="text-4xl font-bold mb-4 page-title">
         Redeem ICP with icUSD
       </h1>
       <p class="text-xl text-gray-300 max-w-2xl mx-auto">
@@ -177,7 +177,7 @@
         
         <div>
           <button
-            class="w-full py-3 px-6 bg-gradient-to-r from-pink-500 to-purple-600 hover:from-pink-600 hover:to-purple-700 rounded-lg text-white font-medium transition-colors"
+            class="w-full py-3 px-6 btn-primary rounded-lg text-white font-medium transition-colors"
             on:click={redeemIcp}
             disabled={actionInProgress || !isConnected || icusdAmount <= 0 || icusdAmount > icusdBalance || isLoading}
           >

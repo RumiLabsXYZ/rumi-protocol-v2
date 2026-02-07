@@ -126,7 +126,7 @@
 
 <div class="container mx-auto px-4 max-w-6xl">
   <div class="mb-8">
-    <h1 class="text-4xl font-bold mb-4 bg-clip-text text-transparent bg-gradient-to-r from-pink-400 to-purple-600">
+    <h1 class="text-4xl font-bold mb-4 page-title">
       Treasury Management
     </h1>
     <p class="text-xl text-gray-300">
