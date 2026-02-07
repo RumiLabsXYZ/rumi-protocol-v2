@@ -37,7 +37,7 @@
     <a href="/liquidations" class="nav-link" class:active={currentPath === '/liquidations'}><span>Liquidate</span></a>
     <a href="/stability-pool" class="nav-link" class:active={currentPath === '/stability-pool'}><span>Stability</span></a>
     {#if isConnected && $permissionStore.isDeveloper}<a href="/treasury" class="nav-link" class:active={currentPath === '/treasury'}><span>Treasury</span></a>{/if}
-    <a href="/learn-more" class="nav-link" class:active={currentPath === '/learn-more'}><span>Learn</span></a>
+    <a href="/docs" class="nav-link" class:active={currentPath.startsWith('/docs')}><span>Docs</span></a>
   </nav>
   <div class="top-actions">
     <span class="beta-chip" title="This protocol is in beta. Use at your own risk.">Beta</span>

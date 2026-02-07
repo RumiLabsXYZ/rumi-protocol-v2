@@ -331,3 +331,35 @@ h1, h2, h3, h4, h5, h6 {
   -webkit-background-clip: text;
   background-clip: text;
 }
+
+
+/* ── Doc pages ── */
+.doc-page { max-width: 700px; margin: 0 auto; }
+.doc-title {
+  font-family: 'Circular Std', 'Inter', sans-serif;
+  font-size: 1.75rem; font-weight: 700;
+  color: var(--rumi-text-primary);
+  margin-bottom: 1.5rem;
+}
+.doc-intro {
+  font-size: 0.9375rem; color: var(--rumi-text-secondary);
+  line-height: 1.6; margin-bottom: 2rem;
+}
+.doc-section { margin-bottom: 2rem; }
+.doc-heading {
+  font-family: 'Circular Std', 'Inter', sans-serif;
+  font-size: 1.0625rem; font-weight: 600;
+  color: var(--rumi-text-primary);
+  margin-bottom: 0.5rem;
+}
+.doc-section p {
+  font-size: 0.875rem; color: var(--rumi-text-secondary);
+  line-height: 1.65; margin-bottom: 0.75rem;
+}
+.doc-section p:last-child { margin-bottom: 0; }
+.doc-link {
+  color: var(--rumi-action); text-decoration: none;
+  border-bottom: 1px solid rgba(52, 211, 153, 0.3);
+  transition: border-color 0.15s ease;
+}
+.doc-link:hover { border-color: var(--rumi-action); }
