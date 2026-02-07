@@ -234,12 +234,13 @@ These items were discussed but NOT yet implemented:
 
 ---
 
-## Git Branch Status (Updated Feb 5)
+## Git Branch Status (Updated Feb 7)
 
 | Branch | Status | Action |
 |--------|--------|--------|
 | `main` | ✅ Contains staging merge + LICENSE | Production branch |
-| `feature/ii-wallet-send-receive` | ✅ **Active** — deployed to mainnet | Merge to main when stable |
+| `feature/ui-updates` | ✅ **Active** — UI rebrand + page reworks | LOCAL ONLY — needs review before deploy |
+| `feature/ii-wallet-send-receive` | ✅ Deployed to mainnet | Merge to main when stable |
 | `staging` | ✅ Merged into main | Can delete |
 | `main-backup-feb4` | Backup of main before staging merge | Keep for safety |
 | `feature/liquidation-price-check` | Has 1 unmerged commit (price validation) | Merge separately |
@@ -361,52 +362,125 @@ get_icp_price : () -> (nat64) query
 
 ### ~~2. Plug Wallet Auto-Reconnect~~ ✅ RESOLVED
 
-### 3. Left Nav Active Highlight Doesn't Track Page
-**Problem**: The highlight/active indicator in the left sidebar navigation doesn't move when the user navigates to a different page
-**Status**: Being addressed in `feature/ui-updates` branch
+### ~~3. Left Nav Active Highlight Doesn't Track Page~~ ✅ RESOLVED
+**Fix**: Replaced manual `window.location` check with SvelteKit `$page` store
+**Branch**: `feature/ui-updates`
 
 ---
 
-## UI Rebrand (February 6, 2026)
+## UI Rebrand & Page Reworks (February 6–7, 2026)
 
-**Branch:** `feature/ui-updates`
+**Branch:** `feature/ui-updates` (local only — NOT deployed to production)
 
-**Goal:** Elevate the UI from template-feeling to a sleek, modern DeFi product ready for public launch.
+**Goal:** Elevate the UI from template-feeling to a sleek, modern DeFi product. Make it feel like crypto people built it.
 
 ### Design System — `/docs/DESIGN_SYSTEM.md`
 A formal design constitution was established and governs all UI decisions:
 - **Three-color system**: indigo base (#080b16), purple/pink identity (#d176e8), emerald action (#34d399)
-- **Typography**: Circular Std headings, Inter body
+- **Typography**: Circular Std headings, Inter body/numbers
 - **Primary Brand** (transactional pages): no gradients, serious infrastructure aesthetic
 - **Secondary Brand** (marketing/educational): gradients allowed
 - **Card hover**: purple inner glow on interactive card grids only
 - **Button text**: dark on emerald fills
+- **Risk colors**: amber (caution), red (danger). No green "safe" states.
+- **Noise grain**: SVG feTurbulence at 3% opacity over body — felt, not seen
+- **Depth cues**: Inset top-edge highlight + purple-tinted shadows on all cards
 
-### Completed Work
+### Global CSS / Design Foundation
 | Change | Details |
 |--------|---------|
-| **Header redesign** | CSS Grid layout, viewport-centered nav, green underline active state |
-| **Action-first layout** | Borrow + Liquidate pages: left = action card, right = protocol stats |
-| **Stability Pool rewrite** | Stripped pink gradients, now matches Primary Brand |
-| **Learn → Docs** | 5 sub-pages sourced from actual Rust code (not assumptions) |
-| **Beta chip** | Single amber pill in header, left of social icons, tooltip on hover |
-| **Color calibration** | Emerald (#34d399) for action, teal (#2DD4BF) for subtle accents |
-| **Typography scale** | Logo 2rem, nav 0.9375rem, page titles 2rem bold |
+| **Background surfaces** | Indigo/blue-purple family: #080b16 (page), #0e1222 (surface1), #141a2e (surface2), #1a2139 (surface3) |
+| **Noise grain** | `body::after` SVG fractalNoise at 3% opacity, fixed, pointer-events none |
+| **Depth cues** | Inset highlight + 2-layer shadow on `.glass-panel`, `.glass-card`, `.icp-card`, `.price-card` |
+| **Purple inner-glow hover** | Cards get faint purple glow on hover via inset box-shadow |
+| **Ambient glow** | `body::before` radial gradient, indigo-tinted, centered top |
+| **Color calibration** | Emerald (#34d399) for action, teal (#2DD4BF) for subtle accents, #d176e8 for identity/orientation |
+| **Typography scale** | Logo 2rem, nav 0.9375rem, page titles 2rem bold purple-accent, key numbers Inter 700 tabular |
+| **Debug toggle** | Debug panels hidden by default, Ctrl+D to toggle (dev mode only) |
 
-### Docs Section (`/docs` route)
-Replaced the old "Learn" page with structured documentation:
-- **Before You Borrow** — fees, minimums, closing process
-- **Liquidation Mechanics** — triggers, 10% bonus, worked example, protocol modes
-- **What Can Go Wrong** — price volatility, oracle failure, smart contract risk, cascades
-- **Protocol Parameters** — all constants from `lib.rs` / `state.rs`
-- **Beta Disclaimer** — no warranty, no audit, canister control, not financial advice
+### Header Redesign
+- CSS Grid layout with true viewport-centered nav
+- Green underline active state on nav items
+- Single amber "Beta" chip, left of social icons, tooltip on hover
 
-**Important correction**: Old Learn page said 130% MCR. Actual code is 133% (`dec!(1.33)`).
+### Page Reworks
+
+#### Borrow (Home) + Stability Pool
+- **Action-first layout**: left column = action card, right column = protocol stats
+- Stability Pool page stripped of pink gradients, matches Primary Brand
+- Step numbers use muted text (not teal), headlines solid off-white
+
+#### Learn → Docs
+Replaced old "Learn" page with structured documentation (5 sub-pages sourced from actual Rust code):
+- Before You Borrow, Liquidation Mechanics, What Can Go Wrong, Protocol Parameters, Beta Disclaimer
+- **Important correction**: Old Learn page said 130% MCR. Actual code is 133% (`dec!(1.33)`).
+
+#### Redeem + Treasury
+- Removed old pink-to-purple gradient headlines → `.page-title` class
+- Removed gradient buttons → `.btn-primary` class
+
+#### Vaults — Vault Management Spec Compliance (Feb 7)
+Dense, expandable inline vault list with full risk-forward UX:
+
+| Feature | Implementation |
+|---------|---------------|
+| **CR-ascending sort** | Riskiest vaults always at top, vault ID tiebreaker |
+| **Single active intent** | Add/Borrow/Repay mutually exclusive — others clear when one is populated |
+| **Add Collateral Max** | Shows wallet ICP balance, neutral color, inline clickable text |
+| **Borrow Max** | Amount that results in CR = 150% |
+| **Repay Max** | min(wallet icUSD balance, outstanding debt) |
+| **Max styling** | All three identical: `--rumi-text-muted`, no action color, subtle hover underline |
+| **Input clamping** | All inputs clamp to valid range on blur (doesn't fight mid-typing) |
+| **Projected CR** | Shown inline next to action button, live color: neutral ≥150%, amber 140-149%, red <140% |
+| **Action disable** | Buttons disabled when projected CR is below minimum |
+| **Risk left-border** | Danger vaults get 2px red left edge, warning vaults get amber |
+| **Stable ordering** | Expanding/collapsing a vault does NOT reorder the list |
+| **No sort controls** | No dropdowns, toggles, or configuration for MVP |
+
+#### Liquidations — Profit-Forward Table Rewrite (Feb 7)
+Complete structural rework from dashboard-style cards to dense exchange-like table:
+
+| Change | Details |
+|--------|---------|
+| **Layout** | Removed right-side ProtocolStats panel. Full-width single column (900px max) |
+| **ICP price** | Inline pill next to page title (not a detached card) |
+| **Summary** | Compact: "3 liquidatable vaults · Refresh" |
+| **Table semantics** | Real `<table>`, tight padding, minimal corners, order-book density |
+| **Column order** | # → **Profit** → CR → Debt → Collateral → Action |
+| **Profit emphasis** | 0.875rem, weight 600, anchors each row. USD sub-value in muted text (NOT green) |
+| **CR colors** | Red <130%, amber 130-150%, neutral ≥150%. Applied to text only, not row |
+| **Action de-escalation** | "Liquidate" is a ghost button (12% red bg, 25% border). Not loud. |
+| **Partial liquidation** | Input + "Go" button revealed on row hover only |
+| **Row hover** | Subtle 5% indigo background wash |
+| **No green anywhere** | Profit is neutral white. No "success" color on this page. |
+| **Sorted by CR ascending** | Most profitable / riskiest vaults at top |
+
+### Git Log (feature/ui-updates, key commits)
+```
+187cfde fix: remove old pink gradients from Redeem and Treasury pages
+41f7687 feat: complete vault management spec compliance
+1dfaa33 feat: rework Liquidations page — profit-forward table layout
+4deb63a feat: vault list CR-ascending sort + spec compliance fixes
+f1f9662 feat: VaultCard rewrite + vault list cleanup + doc archive purge
+760bf98 docs: add AVAI security review to beta disclaimer and risks page
+f19b6a9 fix: remove gradient from Docs title — Primary Brand
+4467e2c feat: replace Learn page with Docs section
+82febf4 feat: single beta chip in header, redesign Learn + Stability pages
+58cf25b feat: lock emerald (#34d399) as action color, teal (#2DD4BF) as subtle accent
+3594a48 feat: action-first layout for Borrow and Liquidate pages
+b25584e feat: top nav rail + purple inner-glow card hover
+79674cb feat: shift background family from red-purple to indigo/blue-purple
+407ec3f fix: hide debug panels by default, toggle with Ctrl+D
+aceda3d feat: add noise grain + depth cues for living surface feel
+a76e90d feat: implement design constitution compliance
+1c7ceb4 fix: bring purple back into design system
+6e1f7c6 feat: UI rebrand - dark precision theme with teal accent
+```
 
 ### Deferred
-- Vault close navigation bug (bigger task)
+- Vault close navigation bug (bigger task, saved for last)
 - ckToken support in Send modal (post-rebrand)
-- Vault list/detail view polish
+- Deploying `feature/ui-updates` to production (needs review first)
 
 ---
 
@@ -502,4 +576,4 @@ dfx deploy vault_frontend --network ic
 
 ---
 
-*Last updated: February 6, 2026*
+*Last updated: February 7, 2026*
