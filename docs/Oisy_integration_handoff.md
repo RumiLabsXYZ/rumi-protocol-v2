@@ -1,6 +1,6 @@
 Oisy_integration_handoff
 
-Last updated: January 30, 2026
+Last updated: February 6, 2026
 Repo: /Users/robertripley/coding/rumi-protocol-v2
 Primary goal: Make Rumi vault operations work for Oisy wallet users by avoiding ICP-ledger ICRC-2 approve/transfer_from flows that Oisy can’t execute.
 
@@ -171,6 +171,42 @@ Outcome D: Other error
   - consent/trusted-origin config
   - ledger implementation mismatch
   - Oisy-specific limitation that requires a push-style design anyway
+
+--------------------------------------------------------------------------------
+
+⚠️ KEY INSIGHT: ICRC-21 consent messages may be the root cause (February 6, 2026)
+
+Research turned up that other ICP developers are hitting the same ICRC-2
+approve failures with Oisy. The pattern is:
+
+1. Oisy enforces ICRC-21 consent messages before signing any transaction.
+2. Before Oisy will let a user approve an icrc2_approve call, it calls
+   icrc21_canister_call_consent_message on the TARGET CANISTER (the ledger
+   being called, not our backend).
+3. If the target canister doesn't implement ICRC-21, or returns an
+   unexpected response, Oisy refuses to sign.
+
+This means the failure may not be "Oisy can't do ICRC-2" — it may be
+"Oisy can't do ICRC-2 on canisters that don't implement ICRC-21."
+
+Canisters to check:
+• ICP ledger (ryjl3-tyaaa-aaaaa-aaaba-cai) — does it implement
+  icrc21_canister_call_consent_message? This is a DFINITY system canister,
+  so we can't change it. If it doesn't support ICRC-21, Oisy ICP ICRC-2
+  will NEVER work and push-deposit is the permanent solution.
+• icUSD ledger (t6bor-paaaa-aaaap-qrd5q-cai) — does OUR ledger implement
+  ICRC-21? If not, we could add it and potentially unblock Oisy for all
+  icUSD operations (repay, add margin via icUSD).
+
+Action items:
+1. Query both ledgers for icrc21_canister_call_consent_message support
+   (try calling it and see what happens).
+2. Check if the ICP ledger's .did file includes ICRC-21 methods.
+3. If our icUSD ledger doesn't support ICRC-21, investigate adding it —
+   this could be the difference between needing push-deposit for everything
+   vs only needing it for ICP.
+4. Forum reference: forum.dfinity.org/t/oisy-wallet-icrc2-approve-failing-
+   because-of-something-related-to-icrc21-canister-call-consent-message/51621
 
 --------------------------------------------------------------------------------
 

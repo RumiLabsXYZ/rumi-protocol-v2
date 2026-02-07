@@ -292,8 +292,12 @@ rumi_stability_pool:   tmhzi-dqaaa-aaaap-qrd6q-cai
 
 ### Vault Operations
 - **Collateral**: ICP only for MVP (ckBTC, ckETH planned)
-- **Liquidation Ratio**: 150% (collateral must be ≥1.5x debt)
-- **Max LTV**: 66.67% (can borrow up to 2/3 of collateral value)
+- **Minimum Collateral Ratio**: 133% (`dec!(1.33)` in code)
+- **Recovery Mode**: Triggers when system-wide CR < 150% (liquidation threshold rises to 150%)
+- **Read-Only Mode**: Triggers when system-wide CR < 100% or oracle < $0.01
+- **Borrowing Fee**: 0.5% one-time (0% in Recovery mode)
+- **Liquidation Bonus**: 10%
+- **Price Oracle**: XRC canister, 60-second fetch interval
 
 ### Key Backend Functions (from .did file)
 ```candid
@@ -367,22 +371,42 @@ get_icp_price : () -> (nat64) query
 
 **Branch:** `feature/ui-updates`
 
-**Goal:** Elevate the UI from template-feeling to a sleek, modern DeFi product ready for public launch. Make it feel like crypto people built it.
+**Goal:** Elevate the UI from template-feeling to a sleek, modern DeFi product ready for public launch.
 
-### In Scope
-- Left nav active highlight fix
-- Font exploration (`circular-std-medium-500.ttf` in repo root)
-- Overall design rebrand: colors, typography, buttons, fields, spacing, vibe
-- Vault list/detail views — make sleeker
-- General cleanup of template-ish design patterns
+### Design System — `/docs/DESIGN_SYSTEM.md`
+A formal design constitution was established and governs all UI decisions:
+- **Three-color system**: indigo base (#080b16), purple/pink identity (#d176e8), emerald action (#34d399)
+- **Typography**: Circular Std headings, Inter body
+- **Primary Brand** (transactional pages): no gradients, serious infrastructure aesthetic
+- **Secondary Brand** (marketing/educational): gradients allowed
+- **Card hover**: purple inner glow on interactive card grids only
+- **Button text**: dark on emerald fills
+
+### Completed Work
+| Change | Details |
+|--------|---------|
+| **Header redesign** | CSS Grid layout, viewport-centered nav, green underline active state |
+| **Action-first layout** | Borrow + Liquidate pages: left = action card, right = protocol stats |
+| **Stability Pool rewrite** | Stripped pink gradients, now matches Primary Brand |
+| **Learn → Docs** | 5 sub-pages sourced from actual Rust code (not assumptions) |
+| **Beta chip** | Single amber pill in header, left of social icons, tooltip on hover |
+| **Color calibration** | Emerald (#34d399) for action, teal (#2DD4BF) for subtle accents |
+| **Typography scale** | Logo 2rem, nav 0.9375rem, page titles 2rem bold |
+
+### Docs Section (`/docs` route)
+Replaced the old "Learn" page with structured documentation:
+- **Before You Borrow** — fees, minimums, closing process
+- **Liquidation Mechanics** — triggers, 10% bonus, worked example, protocol modes
+- **What Can Go Wrong** — price volatility, oracle failure, smart contract risk, cascades
+- **Protocol Parameters** — all constants from `lib.rs` / `state.rs`
+- **Beta Disclaimer** — no warranty, no audit, canister control, not financial advice
+
+**Important correction**: Old Learn page said 130% MCR. Actual code is 133% (`dec!(1.33)`).
 
 ### Deferred
-- Vault close navigation bug (bigger task, saved for later)
+- Vault close navigation bug (bigger task)
 - ckToken support in Send modal (post-rebrand)
-
-### Testing Completed ✅
-- ICP and icUSD transfers with Internet Identity
-- `id.ai` portal authentication flow
+- Vault list/detail view polish
 
 ---
 
@@ -401,7 +425,7 @@ get_icp_price : () -> (nat64) query
 
 ### Frontend (Svelte + TypeScript)
 - **Build**: Vite
-- **Styling**: Tailwind CSS
+- **Styling**: Custom CSS with design system variables (see `/docs/DESIGN_SYSTEM.md`), Tailwind being phased out
 - **Wallet Libraries**: 
   - `@dfinity/auth-client` (II)
   - `window.ic.plug` (Plug)
@@ -469,7 +493,9 @@ dfx deploy vault_frontend --network ic
 
 | Document | Purpose |
 |----------|---------|
+| `/docs/Oisy_integration_handoff.md` | Oisy wallet integration details + ICRC-21 root cause analysis |
 | `/docs/archive/OISY_ICRC2_TEST_SESSION_HANDOFF.md` | Oisy icUSD test details |
+| `/docs/DESIGN_SYSTEM.md` | UI design constitution — colors, typography, component rules |
 | `/docs/OISY_IMPLEMENTATION_COMPLETE.md` | Original Oisy integration work |
 | `/ACKNOWLEDGMENTS.md` | Contributor credits |
 | `/LICENSE` | MIT License |
