@@ -12,6 +12,17 @@
   $: canViewVaults = isDevelopment || $developerAccess || $isConnected
     || ($permissionStore.initialized && $permissionStore.canViewVaults);
 
+  // Sort vaults by Collateral Ratio ascending (riskiest first)
+  // Tiebreaker: vault ID ascending for stable ordering
+  $: sortedVaults = [...$userVaults].sort((a, b) => {
+    const crA = a.borrowedIcusd > 0 && icpPrice > 0
+      ? (a.icpMargin * icpPrice) / a.borrowedIcusd : Infinity;
+    const crB = b.borrowedIcusd > 0 && icpPrice > 0
+      ? (b.icpMargin * icpPrice) / b.borrowedIcusd : Infinity;
+    if (crA !== crB) return crA - crB;
+    return a.vaultId - b.vaultId;
+  });
+
   // Auto-load on wallet connect
   $: if ($isConnected && $principal && !$isLoadingVaults) {
     loadUserVaults();
@@ -64,7 +75,7 @@
     </div>
   {:else}
     <div class="vault-list">
-      {#each $userVaults as vault (vault.vaultId)}
+      {#each sortedVaults as vault (vault.vaultId)}
         <VaultCard {vault} {icpPrice} on:updated={loadUserVaults} />
       {/each}
     </div>

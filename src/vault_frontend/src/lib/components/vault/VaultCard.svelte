@@ -98,6 +98,9 @@
     return getRiskLevel(ratio);
   }
 
+  // Whether projected CR is invalid (below minimum 150%) — disables action button
+  $: borrowCrInvalid = projectedCrBorrow !== null && projectedCrBorrow !== Infinity && projectedCrBorrow < MINT_MINIMUM;
+
   $: canWithdraw = vault.borrowedIcusd === 0 && vault.icpMargin > 0;
   $: canClose = vault.borrowedIcusd === 0;
 
@@ -264,7 +267,7 @@
           </div>
           <div class="action-btn-row">
             <button class="btn-primary btn-sm btn-action" on:click={handleBorrow}
-              disabled={isProcessing || !borrowAmount}>
+              disabled={isProcessing || !borrowAmount || borrowCrInvalid}>
               {isProcessing && activeIntent === 'borrow' ? '…' : 'Borrow'}
             </button>
             {#if projectedCrBorrow !== null}
@@ -383,7 +386,7 @@
   .max-text {
     background: none; border: none; cursor: pointer; padding: 0;
     font-size: 0.6875rem; font-weight: 500; white-space: nowrap;
-    color: var(--rumi-action); opacity: 0.75;
+    color: var(--rumi-text-secondary); opacity: 0.75;
     transition: opacity 0.15s;
   }
   .max-text:hover { opacity: 1; text-decoration: underline; }
