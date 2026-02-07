@@ -113,7 +113,7 @@ Emerald (`#34d399`) is Rumi's action color. It means: do something now.
 
 **Emerald must NOT be used for:** headlines, decoration, card borders, ambient accents, status indicators.
 
-**Button text is always white** on emerald fills. Dark text on emerald fails contrast.
+**Button text is dark** (`--rumi-bg-primary`) on emerald fills.
 
 Fewer emerald moments = stronger emerald signal.
 

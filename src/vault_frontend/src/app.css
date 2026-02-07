@@ -232,7 +232,7 @@ h1, h2, h3, h4, h5, h6 {
 .btn-primary {
   padding: 0.625rem 1.25rem;
   background: var(--rumi-action);
-  color: #fff;
+  color: var(--rumi-bg-primary);
   font-family: 'Circular Std', 'Inter', sans-serif;
   font-weight: 500;
   border: none;
