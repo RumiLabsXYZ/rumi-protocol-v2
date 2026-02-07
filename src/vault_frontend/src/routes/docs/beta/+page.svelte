@@ -19,8 +19,14 @@
   </section>
 
   <section class="doc-section">
-    <h2 class="doc-heading">No Audit</h2>
-    <p>The Rumi Protocol codebase has not undergone a formal third-party security audit. While the development team reviews code before deployment, undiscovered vulnerabilities may exist.</p>
+    <h2 class="doc-heading">No Formal Audit</h2>
+    <p>The Rumi Protocol codebase has not undergone a formal security audit by a traditional human-led auditing firm. An AI-powered review was conducted (see below), but undiscovered vulnerabilities may exist.</p>
+  </section>
+
+  <section class="doc-section">
+    <h2 class="doc-heading">Security Review</h2>
+    <p>The Rumi Protocol codebase was reviewed by <a href="https://www.avai.life/" class="doc-link" target="_blank" rel="noopener">AVAI</a>, an autonomous AI-powered security auditing agent, in December 2025. The review covered 68 Rust source files across all four canisters and found no critical or high-severity issues (3 medium, 5 low). The overall security rating was B+ (83.5/100).</p>
+    <p>This is not a traditional third-party audit conducted by a human security firm. It is an AI-assisted review. You can read the <a href="/AVAI_Security_Audit_Rumi_Protocol_Professional.pdf" class="doc-link" target="_blank">full report (PDF)</a>.</p>
   </section>
 
   <section class="doc-section">

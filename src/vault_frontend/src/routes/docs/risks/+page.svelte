@@ -17,7 +17,7 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Smart Contract Risk</h2>
-    <p>Rumi's backend canisters are written in Rust and deployed on the Internet Computer. While the code has been reviewed, it has not undergone a formal third-party audit. Bugs in the vault logic, liquidation math, or state management could result in loss of funds.</p>
+    <p>Rumi's backend canisters are written in Rust and deployed on the Internet Computer. The codebase was reviewed by an AI-powered auditing agent (<a href="https://www.avai.life/" class="doc-link" target="_blank" rel="noopener">AVAI</a>) but has not undergone a formal audit by a traditional human-led security firm. Bugs in the vault logic, liquidation math, or state management could result in loss of funds.</p>
     <p>Canister upgrades are controlled by a set of principals (the development team). An upgrade with a bug could affect all vaults simultaneously. There is currently no time-lock or governance mechanism on upgrades.</p>
   </section>
 
