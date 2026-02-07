@@ -1,205 +1,179 @@
 <script lang="ts">
-  const features = [
+  const concepts = [
     {
-      title: "Secure Collateral",
-      description: "Your ICP collateral is securely stored in the protocol's smart contracts on the Internet Computer blockchain.",
-      icon: "🔒"
+      title: "Vaults",
+      description: "Deposit ICP as collateral to borrow icUSD. Each vault must maintain at least 130% collateralization to stay healthy."
     },
     {
-      title: "Stable Value",
-      description: "icUSD maintains a stable 1:1 ratio with USD, providing a reliable store of value on ICP.",
-      icon: "💵"
+      title: "icUSD",
+      description: "A stablecoin soft-pegged to the US Dollar, minted against ICP collateral. Use it across the Internet Computer ecosystem."
     },
     {
-      title: "Transparent",
-      description: "All protocol operations are fully on-chain and verifiable through the Internet Computer blockchain.",
-      icon: "🔍"
+      title: "Liquidation",
+      description: "If a vault's collateral ratio drops below 130%, it becomes eligible for liquidation. Liquidators repay the debt and claim discounted collateral."
     },
     {
-      title: "Decentralized",
-      description: "Fully autonomous and decentralized protocol with no central authority or intermediaries.",
-      icon: "🌐"
+      title: "Stability Pool",
+      description: "Deposit icUSD to earn liquidation bonuses. The pool provides instant liquidity when vaults are liquidated, and depositors receive a 10% discount on claimed collateral."
     }
   ];
 
-  const howItWorks = [
-    {
-      step: 1,
-      title: "Connect Your Wallet",
-      description: "Use Plug wallet to connect to the Rumi Protocol dApp."
-    },
-    {
-      step: 2,
-      title: "Create a Vault",
-      description: "Deposit ICP as collateral to create your vault."
-    },
-    {
-      step: 3,
-      title: "Mint icUSD",
-      description: "Generate icUSD stablecoins against your ICP collateral."
-    },
-    {
-      step: 4,
-      title: "Manage Your Position",
-      description: "Monitor your vault's health and adjust your position as needed."
-    }
+  const steps = [
+    { title: "Connect Wallet", description: "Use Internet Identity, Plug, or Oisy to connect." },
+    { title: "Create a Vault", description: "Deposit ICP as collateral." },
+    { title: "Borrow icUSD", description: "Mint stablecoins against your collateral at a minimum 130% ratio." },
+    { title: "Manage Position", description: "Add collateral, repay debt, or withdraw — keep your ratio healthy." }
   ];
-
-  import { onMount } from 'svelte';
-  import { protocolService } from '$lib/services/protocol';
-  import ProtocolStats from '$lib/components/dashboard/ProtocolStats.svelte';
-  
-  let protocolStatus = {
-    mode: 'GeneralAvailability',
-    totalIcpMargin: 0,
-    totalIcusdBorrowed: 0,
-    lastIcpRate: 0,
-    lastIcpTimestamp: 0,
-    totalCollateralRatio: 0
-  };
-  
-  let isLoading = true;
-  
-  async function fetchData() {
-    try {
-      const status = await protocolService.getProtocolStatus();
-      protocolStatus = status;
-    } catch (error) {
-      console.error('Error fetching protocol data:', error);
-    } finally {
-      isLoading = false;
-    }
-  }
-  
-  onMount(fetchData);
 </script>
 
 <svelte:head>
-  <title>RUMI Protocol - Learn More</title>
+  <title>RUMI Protocol - Learn</title>
 </svelte:head>
 
-<div class="max-w-6xl mx-auto px-4 py-12 pb-10">
-  <!-- Hero Section -->
-  <section class="text-center mb-20">
-    <h1 class="text-4xl md:text-5xl font-bold mb-6 bg-gradient-to-r from-purple-400 to-pink-500 bg-clip-text text-transparent">
-      Understanding Rumi Protocol
-    </h1>
-    <p class="text-xl text-gray-300 max-w-3xl mx-auto">
-      Rumi Protocol enables you to generate icUSD stablecoins using ICP as collateral, bringing DeFi stability to the Internet Computer ecosystem.
-    </p>
-  </section>
+<div class="page-container">
+  <h1 class="page-title learn-title">Understanding Rumi Protocol</h1>
+  <p class="page-subtitle">
+    Rumi enables you to borrow icUSD stablecoins using ICP as collateral — DeFi stability native to the Internet Computer.
+  </p>
 
-  <!-- Features Grid -->
-  <section class="mb-20">
-    <h2 class="text-3xl font-bold mb-8 text-center">Key Features</h2>
-    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-      {#each features as feature}
-        <div class="bg-gray-900/50 p-6 rounded-lg backdrop-blur-sm ring-2 ring-purple-400 hover:ring-purple-300 transition-all">
-          <div class="text-4xl mb-4">{feature.icon}</div>
-          <h3 class="text-xl font-semibold mb-2 text-purple-400">{feature.title}</h3>
-          <p class="text-gray-300">{feature.description}</p>
+  <!-- Core Concepts -->
+  <section class="section">
+    <h2 class="section-title">Core Concepts</h2>
+    <div class="concept-grid">
+      {#each concepts as concept}
+        <div class="concept-card">
+          <h3 class="concept-heading">{concept.title}</h3>
+          <p class="concept-text">{concept.description}</p>
         </div>
       {/each}
     </div>
   </section>
 
   <!-- How It Works -->
-  <section class="mb-20">
-    <h2 class="text-3xl font-bold mb-8 text-center">How It Works</h2>
-    <div class="space-y-8">
-      {#each howItWorks as { step, title, description }}
-        <div class="flex items-start gap-6">
-          <div class="flex-shrink-0 w-12 h-12 bg-purple-600 rounded-full flex items-center justify-center text-xl font-bold">
-            {step}
-          </div>
+  <section class="section">
+    <h2 class="section-title">How It Works</h2>
+    <div class="steps-list">
+      {#each steps as step, i}
+        <div class="step-row">
+          <div class="step-number">{i + 1}</div>
           <div>
-            <h3 class="text-xl font-semibold mb-2">{title}</h3>
-            <p class="text-gray-300">{description}</p>
+            <h3 class="step-heading">{step.title}</h3>
+            <p class="step-text">{step.description}</p>
           </div>
         </div>
       {/each}
     </div>
   </section>
 
-  <!-- Protocol Metrics -->
-  <section>
-    <h2 class="text-3xl font-bold mb-8 text-center">Protocol Security</h2>
-    <div class="bg-gray-900/50 p-8 rounded-lg backdrop-blur-sm ring-2 ring-purple-400">
-      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
-        <div>
-          <h3 class="text-lg font-medium text-gray-400 mb-1">Minimum Collateral Ratio</h3>
-          <p class="text-2xl font-bold">150%</p>
-        </div>
-        <div>
-          <h3 class="text-lg font-medium text-gray-400 mb-1">Liquidation Threshold</h3>
-          <p class="text-2xl font-bold">130%</p>
-        </div>
-        <div>
-          <h3 class="text-lg font-medium text-gray-400 mb-1">Protocol Fee</h3>
-          <p class="text-2xl font-bold">0.5%</p>
-        </div>
+  <!-- Protocol Parameters -->
+  <section class="section">
+    <h2 class="section-title">Protocol Parameters</h2>
+    <div class="params-card">
+      <div class="param-row">
+        <span class="param-label">Minimum Collateral Ratio</span>
+        <span class="param-value">130%</span>
       </div>
-    </div>
-  </section>
-</div>
-
-<div class="container mx-auto px-4 max-w-5xl">
-  <section class="mb-12">
-    <div class="text-center mb-10">
-      <h1 class="text-4xl font-bold mb-4 bg-clip-text text-transparent bg-gradient-to-r from-pink-400 to-purple-600">
-        About RUMI Protocol
-      </h1>
-      <p class="text-xl text-gray-300 max-w-3xl mx-auto">
-        A decentralized stablecoin system built on the Internet Computer
-      </p>
-    </div>
-    
-    <ProtocolStats />
-  </section>
-  
-  <section class="mb-12">
-    <div class="glass-card">
-      <h2 class="text-3xl font-semibold mb-6">How RUMI Protocol Works</h2>
-      
-      <div class="prose prose-lg prose-invert max-w-none">
-        <p>
-          RUMI Protocol is a decentralized finance (DeFi) platform built on the Internet Computer that enables users to generate the icUSD stablecoin using ICP as collateral. The system maintains stability through overcollateralization and algorithmically managed parameters.
-        </p>
-        
-        <h3>Key Components</h3>
-        
-        <h4>Vaults</h4>
-        <p>
-          Users can create vaults by depositing ICP tokens as collateral. Each vault must maintain a minimum collateralization ratio of 130%, meaning that the value of the collateral must be at least 1.3 times the value of the borrowed icUSD.
-        </p>
-        
-        <h4>icUSD Stablecoin</h4>
-        <p>
-          icUSD (Internet Computer USD) is a stablecoin soft-pegged to the US Dollar. Users can borrow icUSD against their collateral, trade it, or use it in other DeFi applications within the Internet Computer ecosystem.
-        </p>
-        
-        <h4>Liquidation</h4>
-        <p>
-          If a vault's collateralization ratio falls below 130% due to ICP price fluctuations, it becomes eligible for liquidation. During liquidation, the vault's collateral is used to repay the borrowed icUSD, plus a liquidation penalty.
-        </p>
-        
-        <h4>Liquidity Pool</h4>
-        <p>
-          The protocol maintains a liquidity pool that facilitates redemptions and earns returns for liquidity providers. Users can provide ICP to the liquidity pool and earn a portion of the protocol fees proportional to
-        </p>
+      <div class="param-row">
+        <span class="param-label">Liquidation Threshold</span>
+        <span class="param-value">130%</span>
+      </div>
+      <div class="param-row">
+        <span class="param-label">Borrowing Fee</span>
+        <span class="param-value">0.5%</span>
+      </div>
+      <div class="param-row">
+        <span class="param-label">Liquidation Bonus</span>
+        <span class="param-value">10%</span>
       </div>
     </div>
   </section>
 </div>
 
 <style>
-  /* Optional: Add a gradient line between sections */
-  section:not(:last-child)::after {
-    content: '';
-    display: block;
-    width: 200px;
-    height: 2px;
-    margin: 4rem auto;
-    background: linear-gradient(90deg, transparent, #c084fc, transparent);
+  .page-container { max-width: 800px; margin: 0 auto; }
+
+  /* Learn page uses Secondary Brand — gradient title allowed here */
+  .learn-title {
+    background: linear-gradient(135deg, var(--rumi-purple-accent), var(--rumi-action));
+    background-clip: text;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+  }
+  .page-subtitle {
+    font-size: 1rem;
+    color: var(--rumi-text-secondary);
+    line-height: 1.6;
+    max-width: 600px;
+    margin-bottom: 3rem;
+  }
+
+  .section { margin-bottom: 3rem; }
+
+  /* Concept grid */
+  .concept-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  .concept-card {
+    background: var(--rumi-bg-surface1);
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.75rem;
+    padding: 1.25rem;
+    transition: box-shadow 0.2s ease, border-color 0.2s ease;
+  }
+  .concept-card:hover {
+    border-color: rgba(209, 118, 232, 0.08);
+    box-shadow: inset 0 0 20px 0 rgba(209, 118, 232, 0.06);
+  }
+  .concept-heading {
+    font-family: 'Circular Std', 'Inter', sans-serif;
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--rumi-text-primary);
+    margin-bottom: 0.375rem;
+  }
+  .concept-text { font-size: 0.8125rem; color: var(--rumi-text-secondary); line-height: 1.5; }
+
+  /* Steps */
+  .steps-list { display: flex; flex-direction: column; gap: 1.25rem; }
+  .step-row { display: flex; align-items: flex-start; gap: 1rem; }
+  .step-number {
+    flex-shrink: 0;
+    width: 2rem; height: 2rem;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 50%;
+    background: var(--rumi-bg-surface2);
+    border: 1px solid var(--rumi-border);
+    font-family: 'Inter', sans-serif;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--rumi-text-muted);
+  }
+  .step-heading {
+    font-size: 0.9375rem;
+    font-weight: 600;
+    color: var(--rumi-text-primary);
+    margin-bottom: 0.125rem;
+  }
+  .step-text { font-size: 0.8125rem; color: var(--rumi-text-secondary); }
+
+  /* Params card */
+  .params-card {
+    background: var(--rumi-bg-surface1);
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.75rem;
+    padding: 1.25rem;
+    display: flex; flex-direction: column; gap: 0.75rem;
+  }
+  .param-row { display: flex; justify-content: space-between; align-items: baseline; }
+  .param-label { font-size: 0.8125rem; color: var(--rumi-text-secondary); }
+  .param-value {
+    font-family: 'Inter', sans-serif;
+    font-size: 0.9375rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--rumi-text-primary);
+  }
+
+  @media (max-width: 768px) {
+    .concept-grid { grid-template-columns: 1fr; }
   }
 </style>
