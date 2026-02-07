@@ -53,9 +53,7 @@
 <style>
   .docs-container { max-width: 700px; margin: 0 auto; }
   .docs-title {
-    background: linear-gradient(135deg, var(--rumi-purple-accent), var(--rumi-action));
-    background-clip: text; -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent; color: transparent;
+    color: var(--rumi-text-primary);
   }
   .docs-subtitle {
     font-size: 0.9375rem; color: var(--rumi-text-secondary);
