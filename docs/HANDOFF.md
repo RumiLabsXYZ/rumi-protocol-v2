@@ -431,6 +431,8 @@ Dense, expandable inline vault list with full risk-forward UX:
 | **Repay Max** | min(wallet icUSD balance, outstanding debt) |
 | **Max styling** | All three identical: `--rumi-text-muted`, no action color, subtle hover underline |
 | **Input clamping** | All inputs clamp to valid range on blur (doesn't fight mid-typing) |
+| **Over-max disable** | Buttons disabled when input exceeds max (Add, Borrow, Repay all guarded) |
+| **Single expanded vault** | Only one vault can be expanded at a time; opening another closes the previous |
 | **Projected CR** | Shown inline next to action button, live color: neutral ≥150%, amber 140-149%, red <140% |
 | **Action disable** | Buttons disabled when projected CR is below minimum |
 | **Risk left-border** | Danger vaults get 2px red left edge, warning vaults get amber |

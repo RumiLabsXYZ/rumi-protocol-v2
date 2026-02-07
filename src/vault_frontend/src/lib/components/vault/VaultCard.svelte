@@ -10,12 +10,21 @@
 
   export let vault: Vault;
   export let icpPrice: number = 0;
+  export let expandedVaultId: number | null = null;
 
-  const dispatch = createEventDispatcher<{ updated: void }>();
+  const dispatch = createEventDispatcher<{ updated: void; toggle: { vaultId: number } }>();
   const E8S = 100_000_000;
   const MINT_MINIMUM = 1.5;
 
-  let expanded = false;
+  $: expanded = expandedVaultId === vault.vaultId;
+
+  function toggleExpand() {
+    dispatch('toggle', { vaultId: vault.vaultId });
+    clearMessages();
+    if (!expanded) {
+      addCollateralAmount = ''; borrowAmount = ''; repayAmount = '';
+    }
+  }
 
   // ── Derived display ──
   $: collateralValueUsd = vault.icpMargin * icpPrice;
@@ -103,6 +112,20 @@
 
   // Whether projected CR is invalid (below minimum 150%) — disables action button
   $: borrowCrInvalid = projectedCrBorrow !== null && projectedCrBorrow !== Infinity && projectedCrBorrow < MINT_MINIMUM;
+
+  // Whether input exceeds max — disables action button
+  $: addOverMax = (() => {
+    const v = parseFloat(addCollateralAmount);
+    return v > 0 && maxAddCollateral > 0 && v > maxAddCollateral;
+  })();
+  $: borrowOverMax = (() => {
+    const v = parseFloat(borrowAmount);
+    return v > 0 && maxBorrowable > 0 && v > maxBorrowable;
+  })();
+  $: repayOverMax = (() => {
+    const v = parseFloat(repayAmount);
+    return v > 0 && maxRepayable > 0 && v > maxRepayable;
+  })();
 
   $: canWithdraw = vault.borrowedIcusd === 0 && vault.icpMargin > 0;
   $: canClose = vault.borrowedIcusd === 0;
@@ -215,7 +238,7 @@
 
 <!-- ── Collapsed row ── -->
 <div class="vault-card" class:vault-card-danger={riskLevel === 'danger'} class:vault-card-warning={riskLevel === 'warning'}>
-  <button class="vault-row" on:click={() => { expanded = !expanded; clearMessages(); }}>
+  <button class="vault-row" on:click={toggleExpand}>
     <span class="vault-id">#{vault.vaultId}</span>
     <span class="vault-cell">
       <span class="cell-label">Collateral</span>
@@ -272,7 +295,7 @@
           </div>
           <div class="action-btn-row">
             <button class="btn-primary btn-sm btn-action" on:click={handleAddCollateral}
-              disabled={isProcessing || !addCollateralAmount}>
+              disabled={isProcessing || !addCollateralAmount || addOverMax}>
               {isProcessing && activeIntent === 'add' ? '…' : 'Add'}
             </button>
             {#if projectedCrAdd !== null}
@@ -298,7 +321,7 @@
           </div>
           <div class="action-btn-row">
             <button class="btn-primary btn-sm btn-action" on:click={handleBorrow}
-              disabled={isProcessing || !borrowAmount || borrowCrInvalid}>
+              disabled={isProcessing || !borrowAmount || borrowCrInvalid || borrowOverMax}>
               {isProcessing && activeIntent === 'borrow' ? '…' : 'Borrow'}
             </button>
             {#if projectedCrBorrow !== null}
@@ -325,7 +348,7 @@
           </div>
           <div class="action-btn-row">
             <button class="btn-primary btn-sm btn-action" on:click={handleRepay}
-              disabled={isProcessing || !repayAmount || vault.borrowedIcusd === 0}>
+              disabled={isProcessing || !repayAmount || vault.borrowedIcusd === 0 || repayOverMax}>
               {isProcessing && activeIntent === 'repay' ? '…' : 'Repay'}
             </button>
             {#if projectedCrRepay !== null}

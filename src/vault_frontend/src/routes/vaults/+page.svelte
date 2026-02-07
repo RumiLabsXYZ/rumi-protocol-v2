@@ -8,6 +8,11 @@
   import { developerAccess } from '$lib/stores/developer';
 
   let icpPrice = 0;
+  let expandedVaultId: number | null = null;
+
+  function handleToggle(e: CustomEvent<{ vaultId: number }>) {
+    expandedVaultId = expandedVaultId === e.detail.vaultId ? null : e.detail.vaultId;
+  }
 
   $: canViewVaults = isDevelopment || $developerAccess || $isConnected
     || ($permissionStore.initialized && $permissionStore.canViewVaults);
@@ -76,7 +81,7 @@
   {:else}
     <div class="vault-list">
       {#each sortedVaults as vault (vault.vaultId)}
-        <VaultCard {vault} {icpPrice} on:updated={loadUserVaults} />
+        <VaultCard {vault} {icpPrice} {expandedVaultId} on:updated={loadUserVaults} on:toggle={handleToggle} />
       {/each}
     </div>
   {/if}
