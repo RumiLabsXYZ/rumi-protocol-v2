@@ -52,18 +52,18 @@
      NOT for: numbers, balances, risk indicators, buttons. */
   --rumi-purple-accent: #d176e8;
 
-  /* Neon green — ACTION / INTERACTION color.
-     Used for: buttons, active nav, interactive affordances, focus states.
+  /* Emerald — ACTION / INTERACTION color.
+     Used for: buttons, active nav, primary CTAs.
      If a title and a button compete, the button wins. */
-  --rumi-action: #00e676;
-  --rumi-action-bright: #4ade80;
-  --rumi-action-muted: #16a34a;
-  --rumi-action-dim: rgba(0, 230, 118, 0.10);
-  /* Legacy aliases — point to action green */
-  --rumi-teal: #00e676;
-  --rumi-teal-bright: #4ade80;
-  --rumi-teal-muted: #16a34a;
-  --rumi-teal-dim: rgba(0, 230, 118, 0.10);
+  --rumi-action: #34d399;
+  --rumi-action-bright: #6ee7b7;
+  --rumi-action-muted: #10b981;
+  --rumi-action-dim: rgba(52, 211, 153, 0.10);
+  /* Teal — subtle accent: focus rings, success states, quiet affordances */
+  --rumi-teal: #2DD4BF;
+  --rumi-teal-bright: #5eead4;
+  --rumi-teal-muted: #14b8a6;
+  --rumi-teal-dim: rgba(45, 212, 191, 0.10);
 
   /* Identity gradient — ONLY for RUMI wordmark/logo */
   --rumi-identity-gradient: linear-gradient(135deg, var(--rumi-purple-accent), var(--rumi-action));
@@ -76,8 +76,8 @@
   /* Borders — indigo-tinted */
   --rumi-border: rgba(90, 100, 180, 0.12);
   --rumi-border-hover: rgba(90, 100, 180, 0.25);
-  --rumi-border-accent: rgba(0, 230, 118, 0.25);
-  --rumi-border-teal: rgba(0, 230, 118, 0.25);
+  --rumi-border-accent: rgba(52, 211, 153, 0.25);
+  --rumi-border-teal: rgba(45, 212, 191, 0.25);
 
   /* Risk states — SEMANTIC, DO NOT HARMONIZE */
   --rumi-safe: #10b981;
@@ -226,13 +226,13 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 /* ============================================
-   Buttons — teal is for interaction
+   Buttons — emerald for action, white text
    ============================================ */
 .icp-button,
 .btn-primary {
   padding: 0.625rem 1.25rem;
-  background: var(--rumi-teal);
-  color: var(--rumi-bg-primary);
+  background: var(--rumi-action);
+  color: #fff;
   font-family: 'Circular Std', 'Inter', sans-serif;
   font-weight: 500;
   border: none;
@@ -244,7 +244,7 @@ h1, h2, h3, h4, h5, h6 {
 .icp-button:hover,
 .btn-primary:hover {
   background: var(--rumi-action-bright);
-  box-shadow: 0 0 20px rgba(0, 230, 118, 0.15);
+  box-shadow: 0 0 20px rgba(52, 211, 153, 0.15);
 }
 
 .icp-button:disabled,
@@ -306,8 +306,8 @@ h1, h2, h3, h4, h5, h6 {
 
 .icp-input:focus {
   outline: none;
-  border-color: var(--rumi-action);
-  box-shadow: 0 0 0 1px rgba(0, 230, 118, 0.12);
+  border-color: var(--rumi-teal);
+  box-shadow: 0 0 0 1px rgba(45, 212, 191, 0.12);
 }
 
 /* ============================================
