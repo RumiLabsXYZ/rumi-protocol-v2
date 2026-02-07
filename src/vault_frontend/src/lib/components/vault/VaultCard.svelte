@@ -25,9 +25,12 @@
   $: riskLevel = getRiskLevel(collateralRatio);
   $: maxBorrowable = Math.max(0, (collateralValueUsd / MINT_MINIMUM) - vault.borrowedIcusd);
 
-  // Wallet icUSD balance for repay cap
+  // Wallet balances for input caps
+  $: walletIcp = $walletStore.tokenBalances?.ICP
+    ? parseFloat($walletStore.tokenBalances.ICP.formatted) : 0;
   $: walletIcusd = $walletStore.tokenBalances?.ICUSD
     ? parseFloat($walletStore.tokenBalances.ICUSD.formatted) : 0;
+  $: maxAddCollateral = walletIcp;
   $: maxRepayable = Math.min(walletIcusd, vault.borrowedIcusd);
 
   $: fmtMargin = formatNumber(vault.icpMargin, 4);
@@ -106,6 +109,12 @@
 
   function clearMessages() { actionError = ''; actionSuccess = ''; }
 
+  function setMaxAddCollateral() {
+    if (maxAddCollateral > 0) {
+      borrowAmount = ''; repayAmount = '';
+      addCollateralAmount = maxAddCollateral.toFixed(4);
+    }
+  }
   function setMaxBorrow() {
     if (maxBorrowable > 0) {
       addCollateralAmount = ''; repayAmount = '';
@@ -117,6 +126,23 @@
       addCollateralAmount = ''; borrowAmount = '';
       repayAmount = maxRepayable.toFixed(4);
     }
+  }
+
+  // Clamp on blur — don't fight mid-typing, fix on exit
+  function clampAddCollateral() {
+    const v = parseFloat(addCollateralAmount);
+    if (!v || v <= 0) { addCollateralAmount = ''; return; }
+    if (v > maxAddCollateral && maxAddCollateral > 0) addCollateralAmount = maxAddCollateral.toFixed(4);
+  }
+  function clampBorrow() {
+    const v = parseFloat(borrowAmount);
+    if (!v || v <= 0) { borrowAmount = ''; return; }
+    if (v > maxBorrowable && maxBorrowable > 0) borrowAmount = maxBorrowable.toFixed(2);
+  }
+  function clampRepay() {
+    const v = parseFloat(repayAmount);
+    if (!v || v <= 0) { repayAmount = ''; return; }
+    if (v > maxRepayable && maxRepayable > 0) repayAmount = maxRepayable.toFixed(4);
   }
 
   async function handleAddCollateral() {
@@ -234,10 +260,14 @@
         <div class="action-panel" class:panel-inactive={activeIntent && activeIntent !== 'add'}>
           <span class="action-label-row">
             <span class="action-label">Add Collateral</span>
+            {#if maxAddCollateral > 0}
+              <button class="max-text" on:click={setMaxAddCollateral}>Max: {formatNumber(maxAddCollateral, 4)} ICP</button>
+            {/if}
           </span>
           <div class="action-input-row">
             <input type="number" class="action-input" bind:value={addCollateralAmount}
-              on:input={onAddInput} placeholder="0.00" min="0.001" step="0.01" disabled={isProcessing} />
+              on:input={onAddInput} on:blur={clampAddCollateral}
+              placeholder="0.00" min="0.001" step="0.01" disabled={isProcessing} />
             <span class="input-suffix">ICP</span>
           </div>
           <div class="action-btn-row">
@@ -262,7 +292,8 @@
           </span>
           <div class="action-input-row">
             <input type="number" class="action-input" bind:value={borrowAmount}
-              on:input={onBorrowInput} placeholder="0.00" min="0.1" step="0.1" disabled={isProcessing} />
+              on:input={onBorrowInput} on:blur={clampBorrow}
+              placeholder="0.00" min="0.1" step="0.1" disabled={isProcessing} />
             <span class="input-suffix">icUSD</span>
           </div>
           <div class="action-btn-row">
@@ -282,12 +313,13 @@
           <span class="action-label-row">
             <span class="action-label">Repay</span>
             {#if maxRepayable > 0}
-              <button class="max-text max-text-subdued" on:click={setMaxRepay}>Max: {formatNumber(maxRepayable, 4)} icUSD</button>
+              <button class="max-text" on:click={setMaxRepay}>Max: {formatNumber(maxRepayable, 4)} icUSD</button>
             {/if}
           </span>
           <div class="action-input-row">
             <input type="number" class="action-input" bind:value={repayAmount}
-              on:input={onRepayInput} placeholder="0.00" min="0" step="0.01"
+              on:input={onRepayInput} on:blur={clampRepay}
+              placeholder="0.00" min="0" step="0.01"
               disabled={isProcessing || vault.borrowedIcusd === 0} />
             <span class="input-suffix">icUSD</span>
           </div>
@@ -334,8 +366,8 @@
     border-color: rgba(209,118,232,0.08);
     box-shadow: inset 0 0 20px 0 rgba(209,118,232,0.04), inset 0 1px 0 0 rgba(200,210,240,0.03), 0 2px 8px -2px rgba(8,11,22,0.6);
   }
-  .vault-card-danger { }
-  .vault-card-warning { }
+  .vault-card-danger { border-left: 2px solid var(--rumi-danger); }
+  .vault-card-warning { border-left: 2px solid var(--rumi-caution); }
 
   .vault-row {
     display: grid; grid-template-columns: 3rem 1fr 1fr auto 2rem;
@@ -382,16 +414,14 @@
     font-size: 0.6875rem; color: var(--rumi-text-muted); pointer-events: none;
   }
 
-  /* Max: inline utility text, NOT a button */
+  /* Max: inline utility text, NOT a button — neutral color per spec */
   .max-text {
     background: none; border: none; cursor: pointer; padding: 0;
     font-size: 0.6875rem; font-weight: 500; white-space: nowrap;
-    color: var(--rumi-text-secondary); opacity: 0.75;
+    color: var(--rumi-text-muted); opacity: 0.85;
     transition: opacity 0.15s;
   }
   .max-text:hover { opacity: 1; text-decoration: underline; }
-  .max-text-subdued { opacity: 0.55; }
-  .max-text-subdued:hover { opacity: 0.85; }
 
   /* Button + projected CR inline */
   .action-btn-row { display: flex; align-items: center; gap: 0.5rem; }
