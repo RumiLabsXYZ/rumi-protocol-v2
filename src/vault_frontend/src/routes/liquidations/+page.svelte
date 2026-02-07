@@ -368,7 +368,7 @@ async function partialLiquidateVault(vaultId: number, liquidateAmount: number) {
   <!-- Current ICP Price Display -->
   <div class="mb-8 price-card">
     <div class="flex justify-between items-center mb-4">
-      <h2 class="text-2xl font-bold">Current ICP Price</h2>
+      <h2 class="text-2xl font-bold" style="color: var(--rumi-purple-accent)">Current ICP Price</h2>
       <div class="flex items-center gap-2">
         <button 
           class="p-1 bg-gray-800/50 rounded-full hover:bg-gray-800 transition-colors"
@@ -382,7 +382,7 @@ async function partialLiquidateVault(vaultId: number, liquidateAmount: number) {
           </svg>
         </button>
         {#if isPriceLoading}
-          <div class="w-4 h-4 border-2 border-teal-400 border-t-transparent rounded-full animate-spin"></div>
+          <div class="w-4 h-4 border-2 border-green-400 border-t-transparent rounded-full animate-spin"></div>
         {/if}
       </div>
     </div>
@@ -393,7 +393,7 @@ async function partialLiquidateVault(vaultId: number, liquidateAmount: number) {
       </div>
     {:else if isPriceLoading}
       <div class="flex items-center gap-2">
-        <div class="w-5 h-5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin"></div>
+        <div class="w-5 h-5 border-2 border-green-400 border-t-transparent rounded-full animate-spin"></div>
         <span>Loading price...</span>
       </div>
     {:else}
@@ -405,7 +405,7 @@ async function partialLiquidateVault(vaultId: number, liquidateAmount: number) {
   <section class="mb-12">
     <div class="glass-card">
       <div class="flex justify-between items-center mb-6">
-        <h2 class="text-2xl font-semibold">Liquidatable Vaults</h2>
+        <h2 class="text-2xl font-semibold" style="color: var(--rumi-purple-accent)">Liquidatable Vaults</h2>
         <button 
           class="px-4 py-2 btn-secondary text-white rounded hover:opacity-80 transition-colors"
           on:click={loadLiquidatableVaults}
@@ -435,7 +435,7 @@ async function partialLiquidateVault(vaultId: number, liquidateAmount: number) {
       
       {#if isLoading}
         <div class="flex justify-center items-center py-12">
-          <div class="w-10 h-10 border-4 border-teal-400 border-t-transparent rounded-full animate-spin"></div>
+          <div class="w-10 h-10 border-4 border-green-400 border-t-transparent rounded-full animate-spin"></div>
         </div>
       {:else if liquidatableVaults.length === 0}
         <div class="text-center py-12 bg-gray-800/30 rounded-lg">
@@ -533,7 +533,7 @@ async function partialLiquidateVault(vaultId: number, liquidateAmount: number) {
   <!-- How Liquidations Work Section -->
   <section class="mb-16">
     <div class="max-w-4xl mx-auto">
-      <h2 class="text-2xl font-semibold mb-6 text-center">How Liquidations Work</h2>
+      <h2 class="text-2xl font-semibold mb-6 text-center" style="color: var(--rumi-purple-accent)">How Liquidations Work</h2>
 
       <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div class="glass-card h-full">

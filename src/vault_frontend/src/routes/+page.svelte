@@ -228,7 +228,7 @@
 
   <div class="mb-8 price-card">
     <div class="flex justify-between items-center mb-4">
-      <h2 class="text-2xl font-bold">Current ICP Price</h2>
+      <h2 class="text-2xl font-bold" style="color: var(--rumi-purple-accent)">Current ICP Price</h2>
       <div class="flex items-center gap-2">
         <button 
           class="p-1 bg-gray-800/50 rounded-full hover:bg-gray-800 transition-colors"
@@ -245,7 +245,7 @@
           </svg>
         </button>
         {#if isPriceLoading}
-          <div class="w-4 h-4 border-2 border-teal-400 border-t-transparent rounded-full animate-spin"></div>
+          <div class="w-4 h-4 border-2 border-green-400 border-t-transparent rounded-full animate-spin"></div>
         {/if}
       </div>
     </div>
@@ -273,7 +273,7 @@
       <div class="flex justify-between items-center text-xs text-gray-400 mt-1">
         <span>Updated at {lastPriceUpdateTime} · Auto-refreshes every 30s</span>
         {#if priceRefreshCount > 0}
-          <span class="text-teal-400">Live</span>
+          <span class="text-green-400">Live</span>
         {/if}
       </div>
     {:else if isPriceLoading}
@@ -300,7 +300,7 @@
 
   <section class="mb-12">
     <div class="glass-card max-w-2xl mx-auto">
-      <h2 class="text-2xl font-semibold mb-6">Create a New Vault</h2>
+      <h2 class="text-2xl font-semibold mb-6" style="color: var(--rumi-purple-accent)">Create a New Vault</h2>
 
       {#if $developerAccess}
         <!-- Original vault creation form only shown to developers -->
@@ -443,7 +443,7 @@
 
   <section class="mb-16">
     <div class="max-w-4xl mx-auto">
-      <h2 class="text-2xl font-semibold mb-6 text-center">How It Works</h2>
+      <h2 class="text-2xl font-semibold mb-6 text-center" style="color: var(--rumi-purple-accent)">How It Works</h2>
 
       <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div class="glass-card h-full">

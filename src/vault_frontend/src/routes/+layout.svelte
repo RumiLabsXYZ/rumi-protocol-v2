@@ -29,21 +29,18 @@
     return () => window.removeEventListener('keydown', handleKey);
   });
 </script>
-<aside class="sidebar">
-  <a href="/" class="sidebar-brand"><img src="/rumi-header-logo.png" alt="Rumi" class="sidebar-logo" /><span class="sidebar-wordmark">RUMI</span></a>
-  <nav class="sidebar-nav">
-    <a href="/" class="nav-link" class:active={currentPath === '/'}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9,22 9,12 15,12 15,22"/></svg><span>Borrow</span></a>
-    {#if isConnected && canViewVaults}<a href="/vaults" class="nav-link" class:active={currentPath.startsWith('/vaults')}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><span>Vaults</span></a>{/if}
-    <a href="/liquidations" class="nav-link" class:active={currentPath === '/liquidations'}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg><span>Liquidate</span></a>
-    <a href="/stability-pool" class="nav-link" class:active={currentPath === '/stability-pool'}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg><span>Stability</span></a>
-    {#if isConnected && $permissionStore.isDeveloper}<a href="/treasury" class="nav-link" class:active={currentPath === '/treasury'}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/></svg><span>Treasury</span></a>{/if}
-    <a href="/learn-more" class="nav-link" class:active={currentPath === '/learn-more'}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg><span>Learn</span></a>
+<header class="top-bar">
+  <a href="/" class="top-brand"><img src="/rumi-header-logo.png" alt="Rumi" class="top-logo" /><span class="top-wordmark">RUMI</span></a>
+  <nav class="top-nav">
+    <a href="/" class="nav-link" class:active={currentPath === '/'}><span>Borrow</span></a>
+    {#if isConnected && canViewVaults}<a href="/vaults" class="nav-link" class:active={currentPath.startsWith('/vaults')}><span>Vaults</span></a>{/if}
+    <a href="/liquidations" class="nav-link" class:active={currentPath === '/liquidations'}><span>Liquidate</span></a>
+    <a href="/stability-pool" class="nav-link" class:active={currentPath === '/stability-pool'}><span>Stability</span></a>
+    {#if isConnected && $permissionStore.isDeveloper}<a href="/treasury" class="nav-link" class:active={currentPath === '/treasury'}><span>Treasury</span></a>{/if}
+    <a href="/learn-more" class="nav-link" class:active={currentPath === '/learn-more'}><span>Learn</span></a>
   </nav>
-</aside>
-<header class="top-header">
-  <div style="flex:1"></div>
-  <div style="display:flex;align-items:center;gap:1rem">
-    <div style="display:flex;gap:0.375rem;align-items:center">
+  <div class="top-actions">
+    <div class="top-social">
       <a href="mailto:team@rumiprotocol.io" class="header-icon-link" aria-label="Email"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg></a>
       <a href="https://x.com/rumilabsxyz" target="_blank" rel="noopener noreferrer" class="header-icon-link" aria-label="Twitter"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg></a>
       <a href="https://github.com/RumiLabsXYZ/rumi-protocol-v2" target="_blank" rel="noopener noreferrer" class="header-icon-link" aria-label="GitHub"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/></svg></a>
@@ -61,29 +58,36 @@
 </nav>
 {#if isDevelopment && showDebug}<div class="fixed bottom-4 right-4 z-50"><div class="flex flex-col gap-2"><PriceDebug /><WalletDebug /></div></div>{/if}
 <style>
-  .sidebar { position:fixed;top:0;left:0;width:180px;height:100vh;background:var(--rumi-bg-surface-1);border-right:1px solid var(--rumi-border);z-index:100;display:flex;flex-direction:column;padding:1.25rem 0; }
-  .sidebar-brand { display:flex;align-items:center;gap:0.625rem;padding:0 1.25rem;margin-bottom:2rem;text-decoration:none; }
-  .sidebar-logo { width:2rem;height:2rem;flex-shrink:0; }
-  .sidebar-wordmark { font-family:'Circular Std','Inter',sans-serif;font-size:1.125rem;font-weight:500;letter-spacing:0.08em;background:var(--rumi-identity-gradient);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent; }
-  .sidebar-nav { flex:1;display:flex;flex-direction:column;gap:0.25rem;padding:0 0.75rem; }
-  .nav-link { display:flex;align-items:center;gap:0.75rem;padding:0.625rem 0.75rem;border-radius:0.5rem;color:var(--rumi-text-secondary);text-decoration:none;font-size:0.875rem;transition:all 0.15s ease;position:relative; }
-  .nav-link svg { width:1.125rem;height:1.125rem;flex-shrink:0;opacity:0.6; }
-  .nav-link:hover { color:var(--rumi-text-primary);background:rgba(60,70,140,0.08); }
-  .nav-link:hover svg { opacity:1; }
-  .nav-link.active { color:var(--rumi-teal);background:var(--rumi-teal-dim); }
-  .nav-link.active svg { opacity:1; }
-  .nav-link.active::before { content:'';position:absolute;left:0;top:50%;transform:translateY(-50%);width:3px;height:60%;background:var(--rumi-teal);border-radius:0 2px 2px 0; }
-  .top-header { position:fixed;top:0;left:180px;right:0;height:3.5rem;background:var(--rumi-bg-surface-1);border-bottom:1px solid var(--rumi-border);display:flex;align-items:center;justify-content:space-between;padding:0 1.5rem;z-index:90; }
-  .header-icon-link { display:flex;align-items:center;justify-content:center;width:2rem;height:2rem;border-radius:0.375rem;color:var(--rumi-text-muted);text-decoration:none;transition:all 0.15s ease; }
-  .header-icon-link:hover { color:var(--rumi-text-primary);background:rgba(60,70,140,0.10); }
-  .header-icon-link svg { width:1rem;height:1rem; }
-  .main-content { margin-left:180px;padding:5rem 2rem 2rem;min-height:100vh;position:relative;z-index:1; }
-  .app-footer { margin-left:180px;padding:1.25rem 2rem;border-top:1px solid var(--rumi-border);display:flex;justify-content:center;align-items:center;gap:2rem;font-size:0.75rem;color:var(--rumi-text-muted); }
+  /* ── Top bar: single horizontal rail ── */
+  .top-bar { position:fixed;top:0;left:0;right:0;height:3.25rem;background:var(--rumi-bg-surface-1);border-bottom:1px solid var(--rumi-border);display:flex;align-items:center;padding:0 1.5rem;z-index:100;gap:2rem; }
+  .top-brand { display:flex;align-items:center;gap:0.5rem;text-decoration:none;flex-shrink:0; }
+  .top-logo { width:1.5rem;height:1.5rem; }
+  .top-wordmark { font-family:'Circular Std','Inter',sans-serif;font-size:0.9375rem;font-weight:500;letter-spacing:0.08em;background:var(--rumi-identity-gradient);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent; }
+
+  /* ── Nav links: text only, underline active ── */
+  .top-nav { display:flex;align-items:center;gap:0.125rem;flex:1;justify-content:center; }
+  .nav-link { position:relative;display:flex;align-items:center;padding:0.875rem 0.75rem;color:var(--rumi-text-muted);text-decoration:none;font-family:'Circular Std','Inter',sans-serif;font-size:0.8125rem;font-weight:500;letter-spacing:0.01em;transition:color 0.15s ease; }
+  .nav-link:hover { color:var(--rumi-text-primary); }
+  .nav-link.active { color:var(--rumi-text-primary); }
+  .nav-link.active::after { content:'';position:absolute;bottom:0;left:0.75rem;right:0.75rem;height:2px;background:var(--rumi-action);border-radius:1px 1px 0 0; }
+
+  /* ── Right side: social + wallet ── */
+  .top-actions { display:flex;align-items:center;gap:0.75rem;flex-shrink:0; }
+  .top-social { display:flex;gap:0.25rem;align-items:center; }
+  .header-icon-link { display:flex;align-items:center;justify-content:center;width:1.75rem;height:1.75rem;border-radius:0.375rem;color:var(--rumi-text-muted);text-decoration:none;transition:color 0.15s ease; }
+  .header-icon-link:hover { color:var(--rumi-text-primary); }
+  .header-icon-link svg { width:0.875rem;height:0.875rem; }
+
+  /* ── Main content: no sidebar offset ── */
+  .main-content { padding:4.5rem 2rem 2rem;min-height:100vh;position:relative;z-index:1;max-width:1200px;margin:0 auto; }
+  .app-footer { padding:1.25rem 2rem;border-top:1px solid var(--rumi-border);display:flex;justify-content:center;align-items:center;gap:2rem;font-size:0.75rem;color:var(--rumi-text-muted); }
   .footer-status { display:flex;align-items:center;gap:0.375rem; }
-  .status-dot { width:0.375rem;height:0.375rem;background:var(--rumi-safe);border-radius:50%;box-shadow:0 0 6px rgba(45,212,191,0.4); }
+  .status-dot { width:0.375rem;height:0.375rem;background:var(--rumi-safe);border-radius:50%;box-shadow:0 0 6px rgba(16,185,129,0.4); }
+
+  /* ── Mobile bottom nav ── */
   .mobile-nav { display:none;position:fixed;bottom:0;left:0;right:0;height:3.5rem;background:var(--rumi-bg-surface-1);border-top:1px solid var(--rumi-border);z-index:100;justify-content:space-around;align-items:center; }
   .mob-item { display:flex;flex-direction:column;align-items:center;gap:0.125rem;padding:0.375rem 0.75rem;border-radius:0.375rem;color:var(--rumi-text-muted);text-decoration:none;font-size:0.625rem; }
   .mob-item svg { width:1.125rem;height:1.125rem; }
-  .mob-item.active { color:var(--rumi-teal); }
-  @media (max-width:768px) { .sidebar{display:none} .top-header{left:0} .main-content{margin-left:0;padding:4.5rem 1rem 5rem} .app-footer{margin-left:0;padding-bottom:5rem} .mobile-nav{display:flex} }
+  .mob-item.active { color:var(--rumi-action); }
+  @media (max-width:768px) { .top-nav{display:none} .main-content{padding:4rem 1rem 5rem} .mobile-nav{display:flex} }
 </style>

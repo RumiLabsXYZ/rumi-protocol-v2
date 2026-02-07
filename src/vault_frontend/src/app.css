@@ -47,20 +47,26 @@
   --rumi-purple-base: #3b3d85;
   --rumi-purple-light: #7c3aed;
 
-  /* Expressive purple — secondary accent, rare and intentional.
-     Warm violet-magenta: ICP-native energy without neon.
-     Used for: page titles, section headers, icons, dividers.
+  /* Expressive purple — IDENTITY / ORIENTATION color.
+     Used for: page titles, section headers, brand moments.
      NOT for: numbers, balances, risk indicators, buttons. */
   --rumi-purple-accent: #d176e8;
 
-  /* Teal — earned accent, interactive + key values only */
-  --rumi-teal: #2DD4BF;
-  --rumi-teal-bright: #14F0C5;
-  --rumi-teal-muted: #1a9e8f;
-  --rumi-teal-dim: rgba(45, 212, 191, 0.10);
+  /* Neon green — ACTION / INTERACTION color.
+     Used for: buttons, active nav, interactive affordances, focus states.
+     If a title and a button compete, the button wins. */
+  --rumi-action: #00e676;
+  --rumi-action-bright: #4ade80;
+  --rumi-action-muted: #16a34a;
+  --rumi-action-dim: rgba(0, 230, 118, 0.10);
+  /* Legacy aliases — point to action green */
+  --rumi-teal: #00e676;
+  --rumi-teal-bright: #4ade80;
+  --rumi-teal-muted: #16a34a;
+  --rumi-teal-dim: rgba(0, 230, 118, 0.10);
 
-  /* Identity gradient — ONLY for RUMI wordmark/logo, not headlines */
-  --rumi-identity-gradient: linear-gradient(135deg, var(--rumi-purple-light), var(--rumi-teal));
+  /* Identity gradient — ONLY for RUMI wordmark/logo */
+  --rumi-identity-gradient: linear-gradient(135deg, var(--rumi-purple-accent), var(--rumi-action));
 
   /* Text hierarchy */
   --rumi-text-primary: #e8e4f0;
@@ -70,11 +76,11 @@
   /* Borders — indigo-tinted */
   --rumi-border: rgba(90, 100, 180, 0.12);
   --rumi-border-hover: rgba(90, 100, 180, 0.25);
-  --rumi-border-accent: rgba(45, 212, 191, 0.25);
-  --rumi-border-teal: rgba(45, 212, 191, 0.25);
+  --rumi-border-accent: rgba(0, 230, 118, 0.25);
+  --rumi-border-teal: rgba(0, 230, 118, 0.25);
 
-  /* Risk states — the LOUDEST elements */
-  --rumi-safe: #2DD4BF;
+  /* Risk states — SEMANTIC, DO NOT HARMONIZE */
+  --rumi-safe: #10b981;
   --rumi-caution: #f59e0b;
   --rumi-danger: #ef4444;
   --rumi-critical: #f87171;
@@ -146,12 +152,12 @@ h1, h2, h3, h4, h5, h6 {
   margin-bottom: 0.5rem;
 }
 
-/* Section headers */
+/* Section headers — identity color for orientation */
 .section-title {
   font-family: 'Circular Std', 'Inter', sans-serif;
   font-size: 1.25rem;
   font-weight: 500;
-  color: var(--rumi-text-primary);
+  color: var(--rumi-purple-accent);
   letter-spacing: -0.02em;
 }
 
@@ -199,7 +205,12 @@ h1, h2, h3, h4, h5, h6 {
 .glass-panel:hover,
 .glass-card:hover,
 .icp-card:hover {
-  border-color: var(--rumi-border-hover);
+  border-color: rgba(209, 118, 232, 0.08);
+  box-shadow:
+    inset 0 0 20px 0 rgba(209, 118, 232, 0.06),
+    inset 0 1px 0 0 rgba(200, 210, 240, 0.03),
+    0 2px 8px -2px rgba(8, 11, 22, 0.6),
+    0 1px 3px -1px rgba(14, 18, 40, 0.4);
 }
 
 /* Price card — same depth treatment, slightly stronger border */
@@ -232,8 +243,8 @@ h1, h2, h3, h4, h5, h6 {
 
 .icp-button:hover,
 .btn-primary:hover {
-  background: var(--rumi-teal-bright);
-  box-shadow: 0 0 20px rgba(45, 212, 191, 0.15);
+  background: var(--rumi-action-bright);
+  box-shadow: 0 0 20px rgba(0, 230, 118, 0.15);
 }
 
 .icp-button:disabled,
@@ -256,8 +267,8 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .btn-secondary:hover {
-  border-color: var(--rumi-teal);
-  color: var(--rumi-teal);
+  border-color: var(--rumi-action);
+  color: var(--rumi-action);
 }
 
 .btn-danger {
@@ -295,8 +306,8 @@ h1, h2, h3, h4, h5, h6 {
 
 .icp-input:focus {
   outline: none;
-  border-color: var(--rumi-teal);
-  box-shadow: 0 0 0 1px rgba(45, 212, 191, 0.12);
+  border-color: var(--rumi-action);
+  box-shadow: 0 0 0 1px rgba(0, 230, 118, 0.12);
 }
 
 /* ============================================

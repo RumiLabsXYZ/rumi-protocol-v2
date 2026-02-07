@@ -277,7 +277,7 @@
           <div class="flex flex-col gap-3">
             {#if walletsLoading}
               <div class="flex items-center justify-center py-4">
-                <div class="w-6 h-6 border-2 border-teal-400 border-t-transparent rounded-full animate-spin mr-2"></div>
+                <div class="w-6 h-6 border-2 border-green-400 border-t-transparent rounded-full animate-spin mr-2"></div>
                 <span class="text-gray-400">Loading wallets...</span>
               </div>
             {:else}
@@ -317,7 +317,7 @@
 
           {#if connecting}
             <div class="flex justify-center mt-4">
-              <div class="w-6 h-6 border-2 border-teal-400 border-t-transparent rounded-full animate-spin"></div>
+              <div class="w-6 h-6 border-2 border-green-400 border-t-transparent rounded-full animate-spin"></div>
             </div>
           {/if}
           
