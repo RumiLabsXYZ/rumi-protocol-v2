@@ -338,7 +338,7 @@ h1, h2, h3, h4, h5, h6 {
 .doc-title {
   font-family: 'Circular Std', 'Inter', sans-serif;
   font-size: 1.75rem; font-weight: 700;
-  color: var(--rumi-text-primary);
+  color: var(--rumi-purple-accent);
   margin-bottom: 1.5rem;
 }
 .doc-intro {

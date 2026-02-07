@@ -53,7 +53,7 @@
 <style>
   .docs-container { max-width: 700px; margin: 0 auto; }
   .docs-title {
-    color: var(--rumi-text-primary);
+    /* Inherits purple from .page-title in app.css — no override */
   }
   .docs-subtitle {
     font-size: 0.9375rem; color: var(--rumi-text-secondary);

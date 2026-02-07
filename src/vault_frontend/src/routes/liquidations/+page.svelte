@@ -162,7 +162,7 @@
 
       <div class="action-card">
         <div class="card-header">
-          <h2 class="section-title">Liquidatable Vaults</h2>
+          <h2 class="section-title card-label">Liquidatable Vaults</h2>
           <button class="btn-secondary btn-sm" on:click={loadLiquidatableVaults} disabled={isLoading}>
             {isLoading ? 'Loading…' : 'Refresh'}
           </button>
@@ -297,4 +297,7 @@
     .page-layout { grid-template-columns: 1fr; }
     .context-column { position: static; }
   }
+
+  /* Card-level labels should be off-white, not purple */
+  .card-label { color: var(--rumi-text-primary); }
 </style>

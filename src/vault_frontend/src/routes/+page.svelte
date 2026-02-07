@@ -144,7 +144,7 @@
                     style="width:{Math.min(calculatedCollateralRatio / 3, 100)}%"></div>
                 </div>
                 <p class="form-hint">
-                  {isValidCollateralRatio ? 'Healthy. Higher ratio = lower liquidation risk.' : 'Below 130% minimum.'}
+                  {isValidCollateralRatio ? 'Healthy. Higher ratio = lower liquidation risk.' : 'Below 150% minimum.'}
                 </p>
               </div>
             {/if}
@@ -211,8 +211,10 @@
   .ratio-header { display: flex; justify-content: space-between; font-size: 0.8125rem; color: var(--rumi-text-secondary); margin-bottom: 0.375rem; }
   .ratio-track { height: 4px; background: var(--rumi-bg-surface3); border-radius: 2px; overflow: hidden; }
   .ratio-fill { height: 100%; border-radius: 2px; transition: width 0.3s ease; }
-  .ratio-safe { color: var(--rumi-safe); background: var(--rumi-safe); }
-  .ratio-danger { color: var(--rumi-danger); background: var(--rumi-danger); }
+  .ratio-safe { color: var(--rumi-safe); }
+  .ratio-danger { color: var(--rumi-danger); }
+  .ratio-fill.ratio-safe { background: var(--rumi-safe); }
+  .ratio-fill.ratio-danger { background: var(--rumi-danger); }
 
   /* Messages */
   .msg-error { padding: 0.625rem; background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.2); border-radius: 0.5rem; font-size: 0.8125rem; color: #fca5a5; }

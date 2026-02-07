@@ -1,178 +1,117 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { goto } from '$app/navigation';
-  import { appDataStore, userVaults, isLoadingVaults, walletConnected } from '$lib/stores/appDataStore';
+  import { appDataStore, userVaults, isLoadingVaults } from '$lib/stores/appDataStore';
   import { walletStore, isConnected, principal } from '$lib/stores/wallet';
   import { permissionStore } from '$lib/stores/permissionStore';
   import VaultCard from '$lib/components/vault/VaultCard.svelte';
-  import BatchApprovalManager from '$lib/components/vault/BatchApprovalManager.svelte';
-  import { selectedWalletId } from '$lib/services/auth';
   import { isDevelopment } from '$lib/config';
   import { developerAccess } from '$lib/stores/developer';
-  import { get } from 'svelte/store';
 
-  let showBatchApproval = false;
   let icpPrice = 0;
-  
-  // Simple reactive derived value for vault access - include developer access
-  $: canViewVaults = isDevelopment || $developerAccess || $isConnected || ($permissionStore.initialized && $permissionStore.canViewVaults);
-  
-  // Debug logging
-  $: if (typeof canViewVaults !== 'undefined') {
-    console.log('🔍 Vault access check:', {
-      isDevelopment,
-      developerAccess: $developerAccess,
-      isConnected: $isConnected,
-      permissionStoreInitialized: $permissionStore.initialized,
-      permissionStoreCanViewVaults: $permissionStore.canViewVaults,
-      finalCanViewVaults: canViewVaults
-    });
-  }
 
-  // Auto-load data when wallet connects
+  $: canViewVaults = isDevelopment || $developerAccess || $isConnected
+    || ($permissionStore.initialized && $permissionStore.canViewVaults);
+
+  // Auto-load on wallet connect
   $: if ($isConnected && $principal && !$isLoadingVaults) {
-    console.log('🚀 Wallet connected - loading user vaults...');
     loadUserVaults();
   }
 
   async function loadUserVaults() {
-    if (!$principal) {
-      console.warn('No principal available for loading vaults');
-      return;
-    }
-
+    if (!$principal) return;
     try {
-      // Load protocol status for price info
       const protocolStatus = await appDataStore.fetchProtocolStatus();
-      if (protocolStatus) {
-        icpPrice = protocolStatus.lastIcpRate;
-      }
-      
-      // Load user vaults
+      if (protocolStatus) icpPrice = protocolStatus.lastIcpRate;
       await appDataStore.fetchUserVaults($principal);
     } catch (error) {
-      console.error('Error loading user vaults:', error);
+      console.error('Error loading vaults:', error);
     }
-  }
-
-  // Check if user should see batch approval
-  $: {
-    const walletId = get(selectedWalletId);
-    showBatchApproval = walletId === 'plug' && ($userVaults.length > 0 || $isConnected);
   }
 
   onMount(() => {
-    console.log('🚀 Vaults page mounted');
-    // Data loading is handled by reactive statements when wallet state changes
+    console.log('Vaults page mounted');
   });
 </script>
 
-<div class="max-w-4xl mx-auto p-6">
+<div class="page-container">
+  <div class="page-header">
+    <h1 class="page-title">My Vaults</h1>
+    {#if $isConnected}
+      <button class="btn-secondary btn-compact" on:click={loadUserVaults}
+        disabled={$isLoadingVaults}>
+        {$isLoadingVaults ? 'Refreshing…' : 'Refresh'}
+      </button>
+    {/if}
+  </div>
+
   {#if !canViewVaults}
-    <!-- Developer Access Required Section -->
-    <div class="glass-card mb-8">
-      <div class="flex items-center gap-2 mb-4">
-        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-        </svg>
-        <h2 class="text-2xl font-semibold">Developer Access Required</h2>
-      </div>
-      
-      <p class="text-gray-300 mb-6">
-        The vaults feature is currently in development. Please enter your developer passkey to continue.
-      </p>
+    <div class="empty-state glass-card">
+      <p class="empty-text">Connect your wallet to view vaults.</p>
+    </div>
+  {:else if !$isConnected}
+    <div class="empty-state glass-card">
+      <p class="empty-text">Connect your wallet to view your vaults.</p>
+      <p class="empty-sub">Use the wallet button in the top right corner.</p>
+    </div>
+  {:else if $isLoadingVaults && $userVaults.length === 0}
+    <div class="empty-state">
+      <div class="spinner"></div>
+    </div>
+  {:else if $userVaults.length === 0}
+    <div class="empty-state glass-card">
+      <p class="empty-text">No vaults yet.</p>
+      <a href="/" class="btn-primary">Create Your First Vault</a>
     </div>
   {:else}
-    <!-- ICP Price Display -->
-    <div class="mb-8 price-card">
-      <div class="flex justify-between items-center mb-2">
-        <h2 class="text-2xl font-bold">Current ICP Price</h2>
-        <div class="bg-purple-900/20 px-3 py-1 rounded-full text-xs text-green-400 flex items-center gap-2">
-          <span class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></span>
-          Developer Mode
-        </div>
-      </div>
-      
-      {#if $isLoadingVaults && !icpPrice}
-        <div class="flex items-center gap-2">
-          <div class="w-5 h-5 border-2 border-green-400 border-t-transparent rounded-full animate-spin"></div>
-          <span>Loading price...</span>
-        </div>
-      {:else}
-        <p class="text-xl">${icpPrice.toFixed(2)} USD</p>
-      {/if}
-    </div>
-
-    <!-- Vaults Section -->
-    <div class="mb-10">
-      <div class="flex justify-between items-center">
-        <div>
-          <h1 class="text-3xl font-bold mb-2 mt-8">My Vaults</h1>
-          <p class="text-gray-400">Manage your collateral and mint icUSD</p>
-        </div>
-        
-        {#if $isConnected}
-          <button 
-            on:click={() => loadUserVaults()}
-            class="px-4 py-2 btn-secondary rounded-md text-sm"
-            disabled={$isLoadingVaults}
-          >
-            {$isLoadingVaults ? 'Refreshing...' : 'Refresh'}
-          </button>
-        {/if}
-      </div>
-    </div>
-
-    <!-- Display content based on connection status and data -->
-    {#if !$isConnected}
-      <div class="text-center p-12 bg-gray-900/50 rounded-lg backdrop-blur-sm">
-        <p class="text-xl text-gray-300 mb-4">Please connect your wallet to view your vaults</p>
-        <p class="text-gray-400">Use the wallet button in the top right corner to connect</p>
-      </div>
-    {:else if $isLoadingVaults && $userVaults.length === 0}
-      <div class="flex justify-center p-12">
-        <div class="w-8 h-8 border-4 border-green-400 border-t-transparent rounded-full animate-spin"></div>
-      </div>
-    {:else if $userVaults.length === 0}
-      <div class="text-center p-12 bg-gray-900/50 rounded-lg backdrop-blur-sm">
-        <p class="text-xl text-gray-300 mb-4">You don't have any vaults yet</p>
-        <a 
-          href="/"
-          class="inline-block px-6 py-3 btn-primary rounded-lg"
-        >
-          Create Your First Vault
-        </a>
-      </div>
-    {:else}
-      <!-- Display vaults list when we have vaults -->
-      <div class="space-y-6">
-        {#each $userVaults as vault (vault.vaultId)}
-          <VaultCard {vault} {icpPrice} on:select={(event) => goto(`/vaults/${event.detail.vaultId}`)} />
-        {/each}
-      </div>
-    {/if}
-
-    <!-- Status indicator for debugging -->
-    <div class="mt-6 text-xs text-gray-500">
-      <p>Status: {$isConnected ? 'Connected' : 'Not connected'} | 
-         Principal: {$principal || 'None'} | 
-         Vaults: {$userVaults.length}</p>
+    <div class="vault-list">
+      {#each $userVaults as vault (vault.vaultId)}
+        <VaultCard {vault} {icpPrice} on:updated={loadUserVaults} />
+      {/each}
     </div>
   {/if}
 </div>
 
 <style>
-  .price-card {
-    background: var(--rumi-bg-surface1);
-    border: 1px solid var(--rumi-border-hover);
-    border-radius: 0.75rem;
-    padding: 1.5rem;
+  .page-container { max-width: 800px; margin: 0 auto; }
+  .page-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1.25rem;
+  }
+  .btn-compact {
+    padding: 0.375rem 0.875rem;
+    font-size: 0.75rem;
   }
 
-  .glass-card {
-    background: var(--rumi-bg-surface1);
-    border: 1px solid var(--rumi-border);
-    border-radius: 0.75rem;
-    padding: 1.5rem;
+  .vault-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
   }
+
+  .empty-state {
+    text-align: center;
+    padding: 3rem 1.5rem;
+  }
+  .empty-text {
+    font-size: 0.9375rem;
+    color: var(--rumi-text-secondary);
+    margin-bottom: 0.75rem;
+  }
+  .empty-sub {
+    font-size: 0.8125rem;
+    color: var(--rumi-text-muted);
+  }
+
+  .spinner {
+    width: 1.5rem;
+    height: 1.5rem;
+    border: 2px solid var(--rumi-border-hover);
+    border-top-color: var(--rumi-action);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin: 0 auto;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
 </style>
