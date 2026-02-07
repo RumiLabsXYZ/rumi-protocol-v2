@@ -151,26 +151,24 @@
     }
   }
 
-  // Clamp on blur — don't fight mid-typing, fix on exit
+  // Clamp on blur — only clamp to zero if empty/negative, do NOT auto-reduce over-max
   function clampAddCollateral() {
     const v = parseFloat(addCollateralAmount);
-    if (!v || v <= 0) { addCollateralAmount = ''; return; }
-    if (v > maxAddCollateral && maxAddCollateral > 0) addCollateralAmount = maxAddCollateral.toFixed(4);
+    if (isNaN(v) || v < 0) { addCollateralAmount = ''; return; }
   }
   function clampBorrow() {
     const v = parseFloat(borrowAmount);
-    if (!v || v <= 0) { borrowAmount = ''; return; }
-    if (v > maxBorrowable && maxBorrowable > 0) borrowAmount = maxBorrowable.toFixed(2);
+    if (isNaN(v) || v < 0) { borrowAmount = ''; return; }
   }
   function clampRepay() {
     const v = parseFloat(repayAmount);
-    if (!v || v <= 0) { repayAmount = ''; return; }
-    if (v > maxRepayable && maxRepayable > 0) repayAmount = maxRepayable.toFixed(4);
+    if (isNaN(v) || v < 0) { repayAmount = ''; return; }
   }
 
   async function handleAddCollateral() {
     const amount = parseFloat(addCollateralAmount);
     if (!amount || amount <= 0) { actionError = 'Enter a valid ICP amount'; return; }
+    if (addOverMax) { actionError = `Exceeds wallet balance (${formatNumber(maxAddCollateral, 4)} ICP)`; return; }
     clearMessages(); isProcessing = true;
     try {
       const amountE8s = BigInt(Math.floor(amount * E8S));
@@ -194,7 +192,7 @@
   async function handleBorrow() {
     const amount = parseFloat(borrowAmount);
     if (!amount || amount <= 0) { actionError = 'Enter a valid icUSD amount'; return; }
-    if (amount > maxBorrowable) { actionError = `Max: ${maxBorrowable.toFixed(2)} icUSD`; return; }
+    if (borrowOverMax || borrowCrInvalid) { actionError = `Max: ${formatNumber(maxBorrowable, 2)} icUSD`; return; }
     clearMessages(); isProcessing = true;
     try {
       const result = await protocolService.borrowFromVault(vault.vaultId, amount);
@@ -209,7 +207,7 @@
   async function handleRepay() {
     const amount = parseFloat(repayAmount);
     if (!amount || amount <= 0) { actionError = 'Enter a valid amount'; return; }
-    if (amount > maxRepayable) { actionError = `Max: ${maxRepayable.toFixed(2)} icUSD`; return; }
+    if (repayOverMax) { actionError = `Max: ${formatNumber(maxRepayable, 2)} icUSD`; return; }
     clearMessages(); isProcessing = true;
     try {
       const result = await protocolManager.repayToVault(vault.vaultId, amount);
