@@ -439,23 +439,24 @@ Dense, expandable inline vault list with full risk-forward UX:
 | **Stable ordering** | Expanding/collapsing a vault does NOT reorder the list |
 | **No sort controls** | No dropdowns, toggles, or configuration for MVP |
 
-#### Liquidations — Profit-Forward Table Rewrite (Feb 7)
-Complete structural rework from dashboard-style cards to dense exchange-like table:
+#### Liquidations — Row-Card Redesign (Feb 7, v2)
+Replaced the table-based liquidation UI with card-like rows matching the Vaults page:
 
 | Change | Details |
 |--------|---------|
-| **Layout** | Removed right-side ProtocolStats panel. Full-width single column (900px max) |
-| **ICP price** | Inline pill next to page title (not a detached card) |
-| **Summary** | Compact: "3 liquidatable vaults · Refresh" |
-| **Table semantics** | Real `<table>`, tight padding, minimal corners, order-book density |
-| **Column order** | # → **Profit** → CR → Debt → Collateral → Action |
-| **Profit emphasis** | 0.875rem, weight 600, anchors each row. USD sub-value in muted text (NOT green) |
-| **CR colors** | Red <130%, amber 130-150%, neutral ≥150%. Applied to text only, not row |
-| **Action de-escalation** | "Liquidate" is a ghost button (12% red bg, 25% border). Not loud. |
-| **Partial liquidation** | Input + "Go" button revealed on row hover only |
-| **Row hover** | Subtle 5% indigo background wash |
-| **No green anywhere** | Profit is neutral white. No "success" color on this page. |
-| **Sorted by CR ascending** | Most profitable / riskiest vaults at top |
+| **Layout** | Row-cards (not table). Same surface/border/shadow as VaultCard |
+| **No hover expansion** | Fixed-height cards, no reflow, no layout shifts |
+| **Unified liquidation** | ONE flow: user inputs icUSD to repay, protocol handles full vs partial internally |
+| **No mode switching** | Removed "Partial / Full" distinction from UI entirely |
+| **Input per row** | Numeric icUSD input with inline neutral "Max" text |
+| **Max cap** | min(wallet icUSD balance, vault's outstanding debt) |
+| **Seizure hint** | "→ Seize ~0.42 ICP" shown when input is valid, neutral text |
+| **Button** | Single emerald "Liquidate" button (NOT red). Disabled until input > 0. |
+| **Over-max guard** | Button disabled + "Exceeds max" hint when input > max |
+| **CR coloring** | Red <130%, amber 130-150%. Warning icon on danger. Only colored element. |
+| **Est. Profit** | Full-debt profit estimate shown in info row (USD) |
+| **Row hover** | Subtle purple inner glow, no expansion |
+| **Sort** | CR ascending, vault ID tiebreaker |
 
 ### Git Log (feature/ui-updates, key commits)
 ```
