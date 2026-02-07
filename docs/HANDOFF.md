@@ -335,7 +335,7 @@ get_icp_price : () -> (nat64) query
 |--------|--------|-------|
 | **Plug** | ✅ Working | Primary testing wallet |
 | **Internet Identity** | ✅ Working | Send/Receive implemented, uses `https://id.ai` portal |
-| **Oisy** | 🔴 Partially Blocked | ICP ICRC-2 fails; icUSD under test |
+| **Oisy** | 🔴 Greyed out ("Coming Soon") | ICRC-2 incompatible with ICP ledger; icUSD untested. Disabled in wallet selector. |
 
 ### Oisy Wallet - Current Status
 
