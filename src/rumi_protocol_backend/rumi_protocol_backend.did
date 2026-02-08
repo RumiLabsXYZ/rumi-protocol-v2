@@ -258,6 +258,12 @@ service : (ProtocolArg) -> {
   liquidate_vault_partial : (nat64, nat64) -> (variant { Ok : SuccessWithFee; Err : ProtocolError });
   liquidate_vault_partial_with_stable : (nat64, nat64, StableTokenType) -> (variant { Ok : SuccessWithFee; Err : ProtocolError });
   
+  // Stable token repayment admin functions
+  set_ckstable_repay_fee : (float64) -> (variant { Ok; Err : ProtocolError });
+  get_ckstable_repay_fee : () -> (float64) query;
+  set_stable_token_enabled : (StableTokenType, bool) -> (variant { Ok; Err : ProtocolError });
+  get_stable_token_enabled : (StableTokenType) -> (bool) query;
+  
   // ICRC-21 Consent Message (for wallet integration like Oisy)
   icrc21_canister_call_consent_message : (Icrc21ConsentMessageRequest) -> (variant { Ok : Icrc21ConsentInfo; Err : Icrc21Error });
   

@@ -294,6 +294,129 @@ export class walletOperations {
   }
 
   /**
+   * Approve ckUSDT or ckUSDC transfer for stable token repayments.
+   * Uses the same ICRC-2 interface as icUSD since all are ICRC-2 compliant ledgers.
+   */
+  static async approveStableTransfer(
+    amount: bigint,
+    spenderCanisterId: string,
+    tokenType: 'CKUSDT' | 'CKUSDC'
+  ): Promise<{success: boolean, error?: string}> {
+    const maxRetries = 2;
+    const ledgerId = CONFIG.getStableLedgerId(tokenType);
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        if (attempt > 0) {
+          console.log(`Retrying ${tokenType} approval (attempt ${attempt + 1}/${maxRetries + 1})...`);
+          try {
+            await walletStore.refreshWallet();
+            await new Promise(resolve => setTimeout(resolve, 500));
+          } catch (refreshErr) {
+            console.warn('Wallet refresh failed during retry:', refreshErr);
+          }
+        }
+
+        console.log(`Approving ${amount.toString()} e6s ${tokenType} for ${spenderCanisterId}`);
+
+        // Use icUSD ledger IDL — all ICRC-2 ledgers share the same interface
+        const stableActor = await walletStore.getActor(ledgerId, CONFIG.icusd_ledgerIDL) as IcusdLedgerService;
+
+        const approvalResult = await stableActor.icrc2_approve({
+          amount,
+          spender: {
+            owner: Principal.fromText(spenderCanisterId),
+            subaccount: []
+          },
+          expires_at: [],
+          expected_allowance: [],
+          memo: [],
+          fee: [],
+          from_subaccount: [],
+          created_at_time: []
+        });
+
+        if ('Ok' in approvalResult) {
+          console.log(`${tokenType} approval successful`);
+          return { success: true };
+        } else {
+          return {
+            success: false,
+            error: `${tokenType} approval failed: ${JSON.stringify(approvalResult.Err)}`
+          };
+        }
+      } catch (error) {
+        console.error(`${tokenType} approval failed (attempt ${attempt + 1}/${maxRetries + 1}):`, error);
+
+        if (isStaleActorError(error) && attempt < maxRetries) {
+          console.log(`Detected stale actor error during ${tokenType} approval, will refresh and retry...`);
+          continue;
+        }
+
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : `Failed to approve ${tokenType} transfer`
+        };
+      }
+    }
+
+    return {
+      success: false,
+      error: `Failed to approve ${tokenType} transfer after multiple attempts`
+    };
+  }
+
+  /**
+   * Check stable token allowance (ckUSDT or ckUSDC)
+   */
+  static async checkStableAllowance(
+    spenderCanisterId: string,
+    tokenType: 'CKUSDT' | 'CKUSDC'
+  ): Promise<bigint> {
+    const maxRetries = 2;
+    const ledgerId = CONFIG.getStableLedgerId(tokenType);
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        if (attempt > 0) {
+          await walletStore.refreshWallet();
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+
+        const stableActor = await walletStore.getActor(ledgerId, CONFIG.icusd_ledgerIDL) as IcusdLedgerService;
+
+        const walletState = get(walletStore);
+        if (!walletState.principal) {
+          return BigInt(0);
+        }
+
+        const allowance = await stableActor.icrc2_allowance({
+          account: {
+            owner: walletState.principal,
+            subaccount: []
+          },
+          spender: {
+            owner: Principal.fromText(spenderCanisterId),
+            subaccount: []
+          }
+        });
+
+        return allowance.allowance;
+      } catch (error) {
+        console.error(`${tokenType} allowance check failed (attempt ${attempt + 1}):`, error);
+
+        if (isStaleActorError(error) && attempt < maxRetries) {
+          continue;
+        }
+
+        return BigInt(0);
+      }
+    }
+
+    return BigInt(0);
+  }
+
+  /**
    * Get current icUSD balance with retry on stale actor
    */
   static async getIcusdBalance(): Promise<number> {

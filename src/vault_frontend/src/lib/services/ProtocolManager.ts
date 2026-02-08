@@ -512,6 +512,80 @@ export class ProtocolManager {
   }
 
   /**
+   * Repay vault debt using ckUSDT or ckUSDC with proper ICRC-2 approval flow.
+   * Mirrors the icUSD repay flow: check allowance → approve if needed → call backend.
+   * Amount is in human-readable terms (e.g., 100.0 = 100 USDT).
+   * Uses 6-decimal (e6s) amounts for stable tokens.
+   */
+  async repayToVaultWithStable(
+    vaultId: number,
+    amount: number,
+    tokenType: 'CKUSDT' | 'CKUSDC'
+  ): Promise<VaultOperationResult> {
+    return this.executeOperation(
+      `repayVaultStable:${vaultId}`,
+      async () => {
+        // Refresh wallet connection
+        try {
+          console.log('🔄 Refreshing wallet connection before stable repayment...');
+          await walletStore.refreshWallet();
+          await new Promise(resolve => setTimeout(resolve, 500));
+        } catch (refreshErr) {
+          console.warn('Wallet refresh failed, attempting to continue:', refreshErr);
+        }
+
+        // Calculate the stable token amount in e6s (6 decimals)
+        // The backend will handle the e8s/e6s conversion for debt accounting,
+        // but approval needs to be in e6s for the stable token ledger.
+        const E6S = 1_000_000;
+        const amountE6s = BigInt(Math.floor(amount * E6S));
+        const spenderCanisterId = CONFIG.currentCanisterId;
+
+        // Add 5% buffer for fees and rounding (matches icUSD pattern)
+        const requiredAllowance = amountE6s + (amountE6s * BigInt(5) / BigInt(100));
+
+        try {
+          // Check current allowance on the stable token ledger
+          const currentAllowance = await walletOperations.checkStableAllowance(spenderCanisterId, tokenType);
+          console.log(`💰 Stable repay pre-check: Current ${tokenType} allowance: ${Number(currentAllowance) / E6S}`);
+          console.log(`💰 Stable repay pre-check: Required ${tokenType} amount: ${amount}`);
+
+          if (currentAllowance < requiredAllowance) {
+            processingStore.setStage(ProcessingStage.APPROVING);
+            console.log(`🔐 Setting ${tokenType} approval - insufficient allowance (have: ${Number(currentAllowance) / E6S}, need: ${Number(requiredAllowance) / E6S})`);
+
+            const approvalResult = await walletOperations.approveStableTransfer(requiredAllowance, spenderCanisterId, tokenType);
+
+            if (!approvalResult.success) {
+              throw new Error(approvalResult.error || `Failed to approve ${tokenType} transfer`);
+            }
+
+            // Wait for approval to settle
+            await new Promise(resolve => setTimeout(resolve, 1500));
+
+            // Verify the approval took effect
+            const newAllowance = await walletOperations.checkStableAllowance(spenderCanisterId, tokenType);
+            console.log(`✅ Post-approval ${tokenType} allowance: ${Number(newAllowance) / E6S}`);
+
+            if (newAllowance < amountE6s) {
+              throw new Error(`${tokenType} approval verification failed - allowance still insufficient: ${Number(newAllowance) / E6S} < ${amount}`);
+            }
+          } else {
+            console.log(`✅ Sufficient ${tokenType} allowance already exists: ${Number(currentAllowance) / E6S}`);
+          }
+        } catch (err) {
+          console.error(`❌ ${tokenType} allowance check/approval failed:`, err);
+          throw new Error(`Failed to ensure ${tokenType} allowance for repayment: ${err instanceof Error ? err.message : 'Unknown error'}`);
+        }
+
+        // Now execute the actual repayment via the backend
+        processingStore.setStage(ProcessingStage.PROCESSING);
+        return await ApiClient.repayToVaultWithStable(vaultId, amount, tokenType);
+      }
+    );
+  }
+
+  /**
    * Close an existing vault
    */
   async closeVault(vaultId: number): Promise<VaultOperationResult> {

@@ -1,10 +1,12 @@
 # PR #1 Audit Review: ckUSDT/ckUSDC Repayment & Liquidation
 
-**Date:** 2026-02-07  
-**Reviewer:** Rob (with AI audit assistance)  
-**PR:** `feature/ckusdt-ckusdc-repayment` → `main`  
-**Author:** Agnes  
-**Status:** ❌ DO NOT MERGE — critical issues identified
+**Date:** 2026-02-07 (updated 2026-02-08)
+**Reviewer:** Rob (with AI audit assistance)
+**PR:** `feature/ckusdt-ckusdc-repayment` → `main`
+**Author:** Agnes
+**Status:** 🟡 FIXES IMPLEMENTED — pending Agnes review
+**Design spec:** See `docs/STABLE_REPAYMENT_DESIGN.md`
+**Fix branch:** `feature/ckusdt-ckusdc-repayment-fixes` (5 commits)
 
 ---
 
@@ -12,108 +14,94 @@
 
 This PR adds the ability to repay vault debt or liquidate underwater vaults using ckUSDT or ckUSDC instead of icUSD, at a hardcoded 1:1 exchange rate. Changes span the full stack: Rust backend (new canister endpoints, transfer functions, state fields), Candid interface (new types and methods), treasury (new asset types), and Svelte frontend (token selector dropdown, new API client method).
 
+The original PR had 4 critical vulnerabilities and several significant concerns. All have been addressed on the fixes branch.
+
 ---
 
-## 🔴 Critical Issues (Must Fix Before Merge)
+## 🔴 Critical Issues
 
 ### 1. Decimal Mismatch — 6-decimal tokens treated as 8-decimal
 
-**Severity:** CRITICAL — potential 100x fund loss  
+**Severity:** CRITICAL — potential 100x fund loss
 **Files:** `vault.rs`, `management.rs`, `apiClient.ts`
 
-ckUSDT and ckUSDC on ICP use **6 decimal places** (1 USDT = 1,000,000 raw units). icUSD uses **8 decimal places** (1 icUSD = 100,000,000 raw units).
+ckUSDT/ckUSDC use 6 decimal places (1 USDT = 1,000,000 raw units). icUSD uses 8 (1 icUSD = 100,000,000 raw units). The code passed e8s amounts directly to 6-decimal ledgers — a user repaying 1 icUSD would have 100 USDT pulled from their wallet.
 
-The code does:
-```rust
-let amount: ICUSD = arg.amount.into(); // Treat as 1:1 with icUSD
-```
-
-And the frontend sends:
-```typescript
-amount: BigInt(Math.floor(amount * E8S)),  // E8S = 10^8
-```
-
-But `transfer_ckusdt_from` / `transfer_ckusdc_from` pass the raw amount directly to the 6-decimal ledger:
-```rust
-amount: Nat::from(amount),
-```
-
-**Impact:** A user trying to repay 1 icUSD sends `100_000_000` as the raw amount. The backend pulls `100_000_000` raw units from their ckUSDT wallet — that's **100 USDT**, not 1 USDT. This is a 100x overcharge.
-
-**Fix required:** Convert between 8-decimal (icUSD internal) and 6-decimal (ckUSDT/ckUSDC ledger) representations. The backend needs a scaling factor: `stable_amount = icusd_e8s_amount / 100` when calling the stable ledger, and the debt reduction should still use the 8-decimal icUSD value.
+**Status:** ✅ FIXED in `ff3fcaf`
+**What was done:**
+- Backend `vault.rs`: Truncate `debt_reduction_e8s` to nearest 100 for clean division, then `stable_e6s = debt_reduction_e8s / 100`
+- Backend `vault.rs`: Added `ckstable_repay_fee` surcharge (default 0.02%) applied on the payment side — user pays slightly more ckstable, debt reduction is exact. Fee calculated as `fee_e6s = base_stable_e6s * ckstable_repay_fee`
+- `management.rs`: Transfer functions now receive amounts in e6s after conversion
+- Frontend unchanged — sends human-readable amounts, backend does all conversion
 
 ---
 
-### 2. No icUSD Burned on Stable Repayment — Protocol Accounting Breaks
+### 2. No icUSD Burned on Stable Repayment
 
-**Severity:** CRITICAL — breaks protocol invariants  
-**Files:** `vault.rs` (`repay_to_vault_with_stable`, `liquidate_vault_partial_with_stable`)
+**Severity:** CRITICAL (originally) → ✅ **RESOLVED BY DESIGN**
+**Files:** `vault.rs`
 
-When repaying with icUSD via `repay_to_vault`, the protocol receives icUSD and the vault's debt counter decreases. The icUSD supply naturally shrinks because the protocol holds those tokens.
+When repaying with ckUSDT/ckUSDC, the vault's icUSD debt decreases but no icUSD is burned from circulation.
 
-When repaying with ckUSDT/ckUSDC via `repay_to_vault_with_stable`, the protocol receives ckUSDT, reduces the vault's icUSD debt counter, but **no icUSD is burned or removed from circulation**. 
+**Status:** ✅ RESOLVED — no code change needed
+**Design decision:** This is intentional. The accumulated ckstables are held in the backend canister as a **protocol reserve** for future redemptions during icUSD depeg scenarios. More icUSD in circulation is desirable for liquidity. The system-wide CR formula is adjusted:
 
-**Impact:** Total icUSD supply stays the same while recorded debt goes down. Over time this breaks the fundamental accounting invariant: `total_icusd_minted ≈ total_outstanding_vault_debt`. The protocol becomes undercollateralized in terms of icUSD backing. This is exploitable: mint icUSD from vault, sell it on market, repay with cheap ckUSDT, keep the difference.
+```
+total_icusd_repaid_via_stables = total_ckstable_held / (1 + ckstable_repay_fee)
+Adjusted CR = total_icp_collateral_value / (total_icusd_minted - total_icusd_repaid_via_stables)
+```
 
-**Fix required:** When accepting ckUSDT/ckUSDC for repayment, the protocol must also burn the equivalent icUSD amount from somewhere (protocol reserves, or require the user to also surrender icUSD). Alternatively, the protocol needs to swap the received stablecoins for icUSD and burn that. This is an architectural question that needs a design decision before implementation.
+See `STABLE_REPAYMENT_DESIGN.md` for full details on the reserve strategy.
 
 ---
 
 ### 3. No ICRC-2 Approval Flow for ckUSDT/ckUSDC in Frontend
 
-**Severity:** CRITICAL — all stable repayments will fail  
+**Severity:** CRITICAL — all stable repayments would fail with `InsufficientAllowance`
 **Files:** `VaultDetails.svelte`, `apiClient.ts`
 
-The existing icUSD repayment goes through `protocolManager.repayToVault()` which handles ICRC-2 approval internally. The new stable path calls `ApiClient.repayToVaultWithStable()` directly, which just does the `transfer_from` backend call — but the user **never approved the protocol canister to spend their ckUSDT/ckUSDC**.
+The stable repayment path called the backend's `transfer_from` directly without the user ever approving the protocol canister to spend their ckUSDT/ckUSDC.
 
-The code has this comment:
-```typescript
-// Note: User needs to approve the stable token transfer first
-```
-
-But no approval is actually requested anywhere in the code.
-
-**Impact:** Every stable repayment will fail with an `InsufficientAllowance` error from the ledger. The feature is non-functional as written.
-
-**Fix required:** Add ICRC-2 `approve` call to the ckUSDT/ckUSDC ledger before calling `repay_to_vault_with_stable`. This needs the ledger canister IDs (already in `config.ts`) and proper actor creation for those ledgers.
+**Status:** ✅ FIXED in `49d65c6`
+**What was done:**
+- `walletOperations.ts`: Added `approveStableTransfer()` — calls `icrc2_approve` on the ckUSDT or ckUSDC ledger, with retry logic on stale actor errors. Reuses the icUSD ledger IDL since all ICRC-2 ledgers share the same interface.
+- `walletOperations.ts`: Added `checkStableAllowance()` — queries current allowance on the stable token ledger before deciding whether to approve.
+- `ProtocolManager.ts`: Added `repayToVaultWithStable()` — full approval flow mirroring the existing icUSD pattern: check current allowance → approve with 5% buffer if insufficient → wait 1.5s for approval to settle → verify approval → call `ApiClient.repayToVaultWithStable()`. Works in e6s (6 decimals) for the stable token ledger.
+- `config.ts`: Added `getStableLedgerId(tokenType)` helper to resolve ckUSDT or ckUSDC ledger canister ID.
+- `VaultDetails.svelte`: Updated stable repay path to call `protocolManager.repayToVaultWithStable()` instead of `ApiClient` directly. Removed manual `isApproving` flag since ProtocolManager handles processing stages.
 
 ---
 
 ### 4. Missing `validate_call()` on `liquidate_vault_partial_with_stable`
 
-**Severity:** CRITICAL — allows anonymous callers, skips price staleness check  
+**Severity:** CRITICAL — allowed anonymous callers, skipped price staleness check
 **File:** `main.rs`
 
-The new liquidation endpoint:
-```rust
-async fn liquidate_vault_partial_with_stable(vault_id: u64, amount: u64, token_type: StableTokenType) -> Result<SuccessWithFee, ProtocolError> {
-    check_postcondition(rumi_protocol_backend::vault::liquidate_vault_partial_with_stable(vault_id, amount, token_type).await)
-}
-```
+The new liquidation endpoint was missing `validate_call()?;` which every other mutation endpoint has.
 
-Compare with `repay_to_vault_with_stable` which correctly has:
-```rust
-    validate_call()?;  // ← this is missing from the liquidation function
-    check_postcondition(...)
-```
-
-`validate_call()` does two things: (1) blocks anonymous principals, and (2) checks the ICP price isn't stale. Without it, an attacker could call with `Principal::anonymous()` and liquidate vaults using an outdated ICP price.
-
-**Fix required:** Add `validate_call()?;` before `check_postcondition` in `liquidate_vault_partial_with_stable`.
+**Status:** ✅ FIXED in `028f4af`
+**What was done:**
+- `main.rs`: Added `validate_call()?;` before `check_postcondition` in `liquidate_vault_partial_with_stable`. One-line fix.
 
 ---
 
-## 🟡 Significant Concerns (Should Fix)
+## 🟡 Significant Concerns
 
-### 5. Hardcoded 1:1 Peg Assumption — No Oracle, No Kill-Switch
+### 5. Hardcoded 1:1 Peg Assumption — No Depeg Protection
 
 **Files:** `vault.rs`, design-level
 
-The entire feature assumes `ckUSDT = ckUSDC = 1 icUSD` at all times. Stablecoins do depeg — USDC dropped to ~$0.87 in March 2023, USDT has had episodes.
+The feature assumed ckUSDT = ckUSDC = 1 icUSD at all times with no protection against stablecoin depegs.
 
-**Risk:** If ckUSDT depegs to $0.90, someone could buy cheap ckUSDT and repay $1-denominated icUSD debt at a 10% discount, extracting value from the protocol.
-
-**Recommendation:** At minimum, add an admin function to enable/disable specific stable tokens. Ideally, use a price feed or set acceptable deviation bounds. Document this as a known risk in the protocol docs.
+**Status:** ✅ FIXED in `ff3fcaf`
+**What was done:**
+- `state.rs`: Added `ckstable_repay_fee` (default 0.0002 / 0.02%) and `ckusdt_enabled` / `ckusdc_enabled` (default true) fields to protocol state.
+- `main.rs`: Added `set_ckstable_repay_fee(new_rate)` admin endpoint — developer-only, rejects values outside 0.0–0.05 (0–5%) range. Can be cranked up during depeg events as a soft kill-switch.
+- `main.rs`: Added `set_stable_token_enabled(token_type, enabled)` admin endpoint — developer-only hard kill-switch to completely disable acceptance of a specific token.
+- `main.rs`: Added `get_ckstable_repay_fee()` and `get_stable_token_enabled(token_type)` query endpoints for transparency.
+- `vault.rs`: Both `repay_to_vault_with_stable` and `liquidate_vault_partial_with_stable` check the enabled flag before processing and reject with error if disabled.
+- `.did` file: Updated Candid interface with all new admin endpoints.
+- Price freshness: Backend assumes $1 for ckstables but actions require a fresh ICP price from XRC (calls under 30s old reused, otherwise new call). On-demand only, no interval timer.
 
 ---
 
@@ -121,14 +109,11 @@ The entire feature assumes `ckUSDT = ckUSDC = 1 icUSD` at all times. Stablecoins
 
 **File:** `apiClient.ts` → `repayToVaultWithStable`
 
-```typescript
-// Simulate processing delay
-await new Promise(resolve => setTimeout(resolve, 1200));
-```
+Hardcoded `setTimeout(resolve, 1200)` with a comment saying "simulate processing delay." Not compensating for anything — just dead debug code.
 
-This is a hardcoded 1.2-second artificial delay with a comment literally saying "simulate." It adds unnecessary latency to every stable repayment.
-
-**Fix:** Remove the delay entirely.
+**Status:** ✅ FIXED in `b5d6c53`
+**What was done:**
+- `apiClient.ts`: Removed the `await new Promise(resolve => setTimeout(resolve, 1200));` and its comment. 3 lines deleted.
 
 ---
 
@@ -136,14 +121,10 @@ This is a hardcoded 1.2-second artificial delay with a comment literally saying 
 
 **Files:** `management.rs`, `vault.rs`
 
-The backend transfers ckUSDT/ckUSDC to the protocol canister's own account. But there's no function to:
-- Convert/swap these stablecoins
-- Withdraw them to treasury
-- Route them anywhere useful
+Stablecoins accumulate in the backend canister with no path to manage or use them.
 
-The treasury canister was extended with CKUSDT/CKUSDC asset types, but there's no routing logic (compare with the existing `route_minting_fee_to_treasury` pattern for icUSD fees). The stablecoins just accumulate in the canister with no way to manage them.
-
-**Recommendation:** Add treasury routing for received stablecoins, or at minimum an admin withdrawal function.
+**Status:** ✅ RESOLVED — no code change needed
+**Design decision:** Intentional. The backend canister holds ckstables as a **protocol reserve**. Balances are queried directly from ckUSDT/ckUSDC ledgers via `icrc1_balance_of` (source of truth, no internal counter needed). Future feature: allow redemptions of icUSD for ckstables during depeg scenarios. Frontend stats should surface reserve balances at a later date.
 
 ---
 
@@ -151,64 +132,72 @@ The treasury canister was extended with CKUSDT/CKUSDC asset types, but there's n
 
 **Files:** `management.rs`, `vault.rs`
 
-`transfer_ckusdt_from` and `transfer_ckusdc_from` are identical functions except for which ledger principal they read from state. Should be a single generic function:
+`transfer_ckusdt_from` and `transfer_ckusdc_from` were identical except for which ledger principal they read. Liquidation function was ~150 lines of duplicated logic.
 
-```rust
-pub async fn transfer_stable_from(token_type: StableTokenType, amount: u64, caller: Principal) -> Result<u64, TransferFromError> {
-    let ledger_principal = match token_type {
-        StableTokenType::CKUSDT => read_state(|s| s.ckusdt_ledger_principal),
-        StableTokenType::CKUSDC => read_state(|s| s.ckusdc_ledger_principal),
-    }.ok_or_else(|| ...)?;
-    // ... single implementation
-}
-```
-
-Similarly, `liquidate_vault_partial_with_stable` is a near-complete copy of `liquidate_vault_partial` (~150 lines of duplicated logic). Should be refactored to share a common implementation with a token-type parameter.
+**Status:** ✅ FIXED in `ff3fcaf`
+**What was done:**
+- `management.rs`: Consolidated `transfer_ckusdt_from` and `transfer_ckusdc_from` into a single `transfer_stable_from(token_type, amount_e6s, caller)`. Resolves the correct ledger principal internally via `match token_type`. Net reduction: ~40 lines removed.
+- `vault.rs`: Liquidation logic refactored to share common implementation with token-type parameter.
 
 ---
 
 ## 🟢 Minor / Pre-existing Issues
 
-### 9. Unsafe `.unwrap()` on Vault Lookup
+### 9. Unsafe `.unwrap()` on Vault Lookup — CANISTER TRAP RISK
 
 **File:** `vault.rs`
 
-```rust
-let vault = read_state(|s| s.vault_id_to_vaults.get(&arg.vault_id).cloned().unwrap());
-```
+Vault lookups used `.cloned().unwrap()` which traps (panics) the canister if a vault ID doesn't exist. Pre-existing in `repay_to_vault`, `borrow_from_vault`, `add_margin_to_vault`, and carried into new `repay_to_vault_with_stable`.
 
-This will panic and trap the canister if the vault doesn't exist. The existing `repay_to_vault` has the same pattern, so it's not new to this PR, but worth noting.
+**Status:** ✅ FIXED in `5bca9d1`
+**What was done:**
+- `vault.rs`: Replaced all 3 instances of `.cloned().unwrap()` with `.cloned().ok_or_else(|| ProtocolError::GenericError("Vault not found".to_string()))?`
+- For functions with `guard_principal`: added `guard_principal.fail()` in the error closure to properly clean up the guard on vault-not-found.
+- For `add_margin_to_vault` which uses `_guard_principal` (auto-drop): simple `.ok_or_else()` without explicit fail since the guard drops on scope exit.
+
+---
 
 ### 10. Unrelated package-lock.json Changes
 
-The `package-lock.json` diff is all `"peer": true` annotation additions — harmless but adds noise to the PR.
+The `package-lock.json` diff is all `"peer": true` annotation additions. Harmless — Agnes may have had a reason (dependency resolution). No action taken.
 
 ---
 
-## Action Items
+## Final Status
 
-| # | Issue | Severity | Owner | Status |
-|---|-------|----------|-------|--------|
-| 1 | Decimal mismatch (6 vs 8 decimals) | 🔴 CRITICAL | Agnes | Open |
-| 2 | No icUSD burn on stable repayment | 🔴 CRITICAL | Agnes + Rob (design decision) | Open |
-| 3 | Missing ICRC-2 approval flow in frontend | 🔴 CRITICAL | Agnes | Open |
-| 4 | Missing `validate_call()` on liquidation | 🔴 CRITICAL | Agnes | Open |
-| 5 | No depeg protection / kill-switch | 🟡 SIGNIFICANT | Rob (design decision) | Open |
-| 6 | Remove debug `setTimeout` delay | 🟡 SIGNIFICANT | Agnes | Open |
-| 7 | No mechanism to manage accumulated stablecoins | 🟡 SIGNIFICANT | Rob (design decision) | Open |
-| 8 | Code duplication | 🟡 SIGNIFICANT | Agnes | Open |
-| 9 | Unsafe `.unwrap()` on vault lookup | 🟢 MINOR | — | Pre-existing |
-| 10 | Unrelated package-lock changes | 🟢 MINOR | — | Cosmetic |
+| # | Issue | Severity | Status | Commit |
+|---|-------|----------|--------|--------|
+| 1 | Decimal mismatch (6 vs 8 decimals) | 🔴 CRITICAL | ✅ Fixed | `ff3fcaf` |
+| 2 | No icUSD burn on stable repayment | 🔴→✅ | Resolved by design | N/A |
+| 3 | Missing ICRC-2 approval flow | 🔴 CRITICAL | ✅ Fixed | `49d65c6` |
+| 4 | Missing `validate_call()` | 🔴 CRITICAL | ✅ Fixed | `028f4af` |
+| 5 | No depeg protection | 🟡 SIGNIFICANT | ✅ Fixed | `ff3fcaf` |
+| 6 | Debug `setTimeout` delay | 🟡 SIGNIFICANT | ✅ Fixed | `b5d6c53` |
+| 7 | No stablecoin management | 🟡→✅ | Resolved by design | N/A |
+| 8 | Code duplication | 🟡 SIGNIFICANT | ✅ Fixed | `ff3fcaf` |
+| 9 | Unsafe `.unwrap()` on vault lookup | 🟢 PRE-EXISTING | ✅ Fixed | `5bca9d1` |
+| 10 | package-lock.json noise | 🟢 COSMETIC | Noted | N/A |
 
 ---
 
-## Design Questions to Resolve Before Re-implementation
+## Fix Branch: `feature/ckusdt-ckusdc-repayment-fixes`
 
-1. **Burn mechanism:** When the protocol accepts ckUSDT/ckUSDC for debt repayment, how does the equivalent icUSD get removed from circulation? Options:
-   - Protocol holds icUSD reserves and burns from those
-   - Require a DEX swap (ckUSDT → icUSD) before burning
-   - Don't reduce vault debt 1:1 — apply a conversion rate
-   
-2. **Depeg protection:** Should we use an oracle for ckUSDT/ckUSDC pricing, or is a manual admin toggle sufficient for now?
+5 commits, branched off `feature/ckusdt-ckusdc-repayment`:
 
-3. **Stablecoin management:** Where do received ckUSDT/ckUSDC go? Treasury? Protocol reserve? Automatically swapped?
+| Commit | Files Changed | Description |
+|--------|--------------|-------------|
+| `028f4af` | `main.rs` (+1 line) | #4: Add `validate_call()` to stable liquidation |
+| `b5d6c53` | `apiClient.ts` (-3 lines) | #6: Remove debug setTimeout |
+| `5bca9d1` | `vault.rs` (+12/-3) | #9: Replace `.unwrap()` panics with proper error handling |
+| `ff3fcaf` | `vault.rs`, `management.rs`, `main.rs`, `state.rs`, `.did` (+148/-81) | #1, #5, #8: Decimal conversion, configurable fee, kill-switch, code dedup |
+| `49d65c6` | `walletOperations.ts`, `ProtocolManager.ts`, `config.ts`, `VaultDetails.svelte` (+212/-5) | #3: Full ICRC-2 approval flow for stable repayments |
+
+**Next step:** PR `feature/ckusdt-ckusdc-repayment-fixes` → `feature/ckusdt-ckusdc-repayment` for Agnes to review.
+
+---
+
+## Future Work (Not in Scope for This PR)
+
+- **Redemption feature:** Allow icUSD holders to redeem for ckstables from the protocol reserve during depeg scenarios
+- **Frontend stats:** Surface ckUSDT/ckUSDC reserve balances and adjusted CR on dashboard
+- **Adjusted CR calculation:** Implement the formula in the backend query that returns system-wide stats
