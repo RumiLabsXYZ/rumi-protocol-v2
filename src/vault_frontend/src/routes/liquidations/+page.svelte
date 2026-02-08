@@ -243,8 +243,7 @@
         {@const debt = getVaultDebt(vault)}
         {@const maxLiq = getMaxLiquidation(vault)}
         {@const inputVal = getInputVal(vault)}
-        {@const effectiveAmount = inputVal > 0 ? inputVal : maxLiq}
-        {@const seizure = effectiveAmount > 0 ? calculateSeizure(vault, effectiveAmount) : null}
+        {@const seizure = inputVal > 0 && !isOverMax(vault) ? calculateSeizure(vault, inputVal) : null}
         {@const overMax = isOverMax(vault)}
         {@const isProcessingThis = processingVaultId === vault.vault_id}
         {@const crDanger = cr < 130}
@@ -252,7 +251,7 @@
 
         <div class="liq-card">
           <div class="card-body">
-            <!-- LEFT: risk + numbers (CR → Debt → Collateral → Outcome) -->
+            <!-- LEFT: risk + numbers -->
             <div class="card-left">
               <div class="left-header">
                 <span class="vault-id">#{vault.vault_id}</span>
@@ -268,12 +267,18 @@
                 <span class="stat-sep">·</span>
                 <span class="stat"><span class="stat-label">Collateral</span> <span class="stat-value">{formatNumber(vault.icp_margin_amount / 1e8, 4)} ICP</span></span>
               </div>
-              {#if seizure && !overMax}
-                <div class="outcome">You receive {formatNumber(seizure.icpSeized, 4)} ICP (${formatNumber(seizure.usdValue, 2)})</div>
+            </div>
+
+            <!-- CENTER: outcome (appears when user types) -->
+            <div class="card-center">
+              {#if seizure}
+                <span class="outcome-label">You receive</span>
+                <span class="outcome-value">{formatNumber(seizure.icpSeized, 4)} ICP</span>
+                <span class="outcome-usd">${formatNumber(seizure.usdValue, 2)}</span>
               {/if}
             </div>
 
-            <!-- RIGHT: execution (input + button) -->
+            <!-- RIGHT: execution -->
             <div class="card-right">
               <div class="input-label-row">
                 <span class="input-label">Amount to liquidate</span>
@@ -402,9 +407,23 @@
   }
   .stat-sep { color: var(--rumi-text-muted); opacity: 0.3; font-size: 0.75rem; }
 
-  .outcome {
-    font-family: 'Inter', sans-serif; font-size: 0.75rem;
-    font-variant-numeric: tabular-nums; color: var(--rumi-text-secondary);
+  /* CENTER: outcome */
+  .card-center {
+    flex: 0 0 auto;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 0.125rem;
+    min-width: 7rem;
+  }
+  .outcome-label {
+    font-size: 0.6875rem; color: var(--rumi-text-muted);
+  }
+  .outcome-value {
+    font-family: 'Inter', sans-serif; font-weight: 600; font-size: 0.875rem;
+    font-variant-numeric: tabular-nums; color: var(--rumi-text-primary);
+  }
+  .outcome-usd {
+    font-family: 'Inter', sans-serif; font-size: 0.6875rem;
+    font-variant-numeric: tabular-nums; color: var(--rumi-text-muted);
   }
 
   /* RIGHT: execution */
