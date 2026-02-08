@@ -288,7 +288,11 @@ pub async fn repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("repay_vault_{}", arg.vault_id))?;
     let amount: ICUSD = arg.amount.into();
-    let vault = read_state(|s| s.vault_id_to_vaults.get(&arg.vault_id).cloned().unwrap());
+    let vault = read_state(|s| s.vault_id_to_vaults.get(&arg.vault_id).cloned())
+        .ok_or_else(|| {
+            guard_principal.fail();
+            ProtocolError::GenericError("Vault not found".to_string())
+        })?;
 
     if caller != vault.owner {
         guard_principal.fail();
@@ -331,7 +335,11 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("repay_vault_stable_{}", arg.vault_id))?;
     let amount: ICUSD = arg.amount.into(); // Treat as 1:1 with icUSD
-    let vault = read_state(|s| s.vault_id_to_vaults.get(&arg.vault_id).cloned().unwrap());
+    let vault = read_state(|s| s.vault_id_to_vaults.get(&arg.vault_id).cloned())
+        .ok_or_else(|| {
+            guard_principal.fail();
+            ProtocolError::GenericError("Vault not found".to_string())
+        })?;
 
     if caller != vault.owner {
         guard_principal.fail();
@@ -387,7 +395,8 @@ pub async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
         });
     }
 
-    let vault = read_state(|s| s.vault_id_to_vaults.get(&arg.vault_id).cloned().unwrap());
+    let vault = read_state(|s| s.vault_id_to_vaults.get(&arg.vault_id).cloned())
+        .ok_or_else(|| ProtocolError::GenericError("Vault not found".to_string()))?;
     if caller != vault.owner {
         return Err(ProtocolError::CallerNotOwner);
     }
