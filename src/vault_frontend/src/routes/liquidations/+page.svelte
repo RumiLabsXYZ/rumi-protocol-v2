@@ -243,7 +243,8 @@
         {@const debt = getVaultDebt(vault)}
         {@const maxLiq = getMaxLiquidation(vault)}
         {@const inputVal = getInputVal(vault)}
-        {@const seizure = inputVal > 0 ? calculateSeizure(vault, inputVal) : null}
+        {@const effectiveAmount = inputVal > 0 ? inputVal : maxLiq}
+        {@const seizure = effectiveAmount > 0 ? calculateSeizure(vault, effectiveAmount) : null}
         {@const overMax = isOverMax(vault)}
         {@const isProcessingThis = processingVaultId === vault.vault_id}
         {@const crDanger = cr < 130}
@@ -267,7 +268,7 @@
                 <span class="stat-sep">·</span>
                 <span class="stat"><span class="stat-label">Collateral</span> <span class="stat-value">{formatNumber(vault.icp_margin_amount / 1e8, 4)} ICP</span></span>
               </div>
-              {#if seizure}
+              {#if seizure && !overMax}
                 <div class="outcome">You receive {formatNumber(seizure.icpSeized, 4)} ICP (${formatNumber(seizure.usdValue, 2)})</div>
               {/if}
             </div>
