@@ -239,7 +239,7 @@ These items were discussed but NOT yet implemented:
 | Branch | Status | Action |
 |--------|--------|--------|
 | `main` | ✅ Contains staging merge + LICENSE | Production branch |
-| `feature/ui-updates` | ✅ **Active** — UI rebrand + page reworks | LOCAL ONLY — needs review before deploy |
+| `feature/ui-updates` | ✅ **Active** — UI rebrand + page reworks | Deployed to production from feature branch (not merged to main). Needs PR + review. |
 | `feature/ii-wallet-send-receive` | ✅ Deployed to mainnet | Merge to main when stable |
 | `staging` | ✅ Merged into main | Can delete |
 | `main-backup-feb4` | Backup of main before staging merge | Keep for safety |
@@ -430,36 +430,72 @@ Dense, expandable inline vault list with full risk-forward UX:
 | **Borrow Max** | Amount that results in CR = 150% |
 | **Repay Max** | min(wallet icUSD balance, outstanding debt) |
 | **Max styling** | All three identical: `--rumi-text-muted`, no action color, subtle hover underline |
-| **Input clamping** | All inputs clamp to valid range on blur (doesn't fight mid-typing) |
-| **Over-max disable** | Buttons disabled when input exceeds max (Add, Borrow, Repay all guarded) |
-| **Single expanded vault** | Only one vault can be expanded at a time; opening another closes the previous |
+| **Input behavior** | User types freely — no clamping, no value substitution. Over-max inputs grey out the button. |
+| **Over-max disable** | Buttons disabled + handler hard-guarded when input exceeds max (Add, Borrow, Repay all guarded) |
+| **Single expanded vault** | Only one vault can be expanded at a time; opening another closes the previous and resets inputs |
 | **Projected CR** | Shown inline next to action button, live color: neutral ≥150%, amber 140-149%, red <140% |
 | **Action disable** | Buttons disabled when projected CR is below minimum |
 | **Risk left-border** | Danger vaults get 2px red left edge, warning vaults get amber |
 | **Stable ordering** | Expanding/collapsing a vault does NOT reorder the list |
 | **No sort controls** | No dropdowns, toggles, or configuration for MVP |
 
-#### Liquidations — Row-Card Redesign (Feb 7, v2)
-Replaced the table-based liquidation UI with card-like rows matching the Vaults page:
+#### Liquidations — Row-Card Redesign (Feb 7, v3)
+Complete structural redesign of the liquidation experience, iterated through multiple passes:
 
-| Change | Details |
-|--------|---------|
-| **Layout** | Row-cards (not table). Same surface/border/shadow as VaultCard |
-| **No hover expansion** | Fixed-height cards, no reflow, no layout shifts |
-| **Unified liquidation** | ONE flow: user inputs icUSD to repay, protocol handles full vs partial internally |
-| **No mode switching** | Removed "Partial / Full" distinction from UI entirely |
-| **Input per row** | Numeric icUSD input with inline neutral "Max" text |
-| **Max cap** | min(wallet icUSD balance, vault's outstanding debt) |
-| **Seizure hint** | "→ Seize ~0.42 ICP" shown when input is valid, neutral text |
-| **Button** | Single emerald "Liquidate" button (NOT red). Disabled until input > 0. |
-| **Over-max guard** | Button disabled + "Exceeds max" hint when input > max |
-| **CR coloring** | Red <130%, amber 130-150%. Warning icon on danger. Only colored element. |
-| **Est. Profit** | Full-debt profit estimate shown in info row (USD) |
-| **Row hover** | Subtle purple inner glow, no expansion |
-| **Sort** | CR ascending, vault ID tiebreaker |
+**Layout: Three-zone card**
+| Zone | Content |
+|------|---------|
+| **Left** | Risk stats: CR badge (semantic color + warning icon), Debt, Collateral |
+| **Center** | "You receive" outcome: ICP amount (bold) + USD value (muted). Appears when user types input. |
+| **Right** | Execution: "Amount to liquidate" input + "Liquidate" button |
+
+**Interaction model:**
+| Feature | Details |
+|---------|---------|
+| **Unified flow** | ONE liquidation path. User inputs icUSD amount, protocol handles full vs partial internally (≥99.9% of debt = full) |
+| **No mode switching** | Removed "Partial / Full" distinction entirely |
+| **Input freedom** | User types freely — no clamping, no value substitution |
+| **Over-max behavior** | Input text + button grey out. Button unclickable. No error message on separate line. |
+| **Max utility text** | Neutral color, hover underline. NOT a button, NOT action-colored. Shows "Max: ····" pulse placeholder while wallet balance loads. |
+| **Max cap logic** | Calculates minimum icUSD needed to restore vault CR to ~150%, capped to min(wallet balance, vault debt, restoration amount) |
+| **Liquidate button** | Emerald green (action color). Disabled until valid input > 0 and ≤ max. Hard-guarded in handler too. |
+| **CR coloring** | Red <130%, amber 130-150%. Warning icon on danger. ONLY colored element in card. |
+| **No hover expansion** | Subtle purple border glow only. No layout shifts. |
+| **Sort** | CR ascending (riskiest first), vault ID tiebreaker |
+
+**Copy (locked):**
+- Input label: "Amount to liquidate" (not "Repay")
+- Outcome: "You receive" / "0.4472 ICP $1.11" (no parentheses, no "Est.", no abbreviations)
+
+**⚠️ KNOWN BUG: "You receive" reactivity**
+The center-column seizure calculation does NOT update live when the user types. Currently requires clicking "Refresh" to recalculate. The root cause is Svelte reactivity — `liquidationAmounts` is a plain object and property mutations don't trigger re-renders. A self-assignment trick (`liquidationAmounts = liquidationAmounts`) was attempted but did not resolve the issue in production. This needs a proper fix, likely by:
+- Converting `liquidationAmounts` to a Svelte store, OR
+- Using a reactive `$:` block that watches a serialized version of the amounts, OR
+- Moving to per-vault component state (like VaultCard does)
+
+**Commits (feature/ui-updates):**
+```
+39c3608 fix: live-reactive seizure calculation + layout tweak (attempted, not working)
+7851053 feat: three-zone liquidation card — outcome in center column
+7f40df5 fix: show 'Max: ····' placeholder while wallet balance loads
+5a85ddf fix: stop clamping liquidation input — grey out + disable instead
+67427fb fix: cap liquidation max to restore CR ~150%, not full debt
+fed0950 feat: liquidations row-card redesign — unified flow, no hover expansion
+1dfaa33 feat: rework Liquidations page — profit-forward table layout
+```
 
 ### Git Log (feature/ui-updates, key commits)
 ```
+39c3608 fix: live-reactive seizure calculation + layout tweak
+7851053 feat: three-zone liquidation card — outcome in center column
+7f40df5 fix: show 'Max: ····' placeholder while wallet balance loads
+5a85ddf fix: stop clamping liquidation input — grey out + disable instead
+67427fb fix: cap liquidation max to restore CR ~150%, not full debt
+fed0950 feat: liquidations row-card redesign — unified flow, no hover expansion
+20ce879 fix: stop auto-clamping over-max inputs + hard-guard handlers
+0ef8c3a fix: disable buttons when input exceeds max + single expanded vault
+16c138a feat: grey out Oisy wallet with 'Coming Soon' in connect dialog
+706fa4d docs: update HANDOFF.md with all UI rebrand + page rework details
 187cfde fix: remove old pink gradients from Redeem and Treasury pages
 41f7687 feat: complete vault management spec compliance
 1dfaa33 feat: rework Liquidations page — profit-forward table layout

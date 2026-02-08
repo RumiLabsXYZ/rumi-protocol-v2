@@ -281,7 +281,7 @@
               {#if getSeizure(vault)}
                 {@const s = getSeizure(vault)}
                 <span class="outcome-label">You receive</span>
-                <span class="outcome-line">{formatNumber(s.icpSeized, 4)} ICP <span class="outcome-usd">(${formatNumber(s.usdValue, 2)})</span></span>
+                <span class="outcome-line">{formatNumber(s.icpSeized, 4)} ICP <span class="outcome-usd">${formatNumber(s.usdValue, 2)}</span></span>
               {/if}
             </div>
 
