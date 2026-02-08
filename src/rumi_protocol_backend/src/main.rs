@@ -368,6 +368,7 @@ async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result<Suc
 #[update]
 #[candid_method(update)]
 async fn liquidate_vault_partial_with_stable(vault_id: u64, amount: u64, token_type: StableTokenType) -> Result<SuccessWithFee, ProtocolError> {
+    validate_call()?;
     check_postcondition(rumi_protocol_backend::vault::liquidate_vault_partial_with_stable(vault_id, amount, token_type).await)
 }
 
