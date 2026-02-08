@@ -813,9 +813,6 @@ static async repayToVaultWithStable(
         };
       }
 
-      // Simulate processing delay
-      await new Promise(resolve => setTimeout(resolve, 1200));
-
       const actor = await ApiClient.getAuthenticatedActor();
       const vaultArgWithToken = {
         vault_id: BigInt(vaultId),
