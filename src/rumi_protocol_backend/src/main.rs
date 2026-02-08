@@ -802,6 +802,64 @@ fn get_stability_pool_principal() -> Option<Principal> {
     read_state(|s| s.get_stability_pool_canister())
 }
 
+// ---- Stable token repayment admin functions ----
+
+/// Set the fee rate charged on ckUSDT/ckUSDC repayments (developer only)
+/// Rate is a decimal: 0.0002 = 0.02%, max 0.05 = 5%
+#[candid_method(update)]
+#[update]
+async fn set_ckstable_repay_fee(new_rate: f64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can set ckstable repay fee".to_string()));
+    }
+    if new_rate < 0.0 || new_rate > 0.05 {
+        return Err(ProtocolError::GenericError("Fee rate must be between 0 and 0.05 (5%)".to_string()));
+    }
+    let rate = Ratio::from(rust_decimal::Decimal::try_from(new_rate)
+        .map_err(|_| ProtocolError::GenericError("Invalid fee rate".to_string()))?);
+    mutate_state(|s| { s.ckstable_repay_fee = rate; });
+    log!(INFO, "[set_ckstable_repay_fee] Fee rate set to: {}", new_rate);
+    Ok(())
+}
+
+/// Get the current ckstable repayment fee rate
+#[candid_method(query)]
+#[query]
+fn get_ckstable_repay_fee() -> f64 {
+    read_state(|s| s.ckstable_repay_fee.to_f64())
+}
+
+/// Enable or disable a specific stable token for repayments/liquidations (developer only)
+#[candid_method(update)]
+#[update]
+async fn set_stable_token_enabled(token_type: StableTokenType, enabled: bool) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can toggle stable token acceptance".to_string()));
+    }
+    mutate_state(|s| {
+        match token_type {
+            StableTokenType::CKUSDT => s.ckusdt_enabled = enabled,
+            StableTokenType::CKUSDC => s.ckusdc_enabled = enabled,
+        }
+    });
+    log!(INFO, "[set_stable_token_enabled] {:?} enabled: {}", token_type, enabled);
+    Ok(())
+}
+
+/// Check if a stable token type is currently enabled
+#[candid_method(query)]
+#[query]
+fn get_stable_token_enabled(token_type: StableTokenType) -> bool {
+    read_state(|s| match token_type {
+        StableTokenType::CKUSDT => s.ckusdt_enabled,
+        StableTokenType::CKUSDC => s.ckusdc_enabled,
+    })
+}
+
 // Add guard cleanup method for developers to resolve stuck operations
 #[candid_method(update)]
 #[update]

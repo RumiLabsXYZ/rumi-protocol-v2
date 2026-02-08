@@ -5,7 +5,7 @@ use crate::event::{
 use crate::guard::GuardPrincipal;
 use crate::GuardError;
 use crate::logs::INFO;
-use crate::management::{mint_icusd, transfer_icp_from, transfer_icusd_from, transfer_ckusdt_from, transfer_ckusdc_from};
+use crate::management::{mint_icusd, transfer_icp_from, transfer_icusd_from, transfer_stable_from};
 use crate::numeric::{ICUSD, ICP};
 use crate::{
     mutate_state, read_state, ProtocolError, SuccessWithFee, MIN_ICP_AMOUNT, MIN_ICUSD_AMOUNT,
@@ -19,6 +19,7 @@ use crate::DEBUG;
 use crate::management;
 use crate::PendingMarginTransfer;
 use rust_decimal_macros::dec;
+use rust_decimal::prelude::ToPrimitive;
 use crate::Ratio;
 use crate::compute_collateral_ratio;
 
@@ -288,11 +289,13 @@ pub async fn repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("repay_vault_{}", arg.vault_id))?;
     let amount: ICUSD = arg.amount.into();
-    let vault = read_state(|s| s.vault_id_to_vaults.get(&arg.vault_id).cloned())
-        .ok_or_else(|| {
+    let vault = match read_state(|s| s.vault_id_to_vaults.get(&arg.vault_id).cloned()) {
+        Some(v) => v,
+        None => {
             guard_principal.fail();
-            ProtocolError::GenericError("Vault not found".to_string())
-        })?;
+            return Err(ProtocolError::GenericError("Vault not found".to_string()));
+        }
+    };
 
     if caller != vault.owner {
         guard_principal.fail();
@@ -330,16 +333,32 @@ pub async fn repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
     }
 }
 
-/// Repay vault debt using ckUSDT or ckUSDC (1:1 with icUSD)
+/// Repay vault debt using ckUSDT or ckUSDC (1:1 with icUSD, plus configurable fee)
 pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("repay_vault_stable_{}", arg.vault_id))?;
-    let amount: ICUSD = arg.amount.into(); // Treat as 1:1 with icUSD
-    let vault = read_state(|s| s.vault_id_to_vaults.get(&arg.vault_id).cloned())
-        .ok_or_else(|| {
+
+    // Check if the selected stable token is enabled
+    let is_enabled = read_state(|s| match arg.token_type {
+        StableTokenType::CKUSDT => s.ckusdt_enabled,
+        StableTokenType::CKUSDC => s.ckusdc_enabled,
+    });
+    if !is_enabled {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(format!("{:?} repayments are currently disabled", arg.token_type)));
+    }
+
+    // Truncate to nearest 100 e8s for clean 8→6 decimal conversion
+    let raw_amount_e8s = arg.amount - (arg.amount % 100);
+    let amount: ICUSD = raw_amount_e8s.into();
+
+    let vault = match read_state(|s| s.vault_id_to_vaults.get(&arg.vault_id).cloned()) {
+        Some(v) => v,
+        None => {
             guard_principal.fail();
-            ProtocolError::GenericError("Vault not found".to_string())
-        })?;
+            return Err(ProtocolError::GenericError("Vault not found".to_string()));
+        }
+    };
 
     if caller != vault.owner {
         guard_principal.fail();
@@ -361,15 +380,16 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
         )));
     }
 
-    // Transfer the stable token from user based on token type
-    let transfer_result = match arg.token_type {
-        StableTokenType::CKUSDT => transfer_ckusdt_from(arg.amount, caller).await,
-        StableTokenType::CKUSDC => transfer_ckusdc_from(arg.amount, caller).await,
-    };
+    // Convert e8s (icUSD) to e6s (ckstable) and add fee surcharge
+    let base_stable_e6s = raw_amount_e8s / 100;
+    let fee_rate = read_state(|s| s.ckstable_repay_fee);
+    let fee_e6s = (rust_decimal::Decimal::from(base_stable_e6s) * fee_rate.0)
+        .to_u64().unwrap_or(0);
+    let total_pull_e6s = base_stable_e6s + fee_e6s;
 
-    match transfer_result {
+    // Transfer the stable token from user (in 6-decimal units)
+    match transfer_stable_from(arg.token_type.clone(), total_pull_e6s, caller).await {
         Ok(block_index) => {
-            // Record repayment as if it were icUSD (1:1 parity)
             mutate_state(|s| record_repayed_to_vault(s, arg.vault_id, amount, block_index));
             guard_principal.complete();
             Ok(block_index)
@@ -378,7 +398,7 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
             guard_principal.fail();
             Err(ProtocolError::TransferFromError(
                 transfer_from_error,
-                amount.to_u64(),
+                total_pull_e6s,
             ))
         }
     }
@@ -921,7 +941,7 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
     })
 }
 
-/// Liquidate a vault using ckUSDT or ckUSDC (1:1 with icUSD)
+/// Liquidate a vault using ckUSDT or ckUSDC (1:1 with icUSD, plus configurable fee)
 pub async fn liquidate_vault_partial_with_stable(
     vault_id: u64,
     stable_amount: u64,
@@ -930,7 +950,19 @@ pub async fn liquidate_vault_partial_with_stable(
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_stable_{}", vault_id))?;
 
-    let liquidation_amount: ICUSD = stable_amount.into(); // Treat as 1:1 with icUSD
+    // Check if the selected stable token is enabled
+    let is_enabled = read_state(|s| match token_type {
+        StableTokenType::CKUSDT => s.ckusdt_enabled,
+        StableTokenType::CKUSDC => s.ckusdc_enabled,
+    });
+    if !is_enabled {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(format!("{:?} liquidations are currently disabled", token_type)));
+    }
+
+    // Truncate to nearest 100 e8s for clean 8→6 decimal conversion
+    let raw_amount_e8s = stable_amount - (stable_amount % 100);
+    let liquidation_amount: ICUSD = raw_amount_e8s.into();
 
     if liquidation_amount < MIN_ICUSD_AMOUNT {
         guard_principal.fail();
@@ -954,19 +986,15 @@ pub async fn liquidate_vault_partial_with_stable(
                         s.mode.get_minimum_liquidation_collateral_ratio().to_f64()
                     ))
                 } else {
-                    // Calculate maximum liquidatable debt (e.g., 50% of total debt)
-                    let max_liquidation_ratio = Ratio::new(dec!(0.5)); // 50% max
+                    let max_liquidation_ratio = Ratio::new(dec!(0.5));
                     let max_liquidatable = vault.borrowed_icusd_amount * max_liquidation_ratio;
-
-                    // Ensure requested amount doesn't exceed maximum
                     let actual_liquidation_amount = liquidation_amount.min(max_liquidatable).min(vault.borrowed_icusd_amount);
 
                     if actual_liquidation_amount == ICUSD::new(0) {
                         return Err("Cannot liquidate zero amount".to_string());
                     }
 
-                    // Calculate collateral to transfer (debt + 10% bonus)
-                    let liquidation_bonus = Ratio::new(dec!(1.1)); // 110% (10% bonus)
+                    let liquidation_bonus = Ratio::new(dec!(1.1));
                     let icp_equivalent = actual_liquidation_amount / icp_rate;
                     let collateral_with_bonus = icp_equivalent * liquidation_bonus;
                     let collateral_to_transfer = collateral_with_bonus.min(vault.icp_margin_amount);
@@ -993,20 +1021,22 @@ pub async fn liquidate_vault_partial_with_stable(
         collateral_to_liquidator.to_u64()
     );
 
-    // Step 2: Take stable token from liquidator based on token type
-    let transfer_result = match token_type {
-        StableTokenType::CKUSDT => transfer_ckusdt_from(max_liquidatable_debt.to_u64(), caller).await,
-        StableTokenType::CKUSDC => transfer_ckusdc_from(max_liquidatable_debt.to_u64(), caller).await,
-    };
+    // Step 2: Convert e8s to e6s and add fee surcharge, then take stable token from liquidator
+    let debt_e8s = max_liquidatable_debt.to_u64();
+    let base_stable_e6s = debt_e8s / 100;
+    let fee_rate = read_state(|s| s.ckstable_repay_fee);
+    let fee_e6s = (rust_decimal::Decimal::from(base_stable_e6s) * fee_rate.0)
+        .to_u64().unwrap_or(0);
+    let total_pull_e6s = base_stable_e6s + fee_e6s;
 
-    let stable_block_index = match transfer_result {
+    let stable_block_index = match transfer_stable_from(token_type.clone(), total_pull_e6s, caller).await {
         Ok(block_index) => {
-            log!(INFO, "[liquidate_vault_stable] Received {} {:?} from liquidator", max_liquidatable_debt.to_u64(), token_type);
+            log!(INFO, "[liquidate_vault_stable] Received {} e6s {:?} from liquidator (fee: {} e6s)", total_pull_e6s, token_type, fee_e6s);
             block_index
         },
         Err(transfer_from_error) => {
             guard_principal.fail();
-            return Err(ProtocolError::TransferFromError(transfer_from_error, max_liquidatable_debt.to_u64()));
+            return Err(ProtocolError::TransferFromError(transfer_from_error, total_pull_e6s));
         }
     };
 

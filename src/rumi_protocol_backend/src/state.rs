@@ -41,6 +41,7 @@ macro_rules! ensure {
 pub const ICP_TRANSFER_FEE: ICP = ICP::new(10);
 pub type VaultId = u64;
 pub const DEFAULT_BORROW_FEE: Ratio = Ratio::new(dec!(0.005));
+pub const DEFAULT_CKSTABLE_REPAY_FEE: Ratio = Ratio::new(dec!(0.0002)); // 0.02%
 
 /// Controls which operations the protocol can perform.
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize, Copy)]
@@ -156,6 +157,9 @@ pub struct State {
     pub stability_pool_canister: Option<Principal>, // Add stability pool canister
     pub ckusdt_ledger_principal: Option<Principal>, // ckUSDT ledger for stable repayments
     pub ckusdc_ledger_principal: Option<Principal>, // ckUSDC ledger for stable repayments
+    pub ckstable_repay_fee: Ratio,                  // Fee charged on stable token repayments (default 0.02%)
+    pub ckusdt_enabled: bool,                       // Kill-switch: whether ckUSDT repayments are accepted
+    pub ckusdc_enabled: bool,                       // Kill-switch: whether ckUSDC repayments are accepted
 }
 
 impl From<InitArg> for State {
@@ -191,6 +195,9 @@ impl From<InitArg> for State {
             stability_pool_canister: args.stability_pool_principal, // Initialize stability pool canister from args
             ckusdt_ledger_principal: args.ckusdt_ledger_principal,
             ckusdc_ledger_principal: args.ckusdc_ledger_principal,
+            ckstable_repay_fee: DEFAULT_CKSTABLE_REPAY_FEE,
+            ckusdt_enabled: true,
+            ckusdc_enabled: true,
         }
     }
 }
