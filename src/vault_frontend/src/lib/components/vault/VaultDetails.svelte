@@ -210,15 +210,12 @@
         // Original icUSD repayment flow
         result = await protocolManager.repayToVault(currentVault.vaultId, repayAmount);
       } else {
-        // New stable token repayment (ckUSDT or ckUSDC)
-        // Note: User needs to approve the stable token transfer first
-        isApproving = true;
-        result = await ApiClient.repayToVaultWithStable(
+        // Stable token repayment (ckUSDT or ckUSDC) — approval handled by ProtocolManager
+        result = await protocolManager.repayToVaultWithStable(
           currentVault.vaultId,
           repayAmount,
           repayTokenType
         );
-        isApproving = false;
       }
 
       if (result.success) {

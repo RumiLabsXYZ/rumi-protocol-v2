@@ -59,6 +59,19 @@ export const CONFIG = {
   get currentIcusdLedgerId() {
     return this.isLocal ? LOCAL_CANISTER_IDS.ICUSD_LEDGER : CANISTER_IDS.ICUSD_LEDGER;
   },
+
+  // ckUSDT and ckUSDC ledger IDs (mainnet only — no local equivalents)
+  get ckusdtLedgerId() {
+    return CANISTER_IDS.CKUSDT_LEDGER;
+  },
+
+  get ckusdcLedgerId() {
+    return CANISTER_IDS.CKUSDC_LEDGER;
+  },
+
+  getStableLedgerId(tokenType: 'CKUSDT' | 'CKUSDC'): string {
+    return tokenType === 'CKUSDT' ? CANISTER_IDS.CKUSDT_LEDGER : CANISTER_IDS.CKUSDC_LEDGER;
+  },
   
   // Configure the host based on environment
   get host() {
