@@ -21,14 +21,12 @@
 
   $: isConnected = $wallet.isConnected;
 
-  // Wallet icUSD balance for max cap
   $: walletIcusd = $wallet.tokenBalances?.ICUSD
     ? parseFloat($wallet.tokenBalances.ICUSD.formatted) : 0;
 
   let animatedPrice = tweened(0, { duration: 600, easing: cubicOut });
   $: if (icpPrice > 0) { animatedPrice.set(icpPrice); }
 
-  // Sort by CR ascending — riskiest first
   $: sortedVaults = [...liquidatableVaults].sort((a, b) => {
     const crA = calculateCollateralRatio(a);
     const crB = calculateCollateralRatio(b);
@@ -49,25 +47,67 @@
   }
 
   function getMaxLiquidation(vault: CandidVault): number {
-    return Math.min(walletIcusd, getVaultDebt(vault));
+    const debt = getVaultDebt(vault);
+    const icpCollateral = Number(vault.icp_margin_amount || 0) / 1e8;
+    const currentPrice = icpPrice || 0;
+
+    // Cap: only liquidate enough to restore CR to ~150%
+    // After liquidation of X icUSD, liquidator seizes X/(price*0.9) ICP
+    // New CR = (collateral - seized) * price / (debt - X) >= 1.5
+    // Solve for X: the minimum needed to reach 150%
+    if (currentPrice > 0 && debt > 0) {
+      const collateralValue = icpCollateral * currentPrice;
+      const currentCr = collateralValue / debt;
+      if (currentCr < 1.5) {
+        // How much icUSD to liquidate to bring CR to 150%:
+        // (collateralValue - (X / 0.9)) / (debt - X) = 1.5
+        // collateralValue - X/0.9 = 1.5*debt - 1.5*X
+        // X*(1.5 - 1/0.9) = 1.5*debt - collateralValue
+        // X*(1.5 - 1.1111) = 1.5*debt - collateralValue
+        // X * 0.3889 = 1.5*debt - collateralValue
+        const factor = 1.5 - (1 / 0.9);
+        const numerator = 1.5 * debt - collateralValue;
+        if (factor > 0 && numerator > 0) {
+          const restoreCap = numerator / factor;
+          // Cap to this, but never more than full debt, never more than wallet balance
+          return Math.min(walletIcusd, debt, restoreCap);
+        }
+      }
+    }
+
+    // Fallback: full debt capped to wallet balance
+    return Math.min(walletIcusd, debt);
   }
 
-  function calculateSeizure(vault: CandidVault, icusdAmount: number): { icpSeized: number, profitUsd: number } {
+  function calculateSeizure(vault: CandidVault, icusdAmount: number): { icpSeized: number, usdValue: number } {
     const currentPrice = icpPrice || 1;
     const icpCollateral = Number(vault.icp_margin_amount || 0) / 1e8;
     let icpReceived = currentPrice > 0 ? icusdAmount / currentPrice * (1 / 0.9) : 0;
     const icpSeized = Math.min(icpReceived, icpCollateral);
-    const profitUsd = (icpSeized * currentPrice) - icusdAmount;
+    const usdValue = icpSeized * currentPrice;
     return {
       icpSeized: isFinite(icpSeized) ? icpSeized : 0,
-      profitUsd: isFinite(profitUsd) ? profitUsd : 0
+      usdValue: isFinite(usdValue) ? usdValue : 0
     };
   }
 
+  function getInputVal(vault: CandidVault): number {
+    return parseFloat(liquidationAmounts[vault.vault_id]) || 0;
+  }
+
   function isOverMax(vault: CandidVault): boolean {
-    const v = parseFloat(liquidationAmounts[vault.vault_id]);
-    if (!v || v <= 0) return false;
+    const v = getInputVal(vault);
+    if (v <= 0) return false;
     return v > getMaxLiquidation(vault);
+  }
+
+  // Immediate clamp: prevent typing above max
+  function handleInput(vault: CandidVault) {
+    const max = getMaxLiquidation(vault);
+    const v = parseFloat(liquidationAmounts[vault.vault_id]);
+    if (!isNaN(v) && v > max && max > 0) {
+      liquidationAmounts[vault.vault_id] = max.toFixed(4);
+    }
   }
 
   function setMax(vault: CandidVault) {
@@ -117,13 +157,12 @@
   async function handleLiquidate(vault: CandidVault) {
     if (!isConnected) { liquidationError = "Please connect your wallet"; return; }
     if (processingVaultId !== null) return;
-
-    const inputAmount = parseFloat(liquidationAmounts[vault.vault_id]);
-    if (!inputAmount || inputAmount <= 0) { liquidationError = "Enter an icUSD amount"; return; }
+    const inputAmount = getInputVal(vault);
+    if (inputAmount <= 0) { liquidationError = "Enter an icUSD amount"; return; }
     if (isOverMax(vault)) { liquidationError = "Amount exceeds maximum"; return; }
 
     const vaultDebt = getVaultDebt(vault);
-    const isFullLiquidation = inputAmount >= vaultDebt * 0.999; // within rounding
+    const isFullLiquidation = inputAmount >= vaultDebt * 0.999;
 
     liquidationError = ""; liquidationSuccess = ""; processingVaultId = vault.vault_id;
     try {
@@ -133,23 +172,19 @@
         processingVaultId = null; return;
       }
       if (!await checkAndApproveAllowance(inputAmount * 1.20)) { processingVaultId = null; return; }
-
-      // Re-check vault still available
       await loadLiquidatableVaults();
       if (!liquidatableVaults.find(v => v.vault_id === vault.vault_id)) {
         liquidationError = "Vault no longer available"; processingVaultId = null; return;
       }
-
       let result;
       if (isFullLiquidation) {
         result = await protocolService.liquidateVault(vault.vault_id);
       } else {
         result = await protocolService.partialLiquidateVault(vault.vault_id, inputAmount);
       }
-
       if (result.success) {
         const seizure = calculateSeizure(vault, inputAmount);
-        liquidationSuccess = `Liquidated vault #${vault.vault_id}. Paid ${formatNumber(inputAmount)} icUSD, received ≈${formatNumber(seizure.icpSeized, 4)} ICP.`;
+        liquidationSuccess = `Liquidated vault #${vault.vault_id}. Paid ${formatNumber(inputAmount)} icUSD, received ${formatNumber(seizure.icpSeized, 4)} ICP.`;
         liquidationAmounts[vault.vault_id] = '';
         await loadLiquidatableVaults();
       } else { liquidationError = result.error || "Liquidation failed"; }
@@ -216,7 +251,7 @@
         {@const cr = calculateCollateralRatio(vault)}
         {@const debt = getVaultDebt(vault)}
         {@const maxLiq = getMaxLiquidation(vault)}
-        {@const inputVal = parseFloat(liquidationAmounts[vault.vault_id]) || 0}
+        {@const inputVal = getInputVal(vault)}
         {@const seizure = inputVal > 0 ? calculateSeizure(vault, inputVal) : null}
         {@const overMax = isOverMax(vault)}
         {@const isProcessingThis = processingVaultId === vault.vault_id}
@@ -224,71 +259,56 @@
         {@const crCaution = cr >= 130 && cr < 150}
 
         <div class="liq-card">
-          <!-- Top row: vault info -->
-          <div class="card-info">
-            <span class="vault-id">#{vault.vault_id}</span>
-
-            <span class="info-cell">
-              <span class="cell-label">Debt</span>
-              <span class="cell-value">{formatNumber(debt, 2)} <span class="cell-unit">icUSD</span></span>
-            </span>
-
-            <span class="info-cell">
-              <span class="cell-label">Collateral</span>
-              <span class="cell-value">{formatNumber(vault.icp_margin_amount / 1e8, 4)} <span class="cell-unit">ICP</span></span>
-            </span>
-
-            <span class="info-cell info-cell-cr">
-              <span class="cell-label">CR</span>
-              <span class="cell-value cr-value" class:cr-danger={crDanger} class:cr-caution={crCaution}>
-                {#if crDanger}
-                  <svg class="warn-icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" /></svg>
-                {/if}
-                {formatNumber(cr, 1)}%
-              </span>
-            </span>
-
-            <span class="info-cell info-cell-profit">
-              <span class="cell-label">Est. Profit</span>
-              <span class="cell-value">{formatNumber(calculateSeizure(vault, debt).profitUsd, 2)} <span class="cell-unit">USD</span></span>
-            </span>
-          </div>
-
-          <!-- Bottom row: input + action -->
-          <div class="card-action">
-            <div class="input-group">
-              <span class="input-label-row">
-                <span class="input-label">Repay</span>
-                {#if maxLiq > 0}
-                  <button class="max-text" on:click={() => setMax(vault)}>Max: {formatNumber(maxLiq, 4)} icUSD</button>
-                {/if}
-              </span>
-              <div class="input-wrap">
-                <input type="number" class="liq-input"
-                  bind:value={liquidationAmounts[vault.vault_id]}
-                  min="0" step="0.01"
-                  placeholder="0.00"
-                  disabled={isProcessingThis} />
-                <span class="input-suffix">icUSD</span>
+          <div class="card-body">
+            <!-- LEFT: risk + numbers (CR → Debt → Collateral → Outcome) -->
+            <div class="card-left">
+              <div class="left-header">
+                <span class="vault-id">#{vault.vault_id}</span>
+                <span class="cr-badge" class:cr-danger={crDanger} class:cr-caution={crCaution}>
+                  {#if crDanger}
+                    <svg class="warn-icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" /></svg>
+                  {/if}
+                  {formatNumber(cr, 1)}%
+                </span>
               </div>
+              <div class="left-stats">
+                <span class="stat"><span class="stat-label">Debt</span> <span class="stat-value">{formatNumber(debt, 2)} icUSD</span></span>
+                <span class="stat-sep">·</span>
+                <span class="stat"><span class="stat-label">Collateral</span> <span class="stat-value">{formatNumber(vault.icp_margin_amount / 1e8, 4)} ICP</span></span>
+              </div>
+              {#if seizure}
+                <div class="outcome">You receive {formatNumber(seizure.icpSeized, 4)} ICP (${formatNumber(seizure.usdValue, 2)})</div>
+              {/if}
             </div>
 
-            <div class="action-col">
-              {#if seizure && !overMax}
-                <span class="seize-hint">→ Seize ~{formatNumber(seizure.icpSeized, 4)} ICP</span>
-              {/if}
-              {#if overMax}
-                <span class="seize-hint seize-over">Exceeds max</span>
-              {/if}
-              <button class="btn-primary btn-sm btn-liquidate"
-                on:click={() => handleLiquidate(vault)}
-                disabled={!isConnected || processingVaultId !== null || !inputVal || overMax}>
-                {#if isProcessingThis}
-                  {isApprovingAllowance ? 'Approving…' : 'Liquidating…'}
-                {:else}
-                  Liquidate
+            <!-- RIGHT: execution (input + button) -->
+            <div class="card-right">
+              <div class="input-label-row">
+                <span class="input-label">Amount to liquidate</span>
+                {#if maxLiq > 0}
+                  <button class="max-text" on:click={() => setMax(vault)}>Max: {formatNumber(maxLiq, 4)}</button>
                 {/if}
-              </button>
+              </div>
+              <div class="exec-row">
+                <div class="input-wrap">
+                  <input type="number" class="liq-input"
+                    bind:value={liquidationAmounts[vault.vault_id]}
+                    on:input={() => handleInput(vault)}
+                    min="0" step="0.01"
+                    placeholder="0.00"
+                    disabled={isProcessingThis} />
+                  <span class="input-suffix">icUSD</span>
+                </div>
+                <button class="btn-primary btn-sm btn-liquidate"
+                  on:click={() => handleLiquidate(vault)}
+                  disabled={!isConnected || processingVaultId !== null || !inputVal || overMax}>
+                  {#if isProcessingThis}
+                    {isApprovingAllowance ? 'Approving…' : 'Liquidating…'}
+                  {:else}
+                    Liquidate
+                  {/if}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -320,13 +340,11 @@
   .summary-refresh:hover { color: var(--rumi-text-secondary); }
   .summary-refresh:disabled { opacity: 0.5; cursor: not-allowed; text-decoration: none; }
 
-  /* Messages */
   .msg { padding: 0.5rem 0.75rem; border-radius: 0.375rem; font-size: 0.8125rem; margin-bottom: 0.625rem; }
   .msg-warn { background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.15); color: #fcd34d; }
   .msg-error { background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.15); color: #fca5a5; }
   .msg-success { background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.15); color: #6ee7b7; }
 
-  /* States */
   .loading-state { display: flex; justify-content: center; padding: 3rem 0; }
   .spinner { width: 1.25rem; height: 1.25rem; border: 2px solid var(--rumi-border-hover); border-top-color: var(--rumi-action); border-radius: 50%; animation: spin 0.8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -348,44 +366,65 @@
     box-shadow: inset 0 0 20px 0 rgba(209,118,232,0.03), inset 0 1px 0 0 rgba(200,210,240,0.03), 0 2px 8px -2px rgba(8,11,22,0.6);
   }
 
-  /* ── Top: vault info row ── */
-  .card-info {
-    display: grid;
-    grid-template-columns: 3rem 1fr 1fr auto 1fr;
-    align-items: center; gap: 0.75rem;
-    padding: 0.625rem 1rem;
+  /* ── Single-band card body: left numbers, right execution ── */
+  .card-body {
+    display: flex; align-items: stretch;
+    padding: 0.75rem 1rem;
+    gap: 1.25rem;
   }
 
+  /* LEFT: risk + numbers */
+  .card-left {
+    flex: 1; min-width: 0;
+    display: flex; flex-direction: column; justify-content: center;
+    gap: 0.25rem;
+  }
+
+  .left-header {
+    display: flex; align-items: center; gap: 0.625rem;
+  }
   .vault-id {
     font-family: 'Circular Std','Inter',sans-serif;
     font-weight: 500; font-size: 0.8125rem; color: var(--rumi-text-muted);
   }
-
-  .info-cell { display: flex; flex-direction: column; gap: 0.0625rem; }
-  .cell-label { font-size: 0.6875rem; color: var(--rumi-text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
-  .cell-value {
-    font-family: 'Inter', sans-serif; font-weight: 600; font-size: 0.8125rem;
-    font-variant-numeric: tabular-nums; color: var(--rumi-text-primary);
+  .cr-badge {
+    display: inline-flex; align-items: center; gap: 0.25rem;
+    font-family: 'Inter', sans-serif; font-weight: 700; font-size: 0.9375rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--rumi-text-primary);
   }
-  .cell-unit { font-weight: 400; font-size: 0.6875rem; color: var(--rumi-text-muted); }
-
-  .info-cell-cr { text-align: right; align-items: flex-end; }
-  .cr-value { display: inline-flex; align-items: center; gap: 0.25rem; }
   .cr-danger { color: var(--rumi-danger); }
   .cr-caution { color: var(--rumi-caution); }
   .warn-icon { width: 0.875rem; height: 0.875rem; flex-shrink: 0; }
 
-  .info-cell-profit { text-align: right; align-items: flex-end; }
+  .left-stats {
+    display: flex; align-items: baseline; gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+  .stat { display: inline-flex; align-items: baseline; gap: 0.25rem; }
+  .stat-label { font-size: 0.6875rem; color: var(--rumi-text-muted); }
+  .stat-value {
+    font-family: 'Inter', sans-serif; font-weight: 500; font-size: 0.8125rem;
+    font-variant-numeric: tabular-nums; color: var(--rumi-text-secondary);
+  }
+  .stat-sep { color: var(--rumi-text-muted); opacity: 0.3; font-size: 0.75rem; }
 
-  /* ── Bottom: action row ── */
-  .card-action {
-    display: flex; align-items: flex-end; gap: 1rem;
-    padding: 0 1rem 0.75rem;
+  .outcome {
+    font-family: 'Inter', sans-serif; font-size: 0.75rem;
+    font-variant-numeric: tabular-nums; color: var(--rumi-text-secondary);
   }
 
-  .input-group { flex: 1; min-width: 0; }
-  .input-label-row { display: flex; justify-content: space-between; align-items: baseline; gap: 0.5rem; margin-bottom: 0.25rem; }
-  .input-label { font-size: 0.75rem; font-weight: 500; color: var(--rumi-text-secondary); }
+  /* RIGHT: execution */
+  .card-right {
+    flex: 0 0 16rem;
+    display: flex; flex-direction: column; justify-content: center;
+    gap: 0.25rem;
+  }
+
+  .input-label-row {
+    display: flex; justify-content: space-between; align-items: baseline; gap: 0.5rem;
+  }
+  .input-label { font-size: 0.6875rem; font-weight: 500; color: var(--rumi-text-muted); }
 
   .max-text {
     background: none; border: none; cursor: pointer; padding: 0;
@@ -395,9 +434,11 @@
   }
   .max-text:hover { opacity: 1; text-decoration: underline; }
 
-  .input-wrap { position: relative; }
+  .exec-row { display: flex; gap: 0.375rem; align-items: center; }
+
+  .input-wrap { position: relative; flex: 1; }
   .liq-input {
-    width: 100%; padding: 0.375rem 3rem 0.375rem 0.5rem;
+    width: 100%; padding: 0.375rem 2.75rem 0.375rem 0.5rem;
     background: var(--rumi-bg-surface2); border: 1px solid var(--rumi-border);
     border-radius: 0.375rem; color: var(--rumi-text-primary);
     font-family: 'Inter', sans-serif; font-size: 0.8125rem;
@@ -410,16 +451,8 @@
     font-size: 0.6875rem; color: var(--rumi-text-muted); pointer-events: none;
   }
 
-  .action-col { display: flex; flex-direction: column; align-items: flex-end; gap: 0.25rem; flex-shrink: 0; }
-
-  .seize-hint {
-    font-family: 'Inter', sans-serif; font-size: 0.6875rem;
-    font-variant-numeric: tabular-nums; color: var(--rumi-text-muted); white-space: nowrap;
-  }
-  .seize-over { color: var(--rumi-danger); }
-
   .btn-liquidate {
-    padding: 0.375rem 1.25rem; white-space: nowrap;
+    padding: 0.375rem 0.875rem; white-space: nowrap; flex-shrink: 0;
     font-family: 'Inter', sans-serif;
   }
 
@@ -430,9 +463,7 @@
 
   @media (max-width: 640px) {
     .liq-header { flex-wrap: wrap; }
-    .card-info { grid-template-columns: 3rem 1fr 1fr auto; }
-    .info-cell-profit { display: none; }
-    .card-action { flex-direction: column; align-items: stretch; }
-    .action-col { flex-direction: row; justify-content: space-between; align-items: center; }
+    .card-body { flex-direction: column; gap: 0.625rem; }
+    .card-right { flex: none; }
   }
 </style>
