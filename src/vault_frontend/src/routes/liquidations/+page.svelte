@@ -279,6 +279,8 @@
                 <span class="input-label">Amount to liquidate</span>
                 {#if maxLiq > 0}
                   <button class="max-text" on:click={() => setMax(vault)}>Max: {formatNumber(maxLiq, 4)}</button>
+                {:else if isConnected}
+                  <span class="max-loading">Max: ····</span>
                 {/if}
               </div>
               <div class="exec-row">
@@ -424,6 +426,13 @@
     transition: opacity 0.15s;
   }
   .max-text:hover { opacity: 1; text-decoration: underline; }
+
+  .max-loading {
+    font-size: 0.6875rem; font-weight: 500; white-space: nowrap;
+    color: var(--rumi-text-muted); opacity: 0.5;
+    animation: pulse-subtle 1.5s ease-in-out infinite;
+  }
+  @keyframes pulse-subtle { 0%, 100% { opacity: 0.35; } 50% { opacity: 0.65; } }
 
   .exec-row { display: flex; gap: 0.375rem; align-items: center; }
 
