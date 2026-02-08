@@ -9,7 +9,39 @@
 
 ## Overview
 
-Allow vault owners to repay icUSD debt using ckUSDT or ckUSDC at a 1:1 rate plus a small fee. The protocol pulls slightly more stablecoin than the debt being cleared, keeps the difference as a fee, and reduces vault debt by the exact amount requested.
+Allow vault owners to repay icUSD debt using ckUSDT or ckUSDC at a 1:1 rate plus a configurable fee. The protocol pulls slightly more stablecoin than the debt being cleared, keeps the difference as a fee, and reduces vault debt by the exact amount requested. The accumulated stablecoins are held in the backend canister as a **protocol reserve** that can later be used to meet redemptions (e.g., if icUSD depegs downward).
+
+---
+
+## Stablecoin Reserve Strategy
+
+### Why No icUSD Burn
+
+When the protocol accepts ckUSDT/ckUSDC for debt repayment, the icUSD that was originally minted against that vault's debt remains in circulation. This is intentional and desirable:
+
+- **More icUSD in circulation** improves liquidity and adoption
+- **The protocol accumulates a stablecoin reserve** (ckUSDT/ckUSDC held by the backend canister) that backs the "excess" icUSD
+- **In a downward depeg scenario**, the protocol can offer redemptions for these stables, giving icUSD holders a floor
+
+### Where Stables Are Held
+
+All received ckUSDT/ckUSDC (both the 1:1 repayment amounts and the fees) accumulate in the **backend canister's own account**. This is the same canister that already holds ICP collateral from vaults.
+
+No internal counter is needed to track the reserve — the ckUSDT and ckUSDC ledgers are the source of truth. Query the backend canister's balance on each ledger via standard `icrc1_balance_of` calls to get the current reserve amounts. These should be surfaced on the frontend stats at a later date.
+
+### Adjusted Collateral Ratio Formula
+
+The system-wide collateral ratio must account for the stablecoin reserve. The reserve effectively reduces the amount of icUSD that needs to be backed by ICP collateral:
+
+```
+total_icusd_repaid_via_stables = total_ckstable_held / (1 + ckstable_repay_fee)
+
+Adjusted CR = total_icp_collateral_value / (total_icusd_minted - total_icusd_repaid_via_stables)
+```
+
+**Why `/ (1 + fee)` and not `* (1 - fee)`:** For every 100 icUSD of debt repaid, the protocol holds 100.02 ckstable (at 0.02% fee). To recover the exact icUSD amount from the ckstable total: `100.02 / 1.0002 = 100.00`. Multiplying by `0.9998` gives `99.9999604` — close but not exact. Division is the precise inverse.
+
+**Note:** `total_ckstable_held` is the sum of ckUSDT + ckUSDC balances held by the backend canister, queried from the respective ledgers. `ckstable_repay_fee` is the current value of the configurable fee parameter (see below).
 
 ---
 
@@ -23,7 +55,7 @@ Allow vault owners to repay icUSD debt using ckUSDT or ckUSDC at a 1:1 rate plus
 | ckUSDT | 6        | 1,000,000                       |
 | ckUSDC | 6        | 1,000,000                       |
 
-All internal vault debt accounting is in 8-decimal icUSD units (e8s). Stable token ledgers operate in 6-decimal units (e6s).
+All internal vault debt accounting is in 8-decimal icUSD units (e8s). Stable token ledgers operate in 6-decimal units (e6s). icUSD's decimals cannot be changed (immutable ledger init param, already deployed on mainnet with existing balances and transactions).
 
 ### Conversion Rule
 
@@ -54,9 +86,29 @@ The frontend does NOT need to know about decimal differences between tokens.
 
 ## Fee Structure
 
-### Stable Repayment Fee: 0.02% (adjustable)
+### Configurable Fee Parameter: `ckstable_repay_fee`
 
-The fee is a **surcharge on the stablecoin payment**, not a discount on debt reduction. This ensures vault debt reduces by the exact amount the user intended, with no leftover dust.
+A protocol-level configuration parameter stored in canister state:
+
+- **Parameter name:** `ckstable_repay_fee`
+- **Type:** `Ratio` (same type used for borrowing fee)
+- **Default:** `0.0002` (0.02%)
+- **Adjustable at runtime** via developer-only admin function
+- **Persisted across upgrades** (stored in `State` struct, replayed from event log)
+- **Reasonable bounds:** 0 (fee waived) to 0.05 (5% max, prevents accidental misconfiguration)
+
+### Design Rationale for Starting at 0.02%
+
+The primary purpose of this feature is to provide an escape hatch during low-liquidity launch conditions where users may not be able to acquire icUSD to repay their vaults. Starting with a near-zero fee encourages usage. The fee can be raised later as icUSD liquidity deepens:
+
+- **Launch phase:** 0.02% — encourages adoption, covers rounding dust
+- **Growth phase:** Could raise to 0.1%-0.5% as icUSD becomes liquid on DEXes
+- **Depeg defense:** Can crank to 2%-5% to discourage usage if a ckstable depegs
+- **Emergency:** Set to maximum to effectively disable the feature without a code change
+
+### Fee Application: Surcharge on Payment (Not Discount on Credit)
+
+The fee is added to what the user pays, NOT subtracted from the debt reduction. This ensures clean UX: vault debt reduces by the exact amount the user intended with no leftover dust.
 
 ### Example
 
@@ -69,39 +121,30 @@ User has a vault with 100.00 icUSD debt and wants to fully repay with ckUSDT:
 | 3 | Fee (0.02%) | 0.02 ckUSDT |
 | 4 | Total pulled from user | 100.02 ckUSDT |
 | 5 | Vault debt reduced by | 100.00 icUSD (exact) |
-| 6 | Protocol keeps | 0.02 ckUSDT |
+| 6 | Protocol keeps all 100.02 ckUSDT | (reserve + fee) |
 
 The "Max Repay" button in the UI should display `100.02 ckUSDT` as the total cost to clear 100.00 icUSD of debt.
 
 ### Fee Math (Backend)
 
 ```
-debt_reduction_e8s = requested_amount  // exact icUSD debt reduction
-base_stable_e6s = debt_reduction_e8s / 100  // 1:1 conversion
-fee_e6s = base_stable_e6s * fee_rate  // 0.02% = 0.0002
-total_pull_e6s = base_stable_e6s + fee_e6s  // what we pull from user's wallet
+debt_reduction_e8s = requested_amount               // exact icUSD debt reduction
+debt_reduction_e8s = debt_reduction_e8s - (debt_reduction_e8s % 100)  // truncate for clean conversion
+base_stable_e6s = debt_reduction_e8s / 100           // 1:1 conversion to 6-decimal
+fee_e6s = base_stable_e6s * ckstable_repay_fee       // configurable fee
+total_pull_e6s = base_stable_e6s + fee_e6s           // what we pull from user's wallet
 ```
 
-### Fee Destination
-
-The fee (in ckUSDT/ckUSDC) stays in the protocol canister. Treasury routing for accumulated stablecoins should be implemented separately (see Open Questions).
-
-### Adjustable Fee (Admin Function)
-
-Add a developer-only admin function to update the stable repayment fee rate:
+### Admin Functions
 
 ```
-set_stable_repayment_fee(new_rate: f64) -> Result<(), ProtocolError>
+set_ckstable_repay_fee(new_rate: f64) -> Result<(), ProtocolError>
+get_ckstable_repay_fee() -> f64
 ```
 
-- Only callable by `developer_principal`
-- Stored in protocol state, survives upgrades
-- Default: 0.0002 (0.02%)
-- Can be raised to discourage usage during depeg events (acts as soft kill-switch)
-- Can be set to 0 to waive the fee entirely
-- Reasonable upper bound: 0.05 (5%) to prevent accidental misconfiguration
-
-This should be persisted in state and included in the event log so fee changes are auditable.
+- `set` is developer-only (checks `caller == developer_principal`)
+- Fee changes are recorded in the event log for auditability
+- Rejects values outside 0.0 to 0.05 range
 
 ---
 
@@ -143,7 +186,8 @@ await new Promise(resolve => setTimeout(resolve, 1200));
 ## Backend Changes Summary
 
 ### State (`state.rs`)
-- Add `stable_repayment_fee_rate: Ratio` field (default 0.0002)
+- Add `ckstable_repay_fee: Ratio` field (default `Ratio::new(dec!(0.0002))`)
+- Ensure field is included in event replay for upgrade persistence
 
 ### Management (`management.rs`)
 - Consolidate `transfer_ckusdt_from` and `transfer_ckusdc_from` into a single function:
@@ -154,47 +198,54 @@ await new Promise(resolve => setTimeout(resolve, 1200));
       caller: Principal
   ) -> Result<u64, TransferFromError>
   ```
+  Resolves the correct ledger principal internally based on `token_type`.
 
 ### Vault (`vault.rs`)
 - `repay_to_vault_with_stable`:
   1. Truncate `debt_reduction_e8s` to nearest 100 for clean conversion
-  2. Calculate `fee_e6s` from fee rate
-  3. Calculate `total_pull_e6s = (debt_reduction_e8s / 100) + fee_e6s`
-  4. Call `transfer_stable_from(token_type, total_pull_e6s, caller)`
-  5. On success, reduce vault debt by `debt_reduction_e8s`
-  6. Route fee to treasury (if configured)
+  2. Read `ckstable_repay_fee` from state
+  3. Calculate `fee_e6s` from fee rate
+  4. Calculate `total_pull_e6s = (debt_reduction_e8s / 100) + fee_e6s`
+  5. Call `transfer_stable_from(token_type, total_pull_e6s, caller)`
+  6. On success, reduce vault debt by `debt_reduction_e8s`
 
 - `liquidate_vault_partial_with_stable`: Same conversion and fee logic
 
 ### Main (`main.rs`)
 - Add `validate_call()?` to `liquidate_vault_partial_with_stable`
-- Add `set_stable_repayment_fee` admin endpoint
-- Add `get_stable_repayment_fee` query endpoint
+- Add `set_ckstable_repay_fee` admin endpoint (developer-only)
+- Add `get_ckstable_repay_fee` query endpoint
+
+### Collateral Ratio Calculation
+- Update the system-wide CR calculation to use the adjusted formula:
+  ```
+  adjusted_cr = total_icp_value / (total_icusd_minted - (total_ckstable_held / (1 + ckstable_repay_fee)))
+  ```
+- `total_ckstable_held` is queried from ckUSDT + ckUSDC ledgers via `icrc1_balance_of`
 
 ### Candid (`.did`)
-- Add `set_stable_repayment_fee` and `get_stable_repayment_fee` to service definition
+- Add `set_ckstable_repay_fee` and `get_ckstable_repay_fee` to service definition
 
 ---
 
 ## Open Questions
 
-1. **icUSD burn mechanism:** When the protocol accepts ckUSDT/ckUSDC for debt repayment, the icUSD that was originally minted for that debt is still in circulation. How do we handle this? Options:
-   - Accept the accounting gap for now (icUSD supply slightly exceeds total debt) — revisit when DEX liquidity exists to swap stablecoins back to icUSD
-   - Mint-and-burn: protocol mints icUSD to itself, immediately burns it, to keep supply aligned (wasteful but keeps accounting clean)
-   - Use accumulated stablecoins as protocol reserves backing the excess icUSD
+1. **Depeg circuit breaker:** Beyond the adjustable fee, should there be a hard disable flag per token type? e.g., `set_stable_token_enabled(token_type, bool)` — or is cranking the fee to 5% sufficient?
 
-2. **Treasury routing for stablecoins:** Should accumulated ckUSDT/ckUSDC fees be routed to treasury automatically (like minting fees), or held in the protocol canister until a manual withdrawal?
+2. **Redemption for stables:** The reserve strategy envisions offering redemptions for ckstables during icUSD downward depeg events. This is a separate feature to be designed later, but the reserve accumulation mechanism should be built with this in mind.
 
-3. **Depeg circuit breaker:** Beyond the adjustable fee, should there be a hard disable flag per token type? e.g., `set_stable_token_enabled(token_type, bool)`
+3. **Frontend stats:** Surface ckUSDT/ckUSDC reserve balances and adjusted CR on the frontend dashboard. Low priority — can be added after core feature works.
 
 ---
 
 ## Implementation Order
 
-1. Fix `validate_call()` on liquidation endpoint (one-line fix, merge immediately)
-2. Add decimal conversion + fee logic to backend
-3. Consolidate duplicate transfer functions
-4. Add admin fee endpoints
-5. Update frontend: approval flow, fee display, remove debug delay
-6. Test on local replica with mock ckUSDT/ckUSDC ledgers
-7. Deploy to staging for validation
+1. Fix `validate_call()` on liquidation endpoint (one-line fix)
+2. Add `ckstable_repay_fee` config parameter to state
+3. Add decimal conversion + fee logic to backend
+4. Consolidate duplicate transfer functions into `transfer_stable_from`
+5. Add admin fee endpoints (`set_ckstable_repay_fee` / `get_ckstable_repay_fee`)
+6. Update CR calculation with adjusted formula
+7. Update frontend: approval flow, fee display, remove debug delay
+8. Test on local replica with mock ckUSDT/ckUSDC ledgers
+9. Deploy to staging for validation
