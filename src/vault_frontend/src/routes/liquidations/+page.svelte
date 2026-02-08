@@ -101,15 +101,6 @@
     return v > getMaxLiquidation(vault);
   }
 
-  // Immediate clamp: prevent typing above max
-  function handleInput(vault: CandidVault) {
-    const max = getMaxLiquidation(vault);
-    const v = parseFloat(liquidationAmounts[vault.vault_id]);
-    if (!isNaN(v) && v > max && max > 0) {
-      liquidationAmounts[vault.vault_id] = max.toFixed(4);
-    }
-  }
-
   function setMax(vault: CandidVault) {
     const max = getMaxLiquidation(vault);
     if (max > 0) liquidationAmounts[vault.vault_id] = max.toFixed(4);
@@ -291,9 +282,8 @@
               </div>
               <div class="exec-row">
                 <div class="input-wrap">
-                  <input type="number" class="liq-input"
+                  <input type="number" class="liq-input" class:input-over={overMax}
                     bind:value={liquidationAmounts[vault.vault_id]}
-                    on:input={() => handleInput(vault)}
                     min="0" step="0.01"
                     placeholder="0.00"
                     disabled={isProcessingThis} />
@@ -446,6 +436,7 @@
   }
   .liq-input:focus { outline: none; border-color: var(--rumi-teal); box-shadow: 0 0 0 1px rgba(45,212,191,0.12); }
   .liq-input:disabled { opacity: 0.5; }
+  .liq-input.input-over { color: var(--rumi-text-muted); opacity: 0.5; }
   .input-suffix {
     position: absolute; right: 0.5rem; top: 50%; transform: translateY(-50%);
     font-size: 0.6875rem; color: var(--rumi-text-muted); pointer-events: none;
