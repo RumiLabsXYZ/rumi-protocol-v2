@@ -101,6 +101,16 @@
     return v > getMaxLiquidation(vault);
   }
 
+  // Reactive seizure: called from template, reads liquidationAmounts directly
+  function getSeizure(vault: CandidVault): { icpSeized: number, usdValue: number } | null {
+    // Reference the whole object so Svelte tracks assignment
+    const _amounts = liquidationAmounts;
+    const v = parseFloat(_amounts[vault.vault_id]) || 0;
+    if (v <= 0) return null;
+    if (v > getMaxLiquidation(vault)) return null;
+    return calculateSeizure(vault, v);
+  }
+
   function setMax(vault: CandidVault) {
     const max = getMaxLiquidation(vault);
     if (max > 0) liquidationAmounts[vault.vault_id] = max.toFixed(4);
@@ -242,9 +252,6 @@
         {@const cr = calculateCollateralRatio(vault)}
         {@const debt = getVaultDebt(vault)}
         {@const maxLiq = getMaxLiquidation(vault)}
-        {@const inputVal = getInputVal(vault)}
-        {@const seizure = inputVal > 0 && !isOverMax(vault) ? calculateSeizure(vault, inputVal) : null}
-        {@const overMax = isOverMax(vault)}
         {@const isProcessingThis = processingVaultId === vault.vault_id}
         {@const crDanger = cr < 130}
         {@const crCaution = cr >= 130 && cr < 150}
@@ -271,10 +278,10 @@
 
             <!-- CENTER: outcome (appears when user types) -->
             <div class="card-center">
-              {#if seizure}
+              {#if getSeizure(vault)}
+                {@const s = getSeizure(vault)}
                 <span class="outcome-label">You receive</span>
-                <span class="outcome-value">{formatNumber(seizure.icpSeized, 4)} ICP</span>
-                <span class="outcome-usd">${formatNumber(seizure.usdValue, 2)}</span>
+                <span class="outcome-line">{formatNumber(s.icpSeized, 4)} ICP <span class="outcome-usd">(${formatNumber(s.usdValue, 2)})</span></span>
               {/if}
             </div>
 
@@ -290,8 +297,9 @@
               </div>
               <div class="exec-row">
                 <div class="input-wrap">
-                  <input type="number" class="liq-input" class:input-over={overMax}
+                  <input type="number" class="liq-input" class:input-over={isOverMax(vault)}
                     bind:value={liquidationAmounts[vault.vault_id]}
+                    on:input={() => { liquidationAmounts = liquidationAmounts; }}
                     min="0" step="0.01"
                     placeholder="0.00"
                     disabled={isProcessingThis} />
@@ -299,7 +307,7 @@
                 </div>
                 <button class="btn-primary btn-sm btn-liquidate"
                   on:click={() => handleLiquidate(vault)}
-                  disabled={!isConnected || processingVaultId !== null || !inputVal || overMax}>
+                  disabled={!isConnected || processingVaultId !== null || !getInputVal(vault) || isOverMax(vault)}>
                   {#if isProcessingThis}
                     {isApprovingAllowance ? 'Approving…' : 'Liquidating…'}
                   {:else}
@@ -411,19 +419,18 @@
   .card-center {
     flex: 0 0 auto;
     display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 0.125rem;
+    gap: 0.1875rem;
     min-width: 7rem;
   }
   .outcome-label {
-    font-size: 0.6875rem; color: var(--rumi-text-muted);
+    font-size: 0.6875rem; color: var(--rumi-text-muted); white-space: nowrap;
   }
-  .outcome-value {
+  .outcome-line {
     font-family: 'Inter', sans-serif; font-weight: 600; font-size: 0.875rem;
-    font-variant-numeric: tabular-nums; color: var(--rumi-text-primary);
+    font-variant-numeric: tabular-nums; color: var(--rumi-text-primary); white-space: nowrap;
   }
   .outcome-usd {
-    font-family: 'Inter', sans-serif; font-size: 0.6875rem;
-    font-variant-numeric: tabular-nums; color: var(--rumi-text-muted);
+    font-weight: 400; font-size: 0.75rem; color: var(--rumi-text-muted);
   }
 
   /* RIGHT: execution */
