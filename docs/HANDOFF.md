@@ -523,6 +523,48 @@ a76e90d feat: implement design constitution compliance
 
 ---
 
+## Protocol Constants Centralization (February 9, 2026)
+
+**Branch:** `feature/ui-updates` — Commit `6bff0d1`
+
+### Problem
+Protocol-critical numbers (minimum CR, liquidation threshold) were hardcoded in multiple places across the frontend with inconsistent values. `VaultCard.svelte` had `MINT_MINIMUM = 1.5` and `E8S = 100_000_000` as local constants, and `getRiskLevel()` used hardcoded thresholds (`1.5`, `1.4`) that didn't match actual protocol parameters. The `config.ts` settings object also had wrong values (`minCollateralRatio: 130`, `liquidationThreshold: 125`). If protocol parameters ever change, tracking down every hardcoded instance would be a nightmare.
+
+### Solution: `src/vault_frontend/src/lib/protocol.ts`
+Created a single source of truth for protocol parameters on the frontend:
+
+```typescript
+export const MINIMUM_CR = 1.5;        // 150% — min to open/borrow (backend: RECOVERY_COLLATERAL_RATIO)
+export const LIQUIDATION_CR = 1.33;   // 133% — liquidation threshold (backend: MINIMUM_COLLATERAL_RATIO)
+export const E8S = 100_000_000;
+```
+
+**Backend source:** `src/rumi_protocol_backend/src/lib.rs` lines 56–57:
+```rust
+pub const RECOVERY_COLLATERAL_RATIO: Ratio = Ratio::new(dec!(1.5));   // 150%
+pub const MINIMUM_COLLATERAL_RATIO: Ratio = Ratio::new(dec!(1.33));   // 133%
+```
+
+**Naming note:** The backend names are confusing — `MINIMUM_COLLATERAL_RATIO` is actually the *liquidation* threshold, while `RECOVERY_COLLATERAL_RATIO` is the minimum to open/borrow. The frontend names (`MINIMUM_CR`, `LIQUIDATION_CR`) are more intuitive.
+
+### Risk Level Thresholds (corrected)
+| CR Range | Risk Level | Color | Icon |
+|----------|-----------|-------|------|
+| ≥ 150% (`MINIMUM_CR`) | `normal` | Neutral white | None |
+| 133%–150% (`LIQUIDATION_CR` to `MINIMUM_CR`) | `warning` | Amber | ⚠ |
+| ≤ 133% (`LIQUIDATION_CR`) | `danger` | Red | ⚠ |
+
+**Exception:** Projected CR preview (when user types into Add Collateral / Borrow / Repay fields) uses green for `normal` to signal "this action improves your position."
+
+### Migration Checklist
+`VaultCard.svelte` now imports from `$lib/protocol` instead of local constants. Other files that may still have hardcoded values should be migrated:
+- [ ] `config.ts` — `CONFIG.settings` object has wrong values (130%, 125%) — remove or update
+- [ ] Liquidation page components — check for hardcoded ratio thresholds
+- [ ] Borrow page — check max borrowable calculations
+- [ ] Any future components that reference protocol ratios
+
+---
+
 ## Tech Stack
 
 ### Backend (Rust)
