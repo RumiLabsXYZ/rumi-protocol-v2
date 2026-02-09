@@ -7,14 +7,13 @@
   import { CONFIG } from '../../config';
   import { createEventDispatcher } from 'svelte';
   import { walletStore } from '../../stores/wallet';
+  import { MINIMUM_CR, LIQUIDATION_CR, E8S } from '$lib/protocol';
 
   export let vault: Vault;
   export let icpPrice: number = 0;
   export let expandedVaultId: number | null = null;
 
   const dispatch = createEventDispatcher<{ updated: void; toggle: { vaultId: number } }>();
-  const E8S = 100_000_000;
-  const MINT_MINIMUM = 1.5;
 
   $: expanded = expandedVaultId === vault.vaultId;
 
@@ -32,7 +31,7 @@
     ? collateralValueUsd / vault.borrowedIcusd : Infinity;
   $: borrowedValueUsd = vault.borrowedIcusd;
   $: riskLevel = getRiskLevel(collateralRatio);
-  $: maxBorrowable = Math.max(0, (collateralValueUsd / MINT_MINIMUM) - vault.borrowedIcusd);
+  $: maxBorrowable = Math.max(0, (collateralValueUsd / MINIMUM_CR) - vault.borrowedIcusd);
 
   // Wallet balances for input caps
   $: walletIcp = $walletStore.tokenBalances?.ICP
@@ -43,7 +42,7 @@
   $: maxRepayable = Math.min(walletIcusd, vault.borrowedIcusd);
 
   // ── Credit usage ──
-  $: creditCapacity = collateralValueUsd / MINT_MINIMUM;
+  $: creditCapacity = collateralValueUsd / MINIMUM_CR;
   $: creditUsed = vault.borrowedIcusd > 0 && creditCapacity > 0
     ? Math.min((vault.borrowedIcusd / creditCapacity) * 100, 100) : 0;
   $: creditRisk = creditUsed >= 85 ? 'danger' : creditUsed >= 65 ? 'warning' : 'normal';
@@ -67,9 +66,9 @@
   $: showProjectedCr = activeProjectedCr !== null && activeProjectedCr !== collateralRatio;
 
   function getRiskLevel(ratio: number): 'normal' | 'warning' | 'danger' {
-    if (ratio === Infinity || ratio >= 1.5) return 'normal';
-    if (ratio >= 1.4) return 'warning';  // 140–149.9% = amber
-    return 'danger';                      // <140% = red
+    if (ratio === Infinity || ratio >= MINIMUM_CR) return 'normal';   // ≥150%
+    if (ratio > LIQUIDATION_CR) return 'warning';                     // 133%–150% = amber
+    return 'danger';                                                  // ≤133% = red
   }
 
   // ── Action state ──
@@ -126,7 +125,7 @@
   }
 
   // Whether projected CR is invalid (below minimum 150%) — disables action button
-  $: borrowCrInvalid = projectedCrBorrow !== null && projectedCrBorrow !== Infinity && projectedCrBorrow < MINT_MINIMUM;
+  $: borrowCrInvalid = projectedCrBorrow !== null && projectedCrBorrow !== Infinity && projectedCrBorrow < MINIMUM_CR;
 
   // Whether input exceeds max — disables action button
   $: addOverMax = (() => {
@@ -416,20 +415,21 @@
   .vault-card-warning { border-left: 2px solid var(--rumi-caution); }
 
   .vault-row {
-    display: grid; grid-template-columns: 3rem 1fr 1fr auto auto 2rem;
-    align-items: center; gap: 1rem; padding: 0.625rem 1rem;
+    display: grid; grid-template-columns: 3rem auto auto auto 1fr 2rem;
+    align-items: start; column-gap: 3rem; padding: 0.625rem 1rem;
     width: 100%; background: none; border: none;
     color: inherit; cursor: pointer; text-align: left; font-family: inherit;
   }
-  .vault-id { font-family: 'Circular Std','Inter',sans-serif; font-weight: 500; font-size: 0.8125rem; color: var(--rumi-text-muted); }
+  .vault-id { font-family: 'Circular Std','Inter',sans-serif; font-weight: 500; font-size: 0.8125rem; color: var(--rumi-text-muted); align-self: center; }
   .vault-cell { display: flex; flex-direction: column; gap: 0.0625rem; }
   .cell-label { font-size: 0.6875rem; color: var(--rumi-text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
   .cell-value { font-family: 'Inter',sans-serif; font-weight: 600; font-size: 0.875rem; font-variant-numeric: tabular-nums; color: var(--rumi-text-primary); }
   .cell-sub { font-size: 0.75rem; color: var(--rumi-text-muted); font-variant-numeric: tabular-nums; }
-  .vault-cell-ratio { text-align: right; align-items: flex-end; }
-  .ratio-text { display: inline-flex; align-items: center; gap: 0.25rem; }
+  .vault-cell-ratio { text-align: right; align-items: flex-end; justify-self: end; }
+  .ratio-text { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 1.125rem; font-weight: 700; }
   .ratio-warning { color: var(--rumi-caution); }
   .ratio-danger { color: var(--rumi-danger); }
+  .ratio-healthy { color: var(--rumi-action); }
   .warn-icon { width: 0.875rem; height: 0.875rem; flex-shrink: 0; }
 
   /* ── Credit meter ── */
@@ -448,7 +448,7 @@
   .cr-new { font-weight: 700; }
   .ratio-healthy { color: var(--rumi-success, #10b981); }
 
-  .vault-chevron { display: flex; align-items: center; justify-content: center; transition: transform 0.15s ease; }
+  .vault-chevron { display: flex; align-items: center; justify-content: center; align-self: center; transition: transform 0.15s ease; }
   .vault-chevron svg { width: 1rem; height: 1rem; color: var(--rumi-text-muted); }
   .vault-chevron-open { transform: rotate(90deg); }
 
