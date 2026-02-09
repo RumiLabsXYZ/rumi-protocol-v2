@@ -42,6 +42,12 @@
   $: maxAddCollateral = walletIcp;
   $: maxRepayable = Math.min(walletIcusd, vault.borrowedIcusd);
 
+  // ── Credit usage ──
+  $: creditCapacity = collateralValueUsd / MINT_MINIMUM;
+  $: creditUsed = vault.borrowedIcusd > 0 && creditCapacity > 0
+    ? Math.min((vault.borrowedIcusd / creditCapacity) * 100, 100) : 0;
+  $: creditRisk = creditUsed >= 85 ? 'danger' : creditUsed >= 65 ? 'warning' : 'normal';
+
   $: fmtMargin = formatNumber(vault.icpMargin, 4);
   $: fmtCollateralUsd = formatNumber(collateralValueUsd, 2);
   $: fmtBorrowed = formatNumber(vault.borrowedIcusd, 2);
@@ -50,6 +56,15 @@
   $: riskTooltip = riskLevel === 'warning'
     ? 'Approaching minimum collateral ratio'
     : riskLevel === 'danger' ? 'At risk of liquidation. Add collateral or repay.' : '';
+
+  // ── Active projected CR (whichever field is active) ──
+  $: activeProjectedCr = activeIntent === 'add' ? projectedCrAdd
+    : activeIntent === 'borrow' ? projectedCrBorrow
+    : activeIntent === 'repay' ? projectedCrRepay
+    : null;
+  $: activeProjectedRisk = projectedRisk(activeProjectedCr);
+  $: fmtActiveProjectedCr = fmtProjectedCr(activeProjectedCr);
+  $: showProjectedCr = activeProjectedCr !== null && activeProjectedCr !== collateralRatio;
 
   function getRiskLevel(ratio: number): 'normal' | 'warning' | 'danger' {
     if (ratio === Infinity || ratio >= 1.5) return 'normal';
@@ -235,7 +250,8 @@
 </script>
 
 <!-- ── Collapsed row ── -->
-<div class="vault-card" class:vault-card-danger={riskLevel === 'danger'} class:vault-card-warning={riskLevel === 'warning'}>
+<div class="vault-card" class:vault-card-danger={riskLevel === 'danger'} class:vault-card-warning={riskLevel === 'warning'}
+  style={showProjectedCr ? `border-left-color: var(--rumi-${activeProjectedRisk === 'danger' ? 'danger' : activeProjectedRisk === 'warning' ? 'caution' : 'success'})` : ''}>
   <button class="vault-row" on:click={toggleExpand}>
     <span class="vault-id">#{vault.vaultId}</span>
     <span class="vault-cell">
@@ -248,14 +264,35 @@
       <span class="cell-value">{fmtBorrowed} icUSD</span>
       <span class="cell-sub">${fmtBorrowedUsd}</span>
     </span>
+    <span class="vault-cell vault-cell-credit">
+      <span class="cell-label">Credit</span>
+      <span class="cell-value credit-meter-row">
+        <span class="credit-meter-track">
+          <span class="credit-meter-fill" class:meter-normal={creditRisk === 'normal'}
+            class:meter-warning={creditRisk === 'warning'} class:meter-danger={creditRisk === 'danger'}
+            style="width: {creditUsed}%"></span>
+        </span>
+      </span>
+      <span class="cell-sub">{creditUsed.toFixed(0)}% used</span>
+    </span>
     <span class="vault-cell vault-cell-ratio">
       <span class="cell-label">CR</span>
-      <span class="cell-value ratio-text" class:ratio-warning={riskLevel === 'warning'} class:ratio-danger={riskLevel === 'danger'} title={riskTooltip}>
-        {#if riskLevel !== 'normal'}
-          <svg class="warn-icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" /></svg>
-        {/if}
-        {fmtRatio}
-      </span>
+      {#if showProjectedCr}
+        <span class="cell-value ratio-text cr-projected-row">
+          <span class="cr-old" class:ratio-warning={riskLevel === 'warning'} class:ratio-danger={riskLevel === 'danger'}>{fmtRatio}</span>
+          <span class="cr-arrow">→</span>
+          <span class="cr-new" class:ratio-warning={activeProjectedRisk === 'warning'}
+            class:ratio-danger={activeProjectedRisk === 'danger'}
+            class:ratio-healthy={activeProjectedRisk === 'normal'}>{fmtActiveProjectedCr}</span>
+        </span>
+      {:else}
+        <span class="cell-value ratio-text" class:ratio-warning={riskLevel === 'warning'} class:ratio-danger={riskLevel === 'danger'} title={riskTooltip}>
+          {#if riskLevel !== 'normal'}
+            <svg class="warn-icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" /></svg>
+          {/if}
+          {fmtRatio}
+        </span>
+      {/if}
     </span>
     <span class="vault-chevron" class:vault-chevron-open={expanded}>
       <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" /></svg>
@@ -296,10 +333,6 @@
               disabled={isProcessing || !addCollateralAmount || addOverMax}>
               {isProcessing && activeIntent === 'add' ? '…' : 'Add'}
             </button>
-            {#if projectedCrAdd !== null}
-              <span class="cr-preview" class:cr-warning={projectedRisk(projectedCrAdd) === 'warning'}
-                class:cr-danger={projectedRisk(projectedCrAdd) === 'danger'}>→ CR {fmtProjectedCr(projectedCrAdd)}</span>
-            {/if}
           </div>
         </div>
 
@@ -322,10 +355,6 @@
               disabled={isProcessing || !borrowAmount || borrowCrInvalid || borrowOverMax}>
               {isProcessing && activeIntent === 'borrow' ? '…' : 'Borrow'}
             </button>
-            {#if projectedCrBorrow !== null}
-              <span class="cr-preview" class:cr-warning={projectedRisk(projectedCrBorrow) === 'warning'}
-                class:cr-danger={projectedRisk(projectedCrBorrow) === 'danger'}>→ CR {fmtProjectedCr(projectedCrBorrow)}</span>
-            {/if}
           </div>
         </div>
 
@@ -349,10 +378,6 @@
               disabled={isProcessing || !repayAmount || vault.borrowedIcusd === 0 || repayOverMax}>
               {isProcessing && activeIntent === 'repay' ? '…' : 'Repay'}
             </button>
-            {#if projectedCrRepay !== null}
-              <span class="cr-preview" class:cr-warning={projectedRisk(projectedCrRepay) === 'warning'}
-                class:cr-danger={projectedRisk(projectedCrRepay) === 'danger'}>→ CR {fmtProjectedCr(projectedCrRepay)}</span>
-            {/if}
           </div>
         </div>
       </div>
@@ -391,7 +416,7 @@
   .vault-card-warning { border-left: 2px solid var(--rumi-caution); }
 
   .vault-row {
-    display: grid; grid-template-columns: 3rem 1fr 1fr auto 2rem;
+    display: grid; grid-template-columns: 3rem 1fr 1fr auto auto 2rem;
     align-items: center; gap: 1rem; padding: 0.625rem 1rem;
     width: 100%; background: none; border: none;
     color: inherit; cursor: pointer; text-align: left; font-family: inherit;
@@ -406,6 +431,22 @@
   .ratio-warning { color: var(--rumi-caution); }
   .ratio-danger { color: var(--rumi-danger); }
   .warn-icon { width: 0.875rem; height: 0.875rem; flex-shrink: 0; }
+
+  /* ── Credit meter ── */
+  .vault-cell-credit { min-width: 5rem; }
+  .credit-meter-row { display: flex; align-items: center; height: 1.25rem; }
+  .credit-meter-track { width: 4.5rem; height: 0.25rem; background: var(--rumi-bg-surface2); border-radius: 9999px; overflow: hidden; }
+  .credit-meter-fill { display: block; height: 100%; border-radius: 9999px; transition: width 0.3s ease; }
+  .meter-normal { background: var(--rumi-success, #10b981); }
+  .meter-warning { background: var(--rumi-caution); }
+  .meter-danger { background: var(--rumi-danger); }
+
+  /* ── Projected CR in header ── */
+  .cr-projected-row { display: inline-flex; align-items: center; gap: 0.25rem; }
+  .cr-old { text-decoration: line-through; opacity: 0.5; font-size: 0.75rem; }
+  .cr-arrow { color: var(--rumi-text-muted); font-size: 0.625rem; }
+  .cr-new { font-weight: 700; }
+  .ratio-healthy { color: var(--rumi-success, #10b981); }
 
   .vault-chevron { display: flex; align-items: center; justify-content: center; transition: transform 0.15s ease; }
   .vault-chevron svg { width: 1rem; height: 1rem; color: var(--rumi-text-muted); }
@@ -444,17 +485,11 @@
   }
   .max-text:hover { opacity: 1; text-decoration: underline; }
 
-  /* Button + projected CR inline */
-  .action-btn-row { display: flex; align-items: center; gap: 0.5rem; }
-  .btn-action { width: 70%; }
+  /* Button row — right-aligned, uniform width */
+  .action-btn-row { display: flex; justify-content: flex-end; }
+  .btn-action { width: 6rem; text-align: center; }
   .btn-sm { padding: 0.3125rem 0.75rem; font-size: 0.75rem; border-radius: 0.375rem; }
 
-  /* Projected CR preview */
-  .cr-preview {
-    font-family: 'Inter',sans-serif; font-size: 0.6875rem;
-    font-variant-numeric: tabular-nums; font-weight: 500;
-    color: var(--rumi-text-muted); white-space: nowrap;
-  }
   .cr-warning { color: var(--rumi-caution); }
   .cr-danger { color: var(--rumi-danger); }
 
@@ -483,6 +518,7 @@
   @media (max-width: 640px) {
     .vault-row { grid-template-columns: 3rem 1fr 1fr 2rem; gap: 0.5rem; }
     .vault-cell-ratio { display: none; }
+    .vault-cell-credit { display: none; }
     .action-grid { grid-template-columns: 1fr; }
   }
 </style>
