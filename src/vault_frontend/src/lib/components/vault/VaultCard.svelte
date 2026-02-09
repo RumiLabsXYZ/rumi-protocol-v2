@@ -490,9 +490,6 @@
   .btn-action { width: 6rem; text-align: center; }
   .btn-sm { padding: 0.3125rem 0.75rem; font-size: 0.75rem; border-radius: 0.375rem; }
 
-  .cr-warning { color: var(--rumi-caution); }
-  .cr-danger { color: var(--rumi-danger); }
-
   /* Messages */
   .msg-bar {
     padding: 0.375rem 0.625rem; border-radius: 0.375rem;
