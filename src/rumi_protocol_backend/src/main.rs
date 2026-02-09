@@ -60,11 +60,15 @@ fn check_postcondition<T>(t: T) -> T {
     t
 }
 
-fn validate_call() -> Result<(), ProtocolError> {
+/// Validates caller identity and ensures a fresh price is available.
+/// If the cached ICP price is older than 30 seconds, triggers an on-demand
+/// XRC fetch before proceeding. This allows the background timer to poll
+/// lazily (every 300s) while guaranteeing fresh prices for actual operations.
+async fn validate_call() -> Result<(), ProtocolError> {
     if ic_cdk::caller() == Principal::anonymous() {
         return Err(ProtocolError::AnonymousCallerNotAllowed);
     }
-    read_state(|s| s.check_price_not_too_old())
+    rumi_protocol_backend::xrc::ensure_fresh_price().await
 }
 
 fn validate_mode() -> Result<(), ProtocolError> {
@@ -274,7 +278,7 @@ fn get_vaults(target: Option<Principal>) -> Vec<CandidVault> {
 #[candid_method(update)]
 #[update]
 async fn redeem_icp(icusd_amount: u64) -> Result<SuccessWithFee, ProtocolError> {
-    validate_call()?;
+    validate_call().await?;
     check_postcondition(rumi_protocol_backend::vault::redeem_icp(icusd_amount).await)
 }
 
@@ -291,14 +295,14 @@ fn get_redemption_rate() -> f64 {
 #[candid_method(update)]
 #[update]
 async fn open_vault(collateral_amount: u64, collateral_type: CollateralType) -> Result<OpenVaultSuccess, ProtocolError> {
-    validate_call()?;
+    validate_call().await?;
     check_postcondition(rumi_protocol_backend::vault::open_vault(collateral_amount, collateral_type).await)
 }
 
 #[candid_method(update)]
 #[update]
 async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {
-    validate_call()?;
+    validate_call().await?;
     validate_mode()?;
     check_postcondition(rumi_protocol_backend::vault::borrow_from_vault(arg).await)
 }
@@ -306,21 +310,21 @@ async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, ProtocolErro
 #[candid_method(update)]
 #[update]
 async fn repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
-    validate_call()?;
+    validate_call().await?;
     check_postcondition(rumi_protocol_backend::vault::repay_to_vault(arg).await)
 }
 
 #[candid_method(update)]
 #[update]
 async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
-    validate_call()?;
+    validate_call().await?;
     check_postcondition(rumi_protocol_backend::vault::add_margin_to_vault(arg).await)
 }
 
 #[candid_method(update)]
 #[update]
 async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
-    validate_call()?;
+    validate_call().await?;
     check_postcondition(rumi_protocol_backend::vault::close_vault(vault_id).await)
 }
 
@@ -328,14 +332,14 @@ async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
 #[candid_method(update)]
 #[update]
 async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
-    validate_call()?;
+    validate_call().await?;
     check_postcondition(rumi_protocol_backend::vault::withdraw_collateral(vault_id).await)
 }
 
 #[candid_method(update)]
 #[update]
 async fn withdraw_and_close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
-    validate_call()?;
+    validate_call().await?;
     check_postcondition(rumi_protocol_backend::vault::withdraw_and_close_vault(vault_id).await)
 }
 
@@ -343,7 +347,7 @@ async fn withdraw_and_close_vault(vault_id: u64) -> Result<Option<u64>, Protocol
 #[candid_method(update)]
 #[update]
 async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolError> {
-    validate_call()?;
+    validate_call().await?;
     check_postcondition(rumi_protocol_backend::vault::liquidate_vault(vault_id).await)
 }
 
@@ -351,7 +355,7 @@ async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolError>
 #[candid_method(update)]
 #[update]
 async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
-    validate_call()?;
+    validate_call().await?;
     check_postcondition(rumi_protocol_backend::vault::partial_repay_to_vault(arg).await)
 }
 
@@ -359,7 +363,7 @@ async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
 #[candid_method(update)]
 #[update]
 async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {
-    validate_call()?;
+    validate_call().await?;
     check_postcondition(rumi_protocol_backend::vault::partial_liquidate_vault(arg).await)
 }
 
@@ -412,21 +416,21 @@ fn get_liquidatable_vaults() -> Vec<CandidVault> {
 #[candid_method(update)]
 #[update]
 async fn provide_liquidity(amount: u64) -> Result<u64, ProtocolError> {
-    validate_call()?;
+    validate_call().await?;
     check_postcondition(rumi_protocol_backend::liquidity_pool::provide_liquidity(amount).await)
 }
 
 #[candid_method(update)]
 #[update]
 async fn withdraw_liquidity(amount: u64) -> Result<u64, ProtocolError> {
-    validate_call()?;
+    validate_call().await?;
     check_postcondition(rumi_protocol_backend::liquidity_pool::withdraw_liquidity(amount).await)
 }
 
 #[candid_method(update)]
 #[update]
 async fn claim_liquidity_returns() -> Result<u64, ProtocolError> {
-    validate_call()?;
+    validate_call().await?;
     check_postcondition(rumi_protocol_backend::liquidity_pool::claim_liquidity_returns().await)
 }
 

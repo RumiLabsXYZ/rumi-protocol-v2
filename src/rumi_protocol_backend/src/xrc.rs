@@ -9,7 +9,15 @@ use rust_decimal::prelude::FromPrimitive;
 use rust_decimal_macros::dec;
 use std::time::Duration;
 
-pub const FETCHING_ICP_RATE_INTERVAL: Duration = Duration::from_secs(60);
+/// How often to passively fetch ICP price from XRC (background polling).
+/// Each XRC call costs ~1B cycles. At 60s = ~$58/month, at 300s = ~$12/month.
+/// Price-sensitive operations will fetch on-demand if the cached price is >30s old,
+/// so this is just a lazy background refresh for display/query purposes.
+pub const FETCHING_ICP_RATE_INTERVAL: Duration = Duration::from_secs(300);
+
+/// Maximum age (in nanoseconds) of a cached price before a price-sensitive
+/// operation triggers an on-demand XRC fetch. Set to 30 seconds.
+pub const PRICE_FRESHNESS_THRESHOLD_NANOS: u64 = 30 * 1_000_000_000;
 
 pub async fn fetch_icp_rate() {
     let _guard = match crate::guard::FetchXrcGuard::new() {
@@ -66,4 +74,36 @@ pub async fn fetch_icp_rate() {
     if read_state(|s| s.mode != crate::Mode::ReadOnly) {
         crate::check_vaults();
     }
+}
+
+/// Ensures the ICP price is fresh enough for a price-sensitive operation.
+/// If the cached price is older than PRICE_FRESHNESS_THRESHOLD_NANOS (30s),
+/// fetches a fresh price from XRC before returning.
+/// Returns Ok(()) if a fresh-enough price is available, Err if fetch fails
+/// and no cached price exists.
+pub async fn ensure_fresh_price() -> Result<(), crate::ProtocolError> {
+    let needs_refresh = read_state(|s| {
+        match s.last_icp_timestamp {
+            None => true, // No price at all, definitely need one
+            Some(ts) => {
+                let age = ic_cdk::api::time().saturating_sub(ts);
+                age > PRICE_FRESHNESS_THRESHOLD_NANOS
+            }
+        }
+    });
+
+    if needs_refresh {
+        log!(
+            TRACE_XRC,
+            "[ensure_fresh_price] Cached price is stale (>30s), fetching on-demand"
+        );
+        fetch_icp_rate().await;
+
+        // After fetch, verify we actually have a price now
+        read_state(|s| {
+            s.check_price_not_too_old()
+        })?;
+    }
+
+    Ok(())
 }
