@@ -397,7 +397,7 @@ rumi_stability_pool:   tmhzi-dqaaa-aaaap-qrd6q-cai
 - **Read-Only Mode**: Triggers when system-wide CR < 100% or oracle < $0.01
 - **Borrowing Fee**: 0.5% one-time (0% in Recovery mode)
 - **Liquidation Bonus**: 10%
-- **Price Oracle**: XRC canister, 60-second fetch interval
+- **Price Oracle**: XRC canister, 300s background polling + 30s on-demand freshness for operations
 
 ### Key Backend Functions (from .did file)
 ```candid
@@ -661,6 +661,75 @@ pub const MINIMUM_COLLATERAL_RATIO: Ratio = Ratio::new(dec!(1.33));   // 133%
 - [ ] Liquidation page components — check for hardcoded ratio thresholds
 - [ ] Borrow page — check max borrowable calculations
 - [ ] Any future components that reference protocol ratios
+
+---
+
+## XRC Price Oracle Cost Optimization (February 9, 2026)
+
+**Branch:** `feature/xrc-cost-optimization` (off `feature/ui-updates`)
+
+### Problem
+The XRC (Exchange Rate Canister) was being polled every 60 seconds for the ICP/USD price, costing ~$58/month in cycles. This is the single largest operational cost for the backend canister. Most of these calls are wasted — the price only matters when a user actually performs a vault operation.
+
+### Solution: Lazy Polling + On-Demand Freshness
+
+**Two-layer approach:**
+
+1. **Background timer polls lazily every 300s (5 min)** — just keeps a reasonably fresh price in state for display/queries on the frontend. Reduces cycle cost by ~80% to ~$12/month.
+
+2. **On-demand fetch for price-sensitive operations** — when any price-sensitive function is called, `validate_call()` (now async) checks if the cached price is older than 30 seconds. If so, it triggers an immediate XRC fetch before proceeding. The user's operation always uses a fresh price.
+
+### Code Changes
+
+| File | Change |
+|------|--------|
+| `xrc.rs` | `FETCHING_ICP_RATE_INTERVAL`: 60s → 300s |
+| `xrc.rs` | Added `PRICE_FRESHNESS_THRESHOLD_NANOS` (30s) |
+| `xrc.rs` | Added `ensure_fresh_price()` — checks cache age, fetches on-demand if stale |
+| `main.rs` | `validate_call()` changed from sync → async, now calls `ensure_fresh_price().await` |
+| `main.rs` | All 14 callers updated: `validate_call()?` → `validate_call().await?` |
+
+### Price-Sensitive Functions (14 total)
+
+All go through `validate_call()` → `ensure_fresh_price()`:
+
+**Vault operations (user-initiated, all need fresh price):**
+- `open_vault` — calculates collateral ratio from price
+- `borrow_from_vault` — calculates how much can be minted at current CR
+- `repay_to_vault` — updates CR after debt reduction
+- `partial_repay_to_vault` — same as repay
+- `add_margin_to_vault` — updates CR after collateral addition
+- `close_vault` — needs accurate CR for safety checks
+- `withdraw_collateral` — needs accurate CR to prevent undercollateralization
+- `withdraw_and_close_vault` — same as close
+
+**Liquidations (user-initiated, critical — must have fresh price):**
+- `liquidate_vault` — determines if vault is actually undercollateralized
+- `partial_liquidate_vault` — same
+
+**Redemptions (user-initiated, needs fresh price):**
+- `redeem_icp` — calculates ICP to return for icUSD redeemed
+
+**Stability pool (user-initiated, arguably don't need fresh price):**
+- `provide_liquidity` — deposits icUSD into stability pool (no CR calculation)
+- `withdraw_liquidity` — withdraws icUSD from stability pool (no CR calculation)
+- `claim_liquidity_returns` — claims accumulated returns (no CR calculation)
+
+> **Note:** The three stability pool functions don't perform collateral ratio calculations and arguably don't need a fresh price. We left them with the price check for now (conservative approach), but they could be split out to skip the on-demand fetch if we want to save users the occasional 1-2s delay.
+
+> **Note:** `redeem_icp` is named for the current ICP-only collateral. When we add ckBTC, ckETH, or other collateral types, the redemption function will need to be generalized (e.g., `redeem_collateral` with a collateral type parameter) and each collateral's price will need its own freshness guarantee. This is a future architecture concern to revisit when multi-collateral is implemented.
+
+### Concurrency Safety
+
+The existing `FetchXrcGuard` prevents concurrent XRC calls. If two users trigger actions simultaneously when the price is stale, only one XRC call fires. The second user's `ensure_fresh_price()` calls `fetch_icp_rate()` which silently returns (guard blocks it), but by then the first fetch has already updated the price in state, so the subsequent `check_price_not_too_old()` passes.
+
+### Future Work: Admin-Configurable Interval
+
+Discussed but not yet implemented: a controller-only `set_price_interval(secs: u64)` function that stores the interval in stable memory. Would allow changing the polling interval without redeploying. Currently the canister has zero admin-only functions — this would be the first, establishing the controller-check pattern. See [chat log](https://claude.ai/chat/c89c7960-62cd-40fc-8c69-63dd762bb743) for full discussion.
+
+### Future Work: Multi-Collateral Price Feeds
+
+When additional collateral types (ckBTC, ckETH) are added, `ensure_fresh_price()` will need to become collateral-aware — checking and refreshing the price for the specific collateral involved in the operation, not just ICP. The `FETCHING_CKBTC_RATE_INTERVAL` and `fetch_ckbtc_rate()` references already exist in `setup_timers()` in `main.rs` (from Agnes's staging merge) but the corresponding functions in `xrc.rs` haven't been implemented yet.
 
 ---
 
