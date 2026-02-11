@@ -963,7 +963,6 @@ fn schedule_transfer_retry(vault_id: u64, retry_count: u32) {
     });
 }
 
-#[update]
 pub async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("partial_repay_vault_{}", arg.vault_id))?;
@@ -1006,7 +1005,6 @@ pub async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError>
     }
 }
 
-#[update]
 pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("partial_liquidate_vault_{}", arg.vault_id))?;
@@ -1097,7 +1095,8 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
             vault_id: arg.vault_id,
             liquidator_payment,
             icp_to_liquidator: actual_icp_to_liquidator,
-            liquidator: caller,
+            liquidator: Some(caller),
+            icp_rate: Some(icp_rate),
         };
         crate::storage::record_event(&event);
         

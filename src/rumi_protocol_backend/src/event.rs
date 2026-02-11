@@ -25,16 +25,21 @@ pub enum Event {
         vault_id: u64,
         mode: Mode,
         icp_rate: UsdIcp,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         liquidator: Option<Principal>,
     },
 
     #[serde(rename = "partial_liquidate_vault")]
     PartialLiquidateVault {
         vault_id: u64,
+        #[serde(alias = "liquidated_debt")]
         liquidator_payment: ICUSD,
+        #[serde(alias = "collateral_seized")]
         icp_to_liquidator: ICP,
-        liquidator: Principal,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        liquidator: Option<Principal>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        icp_rate: Option<UsdIcp>,
     },
 
     #[serde(rename = "redemption_on_vaults")]
@@ -204,6 +209,7 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                 liquidator_payment,
                 icp_to_liquidator,
                 liquidator: _,
+                icp_rate: _,
             } => {
                 // Reduce vault debt and collateral
                 if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
