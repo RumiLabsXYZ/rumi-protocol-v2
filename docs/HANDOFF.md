@@ -234,12 +234,15 @@ These items were discussed but NOT yet implemented:
 
 ---
 
-## Git Branch Status (Updated Feb 7)
+## Git Branch Status (Updated Feb 10)
 
 | Branch | Status | Action |
 |--------|--------|--------|
-| `main` | ✅ Contains staging merge + LICENSE + UI rebrand | Production branch |
-| `feature/ui-updates` | ✅ Merged into main | Can delete |
+| `main` | ✅ Contains staging merge + LICENSE + UI rebrand + XRC optimization | Production branch — backend deployed Feb 10 |
+| `feature/ui-updates` | ✅ Merged into main (PR #4, Feb 10) | Can delete |
+| `feature/xrc-cost-optimization` | ✅ Merged into main (PR #7, Feb 10) | Can delete |
+| `feature/ckusdt-ckusdc-repayment` | ⏳ Agnes's PR #1 open → main | Awaiting review |
+| `feature/ckusdt-ckusdc-repayment-fixes` | ⏳ Rob's PR #6 open → ckusdt branch | Merge after PR #1 |
 | `feature/ii-wallet-send-receive` | ✅ Deployed to mainnet | Merge to main when stable |
 | `feature/plug-wallet-reconnect` | ✅ Merged via PR #2 | Can delete |
 | `staging` | ✅ Merged into main | Can delete |
@@ -248,96 +251,93 @@ These items were discussed but NOT yet implemented:
 
 ---
 
-## 🚨 CRITICAL: Backend Build Errors (33 errors on main)
+## Deployment Log: February 10, 2026
 
-### Summary
+### PRs Merged
 
-The backend (`rumi_protocol_backend`) does not compile on `main`. This was introduced by the staging merge (`1cb0034`) which brought in Agnes's guard refactoring code that references State fields that were never added. **Production is not affected** — the currently deployed backend was built before the staging merge and is still running fine. But no backend changes can be deployed until this is fixed.
+1. **PR #4 — UI Rebrand + Page Reworks** (`feature/ui-updates` → `main`)
+   - 34 commits, frontend-only
+   - Had one merge conflict in HANDOFF.md (git branch status table) — resolved manually
+   - Merged locally and pushed to main
 
-### Error Breakdown
+2. **PR #7 — XRC Cost Optimization** (`feature/xrc-cost-optimization` → `main`)
+   - 2 commits on top of UI branch (was branched from tip of `feature/ui-updates`)
+   - Merged cleanly after PR #4 was in main
+   - Backend changes: `main.rs` (async validate_call), `xrc.rs` (300s interval + on-demand fetch)
 
-| Error Type | Count | Source File | Description |
-|------------|-------|-------------|-------------|
-| `E0609: no field operation_guards` | 8 | `guard.rs` | `State` has no `operation_guards: BTreeSet<String>` field |
-| `E0609: no field operation_details` | 8 | `guard.rs` | `State` has no `operation_details: BTreeMap<String, (Principal, String)>` field |
-| `E0609: no field operation_guard_timestamps` | 7 | `guard.rs` | `State` has no `operation_guard_timestamps: BTreeMap<String, u64>` field |
-| `E0308: mismatched types` | 6 | `guard.rs` | Cascade from missing fields (type inference failures) |
-| `E0282: type annotations needed` | 4 | `guard.rs`, `lib.rs` | Cascade from missing fields |
+### Backend Build Fixes Applied
 
-### Root Cause
+The backend had 33 pre-existing build errors from the staging merge. Fixed in this session:
 
-Agnes's staging branch refactored the guard system from **principal-based** guards to **operation-key-based** guards. The old system uses:
-- `principal_guards: BTreeSet<Principal>` ✅ exists in State
-- `principal_guard_timestamps: BTreeMap<Principal, u64>` ✅ exists in State
-- `operation_states: BTreeMap<Principal, OperationState>` ✅ exists in State
-- `operation_names: BTreeMap<Principal, String>` ✅ exists in State
+1. **guard.rs ↔ state.rs mismatch** — `guard.rs` referenced `operation_guards`, `operation_guard_timestamps`, `operation_details` fields that didn't exist in `State`. Added the missing fields to `state.rs` with the correct types (`BTreeSet<String>`, `BTreeMap<String, u64>`, `BTreeMap<String, (Principal, String)>`).
 
-The new guard code in `guard.rs` expects:
-- `operation_guards: BTreeSet<String>` ❌ MISSING — keyed by `"principal:operation_name"` strings
-- `operation_guard_timestamps: BTreeMap<String, u64>` ❌ MISSING — same string keys
-- `operation_details: BTreeMap<String, (Principal, String)>` ❌ MISSING — maps key → (principal, operation_name)
+2. **ckBTC multi-collateral stubs** — `main.rs` had references to `CollateralType`, `UsdCkBtc`, `fetch_ckbtc_rate()`, `ckbtc_margin_amount` etc. from the staging merge. These are future multi-collateral features with no underlying implementation. Commented out all ckBTC-specific code paths.
 
-The guard.rs was merged from staging but the corresponding State struct updates were lost in conflict resolution (we kept main's state.rs during the merge).
+3. **Duplicate `#[update]` exports** — `partial_repay_to_vault` and `partial_liquidate_vault` had `#[update]` macros in both `main.rs` and `vault.rs`, causing linker duplicate symbol errors. Removed the `#[update]` from `vault.rs` (main.rs is the proper entry point with `validate_call()`).
 
-### How guard.rs Works (New System)
+### Backend Deployment
 
-The refactored guard creates composite operation keys like `"fd7h3-mgmok...:open_vault"` combining principal + operation name. This allows a single principal to have multiple concurrent operations of different types (e.g., opening a vault while also doing a repayment), which the old principal-only system didn't support.
+- **Canister:** `tfesu-vyaaa-aaaap-qrd7a-cai`
+- **Method:** `dfx canister install --mode upgrade` (preserves stable memory)
+- **Upgrade argument:** `(variant { Upgrade = record { mode = null } })`
 
-Key functions in `guard.rs`:
-- `create_operation_key(principal, operation_name) → String` — creates the composite key
-- `VaultGuard::new(principal, operation_name)` — acquires guard, cleans stale guards (5-min timeout)
-- `VaultGuard::complete(self)` — marks operation as completed
-- `Drop for VaultGuard` — cleanup on drop, removes guard from all tracking maps
-- `MAX_CONCURRENT = 100` — max concurrent operations
-- `GUARD_TIMEOUT_NANOS = 5 * 60 * 1_000_000_000` — 5-minute timeout
+#### Event Schema Migration Issue
 
-### Fix Required
+The upgrade initially failed with: `missing field "liquidator_payment"` during event replay.
 
-Add three fields to `State` struct in `state.rs` (around line 127):
+**Root cause:** The `PartialLiquidateVault` event schema changed between the previously deployed version and the current code:
 
-```rust
-// Operation-key-based guards (from guard.rs refactor)
-pub operation_guards: BTreeSet<String>,
-pub operation_guard_timestamps: BTreeMap<String, u64>,
-pub operation_details: BTreeMap<String, (Principal, String)>,
-```
+| Field | Old Schema (deployed) | New Schema (current) |
+|-------|----------------------|---------------------|
+| Debt amount | `liquidated_debt: ICUSD` | `liquidator_payment: ICUSD` |
+| Collateral | `collateral_seized: ICP` | `icp_to_liquidator: ICP` |
+| Liquidator | `liquidator: Option<Principal>` | `liquidator: Principal` (required) |
+| Price | `icp_rate: UsdIcp` | *(not present)* |
 
-And initialize them in `impl From<InitArg> for State` (around line 165):
+**Fix applied** (`f4466dc`):
+- Added `#[serde(alias = "liquidated_debt")]` on `liquidator_payment`
+- Added `#[serde(alias = "collateral_seized")]` on `icp_to_liquidator`
+- Changed `liquidator` to `Option<Principal>` with `#[serde(default)]`
+- Added `icp_rate: Option<UsdIcp>` with `#[serde(default)]`
+- Updated `vault.rs` to pass `Some(caller)` and `Some(icp_rate)` when recording new events
 
-```rust
-operation_guards: BTreeSet::new(),
-operation_guard_timestamps: BTreeMap::new(),
-operation_details: BTreeMap::new(),
-```
+This ensures old CBOR-encoded events in stable memory deserialize correctly with the new code.
 
-**Decision needed:** Should the old principal-based guard fields (`principal_guards`, `principal_guard_timestamps`, `operation_states`, `operation_names`) be removed, or kept for backward compatibility? The new guard.rs code doesn't use them, but removing them may affect state deserialization on upgrade.
+Also added `#[serde(default)]` to `LiquidateVault.liquidator` for the same backward-compatibility reason (oldest events didn't have the `liquidator` field at all).
 
-### What This Blocks
+### Post-Deployment Verification
 
-- ❌ Backend deployment to mainnet (any changes)
-- ❌ XRC interval reduction (PR #3 — would save ~$46/month in oracle costs)
-- ❌ Price freshness validation on liquidation endpoints
-- ❌ Any future backend feature work
+- `get_protocol_status` returns successfully
+- `last_icp_rate = 0.0` immediately after upgrade (expected — first 300s timer hadn't fired yet)
+- Protocol shows correct state: `total_icusd_borrowed = 409_380_000`, `total_icp_margin = 270_880_000`
 
-### What Still Works
+### What Was NOT Deployed
 
-- ✅ Frontend-only deploys (`dfx deploy vault_frontend --network ic`)
-- ✅ Currently running backend on mainnet (old build, pre-merge)
-- ✅ All user-facing functionality (vaults, transfers, wallet integration)
+- **Frontend** — UI rebrand was already deployed to production from the feature branch prior to this session. The merge to main was for codebase hygiene, not a new deploy.
+- **PRs #1 and #6** (ckUSDT/ckUSDC repayment) — left for Agnes to review. PR #6 contains critical security fixes (100x decimal overcharge, missing ICRC-2 approval flow, missing validate_call on partial liquidation).
+
+### ⚠️ Note for Future Upgrades
+
+When modifying Event enum variants, always maintain backward compatibility with serde aliases/defaults. The canister replays ALL events from stable memory on every upgrade. If deserialization fails for any event, the entire upgrade traps and rolls back. Test event schema changes against the production event log before deploying.
 
 ---
 
-## XRC Cost Reduction — Pending Build Fix
+## ✅ RESOLVED: Backend Build Errors (February 10, 2026)
 
-### Current Cost
+Fixed as part of the Feb 10 deployment. See "Deployment Log: February 10, 2026" above for full details. Summary: added missing State fields for guard.rs, commented out ckBTC stubs, removed duplicate `#[update]` exports.
+
+---
+
+## ✅ DEPLOYED: XRC Cost Reduction (February 10, 2026)
+
+### Previous Cost
 - ICP/USD fetched every **60 seconds** via XRC
 - 1,440 calls/day × 1B cycles/call = ~1.44T cycles/day ≈ **$1.95/day ($58.50/month)**
 
-### Planned Change (on `feature/liquidation-price-check`, PR #3)
-- Increase `FETCHING_ICP_RATE_INTERVAL_SECS` from 60 → 300 (5 minutes)
-- Reduces to 288 calls/day ≈ **$0.39/day ($11.70/month)** — 80% savings
-- Safe because `check_price_not_too_old()` in state.rs uses a **10-minute** staleness threshold (`TEN_MINS_NANOS`), giving 2x buffer over the 5-minute fetch interval
-- Note: `validate_call()` already calls `check_price_not_too_old()` on ALL endpoints including liquidations, so the separate `validate_price_for_liquidation()` in the PR is redundant but harmless
+### Current (Deployed Feb 10)
+- Background polling reduced to **300 seconds** + on-demand freshness for operations
+- ~288 calls/day ≈ **$0.39/day ($11.70/month)** — **80% savings**
+- See "XRC Price Oracle Cost Optimization" section below for full technical details
 
 ### Future: USDT/USDC Price Feeds
 - For ckUSDT/ckUSDC repayment support, will need USDT/USD and USDC/USD prices
@@ -664,9 +664,9 @@ pub const MINIMUM_COLLATERAL_RATIO: Ratio = Ratio::new(dec!(1.33));   // 133%
 
 ---
 
-## XRC Price Oracle Cost Optimization (February 9, 2026)
+## ✅ DEPLOYED: XRC Price Oracle Cost Optimization (February 9–10, 2026)
 
-**Branch:** `feature/xrc-cost-optimization` (off `feature/ui-updates`)
+**Branch:** `feature/xrc-cost-optimization` — merged to main and **deployed to mainnet Feb 10**
 
 ### Problem
 The XRC (Exchange Rate Canister) was being polled every 60 seconds for the ICP/USD price, costing ~$58/month in cycles. This is the single largest operational cost for the backend canister. Most of these calls are wasted — the price only matters when a user actually performs a vault operation.
