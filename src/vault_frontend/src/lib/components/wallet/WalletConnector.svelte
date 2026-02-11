@@ -243,7 +243,7 @@
   {#if !isConnected}
     <button
       id="wallet-button"
-      class="icp-button flex items-center bg-white ring-2 ring-black/20 hover:ring-white/40 text-black gap-2"
+      class="icp-button flex items-center gap-2"
       on:click|stopPropagation={() => { showWalletDialog = true; console.log("Dialog open state:", showWalletDialog); }}
       disabled={connecting}
     >
@@ -262,7 +262,7 @@
     {#if showWalletDialog}
       <div class="fixed inset-0 z-50 flex items-center justify-center p-4 min-h-screen">
         <div class="absolute inset-0 bg-black/50 backdrop-blur-sm" on:click|stopPropagation={() => showWalletDialog = false}></div>
-        <div id="wallet-dialog" class="relative w-full max-w-md p-6 bg-gradient-to-br from-[#522785] to-[#1a237e] rounded-xl border border-[#29abe2]/20 shadow-xl transform transition-all">
+        <div id="wallet-dialog" class="relative w-full max-w-md p-6 rounded-xl border shadow-xl transform transition-all" style="background: var(--rumi-bg-surface2); border-color: var(--rumi-border)">
           <div class="flex justify-between mb-6">
             <h2 class="text-xl font-semibold text-white">Connect Wallet</h2>
             <button 
@@ -277,15 +277,17 @@
           <div class="flex flex-col gap-3">
             {#if walletsLoading}
               <div class="flex items-center justify-center py-4">
-                <div class="w-6 h-6 border-2 border-purple-500 border-t-transparent rounded-full animate-spin mr-2"></div>
+                <div class="w-6 h-6 border-2 border-green-400 border-t-transparent rounded-full animate-spin mr-2"></div>
                 <span class="text-gray-400">Loading wallets...</span>
               </div>
             {:else}
               {#each walletList as wallet (wallet.id)}
+              {@const isOisy = wallet.id?.toLowerCase() === 'oisy'}
               <button
-                class="flex items-center justify-between w-full px-4 py-3 text-white rounded-xl border transition-all duration-200 bg-gray-800/50 border-purple-500/10 hover:bg-purple-900/20 hover:border-purple-500/30"
-                on:click|stopPropagation={() => connectWallet(wallet.id)}
-                disabled={connecting}
+                class="flex items-center justify-between w-full px-4 py-3 text-white rounded-xl border transition-all duration-200"
+                style="background: var(--rumi-bg-surface1); border-color: var(--rumi-border); {isOisy ? 'opacity: 0.45; cursor: not-allowed;' : ''}"
+                on:click|stopPropagation={() => !isOisy && connectWallet(wallet.id)}
+                disabled={connecting || isOisy}
               >
                 <div class="flex items-center gap-4">
                   {#if wallet.icon}
@@ -293,17 +295,25 @@
                       src={wallet.icon}
                       alt={wallet.name} 
                       class="w-10 h-10 rounded-lg object-contain"
+                      style={isOisy ? 'filter: grayscale(1);' : ''}
                     />
                   {:else}
                     <div class="w-10 h-10 bg-gray-700 rounded-full flex items-center justify-center">
                       <span>{wallet.name[0]}</span>
                     </div>
                   {/if}
-                  <span class="text-lg">{wallet.name}</span>
+                  <div class="flex flex-col items-start">
+                    <span class="text-lg">{wallet.name}</span>
+                    {#if isOisy}
+                      <span style="font-size: 0.6875rem; color: var(--rumi-text-muted);">Coming Soon</span>
+                    {/if}
+                  </div>
                 </div>
-                <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M9 18l6-6-6-6"/>
-                </svg>
+                {#if !isOisy}
+                  <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M9 18l6-6-6-6"/>
+                  </svg>
+                {/if}
               </button>
             {/each}
               
@@ -317,7 +327,7 @@
 
           {#if connecting}
             <div class="flex justify-center mt-4">
-              <div class="w-6 h-6 border-2 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
+              <div class="w-6 h-6 border-2 border-green-400 border-t-transparent rounded-full animate-spin"></div>
             </div>
           {/if}
           
@@ -589,7 +599,7 @@
     width: 1.375rem;
     height: 1.375rem;
     border-radius: 50%;
-    background: linear-gradient(135deg, #7c3aed, #3b82f6);
+    background: var(--rumi-teal-dim);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -696,7 +706,7 @@
     width: 1.75rem;
     height: 1.75rem;
     border-radius: 50%;
-    background: linear-gradient(135deg, #7c3aed, #3b82f6);
+    background: var(--rumi-teal-dim);
     display: flex;
     align-items: center;
     justify-content: center;

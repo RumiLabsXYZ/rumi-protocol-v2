@@ -234,13 +234,13 @@ These items were discussed but NOT yet implemented:
 
 ---
 
-## Git Branch Status (Updated Feb 5)
+## Git Branch Status (Updated Feb 7)
 
 | Branch | Status | Action |
 |--------|--------|--------|
-| `main` | ⚠️ Backend doesn't build (33 errors) | Fix build errors before next backend deploy |
-| `feature/ii-wallet-send-receive` | ✅ **Active** — deployed to mainnet (frontend only) | Merge to main when stable |
-| `feature/liquidation-price-check` | Has XRC interval change + price validation | PR #3 open for Agnes — superseded by main already having staleness checks |
+| `main` | ✅ Contains staging merge + LICENSE + UI rebrand | Production branch |
+| `feature/ui-updates` | ✅ Merged into main | Can delete |
+| `feature/ii-wallet-send-receive` | ✅ Deployed to mainnet | Merge to main when stable |
 | `feature/plug-wallet-reconnect` | ✅ Merged via PR #2 | Can delete |
 | `staging` | ✅ Merged into main | Can delete |
 | `main-backup-feb4` | Backup of main before staging merge | Keep for safety |
@@ -392,8 +392,12 @@ rumi_stability_pool:   tmhzi-dqaaa-aaaap-qrd6q-cai
 
 ### Vault Operations
 - **Collateral**: ICP only for MVP (ckBTC, ckETH planned)
-- **Liquidation Ratio**: 150% (collateral must be ≥1.5x debt)
-- **Max LTV**: 66.67% (can borrow up to 2/3 of collateral value)
+- **Minimum Collateral Ratio**: 133% (`dec!(1.33)` in code)
+- **Recovery Mode**: Triggers when system-wide CR < 150% (liquidation threshold rises to 150%)
+- **Read-Only Mode**: Triggers when system-wide CR < 100% or oracle < $0.01
+- **Borrowing Fee**: 0.5% one-time (0% in Recovery mode)
+- **Liquidation Bonus**: 10%
+- **Price Oracle**: XRC canister, 60-second fetch interval
 
 ### Key Backend Functions (from .did file)
 ```candid
@@ -430,7 +434,7 @@ get_icp_price : () -> (nat64) query
 |--------|--------|-------|
 | **Plug** | ✅ Working | Primary testing wallet |
 | **Internet Identity** | ✅ Working | Send/Receive implemented, uses `https://id.ai` portal |
-| **Oisy** | 🔴 Partially Blocked | ICP ICRC-2 fails; icUSD under test |
+| **Oisy** | 🔴 Greyed out ("Coming Soon") | ICRC-2 incompatible with ICP ledger; icUSD untested. Disabled in wallet selector. |
 
 ### Oisy Wallet - Current Status
 
@@ -455,21 +459,208 @@ get_icp_price : () -> (nat64) query
 **Tried**: Event dispatch, direct `goto()`, even `window.location.href` - none worked
 **Status**: Needs investigation - deployed code may not match source
 
-### 2. Plug Wallet Auto-Reconnect
-**File**: `src/vault_frontend/src/lib/services/auth.ts`
-**Problem**: Plug sessions don't persist across page refresh
-**Status**: Added `waitForPlug()` polling but still failing silently
+### ~~2. Plug Wallet Auto-Reconnect~~ ✅ RESOLVED
 
-### 3. Left Nav Active Highlight Doesn't Track Page
-**Problem**: The highlight/active indicator in the left sidebar navigation doesn't move when the user navigates to a different page
-**Status**: Not investigated yet
+### ~~3. Left Nav Active Highlight Doesn't Track Page~~ ✅ RESOLVED
+**Fix**: Replaced manual `window.location` check with SvelteKit `$page` store
+**Branch**: `feature/ui-updates`
 
 ---
 
-## UI Exploration
+## UI Rebrand & Page Reworks (February 6–7, 2026)
 
-- **Font**: `circular-std-medium-500.ttf` is in the repo root — Rob wants to try this font across the UI to see how it looks
-- **Vault cards**: Want to explore making vault list/detail views sleeker
+**Branch:** `feature/ui-updates` (local only — NOT deployed to production)
+
+**Goal:** Elevate the UI from template-feeling to a sleek, modern DeFi product. Make it feel like crypto people built it.
+
+### Design System — `/docs/DESIGN_SYSTEM.md`
+A formal design constitution was established and governs all UI decisions:
+- **Three-color system**: indigo base (#080b16), purple/pink identity (#d176e8), emerald action (#34d399)
+- **Typography**: Circular Std headings, Inter body/numbers
+- **Primary Brand** (transactional pages): no gradients, serious infrastructure aesthetic
+- **Secondary Brand** (marketing/educational): gradients allowed
+- **Card hover**: purple inner glow on interactive card grids only
+- **Button text**: dark on emerald fills
+- **Risk colors**: amber (caution), red (danger). No green "safe" states.
+- **Noise grain**: SVG feTurbulence at 3% opacity over body — felt, not seen
+- **Depth cues**: Inset top-edge highlight + purple-tinted shadows on all cards
+
+### Global CSS / Design Foundation
+| Change | Details |
+|--------|---------|
+| **Background surfaces** | Indigo/blue-purple family: #080b16 (page), #0e1222 (surface1), #141a2e (surface2), #1a2139 (surface3) |
+| **Noise grain** | `body::after` SVG fractalNoise at 3% opacity, fixed, pointer-events none |
+| **Depth cues** | Inset highlight + 2-layer shadow on `.glass-panel`, `.glass-card`, `.icp-card`, `.price-card` |
+| **Purple inner-glow hover** | Cards get faint purple glow on hover via inset box-shadow |
+| **Ambient glow** | `body::before` radial gradient, indigo-tinted, centered top |
+| **Color calibration** | Emerald (#34d399) for action, teal (#2DD4BF) for subtle accents, #d176e8 for identity/orientation |
+| **Typography scale** | Logo 2rem, nav 0.9375rem, page titles 2rem bold purple-accent, key numbers Inter 700 tabular |
+| **Debug toggle** | Debug panels hidden by default, Ctrl+D to toggle (dev mode only) |
+
+### Header Redesign
+- CSS Grid layout with true viewport-centered nav
+- Green underline active state on nav items
+- Single amber "Beta" chip, left of social icons, tooltip on hover
+
+### Page Reworks
+
+#### Borrow (Home) + Stability Pool
+- **Action-first layout**: left column = action card, right column = protocol stats
+- Stability Pool page stripped of pink gradients, matches Primary Brand
+- Step numbers use muted text (not teal), headlines solid off-white
+
+#### Learn → Docs
+Replaced old "Learn" page with structured documentation (5 sub-pages sourced from actual Rust code):
+- Before You Borrow, Liquidation Mechanics, What Can Go Wrong, Protocol Parameters, Beta Disclaimer
+- **Important correction**: Old Learn page said 130% MCR. Actual code is 133% (`dec!(1.33)`).
+
+#### Redeem + Treasury
+- Removed old pink-to-purple gradient headlines → `.page-title` class
+- Removed gradient buttons → `.btn-primary` class
+
+#### Vaults — Vault Management Spec Compliance (Feb 7)
+Dense, expandable inline vault list with full risk-forward UX:
+
+| Feature | Implementation |
+|---------|---------------|
+| **CR-ascending sort** | Riskiest vaults always at top, vault ID tiebreaker |
+| **Single active intent** | Add/Borrow/Repay mutually exclusive — others clear when one is populated |
+| **Add Collateral Max** | Shows wallet ICP balance, neutral color, inline clickable text |
+| **Borrow Max** | Amount that results in CR = 150% |
+| **Repay Max** | min(wallet icUSD balance, outstanding debt) |
+| **Max styling** | All three identical: `--rumi-text-muted`, no action color, subtle hover underline |
+| **Input behavior** | User types freely — no clamping, no value substitution. Over-max inputs grey out the button. |
+| **Over-max disable** | Buttons disabled + handler hard-guarded when input exceeds max (Add, Borrow, Repay all guarded) |
+| **Single expanded vault** | Only one vault can be expanded at a time; opening another closes the previous and resets inputs |
+| **Projected CR** | Shown inline next to action button, live color: neutral ≥150%, amber 140-149%, red <140% |
+| **Action disable** | Buttons disabled when projected CR is below minimum |
+| **Risk left-border** | Danger vaults get 2px red left edge, warning vaults get amber |
+| **Stable ordering** | Expanding/collapsing a vault does NOT reorder the list |
+| **No sort controls** | No dropdowns, toggles, or configuration for MVP |
+
+#### Liquidations — Row-Card Redesign (Feb 7, v3)
+Complete structural redesign of the liquidation experience, iterated through multiple passes:
+
+**Layout: Three-zone card**
+| Zone | Content |
+|------|---------|
+| **Left** | Risk stats: CR badge (semantic color + warning icon), Debt, Collateral |
+| **Center** | "You receive" outcome: ICP amount (bold) + USD value (muted). Appears when user types input. |
+| **Right** | Execution: "Amount to liquidate" input + "Liquidate" button |
+
+**Interaction model:**
+| Feature | Details |
+|---------|---------|
+| **Unified flow** | ONE liquidation path. User inputs icUSD amount, protocol handles full vs partial internally (≥99.9% of debt = full) |
+| **No mode switching** | Removed "Partial / Full" distinction entirely |
+| **Input freedom** | User types freely — no clamping, no value substitution |
+| **Over-max behavior** | Input text + button grey out. Button unclickable. No error message on separate line. |
+| **Max utility text** | Neutral color, hover underline. NOT a button, NOT action-colored. Shows "Max: ····" pulse placeholder while wallet balance loads. |
+| **Max cap logic** | Calculates minimum icUSD needed to restore vault CR to ~150%, capped to min(wallet balance, vault debt, restoration amount) |
+| **Liquidate button** | Emerald green (action color). Disabled until valid input > 0 and ≤ max. Hard-guarded in handler too. |
+| **CR coloring** | Red <130%, amber 130-150%. Warning icon on danger. ONLY colored element in card. |
+| **No hover expansion** | Subtle purple border glow only. No layout shifts. |
+| **Sort** | CR ascending (riskiest first), vault ID tiebreaker |
+
+**Copy (locked):**
+- Input label: "Amount to liquidate" (not "Repay")
+- Outcome: "You receive" / "0.4472 ICP $1.11" (no parentheses, no "Est.", no abbreviations)
+
+**⚠️ KNOWN BUG: "You receive" reactivity**
+The center-column seizure calculation does NOT update live when the user types. Currently requires clicking "Refresh" to recalculate. The root cause is Svelte reactivity — `liquidationAmounts` is a plain object and property mutations don't trigger re-renders. A self-assignment trick (`liquidationAmounts = liquidationAmounts`) was attempted but did not resolve the issue in production. This needs a proper fix, likely by:
+- Converting `liquidationAmounts` to a Svelte store, OR
+- Using a reactive `$:` block that watches a serialized version of the amounts, OR
+- Moving to per-vault component state (like VaultCard does)
+
+**Commits (feature/ui-updates):**
+```
+39c3608 fix: live-reactive seizure calculation + layout tweak (attempted, not working)
+7851053 feat: three-zone liquidation card — outcome in center column
+7f40df5 fix: show 'Max: ····' placeholder while wallet balance loads
+5a85ddf fix: stop clamping liquidation input — grey out + disable instead
+67427fb fix: cap liquidation max to restore CR ~150%, not full debt
+fed0950 feat: liquidations row-card redesign — unified flow, no hover expansion
+1dfaa33 feat: rework Liquidations page — profit-forward table layout
+```
+
+### Git Log (feature/ui-updates, key commits)
+```
+39c3608 fix: live-reactive seizure calculation + layout tweak
+7851053 feat: three-zone liquidation card — outcome in center column
+7f40df5 fix: show 'Max: ····' placeholder while wallet balance loads
+5a85ddf fix: stop clamping liquidation input — grey out + disable instead
+67427fb fix: cap liquidation max to restore CR ~150%, not full debt
+fed0950 feat: liquidations row-card redesign — unified flow, no hover expansion
+20ce879 fix: stop auto-clamping over-max inputs + hard-guard handlers
+0ef8c3a fix: disable buttons when input exceeds max + single expanded vault
+16c138a feat: grey out Oisy wallet with 'Coming Soon' in connect dialog
+706fa4d docs: update HANDOFF.md with all UI rebrand + page rework details
+187cfde fix: remove old pink gradients from Redeem and Treasury pages
+41f7687 feat: complete vault management spec compliance
+1dfaa33 feat: rework Liquidations page — profit-forward table layout
+4deb63a feat: vault list CR-ascending sort + spec compliance fixes
+f1f9662 feat: VaultCard rewrite + vault list cleanup + doc archive purge
+760bf98 docs: add AVAI security review to beta disclaimer and risks page
+f19b6a9 fix: remove gradient from Docs title — Primary Brand
+4467e2c feat: replace Learn page with Docs section
+82febf4 feat: single beta chip in header, redesign Learn + Stability pages
+58cf25b feat: lock emerald (#34d399) as action color, teal (#2DD4BF) as subtle accent
+3594a48 feat: action-first layout for Borrow and Liquidate pages
+b25584e feat: top nav rail + purple inner-glow card hover
+79674cb feat: shift background family from red-purple to indigo/blue-purple
+407ec3f fix: hide debug panels by default, toggle with Ctrl+D
+aceda3d feat: add noise grain + depth cues for living surface feel
+a76e90d feat: implement design constitution compliance
+1c7ceb4 fix: bring purple back into design system
+6e1f7c6 feat: UI rebrand - dark precision theme with teal accent
+```
+
+### Deferred
+- Vault close navigation bug (bigger task, saved for last)
+- ckToken support in Send modal (post-rebrand)
+- Deploying `feature/ui-updates` to production (needs review first)
+
+---
+
+## Protocol Constants Centralization (February 9, 2026)
+
+**Branch:** `feature/ui-updates` — Commit `6bff0d1`
+
+### Problem
+Protocol-critical numbers (minimum CR, liquidation threshold) were hardcoded in multiple places across the frontend with inconsistent values. `VaultCard.svelte` had `MINT_MINIMUM = 1.5` and `E8S = 100_000_000` as local constants, and `getRiskLevel()` used hardcoded thresholds (`1.5`, `1.4`) that didn't match actual protocol parameters. The `config.ts` settings object also had wrong values (`minCollateralRatio: 130`, `liquidationThreshold: 125`). If protocol parameters ever change, tracking down every hardcoded instance would be a nightmare.
+
+### Solution: `src/vault_frontend/src/lib/protocol.ts`
+Created a single source of truth for protocol parameters on the frontend:
+
+```typescript
+export const MINIMUM_CR = 1.5;        // 150% — min to open/borrow (backend: RECOVERY_COLLATERAL_RATIO)
+export const LIQUIDATION_CR = 1.33;   // 133% — liquidation threshold (backend: MINIMUM_COLLATERAL_RATIO)
+export const E8S = 100_000_000;
+```
+
+**Backend source:** `src/rumi_protocol_backend/src/lib.rs` lines 56–57:
+```rust
+pub const RECOVERY_COLLATERAL_RATIO: Ratio = Ratio::new(dec!(1.5));   // 150%
+pub const MINIMUM_COLLATERAL_RATIO: Ratio = Ratio::new(dec!(1.33));   // 133%
+```
+
+**Naming note:** The backend names are confusing — `MINIMUM_COLLATERAL_RATIO` is actually the *liquidation* threshold, while `RECOVERY_COLLATERAL_RATIO` is the minimum to open/borrow. The frontend names (`MINIMUM_CR`, `LIQUIDATION_CR`) are more intuitive.
+
+### Risk Level Thresholds (corrected)
+| CR Range | Risk Level | Color | Icon |
+|----------|-----------|-------|------|
+| ≥ 150% (`MINIMUM_CR`) | `normal` | Neutral white | None |
+| 133%–150% (`LIQUIDATION_CR` to `MINIMUM_CR`) | `warning` | Amber | ⚠ |
+| ≤ 133% (`LIQUIDATION_CR`) | `danger` | Red | ⚠ |
+
+**Exception:** Projected CR preview (when user types into Add Collateral / Borrow / Repay fields) uses green for `normal` to signal "this action improves your position."
+
+### Migration Checklist
+`VaultCard.svelte` now imports from `$lib/protocol` instead of local constants. Other files that may still have hardcoded values should be migrated:
+- [ ] `config.ts` — `CONFIG.settings` object has wrong values (130%, 125%) — remove or update
+- [ ] Liquidation page components — check for hardcoded ratio thresholds
+- [ ] Borrow page — check max borrowable calculations
+- [ ] Any future components that reference protocol ratios
 
 ---
 
@@ -488,7 +679,7 @@ get_icp_price : () -> (nat64) query
 
 ### Frontend (Svelte + TypeScript)
 - **Build**: Vite
-- **Styling**: Tailwind CSS
+- **Styling**: Custom CSS with design system variables (see `/docs/DESIGN_SYSTEM.md`), Tailwind being phased out
 - **Wallet Libraries**: 
   - `@dfinity/auth-client` (II)
   - `window.ic.plug` (Plug)
@@ -556,11 +747,13 @@ dfx deploy vault_frontend --network ic
 
 | Document | Purpose |
 |----------|---------|
+| `/docs/Oisy_integration_handoff.md` | Oisy wallet integration details + ICRC-21 root cause analysis |
 | `/docs/archive/OISY_ICRC2_TEST_SESSION_HANDOFF.md` | Oisy icUSD test details |
+| `/docs/DESIGN_SYSTEM.md` | UI design constitution — colors, typography, component rules |
 | `/docs/OISY_IMPLEMENTATION_COMPLETE.md` | Original Oisy integration work |
 | `/ACKNOWLEDGMENTS.md` | Contributor credits |
 | `/LICENSE` | MIT License |
 
 ---
 
-*Last updated: February 5, 2026*
+*Last updated: February 7, 2026*

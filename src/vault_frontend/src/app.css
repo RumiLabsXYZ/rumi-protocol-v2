@@ -1,133 +1,365 @@
+/* ============================================
+   RUMI PROTOCOL — Design System Implementation
+   See /docs/DESIGN_SYSTEM.md for principles
+   
+   Color: Deep cool purple base + teal accent (earned)
+   Font: Circular Std (headings) + Inter (body/numbers)
+   ============================================ */
+
+/* Fonts */
+@font-face {
+  font-family: 'Circular Std';
+  src: url('/fonts/CircularStd-Medium.ttf') format('truetype');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+/* ============================================
+   CSS Custom Properties
+   Purple is the MATERIAL. Teal is the SIGNAL.
+   ============================================ */
 :root {
-  --icp-purple: #522785;
-  --icp-blue: #29abe2;
-  --icp-dark: #1c1c1c;
-  --accent-gradient: linear-gradient(45deg, var(--icp-purple), var(--icp-blue));
-  --gradient-end: #1b1c22;
-  --gradient-start: #1a2f53;
+  /* Background surfaces — indigo / blue-purple family.
+     Blue channel clearly dominant. No brown, no eggplant, no warmth. */
+  --rumi-bg-primary: #080b16;
+  --rumi-bg-surface1: #0e1222;
+  --rumi-bg-surface2: #141a2e;
+  --rumi-bg-surface3: #1a2139;
+  /* Aliases for hyphenated refs */
+  --rumi-bg-secondary: #0e1222;
+  --rumi-bg-surface-1: #0e1222;
+  --rumi-bg-surface-2: #141a2e;
+  --rumi-bg-surface-3: #1a2139;
+  --rumi-bg-card: #0e1222;
+  --rumi-bg-card-hover: #141a2e;
+  --rumi-bg-elevated: #141a2e;
+
+  /* Purple — structural accents, now indigo-aligned */
+  --rumi-purple-deep: #111635;
+  --rumi-purple-muted: #1e2854;
+  --rumi-purple-base: #3b3d85;
+  --rumi-purple-light: #7c3aed;
+
+  /* Expressive purple — IDENTITY / ORIENTATION color.
+     Used for: page titles, section headers, brand moments.
+     NOT for: numbers, balances, risk indicators, buttons. */
+  --rumi-purple-accent: #d176e8;
+
+  /* Emerald — ACTION / INTERACTION color.
+     Used for: buttons, active nav, primary CTAs.
+     If a title and a button compete, the button wins. */
+  --rumi-action: #34d399;
+  --rumi-action-bright: #6ee7b7;
+  --rumi-action-muted: #10b981;
+  --rumi-action-dim: rgba(52, 211, 153, 0.10);
+  /* Teal — subtle accent: focus rings, success states, quiet affordances */
+  --rumi-teal: #2DD4BF;
+  --rumi-teal-bright: #5eead4;
+  --rumi-teal-muted: #14b8a6;
+  --rumi-teal-dim: rgba(45, 212, 191, 0.10);
+
+  /* Identity gradient — ONLY for RUMI wordmark/logo */
+  --rumi-identity-gradient: linear-gradient(135deg, var(--rumi-purple-accent), var(--rumi-action));
+
+  /* Text hierarchy */
+  --rumi-text-primary: #e8e4f0;
+  --rumi-text-secondary: #a09bb5;
+  --rumi-text-muted: #605a75;
+
+  /* Borders — indigo-tinted */
+  --rumi-border: rgba(90, 100, 180, 0.12);
+  --rumi-border-hover: rgba(90, 100, 180, 0.25);
+  --rumi-border-accent: rgba(52, 211, 153, 0.25);
+  --rumi-border-teal: rgba(45, 212, 191, 0.25);
+
+  /* Risk states — SEMANTIC, DO NOT HARMONIZE */
+  --rumi-safe: #10b981;
+  --rumi-caution: #f59e0b;
+  --rumi-danger: #ef4444;
+  --rumi-critical: #f87171;
+
+  /* Status */
+  --rumi-green: #10b981;
+  --rumi-red: #ef4444;
+  --rumi-yellow: #f59e0b;
 }
 
+/* ============================================
+   Global Styles
+   ============================================ */
 body {
   min-height: 100vh;
   margin: 0;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  background: var(--rumi-bg-primary);
+  color: var(--rumi-text-primary);
+  color-scheme: dark;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── TECHNIQUE 1: Faint global noise / grain ──
+   SVG feTurbulence noise at very low opacity.
+   Should NOT be consciously visible — only felt.
+   If you can point at it and say "grain," it's too strong. */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  pointer-events: none;
+  opacity: 0.030;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 256px 256px;
+}
+
+/* Very subtle ambient glow — indigo, no warmth */
+body::before {
+  content: '';
+  position: fixed;
+  top: -300px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 900px;
+  height: 600px;
+  background: radial-gradient(ellipse, rgba(50, 60, 140, 0.08) 0%, transparent 65%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Headings — Circular Std, solid color, no gradient */
+h1, h2, h3, h4, h5, h6 {
+  font-family: 'Circular Std', 'Inter', system-ui, sans-serif;
+  color: var(--rumi-text-primary);
+  letter-spacing: -0.02em;
+}
+
+/* Page titles — IDENTITY color, bold, authoritative */
+.page-title {
+  font-family: 'Circular Std', 'Inter', sans-serif;
+  font-size: 2rem;
+  font-weight: 700;
+  color: var(--rumi-purple-accent);
+  letter-spacing: -0.02em;
+  margin-bottom: 0.5rem;
+}
+
+/* Section headers — identity color for orientation */
+.section-title {
+  font-family: 'Circular Std', 'Inter', sans-serif;
+  font-size: 1.25rem;
+  font-weight: 500;
+  color: var(--rumi-purple-accent);
+  letter-spacing: -0.02em;
+}
+
+/* Key numbers — visually dominant per principle #3 */
+.key-number {
   font-family: 'Inter', sans-serif;
-  background: linear-gradient(135deg, #29024f 0%, #522785 50%, #1a237e 100%);
-  background-size: 400% 400%;
-  animation: gradientMove 15s ease infinite;
+  font-weight: 700;
+  font-size: 1.75rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--rumi-text-primary);
 }
 
-.glass-panel {
-  background-color: rgba(255, 255, 255, 0.05);
-  backdrop-filter: blur(16px);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+/* Labels — quiet, structural */
+.field-label {
+  font-family: 'Inter', sans-serif;
+  font-weight: 400;
+  font-size: 0.8125rem;
+  color: var(--rumi-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* ============================================
+   Cards — purple-tinted with local depth cues
+   
+   TECHNIQUE 2: Surfaces feel embedded, not pasted.
+   - Faint top-edge inner highlight (light falloff from above)
+   - Subtle purple-tinted shadow beneath (depth, not decoration)
+   - No gradients, no glow, no glassmorphism
+   ============================================ */
+.glass-panel,
+.glass-card,
+.icp-card {
+  background: var(--rumi-bg-surface1);
+  border: 1px solid var(--rumi-border);
   border-radius: 0.75rem;
+  padding: 1.5rem;
+  transition: border-color 0.2s ease;
+  box-shadow:
+    inset 0 1px 0 0 rgba(200, 210, 240, 0.03),
+    0 2px 8px -2px rgba(8, 11, 22, 0.6),
+    0 1px 3px -1px rgba(14, 18, 40, 0.4);
 }
 
-.icp-button {
-  padding: 0.5rem 1rem;
-  background-color: #522785;
-  color: white;
+.glass-panel:hover,
+.glass-card:hover,
+.icp-card:hover {
+  border-color: rgba(209, 118, 232, 0.08);
+  box-shadow:
+    inset 0 0 20px 0 rgba(209, 118, 232, 0.06),
+    inset 0 1px 0 0 rgba(200, 210, 240, 0.03),
+    0 2px 8px -2px rgba(8, 11, 22, 0.6),
+    0 1px 3px -1px rgba(14, 18, 40, 0.4);
+}
+
+/* Price card — same depth treatment, slightly stronger border */
+.price-card {
+  background: var(--rumi-bg-surface1);
+  border: 1px solid var(--rumi-border-hover);
+  border-radius: 0.75rem;
+  padding: 1.5rem;
+  box-shadow:
+    inset 0 1px 0 0 rgba(200, 210, 240, 0.03),
+    0 2px 8px -2px rgba(8, 11, 22, 0.6),
+    0 1px 3px -1px rgba(14, 18, 40, 0.4);
+}
+
+/* ============================================
+   Buttons — emerald for action, white text
+   ============================================ */
+.icp-button,
+.btn-primary {
+  padding: 0.625rem 1.25rem;
+  background: var(--rumi-action);
+  color: var(--rumi-bg-primary);
+  font-family: 'Circular Std', 'Inter', sans-serif;
+  font-weight: 500;
+  border: none;
   border-radius: 0.5rem;
-  transition: all 0.3s;
+  cursor: pointer;
+  transition: all 0.2s ease;
 }
 
-.icp-button:hover {
-  background-color: #29abe2;
+.icp-button:hover,
+.btn-primary:hover {
+  background: var(--rumi-action-bright);
+  box-shadow: 0 0 20px rgba(52, 211, 153, 0.15);
 }
 
-.icp-button:disabled {
-  opacity: 0.5;
+.icp-button:disabled,
+.btn-primary:disabled {
+  opacity: 0.4;
   cursor: not-allowed;
+  box-shadow: none;
 }
 
-.icp-input {
-  padding: 0.5rem 1rem;
-  background-color: rgba(0, 0, 0, 0.2);
-  border: 1px solid rgba(82, 39, 133, 0.3);
+.btn-secondary {
+  padding: 0.625rem 1.25rem;
+  background: var(--rumi-bg-surface2);
+  border: 1px solid var(--rumi-border-hover);
+  color: var(--rumi-text-primary);
+  font-family: 'Circular Std', 'Inter', sans-serif;
+  font-weight: 500;
   border-radius: 0.5rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-secondary:hover {
+  border-color: var(--rumi-action);
+  color: var(--rumi-action);
+}
+
+.btn-danger {
+  padding: 0.625rem 1.25rem;
+  background: rgba(239, 68, 68, 0.8);
   color: white;
+  font-family: 'Circular Std', 'Inter', sans-serif;
+  font-weight: 500;
+  border: none;
+  border-radius: 0.5rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-danger:hover {
+  background: rgba(239, 68, 68, 1);
+}
+
+/* ============================================
+   Inputs
+   ============================================ */
+.icp-input {
+  padding: 0.625rem 1rem;
+  background: var(--rumi-bg-surface2);
+  border: 1px solid var(--rumi-border);
+  border-radius: 0.5rem;
+  color: var(--rumi-text-primary);
+  font-family: 'Inter', sans-serif;
+  transition: border-color 0.2s ease;
 }
 
 .icp-input::placeholder {
-  color: rgba(156, 163, 175, 1);
+  color: var(--rumi-text-muted);
 }
 
 .icp-input:focus {
   outline: none;
-  border-color: #29abe2;
+  border-color: var(--rumi-teal);
+  box-shadow: 0 0 0 1px rgba(45, 212, 191, 0.12);
 }
 
-.icp-card {
-  background-color: rgba(0, 0, 0, 0.3);
-  backdrop-filter: blur(12px);
-  border: 1px solid rgba(82, 39, 133, 0.2);
-  border-radius: 0.75rem;
-  padding: 1.5rem;
-  transition: all 0.3s;
-}
-
-.icp-card:hover {
-  border-color: rgba(41, 171, 226, 0.3);
-}
-
-@keyframes gradientMove {
-  0% { background-position: 0% 50%; }
-  50% { background-position: 100% 50%; }
-  100% { background-position: 0% 50%; }
-}
-
+/* ============================================
+   Utility Animations
+   ============================================ */
 @keyframes spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
 
-@keyframes bounceHigher {
-  0%, 100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(-60px); 
-  }
-}
-
-.bounce-higher {
-  animation: bounceHigher 4s infinite;
-}
-
-@keyframes bounceNormal {
-  0%, 100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(-30px); 
-  }
-}
-
-.bounce-normal {
-  animation: bounceHigher 5s infinite;
-}
-
 @keyframes fadeSlideIn {
-  0% {
-    opacity: 0;
-    transform: translateY(+30px);
-  }
-  100% {
-    opacity: 1;
-    transform: translateY(0);
-  }
+  0% { opacity: 0; transform: translateY(12px); }
+  100% { opacity: 1; transform: translateY(0); }
 }
 
 .animate-title {
-  animation: fadeSlideIn 2.5s ease-out;
+  animation: fadeSlideIn 0.6s ease-out;
 }
 
 .background-clip-text {
   -webkit-background-clip: text;
   background-clip: text;
 }
+
+
+/* ── Doc pages ── */
+.doc-page { max-width: 700px; margin: 0 auto; }
+.doc-title {
+  font-family: 'Circular Std', 'Inter', sans-serif;
+  font-size: 1.75rem; font-weight: 700;
+  color: var(--rumi-purple-accent);
+  margin-bottom: 1.5rem;
+}
+.doc-intro {
+  font-size: 0.9375rem; color: var(--rumi-text-secondary);
+  line-height: 1.6; margin-bottom: 2rem;
+}
+.doc-section { margin-bottom: 2rem; }
+.doc-heading {
+  font-family: 'Circular Std', 'Inter', sans-serif;
+  font-size: 1.0625rem; font-weight: 600;
+  color: var(--rumi-text-primary);
+  margin-bottom: 0.5rem;
+}
+.doc-section p {
+  font-size: 0.875rem; color: var(--rumi-text-secondary);
+  line-height: 1.65; margin-bottom: 0.75rem;
+}
+.doc-section p:last-child { margin-bottom: 0; }
+.doc-link {
+  color: var(--rumi-action); text-decoration: none;
+  border-bottom: 1px solid rgba(52, 211, 153, 0.3);
+  transition: border-color 0.15s ease;
+}
+.doc-link:hover { border-color: var(--rumi-action); }

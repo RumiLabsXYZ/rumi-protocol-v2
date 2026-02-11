@@ -1,9 +1,8 @@
 <script lang="ts">
-  import { onMount, onDestroy } from "svelte";
+  import { onMount } from "svelte";
   import { walletStore as wallet } from "$lib/stores/wallet";
   import { protocolService } from '$lib/services/protocol';
   import { formatNumber } from '$lib/utils/format';
-  import ProtocolStats from '$lib/components/dashboard/ProtocolStats.svelte';
   import { tweened } from 'svelte/motion';
   import { cubicOut } from 'svelte/easing';
   import type { CandidVault } from '$lib/services/types';
@@ -18,553 +17,480 @@
   let liquidationSuccess = "";
   let processingVaultId: number | null = null;
   let isApprovingAllowance = false;
-  let partialLiquidationAmounts: { [vaultId: number]: number } = {};
-  
+  let liquidationAmounts: { [vaultId: number]: string } = {};
+
   $: isConnected = $wallet.isConnected;
-  
-  // Setup animated price display
-  let animatedPrice = tweened(0, {
-    duration: 600,
-    easing: cubicOut
+
+  $: walletIcusd = $wallet.tokenBalances?.ICUSD
+    ? parseFloat($wallet.tokenBalances.ICUSD.formatted) : 0;
+
+  let animatedPrice = tweened(0, { duration: 600, easing: cubicOut });
+  $: if (icpPrice > 0) { animatedPrice.set(icpPrice); }
+
+  $: sortedVaults = [...liquidatableVaults].sort((a, b) => {
+    const crA = calculateCollateralRatio(a);
+    const crB = calculateCollateralRatio(b);
+    if (crA !== crB) return crA - crB;
+    return a.vault_id - b.vault_id;
   });
-  
-  // Update animated price whenever icpPrice changes
-  $: if (icpPrice > 0) {
-    animatedPrice.set(icpPrice);
-  }
-  
-  // Calculate collateral ratio for each vault
+
   function calculateCollateralRatio(vault: CandidVault): number {
-  // Ensure we have valid numbers and prevent division by zero
-  const icpAmount = Number(vault.icp_margin_amount || 0) / 100_000_000;
-  const icusdAmount = Number(vault.borrowed_icusd_amount || 0) / 100_000_000;
-  const currentPrice = icpPrice || 0;
-  
-  // Calculate collateral value in USD
-  const icpValue = icpAmount * currentPrice;
-  
-  // Safe division
-  if (icusdAmount <= 0) return Infinity;
-  
-  const ratio = (icpValue / icusdAmount) * 100;
-  
-  // Handle potential NaN or infinity results
-  return isFinite(ratio) ? ratio : 0;
-}
-  
-  // Calculate liquidation profit for a vault
-  function calculateLiquidationProfit(vault: CandidVault): { icpAmount: number, profitUsd: number } {
-  // Ensure we have valid numbers
-  const icusdDebt = Number(vault.borrowed_icusd_amount || 0) / 100_000_000;
-  const icpCollateral = Number(vault.icp_margin_amount || 0) / 100_000_000;
-  const currentPrice = icpPrice || 1; // Fallback to 1 to avoid division by zero
-  
-  // Calculate how much ICP the liquidator would receive
-  // (accounting for 10% discount - liquidator pays debt and gets collateral at 90% of value)
-  let icpReceived = 0;
-  if (currentPrice > 0) {
-    icpReceived = icusdDebt / currentPrice * (1 / 0.9);
+    const icpAmount = Number(vault.icp_margin_amount || 0) / 1e8;
+    const icusdAmount = Number(vault.borrowed_icusd_amount || 0) / 1e8;
+    if (icusdAmount <= 0) return Infinity;
+    const ratio = (icpAmount * icpPrice / icusdAmount) * 100;
+    return isFinite(ratio) ? ratio : 0;
   }
-  
-  // Can't receive more than available collateral
-  const icpToReceive = Math.min(icpReceived, icpCollateral);
-  
-  // Calculate profit (value of ICP received minus cost paid in icUSD)
-  const profitUsd = (icpToReceive * currentPrice) - icusdDebt;
-  
-  return {
-    icpAmount: isFinite(icpToReceive) ? icpToReceive : 0,
-    profitUsd: isFinite(profitUsd) ? profitUsd : 0
-  };
-}
-  
-  // Load liquidatable vaults
+
+  function getVaultDebt(vault: CandidVault): number {
+    return Number(vault.borrowed_icusd_amount || 0) / 1e8;
+  }
+
+  function getMaxLiquidation(vault: CandidVault): number {
+    const debt = getVaultDebt(vault);
+    const icpCollateral = Number(vault.icp_margin_amount || 0) / 1e8;
+    const currentPrice = icpPrice || 0;
+
+    // Cap: only liquidate enough to restore CR to ~150%
+    // After liquidation of X icUSD, liquidator seizes X/(price*0.9) ICP
+    // New CR = (collateral - seized) * price / (debt - X) >= 1.5
+    // Solve for X: the minimum needed to reach 150%
+    if (currentPrice > 0 && debt > 0) {
+      const collateralValue = icpCollateral * currentPrice;
+      const currentCr = collateralValue / debt;
+      if (currentCr < 1.5) {
+        // How much icUSD to liquidate to bring CR to 150%:
+        // (collateralValue - (X / 0.9)) / (debt - X) = 1.5
+        // collateralValue - X/0.9 = 1.5*debt - 1.5*X
+        // X*(1.5 - 1/0.9) = 1.5*debt - collateralValue
+        // X*(1.5 - 1.1111) = 1.5*debt - collateralValue
+        // X * 0.3889 = 1.5*debt - collateralValue
+        const factor = 1.5 - (1 / 0.9);
+        const numerator = 1.5 * debt - collateralValue;
+        if (factor > 0 && numerator > 0) {
+          const restoreCap = numerator / factor;
+          // Cap to this, but never more than full debt, never more than wallet balance
+          return Math.min(walletIcusd, debt, restoreCap);
+        }
+      }
+    }
+
+    // Fallback: full debt capped to wallet balance
+    return Math.min(walletIcusd, debt);
+  }
+
+  function calculateSeizure(vault: CandidVault, icusdAmount: number): { icpSeized: number, usdValue: number } {
+    const currentPrice = icpPrice || 1;
+    const icpCollateral = Number(vault.icp_margin_amount || 0) / 1e8;
+    let icpReceived = currentPrice > 0 ? icusdAmount / currentPrice * (1 / 0.9) : 0;
+    const icpSeized = Math.min(icpReceived, icpCollateral);
+    const usdValue = icpSeized * currentPrice;
+    return {
+      icpSeized: isFinite(icpSeized) ? icpSeized : 0,
+      usdValue: isFinite(usdValue) ? usdValue : 0
+    };
+  }
+
+  function getInputVal(vault: CandidVault): number {
+    return parseFloat(liquidationAmounts[vault.vault_id]) || 0;
+  }
+
+  function isOverMax(vault: CandidVault): boolean {
+    const v = getInputVal(vault);
+    if (v <= 0) return false;
+    return v > getMaxLiquidation(vault);
+  }
+
+  // Reactive seizure: called from template, reads liquidationAmounts directly
+  function getSeizure(vault: CandidVault): { icpSeized: number, usdValue: number } | null {
+    // Reference the whole object so Svelte tracks assignment
+    const _amounts = liquidationAmounts;
+    const v = parseFloat(_amounts[vault.vault_id]) || 0;
+    if (v <= 0) return null;
+    if (v > getMaxLiquidation(vault)) return null;
+    return calculateSeizure(vault, v);
+  }
+
+  function setMax(vault: CandidVault) {
+    const max = getMaxLiquidation(vault);
+    if (max > 0) liquidationAmounts[vault.vault_id] = max.toFixed(4);
+  }
+
   async function loadLiquidatableVaults() {
-  isLoading = true;
-  liquidationError = "";
-  
-  try {
-    const vaults = await protocolService.getLiquidatableVaults();
-    liquidatableVaults = vaults.map(vault => {
-      // Safely convert BigInt values to Numbers, defaulting to 0 for invalid values
-      const icpMarginAmount = Number(vault.icp_margin_amount || 0);
-      const borrowedIcusdAmount = Number(vault.borrowed_icusd_amount || 0);
-      const vaultId = Number(vault.vault_id || 0);
-      
-      return {
+    isLoading = true; liquidationError = "";
+    try {
+      const vaults = await protocolService.getLiquidatableVaults();
+      liquidatableVaults = vaults.map(vault => ({
         ...vault,
-        // Store original values
         original_icp_margin_amount: vault.icp_margin_amount,
         original_borrowed_icusd_amount: vault.borrowed_icusd_amount,
-        // Convert to Numbers for UI handling
-        icp_margin_amount: icpMarginAmount,
-        borrowed_icusd_amount: borrowedIcusdAmount,
-        vault_id: vaultId,
-        // Add metadata for display
+        icp_margin_amount: Number(vault.icp_margin_amount || 0),
+        borrowed_icusd_amount: Number(vault.borrowed_icusd_amount || 0),
+        vault_id: Number(vault.vault_id || 0),
         owner: vault.owner.toString()
-      };
-    });
-    console.log("Liquidatable vaults loaded:", liquidatableVaults);
-  } catch (error) {
-    console.error("Error loading liquidatable vaults:", error);
-    liquidationError = "Failed to load liquidatable vaults. Please try again.";
-  } finally {
-    isLoading = false;
+      }));
+    } catch (error) {
+      console.error("Error loading liquidatable vaults:", error);
+      liquidationError = "Failed to load liquidatable vaults.";
+    } finally { isLoading = false; }
   }
-}
-  
-  // Check if the user has sufficient icUSD allowance for liquidation
-  async function checkAndApproveAllowance(vaultId: number, icusdAmount: number): Promise<boolean> {
+
+  async function checkAndApproveAllowance(icusdAmount: number): Promise<boolean> {
     try {
       isApprovingAllowance = true;
-      
-      // Convert amount to e8s (8 decimal places)
-      const amountE8s = BigInt(Math.floor(icusdAmount * 100_000_000));
+      const amountE8s = BigInt(Math.floor(icusdAmount * 1e8));
       const spenderCanisterId = CONFIG.currentCanisterId;
-      
-      // Check current allowance
       const currentAllowance = await walletOperations.checkIcusdAllowance(spenderCanisterId);
-      console.log(`Current icUSD allowance: ${Number(currentAllowance) / 100_000_000}`);
-      
-      // If allowance is insufficient, request approval
       if (currentAllowance < amountE8s) {
-        console.log(`Setting icUSD approval for ${icusdAmount}`);
-        
-        // Request approval with a significant buffer (50% more) to handle any fees or calculation differences
         const approvalAmount = amountE8s * BigInt(150) / BigInt(100);
-        const approvalResult = await walletOperations.approveIcusdTransfer(
-          approvalAmount, 
-          spenderCanisterId
-        );
-        
-        if (!approvalResult.success) {
-          liquidationError = approvalResult.error || "Failed to approve icUSD transfer";
-          return false;
-        }
-        
-        console.log(`Successfully approved ${Number(approvalAmount) / 100_000_000} icUSD`);
-        
-        // Short pause to ensure approval transaction is processed
+        const approvalResult = await walletOperations.approveIcusdTransfer(approvalAmount, spenderCanisterId);
+        if (!approvalResult.success) { liquidationError = approvalResult.error || "Failed to approve icUSD transfer"; return false; }
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
-      
       return true;
     } catch (error) {
       console.error("Error checking/approving allowance:", error);
-      liquidationError = "Failed to approve icUSD transfer. Please try again.";
+      liquidationError = "Failed to approve icUSD transfer.";
       return false;
-    } finally {
-      isApprovingAllowance = false;
-    }
+    } finally { isApprovingAllowance = false; }
   }
-  
-  // Function to perform liquidation
-  async function liquidateVault(vaultId: number) {
-  if (!isConnected) {
-    liquidationError = "Please connect your wallet to liquidate vaults";
-    return;
-  }
-  
-  if (processingVaultId !== null) {
-    return; // Already processing a liquidation
-  }
-  
-  const vault = liquidatableVaults.find(v => v.vault_id === vaultId);
-  if (!vault) {
-    liquidationError = "Vault not found";
-    return;
-  }
-  
-  liquidationError = "";
-  liquidationSuccess = "";
-  processingVaultId = vaultId;
-  
-  try {
-    // Check if user has sufficient icUSD balance
-    const icusdDebt = Number(vault.borrowed_icusd_amount) / 100_000_000;
-    const icusdBalance = await walletOperations.getIcusdBalance();
-    
-    if (icusdBalance < icusdDebt) {
-      liquidationError = `Insufficient icUSD balance. You need ${formatNumber(icusdDebt)} icUSD but have ${formatNumber(icusdBalance)} icUSD.`;
-      processingVaultId = null;
-      return;
-    }
-    
-    // Increase buffer to 20% to handle potential calculation differences
-    const bufferedDebt = icusdDebt * 1.20;
-    
-    // Check and set allowance for icUSD with extra buffer
-    const allowanceApproved = await checkAndApproveAllowance(vaultId, bufferedDebt);
-    if (!allowanceApproved) {
-      processingVaultId = null;
-      return;
-    }
-    
-    // Get latest vaults data before liquidation to ensure we have fresh data
-    await loadLiquidatableVaults();
-    
-    // Re-check that the vault is still available for liquidation
-    const updatedVault = liquidatableVaults.find(v => v.vault_id === vaultId);
-    if (!updatedVault) {
-      liquidationError = "This vault is no longer available for liquidation";
-      processingVaultId = null;
-      return;
-    }
-    
-    console.log(`Liquidating vault #${vaultId}`);
-    const result = await protocolService.liquidateVault(vaultId);
-    
-    if (result.success) {
-      liquidationSuccess = `Successfully liquidated vault #${vaultId}. You paid ${formatNumber(icusdDebt)} icUSD and received approximately ${formatNumber(calculateLiquidationProfit(vault).icpAmount)} ICP.`;
-      // Refresh the list of liquidatable vaults
-      await loadLiquidatableVaults();
-    } else {
-      liquidationError = result.error || "Liquidation failed for unknown reason";
-    }
-  } catch (error) {
-    console.error("Error during liquidation:", error);
-    
-    // Check for specific underflow error
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    if (errorMessage.includes('underflow') && errorMessage.includes('numeric.rs')) {
-      liquidationError = "Liquidation failed due to a calculation error. The vault may have already been liquidated or its state has changed.";
-    } else {
-      liquidationError = errorMessage;
-    }
-  } finally {
-    processingVaultId = null;
-  }
-}
 
-// Partial liquidation function
-async function partialLiquidateVault(vaultId: number, liquidateAmount: number) {
-  if (!isConnected) {
-    liquidationError = "Please connect your wallet to liquidate vaults";
-    return;
-  }
-  
-  if (processingVaultId !== null) {
-    return; // Already processing a liquidation
-  }
-  
-  const vault = liquidatableVaults.find(v => v.vault_id === vaultId);
-  if (!vault) {
-    liquidationError = "Vault not found";
-    return;
-  }
-  
-  liquidationError = "";
-  liquidationSuccess = "";
-  processingVaultId = vaultId;
-  
-  try {
-    // Check if user has sufficient icUSD balance
-    const icusdBalance = await walletOperations.getIcusdBalance();
-    
-    if (icusdBalance < liquidateAmount) {
-      liquidationError = `Insufficient icUSD balance. You need ${formatNumber(liquidateAmount)} icUSD but have ${formatNumber(icusdBalance)} icUSD.`;
-      processingVaultId = null;
-      return;
-    }
-    
-    // Check and set allowance for icUSD with extra buffer
-    const allowanceApproved = await checkAndApproveAllowance(vaultId, liquidateAmount * 1.20);
-    if (!allowanceApproved) {
-      processingVaultId = null;
-      return;
-    }
-    
-    // Get latest vaults data before liquidation to ensure we have fresh data
-    await loadLiquidatableVaults();
-    
-    // Re-check that the vault is still available for liquidation
-    const updatedVault = liquidatableVaults.find(v => v.vault_id === vaultId);
-    if (!updatedVault) {
-      liquidationError = "This vault is no longer available for liquidation";
-      processingVaultId = null;
-      return;
-    }
-    
-    console.log(`Partially liquidating vault #${vaultId} with ${liquidateAmount} icUSD`);
-    const result = await protocolService.partialLiquidateVault(vaultId, liquidateAmount);
-    
-    if (result.success) {
-      // Calculate expected ICP received (10% discount)
-      const expectedIcpValue = liquidateAmount / 0.9; // 10% discount
-      const expectedIcpAmount = expectedIcpValue / icpPrice;
-      
-      liquidationSuccess = `Successfully partially liquidated vault #${vaultId}. You paid ${formatNumber(liquidateAmount)} icUSD and received approximately ${formatNumber(expectedIcpAmount)} ICP (10% discount).`;
-      // Refresh the list of liquidatable vaults
-      await loadLiquidatableVaults();
-    } else {
-      liquidationError = result.error || "Partial liquidation failed for unknown reason";
-    }
-  } catch (error) {
-    console.error("Error during partial liquidation:", error);
-    
-    // Check for specific underflow error
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    if (errorMessage.includes('underflow') && errorMessage.includes('numeric.rs')) {
-      liquidationError = "Partial liquidation failed due to a calculation error. The vault may have already been liquidated or its state has changed.";
-    } else {
-      liquidationError = errorMessage;
-    }
-  } finally {
-    processingVaultId = null;
-  }
-}
-  
-  // Load ICP price
-  async function refreshIcpPrice() {
+  async function handleLiquidate(vault: CandidVault) {
+    if (!isConnected) { liquidationError = "Please connect your wallet"; return; }
+    if (processingVaultId !== null) return;
+    const inputAmount = getInputVal(vault);
+    if (inputAmount <= 0) { liquidationError = "Enter an icUSD amount"; return; }
+    if (isOverMax(vault)) { liquidationError = "Amount exceeds maximum"; return; }
+
+    const vaultDebt = getVaultDebt(vault);
+    const isFullLiquidation = inputAmount >= vaultDebt * 0.999;
+
+    liquidationError = ""; liquidationSuccess = ""; processingVaultId = vault.vault_id;
     try {
-      isPriceLoading = true;
-      const price = await protocolService.getICPPrice();
-      icpPrice = price;
+      const icusdBalance = await walletOperations.getIcusdBalance();
+      if (icusdBalance < inputAmount) {
+        liquidationError = `Insufficient icUSD. Need ${formatNumber(inputAmount)}, have ${formatNumber(icusdBalance)}.`;
+        processingVaultId = null; return;
+      }
+      if (!await checkAndApproveAllowance(inputAmount * 1.20)) { processingVaultId = null; return; }
+      await loadLiquidatableVaults();
+      if (!liquidatableVaults.find(v => v.vault_id === vault.vault_id)) {
+        liquidationError = "Vault no longer available"; processingVaultId = null; return;
+      }
+      let result;
+      if (isFullLiquidation) {
+        result = await protocolService.liquidateVault(vault.vault_id);
+      } else {
+        result = await protocolService.partialLiquidateVault(vault.vault_id, inputAmount);
+      }
+      if (result.success) {
+        const seizure = calculateSeizure(vault, inputAmount);
+        liquidationSuccess = `Liquidated vault #${vault.vault_id}. Paid ${formatNumber(inputAmount)} icUSD, received ${formatNumber(seizure.icpSeized, 4)} ICP.`;
+        liquidationAmounts[vault.vault_id] = '';
+        await loadLiquidatableVaults();
+      } else { liquidationError = result.error || "Liquidation failed"; }
     } catch (error) {
-      console.error("Error fetching ICP price:", error);
-    } finally {
-      isPriceLoading = false;
-    }
+      const msg = error instanceof Error ? error.message : String(error);
+      liquidationError = msg.includes('underflow') ? "Vault state changed. Try again." : msg;
+    } finally { processingVaultId = null; }
   }
-  
-  // Initial data loading
+
+  async function refreshIcpPrice() {
+    try { isPriceLoading = true; icpPrice = await protocolService.getICPPrice(); }
+    catch (error) { console.error("Error fetching ICP price:", error); }
+    finally { isPriceLoading = false; }
+  }
+
   onMount(() => {
-    refreshIcpPrice();
-    loadLiquidatableVaults();
-    
-    // Set up regular refresh intervals
-    const priceInterval = setInterval(refreshIcpPrice, 30000); // Every 30 seconds
-    const vaultsInterval = setInterval(loadLiquidatableVaults, 60000); // Every minute
-    
-    return () => {
-      clearInterval(priceInterval);
-      clearInterval(vaultsInterval);
-    };
-  });
-  
-  onDestroy(() => {
-    // This is handled by the return function in onMount, but added for clarity
+    refreshIcpPrice(); loadLiquidatableVaults();
+    const pi = setInterval(refreshIcpPrice, 30000);
+    const vi = setInterval(loadLiquidatableVaults, 60000);
+    return () => { clearInterval(pi); clearInterval(vi); };
   });
 </script>
 
-<svelte:head>
-  <title>RUMI Protocol - Liquidations</title>
-</svelte:head>
+<svelte:head><title>RUMI Protocol - Liquidations</title></svelte:head>
 
-<div class="container mx-auto px-4 max-w-6xl">
-  <section class="mb-8">
-    <div class="text-center mb-8">
-      <h1 class="text-4xl font-bold mb-4 bg-clip-text text-transparent bg-gradient-to-r from-pink-400 to-purple-600">
-        Market Liquidations
-      </h1>
-      <p class="text-xl text-gray-300 max-w-3xl mx-auto">
-        Earn profits by liquidating undercollateralized vaults. Pay the debt in icUSD, receive the collateral with a 10% discount.
-      </p>
-    </div>
-
-    <ProtocolStats />
-  </section>
-  
-  <!-- Current ICP Price Display -->
-  <div class="mb-8 bg-gray-900/50 p-6 rounded-lg shadow-lg backdrop-blur-sm ring-2 ring-purple-400">
-    <div class="flex justify-between items-center mb-4">
-      <h2 class="text-2xl font-bold">Current ICP Price</h2>
-      <div class="flex items-center gap-2">
-        <button 
-          class="p-1 bg-gray-800/50 rounded-full hover:bg-gray-800 transition-colors"
-          on:click={refreshIcpPrice}
-          disabled={isPriceLoading}
-          title="Refresh price"
-          aria-label="Refresh ICP price"
-        >
-          <svg class="w-4 h-4 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-            <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-        </button>
-        {#if isPriceLoading}
-          <div class="w-4 h-4 border-2 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
-        {/if}
-      </div>
-    </div>
-    
-    {#if icpPrice > 0}
-      <div class="flex items-baseline gap-2">
-        <p class="text-3xl font-semibold tracking-tight">${$animatedPrice.toFixed(2)}</p>
-      </div>
-    {:else if isPriceLoading}
-      <div class="flex items-center gap-2">
-        <div class="w-5 h-5 border-2 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
-        <span>Loading price...</span>
-      </div>
-    {:else}
-      <p class="text-xl text-yellow-500">Price unavailable</p>
-    {/if}
+<div class="liq-page">
+  <div class="liq-header">
+    <h1 class="page-title">Market Liquidations</h1>
+    <span class="price-pill">
+      ICP
+      {#if icpPrice > 0}
+        <span class="price-pill-value">${$animatedPrice.toFixed(2)}</span>
+      {:else if isPriceLoading}
+        <span class="price-pill-value">…</span>
+      {:else}
+        <span class="price-pill-value">—</span>
+      {/if}
+    </span>
   </div>
 
-  <!-- Liquidatable Vaults Section -->
-  <section class="mb-12">
-    <div class="glass-card">
-      <div class="flex justify-between items-center mb-6">
-        <h2 class="text-2xl font-semibold">Liquidatable Vaults</h2>
-        <button 
-          class="px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-500 transition-colors"
-          on:click={loadLiquidatableVaults}
-          disabled={isLoading}
-        >
-          {isLoading ? 'Loading...' : 'Refresh Vaults'}
-        </button>
-      </div>
-      
-      {#if !isConnected}
-        <div class="p-4 mb-6 bg-yellow-900/30 border border-yellow-800 rounded-lg text-yellow-200">
-          <p>Please connect your wallet to liquidate vaults. You'll need icUSD to pay off the vault debt.</p>
-        </div>
-      {/if}
-      
-      {#if liquidationError}
-        <div class="p-4 mb-6 bg-red-900/30 border border-red-800 rounded-lg text-red-200">
-          <p>{liquidationError}</p>
-        </div>
-      {/if}
-      
-      {#if liquidationSuccess}
-        <div class="p-4 mb-6 bg-green-900/30 border border-green-800 rounded-lg text-green-200">
-          <p>{liquidationSuccess}</p>
-        </div>
-      {/if}
-      
-      {#if isLoading}
-        <div class="flex justify-center items-center py-12">
-          <div class="w-10 h-10 border-4 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
-        </div>
-      {:else if liquidatableVaults.length === 0}
-        <div class="text-center py-12 bg-gray-800/30 rounded-lg">
-          <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-          </svg>
-          <h3 class="mt-2 text-xl font-medium text-gray-300">No liquidatable vaults</h3>
-          <p class="mt-1 text-gray-400">All vaults are currently healthy with sufficient collateral ratios.</p>
-        </div>
-      {:else}
-        <div class="overflow-x-auto">
-          <table class="w-full">
-            <thead>
-              <tr class="border-b border-gray-700">
-                <th class="px-4 py-3 text-left text-sm font-medium text-gray-400">Vault ID</th>
-                <th class="px-4 py-3 text-left text-sm font-medium text-gray-400">Debt (icUSD)</th>
-                <th class="px-4 py-3 text-left text-sm font-medium text-gray-400">Collateral (ICP)</th>
-                <th class="px-4 py-3 text-left text-sm font-medium text-gray-400">Coll. Ratio</th>
-                <th class="px-4 py-3 text-left text-sm font-medium text-gray-400">Profit Potential</th>
-                <th class="px-4 py-3 text-right text-sm font-medium text-gray-400">Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each liquidatableVaults as vault (vault.vault_id)}
-                {@const collateralRatio = calculateCollateralRatio(vault)}
-                {@const profit = calculateLiquidationProfit(vault)}
-                <tr class="border-b border-gray-800 hover:bg-gray-800/30">
-                  <td class="px-4 py-4">{vault.vault_id}</td>
-                  <td class="px-4 py-4">{formatNumber(vault.borrowed_icusd_amount / 100_000_000)} icUSD</td>
-                  <td class="px-4 py-4">{formatNumber(vault.icp_margin_amount / 100_000_000)} ICP</td>
-                  <td class="px-4 py-4">
-                    <span class="text-red-400">{formatNumber(collateralRatio)}%</span>
-                  </td>
-                  <td class="px-4 py-4">
-                    <div class="flex flex-col">
-                      <span>{formatNumber(profit.icpAmount)} ICP</span>
-                      <span class="text-green-400">≈ ${formatNumber(profit.profitUsd)}</span>
-                    </div>
-                  </td>
-                  <td class="px-4 py-4 text-right">
-                    <div class="flex flex-col gap-2 items-end">
-                      <!-- Partial Liquidation Controls -->
-                      <div class="flex gap-2 items-center">
-                        <input 
-                          type="number" 
-                          bind:value={partialLiquidationAmounts[vault.vault_id]}
-                          min="0" 
-                          max={vault.borrowed_icusd_amount / 100_000_000}
-                          step="0.01"
-                          placeholder="icUSD amount"
-                          class="w-24 px-2 py-1 bg-gray-800 text-white text-sm rounded border border-gray-700"
-                        />
-                        <button 
-                          class="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                          on:click={() => partialLiquidationAmounts[vault.vault_id] && partialLiquidateVault(vault.vault_id, partialLiquidationAmounts[vault.vault_id])}
-                          disabled={processingVaultId !== null || !isConnected || isApprovingAllowance || !partialLiquidationAmounts[vault.vault_id] || partialLiquidationAmounts[vault.vault_id] <= 0}
-                        >
-                          Partial
-                        </button>
-                      </div>
-                      
-                      <!-- Full Liquidation Button -->
-                      <button 
-                        class="px-4 py-2 bg-pink-600 text-white rounded hover:bg-pink-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                        on:click={() => liquidateVault(vault.vault_id)}
-                        disabled={processingVaultId !== null || !isConnected || isApprovingAllowance}
-                      >
-                        {#if processingVaultId === vault.vault_id}
-                          {#if isApprovingAllowance}
-                            <span class="flex items-center gap-2">
-                              <div class="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                              Approving icUSD...
-                            </span>
-                          {:else}
-                            <span class="flex items-center gap-2">
-                              <div class="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                              Liquidating...
-                            </span>
-                          {/if}
-                        {:else}
-                          Full Liquidate
-                        {/if}
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
-      {/if}
+  <div class="liq-summary">
+    <span class="summary-stat">{sortedVaults.length} liquidatable vault{sortedVaults.length !== 1 ? 's' : ''}</span>
+    <span class="summary-sep">·</span>
+    <button class="summary-refresh" on:click={loadLiquidatableVaults} disabled={isLoading}>
+      {isLoading ? 'Loading…' : 'Refresh'}
+    </button>
+  </div>
+
+  {#if !isConnected}
+    <div class="msg msg-warn">Connect wallet to liquidate. You'll need icUSD to pay vault debt.</div>
+  {/if}
+  {#if liquidationError}<div class="msg msg-error">{liquidationError}</div>{/if}
+  {#if liquidationSuccess}<div class="msg msg-success">{liquidationSuccess}</div>{/if}
+
+  {#if isLoading && liquidatableVaults.length === 0}
+    <div class="loading-state"><div class="spinner"></div></div>
+  {:else if sortedVaults.length === 0}
+    <div class="empty-state">
+      <p class="empty-text">No liquidatable vaults. All positions are healthy.</p>
     </div>
-  </section>
-  
-  <!-- How Liquidations Work Section -->
-  <section class="mb-16">
-    <div class="max-w-4xl mx-auto">
-      <h2 class="text-2xl font-semibold mb-6 text-center">How Liquidations Work</h2>
+  {:else}
+    <div class="liq-list">
+      {#each sortedVaults as vault (vault.vault_id)}
+        {@const cr = calculateCollateralRatio(vault)}
+        {@const debt = getVaultDebt(vault)}
+        {@const maxLiq = getMaxLiquidation(vault)}
+        {@const isProcessingThis = processingVaultId === vault.vault_id}
+        {@const crDanger = cr < 130}
+        {@const crCaution = cr >= 130 && cr < 150}
 
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div class="glass-card h-full">
-          <div class="text-pink-400 text-3xl font-bold mb-2">1</div>
-          <h3 class="text-lg font-medium mb-2">Find Opportunities</h3>
-          <p class="text-gray-300">Browse vaults with collateral ratios below the required threshold (133% in normal mode, 150% in recovery mode).</p>
-        </div>
+        <div class="liq-card">
+          <div class="card-body">
+            <!-- LEFT: risk + numbers -->
+            <div class="card-left">
+              <div class="left-header">
+                <span class="vault-id">#{vault.vault_id}</span>
+                <span class="cr-badge" class:cr-danger={crDanger} class:cr-caution={crCaution}>
+                  {#if crDanger}
+                    <svg class="warn-icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" /></svg>
+                  {/if}
+                  {formatNumber(cr, 1)}%
+                </span>
+              </div>
+              <div class="left-stats">
+                <span class="stat"><span class="stat-label">Debt</span> <span class="stat-value">{formatNumber(debt, 2)} icUSD</span></span>
+                <span class="stat-sep">·</span>
+                <span class="stat"><span class="stat-label">Collateral</span> <span class="stat-value">{formatNumber(vault.icp_margin_amount / 1e8, 4)} ICP</span></span>
+              </div>
+            </div>
 
-        <div class="glass-card h-full">
-          <div class="text-pink-400 text-3xl font-bold mb-2">2</div>
-          <h3 class="text-lg font-medium mb-2">Pay the Debt</h3>
-          <p class="text-gray-300">Pay the debt amount in icUSD to liquidate the vault. You can liquidate partially (any amount up to the full debt) or fully liquidate the entire vault.</p>
-        </div>
+            <!-- CENTER: outcome (appears when user types) -->
+            <div class="card-center">
+              {#if getSeizure(vault)}
+                {@const s = getSeizure(vault)}
+                <span class="outcome-label">You receive</span>
+                <span class="outcome-line">{formatNumber(s.icpSeized, 4)} ICP <span class="outcome-usd">${formatNumber(s.usdValue, 2)}</span></span>
+              {/if}
+            </div>
 
-        <div class="glass-card h-full">
-          <div class="text-pink-400 text-3xl font-bold mb-2">3</div>
-          <h3 class="text-lg font-medium mb-2">Receive Collateral</h3>
-          <p class="text-gray-300">Get the vault's ICP collateral with a 10% discount compared to the current market price, generating profit.</p>
+            <!-- RIGHT: execution -->
+            <div class="card-right">
+              <div class="input-label-row">
+                <span class="input-label">Amount to liquidate</span>
+                {#if maxLiq > 0}
+                  <button class="max-text" on:click={() => setMax(vault)}>Max: {formatNumber(maxLiq, 4)}</button>
+                {:else if isConnected}
+                  <span class="max-loading">Max: ····</span>
+                {/if}
+              </div>
+              <div class="exec-row">
+                <div class="input-wrap">
+                  <input type="number" class="liq-input" class:input-over={isOverMax(vault)}
+                    bind:value={liquidationAmounts[vault.vault_id]}
+                    on:input={() => { liquidationAmounts = liquidationAmounts; }}
+                    min="0" step="0.01"
+                    placeholder="0.00"
+                    disabled={isProcessingThis} />
+                  <span class="input-suffix">icUSD</span>
+                </div>
+                <button class="btn-primary btn-sm btn-liquidate"
+                  on:click={() => handleLiquidate(vault)}
+                  disabled={!isConnected || processingVaultId !== null || !getInputVal(vault) || isOverMax(vault)}>
+                  {#if isProcessingThis}
+                    {isApprovingAllowance ? 'Approving…' : 'Liquidating…'}
+                  {:else}
+                    Liquidate
+                  {/if}
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
-      </div>
+      {/each}
     </div>
-  </section>
+  {/if}
 </div>
 
 <style>
-  /* Add glass card styling */
-  .glass-card {
-    background-color: rgba(31, 41, 55, 0.4);
-    backdrop-filter: blur(16px);
-    border: 1px solid rgba(75, 85, 99, 0.5);
-    border-radius: 0.5rem;
-    padding: 1.5rem;
+  .liq-page { max-width: 800px; margin: 0 auto; }
+  .liq-header { display: flex; align-items: baseline; gap: 1rem; margin-bottom: 0.25rem; }
+
+  .price-pill {
+    display: inline-flex; align-items: baseline; gap: 0.375rem;
+    padding: 0.1875rem 0.625rem;
+    background: var(--rumi-bg-surface1); border: 1px solid var(--rumi-border);
+    border-radius: 1rem; font-size: 0.75rem; color: var(--rumi-text-muted);
+    font-family: 'Inter', sans-serif;
+  }
+  .price-pill-value { font-weight: 600; color: var(--rumi-text-secondary); font-variant-numeric: tabular-nums; }
+
+  .liq-summary { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem; font-size: 0.8125rem; color: var(--rumi-text-muted); }
+  .summary-stat { font-variant-numeric: tabular-nums; }
+  .summary-sep { opacity: 0.4; }
+  .summary-refresh {
+    background: none; border: none; cursor: pointer; color: var(--rumi-text-muted);
+    font-size: 0.75rem; padding: 0; text-decoration: underline; transition: color 0.15s;
+  }
+  .summary-refresh:hover { color: var(--rumi-text-secondary); }
+  .summary-refresh:disabled { opacity: 0.5; cursor: not-allowed; text-decoration: none; }
+
+  .msg { padding: 0.5rem 0.75rem; border-radius: 0.375rem; font-size: 0.8125rem; margin-bottom: 0.625rem; }
+  .msg-warn { background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.15); color: #fcd34d; }
+  .msg-error { background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.15); color: #fca5a5; }
+  .msg-success { background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.15); color: #6ee7b7; }
+
+  .loading-state { display: flex; justify-content: center; padding: 3rem 0; }
+  .spinner { width: 1.25rem; height: 1.25rem; border: 2px solid var(--rumi-border-hover); border-top-color: var(--rumi-action); border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .empty-state { text-align: center; padding: 3rem 1rem; }
+  .empty-text { font-size: 0.875rem; color: var(--rumi-text-secondary); }
+
+  /* ── Card list ── */
+  .liq-list { display: flex; flex-direction: column; gap: 0.625rem; }
+
+  .liq-card {
+    background: var(--rumi-bg-surface1);
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.75rem;
+    box-shadow: inset 0 1px 0 0 rgba(200,210,240,0.03), 0 2px 8px -2px rgba(8,11,22,0.6), 0 1px 3px -1px rgba(14,18,40,0.4);
+    transition: border-color 0.15s ease;
+  }
+  .liq-card:hover {
+    border-color: rgba(209,118,232,0.08);
+    box-shadow: inset 0 0 20px 0 rgba(209,118,232,0.03), inset 0 1px 0 0 rgba(200,210,240,0.03), 0 2px 8px -2px rgba(8,11,22,0.6);
+  }
+
+  /* ── Single-band card body: left numbers, right execution ── */
+  .card-body {
+    display: flex; align-items: stretch;
+    padding: 0.75rem 1rem;
+    gap: 1.25rem;
+  }
+
+  /* LEFT: risk + numbers */
+  .card-left {
+    flex: 1; min-width: 0;
+    display: flex; flex-direction: column; justify-content: center;
+    gap: 0.25rem;
+  }
+
+  .left-header {
+    display: flex; align-items: center; gap: 0.625rem;
+  }
+  .vault-id {
+    font-family: 'Circular Std','Inter',sans-serif;
+    font-weight: 500; font-size: 0.8125rem; color: var(--rumi-text-muted);
+  }
+  .cr-badge {
+    display: inline-flex; align-items: center; gap: 0.25rem;
+    font-family: 'Inter', sans-serif; font-weight: 700; font-size: 0.9375rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--rumi-text-primary);
+  }
+  .cr-danger { color: var(--rumi-danger); }
+  .cr-caution { color: var(--rumi-caution); }
+  .warn-icon { width: 0.875rem; height: 0.875rem; flex-shrink: 0; }
+
+  .left-stats {
+    display: flex; align-items: baseline; gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+  .stat { display: inline-flex; align-items: baseline; gap: 0.25rem; }
+  .stat-label { font-size: 0.6875rem; color: var(--rumi-text-muted); }
+  .stat-value {
+    font-family: 'Inter', sans-serif; font-weight: 500; font-size: 0.8125rem;
+    font-variant-numeric: tabular-nums; color: var(--rumi-text-secondary);
+  }
+  .stat-sep { color: var(--rumi-text-muted); opacity: 0.3; font-size: 0.75rem; }
+
+  /* CENTER: outcome */
+  .card-center {
+    flex: 0 0 auto;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 0.1875rem;
+    min-width: 7rem;
+  }
+  .outcome-label {
+    font-size: 0.6875rem; color: var(--rumi-text-muted); white-space: nowrap;
+  }
+  .outcome-line {
+    font-family: 'Inter', sans-serif; font-weight: 600; font-size: 0.875rem;
+    font-variant-numeric: tabular-nums; color: var(--rumi-text-primary); white-space: nowrap;
+  }
+  .outcome-usd {
+    font-weight: 400; font-size: 0.75rem; color: var(--rumi-text-muted);
+  }
+
+  /* RIGHT: execution */
+  .card-right {
+    flex: 0 0 16rem;
+    display: flex; flex-direction: column; justify-content: center;
+    gap: 0.25rem;
+  }
+
+  .input-label-row {
+    display: flex; justify-content: space-between; align-items: baseline; gap: 0.5rem;
+  }
+  .input-label { font-size: 0.6875rem; font-weight: 500; color: var(--rumi-text-muted); }
+
+  .max-text {
+    background: none; border: none; cursor: pointer; padding: 0;
+    font-size: 0.6875rem; font-weight: 500; white-space: nowrap;
+    color: var(--rumi-text-muted); opacity: 0.85;
+    transition: opacity 0.15s;
+  }
+  .max-text:hover { opacity: 1; text-decoration: underline; }
+
+  .max-loading {
+    font-size: 0.6875rem; font-weight: 500; white-space: nowrap;
+    color: var(--rumi-text-muted); opacity: 0.5;
+    animation: pulse-subtle 1.5s ease-in-out infinite;
+  }
+  @keyframes pulse-subtle { 0%, 100% { opacity: 0.35; } 50% { opacity: 0.65; } }
+
+  .exec-row { display: flex; gap: 0.375rem; align-items: center; }
+
+  .input-wrap { position: relative; flex: 1; }
+  .liq-input {
+    width: 100%; padding: 0.375rem 2.75rem 0.375rem 0.5rem;
+    background: var(--rumi-bg-surface2); border: 1px solid var(--rumi-border);
+    border-radius: 0.375rem; color: var(--rumi-text-primary);
+    font-family: 'Inter', sans-serif; font-size: 0.8125rem;
+    font-variant-numeric: tabular-nums; transition: border-color 0.15s;
+  }
+  .liq-input:focus { outline: none; border-color: var(--rumi-teal); box-shadow: 0 0 0 1px rgba(45,212,191,0.12); }
+  .liq-input:disabled { opacity: 0.5; }
+  .liq-input.input-over { color: var(--rumi-text-muted); opacity: 0.5; }
+  .input-suffix {
+    position: absolute; right: 0.5rem; top: 50%; transform: translateY(-50%);
+    font-size: 0.6875rem; color: var(--rumi-text-muted); pointer-events: none;
+  }
+
+  .btn-liquidate {
+    padding: 0.375rem 0.875rem; white-space: nowrap; flex-shrink: 0;
+    font-family: 'Inter', sans-serif;
+  }
+
+  /* Number input cleanup */
+  .liq-input::-webkit-outer-spin-button,
+  .liq-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  .liq-input[type=number] { -moz-appearance: textfield; appearance: textfield; }
+
+  @media (max-width: 640px) {
+    .liq-header { flex-wrap: wrap; }
+    .card-body { flex-direction: column; gap: 0.625rem; }
+    .card-right { flex: none; }
   }
 </style>
