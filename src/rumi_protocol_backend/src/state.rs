@@ -672,30 +672,16 @@ impl State {
         }
     }
     
-    // Add method to clean up stale operations regularly
+    // NOTE: clean_stale_operations has been disabled. Despite its name, it did not
+    // clean up any stale operations. Its only action was to reset Recovery mode → 
+    // GeneralAvailability when the ICP price timestamp was stale. This is dangerous:
+    // Recovery mode exists to protect the protocol when collateral ratios are low,
+    // and a stale price is a reason to STAY in Recovery (or go ReadOnly), not exit it.
+    // 
+    // TODO: If we need a stuck-state escape hatch, it should require governance action
+    // or at minimum transition to ReadOnly rather than GeneralAvailability.
     pub fn clean_stale_operations(&mut self) {
-        // Get the current time
-        let now = ic_cdk::api::time();
-        
-        // Only reset Recovery mode if the price is older than 10 minutes.
-        // This gives the XRC timer (300s interval) plenty of room to refresh,
-        // while still protecting against truly stuck states.
-        const STALE_OPERATION_NANOS: u64 = 10 * 60 * SEC_NANOS;
-        
-        // Check for stale processing state based on actual Mode variants
-        // Mode is likely either GeneralAvailability, Recovery, or ReadOnly
-        if let Mode::Recovery = self.mode {
-            // If in recovery mode for too long, consider resetting
-            if let Some(last_timestamp) = self.last_icp_timestamp {
-                let age = now - last_timestamp;
-                
-                // If operation has been in processing mode for too long, reset it
-                if age > STALE_OPERATION_NANOS {
-                    log!(INFO, "[clean_stale_operations] Found stale recovery state, resetting mode to GeneralAvailability");
-                    self.mode = Mode::GeneralAvailability;
-                }
-            }
-        }
+        // Intentionally empty — see note above
     }
 }
 
