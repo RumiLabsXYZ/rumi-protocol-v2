@@ -122,10 +122,10 @@ pub struct State {
     pub icp_ledger_fee: ICP,
     pub last_icp_rate: Option<UsdIcp>,
     pub last_icp_timestamp: Option<u64>,
-    pub principal_guards: BTreeSet<Principal>,
-    pub principal_guard_timestamps: BTreeMap<Principal, u64>, // Add timestamps for guards
-    pub operation_states: BTreeMap<Principal, OperationState>, // Track operation states
-    pub operation_names: BTreeMap<Principal, String>, // Track operation names
+    pub operation_guards: BTreeSet<String>,                          // "principal:operation" keys
+    pub operation_guard_timestamps: BTreeMap<String, u64>,             // guard creation timestamps
+    pub operation_states: BTreeMap<String, OperationState>,            // in-progress / completed / failed
+    pub operation_details: BTreeMap<String, (Principal, String)>,      // key -> (principal, operation_name)
     pub is_timer_running: bool,
     pub is_fetching_rate: bool,
     
@@ -156,10 +156,10 @@ impl From<InitArg> for State {
             last_icp_timestamp: None,
             last_icp_rate: None,
             next_available_vault_id: 1,
-            principal_guards: BTreeSet::new(),
-            principal_guard_timestamps: BTreeMap::new(), // Initialize empty timestamps map
+            operation_guards: BTreeSet::new(),
+            operation_guard_timestamps: BTreeMap::new(),
             operation_states: BTreeMap::new(),
-            operation_names: BTreeMap::new(),
+            operation_details: BTreeMap::new(),
             liquidity_pool: BTreeMap::new(),
             liquidity_returns: BTreeMap::new(),
             pending_margin_transfers: BTreeMap::new(),
@@ -666,8 +666,8 @@ impl State {
         Ok(())
     }
 
-    pub fn mark_operation_failed(&mut self, principal: &Principal) {
-        if let Some(state) = self.operation_states.get_mut(principal) {
+    pub fn mark_operation_failed(&mut self, operation_key: &str) {
+        if let Some(state) = self.operation_states.get_mut(operation_key) {
             *state = OperationState::Failed;
         }
     }
@@ -677,8 +677,10 @@ impl State {
         // Get the current time
         let now = ic_cdk::api::time();
         
-        // Find any operations that are stale (older than 3 minutes)
-        const STALE_OPERATION_NANOS: u64 = 3 * 60 * SEC_NANOS;
+        // Only reset Recovery mode if the price is older than 10 minutes.
+        // This gives the XRC timer (300s interval) plenty of room to refresh,
+        // while still protecting against truly stuck states.
+        const STALE_OPERATION_NANOS: u64 = 10 * 60 * SEC_NANOS;
         
         // Check for stale processing state based on actual Mode variants
         // Mode is likely either GeneralAvailability, Recovery, or ReadOnly
