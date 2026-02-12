@@ -5,9 +5,9 @@ use ic_cdk_macros::{init, post_upgrade, query, update};
 use rumi_protocol_backend::{
     event::Event,
     logs::INFO,
-    numeric::{ICUSD, UsdIcp, UsdCkBtc},
+    numeric::{ICUSD, UsdIcp},
     state::{read_state, replace_state, Mode, State},
-    vault::{CandidVault, OpenVaultSuccess, VaultArg, CollateralType},
+    vault::{CandidVault, OpenVaultSuccess, VaultArg},
     Fees, GetEventsArg, ProtocolArg, ProtocolError, ProtocolStatus, SuccessWithFee,
 };
 use rumi_protocol_backend::logs::DEBUG;
@@ -89,10 +89,16 @@ fn setup_timers() {
         ic_cdk::spawn(rumi_protocol_backend::xrc::fetch_icp_rate())
     });
     
-    // New ckBTC rate fetching timer
-    ic_cdk_timers::set_timer_interval(rumi_protocol_backend::xrc::FETCHING_CKBTC_RATE_INTERVAL, || {
-        ic_cdk::spawn(rumi_protocol_backend::xrc::fetch_ckbtc_rate())
+    // Periodic cleanup timer — runs every 5 minutes instead of every heartbeat (~1s).
+    // This alone saves ~99% of the cycles previously burned by the heartbeat.
+    ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(300), || {
+        mutate_state(|s| s.clean_stale_operations());
     });
+    
+    // TODO: Add ckBTC rate fetching timer when multi-collateral is implemented
+    // ic_cdk_timers::set_timer_interval(rumi_protocol_backend::xrc::FETCHING_CKBTC_RATE_INTERVAL, || {
+    //     ic_cdk::spawn(rumi_protocol_backend::xrc::fetch_ckbtc_rate())
+    // });
 }
 
 fn main() {}
@@ -165,13 +171,7 @@ fn get_protocol_status() -> ProtocolStatus {
             .unwrap_or(UsdIcp::from(Decimal::ZERO))
             .to_f64(),
         last_icp_timestamp: s.last_icp_timestamp.unwrap_or(0),
-        last_ckbtc_rate: s
-            .last_ckbtc_rate
-            .unwrap_or(UsdCkBtc::from(Decimal::ZERO))
-            .to_f64(),
-        last_ckbtc_timestamp: s.last_ckbtc_timestamp.unwrap_or(0),
         total_icp_margin: s.total_icp_margin_amount().to_u64(),
-        total_ckbtc_margin: s.total_ckbtc_margin_amount().to_u64(),
         total_icusd_borrowed: s.total_borrowed_icusd_amount().to_u64(),
         total_collateral_ratio: s.total_collateral_ratio.to_f64(),
         mode: s.mode,
@@ -250,9 +250,7 @@ fn get_vaults(target: Option<Principal>) -> Vec<CandidVault> {
                         owner: vault.owner,
                         borrowed_icusd_amount: vault.borrowed_icusd_amount.to_u64(),
                         icp_margin_amount: vault.icp_margin_amount.to_u64(),
-                        ckbtc_margin_amount: vault.ckbtc_margin_amount.to_u64(),
                         vault_id: vault.vault_id,
-                        collateral_type: vault.collateral_type,
                     }
                 })
                 .collect(),
@@ -265,9 +263,7 @@ fn get_vaults(target: Option<Principal>) -> Vec<CandidVault> {
                     owner: vault.owner,
                     borrowed_icusd_amount: vault.borrowed_icusd_amount.to_u64(),
                     icp_margin_amount: vault.icp_margin_amount.to_u64(),
-                    ckbtc_margin_amount: vault.ckbtc_margin_amount.to_u64(),
                     vault_id: vault.vault_id,
-                    collateral_type: vault.collateral_type,
                 })
                 .collect::<Vec<CandidVault>>()
         }),
@@ -294,9 +290,9 @@ fn get_redemption_rate() -> f64 {
 
 #[candid_method(update)]
 #[update]
-async fn open_vault(collateral_amount: u64, collateral_type: CollateralType) -> Result<OpenVaultSuccess, ProtocolError> {
+async fn open_vault(collateral_amount: u64) -> Result<OpenVaultSuccess, ProtocolError> {
     validate_call().await?;
-    check_postcondition(rumi_protocol_backend::vault::open_vault(collateral_amount, collateral_type).await)
+    check_postcondition(rumi_protocol_backend::vault::open_vault(collateral_amount).await)
 }
 
 #[candid_method(update)]
@@ -373,39 +369,23 @@ async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Protoc
 fn get_liquidatable_vaults() -> Vec<CandidVault> {
     read_state(|s| {
         let current_icp_rate = s.last_icp_rate.unwrap_or(UsdIcp::from(dec!(0.0)));
-        let current_ckbtc_rate = s.last_ckbtc_rate.unwrap_or(UsdCkBtc::from(dec!(0.0)));
         
-        if current_icp_rate.to_f64() == 0.0 && current_ckbtc_rate.to_f64() == 0.0 {
+        if current_icp_rate.to_f64() == 0.0 {
             return vec![];
         }
         
         s.vault_id_to_vaults
             .values()
             .filter(|vault| {
-                let ratio = match vault.collateral_type {
-                    CollateralType::ICP => {
-                        if current_icp_rate.to_f64() == 0.0 { return false; }
-                        rumi_protocol_backend::compute_collateral_ratio(vault, current_icp_rate, CollateralType::ICP)
-                    },
-                    CollateralType::CkBTC => {
-                        if current_ckbtc_rate.to_f64() == 0.0 { return false; }
-                        rumi_protocol_backend::compute_collateral_ratio(vault, current_ckbtc_rate, CollateralType::CkBTC)
-                    }
-                };
+                let ratio = rumi_protocol_backend::compute_collateral_ratio(vault, current_icp_rate);
                 ratio < s.mode.get_minimum_liquidation_collateral_ratio()
             })
             .map(|vault| {
-                let collateral_ratio = match vault.collateral_type {
-                    CollateralType::ICP => rumi_protocol_backend::compute_collateral_ratio(vault, current_icp_rate, CollateralType::ICP),
-                    CollateralType::CkBTC => rumi_protocol_backend::compute_collateral_ratio(vault, current_ckbtc_rate, CollateralType::CkBTC),
-                };
                 CandidVault {
                     owner: vault.owner,
                     borrowed_icusd_amount: vault.borrowed_icusd_amount.to_u64(),
                     icp_margin_amount: vault.icp_margin_amount.to_u64(),
-                    ckbtc_margin_amount: vault.ckbtc_margin_amount.to_u64(),
                     vault_id: vault.vault_id,
-                    collateral_type: vault.collateral_type,
                 }
             })
             .collect::<Vec<CandidVault>>()
@@ -506,17 +486,7 @@ fn http_request(req: HttpRequest) -> HttpResponse {
                     "ICP rate.",
                 )?;
 
-                w.encode_gauge(
-                    "rumi_ckbtc_rate",
-                    s.last_ckbtc_rate.unwrap_or(UsdCkBtc::from(dec!(0))).to_f64(),
-                    "ckBTC rate.",
-                )?;
-
                 let total_icp_dec = Decimal::from_u64(s.total_icp_margin_amount().0)
-                    .expect("failed to construct decimal from u64")
-                    / dec!(100_000_000);
-
-                let total_ckbtc_dec = Decimal::from_u64(s.total_ckbtc_margin_amount().0)
                     .expect("failed to construct decimal from u64")
                     / dec!(100_000_000);
 
@@ -526,14 +496,7 @@ fn http_request(req: HttpRequest) -> HttpResponse {
                     "Total ICP Margin.",
                 )?;
 
-                w.encode_gauge(
-                    "ckbtc_total_CKBTC_margin",
-                    total_ckbtc_dec.to_f64().unwrap(),
-                    "Total ckBTC Margin.",
-                )?;
-
-                let total_tvl = (total_icp_dec * s.last_icp_rate.unwrap_or(UsdIcp::from(dec!(0))).0)
-                    + (total_ckbtc_dec * s.last_ckbtc_rate.unwrap_or(UsdCkBtc::from(dec!(0))).0);
+                let total_tvl = total_icp_dec * s.last_icp_rate.unwrap_or(UsdIcp::from(dec!(0))).0;
 
                 w.encode_gauge(
                     "total_tvl",
@@ -630,15 +593,9 @@ fn http_request(req: HttpRequest) -> HttpResponse {
     }
 }
 
-// Add a new heartbeat function to routinely clean up stale operations
-#[ic_cdk::heartbeat]
-fn heartbeat() {
-    use rumi_protocol_backend::state::mutate_state;
-    log!(INFO, "[heartbeat] Running scheduled cleanup tasks");
-    
-    // Clean up any stale operations
-    mutate_state(|s| s.clean_stale_operations());
-}
+// Heartbeat removed — cleanup logic moved to setup_timers() (runs every 5 min).
+// The old #[ic_cdk::heartbeat] fired ~once per second, burning ~0.46 TC/day
+// for a simple cleanup check. Timer-based approach costs ~0.001 TC/day.
 
 #[candid_method(update)]
 #[update]
@@ -663,25 +620,12 @@ async fn recover_pending_transfer(vault_id: u64) -> Result<bool, ProtocolError> 
     });
     
     if let Some(transfer) = transfer_opt {
-        let transfer_fee = match transfer.collateral_type {
-            CollateralType::ICP => read_state(|s| s.icp_ledger_fee),
-            CollateralType::CkBTC => read_state(|s| s.ckbtc_ledger_fee),
-        };
+        let transfer_fee = read_state(|s| s.icp_ledger_fee);
         
-        let result = match transfer.collateral_type {
-            CollateralType::ICP => {
-                crate::management::transfer_icp(
-                    transfer.margin - transfer_fee,
-                    transfer.owner,
-                ).await
-            },
-            CollateralType::CkBTC => {
-                crate::management::transfer_ckbtc(
-                    transfer.margin - transfer_fee,
-                    transfer.owner,
-                ).await
-            }
-        };
+        let result = crate::management::transfer_icp(
+            transfer.margin - transfer_fee,
+            transfer.owner,
+        ).await;
         
         match result {
             Ok(block_index) => {
