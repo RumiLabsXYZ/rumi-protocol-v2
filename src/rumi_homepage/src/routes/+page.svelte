@@ -49,13 +49,12 @@
       DeFi Infrastructure on the Internet Computer
     </p>
     <h1 class="hero-headline animate-in" style="animation-delay: 0.25s;">
-      Borrow stable.<br/>Stay long ICP.
+      Don't sell your ICP.<br/>Borrow instead.
     </h1>
     <p class="text-lg md:text-xl max-w-2xl mx-auto mb-10 animate-in"
        style="color: var(--rumi-text-secondary); animation-delay: 0.4s; line-height: 1.7;">
-      Rumi Labs builds decentralized financial protocols natively on the Internet Computer. 
-      Our flagship product, <strong style="color: var(--rumi-text-primary);">icUSD</strong>, 
-      lets you borrow a stable dollar without selling your ICP.
+      Rumi is the first native stablecoin protocol on the Internet Computer.
+      Collateralize ICP to mint icUSD and access stable liquidity.
     </p>
     <div class="flex flex-col sm:flex-row gap-4 justify-center animate-in" style="animation-delay: 0.55s;">
       <a href="https://app.rumiprotocol.com" target="_blank" rel="noopener" class="cta-primary">Launch App</a>

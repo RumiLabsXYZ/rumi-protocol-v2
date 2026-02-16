@@ -26,7 +26,6 @@
         <a href="/about" class="nav-link" class:active={currentPath === '/about'}>About</a>
         <a href="/Rumi-Protocol-v2-Whitepaper.pdf" target="_blank" class="nav-link">Whitepaper</a>
         <a href="/AVAI_Security_Audit_Rumi_Protocol_Professional.pdf" target="_blank" class="nav-link">Audit</a>
-        <a href="/branding" class="nav-link" class:active={currentPath === '/branding'}>Branding</a>
         <a href="https://app.rumiprotocol.com" target="_blank" rel="noopener" class="launch-cta">Launch App</a>
       </nav>
 
@@ -63,6 +62,7 @@
         <a href="https://github.com/RumiLabsXYZ/rumi-protocol-v2" target="_blank" rel="noopener" class="footer-link">GitHub</a>
         <a href="/Rumi-Protocol-v2-Whitepaper.pdf" target="_blank" class="footer-link">Whitepaper</a>
         <a href="/AVAI_Security_Audit_Rumi_Protocol_Professional.pdf" target="_blank" class="footer-link">Audit</a>
+        <a href="/branding" class="footer-link">Branding</a>
         <a href="mailto:info@rumiprotocol.com" class="footer-link">Contact</a>
       </div>
       <a href="https://app.rumiprotocol.com" target="_blank" rel="noopener"
