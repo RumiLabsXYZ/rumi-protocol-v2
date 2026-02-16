@@ -10,13 +10,13 @@
         }
       ]
     },
-    "rumi_protocol_frontend": {
+    "rumi_homepage": {
       "source": [
-        "src/rumi_protocol_frontend/dist",
-        "src/rumi_protocol_frontend/assets"
+        "src/rumi_homepage/dist",
+        "src/rumi_homepage/assets"
       ],
       "type": "assets",
-      "workspace": "rumi_protocol_frontend"
+      "workspace": "rumi_homepage"
     },
     "vault_frontend": {
       "source": [

@@ -1,6 +1,6 @@
 <script>
   import FeatureCard from '$lib/components/FeatureCard.svelte';
-  let description = "A decentralized stablecoin on ICP, bringing financial stability to Web3.";
+  let description = "Rumi is the first native stablecoin protocol on the Internet Computer. Collateralize ICP to mint icUSD and access stable liquidity.";
 </script>
 
 <section class="flex flex-col items-center justify-center py-10 md:py-12 px-4 md:px-4">
@@ -14,7 +14,7 @@
   <!-- Title and Description -->
   <div class="text-center max-w-4xl mx-auto mb-12">
     <h1 class="text-3xl md:text-4xl lg:text-5xl font-bold gradient-outline mb-6 animate-title">
-      icUSD - The Future of Stablecoin on ICP
+      Don't sell your ICP.<br/>Borrow instead.
     </h1>
     <p class="text-lg md:text-xl text-gray-300 animate-title" style="animation-delay: 0.3s">
       {description}

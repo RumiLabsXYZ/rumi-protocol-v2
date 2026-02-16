@@ -9,12 +9,12 @@
     "build": "npm run build --workspaces --if-present",
     "prebuild": "npm run prebuild --workspaces --if-present",
     "pretest": "npm run prebuild --workspaces --if-present",
-    "start": "npm start --workspace=src/rumi_protocol_frontend",
+    "start": "npm start --workspace=src/rumi_homepage",
     "test": "npm test --workspaces --if-present"
   },
   "type": "module",
   "workspaces": [
-    "src/rumi_protocol_frontend",
+    "src/rumi_homepage",
     "src/vault_frontend"
   ],
   "devDependencies": {
