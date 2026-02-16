@@ -1,4 +1,4 @@
-<section class="max-w-4xl mx-auto px-6 py-20 md:py-28">
+<section class="max-w-4xl mx-auto px-6 py-12 md:py-28">
   <p class="text-sm font-medium tracking-widest uppercase mb-6"
      style="color: var(--rumi-purple-accent);">
     About

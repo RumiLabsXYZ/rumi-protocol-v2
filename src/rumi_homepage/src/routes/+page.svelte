@@ -52,15 +52,15 @@
 <!-- Hero -->
 <section class="hero-section">
   <div class="hero-glow"></div>
-  <div class="max-w-5xl mx-auto px-6 py-24 md:py-32 text-center relative z-10">
-    <p class="text-sm font-medium tracking-widest uppercase mb-6 animate-in"
+  <div class="max-w-5xl mx-auto px-6 py-16 md:py-32 text-center relative z-10">
+    <p class="text-xs md:text-sm font-medium tracking-widest uppercase mb-4 md:mb-6 animate-in"
        style="color: var(--rumi-purple-accent); animation-delay: 0.1s;">
       DeFi Infrastructure on the Internet Computer
     </p>
     <h1 class="hero-headline animate-in" style="animation-delay: 0.25s;">
       Don't sell your ICP.<br/>Borrow instead.
     </h1>
-    <p class="text-lg md:text-xl max-w-2xl mx-auto mb-10 animate-in"
+    <p class="text-base md:text-xl max-w-2xl mx-auto mb-8 md:mb-10 animate-in"
        style="color: var(--rumi-text-secondary); animation-delay: 0.4s; line-height: 1.7;">
       Rumi is the first native stablecoin protocol on the Internet Computer.
       Collateralize ICP to mint icUSD and access stable liquidity.
@@ -90,7 +90,7 @@
 </section>
 
 <!-- Protocol Suite -->
-<section class="max-w-5xl mx-auto px-6 py-20">
+<section class="max-w-5xl mx-auto px-6 py-12 md:py-20">
   <h2 class="section-heading mb-3">The Protocol Suite</h2>
   <p class="text-sm mb-10" style="color: var(--rumi-text-secondary); max-width: 480px;">
     A growing ecosystem of DeFi primitives, purpose-built for the Internet Computer.
@@ -112,10 +112,10 @@
 </section>
 
 <!-- How It Works -->
-<section class="py-20 border-t" style="border-color: var(--rumi-border);">
+<section class="py-12 md:py-20 border-t" style="border-color: var(--rumi-border);">
   <div class="max-w-5xl mx-auto px-6">
     <h2 class="section-heading mb-3">How It Works</h2>
-    <p class="text-sm mb-12" style="color: var(--rumi-text-secondary); max-width: 420px;">
+    <p class="text-sm mb-8 md:mb-12" style="color: var(--rumi-text-secondary); max-width: 420px;">
       Four steps from ICP holder to icUSD borrower.
     </p>
     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -131,7 +131,7 @@
 </section>
 
 <!-- Why ICP -->
-<section class="py-20 border-t" style="border-color: var(--rumi-border);">
+<section class="py-12 md:py-20 border-t" style="border-color: var(--rumi-border);">
   <div class="max-w-5xl mx-auto px-6">
     <h2 class="section-heading mb-3">Why the Internet Computer?</h2>
     <p class="text-sm mb-4" style="color: var(--rumi-text-secondary); max-width: 560px; line-height: 1.7;">
@@ -147,7 +147,7 @@
 </section>
 
 <!-- Trust -->
-<section class="py-20 border-t" style="border-color: var(--rumi-border);">
+<section class="py-12 md:py-20 border-t" style="border-color: var(--rumi-border);">
   <div class="max-w-5xl mx-auto px-6">
     <h2 class="section-heading mb-3">Built for Trust</h2>
     <p class="text-sm mb-10" style="color: var(--rumi-text-secondary); max-width: 440px;">
@@ -165,9 +165,9 @@
 </section>
 
 <!-- CTA -->
-<section class="py-20 border-t" style="border-color: var(--rumi-border);">
+<section class="py-12 md:py-20 border-t" style="border-color: var(--rumi-border);">
   <div class="max-w-3xl mx-auto px-6 text-center">
-    <h2 class="text-2xl md:text-3xl font-bold mb-4" style="color: var(--rumi-text-primary);">Ready to borrow icUSD?</h2>
+    <h2 class="text-xl md:text-3xl font-bold mb-4" style="color: var(--rumi-text-primary);">Ready to borrow icUSD?</h2>
     <p class="text-sm mb-8" style="color: var(--rumi-text-secondary); line-height: 1.7; max-width: 400px; margin-left: auto; margin-right: auto;">
       Connect your wallet, deposit ICP, and mint icUSD in minutes. 
       No KYC, no intermediaries, no bridges.
@@ -195,15 +195,19 @@
 
   .hero-headline {
     font-family: 'Circular Std', 'Inter', sans-serif;
-    font-size: 3rem;
+    font-size: 2.25rem;
     font-weight: 700;
     line-height: 1.15;
     letter-spacing: -0.03em;
-    margin-bottom: 1.5rem;
+    margin-bottom: 1.25rem;
     background: linear-gradient(135deg, var(--rumi-text-primary) 30%, var(--rumi-purple-accent) 70%, var(--rumi-action) 100%);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
+  }
+
+  @media (min-width: 640px) {
+    .hero-headline { font-size: 3rem; margin-bottom: 1.5rem; }
   }
 
   @media (min-width: 768px) {
@@ -212,10 +216,14 @@
 
   .section-heading {
     font-family: 'Circular Std', 'Inter', sans-serif;
-    font-size: 1.5rem;
+    font-size: 1.25rem;
     font-weight: 700;
     color: var(--rumi-purple-accent);
     letter-spacing: -0.02em;
+  }
+
+  @media (min-width: 640px) {
+    .section-heading { font-size: 1.5rem; }
   }
 
   .cta-primary {

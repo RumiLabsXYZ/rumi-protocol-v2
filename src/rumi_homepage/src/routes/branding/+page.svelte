@@ -19,7 +19,7 @@
   }
 </script>
 
-<section class="max-w-5xl mx-auto px-6 py-16 md:py-24">
+<section class="max-w-5xl mx-auto px-6 py-12 md:py-24">
 
   <!-- Header -->
   <p class="text-sm font-medium tracking-widest uppercase mb-4"
@@ -448,16 +448,19 @@
   /* Logo showcase */
   .logo-showcase {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr;
     gap: 1rem;
     border-radius: 0.75rem;
     overflow: hidden;
+  }
+  @media (min-width: 640px) {
+    .logo-showcase { grid-template-columns: 1fr 1fr; }
   }
   .logo-showcase-dark {
     background: var(--rumi-bg-surface1);
     border: 1px solid var(--rumi-border);
     border-radius: 0.75rem;
-    padding: 3rem;
+    padding: 2rem;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -465,12 +468,18 @@
   .logo-showcase-light {
     background: #f0f0f0;
     border-radius: 0.75rem;
-    padding: 3rem;
+    padding: 2rem;
     display: flex;
     align-items: center;
     justify-content: center;
   }
-  .logo-large { width: 120px; height: 120px; }
+  @media (min-width: 640px) {
+    .logo-showcase-dark, .logo-showcase-light { padding: 3rem; }
+  }
+  .logo-large { width: 96px; height: 96px; }
+  @media (min-width: 640px) {
+    .logo-large { width: 120px; height: 120px; }
+  }
 
   /* Asset cards */
   .asset-card {
@@ -552,8 +561,11 @@
   /* Color cards */
   .color-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    grid-template-columns: repeat(2, 1fr);
     gap: 0.75rem;
+  }
+  @media (min-width: 640px) {
+    .color-grid { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
   }
   .color-card {
     background: var(--rumi-bg-surface1);
@@ -586,9 +598,14 @@
   .color-role {
     font-size: 0.6875rem;
     color: var(--rumi-text-muted);
+    overflow-wrap: break-word;
+    word-break: break-all;
   }
   .color-role code {
-    font-size: 0.625rem;
+    font-size: 0.5625rem;
+  }
+  @media (min-width: 640px) {
+    .color-role code { font-size: 0.625rem; }
   }
   .copied-badge {
     font-size: 0.625rem;
@@ -632,20 +649,26 @@
   .gradient-samples { display: flex; flex-direction: column; gap: 1rem; }
   .gradient-sample {
     display: flex;
-    gap: 1rem;
-    align-items: center;
+    flex-direction: column;
+    gap: 0.75rem;
     background: var(--rumi-bg-surface1);
     border: 1px solid var(--rumi-border);
     border-radius: 0.75rem;
     padding: 1rem;
   }
+  @media (min-width: 640px) {
+    .gradient-sample { flex-direction: row; align-items: center; gap: 1rem; }
+  }
   .gradient-preview {
-    width: 80px;
-    height: 48px;
+    width: 100%;
+    height: 32px;
     border-radius: 0.5rem;
     flex-shrink: 0;
   }
-  .gradient-info { display: flex; flex-direction: column; gap: 0.125rem; }
+  @media (min-width: 640px) {
+    .gradient-preview { width: 80px; height: 48px; }
+  }
+  .gradient-info { display: flex; flex-direction: column; gap: 0.125rem; min-width: 0; }
   .gradient-name {
     font-size: 0.8125rem;
     font-weight: 600;
@@ -654,6 +677,8 @@
   .gradient-code {
     font-size: 0.6875rem;
     color: var(--rumi-text-muted);
+    overflow-wrap: break-word;
+    word-break: break-all;
   }
   .gradient-code code { font-size: 0.625rem; }
   .gradient-use {
