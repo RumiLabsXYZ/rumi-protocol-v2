@@ -1,10 +1,9 @@
-<script lang="ts">
-  import { onMount } from "svelte";
-  import NaviLink from '$lib/components/NaviLink.svelte';
-  import "../app.css";
-  
-  let currentPath: string;
-  
+<script>
+  import { onMount } from 'svelte';
+  import '../app.css';
+
+  let currentPath = '/';
+
   onMount(() => {
     currentPath = window.location.pathname;
     window.addEventListener('popstate', () => {
@@ -13,160 +12,123 @@
   });
 </script>
 
-<div class="min-h-screen flex flex-col">
-  <header class="w-full px-6 py-4 glass-panel sticky top-0 z-50 mb-10">
-    <div class="max-w-7xl mx-auto flex justify-between items-center">
-      <!-- Logo section -->
-      <div class="flex items-center gap-4">
-        <img src="/rumi-header-logo.png" alt="Rumi Labs Logo" class="w-20 h-auto" />
-        <img src="/rumi-labs-without-BG.png" alt="Rumi Labs Name" class="h-10 w-auto" />
-      </div>
-      
-      <div class="flex items-center gap-8">
-        <!-- Text-only navigation -->
-        <nav class="hidden md:flex items-center gap-4">
-          <div class="flex items-center gap-4 mr-6">
-            <NaviLink href="/" active={currentPath === '/'} class="nav-text">Home</NaviLink>
-            <NaviLink href="/about" active={currentPath === '/about'} class="nav-text">About Rumi</NaviLink>
-            <NaviLink href="/Rumi-Protocol-3rd-Version.pdf" isWhitepaper={true} class="nav-text">Whitepaper</NaviLink>
-          </div>
-          
-          <!-- Launch button remains styled -->
-          <a href="https://rumiprotocol.io" 
-             target="_blank" 
-             class="launch-button">
-            Launch Dapp
-          </a>
-        </nav>
+<div class="min-h-screen flex flex-col relative z-10">
+  <header class="w-full px-6 py-4 sticky top-0 z-50 border-b"
+          style="background: rgba(8,11,22,0.85); backdrop-filter: blur(12px); border-color: var(--rumi-border);">
+    <div class="max-w-6xl mx-auto flex justify-between items-center">
+      <a href="/" class="flex items-center gap-3 no-underline">
+        <img src="/rumilogo-vector-v2_inset2.png" alt="Rumi" class="w-9 h-9"/>
+        <span class="brand-wordmark">RUMI</span>
+      </a>
 
-        <!-- Social icons -->
-        <div class="flex items-center gap-8">
-          <a href="mailto:team@rumilabs.xyz" class="hover:opacity-80 transition" aria-label="Email Us">
-            <img src="/message-outline-512.png" alt="Email" class="w-8 h-8" />
-          </a>
-          <a href="https://x.com/rumilabsxyz" target="_blank" rel="noopener noreferrer" class="hover:opacity-80 transition" aria-label="Follow us on Twitter">
-            <img src="/twitter-x-256.png" alt="Twitter" class="w-8 h-8" />
-          </a>
-        </div>
+      <nav class="hidden md:flex items-center gap-8">
+        <a href="/" class="nav-link" class:active={currentPath === '/'}>Home</a>
+        <a href="/about" class="nav-link" class:active={currentPath === '/about'}>About</a>
+        <a href="/Rumi-Protocol-v2-Whitepaper.pdf" target="_blank" class="nav-link">Whitepaper</a>
+        <a href="/AVAI_Security_Audit_Rumi_Protocol_Professional.pdf" target="_blank" class="nav-link">Audit</a>
+        <a href="/branding" class="nav-link" class:active={currentPath === '/branding'}>Branding</a>
+        <a href="https://app.rumiprotocol.com" target="_blank" rel="noopener" class="launch-cta">Launch App</a>
+      </nav>
+
+      <div class="flex items-center gap-5">
+        <a href="mailto:info@rumiprotocol.com" class="social-icon" aria-label="Email">
+          <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/>
+            <polyline points="22,6 12,13 2,6"/>
+          </svg>
+        </a>
+        <a href="https://x.com/rumilabsxyz" target="_blank" rel="noopener" class="social-icon" aria-label="Twitter">
+          <svg class="w-5 h-5" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
+          </svg>
+        </a>
+        <a href="https://github.com/RumiLabsXYZ/rumi-protocol-v2" target="_blank" rel="noopener" class="social-icon" aria-label="GitHub">
+          <svg class="w-5 h-5" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/>
+          </svg>
+        </a>
       </div>
     </div>
   </header>
 
-  <main class="flex-grow px-4 md:px-6 py-8 relative z-10">
+  <main class="flex-grow">
     <slot />
   </main>
 
-  <footer class="w-full p-4 md:p-6 bg-black/40 backdrop-blur-xl text-white border-t border-white/10 mt-auto">
-    <div class="max-w-7xl mx-auto flex justify-between items-center">
-      <p class="text-sm md:text-base">
-        &copy; 2025 Rumi Labs LLC. All rights reserved.
-      </p>
-      <a 
-        href="https://rumiprotocol.io" 
-        target="_blank" 
-        class="text-sm md:text-base hover:text-purple-400 transition-colors">
-        Launch Dapp →
+  <footer class="w-full px-6 py-8 border-t mt-auto"
+          style="background: var(--rumi-bg-surface1); border-color: var(--rumi-border);">
+    <div class="max-w-6xl mx-auto flex flex-col md:flex-row justify-between items-center gap-4">
+      <div class="flex items-center gap-6 text-sm" style="color: var(--rumi-text-muted);">
+        <span>&copy; 2025-2026 Rumi Labs LLC</span>
+        <a href="https://github.com/RumiLabsXYZ/rumi-protocol-v2" target="_blank" rel="noopener" class="footer-link">GitHub</a>
+        <a href="/Rumi-Protocol-v2-Whitepaper.pdf" target="_blank" class="footer-link">Whitepaper</a>
+        <a href="/AVAI_Security_Audit_Rumi_Protocol_Professional.pdf" target="_blank" class="footer-link">Audit</a>
+        <a href="mailto:info@rumiprotocol.com" class="footer-link">Contact</a>
+      </div>
+      <a href="https://app.rumiprotocol.com" target="_blank" rel="noopener"
+         class="text-sm font-medium transition-colors" style="color: var(--rumi-action);">
+        Launch App →
       </a>
     </div>
   </footer>
 </div>
 
 <style>
-  :global(body) {
-    min-height: 100vh;
-    margin: 0;
-    font-family: 'Inter', system-ui, sans-serif;
-    color: white;
-    background: linear-gradient(135deg, #29024f 0%, #4a148c 50%, #1a237e 100%);
-    background-size: 200% 200%;
-    animation: gradientMove 15s ease infinite;
-    display: flex;
-    flex-direction: column;
-  }
-
-  @keyframes gradientMove {
-    0% { background-position: 0% 50%; }
-    50% { background-position: 100% 50%; }
-    100% { background-position: 0% 50%; }
-  }
-
-  .glass-panel {
-    @apply bg-black/20 backdrop-blur-md border-b border-white/10;
+  .brand-wordmark {
+    font-family: 'Circular Std', 'Inter', sans-serif;
+    font-size: 1.25rem;
+    font-weight: 500;
+    color: #e8e4f0;
+    letter-spacing: 0.12em;
   }
 
   .nav-link {
-    @apply px-4 py-2 rounded-lg text-gray-300 hover:text-white
-           hover:bg-[#522785]/20 transition-all duration-200;
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--rumi-text-secondary);
+    text-decoration: none;
+    transition: color 0.15s ease;
   }
 
-  .nav-link.active {
-    @apply bg-[#522785]/30 text-white;
+  .nav-link:hover, .nav-link.active {
+    color: var(--rumi-text-primary);
   }
 
-  /* Remove the large logo and name section */
-  :global(.logo-section) {
-    display: none;
+  .launch-cta {
+    font-family: 'Circular Std', 'Inter', sans-serif;
+    font-size: 0.875rem;
+    font-weight: 500;
+    padding: 0.5rem 1.25rem;
+    background: var(--rumi-action);
+    color: var(--rumi-bg-primary);
+    border-radius: 0.5rem;
+    text-decoration: none;
+    transition: all 0.2s ease;
   }
 
-  :global(#app) {
-    min-height: 100vh;
+  .launch-cta:hover {
+    background: var(--rumi-action-bright);
+    box-shadow: 0 0 20px rgba(52,211,153,0.15);
+  }
+
+  .footer-link {
+    color: var(--rumi-text-muted);
+    text-decoration: none;
+    transition: color 0.15s ease;
+  }
+
+  .footer-link:hover {
+    color: var(--rumi-text-secondary);
+  }
+
+  .social-icon {
     display: flex;
-    flex-direction: column;
+    align-items: center;
+    color: var(--rumi-text-muted);
+    transition: color 0.15s ease;
   }
 
-  /* Add new styles for the launch button animation */
-  a[href="https://rumiprotocol.io"] {
-    position: relative;
-    overflow: hidden;
-  }
-
-  a[href="https://rumiprotocol.io"]:after {
-    content: '';
-    position: absolute;
-    top: 0;
-    left: -100%;
-    width: 100%;
-    height: 100%;
-    background: linear-gradient(
-      90deg,
-      transparent,
-      rgba(255, 255, 255, 0.2),
-      transparent
-    );
-    transition: 0.5s;
-  }
-
-  a[href="https://rumiprotocol.io"]:hover:after {
-    left: 100%;
-  }
-
-  .nav-text {
-    @apply text-gray-300 hover:text-white relative text-xl
-           transition-all duration-200 font-semibold tracking-wide;
-  }
-
-  .nav-text::after {
-    content: '';
-    @apply absolute left-0 bottom-0 w-0 h-0.5 bg-purple-400
-           transition-all duration-200;
-  }
-
-  .nav-text:hover::after {
-    @apply w-full;
-  }
-
-  .nav-text.active {
-    @apply text-white;
-  }
-
-  .nav-text.active::after {
-    @apply w-full bg-purple-500;
-  }
-
-  .launch-button {
-    @apply px-6 py-2 bg-gradient-to-r from-[#522785] to-[#29abe2] 
-           rounded-lg font-medium text-white hover:opacity-90 
-           transition-all duration-200 shadow-lg hover:shadow-xl 
-           transform hover:-translate-y-0.5;
+  .social-icon:hover {
+    color: var(--rumi-text-primary);
   }
 </style>
