@@ -101,4 +101,12 @@
   .docs-link:hover .docs-arrow {
     color: var(--rumi-action); transform: translateY(-50%) translateX(2px);
   }
+
+  @media (max-width: 640px) {
+    .docs-subtitle { font-size: 0.875rem; margin-bottom: 1.5rem; }
+    .docs-link { padding: 1rem 2.5rem 1rem 1rem; }
+    .docs-link-title { font-size: 0.9375rem; }
+    .docs-link-desc { font-size: 0.75rem; }
+    .docs-arrow { right: 0.75rem; }
+  }
 </style>

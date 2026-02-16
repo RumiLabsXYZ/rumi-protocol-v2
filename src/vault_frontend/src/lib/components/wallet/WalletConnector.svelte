@@ -801,4 +801,16 @@
   .toast-container > :global(*) {
     pointer-events: auto;
   }
+
+  /* ── Mobile: compact pill, show only ICP balance + caret ── */
+  @media (max-width: 768px) {
+    .wallet-pill { gap: 0.375rem; padding: 0.35rem 0.5rem; }
+    .pill-balances { gap: 0.375rem; }
+    .pill-balance-primary { font-size: 0.75rem; }
+    .pill-balance-secondary { display: none; }
+    .pill-principal { display: none; }
+    .pill-divider { display: none; }
+    .pill-control { display: none; }
+    .dropdown { width: calc(100vw - 1.5rem); max-width: 19rem; }
+  }
 </style>

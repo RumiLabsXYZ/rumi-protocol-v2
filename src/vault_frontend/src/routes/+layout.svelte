@@ -132,5 +132,12 @@
   .mob-item { display:flex;flex-direction:column;align-items:center;gap:0.125rem;padding:0.375rem 0.75rem;border-radius:0.375rem;color:var(--rumi-text-muted);text-decoration:none;font-size:0.625rem; }
   .mob-item svg { width:1.125rem;height:1.125rem; }
   .mob-item.active { color:var(--rumi-action); }
-  @media (max-width:768px) { .top-nav{display:none} .main-content{padding:4.25rem 1rem 5rem} .mobile-nav{display:flex} }
+  @media (max-width:768px) {
+    .top-nav{display:none}
+    .main-content{padding:4.25rem 0.75rem 5rem}
+    .mobile-nav{display:flex}
+    .top-bar{padding:0 0.75rem}
+    .top-social{display:none}
+    .beta-chip{display:none}
+  }
 </style>

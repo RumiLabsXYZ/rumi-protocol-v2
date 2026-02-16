@@ -363,3 +363,22 @@ h1, h2, h3, h4, h5, h6 {
   transition: border-color 0.15s ease;
 }
 .doc-link:hover { border-color: var(--rumi-action); }
+
+/* ============================================
+   Mobile responsive — global utilities
+   ============================================ */
+@media (max-width: 768px) {
+  .page-title {
+    font-size: 1.5rem;
+  }
+
+  .glass-panel,
+  .glass-card,
+  .icp-card {
+    padding: 1rem;
+  }
+
+  .doc-title {
+    font-size: 1.375rem;
+  }
+}

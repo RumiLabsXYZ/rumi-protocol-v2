@@ -574,8 +574,14 @@
   .liq-input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 
   @media (max-width: 640px) {
-    .liq-header { flex-wrap: wrap; }
-    .card-body { flex-direction: column; gap: 0.625rem; }
+    .liq-header { flex-wrap: wrap; gap: 0.5rem; }
+    .card-body { flex-direction: column; gap: 0.625rem; padding: 0.75rem; }
+    .card-left { gap: 0.375rem; }
+    .left-stats { gap: 0.375rem; }
+    .card-center { min-width: 0; align-items: flex-start; }
     .card-right { flex: none; }
+    .exec-row { flex-direction: column; gap: 0.375rem; }
+    .btn-liquidate { width: 100%; }
+    .liq-page { margin: 0; }
   }
 </style>
