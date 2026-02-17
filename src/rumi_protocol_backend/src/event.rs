@@ -1,9 +1,10 @@
-use crate::numeric::{UsdIcp, ICUSD, ICP};
+use crate::numeric::{Ratio, UsdIcp, ICUSD, ICP};
 use crate::state::{PendingMarginTransfer, State};
 use crate::storage::record_event;
 use crate::vault::Vault;
-use crate::{InitArg, Mode, UpgradeArg};
+use crate::{InitArg, Mode, StableTokenType, UpgradeArg};
 use candid::{CandidType, Principal};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,6 +127,21 @@ pub enum Event {
         amount: ICP,
         block_index: Option<u64>,
     },
+
+    /// Configuration event: set the ckstable repayment fee rate.
+    /// Stored as a string representation of the Decimal to avoid CandidType issues.
+    #[serde(rename = "set_ckstable_repay_fee")]
+    SetCkstableRepayFee {
+        /// Fee rate as a string, e.g. "0.0002" for 0.02%
+        rate: String,
+    },
+
+    /// Configuration event: enable or disable a stable token type.
+    #[serde(rename = "set_stable_token_enabled")]
+    SetStableTokenEnabled {
+        token_type: StableTokenType,
+        enabled: bool,
+    },
 }
 
 impl Event {
@@ -151,6 +167,8 @@ impl Event {
             Event::CollateralWithdrawn { vault_id, .. } => vault_id == filter_vault_id,
             Event::VaultWithdrawnAndClosed { vault_id, .. } => vault_id == filter_vault_id,
             Event::WithdrawAndCloseVault { vault_id, .. } => vault_id == filter_vault_id,
+            Event::SetCkstableRepayFee { .. } => false,
+            Event::SetStableTokenEnabled { .. } => false,
         }
     }
 }
@@ -272,13 +290,24 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                 state.close_vault(vault_id);
             },
             // Add this case:
-            Event::WithdrawAndCloseVault { 
+            Event::WithdrawAndCloseVault {
                 vault_id,
                 amount: _,
                 block_index: _,
             } => {
                 // Close the vault during replay
                 state.close_vault(vault_id);
+            },
+            Event::SetCkstableRepayFee { rate } => {
+                if let Ok(dec) = rate.parse::<Decimal>() {
+                    state.ckstable_repay_fee = Ratio::from(dec);
+                }
+            },
+            Event::SetStableTokenEnabled { token_type, enabled } => {
+                match token_type {
+                    StableTokenType::CKUSDT => state.ckusdt_enabled = enabled,
+                    StableTokenType::CKUSDC => state.ckusdc_enabled = enabled,
+                }
             },
         }
     }
@@ -448,7 +477,7 @@ pub fn record_redemption_transfered(
 }
 
 pub fn record_collateral_withdrawn(
-    state: &mut State,
+    _state: &mut State,
     vault_id: u64,
     amount: ICP,
     block_index: u64,
@@ -475,4 +504,22 @@ pub fn record_withdraw_and_close_vault(
     
     // Close the vault (withdrawal is already handled in vault.rs)
     state.close_vault(vault_id);
+}
+
+pub fn record_set_ckstable_repay_fee(state: &mut State, rate: Ratio) {
+    record_event(&Event::SetCkstableRepayFee {
+        rate: rate.0.to_string(),
+    });
+    state.ckstable_repay_fee = rate;
+}
+
+pub fn record_set_stable_token_enabled(state: &mut State, token_type: StableTokenType, enabled: bool) {
+    record_event(&Event::SetStableTokenEnabled {
+        token_type: token_type.clone(),
+        enabled,
+    });
+    match token_type {
+        StableTokenType::CKUSDT => state.ckusdt_enabled = enabled,
+        StableTokenType::CKUSDC => state.ckusdc_enabled = enabled,
+    }
 }

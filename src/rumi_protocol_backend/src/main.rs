@@ -355,12 +355,14 @@ async fn withdraw_and_close_vault(vault_id: u64) -> Result<Option<u64>, Protocol
 #[update]
 #[candid_method(update)]
 async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolError> {
+    validate_call()?;
     check_postcondition(rumi_protocol_backend::vault::liquidate_vault(vault_id).await)
 }
 
 #[update]
 #[candid_method(update)]
 async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result<SuccessWithFee, ProtocolError> {
+    validate_call()?;
     check_postcondition(rumi_protocol_backend::vault::liquidate_vault_partial(vault_id, icusd_amount).await)
 }
 
@@ -819,7 +821,9 @@ async fn set_ckstable_repay_fee(new_rate: f64) -> Result<(), ProtocolError> {
     }
     let rate = Ratio::from(rust_decimal::Decimal::try_from(new_rate)
         .map_err(|_| ProtocolError::GenericError("Invalid fee rate".to_string()))?);
-    mutate_state(|s| { s.ckstable_repay_fee = rate; });
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_ckstable_repay_fee(s, rate);
+    });
     log!(INFO, "[set_ckstable_repay_fee] Fee rate set to: {}", new_rate);
     Ok(())
 }
@@ -841,10 +845,7 @@ async fn set_stable_token_enabled(token_type: StableTokenType, enabled: bool) ->
         return Err(ProtocolError::GenericError("Only developer can toggle stable token acceptance".to_string()));
     }
     mutate_state(|s| {
-        match token_type {
-            StableTokenType::CKUSDT => s.ckusdt_enabled = enabled,
-            StableTokenType::CKUSDC => s.ckusdc_enabled = enabled,
-        }
+        rumi_protocol_backend::event::record_set_stable_token_enabled(s, token_type.clone(), enabled);
     });
     log!(INFO, "[set_stable_token_enabled] {:?} enabled: {}", token_type, enabled);
     Ok(())

@@ -76,7 +76,8 @@ pub async fn redeem_icp(_icusd_amount: u64) -> Result<SuccessWithFee, ProtocolEr
         });
     }
 
-    let current_icp_rate = read_state(|s| s.last_icp_rate.expect("no ICP rate entry"));
+    let current_icp_rate = read_state(|s| s.last_icp_rate)
+        .ok_or(ProtocolError::GenericError("No ICP rate available. Price feed may be down.".to_string()))?;
 
     match transfer_icusd_from(icusd_amount, caller).await {
         Ok(block_index) => {
@@ -180,11 +181,9 @@ pub async fn open_vault(icp_margin: u64) -> Result<OpenVaultSuccess, ProtocolErr
             
             if let TransferFromError::BadFee { expected_fee } = transfer_from_error.clone() {
                 mutate_state(|s| {
-                    let expected_fee: u64 = expected_fee
-                        .0
-                        .try_into()
-                        .expect("failed to convert Nat to u64");
-                    s.icp_ledger_fee = ICP::from(expected_fee);
+                    if let Ok(fee) = u64::try_from(expected_fee.0) {
+                        s.icp_ledger_fee = ICP::from(fee);
+                    }
                 });
             };
             Err(ProtocolError::TransferFromError(
@@ -217,12 +216,12 @@ pub async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, Protocol
 
     let (vault, icp_rate) = match read_state(|s| {
         match s.vault_id_to_vaults.get(&arg.vault_id) {
-            Some(vault) => Ok((
-                vault.clone(),
-                s.last_icp_rate.expect("no icp rate"),
-            )),
+            Some(vault) => {
+                let icp_rate = s.last_icp_rate
+                    .ok_or("No ICP rate available. Price feed may be down.")?;
+                Ok((vault.clone(), icp_rate))
+            },
             None => {
-                // Let's find if vault exists with a friendly error
                 Err("Vault not found. Please check the vault ID.")
             }
         }
@@ -429,11 +428,9 @@ pub async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
         Err(error) => {
             if let TransferFromError::BadFee { expected_fee } = error.clone() {
                 mutate_state(|s| {
-                    let expected_fee: u64 = expected_fee
-                        .0
-                        .try_into()
-                        .expect("failed to convert Nat to u64");
-                    s.icp_ledger_fee = ICP::from(expected_fee);
+                    if let Ok(fee) = u64::try_from(expected_fee.0) {
+                        s.icp_ledger_fee = ICP::from(fee);
+                    }
                 });
             };
             Err(ProtocolError::TransferFromError(error, amount.to_u64()))
@@ -817,14 +814,15 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
     let (vault, icp_rate, _mode, max_liquidatable_debt, collateral_to_liquidator) = match read_state(|s| {
         match s.vault_id_to_vaults.get(&vault_id) {
             Some(vault) => {
-                let icp_rate = s.last_icp_rate.expect("no icp rate");
+                let icp_rate = s.last_icp_rate
+                    .ok_or_else(|| "No ICP rate available. Price feed may be down.".to_string())?;
                 let ratio = compute_collateral_ratio(vault, icp_rate);
-                
+
                 if ratio >= s.mode.get_minimum_liquidation_collateral_ratio() {
                     Err(format!(
                         "Vault #{} is not liquidatable. Current ratio: {}, minimum: {}",
-                        vault_id, 
-                        ratio.to_f64(), 
+                        vault_id,
+                        ratio.to_f64(),
                         s.mode.get_minimum_liquidation_collateral_ratio().to_f64()
                     ))
                 } else {
@@ -975,7 +973,8 @@ pub async fn liquidate_vault_partial_with_stable(
     let (vault, icp_rate, _mode, max_liquidatable_debt, collateral_to_liquidator) = match read_state(|s| {
         match s.vault_id_to_vaults.get(&vault_id) {
             Some(vault) => {
-                let icp_rate = s.last_icp_rate.expect("no icp rate");
+                let icp_rate = s.last_icp_rate
+                    .ok_or_else(|| "No ICP rate available. Price feed may be down.".to_string())?;
                 let ratio = compute_collateral_ratio(vault, icp_rate);
 
                 if ratio >= s.mode.get_minimum_liquidation_collateral_ratio() {
@@ -1111,14 +1110,15 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
     let (vault, icp_rate, mode) = match read_state(|s| {
         match s.vault_id_to_vaults.get(&vault_id) {
             Some(vault) => {
-                let icp_rate = s.last_icp_rate.expect("no icp rate");
+                let icp_rate = s.last_icp_rate
+                    .ok_or_else(|| format!("No ICP rate available. Price feed may be down."))?;
                 let ratio = compute_collateral_ratio(vault, icp_rate);
-                
+
                 if ratio >= s.mode.get_minimum_liquidation_collateral_ratio() {
                     Err(format!(
                         "Vault #{} is not liquidatable. Current ratio: {}, minimum: {}",
-                        vault_id, 
-                        ratio.to_f64(), 
+                        vault_id,
+                        ratio.to_f64(),
                         s.mode.get_minimum_liquidation_collateral_ratio().to_f64()
                     ))
                 } else {
