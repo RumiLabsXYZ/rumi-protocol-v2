@@ -400,12 +400,11 @@ async fn stability_pool_liquidate(vault_id: u64, max_debt_to_liquidate: u64) -> 
                 }
                 
                 // Calculate how much can be liquidated
-                let max_liquidation_ratio = Ratio::new(dec!(0.5)); // 50% max
-                let max_liquidatable = vault.borrowed_icusd_amount * max_liquidation_ratio;
+                let max_liquidatable = vault.borrowed_icusd_amount * s.max_partial_liquidation_ratio;
                 let actual_liquidatable_debt = max_liquidatable.min(vault.borrowed_icusd_amount).min(max_debt_to_liquidate.into());
-                
-                // Calculate collateral that will be seized (debt + 10% bonus)
-                let liquidation_bonus = Ratio::new(dec!(1.1)); // 110%
+
+                // Calculate collateral that will be seized (debt + liquidation bonus)
+                let liquidation_bonus = s.liquidation_bonus;
                 let icp_equivalent = actual_liquidatable_debt / icp_rate;
                 let collateral_with_bonus = icp_equivalent * liquidation_bonus;
                 let collateral_to_seize = collateral_with_bonus.min(vault.icp_margin_amount);
@@ -859,6 +858,151 @@ fn get_stable_token_enabled(token_type: StableTokenType) -> bool {
         StableTokenType::CKUSDT => s.ckusdt_enabled,
         StableTokenType::CKUSDC => s.ckusdc_enabled,
     })
+}
+
+/// Set the liquidation bonus multiplier (developer only)
+/// Rate is a decimal: 1.1 = 110% (10% bonus), range 1.0–1.5
+#[candid_method(update)]
+#[update]
+async fn set_liquidation_bonus(new_rate: f64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can set liquidation bonus".to_string()));
+    }
+    if new_rate < 1.0 || new_rate > 1.5 {
+        return Err(ProtocolError::GenericError("Liquidation bonus must be between 1.0 and 1.5".to_string()));
+    }
+    let rate = Ratio::from(rust_decimal::Decimal::try_from(new_rate)
+        .map_err(|_| ProtocolError::GenericError("Invalid rate".to_string()))?);
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_liquidation_bonus(s, rate);
+    });
+    log!(INFO, "[set_liquidation_bonus] Liquidation bonus set to: {}", new_rate);
+    Ok(())
+}
+
+/// Get the current liquidation bonus multiplier
+#[candid_method(query)]
+#[query]
+fn get_liquidation_bonus() -> f64 {
+    read_state(|s| s.liquidation_bonus.to_f64())
+}
+
+/// Set the borrowing fee rate (developer only)
+/// Rate is a decimal: 0.005 = 0.5%, range 0.0–0.10 (10%)
+#[candid_method(update)]
+#[update]
+async fn set_borrowing_fee(new_rate: f64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can set borrowing fee".to_string()));
+    }
+    if new_rate < 0.0 || new_rate > 0.10 {
+        return Err(ProtocolError::GenericError("Borrowing fee must be between 0 and 0.10 (10%)".to_string()));
+    }
+    let rate = Ratio::from(rust_decimal::Decimal::try_from(new_rate)
+        .map_err(|_| ProtocolError::GenericError("Invalid rate".to_string()))?);
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_borrowing_fee(s, rate);
+    });
+    log!(INFO, "[set_borrowing_fee] Borrowing fee set to: {}", new_rate);
+    Ok(())
+}
+
+/// Get the current borrowing fee rate
+#[candid_method(query)]
+#[query]
+fn get_borrowing_fee() -> f64 {
+    read_state(|s| s.fee.to_f64())
+}
+
+/// Set the redemption fee floor (developer only)
+/// Rate is a decimal: 0.005 = 0.5%, range 0.0–0.10
+#[candid_method(update)]
+#[update]
+async fn set_redemption_fee_floor(new_rate: f64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can set redemption fee floor".to_string()));
+    }
+    if new_rate < 0.0 || new_rate > 0.10 {
+        return Err(ProtocolError::GenericError("Redemption fee floor must be between 0 and 0.10 (10%)".to_string()));
+    }
+    let rate = Ratio::from(rust_decimal::Decimal::try_from(new_rate)
+        .map_err(|_| ProtocolError::GenericError("Invalid rate".to_string()))?);
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_redemption_fee_floor(s, rate);
+    });
+    log!(INFO, "[set_redemption_fee_floor] Redemption fee floor set to: {}", new_rate);
+    Ok(())
+}
+
+/// Get the current redemption fee floor
+#[candid_method(query)]
+#[query]
+fn get_redemption_fee_floor() -> f64 {
+    read_state(|s| s.redemption_fee_floor.to_f64())
+}
+
+/// Set the redemption fee ceiling (developer only)
+/// Rate is a decimal: 0.05 = 5%, range 0.0–0.50
+#[candid_method(update)]
+#[update]
+async fn set_redemption_fee_ceiling(new_rate: f64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can set redemption fee ceiling".to_string()));
+    }
+    if new_rate < 0.0 || new_rate > 0.50 {
+        return Err(ProtocolError::GenericError("Redemption fee ceiling must be between 0 and 0.50 (50%)".to_string()));
+    }
+    let rate = Ratio::from(rust_decimal::Decimal::try_from(new_rate)
+        .map_err(|_| ProtocolError::GenericError("Invalid rate".to_string()))?);
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_redemption_fee_ceiling(s, rate);
+    });
+    log!(INFO, "[set_redemption_fee_ceiling] Redemption fee ceiling set to: {}", new_rate);
+    Ok(())
+}
+
+/// Get the current redemption fee ceiling
+#[candid_method(query)]
+#[query]
+fn get_redemption_fee_ceiling() -> f64 {
+    read_state(|s| s.redemption_fee_ceiling.to_f64())
+}
+
+/// Set the max partial liquidation ratio (developer only)
+/// Rate is a decimal: 0.5 = 50%, range 0.1–1.0
+#[candid_method(update)]
+#[update]
+async fn set_max_partial_liquidation_ratio(new_rate: f64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can set max partial liquidation ratio".to_string()));
+    }
+    if new_rate < 0.1 || new_rate > 1.0 {
+        return Err(ProtocolError::GenericError("Max partial liquidation ratio must be between 0.1 and 1.0".to_string()));
+    }
+    let rate = Ratio::from(rust_decimal::Decimal::try_from(new_rate)
+        .map_err(|_| ProtocolError::GenericError("Invalid rate".to_string()))?);
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_max_partial_liquidation_ratio(s, rate);
+    });
+    log!(INFO, "[set_max_partial_liquidation_ratio] Max partial liquidation ratio set to: {}", new_rate);
+    Ok(())
+}
+
+/// Get the current max partial liquidation ratio
+#[candid_method(query)]
+#[query]
+fn get_max_partial_liquidation_ratio() -> f64 {
+    read_state(|s| s.max_partial_liquidation_ratio.to_f64())
 }
 
 // Add guard cleanup method for developers to resolve stuck operations

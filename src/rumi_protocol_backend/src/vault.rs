@@ -18,9 +18,7 @@ use serde::Serialize;
 use crate::DEBUG;
 use crate::management;
 use crate::PendingMarginTransfer;
-use rust_decimal_macros::dec;
 use rust_decimal::prelude::ToPrimitive;
-use crate::Ratio;
 use crate::compute_collateral_ratio;
 
 
@@ -826,23 +824,21 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
                         s.mode.get_minimum_liquidation_collateral_ratio().to_f64()
                     ))
                 } else {
-                    // Calculate maximum liquidatable debt (e.g., 50% of total debt)
-                    let max_liquidation_ratio = Ratio::new(dec!(0.5)); // 50% max
-                    let max_liquidatable = vault.borrowed_icusd_amount * max_liquidation_ratio;
-                    
+                    // Calculate maximum liquidatable debt
+                    let max_liquidatable = vault.borrowed_icusd_amount * s.max_partial_liquidation_ratio;
+
                     // Ensure requested amount doesn't exceed maximum
                     let actual_liquidation_amount = liquidation_amount.min(max_liquidatable).min(vault.borrowed_icusd_amount);
-                    
+
                     if actual_liquidation_amount == ICUSD::new(0) {
                         return Err("Cannot liquidate zero amount".to_string());
                     }
-                    
-                    // Calculate collateral to transfer (debt + 10% bonus)
-                    let liquidation_bonus = Ratio::new(dec!(1.1)); // 110% (10% bonus)
+
+                    // Calculate collateral to transfer (debt + liquidation bonus)
                     let icp_equivalent = actual_liquidation_amount / icp_rate;
-                    let collateral_with_bonus = icp_equivalent * liquidation_bonus;
+                    let collateral_with_bonus = icp_equivalent * s.liquidation_bonus;
                     let collateral_to_transfer = collateral_with_bonus.min(vault.icp_margin_amount);
-                    
+
                     Ok((vault.clone(), icp_rate, s.mode, actual_liquidation_amount, collateral_to_transfer))
                 }
             },
@@ -985,17 +981,15 @@ pub async fn liquidate_vault_partial_with_stable(
                         s.mode.get_minimum_liquidation_collateral_ratio().to_f64()
                     ))
                 } else {
-                    let max_liquidation_ratio = Ratio::new(dec!(0.5));
-                    let max_liquidatable = vault.borrowed_icusd_amount * max_liquidation_ratio;
+                    let max_liquidatable = vault.borrowed_icusd_amount * s.max_partial_liquidation_ratio;
                     let actual_liquidation_amount = liquidation_amount.min(max_liquidatable).min(vault.borrowed_icusd_amount);
 
                     if actual_liquidation_amount == ICUSD::new(0) {
                         return Err("Cannot liquidate zero amount".to_string());
                     }
 
-                    let liquidation_bonus = Ratio::new(dec!(1.1));
                     let icp_equivalent = actual_liquidation_amount / icp_rate;
-                    let collateral_with_bonus = icp_equivalent * liquidation_bonus;
+                    let collateral_with_bonus = icp_equivalent * s.liquidation_bonus;
                     let collateral_to_transfer = collateral_with_bonus.min(vault.icp_margin_amount);
 
                     Ok((vault.clone(), icp_rate, s.mode, actual_liquidation_amount, collateral_to_transfer))
@@ -1138,8 +1132,8 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
     // Step 2: Calculate liquidation amounts
     let debt_amount = vault.borrowed_icusd_amount;
     let icp_equivalent = debt_amount / icp_rate;
-    let liquidation_bonus = Ratio::new(dec!(1.1)); // 110% (10% bonus)
-    let icp_with_bonus = icp_equivalent * liquidation_bonus;
+    let liq_bonus = read_state(|s| s.liquidation_bonus);
+    let icp_with_bonus = icp_equivalent * liq_bonus;
     let icp_to_liquidator = icp_with_bonus.min(vault.icp_margin_amount);
     let excess_collateral = vault.icp_margin_amount.saturating_sub(icp_to_liquidator);
     

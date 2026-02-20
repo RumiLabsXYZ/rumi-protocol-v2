@@ -142,6 +142,36 @@ pub enum Event {
         token_type: StableTokenType,
         enabled: bool,
     },
+
+    /// Configuration event: set the liquidation bonus multiplier.
+    #[serde(rename = "set_liquidation_bonus")]
+    SetLiquidationBonus {
+        rate: String,
+    },
+
+    /// Configuration event: set the borrowing fee rate.
+    #[serde(rename = "set_borrowing_fee")]
+    SetBorrowingFee {
+        rate: String,
+    },
+
+    /// Configuration event: set the redemption fee floor.
+    #[serde(rename = "set_redemption_fee_floor")]
+    SetRedemptionFeeFloor {
+        rate: String,
+    },
+
+    /// Configuration event: set the redemption fee ceiling.
+    #[serde(rename = "set_redemption_fee_ceiling")]
+    SetRedemptionFeeCeiling {
+        rate: String,
+    },
+
+    /// Configuration event: set the max partial liquidation ratio.
+    #[serde(rename = "set_max_partial_liquidation_ratio")]
+    SetMaxPartialLiquidationRatio {
+        rate: String,
+    },
 }
 
 impl Event {
@@ -169,6 +199,11 @@ impl Event {
             Event::WithdrawAndCloseVault { vault_id, .. } => vault_id == filter_vault_id,
             Event::SetCkstableRepayFee { .. } => false,
             Event::SetStableTokenEnabled { .. } => false,
+            Event::SetLiquidationBonus { .. } => false,
+            Event::SetBorrowingFee { .. } => false,
+            Event::SetRedemptionFeeFloor { .. } => false,
+            Event::SetRedemptionFeeCeiling { .. } => false,
+            Event::SetMaxPartialLiquidationRatio { .. } => false,
         }
     }
 }
@@ -307,6 +342,31 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                 match token_type {
                     StableTokenType::CKUSDT => state.ckusdt_enabled = enabled,
                     StableTokenType::CKUSDC => state.ckusdc_enabled = enabled,
+                }
+            },
+            Event::SetLiquidationBonus { rate } => {
+                if let Ok(dec) = rate.parse::<Decimal>() {
+                    state.liquidation_bonus = Ratio::from(dec);
+                }
+            },
+            Event::SetBorrowingFee { rate } => {
+                if let Ok(dec) = rate.parse::<Decimal>() {
+                    state.fee = Ratio::from(dec);
+                }
+            },
+            Event::SetRedemptionFeeFloor { rate } => {
+                if let Ok(dec) = rate.parse::<Decimal>() {
+                    state.redemption_fee_floor = Ratio::from(dec);
+                }
+            },
+            Event::SetRedemptionFeeCeiling { rate } => {
+                if let Ok(dec) = rate.parse::<Decimal>() {
+                    state.redemption_fee_ceiling = Ratio::from(dec);
+                }
+            },
+            Event::SetMaxPartialLiquidationRatio { rate } => {
+                if let Ok(dec) = rate.parse::<Decimal>() {
+                    state.max_partial_liquidation_ratio = Ratio::from(dec);
                 }
             },
         }
@@ -522,4 +582,39 @@ pub fn record_set_stable_token_enabled(state: &mut State, token_type: StableToke
         StableTokenType::CKUSDT => state.ckusdt_enabled = enabled,
         StableTokenType::CKUSDC => state.ckusdc_enabled = enabled,
     }
+}
+
+pub fn record_set_liquidation_bonus(state: &mut State, rate: Ratio) {
+    record_event(&Event::SetLiquidationBonus {
+        rate: rate.0.to_string(),
+    });
+    state.liquidation_bonus = rate;
+}
+
+pub fn record_set_borrowing_fee(state: &mut State, rate: Ratio) {
+    record_event(&Event::SetBorrowingFee {
+        rate: rate.0.to_string(),
+    });
+    state.fee = rate;
+}
+
+pub fn record_set_redemption_fee_floor(state: &mut State, rate: Ratio) {
+    record_event(&Event::SetRedemptionFeeFloor {
+        rate: rate.0.to_string(),
+    });
+    state.redemption_fee_floor = rate;
+}
+
+pub fn record_set_redemption_fee_ceiling(state: &mut State, rate: Ratio) {
+    record_event(&Event::SetRedemptionFeeCeiling {
+        rate: rate.0.to_string(),
+    });
+    state.redemption_fee_ceiling = rate;
+}
+
+pub fn record_set_max_partial_liquidation_ratio(state: &mut State, rate: Ratio) {
+    record_event(&Event::SetMaxPartialLiquidationRatio {
+        rate: rate.0.to_string(),
+    });
+    state.max_partial_liquidation_ratio = rate;
 }

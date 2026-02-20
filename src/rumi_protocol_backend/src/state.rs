@@ -41,7 +41,11 @@ macro_rules! ensure {
 pub const ICP_TRANSFER_FEE: ICP = ICP::new(10);
 pub type VaultId = u64;
 pub const DEFAULT_BORROW_FEE: Ratio = Ratio::new(dec!(0.005));
-pub const DEFAULT_CKSTABLE_REPAY_FEE: Ratio = Ratio::new(dec!(0.0002)); // 0.02%
+pub const DEFAULT_CKSTABLE_REPAY_FEE: Ratio = Ratio::new(dec!(0.0005)); // 0.05%
+pub const DEFAULT_LIQUIDATION_BONUS: Ratio = Ratio::new(dec!(1.1)); // 110% (10% bonus)
+pub const DEFAULT_MAX_PARTIAL_LIQUIDATION_RATIO: Ratio = Ratio::new(dec!(0.5)); // 50% max
+pub const DEFAULT_REDEMPTION_FEE_FLOOR: Ratio = Ratio::new(dec!(0.005)); // 0.5%
+pub const DEFAULT_REDEMPTION_FEE_CEILING: Ratio = Ratio::new(dec!(0.05)); // 5%
 
 /// Controls which operations the protocol can perform.
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize, Copy)]
@@ -157,9 +161,13 @@ pub struct State {
     pub stability_pool_canister: Option<Principal>, // Add stability pool canister
     pub ckusdt_ledger_principal: Option<Principal>, // ckUSDT ledger for stable repayments
     pub ckusdc_ledger_principal: Option<Principal>, // ckUSDC ledger for stable repayments
-    pub ckstable_repay_fee: Ratio,                  // Fee charged on stable token repayments (default 0.02%)
+    pub ckstable_repay_fee: Ratio,                  // Fee charged on stable token repayments (default 0.05%)
     pub ckusdt_enabled: bool,                       // Kill-switch: whether ckUSDT repayments are accepted
     pub ckusdc_enabled: bool,                       // Kill-switch: whether ckUSDC repayments are accepted
+    pub liquidation_bonus: Ratio,                   // Liquidation bonus multiplier (default 1.1 = 10% bonus)
+    pub max_partial_liquidation_ratio: Ratio,       // Max % of debt liquidatable in partial liquidation (default 0.5)
+    pub redemption_fee_floor: Ratio,                // Minimum redemption fee rate (default 0.005 = 0.5%)
+    pub redemption_fee_ceiling: Ratio,              // Maximum redemption fee rate (default 0.05 = 5%)
 }
 
 impl From<InitArg> for State {
@@ -198,6 +206,10 @@ impl From<InitArg> for State {
             ckstable_repay_fee: DEFAULT_CKSTABLE_REPAY_FEE,
             ckusdt_enabled: true,
             ckusdc_enabled: true,
+            liquidation_bonus: DEFAULT_LIQUIDATION_BONUS,
+            max_partial_liquidation_ratio: DEFAULT_MAX_PARTIAL_LIQUIDATION_RATIO,
+            redemption_fee_floor: DEFAULT_REDEMPTION_FEE_FLOOR,
+            redemption_fee_ceiling: DEFAULT_REDEMPTION_FEE_CEILING,
         }
     }
 }
@@ -265,6 +277,8 @@ impl State {
             redeemed_amount,
             self.total_borrowed_icusd_amount(),
             self.current_base_rate,
+            self.redemption_fee_floor,
+            self.redemption_fee_ceiling,
         )
     }
 
@@ -462,8 +476,7 @@ impl State {
                 let excess_debt = vault.borrowed_icusd_amount - (current_collateral_value / MINIMUM_COLLATERAL_RATIO);
                 let debt_to_liquidate = excess_debt.min(vault.borrowed_icusd_amount);
                 let collateral_equivalent = debt_to_liquidate / icp_rate;
-                let liquidation_bonus = Ratio::new(dec!(1.1)); // 10% bonus
-                let collateral_to_seize = (collateral_equivalent * liquidation_bonus).min(vault.icp_margin_amount);
+                let collateral_to_seize = (collateral_equivalent * self.liquidation_bonus).min(vault.icp_margin_amount);
                 
                 self.liquidate_vault_partial(vault_id, debt_to_liquidate, collateral_to_seize, icp_rate);
             } else {
@@ -774,6 +787,8 @@ fn compute_redemption_fee(
     redeemed_amount: ICUSD,
     total_borrowed_icusd_amount: ICUSD,
     current_base_rate: Ratio,
+    fee_floor: Ratio,
+    fee_ceiling: Ratio,
 ) -> Ratio {
     if total_borrowed_icusd_amount == 0 {
         return Ratio::from(Decimal::ZERO);
@@ -790,8 +805,8 @@ fn compute_redemption_fee(
     let total_rate = rate + redeemed_amount / total_borrowed_icusd_amount * REEDEMED_PROPORTION;
     debug_assert!(total_rate < Ratio::from(dec!(1.0)));
     total_rate
-        .max(Ratio::from(dec!(0.005)))
-        .min(Ratio::from(dec!(0.05)))
+        .max(fee_floor)
+        .min(fee_ceiling)
 }
 
 
