@@ -19,6 +19,12 @@ const walletsList = [
   { id: 'oisy', name: 'Oisy', icon: '/wallets/oisy.svg' },
 ];
 
+interface TokenBalance {
+  raw: bigint;
+  formatted: string;
+  usdValue: number | null;
+}
+
 interface WalletState {
   isConnected: boolean;
   principal: Principal | null;
@@ -27,16 +33,10 @@ interface WalletState {
   loading: boolean;
   icon: string;
   tokenBalances: {
-    ICP?: {
-      raw: bigint;
-      formatted: string;
-      usdValue: number | null;
-    };
-    ICUSD?: {
-      raw: bigint;
-      formatted: string;
-      usdValue: number | null;
-    };
+    ICP?: TokenBalance;
+    ICUSD?: TokenBalance;
+    CKUSDT?: TokenBalance;
+    CKUSDC?: TokenBalance;
   };
 }
 
@@ -152,6 +152,20 @@ function createWalletStore() {
       const protocolStatus = await appDataStore.fetchProtocolStatus();
       const icpPriceValue = protocolStatus?.lastIcpRate || 0;
 
+      // Fetch ckUSDT/ckUSDC balances (6 decimal tokens — format with 6 decimals)
+      let ckusdtBalance = 0n;
+      let ckusdcBalance = 0n;
+      try {
+        [ckusdtBalance, ckusdcBalance] = await Promise.all([
+          TokenService.getTokenBalance(CONFIG.ckusdtLedgerId, state.principal),
+          TokenService.getTokenBalance(CONFIG.ckusdcLedgerId, state.principal),
+        ]);
+      } catch (e) {
+        console.warn('Failed to fetch ckstable balances:', e);
+      }
+
+      const formatStable6 = (raw: bigint) => (Number(raw) / 1_000_000).toFixed(6);
+
       update(state => ({
         ...state,
         balance: icpBalance,
@@ -165,11 +179,21 @@ function createWalletStore() {
             raw: icusdBalance,
             formatted: TokenService.formatBalance(icusdBalance),
             usdValue: Number(TokenService.formatBalance(icusdBalance))
+          },
+          CKUSDT: {
+            raw: ckusdtBalance,
+            formatted: formatStable6(ckusdtBalance),
+            usdValue: Number(formatStable6(ckusdtBalance))
+          },
+          CKUSDC: {
+            raw: ckusdcBalance,
+            formatted: formatStable6(ckusdcBalance),
+            usdValue: Number(formatStable6(ckusdcBalance))
           }
         },
         error: null
       }));
-      
+
       return { icpBalance, icusdBalance };
     } catch (err) {
       console.error('Balance refresh failed:', err);

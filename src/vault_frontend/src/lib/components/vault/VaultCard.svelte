@@ -33,13 +33,22 @@
   $: riskLevel = getRiskLevel(collateralRatio);
   $: maxBorrowable = Math.max(0, (collateralValueUsd / MINIMUM_CR) - vault.borrowedIcusd);
 
+  // Token type for repayment
+  let repayTokenType: 'icUSD' | 'CKUSDT' | 'CKUSDC' = 'icUSD';
+
   // Wallet balances for input caps
   $: walletIcp = $walletStore.tokenBalances?.ICP
     ? parseFloat($walletStore.tokenBalances.ICP.formatted) : 0;
   $: walletIcusd = $walletStore.tokenBalances?.ICUSD
     ? parseFloat($walletStore.tokenBalances.ICUSD.formatted) : 0;
+  $: walletCkusdt = $walletStore.tokenBalances?.CKUSDT
+    ? parseFloat($walletStore.tokenBalances.CKUSDT.formatted) : 0;
+  $: walletCkusdc = $walletStore.tokenBalances?.CKUSDC
+    ? parseFloat($walletStore.tokenBalances.CKUSDC.formatted) : 0;
   $: maxAddCollateral = walletIcp;
-  $: maxRepayable = Math.min(walletIcusd, vault.borrowedIcusd);
+  $: activeRepayBalance = repayTokenType === 'CKUSDT' ? walletCkusdt
+    : repayTokenType === 'CKUSDC' ? walletCkusdc : walletIcusd;
+  $: maxRepayable = Math.min(activeRepayBalance, vault.borrowedIcusd);
 
   // ── Credit usage ──
   $: creditCapacity = collateralValueUsd / MINIMUM_CR;
@@ -90,6 +99,7 @@
   function onAddInput() { borrowAmount = ''; repayAmount = ''; }
   function onBorrowInput() { addCollateralAmount = ''; repayAmount = ''; }
   function onRepayInput() { addCollateralAmount = ''; borrowAmount = ''; }
+  function onTokenChange() { repayAmount = ''; clearMessages(); }
 
   // ── Projected CR calculations ──
   $: projectedCrAdd = (() => {
@@ -221,12 +231,17 @@
   async function handleRepay() {
     const amount = parseFloat(repayAmount);
     if (!amount || amount <= 0) { actionError = 'Enter a valid amount'; return; }
-    if (repayOverMax) { actionError = `Max: ${formatNumber(maxRepayable, 2)} icUSD`; return; }
+    if (repayOverMax) { actionError = `Max: ${formatNumber(maxRepayable, 2)} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`; return; }
     clearMessages(); isProcessing = true;
     try {
-      const result = await protocolManager.repayToVault(vault.vaultId, amount);
+      let result;
+      if (repayTokenType === 'icUSD') {
+        result = await protocolManager.repayToVault(vault.vaultId, amount);
+      } else {
+        result = await protocolManager.repayToVaultWithStable(vault.vaultId, amount, repayTokenType);
+      }
       if (result.success) {
-        actionSuccess = `Repaid ${amount} icUSD`; repayAmount = '';
+        actionSuccess = `Repaid ${amount} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`; repayAmount = '';
         await new Promise(r => setTimeout(r, 1000));
         await vaultStore.refreshVault(vault.vaultId); dispatch('updated');
       } else { actionError = result.error || 'Failed'; }
@@ -362,15 +377,19 @@
           <span class="action-label-row">
             <span class="action-label">Repay</span>
             {#if maxRepayable > 0}
-              <button class="max-text" on:click={setMaxRepay}>Max: {formatNumber(maxRepayable, 4)} icUSD</button>
+              <button class="max-text" on:click={setMaxRepay}>Max: {formatNumber(maxRepayable, 4)} {repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}</button>
             {/if}
           </span>
           <div class="action-input-row">
-            <input type="number" class="action-input" bind:value={repayAmount}
+            <input type="number" class="action-input action-input-with-select" bind:value={repayAmount}
               on:input={onRepayInput} on:blur={clampRepay}
               placeholder="0.00" min="0" step="0.01"
               disabled={isProcessing || vault.borrowedIcusd === 0} />
-            <span class="input-suffix">icUSD</span>
+            <select class="token-select" bind:value={repayTokenType} on:change={onTokenChange} disabled={isProcessing}>
+              <option value="icUSD">icUSD</option>
+              <option value="CKUSDT">ckUSDT</option>
+              <option value="CKUSDC">ckUSDC</option>
+            </select>
           </div>
           <div class="action-btn-row">
             <button class="btn-primary btn-sm btn-action" on:click={handleRepay}
@@ -475,6 +494,17 @@
     position: absolute; right: 0.5rem; top: 50%; transform: translateY(-50%);
     font-size: 0.6875rem; color: var(--rumi-text-muted); pointer-events: none;
   }
+  .action-input-with-select { padding-right: 4.5rem; }
+  .token-select {
+    position: absolute; right: 0.25rem; top: 50%; transform: translateY(-50%);
+    background: var(--rumi-bg-surface1); border: 1px solid var(--rumi-border);
+    border-radius: 0.25rem; color: var(--rumi-text-secondary);
+    font-size: 0.6875rem; font-family: 'Inter',sans-serif;
+    padding: 0.125rem 0.25rem; cursor: pointer;
+    appearance: auto; -webkit-appearance: auto;
+  }
+  .token-select:focus { outline: none; border-color: var(--rumi-teal); }
+  .token-select:disabled { opacity: 0.5; cursor: not-allowed; }
 
   /* Max: inline utility text, NOT a button — neutral color per spec */
   .max-text {
