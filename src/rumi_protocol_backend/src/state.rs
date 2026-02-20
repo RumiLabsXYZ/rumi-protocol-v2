@@ -41,6 +41,11 @@ macro_rules! ensure {
 pub const ICP_TRANSFER_FEE: ICP = ICP::new(10);
 pub type VaultId = u64;
 pub const DEFAULT_BORROW_FEE: Ratio = Ratio::new(dec!(0.005));
+pub const DEFAULT_CKSTABLE_REPAY_FEE: Ratio = Ratio::new(dec!(0.0005)); // 0.05%
+pub const DEFAULT_LIQUIDATION_BONUS: Ratio = Ratio::new(dec!(1.1)); // 110% (10% bonus)
+pub const DEFAULT_MAX_PARTIAL_LIQUIDATION_RATIO: Ratio = Ratio::new(dec!(0.5)); // 50% max
+pub const DEFAULT_REDEMPTION_FEE_FLOOR: Ratio = Ratio::new(dec!(0.005)); // 0.5%
+pub const DEFAULT_REDEMPTION_FEE_CEILING: Ratio = Ratio::new(dec!(0.05)); // 5%
 
 /// Controls which operations the protocol can perform.
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize, Copy)]
@@ -128,12 +133,23 @@ pub struct State {
     pub operation_names: BTreeMap<Principal, String>, // Track operation names
     pub is_timer_running: bool,
     pub is_fetching_rate: bool,
-    
+
     // Rate limiting for close_vault operations
-    pub close_vault_requests: BTreeMap<Principal, Vec<u64>>, // Principal -> timestamps of close requests
-    pub global_close_requests: Vec<u64>, // Global timestamps of close requests
-    pub concurrent_close_operations: u32, // Current concurrent close operations
-    pub dust_forgiven_total: ICUSD, // Total dust amount forgiven
+    pub close_vault_requests: BTreeMap<Principal, Vec<u64>>,
+    pub global_close_requests: Vec<u64>,
+    pub concurrent_close_operations: u32,
+    pub dust_forgiven_total: ICUSD,
+    pub treasury_principal: Option<Principal>,
+    pub stability_pool_canister: Option<Principal>,
+    pub ckusdt_ledger_principal: Option<Principal>,
+    pub ckusdc_ledger_principal: Option<Principal>,
+    pub ckstable_repay_fee: Ratio,
+    pub ckusdt_enabled: bool,
+    pub ckusdc_enabled: bool,
+    pub liquidation_bonus: Ratio,
+    pub max_partial_liquidation_ratio: Ratio,
+    pub redemption_fee_floor: Ratio,
+    pub redemption_fee_ceiling: Ratio,
 }
 
 impl From<InitArg> for State {
@@ -165,12 +181,24 @@ impl From<InitArg> for State {
             pending_margin_transfers: BTreeMap::new(),
             is_timer_running: false,
             is_fetching_rate: false,
-            
             // Rate limiting initialization
             close_vault_requests: BTreeMap::new(),
             global_close_requests: Vec::new(),
             concurrent_close_operations: 0,
             dust_forgiven_total: ICUSD::new(0),
+
+            // ckStable repayment initialization
+            treasury_principal: args.treasury_principal,
+            stability_pool_canister: args.stability_pool_principal,
+            ckusdt_ledger_principal: args.ckusdt_ledger_principal,
+            ckusdc_ledger_principal: args.ckusdc_ledger_principal,
+            ckstable_repay_fee: DEFAULT_CKSTABLE_REPAY_FEE,
+            ckusdt_enabled: true,
+            ckusdc_enabled: true,
+            liquidation_bonus: DEFAULT_LIQUIDATION_BONUS,
+            max_partial_liquidation_ratio: DEFAULT_MAX_PARTIAL_LIQUIDATION_RATIO,
+            redemption_fee_floor: DEFAULT_REDEMPTION_FEE_FLOOR,
+            redemption_fee_ceiling: DEFAULT_REDEMPTION_FEE_CEILING,
         }
     }
 }
@@ -331,6 +359,8 @@ impl State {
             redeemed_amount,
             self.total_borrowed_icusd_amount(),
             self.current_base_rate,
+            self.redemption_fee_floor,
+            self.redemption_fee_ceiling,
         )
     }
 
@@ -504,7 +534,7 @@ impl State {
             match self.vault_id_to_vaults.get_mut(&vault_id) {
                 Some(vault) => {
                     vault.borrowed_icusd_amount = ICUSD::new(0);
-                    
+
                     // Ensure no underflow by taking the minimum
                     let actual_deduction = partial_margin.min(vault.icp_margin_amount);
                     vault.icp_margin_amount -= actual_deduction;
@@ -757,6 +787,8 @@ fn compute_redemption_fee(
     redeemed_amount: ICUSD,
     total_borrowed_icusd_amount: ICUSD,
     current_base_rate: Ratio,
+    fee_floor: Ratio,
+    fee_ceiling: Ratio,
 ) -> Ratio {
     if total_borrowed_icusd_amount == 0 {
         return Ratio::from(Decimal::ZERO);
@@ -773,8 +805,8 @@ fn compute_redemption_fee(
     let total_rate = rate + redeemed_amount / total_borrowed_icusd_amount * REEDEMED_PROPORTION;
     debug_assert!(total_rate < Ratio::from(dec!(1.0)));
     total_rate
-        .max(Ratio::from(dec!(0.005)))
-        .min(Ratio::from(dec!(0.05)))
+        .max(fee_floor)
+        .min(fee_ceiling)
 }
 
 

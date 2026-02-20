@@ -5,10 +5,11 @@ use ic_cdk_macros::{init, post_upgrade, query, update};
 use rumi_protocol_backend::{
     event::Event,
     logs::INFO,
-    numeric::{ICUSD, UsdIcp, UsdCkBtc},
+    numeric::{ICUSD, Ratio, UsdIcp},
     state::{read_state, replace_state, Mode, State},
-    vault::{CandidVault, OpenVaultSuccess, VaultArg, CollateralType},
+    vault::{CandidVault, OpenVaultSuccess, VaultArg},
     Fees, GetEventsArg, ProtocolArg, ProtocolError, ProtocolStatus, SuccessWithFee,
+    VaultArgWithToken, StableTokenType,
 };
 use rumi_protocol_backend::logs::DEBUG;
 use rumi_protocol_backend::state::mutate_state;
@@ -22,6 +23,27 @@ use rumi_protocol_backend::storage::events;
 use rumi_protocol_backend::LiquidityStatus;
 use candid_parser::utils::CandidSource;
 use candid_parser::utils::service_equal;
+use candid::{CandidType, Deserialize};
+
+/// Result from stability pool liquidation
+#[derive(CandidType, Deserialize, Debug)]
+pub struct StabilityPoolLiquidationResult {
+    pub success: bool,
+    pub vault_id: u64,
+    pub liquidated_debt: u64,
+    pub collateral_received: u64,
+    pub collateral_type: String,
+    pub block_index: u64,
+    pub fee: u64,
+}
+
+/// Stability pool configuration
+#[derive(CandidType, Deserialize, Debug)]
+pub struct StabilityPoolConfig {
+    pub stability_pool_canister: Option<Principal>,
+    pub liquidation_discount: u64,
+    pub enabled: bool,
+}
 
 #[cfg(feature = "self_check")]
 fn ok_or_die(result: Result<(), String>) {
@@ -89,10 +111,7 @@ fn setup_timers() {
         ic_cdk::spawn(rumi_protocol_backend::xrc::fetch_icp_rate())
     });
     
-    // New ckBTC rate fetching timer
-    ic_cdk_timers::set_timer_interval(rumi_protocol_backend::xrc::FETCHING_CKBTC_RATE_INTERVAL, || {
-        ic_cdk::spawn(rumi_protocol_backend::xrc::fetch_ckbtc_rate())
-    });
+    // Note: ckBTC rate fetching removed (ICP-only collateral)
 }
 
 fn main() {}
@@ -165,13 +184,7 @@ fn get_protocol_status() -> ProtocolStatus {
             .unwrap_or(UsdIcp::from(Decimal::ZERO))
             .to_f64(),
         last_icp_timestamp: s.last_icp_timestamp.unwrap_or(0),
-        last_ckbtc_rate: s
-            .last_ckbtc_rate
-            .unwrap_or(UsdCkBtc::from(Decimal::ZERO))
-            .to_f64(),
-        last_ckbtc_timestamp: s.last_ckbtc_timestamp.unwrap_or(0),
         total_icp_margin: s.total_icp_margin_amount().to_u64(),
-        total_ckbtc_margin: s.total_ckbtc_margin_amount().to_u64(),
         total_icusd_borrowed: s.total_borrowed_icusd_amount().to_u64(),
         total_collateral_ratio: s.total_collateral_ratio.to_f64(),
         mode: s.mode,
@@ -250,9 +263,7 @@ fn get_vaults(target: Option<Principal>) -> Vec<CandidVault> {
                         owner: vault.owner,
                         borrowed_icusd_amount: vault.borrowed_icusd_amount.to_u64(),
                         icp_margin_amount: vault.icp_margin_amount.to_u64(),
-                        ckbtc_margin_amount: vault.ckbtc_margin_amount.to_u64(),
                         vault_id: vault.vault_id,
-                        collateral_type: vault.collateral_type,
                     }
                 })
                 .collect(),
@@ -265,9 +276,7 @@ fn get_vaults(target: Option<Principal>) -> Vec<CandidVault> {
                     owner: vault.owner,
                     borrowed_icusd_amount: vault.borrowed_icusd_amount.to_u64(),
                     icp_margin_amount: vault.icp_margin_amount.to_u64(),
-                    ckbtc_margin_amount: vault.ckbtc_margin_amount.to_u64(),
                     vault_id: vault.vault_id,
-                    collateral_type: vault.collateral_type,
                 })
                 .collect::<Vec<CandidVault>>()
         }),
@@ -294,9 +303,9 @@ fn get_redemption_rate() -> f64 {
 
 #[candid_method(update)]
 #[update]
-async fn open_vault(collateral_amount: u64, collateral_type: CollateralType) -> Result<OpenVaultSuccess, ProtocolError> {
+async fn open_vault(collateral_amount: u64) -> Result<OpenVaultSuccess, ProtocolError> {
     validate_call().await?;
-    check_postcondition(rumi_protocol_backend::vault::open_vault(collateral_amount, collateral_type).await)
+    check_postcondition(rumi_protocol_backend::vault::open_vault(collateral_amount).await)
 }
 
 #[candid_method(update)]
@@ -312,6 +321,14 @@ async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, ProtocolErro
 async fn repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
     validate_call().await?;
     check_postcondition(rumi_protocol_backend::vault::repay_to_vault(arg).await)
+}
+
+/// Repay vault debt using ckUSDT or ckUSDC (1:1 with icUSD)
+#[candid_method(update)]
+#[update]
+async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, ProtocolError> {
+    validate_call().await?;
+    check_postcondition(rumi_protocol_backend::vault::repay_to_vault_with_stable(arg).await)
 }
 
 #[candid_method(update)]
@@ -359,6 +376,95 @@ async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
     check_postcondition(rumi_protocol_backend::vault::partial_repay_to_vault(arg).await)
 }
 
+// Partial liquidation with icUSD
+#[candid_method(update)]
+#[update]
+async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result<SuccessWithFee, ProtocolError> {
+    validate_call().await?;
+    check_postcondition(rumi_protocol_backend::vault::liquidate_vault_partial(vault_id, icusd_amount).await)
+}
+
+/// Liquidate a vault using ckUSDT or ckUSDC (1:1 with icUSD)
+#[update]
+#[candid_method(update)]
+async fn liquidate_vault_partial_with_stable(vault_id: u64, amount: u64, token_type: StableTokenType) -> Result<SuccessWithFee, ProtocolError> {
+    validate_call().await?;
+    check_postcondition(rumi_protocol_backend::vault::liquidate_vault_partial_with_stable(vault_id, amount, token_type).await)
+}
+
+// Stability Pool Integration - allows stability pool to execute liquidations
+#[update]
+#[candid_method(update)]
+async fn stability_pool_liquidate(vault_id: u64, max_debt_to_liquidate: u64) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+
+    // TODO: Add proper authorization check - only allow registered stability pool
+    // For now, we'll allow any caller for testing
+
+    // Get vault info and validate it's liquidatable
+    let (vault, icp_rate, liquidatable_debt, collateral_available) = read_state(|s| {
+        match s.vault_id_to_vaults.get(&vault_id) {
+            Some(vault) => {
+                let icp_rate = s.last_icp_rate.ok_or("No ICP rate available")?;
+                let ratio = rumi_protocol_backend::compute_collateral_ratio(vault, icp_rate);
+
+                if ratio >= s.mode.get_minimum_liquidation_collateral_ratio() {
+                    return Err(format!(
+                        "Vault #{} is not liquidatable. Current ratio: {:.2}%, minimum: {:.2}%",
+                        vault_id,
+                        ratio.to_f64() * 100.0,
+                        s.mode.get_minimum_liquidation_collateral_ratio().to_f64() * 100.0
+                    ));
+                }
+
+                // Calculate how much can be liquidated
+                let max_liquidatable = vault.borrowed_icusd_amount * s.max_partial_liquidation_ratio;
+                let actual_liquidatable_debt = max_liquidatable.min(vault.borrowed_icusd_amount).min(max_debt_to_liquidate.into());
+
+                // Calculate collateral that will be seized (debt + liquidation bonus)
+                let liquidation_bonus = s.liquidation_bonus;
+                let icp_equivalent = actual_liquidatable_debt / icp_rate;
+                let collateral_with_bonus = icp_equivalent * liquidation_bonus;
+                let collateral_to_seize = collateral_with_bonus.min(vault.icp_margin_amount);
+
+                Ok((vault.clone(), icp_rate, actual_liquidatable_debt, collateral_to_seize))
+            },
+            None => Err(format!("Vault #{} not found", vault_id)),
+        }
+    }).map_err(|e| ProtocolError::GenericError(e))?;
+
+    if liquidatable_debt == ICUSD::new(0) {
+        return Err(ProtocolError::GenericError("No liquidatable debt available".to_string()));
+    }
+
+    // Execute the liquidation using existing logic
+    let result = rumi_protocol_backend::vault::liquidate_vault_partial(vault_id, liquidatable_debt.to_u64()).await?;
+
+    // Return structured result for stability pool
+    Ok(StabilityPoolLiquidationResult {
+        success: true,
+        vault_id,
+        liquidated_debt: liquidatable_debt.to_u64(),
+        collateral_received: collateral_available.to_u64(),
+        collateral_type: "ICP".to_string(), // Currently only ICP is supported
+        block_index: result.block_index,
+        fee: result.fee_amount_paid,
+    })
+}
+
+// Get stability pool configuration
+#[query]
+#[candid_method(query)]
+fn get_stability_pool_config() -> StabilityPoolConfig {
+    read_state(|s| {
+        StabilityPoolConfig {
+            stability_pool_canister: s.stability_pool_canister,
+            liquidation_discount: 10, // 10% discount for stability pool
+            enabled: s.stability_pool_canister.is_some(),
+        }
+    })
+}
+
 // Add the new partial liquidate vault endpoint
 #[candid_method(update)]
 #[update]
@@ -373,40 +479,22 @@ async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Protoc
 fn get_liquidatable_vaults() -> Vec<CandidVault> {
     read_state(|s| {
         let current_icp_rate = s.last_icp_rate.unwrap_or(UsdIcp::from(dec!(0.0)));
-        let current_ckbtc_rate = s.last_ckbtc_rate.unwrap_or(UsdCkBtc::from(dec!(0.0)));
-        
-        if current_icp_rate.to_f64() == 0.0 && current_ckbtc_rate.to_f64() == 0.0 {
+
+        if current_icp_rate.to_f64() == 0.0 {
             return vec![];
         }
-        
+
         s.vault_id_to_vaults
             .values()
             .filter(|vault| {
-                let ratio = match vault.collateral_type {
-                    CollateralType::ICP => {
-                        if current_icp_rate.to_f64() == 0.0 { return false; }
-                        rumi_protocol_backend::compute_collateral_ratio(vault, current_icp_rate, CollateralType::ICP)
-                    },
-                    CollateralType::CkBTC => {
-                        if current_ckbtc_rate.to_f64() == 0.0 { return false; }
-                        rumi_protocol_backend::compute_collateral_ratio(vault, current_ckbtc_rate, CollateralType::CkBTC)
-                    }
-                };
+                let ratio = rumi_protocol_backend::compute_collateral_ratio(vault, current_icp_rate);
                 ratio < s.mode.get_minimum_liquidation_collateral_ratio()
             })
-            .map(|vault| {
-                let collateral_ratio = match vault.collateral_type {
-                    CollateralType::ICP => rumi_protocol_backend::compute_collateral_ratio(vault, current_icp_rate, CollateralType::ICP),
-                    CollateralType::CkBTC => rumi_protocol_backend::compute_collateral_ratio(vault, current_ckbtc_rate, CollateralType::CkBTC),
-                };
-                CandidVault {
-                    owner: vault.owner,
-                    borrowed_icusd_amount: vault.borrowed_icusd_amount.to_u64(),
-                    icp_margin_amount: vault.icp_margin_amount.to_u64(),
-                    ckbtc_margin_amount: vault.ckbtc_margin_amount.to_u64(),
-                    vault_id: vault.vault_id,
-                    collateral_type: vault.collateral_type,
-                }
+            .map(|vault| CandidVault {
+                owner: vault.owner,
+                borrowed_icusd_amount: vault.borrowed_icusd_amount.to_u64(),
+                icp_margin_amount: vault.icp_margin_amount.to_u64(),
+                vault_id: vault.vault_id,
             })
             .collect::<Vec<CandidVault>>()
     })
@@ -506,17 +594,7 @@ fn http_request(req: HttpRequest) -> HttpResponse {
                     "ICP rate.",
                 )?;
 
-                w.encode_gauge(
-                    "rumi_ckbtc_rate",
-                    s.last_ckbtc_rate.unwrap_or(UsdCkBtc::from(dec!(0))).to_f64(),
-                    "ckBTC rate.",
-                )?;
-
                 let total_icp_dec = Decimal::from_u64(s.total_icp_margin_amount().0)
-                    .expect("failed to construct decimal from u64")
-                    / dec!(100_000_000);
-
-                let total_ckbtc_dec = Decimal::from_u64(s.total_ckbtc_margin_amount().0)
                     .expect("failed to construct decimal from u64")
                     / dec!(100_000_000);
 
@@ -526,14 +604,7 @@ fn http_request(req: HttpRequest) -> HttpResponse {
                     "Total ICP Margin.",
                 )?;
 
-                w.encode_gauge(
-                    "ckbtc_total_CKBTC_margin",
-                    total_ckbtc_dec.to_f64().unwrap(),
-                    "Total ckBTC Margin.",
-                )?;
-
-                let total_tvl = (total_icp_dec * s.last_icp_rate.unwrap_or(UsdIcp::from(dec!(0))).0)
-                    + (total_ckbtc_dec * s.last_ckbtc_rate.unwrap_or(UsdCkBtc::from(dec!(0))).0);
+                let total_tvl = total_icp_dec * s.last_icp_rate.unwrap_or(UsdIcp::from(dec!(0))).0;
 
                 w.encode_gauge(
                     "total_tvl",
@@ -663,25 +734,12 @@ async fn recover_pending_transfer(vault_id: u64) -> Result<bool, ProtocolError> 
     });
     
     if let Some(transfer) = transfer_opt {
-        let transfer_fee = match transfer.collateral_type {
-            CollateralType::ICP => read_state(|s| s.icp_ledger_fee),
-            CollateralType::CkBTC => read_state(|s| s.ckbtc_ledger_fee),
-        };
-        
-        let result = match transfer.collateral_type {
-            CollateralType::ICP => {
-                crate::management::transfer_icp(
-                    transfer.margin - transfer_fee,
-                    transfer.owner,
-                ).await
-            },
-            CollateralType::CkBTC => {
-                crate::management::transfer_ckbtc(
-                    transfer.margin - transfer_fee,
-                    transfer.owner,
-                ).await
-            }
-        };
+        let transfer_fee = read_state(|s| s.icp_ledger_fee);
+
+        let result = crate::management::transfer_icp(
+            transfer.margin - transfer_fee,
+            transfer.owner,
+        ).await;
         
         match result {
             Ok(block_index) => {
@@ -702,6 +760,330 @@ async fn recover_pending_transfer(vault_id: u64) -> Result<bool, ProtocolError> 
         // No pending transfer found for this vault
         Err(ProtocolError::GenericError("No pending transfer found for this vault".to_string()))
     }
+}
+
+// Add treasury configuration endpoint (developer only)
+#[candid_method(update)]
+#[update]
+async fn set_treasury_principal(treasury_principal: Principal) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    
+    // Only developer can set treasury principal
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if (!is_developer) {
+        return Err(ProtocolError::GenericError("Only developer can set treasury principal".to_string()));
+    }
+    
+    mutate_state(|s| {
+        s.treasury_principal = Some(treasury_principal);
+    });
+    
+    log!(INFO, "[set_treasury_principal] Treasury principal set to: {}", treasury_principal);
+    Ok(())
+}
+
+#[candid_method(query)]
+#[query]
+fn get_treasury_principal() -> Option<Principal> {
+    read_state(|s| s.treasury_principal)
+}
+
+// Add stability pool configuration endpoint (developer only)
+#[candid_method(update)]
+#[update]
+async fn set_stability_pool_principal(stability_pool_principal: Principal) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    
+    // Only developer can set stability pool principal
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can set stability pool principal".to_string()));
+    }
+    
+    mutate_state(|s| {
+        s.stability_pool_canister = Some(stability_pool_principal);
+    });
+    
+    log!(INFO, "[set_stability_pool_principal] Stability pool principal set to: {}", stability_pool_principal);
+    Ok(())
+}
+
+#[candid_method(query)]
+#[query]
+fn get_stability_pool_principal() -> Option<Principal> {
+    read_state(|s| s.stability_pool_canister)
+}
+
+// ---- Stable token repayment admin functions ----
+
+/// Set the fee rate charged on ckUSDT/ckUSDC repayments (developer only)
+/// Rate is a decimal: 0.0002 = 0.02%, max 0.05 = 5%
+#[candid_method(update)]
+#[update]
+async fn set_ckstable_repay_fee(new_rate: f64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can set ckstable repay fee".to_string()));
+    }
+    if new_rate < 0.0 || new_rate > 0.05 {
+        return Err(ProtocolError::GenericError("Fee rate must be between 0 and 0.05 (5%)".to_string()));
+    }
+    let rate = Ratio::from(rust_decimal::Decimal::try_from(new_rate)
+        .map_err(|_| ProtocolError::GenericError("Invalid fee rate".to_string()))?);
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_ckstable_repay_fee(s, rate);
+    });
+    log!(INFO, "[set_ckstable_repay_fee] Fee rate set to: {}", new_rate);
+    Ok(())
+}
+
+/// Get the current ckstable repayment fee rate
+#[candid_method(query)]
+#[query]
+fn get_ckstable_repay_fee() -> f64 {
+    read_state(|s| s.ckstable_repay_fee.to_f64())
+}
+
+/// Enable or disable a specific stable token for repayments/liquidations (developer only)
+#[candid_method(update)]
+#[update]
+async fn set_stable_token_enabled(token_type: StableTokenType, enabled: bool) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can toggle stable token acceptance".to_string()));
+    }
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_stable_token_enabled(s, token_type.clone(), enabled);
+    });
+    log!(INFO, "[set_stable_token_enabled] {:?} enabled: {}", token_type, enabled);
+    Ok(())
+}
+
+/// Check if a stable token type is currently enabled
+#[candid_method(query)]
+#[query]
+fn get_stable_token_enabled(token_type: StableTokenType) -> bool {
+    read_state(|s| match token_type {
+        StableTokenType::CKUSDT => s.ckusdt_enabled,
+        StableTokenType::CKUSDC => s.ckusdc_enabled,
+    })
+}
+
+/// Set the liquidation bonus multiplier (developer only)
+/// Rate is a decimal: 1.1 = 110% (10% bonus), range 1.0–1.5
+#[candid_method(update)]
+#[update]
+async fn set_liquidation_bonus(new_rate: f64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can set liquidation bonus".to_string()));
+    }
+    if new_rate < 1.0 || new_rate > 1.5 {
+        return Err(ProtocolError::GenericError("Liquidation bonus must be between 1.0 and 1.5".to_string()));
+    }
+    let rate = Ratio::from(rust_decimal::Decimal::try_from(new_rate)
+        .map_err(|_| ProtocolError::GenericError("Invalid rate".to_string()))?);
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_liquidation_bonus(s, rate);
+    });
+    log!(INFO, "[set_liquidation_bonus] Liquidation bonus set to: {}", new_rate);
+    Ok(())
+}
+
+/// Get the current liquidation bonus multiplier
+#[candid_method(query)]
+#[query]
+fn get_liquidation_bonus() -> f64 {
+    read_state(|s| s.liquidation_bonus.to_f64())
+}
+
+/// Set the borrowing fee rate (developer only)
+/// Rate is a decimal: 0.005 = 0.5%, range 0.0–0.10 (10%)
+#[candid_method(update)]
+#[update]
+async fn set_borrowing_fee(new_rate: f64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can set borrowing fee".to_string()));
+    }
+    if new_rate < 0.0 || new_rate > 0.10 {
+        return Err(ProtocolError::GenericError("Borrowing fee must be between 0 and 0.10 (10%)".to_string()));
+    }
+    let rate = Ratio::from(rust_decimal::Decimal::try_from(new_rate)
+        .map_err(|_| ProtocolError::GenericError("Invalid rate".to_string()))?);
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_borrowing_fee(s, rate);
+    });
+    log!(INFO, "[set_borrowing_fee] Borrowing fee set to: {}", new_rate);
+    Ok(())
+}
+
+/// Get the current borrowing fee rate
+#[candid_method(query)]
+#[query]
+fn get_borrowing_fee() -> f64 {
+    read_state(|s| s.fee.to_f64())
+}
+
+/// Set the redemption fee floor (developer only)
+/// Rate is a decimal: 0.005 = 0.5%, range 0.0–0.10
+#[candid_method(update)]
+#[update]
+async fn set_redemption_fee_floor(new_rate: f64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can set redemption fee floor".to_string()));
+    }
+    if new_rate < 0.0 || new_rate > 0.10 {
+        return Err(ProtocolError::GenericError("Redemption fee floor must be between 0 and 0.10 (10%)".to_string()));
+    }
+    let rate = Ratio::from(rust_decimal::Decimal::try_from(new_rate)
+        .map_err(|_| ProtocolError::GenericError("Invalid rate".to_string()))?);
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_redemption_fee_floor(s, rate);
+    });
+    log!(INFO, "[set_redemption_fee_floor] Redemption fee floor set to: {}", new_rate);
+    Ok(())
+}
+
+/// Get the current redemption fee floor
+#[candid_method(query)]
+#[query]
+fn get_redemption_fee_floor() -> f64 {
+    read_state(|s| s.redemption_fee_floor.to_f64())
+}
+
+/// Set the redemption fee ceiling (developer only)
+/// Rate is a decimal: 0.05 = 5%, range 0.0–0.50
+#[candid_method(update)]
+#[update]
+async fn set_redemption_fee_ceiling(new_rate: f64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can set redemption fee ceiling".to_string()));
+    }
+    if new_rate < 0.0 || new_rate > 0.50 {
+        return Err(ProtocolError::GenericError("Redemption fee ceiling must be between 0 and 0.50 (50%)".to_string()));
+    }
+    let rate = Ratio::from(rust_decimal::Decimal::try_from(new_rate)
+        .map_err(|_| ProtocolError::GenericError("Invalid rate".to_string()))?);
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_redemption_fee_ceiling(s, rate);
+    });
+    log!(INFO, "[set_redemption_fee_ceiling] Redemption fee ceiling set to: {}", new_rate);
+    Ok(())
+}
+
+/// Get the current redemption fee ceiling
+#[candid_method(query)]
+#[query]
+fn get_redemption_fee_ceiling() -> f64 {
+    read_state(|s| s.redemption_fee_ceiling.to_f64())
+}
+
+/// Set the max partial liquidation ratio (developer only)
+/// Rate is a decimal: 0.5 = 50%, range 0.1–1.0
+#[candid_method(update)]
+#[update]
+async fn set_max_partial_liquidation_ratio(new_rate: f64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can set max partial liquidation ratio".to_string()));
+    }
+    if new_rate < 0.1 || new_rate > 1.0 {
+        return Err(ProtocolError::GenericError("Max partial liquidation ratio must be between 0.1 and 1.0".to_string()));
+    }
+    let rate = Ratio::from(rust_decimal::Decimal::try_from(new_rate)
+        .map_err(|_| ProtocolError::GenericError("Invalid rate".to_string()))?);
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_max_partial_liquidation_ratio(s, rate);
+    });
+    log!(INFO, "[set_max_partial_liquidation_ratio] Max partial liquidation ratio set to: {}", new_rate);
+    Ok(())
+}
+
+/// Get the current max partial liquidation ratio
+#[candid_method(query)]
+#[query]
+fn get_max_partial_liquidation_ratio() -> f64 {
+    read_state(|s| s.max_partial_liquidation_ratio.to_f64())
+}
+
+// Add guard cleanup method for developers to resolve stuck operations
+#[candid_method(update)]
+#[update]
+async fn clear_stuck_operations(principal_id: Option<Principal>) -> Result<u64, ProtocolError> {
+    let caller = ic_cdk::caller();
+    
+    // Only developer can clear stuck operations
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can clear stuck operations".to_string()));
+    }
+    
+    let cleared_count = mutate_state(|s| {
+        use ic_cdk::api::time;
+        let current_time = time();
+        let mut principals_to_remove: Vec<Principal> = Vec::new();
+        let mut count = 0u64;
+
+        if let Some(target_principal) = principal_id {
+            // Clear specific principal's guard
+            if s.principal_guards.contains(&target_principal) {
+                principals_to_remove.push(target_principal);
+                if let Some(op_name) = s.operation_names.get(&target_principal) {
+                    log!(INFO,
+                        "[clear_stuck_operations] Clearing operation '{}' for principal: {}",
+                        op_name, target_principal.to_string()
+                    );
+                }
+                count += 1;
+            }
+        } else {
+            // Clear all operations older than 2 minutes
+            for principal in s.principal_guards.iter() {
+                let mut should_remove = false;
+
+                if let Some(timestamp) = s.principal_guard_timestamps.get(principal) {
+                    let age_seconds = (current_time - timestamp) / 1_000_000_000;
+                    if age_seconds > 120 {
+                        should_remove = true;
+                    }
+                }
+
+                if should_remove {
+                    principals_to_remove.push(*principal);
+                    if let Some(op_name) = s.operation_names.get(principal) {
+                        log!(INFO,
+                            "[clear_stuck_operations] Clearing stale operation '{}' for principal: {}",
+                            op_name, principal.to_string()
+                        );
+                    }
+                    count += 1;
+                }
+            }
+        }
+
+        // Remove the identified operations
+        for principal in principals_to_remove {
+            s.principal_guards.remove(&principal);
+            s.principal_guard_timestamps.remove(&principal);
+            s.operation_states.remove(&principal);
+            s.operation_names.remove(&principal);
+        }
+
+        count
+    });
+    
+    log!(INFO, "[clear_stuck_operations] Cleared {} stuck operations", cleared_count);
+    Ok(cleared_count)
 }
 
 // Checks the real candid interface against the one declared in the did file

@@ -8,6 +8,7 @@
   import { vaultStore } from '$lib/stores/vaultStore';
   import { walletOperations } from '$lib/services/protocol/walletOperations';
   import { protocolManager } from '$lib/services/ProtocolManager';
+  import { ApiClient } from '$lib/services/protocol/apiClient';
   import { CONFIG } from '$lib/config';
   
   // Change this to accept vaultId instead of the full vault object
@@ -22,6 +23,7 @@
   let addMarginAmount = 0;
   let borrowAmount = 0;
   let repayAmount = 0;
+  let repayTokenType: 'icUSD' | 'CKUSDT' | 'CKUSDC' = 'icUSD'; // Token selector for repayment
   let errorMessage = '';
   let successMessage = '';
   let isAddingMargin = false;
@@ -181,41 +183,50 @@
     }
   }
   
-  // Update handleRepay to use currentVault
+  // Update handleRepay to use currentVault and support multiple token types
   async function handleRepay() {
     if (!currentVault) return;
     if (repayAmount <= 0 || !isFinite(repayAmount)) {
       errorMessage = "Please enter a valid amount";
       return;
     }
-    
+
     if (!isFinite(currentVault.borrowedIcusd) || repayAmount > currentVault.borrowedIcusd) {
       errorMessage = `You can only repay up to ${currentVault.borrowedIcusd} icUSD`;
       return;
     }
-    
+
     try {
       isRepaying = true;
       isApproving = false;
       errorMessage = '';
       successMessage = '';
-      
-      // SIMPLIFIED: Let the ProtocolManager handle approval logic completely
-      // This eliminates duplicate approval requests and race conditions
-      console.log(`🔄 Starting repayment of ${repayAmount} icUSD to vault ${currentVault.vaultId}`);
-      
-      // Call protocol manager directly - it will handle all approval logic internally
-      const result = await protocolManager.repayToVault(currentVault.vaultId, repayAmount);
-      
+
+      console.log(`🔄 Starting repayment of ${repayAmount} ${repayTokenType} to vault ${currentVault.vaultId}`);
+
+      let result;
+
+      if (repayTokenType === 'icUSD') {
+        // Original icUSD repayment flow
+        result = await protocolManager.repayToVault(currentVault.vaultId, repayAmount);
+      } else {
+        // Stable token repayment (ckUSDT or ckUSDC) — approval handled by ProtocolManager
+        result = await protocolManager.repayToVaultWithStable(
+          currentVault.vaultId,
+          repayAmount,
+          repayTokenType
+        );
+      }
+
       if (result.success) {
-        successMessage = `Successfully repaid ${repayAmount} icUSD`;
-        
+        successMessage = `Successfully repaid ${repayAmount} ${repayTokenType}`;
+
         // Reset input
         repayAmount = 0;
-        
+
         // Wait a moment for transaction to settle
         await new Promise(resolve => setTimeout(resolve, 1000));
-        
+
         // Explicitly refresh this vault to ensure UI is updated
         await vaultStore.refreshVault(currentVault.vaultId);
       } else {
@@ -519,55 +530,55 @@
       </button>
     </div>
     
-    <!-- Repay Panel - IMPROVED -->
+    <!-- Repay Panel - With Token Selector -->
     <div class="bg-gray-900/30 p-4 rounded-lg flex flex-col h-full">
       <h3 class="text-lg font-semibold mb-3">Repay</h3>
       <div class="mb-2 flex-grow">
-        <input 
-          type="number" 
-          bind:value={repayAmount} 
-          min="0" 
+        <!-- Token Type Selector -->
+        <div class="mb-2">
+          <label class="text-xs text-gray-400 block mb-1">Pay with:</label>
+          <select
+            bind:value={repayTokenType}
+            class="w-full bg-gray-800 text-white p-2 rounded border border-gray-700 text-sm"
+          >
+            <option value="icUSD">icUSD</option>
+            <option value="CKUSDT">ckUSDT</option>
+            <option value="CKUSDC">ckUSDC</option>
+          </select>
+        </div>
+        <input
+          type="number"
+          bind:value={repayAmount}
+          min="0"
           max={currentVault.borrowedIcusd}
           step="0.01"
-          placeholder="icUSD amount" 
+          placeholder="Amount"
           class="w-full bg-gray-800 text-white p-2 rounded border border-gray-700"
         />
         <p class="text-xs text-gray-400 mt-1">
           {#if currentVault.borrowedIcusd > 0}
             Outstanding: {formattedBorrowedAmount} icUSD
+            {#if repayTokenType !== 'icUSD'}
+              <span class="text-purple-400">(1:1 rate)</span>
+            {/if}
           {:else}
             No outstanding debt
           {/if}
         </p>
       </div>
-      <div class="flex gap-2">
-        <button 
-          on:click={handlePartialRepay} 
-          disabled={isRepaying || isApproving || repayAmount <= 0 || repayAmount > currentVault.borrowedIcusd || currentVault.borrowedIcusd === 0}
-          class="flex-1 bg-blue-600 hover:bg-blue-500 text-white py-2 rounded-md disabled:opacity-50 disabled:cursor-not-allowed text-sm"
-        >
-          {#if isApproving}
-            Approving...
-          {:else if isRepaying}
-            Processing...
-          {:else}
-            Partial Repay
-          {/if}
-        </button>
-        <button 
-          on:click={handleRepay} 
-          disabled={isRepaying || isApproving || repayAmount <= 0 || repayAmount > currentVault.borrowedIcusd || currentVault.borrowedIcusd === 0}
-          class="flex-1 bg-yellow-600 hover:bg-yellow-500 text-white py-2 rounded-md disabled:opacity-50 disabled:cursor-not-allowed text-sm"
-        >
-          {#if isApproving}
-            Approving...
-          {:else if isRepaying}
-            Processing...
-          {:else}
-            Full Repay
-          {/if}
-        </button>
-      </div>
+      <button
+        on:click={handleRepay}
+        disabled={isRepaying || isApproving || repayAmount <= 0 || repayAmount > currentVault.borrowedIcusd || currentVault.borrowedIcusd === 0}
+        class="w-full bg-yellow-600 hover:bg-yellow-500 text-white py-2 rounded-md disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        {#if isApproving}
+          Approving {repayTokenType}...
+        {:else if isRepaying}
+          Processing...
+        {:else}
+          Repay with {repayTokenType}
+        {/if}
+      </button>
     </div>
   </div>
   

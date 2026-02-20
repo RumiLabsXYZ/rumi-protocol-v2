@@ -68,7 +68,7 @@
   .top-bar { position:fixed;top:0;left:0;right:0;height:3.5rem;background:var(--rumi-bg-surface-1);border-bottom:1px solid var(--rumi-border);display:grid;grid-template-columns:auto 1fr auto;align-items:center;padding:0 1.5rem;z-index:100; }
   .top-brand { display:flex;align-items:center;gap:0.5rem;text-decoration:none; }
   .top-logo { width:2rem;height:2rem; }
-  .top-wordmark { font-family:'Circular Std','Inter',sans-serif;font-size:1.0625rem;font-weight:500;letter-spacing:0.08em;background:var(--rumi-identity-gradient);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent; }
+  .top-wordmark { font-family:'Circular Std','Inter',sans-serif;font-size:1.0625rem;font-weight:500;letter-spacing:0.12em;color:var(--rumi-text-primary); }
 
   /* ── Nav: centered in middle grid column ── */
   .top-nav { display:flex;align-items:center;gap:0.25rem;justify-self:center; }

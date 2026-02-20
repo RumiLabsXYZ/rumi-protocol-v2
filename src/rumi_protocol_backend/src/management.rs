@@ -1,5 +1,6 @@
 use crate::numeric::{ICUSD, ICP};
 use crate::state::read_state;
+use crate::StableTokenType;
 use candid::{Nat, Principal};
 use ic_xrc_types::{Asset, AssetClass, GetExchangeRateRequest, GetExchangeRateResult};
 use icrc_ledger_types::icrc1::account::Account;
@@ -254,11 +255,52 @@ pub async fn transfer_icusd(amount: ICUSD, to: Principal) -> Result<u64, Transfe
         })
         .await
         .map_err(|e| TransferError::GenericError {
-            error_code: Nat::from(e.0.max(0) as u64), 
+            error_code: Nat::from(e.0.max(0) as u64),
             message: e.1,
         })??;
 
     Ok(block_index.0.to_u64().unwrap())
+}
+
+/// Transfer ckUSDT or ckUSDC from a user to the protocol (for vault repayment/liquidation)
+/// Amount is in e6s (6-decimal stable token units)
+pub async fn transfer_stable_from(token_type: StableTokenType, amount_e6s: u64, caller: Principal) -> Result<u64, TransferFromError> {
+    let ledger_principal = match token_type {
+        StableTokenType::CKUSDT => read_state(|s| s.ckusdt_ledger_principal),
+        StableTokenType::CKUSDC => read_state(|s| s.ckusdc_ledger_principal),
+    }.ok_or_else(|| TransferFromError::GenericError {
+        error_code: Nat::from(0u64),
+        message: format!("{:?} ledger not configured", token_type),
+    })?;
+
+    let client = ICRC1Client {
+        runtime: CdkRuntime,
+        ledger_canister_id: ledger_principal,
+    };
+    let protocol_id = ic_cdk::id();
+    let block_index = client
+        .transfer_from(TransferFromArgs {
+            spender_subaccount: None,
+            from: Account {
+                owner: caller,
+                subaccount: None,
+            },
+            to: Account {
+                owner: protocol_id,
+                subaccount: None,
+            },
+            amount: Nat::from(amount_e6s),
+            fee: None,
+            created_at_time: None,
+            memo: None,
+        })
+        .await
+        .map_err(|e| TransferFromError::GenericError {
+            error_code: Nat::from(e.0.max(0) as u64),
+            message: e.1,
+        })?;
+
+    Ok(block_index.unwrap().0.to_u64().unwrap())
 }
 
 

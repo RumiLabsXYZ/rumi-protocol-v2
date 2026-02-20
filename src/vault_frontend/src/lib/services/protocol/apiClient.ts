@@ -787,13 +787,71 @@ static async repayToVault(vaultId: number, icusdAmount: number): Promise<VaultOp
   }, vaultId);
 }
 
+/**
+ * Repay to vault using ckUSDT or ckUSDC (1:1 with icUSD)
+ */
+static async repayToVaultWithStable(
+  vaultId: number,
+  amount: number,
+  tokenType: 'CKUSDT' | 'CKUSDC'
+): Promise<VaultOperationResult> {
+  return ApiClient.executeSequentialOperation(async () => {
+    try {
+      console.log(`Repaying ${amount} ${tokenType} to vault #${vaultId}`);
+
+      // Validate input
+      if (!isFinite(amount) || amount <= 0) {
+        return {
+          success: false,
+          error: `Invalid repayment amount: ${amount}. Amount must be a finite positive number.`
+        };
+      }
+
+      if (amount * E8S < MIN_ICUSD_AMOUNT) {
+        return {
+          success: false,
+          error: `Amount too low. Minimum repayment amount: ${MIN_ICUSD_AMOUNT / E8S}`
+        };
+      }
+
+      const actor = await ApiClient.getAuthenticatedActor();
+      const vaultArgWithToken = {
+        vault_id: BigInt(vaultId),
+        amount: BigInt(Math.floor(amount * E8S)),
+        token_type: { [tokenType]: null }
+      };
+
+      const result = await actor.repay_to_vault_with_stable(vaultArgWithToken);
+
+      if ('Ok' in result) {
+        return {
+          success: true,
+          vaultId,
+          blockIndex: Number(result.Ok)
+        };
+      } else {
+        return {
+          success: false,
+          error: ApiClient.formatProtocolError(result.Err)
+        };
+      }
+    } catch (err) {
+      console.error('Error repaying with stable token:', err);
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : 'Unknown error repaying with stable token'
+      };
+    }
+  }, vaultId);
+}
+
   /**
    * Close a vault - with enhanced error handling for auto-removed vaults
    */
   static async closeVault(vaultId: number): Promise<VaultOperationResult> {
     return ApiClient.executeSequentialOperation(async () => {
       // REMOVE: this.operationTimestamps.set(vaultId, Date.now());
-      
+
       try {
         console.log(`Closing vault #${vaultId}`);
         
