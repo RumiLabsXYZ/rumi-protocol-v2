@@ -38,7 +38,7 @@ macro_rules! ensure {
     }
 }
 
-pub const ICP_TRANSFER_FEE: ICP = ICP::new(10);
+pub const ICP_TRANSFER_FEE: ICP = ICP::new(10_000); // 0.0001 ICP — standard ICP ledger fee
 pub type VaultId = u64;
 pub const DEFAULT_BORROW_FEE: Ratio = Ratio::new(dec!(0.005));
 pub const DEFAULT_CKSTABLE_REPAY_FEE: Ratio = Ratio::new(dec!(0.0005)); // 0.05%

@@ -287,20 +287,9 @@ impl From<ICP> for ICUSD {
     }
 }
 
-// Add Mul<UsdIcp> for ICUSD
-impl Mul<UsdIcp> for ICUSD {
-    type Output = ICP;
-    fn mul(self, other: UsdIcp) -> ICP {
-        let icusd_dec = Decimal::from_u64(self.0).expect("failed to construct decimal from u64")
-            / dec!(100_000_000);
-        let result = icusd_dec * other.0;
-        let result_e8s = result * dec!(100_000_000);
-        Token(
-            result_e8s.to_u64().expect("failed to cast decimal as u64"),
-            PhantomData::<IcpTag>,
-        )
-    }
-}
+// NOTE: ICUSD * UsdIcp is intentionally NOT implemented.
+// UsdIcp represents "USD per ICP", so ICUSD * UsdIcp would be dimensionally
+// invalid (USD * USD/ICP = USD²/ICP). Use ICUSD / UsdIcp → ICP instead.
 
 // Add AddAssign for Amount<T>
 impl<T> AddAssign for Amount<T> {
