@@ -70,14 +70,12 @@
 
     if (currentPrice > 0 && debt > 0) {
       const collateralValue = icpCollateral * currentPrice;
-      const currentCr = collateralValue / debt;
-      if (currentCr < recoveryTargetCr) {
-        const factor = recoveryTargetCr - liquidationBonus; // Fetched dynamically from protocol
-        const numerator = recoveryTargetCr * debt - collateralValue;
-        if (factor > 0 && numerator > 0) {
-          const restoreCap = numerator / factor;
-          return Math.min(bal, debt, restoreCap);
-        }
+      // Cap at the amount needed to restore vault to recovery target CR
+      const factor = recoveryTargetCr - liquidationBonus;
+      const numerator = recoveryTargetCr * debt - collateralValue;
+      if (factor > 0 && numerator > 0) {
+        const restoreCap = numerator / factor;
+        return Math.min(bal, debt, restoreCap);
       }
     }
 
@@ -229,10 +227,17 @@
 
   onMount(() => {
     refreshIcpPrice(); loadLiquidatableVaults();
+    // Trigger an immediate wallet balance refresh so Max is available without waiting
+    if ($wallet.isConnected) wallet.refreshBalance().catch(() => {});
     const pi = setInterval(refreshIcpPrice, 30000);
     const vi = setInterval(loadLiquidatableVaults, 60000);
     return () => { clearInterval(pi); clearInterval(vi); };
   });
+
+  // When wallet connects while on this page, fetch balances immediately
+  $: if ($wallet.isConnected && !walletIcusd && !walletCkusdt && !walletCkusdc) {
+    wallet.refreshBalance().catch(() => {});
+  }
 </script>
 
 <svelte:head><title>RUMI Protocol - Liquidations</title></svelte:head>

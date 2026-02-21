@@ -853,13 +853,8 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
                         s.mode.get_minimum_liquidation_collateral_ratio().to_f64()
                     ))
                 } else {
-                    // Calculate maximum liquidatable debt
-                    let mut max_liquidatable = vault.borrowed_icusd_amount * s.max_partial_liquidation_ratio;
-
-                    // In recovery mode, also cap at the amount needed to restore CR to target
-                    if let Some(recovery_cap) = s.compute_recovery_repay_cap(vault, icp_rate) {
-                        max_liquidatable = max_liquidatable.min(recovery_cap);
-                    }
+                    // Cap at the amount needed to restore vault CR to recovery_target_cr
+                    let max_liquidatable = s.compute_partial_liquidation_cap(vault, icp_rate);
 
                     // Ensure requested amount doesn't exceed maximum
                     let actual_liquidation_amount = liquidation_amount.min(max_liquidatable).min(vault.borrowed_icusd_amount);
@@ -1025,12 +1020,8 @@ pub async fn liquidate_vault_partial_with_stable(
                         s.mode.get_minimum_liquidation_collateral_ratio().to_f64()
                     ))
                 } else {
-                    let mut max_liquidatable = vault.borrowed_icusd_amount * s.max_partial_liquidation_ratio;
-
-                    // In recovery mode, also cap at the amount needed to restore CR to target
-                    if let Some(recovery_cap) = s.compute_recovery_repay_cap(vault, icp_rate) {
-                        max_liquidatable = max_liquidatable.min(recovery_cap);
-                    }
+                    // Cap at the amount needed to restore vault CR to recovery_target_cr
+                    let max_liquidatable = s.compute_partial_liquidation_cap(vault, icp_rate);
 
                     let actual_liquidation_amount = liquidation_amount.min(max_liquidatable).min(vault.borrowed_icusd_amount);
 
@@ -1496,11 +1487,8 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
 
     // In recovery mode, cap the payment at the amount needed to restore CR to target
     let liquidator_payment = read_state(|s| {
-        if let Some(recovery_cap) = s.compute_recovery_repay_cap(&vault, icp_rate) {
-            liquidator_payment.min(recovery_cap)
-        } else {
-            liquidator_payment
-        }
+        let cap = s.compute_partial_liquidation_cap(&vault, icp_rate);
+        liquidator_payment.min(cap)
     });
 
     if liquidator_payment > vault.borrowed_icusd_amount {

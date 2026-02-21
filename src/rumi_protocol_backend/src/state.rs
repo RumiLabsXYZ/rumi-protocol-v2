@@ -548,6 +548,22 @@ impl State {
         Some(repay_amount.min(vault.borrowed_icusd_amount))
     }
 
+    /// Compute the max partial liquidation amount: enough to restore a vault's CR to
+    /// recovery_target_cr. Works in all modes. Returns the full debt if the vault is
+    /// so deeply undercollateralized that the formula exceeds 100%.
+    pub fn compute_partial_liquidation_cap(&self, vault: &Vault, icp_rate: UsdIcp) -> ICUSD {
+        let collateral_value: ICUSD = vault.icp_margin_amount * icp_rate;
+        let numerator_icusd = vault.borrowed_icusd_amount * self.recovery_target_cr;
+        if numerator_icusd <= collateral_value {
+            // Already at or above target — shouldn't be liquidatable, but return 0
+            return ICUSD::new(0);
+        }
+        let deficit = numerator_icusd - collateral_value;
+        let denominator = self.recovery_target_cr - self.liquidation_bonus;
+        let repay_amount = deficit / denominator;
+        repay_amount.min(vault.borrowed_icusd_amount)
+    }
+
     pub fn liquidate_vault(&mut self, vault_id: u64, mode: Mode, icp_rate: UsdIcp) {
         let vault = self
             .vault_id_to_vaults
