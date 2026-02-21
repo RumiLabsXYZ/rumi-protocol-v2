@@ -27,7 +27,9 @@ export class QueryOperations {
         totalIcusdBorrowed: Number(canisterStatus.total_icusd_borrowed) / E8S,
         lastIcpRate: Number(canisterStatus.last_icp_rate),
         lastIcpTimestamp: Number(canisterStatus.last_icp_timestamp),
-        totalCollateralRatio: Number(canisterStatus.total_collateral_ratio)
+        totalCollateralRatio: Number(canisterStatus.total_collateral_ratio),
+        liquidationBonus: Number(canisterStatus.liquidation_bonus),
+        recoveryTargetCr: Number(canisterStatus.recovery_target_cr),
       };
     });
   }

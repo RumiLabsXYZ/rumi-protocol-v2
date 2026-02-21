@@ -30,7 +30,7 @@
   });
 </script>
 <header class="top-bar">
-  <a href="/" class="top-brand"><img src="/rumi-header-logo.png" alt="Rumi" class="top-logo" /><span class="top-wordmark">RUMI</span></a>
+  <a href="/" class="top-brand"><img src="/rumilogo-vector-v2_inset2.png" alt="Rumi" class="top-logo" /><span class="top-wordmark">RUMI</span></a>
   <nav class="top-nav">
     <a href="/" class="nav-link" class:active={currentPath === '/'}><span>Borrow</span></a>
     {#if isConnected && canViewVaults}<a href="/vaults" class="nav-link" class:active={currentPath.startsWith('/vaults')}><span>Vaults</span></a>{/if}

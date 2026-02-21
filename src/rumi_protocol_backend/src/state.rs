@@ -42,10 +42,11 @@ pub const ICP_TRANSFER_FEE: ICP = ICP::new(10);
 pub type VaultId = u64;
 pub const DEFAULT_BORROW_FEE: Ratio = Ratio::new(dec!(0.005));
 pub const DEFAULT_CKSTABLE_REPAY_FEE: Ratio = Ratio::new(dec!(0.0005)); // 0.05%
-pub const DEFAULT_LIQUIDATION_BONUS: Ratio = Ratio::new(dec!(1.1)); // 110% (10% bonus)
+pub const DEFAULT_LIQUIDATION_BONUS: Ratio = Ratio::new(dec!(1.15)); // 115% (15% bonus)
 pub const DEFAULT_MAX_PARTIAL_LIQUIDATION_RATIO: Ratio = Ratio::new(dec!(0.5)); // 50% max
 pub const DEFAULT_REDEMPTION_FEE_FLOOR: Ratio = Ratio::new(dec!(0.005)); // 0.5%
 pub const DEFAULT_REDEMPTION_FEE_CEILING: Ratio = Ratio::new(dec!(0.05)); // 5%
+pub const DEFAULT_RECOVERY_TARGET_CR: Ratio = Ratio::new(dec!(1.55)); // 155% — target CR after recovery liquidation
 
 /// Controls which operations the protocol can perform.
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize, Copy)]
@@ -111,6 +112,7 @@ pub struct State {
     pub vault_id_to_vaults: BTreeMap<u64, Vault>,
     pub principal_to_vault_ids: BTreeMap<Principal, BTreeSet<u64>>,
     pub pending_margin_transfers: BTreeMap<VaultId, PendingMarginTransfer>,
+    pub pending_excess_transfers: BTreeMap<VaultId, PendingMarginTransfer>,
     pub pending_redemption_transfer: BTreeMap<u64, PendingMarginTransfer>,
     pub mode: Mode,
     pub fee: Ratio,
@@ -146,10 +148,16 @@ pub struct State {
     pub ckstable_repay_fee: Ratio,
     pub ckusdt_enabled: bool,
     pub ckusdc_enabled: bool,
+    // Cached ckstable prices (from XRC, on-demand only)
+    pub last_ckusdt_rate: Option<rust_decimal::Decimal>,  // USDT/USD price (should be ~1.0)
+    pub last_ckusdt_timestamp: Option<u64>,                // nanos
+    pub last_ckusdc_rate: Option<rust_decimal::Decimal>,  // USDC/USD price (should be ~1.0)
+    pub last_ckusdc_timestamp: Option<u64>,                // nanos
     pub liquidation_bonus: Ratio,
     pub max_partial_liquidation_ratio: Ratio,
     pub redemption_fee_floor: Ratio,
     pub redemption_fee_ceiling: Ratio,
+    pub recovery_target_cr: Ratio,
 }
 
 impl From<InitArg> for State {
@@ -179,6 +187,7 @@ impl From<InitArg> for State {
             liquidity_pool: BTreeMap::new(),
             liquidity_returns: BTreeMap::new(),
             pending_margin_transfers: BTreeMap::new(),
+            pending_excess_transfers: BTreeMap::new(),
             is_timer_running: false,
             is_fetching_rate: false,
             // Rate limiting initialization
@@ -195,10 +204,15 @@ impl From<InitArg> for State {
             ckstable_repay_fee: DEFAULT_CKSTABLE_REPAY_FEE,
             ckusdt_enabled: true,
             ckusdc_enabled: true,
+            last_ckusdt_rate: None,
+            last_ckusdt_timestamp: None,
+            last_ckusdc_rate: None,
+            last_ckusdc_timestamp: None,
             liquidation_bonus: DEFAULT_LIQUIDATION_BONUS,
             max_partial_liquidation_ratio: DEFAULT_MAX_PARTIAL_LIQUIDATION_RATIO,
             redemption_fee_floor: DEFAULT_REDEMPTION_FEE_FLOOR,
             redemption_fee_ceiling: DEFAULT_REDEMPTION_FEE_CEILING,
+            recovery_target_cr: DEFAULT_RECOVERY_TARGET_CR,
         }
     }
 }
@@ -513,6 +527,27 @@ impl State {
         *self.liquidity_pool.get(&principal).unwrap_or(&ICUSD::from(0))
     }
 
+    /// Compute the icUSD repayment needed to restore a vault's CR to recovery_target_cr.
+    /// Returns None if not applicable (not in recovery, or vault CR outside 133-150% range).
+    pub fn compute_recovery_repay_cap(&self, vault: &Vault, icp_rate: UsdIcp) -> Option<ICUSD> {
+        if self.mode != Mode::Recovery {
+            return None;
+        }
+        let vault_cr = compute_collateral_ratio(vault, icp_rate);
+        if vault_cr <= MINIMUM_COLLATERAL_RATIO || vault_cr >= RECOVERY_COLLATERAL_RATIO {
+            return None;
+        }
+        let collateral_value: ICUSD = vault.icp_margin_amount * icp_rate;
+        let numerator_icusd = vault.borrowed_icusd_amount * self.recovery_target_cr;
+        if numerator_icusd <= collateral_value {
+            return None; // already at or above target
+        }
+        let deficit = numerator_icusd - collateral_value;
+        let denominator = self.recovery_target_cr - self.liquidation_bonus;
+        let repay_amount = deficit / denominator;
+        Some(repay_amount.min(vault.borrowed_icusd_amount))
+    }
+
     pub fn liquidate_vault(&mut self, vault_id: u64, mode: Mode, icp_rate: UsdIcp) {
         let vault = self
             .vault_id_to_vaults
@@ -521,28 +556,33 @@ impl State {
             .expect("bug: vault not found");
 
         let vault_collateral_ratio = compute_collateral_ratio(&vault, icp_rate);
-        
+
         if mode == Mode::Recovery && vault_collateral_ratio > MINIMUM_COLLATERAL_RATIO {
-            // Partial liquidation
-            let partial_margin = (vault.borrowed_icusd_amount * MINIMUM_COLLATERAL_RATIO) / icp_rate;
-            assert!(
-                partial_margin <= vault.icp_margin_amount,
-                "partial margin: {partial_margin}, vault margin: {}",
-                vault.icp_margin_amount
-            );
-            
+            // Recovery mode: liquidate only enough to restore CR to recovery_target_cr
+            let collateral_value: ICUSD = vault.icp_margin_amount * icp_rate;
+            let numerator_icusd = vault.borrowed_icusd_amount * self.recovery_target_cr;
+
+            if numerator_icusd <= collateral_value {
+                return; // already at/above target
+            }
+
+            let deficit = numerator_icusd - collateral_value;
+            let denominator = self.recovery_target_cr - self.liquidation_bonus;
+            let repay_amount = (deficit / denominator).min(vault.borrowed_icusd_amount);
+
+            // Collateral seized = repay_amount / icp_rate * bonus
+            let icp_equivalent = repay_amount / icp_rate;
+            let collateral_seized = (icp_equivalent * self.liquidation_bonus).min(vault.icp_margin_amount);
+
             match self.vault_id_to_vaults.get_mut(&vault_id) {
                 Some(vault) => {
-                    vault.borrowed_icusd_amount = ICUSD::new(0);
-
-                    // Ensure no underflow by taking the minimum
-                    let actual_deduction = partial_margin.min(vault.icp_margin_amount);
-                    vault.icp_margin_amount -= actual_deduction;
+                    vault.borrowed_icusd_amount -= repay_amount;
+                    vault.icp_margin_amount -= collateral_seized;
                 }
                 None => ic_cdk::trap("liquidating unknown vault"),
             }
         } else {
-            // Full liquidation
+            // Full liquidation — removes vault entirely
             if let Some(vault) = self.vault_id_to_vaults.remove(&vault_id) {
                 if let Some(vault_ids) = self.principal_to_vault_ids.get_mut(&vault.owner) {
                     vault_ids.remove(&vault_id);
@@ -644,6 +684,11 @@ impl State {
             self.pending_margin_transfers,
             other.pending_margin_transfers,
             "pending_margin_transfers does not match"
+        );
+        ensure_eq!(
+            self.pending_excess_transfers,
+            other.pending_excess_transfers,
+            "pending_excess_transfers does not match"
         );
         ensure_eq!(
             self.principal_to_vault_ids,
@@ -886,6 +931,10 @@ mod tests {
             icp_ledger_principal: Principal::anonymous(),
             fee_e8s: 0,
             developer_principal: Principal::anonymous(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
         });
 
         // Create a vault with some debt
@@ -916,32 +965,49 @@ mod tests {
             icp_ledger_principal: Principal::anonymous(),
             fee_e8s: 0,
             developer_principal: Principal::anonymous(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
         });
         state.mode = Mode::Recovery;
 
         // Set a price
         let icp_rate = UsdIcp::from(dec!(5)); // $5 per ICP
 
-        // Vault with ratio above MINIMUM_COLLATERAL_RATIO but system in Recovery → triggers partial liquidation path
-        // borrowed = 10 icUSD, margin = 3 ICP ⇒ collateral value = $15 ⇒ ratio = 1.5 (> 1.33)
+        // Vault at 140% CR (between 133% and 150%) — should get targeted liquidation
+        // borrowed = 10 icUSD, margin = 2.8 ICP ⇒ collateral value = $14 ⇒ ratio = 1.4
         let owner = Principal::anonymous();
         let vault_id = 42u64;
         state.open_vault(Vault {
             owner,
             vault_id,
-            icp_margin_amount: ICP::new(300_000_000), // 3.0 ICP (e8s inside type)
+            icp_margin_amount: ICP::new(280_000_000), // 2.8 ICP
             borrowed_icusd_amount: ICUSD::new(1_000_000_000), // 10 icUSD
         });
+
+        // Verify CR before
+        let cr_before = compute_collateral_ratio(
+            state.vault_id_to_vaults.get(&vault_id).unwrap(),
+            icp_rate,
+        );
+        assert!(cr_before.to_f64() > 1.33 && cr_before.to_f64() < 1.50,
+            "CR before should be between 133% and 150%, got {}", cr_before.to_f64());
 
         // Execute protocol's recovery liquidation logic
         state.liquidate_vault(vault_id, state.mode, icp_rate);
 
-        // After recovery-mode partial liquidation: debt set to 0 and margin reduced by
-        // partial_margin = borrowed * MINIMUM_COLLATERAL_RATIO / icp_rate
-        let expected_partial_icp = (ICUSD::new(1_000_000_000) * MINIMUM_COLLATERAL_RATIO) / icp_rate;
-
+        // After recovery-mode targeted liquidation:
+        // - Vault should still exist (not fully liquidated)
+        // - Debt should NOT be zero
+        // - CR should be approximately 1.55 (recovery_target_cr)
         let vault = state.vault_id_to_vaults.get(&vault_id).unwrap();
-        assert_eq!(vault.borrowed_icusd_amount, ICUSD::new(0));
-        assert_eq!(vault.icp_margin_amount, ICP::new(300_000_000) - expected_partial_icp);
+        assert!(vault.borrowed_icusd_amount > ICUSD::new(0),
+            "Debt should not be zero after targeted recovery liquidation");
+
+        let cr_after = compute_collateral_ratio(vault, icp_rate);
+        let cr_f64 = cr_after.to_f64();
+        assert!(cr_f64 > 1.54 && cr_f64 < 1.56,
+            "CR after should be approximately 1.55 (155%), got {:.4}", cr_f64);
     }
 }

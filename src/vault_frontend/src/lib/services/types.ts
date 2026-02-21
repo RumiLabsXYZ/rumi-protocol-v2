@@ -82,6 +82,8 @@ export interface ProtocolStatusDTO {
   lastIcpRate: number;
   lastIcpTimestamp: number;
   totalCollateralRatio: number;
+  liquidationBonus: number;
+  recoveryTargetCr: number;
 }
 
 export type ProtocolStatus = ProtocolStatusDTO;

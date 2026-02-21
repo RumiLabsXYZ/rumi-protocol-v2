@@ -6,6 +6,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { createEventDispatcher } from 'svelte';
   import { vaultStore } from '$lib/stores/vaultStore';
+  import { walletStore } from '$lib/stores/walletStore';
   import { walletOperations } from '$lib/services/protocol/walletOperations';
   import { protocolManager } from '$lib/services/ProtocolManager';
   import { ApiClient } from '$lib/services/protocol/apiClient';
@@ -387,13 +388,27 @@
     }
   });
   
-  // Helper to automatically repay max amount
+  // Helper to automatically repay max amount, capped by wallet balance and adjusted for fees
   function setMaxRepay() {
-    if (currentVault && isFinite(currentVault.borrowedIcusd) && currentVault.borrowedIcusd > 0) {
-      repayAmount = currentVault.borrowedIcusd;
-    } else {
+    if (!currentVault || !isFinite(currentVault.borrowedIcusd) || currentVault.borrowedIcusd <= 0) {
       errorMessage = "Cannot set repay amount - invalid debt value";
+      return;
     }
+    const balances = $walletStore.tokenBalances;
+    let walletBalance = Infinity;
+    if (repayTokenType === 'CKUSDT' && balances?.CKUSDT) {
+      walletBalance = parseFloat(balances.CKUSDT.formatted);
+      // Deduct ledger fee ($0.01) + protocol fee (0.05%) so the tx actually succeeds
+      walletBalance = Math.max(0, (walletBalance - 0.01) / 1.0005);
+    } else if (repayTokenType === 'CKUSDC' && balances?.CKUSDC) {
+      walletBalance = parseFloat(balances.CKUSDC.formatted);
+      walletBalance = Math.max(0, (walletBalance - 0.01) / 1.0005);
+    } else if (repayTokenType === 'icUSD' && balances?.ICUSD) {
+      walletBalance = parseFloat(balances.ICUSD.formatted);
+      // Deduct icUSD ledger fee (0.001 icUSD)
+      walletBalance = Math.max(0, walletBalance - 0.001);
+    }
+    repayAmount = Math.min(walletBalance, currentVault.borrowedIcusd);
   }
 </script>
 

@@ -89,7 +89,7 @@ export class walletOperations {
       } else {
         return { 
           success: false, 
-          error: `ICP approval failed: ${JSON.stringify(approvalResult.Err)}` 
+          error: `ICP approval failed: ${String(approvalResult.Err && typeof approvalResult.Err === 'object' ? Object.keys(approvalResult.Err)[0] : approvalResult.Err)}` 
         };
       }
     } catch (error) {
@@ -268,7 +268,7 @@ export class walletOperations {
         } else {
           return { 
             success: false, 
-            error: `icUSD approval failed: ${JSON.stringify(approvalResult.Err)}` 
+            error: `icUSD approval failed: ${String(approvalResult.Err && typeof approvalResult.Err === 'object' ? Object.keys(approvalResult.Err)[0] : approvalResult.Err)}` 
           };
         }
       } catch (error) {
@@ -342,7 +342,7 @@ export class walletOperations {
         } else {
           return {
             success: false,
-            error: `${tokenType} approval failed: ${JSON.stringify(approvalResult.Err)}`
+            error: `${tokenType} approval failed: ${String(approvalResult.Err && typeof approvalResult.Err === 'object' ? Object.keys(approvalResult.Err)[0] : approvalResult.Err)}`
           };
         }
       } catch (error) {

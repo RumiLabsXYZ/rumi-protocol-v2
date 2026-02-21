@@ -349,13 +349,18 @@ function createWalletStore() {
 
           appDataStore.setWalletState(true, principal);
 
-          const { icpBalance, icusdBalance } = await appDataStore.fetchBalances(principal);
-          const protocolStatus = await appDataStore.fetchProtocolStatus();
+          const [{ icpBalance, icusdBalance }, protocolStatus, ckusdtBalance, ckusdcBalance] = await Promise.all([
+            appDataStore.fetchBalances(principal),
+            appDataStore.fetchProtocolStatus(),
+            TokenService.getTokenBalance(CONFIG.ckusdtLedgerId, principal).catch(() => 0n),
+            TokenService.getTokenBalance(CONFIG.ckusdcLedgerId, principal).catch(() => 0n),
+          ]);
           const icpPriceValue = protocolStatus?.lastIcpRate || 0;
+          const formatStable6 = (raw: bigint) => (Number(raw) / 1_000_000).toFixed(6);
 
           let icon = '';
           if (authState.walletType === WALLET_TYPES.INTERNET_IDENTITY) {
-            icon = 'https://internetcomputer.org/img/IC_logo_horizontal.svg';
+            icon = '/wallets/01InfinityMarkHEX.svg';
           } else if (authState.walletType === WALLET_TYPES.PLUG) {
             icon = '/wallets/plug.svg';
           }
@@ -375,6 +380,16 @@ function createWalletStore() {
                 raw: icusdBalance,
                 formatted: TokenService.formatBalance(icusdBalance),
                 usdValue: Number(TokenService.formatBalance(icusdBalance))
+              },
+              CKUSDT: {
+                raw: ckusdtBalance,
+                formatted: formatStable6(ckusdtBalance),
+                usdValue: Number(formatStable6(ckusdtBalance))
+              },
+              CKUSDC: {
+                raw: ckusdcBalance,
+                formatted: formatStable6(ckusdcBalance),
+                usdValue: Number(formatStable6(ckusdcBalance))
               }
             },
             loading: false,
@@ -411,10 +426,14 @@ function createWalletStore() {
 
         appDataStore.setWalletState(true, ownerPrincipal);
 
-        const { icpBalance, icusdBalance } = await appDataStore.fetchBalances(ownerPrincipal);
-        const protocolStatus = await appDataStore.fetchProtocolStatus();
-        
+        const [{ icpBalance, icusdBalance }, protocolStatus, ckusdtBalance, ckusdcBalance] = await Promise.all([
+          appDataStore.fetchBalances(ownerPrincipal),
+          appDataStore.fetchProtocolStatus(),
+          TokenService.getTokenBalance(CONFIG.ckusdtLedgerId, ownerPrincipal).catch(() => 0n),
+          TokenService.getTokenBalance(CONFIG.ckusdcLedgerId, ownerPrincipal).catch(() => 0n),
+        ]);
         const icpPriceValue = protocolStatus?.lastIcpRate || 0;
+        const formatStable6 = (raw: bigint) => (Number(raw) / 1_000_000).toFixed(6);
 
         update(s => ({
           ...s,
@@ -431,10 +450,20 @@ function createWalletStore() {
               raw: icusdBalance,
               formatted: TokenService.formatBalance(icusdBalance),
               usdValue: Number(TokenService.formatBalance(icusdBalance))
+            },
+            CKUSDT: {
+              raw: ckusdtBalance,
+              formatted: formatStable6(ckusdtBalance),
+              usdValue: Number(formatStable6(ckusdtBalance))
+            },
+            CKUSDC: {
+              raw: ckusdcBalance,
+              formatted: formatStable6(ckusdcBalance),
+              usdValue: Number(formatStable6(ckusdcBalance))
             }
           },
           loading: false,
-          icon: walletId === WALLET_TYPES.INTERNET_IDENTITY 
+          icon: walletId === WALLET_TYPES.INTERNET_IDENTITY
             ? '/wallets/01InfinityMarkHEX.svg'
             : walletsList.find(w => w.id === walletId)?.icon ?? ''
         }));

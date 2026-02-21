@@ -120,6 +120,55 @@ pub async fn fetch_icp_price() -> Result<GetExchangeRateResult, String> {
     }
 }
 
+/// Fetch USDT/USD or USDC/USD price from the XRC canister.
+/// Used on-demand for depeg protection on ckstable operations.
+pub async fn fetch_stable_price(symbol: &str) -> Result<GetExchangeRateResult, String> {
+    const XRC_CALL_COST_CYCLES: u64 = 1_000_000_000;
+    const XRC_MARGIN_SEC: u64 = 60;
+
+    let stable = Asset {
+        symbol: symbol.to_string(),
+        class: AssetClass::Cryptocurrency,
+    };
+    let usd = Asset {
+        symbol: "USD".to_string(),
+        class: AssetClass::FiatCurrency,
+    };
+
+    let timestamp_sec = ic_cdk::api::time() / crate::SEC_NANOS - XRC_MARGIN_SEC;
+
+    let args = GetExchangeRateRequest {
+        base_asset: stable,
+        quote_asset: usd,
+        timestamp: Some(timestamp_sec),
+    };
+
+    let xrc_principal = read_state(|s| s.xrc_principal);
+
+    let res_xrc: Result<(GetExchangeRateResult,), _> = ic_cdk::api::call::call_with_payment(
+        xrc_principal,
+        "get_exchange_rate",
+        (args.clone(),),
+        XRC_CALL_COST_CYCLES,
+    )
+    .await;
+
+    match &res_xrc {
+        Ok((xr,)) => {
+            log!(DEBUG, "[fetch_stable_price] XRC request for {}: {:?}", symbol, args);
+            log!(DEBUG, "[fetch_stable_price] XRC response: {:?}", xr);
+            Ok(xr.clone())
+        }
+        Err((code, msg)) => {
+            log!(DEBUG, "[fetch_stable_price] XRC error for {}: {:?}, message: {}", symbol, code, msg);
+            Err(format!(
+                "Error fetching {} price from XRC ({:?}): {:?}",
+                symbol, code, msg
+            ))
+        }
+    }
+}
+
 pub async fn mint_icusd(amount: ICUSD, to: Principal) -> Result<u64, TransferError> {
     let client = ICRC1Client {
         runtime: CdkRuntime,

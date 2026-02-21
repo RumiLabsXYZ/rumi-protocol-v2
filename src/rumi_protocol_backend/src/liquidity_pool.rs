@@ -51,8 +51,9 @@ pub async fn withdraw_liquidity(amount: u64) -> Result<u64, ProtocolError> {
         s.liquidity_pool
             .get(&caller)
             .cloned()
-            .expect("no provided liquidity")
-    });
+    }).ok_or_else(|| ProtocolError::GenericError(
+        "You have no provided liquidity to withdraw".to_string()
+    ))?;
     if amount > provided_liquidity {
         return Err(ProtocolError::GenericError(format!(
             "cannot withdraw: {amount}, provided: {provided_liquidity}"
@@ -75,7 +76,11 @@ pub async fn claim_liquidity_returns() -> Result<u64, ProtocolError> {
     let caller = ic_cdk::caller();
     let _guard_principal = GuardPrincipal::new(caller, "claim_liquidity_returns")?;
 
-    let return_amount = read_state(|s| *s.liquidity_returns.get(&caller).expect("No reward"));
+    let return_amount = read_state(|s| {
+        s.liquidity_returns.get(&caller).cloned()
+    }).ok_or_else(|| ProtocolError::GenericError(
+        "You have no liquidity rewards to claim".to_string()
+    ))?;
 
     match transfer_icp(return_amount, caller).await {
         Ok(block_index) => {

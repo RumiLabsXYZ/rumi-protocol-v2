@@ -63,6 +63,7 @@ export class ProtocolService {
   static withdrawCollateralAndCloseVault = ApiClient.withdrawCollateralAndCloseVault;
   static liquidate_vault = ApiClient.liquidateVault;
   static partialLiquidateVault = ApiClient.partialLiquidateVault;
+  static partialLiquidateVaultWithStable = ApiClient.liquidateVaultPartialWithStable;
   static getLiquidatableVaults = ApiClient.getLiquidatableVaults;
 
 
@@ -105,7 +106,9 @@ export const protocolService = {
   getVaultById: ProtocolService.getVaultById,
   getLiquidatableVaults: ProtocolService.getLiquidatableVaults,
   liquidateVault: ProtocolService.liquidate_vault,
-  
+  partialLiquidateVault: ProtocolService.partialLiquidateVault,
+  partialLiquidateVaultWithStable: ProtocolService.partialLiquidateVaultWithStable,
+
   // Add the new combined operation to the public API
   withdrawCollateralAndCloseVault: ProtocolService.withdrawCollateralAndCloseVault,
 

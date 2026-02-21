@@ -48,9 +48,7 @@ pub const E8S: u64 = 100_000_000;
 
 pub const MIN_LIQUIDITY_AMOUNT: ICUSD = ICUSD::new(1_000_000_000);
 pub const MIN_ICP_AMOUNT: ICP = ICP::new(100_000);  // Instead of MIN_CKBTC_AMOUNT
-pub const MIN_ICUSD_AMOUNT: ICUSD = ICUSD::new(100_000_000); // 1 icUSD (reduced from 5)
-pub const MIN_PARTIAL_REPAY_AMOUNT: ICUSD = ICUSD::new(1_000_000); // 0.01 icUSD for partial repayments
-pub const MIN_PARTIAL_LIQUIDATION_AMOUNT: ICUSD = ICUSD::new(1_000_000); // 0.01 icUSD for partial liquidations
+pub const MIN_ICUSD_AMOUNT: ICUSD = ICUSD::new(1_000_000); // 0.01 icUSD minimum for all stablecoin operations
 pub const DUST_THRESHOLD: ICUSD = ICUSD::new(100); // 0.000001 icUSD - dust threshold for vault closing
 
 // Update collateral ratios per whitepaper
@@ -106,6 +104,8 @@ pub struct ProtocolStatus {
     pub total_icusd_borrowed: u64,
     pub total_collateral_ratio: f64,
     pub mode: Mode,
+    pub liquidation_bonus: f64,
+    pub recovery_target_cr: f64,
 }
 
 #[derive(CandidType, Deserialize, Debug)]
@@ -251,6 +251,11 @@ pub(crate) async fn process_pending_transfer() {
     let icp_transfer_fee = read_state(|s| s.icp_ledger_fee);
     
     for (vault_id, transfer) in pending_transfers {
+        if transfer.margin <= icp_transfer_fee {
+            log!(INFO, "[transfering_margins] Skipping vault {} - margin {} <= fee {}, removing", vault_id, transfer.margin, icp_transfer_fee);
+            mutate_state(|s| { s.pending_margin_transfers.remove(&vault_id); });
+            continue;
+        }
         match crate::management::transfer_icp(
             transfer.margin - icp_transfer_fee,
             transfer.owner,
@@ -296,6 +301,47 @@ pub(crate) async fn process_pending_transfer() {
         }
     }
 
+    // Process pending excess collateral transfers (from full liquidations)
+    let pending_excess = read_state(|s| {
+        s.pending_excess_transfers
+            .iter()
+            .map(|(vault_id, transfer)| (*vault_id, *transfer))
+            .collect::<Vec<(u64, PendingMarginTransfer)>>()
+    });
+
+    for (vault_id, transfer) in pending_excess {
+        if transfer.margin <= icp_transfer_fee {
+            log!(INFO, "[transfering_excess] Skipping vault {} - margin {} <= fee {}, removing", vault_id, transfer.margin, icp_transfer_fee);
+            mutate_state(|s| { s.pending_excess_transfers.remove(&vault_id); });
+            continue;
+        }
+        match crate::management::transfer_icp(
+            transfer.margin - icp_transfer_fee,
+            transfer.owner,
+        )
+        .await
+        {
+            Ok(block_index) => {
+                log!(
+                    INFO,
+                    "[transfering_excess] successfully transferred excess collateral: {} to {}",
+                    transfer.margin,
+                    transfer.owner
+                );
+                mutate_state(|s| { s.pending_excess_transfers.remove(&vault_id); });
+            }
+            Err(error) => {
+                log!(
+                    DEBUG,
+                    "[transfering_excess] failed to transfer excess collateral: {}, to principal: {}, with error: {}",
+                    transfer.margin,
+                    transfer.owner,
+                    error
+                );
+            }
+        }
+    }
+
     // Similar improved logic for redemption transfers
     let pending_redemptions = read_state(|s| {
         s.pending_redemption_transfer
@@ -305,6 +351,11 @@ pub(crate) async fn process_pending_transfer() {
     });
 
     for (icusd_block_index, pending_transfer) in pending_redemptions {
+        if pending_transfer.margin <= icp_transfer_fee {
+            log!(INFO, "[transfering_redemptions] Skipping redemption {} - margin {} <= fee {}, removing", icusd_block_index, pending_transfer.margin, icp_transfer_fee);
+            mutate_state(|s| { s.pending_redemption_transfer.remove(&icusd_block_index); });
+            continue;
+        }
         match crate::management::transfer_icp(
             pending_transfer.margin - icp_transfer_fee,
             pending_transfer.owner,
@@ -333,7 +384,7 @@ pub(crate) async fn process_pending_transfer() {
 
     // Schedule another run if needed, but with better timing
     if read_state(|s| {
-        !s.pending_margin_transfers.is_empty() || !s.pending_redemption_transfer.is_empty()
+        !s.pending_margin_transfers.is_empty() || !s.pending_excess_transfers.is_empty() || !s.pending_redemption_transfer.is_empty()
     }) {
         // Schedule another check in 5 seconds
         log!(INFO, "[process_pending_transfer] Scheduling another transfer attempt in 5 seconds");

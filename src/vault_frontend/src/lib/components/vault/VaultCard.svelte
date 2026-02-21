@@ -48,7 +48,13 @@
   $: maxAddCollateral = walletIcp;
   $: activeRepayBalance = repayTokenType === 'CKUSDT' ? walletCkusdt
     : repayTokenType === 'CKUSDC' ? walletCkusdc : walletIcusd;
-  $: maxRepayable = Math.min(activeRepayBalance, vault.borrowedIcusd);
+  // Deduct ledger transfer fees so Max button produces a tx that actually succeeds
+  // ckUSDT/ckUSDC: $0.01 ledger fee + 0.05% protocol fee
+  // icUSD: 0.001 icUSD ledger fee (no protocol fee)
+  $: effectiveRepayBalance = (repayTokenType === 'CKUSDT' || repayTokenType === 'CKUSDC')
+    ? Math.max(0, (activeRepayBalance - 0.01) / 1.0005)
+    : Math.max(0, activeRepayBalance - 0.001);
+  $: maxRepayable = Math.min(effectiveRepayBalance, vault.borrowedIcusd);
 
   // ── Credit usage ──
   $: creditCapacity = collateralValueUsd / MINIMUM_CR;

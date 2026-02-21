@@ -107,3 +107,142 @@ pub async fn ensure_fresh_price() -> Result<(), crate::ProtocolError> {
 
     Ok(())
 }
+
+/// Depeg thresholds: reject ckstable operations if the stablecoin price
+/// is outside the safe band. Per HANDOFF.md: "reject if rate < $0.95 or > $1.05"
+const DEPEG_LOWER_BOUND: Decimal = dec!(0.95);
+const DEPEG_UPPER_BOUND: Decimal = dec!(1.05);
+
+/// Maximum age for cached ckstable prices before re-fetching.
+/// More lenient than ICP (60s vs 30s) since stablecoin prices move slowly.
+const STABLE_PRICE_FRESHNESS_NANOS: u64 = 60 * 1_000_000_000;
+
+/// Ensures the given ckstable token is not depegged before allowing an operation.
+/// On-demand only — fetches from XRC if cached price is stale or missing.
+/// Returns Ok(()) if the price is within the safe band [$0.95, $1.05].
+pub async fn ensure_stable_not_depegged(
+    token_type: &crate::StableTokenType,
+) -> Result<(), crate::ProtocolError> {
+    let (symbol, needs_refresh) = read_state(|s| {
+        let now = ic_cdk::api::time();
+        match token_type {
+            crate::StableTokenType::CKUSDT => {
+                let stale = match s.last_ckusdt_timestamp {
+                    None => true,
+                    Some(ts) => now.saturating_sub(ts) > STABLE_PRICE_FRESHNESS_NANOS,
+                };
+                ("USDT".to_string(), stale)
+            }
+            crate::StableTokenType::CKUSDC => {
+                let stale = match s.last_ckusdc_timestamp {
+                    None => true,
+                    Some(ts) => now.saturating_sub(ts) > STABLE_PRICE_FRESHNESS_NANOS,
+                };
+                ("USDC".to_string(), stale)
+            }
+        }
+    });
+
+    if needs_refresh {
+        log!(
+            TRACE_XRC,
+            "[ensure_stable_not_depegged] Fetching fresh {} price from XRC",
+            symbol
+        );
+
+        match crate::management::fetch_stable_price(&symbol).await {
+            Ok(call_result) => match call_result {
+                GetExchangeRateResult::Ok(exchange_rate_result) => {
+                    let rate = Decimal::from_u64(exchange_rate_result.rate).unwrap()
+                        / Decimal::from_u64(
+                            10_u64.pow(exchange_rate_result.metadata.decimals),
+                        )
+                        .unwrap();
+
+                    log!(
+                        TRACE_XRC,
+                        "[ensure_stable_not_depegged] {} rate: {} at timestamp: {}",
+                        symbol,
+                        rate,
+                        exchange_rate_result.timestamp
+                    );
+
+                    let ts_nanos = exchange_rate_result.timestamp * 1_000_000_000;
+                    mutate_state(|s| match token_type {
+                        crate::StableTokenType::CKUSDT => {
+                            s.last_ckusdt_rate = Some(rate);
+                            s.last_ckusdt_timestamp = Some(ts_nanos);
+                        }
+                        crate::StableTokenType::CKUSDC => {
+                            s.last_ckusdc_rate = Some(rate);
+                            s.last_ckusdc_timestamp = Some(ts_nanos);
+                        }
+                    });
+                }
+                GetExchangeRateResult::Err(error) => {
+                    log!(
+                        TRACE_XRC,
+                        "[ensure_stable_not_depegged] XRC error for {}: {:?}",
+                        symbol,
+                        error
+                    );
+                    return Err(crate::ProtocolError::TemporarilyUnavailable(format!(
+                        "Cannot verify {} price: XRC returned error {:?}",
+                        symbol, error
+                    )));
+                }
+            },
+            Err(error) => {
+                log!(
+                    TRACE_XRC,
+                    "[ensure_stable_not_depegged] Failed to call XRC for {}: {}",
+                    symbol,
+                    error
+                );
+                return Err(crate::ProtocolError::TemporarilyUnavailable(format!(
+                    "Cannot verify {} price: {}",
+                    symbol, error
+                )));
+            }
+        }
+    }
+
+    // Now check the cached price against depeg thresholds
+    let rate = read_state(|s| match token_type {
+        crate::StableTokenType::CKUSDT => s.last_ckusdt_rate,
+        crate::StableTokenType::CKUSDC => s.last_ckusdc_rate,
+    });
+
+    match rate {
+        Some(price) => {
+            if price < DEPEG_LOWER_BOUND || price > DEPEG_UPPER_BOUND {
+                log!(
+                    TRACE_XRC,
+                    "[ensure_stable_not_depegged] DEPEG DETECTED: {} at ${}, outside [{}, {}]",
+                    symbol,
+                    price,
+                    DEPEG_LOWER_BOUND,
+                    DEPEG_UPPER_BOUND
+                );
+                Err(crate::ProtocolError::GenericError(format!(
+                    "{} appears to be depegged (current price: ${:.4}). \
+                     Operations with this token are suspended until the price \
+                     returns to the ${:.2}–${:.2} range.",
+                    symbol, price, DEPEG_LOWER_BOUND, DEPEG_UPPER_BOUND
+                )))
+            } else {
+                log!(
+                    TRACE_XRC,
+                    "[ensure_stable_not_depegged] {} price ${} is within safe band",
+                    symbol,
+                    price
+                );
+                Ok(())
+            }
+        }
+        None => Err(crate::ProtocolError::TemporarilyUnavailable(format!(
+            "No {} price available. Cannot verify peg safety.",
+            symbol
+        ))),
+    }
+}

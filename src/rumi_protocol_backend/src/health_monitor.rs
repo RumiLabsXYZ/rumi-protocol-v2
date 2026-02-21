@@ -38,6 +38,11 @@ pub async fn check_and_retry_stuck_transfers() {
         let icp_transfer_fee = read_state(|s| s.icp_ledger_fee);
         
         for (vault_id, transfer) in stuck_transfers {
+            if transfer.margin <= icp_transfer_fee {
+                log!(INFO, "[check_stuck_transfers] Removing dust transfer for vault {} - margin {} <= fee {}", vault_id, transfer.margin, icp_transfer_fee);
+                mutate_state(|s| { s.pending_margin_transfers.remove(&vault_id); });
+                continue;
+            }
             match crate::management::transfer_icp(
                 transfer.margin - icp_transfer_fee,
                 transfer.owner,

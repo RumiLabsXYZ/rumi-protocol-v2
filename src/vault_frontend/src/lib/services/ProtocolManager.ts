@@ -476,8 +476,10 @@ export class ProtocolManager {
           console.log(`💰 Repay pre-check: Current icUSD allowance: ${Number(currentAllowance) / 100_000_000}`);
           console.log(`💰 Repay pre-check: Required icUSD amount: ${icusdAmount}`);
           
-          // Add a small buffer (5%) to handle potential fees and ensure sufficient allowance
-          const requiredAllowance = amountE8s + (amountE8s * BigInt(5) / BigInt(100));
+          // ICRC-2 transfer_from deducts (amount + ledger_fee) from allowance
+          // icUSD ledger fee = 100,000 e8s (0.001 icUSD)
+          const ICUSD_LEDGER_FEE = BigInt(100_000);
+          const requiredAllowance = amountE8s + ICUSD_LEDGER_FEE + ICUSD_LEDGER_FEE; // extra fee as safety buffer
           
           if (currentAllowance < requiredAllowance) {
             processingStore.setStage(ProcessingStage.APPROVING);
@@ -541,8 +543,11 @@ export class ProtocolManager {
         const amountE6s = BigInt(Math.floor(amount * E6S));
         const spenderCanisterId = CONFIG.currentCanisterId;
 
-        // Add 5% buffer for fees and rounding (matches icUSD pattern)
-        const requiredAllowance = amountE6s + (amountE6s * BigInt(5) / BigInt(100));
+        // Account for protocol fee (0.05%) + ledger transfer fee (10_000 e6s for ckUSDT/ckUSDC)
+        // ICRC-2 transfer_from deducts (amount + ledger_fee) from the allowance
+        const STABLE_LEDGER_FEE = BigInt(10_000); // 0.01 USDT/USDC
+        const protocolFee = amountE6s / BigInt(2000); // 0.05%
+        const requiredAllowance = amountE6s + protocolFee + STABLE_LEDGER_FEE + STABLE_LEDGER_FEE; // extra fee as safety buffer
 
         try {
           // Check current allowance on the stable token ledger

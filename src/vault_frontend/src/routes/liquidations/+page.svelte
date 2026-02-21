@@ -11,6 +11,8 @@
 
   let liquidatableVaults: CandidVault[] = [];
   let icpPrice = 0;
+  let liquidationBonus = 1.15; // Fallback; fetched dynamically from protocol
+  let recoveryTargetCr = 1.55; // Fallback; fetched dynamically from protocol
   let isLoading = true;
   let isPriceLoading = true;
   let liquidationError = "";
@@ -18,11 +20,25 @@
   let processingVaultId: number | null = null;
   let isApprovingAllowance = false;
   let liquidationAmounts: { [vaultId: number]: string } = {};
+  let liquidationTokens: { [vaultId: number]: 'icUSD' | 'CKUSDT' | 'CKUSDC' } = {};
+
+  function getLiqToken(vaultId: number): 'icUSD' | 'CKUSDT' | 'CKUSDC' {
+    return liquidationTokens[vaultId] || 'icUSD';
+  }
 
   $: isConnected = $wallet.isConnected;
 
   $: walletIcusd = $wallet.tokenBalances?.ICUSD
     ? parseFloat($wallet.tokenBalances.ICUSD.formatted) : 0;
+  $: walletCkusdt = $wallet.tokenBalances?.CKUSDT
+    ? parseFloat($wallet.tokenBalances.CKUSDT.formatted) : 0;
+  $: walletCkusdc = $wallet.tokenBalances?.CKUSDC
+    ? parseFloat($wallet.tokenBalances.CKUSDC.formatted) : 0;
+
+  function getActiveBalance(vaultId: number): number {
+    const token = getLiqToken(vaultId);
+    return token === 'CKUSDT' ? walletCkusdt : token === 'CKUSDC' ? walletCkusdc : walletIcusd;
+  }
 
   let animatedPrice = tweened(0, { duration: 600, easing: cubicOut });
   $: if (icpPrice > 0) { animatedPrice.set(icpPrice); }
@@ -48,42 +64,32 @@
 
   function getMaxLiquidation(vault: CandidVault): number {
     const debt = getVaultDebt(vault);
+    const bal = getActiveBalance(vault.vault_id);
     const icpCollateral = Number(vault.icp_margin_amount || 0) / 1e8;
     const currentPrice = icpPrice || 0;
 
-    // Cap: only liquidate enough to restore CR to ~150%
-    // After liquidation of X icUSD, liquidator seizes X/(price*0.9) ICP
-    // New CR = (collateral - seized) * price / (debt - X) >= 1.5
-    // Solve for X: the minimum needed to reach 150%
     if (currentPrice > 0 && debt > 0) {
       const collateralValue = icpCollateral * currentPrice;
       const currentCr = collateralValue / debt;
-      if (currentCr < 1.5) {
-        // How much icUSD to liquidate to bring CR to 150%:
-        // (collateralValue - (X / 0.9)) / (debt - X) = 1.5
-        // collateralValue - X/0.9 = 1.5*debt - 1.5*X
-        // X*(1.5 - 1/0.9) = 1.5*debt - collateralValue
-        // X*(1.5 - 1.1111) = 1.5*debt - collateralValue
-        // X * 0.3889 = 1.5*debt - collateralValue
-        const factor = 1.5 - (1 / 0.9);
-        const numerator = 1.5 * debt - collateralValue;
+      if (currentCr < recoveryTargetCr) {
+        const factor = recoveryTargetCr - liquidationBonus; // Fetched dynamically from protocol
+        const numerator = recoveryTargetCr * debt - collateralValue;
         if (factor > 0 && numerator > 0) {
           const restoreCap = numerator / factor;
-          // Cap to this, but never more than full debt, never more than wallet balance
-          return Math.min(walletIcusd, debt, restoreCap);
+          return Math.min(bal, debt, restoreCap);
         }
       }
     }
 
-    // Fallback: full debt capped to wallet balance
-    return Math.min(walletIcusd, debt);
+    return Math.min(bal, debt);
   }
 
   function calculateSeizure(vault: CandidVault, icusdAmount: number): { icpSeized: number, usdValue: number } {
     const currentPrice = icpPrice || 1;
     const icpCollateral = Number(vault.icp_margin_amount || 0) / 1e8;
-    let icpReceived = currentPrice > 0 ? icusdAmount / currentPrice * (1 / 0.9) : 0;
-    const icpSeized = Math.min(icpReceived, icpCollateral);
+    const ICP_LEDGER_FEE = 0.0001; // 10,000 e8s — deducted by backend before ICP transfer
+    let icpReceived = currentPrice > 0 ? icusdAmount / currentPrice * liquidationBonus : 0;
+    const icpSeized = Math.max(0, Math.min(icpReceived, icpCollateral) - ICP_LEDGER_FEE);
     const usdValue = icpSeized * currentPrice;
     return {
       icpSeized: isFinite(icpSeized) ? icpSeized : 0,
@@ -159,33 +165,47 @@
     if (!isConnected) { liquidationError = "Please connect your wallet"; return; }
     if (processingVaultId !== null) return;
     const inputAmount = getInputVal(vault);
-    if (inputAmount <= 0) { liquidationError = "Enter an icUSD amount"; return; }
+    if (inputAmount <= 0) { liquidationError = "Enter an amount"; return; }
     if (isOverMax(vault)) { liquidationError = "Amount exceeds maximum"; return; }
 
+    const token = getLiqToken(vault.vault_id);
     const vaultDebt = getVaultDebt(vault);
-    const isFullLiquidation = inputAmount >= vaultDebt * 0.999;
+    const isFullLiquidation = token === 'icUSD' && inputAmount >= vaultDebt * 0.999;
 
     liquidationError = ""; liquidationSuccess = ""; processingVaultId = vault.vault_id;
     try {
-      const icusdBalance = await walletOperations.getIcusdBalance();
-      if (icusdBalance < inputAmount) {
-        liquidationError = `Insufficient icUSD. Need ${formatNumber(inputAmount)}, have ${formatNumber(icusdBalance)}.`;
+      // Balance check
+      const bal = getActiveBalance(vault.vault_id);
+      if (bal < inputAmount) {
+        liquidationError = `Insufficient ${token}. Need ${formatNumber(inputAmount)}, have ${formatNumber(bal)}.`;
         processingVaultId = null; return;
       }
-      if (!await checkAndApproveAllowance(inputAmount * 1.20)) { processingVaultId = null; return; }
+
+      // Approve allowance (icUSD or ckstable)
+      if (token === 'icUSD') {
+        if (!await checkAndApproveAllowance(inputAmount * 1.20)) { processingVaultId = null; return; }
+      }
+      // ckstable approval is handled inside the apiClient method
+
       await loadLiquidatableVaults();
       if (!liquidatableVaults.find(v => v.vault_id === vault.vault_id)) {
         liquidationError = "Vault no longer available"; processingVaultId = null; return;
       }
+
       let result;
-      if (isFullLiquidation) {
-        result = await protocolService.liquidateVault(vault.vault_id);
+      if (token === 'icUSD') {
+        if (isFullLiquidation) {
+          result = await protocolService.liquidateVault(vault.vault_id);
+        } else {
+          result = await protocolService.partialLiquidateVault(vault.vault_id, inputAmount);
+        }
       } else {
-        result = await protocolService.partialLiquidateVault(vault.vault_id, inputAmount);
+        result = await protocolService.partialLiquidateVaultWithStable(vault.vault_id, inputAmount, token);
       }
+
       if (result.success) {
         const seizure = calculateSeizure(vault, inputAmount);
-        liquidationSuccess = `Liquidated vault #${vault.vault_id}. Paid ${formatNumber(inputAmount)} icUSD, received ${formatNumber(seizure.icpSeized, 4)} ICP.`;
+        liquidationSuccess = `Liquidated vault #${vault.vault_id}. Paid ${formatNumber(inputAmount)} ${token}, received ${formatNumber(seizure.icpSeized, 4)} ICP.`;
         liquidationAmounts[vault.vault_id] = '';
         await loadLiquidatableVaults();
       } else { liquidationError = result.error || "Liquidation failed"; }
@@ -196,8 +216,14 @@
   }
 
   async function refreshIcpPrice() {
-    try { isPriceLoading = true; icpPrice = await protocolService.getICPPrice(); }
-    catch (error) { console.error("Error fetching ICP price:", error); }
+    try {
+      isPriceLoading = true;
+      const status = await protocolService.getProtocolStatus();
+      icpPrice = status.lastIcpRate;
+      if (status.liquidationBonus > 0) liquidationBonus = status.liquidationBonus;
+      if (status.recoveryTargetCr > 0) recoveryTargetCr = status.recoveryTargetCr;
+    }
+    catch (error) { console.error("Error fetching protocol status:", error); }
     finally { isPriceLoading = false; }
   }
 
@@ -297,13 +323,20 @@
               </div>
               <div class="exec-row">
                 <div class="input-wrap">
-                  <input type="number" class="liq-input" class:input-over={isOverMax(vault)}
+                  <input type="number" class="liq-input liq-input-with-select" class:input-over={isOverMax(vault)}
                     bind:value={liquidationAmounts[vault.vault_id]}
                     on:input={() => { liquidationAmounts = liquidationAmounts; }}
                     min="0" step="0.01"
                     placeholder="0.00"
                     disabled={isProcessingThis} />
-                  <span class="input-suffix">icUSD</span>
+                  <select class="token-select"
+                    bind:value={liquidationTokens[vault.vault_id]}
+                    on:change={() => { liquidationAmounts[vault.vault_id] = ''; liquidationTokens = liquidationTokens; }}
+                    disabled={isProcessingThis}>
+                    <option value="icUSD">icUSD</option>
+                    <option value="CKUSDT">ckUSDT</option>
+                    <option value="CKUSDC">ckUSDC</option>
+                  </select>
                 </div>
                 <button class="btn-primary btn-sm btn-liquidate"
                   on:click={() => handleLiquidate(vault)}
@@ -473,10 +506,15 @@
   .liq-input:focus { outline: none; border-color: var(--rumi-teal); box-shadow: 0 0 0 1px rgba(45,212,191,0.12); }
   .liq-input:disabled { opacity: 0.5; }
   .liq-input.input-over { color: var(--rumi-text-muted); opacity: 0.5; }
-  .input-suffix {
-    position: absolute; right: 0.5rem; top: 50%; transform: translateY(-50%);
-    font-size: 0.6875rem; color: var(--rumi-text-muted); pointer-events: none;
+  .liq-input-with-select { padding-right: 4.5rem; }
+  .token-select {
+    position: absolute; right: 0.25rem; top: 50%; transform: translateY(-50%);
+    background: transparent; border: none; color: var(--rumi-text-muted);
+    font-size: 0.6875rem; font-family: 'Inter', sans-serif;
+    cursor: pointer; padding: 0.125rem;
   }
+  .token-select:focus { outline: none; }
+  .token-select option { background: var(--rumi-bg-surface2); color: var(--rumi-text-primary); }
 
   .btn-liquidate {
     padding: 0.375rem 0.875rem; white-space: nowrap; flex-shrink: 0;

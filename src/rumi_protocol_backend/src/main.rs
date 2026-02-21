@@ -188,6 +188,8 @@ fn get_protocol_status() -> ProtocolStatus {
         total_icusd_borrowed: s.total_borrowed_icusd_amount().to_u64(),
         total_collateral_ratio: s.total_collateral_ratio.to_f64(),
         mode: s.mode,
+        liquidation_bonus: s.liquidation_bonus.to_f64(),
+        recovery_target_cr: s.recovery_target_cr.to_f64(),
     })
 }
 
@@ -379,27 +381,35 @@ async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
 // Partial liquidation with icUSD
 #[candid_method(update)]
 #[update]
-async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result<SuccessWithFee, ProtocolError> {
+async fn liquidate_vault_partial(arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {
     validate_call().await?;
-    check_postcondition(rumi_protocol_backend::vault::liquidate_vault_partial(vault_id, icusd_amount).await)
+    check_postcondition(rumi_protocol_backend::vault::liquidate_vault_partial(arg.vault_id, arg.amount).await)
 }
 
 /// Liquidate a vault using ckUSDT or ckUSDC (1:1 with icUSD)
 #[update]
 #[candid_method(update)]
-async fn liquidate_vault_partial_with_stable(vault_id: u64, amount: u64, token_type: StableTokenType) -> Result<SuccessWithFee, ProtocolError> {
+async fn liquidate_vault_partial_with_stable(arg: VaultArgWithToken) -> Result<SuccessWithFee, ProtocolError> {
     validate_call().await?;
-    check_postcondition(rumi_protocol_backend::vault::liquidate_vault_partial_with_stable(vault_id, amount, token_type).await)
+    check_postcondition(rumi_protocol_backend::vault::liquidate_vault_partial_with_stable(arg.vault_id, arg.amount, arg.token_type).await)
 }
 
 // Stability Pool Integration - allows stability pool to execute liquidations
 #[update]
 #[candid_method(update)]
 async fn stability_pool_liquidate(vault_id: u64, max_debt_to_liquidate: u64) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
+    validate_call().await?;
     let caller = ic_cdk::api::caller();
 
-    // TODO: Add proper authorization check - only allow registered stability pool
-    // For now, we'll allow any caller for testing
+    // Authorization: only the registered stability pool canister can call this
+    let is_stability_pool = read_state(|s| {
+        s.stability_pool_canister.map_or(false, |sp| sp == caller)
+    });
+    if !is_stability_pool {
+        return Err(ProtocolError::GenericError(
+            "Caller is not the registered stability pool canister".to_string(),
+        ));
+    }
 
     // Get vault info and validate it's liquidatable
     let (vault, icp_rate, liquidatable_debt, collateral_available) = read_state(|s| {
@@ -583,6 +593,12 @@ fn http_request(req: HttpRequest) -> HttpResponse {
                 )?;
 
                 w.encode_gauge(
+                    "rumi_pending_excess_transfers_count",
+                    s.pending_excess_transfers.len() as f64,
+                    "Pending excess collateral transfers count.",
+                )?;
+
+                w.encode_gauge(
                     "rumi_pending_redemption_transfer_count",
                     s.pending_redemption_transfer.len() as f64,
                     "Pending redemption transfers count.",
@@ -716,34 +732,60 @@ fn heartbeat() {
 async fn recover_pending_transfer(vault_id: u64) -> Result<bool, ProtocolError> {
     let caller = ic_cdk::caller();
     
-    // Validate the caller is the owner of this pending transfer
+    // Validate the caller is the owner of this pending transfer (check both maps)
     let is_owner = read_state(|s| {
         s.pending_margin_transfers
             .get(&vault_id)
             .map(|transfer| transfer.owner == caller)
             .unwrap_or(false)
+        || s.pending_excess_transfers
+            .get(&vault_id)
+            .map(|transfer| transfer.owner == caller)
+            .unwrap_or(false)
     });
-    
+
     if !is_owner {
         return Err(ProtocolError::CallerNotOwner);
     }
-    
-    // Process the pending transfer immediately
-    let transfer_opt = read_state(|s| {
-        s.pending_margin_transfers.get(&vault_id).cloned()
+
+    // Process the pending transfer immediately (check margin map first, then excess)
+    let transfer_info = read_state(|s| {
+        if let Some(t) = s.pending_margin_transfers.get(&vault_id).cloned() {
+            Some(("margin", t))
+        } else {
+            s.pending_excess_transfers.get(&vault_id).cloned().map(|t| ("excess", t))
+        }
     });
-    
-    if let Some(transfer) = transfer_opt {
+
+    if let Some((source, transfer)) = transfer_info {
         let transfer_fee = read_state(|s| s.icp_ledger_fee);
+
+        if transfer.margin <= transfer_fee {
+            // Margin too small to cover fee — clean it up
+            mutate_state(|s| {
+                match source {
+                    "margin" => { s.pending_margin_transfers.remove(&vault_id); },
+                    _ => { s.pending_excess_transfers.remove(&vault_id); },
+                }
+            });
+            return Err(ProtocolError::GenericError(
+                "Pending transfer margin is too small to cover the ledger fee".to_string()
+            ));
+        }
 
         let result = crate::management::transfer_icp(
             transfer.margin - transfer_fee,
             transfer.owner,
         ).await;
-        
+
         match result {
             Ok(block_index) => {
-                mutate_state(|s| crate::event::record_margin_transfer(s, vault_id, block_index));
+                mutate_state(|s| {
+                    match source {
+                        "margin" => { crate::event::record_margin_transfer(s, vault_id, block_index); },
+                        _ => { s.pending_excess_transfers.remove(&vault_id); },
+                    }
+                });
                 Ok(true)
             }
             Err(error) => {
@@ -775,9 +817,9 @@ async fn set_treasury_principal(treasury_principal: Principal) -> Result<(), Pro
     }
     
     mutate_state(|s| {
-        s.treasury_principal = Some(treasury_principal);
+        rumi_protocol_backend::event::record_set_treasury_principal(s, treasury_principal);
     });
-    
+
     log!(INFO, "[set_treasury_principal] Treasury principal set to: {}", treasury_principal);
     Ok(())
 }
@@ -801,9 +843,9 @@ async fn set_stability_pool_principal(stability_pool_principal: Principal) -> Re
     }
     
     mutate_state(|s| {
-        s.stability_pool_canister = Some(stability_pool_principal);
+        rumi_protocol_backend::event::record_set_stability_pool_principal(s, stability_pool_principal);
     });
-    
+
     log!(INFO, "[set_stability_pool_principal] Stability pool principal set to: {}", stability_pool_principal);
     Ok(())
 }
@@ -869,6 +911,22 @@ fn get_stable_token_enabled(token_type: StableTokenType) -> bool {
         StableTokenType::CKUSDT => s.ckusdt_enabled,
         StableTokenType::CKUSDC => s.ckusdc_enabled,
     })
+}
+
+/// Set the ckUSDT or ckUSDC ledger principal (developer only)
+#[candid_method(update)]
+#[update]
+async fn set_stable_ledger_principal(token_type: StableTokenType, principal: Principal) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can set stable ledger principals".to_string()));
+    }
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_stable_ledger_principal(s, token_type.clone(), principal);
+    });
+    log!(INFO, "[set_stable_ledger_principal] {:?} set to {}", token_type, principal);
+    Ok(())
 }
 
 /// Set the liquidation bonus multiplier (developer only)
@@ -1014,6 +1072,34 @@ async fn set_max_partial_liquidation_ratio(new_rate: f64) -> Result<(), Protocol
 #[query]
 fn get_max_partial_liquidation_ratio() -> f64 {
     read_state(|s| s.max_partial_liquidation_ratio.to_f64())
+}
+
+/// Set the recovery target collateral ratio (developer only)
+#[candid_method(update)]
+#[update]
+async fn set_recovery_target_cr(new_rate: f64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can set recovery target CR".to_string()));
+    }
+    if new_rate < 1.4 || new_rate > 2.0 {
+        return Err(ProtocolError::GenericError("Recovery target CR must be between 1.4 and 2.0".to_string()));
+    }
+    let rate = Ratio::from(rust_decimal::Decimal::try_from(new_rate)
+        .map_err(|_| ProtocolError::GenericError("Invalid rate".to_string()))?);
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_recovery_target_cr(s, rate);
+    });
+    log!(INFO, "[set_recovery_target_cr] Recovery target CR set to: {}", new_rate);
+    Ok(())
+}
+
+/// Get the current recovery target collateral ratio
+#[candid_method(query)]
+#[query]
+fn get_recovery_target_cr() -> f64 {
+    read_state(|s| s.recovery_target_cr.to_f64())
 }
 
 // Add guard cleanup method for developers to resolve stuck operations

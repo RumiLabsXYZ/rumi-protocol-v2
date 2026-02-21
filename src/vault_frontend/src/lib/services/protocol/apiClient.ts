@@ -332,13 +332,27 @@ private static async refreshVaultData(): Promise<void> {
       return error.GenericError;
     } 
     else if ('TransferError' in error) {
-      return `Transfer error: ${JSON.stringify(error.TransferError)}`;
+      const te = error.TransferError;
+      if ('InsufficientFunds' in te) {
+        return `Insufficient funds. Balance: ${Number(te.InsufficientFunds.balance) / E8S}`;
+      }
+      if ('BadFee' in te) {
+        return `Unexpected fee. Expected: ${Number(te.BadFee.expected_fee)}`;
+      }
+      return `Transfer error: ${BigIntUtils.stringify(te)}`;
     }
     else if ('TransferFromError' in error) {
-      if ('InsufficientAllowance' in error.TransferFromError[0]) {
-        return 'Insufficient allowance. Please approve the tokens first.';
+      const tfe = error.TransferFromError[0];
+      if ('InsufficientAllowance' in tfe) {
+        return `Insufficient allowance (have: ${Number(tfe.InsufficientAllowance.allowance) / 1_000_000}). Please approve the tokens first.`;
       }
-      return `Transfer error: ${JSON.stringify(error.TransferFromError)}`;
+      if ('InsufficientFunds' in tfe) {
+        return `Insufficient ${error.TransferFromError[1] ? 'token' : ''} funds. Your balance is too low for this amount.`;
+      }
+      if ('BadFee' in tfe) {
+        return `Unexpected fee. Expected: ${Number(tfe.BadFee.expected_fee)}`;
+      }
+      return `Transfer error: ${BigIntUtils.stringify(tfe)}`;
     } 
     else if ('AmountTooLow' in error) {
       return `Amount too low. Minimum amount: ${Number(error.AmountTooLow.minimum_amount) / E8S}`;
@@ -1661,7 +1675,7 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
           // Now proceed with partial liquidation
           const actor = await ApiClient.getAuthenticatedActor();
           const icusdAmountE8s = BigInt(Math.floor(icusdAmount * E8S));
-          const result = await actor.liquidate_vault_partial(BigInt(vaultId), icusdAmountE8s);
+          const result = await actor.liquidate_vault_partial({ vault_id: BigInt(vaultId), amount: icusdAmountE8s });
           
           if ('Ok' in result) {
             return {
@@ -1694,6 +1708,81 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
           };
         }
       }, vaultId); // Pass vaultId to ensure proper operation tracking
+    }
+
+    /**
+     * Partially liquidate a vault using ckUSDT or ckUSDC
+     */
+    static async liquidateVaultPartialWithStable(
+      vaultId: number,
+      icusdAmount: number,
+      tokenType: 'CKUSDT' | 'CKUSDC'
+    ): Promise<VaultOperationResult> {
+      return ApiClient.executeSequentialOperation(async () => {
+        try {
+          console.log(`Partially liquidating vault #${vaultId} with ${icusdAmount} ${tokenType}`);
+
+          const vaults = await ApiClient.getLiquidatableVaults();
+          const vault = vaults.find(v => Number(v.vault_id) === vaultId);
+          if (!vault) {
+            return { success: false, error: "Vault not found or is not liquidatable" };
+          }
+
+          const totalDebt = Number(vault.borrowed_icusd_amount) / E8S;
+          if (icusdAmount > totalDebt) {
+            return { success: false, error: `Cannot liquidate more than total debt (${totalDebt.toFixed(2)} icUSD)` };
+          }
+
+          // Convert icUSD amount (e8s) to ckstable amount (e6s)
+          // ICRC-2 transfer_from deducts (amount + ledger_fee) from allowance
+          const STABLE_LEDGER_FEE = BigInt(10_000); // 0.01 USDT/USDC
+          const amountE8s = Math.floor(icusdAmount * E8S);
+          const stableE6s = Math.floor(amountE8s / 100);
+          const protocolFee = BigInt(stableE6s) / BigInt(2000); // 0.05%
+          const bufferedE6s = BigInt(stableE6s) + protocolFee + STABLE_LEDGER_FEE + STABLE_LEDGER_FEE;
+          const spenderCanisterId = CONFIG.currentCanisterId;
+
+          // Check and approve ckstable allowance
+          const currentAllowance = await walletOperations.checkStableAllowance(spenderCanisterId, tokenType);
+          if (currentAllowance < bufferedE6s) {
+            console.log(`Setting ${tokenType} approval for ${bufferedE6s.toString()} e6s`);
+            const approvalResult = await walletOperations.approveStableTransfer(
+              bufferedE6s, spenderCanisterId, tokenType
+            );
+            if (!approvalResult.success) {
+              return { success: false, error: approvalResult.error || `Failed to approve ${tokenType} transfer` };
+            }
+            await new Promise(resolve => setTimeout(resolve, 2000));
+          }
+
+          const actor = await ApiClient.getAuthenticatedActor();
+          const vaultArgWithToken = {
+            vault_id: BigInt(vaultId),
+            amount: BigInt(amountE8s),
+            token_type: { [tokenType]: null }
+          };
+
+          const result = await actor.liquidate_vault_partial_with_stable(vaultArgWithToken);
+
+          if ('Ok' in result) {
+            return {
+              success: true,
+              vaultId,
+              blockIndex: Number(result.Ok.block_index),
+              feePaid: Number(result.Ok.fee_amount_paid) / E8S
+            };
+          } else {
+            return { success: false, error: ApiClient.formatProtocolError(result.Err) };
+          }
+        } catch (err) {
+          console.error('Error liquidating with stable token:', err);
+          const errorMessage = err instanceof Error ? err.message : String(err);
+          if (errorMessage.includes('underflow')) {
+            return { success: false, error: "Liquidation failed due to a calculation error. The vault may have been modified." };
+          }
+          return { success: false, error: errorMessage };
+        }
+      }, vaultId);
     }
 
     /**

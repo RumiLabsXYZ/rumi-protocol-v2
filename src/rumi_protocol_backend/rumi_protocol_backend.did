@@ -97,6 +97,8 @@ type ProtocolStatus = record {
   last_icp_timestamp : nat64;
   last_icp_rate : float64;
   total_collateral_ratio: float64;
+  liquidation_bonus : float64;
+  recovery_target_cr : float64;
 };
 type TransferError = variant {
   GenericError : record { message : text; error_code : nat };
@@ -252,12 +254,29 @@ service : (ProtocolArg) -> {
   // Partial operations
   partial_repay_to_vault : (VaultArg) -> (variant { Ok : nat64; Err : ProtocolError });
   partial_liquidate_vault : (VaultArg) -> (variant { Ok : SuccessWithFee; Err : ProtocolError });
+  liquidate_vault_partial : (VaultArg) -> (variant { Ok : SuccessWithFee; Err : ProtocolError });
+  liquidate_vault_partial_with_stable : (VaultArgWithToken) -> (variant { Ok : SuccessWithFee; Err : ProtocolError });
 
   // Stable token repayment admin functions
   set_ckstable_repay_fee : (float64) -> (variant { Ok; Err : ProtocolError });
   get_ckstable_repay_fee : () -> (float64) query;
   set_stable_token_enabled : (StableTokenType, bool) -> (variant { Ok; Err : ProtocolError });
   get_stable_token_enabled : (StableTokenType) -> (bool) query;
+  set_stable_ledger_principal : (StableTokenType, principal) -> (variant { Ok; Err : ProtocolError });
+
+  // Protocol parameter admin functions
+  set_liquidation_bonus : (float64) -> (variant { Ok; Err : ProtocolError });
+  get_liquidation_bonus : () -> (float64) query;
+  set_borrowing_fee : (float64) -> (variant { Ok; Err : ProtocolError });
+  get_borrowing_fee : () -> (float64) query;
+  set_redemption_fee_floor : (float64) -> (variant { Ok; Err : ProtocolError });
+  get_redemption_fee_floor : () -> (float64) query;
+  set_redemption_fee_ceiling : (float64) -> (variant { Ok; Err : ProtocolError });
+  get_redemption_fee_ceiling : () -> (float64) query;
+  set_max_partial_liquidation_ratio : (float64) -> (variant { Ok; Err : ProtocolError });
+  get_max_partial_liquidation_ratio : () -> (float64) query;
+  set_recovery_target_cr : (float64) -> (variant { Ok; Err : ProtocolError });
+  get_recovery_target_cr : () -> (float64) query;
   
   // ICRC-21 Consent Message (for wallet integration like Oisy)
   icrc21_canister_call_consent_message : (Icrc21ConsentMessageRequest) -> (variant { Ok : Icrc21ConsentInfo; Err : Icrc21Error });

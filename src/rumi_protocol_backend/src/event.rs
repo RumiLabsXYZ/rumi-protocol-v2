@@ -148,6 +148,22 @@ pub enum Event {
         enabled: bool,
     },
 
+    #[serde(rename = "set_stable_ledger_principal")]
+    SetStableLedgerPrincipal {
+        token_type: StableTokenType,
+        principal: Principal,
+    },
+
+    #[serde(rename = "set_treasury_principal")]
+    SetTreasuryPrincipal {
+        principal: Principal,
+    },
+
+    #[serde(rename = "set_stability_pool_principal")]
+    SetStabilityPoolPrincipal {
+        principal: Principal,
+    },
+
     #[serde(rename = "set_liquidation_bonus")]
     SetLiquidationBonus {
         rate: String,
@@ -170,6 +186,11 @@ pub enum Event {
 
     #[serde(rename = "set_max_partial_liquidation_ratio")]
     SetMaxPartialLiquidationRatio {
+        rate: String,
+    },
+
+    #[serde(rename = "set_recovery_target_cr")]
+    SetRecoveryTargetCr {
         rate: String,
     },
 }
@@ -200,11 +221,15 @@ impl Event {
             Event::DustForgiven { vault_id, .. } => vault_id == filter_vault_id,
             Event::SetCkstableRepayFee { .. } => false,
             Event::SetStableTokenEnabled { .. } => false,
+            Event::SetStableLedgerPrincipal { .. } => false,
+            Event::SetTreasuryPrincipal { .. } => false,
+            Event::SetStabilityPoolPrincipal { .. } => false,
             Event::SetLiquidationBonus { .. } => false,
             Event::SetBorrowingFee { .. } => false,
             Event::SetRedemptionFeeFloor { .. } => false,
             Event::SetRedemptionFeeCeiling { .. } => false,
             Event::SetMaxPartialLiquidationRatio { .. } => false,
+            Event::SetRecoveryTargetCr { .. } => false,
         }
     }
 }
@@ -357,6 +382,18 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                     StableTokenType::CKUSDC => state.ckusdc_enabled = enabled,
                 }
             },
+            Event::SetStableLedgerPrincipal { token_type, principal } => {
+                match token_type {
+                    StableTokenType::CKUSDT => state.ckusdt_ledger_principal = Some(principal),
+                    StableTokenType::CKUSDC => state.ckusdc_ledger_principal = Some(principal),
+                }
+            },
+            Event::SetTreasuryPrincipal { principal } => {
+                state.treasury_principal = Some(principal);
+            },
+            Event::SetStabilityPoolPrincipal { principal } => {
+                state.stability_pool_canister = Some(principal);
+            },
             Event::SetLiquidationBonus { rate } => {
                 if let Ok(dec) = rate.parse::<Decimal>() {
                     state.liquidation_bonus = Ratio::from(dec);
@@ -380,6 +417,11 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             Event::SetMaxPartialLiquidationRatio { rate } => {
                 if let Ok(dec) = rate.parse::<Decimal>() {
                     state.max_partial_liquidation_ratio = Ratio::from(dec);
+                }
+            },
+            Event::SetRecoveryTargetCr { rate } => {
+                if let Ok(dec) = rate.parse::<Decimal>() {
+                    state.recovery_target_cr = Ratio::from(dec);
                 }
             },
         }
@@ -597,6 +639,27 @@ pub fn record_set_stable_token_enabled(state: &mut State, token_type: StableToke
     }
 }
 
+pub fn record_set_stable_ledger_principal(state: &mut State, token_type: StableTokenType, principal: Principal) {
+    record_event(&Event::SetStableLedgerPrincipal {
+        token_type: token_type.clone(),
+        principal,
+    });
+    match token_type {
+        StableTokenType::CKUSDT => state.ckusdt_ledger_principal = Some(principal),
+        StableTokenType::CKUSDC => state.ckusdc_ledger_principal = Some(principal),
+    }
+}
+
+pub fn record_set_treasury_principal(state: &mut State, principal: Principal) {
+    record_event(&Event::SetTreasuryPrincipal { principal });
+    state.treasury_principal = Some(principal);
+}
+
+pub fn record_set_stability_pool_principal(state: &mut State, principal: Principal) {
+    record_event(&Event::SetStabilityPoolPrincipal { principal });
+    state.stability_pool_canister = Some(principal);
+}
+
 pub fn record_set_liquidation_bonus(state: &mut State, rate: Ratio) {
     record_event(&Event::SetLiquidationBonus {
         rate: rate.0.to_string(),
@@ -630,4 +693,11 @@ pub fn record_set_max_partial_liquidation_ratio(state: &mut State, rate: Ratio) 
         rate: rate.0.to_string(),
     });
     state.max_partial_liquidation_ratio = rate;
+}
+
+pub fn record_set_recovery_target_cr(state: &mut State, rate: Ratio) {
+    record_event(&Event::SetRecoveryTargetCr {
+        rate: rate.0.to_string(),
+    });
+    state.recovery_target_cr = rate;
 }
