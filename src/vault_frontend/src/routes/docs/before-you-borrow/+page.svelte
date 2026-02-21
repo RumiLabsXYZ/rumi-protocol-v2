@@ -1,3 +1,24 @@
+<script lang="ts">
+  import { onMount } from 'svelte';
+  import { publicActor } from '$lib/services/protocol/apiClient';
+
+  let borrowingFeePct = '0.5';
+  let ckstableFeePct = '0.05';
+
+  onMount(async () => {
+    try {
+      const [bFee, ckFee] = await Promise.all([
+        publicActor.get_borrowing_fee() as Promise<number>,
+        publicActor.get_ckstable_repay_fee() as Promise<number>,
+      ]);
+      borrowingFeePct = (Number(bFee) * 100).toFixed(1);
+      ckstableFeePct = (Number(ckFee) * 100).toFixed(2);
+    } catch (e) {
+      console.error('Failed to fetch fees:', e);
+    }
+  });
+</script>
+
 <svelte:head><title>Before You Borrow - Rumi Docs</title></svelte:head>
 
 <article class="doc-page">
@@ -16,7 +37,12 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Fees</h2>
-    <p>A one-time borrowing fee of 0.5% is deducted from the icUSD you borrow. If you borrow 100 icUSD, you receive 99.5 icUSD and owe 100 icUSD. There is no ongoing interest. The fee drops to 0% if the protocol enters Recovery mode.</p>
+    <p>A one-time borrowing fee of {borrowingFeePct}% is deducted from the icUSD you borrow. If you borrow 100 icUSD, you receive {(100 - parseFloat(borrowingFeePct)).toFixed(1)} icUSD and owe 100 icUSD. There is no ongoing interest. The fee drops to 0% if the protocol enters Recovery mode.</p>
+  </section>
+
+  <section class="doc-section">
+    <h2 class="doc-heading">Repaying Your Debt</h2>
+    <p>You can repay your icUSD debt at any time — in full or partially. You can also repay using <strong>ckUSDT</strong> or <strong>ckUSDC</strong> instead of icUSD. Stablecoin repayments are treated at a 1:1 rate with icUSD, minus a {ckstableFeePct}% conversion fee. The protocol checks the stablecoin's live price and rejects repayment if it has depegged outside the $0.95–$1.05 range.</p>
   </section>
 
   <section class="doc-section">
