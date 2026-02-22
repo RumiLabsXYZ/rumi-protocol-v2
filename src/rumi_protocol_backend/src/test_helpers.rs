@@ -30,11 +30,10 @@ pub fn test_set_icp_price_e8s(price_e8s: u64) {
     
     // Convert e8s to decimal (e.g., 650000000 -> $6.50)
     let price_decimal = Decimal::from_u64(price_e8s).unwrap_or(dec!(0)) / dec!(100_000_000);
-    let icp_rate = UsdIcp::from(price_decimal);
-    
+    let rate = UsdIcp::from(price_decimal);
+
     mutate_state(|s| {
-        s.last_icp_rate = Some(icp_rate);
-        s.last_icp_timestamp = Some(ic_cdk::api::time() / 1_000_000_000); // Fix: wrap in Some()
+        s.set_icp_rate(rate, Some(ic_cdk::api::time()));
     });
 }
 

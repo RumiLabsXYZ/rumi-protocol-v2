@@ -47,6 +47,152 @@ pub const DEFAULT_MAX_PARTIAL_LIQUIDATION_RATIO: Ratio = Ratio::new(dec!(0.5)); 
 pub const DEFAULT_REDEMPTION_FEE_FLOOR: Ratio = Ratio::new(dec!(0.005)); // 0.5%
 pub const DEFAULT_REDEMPTION_FEE_CEILING: Ratio = Ratio::new(dec!(0.05)); // 5%
 pub const DEFAULT_RECOVERY_TARGET_CR: Ratio = Ratio::new(dec!(1.55)); // 155% — target CR after recovery liquidation
+pub const DEFAULT_INTEREST_RATE_APR: Ratio = Ratio::new(dec!(0.0)); // 0% — placeholder for future accrual
+
+/// Collateral type identified by its ICRC-1 ledger canister principal.
+pub type CollateralType = Principal;
+
+/// Per-collateral status — graduated severity levels for risk management.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize, Copy)]
+pub enum CollateralStatus {
+    /// Full functionality — all operations allowed
+    Active,
+    /// No new borrows/vaults or withdrawals; repay, add collateral, close (if empty) allowed
+    Paused,
+    /// HARD STOP — nothing works except admin actions. Emergency brake.
+    Frozen,
+    /// Winding down — repay and close only, no new activity
+    Sunset,
+    /// Fully wound down — read-only
+    Deprecated,
+}
+
+impl Default for CollateralStatus {
+    fn default() -> Self {
+        Self::Active
+    }
+}
+
+impl CollateralStatus {
+    /// Whether opening new vaults is allowed for this collateral
+    pub fn allows_open(&self) -> bool {
+        matches!(self, CollateralStatus::Active)
+    }
+
+    /// Whether borrowing (minting) is allowed
+    pub fn allows_borrow(&self) -> bool {
+        matches!(self, CollateralStatus::Active)
+    }
+
+    /// Whether repaying debt is allowed
+    pub fn allows_repay(&self) -> bool {
+        matches!(self, CollateralStatus::Active | CollateralStatus::Paused | CollateralStatus::Sunset)
+    }
+
+    /// Whether adding collateral is allowed
+    pub fn allows_add_collateral(&self) -> bool {
+        matches!(self, CollateralStatus::Active | CollateralStatus::Paused)
+    }
+
+    /// Whether withdrawing collateral is allowed
+    pub fn allows_withdraw(&self) -> bool {
+        matches!(self, CollateralStatus::Active | CollateralStatus::Sunset)
+    }
+
+    /// Whether closing a vault is allowed (requires zero debt and zero collateral)
+    pub fn allows_close(&self) -> bool {
+        matches!(self, CollateralStatus::Active | CollateralStatus::Paused | CollateralStatus::Sunset)
+    }
+
+    /// Whether liquidations are allowed
+    pub fn allows_liquidation(&self) -> bool {
+        matches!(self, CollateralStatus::Active | CollateralStatus::Paused)
+    }
+
+    /// Whether redemptions are allowed
+    pub fn allows_redemption(&self) -> bool {
+        matches!(self, CollateralStatus::Active)
+    }
+}
+
+/// Price source configuration for a collateral type.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum PriceSource {
+    /// Use the ICP Exchange Rate Canister (XRC) with specified asset pair
+    Xrc {
+        base_asset: String,
+        quote_asset: String,
+    },
+}
+
+/// Per-collateral-type configuration. Each supported collateral token has one of these.
+#[derive(candid::CandidType, Clone, Debug, serde::Deserialize, Serialize)]
+pub struct CollateralConfig {
+    /// ICRC-1 ledger canister ID for this token
+    pub ledger_canister_id: Principal,
+    /// Token decimal precision (e.g., 8 for ICP/ckBTC, 6 for ckUSDC)
+    pub decimals: u8,
+    /// Below this ratio, the vault can be liquidated (e.g., 1.33 = 133%)
+    pub liquidation_ratio: Ratio,
+    /// Below this ratio, recovery mode triggers for this collateral (e.g., 1.5 = 150%)
+    pub borrow_threshold_ratio: Ratio,
+    /// Bonus multiplier for liquidators (e.g., 1.15 = 15% bonus)
+    pub liquidation_bonus: Ratio,
+    /// One-time fee at borrow/mint time (e.g., 0.005 = 0.5%)
+    pub borrowing_fee: Ratio,
+    /// Ongoing interest rate — placeholder for future accrual (default 0.0)
+    pub interest_rate_apr: Ratio,
+    /// Maximum total debt across all vaults for this collateral (u64::MAX = no cap)
+    pub debt_ceiling: u64,
+    /// Minimum vault debt (dust threshold)
+    pub min_vault_debt: ICUSD,
+    /// Token transfer fee in native units
+    pub ledger_fee: u64,
+    /// How to fetch the USD price for this token
+    pub price_source: PriceSource,
+    /// Current operational status
+    pub status: CollateralStatus,
+    /// Last known USD price per 1 whole token (f64 for Candid compatibility)
+    pub last_price: Option<f64>,
+    /// Timestamp of last price update (nanoseconds)
+    pub last_price_timestamp: Option<u64>,
+    /// Minimum redemption fee (e.g., 0.005 = 0.5%)
+    pub redemption_fee_floor: Ratio,
+    /// Maximum redemption fee (e.g., 0.05 = 5%)
+    pub redemption_fee_ceiling: Ratio,
+    /// Dynamic base rate that spikes on redemptions and decays over time
+    pub current_base_rate: Ratio,
+    /// Timestamp of last redemption (nanoseconds)
+    pub last_redemption_time: u64,
+    /// Target CR to restore vaults to during recovery-mode liquidations (e.g., 1.55)
+    pub recovery_target_cr: Ratio,
+}
+
+impl PartialEq for CollateralConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.ledger_canister_id == other.ledger_canister_id
+            && self.decimals == other.decimals
+            && self.liquidation_ratio == other.liquidation_ratio
+            && self.borrow_threshold_ratio == other.borrow_threshold_ratio
+            && self.liquidation_bonus == other.liquidation_bonus
+            && self.borrowing_fee == other.borrowing_fee
+            && self.interest_rate_apr == other.interest_rate_apr
+            && self.debt_ceiling == other.debt_ceiling
+            && self.min_vault_debt == other.min_vault_debt
+            && self.ledger_fee == other.ledger_fee
+            && self.price_source == other.price_source
+            && self.status == other.status
+            && self.last_price.map(f64::to_bits) == other.last_price.map(f64::to_bits)
+            && self.last_price_timestamp == other.last_price_timestamp
+            && self.redemption_fee_floor == other.redemption_fee_floor
+            && self.redemption_fee_ceiling == other.redemption_fee_ceiling
+            && self.current_base_rate == other.current_base_rate
+            && self.last_redemption_time == other.last_redemption_time
+            && self.recovery_target_cr == other.recovery_target_cr
+    }
+}
+
+impl Eq for CollateralConfig {}
 
 /// Controls which operations the protocol can perform.
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize, Copy)]
@@ -101,6 +247,11 @@ impl Default for Mode {
 pub struct PendingMarginTransfer {
     pub owner: Principal,
     pub margin: ICP,
+    /// Which collateral ledger to transfer on. Defaults to ICP (via Principal::anonymous()
+    /// sentinel, fixed up to icp_ledger_principal during processing) for backward compat
+    /// with in-flight pending transfers from before the multi-collateral refactor.
+    #[serde(default = "crate::vault::default_collateral_type")]
+    pub collateral_type: Principal,
 }
 
 thread_local! {
@@ -158,6 +309,10 @@ pub struct State {
     pub redemption_fee_floor: Ratio,
     pub redemption_fee_ceiling: Ratio,
     pub recovery_target_cr: Ratio,
+
+    // Multi-collateral support
+    pub collateral_configs: BTreeMap<CollateralType, CollateralConfig>,
+    pub collateral_to_vault_ids: BTreeMap<CollateralType, BTreeSet<u64>>,
 }
 
 impl From<InitArg> for State {
@@ -213,6 +368,37 @@ impl From<InitArg> for State {
             redemption_fee_floor: DEFAULT_REDEMPTION_FEE_FLOOR,
             redemption_fee_ceiling: DEFAULT_REDEMPTION_FEE_CEILING,
             recovery_target_cr: DEFAULT_RECOVERY_TARGET_CR,
+
+            // Multi-collateral: initialize with ICP as the default collateral
+            collateral_configs: {
+                let mut configs = BTreeMap::new();
+                configs.insert(args.icp_ledger_principal, CollateralConfig {
+                    ledger_canister_id: args.icp_ledger_principal,
+                    decimals: 8,
+                    liquidation_ratio: MINIMUM_COLLATERAL_RATIO,
+                    borrow_threshold_ratio: RECOVERY_COLLATERAL_RATIO,
+                    liquidation_bonus: DEFAULT_LIQUIDATION_BONUS,
+                    borrowing_fee: Ratio::from(fee),
+                    interest_rate_apr: DEFAULT_INTEREST_RATE_APR,
+                    debt_ceiling: u64::MAX,
+                    min_vault_debt: ICUSD::new(1_000_000), // 0.01 icUSD
+                    ledger_fee: ICP_TRANSFER_FEE.to_u64(),
+                    price_source: PriceSource::Xrc {
+                        base_asset: "ICP".to_string(),
+                        quote_asset: "USD".to_string(),
+                    },
+                    status: CollateralStatus::Active,
+                    last_price: None,
+                    last_price_timestamp: None,
+                    redemption_fee_floor: DEFAULT_REDEMPTION_FEE_FLOOR,
+                    redemption_fee_ceiling: DEFAULT_REDEMPTION_FEE_CEILING,
+                    current_base_rate: Ratio::from(Decimal::ZERO),
+                    last_redemption_time: 0,
+                    recovery_target_cr: DEFAULT_RECOVERY_TARGET_CR,
+                });
+                configs
+            },
+            collateral_to_vault_ids: BTreeMap::new(),
         }
     }
 }
@@ -350,18 +536,37 @@ impl State {
             .sum()
     }
 
+    /// Deprecated: use `total_collateral_for(&icp_ledger)` for ICP specifically,
+    /// or sum across all collateral types for cross-collateral totals.
+    /// Kept for backward compat with dashboard and metrics endpoints.
     pub fn total_icp_margin_amount(&self) -> ICP {
-        self.vault_id_to_vaults
-            .values()
-            .map(|vault| vault.icp_margin_amount)
-            .sum()
+        ICP::from(self.total_collateral_for(&self.icp_ledger_principal))
     }
 
-    pub fn compute_total_collateral_ratio(&self, icp_rate: UsdIcp) -> Ratio {
-        if self.total_borrowed_icusd_amount() == ICUSD::new(0) {
+    pub fn compute_total_collateral_ratio(&self, _rate: UsdIcp) -> Ratio {
+        let total_debt = self.total_borrowed_icusd_amount();
+        if total_debt == ICUSD::new(0) {
             return Ratio::from(Decimal::MAX);
         }
-        (self.total_icp_margin_amount() * icp_rate) / self.total_borrowed_icusd_amount()
+        // Sum USD value across ALL vaults using per-collateral pricing.
+        // Iterates vaults directly (not via collateral_to_vault_ids index) for robustness
+        // against legacy vaults with Principal::anonymous() collateral_type.
+        let mut total_value = ICUSD::new(0);
+        for vault in self.vault_id_to_vaults.values() {
+            if let Some(config) = self.get_collateral_config(&vault.collateral_type) {
+                if let Some(price) = config.last_price {
+                    let price_dec = Decimal::from_f64(price).unwrap_or(Decimal::ZERO);
+                    total_value += crate::numeric::collateral_usd_value(
+                        vault.collateral_amount,
+                        price_dec,
+                        config.decimals,
+                    );
+                }
+                // No price → contributes 0 value (conservative)
+            }
+            // No config → contributes 0 value (conservative)
+        }
+        total_value / total_debt
     }
 
     pub fn get_redemption_fee(&self, redeemed_amount: ICUSD) -> Ratio {
@@ -386,9 +591,226 @@ impl State {
         }
     }
 
-    pub fn update_total_collateral_ratio_and_mode(&mut self, icp_rate: UsdIcp) {
+    // --- Multi-collateral helper methods ---
+
+    /// Get the collateral config for a given collateral type.
+    /// Resolves `Principal::anonymous()` (serde default for legacy vaults) to the ICP ledger.
+    pub fn get_collateral_config(&self, ct: &CollateralType) -> Option<&CollateralConfig> {
+        let resolved = if ct == &Principal::anonymous() {
+            &self.icp_ledger_principal
+        } else {
+            ct
+        };
+        self.collateral_configs.get(resolved)
+    }
+
+    /// Get a mutable reference to the collateral config.
+    /// Resolves `Principal::anonymous()` to the ICP ledger.
+    pub fn get_collateral_config_mut(&mut self, ct: &CollateralType) -> Option<&mut CollateralConfig> {
+        let resolved = if ct == &Principal::anonymous() {
+            self.icp_ledger_principal
+        } else {
+            *ct
+        };
+        self.collateral_configs.get_mut(&resolved)
+    }
+
+    /// Get the ICP collateral type (convenience)
+    pub fn icp_collateral_type(&self) -> CollateralType {
+        self.icp_ledger_principal
+    }
+
+    /// Set the ICP rate on both the global field AND the ICP CollateralConfig's `last_price`.
+    /// This is the ONLY correct way to update the ICP price.
+    pub fn set_icp_rate(&mut self, rate: crate::numeric::UsdIcp, timestamp_nanos: Option<u64>) {
+        use rust_decimal::prelude::ToPrimitive;
+        self.last_icp_rate = Some(rate);
+        if let Some(ts) = timestamp_nanos {
+            self.last_icp_timestamp = Some(ts);
+        }
+        let icp = self.icp_collateral_type();
+        if let Some(config) = self.collateral_configs.get_mut(&icp) {
+            config.last_price = Some(rate.to_f64());
+            if let Some(ts) = timestamp_nanos {
+                config.last_price_timestamp = Some(ts);
+            }
+        }
+    }
+
+    /// Get borrowing fee for a specific collateral type
+    pub fn get_borrowing_fee_for(&self, ct: &CollateralType) -> Ratio {
+        if self.mode == Mode::Recovery {
+            return Ratio::from(Decimal::ZERO);
+        }
+        self.collateral_configs
+            .get(ct)
+            .map(|c| c.borrowing_fee)
+            .unwrap_or(self.fee)
+    }
+
+    /// Get liquidation bonus for a specific collateral type
+    pub fn get_liquidation_bonus_for(&self, ct: &CollateralType) -> Ratio {
+        self.collateral_configs
+            .get(ct)
+            .map(|c| c.liquidation_bonus)
+            .unwrap_or(self.liquidation_bonus)
+    }
+
+    /// Get the liquidation ratio (below this, vault is liquidatable) for a specific collateral type
+    pub fn get_liquidation_ratio_for(&self, ct: &CollateralType) -> Ratio {
+        self.collateral_configs
+            .get(ct)
+            .map(|c| c.liquidation_ratio)
+            .unwrap_or(MINIMUM_COLLATERAL_RATIO)
+    }
+
+    /// Get the minimum collateral ratio (below this, recovery mode triggers) for a collateral type
+    pub fn get_min_collateral_ratio_for(&self, ct: &CollateralType) -> Ratio {
+        self.collateral_configs
+            .get(ct)
+            .map(|c| c.borrow_threshold_ratio)
+            .unwrap_or(RECOVERY_COLLATERAL_RATIO)
+    }
+
+    /// Get the last known price for a collateral type (USD per 1 whole token)
+    pub fn get_price_for(&self, ct: &CollateralType) -> Option<f64> {
+        self.get_collateral_config(ct)
+            .and_then(|c| c.last_price)
+    }
+
+    /// Get the collateral's USD price as Decimal, or None.
+    /// Uses per-collateral config (resolves Principal::anonymous() → ICP).
+    pub fn get_collateral_price_decimal(&self, ct: &CollateralType) -> Option<Decimal> {
+        self.get_collateral_config(ct)
+            .and_then(|c| c.last_price)
+            .and_then(|p| Decimal::from_f64(p))
+    }
+
+    /// Get the recovery target CR for a specific collateral type
+    pub fn get_recovery_target_cr_for(&self, ct: &CollateralType) -> Ratio {
+        self.collateral_configs
+            .get(ct)
+            .map(|c| c.recovery_target_cr)
+            .unwrap_or(self.recovery_target_cr)
+    }
+
+    /// Get the minimum liquidation collateral ratio for a specific collateral type,
+    /// accounting for the current protocol mode.
+    /// - Normal/ReadOnly: `config.liquidation_ratio` (e.g., 1.33)
+    /// - Recovery: `config.borrow_threshold_ratio` (e.g., 1.50) — recovery mode liquidates more aggressively
+    pub fn get_min_liquidation_ratio_for(&self, ct: &CollateralType) -> Ratio {
+        match self.mode {
+            Mode::Recovery => self.get_min_collateral_ratio_for(ct),     // borrow_threshold_ratio
+            _ => self.get_liquidation_ratio_for(ct),                      // liquidation_ratio
+        }
+    }
+
+    /// Get the collateral status for a given collateral type
+    pub fn get_collateral_status(&self, ct: &CollateralType) -> Option<CollateralStatus> {
+        self.collateral_configs.get(ct).map(|c| c.status)
+    }
+
+    /// Get the redemption fee for a specific collateral type
+    pub fn get_redemption_fee_for(&self, ct: &CollateralType, redeemed_amount: ICUSD) -> Ratio {
+        if let Some(config) = self.collateral_configs.get(ct) {
+            let current_time = ic_cdk::api::time();
+            let elapsed_hours = (current_time - config.last_redemption_time) / 1_000_000_000 / 3600;
+            let total_borrowed = self.total_debt_for_collateral(ct);
+            compute_redemption_fee(
+                elapsed_hours,
+                redeemed_amount,
+                total_borrowed,
+                config.current_base_rate,
+                config.redemption_fee_floor,
+                config.redemption_fee_ceiling,
+            )
+        } else {
+            self.get_redemption_fee(redeemed_amount)
+        }
+    }
+
+    /// Total borrowed icUSD for a specific collateral type
+    pub fn total_debt_for_collateral(&self, ct: &CollateralType) -> ICUSD {
+        match self.collateral_to_vault_ids.get(ct) {
+            Some(vault_ids) => vault_ids
+                .iter()
+                .filter_map(|id| self.vault_id_to_vaults.get(id))
+                .map(|v| v.borrowed_icusd_amount)
+                .sum(),
+            None => ICUSD::new(0),
+        }
+    }
+
+    /// Total raw collateral amount for a specific collateral type
+    pub fn total_collateral_for(&self, ct: &CollateralType) -> u64 {
+        match self.collateral_to_vault_ids.get(ct) {
+            Some(vault_ids) => vault_ids
+                .iter()
+                .filter_map(|id| self.vault_id_to_vaults.get(id))
+                .map(|v| v.collateral_amount)
+                .sum(),
+            None => 0,
+        }
+    }
+
+    /// Total USD value of collateral for a specific collateral type (normalized by decimals).
+    /// Returns ICUSD value in e8s.
+    pub fn total_collateral_value_for(&self, ct: &CollateralType) -> ICUSD {
+        let raw_amount = self.total_collateral_for(ct);
+        if let Some(config) = self.collateral_configs.get(ct) {
+            if let Some(price) = config.last_price {
+                let price_dec = Decimal::from_f64(price).unwrap_or(Decimal::ZERO);
+                crate::numeric::collateral_usd_value(raw_amount, price_dec, config.decimals)
+            } else {
+                ICUSD::new(0)
+            }
+        } else {
+            ICUSD::new(0)
+        }
+    }
+
+    /// Get all supported collateral types and their statuses
+    pub fn supported_collateral_types(&self) -> Vec<(CollateralType, CollateralStatus)> {
+        self.collateral_configs
+            .iter()
+            .map(|(ct, config)| (*ct, config.status))
+            .collect()
+    }
+
+    /// Register a vault ID under its collateral type index
+    pub fn index_vault_by_collateral(&mut self, collateral_type: CollateralType, vault_id: u64) {
+        self.collateral_to_vault_ids
+            .entry(collateral_type)
+            .or_insert_with(BTreeSet::new)
+            .insert(vault_id);
+    }
+
+    /// Remove a vault ID from its collateral type index
+    pub fn unindex_vault_by_collateral(&mut self, collateral_type: &CollateralType, vault_id: u64) {
+        if let Some(ids) = self.collateral_to_vault_ids.get_mut(collateral_type) {
+            ids.remove(&vault_id);
+            if ids.is_empty() {
+                self.collateral_to_vault_ids.remove(collateral_type);
+            }
+        }
+    }
+
+    /// Sync a global fee-setting event to the ICP CollateralConfig (for backward compat during replay)
+    pub fn sync_icp_collateral_config(&mut self) {
+        let icp = self.icp_ledger_principal;
+        if let Some(config) = self.collateral_configs.get_mut(&icp) {
+            config.borrowing_fee = self.fee;
+            config.liquidation_bonus = self.liquidation_bonus;
+            config.redemption_fee_floor = self.redemption_fee_floor;
+            config.redemption_fee_ceiling = self.redemption_fee_ceiling;
+            config.recovery_target_cr = self.recovery_target_cr;
+            config.ledger_fee = self.icp_ledger_fee.to_u64();
+        }
+    }
+
+    pub fn update_total_collateral_ratio_and_mode(&mut self, rate: UsdIcp) {
         let previous_mode = self.mode;
-        let new_total_collateral_ratio = self.compute_total_collateral_ratio(icp_rate);
+        let new_total_collateral_ratio = self.compute_total_collateral_ratio(rate);
         self.total_collateral_ratio = new_total_collateral_ratio;
         
         if new_total_collateral_ratio < crate::RECOVERY_COLLATERAL_RATIO {
@@ -414,6 +836,7 @@ impl State {
 
     pub fn open_vault(&mut self, vault: Vault) {
         let vault_id = vault.vault_id;
+        let collateral_type = vault.collateral_type;
         self.vault_id_to_vaults.insert(vault_id, vault.clone());
         match self.principal_to_vault_ids.get_mut(&vault.owner) {
             Some(vault_ids) => {
@@ -425,6 +848,8 @@ impl State {
                 self.principal_to_vault_ids.insert(vault.owner, vault_ids);
             }
         }
+        // Index by collateral type
+        self.index_vault_by_collateral(collateral_type, vault_id);
     }
 
     pub fn close_vault(&mut self, vault_id: u64) {
@@ -434,7 +859,8 @@ impl State {
                 vault_id,
                 PendingMarginTransfer {
                     owner,
-                    margin: vault.icp_margin_amount,
+                    margin: ICP::from(vault.collateral_amount),
+                    collateral_type: vault.collateral_type,
                 },
             );
             if let Some(vault_ids) = self.principal_to_vault_ids.get_mut(&owner) {
@@ -459,19 +885,17 @@ impl State {
     pub fn add_margin_to_vault(&mut self, vault_id: u64, add_margin: ICP) {
         match self.vault_id_to_vaults.get_mut(&vault_id) {
             Some(vault) => {
-                vault.icp_margin_amount += add_margin;
+                vault.collateral_amount += add_margin.to_u64();
             }
             None => ic_cdk::trap("adding margin to unknown vault"),
         }
     }
 
-    // TODO(multi-collateral): will subtract from generic collateral_amount field
-    // instead of icp_margin_amount, using collateral-type-specific amount type
     pub fn remove_margin_from_vault(&mut self, vault_id: u64, amount: ICP) {
         match self.vault_id_to_vaults.get_mut(&vault_id) {
             Some(vault) => {
-                assert!(amount <= vault.icp_margin_amount);
-                vault.icp_margin_amount -= amount;
+                assert!(amount.to_u64() <= vault.collateral_amount);
+                vault.collateral_amount -= amount.to_u64();
             }
             None => ic_cdk::trap("removing margin from unknown vault"),
         }
@@ -541,21 +965,30 @@ impl State {
 
     /// Compute the icUSD repayment needed to restore a vault's CR to recovery_target_cr.
     /// Returns None if not applicable (not in recovery, or vault CR outside 133-150% range).
-    pub fn compute_recovery_repay_cap(&self, vault: &Vault, icp_rate: UsdIcp) -> Option<ICUSD> {
+    pub fn compute_recovery_repay_cap(&self, vault: &Vault, collateral_price: UsdIcp) -> Option<ICUSD> {
         if self.mode != Mode::Recovery {
             return None;
         }
-        let vault_cr = compute_collateral_ratio(vault, icp_rate);
+        let vault_cr = compute_collateral_ratio(vault, collateral_price, self);
         if vault_cr <= MINIMUM_COLLATERAL_RATIO || vault_cr >= RECOVERY_COLLATERAL_RATIO {
             return None;
         }
-        let collateral_value: ICUSD = vault.icp_margin_amount * icp_rate;
-        let numerator_icusd = vault.borrowed_icusd_amount * self.recovery_target_cr;
+        let ct = &vault.collateral_type;
+        let config = self.get_collateral_config(ct)?;
+        let price = Decimal::from_f64(config.last_price?)?;
+        let collateral_value: ICUSD = crate::numeric::collateral_usd_value(
+            vault.collateral_amount,
+            price,
+            config.decimals,
+        );
+        let recovery_target = self.get_recovery_target_cr_for(ct);
+        let liq_bonus = self.get_liquidation_bonus_for(ct);
+        let numerator_icusd = vault.borrowed_icusd_amount * recovery_target;
         if numerator_icusd <= collateral_value {
             return None; // already at or above target
         }
         let deficit = numerator_icusd - collateral_value;
-        let denominator = self.recovery_target_cr - self.liquidation_bonus;
+        let denominator = recovery_target - liq_bonus;
         let repay_amount = deficit / denominator;
         Some(repay_amount.min(vault.borrowed_icusd_amount))
     }
@@ -563,49 +996,82 @@ impl State {
     /// Compute the max partial liquidation amount: enough to restore a vault's CR to
     /// recovery_target_cr. Works in all modes. Returns the full debt if the vault is
     /// so deeply undercollateralized that the formula exceeds 100%.
-    pub fn compute_partial_liquidation_cap(&self, vault: &Vault, icp_rate: UsdIcp) -> ICUSD {
-        let collateral_value: ICUSD = vault.icp_margin_amount * icp_rate;
-        let numerator_icusd = vault.borrowed_icusd_amount * self.recovery_target_cr;
+    pub fn compute_partial_liquidation_cap(&self, vault: &Vault, _collateral_price: UsdIcp) -> ICUSD {
+        let ct = &vault.collateral_type;
+        let collateral_value: ICUSD = if let Some(config) = self.get_collateral_config(ct) {
+            if let Some(price) = config.last_price.and_then(Decimal::from_f64) {
+                crate::numeric::collateral_usd_value(vault.collateral_amount, price, config.decimals)
+            } else {
+                // No price — conservatively return full debt (allows full liquidation)
+                return vault.borrowed_icusd_amount;
+            }
+        } else {
+            return vault.borrowed_icusd_amount;
+        };
+        let recovery_target = self.get_recovery_target_cr_for(ct);
+        let liq_bonus = self.get_liquidation_bonus_for(ct);
+        let numerator_icusd = vault.borrowed_icusd_amount * recovery_target;
         if numerator_icusd <= collateral_value {
             // Already at or above target — shouldn't be liquidatable, but return 0
             return ICUSD::new(0);
         }
         let deficit = numerator_icusd - collateral_value;
-        let denominator = self.recovery_target_cr - self.liquidation_bonus;
+        let denominator = recovery_target - liq_bonus;
         let repay_amount = deficit / denominator;
         repay_amount.min(vault.borrowed_icusd_amount)
     }
 
-    pub fn liquidate_vault(&mut self, vault_id: u64, mode: Mode, icp_rate: UsdIcp) {
+    pub fn liquidate_vault(&mut self, vault_id: u64, mode: Mode, collateral_price: UsdIcp) {
         let vault = self
             .vault_id_to_vaults
             .get(&vault_id)
             .cloned()
             .expect("bug: vault not found");
 
-        let vault_collateral_ratio = compute_collateral_ratio(&vault, icp_rate);
+        let ct = vault.collateral_type;
+        let vault_collateral_ratio = compute_collateral_ratio(&vault, collateral_price, self);
 
         if mode == Mode::Recovery && vault_collateral_ratio > MINIMUM_COLLATERAL_RATIO {
             // Recovery mode: liquidate only enough to restore CR to recovery_target_cr
-            let collateral_value: ICUSD = vault.icp_margin_amount * icp_rate;
-            let numerator_icusd = vault.borrowed_icusd_amount * self.recovery_target_cr;
+            let config = match self.get_collateral_config(&ct) {
+                Some(c) => c,
+                None => return, // unknown collateral — cannot liquidate
+            };
+            let price = match config.last_price.and_then(Decimal::from_f64) {
+                Some(p) => p,
+                None => return, // no price — cannot compute
+            };
+            let decimals = config.decimals;
+
+            let collateral_value: ICUSD = crate::numeric::collateral_usd_value(
+                vault.collateral_amount,
+                price,
+                decimals,
+            );
+            let recovery_target = self.get_recovery_target_cr_for(&ct);
+            let liq_bonus = self.get_liquidation_bonus_for(&ct);
+            let numerator_icusd = vault.borrowed_icusd_amount * recovery_target;
 
             if numerator_icusd <= collateral_value {
                 return; // already at/above target
             }
 
             let deficit = numerator_icusd - collateral_value;
-            let denominator = self.recovery_target_cr - self.liquidation_bonus;
+            let denominator = recovery_target - liq_bonus;
             let repay_amount = (deficit / denominator).min(vault.borrowed_icusd_amount);
 
-            // Collateral seized = repay_amount / icp_rate * bonus
-            let icp_equivalent = repay_amount / icp_rate;
-            let collateral_seized = (icp_equivalent * self.liquidation_bonus).min(vault.icp_margin_amount);
+            // Collateral seized = icusd_to_collateral_amount(repay_amount * bonus)
+            let repay_with_bonus: ICUSD = repay_amount * liq_bonus;
+            let collateral_seized = crate::numeric::icusd_to_collateral_amount(
+                repay_with_bonus,
+                price,
+                decimals,
+            ).min(vault.collateral_amount);
 
             match self.vault_id_to_vaults.get_mut(&vault_id) {
                 Some(vault) => {
                     vault.borrowed_icusd_amount -= repay_amount;
-                    vault.icp_margin_amount -= collateral_seized;
+                    vault.collateral_amount -= collateral_seized;
                 }
                 None => ic_cdk::trap("liquidating unknown vault"),
             }
@@ -629,7 +1095,7 @@ impl State {
         for entry in entries {
             match self.vault_id_to_vaults.entry(entry.vault_id) {
                 Occupied(mut vault_entry) => {
-                    vault_entry.get_mut().icp_margin_amount += entry.icp_share_amount;
+                    vault_entry.get_mut().collateral_amount += entry.icp_share_amount.to_u64();
                     vault_entry.get_mut().borrowed_icusd_amount += entry.icusd_share_amount;
                 }
                 Vacant(_) => panic!("bug: vault not found"),
@@ -643,28 +1109,63 @@ impl State {
         }
     }
     
-    pub fn redeem_on_vaults(&mut self, icusd_amount: ICUSD, current_icp_rate: UsdIcp) {
+    pub fn redeem_on_vaults(
+        &mut self,
+        icusd_amount: ICUSD,
+        collateral_price: UsdIcp,
+        collateral_type: &CollateralType,
+    ) {
+        // Resolve config for price & decimals
+        let (price, decimals) = match self.get_collateral_config(collateral_type) {
+            Some(config) => {
+                let p = config.last_price
+                    .and_then(Decimal::from_f64)
+                    .expect("bug: redeem_on_vaults called without price");
+                (p, config.decimals)
+            }
+            None => panic!("bug: redeem_on_vaults called with unknown collateral type"),
+        };
+
+        let resolved_ct = if collateral_type == &Principal::anonymous() {
+            self.icp_ledger_principal
+        } else {
+            *collateral_type
+        };
+
         let mut icusd_amount_to_convert = icusd_amount;
         let mut vaults: BTreeSet<(Ratio, VaultId)> = BTreeSet::new();
-    
+
+        // SECURITY: Only include vaults matching the target collateral type
         for vault in self.vault_id_to_vaults.values() {
+            let vault_ct = if vault.collateral_type == Principal::anonymous() {
+                self.icp_ledger_principal
+            } else {
+                vault.collateral_type
+            };
+            if vault_ct != resolved_ct {
+                continue;
+            }
             vaults.insert((
-                crate::compute_collateral_ratio(vault, current_icp_rate),
+                crate::compute_collateral_ratio(vault, collateral_price, self),
                 vault.vault_id,
             ));
         }
-    
+
         let vault_ids: Vec<VaultId> = vaults.iter().map(|(_cr, vault_id)| *vault_id).collect();
         let mut index: usize = 0;
-    
+
         while icusd_amount_to_convert > 0 && index < vault_ids.len() {
             let vault = self.vault_id_to_vaults.get(&vault_ids[index]).unwrap();
-    
+
             if vault.borrowed_icusd_amount >= icusd_amount_to_convert {
                 // Convert everything on this vault
-                let redeemable_icp_amount: ICP = icusd_amount_to_convert / current_icp_rate;
+                let redeemable_collateral = crate::numeric::icusd_to_collateral_amount(
+                    icusd_amount_to_convert,
+                    price,
+                    decimals,
+                );
                 self.deduct_amount_from_vault(
-                    redeemable_icp_amount,
+                    redeemable_collateral,
                     icusd_amount_to_convert,
                     vault_ids[index],
                 );
@@ -672,9 +1173,13 @@ impl State {
             } else {
                 // Convert what we can on this vault
                 let redeemable_icusd_amount = vault.borrowed_icusd_amount;
-                let redeemable_icp_amount: ICP = redeemable_icusd_amount / current_icp_rate;
+                let redeemable_collateral = crate::numeric::icusd_to_collateral_amount(
+                    redeemable_icusd_amount,
+                    price,
+                    decimals,
+                );
                 self.deduct_amount_from_vault(
-                    redeemable_icp_amount,
+                    redeemable_collateral,
                     redeemable_icusd_amount,
                     vault_ids[index],
                 );
@@ -684,10 +1189,10 @@ impl State {
         }
         debug_assert!(icusd_amount_to_convert == 0);
     }
-    
+
     fn deduct_amount_from_vault(
         &mut self,
-        icp_amount_to_deduct: ICP,
+        collateral_to_deduct: u64,
         icusd_amount_to_deduct: ICUSD,
         vault_id: VaultId,
     ) {
@@ -695,8 +1200,8 @@ impl State {
             Some(vault) => {
                 assert!(vault.borrowed_icusd_amount >= icusd_amount_to_deduct);
                 vault.borrowed_icusd_amount -= icusd_amount_to_deduct;
-                assert!(vault.icp_margin_amount >= icp_amount_to_deduct);
-                vault.icp_margin_amount -= icp_amount_to_deduct;
+                assert!(vault.collateral_amount >= collateral_to_deduct);
+                vault.collateral_amount -= collateral_to_deduct;
             }
             None => ic_cdk::trap("cannot deduct from unknown vault"),
         }
@@ -820,21 +1325,24 @@ pub(crate) fn distribute_across_vaults(
     assert!(!vaults.is_empty());
 
     let target_vault_id = target_vault.vault_id;
-    let total_icp_margin: ICP = vaults
-        .iter()
-        .filter(|&(&vault_id, _vault)| vault_id != target_vault_id)
-        .map(|(_vault_id, vault)| vault.icp_margin_amount)
-        .sum();
+    let total_icp_margin: ICP = ICP::from(
+        vaults
+            .iter()
+            .filter(|&(&vault_id, _vault)| vault_id != target_vault_id)
+            .map(|(_vault_id, vault)| vault.collateral_amount)
+            .sum::<u64>()
+    );
     assert_ne!(total_icp_margin, ICP::new(0));
 
+    let target_collateral = ICP::from(target_vault.collateral_amount);
     let mut result = vec![];
     let mut distributed_icp: ICP = ICP::new(0);
     let mut distributed_icusd: ICUSD = ICUSD::new(0);
 
     for (vault_id, vault) in vaults {
         if *vault_id != target_vault_id {
-            let share: Ratio = vault.icp_margin_amount / total_icp_margin;
-            let icp_share = target_vault.icp_margin_amount * share;
+            let share: Ratio = ICP::from(vault.collateral_amount) / total_icp_margin;
+            let icp_share = target_collateral * share;
             let icusd_share = target_vault.borrowed_icusd_amount * share;
             distributed_icp += icp_share;
             distributed_icusd += icusd_share;
@@ -848,7 +1356,7 @@ pub(crate) fn distribute_across_vaults(
 
     if !result.is_empty() {
         result[0].icusd_share_amount += target_vault.borrowed_icusd_amount - distributed_icusd;
-        result[0].icp_share_amount += target_vault.icp_margin_amount - distributed_icp;
+        result[0].icp_share_amount += target_collateral - distributed_icp;
     }
 
     result
@@ -920,15 +1428,17 @@ mod tests {
         let vault1 = Vault {
             owner: Principal::anonymous(),
             vault_id: 1,
-            icp_margin_amount: ICP::new(500_000),
+            collateral_amount: 500_000,
             borrowed_icusd_amount: ICUSD::new(300_000),
+            collateral_type: Principal::anonymous(),
         };
-        
+
         let vault2 = Vault {
             owner: Principal::anonymous(),
-            vault_id: 2, 
-            icp_margin_amount: ICP::new(300_000),
+            vault_id: 2,
+            collateral_amount: 300_000,
             borrowed_icusd_amount: ICUSD::new(200_000),
+            collateral_type: Principal::anonymous(),
         };
 
         vaults.insert(1, vault1);
@@ -937,8 +1447,9 @@ mod tests {
         let target_vault = Vault {
             owner: Principal::anonymous(),
             vault_id: 3,
-            icp_margin_amount: ICP::new(700_000),
+            collateral_amount: 700_000,
             borrowed_icusd_amount: ICUSD::new(400_000),
+            collateral_type: Principal::anonymous(),
         };
 
         let result = distribute_across_vaults(&vaults, target_vault);
@@ -971,8 +1482,9 @@ mod tests {
         state.open_vault(Vault {
             owner,
             vault_id,
-            icp_margin_amount: ICP::new(1_000_000), // 0.01 ICP
+            collateral_amount: 1_000_000, // 0.01 ICP
             borrowed_icusd_amount: ICUSD::new(200_000_000), // 2 icUSD
+            collateral_type: Principal::anonymous(),
         });
 
         // Repay 0.01 icUSD (minimum partial repay in e8s is 1_000_000)
@@ -1000,8 +1512,9 @@ mod tests {
         });
         state.mode = Mode::Recovery;
 
-        // Set a price
-        let icp_rate = UsdIcp::from(dec!(5)); // $5 per ICP
+        // Set a price — must use set_icp_rate to sync CollateralConfig.last_price
+        let collateral_price = UsdIcp::from(dec!(5)); // $5 per ICP
+        state.set_icp_rate(collateral_price, None);
 
         // Vault at 140% CR (between 133% and 150%) — should get targeted liquidation
         // borrowed = 10 icUSD, margin = 2.8 ICP ⇒ collateral value = $14 ⇒ ratio = 1.4
@@ -1010,30 +1523,36 @@ mod tests {
         state.open_vault(Vault {
             owner,
             vault_id,
-            icp_margin_amount: ICP::new(280_000_000), // 2.8 ICP
+            collateral_amount: 280_000_000, // 2.8 ICP
             borrowed_icusd_amount: ICUSD::new(1_000_000_000), // 10 icUSD
+            collateral_type: Principal::anonymous(),
         });
 
+        // Move state into global so mutate_state/read_state work in this test.
+        replace_state(state);
+
         // Verify CR before
-        let cr_before = compute_collateral_ratio(
-            state.vault_id_to_vaults.get(&vault_id).unwrap(),
-            icp_rate,
-        );
+        let cr_before = read_state(|s| {
+            let vault = s.vault_id_to_vaults.get(&vault_id).unwrap();
+            compute_collateral_ratio(vault, collateral_price, s)
+        });
         assert!(cr_before.to_f64() > 1.33 && cr_before.to_f64() < 1.50,
             "CR before should be between 133% and 150%, got {}", cr_before.to_f64());
 
         // Execute protocol's recovery liquidation logic
-        state.liquidate_vault(vault_id, state.mode, icp_rate);
+        mutate_state(|s| s.liquidate_vault(vault_id, s.mode, collateral_price));
 
         // After recovery-mode targeted liquidation:
         // - Vault should still exist (not fully liquidated)
         // - Debt should NOT be zero
         // - CR should be approximately 1.55 (recovery_target_cr)
-        let vault = state.vault_id_to_vaults.get(&vault_id).unwrap();
-        assert!(vault.borrowed_icusd_amount > ICUSD::new(0),
+        let (borrowed_amount, cr_after) = read_state(|s| {
+            let vault = s.vault_id_to_vaults.get(&vault_id).unwrap();
+            (vault.borrowed_icusd_amount, compute_collateral_ratio(vault, collateral_price, s))
+        });
+        assert!(borrowed_amount > ICUSD::new(0),
             "Debt should not be zero after targeted recovery liquidation");
 
-        let cr_after = compute_collateral_ratio(vault, icp_rate);
         let cr_f64 = cr_after.to_f64();
         assert!(cr_f64 > 1.54 && cr_f64 < 1.56,
             "CR after should be approximately 1.55 (155%), got {:.4}", cr_f64);

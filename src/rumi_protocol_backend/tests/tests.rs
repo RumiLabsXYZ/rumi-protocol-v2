@@ -62,6 +62,10 @@ mod fixtures {
             icp_ledger_principal,
             fee_e8s: 10_000,
             developer_principal,
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
         };
         
         State::from(init_arg)
@@ -71,8 +75,9 @@ mod fixtures {
         Vault {
             owner,
             borrowed_icusd_amount: ICUSD::from(500 * 100_000_000),
-            icp_margin_amount: ICP::from(10 * 100_000_000),
+            collateral_amount: 10 * 100_000_000,
             vault_id,
+            collateral_type: Principal::anonymous(),
         }
     }
     
@@ -80,8 +85,9 @@ mod fixtures {
         Vault {
             owner,
             borrowed_icusd_amount: ICUSD::from(50 * 100_000_000),
-            icp_margin_amount: ICP::from(10 * 100_000_000),
+            collateral_amount: 10 * 100_000_000,
             vault_id,
+            collateral_type: Principal::anonymous(),
         }
     }
     
@@ -89,8 +95,9 @@ mod fixtures {
         Vault {
             owner,
             borrowed_icusd_amount: ICUSD::from(100 * 100_000_000),
-            icp_margin_amount: ICP::from(5 * 100_000_000),
+            collateral_amount: 5 * 100_000_000,
             vault_id,
+            collateral_type: Principal::anonymous(),
         }
     }
 }
@@ -155,8 +162,8 @@ mod vault_tests {
         let user = Principal::from_text("2vxsx-fae").unwrap();
         set_mock_caller(user);
         
-        state.last_icp_rate = Some(UsdIcp::from(dec!(10.0))); // 1 ICP = $10
-        
+        state.set_icp_rate(UsdIcp::from(dec!(10.0)), None); // 1 ICP = $10
+
         let vault_id = state.increment_vault_id();
         let vault = fixtures::create_healthy_vault(mock_caller(), vault_id);
         
@@ -176,16 +183,16 @@ mod vault_tests {
     #[test]
     fn test_open_vault_validation() {
         let mut state = fixtures::create_test_state();
-        state.last_icp_rate = Some(UsdIcp::from(dec!(10.0)));
-        
+        state.set_icp_rate(UsdIcp::from(dec!(10.0)), None);
+
         // Test minimum ICP amount validation
         let too_small_margin = MIN_ICP_AMOUNT.to_u64() - 1;
         assert!(too_small_margin < MIN_ICP_AMOUNT.to_u64());
         
         // Check collateralization ratio calculations
         let icp_margin = ICP::from(10 * 100_000_000); // 10 ICP
-        let icp_rate = UsdIcp::from(dec!(10.0)); // 1 ICP = $10
-        let max_borrowable_amount = icp_margin * icp_rate 
+        let collateral_price = UsdIcp::from(dec!(10.0)); // 1 ICP = $10
+        let max_borrowable_amount = icp_margin * collateral_price
             / rumi_protocol_backend::MINIMUM_COLLATERAL_RATIO;
             
         // Assert it's approximately 75.18 ICUSD (10 ICP * $10 / 1.33)
@@ -197,10 +204,10 @@ mod vault_tests {
     fn test_borrow_and_repay_calculations() {
         let mut state = fixtures::create_test_state();
         let vault_id = setup_test_vault(&mut state);
-        state.last_icp_rate = Some(UsdIcp::from(dec!(10.0)));
+        state.set_icp_rate(UsdIcp::from(dec!(10.0)), None);
         
         let vault = state.vault_id_to_vaults.get(&vault_id).unwrap();
-        let max_borrowable = vault.icp_margin_amount * UsdIcp::from(dec!(10.0)) 
+        let max_borrowable = ICP::from(vault.collateral_amount) * UsdIcp::from(dec!(10.0))
             / rumi_protocol_backend::MINIMUM_COLLATERAL_RATIO;
             
         // Record a borrow (simulate borrow_from_vault logic)
@@ -220,29 +227,31 @@ mod vault_tests {
     
     #[test]
     fn test_vault_collateral_ratio() {
+        let mut state = fixtures::create_test_state();
         let vault = fixtures::create_healthy_vault(
-            Principal::from_text("2vxsx-fae").unwrap(), 
+            Principal::from_text("2vxsx-fae").unwrap(),
             1
         );
-        
+
         // Use the compute_collateral_ratio function to check the health
-        let icp_rate = UsdIcp::from(dec!(10.0)); // 1 ICP = $10
-        let collateral_ratio = rumi_protocol_backend::compute_collateral_ratio(&vault, icp_rate);
-        
+        let collateral_price = UsdIcp::from(dec!(10.0)); // 1 ICP = $10
+        state.set_icp_rate(collateral_price, None);
+        let collateral_ratio = rumi_protocol_backend::compute_collateral_ratio(&vault, collateral_price, &state);
+
         // 10 ICP * $10 / 50 ICUSD = 2.0 = 200% collateral ratio
         assert_eq!(collateral_ratio.0, dec!(2.0));
-        
+
         // Test with an unhealthy vault
         let unhealthy_vault = fixtures::create_unhealthy_vault(
             Principal::from_text("2vxsx-fae").unwrap(),
             2
         );
-        
-        let unhealthy_ratio = rumi_protocol_backend::compute_collateral_ratio(&unhealthy_vault, icp_rate);
-        
+
+        let unhealthy_ratio = rumi_protocol_backend::compute_collateral_ratio(&unhealthy_vault, collateral_price, &state);
+
         // 5 ICP * $10 / 100 ICUSD = 0.5 = 50% collateral ratio (unhealthy)
         assert_eq!(unhealthy_ratio.0, dec!(0.5));
-        
+
         // Now check if it's below minimum
         assert!(unhealthy_ratio < rumi_protocol_backend::MINIMUM_COLLATERAL_RATIO);
     }
@@ -259,13 +268,14 @@ mod vault_tests {
         );
         
         state.vault_id_to_vaults.insert(vault_id, unhealthy_vault);
-        state.last_icp_rate = Some(UsdIcp::from(dec!(10.0)));
-        
+        state.set_icp_rate(UsdIcp::from(dec!(10.0)), None);
+
         // Check if it would be liquidated
-        let icp_rate = state.last_icp_rate.unwrap();
+        let collateral_price = state.last_icp_rate.unwrap();
         let collateral_ratio = rumi_protocol_backend::compute_collateral_ratio(
             state.vault_id_to_vaults.get(&vault_id).unwrap(),
-            icp_rate
+            collateral_price,
+            &state
         );
         
         assert!(collateral_ratio < state.mode.get_minimum_liquidation_collateral_ratio());
@@ -286,15 +296,15 @@ mod protocol_safety_tests {
         let vault = fixtures::create_healthy_vault(user, vault_id);
         
         state.vault_id_to_vaults.insert(vault_id, vault);
-        state.last_icp_rate = Some(UsdIcp::from(dec!(10.0))); // 1 ICP = $10
-        
+        state.set_icp_rate(UsdIcp::from(dec!(10.0)), None); // 1 ICP = $10
+
         // Calculate total collateral ratio
-        let icp_rate = state.last_icp_rate.unwrap();
-        let initial_ratio = state.compute_total_collateral_ratio(icp_rate);  // Fixed: use correct method with required parameter
+        let collateral_price = state.last_icp_rate.unwrap();
+        let initial_ratio = state.compute_total_collateral_ratio(collateral_price);  // Fixed: use correct method with required parameter
         assert!(initial_ratio > Ratio::from(dec!(1.0)));
-        
+
         // Simulate price drop
-        state.last_icp_rate = Some(UsdIcp::from(dec!(5.0))); // 1 ICP = $5
+        state.set_icp_rate(UsdIcp::from(dec!(5.0)), None); // 1 ICP = $5
         
         // Recalculate collateral ratio
         let after_drop_ratio = state.compute_total_collateral_ratio(UsdIcp::from(dec!(5.0)));  // Fixed: use correct method with required parameter
@@ -328,12 +338,12 @@ mod protocol_safety_tests {
         state.vault_id_to_vaults.insert(2, vault2);
         
         // Set rate and calculate initial ratio
-        let icp_rate = UsdIcp::from(dec!(10.0));
-        state.last_icp_rate = Some(icp_rate);
-        
+        let collateral_price = UsdIcp::from(dec!(10.0));
+        state.set_icp_rate(collateral_price, None);
+
         // Calculate the initial ratio directly without unwrapping
         // FIX: Use explicit rate parameter instead of unwrapping state.last_icp_rate
-        let initial_ratio = state.compute_total_collateral_ratio(icp_rate);
+        let initial_ratio = state.compute_total_collateral_ratio(collateral_price);
         state.total_collateral_ratio = initial_ratio;
         
         // Should still be in GA mode
@@ -341,7 +351,7 @@ mod protocol_safety_tests {
         
         // Now simulate significant price drop
         let new_rate = UsdIcp::from(dec!(5.0));
-        state.last_icp_rate = Some(new_rate);
+        state.set_icp_rate(new_rate, None);
         
         // Calculate the new ratio directly without unwrapping
         // FIX: Use explicit rate parameter instead of unwrapping
@@ -383,23 +393,23 @@ mod protocol_safety_tests {
         state.vault_id_to_vaults.insert(2, vault2.clone());
         
         // Set ICP rate directly rather than accessing via unwrap
-        let icp_rate = UsdIcp::from(dec!(10.0));
-        state.last_icp_rate = Some(icp_rate);
-        
+        let collateral_price = UsdIcp::from(dec!(10.0));
+        state.set_icp_rate(collateral_price, None);
+
         // Calculate redemption fee
         let redemption_amount = ICUSD::from(10 * 100_000_000); // 10 ICUSD
         let fee_rate = state.get_redemption_fee(redemption_amount);
         let fee_amount = redemption_amount * fee_rate;
-        
+
         assert!(fee_amount.to_u64() > 0); // Should have non-zero fee
-        
+
         // Calculate how redemption would affect state
         let net_redemption = redemption_amount - fee_amount;
-        let icp_equivalent = net_redemption / icp_rate;
-        
+        let collateral_equivalent = net_redemption / collateral_price;
+
         // This amount should be less than the total margin
-        let total_margin = vault1.icp_margin_amount + vault2.icp_margin_amount;
-        assert!(icp_equivalent < total_margin);
+        let total_margin = ICP::from(vault1.collateral_amount) + ICP::from(vault2.collateral_amount);
+        assert!(collateral_equivalent < total_margin);
     }
 
     #[test]
@@ -425,18 +435,19 @@ mod protocol_safety_tests {
         let borderline_vault = Vault {
             owner: borderline_owner,
             borrowed_icusd_amount: ICUSD::from(70 * 100_000_000), // 70 ICUSD borrowed
-            icp_margin_amount: ICP::from(10 * 100_000_000),       // 10 ICP margin
+            collateral_amount: 10 * 100_000_000,                  // 10 ICP margin
             vault_id: borderline_vault_id,
+            collateral_type: Principal::anonymous(),
         };
         
         state.vault_id_to_vaults.insert(healthy_vault_id, healthy_vault.clone());
         state.vault_id_to_vaults.insert(borderline_vault_id, borderline_vault.clone());
         
         println!("🏦 Created test vaults:");
-        println!("   Healthy vault:    {} icUSD borrowed, {} ICP margin", 
-                 healthy_vault.borrowed_icusd_amount, healthy_vault.icp_margin_amount);
-        println!("   Borderline vault: {} icUSD borrowed, {} ICP margin", 
-                 borderline_vault.borrowed_icusd_amount, borderline_vault.icp_margin_amount);
+        println!("   Healthy vault:    {} icUSD borrowed, {} ICP margin",
+                 healthy_vault.borrowed_icusd_amount, healthy_vault.collateral_amount);
+        println!("   Borderline vault: {} icUSD borrowed, {} ICP margin",
+                 borderline_vault.borrowed_icusd_amount, borderline_vault.collateral_amount);
         
         // Make sure owners are properly recorded in principal_to_vault_ids
         let mut healthy_owner_vaults = std::collections::BTreeSet::new();
@@ -450,14 +461,15 @@ mod protocol_safety_tests {
         // Set initial ICP rate - at $10 per ICP, the borderline vault is ok
         // 10 ICP * $10 / 70 ICUSD = ~1.43 (which is > 1.33 minimum requirement)
         let initial_rate = UsdIcp::from(dec!(10.0));
-        state.last_icp_rate = Some(initial_rate);
+        state.set_icp_rate(initial_rate, None);
         println!("💱 Initial ICP rate: $10.00 per ICP");
         
         // Calculate collateral ratio at $10
         // FIX: Pass the rate explicitly rather than unwrapping from state
         let initial_ratio = rumi_protocol_backend::compute_collateral_ratio(
-            &borderline_vault, 
-            initial_rate
+            &borderline_vault,
+            initial_rate,
+            &state
         );
         println!("📊 Initial collateral ratio: {}", initial_ratio);
         
@@ -469,14 +481,15 @@ mod protocol_safety_tests {
         // Now simulate price drop to $9 per ICP
         // 10 ICP * $9 / 70 ICUSD = ~1.29 (below 1.33 minimum, should trigger liquidation)
         let new_rate = UsdIcp::from(dec!(9.0));
-        state.last_icp_rate = Some(new_rate);
+        state.set_icp_rate(new_rate, None);
         println!("📉 Simulating price drop: $9.00 per ICP");
         
         // Compute the new ratio
         // FIX: Pass the rate explicitly rather than unwrapping from state
         let new_ratio = rumi_protocol_backend::compute_collateral_ratio(
-            &borderline_vault, 
-            new_rate
+            &borderline_vault,
+            new_rate,
+            &state
         );
         println!("📊 New collateral ratio after price drop: {}", new_ratio);
         
@@ -641,13 +654,14 @@ mod minting_tests {
         let vault = Vault {
             owner: user,
             borrowed_icusd_amount: ICUSD::from(0),
-            icp_margin_amount: ICP::from(10 * 100_000_000), // 10 ICP
+            collateral_amount: 10 * 100_000_000, // 10 ICP
             vault_id,
+            collateral_type: Principal::anonymous(),
         };
-        println!("💰 Created vault with {} ICP margin", vault.icp_margin_amount);
+        println!("💰 Created vault with {} ICP margin", vault.collateral_amount);
         
         state.vault_id_to_vaults.insert(vault_id, vault);
-        state.last_icp_rate = Some(UsdIcp::from(dec!(10.0))); // 1 ICP = $10
+        state.set_icp_rate(UsdIcp::from(dec!(10.0)), None); // 1 ICP = $10
         println!("💱 Set ICP rate: $10.00 per ICP");
         
         // Create a mint tracker
@@ -801,12 +815,12 @@ mod minting_tests {
         state.vault_id_to_vaults.insert(1, vault1.clone());
         state.vault_id_to_vaults.insert(2, vault2.clone());
         println!("🏦 Created two healthy vaults for redemption testing");
-        println!("   Vault 1: {} icUSD borrowed, {} ICP margin", vault1.borrowed_icusd_amount, vault1.icp_margin_amount);
-        println!("   Vault 2: {} icUSD borrowed, {} ICP margin", vault2.borrowed_icusd_amount, vault2.icp_margin_amount);
+        println!("   Vault 1: {} icUSD borrowed, {} ICP margin", vault1.borrowed_icusd_amount, vault1.collateral_amount);
+        println!("   Vault 2: {} icUSD borrowed, {} ICP margin", vault2.borrowed_icusd_amount, vault2.collateral_amount);
         
         // Set ICP rate WITHOUT accessing via unwrap
-        let icp_rate = UsdIcp::from(dec!(10.0));
-        state.last_icp_rate = Some(icp_rate);
+        let collateral_price = UsdIcp::from(dec!(10.0));
+        state.set_icp_rate(collateral_price, None);
         println!("💱 Set ICP rate: $10.00 per ICP");
         
         // Track icUSD transfers/burns
@@ -847,7 +861,7 @@ mod minting_tests {
         println!("✓ Burned from correct user");
         
         // Verify the appropriate ICP would be sent back
-        // FIX: Do NOT unwrap state.last_icp_rate, use the local icp_rate variable
+        // FIX: Do NOT unwrap state.last_icp_rate, use the local collateral_price variable
         let fee_rate = state.get_redemption_fee(redeem_amount);
         println!("📊 Redemption fee rate: {}", fee_rate);
         
@@ -857,13 +871,13 @@ mod minting_tests {
         let net_redeem = redeem_amount - fee_amount;
         println!("🧮 Net redemption after fee: {} icUSD", net_redeem);
         
-        // Calculate ICP equivalent of the redeemed amount using the local icp_rate variable
+        // Calculate collateral equivalent of the redeemed amount using the local collateral_price variable
         // FIX: Instead of unwrapping from state
-        let icp_to_send = net_redeem / icp_rate;
-        println!("💰 ICP to send back: {} ICP", icp_to_send);
-        
+        let collateral_to_send = net_redeem / collateral_price;
+        println!("💰 ICP to send back: {} ICP", collateral_to_send);
+
         // Verify a non-zero amount of ICP would be sent back
-        assert!(icp_to_send.to_u64() > 0);
+        assert!(collateral_to_send.to_u64() > 0);
         println!("✓ Non-zero ICP amount will be sent back");
         
         println!("🎉 TEST PASSED: test_redeem_icusd_burn_and_transfer\n");

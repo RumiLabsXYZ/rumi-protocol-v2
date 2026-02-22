@@ -6,8 +6,8 @@ use ic_cdk::update;
 use crate::guard::GuardPrincipal;
 use crate::GuardError;
 use crate::logs::INFO;
-use crate::management::{mint_icusd, transfer_icp_from, transfer_icusd_from, transfer_stable_from};
-use crate::numeric::{ICUSD, ICP, Ratio};
+use crate::management::{mint_icusd, transfer_collateral_from, transfer_icusd_from, transfer_stable_from};
+use crate::numeric::{ICUSD, ICP, UsdIcp};
 use crate::{
     mutate_state, read_state, ProtocolError, SuccessWithFee, MIN_ICP_AMOUNT, MIN_ICUSD_AMOUNT,
     DUST_THRESHOLD,
@@ -21,7 +21,7 @@ use crate::DEBUG;
 use crate::management;
 use crate::PendingMarginTransfer;
 use rust_decimal::prelude::ToPrimitive;
-use rust_decimal_macros::dec;
+
 use crate::compute_collateral_ratio;
 
 
@@ -38,20 +38,39 @@ pub struct VaultArg {
     pub amount: u64,
 }
 
+/// Returns `Principal::anonymous()` as sentinel for old events missing `collateral_type`.
+/// The replay handler replaces this with the actual ICP ledger principal.
+pub(crate) fn default_collateral_type() -> Principal {
+    Principal::anonymous()
+}
+
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Deserialize, Serialize, PartialOrd, Ord)]
 pub struct Vault {
     pub owner: Principal,
     pub borrowed_icusd_amount: ICUSD,
-    pub icp_margin_amount: ICP,
+    /// Raw collateral amount in token's native precision (e.g., e8s for ICP).
+    /// Renamed from `icp_margin_amount`; serde alias handles old events.
+    #[serde(alias = "icp_margin_amount")]
+    pub collateral_amount: u64,
     pub vault_id: u64,
+    /// Ledger canister ID identifying the collateral token.
+    /// Old events lack this field; serde default → Principal::anonymous(),
+    /// fixed up to ICP ledger principal during event replay.
+    #[serde(default = "default_collateral_type")]
+    pub collateral_type: Principal,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Debug)]
 pub struct CandidVault {
     pub owner: Principal,
     pub borrowed_icusd_amount: u64,
+    /// Kept for frontend backward compatibility
     pub icp_margin_amount: u64,
     pub vault_id: u64,
+    /// Raw collateral amount (same value as icp_margin_amount for ICP vaults)
+    pub collateral_amount: u64,
+    /// Ledger canister ID of the collateral token
+    pub collateral_type: Principal,
 }
 
 impl From<Vault> for CandidVault {
@@ -59,15 +78,27 @@ impl From<Vault> for CandidVault {
         Self {
             owner: vault.owner,
             borrowed_icusd_amount: vault.borrowed_icusd_amount.to_u64(),
-            icp_margin_amount: vault.icp_margin_amount.to_u64(),
+            icp_margin_amount: vault.collateral_amount,
             vault_id: vault.vault_id,
+            collateral_amount: vault.collateral_amount,
+            collateral_type: vault.collateral_type,
         }
     }
 }
 
-pub async fn redeem_icp(_icusd_amount: u64) -> Result<SuccessWithFee, ProtocolError> {
+/// Thin wrapper for backward compatibility. Calls `redeem_collateral` with ICP.
+pub async fn redeem_icp(icusd_amount: u64) -> Result<SuccessWithFee, ProtocolError> {
+    let icp_ledger = read_state(|s| s.icp_collateral_type());
+    redeem_collateral(icp_ledger, icusd_amount).await
+}
+
+/// Generic collateral redemption: burn icUSD and receive collateral tokens.
+/// Currently the redemption logic (vault sorting, pending transfers) is ICP-centric,
+/// but the API surface supports any collateral type. The internal logic will be
+/// generalized per-collateral when a second collateral type is actually added.
+pub async fn redeem_collateral(collateral_type: Principal, _icusd_amount: u64) -> Result<SuccessWithFee, ProtocolError> {
     let caller = ic_cdk::api::caller();
-    let _guard_principal = GuardPrincipal::new(caller, "redeem_icp")?;
+    let _guard_principal = GuardPrincipal::new(caller, "redeem_collateral")?;
 
     let icusd_amount: ICUSD = _icusd_amount.into();
 
@@ -77,8 +108,23 @@ pub async fn redeem_icp(_icusd_amount: u64) -> Result<SuccessWithFee, ProtocolEr
         });
     }
 
-    let current_icp_rate = read_state(|s| s.last_icp_rate)
-        .ok_or(ProtocolError::GenericError("No ICP rate available. Price feed may be down.".to_string()))?;
+    // Check collateral status allows redemption
+    let collateral_status = read_state(|s| s.get_collateral_status(&collateral_type));
+    if let Some(status) = collateral_status {
+        if !status.allows_redemption() {
+            return Err(ProtocolError::GenericError(
+                format!("Redemption is not allowed for collateral type {}.", collateral_type),
+            ));
+        }
+    } else {
+        return Err(ProtocolError::GenericError(
+            format!("Collateral type {} not found.", collateral_type),
+        ));
+    }
+
+    let collateral_price = read_state(|s| s.get_collateral_price_decimal(&collateral_type))
+        .ok_or(ProtocolError::TemporarilyUnavailable("No price available for collateral".to_string()))?;
+    let current_collateral_price = UsdIcp::from(collateral_price);
 
     match transfer_icusd_from(icusd_amount, caller).await {
         Ok(block_index) => {
@@ -93,7 +139,7 @@ pub async fn redeem_icp(_icusd_amount: u64) -> Result<SuccessWithFee, ProtocolEr
                     caller,
                     icusd_amount - fee_amount,
                     fee_amount,
-                    current_icp_rate,
+                    current_collateral_price,
                     block_index,
                 );
                 fee_amount
@@ -113,7 +159,7 @@ pub async fn redeem_icp(_icusd_amount: u64) -> Result<SuccessWithFee, ProtocolEr
     }
 }
 
-pub async fn open_vault(icp_margin: u64) -> Result<OpenVaultSuccess, ProtocolError> {
+pub async fn open_vault(collateral_amount_raw: u64, collateral_type_opt: Option<Principal>) -> Result<OpenVaultSuccess, ProtocolError> {
     let caller = ic_cdk::api::caller();
     // Pass operation name to guard for better tracking
     let guard_principal = match GuardPrincipal::new(caller, "open_vault") {
@@ -131,7 +177,25 @@ pub async fn open_vault(icp_margin: u64) -> Result<OpenVaultSuccess, ProtocolErr
         Err(err) => return Err(err.into()),
     };
 
-    let icp_margin_amount = icp_margin.into();
+    // Resolve collateral type: default to ICP if not specified
+    let collateral_type = collateral_type_opt.unwrap_or_else(|| read_state(|s| s.icp_collateral_type()));
+
+    // Look up CollateralConfig; check status is Active
+    let (config_ledger, config_status) = read_state(|s| {
+        match s.get_collateral_config(&collateral_type) {
+            Some(config) => Ok((config.ledger_canister_id, config.status)),
+            None => Err(ProtocolError::GenericError("Collateral type not supported.".to_string())),
+        }
+    })?;
+
+    if !config_status.allows_open() {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "Collateral type is not accepting new vaults.".to_string(),
+        ));
+    }
+
+    let icp_margin_amount: ICP = collateral_amount_raw.into();
 
     if icp_margin_amount < MIN_ICP_AMOUNT {
         // Mark operation as failed since it didn't meet requirements
@@ -141,7 +205,7 @@ pub async fn open_vault(icp_margin: u64) -> Result<OpenVaultSuccess, ProtocolErr
         });
     }
 
-    match transfer_icp_from(icp_margin_amount, caller).await {
+    match transfer_collateral_from(collateral_amount_raw, caller, config_ledger).await {
         Ok(block_index) => {
             let vault_id = mutate_state(|s| {
                 let vault_id = s.increment_vault_id();
@@ -150,18 +214,19 @@ pub async fn open_vault(icp_margin: u64) -> Result<OpenVaultSuccess, ProtocolErr
                     Vault {
                         owner: caller,
                         borrowed_icusd_amount: 0.into(),
-                        icp_margin_amount,
+                        collateral_amount: collateral_amount_raw,
                         vault_id,
+                        collateral_type,
                     },
                     block_index,
                 );
                 vault_id
             });
             log!(INFO, "[open_vault] opened vault with id: {vault_id}");
-            
+
             // Mark operation as successfully completed
             guard_principal.complete();
-            
+
             Ok(OpenVaultSuccess {
                 vault_id,
                 block_index,
@@ -170,11 +235,13 @@ pub async fn open_vault(icp_margin: u64) -> Result<OpenVaultSuccess, ProtocolErr
         Err(transfer_from_error) => {
             // Explicitly mark as failed when an error occurs
             guard_principal.fail();
-            
+
             if let TransferFromError::BadFee { expected_fee } = transfer_from_error.clone() {
                 mutate_state(|s| {
                     if let Ok(fee) = u64::try_from(expected_fee.0) {
-                        s.icp_ledger_fee = ICP::from(fee);
+                        if let Some(config) = s.get_collateral_config_mut(&collateral_type) {
+                            config.ledger_fee = fee;
+                        }
                     }
                 });
             };
@@ -206,12 +273,15 @@ pub async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, Protocol
         });
     }
 
-    let (vault, icp_rate) = match read_state(|s| {
+    let (vault, collateral_price, config_decimals) = match read_state(|s| {
         match s.vault_id_to_vaults.get(&arg.vault_id) {
             Some(vault) => {
-                let icp_rate = s.last_icp_rate
-                    .ok_or("No ICP rate available. Price feed may be down.")?;
-                Ok((vault.clone(), icp_rate))
+                let price = s.get_collateral_price_decimal(&vault.collateral_type)
+                    .ok_or("No price available for collateral. Price feed may be down.")?;
+                let decimals = s.get_collateral_config(&vault.collateral_type)
+                    .map(|c| c.decimals)
+                    .unwrap_or(8);
+                Ok((vault.clone(), price, decimals))
             },
             None => {
                 Err("Vault not found. Please check the vault ID.")
@@ -225,13 +295,40 @@ pub async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, Protocol
         }
     };
 
+    // Check collateral status allows borrowing
+    let collateral_status = read_state(|s| s.get_collateral_status(&vault.collateral_type));
+    if let Some(status) = collateral_status {
+        if !status.allows_borrow() {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "Borrowing is not allowed for this collateral type.".to_string(),
+            ));
+        }
+    }
+
     if caller != vault.owner {
         guard_principal.fail();
         return Err(ProtocolError::CallerNotOwner);
     }
 
-    let max_borrowable_amount = vault.icp_margin_amount * icp_rate
-        / read_state(|s| s.mode.get_minimum_liquidation_collateral_ratio());
+    // Check debt ceiling
+    let current_debt = read_state(|s| s.total_debt_for_collateral(&vault.collateral_type));
+    let debt_ceiling = read_state(|s| {
+        s.get_collateral_config(&vault.collateral_type)
+            .map(|c| c.debt_ceiling)
+            .unwrap_or(u64::MAX)
+    });
+    if current_debt.to_u64() + amount.to_u64() > debt_ceiling {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(format!(
+            "Borrow would exceed debt ceiling ({} + {} > {})",
+            current_debt.to_u64(), amount.to_u64(), debt_ceiling
+        )));
+    }
+
+    let collateral_value = crate::numeric::collateral_usd_value(vault.collateral_amount, collateral_price, config_decimals);
+    let min_ratio = read_state(|s| s.get_min_collateral_ratio_for(&vault.collateral_type));
+    let max_borrowable_amount: ICUSD = collateral_value / min_ratio;
 
     if vault.borrowed_icusd_amount + amount > max_borrowable_amount {
         guard_principal.fail();
@@ -241,7 +338,7 @@ pub async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, Protocol
         )));
     }
 
-    let fee: ICUSD = read_state(|s| amount * s.get_borrowing_fee());
+    let fee: ICUSD = read_state(|s| amount * s.get_borrowing_fee_for(&vault.collateral_type));
 
     match mint_icusd(amount - fee, caller).await {
         Ok(block_index) => {
@@ -274,6 +371,17 @@ pub async fn repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
             return Err(ProtocolError::GenericError("Vault not found".to_string()));
         }
     };
+
+    // Check collateral status allows repayment
+    let collateral_status = read_state(|s| s.get_collateral_status(&vault.collateral_type));
+    if let Some(status) = collateral_status {
+        if !status.allows_repay() {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "Repayment is not allowed for this collateral type.".to_string(),
+            ));
+        }
+    }
 
     if caller != vault.owner {
         guard_principal.fail();
@@ -344,6 +452,17 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
         }
     };
 
+    // Check collateral status allows repayment
+    let collateral_status = read_state(|s| s.get_collateral_status(&vault.collateral_type));
+    if let Some(status) = collateral_status {
+        if !status.allows_repay() {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "Repayment is not allowed for this collateral type.".to_string(),
+            ));
+        }
+    }
+
     if caller != vault.owner {
         guard_principal.fail();
         return Err(ProtocolError::CallerNotOwner);
@@ -400,19 +519,41 @@ pub async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
         });
     }
 
-    let vault = match read_state(|s| s.vault_id_to_vaults.get(&arg.vault_id).cloned()) {
-        Some(v) => v,
-        None => {
+    let (vault, config_ledger) = match read_state(|s| {
+        match s.vault_id_to_vaults.get(&arg.vault_id) {
+            Some(v) => {
+                let ledger = s.get_collateral_config(&v.collateral_type)
+                    .map(|c| c.ledger_canister_id)
+                    .ok_or("Collateral type not configured")?;
+                Ok((v.clone(), ledger))
+            },
+            None => Err("Vault not found"),
+        }
+    }) {
+        Ok(result) => result,
+        Err(msg) => {
             guard_principal.fail();
-            return Err(ProtocolError::GenericError("Vault not found".to_string()));
+            return Err(ProtocolError::GenericError(msg.to_string()));
         }
     };
+
+    // Check collateral status allows adding collateral
+    let collateral_status = read_state(|s| s.get_collateral_status(&vault.collateral_type));
+    if let Some(status) = collateral_status {
+        if !status.allows_add_collateral() {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "Adding collateral is not allowed for this collateral type.".to_string(),
+            ));
+        }
+    }
+
     if caller != vault.owner {
         guard_principal.fail();
         return Err(ProtocolError::CallerNotOwner);
     }
 
-    match transfer_icp_from(amount, caller).await {
+    match transfer_collateral_from(arg.amount, caller, config_ledger).await {
         Ok(block_index) => {
             mutate_state(|s| record_add_margin_to_vault(s, arg.vault_id, amount, block_index));
             guard_principal.complete();
@@ -422,7 +563,9 @@ pub async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
             if let TransferFromError::BadFee { expected_fee } = error.clone() {
                 mutate_state(|s| {
                     if let Ok(fee) = u64::try_from(expected_fee.0) {
-                        s.icp_ledger_fee = ICP::from(fee);
+                        if let Some(config) = s.get_collateral_config_mut(&vault.collateral_type) {
+                            config.ledger_fee = fee;
+                        }
                     }
                 });
             };
@@ -463,6 +606,17 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
             .cloned()
             .ok_or(ProtocolError::GenericError("Vault not found".to_string()))
     })?;
+
+    // Check collateral status allows closing
+    let collateral_status = read_state(|s| s.get_collateral_status(&vault.collateral_type));
+    if let Some(status) = collateral_status {
+        if !status.allows_close() {
+            mutate_state(|s| s.complete_close_vault_request());
+            return Err(ProtocolError::GenericError(
+                "Closing vaults is not allowed for this collateral type.".to_string(),
+            ));
+        }
+    }
 
     // Verify caller is the owner
     if caller != vault.owner {
@@ -510,13 +664,13 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
     }
 
     // Verify there's no remaining collateral
-    if vault.icp_margin_amount > ICP::new(0) {
+    if vault.collateral_amount > 0 {
         mutate_state(|s| s.complete_close_vault_request());
         log!(
             INFO,
             "[close_vault] Cannot close vault #{} with remaining collateral: {}",
             vault_id,
-            vault.icp_margin_amount
+            vault.collateral_amount
         );
         return Err(ProtocolError::GenericError(
             "Cannot close vault with remaining collateral. Withdraw collateral first.".to_string()
@@ -584,7 +738,17 @@ pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
             .cloned()
             .ok_or(ProtocolError::GenericError("Vault not found".to_string()))
     })?;
-    
+
+    // Check collateral status allows withdrawal
+    let collateral_status = read_state(|s| s.get_collateral_status(&vault.collateral_type));
+    if let Some(status) = collateral_status {
+        if !status.allows_withdraw() {
+            return Err(ProtocolError::GenericError(
+                "Withdrawal is not allowed for this collateral type.".to_string(),
+            ));
+        }
+    }
+
     if caller != vault.owner {
         log!(
             INFO,
@@ -610,7 +774,7 @@ pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
     }
     
     // Check there's collateral to withdraw
-    if vault.icp_margin_amount == ICP::new(0) {
+    if vault.collateral_amount == 0 {
         log!(
             INFO,
             "[withdraw_collateral] Vault #{} has no collateral to withdraw",
@@ -618,75 +782,77 @@ pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
         );
         return Err(ProtocolError::GenericError("No collateral to withdraw".to_string()));
     }
-    
+
+    // Look up per-collateral config
+    let (ledger_canister_id, ledger_fee) = read_state(|s| {
+        let config = s.get_collateral_config(&vault.collateral_type)
+            .ok_or(ProtocolError::GenericError("Collateral type not configured".to_string()))?;
+        Ok::<_, ProtocolError>((config.ledger_canister_id, config.ledger_fee))
+    })?;
+
     // Get the amount to transfer
-    let amount_to_transfer = vault.icp_margin_amount;
+    let amount_to_transfer = ICP::from(vault.collateral_amount);
     log!(
         INFO,
-        "[withdraw_collateral] Withdrawing {} ICP from vault #{}",
+        "[withdraw_collateral] Withdrawing {} from vault #{}",
         amount_to_transfer,
         vault_id
     );
-    
+
     // Set margin to zero in vault BEFORE transferring to avoid reentrancy issues
     mutate_state(|state| {
         if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
-            vault.icp_margin_amount = ICP::new(0);
+            vault.collateral_amount = 0;
         }
     });
-    
-    // Make the ICP transfer with appropriate fee deduction
-    let ledger_fee = read_state(|s| s.icp_ledger_fee);
-    let transfer_amount = amount_to_transfer - ledger_fee;
-    
+
+    // Make the collateral transfer with appropriate fee deduction
+    let fee = ICP::from(ledger_fee);
+    let transfer_amount = amount_to_transfer - fee;
+
     log!(
         INFO,
-        "[withdraw_collateral] Transferring {} ICP (after fee deduction) to {}",
+        "[withdraw_collateral] Transferring {} (after fee deduction) to {}",
         transfer_amount,
         caller
     );
-    
-    match management::transfer_icp(transfer_amount, caller).await {
+
+    match management::transfer_collateral(transfer_amount.to_u64(), caller, ledger_canister_id).await {
         Ok(block_index) => {
             // Fix for the lifetime issue - we need to use a separate mutate_state call
             // Rather than passing a mutable reference to the state
             mutate_state(|s| crate::event::record_collateral_withdrawn(s, vault_id, amount_to_transfer, block_index));
-            
+
             log!(
                 INFO,
-                "[withdraw_collateral] Successfully withdrew {} ICP from vault #{}, transfer block_index: {}",
+                "[withdraw_collateral] Successfully withdrew {} from vault #{}, transfer block_index: {}",
                 amount_to_transfer,
                 vault_id,
                 block_index
             );
-            
+
             Ok(block_index)
         },
         Err(error) => {
             // If the transfer fails, we need to restore the collateral in the vault
             mutate_state(|state| {
                 if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
-                    vault.icp_margin_amount = amount_to_transfer;
+                    vault.collateral_amount = amount_to_transfer.to_u64();
                 }
             });
-            
+
             log!(
                 DEBUG,
-                "[withdraw_collateral] Failed to transfer {} ICP to {}, error: {}",
+                "[withdraw_collateral] Failed to transfer {} to {}, error: {}",
                 transfer_amount,
                 caller,
                 error
             );
-            
+
             Err(ProtocolError::TransferError(error))
         }
     }
 }
-
-// TODO(multi-collateral): This function hardcodes ICP as collateral type.
-// When vault struct is parameterized, replace icp_margin_amount with
-// generic collateral_amount, use collateral-type-specific ledger transfer,
-// and look up per-collateral-type minimum CR.
 pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u64, ProtocolError> {
     let caller = ic_cdk::caller();
     let _guard_principal = GuardPrincipal::new(caller, &format!("withdraw_partial_{}", vault_id))?;
@@ -701,19 +867,21 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
 
     log!(
         INFO,
-        "[withdraw_partial_collateral] Request to withdraw {} ICP from vault #{} by principal {}",
+        "[withdraw_partial_collateral] Request to withdraw {} from vault #{} by principal {}",
         withdraw_amount,
         vault_id,
         caller
     );
 
-    // Read vault and ICP rate from state
-    let (vault, icp_rate) = match read_state(|s| {
+    // Read vault, per-collateral price + config from state
+    let (vault, collateral_price, config_decimals, ledger_canister_id, ledger_fee) = match read_state(|s| {
         match s.vault_id_to_vaults.get(&vault_id) {
             Some(vault) => {
-                let icp_rate = s.last_icp_rate
-                    .ok_or("No ICP rate available. Price feed may be down.")?;
-                Ok((vault.clone(), icp_rate))
+                let price = s.get_collateral_price_decimal(&vault.collateral_type)
+                    .ok_or("No price available for collateral. Price feed may be down.")?;
+                let config = s.get_collateral_config(&vault.collateral_type)
+                    .ok_or("Collateral type not configured.")?;
+                Ok((vault.clone(), price, config.decimals, config.ledger_canister_id, config.ledger_fee))
             },
             None => Err("Vault not found. Please check the vault ID.")
         }
@@ -722,45 +890,58 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
         Err(msg) => return Err(ProtocolError::GenericError(msg.to_string())),
     };
 
+    // Check collateral status allows withdrawal
+    let collateral_status = read_state(|s| s.get_collateral_status(&vault.collateral_type));
+    if let Some(status) = collateral_status {
+        if !status.allows_withdraw() {
+            return Err(ProtocolError::GenericError(
+                "Withdrawal is not allowed for this collateral type.".to_string(),
+            ));
+        }
+    }
+
     if caller != vault.owner {
         return Err(ProtocolError::CallerNotOwner);
     }
 
-    if vault.icp_margin_amount == ICP::new(0) {
+    let vault_collateral = ICP::from(vault.collateral_amount);
+
+    if vault_collateral == ICP::new(0) {
         return Err(ProtocolError::GenericError("No collateral to withdraw".to_string()));
     }
 
     // Calculate max withdrawable amount that keeps CR >= minimum
-    // TODO(multi-collateral): min_ratio will come from per-collateral-type config
     let max_withdrawable = if vault.borrowed_icusd_amount == ICUSD::new(0) {
         // No debt — can withdraw everything
-        vault.icp_margin_amount
+        vault_collateral
     } else {
-        // min_collateral_icp = debt * min_ratio / icp_price
-        // max_withdrawable = current_collateral - min_collateral_icp
-        let min_ratio = read_state(|s| s.mode.get_minimum_liquidation_collateral_ratio());
-        // TODO(multi-collateral): use collateral-type-specific price oracle
-        let min_collateral_icp: ICP = (vault.borrowed_icusd_amount * min_ratio) / icp_rate;
+        // min_collateral_value = debt * min_ratio
+        // min_collateral_amount = icusd_to_collateral_amount(min_collateral_value, price, decimals)
+        // max_withdrawable = current_collateral - min_collateral_amount
+        let min_ratio = read_state(|s| s.get_min_collateral_ratio_for(&vault.collateral_type));
+        let min_collateral_value: ICUSD = vault.borrowed_icusd_amount * min_ratio;
+        let min_collateral_raw = crate::numeric::icusd_to_collateral_amount(min_collateral_value, collateral_price, config_decimals);
+        let min_collateral = ICP::from(min_collateral_raw);
 
-        if vault.icp_margin_amount <= min_collateral_icp {
+        if vault_collateral <= min_collateral {
             return Err(ProtocolError::GenericError(
                 "No excess collateral to withdraw. Your vault is already at or below the minimum collateral ratio.".to_string()
             ));
         }
 
-        vault.icp_margin_amount - min_collateral_icp
+        vault_collateral - min_collateral
     };
 
     if withdraw_amount > max_withdrawable {
         return Err(ProtocolError::GenericError(format!(
-            "Withdrawal amount exceeds maximum. Max withdrawable: {} ICP (keeps CR above minimum).",
+            "Withdrawal amount exceeds maximum. Max withdrawable: {} (keeps CR above minimum).",
             max_withdrawable
         )));
     }
 
     log!(
         INFO,
-        "[withdraw_partial_collateral] Max withdrawable: {} ICP, requested: {} ICP from vault #{}",
+        "[withdraw_partial_collateral] Max withdrawable: {}, requested: {} from vault #{}",
         max_withdrawable,
         withdraw_amount,
         vault_id
@@ -769,28 +950,27 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
     // Reduce margin BEFORE transferring to avoid reentrancy
     mutate_state(|state| {
         if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
-            vault.icp_margin_amount -= withdraw_amount;
+            vault.collateral_amount -= withdraw_amount.to_u64();
         }
     });
 
-    // TODO(multi-collateral): use collateral-type-specific ledger fee and transfer fn
-    let ledger_fee = read_state(|s| s.icp_ledger_fee);
-    let transfer_amount = withdraw_amount - ledger_fee;
+    let fee = ICP::from(ledger_fee);
+    let transfer_amount = withdraw_amount - fee;
 
     log!(
         INFO,
-        "[withdraw_partial_collateral] Transferring {} ICP (after fee) to {}",
+        "[withdraw_partial_collateral] Transferring {} (after fee) to {}",
         transfer_amount,
         caller
     );
 
-    match management::transfer_icp(transfer_amount, caller).await {
+    match management::transfer_collateral(transfer_amount.to_u64(), caller, ledger_canister_id).await {
         Ok(block_index) => {
             mutate_state(|s| crate::event::record_partial_collateral_withdrawn(s, vault_id, withdraw_amount, block_index));
 
             log!(
                 INFO,
-                "[withdraw_partial_collateral] Successfully withdrew {} ICP from vault #{}, block_index: {}",
+                "[withdraw_partial_collateral] Successfully withdrew {} from vault #{}, block_index: {}",
                 withdraw_amount,
                 vault_id,
                 block_index
@@ -802,13 +982,13 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
             // Restore collateral on transfer failure
             mutate_state(|state| {
                 if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
-                    vault.icp_margin_amount += withdraw_amount;
+                    vault.collateral_amount += withdraw_amount.to_u64();
                 }
             });
 
             log!(
                 DEBUG,
-                "[withdraw_partial_collateral] Failed to transfer {} ICP to {}, error: {}",
+                "[withdraw_partial_collateral] Failed to transfer {} to {}, error: {}",
                 transfer_amount,
                 caller,
                 error
@@ -838,7 +1018,17 @@ pub async fn withdraw_and_close_vault(vault_id: u64) -> Result<Option<u64>, Prot
             .cloned()
             .ok_or(ProtocolError::GenericError(format!("Vault #{} not found", vault_id)))
     })?;
-    
+
+    // Check collateral status allows withdraw + close
+    let collateral_status = read_state(|s| s.get_collateral_status(&vault.collateral_type));
+    if let Some(status) = collateral_status {
+        if !status.allows_withdraw() || !status.allows_close() {
+            return Err(ProtocolError::GenericError(
+                "Withdraw-and-close is not allowed for this collateral type.".to_string(),
+            ));
+        }
+    }
+
     // Verify caller is the owner
     if caller != vault.owner {
         log!(
@@ -849,7 +1039,7 @@ pub async fn withdraw_and_close_vault(vault_id: u64) -> Result<Option<u64>, Prot
         );
         return Err(ProtocolError::CallerNotOwner);
     }
-    
+
     // Check there's no debt
     if vault.borrowed_icusd_amount > ICUSD::new(0) {
         log!(
@@ -864,67 +1054,74 @@ pub async fn withdraw_and_close_vault(vault_id: u64) -> Result<Option<u64>, Prot
         )));
     }
     
+    // Look up per-collateral config
+    let (ledger_canister_id, ledger_fee) = read_state(|s| {
+        let config = s.get_collateral_config(&vault.collateral_type)
+            .ok_or(ProtocolError::GenericError("Collateral type not configured".to_string()))?;
+        Ok::<_, ProtocolError>((config.ledger_canister_id, config.ledger_fee))
+    })?;
+
     // If there's collateral, withdraw it first
     let mut block_index: Option<u64> = None;
-    let amount_to_transfer = vault.icp_margin_amount; // Get the amount even if zero
-    
+    let amount_to_transfer = ICP::from(vault.collateral_amount);
+
     if amount_to_transfer > ICP::new(0) {
         log!(
             INFO,
-            "[withdraw_and_close] Withdrawing {} ICP from vault #{}",
+            "[withdraw_and_close] Withdrawing {} from vault #{}",
             amount_to_transfer,
             vault_id
         );
-        
+
         // Set margin to zero in vault BEFORE transferring to avoid reentrancy issues
         mutate_state(|state| {
             if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
-                vault.icp_margin_amount = ICP::new(0);
+                vault.collateral_amount = 0;
             }
         });
-        
-        // Make the ICP transfer with appropriate fee deduction
-        let ledger_fee = read_state(|s| s.icp_ledger_fee);
-        let transfer_amount = amount_to_transfer - ledger_fee;
-        
+
+        // Make the collateral transfer with appropriate fee deduction
+        let fee = ICP::from(ledger_fee);
+        let transfer_amount = amount_to_transfer - fee;
+
         log!(
             INFO,
-            "[withdraw_and_close] Transferring {} ICP (after fee deduction) to {}",
+            "[withdraw_and_close] Transferring {} (after fee deduction) to {}",
             transfer_amount,
             caller
         );
-        
-        match management::transfer_icp(transfer_amount, caller).await {
+
+        match management::transfer_collateral(transfer_amount.to_u64(), caller, ledger_canister_id).await {
             Ok(idx) => {
                 // Record the withdrawal event
                 mutate_state(|s| crate::event::record_collateral_withdrawn(s, vault_id, amount_to_transfer, idx));
-                
+
                 log!(
                     INFO,
-                    "[withdraw_and_close] Successfully withdrew {} ICP from vault #{}, block_index: {}",
+                    "[withdraw_and_close] Successfully withdrew {} from vault #{}, block_index: {}",
                     amount_to_transfer,
                     vault_id,
                     idx
                 );
-                
+
                 block_index = Some(idx);
             },
             Err(error) => {
                 // CRITICAL: If the transfer fails, restore the collateral and exit WITHOUT closing the vault
                 mutate_state(|state| {
                     if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
-                        vault.icp_margin_amount = amount_to_transfer;
+                        vault.collateral_amount = amount_to_transfer.to_u64();
                     }
                 });
-                
+
                 log!(
                     DEBUG,
-                    "[withdraw_and_close] Failed to transfer {} ICP to {}, error: {}",
+                    "[withdraw_and_close] Failed to transfer {} to {}, error: {}",
                     transfer_amount,
                     caller,
                     error
                 );
-                
+
                 return Err(ProtocolError::TransferError(error));
             }
         }
@@ -974,23 +1171,35 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
     }
     
     // Step 1: Validate vault is liquidatable and get partial liquidation amounts
-    let (vault, icp_rate, _mode, max_liquidatable_debt, collateral_to_liquidator) = match read_state(|s| {
+    let (vault, collateral_price, config_decimals, collateral_price_usd, _mode, max_liquidatable_debt, collateral_to_liquidator) = match read_state(|s| {
         match s.vault_id_to_vaults.get(&vault_id) {
             Some(vault) => {
-                let icp_rate = s.last_icp_rate
-                    .ok_or_else(|| "No ICP rate available. Price feed may be down.".to_string())?;
-                let ratio = compute_collateral_ratio(vault, icp_rate);
+                // Check collateral status allows liquidation
+                if let Some(status) = s.get_collateral_status(&vault.collateral_type) {
+                    if !status.allows_liquidation() {
+                        return Err("Liquidation is not allowed for this collateral type.".to_string());
+                    }
+                }
 
-                if ratio >= s.mode.get_minimum_liquidation_collateral_ratio() {
+                let price = s.get_collateral_price_decimal(&vault.collateral_type)
+                    .ok_or_else(|| "No price available for collateral. Price feed may be down.".to_string())?;
+                let decimals = s.get_collateral_config(&vault.collateral_type)
+                    .map(|c| c.decimals)
+                    .unwrap_or(8);
+                let collateral_price_usd = UsdIcp::from(price);
+                let ratio = compute_collateral_ratio(vault, collateral_price_usd, s);
+                let min_liq_ratio = s.get_min_liquidation_ratio_for(&vault.collateral_type);
+
+                if ratio >= min_liq_ratio {
                     Err(format!(
                         "Vault #{} is not liquidatable. Current ratio: {}, minimum: {}",
                         vault_id,
                         ratio.to_f64(),
-                        s.mode.get_minimum_liquidation_collateral_ratio().to_f64()
+                        min_liq_ratio.to_f64()
                     ))
                 } else {
                     // Cap at the amount needed to restore vault CR to recovery_target_cr
-                    let max_liquidatable = s.compute_partial_liquidation_cap(vault, icp_rate);
+                    let max_liquidatable = s.compute_partial_liquidation_cap(vault, collateral_price_usd);
 
                     // Ensure requested amount doesn't exceed maximum
                     let actual_liquidation_amount = liquidation_amount.min(max_liquidatable).min(vault.borrowed_icusd_amount);
@@ -1000,11 +1209,12 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
                     }
 
                     // Calculate collateral to transfer (debt + liquidation bonus)
-                    let icp_equivalent = actual_liquidation_amount / icp_rate;
-                    let collateral_with_bonus = icp_equivalent * s.liquidation_bonus;
-                    let collateral_to_transfer = collateral_with_bonus.min(vault.icp_margin_amount);
+                    let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
+                    let collateral_raw = crate::numeric::icusd_to_collateral_amount(actual_liquidation_amount, price, decimals);
+                    let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
+                    let collateral_to_transfer = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
 
-                    Ok((vault.clone(), icp_rate, s.mode, actual_liquidation_amount, collateral_to_transfer))
+                    Ok((vault.clone(), price, decimals, collateral_price_usd, s.mode, actual_liquidation_amount, collateral_to_transfer))
                 }
             },
             None => Err(format!("Vault #{} not found", vault_id)),
@@ -1024,7 +1234,7 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
         vault.borrowed_icusd_amount.to_u64(),
         collateral_to_liquidator.to_u64()
     );
-    
+
     // Step 2: Take icUSD from liquidator
     let icusd_block_index = match transfer_icusd_from(max_liquidatable_debt, caller).await {
         Ok(block_index) => {
@@ -1036,13 +1246,13 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
             return Err(ProtocolError::TransferFromError(transfer_from_error, max_liquidatable_debt.to_u64()));
         }
     };
-    
+
     // Step 3: Update protocol state (partial liquidation)
     mutate_state(|s| {
         // Reduce vault debt and collateral directly
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
             vault.borrowed_icusd_amount -= max_liquidatable_debt;
-            vault.icp_margin_amount -= collateral_to_liquidator;
+            vault.collateral_amount -= collateral_to_liquidator.to_u64();
         }
 
         // Record the partial liquidation event
@@ -1051,7 +1261,7 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
             liquidator_payment: max_liquidatable_debt,
             icp_to_liquidator: collateral_to_liquidator,
             liquidator: Some(caller),
-            icp_rate: Some(icp_rate),
+            icp_rate: Some(collateral_price_usd),
         };
         crate::storage::record_event(&event);
 
@@ -1061,6 +1271,7 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
             PendingMarginTransfer {
                 owner: caller,
                 margin: collateral_to_liquidator,
+                collateral_type: vault.collateral_type,
             },
         );
 
@@ -1088,16 +1299,16 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
     guard_principal.complete();
     
     // Calculate fee (liquidator bonus)
-    let liquidator_value_received = collateral_to_liquidator * icp_rate;
+    let liquidator_value_received = crate::numeric::collateral_usd_value(collateral_to_liquidator.to_u64(), collateral_price, config_decimals);
     let fee_amount = if liquidator_value_received > max_liquidatable_debt {
         liquidator_value_received - max_liquidatable_debt
     } else {
         ICUSD::new(0)
     };
-    
-    log!(INFO, "[liquidate_vault_partial] Partial liquidation completed. Block index: {}, Fee: {}", 
+
+    log!(INFO, "[liquidate_vault_partial] Partial liquidation completed. Block index: {}, Fee: {}",
          icusd_block_index, fee_amount.to_u64());
-    
+
     Ok(SuccessWithFee {
         block_index: icusd_block_index,
         fee_amount_paid: fee_amount.to_u64(),
@@ -1141,23 +1352,35 @@ pub async fn liquidate_vault_partial_with_stable(
     }
 
     // Step 1: Validate vault is liquidatable and get partial liquidation amounts
-    let (vault, icp_rate, _mode, max_liquidatable_debt, collateral_to_liquidator) = match read_state(|s| {
+    let (vault, collateral_price, config_decimals, collateral_price_usd, _mode, max_liquidatable_debt, collateral_to_liquidator) = match read_state(|s| {
         match s.vault_id_to_vaults.get(&vault_id) {
             Some(vault) => {
-                let icp_rate = s.last_icp_rate
-                    .ok_or_else(|| "No ICP rate available. Price feed may be down.".to_string())?;
-                let ratio = compute_collateral_ratio(vault, icp_rate);
+                // Check collateral status allows liquidation
+                if let Some(status) = s.get_collateral_status(&vault.collateral_type) {
+                    if !status.allows_liquidation() {
+                        return Err("Liquidation is not allowed for this collateral type.".to_string());
+                    }
+                }
 
-                if ratio >= s.mode.get_minimum_liquidation_collateral_ratio() {
+                let price = s.get_collateral_price_decimal(&vault.collateral_type)
+                    .ok_or_else(|| "No price available for collateral. Price feed may be down.".to_string())?;
+                let decimals = s.get_collateral_config(&vault.collateral_type)
+                    .map(|c| c.decimals)
+                    .unwrap_or(8);
+                let collateral_price_usd = UsdIcp::from(price);
+                let ratio = compute_collateral_ratio(vault, collateral_price_usd, s);
+                let min_liq_ratio = s.get_min_liquidation_ratio_for(&vault.collateral_type);
+
+                if ratio >= min_liq_ratio {
                     Err(format!(
                         "Vault #{} is not liquidatable. Current ratio: {}, minimum: {}",
                         vault_id,
                         ratio.to_f64(),
-                        s.mode.get_minimum_liquidation_collateral_ratio().to_f64()
+                        min_liq_ratio.to_f64()
                     ))
                 } else {
                     // Cap at the amount needed to restore vault CR to recovery_target_cr
-                    let max_liquidatable = s.compute_partial_liquidation_cap(vault, icp_rate);
+                    let max_liquidatable = s.compute_partial_liquidation_cap(vault, collateral_price_usd);
 
                     let actual_liquidation_amount = liquidation_amount.min(max_liquidatable).min(vault.borrowed_icusd_amount);
 
@@ -1165,11 +1388,12 @@ pub async fn liquidate_vault_partial_with_stable(
                         return Err("Cannot liquidate zero amount".to_string());
                     }
 
-                    let icp_equivalent = actual_liquidation_amount / icp_rate;
-                    let collateral_with_bonus = icp_equivalent * s.liquidation_bonus;
-                    let collateral_to_transfer = collateral_with_bonus.min(vault.icp_margin_amount);
+                    let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
+                    let collateral_raw = crate::numeric::icusd_to_collateral_amount(actual_liquidation_amount, price, decimals);
+                    let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
+                    let collateral_to_transfer = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
 
-                    Ok((vault.clone(), icp_rate, s.mode, actual_liquidation_amount, collateral_to_transfer))
+                    Ok((vault.clone(), price, decimals, collateral_price_usd, s.mode, actual_liquidation_amount, collateral_to_transfer))
                 }
             },
             None => Err(format!("Vault #{} not found", vault_id)),
@@ -1215,7 +1439,7 @@ pub async fn liquidate_vault_partial_with_stable(
         // Reduce vault debt and collateral directly
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
             vault.borrowed_icusd_amount -= max_liquidatable_debt;
-            vault.icp_margin_amount -= collateral_to_liquidator;
+            vault.collateral_amount -= collateral_to_liquidator.to_u64();
         }
 
         // Record the partial liquidation event
@@ -1224,7 +1448,7 @@ pub async fn liquidate_vault_partial_with_stable(
             liquidator_payment: max_liquidatable_debt,
             icp_to_liquidator: collateral_to_liquidator,
             liquidator: Some(caller),
-            icp_rate: Some(icp_rate),
+            icp_rate: Some(collateral_price_usd),
         };
         crate::storage::record_event(&event);
 
@@ -1234,6 +1458,7 @@ pub async fn liquidate_vault_partial_with_stable(
             PendingMarginTransfer {
                 owner: caller,
                 margin: collateral_to_liquidator,
+                collateral_type: vault.collateral_type,
             },
         );
 
@@ -1261,7 +1486,7 @@ pub async fn liquidate_vault_partial_with_stable(
     guard_principal.complete();
 
     // Calculate fee (liquidator bonus)
-    let liquidator_value_received = collateral_to_liquidator * icp_rate;
+    let liquidator_value_received = crate::numeric::collateral_usd_value(collateral_to_liquidator.to_u64(), collateral_price, config_decimals);
     let fee_amount = if liquidator_value_received > max_liquidatable_debt {
         liquidator_value_received - max_liquidatable_debt
     } else {
@@ -1282,22 +1507,34 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
     let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_{}", vault_id))?;
     
     // Step 1: Validate vault is liquidatable
-    let (vault, icp_rate, mode) = match read_state(|s| {
+    let (vault, collateral_price, config_decimals, collateral_price_usd, mode) = match read_state(|s| {
         match s.vault_id_to_vaults.get(&vault_id) {
             Some(vault) => {
-                let icp_rate = s.last_icp_rate
-                    .ok_or_else(|| format!("No ICP rate available. Price feed may be down."))?;
-                let ratio = compute_collateral_ratio(vault, icp_rate);
+                // Check collateral status allows liquidation
+                if let Some(status) = s.get_collateral_status(&vault.collateral_type) {
+                    if !status.allows_liquidation() {
+                        return Err("Liquidation is not allowed for this collateral type.".to_string());
+                    }
+                }
 
-                if ratio >= s.mode.get_minimum_liquidation_collateral_ratio() {
+                let price = s.get_collateral_price_decimal(&vault.collateral_type)
+                    .ok_or_else(|| "No price available for collateral. Price feed may be down.".to_string())?;
+                let decimals = s.get_collateral_config(&vault.collateral_type)
+                    .map(|c| c.decimals)
+                    .unwrap_or(8);
+                let collateral_price_usd = UsdIcp::from(price);
+                let ratio = compute_collateral_ratio(vault, collateral_price_usd, s);
+                let min_liq_ratio = s.get_min_liquidation_ratio_for(&vault.collateral_type);
+
+                if ratio >= min_liq_ratio {
                     Err(format!(
                         "Vault #{} is not liquidatable. Current ratio: {}, minimum: {}",
                         vault_id,
                         ratio.to_f64(),
-                        s.mode.get_minimum_liquidation_collateral_ratio().to_f64()
+                        min_liq_ratio.to_f64()
                     ))
                 } else {
-                    Ok((vault.clone(), icp_rate, s.mode))
+                    Ok((vault.clone(), price, decimals, collateral_price_usd, s.mode))
                 }
             },
             None => Err(format!("Vault #{} not found", vault_id)),
@@ -1312,19 +1549,21 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
 
     // Step 2: Calculate liquidation amounts
     // Check if this is a recovery-mode targeted liquidation (vault CR between 133-150%)
+    let vault_collateral = ICP::from(vault.collateral_amount);
     let (debt_amount, icp_to_liquidator, excess_collateral, is_recovery_partial) = read_state(|s| {
-        if let Some(repay_cap) = s.compute_recovery_repay_cap(&vault, icp_rate) {
+        let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
+        if let Some(repay_cap) = s.compute_recovery_repay_cap(&vault, collateral_price_usd) {
             // Recovery mode: only liquidate enough to restore CR to target
-            let icp_equivalent = repay_cap / icp_rate;
-            let collateral_seized = (icp_equivalent * s.liquidation_bonus).min(vault.icp_margin_amount);
+            let collateral_raw = crate::numeric::icusd_to_collateral_amount(repay_cap, collateral_price, config_decimals);
+            let collateral_seized = (ICP::from(collateral_raw) * liq_bonus).min(vault_collateral);
             (repay_cap, collateral_seized, ICP::new(0), true)
         } else {
             // Normal full liquidation
             let debt = vault.borrowed_icusd_amount;
-            let icp_equivalent = debt / icp_rate;
-            let icp_with_bonus = icp_equivalent * s.liquidation_bonus;
-            let icp_to_liq = icp_with_bonus.min(vault.icp_margin_amount);
-            let excess = vault.icp_margin_amount.saturating_sub(icp_to_liq);
+            let collateral_raw = crate::numeric::icusd_to_collateral_amount(debt, collateral_price, config_decimals);
+            let icp_with_bonus = ICP::from(collateral_raw) * liq_bonus;
+            let icp_to_liq = icp_with_bonus.min(vault_collateral);
+            let excess = vault_collateral.saturating_sub(icp_to_liq);
             (debt, icp_to_liq, excess, false)
         }
     });
@@ -1353,13 +1592,13 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
     // Step 4: Update protocol state ATOMICALLY (this is the critical section)
     mutate_state(|s| {
         // Execute the liquidation in state first (this must happen)
-        s.liquidate_vault(vault_id, mode, icp_rate);
+        s.liquidate_vault(vault_id, mode, collateral_price_usd);
 
         // Record the liquidation event
         let event = crate::event::Event::LiquidateVault {
             vault_id,
             mode,
-            icp_rate,
+            icp_rate: collateral_price_usd,
             liquidator: Some(caller),
         };
         crate::storage::record_event(&event);
@@ -1370,6 +1609,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
             PendingMarginTransfer {
                 owner: caller,
                 margin: icp_to_liquidator,
+                collateral_type: vault.collateral_type,
             },
         );
 
@@ -1382,6 +1622,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
                 PendingMarginTransfer {
                     owner: vault.owner,
                     margin: excess_collateral,
+                    collateral_type: vault.collateral_type,
                 },
             );
         }
@@ -1418,14 +1659,14 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
     guard_principal.complete();
     
     // Calculate fee
-    let liquidator_value_received = icp_to_liquidator * icp_rate;
+    let liquidator_value_received = crate::numeric::collateral_usd_value(icp_to_liquidator.to_u64(), collateral_price, config_decimals);
     let fee_amount = if liquidator_value_received > debt_amount {
         liquidator_value_received - debt_amount
     } else {
         ICUSD::new(0)
     };
-    
-    log!(INFO, "[liquidate_vault] Liquidation completed successfully. Block index: {}, Fee: {}", 
+
+    log!(INFO, "[liquidate_vault] Liquidation completed successfully. Block index: {}, Fee: {}",
          icusd_block_index, fee_amount.to_u64());
     
     Ok(SuccessWithFee {
@@ -1437,8 +1678,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
 // Helper function to attempt immediate transfer processing
 async fn try_process_pending_transfers_immediate(vault_id: u64) -> Result<u32, String> {
     let mut processed_count = 0;
-    let ledger_fee = read_state(|s| s.icp_ledger_fee);
-    
+
     // Get pending transfers for this liquidation
     let transfers_to_process = read_state(|s| {
         let mut transfers = Vec::new();
@@ -1455,9 +1695,17 @@ async fn try_process_pending_transfers_immediate(vault_id: u64) -> Result<u32, S
 
         transfers
     });
-    
+
     // Process each transfer
     for (transfer_type, transfer_id, transfer) in transfers_to_process {
+        // Look up per-collateral ledger fee and canister ID
+        let (ledger_fee, ledger_canister_id) = read_state(|s| {
+            match s.get_collateral_config(&transfer.collateral_type) {
+                Some(config) => (ICP::from(config.ledger_fee), config.ledger_canister_id),
+                None => (s.icp_ledger_fee, s.icp_ledger_principal),
+            }
+        });
+
         if transfer.margin <= ledger_fee {
             log!(INFO, "[immediate_transfer] Skipping {} transfer {} - margin {} <= fee {}, removing", transfer_type, transfer_id, transfer.margin.to_u64(), ledger_fee.to_u64());
             mutate_state(|s| {
@@ -1472,10 +1720,10 @@ async fn try_process_pending_transfers_immediate(vault_id: u64) -> Result<u32, S
         }
         let transfer_amount = transfer.margin - ledger_fee;
 
-        log!(INFO, "[immediate_transfer] Processing {} transfer {} of {} ICP to {}",
+        log!(INFO, "[immediate_transfer] Processing {} transfer {} of {} collateral to {}",
              transfer_type, transfer_id, transfer_amount.to_u64(), transfer.owner);
 
-        match management::transfer_icp(transfer_amount, transfer.owner).await {
+        match management::transfer_collateral(transfer_amount.to_u64(), transfer.owner, ledger_canister_id).await {
             Ok(block_index) => {
                 log!(INFO, "[immediate_transfer] Transfer {} successful, block: {}", transfer_id, block_index);
 
@@ -1544,6 +1792,17 @@ pub async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError>
         }
     };
 
+    // Check collateral status allows repayment
+    let collateral_status = read_state(|s| s.get_collateral_status(&vault.collateral_type));
+    if let Some(status) = collateral_status {
+        if !status.allows_repay() {
+            guard_principal.fail();
+            return Err(ProtocolError::TemporarilyUnavailable(
+                format!("Collateral is {:?}, repayment not allowed", status)
+            ));
+        }
+    }
+
     if caller != vault.owner {
         guard_principal.fail();
         return Err(ProtocolError::CallerNotOwner);
@@ -1586,21 +1845,34 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
     let liquidator_payment: ICUSD = arg.amount.into();
     
     // Step 1: Validate vault is liquidatable
-    let (vault, icp_rate, mode) = match read_state(|s| {
+    let (vault, collateral_price, config_decimals, collateral_price_usd, _mode) = match read_state(|s| {
         match s.vault_id_to_vaults.get(&arg.vault_id) {
             Some(vault) => {
-                let icp_rate = s.last_icp_rate.expect("no icp rate");
-                let ratio = compute_collateral_ratio(vault, icp_rate);
-                
-                if ratio >= s.mode.get_minimum_liquidation_collateral_ratio() {
+                // Check collateral status allows liquidation
+                if let Some(status) = s.get_collateral_status(&vault.collateral_type) {
+                    if !status.allows_liquidation() {
+                        return Err("Liquidation is not allowed for this collateral type.".to_string());
+                    }
+                }
+
+                let price = s.get_collateral_price_decimal(&vault.collateral_type)
+                    .ok_or_else(|| "No price available for collateral. Price feed may be down.".to_string())?;
+                let decimals = s.get_collateral_config(&vault.collateral_type)
+                    .map(|c| c.decimals)
+                    .unwrap_or(8);
+                let collateral_price_usd = UsdIcp::from(price);
+                let ratio = compute_collateral_ratio(vault, collateral_price_usd, s);
+                let min_liq_ratio = s.get_min_liquidation_ratio_for(&vault.collateral_type);
+
+                if ratio >= min_liq_ratio {
                     Err(format!(
                         "Vault #{} is not liquidatable. Current ratio: {}, minimum: {}",
-                        arg.vault_id, 
-                        ratio.to_f64(), 
-                        s.mode.get_minimum_liquidation_collateral_ratio().to_f64()
+                        arg.vault_id,
+                        ratio.to_f64(),
+                        min_liq_ratio.to_f64()
                     ))
                 } else {
-                    Ok((vault.clone(), icp_rate, s.mode))
+                    Ok((vault.clone(), price, decimals, collateral_price_usd, s.mode))
                 }
             },
             None => Err(format!("Vault #{} not found", arg.vault_id)),
@@ -1623,7 +1895,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
 
     // In recovery mode, cap the payment at the amount needed to restore CR to target
     let liquidator_payment = read_state(|s| {
-        let cap = s.compute_partial_liquidation_cap(&vault, icp_rate);
+        let cap = s.compute_partial_liquidation_cap(&vault, collateral_price_usd);
         liquidator_payment.min(cap)
     });
 
@@ -1636,12 +1908,12 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
     }
 
     // Step 3: Calculate liquidation amounts with liquidation bonus
-    let liq_bonus = read_state(|s| s.liquidation_bonus);
-    let icp_value_owed = liquidator_payment * liq_bonus;
-    let icp_to_liquidator = icp_value_owed / icp_rate;
+    let liq_bonus = read_state(|s| s.get_liquidation_bonus_for(&vault.collateral_type));
+    let collateral_raw = crate::numeric::icusd_to_collateral_amount(liquidator_payment, collateral_price, config_decimals);
+    let icp_to_liquidator = ICP::from(collateral_raw) * liq_bonus;
 
     // Ensure we don't give more collateral than available
-    let actual_icp_to_liquidator = icp_to_liquidator.min(vault.icp_margin_amount);
+    let actual_icp_to_liquidator = icp_to_liquidator.min(ICP::from(vault.collateral_amount));
 
     log!(INFO,
         "[partial_liquidate_vault] Vault #{}: liquidator pays {} icUSD, gets {} ICP (bonus: {})",
@@ -1668,7 +1940,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         // Reduce the vault's debt by the liquidator payment amount
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&arg.vault_id) {
             vault.borrowed_icusd_amount -= liquidator_payment;
-            vault.icp_margin_amount -= actual_icp_to_liquidator;
+            vault.collateral_amount -= actual_icp_to_liquidator.to_u64();
         }
         
         // Record the partial liquidation event
@@ -1677,7 +1949,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
             liquidator_payment,
             icp_to_liquidator: actual_icp_to_liquidator,
             liquidator: Some(caller),
-            icp_rate: Some(icp_rate),
+            icp_rate: Some(collateral_price_usd),
         };
         crate::storage::record_event(&event);
         
@@ -1687,9 +1959,10 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
             PendingMarginTransfer {
                 owner: caller,
                 margin: actual_icp_to_liquidator,
+                collateral_type: vault.collateral_type,
             },
         );
-        
+
         log!(INFO, "[partial_liquidate_vault] Protocol state updated, pending transfer created");
     });
     
@@ -1718,14 +1991,14 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
     guard_principal.complete();
     
     // Calculate fee (the 10% discount is the fee)
-    let liquidator_value_received = actual_icp_to_liquidator * icp_rate;
+    let liquidator_value_received = crate::numeric::collateral_usd_value(actual_icp_to_liquidator.to_u64(), collateral_price, config_decimals);
     let fee_amount = if liquidator_value_received > liquidator_payment {
         liquidator_value_received - liquidator_payment
     } else {
         ICUSD::new(0)
     };
-    
-    log!(INFO, "[partial_liquidate_vault] Partial liquidation completed successfully. Block index: {}, Fee: {}", 
+
+    log!(INFO, "[partial_liquidate_vault] Partial liquidation completed successfully. Block index: {}, Fee: {}",
          icusd_block_index, fee_amount.to_u64());
     
     Ok(SuccessWithFee {

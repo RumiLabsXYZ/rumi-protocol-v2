@@ -2,6 +2,7 @@
 members = [
     "src/rumi_protocol_backend",
     "src/rumi_treasury",
-    "src/rumi_stability_pool"
+    "src/rumi_stability_pool",
+    "xrc_demo/xrc_mock",
 ]
 resolver = "2"
