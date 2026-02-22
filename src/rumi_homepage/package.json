@@ -46,9 +46,9 @@
 		"vitest": "^2.0.4"
 	},
 	"dependencies": {
-		"@dfinity/agent": "^1.4.0",
-		"@dfinity/candid": "^1.4.0",
-		"@dfinity/principal": "^1.4.0",
+		"@dfinity/agent": "^2.3.0",
+		"@dfinity/candid": "^2.3.0",
+		"@dfinity/principal": "^2.3.0",
 		"@tailwindcss/container-queries": "^0.1.1",
 		"@tailwindcss/forms": "^0.5.9",
 		"@tailwindcss/typography": "^0.5.15"

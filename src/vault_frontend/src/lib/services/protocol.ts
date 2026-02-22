@@ -49,12 +49,13 @@ export class ProtocolService {
   static borrowFromVault = ApiClient.borrowFromVault;
   static addMarginToVault = ApiClient.addMarginToVault;
   static repayToVault = ApiClient.repayToVault;
-  static partialRepayToVault = ApiClient.partialRepayToVault;
+  static partialRepayToVault = ApiClient.repayToVault;
   static closeVault = ApiClient.closeVault;
   static getVaultHistory = ApiClient.getVaultHistory;
   static redeemIcp = ApiClient.redeemIcp;
   static withdrawCollateral = ApiClient.withdrawCollateral;
-  
+  static withdrawPartialCollateral = ApiClient.withdrawPartialCollateral;
+
   // Liquidity Operations - these go through ProtocolManager for proper error handling and queuing
   static getLiquidityStatus = ApiClient.getLiquidityStatus;
   static provideLiquidity = ApiClient.provideLiquidity;
@@ -62,7 +63,7 @@ export class ProtocolService {
   static claimLiquidityReturns = ApiClient.claimLiquidityReturns;
   static withdrawCollateralAndCloseVault = ApiClient.withdrawCollateralAndCloseVault;
   static liquidate_vault = ApiClient.liquidateVault;
-  static partialLiquidateVault = ApiClient.partialLiquidateVault;
+  static partialLiquidateVault = ApiClient.liquidateVaultPartial;
   static partialLiquidateVaultWithStable = ApiClient.liquidateVaultPartialWithStable;
   static getLiquidatableVaults = ApiClient.getLiquidatableVaults;
 
@@ -103,6 +104,7 @@ export const protocolService = {
   withdrawLiquidity: ProtocolService.withdrawLiquidity,
   claimLiquidityReturns: ProtocolService.claimLiquidityReturns,
   withdrawCollateral: ProtocolService.withdrawCollateral,
+  withdrawPartialCollateral: ProtocolService.withdrawPartialCollateral,
   getVaultById: ProtocolService.getVaultById,
   getLiquidatableVaults: ProtocolService.getLiquidatableVaults,
   liquidateVault: ProtocolService.liquidate_vault,

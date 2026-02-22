@@ -287,7 +287,7 @@
       }
       
       // Call protocol service for partial repayment
-      const result = await protocolService.partialRepayToVault(currentVault.vaultId, repayAmount);
+      const result = await protocolService.repayToVault(currentVault.vaultId, repayAmount);
       
       if (result.success) {
         successMessage = `Successfully made partial repayment of ${repayAmount} icUSD`;

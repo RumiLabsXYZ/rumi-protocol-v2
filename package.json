@@ -20,6 +20,11 @@
   "devDependencies": {
     "vite": "^5.4.11"
   },
+  "overrides": {
+    "@dfinity/principal": "2.3.0",
+    "@dfinity/agent": "2.3.0",
+    "@dfinity/candid": "2.3.0"
+  },
   "dependencies": {
     "@sveltejs/adapter-static": "^3.0.8",
     "@sveltejs/kit": "^2.19.0",

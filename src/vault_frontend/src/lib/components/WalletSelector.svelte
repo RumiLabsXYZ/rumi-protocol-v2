@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { auth, selectedWalletType, connectionError } from '$lib/services/auth';
+  import { auth, selectedWalletId, connectionError } from '$lib/services/auth';
   import { walletStore } from '$lib/stores/wallet';
   import { createEventDispatcher } from 'svelte';
 
@@ -9,7 +9,7 @@
   let showOptions = false;
 
   $: isConnected = $walletStore.isConnected || $auth.isConnected;
-  $: walletType = $selectedWalletType || $auth.walletType;
+  $: walletType = $selectedWalletId || $auth.walletType;
   $: error = $connectionError;
 
   // Debug reactive statements
@@ -53,7 +53,7 @@
   async function disconnect() {
     try {
       // Disconnect based on wallet type
-      if ($selectedWalletType === 'internet-identity') {
+      if ($selectedWalletId === 'internet-identity') {
         await auth.disconnect();
       } else {
         await walletStore.disconnect();

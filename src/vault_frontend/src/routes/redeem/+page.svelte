@@ -18,7 +18,7 @@
   // Subscribe to wallet state
   wallet.subscribe(state => {
     isConnected = state.isConnected;
-    icusdBalance = state.balances.icusd ? Number(state.balances.icusd) : 0;
+    icusdBalance = state.tokenBalances?.ICUSD ? Number(state.tokenBalances.ICUSD.formatted) : 0;
   });
   
   // Calculate values

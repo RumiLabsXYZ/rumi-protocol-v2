@@ -52,10 +52,11 @@
       .map(wallet => {
         const walletIdLower = wallet.id?.toLowerCase();
         const config = walletDisplayConfig[walletIdLower];
+        const w = wallet as any;
         return {
           id: wallet.id,
-          name: config?.name || wallet.name,
-          icon: config?.icon || wallet.icon || `/wallets/${wallet.id}.svg`
+          name: config?.name || w.name || wallet.id,
+          icon: config?.icon || w.icon || `/wallets/${wallet.id}.svg`
         };
       });
     

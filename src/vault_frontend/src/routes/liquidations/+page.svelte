@@ -286,6 +286,7 @@
         {@const isProcessingThis = processingVaultId === vault.vault_id}
         {@const crDanger = cr < 130}
         {@const crCaution = cr >= 130 && cr < 150}
+        {@const s = getSeizure(vault)}
 
         <div class="liq-card">
           <div class="card-body">
@@ -309,8 +310,7 @@
 
             <!-- CENTER: outcome (appears when user types) -->
             <div class="card-center">
-              {#if getSeizure(vault)}
-                {@const s = getSeizure(vault)}
+              {#if s}
                 <span class="outcome-label">You receive</span>
                 <span class="outcome-line">{formatNumber(s.icpSeized, 4)} ICP <span class="outcome-usd">${formatNumber(s.usdValue, 2)}</span></span>
               {/if}

@@ -584,7 +584,7 @@ export class ProtocolManager {
         }
 
         // Now execute the actual repayment via the backend
-        processingStore.setStage(ProcessingStage.PROCESSING);
+        processingStore.setStage(ProcessingStage.CREATING);
         return await ApiClient.repayToVaultWithStable(vaultId, amount, tokenType);
       }
     );
@@ -793,6 +793,16 @@ export class ProtocolManager {
   }
 
   /**
+   * Withdraw partial collateral from a vault (keeps CR above minimum)
+   */
+  async withdrawPartialCollateral(vaultId: number, icpAmount: number): Promise<VaultOperationResult> {
+    return this.executeOperation(
+      `withdrawPartialCollateral:${vaultId}`,
+      () => ApiClient.withdrawPartialCollateral(vaultId, icpAmount)
+    );
+  }
+
+  /**
    * Combined operation: Withdraw collateral and close vault
    */
   async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOperationResult> {
@@ -830,7 +840,7 @@ export class ProtocolManager {
       }
 
       // Step 3: Execute deposit
-      const vaultActor = await walletStore.getActor(CANISTER_IDS.PROTOCOL, CONFIG.rumi_backendIDL);
+      const vaultActor = await walletStore.getActor(CANISTER_IDS.PROTOCOL, CONFIG.rumi_backendIDL) as any;
       const depositResult = await vaultActor.deposit_icp(amountE8s);
       
       if ('Ok' in depositResult) {

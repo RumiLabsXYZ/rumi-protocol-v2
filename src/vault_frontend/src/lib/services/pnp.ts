@@ -124,19 +124,22 @@ export async function connectWithComprehensivePermissions(walletId: string): Pro
     // The owner might be: a string, a Principal object, or an object with toString()/toText()
     if (result?.owner) {
       let normalizedPrincipal: Principal;
-      
-      if (typeof result.owner === 'string') {
+
+      // Cast to any for duck-typing since PNP may return various Principal-like types
+      const ownerRaw: any = result.owner;
+
+      if (typeof ownerRaw === 'string') {
         // Owner is already a string, convert to Principal
-        normalizedPrincipal = Principal.fromText(result.owner);
-      } else if (result.owner instanceof Principal) {
+        normalizedPrincipal = Principal.fromText(ownerRaw);
+      } else if (ownerRaw instanceof Principal) {
         // Already a proper Principal object
-        normalizedPrincipal = result.owner;
-      } else if (typeof result.owner.toText === 'function') {
+        normalizedPrincipal = ownerRaw;
+      } else if (typeof ownerRaw?.toText === 'function') {
         // Has toText method (standard Principal interface)
-        normalizedPrincipal = Principal.fromText(result.owner.toText());
-      } else if (typeof result.owner.toString === 'function') {
+        normalizedPrincipal = Principal.fromText(ownerRaw.toText());
+      } else if (typeof ownerRaw?.toString === 'function') {
         // Fallback to toString
-        normalizedPrincipal = Principal.fromText(result.owner.toString());
+        normalizedPrincipal = Principal.fromText(ownerRaw.toString());
       } else {
         throw new Error('Unable to extract principal from wallet connection result');
       }

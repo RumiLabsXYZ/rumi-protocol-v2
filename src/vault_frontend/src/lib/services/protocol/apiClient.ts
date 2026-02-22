@@ -183,7 +183,7 @@ private static async refreshVaultData(): Promise<void> {
       }
       
       try {
-        return walletStore.getActor(CONFIG.currentCanisterId, rumi_backendIDL);
+        return await walletStore.getActor(CONFIG.currentCanisterId, rumi_backendIDL) as _SERVICE;
       } catch (err) {
         console.error('Failed to get authenticated actor:', err);
         throw new Error('Failed to initialize protocol actor');
@@ -829,10 +829,11 @@ static async repayToVaultWithStable(
       }
 
       const actor = await ApiClient.getAuthenticatedActor();
+      const token_type = tokenType === 'CKUSDT' ? { 'CKUSDT' : null } as const : { 'CKUSDC' : null } as const;
       const vaultArgWithToken = {
         vault_id: BigInt(vaultId),
         amount: BigInt(Math.floor(amount * E8S)),
-        token_type: { [tokenType]: null }
+        token_type
       };
 
       const result = await actor.repay_to_vault_with_stable(vaultArgWithToken);
@@ -1089,6 +1090,51 @@ static async repayToVaultWithStable(
       }
       // REMOVE: finally block with timestamp deletion
     }, vaultId); // ADD: vaultId parameter here
+  }
+
+  /**
+   * Withdraw partial collateral from a vault (keeps CR above minimum)
+   */
+  static async withdrawPartialCollateral(vaultId: number, icpAmount: number): Promise<VaultOperationResult> {
+    return ApiClient.executeSequentialOperation(async () => {
+      try {
+        console.log(`Withdrawing ${icpAmount} ICP collateral from vault #${vaultId}`);
+
+        if (icpAmount * E8S < MIN_ICP_AMOUNT) {
+          return {
+            success: false,
+            error: `Amount too low. Minimum required: ${MIN_ICP_AMOUNT / E8S} ICP`
+          };
+        }
+
+        const actor = await ApiClient.getAuthenticatedActor();
+        const vaultArg = {
+          vault_id: BigInt(vaultId),
+          amount: BigInt(Math.floor(icpAmount * E8S))
+        };
+
+        const result = await actor.withdraw_partial_collateral(vaultArg);
+
+        if ('Ok' in result) {
+          return {
+            success: true,
+            vaultId,
+            blockIndex: Number(result.Ok)
+          };
+        } else {
+          return {
+            success: false,
+            error: ApiClient.formatProtocolError(result.Err)
+          };
+        }
+      } catch (err) {
+        console.error('Error withdrawing partial collateral:', err);
+        return {
+          success: false,
+          error: err instanceof Error ? err.message : 'Unknown error withdrawing collateral'
+        };
+      }
+    }, vaultId);
   }
 
     /**
@@ -1756,10 +1802,11 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
           }
 
           const actor = await ApiClient.getAuthenticatedActor();
+          const liq_token_type = tokenType === 'CKUSDT' ? { 'CKUSDT' : null } as const : { 'CKUSDC' : null } as const;
           const vaultArgWithToken = {
             vault_id: BigInt(vaultId),
             amount: BigInt(amountE8s),
-            token_type: { [tokenType]: null }
+            token_type: liq_token_type
           };
 
           const result = await actor.liquidate_vault_partial_with_stable(vaultArgWithToken);

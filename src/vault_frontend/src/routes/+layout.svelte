@@ -19,10 +19,13 @@
   $: if (isConnected && !permissionInitialized) {
     permissionStore.init().then(s => { if (s) permissionInitialized = true; }).catch(() => { permissionInitialized = true; });
   } else if (!isConnected && permissionInitialized) { permissionStore.clear(); permissionInitialized = false; }
-  onMount(async () => {
-    try { await wallet.initialize(); } catch (e) { console.error('Wallet init failed:', e); }
-    if (isConnected && !permissionInitialized) { try { if (await permissionStore.init()) permissionInitialized = true; } catch (e) { permissionInitialized = true; } }
-    protocolService.getICPPrice().catch(() => {});
+  onMount(() => {
+    // Fire-and-forget async init (async onMount can't return cleanup)
+    (async () => {
+      try { await wallet.initialize(); } catch (e) { console.error('Wallet init failed:', e); }
+      if (isConnected && !permissionInitialized) { try { if (await permissionStore.init()) permissionInitialized = true; } catch (e) { permissionInitialized = true; } }
+      protocolService.getICPPrice().catch(() => {});
+    })();
     // Ctrl+D toggles debug panels in dev mode
     const handleKey = (e: KeyboardEvent) => { if (e.ctrlKey && e.key === 'd') { e.preventDefault(); showDebug = !showDebug; } };
     window.addEventListener('keydown', handleKey);

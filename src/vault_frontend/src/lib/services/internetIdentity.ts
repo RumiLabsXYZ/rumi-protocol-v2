@@ -35,8 +35,8 @@ class InternetIdentityService implements IIAuthService {
       const isAuthenticated = await this.authClient.isAuthenticated();
       
       if (isAuthenticated) {
-        this.identity = this.authClient.getIdentity();
-        this.principal = this.identity.getPrincipal();
+        this.identity = this.authClient!.getIdentity();
+        this.principal = this.identity!.getPrincipal();
         this.isAuthenticated = true;
         
         // Create agent with this identity
@@ -85,7 +85,7 @@ class InternetIdentityService implements IIAuthService {
           onSuccess: async () => {
             try {
               this.identity = this.authClient!.getIdentity();
-              this.principal = this.identity.getPrincipal();
+              this.principal = this.identity!.getPrincipal();
               this.isAuthenticated = true;
 
               // Create agent
