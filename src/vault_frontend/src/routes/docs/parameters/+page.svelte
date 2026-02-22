@@ -106,7 +106,7 @@
     <h2 class="doc-heading">Oracle & Timing</h2>
     <div class="params-table">
       <div class="param"><span class="param-label">Price Source</span><span class="param-val">IC Exchange Rate Canister (XRC)</span></div>
-      <div class="param"><span class="param-label">Price Fetch Interval</span><span class="param-val">60 seconds</span></div>
+      <div class="param"><span class="param-label">Price Fetch Interval</span><span class="param-val">300 seconds (+ on-demand for operations)</span></div>
       <div class="param"><span class="param-label">Read-Only Price Floor</span><span class="param-val">$0.01</span></div>
       <div class="param"><span class="param-label">Stuck Transfer Timeout</span><span class="param-val">15 minutes</span></div>
       <div class="param"><span class="param-label">Health Monitor Interval</span><span class="param-val">5 minutes</span></div>

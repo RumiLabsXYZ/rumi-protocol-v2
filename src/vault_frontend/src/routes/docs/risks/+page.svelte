@@ -21,7 +21,7 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Price Volatility</h2>
-    <p>ICP can move sharply. A vault at 140% collateral ratio is only one bad candle away from liquidation. The protocol checks prices every 60 seconds — if ICP drops 10% between checks, your vault could go from safe to liquidated with no intermediate warning.</p>
+    <p>ICP can move sharply. A vault at 140% collateral ratio is only one bad candle away from liquidation. The protocol polls prices every 5 minutes and refreshes on-demand for operations — if ICP drops sharply between updates, your vault could go from safe to liquidated with no intermediate warning.</p>
     <p>There is no notification system. You are responsible for monitoring your own vaults.</p>
   </section>
 

@@ -30,7 +30,7 @@
   <section class="doc-section">
     <h2 class="doc-heading">When Liquidation Happens</h2>
     <p>A vault becomes eligible for liquidation when its collateral ratio drops below the minimum threshold. In normal operation (General Availability mode), this threshold is 133%. In Recovery mode, it rises to 150%.</p>
-    <p>The protocol checks vault health every time the ICP price updates — approximately every 60 seconds. Liquidation is not instant on price movement; it depends on the next price fetch cycle.</p>
+    <p>The protocol checks vault health every time the ICP price updates — approximately every 5 minutes via background polling. Price-sensitive operations (liquidations, borrows, etc.) also trigger an on-demand price refresh if the cached price is older than 30 seconds. Liquidation is not instant on price movement; it depends on the next price update.</p>
   </section>
 
   <section class="doc-section">

@@ -391,38 +391,60 @@ rumi_stability_pool:   tmhzi-dqaaa-aaaap-qrd6q-cai
 ## Core Protocol Mechanics
 
 ### Vault Operations
-- **Collateral**: ICP only for MVP (ckBTC, ckETH planned)
+- **Collateral**: ICP only (multi-collateral refactor planned — see below)
 - **Minimum Collateral Ratio**: 133% (`dec!(1.33)` in code)
 - **Recovery Mode**: Triggers when system-wide CR < 150% (liquidation threshold rises to 150%)
+- **Recovery Target CR**: 155% (configurable, range 1.4–2.0)
 - **Read-Only Mode**: Triggers when system-wide CR < 100% or oracle < $0.01
-- **Borrowing Fee**: 0.5% one-time (0% in Recovery mode)
-- **Liquidation Bonus**: 10%
 - **Price Oracle**: XRC canister, 300s background polling + 30s on-demand freshness for operations
+
+### Fees (All Configurable via Admin Functions)
+All fees stored in canister State struct, all guarded by `developer_principal == caller` checks.
+
+| Fee | Default | Range | Admin Function |
+|-----|---------|-------|----------------|
+| Borrowing Fee | 0.5% | 0–10% | `set_borrowing_fee` |
+| Redemption Fee Floor | 0.5% | 0–10% | `set_redemption_fee_floor` |
+| Redemption Fee Ceiling | 5% | 0–50% | `set_redemption_fee_ceiling` |
+| Liquidation Bonus | 15% (115% total) | 100–150% | `set_liquidation_bonus` |
+| ckStable Repayment Fee | 0.05% | 0–5% | `set_ckstable_repay_fee` |
+| ICP Transfer Fee | 0.0001 ICP | — | Hardcoded (ICP ledger) |
+
+Redemption fee is dynamic — base rate spikes on each redemption and exponentially decays back to floor.
+Borrowing fee is 0% in Recovery Mode.
 
 ### Key Backend Functions (from .did file)
 ```candid
 // Vault Management
-open_vault : (amount_e8s: nat64) -> (Result)
-borrow_from_vault : (vault_id: nat64, amount_e8s: nat64) -> (Result)
-repay_to_vault : (vault_id: nat64, amount_e8s: nat64) -> (Result)
-add_margin_to_vault : (vault_id: nat64, amount_e8s: nat64) -> (Result)
-withdraw_collateral : (vault_id: nat64, amount_e8s: nat64) -> (Result)
-withdraw_collateral_and_close_vault : (vault_id: nat64) -> (Result)
+open_vault : (nat64) -> (Result)
+borrow_from_vault : (VaultArg) -> (Result)
+repay_to_vault : (VaultArg) -> (Result)
+add_margin_to_vault : (VaultArg) -> (Result)
+withdraw_collateral : (nat64) -> (Result)
+withdraw_partial_collateral : (VaultArg) -> (Result)
+withdraw_and_close_vault : (nat64) -> (Result)
+liquidate_vault : (nat64) -> (Result)
 
-// Partial Operations (NEW from staging merge)
-partial_repay_to_vault : (VaultArg) -> (Result)
-partial_liquidate_vault : (VaultArg) -> (Result)
+// ckStable Repayment & Liquidation
+repay_to_vault_with_stable : (VaultArgWithToken) -> (Result)
+liquidate_vault_partial : (VaultArgWithToken) -> (Result)
 
-// ICRC Standards (for Oisy wallet)
-icrc21_canister_call_consent_message : (Request) -> (Result)
-icrc28_trusted_origins : () -> (Response) query
-icrc10_supported_standards : () -> (vec StandardRecord) query
+// Redemption
+redeem_icp : (nat64) -> (Result)
+
+// Admin (developer_principal only)
+set_borrowing_fee, set_redemption_fee_floor, set_redemption_fee_ceiling,
+set_liquidation_bonus, set_max_partial_liquidation_ratio, set_recovery_target_cr,
+set_ckstable_repay_fee, set_stable_token_enabled, set_stable_ledger_principal,
+set_treasury_principal, set_stability_pool_principal, clear_stuck_operations
 
 // Queries
-get_vault : (vault_id: nat64) -> (opt Vault) query
-get_vaults_by_owner : (owner: principal) -> (vec Vault) query
+get_vault : (nat64) -> (opt Vault) query
+get_vaults_by_owner : (principal) -> (vec Vault) query
 get_protocol_status : () -> (ProtocolStatus) query
 get_icp_price : () -> (nat64) query
+get_borrowing_fee, get_redemption_fee_floor, get_redemption_fee_ceiling,
+get_max_partial_liquidation_ratio, get_ckstable_repay_fee : () -> (float64) query
 ```
 
 ---
@@ -785,30 +807,33 @@ dfx deploy vault_frontend --network ic
 
 ---
 
-## MVP Priorities
+## Feature Status
 
-1. ~~**Merge Staging**~~: ✅ COMPLETED - Treasury, Stability Pool, and other features recovered
-2. **Deploy Merged Code**: Build and deploy the merged main branch to mainnet
-3. **Core Stability**: Vault creation, minting, repayments, liquidations
-4. **Oisy Integration**: Complete icUSD testing, implement push-repayment if needed
-5. **Bug Fixes**: Navigation after vault close, Plug auto-reconnect
-6. **UI Polish**: See task doc for header/nav/wallet UX improvements
+### Completed
+- ✅ Vault creation, borrowing, repayment, liquidation, redemption
+- ✅ Fee system (borrowing, redemption, ckStable repay) — all configurable via admin functions
+- ✅ Treasury canister collecting protocol fees
+- ✅ ckUSDT/ckUSDC repayment and liquidation with depeg protection
+- ✅ Dynamic protocol parameters (all ratios/fees admin-configurable)
+- ✅ Targeted recovery liquidation (restore-to-155% cap)
+- ✅ XRC cost optimization (300s polling + on-demand freshness)
+- ✅ UI rebrand and page reworks
+- ✅ Borrow page overhaul with partial collateral withdraw
+- ✅ TypeScript error cleanup (67 → 24, all remaining are stability pool)
 
-### Post-MVP
-- Fees implementation (route to treasury canister)
-- Stability Pool automation
-- Redemption process
-- Alternative stablecoin repayments (ckUSDT/ckUSDC)
-- Additional collateral types (ckBTC, ckETH)
+### In Progress / Planned
+- **Multi-collateral refactor** — restructure backend to be collateral-type-aware before building more on top. ICP stays the only collateral, but internals become parameterized. See session prompt below.
+- **Stability Pool integration** — canister deployed but not integrated. Blocked on multi-collateral refactor.
+- **Oisy wallet** — greyed out, ICRC-2 incompatible with ICP ledger. Needs push-deposit pattern.
 
 ---
 
 ## Important Notes
 
-- **No fees currently** - Will implement after beta testing
-- **Manual liquidations** - Browse liquidations page for undercollateralized vaults
-- **Fresh deployment** - Old repo at github.com/Rumi-Protocol/Rumi-protocol (blackholed)
-- **Staging merge complete** - All 57 commits now in main
+- **Fees are live** — borrowing, redemption, ckStable repay fees all active and configurable
+- **Manual liquidations** — browse liquidations page for undercollateralized vaults
+- **Fresh deployment** — old repo at github.com/Rumi-Protocol/Rumi-protocol (blackholed)
+- **Multi-collateral refactor next** — backend restructure before stability pool integration
 
 ---
 
@@ -825,4 +850,4 @@ dfx deploy vault_frontend --network ic
 
 ---
 
-*Last updated: February 7, 2026*
+*Last updated: February 21, 2026*

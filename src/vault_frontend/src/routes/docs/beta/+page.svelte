@@ -40,7 +40,7 @@
   </section>
 
   <section class="doc-section">
-    <p class="doc-legal">© 2025 Rumi Labs LLC. All rights reserved.</p>
+    <p class="doc-legal">© 2025–2026 Rumi Labs LLC. All rights reserved.</p>
   </section>
 </article>
 
