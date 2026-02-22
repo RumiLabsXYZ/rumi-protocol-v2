@@ -117,6 +117,14 @@ pub enum Event {
         block_index: u64,
     },
 
+    // TODO(multi-collateral): amount type will need to be generic or token-tagged
+    #[serde(rename = "partial_collateral_withdrawn")]
+    PartialCollateralWithdrawn {
+        vault_id: u64,
+        amount: ICP,
+        block_index: u64,
+    },
+
     VaultWithdrawnAndClosed {
         vault_id: u64,
         caller: Principal,
@@ -216,6 +224,7 @@ impl Event {
             Event::Init(_) => false,
             Event::Upgrade(_) => false,
             Event::CollateralWithdrawn { vault_id, .. } => vault_id == filter_vault_id,
+            Event::PartialCollateralWithdrawn { vault_id, .. } => vault_id == filter_vault_id,
             Event::VaultWithdrawnAndClosed { vault_id, .. } => vault_id == filter_vault_id,
             Event::WithdrawAndCloseVault { vault_id, .. } => vault_id == filter_vault_id,
             Event::DustForgiven { vault_id, .. } => vault_id == filter_vault_id,
@@ -345,6 +354,13 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             }
             Event::CollateralWithdrawn { vault_id, .. } => {
                 // The vault's margin has already been set to 0 in the vault.rs function
+            }
+            Event::PartialCollateralWithdrawn {
+                vault_id,
+                amount,
+                block_index: _,
+            } => {
+                state.remove_margin_from_vault(vault_id, amount);
             }
             // In the match statement inside replay function
             Event::VaultWithdrawnAndClosed {
@@ -603,6 +619,20 @@ pub fn record_collateral_withdrawn(
         block_index,
     });
 
+}
+
+pub fn record_partial_collateral_withdrawn(
+    state: &mut State,
+    vault_id: u64,
+    amount: ICP,
+    block_index: u64,
+) {
+    record_event(&Event::PartialCollateralWithdrawn {
+        vault_id,
+        amount,
+        block_index,
+    });
+    state.remove_margin_from_vault(vault_id, amount);
 }
 
 pub fn record_withdraw_and_close_vault(

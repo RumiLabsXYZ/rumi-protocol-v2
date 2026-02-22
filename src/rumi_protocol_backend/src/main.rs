@@ -357,6 +357,13 @@ async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
 
 #[candid_method(update)]
 #[update]
+async fn withdraw_partial_collateral(arg: rumi_protocol_backend::vault::VaultArg) -> Result<u64, ProtocolError> {
+    validate_call().await?;
+    check_postcondition(rumi_protocol_backend::vault::withdraw_partial_collateral(arg.vault_id, arg.amount).await)
+}
+
+#[candid_method(update)]
+#[update]
 async fn withdraw_and_close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
     validate_call().await?;
     check_postcondition(rumi_protocol_backend::vault::withdraw_and_close_vault(vault_id).await)

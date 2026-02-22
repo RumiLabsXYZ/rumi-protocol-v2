@@ -248,6 +248,7 @@ service : (ProtocolArg) -> {
   
   // Add new endpoint for withdrawing collateral
   withdraw_collateral : (nat64) -> (variant { Ok : nat64; Err : ProtocolError });
+  withdraw_partial_collateral : (VaultArg) -> (variant { Ok : nat64; Err : ProtocolError });
   withdraw_and_close_vault: (nat64) -> (variant { Ok: opt nat64; Err: ProtocolError });
   liquidate_vault : (nat64) -> (variant { Ok : SuccessWithFee; Err : ProtocolError });
 

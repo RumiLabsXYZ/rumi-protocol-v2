@@ -683,6 +683,142 @@ pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
     }
 }
 
+// TODO(multi-collateral): This function hardcodes ICP as collateral type.
+// When vault struct is parameterized, replace icp_margin_amount with
+// generic collateral_amount, use collateral-type-specific ledger transfer,
+// and look up per-collateral-type minimum CR.
+pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u64, ProtocolError> {
+    let caller = ic_cdk::caller();
+    let _guard_principal = GuardPrincipal::new(caller, &format!("withdraw_partial_{}", vault_id))?;
+
+    let withdraw_amount: ICP = ICP::new(amount);
+
+    if withdraw_amount < MIN_ICP_AMOUNT {
+        return Err(ProtocolError::AmountTooLow {
+            minimum_amount: MIN_ICP_AMOUNT.to_u64(),
+        });
+    }
+
+    log!(
+        INFO,
+        "[withdraw_partial_collateral] Request to withdraw {} ICP from vault #{} by principal {}",
+        withdraw_amount,
+        vault_id,
+        caller
+    );
+
+    // Read vault and ICP rate from state
+    let (vault, icp_rate) = match read_state(|s| {
+        match s.vault_id_to_vaults.get(&vault_id) {
+            Some(vault) => {
+                let icp_rate = s.last_icp_rate
+                    .ok_or("No ICP rate available. Price feed may be down.")?;
+                Ok((vault.clone(), icp_rate))
+            },
+            None => Err("Vault not found. Please check the vault ID.")
+        }
+    }) {
+        Ok(result) => result,
+        Err(msg) => return Err(ProtocolError::GenericError(msg.to_string())),
+    };
+
+    if caller != vault.owner {
+        return Err(ProtocolError::CallerNotOwner);
+    }
+
+    if vault.icp_margin_amount == ICP::new(0) {
+        return Err(ProtocolError::GenericError("No collateral to withdraw".to_string()));
+    }
+
+    // Calculate max withdrawable amount that keeps CR >= minimum
+    // TODO(multi-collateral): min_ratio will come from per-collateral-type config
+    let max_withdrawable = if vault.borrowed_icusd_amount == ICUSD::new(0) {
+        // No debt — can withdraw everything
+        vault.icp_margin_amount
+    } else {
+        // min_collateral_icp = debt * min_ratio / icp_price
+        // max_withdrawable = current_collateral - min_collateral_icp
+        let min_ratio = read_state(|s| s.mode.get_minimum_liquidation_collateral_ratio());
+        // TODO(multi-collateral): use collateral-type-specific price oracle
+        let min_collateral_icp: ICP = (vault.borrowed_icusd_amount * min_ratio) / icp_rate;
+
+        if vault.icp_margin_amount <= min_collateral_icp {
+            return Err(ProtocolError::GenericError(
+                "No excess collateral to withdraw. Your vault is already at or below the minimum collateral ratio.".to_string()
+            ));
+        }
+
+        vault.icp_margin_amount - min_collateral_icp
+    };
+
+    if withdraw_amount > max_withdrawable {
+        return Err(ProtocolError::GenericError(format!(
+            "Withdrawal amount exceeds maximum. Max withdrawable: {} ICP (keeps CR above minimum).",
+            max_withdrawable
+        )));
+    }
+
+    log!(
+        INFO,
+        "[withdraw_partial_collateral] Max withdrawable: {} ICP, requested: {} ICP from vault #{}",
+        max_withdrawable,
+        withdraw_amount,
+        vault_id
+    );
+
+    // Reduce margin BEFORE transferring to avoid reentrancy
+    mutate_state(|state| {
+        if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
+            vault.icp_margin_amount -= withdraw_amount;
+        }
+    });
+
+    // TODO(multi-collateral): use collateral-type-specific ledger fee and transfer fn
+    let ledger_fee = read_state(|s| s.icp_ledger_fee);
+    let transfer_amount = withdraw_amount - ledger_fee;
+
+    log!(
+        INFO,
+        "[withdraw_partial_collateral] Transferring {} ICP (after fee) to {}",
+        transfer_amount,
+        caller
+    );
+
+    match management::transfer_icp(transfer_amount, caller).await {
+        Ok(block_index) => {
+            mutate_state(|s| crate::event::record_partial_collateral_withdrawn(s, vault_id, withdraw_amount, block_index));
+
+            log!(
+                INFO,
+                "[withdraw_partial_collateral] Successfully withdrew {} ICP from vault #{}, block_index: {}",
+                withdraw_amount,
+                vault_id,
+                block_index
+            );
+
+            Ok(block_index)
+        },
+        Err(error) => {
+            // Restore collateral on transfer failure
+            mutate_state(|state| {
+                if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
+                    vault.icp_margin_amount += withdraw_amount;
+                }
+            });
+
+            log!(
+                DEBUG,
+                "[withdraw_partial_collateral] Failed to transfer {} ICP to {}, error: {}",
+                transfer_amount,
+                caller,
+                error
+            );
+
+            Err(ProtocolError::TransferError(error))
+        }
+    }
+}
+
 pub async fn withdraw_and_close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
     let caller = ic_cdk::caller();
     // Use a specific name for better tracking

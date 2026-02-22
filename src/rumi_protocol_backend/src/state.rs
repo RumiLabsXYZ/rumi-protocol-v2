@@ -465,6 +465,18 @@ impl State {
         }
     }
 
+    // TODO(multi-collateral): will subtract from generic collateral_amount field
+    // instead of icp_margin_amount, using collateral-type-specific amount type
+    pub fn remove_margin_from_vault(&mut self, vault_id: u64, amount: ICP) {
+        match self.vault_id_to_vaults.get_mut(&vault_id) {
+            Some(vault) => {
+                assert!(amount <= vault.icp_margin_amount);
+                vault.icp_margin_amount -= amount;
+            }
+            None => ic_cdk::trap("removing margin from unknown vault"),
+        }
+    }
+
     pub fn repay_to_vault(&mut self, vault_id: u64, repayed_amount: ICUSD) {
         match self.vault_id_to_vaults.get_mut(&vault_id) {
             Some(vault) => {

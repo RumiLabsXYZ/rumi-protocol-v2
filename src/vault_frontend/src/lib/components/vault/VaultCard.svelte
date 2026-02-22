@@ -21,7 +21,8 @@
     dispatch('toggle', { vaultId: vault.vaultId });
     clearMessages();
     if (!expanded) {
-      addCollateralAmount = ''; borrowAmount = ''; repayAmount = '';
+      activeAction = null;
+      addCollateralAmount = ''; borrowAmount = ''; repayAmount = ''; withdrawAmount = '';
     }
   }
 
@@ -48,13 +49,19 @@
   $: maxAddCollateral = walletIcp;
   $: activeRepayBalance = repayTokenType === 'CKUSDT' ? walletCkusdt
     : repayTokenType === 'CKUSDC' ? walletCkusdc : walletIcusd;
-  // Deduct ledger transfer fees so Max button produces a tx that actually succeeds
-  // ckUSDT/ckUSDC: $0.01 ledger fee + 0.05% protocol fee
-  // icUSD: 0.001 icUSD ledger fee (no protocol fee)
   $: effectiveRepayBalance = (repayTokenType === 'CKUSDT' || repayTokenType === 'CKUSDC')
     ? Math.max(0, (activeRepayBalance - 0.01) / 1.0005)
     : Math.max(0, activeRepayBalance - 0.001);
   $: maxRepayable = Math.min(effectiveRepayBalance, vault.borrowedIcusd);
+
+  // ── Withdraw max: keeps CR at MINIMUM_CR ──
+  $: maxWithdrawable = (() => {
+    if (vault.icpMargin <= 0) return 0;
+    if (vault.borrowedIcusd === 0) return vault.icpMargin;
+    if (!icpPrice || icpPrice <= 0) return 0;
+    const minCollateralIcp = (vault.borrowedIcusd * MINIMUM_CR) / icpPrice;
+    return Math.max(0, vault.icpMargin - minCollateralIcp);
+  })();
 
   // ── Credit usage ──
   $: creditCapacity = collateralValueUsd / MINIMUM_CR;
@@ -71,23 +78,81 @@
     ? 'Approaching minimum collateral ratio'
     : riskLevel === 'danger' ? 'At risk of liquidation. Add collateral or repay.' : '';
 
-  // ── Active projected CR (whichever field is active) ──
-  $: activeProjectedCr = activeIntent === 'add' ? projectedCrAdd
-    : activeIntent === 'borrow' ? projectedCrBorrow
-    : activeIntent === 'repay' ? projectedCrRepay
+  // ── Liquidation price: ICP price at which CR hits 133% ──
+  $: liquidationPrice = vault.borrowedIcusd > 0 && vault.icpMargin > 0
+    ? (vault.borrowedIcusd * LIQUIDATION_CR) / vault.icpMargin : 0;
+
+  // ── Active projected CR (based on active action panel) ──
+  $: activeProjectedCr = activeAction === 'add' ? projectedCrAdd
+    : activeAction === 'withdraw' ? projectedCrWithdraw
+    : activeAction === 'borrow' ? projectedCrBorrow
+    : activeAction === 'repay' ? projectedCrRepay
     : null;
   $: activeProjectedRisk = projectedRisk(activeProjectedCr);
   $: fmtActiveProjectedCr = fmtProjectedCr(activeProjectedCr);
   $: showProjectedCr = activeProjectedCr !== null && activeProjectedCr !== collateralRatio;
 
+  // Projected liquidation price per action
+  $: projectedLiqPrice = (() => {
+    if (activeAction === 'add') {
+      const amt = parseFloat(addCollateralAmount);
+      if (!amt || amt <= 0) return null;
+      const newMargin = vault.icpMargin + amt;
+      return vault.borrowedIcusd > 0 && newMargin > 0
+        ? (vault.borrowedIcusd * LIQUIDATION_CR) / newMargin : 0;
+    }
+    if (activeAction === 'withdraw') {
+      const amt = parseFloat(withdrawAmount);
+      if (!amt || amt <= 0) return null;
+      const newMargin = vault.icpMargin - amt;
+      return vault.borrowedIcusd > 0 && newMargin > 0
+        ? (vault.borrowedIcusd * LIQUIDATION_CR) / newMargin : 0;
+    }
+    if (activeAction === 'borrow') {
+      const amt = parseFloat(borrowAmount);
+      if (!amt || amt <= 0) return null;
+      const newDebt = vault.borrowedIcusd + amt;
+      return newDebt > 0 && vault.icpMargin > 0
+        ? (newDebt * LIQUIDATION_CR) / vault.icpMargin : 0;
+    }
+    if (activeAction === 'repay') {
+      const amt = parseFloat(repayAmount);
+      if (!amt || amt <= 0) return null;
+      const newDebt = vault.borrowedIcusd - amt;
+      return newDebt > 0 && vault.icpMargin > 0
+        ? (newDebt * LIQUIDATION_CR) / vault.icpMargin : 0;
+    }
+    return null;
+  })();
+
+  // ── Safety delta indicator ──
+  $: safetyDelta = (() => {
+    if (activeProjectedCr === null || activeProjectedCr === collateralRatio) return null;
+    if (collateralRatio === Infinity && activeProjectedCr === Infinity) return null;
+    if (collateralRatio === Infinity) return { direction: 'down' as const, pct: 0 };
+    if (activeProjectedCr === Infinity) return { direction: 'up' as const, pct: 0 };
+    const delta = ((activeProjectedCr - collateralRatio) / collateralRatio) * 100;
+    if (Math.abs(delta) < 0.1) return null;
+    return {
+      direction: delta > 0 ? 'up' as const : 'down' as const,
+      pct: Math.abs(delta)
+    };
+  })();
+
+  // ── ICP price distance to liquidation ──
+  $: liqPriceDistance = liquidationPrice > 0 && icpPrice > 0
+    ? ((icpPrice - liquidationPrice) / icpPrice) * 100 : 0;
+
   function getRiskLevel(ratio: number): 'normal' | 'warning' | 'danger' {
-    if (ratio === Infinity || ratio >= MINIMUM_CR) return 'normal';   // ≥150%
-    if (ratio > LIQUIDATION_CR) return 'warning';                     // 133%–150% = amber
-    return 'danger';                                                  // ≤133% = red
+    if (ratio === Infinity || ratio >= MINIMUM_CR) return 'normal';
+    if (ratio > LIQUIDATION_CR) return 'warning';
+    return 'danger';
   }
 
   // ── Action state ──
+  let activeAction: 'add' | 'withdraw' | 'borrow' | 'repay' | null = null;
   let addCollateralAmount = '';
+  let withdrawAmount = '';
   let borrowAmount = '';
   let repayAmount = '';
   let isProcessing = false;
@@ -95,17 +160,27 @@
   let actionSuccess = '';
   let showAdvanced = false;
   let isWithdrawingAndClosing = false;
+  let showTokenDropdown = false;
+  let hasChangedToken = false;
 
-  // Single active intent: track which field is active
-  $: activeIntent = addCollateralAmount ? 'add'
-    : borrowAmount ? 'borrow'
-    : repayAmount ? 'repay'
-    : null;
+  function selectAction(action: 'add' | 'withdraw' | 'borrow' | 'repay') {
+    if (isProcessing) return;
+    clearMessages();
+    addCollateralAmount = ''; withdrawAmount = ''; borrowAmount = ''; repayAmount = '';
+    activeAction = activeAction === action ? null : action;
+  }
 
-  function onAddInput() { borrowAmount = ''; repayAmount = ''; }
-  function onBorrowInput() { addCollateralAmount = ''; repayAmount = ''; }
-  function onRepayInput() { addCollateralAmount = ''; borrowAmount = ''; }
   function onTokenChange() { repayAmount = ''; clearMessages(); }
+
+  $: repayTokenLabel = repayTokenType === 'icUSD' ? 'icUSD'
+    : repayTokenType === 'CKUSDT' ? 'ckUSDT' : 'ckUSDC';
+
+  function selectToken(token: 'icUSD' | 'CKUSDT' | 'CKUSDC') {
+    repayTokenType = token;
+    hasChangedToken = true;
+    showTokenDropdown = false;
+    onTokenChange();
+  }
 
   // ── Projected CR calculations ──
   $: projectedCrAdd = (() => {
@@ -113,6 +188,13 @@
     if (!amt || amt <= 0 || !icpPrice) return null;
     const newCollateral = (vault.icpMargin + amt) * icpPrice;
     return vault.borrowedIcusd > 0 ? newCollateral / vault.borrowedIcusd : Infinity;
+  })();
+
+  $: projectedCrWithdraw = (() => {
+    const amt = parseFloat(withdrawAmount);
+    if (!amt || amt <= 0 || !icpPrice) return null;
+    const newCollateral = (vault.icpMargin - amt) * icpPrice;
+    return vault.borrowedIcusd > 0 && newCollateral > 0 ? newCollateral / vault.borrowedIcusd : Infinity;
   })();
 
   $: projectedCrBorrow = (() => {
@@ -131,7 +213,7 @@
 
   function fmtProjectedCr(ratio: number | null): string {
     if (ratio === null) return '';
-    if (ratio === Infinity) return '∞';
+    if (ratio === Infinity) return '—';
     return `${(ratio * 100).toFixed(1)}%`;
   }
 
@@ -140,13 +222,15 @@
     return getRiskLevel(ratio);
   }
 
-  // Whether projected CR is invalid (below minimum 150%) — disables action button
   $: borrowCrInvalid = projectedCrBorrow !== null && projectedCrBorrow !== Infinity && projectedCrBorrow < MINIMUM_CR;
 
-  // Whether input exceeds max — disables action button
   $: addOverMax = (() => {
     const v = parseFloat(addCollateralAmount);
     return v > 0 && maxAddCollateral > 0 && v > maxAddCollateral;
+  })();
+  $: withdrawOverMax = (() => {
+    const v = parseFloat(withdrawAmount);
+    return v > 0 && v > maxWithdrawable;
   })();
   $: borrowOverMax = (() => {
     const v = parseFloat(borrowAmount);
@@ -163,37 +247,54 @@
   function clearMessages() { actionError = ''; actionSuccess = ''; }
 
   function setMaxAddCollateral() {
-    if (maxAddCollateral > 0) {
-      borrowAmount = ''; repayAmount = '';
-      addCollateralAmount = maxAddCollateral.toFixed(4);
-    }
+    if (maxAddCollateral > 0) addCollateralAmount = maxAddCollateral.toFixed(4);
+  }
+  function setMaxWithdraw() {
+    if (maxWithdrawable > 0) withdrawAmount = maxWithdrawable.toFixed(4);
   }
   function setMaxBorrow() {
-    if (maxBorrowable > 0) {
-      addCollateralAmount = ''; repayAmount = '';
-      borrowAmount = maxBorrowable.toFixed(2);
-    }
+    if (maxBorrowable > 0) borrowAmount = maxBorrowable.toFixed(2);
   }
   function setMaxRepay() {
-    if (maxRepayable > 0) {
-      addCollateralAmount = ''; borrowAmount = '';
-      repayAmount = maxRepayable.toFixed(4);
+    if (maxRepayable > 0) repayAmount = maxRepayable.toFixed(4);
+  }
+
+  function clampInput(field: 'add' | 'withdraw' | 'borrow' | 'repay') {
+    if (field === 'add') {
+      const v = parseFloat(addCollateralAmount);
+      if (isNaN(v) || v < 0) addCollateralAmount = '';
+    } else if (field === 'withdraw') {
+      const v = parseFloat(withdrawAmount);
+      if (isNaN(v) || v < 0) withdrawAmount = '';
+    } else if (field === 'borrow') {
+      const v = parseFloat(borrowAmount);
+      if (isNaN(v) || v < 0) borrowAmount = '';
+    } else if (field === 'repay') {
+      const v = parseFloat(repayAmount);
+      if (isNaN(v) || v < 0) repayAmount = '';
     }
   }
 
-  // Clamp on blur — only clamp to zero if empty/negative, do NOT auto-reduce over-max
-  function clampAddCollateral() {
-    const v = parseFloat(addCollateralAmount);
-    if (isNaN(v) || v < 0) { addCollateralAmount = ''; return; }
-  }
-  function clampBorrow() {
-    const v = parseFloat(borrowAmount);
-    if (isNaN(v) || v < 0) { borrowAmount = ''; return; }
-  }
-  function clampRepay() {
-    const v = parseFloat(repayAmount);
-    if (isNaN(v) || v < 0) { repayAmount = ''; return; }
-  }
+  // ── Stats for each action ──
+  $: activeStats = (() => {
+    if (activeAction === 'add') return {
+      label1: 'Collateral', value1: `${fmtMargin} ICP`,
+      label2: 'Value', value2: `$${fmtCollateralUsd}`,
+    };
+    if (activeAction === 'withdraw') return {
+      label1: 'Collateral', value1: `${fmtMargin} ICP`,
+      label2: 'Max withdraw', value2: `${formatNumber(maxWithdrawable, 4)} ICP`,
+    };
+    if (activeAction === 'borrow') return {
+      label1: 'Debt', value1: `${fmtBorrowed} icUSD`,
+      label2: 'Available', value2: `${formatNumber(maxBorrowable, 2)} icUSD`,
+    };
+    if (activeAction === 'repay') return {
+      label1: 'Debt', value1: `${fmtBorrowed} icUSD`,
+      label2: 'Value', value2: `$${fmtBorrowedUsd}`,
+    };
+    return null;
+  })();
 
   async function handleAddCollateral() {
     const amount = parseFloat(addCollateralAmount);
@@ -213,6 +314,21 @@
       const result = await protocolService.addMarginToVault(vault.vaultId, amount);
       if (result.success) {
         actionSuccess = `Added ${amount} ICP`; addCollateralAmount = '';
+        await vaultStore.refreshVault(vault.vaultId); dispatch('updated');
+      } else { actionError = result.error || 'Failed'; }
+    } catch (err) { actionError = err instanceof Error ? err.message : 'Unknown error';
+    } finally { isProcessing = false; }
+  }
+
+  async function handleWithdrawPartial() {
+    const amount = parseFloat(withdrawAmount);
+    if (!amount || amount <= 0) { actionError = 'Enter a valid ICP amount'; return; }
+    if (withdrawOverMax) { actionError = `Max withdrawable: ${formatNumber(maxWithdrawable, 4)} ICP`; return; }
+    clearMessages(); isProcessing = true;
+    try {
+      const result = await protocolService.withdrawPartialCollateral(vault.vaultId, amount);
+      if (result.success) {
+        actionSuccess = `Withdrew ${amount} ICP`; withdrawAmount = '';
         await vaultStore.refreshVault(vault.vaultId); dispatch('updated');
       } else { actionError = result.error || 'Failed'; }
     } catch (err) { actionError = err instanceof Error ? err.message : 'Unknown error';
@@ -319,7 +435,7 @@
     </span>
   </button>
 
-  <!-- ── Expanded: action panels ── -->
+  <!-- ── Expanded: pill groups + two-column layout ── -->
   {#if expanded}
     <div class="vault-actions">
       {#if actionError}
@@ -333,77 +449,203 @@
         </div>
       {/if}
 
-      <div class="action-grid">
-        <!-- Add Collateral -->
-        <div class="action-panel" class:panel-inactive={activeIntent && activeIntent !== 'add'}>
-          <span class="action-label-row">
-            <span class="action-label">Add Collateral</span>
-            {#if maxAddCollateral > 0}
-              <button class="max-text" on:click={setMaxAddCollateral}>Max: {formatNumber(maxAddCollateral, 4)} ICP</button>
-            {/if}
-          </span>
-          <div class="action-input-row">
-            <input type="number" class="action-input" bind:value={addCollateralAmount}
-              on:input={onAddInput} on:blur={clampAddCollateral}
-              placeholder="0.00" min="0.001" step="0.01" disabled={isProcessing} />
-            <span class="input-suffix">ICP</span>
+      <!-- Action layout: pills top-right, stats left, input right -->
+      <div class="action-layout">
+        <!-- Pill groups: right column -->
+        <div class="pill-groups">
+          <div class="pill-group pill-group-collateral">
+            <button class="pill pill-collateral" class:pill-active-collateral={activeAction === 'add'}
+              on:click={() => selectAction('add')} disabled={isProcessing}>Deposit</button>
+            <button class="pill pill-collateral" class:pill-active-collateral={activeAction === 'withdraw'}
+              class:pill-disabled={maxWithdrawable <= 0 && vault.borrowedIcusd > 0}
+              on:click={() => selectAction('withdraw')} disabled={isProcessing || (maxWithdrawable <= 0 && vault.borrowedIcusd > 0)}>Withdraw</button>
           </div>
-          <div class="action-btn-row">
-            <button class="btn-primary btn-sm btn-action" on:click={handleAddCollateral}
-              disabled={isProcessing || !addCollateralAmount || addOverMax}>
-              {isProcessing && activeIntent === 'add' ? '…' : 'Add'}
-            </button>
+          <div class="pill-group pill-group-debt">
+            <button class="pill pill-debt" class:pill-active-debt={activeAction === 'borrow'}
+              on:click={() => selectAction('borrow')} disabled={isProcessing}>Borrow</button>
+            <button class="pill pill-debt" class:pill-active-debt={activeAction === 'repay'}
+              on:click={() => selectAction('repay')} disabled={isProcessing}>Repay</button>
           </div>
         </div>
 
-        <!-- Borrow -->
-        <div class="action-panel" class:panel-inactive={activeIntent && activeIntent !== 'borrow'}>
-          <span class="action-label-row">
-            <span class="action-label">Borrow</span>
-            {#if maxBorrowable > 0}
-              <button class="max-text" on:click={setMaxBorrow}>Max: {formatNumber(maxBorrowable, 2)} icUSD</button>
+        {#if activeAction}
+        <!-- Stats panel: left column -->
+        <div class="stats-panel">
+            {#if activeStats}
+              <div class="stat-row">
+                <span class="stat-label">{activeStats.label1}</span>
+                <span class="stat-value">{activeStats.value1}</span>
+              </div>
+              <div class="stat-row">
+                <span class="stat-label">{activeStats.label2}</span>
+                <span class="stat-value">{activeStats.value2}</span>
+              </div>
             {/if}
-          </span>
-          <div class="action-input-row">
-            <input type="number" class="action-input" bind:value={borrowAmount}
-              on:input={onBorrowInput} on:blur={clampBorrow}
-              placeholder="0.00" min="0.1" step="0.1" disabled={isProcessing} />
-            <span class="input-suffix">icUSD</span>
+            <div class="stat-divider"></div>
+            <!-- CR row -->
+            <div class="stat-row">
+              <span class="stat-label">CR</span>
+              <span class="stat-value">
+                {#if showProjectedCr}
+                  <span class="stat-cr-old">{fmtRatio}</span>
+                  <span class="stat-arrow">→</span>
+                  <span class="stat-cr-new" class:ratio-warning={activeProjectedRisk === 'warning'}
+                    class:ratio-danger={activeProjectedRisk === 'danger'}
+                    class:ratio-healthy={activeProjectedRisk === 'normal'}>{fmtActiveProjectedCr}</span>
+                {:else}
+                  <span class:ratio-warning={riskLevel === 'warning'} class:ratio-danger={riskLevel === 'danger'}>{fmtRatio}</span>
+                {/if}
+              </span>
+            </div>
+            <!-- Liq price row -->
+            {#if vault.borrowedIcusd > 0 || activeAction === 'borrow'}
+              <div class="stat-row">
+                <span class="stat-label">Liq. price</span>
+                <span class="stat-value">
+                  {#if projectedLiqPrice !== null}
+                    <span class="stat-cr-old">${formatNumber(liquidationPrice, 2)}</span>
+                    <span class="stat-arrow">→</span>
+                    <span>${formatNumber(projectedLiqPrice, 2)}</span>
+                  {:else}
+                    ${formatNumber(liquidationPrice, 2)}
+                  {/if}
+                </span>
+              </div>
+              {#if liqPriceDistance > 0}
+                <div class="stat-row">
+                  <span class="stat-label">Distance</span>
+                  <span class="stat-value stat-distance" class:stat-distance-danger={liqPriceDistance < 15}
+                    class:stat-distance-warning={liqPriceDistance >= 15 && liqPriceDistance < 30}>
+                    {liqPriceDistance.toFixed(1)}% below ICP
+                  </span>
+                </div>
+              {/if}
+            {/if}
+            <!-- Safety delta -->
+            {#if safetyDelta}
+              <div class="safety-delta" class:safety-up={safetyDelta.direction === 'up'} class:safety-down={safetyDelta.direction === 'down'}>
+                <span class="safety-arrow">{safetyDelta.direction === 'up' ? '▲' : '▼'}</span>
+                <span>{safetyDelta.direction === 'up' ? 'Safer' : 'Riskier'} by {safetyDelta.pct.toFixed(1)}%</span>
+              </div>
+            {/if}
           </div>
-          <div class="action-btn-row">
-            <button class="btn-primary btn-sm btn-action" on:click={handleBorrow}
-              disabled={isProcessing || !borrowAmount || borrowCrInvalid || borrowOverMax}>
-              {isProcessing && activeIntent === 'borrow' ? '…' : 'Borrow'}
-            </button>
-          </div>
-        </div>
 
-        <!-- Repay -->
-        <div class="action-panel" class:panel-inactive={activeIntent && activeIntent !== 'repay'}>
-          <span class="action-label-row">
-            <span class="action-label">Repay</span>
-            {#if maxRepayable > 0}
-              <button class="max-text" on:click={setMaxRepay}>Max: {formatNumber(maxRepayable, 4)} {repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}</button>
+          <!-- Right: input panel -->
+          <div class="input-panel" class:input-panel-collateral={activeAction === 'add' || activeAction === 'withdraw'}
+            class:input-panel-debt={activeAction === 'borrow' || activeAction === 'repay'}>
+
+            {#if activeAction === 'add'}
+              <div class="input-header">
+                <span class="input-label">Deposit Collateral</span>
+                {#if maxAddCollateral > 0}
+                  <button class="max-text" on:click={setMaxAddCollateral}>Max</button>
+                {/if}
+              </div>
+              <div class="action-input-row">
+                <input type="number" class="action-input" bind:value={addCollateralAmount}
+                  on:blur={() => clampInput('add')}
+                  placeholder="0.00" min="0.001" step="0.01" disabled={isProcessing} />
+                <span class="input-suffix">ICP</span>
+              </div>
+              <div class="input-submit-row">
+                <button class="btn-submit btn-submit-collateral" on:click={handleAddCollateral}
+                  disabled={isProcessing || !addCollateralAmount || addOverMax}>
+                  {isProcessing ? '...' : 'Deposit'}
+                </button>
+              </div>
+
+            {:else if activeAction === 'withdraw'}
+              <div class="input-header">
+                <span class="input-label">Withdraw Collateral</span>
+                {#if maxWithdrawable > 0}
+                  <button class="max-text" on:click={setMaxWithdraw}>Max</button>
+                {/if}
+              </div>
+              {#if vault.borrowedIcusd > 0}
+                <span class="input-hint">Keeps CR above 150%</span>
+              {/if}
+              <div class="action-input-row">
+                <input type="number" class="action-input" bind:value={withdrawAmount}
+                  on:blur={() => clampInput('withdraw')}
+                  placeholder="0.00" min="0.001" step="0.01" disabled={isProcessing} />
+                <span class="input-suffix">ICP</span>
+              </div>
+              <div class="input-submit-row">
+                <button class="btn-submit btn-submit-collateral" on:click={handleWithdrawPartial}
+                  disabled={isProcessing || !withdrawAmount || withdrawOverMax}>
+                  {isProcessing ? '...' : 'Withdraw'}
+                </button>
+              </div>
+
+            {:else if activeAction === 'borrow'}
+              <div class="input-header">
+                <span class="input-label">Borrow icUSD</span>
+                {#if maxBorrowable > 0}
+                  <button class="max-text" on:click={setMaxBorrow}>Max</button>
+                {/if}
+              </div>
+              <div class="action-input-row">
+                <input type="number" class="action-input" bind:value={borrowAmount}
+                  on:blur={() => clampInput('borrow')}
+                  placeholder="0.00" min="0.1" step="0.1" disabled={isProcessing} />
+                <span class="input-suffix">icUSD</span>
+              </div>
+              <div class="input-submit-row">
+                <button class="btn-submit btn-submit-debt" on:click={handleBorrow}
+                  disabled={isProcessing || !borrowAmount || borrowCrInvalid || borrowOverMax}>
+                  {isProcessing ? '...' : 'Borrow'}
+                </button>
+              </div>
+
+            {:else if activeAction === 'repay'}
+              <div class="input-header">
+                <span class="input-label">Repay Debt</span>
+                {#if maxRepayable > 0}
+                  <button class="max-text" on:click={setMaxRepay}>Max</button>
+                {/if}
+              </div>
+              <div class="action-input-row">
+                <input type="number" class="action-input action-input-repay" bind:value={repayAmount}
+                  on:blur={() => clampInput('repay')}
+                  placeholder="0.00" min="0" step="0.01" disabled={isProcessing} />
+                <button class="token-selector" class:token-selector-pulse={!hasChangedToken}
+                  on:click={() => { showTokenDropdown = !showTokenDropdown; }}
+                  disabled={isProcessing}>
+                  <span class="token-dot" class:token-dot-icusd={repayTokenType === 'icUSD'}
+                    class:token-dot-ckusdt={repayTokenType === 'CKUSDT'}
+                    class:token-dot-ckusdc={repayTokenType === 'CKUSDC'}></span>
+                  {repayTokenLabel}
+                  <span class="token-chevron">▾</span>
+                </button>
+                {#if showTokenDropdown}
+                  <div class="token-dropdown">
+                    <button class="token-option" class:token-option-active={repayTokenType === 'icUSD'}
+                      on:click={() => selectToken('icUSD')}>
+                      <span class="token-dot token-dot-icusd"></span> icUSD
+                    </button>
+                    <button class="token-option" class:token-option-active={repayTokenType === 'CKUSDT'}
+                      on:click={() => selectToken('CKUSDT')}>
+                      <span class="token-dot token-dot-ckusdt"></span> ckUSDT
+                    </button>
+                    <button class="token-option" class:token-option-active={repayTokenType === 'CKUSDC'}
+                      on:click={() => selectToken('CKUSDC')}>
+                      <span class="token-dot token-dot-ckusdc"></span> ckUSDC
+                    </button>
+                  </div>
+                {/if}
+              </div>
+              {#if !hasChangedToken}
+                <span class="token-hint">Tap token to pay with ckUSDT or ckUSDC</span>
+              {/if}
+              <div class="input-submit-row">
+                <button class="btn-submit btn-submit-debt" on:click={handleRepay}
+                  disabled={isProcessing || !repayAmount || repayOverMax}>
+                  {isProcessing ? '...' : 'Repay'}
+                </button>
+              </div>
             {/if}
-          </span>
-          <div class="action-input-row">
-            <input type="number" class="action-input action-input-with-select" bind:value={repayAmount}
-              on:input={onRepayInput} on:blur={clampRepay}
-              placeholder="0.00" min="0" step="0.01"
-              disabled={isProcessing || vault.borrowedIcusd === 0} />
-            <select class="token-select" bind:value={repayTokenType} on:change={onTokenChange} disabled={isProcessing}>
-              <option value="icUSD">icUSD</option>
-              <option value="CKUSDT">ckUSDT</option>
-              <option value="CKUSDC">ckUSDC</option>
-            </select>
           </div>
-          <div class="action-btn-row">
-            <button class="btn-primary btn-sm btn-action" on:click={handleRepay}
-              disabled={isProcessing || !repayAmount || vault.borrowedIcusd === 0 || repayOverMax}>
-              {isProcessing && activeIntent === 'repay' ? '…' : 'Repay'}
-            </button>
-          </div>
-        </div>
+        {/if}
       </div>
 
       {#if canWithdraw || canClose}
@@ -414,7 +656,7 @@
           {#if showAdvanced}
             <div class="advanced-content">
               <button class="btn-danger btn-sm" on:click={handleWithdrawAndClose} disabled={isWithdrawingAndClosing}>
-                {isWithdrawingAndClosing ? 'Closing…' : 'Withdraw Collateral & Close Vault'}
+                {isWithdrawingAndClosing ? 'Closing...' : 'Withdraw Collateral & Close Vault'}
               </button>
             </div>
           {/if}
@@ -471,7 +713,6 @@
   .cr-old { text-decoration: line-through; opacity: 0.5; font-size: 0.75rem; }
   .cr-arrow { color: var(--rumi-text-muted); font-size: 0.625rem; }
   .cr-new { font-weight: 700; }
-  .ratio-healthy { color: var(--rumi-success, #10b981); }
 
   .vault-chevron { display: flex; align-items: center; justify-content: center; align-self: center; transition: transform 0.15s ease; }
   .vault-chevron svg { width: 1rem; height: 1rem; color: var(--rumi-text-muted); }
@@ -479,52 +720,216 @@
 
   /* ── Expanded ── */
   .vault-actions { border-top: 1px solid var(--rumi-border); padding: 0.625rem 1rem 0.75rem; }
-  .action-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.75rem; }
-  .action-panel { display: flex; flex-direction: column; gap: 0.3125rem; transition: opacity 0.15s ease; }
-  .panel-inactive { opacity: 0.4; }
 
-  .action-label { font-size: 0.75rem; font-weight: 500; color: var(--rumi-text-secondary); }
-  .action-label-row { display: flex; justify-content: space-between; align-items: baseline; gap: 0.5rem; min-height: 1.125rem; }
+  /* ── Two pill groups ── */
+  .pill-groups {
+    grid-column: 2; grid-row: 1;
+    display: flex; justify-content: space-between; gap: 0.5rem;
+    margin-bottom: 0.25rem;
+  }
+  .pill-group {
+    display: flex; border-radius: 0.375rem; overflow: hidden;
+    border: 1px solid var(--rumi-border);
+  }
+  .pill {
+    padding: 0.3125rem 0.75rem;
+    background: var(--rumi-bg-surface2); border: none;
+    font-family: 'Inter',sans-serif; font-size: 0.75rem; font-weight: 500;
+    cursor: pointer; transition: all 0.15s ease; text-align: center;
+    min-width: 4.5rem;
+  }
+  .pill-collateral { color: var(--rumi-text-secondary); }
+  .pill-debt { color: var(--rumi-text-secondary); }
+  .pill:first-child { border-right: 1px solid var(--rumi-border); }
+
+  /* Collateral pills: teal */
+  .pill-collateral:hover:not(:disabled) { color: #2DD4BF; background: rgba(45,212,191,0.06); }
+  .pill-active-collateral {
+    background: rgba(45,212,191,0.12); color: #2DD4BF; font-weight: 600;
+  }
+  .pill-group-collateral { border-color: rgba(45,212,191,0.15); }
+  .pill-group-collateral:has(.pill-active-collateral) { border-color: rgba(45,212,191,0.35); }
+
+  /* Debt pills: purple */
+  .pill-debt:hover:not(:disabled) { color: #d176e8; background: rgba(209,118,232,0.06); }
+  .pill-active-debt {
+    background: rgba(209,118,232,0.12); color: #d176e8; font-weight: 600;
+  }
+  .pill-group-debt { border-color: rgba(209,118,232,0.15); }
+  .pill-group-debt:has(.pill-active-debt) { border-color: rgba(209,118,232,0.35); }
+
+  .pill-disabled { opacity: 0.35; cursor: not-allowed; }
+  .pill:disabled { cursor: not-allowed; }
+
+  /* ── Grid layout: stats left, pills+input right ── */
+  .action-layout {
+    display: grid; grid-template-columns: 1fr 1.2fr; gap: 0.5rem 1rem;
+  }
+
+  /* ── Stats panel (left column, spans rows 1-2) ── */
+  .stats-panel {
+    grid-column: 1; grid-row: 1 / 3;
+    display: flex; flex-direction: column; gap: 0.375rem;
+    padding: 0.625rem 0.75rem;
+    background: var(--rumi-bg-surface2);
+    border-radius: 0.5rem;
+    border: 1px solid var(--rumi-border);
+  }
+  .stat-row {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 0.75rem;
+  }
+  .stat-label { color: var(--rumi-text-muted); font-weight: 400; }
+  .stat-value {
+    color: var(--rumi-text-primary); font-weight: 600;
+    font-variant-numeric: tabular-nums; font-family: 'Inter',sans-serif;
+  }
+  .stat-divider {
+    height: 1px; background: var(--rumi-border); margin: 0.125rem 0;
+  }
+  .stat-cr-old { opacity: 0.45; text-decoration: line-through; font-weight: 400; }
+  .stat-arrow { color: var(--rumi-text-muted); font-size: 0.625rem; margin: 0 0.125rem; }
+  .stat-cr-new { font-weight: 600; }
+  .stat-distance { font-weight: 500; color: var(--rumi-text-secondary); }
+  .stat-distance-danger { color: var(--rumi-danger); }
+  .stat-distance-warning { color: var(--rumi-caution); }
+
+  /* Safety delta badge */
+  .safety-delta {
+    display: inline-flex; align-items: center; gap: 0.25rem;
+    font-size: 0.6875rem; font-weight: 600;
+    padding: 0.1875rem 0.5rem; border-radius: 0.25rem;
+    margin-top: 0.125rem; width: fit-content;
+  }
+  .safety-up {
+    color: #34d399; background: rgba(52,211,153,0.08);
+  }
+  .safety-down {
+    color: #f87171; background: rgba(248,113,113,0.08);
+  }
+  .safety-arrow { font-size: 0.5rem; }
+
+  /* ── Input panel (right column, row 2) ── */
+  .input-panel {
+    grid-column: 2; grid-row: 2;
+    display: flex; flex-direction: column; gap: 0.375rem;
+    padding: 0.625rem 0.75rem;
+    border-radius: 0.5rem;
+    border: 1px solid var(--rumi-border);
+  }
+  .input-panel-collateral { border-color: rgba(45,212,191,0.2); }
+  .input-panel-debt { border-color: rgba(209,118,232,0.2); }
+
+  .input-header {
+    display: flex; justify-content: space-between; align-items: baseline;
+  }
+  .input-label { font-size: 0.75rem; font-weight: 500; color: var(--rumi-text-secondary); }
+  .input-hint { font-size: 0.6875rem; color: var(--rumi-text-muted); margin-top: -0.125rem; }
 
   .action-input-row { position: relative; }
   .action-input {
-    width: 100%; padding: 0.375rem 2.5rem 0.375rem 0.5rem;
+    width: 100%; padding: 0.4375rem 3rem 0.4375rem 0.625rem;
     background: var(--rumi-bg-surface2); border: 1px solid var(--rumi-border);
     border-radius: 0.375rem; color: var(--rumi-text-primary);
-    font-family: 'Inter',sans-serif; font-size: 0.8125rem;
+    font-family: 'Inter',sans-serif; font-size: 0.875rem;
     font-variant-numeric: tabular-nums; transition: border-color 0.15s;
   }
-  .action-input:focus { outline: none; border-color: var(--rumi-teal); box-shadow: 0 0 0 1px rgba(45,212,191,0.12); }
+  .input-panel-collateral .action-input:focus { outline: none; border-color: #2DD4BF; box-shadow: 0 0 0 1px rgba(45,212,191,0.12); }
+  .input-panel-debt .action-input:focus { outline: none; border-color: #d176e8; box-shadow: 0 0 0 1px rgba(209,118,232,0.12); }
   .action-input:disabled { opacity: 0.5; }
   .input-suffix {
-    position: absolute; right: 0.5rem; top: 50%; transform: translateY(-50%);
-    font-size: 0.6875rem; color: var(--rumi-text-muted); pointer-events: none;
+    position: absolute; right: 0.625rem; top: 50%; transform: translateY(-50%);
+    font-size: 0.75rem; color: var(--rumi-text-muted); pointer-events: none;
   }
-  .action-input-with-select { padding-right: 4.5rem; }
-  .token-select {
-    position: absolute; right: 0.25rem; top: 50%; transform: translateY(-50%);
-    background: var(--rumi-bg-surface1); border: 1px solid var(--rumi-border);
-    border-radius: 0.25rem; color: var(--rumi-text-secondary);
-    font-size: 0.6875rem; font-family: 'Inter',sans-serif;
-    padding: 0.125rem 0.25rem; cursor: pointer;
-    appearance: auto; -webkit-appearance: auto;
-  }
-  .token-select:focus { outline: none; border-color: var(--rumi-teal); }
-  .token-select:disabled { opacity: 0.5; cursor: not-allowed; }
 
-  /* Max: inline utility text, NOT a button — neutral color per spec */
+  /* ── Token selector (in-field dropdown) ── */
+  .action-input-repay { padding-right: 5.5rem; }
+  .token-selector {
+    position: absolute; right: 0.375rem; top: 50%; transform: translateY(-50%);
+    display: inline-flex; align-items: center; gap: 0.25rem;
+    padding: 0.1875rem 0.375rem; border-radius: 0.25rem;
+    background: var(--rumi-bg-surface2); border: 1px solid var(--rumi-border);
+    color: var(--rumi-text-primary); font-family: 'Inter',sans-serif;
+    font-size: 0.6875rem; font-weight: 500; cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .token-selector:hover:not(:disabled) {
+    border-color: #d176e8; background: rgba(209,118,232,0.06);
+  }
+  .token-selector:disabled { opacity: 0.5; cursor: not-allowed; }
+  .token-chevron { font-size: 0.5rem; color: var(--rumi-text-muted); margin-left: 0.0625rem; }
+
+  /* Subtle pulse on first render to draw attention */
+  .token-selector-pulse {
+    animation: token-pulse 2s ease-in-out 0.5s 2;
+  }
+  @keyframes token-pulse {
+    0%, 100% { box-shadow: none; }
+    50% { box-shadow: 0 0 0 2px rgba(209,118,232,0.25); }
+  }
+
+  /* Token color dots */
+  .token-dot {
+    width: 0.375rem; height: 0.375rem; border-radius: 9999px;
+    display: inline-block; flex-shrink: 0;
+  }
+  .token-dot-icusd { background: #818cf8; }
+  .token-dot-ckusdt { background: #26a17b; }
+  .token-dot-ckusdc { background: #2775ca; }
+
+  /* Dropdown */
+  .token-dropdown {
+    position: absolute; right: 0.375rem; top: calc(50% + 1rem);
+    display: flex; flex-direction: column;
+    background: var(--rumi-bg-surface1); border: 1px solid var(--rumi-border);
+    border-radius: 0.375rem; overflow: hidden; z-index: 10;
+    box-shadow: 0 4px 12px -2px rgba(0,0,0,0.5);
+    min-width: 6rem;
+  }
+  .token-option {
+    display: flex; align-items: center; gap: 0.375rem;
+    padding: 0.375rem 0.5rem;
+    background: none; border: none;
+    color: var(--rumi-text-secondary); font-family: 'Inter',sans-serif;
+    font-size: 0.6875rem; font-weight: 500; cursor: pointer;
+    transition: background 0.1s;
+  }
+  .token-option:hover { background: rgba(209,118,232,0.08); color: var(--rumi-text-primary); }
+  .token-option-active { color: #d176e8; font-weight: 600; }
+
+  /* Hint text */
+  .token-hint {
+    font-size: 0.625rem; color: var(--rumi-text-muted);
+    opacity: 0.7; margin-top: -0.125rem;
+  }
+
+  /* Max button */
   .max-text {
     background: none; border: none; cursor: pointer; padding: 0;
-    font-size: 0.6875rem; font-weight: 500; white-space: nowrap;
+    font-size: 0.6875rem; font-weight: 600; white-space: nowrap;
     color: var(--rumi-text-muted); opacity: 0.85;
     transition: opacity 0.15s;
   }
   .max-text:hover { opacity: 1; text-decoration: underline; }
 
-  /* Button row — right-aligned, uniform width */
-  .action-btn-row { display: flex; justify-content: flex-end; }
-  .btn-action { width: 6rem; text-align: center; }
-  .btn-sm { padding: 0.3125rem 0.75rem; font-size: 0.75rem; border-radius: 0.375rem; }
+  /* Submit button */
+  .input-submit-row { display: flex; justify-content: flex-end; margin-top: 0.125rem; }
+  .btn-submit {
+    padding: 0.375rem 1rem; font-size: 0.75rem; font-weight: 600;
+    border-radius: 0.375rem; border: none; cursor: pointer;
+    font-family: 'Inter',sans-serif; transition: all 0.15s ease;
+  }
+  .btn-submit:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-submit-collateral {
+    background: rgba(45,212,191,0.15); color: #2DD4BF;
+    border: 1px solid rgba(45,212,191,0.3);
+  }
+  .btn-submit-collateral:hover:not(:disabled) { background: rgba(45,212,191,0.25); }
+  .btn-submit-debt {
+    background: rgba(209,118,232,0.15); color: #d176e8;
+    border: 1px solid rgba(209,118,232,0.3);
+  }
+  .btn-submit-debt:hover:not(:disabled) { background: rgba(209,118,232,0.25); }
 
   /* Messages */
   .msg-bar {
@@ -552,6 +957,11 @@
     .vault-row { grid-template-columns: 3rem 1fr 1fr 2rem; gap: 0.5rem; }
     .vault-cell-ratio { display: none; }
     .vault-cell-credit { display: none; }
-    .action-grid { grid-template-columns: 1fr; }
+    .action-layout { grid-template-columns: 1fr; }
+    .pill-groups { grid-column: 1; flex-direction: column; gap: 0.5rem; }
+    .pill-group { flex: 1; }
+    .pill { flex: 1; }
+    .stats-panel { grid-column: 1; grid-row: auto; order: 2; }
+    .input-panel { grid-column: 1; grid-row: auto; order: 1; }
   }
 </style>
