@@ -3,9 +3,12 @@
   import '../app.css';
 
   let currentPath = '/';
+  let appUrl = 'https://app.rumiprotocol.com';
 
   onMount(() => {
     currentPath = window.location.pathname;
+    const match = window.location.hostname.match(/rumiprotocol\.(\w+)$/);
+    appUrl = match ? `https://app.rumiprotocol.${match[1]}` : 'https://app.rumiprotocol.com';
     window.addEventListener('popstate', () => {
       currentPath = window.location.pathname;
     });
@@ -26,7 +29,7 @@
         <a href="/about" class="nav-link" class:active={currentPath === '/about'}>About</a>
         <a href="/Rumi-Protocol-v2-Whitepaper.pdf" target="_blank" class="nav-link">Whitepaper</a>
         <a href="/AVAI_Security_Audit_Rumi_Protocol_Professional.pdf" target="_blank" class="nav-link">Audit</a>
-        <a href="https://app.rumiprotocol.com" target="_blank" rel="noopener" class="launch-cta">Launch App</a>
+        <a href={appUrl} target="_blank" rel="noopener" class="launch-cta">Launch App</a>
       </nav>
 
       <div class="flex items-center gap-5">
@@ -75,7 +78,7 @@
         <a href="/branding" class="footer-link">Branding</a>
         <a href="mailto:info@rumiprotocol.com" class="footer-link">Contact</a>
       </div>
-      <a href="https://app.rumiprotocol.com" target="_blank" rel="noopener"
+      <a href={appUrl} target="_blank" rel="noopener"
          class="text-sm font-medium transition-colors" style="color: var(--rumi-action);">
         Launch App →
       </a>

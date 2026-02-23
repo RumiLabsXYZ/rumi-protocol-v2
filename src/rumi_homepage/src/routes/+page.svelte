@@ -1,11 +1,20 @@
 <script>
-  const protocolSuite = [
+  import { onMount } from 'svelte';
+
+  let appUrl = 'https://app.rumiprotocol.com';
+
+  onMount(() => {
+    const match = window.location.hostname.match(/rumiprotocol\.(\w+)$/);
+    appUrl = match ? `https://app.rumiprotocol.${match[1]}` : 'https://app.rumiprotocol.com';
+  });
+
+  $: protocolSuite = [
     {
       name: 'Rumi Protocol',
       tag: 'LIVE',
       tagColor: '#34d399',
       description: 'Borrow icUSD against your ICP. A fully on-chain CDP engine with liquidation protection, stability pools, and transparent governance.',
-      href: 'https://app.rumiprotocol.com',
+      href: appUrl,
       cta: 'Launch App'
     },
     {
@@ -57,7 +66,7 @@
       Collateralize ICP to mint icUSD and access stable liquidity.
     </p>
     <div class="flex flex-col sm:flex-row gap-4 justify-center animate-in" style="animation-delay: 0.55s;">
-      <a href="https://app.rumiprotocol.com" target="_blank" rel="noopener" class="cta-primary">Launch App</a>
+      <a href={appUrl} target="_blank" rel="noopener" class="cta-primary">Launch App</a>
       <a href="/Rumi-Protocol-v2-Whitepaper.pdf" target="_blank" class="cta-secondary">Read Whitepaper</a>
     </div>
   </div>
@@ -163,7 +172,7 @@
       Connect your wallet, deposit ICP, and mint icUSD in minutes. 
       No KYC, no intermediaries, no bridges.
     </p>
-    <a href="https://app.rumiprotocol.com" target="_blank" rel="noopener" class="cta-primary">Launch App</a>
+    <a href={appUrl} target="_blank" rel="noopener" class="cta-primary">Launch App</a>
   </div>
 </section>
 
