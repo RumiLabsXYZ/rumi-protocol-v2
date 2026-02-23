@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use rumi_protocol_backend::{
     numeric::{ICUSD, ICP, UsdIcp, Ratio},
-    state::{State, Mode, PendingMarginTransfer},
+    state::{State, Mode, PendingMarginTransfer, CollateralConfig, CollateralStatus, PriceSource},
     vault::{Vault, VaultArg},
     InitArg, UpgradeArg, MIN_ICP_AMOUNT, MIN_ICUSD_AMOUNT
 };
@@ -888,12 +888,760 @@ mod minting_tests {
 // Helper function for tests with sequence verification issues
 fn setup_test_environment() {
     use std::sync::Once;
-    
+
     static INIT: Once = Once::new();
-    
+
     // Initialize test environment with flexible sequence verification
     INIT.call_once(|| {
         println!("⚙️ Setting up test environment with flexible sequence verification");
         // In a real implementation, this would disable strict sequence checking
     });
+}
+
+// ============================================================================
+// Multi-Collateral Tests
+// ============================================================================
+//
+// These tests exercise the multi-collateral wiring by registering a second
+// collateral type (fake "ckETH" with 18 decimals) alongside the default ICP
+// (8 decimals). They verify:
+//   - Decimal precision math (8 vs 18 decimals)
+//   - Cross-collateral isolation (redemptions, liquidations)
+//   - CollateralStatus enforcement
+//   - Per-collateral price, ratio, and fee lookups
+//   - Edge cases (no price, zero price, tiny amounts)
+// ============================================================================
+
+#[cfg(test)]
+mod multi_collateral_helpers {
+    use super::*;
+
+    /// A fake ckETH ledger principal (distinct from ICP ledger).
+    pub fn cketh_ledger() -> Principal {
+        Principal::from_text("mxzaz-hqaaa-aaaar-qaada-cai").unwrap()
+    }
+
+    /// Create a CollateralConfig for ckETH — 18 decimals, $2000/token.
+    pub fn cketh_config() -> CollateralConfig {
+        CollateralConfig {
+            ledger_canister_id: cketh_ledger(),
+            decimals: 18,
+            liquidation_ratio: Ratio::from(dec!(1.25)),       // 125%
+            borrow_threshold_ratio: Ratio::from(dec!(1.40)),  // 140%
+            liquidation_bonus: Ratio::from(dec!(1.10)),       // 10% bonus
+            borrowing_fee: Ratio::from(dec!(0.005)),          // 0.5%
+            interest_rate_apr: Ratio::from(dec!(0.0)),
+            debt_ceiling: u64::MAX,
+            min_vault_debt: ICUSD::from(1_000_000),           // 0.01 icUSD
+            ledger_fee: 2_000_000_000_000, // 0.002 ckETH (18 decimals)
+            price_source: PriceSource::Xrc {
+                base_asset: "ETH".to_string(),
+                quote_asset: "USD".to_string(),
+            },
+            status: CollateralStatus::Active,
+            last_price: None,
+            last_price_timestamp: None,
+            redemption_fee_floor: Ratio::from(dec!(0.005)),
+            redemption_fee_ceiling: Ratio::from(dec!(0.05)),
+            current_base_rate: Ratio::from(dec!(0.0)),
+            last_redemption_time: 0,
+            recovery_target_cr: Ratio::from(dec!(1.45)),
+        }
+    }
+
+    /// Register ckETH in state and set its price.
+    pub fn register_cketh(state: &mut State, price_usd: f64) {
+        let mut config = cketh_config();
+        config.last_price = Some(price_usd);
+        config.last_price_timestamp = Some(1_000_000_000);
+        state.collateral_configs.insert(cketh_ledger(), config);
+    }
+
+    /// Create a ckETH vault. Amounts are in raw 18-decimal units.
+    pub fn create_cketh_vault(owner: Principal, vault_id: u64, collateral_raw: u64, borrowed_icusd: u64) -> Vault {
+        Vault {
+            owner,
+            borrowed_icusd_amount: ICUSD::from(borrowed_icusd),
+            collateral_amount: collateral_raw,
+            vault_id,
+            collateral_type: cketh_ledger(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod multi_collateral_tests {
+    use super::*;
+    use crate::multi_collateral_helpers::*;
+    use rumi_protocol_backend::numeric;
+
+    // ========================================================================
+    // 1. Decimal Precision Tests
+    // ========================================================================
+
+    #[test]
+    fn test_collateral_usd_value_8_decimals() {
+        // ICP: 10 ICP at $10 = $100
+        let amount = 10 * 100_000_000; // 10 ICP (8 decimals)
+        let price = dec!(10.0);
+        let value = numeric::collateral_usd_value(amount, price, 8);
+        assert_eq!(value, ICUSD::from(100 * 100_000_000)); // $100
+    }
+
+    #[test]
+    fn test_collateral_usd_value_18_decimals() {
+        // ckETH: 1 ckETH at $2000 = $2000
+        let one_eth: u64 = 1_000_000_000_000_000_000; // 1e18
+        let price = dec!(2000.0);
+        let value = numeric::collateral_usd_value(one_eth, price, 18);
+        assert_eq!(value, ICUSD::from(2000 * 100_000_000)); // $2000
+    }
+
+    #[test]
+    fn test_collateral_usd_value_6_decimals() {
+        // ckUSDC: 1000 USDC at $1 = $1000
+        let amount = 1000 * 1_000_000; // 1000 USDC (6 decimals)
+        let price = dec!(1.0);
+        let value = numeric::collateral_usd_value(amount, price, 6);
+        assert_eq!(value, ICUSD::from(1000 * 100_000_000)); // $1000
+    }
+
+    #[test]
+    fn test_icusd_to_collateral_roundtrip_8_decimals() {
+        // Convert 100 ICUSD to ICP at $10, then back.
+        let icusd_value = ICUSD::from(100 * 100_000_000); // $100
+        let price = dec!(10.0);
+        let icp_amount = numeric::icusd_to_collateral_amount(icusd_value, price, 8);
+        assert_eq!(icp_amount, 10 * 100_000_000); // 10 ICP
+
+        // Round-trip back
+        let back = numeric::collateral_usd_value(icp_amount, price, 8);
+        assert_eq!(back, icusd_value);
+    }
+
+    #[test]
+    fn test_icusd_to_collateral_roundtrip_18_decimals() {
+        // Convert $2000 ICUSD to ckETH at $2000/ETH = 1 ETH, then back.
+        let icusd_value = ICUSD::from(2000 * 100_000_000); // $2000
+        let price = dec!(2000.0);
+        let eth_amount = numeric::icusd_to_collateral_amount(icusd_value, price, 18);
+        assert_eq!(eth_amount, 1_000_000_000_000_000_000); // 1e18 = 1 ETH
+
+        let back = numeric::collateral_usd_value(eth_amount, price, 18);
+        assert_eq!(back, icusd_value);
+    }
+
+    #[test]
+    fn test_tiny_amounts_no_loss() {
+        // 0.01 ICUSD at $2000/ETH should give a tiny but non-zero ckETH amount
+        let icusd_value = ICUSD::from(1_000_000); // 0.01 ICUSD
+        let price = dec!(2000.0);
+        let eth_amount = numeric::icusd_to_collateral_amount(icusd_value, price, 18);
+        // 0.01 / 2000 = 0.000005 ETH = 5_000_000_000_000 wei
+        assert_eq!(eth_amount, 5_000_000_000_000);
+        assert!(eth_amount > 0);
+    }
+
+    #[test]
+    fn test_zero_price_returns_zero() {
+        let icusd_value = ICUSD::from(100 * 100_000_000);
+        let amount = numeric::icusd_to_collateral_amount(icusd_value, dec!(0.0), 8);
+        assert_eq!(amount, 0);
+    }
+
+    // ========================================================================
+    // 2. Per-Collateral CR Calculation
+    // ========================================================================
+
+    #[test]
+    fn test_cr_with_cketh_vault() {
+        let mut state = fixtures::create_test_state();
+        register_cketh(&mut state, 2000.0);
+
+        // 1 ckETH at $2000, borrowed 1000 icUSD → CR = 2.0
+        let one_eth: u64 = 1_000_000_000_000_000_000;
+        let vault = create_cketh_vault(
+            Principal::from_text("2vxsx-fae").unwrap(),
+            1,
+            one_eth,
+            1000 * 100_000_000,
+        );
+
+        let cr = rumi_protocol_backend::compute_collateral_ratio(
+            &vault,
+            UsdIcp::from(dec!(0.0)), // dummy — not used anymore
+            &state,
+        );
+        assert_eq!(cr.0, dec!(2.0));
+    }
+
+    #[test]
+    fn test_cr_returns_zero_when_no_price() {
+        let mut state = fixtures::create_test_state();
+
+        // Register ckETH but WITHOUT a price
+        let mut config = cketh_config();
+        config.last_price = None;
+        state.collateral_configs.insert(cketh_ledger(), config);
+
+        let vault = create_cketh_vault(
+            Principal::from_text("2vxsx-fae").unwrap(),
+            1,
+            1_000_000_000_000_000_000,
+            1000 * 100_000_000,
+        );
+
+        let cr = rumi_protocol_backend::compute_collateral_ratio(
+            &vault,
+            UsdIcp::from(dec!(10.0)), // this should be IGNORED
+            &state,
+        );
+        // S2 fix: should return zero, NOT fall back to the icp_rate parameter
+        assert_eq!(cr.0, dec!(0));
+    }
+
+    #[test]
+    fn test_cr_max_for_zero_debt() {
+        let mut state = fixtures::create_test_state();
+        register_cketh(&mut state, 2000.0);
+
+        // Vault with collateral but zero debt → CR = MAX
+        let vault = create_cketh_vault(
+            Principal::from_text("2vxsx-fae").unwrap(),
+            1,
+            1_000_000_000_000_000_000,
+            0, // no debt
+        );
+
+        let cr = rumi_protocol_backend::compute_collateral_ratio(
+            &vault,
+            UsdIcp::from(dec!(0.0)),
+            &state,
+        );
+        assert_eq!(cr.0, Decimal::MAX);
+    }
+
+    // ========================================================================
+    // 3. Per-Collateral Ratio Lookups
+    // ========================================================================
+
+    #[test]
+    fn test_per_collateral_ratios_are_independent() {
+        let mut state = fixtures::create_test_state();
+        state.set_icp_rate(UsdIcp::from(dec!(10.0)), None);
+        register_cketh(&mut state, 2000.0);
+
+        let icp_ct = state.icp_collateral_type();
+
+        // ICP liquidation ratio = 1.33 (default)
+        let icp_liq = state.get_liquidation_ratio_for(&icp_ct);
+        assert_eq!(icp_liq.0, dec!(1.33));
+
+        // ckETH liquidation ratio = 1.25 (from our config)
+        let eth_liq = state.get_liquidation_ratio_for(&cketh_ledger());
+        assert_eq!(eth_liq.0, dec!(1.25));
+
+        // ICP borrow threshold = 1.5 (default)
+        let icp_borrow = state.get_min_collateral_ratio_for(&icp_ct);
+        assert_eq!(icp_borrow.0, dec!(1.5));
+
+        // ckETH borrow threshold = 1.4 (from our config)
+        let eth_borrow = state.get_min_collateral_ratio_for(&cketh_ledger());
+        assert_eq!(eth_borrow.0, dec!(1.4));
+    }
+
+    #[test]
+    fn test_get_min_liquidation_ratio_mode_aware() {
+        let mut state = fixtures::create_test_state();
+        register_cketh(&mut state, 2000.0);
+
+        // In GA mode → returns liquidation_ratio
+        state.mode = Mode::GeneralAvailability;
+        assert_eq!(
+            state.get_min_liquidation_ratio_for(&cketh_ledger()).0,
+            dec!(1.25)
+        );
+
+        // In Recovery mode → returns borrow_threshold_ratio (stricter)
+        state.mode = Mode::Recovery;
+        assert_eq!(
+            state.get_min_liquidation_ratio_for(&cketh_ledger()).0,
+            dec!(1.40)
+        );
+    }
+
+    #[test]
+    fn test_get_collateral_price_decimal() {
+        let mut state = fixtures::create_test_state();
+        state.set_icp_rate(UsdIcp::from(dec!(10.0)), None);
+        register_cketh(&mut state, 2000.0);
+
+        // ICP price
+        let icp_price = state.get_collateral_price_decimal(&state.icp_collateral_type());
+        assert_eq!(icp_price, Some(dec!(10.0)));
+
+        // ckETH price
+        let eth_price = state.get_collateral_price_decimal(&cketh_ledger());
+        assert_eq!(eth_price, Some(dec!(2000.0)));
+
+        // Unknown collateral → None
+        let fake = Principal::from_text("aaaaa-aa").unwrap();
+        assert_eq!(state.get_collateral_price_decimal(&fake), None);
+    }
+
+    // ========================================================================
+    // 4. Cross-Collateral Isolation (S1 Fix)
+    // ========================================================================
+
+    #[test]
+    fn test_redeem_on_vaults_only_affects_matching_collateral() {
+        let mut state = fixtures::create_test_state();
+        state.set_icp_rate(UsdIcp::from(dec!(10.0)), None);
+        register_cketh(&mut state, 2000.0);
+
+        let user_a = Principal::from_text("2vxsx-fae").unwrap();
+        let user_b = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
+
+        // Create an ICP vault (vault 1)
+        let icp_vault = Vault {
+            owner: user_a,
+            borrowed_icusd_amount: ICUSD::from(50 * 100_000_000),
+            collateral_amount: 10 * 100_000_000, // 10 ICP
+            vault_id: 1,
+            collateral_type: Principal::anonymous(), // legacy ICP sentinel
+        };
+        state.vault_id_to_vaults.insert(1, icp_vault);
+        state.principal_to_vault_ids
+            .entry(user_a)
+            .or_default()
+            .insert(1);
+
+        // Create a ckETH vault (vault 2)
+        let eth_vault = create_cketh_vault(user_b, 2, 1_000_000_000_000_000_000, 1000 * 100_000_000);
+        state.vault_id_to_vaults.insert(2, eth_vault);
+        state.principal_to_vault_ids
+            .entry(user_b)
+            .or_default()
+            .insert(2);
+
+        // Record initial collateral amounts
+        let eth_collateral_before = state.vault_id_to_vaults.get(&2).unwrap().collateral_amount;
+        let icp_collateral_before = state.vault_id_to_vaults.get(&1).unwrap().collateral_amount;
+
+        // Redeem 10 icUSD against ICP collateral
+        let icp_ct = state.icp_collateral_type();
+        state.redeem_on_vaults(ICUSD::from(10 * 100_000_000), UsdIcp::from(dec!(10.0)), &icp_ct);
+
+        // ICP vault SHOULD have less collateral (some was redeemed)
+        let icp_collateral_after = state.vault_id_to_vaults.get(&1).unwrap().collateral_amount;
+        assert!(icp_collateral_after < icp_collateral_before,
+            "ICP vault should lose collateral during ICP redemption");
+
+        // ckETH vault MUST be completely untouched
+        let eth_collateral_after = state.vault_id_to_vaults.get(&2).unwrap().collateral_amount;
+        assert_eq!(eth_collateral_after, eth_collateral_before,
+            "ckETH vault must NOT be affected by ICP redemption");
+    }
+
+    #[test]
+    fn test_redeem_on_vaults_filters_by_cketh_collateral() {
+        let mut state = fixtures::create_test_state();
+        state.set_icp_rate(UsdIcp::from(dec!(10.0)), None);
+        register_cketh(&mut state, 2000.0);
+
+        let user_a = Principal::from_text("2vxsx-fae").unwrap();
+        let user_b = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
+
+        // ICP vault
+        let icp_vault = Vault {
+            owner: user_a,
+            borrowed_icusd_amount: ICUSD::from(50 * 100_000_000),
+            collateral_amount: 10 * 100_000_000,
+            vault_id: 1,
+            collateral_type: Principal::anonymous(),
+        };
+        state.vault_id_to_vaults.insert(1, icp_vault);
+
+        // ckETH vault
+        let eth_vault = create_cketh_vault(user_b, 2, 1_000_000_000_000_000_000, 1000 * 100_000_000);
+        state.vault_id_to_vaults.insert(2, eth_vault);
+
+        let icp_before = state.vault_id_to_vaults.get(&1).unwrap().collateral_amount;
+
+        // Redeem against ckETH specifically
+        state.redeem_on_vaults(ICUSD::from(10 * 100_000_000), UsdIcp::from(dec!(2000.0)), &cketh_ledger());
+
+        // ICP vault MUST be untouched
+        let icp_after = state.vault_id_to_vaults.get(&1).unwrap().collateral_amount;
+        assert_eq!(icp_after, icp_before,
+            "ICP vault must NOT be affected by ckETH redemption");
+
+        // ckETH vault SHOULD have less collateral
+        let eth_after = state.vault_id_to_vaults.get(&2).unwrap().collateral_amount;
+        assert!(eth_after < 1_000_000_000_000_000_000,
+            "ckETH vault should lose collateral during ckETH redemption");
+    }
+
+    // ========================================================================
+    // 5. Liquidation with Non-ICP Collateral
+    // ========================================================================
+
+    #[test]
+    fn test_liquidate_cketh_vault() {
+        let mut state = fixtures::create_test_state();
+        state.set_icp_rate(UsdIcp::from(dec!(10.0)), None);
+        register_cketh(&mut state, 2000.0);
+
+        let user = Principal::from_text("2vxsx-fae").unwrap();
+
+        // Create an unhealthy ckETH vault: 0.5 ETH at $2000 = $1000, borrowed $900
+        // CR = 1000/900 = 1.11 — below ckETH liquidation ratio of 1.25
+        let half_eth: u64 = 500_000_000_000_000_000; // 0.5 ETH
+        let vault = create_cketh_vault(user, 1, half_eth, 900 * 100_000_000);
+        state.vault_id_to_vaults.insert(1, vault);
+
+        let mut owner_vaults = std::collections::BTreeSet::new();
+        owner_vaults.insert(1u64);
+        state.principal_to_vault_ids.insert(user, owner_vaults);
+
+        // Verify it's unhealthy
+        let cr = rumi_protocol_backend::compute_collateral_ratio(
+            state.vault_id_to_vaults.get(&1).unwrap(),
+            UsdIcp::from(dec!(0.0)),
+            &state,
+        );
+        assert!(cr < state.get_min_liquidation_ratio_for(&cketh_ledger()),
+            "Vault CR {} should be below liquidation ratio {}",
+            cr.0, state.get_min_liquidation_ratio_for(&cketh_ledger()).0);
+
+        // Liquidate it
+        state.liquidate_vault(1, state.mode, UsdIcp::from(dec!(2000.0)));
+
+        // Vault should be removed
+        assert!(!state.vault_id_to_vaults.contains_key(&1),
+            "Liquidated ckETH vault should be removed");
+    }
+
+    #[test]
+    fn test_liquidation_does_not_cross_collateral() {
+        let mut state = fixtures::create_test_state();
+        state.set_icp_rate(UsdIcp::from(dec!(10.0)), None);
+        register_cketh(&mut state, 2000.0);
+
+        let user_a = Principal::from_text("2vxsx-fae").unwrap();
+        let user_b = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
+
+        // Healthy ICP vault
+        let icp_vault = Vault {
+            owner: user_a,
+            borrowed_icusd_amount: ICUSD::from(50 * 100_000_000),
+            collateral_amount: 10 * 100_000_000,
+            vault_id: 1,
+            collateral_type: Principal::anonymous(),
+        };
+        state.vault_id_to_vaults.insert(1, icp_vault);
+
+        // Unhealthy ckETH vault — will be liquidated
+        let vault = create_cketh_vault(user_b, 2, 500_000_000_000_000_000, 900 * 100_000_000);
+        state.vault_id_to_vaults.insert(2, vault);
+
+        let mut owner_b_vaults = std::collections::BTreeSet::new();
+        owner_b_vaults.insert(2u64);
+        state.principal_to_vault_ids.insert(user_b, owner_b_vaults);
+
+        // Liquidate ckETH vault
+        state.liquidate_vault(2, state.mode, UsdIcp::from(dec!(2000.0)));
+
+        // ckETH vault removed
+        assert!(!state.vault_id_to_vaults.contains_key(&2));
+
+        // ICP vault must be completely untouched
+        let icp = state.vault_id_to_vaults.get(&1).unwrap();
+        assert_eq!(icp.collateral_amount, 10 * 100_000_000);
+        assert_eq!(icp.borrowed_icusd_amount, ICUSD::from(50 * 100_000_000));
+    }
+
+    // ========================================================================
+    // 6. Mixed-Collateral TCR
+    // ========================================================================
+
+    #[test]
+    fn test_tcr_sums_across_collateral_types() {
+        let mut state = fixtures::create_test_state();
+        state.set_icp_rate(UsdIcp::from(dec!(10.0)), None);
+        register_cketh(&mut state, 2000.0);
+
+        // ICP vault: 10 ICP @ $10 = $100 collateral, 50 icUSD debt
+        let icp_vault = Vault {
+            owner: Principal::from_text("2vxsx-fae").unwrap(),
+            borrowed_icusd_amount: ICUSD::from(50 * 100_000_000),
+            collateral_amount: 10 * 100_000_000,
+            vault_id: 1,
+            collateral_type: Principal::anonymous(),
+        };
+        state.vault_id_to_vaults.insert(1, icp_vault);
+
+        // ckETH vault: 1 ETH @ $2000 = $2000 collateral, 1000 icUSD debt
+        let eth_vault = create_cketh_vault(
+            Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap(),
+            2,
+            1_000_000_000_000_000_000,
+            1000 * 100_000_000,
+        );
+        state.vault_id_to_vaults.insert(2, eth_vault);
+
+        // Total: $2100 collateral / 1050 icUSD debt = 2.0
+        let tcr = state.compute_total_collateral_ratio(UsdIcp::from(dec!(0.0)));
+        assert_eq!(tcr.0, dec!(2.0));
+    }
+
+    #[test]
+    fn test_tcr_excludes_no_price_collateral() {
+        let mut state = fixtures::create_test_state();
+        state.set_icp_rate(UsdIcp::from(dec!(10.0)), None);
+
+        // Register ckETH WITHOUT a price
+        let mut config = cketh_config();
+        config.last_price = None;
+        state.collateral_configs.insert(cketh_ledger(), config);
+
+        // ICP vault: 10 ICP @ $10 = $100, 50 icUSD debt
+        let icp_vault = Vault {
+            owner: Principal::from_text("2vxsx-fae").unwrap(),
+            borrowed_icusd_amount: ICUSD::from(50 * 100_000_000),
+            collateral_amount: 10 * 100_000_000,
+            vault_id: 1,
+            collateral_type: Principal::anonymous(),
+        };
+        state.vault_id_to_vaults.insert(1, icp_vault);
+
+        // ckETH vault: has collateral and debt but NO price → contributes 0 value
+        let eth_vault = create_cketh_vault(
+            Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap(),
+            2,
+            1_000_000_000_000_000_000,
+            1000 * 100_000_000,
+        );
+        state.vault_id_to_vaults.insert(2, eth_vault);
+
+        // Total: $100 collateral (only ICP counted) / 1050 debt (both counted)
+        // = ~0.095 — VERY conservative since ckETH debt is counted but value is not
+        let tcr = state.compute_total_collateral_ratio(UsdIcp::from(dec!(0.0)));
+        assert!(tcr.0 < dec!(0.1),
+            "TCR should be very low when ckETH has debt but no price. Got: {}", tcr.0);
+    }
+
+    // ========================================================================
+    // 7. CollateralStatus Enforcement
+    // ========================================================================
+
+    #[test]
+    fn test_status_allows_matrix() {
+        // Active: everything allowed
+        assert!(CollateralStatus::Active.allows_open());
+        assert!(CollateralStatus::Active.allows_borrow());
+        assert!(CollateralStatus::Active.allows_repay());
+        assert!(CollateralStatus::Active.allows_liquidation());
+        assert!(CollateralStatus::Active.allows_redemption());
+
+        // Paused: no borrows/open/withdraw/redeem, but repay and liquidate OK
+        assert!(!CollateralStatus::Paused.allows_open());
+        assert!(!CollateralStatus::Paused.allows_borrow());
+        assert!(CollateralStatus::Paused.allows_repay());
+        assert!(CollateralStatus::Paused.allows_liquidation());
+        assert!(!CollateralStatus::Paused.allows_redemption());
+
+        // Frozen: NOTHING works
+        assert!(!CollateralStatus::Frozen.allows_open());
+        assert!(!CollateralStatus::Frozen.allows_borrow());
+        assert!(!CollateralStatus::Frozen.allows_repay());
+        assert!(!CollateralStatus::Frozen.allows_liquidation());
+        assert!(!CollateralStatus::Frozen.allows_redemption());
+
+        // Sunset: repay only (and close)
+        assert!(!CollateralStatus::Sunset.allows_open());
+        assert!(!CollateralStatus::Sunset.allows_borrow());
+        assert!(CollateralStatus::Sunset.allows_repay());
+        assert!(!CollateralStatus::Sunset.allows_liquidation());
+        assert!(!CollateralStatus::Sunset.allows_redemption());
+
+        // Deprecated: nothing
+        assert!(!CollateralStatus::Deprecated.allows_open());
+        assert!(!CollateralStatus::Deprecated.allows_borrow());
+        assert!(!CollateralStatus::Deprecated.allows_repay());
+        assert!(!CollateralStatus::Deprecated.allows_liquidation());
+        assert!(!CollateralStatus::Deprecated.allows_redemption());
+    }
+
+    #[test]
+    fn test_collateral_status_lookup() {
+        let mut state = fixtures::create_test_state();
+        register_cketh(&mut state, 2000.0);
+
+        // ICP should be Active (default)
+        let icp_ct = state.icp_collateral_type();
+        assert_eq!(state.get_collateral_status(&icp_ct), Some(CollateralStatus::Active));
+
+        // ckETH should be Active (we registered it that way)
+        assert_eq!(state.get_collateral_status(&cketh_ledger()), Some(CollateralStatus::Active));
+
+        // Unknown collateral → None
+        let fake = Principal::from_text("aaaaa-aa").unwrap();
+        assert_eq!(state.get_collateral_status(&fake), None);
+
+        // Change ckETH to Paused
+        state.collateral_configs.get_mut(&cketh_ledger()).unwrap().status = CollateralStatus::Paused;
+        assert_eq!(state.get_collateral_status(&cketh_ledger()), Some(CollateralStatus::Paused));
+    }
+
+    // ========================================================================
+    // 8. Legacy Vault Backward Compatibility
+    // ========================================================================
+
+    #[test]
+    fn test_anonymous_principal_resolves_to_icp() {
+        let mut state = fixtures::create_test_state();
+        state.set_icp_rate(UsdIcp::from(dec!(10.0)), None);
+
+        // Legacy vaults use Principal::anonymous() as collateral_type
+        let config = state.get_collateral_config(&Principal::anonymous());
+        assert!(config.is_some(), "Principal::anonymous() should resolve to ICP config");
+        assert_eq!(config.unwrap().decimals, 8);
+    }
+
+    #[test]
+    fn test_legacy_vault_cr_uses_icp_config() {
+        let mut state = fixtures::create_test_state();
+        state.set_icp_rate(UsdIcp::from(dec!(10.0)), None);
+
+        // Legacy vault with Principal::anonymous()
+        let vault = Vault {
+            owner: Principal::from_text("2vxsx-fae").unwrap(),
+            borrowed_icusd_amount: ICUSD::from(50 * 100_000_000),
+            collateral_amount: 10 * 100_000_000,
+            vault_id: 1,
+            collateral_type: Principal::anonymous(),
+        };
+
+        let cr = rumi_protocol_backend::compute_collateral_ratio(
+            &vault,
+            UsdIcp::from(dec!(0.0)), // ignored
+            &state,
+        );
+        // 10 ICP * $10 / 50 icUSD = 2.0
+        assert_eq!(cr.0, dec!(2.0));
+    }
+
+    // ========================================================================
+    // 9. PendingMarginTransfer Carries Collateral Type
+    // ========================================================================
+
+    #[test]
+    fn test_close_vault_creates_pending_transfer_with_collateral_type() {
+        let mut state = fixtures::create_test_state();
+        state.set_icp_rate(UsdIcp::from(dec!(10.0)), None);
+        register_cketh(&mut state, 2000.0);
+
+        let user = Principal::from_text("2vxsx-fae").unwrap();
+
+        // Create ckETH vault with zero debt (closeable)
+        let vault = create_cketh_vault(user, 1, 1_000_000_000_000_000_000, 0);
+        state.vault_id_to_vaults.insert(1, vault);
+        state.principal_to_vault_ids
+            .entry(user)
+            .or_default()
+            .insert(1);
+
+        // Close the vault
+        state.close_vault(1);
+
+        // Verify the pending transfer carries ckETH collateral type
+        assert!(!state.pending_margin_transfers.is_empty(),
+            "Should have a pending margin transfer");
+
+        // pending_margin_transfers is a BTreeMap<VaultId, PendingMarginTransfer>
+        let transfer = state.pending_margin_transfers.values().next().unwrap();
+        assert_eq!(transfer.collateral_type, cketh_ledger(),
+            "Pending transfer should carry ckETH collateral type, not ICP");
+        assert_eq!(transfer.owner, user);
+    }
+
+    // ========================================================================
+    // 10. Price Update Isolation
+    // ========================================================================
+
+    #[test]
+    fn test_set_icp_rate_does_not_affect_cketh() {
+        let mut state = fixtures::create_test_state();
+        register_cketh(&mut state, 2000.0);
+
+        // Set ICP rate
+        state.set_icp_rate(UsdIcp::from(dec!(15.0)), None);
+
+        // ICP price should be updated
+        let icp_price = state.get_collateral_price_decimal(&state.icp_collateral_type());
+        assert_eq!(icp_price, Some(dec!(15.0)));
+
+        // ckETH price should be UNCHANGED
+        let eth_price = state.get_collateral_price_decimal(&cketh_ledger());
+        assert_eq!(eth_price, Some(dec!(2000.0)));
+    }
+
+    #[test]
+    fn test_cketh_price_update_does_not_affect_icp() {
+        let mut state = fixtures::create_test_state();
+        state.set_icp_rate(UsdIcp::from(dec!(10.0)), None);
+        register_cketh(&mut state, 2000.0);
+
+        // Update ckETH price directly
+        state.collateral_configs.get_mut(&cketh_ledger()).unwrap().last_price = Some(2500.0);
+
+        // ICP price should be UNCHANGED
+        let icp_price = state.get_collateral_price_decimal(&state.icp_collateral_type());
+        assert_eq!(icp_price, Some(dec!(10.0)));
+
+        // ckETH price should be updated
+        let eth_price = state.get_collateral_price_decimal(&cketh_ledger());
+        assert_eq!(eth_price, Some(dec!(2500.0)));
+    }
+
+    // ========================================================================
+    // 11. Per-Collateral Fee Lookups
+    // ========================================================================
+
+    #[test]
+    fn test_per_collateral_borrowing_fee() {
+        let mut state = fixtures::create_test_state();
+        register_cketh(&mut state, 2000.0);
+
+        let icp_ct = state.icp_collateral_type();
+
+        // ICP borrowing fee from test fixture: fee_e8s=10_000 → 10000/1e8 = 0.0001
+        let icp_fee = state.get_borrowing_fee_for(&icp_ct);
+        assert_eq!(icp_fee.0, dec!(0.0001));
+
+        // ckETH borrowing fee = 0.005 (from our cketh_config)
+        let eth_fee = state.get_borrowing_fee_for(&cketh_ledger());
+        assert_eq!(eth_fee.0, dec!(0.005));
+
+        // Change ckETH fee to 1%
+        state.collateral_configs.get_mut(&cketh_ledger()).unwrap().borrowing_fee = Ratio::from(dec!(0.01));
+        let eth_fee = state.get_borrowing_fee_for(&cketh_ledger());
+        assert_eq!(eth_fee.0, dec!(0.01));
+
+        // ICP fee should be unchanged
+        assert_eq!(state.get_borrowing_fee_for(&icp_ct).0, dec!(0.0001));
+    }
+
+    #[test]
+    fn test_per_collateral_liquidation_bonus() {
+        let mut state = fixtures::create_test_state();
+        register_cketh(&mut state, 2000.0);
+
+        let icp_ct = state.icp_collateral_type();
+
+        // ICP = 1.15, ckETH = 1.10
+        assert_eq!(state.get_liquidation_bonus_for(&icp_ct).0, dec!(1.15));
+        assert_eq!(state.get_liquidation_bonus_for(&cketh_ledger()).0, dec!(1.10));
+    }
 }

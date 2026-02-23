@@ -1169,6 +1169,7 @@ impl State {
                     icusd_amount_to_convert,
                     vault_ids[index],
                 );
+                icusd_amount_to_convert = ICUSD::from(0);
                 break;
             } else {
                 // Convert what we can on this vault
