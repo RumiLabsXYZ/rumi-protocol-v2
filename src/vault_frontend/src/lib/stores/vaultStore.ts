@@ -2,6 +2,8 @@ import { writable, get } from 'svelte/store';
 import { protocolService } from '../services/protocol';
 import { walletStore } from './wallet';
 import { BigIntUtils } from '../utils/bigintUtils';
+import { collateralStore } from './collateralStore';
+import { CANISTER_IDS } from '../config';
 import type { VaultDTO } from '../services/types';
 
 // Define enhanced vault type with additional calculated properties
@@ -16,6 +18,11 @@ export interface EnhancedVault {
   collateralValueUSD?: number;
   maxBorrowable?: number;
   status?: 'healthy' | 'warning' | 'danger';
+  // Multi-collateral fields
+  collateralType: string;
+  collateralAmount: number;
+  collateralSymbol: string;
+  collateralDecimals: number;
 }
 
 export interface PendingTransfer {
@@ -147,7 +154,7 @@ function createVaultStore() {
         const enhancedVaults = vaults
           .filter(vault => {
             // Double-check the vault is not effectively closed
-            const hasCollateral = Number(vault.icpMargin) > 0;
+            const hasCollateral = Number(vault.collateralAmount ?? vault.icpMargin) > 0;
             const hasDebt = Number(vault.borrowedIcusd) > 0;
             return hasCollateral || hasDebt;
           })
@@ -194,34 +201,52 @@ function createVaultStore() {
     },
     
     /**
-     * Enhance a vault DTO with calculated properties
+     * Enhance a vault DTO with calculated properties.
+     * Uses per-collateral price from collateralStore when available,
+     * falling back to the provided ICP price for backward compat.
      */
     enhanceVault(vault: VaultDTO, currentIcpPrice: number): EnhancedVault {
+      // Resolve multi-collateral fields (with backward compat defaults)
+      const collateralType = vault.collateralType || CANISTER_IDS.ICP_LEDGER;
+      const collateralAmount = vault.collateralAmount ?? vault.icpMargin;
+      const collateralSymbol = vault.collateralSymbol || 'ICP';
+      const collateralDecimals = vault.collateralDecimals ?? 8;
+
+      // Get per-collateral price — fall back to ICP price for ICP vaults
+      const ctInfo = collateralStore.getCollateralInfo(collateralType);
+      const collateralPrice = ctInfo?.price || (collateralType === CANISTER_IDS.ICP_LEDGER ? currentIcpPrice : 0);
+
       // CRITICAL FIX: Ensure values are proper numbers and not strings
-      const icpMargin = typeof vault.icpMargin === 'string' ? parseFloat(vault.icpMargin) : vault.icpMargin;
+      const numCollateralAmount = typeof collateralAmount === 'string' ? parseFloat(collateralAmount) : collateralAmount;
       const borrowedIcusd = typeof vault.borrowedIcusd === 'string' ? parseFloat(vault.borrowedIcusd) : vault.borrowedIcusd;
-      
+      const icpMargin = typeof vault.icpMargin === 'string' ? parseFloat(vault.icpMargin) : vault.icpMargin;
+
       // Log the values for debugging
-      console.log(`Enhancing vault #${vault.vaultId} - icpMargin: ${icpMargin}, borrowedIcusd: ${borrowedIcusd}`);
-      
-      const collateralValueUsd = icpMargin * currentIcpPrice;
-      
+      console.log(`Enhancing vault #${vault.vaultId} - ${collateralSymbol}=${numCollateralAmount}, icUSD=${borrowedIcusd}, price=${collateralPrice}`);
+
+      const collateralValueUsd = numCollateralAmount * collateralPrice;
+
       // Calculate collateral ratio (prevent division by zero)
-      const collateralRatio = borrowedIcusd > 0 
-        ? collateralValueUsd / borrowedIcusd 
+      const collateralRatio = borrowedIcusd > 0
+        ? collateralValueUsd / borrowedIcusd
         : Infinity;
-      
+
       // Ensure timestamp is a number (use current time if not present)
       const timestamp = vault.timestamp || Date.now();
-      
+
       return {
         ...vault,
-        icpMargin,             // Ensure numeric
-        borrowedIcusd,         // Ensure numeric
+        icpMargin,                    // Ensure numeric
+        borrowedIcusd,                // Ensure numeric
         collateralValueUSD: collateralValueUsd,
         collateralRatio,
-        timestamp,             // Ensure timestamp is always provided
-        lastUpdated: Date.now()
+        timestamp,                    // Ensure timestamp is always provided
+        lastUpdated: Date.now(),
+        // Multi-collateral fields
+        collateralType,
+        collateralAmount: numCollateralAmount,
+        collateralSymbol,
+        collateralDecimals,
       };
     },
     

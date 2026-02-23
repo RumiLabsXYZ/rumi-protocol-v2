@@ -22,15 +22,16 @@ import { get } from 'svelte/store';
 import { vaultStore } from '$lib/stores/vaultStore';
 import { QueryOperations } from './queryOperations';
 import { permissionManager } from '../PermissionManager';
-import type { 
-  VaultDTO, 
-  VaultOperationResult, 
-  FeesDTO, 
+import type {
+  VaultDTO,
+  VaultOperationResult,
+  FeesDTO,
   LiquidityStatusDTO,
-  CandidVault 
+  CandidVault
 } from '../types';
 import { protocolService } from '../protocol';
 import { RequestDeduplicator } from '../RequestDeduplicator';
+import { collateralStore } from '$lib/stores/collateralStore';
 
 
 
@@ -392,22 +393,35 @@ private static async refreshVaultData(): Promise<void> {
   }
 
     /**
-     * Open a new vault with ICP collateral
+     * Open a new vault with collateral.
+     * @param collateralAmount Amount of collateral in human-readable units (e.g., 2.5 ICP)
+     * @param collateralTypePrincipal Optional principal text of the collateral token's ledger.
+     *        If omitted, defaults to ICP.
      */
-    static async openVault(icpAmount: number): Promise<VaultOperationResult> {
+    static async openVault(collateralAmount: number, collateralTypePrincipal?: string): Promise<VaultOperationResult> {
         // Keep track of ongoing request
         let abortController: AbortController | null = null;
-        
+
+        // Resolve collateral info
+        const ctPrincipal = collateralTypePrincipal || CANISTER_IDS.ICP_LEDGER;
+        const collateralInfo = collateralStore.getCollateralInfo(ctPrincipal);
+        const decimals = collateralInfo?.decimals ?? 8;
+        const decimalsFactor = Math.pow(10, decimals);
+        const ledgerCanisterId = collateralInfo?.ledgerCanisterId ?? CONFIG.currentIcpLedgerId;
+        const symbol = collateralInfo?.symbol ?? 'ICP';
+
         try {
-          console.log(`Creating vault with ${icpAmount} ICP`);
-          
-          if (icpAmount * E8S < MIN_ICP_AMOUNT) {
+          console.log(`Creating vault with ${collateralAmount} ${symbol}`);
+
+          // Minimum amount check (in raw units)
+          const amountRaw = BigInt(Math.floor(collateralAmount * decimalsFactor));
+          if (amountRaw < BigInt(MIN_ICP_AMOUNT)) {
             return {
               success: false,
-              error: `Amount too low. Minimum required: ${MIN_ICP_AMOUNT / E8S} ICP`
+              error: `Amount too low. Minimum required: ${MIN_ICP_AMOUNT / decimalsFactor} ${symbol}`
             };
           }
-          
+
           // Check wallet connection status before proceeding
           const walletState = get(walletStore);
           if (!walletState.isConnected || !walletState.principal) {
@@ -416,53 +430,59 @@ private static async refreshVaultData(): Promise<void> {
               error: "Wallet not connected. Please connect your wallet and try again."
             };
           }
-          
-          // Create a new abort controller for this request"
+
+          // Create a new abort controller for this request
           abortController = new AbortController();
           const signal = abortController.signal;
-          
+
           // Enhanced error handling for wallet signer issues
           try {
             const actor = await ApiClient.getAuthenticatedActor();
-            const amountE8s = BigInt(Math.floor(icpAmount * E8S));
-            
+
             // CRITICAL: Check and increase allowance before proceeding
             const spenderCanisterId = CONFIG.currentCanisterId;
-            
-            // First check current allowance
-            const currentAllowance = await walletOperations.checkIcpAllowance(spenderCanisterId);
-            console.log(`Current allowance for protocol canister: ${Number(currentAllowance) / E8S} ICP`);
-            
+
+            // First check current allowance (using generic collateral method)
+            const currentAllowance = await walletOperations.checkCollateralAllowance(spenderCanisterId, ledgerCanisterId);
+            console.log(`Current ${symbol} allowance for protocol canister: ${Number(currentAllowance) / decimalsFactor}`);
+
             // If allowance is insufficient, request approval
-            if (currentAllowance < amountE8s) {
-              console.log(`Requesting approval for ${icpAmount} ICP`);
-              
+            if (currentAllowance < amountRaw) {
+              console.log(`Requesting approval for ${collateralAmount} ${symbol}`);
+
               // Use a higher allowance (5% more than needed) to avoid small rounding issues
-              const requestedAllowance = amountE8s * 105n / 100n;
-              
-              const approvalResult = await walletOperations.approveIcpTransfer(requestedAllowance, spenderCanisterId);
-              
+              const requestedAllowance = amountRaw * 105n / 100n;
+
+              const approvalResult = await walletOperations.approveCollateralTransfer(
+                requestedAllowance, spenderCanisterId, ledgerCanisterId
+              );
+
               if (!approvalResult.success) {
                 return {
                   success: false,
-                  error: approvalResult.error || "Failed to approve ICP transfer"
+                  error: approvalResult.error || `Failed to approve ${symbol} transfer`
                 };
               }
-              
-              console.log(`Successfully set allowance to ${Number(requestedAllowance) / E8S} ICP`);
+
+              console.log(`Successfully set ${symbol} allowance to ${Number(requestedAllowance) / decimalsFactor}`);
             }
-            
+
             // Add a timeout to catch hanging signatures
             const timeoutPromise = new Promise<never>((_, reject) => {
               setTimeout(() => reject(new Error("Wallet signature request timed out")), 60000);
             });
-            
+
+            // Build the optional collateral_type argument
+            const collateralTypeOpt: [] | [Principal] = ctPrincipal === CANISTER_IDS.ICP_LEDGER
+              ? []  // ICP is the default, no need to pass
+              : [Principal.fromText(ctPrincipal)];
+
             // Race between the actual operation and the timeout
             const result = await Promise.race([
-              actor.open_vault(amountE8s),
+              actor.open_vault(amountRaw, collateralTypeOpt),
               timeoutPromise
             ]);
-            
+
             if ('Ok' in result) {
               return {
                 success: true,
@@ -597,38 +617,56 @@ static async borrowFromVault(vaultId: number, icusdAmount: number): Promise<Vaul
 
 
 /**
- * Add Margin to a vault
+ * Add Margin (collateral) to a vault.
+ * @param vaultId The vault to add collateral to
+ * @param collateralAmount Amount in human-readable units
+ * @param collateralTypePrincipal Optional: the collateral type principal. If omitted, looks up from vault data or defaults to ICP.
  */
-static async addMarginToVault(vaultId: number, icpAmount: number): Promise<VaultOperationResult> {
+static async addMarginToVault(vaultId: number, collateralAmount: number, collateralTypePrincipal?: string): Promise<VaultOperationResult> {
   return ApiClient.executeSequentialOperation(async () => {
     try {
-      console.log(`Adding ${icpAmount} ICP to vault #${vaultId}`);
-      
-      if (icpAmount * E8S < MIN_ICP_AMOUNT) {
+      // Resolve collateral info — try the provided principal, or look up from vault, or default to ICP
+      let ctPrincipal = collateralTypePrincipal;
+      if (!ctPrincipal) {
+        // Try to get collateral type from the user's vault data
+        const vault = await ApiClient.getVaultById(vaultId);
+        ctPrincipal = vault?.collateralType || CANISTER_IDS.ICP_LEDGER;
+      }
+      const ctInfo = collateralStore.getCollateralInfo(ctPrincipal);
+      const ctDecimals = ctInfo?.decimals ?? 8;
+      const ctDecimalsFactor = Math.pow(10, ctDecimals);
+      const ledgerCanisterId = ctInfo?.ledgerCanisterId ?? CONFIG.currentIcpLedgerId;
+      const symbol = ctInfo?.symbol ?? 'ICP';
+
+      console.log(`Adding ${collateralAmount} ${symbol} to vault #${vaultId}`);
+
+      if (collateralAmount * ctDecimalsFactor < MIN_ICP_AMOUNT) {
         return {
           success: false,
-          error: `Amount too low. Minimum required: ${MIN_ICP_AMOUNT / E8S} ICP`
+          error: `Amount too low. Minimum required: ${MIN_ICP_AMOUNT / ctDecimalsFactor} ${symbol}`
         };
       }
-      const amountE8s = BigInt(Math.floor(icpAmount * E8S));
-      const bufferAmount = amountE8s * BigInt(120) / BigInt(100); // 20% buffer
-      
-      // Check if user has sufficient ICP balance
-      const hasSufficientBalance = await walletOperations.checkSufficientBalance(Number(bufferAmount) / E8S);
-      if (!hasSufficientBalance) {
-        return {
-          success: false,
-          error: `Insufficient ICP balance. Please ensure you have at least ${icpAmount} ICP available.`
-        };
+      const amountRaw = BigInt(Math.floor(collateralAmount * ctDecimalsFactor));
+      const bufferAmount = amountRaw * BigInt(120) / BigInt(100); // 20% buffer
+
+      // Check if user has sufficient balance (only works for ICP via wallet store)
+      if (ctPrincipal === CANISTER_IDS.ICP_LEDGER) {
+        const hasSufficientBalance = await walletOperations.checkSufficientBalance(Number(bufferAmount) / ctDecimalsFactor);
+        if (!hasSufficientBalance) {
+          return {
+            success: false,
+            error: `Insufficient ${symbol} balance. Please ensure you have at least ${collateralAmount} ${symbol} available.`
+          };
+        }
       }
-      
+
       // First check current allowance
       const spenderCanisterId = CONFIG.currentCanisterId;
       let currentAllowance;
-      
+
       try {
-        currentAllowance = await walletOperations.checkIcpAllowance(spenderCanisterId);
-        console.log('Current ICP allowance:', currentAllowance.toString());
+        currentAllowance = await walletOperations.checkCollateralAllowance(spenderCanisterId, ledgerCanisterId);
+        console.log(`Current ${symbol} allowance:`, currentAllowance.toString());
       } catch (err) {
         console.error('Error checking allowance:', err);
         return {
@@ -636,69 +674,58 @@ static async addMarginToVault(vaultId: number, icpAmount: number): Promise<Vault
           error: 'Failed to check token allowance. Please ensure your wallet is connected and try again.'
         };
       }
-      
-      // Always request a new approval with a 20% buffer to ensure there's enough allowance
-      // This is critical as the exact amount often fails due to precision issues or fees
-      
-      if (currentAllowance < amountE8s) {
+
+      if (currentAllowance < amountRaw) {
         console.log('Insufficient allowance, requesting approval...');
-        console.log(`Requesting ${bufferAmount} e8s (original: ${amountE8s} e8s)`);
-        
+        console.log(`Requesting ${bufferAmount} raw (original: ${amountRaw} raw)`);
+
         try {
-          const approvalResult = await walletOperations.approveIcpTransfer(
-            bufferAmount, // Use buffered amount that's 20% higher
-            spenderCanisterId
+          const approvalResult = await walletOperations.approveCollateralTransfer(
+            bufferAmount, spenderCanisterId, ledgerCanisterId
           );
-          
+
           if (!approvalResult.success) {
             return {
               success: false,
-              error: approvalResult.error || 'Failed to approve ICP transfer'
+              error: approvalResult.error || `Failed to approve ${symbol} transfer`
             };
           }
-          
+
           // Short delay to allow approval to be processed
           await new Promise(resolve => setTimeout(resolve, 2000));
-          
+
           // Verify approval worked
-          const newAllowance = await walletOperations.checkIcpAllowance(spenderCanisterId);
+          const newAllowance = await walletOperations.checkCollateralAllowance(spenderCanisterId, ledgerCanisterId);
           console.log('New allowance after approval:', newAllowance.toString());
-          
-          if (newAllowance < amountE8s) {
+
+          if (newAllowance < amountRaw) {
             return {
               success: false,
-              error: `Approval did not complete successfully. Required: ${amountE8s}, Got: ${newAllowance}`
+              error: `Approval did not complete successfully. Required: ${amountRaw}, Got: ${newAllowance}`
             };
           }
         } catch (approvalErr) {
           console.error('Approval error:', approvalErr);
           return {
             success: false,
-            error: approvalErr instanceof Error ? 
+            error: approvalErr instanceof Error ?
               approvalErr.message : 'Unknown error during approval'
           };
         }
       } else {
-        console.log(`Current allowance ${currentAllowance} is sufficient for amount ${amountE8s}`);
-        
-        // If allowance is just barely enough, still request a higher allowance to prevent future issues
+        console.log(`Current allowance ${currentAllowance} is sufficient for amount ${amountRaw}`);
+
+        // If allowance is just barely enough, still request a higher allowance
         if (currentAllowance < bufferAmount) {
           console.log('Existing allowance is close to required amount, increasing for safety');
           try {
-            const approvalResult = await walletOperations.approveIcpTransfer(
-              bufferAmount,
-              spenderCanisterId
+            const approvalResult = await walletOperations.approveCollateralTransfer(
+              bufferAmount, spenderCanisterId, ledgerCanisterId
             );
-            
+
             if (approvalResult.success) {
               console.log('Successfully increased allowance for future operations');
-              
-              // Short delay to allow approval to be processed
               await new Promise(resolve => setTimeout(resolve, 2000));
-              
-              // Verify approval worked
-              const newAllowance = await walletOperations.checkIcpAllowance(spenderCanisterId);
-              console.log('New allowance after increase:', newAllowance.toString());
             } else {
               console.warn('Failed to increase allowance, but continuing with existing allowance');
             }
@@ -712,9 +739,9 @@ static async addMarginToVault(vaultId: number, icpAmount: number): Promise<Vault
       const actor = await ApiClient.getAuthenticatedActor();
       const vaultArg = {
         vault_id: BigInt(vaultId),
-        amount: amountE8s // Use the original amount for the actual operation
+        amount: amountRaw // Use the original amount for the actual operation
       };
-      
+
       console.log('Calling add_margin_to_vault with args:', {
         vault_id: vaultArg.vault_id.toString(),
         amount: vaultArg.amount.toString()
@@ -1008,20 +1035,33 @@ static async repayToVaultWithStable(
         for (const v of sortedVaults) {
           // Create a display-friendly ID
           const vaultId = Number(v.vault_id);
-          
-          // CRITICAL FIX: Convert bigint values properly to numbers with scaling
-          // Use Number() constructor instead of potentially problematic division
-          const icpMargin = Number(v.icp_margin_amount) / E8S;
+
+          // Resolve collateral type
+          const ctPrincipal = v.collateral_type.toText();
+          const ctInfo = collateralStore.getCollateralInfo(ctPrincipal);
+          const ctDecimals = ctInfo?.decimals ?? 8;
+          const ctDecimalsFactor = Math.pow(10, ctDecimals);
+          const ctSymbol = ctInfo?.symbol ?? collateralStore.getCollateralSymbol(ctPrincipal);
+
+          // Convert raw amounts to human-readable
+          const collateralAmount = Number(v.collateral_amount) / ctDecimalsFactor;
           const borrowedIcusd = Number(v.borrowed_icusd_amount) / E8S;
-          
-          console.log(`Processing vault #${vaultId}: ICP=${icpMargin}, icUSD=${borrowedIcusd}`);
-          
+
+          // icpMargin kept for backward compat (same value as collateralAmount for ICP vaults)
+          const icpMargin = Number(v.icp_margin_amount) / E8S;
+
+          console.log(`Processing vault #${vaultId}: ${ctSymbol}=${collateralAmount}, icUSD=${borrowedIcusd}`);
+
           vaults.push({
             vaultId,
             owner: v.owner.toString(),
             icpMargin,
             borrowedIcusd,
-            timestamp: now
+            timestamp: now,
+            collateralType: ctPrincipal,
+            collateralAmount,
+            collateralSymbol: ctSymbol,
+            collateralDecimals: ctDecimals,
           });
         }
         
@@ -1191,6 +1231,47 @@ static async repayToVaultWithStable(
       }
     }
   
+    /**
+     * Redeem collateral by providing icUSD — generic version that works for any collateral type
+     * @param collateralTypePrincipal Ledger canister principal text of the collateral to redeem
+     * @param icusdAmount Amount of icUSD to redeem
+     */
+    static async redeemCollateral(collateralTypePrincipal: string, icusdAmount: number): Promise<VaultOperationResult> {
+      try {
+        console.log(`Redeeming ${icusdAmount} icUSD for collateral ${collateralTypePrincipal}`);
+
+        if (icusdAmount * E8S < MIN_ICUSD_AMOUNT) {
+          return {
+            success: false,
+            error: `Amount too low, minimum is ${MIN_ICUSD_AMOUNT / E8S} icUSD`
+          };
+        }
+
+        const actor = await ApiClient.getAuthenticatedActor();
+        const collateralPrincipal = Principal.fromText(collateralTypePrincipal);
+        const result = await actor.redeem_collateral(collateralPrincipal, BigInt(Math.floor(icusdAmount * E8S)));
+
+        if ('Ok' in result) {
+          return {
+            success: true,
+            blockIndex: Number(result.Ok.block_index),
+            feePaid: Number(result.Ok.fee_amount_paid) / E8S
+          };
+        } else {
+          return {
+            success: false,
+            error: ApiClient.formatProtocolError(result.Err)
+          };
+        }
+      } catch (err) {
+        console.error('Error redeeming collateral:', err);
+        return {
+          success: false,
+          error: err instanceof Error ? err.message : 'Unknown error redeeming collateral'
+        };
+      }
+    }
+
     /**
      * Get a specific vault by ID
      * This is a helper method that searches through all user vaults

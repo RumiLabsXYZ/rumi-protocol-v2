@@ -416,6 +416,138 @@ export class walletOperations {
     return BigInt(0);
   }
 
+  // ── Generic collateral approve/allowance (multi-collateral) ──────────
+
+  /**
+   * Approve a transfer of any ICRC-2 collateral token.
+   * If the ledger is ICP, delegates to approveIcpTransfer.
+   * Otherwise uses the generic ICRC-2 pattern.
+   */
+  static async approveCollateralTransfer(
+    amount: bigint,
+    spenderCanisterId: string,
+    ledgerCanisterId: string
+  ): Promise<{success: boolean, error?: string}> {
+    // Delegate to ICP-specific method if this is the ICP ledger
+    if (ledgerCanisterId === CONFIG.currentIcpLedgerId) {
+      return walletOperations.approveIcpTransfer(amount, spenderCanisterId);
+    }
+
+    const maxRetries = 2;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        if (attempt > 0) {
+          console.log(`Retrying collateral approval (attempt ${attempt + 1}/${maxRetries + 1})...`);
+          try {
+            await walletStore.refreshWallet();
+            await new Promise(resolve => setTimeout(resolve, 500));
+          } catch (refreshErr) {
+            console.warn('Wallet refresh failed during retry:', refreshErr);
+          }
+        }
+
+        console.log(`Approving ${amount.toString()} for spender ${spenderCanisterId} on ledger ${ledgerCanisterId}`);
+
+        // Use icUSD IDL — all ICRC-2 ledgers share the same interface
+        const ledgerActor = await walletStore.getActor(ledgerCanisterId, CONFIG.icusd_ledgerIDL) as IcusdLedgerService;
+
+        const approvalResult = await ledgerActor.icrc2_approve({
+          amount,
+          spender: {
+            owner: Principal.fromText(spenderCanisterId),
+            subaccount: []
+          },
+          expires_at: [],
+          expected_allowance: [],
+          memo: [],
+          fee: [],
+          from_subaccount: [],
+          created_at_time: []
+        });
+
+        if ('Ok' in approvalResult) {
+          console.log('Collateral approval successful');
+          return { success: true };
+        } else {
+          return {
+            success: false,
+            error: `Collateral approval failed: ${String(approvalResult.Err && typeof approvalResult.Err === 'object' ? Object.keys(approvalResult.Err)[0] : approvalResult.Err)}`
+          };
+        }
+      } catch (error) {
+        console.error(`Collateral approval failed (attempt ${attempt + 1}/${maxRetries + 1}):`, error);
+
+        if (isStaleActorError(error) && attempt < maxRetries) {
+          continue;
+        }
+
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to approve collateral transfer'
+        };
+      }
+    }
+
+    return {
+      success: false,
+      error: 'Failed to approve collateral transfer after multiple attempts'
+    };
+  }
+
+  /**
+   * Check the ICRC-2 allowance for any collateral token.
+   * If the ledger is ICP, delegates to checkIcpAllowance.
+   */
+  static async checkCollateralAllowance(
+    spenderCanisterId: string,
+    ledgerCanisterId: string
+  ): Promise<bigint> {
+    // Delegate to ICP-specific method if this is the ICP ledger
+    if (ledgerCanisterId === CONFIG.currentIcpLedgerId) {
+      return walletOperations.checkIcpAllowance(spenderCanisterId);
+    }
+
+    const maxRetries = 2;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        if (attempt > 0) {
+          await walletStore.refreshWallet();
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+
+        const walletState = get(walletStore);
+        if (!walletState.principal) {
+          return BigInt(0);
+        }
+
+        const ledgerActor = await walletStore.getActor(ledgerCanisterId, CONFIG.icusd_ledgerIDL) as IcusdLedgerService;
+
+        const result = await ledgerActor.icrc2_allowance({
+          account: {
+            owner: walletState.principal,
+            subaccount: []
+          },
+          spender: {
+            owner: Principal.fromText(spenderCanisterId),
+            subaccount: []
+          }
+        });
+
+        return result.allowance;
+      } catch (err) {
+        console.error(`Collateral allowance check failed (attempt ${attempt + 1}):`, err);
+
+        if (isStaleActorError(err) && attempt < maxRetries) {
+          continue;
+        }
+
+        return BigInt(0);
+      }
+    }
+
+    return BigInt(0);
+  }
+
   /**
    * Get current icUSD balance with retry on stale actor
    */

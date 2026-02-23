@@ -48,19 +48,27 @@ export interface FeesDTO {
 export interface VaultDTO {
   vaultId: number;
   owner: string;
-  icpMargin: number;
+  icpMargin: number;              // Kept for backward compat (same as collateralAmount for ICP)
   borrowedIcusd: number;
   timestamp?: number;
+  // Multi-collateral fields
+  collateralType: string;         // Principal text of collateral token's ledger
+  collateralAmount: number;       // Human-readable (divided by decimals)
+  collateralSymbol: string;       // "ICP", "ckETH", "ckBTC", etc.
+  collateralDecimals: number;     // 8 for ICP, 18 for ckETH, etc.
 }
 
 /**
- * Interface for CandidVault as returned by the backend
+ * Interface for CandidVault as returned by the backend.
+ * Matches the regenerated Candid declarations.
  */
 export interface CandidVault {
   vault_id: number;
   owner: string;
   borrowed_icusd_amount: number;
-  icp_margin_amount: number;
+  icp_margin_amount: number;        // Kept for backward compat
+  collateral_amount: number;        // Raw amount in token's native precision
+  collateral_type: string;          // Principal text of collateral token's ledger
 }
 
 // Liquidity status as returned to the frontend
@@ -99,4 +107,29 @@ export interface EnhancedVault {
   collateralValueUSD?: number;
   maxBorrowable?: number;
   status?: 'healthy' | 'warning' | 'danger';
+  // Multi-collateral fields
+  collateralType: string;
+  collateralAmount: number;
+  collateralSymbol: string;
+  collateralDecimals: number;
+}
+
+// Per-collateral configuration from backend CollateralConfig
+export interface CollateralInfo {
+  principal: string;            // Ledger canister principal (text)
+  symbol: string;               // "ICP", "ckETH", "ckBTC"
+  decimals: number;             // 8 for ICP, 18 for ckETH, etc.
+  ledgerCanisterId: string;     // Same as principal for ICRC-1 tokens
+  price: number;                // Current USD price
+  priceTimestamp: number;       // When price was last updated
+  minimumCr: number;            // borrow_threshold_ratio
+  liquidationCr: number;        // liquidation_ratio
+  borrowingFee: number;         // One-time fee at mint
+  liquidationBonus: number;
+  recoveryTargetCr: number;
+  debtCeiling: number;          // In ICUSD e8s
+  minVaultDebt: number;         // Dust threshold in ICUSD e8s
+  ledgerFee: number;            // Transfer fee in native units
+  color: string;                // UI badge color
+  status: string;               // "Active", "Paused", "Frozen", etc.
 }

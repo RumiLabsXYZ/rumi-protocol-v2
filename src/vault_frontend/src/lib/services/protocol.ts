@@ -53,6 +53,7 @@ export class ProtocolService {
   static closeVault = ApiClient.closeVault;
   static getVaultHistory = ApiClient.getVaultHistory;
   static redeemIcp = ApiClient.redeemIcp;
+  static redeemCollateral = ApiClient.redeemCollateral;
   static withdrawCollateral = ApiClient.withdrawCollateral;
   static withdrawPartialCollateral = ApiClient.withdrawPartialCollateral;
 
@@ -75,6 +76,14 @@ export class ProtocolService {
   static approveIcusdTransfer = walletOperations.approveIcusdTransfer;
   static approveIcpTransfer = walletOperations.approveIcpTransfer;
   static resetWalletSignerState = walletOperations.resetWalletSignerState;
+
+  // Multi-collateral wallet operations
+  static approveCollateralTransfer = walletOperations.approveCollateralTransfer;
+  static checkCollateralAllowance = walletOperations.checkCollateralAllowance;
+
+  // Multi-collateral queries
+  static getSupportedCollateralTypes = QueryOperations.getSupportedCollateralTypes;
+  static getCollateralConfig = QueryOperations.getCollateralConfig;
 
 }
 
@@ -99,6 +108,7 @@ export const protocolService = {
   closeVault: ProtocolService.closeVault,
   getVaultHistory: ProtocolService.getVaultHistory,
   redeemIcp: ProtocolService.redeemIcp,
+  redeemCollateral: ProtocolService.redeemCollateral,
   getLiquidityStatus: ProtocolService.getLiquidityStatus,
   provideLiquidity: ProtocolService.provideLiquidity,
   withdrawLiquidity: ProtocolService.withdrawLiquidity,
@@ -121,6 +131,14 @@ export const protocolService = {
   checkIcusdAllowance: ProtocolService.checkIcusdAllowance,
   approveIcusdTransfer: ProtocolService.approveIcusdTransfer,
   
+  // Multi-collateral wallet operations
+  approveCollateralTransfer: ProtocolService.approveCollateralTransfer,
+  checkCollateralAllowance: ProtocolService.checkCollateralAllowance,
+
+  // Multi-collateral queries
+  getSupportedCollateralTypes: ProtocolService.getSupportedCollateralTypes,
+  getCollateralConfig: ProtocolService.getCollateralConfig,
+
   // Error helpers
   isAlreadyProcessingError: ProtocolService.isAlreadyProcessingError,
   isStaleProcessingState: ProtocolService.isStaleProcessingState,

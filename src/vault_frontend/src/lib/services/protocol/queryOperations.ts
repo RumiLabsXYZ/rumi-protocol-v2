@@ -1,11 +1,14 @@
 import { ApiClient, E8S } from './apiClient';
-import type { FeesInfo, ProtocolStatus, FeesDTO, ProtocolStatusDTO } from '../types';
+import type { FeesInfo, ProtocolStatus, FeesDTO, ProtocolStatusDTO, CollateralInfo } from '../types';
 import type {
     ProtocolStatus as CanisterProtocolStatus,
-    Fees
+    Fees,
+    CollateralConfig
   } from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did';
+import { Principal } from '@dfinity/principal';
 import { CONFIG } from '../../config';
 import { RequestDeduplicator } from '../RequestDeduplicator';
+import { decodeRustDecimal } from '$lib/utils/decimalUtils';
 
 /**
  * Operations focused on querying protocol data
@@ -144,6 +147,96 @@ export class QueryOperations {
       console.error('Error getting pending transfers:', err);
       return [];
     }
+  }
+
+  /**
+   * Get the list of supported collateral types with their status.
+   * Returns an array of [principalText, statusString] pairs.
+   */
+  static async getSupportedCollateralTypes(): Promise<Array<{ principal: string; status: string }>> {
+    return RequestDeduplicator.deduplicate('get_supported_collateral_types', async () => {
+      try {
+        const result = await ApiClient.getPublicData<Array<[any, any]>>('get_supported_collateral_types');
+        return result.map(([principal, status]: [any, any]) => {
+          let statusStr = 'Unknown';
+          if (status && typeof status === 'object') {
+            if ('Active' in status) statusStr = 'Active';
+            else if ('Paused' in status) statusStr = 'Paused';
+            else if ('Frozen' in status) statusStr = 'Frozen';
+            else if ('Sunset' in status) statusStr = 'Sunset';
+            else if ('Deprecated' in status) statusStr = 'Deprecated';
+          }
+          return {
+            principal: principal.toText ? principal.toText() : String(principal),
+            status: statusStr,
+          };
+        });
+      } catch (err) {
+        console.error('Failed to get supported collateral types:', err);
+        return [];
+      }
+    });
+  }
+
+  /**
+   * Get the CollateralConfig for a specific collateral type, decoded into CollateralInfo.
+   * Returns null if the collateral type is not found.
+   */
+  static async getCollateralConfig(collateralPrincipal: string): Promise<CollateralInfo | null> {
+    return RequestDeduplicator.deduplicate(`get_collateral_config_${collateralPrincipal}`, async () => {
+      try {
+        const principal = Principal.fromText(collateralPrincipal);
+        const configOpt = await ApiClient.getPublicData<[] | [CollateralConfig]>(
+          'get_collateral_config', principal
+        );
+        if (!configOpt || (Array.isArray(configOpt) && configOpt.length === 0)) {
+          return null;
+        }
+        const config = Array.isArray(configOpt) ? configOpt[0] : configOpt;
+
+        // Parse status
+        let statusStr = 'Unknown';
+        if (config.status && typeof config.status === 'object') {
+          if ('Active' in config.status) statusStr = 'Active';
+          else if ('Paused' in config.status) statusStr = 'Paused';
+          else if ('Frozen' in config.status) statusStr = 'Frozen';
+          else if ('Sunset' in config.status) statusStr = 'Sunset';
+          else if ('Deprecated' in config.status) statusStr = 'Deprecated';
+        }
+
+        // Decode blob fields
+        const liquidationCr = decodeRustDecimal(config.liquidation_ratio);
+        const minimumCr = decodeRustDecimal(config.borrow_threshold_ratio);
+        const borrowingFee = decodeRustDecimal(config.borrowing_fee);
+        const liquidationBonus = decodeRustDecimal(config.liquidation_bonus);
+        const recoveryTargetCr = decodeRustDecimal(config.recovery_target_cr);
+
+        const price = config.last_price.length > 0 ? Number(config.last_price[0]) : 0;
+        const priceTimestamp = config.last_price_timestamp.length > 0 ? Number(config.last_price_timestamp[0]) : 0;
+
+        return {
+          principal: collateralPrincipal,
+          symbol: collateralPrincipal, // Caller should map to friendly name
+          decimals: Number(config.decimals),
+          ledgerCanisterId: config.ledger_canister_id.toText(),
+          price,
+          priceTimestamp,
+          minimumCr,
+          liquidationCr,
+          borrowingFee,
+          liquidationBonus,
+          recoveryTargetCr,
+          debtCeiling: Number(config.debt_ceiling),
+          minVaultDebt: Number(config.min_vault_debt),
+          ledgerFee: Number(config.ledger_fee),
+          color: '#94A3B8', // Caller should map to friendly color
+          status: statusStr,
+        } as CollateralInfo;
+      } catch (err) {
+        console.error('Failed to get collateral config:', err);
+        return null;
+      }
+    });
   }
 
   /**
