@@ -234,11 +234,12 @@ These items were discussed but NOT yet implemented:
 
 ---
 
-## Git Branch Status (Updated Feb 10)
+## Git Branch Status (Updated Feb 23)
 
 | Branch | Status | Action |
 |--------|--------|--------|
 | `main` | ✅ Contains staging merge + LICENSE + UI rebrand + XRC optimization | Production branch — backend deployed Feb 10 |
+| `feature/multi-collateral-refactor` | ✅ Backend Phase 1+2 + frontend complete, all tests pass | Merge to main when ready to deploy |
 | `feature/ui-updates` | ✅ Merged into main (PR #4, Feb 10) | Can delete |
 | `feature/xrc-cost-optimization` | ✅ Merged into main (PR #7, Feb 10) | Can delete |
 | `feature/ckusdt-ckusdc-repayment` | ⏳ Agnes's PR #1 open → main | Awaiting review |
@@ -391,12 +392,15 @@ rumi_stability_pool:   tmhzi-dqaaa-aaaap-qrd6q-cai
 ## Core Protocol Mechanics
 
 ### Vault Operations
-- **Collateral**: ICP only (multi-collateral refactor planned — see below)
-- **Minimum Collateral Ratio**: 133% (`dec!(1.33)` in code)
-- **Recovery Mode**: Triggers when system-wide CR < 150% (liquidation threshold rises to 150%)
-- **Recovery Target CR**: 155% (configurable, range 1.4–2.0)
+- **Collateral**: Multi-collateral — ICP live, ckETH and ckBTC ready to register via `add_collateral_token`
+- **Per-collateral parameters**: Each collateral type has its own liquidation ratio, borrow threshold, borrowing fee, liquidation bonus, recovery target CR, debt ceiling, and price feed
+- **Minimum Collateral Ratio**: 150% default (`borrow_threshold_ratio` per collateral — below this, borrows/withdrawals blocked)
+- **Liquidation Ratio**: 133% default (`liquidation_ratio` per collateral — below this, vault is liquidatable)
+- **Recovery Mode**: Triggers when system-wide TCR < 150% (liquidation threshold rises to borrow_threshold_ratio)
+- **Recovery Target CR**: 155% (configurable per collateral, range 1.4–2.0)
 - **Read-Only Mode**: Triggers when system-wide CR < 100% or oracle < $0.01
-- **Price Oracle**: XRC canister, 300s background polling + 30s on-demand freshness for operations
+- **Collateral Status**: Active, Paused, Frozen, Sunset, Deprecated — per-collateral emergency controls
+- **Price Oracle**: XRC canister, 300s background polling + 30s on-demand freshness for operations. Per-collateral price timers registered on `add_collateral_token`.
 
 ### Fees (All Configurable via Admin Functions)
 All fees stored in canister State struct, all guarded by `developer_principal == caller` checks.
@@ -416,10 +420,10 @@ Borrowing fee is 0% in Recovery Mode.
 ### Key Backend Functions (from .did file)
 ```candid
 // Vault Management
-open_vault : (nat64) -> (Result)
+open_vault : (nat64, opt principal) -> (Result)     // amount, optional collateral type (defaults ICP)
 borrow_from_vault : (VaultArg) -> (Result)
 repay_to_vault : (VaultArg) -> (Result)
-add_margin_to_vault : (VaultArg) -> (Result)
+add_margin_to_vault : (AddCollateralArg) -> (Result) // vault_id + amount + optional collateral type
 withdraw_collateral : (nat64) -> (Result)
 withdraw_partial_collateral : (VaultArg) -> (Result)
 withdraw_and_close_vault : (nat64) -> (Result)
@@ -430,9 +434,15 @@ repay_to_vault_with_stable : (VaultArgWithToken) -> (Result)
 liquidate_vault_partial : (VaultArgWithToken) -> (Result)
 
 // Redemption
-redeem_icp : (nat64) -> (Result)
+redeem_icp : (nat64) -> (Result)                    // ICP-specific convenience wrapper
+redeem_collateral : (principal, nat64) -> (Result)  // generic: collateral type + icUSD amount
 
-// Admin (developer_principal only)
+// Multi-Collateral Admin (developer_principal only)
+add_collateral_token : (AddCollateralArg) -> (Result)       // register new token
+set_collateral_status : (principal, CollateralStatus) -> ()  // freeze/pause/sunset
+update_collateral_config : (principal, CollateralConfigUpdate) -> (Result)
+
+// Legacy Admin (developer_principal only — affect ICP config)
 set_borrowing_fee, set_redemption_fee_floor, set_redemption_fee_ceiling,
 set_liquidation_bonus, set_max_partial_liquidation_ratio, set_recovery_target_cr,
 set_ckstable_repay_fee, set_stable_token_enabled, set_stable_ledger_principal,
@@ -443,6 +453,8 @@ get_vault : (nat64) -> (opt Vault) query
 get_vaults_by_owner : (principal) -> (vec Vault) query
 get_protocol_status : () -> (ProtocolStatus) query
 get_icp_price : () -> (nat64) query
+get_collateral_config : (principal) -> (opt CollateralConfig) query
+get_supported_collateral_types : () -> (vec record { principal; CollateralStatus }) query
 get_borrowing_fee, get_redemption_fee_floor, get_redemption_fee_ceiling,
 get_max_partial_liquidation_ratio, get_ckstable_repay_fee : () -> (float64) query
 ```
@@ -686,6 +698,117 @@ pub const MINIMUM_COLLATERAL_RATIO: Ratio = Ratio::new(dec!(1.33));   // 133%
 
 ---
 
+## ✅ COMPLETED: Multi-Collateral Refactor (February 21–23, 2026)
+
+**Branch:** `feature/multi-collateral-refactor`
+
+### Overview
+
+Full multi-collateral support across backend and frontend. Any ICRC-1 token can now be registered as collateral by calling `add_collateral_token`. Each collateral type has its own liquidation ratio, borrow threshold, borrowing fee, liquidation bonus, price feed, decimals, debt ceiling, and status. ICP remains the only registered collateral; ckETH and ckBTC are ready to register.
+
+### Backend — Phase 1 (Types & State) + Phase 2 (Wiring)
+
+| Area | Changes |
+|------|---------|
+| **Vault struct** | `collateral_type: Principal`, `collateral_amount: u64` with serde alias/default for backward compat |
+| **CollateralConfig** | Per-token: liquidation_ratio, borrow_threshold_ratio, borrowing_fee, liquidation_bonus, recovery_target_cr, decimals, debt_ceiling, price_source, status |
+| **CollateralStatus** | Active, Paused, Frozen, Sunset, Deprecated — graduated severity controls |
+| **State** | `collateral_configs: BTreeMap<Principal, CollateralConfig>`, `collateral_to_vault_ids` index |
+| **Vault operations** | All 14 operations read per-collateral config: correct ledger, decimals, ratios, price |
+| **Transfers** | Generic `transfer_collateral` / `transfer_collateral_from` — existing ICP functions delegate |
+| **Redemption** | `redeem_collateral(principal, amount)` filters vaults by collateral type — no cross-collateral exploit |
+| **TCR** | Sums across all collateral types: `Σ(collateral_value_per_type) / Σ(debt)` |
+| **Event replay** | Fully backward-compatible via serde aliases/defaults — old ICP events deserialize correctly |
+| **Admin endpoints** | `add_collateral_token`, `set_collateral_status`, `update_collateral_config`, `get_collateral_config`, `get_supported_collateral_types` |
+
+### Frontend — 15-Step Implementation
+
+| Step | File(s) | Change |
+|------|---------|--------|
+| 0 | declarations/ | `dfx generate` — updated TypeScript types |
+| 1 | `decimalUtils.ts` (NEW) | 16-byte rust_decimal::Decimal → JS number decoder |
+| 2 | `types.ts` | `CollateralInfo` interface, multi-collateral fields on VaultDTO/EnhancedVault |
+| 3 | `collateralStore.ts` (NEW) | Fetches/caches CollateralConfig from backend, decodes blob fields, 30s cache |
+| 4 | `protocol.ts` | Per-collateral helpers: getMinimumCR, getLiquidationCR, getBorrowingFee, etc. |
+| 5 | `walletOperations.ts` | Generic `approveCollateralTransfer` / `checkCollateralAllowance` |
+| 6 | `apiClient.ts` | `openVault(amount, collateralType?)`, `getUserVaults` populates per-collateral fields, `addMarginToVault` with correct ledger, `redeemCollateral` |
+| 7 | `queryOperations.ts` | `getSupportedCollateralTypes`, `getCollateralConfig` with request dedup |
+| 8 | `protocol.ts` (facade) | Wired all new methods through singleton |
+| 9 | `appDataStore.ts` | Triggers collateral store fetch on protocol status load |
+| 10 | `vaultStore.ts` | `enhanceVault` uses per-collateral price |
+| 11 | `+page.svelte` (Borrow) | Collateral dropdown from store, per-collateral CR/fee/price |
+| 12 | `VaultCard.svelte` | ~20 ICP refs → dynamic symbol/price/CR, per-token wallet balance for Add Collateral |
+| 13 | `vaults/+page.svelte` | Per-collateral price for CR sorting |
+| 14 | `liquidations/+page.svelte` | Per-collateral CR calculation, seizure display with dynamic symbol |
+
+### Tests — All Passing
+
+**Unit tests (Rust):** 40 passed, 0 failed, 5 ignored (pre-existing)
+```
+cargo test --package rumi_protocol_backend --test tests
+```
+
+28 multi-collateral-specific tests covering:
+- Per-collateral CR calculation (8/18/6 decimals)
+- Cross-collateral isolation (ICP price doesn't affect ckETH)
+- Liquidation with per-collateral bonus
+- Redemption filters by collateral type (no cross-collateral exploit)
+- Collateral status enforcement matrix
+- TCR sums across collateral types
+- Legacy vault backward compatibility
+- Per-collateral borrowing fee and ratios
+
+**PocketIC integration tests:** 21 passed, 0 failed
+```
+POCKET_IC_BIN=/path/to/pocket-ic cargo test --package rumi_protocol_backend --test pocket_ic_tests
+```
+
+14 multi-collateral integration tests covering:
+- `add_collateral_token` registration + non-developer rejection
+- `open_vault` with ckETH (18 decimals)
+- `open_vault` with unregistered collateral → rejection
+- `open_vault` with `None` defaults to ICP
+- Borrow against ckETH vault
+- ckETH vault full lifecycle (open → borrow → repay → close)
+- ICP and ckETH vaults coexist independently
+- Collateral status Paused blocks borrow
+- Collateral status Frozen blocks everything
+- Upgrade preserves multi-collateral state
+
+**Frontend build:** Compiles cleanly (`npm run build` in vault_frontend)
+
+### Security Issues Fixed (Backend Phase 2)
+
+| # | Issue | Severity | Fix |
+|---|-------|----------|-----|
+| S1 | `redeem_on_vaults` didn't filter by collateral type — cross-collateral exploit | CRITICAL | Filters vaults by collateral type, uses per-collateral ledger |
+| S2 | `compute_collateral_ratio` fell back to ICP price when `last_price=None` | HIGH | Returns 0 when no price; operations blocked before reaching CR calc |
+| S3 | `PendingMarginTransfer` had no `collateral_type` field — always transferred ICP | HIGH | Added field with serde default |
+| S4 | `partial_repay_to_vault` skipped `CollateralStatus` check | MEDIUM | Added status check |
+
+### How to Register a New Collateral Type
+
+```bash
+# From dfx with developer identity:
+dfx canister call rumi_protocol_backend add_collateral_token '(record {
+  ledger_canister_id = principal "ss2fx-dyaaa-aaaar-qacoq-cai";
+  price_source = variant { Xrc = record { base_asset = "ETH"; quote_asset = "USD" } };
+  liquidation_ratio = 1.33 : float64;
+  borrow_threshold_ratio = 1.5 : float64;
+  liquidation_bonus = 1.15 : float64;
+  borrowing_fee = 0.005 : float64;
+  debt_ceiling = 1_000_000_000_000 : nat64;
+  min_vault_debt = 500_000_000 : nat64;
+  recovery_target_cr = 1.55 : float64;
+  redemption_fee_floor = 0.005 : float64;
+  redemption_fee_ceiling = 0.05 : float64;
+})'
+```
+
+The frontend auto-populates the collateral dropdown from `get_supported_collateral_types()`. Add the token's symbol/color to `KNOWN_COLLATERAL_META` in `collateralStore.ts` for a friendly display name (otherwise it shows the truncated principal).
+
+---
+
 ## ✅ DEPLOYED: XRC Price Oracle Cost Optimization (February 9–10, 2026)
 
 **Branch:** `feature/xrc-cost-optimization` — merged to main and **deployed to mainnet Feb 10**
@@ -739,7 +862,7 @@ All go through `validate_call()` → `ensure_fresh_price()`:
 
 > **Note:** The three stability pool functions don't perform collateral ratio calculations and arguably don't need a fresh price. We left them with the price check for now (conservative approach), but they could be split out to skip the on-demand fetch if we want to save users the occasional 1-2s delay.
 
-> **Note:** `redeem_icp` is named for the current ICP-only collateral. When we add ckBTC, ckETH, or other collateral types, the redemption function will need to be generalized (e.g., `redeem_collateral` with a collateral type parameter) and each collateral's price will need its own freshness guarantee. This is a future architecture concern to revisit when multi-collateral is implemented.
+> **Note:** `redeem_collateral(principal, amount)` now exists alongside `redeem_icp` (which is a thin wrapper). Both the backend endpoint and the frontend `protocolService.redeemCollateral()` are wired. Per-collateral price freshness is handled by `ensure_fresh_price_for(collateral_type)`.
 
 ### Concurrency Safety
 
@@ -749,9 +872,9 @@ The existing `FetchXrcGuard` prevents concurrent XRC calls. If two users trigger
 
 Discussed but not yet implemented: a controller-only `set_price_interval(secs: u64)` function that stores the interval in stable memory. Would allow changing the polling interval without redeploying. Currently the canister has zero admin-only functions — this would be the first, establishing the controller-check pattern. See [chat log](https://claude.ai/chat/c89c7960-62cd-40fc-8c69-63dd762bb743) for full discussion.
 
-### Future Work: Multi-Collateral Price Feeds
+### ✅ DONE: Multi-Collateral Price Feeds
 
-When additional collateral types (ckBTC, ckETH) are added, `ensure_fresh_price()` will need to become collateral-aware — checking and refreshing the price for the specific collateral involved in the operation, not just ICP. The `FETCHING_CKBTC_RATE_INTERVAL` and `fetch_ckbtc_rate()` references already exist in `setup_timers()` in `main.rs` (from Agnes's staging merge) but the corresponding functions in `xrc.rs` haven't been implemented yet.
+The multi-collateral refactor (Feb 21–23) implemented per-collateral price fetching. Each collateral type has a `PriceSource` config, and `add_collateral_token` registers a price timer for the new token's XRC asset pair. `ensure_fresh_price_for(collateral_type)` checks and refreshes per-collateral prices on-demand. See the Multi-Collateral Refactor section above for full details.
 
 ---
 
@@ -820,20 +943,21 @@ dfx deploy vault_frontend --network ic
 - ✅ UI rebrand and page reworks
 - ✅ Borrow page overhaul with partial collateral withdraw
 - ✅ TypeScript error cleanup (67 → 24, all remaining are stability pool)
+- ✅ Multi-collateral refactor — backend Phase 1 + 2 complete, frontend fully wired. See detailed section below.
 
 ### In Progress / Planned
-- **Multi-collateral refactor** — restructure backend to be collateral-type-aware before building more on top. ICP stays the only collateral, but internals become parameterized. See session prompt below.
-- **Stability Pool integration** — canister deployed but not integrated. Blocked on multi-collateral refactor.
+- **Register ckETH / ckBTC** — backend ready, call `add_collateral_token` to go live. Frontend auto-populates.
+- **Stability Pool integration** — canister deployed but not integrated.
 - **Oisy wallet** — greyed out, ICRC-2 incompatible with ICP ledger. Needs push-deposit pattern.
 
 ---
 
 ## Important Notes
 
-- **Fees are live** — borrowing, redemption, ckStable repay fees all active and configurable
+- **Multi-collateral ready** — backend + frontend fully wired. Register new tokens via `add_collateral_token`.
+- **Fees are live** — borrowing, redemption, ckStable repay fees all active and configurable (per-collateral)
 - **Manual liquidations** — browse liquidations page for undercollateralized vaults
 - **Fresh deployment** — old repo at github.com/Rumi-Protocol/Rumi-protocol (blackholed)
-- **Multi-collateral refactor next** — backend restructure before stability pool integration
 
 ---
 
@@ -841,6 +965,7 @@ dfx deploy vault_frontend --network ic
 
 | Document | Purpose |
 |----------|---------|
+| `/docs/MULTI_COLLATERAL_REFACTOR_PLAN.md` | Original backend refactor plan (Phases 1–8) |
 | `/docs/Oisy_integration_handoff.md` | Oisy wallet integration details + ICRC-21 root cause analysis |
 | `/docs/archive/OISY_ICRC2_TEST_SESSION_HANDOFF.md` | Oisy icUSD test details |
 | `/docs/DESIGN_SYSTEM.md` | UI design constitution — colors, typography, component rules |
@@ -850,4 +975,4 @@ dfx deploy vault_frontend --network ic
 
 ---
 
-*Last updated: February 21, 2026*
+*Last updated: February 23, 2026*
