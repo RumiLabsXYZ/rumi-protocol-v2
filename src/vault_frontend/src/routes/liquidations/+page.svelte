@@ -304,7 +304,9 @@
         {@const isProcessingThis = processingVaultId === vault.vault_id}
         {@const crDanger = cr < 130}
         {@const crCaution = cr >= 130 && cr < 150}
-        {@const s = getSeizure(vault)}
+        {@const inputVal = parseFloat(liquidationAmounts[vault.vault_id] || '') || 0}
+        {@const overMax = inputVal > 0 && maxLiq > 0 && inputVal > maxLiq}
+        {@const s = inputVal > 0 && !overMax ? calculateSeizure(vault, inputVal) : null}
         {@const ci = getVaultCollateralInfo(vault)}
 
         <div class="liq-card">
@@ -347,7 +349,7 @@
               </div>
               <div class="exec-row">
                 <div class="input-wrap">
-                  <input type="number" class="liq-input liq-input-with-select" class:input-over={isOverMax(vault)}
+                  <input type="number" class="liq-input liq-input-with-select" class:input-over={overMax}
                     bind:value={liquidationAmounts[vault.vault_id]}
                     on:input={() => { liquidationAmounts = liquidationAmounts; }}
                     min="0" step="0.01"
@@ -364,7 +366,7 @@
                 </div>
                 <button class="btn-primary btn-sm btn-liquidate"
                   on:click={() => handleLiquidate(vault)}
-                  disabled={!isConnected || processingVaultId !== null || !getInputVal(vault) || isOverMax(vault)}>
+                  disabled={!isConnected || processingVaultId !== null || inputVal <= 0}>
                   {#if isProcessingThis}
                     {isApprovingAllowance ? 'Approving…' : 'Liquidating…'}
                   {:else}
