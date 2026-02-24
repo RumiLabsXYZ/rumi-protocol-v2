@@ -230,6 +230,7 @@ fn get_protocol_status() -> ProtocolStatus {
         mode: s.mode,
         liquidation_bonus: s.liquidation_bonus.to_f64(),
         recovery_target_cr: s.recovery_target_cr.to_f64(),
+        recovery_mode_threshold: s.recovery_mode_threshold.to_f64(),
     })
 }
 

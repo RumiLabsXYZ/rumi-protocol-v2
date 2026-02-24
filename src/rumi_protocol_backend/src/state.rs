@@ -310,6 +310,10 @@ pub struct State {
     pub redemption_fee_ceiling: Ratio,
     pub recovery_target_cr: Ratio,
 
+    /// Cached dynamic recovery mode threshold (debt-weighted average of per-collateral borrow thresholds).
+    /// Updated alongside total_collateral_ratio on each price tick.
+    pub recovery_mode_threshold: Ratio,
+
     // Multi-collateral support
     pub collateral_configs: BTreeMap<CollateralType, CollateralConfig>,
     pub collateral_to_vault_ids: BTreeMap<CollateralType, BTreeSet<u64>>,
@@ -368,6 +372,7 @@ impl From<InitArg> for State {
             redemption_fee_floor: DEFAULT_REDEMPTION_FEE_FLOOR,
             redemption_fee_ceiling: DEFAULT_REDEMPTION_FEE_CEILING,
             recovery_target_cr: DEFAULT_RECOVERY_TARGET_CR,
+            recovery_mode_threshold: RECOVERY_COLLATERAL_RATIO,
 
             // Multi-collateral: initialize with ICP as the default collateral
             collateral_configs: {
@@ -567,6 +572,41 @@ impl State {
             // No config → contributes 0 value (conservative)
         }
         total_value / total_debt
+    }
+
+    /// Compute the dynamic recovery mode threshold as a debt-weighted average
+    /// of per-collateral borrow_threshold_ratio values.
+    /// Falls back to RECOVERY_COLLATERAL_RATIO when total debt is zero.
+    ///
+    /// Formula: recovery_threshold = Σ (debt_i / total_debt) × borrow_threshold_i
+    ///
+    /// Mathematical guarantee: the result can never be lower than the lowest
+    /// individual borrow_threshold_ratio, ensuring no collateral type's users
+    /// get surprise-liquidated below their own threshold.
+    pub fn compute_dynamic_recovery_threshold(&self) -> Ratio {
+        let total_debt = self.total_borrowed_icusd_amount();
+        if total_debt == ICUSD::new(0) {
+            return RECOVERY_COLLATERAL_RATIO;
+        }
+        let total_debt_dec = Decimal::from_u64(total_debt.to_u64())
+            .unwrap_or(Decimal::ZERO);
+
+        let mut weighted_sum = Decimal::ZERO;
+        for (ct, config) in &self.collateral_configs {
+            let debt_i = self.total_debt_for_collateral(ct);
+            if debt_i == ICUSD::new(0) {
+                continue;
+            }
+            let debt_i_dec = Decimal::from_u64(debt_i.to_u64())
+                .unwrap_or(Decimal::ZERO);
+            weighted_sum += (debt_i_dec / total_debt_dec) * config.borrow_threshold_ratio.0;
+        }
+
+        if weighted_sum == Decimal::ZERO {
+            // Safety fallback: no configs matched (shouldn't happen if total_debt > 0)
+            return RECOVERY_COLLATERAL_RATIO;
+        }
+        Ratio::from(weighted_sum)
     }
 
     pub fn get_redemption_fee(&self, redeemed_amount: ICUSD) -> Ratio {
@@ -812,24 +852,28 @@ impl State {
         let previous_mode = self.mode;
         let new_total_collateral_ratio = self.compute_total_collateral_ratio(rate);
         self.total_collateral_ratio = new_total_collateral_ratio;
-        
-        if new_total_collateral_ratio < crate::RECOVERY_COLLATERAL_RATIO {
+
+        // Compute the debt-weighted recovery threshold and cache it
+        let dynamic_threshold = self.compute_dynamic_recovery_threshold();
+        self.recovery_mode_threshold = dynamic_threshold;
+
+        if new_total_collateral_ratio < dynamic_threshold {
             self.mode = Mode::Recovery;
         } else {
             self.mode = Mode::GeneralAvailability;
         }
-        
+
         if new_total_collateral_ratio < Ratio::from(dec!(1.0)) {
             self.mode = Mode::ReadOnly;
         }
-        
+
         if previous_mode != self.mode {
             log!(
                 crate::DEBUG,
-                "[update_mode] switched to {}, ratio: {}, min ratio: {:?}",
+                "[update_mode] switched to {}, ratio: {}, recovery threshold: {}",
                 self.mode,
                 new_total_collateral_ratio.to_f64(),
-                self.mode.get_minimum_liquidation_collateral_ratio().to_f64()
+                dynamic_threshold.to_f64()
             );
         }
     }
@@ -964,13 +1008,16 @@ impl State {
     }
 
     /// Compute the icUSD repayment needed to restore a vault's CR to recovery_target_cr.
-    /// Returns None if not applicable (not in recovery, or vault CR outside 133-150% range).
+    /// Returns None if not applicable (not in recovery, or vault CR outside the per-collateral
+    /// liquidation_ratio..borrow_threshold_ratio range).
     pub fn compute_recovery_repay_cap(&self, vault: &Vault, collateral_price: UsdIcp) -> Option<ICUSD> {
         if self.mode != Mode::Recovery {
             return None;
         }
         let vault_cr = compute_collateral_ratio(vault, collateral_price, self);
-        if vault_cr <= MINIMUM_COLLATERAL_RATIO || vault_cr >= RECOVERY_COLLATERAL_RATIO {
+        let per_collateral_liq_ratio = self.get_liquidation_ratio_for(&vault.collateral_type);
+        let per_collateral_borrow_threshold = self.get_min_collateral_ratio_for(&vault.collateral_type);
+        if vault_cr <= per_collateral_liq_ratio || vault_cr >= per_collateral_borrow_threshold {
             return None;
         }
         let ct = &vault.collateral_type;

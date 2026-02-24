@@ -243,6 +243,7 @@ type ProtocolStatus = record {
   recovery_target_cr : float64;
   liquidation_bonus : float64;
   last_icp_rate : float64;
+  recovery_mode_threshold : float64;
 };
 type Result = variant { Ok; Err : ProtocolError };
 type Result_1 = variant { Ok : nat64; Err : ProtocolError };

@@ -107,6 +107,7 @@ pub struct ProtocolStatus {
     pub mode: Mode,
     pub liquidation_bonus: f64,
     pub recovery_target_cr: f64,
+    pub recovery_mode_threshold: f64,
 }
 
 #[derive(CandidType, Deserialize, Debug)]

@@ -362,9 +362,11 @@ mod protocol_safety_tests {
         state.update_total_collateral_ratio_and_mode(new_rate);
         
         // Check if mode changed appropriately
+        // With only ICP configured, the dynamic threshold equals RECOVERY_COLLATERAL_RATIO
+        let expected_threshold = state.compute_dynamic_recovery_threshold();
         if after_drop_ratio < Ratio::from(dec!(1.0)) {
             assert_eq!(state.mode, Mode::ReadOnly);
-        } else if after_drop_ratio < rumi_protocol_backend::RECOVERY_COLLATERAL_RATIO {
+        } else if after_drop_ratio < expected_threshold {
             assert_eq!(state.mode, Mode::Recovery);
         } else {
             assert_eq!(state.mode, Mode::GeneralAvailability);
@@ -1643,5 +1645,150 @@ mod multi_collateral_tests {
         // ICP = 1.15, ckETH = 1.10
         assert_eq!(state.get_liquidation_bonus_for(&icp_ct).0, dec!(1.15));
         assert_eq!(state.get_liquidation_bonus_for(&cketh_ledger()).0, dec!(1.10));
+    }
+
+    // ========================================================================
+    // Dynamic Recovery Threshold Tests
+    // ========================================================================
+
+    #[test]
+    fn test_dynamic_recovery_threshold_no_debt_fallback() {
+        let state = fixtures::create_test_state();
+        // No vaults, no debt → should fall back to RECOVERY_COLLATERAL_RATIO (1.5)
+        let threshold = state.compute_dynamic_recovery_threshold();
+        assert_eq!(threshold, rumi_protocol_backend::RECOVERY_COLLATERAL_RATIO);
+    }
+
+    #[test]
+    fn test_dynamic_recovery_threshold_single_collateral() {
+        let mut state = fixtures::create_test_state();
+        state.set_icp_rate(UsdIcp::from(dec!(10.0)), Some(1_000_000_000));
+
+        // Create an ICP vault: 10 ICP ($100 value), 50 icUSD debt
+        let icp_ct = state.icp_collateral_type();
+        let vault = Vault {
+            owner: Principal::from_text("2vxsx-fae").unwrap(),
+            borrowed_icusd_amount: ICUSD::from(50 * 100_000_000),
+            collateral_amount: 10 * 100_000_000,
+            vault_id: 1,
+            collateral_type: icp_ct,
+        };
+        state.open_vault(vault);
+
+        // With only ICP debt, threshold should equal ICP's borrow_threshold_ratio (1.5)
+        let threshold = state.compute_dynamic_recovery_threshold();
+        assert_eq!(threshold.0, dec!(1.5));
+    }
+
+    #[test]
+    fn test_dynamic_recovery_threshold_weighted_average() {
+        let mut state = fixtures::create_test_state();
+        state.set_icp_rate(UsdIcp::from(dec!(10.0)), Some(1_000_000_000));
+        register_cketh(&mut state, 2000.0);
+
+        let icp_ct = state.icp_collateral_type();
+
+        // ICP vault: 10 ICP, 50 icUSD debt
+        let icp_vault = Vault {
+            owner: Principal::from_text("2vxsx-fae").unwrap(),
+            borrowed_icusd_amount: ICUSD::from(50 * 100_000_000),
+            collateral_amount: 10 * 100_000_000,
+            vault_id: 1,
+            collateral_type: icp_ct,
+        };
+        state.open_vault(icp_vault);
+
+        // ckETH vault: 0.05 ckETH (50 * 10^18 / 10^18 = 50 * 10^15 raw), 50 icUSD debt
+        let eth_vault = create_cketh_vault(
+            Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap(),
+            2,
+            50_000_000_000_000_000, // 0.05 ckETH at $2000 = $100
+            50 * 100_000_000,       // 50 icUSD
+        );
+        state.open_vault(eth_vault);
+
+        // 50 icUSD at 1.50 (ICP) + 50 icUSD at 1.40 (ckETH) = 50/50 weight
+        // Expected: (0.5 * 1.5) + (0.5 * 1.4) = 0.75 + 0.70 = 1.45
+        let threshold = state.compute_dynamic_recovery_threshold();
+        assert_eq!(threshold.0, dec!(1.45));
+    }
+
+    #[test]
+    fn test_dynamic_recovery_threshold_unequal_debt() {
+        let mut state = fixtures::create_test_state();
+        state.set_icp_rate(UsdIcp::from(dec!(10.0)), Some(1_000_000_000));
+        register_cketh(&mut state, 2000.0);
+
+        let icp_ct = state.icp_collateral_type();
+
+        // ICP vault: 80 icUSD debt
+        let icp_vault = Vault {
+            owner: Principal::from_text("2vxsx-fae").unwrap(),
+            borrowed_icusd_amount: ICUSD::from(80 * 100_000_000),
+            collateral_amount: 20 * 100_000_000,
+            vault_id: 1,
+            collateral_type: icp_ct,
+        };
+        state.open_vault(icp_vault);
+
+        // ckETH vault: 20 icUSD debt
+        let eth_vault = create_cketh_vault(
+            Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap(),
+            2,
+            50_000_000_000_000_000,
+            20 * 100_000_000,
+        );
+        state.open_vault(eth_vault);
+
+        // 80% ICP (1.50) + 20% ckETH (1.40) = 0.8 * 1.5 + 0.2 * 1.4 = 1.20 + 0.28 = 1.48
+        let threshold = state.compute_dynamic_recovery_threshold();
+        assert_eq!(threshold.0, dec!(1.48));
+    }
+
+    #[test]
+    fn test_mode_switch_uses_dynamic_threshold() {
+        let mut state = fixtures::create_test_state();
+        state.set_icp_rate(UsdIcp::from(dec!(10.0)), Some(1_000_000_000));
+        register_cketh(&mut state, 2000.0);
+
+        let icp_ct = state.icp_collateral_type();
+
+        // ICP vault: 10 ICP ($100), 50 icUSD debt → CR = 200%
+        let icp_vault = Vault {
+            owner: Principal::from_text("2vxsx-fae").unwrap(),
+            borrowed_icusd_amount: ICUSD::from(50 * 100_000_000),
+            collateral_amount: 10 * 100_000_000,
+            vault_id: 1,
+            collateral_type: icp_ct,
+        };
+        state.open_vault(icp_vault);
+
+        // ckETH vault: 0.05 ckETH ($100), 50 icUSD debt → CR = 200%
+        let eth_vault = create_cketh_vault(
+            Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap(),
+            2,
+            50_000_000_000_000_000,
+            50 * 100_000_000,
+        );
+        state.open_vault(eth_vault);
+
+        // Weighted threshold = 1.45 (50/50 at 1.50 and 1.40)
+        // System CR at $10 ICP, $2000 ckETH: ($100+$100)/$100 = 200% → GA
+        state.update_total_collateral_ratio_and_mode(UsdIcp::from(dec!(10.0)));
+        assert_eq!(state.mode, Mode::GeneralAvailability);
+        assert_eq!(state.recovery_mode_threshold.0, dec!(1.45));
+
+        // Drop ICP price to $3.50, ckETH stays at $2000
+        // ICP collateral: 10 * $3.50 = $35, ckETH: 0.05 * $2000 = $100
+        // Total collateral value: $135, total debt: $100
+        // System CR = 135% < 145% → Recovery
+        // But 135% > the old static 133% liquidation ratio, so this would have been missed
+        // with a static threshold that was too low
+        state.set_icp_rate(UsdIcp::from(dec!(3.5)), Some(2_000_000_000));
+        state.update_total_collateral_ratio_and_mode(UsdIcp::from(dec!(3.5)));
+
+        assert_eq!(state.mode, Mode::Recovery);
+        // Threshold should still be 1.45
+        assert_eq!(state.recovery_mode_threshold.0, dec!(1.45));
     }
 }
