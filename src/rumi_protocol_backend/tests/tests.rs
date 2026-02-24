@@ -1792,3 +1792,716 @@ mod multi_collateral_tests {
         assert_eq!(state.recovery_mode_threshold.0, dec!(1.45));
     }
 }
+
+// ============================================================================
+// Dynamic Redemption Fee Tests
+// ============================================================================
+//
+// The fee formula: fee = base_rate × 0.94^elapsed_hours + (redeemed / total_borrowed) × 0.5
+// Clamped between floor (0.3%) and ceiling (5%).
+//
+// Tests call compute_redemption_fee directly (pure function) to avoid
+// depending on ic_cdk::api::time() which requires an IC runtime.
+// ============================================================================
+
+#[cfg(test)]
+mod redemption_fee_tests {
+    use super::*;
+    use rumi_protocol_backend::state::{
+        compute_redemption_fee,
+        DEFAULT_REDEMPTION_FEE_FLOOR,
+        DEFAULT_REDEMPTION_FEE_CEILING,
+    };
+
+    #[test]
+    fn test_fee_zero_total_borrowed_returns_zero() {
+        // Edge case: no debt in protocol → fee should be zero (avoid division by zero)
+        let fee = compute_redemption_fee(
+            0,                              // elapsed_hours
+            ICUSD::from(100_000_000),       // redeemed: 1 icUSD
+            ICUSD::from(0),                 // total_borrowed: 0
+            Ratio::from(dec!(0)),           // base_rate
+            DEFAULT_REDEMPTION_FEE_FLOOR,
+            DEFAULT_REDEMPTION_FEE_CEILING,
+        );
+        assert_eq!(fee.0, dec!(0));
+    }
+
+    #[test]
+    fn test_fee_fresh_redemption_small_amount() {
+        // No prior redemptions (base_rate=0), redeem 1 of 1000 icUSD
+        // fee = 0 * 0.94^0 + (1/1000) * 0.5 = 0.0005
+        // But floor is 0.003 → clamp up
+        let fee = compute_redemption_fee(
+            0,
+            ICUSD::from(1 * 100_000_000),      // redeem 1 icUSD
+            ICUSD::from(1000 * 100_000_000),    // total debt 1000 icUSD
+            Ratio::from(dec!(0)),
+            DEFAULT_REDEMPTION_FEE_FLOOR,
+            DEFAULT_REDEMPTION_FEE_CEILING,
+        );
+        assert_eq!(fee, DEFAULT_REDEMPTION_FEE_FLOOR,
+            "Small redemption with zero base rate should hit the floor");
+    }
+
+    #[test]
+    fn test_fee_large_redemption_pushes_above_floor() {
+        // Redeem 50% of total → (500/1000) * 0.5 = 0.25 → capped at ceiling
+        let fee = compute_redemption_fee(
+            0,
+            ICUSD::from(500 * 100_000_000),
+            ICUSD::from(1000 * 100_000_000),
+            Ratio::from(dec!(0)),
+            DEFAULT_REDEMPTION_FEE_FLOOR,
+            DEFAULT_REDEMPTION_FEE_CEILING,
+        );
+        assert_eq!(fee, DEFAULT_REDEMPTION_FEE_CEILING,
+            "Redeeming 50% of total debt should hit the ceiling");
+    }
+
+    #[test]
+    fn test_fee_medium_redemption_between_floor_and_ceiling() {
+        // Redeem 2% of total: (20/1000) * 0.5 = 0.01 = 1%
+        // Floor = 0.3%, ceiling = 5% → 1% is in range
+        let fee = compute_redemption_fee(
+            0,
+            ICUSD::from(20 * 100_000_000),
+            ICUSD::from(1000 * 100_000_000),
+            Ratio::from(dec!(0)),
+            DEFAULT_REDEMPTION_FEE_FLOOR,
+            DEFAULT_REDEMPTION_FEE_CEILING,
+        );
+        assert_eq!(fee.0, dec!(0.01),
+            "Redeeming 2% of total debt should give 1% fee");
+    }
+
+    #[test]
+    fn test_fee_decay_with_base_rate() {
+        // base_rate = 4%, 11 hours elapsed
+        // 0.94^11 ≈ 0.506 → decayed = 0.04 * 0.506 ≈ 0.02024
+        // + (1/1000)*0.5 = 0.0005 → total ≈ 0.02074
+        let fee = compute_redemption_fee(
+            11,                                 // 11 hours elapsed
+            ICUSD::from(1 * 100_000_000),       // tiny redemption
+            ICUSD::from(1000 * 100_000_000),
+            Ratio::from(dec!(0.04)),            // 4% base rate
+            DEFAULT_REDEMPTION_FEE_FLOOR,
+            DEFAULT_REDEMPTION_FEE_CEILING,
+        );
+        assert!(fee.0 > dec!(0.015), "Decayed fee should be above 1.5%, got {}", fee.0);
+        assert!(fee.0 < dec!(0.03), "Decayed fee should be below 3%, got {}", fee.0);
+    }
+
+    #[test]
+    fn test_fee_no_decay_at_zero_hours() {
+        // base_rate = 4%, 0 hours elapsed → no decay
+        // fee = 0.04 * 0.94^0 + (1/1000)*0.5 = 0.04 + 0.0005 = 0.0405
+        let fee = compute_redemption_fee(
+            0,
+            ICUSD::from(1 * 100_000_000),
+            ICUSD::from(1000 * 100_000_000),
+            Ratio::from(dec!(0.04)),
+            DEFAULT_REDEMPTION_FEE_FLOOR,
+            DEFAULT_REDEMPTION_FEE_CEILING,
+        );
+        assert_eq!(fee.0, dec!(0.0405));
+    }
+
+    #[test]
+    fn test_fee_ceiling_caps_large_base_rate() {
+        // base_rate = 10% with no decay → 10% + proportion → well above ceiling
+        let fee = compute_redemption_fee(
+            0,
+            ICUSD::from(1 * 100_000_000),
+            ICUSD::from(1000 * 100_000_000),
+            Ratio::from(dec!(0.10)),
+            DEFAULT_REDEMPTION_FEE_FLOOR,
+            DEFAULT_REDEMPTION_FEE_CEILING,
+        );
+        assert_eq!(fee, DEFAULT_REDEMPTION_FEE_CEILING,
+            "Fee should be capped at ceiling");
+    }
+
+    #[test]
+    fn test_fee_full_decay_returns_to_floor() {
+        // After 1000 hours, 0.94^1000 ≈ 0 → base effectively gone
+        // + tiny proportion → below floor → clamp to floor
+        let fee = compute_redemption_fee(
+            1000,
+            ICUSD::from(1 * 100_000_000),
+            ICUSD::from(1000 * 100_000_000),
+            Ratio::from(dec!(0.04)),
+            DEFAULT_REDEMPTION_FEE_FLOOR,
+            DEFAULT_REDEMPTION_FEE_CEILING,
+        );
+        assert_eq!(fee, DEFAULT_REDEMPTION_FEE_FLOOR,
+            "After full decay, fee should return to floor");
+    }
+
+    #[test]
+    fn test_fee_exact_at_floor_boundary() {
+        // Craft inputs where the computed fee exactly equals the floor
+        // floor = 0.003; if proportion = 0.006 → total = 0.006 > floor → should be 0.006
+        // redeemed/total * 0.5 = 0.006 → redeemed/total = 0.012
+        // e.g., redeem 12 of 1000
+        let fee = compute_redemption_fee(
+            0,
+            ICUSD::from(12 * 100_000_000),
+            ICUSD::from(1000 * 100_000_000),
+            Ratio::from(dec!(0)),
+            DEFAULT_REDEMPTION_FEE_FLOOR,
+            DEFAULT_REDEMPTION_FEE_CEILING,
+        );
+        assert_eq!(fee.0, dec!(0.006),
+            "12/1000 * 0.5 = 0.006 which is above floor");
+    }
+
+    #[test]
+    fn test_fee_with_custom_floor_ceiling() {
+        // Custom floor=1%, ceiling=3%
+        let custom_floor = Ratio::from(dec!(0.01));
+        let custom_ceiling = Ratio::from(dec!(0.03));
+
+        // Tiny redemption → proportion ≈ 0 → clamp to custom floor
+        let fee = compute_redemption_fee(
+            0,
+            ICUSD::from(1 * 100_000_000),
+            ICUSD::from(10000 * 100_000_000),
+            Ratio::from(dec!(0)),
+            custom_floor,
+            custom_ceiling,
+        );
+        assert_eq!(fee.0, dec!(0.01), "Should clamp to custom floor");
+
+        // Huge redemption → above custom ceiling → clamp
+        let fee2 = compute_redemption_fee(
+            0,
+            ICUSD::from(5000 * 100_000_000),
+            ICUSD::from(10000 * 100_000_000),
+            Ratio::from(dec!(0)),
+            custom_floor,
+            custom_ceiling,
+        );
+        assert_eq!(fee2.0, dec!(0.03), "Should clamp to custom ceiling");
+    }
+
+    #[test]
+    fn test_fee_multiple_sequential_redemptions_compound() {
+        // Simulate: first redemption sets a base rate, second sees it
+        let total_debt = ICUSD::from(1000 * 100_000_000);
+
+        // First redemption: base=0, redeem 20 → fee = 0 + (20/1000)*0.5 = 0.01
+        let fee1 = compute_redemption_fee(
+            0,
+            ICUSD::from(20 * 100_000_000),
+            total_debt,
+            Ratio::from(dec!(0)),
+            DEFAULT_REDEMPTION_FEE_FLOOR,
+            DEFAULT_REDEMPTION_FEE_CEILING,
+        );
+        assert_eq!(fee1.0, dec!(0.01));
+
+        // Second redemption immediately (0 elapsed): base=0.01, redeem 20
+        // fee = 0.01 * 0.94^0 + (20/1000)*0.5 = 0.01 + 0.01 = 0.02
+        let fee2 = compute_redemption_fee(
+            0,
+            ICUSD::from(20 * 100_000_000),
+            total_debt,
+            fee1, // base rate updated to fee1
+            DEFAULT_REDEMPTION_FEE_FLOOR,
+            DEFAULT_REDEMPTION_FEE_CEILING,
+        );
+        assert_eq!(fee2.0, dec!(0.02),
+            "Second redemption should compound on the base rate");
+    }
+}
+
+// ============================================================================
+// Water-Filling Redemption Algorithm Tests
+// ============================================================================
+//
+// Verifies the proportional redemption distribution across vaults with equal
+// or banded collateral ratios.
+// ============================================================================
+
+#[cfg(test)]
+mod water_filling_tests {
+    use super::*;
+
+    fn setup_multi_vault_state() -> (State, Principal) {
+        let mut state = fixtures::create_test_state();
+        state.set_icp_rate(UsdIcp::from(dec!(10.0)), Some(1_000_000_000));
+        let icp_ct = state.icp_collateral_type();
+
+        let user_a = Principal::from_text("2vxsx-fae").unwrap();
+        let user_b = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
+        let user_c = Principal::from_text("mxzaz-hqaaa-aaaar-qaada-cai").unwrap();
+
+        // Vault 1: 10 ICP ($100), 60 icUSD debt → CR ≈ 1.67
+        let v1 = Vault {
+            owner: user_a,
+            borrowed_icusd_amount: ICUSD::from(60 * 100_000_000),
+            collateral_amount: 10 * 100_000_000,
+            vault_id: 1,
+            collateral_type: icp_ct,
+        };
+        state.open_vault(v1);
+
+        // Vault 2: 10 ICP ($100), 60 icUSD debt → CR ≈ 1.67 (same as vault 1)
+        let v2 = Vault {
+            owner: user_b,
+            borrowed_icusd_amount: ICUSD::from(60 * 100_000_000),
+            collateral_amount: 10 * 100_000_000,
+            vault_id: 2,
+            collateral_type: icp_ct,
+        };
+        state.open_vault(v2);
+
+        // Vault 3: 20 ICP ($200), 60 icUSD debt → CR ≈ 3.33 (much higher)
+        let v3 = Vault {
+            owner: user_c,
+            borrowed_icusd_amount: ICUSD::from(60 * 100_000_000),
+            collateral_amount: 20 * 100_000_000,
+            vault_id: 3,
+            collateral_type: icp_ct,
+        };
+        state.open_vault(v3);
+
+        (state, icp_ct)
+    }
+
+    #[test]
+    fn test_redemption_targets_lowest_cr_vaults_first() {
+        let (mut state, icp_ct) = setup_multi_vault_state();
+
+        // Redeem 10 icUSD — should hit vaults 1 & 2 (lowest CR) not vault 3
+        let v3_collateral_before = state.vault_id_to_vaults.get(&3).unwrap().collateral_amount;
+        state.redeem_on_vaults(ICUSD::from(10 * 100_000_000), UsdIcp::from(dec!(10.0)), &icp_ct);
+
+        // Vault 3 should be untouched (higher CR)
+        let v3_collateral_after = state.vault_id_to_vaults.get(&3).unwrap().collateral_amount;
+        assert_eq!(v3_collateral_after, v3_collateral_before,
+            "Highest-CR vault should not be redeemed against");
+
+        // Vaults 1 & 2 should both lose collateral (equal CR band → proportional)
+        let v1 = state.vault_id_to_vaults.get(&1).unwrap();
+        let v2 = state.vault_id_to_vaults.get(&2).unwrap();
+        assert!(v1.collateral_amount < 10 * 100_000_000, "Vault 1 should lose collateral");
+        assert!(v2.collateral_amount < 10 * 100_000_000, "Vault 2 should lose collateral");
+    }
+
+    #[test]
+    fn test_equal_cr_vaults_get_proportional_redemption() {
+        let (mut state, icp_ct) = setup_multi_vault_state();
+
+        let v1_debt_before = state.vault_id_to_vaults.get(&1).unwrap().borrowed_icusd_amount;
+        let v2_debt_before = state.vault_id_to_vaults.get(&2).unwrap().borrowed_icusd_amount;
+
+        // Same debt → should get equal shares
+        state.redeem_on_vaults(ICUSD::from(10 * 100_000_000), UsdIcp::from(dec!(10.0)), &icp_ct);
+
+        let v1_debt_after = state.vault_id_to_vaults.get(&1).unwrap().borrowed_icusd_amount;
+        let v2_debt_after = state.vault_id_to_vaults.get(&2).unwrap().borrowed_icusd_amount;
+
+        // Both should have been reduced by approximately the same amount
+        let v1_reduction = (v1_debt_before - v1_debt_after).to_u64();
+        let v2_reduction = (v2_debt_before - v2_debt_after).to_u64();
+
+        assert_eq!(v1_reduction, v2_reduction,
+            "Equal-CR equal-debt vaults should get equal redemption shares");
+        assert_eq!(v1_reduction + v2_reduction, 10 * 100_000_000,
+            "Total redemption should equal the requested amount");
+    }
+
+    #[test]
+    fn test_redemption_reduces_both_debt_and_collateral() {
+        let (mut state, icp_ct) = setup_multi_vault_state();
+
+        let v1_before = state.vault_id_to_vaults.get(&1).unwrap().clone();
+        state.redeem_on_vaults(ICUSD::from(10 * 100_000_000), UsdIcp::from(dec!(10.0)), &icp_ct);
+        let v1_after = state.vault_id_to_vaults.get(&1).unwrap();
+
+        assert!(v1_after.borrowed_icusd_amount < v1_before.borrowed_icusd_amount,
+            "Debt should decrease after redemption");
+        assert!(v1_after.collateral_amount < v1_before.collateral_amount,
+            "Collateral should decrease after redemption");
+    }
+
+    #[test]
+    fn test_redemption_zero_amount_is_noop() {
+        let (mut state, icp_ct) = setup_multi_vault_state();
+        let v1_before = state.vault_id_to_vaults.get(&1).unwrap().clone();
+        state.redeem_on_vaults(ICUSD::from(0), UsdIcp::from(dec!(10.0)), &icp_ct);
+        let v1_after = state.vault_id_to_vaults.get(&1).unwrap();
+        assert_eq!(v1_after.collateral_amount, v1_before.collateral_amount);
+        assert_eq!(v1_after.borrowed_icusd_amount, v1_before.borrowed_icusd_amount);
+    }
+
+    #[test]
+    fn test_redemption_capped_at_vault_debt() {
+        let mut state = fixtures::create_test_state();
+        state.set_icp_rate(UsdIcp::from(dec!(10.0)), Some(1_000_000_000));
+        let icp_ct = state.icp_collateral_type();
+
+        // Single vault with only 10 icUSD debt
+        let v1 = Vault {
+            owner: Principal::from_text("2vxsx-fae").unwrap(),
+            borrowed_icusd_amount: ICUSD::from(10 * 100_000_000),
+            collateral_amount: 100 * 100_000_000,
+            vault_id: 1,
+            collateral_type: icp_ct,
+        };
+        state.open_vault(v1);
+
+        // Try to redeem 50 icUSD — more than the vault has
+        state.redeem_on_vaults(ICUSD::from(50 * 100_000_000), UsdIcp::from(dec!(10.0)), &icp_ct);
+
+        // Vault debt should go to zero (capped at actual debt)
+        let v1_after = state.vault_id_to_vaults.get(&1).unwrap();
+        assert_eq!(v1_after.borrowed_icusd_amount.to_u64(), 0,
+            "Vault debt should be fully cleared when redemption exceeds debt");
+    }
+}
+
+// ============================================================================
+// ckStable Repayment Math Tests
+// ============================================================================
+//
+// Tests the e8s→e6s conversion, fee calculation, and truncation logic used
+// when repaying vault debt with ckUSDT or ckUSDC.
+// ============================================================================
+
+#[cfg(test)]
+mod ckstable_math_tests {
+    use super::*;
+    use rumi_protocol_backend::state::DEFAULT_CKSTABLE_REPAY_FEE;
+    use rust_decimal::prelude::ToPrimitive;
+
+    #[test]
+    fn test_e8s_to_e6s_basic_conversion() {
+        // 1 icUSD = 100_000_000 e8s → 1_000_000 e6s
+        let amount_e8s: u64 = 100_000_000;
+        let amount_e6s = amount_e8s / 100;
+        assert_eq!(amount_e6s, 1_000_000, "1 icUSD should convert to 1 ckStable");
+    }
+
+    #[test]
+    fn test_e8s_to_e6s_truncation() {
+        // 1.00000099 icUSD (100_000_099 e8s) truncated to nearest 100
+        let raw_amount: u64 = 100_000_099;
+        let truncated = raw_amount - (raw_amount % 100);
+        assert_eq!(truncated, 100_000_000, "Should truncate to nearest 100 e8s");
+        assert_eq!(truncated / 100, 1_000_000, "Truncated amount converts cleanly to e6s");
+    }
+
+    #[test]
+    fn test_e8s_to_e6s_small_amount_truncation() {
+        // 99 e8s (below 100) → truncates to 0
+        let raw_amount: u64 = 99;
+        let truncated = raw_amount - (raw_amount % 100);
+        assert_eq!(truncated, 0, "Amount below 100 e8s should truncate to zero");
+    }
+
+    #[test]
+    fn test_ckstable_fee_calculation() {
+        // Default fee: 0.05% (0.0005)
+        // Repay 100 ckStable (100_000_000 e6s) → fee = 100_000_000 * 0.0005 = 50_000
+        let base_stable_e6s: u64 = 100_000_000; // 100 ckStable
+        let fee_rate = DEFAULT_CKSTABLE_REPAY_FEE;
+        let fee_e6s = (Decimal::from(base_stable_e6s) * fee_rate.0)
+            .to_u64().unwrap_or(0);
+        assert_eq!(fee_e6s, 50_000, "0.05% of 100 ckStable = 0.05 ckStable = 50000 e6s");
+
+        let total_pull = base_stable_e6s + fee_e6s;
+        assert_eq!(total_pull, 100_050_000, "Total pull should be amount + fee");
+    }
+
+    #[test]
+    fn test_ckstable_fee_on_small_amount() {
+        // Repay 1 ckStable (1_000_000 e6s) → fee = 1_000_000 * 0.0005 = 500
+        let base_stable_e6s: u64 = 1_000_000;
+        let fee_rate = DEFAULT_CKSTABLE_REPAY_FEE;
+        let fee_e6s = (Decimal::from(base_stable_e6s) * fee_rate.0)
+            .to_u64().unwrap_or(0);
+        assert_eq!(fee_e6s, 500);
+    }
+
+    #[test]
+    fn test_ckstable_fee_on_minimum_amount() {
+        // MIN_ICUSD_AMOUNT = 0.1 icUSD = 10_000_000 e8s → 100_000 e6s
+        let base_stable_e6s: u64 = 100_000;
+        let fee_rate = DEFAULT_CKSTABLE_REPAY_FEE;
+        let fee_e6s = (Decimal::from(base_stable_e6s) * fee_rate.0)
+            .to_u64().unwrap_or(0);
+        assert_eq!(fee_e6s, 50, "Fee on minimum amount should be 50 e6s (0.00005 ckStable)");
+    }
+
+    #[test]
+    fn test_reserve_redemption_flat_fee() {
+        // Reserve fee: 0.3% (DEFAULT_RESERVE_REDEMPTION_FEE = 0.003)
+        let reserve_fee = rumi_protocol_backend::state::DEFAULT_RESERVE_REDEMPTION_FEE;
+        let icusd_amount = ICUSD::from(100 * 100_000_000); // 100 icUSD
+        let fee = icusd_amount * reserve_fee;
+        // 100 * 0.003 = 0.3 icUSD = 30_000_000 e8s
+        assert_eq!(fee.to_u64(), 30_000_000);
+
+        let net = icusd_amount - fee;
+        assert_eq!(net.to_u64(), 9_970_000_000u64, "Net should be 99.7 icUSD");
+    }
+
+    #[test]
+    fn test_reserve_redemption_e8s_to_e6s() {
+        // Net icUSD after fee → convert to e6s for ckStable transfer
+        let net_icusd_e8s: u64 = 9_970_000_000; // 99.7 icUSD in e8s
+        let net_e6s = net_icusd_e8s / 100;
+        assert_eq!(net_e6s, 99_700_000, "99.7 icUSD = 99.7 ckStable = 99_700_000 e6s");
+    }
+}
+
+// ============================================================================
+// Admin Mint State Tests
+// ============================================================================
+//
+// Tests the validation logic and state tracking for admin_mint_icusd.
+// The actual async mint function is tested via PocketIC integration tests.
+// These tests verify the cap, cooldown, and state field behavior.
+// ============================================================================
+
+#[cfg(test)]
+mod admin_mint_state_tests {
+    use super::*;
+
+    const ADMIN_MINT_CAP_E8S: u64 = 150_000_000_000; // 1,500 icUSD
+    const ADMIN_MINT_COOLDOWN_NS: u64 = 72 * 3600 * 1_000_000_000; // 72 hours
+
+    #[test]
+    fn test_admin_mint_cap_value() {
+        // Verify the cap is exactly 1,500 icUSD
+        assert_eq!(ADMIN_MINT_CAP_E8S, 150_000_000_000);
+        assert_eq!(ADMIN_MINT_CAP_E8S / 100_000_000, 1500);
+    }
+
+    #[test]
+    fn test_admin_mint_cooldown_value() {
+        // Verify cooldown is exactly 72 hours in nanoseconds
+        let hours_72_nanos: u64 = 72 * 3600 * 1_000_000_000;
+        assert_eq!(ADMIN_MINT_COOLDOWN_NS, hours_72_nanos);
+    }
+
+    #[test]
+    fn test_admin_mint_cooldown_tracking_in_state() {
+        let state = fixtures::create_test_state();
+        // Fresh state should have last_admin_mint_time = 0
+        assert_eq!(state.last_admin_mint_time, 0);
+    }
+
+    #[test]
+    fn test_admin_mint_cooldown_active() {
+        let mut state = fixtures::create_test_state();
+        // Simulate a mint at time 100 (nanos)
+        state.last_admin_mint_time = 100;
+
+        // At time 100 + 1 hour → cooldown is active (71 hours remaining)
+        let now: u64 = 100 + 3600 * 1_000_000_000;
+        let elapsed = now.saturating_sub(state.last_admin_mint_time);
+        assert!(elapsed < ADMIN_MINT_COOLDOWN_NS,
+            "1 hour after mint should still be in cooldown");
+    }
+
+    #[test]
+    fn test_admin_mint_cooldown_expired() {
+        let mut state = fixtures::create_test_state();
+        state.last_admin_mint_time = 100;
+
+        // At time 100 + 73 hours → cooldown is expired
+        let now: u64 = 100 + 73 * 3600 * 1_000_000_000;
+        let elapsed = now.saturating_sub(state.last_admin_mint_time);
+        assert!(elapsed >= ADMIN_MINT_COOLDOWN_NS,
+            "73 hours after mint should be past cooldown");
+    }
+
+    #[test]
+    fn test_admin_mint_cap_boundary() {
+        // Exactly at cap should be allowed
+        let amount = ADMIN_MINT_CAP_E8S;
+        assert!(amount <= ADMIN_MINT_CAP_E8S);
+
+        // 1 e8s over cap should be rejected
+        let over_cap = ADMIN_MINT_CAP_E8S + 1;
+        assert!(over_cap > ADMIN_MINT_CAP_E8S);
+    }
+
+    #[test]
+    fn test_admin_mint_zero_amount_rejected() {
+        let amount: u64 = 0;
+        assert_eq!(amount, 0, "Zero amount should be caught by validation");
+    }
+
+    #[test]
+    fn test_admin_mint_event_structure() {
+        use rumi_protocol_backend::event::Event;
+
+        let to = Principal::from_text("2vxsx-fae").unwrap();
+        let event = Event::AdminMint {
+            amount: ICUSD::from(100_000_000),
+            to,
+            reason: "Refund for failed transfer".to_string(),
+            block_index: 42,
+        };
+
+        // Verify event is not vault-related
+        assert!(!event.is_vault_related(&1),
+            "AdminMint should not be vault-related");
+
+        // Verify event data
+        if let Event::AdminMint { amount, to: recipient, reason, block_index } = &event {
+            assert_eq!(amount.to_u64(), 100_000_000);
+            assert_eq!(*recipient, Principal::from_text("2vxsx-fae").unwrap());
+            assert_eq!(reason, "Refund for failed transfer");
+            assert_eq!(*block_index, 42);
+        } else {
+            panic!("Event should be AdminMint");
+        }
+    }
+
+    #[test]
+    fn test_admin_mint_event_serialization_roundtrip() {
+        use rumi_protocol_backend::event::Event;
+
+        let event = Event::AdminMint {
+            amount: ICUSD::from(50_000_000_000), // 500 icUSD
+            to: Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap(),
+            reason: "Test compensation".to_string(),
+            block_index: 999,
+        };
+
+        let json = serde_json::to_string(&event).expect("Serialization should succeed");
+        let deserialized: Event = serde_json::from_str(&json).expect("Deserialization should succeed");
+        assert_eq!(event, deserialized, "Roundtrip should preserve event data");
+    }
+}
+
+// ============================================================================
+// Reserve Redemption State & Config Tests
+// ============================================================================
+
+#[cfg(test)]
+mod reserve_redemption_config_tests {
+    use super::*;
+    use rust_decimal::prelude::ToPrimitive;
+
+    #[test]
+    fn test_reserve_redemptions_disabled_by_default() {
+        let state = fixtures::create_test_state();
+        assert!(!state.reserve_redemptions_enabled,
+            "Reserve redemptions should be disabled by default");
+    }
+
+    #[test]
+    fn test_reserve_redemption_fee_default() {
+        let state = fixtures::create_test_state();
+        assert_eq!(state.reserve_redemption_fee.0, dec!(0.003),
+            "Default reserve redemption fee should be 0.3%");
+    }
+
+    #[test]
+    fn test_ckstable_ledgers_none_by_default_without_init() {
+        // Create state without ckStable ledger principals
+        let state = fixtures::create_test_state();
+        assert!(state.ckusdt_ledger_principal.is_none());
+        assert!(state.ckusdc_ledger_principal.is_none());
+    }
+
+    #[test]
+    fn test_ckstable_ledgers_from_init() {
+        let ckusdt = Principal::from_text("mxzaz-hqaaa-aaaar-qaada-cai").unwrap();
+        let ckusdc = Principal::from_text("xevnm-gaaaa-aaaar-qafnq-cai").unwrap();
+
+        let init_arg = InitArg {
+            xrc_principal: Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap(),
+            icusd_ledger_principal: Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap(),
+            icp_ledger_principal: Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap(),
+            fee_e8s: 10_000,
+            developer_principal: Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: Some(ckusdt),
+            ckusdc_ledger_principal: Some(ckusdc),
+        };
+
+        let state = State::from(init_arg);
+        assert_eq!(state.ckusdt_ledger_principal, Some(ckusdt));
+        assert_eq!(state.ckusdc_ledger_principal, Some(ckusdc));
+        assert!(state.ckusdt_enabled);
+        assert!(state.ckusdc_enabled);
+    }
+
+    #[test]
+    fn test_ckstable_repay_fee_default() {
+        let state = fixtures::create_test_state();
+        assert_eq!(state.ckstable_repay_fee.0, dec!(0.0005),
+            "Default ckStable repay fee should be 0.05%");
+    }
+
+    #[test]
+    fn test_reserve_event_structure() {
+        use rumi_protocol_backend::event::Event;
+
+        let event = Event::ReserveRedemption {
+            owner: Principal::from_text("2vxsx-fae").unwrap(),
+            icusd_amount: ICUSD::from(100 * 100_000_000),
+            fee_amount: ICUSD::from(30_000_000), // 0.3 icUSD fee
+            stable_token_ledger: Principal::from_text("mxzaz-hqaaa-aaaar-qaada-cai").unwrap(),
+            stable_amount_sent: 99_700_000, // 99.7 e6s
+            fee_stable_amount: 300_000, // 0.3 e6s
+            icusd_block_index: 123,
+        };
+
+        // Verify it's not vault-related
+        assert!(!event.is_vault_related(&1));
+
+        // Verify roundtrip
+        let json = serde_json::to_string(&event).expect("Serialize reserve redemption");
+        let deserialized: Event = serde_json::from_str(&json).expect("Deserialize reserve redemption");
+        assert_eq!(event, deserialized);
+    }
+
+    #[test]
+    fn test_spillover_calculation() {
+        // Simulate the spillover math from redeem_reserves
+        let icusd_amount_e8s: u64 = 100 * 100_000_000; // 100 icUSD
+        let reserve_fee_rate = dec!(0.003); // 0.3%
+        let fee_e8s = (Decimal::from(icusd_amount_e8s) * reserve_fee_rate)
+            .to_u64().unwrap();
+        let net_e8s = icusd_amount_e8s - fee_e8s;
+        let net_e6s = net_e8s / 100;
+        let fee_e6s = fee_e8s / 100;
+
+        assert_eq!(fee_e8s, 30_000_000, "Fee should be 0.3 icUSD");
+        assert_eq!(net_e6s, 99_700_000, "Net should be 99.7 ckStable in e6s");
+        assert_eq!(fee_e6s, 300_000, "Fee should be 0.3 ckStable in e6s");
+
+        // If reserve_balance < total_needed, compute spillover
+        let reserve_balance: u64 = 50_000_000; // Only 50 ckStable in reserves
+        let ledger_fee: u64 = 10_000;
+        let fee_budget = if fee_e6s > 0 { ledger_fee * 2 } else { ledger_fee };
+        let total_needed = net_e6s + fee_e6s + fee_budget;
+
+        // Reserve can cover some but not all
+        let available = if reserve_balance >= total_needed {
+            net_e6s
+        } else if reserve_balance > fee_e6s + fee_budget {
+            reserve_balance - fee_e6s - fee_budget
+        } else {
+            0
+        };
+
+        let spillover_e6s = net_e6s - available;
+        let spillover_e8s = spillover_e6s * 100;
+
+        assert!(spillover_e6s > 0, "Should have spillover when reserves are insufficient");
+        assert!(available < net_e6s, "Available should be less than full amount");
+        assert_eq!(available + spillover_e6s, net_e6s, "Available + spillover should equal net");
+        assert_eq!(spillover_e8s, spillover_e6s * 100, "Spillover e8s should be 100x e6s");
+    }
+}

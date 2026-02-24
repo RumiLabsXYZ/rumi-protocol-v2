@@ -3180,3 +3180,217 @@ fn test_open_vault_none_defaults_to_icp() {
 
     log("🎉 TEST PASSED: test_open_vault_none_defaults_to_icp");
 }
+
+//-----------------------------------------------------------------------------------
+// ADMIN MINT INTEGRATION TESTS
+//-----------------------------------------------------------------------------------
+
+/// Helper: call admin_mint_icusd as a given principal.
+fn call_admin_mint(
+    pic: &PocketIc,
+    protocol_id: Principal,
+    caller: Principal,
+    amount_e8s: u64,
+    to: Principal,
+    reason: &str,
+) -> Result<u64, ProtocolError> {
+    let encoded = encode_args((amount_e8s, to, reason.to_string()))
+        .expect("Failed to encode admin_mint_icusd args");
+
+    let result = pic
+        .update_call(protocol_id, caller, "admin_mint_icusd", encoded)
+        .expect("Failed to call admin_mint_icusd");
+
+    match result {
+        WasmResult::Reply(bytes) => {
+            decode_one::<Result<u64, ProtocolError>>(&bytes)
+                .expect("Failed to decode admin_mint_icusd response")
+        }
+        WasmResult::Reject(error) => panic!("Canister rejected admin_mint_icusd: {}", error),
+    }
+}
+
+/// Helper: fetch all events from the protocol.
+fn fetch_events(pic: &PocketIc, protocol_id: Principal, start: u64, length: u64) -> Vec<Event> {
+    let arg = GetEventsArg { start, length };
+    let encoded = encode_args((arg,)).expect("Failed to encode get_events args");
+
+    let result = pic
+        .query_call(protocol_id, Principal::anonymous(), "get_events", encoded)
+        .expect("Failed to call get_events");
+
+    match result {
+        WasmResult::Reply(bytes) => {
+            decode_one::<Vec<Event>>(&bytes).expect("Failed to decode get_events response")
+        }
+        WasmResult::Reject(error) => panic!("Canister rejected get_events: {}", error),
+    }
+}
+
+/// Test: developer can successfully mint icUSD and the balance + event are correct.
+#[test]
+fn test_admin_mint_success() {
+    log("🧪 TEST STARTING: test_admin_mint_success");
+    let (pic, protocol_id, _icp_ledger_id, icusd_ledger_id) = setup_protocol();
+
+    let developer = Principal::self_authenticating(&[5, 6, 7, 8]);
+    let recipient = Principal::self_authenticating(&[9, 10, 11, 12]);
+
+    // Check recipient icUSD balance before mint
+    let balance_before = get_icusd_balance(&pic, icusd_ledger_id, recipient);
+    log(&format!("💰 Recipient balance before: {}", balance_before));
+
+    // Mint 100 icUSD (10_000_000_000 e8s) to recipient
+    let mint_amount = 10_000_000_000u64; // 100 icUSD
+    let result = call_admin_mint(
+        &pic, protocol_id, developer, mint_amount, recipient, "Refund for failed operation #42",
+    );
+    assert!(result.is_ok(), "Admin mint should succeed: {:?}", result.err());
+    let block_index = result.unwrap();
+    log(&format!("✅ Admin mint succeeded, block_index={}", block_index));
+
+    // Verify balance increased
+    let balance_after = get_icusd_balance(&pic, icusd_ledger_id, recipient);
+    log(&format!("💰 Recipient balance after: {}", balance_after));
+    assert_eq!(
+        balance_after - balance_before, mint_amount,
+        "Recipient should have received exactly {} e8s", mint_amount
+    );
+
+    // Verify event was recorded
+    let events = fetch_events(&pic, protocol_id, 0, 100);
+    let admin_mint_events: Vec<&Event> = events.iter().filter(|e| {
+        matches!(e, Event::AdminMint { .. })
+    }).collect();
+    assert_eq!(admin_mint_events.len(), 1, "Should have exactly one AdminMint event");
+
+    if let Event::AdminMint { amount, to, reason, block_index: evt_block } = admin_mint_events[0] {
+        assert!(*amount == mint_amount, "Minted amount should match");
+        assert_eq!(*to, recipient);
+        assert_eq!(reason, "Refund for failed operation #42");
+        assert_eq!(*evt_block, block_index);
+        log("✅ AdminMint event fields verified");
+    } else {
+        panic!("Expected AdminMint event variant");
+    }
+
+    log("🎉 TEST PASSED: test_admin_mint_success");
+}
+
+/// Test: non-developer caller is rejected.
+#[test]
+fn test_admin_mint_non_developer_rejected() {
+    log("🧪 TEST STARTING: test_admin_mint_non_developer_rejected");
+    let (pic, protocol_id, _icp_ledger_id, _icusd_ledger_id) = setup_protocol();
+
+    let non_developer = Principal::self_authenticating(&[99, 99, 99]);
+    let recipient = Principal::self_authenticating(&[9, 10, 11, 12]);
+
+    let result = call_admin_mint(&pic, protocol_id, non_developer, 1_000_000_000, recipient, "test");
+    assert!(result.is_err(), "Non-developer should be rejected");
+    match result.unwrap_err() {
+        ProtocolError::GenericError(msg) => {
+            assert!(msg.contains("Only developer"), "Error should mention developer: {}", msg);
+        }
+        other => panic!("Expected GenericError, got {:?}", other),
+    }
+
+    log("🎉 TEST PASSED: test_admin_mint_non_developer_rejected");
+}
+
+/// Test: amount exceeding the 1,500 icUSD cap is rejected.
+#[test]
+fn test_admin_mint_cap_exceeded() {
+    log("🧪 TEST STARTING: test_admin_mint_cap_exceeded");
+    let (pic, protocol_id, _icp_ledger_id, _icusd_ledger_id) = setup_protocol();
+
+    let developer = Principal::self_authenticating(&[5, 6, 7, 8]);
+    let recipient = Principal::self_authenticating(&[9, 10, 11, 12]);
+
+    // Try to mint 1,501 icUSD (exceeds cap of 1,500)
+    let over_cap = 150_100_000_000u64; // 1,501 icUSD
+    let result = call_admin_mint(&pic, protocol_id, developer, over_cap, recipient, "too much");
+    assert!(result.is_err(), "Amount over cap should be rejected");
+    match result.unwrap_err() {
+        ProtocolError::GenericError(msg) => {
+            assert!(msg.contains("cap"), "Error should mention cap: {}", msg);
+        }
+        other => panic!("Expected GenericError about cap, got {:?}", other),
+    }
+
+    // Verify exactly at cap works
+    let at_cap = 150_000_000_000u64; // exactly 1,500 icUSD
+    let result = call_admin_mint(&pic, protocol_id, developer, at_cap, recipient, "at cap");
+    assert!(result.is_ok(), "Exactly at cap should succeed: {:?}", result.err());
+
+    log("🎉 TEST PASSED: test_admin_mint_cap_exceeded");
+}
+
+/// Test: zero amount is rejected.
+#[test]
+fn test_admin_mint_zero_amount_rejected() {
+    log("🧪 TEST STARTING: test_admin_mint_zero_amount_rejected");
+    let (pic, protocol_id, _icp_ledger_id, _icusd_ledger_id) = setup_protocol();
+
+    let developer = Principal::self_authenticating(&[5, 6, 7, 8]);
+    let recipient = Principal::self_authenticating(&[9, 10, 11, 12]);
+
+    let result = call_admin_mint(&pic, protocol_id, developer, 0, recipient, "zero");
+    assert!(result.is_err(), "Zero amount should be rejected");
+    match result.unwrap_err() {
+        ProtocolError::GenericError(msg) => {
+            assert!(msg.contains("Amount must be > 0"), "Error should mention zero: {}", msg);
+        }
+        other => panic!("Expected GenericError about zero, got {:?}", other),
+    }
+
+    log("🎉 TEST PASSED: test_admin_mint_zero_amount_rejected");
+}
+
+/// Test: 72-hour cooldown is enforced between admin mints.
+#[test]
+fn test_admin_mint_cooldown_enforced() {
+    log("🧪 TEST STARTING: test_admin_mint_cooldown_enforced");
+    let (pic, protocol_id, _icp_ledger_id, _icusd_ledger_id) = setup_protocol();
+
+    let developer = Principal::self_authenticating(&[5, 6, 7, 8]);
+    let recipient = Principal::self_authenticating(&[9, 10, 11, 12]);
+
+    // First mint should succeed
+    let result1 = call_admin_mint(
+        &pic, protocol_id, developer, 1_000_000_000, recipient, "first mint",
+    );
+    assert!(result1.is_ok(), "First admin mint should succeed: {:?}", result1.err());
+    log("✅ First mint succeeded");
+
+    // Immediate second mint should fail (cooldown)
+    let result2 = call_admin_mint(
+        &pic, protocol_id, developer, 1_000_000_000, recipient, "second mint too soon",
+    );
+    assert!(result2.is_err(), "Second mint should fail due to cooldown");
+    match result2.unwrap_err() {
+        ProtocolError::GenericError(msg) => {
+            assert!(msg.contains("cooldown"), "Error should mention cooldown: {}", msg);
+        }
+        other => panic!("Expected GenericError about cooldown, got {:?}", other),
+    }
+    log("✅ Second mint correctly rejected by cooldown");
+
+    // Advance time by 73 hours (past the 72-hour cooldown)
+    pic.advance_time(std::time::Duration::from_secs(73 * 3600));
+    log("⏰ Advanced time by 73 hours");
+
+    // Third mint should succeed after cooldown expires
+    let result3 = call_admin_mint(
+        &pic, protocol_id, developer, 1_000_000_000, recipient, "after cooldown",
+    );
+    assert!(result3.is_ok(), "Mint after cooldown should succeed: {:?}", result3.err());
+    log("✅ Third mint succeeded after cooldown");
+
+    // Verify two AdminMint events total
+    let events = fetch_events(&pic, protocol_id, 0, 100);
+    let admin_mint_count = events.iter().filter(|e| matches!(e, Event::AdminMint { .. })).count();
+    assert_eq!(admin_mint_count, 2, "Should have exactly 2 AdminMint events (first + after cooldown)");
+
+    log("🎉 TEST PASSED: test_admin_mint_cooldown_enforced");
+}

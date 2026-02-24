@@ -1539,7 +1539,7 @@ pub(crate) fn distribute_across_vaults(
 }
 
 
-fn compute_redemption_fee(
+pub fn compute_redemption_fee(
     elapsed_hours: u64,
     redeemed_amount: ICUSD,
     total_borrowed_icusd_amount: ICUSD,
