@@ -1,9 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { publicActor } from '$lib/services/protocol/apiClient';
+  import { collateralStore } from '$lib/stores/collateralStore';
+  import { get } from 'svelte/store';
 
   let borrowingFeePct = '0.5';
   let ckstableFeePct = '0.05';
+  let liqPct = '133';
+  let minBorrow = '0.01';
 
   onMount(async () => {
     try {
@@ -13,6 +17,15 @@
       ]);
       borrowingFeePct = (Number(bFee) * 100).toFixed(1);
       ckstableFeePct = (Number(ckFee) * 100).toFixed(2);
+
+      await collateralStore.fetchSupportedCollateral();
+      const state = get(collateralStore);
+      const icpConfig = state.collaterals.find(c => c.symbol === 'ICP');
+      if (icpConfig) {
+        liqPct = (icpConfig.liquidationCr * 100).toFixed(0);
+        const minDebt = icpConfig.minVaultDebt / 1e8;
+        if (minDebt > 0) minBorrow = minDebt.toString();
+      }
     } catch (e) {
       console.error('Failed to fetch fees:', e);
     }
@@ -32,7 +45,7 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Minimum Requirements</h2>
-    <p>The minimum collateral deposit is 0.001 ICP. The minimum borrow amount is 1 icUSD. Your vault must maintain a collateral ratio of at least 133% at all times. If ICP's price drops and your ratio falls below 133%, your vault becomes eligible for liquidation.</p>
+    <p>The minimum collateral deposit is 0.001 ICP. The minimum borrow amount is {minBorrow} icUSD. Your vault must maintain a collateral ratio of at least {liqPct}% at all times. If ICP's price drops and your ratio falls below {liqPct}%, your vault becomes eligible for liquidation.</p>
   </section>
 
   <section class="doc-section">

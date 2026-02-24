@@ -101,6 +101,7 @@ function createCollateralStore() {
           const borrowingFee = decodeRustDecimal(config.borrowing_fee);
           const liquidationBonus = decodeRustDecimal(config.liquidation_bonus);
           const recoveryTargetCr = decodeRustDecimal(config.recovery_target_cr);
+          const interestRateApr = config.interest_rate_apr ? decodeRustDecimal(config.interest_rate_apr) : 0;
 
           const price = config.last_price.length > 0 ? Number(config.last_price[0]) : 0;
           const priceTimestamp = config.last_price_timestamp.length > 0 ? Number(config.last_price_timestamp[0]) : 0;
@@ -117,6 +118,7 @@ function createCollateralStore() {
             borrowingFee,
             liquidationBonus,
             recoveryTargetCr,
+            interestRateApr,
             debtCeiling: Number(config.debt_ceiling),
             minVaultDebt: Number(config.min_vault_debt),
             ledgerFee: Number(config.ledger_fee),

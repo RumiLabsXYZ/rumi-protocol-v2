@@ -10,6 +10,7 @@
   import { MINIMUM_CR, LIQUIDATION_CR, E8S, getMinimumCR, getLiquidationCR } from '$lib/protocol';
   import { collateralStore } from '../../stores/collateralStore';
   import { TokenService } from '../../services/tokenService';
+  import { toastStore } from '../../stores/toast';
 
   export let vault: Vault;
   export let icpPrice: number = 0;
@@ -34,7 +35,7 @@
     dispatch('toggle', { vaultId: vault.vaultId });
     clearMessages();
     if (!expanded) {
-      activeAction = null;
+      activeAction = 'repay';
       addCollateralAmount = ''; borrowAmount = ''; repayAmount = ''; withdrawAmount = '';
     }
   }
@@ -183,8 +184,6 @@
   let borrowAmount = '';
   let repayAmount = '';
   let isProcessing = false;
-  let actionError = '';
-  let actionSuccess = '';
   let showAdvanced = false;
   let isWithdrawingAndClosing = false;
   let showTokenDropdown = false;
@@ -271,7 +270,7 @@
   $: canWithdraw = vault.borrowedIcusd === 0 && vaultCollateralAmount > 0;
   $: canClose = vault.borrowedIcusd === 0;
 
-  function clearMessages() { actionError = ''; actionSuccess = ''; }
+  function clearMessages() { /* toasts auto-dismiss */ }
 
   function setMaxAddCollateral() {
     if (maxAddCollateral > 0) addCollateralAmount = maxAddCollateral.toFixed(4);
@@ -325,8 +324,8 @@
 
   async function handleAddCollateral() {
     const amount = parseFloat(addCollateralAmount);
-    if (!amount || amount <= 0) { actionError = `Enter a valid ${collateralSymbol} amount`; return; }
-    if (addOverMax) { actionError = `Exceeds wallet balance (${formatNumber(maxAddCollateral, 4)} ${collateralSymbol})`; return; }
+    if (!amount || amount <= 0) { toastStore.error(`Enter a valid ${collateralSymbol} amount`, 8000); return; }
+    if (addOverMax) { toastStore.error(`Exceeds wallet balance (${formatNumber(maxAddCollateral, 4)} ${collateralSymbol})`, 8000); return; }
     clearMessages(); isProcessing = true;
     try {
       const ledgerCanisterId = vaultCollateralInfo?.ledgerCanisterId ?? CONFIG.currentIcpLedgerId;
@@ -336,52 +335,52 @@
       if (currentAllowance < amountRaw) {
         const bufferAmount = amountRaw * BigInt(120) / BigInt(100);
         const approvalResult = await protocolService.approveCollateralTransfer(bufferAmount, spenderCanisterId, ledgerCanisterId);
-        if (!approvalResult.success) { actionError = approvalResult.error || 'Approval failed'; return; }
+        if (!approvalResult.success) { toastStore.error(approvalResult.error || 'Approval failed', 8000); return; }
         await new Promise(r => setTimeout(r, 2000));
       }
       const result = await protocolService.addMarginToVault(vault.vaultId, amount, vaultCollateralType);
       if (result.success) {
-        actionSuccess = `Added ${amount} ${collateralSymbol}`; addCollateralAmount = '';
+        toastStore.success(`Added ${amount} ${collateralSymbol}`, 8000); addCollateralAmount = '';
         await vaultStore.refreshVault(vault.vaultId); dispatch('updated');
-      } else { actionError = result.error || 'Failed'; }
-    } catch (err) { actionError = err instanceof Error ? err.message : 'Unknown error';
+      } else { toastStore.error(result.error || 'Failed', 8000); }
+    } catch (err) { toastStore.error(err instanceof Error ? err.message : 'Unknown error', 8000);
     } finally { isProcessing = false; }
   }
 
   async function handleWithdrawPartial() {
     const amount = parseFloat(withdrawAmount);
-    if (!amount || amount <= 0) { actionError = `Enter a valid ${collateralSymbol} amount`; return; }
-    if (withdrawOverMax) { actionError = `Max withdrawable: ${formatNumber(maxWithdrawable, 4)} ${collateralSymbol}`; return; }
+    if (!amount || amount <= 0) { toastStore.error(`Enter a valid ${collateralSymbol} amount`, 8000); return; }
+    if (withdrawOverMax) { toastStore.error(`Max withdrawable: ${formatNumber(maxWithdrawable, 4)} ${collateralSymbol}`, 8000); return; }
     clearMessages(); isProcessing = true;
     try {
       const result = await protocolService.withdrawPartialCollateral(vault.vaultId, amount);
       if (result.success) {
-        actionSuccess = `Withdrew ${amount} ${collateralSymbol}`; withdrawAmount = '';
+        toastStore.success(`Withdrew ${amount} ${collateralSymbol}`, 8000); withdrawAmount = '';
         await vaultStore.refreshVault(vault.vaultId); dispatch('updated');
-      } else { actionError = result.error || 'Failed'; }
-    } catch (err) { actionError = err instanceof Error ? err.message : 'Unknown error';
+      } else { toastStore.error(result.error || 'Failed', 8000); }
+    } catch (err) { toastStore.error(err instanceof Error ? err.message : 'Unknown error', 8000);
     } finally { isProcessing = false; }
   }
 
   async function handleBorrow() {
     const amount = parseFloat(borrowAmount);
-    if (!amount || amount <= 0) { actionError = 'Enter a valid icUSD amount'; return; }
-    if (borrowOverMax || borrowCrInvalid) { actionError = `Max: ${formatNumber(maxBorrowable, 2)} icUSD`; return; }
+    if (!amount || amount <= 0) { toastStore.error('Enter a valid icUSD amount', 8000); return; }
+    if (borrowOverMax || borrowCrInvalid) { toastStore.error(`Max: ${formatNumber(maxBorrowable, 2)} icUSD`, 8000); return; }
     clearMessages(); isProcessing = true;
     try {
       const result = await protocolService.borrowFromVault(vault.vaultId, amount);
       if (result.success) {
-        actionSuccess = `Borrowed ${amount} icUSD`; borrowAmount = '';
+        toastStore.success(`Borrowed ${amount} icUSD`, 8000); borrowAmount = '';
         await vaultStore.refreshVault(vault.vaultId); dispatch('updated');
-      } else { actionError = result.error || 'Failed'; }
-    } catch (err) { actionError = err instanceof Error ? err.message : 'Unknown error';
+      } else { toastStore.error(result.error || 'Failed', 8000); }
+    } catch (err) { toastStore.error(err instanceof Error ? err.message : 'Unknown error', 8000);
     } finally { isProcessing = false; }
   }
 
   async function handleRepay() {
     const amount = parseFloat(repayAmount);
-    if (!amount || amount <= 0) { actionError = 'Enter a valid amount'; return; }
-    if (repayOverMax) { actionError = `Max: ${formatNumber(maxRepayable, 2)} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`; return; }
+    if (!amount || amount <= 0) { toastStore.error('Enter a valid amount', 8000); return; }
+    if (repayOverMax) { toastStore.error(`Max: ${formatNumber(maxRepayable, 2)} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`, 8000); return; }
     clearMessages(); isProcessing = true;
     try {
       let result;
@@ -391,24 +390,24 @@
         result = await protocolManager.repayToVaultWithStable(vault.vaultId, amount, repayTokenType);
       }
       if (result.success) {
-        actionSuccess = `Repaid ${amount} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`; repayAmount = '';
+        toastStore.success(`Repaid ${amount} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`, 8000); repayAmount = '';
         await new Promise(r => setTimeout(r, 1000));
         await vaultStore.refreshVault(vault.vaultId); dispatch('updated');
-      } else { actionError = result.error || 'Failed'; }
-    } catch (err) { actionError = err instanceof Error ? err.message : 'Unknown error';
+      } else { toastStore.error(result.error || 'Failed', 8000); }
+    } catch (err) { toastStore.error(err instanceof Error ? err.message : 'Unknown error', 8000);
     } finally { isProcessing = false; }
   }
 
   async function handleWithdrawAndClose() {
-    if (!canWithdraw) { actionError = 'Repay all debt first'; return; }
+    if (!canWithdraw) { toastStore.error('Repay all debt first', 8000); return; }
     clearMessages(); isWithdrawingAndClosing = true;
     try {
       const result = await protocolService.withdrawCollateralAndCloseVault(vault.vaultId);
       if (result.success) {
-        actionSuccess = 'Vault closed. Collateral returned.';
+        toastStore.success('Vault closed. Collateral returned.', 8000);
         await vaultStore.refreshVaults(); dispatch('updated');
-      } else { actionError = result.error || 'Failed'; }
-    } catch (err) { actionError = err instanceof Error ? err.message : 'Unknown error';
+      } else { toastStore.error(result.error || 'Failed', 8000); }
+    } catch (err) { toastStore.error(err instanceof Error ? err.message : 'Unknown error', 8000);
     } finally { isWithdrawingAndClosing = false; }
   }
 </script>
@@ -466,17 +465,6 @@
   <!-- ── Expanded: pill groups + two-column layout ── -->
   {#if expanded}
     <div class="vault-actions">
-      {#if actionError}
-        <div class="msg-bar msg-error">{actionError}
-          <button class="msg-dismiss" on:click={() => actionError = ''}>×</button>
-        </div>
-      {/if}
-      {#if actionSuccess}
-        <div class="msg-bar msg-success">{actionSuccess}
-          <button class="msg-dismiss" on:click={() => actionSuccess = ''}>×</button>
-        </div>
-      {/if}
-
       <!-- Action layout: pills top-right, stats left, input right -->
       <div class="action-layout">
         <!-- Pill groups: right column -->
@@ -662,10 +650,10 @@
                   </div>
                 {/if}
               </div>
-              {#if !hasChangedToken}
-                <span class="token-hint">Tap token to pay with ckUSDT or ckUSDC</span>
-              {/if}
               <div class="input-submit-row">
+                {#if !hasChangedToken}
+                  <span class="token-hint">Click token name to pay with ckUSDT or ckUSDC</span>
+                {/if}
                 <button class="btn-submit btn-submit-debt" on:click={handleRepay}
                   disabled={isProcessing || !repayAmount || repayOverMax}>
                   {isProcessing ? '...' : 'Repay'}
@@ -928,7 +916,7 @@
   /* Hint text */
   .token-hint {
     font-size: 0.625rem; color: var(--rumi-text-muted);
-    opacity: 0.7; margin-top: -0.125rem;
+    opacity: 0.7; margin: 0; white-space: nowrap;
   }
 
   /* Max button */
@@ -941,7 +929,8 @@
   .max-text:hover { opacity: 1; text-decoration: underline; }
 
   /* Submit button */
-  .input-submit-row { display: flex; justify-content: flex-end; margin-top: 0.125rem; }
+  .input-submit-row { display: flex; justify-content: flex-end; align-items: center; gap: 0.5rem; margin-top: 0.125rem; }
+  .input-submit-row .token-hint { margin-right: auto; }
   .btn-submit {
     padding: 0.375rem 1rem; font-size: 0.75rem; font-weight: 600;
     border-radius: 0.375rem; border: none; cursor: pointer;
@@ -958,17 +947,6 @@
     border: 1px solid rgba(209,118,232,0.3);
   }
   .btn-submit-debt:hover:not(:disabled) { background: rgba(209,118,232,0.25); }
-
-  /* Messages */
-  .msg-bar {
-    padding: 0.375rem 0.625rem; border-radius: 0.375rem;
-    font-size: 0.75rem; display: flex; justify-content: space-between;
-    align-items: center; margin-bottom: 0.5rem;
-  }
-  .msg-error { background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.2); color: #fca5a5; }
-  .msg-success { background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.2); color: #6ee7b7; }
-  .msg-dismiss { background: none; border: none; color: inherit; cursor: pointer; font-size: 0.875rem; padding: 0 0.25rem; opacity: 0.6; }
-  .msg-dismiss:hover { opacity: 1; }
 
   /* Advanced */
   .advanced-section { margin-top: 0.625rem; padding-top: 0.375rem; border-top: 1px solid var(--rumi-border); }

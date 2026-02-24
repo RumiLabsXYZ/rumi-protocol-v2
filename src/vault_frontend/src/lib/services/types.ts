@@ -92,6 +92,7 @@ export interface ProtocolStatusDTO {
   totalCollateralRatio: number;
   liquidationBonus: number;
   recoveryTargetCr: number;
+  recoveryModeThreshold: number;
 }
 
 export type ProtocolStatus = ProtocolStatusDTO;
@@ -127,6 +128,7 @@ export interface CollateralInfo {
   borrowingFee: number;         // One-time fee at mint
   liquidationBonus: number;
   recoveryTargetCr: number;
+  interestRateApr: number;      // Annual interest rate (0.0 = 0%)
   debtCeiling: number;          // In ICUSD e8s
   minVaultDebt: number;         // Dust threshold in ICUSD e8s
   ledgerFee: number;            // Transfer fee in native units

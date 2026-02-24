@@ -10,6 +10,7 @@
   import { protocolService } from "../lib/services/protocol";
   import { isDevelopment } from "../lib/config";
   import { developerAccess } from "../lib/stores/developer";
+  import ToastContainer from "../lib/components/common/ToastContainer.svelte";
   let permissionInitialized = false;
   let showDebug = false;
   $: currentPath = $page.url.pathname;
@@ -54,6 +55,7 @@
     <WalletConnector />
   </div>
 </header>
+<ToastContainer />
 <main class="main-content"><slot /></main>
 <footer class="app-footer"><span>&copy; 2025 Rumi Labs LLC</span>{#if isConnected}<span class="footer-status"><span class="status-dot"></span>Connected to IC</span>{/if}</footer>
 <nav class="mobile-nav">

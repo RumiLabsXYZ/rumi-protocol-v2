@@ -1,13 +1,27 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { protocolService } from '$lib/services/protocol';
+  import { collateralStore } from '$lib/stores/collateralStore';
+  import { get } from 'svelte/store';
 
   let targetPct = '155';
+  let liqPct = '133';
+  let borrowPct = '150';
+  let recoveryPct = '150';
 
   onMount(async () => {
     try {
       const status = await protocolService.getProtocolStatus();
       if (status.recoveryTargetCr > 0) targetPct = (status.recoveryTargetCr * 100).toFixed(0);
+      if (status.recoveryModeThreshold > 0) recoveryPct = (status.recoveryModeThreshold * 100).toFixed(0);
+
+      await collateralStore.fetchSupportedCollateral();
+      const state = get(collateralStore);
+      const icpConfig = state.collaterals.find(c => c.symbol === 'ICP');
+      if (icpConfig) {
+        liqPct = (icpConfig.liquidationCr * 100).toFixed(0);
+        borrowPct = (icpConfig.minimumCr * 100).toFixed(0);
+      }
     } catch (e) {
       console.error('Failed to fetch protocol status:', e);
     }
@@ -45,8 +59,8 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Recovery Mode Cascades</h2>
-    <p>If the total system collateral ratio drops below 150%, the protocol enters Recovery mode and raises the liquidation threshold to 150%. This can cause vaults that were previously safe (e.g., at 145%) to suddenly become liquidatable — even though those individual vaults didn't change.</p>
-    <p>In Recovery mode, vaults between 133% and 150% CR receive <strong>targeted partial liquidation</strong> — only enough debt is repaid to restore their CR to {targetPct}%. They are not fully liquidated. Vaults below 133% are still fully liquidated. See <a href="/docs/liquidation" class="doc-link">Liquidation Mechanics</a> for details.</p>
+    <p>If the total system collateral ratio drops below the Recovery Mode threshold (currently {recoveryPct}%), the protocol enters Recovery mode and raises the liquidation threshold to the borrowing threshold (currently {borrowPct}% for ICP). This can cause vaults that were previously safe to suddenly become liquidatable — even though those individual vaults didn't change.</p>
+    <p>In Recovery mode, vaults between {liqPct}% and {borrowPct}% CR receive <strong>targeted partial liquidation</strong> — only enough debt is repaid to restore their CR to {targetPct}%. They are not fully liquidated. Vaults below {liqPct}% are still fully liquidated. See <a href="/docs/liquidation" class="doc-link">Liquidation Mechanics</a> for details.</p>
   </section>
 
   <section class="doc-section">

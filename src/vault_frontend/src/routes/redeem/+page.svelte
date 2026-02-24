@@ -91,7 +91,7 @@
 </script>
 
 <svelte:head>
-  <title>RUMI Protocol - Redeem ICP</title>
+  <title>Rumi Protocol - Redeem ICP</title>
 </svelte:head>
 
 <div class="container mx-auto px-4 max-w-6xl">

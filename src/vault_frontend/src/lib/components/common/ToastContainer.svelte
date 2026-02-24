@@ -17,10 +17,13 @@
 <style>
   .toast-container {
     position: fixed;
-    bottom: 0;
-    right: 0;
+    top: 5rem;
+    right: 1.5rem;
     z-index: 10000;
     pointer-events: none;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
   }
   
   .toast-container :global(.toast) {

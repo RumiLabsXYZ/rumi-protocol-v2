@@ -121,7 +121,7 @@
 </script>
 
 <svelte:head>
-  <title>Treasury Management - RUMI Protocol</title>
+  <title>Treasury Management - Rumi Protocol</title>
 </svelte:head>
 
 <div class="container mx-auto px-4 max-w-6xl">

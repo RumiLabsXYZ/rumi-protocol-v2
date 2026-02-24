@@ -1,9 +1,14 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { protocolService } from '$lib/services/protocol';
+  import { collateralStore } from '$lib/stores/collateralStore';
+  import { get } from 'svelte/store';
 
   let liquidationBonus = 1.15;
   let recoveryTargetCr = 1.55;
+  let liqPct = '133';
+  let borrowPct = '150';
+  let recoveryPct = '150';
   let loaded = false;
 
   $: bonusPct = ((liquidationBonus - 1) * 100).toFixed(0);
@@ -15,6 +20,15 @@
       const status = await protocolService.getProtocolStatus();
       if (status.liquidationBonus > 0) liquidationBonus = status.liquidationBonus;
       if (status.recoveryTargetCr > 0) recoveryTargetCr = status.recoveryTargetCr;
+      if (status.recoveryModeThreshold > 0) recoveryPct = (status.recoveryModeThreshold * 100).toFixed(0);
+
+      await collateralStore.fetchSupportedCollateral();
+      const state = get(collateralStore);
+      const icpConfig = state.collaterals.find(c => c.symbol === 'ICP');
+      if (icpConfig) {
+        liqPct = (icpConfig.liquidationCr * 100).toFixed(0);
+        borrowPct = (icpConfig.minimumCr * 100).toFixed(0);
+      }
     } catch (e) {
       console.error('Failed to fetch protocol status:', e);
     }
@@ -29,7 +43,7 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">When Liquidation Happens</h2>
-    <p>A vault becomes eligible for liquidation when its collateral ratio drops below the minimum threshold. In normal operation (General Availability mode), this threshold is 133%. In Recovery mode, it rises to 150%.</p>
+    <p>A vault becomes eligible for liquidation when its collateral ratio drops below the minimum threshold. In normal operation (General Availability mode), this threshold is {liqPct}%. In Recovery mode, it rises to {borrowPct}%.</p>
     <p>The protocol checks vault health every time the ICP price updates — approximately every 5 minutes via background polling. Price-sensitive operations (liquidations, borrows, etc.) also trigger an on-demand price refresh if the cached price is older than 30 seconds. Liquidation is not instant on price movement; it depends on the next price update.</p>
   </section>
 
@@ -52,24 +66,24 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Liquidation Example</h2>
-    <p>Suppose you have a vault with 10 ICP (worth $100 at $10/ICP) and 70 icUSD debt. Your collateral ratio is 143% — safe. ICP drops to $7. Now your 10 ICP is worth $70, and your ratio is 100% — well below the 133% threshold.</p>
+    <p>Suppose you have a vault with 10 ICP (worth $100 at $10/ICP) and 70 icUSD debt. Your collateral ratio is 143% — safe. ICP drops to $7. Now your 10 ICP is worth $70, and your ratio is 100% — well below the {liqPct}% threshold.</p>
     <p>A liquidator repays your 70 icUSD debt and receives ICP worth ${(70 * liquidationBonus).toFixed(0)} (70 &times; {liquidationBonus.toFixed(2)}). That's {(70 * liquidationBonus / 7).toFixed(1)} ICP at $7/ICP — but you only have 10 ICP, so the liquidator gets all 10 ICP. Your vault is closed. You keep the 70 icUSD you originally borrowed, but your ICP is gone.</p>
   </section>
 
   <section class="doc-section">
     <h2 class="doc-heading">Recovery Mode — Targeted Liquidation</h2>
-    <p>When the protocol enters Recovery mode (total system CR below 150%), the liquidation threshold rises to 150%. Vaults between 133% and 150% CR become liquidatable — but they are <strong>not</strong> fully liquidated.</p>
+    <p>When the protocol enters Recovery mode (total system CR below {recoveryPct}%), the liquidation threshold rises to {borrowPct}%. Vaults between {liqPct}% and {borrowPct}% CR become liquidatable — but they are <strong>not</strong> fully liquidated.</p>
     <p>Instead, the protocol calculates the minimum amount of debt that needs to be repaid to restore the vault's collateral ratio to {targetPct}%. The liquidator pays only that amount and receives proportional ICP collateral plus the {bonusPct}% bonus. The vault remains open with reduced debt and collateral at approximately {targetPct}% CR.</p>
     <p>The formula is:</p>
     <p class="doc-formula">repay = ({targetPct}% &times; debt &minus; collateral value) &divide; ({targetPct}% &minus; {bonusMult}%)</p>
-    <p>Vaults below 133% CR are still fully liquidated in both normal and Recovery mode.</p>
+    <p>Vaults below {liqPct}% CR are still fully liquidated in both normal and Recovery mode.</p>
   </section>
 
   <section class="doc-section">
     <h2 class="doc-heading">Protocol Modes</h2>
     <p>The protocol operates in one of three modes based on the system-wide total collateral ratio:</p>
-    <p><strong>General Availability</strong> — total CR is above 150%. Normal operations. Liquidation threshold is 133%. Borrowing fee applies.</p>
-    <p><strong>Recovery</strong> — total CR drops below 150%. Liquidation threshold rises to 150%. Borrowing fee drops to 0% to encourage repayment. Vaults between 133–150% get targeted partial liquidation.</p>
+    <p><strong>General Availability</strong> — total CR is above {recoveryPct}%. Normal operations. Liquidation threshold is {liqPct}%. Borrowing fee applies.</p>
+    <p><strong>Recovery</strong> — total CR drops below {recoveryPct}%. Liquidation threshold rises to {borrowPct}%. Borrowing fee drops to 0% to encourage repayment. Vaults between {liqPct}–{borrowPct}% get targeted partial liquidation.</p>
     <p><strong>Read-Only</strong> — total CR drops below 100%, or the oracle reports a price below $0.01. All state-changing operations are paused. No new borrows, no liquidations. The protocol waits for conditions to improve.</p>
   </section>
 

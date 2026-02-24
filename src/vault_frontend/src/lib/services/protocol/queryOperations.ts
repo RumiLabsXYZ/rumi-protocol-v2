@@ -33,6 +33,7 @@ export class QueryOperations {
         totalCollateralRatio: Number(canisterStatus.total_collateral_ratio),
         liquidationBonus: Number(canisterStatus.liquidation_bonus),
         recoveryTargetCr: Number(canisterStatus.recovery_target_cr),
+        recoveryModeThreshold: Number(canisterStatus.recovery_mode_threshold),
       };
     });
   }

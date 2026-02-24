@@ -141,7 +141,7 @@
   }
 </script>
 
-<svelte:head><title>RUMI Protocol - Borrow icUSD</title></svelte:head>
+<svelte:head><title>Rumi Protocol - Borrow icUSD</title></svelte:head>
 
 <svelte:window on:click={handleWindowClick} />
 

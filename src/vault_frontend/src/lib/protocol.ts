@@ -69,12 +69,12 @@ export function getDecimalsFactor(collateralPrincipal?: string): number {
 
 /**
  * Get the borrowing fee rate for a given collateral type.
- * Falls back to 0.005 (0.5%) if unknown.
+ * Falls back to 0 if unknown (current ICP default is 0%).
  */
 export function getBorrowingFee(collateralPrincipal?: string): number {
-  if (!collateralPrincipal) return 0.005;
+  if (!collateralPrincipal) return 0;
   const info = collateralStore.getCollateralInfo(collateralPrincipal);
-  return info?.borrowingFee ?? 0.005;
+  return info?.borrowingFee ?? 0;
 }
 
 /**

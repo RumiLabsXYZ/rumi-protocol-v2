@@ -11,7 +11,8 @@
   import { protocolManager } from '$lib/services/ProtocolManager';
   import { ApiClient } from '$lib/services/protocol/apiClient';
   import { CONFIG } from '$lib/config';
-  
+  import { getMinimumCR, getLiquidationCR } from '$lib/protocol';
+
   // Change this to accept vaultId instead of the full vault object
   export let vaultId: number;
   export let icpPrice: number;
@@ -50,8 +51,9 @@
   $: collateralRatio = currentVault && currentVault.borrowedIcusd > 0 
     ? collateralValueUsd / currentVault.borrowedIcusd 
     : Infinity;
-  $: minCollateralRatio = 1.33;
-  $: warningCollateralRatio = 1.5;
+  $: vaultCollateralPrincipal = currentVault?.collateralType;
+  $: minCollateralRatio = getLiquidationCR(vaultCollateralPrincipal);
+  $: warningCollateralRatio = getMinimumCR(vaultCollateralPrincipal);
   $: maxBorrowable = currentVault && currentVault.borrowedIcusd > 0 
     ? (collateralValueUsd / minCollateralRatio) - currentVault.borrowedIcusd
     : collateralValueUsd / minCollateralRatio;

@@ -2,6 +2,7 @@
   import { walletStore } from '../../stores/wallet';
   import { ProtocolService } from '../../services/protocol';
   import { protocolManager } from '../../services/ProtocolManager';
+  import { getMinimumCR, getLiquidationCR } from '$lib/protocol';
 
 
   interface VaultResponse {
@@ -9,7 +10,7 @@
       vault_id: bigint;
     };
   }
-  
+
   let collateralAmount = '';
   let mintAmount = '';
   let sliderValue = 0;
@@ -21,15 +22,19 @@
   $: icpPrice = ProtocolService?.getICPPrice() || 0;
   $: balance = wallet.balance;
 
+  // Per-collateral thresholds (ICP default for vault creation)
+  $: borrowThreshold = getMinimumCR();  // ICP borrow threshold (e.g. 1.5)
+  $: liquidationThreshold = getLiquidationCR();  // ICP liquidation ratio (e.g. 1.33)
+
   // Calculate potential amounts
   $: maxCollateralAmount = balance ? Number(balance) / 100000000 : 0;
   $: collateralValueUSD = parseFloat(collateralAmount) * Number(icpPrice);
-  $: maxMintAmount = collateralValueUSD / 1.5; // Based on minimum collateral ratio
+  $: maxMintAmount = collateralValueUSD / borrowThreshold;
   $: mintPercentage = (parseFloat(mintAmount) / maxMintAmount) * 100;
   $: collateralRatio = mintAmount ? (collateralValueUSD / parseFloat(mintAmount)) : Infinity;
-  $: collateralRatioColor = 
+  $: collateralRatioColor =
     collateralRatio >= 2.0 ? 'text-green-400' :
-    collateralRatio >= 1.5 ? 'text-yellow-400' : 
+    collateralRatio >= borrowThreshold ? 'text-yellow-400' :
     'text-red-400';
 
   // Handle slider changes

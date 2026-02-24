@@ -1,8 +1,10 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { formatNumber } from '$lib/utils/format';
-  import { MINIMUM_CR, LIQUIDATION_CR } from '$lib/protocol';
   import { protocolService } from '$lib/services/protocol';
+  import { publicActor } from '$lib/services/protocol/apiClient';
+  import { collateralStore } from '$lib/stores/collateralStore';
+  import { get } from 'svelte/store';
 
   export let protocolStatus: {
     mode: any;
@@ -13,15 +15,21 @@
     totalCollateralRatio: number;
     liquidationBonus: number;
     recoveryTargetCr: number;
+    recoveryModeThreshold: number;
   } | undefined = undefined;
 
   // Self-fetch fallback when no prop is provided
   let selfFetchedStatus: typeof protocolStatus;
+  let selfFetchedBorrowFee = 0;
   let refreshInterval: ReturnType<typeof setInterval>;
 
   async function fetchStatus() {
     try {
-      const s = await protocolService.getProtocolStatus();
+      const [s, bFee] = await Promise.all([
+        protocolService.getProtocolStatus(),
+        publicActor.get_borrowing_fee() as Promise<number>,
+      ]);
+      selfFetchedBorrowFee = Number(bFee);
       selfFetchedStatus = {
         mode: s.mode || 'GeneralAvailability',
         totalIcpMargin: Number(s.totalIcpMargin || 0),
@@ -31,7 +39,10 @@
         totalCollateralRatio: Number(s.totalCollateralRatio || 0),
         liquidationBonus: Number(s.liquidationBonus || 0),
         recoveryTargetCr: Number(s.recoveryTargetCr || 0),
+        recoveryModeThreshold: Number(s.recoveryModeThreshold || 0),
       };
+      // Also fetch per-collateral config for ICP-specific values
+      await collateralStore.fetchSupportedCollateral();
     } catch (e) { console.error('ProtocolStats fetch error:', e); }
   }
 
@@ -62,7 +73,13 @@
     return 'Unknown';
   })();
   $: modeClass = modeLabel === 'Normal' ? 'mode-normal' : modeLabel === 'Recovery' ? 'mode-recovery' : 'mode-other';
-  $: liqBonus = (status?.liquidationBonus || 0) * 100;
+  $: liqBonus = status?.liquidationBonus ? (status.liquidationBonus - 1) * 100 : 0;
+  $: borrowFee = selfFetchedBorrowFee * 100;
+  // Per-collateral ICP values from collateral store (live, not hardcoded)
+  $: icpConfig = $collateralStore.collaterals.find(c => c.symbol === 'ICP');
+  $: minCR = icpConfig?.minimumCr ?? 1.5;
+  $: liqCR = icpConfig?.liquidationCr ?? 1.33;
+  $: recoveryThreshold = status?.recoveryModeThreshold ?? 1.5;
 </script>
 
 <div class="protocol-stats">
@@ -104,12 +121,16 @@
   <h4 class="group-heading">Parameters</h4>
   <div class="stats-stack">
     <div class="stat-row">
-      <span class="stat-label">Min CR</span>
-      <span class="stat-value">{(MINIMUM_CR * 100).toFixed(0)}%</span>
+      <span class="stat-label">Min CR (ICP)</span>
+      <span class="stat-value">{(minCR * 100).toFixed(0)}%</span>
     </div>
     <div class="stat-row">
-      <span class="stat-label">Liquidation CR</span>
-      <span class="stat-value">{(LIQUIDATION_CR * 100).toFixed(0)}%</span>
+      <span class="stat-label">Liquidation CR (ICP)</span>
+      <span class="stat-value">{(liqCR * 100).toFixed(0)}%</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Recovery Threshold</span>
+      <span class="stat-value">{(recoveryThreshold * 100).toFixed(0)}%</span>
     </div>
     <div class="stat-row">
       <span class="stat-label">Liq. Bonus</span>
@@ -117,7 +138,7 @@
     </div>
     <div class="stat-row">
       <span class="stat-label">Borrowing Fee</span>
-      <span class="stat-value">0.5%</span>
+      <span class="stat-value">{formatNumber(borrowFee)}%</span>
     </div>
     <div class="stat-row">
       <span class="stat-label">Mode</span>
