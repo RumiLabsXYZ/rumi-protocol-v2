@@ -386,7 +386,7 @@ impl From<InitArg> for State {
                     borrowing_fee: Ratio::from(fee),
                     interest_rate_apr: DEFAULT_INTEREST_RATE_APR,
                     debt_ceiling: u64::MAX,
-                    min_vault_debt: ICUSD::new(1_000_000), // 0.01 icUSD
+                    min_vault_debt: ICUSD::new(10_000_000), // 0.1 icUSD
                     ledger_fee: ICP_TRANSFER_FEE.to_u64(),
                     price_source: PriceSource::Xrc {
                         base_asset: "ICP".to_string(),

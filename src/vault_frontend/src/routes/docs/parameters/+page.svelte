@@ -174,7 +174,7 @@
       </div>
       <div class="param">
         <span class="param-label">Minimum Partial Repayment <span class="tip" title="The smallest repayment amount accepted by the protocol.">?</span></span>
-        <span class="param-val">0.01 icUSD</span>
+        <span class="param-val">0.1 icUSD</span>
       </div>
       <div class="param">
         <span class="param-label">Dust Threshold (auto-forgiven) <span class="tip" title="Debt amounts smaller than this are automatically forgiven when closing a vault, to avoid rounding issues.">?</span></span>

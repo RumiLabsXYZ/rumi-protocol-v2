@@ -191,9 +191,10 @@
 
   function selectAction(action: 'add' | 'withdraw' | 'borrow' | 'repay') {
     if (isProcessing) return;
+    if (activeAction === action) return; // already selected — do nothing
     clearMessages();
     addCollateralAmount = ''; withdrawAmount = ''; borrowAmount = ''; repayAmount = '';
-    activeAction = activeAction === action ? null : action;
+    activeAction = action;
   }
 
   function onTokenChange() { repayAmount = ''; clearMessages(); }
@@ -272,17 +273,21 @@
 
   function clearMessages() { /* toasts auto-dismiss */ }
 
+  function floorTo(val: number, decimals: number): string {
+    const factor = Math.pow(10, decimals);
+    return (Math.floor(val * factor) / factor).toFixed(decimals);
+  }
   function setMaxAddCollateral() {
-    if (maxAddCollateral > 0) addCollateralAmount = maxAddCollateral.toFixed(4);
+    if (maxAddCollateral > 0) addCollateralAmount = floorTo(maxAddCollateral, 4);
   }
   function setMaxWithdraw() {
-    if (maxWithdrawable > 0) withdrawAmount = maxWithdrawable.toFixed(4);
+    if (maxWithdrawable > 0) withdrawAmount = floorTo(maxWithdrawable, 4);
   }
   function setMaxBorrow() {
-    if (maxBorrowable > 0) borrowAmount = maxBorrowable.toFixed(2);
+    if (maxBorrowable > 0) borrowAmount = floorTo(maxBorrowable, 2);
   }
   function setMaxRepay() {
-    if (maxRepayable > 0) repayAmount = maxRepayable.toFixed(4);
+    if (maxRepayable > 0) repayAmount = floorTo(maxRepayable, 4);
   }
 
   function clampInput(field: 'add' | 'withdraw' | 'borrow' | 'repay') {
@@ -362,9 +367,12 @@
     } finally { isProcessing = false; }
   }
 
+  const MIN_ICUSD = 0.1;
+
   async function handleBorrow() {
     const amount = parseFloat(borrowAmount);
     if (!amount || amount <= 0) { toastStore.error('Enter a valid icUSD amount', 8000); return; }
+    if (amount < MIN_ICUSD) { toastStore.error(`Minimum borrow amount is ${MIN_ICUSD} icUSD`, 8000); return; }
     if (borrowOverMax || borrowCrInvalid) { toastStore.error(`Max: ${formatNumber(maxBorrowable, 2)} icUSD`, 8000); return; }
     clearMessages(); isProcessing = true;
     try {
@@ -380,6 +388,7 @@
   async function handleRepay() {
     const amount = parseFloat(repayAmount);
     if (!amount || amount <= 0) { toastStore.error('Enter a valid amount', 8000); return; }
+    if (amount < MIN_ICUSD) { toastStore.error(`Minimum repay amount is ${MIN_ICUSD} icUSD`, 8000); return; }
     if (repayOverMax) { toastStore.error(`Max: ${formatNumber(maxRepayable, 2)} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`, 8000); return; }
     clearMessages(); isProcessing = true;
     try {

@@ -7,7 +7,7 @@
   let borrowingFeePct = '0.5';
   let ckstableFeePct = '0.05';
   let liqPct = '133';
-  let minBorrow = '0.01';
+  let minBorrow = '0.1';
 
   onMount(async () => {
     try {

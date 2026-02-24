@@ -934,7 +934,7 @@ mod multi_collateral_helpers {
             borrowing_fee: Ratio::from(dec!(0.005)),          // 0.5%
             interest_rate_apr: Ratio::from(dec!(0.0)),
             debt_ceiling: u64::MAX,
-            min_vault_debt: ICUSD::from(1_000_000),           // 0.01 icUSD
+            min_vault_debt: ICUSD::from(10_000_000),          // 0.1 icUSD
             ledger_fee: 2_000_000_000_000, // 0.002 ckETH (18 decimals)
             price_source: PriceSource::Xrc {
                 base_asset: "ETH".to_string(),

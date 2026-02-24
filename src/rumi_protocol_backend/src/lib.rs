@@ -49,7 +49,7 @@ pub const E8S: u64 = 100_000_000;
 
 pub const MIN_LIQUIDITY_AMOUNT: ICUSD = ICUSD::new(1_000_000_000);
 pub const MIN_ICP_AMOUNT: ICP = ICP::new(100_000);  // Instead of MIN_CKBTC_AMOUNT
-pub const MIN_ICUSD_AMOUNT: ICUSD = ICUSD::new(1_000_000); // 0.01 icUSD minimum for all stablecoin operations
+pub const MIN_ICUSD_AMOUNT: ICUSD = ICUSD::new(10_000_000); // 0.1 icUSD minimum for all stablecoin operations
 pub const DUST_THRESHOLD: ICUSD = ICUSD::new(100); // 0.000001 icUSD - dust threshold for vault closing
 
 // Update collateral ratios per whitepaper
