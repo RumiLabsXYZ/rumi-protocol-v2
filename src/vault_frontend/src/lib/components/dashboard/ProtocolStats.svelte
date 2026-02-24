@@ -5,6 +5,9 @@
   import { publicActor } from '$lib/services/protocol/apiClient';
   import { collateralStore } from '$lib/stores/collateralStore';
   import { get } from 'svelte/store';
+  import { TokenService } from '$lib/services/tokenService';
+  import { CANISTER_IDS } from '$lib/config';
+  import { Principal } from '@dfinity/principal';
 
   export let protocolStatus: {
     mode: any;
@@ -21,7 +24,11 @@
   // Self-fetch fallback when no prop is provided
   let selfFetchedStatus: typeof protocolStatus;
   let selfFetchedBorrowFee = 0;
+  let ckusdtReserve = 0;
+  let ckusdcReserve = 0;
   let refreshInterval: ReturnType<typeof setInterval>;
+
+  const protocolPrincipal = Principal.fromText(CANISTER_IDS.PROTOCOL);
 
   async function fetchStatus() {
     try {
@@ -43,7 +50,20 @@
       };
       // Also fetch per-collateral config for ICP-specific values
       await collateralStore.fetchSupportedCollateral();
+      // Fetch ckStable reserves held by the protocol canister
+      fetchCkStableReserves();
     } catch (e) { console.error('ProtocolStats fetch error:', e); }
+  }
+
+  async function fetchCkStableReserves() {
+    try {
+      const [usdt, usdc] = await Promise.all([
+        TokenService.getTokenBalance(CANISTER_IDS.CKUSDT_LEDGER, protocolPrincipal),
+        TokenService.getTokenBalance(CANISTER_IDS.CKUSDC_LEDGER, protocolPrincipal),
+      ]);
+      ckusdtReserve = Number(usdt) / 1e6; // ckUSDT = 6 decimals
+      ckusdcReserve = Number(usdc) / 1e6; // ckUSDC = 6 decimals
+    } catch (e) { console.error('ckStable reserve fetch error:', e); }
   }
 
   onMount(() => {
@@ -80,6 +100,7 @@
   $: minCR = icpConfig?.minimumCr ?? 1.5;
   $: liqCR = icpConfig?.liquidationCr ?? 1.33;
   $: recoveryThreshold = status?.recoveryModeThreshold ?? 1.5;
+  $: totalCkStableReserves = ckusdtReserve + ckusdcReserve;
 </script>
 
 <div class="protocol-stats">
@@ -114,6 +135,27 @@
       <span class="stat-value">{formatNumber(status?.totalIcusdBorrowed || 0)} icUSD</span>
     </div>
   </div>
+
+  {#if totalCkStableReserves > 0}
+    <div class="group-divider"></div>
+
+    <!-- Reserves -->
+    <h4 class="group-heading">ckStable Reserves</h4>
+    <div class="stats-stack">
+      {#if ckusdtReserve > 0}
+        <div class="stat-row">
+          <span class="stat-label">ckUSDT</span>
+          <span class="stat-value">{formatNumber(ckusdtReserve, 2)}</span>
+        </div>
+      {/if}
+      {#if ckusdcReserve > 0}
+        <div class="stat-row">
+          <span class="stat-label">ckUSDC</span>
+          <span class="stat-value">{formatNumber(ckusdcReserve, 2)}</span>
+        </div>
+      {/if}
+    </div>
+  {/if}
 
   <div class="group-divider"></div>
 

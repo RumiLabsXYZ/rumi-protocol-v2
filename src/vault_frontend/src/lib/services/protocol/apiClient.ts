@@ -39,10 +39,6 @@ import { collateralStore } from '$lib/stores/collateralStore';
 export const E8S = 100_000_000;
 export const MIN_ICP_AMOUNT = 100_000; // 0.001 ICP
 export const MIN_ICUSD_AMOUNT = 10_000_000; // 0.10 icUSD (10 cents)
-export const MINIMUM_COLLATERAL_RATIO = 1.5; // 150% — minimum for minting (66% LTV)
-export const LIQUIDATION_COLLATERAL_RATIO = 1.33; // 133% — liquidation threshold (75% LTV)
-export const RECOVERY_COLLATERAL_RATIO = 1.5; // 150%
-
 // CRITICAL CHANGE: Set this to false to use real data from the backend
 export const USE_MOCK_DATA = false;
 
