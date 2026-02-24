@@ -202,6 +202,11 @@ pub enum Event {
         rate: String,
     },
 
+    #[serde(rename = "set_recovery_liquidation_buffer")]
+    SetRecoveryLiquidationBuffer {
+        buffer: String,
+    },
+
     #[serde(rename = "add_collateral_type")]
     AddCollateralType {
         collateral_type: CollateralType,
@@ -257,6 +262,7 @@ impl Event {
             Event::SetRedemptionFeeCeiling { .. } => false,
             Event::SetMaxPartialLiquidationRatio { .. } => false,
             Event::SetRecoveryTargetCr { .. } => false,
+            Event::SetRecoveryLiquidationBuffer { .. } => false,
             Event::AddCollateralType { .. } => false,
             Event::UpdateCollateralStatus { .. } => false,
             Event::UpdateCollateralConfig { .. } => false,
@@ -466,8 +472,17 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                 }
             },
             Event::SetRecoveryTargetCr { rate } => {
+                // Legacy: old events stored an absolute target (e.g. 1.55).
+                // We keep replaying into recovery_target_cr for historical fidelity,
+                // but the protocol now uses recovery_liquidation_buffer for computation.
                 if let Ok(dec) = rate.parse::<Decimal>() {
                     state.recovery_target_cr = Ratio::from(dec);
+                    state.sync_icp_collateral_config();
+                }
+            },
+            Event::SetRecoveryLiquidationBuffer { buffer } => {
+                if let Ok(dec) = buffer.parse::<Decimal>() {
+                    state.recovery_liquidation_buffer = Ratio::from(dec);
                     state.sync_icp_collateral_config();
                 }
             },
@@ -777,6 +792,14 @@ pub fn record_set_recovery_target_cr(state: &mut State, rate: Ratio) {
         rate: rate.0.to_string(),
     });
     state.recovery_target_cr = rate;
+    state.sync_icp_collateral_config();
+}
+
+pub fn record_set_recovery_liquidation_buffer(state: &mut State, buffer: Ratio) {
+    record_event(&Event::SetRecoveryLiquidationBuffer {
+        buffer: buffer.0.to_string(),
+    });
+    state.recovery_liquidation_buffer = buffer;
     state.sync_icp_collateral_config();
 }
 

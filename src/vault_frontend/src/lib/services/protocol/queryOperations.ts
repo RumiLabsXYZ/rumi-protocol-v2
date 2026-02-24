@@ -34,6 +34,7 @@ export class QueryOperations {
         liquidationBonus: Number(canisterStatus.liquidation_bonus),
         recoveryTargetCr: Number(canisterStatus.recovery_target_cr),
         recoveryModeThreshold: Number(canisterStatus.recovery_mode_threshold),
+        recoveryLiquidationBuffer: Number(canisterStatus.recovery_liquidation_buffer),
       };
     });
   }

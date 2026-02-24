@@ -46,7 +46,8 @@ pub const DEFAULT_LIQUIDATION_BONUS: Ratio = Ratio::new(dec!(1.15)); // 115% (15
 pub const DEFAULT_MAX_PARTIAL_LIQUIDATION_RATIO: Ratio = Ratio::new(dec!(0.5)); // 50% max
 pub const DEFAULT_REDEMPTION_FEE_FLOOR: Ratio = Ratio::new(dec!(0.005)); // 0.5%
 pub const DEFAULT_REDEMPTION_FEE_CEILING: Ratio = Ratio::new(dec!(0.05)); // 5%
-pub const DEFAULT_RECOVERY_TARGET_CR: Ratio = Ratio::new(dec!(1.55)); // 155% — target CR after recovery liquidation
+pub const DEFAULT_RECOVERY_TARGET_CR: Ratio = Ratio::new(dec!(1.55)); // 155% — legacy; kept for serde backwards compat
+pub const DEFAULT_RECOVERY_LIQUIDATION_BUFFER: Ratio = Ratio::new(dec!(0.05)); // 5% above recovery threshold
 pub const DEFAULT_INTEREST_RATE_APR: Ratio = Ratio::new(dec!(0.0)); // 0% — placeholder for future accrual
 
 /// Collateral type identified by its ICRC-1 ledger canister principal.
@@ -308,7 +309,11 @@ pub struct State {
     pub max_partial_liquidation_ratio: Ratio,
     pub redemption_fee_floor: Ratio,
     pub redemption_fee_ceiling: Ratio,
-    pub recovery_target_cr: Ratio,
+    pub recovery_target_cr: Ratio, // legacy absolute value; kept for compat with old events
+
+    /// Buffer above the dynamic recovery threshold for partial-liquidation target.
+    /// Effective recovery target = recovery_mode_threshold + recovery_liquidation_buffer.
+    pub recovery_liquidation_buffer: Ratio,
 
     /// Cached dynamic recovery mode threshold (debt-weighted average of per-collateral borrow thresholds).
     /// Updated alongside total_collateral_ratio on each price tick.
@@ -372,6 +377,7 @@ impl From<InitArg> for State {
             redemption_fee_floor: DEFAULT_REDEMPTION_FEE_FLOOR,
             redemption_fee_ceiling: DEFAULT_REDEMPTION_FEE_CEILING,
             recovery_target_cr: DEFAULT_RECOVERY_TARGET_CR,
+            recovery_liquidation_buffer: DEFAULT_RECOVERY_LIQUIDATION_BUFFER,
             recovery_mode_threshold: RECOVERY_COLLATERAL_RATIO,
 
             // Multi-collateral: initialize with ICP as the default collateral
@@ -726,12 +732,10 @@ impl State {
             .and_then(|p| Decimal::from_f64(p))
     }
 
-    /// Get the recovery target CR for a specific collateral type
-    pub fn get_recovery_target_cr_for(&self, ct: &CollateralType) -> Ratio {
-        self.collateral_configs
-            .get(ct)
-            .map(|c| c.recovery_target_cr)
-            .unwrap_or(self.recovery_target_cr)
+    /// Compute the effective recovery target CR: dynamic threshold + admin-set buffer.
+    /// This is the CR that partial-liquidated vaults are restored to during Recovery Mode.
+    pub fn get_recovery_target_cr_for(&self, _ct: &CollateralType) -> Ratio {
+        Ratio::from(self.recovery_mode_threshold.0 + self.recovery_liquidation_buffer.0)
     }
 
     /// Get the minimum liquidation collateral ratio for a specific collateral type,
@@ -843,7 +847,7 @@ impl State {
             config.liquidation_bonus = self.liquidation_bonus;
             config.redemption_fee_floor = self.redemption_fee_floor;
             config.redemption_fee_ceiling = self.redemption_fee_ceiling;
-            config.recovery_target_cr = self.recovery_target_cr;
+            config.recovery_target_cr = Ratio::from(self.recovery_mode_threshold.0 + self.recovery_liquidation_buffer.0);
             config.ledger_fee = self.icp_ledger_fee.to_u64();
         }
     }

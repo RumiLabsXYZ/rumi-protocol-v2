@@ -93,6 +93,7 @@ export interface ProtocolStatusDTO {
   liquidationBonus: number;
   recoveryTargetCr: number;
   recoveryModeThreshold: number;
+  recoveryLiquidationBuffer: number;
 }
 
 export type ProtocolStatus = ProtocolStatusDTO;

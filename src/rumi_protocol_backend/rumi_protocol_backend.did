@@ -103,6 +103,7 @@ type Event = variant {
     amount : nat64;
   };
   set_recovery_target_cr : record { rate : text };
+  set_recovery_liquidation_buffer : record { buffer : text };
   init : InitArg;
   set_stable_ledger_principal : record {
     "principal" : principal;
@@ -244,6 +245,7 @@ type ProtocolStatus = record {
   liquidation_bonus : float64;
   last_icp_rate : float64;
   recovery_mode_threshold : float64;
+  recovery_liquidation_buffer : float64;
 };
 type Result = variant { Ok; Err : ProtocolError };
 type Result_1 = variant { Ok : nat64; Err : ProtocolError };
@@ -325,6 +327,7 @@ service : (ProtocolArg) -> {
   get_liquidity_status : (principal) -> (LiquidityStatus) query;
   get_max_partial_liquidation_ratio : () -> (float64) query;
   get_protocol_status : () -> (ProtocolStatus) query;
+  get_recovery_liquidation_buffer : () -> (float64) query;
   get_recovery_target_cr : () -> (float64) query;
   get_redemption_fee_ceiling : () -> (float64) query;
   get_redemption_fee_floor : () -> (float64) query;
@@ -359,6 +362,7 @@ service : (ProtocolArg) -> {
   set_collateral_status : (principal, CollateralStatus) -> (Result);
   set_liquidation_bonus : (float64) -> (Result);
   set_max_partial_liquidation_ratio : (float64) -> (Result);
+  set_recovery_liquidation_buffer : (float64) -> (Result);
   set_recovery_target_cr : (float64) -> (Result);
   set_redemption_fee_ceiling : (float64) -> (Result);
   set_redemption_fee_floor : (float64) -> (Result);

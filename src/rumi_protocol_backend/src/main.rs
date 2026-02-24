@@ -229,8 +229,9 @@ fn get_protocol_status() -> ProtocolStatus {
         total_collateral_ratio: s.total_collateral_ratio.to_f64(),
         mode: s.mode,
         liquidation_bonus: s.liquidation_bonus.to_f64(),
-        recovery_target_cr: s.recovery_target_cr.to_f64(),
+        recovery_target_cr: Ratio::from(s.recovery_mode_threshold.0 + s.recovery_liquidation_buffer.0).to_f64(),
         recovery_mode_threshold: s.recovery_mode_threshold.to_f64(),
+        recovery_liquidation_buffer: s.recovery_liquidation_buffer.to_f64(),
     })
 }
 
@@ -1131,32 +1132,75 @@ fn get_max_partial_liquidation_ratio() -> f64 {
     read_state(|s| s.max_partial_liquidation_ratio.to_f64())
 }
 
-/// Set the recovery target collateral ratio (developer only)
+/// Set the recovery liquidation buffer (developer only).
+/// The effective recovery target CR = dynamic recovery threshold + this buffer.
+/// Example: buffer = 0.05 (5%), threshold = 1.50 → target = 1.55.
+#[candid_method(update)]
+#[update]
+async fn set_recovery_liquidation_buffer(new_buffer: f64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set recovery liquidation buffer".to_string(),
+        ));
+    }
+    if new_buffer < 0.01 || new_buffer > 0.5 {
+        return Err(ProtocolError::GenericError(
+            "Recovery liquidation buffer must be between 0.01 (1%) and 0.5 (50%)".to_string(),
+        ));
+    }
+    let buffer = Ratio::from(rust_decimal::Decimal::try_from(new_buffer)
+        .map_err(|_| ProtocolError::GenericError("Invalid buffer value".to_string()))?);
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_recovery_liquidation_buffer(s, buffer);
+    });
+    log!(INFO, "[set_recovery_liquidation_buffer] Buffer set to: {} ({}%)", new_buffer, new_buffer * 100.0);
+    Ok(())
+}
+
+/// Get the current recovery liquidation buffer
+#[candid_method(query)]
+#[query]
+fn get_recovery_liquidation_buffer() -> f64 {
+    read_state(|s| s.recovery_liquidation_buffer.to_f64())
+}
+
+/// Get the effective recovery target CR (threshold + buffer)
+#[candid_method(query)]
+#[query]
+fn get_recovery_target_cr() -> f64 {
+    read_state(|s| Ratio::from(s.recovery_mode_threshold.0 + s.recovery_liquidation_buffer.0).to_f64())
+}
+
+/// Legacy: set the recovery target CR as an absolute value.
+/// Kept for Candid backwards compat. Internally converts to buffer.
 #[candid_method(update)]
 #[update]
 async fn set_recovery_target_cr(new_rate: f64) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
-        return Err(ProtocolError::GenericError("Only developer can set recovery target CR".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set recovery target CR".to_string(),
+        ));
     }
-    if new_rate < 1.4 || new_rate > 2.0 {
-        return Err(ProtocolError::GenericError("Recovery target CR must be between 1.4 and 2.0".to_string()));
+    // Convert absolute target to buffer: buffer = target - current threshold
+    let threshold = read_state(|s| s.recovery_mode_threshold.to_f64());
+    let buffer_val = new_rate - threshold;
+    if buffer_val < 0.01 || buffer_val > 0.5 {
+        return Err(ProtocolError::GenericError(format!(
+            "Computed buffer {} (target {} - threshold {}) is out of range 0.01..0.5",
+            buffer_val, new_rate, threshold
+        )));
     }
-    let rate = Ratio::from(rust_decimal::Decimal::try_from(new_rate)
+    let buffer = Ratio::from(rust_decimal::Decimal::try_from(buffer_val)
         .map_err(|_| ProtocolError::GenericError("Invalid rate".to_string()))?);
     mutate_state(|s| {
-        rumi_protocol_backend::event::record_set_recovery_target_cr(s, rate);
+        rumi_protocol_backend::event::record_set_recovery_liquidation_buffer(s, buffer);
     });
-    log!(INFO, "[set_recovery_target_cr] Recovery target CR set to: {}", new_rate);
+    log!(INFO, "[set_recovery_target_cr] (legacy) → buffer set to: {} ({}%)", buffer_val, buffer_val * 100.0);
     Ok(())
-}
-
-/// Get the current recovery target collateral ratio
-#[candid_method(query)]
-#[query]
-fn get_recovery_target_cr() -> f64 {
-    read_state(|s| s.recovery_target_cr.to_f64())
 }
 
 // Add guard cleanup method for developers to resolve stuck operations
