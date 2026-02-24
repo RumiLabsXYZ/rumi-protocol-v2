@@ -4,8 +4,9 @@
   import { walletStore, isConnected, principal } from '$lib/stores/wallet';
   import { permissionStore } from '$lib/stores/permissionStore';
   import VaultCard from '$lib/components/vault/VaultCard.svelte';
-  import { isDevelopment } from '$lib/config';
+  import { isDevelopment, CANISTER_IDS } from '$lib/config';
   import { developerAccess } from '$lib/stores/developer';
+  import { collateralStore } from '$lib/stores/collateralStore';
 
   let icpPrice = 0;
   let expandedVaultId: number | null = null;
@@ -18,12 +19,18 @@
     || ($permissionStore.initialized && $permissionStore.canViewVaults);
 
   // Sort vaults by Collateral Ratio ascending (riskiest first)
-  // Tiebreaker: vault ID ascending for stable ordering
+  // Uses per-collateral price from collateral store
   $: sortedVaults = [...$userVaults].sort((a, b) => {
-    const crA = a.borrowedIcusd > 0 && icpPrice > 0
-      ? (a.icpMargin * icpPrice) / a.borrowedIcusd : Infinity;
-    const crB = b.borrowedIcusd > 0 && icpPrice > 0
-      ? (b.icpMargin * icpPrice) / b.borrowedIcusd : Infinity;
+    const ctA = a.collateralType || CANISTER_IDS.ICP_LEDGER;
+    const ctB = b.collateralType || CANISTER_IDS.ICP_LEDGER;
+    const priceA = collateralStore.getCollateralPrice(ctA) || (ctA === CANISTER_IDS.ICP_LEDGER ? icpPrice : 0);
+    const priceB = collateralStore.getCollateralPrice(ctB) || (ctB === CANISTER_IDS.ICP_LEDGER ? icpPrice : 0);
+    const amountA = a.collateralAmount ?? a.icpMargin;
+    const amountB = b.collateralAmount ?? b.icpMargin;
+    const crA = a.borrowedIcusd > 0 && priceA > 0
+      ? (amountA * priceA) / a.borrowedIcusd : Infinity;
+    const crB = b.borrowedIcusd > 0 && priceB > 0
+      ? (amountB * priceB) / b.borrowedIcusd : Infinity;
     if (crA !== crB) return crA - crB;
     return a.vaultId - b.vaultId;
   });

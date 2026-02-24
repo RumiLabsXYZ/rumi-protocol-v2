@@ -354,6 +354,14 @@ function createAppDataStore() {
     async _fetchProtocolStatusFromAPI(): Promise<ProtocolStatusDTO> {
       // Import here to avoid circular dependencies
       const { QueryOperations } = await import('../services/protocol/queryOperations');
+
+      // Also trigger collateral store fetch (non-blocking) on protocol status load
+      import('./collateralStore').then(({ collateralStore }) => {
+        collateralStore.fetchSupportedCollateral().catch(err => {
+          console.warn('Background collateral fetch failed:', err);
+        });
+      });
+
       return QueryOperations.getProtocolStatus();
     },
 

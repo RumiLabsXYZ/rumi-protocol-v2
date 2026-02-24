@@ -228,61 +228,16 @@ pub async fn transfer_icusd_from(amount: ICUSD, caller: Principal) -> Result<u64
 }
 
 
+/// Thin wrapper around generic transfer_collateral_from for ICP.
 pub async fn transfer_icp_from(amount: ICP, caller: Principal) -> Result<u64, TransferFromError> {
-    let client = ICRC1Client {
-        runtime: CdkRuntime,
-        ledger_canister_id: read_state(|s| s.icp_ledger_principal),
-    };
-    let protocol_id = ic_cdk::id();
-    let block_index = client
-        .transfer_from(TransferFromArgs {
-            spender_subaccount: None,
-            from: Account {
-                owner: caller,
-                subaccount: None,
-            },
-            to: Account {
-                owner: protocol_id,
-                subaccount: None,
-            },
-            amount: amount.to_nat(),
-            fee: None,
-            created_at_time: None,
-            memo: None,
-        })
-        .await
-        .map_err(|e| TransferFromError::GenericError {
-            error_code: Nat::from(e.0.max(0) as u64), 
-            message: e.1,                           
-        })?;
-
-        Ok(block_index.unwrap().0.to_u64().unwrap())
+    let ledger = read_state(|s| s.icp_ledger_principal);
+    transfer_collateral_from(amount.to_u64(), caller, ledger).await
 }
 
+/// Thin wrapper around generic transfer_collateral for ICP.
 pub async fn transfer_icp(amount: ICP, to: Principal) -> Result<u64, TransferError> {
-    let client = ICRC1Client {
-        runtime: CdkRuntime,
-        ledger_canister_id: read_state(|s| s.icp_ledger_principal),
-    };
-    let block_index = client
-        .transfer(TransferArg {
-            from_subaccount: None,
-            to: Account {
-                owner: to,
-                subaccount: None,
-            },
-            fee: None,
-            created_at_time: None,
-            memo: None,
-            amount: amount.to_nat(),
-        })
-        .await
-        .map_err(|e| TransferError::GenericError {
-            error_code: Nat::from(e.0.max(0) as u64), 
-            message: e.1,
-        })??;
-
-    Ok(block_index.0.to_u64().unwrap())
+    let ledger = read_state(|s| s.icp_ledger_principal);
+    transfer_collateral(amount.to_u64(), to, ledger).await
 }
 
 pub async fn transfer_icusd(amount: ICUSD, to: Principal) -> Result<u64, TransferError> {
@@ -309,6 +264,77 @@ pub async fn transfer_icusd(amount: ICUSD, to: Principal) -> Result<u64, Transfe
         })??;
 
     Ok(block_index.0.to_u64().unwrap())
+}
+
+/// Query the ICRC-1 transfer fee for a given ledger canister.
+pub async fn get_ledger_fee(ledger: Principal) -> Result<u64, String> {
+    let client = ICRC1Client {
+        runtime: CdkRuntime,
+        ledger_canister_id: ledger,
+    };
+    let fee = client.fee().await.map_err(|e| format!("icrc1_fee call failed: {:?}", e))?;
+    Ok(fee.0.to_u64().unwrap_or(0))
+}
+
+/// Generic collateral transfer: move tokens from the protocol canister to a recipient.
+/// The `ledger` parameter is the ICRC-1 ledger canister ID of the collateral token.
+pub async fn transfer_collateral(amount: u64, to: Principal, ledger: Principal) -> Result<u64, TransferError> {
+    let client = ICRC1Client {
+        runtime: CdkRuntime,
+        ledger_canister_id: ledger,
+    };
+    let block_index = client
+        .transfer(TransferArg {
+            from_subaccount: None,
+            to: Account {
+                owner: to,
+                subaccount: None,
+            },
+            fee: None,
+            created_at_time: None,
+            memo: None,
+            amount: Nat::from(amount),
+        })
+        .await
+        .map_err(|e| TransferError::GenericError {
+            error_code: Nat::from(e.0.max(0) as u64),
+            message: e.1,
+        })??;
+
+    Ok(block_index.0.to_u64().unwrap())
+}
+
+/// Generic collateral transfer_from: pull tokens from a user into the protocol canister.
+/// The `ledger` parameter is the ICRC-1 ledger canister ID of the collateral token.
+pub async fn transfer_collateral_from(amount: u64, from: Principal, ledger: Principal) -> Result<u64, TransferFromError> {
+    let client = ICRC1Client {
+        runtime: CdkRuntime,
+        ledger_canister_id: ledger,
+    };
+    let protocol_id = ic_cdk::id();
+    let block_index = client
+        .transfer_from(TransferFromArgs {
+            spender_subaccount: None,
+            from: Account {
+                owner: from,
+                subaccount: None,
+            },
+            to: Account {
+                owner: protocol_id,
+                subaccount: None,
+            },
+            amount: Nat::from(amount),
+            fee: None,
+            created_at_time: None,
+            memo: None,
+        })
+        .await
+        .map_err(|e| TransferFromError::GenericError {
+            error_code: Nat::from(e.0.max(0) as u64),
+            message: e.1,
+        })?;
+
+    Ok(block_index.unwrap().0.to_u64().unwrap())
 }
 
 /// Transfer ckUSDT or ckUSDC from a user to the protocol (for vault repayment/liquidation)
@@ -352,5 +378,20 @@ pub async fn transfer_stable_from(token_type: StableTokenType, amount_e6s: u64, 
     Ok(block_index.unwrap().0.to_u64().unwrap())
 }
 
-
-
+/// Query the ICRC-1 balance of the protocol canister on any token ledger.
+pub async fn get_token_balance(ledger: Principal) -> Result<u64, String> {
+    let protocol_id = ic_cdk::id();
+    let result: Result<(Nat,), _> = ic_cdk::call(
+        ledger,
+        "icrc1_balance_of",
+        (Account {
+            owner: protocol_id,
+            subaccount: None,
+        },),
+    )
+    .await;
+    match result {
+        Ok((balance,)) => Ok(balance.0.to_u64().unwrap_or(0)),
+        Err((code, msg)) => Err(format!("icrc1_balance_of failed: {:?} {}", code, msg)),
+    }
+}

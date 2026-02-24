@@ -262,6 +262,14 @@ impl Ratio {
         Amount(value, PhantomData::<RatioTag>)
     }
 
+    /// Create a Ratio from an f64 value (for Candid endpoint deserialization)
+    pub fn from_f64(value: f64) -> Self {
+        Amount(
+            Decimal::from_f64_retain(value).unwrap_or(Decimal::ZERO),
+            PhantomData::<RatioTag>,
+        )
+    }
+
     pub fn pow(self, rhs: u64) -> Self {
         if rhs == 0 {
             return Amount(Decimal::ONE, PhantomData::<RatioTag>); 
@@ -443,6 +451,39 @@ impl<T> fmt::Display for Token<T> {
             write!(fmt, "{}.0", int)
         }
     }
+}
+
+/// Convert raw collateral amount to USD value using price and decimals.
+/// Returns the value in ICUSD e8s (8-decimal precision).
+/// `amount` is the raw token amount in native precision,
+/// `price_usd` is the USD price per 1 whole token,
+/// `decimals` is the token's decimal precision (e.g. 8 for ICP, 6 for ckUSDC).
+pub fn collateral_usd_value(amount: u64, price_usd: Decimal, decimals: u8) -> ICUSD {
+    let whole_tokens = Decimal::from(amount) / Decimal::from(10u64.pow(decimals as u32));
+    let usd_value = whole_tokens * price_usd;
+    // Convert to ICUSD e8s (8-decimal precision)
+    let e8s = (usd_value * dec!(100_000_000)).to_u64().unwrap_or(0);
+    ICUSD::from(e8s)
+}
+
+/// Convert raw collateral amount to a Decimal of whole-token units.
+/// Useful for CR calculations that work in decimal ratios.
+pub fn collateral_to_whole_tokens(amount: u64, decimals: u8) -> Decimal {
+    Decimal::from(amount) / Decimal::from(10u64.pow(decimals as u32))
+}
+
+/// Convert ICUSD value to raw collateral amount (inverse of collateral_usd_value).
+/// Given a USD value (as ICUSD e8s), a price per whole token, and decimals,
+/// returns the raw token amount in native precision.
+/// Example: 10 icUSD at $5/token with 8 decimals = 2 * 10^8 = 200_000_000 raw units.
+pub fn icusd_to_collateral_amount(icusd_value: ICUSD, price_usd: Decimal, decimals: u8) -> u64 {
+    if price_usd.is_zero() {
+        return 0;
+    }
+    let usd_value = Decimal::from(icusd_value.to_u64()) / dec!(100_000_000);
+    let whole_tokens = usd_value / price_usd;
+    let raw_amount = whole_tokens * Decimal::from(10u64.pow(decimals as u32));
+    raw_amount.to_u64().unwrap_or(0)
 }
 
 impl<T> fmt::Display for Amount<T> {

@@ -11,8 +11,10 @@ mod tests {
         let args = TreasuryInitArgs {
             controller: mock_principal(),
             icusd_ledger: mock_principal(),
-            icp_ledger: mock_principal(), 
+            icp_ledger: mock_principal(),
             ckbtc_ledger: Some(mock_principal()),
+            ckusdt_ledger: Some(mock_principal()),
+            ckusdc_ledger: Some(mock_principal()),
         };
         crate::state::init_state(args);
     }
@@ -38,7 +40,7 @@ mod tests {
         assert_eq!(status.controller, mock_principal());
         assert_eq!(status.is_paused, false);
         assert_eq!(status.total_deposits, 0);
-        assert_eq!(status.balances.len(), 3); // ICUSD, ICP, CKBTC
+        assert_eq!(status.balances.len(), 5); // ICUSD, ICP, CKBTC, CKUSDT, CKUSDC
     }
 
     #[test]

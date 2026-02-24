@@ -1,6 +1,29 @@
 <script>
+  import { onMount } from 'svelte';
+  import { collateralStore } from '$lib/stores/collateralStore';
+  import { get } from 'svelte/store';
+
+  let borrowPct = '150';
+  let liqPct = '133';
+
+  onMount(async () => {
+    try {
+      await collateralStore.fetchSupportedCollateral();
+      const state = get(collateralStore);
+      const icpConfig = state.collaterals.find(c => c.symbol === 'ICP');
+      if (icpConfig) {
+        borrowPct = (icpConfig.minimumCr * 100).toFixed(0);
+        liqPct = (icpConfig.liquidationCr * 100).toFixed(0);
+      }
+    } catch (e) {
+      console.error('Failed to fetch collateral config:', e);
+    }
+  });
+
   // Data structure for the content
-  let aboutData = {
+  // Note: {borrowPct} and {liqPct} are not interpolated here — they are set reactively.
+  // We build the data reactively below so it updates when live values load.
+  $: aboutData = {
     title: "icUSD Protocol: A Decentralized Stablecoin System",
     vision: "The icUSD Protocol is a next-generation decentralized stablecoin system built on the Internet Computer Protocol (ICP). It aims to provide a fully on-chain, transparent, and algorithmically governed stablecoin designed to maintain a 1:1 peg with the US Dollar.",
     coreComponents: [
@@ -8,7 +31,7 @@
         title: "Stablecoin (icUSD):",
         details: [
           "Overcollateralized: Users lock ICP tokens as collateral to mint icUSD.",
-          "Collateralization Ratio (CR): Maintains a minimum CR of 150%.",
+          `Collateralization Ratio (CR): Maintains a minimum CR of ${borrowPct}%.`,
           "Burning Mechanism: Users can redeem ICP by burning icUSD.",
         ],
       },
@@ -16,7 +39,7 @@
         title: "Vault System:",
         details: [
           "Manages user deposits and tracks collateralization.",
-          "Automatically liquidates positions when CR falls below 150%.",
+          `Automatically liquidates positions when CR falls below ${liqPct}%.`,
         ],
       },
       {
@@ -46,13 +69,13 @@
         title: "Minting icUSD:",
         details: [
           "Users deposit ICP into a vault.",
-          "icUSD is minted based on the collateral value, ensuring a 150% CR.",
+          `icUSD is minted based on the collateral value, ensuring a ${borrowPct}% CR.`,
         ],
       },
       {
         title: "Liquidation:",
         details: [
-          "If CR < 150%, collateral is sold to cover the issued icUSD.",
+          `If CR < ${liqPct}%, collateral is sold to cover the issued icUSD.`,
           "Liquidators purchase collateral at a discount.",
         ],
       },

@@ -1,18 +1,87 @@
-type InitArg = record {
-  fee_e8s : nat64;
-  icp_ledger_principal : principal;
-  xrc_principal : principal;
-  icusd_ledger_principal : principal;
-  developer_principal : principal;
-  treasury_principal : opt principal;
-  stability_pool_principal : opt principal;
-  ckusdt_ledger_principal : opt principal;
-  ckusdc_ledger_principal : opt principal;
+type AddCollateralArg = record {
+  debt_ceiling : nat64;
+  min_vault_debt : nat64;
+  borrow_threshold_ratio : float64;
+  ledger_fee : nat64;
+  recovery_target_cr : float64;
+  ledger_canister_id : principal;
+  price_source : PriceSource;
+  liquidation_bonus : float64;
+  borrowing_fee : float64;
+  liquidation_ratio : float64;
 };
+type CandidVault = record {
+  collateral_amount : nat64;
+  owner : principal;
+  vault_id : nat64;
+  collateral_type : principal;
+  icp_margin_amount : nat64;
+  borrowed_icusd_amount : nat64;
+};
+type CollateralConfig = record {
+  last_redemption_time : nat64;
+  status : CollateralStatus;
+  decimals : nat8;
+  redemption_fee_ceiling : blob;
+  debt_ceiling : nat64;
+  min_vault_debt : nat64;
+  borrow_threshold_ratio : blob;
+  last_price : opt float64;
+  last_price_timestamp : opt nat64;
+  redemption_fee_floor : blob;
+  ledger_fee : nat64;
+  recovery_target_cr : blob;
+  current_base_rate : blob;
+  ledger_canister_id : principal;
+  price_source : PriceSource;
+  liquidation_bonus : blob;
+  borrowing_fee : blob;
+  interest_rate_apr : blob;
+  liquidation_ratio : blob;
+};
+type CollateralStatus = variant { Paused; Active; Deprecated; Sunset; Frozen };
+type ConsentInfo = record {
+  metadata : ConsentMessageMetadata;
+  consent_message : ConsentMessage;
+};
+type ConsentMessage = variant {
+  LineDisplayMessage : record { pages : vec LineDisplayPage };
+  GenericDisplayMessage : text;
+};
+type ConsentMessageMetadata = record {
+  utc_offset_minutes : opt int16;
+  language : text;
+};
+type ConsentMessageRequest = record {
+  arg : blob;
+  method : text;
+  user_preferences : ConsentMessageSpec;
+};
+type ConsentMessageSpec = record {
+  metadata : ConsentMessageMetadata;
+  device_spec : opt DeviceSpec;
+};
+type DeviceSpec = variant {
+  GenericDisplay;
+  LineDisplay : record { characters_per_line : nat16; lines_per_page : nat16 };
+};
+type ErrorInfo = record { description : text };
 type Event = variant {
+  set_borrowing_fee : record { rate : text };
+  VaultWithdrawnAndClosed : record {
+    vault_id : nat64;
+    timestamp : nat64;
+    caller : principal;
+    amount : nat64;
+  };
   claim_liquidity_returns : record {
     block_index : nat64;
     caller : principal;
+    amount : nat64;
+  };
+  collateral_withdrawn : record {
+    block_index : nat64;
+    vault_id : nat64;
     amount : nat64;
   };
   repay_to_vault : record {
@@ -25,14 +94,28 @@ type Event = variant {
     caller : principal;
     amount : nat64;
   };
+  set_ckstable_repay_fee : record { rate : text };
+  set_treasury_principal : record { "principal" : principal };
+  set_max_partial_liquidation_ratio : record { rate : text };
+  withdraw_and_close_vault : record {
+    block_index : opt nat64;
+    vault_id : nat64;
+    amount : nat64;
+  };
+  set_recovery_target_cr : record { rate : text };
+  set_recovery_liquidation_buffer : record { buffer : text };
   init : InitArg;
+  set_stable_ledger_principal : record {
+    "principal" : principal;
+    token_type : StableTokenType;
+  };
   open_vault : record { block_index : nat64; vault : Vault };
   redemption_on_vaults : record {
-    owner : principal;
-    icusd_block_index : nat64;
     icusd_amount : nat64;
+    icusd_block_index : nat64;
+    owner : principal;
     fee_amount : nat64;
-    current_icp_rate : vec nat8;
+    current_icp_rate : blob;
   };
   margin_transfer : record { block_index : nat64; vault_id : nat64 };
   upgrade : UpgradeArg;
@@ -42,33 +125,110 @@ type Event = variant {
     fee_amount : nat64;
     borrowed_amount : nat64;
   };
+  update_collateral_config : record {
+    config : CollateralConfig;
+    collateral_type : principal;
+  };
   redistribute_vault : record { vault_id : nat64 };
+  partial_collateral_withdrawn : record {
+    block_index : nat64;
+    vault_id : nat64;
+    amount : nat64;
+  };
+  dust_forgiven : VaultArg;
+  partial_liquidate_vault : record {
+    icp_rate : opt blob;
+    liquidator_payment : nat64;
+    vault_id : nat64;
+    liquidator : opt principal;
+    icp_to_liquidator : nat64;
+  };
   withdraw_liquidity : record {
     block_index : nat64;
     caller : principal;
     amount : nat64;
   };
+  set_liquidation_bonus : record { rate : text };
   close_vault : record { block_index : opt nat64; vault_id : nat64 };
+  update_collateral_status : record {
+    status : CollateralStatus;
+    collateral_type : principal;
+  };
+  set_redemption_fee_ceiling : record { rate : text };
   add_margin_to_vault : record {
     block_index : nat64;
     vault_id : nat64;
     margin_added : nat64;
   };
+  set_stability_pool_principal : record { "principal" : principal };
+  set_redemption_fee_floor : record { rate : text };
   redemption_transfered : record {
     icusd_block_index : nat64;
     icp_block_index : nat64;
   };
   liquidate_vault : record {
     mode : Mode;
-    icp_rate : vec nat8;
+    icp_rate : blob;
     vault_id : nat64;
+    liquidator : opt principal;
   };
-  withdraw_and_close_vault : record {
-    vault_id : nat64;
+  add_collateral_type : record {
+    config : CollateralConfig;
+    collateral_type : principal;
+  };
+  set_stable_token_enabled : record {
+    enabled : bool;
+    token_type : StableTokenType;
+  };
+  set_reserve_redemptions_enabled : record { enabled : bool };
+  set_reserve_redemption_fee : record { fee : text };
+  reserve_redemption : record {
+    owner : principal;
+    icusd_amount : nat64;
+    fee_amount : nat64;
+    stable_token_ledger : principal;
+    stable_amount_sent : nat64;
+    fee_stable_amount : nat64;
+    icusd_block_index : nat64;
+  };
+  admin_mint : record {
     amount : nat64;
-    block_index : opt nat64;
+    to : principal;
+    reason : text;
+    block_index : nat64;
   };
 };
+type Fees = record { redemption_fee : float64; borrowing_fee : float64 };
+type GetEventsArg = record { start : nat64; length : nat64 };
+type HttpRequest = record {
+  url : text;
+  method : text;
+  body : blob;
+  headers : vec record { text; text };
+};
+type HttpResponse = record {
+  body : blob;
+  headers : vec record { text; text };
+  status_code : nat16;
+};
+type Icrc21Error = variant {
+  GenericError : record { description : text; error_code : nat64 };
+  UnsupportedCanisterCall : ErrorInfo;
+  ConsentMessageUnavailable : ErrorInfo;
+};
+type Icrc28TrustedOriginsResponse = record { trusted_origins : vec text };
+type InitArg = record {
+  ckusdc_ledger_principal : opt principal;
+  xrc_principal : principal;
+  icp_ledger_principal : principal;
+  fee_e8s : nat64;
+  ckusdt_ledger_principal : opt principal;
+  stability_pool_principal : opt principal;
+  treasury_principal : opt principal;
+  developer_principal : principal;
+  icusd_ledger_principal : principal;
+};
+type LineDisplayPage = record { lines : vec text };
 type LiquidityStatus = record {
   liquidity_provided : nat64;
   total_liquidity_provided : nat64;
@@ -76,9 +236,11 @@ type LiquidityStatus = record {
   available_liquidity_reward : nat64;
   total_available_returns : nat64;
 };
-type Fees = record { redemption_fee : float64; borrowing_fee : float64 };
 type Mode = variant { ReadOnly; GeneralAvailability; Recovery };
 type OpenVaultSuccess = record { block_index : nat64; vault_id : nat64 };
+type PriceSource = variant {
+  Xrc : record { quote_asset : text; base_asset : text };
+};
 type ProtocolArg = variant { Upgrade : UpgradeArg; Init : InitArg };
 type ProtocolError = variant {
   GenericError : text;
@@ -91,15 +253,56 @@ type ProtocolError = variant {
   CallerNotOwner;
 };
 type ProtocolStatus = record {
+  last_icp_timestamp : nat64;
   mode : Mode;
   total_icusd_borrowed : nat64;
+  total_collateral_ratio : float64;
   total_icp_margin : nat64;
-  last_icp_timestamp : nat64;
-  last_icp_rate : float64;
-  total_collateral_ratio: float64;
-  liquidation_bonus : float64;
   recovery_target_cr : float64;
+  liquidation_bonus : float64;
+  last_icp_rate : float64;
+  recovery_mode_threshold : float64;
+  recovery_liquidation_buffer : float64;
+  reserve_redemptions_enabled : bool;
+  reserve_redemption_fee : float64;
 };
+type Result = variant { Ok; Err : ProtocolError };
+type Result_1 = variant { Ok : nat64; Err : ProtocolError };
+type Result_2 = variant { Ok : SuccessWithFee; Err : ProtocolError };
+type Result_3 = variant { Ok : opt nat64; Err : ProtocolError };
+type Result_4 = variant { Ok : ConsentInfo; Err : Icrc21Error };
+type Result_5 = variant { Ok : OpenVaultSuccess; Err : ProtocolError };
+type Result_6 = variant { Ok : bool; Err : ProtocolError };
+type Result_7 = variant {
+  Ok : StabilityPoolLiquidationResult;
+  Err : ProtocolError;
+};
+type StabilityPoolConfig = record {
+  enabled : bool;
+  liquidation_discount : nat64;
+  stability_pool_canister : opt principal;
+};
+type StabilityPoolLiquidationResult = record {
+  fee : nat64;
+  block_index : nat64;
+  vault_id : nat64;
+  liquidated_debt : nat64;
+  success : bool;
+  collateral_type : text;
+  collateral_received : nat64;
+};
+type StableTokenType = variant { CKUSDC; CKUSDT };
+type StandardRecord = record { url : text; name : text };
+type ReserveBalance = record { ledger : principal; balance : nat64; symbol : text };
+type ReserveRedemptionResult = record {
+  icusd_block_index : nat64;
+  stable_amount_sent : nat64;
+  fee_amount : nat64;
+  stable_token_used : principal;
+  vault_spillover_amount : nat64;
+};
+type Result_8 = variant { Ok : ReserveRedemptionResult; Err : ProtocolError };
+type SuccessWithFee = record { block_index : nat64; fee_amount_paid : nat64 };
 type TransferError = variant {
   GenericError : record { message : text; error_code : nat };
   TemporarilyUnavailable;
@@ -122,169 +325,90 @@ type TransferFromError = variant {
   InsufficientFunds : record { balance : nat };
 };
 type UpgradeArg = record { mode : opt Mode };
-type GetEventsArg = record { start : nat64; length : nat64 };
 type Vault = record {
+  collateral_amount : nat64;
   owner : principal;
   vault_id : nat64;
-  icp_margin_amount : nat64;
+  collateral_type : principal;
   borrowed_icusd_amount : nat64;
 };
-type CandidVault = record {
-  owner : principal;
-  borrowed_icusd_amount : nat64;
-  icp_margin_amount : nat64;
-  vault_id : nat64;
-};
-type SuccessWithFee = record { block_index : nat64; fee_amount_paid : nat64 };
 type VaultArg = record { vault_id : nat64; amount : nat64 };
-
-// Stable token types for repayment (ckUSDT/ckUSDC)
-type StableTokenType = variant { CKUSDT; CKUSDC };
-type VaultArgWithToken = record { vault_id : nat64; amount : nat64; token_type : StableTokenType };
-
-// Add HTTP types
-type HttpRequest = record {
-  url : text;
-  method : text;
-  body : blob;
-  headers : vec record { text; text };
+type VaultArgWithToken = record {
+  vault_id : nat64;
+  amount : nat64;
+  token_type : StableTokenType;
 };
-
-type HttpResponse = record {
-  body : blob;
-  headers : vec record { text; text };
-  status_code : nat16;
-};
-
-// ICRC-21 Consent Message Types
-type Icrc21ConsentMessageMetadata = record {
-  language : text;
-  utc_offset_minutes : opt int16;
-};
-
-type Icrc21DeviceSpec = variant {
-  GenericDisplay;
-  LineDisplay : record {
-    characters_per_line : nat16;
-    lines_per_page : nat16;
-  };
-};
-
-type Icrc21ConsentMessageSpec = record {
-  metadata : Icrc21ConsentMessageMetadata;
-  device_spec : opt Icrc21DeviceSpec;
-};
-
-type Icrc21ConsentMessageRequest = record {
-  method : text;
-  arg : blob;
-  user_preferences : Icrc21ConsentMessageSpec;
-};
-
-type Icrc21LineDisplayPage = record {
-  lines : vec text;
-};
-
-type Icrc21ConsentMessage = variant {
-  GenericDisplayMessage : text;
-  LineDisplayMessage : record {
-    pages : vec Icrc21LineDisplayPage;
-  };
-};
-
-type Icrc21ConsentInfo = record {
-  metadata : Icrc21ConsentMessageMetadata;
-  consent_message : Icrc21ConsentMessage;
-};
-
-type Icrc21ErrorInfo = record {
-  description : text;
-};
-
-type Icrc21Error = variant {
-  GenericError : record { error_code : nat64; description : text };
-  UnsupportedCanisterCall : Icrc21ErrorInfo;
-  ConsentMessageUnavailable : Icrc21ErrorInfo;
-};
-
-// ICRC-28 Trusted Origins
-type Icrc28TrustedOriginsResponse = record {
-  trusted_origins : vec text;
-};
-
-// ICRC-10 Supported Standards
-type StandardRecord = record {
-  name : text;
-  url : text;
-};
-
 service : (ProtocolArg) -> {
-  // Vault related operations
-  redeem_icp : (nat64) -> (variant { Ok : SuccessWithFee; Err : ProtocolError });
-  open_vault : (nat64) -> (variant { Ok : OpenVaultSuccess; Err : ProtocolError });
-  add_margin_to_vault : (VaultArg) -> (variant { Ok : nat64; Err : ProtocolError });
-  borrow_from_vault : (VaultArg) -> (variant { Ok : SuccessWithFee; Err : ProtocolError });
-  repay_to_vault : (VaultArg) -> (variant { Ok : nat64; Err : ProtocolError });
-  repay_to_vault_with_stable : (VaultArgWithToken) -> (variant { Ok : nat64; Err : ProtocolError });
-  close_vault : (nat64) -> (variant { Ok : opt nat64; Err : ProtocolError });
-
-  // Liquidity related operations
-  provide_liquidity : (nat64) -> (variant { Ok : nat64; Err : ProtocolError });
-  withdraw_liquidity : (nat64) -> (variant { Ok : nat64; Err : ProtocolError });
-  claim_liquidity_returns : () -> (variant { Ok : nat64; Err : ProtocolError });
-
-  // Query endpoints
-  get_fees : (nat64) -> (Fees) query;
-  get_liquidity_status : (principal) -> (LiquidityStatus) query;
-  get_protocol_status : () -> (ProtocolStatus) query;
-  get_vaults : (opt principal) -> (vec Vault) query;
-  get_vault_history : (nat64) -> (vec Event) query;
-  get_events : (GetEventsArg) -> (vec Event) query;
-  get_redemption_rate : () -> (float64) query;  
-  get_liquidatable_vaults : () -> (vec CandidVault) query;
-
-  // Add HTTP endpoint
-  http_request : (HttpRequest) -> (HttpResponse) query;
-  
-  // Add new endpoint for withdrawing collateral
-  withdraw_collateral : (nat64) -> (variant { Ok : nat64; Err : ProtocolError });
-  withdraw_partial_collateral : (VaultArg) -> (variant { Ok : nat64; Err : ProtocolError });
-  withdraw_and_close_vault: (nat64) -> (variant { Ok: opt nat64; Err: ProtocolError });
-  liquidate_vault : (nat64) -> (variant { Ok : SuccessWithFee; Err : ProtocolError });
-
-  // Partial operations
-  partial_repay_to_vault : (VaultArg) -> (variant { Ok : nat64; Err : ProtocolError });
-  partial_liquidate_vault : (VaultArg) -> (variant { Ok : SuccessWithFee; Err : ProtocolError });
-  liquidate_vault_partial : (VaultArg) -> (variant { Ok : SuccessWithFee; Err : ProtocolError });
-  liquidate_vault_partial_with_stable : (VaultArgWithToken) -> (variant { Ok : SuccessWithFee; Err : ProtocolError });
-
-  // Stable token repayment admin functions
-  set_ckstable_repay_fee : (float64) -> (variant { Ok; Err : ProtocolError });
-  get_ckstable_repay_fee : () -> (float64) query;
-  set_stable_token_enabled : (StableTokenType, bool) -> (variant { Ok; Err : ProtocolError });
-  get_stable_token_enabled : (StableTokenType) -> (bool) query;
-  set_stable_ledger_principal : (StableTokenType, principal) -> (variant { Ok; Err : ProtocolError });
-
-  // Protocol parameter admin functions
-  set_liquidation_bonus : (float64) -> (variant { Ok; Err : ProtocolError });
-  get_liquidation_bonus : () -> (float64) query;
-  set_borrowing_fee : (float64) -> (variant { Ok; Err : ProtocolError });
+  add_collateral_token : (AddCollateralArg) -> (Result);
+  add_margin_to_vault : (VaultArg) -> (Result_1);
+  borrow_from_vault : (VaultArg) -> (Result_2);
+  claim_liquidity_returns : () -> (Result_1);
+  clear_stuck_operations : (opt principal) -> (Result_1);
+  close_vault : (nat64) -> (Result_3);
   get_borrowing_fee : () -> (float64) query;
-  set_redemption_fee_floor : (float64) -> (variant { Ok; Err : ProtocolError });
-  get_redemption_fee_floor : () -> (float64) query;
-  set_redemption_fee_ceiling : (float64) -> (variant { Ok; Err : ProtocolError });
-  get_redemption_fee_ceiling : () -> (float64) query;
-  set_max_partial_liquidation_ratio : (float64) -> (variant { Ok; Err : ProtocolError });
+  get_ckstable_repay_fee : () -> (float64) query;
+  get_collateral_config : (principal) -> (opt CollateralConfig) query;
+  get_events : (GetEventsArg) -> (vec Event) query;
+  get_fees : (nat64) -> (Fees) query;
+  get_liquidatable_vaults : () -> (vec CandidVault) query;
+  get_liquidation_bonus : () -> (float64) query;
+  get_liquidity_status : (principal) -> (LiquidityStatus) query;
   get_max_partial_liquidation_ratio : () -> (float64) query;
-  set_recovery_target_cr : (float64) -> (variant { Ok; Err : ProtocolError });
+  get_protocol_status : () -> (ProtocolStatus) query;
+  get_recovery_liquidation_buffer : () -> (float64) query;
   get_recovery_target_cr : () -> (float64) query;
-  
-  // ICRC-21 Consent Message (for wallet integration like Oisy)
-  icrc21_canister_call_consent_message : (Icrc21ConsentMessageRequest) -> (variant { Ok : Icrc21ConsentInfo; Err : Icrc21Error });
-  
-  // ICRC-28 Trusted Origins
-  icrc28_trusted_origins : () -> (Icrc28TrustedOriginsResponse) query;
-  
-  // ICRC-10 Supported Standards
+  get_redemption_fee_ceiling : () -> (float64) query;
+  get_redemption_fee_floor : () -> (float64) query;
+  get_redemption_rate : () -> (float64) query;
+  get_reserve_balances : () -> (vec ReserveBalance) query;
+  get_reserve_redemption_fee : () -> (float64) query;
+  get_reserve_redemptions_enabled : () -> (bool) query;
+  get_stability_pool_config : () -> (StabilityPoolConfig) query;
+  get_stability_pool_principal : () -> (opt principal) query;
+  get_stable_token_enabled : (StableTokenType) -> (bool) query;
+  get_supported_collateral_types : () -> (
+      vec record { principal; CollateralStatus },
+    ) query;
+  get_treasury_principal : () -> (opt principal) query;
+  get_vault_history : (nat64) -> (vec Event) query;
+  get_vaults : (opt principal) -> (vec CandidVault) query;
+  http_request : (HttpRequest) -> (HttpResponse) query;
   icrc10_supported_standards : () -> (vec StandardRecord) query;
+  icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (Result_4);
+  icrc28_trusted_origins : () -> (Icrc28TrustedOriginsResponse) query;
+  liquidate_vault : (nat64) -> (Result_2);
+  liquidate_vault_partial : (VaultArg) -> (Result_2);
+  liquidate_vault_partial_with_stable : (VaultArgWithToken) -> (Result_2);
+  open_vault : (nat64, opt principal) -> (Result_5);
+  partial_liquidate_vault : (VaultArg) -> (Result_2);
+  partial_repay_to_vault : (VaultArg) -> (Result_1);
+  provide_liquidity : (nat64) -> (Result_1);
+  recover_pending_transfer : (nat64) -> (Result_6);
+  redeem_collateral : (principal, nat64) -> (Result_2);
+  redeem_icp : (nat64) -> (Result_2);
+  redeem_reserves : (nat64, opt principal) -> (Result_8);
+  repay_to_vault : (VaultArg) -> (Result_1);
+  repay_to_vault_with_stable : (VaultArgWithToken) -> (Result_1);
+  set_borrowing_fee : (float64) -> (Result);
+  set_ckstable_repay_fee : (float64) -> (Result);
+  set_collateral_status : (principal, CollateralStatus) -> (Result);
+  set_liquidation_bonus : (float64) -> (Result);
+  set_max_partial_liquidation_ratio : (float64) -> (Result);
+  set_recovery_liquidation_buffer : (float64) -> (Result);
+  set_recovery_target_cr : (float64) -> (Result);
+  admin_mint_icusd : (nat64, principal, text) -> (Result_1);
+  set_redemption_fee_ceiling : (float64) -> (Result);
+  set_redemption_fee_floor : (float64) -> (Result);
+  set_reserve_redemption_fee : (float64) -> (Result);
+  set_reserve_redemptions_enabled : (bool) -> (Result);
+  set_stability_pool_principal : (principal) -> (Result);
+  set_stable_ledger_principal : (StableTokenType, principal) -> (Result);
+  set_stable_token_enabled : (StableTokenType, bool) -> (Result);
+  set_treasury_principal : (principal) -> (Result);
+  stability_pool_liquidate : (nat64, nat64) -> (Result_7);
+  update_collateral_config : (principal, CollateralConfig) -> (Result);
+  withdraw_and_close_vault : (nat64) -> (Result_3);
+  withdraw_collateral : (nat64) -> (Result_1);
+  withdraw_liquidity : (nat64) -> (Result_1);
+  withdraw_partial_collateral : (VaultArg) -> (Result_1);
 }

@@ -1,8 +1,13 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { formatNumber } from '$lib/utils/format';
-  import { MINIMUM_CR, LIQUIDATION_CR } from '$lib/protocol';
   import { protocolService } from '$lib/services/protocol';
+  import { publicActor } from '$lib/services/protocol/apiClient';
+  import { collateralStore } from '$lib/stores/collateralStore';
+  import { get } from 'svelte/store';
+  import { TokenService } from '$lib/services/tokenService';
+  import { CANISTER_IDS } from '$lib/config';
+  import { Principal } from '@dfinity/principal';
 
   export let protocolStatus: {
     mode: any;
@@ -13,15 +18,28 @@
     totalCollateralRatio: number;
     liquidationBonus: number;
     recoveryTargetCr: number;
+    recoveryModeThreshold: number;
+    recoveryLiquidationBuffer: number;
+    reserveRedemptionsEnabled?: boolean;
+    reserveRedemptionFee?: number;
   } | undefined = undefined;
 
   // Self-fetch fallback when no prop is provided
   let selfFetchedStatus: typeof protocolStatus;
+  let selfFetchedBorrowFee = 0;
+  let ckusdtReserve = 0;
+  let ckusdcReserve = 0;
   let refreshInterval: ReturnType<typeof setInterval>;
+
+  const protocolPrincipal = Principal.fromText(CANISTER_IDS.PROTOCOL);
 
   async function fetchStatus() {
     try {
-      const s = await protocolService.getProtocolStatus();
+      const [s, bFee] = await Promise.all([
+        protocolService.getProtocolStatus(),
+        publicActor.get_borrowing_fee() as Promise<number>,
+      ]);
+      selfFetchedBorrowFee = Number(bFee);
       selfFetchedStatus = {
         mode: s.mode || 'GeneralAvailability',
         totalIcpMargin: Number(s.totalIcpMargin || 0),
@@ -31,8 +49,27 @@
         totalCollateralRatio: Number(s.totalCollateralRatio || 0),
         liquidationBonus: Number(s.liquidationBonus || 0),
         recoveryTargetCr: Number(s.recoveryTargetCr || 0),
+        recoveryModeThreshold: Number(s.recoveryModeThreshold || 0),
+        recoveryLiquidationBuffer: Number(s.recoveryLiquidationBuffer || 0),
+        reserveRedemptionsEnabled: Boolean(s.reserveRedemptionsEnabled),
+        reserveRedemptionFee: Number(s.reserveRedemptionFee || 0),
       };
+      // Also fetch per-collateral config for ICP-specific values
+      await collateralStore.fetchSupportedCollateral();
+      // Fetch ckStable reserves held by the protocol canister
+      fetchCkStableReserves();
     } catch (e) { console.error('ProtocolStats fetch error:', e); }
+  }
+
+  async function fetchCkStableReserves() {
+    try {
+      const [usdt, usdc] = await Promise.all([
+        TokenService.getTokenBalance(CANISTER_IDS.CKUSDT_LEDGER, protocolPrincipal),
+        TokenService.getTokenBalance(CANISTER_IDS.CKUSDC_LEDGER, protocolPrincipal),
+      ]);
+      ckusdtReserve = Number(usdt) / 1e6; // ckUSDT = 6 decimals
+      ckusdcReserve = Number(usdc) / 1e6; // ckUSDC = 6 decimals
+    } catch (e) { console.error('ckStable reserve fetch error:', e); }
   }
 
   onMount(() => {
@@ -62,31 +99,29 @@
     return 'Unknown';
   })();
   $: modeClass = modeLabel === 'Normal' ? 'mode-normal' : modeLabel === 'Recovery' ? 'mode-recovery' : 'mode-other';
-  $: liqBonus = (status?.liquidationBonus || 0) * 100;
+  $: liqBonus = status?.liquidationBonus ? (status.liquidationBonus - 1) * 100 : 0;
+  $: borrowFee = selfFetchedBorrowFee * 100;
+  // Per-collateral ICP values from collateral store (live, not hardcoded)
+  $: icpConfig = $collateralStore.collaterals.find(c => c.symbol === 'ICP');
+  $: minCR = icpConfig?.minimumCr ?? 1.5;
+  $: liqCR = icpConfig?.liquidationCr ?? 1.33;
+  $: recoveryThreshold = status?.recoveryModeThreshold ?? 1.5;
+  $: interestApr = icpConfig?.interestRateApr ?? 0;
 </script>
 
 <div class="protocol-stats">
-  <!-- Market -->
-  <h4 class="group-heading">Market</h4>
-  <div class="stats-stack">
-    <div class="stat-row">
-      <span class="stat-label">ICP Price</span>
-      <span class="stat-value">{icpPrice > 0 ? `$${formatNumber(icpPrice)}` : '—'}</span>
-    </div>
-    <div class="stat-row">
-      <span class="stat-label">Protocol CR</span>
-      <span class="stat-value">{formattedCR}%</span>
-    </div>
-  </div>
-
-  <div class="group-divider"></div>
-
   <!-- System -->
   <h4 class="group-heading">System</h4>
   <div class="stats-stack">
     <div class="stat-row">
+      <span class="stat-label">Protocol CR</span>
+      <span class="stat-value">{formattedCR}%</span>
+    </div>
+    <div class="stat-row">
       <span class="stat-label">Total Collateral</span>
-      <span class="stat-value">{formatNumber(status?.totalIcpMargin || 0)} ICP</span>
+      <span class="stat-value-stack">
+        <span>{formatNumber(status?.totalIcpMargin || 0)} ICP</span>
+      </span>
     </div>
     <div class="stat-row">
       <span class="stat-label">Collateral Value</span>
@@ -96,6 +131,19 @@
       <span class="stat-label">Total Borrowed</span>
       <span class="stat-value">{formatNumber(status?.totalIcusdBorrowed || 0)} icUSD</span>
     </div>
+    {#if ckusdtReserve > 0 || ckusdcReserve > 0}
+      <div class="stat-row">
+        <span class="stat-label">Reserves</span>
+        <span class="stat-value-stack">
+          {#if ckusdtReserve > 0}
+            <span>{formatNumber(ckusdtReserve, 2)} ckUSDT</span>
+          {/if}
+          {#if ckusdcReserve > 0}
+            <span>{formatNumber(ckusdcReserve, 2)} ckUSDC</span>
+          {/if}
+        </span>
+      </div>
+    {/if}
   </div>
 
   <div class="group-divider"></div>
@@ -104,12 +152,16 @@
   <h4 class="group-heading">Parameters</h4>
   <div class="stats-stack">
     <div class="stat-row">
-      <span class="stat-label">Min CR</span>
-      <span class="stat-value">{(MINIMUM_CR * 100).toFixed(0)}%</span>
+      <span class="stat-label">Min CR (ICP)</span>
+      <span class="stat-value">{(minCR * 100).toFixed(0)}%</span>
     </div>
     <div class="stat-row">
-      <span class="stat-label">Liquidation CR</span>
-      <span class="stat-value">{(LIQUIDATION_CR * 100).toFixed(0)}%</span>
+      <span class="stat-label">Liquidation CR (ICP)</span>
+      <span class="stat-value">{(liqCR * 100).toFixed(0)}%</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Recovery Threshold</span>
+      <span class="stat-value">{(recoveryThreshold * 100).toFixed(0)}%</span>
     </div>
     <div class="stat-row">
       <span class="stat-label">Liq. Bonus</span>
@@ -117,7 +169,11 @@
     </div>
     <div class="stat-row">
       <span class="stat-label">Borrowing Fee</span>
-      <span class="stat-value">0.5%</span>
+      <span class="stat-value">{formatNumber(borrowFee)}%</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Interest APR</span>
+      <span class="stat-value">{interestApr > 0 ? `${formatNumber(interestApr * 100)}%` : '0%'}</span>
     </div>
     <div class="stat-row">
       <span class="stat-label">Mode</span>
@@ -163,6 +219,17 @@
     color: var(--rumi-text-secondary);
   }
   .stat-value {
+    font-family: 'Inter', sans-serif;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--rumi-text-primary);
+  }
+  .stat-value-stack {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.125rem;
     font-family: 'Inter', sans-serif;
     font-size: 0.8125rem;
     font-weight: 600;

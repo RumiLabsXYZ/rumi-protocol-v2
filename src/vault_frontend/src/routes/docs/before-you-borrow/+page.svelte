@@ -1,9 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { publicActor } from '$lib/services/protocol/apiClient';
+  import { collateralStore } from '$lib/stores/collateralStore';
+  import { get } from 'svelte/store';
 
   let borrowingFeePct = '0.5';
   let ckstableFeePct = '0.05';
+  let liqPct = '133';
+  let minBorrow = '0.1';
 
   onMount(async () => {
     try {
@@ -13,6 +17,15 @@
       ]);
       borrowingFeePct = (Number(bFee) * 100).toFixed(1);
       ckstableFeePct = (Number(ckFee) * 100).toFixed(2);
+
+      await collateralStore.fetchSupportedCollateral();
+      const state = get(collateralStore);
+      const icpConfig = state.collaterals.find(c => c.symbol === 'ICP');
+      if (icpConfig) {
+        liqPct = (icpConfig.liquidationCr * 100).toFixed(0);
+        const minDebt = icpConfig.minVaultDebt / 1e8;
+        if (minDebt > 0) minBorrow = minDebt.toString();
+      }
     } catch (e) {
       console.error('Failed to fetch fees:', e);
     }
@@ -32,7 +45,7 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Minimum Requirements</h2>
-    <p>The minimum collateral deposit is 0.001 ICP. The minimum borrow amount is 1 icUSD. Your vault must maintain a collateral ratio of at least 133% at all times. If ICP's price drops and your ratio falls below 133%, your vault becomes eligible for liquidation.</p>
+    <p>The minimum collateral deposit is 0.001 ICP. The minimum borrow amount is {minBorrow} icUSD. Your vault must maintain a collateral ratio of at least {liqPct}% at all times. If ICP's price drops and your ratio falls below {liqPct}%, your vault becomes eligible for liquidation.</p>
   </section>
 
   <section class="doc-section">
@@ -46,15 +59,22 @@
   </section>
 
   <section class="doc-section">
+    <h2 class="doc-heading">Managing Collateral</h2>
+    <p>You can add more ICP collateral to your vault at any time to improve your collateral ratio. You can also <strong>withdraw collateral partially</strong> — taking some ICP out while keeping the vault open, as long as your CR stays above the borrowing threshold ({liqPct}% minimum).</p>
+    <p>The maximum you can withdraw is: <code>current collateral - (debt &times; min ratio &divide; ICP price)</code>. The protocol calculates this for you and rejects withdrawals that would put your vault at risk.</p>
+  </section>
+
+  <section class="doc-section">
     <h2 class="doc-heading">Closing Your Vault</h2>
-    <p>To close a vault, you must first repay all outstanding icUSD debt, then withdraw your ICP collateral. The vault can then be closed. Dust amounts below 0.000001 icUSD are forgiven automatically on close.</p>
-    <p>You can also partially repay debt or add more collateral at any time to improve your collateral ratio.</p>
+    <p>To close a vault, you must first repay all outstanding icUSD debt, then withdraw your ICP collateral. The protocol also offers a <strong>withdraw-and-close</strong> operation that does both steps atomically in a single call. Dust amounts below 0.000001 icUSD are forgiven automatically on close.</p>
   </section>
 
   <section class="doc-section">
     <h2 class="doc-heading">What You Should Understand</h2>
     <p>ICP is volatile. A sharp price drop can push your vault below the liquidation threshold faster than you can react. There is no grace period and no notification system — liquidation is immediate and automated.</p>
     <p>Higher collateral ratios give you more buffer. A vault at 200% can absorb a much larger price drop than one at 140%.</p>
+    <p>Your vault's collateral can also be affected by redemptions. When icUSD holders redeem and protocol reserves are insufficient, collateral is taken from the lowest-CR vaults. See <a href="/docs/redemptions" class="doc-link">Redemptions</a> for details.</p>
+    <p>The protocol allows only one operation per user at a time. If you submit a second transaction before the first completes, it will be rejected. Wait for confirmations before taking another action.</p>
     <p>This protocol is in beta. See the <a href="/docs/beta" class="doc-link">beta disclaimer</a> and <a href="/docs/risks" class="doc-link">risk documentation</a> for full details.</p>
   </section>
 </article>

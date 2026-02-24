@@ -1,5 +1,5 @@
 use crate::numeric::{Ratio, UsdIcp, ICUSD, ICP};
-use crate::state::{PendingMarginTransfer, State};
+use crate::state::{CollateralConfig, CollateralStatus, CollateralType, PendingMarginTransfer, State};
 use crate::storage::record_event;
 use crate::vault::Vault;
 use crate::{InitArg, Mode, StableTokenType, UpgradeArg};
@@ -201,6 +201,57 @@ pub enum Event {
     SetRecoveryTargetCr {
         rate: String,
     },
+
+    #[serde(rename = "set_recovery_liquidation_buffer")]
+    SetRecoveryLiquidationBuffer {
+        buffer: String,
+    },
+
+    #[serde(rename = "add_collateral_type")]
+    AddCollateralType {
+        collateral_type: CollateralType,
+        config: CollateralConfig,
+    },
+
+    #[serde(rename = "update_collateral_status")]
+    UpdateCollateralStatus {
+        collateral_type: CollateralType,
+        status: CollateralStatus,
+    },
+
+    #[serde(rename = "update_collateral_config")]
+    UpdateCollateralConfig {
+        collateral_type: CollateralType,
+        config: CollateralConfig,
+    },
+
+    #[serde(rename = "set_reserve_redemptions_enabled")]
+    SetReserveRedemptionsEnabled {
+        enabled: bool,
+    },
+
+    #[serde(rename = "set_reserve_redemption_fee")]
+    SetReserveRedemptionFee {
+        fee: String,
+    },
+
+    #[serde(rename = "reserve_redemption")]
+    ReserveRedemption {
+        owner: Principal,
+        icusd_amount: ICUSD,
+        fee_amount: ICUSD,
+        stable_token_ledger: Principal,
+        stable_amount_sent: u64,
+        fee_stable_amount: u64,
+        icusd_block_index: u64,
+    },
+    #[serde(rename = "admin_mint")]
+    AdminMint {
+        amount: ICUSD,
+        to: Principal,
+        reason: String,
+        block_index: u64,
+    },
 }
 
 impl Event {
@@ -239,6 +290,14 @@ impl Event {
             Event::SetRedemptionFeeCeiling { .. } => false,
             Event::SetMaxPartialLiquidationRatio { .. } => false,
             Event::SetRecoveryTargetCr { .. } => false,
+            Event::SetRecoveryLiquidationBuffer { .. } => false,
+            Event::AddCollateralType { .. } => false,
+            Event::UpdateCollateralStatus { .. } => false,
+            Event::UpdateCollateralConfig { .. } => false,
+            Event::SetReserveRedemptionsEnabled { .. } => false,
+            Event::SetReserveRedemptionFee { .. } => false,
+            Event::ReserveRedemption { .. } => false,
+            Event::AdminMint { .. } => false,
         }
     }
 }
@@ -266,10 +325,14 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
     for event in events {
         match event {
             Event::OpenVault {
-                vault,
+                mut vault,
                 block_index: _,
             } => {
                 vault_id += 1;
+                // Fix up legacy events that lack collateral_type (serde default = anonymous)
+                if vault.collateral_type == Principal::anonymous() {
+                    vault.collateral_type = state.icp_ledger_principal;
+                }
                 state.open_vault(vault);
             }
             Event::CloseVault {
@@ -292,7 +355,7 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                 // Reduce vault debt and collateral
                 if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
                     vault.borrowed_icusd_amount -= liquidator_payment;
-                    vault.icp_margin_amount -= icp_to_liquidator;
+                    vault.collateral_amount -= icp_to_liquidator.to_u64();
                 }
             },
             Event::RedistributeVault { vault_id } => state.redistribute_vault(vault_id),
@@ -313,11 +376,12 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                 icusd_block_index,
             } => {
                 state.provide_liquidity(fee_amount, state.developer_principal);
-                state.redeem_on_vaults(icusd_amount, current_icp_rate);
+                let redeem_ct = state.icp_collateral_type();
+                state.redeem_on_vaults(icusd_amount, current_icp_rate, &redeem_ct);
                 let margin: ICP = icusd_amount / current_icp_rate;
                 state
                     .pending_redemption_transfer
-                    .insert(icusd_block_index, PendingMarginTransfer { owner, margin });
+                    .insert(icusd_block_index, PendingMarginTransfer { owner, margin, collateral_type: crate::vault::default_collateral_type() });
             }
             Event::RedemptionTransfered {
                 icusd_block_index, ..
@@ -413,21 +477,25 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             Event::SetLiquidationBonus { rate } => {
                 if let Ok(dec) = rate.parse::<Decimal>() {
                     state.liquidation_bonus = Ratio::from(dec);
+                    state.sync_icp_collateral_config();
                 }
             },
             Event::SetBorrowingFee { rate } => {
                 if let Ok(dec) = rate.parse::<Decimal>() {
                     state.fee = Ratio::from(dec);
+                    state.sync_icp_collateral_config();
                 }
             },
             Event::SetRedemptionFeeFloor { rate } => {
                 if let Ok(dec) = rate.parse::<Decimal>() {
                     state.redemption_fee_floor = Ratio::from(dec);
+                    state.sync_icp_collateral_config();
                 }
             },
             Event::SetRedemptionFeeCeiling { rate } => {
                 if let Ok(dec) = rate.parse::<Decimal>() {
                     state.redemption_fee_ceiling = Ratio::from(dec);
+                    state.sync_icp_collateral_config();
                 }
             },
             Event::SetMaxPartialLiquidationRatio { rate } => {
@@ -436,9 +504,45 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                 }
             },
             Event::SetRecoveryTargetCr { rate } => {
+                // Legacy: old events stored an absolute target (e.g. 1.55).
+                // We keep replaying into recovery_target_cr for historical fidelity,
+                // but the protocol now uses recovery_liquidation_buffer for computation.
                 if let Ok(dec) = rate.parse::<Decimal>() {
                     state.recovery_target_cr = Ratio::from(dec);
+                    state.sync_icp_collateral_config();
                 }
+            },
+            Event::SetRecoveryLiquidationBuffer { buffer } => {
+                if let Ok(dec) = buffer.parse::<Decimal>() {
+                    state.recovery_liquidation_buffer = Ratio::from(dec);
+                    state.sync_icp_collateral_config();
+                }
+            },
+            Event::AddCollateralType { collateral_type, config } => {
+                state.collateral_configs.insert(collateral_type, config);
+            },
+            Event::UpdateCollateralStatus { collateral_type, status } => {
+                if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+                    config.status = status;
+                }
+            },
+            Event::UpdateCollateralConfig { collateral_type, config } => {
+                state.collateral_configs.insert(collateral_type, config);
+            },
+            Event::SetReserveRedemptionsEnabled { enabled } => {
+                state.reserve_redemptions_enabled = enabled;
+            },
+            Event::SetReserveRedemptionFee { fee } => {
+                if let Ok(dec) = fee.parse::<Decimal>() {
+                    state.reserve_redemption_fee = Ratio::from(dec);
+                }
+            },
+            Event::ReserveRedemption { .. } => {
+                // Reserve redemptions don't change in-memory state during replay;
+                // the actual token transfers are async and not replayed.
+            },
+            Event::AdminMint { .. } => {
+                // Admin mints are ledger-only operations; no in-memory state changes.
             },
         }
     }
@@ -446,14 +550,14 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
     Ok(state)
 }
 
-pub fn record_liquidate_vault(state: &mut State, vault_id: u64, mode: Mode, icp_rate: UsdIcp) {
+pub fn record_liquidate_vault(state: &mut State, vault_id: u64, mode: Mode, collateral_price: UsdIcp) {
     record_event(&Event::LiquidateVault {
         vault_id,
         mode,
-        icp_rate,
+        icp_rate: collateral_price,
         liquidator: None,
     });
-    state.liquidate_vault(vault_id, mode, icp_rate);
+    state.liquidate_vault(vault_id, mode, collateral_price);
 }
 
 pub fn record_redistribute_vault(state: &mut State, vault_id: u64) {
@@ -577,22 +681,25 @@ pub fn record_redemption_on_vaults(
     owner: Principal,
     icusd_amount: ICUSD,
     fee_amount: ICUSD,
-    current_icp_rate: UsdIcp,
+    collateral_price: UsdIcp,
     icusd_block_index: u64,
 ) {
     record_event(&Event::RedemptionOnVaults {
         owner,
-        current_icp_rate,
+        current_icp_rate: collateral_price,
         icusd_amount,
         fee_amount,
         icusd_block_index,
     });
-    state.provide_liquidity(fee_amount, state.developer_principal);
-    state.redeem_on_vaults(icusd_amount, current_icp_rate);
-    let margin: ICP = icusd_amount / current_icp_rate;
+    // Fee is already deducted from icusd_amount before calling redeem_on_vaults,
+    // so vault owners effectively keep the fee (less collateral seized for their debt).
+    // The fee portion of icUSD stays in the protocol canister (burned).
+    let redeem_ct = state.icp_collateral_type();
+    state.redeem_on_vaults(icusd_amount, collateral_price, &redeem_ct);
+    let margin: ICP = icusd_amount / collateral_price;
     state
         .pending_redemption_transfer
-        .insert(icusd_block_index, PendingMarginTransfer { owner, margin });
+        .insert(icusd_block_index, PendingMarginTransfer { owner, margin, collateral_type: crate::vault::default_collateral_type() });
 }
 
 pub fn record_redemption_transfered(
@@ -695,6 +802,7 @@ pub fn record_set_liquidation_bonus(state: &mut State, rate: Ratio) {
         rate: rate.0.to_string(),
     });
     state.liquidation_bonus = rate;
+    state.sync_icp_collateral_config();
 }
 
 pub fn record_set_borrowing_fee(state: &mut State, rate: Ratio) {
@@ -702,6 +810,7 @@ pub fn record_set_borrowing_fee(state: &mut State, rate: Ratio) {
         rate: rate.0.to_string(),
     });
     state.fee = rate;
+    state.sync_icp_collateral_config();
 }
 
 pub fn record_set_redemption_fee_floor(state: &mut State, rate: Ratio) {
@@ -709,6 +818,7 @@ pub fn record_set_redemption_fee_floor(state: &mut State, rate: Ratio) {
         rate: rate.0.to_string(),
     });
     state.redemption_fee_floor = rate;
+    state.sync_icp_collateral_config();
 }
 
 pub fn record_set_redemption_fee_ceiling(state: &mut State, rate: Ratio) {
@@ -716,6 +826,7 @@ pub fn record_set_redemption_fee_ceiling(state: &mut State, rate: Ratio) {
         rate: rate.0.to_string(),
     });
     state.redemption_fee_ceiling = rate;
+    state.sync_icp_collateral_config();
 }
 
 pub fn record_set_max_partial_liquidation_ratio(state: &mut State, rate: Ratio) {
@@ -730,4 +841,97 @@ pub fn record_set_recovery_target_cr(state: &mut State, rate: Ratio) {
         rate: rate.0.to_string(),
     });
     state.recovery_target_cr = rate;
+    state.sync_icp_collateral_config();
+}
+
+pub fn record_set_recovery_liquidation_buffer(state: &mut State, buffer: Ratio) {
+    record_event(&Event::SetRecoveryLiquidationBuffer {
+        buffer: buffer.0.to_string(),
+    });
+    state.recovery_liquidation_buffer = buffer;
+    state.sync_icp_collateral_config();
+}
+
+pub fn record_add_collateral_type(
+    state: &mut State,
+    collateral_type: CollateralType,
+    config: CollateralConfig,
+) {
+    record_event(&Event::AddCollateralType {
+        collateral_type,
+        config: config.clone(),
+    });
+    state.collateral_configs.insert(collateral_type, config);
+}
+
+pub fn record_update_collateral_status(
+    state: &mut State,
+    collateral_type: CollateralType,
+    status: CollateralStatus,
+) {
+    record_event(&Event::UpdateCollateralStatus {
+        collateral_type,
+        status,
+    });
+    if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+        config.status = status;
+    }
+}
+
+pub fn record_update_collateral_config(
+    state: &mut State,
+    collateral_type: CollateralType,
+    config: CollateralConfig,
+) {
+    record_event(&Event::UpdateCollateralConfig {
+        collateral_type,
+        config: config.clone(),
+    });
+    state.collateral_configs.insert(collateral_type, config);
+}
+
+pub fn record_set_reserve_redemptions_enabled(state: &mut State, enabled: bool) {
+    record_event(&Event::SetReserveRedemptionsEnabled { enabled });
+    state.reserve_redemptions_enabled = enabled;
+}
+
+pub fn record_set_reserve_redemption_fee(state: &mut State, fee: Ratio) {
+    record_event(&Event::SetReserveRedemptionFee {
+        fee: fee.0.to_string(),
+    });
+    state.reserve_redemption_fee = fee;
+}
+
+pub fn record_reserve_redemption(
+    owner: Principal,
+    icusd_amount: ICUSD,
+    fee_amount: ICUSD,
+    stable_token_ledger: Principal,
+    stable_amount_sent: u64,
+    fee_stable_amount: u64,
+    icusd_block_index: u64,
+) {
+    record_event(&Event::ReserveRedemption {
+        owner,
+        icusd_amount,
+        fee_amount,
+        stable_token_ledger,
+        stable_amount_sent,
+        fee_stable_amount,
+        icusd_block_index,
+    });
+}
+
+pub fn record_admin_mint(
+    amount: ICUSD,
+    to: Principal,
+    reason: String,
+    block_index: u64,
+) {
+    record_event(&Event::AdminMint {
+        amount,
+        to,
+        reason,
+        block_index,
+    });
 }

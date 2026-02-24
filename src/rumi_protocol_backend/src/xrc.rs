@@ -5,7 +5,7 @@ use crate::Decimal;
 use crate::Mode;
 use ic_canister_log::log;
 use ic_xrc_types::GetExchangeRateResult;
-use rust_decimal::prelude::FromPrimitive;
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use rust_decimal_macros::dec;
 use std::time::Duration;
 
@@ -44,17 +44,14 @@ pub async fn fetch_icp_rate() {
                     "[FetchPrice] fetched new ICP rate: {rate} with timestamp: {}",
                     exchange_rate_result.timestamp
                 );
-                mutate_state(|s| match s.last_icp_timestamp {
-                    Some(last_icp_timestamp) => {
-                        if last_icp_timestamp < exchange_rate_result.timestamp * 1_000_000_000 {
-                            s.last_icp_rate = Some(UsdIcp::from(rate));
-                            s.last_icp_timestamp = 
-                                Some(exchange_rate_result.timestamp * 1_000_000_000);
-                        }
-                    }
-                    None => {
-                        s.last_icp_rate = Some(UsdIcp::from(rate));
-                        s.last_icp_timestamp = Some(exchange_rate_result.timestamp * 1_000_000_000);
+                mutate_state(|s| {
+                    let ts_nanos = exchange_rate_result.timestamp * 1_000_000_000;
+                    let should_update = match s.last_icp_timestamp {
+                        Some(last_ts) => last_ts < ts_nanos,
+                        None => true,
+                    };
+                    if should_update {
+                        s.set_icp_rate(UsdIcp::from(rate), Some(ts_nanos));
                     }
                 });
             }
@@ -73,6 +70,34 @@ pub async fn fetch_icp_rate() {
     }
     if read_state(|s| s.mode != crate::Mode::ReadOnly) {
         crate::check_vaults();
+    }
+}
+
+/// Ensures the price for the given collateral type is fresh enough for
+/// a price-sensitive operation. Currently only ICP is supported; other
+/// collateral types will be handled when their price timers are added.
+pub async fn ensure_fresh_price_for(
+    collateral_type: &candid::Principal,
+) -> Result<(), crate::ProtocolError> {
+    let icp_ledger = read_state(|s| s.icp_collateral_type());
+    if *collateral_type == icp_ledger {
+        ensure_fresh_price().await
+    } else {
+        // For future collateral types: check per-collateral last_price_timestamp
+        // and fetch from the configured PriceSource if stale.
+        let has_price = read_state(|s| {
+            s.get_collateral_config(collateral_type)
+                .and_then(|c| c.last_price)
+                .is_some()
+        });
+        if has_price {
+            Ok(())
+        } else {
+            Err(crate::ProtocolError::GenericError(format!(
+                "No price available for collateral {}",
+                collateral_type
+            )))
+        }
     }
 }
 

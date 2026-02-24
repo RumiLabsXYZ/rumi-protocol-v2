@@ -4,14 +4,28 @@
   import { protocolService } from '../../services/protocol';
   import { vaultStore } from '../../stores/vaultStore';
   import { protocolManager } from '../../services/ProtocolManager';
-  import { CONFIG } from '../../config';
+  import { CONFIG, CANISTER_IDS } from '../../config';
   import { createEventDispatcher } from 'svelte';
   import { walletStore } from '../../stores/wallet';
-  import { MINIMUM_CR, LIQUIDATION_CR, E8S } from '$lib/protocol';
+  import { MINIMUM_CR, LIQUIDATION_CR, E8S, getMinimumCR, getLiquidationCR } from '$lib/protocol';
+  import { collateralStore } from '../../stores/collateralStore';
+  import { TokenService } from '../../services/tokenService';
+  import { toastStore } from '../../stores/toast';
 
   export let vault: Vault;
   export let icpPrice: number = 0;
   export let expandedVaultId: number | null = null;
+
+  // ── Per-collateral derived values ──
+  $: vaultCollateralType = vault.collateralType || CANISTER_IDS.ICP_LEDGER;
+  $: vaultCollateralInfo = collateralStore.getCollateralInfo(vaultCollateralType);
+  $: collateralSymbol = vault.collateralSymbol || vaultCollateralInfo?.symbol || 'ICP';
+  $: collateralDecimals = vault.collateralDecimals ?? vaultCollateralInfo?.decimals ?? 8;
+  $: collateralDecimalsFactor = Math.pow(10, collateralDecimals);
+  $: vaultCollateralPrice = vaultCollateralInfo?.price || (vaultCollateralType === CANISTER_IDS.ICP_LEDGER ? icpPrice : 0);
+  $: vaultMinCR = getMinimumCR(vaultCollateralType);
+  $: vaultLiqCR = getLiquidationCR(vaultCollateralType);
+  $: vaultCollateralAmount = vault.collateralAmount ?? vault.icpMargin;
 
   const dispatch = createEventDispatcher<{ updated: void; toggle: { vaultId: number } }>();
 
@@ -21,18 +35,18 @@
     dispatch('toggle', { vaultId: vault.vaultId });
     clearMessages();
     if (!expanded) {
-      activeAction = null;
+      activeAction = 'repay';
       addCollateralAmount = ''; borrowAmount = ''; repayAmount = ''; withdrawAmount = '';
     }
   }
 
   // ── Derived display ──
-  $: collateralValueUsd = vault.icpMargin * icpPrice;
+  $: collateralValueUsd = vaultCollateralAmount * vaultCollateralPrice;
   $: collateralRatio = vault.borrowedIcusd > 0
     ? collateralValueUsd / vault.borrowedIcusd : Infinity;
   $: borrowedValueUsd = vault.borrowedIcusd;
   $: riskLevel = getRiskLevel(collateralRatio);
-  $: maxBorrowable = Math.max(0, (collateralValueUsd / MINIMUM_CR) - vault.borrowedIcusd);
+  $: maxBorrowable = Math.max(0, (collateralValueUsd / vaultMinCR) - vault.borrowedIcusd);
 
   // Token type for repayment
   let repayTokenType: 'icUSD' | 'CKUSDT' | 'CKUSDC' = 'icUSD';
@@ -46,7 +60,21 @@
     ? parseFloat($walletStore.tokenBalances.CKUSDT.formatted) : 0;
   $: walletCkusdc = $walletStore.tokenBalances?.CKUSDC
     ? parseFloat($walletStore.tokenBalances.CKUSDC.formatted) : 0;
-  $: maxAddCollateral = walletIcp;
+  // Per-collateral wallet balance for "Add Collateral" cap
+  let nonIcpCollateralBalance = 0;
+  let _lastFetchedCt = '';
+  $: if (vaultCollateralType !== CANISTER_IDS.ICP_LEDGER && $walletStore.isConnected && $walletStore.principal) {
+    // Fetch balance for this vault's collateral token
+    const ct = vaultCollateralType;
+    const ledger = vaultCollateralInfo?.ledgerCanisterId || ct;
+    if (ct !== _lastFetchedCt) {
+      _lastFetchedCt = ct;
+      TokenService.getTokenBalance(ledger, $walletStore.principal)
+        .then(raw => { nonIcpCollateralBalance = Number(raw) / collateralDecimalsFactor; })
+        .catch(() => { nonIcpCollateralBalance = 0; });
+    }
+  }
+  $: maxAddCollateral = vaultCollateralType === CANISTER_IDS.ICP_LEDGER ? walletIcp : nonIcpCollateralBalance;
   $: activeRepayBalance = repayTokenType === 'CKUSDT' ? walletCkusdt
     : repayTokenType === 'CKUSDC' ? walletCkusdc : walletIcusd;
   $: effectiveRepayBalance = (repayTokenType === 'CKUSDT' || repayTokenType === 'CKUSDC')
@@ -54,22 +82,22 @@
     : Math.max(0, activeRepayBalance - 0.001);
   $: maxRepayable = Math.min(effectiveRepayBalance, vault.borrowedIcusd);
 
-  // ── Withdraw max: keeps CR at MINIMUM_CR ──
+  // ── Withdraw max: keeps CR at minimum for this collateral ──
   $: maxWithdrawable = (() => {
-    if (vault.icpMargin <= 0) return 0;
-    if (vault.borrowedIcusd === 0) return vault.icpMargin;
-    if (!icpPrice || icpPrice <= 0) return 0;
-    const minCollateralIcp = (vault.borrowedIcusd * MINIMUM_CR) / icpPrice;
-    return Math.max(0, vault.icpMargin - minCollateralIcp);
+    if (vaultCollateralAmount <= 0) return 0;
+    if (vault.borrowedIcusd === 0) return vaultCollateralAmount;
+    if (!vaultCollateralPrice || vaultCollateralPrice <= 0) return 0;
+    const minCollateral = (vault.borrowedIcusd * vaultMinCR) / vaultCollateralPrice;
+    return Math.max(0, vaultCollateralAmount - minCollateral);
   })();
 
   // ── Credit usage ──
-  $: creditCapacity = collateralValueUsd / MINIMUM_CR;
+  $: creditCapacity = collateralValueUsd / vaultMinCR;
   $: creditUsed = vault.borrowedIcusd > 0 && creditCapacity > 0
     ? Math.min((vault.borrowedIcusd / creditCapacity) * 100, 100) : 0;
   $: creditRisk = creditUsed >= 85 ? 'danger' : creditUsed >= 65 ? 'warning' : 'normal';
 
-  $: fmtMargin = formatNumber(vault.icpMargin, 4);
+  $: fmtMargin = formatNumber(vaultCollateralAmount, 4);
   $: fmtCollateralUsd = formatNumber(collateralValueUsd, 2);
   $: fmtBorrowed = formatNumber(vault.borrowedIcusd, 2);
   $: fmtBorrowedUsd = formatNumber(borrowedValueUsd, 2);
@@ -78,9 +106,9 @@
     ? 'Approaching minimum collateral ratio'
     : riskLevel === 'danger' ? 'At risk of liquidation. Add collateral or repay.' : '';
 
-  // ── Liquidation price: ICP price at which CR hits 133% ──
-  $: liquidationPrice = vault.borrowedIcusd > 0 && vault.icpMargin > 0
-    ? (vault.borrowedIcusd * LIQUIDATION_CR) / vault.icpMargin : 0;
+  // ── Liquidation price: collateral price at which CR hits liquidation ratio ──
+  $: liquidationPrice = vault.borrowedIcusd > 0 && vaultCollateralAmount > 0
+    ? (vault.borrowedIcusd * vaultLiqCR) / vaultCollateralAmount : 0;
 
   // ── Active projected CR (based on active action panel) ──
   $: activeProjectedCr = activeAction === 'add' ? projectedCrAdd
@@ -97,30 +125,30 @@
     if (activeAction === 'add') {
       const amt = parseFloat(addCollateralAmount);
       if (!amt || amt <= 0) return null;
-      const newMargin = vault.icpMargin + amt;
+      const newMargin = vaultCollateralAmount + amt;
       return vault.borrowedIcusd > 0 && newMargin > 0
-        ? (vault.borrowedIcusd * LIQUIDATION_CR) / newMargin : 0;
+        ? (vault.borrowedIcusd * vaultLiqCR) / newMargin : 0;
     }
     if (activeAction === 'withdraw') {
       const amt = parseFloat(withdrawAmount);
       if (!amt || amt <= 0) return null;
-      const newMargin = vault.icpMargin - amt;
+      const newMargin = vaultCollateralAmount - amt;
       return vault.borrowedIcusd > 0 && newMargin > 0
-        ? (vault.borrowedIcusd * LIQUIDATION_CR) / newMargin : 0;
+        ? (vault.borrowedIcusd * vaultLiqCR) / newMargin : 0;
     }
     if (activeAction === 'borrow') {
       const amt = parseFloat(borrowAmount);
       if (!amt || amt <= 0) return null;
       const newDebt = vault.borrowedIcusd + amt;
-      return newDebt > 0 && vault.icpMargin > 0
-        ? (newDebt * LIQUIDATION_CR) / vault.icpMargin : 0;
+      return newDebt > 0 && vaultCollateralAmount > 0
+        ? (newDebt * vaultLiqCR) / vaultCollateralAmount : 0;
     }
     if (activeAction === 'repay') {
       const amt = parseFloat(repayAmount);
       if (!amt || amt <= 0) return null;
       const newDebt = vault.borrowedIcusd - amt;
-      return newDebt > 0 && vault.icpMargin > 0
-        ? (newDebt * LIQUIDATION_CR) / vault.icpMargin : 0;
+      return newDebt > 0 && vaultCollateralAmount > 0
+        ? (newDebt * vaultLiqCR) / vaultCollateralAmount : 0;
     }
     return null;
   })();
@@ -139,13 +167,13 @@
     };
   })();
 
-  // ── ICP price distance to liquidation ──
-  $: liqPriceDistance = liquidationPrice > 0 && icpPrice > 0
-    ? ((icpPrice - liquidationPrice) / icpPrice) * 100 : 0;
+  // ── Collateral price distance to liquidation ──
+  $: liqPriceDistance = liquidationPrice > 0 && vaultCollateralPrice > 0
+    ? ((vaultCollateralPrice - liquidationPrice) / vaultCollateralPrice) * 100 : 0;
 
   function getRiskLevel(ratio: number): 'normal' | 'warning' | 'danger' {
-    if (ratio === Infinity || ratio >= MINIMUM_CR) return 'normal';
-    if (ratio > LIQUIDATION_CR) return 'warning';
+    if (ratio === Infinity || ratio >= vaultMinCR) return 'normal';
+    if (ratio > vaultLiqCR) return 'warning';
     return 'danger';
   }
 
@@ -156,8 +184,6 @@
   let borrowAmount = '';
   let repayAmount = '';
   let isProcessing = false;
-  let actionError = '';
-  let actionSuccess = '';
   let showAdvanced = false;
   let isWithdrawingAndClosing = false;
   let showTokenDropdown = false;
@@ -165,9 +191,10 @@
 
   function selectAction(action: 'add' | 'withdraw' | 'borrow' | 'repay') {
     if (isProcessing) return;
+    if (activeAction === action) return; // already selected — do nothing
     clearMessages();
     addCollateralAmount = ''; withdrawAmount = ''; borrowAmount = ''; repayAmount = '';
-    activeAction = activeAction === action ? null : action;
+    activeAction = action;
   }
 
   function onTokenChange() { repayAmount = ''; clearMessages(); }
@@ -185,15 +212,15 @@
   // ── Projected CR calculations ──
   $: projectedCrAdd = (() => {
     const amt = parseFloat(addCollateralAmount);
-    if (!amt || amt <= 0 || !icpPrice) return null;
-    const newCollateral = (vault.icpMargin + amt) * icpPrice;
+    if (!amt || amt <= 0 || !vaultCollateralPrice) return null;
+    const newCollateral = (vaultCollateralAmount + amt) * vaultCollateralPrice;
     return vault.borrowedIcusd > 0 ? newCollateral / vault.borrowedIcusd : Infinity;
   })();
 
   $: projectedCrWithdraw = (() => {
     const amt = parseFloat(withdrawAmount);
-    if (!amt || amt <= 0 || !icpPrice) return null;
-    const newCollateral = (vault.icpMargin - amt) * icpPrice;
+    if (!amt || amt <= 0 || !vaultCollateralPrice) return null;
+    const newCollateral = (vaultCollateralAmount - amt) * vaultCollateralPrice;
     return vault.borrowedIcusd > 0 && newCollateral > 0 ? newCollateral / vault.borrowedIcusd : Infinity;
   })();
 
@@ -222,7 +249,7 @@
     return getRiskLevel(ratio);
   }
 
-  $: borrowCrInvalid = projectedCrBorrow !== null && projectedCrBorrow !== Infinity && projectedCrBorrow < MINIMUM_CR;
+  $: borrowCrInvalid = projectedCrBorrow !== null && projectedCrBorrow !== Infinity && projectedCrBorrow < vaultMinCR;
 
   $: addOverMax = (() => {
     const v = parseFloat(addCollateralAmount);
@@ -241,22 +268,26 @@
     return v > 0 && maxRepayable > 0 && v > maxRepayable;
   })();
 
-  $: canWithdraw = vault.borrowedIcusd === 0 && vault.icpMargin > 0;
+  $: canWithdraw = vault.borrowedIcusd === 0 && vaultCollateralAmount > 0;
   $: canClose = vault.borrowedIcusd === 0;
 
-  function clearMessages() { actionError = ''; actionSuccess = ''; }
+  function clearMessages() { /* toasts auto-dismiss */ }
 
+  function floorTo(val: number, decimals: number): string {
+    const factor = Math.pow(10, decimals);
+    return (Math.floor(val * factor) / factor).toFixed(decimals);
+  }
   function setMaxAddCollateral() {
-    if (maxAddCollateral > 0) addCollateralAmount = maxAddCollateral.toFixed(4);
+    if (maxAddCollateral > 0) addCollateralAmount = floorTo(maxAddCollateral, 4);
   }
   function setMaxWithdraw() {
-    if (maxWithdrawable > 0) withdrawAmount = maxWithdrawable.toFixed(4);
+    if (maxWithdrawable > 0) withdrawAmount = floorTo(maxWithdrawable, 4);
   }
   function setMaxBorrow() {
-    if (maxBorrowable > 0) borrowAmount = maxBorrowable.toFixed(2);
+    if (maxBorrowable > 0) borrowAmount = floorTo(maxBorrowable, 2);
   }
   function setMaxRepay() {
-    if (maxRepayable > 0) repayAmount = maxRepayable.toFixed(4);
+    if (maxRepayable > 0) repayAmount = floorTo(maxRepayable, 4);
   }
 
   function clampInput(field: 'add' | 'withdraw' | 'borrow' | 'repay') {
@@ -278,12 +309,12 @@
   // ── Stats for each action ──
   $: activeStats = (() => {
     if (activeAction === 'add') return {
-      label1: 'Collateral', value1: `${fmtMargin} ICP`,
+      label1: 'Collateral', value1: `${fmtMargin} ${collateralSymbol}`,
       label2: 'Value', value2: `$${fmtCollateralUsd}`,
     };
     if (activeAction === 'withdraw') return {
-      label1: 'Collateral', value1: `${fmtMargin} ICP`,
-      label2: 'Max withdraw', value2: `${formatNumber(maxWithdrawable, 4)} ICP`,
+      label1: 'Collateral', value1: `${fmtMargin} ${collateralSymbol}`,
+      label2: 'Max withdraw', value2: `${formatNumber(maxWithdrawable, 4)} ${collateralSymbol}`,
     };
     if (activeAction === 'borrow') return {
       label1: 'Debt', value1: `${fmtBorrowed} icUSD`,
@@ -298,62 +329,67 @@
 
   async function handleAddCollateral() {
     const amount = parseFloat(addCollateralAmount);
-    if (!amount || amount <= 0) { actionError = 'Enter a valid ICP amount'; return; }
-    if (addOverMax) { actionError = `Exceeds wallet balance (${formatNumber(maxAddCollateral, 4)} ICP)`; return; }
+    if (!amount || amount <= 0) { toastStore.error(`Enter a valid ${collateralSymbol} amount`, 8000); return; }
+    if (addOverMax) { toastStore.error(`Exceeds wallet balance (${formatNumber(maxAddCollateral, 4)} ${collateralSymbol})`, 8000); return; }
     clearMessages(); isProcessing = true;
     try {
-      const amountE8s = BigInt(Math.floor(amount * E8S));
+      const ledgerCanisterId = vaultCollateralInfo?.ledgerCanisterId ?? CONFIG.currentIcpLedgerId;
+      const amountRaw = BigInt(Math.floor(amount * collateralDecimalsFactor));
       const spenderCanisterId = CONFIG.currentCanisterId;
-      const currentAllowance = await protocolService.checkIcpAllowance(spenderCanisterId);
-      if (currentAllowance < amountE8s) {
-        const bufferAmount = amountE8s * BigInt(120) / BigInt(100);
-        const approvalResult = await protocolService.approveIcpTransfer(bufferAmount, spenderCanisterId);
-        if (!approvalResult.success) { actionError = approvalResult.error || 'Approval failed'; return; }
+      const currentAllowance = await protocolService.checkCollateralAllowance(spenderCanisterId, ledgerCanisterId);
+      if (currentAllowance < amountRaw) {
+        const bufferAmount = amountRaw * BigInt(120) / BigInt(100);
+        const approvalResult = await protocolService.approveCollateralTransfer(bufferAmount, spenderCanisterId, ledgerCanisterId);
+        if (!approvalResult.success) { toastStore.error(approvalResult.error || 'Approval failed', 8000); return; }
         await new Promise(r => setTimeout(r, 2000));
       }
-      const result = await protocolService.addMarginToVault(vault.vaultId, amount);
+      const result = await protocolService.addMarginToVault(vault.vaultId, amount, vaultCollateralType);
       if (result.success) {
-        actionSuccess = `Added ${amount} ICP`; addCollateralAmount = '';
+        toastStore.success(`Added ${amount} ${collateralSymbol}`, 8000); addCollateralAmount = '';
         await vaultStore.refreshVault(vault.vaultId); dispatch('updated');
-      } else { actionError = result.error || 'Failed'; }
-    } catch (err) { actionError = err instanceof Error ? err.message : 'Unknown error';
+      } else { toastStore.error(result.error || 'Failed', 8000); }
+    } catch (err) { toastStore.error(err instanceof Error ? err.message : 'Unknown error', 8000);
     } finally { isProcessing = false; }
   }
 
   async function handleWithdrawPartial() {
     const amount = parseFloat(withdrawAmount);
-    if (!amount || amount <= 0) { actionError = 'Enter a valid ICP amount'; return; }
-    if (withdrawOverMax) { actionError = `Max withdrawable: ${formatNumber(maxWithdrawable, 4)} ICP`; return; }
+    if (!amount || amount <= 0) { toastStore.error(`Enter a valid ${collateralSymbol} amount`, 8000); return; }
+    if (withdrawOverMax) { toastStore.error(`Max withdrawable: ${formatNumber(maxWithdrawable, 4)} ${collateralSymbol}`, 8000); return; }
     clearMessages(); isProcessing = true;
     try {
       const result = await protocolService.withdrawPartialCollateral(vault.vaultId, amount);
       if (result.success) {
-        actionSuccess = `Withdrew ${amount} ICP`; withdrawAmount = '';
+        toastStore.success(`Withdrew ${amount} ${collateralSymbol}`, 8000); withdrawAmount = '';
         await vaultStore.refreshVault(vault.vaultId); dispatch('updated');
-      } else { actionError = result.error || 'Failed'; }
-    } catch (err) { actionError = err instanceof Error ? err.message : 'Unknown error';
+      } else { toastStore.error(result.error || 'Failed', 8000); }
+    } catch (err) { toastStore.error(err instanceof Error ? err.message : 'Unknown error', 8000);
     } finally { isProcessing = false; }
   }
 
+  const MIN_ICUSD = 0.1;
+
   async function handleBorrow() {
     const amount = parseFloat(borrowAmount);
-    if (!amount || amount <= 0) { actionError = 'Enter a valid icUSD amount'; return; }
-    if (borrowOverMax || borrowCrInvalid) { actionError = `Max: ${formatNumber(maxBorrowable, 2)} icUSD`; return; }
+    if (!amount || amount <= 0) { toastStore.error('Enter a valid icUSD amount', 8000); return; }
+    if (amount < MIN_ICUSD) { toastStore.error(`Minimum borrow amount is ${MIN_ICUSD} icUSD`, 8000); return; }
+    if (borrowOverMax || borrowCrInvalid) { toastStore.error(`Max: ${formatNumber(maxBorrowable, 2)} icUSD`, 8000); return; }
     clearMessages(); isProcessing = true;
     try {
       const result = await protocolService.borrowFromVault(vault.vaultId, amount);
       if (result.success) {
-        actionSuccess = `Borrowed ${amount} icUSD`; borrowAmount = '';
+        toastStore.success(`Borrowed ${amount} icUSD`, 8000); borrowAmount = '';
         await vaultStore.refreshVault(vault.vaultId); dispatch('updated');
-      } else { actionError = result.error || 'Failed'; }
-    } catch (err) { actionError = err instanceof Error ? err.message : 'Unknown error';
+      } else { toastStore.error(result.error || 'Failed', 8000); }
+    } catch (err) { toastStore.error(err instanceof Error ? err.message : 'Unknown error', 8000);
     } finally { isProcessing = false; }
   }
 
   async function handleRepay() {
     const amount = parseFloat(repayAmount);
-    if (!amount || amount <= 0) { actionError = 'Enter a valid amount'; return; }
-    if (repayOverMax) { actionError = `Max: ${formatNumber(maxRepayable, 2)} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`; return; }
+    if (!amount || amount <= 0) { toastStore.error('Enter a valid amount', 8000); return; }
+    if (amount < MIN_ICUSD) { toastStore.error(`Minimum repay amount is ${MIN_ICUSD} icUSD`, 8000); return; }
+    if (repayOverMax) { toastStore.error(`Max: ${formatNumber(maxRepayable, 2)} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`, 8000); return; }
     clearMessages(); isProcessing = true;
     try {
       let result;
@@ -363,24 +399,24 @@
         result = await protocolManager.repayToVaultWithStable(vault.vaultId, amount, repayTokenType);
       }
       if (result.success) {
-        actionSuccess = `Repaid ${amount} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`; repayAmount = '';
+        toastStore.success(`Repaid ${amount} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`, 8000); repayAmount = '';
         await new Promise(r => setTimeout(r, 1000));
         await vaultStore.refreshVault(vault.vaultId); dispatch('updated');
-      } else { actionError = result.error || 'Failed'; }
-    } catch (err) { actionError = err instanceof Error ? err.message : 'Unknown error';
+      } else { toastStore.error(result.error || 'Failed', 8000); }
+    } catch (err) { toastStore.error(err instanceof Error ? err.message : 'Unknown error', 8000);
     } finally { isProcessing = false; }
   }
 
   async function handleWithdrawAndClose() {
-    if (!canWithdraw) { actionError = 'Repay all debt first'; return; }
+    if (!canWithdraw) { toastStore.error('Repay all debt first', 8000); return; }
     clearMessages(); isWithdrawingAndClosing = true;
     try {
       const result = await protocolService.withdrawCollateralAndCloseVault(vault.vaultId);
       if (result.success) {
-        actionSuccess = 'Vault closed. Collateral returned.';
+        toastStore.success('Vault closed. Collateral returned.', 8000);
         await vaultStore.refreshVaults(); dispatch('updated');
-      } else { actionError = result.error || 'Failed'; }
-    } catch (err) { actionError = err instanceof Error ? err.message : 'Unknown error';
+      } else { toastStore.error(result.error || 'Failed', 8000); }
+    } catch (err) { toastStore.error(err instanceof Error ? err.message : 'Unknown error', 8000);
     } finally { isWithdrawingAndClosing = false; }
   }
 </script>
@@ -392,7 +428,7 @@
     <span class="vault-id">#{vault.vaultId}</span>
     <span class="vault-cell">
       <span class="cell-label">Collateral</span>
-      <span class="cell-value">{fmtMargin} ICP</span>
+      <span class="cell-value">{fmtMargin} {collateralSymbol}</span>
       <span class="cell-sub">${fmtCollateralUsd}</span>
     </span>
     <span class="vault-cell">
@@ -438,17 +474,6 @@
   <!-- ── Expanded: pill groups + two-column layout ── -->
   {#if expanded}
     <div class="vault-actions">
-      {#if actionError}
-        <div class="msg-bar msg-error">{actionError}
-          <button class="msg-dismiss" on:click={() => actionError = ''}>×</button>
-        </div>
-      {/if}
-      {#if actionSuccess}
-        <div class="msg-bar msg-success">{actionSuccess}
-          <button class="msg-dismiss" on:click={() => actionSuccess = ''}>×</button>
-        </div>
-      {/if}
-
       <!-- Action layout: pills top-right, stats left, input right -->
       <div class="action-layout">
         <!-- Pill groups: right column -->
@@ -516,7 +541,7 @@
                   <span class="stat-label">Distance</span>
                   <span class="stat-value stat-distance" class:stat-distance-danger={liqPriceDistance < 15}
                     class:stat-distance-warning={liqPriceDistance >= 15 && liqPriceDistance < 30}>
-                    {liqPriceDistance.toFixed(1)}% below ICP
+                    {liqPriceDistance.toFixed(1)}% below {collateralSymbol}
                   </span>
                 </div>
               {/if}
@@ -538,14 +563,14 @@
               <div class="input-header">
                 <span class="input-label">Deposit Collateral</span>
                 {#if maxAddCollateral > 0}
-                  <button class="max-text" on:click={setMaxAddCollateral}>Max</button>
+                  <button class="max-text" on:click={setMaxAddCollateral}>Max: {floorTo(maxAddCollateral, 4)}</button>
                 {/if}
               </div>
               <div class="action-input-row">
                 <input type="number" class="action-input" bind:value={addCollateralAmount}
                   on:blur={() => clampInput('add')}
                   placeholder="0.00" min="0.001" step="0.01" disabled={isProcessing} />
-                <span class="input-suffix">ICP</span>
+                <span class="input-suffix">{collateralSymbol}</span>
               </div>
               <div class="input-submit-row">
                 <button class="btn-submit btn-submit-collateral" on:click={handleAddCollateral}
@@ -558,17 +583,17 @@
               <div class="input-header">
                 <span class="input-label">Withdraw Collateral</span>
                 {#if maxWithdrawable > 0}
-                  <button class="max-text" on:click={setMaxWithdraw}>Max</button>
+                  <button class="max-text" on:click={setMaxWithdraw}>Max: {floorTo(maxWithdrawable, 4)}</button>
                 {/if}
               </div>
               {#if vault.borrowedIcusd > 0}
-                <span class="input-hint">Keeps CR above 150%</span>
+                <span class="input-hint">Keeps CR above {(vaultMinCR * 100).toFixed(0)}%</span>
               {/if}
               <div class="action-input-row">
                 <input type="number" class="action-input" bind:value={withdrawAmount}
                   on:blur={() => clampInput('withdraw')}
                   placeholder="0.00" min="0.001" step="0.01" disabled={isProcessing} />
-                <span class="input-suffix">ICP</span>
+                <span class="input-suffix">{collateralSymbol}</span>
               </div>
               <div class="input-submit-row">
                 <button class="btn-submit btn-submit-collateral" on:click={handleWithdrawPartial}
@@ -581,7 +606,7 @@
               <div class="input-header">
                 <span class="input-label">Borrow icUSD</span>
                 {#if maxBorrowable > 0}
-                  <button class="max-text" on:click={setMaxBorrow}>Max</button>
+                  <button class="max-text" on:click={setMaxBorrow}>Max: {floorTo(maxBorrowable, 2)}</button>
                 {/if}
               </div>
               <div class="action-input-row">
@@ -601,7 +626,7 @@
               <div class="input-header">
                 <span class="input-label">Repay Debt</span>
                 {#if maxRepayable > 0}
-                  <button class="max-text" on:click={setMaxRepay}>Max</button>
+                  <button class="max-text" on:click={setMaxRepay}>Max: {floorTo(maxRepayable, 4)}</button>
                 {/if}
               </div>
               <div class="action-input-row">
@@ -634,10 +659,10 @@
                   </div>
                 {/if}
               </div>
-              {#if !hasChangedToken}
-                <span class="token-hint">Tap token to pay with ckUSDT or ckUSDC</span>
-              {/if}
               <div class="input-submit-row">
+                {#if !hasChangedToken}
+                  <span class="token-hint">Click token name to pay with ckUSDT or ckUSDC</span>
+                {/if}
                 <button class="btn-submit btn-submit-debt" on:click={handleRepay}
                   disabled={isProcessing || !repayAmount || repayOverMax}>
                   {isProcessing ? '...' : 'Repay'}
@@ -900,7 +925,7 @@
   /* Hint text */
   .token-hint {
     font-size: 0.625rem; color: var(--rumi-text-muted);
-    opacity: 0.7; margin-top: -0.125rem;
+    opacity: 0.7; margin: 0; white-space: nowrap;
   }
 
   /* Max button */
@@ -913,7 +938,8 @@
   .max-text:hover { opacity: 1; text-decoration: underline; }
 
   /* Submit button */
-  .input-submit-row { display: flex; justify-content: flex-end; margin-top: 0.125rem; }
+  .input-submit-row { display: flex; justify-content: flex-end; align-items: center; gap: 0.5rem; margin-top: 0.125rem; }
+  .input-submit-row .token-hint { margin-right: auto; }
   .btn-submit {
     padding: 0.375rem 1rem; font-size: 0.75rem; font-weight: 600;
     border-radius: 0.375rem; border: none; cursor: pointer;
@@ -930,17 +956,6 @@
     border: 1px solid rgba(209,118,232,0.3);
   }
   .btn-submit-debt:hover:not(:disabled) { background: rgba(209,118,232,0.25); }
-
-  /* Messages */
-  .msg-bar {
-    padding: 0.375rem 0.625rem; border-radius: 0.375rem;
-    font-size: 0.75rem; display: flex; justify-content: space-between;
-    align-items: center; margin-bottom: 0.5rem;
-  }
-  .msg-error { background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.2); color: #fca5a5; }
-  .msg-success { background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.2); color: #6ee7b7; }
-  .msg-dismiss { background: none; border: none; color: inherit; cursor: pointer; font-size: 0.875rem; padding: 0 0.25rem; opacity: 0.6; }
-  .msg-dismiss:hover { opacity: 1; }
 
   /* Advanced */
   .advanced-section { margin-top: 0.625rem; padding-top: 0.375rem; border-top: 1px solid var(--rumi-border); }

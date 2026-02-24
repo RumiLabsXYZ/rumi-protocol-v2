@@ -2,7 +2,6 @@
 // This module implements the ICRC-21 standard for human-readable consent messages
 
 use candid::{CandidType, Decode, Deserialize};
-use ic_cdk::update;
 use crate::vault::VaultArg;
 
 /// Metadata about the consent message request
@@ -438,7 +437,6 @@ fn generate_consent_message(method: &str, arg: &[u8]) -> Result<String, String> 
 }
 
 /// ICRC-21: Get consent message for a canister call
-#[update]
 pub fn icrc21_canister_call_consent_message(
     request: ConsentMessageRequest,
 ) -> Icrc21ConsentMessageResult {
@@ -536,7 +534,6 @@ pub fn icrc21_canister_call_consent_message(
 
 /// ICRC-28: Return trusted origins for this canister
 /// This allows signers to verify which frontends are trusted
-#[ic_cdk::query]
 pub fn icrc28_trusted_origins() -> Icrc28TrustedOriginsResponse {
     Icrc28TrustedOriginsResponse {
         trusted_origins: vec![
@@ -549,7 +546,6 @@ pub fn icrc28_trusted_origins() -> Icrc28TrustedOriginsResponse {
 }
 
 /// ICRC-10: Return supported standards
-#[ic_cdk::query]
 pub fn icrc10_supported_standards() -> Vec<StandardRecord> {
     vec![
         StandardRecord {

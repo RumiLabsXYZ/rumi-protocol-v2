@@ -1,13 +1,27 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { protocolService } from '$lib/services/protocol';
+  import { collateralStore } from '$lib/stores/collateralStore';
+  import { get } from 'svelte/store';
 
   let targetPct = '155';
+  let liqPct = '133';
+  let borrowPct = '150';
+  let recoveryPct = '150';
 
   onMount(async () => {
     try {
       const status = await protocolService.getProtocolStatus();
       if (status.recoveryTargetCr > 0) targetPct = (status.recoveryTargetCr * 100).toFixed(0);
+      if (status.recoveryModeThreshold > 0) recoveryPct = (status.recoveryModeThreshold * 100).toFixed(0);
+
+      await collateralStore.fetchSupportedCollateral();
+      const state = get(collateralStore);
+      const icpConfig = state.collaterals.find(c => c.symbol === 'ICP');
+      if (icpConfig) {
+        liqPct = (icpConfig.liquidationCr * 100).toFixed(0);
+        borrowPct = (icpConfig.minimumCr * 100).toFixed(0);
+      }
     } catch (e) {
       console.error('Failed to fetch protocol status:', e);
     }
@@ -45,8 +59,14 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Recovery Mode Cascades</h2>
-    <p>If the total system collateral ratio drops below 150%, the protocol enters Recovery mode and raises the liquidation threshold to 150%. This can cause vaults that were previously safe (e.g., at 145%) to suddenly become liquidatable — even though those individual vaults didn't change.</p>
-    <p>In Recovery mode, vaults between 133% and 150% CR receive <strong>targeted partial liquidation</strong> — only enough debt is repaid to restore their CR to {targetPct}%. They are not fully liquidated. Vaults below 133% are still fully liquidated. See <a href="/docs/liquidation" class="doc-link">Liquidation Mechanics</a> for details.</p>
+    <p>If the total system collateral ratio drops below the Recovery Mode threshold (currently {recoveryPct}%), the protocol enters Recovery mode and raises the liquidation threshold to the borrowing threshold (currently {borrowPct}% for ICP). This can cause vaults that were previously safe to suddenly become liquidatable — even though those individual vaults didn't change.</p>
+    <p>The Recovery Mode threshold is a <strong>debt-weighted average</strong> of all collateral types' borrowing thresholds. If new collateral types are added with different thresholds, the trigger point for Recovery Mode changes for everyone. Borrowing is still allowed in Recovery mode, but the fee drops to 0% to encourage repayment.</p>
+    <p>In Recovery mode, vaults between {liqPct}% and {borrowPct}% CR receive <strong>targeted partial liquidation</strong> — only enough debt is repaid to restore their CR to {targetPct}%. They are not fully liquidated. Vaults below {liqPct}% are still fully liquidated. See <a href="/docs/liquidation" class="doc-link">Liquidation Mechanics</a> for details.</p>
+  </section>
+
+  <section class="doc-section">
+    <h2 class="doc-heading">Redistribution Risk</h2>
+    <p>If a vault becomes deeply undercollateralized and is not liquidated by a third party, the protocol can redistribute its remaining debt and collateral across all other vaults of the same collateral type. This means your vault can absorb extra debt from a failed vault — even if your own vault is healthy. The extra debt comes with proportional extra collateral, so the net impact is a slight CR decrease. See <a href="/docs/liquidation" class="doc-link">Liquidation Mechanics</a> for the formula.</p>
   </section>
 
   <section class="doc-section">
@@ -57,5 +77,23 @@
   <section class="doc-section">
     <h2 class="doc-heading">Stablecoin Depeg Risk</h2>
     <p>The protocol accepts ckUSDT and ckUSDC for vault repayment and liquidation at a 1:1 rate with icUSD. If either stablecoin depegs significantly, this could allow users to repay debt at a discount. As a safeguard, the protocol checks live prices via the XRC oracle and rejects transactions if the stablecoin is trading outside the $0.95–$1.05 range.</p>
+  </section>
+
+  <section class="doc-section">
+    <h2 class="doc-heading">Non-Atomic Inter-Canister Calls</h2>
+    <p>Unlike Ethereum where transactions are atomic (all-or-nothing), the Internet Computer uses asynchronous inter-canister messaging. A multi-step operation (e.g., burn icUSD then send ckStable) can fail partway through. The protocol mitigates this with a compensation pattern: if a later step fails, earlier steps are automatically reversed (e.g., icUSD is refunded). However, if the reversal also fails, manual intervention via <a href="/transparency" class="doc-link">admin mint</a> may be required.</p>
+  </section>
+
+  <section class="doc-section">
+    <h2 class="doc-heading">Admin Controls</h2>
+    <p>The developer principal can mint icUSD directly via an <code>admin_mint_icusd</code> function. This exists as an emergency tool — for example, to refund users who lost funds due to a failed inter-canister transfer. Guardrails: each mint is capped at 1,500 icUSD with a 72-hour cooldown. Every use is recorded on-chain with a reason. See the <a href="/transparency" class="doc-link">Transparency</a> page for a full log.</p>
+    <p>Beyond minting, the developer principal can adjust all configurable protocol parameters without a timelock or governance vote. This includes: borrowing fee, liquidation bonus, redemption fee floor/ceiling, reserve redemption fee, ckStable repay fee, recovery liquidation buffer, and per-collateral settings (liquidation ratio, borrow threshold, debt ceiling, status). The developer can also enable/disable reserve redemptions and individual stablecoin tokens.</p>
+    <p>All parameter changes are recorded as on-chain events in the protocol's immutable event log. If the protocol transitions to SNS (DAO) governance, these functions would be controlled by governance proposals rather than a single principal.</p>
+  </section>
+
+  <section class="doc-section">
+    <h2 class="doc-heading">Reserve Depletion</h2>
+    <p>The protocol accumulates ckUSDT and ckUSDC reserves when users repay vault debt with stablecoins. These reserves are used to fill <a href="/docs/redemptions" class="doc-link">reserve redemptions</a> (Tier 1). If redemption demand exceeds the available reserves, the remainder spills over into vault redemptions, which take ICP collateral from the lowest-CR vaults.</p>
+    <p>Heavy redemption activity can drain reserves entirely, causing all subsequent redemptions to hit vaults directly. The protocol admin can disable reserve redemptions if reserve levels become critically low. Vault owners should be aware that redemptions can reduce their collateral even if they maintain healthy collateral ratios — vaults with the lowest CRs are targeted first.</p>
   </section>
 </article>

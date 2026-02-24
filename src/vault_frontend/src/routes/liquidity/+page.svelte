@@ -183,7 +183,7 @@
 </script>
 
 <svelte:head>
-  <title>RUMI Protocol - Liquidity</title>
+  <title>Rumi Protocol - Liquidity</title>
 </svelte:head>
 
 <div class="container mx-auto px-4 max-w-6xl">
@@ -193,7 +193,7 @@
         Liquidity Pool
       </h1>
       <p class="text-xl text-gray-300 max-w-2xl mx-auto">
-        Provide liquidity to the RUMI Protocol and earn rewards
+        Provide liquidity to the Rumi Protocol and earn rewards
       </p>
     </div>
     

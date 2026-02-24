@@ -19,13 +19,6 @@ import { walletOperations } from './protocol/walletOperations';
 const E8S = 100_000_000;
 const MIN_ICP_AMOUNT = 100_000; // 0.001 ICP
 const MIN_ICUSD_AMOUNT = 100_000_000; // 1 icUSD (reduced from 5)
-const MIN_PARTIAL_REPAY_AMOUNT = 1_000_000; // 0.01 icUSD for partial repayments
-const MIN_PARTIAL_LIQUIDATION_AMOUNT = 1_000_000; // 0.01 icUSD for partial liquidations
-const DUST_THRESHOLD = 100; // 0.000001 icUSD - dust threshold for vault closing
-const MINIMUM_COLLATERAL_RATIO = 1.5; // 150% — minimum for minting (66% LTV)
-const LIQUIDATION_COLLATERAL_RATIO = 1.33; // 133% — liquidation threshold (75% LTV)
-const RECOVERY_COLLATERAL_RATIO = 1.5; // 150%
-
 /**
  * Protocol Service provides a consolidated API to interact with the protocol canister
  * This is the main entry point that delegates to specialized modules
@@ -53,6 +46,9 @@ export class ProtocolService {
   static closeVault = ApiClient.closeVault;
   static getVaultHistory = ApiClient.getVaultHistory;
   static redeemIcp = ApiClient.redeemIcp;
+  static redeemCollateral = ApiClient.redeemCollateral;
+  static redeemReserves = ApiClient.redeemReserves;
+  static getReserveBalances = ApiClient.getReserveBalances;
   static withdrawCollateral = ApiClient.withdrawCollateral;
   static withdrawPartialCollateral = ApiClient.withdrawPartialCollateral;
 
@@ -75,6 +71,14 @@ export class ProtocolService {
   static approveIcusdTransfer = walletOperations.approveIcusdTransfer;
   static approveIcpTransfer = walletOperations.approveIcpTransfer;
   static resetWalletSignerState = walletOperations.resetWalletSignerState;
+
+  // Multi-collateral wallet operations
+  static approveCollateralTransfer = walletOperations.approveCollateralTransfer;
+  static checkCollateralAllowance = walletOperations.checkCollateralAllowance;
+
+  // Multi-collateral queries
+  static getSupportedCollateralTypes = QueryOperations.getSupportedCollateralTypes;
+  static getCollateralConfig = QueryOperations.getCollateralConfig;
 
 }
 
@@ -99,6 +103,9 @@ export const protocolService = {
   closeVault: ProtocolService.closeVault,
   getVaultHistory: ProtocolService.getVaultHistory,
   redeemIcp: ProtocolService.redeemIcp,
+  redeemCollateral: ProtocolService.redeemCollateral,
+  redeemReserves: ProtocolService.redeemReserves,
+  getReserveBalances: ProtocolService.getReserveBalances,
   getLiquidityStatus: ProtocolService.getLiquidityStatus,
   provideLiquidity: ProtocolService.provideLiquidity,
   withdrawLiquidity: ProtocolService.withdrawLiquidity,
@@ -121,6 +128,14 @@ export const protocolService = {
   checkIcusdAllowance: ProtocolService.checkIcusdAllowance,
   approveIcusdTransfer: ProtocolService.approveIcusdTransfer,
   
+  // Multi-collateral wallet operations
+  approveCollateralTransfer: ProtocolService.approveCollateralTransfer,
+  checkCollateralAllowance: ProtocolService.checkCollateralAllowance,
+
+  // Multi-collateral queries
+  getSupportedCollateralTypes: ProtocolService.getSupportedCollateralTypes,
+  getCollateralConfig: ProtocolService.getCollateralConfig,
+
   // Error helpers
   isAlreadyProcessingError: ProtocolService.isAlreadyProcessingError,
   isStaleProcessingState: ProtocolService.isStaleProcessingState,

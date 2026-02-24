@@ -7,7 +7,9 @@
   import { cubicOut } from 'svelte/easing';
   import type { CandidVault } from '$lib/services/types';
   import { walletOperations } from "$lib/services/protocol/walletOperations";
-  import { CONFIG } from "$lib/config";
+  import { CONFIG, CANISTER_IDS } from "$lib/config";
+  import { collateralStore } from '$lib/stores/collateralStore';
+  import { getLiquidationCR } from '$lib/protocol';
 
   let liquidatableVaults: CandidVault[] = [];
   let icpPrice = 0;
@@ -51,10 +53,14 @@
   });
 
   function calculateCollateralRatio(vault: CandidVault): number {
-    const icpAmount = Number(vault.icp_margin_amount || 0) / 1e8;
+    const ctPrincipal = vault.collateral_type ? (typeof vault.collateral_type === 'string' ? vault.collateral_type : vault.collateral_type.toText?.() || CANISTER_IDS.ICP_LEDGER) : CANISTER_IDS.ICP_LEDGER;
+    const ctInfo = collateralStore.getCollateralInfo(ctPrincipal);
+    const decimals = ctInfo?.decimals ?? 8;
+    const price = ctInfo?.price || (ctPrincipal === CANISTER_IDS.ICP_LEDGER ? icpPrice : 0);
+    const collateralAmount = Number(vault.collateral_amount || vault.icp_margin_amount || 0) / Math.pow(10, decimals);
     const icusdAmount = Number(vault.borrowed_icusd_amount || 0) / 1e8;
     if (icusdAmount <= 0) return Infinity;
-    const ratio = (icpAmount * icpPrice / icusdAmount) * 100;
+    const ratio = (collateralAmount * price / icusdAmount) * 100;
     return isFinite(ratio) ? ratio : 0;
   }
 
@@ -62,14 +68,25 @@
     return Number(vault.borrowed_icusd_amount || 0) / 1e8;
   }
 
+  function getVaultCollateralInfo(vault: CandidVault) {
+    const ctPrincipal = vault.collateral_type ? (typeof vault.collateral_type === 'string' ? vault.collateral_type : vault.collateral_type.toText?.() || CANISTER_IDS.ICP_LEDGER) : CANISTER_IDS.ICP_LEDGER;
+    const ctInfo = collateralStore.getCollateralInfo(ctPrincipal);
+    const decimals = ctInfo?.decimals ?? 8;
+    const price = ctInfo?.price || (ctPrincipal === CANISTER_IDS.ICP_LEDGER ? icpPrice : 0);
+    const symbol = ctInfo?.symbol ?? 'ICP';
+    const collateralAmount = Number(vault.collateral_amount || vault.icp_margin_amount || 0) / Math.pow(10, decimals);
+    const ledgerFee = ctInfo?.ledgerFee ? ctInfo.ledgerFee / Math.pow(10, decimals) : 0.0001;
+    return { ctPrincipal, decimals, price, symbol, collateralAmount, ledgerFee };
+  }
+
   function getMaxLiquidation(vault: CandidVault): number {
     const debt = getVaultDebt(vault);
     const bal = getActiveBalance(vault.vault_id);
-    const icpCollateral = Number(vault.icp_margin_amount || 0) / 1e8;
-    const currentPrice = icpPrice || 0;
+    const { collateralAmount, price } = getVaultCollateralInfo(vault);
+    const currentPrice = price || 0;
 
     if (currentPrice > 0 && debt > 0) {
-      const collateralValue = icpCollateral * currentPrice;
+      const collateralValue = collateralAmount * currentPrice;
       // Cap at the amount needed to restore vault to recovery target CR
       const factor = recoveryTargetCr - liquidationBonus;
       const numerator = recoveryTargetCr * debt - collateralValue;
@@ -82,16 +99,16 @@
     return Math.min(bal, debt);
   }
 
-  function calculateSeizure(vault: CandidVault, icusdAmount: number): { icpSeized: number, usdValue: number } {
-    const currentPrice = icpPrice || 1;
-    const icpCollateral = Number(vault.icp_margin_amount || 0) / 1e8;
-    const ICP_LEDGER_FEE = 0.0001; // 10,000 e8s — deducted by backend before ICP transfer
-    let icpReceived = currentPrice > 0 ? icusdAmount / currentPrice * liquidationBonus : 0;
-    const icpSeized = Math.max(0, Math.min(icpReceived, icpCollateral) - ICP_LEDGER_FEE);
-    const usdValue = icpSeized * currentPrice;
+  function calculateSeizure(vault: CandidVault, icusdAmount: number): { collateralSeized: number, usdValue: number, symbol: string } {
+    const { collateralAmount, price, symbol, ledgerFee } = getVaultCollateralInfo(vault);
+    const currentPrice = price || 1;
+    let collateralReceived = currentPrice > 0 ? icusdAmount / currentPrice * liquidationBonus : 0;
+    const collateralSeized = Math.max(0, Math.min(collateralReceived, collateralAmount) - ledgerFee);
+    const usdValue = collateralSeized * currentPrice;
     return {
-      icpSeized: isFinite(icpSeized) ? icpSeized : 0,
-      usdValue: isFinite(usdValue) ? usdValue : 0
+      collateralSeized: isFinite(collateralSeized) ? collateralSeized : 0,
+      usdValue: isFinite(usdValue) ? usdValue : 0,
+      symbol
     };
   }
 
@@ -106,7 +123,7 @@
   }
 
   // Reactive seizure: called from template, reads liquidationAmounts directly
-  function getSeizure(vault: CandidVault): { icpSeized: number, usdValue: number } | null {
+  function getSeizure(vault: CandidVault): { collateralSeized: number, usdValue: number, symbol: string } | null {
     // Reference the whole object so Svelte tracks assignment
     const _amounts = liquidationAmounts;
     const v = parseFloat(_amounts[vault.vault_id]) || 0;
@@ -129,6 +146,7 @@
         original_icp_margin_amount: vault.icp_margin_amount,
         original_borrowed_icusd_amount: vault.borrowed_icusd_amount,
         icp_margin_amount: Number(vault.icp_margin_amount || 0),
+        collateral_amount: Number(vault.collateral_amount || vault.icp_margin_amount || 0),
         borrowed_icusd_amount: Number(vault.borrowed_icusd_amount || 0),
         vault_id: Number(vault.vault_id || 0),
         owner: vault.owner.toString()
@@ -203,7 +221,7 @@
 
       if (result.success) {
         const seizure = calculateSeizure(vault, inputAmount);
-        liquidationSuccess = `Liquidated vault #${vault.vault_id}. Paid ${formatNumber(inputAmount)} ${token}, received ${formatNumber(seizure.icpSeized, 4)} ICP.`;
+        liquidationSuccess = `Liquidated vault #${vault.vault_id}. Paid ${formatNumber(inputAmount)} ${token}, received ${formatNumber(seizure.collateralSeized, 4)} ${seizure.symbol}.`;
         liquidationAmounts[vault.vault_id] = '';
         await loadLiquidatableVaults();
       } else { liquidationError = result.error || "Liquidation failed"; }
@@ -240,7 +258,7 @@
   }
 </script>
 
-<svelte:head><title>RUMI Protocol - Liquidations</title></svelte:head>
+<svelte:head><title>Rumi Protocol - Liquidations</title></svelte:head>
 
 <div class="liq-page">
   <div class="liq-header">
@@ -286,7 +304,10 @@
         {@const isProcessingThis = processingVaultId === vault.vault_id}
         {@const crDanger = cr < 130}
         {@const crCaution = cr >= 130 && cr < 150}
-        {@const s = getSeizure(vault)}
+        {@const inputVal = parseFloat(liquidationAmounts[vault.vault_id] || '') || 0}
+        {@const overMax = inputVal > 0 && maxLiq > 0 && inputVal > maxLiq}
+        {@const s = inputVal > 0 && !overMax ? calculateSeizure(vault, inputVal) : null}
+        {@const ci = getVaultCollateralInfo(vault)}
 
         <div class="liq-card">
           <div class="card-body">
@@ -304,7 +325,7 @@
               <div class="left-stats">
                 <span class="stat"><span class="stat-label">Debt</span> <span class="stat-value">{formatNumber(debt, 2)} icUSD</span></span>
                 <span class="stat-sep">·</span>
-                <span class="stat"><span class="stat-label">Collateral</span> <span class="stat-value">{formatNumber(vault.icp_margin_amount / 1e8, 4)} ICP</span></span>
+                <span class="stat"><span class="stat-label">Collateral</span> <span class="stat-value">{formatNumber(ci.collateralAmount, 4)} {ci.symbol}</span></span>
               </div>
             </div>
 
@@ -312,7 +333,7 @@
             <div class="card-center">
               {#if s}
                 <span class="outcome-label">You receive</span>
-                <span class="outcome-line">{formatNumber(s.icpSeized, 4)} ICP <span class="outcome-usd">${formatNumber(s.usdValue, 2)}</span></span>
+                <span class="outcome-line">{formatNumber(s.collateralSeized, 4)} {s.symbol} <span class="outcome-usd">${formatNumber(s.usdValue, 2)}</span></span>
               {/if}
             </div>
 
@@ -328,7 +349,7 @@
               </div>
               <div class="exec-row">
                 <div class="input-wrap">
-                  <input type="number" class="liq-input liq-input-with-select" class:input-over={isOverMax(vault)}
+                  <input type="number" class="liq-input liq-input-with-select" class:input-over={overMax}
                     bind:value={liquidationAmounts[vault.vault_id]}
                     on:input={() => { liquidationAmounts = liquidationAmounts; }}
                     min="0" step="0.01"
@@ -345,7 +366,7 @@
                 </div>
                 <button class="btn-primary btn-sm btn-liquidate"
                   on:click={() => handleLiquidate(vault)}
-                  disabled={!isConnected || processingVaultId !== null || !getInputVal(vault) || isOverMax(vault)}>
+                  disabled={!isConnected || processingVaultId !== null || inputVal <= 0}>
                   {#if isProcessingThis}
                     {isApprovingAllowance ? 'Approving…' : 'Liquidating…'}
                   {:else}

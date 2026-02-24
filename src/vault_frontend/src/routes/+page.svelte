@@ -7,10 +7,12 @@
   import { appDataStore, protocolStatus, isLoadingProtocol } from '$lib/stores/appDataStore';
   import { walletStore, isConnected, principal } from '$lib/stores/wallet';
   import { protocolService } from '$lib/services/protocol';
-  import { MINIMUM_CR, LIQUIDATION_CR } from '$lib/protocol';
+  import { MINIMUM_CR, LIQUIDATION_CR, getMinimumCR, getLiquidationCR, getBorrowingFee } from '$lib/protocol';
+  import { collateralStore, activeCollateralTypes } from '$lib/stores/collateralStore';
+  import { CANISTER_IDS } from '$lib/config';
   import ProtocolStats from '$lib/components/dashboard/ProtocolStats.svelte';
 
-  let icpAmount = 1;
+  let collateralAmount = 1;
   let icusdAmount = 5;
   let errorMessage = '';
   let successMessage = '';
@@ -18,47 +20,67 @@
   let showDevInput = false;
 
   // Collateral token selector
-  let selectedCollateral = 'ICP';
+  let selectedCollateralPrincipal = CANISTER_IDS.ICP_LEDGER;
   let showCollateralDropdown = false;
-  const collateralTokens = [{ id: 'ICP', label: 'ICP', color: '#2DD4BF' }];
+
+  // Populate collateral token list from store, with ICP fallback
+  $: collateralTokens = $activeCollateralTypes.length > 0
+    ? $activeCollateralTypes.map(ct => ({
+        id: ct.principal,
+        label: ct.symbol,
+        color: ct.color,
+      }))
+    : [{ id: CANISTER_IDS.ICP_LEDGER, label: 'ICP', color: '#2DD4BF' }];
+
+  // Derive per-collateral reactive values
+  $: selectedCollateralInfo = collateralStore.getCollateralInfo(selectedCollateralPrincipal);
+  $: selectedSymbol = selectedCollateralInfo?.symbol ?? 'ICP';
+  $: selectedMinCR = getMinimumCR(selectedCollateralPrincipal);
+  $: selectedLiqCR = getLiquidationCR(selectedCollateralPrincipal);
+  $: selectedBorrowingFee = getBorrowingFee(selectedCollateralPrincipal);
+
+  // Price: use per-collateral price from store, fall back to ICP from protocol status
+  $: icpPrice = $protocolStatus?.lastIcpRate || 0;
+  $: collateralPrice = selectedCollateralInfo?.price
+    || (selectedCollateralPrincipal === CANISTER_IDS.ICP_LEDGER ? icpPrice : 0);
+  $: collateralValue = collateralAmount * collateralPrice;
 
   let isPriceLoading = true;
   let priceRefreshInterval: ReturnType<typeof setInterval>;
   let priceUpdateError = false;
 
-  $: icpPrice = $protocolStatus?.lastIcpRate || 0;
-  $: collateralValue = icpAmount * icpPrice;
+  // Legacy alias for backward compat in template
+  $: icpAmount = collateralAmount;
 
-  const borrowingFee = 0.005;
-  $: calculatedBorrowFee = icusdAmount * borrowingFee;
+  $: calculatedBorrowFee = icusdAmount * selectedBorrowingFee;
   $: calculatedIcusdAmount = icusdAmount - calculatedBorrowFee;
-  $: calculatedCollateralRatio = icpAmount > 0 && icusdAmount >= 0.001
-    ? ((icpAmount * icpPrice) / icusdAmount) * 100 : icpAmount > 0 ? Infinity : 0;
+  $: calculatedCollateralRatio = collateralAmount > 0 && icusdAmount >= 0.001
+    ? ((collateralAmount * collateralPrice) / icusdAmount) * 100 : collateralAmount > 0 ? Infinity : 0;
   $: formattedCollateralRatio = calculatedCollateralRatio === Infinity
     ? '∞' : calculatedCollateralRatio > 1000000 ? '>1,000,000' : formatNumber(calculatedCollateralRatio);
-  $: isValidCollateralRatio = calculatedCollateralRatio >= MINIMUM_CR * 100;
+  $: isValidCollateralRatio = calculatedCollateralRatio >= selectedMinCR * 100;
 
   // Liquidation price
-  $: liquidationPrice = icpAmount > 0 && icusdAmount > 0
-    ? (icusdAmount * LIQUIDATION_CR) / icpAmount : 0;
-  $: liqPriceRatio = icpPrice > 0 && liquidationPrice > 0 ? liquidationPrice / icpPrice : 0;
+  $: liquidationPrice = collateralAmount > 0 && icusdAmount > 0
+    ? (icusdAmount * selectedLiqCR) / collateralAmount : 0;
+  $: liqPriceRatio = collateralPrice > 0 && liquidationPrice > 0 ? liquidationPrice / collateralPrice : 0;
   $: liqPriceSeverity = liqPriceRatio > 0.75 ? 'danger' : liqPriceRatio > 0.5 ? 'caution' : 'safe';
-  $: safetyDelta = icpPrice > 0 && liquidationPrice > 0
-    ? ((icpPrice - liquidationPrice) / icpPrice) * 100 : 0;
+  $: safetyDelta = collateralPrice > 0 && liquidationPrice > 0
+    ? ((collateralPrice - liquidationPrice) / collateralPrice) * 100 : 0;
 
   // Max borrow
-  $: maxBorrow = icpAmount > 0 && icpPrice > 0
-    ? Math.floor(((icpAmount * icpPrice) / MINIMUM_CR) * 100) / 100 : 0;
+  $: maxBorrow = collateralAmount > 0 && collateralPrice > 0
+    ? Math.floor(((collateralAmount * collateralPrice) / selectedMinCR) * 100) / 100 : 0;
 
   // CR gauge zones (percentage positions on a 0–400% scale)
   $: gaugePosition = calculatedCollateralRatio === Infinity
     ? 100 : Math.min(calculatedCollateralRatio / 4, 100);
-  // Zone boundaries: liquidation at 133%, caution at 200%, mapped to 0-100 scale
-  const liqZone = (LIQUIDATION_CR * 100) / 4;   // 33.25%
+  // Zone boundaries mapped to 0-100 scale
+  $: liqZone = (selectedLiqCR * 100) / 4;
   const cautionZone = 200 / 4;                    // 50%
 
-  function selectCollateral(id: string) {
-    selectedCollateral = id;
+  function selectCollateral(principalText: string) {
+    selectedCollateralPrincipal = principalText;
     showCollateralDropdown = false;
   }
 
@@ -99,18 +121,18 @@
 
   async function createVault() {
     if (!$isConnected) { errorMessage = 'Please connect your wallet first'; return; }
-    if (icpAmount <= 0) { errorMessage = 'Please enter a valid collateral amount'; return; }
+    if (collateralAmount <= 0) { errorMessage = 'Please enter a valid collateral amount'; return; }
     if (icusdAmount <= 0) { errorMessage = 'Please enter a valid icUSD amount to borrow'; return; }
-    if (!isValidCollateralRatio) { errorMessage = `Collateral ratio must be at least ${(MINIMUM_CR * 100).toFixed(0)}%`; return; }
+    if (!isValidCollateralRatio) { errorMessage = `Collateral ratio must be at least ${(selectedMinCR * 100).toFixed(0)}%`; return; }
     actionInProgress = true; errorMessage = ''; successMessage = '';
     try {
-      const openResult = await protocolService.openVault(icpAmount);
+      const openResult = await protocolService.openVault(collateralAmount, selectedCollateralPrincipal);
       if (!openResult.success) { errorMessage = openResult.error || 'Failed to open vault'; return; }
       const borrowResult = await protocolService.borrowFromVault(openResult.vaultId!, icusdAmount);
       if (borrowResult.success) {
         successMessage = `Successfully created vault #${openResult.vaultId} and borrowed ${icusdAmount} icUSD!`;
         if ($principal) await appDataStore.refreshAll($principal);
-        icpAmount = 1; icusdAmount = 5;
+        collateralAmount = 1; icusdAmount = 5;
       } else { errorMessage = borrowResult.error || 'Failed to borrow from vault'; }
     } catch (error) {
       console.error('Error creating vault:', error);
@@ -119,7 +141,7 @@
   }
 </script>
 
-<svelte:head><title>RUMI Protocol - Borrow icUSD</title></svelte:head>
+<svelte:head><title>Rumi Protocol - Borrow icUSD</title></svelte:head>
 
 <svelte:window on:click={handleWindowClick} />
 
@@ -141,28 +163,28 @@
             <div class="form-field">
               <label for="collateral-amount" class="form-label">Collateral</label>
               <div class="input-wrap">
-                <input id="collateral-amount" type="number" bind:value={icpAmount} min="0" step="0.01"
+                <input id="collateral-amount" type="number" bind:value={collateralAmount} min="0" step="0.01"
                   class="icp-input form-input" placeholder="0.00" disabled={actionInProgress} />
                 <button class="token-selector"
                   on:click|stopPropagation={() => { showCollateralDropdown = !showCollateralDropdown; }}>
-                  <span class="token-dot token-dot-icp"></span>
-                  {selectedCollateral}
+                  <span class="token-dot" style="background:{collateralTokens.find(t => t.id === selectedCollateralPrincipal)?.color || '#2DD4BF'}"></span>
+                  {selectedSymbol}
                   <svg class="token-chevron" width="10" height="6" viewBox="0 0 10 6" fill="none"><path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
                 </button>
                 {#if showCollateralDropdown}
                   <div class="token-dropdown" on:click|stopPropagation>
                     {#each collateralTokens as token}
-                      <button class="token-option" class:token-option-active={selectedCollateral === token.id}
+                      <button class="token-option" class:token-option-active={selectedCollateralPrincipal === token.id}
                         on:click={() => selectCollateral(token.id)}>
-                        <span class="token-dot token-dot-icp"></span>
+                        <span class="token-dot" style="background:{token.color}"></span>
                         {token.label}
                       </button>
                     {/each}
                   </div>
                 {/if}
               </div>
-              {#if icpAmount > 0 && icpPrice > 0}
-                <p class="form-hint">≈ ${formatNumber(icpAmount * icpPrice)}</p>
+              {#if collateralAmount > 0 && collateralPrice > 0}
+                <p class="form-hint">≈ ${formatNumber(collateralAmount * collateralPrice)}</p>
               {/if}
             </div>
 
@@ -180,13 +202,13 @@
                 </div>
               </div>
               {#if icusdAmount > 0}
-                <div class="fee-row"><span>Fee ({(borrowingFee * 100).toFixed(1)}%)</span><span>{formatNumber(calculatedBorrowFee)} icUSD</span></div>
+                <div class="fee-row"><span>Fee ({(selectedBorrowingFee * 100).toFixed(1)}%)</span><span>{formatNumber(calculatedBorrowFee)} icUSD</span></div>
                 <div class="fee-row"><span>You receive</span><span>{formatNumber(calculatedIcusdAmount)} icUSD</span></div>
               {/if}
             </div>
 
             <!-- CR gauge + liquidation price -->
-            {#if icpAmount > 0 && icusdAmount > 0}
+            {#if collateralAmount > 0 && icusdAmount > 0}
               <div class="gauge-section">
                 <div class="gauge-header">
                   <span>Collateral Ratio</span>
@@ -202,7 +224,7 @@
                     style="left:{gaugePosition}%"></div>
                 </div>
                 <div class="gauge-labels">
-                  <span>{(LIQUIDATION_CR * 100).toFixed(0)}%</span>
+                  <span>{(selectedLiqCR * 100).toFixed(0)}%</span>
                   <span>200%</span>
                   <span>400%+</span>
                 </div>
