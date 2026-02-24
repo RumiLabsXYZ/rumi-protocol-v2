@@ -94,6 +94,24 @@ export interface ProtocolStatusDTO {
   recoveryTargetCr: number;
   recoveryModeThreshold: number;
   recoveryLiquidationBuffer: number;
+  reserveRedemptionsEnabled: boolean;
+  reserveRedemptionFee: number;
+}
+
+// Reserve redemption result from backend
+export interface ReserveRedemptionResult {
+  icusdBlockIndex: number;
+  stableAmountSent: number;    // in e6s (ckStable native units)
+  feeAmount: number;           // in icUSD e8s
+  stableTokenUsed: string;     // principal text of the ledger used
+  vaultSpilloverAmount: number; // icUSD e8s that spilled over to vault redemptions
+}
+
+// Reserve balance for a given ckStable token
+export interface ReserveBalance {
+  ledger: string;   // principal text
+  balance: number;  // raw native units (e6s for ckStable)
+  symbol: string;
 }
 
 export type ProtocolStatus = ProtocolStatusDTO;

@@ -50,13 +50,14 @@
   <section class="doc-section">
     <h2 class="doc-heading">Full Liquidation</h2>
     <p>Any user can liquidate an undercollateralized vault. The liquidator pays the vault's full icUSD debt and receives the vault's ICP collateral at a {bonusPct}% bonus — meaning they get ICP worth {bonusMult}% of the debt they repaid, up to the total collateral in the vault.</p>
-    <p>If the vault's collateral is worth less than {bonusMult}% of the debt (deep undercollateralization), the liquidator receives all available collateral. Any excess collateral above the {bonusMult}% is returned to the original vault owner.</p>
+    <p>If the vault's collateral is worth less than {bonusMult}% of the debt (deep undercollateralization), the liquidator receives all available collateral. For full liquidations, any excess collateral above the {bonusMult}% is returned to the original vault owner. For partial liquidations, the excess remains in the vault since it stays open.</p>
   </section>
 
   <section class="doc-section">
     <h2 class="doc-heading">Partial Liquidation</h2>
-    <p>Liquidators can also repay only a portion of a vault's debt rather than the full amount. The maximum partial liquidation is capped at a configurable percentage of the vault's total debt (see <a href="/docs/parameters" class="doc-link">Protocol Parameters</a>). The liquidator receives ICP collateral proportional to the debt they repay, plus the same {bonusPct}% bonus.</p>
-    <p>Partial liquidations leave the vault open with reduced debt and reduced collateral. This is useful for large vaults where repaying the full debt may not be practical.</p>
+    <p>Liquidators can also repay only a portion of a vault's debt. The maximum amount is capped at the amount needed to restore the vault's collateral ratio to the Recovery Target CR. The formula is the same as in Recovery mode:</p>
+    <p class="doc-formula">max repay = (target CR &times; debt &minus; collateral value) &divide; (target CR &minus; liquidation bonus)</p>
+    <p>If the requested amount is less than this cap, the liquidator pays their chosen amount. The liquidator receives ICP collateral proportional to the debt they repay, plus the same {bonusPct}% bonus. Partial liquidations leave the vault open with reduced debt and reduced collateral.</p>
   </section>
 
   <section class="doc-section">
@@ -85,6 +86,13 @@
     <p><strong>General Availability</strong> — total CR is above {recoveryPct}%. Normal operations. Liquidation threshold is {liqPct}%. Borrowing fee applies.</p>
     <p><strong>Recovery</strong> — total CR drops below {recoveryPct}%. Liquidation threshold rises to {borrowPct}%. Borrowing fee drops to 0% to encourage repayment. Vaults between {liqPct}–{borrowPct}% get targeted partial liquidation.</p>
     <p><strong>Read-Only</strong> — total CR drops below 100%, or the oracle reports a price below $0.01. All state-changing operations are paused. No new borrows, no liquidations. The protocol waits for conditions to improve.</p>
+  </section>
+
+  <section class="doc-section">
+    <h2 class="doc-heading">Redistribution</h2>
+    <p>If a vault is deeply undercollateralized and no liquidator steps in, the protocol can <strong>redistribute</strong> the vault's remaining debt and collateral across all other vaults of the same collateral type. Each surviving vault absorbs a share proportional to its own collateral:</p>
+    <p class="doc-formula">share = your collateral &divide; total other vault collateral</p>
+    <p>Your vault gains both extra collateral and extra debt from the redistributed vault. The net effect is a slight decrease in your collateral ratio. Redistribution is a last resort — it protects the protocol from bad debt but spreads the cost across all vault owners.</p>
   </section>
 
   <section class="doc-section">

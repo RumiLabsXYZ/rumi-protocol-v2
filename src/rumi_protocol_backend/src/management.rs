@@ -266,6 +266,16 @@ pub async fn transfer_icusd(amount: ICUSD, to: Principal) -> Result<u64, Transfe
     Ok(block_index.0.to_u64().unwrap())
 }
 
+/// Query the ICRC-1 transfer fee for a given ledger canister.
+pub async fn get_ledger_fee(ledger: Principal) -> Result<u64, String> {
+    let client = ICRC1Client {
+        runtime: CdkRuntime,
+        ledger_canister_id: ledger,
+    };
+    let fee = client.fee().await.map_err(|e| format!("icrc1_fee call failed: {:?}", e))?;
+    Ok(fee.0.to_u64().unwrap_or(0))
+}
+
 /// Generic collateral transfer: move tokens from the protocol canister to a recipient.
 /// The `ledger` parameter is the ICRC-1 ledger canister ID of the collateral token.
 pub async fn transfer_collateral(amount: u64, to: Principal, ledger: Principal) -> Result<u64, TransferError> {
@@ -368,5 +378,20 @@ pub async fn transfer_stable_from(token_type: StableTokenType, amount_e6s: u64, 
     Ok(block_index.unwrap().0.to_u64().unwrap())
 }
 
-
-
+/// Query the ICRC-1 balance of the protocol canister on any token ledger.
+pub async fn get_token_balance(ledger: Principal) -> Result<u64, String> {
+    let protocol_id = ic_cdk::id();
+    let result: Result<(Nat,), _> = ic_cdk::call(
+        ledger,
+        "icrc1_balance_of",
+        (Account {
+            owner: protocol_id,
+            subaccount: None,
+        },),
+    )
+    .await;
+    match result {
+        Ok((balance,)) => Ok(balance.0.to_u64().unwrap_or(0)),
+        Err((code, msg)) => Err(format!("icrc1_balance_of failed: {:?} {}", code, msg)),
+    }
+}

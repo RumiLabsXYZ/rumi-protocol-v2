@@ -47,6 +47,8 @@ export class ProtocolService {
   static getVaultHistory = ApiClient.getVaultHistory;
   static redeemIcp = ApiClient.redeemIcp;
   static redeemCollateral = ApiClient.redeemCollateral;
+  static redeemReserves = ApiClient.redeemReserves;
+  static getReserveBalances = ApiClient.getReserveBalances;
   static withdrawCollateral = ApiClient.withdrawCollateral;
   static withdrawPartialCollateral = ApiClient.withdrawPartialCollateral;
 
@@ -102,6 +104,8 @@ export const protocolService = {
   getVaultHistory: ProtocolService.getVaultHistory,
   redeemIcp: ProtocolService.redeemIcp,
   redeemCollateral: ProtocolService.redeemCollateral,
+  redeemReserves: ProtocolService.redeemReserves,
+  getReserveBalances: ProtocolService.getReserveBalances,
   getLiquidityStatus: ProtocolService.getLiquidityStatus,
   provideLiquidity: ProtocolService.provideLiquidity,
   withdrawLiquidity: ProtocolService.withdrawLiquidity,

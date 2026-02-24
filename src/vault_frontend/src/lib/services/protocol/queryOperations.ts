@@ -35,6 +35,8 @@ export class QueryOperations {
         recoveryTargetCr: Number(canisterStatus.recovery_target_cr),
         recoveryModeThreshold: Number(canisterStatus.recovery_mode_threshold),
         recoveryLiquidationBuffer: Number(canisterStatus.recovery_liquidation_buffer),
+        reserveRedemptionsEnabled: Boolean((canisterStatus as any).reserve_redemptions_enabled),
+        reserveRedemptionFee: Number((canisterStatus as any).reserve_redemption_fee),
       };
     });
   }

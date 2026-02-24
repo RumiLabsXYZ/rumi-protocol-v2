@@ -9,6 +9,7 @@ use rumi_protocol_backend::{
     state::{read_state, replace_state, Mode, State},
     vault::{CandidVault, OpenVaultSuccess, VaultArg},
     Fees, GetEventsArg, ProtocolArg, ProtocolError, ProtocolStatus, SuccessWithFee,
+    ReserveRedemptionResult, ReserveBalance,
     VaultArgWithToken, StableTokenType,
 };
 use rumi_protocol_backend::logs::DEBUG;
@@ -232,6 +233,8 @@ fn get_protocol_status() -> ProtocolStatus {
         recovery_target_cr: Ratio::from(s.recovery_mode_threshold.0 + s.recovery_liquidation_buffer.0).to_f64(),
         recovery_mode_threshold: s.recovery_mode_threshold.to_f64(),
         recovery_liquidation_buffer: s.recovery_liquidation_buffer.to_f64(),
+        reserve_redemptions_enabled: s.reserve_redemptions_enabled,
+        reserve_redemption_fee: s.reserve_redemption_fee.to_f64(),
     })
 }
 
@@ -1101,6 +1104,145 @@ async fn set_redemption_fee_ceiling(new_rate: f64) -> Result<(), ProtocolError> 
 #[query]
 fn get_redemption_fee_ceiling() -> f64 {
     read_state(|s| s.redemption_fee_ceiling.to_f64())
+}
+
+// ── Reserve redemption admin functions ──────────────────────────────
+
+/// Enable or disable reserve redemptions (developer only)
+#[candid_method(update)]
+#[update]
+async fn set_reserve_redemptions_enabled(enabled: bool) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can toggle reserve redemptions".to_string()));
+    }
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_reserve_redemptions_enabled(s, enabled);
+    });
+    log!(INFO, "[set_reserve_redemptions_enabled] Reserve redemptions enabled: {}", enabled);
+    Ok(())
+}
+
+/// Get whether reserve redemptions are enabled
+#[candid_method(query)]
+#[query]
+fn get_reserve_redemptions_enabled() -> bool {
+    read_state(|s| s.reserve_redemptions_enabled)
+}
+
+/// Set the flat fee for reserve redemptions (developer only)
+/// Rate is a decimal: 0.003 = 0.3%, range 0.0–0.10
+#[candid_method(update)]
+#[update]
+async fn set_reserve_redemption_fee(new_rate: f64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can set reserve redemption fee".to_string()));
+    }
+    if new_rate < 0.0 || new_rate > 0.10 {
+        return Err(ProtocolError::GenericError("Reserve redemption fee must be between 0 and 0.10 (10%)".to_string()));
+    }
+    let rate = Ratio::from(rust_decimal::Decimal::try_from(new_rate)
+        .map_err(|_| ProtocolError::GenericError("Invalid rate".to_string()))?);
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_reserve_redemption_fee(s, rate);
+    });
+    log!(INFO, "[set_reserve_redemption_fee] Reserve redemption fee set to: {}", new_rate);
+    Ok(())
+}
+
+/// Get the current reserve redemption fee
+#[candid_method(query)]
+#[query]
+fn get_reserve_redemption_fee() -> f64 {
+    read_state(|s| s.reserve_redemption_fee.to_f64())
+}
+
+/// Redeem icUSD for ckStable tokens from reserves (with vault spillover fallback)
+#[candid_method(update)]
+#[update]
+async fn redeem_reserves(amount: u64, preferred_token: Option<Principal>) -> Result<ReserveRedemptionResult, ProtocolError> {
+    validate_call().await?;
+    rumi_protocol_backend::vault::redeem_reserves(amount, preferred_token).await
+}
+
+/// Query available reserve balances
+#[candid_method(query)]
+#[query]
+fn get_reserve_balances() -> Vec<ReserveBalance> {
+    // Note: This returns cached/approximate balances.
+    // Actual balances require async inter-canister calls via the update version.
+    // For now we return the configured ledgers; actual balances fetched by frontend directly.
+    let mut balances = Vec::new();
+    read_state(|s| {
+        if let Some(ledger) = s.ckusdt_ledger_principal {
+            balances.push(ReserveBalance {
+                ledger,
+                balance: 0, // frontend queries ledger directly for live balance
+                symbol: "ckUSDT".to_string(),
+            });
+        }
+        if let Some(ledger) = s.ckusdc_ledger_principal {
+            balances.push(ReserveBalance {
+                ledger,
+                balance: 0,
+                symbol: "ckUSDC".to_string(),
+            });
+        }
+    });
+    balances
+}
+
+/// Admin: mint icUSD to a recipient (developer only).
+/// Used for refunding stuck icUSD from failed operations.
+/// Capped at 1,500 icUSD per call with a 72-hour cooldown between mints.
+/// Every use is recorded as an on-chain event with a stated reason.
+#[candid_method(update)]
+#[update]
+async fn admin_mint_icusd(amount_e8s: u64, to: Principal, reason: String) -> Result<u64, ProtocolError> {
+    const ADMIN_MINT_CAP_E8S: u64 = 150_000_000_000; // 1,500 icUSD
+    const ADMIN_MINT_COOLDOWN_NS: u64 = 72 * 3600 * 1_000_000_000; // 72 hours
+
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can call admin_mint_icusd".to_string()));
+    }
+    if amount_e8s == 0 {
+        return Err(ProtocolError::GenericError("Amount must be > 0".to_string()));
+    }
+    if amount_e8s > ADMIN_MINT_CAP_E8S {
+        return Err(ProtocolError::GenericError(
+            format!("Amount exceeds admin mint cap of {} e8s (1,500 icUSD)", ADMIN_MINT_CAP_E8S)
+        ));
+    }
+
+    // Enforce 72-hour cooldown
+    let last_mint_time = read_state(|s| s.last_admin_mint_time);
+    let now = ic_cdk::api::time();
+    if last_mint_time > 0 && now.saturating_sub(last_mint_time) < ADMIN_MINT_COOLDOWN_NS {
+        let remaining_ns = ADMIN_MINT_COOLDOWN_NS - (now - last_mint_time);
+        let remaining_hours = remaining_ns / (3600 * 1_000_000_000);
+        return Err(ProtocolError::GenericError(
+            format!("Admin mint cooldown active. ~{} hours remaining.", remaining_hours)
+        ));
+    }
+
+    let amount = rumi_protocol_backend::numeric::ICUSD::from(amount_e8s);
+    let block_index = rumi_protocol_backend::management::mint_icusd(amount, to).await
+        .map_err(|e| ProtocolError::GenericError(format!("Mint failed: {:?}", e)))?;
+
+    // Update cooldown timestamp
+    mutate_state(|s| { s.last_admin_mint_time = now; });
+
+    // Record on-chain event for transparency
+    rumi_protocol_backend::event::record_admin_mint(amount, to, reason.clone(), block_index);
+
+    log!(INFO, "[admin_mint_icusd] Minted {} e8s icUSD to {} (block {}). Reason: {}",
+        amount_e8s, to, block_index, reason);
+    Ok(block_index)
 }
 
 /// Set the max partial liquidation ratio (developer only)

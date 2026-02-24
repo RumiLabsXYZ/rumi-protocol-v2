@@ -109,6 +109,24 @@ pub struct ProtocolStatus {
     pub recovery_target_cr: f64,
     pub recovery_mode_threshold: f64,
     pub recovery_liquidation_buffer: f64,
+    pub reserve_redemptions_enabled: bool,
+    pub reserve_redemption_fee: f64,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+pub struct ReserveRedemptionResult {
+    pub icusd_block_index: u64,
+    pub stable_amount_sent: u64,
+    pub fee_amount: u64,
+    pub stable_token_used: Principal,
+    pub vault_spillover_amount: u64,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+pub struct ReserveBalance {
+    pub ledger: Principal,
+    pub balance: u64,
+    pub symbol: String,
 }
 
 #[derive(CandidType, Deserialize, Debug)]

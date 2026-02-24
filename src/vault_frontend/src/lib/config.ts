@@ -12,6 +12,8 @@ export const CANISTER_IDS = {
   // ckUSDT and ckUSDC ledgers on ICP mainnet
   CKUSDT_LEDGER: "cngnf-vqaaa-aaaar-qag4q-cai",
   CKUSDC_LEDGER: "xevnm-gaaaa-aaaar-qafnq-cai",
+  // icUSD index canister for transaction history queries
+  ICUSD_INDEX: "6niqu-siaaa-aaaap-qrjeq-cai",
 } as const;
 
 // Canister IDs for local development

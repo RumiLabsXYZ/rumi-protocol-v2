@@ -6,7 +6,7 @@ use crate::{
 };
 use candid::Principal;
 use ic_canister_log::log;
-use rust_decimal::prelude::FromPrimitive;
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::Serialize;
@@ -44,8 +44,9 @@ pub const DEFAULT_BORROW_FEE: Ratio = Ratio::new(dec!(0.005));
 pub const DEFAULT_CKSTABLE_REPAY_FEE: Ratio = Ratio::new(dec!(0.0005)); // 0.05%
 pub const DEFAULT_LIQUIDATION_BONUS: Ratio = Ratio::new(dec!(1.15)); // 115% (15% bonus)
 pub const DEFAULT_MAX_PARTIAL_LIQUIDATION_RATIO: Ratio = Ratio::new(dec!(0.5)); // 50% max
-pub const DEFAULT_REDEMPTION_FEE_FLOOR: Ratio = Ratio::new(dec!(0.005)); // 0.5%
+pub const DEFAULT_REDEMPTION_FEE_FLOOR: Ratio = Ratio::new(dec!(0.003)); // 0.3%
 pub const DEFAULT_REDEMPTION_FEE_CEILING: Ratio = Ratio::new(dec!(0.05)); // 5%
+pub const DEFAULT_RESERVE_REDEMPTION_FEE: Ratio = Ratio::new(dec!(0.003)); // 0.3% flat fee for reserve redemptions
 pub const DEFAULT_RECOVERY_TARGET_CR: Ratio = Ratio::new(dec!(1.55)); // 155% — legacy; kept for serde backwards compat
 pub const DEFAULT_RECOVERY_LIQUIDATION_BUFFER: Ratio = Ratio::new(dec!(0.05)); // 5% above recovery threshold
 pub const DEFAULT_INTEREST_RATE_APR: Ratio = Ratio::new(dec!(0.0)); // 0% — placeholder for future accrual
@@ -319,6 +320,13 @@ pub struct State {
     /// Updated alongside total_collateral_ratio on each price tick.
     pub recovery_mode_threshold: Ratio,
 
+    // Reserve redemptions
+    pub reserve_redemptions_enabled: bool,
+    pub reserve_redemption_fee: Ratio,
+
+    // Admin mint cooldown tracking
+    pub last_admin_mint_time: u64,
+
     // Multi-collateral support
     pub collateral_configs: BTreeMap<CollateralType, CollateralConfig>,
     pub collateral_to_vault_ids: BTreeMap<CollateralType, BTreeSet<u64>>,
@@ -379,6 +387,13 @@ impl From<InitArg> for State {
             recovery_target_cr: DEFAULT_RECOVERY_TARGET_CR,
             recovery_liquidation_buffer: DEFAULT_RECOVERY_LIQUIDATION_BUFFER,
             recovery_mode_threshold: RECOVERY_COLLATERAL_RATIO,
+
+            // Reserve redemptions
+            reserve_redemptions_enabled: false,
+            reserve_redemption_fee: DEFAULT_RESERVE_REDEMPTION_FEE,
+
+            // Admin mint cooldown
+            last_admin_mint_time: 0,
 
             // Multi-collateral: initialize with ICP as the default collateral
             collateral_configs: {
@@ -1160,12 +1175,22 @@ impl State {
         }
     }
     
+    /// Water-filling redemption: spread redemptions across vaults to equalize CR.
+    ///
+    /// Instead of draining the lowest-CR vault completely, this algorithm raises
+    /// the lowest-CR vault(s) until they match the next tier, then splits
+    /// proportionally by debt among all vaults in the band. This maximizes
+    /// capital efficiency and fairness to vault owners.
     pub fn redeem_on_vaults(
         &mut self,
         icusd_amount: ICUSD,
         collateral_price: UsdIcp,
         collateral_type: &CollateralType,
     ) {
+        if icusd_amount == 0 {
+            return;
+        }
+
         // Resolve config for price & decimals
         let (price, decimals) = match self.get_collateral_config(collateral_type) {
             Some(config) => {
@@ -1183,11 +1208,12 @@ impl State {
             *collateral_type
         };
 
-        let mut icusd_amount_to_convert = icusd_amount;
-        let mut vaults: BTreeSet<(Ratio, VaultId)> = BTreeSet::new();
-
-        // SECURITY: Only include vaults matching the target collateral type
+        // Collect eligible vaults sorted by CR ascending
+        let mut vault_entries: Vec<(Decimal, VaultId)> = Vec::new();
         for vault in self.vault_id_to_vaults.values() {
+            if vault.borrowed_icusd_amount == 0 {
+                continue; // skip zero-debt vaults
+            }
             let vault_ct = if vault.collateral_type == Principal::anonymous() {
                 self.icp_ledger_principal
             } else {
@@ -1196,50 +1222,143 @@ impl State {
             if vault_ct != resolved_ct {
                 continue;
             }
-            vaults.insert((
-                crate::compute_collateral_ratio(vault, collateral_price, self),
-                vault.vault_id,
-            ));
+            let cr = crate::compute_collateral_ratio(vault, collateral_price, self);
+            vault_entries.push((cr.0, vault.vault_id));
+        }
+        vault_entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        if vault_entries.is_empty() {
+            return;
         }
 
-        let vault_ids: Vec<VaultId> = vaults.iter().map(|(_cr, vault_id)| *vault_id).collect();
-        let mut index: usize = 0;
+        let mut remaining = icusd_amount.to_u64() as u128;
 
-        while icusd_amount_to_convert > 0 && index < vault_ids.len() {
-            let vault = self.vault_id_to_vaults.get(&vault_ids[index]).unwrap();
+        // Water-filling: process from lowest CR upward
+        let mut band_start = 0usize;
+        while remaining > 0 && band_start < vault_entries.len() {
+            // Current band = all vaults from band_start that share the lowest CR
+            let band_cr = vault_entries[band_start].0;
 
-            if vault.borrowed_icusd_amount >= icusd_amount_to_convert {
-                // Convert everything on this vault
-                let redeemable_collateral = crate::numeric::icusd_to_collateral_amount(
-                    icusd_amount_to_convert,
-                    price,
-                    decimals,
+            // Find the CR of the next tier (first vault above current band)
+            let mut band_end = band_start + 1;
+            while band_end < vault_entries.len() && vault_entries[band_end].0 == band_cr {
+                band_end += 1;
+            }
+
+            // Compute total debt in the current band
+            let band_vault_ids: Vec<VaultId> = vault_entries[band_start..band_end]
+                .iter().map(|(_, id)| *id).collect();
+            let band_debts: Vec<u128> = band_vault_ids.iter().map(|id| {
+                self.vault_id_to_vaults.get(id).unwrap().borrowed_icusd_amount.to_u64() as u128
+            }).collect();
+            let total_band_debt: u128 = band_debts.iter().sum();
+
+            if total_band_debt == 0 {
+                band_start = band_end;
+                continue;
+            }
+
+            if band_end >= vault_entries.len() {
+                // No next tier — distribute all remaining proportionally across band
+                self.distribute_redemption_across_band(
+                    &band_vault_ids, &band_debts, total_band_debt,
+                    remaining, price, decimals,
                 );
-                self.deduct_amount_from_vault(
-                    redeemable_collateral,
-                    icusd_amount_to_convert,
-                    vault_ids[index],
-                );
-                icusd_amount_to_convert = ICUSD::from(0);
+                remaining = 0;
                 break;
+            }
+
+            // Calculate how much icUSD (e8s) is needed to raise all band vaults to next tier CR
+            let next_cr = vault_entries[band_end].0;
+            // Formula: x_i = D_i * (CR_next - CR_current) / (CR_next - 1)
+            let cr_diff = next_cr - band_cr;
+            let cr_denom = next_cr - Decimal::ONE;
+            if cr_denom <= Decimal::ZERO {
+                // Safety: if next CR <= 1, just drain proportionally
+                self.distribute_redemption_across_band(
+                    &band_vault_ids, &band_debts, total_band_debt,
+                    remaining, price, decimals,
+                );
+                remaining = 0;
+                break;
+            }
+
+            // Total icUSD needed to level up the band (in e8s)
+            let total_needed_dec = Decimal::from(total_band_debt as u64) * cr_diff / cr_denom;
+            let total_needed = total_needed_dec.to_u64().unwrap_or(u64::MAX) as u128;
+
+            if remaining >= total_needed && total_needed > 0 {
+                // Level up the entire band
+                self.distribute_redemption_across_band(
+                    &band_vault_ids, &band_debts, total_band_debt,
+                    total_needed, price, decimals,
+                );
+                remaining -= total_needed;
+
+                // Re-read CRs for band vaults and merge into next tier
+                // (they should now match next_cr approximately)
+                for i in band_start..band_end {
+                    vault_entries[i].0 = next_cr;
+                }
+                // Continue with band_start unchanged — the band now includes the next tier
+                // Actually, we advance to process the merged group in next iteration
+                // Don't advance band_start — loop will re-evaluate with the wider band
+                continue;
             } else {
-                // Convert what we can on this vault
-                let redeemable_icusd_amount = vault.borrowed_icusd_amount;
-                let redeemable_collateral = crate::numeric::icusd_to_collateral_amount(
-                    redeemable_icusd_amount,
-                    price,
-                    decimals,
+                // Can't reach next tier. Distribute remaining proportionally.
+                self.distribute_redemption_across_band(
+                    &band_vault_ids, &band_debts, total_band_debt,
+                    remaining, price, decimals,
                 );
-                self.deduct_amount_from_vault(
-                    redeemable_collateral,
-                    redeemable_icusd_amount,
-                    vault_ids[index],
-                );
-                icusd_amount_to_convert -= redeemable_icusd_amount;
-                index += 1;
+                remaining = 0;
+                break;
             }
         }
-        debug_assert!(icusd_amount_to_convert == 0);
+    }
+
+    /// Distribute a redemption amount proportionally across a band of vaults by debt size.
+    fn distribute_redemption_across_band(
+        &mut self,
+        vault_ids: &[VaultId],
+        debts: &[u128],
+        total_debt: u128,
+        redemption_e8s: u128,
+        price: Decimal,
+        decimals: u8,
+    ) {
+        if total_debt == 0 || redemption_e8s == 0 {
+            return;
+        }
+
+        let mut distributed: u128 = 0;
+        for (i, vault_id) in vault_ids.iter().enumerate() {
+            let vault_debt = debts[i];
+            // Proportional share: redemption_e8s * vault_debt / total_debt
+            let share = if i == vault_ids.len() - 1 {
+                // Last vault gets the remainder to avoid rounding dust
+                redemption_e8s - distributed
+            } else {
+                redemption_e8s * vault_debt / total_debt
+            };
+
+            if share == 0 {
+                continue;
+            }
+
+            // Cap at vault's actual debt
+            let vault = self.vault_id_to_vaults.get(vault_id).unwrap();
+            let max_share = vault.borrowed_icusd_amount.to_u64() as u128;
+            let actual_share = share.min(max_share);
+
+            let icusd_to_deduct = ICUSD::from(actual_share as u64);
+            let collateral_to_deduct = crate::numeric::icusd_to_collateral_amount(
+                icusd_to_deduct,
+                price,
+                decimals,
+            );
+            self.deduct_amount_from_vault(collateral_to_deduct, icusd_to_deduct, *vault_id);
+            distributed += actual_share;
+        }
     }
 
     fn deduct_amount_from_vault(
@@ -1294,6 +1413,11 @@ impl State {
             self.icp_ledger_principal,
             other.icp_ledger_principal,
             "icp_ledger_principal does not match"
+        );
+        ensure_eq!(
+            self.reserve_redemptions_enabled,
+            other.reserve_redemptions_enabled,
+            "reserve_redemptions_enabled does not match"
         );
 
         Ok(())

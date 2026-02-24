@@ -20,6 +20,8 @@
     recoveryTargetCr: number;
     recoveryModeThreshold: number;
     recoveryLiquidationBuffer: number;
+    reserveRedemptionsEnabled?: boolean;
+    reserveRedemptionFee?: number;
   } | undefined = undefined;
 
   // Self-fetch fallback when no prop is provided
@@ -49,6 +51,8 @@
         recoveryTargetCr: Number(s.recoveryTargetCr || 0),
         recoveryModeThreshold: Number(s.recoveryModeThreshold || 0),
         recoveryLiquidationBuffer: Number(s.recoveryLiquidationBuffer || 0),
+        reserveRedemptionsEnabled: Boolean(s.reserveRedemptionsEnabled),
+        reserveRedemptionFee: Number(s.reserveRedemptionFee || 0),
       };
       // Also fetch per-collateral config for ICP-specific values
       await collateralStore.fetchSupportedCollateral();

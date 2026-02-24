@@ -1189,6 +1189,95 @@ static async repayToVaultWithStable(
   
 
     /**
+     * Redeem icUSD for ckStable reserves (ckUSDT/ckUSDC).
+     * Falls back to vault redemption if reserves are insufficient.
+     * @param icusdAmount Amount of icUSD to redeem (human-readable)
+     * @param preferredToken Optional principal of preferred ckStable ledger
+     */
+    static async redeemReserves(
+      icusdAmount: number,
+      preferredToken?: string
+    ): Promise<VaultOperationResult & { stableAmountSent?: number; vaultSpillover?: number }> {
+      try {
+        console.log(`Redeeming ${icusdAmount} icUSD for reserves`);
+
+        if (icusdAmount * E8S < MIN_ICUSD_AMOUNT) {
+          return {
+            success: false,
+            error: `Amount too low, minimum is ${MIN_ICUSD_AMOUNT / E8S} icUSD`
+          };
+        }
+
+        const icusdE8s = BigInt(Math.floor(icusdAmount * E8S));
+
+        // Approve icUSD transfer (the backend pulls via icrc2_transfer_from)
+        const spenderCanisterId = CONFIG.currentCanisterId;
+        const bufferedAmount = icusdE8s * 105n / 100n;
+
+        const currentAllowance = await walletOperations.checkIcusdAllowance(spenderCanisterId);
+        if (currentAllowance < bufferedAmount) {
+          const approvalResult = await walletOperations.approveIcusdTransfer(
+            bufferedAmount, spenderCanisterId
+          );
+          if (!approvalResult.success) {
+            return {
+              success: false,
+              error: approvalResult.error || 'Failed to approve icUSD transfer'
+            };
+          }
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+
+        const actor = await ApiClient.getAuthenticatedActor();
+        const preferredOpt: [] | [Principal] = preferredToken
+          ? [Principal.fromText(preferredToken)]
+          : [];
+
+        const result = await actor.redeem_reserves(icusdE8s, preferredOpt);
+
+        if ('Ok' in result) {
+          const r = result.Ok;
+          return {
+            success: true,
+            blockIndex: Number(r.icusd_block_index),
+            feePaid: Number(r.fee_amount) / E8S,
+            stableAmountSent: Number(r.stable_amount_sent),
+            vaultSpillover: Number(r.vault_spillover_amount),
+          };
+        } else {
+          return {
+            success: false,
+            error: ApiClient.formatProtocolError(result.Err)
+          };
+        }
+      } catch (err) {
+        console.error('Error redeeming reserves:', err);
+        return {
+          success: false,
+          error: err instanceof Error ? err.message : 'Unknown error redeeming reserves'
+        };
+      }
+    }
+
+    /**
+     * Get reserve balances (ckStable tokens held by protocol).
+     * Returns array of {ledger, balance, symbol}.
+     */
+    static async getReserveBalances(): Promise<Array<{ ledger: string; balance: number; symbol: string }>> {
+      try {
+        const result = await ApiClient.getPublicData<any[]>('get_reserve_balances');
+        return result.map((rb: any) => ({
+          ledger: rb.ledger.toText ? rb.ledger.toText() : String(rb.ledger),
+          balance: Number(rb.balance),
+          symbol: rb.symbol,
+        }));
+      } catch (err) {
+        console.error('Error getting reserve balances:', err);
+        return [];
+      }
+    }
+
+    /**
      * Redeem ICP by providing icUSD
      * @param icusdAmount Amount of icUSD to redeem
      */

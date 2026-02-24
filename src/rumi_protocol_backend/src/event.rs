@@ -224,6 +224,34 @@ pub enum Event {
         collateral_type: CollateralType,
         config: CollateralConfig,
     },
+
+    #[serde(rename = "set_reserve_redemptions_enabled")]
+    SetReserveRedemptionsEnabled {
+        enabled: bool,
+    },
+
+    #[serde(rename = "set_reserve_redemption_fee")]
+    SetReserveRedemptionFee {
+        fee: String,
+    },
+
+    #[serde(rename = "reserve_redemption")]
+    ReserveRedemption {
+        owner: Principal,
+        icusd_amount: ICUSD,
+        fee_amount: ICUSD,
+        stable_token_ledger: Principal,
+        stable_amount_sent: u64,
+        fee_stable_amount: u64,
+        icusd_block_index: u64,
+    },
+    #[serde(rename = "admin_mint")]
+    AdminMint {
+        amount: ICUSD,
+        to: Principal,
+        reason: String,
+        block_index: u64,
+    },
 }
 
 impl Event {
@@ -266,6 +294,10 @@ impl Event {
             Event::AddCollateralType { .. } => false,
             Event::UpdateCollateralStatus { .. } => false,
             Event::UpdateCollateralConfig { .. } => false,
+            Event::SetReserveRedemptionsEnabled { .. } => false,
+            Event::SetReserveRedemptionFee { .. } => false,
+            Event::ReserveRedemption { .. } => false,
+            Event::AdminMint { .. } => false,
         }
     }
 }
@@ -497,6 +529,21 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             Event::UpdateCollateralConfig { collateral_type, config } => {
                 state.collateral_configs.insert(collateral_type, config);
             },
+            Event::SetReserveRedemptionsEnabled { enabled } => {
+                state.reserve_redemptions_enabled = enabled;
+            },
+            Event::SetReserveRedemptionFee { fee } => {
+                if let Ok(dec) = fee.parse::<Decimal>() {
+                    state.reserve_redemption_fee = Ratio::from(dec);
+                }
+            },
+            Event::ReserveRedemption { .. } => {
+                // Reserve redemptions don't change in-memory state during replay;
+                // the actual token transfers are async and not replayed.
+            },
+            Event::AdminMint { .. } => {
+                // Admin mints are ledger-only operations; no in-memory state changes.
+            },
         }
     }
     state.next_available_vault_id = vault_id;
@@ -644,7 +691,9 @@ pub fn record_redemption_on_vaults(
         fee_amount,
         icusd_block_index,
     });
-    state.provide_liquidity(fee_amount, state.developer_principal);
+    // Fee is already deducted from icusd_amount before calling redeem_on_vaults,
+    // so vault owners effectively keep the fee (less collateral seized for their debt).
+    // The fee portion of icUSD stays in the protocol canister (burned).
     let redeem_ct = state.icp_collateral_type();
     state.redeem_on_vaults(icusd_amount, collateral_price, &redeem_ct);
     let margin: ICP = icusd_amount / collateral_price;
@@ -839,4 +888,50 @@ pub fn record_update_collateral_config(
         config: config.clone(),
     });
     state.collateral_configs.insert(collateral_type, config);
+}
+
+pub fn record_set_reserve_redemptions_enabled(state: &mut State, enabled: bool) {
+    record_event(&Event::SetReserveRedemptionsEnabled { enabled });
+    state.reserve_redemptions_enabled = enabled;
+}
+
+pub fn record_set_reserve_redemption_fee(state: &mut State, fee: Ratio) {
+    record_event(&Event::SetReserveRedemptionFee {
+        fee: fee.0.to_string(),
+    });
+    state.reserve_redemption_fee = fee;
+}
+
+pub fn record_reserve_redemption(
+    owner: Principal,
+    icusd_amount: ICUSD,
+    fee_amount: ICUSD,
+    stable_token_ledger: Principal,
+    stable_amount_sent: u64,
+    fee_stable_amount: u64,
+    icusd_block_index: u64,
+) {
+    record_event(&Event::ReserveRedemption {
+        owner,
+        icusd_amount,
+        fee_amount,
+        stable_token_ledger,
+        stable_amount_sent,
+        fee_stable_amount,
+        icusd_block_index,
+    });
+}
+
+pub fn record_admin_mint(
+    amount: ICUSD,
+    to: Principal,
+    reason: String,
+    block_index: u64,
+) {
+    record_event(&Event::AdminMint {
+        amount,
+        to,
+        reason,
+        block_index,
+    });
 }

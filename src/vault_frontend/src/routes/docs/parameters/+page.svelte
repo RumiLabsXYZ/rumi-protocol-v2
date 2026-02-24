@@ -12,6 +12,7 @@
   let redemptionFeeFloor = 0;
   let redemptionFeeCeiling = 0;
   let ckstableRepayFee = 0;
+  let reserveRedemptionFee = 0;
 
   // Per-collateral values (ICP defaults)
   let liquidationRatio = 0;
@@ -39,12 +40,13 @@
   onMount(async () => {
     try {
       // Fetch global parameters and per-collateral config in parallel
-      const [status, bFee, rfFloor, rfCeil, ckFee] = await Promise.all([
+      const [status, bFee, rfFloor, rfCeil, ckFee, rrFee] = await Promise.all([
         protocolService.getProtocolStatus(),
         publicActor.get_borrowing_fee() as Promise<number>,
         publicActor.get_redemption_fee_floor() as Promise<number>,
         publicActor.get_redemption_fee_ceiling() as Promise<number>,
         publicActor.get_ckstable_repay_fee() as Promise<number>,
+        publicActor.get_reserve_redemption_fee() as Promise<number>,
       ]);
 
       liquidationBonus = status.liquidationBonus;
@@ -54,6 +56,7 @@
       redemptionFeeFloor = Number(rfFloor);
       redemptionFeeCeiling = Number(rfCeil);
       ckstableRepayFee = Number(ckFee);
+      reserveRedemptionFee = Number(rrFee);
 
       // Load per-collateral config (ICP values)
       await collateralStore.fetchSupportedCollateral();
@@ -147,6 +150,14 @@
         <span class="param-val live">{pctRaw(redemptionFeeCeiling)}</span>
       </div>
       <div class="param">
+        <span class="param-label">Redemption Fee Decay <span class="tip" data-tip="The vault redemption fee decays by this factor each hour of inactivity. 0.94 means the rate roughly halves every 11 hours. This is hardcoded, not admin-configurable.">?</span></span>
+        <span class="param-val">0.94 per hour</span>
+      </div>
+      <div class="param">
+        <span class="param-label">Reserve Redemption Fee <span class="tip" data-tip="A flat fee applied when redeeming icUSD through the protocol's ckStable reserves (Tier 1). Unlike vault redemption fees, this does not vary with volume.">?</span></span>
+        <span class="param-val live">{pctRaw(reserveRedemptionFee)}</span>
+      </div>
+      <div class="param">
         <span class="param-label">ckUSDT / ckUSDC Repay Fee <span class="tip" data-tip="A small fee applied when repaying vault debt or liquidating with ckUSDT or ckUSDC instead of icUSD. Compensates for potential stablecoin price variance.">?</span></span>
         <span class="param-val live">{pctRaw(ckstableRepayFee, 2)}</span>
       </div>
@@ -190,8 +201,26 @@
       <div class="param"><span class="param-label">Stablecoin (minted)</span><span class="param-val">icUSD</span></div>
       <div class="param"><span class="param-label">Repayment & Liquidation</span><span class="param-val">icUSD, ckUSDT, ckUSDC</span></div>
       <div class="param">
-        <span class="param-label">ckStable Depeg Rejection <span class="tip" data-tip="If ckUSDT or ckUSDC is trading outside this range, the protocol rejects it for repayment or liquidation to protect against depeg events.">?</span></span>
+        <span class="param-label">ckStable Depeg Rejection <span class="tip" data-tip="If ckUSDT or ckUSDC is trading outside this range, the protocol rejects it for repayment or liquidation to protect against depeg events. Stablecoin prices are cached for up to 60 seconds (vs 30s for ICP).">?</span></span>
         <span class="param-val">Outside $0.95 – $1.05</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="doc-section">
+    <h2 class="doc-heading">Precision & Rounding</h2>
+    <div class="params-table">
+      <div class="param">
+        <span class="param-label">Token Arithmetic <span class="tip" data-tip="All internal token division operations (e.g., converting icUSD to ICP at a given price) round down (floor). This means the protocol never overpays — rounding always favors the protocol by a fraction of a unit.">?</span></span>
+        <span class="param-val">Floor rounding (truncation)</span>
+      </div>
+      <div class="param">
+        <span class="param-label">icUSD Precision <span class="tip" data-tip="icUSD uses 8 decimal places (e8s). 1 icUSD = 100,000,000 e8s.">?</span></span>
+        <span class="param-val">8 decimals (e8s)</span>
+      </div>
+      <div class="param">
+        <span class="param-label">ckStable Precision <span class="tip" data-tip="ckUSDT and ckUSDC use 6 decimal places (e6s). When converting between icUSD (8 decimals) and ckStables (6 decimals), amounts are truncated to the nearest 100 e8s. Up to 0.00000099 icUSD may be lost per conversion.">?</span></span>
+        <span class="param-val">6 decimals (e6s) — 100:1 conversion from e8s</span>
       </div>
     </div>
   </section>
@@ -204,8 +233,16 @@
         <span class="param-val">IC Exchange Rate Canister (XRC)</span>
       </div>
       <div class="param">
-        <span class="param-label">Price Fetch Interval <span class="tip" data-tip="Prices are refreshed automatically every 300 seconds. Operations like borrowing and liquidation also trigger an on-demand refresh if the cached price is older than 30 seconds.">?</span></span>
-        <span class="param-val">300 seconds (+ on-demand for operations)</span>
+        <span class="param-label">Background Price Polling <span class="tip" data-tip="Prices are refreshed automatically on this interval via a canister timer.">?</span></span>
+        <span class="param-val">300 seconds</span>
+      </div>
+      <div class="param">
+        <span class="param-label">On-Demand Freshness <span class="tip" data-tip="Operations like borrowing and liquidation trigger a fresh price fetch if the cached price is older than this. Ensures operations use recent data.">?</span></span>
+        <span class="param-val">30 seconds</span>
+      </div>
+      <div class="param">
+        <span class="param-label">Stale Price Rejection <span class="tip" data-tip="If the latest price is older than this, the protocol rejects all state-changing operations until a fresh price is obtained. This prevents operations based on dangerously outdated prices.">?</span></span>
+        <span class="param-val">10 minutes</span>
       </div>
       <div class="param">
         <span class="param-label">Read-Only Price Floor <span class="tip" data-tip="If the oracle reports a price below this level, the protocol enters Read-Only mode and halts all operations as a safety measure.">?</span></span>
@@ -218,6 +255,10 @@
       <div class="param">
         <span class="param-label">Health Monitor Interval <span class="tip" data-tip="A background process that checks for stuck transfers, under-collateralized vaults, and other health issues.">?</span></span>
         <span class="param-val">5 minutes</span>
+      </div>
+      <div class="param">
+        <span class="param-label">Operation Concurrency <span class="tip" data-tip="Each user can only have one vault operation in-flight at a time. If you submit a second operation before the first completes, it will fail with 'AlreadyProcessing'. Guards auto-release after 2.5 minutes for the same user, with a hard 5-minute expiry. The system supports up to 100 concurrent operations across all users.">?</span></span>
+        <span class="param-val">1 per user / 100 global (5-min guard timeout)</span>
       </div>
     </div>
   </section>

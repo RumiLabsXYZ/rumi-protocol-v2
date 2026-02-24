@@ -86,6 +86,188 @@ impl From<Vault> for CandidVault {
     }
 }
 
+/// Redeem icUSD for ckStable tokens from the protocol's reserves.
+/// Two-tier system: reserves first (flat fee), then vault spillover (dynamic fee).
+pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Principal>) -> Result<crate::ReserveRedemptionResult, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let _guard_principal = GuardPrincipal::new(caller, "redeem_reserves")?;
+
+    let icusd_amount: ICUSD = icusd_amount_raw.into();
+
+    if icusd_amount < MIN_ICUSD_AMOUNT {
+        return Err(ProtocolError::AmountTooLow {
+            minimum_amount: MIN_ICUSD_AMOUNT.to_u64(),
+        });
+    }
+
+    // Check reserve redemptions are enabled
+    let (enabled, reserve_fee_ratio, ckusdt_ledger, ckusdc_ledger, treasury) = read_state(|s| (
+        s.reserve_redemptions_enabled,
+        s.reserve_redemption_fee,
+        s.ckusdt_ledger_principal,
+        s.ckusdc_ledger_principal,
+        s.treasury_principal,
+    ));
+
+    if !enabled {
+        return Err(ProtocolError::GenericError(
+            "Reserve redemptions are currently disabled.".to_string(),
+        ));
+    }
+
+    // Determine which ledger to use
+    let stable_ledger = if let Some(pref) = preferred_token {
+        // Validate it's one of our known stable ledgers
+        if Some(pref) == ckusdt_ledger || Some(pref) == ckusdc_ledger {
+            pref
+        } else {
+            return Err(ProtocolError::GenericError(
+                "Preferred token is not a supported reserve token.".to_string(),
+            ));
+        }
+    } else {
+        // Default: try ckUSDT first, then ckUSDC
+        ckusdt_ledger
+            .or(ckusdc_ledger)
+            .ok_or_else(|| ProtocolError::GenericError("No reserve token ledgers configured.".to_string()))?
+    };
+
+    // Calculate fee (flat rate)
+    let fee_icusd = icusd_amount * reserve_fee_ratio;
+    let net_icusd = icusd_amount - fee_icusd;
+
+    // Convert e8s (icUSD) to e6s (ckStable): divide by 100
+    let net_e6s = net_icusd.to_u64() / 100;
+    let fee_e6s = fee_icusd.to_u64() / 100;
+
+    if net_e6s == 0 {
+        return Err(ProtocolError::GenericError(
+            "Redemption amount too small after fee.".to_string(),
+        ));
+    }
+
+    // Check reserve balance before pulling icUSD
+    let reserve_balance = management::get_token_balance(stable_ledger).await
+        .map_err(|e| ProtocolError::TemporarilyUnavailable(format!("Cannot query reserve balance: {}", e)))?;
+
+    // Determine how much can come from reserves vs vault spillover.
+    // Each ICRC-1 transfer also costs a ledger fee (deducted from sender balance).
+    // Query the actual fee from the ledger rather than hardcoding.
+    let ledger_fee = management::get_ledger_fee(stable_ledger).await
+        .unwrap_or(10_000); // fallback to 10_000 e6s (0.01 USD) if query fails
+    let fee_budget = if fee_e6s > 0 { ledger_fee * 2 } else { ledger_fee };
+    let total_needed_e6s = net_e6s + fee_e6s + fee_budget;
+    let available_for_user = if reserve_balance >= total_needed_e6s {
+        net_e6s
+    } else if reserve_balance > fee_e6s + fee_budget {
+        // Partial: reserve can cover some but not all
+        reserve_balance - fee_e6s - fee_budget
+    } else {
+        0
+    };
+
+    let spillover_e6s = net_e6s - available_for_user;
+    let spillover_e8s = spillover_e6s * 100; // convert back to icUSD e8s
+
+    // Pull icUSD from caller (effectively burns it)
+    let icusd_block_index = transfer_icusd_from(icusd_amount, caller).await
+        .map_err(|e| ProtocolError::TransferFromError(e, icusd_amount.to_u64()))?;
+
+    // Transfer ckStable to user from reserves.
+    // CRITICAL: If this fails we MUST refund the icUSD — otherwise the user
+    // loses funds with nothing received. ICP inter-canister calls are NOT
+    // atomic, so we implement the saga/compensation pattern manually.
+    if available_for_user > 0 {
+        if let Err(transfer_err) = management::transfer_collateral(available_for_user, caller, stable_ledger).await {
+            log!(crate::INFO,
+                "[redeem_reserves] ckStable transfer failed for {}: {:?}. Refunding {} icUSD.",
+                caller, transfer_err, icusd_amount.to_u64()
+            );
+            // Attempt to refund icUSD (minus ledger fee which is deducted by the ledger)
+            match management::transfer_icusd(icusd_amount, caller).await {
+                Ok(refund_block) => {
+                    log!(crate::INFO,
+                        "[redeem_reserves] Refunded {} icUSD to {} (block {})",
+                        icusd_amount.to_u64(), caller, refund_block
+                    );
+                }
+                Err(refund_err) => {
+                    // Both the ckStable send AND the refund failed.
+                    // Log a critical error — admin must manually resolve.
+                    log!(crate::INFO,
+                        "[redeem_reserves] CRITICAL: ckStable transfer failed AND icUSD refund failed for {}! \
+                         Amount: {} icUSD. ckStable error: {:?}. Refund error: {:?}. \
+                         Manual intervention required.",
+                        caller, icusd_amount.to_u64(), transfer_err, refund_err
+                    );
+                }
+            }
+            return Err(ProtocolError::GenericError(
+                format!("Reserve transfer failed — your icUSD has been refunded. Error: {:?}", transfer_err),
+            ));
+        }
+    }
+
+    // Transfer fee to treasury (if configured), otherwise fee stays in reserves
+    if fee_e6s > 0 {
+        if let Some(treasury_principal) = treasury {
+            let _ = management::transfer_collateral(fee_e6s, treasury_principal, stable_ledger).await;
+            // If treasury transfer fails, fee stays in reserves — not critical
+        }
+    }
+
+    // Record the reserve redemption event
+    crate::event::record_reserve_redemption(
+        caller,
+        icusd_amount,
+        fee_icusd,
+        stable_ledger,
+        available_for_user,
+        fee_e6s,
+        icusd_block_index,
+    );
+
+    // Handle vault spillover if reserves didn't cover everything
+    if spillover_e8s > 0 {
+        // Use ICP vault redemption for the remainder with dynamic fee
+        let icp_ledger = read_state(|s| s.icp_collateral_type());
+        let collateral_price = read_state(|s| s.get_collateral_price_decimal(&icp_ledger))
+            .ok_or(ProtocolError::TemporarilyUnavailable("No ICP price for vault spillover".to_string()))?;
+        let current_price = UsdIcp::from(collateral_price);
+
+        mutate_state(|s| {
+            let spillover_icusd = ICUSD::from(spillover_e8s);
+            let base_fee = s.get_redemption_fee(spillover_icusd);
+            s.current_base_rate = base_fee;
+            s.last_redemption_time = ic_cdk::api::time();
+            let vault_fee = spillover_icusd * base_fee;
+
+            record_redemption_on_vaults(
+                s,
+                caller,
+                spillover_icusd - vault_fee,
+                vault_fee,
+                current_price,
+                icusd_block_index,
+            );
+        });
+        ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), || {
+            ic_cdk::spawn(crate::process_pending_transfer())
+        });
+    }
+
+    log!(INFO, "[redeem_reserves] {} redeemed {} icUSD: {} e6s from reserves, {} e8s vault spillover, fee {} e6s",
+        caller, icusd_amount.to_u64(), available_for_user, spillover_e8s, fee_e6s);
+
+    Ok(crate::ReserveRedemptionResult {
+        icusd_block_index,
+        stable_amount_sent: available_for_user,
+        fee_amount: fee_icusd.to_u64(),
+        stable_token_used: stable_ledger,
+        vault_spillover_amount: spillover_e8s,
+    })
+}
+
 /// Thin wrapper for backward compatibility. Calls `redeem_collateral` with ICP.
 pub async fn redeem_icp(icusd_amount: u64) -> Result<SuccessWithFee, ProtocolError> {
     let icp_ledger = read_state(|s| s.icp_collateral_type());

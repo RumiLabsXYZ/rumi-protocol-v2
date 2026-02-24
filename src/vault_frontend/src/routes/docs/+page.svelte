@@ -16,9 +16,19 @@
       description: "Protocol risks, oracle failure modes, and edge cases you should understand."
     },
     {
+      title: "Redemptions",
+      href: "/docs/redemptions",
+      description: "How icUSD redemptions work: reserve-backed ckStable and vault spillover."
+    },
+    {
       title: "Protocol Parameters",
       href: "/docs/parameters",
       description: "Current constants, fees, ratios, and operational thresholds."
+    },
+    {
+      title: "Transparency",
+      href: "/transparency",
+      description: "On-chain log of every admin action, including emergency icUSD mints."
     },
     {
       title: "Beta Disclaimer",
