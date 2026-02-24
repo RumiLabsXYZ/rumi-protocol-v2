@@ -563,7 +563,7 @@
               <div class="input-header">
                 <span class="input-label">Deposit Collateral</span>
                 {#if maxAddCollateral > 0}
-                  <button class="max-text" on:click={setMaxAddCollateral}>Max</button>
+                  <button class="max-text" on:click={setMaxAddCollateral}>Max: {floorTo(maxAddCollateral, 4)}</button>
                 {/if}
               </div>
               <div class="action-input-row">
@@ -583,7 +583,7 @@
               <div class="input-header">
                 <span class="input-label">Withdraw Collateral</span>
                 {#if maxWithdrawable > 0}
-                  <button class="max-text" on:click={setMaxWithdraw}>Max</button>
+                  <button class="max-text" on:click={setMaxWithdraw}>Max: {floorTo(maxWithdrawable, 4)}</button>
                 {/if}
               </div>
               {#if vault.borrowedIcusd > 0}
@@ -606,7 +606,7 @@
               <div class="input-header">
                 <span class="input-label">Borrow icUSD</span>
                 {#if maxBorrowable > 0}
-                  <button class="max-text" on:click={setMaxBorrow}>Max</button>
+                  <button class="max-text" on:click={setMaxBorrow}>Max: {floorTo(maxBorrowable, 2)}</button>
                 {/if}
               </div>
               <div class="action-input-row">
@@ -626,7 +626,7 @@
               <div class="input-header">
                 <span class="input-label">Repay Debt</span>
                 {#if maxRepayable > 0}
-                  <button class="max-text" on:click={setMaxRepay}>Max</button>
+                  <button class="max-text" on:click={setMaxRepay}>Max: {floorTo(maxRepayable, 4)}</button>
                 {/if}
               </div>
               <div class="action-input-row">
