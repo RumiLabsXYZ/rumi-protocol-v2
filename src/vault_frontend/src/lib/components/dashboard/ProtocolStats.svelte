@@ -19,6 +19,7 @@
     liquidationBonus: number;
     recoveryTargetCr: number;
     recoveryModeThreshold: number;
+    recoveryLiquidationBuffer: number;
   } | undefined = undefined;
 
   // Self-fetch fallback when no prop is provided
@@ -47,6 +48,7 @@
         liquidationBonus: Number(s.liquidationBonus || 0),
         recoveryTargetCr: Number(s.recoveryTargetCr || 0),
         recoveryModeThreshold: Number(s.recoveryModeThreshold || 0),
+        recoveryLiquidationBuffer: Number(s.recoveryLiquidationBuffer || 0),
       };
       // Also fetch per-collateral config for ICP-specific values
       await collateralStore.fetchSupportedCollateral();
@@ -100,31 +102,22 @@
   $: minCR = icpConfig?.minimumCr ?? 1.5;
   $: liqCR = icpConfig?.liquidationCr ?? 1.33;
   $: recoveryThreshold = status?.recoveryModeThreshold ?? 1.5;
-  $: totalCkStableReserves = ckusdtReserve + ckusdcReserve;
+  $: interestApr = icpConfig?.interestRateApr ?? 0;
 </script>
 
 <div class="protocol-stats">
-  <!-- Market -->
-  <h4 class="group-heading">Market</h4>
-  <div class="stats-stack">
-    <div class="stat-row">
-      <span class="stat-label">ICP Price</span>
-      <span class="stat-value">{icpPrice > 0 ? `$${formatNumber(icpPrice)}` : '—'}</span>
-    </div>
-    <div class="stat-row">
-      <span class="stat-label">Protocol CR</span>
-      <span class="stat-value">{formattedCR}%</span>
-    </div>
-  </div>
-
-  <div class="group-divider"></div>
-
   <!-- System -->
   <h4 class="group-heading">System</h4>
   <div class="stats-stack">
     <div class="stat-row">
+      <span class="stat-label">Protocol CR</span>
+      <span class="stat-value">{formattedCR}%</span>
+    </div>
+    <div class="stat-row">
       <span class="stat-label">Total Collateral</span>
-      <span class="stat-value">{formatNumber(status?.totalIcpMargin || 0)} ICP</span>
+      <span class="stat-value-stack">
+        <span>{formatNumber(status?.totalIcpMargin || 0)} ICP</span>
+      </span>
     </div>
     <div class="stat-row">
       <span class="stat-label">Collateral Value</span>
@@ -134,28 +127,20 @@
       <span class="stat-label">Total Borrowed</span>
       <span class="stat-value">{formatNumber(status?.totalIcusdBorrowed || 0)} icUSD</span>
     </div>
+    {#if ckusdtReserve > 0 || ckusdcReserve > 0}
+      <div class="stat-row">
+        <span class="stat-label">Reserves</span>
+        <span class="stat-value-stack">
+          {#if ckusdtReserve > 0}
+            <span>{formatNumber(ckusdtReserve, 2)} ckUSDT</span>
+          {/if}
+          {#if ckusdcReserve > 0}
+            <span>{formatNumber(ckusdcReserve, 2)} ckUSDC</span>
+          {/if}
+        </span>
+      </div>
+    {/if}
   </div>
-
-  {#if totalCkStableReserves > 0}
-    <div class="group-divider"></div>
-
-    <!-- Reserves -->
-    <h4 class="group-heading">ckStable Reserves</h4>
-    <div class="stats-stack">
-      {#if ckusdtReserve > 0}
-        <div class="stat-row">
-          <span class="stat-label">ckUSDT</span>
-          <span class="stat-value">{formatNumber(ckusdtReserve, 2)}</span>
-        </div>
-      {/if}
-      {#if ckusdcReserve > 0}
-        <div class="stat-row">
-          <span class="stat-label">ckUSDC</span>
-          <span class="stat-value">{formatNumber(ckusdcReserve, 2)}</span>
-        </div>
-      {/if}
-    </div>
-  {/if}
 
   <div class="group-divider"></div>
 
@@ -181,6 +166,10 @@
     <div class="stat-row">
       <span class="stat-label">Borrowing Fee</span>
       <span class="stat-value">{formatNumber(borrowFee)}%</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Interest APR</span>
+      <span class="stat-value">{interestApr > 0 ? `${formatNumber(interestApr * 100)}%` : '0%'}</span>
     </div>
     <div class="stat-row">
       <span class="stat-label">Mode</span>
@@ -226,6 +215,17 @@
     color: var(--rumi-text-secondary);
   }
   .stat-value {
+    font-family: 'Inter', sans-serif;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--rumi-text-primary);
+  }
+  .stat-value-stack {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.125rem;
     font-family: 'Inter', sans-serif;
     font-size: 0.8125rem;
     font-weight: 600;
