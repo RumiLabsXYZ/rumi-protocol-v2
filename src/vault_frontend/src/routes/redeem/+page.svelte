@@ -182,7 +182,13 @@
           await wallet.refreshBalance();
           fetchData();
         } else {
-          errorMessage = result.error || 'Failed to redeem';
+          // Oisy two-step: approval succeeded, show as info not error
+          const msg = result.error || 'Failed to redeem';
+          if (msg.includes('Click Redeem again')) {
+            successMessage = 'Approved! Click Redeem again to complete.';
+          } else {
+            errorMessage = msg;
+          }
         }
       } else {
         // No reserves available — fall back to direct ICP vault redemption

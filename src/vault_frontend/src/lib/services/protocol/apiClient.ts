@@ -17,7 +17,7 @@ import type {
     ProtocolError,
     OpenVaultSuccess
   } from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did.js';
-import { walletOperations } from './walletOperations';
+import { walletOperations, isOisyWallet, computeDepositAccount } from './walletOperations';
 import { get } from 'svelte/store';
 import { vaultStore } from '$lib/stores/vaultStore';
 import { QueryOperations } from './queryOperations';
@@ -207,28 +207,27 @@ private static async refreshVaultData(): Promise<void> {
     error?: string;
   }> {
     try {
-      // Get actor first to ensure we're authenticated
-      const actor = await this.getAuthenticatedActor();
-      
-      // Then check if vault exists
+      // Check if vault exists (uses anonymous actor for reads)
       const vault = await this.getVaultById(vaultId);
       if (!vault) {
-        return { vault: null, actor, error: 'Vault not found' };
+        return { vault: null, actor: null, error: 'Vault not found' };
       }
-  
+
       // Verify ownership
       const walletState = get(walletStore);
       if (vault.owner !== walletState.principal?.toString()) {
-        return { vault, actor, error: 'You do not own this vault' };
+        return { vault, actor: null, error: 'You do not own this vault' };
       }
-  
+
+      // Only get authenticated actor after ownership verified (for update calls)
+      const actor = await this.getAuthenticatedActor();
       return { vault, actor };
     } catch (error) {
       console.error('Error verifying vault access:', error);
-      return { 
-        vault: null, 
-        actor: null, 
-        error: error instanceof Error ? error.message : 'Failed to verify vault access' 
+      return {
+        vault: null,
+        actor: null,
+        error: error instanceof Error ? error.message : 'Failed to verify vault access'
       };
     }
   }
@@ -280,16 +279,13 @@ private static async refreshVaultData(): Promise<void> {
    */
     static async triggerPendingTransfers(): Promise<boolean> {
         try {
-          const actor = await ApiClient.getAuthenticatedActor();
-          
-          // The backend doesn't have a direct trigger, so we make a series of calls
-          // that should indirectly cause the backend to process transfers
-          await actor.get_protocol_status();
-          
+          // Use anonymous actor — get_protocol_status is a public query
+          await publicActor.get_protocol_status();
+
           // Make a second call after a short delay to help trigger the timer
           setTimeout(async () => {
             try {
-              await actor.get_protocol_status();
+              await publicActor.get_protocol_status();
             } catch (e) {
               console.error('Error in follow-up call:', e);
             }
@@ -435,6 +431,68 @@ private static async refreshVaultData(): Promise<void> {
           try {
             const actor = await ApiClient.getAuthenticatedActor();
 
+            // Build the optional collateral_type argument
+            const collateralTypeOpt: [] | [Principal] = ctPrincipal === CANISTER_IDS.ICP_LEDGER
+              ? []  // ICP is the default, no need to pass
+              : [Principal.fromText(ctPrincipal)];
+
+            // ─── Oisy push-deposit path (two-step) ───
+            // Oisy cannot do ICRC-2 approve on the ICP ledger (ICRC-21 not supported).
+            // Step 1: Transfer collateral to deposit subaccount (opens signer popup).
+            // Step 2 is deferred — returns pendingDeposit so the UI can prompt
+            //   the user to click again (providing a fresh browser user-gesture
+            //   so the second signer popup is not blocked).
+            if (isOisyWallet()) {
+              console.log(`[Oisy] Using push-deposit flow for vault creation`);
+
+              // Compute deposit account client-side (no canister call — no signer popup)
+              console.log(`[Oisy] Step 1/3: Computing deposit account...`);
+              const walletState = get(walletStore);
+              if (!walletState.principal) {
+                return { success: false, error: '[Oisy] Wallet principal missing' };
+              }
+              const depositAccount = await computeDepositAccount(walletState.principal);
+              console.log(`[Oisy] Deposit account computed:`, depositAccount);
+
+              // Get ICP ledger actor through PNP/Oisy
+              console.log(`[Oisy] Step 2/3: Getting ICP ledger actor for ${ledgerCanisterId}...`);
+              const ledgerActor = await walletStore.getActor(ledgerCanisterId, CONFIG.icp_ledgerIDL);
+              if (!ledgerActor) {
+                return { success: false, error: '[Oisy] Failed to create ICP ledger actor — PNP returned null' };
+              }
+              console.log(`[Oisy] Ledger actor ready`);
+
+              // Transfer collateral to the deposit account via icrc1_transfer
+              console.log(`[Oisy] Step 3/3: Calling icrc1_transfer for ${collateralAmount} ${symbol} (${amountRaw} raw)...`);
+              const transferResult = await (ledgerActor as any).icrc1_transfer({
+                to: depositAccount,
+                amount: amountRaw,
+                fee: [],
+                memo: [],
+                from_subaccount: [],
+                created_at_time: [],
+              });
+
+              if ('Err' in transferResult) {
+                console.error(`[Oisy] icrc1_transfer error:`, transferResult.Err);
+                return {
+                  success: false,
+                  error: `Failed to transfer ${symbol} to deposit account: ${JSON.stringify(transferResult.Err)}`
+                };
+              }
+              console.log(`[Oisy] Deposited ${collateralAmount} ${symbol} (block ${transferResult.Ok})`);
+
+              // Return pendingDeposit — the UI will prompt the user to click
+              // "Create Vault" again, giving a fresh user gesture for the next popup.
+              return {
+                success: false,
+                pendingDeposit: true,
+                depositBlockIndex: Number(transferResult.Ok),
+                message: `Deposit of ${collateralAmount} ${symbol} confirmed. Click "Create Vault" to finalize.`
+              };
+            }
+
+            // ─── Standard ICRC-2 path (Plug, II, etc.) ───
             // CRITICAL: Check and increase allowance before proceeding
             const spenderCanisterId = CONFIG.currentCanisterId;
 
@@ -467,11 +525,6 @@ private static async refreshVaultData(): Promise<void> {
             const timeoutPromise = new Promise<never>((_, reject) => {
               setTimeout(() => reject(new Error("Wallet signature request timed out")), 60000);
             });
-
-            // Build the optional collateral_type argument
-            const collateralTypeOpt: [] | [Principal] = ctPrincipal === CANISTER_IDS.ICP_LEDGER
-              ? []  // ICP is the default, no need to pass
-              : [Principal.fromText(ctPrincipal)];
 
             // Race between the actual operation and the timeout
             const result = await Promise.race([
@@ -552,6 +605,83 @@ private static async refreshVaultData(): Promise<void> {
         }
       }
 
+
+/**
+ * Finalize an Oisy push-deposit vault creation.
+ * Called AFTER the user's collateral has been transferred to the deposit subaccount
+ * (step 1 of the two-step flow). This must be triggered by a fresh user gesture
+ * so the Oisy signer popup is not blocked by the browser.
+ */
+static async finalizeOpenVaultDeposit(collateralTypePrincipal?: string, borrowAmount?: number): Promise<VaultOperationResult> {
+  try {
+    // If borrowAmount > 0, the backend will create the vault AND borrow in one atomic call.
+    // This avoids a third signer popup for borrowFromVault.
+    const borrowRaw = borrowAmount && borrowAmount > 0
+      ? BigInt(Math.floor(borrowAmount * E8S))
+      : BigInt(0);
+    console.log(`[Oisy] Finalizing vault creation (step 2)... borrowAmount=${borrowAmount ?? 0} (${borrowRaw} raw)`);
+    const actor = await ApiClient.getAuthenticatedActor();
+
+    const ctPrincipal = collateralTypePrincipal || CANISTER_IDS.ICP_LEDGER;
+    const collateralTypeOpt: [] | [Principal] = ctPrincipal === CANISTER_IDS.ICP_LEDGER
+      ? []
+      : [Principal.fromText(ctPrincipal)];
+
+    const result = await actor.open_vault_with_deposit(borrowRaw, collateralTypeOpt);
+
+    if ('Ok' in result) {
+      return {
+        success: true,
+        vaultId: Number(result.Ok.vault_id),
+        blockIndex: Number(result.Ok.block_index)
+      };
+    } else {
+      return {
+        success: false,
+        error: ApiClient.formatProtocolError(result.Err)
+      };
+    }
+  } catch (err) {
+    console.error('[Oisy] Error finalizing vault deposit:', err);
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Unknown error finalizing vault creation'
+    };
+  }
+}
+
+/**
+ * Finalize an Oisy push-deposit add-margin operation.
+ * Called AFTER the user's collateral has been transferred to the deposit subaccount.
+ * Must be triggered by a fresh user gesture.
+ */
+static async finalizeAddMarginDeposit(vaultId: number): Promise<VaultOperationResult> {
+  try {
+    console.log(`[Oisy] Finalizing add margin to vault #${vaultId} (step 2)...`);
+    const actor = await ApiClient.getAuthenticatedActor();
+
+    const result = await actor.add_margin_with_deposit(BigInt(vaultId));
+
+    if ('Ok' in result) {
+      return {
+        success: true,
+        vaultId,
+        blockIndex: Number(result.Ok)
+      };
+    } else {
+      return {
+        success: false,
+        error: ApiClient.formatProtocolError(result.Err)
+      };
+    }
+  } catch (err) {
+    console.error('[Oisy] Error finalizing add margin deposit:', err);
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Unknown error finalizing add margin'
+    };
+  }
+}
 
 /**
  * Borrow icUSD from an existing vault
@@ -656,6 +786,49 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
         }
       }
 
+      const actor = await ApiClient.getAuthenticatedActor();
+
+      // ─── Oisy push-deposit path (two-step) ───
+      // Step 1: Transfer to deposit subaccount. Step 2 (finalize) is deferred
+      // to a fresh user gesture so the second Oisy signer popup isn't blocked.
+      if (isOisyWallet()) {
+        console.log(`[Oisy] Using push-deposit flow for add margin to vault #${vaultId}`);
+
+        // Compute deposit account client-side
+        const walletState2 = get(walletStore);
+        const depositAccount = await computeDepositAccount(walletState2.principal!);
+        console.log(`[Oisy] Deposit account:`, depositAccount);
+
+        // Transfer collateral to deposit account
+        const ledgerActor = await walletStore.getActor(ledgerCanisterId, CONFIG.icp_ledgerIDL);
+        const transferResult = await (ledgerActor as any).icrc1_transfer({
+          to: depositAccount,
+          amount: amountRaw,
+          fee: [],
+          memo: [],
+          from_subaccount: [],
+          created_at_time: [],
+        });
+
+        if ('Err' in transferResult) {
+          return {
+            success: false,
+            error: `Failed to transfer ${symbol} to deposit account: ${JSON.stringify(transferResult.Err)}`
+          };
+        }
+        console.log(`[Oisy] Deposited ${collateralAmount} ${symbol} (block ${transferResult.Ok})`);
+
+        // Return pendingDeposit — UI will prompt user to click again
+        return {
+          success: false,
+          pendingDeposit: true,
+          depositBlockIndex: Number(transferResult.Ok),
+          vaultId,
+          message: `Deposit of ${collateralAmount} ${symbol} confirmed. Click "Add Collateral" to finalize.`
+        };
+      }
+
+      // ─── Standard ICRC-2 path (Plug, II, etc.) ───
       // First check current allowance
       const spenderCanisterId = CONFIG.currentCanisterId;
       let currentAllowance;
@@ -732,7 +905,6 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
       }
 
       // Now proceed with adding margin
-      const actor = await ApiClient.getAuthenticatedActor();
       const vaultArg = {
         vault_id: BigInt(vaultId),
         amount: amountRaw // Use the original amount for the actual operation
@@ -742,7 +914,7 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
         vault_id: vaultArg.vault_id.toString(),
         amount: vaultArg.amount.toString()
       });
-      
+
       const result = await actor.add_margin_to_vault(vaultArg);
       
       if ('Ok' in result) {
@@ -791,15 +963,12 @@ static async repayToVault(vaultId: number, icusdAmount: number): Promise<VaultOp
         };
       }
       
-      // Simulate processing delay
-      await new Promise(resolve => setTimeout(resolve, 1200));
-      
       const actor = await ApiClient.getAuthenticatedActor();
       const vaultArg = {
         vault_id: BigInt(vaultId),
         amount: BigInt(Math.floor(icusdAmount * E8S))
       };
-      
+
       const result = await actor.repay_to_vault(vaultArg);
       
       if ('Ok' in result) {
@@ -1007,13 +1176,11 @@ static async repayToVaultWithStable(
         // Set loading flag to prevent duplicate requests
         ApiClient.vaultCache.loading = true;
         
-        const actor = await ApiClient.getAuthenticatedActor();
-        // Use the actual Principal from wallet state, or reconstruct from string if needed
-        // The Principal must be a proper @dfinity/principal instance for Candid serialization
+        // Use anonymous actor for read-only queries — avoids Oisy signer popups
         const principalForQuery = userPrincipal || Principal.fromText(principalStr);
-        
+
         console.log(`Fetching vaults for principal: ${principalStr}`);
-        const canisterVaults = await actor.get_vaults([principalForQuery]);
+        const canisterVaults = await publicActor.get_vaults([principalForQuery]);
         console.log('Raw canister vaults data:', canisterVaults);
         
         // Get protocol status for ICP price calculation
@@ -1178,8 +1345,8 @@ static async repayToVaultWithStable(
      */
     static async getVaultHistory(vaultId: number): Promise<any[]> {
       try {
-        const actor = await ApiClient.getAuthenticatedActor();
-        const history = await actor.get_vault_history(BigInt(vaultId));
+        // Use anonymous actor for read-only queries — avoids Oisy signer popups
+        const history = await publicActor.get_vault_history(BigInt(vaultId));
         return history.map((event: any) => event);
       } catch (err) {
         console.error('Error getting vault history:', err);
@@ -1216,8 +1383,10 @@ static async repayToVaultWithStable(
 
         const currentAllowance = await walletOperations.checkIcusdAllowance(spenderCanisterId);
         if (currentAllowance < bufferedAmount) {
+          // Approve 1B icUSD so future redemptions skip this popup entirely
+          const LARGE_APPROVAL = BigInt(100_000_000_000_000_000); // 1B icUSD in e8s
           const approvalResult = await walletOperations.approveIcusdTransfer(
-            bufferedAmount, spenderCanisterId
+            LARGE_APPROVAL, spenderCanisterId
           );
           if (!approvalResult.success) {
             return {
@@ -1225,7 +1394,13 @@ static async repayToVaultWithStable(
               error: approvalResult.error || 'Failed to approve icUSD transfer'
             };
           }
-          await new Promise(resolve => setTimeout(resolve, 2000));
+
+          // For Oisy: approval consumed the user gesture — the next popup will be blocked.
+          if (isOisyWallet()) {
+            return { success: false, error: 'Approved! Click Redeem again to complete.' };
+          }
+
+          await new Promise(resolve => setTimeout(resolve, 1000));
         }
 
         const actor = await ApiClient.getAuthenticatedActor();
@@ -1384,10 +1559,9 @@ static async repayToVaultWithStable(
             };
           }
           
-          const actor = await ApiClient.getAuthenticatedActor();
-          // Use the actual Principal or reconstruct from string for proper Candid serialization
+          // Use anonymous actor for read-only queries — avoids Oisy signer popups
           const principalForQuery = Principal.fromText(principal.toString());
-          return actor.get_liquidity_status(principalForQuery);
+          return publicActor.get_liquidity_status(principalForQuery);
         } catch (err) {
           console.error('Error getting liquidity status:', err);
           throw new Error('Failed to get liquidity status');
@@ -1864,26 +2038,30 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
           
           // If allowance is insufficient, request approval
           if (currentAllowance < bufferedAmount) {
-            console.log(`Setting icUSD approval for ${Number(bufferedAmount) / E8S}`);
-            
+            // Approve 1B icUSD so future liquidations skip this popup entirely
+            const LARGE_APPROVAL = BigInt(100_000_000_000_000_000); // 1B icUSD in e8s
+            console.log(`Setting large icUSD approval (1B) to avoid future popups`);
+
             const approvalResult = await walletOperations.approveIcusdTransfer(
-              bufferedAmount,
+              LARGE_APPROVAL,
               spenderCanisterId
             );
-            
+
             if (!approvalResult.success) {
               return {
                 success: false,
                 error: approvalResult.error || "Failed to approve icUSD transfer"
               };
             }
-            
-            console.log(`Successfully approved ${Number(bufferedAmount) / E8S} icUSD`);
-            
-            // Short pause to ensure approval transaction is processed
-            await new Promise(resolve => setTimeout(resolve, 2000));
+
+            // For Oisy: approval consumed the user gesture — the next popup will be blocked.
+            if (isOisyWallet()) {
+              return { success: false, error: 'Approved! Click Liquidate again to complete.' };
+            }
+
+            await new Promise(resolve => setTimeout(resolve, 1000));
           }
-          
+
           // Now proceed with partial liquidation
           const actor = await ApiClient.getAuthenticatedActor();
           const icusdAmountE8s = BigInt(Math.floor(icusdAmount * E8S));
@@ -1957,14 +2135,22 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
           // Check and approve ckstable allowance
           const currentAllowance = await walletOperations.checkStableAllowance(spenderCanisterId, tokenType);
           if (currentAllowance < bufferedE6s) {
-            console.log(`Setting ${tokenType} approval for ${bufferedE6s.toString()} e6s`);
+            // Approve 1B tokens so future liquidations skip this popup entirely
+            const LARGE_APPROVAL = BigInt(1_000_000_000_000_000); // 1B in e6s
+            console.log(`Setting large ${tokenType} approval (1B) to avoid future popups`);
             const approvalResult = await walletOperations.approveStableTransfer(
-              bufferedE6s, spenderCanisterId, tokenType
+              LARGE_APPROVAL, spenderCanisterId, tokenType
             );
             if (!approvalResult.success) {
               return { success: false, error: approvalResult.error || `Failed to approve ${tokenType} transfer` };
             }
-            await new Promise(resolve => setTimeout(resolve, 2000));
+
+            // For Oisy: approval consumed the user gesture — the next popup will be blocked.
+            // Return a friendly message; the user clicks Liquidate again.
+            if (isOisyWallet()) {
+              return { success: false, error: 'Approved! Click Liquidate again to complete.' };
+            }
+            await new Promise(resolve => setTimeout(resolve, 1000));
           }
 
           const actor = await ApiClient.getAuthenticatedActor();
@@ -2032,26 +2218,30 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
           
           // If allowance is insufficient, request approval
           if (currentAllowance < bufferedDebt) {
-            console.log(`Setting icUSD approval for ${Number(bufferedDebt) / E8S}`);
-            
+            // Approve 1B icUSD so future liquidations skip this popup entirely
+            const LARGE_APPROVAL = BigInt(100_000_000_000_000_000); // 1B icUSD in e8s
+            console.log(`Setting large icUSD approval (1B) to avoid future popups`);
+
             const approvalResult = await walletOperations.approveIcusdTransfer(
-              bufferedDebt,
+              LARGE_APPROVAL,
               spenderCanisterId
             );
-            
+
             if (!approvalResult.success) {
               return {
                 success: false,
                 error: approvalResult.error || "Failed to approve icUSD transfer"
               };
             }
-            
-            console.log(`Successfully approved ${Number(bufferedDebt) / E8S} icUSD`);
-            
-            // Short pause to ensure approval transaction is processed
-            await new Promise(resolve => setTimeout(resolve, 2000));
+
+            // For Oisy: approval consumed the user gesture — the next popup will be blocked.
+            if (isOisyWallet()) {
+              return { success: false, error: 'Approved! Click Liquidate again to complete.' };
+            }
+
+            await new Promise(resolve => setTimeout(resolve, 1000));
           }
-          
+
           // Now proceed with liquidation
           const actor = await ApiClient.getAuthenticatedActor();
           const result = await actor.liquidate_vault(BigInt(vaultId));

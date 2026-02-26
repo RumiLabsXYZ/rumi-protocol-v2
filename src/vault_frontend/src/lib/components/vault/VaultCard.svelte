@@ -46,7 +46,8 @@
     ? collateralValueUsd / vault.borrowedIcusd : Infinity;
   $: borrowedValueUsd = vault.borrowedIcusd;
   $: riskLevel = getRiskLevel(collateralRatio);
-  $: maxBorrowable = Math.max(0, (collateralValueUsd / vaultMinCR) - vault.borrowedIcusd);
+  // 0.5% haircut so the Max button never overshoots the backend oracle price
+  $: maxBorrowable = Math.max(0, ((collateralValueUsd / vaultMinCR) - vault.borrowedIcusd) * 0.995);
 
   // Token type for repayment
   let repayTokenType: 'icUSD' | 'CKUSDT' | 'CKUSDC' = 'icUSD';
@@ -83,12 +84,13 @@
   $: maxRepayable = Math.min(effectiveRepayBalance, vault.borrowedIcusd);
 
   // ── Withdraw max: keeps CR at minimum for this collateral ──
+  // 0.5% haircut when debt exists so Max never overshoots backend oracle price
   $: maxWithdrawable = (() => {
     if (vaultCollateralAmount <= 0) return 0;
     if (vault.borrowedIcusd === 0) return vaultCollateralAmount;
     if (!vaultCollateralPrice || vaultCollateralPrice <= 0) return 0;
     const minCollateral = (vault.borrowedIcusd * vaultMinCR) / vaultCollateralPrice;
-    return Math.max(0, vaultCollateralAmount - minCollateral);
+    return Math.max(0, (vaultCollateralAmount - minCollateral) * 0.995);
   })();
 
   // ── Credit usage ──
@@ -184,7 +186,6 @@
   let borrowAmount = '';
   let repayAmount = '';
   let isProcessing = false;
-  let showAdvanced = false;
   let isWithdrawingAndClosing = false;
   let showTokenDropdown = false;
   let hasChangedToken = false;
@@ -271,6 +272,14 @@
   $: canWithdraw = vault.borrowedIcusd === 0 && vaultCollateralAmount > 0;
   $: canClose = vault.borrowedIcusd === 0;
 
+  // Detect if withdraw amount is the full collateral (max)
+  $: isMaxWithdraw = (() => {
+    const amt = parseFloat(withdrawAmount);
+    return amt > 0 && maxWithdrawable > 0 && Math.abs(amt - maxWithdrawable) < 0.0001;
+  })();
+  // When no debt + max withdraw → this becomes a "Withdraw & Close" action
+  $: isWithdrawAndClose = canClose && isMaxWithdraw;
+
   function clearMessages() { /* toasts auto-dismiss */ }
 
   function floorTo(val: number, decimals: number): string {
@@ -352,6 +361,15 @@
     } finally { isProcessing = false; }
   }
 
+  // Smart withdraw: delegates to withdraw-and-close when no debt + max amount
+  async function handleWithdraw() {
+    if (isWithdrawAndClose) {
+      await handleWithdrawAndClose();
+    } else {
+      await handleWithdrawPartial();
+    }
+  }
+
   async function handleWithdrawPartial() {
     const amount = parseFloat(withdrawAmount);
     if (!amount || amount <= 0) { toastStore.error(`Enter a valid ${collateralSymbol} amount`, 8000); return; }
@@ -403,7 +421,14 @@
         await new Promise(r => setTimeout(r, 1000));
         await vaultStore.refreshVault(vault.vaultId); dispatch('updated');
       } else { toastStore.error(result.error || 'Failed', 8000); }
-    } catch (err) { toastStore.error(err instanceof Error ? err.message : 'Unknown error', 8000);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      // Oisy two-step flow: approval succeeded, user just needs to click again
+      if (msg.includes('click Repay again')) {
+        toastStore.info('Approved! Click Repay again to complete.', 8000);
+      } else {
+        toastStore.error(msg, 8000);
+      }
     } finally { isProcessing = false; }
   }
 
@@ -596,9 +621,15 @@
                 <span class="input-suffix">{collateralSymbol}</span>
               </div>
               <div class="input-submit-row">
-                <button class="btn-submit btn-submit-collateral" on:click={handleWithdrawPartial}
-                  disabled={isProcessing || !withdrawAmount || withdrawOverMax}>
-                  {isProcessing ? '...' : 'Withdraw'}
+                <button class="btn-submit btn-submit-collateral" on:click={handleWithdraw}
+                  disabled={isProcessing || isWithdrawingAndClosing || !withdrawAmount || withdrawOverMax}>
+                  {#if isProcessing || isWithdrawingAndClosing}
+                    ...
+                  {:else if isWithdrawAndClose}
+                    Withdraw & Close
+                  {:else}
+                    Withdraw
+                  {/if}
                 </button>
               </div>
 
@@ -673,20 +704,6 @@
         {/if}
       </div>
 
-      {#if canWithdraw || canClose}
-        <div class="advanced-section">
-          <button class="advanced-toggle" on:click={() => showAdvanced = !showAdvanced}>
-            {showAdvanced ? '▾' : '▸'} Advanced
-          </button>
-          {#if showAdvanced}
-            <div class="advanced-content">
-              <button class="btn-danger btn-sm" on:click={handleWithdrawAndClose} disabled={isWithdrawingAndClosing}>
-                {isWithdrawingAndClosing ? 'Closing...' : 'Withdraw Collateral & Close Vault'}
-              </button>
-            </div>
-          {/if}
-        </div>
-      {/if}
     </div>
   {/if}
 </div>
@@ -956,12 +973,6 @@
     border: 1px solid rgba(209,118,232,0.3);
   }
   .btn-submit-debt:hover:not(:disabled) { background: rgba(209,118,232,0.25); }
-
-  /* Advanced */
-  .advanced-section { margin-top: 0.625rem; padding-top: 0.375rem; border-top: 1px solid var(--rumi-border); }
-  .advanced-toggle { background: none; border: none; color: var(--rumi-text-muted); font-size: 0.6875rem; cursor: pointer; padding: 0; }
-  .advanced-toggle:hover { color: var(--rumi-text-secondary); }
-  .advanced-content { margin-top: 0.375rem; }
 
   /* Number input cleanup */
   .action-input::-webkit-outer-spin-button,

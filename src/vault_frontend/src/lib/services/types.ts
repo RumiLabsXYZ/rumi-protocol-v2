@@ -24,6 +24,9 @@ export interface VaultOperationResult {
   blockIndex?: number;
   feePaid?: number;
   message?: string;
+  // Oisy two-step push-deposit: deposit succeeded, awaiting user gesture to finalize
+  pendingDeposit?: boolean;
+  depositBlockIndex?: number;
 }
 
 export interface VaultHistoryEvent {

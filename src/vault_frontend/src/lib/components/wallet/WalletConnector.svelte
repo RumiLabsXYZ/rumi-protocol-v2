@@ -225,6 +225,36 @@
   $: account = $walletStore.principal?.toString() ?? null;
   $: currentIcon = $walletStore.icon;
   $: tokenBalances = $walletStore.tokenBalances ?? {};
+
+  // Quick reconnect: detect if user had Oisy connected before page refresh
+  let pendingReconnectWallet: string | null = null;
+  $: if (!isConnected && typeof window !== 'undefined') {
+    const lastWallet = localStorage.getItem('rumi_last_wallet');
+    const wasConnected = localStorage.getItem('rumi_was_connected');
+    pendingReconnectWallet = (lastWallet && wasConnected) ? lastWallet : null;
+  } else {
+    pendingReconnectWallet = null;
+  }
+
+  // Wallet display names for the reconnect button
+  const walletDisplayNames: Record<string, string> = {
+    'oisy': 'Oisy',
+    'plug': 'Plug',
+    'internet-identity': 'Internet Identity'
+  };
+
+  function getReconnectLabel(walletId: string): string {
+    return walletDisplayNames[walletId] || walletId;
+  }
+
+  function getReconnectIcon(walletId: string): string | null {
+    const icons: Record<string, string> = {
+      'oisy': '/wallets/oisy.svg',
+      'plug': '/wallets/plug.svg',
+      'internet-identity': '/main-icp-logo.png'
+    };
+    return icons[walletId] || null;
+  }
   
   // Log the token balances whenever they change
   $: {
@@ -242,6 +272,28 @@
 
 <div id="wallet-container">
   {#if !isConnected}
+    {#if pendingReconnectWallet && !connecting}
+      <!-- Quick reconnect: user had a wallet connected before page refresh -->
+      <div class="flex items-center gap-2">
+        <button
+          id="wallet-button"
+          class="icp-button reconnect-btn flex items-center gap-2"
+          on:click|stopPropagation={() => connectWallet(pendingReconnectWallet)}
+        >
+          {#if getReconnectIcon(pendingReconnectWallet)}
+            <img src={getReconnectIcon(pendingReconnectWallet)} alt="" class="w-4 h-4 rounded-sm" />
+          {/if}
+          Reconnect to {getReconnectLabel(pendingReconnectWallet)}
+        </button>
+        <button
+          class="icp-button-secondary"
+          on:click|stopPropagation={() => { pendingReconnectWallet = null; localStorage.removeItem('rumi_last_wallet'); localStorage.removeItem('rumi_was_connected'); showWalletDialog = true; }}
+          title="Choose a different wallet"
+        >
+          ⋯
+        </button>
+      </div>
+    {:else}
     <button
       id="wallet-button"
       class="icp-button flex items-center gap-2"
@@ -259,6 +311,7 @@
       {/if}
       {connecting ? 'Connecting...' : 'Connect Wallet'}
     </button>
+    {/if}
 
     {#if showWalletDialog}
       <div class="fixed inset-0 z-50 flex items-center justify-center p-4 min-h-screen">
@@ -283,20 +336,18 @@
               </div>
             {:else}
               {#each walletList as wallet (wallet.id)}
-              {@const isOisy = wallet.id?.toLowerCase() === 'oisy'}
               <button
                 class="flex items-center justify-between w-full px-4 py-3 text-white rounded-xl border transition-all duration-200"
-                style="background: var(--rumi-bg-surface1); border-color: var(--rumi-border); {isOisy ? 'opacity: 0.45; cursor: not-allowed;' : ''}"
-                on:click|stopPropagation={() => !isOisy && connectWallet(wallet.id)}
-                disabled={connecting || isOisy}
+                style="background: var(--rumi-bg-surface1); border-color: var(--rumi-border);"
+                on:click|stopPropagation={() => connectWallet(wallet.id)}
+                disabled={connecting}
               >
                 <div class="flex items-center gap-4">
                   {#if wallet.icon}
-                    <img 
+                    <img
                       src={wallet.icon}
-                      alt={wallet.name} 
+                      alt={wallet.name}
                       class="w-10 h-10 rounded-lg object-contain"
-                      style={isOisy ? 'filter: grayscale(1);' : ''}
                     />
                   {:else}
                     <div class="w-10 h-10 bg-gray-700 rounded-full flex items-center justify-center">
@@ -305,16 +356,11 @@
                   {/if}
                   <div class="flex flex-col items-start">
                     <span class="text-lg">{wallet.name}</span>
-                    {#if isOisy}
-                      <span style="font-size: 0.6875rem; color: var(--rumi-text-muted);">Coming Soon</span>
-                    {/if}
                   </div>
                 </div>
-                {#if !isOisy}
                   <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M9 18l6-6-6-6"/>
                   </svg>
-                {/if}
               </button>
             {/each}
               
@@ -857,6 +903,29 @@
   }
   .dropdown-action-disconnect:hover {
     background: rgba(239, 68, 68, 0.08);
+  }
+
+  /* ── Quick Reconnect ── */
+  .reconnect-btn {
+    animation: pulse-reconnect 2.5s ease-in-out infinite;
+  }
+  @keyframes pulse-reconnect {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(139, 92, 246, 0.3); }
+    50% { box-shadow: 0 0 0 6px rgba(139, 92, 246, 0); }
+  }
+  .icp-button-secondary {
+    padding: 0.4rem 0.6rem;
+    background: rgba(15, 15, 25, 0.85);
+    border: 1px solid rgba(139, 92, 246, 0.15);
+    border-radius: 0.5rem;
+    color: rgba(255, 255, 255, 0.5);
+    cursor: pointer;
+    font-size: 0.875rem;
+    transition: all 0.15s ease;
+  }
+  .icp-button-secondary:hover {
+    border-color: rgba(139, 92, 246, 0.35);
+    color: rgba(255, 255, 255, 0.8);
   }
 
   /* ── Toast container ── */

@@ -413,9 +413,56 @@ fn generate_consent_message(method: &str, arg: &[u8]) -> Result<String, String> 
             }
         }
         
+        // ─── Push-deposit methods (Oisy wallet integration) ───
+        "open_vault_with_deposit" => {
+            match try_decode_u64(arg, "open_vault_with_deposit")? {
+                Some(borrow_amount) if borrow_amount > 0 => Ok(format!(
+                    "## Create Vault (Push-Deposit)\n\n\
+                    You are creating a new vault using collateral you deposited to your deposit account.\n\n\
+                    Requested initial borrow: **{}**\n\n\
+                    This will:\n\
+                    - Sweep deposited collateral into the protocol\n\
+                    - Create a new vault\n\
+                    - Borrow the requested icUSD amount\n\n\
+                    *Minimum collateral ratio: 150%*",
+                    format_icusd_amount(borrow_amount)
+                )),
+                _ => Ok(
+                    "## Create Vault (Push-Deposit)\n\n\
+                    You are creating a new vault using collateral you deposited to your deposit account.\n\n\
+                    This will:\n\
+                    - Sweep deposited collateral into the protocol\n\
+                    - Create a new vault that you can borrow icUSD against\n\n\
+                    *Minimum collateral ratio: 150%*".to_string()
+                ),
+            }
+        }
+
+        "add_margin_with_deposit" => {
+            match try_decode_u64(arg, "add_margin_with_deposit")? {
+                Some(vault_id) => Ok(format!(
+                    "## Add Collateral (Push-Deposit)\n\n\
+                    You are adding collateral to vault #{} using funds from your deposit account.\n\n\
+                    This will sweep your deposited collateral and increase your vault's collateral ratio.",
+                    vault_id
+                )),
+                None => Ok(
+                    "## Add Collateral (Push-Deposit)\n\n\
+                    You are adding collateral to your vault using funds from your deposit account.\n\n\
+                    This will increase your collateral ratio and reduce liquidation risk.".to_string()
+                ),
+            }
+        }
+
+        "get_deposit_account" => {
+            Ok("## Get Deposit Account\n\n\
+                This is a read-only query that returns your deposit account address.\n\
+                No funds will be moved.".to_string())
+        }
+
         // Query methods don't need consent messages, but we handle them gracefully
-        "get_fees" | "get_liquidity_status" | "get_protocol_status" | 
-        "get_vaults" | "get_vault_history" | "get_events" | 
+        "get_fees" | "get_liquidity_status" | "get_protocol_status" |
+        "get_vaults" | "get_vault_history" | "get_events" |
         "get_redemption_rate" | "get_liquidatable_vaults" | "http_request" => {
             Ok(format!(
                 "## Query: {}\n\n\
@@ -541,6 +588,8 @@ pub fn icrc28_trusted_origins() -> Icrc28TrustedOriginsResponse {
             "https://tcfua-yaaaa-aaaap-qrd7q-cai.raw.icp0.io".to_string(),
             "https://rumi.finance".to_string(),
             "https://www.rumi.finance".to_string(),
+            "https://rumiprotocol.io".to_string(),
+            "https://www.rumiprotocol.io".to_string(),
         ],
     }
 }

@@ -6,7 +6,7 @@
   import { tweened } from 'svelte/motion';
   import { cubicOut } from 'svelte/easing';
   import type { CandidVault } from '$lib/services/types';
-  import { walletOperations } from "$lib/services/protocol/walletOperations";
+  import { walletOperations, isOisyWallet } from "$lib/services/protocol/walletOperations";
   import { CONFIG, CANISTER_IDS } from "$lib/config";
   import { collateralStore } from '$lib/stores/collateralStore';
   import { getLiquidationCR } from '$lib/protocol';
@@ -164,9 +164,17 @@
       const spenderCanisterId = CONFIG.currentCanisterId;
       const currentAllowance = await walletOperations.checkIcusdAllowance(spenderCanisterId);
       if (currentAllowance < amountE8s) {
-        const approvalAmount = amountE8s * BigInt(150) / BigInt(100);
-        const approvalResult = await walletOperations.approveIcusdTransfer(approvalAmount, spenderCanisterId);
+        // Approve 1B icUSD so future liquidations skip this popup entirely
+        const LARGE_APPROVAL = BigInt(100_000_000_000_000_000); // 1B icUSD in e8s
+        const approvalResult = await walletOperations.approveIcusdTransfer(LARGE_APPROVAL, spenderCanisterId);
         if (!approvalResult.success) { liquidationError = approvalResult.error || "Failed to approve icUSD transfer"; return false; }
+
+        // For Oisy: approval consumed the user gesture — the next popup will be blocked.
+        // Return false with a friendly message; the user clicks Liquidate again.
+        if (isOisyWallet()) {
+          liquidationSuccess = "Approved! Click Liquidate again to complete.";
+          return false;
+        }
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
       return true;
@@ -224,7 +232,15 @@
         liquidationSuccess = `Liquidated vault #${vault.vault_id}. Paid ${formatNumber(inputAmount)} ${token}, received ${formatNumber(seizure.collateralSeized, 4)} ${seizure.symbol}.`;
         liquidationAmounts[vault.vault_id] = '';
         await loadLiquidatableVaults();
-      } else { liquidationError = result.error || "Liquidation failed"; }
+      } else {
+        const msg = result.error || "Liquidation failed";
+        // Oisy two-step: approval succeeded, show as success not error
+        if (msg.includes('Click Liquidate again')) {
+          liquidationSuccess = 'Approved! Click Liquidate again to complete.';
+        } else {
+          liquidationError = msg;
+        }
+      }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       liquidationError = msg.includes('underflow') ? "Vault state changed. Try again." : msg;

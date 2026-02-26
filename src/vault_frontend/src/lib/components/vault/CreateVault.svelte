@@ -42,6 +42,9 @@
   let cancelCheckRunning = false;
   let vaultCheckMode = false;
 
+  // Oisy two-step push-deposit state
+  let pendingOisyDeposit = false;
+
   $: potentialUsdValue = Number(collateralAmount) * icpPrice;
   $: isConnected = $walletStore.isConnected;
   $: isDeveloper = $developerAccess;
@@ -230,56 +233,113 @@
   }
   
   async function handleCreateVault() {
+    // ─── Oisy step 2: finalize a pending deposit ───
+    // Must run FIRST — no prerequisite/balance checks needed (funds already deposited).
+    if (pendingOisyDeposit) {
+      if (isCreating || !isConnected) return;
+      try {
+        isCreating = true;
+        error = "";
+        updateStatus('Finalizing vault creation...');
+        startProcessingTimer();
+
+        const finalResult = await protocolService.finalizeOpenVaultDeposit();
+
+        if (finalResult.success) {
+          console.log('Vault creation finalized:', finalResult);
+          pendingOisyDeposit = false;
+          retryCount = 0;
+          collateralAmount = "";
+          updateStatus('Vault created successfully!');
+          await Promise.all([
+            walletStore.refreshBalance(),
+            vaultStore.loadVaults()
+          ]);
+        } else {
+          error = finalResult.error || "Failed to finalize vault creation";
+          updateStatus('Failed to finalize vault');
+        }
+      } catch (err) {
+        console.error('Vault finalization error:', err);
+        error = err instanceof Error ? err.message : "Failed to finalize vault";
+        updateStatus('Failed to finalize vault');
+      } finally {
+        isCreating = false;
+        stopProcessingTimer();
+      }
+      return;
+    }
+
+    // ─── Normal flow (step 1 for Oisy, or full flow for Plug/II) ───
     if (!collateralAmount || isCreating || !isConnected) return;
-    
+
     // Clear existing timers
     if (retryTimer) {
       clearTimeout(retryTimer);
       retryTimer = null;
     }
-    
-    // First check prerequisites and system status
-    const prerequisitesOk = await checkWalletPrerequisites();
-    if (!prerequisitesOk) return;
-    
+
+    // Basic prerequisite checks (wallet connected, amount valid)
+    if (!$walletStore.principal) {
+      error = "Wallet principal not available";
+      return;
+    }
+    const amount = Number(collateralAmount);
+    if (isNaN(amount) || amount <= 0) {
+      error = "Invalid collateral amount";
+      return;
+    }
+
+    updateStatus('Checking system status...');
     const systemOk = await checkSystemStatus();
-    if (!systemOk) return;
-    
+    if (!systemOk) {
+      console.error('System status check failed, error:', error);
+      return;
+    }
+
     // Now proceed with vault creation
     try {
       isCreating = true;
       error = "";
       retryCountdown = 0;
-      updateStatus('Starting vault creation...');
-      
+
       // Start tracking elapsed time
       startProcessingTimer();
-      
-      // Broken down steps for better troubleshooting
-      updateStatus('Requesting ICP approval...');
-      
-      // Convert amount
-      const amount = Number(collateralAmount); 
+
+      updateStatus('Sending vault creation request...');
       console.log('Creating vault with collateral:', amount);
-      
-      // Create vault with longer timeouts
+
       const result = await protocolService.openVault(amount);
-      
-      // Success handling
-      console.log('Vault creation succeeded:', result);
-      retryCount = 0;
-      collateralAmount = "";
-      updateStatus('Vault created successfully!');
-      
-      // Refresh data
-      await Promise.all([
-        walletStore.refreshBalance(),
-        vaultStore.loadVaults()
-      ]);
-      
+      console.log('openVault result:', JSON.stringify(result, (k, v) => typeof v === 'bigint' ? v.toString() : v));
+
+      // Handle Oisy two-step: deposit confirmed, needs user gesture to finalize
+      if (result.pendingDeposit) {
+        pendingOisyDeposit = true;
+        error = "";
+        updateStatus(result.message || 'Deposit confirmed. Click "Create Vault" to finalize.');
+        return;
+      }
+
+      // Success handling (non-Oisy or direct success)
+      if (result.success) {
+        console.log('Vault creation succeeded:', result);
+        retryCount = 0;
+        collateralAmount = "";
+        updateStatus('Vault created successfully!');
+
+        // Refresh data
+        await Promise.all([
+          walletStore.refreshBalance(),
+          vaultStore.loadVaults()
+        ]);
+      } else {
+        error = result.error || "Failed to create vault (no error details)";
+        updateStatus('Failed: ' + error);
+      }
+
     } catch (err) {
       console.error('Vault creation error:', err);
-      
+
       // Better error categorization
       if (err instanceof Error) {
         if (err.message.includes('approval timeout')) {
@@ -293,8 +353,8 @@
       } else {
         error = "Failed to create vault";
       }
-      
-      updateStatus('Failed to create vault');
+
+      updateStatus('Error: ' + error);
     } finally {
       isCreating = false;
       stopProcessingTimer();
@@ -529,11 +589,15 @@
 
 <button
   on:click={handleCreateVault}
-  disabled={!collateralAmount }
-  class="w-full px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-500 disabled:opacity-50"
-  data-testid="create-vault-button" 
+  disabled={!collateralAmount && !pendingOisyDeposit}
+  class="w-full px-4 py-2 text-white rounded-lg disabled:opacity-50 {pendingOisyDeposit ? 'bg-green-600 hover:bg-green-500 animate-pulse' : 'bg-purple-600 hover:bg-purple-500'}"
+  data-testid="create-vault-button"
 >
-  Create Vault
+  {#if pendingOisyDeposit}
+    ✓ Deposit Confirmed — Click to Create Vault
+  {:else}
+    Create Vault
+  {/if}
 </button>
 
       {#if error}

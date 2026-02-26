@@ -385,6 +385,36 @@ async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
     check_postcondition(rumi_protocol_backend::vault::add_margin_to_vault(arg).await)
 }
 
+// ─── Push-deposit endpoints (Oisy wallet integration) ───
+
+/// Get the deposit account for the caller. The user transfers collateral here,
+/// then calls open_vault_with_deposit or add_margin_with_deposit.
+#[candid_method(query)]
+#[query]
+fn get_deposit_account(collateral_type: Option<Principal>) -> icrc_ledger_types::icrc1::account::Account {
+    let caller = ic_cdk::caller();
+    rumi_protocol_backend::management::get_deposit_account_for(&caller)
+}
+
+/// Open a vault using funds already deposited to the caller's deposit account.
+/// Use this instead of open_vault when the wallet cannot do ICRC-2 approve (e.g., Oisy).
+#[candid_method(update)]
+#[update]
+async fn open_vault_with_deposit(borrow_amount: u64, collateral_type: Option<Principal>) -> Result<OpenVaultSuccess, ProtocolError> {
+    validate_call().await?;
+    validate_mode()?;
+    check_postcondition(rumi_protocol_backend::vault::open_vault_with_deposit(borrow_amount, collateral_type).await)
+}
+
+/// Add margin to a vault using funds already deposited to the caller's deposit account.
+/// Use this instead of add_margin_to_vault when the wallet cannot do ICRC-2 approve.
+#[candid_method(update)]
+#[update]
+async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError> {
+    validate_call().await?;
+    check_postcondition(rumi_protocol_backend::vault::add_margin_with_deposit(vault_id).await)
+}
+
 #[candid_method(update)]
 #[update]
 async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {

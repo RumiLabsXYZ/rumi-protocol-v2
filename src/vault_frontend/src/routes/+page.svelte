@@ -10,6 +10,7 @@
   import { MINIMUM_CR, LIQUIDATION_CR, getMinimumCR, getLiquidationCR, getBorrowingFee } from '$lib/protocol';
   import { collateralStore, activeCollateralTypes } from '$lib/stores/collateralStore';
   import { CANISTER_IDS } from '$lib/config';
+  import { isOisyWallet } from '$lib/services/protocol/walletOperations';
   import ProtocolStats from '$lib/components/dashboard/ProtocolStats.svelte';
 
   let collateralAmount = 1;
@@ -18,6 +19,9 @@
   let successMessage = '';
   let actionInProgress = false;
   let showDevInput = false;
+
+  // Oisy two-step push-deposit state
+  let pendingOisyDeposit = false;
 
   // Collateral token selector
   let selectedCollateralPrincipal = CANISTER_IDS.ICP_LEDGER;
@@ -120,6 +124,33 @@
   }
 
   async function createVault() {
+    // ── Oisy Step 2: Finalize pending deposit ──
+    // If step 1 completed (collateral transferred to deposit subaccount),
+    // this click finalizes vault creation + borrowing in one backend call.
+    if (pendingOisyDeposit) {
+      actionInProgress = true; errorMessage = ''; successMessage = '';
+      try {
+        // open_vault_with_deposit(borrowAmount, collateralType) handles both
+        // vault creation AND initial borrow atomically on the backend.
+        const result = await protocolService.finalizeOpenVaultDeposit(
+          selectedCollateralPrincipal, icusdAmount
+        );
+        if (result.success) {
+          successMessage = `Successfully created vault #${result.vaultId} and borrowed ${icusdAmount} icUSD!`;
+          pendingOisyDeposit = false;
+          if ($principal) await appDataStore.refreshAll($principal);
+          collateralAmount = 1; icusdAmount = 5;
+        } else {
+          errorMessage = result.error || 'Failed to create vault';
+        }
+      } catch (error) {
+        console.error('[Oisy] Error finalizing vault:', error);
+        errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+      } finally { actionInProgress = false; }
+      return;
+    }
+
+    // ── Standard validation ──
     if (!$isConnected) { errorMessage = 'Please connect your wallet first'; return; }
     if (collateralAmount <= 0) { errorMessage = 'Please enter a valid collateral amount'; return; }
     if (icusdAmount <= 0) { errorMessage = 'Please enter a valid icUSD amount to borrow'; return; }
@@ -127,7 +158,17 @@
     actionInProgress = true; errorMessage = ''; successMessage = '';
     try {
       const openResult = await protocolService.openVault(collateralAmount, selectedCollateralPrincipal);
+
+      // ── Oisy Step 1: Deposit confirmed, awaiting second user gesture ──
+      if (openResult.pendingDeposit) {
+        pendingOisyDeposit = true;
+        successMessage = openResult.message || 'Deposit confirmed! Click again to create your vault.';
+        return;
+      }
+
       if (!openResult.success) { errorMessage = openResult.error || 'Failed to open vault'; return; }
+
+      // ── Standard ICRC-2 flow (Plug / II): vault created, now borrow ──
       const borrowResult = await protocolService.borrowFromVault(openResult.vaultId!, icusdAmount);
       if (borrowResult.success) {
         successMessage = `Successfully created vault #${openResult.vaultId} and borrowed ${icusdAmount} icUSD!`;
@@ -247,9 +288,14 @@
             {#if errorMessage}<div class="msg-error">{errorMessage}</div>{/if}
             {#if successMessage}<div class="msg-success">{successMessage}</div>{/if}
 
-            <button class="btn-primary cta-button" on:click={createVault} disabled={actionInProgress || !$isConnected}>
-              {#if !$isConnected}Connect Wallet to Continue
+            <button
+              class="btn-primary cta-button {pendingOisyDeposit ? 'cta-pending-deposit' : ''}"
+              on:click={createVault}
+              disabled={actionInProgress || (!$isConnected && !pendingOisyDeposit)}
+            >
+              {#if !$isConnected && !pendingOisyDeposit}Connect Wallet to Continue
               {:else if actionInProgress}Creating Vault…
+              {:else if pendingOisyDeposit}✓ Deposit Confirmed — Click to Create Vault
               {:else}Create Vault & Borrow icUSD{/if}
             </button>
           </div>
@@ -390,6 +436,15 @@
 
   /* CTA */
   .cta-button { width: 100%; padding: 0.75rem; }
+  .cta-pending-deposit {
+    background: #059669 !important;
+    animation: pulse-green 2s ease-in-out infinite;
+  }
+  .cta-pending-deposit:hover { background: #047857 !important; }
+  @keyframes pulse-green {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(5, 150, 105, 0.4); }
+    50% { box-shadow: 0 0 0 8px rgba(5, 150, 105, 0); }
+  }
 
   /* Dev gate */
   .dev-gate { text-align: center; padding: 2rem 1rem; }
