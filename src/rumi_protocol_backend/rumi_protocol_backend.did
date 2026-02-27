@@ -1,3 +1,7 @@
+type DepositAccount = record {
+  owner : principal;
+  subaccount : opt blob;
+};
 type AddCollateralArg = record {
   debt_ceiling : nat64;
   min_vault_debt : nat64;
@@ -379,7 +383,11 @@ service : (ProtocolArg) -> {
   liquidate_vault : (nat64) -> (Result_2);
   liquidate_vault_partial : (VaultArg) -> (Result_2);
   liquidate_vault_partial_with_stable : (VaultArgWithToken) -> (Result_2);
+  get_deposit_account : (opt principal) -> (DepositAccount) query;
   open_vault : (nat64, opt principal) -> (Result_5);
+  open_vault_and_borrow : (nat64, nat64, opt principal) -> (Result_5);
+  open_vault_with_deposit : (nat64, opt principal) -> (Result_5);
+  add_margin_with_deposit : (nat64) -> (Result_1);
   partial_liquidate_vault : (VaultArg) -> (Result_2);
   partial_repay_to_vault : (VaultArg) -> (Result_1);
   provide_liquidity : (nat64) -> (Result_1);

@@ -231,55 +231,65 @@
   
   async function handleCreateVault() {
     if (!collateralAmount || isCreating || !isConnected) return;
-    
+
     // Clear existing timers
     if (retryTimer) {
       clearTimeout(retryTimer);
       retryTimer = null;
     }
-    
-    // First check prerequisites and system status
-    const prerequisitesOk = await checkWalletPrerequisites();
-    if (!prerequisitesOk) return;
-    
+
+    // Basic prerequisite checks (wallet connected, amount valid)
+    if (!$walletStore.principal) {
+      error = "Wallet principal not available";
+      return;
+    }
+    const amount = Number(collateralAmount);
+    if (isNaN(amount) || amount <= 0) {
+      error = "Invalid collateral amount";
+      return;
+    }
+
+    updateStatus('Checking system status...');
     const systemOk = await checkSystemStatus();
-    if (!systemOk) return;
-    
+    if (!systemOk) {
+      console.error('System status check failed, error:', error);
+      return;
+    }
+
     // Now proceed with vault creation
     try {
       isCreating = true;
       error = "";
       retryCountdown = 0;
-      updateStatus('Starting vault creation...');
-      
+
       // Start tracking elapsed time
       startProcessingTimer();
-      
-      // Broken down steps for better troubleshooting
-      updateStatus('Requesting ICP approval...');
-      
-      // Convert amount
-      const amount = Number(collateralAmount); 
+
+      updateStatus('Sending vault creation request...');
       console.log('Creating vault with collateral:', amount);
-      
-      // Create vault with longer timeouts
+
       const result = await protocolService.openVault(amount);
-      
-      // Success handling
-      console.log('Vault creation succeeded:', result);
-      retryCount = 0;
-      collateralAmount = "";
-      updateStatus('Vault created successfully!');
-      
-      // Refresh data
-      await Promise.all([
-        walletStore.refreshBalance(),
-        vaultStore.loadVaults()
-      ]);
-      
+      console.log('openVault result:', JSON.stringify(result, (k, v) => typeof v === 'bigint' ? v.toString() : v));
+
+      if (result.success) {
+        console.log('Vault creation succeeded:', result);
+        retryCount = 0;
+        collateralAmount = "";
+        updateStatus('Vault created successfully!');
+
+        // Refresh data
+        await Promise.all([
+          walletStore.refreshBalance(),
+          vaultStore.loadVaults()
+        ]);
+      } else {
+        error = result.error || "Failed to create vault (no error details)";
+        updateStatus('Failed: ' + error);
+      }
+
     } catch (err) {
       console.error('Vault creation error:', err);
-      
+
       // Better error categorization
       if (err instanceof Error) {
         if (err.message.includes('approval timeout')) {
@@ -293,8 +303,8 @@
       } else {
         error = "Failed to create vault";
       }
-      
-      updateStatus('Failed to create vault');
+
+      updateStatus('Error: ' + error);
     } finally {
       isCreating = false;
       stopProcessingTimer();
@@ -529,11 +539,12 @@
 
 <button
   on:click={handleCreateVault}
-  disabled={!collateralAmount }
-  class="w-full px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-500 disabled:opacity-50"
-  data-testid="create-vault-button" 
+  disabled={!collateralAmount}
+  class="w-full px-4 py-2 text-white rounded-lg disabled:opacity-50 bg-purple-600 hover:bg-purple-500"
+  data-testid="create-vault-button"
 >
-  Create Vault
+    Create Vault
+  {/if}
 </button>
 
       {#if error}

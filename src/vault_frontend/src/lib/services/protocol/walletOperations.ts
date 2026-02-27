@@ -1,5 +1,5 @@
 import { Principal } from '@dfinity/principal';
-import { Actor, HttpAgent } from "@dfinity/agent";
+import { Actor, HttpAgent, AnonymousIdentity } from "@dfinity/agent";
 import { get } from 'svelte/store';
 import { walletStore } from '../../stores/wallet';
 import { CONFIG } from '../../config';
@@ -24,6 +24,44 @@ import type { _SERVICE as IcusdLedgerService } from '$declarations/icusd_ledger/
 export const E8S = 100_000_000;
 
 /**
+ * Compute the deposit subaccount for a given principal.
+ * Mirrors the backend's compute_deposit_subaccount: SHA-256("rumi-deposit" || principal_bytes).
+ * This avoids calling get_deposit_account through the Oisy signer.
+ */
+export async function computeDepositAccount(principal: Principal): Promise<{
+  owner: Principal;
+  subaccount: [Uint8Array] | [];
+}> {
+  const prefix = new TextEncoder().encode('rumi-deposit');
+  const principalBytes = principal.toUint8Array();
+  const combined = new Uint8Array(prefix.length + principalBytes.length);
+  combined.set(prefix, 0);
+  combined.set(principalBytes, prefix.length);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', combined);
+  const subaccount = new Uint8Array(hashBuffer);
+  return {
+    owner: Principal.fromText(CONFIG.currentCanisterId),
+    subaccount: [subaccount],
+  };
+}
+
+/**
+ * Check if the current wallet is Oisy.
+ * For Oisy wallets, vault operations use ICRC-112 batched signing to combine
+ * approve + action into a single signer popup. The SignerAgent natively handles
+ * icrc2_approve consent (Tier 1), bypassing the ICP ledger's lack of ICRC-21.
+ */
+export function isOisyWallet(): boolean {
+  try {
+    const lastWallet = localStorage.getItem('rumi_last_wallet');
+    return lastWallet?.toLowerCase() === 'oisy' ||
+           lastWallet?.toLowerCase().includes('oisy') || false;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Helper to check if an error is a stale actor/read state error
  */
 function isStaleActorError(err: any): boolean {
@@ -34,6 +72,29 @@ function isStaleActorError(err: any): boolean {
            msg.includes('actor') && msg.includes('stale');
   }
   return false;
+}
+
+/**
+ * Create an anonymous (unauthenticated) actor for read-only query calls.
+ * This bypasses Oisy's ICRC-21 signer which only supports a limited set of
+ * functions (icrc1_transfer, icrc2_approve, icrc2_transfer_from, transfer).
+ * Query calls like icrc2_allowance and icrc1_balance_of don't need signing.
+ */
+let _anonAgent: HttpAgent | null = null;
+async function getAnonymousActor<T>(canisterId: string, idl: any): Promise<T> {
+  if (!_anonAgent) {
+    _anonAgent = new HttpAgent({
+      host: CONFIG.host,
+      identity: new AnonymousIdentity(),
+    });
+    if (CONFIG.isLocal) {
+      await _anonAgent.fetchRootKey();
+    }
+  }
+  return Actor.createActor<T>(idl, {
+    agent: _anonAgent,
+    canisterId,
+  });
 }
 
 /**
@@ -102,51 +163,33 @@ export class walletOperations {
   }
 
   /**
-   * Check ICP allowance with retry on stale actor
+   * Check ICP allowance using anonymous actor (no signer popup).
+   * icrc2_allowance is a query call — doesn't need authentication.
    */
   static async checkIcpAllowance(spenderCanisterId: string): Promise<bigint> {
-    const maxRetries = 2;
-    
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      try {
-        const walletState = get(walletStore);
-        if (!walletState.principal) {
-          return BigInt(0);
-        }
-        
-        const icpActor = await walletStore.getActor(CONFIG.currentIcpLedgerId, CONFIG.icp_ledgerIDL) as IcpLedgerService;
-        const result = await icpActor.icrc2_allowance({
-          account: { 
-            owner: walletState.principal, 
-            subaccount: [] 
-          },
-          spender: { 
-            owner: Principal.fromText(spenderCanisterId), 
-            subaccount: [] 
-          }
-        });
-        
-        return result.allowance;
-      } catch (err) {
-        console.error(`Failed to check ICP allowance (attempt ${attempt + 1}/${maxRetries + 1}):`, err);
-        
-        // If this is a stale actor error and we have retries left, refresh wallet and retry
-        if (isStaleActorError(err) && attempt < maxRetries) {
-          console.log('Detected stale actor error, refreshing wallet and retrying...');
-          try {
-            await walletStore.refreshWallet();
-            await new Promise(resolve => setTimeout(resolve, 500)); // Brief delay after refresh
-          } catch (refreshErr) {
-            console.warn('Wallet refresh failed:', refreshErr);
-          }
-          continue; // Retry
-        }
-        
+    try {
+      const walletState = get(walletStore);
+      if (!walletState.principal) {
         return BigInt(0);
       }
+
+      const icpActor = await getAnonymousActor<IcpLedgerService>(CONFIG.currentIcpLedgerId, CONFIG.icp_ledgerIDL);
+      const result = await icpActor.icrc2_allowance({
+        account: {
+          owner: walletState.principal,
+          subaccount: []
+        },
+        spender: {
+          owner: Principal.fromText(spenderCanisterId),
+          subaccount: []
+        }
+      });
+
+      return result.allowance;
+    } catch (err) {
+      console.error('Failed to check ICP allowance:', err);
+      return BigInt(0);
     }
-    
-    return BigInt(0);
   }
 
   /**
@@ -172,57 +215,33 @@ export class walletOperations {
   }
 
   /**
-   * Check icUSD allowance with retry on stale actor
+   * Check icUSD allowance using anonymous actor (no signer popup).
+   * icrc2_allowance is a query call — doesn't need authentication.
    */
   static async checkIcusdAllowance(spenderCanisterId: string): Promise<bigint> {
-    const maxRetries = 2;
-    
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      try {
-        const walletState = get(walletStore);
-        if (!walletState.principal) {
-          return BigInt(0);
-        }
-        
-        // On retry, refresh wallet first
-        if (attempt > 0) {
-          console.log(`Retrying icUSD allowance check (attempt ${attempt + 1}/${maxRetries + 1})...`);
-          try {
-            await walletStore.refreshWallet();
-            await new Promise(resolve => setTimeout(resolve, 500)); // Brief delay after refresh
-          } catch (refreshErr) {
-            console.warn('Wallet refresh failed during retry:', refreshErr);
-          }
-        }
-        
-        const icusdActor = await walletStore.getActor(CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL) as IcusdLedgerService;
-        const result = await icusdActor.icrc2_allowance({
-          account: { 
-            owner: walletState.principal, 
-            subaccount: [] 
-          },
-          spender: { 
-            owner: Principal.fromText(spenderCanisterId), 
-            subaccount: [] 
-          }
-        });
-        
-        return result.allowance;
-      } catch (err) {
-        console.error(`Failed to check icUSD allowance (attempt ${attempt + 1}/${maxRetries + 1}):`, err);
-        
-        // If this is a stale actor error and we have retries left, continue to retry
-        if (isStaleActorError(err) && attempt < maxRetries) {
-          console.log('Detected stale actor error for icUSD, will refresh and retry...');
-          continue; // Retry (refresh happens at start of next iteration)
-        }
-        
-        // On last attempt or non-stale error, return 0
+    try {
+      const walletState = get(walletStore);
+      if (!walletState.principal) {
         return BigInt(0);
       }
+
+      const icusdActor = await getAnonymousActor<IcusdLedgerService>(CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL);
+      const result = await icusdActor.icrc2_allowance({
+        account: {
+          owner: walletState.principal,
+          subaccount: []
+        },
+        spender: {
+          owner: Principal.fromText(spenderCanisterId),
+          subaccount: []
+        }
+      });
+
+      return result.allowance;
+    } catch (err) {
+      console.error('Failed to check icUSD allowance:', err);
+      return BigInt(0);
     }
-    
-    return BigInt(0);
   }
   
   /**
@@ -367,53 +386,38 @@ export class walletOperations {
   }
 
   /**
-   * Check stable token allowance (ckUSDT or ckUSDC)
+   * Check stable token allowance (ckUSDT or ckUSDC) using anonymous actor.
+   * icrc2_allowance is a query call — doesn't need authentication or Oisy signer.
    */
   static async checkStableAllowance(
     spenderCanisterId: string,
     tokenType: 'CKUSDT' | 'CKUSDC'
   ): Promise<bigint> {
-    const maxRetries = 2;
-    const ledgerId = CONFIG.getStableLedgerId(tokenType);
-
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      try {
-        if (attempt > 0) {
-          await walletStore.refreshWallet();
-          await new Promise(resolve => setTimeout(resolve, 500));
-        }
-
-        const stableActor = await walletStore.getActor(ledgerId, CONFIG.icusd_ledgerIDL) as IcusdLedgerService;
-
-        const walletState = get(walletStore);
-        if (!walletState.principal) {
-          return BigInt(0);
-        }
-
-        const allowance = await stableActor.icrc2_allowance({
-          account: {
-            owner: walletState.principal,
-            subaccount: []
-          },
-          spender: {
-            owner: Principal.fromText(spenderCanisterId),
-            subaccount: []
-          }
-        });
-
-        return allowance.allowance;
-      } catch (error) {
-        console.error(`${tokenType} allowance check failed (attempt ${attempt + 1}):`, error);
-
-        if (isStaleActorError(error) && attempt < maxRetries) {
-          continue;
-        }
-
+    try {
+      const walletState = get(walletStore);
+      if (!walletState.principal) {
         return BigInt(0);
       }
-    }
 
-    return BigInt(0);
+      const ledgerId = CONFIG.getStableLedgerId(tokenType);
+      const stableActor = await getAnonymousActor<IcusdLedgerService>(ledgerId, CONFIG.icusd_ledgerIDL);
+
+      const allowance = await stableActor.icrc2_allowance({
+        account: {
+          owner: walletState.principal,
+          subaccount: []
+        },
+        spender: {
+          owner: Principal.fromText(spenderCanisterId),
+          subaccount: []
+        }
+      });
+
+      return allowance.allowance;
+    } catch (error) {
+      console.error(`${tokenType} allowance check failed:`, error);
+      return BigInt(0);
+    }
   }
 
   // ── Generic collateral approve/allowance (multi-collateral) ──────────
@@ -495,7 +499,8 @@ export class walletOperations {
   }
 
   /**
-   * Check the ICRC-2 allowance for any collateral token.
+   * Check the ICRC-2 allowance for any collateral token using anonymous actor.
+   * icrc2_allowance is a query call — doesn't need authentication or Oisy signer.
    * If the ledger is ICP, delegates to checkIcpAllowance.
    */
   static async checkCollateralAllowance(
@@ -507,180 +512,114 @@ export class walletOperations {
       return walletOperations.checkIcpAllowance(spenderCanisterId);
     }
 
-    const maxRetries = 2;
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      try {
-        if (attempt > 0) {
-          await walletStore.refreshWallet();
-          await new Promise(resolve => setTimeout(resolve, 500));
-        }
-
-        const walletState = get(walletStore);
-        if (!walletState.principal) {
-          return BigInt(0);
-        }
-
-        const ledgerActor = await walletStore.getActor(ledgerCanisterId, CONFIG.icusd_ledgerIDL) as IcusdLedgerService;
-
-        const result = await ledgerActor.icrc2_allowance({
-          account: {
-            owner: walletState.principal,
-            subaccount: []
-          },
-          spender: {
-            owner: Principal.fromText(spenderCanisterId),
-            subaccount: []
-          }
-        });
-
-        return result.allowance;
-      } catch (err) {
-        console.error(`Collateral allowance check failed (attempt ${attempt + 1}):`, err);
-
-        if (isStaleActorError(err) && attempt < maxRetries) {
-          continue;
-        }
-
+    try {
+      const walletState = get(walletStore);
+      if (!walletState.principal) {
         return BigInt(0);
       }
-    }
 
-    return BigInt(0);
-  }
+      const ledgerActor = await getAnonymousActor<IcusdLedgerService>(ledgerCanisterId, CONFIG.icusd_ledgerIDL);
 
-  /**
-   * Get current icUSD balance with retry on stale actor
-   */
-  static async getIcusdBalance(): Promise<number> {
-    const maxRetries = 2;
-    
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      try {
-        const walletState = get(walletStore);
-        
-        if (!walletState.isConnected || !walletState.principal) {
-          return 0;
-        }
-        
-        if (walletState.tokenBalances?.ICUSD?.raw) {
-          return Number(walletState.tokenBalances.ICUSD.raw) / E8S;
-        }
-        
-        // On retry, refresh wallet first
-        if (attempt > 0) {
-          console.log(`Retrying icUSD balance check (attempt ${attempt + 1}/${maxRetries + 1})...`);
-          try {
-            await walletStore.refreshWallet();
-            await new Promise(resolve => setTimeout(resolve, 500));
-          } catch (refreshErr) {
-            console.warn('Wallet refresh failed during retry:', refreshErr);
-          }
-        }
-        
-        const icusdActor = await walletStore.getActor(CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL) as IcusdLedgerService;
-        const balance = await icusdActor.icrc1_balance_of({
+      const result = await ledgerActor.icrc2_allowance({
+        account: {
           owner: walletState.principal,
           subaccount: []
-        });
-        
-        return Number(balance) / E8S;
-      } catch (err) {
-        console.error(`Error getting icUSD balance (attempt ${attempt + 1}/${maxRetries + 1}):`, err);
-        
-        // If this is a stale actor error and we have retries left, continue to retry
-        if (isStaleActorError(err) && attempt < maxRetries) {
-          continue;
+        },
+        spender: {
+          owner: Principal.fromText(spenderCanisterId),
+          subaccount: []
         }
-        
-        return 0;
-      }
+      });
+
+      return result.allowance;
+    } catch (err) {
+      console.error('Collateral allowance check failed:', err);
+      return BigInt(0);
     }
-    
-    return 0;
   }
 
   /**
-   * Get both ICP and icUSD balances with retry on stale actor
+   * Get current icUSD balance. Uses cached balance first, falls back to anonymous actor query.
+   */
+  static async getIcusdBalance(): Promise<number> {
+    try {
+      const walletState = get(walletStore);
+
+      if (!walletState.isConnected || !walletState.principal) {
+        return 0;
+      }
+
+      if (walletState.tokenBalances?.ICUSD?.raw) {
+        return Number(walletState.tokenBalances.ICUSD.raw) / E8S;
+      }
+
+      // Fallback: query ledger directly with anonymous actor (no signer popup)
+      const icusdActor = await getAnonymousActor<IcusdLedgerService>(CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL);
+      const balance = await icusdActor.icrc1_balance_of({
+        owner: walletState.principal,
+        subaccount: []
+      });
+
+      return Number(balance) / E8S;
+    } catch (err) {
+      console.error('Error getting icUSD balance:', err);
+      return 0;
+    }
+  }
+
+  /**
+   * Get both ICP and icUSD balances. Uses cached balances first, falls back to anonymous actor queries.
    */
   static async getUserBalances(): Promise<UserBalances> {
-    const maxRetries = 2;
-    
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      try {
-        const walletState = get(walletStore);
-        
-        if (!walletState.isConnected || !walletState.principal) {
-          return { icp: 0, icusd: 0 };
-        }
-        
-        let icpBalance = walletState.tokenBalances?.ICP?.raw 
-          ? Number(walletState.tokenBalances.ICP.raw) / E8S 
-          : 0;
-          
-        let icusdBalance = walletState.tokenBalances?.ICUSD?.raw
-          ? Number(walletState.tokenBalances.ICUSD.raw) / E8S
-          : 0;
-        
-        // On retry, refresh wallet first
-        if (attempt > 0) {
-          console.log(`Retrying balance fetch (attempt ${attempt + 1}/${maxRetries + 1})...`);
-          try {
-            await walletStore.refreshWallet();
-            await new Promise(resolve => setTimeout(resolve, 500));
-          } catch (refreshErr) {
-            console.warn('Wallet refresh failed during retry:', refreshErr);
-          }
-        }
-        
-        // Fetch from ledger if not available in tokenBalances
-        if (icpBalance === 0) {
-          try {
-            const icpActor = await walletStore.getActor(CONFIG.currentIcpLedgerId, CONFIG.icp_ledgerIDL) as IcpLedgerService;
-            const balance = await icpActor.icrc1_balance_of({
-              owner: walletState.principal,
-              subaccount: []
-            });
-            icpBalance = Number(balance) / E8S;
-          } catch (err) {
-            console.warn('Failed to fetch ICP balance:', err);
-            if (isStaleActorError(err) && attempt < maxRetries) {
-              throw err; // Trigger retry
-            }
-          }
-        }
-        
-        if (icusdBalance === 0) {
-          try {
-            const icusdActor = await walletStore.getActor(CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL) as IcusdLedgerService;
-            const balance = await icusdActor.icrc1_balance_of({
-              owner: walletState.principal,
-              subaccount: []
-            });
-            icusdBalance = Number(balance) / E8S;
-          } catch (err) {
-            console.warn('Failed to fetch icUSD balance:', err);
-            if (isStaleActorError(err) && attempt < maxRetries) {
-              throw err; // Trigger retry
-            }
-          }
-        }
-        
-        return {
-          icp: icpBalance,
-          icusd: icusdBalance
-        };
-      } catch (err) {
-        console.error(`Error getting user balances (attempt ${attempt + 1}/${maxRetries + 1}):`, err);
-        
-        // If this is a stale actor error and we have retries left, continue to retry
-        if (isStaleActorError(err) && attempt < maxRetries) {
-          continue;
-        }
-        
+    try {
+      const walletState = get(walletStore);
+
+      if (!walletState.isConnected || !walletState.principal) {
         return { icp: 0, icusd: 0 };
       }
+
+      let icpBalance = walletState.tokenBalances?.ICP?.raw
+        ? Number(walletState.tokenBalances.ICP.raw) / E8S
+        : 0;
+
+      let icusdBalance = walletState.tokenBalances?.ICUSD?.raw
+        ? Number(walletState.tokenBalances.ICUSD.raw) / E8S
+        : 0;
+
+      // Fetch from ledger with anonymous actor if not available in tokenBalances
+      if (icpBalance === 0) {
+        try {
+          const icpActor = await getAnonymousActor<IcpLedgerService>(CONFIG.currentIcpLedgerId, CONFIG.icp_ledgerIDL);
+          const balance = await icpActor.icrc1_balance_of({
+            owner: walletState.principal,
+            subaccount: []
+          });
+          icpBalance = Number(balance) / E8S;
+        } catch (err) {
+          console.warn('Failed to fetch ICP balance:', err);
+        }
+      }
+
+      if (icusdBalance === 0) {
+        try {
+          const icusdActor = await getAnonymousActor<IcusdLedgerService>(CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL);
+          const balance = await icusdActor.icrc1_balance_of({
+            owner: walletState.principal,
+            subaccount: []
+          });
+          icusdBalance = Number(balance) / E8S;
+        } catch (err) {
+          console.warn('Failed to fetch icUSD balance:', err);
+        }
+      }
+
+      return {
+        icp: icpBalance,
+        icusd: icusdBalance
+      };
+    } catch (err) {
+      console.error('Error getting user balances:', err);
+      return { icp: 0, icusd: 0 };
     }
-    
-    return { icp: 0, icusd: 0 };
   }
 }

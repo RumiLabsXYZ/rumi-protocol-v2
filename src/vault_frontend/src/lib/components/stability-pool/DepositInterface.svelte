@@ -103,7 +103,10 @@
   }
   
   function setMaxDeposit() {
-    depositAmount = stabilityPoolService.formatIcusd(icusdBalance);
+    // Deduct icUSD ledger fee (100_000 e8s = 0.001 icUSD) so deposit + fee doesn't exceed balance
+    const ICUSD_LEDGER_FEE = BigInt(100_000);
+    const adjusted = icusdBalance > ICUSD_LEDGER_FEE ? icusdBalance - ICUSD_LEDGER_FEE : BigInt(0);
+    depositAmount = stabilityPoolService.formatIcusd(adjusted);
   }
   
   function setMaxWithdraw() {
@@ -460,10 +463,10 @@
     align-items: center;
     gap: 0.5rem;
     padding: 0.75rem;
-    background: rgba(239, 68, 68, 0.1);
-    border: 1px solid rgba(239, 68, 68, 0.3);
+    background: rgba(224, 107, 159, 0.1);
+    border: 1px solid rgba(224, 107, 159, 0.3);
     border-radius: 0.5rem;
-    color: #f87171;
+    color: #e881a8;
     font-size: 0.875rem;
     margin-top: 1rem;
   }

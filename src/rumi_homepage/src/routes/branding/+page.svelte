@@ -249,14 +249,17 @@
   <!-- ═══════════ RISK & STATUS ═══════════ -->
   <div class="section-divider"></div>
   <h2 class="section-heading">Risk & Status</h2>
-  <p class="section-desc mb-6">Semantic colors for collateral ratio indicators and system alerts.</p>
+  <p class="section-desc mb-6">
+    Semantic colors for collateral ratio indicators and system alerts.
+    The risk scale uses only cool tones — teal through violet to pink — with zero warm-tone intrusion.
+    All thresholds are per-collateral (e.g. ICP minCR = 150%, liqCR = 133%).
+  </p>
 
   <div class="color-grid mb-10">
     {#each [
-      { name: 'Safe', hex: '#34d399', var: 'CR ≥ 200%' },
-      { name: 'Caution', hex: '#fbbf24', var: 'CR 150–200%' },
-      { name: 'Danger', hex: '#f87171', var: 'CR 130–150%' },
-      { name: 'Critical', hex: '#ef4444', var: 'CR < 130%' },
+      { name: 'Safe', hex: '#2DD4BF', var: 'CR ≥ minCR × 1.234 · --rumi-safe' },
+      { name: 'Caution', hex: '#a78bfa', var: 'minCR → minCR × 1.234 · --rumi-caution' },
+      { name: 'Warning / Danger', hex: '#e06b9f', var: 'CR < minCR · --rumi-danger' },
     ] as color}
       <button class="color-card" on:click={() => copyToClipboard(color.hex, color.var)}>
         <div class="color-swatch" style="background: {color.hex};"></div>
@@ -347,6 +350,18 @@
         <span class="gradient-name">Hero Headline</span>
         <span class="gradient-code"><code>linear-gradient(135deg, #e8e4f0 30%, #d176e8 70%, #34d399 100%)</code></span>
         <span class="gradient-use">Marketing hero headlines only (secondary brand).</span>
+      </div>
+    </div>
+    <div class="gradient-sample">
+      <div class="health-meter-preview">
+        <div class="hm-zone hm-pink"></div>
+        <div class="hm-zone hm-gradient"></div>
+        <div class="hm-zone hm-teal"></div>
+      </div>
+      <div class="gradient-info">
+        <span class="gradient-name">Health Meter</span>
+        <span class="gradient-code"><code>pink (solid) | pink→violet (gradient) | teal (solid)</code></span>
+        <span class="gradient-use">Vault card CR gauge. Three discrete zones: danger, transition, safe. Scale: 100–300% CR. Boundaries are per-collateral.</span>
       </div>
     </div>
   </div>
@@ -620,6 +635,21 @@
     color: var(--rumi-text-secondary);
   }
 
+  /* Health meter preview */
+  .health-meter-preview {
+    display: flex;
+    width: 80px;
+    height: 12px;
+    border-radius: 9999px;
+    overflow: hidden;
+    flex-shrink: 0;
+    align-self: center;
+  }
+  .hm-zone { height: 100%; }
+  .hm-pink { width: 16.5%; background: rgba(224, 107, 159, 0.75); }
+  .hm-gradient { width: 33.5%; background: linear-gradient(to right, rgba(224, 107, 159, 0.65), rgba(167, 139, 250, 0.6)); }
+  .hm-teal { width: 50%; background: rgba(45, 212, 191, 0.5); }
+
   /* Usage rules */
   .rule-card {
     background: var(--rumi-bg-surface1);
@@ -635,7 +665,7 @@
     margin-bottom: 1rem;
   }
   .rule-do .rule-title { color: var(--rumi-action); }
-  .rule-dont .rule-title { color: #f87171; }
+  .rule-dont .rule-title { color: #e06b9f; }
   .rule-list {
     list-style: none;
     padding: 0;
@@ -662,7 +692,7 @@
     content: '✗';
     position: absolute;
     left: 0;
-    color: #f87171;
+    color: #e06b9f;
     font-size: 0.75rem;
   }
 </style>

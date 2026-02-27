@@ -83,6 +83,28 @@ export function formatAddress(
 }
 
 /**
+ * Smart token balance formatting:
+ * - 2 decimal places for values >= 0.01
+ * - 2 significant digits for values < 0.01 (e.g., 0.0012, 0.00012)
+ * - "0.00" for zero or invalid values
+ */
+export function formatTokenBalance(value: number | string | undefined | null): string {
+  if (value === undefined || value === null) return '0.00';
+  const num = typeof value === 'string' ? parseFloat(value) : value;
+  if (isNaN(num) || num === 0) return '0.00';
+
+  if (Math.abs(num) >= 0.01) {
+    return num.toFixed(2);
+  }
+
+  // For values < 0.01, show 2 significant digits
+  // e.g., 0.0012345 → 0.0012, 0.00012345 → 0.00012
+  const magnitude = Math.floor(Math.log10(Math.abs(num)));
+  const decimals = Math.abs(magnitude) + 1;
+  return num.toFixed(decimals);
+}
+
+/**
  * Format a date
  */
 export function formatDate(

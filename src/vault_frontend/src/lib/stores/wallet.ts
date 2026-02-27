@@ -363,6 +363,8 @@ function createWalletStore() {
             icon = '/wallets/01InfinityMarkHEX.svg';
           } else if (authState.walletType === WALLET_TYPES.PLUG) {
             icon = '/wallets/plug.svg';
+          } else if (authState.walletType === WALLET_TYPES.OISY) {
+            icon = '/wallets/oisy.svg';
           }
 
           update(s => ({

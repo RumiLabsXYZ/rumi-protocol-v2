@@ -45,8 +45,8 @@
 <div class="page-container docs-container">
   <h1 class="page-title docs-title">Documentation</h1>
   <p class="docs-subtitle">
-    Rumi Protocol is a CDP system that lets you borrow icUSD stablecoins against ICP collateral on the Internet Computer.
-    These docs cover what's currently implemented — not future plans.
+    Rumi Protocol is a CDP system that lets you borrow icUSD stablecoins against supported collateral on the Internet Computer.
+    These docs cover what's currently implemented — not future plans. Connect with <strong>Oisy</strong>, <strong>Plug</strong>, <strong>Internet Identity</strong>, or <strong>NFID</strong> to get started.
   </p>
 
   <nav class="docs-nav">

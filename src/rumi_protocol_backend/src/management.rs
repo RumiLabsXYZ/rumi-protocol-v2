@@ -8,6 +8,7 @@ use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
 use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromError};
 use icrc_ledger_client_cdk::{CdkRuntime, ICRC1Client};
 use num_traits::ToPrimitive;
+use sha2::{Sha256, Digest};
 use std::fmt;
 use crate::log;
 use crate::DEBUG;
@@ -394,4 +395,98 @@ pub async fn get_token_balance(ledger: Principal) -> Result<u64, String> {
         Ok((balance,)) => Ok(balance.0.to_u64().unwrap_or(0)),
         Err((code, msg)) => Err(format!("icrc1_balance_of failed: {:?} {}", code, msg)),
     }
+}
+
+// ─── Push-deposit helpers (Oisy wallet integration) ───
+
+/// Compute a deterministic deposit subaccount for a given caller.
+/// Subaccount = SHA-256(b"rumi-deposit" || caller.as_slice())
+pub fn compute_deposit_subaccount(caller: &Principal) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"rumi-deposit");
+    hasher.update(caller.as_slice());
+    hasher.finalize().into()
+}
+
+/// Return the deposit Account for a caller. The account is owned by the
+/// backend canister with a caller-specific subaccount.
+pub fn get_deposit_account_for(caller: &Principal) -> Account {
+    Account {
+        owner: ic_cdk::id(),
+        subaccount: Some(compute_deposit_subaccount(caller)),
+    }
+}
+
+/// Query the ICRC-1 balance of a specific account on a ledger.
+pub async fn get_balance_of(account: Account, ledger: Principal) -> Result<u64, String> {
+    let result: Result<(Nat,), _> = ic_cdk::call(
+        ledger,
+        "icrc1_balance_of",
+        (account,),
+    )
+    .await;
+    match result {
+        Ok((balance,)) => Ok(balance.0.to_u64().unwrap_or(0)),
+        Err((code, msg)) => Err(format!("icrc1_balance_of failed: {:?} {}", code, msg)),
+    }
+}
+
+/// Sweep funds from a deposit subaccount into the protocol's main account.
+/// Returns (amount_received, sweep_block_index) where amount is balance minus ledger fee.
+pub async fn sweep_deposit(
+    caller: &Principal,
+    ledger: Principal,
+    ledger_fee: u64,
+) -> Result<(u64, u64), String> {
+    let subaccount = compute_deposit_subaccount(caller);
+    let deposit_account = Account {
+        owner: ic_cdk::id(),
+        subaccount: Some(subaccount),
+    };
+
+    // Read how much is sitting in the deposit subaccount
+    let balance = get_balance_of(deposit_account, ledger).await?;
+
+    if balance == 0 {
+        return Err("No deposit found in subaccount".to_string());
+    }
+
+    if balance <= ledger_fee {
+        return Err(format!(
+            "Deposit balance ({}) is not enough to cover the ledger fee ({})",
+            balance, ledger_fee
+        ));
+    }
+
+    let transfer_amount = balance - ledger_fee;
+
+    let client = ICRC1Client {
+        runtime: CdkRuntime,
+        ledger_canister_id: ledger,
+    };
+
+    let block_index = client
+        .transfer(TransferArg {
+            from_subaccount: Some(subaccount),
+            to: Account {
+                owner: ic_cdk::id(),
+                subaccount: None,
+            },
+            fee: None,
+            created_at_time: None,
+            memo: None,
+            amount: Nat::from(transfer_amount),
+        })
+        .await
+        .map_err(|e| format!("sweep transfer call failed: {:?}", e))?
+        .map_err(|e| format!("sweep transfer error: {:?}", e))?;
+
+    let block_index_u64 = block_index.0.to_u64().unwrap_or(0);
+
+    log!(DEBUG,
+        "[sweep_deposit] Swept {} from subaccount for {} on ledger {} (block {})",
+        transfer_amount, caller, ledger, block_index_u64
+    );
+
+    Ok((transfer_amount, block_index_u64))
 }

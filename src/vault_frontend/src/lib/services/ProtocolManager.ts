@@ -1,6 +1,6 @@
 import type { Principal } from '@dfinity/principal';
 import { ApiClient } from './protocol/apiClient';
-import { walletOperations } from './protocol/walletOperations';
+import { walletOperations, isOisyWallet } from './protocol/walletOperations';
 import { QueryOperations } from './protocol/queryOperations';
 import type { VaultOperationResult } from './types';
 import { processingStore, ProcessingStage } from '$lib/stores/processingStore';
@@ -127,13 +127,17 @@ export class ProtocolManager {
       // Add to queue
       const promise = (async () => {
         processingStore.setStage(ProcessingStage.CHECKING);
-        
+
         // Run pre-checks if provided
         if (preChecks) await preChecks();
-        
-        // Validate system state
-        await this.validateOperation(operation);
-        
+
+        // Skip async protocol status check for Oisy — the canister query burns
+        // the browser's user gesture context which is needed for the signer popup.
+        // The backend validates everything regardless.
+        if (!isOisyWallet()) {
+          await this.validateOperation(operation);
+        }
+
         processingStore.setStage(ProcessingStage.CREATING);
         
         // Check if operation has been aborted
@@ -456,54 +460,36 @@ export class ProtocolManager {
       async () => {
         // Pre-checks - validation is now handled in ApiClient
         await walletOperations.checkSufficientBalance(icusdAmount);
-        
-        // IMPORTANT: Refresh wallet connection before checking allowance to prevent stale actor errors
-        try {
-          console.log('🔄 Refreshing wallet connection before repayment...');
-          await walletStore.refreshWallet();
-          await new Promise(resolve => setTimeout(resolve, 500)); // Brief delay for connection to settle
-        } catch (refreshErr) {
-          console.warn('Wallet refresh failed, attempting to continue:', refreshErr);
-        }
-        
-        // Ensure proper icUSD allowance for the repayment
+
+        // Oisy: icUSD allowance is handled via ICRC-112 batching inside apiClient.repayToVault
+        if (isOisyWallet()) return;
+
         const amountE8s = BigInt(Math.floor(icusdAmount * 100_000_000));
         const spenderCanisterId = CONFIG.currentCanisterId;
-        
+
         try {
-          // Check current allowance (walletOperations.checkIcusdAllowance now has built-in retry)
+          // Check current allowance (anonymous actor, no popup)
           const currentAllowance = await walletOperations.checkIcusdAllowance(spenderCanisterId);
-          console.log(`💰 Repay pre-check: Current icUSD allowance: ${Number(currentAllowance) / 100_000_000}`);
-          console.log(`💰 Repay pre-check: Required icUSD amount: ${icusdAmount}`);
-          
-          // ICRC-2 transfer_from deducts (amount + ledger_fee) from allowance
-          // icUSD ledger fee = 100,000 e8s (0.001 icUSD)
+          console.log(`💰 Repay pre-check: icUSD allowance: ${Number(currentAllowance) / 100_000_000}, need: ${icusdAmount}`);
+
           const ICUSD_LEDGER_FEE = BigInt(100_000);
-          const requiredAllowance = amountE8s + ICUSD_LEDGER_FEE + ICUSD_LEDGER_FEE; // extra fee as safety buffer
-          
+          const requiredAllowance = amountE8s + ICUSD_LEDGER_FEE + ICUSD_LEDGER_FEE;
+
           if (currentAllowance < requiredAllowance) {
             processingStore.setStage(ProcessingStage.APPROVING);
-            console.log(`🔐 Setting icUSD approval - insufficient allowance (have: ${Number(currentAllowance) / 100_000_000}, need: ${Number(requiredAllowance) / 100_000_000})`);
-            
-            // Approve with the buffered amount (approveIcusdTransfer now has built-in retry)
-            const approvalResult = await walletOperations.approveIcusdTransfer(requiredAllowance, spenderCanisterId);
-            
+
+            const LARGE_APPROVAL = BigInt(100_000_000_000_000_000); // 1B icUSD in e8s
+            console.log(`🔐 Approving large icUSD allowance (1B) to avoid future popups...`);
+
+            const approvalResult = await walletOperations.approveIcusdTransfer(LARGE_APPROVAL, spenderCanisterId);
+
             if (!approvalResult.success) {
               throw new Error(approvalResult.error || 'Failed to approve icUSD transfer');
             }
-            
-            // Wait for approval to settle
-            await new Promise(resolve => setTimeout(resolve, 1500));
-            
-            // Verify the approval took effect
-            const newAllowance = await walletOperations.checkIcusdAllowance(spenderCanisterId);
-            console.log(`✅ Post-approval allowance: ${Number(newAllowance) / 100_000_000} icUSD`);
-            
-            if (newAllowance < amountE8s) {
-              throw new Error(`Approval verification failed - allowance still insufficient: ${Number(newAllowance) / 100_000_000} < ${icusdAmount}`);
-            }
+
+            await new Promise(resolve => setTimeout(resolve, 500));
           } else {
-            console.log(`✅ Sufficient icUSD allowance already exists: ${Number(currentAllowance) / 100_000_000}`);
+            console.log(`✅ Sufficient icUSD allowance already exists`);
           }
         } catch (err) {
           console.error('❌ icUSD allowance check/approval failed:', err);
@@ -527,56 +513,40 @@ export class ProtocolManager {
     return this.executeOperation(
       `repayVaultStable:${vaultId}`,
       async () => {
-        // Refresh wallet connection
-        try {
-          console.log('🔄 Refreshing wallet connection before stable repayment...');
-          await walletStore.refreshWallet();
-          await new Promise(resolve => setTimeout(resolve, 500));
-        } catch (refreshErr) {
-          console.warn('Wallet refresh failed, attempting to continue:', refreshErr);
+        // Oisy: stable allowance is handled via ICRC-112 batching inside apiClient.repayToVaultWithStable
+        if (isOisyWallet()) {
+          processingStore.setStage(ProcessingStage.CREATING);
+          return await ApiClient.repayToVaultWithStable(vaultId, amount, tokenType);
         }
 
-        // Calculate the stable token amount in e6s (6 decimals)
-        // The backend will handle the e8s/e6s conversion for debt accounting,
-        // but approval needs to be in e6s for the stable token ledger.
         const E6S = 1_000_000;
         const amountE6s = BigInt(Math.floor(amount * E6S));
         const spenderCanisterId = CONFIG.currentCanisterId;
 
-        // Account for protocol fee (0.05%) + ledger transfer fee (10_000 e6s for ckUSDT/ckUSDC)
-        // ICRC-2 transfer_from deducts (amount + ledger_fee) from the allowance
         const STABLE_LEDGER_FEE = BigInt(10_000); // 0.01 USDT/USDC
         const protocolFee = amountE6s / BigInt(2000); // 0.05%
-        const requiredAllowance = amountE6s + protocolFee + STABLE_LEDGER_FEE + STABLE_LEDGER_FEE; // extra fee as safety buffer
+        const requiredAllowance = amountE6s + protocolFee + STABLE_LEDGER_FEE + STABLE_LEDGER_FEE;
 
         try {
-          // Check current allowance on the stable token ledger
+          // Check current allowance (anonymous actor, no popup)
           const currentAllowance = await walletOperations.checkStableAllowance(spenderCanisterId, tokenType);
-          console.log(`💰 Stable repay pre-check: Current ${tokenType} allowance: ${Number(currentAllowance) / E6S}`);
-          console.log(`💰 Stable repay pre-check: Required ${tokenType} amount: ${amount}`);
+          console.log(`💰 Stable repay: ${tokenType} allowance: ${Number(currentAllowance) / E6S}, need: ${amount}`);
 
           if (currentAllowance < requiredAllowance) {
             processingStore.setStage(ProcessingStage.APPROVING);
-            console.log(`🔐 Setting ${tokenType} approval - insufficient allowance (have: ${Number(currentAllowance) / E6S}, need: ${Number(requiredAllowance) / E6S})`);
 
-            const approvalResult = await walletOperations.approveStableTransfer(requiredAllowance, spenderCanisterId, tokenType);
+            const LARGE_APPROVAL = BigInt(1_000_000_000_000_000); // 1B in e6s
+            console.log(`🔐 Approving large ${tokenType} allowance to avoid future popups...`);
+
+            const approvalResult = await walletOperations.approveStableTransfer(LARGE_APPROVAL, spenderCanisterId, tokenType);
 
             if (!approvalResult.success) {
               throw new Error(approvalResult.error || `Failed to approve ${tokenType} transfer`);
             }
 
-            // Wait for approval to settle
-            await new Promise(resolve => setTimeout(resolve, 1500));
-
-            // Verify the approval took effect
-            const newAllowance = await walletOperations.checkStableAllowance(spenderCanisterId, tokenType);
-            console.log(`✅ Post-approval ${tokenType} allowance: ${Number(newAllowance) / E6S}`);
-
-            if (newAllowance < amountE6s) {
-              throw new Error(`${tokenType} approval verification failed - allowance still insufficient: ${Number(newAllowance) / E6S} < ${amount}`);
-            }
+            await new Promise(resolve => setTimeout(resolve, 500));
           } else {
-            console.log(`✅ Sufficient ${tokenType} allowance already exists: ${Number(currentAllowance) / E6S}`);
+            console.log(`✅ Sufficient ${tokenType} allowance already exists`);
           }
         } catch (err) {
           console.error(`❌ ${tokenType} allowance check/approval failed:`, err);
@@ -818,31 +788,33 @@ export class ProtocolManager {
   }
 
   /**
-   * Deposit ICP to vault with complete flow automation
+   * Deposit ICP to vault with complete flow automation.
+   * Note: For Oisy wallets, ICP operations use ICRC-112 batched signing
+   * (handled in apiClient openVault/addMargin), so this method is
+   * typically only called for Plug/II wallets.
    */
   static async depositIcp(amount: number): Promise<ProtocolResult> {
     try {
       console.log(`💰 Starting ICP deposit of ${amount} ICP`);
-      
-      // Validate amount
+
       if (!isFinite(amount) || amount <= 0) {
         return this.createError(`Invalid deposit amount: ${amount}. Amount must be a finite positive number.`);
       }
-      
-      // REMOVED: No longer need to explicitly request permissions
-      // Permissions are automatically handled during wallet connection
 
-      // Step 2: Approve ICP transfer instead of calling ensureTokenApproval
       const amountE8s = BigInt(Math.floor(amount * 100_000_000));
       const approvalResult = await walletOperations.approveIcpTransfer(amountE8s, CANISTER_IDS.PROTOCOL);
       if (!approvalResult.success) {
         return this.createError(`ICP approval failed: ${approvalResult.error}`);
       }
 
-      // Step 3: Execute deposit
+      // For Oisy: approval consumed the user gesture — the next popup will be blocked.
+      if (isOisyWallet()) {
+        return this.createError('Approved! Click Deposit again to complete.');
+      }
+
       const vaultActor = await walletStore.getActor(CANISTER_IDS.PROTOCOL, CONFIG.rumi_backendIDL) as any;
       const depositResult = await vaultActor.deposit_icp(amountE8s);
-      
+
       if ('Ok' in depositResult) {
         return this.createSuccess(`Successfully deposited ${amount} ICP`, depositResult.Ok);
       } else {

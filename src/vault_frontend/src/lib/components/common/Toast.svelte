@@ -12,13 +12,13 @@
   
   const typeStyles = {
     success: {
-      bg: 'rgba(34, 197, 94, 0.95)',
-      border: '#22c55e',
+      bg: 'rgba(45, 212, 191, 0.95)',
+      border: '#2DD4BF',
       icon: '✓'
     },
     error: {
-      bg: 'rgba(239, 68, 68, 0.95)',
-      border: '#ef4444',
+      bg: 'rgba(224, 107, 159, 0.95)',
+      border: '#e06b9f',
       icon: '✕'
     },
     info: {

@@ -12,6 +12,7 @@
   import { ApiClient } from '$lib/services/protocol/apiClient';
   import { CONFIG } from '$lib/config';
   import { getMinimumCR, getLiquidationCR } from '$lib/protocol';
+  import VaultHistory from './VaultHistory.svelte';
 
   // Change this to accept vaultId instead of the full vault object
   export let vaultId: number;
@@ -42,7 +43,10 @@
   let isWithdrawingCollateral = false;
   $: showCollectButton = currentVault && currentVault.icpMargin > 0;
   let isWithdrawingAndClosing = false;
-  
+
+  // Withdraw collateral state
+  let withdrawAmount = 0;
+
   const dispatch = createEventDispatcher();
   const E8S = 100_000_000;
   
@@ -60,6 +64,17 @@
   $: vaultHealthStatus = getVaultHealthStatus(collateralRatio);
   $: canWithdraw = currentVault && currentVault.borrowedIcusd === 0 && currentVault.icpMargin > 0;
   $: canClose = currentVault && currentVault.borrowedIcusd === 0;
+
+  // Withdraw: is this a full withdrawal that should also close the vault?
+  $: isMaxWithdraw = currentVault && withdrawAmount > 0 &&
+    Math.abs(withdrawAmount - currentVault.icpMargin) < 0.0001;
+  $: isWithdrawAndClose = canClose && isMaxWithdraw;
+
+  function setMaxWithdraw() {
+    if (currentVault) {
+      withdrawAmount = currentVault.icpMargin;
+    }
+  }
   
   // Format display values
   $: formattedCollateralValue = formatNumber(collateralValueUsd, 2);
@@ -78,60 +93,61 @@
   // Update handleAddMargin to use currentVault
   async function handleAddMargin() {
     if (!currentVault) return;
+
     if (addMarginAmount <= 0) {
       errorMessage = "Please enter a valid amount";
       return;
     }
-    
+
     try {
       isAddingMargin = true;
       errorMessage = '';
       successMessage = '';
-      
+
       // First check and request ICP approval if needed
       const amountE8s = BigInt(Math.floor(addMarginAmount * E8S));
       const spenderCanisterId = CONFIG.currentCanisterId;
-      
+
       // Set approval state to show user what's happening
       isApproving = true;
-      
+
       // Check current allowance
       const currentAllowance = await protocolService.checkIcpAllowance(spenderCanisterId);
       console.log('Current ICP allowance:', currentAllowance.toString());
-      
+
       // If allowance is insufficient, request approval with 20% buffer
       if (currentAllowance < amountE8s) {
         const bufferAmount = amountE8s * BigInt(120) / BigInt(100); // 20% buffer
         console.log('Requesting approval for:', bufferAmount.toString());
-        
+
         const approvalResult = await protocolService.approveIcpTransfer(
           bufferAmount,
           spenderCanisterId
         );
-        
+
         if (!approvalResult.success) {
           errorMessage = approvalResult.error || 'Failed to approve ICP transfer';
           isAddingMargin = false;
           isApproving = false;
           return;
         }
-        
+
         // Short delay to allow approval to be processed
         await new Promise(resolve => setTimeout(resolve, 2000));
       }
-      
+
       // Reset approval state
       isApproving = false;
-      
+
       // Now proceed with adding margin
       const result = await protocolService.addMarginToVault(currentVault.vaultId, addMarginAmount);
-      
+
       if (result.success) {
         successMessage = `Successfully added ${addMarginAmount} ICP to vault`;
-        
+
         // Reset input
         addMarginAmount = 0;
-        
+
         // Explicitly refresh this vault to ensure UI is updated
         await vaultStore.refreshVault(currentVault.vaultId);
       } else {
@@ -347,6 +363,45 @@
     }
   }
   
+  // Withdraw collateral (partial or full with close)
+  async function handleWithdrawCollateral() {
+    if (!currentVault || withdrawAmount <= 0) return;
+
+    try {
+      isWithdrawingCollateral = true;
+      errorMessage = '';
+      successMessage = '';
+
+      if (isWithdrawAndClose) {
+        // Full withdrawal + close vault
+        const result = await protocolService.withdrawCollateralAndCloseVault(currentVault.vaultId);
+        if (result.success) {
+          successMessage = `Withdrew ${currentVault.icpMargin} ICP and closed vault`;
+          closeSuccess = true;
+          await vaultStore.refreshVaults();
+          window.location.href = '/vaults';
+        } else {
+          errorMessage = result.error || "Failed to withdraw and close vault";
+        }
+      } else {
+        // Partial withdrawal
+        const result = await protocolService.withdrawPartialCollateral(currentVault.vaultId, withdrawAmount);
+        if (result.success) {
+          successMessage = `Withdrew ${withdrawAmount} ICP from vault`;
+          withdrawAmount = 0;
+          await vaultStore.refreshVault(currentVault.vaultId);
+        } else {
+          errorMessage = result.error || "Failed to withdraw collateral";
+        }
+      }
+    } catch (err) {
+      console.error('Error withdrawing collateral:', err);
+      errorMessage = err instanceof Error ? err.message : "Unknown error";
+    } finally {
+      isWithdrawingCollateral = false;
+    }
+  }
+
   // Update handleResetOperations
   async function handleResetOperations() {
     try {
@@ -399,16 +454,14 @@
     const balances = $walletStore.tokenBalances;
     let walletBalance = Infinity;
     if (repayTokenType === 'CKUSDT' && balances?.CKUSDT) {
-      walletBalance = parseFloat(balances.CKUSDT.formatted);
-      // Deduct ledger fee ($0.01) + protocol fee (0.05%) so the tx actually succeeds
-      walletBalance = Math.max(0, (walletBalance - 0.01) / 1.0005);
+      // Deduct ckUSDT ledger fee (0.01)
+      walletBalance = Math.max(0, parseFloat(balances.CKUSDT.formatted) - 0.01);
     } else if (repayTokenType === 'CKUSDC' && balances?.CKUSDC) {
-      walletBalance = parseFloat(balances.CKUSDC.formatted);
-      walletBalance = Math.max(0, (walletBalance - 0.01) / 1.0005);
+      // Deduct ckUSDC ledger fee (0.01)
+      walletBalance = Math.max(0, parseFloat(balances.CKUSDC.formatted) - 0.01);
     } else if (repayTokenType === 'icUSD' && balances?.ICUSD) {
-      walletBalance = parseFloat(balances.ICUSD.formatted);
-      // Deduct icUSD ledger fee (0.001 icUSD)
-      walletBalance = Math.max(0, walletBalance - 0.001);
+      // Deduct icUSD ledger fee (0.001)
+      walletBalance = Math.max(0, parseFloat(balances.ICUSD.formatted) - 0.001);
     }
     repayAmount = Math.min(walletBalance, currentVault.borrowedIcusd);
   }
@@ -451,15 +504,7 @@
           <p class="text-gray-400 text-sm">${formattedCollateralValue}</p>
         </div>
         <div>
-          {#if canWithdraw}
-            <button 
-              on:click={handleWithdrawAndCloseVault} 
-              disabled={isWithdrawingCollateral}
-              class="text-sm px-3 py-1 bg-purple-600 hover:bg-purple-500 rounded-md"
-            >
-              {isWithdrawingCollateral ? 'Withdrawing...' : 'Withdraw'}
-            </button>
-          {/if}
+          <!-- Withdraw button removed — see Withdraw panel below -->
         </div>
       </div>
     </div>
@@ -486,7 +531,48 @@
   </div>
   
   <!-- IMPROVED Action Panels -->
-  <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+  <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
+    <!-- Withdraw Collateral Panel -->
+    <div class="bg-gray-900/30 p-4 rounded-lg flex flex-col h-full">
+      <h3 class="text-lg font-semibold mb-3">Withdraw</h3>
+      <div class="mb-2 flex-grow">
+        <div class="flex gap-1">
+          <input
+            type="number"
+            bind:value={withdrawAmount}
+            min="0.001"
+            max={currentVault?.icpMargin || 0}
+            step="0.01"
+            placeholder="ICP amount"
+            class="w-full bg-gray-800 text-white p-2 rounded border border-gray-700"
+          />
+          <button
+            on:click={setMaxWithdraw}
+            class="px-2 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 rounded border border-gray-600 whitespace-nowrap"
+          >Max</button>
+        </div>
+        <p class="text-xs text-gray-400 mt-1">
+          Available: {formattedMargin} ICP
+          {#if currentVault && currentVault.borrowedIcusd > 0}
+            <span class="text-yellow-400">(has debt)</span>
+          {/if}
+        </p>
+      </div>
+      <button
+        on:click={handleWithdrawCollateral}
+        disabled={isWithdrawingCollateral || withdrawAmount <= 0 || (currentVault && withdrawAmount > currentVault.icpMargin)}
+        class="w-full text-white py-2 rounded-md disabled:opacity-50 disabled:cursor-not-allowed {isWithdrawAndClose ? 'bg-indigo-600 hover:bg-indigo-500' : 'bg-purple-600 hover:bg-purple-500'}"
+      >
+        {#if isWithdrawingCollateral}
+          Processing...
+        {:else if isWithdrawAndClose}
+          Withdraw & Close Vault
+        {:else}
+          Withdraw ICP
+        {/if}
+      </button>
+    </div>
+
     <!-- Add Margin Panel - IMPROVED -->
     <div class="bg-gray-900/30 p-4 rounded-lg flex flex-col h-full">
       <h3 class="text-lg font-semibold mb-3">Add Collateral</h3>
@@ -503,10 +589,10 @@
           Current: {formattedMargin} ICP
         </p>
       </div>
-      <button 
-        on:click={handleAddMargin} 
+      <button
+        on:click={handleAddMargin}
         disabled={isAddingMargin || isApproving || !addMarginAmount || addMarginAmount <= 0}
-        class="w-full bg-blue-600 hover:bg-blue-500 text-white py-2 rounded-md disabled:opacity-50 disabled:cursor-not-allowed"
+        class="w-full text-white py-2 rounded-md disabled:opacity-50 disabled:cursor-not-allowed bg-blue-600 hover:bg-blue-500"
       >
         {#if isApproving}
           Approving...
@@ -630,55 +716,19 @@
   </div>
 {/if}
   
-  <!-- Close Vault Section - IMPROVED -->
+  <!-- Vault Management -->
   <div class="mt-8 border-t border-gray-700 pt-6">
-    <h3 class="text-lg font-semibold mb-4">Vault Management</h3>
-    
     <div class="flex flex-wrap gap-4">
-      {#if canWithdraw && canClose}
-        <!-- Combined withdrawal and close button -->
-        <button 
-          on:click={handleWithdrawAndCloseVault}
-          disabled={isWithdrawingAndClosing }
-          class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-md disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
-        >
-          {#if isWithdrawingAndClosing}
-            <span class="inline-block animate-spin mr-2">↻</span> Processing...
-          {:else}
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-1" viewBox="0 0 20 20" fill="currentColor">
-              <path d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4V5h12v10z" />
-            </svg>
-            Withdraw & Close Vault
-          {/if}
-        </button>
-      {:else if canClose}
-        <!-- Just close button if no collateral -->
-        <button 
-          on:click={handleWithdrawAndCloseVault}
-          disabled={isClosing }
-          class="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-md disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
-        >
-          {#if isClosing}
-            <span class="inline-block animate-spin mr-2">↻</span> Closing...
-          {:else}
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-1" viewBox="0 0 20 20" fill="currentColor">
-              <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
-            </svg>
-            Close Vault
-          {/if}
-        </button>
-      {/if}
-      
       <!-- Debug button for resetting operations -->
-      <button 
+      <button
         on:click={handleResetOperations}
         disabled={isResettingOperations}
-        class="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-md flex items-center"
+        class="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-md flex items-center text-sm"
       >
         {#if isResettingOperations}
           <span class="inline-block animate-spin mr-2">↻</span> Resetting...
         {:else}
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-1" viewBox="0 0 20 20" fill="currentColor">
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1" viewBox="0 0 20 20" fill="currentColor">
             <path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd" />
           </svg>
           Reset Operations
@@ -697,6 +747,11 @@
         Vault has been successfully closed
       </div>
     {/if}
+  </div>
+
+  <!-- Vault History -->
+  <div class="mt-8">
+    <VaultHistory vaultId={currentVault.vaultId} />
   </div>
 </div>
 {:else}

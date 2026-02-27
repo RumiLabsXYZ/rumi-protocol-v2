@@ -207,43 +207,47 @@ function createAuthStore() {
           console.log('⚠️ Could not restore Plug session silently, user must reconnect');
           storage.clear();
         } else if (lastWallet === WALLET_TYPES.OISY || lastWallet.toLowerCase().includes('oisy')) {
-          // For Oisy and other PNP wallets, try to restore session via PNP library
-          console.log('🔄 Attempting Oisy/PNP session restore...');
-          
+          // Auto-reconnect Oisy on page load (same approach as ICPSwap).
+          // Oisy uses PostMessageTransport which briefly opens the signer popup.
+          // For already-authorized dApps, the popup auto-approves and closes instantly.
+          // PNP's detectNonClickEstablishment is already false for Oisy, allowing
+          // programmatic popup opening. If blocked, we fall back to a reconnect button.
+          console.log('🔄 Auto-reconnecting Oisy wallet...');
           try {
-            // Check if PNP has an active connection
-            const pnpInstance = getPnpInstance();
-            
-            if (pnpInstance && typeof pnpInstance.isConnected === 'function' && await pnpInstance.isConnected()) {
-              console.log('✅ PNP session still active, checking principal...');
-              
-              // Try to get the principal from PNP account
-              const account = pnpInstance.account;
-              
-              if (account?.owner) {
-                const convertedPrincipal = Principal.fromText(account.owner.toString());
-                const balance = await refreshWalletBalance(convertedPrincipal);
-                
-                set({
-                  isConnected: true,
-                  account: { owner: convertedPrincipal, balance },
-                  isInitialized: true,
-                  walletType: WALLET_TYPES.OISY
-                });
-                
-                selectedWalletId.set(lastWallet);
-                currentWalletType.set(WALLET_TYPES.OISY);
-                console.log('🎉 Oisy session restored successfully');
-                return;
+            // Ensure PNP is initialized before attempting reconnect
+            getPnpInstance();
+
+            // Race the connect against a timeout — if popup is blocked, don't hang
+            const connectPromise = connectWithComprehensivePermissions('oisy');
+            const timeoutPromise = new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error('Oisy reconnect timed out')), 15000)
+            );
+
+            const result = await Promise.race([connectPromise, timeoutPromise]);
+
+            if (result?.owner) {
+              let balance = BigInt(0);
+              try {
+                balance = await refreshWalletBalance(result.owner);
+              } catch (e) {
+                console.warn('Balance fetch failed during Oisy restore:', e);
               }
+
+              set({
+                isConnected: true,
+                account: { owner: result.owner, balance },
+                isInitialized: true,
+                walletType: WALLET_TYPES.OISY
+              });
+
+              selectedWalletId.set(lastWallet);
+              currentWalletType.set(WALLET_TYPES.OISY);
+              console.log('🎉 Oisy session auto-restored');
+              return;
             }
-            
-            // If PNP session not active, clear storage
-            console.log('⚠️ Oisy session not found, user must reconnect');
-            storage.clear();
-          } catch (oisyError) {
-            console.log('⚠️ Oisy session restore failed:', oisyError);
-            storage.clear();
+          } catch (e) {
+            console.warn('⚠️ Oisy auto-reconnect failed (popup may have been blocked):', e);
+            // Fall through — WalletConnector will detect LAST_WALLET and show reconnect button
           }
         } else {
           // Unknown wallet type, clear storage

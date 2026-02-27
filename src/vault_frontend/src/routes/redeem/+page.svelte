@@ -182,7 +182,13 @@
           await wallet.refreshBalance();
           fetchData();
         } else {
-          errorMessage = result.error || 'Failed to redeem';
+          // Oisy two-step: approval succeeded, show as info not error
+          const msg = result.error || 'Failed to redeem';
+          if (msg.includes('Click Redeem again')) {
+            successMessage = 'Approved! Click Redeem again to complete.';
+          } else {
+            errorMessage = msg;
+          }
         }
       } else {
         // No reserves available — fall back to direct ICP vault redemption
@@ -270,10 +276,10 @@
               <div class="max-btn-row">
                 <button
                   class="max-btn"
-                  on:click={() => icusdAmount = icusdBalance}
+                  on:click={() => icusdAmount = Math.max(0, icusdBalance - 0.001)}
                   disabled={actionInProgress}
                 >
-                  Max: {formatNumber(icusdBalance)}
+                  Max: {formatNumber(Math.max(0, icusdBalance - 0.001))}
                 </button>
               </div>
             {/if}
@@ -445,13 +451,13 @@
     align-items: center;
     padding: 0.625rem 1rem;
     border-radius: 0.5rem;
-    background: rgba(16, 185, 129, 0.06);
-    border: 1px solid rgba(16, 185, 129, 0.15);
+    background: rgba(45, 212, 191, 0.06);
+    border: 1px solid rgba(45, 212, 191, 0.15);
   }
   .reserve-label {
     font-size: 0.75rem;
     font-weight: 500;
-    color: #6ee7b7;
+    color: #5eead4;
   }
   .reserve-amounts {
     display: flex;
@@ -468,7 +474,7 @@
   }
   .reserve-total {
     font-weight: 600;
-    color: #6ee7b7;
+    color: #5eead4;
   }
 
   /* ── Action card ───────────────────────────────────────────────── */
@@ -622,14 +628,14 @@
     font-size: 0.8125rem;
   }
   .msg-error {
-    background: rgba(239, 68, 68, 0.1);
-    border: 1px solid rgba(239, 68, 68, 0.25);
-    color: #fca5a5;
+    background: rgba(224, 107, 159, 0.1);
+    border: 1px solid rgba(224, 107, 159, 0.25);
+    color: #e881a8;
   }
   .msg-success {
-    background: rgba(16, 185, 129, 0.1);
-    border: 1px solid rgba(16, 185, 129, 0.25);
-    color: #6ee7b7;
+    background: rgba(45, 212, 191, 0.1);
+    border: 1px solid rgba(45, 212, 191, 0.25);
+    color: #5eead4;
   }
 
   /* ── Submit button ─────────────────────────────────────────────── */

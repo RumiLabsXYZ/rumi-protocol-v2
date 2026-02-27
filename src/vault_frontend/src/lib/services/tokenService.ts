@@ -1,5 +1,6 @@
 import { Principal } from '@dfinity/principal';
 import { Actor, HttpAgent } from '@dfinity/agent';
+import { IDL } from '@dfinity/candid';
 import { canisterIDLs, pnp } from './pnp';
 import { CONFIG } from '../config';
 import { ICRC1_IDL } from '../idls/ledger.idl';
@@ -8,6 +9,22 @@ import { walletStore as wallet } from '../stores/wallet';
 
 // Constants for token handling
 const E8S = 100_000_000;
+
+/**
+ * Minimal IDL factory for icrc1_metadata that properly handles MetadataValue variant.
+ * The main ledger IDL incorrectly types metadata as Vec<(Text, Text)> — this fixes it.
+ */
+const MetadataIDL: IDL.InterfaceFactory = ({ IDL: IDLParam }) => {
+  const MetadataValue = IDLParam.Variant({
+    'Nat': IDLParam.Nat,
+    'Int': IDLParam.Int,
+    'Text': IDLParam.Text,
+    'Blob': IDLParam.Vec(IDLParam.Nat8),
+  });
+  return IDLParam.Service({
+    'icrc1_metadata': IDLParam.Func([], [IDLParam.Vec(IDLParam.Tuple(IDLParam.Text, MetadataValue))], ['query']),
+  });
+};
 
 /**
  * Service for token-related operations like fetching balances, approvals, and format handling
@@ -22,6 +39,9 @@ export class TokenService {
     balance: bigint,
     timestamp: number
   }> = new Map();
+
+  // Logo cache (canisterId → data URL string)
+  private static logoCache: Map<string, string> = new Map();
 
   /**
    * Format balance with better precision handling
@@ -54,6 +74,45 @@ export class TokenService {
       agent,
       canisterId,
     });
+  }
+
+  /**
+   * Fetch the logo for an ICRC-1 token from its ledger canister metadata.
+   * Returns a data URL string (e.g., "data:image/png;base64,...") or null if unavailable.
+   * Results are cached in memory.
+   */
+  static async fetchTokenLogo(canisterId: string): Promise<string | null> {
+    // Return cached logo if available
+    const cached = this.logoCache.get(canisterId);
+    if (cached !== undefined) {
+      return cached || null;
+    }
+
+    try {
+      const agent = new HttpAgent({ host: CONFIG.host });
+      if (CONFIG.isLocal) {
+        await agent.fetchRootKey().catch(() => {});
+      }
+
+      const actor = Actor.createActor(MetadataIDL, { agent, canisterId });
+      const metadata: Array<[string, any]> = await (actor as any).icrc1_metadata();
+
+      for (const [key, value] of metadata) {
+        if (key === 'icrc1:logo' && value && 'Text' in value) {
+          const logo = value.Text as string;
+          this.logoCache.set(canisterId, logo);
+          return logo;
+        }
+      }
+
+      // No logo found — cache empty string to avoid re-fetching
+      this.logoCache.set(canisterId, '');
+      return null;
+    } catch (err) {
+      console.warn(`Failed to fetch logo for ${canisterId}:`, err);
+      this.logoCache.set(canisterId, '');
+      return null;
+    }
   }
 
   /**

@@ -435,27 +435,136 @@ pub async fn open_vault(collateral_amount_raw: u64, collateral_type_opt: Option<
     }
 }
 
-pub async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {
+/// Compound open-vault-and-borrow in a single canister call.
+///
+/// Uses ICRC-2 `transfer_from` (like `open_vault`) to pull collateral, creates
+/// the vault, then immediately borrows `borrow_amount_raw` icUSD — all under a
+/// single guard.  This allows Oisy / ICRC-112 signer wallets to batch
+/// `icrc2_approve` + `open_vault_and_borrow` into **one** popup instead of the
+/// three sequential popups that separate `open_vault` + `borrow_from_vault`
+/// would require.
+pub async fn open_vault_and_borrow(
+    collateral_amount_raw: u64,
+    borrow_amount_raw: u64,
+    collateral_type_opt: Option<Principal>,
+) -> Result<OpenVaultSuccess, ProtocolError> {
     let caller = ic_cdk::api::caller();
-    let guard_principal = match GuardPrincipal::new(caller, &format!("borrow_vault_{}", arg.vault_id)) {
+    let guard_principal = match GuardPrincipal::new(caller, "open_vault_and_borrow") {
         Ok(guard) => guard,
         Err(GuardError::AlreadyProcessing) => {
-            log!(INFO, "[borrow_from_vault] Principal {:?} already has an ongoing operation", caller);
+            log!(INFO, "[open_vault_and_borrow] Principal {:?} already has an ongoing operation", caller);
             return Err(ProtocolError::AlreadyProcessing);
+        },
+        Err(GuardError::StaleOperation) => {
+            log!(INFO, "[open_vault_and_borrow] Principal {:?} has a stale operation being cleaned up", caller);
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "Previous operation is being cleaned up. Please try again in a few seconds.".to_string()
+            ));
         },
         Err(err) => return Err(err.into()),
     };
-    
+
+    // Resolve collateral type: default to ICP if not specified
+    let collateral_type = collateral_type_opt.unwrap_or_else(|| read_state(|s| s.icp_collateral_type()));
+
+    // Look up CollateralConfig; check status is Active
+    let (config_ledger, config_status) = read_state(|s| {
+        match s.get_collateral_config(&collateral_type) {
+            Some(config) => Ok((config.ledger_canister_id, config.status)),
+            None => Err(ProtocolError::GenericError("Collateral type not supported.".to_string())),
+        }
+    })?;
+
+    if !config_status.allows_open() {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "Collateral type is not accepting new vaults.".to_string(),
+        ));
+    }
+
+    let icp_margin_amount: ICP = collateral_amount_raw.into();
+
+    if icp_margin_amount < MIN_ICP_AMOUNT {
+        guard_principal.fail();
+        return Err(ProtocolError::AmountTooLow {
+            minimum_amount: MIN_ICP_AMOUNT.to_u64(),
+        });
+    }
+
+    // Pull collateral via ICRC-2 transfer_from (caller must have approved first)
+    let block_index = match transfer_collateral_from(collateral_amount_raw, caller, config_ledger).await {
+        Ok(bi) => bi,
+        Err(transfer_from_error) => {
+            guard_principal.fail();
+            if let TransferFromError::BadFee { expected_fee } = transfer_from_error.clone() {
+                mutate_state(|s| {
+                    if let Ok(fee) = u64::try_from(expected_fee.0) {
+                        if let Some(config) = s.get_collateral_config_mut(&collateral_type) {
+                            config.ledger_fee = fee;
+                        }
+                    }
+                });
+            };
+            return Err(ProtocolError::TransferFromError(
+                transfer_from_error,
+                icp_margin_amount.to_u64(),
+            ));
+        }
+    };
+
+    // Create the vault
+    let vault_id = mutate_state(|s| {
+        let vault_id = s.increment_vault_id();
+        record_open_vault(
+            s,
+            Vault {
+                owner: caller,
+                borrowed_icusd_amount: 0.into(),
+                collateral_amount: collateral_amount_raw,
+                vault_id,
+                collateral_type,
+            },
+            block_index,
+        );
+        vault_id
+    });
+
+    log!(INFO, "[open_vault_and_borrow] opened vault {vault_id}, now borrowing {borrow_amount_raw}");
+
+    // Borrow icUSD — reuse internal fn to avoid guard conflict
+    if borrow_amount_raw > 0 {
+        match borrow_from_vault_internal(caller, VaultArg { vault_id, amount: borrow_amount_raw }).await {
+            Ok(borrow_result) => {
+                log!(INFO, "[open_vault_and_borrow] vault {} borrow of {} succeeded (fee: {})",
+                    vault_id, borrow_amount_raw, borrow_result.fee_amount_paid);
+            },
+            Err(e) => {
+                guard_principal.fail();
+                return Err(ProtocolError::GenericError(format!(
+                    "Vault created (id={}) but borrow of {} failed: {:?}. You can borrow separately.",
+                    vault_id, borrow_amount_raw, e
+                )));
+            }
+        }
+    }
+
+    guard_principal.complete();
+    Ok(OpenVaultSuccess { vault_id, block_index })
+}
+
+/// Internal borrow logic without guard management.
+/// Called by both `borrow_from_vault` (which acquires its own guard) and
+/// `open_vault_with_deposit` (which already holds a guard for the same principal).
+async fn borrow_from_vault_internal(caller: Principal, arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {
     let amount: ICUSD = arg.amount.into();
 
     if amount < MIN_ICUSD_AMOUNT {
-        guard_principal.fail();
         return Err(ProtocolError::AmountTooLow {
             minimum_amount: MIN_ICUSD_AMOUNT.to_u64(),
         });
     }
 
-    let (vault, collateral_price, config_decimals) = match read_state(|s| {
+    let (vault, collateral_price, config_decimals) = read_state(|s| {
         match s.vault_id_to_vaults.get(&arg.vault_id) {
             Some(vault) => {
                 let price = s.get_collateral_price_decimal(&vault.collateral_type)
@@ -469,19 +578,12 @@ pub async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, Protocol
                 Err("Vault not found. Please check the vault ID.")
             }
         }
-    }) {
-        Ok(result) => result,
-        Err(msg) => {
-            guard_principal.fail();
-            return Err(ProtocolError::GenericError(msg.to_string()));
-        }
-    };
+    }).map_err(|msg: &str| ProtocolError::GenericError(msg.to_string()))?;
 
     // Check collateral status allows borrowing
     let collateral_status = read_state(|s| s.get_collateral_status(&vault.collateral_type));
     if let Some(status) = collateral_status {
         if !status.allows_borrow() {
-            guard_principal.fail();
             return Err(ProtocolError::GenericError(
                 "Borrowing is not allowed for this collateral type.".to_string(),
             ));
@@ -489,7 +591,6 @@ pub async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, Protocol
     }
 
     if caller != vault.owner {
-        guard_principal.fail();
         return Err(ProtocolError::CallerNotOwner);
     }
 
@@ -501,7 +602,6 @@ pub async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, Protocol
             .unwrap_or(u64::MAX)
     });
     if current_debt.to_u64() + amount.to_u64() > debt_ceiling {
-        guard_principal.fail();
         return Err(ProtocolError::GenericError(format!(
             "Borrow would exceed debt ceiling ({} + {} > {})",
             current_debt.to_u64(), amount.to_u64(), debt_ceiling
@@ -513,7 +613,6 @@ pub async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, Protocol
     let max_borrowable_amount: ICUSD = collateral_value / min_ratio;
 
     if vault.borrowed_icusd_amount + amount > max_borrowable_amount {
-        guard_principal.fail();
         return Err(ProtocolError::GenericError(format!(
             "failed to borrow from vault, max borrowable: {max_borrowable_amount}, borrowed: {}, requested: {amount}",
             vault.borrowed_icusd_amount
@@ -527,17 +626,37 @@ pub async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, Protocol
             mutate_state(|s| {
                 record_borrow_from_vault(s, arg.vault_id, amount, fee, block_index);
             });
-            
-            guard_principal.complete();
-            
+
             Ok(SuccessWithFee {
                 block_index,
                 fee_amount_paid: fee.to_u64(),
             })
         }
         Err(mint_error) => {
-            guard_principal.fail();
             Err(ProtocolError::TransferError(mint_error))
+        }
+    }
+}
+
+pub async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let guard_principal = match GuardPrincipal::new(caller, &format!("borrow_vault_{}", arg.vault_id)) {
+        Ok(guard) => guard,
+        Err(GuardError::AlreadyProcessing) => {
+            log!(INFO, "[borrow_from_vault] Principal {:?} already has an ongoing operation", caller);
+            return Err(ProtocolError::AlreadyProcessing);
+        },
+        Err(err) => return Err(err.into()),
+    };
+
+    match borrow_from_vault_internal(caller, arg).await {
+        Ok(result) => {
+            guard_principal.complete();
+            Ok(result)
+        }
+        Err(e) => {
+            guard_principal.fail();
+            Err(e)
         }
     }
 }
@@ -755,6 +874,176 @@ pub async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
             Err(ProtocolError::TransferFromError(error, amount.to_u64()))
         }
     }
+}
+
+// ─── Push-deposit vault operations (Oisy wallet integration) ───
+//
+// These mirror open_vault / add_margin_to_vault but instead of pulling funds
+// via ICRC-2 transfer_from, they sweep funds that the user already pushed to
+// a deterministic deposit subaccount. This avoids sequential signer popups
+// that Oisy's ICRC-21/25 consent flow may trigger (whether ICRC-2 approve
+// actually works through Oisy is unconfirmed).
+
+pub async fn open_vault_with_deposit(
+    borrow_amount_raw: u64,
+    collateral_type_opt: Option<Principal>,
+) -> Result<OpenVaultSuccess, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let guard_principal = match GuardPrincipal::new(caller, "open_vault_with_deposit") {
+        Ok(guard) => guard,
+        Err(GuardError::AlreadyProcessing) => {
+            log!(INFO, "[open_vault_with_deposit] Principal {:?} already has an ongoing operation", caller);
+            return Err(ProtocolError::AlreadyProcessing);
+        },
+        Err(err) => return Err(err.into()),
+    };
+
+    // Resolve collateral type: default to ICP if not specified
+    let collateral_type = collateral_type_opt.unwrap_or_else(|| read_state(|s| s.icp_collateral_type()));
+
+    // Look up CollateralConfig
+    let (config_ledger, config_status, config_fee) = read_state(|s| {
+        match s.get_collateral_config(&collateral_type) {
+            Some(config) => Ok((config.ledger_canister_id, config.status, config.ledger_fee)),
+            None => Err(ProtocolError::GenericError("Collateral type not supported.".to_string())),
+        }
+    })?;
+
+    if !config_status.allows_open() {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "Collateral type is not accepting new vaults.".to_string(),
+        ));
+    }
+
+    // Sweep funds from the caller's deposit subaccount
+    let (collateral_amount, sweep_block_index) = match management::sweep_deposit(&caller, config_ledger, config_fee).await {
+        Ok(result) => result,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                format!("Push-deposit sweep failed: {}. Did you transfer collateral to your deposit account first?", e),
+            ));
+        }
+    };
+
+    let icp_margin_amount: ICP = collateral_amount.into();
+    if icp_margin_amount < MIN_ICP_AMOUNT {
+        guard_principal.fail();
+        return Err(ProtocolError::AmountTooLow {
+            minimum_amount: MIN_ICP_AMOUNT.to_u64(),
+        });
+    }
+
+    // Open the vault with the swept collateral (same logic as open_vault post-transfer)
+    let vault_id = mutate_state(|s| {
+        let vault_id = s.increment_vault_id();
+        record_open_vault(
+            s,
+            Vault {
+                owner: caller,
+                borrowed_icusd_amount: 0.into(),
+                collateral_amount,
+                vault_id,
+                collateral_type,
+            },
+            sweep_block_index,
+        );
+        vault_id
+    });
+
+    log!(INFO, "[open_vault_with_deposit] opened vault {} for {} with {} collateral via push-deposit (sweep block {})",
+        vault_id, caller, collateral_amount, sweep_block_index);
+
+    // If the caller also requested an initial borrow, do it now.
+    // Use borrow_from_vault_internal to avoid GuardPrincipal conflict —
+    // this function already holds the guard for `caller`.
+    if borrow_amount_raw > 0 {
+        match borrow_from_vault_internal(caller, VaultArg { vault_id, amount: borrow_amount_raw }).await {
+            Ok(borrow_result) => {
+                log!(INFO, "[open_vault_with_deposit] vault {} initial borrow of {} succeeded (fee: {})",
+                    vault_id, borrow_amount_raw, borrow_result.fee_amount_paid);
+            },
+            Err(e) => {
+                guard_principal.fail();
+                return Err(ProtocolError::GenericError(format!(
+                    "Vault created (id={}) but initial borrow of {} failed: {:?}. You can borrow in a separate call.",
+                    vault_id, borrow_amount_raw, e
+                )));
+            }
+        }
+    }
+
+    guard_principal.complete();
+    Ok(OpenVaultSuccess {
+        vault_id,
+        block_index: sweep_block_index,
+    })
+}
+
+pub async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let guard_principal = GuardPrincipal::new(caller, &format!("add_margin_deposit_{}", vault_id))?;
+
+    let (vault, config_ledger, config_fee) = match read_state(|s| {
+        match s.vault_id_to_vaults.get(&vault_id) {
+            Some(v) => {
+                let config = s.get_collateral_config(&v.collateral_type)
+                    .ok_or("Collateral type not configured")?;
+                Ok((v.clone(), config.ledger_canister_id, config.ledger_fee))
+            },
+            None => Err("Vault not found"),
+        }
+    }) {
+        Ok(result) => result,
+        Err(msg) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(msg.to_string()));
+        }
+    };
+
+    // Check collateral status
+    let collateral_status = read_state(|s| s.get_collateral_status(&vault.collateral_type));
+    if let Some(status) = collateral_status {
+        if !status.allows_add_collateral() {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "Adding collateral is not allowed for this collateral type.".to_string(),
+            ));
+        }
+    }
+
+    if caller != vault.owner {
+        guard_principal.fail();
+        return Err(ProtocolError::CallerNotOwner);
+    }
+
+    // Sweep funds from deposit subaccount
+    let (collateral_amount, sweep_block_index) = match management::sweep_deposit(&caller, config_ledger, config_fee).await {
+        Ok(result) => result,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                format!("Push-deposit sweep failed: {}. Did you transfer collateral to your deposit account first?", e),
+            ));
+        }
+    };
+
+    let margin_added: ICP = collateral_amount.into();
+    if margin_added < MIN_ICP_AMOUNT {
+        guard_principal.fail();
+        return Err(ProtocolError::AmountTooLow {
+            minimum_amount: MIN_ICP_AMOUNT.to_u64(),
+        });
+    }
+
+    mutate_state(|s| record_add_margin_to_vault(s, vault_id, margin_added, sweep_block_index));
+
+    log!(INFO, "[add_margin_with_deposit] added {} collateral to vault {} via push-deposit (sweep block {})",
+        collateral_amount, vault_id, sweep_block_index);
+
+    guard_principal.complete();
+    Ok(sweep_block_index)
 }
 
 pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {

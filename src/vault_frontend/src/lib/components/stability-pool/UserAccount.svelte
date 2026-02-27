@@ -201,7 +201,7 @@
   }
 
   .summary-value.success {
-    color: #22c55e;
+    color: #2DD4BF;
   }
 
   /* Responsive Design */

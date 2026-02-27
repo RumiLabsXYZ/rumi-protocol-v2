@@ -59,6 +59,9 @@
   $: formattedCollateralRatio = calculatedCollateralRatio === Infinity
     ? '∞' : calculatedCollateralRatio > 1000000 ? '>1,000,000' : formatNumber(calculatedCollateralRatio);
   $: isValidCollateralRatio = calculatedCollateralRatio >= selectedMinCR * 100;
+  // CR color: 3 states for text + marker
+  $: crColorClass = calculatedCollateralRatio < selectedMinCR * 100 ? 'danger'
+    : calculatedCollateralRatio < selectedMinCR * 1.234 * 100 ? 'caution' : 'safe';
 
   // Liquidation price
   $: liquidationPrice = collateralAmount > 0 && icusdAmount > 0
@@ -68,16 +71,38 @@
   $: safetyDelta = collateralPrice > 0 && liquidationPrice > 0
     ? ((collateralPrice - liquidationPrice) / collateralPrice) * 100 : 0;
 
-  // Max borrow
+  // Max borrow — 0.5% haircut so Max never overshoots the backend oracle price
   $: maxBorrow = collateralAmount > 0 && collateralPrice > 0
-    ? Math.floor(((collateralAmount * collateralPrice) / selectedMinCR) * 100) / 100 : 0;
+    ? Math.floor(((collateralAmount * collateralPrice) / selectedMinCR) * 0.995 * 100) / 100 : 0;
 
-  // CR gauge zones (percentage positions on a 0–400% scale)
+  // Max collateral from wallet balance (minus token ledger fee from metadata)
+  $: maxCollateral = (() => {
+    if (!$isConnected) return 0;
+    const info = selectedCollateralInfo;
+    const decimals = info?.decimals ?? 8;
+    const ledgerFeeHuman = info ? info.ledgerFee / Math.pow(10, decimals) : 0.0001;
+    if (selectedCollateralPrincipal === CANISTER_IDS.ICP_LEDGER) {
+      const bal = $walletStore.tokenBalances?.ICP;
+      return bal ? Math.max(0, parseFloat(bal.formatted) - ledgerFeeHuman) : 0;
+    }
+    if (info?.symbol) {
+      const bal = $walletStore.tokenBalances?.[info.symbol];
+      return bal ? Math.max(0, parseFloat(bal.formatted) - ledgerFeeHuman) : 0;
+    }
+    return 0;
+  })();
+
+  function setMaxCollateral() {
+    if (maxCollateral > 0) collateralAmount = Math.floor(maxCollateral * 10000) / 10000;
+  }
+
+  // CR gauge zones (100–300% CR scale → 0–100% gauge)
   $: gaugePosition = calculatedCollateralRatio === Infinity
-    ? 100 : Math.min(calculatedCollateralRatio / 4, 100);
-  // Zone boundaries mapped to 0-100 scale
-  $: liqZone = (selectedLiqCR * 100) / 4;
-  const cautionZone = 200 / 4;                    // 50%
+    ? 100 : Math.min(Math.max((calculatedCollateralRatio - 100) / 2, 0), 100);
+  // Zone boundaries (all per-collateral)
+  $: liqZone = Math.max(((selectedLiqCR * 100) - 100) / 2, 0);               // e.g. 16.5% for 133% liq CR
+  $: borrowZone = Math.max(((selectedMinCR * 100) - 100) / 2, 0);             // e.g. 25% for 150% borrow CR
+  $: comfortZone = Math.max(((selectedMinCR * 1.234 * 100) - 100) / 2, 0);    // e.g. 42.6% for ~185% comfort
 
   function selectCollateral(principalText: string) {
     selectedCollateralPrincipal = principalText;
@@ -126,14 +151,15 @@
     if (!isValidCollateralRatio) { errorMessage = `Collateral ratio must be at least ${(selectedMinCR * 100).toFixed(0)}%`; return; }
     actionInProgress = true; errorMessage = ''; successMessage = '';
     try {
-      const openResult = await protocolService.openVault(collateralAmount, selectedCollateralPrincipal);
-      if (!openResult.success) { errorMessage = openResult.error || 'Failed to open vault'; return; }
-      const borrowResult = await protocolService.borrowFromVault(openResult.vaultId!, icusdAmount);
-      if (borrowResult.success) {
-        successMessage = `Successfully created vault #${openResult.vaultId} and borrowed ${icusdAmount} icUSD!`;
+      // Compound: open vault + borrow in one backend call.
+      // For Oisy this batches approve + open_vault_and_borrow into a single popup.
+      const result = await protocolService.openVaultAndBorrow(collateralAmount, icusdAmount, selectedCollateralPrincipal);
+
+      if (result.success) {
+        successMessage = `Successfully created vault #${result.vaultId} and borrowed ${icusdAmount} icUSD!`;
         if ($principal) await appDataStore.refreshAll($principal);
         collateralAmount = 1; icusdAmount = 5;
-      } else { errorMessage = borrowResult.error || 'Failed to borrow from vault'; }
+      } else { errorMessage = result.error || 'Failed to create vault'; }
     } catch (error) {
       console.error('Error creating vault:', error);
       errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
@@ -161,7 +187,12 @@
           <div class="form-stack">
             <!-- Collateral input -->
             <div class="form-field">
-              <label for="collateral-amount" class="form-label">Collateral</label>
+              <div class="form-label-row">
+                <label for="collateral-amount" class="form-label">Collateral</label>
+                {#if maxCollateral > 0}
+                  <button class="max-btn" on:click={setMaxCollateral}>Max: {formatNumber(maxCollateral, 4)}</button>
+                {/if}
+              </div>
               <div class="input-wrap">
                 <input id="collateral-amount" type="number" bind:value={collateralAmount} min="0" step="0.01"
                   class="icp-input form-input" placeholder="0.00" disabled={actionInProgress} />
@@ -212,21 +243,24 @@
               <div class="gauge-section">
                 <div class="gauge-header">
                   <span>Collateral Ratio</span>
-                  <span class:ratio-safe={isValidCollateralRatio} class:ratio-danger={!isValidCollateralRatio}>
+                  <span class:ratio-safe={crColorClass === 'safe'} class:ratio-caution={crColorClass === 'caution'} class:ratio-danger={crColorClass === 'danger'}>
                     {formattedCollateralRatio}%
                   </span>
                 </div>
                 <div class="gauge-track">
-                  <div class="gauge-zone gauge-zone-red" style="width:{liqZone}%"></div>
-                  <div class="gauge-zone gauge-zone-yellow" style="width:{cautionZone - liqZone}%; left:{liqZone}%"></div>
-                  <div class="gauge-zone gauge-zone-green" style="width:{100 - cautionZone}%; left:{cautionZone}%"></div>
-                  <div class="gauge-marker" class:marker-safe={isValidCollateralRatio} class:marker-danger={!isValidCollateralRatio}
+                  <div class="gauge-zone gauge-zone-pink" style="width:{liqZone}%"></div>
+                  <div class="gauge-zone gauge-zone-gradient" style="width:{comfortZone - liqZone}%; left:{liqZone}%"></div>
+                  <div class="gauge-zone gauge-zone-teal" style="width:{100 - comfortZone}%; left:{comfortZone}%"></div>
+                  <div class="gauge-tick" style="left:{borrowZone}%"></div>
+                  <div class="gauge-marker"
+                    class:marker-safe={crColorClass === 'safe'}
+                    class:marker-caution={crColorClass === 'caution'}
+                    class:marker-danger={crColorClass === 'danger'}
                     style="left:{gaugePosition}%"></div>
                 </div>
                 <div class="gauge-labels">
-                  <span>{(selectedLiqCR * 100).toFixed(0)}%</span>
-                  <span>200%</span>
-                  <span>400%+</span>
+                  <span class="gauge-label-abs" style="left:{liqZone}%">liq</span>
+                  <span class="gauge-label-abs" style="right:0">300%+</span>
                 </div>
 
                 <!-- Liquidation price -->
@@ -247,7 +281,11 @@
             {#if errorMessage}<div class="msg-error">{errorMessage}</div>{/if}
             {#if successMessage}<div class="msg-success">{successMessage}</div>{/if}
 
-            <button class="btn-primary cta-button" on:click={createVault} disabled={actionInProgress || !$isConnected}>
+            <button
+              class="btn-primary cta-button"
+              on:click={createVault}
+              disabled={actionInProgress || !$isConnected}
+            >
               {#if !$isConnected}Connect Wallet to Continue
               {:else if actionInProgress}Creating Vault…
               {:else}Create Vault & Borrow icUSD{/if}
@@ -286,6 +324,7 @@
   .form-stack { display: flex; flex-direction: column; gap: 1.25rem; }
   .form-field { display: flex; flex-direction: column; gap: 0.25rem; }
   .form-label { font-size: 0.8125rem; font-weight: 500; color: var(--rumi-text-secondary); }
+  .form-label-row { display: flex; justify-content: space-between; align-items: baseline; }
   .input-wrap { position: relative; }
   .form-input { width: 100%; padding-right: 5.5rem; }
   .form-input-with-max { padding-right: 7rem; }
@@ -351,24 +390,29 @@
     position: relative; height: 8px; border-radius: 4px; overflow: hidden;
     background: var(--rumi-bg-surface3);
   }
-  .gauge-zone {
-    position: absolute; top: 0; height: 100%;
+  .gauge-zone { position: absolute; top: 0; height: 100%; }
+  .gauge-zone-pink { background: rgba(224, 107, 159, 0.75); left: 0; border-radius: 4px 0 0 4px; }
+  .gauge-zone-gradient { background: linear-gradient(to right, rgba(224, 107, 159, 0.65), rgba(167, 139, 250, 0.6)); }
+  .gauge-zone-teal { background: rgba(45, 212, 191, 0.5); border-radius: 0 4px 4px 0; }
+  .gauge-tick {
+    position: absolute; top: 0; width: 1px; height: 100%;
+    background: rgba(255,255,255,0.25); transform: translateX(-50%);
+    pointer-events: none;
   }
-  .gauge-zone-red { background: rgba(239, 68, 68, 0.35); left: 0; border-radius: 4px 0 0 4px; }
-  .gauge-zone-yellow { background: rgba(245, 158, 11, 0.3); }
-  .gauge-zone-green { background: rgba(16, 185, 129, 0.3); border-radius: 0 4px 4px 0; }
   .gauge-marker {
     position: absolute; top: -3px; width: 3px; height: 14px;
     border-radius: 1.5px; transform: translateX(-50%);
     transition: left 0.3s ease;
   }
-  .marker-safe { background: var(--rumi-safe); box-shadow: 0 0 4px rgba(16, 185, 129, 0.5); }
-  .marker-danger { background: var(--rumi-danger); box-shadow: 0 0 4px rgba(239, 68, 68, 0.5); }
+  .marker-safe { background: var(--rumi-safe); box-shadow: 0 0 4px rgba(45, 212, 191, 0.5); }
+  .marker-caution { background: var(--rumi-caution); box-shadow: 0 0 4px rgba(167, 139, 250, 0.5); }
+  .marker-danger { background: var(--rumi-danger); box-shadow: 0 0 4px rgba(224, 107, 159, 0.5); }
   .gauge-labels {
-    display: flex; justify-content: space-between;
-    font-size: 0.625rem; color: var(--rumi-text-muted); margin-top: 0.25rem;
-    padding: 0 0.125rem;
+    position: relative; height: 0.875rem;
+    font-size: 0.6875rem; color: var(--rumi-text-muted); margin-top: 0.25rem;
   }
+  .gauge-label-abs { position: absolute; transform: translateX(-50%); }
+  .gauge-label-abs:last-child { transform: none; }
 
   /* Liquidation price */
   .liq-price {
@@ -382,11 +426,12 @@
   .liq-danger { color: var(--rumi-danger); }
 
   .ratio-safe { color: var(--rumi-safe); }
+  .ratio-caution { color: var(--rumi-caution); }
   .ratio-danger { color: var(--rumi-danger); }
 
   /* Messages */
-  .msg-error { padding: 0.625rem; background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.2); border-radius: 0.5rem; font-size: 0.8125rem; color: #fca5a5; }
-  .msg-success { padding: 0.625rem; background: rgba(16,185,129,0.1); border: 1px solid rgba(16,185,129,0.2); border-radius: 0.5rem; font-size: 0.8125rem; color: #6ee7b7; }
+  .msg-error { padding: 0.625rem; background: rgba(224,107,159,0.1); border: 1px solid rgba(224,107,159,0.2); border-radius: 0.5rem; font-size: 0.8125rem; color: #e881a8; }
+  .msg-success { padding: 0.625rem; background: rgba(45,212,191,0.1); border: 1px solid rgba(45,212,191,0.2); border-radius: 0.5rem; font-size: 0.8125rem; color: #5eead4; }
 
   /* CTA */
   .cta-button { width: 100%; padding: 0.75rem; }

@@ -6,7 +6,7 @@
   import { tweened } from 'svelte/motion';
   import { cubicOut } from 'svelte/easing';
   import type { CandidVault } from '$lib/services/types';
-  import { walletOperations } from "$lib/services/protocol/walletOperations";
+  import { walletOperations, isOisyWallet } from "$lib/services/protocol/walletOperations";
   import { CONFIG, CANISTER_IDS } from "$lib/config";
   import { collateralStore } from '$lib/stores/collateralStore';
   import { getLiquidationCR } from '$lib/protocol';
@@ -39,7 +39,10 @@
 
   function getActiveBalance(vaultId: number): number {
     const token = getLiqToken(vaultId);
-    return token === 'CKUSDT' ? walletCkusdt : token === 'CKUSDC' ? walletCkusdc : walletIcusd;
+    // Deduct token's ledger fee: icUSD = 0.001, ckUSDT/ckUSDC = 0.01
+    if (token === 'CKUSDT') return Math.max(0, walletCkusdt - 0.01);
+    if (token === 'CKUSDC') return Math.max(0, walletCkusdc - 0.01);
+    return Math.max(0, walletIcusd - 0.001);
   }
 
   let animatedPrice = tweened(0, { duration: 600, easing: cubicOut });
@@ -164,9 +167,17 @@
       const spenderCanisterId = CONFIG.currentCanisterId;
       const currentAllowance = await walletOperations.checkIcusdAllowance(spenderCanisterId);
       if (currentAllowance < amountE8s) {
-        const approvalAmount = amountE8s * BigInt(150) / BigInt(100);
-        const approvalResult = await walletOperations.approveIcusdTransfer(approvalAmount, spenderCanisterId);
+        // Approve 1B icUSD so future liquidations skip this popup entirely
+        const LARGE_APPROVAL = BigInt(100_000_000_000_000_000); // 1B icUSD in e8s
+        const approvalResult = await walletOperations.approveIcusdTransfer(LARGE_APPROVAL, spenderCanisterId);
         if (!approvalResult.success) { liquidationError = approvalResult.error || "Failed to approve icUSD transfer"; return false; }
+
+        // For Oisy: approval consumed the user gesture — the next popup will be blocked.
+        // Return false with a friendly message; the user clicks Liquidate again.
+        if (isOisyWallet()) {
+          liquidationSuccess = "Approved! Click Liquidate again to complete.";
+          return false;
+        }
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
       return true;
@@ -224,7 +235,15 @@
         liquidationSuccess = `Liquidated vault #${vault.vault_id}. Paid ${formatNumber(inputAmount)} ${token}, received ${formatNumber(seizure.collateralSeized, 4)} ${seizure.symbol}.`;
         liquidationAmounts[vault.vault_id] = '';
         await loadLiquidatableVaults();
-      } else { liquidationError = result.error || "Liquidation failed"; }
+      } else {
+        const msg = result.error || "Liquidation failed";
+        // Oisy two-step: approval succeeded, show as success not error
+        if (msg.includes('Click Liquidate again')) {
+          liquidationSuccess = 'Approved! Click Liquidate again to complete.';
+        } else {
+          liquidationError = msg;
+        }
+      }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       liquidationError = msg.includes('underflow') ? "Vault state changed. Try again." : msg;
@@ -406,9 +425,9 @@
   .summary-refresh:disabled { opacity: 0.5; cursor: not-allowed; text-decoration: none; }
 
   .msg { padding: 0.5rem 0.75rem; border-radius: 0.375rem; font-size: 0.8125rem; margin-bottom: 0.625rem; }
-  .msg-warn { background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.15); color: #fcd34d; }
-  .msg-error { background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.15); color: #fca5a5; }
-  .msg-success { background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.15); color: #6ee7b7; }
+  .msg-warn { background: rgba(167,139,250,0.08); border: 1px solid rgba(167,139,250,0.15); color: #c4b5fd; }
+  .msg-error { background: rgba(224,107,159,0.08); border: 1px solid rgba(224,107,159,0.15); color: #e881a8; }
+  .msg-success { background: rgba(45,212,191,0.08); border: 1px solid rgba(45,212,191,0.15); color: #5eead4; }
 
   .loading-state { display: flex; justify-content: center; padding: 3rem 0; }
   .spinner { width: 1.25rem; height: 1.25rem; border: 2px solid var(--rumi-border-hover); border-top-color: var(--rumi-action); border-radius: 50%; animation: spin 0.8s linear infinite; }

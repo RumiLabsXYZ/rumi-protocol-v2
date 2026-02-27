@@ -4,7 +4,7 @@ import { idlFactory as rumi_backendIDL } from '$declarations/rumi_protocol_backe
 import { idlFactory as icp_ledgerIDL } from '$declarations/icp_ledger/icp_ledger.did.js';
 import { idlFactory as icusd_ledgerIDL } from '$declarations/icusd_ledger/icusd_ledger.did.js';
 import { idlFactory as stabilityPoolIDL } from '$declarations/rumi_stability_pool/rumi_stability_pool.did.js';
-import { createPNP, type PNP, ConfigBuilder } from '@windoge98/plug-n-play';
+import { createPNP, type PNP, ConfigBuilder, BaseSignerAdapter } from '@windoge98/plug-n-play';
 
 // Define types for supported canisters
 export type CanisterType =
@@ -303,5 +303,26 @@ export const pnp = {
   // Open channel for Safari compatibility (beta feature)
   async openChannel(): Promise<void> {
     await globalPnp?.openChannel();
+  },
+
+  /**
+   * Get the SignerAgent from the current PNP adapter (Oisy/NFID).
+   * Returns null for non-signer wallets (Plug, II) or when not connected.
+   * Used for ICRC-112 batching: approve + action in a single signer popup.
+   *
+   * The SignerAgent exposes batch()/execute()/clear() for ICRC-112 batched calls.
+   * Sequential batching: batch() → queue call A → batch() → queue call B → execute()
+   * sends a single signer popup with ordered sequences.
+   */
+  getSignerAgent(): any {
+    try {
+      const provider = globalPnp?.provider;
+      if (provider && 'getSignerAgent' in provider) {
+        return (provider as any).getSignerAgent();
+      }
+      return null;
+    } catch {
+      return null;
+    }
   }
 };
