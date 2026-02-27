@@ -281,11 +281,11 @@
   }
 
   .error-box {
-    background: rgba(239, 68, 68, 0.15);
-    border: 1px solid rgba(239, 68, 68, 0.3);
+    background: rgba(224, 107, 159, 0.15);
+    border: 1px solid rgba(224, 107, 159, 0.3);
     border-radius: 0.5rem;
     padding: 0.625rem 0.75rem;
-    color: #fca5a5;
+    color: #e881a8;
     font-size: 0.8rem;
   }
 

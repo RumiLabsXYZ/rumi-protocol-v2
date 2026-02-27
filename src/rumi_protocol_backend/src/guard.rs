@@ -150,19 +150,14 @@ impl GuardPrincipal {
 
 impl Drop for GuardPrincipal {
     fn drop(&mut self) {
+        // Always release the guard when the struct goes out of scope.
+        // The guard exists to prevent concurrent access during an operation;
+        // once the Rust function returns (success or failure), the lock must be freed.
         mutate_state(|s| {
-            if let Some(state) = s.operation_states.get(&self.principal) {
-                if *state == OperationState::Completed {
-                    s.principal_guards.remove(&self.principal);
-                    s.principal_guard_timestamps.remove(&self.principal);
-                    s.operation_states.remove(&self.principal);
-                    s.operation_names.remove(&self.principal);
-                }
-            } else {
-                s.principal_guards.remove(&self.principal);
-                s.principal_guard_timestamps.remove(&self.principal);
-                s.operation_names.remove(&self.principal);
-            }
+            s.principal_guards.remove(&self.principal);
+            s.principal_guard_timestamps.remove(&self.principal);
+            s.operation_states.remove(&self.principal);
+            s.operation_names.remove(&self.principal);
         });
     }
 }

@@ -42,9 +42,6 @@
   let cancelCheckRunning = false;
   let vaultCheckMode = false;
 
-  // Oisy two-step push-deposit state
-  let pendingOisyDeposit = false;
-
   $: potentialUsdValue = Number(collateralAmount) * icpPrice;
   $: isConnected = $walletStore.isConnected;
   $: isDeveloper = $developerAccess;
@@ -233,44 +230,6 @@
   }
   
   async function handleCreateVault() {
-    // ─── Oisy step 2: finalize a pending deposit ───
-    // Must run FIRST — no prerequisite/balance checks needed (funds already deposited).
-    if (pendingOisyDeposit) {
-      if (isCreating || !isConnected) return;
-      try {
-        isCreating = true;
-        error = "";
-        updateStatus('Finalizing vault creation...');
-        startProcessingTimer();
-
-        const finalResult = await protocolService.finalizeOpenVaultDeposit();
-
-        if (finalResult.success) {
-          console.log('Vault creation finalized:', finalResult);
-          pendingOisyDeposit = false;
-          retryCount = 0;
-          collateralAmount = "";
-          updateStatus('Vault created successfully!');
-          await Promise.all([
-            walletStore.refreshBalance(),
-            vaultStore.loadVaults()
-          ]);
-        } else {
-          error = finalResult.error || "Failed to finalize vault creation";
-          updateStatus('Failed to finalize vault');
-        }
-      } catch (err) {
-        console.error('Vault finalization error:', err);
-        error = err instanceof Error ? err.message : "Failed to finalize vault";
-        updateStatus('Failed to finalize vault');
-      } finally {
-        isCreating = false;
-        stopProcessingTimer();
-      }
-      return;
-    }
-
-    // ─── Normal flow (step 1 for Oisy, or full flow for Plug/II) ───
     if (!collateralAmount || isCreating || !isConnected) return;
 
     // Clear existing timers
@@ -312,15 +271,6 @@
       const result = await protocolService.openVault(amount);
       console.log('openVault result:', JSON.stringify(result, (k, v) => typeof v === 'bigint' ? v.toString() : v));
 
-      // Handle Oisy two-step: deposit confirmed, needs user gesture to finalize
-      if (result.pendingDeposit) {
-        pendingOisyDeposit = true;
-        error = "";
-        updateStatus(result.message || 'Deposit confirmed. Click "Create Vault" to finalize.');
-        return;
-      }
-
-      // Success handling (non-Oisy or direct success)
       if (result.success) {
         console.log('Vault creation succeeded:', result);
         retryCount = 0;
@@ -589,13 +539,10 @@
 
 <button
   on:click={handleCreateVault}
-  disabled={!collateralAmount && !pendingOisyDeposit}
-  class="w-full px-4 py-2 text-white rounded-lg disabled:opacity-50 {pendingOisyDeposit ? 'bg-green-600 hover:bg-green-500 animate-pulse' : 'bg-purple-600 hover:bg-purple-500'}"
+  disabled={!collateralAmount}
+  class="w-full px-4 py-2 text-white rounded-lg disabled:opacity-50 bg-purple-600 hover:bg-purple-500"
   data-testid="create-vault-button"
 >
-  {#if pendingOisyDeposit}
-    ✓ Deposit Confirmed — Click to Create Vault
-  {:else}
     Create Vault
   {/if}
 </button>

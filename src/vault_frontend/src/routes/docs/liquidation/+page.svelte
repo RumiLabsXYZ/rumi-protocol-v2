@@ -2,18 +2,25 @@
   import { onMount } from 'svelte';
   import { protocolService } from '$lib/services/protocol';
   import { collateralStore } from '$lib/stores/collateralStore';
+  import type { CollateralInfo } from '$lib/services/types';
   import { get } from 'svelte/store';
 
   let liquidationBonus = 1.15;
   let recoveryTargetCr = 1.55;
-  let liqPct = '133';
-  let borrowPct = '150';
   let recoveryPct = '150';
+  let collaterals: CollateralInfo[] = [];
   let loaded = false;
 
   $: bonusPct = ((liquidationBonus - 1) * 100).toFixed(0);
   $: bonusMult = (liquidationBonus * 100).toFixed(0);
   $: targetPct = (recoveryTargetCr * 100).toFixed(0);
+  // Summary string like "133% for ICP, 125% for ckETH"
+  $: liqSummary = collaterals.map(c => `${(c.liquidationCr * 100).toFixed(0)}% for ${c.symbol}`).join(', ');
+  $: borrowSummary = collaterals.map(c => `${(c.minimumCr * 100).toFixed(0)}% for ${c.symbol}`).join(', ');
+  // Use first collateral as the example default
+  $: exLiqPct = collaterals.length > 0 ? (collaterals[0].liquidationCr * 100).toFixed(0) : '133';
+  $: exBorrowPct = collaterals.length > 0 ? (collaterals[0].minimumCr * 100).toFixed(0) : '150';
+  $: exSymbol = collaterals.length > 0 ? collaterals[0].symbol : 'ICP';
 
   onMount(async () => {
     try {
@@ -24,11 +31,7 @@
 
       await collateralStore.fetchSupportedCollateral();
       const state = get(collateralStore);
-      const icpConfig = state.collaterals.find(c => c.symbol === 'ICP');
-      if (icpConfig) {
-        liqPct = (icpConfig.liquidationCr * 100).toFixed(0);
-        borrowPct = (icpConfig.minimumCr * 100).toFixed(0);
-      }
+      collaterals = state.collaterals;
     } catch (e) {
       console.error('Failed to fetch protocol status:', e);
     }
@@ -43,13 +46,13 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">When Liquidation Happens</h2>
-    <p>A vault becomes eligible for liquidation when its collateral ratio drops below the minimum threshold. In normal operation (General Availability mode), this threshold is {liqPct}%. In Recovery mode, it rises to {borrowPct}%.</p>
-    <p>The protocol checks vault health every time the ICP price updates — approximately every 5 minutes via background polling. Price-sensitive operations (liquidations, borrows, etc.) also trigger an on-demand price refresh if the cached price is older than 30 seconds. Liquidation is not instant on price movement; it depends on the next price update.</p>
+    <p>A vault becomes eligible for liquidation when its collateral ratio drops below the liquidation threshold for that collateral type{liqSummary ? ` (${liqSummary})` : ''}. In Recovery mode, the threshold rises to the borrowing threshold{borrowSummary ? ` (${borrowSummary})` : ''}.</p>
+    <p>The protocol checks vault health every time collateral prices update — approximately every 5 minutes via background polling. Price-sensitive operations (liquidations, borrows, etc.) also trigger an on-demand price refresh if the cached price is older than 30 seconds. Liquidation is not instant on price movement; it depends on the next price update.</p>
   </section>
 
   <section class="doc-section">
     <h2 class="doc-heading">Full Liquidation</h2>
-    <p>Any user can liquidate an undercollateralized vault. The liquidator pays the vault's full icUSD debt and receives the vault's ICP collateral at a {bonusPct}% bonus — meaning they get ICP worth {bonusMult}% of the debt they repaid, up to the total collateral in the vault.</p>
+    <p>Any user can liquidate an undercollateralized vault. The liquidator pays the vault's full icUSD debt and receives the vault's collateral at a {bonusPct}% bonus — meaning they get collateral worth {bonusMult}% of the debt they repaid, up to the total collateral in the vault.</p>
     <p>If the vault's collateral is worth less than {bonusMult}% of the debt (deep undercollateralization), the liquidator receives all available collateral. For full liquidations, any excess collateral above the {bonusMult}% is returned to the original vault owner. For partial liquidations, the excess remains in the vault since it stays open.</p>
   </section>
 
@@ -57,7 +60,7 @@
     <h2 class="doc-heading">Partial Liquidation</h2>
     <p>Liquidators can also repay only a portion of a vault's debt. The maximum amount is capped at the amount needed to restore the vault's collateral ratio to the Recovery Target CR. The formula is the same as in Recovery mode:</p>
     <p class="doc-formula">max repay = (target CR &times; debt &minus; collateral value) &divide; (target CR &minus; liquidation bonus)</p>
-    <p>If the requested amount is less than this cap, the liquidator pays their chosen amount. The liquidator receives ICP collateral proportional to the debt they repay, plus the same {bonusPct}% bonus. Partial liquidations leave the vault open with reduced debt and reduced collateral.</p>
+    <p>If the requested amount is less than this cap, the liquidator pays their chosen amount. The liquidator receives collateral proportional to the debt they repay, plus the same {bonusPct}% bonus. Partial liquidations leave the vault open with reduced debt and reduced collateral.</p>
   </section>
 
   <section class="doc-section">
@@ -67,24 +70,24 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Liquidation Example</h2>
-    <p>Suppose you have a vault with 10 ICP (worth $100 at $10/ICP) and 70 icUSD debt. Your collateral ratio is 143% — safe. ICP drops to $7. Now your 10 ICP is worth $70, and your ratio is 100% — well below the {liqPct}% threshold.</p>
-    <p>A liquidator repays your 70 icUSD debt and receives ICP worth ${(70 * liquidationBonus).toFixed(0)} (70 &times; {liquidationBonus.toFixed(2)}). That's {(70 * liquidationBonus / 7).toFixed(1)} ICP at $7/ICP — but you only have 10 ICP, so the liquidator gets all 10 ICP. Your vault is closed. You keep the 70 icUSD you originally borrowed, but your ICP is gone.</p>
+    <p>Suppose you have an {exSymbol} vault with 10 {exSymbol} (worth $100 at $10/{exSymbol}) and 70 icUSD debt. Your collateral ratio is 143% — safe. {exSymbol} drops to $7. Now your 10 {exSymbol} is worth $70, and your ratio is 100% — well below the {exLiqPct}% threshold.</p>
+    <p>A liquidator repays your 70 icUSD debt and receives {exSymbol} worth ${(70 * liquidationBonus).toFixed(0)} (70 &times; {liquidationBonus.toFixed(2)}). That's {(70 * liquidationBonus / 7).toFixed(1)} {exSymbol} at $7/{exSymbol} — but you only have 10 {exSymbol}, so the liquidator gets all 10 {exSymbol}. Your vault is closed. You keep the 70 icUSD you originally borrowed, but your {exSymbol} is gone.</p>
   </section>
 
   <section class="doc-section">
     <h2 class="doc-heading">Recovery Mode — Targeted Liquidation</h2>
-    <p>When the protocol enters Recovery mode (total system CR below {recoveryPct}%), the liquidation threshold rises to {borrowPct}%. Vaults between {liqPct}% and {borrowPct}% CR become liquidatable — but they are <strong>not</strong> fully liquidated.</p>
-    <p>Instead, the protocol calculates the minimum amount of debt that needs to be repaid to restore the vault's collateral ratio to {targetPct}%. The liquidator pays only that amount and receives proportional ICP collateral plus the {bonusPct}% bonus. The vault remains open with reduced debt and collateral at approximately {targetPct}% CR.</p>
+    <p>When the protocol enters Recovery mode (total system CR below {recoveryPct}%), the liquidation threshold rises to the borrowing threshold for each collateral type. Vaults between their liquidation ratio and borrowing threshold become liquidatable — but they are <strong>not</strong> fully liquidated.</p>
+    <p>Instead, the protocol calculates the minimum amount of debt that needs to be repaid to restore the vault's collateral ratio to {targetPct}%. The liquidator pays only that amount and receives proportional collateral plus the {bonusPct}% bonus. The vault remains open with reduced debt and collateral at approximately {targetPct}% CR.</p>
     <p>The formula is:</p>
     <p class="doc-formula">repay = ({targetPct}% &times; debt &minus; collateral value) &divide; ({targetPct}% &minus; {bonusMult}%)</p>
-    <p>Vaults below {liqPct}% CR are still fully liquidated in both normal and Recovery mode.</p>
+    <p>Vaults below their liquidation ratio are still fully liquidated in both normal and Recovery mode.</p>
   </section>
 
   <section class="doc-section">
     <h2 class="doc-heading">Protocol Modes</h2>
     <p>The protocol operates in one of three modes based on the system-wide total collateral ratio:</p>
-    <p><strong>General Availability</strong> — total CR is above {recoveryPct}%. Normal operations. Liquidation threshold is {liqPct}%. Borrowing fee applies.</p>
-    <p><strong>Recovery</strong> — total CR drops below {recoveryPct}%. Liquidation threshold rises to {borrowPct}%. Borrowing fee drops to 0% to encourage repayment. Vaults between {liqPct}–{borrowPct}% get targeted partial liquidation.</p>
+    <p><strong>General Availability</strong> — total CR is above {recoveryPct}%. Normal operations. Liquidation uses each collateral type's own liquidation ratio.</p>
+    <p><strong>Recovery</strong> — total CR drops below {recoveryPct}%. Liquidation threshold rises to the borrowing threshold for each type. Borrowing fee drops to 0% to encourage repayment. Vaults between the liquidation ratio and borrowing threshold get targeted partial liquidation.</p>
     <p><strong>Read-Only</strong> — total CR drops below 100%, or the oracle reports a price below $0.01. All state-changing operations are paused. No new borrows, no liquidations. The protocol waits for conditions to improve.</p>
   </section>
 
@@ -97,7 +100,7 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Transfer Processing</h2>
-    <p>When a liquidation occurs, the protocol attempts to transfer ICP to the liquidator immediately. If the transfer fails (e.g., due to a temporary ledger issue), the transfer is queued and retried with exponential backoff — 1s, 2s, 4s, 8s, 16s. A health monitor also checks for stuck transfers every 5 minutes as a fallback.</p>
+    <p>When a liquidation occurs, the protocol attempts to transfer collateral to the liquidator immediately. If the transfer fails (e.g., due to a temporary ledger issue), the transfer is queued and retried with exponential backoff — 1s, 2s, 4s, 8s, 16s. A health monitor also checks for stuck transfers every 5 minutes as a fallback.</p>
   </section>
 </article>
 

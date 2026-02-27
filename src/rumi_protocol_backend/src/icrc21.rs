@@ -152,10 +152,26 @@ fn try_decode_u64_pair(arg: &[u8], _method_name: &str) -> Result<Option<(u64, u6
     if arg.is_empty() || arg.len() < 6 {
         return Ok(None);
     }
-    
+
     match Decode!(arg, u64, u64) {
         Ok(values) => Ok(Some(values)),
         Err(_) => Ok(None), // Graceful fallback - return generic message
+    }
+}
+
+/// Try to decode (u64, u64, opt principal) for open_vault_and_borrow
+fn try_decode_u64_u64_opt_principal(arg: &[u8], _method_name: &str) -> Result<Option<(u64, u64)>, String> {
+    if arg.is_empty() || arg.len() < 6 {
+        return Ok(None);
+    }
+    // We only care about the first two u64 values (collateral, borrow amount)
+    match Decode!(arg, u64, u64, Option<candid::Principal>) {
+        Ok((a, b, _)) => Ok(Some((a, b))),
+        // Fall back to just decoding two u64s (e.g. if Oisy omits optional)
+        Err(_) => match Decode!(arg, u64, u64) {
+            Ok(values) => Ok(Some(values)),
+            Err(_) => Ok(None),
+        },
     }
 }
 
@@ -185,6 +201,42 @@ fn generate_consent_message(method: &str, arg: &[u8]) -> Result<String, String> 
             }
         }
         
+        "open_vault_and_borrow" => {
+            // Decode argument: (nat64, nat64, opt principal) — collateral e8s, borrow e8s, collateral type
+            match try_decode_u64_u64_opt_principal(arg, "open_vault_and_borrow")? {
+                Some((collateral, borrow)) if borrow > 0 => Ok(format!(
+                    "## Create Vault & Borrow\n\n\
+                    You are creating a new vault with **{}** as collateral \
+                    and borrowing **{}**.\n\n\
+                    This will:\n\
+                    - Lock your ICP in the Rumi Protocol\n\
+                    - Create a new vault\n\
+                    - Borrow icUSD to your wallet\n\n\
+                    *A small borrowing fee will be applied. Minimum collateral ratio: 150%*",
+                    format_icp_amount(collateral),
+                    format_icusd_amount(borrow)
+                )),
+                Some((collateral, _)) => Ok(format!(
+                    "## Create New Vault\n\n\
+                    You are creating a new vault with **{}** as collateral.\n\n\
+                    This will:\n\
+                    - Lock your ICP in the Rumi Protocol\n\
+                    - Create a new vault that you can borrow icUSD against\n\n\
+                    *Minimum collateral ratio: 150%*",
+                    format_icp_amount(collateral)
+                )),
+                None => Ok(
+                    "## Create Vault & Borrow\n\n\
+                    You are creating a new vault and borrowing icUSD.\n\n\
+                    This will:\n\
+                    - Lock your ICP as collateral\n\
+                    - Create a new vault\n\
+                    - Borrow icUSD to your wallet\n\n\
+                    *A small borrowing fee will be applied. Minimum collateral ratio: 150%*".to_string()
+                ),
+            }
+        }
+
         "add_margin_to_vault" => {
             match try_decode_vault_arg(arg, "add_margin_to_vault")? {
                 Some(vault_arg) => Ok(format!(

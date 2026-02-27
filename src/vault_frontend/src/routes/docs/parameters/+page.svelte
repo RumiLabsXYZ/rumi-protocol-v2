@@ -3,6 +3,7 @@
   import { protocolService } from '$lib/services/protocol';
   import { publicActor } from '$lib/services/protocol/apiClient';
   import { collateralStore } from '$lib/stores/collateralStore';
+  import type { CollateralInfo } from '$lib/services/types';
   import { get } from 'svelte/store';
 
   let liquidationBonus = 0;
@@ -14,13 +15,8 @@
   let ckstableRepayFee = 0;
   let reserveRedemptionFee = 0;
 
-  // Per-collateral values (ICP defaults)
-  let liquidationRatio = 0;
-  let borrowThreshold = 0;
-  let interestRateApr = 0;
-  let minVaultDebt = 0;
-  let debtCeiling = 0;
-  let ledgerFee = 0;
+  // All supported collateral types (populated dynamically)
+  let collaterals: CollateralInfo[] = [];
 
   let loaded = false;
 
@@ -35,6 +31,16 @@
   function crPct(val: number): string {
     if (!val) return '—';
     return (val * 100).toFixed(0) + '%';
+  }
+  function fmtLedgerFee(c: CollateralInfo): string {
+    const fee = c.ledgerFee / Math.pow(10, c.decimals);
+    return fee > 0 ? `${fee} ${c.symbol}` : `0.${'0'.repeat(c.decimals - 1)}1 ${c.symbol}`;
+  }
+  function fmtDebtCeiling(c: CollateralInfo): string {
+    if (c.debtCeiling > 0 && c.debtCeiling < Number.MAX_SAFE_INTEGER) {
+      return `${(c.debtCeiling / 1e8).toLocaleString()} icUSD`;
+    }
+    return 'Unlimited';
   }
 
   onMount(async () => {
@@ -58,19 +64,14 @@
       ckstableRepayFee = Number(ckFee);
       reserveRedemptionFee = Number(rrFee);
 
-      // Load per-collateral config (ICP values)
+      // Load ALL supported collateral types
       await collateralStore.fetchSupportedCollateral();
       const state = get(collateralStore);
-      const icpConfig = state.collaterals.find(c => c.symbol === 'ICP');
-      if (icpConfig) {
-        liquidationRatio = icpConfig.liquidationCr;
-        borrowThreshold = icpConfig.minimumCr;
-        interestRateApr = icpConfig.interestRateApr;
-        minVaultDebt = icpConfig.minVaultDebt / 1e8; // e8s → icUSD
-        debtCeiling = icpConfig.debtCeiling;
-        ledgerFee = icpConfig.ledgerFee / 1e8; // e8s → ICP
-        // Override global with per-collateral if available
-        if (icpConfig.borrowingFee !== undefined) borrowingFee = icpConfig.borrowingFee;
+      collaterals = state.collaterals;
+
+      // Use first collateral's borrowing fee as the global default if available
+      if (collaterals.length > 0 && collaterals[0].borrowingFee !== undefined) {
+        borrowingFee = collaterals[0].borrowingFee;
       }
     } catch (e) {
       console.error('Failed to fetch protocol parameters:', e);
@@ -89,17 +90,45 @@
     <p class="doc-loading">Loading parameters from canister...</p>
   {:else}
 
+  {#each collaterals as c (c.principal)}
   <section class="doc-section">
-    <h2 class="doc-heading">Collateral & Liquidation (ICP)</h2>
+    <h2 class="doc-heading">Collateral & Liquidation ({c.symbol})</h2>
     <div class="params-table">
       <div class="param">
-        <span class="param-label">Borrowing Threshold (Min CR) <span class="tip" data-tip="The minimum collateral ratio required to open a vault or borrow more icUSD. Your vault must be above this ratio to mint new debt.">?</span></span>
-        <span class="param-val live">{crPct(borrowThreshold)}</span>
+        <span class="param-label">Borrowing Threshold (Min CR) <span class="tip" data-tip="The minimum collateral ratio required to open a vault or borrow more icUSD with {c.symbol} collateral.">?</span></span>
+        <span class="param-val live">{crPct(c.minimumCr)}</span>
       </div>
       <div class="param">
-        <span class="param-label">Liquidation Ratio <span class="tip" data-tip="If your vault's collateral ratio drops below this level, it becomes eligible for liquidation. Liquidators can repay your debt and claim your collateral at a bonus.">?</span></span>
-        <span class="param-val live">{crPct(liquidationRatio)}</span>
+        <span class="param-label">Liquidation Ratio <span class="tip" data-tip="If your {c.symbol} vault's collateral ratio drops below this level, it becomes eligible for liquidation.">?</span></span>
+        <span class="param-val live">{crPct(c.liquidationCr)}</span>
       </div>
+      <div class="param">
+        <span class="param-label">Interest Rate (APR) <span class="tip" data-tip="Annual interest charged on outstanding {c.symbol} vault debt.">?</span></span>
+        <span class="param-val live">{pctRaw(c.interestRateApr)}</span>
+      </div>
+      <div class="param">
+        <span class="param-label">Minimum Borrow Amount <span class="tip" data-tip="The smallest amount of icUSD you can borrow in a {c.symbol} vault.">?</span></span>
+        <span class="param-val live">{c.minVaultDebt > 0 ? `${c.minVaultDebt / 1e8} icUSD` : '—'}</span>
+      </div>
+      <div class="param">
+        <span class="param-label">Debt Ceiling <span class="tip" data-tip="The maximum total icUSD that can be borrowed against {c.symbol} across all vaults.">?</span></span>
+        <span class="param-val live">{fmtDebtCeiling(c)}</span>
+      </div>
+      <div class="param">
+        <span class="param-label">Ledger Fee <span class="tip" data-tip="The network fee charged by the {c.symbol} ledger for each transfer. This is an Internet Computer system fee, not a Rumi fee.">?</span></span>
+        <span class="param-val">{fmtLedgerFee(c)}</span>
+      </div>
+      <div class="param">
+        <span class="param-label">Status <span class="tip" data-tip="Current operational status of this collateral type.">?</span></span>
+        <span class="param-val" class:live={c.status === 'Active'}>{c.status}</span>
+      </div>
+    </div>
+  </section>
+  {/each}
+
+  <section class="doc-section">
+    <h2 class="doc-heading">Global Liquidation Parameters</h2>
+    <div class="params-table">
       <div class="param">
         <span class="param-label">Recovery Mode Threshold <span class="tip" data-tip="The system-wide collateral ratio that triggers Recovery Mode. Calculated as a debt-weighted average of all collateral types' borrowing thresholds. When the total system CR falls below this, the protocol enters Recovery Mode and the liquidation threshold rises.">?</span></span>
         <span class="param-val live">{crPct(recoveryModeThreshold)} (system-wide, debt-weighted)</span>
@@ -116,17 +145,6 @@
         <span class="param-label">Partial Liquidation <span class="tip" data-tip="In Recovery Mode, vaults between the Liquidation Ratio and Borrowing Threshold are not fully liquidated. Instead, only enough debt is repaid to restore the vault to the Recovery Target CR.">?</span></span>
         <span class="param-val">Restores vault CR to Recovery Target</span>
       </div>
-      {#if debtCeiling > 0 && debtCeiling < Number.MAX_SAFE_INTEGER}
-        <div class="param">
-          <span class="param-label">Debt Ceiling <span class="tip" data-tip="The maximum total icUSD that can be borrowed against this collateral type across all vaults.">?</span></span>
-          <span class="param-val live">{(debtCeiling / 1e8).toLocaleString()} icUSD</span>
-        </div>
-      {:else}
-        <div class="param">
-          <span class="param-label">Debt Ceiling <span class="tip" data-tip="The maximum total icUSD that can be borrowed against this collateral type. Currently there is no cap.">?</span></span>
-          <span class="param-val live">Unlimited</span>
-        </div>
-      {/if}
     </div>
   </section>
 
@@ -136,10 +154,6 @@
       <div class="param">
         <span class="param-label">Borrowing Fee <span class="tip" data-tip="A one-time fee deducted from the icUSD you mint. For example, if 0.5%, borrowing 100 icUSD means you receive 99.5 icUSD but owe 100. Drops to 0% during Recovery Mode.">?</span></span>
         <span class="param-val live">{pctRaw(borrowingFee)} (0% in Recovery)</span>
-      </div>
-      <div class="param">
-        <span class="param-label">Interest Rate (APR) <span class="tip" data-tip="Annual interest charged on outstanding vault debt. Currently 0% — Rumi charges no ongoing interest.">?</span></span>
-        <span class="param-val live">{pctRaw(interestRateApr)}</span>
       </div>
       <div class="param">
         <span class="param-label">Redemption Fee Floor <span class="tip" data-tip="The minimum fee charged when redeeming icUSD for collateral. The actual fee starts here and increases with redemption volume, then decays back over time.">?</span></span>
@@ -162,10 +176,6 @@
         <span class="param-val live">{pctRaw(ckstableRepayFee, 2)}</span>
       </div>
       <div class="param">
-        <span class="param-label">ICP Ledger Fee <span class="tip" data-tip="The network fee charged by the ICP ledger for each transfer. This is an Internet Computer system fee, not a Rumi fee.">?</span></span>
-        <span class="param-val">{ledgerFee > 0 ? `${ledgerFee} ICP` : '0.0001 ICP'}</span>
-      </div>
-      <div class="param">
         <span class="param-label">icUSD Ledger Fee <span class="tip" data-tip="The network fee charged by the icUSD ledger for each transfer.">?</span></span>
         <span class="param-val">0.001 icUSD</span>
       </div>
@@ -175,14 +185,6 @@
   <section class="doc-section">
     <h2 class="doc-heading">Minimums</h2>
     <div class="params-table">
-      <div class="param">
-        <span class="param-label">Minimum ICP Deposit <span class="tip" data-tip="The smallest amount of ICP you can deposit when opening a vault.">?</span></span>
-        <span class="param-val">0.001 ICP</span>
-      </div>
-      <div class="param">
-        <span class="param-label">Minimum Borrow Amount <span class="tip" data-tip="The smallest amount of icUSD you can borrow. Vaults with debt below this amount cannot be created.">?</span></span>
-        <span class="param-val live">{minVaultDebt > 0 ? `${minVaultDebt} icUSD` : '—'}</span>
-      </div>
       <div class="param">
         <span class="param-label">Minimum Partial Repayment <span class="tip" data-tip="The smallest repayment amount accepted by the protocol.">?</span></span>
         <span class="param-val">0.1 icUSD</span>
@@ -197,11 +199,14 @@
   <section class="doc-section">
     <h2 class="doc-heading">Supported Tokens</h2>
     <div class="params-table">
-      <div class="param"><span class="param-label">Collateral</span><span class="param-val">ICP</span></div>
+      <div class="param">
+        <span class="param-label">Collateral</span>
+        <span class="param-val live">{collaterals.map(c => c.symbol).join(', ') || '—'}</span>
+      </div>
       <div class="param"><span class="param-label">Stablecoin (minted)</span><span class="param-val">icUSD</span></div>
       <div class="param"><span class="param-label">Repayment & Liquidation</span><span class="param-val">icUSD, ckUSDT, ckUSDC</span></div>
       <div class="param">
-        <span class="param-label">ckStable Depeg Rejection <span class="tip" data-tip="If ckUSDT or ckUSDC is trading outside this range, the protocol rejects it for repayment or liquidation to protect against depeg events. Stablecoin prices are cached for up to 60 seconds (vs 30s for ICP).">?</span></span>
+        <span class="param-label">ckStable Depeg Rejection <span class="tip" data-tip="If ckUSDT or ckUSDC is trading outside this range, the protocol rejects it for repayment or liquidation to protect against depeg events. Stablecoin prices are cached for up to 60 seconds (vs 30s for collateral).">?</span></span>
         <span class="param-val">Outside $0.95 – $1.05</span>
       </div>
     </div>

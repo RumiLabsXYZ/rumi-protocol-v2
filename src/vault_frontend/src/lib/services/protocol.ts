@@ -37,8 +37,7 @@ export class ProtocolService {
 
   // Vault Operations - these go through ProtocolManager for proper error handling and queuing
   static openVault = ApiClient.openVault;
-  static finalizeOpenVaultDeposit = ApiClient.finalizeOpenVaultDeposit;
-  static finalizeAddMarginDeposit = ApiClient.finalizeAddMarginDeposit;
+  static openVaultAndBorrow = ApiClient.openVaultAndBorrow;
   static getUserVaults = ApiClient.getUserVaults;
   static getVaultById = ApiClient.getVaultById;
   static borrowFromVault = ApiClient.borrowFromVault;
@@ -98,8 +97,7 @@ export const protocolService = {
   
   // Vault operations
   openVault: ProtocolService.openVault,
-  finalizeOpenVaultDeposit: ProtocolService.finalizeOpenVaultDeposit,
-  finalizeAddMarginDeposit: ProtocolService.finalizeAddMarginDeposit,
+  openVaultAndBorrow: ProtocolService.openVaultAndBorrow,
   getUserVaults: ProtocolService.getUserVaults,
   borrowFromVault: ProtocolService.borrowFromVault,
   addMarginToVault: ProtocolService.addMarginToVault,

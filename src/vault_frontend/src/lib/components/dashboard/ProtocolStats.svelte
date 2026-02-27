@@ -245,12 +245,12 @@
     letter-spacing: 0.02em;
   }
   .mode-normal {
-    background: rgba(16, 185, 129, 0.15);
-    color: #6ee7b7;
+    background: rgba(45, 212, 191, 0.15);
+    color: #5eead4;
   }
   .mode-recovery {
-    background: rgba(245, 158, 11, 0.15);
-    color: #fbbf24;
+    background: rgba(167, 139, 250, 0.15);
+    color: #c4b5fd;
   }
   .mode-other {
     background: rgba(107, 114, 128, 0.15);

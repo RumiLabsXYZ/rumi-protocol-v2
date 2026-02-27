@@ -75,12 +75,18 @@
         .catch(() => { nonIcpCollateralBalance = 0; });
     }
   }
-  $: maxAddCollateral = vaultCollateralType === CANISTER_IDS.ICP_LEDGER ? walletIcp : nonIcpCollateralBalance;
+  // Deduct the collateral token's ledger fee so the deposit + fee doesn't exceed the wallet balance
+  $: collateralLedgerFeeHuman = vaultCollateralInfo
+    ? vaultCollateralInfo.ledgerFee / Math.pow(10, vaultCollateralInfo.decimals) : 0.0001;
+  $: maxAddCollateral = (() => {
+    const raw = vaultCollateralType === CANISTER_IDS.ICP_LEDGER ? walletIcp : nonIcpCollateralBalance;
+    return Math.max(0, raw - collateralLedgerFeeHuman);
+  })();
   $: activeRepayBalance = repayTokenType === 'CKUSDT' ? walletCkusdt
     : repayTokenType === 'CKUSDC' ? walletCkusdc : walletIcusd;
-  $: effectiveRepayBalance = (repayTokenType === 'CKUSDT' || repayTokenType === 'CKUSDC')
-    ? Math.max(0, (activeRepayBalance - 0.01) / 1.0005)
-    : Math.max(0, activeRepayBalance - 0.001);
+  // Deduct the repay token's ledger fee: icUSD = 0.001, ckUSDT/ckUSDC = 0.01
+  $: repayLedgerFee = (repayTokenType === 'CKUSDT' || repayTokenType === 'CKUSDC') ? 0.01 : 0.001;
+  $: effectiveRepayBalance = Math.max(0, activeRepayBalance - repayLedgerFee);
   $: maxRepayable = Math.min(effectiveRepayBalance, vault.borrowedIcusd);
 
   // ── Withdraw max: keeps CR at minimum for this collateral ──
@@ -97,7 +103,16 @@
   $: creditCapacity = collateralValueUsd / vaultMinCR;
   $: creditUsed = vault.borrowedIcusd > 0 && creditCapacity > 0
     ? Math.min((vault.borrowedIcusd / creditCapacity) * 100, 100) : 0;
-  $: creditRisk = creditUsed >= 85 ? 'danger' : creditUsed >= 65 ? 'warning' : 'normal';
+
+  // ── Health gauge (4 discrete zones, 100–300% CR scale) ──
+  // pink (liquidation) | deep-violet (can't borrow) | violet (can borrow) | teal (safe)
+  // All zone boundaries are per-collateral.
+  $: crPct = collateralRatio === Infinity ? 300 : collateralRatio * 100;
+  $: gaugePct = Math.min(Math.max((crPct - 100) / 2, 0), 100);
+  $: liqZonePct = Math.max(((vaultLiqCR * 100) - 100) / 2, 0);               // e.g. 16.5%
+  $: borrowZonePct = Math.max(((vaultMinCR * 100) - 100) / 2, 0);             // e.g. 25%
+  $: comfortZonePct = Math.max(((vaultMinCR * 1.234 * 100) - 100) / 2, 0);    // e.g. 42.6%
+
 
   $: fmtMargin = formatNumber(vaultCollateralAmount, 4);
   $: fmtCollateralUsd = formatNumber(collateralValueUsd, 2);
@@ -173,8 +188,10 @@
   $: liqPriceDistance = liquidationPrice > 0 && vaultCollateralPrice > 0
     ? ((vaultCollateralPrice - liquidationPrice) / vaultCollateralPrice) * 100 : 0;
 
-  function getRiskLevel(ratio: number): 'normal' | 'warning' | 'danger' {
-    if (ratio === Infinity || ratio >= vaultMinCR) return 'normal';
+  function getRiskLevel(ratio: number): 'safe' | 'caution' | 'warning' | 'danger' {
+    const comfortCR = vaultMinCR * 1.234;
+    if (ratio === Infinity || ratio >= comfortCR) return 'safe';
+    if (ratio >= vaultMinCR) return 'caution';
     if (ratio > vaultLiqCR) return 'warning';
     return 'danger';
   }
@@ -245,8 +262,8 @@
     return `${(ratio * 100).toFixed(1)}%`;
   }
 
-  function projectedRisk(ratio: number | null): 'normal' | 'warning' | 'danger' {
-    if (ratio === null || ratio === Infinity) return 'normal';
+  function projectedRisk(ratio: number | null): 'safe' | 'caution' | 'warning' | 'danger' {
+    if (ratio === null || ratio === Infinity) return 'safe';
     return getRiskLevel(ratio);
   }
 
@@ -448,7 +465,7 @@
 
 <!-- ── Collapsed row ── -->
 <div class="vault-card" class:vault-card-danger={riskLevel === 'danger'} class:vault-card-warning={riskLevel === 'warning'}
-  style={showProjectedCr ? `border-left-color: var(--rumi-${activeProjectedRisk === 'danger' ? 'danger' : activeProjectedRisk === 'warning' ? 'caution' : 'success'})` : ''}>
+  style={showProjectedCr ? `border-left-color: var(--rumi-${activeProjectedRisk === 'danger' || activeProjectedRisk === 'warning' ? 'danger' : activeProjectedRisk === 'caution' ? 'caution' : 'safe'})` : ''}>
   <button class="vault-row" on:click={toggleExpand}>
     <span class="vault-id">#{vault.vaultId}</span>
     <span class="vault-cell">
@@ -461,30 +478,37 @@
       <span class="cell-value">{fmtBorrowed} icUSD</span>
       <span class="cell-sub">${fmtBorrowedUsd}</span>
     </span>
-    <span class="vault-cell vault-cell-credit">
-      <span class="cell-label">Credit</span>
-      <span class="cell-value credit-meter-row">
-        <span class="credit-meter-track">
-          <span class="credit-meter-fill" class:meter-normal={creditRisk === 'normal'}
-            class:meter-warning={creditRisk === 'warning'} class:meter-danger={creditRisk === 'danger'}
-            style="width: {creditUsed}%"></span>
-        </span>
+    <span class="vault-cell vault-cell-bar">
+      <span class="gauge-track">
+        <span class="gauge-zone gauge-zone-pink" style="width:{liqZonePct}%"></span>
+        <span class="gauge-zone gauge-zone-gradient" style="width:{comfortZonePct - liqZonePct}%; left:{liqZonePct}%"></span>
+        <span class="gauge-zone gauge-zone-teal" style="width:{100 - comfortZonePct}%; left:{comfortZonePct}%"></span>
+        <span class="gauge-tick" style="left:{borrowZonePct}%"></span>
+        <span class="gauge-marker"
+          class:marker-safe={riskLevel === 'safe'}
+          class:marker-caution={riskLevel === 'caution'}
+          class:marker-danger={riskLevel === 'danger' || riskLevel === 'warning'}
+          style="left:{gaugePct}%"></span>
       </span>
-      <span class="cell-sub">{creditUsed.toFixed(0)}% used</span>
+      <span class="gauge-labels">
+        <span class="gauge-label-abs" style="left:{liqZonePct}%">liq</span>
+        <span class="gauge-label-abs gauge-label-end">300%+</span>
+      </span>
     </span>
     <span class="vault-cell vault-cell-ratio">
       <span class="cell-label">CR</span>
       {#if showProjectedCr}
         <span class="cell-value ratio-text cr-projected-row">
-          <span class="cr-old" class:ratio-warning={riskLevel === 'warning'} class:ratio-danger={riskLevel === 'danger'}>{fmtRatio}</span>
+          <span class="cr-old" class:ratio-warning={riskLevel === 'warning'} class:ratio-caution={riskLevel === 'caution'} class:ratio-danger={riskLevel === 'danger'}>{fmtRatio}</span>
           <span class="cr-arrow">→</span>
           <span class="cr-new" class:ratio-warning={activeProjectedRisk === 'warning'}
+            class:ratio-caution={activeProjectedRisk === 'caution'}
             class:ratio-danger={activeProjectedRisk === 'danger'}
-            class:ratio-healthy={activeProjectedRisk === 'normal'}>{fmtActiveProjectedCr}</span>
+            class:ratio-healthy={activeProjectedRisk === 'safe'}>{fmtActiveProjectedCr}</span>
         </span>
       {:else}
-        <span class="cell-value ratio-text" class:ratio-warning={riskLevel === 'warning'} class:ratio-danger={riskLevel === 'danger'} title={riskTooltip}>
-          {#if riskLevel !== 'normal'}
+        <span class="cell-value ratio-text" class:ratio-warning={riskLevel === 'warning'} class:ratio-caution={riskLevel === 'caution'} class:ratio-danger={riskLevel === 'danger'} title={riskTooltip}>
+          {#if riskLevel === 'warning' || riskLevel === 'danger'}
             <svg class="warn-icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" /></svg>
           {/if}
           {fmtRatio}
@@ -540,10 +564,11 @@
                   <span class="stat-cr-old">{fmtRatio}</span>
                   <span class="stat-arrow">→</span>
                   <span class="stat-cr-new" class:ratio-warning={activeProjectedRisk === 'warning'}
+                    class:ratio-caution={activeProjectedRisk === 'caution'}
                     class:ratio-danger={activeProjectedRisk === 'danger'}
-                    class:ratio-healthy={activeProjectedRisk === 'normal'}>{fmtActiveProjectedCr}</span>
+                    class:ratio-healthy={activeProjectedRisk === 'safe'}>{fmtActiveProjectedCr}</span>
                 {:else}
-                  <span class:ratio-warning={riskLevel === 'warning'} class:ratio-danger={riskLevel === 'danger'}>{fmtRatio}</span>
+                  <span class:ratio-warning={riskLevel === 'warning'} class:ratio-caution={riskLevel === 'caution'} class:ratio-danger={riskLevel === 'danger'}>{fmtRatio}</span>
                 {/if}
               </span>
             </div>
@@ -724,7 +749,7 @@
   .vault-card-warning { border-left: 2px solid var(--rumi-caution); }
 
   .vault-row {
-    display: grid; grid-template-columns: 3rem auto auto auto 1fr 2rem;
+    display: grid; grid-template-columns: 3rem auto auto 1fr 5.5rem 2rem;
     align-items: start; column-gap: 3rem; padding: 0.625rem 1rem;
     width: 100%; background: none; border: none;
     color: inherit; cursor: pointer; text-align: left; font-family: inherit;
@@ -736,19 +761,45 @@
   .cell-sub { font-size: 0.75rem; color: var(--rumi-text-muted); font-variant-numeric: tabular-nums; }
   .vault-cell-ratio { text-align: right; align-items: flex-end; justify-self: end; }
   .ratio-text { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 1.125rem; font-weight: 700; }
-  .ratio-warning { color: var(--rumi-caution); }
+  .ratio-warning { color: var(--rumi-danger); }
+  .ratio-caution { color: var(--rumi-caution); }
   .ratio-danger { color: var(--rumi-danger); }
-  .ratio-healthy { color: var(--rumi-action); }
+  .ratio-healthy { color: var(--rumi-safe); }
   .warn-icon { width: 0.875rem; height: 0.875rem; flex-shrink: 0; }
 
-  /* ── Credit meter ── */
-  .vault-cell-credit { min-width: 5rem; }
-  .credit-meter-row { display: flex; align-items: center; height: 1.25rem; }
-  .credit-meter-track { width: 4.5rem; height: 0.25rem; background: var(--rumi-bg-surface2); border-radius: 9999px; overflow: hidden; }
-  .credit-meter-fill { display: block; height: 100%; border-radius: 9999px; transition: width 0.3s ease; }
-  .meter-normal { background: var(--rumi-success, #10b981); }
-  .meter-warning { background: var(--rumi-caution); }
-  .meter-danger { background: var(--rumi-danger); }
+  /* ── Health gauge (discrete zones matching borrow page) ── */
+  .vault-cell-bar {
+    justify-self: center; align-self: center;
+    display: flex; flex-direction: column; min-width: 12rem; width: 100%;
+    gap: 0.125rem;
+  }
+  .gauge-track {
+    position: relative; width: 100%; height: 6px; border-radius: 3px;
+    overflow: hidden; background: var(--rumi-bg-surface3);
+  }
+  .gauge-zone { position: absolute; top: 0; height: 100%; }
+  .gauge-zone-pink { background: rgba(224, 107, 159, 0.75); left: 0; border-radius: 3px 0 0 3px; }
+  .gauge-zone-gradient { background: linear-gradient(to right, rgba(224, 107, 159, 0.65), rgba(167, 139, 250, 0.6)); }
+  .gauge-zone-teal { background: rgba(45, 212, 191, 0.5); border-radius: 0 3px 3px 0; }
+  .gauge-tick {
+    position: absolute; top: 0; width: 1px; height: 100%;
+    background: rgba(255,255,255,0.25); transform: translateX(-50%);
+    pointer-events: none;
+  }
+  .gauge-marker {
+    position: absolute; top: -3px; width: 3px; height: 12px;
+    border-radius: 1.5px; transform: translateX(-50%);
+    transition: left 0.3s ease;
+  }
+  .marker-safe { background: var(--rumi-safe); box-shadow: 0 0 4px rgba(45, 212, 191, 0.5); }
+  .marker-caution { background: var(--rumi-caution); box-shadow: 0 0 4px rgba(167, 139, 250, 0.5); }
+  .marker-danger { background: var(--rumi-danger); box-shadow: 0 0 4px rgba(224, 107, 159, 0.5); }
+  .gauge-labels {
+    position: relative; height: 0.75rem;
+    font-size: 0.5625rem; color: var(--rumi-text-muted); opacity: 0.85;
+  }
+  .gauge-label-abs { position: absolute; transform: translateX(-50%); }
+  .gauge-label-end { right: 0; transform: none; }
 
   /* ── Projected CR in header ── */
   .cr-projected-row { display: inline-flex; align-items: center; gap: 0.25rem; }
@@ -844,10 +895,10 @@
     margin-top: 0.125rem; width: fit-content;
   }
   .safety-up {
-    color: #34d399; background: rgba(52,211,153,0.08);
+    color: #2DD4BF; background: rgba(45,212,191,0.08);
   }
   .safety-down {
-    color: #f87171; background: rgba(248,113,113,0.08);
+    color: #e881a8; background: rgba(232,129,168,0.08);
   }
   .safety-arrow { font-size: 0.5rem; }
 
@@ -981,6 +1032,7 @@
 
   @media (max-width: 640px) {
     .vault-row { grid-template-columns: 3rem 1fr 1fr 2rem; gap: 0.5rem; }
+    .vault-cell-bar { display: none; }
     .vault-cell-ratio { display: none; }
     .vault-cell-credit { display: none; }
     .action-layout { grid-template-columns: 1fr; }

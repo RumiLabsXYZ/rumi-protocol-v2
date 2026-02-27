@@ -17,7 +17,8 @@ import type {
     ProtocolError,
     OpenVaultSuccess
   } from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did.js';
-import { walletOperations, isOisyWallet, computeDepositAccount } from './walletOperations';
+import { walletOperations, isOisyWallet } from './walletOperations';
+import { pnp } from '../pnp';
 import { get } from 'svelte/store';
 import { vaultStore } from '$lib/stores/vaultStore';
 import { QueryOperations } from './queryOperations';
@@ -436,64 +437,68 @@ private static async refreshVaultData(): Promise<void> {
               ? []  // ICP is the default, no need to pass
               : [Principal.fromText(ctPrincipal)];
 
-            // ─── Oisy push-deposit path (two-step) ───
-            // Oisy cannot do ICRC-2 approve on the ICP ledger (ICRC-21 not supported).
-            // Step 1: Transfer collateral to deposit subaccount (opens signer popup).
-            // Step 2 is deferred — returns pendingDeposit so the UI can prompt
-            //   the user to click again (providing a fresh browser user-gesture
-            //   so the second signer popup is not blocked).
-            if (isOisyWallet()) {
-              console.log(`[Oisy] Using push-deposit flow for vault creation`);
+            // ─── Oisy ICRC-112 batched path ───
+            // Batches approve + open_vault into a single signer popup via ICRC-112.
+            // The SignerAgent natively handles icrc2_approve consent (Tier 1) so
+            // the ICP ledger's lack of ICRC-21 is not an issue.
+            const signerAgent = isOisyWallet() ? pnp.getSignerAgent() : null;
 
-              // Compute deposit account client-side (no canister call — no signer popup)
-              console.log(`[Oisy] Step 1/3: Computing deposit account...`);
-              const walletState = get(walletStore);
-              if (!walletState.principal) {
-                return { success: false, error: '[Oisy] Wallet principal missing' };
-              }
-              const depositAccount = await computeDepositAccount(walletState.principal);
-              console.log(`[Oisy] Deposit account computed:`, depositAccount);
+            if (signerAgent) {
+              console.log(`[Oisy] Using ICRC-112 batched approve+open_vault`);
+              const requestedAllowance = amountRaw * 105n / 100n;
 
-              // Get ICP ledger actor through PNP/Oisy
-              console.log(`[Oisy] Step 2/3: Getting ICP ledger actor for ${ledgerCanisterId}...`);
-              const ledgerActor = await walletStore.getActor(ledgerCanisterId, CONFIG.icp_ledgerIDL);
-              if (!ledgerActor) {
-                return { success: false, error: '[Oisy] Failed to create ICP ledger actor — PNP returned null' };
-              }
-              console.log(`[Oisy] Ledger actor ready`);
+              // Get actors that will route through the SignerAgent
+              const ledgerActor = await walletStore.getActor(ledgerCanisterId, CONFIG.icp_ledgerIDL) as any;
 
-              // Transfer collateral to the deposit account via icrc1_transfer
-              console.log(`[Oisy] Step 3/3: Calling icrc1_transfer for ${collateralAmount} ${symbol} (${amountRaw} raw)...`);
-              const transferResult = await (ledgerActor as any).icrc1_transfer({
-                to: depositAccount,
-                amount: amountRaw,
-                fee: [],
+              // Sequence 0: approve
+              signerAgent.batch();
+              const approvePromise = ledgerActor.icrc2_approve({
+                amount: requestedAllowance,
+                spender: {
+                  owner: Principal.fromText(CONFIG.currentCanisterId),
+                  subaccount: []
+                },
+                expires_at: [],
+                expected_allowance: [],
                 memo: [],
+                fee: [],
                 from_subaccount: [],
-                created_at_time: [],
+                created_at_time: []
               });
 
-              if ('Err' in transferResult) {
-                console.error(`[Oisy] icrc1_transfer error:`, transferResult.Err);
+              // Sequence 1: open_vault (runs after approve completes)
+              signerAgent.batch();
+              const vaultPromise = actor.open_vault(amountRaw, collateralTypeOpt);
+
+              // Fire both as a single ICRC-112 batch request → one Oisy popup
+              await signerAgent.execute();
+
+              const [approveResult, result] = await Promise.all([approvePromise, vaultPromise]);
+
+              // Check approve result
+              if (approveResult && 'Err' in approveResult) {
                 return {
                   success: false,
-                  error: `Failed to transfer ${symbol} to deposit account: ${JSON.stringify(transferResult.Err)}`
+                  error: `${symbol} approval failed: ${JSON.stringify(approveResult.Err)}`
                 };
               }
-              console.log(`[Oisy] Deposited ${collateralAmount} ${symbol} (block ${transferResult.Ok})`);
 
-              // Return pendingDeposit — the UI will prompt the user to click
-              // "Create Vault" again, giving a fresh user gesture for the next popup.
-              return {
-                success: false,
-                pendingDeposit: true,
-                depositBlockIndex: Number(transferResult.Ok),
-                message: `Deposit of ${collateralAmount} ${symbol} confirmed. Click "Create Vault" to finalize.`
-              };
+              if ('Ok' in result) {
+                return {
+                  success: true,
+                  vaultId: Number(result.Ok.vault_id),
+                  blockIndex: Number(result.Ok.block_index)
+                };
+              } else {
+                return {
+                  success: false,
+                  error: ApiClient.formatProtocolError(result.Err)
+                };
+              }
             }
 
             // ─── Standard ICRC-2 path (Plug, II, etc.) ───
-            // CRITICAL: Check and increase allowance before proceeding
+            // Sequential approve then open_vault (two separate popups)
             const spenderCanisterId = CONFIG.currentCanisterId;
 
             // First check current allowance (using generic collateral method)
@@ -607,80 +612,157 @@ private static async refreshVaultData(): Promise<void> {
 
 
 /**
- * Finalize an Oisy push-deposit vault creation.
- * Called AFTER the user's collateral has been transferred to the deposit subaccount
- * (step 1 of the two-step flow). This must be triggered by a fresh user gesture
- * so the Oisy signer popup is not blocked by the browser.
+ * Compound: open vault + borrow icUSD in a single canister call.
+ *
+ * For Oisy / ICRC-112 wallets this batches approve + open_vault_and_borrow
+ * into **one** signer popup (instead of approve → open_vault → borrow which
+ * requires three popups and fails because the browser blocks async popups).
+ *
+ * For non-Oisy wallets this still reduces round-trips (approve → one backend call
+ * instead of approve → open_vault → borrow).
  */
-static async finalizeOpenVaultDeposit(collateralTypePrincipal?: string, borrowAmount?: number): Promise<VaultOperationResult> {
-  try {
-    // If borrowAmount > 0, the backend will create the vault AND borrow in one atomic call.
-    // This avoids a third signer popup for borrowFromVault.
-    const borrowRaw = borrowAmount && borrowAmount > 0
-      ? BigInt(Math.floor(borrowAmount * E8S))
-      : BigInt(0);
-    console.log(`[Oisy] Finalizing vault creation (step 2)... borrowAmount=${borrowAmount ?? 0} (${borrowRaw} raw)`);
-    const actor = await ApiClient.getAuthenticatedActor();
-
+static async openVaultAndBorrow(
+  collateralAmount: number,
+  icusdAmount: number,
+  collateralTypePrincipal?: string
+): Promise<VaultOperationResult> {
+  return ApiClient.executeSequentialOperation(async () => {
     const ctPrincipal = collateralTypePrincipal || CANISTER_IDS.ICP_LEDGER;
-    const collateralTypeOpt: [] | [Principal] = ctPrincipal === CANISTER_IDS.ICP_LEDGER
-      ? []
-      : [Principal.fromText(ctPrincipal)];
+    const collateralInfo = collateralStore.getCollateralInfo(ctPrincipal);
+    const decimals = collateralInfo?.decimals ?? 8;
+    const decimalsFactor = Math.pow(10, decimals);
+    const ledgerCanisterId = collateralInfo?.ledgerCanisterId ?? CONFIG.currentIcpLedgerId;
+    const symbol = collateralInfo?.symbol ?? 'ICP';
 
-    const result = await actor.open_vault_with_deposit(borrowRaw, collateralTypeOpt);
+    try {
+      console.log(`Creating vault with ${collateralAmount} ${symbol} and borrowing ${icusdAmount} icUSD`);
 
-    if ('Ok' in result) {
-      return {
-        success: true,
-        vaultId: Number(result.Ok.vault_id),
-        blockIndex: Number(result.Ok.block_index)
-      };
-    } else {
-      return {
-        success: false,
-        error: ApiClient.formatProtocolError(result.Err)
-      };
+      const amountRaw = BigInt(Math.floor(collateralAmount * decimalsFactor));
+      const borrowRaw = BigInt(Math.floor(icusdAmount * E8S));
+
+      if (amountRaw < BigInt(MIN_ICP_AMOUNT)) {
+        return { success: false, error: `Amount too low. Minimum required: ${MIN_ICP_AMOUNT / decimalsFactor} ${symbol}` };
+      }
+
+      const walletState = get(walletStore);
+      if (!walletState.isConnected || !walletState.principal) {
+        return { success: false, error: "Wallet not connected. Please connect your wallet and try again." };
+      }
+
+      try {
+        const actor = await ApiClient.getAuthenticatedActor();
+
+        const collateralTypeOpt: [] | [Principal] = ctPrincipal === CANISTER_IDS.ICP_LEDGER
+          ? []
+          : [Principal.fromText(ctPrincipal)];
+
+        // ─── Oisy ICRC-112 batched path ───
+        const signerAgent = isOisyWallet() ? pnp.getSignerAgent() : null;
+
+        if (signerAgent) {
+          console.log(`[Oisy] Using ICRC-112 batched approve+open_vault_and_borrow`);
+          const requestedAllowance = amountRaw * 105n / 100n;
+
+          const ledgerActor = await walletStore.getActor(ledgerCanisterId, CONFIG.icp_ledgerIDL) as any;
+
+          // Sequence 0: approve
+          signerAgent.batch();
+          const approvePromise = ledgerActor.icrc2_approve({
+            amount: requestedAllowance,
+            spender: {
+              owner: Principal.fromText(CONFIG.currentCanisterId),
+              subaccount: []
+            },
+            expires_at: [],
+            expected_allowance: [],
+            memo: [],
+            fee: [],
+            from_subaccount: [],
+            created_at_time: []
+          });
+
+          // Sequence 1: open_vault_and_borrow (runs after approve completes)
+          signerAgent.batch();
+          const vaultPromise = actor.open_vault_and_borrow(amountRaw, borrowRaw, collateralTypeOpt);
+
+          // Fire both as a single ICRC-112 batch request → one Oisy popup
+          await signerAgent.execute();
+
+          const [approveResult, result] = await Promise.all([approvePromise, vaultPromise]);
+
+          if (approveResult && 'Err' in approveResult) {
+            return { success: false, error: `${symbol} approval failed: ${JSON.stringify(approveResult.Err)}` };
+          }
+
+          if ('Ok' in result) {
+            return {
+              success: true,
+              vaultId: Number(result.Ok.vault_id),
+              blockIndex: Number(result.Ok.block_index)
+            };
+          } else {
+            return { success: false, error: ApiClient.formatProtocolError(result.Err) };
+          }
+        }
+
+        // ─── Standard ICRC-2 path (Plug, II, etc.) ───
+        const spenderCanisterId = CONFIG.currentCanisterId;
+
+        const currentAllowance = await walletOperations.checkCollateralAllowance(spenderCanisterId, ledgerCanisterId);
+        if (currentAllowance < amountRaw) {
+          const requestedAllowance = amountRaw * 105n / 100n;
+          const approvalResult = await walletOperations.approveCollateralTransfer(
+            requestedAllowance, spenderCanisterId, ledgerCanisterId
+          );
+          if (!approvalResult.success) {
+            return { success: false, error: approvalResult.error || `Failed to approve ${symbol} transfer` };
+          }
+        }
+
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error("Wallet signature request timed out")), 60000);
+        });
+
+        const result = await Promise.race([
+          actor.open_vault_and_borrow(amountRaw, borrowRaw, collateralTypeOpt),
+          timeoutPromise
+        ]);
+
+        if ('Ok' in result) {
+          return {
+            success: true,
+            vaultId: Number(result.Ok.vault_id),
+            blockIndex: Number(result.Ok.block_index)
+          };
+        } else {
+          return { success: false, error: ApiClient.formatProtocolError(result.Err) };
+        }
+      } catch (signerErr) {
+        console.error('Error in openVaultAndBorrow:', signerErr);
+
+        if (signerErr instanceof Error) {
+          const errMsg = signerErr.message.toLowerCase();
+          if (errMsg.includes('insufficientallowance') || errMsg.includes('insufficient allowance')) {
+            return { success: false, error: "Insufficient ICP allowance. Please try again to approve the required amount." };
+          }
+          if (errMsg.includes('invalid response from signer') || errMsg.includes('failed to sign') ||
+              errMsg.includes('rejected') || errMsg.includes('user declined')) {
+            await walletOperations.resetWalletSignerState();
+            try {
+              await walletStore.refreshWallet();
+              return { success: false, error: "Wallet signature failed. Please try again after refreshing the page." };
+            } catch {
+              return { success: false, error: "Wallet signature error. Please disconnect and reconnect your wallet." };
+            }
+          }
+        }
+        throw signerErr;
+      }
+    } catch (err) {
+      console.error('Error in openVaultAndBorrow:', err);
+      return { success: false, error: err instanceof Error ? err.message : 'Unknown error opening vault' };
     }
-  } catch (err) {
-    console.error('[Oisy] Error finalizing vault deposit:', err);
-    return {
-      success: false,
-      error: err instanceof Error ? err.message : 'Unknown error finalizing vault creation'
-    };
-  }
-}
-
-/**
- * Finalize an Oisy push-deposit add-margin operation.
- * Called AFTER the user's collateral has been transferred to the deposit subaccount.
- * Must be triggered by a fresh user gesture.
- */
-static async finalizeAddMarginDeposit(vaultId: number): Promise<VaultOperationResult> {
-  try {
-    console.log(`[Oisy] Finalizing add margin to vault #${vaultId} (step 2)...`);
-    const actor = await ApiClient.getAuthenticatedActor();
-
-    const result = await actor.add_margin_with_deposit(BigInt(vaultId));
-
-    if ('Ok' in result) {
-      return {
-        success: true,
-        vaultId,
-        blockIndex: Number(result.Ok)
-      };
-    } else {
-      return {
-        success: false,
-        error: ApiClient.formatProtocolError(result.Err)
-      };
-    }
-  } catch (err) {
-    console.error('[Oisy] Error finalizing add margin deposit:', err);
-    return {
-      success: false,
-      error: err instanceof Error ? err.message : 'Unknown error finalizing add margin'
-    };
-  }
+  });
 }
 
 /**
@@ -788,44 +870,62 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
 
       const actor = await ApiClient.getAuthenticatedActor();
 
-      // ─── Oisy push-deposit path (two-step) ───
-      // Step 1: Transfer to deposit subaccount. Step 2 (finalize) is deferred
-      // to a fresh user gesture so the second Oisy signer popup isn't blocked.
-      if (isOisyWallet()) {
-        console.log(`[Oisy] Using push-deposit flow for add margin to vault #${vaultId}`);
+      // ─── Oisy ICRC-112 batched path ───
+      // Batches approve + add_margin into a single signer popup via ICRC-112.
+      const marginSignerAgent = isOisyWallet() ? pnp.getSignerAgent() : null;
 
-        // Compute deposit account client-side
-        const walletState2 = get(walletStore);
-        const depositAccount = await computeDepositAccount(walletState2.principal!);
-        console.log(`[Oisy] Deposit account:`, depositAccount);
+      if (marginSignerAgent) {
+        console.log(`[Oisy] Using ICRC-112 batched approve+add_margin for vault #${vaultId}`);
 
-        // Transfer collateral to deposit account
-        const ledgerActor = await walletStore.getActor(ledgerCanisterId, CONFIG.icp_ledgerIDL);
-        const transferResult = await (ledgerActor as any).icrc1_transfer({
-          to: depositAccount,
-          amount: amountRaw,
-          fee: [],
+        const ledgerActor = await walletStore.getActor(ledgerCanisterId, CONFIG.icp_ledgerIDL) as any;
+
+        // Sequence 0: approve
+        marginSignerAgent.batch();
+        const approvePromise = ledgerActor.icrc2_approve({
+          amount: bufferAmount,
+          spender: {
+            owner: Principal.fromText(CONFIG.currentCanisterId),
+            subaccount: []
+          },
+          expires_at: [],
+          expected_allowance: [],
           memo: [],
+          fee: [],
           from_subaccount: [],
-          created_at_time: [],
+          created_at_time: []
         });
 
-        if ('Err' in transferResult) {
+        // Sequence 1: add_margin_to_vault (runs after approve completes)
+        marginSignerAgent.batch();
+        const marginPromise = actor.add_margin_to_vault({
+          vault_id: BigInt(vaultId),
+          amount: amountRaw
+        });
+
+        // Fire both as a single ICRC-112 batch request → one Oisy popup
+        await marginSignerAgent.execute();
+
+        const [approveResult, marginResult] = await Promise.all([approvePromise, marginPromise]);
+
+        if (approveResult && 'Err' in approveResult) {
           return {
             success: false,
-            error: `Failed to transfer ${symbol} to deposit account: ${JSON.stringify(transferResult.Err)}`
+            error: `${symbol} approval failed: ${JSON.stringify(approveResult.Err)}`
           };
         }
-        console.log(`[Oisy] Deposited ${collateralAmount} ${symbol} (block ${transferResult.Ok})`);
 
-        // Return pendingDeposit — UI will prompt user to click again
-        return {
-          success: false,
-          pendingDeposit: true,
-          depositBlockIndex: Number(transferResult.Ok),
-          vaultId,
-          message: `Deposit of ${collateralAmount} ${symbol} confirmed. Click "Add Collateral" to finalize.`
-        };
+        if ('Ok' in marginResult) {
+          return {
+            success: true,
+            vaultId,
+            blockIndex: Number(marginResult.Ok)
+          };
+        } else {
+          return {
+            success: false,
+            error: ApiClient.formatProtocolError(marginResult.Err)
+          };
+        }
       }
 
       // ─── Standard ICRC-2 path (Plug, II, etc.) ───
@@ -941,13 +1041,16 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
 }
   
 /**
- * Repay icUSD to a vault
+ * Repay icUSD to a vault.
+ *
+ * For Oisy wallets: if the icUSD allowance is insufficient, batches
+ * icrc2_approve + repay_to_vault into a single ICRC-112 popup.
  */
 static async repayToVault(vaultId: number, icusdAmount: number): Promise<VaultOperationResult> {
   return ApiClient.executeSequentialOperation(async () => {
     try {
       console.log(`Repaying ${icusdAmount} icUSD to vault #${vaultId}`);
-      
+
       // Validate input is finite before any calculations
       if (!isFinite(icusdAmount) || icusdAmount <= 0) {
         return {
@@ -955,22 +1058,65 @@ static async repayToVault(vaultId: number, icusdAmount: number): Promise<VaultOp
           error: `Invalid repayment amount: ${icusdAmount}. Amount must be a finite positive number.`
         };
       }
-      
+
       if (icusdAmount * E8S < MIN_ICUSD_AMOUNT) {
         return {
           success: false,
           error: `Amount too low. Minimum repayment amount: ${MIN_ICUSD_AMOUNT / E8S} icUSD`
         };
       }
-      
+
+      const amountE8s = BigInt(Math.floor(icusdAmount * E8S));
       const actor = await ApiClient.getAuthenticatedActor();
       const vaultArg = {
         vault_id: BigInt(vaultId),
-        amount: BigInt(Math.floor(icusdAmount * E8S))
+        amount: amountE8s
       };
 
+      // ─── Oisy ICRC-112 batched path ───
+      const signerAgent = isOisyWallet() ? pnp.getSignerAgent() : null;
+      if (signerAgent) {
+        const spenderCanisterId = CONFIG.currentCanisterId;
+        const currentAllowance = await walletOperations.checkIcusdAllowance(spenderCanisterId);
+        const ICUSD_LEDGER_FEE = BigInt(100_000);
+        const requiredAllowance = amountE8s + ICUSD_LEDGER_FEE + ICUSD_LEDGER_FEE;
+
+        if (currentAllowance < requiredAllowance) {
+          console.log(`[Oisy] Batching icUSD approve + repay_to_vault`);
+          const LARGE_APPROVAL = BigInt(100_000_000_000_000_000); // 1B icUSD in e8s
+          const icusdLedgerActor = await walletStore.getActor(
+            CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL
+          ) as any;
+
+          signerAgent.batch();
+          const approvePromise = icusdLedgerActor.icrc2_approve({
+            amount: LARGE_APPROVAL,
+            spender: { owner: Principal.fromText(spenderCanisterId), subaccount: [] },
+            expires_at: [], expected_allowance: [], memo: [], fee: [],
+            from_subaccount: [], created_at_time: []
+          });
+
+          signerAgent.batch();
+          const repayPromise = actor.repay_to_vault(vaultArg);
+
+          await signerAgent.execute();
+          const [approveResult, result] = await Promise.all([approvePromise, repayPromise]);
+
+          if (approveResult && 'Err' in approveResult) {
+            return { success: false, error: `icUSD approval failed: ${JSON.stringify(approveResult.Err)}` };
+          }
+          if ('Ok' in result) {
+            return { success: true, vaultId, blockIndex: Number(result.Ok) };
+          } else {
+            return { success: false, error: ApiClient.formatProtocolError(result.Err) };
+          }
+        }
+        // Allowance already sufficient — fall through to normal call
+      }
+
+      // ─── Standard path (non-Oisy, or Oisy with sufficient allowance) ───
       const result = await actor.repay_to_vault(vaultArg);
-      
+
       if ('Ok' in result) {
         return {
           success: true,
@@ -994,7 +1140,10 @@ static async repayToVault(vaultId: number, icusdAmount: number): Promise<VaultOp
 }
 
 /**
- * Repay to vault using ckUSDT or ckUSDC (1:1 with icUSD)
+ * Repay to vault using ckUSDT or ckUSDC (1:1 with icUSD).
+ *
+ * For Oisy wallets: if the stable allowance is insufficient, batches
+ * icrc2_approve + repay_to_vault_with_stable into a single ICRC-112 popup.
  */
 static async repayToVaultWithStable(
   vaultId: number,
@@ -1022,12 +1171,60 @@ static async repayToVaultWithStable(
 
       const actor = await ApiClient.getAuthenticatedActor();
       const token_type = tokenType === 'CKUSDT' ? { 'CKUSDT' : null } as const : { 'CKUSDC' : null } as const;
+      const amountE8s = BigInt(Math.floor(amount * E8S));
       const vaultArgWithToken = {
         vault_id: BigInt(vaultId),
-        amount: BigInt(Math.floor(amount * E8S)),
+        amount: amountE8s,
         token_type
       };
 
+      // ─── Oisy ICRC-112 batched path ───
+      const signerAgent = isOisyWallet() ? pnp.getSignerAgent() : null;
+      if (signerAgent) {
+        const spenderCanisterId = CONFIG.currentCanisterId;
+        const E6S = 1_000_000;
+        const amountE6s = BigInt(Math.floor(amount * E6S));
+        const STABLE_LEDGER_FEE = BigInt(10_000);
+        const protocolFee = amountE6s / BigInt(2000); // 0.05%
+        const requiredAllowance = amountE6s + protocolFee + STABLE_LEDGER_FEE + STABLE_LEDGER_FEE;
+
+        const currentAllowance = await walletOperations.checkStableAllowance(spenderCanisterId, tokenType);
+
+        if (currentAllowance < requiredAllowance) {
+          console.log(`[Oisy] Batching ${tokenType} approve + repay_to_vault_with_stable`);
+          const LARGE_APPROVAL = BigInt(1_000_000_000_000_000); // 1B in e6s
+          const stableLedgerId = CONFIG.getStableLedgerId(tokenType);
+          const stableLedgerActor = await walletStore.getActor(
+            stableLedgerId, CONFIG.icusd_ledgerIDL
+          ) as any;
+
+          signerAgent.batch();
+          const approvePromise = stableLedgerActor.icrc2_approve({
+            amount: LARGE_APPROVAL,
+            spender: { owner: Principal.fromText(spenderCanisterId), subaccount: [] },
+            expires_at: [], expected_allowance: [], memo: [], fee: [],
+            from_subaccount: [], created_at_time: []
+          });
+
+          signerAgent.batch();
+          const repayPromise = actor.repay_to_vault_with_stable(vaultArgWithToken);
+
+          await signerAgent.execute();
+          const [approveResult, result] = await Promise.all([approvePromise, repayPromise]);
+
+          if (approveResult && 'Err' in approveResult) {
+            return { success: false, error: `${tokenType} approval failed: ${JSON.stringify(approveResult.Err)}` };
+          }
+          if ('Ok' in result) {
+            return { success: true, vaultId, blockIndex: Number(result.Ok) };
+          } else {
+            return { success: false, error: ApiClient.formatProtocolError(result.Err) };
+          }
+        }
+        // Allowance already sufficient — fall through to normal call
+      }
+
+      // ─── Standard path (non-Oisy, or Oisy with sufficient allowance) ───
       const result = await actor.repay_to_vault_with_stable(vaultArgWithToken);
 
       if ('Ok' in result) {
@@ -1376,15 +1573,63 @@ static async repayToVaultWithStable(
         }
 
         const icusdE8s = BigInt(Math.floor(icusdAmount * E8S));
-
-        // Approve icUSD transfer (the backend pulls via icrc2_transfer_from)
         const spenderCanisterId = CONFIG.currentCanisterId;
         const bufferedAmount = icusdE8s * 105n / 100n;
 
+        const preferredOpt: [] | [Principal] = preferredToken
+          ? [Principal.fromText(preferredToken)]
+          : [];
+
+        // ─── Oisy ICRC-112 batched path ───
+        const signerAgent = isOisyWallet() ? pnp.getSignerAgent() : null;
+        if (signerAgent) {
+          const currentAllowance = await walletOperations.checkIcusdAllowance(spenderCanisterId);
+
+          if (currentAllowance < bufferedAmount) {
+            console.log(`[Oisy] Batching icUSD approve + redeem_reserves`);
+            const LARGE_APPROVAL = BigInt(100_000_000_000_000_000); // 1B icUSD in e8s
+            const icusdLedgerActor = await walletStore.getActor(
+              CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL
+            ) as any;
+            const actor = await ApiClient.getAuthenticatedActor();
+
+            signerAgent.batch();
+            const approvePromise = icusdLedgerActor.icrc2_approve({
+              amount: LARGE_APPROVAL,
+              spender: { owner: Principal.fromText(spenderCanisterId), subaccount: [] },
+              expires_at: [], expected_allowance: [], memo: [], fee: [],
+              from_subaccount: [], created_at_time: []
+            });
+
+            signerAgent.batch();
+            const redeemPromise = actor.redeem_reserves(icusdE8s, preferredOpt);
+
+            await signerAgent.execute();
+            const [approveResult, result] = await Promise.all([approvePromise, redeemPromise]);
+
+            if (approveResult && 'Err' in approveResult) {
+              return { success: false, error: `icUSD approval failed: ${JSON.stringify(approveResult.Err)}` };
+            }
+            if ('Ok' in result) {
+              const r = result.Ok;
+              return {
+                success: true,
+                blockIndex: Number(r.icusd_block_index),
+                feePaid: Number(r.fee_amount) / E8S,
+                stableAmountSent: Number(r.stable_amount_sent),
+                vaultSpillover: Number(r.vault_spillover_amount),
+              };
+            } else {
+              return { success: false, error: ApiClient.formatProtocolError(result.Err) };
+            }
+          }
+          // Allowance already sufficient — fall through
+        }
+
+        // ─── Standard path (non-Oisy, or sufficient allowance) ───
         const currentAllowance = await walletOperations.checkIcusdAllowance(spenderCanisterId);
         if (currentAllowance < bufferedAmount) {
-          // Approve 1B icUSD so future redemptions skip this popup entirely
-          const LARGE_APPROVAL = BigInt(100_000_000_000_000_000); // 1B icUSD in e8s
+          const LARGE_APPROVAL = BigInt(100_000_000_000_000_000);
           const approvalResult = await walletOperations.approveIcusdTransfer(
             LARGE_APPROVAL, spenderCanisterId
           );
@@ -1394,20 +1639,10 @@ static async repayToVaultWithStable(
               error: approvalResult.error || 'Failed to approve icUSD transfer'
             };
           }
-
-          // For Oisy: approval consumed the user gesture — the next popup will be blocked.
-          if (isOisyWallet()) {
-            return { success: false, error: 'Approved! Click Redeem again to complete.' };
-          }
-
           await new Promise(resolve => setTimeout(resolve, 1000));
         }
 
         const actor = await ApiClient.getAuthenticatedActor();
-        const preferredOpt: [] | [Principal] = preferredToken
-          ? [Principal.fromText(preferredToken)]
-          : [];
-
         const result = await actor.redeem_reserves(icusdE8s, preferredOpt);
 
         if ('Ok' in result) {
@@ -2031,15 +2266,52 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
           // Check and set allowance for icUSD with a 20% buffer
           const bufferedAmount = BigInt(Math.floor((icusdAmount * 1.2) * E8S));
           const spenderCanisterId = CONFIG.currentCanisterId;
-          
-          // Check current allowance
+          const icusdAmountE8s = BigInt(Math.floor(icusdAmount * E8S));
+
+          // ─── Oisy ICRC-112 batched path ───
+          const signerAgent = isOisyWallet() ? pnp.getSignerAgent() : null;
+          if (signerAgent) {
+            const currentAllowance = await walletOperations.checkIcusdAllowance(spenderCanisterId);
+            if (currentAllowance < bufferedAmount) {
+              console.log(`[Oisy] Batching icUSD approve + liquidate_vault_partial`);
+              const LARGE_APPROVAL = BigInt(100_000_000_000_000_000);
+              const icusdLedgerActor = await walletStore.getActor(
+                CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL
+              ) as any;
+              const actor = await ApiClient.getAuthenticatedActor();
+
+              signerAgent.batch();
+              const approvePromise = icusdLedgerActor.icrc2_approve({
+                amount: LARGE_APPROVAL,
+                spender: { owner: Principal.fromText(spenderCanisterId), subaccount: [] },
+                expires_at: [], expected_allowance: [], memo: [], fee: [],
+                from_subaccount: [], created_at_time: []
+              });
+
+              signerAgent.batch();
+              const liqPromise = actor.liquidate_vault_partial({ vault_id: BigInt(vaultId), amount: icusdAmountE8s });
+
+              await signerAgent.execute();
+              const [approveResult, result] = await Promise.all([approvePromise, liqPromise]);
+
+              if (approveResult && 'Err' in approveResult) {
+                return { success: false, error: `icUSD approval failed: ${JSON.stringify(approveResult.Err)}` };
+              }
+              if ('Ok' in result) {
+                return { success: true, vaultId, blockIndex: Number(result.Ok.block_index), feePaid: Number(result.Ok.fee_amount_paid) / E8S };
+              } else {
+                return { success: false, error: ApiClient.formatProtocolError(result.Err) };
+              }
+            }
+            // Allowance sufficient — fall through to standard path
+          }
+
+          // ─── Standard path ───
           const currentAllowance = await walletOperations.checkIcusdAllowance(spenderCanisterId);
           console.log(`Current icUSD allowance: ${Number(currentAllowance) / E8S}`);
-          
-          // If allowance is insufficient, request approval
+
           if (currentAllowance < bufferedAmount) {
-            // Approve 1B icUSD so future liquidations skip this popup entirely
-            const LARGE_APPROVAL = BigInt(100_000_000_000_000_000); // 1B icUSD in e8s
+            const LARGE_APPROVAL = BigInt(100_000_000_000_000_000);
             console.log(`Setting large icUSD approval (1B) to avoid future popups`);
 
             const approvalResult = await walletOperations.approveIcusdTransfer(
@@ -2054,17 +2326,11 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
               };
             }
 
-            // For Oisy: approval consumed the user gesture — the next popup will be blocked.
-            if (isOisyWallet()) {
-              return { success: false, error: 'Approved! Click Liquidate again to complete.' };
-            }
-
             await new Promise(resolve => setTimeout(resolve, 1000));
           }
 
           // Now proceed with partial liquidation
           const actor = await ApiClient.getAuthenticatedActor();
-          const icusdAmountE8s = BigInt(Math.floor(icusdAmount * E8S));
           const result = await actor.liquidate_vault_partial({ vault_id: BigInt(vaultId), amount: icusdAmountE8s });
           
           if ('Ok' in result) {
@@ -2132,28 +2398,6 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
           const bufferedE6s = BigInt(stableE6s) + protocolFee + STABLE_LEDGER_FEE + STABLE_LEDGER_FEE;
           const spenderCanisterId = CONFIG.currentCanisterId;
 
-          // Check and approve ckstable allowance
-          const currentAllowance = await walletOperations.checkStableAllowance(spenderCanisterId, tokenType);
-          if (currentAllowance < bufferedE6s) {
-            // Approve 1B tokens so future liquidations skip this popup entirely
-            const LARGE_APPROVAL = BigInt(1_000_000_000_000_000); // 1B in e6s
-            console.log(`Setting large ${tokenType} approval (1B) to avoid future popups`);
-            const approvalResult = await walletOperations.approveStableTransfer(
-              LARGE_APPROVAL, spenderCanisterId, tokenType
-            );
-            if (!approvalResult.success) {
-              return { success: false, error: approvalResult.error || `Failed to approve ${tokenType} transfer` };
-            }
-
-            // For Oisy: approval consumed the user gesture — the next popup will be blocked.
-            // Return a friendly message; the user clicks Liquidate again.
-            if (isOisyWallet()) {
-              return { success: false, error: 'Approved! Click Liquidate again to complete.' };
-            }
-            await new Promise(resolve => setTimeout(resolve, 1000));
-          }
-
-          const actor = await ApiClient.getAuthenticatedActor();
           const liq_token_type = tokenType === 'CKUSDT' ? { 'CKUSDT' : null } as const : { 'CKUSDC' : null } as const;
           const vaultArgWithToken = {
             vault_id: BigInt(vaultId),
@@ -2161,6 +2405,60 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
             token_type: liq_token_type
           };
 
+          // ─── Oisy ICRC-112 batched path ───
+          const signerAgent = isOisyWallet() ? pnp.getSignerAgent() : null;
+          if (signerAgent) {
+            const currentAllowance = await walletOperations.checkStableAllowance(spenderCanisterId, tokenType);
+            if (currentAllowance < bufferedE6s) {
+              console.log(`[Oisy] Batching ${tokenType} approve + liquidate_vault_partial_with_stable`);
+              const LARGE_APPROVAL = BigInt(1_000_000_000_000_000);
+              const stableLedgerId = CONFIG.getStableLedgerId(tokenType);
+              const stableLedgerActor = await walletStore.getActor(
+                stableLedgerId, CONFIG.icusd_ledgerIDL
+              ) as any;
+              const actor = await ApiClient.getAuthenticatedActor();
+
+              signerAgent.batch();
+              const approvePromise = stableLedgerActor.icrc2_approve({
+                amount: LARGE_APPROVAL,
+                spender: { owner: Principal.fromText(spenderCanisterId), subaccount: [] },
+                expires_at: [], expected_allowance: [], memo: [], fee: [],
+                from_subaccount: [], created_at_time: []
+              });
+
+              signerAgent.batch();
+              const liqPromise = actor.liquidate_vault_partial_with_stable(vaultArgWithToken);
+
+              await signerAgent.execute();
+              const [approveResult, result] = await Promise.all([approvePromise, liqPromise]);
+
+              if (approveResult && 'Err' in approveResult) {
+                return { success: false, error: `${tokenType} approval failed: ${JSON.stringify(approveResult.Err)}` };
+              }
+              if ('Ok' in result) {
+                return { success: true, vaultId, blockIndex: Number(result.Ok.block_index), feePaid: Number(result.Ok.fee_amount_paid) / E8S };
+              } else {
+                return { success: false, error: ApiClient.formatProtocolError(result.Err) };
+              }
+            }
+            // Allowance sufficient — fall through
+          }
+
+          // ─── Standard path ───
+          const currentAllowance = await walletOperations.checkStableAllowance(spenderCanisterId, tokenType);
+          if (currentAllowance < bufferedE6s) {
+            const LARGE_APPROVAL = BigInt(1_000_000_000_000_000);
+            console.log(`Setting large ${tokenType} approval (1B) to avoid future popups`);
+            const approvalResult = await walletOperations.approveStableTransfer(
+              LARGE_APPROVAL, spenderCanisterId, tokenType
+            );
+            if (!approvalResult.success) {
+              return { success: false, error: approvalResult.error || `Failed to approve ${tokenType} transfer` };
+            }
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+
+          const actor = await ApiClient.getAuthenticatedActor();
           const result = await actor.liquidate_vault_partial_with_stable(vaultArgWithToken);
 
           if ('Ok' in result) {
@@ -2211,15 +2509,51 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
           // Check and set allowance for icUSD with a 50% buffer
           const bufferedDebt = BigInt(Math.floor((icusdDebt * 1.5) * E8S));
           const spenderCanisterId = CONFIG.currentCanisterId;
-          
-          // Check current allowance
+
+          // ─── Oisy ICRC-112 batched path ───
+          const signerAgent = isOisyWallet() ? pnp.getSignerAgent() : null;
+          if (signerAgent) {
+            const currentAllowance = await walletOperations.checkIcusdAllowance(spenderCanisterId);
+            if (currentAllowance < bufferedDebt) {
+              console.log(`[Oisy] Batching icUSD approve + liquidate_vault`);
+              const LARGE_APPROVAL = BigInt(100_000_000_000_000_000);
+              const icusdLedgerActor = await walletStore.getActor(
+                CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL
+              ) as any;
+              const actor = await ApiClient.getAuthenticatedActor();
+
+              signerAgent.batch();
+              const approvePromise = icusdLedgerActor.icrc2_approve({
+                amount: LARGE_APPROVAL,
+                spender: { owner: Principal.fromText(spenderCanisterId), subaccount: [] },
+                expires_at: [], expected_allowance: [], memo: [], fee: [],
+                from_subaccount: [], created_at_time: []
+              });
+
+              signerAgent.batch();
+              const liqPromise = actor.liquidate_vault(BigInt(vaultId));
+
+              await signerAgent.execute();
+              const [approveResult, result] = await Promise.all([approvePromise, liqPromise]);
+
+              if (approveResult && 'Err' in approveResult) {
+                return { success: false, error: `icUSD approval failed: ${JSON.stringify(approveResult.Err)}` };
+              }
+              if ('Ok' in result) {
+                return { success: true, vaultId, blockIndex: Number(result.Ok.block_index), feePaid: Number(result.Ok.fee_amount_paid) / E8S };
+              } else {
+                return { success: false, error: ApiClient.formatProtocolError(result.Err) };
+              }
+            }
+            // Allowance sufficient — fall through
+          }
+
+          // ─── Standard path ───
           const currentAllowance = await walletOperations.checkIcusdAllowance(spenderCanisterId);
           console.log(`Current icUSD allowance: ${Number(currentAllowance) / E8S}`);
-          
-          // If allowance is insufficient, request approval
+
           if (currentAllowance < bufferedDebt) {
-            // Approve 1B icUSD so future liquidations skip this popup entirely
-            const LARGE_APPROVAL = BigInt(100_000_000_000_000_000); // 1B icUSD in e8s
+            const LARGE_APPROVAL = BigInt(100_000_000_000_000_000);
             console.log(`Setting large icUSD approval (1B) to avoid future popups`);
 
             const approvalResult = await walletOperations.approveIcusdTransfer(
@@ -2232,11 +2566,6 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
                 success: false,
                 error: approvalResult.error || "Failed to approve icUSD transfer"
               };
-            }
-
-            // For Oisy: approval consumed the user gesture — the next popup will be blocked.
-            if (isOisyWallet()) {
-              return { success: false, error: 'Approved! Click Liquidate again to complete.' };
             }
 
             await new Promise(resolve => setTimeout(resolve, 1000));

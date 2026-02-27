@@ -355,6 +355,22 @@ async fn open_vault(collateral_amount: u64, collateral_type: Option<Principal>) 
     check_postcondition(rumi_protocol_backend::vault::open_vault(collateral_amount, collateral_type).await)
 }
 
+/// Compound open vault + borrow in a single canister call.
+/// Allows Oisy / ICRC-112 wallets to batch approve + this call into one popup.
+#[candid_method(update)]
+#[update]
+async fn open_vault_and_borrow(
+    collateral_amount: u64,
+    borrow_amount: u64,
+    collateral_type: Option<Principal>,
+) -> Result<OpenVaultSuccess, ProtocolError> {
+    validate_call().await?;
+    validate_mode()?;
+    check_postcondition(
+        rumi_protocol_backend::vault::open_vault_and_borrow(collateral_amount, borrow_amount, collateral_type).await,
+    )
+}
+
 #[candid_method(update)]
 #[update]
 async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {

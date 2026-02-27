@@ -79,16 +79,16 @@
   --rumi-border-accent: rgba(52, 211, 153, 0.25);
   --rumi-border-teal: rgba(45, 212, 191, 0.25);
 
-  /* Risk states — SEMANTIC, DO NOT HARMONIZE */
-  --rumi-safe: #10b981;
-  --rumi-caution: #f59e0b;
-  --rumi-danger: #ef4444;
-  --rumi-critical: #f87171;
+  /* Risk states — teal → violet → pink, harmonized with palette */
+  --rumi-safe: #2DD4BF;
+  --rumi-caution: #a78bfa;
+  --rumi-danger: #e06b9f;
+  --rumi-critical: #e881a8;
 
-  /* Status */
-  --rumi-green: #10b981;
-  --rumi-red: #ef4444;
-  --rumi-yellow: #f59e0b;
+  /* Status — risk-aligned aliases */
+  --rumi-green: #2DD4BF;
+  --rumi-red: #e06b9f;
+  --rumi-yellow: #a78bfa;
 }
 
 /* ============================================
@@ -273,7 +273,7 @@ h1, h2, h3, h4, h5, h6 {
 
 .btn-danger {
   padding: 0.625rem 1.25rem;
-  background: rgba(239, 68, 68, 0.8);
+  background: rgba(224, 107, 159, 0.8);
   color: white;
   font-family: 'Circular Std', 'Inter', sans-serif;
   font-weight: 500;
@@ -284,7 +284,7 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .btn-danger:hover {
-  background: rgba(239, 68, 68, 1);
+  background: rgba(224, 107, 159, 1);
 }
 
 /* ============================================

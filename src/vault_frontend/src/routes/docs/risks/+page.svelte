@@ -2,12 +2,15 @@
   import { onMount } from 'svelte';
   import { protocolService } from '$lib/services/protocol';
   import { collateralStore } from '$lib/stores/collateralStore';
+  import type { CollateralInfo } from '$lib/services/types';
   import { get } from 'svelte/store';
 
   let targetPct = '155';
-  let liqPct = '133';
-  let borrowPct = '150';
   let recoveryPct = '150';
+  let collaterals: CollateralInfo[] = [];
+
+  $: liqSummary = collaterals.map(c => `${(c.liquidationCr * 100).toFixed(0)}% for ${c.symbol}`).join(', ');
+  $: borrowSummary = collaterals.map(c => `${(c.minimumCr * 100).toFixed(0)}% for ${c.symbol}`).join(', ');
 
   onMount(async () => {
     try {
@@ -17,11 +20,7 @@
 
       await collateralStore.fetchSupportedCollateral();
       const state = get(collateralStore);
-      const icpConfig = state.collaterals.find(c => c.symbol === 'ICP');
-      if (icpConfig) {
-        liqPct = (icpConfig.liquidationCr * 100).toFixed(0);
-        borrowPct = (icpConfig.minimumCr * 100).toFixed(0);
-      }
+      collaterals = state.collaterals;
     } catch (e) {
       console.error('Failed to fetch protocol status:', e);
     }
@@ -35,13 +34,13 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Price Volatility</h2>
-    <p>ICP can move sharply. A vault at 140% collateral ratio is only one bad candle away from liquidation. The protocol polls prices every 5 minutes and refreshes on-demand for operations — if ICP drops sharply between updates, your vault could go from safe to liquidated with no intermediate warning.</p>
+    <p>Collateral assets can move sharply. A vault at 140% collateral ratio is only one bad candle away from liquidation. The protocol polls prices every 5 minutes and refreshes on-demand for operations — if a collateral asset drops sharply between updates, your vault could go from safe to liquidated with no intermediate warning.</p>
     <p>There is no notification system. You are responsible for monitoring your own vaults.</p>
   </section>
 
   <section class="doc-section">
     <h2 class="doc-heading">Oracle Failure</h2>
-    <p>The protocol gets ICP prices from the Internet Computer's Exchange Rate Canister (XRC). If the XRC fails to return a price, the protocol continues using the last known price. If the XRC returns a price below $0.01, the protocol switches to Read-Only mode and halts all operations.</p>
+    <p>The protocol gets collateral prices from the Internet Computer's Exchange Rate Canister (XRC). If the XRC fails to return a price, the protocol continues using the last known price. If the XRC returns a price below $0.01, the protocol switches to Read-Only mode and halts all operations.</p>
     <p>Risks include: stale prices leading to delayed liquidations (bad for the protocol) or premature liquidations if the XRC reports an incorrect price (bad for vault owners). The XRC is an IC system canister — Rumi has no control over its availability or accuracy.</p>
   </section>
 
@@ -53,15 +52,15 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Ledger and Transfer Failures</h2>
-    <p>Operations involve multiple ledger calls (ICP transfers, icUSD minting). If a transfer fails mid-operation, the protocol uses guards to prevent double-processing and queues failed transfers for retry. However, edge cases could result in temporary inconsistencies — for example, a vault state updating before a transfer completes.</p>
+    <p>Operations involve multiple ledger calls (collateral transfers, icUSD minting). If a transfer fails mid-operation, the protocol uses guards to prevent double-processing and queues failed transfers for retry. However, edge cases could result in temporary inconsistencies — for example, a vault state updating before a transfer completes.</p>
     <p>The protocol includes a health monitor that checks for stuck transfers every 5 minutes and retries them, but transfers stuck for over 15 minutes may require manual intervention.</p>
   </section>
 
   <section class="doc-section">
     <h2 class="doc-heading">Recovery Mode Cascades</h2>
-    <p>If the total system collateral ratio drops below the Recovery Mode threshold (currently {recoveryPct}%), the protocol enters Recovery mode and raises the liquidation threshold to the borrowing threshold (currently {borrowPct}% for ICP). This can cause vaults that were previously safe to suddenly become liquidatable — even though those individual vaults didn't change.</p>
+    <p>If the total system collateral ratio drops below the Recovery Mode threshold (currently {recoveryPct}%), the protocol enters Recovery mode and raises the liquidation threshold to the borrowing threshold for each collateral type{borrowSummary ? ` (${borrowSummary})` : ''}. This can cause vaults that were previously safe to suddenly become liquidatable — even though those individual vaults didn't change.</p>
     <p>The Recovery Mode threshold is a <strong>debt-weighted average</strong> of all collateral types' borrowing thresholds. If new collateral types are added with different thresholds, the trigger point for Recovery Mode changes for everyone. Borrowing is still allowed in Recovery mode, but the fee drops to 0% to encourage repayment.</p>
-    <p>In Recovery mode, vaults between {liqPct}% and {borrowPct}% CR receive <strong>targeted partial liquidation</strong> — only enough debt is repaid to restore their CR to {targetPct}%. They are not fully liquidated. Vaults below {liqPct}% are still fully liquidated. See <a href="/docs/liquidation" class="doc-link">Liquidation Mechanics</a> for details.</p>
+    <p>In Recovery mode, vaults between their liquidation ratio and borrowing threshold receive <strong>targeted partial liquidation</strong> — only enough debt is repaid to restore their CR to {targetPct}%. They are not fully liquidated. Vaults below their liquidation ratio are still fully liquidated. See <a href="/docs/liquidation" class="doc-link">Liquidation Mechanics</a> for details.</p>
   </section>
 
   <section class="doc-section">
@@ -93,7 +92,7 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Reserve Depletion</h2>
-    <p>The protocol accumulates ckUSDT and ckUSDC reserves when users repay vault debt with stablecoins. These reserves are used to fill <a href="/docs/redemptions" class="doc-link">reserve redemptions</a> (Tier 1). If redemption demand exceeds the available reserves, the remainder spills over into vault redemptions, which take ICP collateral from the lowest-CR vaults.</p>
+    <p>The protocol accumulates ckUSDT and ckUSDC reserves when users repay vault debt with stablecoins. These reserves are used to fill <a href="/docs/redemptions" class="doc-link">reserve redemptions</a> (Tier 1). If redemption demand exceeds the available reserves, the remainder spills over into vault redemptions, which take collateral from the lowest-CR vaults.</p>
     <p>Heavy redemption activity can drain reserves entirely, causing all subsequent redemptions to hit vaults directly. The protocol admin can disable reserve redemptions if reserve levels become critically low. Vault owners should be aware that redemptions can reduce their collateral even if they maintain healthy collateral ratios — vaults with the lowest CRs are targeted first.</p>
   </section>
 </article>

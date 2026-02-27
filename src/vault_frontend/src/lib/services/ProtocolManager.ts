@@ -127,13 +127,17 @@ export class ProtocolManager {
       // Add to queue
       const promise = (async () => {
         processingStore.setStage(ProcessingStage.CHECKING);
-        
+
         // Run pre-checks if provided
         if (preChecks) await preChecks();
-        
-        // Validate system state
-        await this.validateOperation(operation);
-        
+
+        // Skip async protocol status check for Oisy — the canister query burns
+        // the browser's user gesture context which is needed for the signer popup.
+        // The backend validates everything regardless.
+        if (!isOisyWallet()) {
+          await this.validateOperation(operation);
+        }
+
         processingStore.setStage(ProcessingStage.CREATING);
         
         // Check if operation has been aborted
@@ -457,6 +461,9 @@ export class ProtocolManager {
         // Pre-checks - validation is now handled in ApiClient
         await walletOperations.checkSufficientBalance(icusdAmount);
 
+        // Oisy: icUSD allowance is handled via ICRC-112 batching inside apiClient.repayToVault
+        if (isOisyWallet()) return;
+
         const amountE8s = BigInt(Math.floor(icusdAmount * 100_000_000));
         const spenderCanisterId = CONFIG.currentCanisterId;
 
@@ -480,23 +487,11 @@ export class ProtocolManager {
               throw new Error(approvalResult.error || 'Failed to approve icUSD transfer');
             }
 
-            // For Oisy: the approval popup consumed the user gesture context.
-            // The browser will block the next popup (repay call). Stop here and
-            // ask the user to click Repay again — the large approval is now in
-            // place so the next attempt will skip this step entirely.
-            if (isOisyWallet()) {
-              throw new Error('Approval confirmed! Please click Repay again to complete the transaction.');
-            }
-
             await new Promise(resolve => setTimeout(resolve, 500));
           } else {
             console.log(`✅ Sufficient icUSD allowance already exists`);
           }
         } catch (err) {
-          // Re-throw our friendly Oisy "click again" message as-is
-          if (err instanceof Error && err.message.includes('click Repay again')) {
-            throw err;
-          }
           console.error('❌ icUSD allowance check/approval failed:', err);
           throw new Error(`Failed to ensure icUSD allowance for repayment: ${err instanceof Error ? err.message : 'Unknown error'}`);
         }
@@ -518,6 +513,12 @@ export class ProtocolManager {
     return this.executeOperation(
       `repayVaultStable:${vaultId}`,
       async () => {
+        // Oisy: stable allowance is handled via ICRC-112 batching inside apiClient.repayToVaultWithStable
+        if (isOisyWallet()) {
+          processingStore.setStage(ProcessingStage.CREATING);
+          return await ApiClient.repayToVaultWithStable(vaultId, amount, tokenType);
+        }
+
         const E6S = 1_000_000;
         const amountE6s = BigInt(Math.floor(amount * E6S));
         const spenderCanisterId = CONFIG.currentCanisterId;
@@ -543,23 +544,11 @@ export class ProtocolManager {
               throw new Error(approvalResult.error || `Failed to approve ${tokenType} transfer`);
             }
 
-            // For Oisy: the approval popup consumed the user gesture context.
-            // The browser will block the next popup (repay call). Stop here and
-            // ask the user to click Repay again — the large approval is now in
-            // place so the next attempt will skip this step entirely.
-            if (isOisyWallet()) {
-              throw new Error('Approval confirmed! Please click Repay again to complete the transaction.');
-            }
-
             await new Promise(resolve => setTimeout(resolve, 500));
           } else {
             console.log(`✅ Sufficient ${tokenType} allowance already exists`);
           }
         } catch (err) {
-          // Re-throw our friendly Oisy "click again" message as-is
-          if (err instanceof Error && err.message.includes('click Repay again')) {
-            throw err;
-          }
           console.error(`❌ ${tokenType} allowance check/approval failed:`, err);
           throw new Error(`Failed to ensure ${tokenType} allowance for repayment: ${err instanceof Error ? err.message : 'Unknown error'}`);
         }
@@ -800,7 +789,7 @@ export class ProtocolManager {
 
   /**
    * Deposit ICP to vault with complete flow automation.
-   * Note: For Oisy wallets, ICP operations use the push-deposit flow
+   * Note: For Oisy wallets, ICP operations use ICRC-112 batched signing
    * (handled in apiClient openVault/addMargin), so this method is
    * typically only called for Plug/II wallets.
    */

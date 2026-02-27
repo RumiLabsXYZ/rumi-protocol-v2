@@ -6,9 +6,10 @@
   import { permissionManager } from '../../services/PermissionManager';
   import { WALLET_TYPES, currentWalletType } from '../../services/auth';
   import { truncatePrincipal, copyToClipboard } from '../../utils/principalHelpers';
+  import { formatTokenBalance } from '../../utils/format';
+  import { TokenService } from '../../services/tokenService';
+  import { CONFIG } from '../../config';
   import Toast from '../common/Toast.svelte';
-  import ReceiveModal from './ReceiveModal.svelte';
-  import SendModal from './SendModal.svelte';
 
   interface WalletInfo {
     id: string;
@@ -16,9 +17,20 @@
     icon?: string;
   }
 
+  // Token display metadata — ICP and icUSD use local assets; ck tokens fetch from ledger
+  const TOKEN_META: Record<string, { name: string; symbol: string; icon: string; fallbackColor: string; canisterId?: string }> = {
+    ICP:    { name: 'Internet Computer', symbol: 'ICP',    icon: '/icp-token-dark.svg', fallbackColor: '#3B00B9' },
+    ICUSD:  { name: 'icUSD',             symbol: 'icUSD',  icon: '/icUSD-logo.png',     fallbackColor: '#8B5CF6' },
+    CKUSDT: { name: 'ckUSDT',            symbol: 'ckUSDT', icon: '',                    fallbackColor: '#26A17B', canisterId: CONFIG.ckusdtLedgerId },
+    CKUSDC: { name: 'ckUSDC',            symbol: 'ckUSDC', icon: '',                    fallbackColor: '#2775CA', canisterId: CONFIG.ckusdcLedgerId },
+  };
+
+  // Dynamically fetched logos (canisterId → data URL)
+  let dynamicLogos: Record<string, string> = {};
+
   // Whitelist: only include these wallet IDs from PNP library
   const ALLOWED_PNP_WALLETS = ['plug', 'oisy'];
-  
+
   // Internet Identity is always available (hardcoded, doesn't need PNP)
   const internetIdentityWallet: WalletInfo = {
     id: WALLET_TYPES.INTERNET_IDENTITY,
@@ -33,22 +45,14 @@
   // Helper function to build wallet list from PNP
   function buildWalletList(): WalletInfo[] {
     const pnpWallets = pnp.getEnabledWallets();
-    console.log("🔍 Available wallets from PNP:", pnpWallets);
-    console.log("🔍 PNP wallet IDs:", pnpWallets.map(w => w.id));
-    
-    // Define proper display names and icons for each wallet
+
     const walletDisplayConfig: Record<string, { name: string; icon: string }> = {
       'plug': { name: 'Plug', icon: '/wallets/plug.svg' },
       'oisy': { name: 'Oisy', icon: '/wallets/oisy.svg' }
     };
-    
+
     const filteredWallets = pnpWallets
-      .filter(wallet => {
-        const walletIdLower = wallet.id?.toLowerCase();
-        const isAllowed = ALLOWED_PNP_WALLETS.includes(walletIdLower);
-        console.log(`🔍 Wallet "${wallet.id}" (lowercase: "${walletIdLower}") - allowed: ${isAllowed}`);
-        return isAllowed;
-      })
+      .filter(wallet => ALLOWED_PNP_WALLETS.includes(wallet.id?.toLowerCase()))
       .map(wallet => {
         const walletIdLower = wallet.id?.toLowerCase();
         const config = walletDisplayConfig[walletIdLower];
@@ -59,8 +63,7 @@
           icon: config?.icon || w.icon || `/wallets/${wallet.id}.svg`
         };
       });
-    
-    console.log("✅ Final filtered PNP wallets:", filteredWallets);
+
     return [internetIdentityWallet, ...filteredWallets];
   }
 
@@ -69,10 +72,8 @@
   let connecting = false;
   let abortController = new AbortController();
   let isRefreshingBalance = false;
+  let copiedPrincipal = false;
 
-  // Send/Receive modal state
-  let showReceiveModal = false;
-  let showSendModal = false;
   let toasts: Array<{ id: number; message: string; type: 'success' | 'error' | 'info' }> = [];
   let toastId = 0;
 
@@ -85,21 +86,14 @@
     toasts = toasts.filter(t => t.id !== id);
   }
 
-  // Check if current wallet is II (only II gets send/receive)
-  $: isInternetIdentity = $currentWalletType === WALLET_TYPES.INTERNET_IDENTITY;
-
   async function handleCopyPrincipal(e: MouseEvent) {
     e.stopPropagation();
     if (!account) return;
     const success = await copyToClipboard(account);
     if (success) {
-      addToast('Principal copied', 'success');
+      copiedPrincipal = true;
+      setTimeout(() => { copiedPrincipal = false; }, 2000);
     }
-  }
-
-  function handleSendSuccess() {
-    showSendModal = false;
-    walletStore.refreshBalance();
   }
 
   onDestroy(() => {
@@ -111,30 +105,26 @@
 
   async function connectWallet(walletId: string) {
     if (!walletId || connecting) return;
-    
+
     try {
       connecting = true;
       error = null;
       abortController = new AbortController();
-      
+
       const timeoutId = setTimeout(() => abortController.abort(), 30000);
-      
-      // FIXED: Connect wallet FIRST, then permissions are handled automatically
-      // The walletStore.connect() will handle permission requests internally
+
       await walletStore.connect(walletId);
       clearTimeout(timeoutId);
       showWalletDialog = false;
-      
-      // Add a short delay then refresh balance explicitly
+
       setTimeout(async () => {
         try {
           await walletStore.refreshBalance();
-          console.log('Initial balance refresh completed');
         } catch (err) {
           console.warn('Initial balance refresh failed:', err);
         }
       }, 1000);
-      
+
     } catch (err) {
       console.error('Connection error:', err);
       error = err instanceof Error ? err.message : 'Failed to connect';
@@ -146,87 +136,116 @@
   async function disconnectWallet() {
     try {
       await walletStore.disconnect();
-      showWalletDialog = false; // Close the dropdown after disconnect
+      showWalletDialog = false;
     } catch (err) {
       console.error('Disconnection failed:', err);
     }
-  }
-
-  function formatAddress(addr: string | null): string {
-    if (!addr) return '';
-    return truncatePrincipal(addr);
   }
 
   // Handle clicks outside the wallet dialog to close it
   function handleClickOutside(event: MouseEvent) {
     const target = event.target as HTMLElement;
     if (!showWalletDialog) return;
-    
-    // Don't close dropdown if a modal is open
-    if (showReceiveModal || showSendModal) return;
-    
+
     const walletDialog = document.getElementById('wallet-dialog');
     const walletButton = document.getElementById('wallet-button');
-    
-    // Close dialog if clicking outside and not on the button
-    if (walletDialog && !walletDialog.contains(target) && 
+
+    if (walletDialog && !walletDialog.contains(target) &&
         walletButton && !walletButton.contains(target)) {
       showWalletDialog = false;
     }
   }
 
-  // Setup click handler on mount
+  // Fetch logos from ICRC-1 ledger metadata for tokens without local icons
+  async function fetchDynamicLogos() {
+    for (const [key, meta] of Object.entries(TOKEN_META)) {
+      if (!meta.icon && meta.canisterId) {
+        try {
+          const logo = await TokenService.fetchTokenLogo(meta.canisterId);
+          if (logo) {
+            dynamicLogos = { ...dynamicLogos, [key]: logo };
+          }
+        } catch (err) {
+          console.warn(`Failed to fetch logo for ${key}:`, err);
+        }
+      }
+    }
+  }
+
   onMount(() => {
     document.addEventListener('click', handleClickOutside);
-    
-    // Initialize PNP and build wallet list
+
     try {
-      console.log("🚀 WalletConnector onMount: Initializing PNP...");
       initializePNP();
       walletList = buildWalletList();
-      console.log("✅ Wallet list built:", walletList.map(w => w.id));
     } catch (err) {
-      console.error("❌ Failed to initialize PNP:", err);
+      console.error("Failed to initialize PNP:", err);
     } finally {
       walletsLoading = false;
     }
-    
-    // Perform an initial balance refresh if connected
+
     if ($walletStore.isConnected && $walletStore.principal) {
       walletStore.refreshBalance().catch(err => {
         console.warn('Initial balance refresh failed:', err);
       });
     }
-    
+
+    // Fetch ck token logos from their ledger metadata (non-blocking)
+    fetchDynamicLogos();
+
     return () => {
       document.removeEventListener('click', handleClickOutside);
     };
   });
 
-  // Add manual refresh function
   async function handleRefreshBalance(e: MouseEvent | KeyboardEvent) {
     e.stopPropagation();
-    
-    if (isRefreshingBalance) return; // Prevent multiple concurrent refreshes
-    
+    if (isRefreshingBalance) return;
+
     try {
       isRefreshingBalance = true;
-      console.log('Manual balance refresh requested');
       await walletStore.refreshBalance();
-      console.log('Balance refresh completed');
     } catch (err) {
       console.error('Manual balance refresh failed:', err);
     } finally {
       isRefreshingBalance = false;
     }
   }
-  
+
   $: isConnected = $walletStore.isConnected;
   $: account = $walletStore.principal?.toString() ?? null;
   $: currentIcon = $walletStore.icon;
   $: tokenBalances = $walletStore.tokenBalances ?? {};
 
-  // Quick reconnect: detect if user had Oisy connected before page refresh
+  // Compute total USD value
+  $: totalUsdValue = Object.values(tokenBalances).reduce((sum, tb) => {
+    return sum + (tb?.usdValue ?? 0);
+  }, 0);
+
+  // Build active token list: icUSD first, then ICP, then rest by USD value
+  $: activeTokens = Object.entries(tokenBalances)
+    .filter(([_, tb]) => tb && tb.raw > 0n)
+    .map(([key, tb]) => {
+      const baseMeta = TOKEN_META[key] || { name: key, symbol: key, icon: '', fallbackColor: '#666' };
+      const resolvedIcon = baseMeta.icon || dynamicLogos[key] || '';
+      return {
+        key,
+        meta: { ...baseMeta, icon: resolvedIcon },
+        balance: tb!
+      };
+    })
+    .sort((a, b) => {
+      // icUSD always first
+      if (a.key === 'ICUSD') return -1;
+      if (b.key === 'ICUSD') return 1;
+      // ICP always second
+      if (a.key === 'ICP') return -1;
+      if (b.key === 'ICP') return 1;
+      // Rest sorted by USD value descending
+      return (b.balance.usdValue ?? 0) - (a.balance.usdValue ?? 0);
+    });
+
+  // Quick reconnect
   let pendingReconnectWallet: string | null = null;
   $: if (!isConnected && typeof window !== 'undefined') {
     const lastWallet = localStorage.getItem('rumi_last_wallet');
@@ -236,7 +255,6 @@
     pendingReconnectWallet = null;
   }
 
-  // Wallet display names for the reconnect button
   const walletDisplayNames: Record<string, string> = {
     'oisy': 'Oisy',
     'plug': 'Plug',
@@ -255,25 +273,12 @@
     };
     return icons[walletId] || null;
   }
-  
-  // Log the token balances whenever they change
-  $: {
-    console.log('Current wallet state:', $walletStore);
-    if ($walletStore.tokenBalances?.ICP) {
-      console.log('Displayed ICP balance:', $walletStore.tokenBalances.ICP.formatted,
-                  'Raw:', $walletStore.tokenBalances.ICP.raw.toString());
-    }
-  }
 </script>
-
-<svelte:head>
-  <!-- Add any necessary script imports here -->
-</svelte:head>
 
 <div id="wallet-container">
   {#if !isConnected}
     {#if pendingReconnectWallet && !connecting}
-      <!-- Quick reconnect: user had a wallet connected before page refresh -->
+      <!-- Quick reconnect -->
       <div class="flex items-center gap-2">
         <button
           id="wallet-button"
@@ -297,7 +302,7 @@
     <button
       id="wallet-button"
       class="icp-button flex items-center gap-2"
-      on:click|stopPropagation={() => { showWalletDialog = true; console.log("Dialog open state:", showWalletDialog); }}
+      on:click|stopPropagation={() => { showWalletDialog = true; }}
       disabled={connecting}
     >
       {#if connecting}
@@ -319,7 +324,7 @@
         <div id="wallet-dialog" class="relative w-full max-w-md p-6 rounded-xl border shadow-xl transform transition-all" style="background: var(--rumi-bg-surface2); border-color: var(--rumi-border)">
           <div class="flex justify-between mb-6">
             <h2 class="text-xl font-semibold text-white">Connect Wallet</h2>
-            <button 
+            <button
               class="text-gray-400 hover:text-gray-200"
               on:click|stopPropagation={() => showWalletDialog = false}
               disabled={connecting}
@@ -327,7 +332,7 @@
               ✕
             </button>
           </div>
-          
+
           <div class="flex flex-col gap-3">
             {#if walletsLoading}
               <div class="flex items-center justify-center py-4">
@@ -363,10 +368,10 @@
                   </svg>
               </button>
             {/each}
-              
+
             {#if walletList.length === 1}
               <p class="text-sm text-yellow-400 text-center mt-2">
-                ⚠️ Only Internet Identity available. Plug and Oisy may not have loaded.
+                Only Internet Identity available. Plug and Oisy may not have loaded.
               </p>
             {/if}
             {/if}
@@ -377,12 +382,12 @@
               <div class="w-6 h-6 border-2 border-green-400 border-t-transparent rounded-full animate-spin"></div>
             </div>
           {/if}
-          
+
           {#if error}
             <div class="mt-4 p-3 bg-red-900/50 text-red-200 rounded-lg">
               <div class="flex justify-between">
                 <div>{error}</div>
-                <button 
+                <button
                   class="text-gray-400 hover:text-gray-200"
                   on:click|stopPropagation={() => error = null}
                   aria-label="Close error message"
@@ -396,160 +401,104 @@
       </div>
     {/if}
   {:else}
+    <!-- ═══ Connected: Icon-only header button ═══ -->
     <div class="relative">
       <button
         id="wallet-button"
-        class="wallet-pill"
+        class="wallet-icon-btn"
         on:click|stopPropagation={() => { showWalletDialog = !showWalletDialog; }}
         aria-expanded={showWalletDialog}
         aria-controls="wallet-dialog"
+        title="Wallet"
       >
-        <!-- Wallet Icon -->
         {#if currentIcon}
-          <img src={currentIcon} alt="" class="pill-icon" />
+          <img src={currentIcon} alt="Wallet" class="wallet-icon-img" />
         {:else}
-          <div class="pill-icon-fallback">
-            <div class="pill-icon-dot"></div>
-          </div>
-        {/if}
-
-        <!-- Balances: icUSD primary, ICP secondary -->
-        <div class="pill-balances">
-          {#if tokenBalances.ICUSD && Number(tokenBalances.ICUSD.formatted) > 0}
-            <span class="pill-balance-primary">{tokenBalances.ICUSD.formatted} icUSD</span>
-          {/if}
-          {#if tokenBalances.ICP}
-            <span class="pill-balance-secondary">{tokenBalances.ICP.formatted} ICP</span>
-          {/if}
-        </div>
-
-        <!-- Principal (metadata) -->
-        <span class="pill-principal">{formatAddress(account)}</span>
-
-        <!-- Controls separator + icons -->
-        <span class="pill-divider"></span>
-
-        <div
-          class="pill-control"
-          on:click|stopPropagation={handleRefreshBalance}
-          on:keydown={e => e.key === 'Enter' && handleRefreshBalance(e)}
-          role="button"
-          tabindex="0"
-          title="Refresh balance"
-        >
-          <svg class:animate-spin={isRefreshingBalance} class="pill-control-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" stroke-linecap="round" stroke-linejoin="round"/>
+          <svg class="wallet-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 12V7H5a2 2 0 0 1 0-4h14v4" />
+            <path d="M3 5v14a2 2 0 0 0 2 2h16v-5" />
+            <path d="M18 12a2 2 0 0 0 0 4h4v-4Z" />
           </svg>
-        </div>
-
-        <svg
-          class="pill-control-icon pill-caret {showWalletDialog ? 'pill-caret-open' : ''}"
-          fill="none"
-          stroke="currentColor"
-          viewBox="0 0 24 24"
-        >
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
-        </svg>
+        {/if}
+        <span class="wallet-connected-dot"></span>
       </button>
 
       {#if showWalletDialog}
-        <div 
+        <div
           class="dropdown"
           id="wallet-dialog"
           role="dialog"
-          aria-label="Wallet options"
+          aria-label="Wallet details"
         >
-          <!-- Principal header -->
-          <div class="dropdown-header">
-            <div class="dropdown-identity">
-              {#if currentIcon}
-                <img src={currentIcon} alt="" class="dropdown-wallet-icon" />
-              {:else}
-                <div class="dropdown-wallet-icon-fallback">
-                  <svg class="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 20 20">
-                    <path d="M4 4a2 2 0 00-2 2v1h16V6a2 2 0 00-2-2H4zM18 9H2v5a2 2 0 002 2h12a2 2 0 002-2V9zM4 13a1 1 0 011-1h1a1 1 0 110 2H5a1 1 0 01-1-1zm5-1a1 1 0 100 2h1a1 1 0 100-2H9z"></path>
-                  </svg>
-                </div>
-              {/if}
-              <div class="dropdown-identity-text">
-                <p class="dropdown-label">Connected</p>
-                <p
-                  class="dropdown-principal"
-                  on:click|stopPropagation={handleCopyPrincipal}
-                  title="Click to copy full principal"
-                >{formatAddress(account)}</p>
-              </div>
+          <!-- USD Total + Rumi logo -->
+          <div class="dropdown-total">
+            <div class="dropdown-total-left">
+              <span class="dropdown-total-label">Total Balance</span>
+              <span class="dropdown-total-value">${totalUsdValue.toFixed(2)}</span>
             </div>
+            <img src="/main-logo-without-BG.png" alt="Rumi" class="dropdown-total-logo" />
           </div>
 
-          <!-- Balances -->
-          <div class="dropdown-balances">
-            {#if tokenBalances.ICP}
-              <div class="dropdown-balance-row">
-                <div class="dropdown-balance-left">
-                  <img src="/icp_logo.png" alt="ICP" class="dropdown-token-icon" />
-                  <span class="dropdown-balance-amount">{tokenBalances.ICP.formatted} ICP</span>
-                </div>
-                {#if tokenBalances.ICP.usdValue}
-                  <span class="dropdown-balance-usd">${tokenBalances.ICP.usdValue.toFixed(2)}</span>
-                {/if}
-              </div>
+          <!-- Principal (full, wrapping, with inline copy) -->
+          <button
+            class="dropdown-principal-row"
+            on:click|stopPropagation={handleCopyPrincipal}
+            title={copiedPrincipal ? 'Copied!' : 'Click to copy principal'}
+          >
+            <span class="dropdown-principal-text">{account ?? ''}</span>
+            {#if copiedPrincipal}
+              <svg class="dropdown-copy-icon dropdown-copy-icon-ok" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <polyline points="20 6 9 17 4 12"/>
+              </svg>
+            {:else}
+              <svg class="dropdown-copy-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+              </svg>
             {/if}
+          </button>
 
-            {#if tokenBalances.ICUSD}
-              <div class="dropdown-balance-row">
-                <div class="dropdown-balance-left">
-                  <img src="/icUSD-logo.png" alt="icUSD" class="dropdown-token-icon" />
-                  <span class="dropdown-balance-amount">{tokenBalances.ICUSD.formatted} icUSD</span>
+          <!-- Token Balances -->
+          <div class="dropdown-tokens">
+            {#if activeTokens.length > 0}
+              {#each activeTokens as token (token.key)}
+                <div class="dropdown-token-row">
+                  <div class="dropdown-token-left">
+                    {#if token.meta.icon}
+                      <img
+                        src={token.meta.icon}
+                        alt={token.meta.symbol}
+                        class="dropdown-token-icon"
+                      />
+                    {:else}
+                      <div class="dropdown-token-icon-fallback" style="background: {token.meta.fallbackColor}">
+                        <span>{token.meta.symbol.charAt(0)}</span>
+                      </div>
+                    {/if}
+                    <div class="dropdown-token-info">
+                      <span class="dropdown-token-symbol">{token.meta.symbol}</span>
+                      <span class="dropdown-token-name">{token.meta.name}</span>
+                    </div>
+                  </div>
+                  <div class="dropdown-token-right">
+                    <span class="dropdown-token-amount">{formatTokenBalance(token.balance.formatted)}</span>
+                    {#if token.balance.usdValue !== null && token.balance.usdValue > 0}
+                      <span class="dropdown-token-usd">${token.balance.usdValue.toFixed(2)}</span>
+                    {/if}
+                  </div>
                 </div>
-              </div>
-            {/if}
-
-            {#if (!tokenBalances.ICP || Number(tokenBalances.ICP.formatted) === 0) && (!tokenBalances.ICUSD || Number(tokenBalances.ICUSD.formatted) === 0)}
+              {/each}
+            {:else}
               <div class="dropdown-empty">
                 <p>No balances found</p>
                 <p class="dropdown-empty-hint">Try refreshing your balance</p>
               </div>
             {/if}
           </div>
-          
+
           <!-- Actions -->
           <div class="dropdown-actions">
-            {#if isInternetIdentity}
-              <div class="dropdown-action-pair">
-                <button
-                  class="dropdown-btn dropdown-btn-receive"
-                  on:click|stopPropagation={() => { showReceiveModal = true; showWalletDialog = false; }}
-                >
-                  <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M12 5v14M5 12l7 7 7-7"/>
-                  </svg>
-                  Receive
-                </button>
-                <button
-                  class="dropdown-btn dropdown-btn-send"
-                  on:click|stopPropagation={() => { showSendModal = true; showWalletDialog = false; }}
-                >
-                  <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M12 19V5M5 12l7-7 7 7"/>
-                  </svg>
-                  Send
-                </button>
-              </div>
-            {:else}
-              <div class="dropdown-action-pair" title="Use your wallet app to send and receive">
-                <button class="dropdown-btn dropdown-btn-disabled" disabled>
-                  <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
-                  Receive
-                </button>
-                <button class="dropdown-btn dropdown-btn-disabled" disabled>
-                  <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
-                  Send
-                </button>
-              </div>
-            {/if}
-
-            <button 
+            <button
               class="dropdown-action-row dropdown-action-refresh"
               on:click|stopPropagation={handleRefreshBalance}
               disabled={isRefreshingBalance}
@@ -559,7 +508,7 @@
               </svg>
               <span>{isRefreshingBalance ? 'Refreshing...' : 'Refresh Balance'}</span>
             </button>
-            
+
             <button
               class="dropdown-action-row dropdown-action-disconnect"
               on:click|stopPropagation={disconnectWallet}
@@ -585,24 +534,6 @@
   </div>
 {/if}
 
-{#if showReceiveModal && account}
-  <ReceiveModal
-    principal={account}
-    onClose={() => showReceiveModal = false}
-    onToast={addToast}
-  />
-{/if}
-
-{#if showSendModal}
-  <SendModal
-    onClose={() => showSendModal = false}
-    onSuccess={handleSendSuccess}
-    onToast={addToast}
-    icpBalance={tokenBalances.ICP?.formatted ?? '0'}
-    icusdBalance={tokenBalances.ICUSD?.formatted ?? '0'}
-  />
-{/if}
-
 {#if toasts.length > 0}
   <div class="toast-container">
     {#each toasts as toast (toast.id)}
@@ -616,115 +547,56 @@
 {/if}
 
 <style>
-  /* ── Header Pill ── */
-  .wallet-pill {
+  /* ═══ Connected: Icon-only header button ═══ */
+  .wallet-icon-btn {
+    position: relative;
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    padding: 0.4rem 0.6rem 0.4rem 0.5rem;
+    justify-content: center;
+    width: 2.25rem;
+    height: 2.25rem;
     background: rgba(15, 15, 25, 0.85);
     backdrop-filter: blur(12px);
     border: 1px solid rgba(139, 92, 246, 0.15);
-    border-radius: 0.75rem;
+    border-radius: 50%;
     cursor: pointer;
     transition: border-color 0.15s ease, background 0.15s ease;
-    color: white;
-    font-family: inherit;
+    padding: 0;
   }
-  .wallet-pill:hover {
-    border-color: rgba(139, 92, 246, 0.35);
-    background: rgba(20, 20, 35, 0.9);
+  .wallet-icon-btn:hover {
+    border-color: rgba(139, 92, 246, 0.4);
+    background: rgba(20, 20, 35, 0.95);
   }
 
-  .pill-icon {
+  .wallet-icon-img {
     width: 1.375rem;
     height: 1.375rem;
     border-radius: 50%;
-    flex-shrink: 0;
+    object-fit: contain;
   }
-  .pill-icon-fallback {
-    width: 1.375rem;
-    height: 1.375rem;
+  .wallet-icon-svg {
+    width: 1.125rem;
+    height: 1.125rem;
+    color: rgba(255, 255, 255, 0.7);
+  }
+
+  .wallet-connected-dot {
+    position: absolute;
+    bottom: 0;
+    right: 0;
+    width: 0.5rem;
+    height: 0.5rem;
+    background: #2DD4BF;
+    border: 1.5px solid rgba(12, 12, 22, 0.97);
     border-radius: 50%;
-    background: var(--rumi-teal-dim);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-  }
-  .pill-icon-dot {
-    width: 0.35rem;
-    height: 0.35rem;
-    background: white;
-    border-radius: 50%;
   }
 
-  .pill-balances {
-    display: flex;
-    align-items: baseline;
-    gap: 0.5rem;
-  }
-  .pill-balance-primary {
-    font-size: 0.825rem;
-    font-weight: 600;
-    color: rgba(255, 255, 255, 0.95);
-    white-space: nowrap;
-  }
-  .pill-balance-secondary {
-    font-size: 0.75rem;
-    font-weight: 400;
-    color: rgba(255, 255, 255, 0.45);
-    white-space: nowrap;
-  }
-
-  .pill-principal {
-    font-size: 0.65rem;
-    font-family: 'SF Mono', 'Fira Code', monospace;
-    color: rgba(255, 255, 255, 0.3);
-    white-space: nowrap;
-  }
-
-  .pill-divider {
-    width: 1px;
-    height: 1rem;
-    background: rgba(255, 255, 255, 0.1);
-    margin: 0 0.1rem;
-    flex-shrink: 0;
-  }
-
-  .pill-control {
-    padding: 0.25rem;
-    border-radius: 0.25rem;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    transition: background 0.12s ease;
-  }
-  .pill-control:hover {
-    background: rgba(255, 255, 255, 0.08);
-  }
-
-  .pill-control-icon {
-    width: 0.875rem;
-    height: 0.875rem;
-    color: rgba(255, 255, 255, 0.35);
-    flex-shrink: 0;
-  }
-
-  .pill-caret {
-    transition: transform 0.2s ease;
-  }
-  .pill-caret-open {
-    transform: rotate(180deg);
-  }
-
-  /* ── Dropdown ── */
+  /* ═══ Dropdown ═══ */
   .dropdown {
     position: absolute;
     right: 0;
     top: calc(100% + 0.5rem);
-    width: 19rem;
+    width: 20rem;
     background: rgba(12, 12, 22, 0.97);
     backdrop-filter: blur(16px);
     border: 1px solid rgba(139, 92, 246, 0.15);
@@ -734,89 +606,160 @@
     overflow: hidden;
   }
 
-  .dropdown-header {
-    padding: 0.875rem 1rem;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-  }
-  .dropdown-identity {
-    display: flex;
-    align-items: center;
-    gap: 0.625rem;
-  }
-  .dropdown-wallet-icon {
-    width: 1.75rem;
-    height: 1.75rem;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-  .dropdown-wallet-icon-fallback {
-    width: 1.75rem;
-    height: 1.75rem;
-    border-radius: 50%;
-    background: var(--rumi-teal-dim);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-  }
-
-  .dropdown-identity-text {
-    min-width: 0;
-  }
-  .dropdown-label {
-    margin: 0;
-    font-size: 0.75rem;
-    font-weight: 500;
-    color: rgba(255, 255, 255, 0.5);
-    line-height: 1;
-  }
-  .dropdown-principal {
-    margin: 0.2rem 0 0;
-    font-size: 0.7rem;
-    font-family: 'SF Mono', 'Fira Code', monospace;
-    color: rgba(255, 255, 255, 0.6);
-    cursor: pointer;
-    transition: color 0.12s ease;
-  }
-  .dropdown-principal:hover {
-    color: rgba(167, 139, 250, 0.9);
-  }
-
-  /* ── Dropdown balances ── */
-  .dropdown-balances {
-    padding: 0.625rem 0.75rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.375rem;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-  }
-  .dropdown-balance-row {
+  /* ── USD Total + Rumi logo ── */
+  .dropdown-total {
+    padding: 1rem 1rem 0.625rem;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0.5rem 0.5rem;
-    background: rgba(255, 255, 255, 0.03);
-    border-radius: 0.5rem;
   }
-  .dropdown-balance-left {
+  .dropdown-total-left {
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+  }
+  .dropdown-total-label {
+    font-size: 0.7rem;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.4);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .dropdown-total-value {
+    font-size: 1.375rem;
+    font-weight: 600;
+    color: white;
+    letter-spacing: -0.01em;
+  }
+  .dropdown-total-logo {
+    width: 3.5rem;
+    height: 3.5rem;
+    object-fit: contain;
+    opacity: 0.4;
+  }
+
+  /* ── Principal (full, wrapping, clickable to copy) ── */
+  .dropdown-principal-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.375rem;
+    width: 100%;
+    padding: 0 1rem 0.75rem;
+    border: none;
+    background: transparent;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    cursor: pointer;
+    transition: background 0.12s ease;
+    text-align: left;
+  }
+  .dropdown-principal-row:hover {
+    background: rgba(255, 255, 255, 0.03);
+  }
+  .dropdown-principal-text {
+    font-size: 0.65rem;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    color: rgba(255, 255, 255, 0.35);
+    word-break: break-all;
+    line-height: 1.4;
+    flex: 1;
+    min-width: 0;
+  }
+  .dropdown-principal-row:hover .dropdown-principal-text {
+    color: rgba(167, 139, 250, 0.7);
+  }
+  .dropdown-copy-icon {
+    width: 0.75rem;
+    height: 0.75rem;
+    color: rgba(255, 255, 255, 0.3);
+    flex-shrink: 0;
+    margin-top: 0.1rem;
+  }
+  .dropdown-principal-row:hover .dropdown-copy-icon {
+    color: rgba(167, 139, 250, 0.9);
+  }
+  .dropdown-copy-icon-ok {
+    color: rgba(74, 222, 128, 0.9);
+  }
+
+  /* ── Token Balances ── */
+  .dropdown-tokens {
+    padding: 0.5rem 0.625rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    max-height: 16rem;
+    overflow-y: auto;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  }
+  .dropdown-token-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.5rem;
+    border-radius: 0.5rem;
+    transition: background 0.12s ease;
+  }
+  .dropdown-token-row:hover {
+    background: rgba(255, 255, 255, 0.03);
+  }
+  .dropdown-token-left {
     display: flex;
     align-items: center;
     gap: 0.5rem;
   }
   .dropdown-token-icon {
-    width: 1.125rem;
-    height: 1.125rem;
+    width: 1.375rem;
+    height: 1.375rem;
     border-radius: 50%;
+    flex-shrink: 0;
+    object-fit: cover;
   }
-  .dropdown-balance-amount {
-    font-size: 0.825rem;
-    font-weight: 500;
+  .dropdown-token-icon-fallback {
+    width: 1.375rem;
+    height: 1.375rem;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    font-size: 0.65rem;
+    font-weight: 700;
+    color: white;
+  }
+  .dropdown-token-info {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+  .dropdown-token-symbol {
+    font-size: 0.8rem;
+    font-weight: 600;
     color: rgba(255, 255, 255, 0.9);
+    line-height: 1.2;
   }
-  .dropdown-balance-usd {
-    font-size: 0.7rem;
-    color: rgba(255, 255, 255, 0.35);
+  .dropdown-token-name {
+    font-size: 0.625rem;
+    color: rgba(255, 255, 255, 0.3);
+    line-height: 1.2;
   }
+  .dropdown-token-right {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0;
+  }
+  .dropdown-token-amount {
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.85);
+    line-height: 1.2;
+  }
+  .dropdown-token-usd {
+    font-size: 0.625rem;
+    color: rgba(255, 255, 255, 0.3);
+    line-height: 1.2;
+  }
+
   .dropdown-empty {
     text-align: center;
     padding: 1rem 0;
@@ -829,56 +772,13 @@
     margin-top: 0.2rem;
   }
 
-  /* ── Dropdown actions ── */
+  /* ── Actions ── */
   .dropdown-actions {
     padding: 0.5rem;
     display: flex;
     flex-direction: column;
     gap: 0.25rem;
   }
-  .dropdown-action-pair {
-    display: flex;
-    gap: 0.375rem;
-    margin-bottom: 0.25rem;
-  }
-  .dropdown-btn {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.375rem;
-    padding: 0.5rem;
-    font-size: 0.8rem;
-    font-weight: 500;
-    border-radius: 0.5rem;
-    border: 1px solid transparent;
-    cursor: pointer;
-    transition: all 0.12s ease;
-  }
-  .dropdown-btn-receive {
-    color: rgba(74, 222, 128, 0.9);
-    background: rgba(34, 197, 94, 0.08);
-    border-color: rgba(34, 197, 94, 0.15);
-  }
-  .dropdown-btn-receive:hover {
-    background: rgba(34, 197, 94, 0.15);
-  }
-  .dropdown-btn-send {
-    color: rgba(167, 139, 250, 0.9);
-    background: rgba(139, 92, 246, 0.08);
-    border-color: rgba(139, 92, 246, 0.15);
-  }
-  .dropdown-btn-send:hover {
-    background: rgba(139, 92, 246, 0.15);
-  }
-  .dropdown-btn-disabled {
-    color: rgba(255, 255, 255, 0.25);
-    background: rgba(255, 255, 255, 0.03);
-    border-color: rgba(255, 255, 255, 0.06);
-    cursor: not-allowed;
-    opacity: 0.5;
-  }
-
   .dropdown-action-row {
     display: flex;
     align-items: center;
@@ -893,16 +793,17 @@
     transition: background 0.12s ease;
   }
   .dropdown-action-refresh {
-    color: rgba(96, 165, 250, 0.85);
+    color: rgba(167, 139, 250, 0.85);
   }
   .dropdown-action-refresh:hover {
-    background: rgba(59, 130, 246, 0.08);
+    background: rgba(139, 92, 246, 0.08);
   }
   .dropdown-action-disconnect {
-    color: rgba(248, 113, 113, 0.85);
+    color: rgba(255, 255, 255, 0.4);
   }
   .dropdown-action-disconnect:hover {
-    background: rgba(239, 68, 68, 0.08);
+    background: rgba(255, 255, 255, 0.05);
+    color: rgba(255, 255, 255, 0.6);
   }
 
   /* ── Quick Reconnect ── */
@@ -931,9 +832,9 @@
   /* ── Toast container ── */
   .toast-container {
     position: fixed;
-    top: 4.5rem; /* header height + 14px offset */
+    top: 4.5rem;
     right: 1rem;
-    z-index: 8000; /* above content, below modals (9000) */
+    z-index: 8000;
     display: flex;
     flex-direction: column;
     gap: 0.5rem;

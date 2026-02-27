@@ -218,7 +218,7 @@
   .status-indicator {
     width: 8px;
     height: 8px;
-    background: #10b981;
+    background: #2DD4BF;
     border-radius: 50%;
     animation: pulse 2s ease-in-out infinite;
   }
@@ -235,27 +235,27 @@
   }
 
   .disconnect-button {
-    background: rgba(239, 68, 68, 0.2);
-    color: #ef4444;
+    background: rgba(224, 107, 159, 0.2);
+    color: #e06b9f;
     padding: 0.5rem 1rem;
     border-radius: 0.375rem;
-    border: 1px solid rgba(239, 68, 68, 0.3);
+    border: 1px solid rgba(224, 107, 159, 0.3);
     cursor: pointer;
     font-size: 0.875rem;
     transition: all 0.2s ease;
   }
 
   .disconnect-button:hover {
-    background: rgba(239, 68, 68, 0.3);
+    background: rgba(224, 107, 159, 0.3);
   }
 
   .error-message {
     margin-top: 0.5rem;
     padding: 0.75rem;
-    background: rgba(239, 68, 68, 0.1);
-    border: 1px solid rgba(239, 68, 68, 0.3);
+    background: rgba(224, 107, 159, 0.1);
+    border: 1px solid rgba(224, 107, 159, 0.3);
     border-radius: 0.5rem;
-    color: #fca5a5;
+    color: #e881a8;
     font-size: 0.875rem;
   }
 </style>

@@ -248,10 +248,10 @@
     align-items: center;
     gap: 0.5rem;
     padding: 0.75rem;
-    background: rgba(239, 68, 68, 0.1);
-    border: 1px solid rgba(239, 68, 68, 0.3);
+    background: rgba(224, 107, 159, 0.1);
+    border: 1px solid rgba(224, 107, 159, 0.3);
     border-radius: 0.5rem;
-    color: #f87171;
+    color: #e881a8;
     font-size: 0.875rem;
     margin-bottom: 1rem;
   }
@@ -330,8 +330,8 @@
   }
 
   .vault-status.critical {
-    background: rgba(239, 68, 68, 0.2);
-    color: #f87171;
+    background: rgba(224, 107, 159, 0.2);
+    color: #e881a8;
   }
 
   .liquidation-time {
@@ -365,7 +365,7 @@
   }
 
   .detail-value.critical {
-    color: #f87171;
+    color: #e881a8;
   }
 
   .liquidation-amounts {
@@ -381,7 +381,7 @@
   }
 
   .amount-item.bonus .amount-value {
-    color: #22c55e;
+    color: #2DD4BF;
   }
 
   /* Responsive Design */

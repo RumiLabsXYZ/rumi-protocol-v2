@@ -47,9 +47,6 @@
   // Withdraw collateral state
   let withdrawAmount = 0;
 
-  // Oisy two-step push-deposit state for add margin
-  let pendingMarginDeposit = false;
-
   const dispatch = createEventDispatcher();
   const E8S = 100_000_000;
   
@@ -96,32 +93,6 @@
   // Update handleAddMargin to use currentVault
   async function handleAddMargin() {
     if (!currentVault) return;
-
-    // Oisy step 2: finalize the pending margin deposit
-    if (pendingMarginDeposit) {
-      try {
-        isAddingMargin = true;
-        errorMessage = '';
-        successMessage = '';
-
-        const finalResult = await protocolService.finalizeAddMarginDeposit(currentVault.vaultId);
-
-        if (finalResult.success) {
-          successMessage = `Successfully added collateral to vault`;
-          pendingMarginDeposit = false;
-          addMarginAmount = 0;
-          await vaultStore.refreshVault(currentVault.vaultId);
-        } else {
-          errorMessage = finalResult.error || "Failed to finalize add collateral";
-        }
-      } catch (err) {
-        console.error('Error finalizing add margin:', err);
-        errorMessage = err instanceof Error ? err.message : "Unknown error";
-      } finally {
-        isAddingMargin = false;
-      }
-      return;
-    }
 
     if (addMarginAmount <= 0) {
       errorMessage = "Please enter a valid amount";
@@ -170,14 +141,6 @@
 
       // Now proceed with adding margin
       const result = await protocolService.addMarginToVault(currentVault.vaultId, addMarginAmount);
-
-      // Handle Oisy two-step: deposit confirmed, needs user gesture to finalize
-      if (result.pendingDeposit) {
-        pendingMarginDeposit = true;
-        errorMessage = '';
-        successMessage = result.message || 'Deposit confirmed. Click "Add Collateral" to finalize.';
-        return;
-      }
 
       if (result.success) {
         successMessage = `Successfully added ${addMarginAmount} ICP to vault`;
@@ -491,16 +454,14 @@
     const balances = $walletStore.tokenBalances;
     let walletBalance = Infinity;
     if (repayTokenType === 'CKUSDT' && balances?.CKUSDT) {
-      walletBalance = parseFloat(balances.CKUSDT.formatted);
-      // Deduct ledger fee ($0.01) + protocol fee (0.05%) so the tx actually succeeds
-      walletBalance = Math.max(0, (walletBalance - 0.01) / 1.0005);
+      // Deduct ckUSDT ledger fee (0.01)
+      walletBalance = Math.max(0, parseFloat(balances.CKUSDT.formatted) - 0.01);
     } else if (repayTokenType === 'CKUSDC' && balances?.CKUSDC) {
-      walletBalance = parseFloat(balances.CKUSDC.formatted);
-      walletBalance = Math.max(0, (walletBalance - 0.01) / 1.0005);
+      // Deduct ckUSDC ledger fee (0.01)
+      walletBalance = Math.max(0, parseFloat(balances.CKUSDC.formatted) - 0.01);
     } else if (repayTokenType === 'icUSD' && balances?.ICUSD) {
-      walletBalance = parseFloat(balances.ICUSD.formatted);
-      // Deduct icUSD ledger fee (0.001 icUSD)
-      walletBalance = Math.max(0, walletBalance - 0.001);
+      // Deduct icUSD ledger fee (0.001)
+      walletBalance = Math.max(0, parseFloat(balances.ICUSD.formatted) - 0.001);
     }
     repayAmount = Math.min(walletBalance, currentVault.borrowedIcusd);
   }
@@ -630,15 +591,13 @@
       </div>
       <button
         on:click={handleAddMargin}
-        disabled={isAddingMargin || isApproving || (!pendingMarginDeposit && (!addMarginAmount || addMarginAmount <= 0))}
-        class="w-full text-white py-2 rounded-md disabled:opacity-50 disabled:cursor-not-allowed {pendingMarginDeposit ? 'bg-green-600 hover:bg-green-500 animate-pulse' : 'bg-blue-600 hover:bg-blue-500'}"
+        disabled={isAddingMargin || isApproving || !addMarginAmount || addMarginAmount <= 0}
+        class="w-full text-white py-2 rounded-md disabled:opacity-50 disabled:cursor-not-allowed bg-blue-600 hover:bg-blue-500"
       >
         {#if isApproving}
           Approving...
         {:else if isAddingMargin}
           Processing...
-        {:else if pendingMarginDeposit}
-          ✓ Deposit Confirmed — Click to Add
         {:else}
           Add ICP
         {/if}

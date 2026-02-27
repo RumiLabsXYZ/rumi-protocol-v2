@@ -297,10 +297,10 @@
     align-items: center;
     gap: 0.5rem;
     padding: 0.75rem;
-    background: rgba(239, 68, 68, 0.1);
-    border: 1px solid rgba(239, 68, 68, 0.3);
+    background: rgba(224, 107, 159, 0.1);
+    border: 1px solid rgba(224, 107, 159, 0.3);
     border-radius: 0.5rem;
-    color: #f87171;
+    color: #e881a8;
     font-size: 0.875rem;
   }
 

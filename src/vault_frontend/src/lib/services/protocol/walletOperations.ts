@@ -47,9 +47,9 @@ export async function computeDepositAccount(principal: Principal): Promise<{
 
 /**
  * Check if the current wallet is Oisy.
- * Oisy wallets cannot perform ICRC-2 approve/transfer_from on the ICP ledger
- * because the ICP ledger (a DFINITY system canister) doesn't support ICRC-21
- * consent messages. Use push-deposit flows instead.
+ * For Oisy wallets, vault operations use ICRC-112 batched signing to combine
+ * approve + action into a single signer popup. The SignerAgent natively handles
+ * icrc2_approve consent (Tier 1), bypassing the ICP ledger's lack of ICRC-21.
  */
 export function isOisyWallet(): boolean {
   try {

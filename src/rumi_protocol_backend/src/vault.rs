@@ -435,6 +435,123 @@ pub async fn open_vault(collateral_amount_raw: u64, collateral_type_opt: Option<
     }
 }
 
+/// Compound open-vault-and-borrow in a single canister call.
+///
+/// Uses ICRC-2 `transfer_from` (like `open_vault`) to pull collateral, creates
+/// the vault, then immediately borrows `borrow_amount_raw` icUSD — all under a
+/// single guard.  This allows Oisy / ICRC-112 signer wallets to batch
+/// `icrc2_approve` + `open_vault_and_borrow` into **one** popup instead of the
+/// three sequential popups that separate `open_vault` + `borrow_from_vault`
+/// would require.
+pub async fn open_vault_and_borrow(
+    collateral_amount_raw: u64,
+    borrow_amount_raw: u64,
+    collateral_type_opt: Option<Principal>,
+) -> Result<OpenVaultSuccess, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let guard_principal = match GuardPrincipal::new(caller, "open_vault_and_borrow") {
+        Ok(guard) => guard,
+        Err(GuardError::AlreadyProcessing) => {
+            log!(INFO, "[open_vault_and_borrow] Principal {:?} already has an ongoing operation", caller);
+            return Err(ProtocolError::AlreadyProcessing);
+        },
+        Err(GuardError::StaleOperation) => {
+            log!(INFO, "[open_vault_and_borrow] Principal {:?} has a stale operation being cleaned up", caller);
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "Previous operation is being cleaned up. Please try again in a few seconds.".to_string()
+            ));
+        },
+        Err(err) => return Err(err.into()),
+    };
+
+    // Resolve collateral type: default to ICP if not specified
+    let collateral_type = collateral_type_opt.unwrap_or_else(|| read_state(|s| s.icp_collateral_type()));
+
+    // Look up CollateralConfig; check status is Active
+    let (config_ledger, config_status) = read_state(|s| {
+        match s.get_collateral_config(&collateral_type) {
+            Some(config) => Ok((config.ledger_canister_id, config.status)),
+            None => Err(ProtocolError::GenericError("Collateral type not supported.".to_string())),
+        }
+    })?;
+
+    if !config_status.allows_open() {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "Collateral type is not accepting new vaults.".to_string(),
+        ));
+    }
+
+    let icp_margin_amount: ICP = collateral_amount_raw.into();
+
+    if icp_margin_amount < MIN_ICP_AMOUNT {
+        guard_principal.fail();
+        return Err(ProtocolError::AmountTooLow {
+            minimum_amount: MIN_ICP_AMOUNT.to_u64(),
+        });
+    }
+
+    // Pull collateral via ICRC-2 transfer_from (caller must have approved first)
+    let block_index = match transfer_collateral_from(collateral_amount_raw, caller, config_ledger).await {
+        Ok(bi) => bi,
+        Err(transfer_from_error) => {
+            guard_principal.fail();
+            if let TransferFromError::BadFee { expected_fee } = transfer_from_error.clone() {
+                mutate_state(|s| {
+                    if let Ok(fee) = u64::try_from(expected_fee.0) {
+                        if let Some(config) = s.get_collateral_config_mut(&collateral_type) {
+                            config.ledger_fee = fee;
+                        }
+                    }
+                });
+            };
+            return Err(ProtocolError::TransferFromError(
+                transfer_from_error,
+                icp_margin_amount.to_u64(),
+            ));
+        }
+    };
+
+    // Create the vault
+    let vault_id = mutate_state(|s| {
+        let vault_id = s.increment_vault_id();
+        record_open_vault(
+            s,
+            Vault {
+                owner: caller,
+                borrowed_icusd_amount: 0.into(),
+                collateral_amount: collateral_amount_raw,
+                vault_id,
+                collateral_type,
+            },
+            block_index,
+        );
+        vault_id
+    });
+
+    log!(INFO, "[open_vault_and_borrow] opened vault {vault_id}, now borrowing {borrow_amount_raw}");
+
+    // Borrow icUSD — reuse internal fn to avoid guard conflict
+    if borrow_amount_raw > 0 {
+        match borrow_from_vault_internal(caller, VaultArg { vault_id, amount: borrow_amount_raw }).await {
+            Ok(borrow_result) => {
+                log!(INFO, "[open_vault_and_borrow] vault {} borrow of {} succeeded (fee: {})",
+                    vault_id, borrow_amount_raw, borrow_result.fee_amount_paid);
+            },
+            Err(e) => {
+                guard_principal.fail();
+                return Err(ProtocolError::GenericError(format!(
+                    "Vault created (id={}) but borrow of {} failed: {:?}. You can borrow separately.",
+                    vault_id, borrow_amount_raw, e
+                )));
+            }
+        }
+    }
+
+    guard_principal.complete();
+    Ok(OpenVaultSuccess { vault_id, block_index })
+}
+
 /// Internal borrow logic without guard management.
 /// Called by both `borrow_from_vault` (which acquires its own guard) and
 /// `open_vault_with_deposit` (which already holds a guard for the same principal).

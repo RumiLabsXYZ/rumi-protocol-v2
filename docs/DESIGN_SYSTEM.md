@@ -127,18 +127,56 @@ Teal (`#2DD4BF`) is Rumi's subtle accent. It means: something is responding to y
 
 Teal is calming. Emerald is commanding. They must not be confused.
 
-### Risk Color System (The Most Expressive Element)
+### Risk Color System (Teal → Violet → Pink)
 
-This is where color gets loud.
+Risk states are the most expressive color element — but they must still feel like Rumi.
 
-| State | Color | Meaning |
-|-------|-------|---------|
-| Safe (>200% CR) | Teal/green | Calm, expected |
-| Caution (150-200% CR) | Amber | Warm, noticeable |
-| Danger (<150% CR) | Red | Urgent, unmissable |
-| Liquidatable (<130% CR) | Bright red + subtle pulse/glow | The loudest moment in the UI |
+Stock traffic-light colors (pure green/yellow/red) clash with the purple-teal identity. Instead, the risk scale uses colors drawn entirely from Rumi's cool-toned palette — teal through violet to pink — so there is zero warm-tone intrusion.
 
-The collateral ratio visualization should be the most expressive color element in the entire app.
+| State | Hex | Color Family | Meaning |
+|-------|-----|-------------|---------|
+| Safe (> minCR × 1.234) | `#2DD4BF` | Rumi teal | Calm, expected — same family as the quiet accent |
+| Caution (minCR → minCR × 1.234) | `#a78bfa` | Indigo-violet | Can borrow but getting tight — sits naturally beside the purple surfaces |
+| Warning (liqCR → minCR) | `#e06b9f` | Hot rose/pink | Can't borrow more, approaching liquidation |
+| Danger (< liqCR) | `#e06b9f` | Hot rose/pink | Below liquidation threshold |
+
+The comfort threshold is computed as `minCR × 1.234` per collateral type (e.g., ~185% for ICP with 150% minCR). This is not displayed to the user — it's an internal UX boundary.
+
+CSS variables: `--rumi-safe`, `--rumi-caution`, `--rumi-danger`, `--rumi-critical`.
+
+The collateral ratio visualization should be the most expressive color element in the entire app — but it should never look like it was borrowed from a different product.
+
+### Health Meter (Vault Card + Borrow Page)
+
+Both the vault card and borrow page share an identical CR gauge with a **100%–300% CR scale**.
+
+**Three visual zones** (left to right, safe on the right):
+
+| Zone | CR Range | Bar Style | Meaning |
+|------|----------|-----------|---------|
+| Pink | 100% → liqCR | Solid `rgba(224,107,159,0.75)` | Below liquidation |
+| Gradient | liqCR → comfort | `linear-gradient(pink → violet)` | Transition zone: liq through borrow threshold to comfort |
+| Teal | comfort → 300%+ | Solid `rgba(45,212,191,0.5)` | Safe territory |
+
+All zone boundaries are **per-collateral** — derived from `getLiquidationCR()` and `getMinimumCR()` for each collateral type.
+
+**Scale mapping:** `gaugePosition = clamp((CR% - 100) / 2, 0, 100)`. Anything above 300% CR pins to the right edge.
+
+**Borrow threshold tick:** A thin 1px white tick at `borrowZone = (minCR × 100 - 100) / 2` marks where borrowing becomes possible. This is the only tick on the bar.
+
+**Vertical marker:** A 3px-wide, 12–14px-tall pill-shaped marker shows the vault's current CR position. Marker color matches the CR state: teal (safe), violet (caution), or pink (danger/warning).
+
+**Labels:** Two labels positioned below the bar:
+- `liq` — at the liquidation threshold boundary (pink/gradient junction)
+- `300%+` — at the right edge
+
+**CR text color** uses the same 3-state system: pink below minCR, violet in caution zone, teal when safe.
+
+**Design rules:**
+- The bar is hidden on mobile (`< 640px`) where the CR number suffices
+- Marker position transitions smoothly (`0.3s ease`) when projected CR changes
+- Labels use slightly muted text color but remain legible (no heavy opacity reduction)
+- The `getRiskLevel()` function returns 4 states: `safe | caution | warning | danger`
 
 ---
 

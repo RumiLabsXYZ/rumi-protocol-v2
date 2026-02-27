@@ -39,7 +39,10 @@
 
   function getActiveBalance(vaultId: number): number {
     const token = getLiqToken(vaultId);
-    return token === 'CKUSDT' ? walletCkusdt : token === 'CKUSDC' ? walletCkusdc : walletIcusd;
+    // Deduct token's ledger fee: icUSD = 0.001, ckUSDT/ckUSDC = 0.01
+    if (token === 'CKUSDT') return Math.max(0, walletCkusdt - 0.01);
+    if (token === 'CKUSDC') return Math.max(0, walletCkusdc - 0.01);
+    return Math.max(0, walletIcusd - 0.001);
   }
 
   let animatedPrice = tweened(0, { duration: 600, easing: cubicOut });
@@ -422,9 +425,9 @@
   .summary-refresh:disabled { opacity: 0.5; cursor: not-allowed; text-decoration: none; }
 
   .msg { padding: 0.5rem 0.75rem; border-radius: 0.375rem; font-size: 0.8125rem; margin-bottom: 0.625rem; }
-  .msg-warn { background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.15); color: #fcd34d; }
-  .msg-error { background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.15); color: #fca5a5; }
-  .msg-success { background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.15); color: #6ee7b7; }
+  .msg-warn { background: rgba(167,139,250,0.08); border: 1px solid rgba(167,139,250,0.15); color: #c4b5fd; }
+  .msg-error { background: rgba(224,107,159,0.08); border: 1px solid rgba(224,107,159,0.15); color: #e881a8; }
+  .msg-success { background: rgba(45,212,191,0.08); border: 1px solid rgba(45,212,191,0.15); color: #5eead4; }
 
   .loading-state { display: flex; justify-content: center; padding: 3rem 0; }
   .spinner { width: 1.25rem; height: 1.25rem; border: 2px solid var(--rumi-border-hover); border-top-color: var(--rumi-action); border-radius: 50%; animation: spin 0.8s linear infinite; }

@@ -150,8 +150,8 @@
   }
 
   .stat-card.info {
-    border-color: rgba(34, 197, 94, 0.3);
-    background: rgba(34, 197, 94, 0.05);
+    border-color: rgba(45, 212, 191, 0.3);
+    background: rgba(45, 212, 191, 0.05);
   }
 
   .stat-icon {
@@ -170,7 +170,7 @@
   }
 
   .stat-card.info .stat-icon {
-    color: #22c55e;
+    color: #2DD4BF;
   }
 
   .stat-content {
