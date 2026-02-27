@@ -111,8 +111,13 @@ fn setup_timers() {
     ic_cdk_timers::set_timer_interval(rumi_protocol_backend::xrc::FETCHING_ICP_RATE_INTERVAL, || {
         ic_cdk::spawn(rumi_protocol_backend::xrc::fetch_icp_rate())
     });
-    
-    // Note: ckBTC rate fetching removed (ICP-only collateral)
+
+    // Periodic cleanup timer — runs every 5 minutes instead of every heartbeat (~1s).
+    // This alone saves ~99% of the cycles previously burned by the heartbeat.
+    ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(300), || {
+        use rumi_protocol_backend::state::mutate_state;
+        mutate_state(|s| s.clean_stale_operations());
+    });
 }
 
 fn main() {}
@@ -816,15 +821,6 @@ fn http_request(req: HttpRequest) -> HttpResponse {
     }
 }
 
-// Add a new heartbeat function to routinely clean up stale operations
-#[ic_cdk::heartbeat]
-fn heartbeat() {
-    use rumi_protocol_backend::state::mutate_state;
-    log!(INFO, "[heartbeat] Running scheduled cleanup tasks");
-    
-    // Clean up any stale operations
-    mutate_state(|s| s.clean_stale_operations());
-}
 
 #[candid_method(update)]
 #[update]

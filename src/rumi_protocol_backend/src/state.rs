@@ -1461,8 +1461,9 @@ impl State {
         // Get the current time
         let now = ic_cdk::api::time();
         
-        // Find any operations that are stale (older than 3 minutes)
-        const STALE_OPERATION_NANOS: u64 = 3 * 60 * SEC_NANOS;
+        // Find any operations that are stale (older than 10 minutes).
+        // Bumped from 3m to 10m since cleanup now runs on a 5-minute timer, not every heartbeat.
+        const STALE_OPERATION_NANOS: u64 = 10 * 60 * SEC_NANOS;
         
         // Check for stale processing state based on actual Mode variants
         // Mode is likely either GeneralAvailability, Recovery, or ReadOnly
