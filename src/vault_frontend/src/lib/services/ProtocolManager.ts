@@ -440,11 +440,16 @@ export class ProtocolManager {
    * Add ICP margin to an existing vault
    */
   async addMarginToVault(vaultId: number, icpAmount: number): Promise<VaultOperationResult> {
+    // Oisy: bypass executeOperation entirely — its async overhead (queue checks,
+    // processing store, pre-checks) burns the browser user gesture context needed
+    // for the ICRC-112 signer popup. ApiClient handles everything in one batch.
+    if (isOisyWallet()) {
+      return ApiClient.addMarginToVault(vaultId, icpAmount);
+    }
     return this.executeOperation(
       `addMarginToVault:${vaultId}`,
       () => ApiClient.addMarginToVault(vaultId, icpAmount),
       async () => {
-        // Check if the user has sufficient balance
         await walletOperations.checkSufficientBalance(icpAmount);
       }
     );
@@ -454,21 +459,21 @@ export class ProtocolManager {
    * Repay icUSD to a vault
    */
   async repayToVault(vaultId: number, icusdAmount: number): Promise<VaultOperationResult> {
+    // Oisy: bypass executeOperation entirely — its async overhead burns the browser
+    // user gesture context needed for the ICRC-112 signer popup.
+    if (isOisyWallet()) {
+      return ApiClient.repayToVault(vaultId, icusdAmount);
+    }
     return this.executeOperation(
       `repayToVault:${vaultId}`,
       () => ApiClient.repayToVault(vaultId, icusdAmount),
       async () => {
-        // Pre-checks - validation is now handled in ApiClient
         await walletOperations.checkSufficientBalance(icusdAmount);
-
-        // Oisy: icUSD allowance is handled via ICRC-112 batching inside apiClient.repayToVault
-        if (isOisyWallet()) return;
 
         const amountE8s = BigInt(Math.floor(icusdAmount * 100_000_000));
         const spenderCanisterId = CONFIG.currentCanisterId;
 
         try {
-          // Check current allowance (anonymous actor, no popup)
           const currentAllowance = await walletOperations.checkIcusdAllowance(spenderCanisterId);
           console.log(`💰 Repay pre-check: icUSD allowance: ${Number(currentAllowance) / 100_000_000}, need: ${icusdAmount}`);
 
@@ -510,14 +515,14 @@ export class ProtocolManager {
     amount: number,
     tokenType: 'CKUSDT' | 'CKUSDC'
   ): Promise<VaultOperationResult> {
+    // Oisy: bypass executeOperation entirely — its async overhead burns the browser
+    // user gesture context needed for the ICRC-112 signer popup.
+    if (isOisyWallet()) {
+      return ApiClient.repayToVaultWithStable(vaultId, amount, tokenType);
+    }
     return this.executeOperation(
       `repayVaultStable:${vaultId}`,
       async () => {
-        // Oisy: stable allowance is handled via ICRC-112 batching inside apiClient.repayToVaultWithStable
-        if (isOisyWallet()) {
-          processingStore.setStage(ProcessingStage.CREATING);
-          return await ApiClient.repayToVaultWithStable(vaultId, amount, tokenType);
-        }
 
         const E6S = 1_000_000;
         const amountE6s = BigInt(Math.floor(amount * E6S));

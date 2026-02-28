@@ -11,6 +11,7 @@
   import { collateralStore } from '../../stores/collateralStore';
   import { TokenService } from '../../services/tokenService';
   import { toastStore } from '../../stores/toast';
+  import { isOisyWallet } from '../../services/protocol/walletOperations';
 
   export let vault: Vault;
   export let icpPrice: number = 0;
@@ -359,15 +360,19 @@
     if (addOverMax) { toastStore.error(`Exceeds wallet balance (${formatNumber(maxAddCollateral, 4)} ${collateralSymbol})`, 8000); return; }
     clearMessages(); isProcessing = true;
     try {
-      const ledgerCanisterId = vaultCollateralInfo?.ledgerCanisterId ?? CONFIG.currentIcpLedgerId;
-      const amountRaw = BigInt(Math.floor(amount * collateralDecimalsFactor));
-      const spenderCanisterId = CONFIG.currentCanisterId;
-      const currentAllowance = await protocolService.checkCollateralAllowance(spenderCanisterId, ledgerCanisterId);
-      if (currentAllowance < amountRaw) {
-        const bufferAmount = amountRaw * BigInt(120) / BigInt(100);
-        const approvalResult = await protocolService.approveCollateralTransfer(bufferAmount, spenderCanisterId, ledgerCanisterId);
-        if (!approvalResult.success) { toastStore.error(approvalResult.error || 'Approval failed', 8000); return; }
-        await new Promise(r => setTimeout(r, 2000));
+      // Oisy: skip pre-approval — ApiClient ICRC-112 batch handles approve+add_margin
+      // in a single popup. Any async work here burns the browser user gesture context.
+      if (!isOisyWallet()) {
+        const ledgerCanisterId = vaultCollateralInfo?.ledgerCanisterId ?? CONFIG.currentIcpLedgerId;
+        const amountRaw = BigInt(Math.floor(amount * collateralDecimalsFactor));
+        const spenderCanisterId = CONFIG.currentCanisterId;
+        const currentAllowance = await protocolService.checkCollateralAllowance(spenderCanisterId, ledgerCanisterId);
+        if (currentAllowance < amountRaw) {
+          const bufferAmount = amountRaw * BigInt(120) / BigInt(100);
+          const approvalResult = await protocolService.approveCollateralTransfer(bufferAmount, spenderCanisterId, ledgerCanisterId);
+          if (!approvalResult.success) { toastStore.error(approvalResult.error || 'Approval failed', 8000); return; }
+          await new Promise(r => setTimeout(r, 2000));
+        }
       }
       const result = await protocolService.addMarginToVault(vault.vaultId, amount, vaultCollateralType);
       if (result.success) {

@@ -245,12 +245,14 @@
       return (b.balance.usdValue ?? 0) - (a.balance.usdValue ?? 0);
     });
 
-  // Quick reconnect
+  // Quick reconnect — skip for Oisy (auto-reconnect handles it; the button
+  // would flash briefly during page load before auto-reconnect completes)
   let pendingReconnectWallet: string | null = null;
   $: if (!isConnected && typeof window !== 'undefined') {
     const lastWallet = localStorage.getItem('rumi_last_wallet');
     const wasConnected = localStorage.getItem('rumi_was_connected');
-    pendingReconnectWallet = (lastWallet && wasConnected) ? lastWallet : null;
+    const isOisy = lastWallet?.toLowerCase().includes('oisy');
+    pendingReconnectWallet = (lastWallet && wasConnected && !isOisy) ? lastWallet : null;
   } else {
     pendingReconnectWallet = null;
   }

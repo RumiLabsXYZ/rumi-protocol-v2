@@ -7,7 +7,7 @@
   import { createEventDispatcher } from 'svelte';
   import { vaultStore } from '$lib/stores/vaultStore';
   import { walletStore } from '$lib/stores/walletStore';
-  import { walletOperations } from '$lib/services/protocol/walletOperations';
+  import { walletOperations, isOisyWallet } from '$lib/services/protocol/walletOperations';
   import { protocolManager } from '$lib/services/ProtocolManager';
   import { ApiClient } from '$lib/services/protocol/apiClient';
   import { CONFIG } from '$lib/config';
@@ -104,40 +104,30 @@
       errorMessage = '';
       successMessage = '';
 
-      // First check and request ICP approval if needed
-      const amountE8s = BigInt(Math.floor(addMarginAmount * E8S));
-      const spenderCanisterId = CONFIG.currentCanisterId;
+      // Oisy: skip pre-approval — ApiClient ICRC-112 batch handles approve+add_margin
+      // in a single popup. Any async work here burns the browser user gesture context.
+      if (!isOisyWallet()) {
+        const amountE8s = BigInt(Math.floor(addMarginAmount * E8S));
+        const spenderCanisterId = CONFIG.currentCanisterId;
 
-      // Set approval state to show user what's happening
-      isApproving = true;
+        isApproving = true;
+        const currentAllowance = await protocolService.checkIcpAllowance(spenderCanisterId);
+        console.log('Current ICP allowance:', currentAllowance.toString());
 
-      // Check current allowance
-      const currentAllowance = await protocolService.checkIcpAllowance(spenderCanisterId);
-      console.log('Current ICP allowance:', currentAllowance.toString());
-
-      // If allowance is insufficient, request approval with 20% buffer
-      if (currentAllowance < amountE8s) {
-        const bufferAmount = amountE8s * BigInt(120) / BigInt(100); // 20% buffer
-        console.log('Requesting approval for:', bufferAmount.toString());
-
-        const approvalResult = await protocolService.approveIcpTransfer(
-          bufferAmount,
-          spenderCanisterId
-        );
-
-        if (!approvalResult.success) {
-          errorMessage = approvalResult.error || 'Failed to approve ICP transfer';
-          isAddingMargin = false;
-          isApproving = false;
-          return;
+        if (currentAllowance < amountE8s) {
+          const bufferAmount = amountE8s * BigInt(120) / BigInt(100);
+          console.log('Requesting approval for:', bufferAmount.toString());
+          const approvalResult = await protocolService.approveIcpTransfer(bufferAmount, spenderCanisterId);
+          if (!approvalResult.success) {
+            errorMessage = approvalResult.error || 'Failed to approve ICP transfer';
+            isAddingMargin = false;
+            isApproving = false;
+            return;
+          }
+          await new Promise(resolve => setTimeout(resolve, 2000));
         }
-
-        // Short delay to allow approval to be processed
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        isApproving = false;
       }
-
-      // Reset approval state
-      isApproving = false;
 
       // Now proceed with adding margin
       const result = await protocolService.addMarginToVault(currentVault.vaultId, addMarginAmount);
@@ -278,32 +268,27 @@
       isApproving = false;
       errorMessage = '';
       successMessage = '';
-      
-      // Check approval first
-      const amountE8s = BigInt(Math.floor(repayAmount * E8S));
-      const spenderCanisterId = CONFIG.currentCanisterId;
-      currentAllowance = Number(await protocolService.checkIcusdAllowance(spenderCanisterId));
-      
-      // If approval is needed
-      if (currentAllowance < Number(amountE8s)) {
-        isApproving = true;
-        
-        // Request approval
-        const approvalResult = await protocolService.approveIcusdTransfer(
-          amountE8s, 
-          spenderCanisterId
-        );
-        
-        if (!approvalResult.success) {
-          errorMessage = approvalResult.error || "Failed to approve icUSD transfer";
-          isRepaying = false;
+
+      // Oisy: skip pre-approval — ApiClient ICRC-112 batch handles approve+repay
+      // in a single popup. Any async work here burns the browser user gesture context.
+      if (!isOisyWallet()) {
+        const amountE8s = BigInt(Math.floor(repayAmount * E8S));
+        const spenderCanisterId = CONFIG.currentCanisterId;
+        currentAllowance = Number(await protocolService.checkIcusdAllowance(spenderCanisterId));
+
+        if (currentAllowance < Number(amountE8s)) {
+          isApproving = true;
+          const approvalResult = await protocolService.approveIcusdTransfer(amountE8s, spenderCanisterId);
+          if (!approvalResult.success) {
+            errorMessage = approvalResult.error || "Failed to approve icUSD transfer";
+            isRepaying = false;
+            isApproving = false;
+            return;
+          }
           isApproving = false;
-          return;
         }
-        
-        isApproving = false;
       }
-      
+
       // Call protocol service for partial repayment
       const result = await protocolService.repayToVault(currentVault.vaultId, repayAmount);
       

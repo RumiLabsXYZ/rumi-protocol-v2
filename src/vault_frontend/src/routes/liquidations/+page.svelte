@@ -209,7 +209,9 @@
       }
 
       // Approve allowance (icUSD or ckstable)
-      if (token === 'icUSD') {
+      // Oisy: skip — ApiClient ICRC-112 batch handles approve+liquidate in one popup.
+      // Async work here burns the browser user gesture context needed for the signer popup.
+      if (token === 'icUSD' && !isOisyWallet()) {
         if (!await checkAndApproveAllowance(inputAmount * 1.20)) { processingVaultId = null; return; }
       }
       // ckstable approval is handled inside the apiClient method
