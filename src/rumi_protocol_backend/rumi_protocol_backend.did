@@ -13,6 +13,7 @@ type AddCollateralArg = record {
   liquidation_bonus : float64;
   borrowing_fee : float64;
   liquidation_ratio : float64;
+  display_color : opt text;
 };
 type CandidVault = record {
   collateral_amount : nat64;
@@ -42,6 +43,7 @@ type CollateralConfig = record {
   borrowing_fee : blob;
   interest_rate_apr : blob;
   liquidation_ratio : blob;
+  display_color : opt text;
 };
 type CollateralStatus = variant { Paused; Active; Deprecated; Sunset; Frozen };
 type ConsentInfo = record {

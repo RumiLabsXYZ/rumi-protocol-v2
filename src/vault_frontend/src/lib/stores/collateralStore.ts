@@ -1,20 +1,8 @@
 import { writable, derived, get } from 'svelte/store';
 import type { CollateralInfo } from '../services/types';
 import { decodeRustDecimal } from '../utils/decimalUtils';
-import { CANISTER_IDS } from '../config';
-
-/**
- * Known metadata for collateral tokens that can't be derived from the backend.
- * Maps ledger canister principal (text) to display metadata.
- */
-const KNOWN_COLLATERAL_META: Record<string, { symbol: string; color: string }> = {
-  // ICP ledger
-  'ryjl3-tyaaa-aaaaa-aaaba-cai': { symbol: 'ICP', color: '#2DD4BF' },
-  // ckETH ledger (mainnet)
-  'ss2fx-dyaaa-aaaar-qacoq-cai': { symbol: 'ckETH', color: '#627EEA' },
-  // ckBTC ledger (mainnet)
-  'mxzaz-hqaaa-aaaar-qaada-cai': { symbol: 'ckBTC', color: '#F7931A' },
-};
+import { TokenService } from '../services/tokenService';
+import { ICRC1_IDL } from '../idls/ledger.idl';
 
 /**
  * Extract a display-friendly status string from the Candid CollateralStatus variant.
@@ -88,12 +76,21 @@ function createCollateralStore() {
 
           const config = configOpt[0];
           const principalText = principal.toText();
+          const ledgerId = config.ledger_canister_id.toText();
 
-          // Look up known metadata or fall back to generic
-          const meta = KNOWN_COLLATERAL_META[principalText] || {
-            symbol: principalText.substring(0, 5).toUpperCase(),
-            color: '#94A3B8',
-          };
+          // Fetch symbol dynamically from the ledger's icrc1_symbol
+          let symbol = principalText.substring(0, 5).toUpperCase();
+          try {
+            const ledgerActor = await TokenService.createAnonymousActor(ledgerId, ICRC1_IDL);
+            symbol = await (ledgerActor as any).icrc1_symbol();
+          } catch (err) {
+            console.warn(`Failed to fetch icrc1_symbol for ${ledgerId}:`, err);
+          }
+
+          // Read display_color from backend config, fall back to neutral gray
+          const color = (config.display_color && config.display_color.length > 0)
+            ? config.display_color[0]
+            : '#94A3B8';
 
           // Decode blob fields using Rust Decimal decoder
           const liquidationCr = decodeRustDecimal(config.liquidation_ratio);
@@ -108,9 +105,9 @@ function createCollateralStore() {
 
           collaterals.push({
             principal: principalText,
-            symbol: meta.symbol,
+            symbol,
             decimals: Number(config.decimals),
-            ledgerCanisterId: config.ledger_canister_id.toText(),
+            ledgerCanisterId: ledgerId,
             price,
             priceTimestamp,
             minimumCr,
@@ -122,7 +119,7 @@ function createCollateralStore() {
             debtCeiling: Number(config.debt_ceiling),
             minVaultDebt: Number(config.min_vault_debt),
             ledgerFee: Number(config.ledger_fee),
-            color: meta.color,
+            color,
             status: statusStr,
           });
         }
@@ -169,10 +166,7 @@ function createCollateralStore() {
      */
     getCollateralSymbol(principalText: string): string {
       const info = this.getCollateralInfo(principalText);
-      if (info) return info.symbol;
-      const meta = KNOWN_COLLATERAL_META[principalText];
-      if (meta) return meta.symbol;
-      return principalText.substring(0, 5);
+      return info?.symbol ?? principalText.substring(0, 5);
     },
 
     /**
@@ -188,9 +182,7 @@ function createCollateralStore() {
      */
     getCollateralColor(principalText: string): string {
       const info = this.getCollateralInfo(principalText);
-      if (info) return info.color;
-      const meta = KNOWN_COLLATERAL_META[principalText];
-      return meta?.color ?? '#94A3B8';
+      return info?.color ?? '#94A3B8';
     },
 
     /**

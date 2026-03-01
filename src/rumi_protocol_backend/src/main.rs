@@ -1540,6 +1540,7 @@ async fn add_collateral_token(arg: rumi_protocol_backend::AddCollateralArg) -> R
         current_base_rate: Ratio::from_f64(0.0),
         last_redemption_time: 0,
         recovery_target_cr: Ratio::from_f64(arg.recovery_target_cr),
+        display_color: arg.display_color,
     };
 
     mutate_state(|s| {

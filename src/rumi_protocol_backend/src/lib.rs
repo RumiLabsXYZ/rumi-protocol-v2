@@ -179,6 +179,8 @@ pub struct AddCollateralArg {
     pub interest_rate_apr: f64,
     /// Target CR after recovery liquidation (e.g., 1.55)
     pub recovery_target_cr: f64,
+    /// Hex color for frontend display (e.g., "#F7931A")
+    pub display_color: Option<String>,
 }
 
 #[derive(CandidType, Debug, Clone, Deserialize)]

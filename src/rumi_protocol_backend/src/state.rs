@@ -190,6 +190,9 @@ pub struct CollateralConfig {
     pub last_redemption_time: u64,
     /// Target CR to restore vaults to during recovery-mode liquidations (e.g., 1.55)
     pub recovery_target_cr: Ratio,
+    /// Hex color for frontend display (e.g., "#F7931A"). Optional for backward compat.
+    #[serde(default)]
+    pub display_color: Option<String>,
 }
 
 impl PartialEq for CollateralConfig {
@@ -213,6 +216,7 @@ impl PartialEq for CollateralConfig {
             && self.current_base_rate == other.current_base_rate
             && self.last_redemption_time == other.last_redemption_time
             && self.recovery_target_cr == other.recovery_target_cr
+            && self.display_color == other.display_color
     }
 }
 
@@ -445,6 +449,7 @@ impl From<InitArg> for State {
                     current_base_rate: Ratio::from(Decimal::ZERO),
                     last_redemption_time: 0,
                     recovery_target_cr: DEFAULT_RECOVERY_TARGET_CR,
+                    display_color: Some("#2DD4BF".to_string()),
                 });
                 configs
             },
