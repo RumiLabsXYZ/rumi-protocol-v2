@@ -175,6 +175,8 @@ pub struct AddCollateralArg {
     pub debt_ceiling: u64,
     /// Minimum vault debt (dust threshold)
     pub min_vault_debt: u64,
+    /// Ongoing annual interest rate (e.g., 0.02 = 2% APR)
+    pub interest_rate_apr: f64,
     /// Target CR after recovery liquidation (e.g., 1.55)
     pub recovery_target_cr: f64,
 }

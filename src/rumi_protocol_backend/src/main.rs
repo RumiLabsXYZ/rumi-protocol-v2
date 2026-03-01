@@ -1510,7 +1510,7 @@ async fn add_collateral_token(arg: rumi_protocol_backend::AddCollateralArg) -> R
         borrow_threshold_ratio: Ratio::from_f64(arg.borrow_threshold_ratio),
         liquidation_bonus: Ratio::from_f64(arg.liquidation_bonus),
         borrowing_fee: Ratio::from_f64(arg.borrowing_fee),
-        interest_rate_apr: Ratio::from_f64(0.0),
+        interest_rate_apr: Ratio::from_f64(arg.interest_rate_apr),
         debt_ceiling: arg.debt_ceiling,
         min_vault_debt: rumi_protocol_backend::numeric::ICUSD::from(arg.min_vault_debt),
         ledger_fee,
