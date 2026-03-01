@@ -106,6 +106,12 @@ fn validate_mode() -> Result<(), ProtocolError> {
     }
 }
 
+/// Validates price freshness for liquidation operations.
+/// Liquidations are critical for protocol solvency, so we require fresh prices.
+fn validate_price_for_liquidation() -> Result<(), ProtocolError> {
+    read_state(|s| s.check_price_not_too_old())
+}
+
 fn setup_timers() {
     // ── Immediate price fetch (fire on the very next execution round) ───────
     // Prices are ephemeral and not stored as events, so after an upgrade
@@ -509,6 +515,7 @@ async fn withdraw_and_close_vault(vault_id: u64) -> Result<Option<u64>, Protocol
 #[update]
 async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolError> {
     validate_call().await?;
+    validate_price_for_liquidation()?;
     check_postcondition(rumi_protocol_backend::vault::liquidate_vault(vault_id).await)
 }
 
@@ -525,6 +532,7 @@ async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
 #[update]
 async fn liquidate_vault_partial(arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {
     validate_call().await?;
+    validate_price_for_liquidation()?;
     check_postcondition(rumi_protocol_backend::vault::liquidate_vault_partial(arg.vault_id, arg.amount).await)
 }
 
@@ -533,6 +541,7 @@ async fn liquidate_vault_partial(arg: VaultArg) -> Result<SuccessWithFee, Protoc
 #[candid_method(update)]
 async fn liquidate_vault_partial_with_stable(arg: VaultArgWithToken) -> Result<SuccessWithFee, ProtocolError> {
     validate_call().await?;
+    validate_price_for_liquidation()?;
     check_postcondition(rumi_protocol_backend::vault::liquidate_vault_partial_with_stable(arg.vault_id, arg.amount, arg.token_type).await)
 }
 
@@ -541,6 +550,7 @@ async fn liquidate_vault_partial_with_stable(arg: VaultArgWithToken) -> Result<S
 #[candid_method(update)]
 async fn stability_pool_liquidate(vault_id: u64, max_debt_to_liquidate: u64) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
     validate_call().await?;
+    validate_price_for_liquidation()?;
     let caller = ic_cdk::api::caller();
 
     // Authorization: only the registered stability pool canister can call this
@@ -626,6 +636,7 @@ fn get_stability_pool_config() -> StabilityPoolConfig {
 #[update]
 async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {
     validate_call().await?;
+    validate_price_for_liquidation()?;
     check_postcondition(rumi_protocol_backend::vault::partial_liquidate_vault(arg).await)
 }
 
