@@ -94,9 +94,9 @@
 
 <section class="flex flex-col items-center justify-center p-10 text-white text-center">
   <div class="flex justify-center items-center space-x-5 pb-10">
-  <img src="/icUSD-logo.png" alt="Coin 3" class="w-40 h-36 md:w-48 md:h-48 bounce-normal" />
-  <img src="/icUSD-logo.png" alt="Coin 1" class="w-40 h-36 md:w-48 md:h-48 bounce-higher" />
-  <img src="/icUSD-logo.png" alt="Coin 3" class="w-40 h-36 md:w-48 md:h-48 bounce-normal" />
+  <img src="/icusd-logo_v3.svg" alt="Coin 3" class="w-40 h-36 md:w-48 md:h-48 bounce-normal" />
+  <img src="/icusd-logo_v3.svg" alt="Coin 1" class="w-40 h-36 md:w-48 md:h-48 bounce-higher" />
+  <img src="/icusd-logo_v3.svg" alt="Coin 3" class="w-40 h-36 md:w-48 md:h-48 bounce-normal" />
   </div>
 
 

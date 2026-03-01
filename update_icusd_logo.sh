@@ -13,7 +13,7 @@ echo "============================================"
 echo ""
 
 # Check if logo file exists
-LOGO_FILE="src/rumi_protocol_backend/icUSD-logo-256.png"
+LOGO_FILE="src/rumi_homepage/static/icusd-logo_v3.svg"
 if [ ! -f "$LOGO_FILE" ]; then
     echo "ERROR: Logo file not found at $LOGO_FILE"
     echo "Please copy your new logo to this location first."
@@ -27,7 +27,7 @@ echo ""
 # Encode logo as base64
 echo "Encoding logo as base64..."
 LOGO_BASE64=$(base64 -i "$LOGO_FILE" | tr -d '\n')
-LOGO_DATA_URL="data:image/png;base64,${LOGO_BASE64}"
+LOGO_DATA_URL="data:image/svg+xml;base64,${LOGO_BASE64}"
 echo "Logo data URL length: ${#LOGO_DATA_URL} characters"
 echo ""
 

@@ -20,7 +20,7 @@
   // Token display metadata — ICP and icUSD use local assets; ck tokens fetch from ledger
   const TOKEN_META: Record<string, { name: string; symbol: string; icon: string; fallbackColor: string; canisterId?: string }> = {
     ICP:    { name: 'Internet Computer', symbol: 'ICP',    icon: '/icp-token-dark.svg', fallbackColor: '#3B00B9' },
-    ICUSD:  { name: 'icUSD',             symbol: 'icUSD',  icon: '/icUSD-logo.png',     fallbackColor: '#8B5CF6' },
+    ICUSD:  { name: 'icUSD',             symbol: 'icUSD',  icon: '/icusd-logo_v3.svg',     fallbackColor: '#8B5CF6' },
     CKUSDT: { name: 'ckUSDT',            symbol: 'ckUSDT', icon: '',                    fallbackColor: '#26A17B', canisterId: CONFIG.ckusdtLedgerId },
     CKUSDC: { name: 'ckUSDC',            symbol: 'ckUSDC', icon: '',                    fallbackColor: '#2775CA', canisterId: CONFIG.ckusdcLedgerId },
   };

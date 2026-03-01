@@ -113,6 +113,24 @@
     The Standard/Tight version is only for large hero contexts (200px+) where the fine detail is visible.
   </p>
 
+  <!-- icUSD Token Logo -->
+  <h3 class="subsection-heading mb-4">icUSD Token</h3>
+  <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-8">
+    <div class="asset-card">
+      <div class="asset-preview">
+        <img src="/icusd-logo_v3.svg" alt="icUSD logo SVG" class="logo-thumb" />
+      </div>
+      <div class="asset-info">
+        <span class="asset-label">icUSD Token Mark</span>
+        <span class="asset-note">On-chain token logo. Used in wallets, DEX listings, and token metadata.</span>
+        <div class="asset-btn-row">
+          <button class="asset-download" on:click={() => downloadAsset('icusd-logo_v3.svg')}>SVG</button>
+          <button class="asset-download" on:click={() => downloadAsset('icusd-logo_v3.png')}>PNG</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Logo + Wordmark -->
   <div class="logo-wordmark-row mb-4">
     <img src="/rumilogo-vector-v2_inset2.png" alt="Rumi" class="w-10 h-10" />
@@ -417,6 +435,14 @@
     color: var(--rumi-text-secondary);
     line-height: 1.65;
     max-width: 560px;
+  }
+
+  .subsection-heading {
+    font-family: 'Circular Std', 'Inter', sans-serif;
+    font-size: 1.125rem;
+    font-weight: 600;
+    color: var(--rumi-text-primary);
+    letter-spacing: -0.01em;
   }
 
   /* Logo showcase */

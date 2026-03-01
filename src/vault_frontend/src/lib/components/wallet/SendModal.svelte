@@ -94,7 +94,7 @@
         class:active={selectedToken === 'icUSD'}
         on:click={() => selectToken('icUSD')}
       >
-        <img src="/icUSD-logo.png" alt="icUSD" class="token-icon" />
+        <img src="/icusd-logo_v3.svg" alt="icUSD" class="token-icon" />
         icUSD
       </button>
     </div>
