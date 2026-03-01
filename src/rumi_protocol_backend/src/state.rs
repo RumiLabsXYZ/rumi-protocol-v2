@@ -117,13 +117,35 @@ impl CollateralStatus {
     }
 }
 
+/// Asset class for XRC price queries (mirrors ic_xrc_types::AssetClass but with serde support).
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum XrcAssetClass {
+    Cryptocurrency,
+    FiatCurrency,
+}
+
+impl Default for XrcAssetClass {
+    fn default() -> Self {
+        XrcAssetClass::Cryptocurrency
+    }
+}
+
+/// Default for quote asset class (USD is always fiat).
+fn default_fiat() -> XrcAssetClass {
+    XrcAssetClass::FiatCurrency
+}
+
 /// Price source configuration for a collateral type.
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub enum PriceSource {
     /// Use the ICP Exchange Rate Canister (XRC) with specified asset pair
     Xrc {
         base_asset: String,
+        #[serde(default)]
+        base_asset_class: XrcAssetClass,
         quote_asset: String,
+        #[serde(default = "default_fiat")]
+        quote_asset_class: XrcAssetClass,
     },
 }
 
@@ -411,7 +433,9 @@ impl From<InitArg> for State {
                     ledger_fee: ICP_TRANSFER_FEE.to_u64(),
                     price_source: PriceSource::Xrc {
                         base_asset: "ICP".to_string(),
+                        base_asset_class: XrcAssetClass::Cryptocurrency,
                         quote_asset: "USD".to_string(),
+                        quote_asset_class: XrcAssetClass::FiatCurrency,
                     },
                     status: CollateralStatus::Active,
                     last_price: None,

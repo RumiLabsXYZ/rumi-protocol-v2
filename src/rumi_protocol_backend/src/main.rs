@@ -107,10 +107,27 @@ fn validate_mode() -> Result<(), ProtocolError> {
 }
 
 fn setup_timers() {
-    // Existing ICP rate fetching timer
+    // ICP rate fetching timer
     ic_cdk_timers::set_timer_interval(rumi_protocol_backend::xrc::FETCHING_ICP_RATE_INTERVAL, || {
         ic_cdk::spawn(rumi_protocol_backend::xrc::fetch_icp_rate())
     });
+
+    // Price timers for all non-ICP collateral types (timers don't survive upgrades,
+    // so we re-register them here for any collateral added via add_collateral_token).
+    let non_icp_collaterals: Vec<candid::Principal> = read_state(|s| {
+        let icp = s.icp_collateral_type();
+        s.collateral_configs.keys()
+            .filter(|ct| **ct != icp)
+            .cloned()
+            .collect()
+    });
+    for ledger_id in non_icp_collaterals {
+        log!(INFO, "[setup_timers] Registering price timer for collateral {}", ledger_id);
+        ic_cdk_timers::set_timer_interval(
+            rumi_protocol_backend::xrc::FETCHING_ICP_RATE_INTERVAL,
+            move || ic_cdk::spawn(rumi_protocol_backend::management::fetch_collateral_price(ledger_id)),
+        );
+    }
 
     // Periodic cleanup timer — runs every 5 minutes instead of every heartbeat (~1s).
     // This alone saves ~99% of the cycles previously burned by the heartbeat.
@@ -1530,17 +1547,16 @@ async fn add_collateral_token(arg: rumi_protocol_backend::AddCollateralArg) -> R
     });
 
     // Register a price-fetching timer for the new collateral type.
-    // For now, this is a placeholder — the XRC price source will be polled
-    // at the same interval as ICP. When we add more collateral types with
-    // actual oracles, this timer will call a per-collateral price fetch.
+    // ICP has its own dedicated timer in setup_timers(); other collateral
+    // types use the generic fetch_collateral_price.
     let ledger_id = arg.ledger_canister_id;
     let is_icp = read_state(|s| s.icp_collateral_type() == ledger_id);
     if !is_icp {
-        log!(INFO, "[add_collateral_token] Registering price timer for new collateral {}", ledger_id);
-        // Future: ic_cdk_timers::set_timer_interval(...) calling
-        //   xrc::fetch_collateral_price(ledger_id) for the configured PriceSource.
-        // For the initial refactor, the per-collateral price is set via
-        //   update_collateral_config or on-demand via ensure_fresh_price_for.
+        log!(INFO, "[add_collateral_token] Registering price timer for collateral {}", ledger_id);
+        ic_cdk_timers::set_timer_interval(
+            rumi_protocol_backend::xrc::FETCHING_ICP_RATE_INTERVAL,
+            move || ic_cdk::spawn(rumi_protocol_backend::management::fetch_collateral_price(ledger_id)),
+        );
     }
 
     log!(INFO, "[add_collateral_token] Added collateral type: {} (decimals={})", arg.ledger_canister_id, decimals);
