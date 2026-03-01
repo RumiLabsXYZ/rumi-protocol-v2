@@ -6,7 +6,7 @@ type AddCollateralArg = record {
   debt_ceiling : nat64;
   min_vault_debt : nat64;
   borrow_threshold_ratio : float64;
-  ledger_fee : nat64;
+  interest_rate_apr : float64;
   recovery_target_cr : float64;
   ledger_canister_id : principal;
   price_source : PriceSource;
@@ -242,8 +242,9 @@ type LiquidityStatus = record {
 };
 type Mode = variant { ReadOnly; GeneralAvailability; Recovery };
 type OpenVaultSuccess = record { block_index : nat64; vault_id : nat64 };
+type XrcAssetClass = variant { Cryptocurrency; FiatCurrency };
 type PriceSource = variant {
-  Xrc : record { quote_asset : text; base_asset : text };
+  Xrc : record { base_asset : text; base_asset_class : XrcAssetClass; quote_asset : text; quote_asset_class : XrcAssetClass };
 };
 type ProtocolArg = variant { Upgrade : UpgradeArg; Init : InitArg };
 type ProtocolError = variant {
