@@ -150,6 +150,7 @@ export interface CollateralInfo {
   interestRateApr: number;      // Annual interest rate (0.0 = 0%)
   debtCeiling: number;          // In ICUSD e8s
   minVaultDebt: number;         // Dust threshold in ICUSD e8s
+  minCollateralDeposit: number; // Minimum collateral in native units
   ledgerFee: number;            // Transfer fee in native units
   color: string;                // UI badge color
   status: string;               // "Active", "Paused", "Frozen", etc.

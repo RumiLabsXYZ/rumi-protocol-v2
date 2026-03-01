@@ -269,18 +269,19 @@ export const pnp = {
     return false;
   },
   
-  // Override getActor to use Plug directly when possible and beta API format
-  async getActor(canisterId: string, idl: any) {
+  // Override getActor to use Plug directly when possible and beta API format.
+  // walletType must be passed so we only use the Plug shortcut when Plug is the active wallet.
+  async getActor(canisterId: string, idl: any, walletType?: string) {
     try {
-      // For Plug wallet, use the direct Plug API to avoid permission prompts
-      if (window.ic?.plug && await window.ic.plug.isConnected()) {
+      // Only use Plug direct API when the user explicitly connected with Plug
+      if (walletType === 'plug' && window.ic?.plug && await window.ic.plug.isConnected()) {
         console.log('🔧 Using Plug direct API for actor:', canisterId);
         return await window.ic.plug.createActor({
           canisterId,
           interfaceFactory: idl
         });
       }
-      
+
       // For other wallets (including Oisy), use PNP beta API with options object
       console.log('🔧 Using PNP beta getActor for:', canisterId);
       return globalPnp?.getActor({ canisterId, idl });

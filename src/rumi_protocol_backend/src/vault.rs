@@ -9,7 +9,7 @@ use crate::logs::INFO;
 use crate::management::{mint_icusd, transfer_collateral_from, transfer_icusd_from, transfer_stable_from};
 use crate::numeric::{ICUSD, ICP, UsdIcp};
 use crate::{
-    mutate_state, read_state, ProtocolError, SuccessWithFee, MIN_ICP_AMOUNT, MIN_ICUSD_AMOUNT,
+    mutate_state, read_state, ProtocolError, SuccessWithFee, MIN_ICUSD_AMOUNT,
     DUST_THRESHOLD,
     StableTokenType, VaultArgWithToken,
 };
@@ -363,9 +363,9 @@ pub async fn open_vault(collateral_amount_raw: u64, collateral_type_opt: Option<
     let collateral_type = collateral_type_opt.unwrap_or_else(|| read_state(|s| s.icp_collateral_type()));
 
     // Look up CollateralConfig; check status is Active
-    let (config_ledger, config_status) = read_state(|s| {
+    let (config_ledger, config_status, min_deposit) = read_state(|s| {
         match s.get_collateral_config(&collateral_type) {
-            Some(config) => Ok((config.ledger_canister_id, config.status)),
+            Some(config) => Ok((config.ledger_canister_id, config.status, config.min_collateral_deposit)),
             None => Err(ProtocolError::GenericError("Collateral type not supported.".to_string())),
         }
     })?;
@@ -379,11 +379,10 @@ pub async fn open_vault(collateral_amount_raw: u64, collateral_type_opt: Option<
 
     let icp_margin_amount: ICP = collateral_amount_raw.into();
 
-    if icp_margin_amount < MIN_ICP_AMOUNT {
-        // Mark operation as failed since it didn't meet requirements
+    if min_deposit > 0 && icp_margin_amount < ICP::new(min_deposit) {
         guard_principal.fail();
         return Err(ProtocolError::AmountTooLow {
-            minimum_amount: MIN_ICP_AMOUNT.to_u64(),
+            minimum_amount: min_deposit,
         });
     }
 
@@ -468,9 +467,9 @@ pub async fn open_vault_and_borrow(
     let collateral_type = collateral_type_opt.unwrap_or_else(|| read_state(|s| s.icp_collateral_type()));
 
     // Look up CollateralConfig; check status is Active
-    let (config_ledger, config_status) = read_state(|s| {
+    let (config_ledger, config_status, min_deposit) = read_state(|s| {
         match s.get_collateral_config(&collateral_type) {
-            Some(config) => Ok((config.ledger_canister_id, config.status)),
+            Some(config) => Ok((config.ledger_canister_id, config.status, config.min_collateral_deposit)),
             None => Err(ProtocolError::GenericError("Collateral type not supported.".to_string())),
         }
     })?;
@@ -484,10 +483,10 @@ pub async fn open_vault_and_borrow(
 
     let icp_margin_amount: ICP = collateral_amount_raw.into();
 
-    if icp_margin_amount < MIN_ICP_AMOUNT {
+    if min_deposit > 0 && icp_margin_amount < ICP::new(min_deposit) {
         guard_principal.fail();
         return Err(ProtocolError::AmountTooLow {
-            minimum_amount: MIN_ICP_AMOUNT.to_u64(),
+            minimum_amount: min_deposit,
         });
     }
 
@@ -813,20 +812,12 @@ pub async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
     let guard_principal = GuardPrincipal::new(caller, &format!("add_margin_vault_{}", arg.vault_id))?;
     let amount: ICP = arg.amount.into();
 
-    if amount < MIN_ICP_AMOUNT {
-        guard_principal.fail();
-        return Err(ProtocolError::AmountTooLow {
-            minimum_amount: MIN_ICP_AMOUNT.to_u64(),
-        });
-    }
-
-    let (vault, config_ledger) = match read_state(|s| {
+    let (vault, config_ledger, min_deposit) = match read_state(|s| {
         match s.vault_id_to_vaults.get(&arg.vault_id) {
             Some(v) => {
-                let ledger = s.get_collateral_config(&v.collateral_type)
-                    .map(|c| c.ledger_canister_id)
+                let config = s.get_collateral_config(&v.collateral_type)
                     .ok_or("Collateral type not configured")?;
-                Ok((v.clone(), ledger))
+                Ok((v.clone(), config.ledger_canister_id, config.min_collateral_deposit))
             },
             None => Err("Vault not found"),
         }
@@ -837,6 +828,13 @@ pub async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
             return Err(ProtocolError::GenericError(msg.to_string()));
         }
     };
+
+    if min_deposit > 0 && amount < ICP::new(min_deposit) {
+        guard_principal.fail();
+        return Err(ProtocolError::AmountTooLow {
+            minimum_amount: min_deposit,
+        });
+    }
 
     // Check collateral status allows adding collateral
     let collateral_status = read_state(|s| s.get_collateral_status(&vault.collateral_type));
@@ -902,9 +900,9 @@ pub async fn open_vault_with_deposit(
     let collateral_type = collateral_type_opt.unwrap_or_else(|| read_state(|s| s.icp_collateral_type()));
 
     // Look up CollateralConfig
-    let (config_ledger, config_status, config_fee) = read_state(|s| {
+    let (config_ledger, config_status, config_fee, min_deposit) = read_state(|s| {
         match s.get_collateral_config(&collateral_type) {
-            Some(config) => Ok((config.ledger_canister_id, config.status, config.ledger_fee)),
+            Some(config) => Ok((config.ledger_canister_id, config.status, config.ledger_fee, config.min_collateral_deposit)),
             None => Err(ProtocolError::GenericError("Collateral type not supported.".to_string())),
         }
     })?;
@@ -928,10 +926,10 @@ pub async fn open_vault_with_deposit(
     };
 
     let icp_margin_amount: ICP = collateral_amount.into();
-    if icp_margin_amount < MIN_ICP_AMOUNT {
+    if min_deposit > 0 && icp_margin_amount < ICP::new(min_deposit) {
         guard_principal.fail();
         return Err(ProtocolError::AmountTooLow {
-            minimum_amount: MIN_ICP_AMOUNT.to_u64(),
+            minimum_amount: min_deposit,
         });
     }
 
@@ -985,12 +983,12 @@ pub async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("add_margin_deposit_{}", vault_id))?;
 
-    let (vault, config_ledger, config_fee) = match read_state(|s| {
+    let (vault, config_ledger, config_fee, min_deposit) = match read_state(|s| {
         match s.vault_id_to_vaults.get(&vault_id) {
             Some(v) => {
                 let config = s.get_collateral_config(&v.collateral_type)
                     .ok_or("Collateral type not configured")?;
-                Ok((v.clone(), config.ledger_canister_id, config.ledger_fee))
+                Ok((v.clone(), config.ledger_canister_id, config.ledger_fee, config.min_collateral_deposit))
             },
             None => Err("Vault not found"),
         }
@@ -1030,10 +1028,10 @@ pub async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError
     };
 
     let margin_added: ICP = collateral_amount.into();
-    if margin_added < MIN_ICP_AMOUNT {
+    if min_deposit > 0 && margin_added < ICP::new(min_deposit) {
         guard_principal.fail();
         return Err(ProtocolError::AmountTooLow {
-            minimum_amount: MIN_ICP_AMOUNT.to_u64(),
+            minimum_amount: min_deposit,
         });
     }
 
@@ -1330,9 +1328,26 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
 
     let withdraw_amount: ICP = ICP::new(amount);
 
-    if withdraw_amount < MIN_ICP_AMOUNT {
+    // Read vault, per-collateral price + config from state
+    let (vault, collateral_price, config_decimals, ledger_canister_id, ledger_fee, min_deposit) = match read_state(|s| {
+        match s.vault_id_to_vaults.get(&vault_id) {
+            Some(vault) => {
+                let price = s.get_collateral_price_decimal(&vault.collateral_type)
+                    .ok_or("No price available for collateral. Price feed may be down.")?;
+                let config = s.get_collateral_config(&vault.collateral_type)
+                    .ok_or("Collateral type not configured.")?;
+                Ok((vault.clone(), price, config.decimals, config.ledger_canister_id, config.ledger_fee, config.min_collateral_deposit))
+            },
+            None => Err("Vault not found. Please check the vault ID.")
+        }
+    }) {
+        Ok(result) => result,
+        Err(msg) => return Err(ProtocolError::GenericError(msg.to_string())),
+    };
+
+    if min_deposit > 0 && withdraw_amount < ICP::new(min_deposit) {
         return Err(ProtocolError::AmountTooLow {
-            minimum_amount: MIN_ICP_AMOUNT.to_u64(),
+            minimum_amount: min_deposit,
         });
     }
 
@@ -1343,23 +1358,6 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
         vault_id,
         caller
     );
-
-    // Read vault, per-collateral price + config from state
-    let (vault, collateral_price, config_decimals, ledger_canister_id, ledger_fee) = match read_state(|s| {
-        match s.vault_id_to_vaults.get(&vault_id) {
-            Some(vault) => {
-                let price = s.get_collateral_price_decimal(&vault.collateral_type)
-                    .ok_or("No price available for collateral. Price feed may be down.")?;
-                let config = s.get_collateral_config(&vault.collateral_type)
-                    .ok_or("Collateral type not configured.")?;
-                Ok((vault.clone(), price, config.decimals, config.ledger_canister_id, config.ledger_fee))
-            },
-            None => Err("Vault not found. Please check the vault ID.")
-        }
-    }) {
-        Ok(result) => result,
-        Err(msg) => return Err(ProtocolError::GenericError(msg.to_string())),
-    };
 
     // Check collateral status allows withdrawal
     let collateral_status = read_state(|s| s.get_collateral_status(&vault.collateral_type));
@@ -1418,12 +1416,8 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
         vault_id
     );
 
-    // Reduce margin BEFORE transferring to avoid reentrancy
-    mutate_state(|state| {
-        if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
-            vault.collateral_amount -= withdraw_amount.to_u64();
-        }
-    });
+    // Note: margin is reduced in record_partial_collateral_withdrawn (via remove_margin_from_vault)
+    // after the transfer succeeds. Do NOT also subtract here — that would double-deduct.
 
     let fee = ICP::from(ledger_fee);
     let transfer_amount = withdraw_amount - fee;
@@ -1450,12 +1444,8 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
             Ok(block_index)
         },
         Err(error) => {
-            // Restore collateral on transfer failure
-            mutate_state(|state| {
-                if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
-                    vault.collateral_amount += withdraw_amount.to_u64();
-                }
-            });
+            // No need to restore vault state — collateral is only deducted on success
+            // (in record_partial_collateral_withdrawn via remove_margin_from_vault).
 
             log!(
                 DEBUG,

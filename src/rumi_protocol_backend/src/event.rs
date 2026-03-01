@@ -252,6 +252,14 @@ pub enum Event {
         reason: String,
         block_index: u64,
     },
+    /// Admin correction of vault collateral amount (e.g., fixing inflation from error handler bug)
+    #[serde(rename = "admin_vault_correction")]
+    AdminVaultCorrection {
+        vault_id: u64,
+        old_amount: u64,
+        new_amount: u64,
+        reason: String,
+    },
 }
 
 impl Event {
@@ -298,6 +306,7 @@ impl Event {
             Event::SetReserveRedemptionFee { .. } => false,
             Event::ReserveRedemption { .. } => false,
             Event::AdminMint { .. } => false,
+            Event::AdminVaultCorrection { vault_id, .. } => vault_id == filter_vault_id,
         }
     }
 }
@@ -543,6 +552,16 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             },
             Event::AdminMint { .. } => {
                 // Admin mints are ledger-only operations; no in-memory state changes.
+            },
+            Event::AdminVaultCorrection {
+                vault_id,
+                old_amount: _,
+                new_amount,
+                reason: _,
+            } => {
+                if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
+                    vault.collateral_amount = new_amount;
+                }
             },
         }
     }
@@ -934,4 +953,22 @@ pub fn record_admin_mint(
         reason,
         block_index,
     });
+}
+
+pub fn record_admin_vault_correction(
+    state: &mut State,
+    vault_id: u64,
+    old_amount: u64,
+    new_amount: u64,
+    reason: String,
+) {
+    record_event(&Event::AdminVaultCorrection {
+        vault_id,
+        old_amount,
+        new_amount,
+        reason,
+    });
+    if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
+        vault.collateral_amount = new_amount;
+    }
 }

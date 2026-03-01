@@ -9,7 +9,7 @@ use rumi_protocol_backend::{
     state::{read_state, replace_state, Mode, State},
     vault::{CandidVault, OpenVaultSuccess, VaultArg},
     Fees, GetEventsArg, ProtocolArg, ProtocolError, ProtocolStatus, SuccessWithFee,
-    ReserveRedemptionResult, ReserveBalance,
+    ReserveRedemptionResult, ReserveBalance, CollateralTotals,
     VaultArgWithToken, StableTokenType,
 };
 use rumi_protocol_backend::logs::DEBUG;
@@ -107,10 +107,49 @@ fn validate_mode() -> Result<(), ProtocolError> {
 }
 
 fn setup_timers() {
-    // Existing ICP rate fetching timer
+    // ── Immediate price fetch (fire on the very next execution round) ───────
+    // Prices are ephemeral and not stored as events, so after an upgrade
+    // the collateral configs have stale or missing prices.  An immediate
+    // fetch ensures CRs are correct within seconds instead of waiting
+    // up to 5 minutes for the first interval tick.
+    ic_cdk_timers::set_timer(std::time::Duration::ZERO, || {
+        ic_cdk::spawn(rumi_protocol_backend::xrc::fetch_icp_rate())
+    });
+    let non_icp_collaterals_immediate: Vec<candid::Principal> = read_state(|s| {
+        let icp = s.icp_collateral_type();
+        s.collateral_configs.keys()
+            .filter(|ct| **ct != icp)
+            .cloned()
+            .collect()
+    });
+    for ledger_id in non_icp_collaterals_immediate {
+        ic_cdk_timers::set_timer(std::time::Duration::ZERO, move || {
+            ic_cdk::spawn(rumi_protocol_backend::management::fetch_collateral_price(ledger_id))
+        });
+    }
+
+    // ── Recurring price fetching timers ─────────────────────────────────────
+    // ICP rate fetching timer
     ic_cdk_timers::set_timer_interval(rumi_protocol_backend::xrc::FETCHING_ICP_RATE_INTERVAL, || {
         ic_cdk::spawn(rumi_protocol_backend::xrc::fetch_icp_rate())
     });
+
+    // Price timers for all non-ICP collateral types (timers don't survive upgrades,
+    // so we re-register them here for any collateral added via add_collateral_token).
+    let non_icp_collaterals: Vec<candid::Principal> = read_state(|s| {
+        let icp = s.icp_collateral_type();
+        s.collateral_configs.keys()
+            .filter(|ct| **ct != icp)
+            .cloned()
+            .collect()
+    });
+    for ledger_id in non_icp_collaterals {
+        log!(INFO, "[setup_timers] Registering price timer for collateral {}", ledger_id);
+        ic_cdk_timers::set_timer_interval(
+            rumi_protocol_backend::xrc::FETCHING_ICP_RATE_INTERVAL,
+            move || ic_cdk::spawn(rumi_protocol_backend::management::fetch_collateral_price(ledger_id)),
+        );
+    }
 
     // Periodic cleanup timer — runs every 5 minutes instead of every heartbeat (~1s).
     // This alone saves ~99% of the cycles previously burned by the heartbeat.
@@ -1486,6 +1525,21 @@ async fn add_collateral_token(arg: rumi_protocol_backend::AddCollateralArg) -> R
         }
     };
 
+    // Query icrc1_fee from the ledger
+    let fee_result: Result<(candid::Nat,), _> = ic_cdk::call(arg.ledger_canister_id, "icrc1_fee", ()).await;
+    let ledger_fee = match fee_result {
+        Ok((f,)) => {
+            use num_traits::ToPrimitive;
+            f.0.to_u64().unwrap_or(0)
+        }
+        Err((code, msg)) => {
+            return Err(ProtocolError::GenericError(format!(
+                "Failed to query icrc1_fee from {}: {:?} {}",
+                arg.ledger_canister_id, code, msg
+            )));
+        }
+    };
+
     use rumi_protocol_backend::state::{CollateralConfig, CollateralStatus};
 
     let config = CollateralConfig {
@@ -1495,10 +1549,10 @@ async fn add_collateral_token(arg: rumi_protocol_backend::AddCollateralArg) -> R
         borrow_threshold_ratio: Ratio::from_f64(arg.borrow_threshold_ratio),
         liquidation_bonus: Ratio::from_f64(arg.liquidation_bonus),
         borrowing_fee: Ratio::from_f64(arg.borrowing_fee),
-        interest_rate_apr: Ratio::from_f64(0.0),
+        interest_rate_apr: Ratio::from_f64(arg.interest_rate_apr),
         debt_ceiling: arg.debt_ceiling,
         min_vault_debt: rumi_protocol_backend::numeric::ICUSD::from(arg.min_vault_debt),
-        ledger_fee: arg.ledger_fee,
+        ledger_fee,
         price_source: arg.price_source,
         status: CollateralStatus::Active,
         last_price: None,
@@ -1508,6 +1562,8 @@ async fn add_collateral_token(arg: rumi_protocol_backend::AddCollateralArg) -> R
         current_base_rate: Ratio::from_f64(0.0),
         last_redemption_time: 0,
         recovery_target_cr: Ratio::from_f64(arg.recovery_target_cr),
+        min_collateral_deposit: arg.min_collateral_deposit,
+        display_color: arg.display_color,
     };
 
     mutate_state(|s| {
@@ -1515,17 +1571,16 @@ async fn add_collateral_token(arg: rumi_protocol_backend::AddCollateralArg) -> R
     });
 
     // Register a price-fetching timer for the new collateral type.
-    // For now, this is a placeholder — the XRC price source will be polled
-    // at the same interval as ICP. When we add more collateral types with
-    // actual oracles, this timer will call a per-collateral price fetch.
+    // ICP has its own dedicated timer in setup_timers(); other collateral
+    // types use the generic fetch_collateral_price.
     let ledger_id = arg.ledger_canister_id;
     let is_icp = read_state(|s| s.icp_collateral_type() == ledger_id);
     if !is_icp {
-        log!(INFO, "[add_collateral_token] Registering price timer for new collateral {}", ledger_id);
-        // Future: ic_cdk_timers::set_timer_interval(...) calling
-        //   xrc::fetch_collateral_price(ledger_id) for the configured PriceSource.
-        // For the initial refactor, the per-collateral price is set via
-        //   update_collateral_config or on-demand via ensure_fresh_price_for.
+        log!(INFO, "[add_collateral_token] Registering price timer for collateral {}", ledger_id);
+        ic_cdk_timers::set_timer_interval(
+            rumi_protocol_backend::xrc::FETCHING_ICP_RATE_INTERVAL,
+            move || ic_cdk::spawn(rumi_protocol_backend::management::fetch_collateral_price(ledger_id)),
+        );
     }
 
     log!(INFO, "[add_collateral_token] Added collateral type: {} (decimals={})", arg.ledger_canister_id, decimals);
@@ -1569,6 +1624,39 @@ fn get_supported_collateral_types() -> Vec<(Principal, rumi_protocol_backend::st
     read_state(|s| s.supported_collateral_types())
 }
 
+/// Returns per-collateral aggregate totals (collateral amount, debt, vault count).
+/// O(collateral_types × vaults_per_type) but computed on-canister — returns a tiny response
+/// instead of transferring all vault data to the caller.
+#[candid_method(query)]
+#[query]
+fn get_collateral_totals() -> Vec<CollateralTotals> {
+    read_state(|s| {
+        s.collateral_configs
+            .iter()
+            .map(|(ct, config)| {
+                let vault_count = s
+                    .collateral_to_vault_ids
+                    .get(ct)
+                    .map(|ids| ids.len() as u64)
+                    .unwrap_or(0);
+                CollateralTotals {
+                    collateral_type: *ct,
+                    symbol: config
+                        .display_color
+                        .as_ref()
+                        .map(|_| String::new()) // placeholder — symbol fetched from ledger by frontend
+                        .unwrap_or_default(),
+                    decimals: config.decimals,
+                    total_collateral: s.total_collateral_for(ct),
+                    total_debt: s.total_debt_for_collateral(ct).to_u64(),
+                    vault_count,
+                    price: config.last_price.unwrap_or(0.0),
+                }
+            })
+            .collect()
+    })
+}
+
 /// Update any per-collateral parameter (developer only).
 /// Replaces the entire CollateralConfig for the given collateral type.
 /// Use `get_collateral_config` to fetch the current config, modify fields, then pass back.
@@ -1601,6 +1689,38 @@ async fn update_collateral_config(
     });
 
     log!(INFO, "[update_collateral_config] Updated config for collateral {}", collateral_type);
+    Ok(())
+}
+
+/// Admin correction of vault collateral amount (developer only).
+/// Used to fix vault state that was inflated/deflated by bugs.
+/// Records an on-chain event for full auditability.
+#[candid_method(update)]
+#[update]
+async fn admin_correct_vault_collateral(
+    vault_id: u64,
+    new_collateral_amount: u64,
+    reason: String,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can correct vault collateral".to_string()));
+    }
+
+    let old_amount = read_state(|s| {
+        s.vault_id_to_vaults
+            .get(&vault_id)
+            .map(|v| v.collateral_amount)
+            .ok_or(ProtocolError::GenericError(format!("Vault #{} not found", vault_id)))
+    })?;
+
+    mutate_state(|s| {
+        event::record_admin_vault_correction(s, vault_id, old_amount, new_collateral_amount, reason.clone());
+    });
+
+    log!(INFO, "[admin_correct_vault_collateral] Vault #{}: {} -> {} raw units. Reason: {}",
+        vault_id, old_amount, new_collateral_amount, reason);
     Ok(())
 }
 

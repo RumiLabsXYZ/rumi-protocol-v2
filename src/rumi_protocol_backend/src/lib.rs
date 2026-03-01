@@ -156,6 +156,18 @@ pub struct LiquidityStatus {
     pub total_available_returns: u64,
 }
 
+/// Per-collateral aggregate totals — lightweight alternative to fetching all vaults.
+#[derive(CandidType, Deserialize, Debug)]
+pub struct CollateralTotals {
+    pub collateral_type: Principal,
+    pub symbol: String,
+    pub decimals: u8,
+    pub total_collateral: u64,      // Raw token units
+    pub total_debt: u64,            // icUSD e8s
+    pub vault_count: u64,
+    pub price: f64,                 // Last USD price
+}
+
 /// Argument for adding a new collateral type via admin endpoint.
 #[derive(CandidType, Clone, Debug, Deserialize)]
 pub struct AddCollateralArg {
@@ -175,10 +187,14 @@ pub struct AddCollateralArg {
     pub debt_ceiling: u64,
     /// Minimum vault debt (dust threshold)
     pub min_vault_debt: u64,
-    /// Token transfer fee in native units
-    pub ledger_fee: u64,
+    /// Ongoing annual interest rate (e.g., 0.02 = 2% APR)
+    pub interest_rate_apr: f64,
     /// Target CR after recovery liquidation (e.g., 1.55)
     pub recovery_target_cr: f64,
+    /// Minimum collateral deposit in native token units (e.g., 100_000 for 0.001 ICP)
+    pub min_collateral_deposit: u64,
+    /// Hex color for frontend display (e.g., "#F7931A")
+    pub display_color: Option<String>,
 }
 
 #[derive(CandidType, Debug, Clone, Deserialize)]

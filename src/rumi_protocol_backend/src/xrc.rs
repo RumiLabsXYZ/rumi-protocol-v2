@@ -74,8 +74,8 @@ pub async fn fetch_icp_rate() {
 }
 
 /// Ensures the price for the given collateral type is fresh enough for
-/// a price-sensitive operation. Currently only ICP is supported; other
-/// collateral types will be handled when their price timers are added.
+/// a price-sensitive operation. ICP uses its own dedicated path; other
+/// collateral types use the generic fetch_collateral_price.
 pub async fn ensure_fresh_price_for(
     collateral_type: &candid::Principal,
 ) -> Result<(), crate::ProtocolError> {
@@ -83,8 +83,29 @@ pub async fn ensure_fresh_price_for(
     if *collateral_type == icp_ledger {
         ensure_fresh_price().await
     } else {
-        // For future collateral types: check per-collateral last_price_timestamp
-        // and fetch from the configured PriceSource if stale.
+        let needs_refresh = read_state(|s| {
+            match s.get_collateral_config(collateral_type) {
+                Some(config) => match config.last_price_timestamp {
+                    None => true,
+                    Some(ts) => {
+                        let age = ic_cdk::api::time().saturating_sub(ts);
+                        age > PRICE_FRESHNESS_THRESHOLD_NANOS
+                    }
+                },
+                None => true,
+            }
+        });
+
+        if needs_refresh {
+            log!(
+                TRACE_XRC,
+                "[ensure_fresh_price_for] Price stale for {}, fetching on-demand",
+                collateral_type
+            );
+            crate::management::fetch_collateral_price(*collateral_type).await;
+        }
+
+        // Verify we have a price now
         let has_price = read_state(|s| {
             s.get_collateral_config(collateral_type)
                 .and_then(|c| c.last_price)

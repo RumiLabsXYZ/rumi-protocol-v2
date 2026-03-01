@@ -170,6 +170,99 @@ pub async fn fetch_stable_price(symbol: &str) -> Result<GetExchangeRateResult, S
     }
 }
 
+/// Generic price fetch for any collateral type using its PriceSource config.
+/// Reads the asset pair and classes from CollateralConfig, calls XRC, and
+/// stores the result in last_price / last_price_timestamp.
+pub async fn fetch_collateral_price(collateral_type: Principal) {
+    use crate::state::{mutate_state, PriceSource, XrcAssetClass};
+    use ic_canister_log::log;
+    use crate::logs::TRACE_XRC;
+    use rust_decimal::prelude::FromPrimitive;
+
+    const XRC_CALL_COST_CYCLES: u64 = 1_000_000_000;
+    const XRC_MARGIN_SEC: u64 = 60;
+
+    let price_source = read_state(|s| {
+        s.get_collateral_config(&collateral_type).map(|c| c.price_source.clone())
+    });
+
+    let price_source = match price_source {
+        Some(ps) => ps,
+        None => {
+            log!(TRACE_XRC, "[fetch_collateral_price] No config for {}", collateral_type);
+            return;
+        }
+    };
+
+    let PriceSource::Xrc { base_asset, base_asset_class, quote_asset, quote_asset_class } = price_source;
+
+    let base = Asset {
+        symbol: base_asset.clone(),
+        class: match base_asset_class {
+            XrcAssetClass::Cryptocurrency => AssetClass::Cryptocurrency,
+            XrcAssetClass::FiatCurrency => AssetClass::FiatCurrency,
+        },
+    };
+    let quote = Asset {
+        symbol: quote_asset.clone(),
+        class: match quote_asset_class {
+            XrcAssetClass::Cryptocurrency => AssetClass::Cryptocurrency,
+            XrcAssetClass::FiatCurrency => AssetClass::FiatCurrency,
+        },
+    };
+
+    let timestamp_sec = ic_cdk::api::time() / crate::SEC_NANOS - XRC_MARGIN_SEC;
+
+    let args = GetExchangeRateRequest {
+        base_asset: base,
+        quote_asset: quote,
+        timestamp: Some(timestamp_sec),
+    };
+
+    let xrc_principal = read_state(|s| s.xrc_principal);
+
+    let res_xrc: Result<(GetExchangeRateResult,), _> = ic_cdk::api::call::call_with_payment(
+        xrc_principal,
+        "get_exchange_rate",
+        (args.clone(),),
+        XRC_CALL_COST_CYCLES,
+    )
+    .await;
+
+    match res_xrc {
+        Ok((GetExchangeRateResult::Ok(exchange_rate_result),)) => {
+            let rate = rust_decimal::Decimal::from_u64(exchange_rate_result.rate).unwrap()
+                / rust_decimal::Decimal::from_u64(10_u64.pow(exchange_rate_result.metadata.decimals)).unwrap();
+
+            log!(
+                TRACE_XRC,
+                "[fetch_collateral_price] {} rate: {} at timestamp: {}",
+                base_asset, rate, exchange_rate_result.timestamp
+            );
+
+            let ts_nanos = exchange_rate_result.timestamp * 1_000_000_000;
+            mutate_state(|s| {
+                if let Some(config) = s.collateral_configs.get_mut(&collateral_type) {
+                    let should_update = match config.last_price_timestamp {
+                        Some(last_ts) => last_ts < ts_nanos,
+                        None => true,
+                    };
+                    if should_update {
+                        config.last_price = rate.to_f64();
+                        config.last_price_timestamp = Some(ts_nanos);
+                    }
+                }
+            });
+        }
+        Ok((GetExchangeRateResult::Err(error),)) => {
+            log!(TRACE_XRC, "[fetch_collateral_price] XRC error for {}: {:?}", base_asset, error);
+        }
+        Err((code, msg)) => {
+            log!(TRACE_XRC, "[fetch_collateral_price] Call error for {}: {:?} {}", base_asset, code, msg);
+        }
+    }
+}
+
 pub async fn mint_icusd(amount: ICUSD, to: Principal) -> Result<u64, TransferError> {
     let client = ICRC1Client {
         runtime: CdkRuntime,
@@ -224,8 +317,8 @@ pub async fn transfer_icusd_from(amount: ICUSD, caller: Principal) -> Result<u64
             message: e.1,                            
         })?;
         
-    
-        Ok(block_index.unwrap().0.to_u64().unwrap())
+    let nat = block_index.map_err(|e| e)?;
+    Ok(nat.0.to_u64().unwrap())
 }
 
 
@@ -335,7 +428,8 @@ pub async fn transfer_collateral_from(amount: u64, from: Principal, ledger: Prin
             message: e.1,
         })?;
 
-    Ok(block_index.unwrap().0.to_u64().unwrap())
+    let nat = block_index.map_err(|e| e)?;
+    Ok(nat.0.to_u64().unwrap())
 }
 
 /// Transfer ckUSDT or ckUSDC from a user to the protocol (for vault repayment/liquidation)
@@ -376,7 +470,8 @@ pub async fn transfer_stable_from(token_type: StableTokenType, amount_e6s: u64, 
             message: e.1,
         })?;
 
-    Ok(block_index.unwrap().0.to_u64().unwrap())
+    let nat = block_index.map_err(|e| e)?;
+    Ok(nat.0.to_u64().unwrap())
 }
 
 /// Query the ICRC-1 balance of the protocol canister on any token ledger.

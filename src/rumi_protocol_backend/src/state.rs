@@ -117,13 +117,35 @@ impl CollateralStatus {
     }
 }
 
+/// Asset class for XRC price queries (mirrors ic_xrc_types::AssetClass but with serde support).
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum XrcAssetClass {
+    Cryptocurrency,
+    FiatCurrency,
+}
+
+impl Default for XrcAssetClass {
+    fn default() -> Self {
+        XrcAssetClass::Cryptocurrency
+    }
+}
+
+/// Default for quote asset class (USD is always fiat).
+fn default_fiat() -> XrcAssetClass {
+    XrcAssetClass::FiatCurrency
+}
+
 /// Price source configuration for a collateral type.
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub enum PriceSource {
     /// Use the ICP Exchange Rate Canister (XRC) with specified asset pair
     Xrc {
         base_asset: String,
+        #[serde(default)]
+        base_asset_class: XrcAssetClass,
         quote_asset: String,
+        #[serde(default = "default_fiat")]
+        quote_asset_class: XrcAssetClass,
     },
 }
 
@@ -168,6 +190,13 @@ pub struct CollateralConfig {
     pub last_redemption_time: u64,
     /// Target CR to restore vaults to during recovery-mode liquidations (e.g., 1.55)
     pub recovery_target_cr: Ratio,
+    /// Minimum collateral deposit in native token units (e.g., 100_000 = 0.001 ICP at 8 decimals).
+    /// Defaults to 0 for backward compat (no minimum enforced for legacy configs).
+    #[serde(default)]
+    pub min_collateral_deposit: u64,
+    /// Hex color for frontend display (e.g., "#F7931A"). Optional for backward compat.
+    #[serde(default)]
+    pub display_color: Option<String>,
 }
 
 impl PartialEq for CollateralConfig {
@@ -191,6 +220,8 @@ impl PartialEq for CollateralConfig {
             && self.current_base_rate == other.current_base_rate
             && self.last_redemption_time == other.last_redemption_time
             && self.recovery_target_cr == other.recovery_target_cr
+            && self.min_collateral_deposit == other.min_collateral_deposit
+            && self.display_color == other.display_color
     }
 }
 
@@ -411,7 +442,9 @@ impl From<InitArg> for State {
                     ledger_fee: ICP_TRANSFER_FEE.to_u64(),
                     price_source: PriceSource::Xrc {
                         base_asset: "ICP".to_string(),
+                        base_asset_class: XrcAssetClass::Cryptocurrency,
                         quote_asset: "USD".to_string(),
+                        quote_asset_class: XrcAssetClass::FiatCurrency,
                     },
                     status: CollateralStatus::Active,
                     last_price: None,
@@ -421,6 +454,8 @@ impl From<InitArg> for State {
                     current_base_rate: Ratio::from(Decimal::ZERO),
                     last_redemption_time: 0,
                     recovery_target_cr: DEFAULT_RECOVERY_TARGET_CR,
+                    min_collateral_deposit: 100_000, // 0.001 ICP
+                    display_color: Some("#2DD4BF".to_string()),
                 });
                 configs
             },
@@ -731,6 +766,15 @@ impl State {
             .get(ct)
             .map(|c| c.borrow_threshold_ratio)
             .unwrap_or(RECOVERY_COLLATERAL_RATIO)
+    }
+
+    /// Get the minimum collateral deposit (in native token units) for a collateral type.
+    /// Returns 0 if not configured (no minimum enforced).
+    pub fn get_min_collateral_deposit_for(&self, ct: &CollateralType) -> u64 {
+        self.collateral_configs
+            .get(ct)
+            .map(|c| c.min_collateral_deposit)
+            .unwrap_or(0)
     }
 
     /// Get the last known price for a collateral type (USD per 1 whole token)

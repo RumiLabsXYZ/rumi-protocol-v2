@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { formatNumber } from '$lib/utils/format';
+  import { formatNumber, formatTokenBalance } from '$lib/utils/format';
   import { protocolService } from '$lib/services/protocol';
   import { publicActor } from '$lib/services/protocol/apiClient';
   import { collateralStore } from '$lib/stores/collateralStore';
@@ -31,6 +31,9 @@
   let ckusdcReserve = 0;
   let refreshInterval: ReturnType<typeof setInterval>;
 
+  // Per-collateral totals: { symbol, amount (human-readable), color }[]
+  let collateralTotals: { symbol: string; amount: number; color: string }[] = [];
+
   const protocolPrincipal = Principal.fromText(CANISTER_IDS.PROTOCOL);
 
   async function fetchStatus() {
@@ -56,6 +59,8 @@
       };
       // Also fetch per-collateral config for ICP-specific values
       await collateralStore.fetchSupportedCollateral();
+      // Compute per-collateral totals from all vaults
+      fetchCollateralTotals();
       // Fetch ckStable reserves held by the protocol canister
       fetchCkStableReserves();
     } catch (e) { console.error('ProtocolStats fetch error:', e); }
@@ -72,6 +77,26 @@
     } catch (e) { console.error('ckStable reserve fetch error:', e); }
   }
 
+  async function fetchCollateralTotals() {
+    try {
+      // Use lightweight backend aggregate instead of fetching all vaults
+      const totals = await publicActor.get_collateral_totals() as any[];
+      const collaterals = get(collateralStore).collaterals;
+      collateralTotals = totals
+        .map((t: any) => {
+          const ct = t.collateral_type?.toText?.() || '';
+          const info = collaterals.find(c => c.principal === ct);
+          const decimals = info?.decimals ?? Number(t.decimals);
+          return {
+            symbol: info?.symbol ?? ct.substring(0, 5),
+            amount: Number(t.total_collateral) / Math.pow(10, decimals),
+            color: info?.color ?? '#94A3B8',
+          };
+        })
+        .filter((t: any) => t.amount > 0);
+    } catch (e) { console.error('CollateralTotals fetch error:', e); }
+  }
+
   onMount(() => {
     if (!protocolStatus) {
       fetchStatus();
@@ -83,7 +108,12 @@
 
   $: status = protocolStatus || selfFetchedStatus;
   $: icpPrice = status?.lastIcpRate || 0;
-  $: collateralValueUsd = (status?.totalIcpMargin || 0) * icpPrice;
+  $: collateralValueUsd = collateralTotals.length > 0
+    ? collateralTotals.reduce((sum, ct) => {
+        const info = $collateralStore.collaterals.find(c => c.symbol === ct.symbol);
+        return sum + ct.amount * (info?.price || 0);
+      }, 0)
+    : (status?.totalIcpMargin || 0) * icpPrice;
   $: collateralPercent = (status?.totalIcusdBorrowed || 0) > 0
     ? (status?.totalCollateralRatio || 0) * 100
     : (status?.totalIcpMargin || 0) > 0 ? Infinity : 0;
@@ -101,12 +131,32 @@
   $: modeClass = modeLabel === 'Normal' ? 'mode-normal' : modeLabel === 'Recovery' ? 'mode-recovery' : 'mode-other';
   $: liqBonus = status?.liquidationBonus ? (status.liquidationBonus - 1) * 100 : 0;
   $: borrowFee = selfFetchedBorrowFee * 100;
-  // Per-collateral ICP values from collateral store (live, not hardcoded)
+  // Optional: selected collateral from borrow page (if not provided, falls back to ICP)
+  export let selectedCollateral: {
+    symbol?: string;
+    minimumCr?: number;
+    liquidationCr?: number;
+    liquidationBonus?: number;
+    borrowingFee?: number;
+    interestRateApr?: number;
+    recoveryTargetCr?: number;
+  } | undefined = undefined;
+
+  // Per-collateral values — use selectedCollateral if provided, else ICP from store
   $: icpConfig = $collateralStore.collaterals.find(c => c.symbol === 'ICP');
-  $: minCR = icpConfig?.minimumCr ?? 1.5;
-  $: liqCR = icpConfig?.liquidationCr ?? 1.33;
+  $: activeConfig = selectedCollateral ?? icpConfig;
+  $: paramLabel = (() => {
+    const sym = activeConfig?.symbol ?? 'ICP';
+    // Keep 'ck' prefix lowercase when the heading is uppercased
+    return sym.startsWith('ck') ? 'ck' + sym.slice(2).toUpperCase() : sym.toUpperCase();
+  })();
+  $: minCR = activeConfig?.minimumCr ?? 1.5;
+  $: liqCR = activeConfig?.liquidationCr ?? 1.33;
+  $: liqPenalty = activeConfig?.liquidationBonus ? (activeConfig.liquidationBonus - 1) * 100 : liqBonus;
+  $: paramBorrowFee = activeConfig?.borrowingFee ? activeConfig.borrowingFee * 100 : borrowFee;
+  $: interestApr = activeConfig?.interestRateApr ?? 0;
   $: recoveryThreshold = status?.recoveryModeThreshold ?? 1.5;
-  $: interestApr = icpConfig?.interestRateApr ?? 0;
+  $: recoveryTargetCr = activeConfig?.recoveryTargetCr ?? 1.55;
 </script>
 
 <div class="protocol-stats">
@@ -120,7 +170,13 @@
     <div class="stat-row">
       <span class="stat-label">Total Collateral</span>
       <span class="stat-value-stack">
-        <span>{formatNumber(status?.totalIcpMargin || 0)} ICP</span>
+        {#if collateralTotals.length > 0}
+          {#each collateralTotals as ct}
+            <span><span class="collateral-dot" style="background:{ct.color}"></span> {formatTokenBalance(ct.amount)} {ct.symbol}</span>
+          {/each}
+        {:else}
+          <span>{formatNumber(status?.totalIcpMargin || 0)} ICP</span>
+        {/if}
       </span>
     </div>
     <div class="stat-row">
@@ -144,40 +200,44 @@
         </span>
       </div>
     {/if}
-  </div>
-
-  <div class="group-divider"></div>
-
-  <!-- Parameters -->
-  <h4 class="group-heading">Parameters</h4>
-  <div class="stats-stack">
-    <div class="stat-row">
-      <span class="stat-label">Min CR (ICP)</span>
-      <span class="stat-value">{(minCR * 100).toFixed(0)}%</span>
-    </div>
-    <div class="stat-row">
-      <span class="stat-label">Liquidation CR (ICP)</span>
-      <span class="stat-value">{(liqCR * 100).toFixed(0)}%</span>
-    </div>
     <div class="stat-row">
       <span class="stat-label">Recovery Threshold</span>
       <span class="stat-value">{(recoveryThreshold * 100).toFixed(0)}%</span>
     </div>
     <div class="stat-row">
-      <span class="stat-label">Liq. Bonus</span>
-      <span class="stat-value">{liqBonus > 0 ? `${formatNumber(liqBonus)}%` : '—'}</span>
+      <span class="stat-label">Mode</span>
+      <span class="stat-value"><span class="mode-badge {modeClass}">{modeLabel}</span></span>
+    </div>
+  </div>
+
+  <div class="group-divider"></div>
+
+  <!-- Per-collateral parameters — tracks borrow page selection -->
+  <h4 class="group-heading">Parameters <span class="param-symbol">({paramLabel})</span></h4>
+  <div class="stats-stack">
+    <div class="stat-row">
+      <span class="stat-label">Min CR</span>
+      <span class="stat-value">{(minCR * 100).toFixed(0)}%</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Liquidation CR</span>
+      <span class="stat-value">{(liqCR * 100).toFixed(0)}%</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Recovery Target CR</span>
+      <span class="stat-value">{(recoveryTargetCr * 100).toFixed(0)}%</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Liq. Penalty</span>
+      <span class="stat-value">{liqPenalty > 0 ? `${formatNumber(liqPenalty)}%` : '—'}</span>
     </div>
     <div class="stat-row">
       <span class="stat-label">Borrowing Fee</span>
-      <span class="stat-value">{formatNumber(borrowFee)}%</span>
+      <span class="stat-value">{formatNumber(paramBorrowFee)}%</span>
     </div>
     <div class="stat-row">
       <span class="stat-label">Interest APR</span>
       <span class="stat-value">{interestApr > 0 ? `${formatNumber(interestApr * 100)}%` : '0%'}</span>
-    </div>
-    <div class="stat-row">
-      <span class="stat-label">Mode</span>
-      <span class="stat-value"><span class="mode-badge {modeClass}">{modeLabel}</span></span>
     </div>
   </div>
 </div>
@@ -197,6 +257,9 @@
     letter-spacing: 0.08em;
     color: var(--rumi-text-muted);
     margin-bottom: 0.625rem;
+  }
+  .param-symbol {
+    text-transform: none;
   }
   .group-divider {
     height: 1px;
@@ -235,6 +298,13 @@
     font-weight: 600;
     font-variant-numeric: tabular-nums;
     color: var(--rumi-text-primary);
+  }
+  .collateral-dot {
+    display: inline-block;
+    width: 0.375rem;
+    height: 0.375rem;
+    border-radius: 9999px;
+    vertical-align: middle;
   }
   .mode-badge {
     display: inline-block;

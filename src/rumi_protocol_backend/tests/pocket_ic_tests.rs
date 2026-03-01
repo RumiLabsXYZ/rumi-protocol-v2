@@ -15,7 +15,7 @@ use rumi_protocol_backend::{
     AddCollateralArg,
 };
 use rumi_protocol_backend::event::Event;
-use rumi_protocol_backend::state::{CollateralConfig, CollateralStatus, PriceSource};
+use rumi_protocol_backend::state::{CollateralConfig, CollateralStatus, PriceSource, XrcAssetClass};
 use ic_xrc_types::{Asset, AssetClass, GetExchangeRateRequest, ExchangeRate};
 
 //-----------------------------------------------------------------------------------
@@ -1961,7 +1961,9 @@ fn setup_protocol_with_cketh() -> (PocketIc, Principal, Principal, Principal, Pr
         ledger_canister_id: cketh_ledger_id,
         price_source: PriceSource::Xrc {
             base_asset: "ETH".to_string(),
+            base_asset_class: XrcAssetClass::Cryptocurrency,
             quote_asset: "USD".to_string(),
+            quote_asset_class: XrcAssetClass::FiatCurrency,
         },
         liquidation_ratio: 1.5,
         borrow_threshold_ratio: 2.0,
@@ -1969,8 +1971,10 @@ fn setup_protocol_with_cketh() -> (PocketIc, Principal, Principal, Principal, Pr
         borrowing_fee: 0.005,
         debt_ceiling: u64::MAX,
         min_vault_debt: 100_000_000, // 1 ICUSD
-        ledger_fee: 10_000_000_000_000, // 0.00001 ckETH
+        interest_rate_apr: 0.0,
         recovery_target_cr: 2.0,
+        min_collateral_deposit: 0,
+        display_color: None,
     };
     register_collateral(&pic, protocol_id, add_arg)
         .expect("Failed to register ckETH collateral");
@@ -2083,7 +2087,9 @@ fn test_add_collateral_token() {
         ledger_canister_id: cketh_ledger_id,
         price_source: PriceSource::Xrc {
             base_asset: "ETH".to_string(),
+            base_asset_class: XrcAssetClass::Cryptocurrency,
             quote_asset: "USD".to_string(),
+            quote_asset_class: XrcAssetClass::FiatCurrency,
         },
         liquidation_ratio: 1.5,
         borrow_threshold_ratio: 2.0,
@@ -2091,8 +2097,10 @@ fn test_add_collateral_token() {
         borrowing_fee: 0.005,
         debt_ceiling: u64::MAX,
         min_vault_debt: 100_000_000,
-        ledger_fee: 10_000_000_000_000,
+        interest_rate_apr: 0.0,
         recovery_target_cr: 2.0,
+        min_collateral_deposit: 0,
+        display_color: None,
     };
     register_collateral(&pic, protocol_id, add_arg)
         .expect("Failed to register ckETH collateral");
@@ -3065,7 +3073,9 @@ fn test_add_collateral_non_developer_rejected() {
         ledger_canister_id: fake_ledger,
         price_source: PriceSource::Xrc {
             base_asset: "FAKE".to_string(),
+            base_asset_class: XrcAssetClass::Cryptocurrency,
             quote_asset: "USD".to_string(),
+            quote_asset_class: XrcAssetClass::FiatCurrency,
         },
         liquidation_ratio: 1.5,
         borrow_threshold_ratio: 2.0,
@@ -3073,8 +3083,10 @@ fn test_add_collateral_non_developer_rejected() {
         borrowing_fee: 0.005,
         debt_ceiling: u64::MAX,
         min_vault_debt: 100_000_000,
-        ledger_fee: 10_000,
+        interest_rate_apr: 0.0,
         recovery_target_cr: 2.0,
+        min_collateral_deposit: 0,
+        display_color: None,
     };
 
     let encoded = encode_args((add_arg,)).unwrap();
