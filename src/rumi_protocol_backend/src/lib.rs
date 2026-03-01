@@ -175,8 +175,6 @@ pub struct AddCollateralArg {
     pub debt_ceiling: u64,
     /// Minimum vault debt (dust threshold)
     pub min_vault_debt: u64,
-    /// Token transfer fee in native units
-    pub ledger_fee: u64,
     /// Target CR after recovery liquidation (e.g., 1.55)
     pub recovery_target_cr: f64,
 }

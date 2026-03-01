@@ -1486,6 +1486,21 @@ async fn add_collateral_token(arg: rumi_protocol_backend::AddCollateralArg) -> R
         }
     };
 
+    // Query icrc1_fee from the ledger
+    let fee_result: Result<(candid::Nat,), _> = ic_cdk::call(arg.ledger_canister_id, "icrc1_fee", ()).await;
+    let ledger_fee = match fee_result {
+        Ok((f,)) => {
+            use num_traits::ToPrimitive;
+            f.0.to_u64().unwrap_or(0)
+        }
+        Err((code, msg)) => {
+            return Err(ProtocolError::GenericError(format!(
+                "Failed to query icrc1_fee from {}: {:?} {}",
+                arg.ledger_canister_id, code, msg
+            )));
+        }
+    };
+
     use rumi_protocol_backend::state::{CollateralConfig, CollateralStatus};
 
     let config = CollateralConfig {
@@ -1498,7 +1513,7 @@ async fn add_collateral_token(arg: rumi_protocol_backend::AddCollateralArg) -> R
         interest_rate_apr: Ratio::from_f64(0.0),
         debt_ceiling: arg.debt_ceiling,
         min_vault_debt: rumi_protocol_backend::numeric::ICUSD::from(arg.min_vault_debt),
-        ledger_fee: arg.ledger_fee,
+        ledger_fee,
         price_source: arg.price_source,
         status: CollateralStatus::Active,
         last_price: None,
