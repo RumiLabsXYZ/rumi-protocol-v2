@@ -118,6 +118,7 @@ function createCollateralStore() {
             interestRateApr,
             debtCeiling: Number(config.debt_ceiling),
             minVaultDebt: Number(config.min_vault_debt),
+            minCollateralDeposit: Number(config.min_collateral_deposit),
             ledgerFee: Number(config.ledger_fee),
             color,
             status: statusStr,

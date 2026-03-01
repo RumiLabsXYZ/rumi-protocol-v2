@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use rumi_protocol_backend::{
     numeric::{ICUSD, ICP, UsdIcp, Ratio},
-    state::{State, Mode, PendingMarginTransfer, CollateralConfig, CollateralStatus, PriceSource},
+    state::{State, Mode, PendingMarginTransfer, CollateralConfig, CollateralStatus, PriceSource, XrcAssetClass},
     vault::{Vault, VaultArg},
     InitArg, UpgradeArg, MIN_ICP_AMOUNT, MIN_ICUSD_AMOUNT
 };
@@ -938,7 +938,9 @@ mod multi_collateral_helpers {
             ledger_fee: 2_000_000_000_000, // 0.002 ckETH (18 decimals)
             price_source: PriceSource::Xrc {
                 base_asset: "ETH".to_string(),
+                base_asset_class: XrcAssetClass::Cryptocurrency,
                 quote_asset: "USD".to_string(),
+                quote_asset_class: XrcAssetClass::FiatCurrency,
             },
             status: CollateralStatus::Active,
             last_price: None,
@@ -948,6 +950,8 @@ mod multi_collateral_helpers {
             current_base_rate: Ratio::from(dec!(0.0)),
             last_redemption_time: 0,
             recovery_target_cr: Ratio::from(dec!(1.45)),
+            min_collateral_deposit: 0,
+            display_color: None,
         }
     }
 

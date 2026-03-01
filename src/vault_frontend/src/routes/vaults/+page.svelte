@@ -7,6 +7,7 @@
   import { isDevelopment, CANISTER_IDS } from '$lib/config';
   import { developerAccess } from '$lib/stores/developer';
   import { collateralStore } from '$lib/stores/collateralStore';
+  import { getMinimumCR, getLiquidationCR } from '$lib/protocol';
 
   let icpPrice = 0;
   let expandedVaultId: number | null = null;
@@ -18,8 +19,17 @@
   $: canViewVaults = isDevelopment || $developerAccess || $isConnected
     || ($permissionStore.initialized && $permissionStore.canViewVaults);
 
-  // Sort vaults by Collateral Ratio ascending (riskiest first)
-  // Uses per-collateral price from collateral store
+  // Sort vaults by risk level group (red → purple → white), then CR ascending within each group.
+  // Uses per-collateral price + per-collateral liquidation/minimum ratios.
+  function vaultRiskBucket(cr: number, ct: string): number {
+    const minCR = getMinimumCR(ct);
+    const liqCR = getLiquidationCR(ct);
+    const comfortCR = minCR * 1.234;
+    if (cr === Infinity || cr >= comfortCR) return 2; // safe (white)
+    if (cr >= minCR) return 1;                        // caution (purple)
+    return 0;                                          // danger/warning (red)
+  }
+
   $: sortedVaults = [...$userVaults].sort((a, b) => {
     const ctA = a.collateralType || CANISTER_IDS.ICP_LEDGER;
     const ctB = b.collateralType || CANISTER_IDS.ICP_LEDGER;
@@ -31,6 +41,9 @@
       ? (amountA * priceA) / a.borrowedIcusd : Infinity;
     const crB = b.borrowedIcusd > 0 && priceB > 0
       ? (amountB * priceB) / b.borrowedIcusd : Infinity;
+    const bucketA = vaultRiskBucket(crA, ctA);
+    const bucketB = vaultRiskBucket(crB, ctB);
+    if (bucketA !== bucketB) return bucketA - bucketB;
     if (crA !== crB) return crA - crB;
     return a.vaultId - b.vaultId;
   });

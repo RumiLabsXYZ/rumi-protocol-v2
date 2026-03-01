@@ -483,14 +483,11 @@ function createAuthStore() {
           canisterId
         }) as T;
       } else if (state.walletType === WALLET_TYPES.OISY || state.walletType === WALLET_TYPES.PLUG) {
-        // Use PNP for both Oisy and Plug wallets
-        // Trust the state.isConnected flag which was set during connection
-        // The pnp.isConnectedAsync() check doesn't work reliably for all PNP wallets
-        
-        return pnp.getActor(canisterId, idl) as unknown as T;
+        // Use PNP for both Oisy and Plug wallets — pass walletType so pnp
+        // only uses Plug shortcut when Plug is the active wallet (not Oisy)
+        return pnp.getActor(canisterId, idl, state.walletType) as unknown as T;
       } else {
         // Fallback for any other PNP-based wallets
-        // Trust state.isConnected since it was validated during connection
         return pnp.getActor(canisterId, idl) as unknown as T;
       }
     },

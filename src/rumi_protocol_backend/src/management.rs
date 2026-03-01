@@ -317,8 +317,8 @@ pub async fn transfer_icusd_from(amount: ICUSD, caller: Principal) -> Result<u64
             message: e.1,                            
         })?;
         
-    
-        Ok(block_index.unwrap().0.to_u64().unwrap())
+    let nat = block_index.map_err(|e| e)?;
+    Ok(nat.0.to_u64().unwrap())
 }
 
 
@@ -428,7 +428,8 @@ pub async fn transfer_collateral_from(amount: u64, from: Principal, ledger: Prin
             message: e.1,
         })?;
 
-    Ok(block_index.unwrap().0.to_u64().unwrap())
+    let nat = block_index.map_err(|e| e)?;
+    Ok(nat.0.to_u64().unwrap())
 }
 
 /// Transfer ckUSDT or ckUSDC from a user to the protocol (for vault repayment/liquidation)
@@ -469,7 +470,8 @@ pub async fn transfer_stable_from(token_type: StableTokenType, amount_e6s: u64, 
             message: e.1,
         })?;
 
-    Ok(block_index.unwrap().0.to_u64().unwrap())
+    let nat = block_index.map_err(|e| e)?;
+    Ok(nat.0.to_u64().unwrap())
 }
 
 /// Query the ICRC-1 balance of the protocol canister on any token ledger.

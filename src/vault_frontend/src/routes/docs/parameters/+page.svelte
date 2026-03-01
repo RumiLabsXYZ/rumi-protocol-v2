@@ -138,7 +138,7 @@
         <span class="param-val live">{crPct(recoveryTargetCr)} (threshold + buffer)</span>
       </div>
       <div class="param">
-        <span class="param-label">Liquidation Bonus <span class="tip" data-tip="The extra collateral a liquidator receives as an incentive. For example, 15% means liquidators get collateral worth 115% of the debt they repay.">?</span></span>
+        <span class="param-label">Liquidation Penalty <span class="tip" data-tip="The extra collateral seized from a liquidated vault. For example, 15% means the liquidator receives collateral worth 115% of the debt they repay — the extra 15% is your penalty for being undercollateralized.">?</span></span>
         <span class="param-val live">{pct(liquidationBonus)}</span>
       </div>
       <div class="param">

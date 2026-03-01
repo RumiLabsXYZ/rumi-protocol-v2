@@ -38,7 +38,6 @@ import { collateralStore } from '$lib/stores/collateralStore';
 
 // Constants from backend
 export const E8S = 100_000_000;
-export const MIN_ICP_AMOUNT = 100_000; // 0.001 ICP
 export const MIN_ICUSD_AMOUNT = 10_000_000; // 0.10 icUSD (10 cents)
 // CRITICAL CHANGE: Set this to false to use real data from the backend
 export const USE_MOCK_DATA = false;
@@ -349,7 +348,7 @@ private static async refreshVaultData(): Promise<void> {
       return `Transfer error: ${BigIntUtils.stringify(tfe)}`;
     } 
     else if ('AmountTooLow' in error) {
-      return `Amount too low. Minimum amount: ${Number(error.AmountTooLow.minimum_amount) / E8S}`;
+      return `Amount too low. Minimum amount: ${Number(error.AmountTooLow.minimum_amount)} raw units`;
     } 
     else if ('AlreadyProcessing' in error) {
       return 'This operation is already in progress. Please wait.';
@@ -406,12 +405,13 @@ private static async refreshVaultData(): Promise<void> {
         try {
           console.log(`Creating vault with ${collateralAmount} ${symbol}`);
 
-          // Minimum amount check (in raw units)
+          // Minimum amount check (in raw units) — per-collateral from on-chain config
           const amountRaw = BigInt(Math.floor(collateralAmount * decimalsFactor));
-          if (amountRaw < BigInt(MIN_ICP_AMOUNT)) {
+          const minDeposit = collateralInfo?.minCollateralDeposit ?? 0;
+          if (minDeposit > 0 && amountRaw < BigInt(minDeposit)) {
             return {
               success: false,
-              error: `Amount too low. Minimum required: ${MIN_ICP_AMOUNT / decimalsFactor} ${symbol}`
+              error: `Amount too low. Minimum required: ${minDeposit / decimalsFactor} ${symbol}`
             };
           }
 
@@ -640,8 +640,9 @@ static async openVaultAndBorrow(
       const amountRaw = BigInt(Math.floor(collateralAmount * decimalsFactor));
       const borrowRaw = BigInt(Math.floor(icusdAmount * E8S));
 
-      if (amountRaw < BigInt(MIN_ICP_AMOUNT)) {
-        return { success: false, error: `Amount too low. Minimum required: ${MIN_ICP_AMOUNT / decimalsFactor} ${symbol}` };
+      const minDeposit = collateralInfo?.minCollateralDeposit ?? 0;
+      if (minDeposit > 0 && amountRaw < BigInt(minDeposit)) {
+        return { success: false, error: `Amount too low. Minimum required: ${minDeposit / decimalsFactor} ${symbol}` };
       }
 
       const walletState = get(walletStore);
@@ -848,10 +849,11 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
 
       console.log(`Adding ${collateralAmount} ${symbol} to vault #${vaultId}`);
 
-      if (collateralAmount * ctDecimalsFactor < MIN_ICP_AMOUNT) {
+      const minDeposit = ctInfo?.minCollateralDeposit ?? 0;
+      if (minDeposit > 0 && collateralAmount * ctDecimalsFactor < minDeposit) {
         return {
           success: false,
-          error: `Amount too low. Minimum required: ${MIN_ICP_AMOUNT / ctDecimalsFactor} ${symbol}`
+          error: `Amount too low. Minimum required: ${minDeposit / ctDecimalsFactor} ${symbol}`
         };
       }
       const amountRaw = BigInt(Math.floor(collateralAmount * ctDecimalsFactor));
@@ -1481,23 +1483,20 @@ static async repayToVaultWithStable(
 
   /**
    * Withdraw partial collateral from a vault (keeps CR above minimum)
+   * @param decimals Token decimal precision (default 8 for ICP)
    */
-  static async withdrawPartialCollateral(vaultId: number, icpAmount: number): Promise<VaultOperationResult> {
+  static async withdrawPartialCollateral(vaultId: number, icpAmount: number, decimals: number = 8): Promise<VaultOperationResult> {
     return ApiClient.executeSequentialOperation(async () => {
       try {
-        console.log(`Withdrawing ${icpAmount} ICP collateral from vault #${vaultId}`);
+        const factor = Math.pow(10, decimals);
+        console.log(`Withdrawing ${icpAmount} collateral (decimals=${decimals}) from vault #${vaultId}`);
 
-        if (icpAmount * E8S < MIN_ICP_AMOUNT) {
-          return {
-            success: false,
-            error: `Amount too low. Minimum required: ${MIN_ICP_AMOUNT / E8S} ICP`
-          };
-        }
+        // Min amount validated by backend (per-collateral min_collateral_deposit)
 
         const actor = await ApiClient.getAuthenticatedActor();
         const vaultArg = {
           vault_id: BigInt(vaultId),
-          amount: BigInt(Math.floor(icpAmount * E8S))
+          amount: BigInt(Math.floor(icpAmount * factor))
         };
 
         const result = await actor.withdraw_partial_collateral(vaultArg);

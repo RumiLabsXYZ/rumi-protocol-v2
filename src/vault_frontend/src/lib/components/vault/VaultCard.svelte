@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { formatNumber } from '../../utils/format';
+  import { formatNumber, formatTokenBalance } from '../../utils/format';
   import type { Vault } from '../../services/types';
   import { protocolService } from '../../services/protocol';
   import { vaultStore } from '../../stores/vaultStore';
@@ -21,6 +21,7 @@
   $: vaultCollateralType = vault.collateralType || CANISTER_IDS.ICP_LEDGER;
   $: vaultCollateralInfo = collateralStore.getCollateralInfo(vaultCollateralType);
   $: collateralSymbol = vault.collateralSymbol || vaultCollateralInfo?.symbol || 'ICP';
+  $: collateralColor = vaultCollateralInfo?.color ?? '#94A3B8';
   $: collateralDecimals = vault.collateralDecimals ?? vaultCollateralInfo?.decimals ?? 8;
   $: collateralDecimalsFactor = Math.pow(10, collateralDecimals);
   $: vaultCollateralPrice = vaultCollateralInfo?.price || (vaultCollateralType === CANISTER_IDS.ICP_LEDGER ? icpPrice : 0);
@@ -76,12 +77,12 @@
         .catch(() => { nonIcpCollateralBalance = 0; });
     }
   }
-  // Deduct the collateral token's ledger fee so the deposit + fee doesn't exceed the wallet balance
+  // Deduct 2x the collateral token's ledger fee: one for the icrc2_approve, one for the transfer_from
   $: collateralLedgerFeeHuman = vaultCollateralInfo
     ? vaultCollateralInfo.ledgerFee / Math.pow(10, vaultCollateralInfo.decimals) : 0.0001;
   $: maxAddCollateral = (() => {
     const raw = vaultCollateralType === CANISTER_IDS.ICP_LEDGER ? walletIcp : nonIcpCollateralBalance;
-    return Math.max(0, raw - collateralLedgerFeeHuman);
+    return Math.max(0, raw - 2 * collateralLedgerFeeHuman);
   })();
   $: activeRepayBalance = repayTokenType === 'CKUSDT' ? walletCkusdt
     : repayTokenType === 'CKUSDC' ? walletCkusdc : walletIcusd;
@@ -115,7 +116,7 @@
   $: comfortZonePct = Math.max(((vaultMinCR * 1.234 * 100) - 100) / 2, 0);    // e.g. 42.6%
 
 
-  $: fmtMargin = formatNumber(vaultCollateralAmount, 4);
+  $: fmtMargin = formatTokenBalance(vaultCollateralAmount);
   $: fmtCollateralUsd = formatNumber(collateralValueUsd, 2);
   $: fmtBorrowed = formatNumber(vault.borrowedIcusd, 2);
   $: fmtBorrowedUsd = formatNumber(borrowedValueUsd, 2);
@@ -302,13 +303,20 @@
 
   function floorTo(val: number, decimals: number): string {
     const factor = Math.pow(10, decimals);
-    return (Math.floor(val * factor) / factor).toFixed(decimals);
+    const fixed = (Math.floor(val * factor) / factor).toFixed(decimals);
+    if (fixed.includes('.')) {
+      let trimmed = fixed.replace(/0+$/, '');
+      if (trimmed.endsWith('.')) trimmed = trimmed + '0';
+      return trimmed;
+    }
+    return fixed;
   }
+  $: collateralFloorDigits = collateralDecimals;
   function setMaxAddCollateral() {
-    if (maxAddCollateral > 0) addCollateralAmount = floorTo(maxAddCollateral, 4);
+    if (maxAddCollateral > 0) addCollateralAmount = floorTo(maxAddCollateral, collateralFloorDigits);
   }
   function setMaxWithdraw() {
-    if (maxWithdrawable > 0) withdrawAmount = floorTo(maxWithdrawable, 4);
+    if (maxWithdrawable > 0) withdrawAmount = floorTo(maxWithdrawable, collateralFloorDigits);
   }
   function setMaxBorrow() {
     if (maxBorrowable > 0) borrowAmount = floorTo(maxBorrowable, 2);
@@ -398,7 +406,7 @@
     if (withdrawOverMax) { toastStore.error(`Max withdrawable: ${formatNumber(maxWithdrawable, 4)} ${collateralSymbol}`, 8000); return; }
     clearMessages(); isProcessing = true;
     try {
-      const result = await protocolService.withdrawPartialCollateral(vault.vaultId, amount);
+      const result = await protocolService.withdrawPartialCollateral(vault.vaultId, amount, collateralDecimals);
       if (result.success) {
         toastStore.success(`Withdrew ${amount} ${collateralSymbol}`, 8000); withdrawAmount = '';
         await vaultStore.refreshVault(vault.vaultId); dispatch('updated');
@@ -472,7 +480,7 @@
 <div class="vault-card" class:vault-card-danger={riskLevel === 'danger'} class:vault-card-warning={riskLevel === 'warning'}
   style={showProjectedCr ? `border-left-color: var(--rumi-${activeProjectedRisk === 'danger' || activeProjectedRisk === 'warning' ? 'danger' : activeProjectedRisk === 'caution' ? 'caution' : 'safe'})` : ''}>
   <button class="vault-row" on:click={toggleExpand}>
-    <span class="vault-id">#{vault.vaultId}</span>
+    <span class="vault-id"><span class="collateral-dot" style="background:{collateralColor}"></span>#{vault.vaultId}</span>
     <span class="vault-cell">
       <span class="cell-label">Collateral</span>
       <span class="cell-value">{fmtMargin} {collateralSymbol}</span>
@@ -505,7 +513,6 @@
       {#if showProjectedCr}
         <span class="cell-value ratio-text cr-projected-row">
           <span class="cr-old" class:ratio-warning={riskLevel === 'warning'} class:ratio-caution={riskLevel === 'caution'} class:ratio-danger={riskLevel === 'danger'}>{fmtRatio}</span>
-          <span class="cr-arrow">→</span>
           <span class="cr-new" class:ratio-warning={activeProjectedRisk === 'warning'}
             class:ratio-caution={activeProjectedRisk === 'caution'}
             class:ratio-danger={activeProjectedRisk === 'danger'}
@@ -572,6 +579,11 @@
                     class:ratio-caution={activeProjectedRisk === 'caution'}
                     class:ratio-danger={activeProjectedRisk === 'danger'}
                     class:ratio-healthy={activeProjectedRisk === 'safe'}>{fmtActiveProjectedCr}</span>
+                  {#if safetyDelta}
+                    <span class="stat-safety-inline" class:safety-up={safetyDelta.direction === 'up'} class:safety-down={safetyDelta.direction === 'down'}>
+                      {safetyDelta.direction === 'up' ? '▲' : '▼'}{safetyDelta.pct.toFixed(0)}%
+                    </span>
+                  {/if}
                 {:else}
                   <span class:ratio-warning={riskLevel === 'warning'} class:ratio-caution={riskLevel === 'caution'} class:ratio-danger={riskLevel === 'danger'}>{fmtRatio}</span>
                 {/if}
@@ -601,13 +613,7 @@
                 </div>
               {/if}
             {/if}
-            <!-- Safety delta -->
-            {#if safetyDelta}
-              <div class="safety-delta" class:safety-up={safetyDelta.direction === 'up'} class:safety-down={safetyDelta.direction === 'down'}>
-                <span class="safety-arrow">{safetyDelta.direction === 'up' ? '▲' : '▼'}</span>
-                <span>{safetyDelta.direction === 'up' ? 'Safer' : 'Riskier'} by {safetyDelta.pct.toFixed(1)}%</span>
-              </div>
-            {/if}
+            <!-- Safety delta is now inline with CR row -->
           </div>
 
           <!-- Right: input panel -->
@@ -618,7 +624,7 @@
               <div class="input-header">
                 <span class="input-label">Deposit Collateral</span>
                 {#if maxAddCollateral > 0}
-                  <button class="max-text" on:click={setMaxAddCollateral}>Max: {floorTo(maxAddCollateral, 4)}</button>
+                  <button class="max-text" on:click={setMaxAddCollateral}>Max: {floorTo(maxAddCollateral, collateralFloorDigits)}</button>
                 {/if}
               </div>
               <div class="action-input-row">
@@ -628,6 +634,9 @@
                 <span class="input-suffix">{collateralSymbol}</span>
               </div>
               <div class="input-submit-row">
+                {#if addCollateralAmount && parseFloat(addCollateralAmount) > 0}
+                  <span class="input-usd-hint">≈ ${formatNumber(parseFloat(addCollateralAmount) * vaultCollateralPrice, 2)}</span>
+                {/if}
                 <button class="btn-submit btn-submit-collateral" on:click={handleAddCollateral}
                   disabled={isProcessing || !addCollateralAmount || addOverMax}>
                   {isProcessing ? '...' : 'Deposit'}
@@ -638,12 +647,9 @@
               <div class="input-header">
                 <span class="input-label">Withdraw Collateral</span>
                 {#if maxWithdrawable > 0}
-                  <button class="max-text" on:click={setMaxWithdraw}>Max: {floorTo(maxWithdrawable, 4)}</button>
+                  <button class="max-text" on:click={setMaxWithdraw}>Max: {floorTo(maxWithdrawable, collateralFloorDigits)}</button>
                 {/if}
               </div>
-              {#if vault.borrowedIcusd > 0}
-                <span class="input-hint">Keeps CR above {(vaultMinCR * 100).toFixed(0)}%</span>
-              {/if}
               <div class="action-input-row">
                 <input type="number" class="action-input" bind:value={withdrawAmount}
                   on:blur={() => clampInput('withdraw')}
@@ -651,6 +657,9 @@
                 <span class="input-suffix">{collateralSymbol}</span>
               </div>
               <div class="input-submit-row">
+                {#if withdrawAmount && parseFloat(withdrawAmount) > 0}
+                  <span class="input-usd-hint">≈ ${formatNumber(parseFloat(withdrawAmount) * vaultCollateralPrice, 2)}</span>
+                {/if}
                 <button class="btn-submit btn-submit-collateral" on:click={handleWithdraw}
                   disabled={isProcessing || isWithdrawingAndClosing || !withdrawAmount || withdrawOverMax}>
                   {#if isProcessing || isWithdrawingAndClosing}
@@ -754,12 +763,13 @@
   .vault-card-warning { border-left: 2px solid var(--rumi-caution); }
 
   .vault-row {
-    display: grid; grid-template-columns: 3rem auto auto 1fr 5.5rem 2rem;
-    align-items: start; column-gap: 3rem; padding: 0.625rem 1rem;
+    display: grid; grid-template-columns: 3rem 8.5rem 7rem 1fr 5.5rem 1.5rem;
+    align-items: start; column-gap: 1.25rem; padding: 0.625rem 1rem;
     width: 100%; background: none; border: none;
     color: inherit; cursor: pointer; text-align: left; font-family: inherit;
   }
-  .vault-id { font-family: 'Circular Std','Inter',sans-serif; font-weight: 500; font-size: 0.8125rem; color: var(--rumi-text-muted); align-self: center; }
+  .vault-id { font-family: 'Circular Std','Inter',sans-serif; font-weight: 500; font-size: 0.8125rem; color: var(--rumi-text-muted); align-self: center; display: inline-flex; align-items: center; gap: 0.375rem; }
+  .collateral-dot { width: 0.375rem; height: 0.375rem; border-radius: 9999px; flex-shrink: 0; }
   .vault-cell { display: flex; flex-direction: column; gap: 0.0625rem; }
   .cell-label { font-size: 0.6875rem; color: var(--rumi-text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
   .cell-value { font-family: 'Inter',sans-serif; font-weight: 600; font-size: 0.875rem; font-variant-numeric: tabular-nums; color: var(--rumi-text-primary); }
@@ -807,10 +817,9 @@
   .gauge-label-end { right: 0; transform: none; }
 
   /* ── Projected CR in header ── */
-  .cr-projected-row { display: inline-flex; align-items: center; gap: 0.25rem; }
-  .cr-old { text-decoration: line-through; opacity: 0.5; font-size: 0.75rem; }
-  .cr-arrow { color: var(--rumi-text-muted); font-size: 0.625rem; }
-  .cr-new { font-weight: 700; }
+  .cr-projected-row { display: inline-flex; flex-direction: column; align-items: flex-end; gap: 0; }
+  .cr-old { text-decoration: line-through; opacity: 0.5; font-size: 0.65rem; line-height: 1; }
+  .cr-new { font-weight: 700; line-height: 1.2; }
 
   .vault-chevron { display: flex; align-items: center; justify-content: center; align-self: center; transition: transform 0.15s ease; }
   .vault-chevron svg { width: 1rem; height: 1rem; color: var(--rumi-text-muted); }
@@ -892,20 +901,12 @@
   .stat-distance-danger { color: var(--rumi-danger); }
   .stat-distance-warning { color: var(--rumi-caution); }
 
-  /* Safety delta badge */
-  .safety-delta {
-    display: inline-flex; align-items: center; gap: 0.25rem;
-    font-size: 0.6875rem; font-weight: 600;
-    padding: 0.1875rem 0.5rem; border-radius: 0.25rem;
-    margin-top: 0.125rem; width: fit-content;
+  /* Safety delta inline with CR */
+  .stat-safety-inline {
+    font-size: 0.5625rem; font-weight: 600; margin-left: 0.25rem;
   }
-  .safety-up {
-    color: #2DD4BF; background: rgba(45,212,191,0.08);
-  }
-  .safety-down {
-    color: #e881a8; background: rgba(232,129,168,0.08);
-  }
-  .safety-arrow { font-size: 0.5rem; }
+  .stat-safety-inline.safety-up { color: #2DD4BF; }
+  .stat-safety-inline.safety-down { color: #e881a8; }
 
   /* ── Input panel (right column, row 2) ── */
   .input-panel {
@@ -1013,6 +1014,7 @@
   /* Submit button */
   .input-submit-row { display: flex; justify-content: flex-end; align-items: center; gap: 0.5rem; margin-top: 0.125rem; }
   .input-submit-row .token-hint { margin-right: auto; }
+  .input-submit-row .input-usd-hint { margin-right: auto; font-size: 0.75rem; color: var(--rumi-text-muted); }
   .btn-submit {
     padding: 0.375rem 1rem; font-size: 0.75rem; font-weight: 600;
     border-radius: 0.375rem; border: none; cursor: pointer;

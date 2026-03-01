@@ -83,25 +83,44 @@ export function formatAddress(
 }
 
 /**
- * Smart token balance formatting:
- * - 2 decimal places for values >= 0.01
- * - 2 significant digits for values < 0.01 (e.g., 0.0012, 0.00012)
- * - "0.00" for zero or invalid values
+ * Smart token balance formatting — 2 significant decimal digits, no trailing zeros.
+ *
+ * Rules:
+ * - Show at most 2 decimal places when the integer part is non-zero (97.12)
+ * - For values < 1, extend decimals until 2 non-zero digits are visible:
+ *     0.012 (3 places), 0.0012 (4 places), 0.00012 (5 places), etc.
+ * - Never show trailing zeros: 0.0010 → 0.001, 254.20 → 254.2
+ * - "0" for zero/invalid values
  */
 export function formatTokenBalance(value: number | string | undefined | null): string {
-  if (value === undefined || value === null) return '0.00';
+  if (value === undefined || value === null) return '0';
   const num = typeof value === 'string' ? parseFloat(value) : value;
-  if (isNaN(num) || num === 0) return '0.00';
+  if (isNaN(num) || num === 0) return '0';
 
-  if (Math.abs(num) >= 0.01) {
-    return num.toFixed(2);
+  const abs = Math.abs(num);
+
+  // Determine how many decimal places we need for 2 significant digits
+  let decimals: number;
+  if (abs >= 1) {
+    // Integer part is non-zero — 2 decimal places max
+    decimals = 2;
+  } else {
+    // Count leading zeros after decimal: e.g. 0.0012 has 2 leading zeros
+    // magnitude of 0.0012 is -3, so leading zeros = abs(magnitude) - 1 = 2
+    const magnitude = Math.floor(Math.log10(abs));
+    // We want (leading zeros) + 2 significant digits
+    decimals = Math.abs(magnitude) + 1;
   }
 
-  // For values < 0.01, show 2 significant digits
-  // e.g., 0.0012345 → 0.0012, 0.00012345 → 0.00012
-  const magnitude = Math.floor(Math.log10(Math.abs(num)));
-  const decimals = Math.abs(magnitude) + 1;
-  return num.toFixed(decimals);
+  const fixed = num.toFixed(decimals);
+
+  // Strip trailing zeros after the decimal point
+  if (fixed.includes('.')) {
+    let trimmed = fixed.replace(/0+$/, '');
+    if (trimmed.endsWith('.')) trimmed = trimmed.slice(0, -1);
+    return trimmed;
+  }
+  return fixed;
 }
 
 /**

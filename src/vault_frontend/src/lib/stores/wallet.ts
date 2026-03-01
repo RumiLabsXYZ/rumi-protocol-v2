@@ -32,17 +32,45 @@ interface WalletState {
   error: string | null;
   loading: boolean;
   icon: string;
-  tokenBalances: {
-    ICP?: TokenBalance;
-    ICUSD?: TokenBalance;
-    CKUSDT?: TokenBalance;
-    CKUSDC?: TokenBalance;
-  };
+  tokenBalances: Record<string, TokenBalance>;
 }
 
 // Helper to extract the proper Principal value.
 function getOwner(principal: any): Principal {
   return principal?.owner ? principal.owner : principal;
+}
+
+/**
+ * Fetch balances for all active collateral types (except ICP which is handled separately).
+ * Returns a Record keyed by token symbol (e.g., "ckBTC", "ckXAUT").
+ */
+async function fetchCollateralBalances(
+  ownerPrincipal: Principal,
+  collateralPrices: Record<string, number>
+): Promise<Record<string, TokenBalance>> {
+  const { collateralStore } = await import('./collateralStore');
+  const collaterals = await collateralStore.fetchSupportedCollateral();
+  const balances: Record<string, TokenBalance> = {};
+
+  // Fetch all non-ICP collateral balances in parallel
+  const nonIcp = collaterals.filter(c => c.ledgerCanisterId !== CANISTER_IDS.ICP_LEDGER);
+  const results = await Promise.allSettled(
+    nonIcp.map(async (c) => {
+      const raw = await TokenService.getTokenBalance(c.ledgerCanisterId, ownerPrincipal);
+      const formatted = (Number(raw) / Math.pow(10, c.decimals)).toFixed(c.decimals > 6 ? 8 : 6);
+      const price = collateralPrices[c.symbol] ?? c.price ?? 0;
+      return { symbol: c.symbol, raw, formatted, usdValue: parseFloat(formatted) * price };
+    })
+  );
+
+  for (const result of results) {
+    if (result.status === 'fulfilled') {
+      const { symbol, raw, formatted, usdValue } = result.value;
+      balances[symbol] = { raw, formatted, usdValue };
+    }
+  }
+
+  return balances;
 }
 
 function createWalletStore() {
@@ -166,6 +194,14 @@ function createWalletStore() {
 
       const formatStable6 = (raw: bigint) => (Number(raw) / 1_000_000).toFixed(6);
 
+      // Fetch collateral token balances (ckBTC, ckXAUT, etc.)
+      let collateralBalances: Record<string, TokenBalance> = {};
+      try {
+        collateralBalances = await fetchCollateralBalances(state.principal, {});
+      } catch (e) {
+        console.warn('Failed to fetch collateral balances:', e);
+      }
+
       update(state => ({
         ...state,
         balance: icpBalance,
@@ -189,7 +225,8 @@ function createWalletStore() {
             raw: ckusdcBalance,
             formatted: formatStable6(ckusdcBalance),
             usdValue: Number(formatStable6(ckusdcBalance))
-          }
+          },
+          ...collateralBalances
         },
         error: null
       }));
@@ -367,6 +404,14 @@ function createWalletStore() {
             icon = '/wallets/oisy.svg';
           }
 
+          // Fetch collateral token balances (ckBTC, ckXAUT, etc.)
+          let collateralBalances: Record<string, TokenBalance> = {};
+          try {
+            collateralBalances = await fetchCollateralBalances(principal, {});
+          } catch (e) {
+            console.warn('Failed to fetch collateral balances:', e);
+          }
+
           update(s => ({
             ...s,
             isConnected: true,
@@ -392,7 +437,8 @@ function createWalletStore() {
                 raw: ckusdcBalance,
                 formatted: formatStable6(ckusdcBalance),
                 usdValue: Number(formatStable6(ckusdcBalance))
-              }
+              },
+              ...collateralBalances
             },
             loading: false,
             icon: icon
@@ -437,6 +483,14 @@ function createWalletStore() {
         const icpPriceValue = protocolStatus?.lastIcpRate || 0;
         const formatStable6 = (raw: bigint) => (Number(raw) / 1_000_000).toFixed(6);
 
+        // Fetch collateral token balances (ckBTC, ckXAUT, etc.)
+        let collateralBalances: Record<string, TokenBalance> = {};
+        try {
+          collateralBalances = await fetchCollateralBalances(ownerPrincipal, {});
+        } catch (e) {
+          console.warn('Failed to fetch collateral balances:', e);
+        }
+
         update(s => ({
           ...s,
           isConnected: true,
@@ -462,7 +516,8 @@ function createWalletStore() {
               raw: ckusdcBalance,
               formatted: formatStable6(ckusdcBalance),
               usdValue: Number(formatStable6(ckusdcBalance))
-            }
+            },
+            ...collateralBalances
           },
           loading: false,
           icon: walletId === WALLET_TYPES.INTERNET_IDENTITY

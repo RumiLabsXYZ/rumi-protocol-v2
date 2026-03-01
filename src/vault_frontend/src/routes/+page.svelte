@@ -7,7 +7,7 @@
   import { appDataStore, protocolStatus, isLoadingProtocol } from '$lib/stores/appDataStore';
   import { walletStore, isConnected, principal } from '$lib/stores/wallet';
   import { protocolService } from '$lib/services/protocol';
-  import { MINIMUM_CR, LIQUIDATION_CR, getMinimumCR, getLiquidationCR, getBorrowingFee } from '$lib/protocol';
+  import { MINIMUM_CR, LIQUIDATION_CR } from '$lib/protocol';
   import { collateralStore, activeCollateralTypes } from '$lib/stores/collateralStore';
   import { CANISTER_IDS } from '$lib/config';
   import ProtocolStats from '$lib/components/dashboard/ProtocolStats.svelte';
@@ -32,12 +32,13 @@
       }))
     : [{ id: CANISTER_IDS.ICP_LEDGER, label: 'ICP', color: '#2DD4BF' }];
 
-  // Derive per-collateral reactive values
-  $: selectedCollateralInfo = collateralStore.getCollateralInfo(selectedCollateralPrincipal);
+  // Derive per-collateral reactive values — subscribe to $collateralStore so updates
+  // propagate when data loads AND when the user switches tokens
+  $: selectedCollateralInfo = $collateralStore.collaterals.find(c => c.principal === selectedCollateralPrincipal);
   $: selectedSymbol = selectedCollateralInfo?.symbol ?? 'ICP';
-  $: selectedMinCR = getMinimumCR(selectedCollateralPrincipal);
-  $: selectedLiqCR = getLiquidationCR(selectedCollateralPrincipal);
-  $: selectedBorrowingFee = getBorrowingFee(selectedCollateralPrincipal);
+  $: selectedMinCR = selectedCollateralInfo?.minimumCr ?? MINIMUM_CR;
+  $: selectedLiqCR = selectedCollateralInfo?.liquidationCr ?? LIQUIDATION_CR;
+  $: selectedBorrowingFee = selectedCollateralInfo?.borrowingFee ?? 0;
 
   // Price: use per-collateral price from store, fall back to ICP from protocol status
   $: icpPrice = $protocolStatus?.lastIcpRate || 0;
@@ -125,6 +126,8 @@
   onMount(() => {
     loadProtocolData();
     refreshPrice();
+    // Ensure collateral configs are loaded (provides per-asset CR, fees, etc.)
+    collateralStore.fetchSupportedCollateral();
     priceRefreshInterval = setInterval(refreshPrice, 30000);
     return () => { if (priceRefreshInterval) clearInterval(priceRefreshInterval); };
   });
@@ -177,7 +180,7 @@
   <div class="page-layout">
     <!-- LEFT: Protocol stats -->
     <div class="stats-column">
-      <ProtocolStats protocolStatus={$protocolStatus ?? undefined} />
+      <ProtocolStats protocolStatus={$protocolStatus ?? undefined} selectedCollateral={selectedCollateralInfo} />
     </div>
 
     <!-- RIGHT: Action card -->

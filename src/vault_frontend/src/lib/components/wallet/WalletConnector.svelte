@@ -9,6 +9,7 @@
   import { formatTokenBalance } from '../../utils/format';
   import { TokenService } from '../../services/tokenService';
   import { CONFIG } from '../../config';
+  import { collateralStore } from '../../stores/collateralStore';
   import Toast from '../common/Toast.svelte';
 
   interface WalletInfo {
@@ -17,15 +18,40 @@
     icon?: string;
   }
 
-  // Token display metadata — ICP and icUSD use local assets; ck tokens fetch from ledger
-  const TOKEN_META: Record<string, { name: string; symbol: string; icon: string; fallbackColor: string; canisterId?: string }> = {
+  interface TokenMeta {
+    name: string;
+    symbol: string;
+    icon: string;
+    fallbackColor: string;
+    canisterId?: string;
+  }
+
+  // Static token metadata for ICP, icUSD, and ck stablecoins
+  const STATIC_TOKEN_META: Record<string, TokenMeta> = {
     ICP:    { name: 'Internet Computer', symbol: 'ICP',    icon: '/icp-token-dark.svg', fallbackColor: '#3B00B9' },
-    ICUSD:  { name: 'icUSD',             symbol: 'icUSD',  icon: '/icusd-logo_v3.svg',     fallbackColor: '#8B5CF6' },
+    ICUSD:  { name: 'icUSD',             symbol: 'icUSD',  icon: '/icusd-logo_v3.svg',  fallbackColor: '#8B5CF6' },
     CKUSDT: { name: 'ckUSDT',            symbol: 'ckUSDT', icon: '',                    fallbackColor: '#26A17B', canisterId: CONFIG.ckusdtLedgerId },
     CKUSDC: { name: 'ckUSDC',            symbol: 'ckUSDC', icon: '',                    fallbackColor: '#2775CA', canisterId: CONFIG.ckusdcLedgerId },
   };
 
-  // Dynamically fetched logos (canisterId → data URL)
+  // Build full TOKEN_META reactively from static entries + collateral store
+  $: collateralTokenMeta = (() => {
+    const meta: Record<string, TokenMeta> = { ...STATIC_TOKEN_META };
+    for (const c of $collateralStore.collaterals) {
+      // Skip if we already have static metadata for this symbol
+      if (meta[c.symbol]) continue;
+      meta[c.symbol] = {
+        name: c.symbol,
+        symbol: c.symbol,
+        icon: '',  // Will be resolved via dynamicLogos
+        fallbackColor: c.color || '#94A3B8',
+        canisterId: c.ledgerCanisterId,
+      };
+    }
+    return meta;
+  })();
+
+  // Dynamically fetched logos (token symbol → data URL)
   let dynamicLogos: Record<string, string> = {};
 
   // Whitelist: only include these wallet IDs from PNP library
@@ -157,9 +183,9 @@
   }
 
   // Fetch logos from ICRC-1 ledger metadata for tokens without local icons
-  async function fetchDynamicLogos() {
-    for (const [key, meta] of Object.entries(TOKEN_META)) {
-      if (!meta.icon && meta.canisterId) {
+  async function fetchDynamicLogos(tokenMeta: Record<string, TokenMeta>) {
+    for (const [key, meta] of Object.entries(tokenMeta)) {
+      if (!meta.icon && meta.canisterId && !dynamicLogos[key]) {
         try {
           const logo = await TokenService.fetchTokenLogo(meta.canisterId);
           if (logo) {
@@ -190,8 +216,8 @@
       });
     }
 
-    // Fetch ck token logos from their ledger metadata (non-blocking)
-    fetchDynamicLogos();
+    // Fetch logos from ledger metadata for tokens without local icons (non-blocking)
+    fetchDynamicLogos(STATIC_TOKEN_META);
 
     return () => {
       document.removeEventListener('click', handleClickOutside);
@@ -212,6 +238,11 @@
     }
   }
 
+  // Re-fetch logos when collateral metadata changes (new tokens discovered)
+  $: if (collateralTokenMeta && Object.keys(collateralTokenMeta).length > Object.keys(STATIC_TOKEN_META).length) {
+    fetchDynamicLogos(collateralTokenMeta);
+  }
+
   $: isConnected = $walletStore.isConnected;
   $: account = $walletStore.principal?.toString() ?? null;
   $: currentIcon = $walletStore.icon;
@@ -226,7 +257,7 @@
   $: activeTokens = Object.entries(tokenBalances)
     .filter(([_, tb]) => tb && tb.raw > 0n)
     .map(([key, tb]) => {
-      const baseMeta = TOKEN_META[key] || { name: key, symbol: key, icon: '', fallbackColor: '#666' };
+      const baseMeta = collateralTokenMeta[key] || { name: key, symbol: key, icon: '', fallbackColor: '#666' };
       const resolvedIcon = baseMeta.icon || dynamicLogos[key] || '';
       return {
         key,
@@ -245,62 +276,10 @@
       return (b.balance.usdValue ?? 0) - (a.balance.usdValue ?? 0);
     });
 
-  // Quick reconnect — skip for Oisy (auto-reconnect handles it; the button
-  // would flash briefly during page load before auto-reconnect completes)
-  let pendingReconnectWallet: string | null = null;
-  $: if (!isConnected && typeof window !== 'undefined') {
-    const lastWallet = localStorage.getItem('rumi_last_wallet');
-    const wasConnected = localStorage.getItem('rumi_was_connected');
-    const isOisy = lastWallet?.toLowerCase().includes('oisy');
-    pendingReconnectWallet = (lastWallet && wasConnected && !isOisy) ? lastWallet : null;
-  } else {
-    pendingReconnectWallet = null;
-  }
-
-  const walletDisplayNames: Record<string, string> = {
-    'oisy': 'Oisy',
-    'plug': 'Plug',
-    'internet-identity': 'Internet Identity'
-  };
-
-  function getReconnectLabel(walletId: string): string {
-    return walletDisplayNames[walletId] || walletId;
-  }
-
-  function getReconnectIcon(walletId: string): string | null {
-    const icons: Record<string, string> = {
-      'oisy': '/wallets/oisy.svg',
-      'plug': '/wallets/plug.svg',
-      'internet-identity': '/main-icp-logo.png'
-    };
-    return icons[walletId] || null;
-  }
 </script>
 
 <div id="wallet-container">
   {#if !isConnected}
-    {#if pendingReconnectWallet && !connecting}
-      <!-- Quick reconnect -->
-      <div class="flex items-center gap-2">
-        <button
-          id="wallet-button"
-          class="icp-button reconnect-btn flex items-center gap-2"
-          on:click|stopPropagation={() => connectWallet(pendingReconnectWallet)}
-        >
-          {#if getReconnectIcon(pendingReconnectWallet)}
-            <img src={getReconnectIcon(pendingReconnectWallet)} alt="" class="w-4 h-4 rounded-sm" />
-          {/if}
-          Reconnect to {getReconnectLabel(pendingReconnectWallet)}
-        </button>
-        <button
-          class="icp-button-secondary"
-          on:click|stopPropagation={() => { pendingReconnectWallet = null; localStorage.removeItem('rumi_last_wallet'); localStorage.removeItem('rumi_was_connected'); showWalletDialog = true; }}
-          title="Choose a different wallet"
-        >
-          ⋯
-        </button>
-      </div>
-    {:else}
     <button
       id="wallet-button"
       class="icp-button flex items-center gap-2"
@@ -318,7 +297,6 @@
       {/if}
       {connecting ? 'Connecting...' : 'Connect Wallet'}
     </button>
-    {/if}
 
     {#if showWalletDialog}
       <div class="fixed inset-0 z-50 flex items-center justify-center p-4 min-h-screen">
@@ -806,29 +784,6 @@
   .dropdown-action-disconnect:hover {
     background: rgba(255, 255, 255, 0.05);
     color: rgba(255, 255, 255, 0.6);
-  }
-
-  /* ── Quick Reconnect ── */
-  .reconnect-btn {
-    animation: pulse-reconnect 2.5s ease-in-out infinite;
-  }
-  @keyframes pulse-reconnect {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(139, 92, 246, 0.3); }
-    50% { box-shadow: 0 0 0 6px rgba(139, 92, 246, 0); }
-  }
-  .icp-button-secondary {
-    padding: 0.4rem 0.6rem;
-    background: rgba(15, 15, 25, 0.85);
-    border: 1px solid rgba(139, 92, 246, 0.15);
-    border-radius: 0.5rem;
-    color: rgba(255, 255, 255, 0.5);
-    cursor: pointer;
-    font-size: 0.875rem;
-    transition: all 0.15s ease;
-  }
-  .icp-button-secondary:hover {
-    border-color: rgba(139, 92, 246, 0.35);
-    color: rgba(255, 255, 255, 0.8);
   }
 
   /* ── Toast container ── */

@@ -86,7 +86,7 @@
   <section class="doc-section">
     <h2 class="doc-heading">Admin Controls</h2>
     <p>The developer principal can mint icUSD directly via an <code>admin_mint_icusd</code> function. This exists as an emergency tool — for example, to refund users who lost funds due to a failed inter-canister transfer. Guardrails: each mint is capped at 1,500 icUSD with a 72-hour cooldown. Every use is recorded on-chain with a reason. See the <a href="/transparency" class="doc-link">Transparency</a> page for a full log.</p>
-    <p>Beyond minting, the developer principal can adjust all configurable protocol parameters without a timelock or governance vote. This includes: borrowing fee, liquidation bonus, redemption fee floor/ceiling, reserve redemption fee, ckStable repay fee, recovery liquidation buffer, and per-collateral settings (liquidation ratio, borrow threshold, debt ceiling, status). The developer can also enable/disable reserve redemptions and individual stablecoin tokens.</p>
+    <p>Beyond minting, the developer principal can adjust all configurable protocol parameters without a timelock or governance vote. This includes: borrowing fee, liquidation penalty, redemption fee floor/ceiling, reserve redemption fee, ckStable repay fee, recovery liquidation buffer, and per-collateral settings (liquidation ratio, borrow threshold, debt ceiling, status). The developer can also enable/disable reserve redemptions and individual stablecoin tokens.</p>
     <p>All parameter changes are recorded as on-chain events in the protocol's immutable event log. If the protocol transitions to SNS (DAO) governance, these functions would be controlled by governance proposals rather than a single principal.</p>
   </section>
 
