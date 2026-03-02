@@ -21,6 +21,11 @@ type CandidVault = record {
   icp_margin_amount : nat64;
   borrowed_icusd_amount : nat64;
 };
+type InterpolationMethod = variant { Linear };
+type RateMarker = record { cr_level : blob; multiplier : blob };
+type RateCurve = record { markers : vec RateMarker; method : InterpolationMethod };
+type SystemThreshold = variant { LiquidationRatio; BorrowThreshold; WarningCr; HealthyCr };
+type RecoveryRateMarker = record { threshold : SystemThreshold; multiplier : blob };
 type CollateralConfig = record {
   last_redemption_time : nat64;
   status : CollateralStatus;
@@ -42,7 +47,11 @@ type CollateralConfig = record {
   display_color : opt text;
   borrowing_fee : blob;
   interest_rate_apr : blob;
+  recovery_borrowing_fee : opt blob;
+  recovery_interest_rate_apr : opt blob;
   liquidation_ratio : blob;
+  healthy_cr : opt blob;
+  rate_curve : opt RateCurve;
 };
 type CollateralStatus = variant { Paused; Active; Deprecated; Sunset; Frozen };
 type CollateralTotals = record {
@@ -169,11 +178,27 @@ type Event = variant {
     amount : nat64;
     reason : text;
   };
+  set_recovery_parameters : record {
+    collateral_type : principal;
+    recovery_borrowing_fee : opt text;
+    recovery_interest_rate_apr : opt text;
+  };
   admin_vault_correction : record {
     vault_id : nat64;
     old_amount : nat64;
     new_amount : nat64;
     reason : text;
+  };
+  set_rate_curve_markers : record {
+    collateral_type : opt text;
+    markers : text;
+  };
+  set_recovery_rate_curve : record {
+    markers : text;
+  };
+  set_healthy_cr : record {
+    collateral_type : text;
+    healthy_cr : opt text;
   };
   set_liquidation_bonus : record { rate : text };
   reserve_redemption : record {
@@ -315,6 +340,7 @@ type Result_8 = variant {
   Ok : StabilityPoolLiquidationResult;
   Err : ProtocolError;
 };
+type Result_9 = variant { Ok : float64; Err : ProtocolError };
 type StabilityPoolConfig = record {
   enabled : bool;
   liquidation_discount : nat64;
@@ -406,6 +432,7 @@ service : (ProtocolArg) -> {
     ) query;
   get_treasury_principal : () -> (opt principal) query;
   get_vault_history : (nat64) -> (vec Event) query;
+  get_vault_interest_rate : (nat64) -> (Result_9) query;
   get_vaults : (opt principal) -> (vec CandidVault) query;
   http_request : (HttpRequest) -> (HttpResponse) query;
   icrc10_supported_standards : () -> (vec StandardRecord) query;
@@ -432,6 +459,10 @@ service : (ProtocolArg) -> {
   set_liquidation_bonus : (float64) -> (Result);
   set_max_partial_liquidation_ratio : (float64) -> (Result);
   set_recovery_liquidation_buffer : (float64) -> (Result);
+  set_rate_curve_markers : (opt principal, vec record { float64; float64 }) -> (Result);
+  set_recovery_parameters : (principal, opt float64, opt float64) -> (Result);
+  set_recovery_rate_curve : (vec record { text; float64 }) -> (Result);
+  set_healthy_cr : (principal, opt float64) -> (Result);
   set_recovery_target_cr : (float64) -> (Result);
   set_redemption_fee_ceiling : (float64) -> (Result);
   set_redemption_fee_floor : (float64) -> (Result);

@@ -51,6 +51,21 @@ pub const DEFAULT_RECOVERY_TARGET_CR: Ratio = Ratio::new(dec!(1.55)); // 155% �
 pub const DEFAULT_RECOVERY_LIQUIDATION_BUFFER: Ratio = Ratio::new(dec!(0.05)); // 5% above recovery threshold
 pub const DEFAULT_INTEREST_RATE_APR: Ratio = Ratio::new(dec!(0.0)); // 0% — placeholder for future accrual
 
+/// Default Layer 1 multipliers at each CR marker
+pub const DEFAULT_RATE_MULTIPLIER_HEALTHY: Ratio = Ratio::new(dec!(1.0));
+pub const DEFAULT_RATE_MULTIPLIER_WARNING: Ratio = Ratio::new(dec!(1.75));
+pub const DEFAULT_RATE_MULTIPLIER_BORROW_THRESHOLD: Ratio = Ratio::new(dec!(2.5));
+pub const DEFAULT_RATE_MULTIPLIER_LIQUIDATION: Ratio = Ratio::new(dec!(5.0));
+
+/// Default Layer 2 (recovery) multipliers
+pub const DEFAULT_RECOVERY_MULTIPLIER_HEALTHY: Ratio = Ratio::new(dec!(1.0));
+pub const DEFAULT_RECOVERY_MULTIPLIER_WARNING: Ratio = Ratio::new(dec!(1.15));
+pub const DEFAULT_RECOVERY_MULTIPLIER_BORROW_THRESHOLD: Ratio = Ratio::new(dec!(1.33));
+pub const DEFAULT_RECOVERY_MULTIPLIER_LIQUIDATION: Ratio = Ratio::new(dec!(2.0));
+
+/// Default healthy CR multiplier (healthy_cr = this * borrow_threshold_ratio)
+pub const DEFAULT_HEALTHY_CR_MULTIPLIER: Ratio = Ratio::new(dec!(1.5));
+
 /// Collateral type identified by its ICRC-1 ledger canister principal.
 pub type CollateralType = Principal;
 
@@ -149,6 +164,50 @@ pub enum PriceSource {
     },
 }
 
+/// How to interpolate between rate curve markers.
+/// Linear for now; enum allows adding Exponential, Polynomial, etc. via upgrade.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum InterpolationMethod {
+    Linear,
+}
+
+impl Default for InterpolationMethod {
+    fn default() -> Self {
+        InterpolationMethod::Linear
+    }
+}
+
+/// A point on a rate curve: at this CR level, apply this multiplier to the base rate.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct RateMarker {
+    pub cr_level: Ratio,
+    pub multiplier: Ratio,
+}
+
+/// A per-asset rate curve: ordered markers + interpolation method.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct RateCurve {
+    pub markers: Vec<RateMarker>,  // sorted by cr_level ascending
+    pub method: InterpolationMethod,
+}
+
+/// Named system-wide thresholds for the recovery rate curve (Layer 2).
+/// These resolve to debt-weighted averages at runtime.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum SystemThreshold {
+    LiquidationRatio,
+    BorrowThreshold,
+    WarningCr,
+    HealthyCr,
+}
+
+/// A recovery rate marker: at this named threshold, apply this multiplier.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct RecoveryRateMarker {
+    pub threshold: SystemThreshold,
+    pub multiplier: Ratio,
+}
+
 /// Per-collateral-type configuration. Each supported collateral token has one of these.
 #[derive(candid::CandidType, Clone, Debug, serde::Deserialize, Serialize)]
 pub struct CollateralConfig {
@@ -194,9 +253,22 @@ pub struct CollateralConfig {
     /// Defaults to 0 for backward compat (no minimum enforced for legacy configs).
     #[serde(default)]
     pub min_collateral_deposit: u64,
+    /// Borrowing fee override during Recovery mode. None = use normal borrowing_fee.
+    #[serde(default)]
+    pub recovery_borrowing_fee: Option<Ratio>,
+    /// Interest rate override during Recovery mode. None = use normal interest_rate_apr.
+    #[serde(default)]
+    pub recovery_interest_rate_apr: Option<Ratio>,
     /// Hex color for frontend display (e.g., "#F7931A"). Optional for backward compat.
     #[serde(default)]
     pub display_color: Option<String>,
+    /// Admin-configurable "healthy" CR. Default: 1.5 * borrow_threshold_ratio.
+    /// None = use default. Must be > borrow_threshold_ratio if set.
+    #[serde(default)]
+    pub healthy_cr: Option<Ratio>,
+    /// Per-asset rate curve markers. None = use global_rate_curve from State.
+    #[serde(default)]
+    pub rate_curve: Option<RateCurve>,
 }
 
 impl PartialEq for CollateralConfig {
@@ -221,7 +293,11 @@ impl PartialEq for CollateralConfig {
             && self.last_redemption_time == other.last_redemption_time
             && self.recovery_target_cr == other.recovery_target_cr
             && self.min_collateral_deposit == other.min_collateral_deposit
+            && self.recovery_borrowing_fee == other.recovery_borrowing_fee
+            && self.recovery_interest_rate_apr == other.recovery_interest_rate_apr
             && self.display_color == other.display_color
+            && self.healthy_cr == other.healthy_cr
+            && self.rate_curve == other.rate_curve
     }
 }
 
@@ -361,6 +437,18 @@ pub struct State {
     // Multi-collateral support
     pub collateral_configs: BTreeMap<CollateralType, CollateralConfig>,
     pub collateral_to_vault_ids: BTreeMap<CollateralType, BTreeSet<u64>>,
+
+    // Dynamic interest rates (Layer 1 global + Layer 2 recovery)
+    /// Global default rate curve (used when an asset has no per-asset rate_curve).
+    pub global_rate_curve: RateCurve,
+    /// Recovery mode rate curve (Layer 2, system-wide). Named thresholds resolved at runtime.
+    pub recovery_rate_curve: Vec<RecoveryRateMarker>,
+    /// Cached debt-weighted average of per-asset recovery CRs (borrow_threshold + buffer).
+    pub weighted_avg_recovery_cr: Ratio,
+    /// Cached debt-weighted average of per-asset warning CRs (2 * recovery_cr - borrow_threshold).
+    pub weighted_avg_warning_cr: Ratio,
+    /// Cached debt-weighted average of per-asset healthy CRs (override or 1.5 * borrow_threshold).
+    pub weighted_avg_healthy_cr: Ratio,
 }
 
 impl From<InitArg> for State {
@@ -455,11 +543,35 @@ impl From<InitArg> for State {
                     last_redemption_time: 0,
                     recovery_target_cr: DEFAULT_RECOVERY_TARGET_CR,
                     min_collateral_deposit: 100_000, // 0.001 ICP
+                    recovery_borrowing_fee: None,
+                    recovery_interest_rate_apr: None,
                     display_color: Some("#2DD4BF".to_string()),
+                    healthy_cr: None,
+                    rate_curve: None,
                 });
                 configs
             },
             collateral_to_vault_ids: BTreeMap::new(),
+
+            // Dynamic interest rates
+            global_rate_curve: RateCurve {
+                markers: vec![
+                    RateMarker { cr_level: Ratio::new(dec!(0)), multiplier: DEFAULT_RATE_MULTIPLIER_LIQUIDATION },
+                    RateMarker { cr_level: Ratio::new(dec!(0)), multiplier: DEFAULT_RATE_MULTIPLIER_BORROW_THRESHOLD },
+                    RateMarker { cr_level: Ratio::new(dec!(0)), multiplier: DEFAULT_RATE_MULTIPLIER_WARNING },
+                    RateMarker { cr_level: Ratio::new(dec!(0)), multiplier: DEFAULT_RATE_MULTIPLIER_HEALTHY },
+                ],
+                method: InterpolationMethod::Linear,
+            },
+            recovery_rate_curve: vec![
+                RecoveryRateMarker { threshold: SystemThreshold::LiquidationRatio, multiplier: DEFAULT_RECOVERY_MULTIPLIER_LIQUIDATION },
+                RecoveryRateMarker { threshold: SystemThreshold::BorrowThreshold, multiplier: DEFAULT_RECOVERY_MULTIPLIER_BORROW_THRESHOLD },
+                RecoveryRateMarker { threshold: SystemThreshold::WarningCr, multiplier: DEFAULT_RECOVERY_MULTIPLIER_WARNING },
+                RecoveryRateMarker { threshold: SystemThreshold::HealthyCr, multiplier: DEFAULT_RECOVERY_MULTIPLIER_HEALTHY },
+            ],
+            weighted_avg_recovery_cr: Ratio::new(dec!(0)),
+            weighted_avg_warning_cr: Ratio::new(dec!(0)),
+            weighted_avg_healthy_cr: Ratio::new(dec!(0)),
         }
     }
 }
@@ -665,6 +777,49 @@ impl State {
         Ratio::from(weighted_sum)
     }
 
+    /// Compute debt-weighted averages of per-asset recovery_cr, warning_cr, and healthy_cr.
+    /// Same loop pattern as compute_dynamic_recovery_threshold, but calculates 3 extra averages.
+    /// Returns (weighted_avg_recovery_cr, weighted_avg_warning_cr, weighted_avg_healthy_cr).
+    pub fn compute_weighted_cr_averages(&self) -> (Ratio, Ratio, Ratio) {
+        let total_debt = self.total_borrowed_icusd_amount();
+        if total_debt == ICUSD::new(0) {
+            // No debt: use defaults based on first collateral type or global defaults
+            return (
+                RECOVERY_COLLATERAL_RATIO + self.recovery_liquidation_buffer,
+                // warning = 2 * recovery_cr - borrow_threshold = borrow + 2*buffer
+                RECOVERY_COLLATERAL_RATIO + self.recovery_liquidation_buffer + self.recovery_liquidation_buffer,
+                RECOVERY_COLLATERAL_RATIO * DEFAULT_HEALTHY_CR_MULTIPLIER,
+            );
+        }
+        let total_debt_dec = Decimal::from_u64(total_debt.to_u64())
+            .unwrap_or(Decimal::ZERO);
+
+        let mut w_recovery = Decimal::ZERO;
+        let mut w_warning = Decimal::ZERO;
+        let mut w_healthy = Decimal::ZERO;
+
+        for (ct, config) in &self.collateral_configs {
+            let debt_i = self.total_debt_for_collateral(ct);
+            if debt_i == ICUSD::new(0) {
+                continue;
+            }
+            let weight = Decimal::from_u64(debt_i.to_u64())
+                .unwrap_or(Decimal::ZERO) / total_debt_dec;
+
+            let recovery_cr = config.borrow_threshold_ratio.0 + self.recovery_liquidation_buffer.0;
+            let warning_cr = recovery_cr + recovery_cr - config.borrow_threshold_ratio.0;
+            let healthy_cr = config.healthy_cr
+                .map(|h| h.0)
+                .unwrap_or(config.borrow_threshold_ratio.0 * DEFAULT_HEALTHY_CR_MULTIPLIER.0);
+
+            w_recovery += weight * recovery_cr;
+            w_warning += weight * warning_cr;
+            w_healthy += weight * healthy_cr;
+        }
+
+        (Ratio::from(w_recovery), Ratio::from(w_warning), Ratio::from(w_healthy))
+    }
+
     pub fn get_redemption_fee(&self, redeemed_amount: ICUSD) -> Ratio {
         let current_time = ic_cdk::api::time();
         let last_redemption_time = self.last_redemption_time;
@@ -680,11 +835,7 @@ impl State {
     }
 
     pub fn get_borrowing_fee(&self) -> Ratio {
-        match self.mode {
-            Mode::Recovery => Ratio::from(Decimal::ZERO),
-            Mode::GeneralAvailability => self.fee,
-            Mode::ReadOnly => self.fee,
-        }
+        self.fee
     }
 
     // --- Multi-collateral helper methods ---
@@ -735,13 +886,216 @@ impl State {
 
     /// Get borrowing fee for a specific collateral type
     pub fn get_borrowing_fee_for(&self, ct: &CollateralType) -> Ratio {
+        let config = self.collateral_configs.get(ct);
         if self.mode == Mode::Recovery {
-            return Ratio::from(Decimal::ZERO);
+            // Use recovery override if set, otherwise normal fee
+            return config
+                .and_then(|c| c.recovery_borrowing_fee)
+                .or_else(|| config.map(|c| c.borrowing_fee))
+                .unwrap_or(self.fee);
         }
-        self.collateral_configs
-            .get(ct)
-            .map(|c| c.borrowing_fee)
-            .unwrap_or(self.fee)
+        config.map(|c| c.borrowing_fee).unwrap_or(self.fee)
+    }
+
+    /// Get interest rate for a specific collateral type (recovery-aware)
+    pub fn get_interest_rate_for(&self, ct: &CollateralType) -> Ratio {
+        let config = self.collateral_configs.get(ct);
+        if self.mode == Mode::Recovery {
+            return config
+                .and_then(|c| c.recovery_interest_rate_apr)
+                .or_else(|| config.map(|c| c.interest_rate_apr))
+                .unwrap_or(DEFAULT_INTEREST_RATE_APR);
+        }
+        config.map(|c| c.interest_rate_apr).unwrap_or(DEFAULT_INTEREST_RATE_APR)
+    }
+
+    /// Per-asset recovery CR = borrow_threshold_ratio + recovery_liquidation_buffer.
+    /// E.g., 150% + 5% = 155%.
+    pub fn get_recovery_cr_for(&self, ct: &CollateralType) -> Ratio {
+        let borrow_threshold = self.collateral_configs.get(ct)
+            .map(|c| c.borrow_threshold_ratio)
+            .unwrap_or(RECOVERY_COLLATERAL_RATIO);
+        borrow_threshold + self.recovery_liquidation_buffer
+    }
+
+    /// Per-asset warning CR = 2 * recovery_cr - borrow_threshold.
+    /// E.g., 2 * 155% - 150% = 160%.
+    pub fn get_warning_cr_for(&self, ct: &CollateralType) -> Ratio {
+        let borrow_threshold = self.collateral_configs.get(ct)
+            .map(|c| c.borrow_threshold_ratio)
+            .unwrap_or(RECOVERY_COLLATERAL_RATIO);
+        let recovery_cr = borrow_threshold + self.recovery_liquidation_buffer;
+        // 2 * recovery_cr - borrow_threshold
+        recovery_cr + recovery_cr - borrow_threshold
+    }
+
+    /// Per-asset healthy CR = admin override if set, else 1.5 * borrow_threshold.
+    /// E.g., 1.5 * 150% = 225%.
+    pub fn get_healthy_cr_for(&self, ct: &CollateralType) -> Ratio {
+        let config = self.collateral_configs.get(ct);
+        // Use admin override if present
+        if let Some(healthy) = config.and_then(|c| c.healthy_cr) {
+            return healthy;
+        }
+        // Default: 1.5 * borrow_threshold_ratio
+        let borrow_threshold = config
+            .map(|c| c.borrow_threshold_ratio)
+            .unwrap_or(RECOVERY_COLLATERAL_RATIO);
+        borrow_threshold * DEFAULT_HEALTHY_CR_MULTIPLIER
+    }
+
+    // --- Dynamic Interest Rate Logic ---
+
+    /// Linearly interpolate a multiplier between sorted (cr_level, multiplier) pairs.
+    /// - If cr >= highest cr_level: returns the multiplier at the highest marker.
+    /// - If cr <= lowest cr_level: returns the multiplier at the lowest marker.
+    /// - Between two markers: linearly interpolate.
+    /// `resolved_markers` must be sorted by cr_level ascending and non-empty.
+    fn interpolate_multiplier(resolved_markers: &[(Ratio, Ratio)], cr: Ratio) -> Ratio {
+        if resolved_markers.is_empty() {
+            return Ratio::new(dec!(1.0));
+        }
+        let first = &resolved_markers[0];
+        if cr <= first.0 {
+            return first.1;
+        }
+        let last = &resolved_markers[resolved_markers.len() - 1];
+        if cr >= last.0 {
+            return last.1;
+        }
+        // Find the two surrounding markers
+        for i in 0..resolved_markers.len() - 1 {
+            let lo = &resolved_markers[i];
+            let hi = &resolved_markers[i + 1];
+            if cr >= lo.0 && cr <= hi.0 {
+                let range = hi.0.0 - lo.0.0;
+                if range == Decimal::ZERO {
+                    return lo.1;
+                }
+                let t = (cr.0 - lo.0.0) / range;
+                let multiplier = lo.1.0 + t * (hi.1.0 - lo.1.0);
+                return Ratio::from(multiplier);
+            }
+        }
+        // Shouldn't reach here if markers are sorted, but fallback
+        Ratio::new(dec!(1.0))
+    }
+
+    /// Resolve the global_rate_curve markers to concrete (cr_level, multiplier) pairs
+    /// for a given collateral type, using that asset's own threshold values.
+    /// Markers in global_rate_curve store cr_level=0 as placeholders; the actual CR levels
+    /// come from the asset's liquidation_ratio, borrow_threshold, warning_cr, healthy_cr.
+    fn resolve_layer1_markers(&self, ct: &CollateralType) -> Vec<(Ratio, Ratio)> {
+        let config = self.collateral_configs.get(ct);
+
+        // If asset has a per-asset rate_curve, use it directly (markers already have concrete CRs)
+        if let Some(curve) = config.and_then(|c| c.rate_curve.as_ref()) {
+            return curve.markers.iter()
+                .map(|m| (m.cr_level, m.multiplier))
+                .collect();
+        }
+
+        // Use global_rate_curve with per-asset thresholds
+        let liq_ratio = self.get_liquidation_ratio_for(ct);
+        let borrow_threshold = config
+            .map(|c| c.borrow_threshold_ratio)
+            .unwrap_or(RECOVERY_COLLATERAL_RATIO);
+        let warning_cr = self.get_warning_cr_for(ct);
+        let healthy_cr = self.get_healthy_cr_for(ct);
+
+        // Map global markers to per-asset CR levels.
+        // Global curve has exactly 4 markers in order: liq, borrow, warning, healthy.
+        let cr_levels = [liq_ratio, borrow_threshold, warning_cr, healthy_cr];
+        let markers = &self.global_rate_curve.markers;
+
+        let mut resolved: Vec<(Ratio, Ratio)> = markers.iter()
+            .enumerate()
+            .map(|(i, m)| {
+                let cr = if i < cr_levels.len() { cr_levels[i] } else { m.cr_level };
+                (cr, m.multiplier)
+            })
+            .collect();
+        resolved.sort_by(|a, b| a.0.0.cmp(&b.0.0));
+        resolved
+    }
+
+    /// Resolve Layer 2 recovery rate markers to concrete (cr_level, multiplier) pairs
+    /// using the cached weighted average thresholds.
+    fn resolve_layer2_markers(&self) -> Vec<(Ratio, Ratio)> {
+        let mut resolved: Vec<(Ratio, Ratio)> = self.recovery_rate_curve.iter()
+            .map(|m| {
+                let cr = match m.threshold {
+                    SystemThreshold::LiquidationRatio => self.compute_weighted_liquidation_ratio(),
+                    SystemThreshold::BorrowThreshold => self.recovery_mode_threshold,
+                    SystemThreshold::WarningCr => self.weighted_avg_warning_cr,
+                    SystemThreshold::HealthyCr => self.weighted_avg_healthy_cr,
+                };
+                (cr, m.multiplier)
+            })
+            .collect();
+        resolved.sort_by(|a, b| a.0.0.cmp(&b.0.0));
+        resolved
+    }
+
+    /// Compute debt-weighted average of per-asset liquidation_ratio values.
+    fn compute_weighted_liquidation_ratio(&self) -> Ratio {
+        let total_debt = self.total_borrowed_icusd_amount();
+        if total_debt == ICUSD::new(0) {
+            return MINIMUM_COLLATERAL_RATIO;
+        }
+        let total_debt_dec = Decimal::from_u64(total_debt.to_u64())
+            .unwrap_or(Decimal::ZERO);
+        let mut weighted_sum = Decimal::ZERO;
+        for (ct, config) in &self.collateral_configs {
+            let debt_i = self.total_debt_for_collateral(ct);
+            if debt_i == ICUSD::new(0) {
+                continue;
+            }
+            let weight = Decimal::from_u64(debt_i.to_u64())
+                .unwrap_or(Decimal::ZERO) / total_debt_dec;
+            weighted_sum += weight * config.liquidation_ratio.0;
+        }
+        if weighted_sum == Decimal::ZERO {
+            return MINIMUM_COLLATERAL_RATIO;
+        }
+        Ratio::from(weighted_sum)
+    }
+
+    /// Get the dynamic interest rate for a vault, considering both Layer 1 (per-vault CR)
+    /// and Layer 2 (system-wide recovery multiplier).
+    ///
+    /// 1. If recovery_interest_rate_apr is set and system is in Recovery, use static override.
+    /// 2. Get base rate from CollateralConfig.
+    /// 3. Layer 1: multiply by CR-dependent multiplier from rate curve.
+    /// 4. Layer 2 (Recovery only): multiply by TCR-dependent recovery multiplier.
+    pub fn get_dynamic_interest_rate_for(&self, ct: &CollateralType, vault_cr: Ratio) -> Ratio {
+        let config = self.collateral_configs.get(ct);
+
+        // Static override escape valve
+        if self.mode == Mode::Recovery {
+            if let Some(static_rate) = config.and_then(|c| c.recovery_interest_rate_apr) {
+                return static_rate;
+            }
+        }
+
+        // Base rate
+        let base_rate = config
+            .map(|c| c.interest_rate_apr)
+            .unwrap_or(DEFAULT_INTEREST_RATE_APR);
+
+        // Layer 1: per-vault CR multiplier
+        let layer1_markers = self.resolve_layer1_markers(ct);
+        let layer1_mult = Self::interpolate_multiplier(&layer1_markers, vault_cr);
+        let layer1_rate = base_rate * layer1_mult;
+
+        // Layer 2: system-wide recovery multiplier (only in Recovery mode)
+        if self.mode == Mode::Recovery {
+            let layer2_markers = self.resolve_layer2_markers();
+            let layer2_mult = Self::interpolate_multiplier(&layer2_markers, self.total_collateral_ratio);
+            return layer1_rate * layer2_mult;
+        }
+
+        layer1_rate
     }
 
     /// Get liquidation bonus for a specific collateral type
@@ -919,6 +1273,12 @@ impl State {
         // Compute the debt-weighted recovery threshold and cache it
         let dynamic_threshold = self.compute_dynamic_recovery_threshold();
         self.recovery_mode_threshold = dynamic_threshold;
+
+        // Cache weighted CR averages for dynamic interest rate computation
+        let (w_recovery, w_warning, w_healthy) = self.compute_weighted_cr_averages();
+        self.weighted_avg_recovery_cr = w_recovery;
+        self.weighted_avg_warning_cr = w_warning;
+        self.weighted_avg_healthy_cr = w_healthy;
 
         if new_total_collateral_ratio < dynamic_threshold {
             self.mode = Mode::Recovery;
@@ -1777,5 +2137,183 @@ mod tests {
         let cr_f64 = cr_after.to_f64();
         assert!(cr_f64 > 1.54 && cr_f64 < 1.56,
             "CR after should be approximately 1.55 (155%), got {:.4}", cr_f64);
+    }
+
+    // --- Dynamic Interest Rate Tests ---
+
+    #[test]
+    fn test_interpolate_multiplier_at_and_above_highest() {
+        let markers = vec![
+            (Ratio::from_f64(1.33), Ratio::from_f64(5.0)),
+            (Ratio::from_f64(1.50), Ratio::from_f64(2.5)),
+            (Ratio::from_f64(1.60), Ratio::from_f64(1.75)),
+            (Ratio::from_f64(2.25), Ratio::from_f64(1.0)),
+        ];
+        // At healthy CR: 1.0x
+        let m = State::interpolate_multiplier(&markers, Ratio::from_f64(2.25));
+        assert!((m.to_f64() - 1.0).abs() < 0.001);
+        // Above healthy CR: still 1.0x
+        let m = State::interpolate_multiplier(&markers, Ratio::from_f64(5.0));
+        assert!((m.to_f64() - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_interpolate_multiplier_at_and_below_lowest() {
+        let markers = vec![
+            (Ratio::from_f64(1.33), Ratio::from_f64(5.0)),
+            (Ratio::from_f64(1.50), Ratio::from_f64(2.5)),
+            (Ratio::from_f64(2.25), Ratio::from_f64(1.0)),
+        ];
+        // At liquidation ratio: 5.0x
+        let m = State::interpolate_multiplier(&markers, Ratio::from_f64(1.33));
+        assert!((m.to_f64() - 5.0).abs() < 0.001);
+        // Below: still 5.0x
+        let m = State::interpolate_multiplier(&markers, Ratio::from_f64(1.0));
+        assert!((m.to_f64() - 5.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_interpolate_multiplier_midpoint() {
+        let markers = vec![
+            (Ratio::from_f64(1.50), Ratio::from_f64(2.5)),
+            (Ratio::from_f64(1.60), Ratio::from_f64(1.75)),
+        ];
+        // Midpoint between 150% and 160% => t=0.5 => 2.5 - 0.5*(2.5-1.75) = 2.125
+        let m = State::interpolate_multiplier(&markers, Ratio::from_f64(1.55));
+        assert!((m.to_f64() - 2.125).abs() < 0.001,
+            "Expected 2.125, got {}", m.to_f64());
+    }
+
+    #[test]
+    fn test_interpolate_multiplier_empty_markers() {
+        let markers: Vec<(Ratio, Ratio)> = vec![];
+        let m = State::interpolate_multiplier(&markers, Ratio::from_f64(1.5));
+        assert!((m.to_f64() - 1.0).abs() < 0.001, "Empty markers should return 1.0x");
+    }
+
+    #[test]
+    fn test_derived_cr_getters() {
+        let state = State::from(InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: Principal::anonymous(),
+            fee_e8s: 0,
+            developer_principal: Principal::anonymous(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        });
+        let icp = state.icp_ledger_principal;
+
+        // ICP: borrow_threshold=1.5, buffer=0.05
+        // recovery_cr = 1.5 + 0.05 = 1.55
+        let recovery_cr = state.get_recovery_cr_for(&icp);
+        assert!((recovery_cr.to_f64() - 1.55).abs() < 0.001,
+            "Expected recovery_cr 1.55, got {}", recovery_cr.to_f64());
+
+        // warning_cr = 2 * 1.55 - 1.5 = 1.6
+        let warning_cr = state.get_warning_cr_for(&icp);
+        assert!((warning_cr.to_f64() - 1.60).abs() < 0.001,
+            "Expected warning_cr 1.60, got {}", warning_cr.to_f64());
+
+        // healthy_cr = 1.5 * 1.5 = 2.25
+        let healthy_cr = state.get_healthy_cr_for(&icp);
+        assert!((healthy_cr.to_f64() - 2.25).abs() < 0.001,
+            "Expected healthy_cr 2.25, got {}", healthy_cr.to_f64());
+    }
+
+    #[test]
+    fn test_dynamic_rate_healthy_vault_normal_mode() {
+        let state = State::from(InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: Principal::anonymous(),
+            fee_e8s: 0,
+            developer_principal: Principal::anonymous(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        });
+        let icp = state.icp_ledger_principal;
+
+        // A vault at 300% CR (well above healthy 225%) → multiplier = 1.0x
+        let rate = state.get_dynamic_interest_rate_for(&icp, Ratio::from_f64(3.0));
+        let base = DEFAULT_INTEREST_RATE_APR.to_f64();
+        assert!((rate.to_f64() - base).abs() < 0.0001,
+            "Healthy vault should get base rate {}, got {}", base, rate.to_f64());
+    }
+
+    #[test]
+    fn test_dynamic_rate_risky_vault_normal_mode() {
+        let state = State::from(InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: Principal::anonymous(),
+            fee_e8s: 0,
+            developer_principal: Principal::anonymous(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        });
+        let icp = state.icp_ledger_principal;
+
+        // Vault at 155% CR (between borrow_threshold 150% and warning_cr 160%)
+        // Expected: interpolation between 2.5x and 1.75x at t=0.5 => 2.125x
+        let rate = state.get_dynamic_interest_rate_for(&icp, Ratio::from_f64(1.55));
+        let expected = DEFAULT_INTEREST_RATE_APR.to_f64() * 2.125;
+        assert!((rate.to_f64() - expected).abs() < 0.001,
+            "Expected rate {}, got {}", expected, rate.to_f64());
+    }
+
+    #[test]
+    fn test_dynamic_rate_at_liquidation_ratio() {
+        let state = State::from(InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: Principal::anonymous(),
+            fee_e8s: 0,
+            developer_principal: Principal::anonymous(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        });
+        let icp = state.icp_ledger_principal;
+
+        // Vault at exactly liquidation_ratio (133%) → 5.0x multiplier
+        let rate = state.get_dynamic_interest_rate_for(&icp, Ratio::from_f64(1.33));
+        let expected = DEFAULT_INTEREST_RATE_APR.to_f64() * 5.0;
+        assert!((rate.to_f64() - expected).abs() < 0.001,
+            "Expected rate {}, got {}", expected, rate.to_f64());
+    }
+
+    #[test]
+    fn test_static_override_in_recovery() {
+        let mut state = State::from(InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: Principal::anonymous(),
+            fee_e8s: 0,
+            developer_principal: Principal::anonymous(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        });
+        let icp = state.icp_ledger_principal;
+        state.mode = Mode::Recovery;
+
+        // Set static override
+        if let Some(config) = state.collateral_configs.get_mut(&icp) {
+            config.recovery_interest_rate_apr = Some(Ratio::from_f64(0.10)); // 10%
+        }
+
+        // Should return the static override regardless of vault CR
+        let rate = state.get_dynamic_interest_rate_for(&icp, Ratio::from_f64(3.0));
+        assert!((rate.to_f64() - 0.10).abs() < 0.001,
+            "Expected static override 0.10, got {}", rate.to_f64());
     }
 }
