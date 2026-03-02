@@ -1503,6 +1503,173 @@ async fn set_recovery_parameters(
     Ok(())
 }
 
+/// Set rate curve markers for a collateral type or the global default.
+/// `collateral_type`: None = update global default curve; Some(principal) = per-asset curve.
+/// `markers`: Vec of (cr_level, multiplier) pairs, sorted ascending by cr_level.
+#[candid_method(update)]
+#[update]
+async fn set_rate_curve_markers(
+    collateral_type: Option<Principal>,
+    markers: Vec<(f64, f64)>,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set rate curve markers".to_string(),
+        ));
+    }
+    if markers.len() < 2 {
+        return Err(ProtocolError::GenericError(
+            "Rate curve must have at least 2 markers".to_string(),
+        ));
+    }
+    // Validate sorted ascending and positive multipliers
+    for i in 0..markers.len() {
+        if markers[i].1 <= 0.0 {
+            return Err(ProtocolError::GenericError(
+                format!("Multiplier at index {} must be positive", i),
+            ));
+        }
+        if i > 0 && markers[i].0 <= markers[i - 1].0 {
+            return Err(ProtocolError::GenericError(
+                "Markers must be sorted ascending by cr_level".to_string(),
+            ));
+        }
+    }
+    // Validate collateral type exists if specified
+    if let Some(ct) = collateral_type {
+        let exists = read_state(|s| s.collateral_configs.contains_key(&ct));
+        if !exists {
+            return Err(ProtocolError::GenericError("Unknown collateral type".to_string()));
+        }
+    }
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_rate_curve_markers(
+            s, collateral_type, markers.clone(),
+        );
+    });
+    log!(INFO, "[set_rate_curve_markers] collateral={:?}, markers={:?}", collateral_type, markers);
+    Ok(())
+}
+
+/// Set the recovery rate curve (Layer 2 system-wide multipliers).
+/// `markers`: Vec of (SystemThreshold variant name, multiplier) pairs.
+#[candid_method(update)]
+#[update]
+async fn set_recovery_rate_curve(
+    markers: Vec<(String, f64)>,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set recovery rate curve".to_string(),
+        ));
+    }
+    if markers.len() < 2 {
+        return Err(ProtocolError::GenericError(
+            "Recovery rate curve must have at least 2 markers".to_string(),
+        ));
+    }
+    // Parse and validate threshold names
+    use rumi_protocol_backend::state::SystemThreshold;
+    let mut parsed: Vec<(SystemThreshold, f64)> = Vec::new();
+    for (thresh_str, mult) in &markers {
+        if *mult <= 0.0 {
+            return Err(ProtocolError::GenericError(
+                format!("Multiplier for {} must be positive", thresh_str),
+            ));
+        }
+        let threshold = match thresh_str.as_str() {
+            "LiquidationRatio" => SystemThreshold::LiquidationRatio,
+            "BorrowThreshold" => SystemThreshold::BorrowThreshold,
+            "WarningCr" => SystemThreshold::WarningCr,
+            "HealthyCr" => SystemThreshold::HealthyCr,
+            _ => return Err(ProtocolError::GenericError(
+                format!("Unknown threshold: {}. Valid: LiquidationRatio, BorrowThreshold, WarningCr, HealthyCr", thresh_str),
+            )),
+        };
+        parsed.push((threshold, *mult));
+    }
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_recovery_rate_curve(s, parsed);
+    });
+    log!(INFO, "[set_recovery_rate_curve] markers={:?}", markers);
+    Ok(())
+}
+
+/// Set the healthy CR override for a collateral type.
+/// `healthy_cr`: None = reset to default (1.5x borrow threshold).
+#[candid_method(update)]
+#[update]
+async fn set_healthy_cr(
+    collateral_type: Principal,
+    healthy_cr: Option<f64>,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set healthy CR".to_string(),
+        ));
+    }
+    let exists = read_state(|s| s.collateral_configs.contains_key(&collateral_type));
+    if !exists {
+        return Err(ProtocolError::GenericError("Unknown collateral type".to_string()));
+    }
+    // Validate healthy_cr > borrow_threshold if set
+    if let Some(cr) = healthy_cr {
+        let borrow_threshold = read_state(|s| {
+            s.collateral_configs.get(&collateral_type)
+                .map(|c| c.borrow_threshold_ratio.to_f64())
+                .unwrap_or(1.5)
+        });
+        if cr <= borrow_threshold {
+            return Err(ProtocolError::GenericError(
+                format!("healthy_cr ({}) must be greater than borrow_threshold_ratio ({})", cr, borrow_threshold),
+            ));
+        }
+    }
+    let ratio = healthy_cr
+        .map(|f| Decimal::try_from(f))
+        .transpose()
+        .map_err(|_| ProtocolError::GenericError("Invalid healthy_cr value".to_string()))?
+        .map(Ratio::from);
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_healthy_cr(s, collateral_type, ratio);
+    });
+    log!(INFO, "[set_healthy_cr] collateral={}, healthy_cr={:?}", collateral_type, healthy_cr);
+    Ok(())
+}
+
+/// Query: get the current dynamic interest rate for a specific vault.
+#[candid_method(query)]
+#[query]
+fn get_vault_interest_rate(vault_id: u64) -> Result<f64, ProtocolError> {
+    read_state(|s| {
+        let vault = s.vault_id_to_vaults.get(&vault_id)
+            .ok_or_else(|| ProtocolError::GenericError(format!("Vault {} not found", vault_id)))?;
+        let config = s.get_collateral_config(&vault.collateral_type)
+            .ok_or_else(|| ProtocolError::GenericError("Unknown collateral type".to_string()))?;
+        // Compute vault CR
+        let price = config.last_price
+            .ok_or_else(|| ProtocolError::GenericError("No price available for collateral".to_string()))?;
+        let price_dec = Decimal::from_f64(price).unwrap_or(Decimal::ZERO);
+        let vault_value = rumi_protocol_backend::numeric::collateral_usd_value(
+            vault.collateral_amount,
+            price_dec,
+            config.decimals,
+        );
+        let vault_cr = if vault.borrowed_icusd_amount == ICUSD::new(0) {
+            Ratio::from(Decimal::MAX)
+        } else {
+            vault_value / vault.borrowed_icusd_amount
+        };
+        Ok(s.get_dynamic_interest_rate_for(&vault.collateral_type, vault_cr).to_f64())
+    })
+}
+
 // Add guard cleanup method for developers to resolve stuck operations
 #[candid_method(update)]
 #[update]
