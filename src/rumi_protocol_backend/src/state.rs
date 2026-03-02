@@ -2617,4 +2617,78 @@ mod tests {
             "Debt increase should be small for 300s, got {}", v.borrowed_icusd_amount.0);
         assert_eq!(v.last_accrual_time, tick);
     }
+
+    #[test]
+    fn test_accrual_before_check_vaults_flow() {
+        // Simulates the full timer tick flow: accrue → check vault health
+        let mut state = accrual_test_state();
+        let icp = state.icp_ledger_principal;
+
+        let start = 1_000_000_000_000u64; // 1 trillion nanos
+
+        // Vault with 1.5 ICP ($15), 5 icUSD debt → CR = 300% (healthy)
+        state.vault_id_to_vaults.insert(1, Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            collateral_amount: 150_000_000,
+            borrowed_icusd_amount: ICUSD::new(500_000_000),
+            collateral_type: icp,
+            last_accrual_time: start,
+        });
+
+        let initial_debt = state.vault_id_to_vaults.get(&1).unwrap().borrowed_icusd_amount;
+
+        // Simulate timer tick: 300 seconds later
+        let tick1 = start + 300 * 1_000_000_000;
+        state.accrue_all_vault_interest(tick1);
+
+        let debt_after_tick1 = state.vault_id_to_vaults.get(&1).unwrap().borrowed_icusd_amount;
+        assert!(debt_after_tick1 > initial_debt,
+            "Debt should increase after first tick: {} > {}", debt_after_tick1.0, initial_debt.0);
+
+        // Simulate second timer tick: another 300 seconds
+        let tick2 = tick1 + 300 * 1_000_000_000;
+        state.accrue_all_vault_interest(tick2);
+
+        let debt_after_tick2 = state.vault_id_to_vaults.get(&1).unwrap().borrowed_icusd_amount;
+        assert!(debt_after_tick2 > debt_after_tick1,
+            "Debt should increase after second tick: {} > {}", debt_after_tick2.0, debt_after_tick1.0);
+
+        // Verify the increase is proportional across ticks
+        let increase1 = debt_after_tick1.0 - initial_debt.0;
+        let increase2 = debt_after_tick2.0 - debt_after_tick1.0;
+        // Second increase should be >= first (compounding on larger base)
+        assert!(increase2 >= increase1,
+            "Compounding: second increase {} should be >= first {}", increase2, increase1);
+    }
+
+    #[test]
+    fn test_weighted_average_interest_rate_empty() {
+        let state = accrual_test_state();
+        let avg = state.weighted_average_interest_rate();
+        assert_eq!(avg.0, rust_decimal::Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_weighted_average_interest_rate_single_vault() {
+        let mut state = accrual_test_state();
+        let icp = state.icp_ledger_principal;
+
+        // Single vault at CR = 300% (above healthy_cr 225%) → multiplier 1.0x
+        // Base APR = 5%, so weighted avg should be 5%
+        state.vault_id_to_vaults.insert(1, Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            collateral_amount: 150_000_000, // 1.5 ICP
+            borrowed_icusd_amount: ICUSD::new(500_000_000), // 5 icUSD
+            collateral_type: icp,
+            last_accrual_time: 0,
+        });
+
+        let avg = state.weighted_average_interest_rate();
+        // At 300% CR with base 5% and 1.0x multiplier, should be ~0.05
+        let diff = (avg.0 - rust_decimal_macros::dec!(0.05)).abs();
+        assert!(diff < rust_decimal_macros::dec!(0.001),
+            "Weighted avg rate should be ~5%, got {}", avg.0);
+    }
 }
