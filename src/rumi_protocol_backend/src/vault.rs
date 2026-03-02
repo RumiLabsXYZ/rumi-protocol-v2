@@ -58,6 +58,10 @@ pub struct Vault {
     /// fixed up to ICP ledger principal during event replay.
     #[serde(default = "default_collateral_type")]
     pub collateral_type: Principal,
+    /// Nanosecond timestamp of last interest accrual for this vault.
+    /// Defaults to 0 for existing vaults (migration sets it in post_upgrade).
+    #[serde(default)]
+    pub last_accrual_time: u64,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Debug)]
@@ -398,6 +402,7 @@ pub async fn open_vault(collateral_amount_raw: u64, collateral_type_opt: Option<
                         collateral_amount: collateral_amount_raw,
                         vault_id,
                         collateral_type,
+                        last_accrual_time: ic_cdk::api::time(),
                     },
                     block_index,
                 );
@@ -522,6 +527,7 @@ pub async fn open_vault_and_borrow(
                 collateral_amount: collateral_amount_raw,
                 vault_id,
                 collateral_type,
+                last_accrual_time: ic_cdk::api::time(),
             },
             block_index,
         );
@@ -944,6 +950,7 @@ pub async fn open_vault_with_deposit(
                 collateral_amount,
                 vault_id,
                 collateral_type,
+                last_accrual_time: ic_cdk::api::time(),
             },
             sweep_block_index,
         );

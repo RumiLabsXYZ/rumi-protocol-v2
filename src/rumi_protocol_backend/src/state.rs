@@ -2012,6 +2012,7 @@ mod tests {
             collateral_amount: 500_000,
             borrowed_icusd_amount: ICUSD::new(300_000),
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
         };
 
         let vault2 = Vault {
@@ -2020,6 +2021,7 @@ mod tests {
             collateral_amount: 300_000,
             borrowed_icusd_amount: ICUSD::new(200_000),
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
         };
 
         vaults.insert(1, vault1);
@@ -2031,6 +2033,7 @@ mod tests {
             collateral_amount: 700_000,
             borrowed_icusd_amount: ICUSD::new(400_000),
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
         };
 
         let result = distribute_across_vaults(&vaults, target_vault);
@@ -2066,6 +2069,7 @@ mod tests {
             collateral_amount: 1_000_000, // 0.01 ICP
             borrowed_icusd_amount: ICUSD::new(200_000_000), // 2 icUSD
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
         });
 
         // Repay 0.01 icUSD (minimum partial repay in e8s is 1_000_000)
@@ -2107,6 +2111,7 @@ mod tests {
             collateral_amount: 280_000_000, // 2.8 ICP
             borrowed_icusd_amount: ICUSD::new(1_000_000_000), // 10 icUSD
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
         });
 
         // Move state into global so mutate_state/read_state work in this test.
