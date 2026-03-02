@@ -777,6 +777,49 @@ impl State {
         Ratio::from(weighted_sum)
     }
 
+    /// Compute debt-weighted averages of per-asset recovery_cr, warning_cr, and healthy_cr.
+    /// Same loop pattern as compute_dynamic_recovery_threshold, but calculates 3 extra averages.
+    /// Returns (weighted_avg_recovery_cr, weighted_avg_warning_cr, weighted_avg_healthy_cr).
+    pub fn compute_weighted_cr_averages(&self) -> (Ratio, Ratio, Ratio) {
+        let total_debt = self.total_borrowed_icusd_amount();
+        if total_debt == ICUSD::new(0) {
+            // No debt: use defaults based on first collateral type or global defaults
+            return (
+                RECOVERY_COLLATERAL_RATIO + self.recovery_liquidation_buffer,
+                // warning = 2 * recovery_cr - borrow_threshold = borrow + 2*buffer
+                RECOVERY_COLLATERAL_RATIO + self.recovery_liquidation_buffer + self.recovery_liquidation_buffer,
+                RECOVERY_COLLATERAL_RATIO * DEFAULT_HEALTHY_CR_MULTIPLIER,
+            );
+        }
+        let total_debt_dec = Decimal::from_u64(total_debt.to_u64())
+            .unwrap_or(Decimal::ZERO);
+
+        let mut w_recovery = Decimal::ZERO;
+        let mut w_warning = Decimal::ZERO;
+        let mut w_healthy = Decimal::ZERO;
+
+        for (ct, config) in &self.collateral_configs {
+            let debt_i = self.total_debt_for_collateral(ct);
+            if debt_i == ICUSD::new(0) {
+                continue;
+            }
+            let weight = Decimal::from_u64(debt_i.to_u64())
+                .unwrap_or(Decimal::ZERO) / total_debt_dec;
+
+            let recovery_cr = config.borrow_threshold_ratio.0 + self.recovery_liquidation_buffer.0;
+            let warning_cr = recovery_cr + recovery_cr - config.borrow_threshold_ratio.0;
+            let healthy_cr = config.healthy_cr
+                .map(|h| h.0)
+                .unwrap_or(config.borrow_threshold_ratio.0 * DEFAULT_HEALTHY_CR_MULTIPLIER.0);
+
+            w_recovery += weight * recovery_cr;
+            w_warning += weight * warning_cr;
+            w_healthy += weight * healthy_cr;
+        }
+
+        (Ratio::from(w_recovery), Ratio::from(w_warning), Ratio::from(w_healthy))
+    }
+
     pub fn get_redemption_fee(&self, redeemed_amount: ICUSD) -> Ratio {
         let current_time = ic_cdk::api::time();
         let last_redemption_time = self.last_redemption_time;
@@ -1076,6 +1119,12 @@ impl State {
         // Compute the debt-weighted recovery threshold and cache it
         let dynamic_threshold = self.compute_dynamic_recovery_threshold();
         self.recovery_mode_threshold = dynamic_threshold;
+
+        // Cache weighted CR averages for dynamic interest rate computation
+        let (w_recovery, w_warning, w_healthy) = self.compute_weighted_cr_averages();
+        self.weighted_avg_recovery_cr = w_recovery;
+        self.weighted_avg_warning_cr = w_warning;
+        self.weighted_avg_healthy_cr = w_healthy;
 
         if new_total_collateral_ratio < dynamic_threshold {
             self.mode = Mode::Recovery;
