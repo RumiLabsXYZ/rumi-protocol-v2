@@ -218,6 +218,23 @@ fn post_upgrade(arg: ProtocolArg) {
 
     replace_state(state);
 
+    // Migration: set last_accrual_time for any existing vaults that have it at 0.
+    // This avoids a massive retroactive accrual on first tick.
+    let now = ic_cdk::api::time();
+    let migrated = mutate_state(|s| {
+        let mut count = 0u64;
+        for vault in s.vault_id_to_vaults.values_mut() {
+            if vault.last_accrual_time == 0 {
+                vault.last_accrual_time = now;
+                count += 1;
+            }
+        }
+        count
+    });
+    if migrated > 0 {
+        log!(INFO, "[upgrade]: migrated {} vaults: set last_accrual_time to {}", migrated, now);
+    }
+
     let end = ic_cdk::api::instruction_counter();
 
     log!(
