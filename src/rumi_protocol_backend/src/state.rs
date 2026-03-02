@@ -1177,6 +1177,31 @@ impl State {
         }
     }
 
+    /// Compute the debt-weighted average interest rate across all vaults.
+    /// Returns 0 if no vaults have outstanding debt.
+    pub fn weighted_average_interest_rate(&self) -> Ratio {
+        let dummy_rate = self
+            .last_icp_rate
+            .unwrap_or(UsdIcp::from(rust_decimal_macros::dec!(1.0)));
+        let mut total_debt = Decimal::ZERO;
+        let mut weighted_sum = Decimal::ZERO;
+        for vault in self.vault_id_to_vaults.values() {
+            if vault.borrowed_icusd_amount.0 == 0 {
+                continue;
+            }
+            let debt = Decimal::from(vault.borrowed_icusd_amount.0);
+            let cr = crate::compute_collateral_ratio(vault, dummy_rate, self);
+            let rate = self.get_dynamic_interest_rate_for(&vault.collateral_type, cr);
+            weighted_sum += debt * rate.0;
+            total_debt += debt;
+        }
+        if total_debt.is_zero() {
+            Ratio::from(Decimal::ZERO)
+        } else {
+            Ratio::from(weighted_sum / total_debt)
+        }
+    }
+
     /// Get liquidation bonus for a specific collateral type
     pub fn get_liquidation_bonus_for(&self, ct: &CollateralType) -> Ratio {
         self.collateral_configs
