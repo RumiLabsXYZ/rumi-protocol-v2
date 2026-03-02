@@ -2138,4 +2138,182 @@ mod tests {
         assert!(cr_f64 > 1.54 && cr_f64 < 1.56,
             "CR after should be approximately 1.55 (155%), got {:.4}", cr_f64);
     }
+
+    // --- Dynamic Interest Rate Tests ---
+
+    #[test]
+    fn test_interpolate_multiplier_at_and_above_highest() {
+        let markers = vec![
+            (Ratio::from_f64(1.33), Ratio::from_f64(5.0)),
+            (Ratio::from_f64(1.50), Ratio::from_f64(2.5)),
+            (Ratio::from_f64(1.60), Ratio::from_f64(1.75)),
+            (Ratio::from_f64(2.25), Ratio::from_f64(1.0)),
+        ];
+        // At healthy CR: 1.0x
+        let m = State::interpolate_multiplier(&markers, Ratio::from_f64(2.25));
+        assert!((m.to_f64() - 1.0).abs() < 0.001);
+        // Above healthy CR: still 1.0x
+        let m = State::interpolate_multiplier(&markers, Ratio::from_f64(5.0));
+        assert!((m.to_f64() - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_interpolate_multiplier_at_and_below_lowest() {
+        let markers = vec![
+            (Ratio::from_f64(1.33), Ratio::from_f64(5.0)),
+            (Ratio::from_f64(1.50), Ratio::from_f64(2.5)),
+            (Ratio::from_f64(2.25), Ratio::from_f64(1.0)),
+        ];
+        // At liquidation ratio: 5.0x
+        let m = State::interpolate_multiplier(&markers, Ratio::from_f64(1.33));
+        assert!((m.to_f64() - 5.0).abs() < 0.001);
+        // Below: still 5.0x
+        let m = State::interpolate_multiplier(&markers, Ratio::from_f64(1.0));
+        assert!((m.to_f64() - 5.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_interpolate_multiplier_midpoint() {
+        let markers = vec![
+            (Ratio::from_f64(1.50), Ratio::from_f64(2.5)),
+            (Ratio::from_f64(1.60), Ratio::from_f64(1.75)),
+        ];
+        // Midpoint between 150% and 160% => t=0.5 => 2.5 - 0.5*(2.5-1.75) = 2.125
+        let m = State::interpolate_multiplier(&markers, Ratio::from_f64(1.55));
+        assert!((m.to_f64() - 2.125).abs() < 0.001,
+            "Expected 2.125, got {}", m.to_f64());
+    }
+
+    #[test]
+    fn test_interpolate_multiplier_empty_markers() {
+        let markers: Vec<(Ratio, Ratio)> = vec![];
+        let m = State::interpolate_multiplier(&markers, Ratio::from_f64(1.5));
+        assert!((m.to_f64() - 1.0).abs() < 0.001, "Empty markers should return 1.0x");
+    }
+
+    #[test]
+    fn test_derived_cr_getters() {
+        let state = State::from(InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: Principal::anonymous(),
+            fee_e8s: 0,
+            developer_principal: Principal::anonymous(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        });
+        let icp = state.icp_ledger_principal;
+
+        // ICP: borrow_threshold=1.5, buffer=0.05
+        // recovery_cr = 1.5 + 0.05 = 1.55
+        let recovery_cr = state.get_recovery_cr_for(&icp);
+        assert!((recovery_cr.to_f64() - 1.55).abs() < 0.001,
+            "Expected recovery_cr 1.55, got {}", recovery_cr.to_f64());
+
+        // warning_cr = 2 * 1.55 - 1.5 = 1.6
+        let warning_cr = state.get_warning_cr_for(&icp);
+        assert!((warning_cr.to_f64() - 1.60).abs() < 0.001,
+            "Expected warning_cr 1.60, got {}", warning_cr.to_f64());
+
+        // healthy_cr = 1.5 * 1.5 = 2.25
+        let healthy_cr = state.get_healthy_cr_for(&icp);
+        assert!((healthy_cr.to_f64() - 2.25).abs() < 0.001,
+            "Expected healthy_cr 2.25, got {}", healthy_cr.to_f64());
+    }
+
+    #[test]
+    fn test_dynamic_rate_healthy_vault_normal_mode() {
+        let state = State::from(InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: Principal::anonymous(),
+            fee_e8s: 0,
+            developer_principal: Principal::anonymous(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        });
+        let icp = state.icp_ledger_principal;
+
+        // A vault at 300% CR (well above healthy 225%) → multiplier = 1.0x
+        let rate = state.get_dynamic_interest_rate_for(&icp, Ratio::from_f64(3.0));
+        let base = DEFAULT_INTEREST_RATE_APR.to_f64();
+        assert!((rate.to_f64() - base).abs() < 0.0001,
+            "Healthy vault should get base rate {}, got {}", base, rate.to_f64());
+    }
+
+    #[test]
+    fn test_dynamic_rate_risky_vault_normal_mode() {
+        let state = State::from(InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: Principal::anonymous(),
+            fee_e8s: 0,
+            developer_principal: Principal::anonymous(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        });
+        let icp = state.icp_ledger_principal;
+
+        // Vault at 155% CR (between borrow_threshold 150% and warning_cr 160%)
+        // Expected: interpolation between 2.5x and 1.75x at t=0.5 => 2.125x
+        let rate = state.get_dynamic_interest_rate_for(&icp, Ratio::from_f64(1.55));
+        let expected = DEFAULT_INTEREST_RATE_APR.to_f64() * 2.125;
+        assert!((rate.to_f64() - expected).abs() < 0.001,
+            "Expected rate {}, got {}", expected, rate.to_f64());
+    }
+
+    #[test]
+    fn test_dynamic_rate_at_liquidation_ratio() {
+        let state = State::from(InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: Principal::anonymous(),
+            fee_e8s: 0,
+            developer_principal: Principal::anonymous(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        });
+        let icp = state.icp_ledger_principal;
+
+        // Vault at exactly liquidation_ratio (133%) → 5.0x multiplier
+        let rate = state.get_dynamic_interest_rate_for(&icp, Ratio::from_f64(1.33));
+        let expected = DEFAULT_INTEREST_RATE_APR.to_f64() * 5.0;
+        assert!((rate.to_f64() - expected).abs() < 0.001,
+            "Expected rate {}, got {}", expected, rate.to_f64());
+    }
+
+    #[test]
+    fn test_static_override_in_recovery() {
+        let mut state = State::from(InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: Principal::anonymous(),
+            fee_e8s: 0,
+            developer_principal: Principal::anonymous(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        });
+        let icp = state.icp_ledger_principal;
+        state.mode = Mode::Recovery;
+
+        // Set static override
+        if let Some(config) = state.collateral_configs.get_mut(&icp) {
+            config.recovery_interest_rate_apr = Some(Ratio::from_f64(0.10)); // 10%
+        }
+
+        // Should return the static override regardless of vault CR
+        let rate = state.get_dynamic_interest_rate_for(&icp, Ratio::from_f64(3.0));
+        assert!((rate.to_f64() - 0.10).abs() < 0.001,
+            "Expected static override 0.10, got {}", rate.to_f64());
+    }
 }
