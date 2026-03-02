@@ -244,6 +244,10 @@ type Event = variant {
     enabled : bool;
     token_type : StableTokenType;
   };
+  set_interest_rate : record {
+    collateral_type : principal;
+    interest_rate_apr : text;
+  };
   accrue_interest : record { timestamp : nat64 };
 };
 type Fees = record { redemption_fee : float64; borrowing_fee : float64 };
@@ -466,6 +470,7 @@ service : (ProtocolArg) -> {
   set_recovery_parameters : (principal, opt float64, opt float64) -> (Result);
   set_recovery_rate_curve : (vec record { text; float64 }) -> (Result);
   set_healthy_cr : (principal, opt float64) -> (Result);
+  set_interest_rate : (principal, float64) -> (Result);
   set_recovery_target_cr : (float64) -> (Result);
   set_redemption_fee_ceiling : (float64) -> (Result);
   set_redemption_fee_floor : (float64) -> (Result);

@@ -1520,6 +1520,48 @@ async fn set_recovery_parameters(
     Ok(())
 }
 
+/// Set the base interest rate APR for a specific collateral type (developer only).
+/// e.g. 0.02 = 2% APR, 0.005 = 0.5% APR.
+#[candid_method(update)]
+#[update]
+async fn set_interest_rate(
+    collateral_type: Principal,
+    interest_rate_apr: f64,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set interest rates".to_string(),
+        ));
+    }
+    let exists = read_state(|s| s.collateral_configs.contains_key(&collateral_type));
+    if !exists {
+        return Err(ProtocolError::GenericError(
+            "Unknown collateral type".to_string(),
+        ));
+    }
+    if interest_rate_apr < 0.0 || interest_rate_apr > 1.0 {
+        return Err(ProtocolError::GenericError(
+            "Interest rate APR must be between 0 and 1.0 (100%)".to_string(),
+        ));
+    }
+    let rate = Ratio::from(
+        Decimal::try_from(interest_rate_apr)
+            .map_err(|_| ProtocolError::GenericError("Invalid interest rate value".to_string()))?,
+    );
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_interest_rate(s, collateral_type, rate);
+    });
+    log!(
+        INFO,
+        "[set_interest_rate] collateral={}, interest_rate_apr={}",
+        collateral_type,
+        interest_rate_apr
+    );
+    Ok(())
+}
+
 /// Set rate curve markers for a collateral type or the global default.
 /// `collateral_type`: None = update global default curve; Some(principal) = per-asset curve.
 /// `markers`: Vec of (cr_level, multiplier) pairs, sorted ascending by cr_level.

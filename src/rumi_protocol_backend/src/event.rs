@@ -288,6 +288,13 @@ pub enum Event {
         healthy_cr: Option<String>,
     },
 
+    /// Admin set interest rate APR for a collateral type
+    #[serde(rename = "set_interest_rate")]
+    SetInterestRate {
+        collateral_type: CollateralType,
+        interest_rate_apr: String,
+    },
+
     /// Per-vault interest accrual tick. One event per timer tick.
     /// On replay, calls accrue_all_vault_interest(timestamp).
     #[serde(rename = "accrue_interest")]
@@ -345,6 +352,7 @@ impl Event {
             Event::SetRateCurveMarkers { .. } => false,
             Event::SetRecoveryRateCurve { .. } => false,
             Event::SetHealthyCr { .. } => false,
+            Event::SetInterestRate { .. } => false,
             Event::AccrueInterest { .. } => false,
         }
     }
@@ -667,6 +675,13 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                             .as_ref()
                             .and_then(|s| s.parse::<Decimal>().ok())
                             .map(Ratio::from);
+                    }
+                }
+            },
+            Event::SetInterestRate { collateral_type, interest_rate_apr } => {
+                if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+                    if let Ok(rate) = interest_rate_apr.parse::<Decimal>() {
+                        config.interest_rate_apr = Ratio::from(rate);
                     }
                 }
             },
@@ -1174,6 +1189,20 @@ pub fn record_set_healthy_cr(
 }
 
 /// Record an interest accrual event and apply to all vaults.
+pub fn record_set_interest_rate(
+    state: &mut State,
+    collateral_type: CollateralType,
+    interest_rate_apr: Ratio,
+) {
+    record_event(&Event::SetInterestRate {
+        collateral_type,
+        interest_rate_apr: interest_rate_apr.0.to_string(),
+    });
+    if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+        config.interest_rate_apr = interest_rate_apr;
+    }
+}
+
 pub fn record_accrue_interest(state: &mut State, now_nanos: u64) {
     record_event(&Event::AccrueInterest { timestamp: now_nanos });
     state.accrue_all_vault_interest(now_nanos);
