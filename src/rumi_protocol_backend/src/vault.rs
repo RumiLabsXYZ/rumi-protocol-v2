@@ -2269,6 +2269,11 @@ pub async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError>
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("partial_repay_vault_{}", arg.vault_id))?;
     let amount: ICUSD = arg.amount.into();
+
+    // Accrue interest before repayment so the correct debt balance is used.
+    let now = ic_cdk::api::time();
+    mutate_state(|s| s.accrue_single_vault(arg.vault_id, now));
+
     let vault = match read_state(|s| s.vault_id_to_vaults.get(&arg.vault_id).cloned()) {
         Some(v) => v,
         None => {
