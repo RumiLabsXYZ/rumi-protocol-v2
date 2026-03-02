@@ -866,6 +866,41 @@ impl State {
         config.map(|c| c.interest_rate_apr).unwrap_or(DEFAULT_INTEREST_RATE_APR)
     }
 
+    /// Per-asset recovery CR = borrow_threshold_ratio + recovery_liquidation_buffer.
+    /// E.g., 150% + 5% = 155%.
+    pub fn get_recovery_cr_for(&self, ct: &CollateralType) -> Ratio {
+        let borrow_threshold = self.collateral_configs.get(ct)
+            .map(|c| c.borrow_threshold_ratio)
+            .unwrap_or(RECOVERY_COLLATERAL_RATIO);
+        borrow_threshold + self.recovery_liquidation_buffer
+    }
+
+    /// Per-asset warning CR = 2 * recovery_cr - borrow_threshold.
+    /// E.g., 2 * 155% - 150% = 160%.
+    pub fn get_warning_cr_for(&self, ct: &CollateralType) -> Ratio {
+        let borrow_threshold = self.collateral_configs.get(ct)
+            .map(|c| c.borrow_threshold_ratio)
+            .unwrap_or(RECOVERY_COLLATERAL_RATIO);
+        let recovery_cr = borrow_threshold + self.recovery_liquidation_buffer;
+        // 2 * recovery_cr - borrow_threshold
+        recovery_cr + recovery_cr - borrow_threshold
+    }
+
+    /// Per-asset healthy CR = admin override if set, else 1.5 * borrow_threshold.
+    /// E.g., 1.5 * 150% = 225%.
+    pub fn get_healthy_cr_for(&self, ct: &CollateralType) -> Ratio {
+        let config = self.collateral_configs.get(ct);
+        // Use admin override if present
+        if let Some(healthy) = config.and_then(|c| c.healthy_cr) {
+            return healthy;
+        }
+        // Default: 1.5 * borrow_threshold_ratio
+        let borrow_threshold = config
+            .map(|c| c.borrow_threshold_ratio)
+            .unwrap_or(RECOVERY_COLLATERAL_RATIO);
+        borrow_threshold * DEFAULT_HEALTHY_CR_MULTIPLIER
+    }
+
     /// Get liquidation bonus for a specific collateral type
     pub fn get_liquidation_bonus_for(&self, ct: &CollateralType) -> Ratio {
         self.collateral_configs
