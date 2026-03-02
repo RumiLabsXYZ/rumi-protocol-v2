@@ -944,6 +944,160 @@ impl State {
         borrow_threshold * DEFAULT_HEALTHY_CR_MULTIPLIER
     }
 
+    // --- Dynamic Interest Rate Logic ---
+
+    /// Linearly interpolate a multiplier between sorted (cr_level, multiplier) pairs.
+    /// - If cr >= highest cr_level: returns the multiplier at the highest marker.
+    /// - If cr <= lowest cr_level: returns the multiplier at the lowest marker.
+    /// - Between two markers: linearly interpolate.
+    /// `resolved_markers` must be sorted by cr_level ascending and non-empty.
+    fn interpolate_multiplier(resolved_markers: &[(Ratio, Ratio)], cr: Ratio) -> Ratio {
+        if resolved_markers.is_empty() {
+            return Ratio::new(dec!(1.0));
+        }
+        let first = &resolved_markers[0];
+        if cr <= first.0 {
+            return first.1;
+        }
+        let last = &resolved_markers[resolved_markers.len() - 1];
+        if cr >= last.0 {
+            return last.1;
+        }
+        // Find the two surrounding markers
+        for i in 0..resolved_markers.len() - 1 {
+            let lo = &resolved_markers[i];
+            let hi = &resolved_markers[i + 1];
+            if cr >= lo.0 && cr <= hi.0 {
+                let range = hi.0.0 - lo.0.0;
+                if range == Decimal::ZERO {
+                    return lo.1;
+                }
+                let t = (cr.0 - lo.0.0) / range;
+                let multiplier = lo.1.0 + t * (hi.1.0 - lo.1.0);
+                return Ratio::from(multiplier);
+            }
+        }
+        // Shouldn't reach here if markers are sorted, but fallback
+        Ratio::new(dec!(1.0))
+    }
+
+    /// Resolve the global_rate_curve markers to concrete (cr_level, multiplier) pairs
+    /// for a given collateral type, using that asset's own threshold values.
+    /// Markers in global_rate_curve store cr_level=0 as placeholders; the actual CR levels
+    /// come from the asset's liquidation_ratio, borrow_threshold, warning_cr, healthy_cr.
+    fn resolve_layer1_markers(&self, ct: &CollateralType) -> Vec<(Ratio, Ratio)> {
+        let config = self.collateral_configs.get(ct);
+
+        // If asset has a per-asset rate_curve, use it directly (markers already have concrete CRs)
+        if let Some(curve) = config.and_then(|c| c.rate_curve.as_ref()) {
+            return curve.markers.iter()
+                .map(|m| (m.cr_level, m.multiplier))
+                .collect();
+        }
+
+        // Use global_rate_curve with per-asset thresholds
+        let liq_ratio = self.get_liquidation_ratio_for(ct);
+        let borrow_threshold = config
+            .map(|c| c.borrow_threshold_ratio)
+            .unwrap_or(RECOVERY_COLLATERAL_RATIO);
+        let warning_cr = self.get_warning_cr_for(ct);
+        let healthy_cr = self.get_healthy_cr_for(ct);
+
+        // Map global markers to per-asset CR levels.
+        // Global curve has exactly 4 markers in order: liq, borrow, warning, healthy.
+        let cr_levels = [liq_ratio, borrow_threshold, warning_cr, healthy_cr];
+        let markers = &self.global_rate_curve.markers;
+
+        let mut resolved: Vec<(Ratio, Ratio)> = markers.iter()
+            .enumerate()
+            .map(|(i, m)| {
+                let cr = if i < cr_levels.len() { cr_levels[i] } else { m.cr_level };
+                (cr, m.multiplier)
+            })
+            .collect();
+        resolved.sort_by(|a, b| a.0.0.cmp(&b.0.0));
+        resolved
+    }
+
+    /// Resolve Layer 2 recovery rate markers to concrete (cr_level, multiplier) pairs
+    /// using the cached weighted average thresholds.
+    fn resolve_layer2_markers(&self) -> Vec<(Ratio, Ratio)> {
+        let mut resolved: Vec<(Ratio, Ratio)> = self.recovery_rate_curve.iter()
+            .map(|m| {
+                let cr = match m.threshold {
+                    SystemThreshold::LiquidationRatio => self.compute_weighted_liquidation_ratio(),
+                    SystemThreshold::BorrowThreshold => self.recovery_mode_threshold,
+                    SystemThreshold::WarningCr => self.weighted_avg_warning_cr,
+                    SystemThreshold::HealthyCr => self.weighted_avg_healthy_cr,
+                };
+                (cr, m.multiplier)
+            })
+            .collect();
+        resolved.sort_by(|a, b| a.0.0.cmp(&b.0.0));
+        resolved
+    }
+
+    /// Compute debt-weighted average of per-asset liquidation_ratio values.
+    fn compute_weighted_liquidation_ratio(&self) -> Ratio {
+        let total_debt = self.total_borrowed_icusd_amount();
+        if total_debt == ICUSD::new(0) {
+            return MINIMUM_COLLATERAL_RATIO;
+        }
+        let total_debt_dec = Decimal::from_u64(total_debt.to_u64())
+            .unwrap_or(Decimal::ZERO);
+        let mut weighted_sum = Decimal::ZERO;
+        for (ct, config) in &self.collateral_configs {
+            let debt_i = self.total_debt_for_collateral(ct);
+            if debt_i == ICUSD::new(0) {
+                continue;
+            }
+            let weight = Decimal::from_u64(debt_i.to_u64())
+                .unwrap_or(Decimal::ZERO) / total_debt_dec;
+            weighted_sum += weight * config.liquidation_ratio.0;
+        }
+        if weighted_sum == Decimal::ZERO {
+            return MINIMUM_COLLATERAL_RATIO;
+        }
+        Ratio::from(weighted_sum)
+    }
+
+    /// Get the dynamic interest rate for a vault, considering both Layer 1 (per-vault CR)
+    /// and Layer 2 (system-wide recovery multiplier).
+    ///
+    /// 1. If recovery_interest_rate_apr is set and system is in Recovery, use static override.
+    /// 2. Get base rate from CollateralConfig.
+    /// 3. Layer 1: multiply by CR-dependent multiplier from rate curve.
+    /// 4. Layer 2 (Recovery only): multiply by TCR-dependent recovery multiplier.
+    pub fn get_dynamic_interest_rate_for(&self, ct: &CollateralType, vault_cr: Ratio) -> Ratio {
+        let config = self.collateral_configs.get(ct);
+
+        // Static override escape valve
+        if self.mode == Mode::Recovery {
+            if let Some(static_rate) = config.and_then(|c| c.recovery_interest_rate_apr) {
+                return static_rate;
+            }
+        }
+
+        // Base rate
+        let base_rate = config
+            .map(|c| c.interest_rate_apr)
+            .unwrap_or(DEFAULT_INTEREST_RATE_APR);
+
+        // Layer 1: per-vault CR multiplier
+        let layer1_markers = self.resolve_layer1_markers(ct);
+        let layer1_mult = Self::interpolate_multiplier(&layer1_markers, vault_cr);
+        let layer1_rate = base_rate * layer1_mult;
+
+        // Layer 2: system-wide recovery multiplier (only in Recovery mode)
+        if self.mode == Mode::Recovery {
+            let layer2_markers = self.resolve_layer2_markers();
+            let layer2_mult = Self::interpolate_multiplier(&layer2_markers, self.total_collateral_ratio);
+            return layer1_rate * layer2_mult;
+        }
+
+        layer1_rate
+    }
+
     /// Get liquidation bonus for a specific collateral type
     pub fn get_liquidation_bonus_for(&self, ct: &CollateralType) -> Ratio {
         self.collateral_configs
