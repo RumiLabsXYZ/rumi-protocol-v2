@@ -51,6 +51,21 @@ pub const DEFAULT_RECOVERY_TARGET_CR: Ratio = Ratio::new(dec!(1.55)); // 155% â€
 pub const DEFAULT_RECOVERY_LIQUIDATION_BUFFER: Ratio = Ratio::new(dec!(0.05)); // 5% above recovery threshold
 pub const DEFAULT_INTEREST_RATE_APR: Ratio = Ratio::new(dec!(0.0)); // 0% â€” placeholder for future accrual
 
+/// Default Layer 1 multipliers at each CR marker
+pub const DEFAULT_RATE_MULTIPLIER_HEALTHY: Ratio = Ratio::new(dec!(1.0));
+pub const DEFAULT_RATE_MULTIPLIER_WARNING: Ratio = Ratio::new(dec!(1.75));
+pub const DEFAULT_RATE_MULTIPLIER_BORROW_THRESHOLD: Ratio = Ratio::new(dec!(2.5));
+pub const DEFAULT_RATE_MULTIPLIER_LIQUIDATION: Ratio = Ratio::new(dec!(5.0));
+
+/// Default Layer 2 (recovery) multipliers
+pub const DEFAULT_RECOVERY_MULTIPLIER_HEALTHY: Ratio = Ratio::new(dec!(1.0));
+pub const DEFAULT_RECOVERY_MULTIPLIER_WARNING: Ratio = Ratio::new(dec!(1.15));
+pub const DEFAULT_RECOVERY_MULTIPLIER_BORROW_THRESHOLD: Ratio = Ratio::new(dec!(1.33));
+pub const DEFAULT_RECOVERY_MULTIPLIER_LIQUIDATION: Ratio = Ratio::new(dec!(2.0));
+
+/// Default healthy CR multiplier (healthy_cr = this * borrow_threshold_ratio)
+pub const DEFAULT_HEALTHY_CR_MULTIPLIER: Ratio = Ratio::new(dec!(1.5));
+
 /// Collateral type identified by its ICRC-1 ledger canister principal.
 pub type CollateralType = Principal;
 
@@ -149,6 +164,50 @@ pub enum PriceSource {
     },
 }
 
+/// How to interpolate between rate curve markers.
+/// Linear for now; enum allows adding Exponential, Polynomial, etc. via upgrade.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum InterpolationMethod {
+    Linear,
+}
+
+impl Default for InterpolationMethod {
+    fn default() -> Self {
+        InterpolationMethod::Linear
+    }
+}
+
+/// A point on a rate curve: at this CR level, apply this multiplier to the base rate.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct RateMarker {
+    pub cr_level: Ratio,
+    pub multiplier: Ratio,
+}
+
+/// A per-asset rate curve: ordered markers + interpolation method.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct RateCurve {
+    pub markers: Vec<RateMarker>,  // sorted by cr_level ascending
+    pub method: InterpolationMethod,
+}
+
+/// Named system-wide thresholds for the recovery rate curve (Layer 2).
+/// These resolve to debt-weighted averages at runtime.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum SystemThreshold {
+    LiquidationRatio,
+    BorrowThreshold,
+    WarningCr,
+    HealthyCr,
+}
+
+/// A recovery rate marker: at this named threshold, apply this multiplier.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct RecoveryRateMarker {
+    pub threshold: SystemThreshold,
+    pub multiplier: Ratio,
+}
+
 /// Per-collateral-type configuration. Each supported collateral token has one of these.
 #[derive(candid::CandidType, Clone, Debug, serde::Deserialize, Serialize)]
 pub struct CollateralConfig {
@@ -194,6 +253,12 @@ pub struct CollateralConfig {
     /// Defaults to 0 for backward compat (no minimum enforced for legacy configs).
     #[serde(default)]
     pub min_collateral_deposit: u64,
+    /// Borrowing fee override during Recovery mode. None = use normal borrowing_fee.
+    #[serde(default)]
+    pub recovery_borrowing_fee: Option<Ratio>,
+    /// Interest rate override during Recovery mode. None = use normal interest_rate_apr.
+    #[serde(default)]
+    pub recovery_interest_rate_apr: Option<Ratio>,
     /// Hex color for frontend display (e.g., "#F7931A"). Optional for backward compat.
     #[serde(default)]
     pub display_color: Option<String>,
@@ -221,6 +286,8 @@ impl PartialEq for CollateralConfig {
             && self.last_redemption_time == other.last_redemption_time
             && self.recovery_target_cr == other.recovery_target_cr
             && self.min_collateral_deposit == other.min_collateral_deposit
+            && self.recovery_borrowing_fee == other.recovery_borrowing_fee
+            && self.recovery_interest_rate_apr == other.recovery_interest_rate_apr
             && self.display_color == other.display_color
     }
 }
@@ -455,6 +522,8 @@ impl From<InitArg> for State {
                     last_redemption_time: 0,
                     recovery_target_cr: DEFAULT_RECOVERY_TARGET_CR,
                     min_collateral_deposit: 100_000, // 0.001 ICP
+                    recovery_borrowing_fee: None,
+                    recovery_interest_rate_apr: None,
                     display_color: Some("#2DD4BF".to_string()),
                 });
                 configs
@@ -680,11 +749,7 @@ impl State {
     }
 
     pub fn get_borrowing_fee(&self) -> Ratio {
-        match self.mode {
-            Mode::Recovery => Ratio::from(Decimal::ZERO),
-            Mode::GeneralAvailability => self.fee,
-            Mode::ReadOnly => self.fee,
-        }
+        self.fee
     }
 
     // --- Multi-collateral helper methods ---
@@ -735,13 +800,27 @@ impl State {
 
     /// Get borrowing fee for a specific collateral type
     pub fn get_borrowing_fee_for(&self, ct: &CollateralType) -> Ratio {
+        let config = self.collateral_configs.get(ct);
         if self.mode == Mode::Recovery {
-            return Ratio::from(Decimal::ZERO);
+            // Use recovery override if set, otherwise normal fee
+            return config
+                .and_then(|c| c.recovery_borrowing_fee)
+                .or_else(|| config.map(|c| c.borrowing_fee))
+                .unwrap_or(self.fee);
         }
-        self.collateral_configs
-            .get(ct)
-            .map(|c| c.borrowing_fee)
-            .unwrap_or(self.fee)
+        config.map(|c| c.borrowing_fee).unwrap_or(self.fee)
+    }
+
+    /// Get interest rate for a specific collateral type (recovery-aware)
+    pub fn get_interest_rate_for(&self, ct: &CollateralType) -> Ratio {
+        let config = self.collateral_configs.get(ct);
+        if self.mode == Mode::Recovery {
+            return config
+                .and_then(|c| c.recovery_interest_rate_apr)
+                .or_else(|| config.map(|c| c.interest_rate_apr))
+                .unwrap_or(DEFAULT_INTEREST_RATE_APR);
+        }
+        config.map(|c| c.interest_rate_apr).unwrap_or(DEFAULT_INTEREST_RATE_APR)
     }
 
     /// Get liquidation bonus for a specific collateral type
