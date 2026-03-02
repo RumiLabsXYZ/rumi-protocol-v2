@@ -287,6 +287,13 @@ pub enum Event {
         collateral_type: String,
         healthy_cr: Option<String>,
     },
+
+    /// Per-vault interest accrual tick. One event per timer tick.
+    /// On replay, calls accrue_all_vault_interest(timestamp).
+    #[serde(rename = "accrue_interest")]
+    AccrueInterest {
+        timestamp: u64,
+    },
 }
 
 impl Event {
@@ -338,6 +345,7 @@ impl Event {
             Event::SetRateCurveMarkers { .. } => false,
             Event::SetRecoveryRateCurve { .. } => false,
             Event::SetHealthyCr { .. } => false,
+            Event::AccrueInterest { .. } => false,
         }
     }
 }
@@ -661,6 +669,9 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                             .map(Ratio::from);
                     }
                 }
+            },
+            Event::AccrueInterest { timestamp } => {
+                state.accrue_all_vault_interest(timestamp);
             },
         }
     }
@@ -1160,4 +1171,10 @@ pub fn record_set_healthy_cr(
     if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
         config.healthy_cr = healthy_cr;
     }
+}
+
+/// Record an interest accrual event and apply to all vaults.
+pub fn record_accrue_interest(state: &mut State, now_nanos: u64) {
+    record_event(&Event::AccrueInterest { timestamp: now_nanos });
+    state.accrue_all_vault_interest(now_nanos);
 }
