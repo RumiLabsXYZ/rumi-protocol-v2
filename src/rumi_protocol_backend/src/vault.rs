@@ -569,6 +569,10 @@ async fn borrow_from_vault_internal(caller: Principal, arg: VaultArg) -> Result<
         });
     }
 
+    // Accrue interest on this vault before borrowing so CR check uses up-to-date debt.
+    let now = ic_cdk::api::time();
+    mutate_state(|s| s.accrue_single_vault(arg.vault_id, now));
+
     let (vault, collateral_price, config_decimals) = read_state(|s| {
         match s.vault_id_to_vaults.get(&arg.vault_id) {
             Some(vault) => {
@@ -670,6 +674,11 @@ pub async fn repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("repay_vault_{}", arg.vault_id))?;
     let amount: ICUSD = arg.amount.into();
+
+    // Accrue interest before repayment so the correct debt balance is used.
+    let now = ic_cdk::api::time();
+    mutate_state(|s| s.accrue_single_vault(arg.vault_id, now));
+
     let vault = match read_state(|s| s.vault_id_to_vaults.get(&arg.vault_id).cloned()) {
         Some(v) => v,
         None => {
@@ -749,6 +758,10 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
     // Truncate to nearest 100 e8s for clean 8→6 decimal conversion
     let raw_amount_e8s = arg.amount - (arg.amount % 100);
     let amount: ICUSD = raw_amount_e8s.into();
+
+    // Accrue interest before repayment so the correct debt balance is used.
+    let now = ic_cdk::api::time();
+    mutate_state(|s| s.accrue_single_vault(arg.vault_id, now));
 
     let vault = match read_state(|s| s.vault_id_to_vaults.get(&arg.vault_id).cloned()) {
         Some(v) => v,
@@ -1060,7 +1073,11 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
     
     // Record the close request for rate limiting
     mutate_state(|s| s.record_close_vault_request(caller));
-    
+
+    // Accrue interest before closing so the full repayment amount is accurate.
+    let now = ic_cdk::api::time();
+    mutate_state(|s| s.accrue_single_vault(vault_id, now));
+
     // Check if the vault exists first
     let vault_exists = read_state(|s| s.vault_id_to_vaults.contains_key(&vault_id));
     
@@ -2311,7 +2328,11 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("partial_liquidate_vault_{}", arg.vault_id))?;
     let liquidator_payment: ICUSD = arg.amount.into();
-    
+
+    // Accrue interest before liquidation so CR check uses up-to-date debt.
+    let now = ic_cdk::api::time();
+    mutate_state(|s| s.accrue_single_vault(arg.vault_id, now));
+
     // Step 1: Validate vault is liquidatable
     let (vault, collateral_price, config_decimals, collateral_price_usd, _mode) = match read_state(|s| {
         match s.vault_id_to_vaults.get(&arg.vault_id) {
