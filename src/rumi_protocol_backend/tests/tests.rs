@@ -951,7 +951,11 @@ mod multi_collateral_helpers {
             last_redemption_time: 0,
             recovery_target_cr: Ratio::from(dec!(1.45)),
             min_collateral_deposit: 0,
+            recovery_borrowing_fee: None,
+            recovery_interest_rate_apr: None,
             display_color: None,
+            healthy_cr: None,
+            rate_curve: None,
         }
     }
 

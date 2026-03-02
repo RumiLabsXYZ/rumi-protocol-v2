@@ -262,6 +262,13 @@ pub struct CollateralConfig {
     /// Hex color for frontend display (e.g., "#F7931A"). Optional for backward compat.
     #[serde(default)]
     pub display_color: Option<String>,
+    /// Admin-configurable "healthy" CR. Default: 1.5 * borrow_threshold_ratio.
+    /// None = use default. Must be > borrow_threshold_ratio if set.
+    #[serde(default)]
+    pub healthy_cr: Option<Ratio>,
+    /// Per-asset rate curve markers. None = use global_rate_curve from State.
+    #[serde(default)]
+    pub rate_curve: Option<RateCurve>,
 }
 
 impl PartialEq for CollateralConfig {
@@ -289,6 +296,8 @@ impl PartialEq for CollateralConfig {
             && self.recovery_borrowing_fee == other.recovery_borrowing_fee
             && self.recovery_interest_rate_apr == other.recovery_interest_rate_apr
             && self.display_color == other.display_color
+            && self.healthy_cr == other.healthy_cr
+            && self.rate_curve == other.rate_curve
     }
 }
 
@@ -428,6 +437,18 @@ pub struct State {
     // Multi-collateral support
     pub collateral_configs: BTreeMap<CollateralType, CollateralConfig>,
     pub collateral_to_vault_ids: BTreeMap<CollateralType, BTreeSet<u64>>,
+
+    // Dynamic interest rates (Layer 1 global + Layer 2 recovery)
+    /// Global default rate curve (used when an asset has no per-asset rate_curve).
+    pub global_rate_curve: RateCurve,
+    /// Recovery mode rate curve (Layer 2, system-wide). Named thresholds resolved at runtime.
+    pub recovery_rate_curve: Vec<RecoveryRateMarker>,
+    /// Cached debt-weighted average of per-asset recovery CRs (borrow_threshold + buffer).
+    pub weighted_avg_recovery_cr: Ratio,
+    /// Cached debt-weighted average of per-asset warning CRs (2 * recovery_cr - borrow_threshold).
+    pub weighted_avg_warning_cr: Ratio,
+    /// Cached debt-weighted average of per-asset healthy CRs (override or 1.5 * borrow_threshold).
+    pub weighted_avg_healthy_cr: Ratio,
 }
 
 impl From<InitArg> for State {
@@ -525,10 +546,32 @@ impl From<InitArg> for State {
                     recovery_borrowing_fee: None,
                     recovery_interest_rate_apr: None,
                     display_color: Some("#2DD4BF".to_string()),
+                    healthy_cr: None,
+                    rate_curve: None,
                 });
                 configs
             },
             collateral_to_vault_ids: BTreeMap::new(),
+
+            // Dynamic interest rates
+            global_rate_curve: RateCurve {
+                markers: vec![
+                    RateMarker { cr_level: Ratio::new(dec!(0)), multiplier: DEFAULT_RATE_MULTIPLIER_LIQUIDATION },
+                    RateMarker { cr_level: Ratio::new(dec!(0)), multiplier: DEFAULT_RATE_MULTIPLIER_BORROW_THRESHOLD },
+                    RateMarker { cr_level: Ratio::new(dec!(0)), multiplier: DEFAULT_RATE_MULTIPLIER_WARNING },
+                    RateMarker { cr_level: Ratio::new(dec!(0)), multiplier: DEFAULT_RATE_MULTIPLIER_HEALTHY },
+                ],
+                method: InterpolationMethod::Linear,
+            },
+            recovery_rate_curve: vec![
+                RecoveryRateMarker { threshold: SystemThreshold::LiquidationRatio, multiplier: DEFAULT_RECOVERY_MULTIPLIER_LIQUIDATION },
+                RecoveryRateMarker { threshold: SystemThreshold::BorrowThreshold, multiplier: DEFAULT_RECOVERY_MULTIPLIER_BORROW_THRESHOLD },
+                RecoveryRateMarker { threshold: SystemThreshold::WarningCr, multiplier: DEFAULT_RECOVERY_MULTIPLIER_WARNING },
+                RecoveryRateMarker { threshold: SystemThreshold::HealthyCr, multiplier: DEFAULT_RECOVERY_MULTIPLIER_HEALTHY },
+            ],
+            weighted_avg_recovery_cr: Ratio::new(dec!(0)),
+            weighted_avg_warning_cr: Ratio::new(dec!(0)),
+            weighted_avg_healthy_cr: Ratio::new(dec!(0)),
         }
     }
 }

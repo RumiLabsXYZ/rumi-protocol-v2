@@ -1437,6 +1437,72 @@ async fn set_recovery_target_cr(new_rate: f64) -> Result<(), ProtocolError> {
     Ok(())
 }
 
+/// Set per-collateral recovery mode overrides for borrowing fee and interest rate (developer only).
+/// Pass None to clear an override (reverts to normal value during Recovery).
+#[candid_method(update)]
+#[update]
+async fn set_recovery_parameters(
+    collateral_type: Principal,
+    recovery_borrowing_fee: Option<f64>,
+    recovery_interest_rate_apr: Option<f64>,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set recovery parameters".to_string(),
+        ));
+    }
+    // Validate collateral type exists
+    let exists = read_state(|s| s.collateral_configs.contains_key(&collateral_type));
+    if !exists {
+        return Err(ProtocolError::GenericError(
+            "Unknown collateral type".to_string(),
+        ));
+    }
+    // Validate fee ranges
+    if let Some(fee) = recovery_borrowing_fee {
+        if fee < 0.0 || fee > 0.10 {
+            return Err(ProtocolError::GenericError(
+                "Recovery borrowing fee must be between 0 and 0.10 (10%)".to_string(),
+            ));
+        }
+    }
+    if let Some(apr) = recovery_interest_rate_apr {
+        if apr < 0.0 || apr > 1.0 {
+            return Err(ProtocolError::GenericError(
+                "Recovery interest rate APR must be between 0 and 1.0 (100%)".to_string(),
+            ));
+        }
+    }
+    let fee_ratio = recovery_borrowing_fee
+        .map(|f| Decimal::try_from(f))
+        .transpose()
+        .map_err(|_| ProtocolError::GenericError("Invalid borrowing fee value".to_string()))?
+        .map(Ratio::from);
+    let apr_ratio = recovery_interest_rate_apr
+        .map(|f| Decimal::try_from(f))
+        .transpose()
+        .map_err(|_| ProtocolError::GenericError("Invalid interest rate value".to_string()))?
+        .map(Ratio::from);
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_recovery_parameters(
+            s,
+            collateral_type,
+            fee_ratio,
+            apr_ratio,
+        );
+    });
+    log!(
+        INFO,
+        "[set_recovery_parameters] collateral={}, recovery_borrowing_fee={:?}, recovery_interest_rate_apr={:?}",
+        collateral_type,
+        recovery_borrowing_fee,
+        recovery_interest_rate_apr
+    );
+    Ok(())
+}
+
 // Add guard cleanup method for developers to resolve stuck operations
 #[candid_method(update)]
 #[update]
@@ -1574,7 +1640,11 @@ async fn add_collateral_token(arg: rumi_protocol_backend::AddCollateralArg) -> R
         last_redemption_time: 0,
         recovery_target_cr: Ratio::from_f64(arg.recovery_target_cr),
         min_collateral_deposit: arg.min_collateral_deposit,
+        recovery_borrowing_fee: None,
+        recovery_interest_rate_apr: None,
         display_color: arg.display_color,
+        healthy_cr: None,
+        rate_curve: None,
     };
 
     mutate_state(|s| {
