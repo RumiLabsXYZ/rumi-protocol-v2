@@ -252,6 +252,13 @@ pub enum Event {
         reason: String,
         block_index: u64,
     },
+    #[serde(rename = "set_recovery_parameters")]
+    SetRecoveryParameters {
+        collateral_type: CollateralType,
+        recovery_borrowing_fee: Option<String>,
+        recovery_interest_rate_apr: Option<String>,
+    },
+
     /// Admin correction of vault collateral amount (e.g., fixing inflation from error handler bug)
     #[serde(rename = "admin_vault_correction")]
     AdminVaultCorrection {
@@ -259,6 +266,26 @@ pub enum Event {
         old_amount: u64,
         new_amount: u64,
         reason: String,
+    },
+
+    /// Admin set rate curve markers (per-asset or global)
+    #[serde(rename = "set_rate_curve_markers")]
+    SetRateCurveMarkers {
+        collateral_type: Option<String>,  // None for global
+        markers: String,                  // JSON-serialized marker pairs
+    },
+
+    /// Admin set recovery rate curve (system-wide Layer 2)
+    #[serde(rename = "set_recovery_rate_curve")]
+    SetRecoveryRateCurve {
+        markers: String,  // JSON-serialized (threshold, multiplier) pairs
+    },
+
+    /// Admin set healthy CR for a collateral type
+    #[serde(rename = "set_healthy_cr")]
+    SetHealthyCr {
+        collateral_type: String,
+        healthy_cr: Option<String>,
     },
 }
 
@@ -306,7 +333,11 @@ impl Event {
             Event::SetReserveRedemptionFee { .. } => false,
             Event::ReserveRedemption { .. } => false,
             Event::AdminMint { .. } => false,
+            Event::SetRecoveryParameters { .. } => false,
             Event::AdminVaultCorrection { vault_id, .. } => vault_id == filter_vault_id,
+            Event::SetRateCurveMarkers { .. } => false,
+            Event::SetRecoveryRateCurve { .. } => false,
+            Event::SetHealthyCr { .. } => false,
         }
     }
 }
@@ -553,6 +584,22 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             Event::AdminMint { .. } => {
                 // Admin mints are ledger-only operations; no in-memory state changes.
             },
+            Event::SetRecoveryParameters {
+                collateral_type,
+                recovery_borrowing_fee,
+                recovery_interest_rate_apr,
+            } => {
+                if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+                    config.recovery_borrowing_fee = recovery_borrowing_fee
+                        .as_ref()
+                        .and_then(|s| s.parse::<Decimal>().ok())
+                        .map(Ratio::from);
+                    config.recovery_interest_rate_apr = recovery_interest_rate_apr
+                        .as_ref()
+                        .and_then(|s| s.parse::<Decimal>().ok())
+                        .map(Ratio::from);
+                }
+            },
             Event::AdminVaultCorrection {
                 vault_id,
                 old_amount: _,
@@ -561,6 +608,58 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             } => {
                 if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
                     vault.collateral_amount = new_amount;
+                }
+            },
+            Event::SetRateCurveMarkers { collateral_type, markers } => {
+                use crate::state::{RateMarker, RateCurve, InterpolationMethod};
+                if let Ok(pairs) = serde_json::from_str::<Vec<(String, String)>>(&markers) {
+                    let parsed: Vec<RateMarker> = pairs.iter()
+                        .filter_map(|(cr, mult)| {
+                            let cr_dec = cr.parse::<Decimal>().ok()?;
+                            let mult_dec = mult.parse::<Decimal>().ok()?;
+                            Some(RateMarker { cr_level: Ratio::from(cr_dec), multiplier: Ratio::from(mult_dec) })
+                        })
+                        .collect();
+                    let curve = RateCurve { markers: parsed, method: InterpolationMethod::Linear };
+                    match collateral_type {
+                        None => { state.global_rate_curve = curve; },
+                        Some(ct_str) => {
+                            if let Ok(ct) = Principal::from_text(&ct_str) {
+                                if let Some(config) = state.collateral_configs.get_mut(&ct) {
+                                    config.rate_curve = Some(curve);
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            Event::SetRecoveryRateCurve { markers } => {
+                use crate::state::{RecoveryRateMarker, SystemThreshold};
+                if let Ok(pairs) = serde_json::from_str::<Vec<(String, String)>>(&markers) {
+                    let parsed: Vec<RecoveryRateMarker> = pairs.iter()
+                        .filter_map(|(thresh_str, mult_str)| {
+                            let threshold = match thresh_str.as_str() {
+                                "LiquidationRatio" => SystemThreshold::LiquidationRatio,
+                                "BorrowThreshold" => SystemThreshold::BorrowThreshold,
+                                "WarningCr" => SystemThreshold::WarningCr,
+                                "HealthyCr" => SystemThreshold::HealthyCr,
+                                _ => return None,
+                            };
+                            let mult_dec = mult_str.parse::<Decimal>().ok()?;
+                            Some(RecoveryRateMarker { threshold, multiplier: Ratio::from(mult_dec) })
+                        })
+                        .collect();
+                    state.recovery_rate_curve = parsed;
+                }
+            },
+            Event::SetHealthyCr { collateral_type, healthy_cr } => {
+                if let Ok(ct) = Principal::from_text(&collateral_type) {
+                    if let Some(config) = state.collateral_configs.get_mut(&ct) {
+                        config.healthy_cr = healthy_cr
+                            .as_ref()
+                            .and_then(|s| s.parse::<Decimal>().ok())
+                            .map(Ratio::from);
+                    }
                 }
             },
         }
@@ -955,6 +1054,23 @@ pub fn record_admin_mint(
     });
 }
 
+pub fn record_set_recovery_parameters(
+    state: &mut State,
+    collateral_type: CollateralType,
+    recovery_borrowing_fee: Option<Ratio>,
+    recovery_interest_rate_apr: Option<Ratio>,
+) {
+    record_event(&Event::SetRecoveryParameters {
+        collateral_type,
+        recovery_borrowing_fee: recovery_borrowing_fee.map(|r| r.0.to_string()),
+        recovery_interest_rate_apr: recovery_interest_rate_apr.map(|r| r.0.to_string()),
+    });
+    if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+        config.recovery_borrowing_fee = recovery_borrowing_fee;
+        config.recovery_interest_rate_apr = recovery_interest_rate_apr;
+    }
+}
+
 pub fn record_admin_vault_correction(
     state: &mut State,
     vault_id: u64,
@@ -970,5 +1086,78 @@ pub fn record_admin_vault_correction(
     });
     if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
         vault.collateral_amount = new_amount;
+    }
+}
+
+pub fn record_set_rate_curve_markers(
+    state: &mut State,
+    collateral_type: Option<CollateralType>,
+    markers: Vec<(f64, f64)>,
+) {
+    use crate::state::{RateMarker, RateCurve, InterpolationMethod};
+    let serialized: Vec<(String, String)> = markers.iter()
+        .map(|(cr, mult)| (cr.to_string(), mult.to_string()))
+        .collect();
+    let markers_json = serde_json::to_string(&serialized).unwrap_or_default();
+    record_event(&Event::SetRateCurveMarkers {
+        collateral_type: collateral_type.map(|ct| ct.to_text()),
+        markers: markers_json,
+    });
+    let parsed: Vec<RateMarker> = markers.iter()
+        .map(|(cr, mult)| RateMarker {
+            cr_level: Ratio::from_f64(*cr),
+            multiplier: Ratio::from_f64(*mult),
+        })
+        .collect();
+    let curve = RateCurve { markers: parsed, method: InterpolationMethod::Linear };
+    match collateral_type {
+        None => { state.global_rate_curve = curve; },
+        Some(ct) => {
+            if let Some(config) = state.collateral_configs.get_mut(&ct) {
+                config.rate_curve = Some(curve);
+            }
+        }
+    }
+}
+
+pub fn record_set_recovery_rate_curve(
+    state: &mut State,
+    markers: Vec<(crate::state::SystemThreshold, f64)>,
+) {
+    use crate::state::{RecoveryRateMarker, SystemThreshold};
+    let serialized: Vec<(String, String)> = markers.iter()
+        .map(|(thresh, mult)| {
+            let thresh_str = match thresh {
+                SystemThreshold::LiquidationRatio => "LiquidationRatio",
+                SystemThreshold::BorrowThreshold => "BorrowThreshold",
+                SystemThreshold::WarningCr => "WarningCr",
+                SystemThreshold::HealthyCr => "HealthyCr",
+            };
+            (thresh_str.to_string(), mult.to_string())
+        })
+        .collect();
+    let markers_json = serde_json::to_string(&serialized).unwrap_or_default();
+    record_event(&Event::SetRecoveryRateCurve {
+        markers: markers_json,
+    });
+    state.recovery_rate_curve = markers.iter()
+        .map(|(thresh, mult)| RecoveryRateMarker {
+            threshold: thresh.clone(),
+            multiplier: Ratio::from_f64(*mult),
+        })
+        .collect();
+}
+
+pub fn record_set_healthy_cr(
+    state: &mut State,
+    collateral_type: CollateralType,
+    healthy_cr: Option<Ratio>,
+) {
+    record_event(&Event::SetHealthyCr {
+        collateral_type: collateral_type.to_text(),
+        healthy_cr: healthy_cr.map(|r| r.0.to_string()),
+    });
+    if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+        config.healthy_cr = healthy_cr;
     }
 }
