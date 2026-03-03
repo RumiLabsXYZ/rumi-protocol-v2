@@ -5,7 +5,7 @@
   import { vaultStore } from '../../stores/vaultStore';
   import { protocolManager } from '../../services/ProtocolManager';
   import { CONFIG, CANISTER_IDS } from '../../config';
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, onDestroy } from 'svelte';
   import { walletStore } from '../../stores/wallet';
   import { MINIMUM_CR, LIQUIDATION_CR, E8S, getMinimumCR, getLiquidationCR } from '$lib/protocol';
   import { collateralStore } from '../../stores/collateralStore';
@@ -44,12 +44,12 @@
 
   // ── Derived display ──
   $: collateralValueUsd = vaultCollateralAmount * vaultCollateralPrice;
-  $: collateralRatio = vault.borrowedIcusd > 0
-    ? collateralValueUsd / vault.borrowedIcusd : Infinity;
-  $: borrowedValueUsd = vault.borrowedIcusd;
+  $: collateralRatio = tickingDebt > 0
+    ? collateralValueUsd / tickingDebt : Infinity;
+  $: borrowedValueUsd = tickingDebt;
   $: riskLevel = getRiskLevel(collateralRatio);
   // 0.5% haircut so the Max button never overshoots the backend oracle price
-  $: maxBorrowable = Math.max(0, ((collateralValueUsd / vaultMinCR) - vault.borrowedIcusd) * 0.995);
+  $: maxBorrowable = Math.max(0, ((collateralValueUsd / vaultMinCR) - tickingDebt) * 0.995);
 
   // Token type for repayment
   let repayTokenType: 'icUSD' | 'CKUSDT' | 'CKUSDC' = 'icUSD';
@@ -89,22 +89,22 @@
   // Deduct the repay token's ledger fee: icUSD = 0.001, ckUSDT/ckUSDC = 0.01
   $: repayLedgerFee = (repayTokenType === 'CKUSDT' || repayTokenType === 'CKUSDC') ? 0.01 : 0.001;
   $: effectiveRepayBalance = Math.max(0, activeRepayBalance - repayLedgerFee);
-  $: maxRepayable = Math.min(effectiveRepayBalance, vault.borrowedIcusd);
+  $: maxRepayable = Math.min(effectiveRepayBalance, tickingDebt);
 
   // ── Withdraw max: keeps CR at minimum for this collateral ──
   // 0.5% haircut when debt exists so Max never overshoots backend oracle price
   $: maxWithdrawable = (() => {
     if (vaultCollateralAmount <= 0) return 0;
-    if (vault.borrowedIcusd === 0) return vaultCollateralAmount;
+    if (tickingDebt === 0) return vaultCollateralAmount;
     if (!vaultCollateralPrice || vaultCollateralPrice <= 0) return 0;
-    const minCollateral = (vault.borrowedIcusd * vaultMinCR) / vaultCollateralPrice;
+    const minCollateral = (tickingDebt * vaultMinCR) / vaultCollateralPrice;
     return Math.max(0, (vaultCollateralAmount - minCollateral) * 0.995);
   })();
 
   // ── Credit usage ──
   $: creditCapacity = collateralValueUsd / vaultMinCR;
-  $: creditUsed = vault.borrowedIcusd > 0 && creditCapacity > 0
-    ? Math.min((vault.borrowedIcusd / creditCapacity) * 100, 100) : 0;
+  $: creditUsed = tickingDebt > 0 && creditCapacity > 0
+    ? Math.min((tickingDebt / creditCapacity) * 100, 100) : 0;
 
   // ── Health gauge (4 discrete zones, 100–300% CR scale) ──
   // pink (liquidation) | deep-violet (can't borrow) | violet (can borrow) | teal (safe)
@@ -116,18 +116,38 @@
   $: comfortZonePct = Math.max(((vaultMinCR * 1.234 * 100) - 100) / 2, 0);    // e.g. 42.6%
 
 
+  // ── Live-ticking interest accrual (client-side interpolation) ──
+  const SECONDS_PER_YEAR = 365 * 24 * 60 * 60;
+  $: vaultInterestRate = vaultCollateralInfo?.interestRateApr ?? 0;
+  let lastFetchTime = Date.now() / 1000;
+  let tickingDebt = vault.borrowedIcusd;
+
+  // Reset baseline whenever the backend value changes (refetch)
+  $: {
+    tickingDebt = vault.borrowedIcusd;
+    lastFetchTime = Date.now() / 1000;
+  }
+
+  const tickInterval = setInterval(() => {
+    if (vault.borrowedIcusd > 0 && vaultInterestRate > 0) {
+      const elapsed = (Date.now() / 1000) - lastFetchTime;
+      tickingDebt = vault.borrowedIcusd * (1 + vaultInterestRate * elapsed / SECONDS_PER_YEAR);
+    }
+  }, 1000);
+  onDestroy(() => clearInterval(tickInterval));
+
   $: fmtMargin = formatTokenBalance(vaultCollateralAmount);
   $: fmtCollateralUsd = formatNumber(collateralValueUsd, 2);
-  $: fmtBorrowed = formatNumber(vault.borrowedIcusd, 2);
-  $: fmtBorrowedUsd = formatNumber(borrowedValueUsd, 2);
+  $: fmtBorrowed = formatNumber(tickingDebt, 2);
+  $: fmtBorrowedUsd = formatNumber(tickingDebt, 2);
   $: fmtRatio = collateralRatio === Infinity ? '—' : `${(collateralRatio * 100).toFixed(1)}%`;
   $: riskTooltip = riskLevel === 'warning'
     ? 'Approaching minimum collateral ratio'
     : riskLevel === 'danger' ? 'At risk of liquidation. Add collateral or repay.' : '';
 
   // ── Liquidation price: collateral price at which CR hits liquidation ratio ──
-  $: liquidationPrice = vault.borrowedIcusd > 0 && vaultCollateralAmount > 0
-    ? (vault.borrowedIcusd * vaultLiqCR) / vaultCollateralAmount : 0;
+  $: liquidationPrice = tickingDebt > 0 && vaultCollateralAmount > 0
+    ? (tickingDebt * vaultLiqCR) / vaultCollateralAmount : 0;
 
   // ── Active projected CR (based on active action panel) ──
   $: activeProjectedCr = activeAction === 'add' ? projectedCrAdd
@@ -145,27 +165,27 @@
       const amt = parseFloat(addCollateralAmount);
       if (!amt || amt <= 0) return null;
       const newMargin = vaultCollateralAmount + amt;
-      return vault.borrowedIcusd > 0 && newMargin > 0
-        ? (vault.borrowedIcusd * vaultLiqCR) / newMargin : 0;
+      return tickingDebt > 0 && newMargin > 0
+        ? (tickingDebt * vaultLiqCR) / newMargin : 0;
     }
     if (activeAction === 'withdraw') {
       const amt = parseFloat(withdrawAmount);
       if (!amt || amt <= 0) return null;
       const newMargin = vaultCollateralAmount - amt;
-      return vault.borrowedIcusd > 0 && newMargin > 0
-        ? (vault.borrowedIcusd * vaultLiqCR) / newMargin : 0;
+      return tickingDebt > 0 && newMargin > 0
+        ? (tickingDebt * vaultLiqCR) / newMargin : 0;
     }
     if (activeAction === 'borrow') {
       const amt = parseFloat(borrowAmount);
       if (!amt || amt <= 0) return null;
-      const newDebt = vault.borrowedIcusd + amt;
+      const newDebt = tickingDebt + amt;
       return newDebt > 0 && vaultCollateralAmount > 0
         ? (newDebt * vaultLiqCR) / vaultCollateralAmount : 0;
     }
     if (activeAction === 'repay') {
       const amt = parseFloat(repayAmount);
       if (!amt || amt <= 0) return null;
-      const newDebt = vault.borrowedIcusd - amt;
+      const newDebt = tickingDebt - amt;
       return newDebt > 0 && vaultCollateralAmount > 0
         ? (newDebt * vaultLiqCR) / vaultCollateralAmount : 0;
     }
@@ -234,27 +254,27 @@
     const amt = parseFloat(addCollateralAmount);
     if (!amt || amt <= 0 || !vaultCollateralPrice) return null;
     const newCollateral = (vaultCollateralAmount + amt) * vaultCollateralPrice;
-    return vault.borrowedIcusd > 0 ? newCollateral / vault.borrowedIcusd : Infinity;
+    return tickingDebt > 0 ? newCollateral / tickingDebt : Infinity;
   })();
 
   $: projectedCrWithdraw = (() => {
     const amt = parseFloat(withdrawAmount);
     if (!amt || amt <= 0 || !vaultCollateralPrice) return null;
     const newCollateral = (vaultCollateralAmount - amt) * vaultCollateralPrice;
-    return vault.borrowedIcusd > 0 && newCollateral > 0 ? newCollateral / vault.borrowedIcusd : Infinity;
+    return tickingDebt > 0 && newCollateral > 0 ? newCollateral / tickingDebt : Infinity;
   })();
 
   $: projectedCrBorrow = (() => {
     const amt = parseFloat(borrowAmount);
     if (!amt || amt <= 0) return null;
-    const newDebt = vault.borrowedIcusd + amt;
+    const newDebt = tickingDebt + amt;
     return newDebt > 0 ? collateralValueUsd / newDebt : Infinity;
   })();
 
   $: projectedCrRepay = (() => {
     const amt = parseFloat(repayAmount);
     if (!amt || amt <= 0) return null;
-    const newDebt = vault.borrowedIcusd - amt;
+    const newDebt = tickingDebt - amt;
     return newDebt > 0 ? collateralValueUsd / newDebt : Infinity;
   })();
 
@@ -288,8 +308,8 @@
     return v > 0 && maxRepayable > 0 && v > maxRepayable;
   })();
 
-  $: canWithdraw = vault.borrowedIcusd === 0 && vaultCollateralAmount > 0;
-  $: canClose = vault.borrowedIcusd === 0;
+  $: canWithdraw = tickingDebt === 0 && vaultCollateralAmount > 0;
+  $: canClose = tickingDebt === 0;
 
   // Detect if withdraw amount is the full collateral (max)
   $: isMaxWithdraw = (() => {
@@ -543,8 +563,8 @@
             <button class="pill pill-collateral" class:pill-active-collateral={activeAction === 'add'}
               on:click={() => selectAction('add')} disabled={isProcessing}>Deposit</button>
             <button class="pill pill-collateral" class:pill-active-collateral={activeAction === 'withdraw'}
-              class:pill-disabled={maxWithdrawable <= 0 && vault.borrowedIcusd > 0}
-              on:click={() => selectAction('withdraw')} disabled={isProcessing || (maxWithdrawable <= 0 && vault.borrowedIcusd > 0)}>Withdraw</button>
+              class:pill-disabled={maxWithdrawable <= 0 && tickingDebt > 0}
+              on:click={() => selectAction('withdraw')} disabled={isProcessing || (maxWithdrawable <= 0 && tickingDebt > 0)}>Withdraw</button>
           </div>
           <div class="pill-group pill-group-debt">
             <button class="pill pill-debt" class:pill-active-debt={activeAction === 'borrow'}
@@ -590,7 +610,7 @@
               </span>
             </div>
             <!-- Liq price row -->
-            {#if vault.borrowedIcusd > 0 || activeAction === 'borrow'}
+            {#if tickingDebt > 0 || activeAction === 'borrow'}
               <div class="stat-row">
                 <span class="stat-label">Liq. price</span>
                 <span class="stat-value">

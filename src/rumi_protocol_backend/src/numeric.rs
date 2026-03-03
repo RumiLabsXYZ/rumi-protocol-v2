@@ -14,7 +14,10 @@ use std::ops::{Add, AddAssign, Div, Mul, Sub, SubAssign};
 mod tests;
 
 const E8S: u64 = 100_000_000;
-const ICUSD_DEC: u64 = 100_000_000; 
+const ICUSD_DEC: u64 = 100_000_000;
+
+/// Nanoseconds in a 365-day year. Used for interest accrual.
+pub const NANOS_PER_YEAR: u64 = 365 * 24 * 60 * 60 * 1_000_000_000;
 
 
 #[derive(PartialEq, Eq, Debug, Ord, PartialOrd, Clone, Copy)]

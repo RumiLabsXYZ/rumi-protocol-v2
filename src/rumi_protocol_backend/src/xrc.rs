@@ -68,6 +68,12 @@ pub async fn fetch_icp_rate() {
     if let Some(last_icp_rate) = read_state(|s| s.last_icp_rate) {
         mutate_state(|s| s.update_total_collateral_ratio_and_mode(last_icp_rate));
     }
+    // Accrue interest on all vaults before checking vault health.
+    // This ensures liquidation decisions use up-to-date debt balances.
+    if read_state(|s| s.mode != crate::Mode::ReadOnly) {
+        let now = ic_cdk::api::time();
+        mutate_state(|s| crate::event::record_accrue_interest(s, now));
+    }
     if read_state(|s| s.mode != crate::Mode::ReadOnly) {
         crate::check_vaults();
     }

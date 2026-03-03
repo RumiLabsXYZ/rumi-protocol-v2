@@ -218,6 +218,23 @@ fn post_upgrade(arg: ProtocolArg) {
 
     replace_state(state);
 
+    // Migration: set last_accrual_time for any existing vaults that have it at 0.
+    // This avoids a massive retroactive accrual on first tick.
+    let now = ic_cdk::api::time();
+    let migrated = mutate_state(|s| {
+        let mut count = 0u64;
+        for vault in s.vault_id_to_vaults.values_mut() {
+            if vault.last_accrual_time == 0 {
+                vault.last_accrual_time = now;
+                count += 1;
+            }
+        }
+        count
+    });
+    if migrated > 0 {
+        log!(INFO, "[upgrade]: migrated {} vaults: set last_accrual_time to {}", migrated, now);
+    }
+
     let end = ic_cdk::api::instruction_counter();
 
     log!(
@@ -1503,6 +1520,48 @@ async fn set_recovery_parameters(
     Ok(())
 }
 
+/// Set the base interest rate APR for a specific collateral type (developer only).
+/// e.g. 0.02 = 2% APR, 0.005 = 0.5% APR.
+#[candid_method(update)]
+#[update]
+async fn set_interest_rate(
+    collateral_type: Principal,
+    interest_rate_apr: f64,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set interest rates".to_string(),
+        ));
+    }
+    let exists = read_state(|s| s.collateral_configs.contains_key(&collateral_type));
+    if !exists {
+        return Err(ProtocolError::GenericError(
+            "Unknown collateral type".to_string(),
+        ));
+    }
+    if interest_rate_apr < 0.0 || interest_rate_apr > 1.0 {
+        return Err(ProtocolError::GenericError(
+            "Interest rate APR must be between 0 and 1.0 (100%)".to_string(),
+        ));
+    }
+    let rate = Ratio::from(
+        Decimal::try_from(interest_rate_apr)
+            .map_err(|_| ProtocolError::GenericError("Invalid interest rate value".to_string()))?,
+    );
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_interest_rate(s, collateral_type, rate);
+    });
+    log!(
+        INFO,
+        "[set_interest_rate] collateral={}, interest_rate_apr={}",
+        collateral_type,
+        interest_rate_apr
+    );
+    Ok(())
+}
+
 /// Set rate curve markers for a collateral type or the global default.
 /// `collateral_type`: None = update global default curve; Some(principal) = per-asset curve.
 /// `markers`: Vec of (cr_level, multiplier) pairs, sorted ascending by cr_level.
@@ -1801,8 +1860,8 @@ async fn add_collateral_token(arg: rumi_protocol_backend::AddCollateralArg) -> R
         status: CollateralStatus::Active,
         last_price: None,
         last_price_timestamp: None,
-        redemption_fee_floor: Ratio::from_f64(0.005),
-        redemption_fee_ceiling: Ratio::from_f64(0.05),
+        redemption_fee_floor: Ratio::from_f64(arg.redemption_fee_floor.unwrap_or(0.005)),
+        redemption_fee_ceiling: Ratio::from_f64(arg.redemption_fee_ceiling.unwrap_or(0.05)),
         current_base_rate: Ratio::from_f64(0.0),
         last_redemption_time: 0,
         recovery_target_cr: Ratio::from_f64(arg.recovery_target_cr),

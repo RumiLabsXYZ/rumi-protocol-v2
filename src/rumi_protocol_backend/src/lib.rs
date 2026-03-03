@@ -195,6 +195,10 @@ pub struct AddCollateralArg {
     pub min_collateral_deposit: u64,
     /// Hex color for frontend display (e.g., "#F7931A")
     pub display_color: Option<String>,
+    /// Minimum redemption fee (floor), e.g., 0.005 = 0.5%
+    pub redemption_fee_floor: Option<f64>,
+    /// Maximum redemption fee (ceiling), e.g., 0.05 = 5%
+    pub redemption_fee_ceiling: Option<f64>,
 }
 
 #[derive(CandidType, Debug, Clone, Deserialize)]

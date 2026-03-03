@@ -1098,6 +1098,110 @@ impl State {
         layer1_rate
     }
 
+    /// Accrue interest on a single vault up to `now_nanos`.
+    /// Two-phase for borrow checker: compute rate (immutable), then apply (mutable).
+    pub fn accrue_single_vault(&mut self, vault_id: u64, now_nanos: u64) {
+        // Phase 1: compute rate (immutable borrow of self)
+        let rate_and_elapsed = {
+            let s: &State = &*self;
+            match s.vault_id_to_vaults.get(&vault_id) {
+                Some(vault)
+                    if vault.borrowed_icusd_amount.0 > 0
+                        && vault.last_accrual_time < now_nanos =>
+                {
+                    let dummy_rate = s
+                        .last_icp_rate
+                        .unwrap_or(UsdIcp::from(rust_decimal_macros::dec!(1.0)));
+                    let cr = crate::compute_collateral_ratio(vault, dummy_rate, s);
+                    let rate = s.get_dynamic_interest_rate_for(&vault.collateral_type, cr);
+                    let elapsed = now_nanos.saturating_sub(vault.last_accrual_time);
+                    Some((rate, elapsed))
+                }
+                _ => None,
+            }
+        };
+        // Phase 2: apply (mutable borrow)
+        if let Some((rate, elapsed)) = rate_and_elapsed {
+            if elapsed == 0 {
+                return;
+            }
+            if let Some(vault) = self.vault_id_to_vaults.get_mut(&vault_id) {
+                let debt = Decimal::from(vault.borrowed_icusd_amount.0);
+                let factor = Decimal::ONE
+                    + rate.0 * Decimal::from(elapsed)
+                        / Decimal::from(crate::numeric::NANOS_PER_YEAR);
+                let new_debt = (debt * factor).to_u64().unwrap_or(vault.borrowed_icusd_amount.0);
+                vault.borrowed_icusd_amount = ICUSD::from(new_debt);
+                vault.last_accrual_time = now_nanos;
+            }
+        }
+    }
+
+    /// Accrue interest on ALL vaults with outstanding debt.
+    /// Two-phase: collect (vault_id, rate, elapsed) immutably, then apply mutably.
+    pub fn accrue_all_vault_interest(&mut self, now_nanos: u64) {
+        // Phase 1: compute rates for all vaults (immutable)
+        let accruals: Vec<(u64, Ratio, u64)> = {
+            let s: &State = &*self;
+            let dummy_rate = s
+                .last_icp_rate
+                .unwrap_or(UsdIcp::from(rust_decimal_macros::dec!(1.0)));
+            s.vault_id_to_vaults
+                .iter()
+                .filter(|(_, v)| {
+                    v.borrowed_icusd_amount.0 > 0 && v.last_accrual_time < now_nanos
+                })
+                .map(|(id, vault)| {
+                    let cr = crate::compute_collateral_ratio(vault, dummy_rate, s);
+                    let rate =
+                        s.get_dynamic_interest_rate_for(&vault.collateral_type, cr);
+                    let elapsed = now_nanos.saturating_sub(vault.last_accrual_time);
+                    (*id, rate, elapsed)
+                })
+                .collect()
+        };
+        // Phase 2: apply accruals (mutable)
+        for (vault_id, rate, elapsed) in accruals {
+            if elapsed == 0 {
+                continue;
+            }
+            if let Some(vault) = self.vault_id_to_vaults.get_mut(&vault_id) {
+                let debt = Decimal::from(vault.borrowed_icusd_amount.0);
+                let factor = Decimal::ONE
+                    + rate.0 * Decimal::from(elapsed)
+                        / Decimal::from(crate::numeric::NANOS_PER_YEAR);
+                let new_debt = (debt * factor).to_u64().unwrap_or(vault.borrowed_icusd_amount.0);
+                vault.borrowed_icusd_amount = ICUSD::from(new_debt);
+                vault.last_accrual_time = now_nanos;
+            }
+        }
+    }
+
+    /// Compute the debt-weighted average interest rate across all vaults.
+    /// Returns 0 if no vaults have outstanding debt.
+    pub fn weighted_average_interest_rate(&self) -> Ratio {
+        let dummy_rate = self
+            .last_icp_rate
+            .unwrap_or(UsdIcp::from(rust_decimal_macros::dec!(1.0)));
+        let mut total_debt = Decimal::ZERO;
+        let mut weighted_sum = Decimal::ZERO;
+        for vault in self.vault_id_to_vaults.values() {
+            if vault.borrowed_icusd_amount.0 == 0 {
+                continue;
+            }
+            let debt = Decimal::from(vault.borrowed_icusd_amount.0);
+            let cr = crate::compute_collateral_ratio(vault, dummy_rate, self);
+            let rate = self.get_dynamic_interest_rate_for(&vault.collateral_type, cr);
+            weighted_sum += debt * rate.0;
+            total_debt += debt;
+        }
+        if total_debt.is_zero() {
+            Ratio::from(Decimal::ZERO)
+        } else {
+            Ratio::from(weighted_sum / total_debt)
+        }
+    }
+
     /// Get liquidation bonus for a specific collateral type
     pub fn get_liquidation_bonus_for(&self, ct: &CollateralType) -> Ratio {
         self.collateral_configs
@@ -2012,6 +2116,7 @@ mod tests {
             collateral_amount: 500_000,
             borrowed_icusd_amount: ICUSD::new(300_000),
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
         };
 
         let vault2 = Vault {
@@ -2020,6 +2125,7 @@ mod tests {
             collateral_amount: 300_000,
             borrowed_icusd_amount: ICUSD::new(200_000),
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
         };
 
         vaults.insert(1, vault1);
@@ -2031,6 +2137,7 @@ mod tests {
             collateral_amount: 700_000,
             borrowed_icusd_amount: ICUSD::new(400_000),
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
         };
 
         let result = distribute_across_vaults(&vaults, target_vault);
@@ -2066,6 +2173,7 @@ mod tests {
             collateral_amount: 1_000_000, // 0.01 ICP
             borrowed_icusd_amount: ICUSD::new(200_000_000), // 2 icUSD
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
         });
 
         // Repay 0.01 icUSD (minimum partial repay in e8s is 1_000_000)
@@ -2107,6 +2215,7 @@ mod tests {
             collateral_amount: 280_000_000, // 2.8 ICP
             borrowed_icusd_amount: ICUSD::new(1_000_000_000), // 10 icUSD
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
         });
 
         // Move state into global so mutate_state/read_state work in this test.
@@ -2315,5 +2424,271 @@ mod tests {
         let rate = state.get_dynamic_interest_rate_for(&icp, Ratio::from_f64(3.0));
         assert!((rate.to_f64() - 0.10).abs() < 0.001,
             "Expected static override 0.10, got {}", rate.to_f64());
+    }
+
+    // --- Interest Accrual Tests ---
+
+    /// Helper: create a State with ICP price set and a non-zero interest rate.
+    fn accrual_test_state() -> State {
+        let mut state = State::from(InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: Principal::anonymous(),
+            fee_e8s: 0,
+            developer_principal: Principal::anonymous(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        });
+        let icp = state.icp_ledger_principal;
+        // Set ICP price to $10, so CR math works
+        state.last_icp_rate = Some(UsdIcp::from(dec!(10.0)));
+        if let Some(config) = state.collateral_configs.get_mut(&icp) {
+            config.last_price = Some(10.0);
+            // Set a 5% base interest rate for testability
+            config.interest_rate_apr = Ratio::from_f64(0.05);
+        }
+        state
+    }
+
+    #[test]
+    fn test_accrue_single_vault_basic() {
+        let mut state = accrual_test_state();
+        let icp = state.icp_ledger_principal;
+
+        // Insert a vault: 1.5 ICP collateral, 5 icUSD debt
+        // CR = (150M * $10 / 1e8) / (500M / 1e8) = $15 / $5 = 3.0
+        // 300% is above healthy_cr (225%), so multiplier = 1.0x
+        let vault = Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            collateral_amount: 150_000_000, // 1.5 ICP
+            borrowed_icusd_amount: ICUSD::new(500_000_000), // 5 icUSD
+            collateral_type: icp,
+            last_accrual_time: 0, // t=0
+        };
+        state.vault_id_to_vaults.insert(1, vault);
+
+        // Accrue for exactly 1 year
+        let one_year_nanos = crate::numeric::NANOS_PER_YEAR;
+        state.accrue_single_vault(1, one_year_nanos);
+
+        let vault_after = state.vault_id_to_vaults.get(&1).unwrap();
+        // At 300% CR (above healthy 225%): multiplier = 1.0x
+        // rate = 5% × 1.0 = 5%
+        // After 1 year: debt = 500_000_000 × 1.05 = 525_000_000
+        assert_eq!(vault_after.borrowed_icusd_amount.0, 525_000_000,
+            "After 1 year at 5%, 500M should become 525M, got {}",
+            vault_after.borrowed_icusd_amount.0);
+        assert_eq!(vault_after.last_accrual_time, one_year_nanos);
+    }
+
+    #[test]
+    fn test_accrue_single_vault_zero_debt_noop() {
+        let mut state = accrual_test_state();
+        let icp = state.icp_ledger_principal;
+
+        let vault = Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            collateral_amount: 100_000_000,
+            borrowed_icusd_amount: ICUSD::new(0), // zero debt
+            collateral_type: icp,
+            last_accrual_time: 0,
+        };
+        state.vault_id_to_vaults.insert(1, vault);
+
+        state.accrue_single_vault(1, crate::numeric::NANOS_PER_YEAR);
+
+        let vault_after = state.vault_id_to_vaults.get(&1).unwrap();
+        assert_eq!(vault_after.borrowed_icusd_amount.0, 0);
+        // last_accrual_time should NOT be updated (no-op)
+        assert_eq!(vault_after.last_accrual_time, 0);
+    }
+
+    #[test]
+    fn test_accrue_single_vault_same_timestamp_noop() {
+        let mut state = accrual_test_state();
+        let icp = state.icp_ledger_principal;
+
+        let vault = Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            collateral_amount: 100_000_000,
+            borrowed_icusd_amount: ICUSD::new(500_000_000),
+            collateral_type: icp,
+            last_accrual_time: 1000, // already accrued up to t=1000
+        };
+        state.vault_id_to_vaults.insert(1, vault);
+
+        state.accrue_single_vault(1, 1000); // same timestamp → no-op
+
+        let vault_after = state.vault_id_to_vaults.get(&1).unwrap();
+        assert_eq!(vault_after.borrowed_icusd_amount.0, 500_000_000);
+    }
+
+    #[test]
+    fn test_accrue_all_vault_interest_multiple_vaults() {
+        let mut state = accrual_test_state();
+        let icp = state.icp_ledger_principal;
+
+        // Vault 1: 1.5 ICP, 5 icUSD → CR = 300% (above healthy 225%)
+        state.vault_id_to_vaults.insert(1, Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            collateral_amount: 150_000_000,
+            borrowed_icusd_amount: ICUSD::new(500_000_000),
+            collateral_type: icp,
+            last_accrual_time: 0,
+        });
+
+        // Vault 2: 2 ICP, 5 icUSD → CR = 400% (above healthy 225%)
+        state.vault_id_to_vaults.insert(2, Vault {
+            owner: Principal::anonymous(),
+            vault_id: 2,
+            collateral_amount: 200_000_000,
+            borrowed_icusd_amount: ICUSD::new(500_000_000),
+            collateral_type: icp,
+            last_accrual_time: 0,
+        });
+
+        // Vault 3: zero debt (should be skipped)
+        state.vault_id_to_vaults.insert(3, Vault {
+            owner: Principal::anonymous(),
+            vault_id: 3,
+            collateral_amount: 100_000_000,
+            borrowed_icusd_amount: ICUSD::new(0),
+            collateral_type: icp,
+            last_accrual_time: 0,
+        });
+
+        let one_year = crate::numeric::NANOS_PER_YEAR;
+        state.accrue_all_vault_interest(one_year);
+
+        // Vault 1 (300% CR, above healthy): multiplier = 1.0x, rate = 5%
+        let v1 = state.vault_id_to_vaults.get(&1).unwrap();
+        assert_eq!(v1.borrowed_icusd_amount.0, 525_000_000,
+            "Vault 1 expected 525M, got {}", v1.borrowed_icusd_amount.0);
+        assert_eq!(v1.last_accrual_time, one_year);
+
+        // Vault 2 (400% CR, well above healthy): multiplier = 1.0x, rate = 5%
+        let v2 = state.vault_id_to_vaults.get(&2).unwrap();
+        assert_eq!(v2.borrowed_icusd_amount.0, 525_000_000,
+            "Vault 2 expected 525M, got {}", v2.borrowed_icusd_amount.0);
+        assert_eq!(v2.last_accrual_time, one_year);
+
+        // Vault 3 (zero debt): unchanged
+        let v3 = state.vault_id_to_vaults.get(&3).unwrap();
+        assert_eq!(v3.borrowed_icusd_amount.0, 0);
+        assert_eq!(v3.last_accrual_time, 0); // not updated
+    }
+
+    #[test]
+    fn test_accrue_300s_tick() {
+        let mut state = accrual_test_state();
+        let icp = state.icp_ledger_principal;
+
+        // 1.5 ICP, 5 icUSD debt → CR = 300% (above healthy) → multiplier 1.0x
+        state.vault_id_to_vaults.insert(1, Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            collateral_amount: 150_000_000,
+            borrowed_icusd_amount: ICUSD::new(500_000_000),
+            collateral_type: icp,
+            last_accrual_time: 0,
+        });
+
+        // 300 seconds in nanos
+        let tick = 300_000_000_000u64;
+        state.accrue_single_vault(1, tick);
+
+        let v = state.vault_id_to_vaults.get(&1).unwrap();
+        // factor = 1 + 0.05 * 300e9 / NANOS_PER_YEAR
+        // = 1 + 0.05 * 300 / 31_536_000
+        // = 1 + 0.05 * 9.5129e-6
+        // = 1 + 4.7565e-7
+        // ≈ 1.00000047565
+        // new_debt = 500_000_000 * 1.00000047565 ≈ 500_000_237
+        // With u64 truncation it should be 500_000_237 or close
+        assert!(v.borrowed_icusd_amount.0 > 500_000_000,
+            "Debt should increase after 300s tick, got {}", v.borrowed_icusd_amount.0);
+        assert!(v.borrowed_icusd_amount.0 < 500_001_000,
+            "Debt increase should be small for 300s, got {}", v.borrowed_icusd_amount.0);
+        assert_eq!(v.last_accrual_time, tick);
+    }
+
+    #[test]
+    fn test_accrual_before_check_vaults_flow() {
+        // Simulates the full timer tick flow: accrue → check vault health
+        let mut state = accrual_test_state();
+        let icp = state.icp_ledger_principal;
+
+        let start = 1_000_000_000_000u64; // 1 trillion nanos
+
+        // Vault with 1.5 ICP ($15), 5 icUSD debt → CR = 300% (healthy)
+        state.vault_id_to_vaults.insert(1, Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            collateral_amount: 150_000_000,
+            borrowed_icusd_amount: ICUSD::new(500_000_000),
+            collateral_type: icp,
+            last_accrual_time: start,
+        });
+
+        let initial_debt = state.vault_id_to_vaults.get(&1).unwrap().borrowed_icusd_amount;
+
+        // Simulate timer tick: 300 seconds later
+        let tick1 = start + 300 * 1_000_000_000;
+        state.accrue_all_vault_interest(tick1);
+
+        let debt_after_tick1 = state.vault_id_to_vaults.get(&1).unwrap().borrowed_icusd_amount;
+        assert!(debt_after_tick1 > initial_debt,
+            "Debt should increase after first tick: {} > {}", debt_after_tick1.0, initial_debt.0);
+
+        // Simulate second timer tick: another 300 seconds
+        let tick2 = tick1 + 300 * 1_000_000_000;
+        state.accrue_all_vault_interest(tick2);
+
+        let debt_after_tick2 = state.vault_id_to_vaults.get(&1).unwrap().borrowed_icusd_amount;
+        assert!(debt_after_tick2 > debt_after_tick1,
+            "Debt should increase after second tick: {} > {}", debt_after_tick2.0, debt_after_tick1.0);
+
+        // Verify the increase is proportional across ticks
+        let increase1 = debt_after_tick1.0 - initial_debt.0;
+        let increase2 = debt_after_tick2.0 - debt_after_tick1.0;
+        // Second increase should be >= first (compounding on larger base)
+        assert!(increase2 >= increase1,
+            "Compounding: second increase {} should be >= first {}", increase2, increase1);
+    }
+
+    #[test]
+    fn test_weighted_average_interest_rate_empty() {
+        let state = accrual_test_state();
+        let avg = state.weighted_average_interest_rate();
+        assert_eq!(avg.0, rust_decimal::Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_weighted_average_interest_rate_single_vault() {
+        let mut state = accrual_test_state();
+        let icp = state.icp_ledger_principal;
+
+        // Single vault at CR = 300% (above healthy_cr 225%) → multiplier 1.0x
+        // Base APR = 5%, so weighted avg should be 5%
+        state.vault_id_to_vaults.insert(1, Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            collateral_amount: 150_000_000, // 1.5 ICP
+            borrowed_icusd_amount: ICUSD::new(500_000_000), // 5 icUSD
+            collateral_type: icp,
+            last_accrual_time: 0,
+        });
+
+        let avg = state.weighted_average_interest_rate();
+        // At 300% CR with base 5% and 1.0x multiplier, should be ~0.05
+        let diff = (avg.0 - rust_decimal_macros::dec!(0.05)).abs();
+        assert!(diff < rust_decimal_macros::dec!(0.001),
+            "Weighted avg rate should be ~5%, got {}", avg.0);
     }
 }
