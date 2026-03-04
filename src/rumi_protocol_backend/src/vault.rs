@@ -44,6 +44,11 @@ pub(crate) fn default_collateral_type() -> Principal {
     Principal::anonymous()
 }
 
+/// Returns zero ICUSD for serde default of `accrued_interest` field.
+fn default_zero_icusd() -> ICUSD {
+    ICUSD::new(0)
+}
+
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Deserialize, Serialize, PartialOrd, Ord)]
 pub struct Vault {
     pub owner: Principal,
@@ -62,6 +67,11 @@ pub struct Vault {
     /// Defaults to 0 for existing vaults (migration sets it in post_upgrade).
     #[serde(default)]
     pub last_accrual_time: u64,
+    /// Accumulated interest on this vault's debt.
+    /// Sub-component of `borrowed_icusd_amount` — tracks how much is interest vs principal.
+    /// Defaults to 0 for existing vaults (backward compat).
+    #[serde(default = "default_zero_icusd")]
+    pub accrued_interest: ICUSD,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Debug)]
@@ -75,6 +85,8 @@ pub struct CandidVault {
     pub collateral_amount: u64,
     /// Ledger canister ID of the collateral token
     pub collateral_type: Principal,
+    /// Accumulated interest portion of the vault's debt (in e8s)
+    pub accrued_interest: u64,
 }
 
 impl From<Vault> for CandidVault {
@@ -86,6 +98,7 @@ impl From<Vault> for CandidVault {
             vault_id: vault.vault_id,
             collateral_amount: vault.collateral_amount,
             collateral_type: vault.collateral_type,
+            accrued_interest: vault.accrued_interest.to_u64(),
         }
     }
 }
@@ -403,6 +416,7 @@ pub async fn open_vault(collateral_amount_raw: u64, collateral_type_opt: Option<
                         vault_id,
                         collateral_type,
                         last_accrual_time: ic_cdk::api::time(),
+                        accrued_interest: ICUSD::new(0),
                     },
                     block_index,
                 );
@@ -528,6 +542,7 @@ pub async fn open_vault_and_borrow(
                 vault_id,
                 collateral_type,
                 last_accrual_time: ic_cdk::api::time(),
+                accrued_interest: ICUSD::new(0),
             },
             block_index,
         );
@@ -964,6 +979,7 @@ pub async fn open_vault_with_deposit(
                 vault_id,
                 collateral_type,
                 last_accrual_time: ic_cdk::api::time(),
+                accrued_interest: ICUSD::new(0),
             },
             sweep_block_index,
         );

@@ -78,6 +78,8 @@ mod fixtures {
             collateral_amount: 10 * 100_000_000,
             vault_id,
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         }
     }
     
@@ -88,6 +90,8 @@ mod fixtures {
             collateral_amount: 10 * 100_000_000,
             vault_id,
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         }
     }
     
@@ -98,6 +102,8 @@ mod fixtures {
             collateral_amount: 5 * 100_000_000,
             vault_id,
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         }
     }
 }
@@ -440,6 +446,8 @@ mod protocol_safety_tests {
             collateral_amount: 10 * 100_000_000,                  // 10 ICP margin
             vault_id: borderline_vault_id,
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         
         state.vault_id_to_vaults.insert(healthy_vault_id, healthy_vault.clone());
@@ -659,6 +667,8 @@ mod minting_tests {
             collateral_amount: 10 * 100_000_000, // 10 ICP
             vault_id,
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         println!("💰 Created vault with {} ICP margin", vault.collateral_amount);
         
@@ -975,6 +985,8 @@ mod multi_collateral_helpers {
             collateral_amount: collateral_raw,
             vault_id,
             collateral_type: cketh_ledger(),
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         }
     }
 }
@@ -1219,6 +1231,8 @@ mod multi_collateral_tests {
             collateral_amount: 10 * 100_000_000, // 10 ICP
             vault_id: 1,
             collateral_type: Principal::anonymous(), // legacy ICP sentinel
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         state.vault_id_to_vaults.insert(1, icp_vault);
         state.principal_to_vault_ids
@@ -1269,6 +1283,8 @@ mod multi_collateral_tests {
             collateral_amount: 10 * 100_000_000,
             vault_id: 1,
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         state.vault_id_to_vaults.insert(1, icp_vault);
 
@@ -1348,6 +1364,8 @@ mod multi_collateral_tests {
             collateral_amount: 10 * 100_000_000,
             vault_id: 1,
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         state.vault_id_to_vaults.insert(1, icp_vault);
 
@@ -1388,6 +1406,8 @@ mod multi_collateral_tests {
             collateral_amount: 10 * 100_000_000,
             vault_id: 1,
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         state.vault_id_to_vaults.insert(1, icp_vault);
 
@@ -1422,6 +1442,8 @@ mod multi_collateral_tests {
             collateral_amount: 10 * 100_000_000,
             vault_id: 1,
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         state.vault_id_to_vaults.insert(1, icp_vault);
 
@@ -1531,6 +1553,8 @@ mod multi_collateral_tests {
             collateral_amount: 10 * 100_000_000,
             vault_id: 1,
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
 
         let cr = rumi_protocol_backend::compute_collateral_ratio(
@@ -1680,6 +1704,8 @@ mod multi_collateral_tests {
             collateral_amount: 10 * 100_000_000,
             vault_id: 1,
             collateral_type: icp_ct,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         state.open_vault(vault);
 
@@ -1703,6 +1729,8 @@ mod multi_collateral_tests {
             collateral_amount: 10 * 100_000_000,
             vault_id: 1,
             collateral_type: icp_ct,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         state.open_vault(icp_vault);
 
@@ -1736,6 +1764,8 @@ mod multi_collateral_tests {
             collateral_amount: 20 * 100_000_000,
             vault_id: 1,
             collateral_type: icp_ct,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         state.open_vault(icp_vault);
 
@@ -1768,6 +1798,8 @@ mod multi_collateral_tests {
             collateral_amount: 10 * 100_000_000,
             vault_id: 1,
             collateral_type: icp_ct,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         state.open_vault(icp_vault);
 
@@ -2052,6 +2084,8 @@ mod water_filling_tests {
             collateral_amount: 10 * 100_000_000,
             vault_id: 1,
             collateral_type: icp_ct,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         state.open_vault(v1);
 
@@ -2062,6 +2096,8 @@ mod water_filling_tests {
             collateral_amount: 10 * 100_000_000,
             vault_id: 2,
             collateral_type: icp_ct,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         state.open_vault(v2);
 
@@ -2072,6 +2108,8 @@ mod water_filling_tests {
             collateral_amount: 20 * 100_000_000,
             vault_id: 3,
             collateral_type: icp_ct,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         state.open_vault(v3);
 
@@ -2158,6 +2196,8 @@ mod water_filling_tests {
             collateral_amount: 100 * 100_000_000,
             vault_id: 1,
             collateral_type: icp_ct,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         state.open_vault(v1);
 

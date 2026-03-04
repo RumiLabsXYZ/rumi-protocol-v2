@@ -2117,6 +2117,7 @@ mod tests {
             borrowed_icusd_amount: ICUSD::new(300_000),
             collateral_type: Principal::anonymous(),
             last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
 
         let vault2 = Vault {
@@ -2126,6 +2127,7 @@ mod tests {
             borrowed_icusd_amount: ICUSD::new(200_000),
             collateral_type: Principal::anonymous(),
             last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
 
         vaults.insert(1, vault1);
@@ -2138,6 +2140,7 @@ mod tests {
             borrowed_icusd_amount: ICUSD::new(400_000),
             collateral_type: Principal::anonymous(),
             last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
 
         let result = distribute_across_vaults(&vaults, target_vault);
@@ -2174,6 +2177,7 @@ mod tests {
             borrowed_icusd_amount: ICUSD::new(200_000_000), // 2 icUSD
             collateral_type: Principal::anonymous(),
             last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         });
 
         // Repay 0.01 icUSD (minimum partial repay in e8s is 1_000_000)
@@ -2216,6 +2220,7 @@ mod tests {
             borrowed_icusd_amount: ICUSD::new(1_000_000_000), // 10 icUSD
             collateral_type: Principal::anonymous(),
             last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         });
 
         // Move state into global so mutate_state/read_state work in this test.
@@ -2467,6 +2472,7 @@ mod tests {
             borrowed_icusd_amount: ICUSD::new(500_000_000), // 5 icUSD
             collateral_type: icp,
             last_accrual_time: 0, // t=0
+            accrued_interest: ICUSD::new(0),
         };
         state.vault_id_to_vaults.insert(1, vault);
 
@@ -2496,6 +2502,7 @@ mod tests {
             borrowed_icusd_amount: ICUSD::new(0), // zero debt
             collateral_type: icp,
             last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         state.vault_id_to_vaults.insert(1, vault);
 
@@ -2519,6 +2526,7 @@ mod tests {
             borrowed_icusd_amount: ICUSD::new(500_000_000),
             collateral_type: icp,
             last_accrual_time: 1000, // already accrued up to t=1000
+            accrued_interest: ICUSD::new(0),
         };
         state.vault_id_to_vaults.insert(1, vault);
 
@@ -2541,6 +2549,7 @@ mod tests {
             borrowed_icusd_amount: ICUSD::new(500_000_000),
             collateral_type: icp,
             last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         });
 
         // Vault 2: 2 ICP, 5 icUSD → CR = 400% (above healthy 225%)
@@ -2551,6 +2560,7 @@ mod tests {
             borrowed_icusd_amount: ICUSD::new(500_000_000),
             collateral_type: icp,
             last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         });
 
         // Vault 3: zero debt (should be skipped)
@@ -2561,6 +2571,7 @@ mod tests {
             borrowed_icusd_amount: ICUSD::new(0),
             collateral_type: icp,
             last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         });
 
         let one_year = crate::numeric::NANOS_PER_YEAR;
@@ -2597,6 +2608,7 @@ mod tests {
             borrowed_icusd_amount: ICUSD::new(500_000_000),
             collateral_type: icp,
             last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         });
 
         // 300 seconds in nanos
@@ -2634,6 +2646,7 @@ mod tests {
             borrowed_icusd_amount: ICUSD::new(500_000_000),
             collateral_type: icp,
             last_accrual_time: start,
+            accrued_interest: ICUSD::new(0),
         });
 
         let initial_debt = state.vault_id_to_vaults.get(&1).unwrap().borrowed_icusd_amount;
@@ -2683,6 +2696,7 @@ mod tests {
             borrowed_icusd_amount: ICUSD::new(500_000_000), // 5 icUSD
             collateral_type: icp,
             last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         });
 
         let avg = state.weighted_average_interest_rate();
