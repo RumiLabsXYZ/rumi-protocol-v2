@@ -7,10 +7,10 @@ type AssetType = variant {
 };
 
 type DepositType = variant {
-  MintingFee;
+  BorrowingFee;
   RedemptionFee;
-  LiquidationSurplus;
-  StabilityFee;
+  LiquidationFee;
+  InterestRevenue;
 };
 
 type AssetBalance = record {
@@ -71,6 +71,5 @@ service : (TreasuryInitArgs) -> {
   withdraw: (WithdrawArgs) -> (variant { Ok : WithdrawResult; Err : text });
   get_status: () -> (TreasuryStatus) query;
   get_deposits: (opt nat64, opt nat64) -> (vec DepositRecord) query;
-  set_controller: (principal) -> (variant { Ok; Err : text });
   set_paused: (bool) -> (variant { Ok; Err : text });
 }

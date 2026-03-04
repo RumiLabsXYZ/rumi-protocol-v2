@@ -5,7 +5,6 @@ mod state;
 mod tests;
 
 use candid::{candid_method, Principal};
-// use ic_cdk::api::management_canister::main::raw_rand;
 use ic_cdk::{init, post_upgrade, pre_upgrade, query, update};
 use ic_cdk::api::caller;
 use ic_canister_log::{log, declare_log_buffer};
@@ -13,7 +12,7 @@ use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
 use icrc_ledger_types::icrc1::account::Account;
 use state::{init_state, restore_state, with_state, with_state_mut};
 use types::{
-    AssetType, DepositArgs, DepositRecord, TreasuryInitArgs, 
+    AssetType, DepositArgs, DepositRecord, TreasuryInitArgs,
     TreasuryStatus, WithdrawArgs, WithdrawResult
 };
 
@@ -41,35 +40,34 @@ fn post_upgrade() {
     log!(LOG, "Treasury upgrade completed — state restored from stable memory");
 }
 
-/// Only controller can call this function
+/// Reject callers that are not an IC-level controller of this canister.
+/// Controllers are set via `dfx canister update-settings --add-controller`.
 fn ensure_controller() -> Result<(), String> {
     let caller = caller();
-    let controller = with_state(|s| s.get_config().controller);
-    
-    if caller != controller {
-        return Err(format!("Access denied. Only controller {} can call this function", controller));
+    if !ic_cdk::api::is_controller(&caller) {
+        return Err(format!(
+            "Access denied. {} is not a controller of this canister",
+            caller
+        ));
     }
     Ok(())
 }
 
-/// Deposit funds to treasury (only controller can call)
+/// Deposit funds to treasury (controllers only)
 #[update]
 #[candid_method(update)]
 async fn deposit(args: DepositArgs) -> Result<u64, String> {
-    // Anyone can deposit to treasury, only controller can withdraw
-    
+    ensure_controller()?;
+
     // Check if treasury is paused
     let is_paused = with_state(|s| s.get_config().is_paused);
     if is_paused {
         return Err("Treasury is paused and not accepting deposits".to_string());
     }
 
-    log!(LOG, "Processing deposit: {:?} {} {:?}", 
+    log!(LOG, "Processing deposit: {:?} {} {:?}",
          args.deposit_type, args.amount, args.asset_type);
 
-    // Verify the transfer actually happened by checking the ledger
-    // (In production, you'd call the ledger to verify the block_index)
-    
     let record = DepositRecord {
         id: 0, // Will be set by add_deposit
         deposit_type: args.deposit_type,
@@ -81,21 +79,21 @@ async fn deposit(args: DepositArgs) -> Result<u64, String> {
     };
 
     let deposit_id = with_state_mut(|s| s.add_deposit(record));
-    
+
     log!(LOG, "Deposit {} recorded successfully", deposit_id);
     Ok(deposit_id)
 }
 
-/// Withdraw funds from treasury (only controller can call)
+/// Withdraw funds from treasury (controllers only)
 #[update]
 #[candid_method(update)]
 async fn withdraw(args: WithdrawArgs) -> Result<WithdrawResult, String> {
     ensure_controller()?;
-    
-    log!(LOG, "Processing withdrawal: {} {:?} to {}", 
+
+    log!(LOG, "Processing withdrawal: {} {:?} to {}",
          args.amount, args.asset_type, args.to);
 
-    // Check if we have sufficient balance
+    // Deduct from bookkeeping before attempting transfer
     with_state_mut(|s| s.withdraw(args.asset_type.clone(), args.amount))?;
 
     // Get the appropriate ledger principal
@@ -128,12 +126,7 @@ async fn withdraw(args: WithdrawArgs) -> Result<WithdrawResult, String> {
         Ok(block_index) => block_index,
         Err(e) => {
             // Restore the balance if transfer failed
-            with_state_mut(|s| {
-                if let Some(balance) = s.balances.get_mut(&args.asset_type) {
-                    balance.total += args.amount;
-                    balance.available += args.amount;
-                }
-            });
+            with_state_mut(|s| s.restore_balance(&args.asset_type, args.amount));
             return Err(format!("Transfer failed: {:?}", e));
         }
     };
@@ -142,8 +135,8 @@ async fn withdraw(args: WithdrawArgs) -> Result<WithdrawResult, String> {
 
     Ok(WithdrawResult {
         block_index,
-        amount_transferred: args.amount, // Full amount transferred (fee handled by ledger)
-        fee: 0, // Fee is handled internally by the ledger canister
+        amount_transferred: args.amount,
+        fee: 0,
     })
 }
 
@@ -160,7 +153,7 @@ fn get_status() -> TreasuryStatus {
         TreasuryStatus {
             total_deposits: s.get_deposits_count(),
             balances,
-            controller: config.controller,
+            controller: ic_cdk::api::id(), // show canister's own principal
             is_paused: config.is_paused,
         }
     })
@@ -174,16 +167,7 @@ fn get_deposits(start: Option<u64>, limit: Option<usize>) -> Vec<DepositRecord> 
     with_state(|s| s.get_deposits(start, limit))
 }
 
-/// Update controller (for SNS transition)
-#[update]
-#[candid_method(update)]
-fn set_controller(new_controller: Principal) -> Result<(), String> {
-    ensure_controller()?;
-    log!(LOG, "Updating controller to: {}", new_controller);
-    with_state_mut(|s| s.set_controller(new_controller))
-}
-
-/// Pause/unpause treasury
+/// Pause/unpause treasury (controllers only)
 #[update]
 #[candid_method(update)]
 fn set_paused(paused: bool) -> Result<(), String> {

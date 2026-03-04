@@ -130,3 +130,10 @@ pub struct WithdrawResult {
     /// Fee deducted
     pub fee: u64,
 }
+
+/// Snapshot of all asset balances, persisted to stable memory via `StableCell`.
+/// Survives canister upgrades (unlike the in-memory `HashMap`).
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, Default)]
+pub struct BalancesSnapshot {
+    pub entries: Vec<(AssetType, AssetBalance)>,
+}
