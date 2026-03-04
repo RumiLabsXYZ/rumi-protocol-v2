@@ -5,6 +5,7 @@ use crate::vault::Vault;
 use crate::{InitArg, Mode, StableTokenType, UpgradeArg};
 use candid::{CandidType, Principal};
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
 
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -400,7 +401,7 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                 mode,
                 icp_rate,
                 liquidator: _,
-            } => state.liquidate_vault(vault_id, mode, icp_rate),
+            } => { let _ = state.liquidate_vault(vault_id, mode, icp_rate); },
             Event::PartialLiquidateVault {
                 vault_id,
                 liquidator_payment,
@@ -408,10 +409,19 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                 liquidator: _,
                 icp_rate: _,
             } => {
-                // Reduce vault debt and collateral
+                // Reduce vault debt and collateral, accounting for interest share
                 if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
+                    // Compute proportional interest share before reducing debt
+                    let interest_share = if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
+                        let share = (rust_decimal::Decimal::from(liquidator_payment.0)
+                            * rust_decimal::Decimal::from(vault.accrued_interest.0)
+                            / rust_decimal::Decimal::from(vault.borrowed_icusd_amount.0))
+                            .to_u64().unwrap_or(0);
+                        ICUSD::new(share.min(vault.accrued_interest.0))
+                    } else { ICUSD::new(0) };
                     vault.borrowed_icusd_amount -= liquidator_payment;
                     vault.collateral_amount -= icp_to_liquidator.to_u64();
+                    vault.accrued_interest -= interest_share;
                 }
             },
             Event::RedistributeVault { vault_id } => state.redistribute_vault(vault_id),
@@ -701,7 +711,7 @@ pub fn record_liquidate_vault(state: &mut State, vault_id: u64, mode: Mode, coll
         icp_rate: collateral_price,
         liquidator: None,
     });
-    state.liquidate_vault(vault_id, mode, collateral_price);
+    let _ = state.liquidate_vault(vault_id, mode, collateral_price);
 }
 
 pub fn record_redistribute_vault(state: &mut State, vault_id: u64) {

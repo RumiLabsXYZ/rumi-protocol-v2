@@ -77,6 +77,10 @@ pub async fn fetch_icp_rate() {
     if read_state(|s| s.mode != crate::Mode::ReadOnly) {
         crate::check_vaults();
     }
+
+    // Drain any pending treasury interest/collateral accumulated from sync liquidations
+    crate::treasury::drain_pending_treasury_interest().await;
+    crate::treasury::drain_pending_treasury_collateral().await;
 }
 
 /// Ensures the price for the given collateral type is fresh enough for

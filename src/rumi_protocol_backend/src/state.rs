@@ -1624,7 +1624,9 @@ impl State {
         repay_amount.min(vault.borrowed_icusd_amount)
     }
 
-    pub fn liquidate_vault(&mut self, vault_id: u64, mode: Mode, collateral_price: UsdIcp) {
+    /// Liquidate a vault. Returns the interest share of the debt reduction
+    /// so callers can route it to treasury.
+    pub fn liquidate_vault(&mut self, vault_id: u64, mode: Mode, collateral_price: UsdIcp) -> ICUSD {
         let vault = self
             .vault_id_to_vaults
             .get(&vault_id)
@@ -1638,11 +1640,11 @@ impl State {
             // Recovery mode: liquidate only enough to restore CR to recovery_target_cr
             let config = match self.get_collateral_config(&ct) {
                 Some(c) => c,
-                None => return, // unknown collateral — cannot liquidate
+                None => return ICUSD::new(0), // unknown collateral — cannot liquidate
             };
             let price = match config.last_price.and_then(Decimal::from_f64) {
                 Some(p) => p,
-                None => return, // no price — cannot compute
+                None => return ICUSD::new(0), // no price — cannot compute
             };
             let decimals = config.decimals;
 
@@ -1656,7 +1658,7 @@ impl State {
             let numerator_icusd = vault.borrowed_icusd_amount * recovery_target;
 
             if numerator_icusd <= collateral_value {
-                return; // already at/above target
+                return ICUSD::new(0); // already at/above target
             }
 
             let deficit = numerator_icusd - collateral_value;
@@ -1673,18 +1675,32 @@ impl State {
 
             match self.vault_id_to_vaults.get_mut(&vault_id) {
                 Some(vault) => {
+                    // Compute interest share proportionally before reducing debt
+                    let interest_share = if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
+                        let share = (rust_decimal::Decimal::from(repay_amount.0)
+                            * rust_decimal::Decimal::from(vault.accrued_interest.0)
+                            / rust_decimal::Decimal::from(vault.borrowed_icusd_amount.0))
+                            .to_u64().unwrap_or(0);
+                        ICUSD::new(share.min(vault.accrued_interest.0))
+                    } else { ICUSD::new(0) };
+
                     vault.borrowed_icusd_amount -= repay_amount;
                     vault.collateral_amount -= collateral_seized;
+                    vault.accrued_interest -= interest_share;
+                    interest_share
                 }
                 None => ic_cdk::trap("liquidating unknown vault"),
             }
         } else {
             // Full liquidation — removes vault entirely
+            // All remaining accrued_interest is interest revenue
+            let interest_share = vault.accrued_interest;
             if let Some(vault) = self.vault_id_to_vaults.remove(&vault_id) {
                 if let Some(vault_ids) = self.principal_to_vault_ids.get_mut(&vault.owner) {
                     vault_ids.remove(&vault_id);
                 }
             }
+            interest_share
         }
     }
 

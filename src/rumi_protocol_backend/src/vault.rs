@@ -1751,11 +1751,23 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
     };
 
     // Step 3: Update protocol state (partial liquidation)
-    mutate_state(|s| {
+    let interest_share = mutate_state(|s| {
+        // Compute proportional interest share before reducing debt
+        let interest_share = if let Some(vault) = s.vault_id_to_vaults.get(&vault_id) {
+            if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
+                let share = (rust_decimal::Decimal::from(max_liquidatable_debt.0)
+                    * rust_decimal::Decimal::from(vault.accrued_interest.0)
+                    / rust_decimal::Decimal::from(vault.borrowed_icusd_amount.0))
+                    .to_u64().unwrap_or(0);
+                ICUSD::new(share.min(vault.accrued_interest.0))
+            } else { ICUSD::new(0) }
+        } else { ICUSD::new(0) };
+
         // Reduce vault debt and collateral directly
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
             vault.borrowed_icusd_amount -= max_liquidatable_debt;
             vault.collateral_amount -= collateral_to_liquidator.to_u64();
+            vault.accrued_interest -= interest_share;
         }
 
         // Record the partial liquidation event
@@ -1779,7 +1791,11 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
         );
 
         log!(INFO, "[liquidate_vault_partial] Partial liquidation completed, {} pending transfers created", 1);
+        interest_share
     });
+
+    // Route interest share to treasury (fire-and-forget)
+    crate::treasury::mint_interest_to_treasury(interest_share).await;
     
     // Step 4: Process transfer (same as complete liquidation)
     match try_process_pending_transfers_immediate(vault_id).await {
@@ -1938,11 +1954,23 @@ pub async fn liquidate_vault_partial_with_stable(
     };
 
     // Step 3: Update protocol state (partial liquidation)
-    mutate_state(|s| {
+    let interest_share = mutate_state(|s| {
+        // Compute proportional interest share before reducing debt
+        let interest_share = if let Some(vault) = s.vault_id_to_vaults.get(&vault_id) {
+            if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
+                let share = (rust_decimal::Decimal::from(max_liquidatable_debt.0)
+                    * rust_decimal::Decimal::from(vault.accrued_interest.0)
+                    / rust_decimal::Decimal::from(vault.borrowed_icusd_amount.0))
+                    .to_u64().unwrap_or(0);
+                ICUSD::new(share.min(vault.accrued_interest.0))
+            } else { ICUSD::new(0) }
+        } else { ICUSD::new(0) };
+
         // Reduce vault debt and collateral directly
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
             vault.borrowed_icusd_amount -= max_liquidatable_debt;
             vault.collateral_amount -= collateral_to_liquidator.to_u64();
+            vault.accrued_interest -= interest_share;
         }
 
         // Record the partial liquidation event
@@ -1966,7 +1994,11 @@ pub async fn liquidate_vault_partial_with_stable(
         );
 
         log!(INFO, "[liquidate_vault_stable] Partial liquidation completed, pending transfer created");
+        interest_share
     });
+
+    // Route interest share to treasury (fire-and-forget)
+    crate::treasury::mint_interest_to_treasury(interest_share).await;
 
     // Step 4: Process transfer
     match try_process_pending_transfers_immediate(vault_id).await {
@@ -2093,9 +2125,10 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
     };
 
     // Step 4: Update protocol state ATOMICALLY (this is the critical section)
-    mutate_state(|s| {
+    let interest_share = mutate_state(|s| {
         // Execute the liquidation in state first (this must happen)
-        s.liquidate_vault(vault_id, mode, collateral_price_usd);
+        // liquidate_vault returns the interest share of the debt reduction
+        let interest_share = s.liquidate_vault(vault_id, mode, collateral_price_usd);
 
         // Record the liquidation event
         let event = crate::event::Event::LiquidateVault {
@@ -2132,7 +2165,11 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
 
         log!(INFO, "[liquidate_vault] Protocol state updated, {} pending transfers created",
              if !is_recovery_partial && excess_collateral > ICP::new(0) { 2 } else { 1 });
+        interest_share
     });
+
+    // Route interest share to treasury (fire-and-forget)
+    crate::treasury::mint_interest_to_treasury(interest_share).await;
     
     // Step 5: Attempt immediate transfer processing (best effort)
     log!(INFO, "[liquidate_vault] Attempting immediate transfer processing...");
@@ -2449,13 +2486,25 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
     };
     
     // Step 5: Update protocol state ATOMICALLY
-    mutate_state(|s| {
+    let interest_share = mutate_state(|s| {
+        // Compute proportional interest share before reducing debt
+        let interest_share = if let Some(vault) = s.vault_id_to_vaults.get(&arg.vault_id) {
+            if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
+                let share = (rust_decimal::Decimal::from(liquidator_payment.0)
+                    * rust_decimal::Decimal::from(vault.accrued_interest.0)
+                    / rust_decimal::Decimal::from(vault.borrowed_icusd_amount.0))
+                    .to_u64().unwrap_or(0);
+                ICUSD::new(share.min(vault.accrued_interest.0))
+            } else { ICUSD::new(0) }
+        } else { ICUSD::new(0) };
+
         // Reduce the vault's debt by the liquidator payment amount
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&arg.vault_id) {
             vault.borrowed_icusd_amount -= liquidator_payment;
             vault.collateral_amount -= actual_icp_to_liquidator.to_u64();
+            vault.accrued_interest -= interest_share;
         }
-        
+
         // Record the partial liquidation event
         let event = crate::event::Event::PartialLiquidateVault {
             vault_id: arg.vault_id,
@@ -2465,10 +2514,10 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
             icp_rate: Some(collateral_price_usd),
         };
         crate::storage::record_event(&event);
-        
+
         // Create pending transfer for liquidator reward
         s.pending_margin_transfers.insert(
-            arg.vault_id, 
+            arg.vault_id,
             PendingMarginTransfer {
                 owner: caller,
                 margin: actual_icp_to_liquidator,
@@ -2477,7 +2526,11 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         );
 
         log!(INFO, "[partial_liquidate_vault] Protocol state updated, pending transfer created");
+        interest_share
     });
+
+    // Route interest share to treasury (fire-and-forget)
+    crate::treasury::mint_interest_to_treasury(interest_share).await;
     
     // Step 6: Attempt immediate transfer processing
     log!(INFO, "[partial_liquidate_vault] Attempting immediate transfer processing...");
