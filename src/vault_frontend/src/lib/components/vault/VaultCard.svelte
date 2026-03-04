@@ -499,7 +499,7 @@
 </script>
 
 <!-- ── Collapsed row ── -->
-<div class="vault-card" class:vault-card-danger={riskLevel === 'danger'} class:vault-card-warning={riskLevel === 'warning'}
+<div class="vault-card" class:vault-card-danger={riskLevel === 'danger'} class:vault-card-warning={riskLevel === 'warning'} class:vault-card-caution={riskLevel === 'caution'}
   style={showProjectedCr ? `border-left-color: var(--rumi-${activeProjectedRisk === 'danger' || activeProjectedRisk === 'warning' ? 'danger' : activeProjectedRisk === 'caution' ? 'caution' : 'safe'})` : ''}>
   <button class="vault-row" on:click={toggleExpand}>
     <span class="vault-id"><span class="collateral-dot" style="background:{collateralColor}"></span>#{vault.vaultId}</span>
@@ -593,6 +593,12 @@
                 <span class="stat-label">{activeStats.label2}</span>
                 <span class="stat-value">{activeStats.value2}</span>
               </div>
+              {#if vaultInterestRate > 0}
+                <div class="stat-row">
+                  <span class="stat-label">Interest</span>
+                  <span class="stat-value stat-interest">{(vaultInterestRate * 100).toFixed(2)}% APR</span>
+                </div>
+              {/if}
             {/if}
             <div class="stat-divider"></div>
             <!-- CR row -->
@@ -787,7 +793,8 @@
     box-shadow: inset 0 0 20px 0 rgba(209,118,232,0.04), inset 0 1px 0 0 rgba(200,210,240,0.03), 0 2px 8px -2px rgba(8,11,22,0.6);
   }
   .vault-card-danger { border-left: 2px solid var(--rumi-danger); }
-  .vault-card-warning { border-left: 2px solid var(--rumi-caution); }
+  .vault-card-warning { border-left: 2px solid var(--rumi-danger); }
+  .vault-card-caution { border-left: 2px solid var(--rumi-caution); }
 
   .vault-row {
     display: grid; grid-template-columns: 3rem 8.5rem 7rem 1fr 5.5rem 1.5rem;
@@ -928,6 +935,7 @@
   .stat-distance { font-weight: 500; color: var(--rumi-text-secondary); }
   .stat-distance-danger { color: var(--rumi-danger); }
   .stat-distance-warning { color: var(--rumi-caution); }
+  .stat-interest { color: #d176e8; font-size: 0.8125rem; }
 
   /* Safety delta inline with CR */
   .stat-safety-inline {
