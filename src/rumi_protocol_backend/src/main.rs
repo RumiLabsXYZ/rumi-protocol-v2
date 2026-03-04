@@ -1450,6 +1450,29 @@ fn get_liquidation_protocol_share() -> f64 {
     read_state(|s| s.liquidation_protocol_share.to_f64())
 }
 
+#[derive(CandidType, Deserialize)]
+pub struct TreasuryStats {
+    pub treasury_principal: Option<Principal>,
+    pub total_accrued_interest_system: u64,
+    pub pending_treasury_interest: u64,
+    pub pending_treasury_collateral_entries: u64,
+    pub liquidation_protocol_share: f64,
+}
+
+/// Get treasury-related statistics including accrued interest across all vaults.
+#[candid_method(query)]
+#[query]
+fn get_treasury_stats() -> TreasuryStats {
+    read_state(|s| TreasuryStats {
+        treasury_principal: s.treasury_principal,
+        total_accrued_interest_system: s.vault_id_to_vaults.values()
+            .map(|v| v.accrued_interest.to_u64()).sum(),
+        pending_treasury_interest: s.pending_treasury_interest.to_u64(),
+        pending_treasury_collateral_entries: s.pending_treasury_collateral.len() as u64,
+        liquidation_protocol_share: s.liquidation_protocol_share.to_f64(),
+    })
+}
+
 /// Get the effective recovery target CR (threshold + buffer)
 #[candid_method(query)]
 #[query]
