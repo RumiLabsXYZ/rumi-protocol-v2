@@ -93,9 +93,11 @@
 
   // ── Withdraw max: keeps CR at minimum for this collateral ──
   // 0.5% haircut when debt exists so Max never overshoots backend oracle price
+  // Dust debt (<0.0005 icUSD) is treated as zero — backend forgives on withdrawal
+  const DUST_THRESHOLD = 0.0005;
   $: maxWithdrawable = (() => {
     if (vaultCollateralAmount <= 0) return 0;
-    if (tickingDebt === 0) return vaultCollateralAmount;
+    if (tickingDebt < DUST_THRESHOLD) return vaultCollateralAmount;
     if (!vaultCollateralPrice || vaultCollateralPrice <= 0) return 0;
     const minCollateral = (tickingDebt * vaultMinCR) / vaultCollateralPrice;
     return Math.max(0, (vaultCollateralAmount - minCollateral) * 0.995);
@@ -308,8 +310,8 @@
     return v > 0 && maxRepayable > 0 && v > maxRepayable;
   })();
 
-  $: canWithdraw = tickingDebt === 0 && vaultCollateralAmount > 0;
-  $: canClose = tickingDebt === 0;
+  $: canWithdraw = tickingDebt < DUST_THRESHOLD && vaultCollateralAmount > 0;
+  $: canClose = tickingDebt < DUST_THRESHOLD;
 
   // Detect if withdraw amount is the full collateral (max)
   $: isMaxWithdraw = (() => {

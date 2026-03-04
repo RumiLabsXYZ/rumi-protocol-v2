@@ -50,6 +50,7 @@ pub const DEFAULT_RESERVE_REDEMPTION_FEE: Ratio = Ratio::new(dec!(0.003)); // 0.
 pub const DEFAULT_RECOVERY_TARGET_CR: Ratio = Ratio::new(dec!(1.55)); // 155% — legacy; kept for serde backwards compat
 pub const DEFAULT_RECOVERY_LIQUIDATION_BUFFER: Ratio = Ratio::new(dec!(0.05)); // 5% above recovery threshold
 pub const DEFAULT_INTEREST_RATE_APR: Ratio = Ratio::new(dec!(0.0)); // 0% — placeholder for future accrual
+pub const DUST_DEBT_THRESHOLD: u64 = 50_000; // 0.0005 icUSD — debt below this is forgiven on withdrawal
 
 /// Default Layer 1 multipliers at each CR marker
 pub const DEFAULT_RATE_MULTIPLIER_HEALTHY: Ratio = Ratio::new(dec!(1.0));

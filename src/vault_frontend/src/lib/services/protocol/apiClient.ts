@@ -2125,8 +2125,9 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
         };
       }
       
-      // Verify the vault has no debt
-      if (vault.borrowedIcusd > 0) {
+      // Verify the vault has no debt (dust below 0.0005 icUSD is forgiven by backend)
+      const DUST_THRESHOLD = 0.0005;
+      if (vault.borrowedIcusd > DUST_THRESHOLD) {
         return {
           success: false,
           error: `Cannot close vault while it has outstanding debt of ${vault.borrowedIcusd} icUSD. Please repay all debt first.`

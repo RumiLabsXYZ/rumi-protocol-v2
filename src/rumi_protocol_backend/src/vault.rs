@@ -1424,9 +1424,27 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
         return Err(ProtocolError::GenericError("No collateral to withdraw".to_string()));
     }
 
+    // Forgive dust debt: if remaining debt is below threshold, zero it out
+    let has_dust = vault.borrowed_icusd_amount.0 > 0
+        && vault.borrowed_icusd_amount.0 <= crate::state::DUST_DEBT_THRESHOLD;
+    if has_dust {
+        log!(
+            INFO,
+            "[withdraw_partial_collateral] Forgiving dust debt of {} on vault #{}",
+            vault.borrowed_icusd_amount,
+            vault_id
+        );
+        mutate_state(|s| {
+            if let Some(v) = s.vault_id_to_vaults.get_mut(&vault_id) {
+                v.borrowed_icusd_amount = ICUSD::new(0);
+                v.accrued_interest = ICUSD::new(0);
+            }
+        });
+    }
+
     // Calculate max withdrawable amount that keeps CR >= minimum
-    let max_withdrawable = if vault.borrowed_icusd_amount == ICUSD::new(0) {
-        // No debt — can withdraw everything
+    let max_withdrawable = if vault.borrowed_icusd_amount == ICUSD::new(0) || has_dust {
+        // No debt (or dust forgiven) — can withdraw everything
         vault_collateral
     } else {
         // min_collateral_value = debt * min_ratio
@@ -1546,8 +1564,23 @@ pub async fn withdraw_and_close_vault(vault_id: u64) -> Result<Option<u64>, Prot
         return Err(ProtocolError::CallerNotOwner);
     }
 
-    // Check there's no debt
-    if vault.borrowed_icusd_amount > ICUSD::new(0) {
+    // Forgive dust debt before checking
+    if vault.borrowed_icusd_amount.0 > 0
+        && vault.borrowed_icusd_amount.0 <= crate::state::DUST_DEBT_THRESHOLD
+    {
+        log!(
+            INFO,
+            "[withdraw_and_close] Forgiving dust debt of {} on vault #{}",
+            vault.borrowed_icusd_amount,
+            vault_id
+        );
+        mutate_state(|s| {
+            if let Some(v) = s.vault_id_to_vaults.get_mut(&vault_id) {
+                v.borrowed_icusd_amount = ICUSD::new(0);
+                v.accrued_interest = ICUSD::new(0);
+            }
+        });
+    } else if vault.borrowed_icusd_amount > ICUSD::new(0) {
         log!(
             INFO,
             "[withdraw_and_close] Vault #{} has outstanding debt of {} icUSD",
@@ -1555,7 +1588,7 @@ pub async fn withdraw_and_close_vault(vault_id: u64) -> Result<Option<u64>, Prot
             vault.borrowed_icusd_amount
         );
         return Err(ProtocolError::GenericError(format!(
-            "Vault has {} icUSD debt. You must repay all debt before withdrawing and closing.",
+            "Cannot close vault while it has outstanding debt of {} icUSD. Please repay all debt first.",
             vault.borrowed_icusd_amount
         )));
     }
