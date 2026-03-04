@@ -42,6 +42,10 @@ pub enum Event {
         liquidator: Option<Principal>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         icp_rate: Option<UsdIcp>,
+        /// Collateral (e8s) taken as protocol fee from the liquidation bonus.
+        /// Old events deserialize as None (protocol_cut was 0 before this field existed).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        protocol_fee_collateral: Option<u64>,
     },
 
     #[serde(rename = "redemption_on_vaults")]
@@ -414,6 +418,7 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                 icp_to_liquidator,
                 liquidator: _,
                 icp_rate: _,
+                protocol_fee_collateral,
             } => {
                 // Reduce vault debt and collateral, accounting for interest share
                 if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
@@ -426,7 +431,11 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                         ICUSD::new(share.min(vault.accrued_interest.0))
                     } else { ICUSD::new(0) };
                     vault.borrowed_icusd_amount -= liquidator_payment;
-                    vault.collateral_amount -= icp_to_liquidator.to_u64();
+                    // Vault loses icp_to_liquidator + protocol_fee_collateral
+                    // (old events have protocol_fee_collateral=None → 0, which is correct)
+                    let total_collateral_seized = icp_to_liquidator.to_u64()
+                        + protocol_fee_collateral.unwrap_or(0);
+                    vault.collateral_amount -= total_collateral_seized;
                     vault.accrued_interest -= interest_share;
                 }
             },

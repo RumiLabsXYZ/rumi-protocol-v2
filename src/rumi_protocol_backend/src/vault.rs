@@ -1789,6 +1789,7 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
             icp_to_liquidator: collateral_to_liquidator,
             liquidator: Some(caller),
             icp_rate: Some(collateral_price_usd),
+            protocol_fee_collateral: if protocol_cut > 0 { Some(protocol_cut) } else { None },
         };
         crate::storage::record_event(&event);
 
@@ -2007,6 +2008,7 @@ pub async fn liquidate_vault_partial_with_stable(
             icp_to_liquidator: collateral_to_liquidator,
             liquidator: Some(caller),
             icp_rate: Some(collateral_price_usd),
+            protocol_fee_collateral: if protocol_cut > 0 { Some(protocol_cut) } else { None },
         };
         crate::storage::record_event(&event);
 
@@ -2571,6 +2573,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
             icp_to_liquidator: collateral_to_liquidator,
             liquidator: Some(caller),
             icp_rate: Some(collateral_price_usd),
+            protocol_fee_collateral: if protocol_cut > 0 { Some(protocol_cut) } else { None },
         };
         crate::storage::record_event(&event);
 
