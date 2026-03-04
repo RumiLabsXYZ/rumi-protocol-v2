@@ -651,6 +651,9 @@ async fn borrow_from_vault_internal(caller: Principal, arg: VaultArg) -> Result<
                 record_borrow_from_vault(s, arg.vault_id, amount, fee, block_index);
             });
 
+            // Mint the borrowing fee to treasury (fire-and-forget)
+            crate::treasury::mint_borrowing_fee_to_treasury(fee).await;
+
             Ok(SuccessWithFee {
                 block_index,
                 fee_amount_paid: fee.to_u64(),

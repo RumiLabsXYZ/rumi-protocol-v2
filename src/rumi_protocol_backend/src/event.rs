@@ -428,10 +428,10 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             Event::BorrowFromVault {
                 vault_id,
                 borrowed_amount,
-                fee_amount,
+                fee_amount: _,
                 block_index: _,
             } => {
-                state.provide_liquidity(fee_amount, state.developer_principal);
+                // Fee was phantom (never minted) in old events; now routed to treasury in async caller.
                 state.borrow_from_vault(vault_id, borrowed_amount)
             }
             Event::RedemptionOnVaults {
@@ -799,7 +799,7 @@ pub fn record_borrow_from_vault(
         borrowed_amount,
     });
     state.borrow_from_vault(vault_id, borrowed_amount);
-    state.provide_liquidity(fee_amount, state.developer_principal);
+    // Fee is now minted to treasury in the async caller — no longer credited to liquidity pool.
 }
 
 /// Record a repayment event and update vault state.

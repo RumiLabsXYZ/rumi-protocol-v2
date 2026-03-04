@@ -2263,6 +2263,27 @@ mod tests {
     }
 
     #[test]
+    fn test_borrow_fee_does_not_credit_liquidity_pool() {
+        let mut state = accrual_test_state();
+        let dev = state.developer_principal;
+        let icp = state.icp_ledger_principal;
+
+        state.open_vault(Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            collateral_amount: 500_000_000, // 5 ICP
+            borrowed_icusd_amount: ICUSD::new(0),
+            collateral_type: icp,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+        });
+
+        crate::event::record_borrow_from_vault(&mut state, 1, ICUSD::new(100_000_000), ICUSD::new(500_000), 0);
+        assert_eq!(state.get_provided_liquidity(dev).0, 0,
+            "Borrowing fee should NOT go to developer liquidity pool");
+    }
+
+    #[test]
     fn test_recovery_mode_partial_liquidation_path() {
         // Initialize state with Recovery mode
         let mut state = State::from(InitArg {
