@@ -35,6 +35,7 @@ pub mod management;
 pub mod numeric;
 pub mod state;
 pub mod storage;
+pub mod treasury;
 pub mod vault;
 pub mod xrc;
 

@@ -449,6 +449,13 @@ pub struct State {
     pub weighted_avg_warning_cr: Ratio,
     /// Cached debt-weighted average of per-asset healthy CRs (override or 1.5 * borrow_threshold).
     pub weighted_avg_healthy_cr: Ratio,
+
+    // Treasury fee routing
+    /// Interest revenue from sync liquidations, minted to treasury in next timer tick.
+    pub pending_treasury_interest: ICUSD,
+    /// Collateral fees from sync liquidations, transferred to treasury in next timer tick.
+    /// Each entry is (amount_e8s, collateral_ledger_principal).
+    pub pending_treasury_collateral: Vec<(u64, Principal)>,
 }
 
 impl From<InitArg> for State {
@@ -572,6 +579,10 @@ impl From<InitArg> for State {
             weighted_avg_recovery_cr: Ratio::new(dec!(0)),
             weighted_avg_warning_cr: Ratio::new(dec!(0)),
             weighted_avg_healthy_cr: Ratio::new(dec!(0)),
+
+            // Treasury fee routing
+            pending_treasury_interest: ICUSD::new(0),
+            pending_treasury_collateral: Vec::new(),
         }
     }
 }
