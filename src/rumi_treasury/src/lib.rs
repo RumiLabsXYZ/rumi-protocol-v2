@@ -11,7 +11,7 @@ use ic_cdk::api::caller;
 use ic_canister_log::{log, declare_log_buffer};
 use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
 use icrc_ledger_types::icrc1::account::Account;
-use state::{init_state, with_state, with_state_mut};
+use state::{init_state, restore_state, with_state, with_state_mut};
 use types::{
     AssetType, DepositArgs, DepositRecord, TreasuryInitArgs, 
     TreasuryStatus, WithdrawArgs, WithdrawResult
@@ -34,10 +34,11 @@ fn pre_upgrade() {
     log!(LOG, "Starting treasury upgrade");
 }
 
-/// Post-upgrade hook to restore state
+/// Post-upgrade hook to restore state from stable memory
 #[post_upgrade]
 fn post_upgrade() {
-    log!(LOG, "Treasury upgrade completed");
+    restore_state();
+    log!(LOG, "Treasury upgrade completed — state restored from stable memory");
 }
 
 /// Only controller can call this function

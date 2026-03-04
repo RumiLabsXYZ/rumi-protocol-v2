@@ -183,6 +183,69 @@ pub fn init_state(args: TreasuryInitArgs) {
     });
 }
 
+/// Restore treasury state from stable memory after upgrade.
+///
+/// `StableBTreeMap::init` and `StableCell::init` re-open existing stable
+/// memory regions (they don't overwrite).  We reconstruct the in-memory
+/// `balances` HashMap by replaying all deposit records.
+///
+/// NOTE: Withdrawals only modify the in-memory HashMap, so they are NOT
+/// reflected in the reconstructed balances.  In practice the treasury is new
+/// and has not had withdrawals; a future refactor should persist withdrawals
+/// in a separate stable structure.
+pub fn restore_state() {
+    STATE.with(|s| {
+        MEMORY_MANAGER.with(|mm| {
+            let memory_manager = mm.borrow();
+
+            // Re-open the stable structures — reads existing data from stable memory
+            let deposits: StableBTreeMap<u64, DepositRecord, Memory> =
+                StableBTreeMap::init(memory_manager.get(MemoryId::new(0)));
+
+            // Dummy default for StableCell::init — real value is read from stable memory
+            let dummy_config = TreasuryConfig {
+                controller: Principal::anonymous(),
+                icusd_ledger: Principal::anonymous(),
+                icp_ledger: Principal::anonymous(),
+                ckbtc_ledger: None,
+                ckusdt_ledger: None,
+                ckusdc_ledger: None,
+                is_paused: true,
+            };
+            let config =
+                StableCell::init(memory_manager.get(MemoryId::new(1)), dummy_config).unwrap();
+
+            // Reconstruct balances from deposit records
+            let mut balances = HashMap::new();
+            balances.insert(AssetType::ICUSD, AssetBalance::default());
+            balances.insert(AssetType::ICP, AssetBalance::default());
+            balances.insert(AssetType::CKBTC, AssetBalance::default());
+            balances.insert(AssetType::CKUSDT, AssetBalance::default());
+            balances.insert(AssetType::CKUSDC, AssetBalance::default());
+
+            let mut max_id: u64 = 0;
+            for (id, record) in deposits.iter() {
+                if let Some(balance) = balances.get_mut(&record.asset_type) {
+                    balance.total += record.amount;
+                    balance.available += record.amount;
+                }
+                if id > max_id {
+                    max_id = id;
+                }
+            }
+
+            let next_deposit_id = if max_id > 0 { max_id + 1 } else { 1 };
+
+            *s.borrow_mut() = Some(TreasuryState {
+                deposits,
+                balances,
+                config,
+                next_deposit_id,
+            });
+        });
+    });
+}
+
 /// Read treasury state
 pub fn with_state<R>(f: impl FnOnce(&TreasuryState) -> R) -> R {
     STATE.with(|s| {
