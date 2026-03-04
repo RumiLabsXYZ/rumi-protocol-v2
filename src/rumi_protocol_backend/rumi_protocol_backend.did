@@ -22,6 +22,7 @@ type CandidVault = record {
   collateral_type : principal;
   icp_margin_amount : nat64;
   borrowed_icusd_amount : nat64;
+  accrued_interest : nat64;
 };
 type InterpolationMethod = variant { Linear };
 type RateMarker = record { cr_level : blob; multiplier : blob };
@@ -168,6 +169,7 @@ type Event = variant {
     vault_id : nat64;
     liquidator : opt principal;
     icp_to_liquidator : nat64;
+    protocol_fee_collateral : opt nat64;
   };
   withdraw_liquidity : record {
     block_index : nat64;
@@ -203,6 +205,7 @@ type Event = variant {
     healthy_cr : opt text;
   };
   set_liquidation_bonus : record { rate : text };
+  set_liquidation_protocol_share : record { share : text };
   reserve_redemption : record {
     icusd_amount : nat64;
     icusd_block_index : nat64;
@@ -386,6 +389,13 @@ type TransferFromError = variant {
   TooOld;
   InsufficientFunds : record { balance : nat };
 };
+type TreasuryStats = record {
+  treasury_principal : opt principal;
+  total_accrued_interest_system : nat64;
+  pending_treasury_interest : nat64;
+  pending_treasury_collateral_entries : nat64;
+  liquidation_protocol_share : float64;
+};
 type UpgradeArg = record { mode : opt Mode };
 type Vault = record {
   collateral_amount : nat64;
@@ -393,6 +403,8 @@ type Vault = record {
   vault_id : nat64;
   collateral_type : principal;
   borrowed_icusd_amount : nat64;
+  last_accrual_time : nat64;
+  accrued_interest : nat64;
 };
 type VaultArg = record { vault_id : nat64; amount : nat64 };
 type VaultArgWithToken = record {
@@ -420,6 +432,7 @@ service : (ProtocolArg) -> {
   get_fees : (nat64) -> (Fees) query;
   get_liquidatable_vaults : () -> (vec CandidVault) query;
   get_liquidation_bonus : () -> (float64) query;
+  get_liquidation_protocol_share : () -> (float64) query;
   get_liquidity_status : (principal) -> (LiquidityStatus) query;
   get_max_partial_liquidation_ratio : () -> (float64) query;
   get_protocol_status : () -> (ProtocolStatus) query;
@@ -438,6 +451,7 @@ service : (ProtocolArg) -> {
       vec record { principal; CollateralStatus },
     ) query;
   get_treasury_principal : () -> (opt principal) query;
+  get_treasury_stats : () -> (TreasuryStats) query;
   get_vault_history : (nat64) -> (vec Event) query;
   get_vault_interest_rate : (nat64) -> (Result_9) query;
   get_vaults : (opt principal) -> (vec CandidVault) query;
@@ -464,6 +478,7 @@ service : (ProtocolArg) -> {
   set_ckstable_repay_fee : (float64) -> (Result);
   set_collateral_status : (principal, CollateralStatus) -> (Result);
   set_liquidation_bonus : (float64) -> (Result);
+  set_liquidation_protocol_share : (float64) -> (Result);
   set_max_partial_liquidation_ratio : (float64) -> (Result);
   set_recovery_liquidation_buffer : (float64) -> (Result);
   set_rate_curve_markers : (opt principal, vec record { float64; float64 }) -> (Result);

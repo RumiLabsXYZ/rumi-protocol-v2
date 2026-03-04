@@ -449,6 +449,16 @@ pub struct State {
     pub weighted_avg_warning_cr: Ratio,
     /// Cached debt-weighted average of per-asset healthy CRs (override or 1.5 * borrow_threshold).
     pub weighted_avg_healthy_cr: Ratio,
+
+    // Treasury fee routing
+    /// Interest revenue from sync liquidations, minted to treasury in next timer tick.
+    pub pending_treasury_interest: ICUSD,
+    /// Collateral fees from sync liquidations, transferred to treasury in next timer tick.
+    /// Each entry is (amount_e8s, collateral_ledger_principal).
+    pub pending_treasury_collateral: Vec<(u64, Principal)>,
+    /// Global fraction of the liquidation bonus (liquidator's profit) that goes to the protocol treasury.
+    /// e.g., 0.03 = protocol gets 3% of the bonus, liquidator keeps 97%.
+    pub liquidation_protocol_share: Ratio,
 }
 
 impl From<InitArg> for State {
@@ -572,6 +582,11 @@ impl From<InitArg> for State {
             weighted_avg_recovery_cr: Ratio::new(dec!(0)),
             weighted_avg_warning_cr: Ratio::new(dec!(0)),
             weighted_avg_healthy_cr: Ratio::new(dec!(0)),
+
+            // Treasury fee routing
+            pending_treasury_interest: ICUSD::new(0),
+            pending_treasury_collateral: Vec::new(),
+            liquidation_protocol_share: crate::DEFAULT_LIQUIDATION_PROTOCOL_SHARE,
         }
     }
 }
@@ -1131,6 +1146,8 @@ impl State {
                     + rate.0 * Decimal::from(elapsed)
                         / Decimal::from(crate::numeric::NANOS_PER_YEAR);
                 let new_debt = (debt * factor).to_u64().unwrap_or(vault.borrowed_icusd_amount.0);
+                let interest_delta = new_debt.saturating_sub(vault.borrowed_icusd_amount.0);
+                vault.accrued_interest += ICUSD::from(interest_delta);
                 vault.borrowed_icusd_amount = ICUSD::from(new_debt);
                 vault.last_accrual_time = now_nanos;
             }
@@ -1171,6 +1188,8 @@ impl State {
                     + rate.0 * Decimal::from(elapsed)
                         / Decimal::from(crate::numeric::NANOS_PER_YEAR);
                 let new_debt = (debt * factor).to_u64().unwrap_or(vault.borrowed_icusd_amount.0);
+                let interest_delta = new_debt.saturating_sub(vault.borrowed_icusd_amount.0);
+                vault.accrued_interest += ICUSD::from(interest_delta);
                 vault.borrowed_icusd_amount = ICUSD::from(new_debt);
                 vault.last_accrual_time = now_nanos;
             }
@@ -1208,6 +1227,11 @@ impl State {
             .get(ct)
             .map(|c| c.liquidation_bonus)
             .unwrap_or(self.liquidation_bonus)
+    }
+
+    /// Get the global protocol share of the liquidation bonus (liquidator's profit).
+    pub fn get_liquidation_protocol_share(&self) -> Ratio {
+        self.liquidation_protocol_share
     }
 
     /// Get the liquidation ratio (below this, vault is liquidatable) for a specific collateral type
@@ -1472,11 +1496,25 @@ impl State {
         }
     }
 
-    pub fn repay_to_vault(&mut self, vault_id: u64, repayed_amount: ICUSD) {
+    /// Repay debt to a vault. Returns `(interest_share, principal_share)` of the repayment.
+    /// The interest share is proportional to how much of the vault's current debt is accrued interest.
+    pub fn repay_to_vault(&mut self, vault_id: u64, repayed_amount: ICUSD) -> (ICUSD, ICUSD) {
         match self.vault_id_to_vaults.get_mut(&vault_id) {
             Some(vault) => {
                 assert!(repayed_amount <= vault.borrowed_icusd_amount);
+                let interest_share = if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
+                    let share = (rust_decimal::Decimal::from(repayed_amount.0)
+                        * rust_decimal::Decimal::from(vault.accrued_interest.0)
+                        / rust_decimal::Decimal::from(vault.borrowed_icusd_amount.0))
+                        .to_u64().unwrap_or(0);
+                    ICUSD::new(share.min(vault.accrued_interest.0))
+                } else {
+                    ICUSD::new(0)
+                };
+                let principal_share = repayed_amount - interest_share;
                 vault.borrowed_icusd_amount -= repayed_amount;
+                vault.accrued_interest -= interest_share;
+                (interest_share, principal_share)
             }
             None => ic_cdk::trap("repaying to unknown vault"),
         }
@@ -1595,7 +1633,9 @@ impl State {
         repay_amount.min(vault.borrowed_icusd_amount)
     }
 
-    pub fn liquidate_vault(&mut self, vault_id: u64, mode: Mode, collateral_price: UsdIcp) {
+    /// Liquidate a vault. Returns the interest share of the debt reduction
+    /// so callers can route it to treasury.
+    pub fn liquidate_vault(&mut self, vault_id: u64, mode: Mode, collateral_price: UsdIcp) -> ICUSD {
         let vault = self
             .vault_id_to_vaults
             .get(&vault_id)
@@ -1609,11 +1649,11 @@ impl State {
             // Recovery mode: liquidate only enough to restore CR to recovery_target_cr
             let config = match self.get_collateral_config(&ct) {
                 Some(c) => c,
-                None => return, // unknown collateral — cannot liquidate
+                None => return ICUSD::new(0), // unknown collateral — cannot liquidate
             };
             let price = match config.last_price.and_then(Decimal::from_f64) {
                 Some(p) => p,
-                None => return, // no price — cannot compute
+                None => return ICUSD::new(0), // no price — cannot compute
             };
             let decimals = config.decimals;
 
@@ -1627,7 +1667,7 @@ impl State {
             let numerator_icusd = vault.borrowed_icusd_amount * recovery_target;
 
             if numerator_icusd <= collateral_value {
-                return; // already at/above target
+                return ICUSD::new(0); // already at/above target
             }
 
             let deficit = numerator_icusd - collateral_value;
@@ -1644,18 +1684,32 @@ impl State {
 
             match self.vault_id_to_vaults.get_mut(&vault_id) {
                 Some(vault) => {
+                    // Compute interest share proportionally before reducing debt
+                    let interest_share = if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
+                        let share = (rust_decimal::Decimal::from(repay_amount.0)
+                            * rust_decimal::Decimal::from(vault.accrued_interest.0)
+                            / rust_decimal::Decimal::from(vault.borrowed_icusd_amount.0))
+                            .to_u64().unwrap_or(0);
+                        ICUSD::new(share.min(vault.accrued_interest.0))
+                    } else { ICUSD::new(0) };
+
                     vault.borrowed_icusd_amount -= repay_amount;
                     vault.collateral_amount -= collateral_seized;
+                    vault.accrued_interest -= interest_share;
+                    interest_share
                 }
                 None => ic_cdk::trap("liquidating unknown vault"),
             }
         } else {
             // Full liquidation — removes vault entirely
+            // All remaining accrued_interest is interest revenue
+            let interest_share = vault.accrued_interest;
             if let Some(vault) = self.vault_id_to_vaults.remove(&vault_id) {
                 if let Some(vault_ids) = self.principal_to_vault_ids.get_mut(&vault.owner) {
                     vault_ids.remove(&vault_id);
                 }
             }
+            interest_share
         }
     }
 
@@ -2117,6 +2171,7 @@ mod tests {
             borrowed_icusd_amount: ICUSD::new(300_000),
             collateral_type: Principal::anonymous(),
             last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
 
         let vault2 = Vault {
@@ -2126,6 +2181,7 @@ mod tests {
             borrowed_icusd_amount: ICUSD::new(200_000),
             collateral_type: Principal::anonymous(),
             last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
 
         vaults.insert(1, vault1);
@@ -2138,6 +2194,7 @@ mod tests {
             borrowed_icusd_amount: ICUSD::new(400_000),
             collateral_type: Principal::anonymous(),
             last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
 
         let result = distribute_across_vaults(&vaults, target_vault);
@@ -2174,15 +2231,65 @@ mod tests {
             borrowed_icusd_amount: ICUSD::new(200_000_000), // 2 icUSD
             collateral_type: Principal::anonymous(),
             last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         });
 
         // Repay 0.01 icUSD (minimum partial repay in e8s is 1_000_000)
         let repay_amount = ICUSD::new(1_000_000);
-        state.repay_to_vault(vault_id, repay_amount);
+        let _ = state.repay_to_vault(vault_id, repay_amount);
 
         // Assert debt reduced correctly
         let vault = state.vault_id_to_vaults.get(&vault_id).unwrap();
         assert_eq!(vault.borrowed_icusd_amount, ICUSD::new(199_000_000));
+    }
+
+    #[test]
+    fn test_repay_reduces_accrued_interest_proportionally() {
+        let mut state = accrual_test_state();
+        let icp = state.icp_ledger_principal;
+
+        state.vault_id_to_vaults.insert(1, Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            collateral_amount: 150_000_000,
+            borrowed_icusd_amount: ICUSD::new(500_000_000), // 5 icUSD total
+            collateral_type: icp,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(100_000_000), // 1 icUSD is interest
+        });
+
+        let (interest_share, principal_share) = state.repay_to_vault(1, ICUSD::new(250_000_000));
+
+        let vault = state.vault_id_to_vaults.get(&1).unwrap();
+        assert_eq!(vault.borrowed_icusd_amount.0, 250_000_000);
+        // 100/500 = 20% is interest, so 20% of 250M = 50M
+        assert_eq!(interest_share.0, 50_000_000,
+            "interest share of repayment should be 50M, got {}", interest_share.0);
+        assert_eq!(principal_share.0, 200_000_000,
+            "principal share should be 200M, got {}", principal_share.0);
+        assert_eq!(vault.accrued_interest.0, 50_000_000,
+            "remaining accrued_interest should be 50M, got {}", vault.accrued_interest.0);
+    }
+
+    #[test]
+    fn test_borrow_fee_does_not_credit_liquidity_pool() {
+        let mut state = accrual_test_state();
+        let dev = state.developer_principal;
+        let icp = state.icp_ledger_principal;
+
+        state.open_vault(Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            collateral_amount: 500_000_000, // 5 ICP
+            borrowed_icusd_amount: ICUSD::new(0),
+            collateral_type: icp,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+        });
+
+        crate::event::record_borrow_from_vault(&mut state, 1, ICUSD::new(100_000_000), ICUSD::new(500_000), 0);
+        assert_eq!(state.get_provided_liquidity(dev).0, 0,
+            "Borrowing fee should NOT go to developer liquidity pool");
     }
 
     #[test]
@@ -2216,6 +2323,7 @@ mod tests {
             borrowed_icusd_amount: ICUSD::new(1_000_000_000), // 10 icUSD
             collateral_type: Principal::anonymous(),
             last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         });
 
         // Move state into global so mutate_state/read_state work in this test.
@@ -2467,6 +2575,7 @@ mod tests {
             borrowed_icusd_amount: ICUSD::new(500_000_000), // 5 icUSD
             collateral_type: icp,
             last_accrual_time: 0, // t=0
+            accrued_interest: ICUSD::new(0),
         };
         state.vault_id_to_vaults.insert(1, vault);
 
@@ -2482,6 +2591,33 @@ mod tests {
             "After 1 year at 5%, 500M should become 525M, got {}",
             vault_after.borrowed_icusd_amount.0);
         assert_eq!(vault_after.last_accrual_time, one_year_nanos);
+        assert_eq!(vault_after.accrued_interest.0, 25_000_000,
+            "accrued_interest should track the 25M delta, got {}", vault_after.accrued_interest.0);
+    }
+
+    #[test]
+    fn test_accrue_single_vault_tracks_accrued_interest() {
+        let mut state = accrual_test_state();
+        let icp = state.icp_ledger_principal;
+
+        // Start with some pre-existing accrued interest
+        state.vault_id_to_vaults.insert(1, Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            collateral_amount: 150_000_000, // 1.5 ICP
+            borrowed_icusd_amount: ICUSD::new(500_000_000), // 5 icUSD
+            collateral_type: icp,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(10_000_000), // 0.1 icUSD pre-existing
+        });
+
+        state.accrue_single_vault(1, crate::numeric::NANOS_PER_YEAR);
+
+        let vault = state.vault_id_to_vaults.get(&1).unwrap();
+        assert_eq!(vault.borrowed_icusd_amount.0, 525_000_000);
+        // 10M pre-existing + 25M new delta = 35M
+        assert_eq!(vault.accrued_interest.0, 35_000_000,
+            "accrued_interest should be 10M + 25M = 35M, got {}", vault.accrued_interest.0);
     }
 
     #[test]
@@ -2496,6 +2632,7 @@ mod tests {
             borrowed_icusd_amount: ICUSD::new(0), // zero debt
             collateral_type: icp,
             last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         state.vault_id_to_vaults.insert(1, vault);
 
@@ -2519,6 +2656,7 @@ mod tests {
             borrowed_icusd_amount: ICUSD::new(500_000_000),
             collateral_type: icp,
             last_accrual_time: 1000, // already accrued up to t=1000
+            accrued_interest: ICUSD::new(0),
         };
         state.vault_id_to_vaults.insert(1, vault);
 
@@ -2541,6 +2679,7 @@ mod tests {
             borrowed_icusd_amount: ICUSD::new(500_000_000),
             collateral_type: icp,
             last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         });
 
         // Vault 2: 2 ICP, 5 icUSD → CR = 400% (above healthy 225%)
@@ -2551,6 +2690,7 @@ mod tests {
             borrowed_icusd_amount: ICUSD::new(500_000_000),
             collateral_type: icp,
             last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         });
 
         // Vault 3: zero debt (should be skipped)
@@ -2561,6 +2701,7 @@ mod tests {
             borrowed_icusd_amount: ICUSD::new(0),
             collateral_type: icp,
             last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         });
 
         let one_year = crate::numeric::NANOS_PER_YEAR;
@@ -2597,6 +2738,7 @@ mod tests {
             borrowed_icusd_amount: ICUSD::new(500_000_000),
             collateral_type: icp,
             last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         });
 
         // 300 seconds in nanos
@@ -2634,6 +2776,7 @@ mod tests {
             borrowed_icusd_amount: ICUSD::new(500_000_000),
             collateral_type: icp,
             last_accrual_time: start,
+            accrued_interest: ICUSD::new(0),
         });
 
         let initial_debt = state.vault_id_to_vaults.get(&1).unwrap().borrowed_icusd_amount;
@@ -2683,6 +2826,7 @@ mod tests {
             borrowed_icusd_amount: ICUSD::new(500_000_000), // 5 icUSD
             collateral_type: icp,
             last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         });
 
         let avg = state.weighted_average_interest_rate();
@@ -2690,5 +2834,67 @@ mod tests {
         let diff = (avg.0 - rust_decimal_macros::dec!(0.05)).abs();
         assert!(diff < rust_decimal_macros::dec!(0.001),
             "Weighted avg rate should be ~5%, got {}", avg.0);
+    }
+
+    #[test]
+    fn test_liquidation_protocol_share_splits_bonus() {
+        use rust_decimal_macros::dec;
+        // Setup: vault at ~130% CR, liq_bonus=1.15, protocol_share=0.03 (3%)
+        // ICP price = $10, vault has 1.5 ICP ($15) and $11.5 debt → CR ~130%
+        let mut state = accrual_test_state();
+        let icp = state.icp_ledger_principal;
+        let collateral_price = UsdIcp::from(dec!(10.0));
+
+        // Verify default protocol share is 3%
+        assert_eq!(state.get_liquidation_protocol_share().0, dec!(0.03),
+            "Default liquidation_protocol_share should be 3%");
+
+        // Vault with 1.5 ICP ($15), $11.5 debt → CR = 15/11.5 ≈ 1.304
+        state.open_vault(Vault {
+            owner: Principal::anonymous(),
+            vault_id: 10,
+            collateral_amount: 150_000_000, // 1.5 ICP = $15
+            borrowed_icusd_amount: ICUSD::new(1_150_000_000), // 11.5 icUSD
+            collateral_type: icp,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(100_000_000), // 1 icUSD of accrued interest
+        });
+
+        // Simulate partial liquidation: liquidator pays 5 icUSD
+        let liquidator_payment = ICUSD::new(500_000_000); // 5 icUSD
+        let liq_bonus = state.get_liquidation_bonus_for(&icp); // 1.15
+        let protocol_share = state.get_liquidation_protocol_share(); // 0.03
+
+        // collateral_raw: 5 icUSD / $10 = 0.5 ICP = 50_000_000 e8s
+        let collateral_raw = crate::numeric::icusd_to_collateral_amount(
+            liquidator_payment, dec!(10.0), 8
+        );
+        assert_eq!(collateral_raw, 50_000_000, "collateral_raw should be 0.5 ICP");
+
+        // total_to_seize = 0.5 ICP * 1.15 = 0.575 ICP = 57_500_000 e8s
+        let total_to_seize = (ICP::from(collateral_raw) * liq_bonus).min(ICP::from(150_000_000u64));
+        assert_eq!(total_to_seize.to_u64(), 57_500_000, "total_to_seize should be 0.575 ICP");
+
+        // bonus_portion = 57_500_000 - 50_000_000 = 7_500_000 (0.075 ICP)
+        let bonus_portion = total_to_seize.to_u64().saturating_sub(collateral_raw);
+        assert_eq!(bonus_portion, 7_500_000, "bonus_portion should be 0.075 ICP");
+
+        // protocol_cut = 7_500_000 * 0.03 = 225_000 (0.00225 ICP)
+        let protocol_cut = (rust_decimal::Decimal::from(bonus_portion) * protocol_share.0)
+            .to_u64().unwrap_or(0);
+        assert_eq!(protocol_cut, 225_000, "protocol_cut should be 0.00225 ICP");
+
+        // collateral_to_liquidator = 57_500_000 - 225_000 = 57_275_000
+        let collateral_to_liquidator = total_to_seize.to_u64() - protocol_cut;
+        assert_eq!(collateral_to_liquidator, 57_275_000,
+            "liquidator should get total_to_seize minus protocol_cut");
+
+        // Verify the sync State::liquidate_vault still works correctly
+        // (it doesn't split the fee — the async callers do that)
+        let interest_share = state.liquidate_vault(10, Mode::GeneralAvailability, collateral_price);
+        // Full liquidation: all accrued_interest is returned
+        assert_eq!(interest_share.0, 100_000_000, "Full liquidation should return all accrued_interest");
+        // Vault should be removed
+        assert!(state.vault_id_to_vaults.get(&10).is_none(), "Vault should be removed after full liquidation");
     }
 }

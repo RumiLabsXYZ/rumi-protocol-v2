@@ -56,6 +56,7 @@ export interface VaultDTO {
   collateralAmount: number;       // Human-readable (divided by decimals)
   collateralSymbol: string;       // "ICP", "ckETH", "ckBTC", etc.
   collateralDecimals: number;     // 8 for ICP, 18 for ckETH, etc.
+  accruedInterest: number;        // Accumulated interest in e8s
 }
 
 /**
@@ -69,6 +70,7 @@ export interface CandidVault {
   icp_margin_amount: number;        // Kept for backward compat
   collateral_amount: number;        // Raw amount in token's native precision
   collateral_type: string;          // Principal text of collateral token's ledger
+  accrued_interest: number;         // Accumulated interest in e8s
 }
 
 // Liquidity status as returned to the frontend

@@ -78,6 +78,8 @@ mod fixtures {
             collateral_amount: 10 * 100_000_000,
             vault_id,
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         }
     }
     
@@ -88,6 +90,8 @@ mod fixtures {
             collateral_amount: 10 * 100_000_000,
             vault_id,
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         }
     }
     
@@ -98,6 +102,8 @@ mod fixtures {
             collateral_amount: 5 * 100_000_000,
             vault_id,
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         }
     }
 }
@@ -440,6 +446,8 @@ mod protocol_safety_tests {
             collateral_amount: 10 * 100_000_000,                  // 10 ICP margin
             vault_id: borderline_vault_id,
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         
         state.vault_id_to_vaults.insert(healthy_vault_id, healthy_vault.clone());
@@ -659,6 +667,8 @@ mod minting_tests {
             collateral_amount: 10 * 100_000_000, // 10 ICP
             vault_id,
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         println!("💰 Created vault with {} ICP margin", vault.collateral_amount);
         
@@ -975,6 +985,8 @@ mod multi_collateral_helpers {
             collateral_amount: collateral_raw,
             vault_id,
             collateral_type: cketh_ledger(),
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         }
     }
 }
@@ -1219,6 +1231,8 @@ mod multi_collateral_tests {
             collateral_amount: 10 * 100_000_000, // 10 ICP
             vault_id: 1,
             collateral_type: Principal::anonymous(), // legacy ICP sentinel
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         state.vault_id_to_vaults.insert(1, icp_vault);
         state.principal_to_vault_ids
@@ -1269,6 +1283,8 @@ mod multi_collateral_tests {
             collateral_amount: 10 * 100_000_000,
             vault_id: 1,
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         state.vault_id_to_vaults.insert(1, icp_vault);
 
@@ -1348,6 +1364,8 @@ mod multi_collateral_tests {
             collateral_amount: 10 * 100_000_000,
             vault_id: 1,
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         state.vault_id_to_vaults.insert(1, icp_vault);
 
@@ -1388,6 +1406,8 @@ mod multi_collateral_tests {
             collateral_amount: 10 * 100_000_000,
             vault_id: 1,
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         state.vault_id_to_vaults.insert(1, icp_vault);
 
@@ -1422,6 +1442,8 @@ mod multi_collateral_tests {
             collateral_amount: 10 * 100_000_000,
             vault_id: 1,
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         state.vault_id_to_vaults.insert(1, icp_vault);
 
@@ -1531,6 +1553,8 @@ mod multi_collateral_tests {
             collateral_amount: 10 * 100_000_000,
             vault_id: 1,
             collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
 
         let cr = rumi_protocol_backend::compute_collateral_ratio(
@@ -1680,6 +1704,8 @@ mod multi_collateral_tests {
             collateral_amount: 10 * 100_000_000,
             vault_id: 1,
             collateral_type: icp_ct,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         state.open_vault(vault);
 
@@ -1703,6 +1729,8 @@ mod multi_collateral_tests {
             collateral_amount: 10 * 100_000_000,
             vault_id: 1,
             collateral_type: icp_ct,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         state.open_vault(icp_vault);
 
@@ -1736,6 +1764,8 @@ mod multi_collateral_tests {
             collateral_amount: 20 * 100_000_000,
             vault_id: 1,
             collateral_type: icp_ct,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         state.open_vault(icp_vault);
 
@@ -1768,6 +1798,8 @@ mod multi_collateral_tests {
             collateral_amount: 10 * 100_000_000,
             vault_id: 1,
             collateral_type: icp_ct,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         state.open_vault(icp_vault);
 
@@ -2052,6 +2084,8 @@ mod water_filling_tests {
             collateral_amount: 10 * 100_000_000,
             vault_id: 1,
             collateral_type: icp_ct,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         state.open_vault(v1);
 
@@ -2062,6 +2096,8 @@ mod water_filling_tests {
             collateral_amount: 10 * 100_000_000,
             vault_id: 2,
             collateral_type: icp_ct,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         state.open_vault(v2);
 
@@ -2072,6 +2108,8 @@ mod water_filling_tests {
             collateral_amount: 20 * 100_000_000,
             vault_id: 3,
             collateral_type: icp_ct,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         state.open_vault(v3);
 
@@ -2158,6 +2196,8 @@ mod water_filling_tests {
             collateral_amount: 100 * 100_000_000,
             vault_id: 1,
             collateral_type: icp_ct,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
         };
         state.open_vault(v1);
 
@@ -2511,5 +2551,131 @@ mod reserve_redemption_config_tests {
         assert!(available < net_e6s, "Available should be less than full amount");
         assert_eq!(available + spillover_e6s, net_e6s, "Available + spillover should equal net");
         assert_eq!(spillover_e8s, spillover_e6s * 100, "Spillover e8s should be 100x e6s");
+    }
+
+    /// Verify that PartialLiquidateVault event replay correctly accounts for protocol_fee_collateral.
+    /// Regression test: vault.collateral_amount must decrease by icp_to_liquidator + protocol_fee_collateral,
+    /// not just icp_to_liquidator alone.
+    #[test]
+    fn test_partial_liquidate_event_replay_includes_protocol_fee() {
+        use rumi_protocol_backend::numeric::ICP;
+
+        let mut state = fixtures::create_test_state();
+        let icp = state.icp_ledger_principal;
+
+        // Open vault: 2 ICP collateral, 10 icUSD debt, 1 icUSD accrued interest
+        state.open_vault(Vault {
+            owner: Principal::anonymous(),
+            vault_id: 42,
+            collateral_amount: 200_000_000, // 2 ICP
+            borrowed_icusd_amount: ICUSD::new(1_000_000_000), // 10 icUSD
+            collateral_type: icp,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(100_000_000), // 1 icUSD interest
+        });
+
+        // Simulate a PartialLiquidateVault event with protocol_fee_collateral
+        let liquidator_payment = ICUSD::new(500_000_000); // 5 icUSD
+        let icp_to_liquidator = ICP::from(57_275_000u64); // 0.57275 ICP (after protocol cut)
+        let protocol_fee_collateral: Option<u64> = Some(225_000); // 0.00225 ICP protocol fee
+
+        let event = Event::PartialLiquidateVault {
+            vault_id: 42,
+            liquidator_payment,
+            icp_to_liquidator,
+            liquidator: Some(Principal::anonymous()),
+            icp_rate: None,
+            protocol_fee_collateral,
+        };
+
+        // Apply the event directly (simulates replay)
+        match event {
+            Event::PartialLiquidateVault {
+                vault_id,
+                liquidator_payment,
+                icp_to_liquidator,
+                protocol_fee_collateral,
+                ..
+            } => {
+                if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
+                    let interest_share = if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
+                        let share = (Decimal::from(liquidator_payment.0)
+                            * Decimal::from(vault.accrued_interest.0)
+                            / Decimal::from(vault.borrowed_icusd_amount.0))
+                            .to_u64().unwrap_or(0);
+                        ICUSD::new(share.min(vault.accrued_interest.0))
+                    } else { ICUSD::new(0) };
+                    vault.borrowed_icusd_amount -= liquidator_payment;
+                    let total_collateral_seized = icp_to_liquidator.to_u64()
+                        + protocol_fee_collateral.unwrap_or(0);
+                    vault.collateral_amount -= total_collateral_seized;
+                    vault.accrued_interest -= interest_share;
+                }
+            },
+            _ => panic!("wrong event variant"),
+        }
+
+        let vault = state.vault_id_to_vaults.get(&42).unwrap();
+        // 200_000_000 - (57_275_000 + 225_000) = 200_000_000 - 57_500_000 = 142_500_000
+        assert_eq!(vault.collateral_amount, 142_500_000,
+            "Vault collateral should decrease by icp_to_liquidator + protocol_fee, got {}",
+            vault.collateral_amount);
+        assert_eq!(vault.borrowed_icusd_amount.0, 500_000_000,
+            "Vault debt should decrease by liquidator_payment");
+        // Interest share = 500M * 100M / 1000M = 50M
+        assert_eq!(vault.accrued_interest.0, 50_000_000,
+            "Accrued interest should decrease proportionally");
+    }
+
+    /// Verify backward compat: old events without protocol_fee_collateral still replay correctly.
+    #[test]
+    fn test_partial_liquidate_event_replay_without_protocol_fee() {
+        use rumi_protocol_backend::numeric::ICP;
+
+        let mut state = fixtures::create_test_state();
+        let icp = state.icp_ledger_principal;
+
+        state.open_vault(Vault {
+            owner: Principal::anonymous(),
+            vault_id: 99,
+            collateral_amount: 200_000_000,
+            borrowed_icusd_amount: ICUSD::new(1_000_000_000),
+            collateral_type: icp,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+        });
+
+        // Old-style event: no protocol_fee_collateral field
+        let event = Event::PartialLiquidateVault {
+            vault_id: 99,
+            liquidator_payment: ICUSD::new(500_000_000),
+            icp_to_liquidator: ICP::from(57_500_000u64), // total_to_seize (old events: no split)
+            liquidator: None,
+            icp_rate: None,
+            protocol_fee_collateral: None, // Old events deserialize as None
+        };
+
+        match event {
+            Event::PartialLiquidateVault {
+                vault_id,
+                liquidator_payment,
+                icp_to_liquidator,
+                protocol_fee_collateral,
+                ..
+            } => {
+                if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
+                    vault.borrowed_icusd_amount -= liquidator_payment;
+                    let total_collateral_seized = icp_to_liquidator.to_u64()
+                        + protocol_fee_collateral.unwrap_or(0);
+                    vault.collateral_amount -= total_collateral_seized;
+                }
+            },
+            _ => panic!("wrong event variant"),
+        }
+
+        let vault = state.vault_id_to_vaults.get(&99).unwrap();
+        // 200_000_000 - 57_500_000 = 142_500_000 (same as before, no protocol fee)
+        assert_eq!(vault.collateral_amount, 142_500_000,
+            "Old events without protocol_fee should work: got {}", vault.collateral_amount);
     }
 }

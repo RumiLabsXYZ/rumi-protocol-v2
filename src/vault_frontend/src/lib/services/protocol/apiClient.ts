@@ -1411,6 +1411,7 @@ static async repayToVaultWithStable(
             collateralAmount,
             collateralSymbol: ctSymbol,
             collateralDecimals: ctDecimals,
+            accruedInterest: Number((v as any).accrued_interest ?? 0),
           });
         }
         

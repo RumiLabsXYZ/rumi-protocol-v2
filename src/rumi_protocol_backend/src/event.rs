@@ -5,6 +5,7 @@ use crate::vault::Vault;
 use crate::{InitArg, Mode, StableTokenType, UpgradeArg};
 use candid::{CandidType, Principal};
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
 
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +42,10 @@ pub enum Event {
         liquidator: Option<Principal>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         icp_rate: Option<UsdIcp>,
+        /// Collateral (e8s) taken as protocol fee from the liquidation bonus.
+        /// Old events deserialize as None (protocol_cut was 0 before this field existed).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        protocol_fee_collateral: Option<u64>,
     },
 
     #[serde(rename = "redemption_on_vaults")]
@@ -207,6 +212,11 @@ pub enum Event {
         buffer: String,
     },
 
+    #[serde(rename = "set_liquidation_protocol_share")]
+    SetLiquidationProtocolShare {
+        share: String,
+    },
+
     #[serde(rename = "add_collateral_type")]
     AddCollateralType {
         collateral_type: CollateralType,
@@ -340,6 +350,7 @@ impl Event {
             Event::SetMaxPartialLiquidationRatio { .. } => false,
             Event::SetRecoveryTargetCr { .. } => false,
             Event::SetRecoveryLiquidationBuffer { .. } => false,
+            Event::SetLiquidationProtocolShare { .. } => false,
             Event::AddCollateralType { .. } => false,
             Event::UpdateCollateralStatus { .. } => false,
             Event::UpdateCollateralConfig { .. } => false,
@@ -400,28 +411,42 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                 mode,
                 icp_rate,
                 liquidator: _,
-            } => state.liquidate_vault(vault_id, mode, icp_rate),
+            } => { let _ = state.liquidate_vault(vault_id, mode, icp_rate); },
             Event::PartialLiquidateVault {
                 vault_id,
                 liquidator_payment,
                 icp_to_liquidator,
                 liquidator: _,
                 icp_rate: _,
+                protocol_fee_collateral,
             } => {
-                // Reduce vault debt and collateral
+                // Reduce vault debt and collateral, accounting for interest share
                 if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
+                    // Compute proportional interest share before reducing debt
+                    let interest_share = if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
+                        let share = (rust_decimal::Decimal::from(liquidator_payment.0)
+                            * rust_decimal::Decimal::from(vault.accrued_interest.0)
+                            / rust_decimal::Decimal::from(vault.borrowed_icusd_amount.0))
+                            .to_u64().unwrap_or(0);
+                        ICUSD::new(share.min(vault.accrued_interest.0))
+                    } else { ICUSD::new(0) };
                     vault.borrowed_icusd_amount -= liquidator_payment;
-                    vault.collateral_amount -= icp_to_liquidator.to_u64();
+                    // Vault loses icp_to_liquidator + protocol_fee_collateral
+                    // (old events have protocol_fee_collateral=None → 0, which is correct)
+                    let total_collateral_seized = icp_to_liquidator.to_u64()
+                        + protocol_fee_collateral.unwrap_or(0);
+                    vault.collateral_amount -= total_collateral_seized;
+                    vault.accrued_interest -= interest_share;
                 }
             },
             Event::RedistributeVault { vault_id } => state.redistribute_vault(vault_id),
             Event::BorrowFromVault {
                 vault_id,
                 borrowed_amount,
-                fee_amount,
+                fee_amount: _,
                 block_index: _,
             } => {
-                state.provide_liquidity(fee_amount, state.developer_principal);
+                // Fee was phantom (never minted) in old events; now routed to treasury in async caller.
                 state.borrow_from_vault(vault_id, borrowed_amount)
             }
             Event::RedemptionOnVaults {
@@ -454,7 +479,7 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                 repayed_amount,
                 ..
             } => {
-                state.repay_to_vault(vault_id, repayed_amount);
+                let _ = state.repay_to_vault(vault_id, repayed_amount);
             }
             Event::ProvideLiquidity { amount, caller, .. } => {
                 state.provide_liquidity(amount, caller);
@@ -572,6 +597,11 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                 if let Ok(dec) = buffer.parse::<Decimal>() {
                     state.recovery_liquidation_buffer = Ratio::from(dec);
                     state.sync_icp_collateral_config();
+                }
+            },
+            Event::SetLiquidationProtocolShare { share } => {
+                if let Ok(dec) = share.parse::<Decimal>() {
+                    state.liquidation_protocol_share = Ratio::from(dec);
                 }
             },
             Event::AddCollateralType { collateral_type, config } => {
@@ -701,7 +731,7 @@ pub fn record_liquidate_vault(state: &mut State, vault_id: u64, mode: Mode, coll
         icp_rate: collateral_price,
         liquidator: None,
     });
-    state.liquidate_vault(vault_id, mode, collateral_price);
+    let _ = state.liquidate_vault(vault_id, mode, collateral_price);
 }
 
 pub fn record_redistribute_vault(state: &mut State, vault_id: u64) {
@@ -789,21 +819,24 @@ pub fn record_borrow_from_vault(
         borrowed_amount,
     });
     state.borrow_from_vault(vault_id, borrowed_amount);
-    state.provide_liquidity(fee_amount, state.developer_principal);
+    // Fee is now minted to treasury in the async caller — no longer credited to liquidity pool.
 }
 
+/// Record a repayment event and update vault state.
+/// Returns the interest share of the repayment (for treasury routing).
 pub fn record_repayed_to_vault(
     state: &mut State,
     vault_id: u64,
     repayed_amount: ICUSD,
     block_index: u64,
-) {
+) -> ICUSD {
     record_event(&Event::RepayToVault {
         vault_id,
         block_index,
         repayed_amount,
     });
-    state.repay_to_vault(vault_id, repayed_amount);
+    let (interest_share, _) = state.repay_to_vault(vault_id, repayed_amount);
+    interest_share
 }
 
 pub fn record_add_margin_to_vault(
@@ -994,6 +1027,13 @@ pub fn record_set_recovery_liquidation_buffer(state: &mut State, buffer: Ratio) 
     });
     state.recovery_liquidation_buffer = buffer;
     state.sync_icp_collateral_config();
+}
+
+pub fn record_set_liquidation_protocol_share(state: &mut State, share: Ratio) {
+    record_event(&Event::SetLiquidationProtocolShare {
+        share: share.0.to_string(),
+    });
+    state.liquidation_protocol_share = share;
 }
 
 pub fn record_add_collateral_type(

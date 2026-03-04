@@ -3,11 +3,11 @@
 
   // Mock data — various risk levels
   const mockVaults = [
-    { vaultId: 12, icpMargin: 5.0,    borrowedIcusd: 10.0,  owner: 'mock' },
-    { vaultId: 28, icpMargin: 0.1,    borrowedIcusd: 0.17,  owner: 'mock' },
-    { vaultId: 7,  icpMargin: 100.0,  borrowedIcusd: 200.0, owner: 'mock' },
-    { vaultId: 41, icpMargin: 2.5,    borrowedIcusd: 0,     owner: 'mock' },
-    { vaultId: 3,  icpMargin: 1.0,    borrowedIcusd: 4.5,   owner: 'mock' },
+    { vaultId: 12, icpMargin: 5.0,    borrowedIcusd: 10.0,  owner: 'mock', collateralType: '', collateralAmount: 5.0, collateralSymbol: 'ICP', collateralDecimals: 8, accruedInterest: 5000000 },
+    { vaultId: 28, icpMargin: 0.1,    borrowedIcusd: 0.17,  owner: 'mock', collateralType: '', collateralAmount: 0.1, collateralSymbol: 'ICP', collateralDecimals: 8, accruedInterest: 0 },
+    { vaultId: 7,  icpMargin: 100.0,  borrowedIcusd: 200.0, owner: 'mock', collateralType: '', collateralAmount: 100.0, collateralSymbol: 'ICP', collateralDecimals: 8, accruedInterest: 100000000 },
+    { vaultId: 41, icpMargin: 2.5,    borrowedIcusd: 0,     owner: 'mock', collateralType: '', collateralAmount: 2.5, collateralSymbol: 'ICP', collateralDecimals: 8, accruedInterest: 0 },
+    { vaultId: 3,  icpMargin: 1.0,    borrowedIcusd: 4.5,   owner: 'mock', collateralType: '', collateralAmount: 1.0, collateralSymbol: 'ICP', collateralDecimals: 8, accruedInterest: 25000000 },
   ];
 
   const icpPrice = 7.50;
