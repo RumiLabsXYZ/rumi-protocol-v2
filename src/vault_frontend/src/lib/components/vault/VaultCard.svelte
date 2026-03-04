@@ -510,6 +510,11 @@
       <span class="cell-label">Borrowed</span>
       <span class="cell-value">{fmtBorrowed} icUSD</span>
       <span class="cell-sub">${fmtBorrowedUsd}</span>
+      {#if vault.accruedInterest > 0}
+        <span class="cell-sub interest-accrued">
+          incl. {formatNumber(vault.accruedInterest / 1e8, 4)} interest
+        </span>
+      {/if}
     </span>
     <span class="vault-cell vault-cell-bar">
       <span class="gauge-track">
@@ -794,6 +799,7 @@
   .cell-label { font-size: 0.6875rem; color: var(--rumi-text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
   .cell-value { font-family: 'Inter',sans-serif; font-weight: 600; font-size: 0.875rem; font-variant-numeric: tabular-nums; color: var(--rumi-text-primary); }
   .cell-sub { font-size: 0.75rem; color: var(--rumi-text-muted); font-variant-numeric: tabular-nums; }
+  .interest-accrued { color: #d176e8; font-size: 0.7rem; opacity: 0.8; }
   .vault-cell-ratio { text-align: right; align-items: flex-end; justify-self: end; }
   .ratio-text { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 1.125rem; font-weight: 700; }
   .ratio-warning { color: var(--rumi-danger); }

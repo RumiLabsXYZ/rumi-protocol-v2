@@ -316,7 +316,7 @@ function createVaultStore() {
             const updatedVault = {
               ...state.vaults[index],
               ...updates,
-            } as VaultDTO;
+            } as unknown as VaultDTO;
             
             // Enhance it with derived values
             const enhancedVault = this.enhanceVault(updatedVault, icpPrice);
