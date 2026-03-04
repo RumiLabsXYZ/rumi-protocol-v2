@@ -1131,6 +1131,8 @@ impl State {
                     + rate.0 * Decimal::from(elapsed)
                         / Decimal::from(crate::numeric::NANOS_PER_YEAR);
                 let new_debt = (debt * factor).to_u64().unwrap_or(vault.borrowed_icusd_amount.0);
+                let interest_delta = new_debt.saturating_sub(vault.borrowed_icusd_amount.0);
+                vault.accrued_interest += ICUSD::from(interest_delta);
                 vault.borrowed_icusd_amount = ICUSD::from(new_debt);
                 vault.last_accrual_time = now_nanos;
             }
@@ -1171,6 +1173,8 @@ impl State {
                     + rate.0 * Decimal::from(elapsed)
                         / Decimal::from(crate::numeric::NANOS_PER_YEAR);
                 let new_debt = (debt * factor).to_u64().unwrap_or(vault.borrowed_icusd_amount.0);
+                let interest_delta = new_debt.saturating_sub(vault.borrowed_icusd_amount.0);
+                vault.accrued_interest += ICUSD::from(interest_delta);
                 vault.borrowed_icusd_amount = ICUSD::from(new_debt);
                 vault.last_accrual_time = now_nanos;
             }
@@ -2488,6 +2492,33 @@ mod tests {
             "After 1 year at 5%, 500M should become 525M, got {}",
             vault_after.borrowed_icusd_amount.0);
         assert_eq!(vault_after.last_accrual_time, one_year_nanos);
+        assert_eq!(vault_after.accrued_interest.0, 25_000_000,
+            "accrued_interest should track the 25M delta, got {}", vault_after.accrued_interest.0);
+    }
+
+    #[test]
+    fn test_accrue_single_vault_tracks_accrued_interest() {
+        let mut state = accrual_test_state();
+        let icp = state.icp_ledger_principal;
+
+        // Start with some pre-existing accrued interest
+        state.vault_id_to_vaults.insert(1, Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            collateral_amount: 150_000_000, // 1.5 ICP
+            borrowed_icusd_amount: ICUSD::new(500_000_000), // 5 icUSD
+            collateral_type: icp,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(10_000_000), // 0.1 icUSD pre-existing
+        });
+
+        state.accrue_single_vault(1, crate::numeric::NANOS_PER_YEAR);
+
+        let vault = state.vault_id_to_vaults.get(&1).unwrap();
+        assert_eq!(vault.borrowed_icusd_amount.0, 525_000_000);
+        // 10M pre-existing + 25M new delta = 35M
+        assert_eq!(vault.accrued_interest.0, 35_000_000,
+            "accrued_interest should be 10M + 25M = 35M, got {}", vault.accrued_interest.0);
     }
 
     #[test]
