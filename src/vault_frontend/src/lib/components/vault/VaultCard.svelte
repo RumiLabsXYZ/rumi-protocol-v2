@@ -12,6 +12,7 @@
   import { TokenService } from '../../services/tokenService';
   import { toastStore } from '../../stores/toast';
   import { isOisyWallet } from '../../services/protocol/walletOperations';
+  import { ApiClient } from '../../services/protocol/apiClient';
 
   export let vault: Vault;
   export let icpPrice: number = 0;
@@ -39,6 +40,10 @@
     if (!expanded) {
       activeAction = 'repay';
       addCollateralAmount = ''; borrowAmount = ''; repayAmount = ''; withdrawAmount = '';
+      // Fetch per-vault dynamic interest rate (CR-dependent)
+      ApiClient.getVaultInterestRate(vault.vaultId).then(rate => {
+        if (rate !== null) dynamicInterestRate = rate;
+      });
     }
   }
 
@@ -120,7 +125,9 @@
 
   // ── Live-ticking interest accrual (client-side interpolation) ──
   const SECONDS_PER_YEAR = 365 * 24 * 60 * 60;
-  $: vaultInterestRate = vaultCollateralInfo?.interestRateApr ?? 0;
+  $: baseInterestRate = vaultCollateralInfo?.interestRateApr ?? 0;
+  let dynamicInterestRate: number | null = null;
+  $: vaultInterestRate = dynamicInterestRate ?? baseInterestRate;
   let lastFetchTime = Date.now() / 1000;
   let tickingDebt = vault.borrowedIcusd;
 

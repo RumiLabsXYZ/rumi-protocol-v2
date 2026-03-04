@@ -1537,7 +1537,23 @@ static async repayToVaultWithStable(
         return [];
       }
     }
-  
+
+    /**
+     * Get the dynamic interest rate for a specific vault (considers CR-based multiplier + recovery mode).
+     * Returns the APR as a decimal (e.g. 0.05 = 5%).
+     */
+    static async getVaultInterestRate(vaultId: number): Promise<number | null> {
+      try {
+        const result = await publicActor.get_vault_interest_rate(BigInt(vaultId));
+        if ('Ok' in result) return result.Ok;
+        console.warn('get_vault_interest_rate error:', result.Err);
+        return null;
+      } catch (err) {
+        console.error('Error getting vault interest rate:', err);
+        return null;
+      }
+    }
+
 
     /**
      * Redeem icUSD for ckStable reserves (ckUSDT/ckUSDC).

@@ -46,6 +46,7 @@ export class ProtocolService {
   static partialRepayToVault = ApiClient.repayToVault;
   static closeVault = ApiClient.closeVault;
   static getVaultHistory = ApiClient.getVaultHistory;
+  static getVaultInterestRate = ApiClient.getVaultInterestRate;
   static redeemIcp = ApiClient.redeemIcp;
   static redeemCollateral = ApiClient.redeemCollateral;
   static redeemReserves = ApiClient.redeemReserves;
