@@ -4,14 +4,17 @@ use serde::Serialize;
 /// Types of deposits that can be made to the treasury
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum DepositType {
-    /// Fee collected when users mint icUSD
-    MintingFee,
+    /// Fee collected when users borrow/mint icUSD
+    #[serde(alias = "MintingFee")]
+    BorrowingFee,
     /// Fee collected when users redeem icUSD
     RedemptionFee,
-    /// Surplus collateral from liquidations
-    LiquidationSurplus,
-    /// Stability fees accrued over time
-    StabilityFee,
+    /// Protocol's share of liquidation bonus (in collateral)
+    #[serde(alias = "LiquidationSurplus")]
+    LiquidationFee,
+    /// Interest revenue accrued on vault debt
+    #[serde(alias = "StabilityFee")]
+    InterestRevenue,
 }
 
 /// Asset types that can be held in treasury

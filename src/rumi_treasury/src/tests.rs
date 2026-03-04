@@ -49,7 +49,7 @@ mod tests {
 
         let deposit_record = DepositRecord {
             id: 0, // Will be set by add_deposit
-            deposit_type: DepositType::MintingFee,
+            deposit_type: DepositType::BorrowingFee,
             asset_type: AssetType::ICUSD,
             amount: 1_000_000, // 0.01 icUSD in e8s
             block_index: 12345,
@@ -78,7 +78,7 @@ mod tests {
         // First add some balance
         let deposit_record = DepositRecord {
             id: 0,
-            deposit_type: DepositType::LiquidationSurplus,
+            deposit_type: DepositType::LiquidationFee,
             asset_type: AssetType::ICP,
             amount: 5_000_000, // 0.05 ICP in e8s
             block_index: 54321,
@@ -160,7 +160,7 @@ mod tests {
         let deposits = vec![
             DepositRecord {
                 id: 0,
-                deposit_type: DepositType::MintingFee,
+                deposit_type: DepositType::BorrowingFee,
                 asset_type: AssetType::ICUSD,
                 amount: 1_000_000,
                 block_index: 1,
@@ -188,7 +188,7 @@ mod tests {
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].id, 1);
         assert_eq!(history[1].id, 2);
-        assert_eq!(history[0].deposit_type, DepositType::MintingFee);
+        assert_eq!(history[0].deposit_type, DepositType::BorrowingFee);
         assert_eq!(history[1].deposit_type, DepositType::RedemptionFee);
     }
 }
