@@ -456,6 +456,9 @@ pub struct State {
     /// Collateral fees from sync liquidations, transferred to treasury in next timer tick.
     /// Each entry is (amount_e8s, collateral_ledger_principal).
     pub pending_treasury_collateral: Vec<(u64, Principal)>,
+    /// Global fraction of the liquidation bonus (liquidator's profit) that goes to the protocol treasury.
+    /// e.g., 0.03 = protocol gets 3% of the bonus, liquidator keeps 97%.
+    pub liquidation_protocol_share: Ratio,
 }
 
 impl From<InitArg> for State {
@@ -583,6 +586,7 @@ impl From<InitArg> for State {
             // Treasury fee routing
             pending_treasury_interest: ICUSD::new(0),
             pending_treasury_collateral: Vec::new(),
+            liquidation_protocol_share: crate::DEFAULT_LIQUIDATION_PROTOCOL_SHARE,
         }
     }
 }
@@ -1223,6 +1227,11 @@ impl State {
             .get(ct)
             .map(|c| c.liquidation_bonus)
             .unwrap_or(self.liquidation_bonus)
+    }
+
+    /// Get the global protocol share of the liquidation bonus (liquidator's profit).
+    pub fn get_liquidation_protocol_share(&self) -> Ratio {
+        self.liquidation_protocol_share
     }
 
     /// Get the liquidation ratio (below this, vault is liquidatable) for a specific collateral type
@@ -2825,5 +2834,67 @@ mod tests {
         let diff = (avg.0 - rust_decimal_macros::dec!(0.05)).abs();
         assert!(diff < rust_decimal_macros::dec!(0.001),
             "Weighted avg rate should be ~5%, got {}", avg.0);
+    }
+
+    #[test]
+    fn test_liquidation_protocol_share_splits_bonus() {
+        use rust_decimal_macros::dec;
+        // Setup: vault at ~130% CR, liq_bonus=1.15, protocol_share=0.03 (3%)
+        // ICP price = $10, vault has 1.5 ICP ($15) and $11.5 debt → CR ~130%
+        let mut state = accrual_test_state();
+        let icp = state.icp_ledger_principal;
+        let collateral_price = UsdIcp::from(dec!(10.0));
+
+        // Verify default protocol share is 3%
+        assert_eq!(state.get_liquidation_protocol_share().0, dec!(0.03),
+            "Default liquidation_protocol_share should be 3%");
+
+        // Vault with 1.5 ICP ($15), $11.5 debt → CR = 15/11.5 ≈ 1.304
+        state.open_vault(Vault {
+            owner: Principal::anonymous(),
+            vault_id: 10,
+            collateral_amount: 150_000_000, // 1.5 ICP = $15
+            borrowed_icusd_amount: ICUSD::new(1_150_000_000), // 11.5 icUSD
+            collateral_type: icp,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(100_000_000), // 1 icUSD of accrued interest
+        });
+
+        // Simulate partial liquidation: liquidator pays 5 icUSD
+        let liquidator_payment = ICUSD::new(500_000_000); // 5 icUSD
+        let liq_bonus = state.get_liquidation_bonus_for(&icp); // 1.15
+        let protocol_share = state.get_liquidation_protocol_share(); // 0.03
+
+        // collateral_raw: 5 icUSD / $10 = 0.5 ICP = 50_000_000 e8s
+        let collateral_raw = crate::numeric::icusd_to_collateral_amount(
+            liquidator_payment, dec!(10.0), 8
+        );
+        assert_eq!(collateral_raw, 50_000_000, "collateral_raw should be 0.5 ICP");
+
+        // total_to_seize = 0.5 ICP * 1.15 = 0.575 ICP = 57_500_000 e8s
+        let total_to_seize = (ICP::from(collateral_raw) * liq_bonus).min(ICP::from(150_000_000u64));
+        assert_eq!(total_to_seize.to_u64(), 57_500_000, "total_to_seize should be 0.575 ICP");
+
+        // bonus_portion = 57_500_000 - 50_000_000 = 7_500_000 (0.075 ICP)
+        let bonus_portion = total_to_seize.to_u64().saturating_sub(collateral_raw);
+        assert_eq!(bonus_portion, 7_500_000, "bonus_portion should be 0.075 ICP");
+
+        // protocol_cut = 7_500_000 * 0.03 = 225_000 (0.00225 ICP)
+        let protocol_cut = (rust_decimal::Decimal::from(bonus_portion) * protocol_share.0)
+            .to_u64().unwrap_or(0);
+        assert_eq!(protocol_cut, 225_000, "protocol_cut should be 0.00225 ICP");
+
+        // collateral_to_liquidator = 57_500_000 - 225_000 = 57_275_000
+        let collateral_to_liquidator = total_to_seize.to_u64() - protocol_cut;
+        assert_eq!(collateral_to_liquidator, 57_275_000,
+            "liquidator should get total_to_seize minus protocol_cut");
+
+        // Verify the sync State::liquidate_vault still works correctly
+        // (it doesn't split the fee — the async callers do that)
+        let interest_share = state.liquidate_vault(10, Mode::GeneralAvailability, collateral_price);
+        // Full liquidation: all accrued_interest is returned
+        assert_eq!(interest_share.0, 100_000_000, "Full liquidation should return all accrued_interest");
+        // Vault should be removed
+        assert!(state.vault_id_to_vaults.get(&10).is_none(), "Vault should be removed after full liquidation");
     }
 }

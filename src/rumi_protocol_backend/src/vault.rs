@@ -1677,7 +1677,7 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
     }
     
     // Step 1: Validate vault is liquidatable and get partial liquidation amounts
-    let (vault, collateral_price, config_decimals, collateral_price_usd, _mode, max_liquidatable_debt, collateral_to_liquidator) = match read_state(|s| {
+    let (vault, collateral_price, config_decimals, collateral_price_usd, _mode, max_liquidatable_debt, collateral_to_liquidator, total_to_seize, protocol_cut) = match read_state(|s| {
         match s.vault_id_to_vaults.get(&vault_id) {
             Some(vault) => {
                 // Check collateral status allows liquidation
@@ -1716,11 +1716,18 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
 
                     // Calculate collateral to transfer (debt + liquidation bonus)
                     let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
+                    let protocol_share = s.get_liquidation_protocol_share();
                     let collateral_raw = crate::numeric::icusd_to_collateral_amount(actual_liquidation_amount, price, decimals);
                     let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
-                    let collateral_to_transfer = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
+                    let total_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
 
-                    Ok((vault.clone(), price, decimals, collateral_price_usd, s.mode, actual_liquidation_amount, collateral_to_transfer))
+                    // Split: protocol gets a share of the bonus portion (liquidator's profit)
+                    let bonus_portion = total_to_seize.to_u64().saturating_sub(collateral_raw);
+                    let protocol_cut = (rust_decimal::Decimal::from(bonus_portion) * protocol_share.0)
+                        .to_u64().unwrap_or(0);
+                    let collateral_to_liquidator = ICP::from(total_to_seize.to_u64() - protocol_cut);
+
+                    Ok((vault.clone(), price, decimals, collateral_price_usd, s.mode, actual_liquidation_amount, collateral_to_liquidator, total_to_seize, protocol_cut))
                 }
             },
             None => Err(format!("Vault #{} not found", vault_id)),
@@ -1734,11 +1741,12 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
     };
 
     log!(INFO,
-        "[liquidate_vault_partial] Vault #{}: liquidating {} icUSD (max: {}), getting {} ICP collateral",
+        "[liquidate_vault_partial] Vault #{}: liquidating {} icUSD (max: {}), getting {} ICP collateral (protocol fee: {} ICP)",
         vault_id,
         max_liquidatable_debt.to_u64(),
         vault.borrowed_icusd_amount.to_u64(),
-        collateral_to_liquidator.to_u64()
+        collateral_to_liquidator.to_u64(),
+        protocol_cut
     );
 
     // Step 2: Take icUSD from liquidator
@@ -1767,9 +1775,10 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
         } else { ICUSD::new(0) };
 
         // Reduce vault debt and collateral directly
+        // Vault loses total_to_seize (liquidator + protocol cut)
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
             vault.borrowed_icusd_amount -= max_liquidatable_debt;
-            vault.collateral_amount -= collateral_to_liquidator.to_u64();
+            vault.collateral_amount -= total_to_seize.to_u64();
             vault.accrued_interest -= interest_share;
         }
 
@@ -1799,6 +1808,12 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
 
     // Route interest share to treasury (fire-and-forget)
     crate::treasury::mint_interest_to_treasury(interest_share).await;
+
+    // Send protocol's liquidation fee cut to treasury (fire-and-forget)
+    if protocol_cut > 0 {
+        let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
+        crate::treasury::send_liquidation_fee_to_treasury(protocol_cut, vault.collateral_type, asset_type).await;
+    }
     
     // Step 4: Process transfer (same as complete liquidation)
     match try_process_pending_transfers_immediate(vault_id).await {
@@ -1874,7 +1889,7 @@ pub async fn liquidate_vault_partial_with_stable(
     }
 
     // Step 1: Validate vault is liquidatable and get partial liquidation amounts
-    let (vault, collateral_price, config_decimals, collateral_price_usd, _mode, max_liquidatable_debt, collateral_to_liquidator) = match read_state(|s| {
+    let (vault, collateral_price, config_decimals, collateral_price_usd, _mode, max_liquidatable_debt, collateral_to_liquidator, total_to_seize, protocol_cut) = match read_state(|s| {
         match s.vault_id_to_vaults.get(&vault_id) {
             Some(vault) => {
                 // Check collateral status allows liquidation
@@ -1911,11 +1926,18 @@ pub async fn liquidate_vault_partial_with_stable(
                     }
 
                     let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
+                    let protocol_share = s.get_liquidation_protocol_share();
                     let collateral_raw = crate::numeric::icusd_to_collateral_amount(actual_liquidation_amount, price, decimals);
                     let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
-                    let collateral_to_transfer = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
+                    let total_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
 
-                    Ok((vault.clone(), price, decimals, collateral_price_usd, s.mode, actual_liquidation_amount, collateral_to_transfer))
+                    // Split: protocol gets a share of the bonus portion
+                    let bonus_portion = total_to_seize.to_u64().saturating_sub(collateral_raw);
+                    let protocol_cut = (rust_decimal::Decimal::from(bonus_portion) * protocol_share.0)
+                        .to_u64().unwrap_or(0);
+                    let collateral_to_liquidator = ICP::from(total_to_seize.to_u64() - protocol_cut);
+
+                    Ok((vault.clone(), price, decimals, collateral_price_usd, s.mode, actual_liquidation_amount, collateral_to_liquidator, total_to_seize, protocol_cut))
                 }
             },
             None => Err(format!("Vault #{} not found", vault_id)),
@@ -1929,12 +1951,13 @@ pub async fn liquidate_vault_partial_with_stable(
     };
 
     log!(INFO,
-        "[liquidate_vault_stable] Vault #{}: liquidating {} {:?} (max: {}), getting {} ICP collateral",
+        "[liquidate_vault_stable] Vault #{}: liquidating {} {:?} (max: {}), getting {} ICP collateral (protocol fee: {} ICP)",
         vault_id,
         max_liquidatable_debt.to_u64(),
         token_type,
         vault.borrowed_icusd_amount.to_u64(),
-        collateral_to_liquidator.to_u64()
+        collateral_to_liquidator.to_u64(),
+        protocol_cut
     );
 
     // Step 2: Convert e8s to e6s and add fee surcharge, then take stable token from liquidator
@@ -1970,9 +1993,10 @@ pub async fn liquidate_vault_partial_with_stable(
         } else { ICUSD::new(0) };
 
         // Reduce vault debt and collateral directly
+        // Vault loses total_to_seize (liquidator + protocol cut)
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
             vault.borrowed_icusd_amount -= max_liquidatable_debt;
-            vault.collateral_amount -= collateral_to_liquidator.to_u64();
+            vault.collateral_amount -= total_to_seize.to_u64();
             vault.accrued_interest -= interest_share;
         }
 
@@ -2002,6 +2026,12 @@ pub async fn liquidate_vault_partial_with_stable(
 
     // Route interest share to treasury (fire-and-forget)
     crate::treasury::mint_interest_to_treasury(interest_share).await;
+
+    // Send protocol's liquidation fee cut to treasury (fire-and-forget)
+    if protocol_cut > 0 {
+        let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
+        crate::treasury::send_liquidation_fee_to_treasury(protocol_cut, vault.collateral_type, asset_type).await;
+    }
 
     // Step 4: Process transfer
     match try_process_pending_transfers_immediate(vault_id).await {
@@ -2088,29 +2118,41 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
     // Step 2: Calculate liquidation amounts
     // Check if this is a recovery-mode targeted liquidation (vault CR between 133-150%)
     let vault_collateral = ICP::from(vault.collateral_amount);
-    let (debt_amount, icp_to_liquidator, excess_collateral, is_recovery_partial) = read_state(|s| {
+    let (debt_amount, collateral_to_liquidator, total_to_seize, protocol_cut, excess_collateral, is_recovery_partial) = read_state(|s| {
         let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
+        let protocol_share = s.get_liquidation_protocol_share();
         if let Some(repay_cap) = s.compute_recovery_repay_cap(&vault, collateral_price_usd) {
             // Recovery mode: only liquidate enough to restore CR to target
             let collateral_raw = crate::numeric::icusd_to_collateral_amount(repay_cap, collateral_price, config_decimals);
-            let collateral_seized = (ICP::from(collateral_raw) * liq_bonus).min(vault_collateral);
-            (repay_cap, collateral_seized, ICP::new(0), true)
+            let total_to_seize = (ICP::from(collateral_raw) * liq_bonus).min(vault_collateral);
+            // Split: protocol gets a share of the bonus portion (liquidator's profit)
+            let bonus_portion = total_to_seize.to_u64().saturating_sub(collateral_raw);
+            let protocol_cut = (rust_decimal::Decimal::from(bonus_portion) * protocol_share.0)
+                .to_u64().unwrap_or(0);
+            let collateral_to_liquidator = ICP::from(total_to_seize.to_u64() - protocol_cut);
+            (repay_cap, collateral_to_liquidator, total_to_seize, protocol_cut, ICP::new(0), true)
         } else {
             // Normal full liquidation
             let debt = vault.borrowed_icusd_amount;
             let collateral_raw = crate::numeric::icusd_to_collateral_amount(debt, collateral_price, config_decimals);
             let icp_with_bonus = ICP::from(collateral_raw) * liq_bonus;
-            let icp_to_liq = icp_with_bonus.min(vault_collateral);
-            let excess = vault_collateral.saturating_sub(icp_to_liq);
-            (debt, icp_to_liq, excess, false)
+            let total_to_seize = icp_with_bonus.min(vault_collateral);
+            // Split: protocol gets a share of the bonus portion (liquidator's profit)
+            let bonus_portion = total_to_seize.to_u64().saturating_sub(collateral_raw);
+            let protocol_cut = (rust_decimal::Decimal::from(bonus_portion) * protocol_share.0)
+                .to_u64().unwrap_or(0);
+            let collateral_to_liquidator = ICP::from(total_to_seize.to_u64() - protocol_cut);
+            let excess = vault_collateral.saturating_sub(total_to_seize);
+            (debt, collateral_to_liquidator, total_to_seize, protocol_cut, excess, false)
         }
     });
 
     log!(INFO,
-        "[liquidate_vault] Vault #{}: debt_to_repay={} icUSD, liquidator gets {} ICP, excess={} ICP, recovery_partial={}",
+        "[liquidate_vault] Vault #{}: debt_to_repay={} icUSD, liquidator gets {} ICP (protocol fee: {} ICP), excess={} ICP, recovery_partial={}",
         vault_id,
         debt_amount.to_u64(),
-        icp_to_liquidator.to_u64(),
+        collateral_to_liquidator.to_u64(),
+        protocol_cut,
         excess_collateral.to_u64(),
         is_recovery_partial
     );
@@ -2142,12 +2184,12 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         };
         crate::storage::record_event(&event);
 
-        // Create pending transfer for liquidator reward
+        // Create pending transfer for liquidator reward (minus protocol cut)
         s.pending_margin_transfers.insert(
             vault_id,
             PendingMarginTransfer {
                 owner: caller,
-                margin: icp_to_liquidator,
+                margin: collateral_to_liquidator,
                 collateral_type: vault.collateral_type,
             },
         );
@@ -2173,7 +2215,13 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
 
     // Route interest share to treasury (fire-and-forget)
     crate::treasury::mint_interest_to_treasury(interest_share).await;
-    
+
+    // Send protocol's liquidation fee cut to treasury (fire-and-forget)
+    if protocol_cut > 0 {
+        let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
+        crate::treasury::send_liquidation_fee_to_treasury(protocol_cut, vault.collateral_type, asset_type).await;
+    }
+
     // Step 5: Attempt immediate transfer processing (best effort)
     log!(INFO, "[liquidate_vault] Attempting immediate transfer processing...");
     
@@ -2202,7 +2250,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
     guard_principal.complete();
     
     // Calculate fee
-    let liquidator_value_received = crate::numeric::collateral_usd_value(icp_to_liquidator.to_u64(), collateral_price, config_decimals);
+    let liquidator_value_received = crate::numeric::collateral_usd_value(collateral_to_liquidator.to_u64(), collateral_price, config_decimals);
     let fee_amount = if liquidator_value_received > debt_amount {
         liquidator_value_received - debt_amount
     } else {
@@ -2460,19 +2508,26 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         )));
     }
 
-    // Step 3: Calculate liquidation amounts with liquidation bonus
-    let liq_bonus = read_state(|s| s.get_liquidation_bonus_for(&vault.collateral_type));
+    // Step 3: Calculate liquidation amounts with liquidation bonus and protocol fee
+    let (liq_bonus, protocol_share) = read_state(|s| {
+        (s.get_liquidation_bonus_for(&vault.collateral_type), s.get_liquidation_protocol_share())
+    });
     let collateral_raw = crate::numeric::icusd_to_collateral_amount(liquidator_payment, collateral_price, config_decimals);
-    let icp_to_liquidator = ICP::from(collateral_raw) * liq_bonus;
+    let icp_with_bonus = ICP::from(collateral_raw) * liq_bonus;
+    let total_to_seize = icp_with_bonus.min(ICP::from(vault.collateral_amount));
 
-    // Ensure we don't give more collateral than available
-    let actual_icp_to_liquidator = icp_to_liquidator.min(ICP::from(vault.collateral_amount));
+    // Split: protocol gets a share of the bonus portion (liquidator's profit)
+    let bonus_portion = total_to_seize.to_u64().saturating_sub(collateral_raw);
+    let protocol_cut = (rust_decimal::Decimal::from(bonus_portion) * protocol_share.0)
+        .to_u64().unwrap_or(0);
+    let collateral_to_liquidator = ICP::from(total_to_seize.to_u64() - protocol_cut);
 
     log!(INFO,
-        "[partial_liquidate_vault] Vault #{}: liquidator pays {} icUSD, gets {} ICP (bonus: {})",
+        "[partial_liquidate_vault] Vault #{}: liquidator pays {} icUSD, gets {} ICP (protocol fee: {} ICP, bonus: {})",
         arg.vault_id,
         liquidator_payment.to_u64(),
-        actual_icp_to_liquidator.to_u64(),
+        collateral_to_liquidator.to_u64(),
+        protocol_cut,
         liq_bonus.to_f64()
     );
     
@@ -2502,9 +2557,10 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         } else { ICUSD::new(0) };
 
         // Reduce the vault's debt by the liquidator payment amount
+        // Vault loses total_to_seize (liquidator + protocol cut)
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&arg.vault_id) {
             vault.borrowed_icusd_amount -= liquidator_payment;
-            vault.collateral_amount -= actual_icp_to_liquidator.to_u64();
+            vault.collateral_amount -= total_to_seize.to_u64();
             vault.accrued_interest -= interest_share;
         }
 
@@ -2512,18 +2568,18 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         let event = crate::event::Event::PartialLiquidateVault {
             vault_id: arg.vault_id,
             liquidator_payment,
-            icp_to_liquidator: actual_icp_to_liquidator,
+            icp_to_liquidator: collateral_to_liquidator,
             liquidator: Some(caller),
             icp_rate: Some(collateral_price_usd),
         };
         crate::storage::record_event(&event);
 
-        // Create pending transfer for liquidator reward
+        // Create pending transfer for liquidator reward (minus protocol cut)
         s.pending_margin_transfers.insert(
             arg.vault_id,
             PendingMarginTransfer {
                 owner: caller,
-                margin: actual_icp_to_liquidator,
+                margin: collateral_to_liquidator,
                 collateral_type: vault.collateral_type,
             },
         );
@@ -2534,7 +2590,13 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
 
     // Route interest share to treasury (fire-and-forget)
     crate::treasury::mint_interest_to_treasury(interest_share).await;
-    
+
+    // Send protocol's liquidation fee cut to treasury (fire-and-forget)
+    if protocol_cut > 0 {
+        let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
+        crate::treasury::send_liquidation_fee_to_treasury(protocol_cut, vault.collateral_type, asset_type).await;
+    }
+
     // Step 6: Attempt immediate transfer processing
     log!(INFO, "[partial_liquidate_vault] Attempting immediate transfer processing...");
     
@@ -2560,7 +2622,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
     guard_principal.complete();
     
     // Calculate fee (the 10% discount is the fee)
-    let liquidator_value_received = crate::numeric::collateral_usd_value(actual_icp_to_liquidator.to_u64(), collateral_price, config_decimals);
+    let liquidator_value_received = crate::numeric::collateral_usd_value(collateral_to_liquidator.to_u64(), collateral_price, config_decimals);
     let fee_amount = if liquidator_value_received > liquidator_payment {
         liquidator_value_received - liquidator_payment
     } else {

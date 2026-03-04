@@ -1417,6 +1417,39 @@ fn get_recovery_liquidation_buffer() -> f64 {
     read_state(|s| s.recovery_liquidation_buffer.to_f64())
 }
 
+/// Set the global liquidation protocol share (fraction of liquidator's bonus profit).
+/// Default: 0.03 (3%). Range: 0.0–1.0.
+#[candid_method(update)]
+#[update]
+async fn set_liquidation_protocol_share(new_share: f64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set liquidation protocol share".to_string(),
+        ));
+    }
+    if !(0.0..=1.0).contains(&new_share) {
+        return Err(ProtocolError::GenericError(
+            "Liquidation protocol share must be between 0.0 and 1.0".to_string(),
+        ));
+    }
+    let share = Ratio::from(rust_decimal::Decimal::try_from(new_share)
+        .map_err(|_| ProtocolError::GenericError("Invalid share value".to_string()))?);
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_liquidation_protocol_share(s, share);
+    });
+    log!(INFO, "[set_liquidation_protocol_share] Share set to: {} ({}%)", new_share, new_share * 100.0);
+    Ok(())
+}
+
+/// Get the global liquidation protocol share.
+#[candid_method(query)]
+#[query]
+fn get_liquidation_protocol_share() -> f64 {
+    read_state(|s| s.liquidation_protocol_share.to_f64())
+}
+
 /// Get the effective recovery target CR (threshold + buffer)
 #[candid_method(query)]
 #[query]

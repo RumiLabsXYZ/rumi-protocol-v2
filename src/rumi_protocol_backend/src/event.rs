@@ -208,6 +208,11 @@ pub enum Event {
         buffer: String,
     },
 
+    #[serde(rename = "set_liquidation_protocol_share")]
+    SetLiquidationProtocolShare {
+        share: String,
+    },
+
     #[serde(rename = "add_collateral_type")]
     AddCollateralType {
         collateral_type: CollateralType,
@@ -341,6 +346,7 @@ impl Event {
             Event::SetMaxPartialLiquidationRatio { .. } => false,
             Event::SetRecoveryTargetCr { .. } => false,
             Event::SetRecoveryLiquidationBuffer { .. } => false,
+            Event::SetLiquidationProtocolShare { .. } => false,
             Event::AddCollateralType { .. } => false,
             Event::UpdateCollateralStatus { .. } => false,
             Event::UpdateCollateralConfig { .. } => false,
@@ -582,6 +588,11 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                 if let Ok(dec) = buffer.parse::<Decimal>() {
                     state.recovery_liquidation_buffer = Ratio::from(dec);
                     state.sync_icp_collateral_config();
+                }
+            },
+            Event::SetLiquidationProtocolShare { share } => {
+                if let Ok(dec) = share.parse::<Decimal>() {
+                    state.liquidation_protocol_share = Ratio::from(dec);
                 }
             },
             Event::AddCollateralType { collateral_type, config } => {
@@ -1007,6 +1018,13 @@ pub fn record_set_recovery_liquidation_buffer(state: &mut State, buffer: Ratio) 
     });
     state.recovery_liquidation_buffer = buffer;
     state.sync_icp_collateral_config();
+}
+
+pub fn record_set_liquidation_protocol_share(state: &mut State, share: Ratio) {
+    record_event(&Event::SetLiquidationProtocolShare {
+        share: share.0.to_string(),
+    });
+    state.liquidation_protocol_share = share;
 }
 
 pub fn record_add_collateral_type(

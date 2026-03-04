@@ -56,6 +56,8 @@ pub const DUST_THRESHOLD: ICUSD = ICUSD::new(100); // 0.000001 icUSD - dust thre
 // Update collateral ratios per whitepaper
 pub const RECOVERY_COLLATERAL_RATIO: Ratio = Ratio::new(dec!(1.5));  // 150%
 pub const MINIMUM_COLLATERAL_RATIO: Ratio = Ratio::new(dec!(1.33));  // 133%
+/// Default protocol share of liquidator's bonus profit (3%).
+pub const DEFAULT_LIQUIDATION_PROTOCOL_SHARE: Ratio = Ratio::new(dec!(0.03));
 
 /// Stable token types accepted for vault repayment (1:1 with icUSD)
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
