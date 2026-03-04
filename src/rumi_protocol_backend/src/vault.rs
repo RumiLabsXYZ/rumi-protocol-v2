@@ -735,7 +735,8 @@ pub async fn repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
 
     match transfer_icusd_from(amount, caller).await {
         Ok(block_index) => {
-            mutate_state(|s| record_repayed_to_vault(s, arg.vault_id, amount, block_index));
+            let interest_share = mutate_state(|s| record_repayed_to_vault(s, arg.vault_id, amount, block_index));
+            crate::treasury::mint_interest_to_treasury(interest_share).await;
             guard_principal.complete(); // Mark as completed
             Ok(block_index)
         }
@@ -827,7 +828,8 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
     // Transfer the stable token from user (in 6-decimal units)
     match transfer_stable_from(arg.token_type.clone(), total_pull_e6s, caller).await {
         Ok(block_index) => {
-            mutate_state(|s| record_repayed_to_vault(s, arg.vault_id, amount, block_index));
+            let interest_share = mutate_state(|s| record_repayed_to_vault(s, arg.vault_id, amount, block_index));
+            crate::treasury::mint_interest_to_treasury(interest_share).await;
             guard_principal.complete();
             Ok(block_index)
         }
@@ -1148,10 +1150,10 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
             vault_id
         );
         
-        // Record dust forgiveness
+        // Record dust forgiveness (no real payment, no treasury routing)
         mutate_state(|s| {
             s.dust_forgiven_total += vault.borrowed_icusd_amount;
-            s.repay_to_vault(vault_id, vault.borrowed_icusd_amount);
+            let _ = s.repay_to_vault(vault_id, vault.borrowed_icusd_amount);
         });
         
         // Record dust forgiveness event
@@ -2331,7 +2333,8 @@ pub async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError>
 
     match transfer_icusd_from(amount, caller).await {
         Ok(block_index) => {
-            mutate_state(|s| record_repayed_to_vault(s, arg.vault_id, amount, block_index));
+            let interest_share = mutate_state(|s| record_repayed_to_vault(s, arg.vault_id, amount, block_index));
+            crate::treasury::mint_interest_to_treasury(interest_share).await;
             guard_principal.complete(); // Mark as completed
             Ok(block_index)
         }

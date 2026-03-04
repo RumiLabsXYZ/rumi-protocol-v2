@@ -1487,11 +1487,25 @@ impl State {
         }
     }
 
-    pub fn repay_to_vault(&mut self, vault_id: u64, repayed_amount: ICUSD) {
+    /// Repay debt to a vault. Returns `(interest_share, principal_share)` of the repayment.
+    /// The interest share is proportional to how much of the vault's current debt is accrued interest.
+    pub fn repay_to_vault(&mut self, vault_id: u64, repayed_amount: ICUSD) -> (ICUSD, ICUSD) {
         match self.vault_id_to_vaults.get_mut(&vault_id) {
             Some(vault) => {
                 assert!(repayed_amount <= vault.borrowed_icusd_amount);
+                let interest_share = if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
+                    let share = (rust_decimal::Decimal::from(repayed_amount.0)
+                        * rust_decimal::Decimal::from(vault.accrued_interest.0)
+                        / rust_decimal::Decimal::from(vault.borrowed_icusd_amount.0))
+                        .to_u64().unwrap_or(0);
+                    ICUSD::new(share.min(vault.accrued_interest.0))
+                } else {
+                    ICUSD::new(0)
+                };
+                let principal_share = repayed_amount - interest_share;
                 vault.borrowed_icusd_amount -= repayed_amount;
+                vault.accrued_interest -= interest_share;
+                (interest_share, principal_share)
             }
             None => ic_cdk::trap("repaying to unknown vault"),
         }
@@ -2197,11 +2211,39 @@ mod tests {
 
         // Repay 0.01 icUSD (minimum partial repay in e8s is 1_000_000)
         let repay_amount = ICUSD::new(1_000_000);
-        state.repay_to_vault(vault_id, repay_amount);
+        let _ = state.repay_to_vault(vault_id, repay_amount);
 
         // Assert debt reduced correctly
         let vault = state.vault_id_to_vaults.get(&vault_id).unwrap();
         assert_eq!(vault.borrowed_icusd_amount, ICUSD::new(199_000_000));
+    }
+
+    #[test]
+    fn test_repay_reduces_accrued_interest_proportionally() {
+        let mut state = accrual_test_state();
+        let icp = state.icp_ledger_principal;
+
+        state.vault_id_to_vaults.insert(1, Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            collateral_amount: 150_000_000,
+            borrowed_icusd_amount: ICUSD::new(500_000_000), // 5 icUSD total
+            collateral_type: icp,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(100_000_000), // 1 icUSD is interest
+        });
+
+        let (interest_share, principal_share) = state.repay_to_vault(1, ICUSD::new(250_000_000));
+
+        let vault = state.vault_id_to_vaults.get(&1).unwrap();
+        assert_eq!(vault.borrowed_icusd_amount.0, 250_000_000);
+        // 100/500 = 20% is interest, so 20% of 250M = 50M
+        assert_eq!(interest_share.0, 50_000_000,
+            "interest share of repayment should be 50M, got {}", interest_share.0);
+        assert_eq!(principal_share.0, 200_000_000,
+            "principal share should be 200M, got {}", principal_share.0);
+        assert_eq!(vault.accrued_interest.0, 50_000_000,
+            "remaining accrued_interest should be 50M, got {}", vault.accrued_interest.0);
     }
 
     #[test]

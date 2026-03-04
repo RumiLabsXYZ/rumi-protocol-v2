@@ -454,7 +454,7 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                 repayed_amount,
                 ..
             } => {
-                state.repay_to_vault(vault_id, repayed_amount);
+                let _ = state.repay_to_vault(vault_id, repayed_amount);
             }
             Event::ProvideLiquidity { amount, caller, .. } => {
                 state.provide_liquidity(amount, caller);
@@ -792,18 +792,21 @@ pub fn record_borrow_from_vault(
     state.provide_liquidity(fee_amount, state.developer_principal);
 }
 
+/// Record a repayment event and update vault state.
+/// Returns the interest share of the repayment (for treasury routing).
 pub fn record_repayed_to_vault(
     state: &mut State,
     vault_id: u64,
     repayed_amount: ICUSD,
     block_index: u64,
-) {
+) -> ICUSD {
     record_event(&Event::RepayToVault {
         vault_id,
         block_index,
         repayed_amount,
     });
-    state.repay_to_vault(vault_id, repayed_amount);
+    let (interest_share, _) = state.repay_to_vault(vault_id, repayed_amount);
+    interest_share
 }
 
 pub fn record_add_margin_to_vault(
