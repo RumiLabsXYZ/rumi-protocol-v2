@@ -1,281 +1,269 @@
-use ic_cdk_timers;
-use std::time::Duration;
+use std::collections::BTreeMap;
+use candid::Principal;
 use ic_canister_log::log;
 use ic_cdk::call;
+use icrc_ledger_types::icrc1::account::Account;
+use icrc_ledger_types::icrc2::approve::{ApproveArgs, ApproveError};
 
-use crate::types::*;
-use crate::state::read_state;
 use crate::logs::INFO;
+use crate::types::*;
+use crate::state::{read_state, mutate_state};
 
-use rumi_protocol_backend::vault::CandidVault;
+/// Called by the backend when it detects liquidatable vaults (push model).
+/// Processes each vault sequentially, consuming stablecoins and distributing collateral.
+pub async fn notify_liquidatable_vaults(vaults: Vec<LiquidatableVaultInfo>) -> Vec<LiquidationResult> {
+    if read_state(|s| s.configuration.emergency_pause) {
+        log!(INFO, "Pool is paused — ignoring {} liquidatable vaults", vaults.len());
+        return vec![];
+    }
 
+    log!(INFO, "Received push notification: {} liquidatable vaults", vaults.len());
 
+    let max_batch = read_state(|s| s.configuration.max_liquidations_per_batch) as usize;
+
+    let mut results = Vec::new();
+    for vault_info in vaults.into_iter().take(max_batch) {
+        // Skip if already in-flight
+        if read_state(|s| s.in_flight_liquidations.contains(&vault_info.vault_id)) {
+            log!(INFO, "Vault {} already in-flight, skipping", vault_info.vault_id);
+            continue;
+        }
+
+        // Check effective pool coverage for this collateral type
+        let effective_pool = read_state(|s| s.effective_pool_for_collateral(&vault_info.collateral_type));
+        if effective_pool < vault_info.debt_amount {
+            log!(INFO, "Insufficient pool coverage for vault {}: need {} e8s, have {} e8s",
+                vault_info.vault_id, vault_info.debt_amount, effective_pool);
+            continue;
+        }
+
+        // Mark as in-flight
+        mutate_state(|s| { s.in_flight_liquidations.insert(vault_info.vault_id); });
+
+        let result = execute_single_liquidation(&vault_info).await;
+
+        // Clear in-flight
+        mutate_state(|s| { s.in_flight_liquidations.remove(&vault_info.vault_id); });
+
+        if result.success {
+            log!(INFO, "Liquidated vault {}: gained {} collateral",
+                vault_info.vault_id, result.collateral_gained);
+        } else {
+            log!(INFO, "Liquidation failed for vault {}: {}",
+                vault_info.vault_id, result.error_message.as_deref().unwrap_or("unknown"));
+        }
+
+        results.push(result);
+    }
+
+    results
+}
+
+/// Public fallback: anyone can call this to trigger a liquidation for a specific vault.
+/// Per-caller guard is enforced at the lib.rs level.
 pub async fn execute_liquidation(vault_id: u64) -> Result<LiquidationResult, StabilityPoolError> {
     if read_state(|s| s.configuration.emergency_pause) {
-        return Err(StabilityPoolError::TemporarilyUnavailable(
-            "Pool is emergency paused".to_string()
-        ));
+        return Err(StabilityPoolError::EmergencyPaused);
     }
 
-    log!(INFO,
-        "Liquidation request for vault: {}", vault_id);
+    if read_state(|s| s.in_flight_liquidations.contains(&vault_id)) {
+        return Err(StabilityPoolError::SystemBusy);
+    }
 
-    let protocol_canister_id = read_state(|s| s.protocol_canister_id);
+    // Fetch vault info from backend
+    let protocol_id = read_state(|s| s.protocol_canister_id);
 
-    let vault_info_result: Result<(Result<rumi_protocol_backend::VaultLiquidationInfo, String>,), _> = call(
-        protocol_canister_id,
-        "get_vault_for_liquidation",
-        (vault_id,)
-    ).await;
+    let (vaults,): (Vec<rumi_protocol_backend::vault::CandidVault>,) = call(
+        protocol_id, "get_liquidatable_vaults", ()
+    ).await.map_err(|_e| StabilityPoolError::InterCanisterCallFailed {
+        target: "Protocol".to_string(),
+        method: "get_liquidatable_vaults".to_string(),
+    })?;
+    let target_vault = vaults.into_iter().find(|v| v.vault_id == vault_id);
 
-    let vault_info = match vault_info_result {
-        Ok((Ok(info),)) => info,
-        Ok((Err(error_msg),)) => {
-            log!(INFO, "Vault {} not found or not liquidatable: {}", vault_id, error_msg);
-            return Ok(LiquidationResult {
-                vault_id,
-                icusd_used: 0,
-                icp_gained: 0,
-                success: false,
-                error_message: Some(error_msg),
-                block_index: None,
-            });
-        },
-        Err(call_error) => {
-            let error_msg = format!("Failed to get vault info: {:?}", call_error);
-            log!(INFO, "{}", error_msg);
-            return Err(StabilityPoolError::InterCanisterCallFailed {
-                target: "Protocol".to_string(),
-                method: "get_vault_for_liquidation".to_string()
-            });
-        }
+    let vault = match target_vault {
+        Some(v) => v,
+        None => return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "Vault not found in liquidatable list".to_string(),
+        }),
     };
 
-    if !vault_info.is_liquidatable {
-        let error_msg = format!(
-            "Vault {} is not liquidatable. Current ratio: {:.2}%, required: {:.2}%",
-            vault_id, vault_info.current_collateral_ratio * 100.0, vault_info.minimum_collateral_ratio * 100.0
-        );
-        log!(INFO, "{}", error_msg);
-        return Ok(LiquidationResult {
-            vault_id,
-            icusd_used: 0,
-            icp_gained: 0,
-            success: false,
-            error_message: Some(error_msg),
-            block_index: None,
-        });
-    }
+    let vault_info = LiquidatableVaultInfo {
+        vault_id: vault.vault_id,
+        collateral_type: vault.collateral_type,
+        debt_amount: vault.borrowed_icusd_amount,
+        collateral_amount: vault.icp_margin_amount,
+    };
 
-    let debt_amount = rumi_protocol_backend::numeric::ICUSD::from(vault_info.borrowed_icusd);
-    let pool_has_funds = read_state(|s| s.has_sufficient_funds(debt_amount));
-
-    if !pool_has_funds {
-        let error_msg = format!("Insufficient pool balance to liquidate vault {}. Required: {} icUSD", vault_id, vault_info.borrowed_icusd);
-        log!(INFO, "{}", error_msg);
+    // Check pool coverage
+    let effective_pool = read_state(|s| s.effective_pool_for_collateral(&vault_info.collateral_type));
+    if effective_pool < vault_info.debt_amount {
         return Err(StabilityPoolError::InsufficientPoolBalance);
     }
 
-    log!(INFO, "Executing liquidation for vault {}: debt={} icUSD, collateral={} ICP",
-         vault_id, vault_info.borrowed_icusd, vault_info.icp_collateral);
+    mutate_state(|s| { s.in_flight_liquidations.insert(vault_id); });
+    let result = execute_single_liquidation(&vault_info).await;
+    mutate_state(|s| { s.in_flight_liquidations.remove(&vault_id); });
 
-    let liquidation_result: Result<(Result<rumi_protocol_backend::SuccessWithFee, rumi_protocol_backend::ProtocolError>,), _> = call(
-        protocol_canister_id,
-        "liquidate_vault",
-        (vault_id,)
-    ).await;
-
-    match liquidation_result {
-        Ok((Ok(success_result),)) => {
-            let block_index = success_result.block_index;
-            let fee_paid = success_result.fee_amount_paid;
-
-            let collateral_gained = rumi_protocol_backend::numeric::ICP::from(vault_info.icp_collateral);
-            let liquidation_discount = collateral_gained * rumi_protocol_backend::numeric::Ratio::from(rust_decimal_macros::dec!(0.1)); 
-
-            log!(INFO, "Liquidation successful! Block: {}, Fee: {}, Collateral gained: {} ICP",
-                 block_index, fee_paid, liquidation_discount.to_u64());
-
-            crate::state::mutate_state(|s| {
-                s.process_liquidation_gains(vault_id, debt_amount, liquidation_discount);
-            });
-
-            log!(INFO, "Liquidation gains distributed to {} depositors", read_state(|s| s.deposits.len()));
-
-            Ok(LiquidationResult {
-                vault_id,
-                icusd_used: vault_info.borrowed_icusd,
-                icp_gained: liquidation_discount.to_u64(),
-                success: true,
-                error_message: None,
-                block_index: Some(block_index),
-            })
-        },
-        Ok((Err(protocol_error),)) => {
-            let error_msg = format!("Protocol liquidation failed: {:?}", protocol_error);
-            log!(INFO, "{}", error_msg);
-            Ok(LiquidationResult {
-                vault_id,
-                icusd_used: 0,
-                icp_gained: 0,
-                success: false,
-                error_message: Some(error_msg),
-                block_index: None,
-            })
-        },
-        Err(call_error) => {
-            let error_msg = format!("Inter-canister call failed: {:?}", call_error);
-            log!(INFO, "{}", error_msg);
-            Err(StabilityPoolError::InterCanisterCallFailed {
-                target: "Protocol".to_string(),
-                method: "liquidate_vault".to_string()
-            })
-        }
-    }
+    Ok(result)
 }
 
-pub async fn scan_and_liquidate() -> Result<Vec<LiquidationResult>, StabilityPoolError> {
-    if read_state(|s| s.configuration.emergency_pause) {
-        return Err(StabilityPoolError::TemporarilyUnavailable(
-            "Pool is emergency paused".to_string()
-        ));
+/// Core liquidation logic for a single vault.
+async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> LiquidationResult {
+    let protocol_id = read_state(|s| s.protocol_canister_id);
+
+    // Step 1: Compute token draw
+    let token_draw = read_state(|s| s.compute_token_draw(vault_info.debt_amount, &vault_info.collateral_type));
+
+    if token_draw.is_empty() {
+        return LiquidationResult {
+            vault_id: vault_info.vault_id,
+            stables_consumed: BTreeMap::new(),
+            collateral_gained: 0,
+            collateral_type: vault_info.collateral_type,
+            success: false,
+            error_message: Some("No stablecoins available for liquidation".to_string()),
+        };
     }
 
-    log!(INFO, "Starting vault scan and liquidation");
+    log!(INFO, "Token draw for vault {}: {:?}", vault_info.vault_id, token_draw);
 
-    let liquidatable_vaults = match get_liquidatable_vaults().await {
-        Ok(vaults) => vaults,
-        Err(e) => {
-            log!(INFO, "Failed to get liquidatable vaults: {:?}", e);
-            return Err(e);
-        }
-    };
+    // Step 2: Approve backend for each token and call appropriate liquidation endpoint
+    let mut total_collateral_gained: u64 = 0;
+    let mut actual_consumed: BTreeMap<Principal, u64> = BTreeMap::new();
 
-    if liquidatable_vaults.is_empty() {
-        log!(INFO, "No liquidatable vaults found");
-        return Ok(vec![]);
-    }
+    // Get stablecoin configs for classification
+    let stablecoin_configs: BTreeMap<Principal, StablecoinConfig> = read_state(|s| s.stablecoin_registry.clone());
+    let icusd_ledger = stablecoin_configs.iter()
+        .find(|(_, c)| c.symbol == "icUSD")
+        .map(|(id, _)| *id);
 
-    log!(INFO, "Found {} liquidatable vaults", liquidatable_vaults.len());
+    for (token_ledger, amount) in &token_draw {
+        let is_icusd = icusd_ledger.map(|id| id == *token_ledger).unwrap_or(false);
 
-    let max_liquidations = read_state(|s| s.configuration.max_liquidations_per_batch);
-    let vaults_to_process = liquidatable_vaults.into_iter()
-        .take(max_liquidations as usize)
-        .collect::<Vec<_>>();
+        // Approve backend to spend this token
+        let approve_args = ApproveArgs {
+            from_subaccount: None,
+            spender: Account { owner: protocol_id, subaccount: None },
+            amount: candid::Nat::from(*amount as u128 * 2), // 2x buffer for fees
+            expected_allowance: None,
+            expires_at: Some(ic_cdk::api::time() + 300_000_000_000), // 5 min
+            fee: None,
+            memo: None,
+            created_at_time: Some(ic_cdk::api::time()),
+        };
 
-    log!(INFO, "Processing {} vaults in this batch", vaults_to_process.len());
+        let approve_result: Result<(Result<candid::Nat, ApproveError>,), _> = call(
+            *token_ledger, "icrc2_approve", (approve_args,)
+        ).await;
 
-    let mut results = Vec::new();
-    for vault in vaults_to_process {
-        log!(INFO, "Processing vault {}: debt={} icUSD, priority={}",
-             vault.vault_id, vault.debt_amount, vault.priority_score);
-
-        match execute_liquidation(vault.vault_id).await {
-            Ok(result) => {
-                if result.success {
-                    log!(INFO, "✅ Successfully liquidated vault {}: gained {} ICP",
-                         vault.vault_id, result.icp_gained);
-                } else {
-                    log!(INFO, "⚠️ Liquidation attempt failed for vault {}: {}",
-                         vault.vault_id, result.error_message.as_deref().unwrap_or("Unknown error"));
-                }
-                results.push(result);
+        match approve_result {
+            Ok((Ok(_),)) => {},
+            Ok((Err(e),)) => {
+                log!(INFO, "Approve failed for {}: {:?}", token_ledger, e);
+                continue;
             },
             Err(e) => {
-                log!(INFO, "❌ Error liquidating vault {}: {:?}", vault.vault_id, e);
-                results.push(LiquidationResult {
-                    vault_id: vault.vault_id,
-                    icusd_used: 0,
-                    icp_gained: 0,
-                    success: false,
-                    error_message: Some(format!("System error: {:?}", e)),
-                    block_index: None,
-                });
+                log!(INFO, "Approve call failed for {}: {:?}", token_ledger, e);
+                continue;
             }
         }
 
-        ic_cdk_timers::set_timer(std::time::Duration::from_millis(100), || {});
+        // Call the appropriate backend endpoint
+        let liq_result = if is_icusd {
+            // liquidate_vault_partial(vault_id, amount_e8s)
+            let call_result: Result<(Result<rumi_protocol_backend::SuccessWithFee, rumi_protocol_backend::ProtocolError>,), _> = call(
+                protocol_id,
+                "liquidate_vault_partial",
+                (rumi_protocol_backend::vault::VaultArg {
+                    vault_id: vault_info.vault_id,
+                    amount: *amount,
+                },)
+            ).await;
+            call_result.map(|(r,)| r)
+        } else {
+            // Determine StableTokenType from ledger principal
+            let token_type = determine_stable_token_type(*token_ledger, &stablecoin_configs);
+            match token_type {
+                Some(tt) => {
+                    let call_result: Result<(Result<rumi_protocol_backend::SuccessWithFee, rumi_protocol_backend::ProtocolError>,), _> = call(
+                        protocol_id,
+                        "liquidate_vault_partial_with_stable",
+                        (rumi_protocol_backend::VaultArgWithToken {
+                            vault_id: vault_info.vault_id,
+                            amount: *amount,
+                            token_type: tt,
+                        },)
+                    ).await;
+                    call_result.map(|(r,)| r)
+                },
+                None => {
+                    log!(INFO, "Unknown stable token type for {}, skipping", token_ledger);
+                    continue;
+                }
+            }
+        };
+
+        match liq_result {
+            Ok(Ok(success)) => {
+                log!(INFO, "Liquidation call succeeded for vault {} with token {}: fee={}",
+                    vault_info.vault_id, token_ledger, success.fee_amount_paid);
+                actual_consumed.insert(*token_ledger, *amount);
+                total_collateral_gained += success.fee_amount_paid; // fee_amount_paid is actually the collateral value
+            },
+            Ok(Err(protocol_error)) => {
+                log!(INFO, "Protocol rejected liquidation for vault {} with token {}: {:?}",
+                    vault_info.vault_id, token_ledger, protocol_error);
+            },
+            Err(call_error) => {
+                log!(INFO, "Liquidation call failed for vault {} with token {}: {:?}",
+                    vault_info.vault_id, token_ledger, call_error);
+            }
+        }
     }
 
-    let successful_liquidations = results.iter().filter(|r| r.success).count();
-    let total_icp_gained: u64 = results.iter().map(|r| r.icp_gained).sum();
+    // Step 3: If any liquidation calls succeeded, process gains
+    if !actual_consumed.is_empty() && total_collateral_gained > 0 {
+        mutate_state(|s| {
+            s.process_liquidation_gains(
+                vault_info.vault_id,
+                vault_info.collateral_type,
+                &actual_consumed,
+                total_collateral_gained,
+            );
+        });
 
-    log!(INFO, "Scan completed: {}/{} successful liquidations, {} ICP gained total",
-         successful_liquidations, results.len(), total_icp_gained);
-
-    Ok(results)
-}
-
-pub async fn get_liquidatable_vaults() -> Result<Vec<LiquidatableVault>, StabilityPoolError> {
-    let protocol_canister_id = read_state(|s| s.protocol_canister_id);
-
-    log!(INFO, "Calling protocol canister {} to get liquidatable vaults", protocol_canister_id);
-
-    let call_result: Result<(Vec<CandidVault>,), _> = call(
-        protocol_canister_id,
-        "get_liquidatable_vaults",
-        ()
-    ).await;
-
-    match call_result {
-        Ok((vaults,)) => {
-            log!(INFO, "Successfully retrieved {} liquidatable vaults from protocol", vaults.len());
-
-            let liquidatable_vaults: Vec<LiquidatableVault> = vaults.into_iter().map(|vault| {
-                let collateral_ratio = if vault.borrowed_icusd_amount > 0 {
-                    let ratio = (vault.icp_margin_amount as f64) / (vault.borrowed_icusd_amount as f64);
-                    format!("{:.4}", ratio)
-                } else {
-                    "∞".to_string()
-                };
-
-                let liquidation_discount = vault.icp_margin_amount / 10; 
-
-                LiquidatableVault {
-                    vault_id: vault.vault_id,
-                    owner: vault.owner,
-                    debt_amount: vault.borrowed_icusd_amount,
-                    collateral_amount: vault.icp_margin_amount,
-                    collateral_ratio,
-                    liquidation_discount,
-                    priority_score: vault.borrowed_icusd_amount, 
-                }
-            }).collect();
-
-            Ok(liquidatable_vaults)
-        },
-        Err(e) => {
-            log!(INFO, "Failed to get liquidatable vaults from protocol: {:?}", e);
-            Err(StabilityPoolError::TemporarilyUnavailable(
-                format!("Failed to communicate with protocol canister: {:?}", e)
-            ))
+        LiquidationResult {
+            vault_id: vault_info.vault_id,
+            stables_consumed: actual_consumed,
+            collateral_gained: total_collateral_gained,
+            collateral_type: vault_info.collateral_type,
+            success: true,
+            error_message: None,
+        }
+    } else {
+        LiquidationResult {
+            vault_id: vault_info.vault_id,
+            stables_consumed: BTreeMap::new(),
+            collateral_gained: 0,
+            collateral_type: vault_info.collateral_type,
+            success: false,
+            error_message: Some("All liquidation calls failed".to_string()),
         }
     }
 }
 
-pub fn setup_liquidation_monitoring() {
-    let scan_interval = read_state(|s| s.configuration.liquidation_scan_interval);
-
-    log!(INFO,
-        "Setting up liquidation monitoring with {}s intervals", scan_interval);
-
-    ic_cdk_timers::set_timer_interval(
-        Duration::from_secs(scan_interval),
-        || {
-            ic_cdk::spawn(async {
-                match scan_and_liquidate().await {
-                    Ok(results) => {
-                        if !results.is_empty() {
-                            log!(INFO,
-                                "Liquidation scan completed: {} vaults processed", results.len());
-                        }
-                    }
-                    Err(error) => {
-                        log!(INFO,
-                            "Liquidation scan failed: {:?}", error);
-                    }
-                }
-            })
-        }
-    );
+/// Thin translation layer: map a ledger principal to the backend's StableTokenType enum.
+/// This goes away when the backend gets a dynamic stablecoin registry.
+fn determine_stable_token_type(
+    ledger: Principal,
+    configs: &BTreeMap<Principal, StablecoinConfig>,
+) -> Option<rumi_protocol_backend::StableTokenType> {
+    let config = configs.get(&ledger)?;
+    match config.symbol.as_str() {
+        "ckUSDT" => Some(rumi_protocol_backend::StableTokenType::CKUSDT),
+        "ckUSDC" => Some(rumi_protocol_backend::StableTokenType::CKUSDC),
+        _ => None, // icUSD uses a different endpoint, other tokens not yet mapped
+    }
 }
