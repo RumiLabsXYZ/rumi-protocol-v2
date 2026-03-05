@@ -5,8 +5,6 @@ use ic_cdk::call;
 use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromError};
 use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
 use icrc_ledger_types::icrc1::account::Account;
-use num_traits::ToPrimitive;
-
 use crate::logs::INFO;
 use crate::types::*;
 use crate::state::{read_state, mutate_state};
