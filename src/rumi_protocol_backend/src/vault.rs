@@ -349,6 +349,7 @@ pub async fn redeem_collateral(collateral_type: Principal, _icusd_amount: u64) -
             Ok(SuccessWithFee {
                 block_index,
                 fee_amount_paid: fee_amount.to_u64(),
+                collateral_amount_received: None,
             })
         }
         Err(transfer_from_error) => Err(ProtocolError::TransferFromError(
@@ -657,6 +658,7 @@ async fn borrow_from_vault_internal(caller: Principal, arg: VaultArg) -> Result<
             Ok(SuccessWithFee {
                 block_index,
                 fee_amount_paid: fee.to_u64(),
+                collateral_amount_received: None,
             })
         }
         Err(mint_error) => {
@@ -1877,12 +1879,13 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
         ICUSD::new(0)
     };
 
-    log!(INFO, "[liquidate_vault_partial] Partial liquidation completed. Block index: {}, Fee: {}",
-         icusd_block_index, fee_amount.to_u64());
+    log!(INFO, "[liquidate_vault_partial] Partial liquidation completed. Block index: {}, Fee: {}, Collateral: {}",
+         icusd_block_index, fee_amount.to_u64(), collateral_to_liquidator.to_u64());
 
     Ok(SuccessWithFee {
         block_index: icusd_block_index,
         fee_amount_paid: fee_amount.to_u64(),
+        collateral_amount_received: Some(collateral_to_liquidator.to_u64()),
     })
 }
 
@@ -2096,12 +2099,13 @@ pub async fn liquidate_vault_partial_with_stable(
         ICUSD::new(0)
     };
 
-    log!(INFO, "[liquidate_vault_stable] Liquidation completed. Block index: {}, Fee: {}",
-         stable_block_index, fee_amount.to_u64());
+    log!(INFO, "[liquidate_vault_stable] Liquidation completed. Block index: {}, Fee: {}, Collateral: {}",
+         stable_block_index, fee_amount.to_u64(), collateral_to_liquidator.to_u64());
 
     Ok(SuccessWithFee {
         block_index: stable_block_index,
         fee_amount_paid: fee_amount.to_u64(),
+        collateral_amount_received: Some(collateral_to_liquidator.to_u64()),
     })
 }
 
@@ -2292,12 +2296,13 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         ICUSD::new(0)
     };
 
-    log!(INFO, "[liquidate_vault] Liquidation completed successfully. Block index: {}, Fee: {}",
-         icusd_block_index, fee_amount.to_u64());
-    
+    log!(INFO, "[liquidate_vault] Liquidation completed successfully. Block index: {}, Fee: {}, Collateral: {}",
+         icusd_block_index, fee_amount.to_u64(), collateral_to_liquidator.to_u64());
+
     Ok(SuccessWithFee {
         block_index: icusd_block_index,
         fee_amount_paid: fee_amount.to_u64(),
+        collateral_amount_received: Some(collateral_to_liquidator.to_u64()),
     })
 }
 
@@ -2665,11 +2670,12 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         ICUSD::new(0)
     };
 
-    log!(INFO, "[partial_liquidate_vault] Partial liquidation completed successfully. Block index: {}, Fee: {}",
-         icusd_block_index, fee_amount.to_u64());
-    
+    log!(INFO, "[partial_liquidate_vault] Partial liquidation completed successfully. Block index: {}, Fee: {}, Collateral: {}",
+         icusd_block_index, fee_amount.to_u64(), collateral_to_liquidator.to_u64());
+
     Ok(SuccessWithFee {
         block_index: icusd_block_index,
         fee_amount_paid: fee_amount.to_u64(),
+        collateral_amount_received: Some(collateral_to_liquidator.to_u64()),
     })
 }

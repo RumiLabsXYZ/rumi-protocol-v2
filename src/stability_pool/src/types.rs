@@ -91,20 +91,22 @@ impl DepositPosition {
 }
 
 /// Convert a token amount from its native decimals to e8s (8 decimal places).
+/// Uses saturating arithmetic to prevent overflow on large amounts.
 pub fn normalize_to_e8s(amount: u64, decimals: u8) -> u64 {
     match decimals.cmp(&8) {
         std::cmp::Ordering::Equal => amount,
-        std::cmp::Ordering::Less => amount * 10u64.pow((8 - decimals) as u32),
+        std::cmp::Ordering::Less => amount.saturating_mul(10u64.pow((8 - decimals) as u32)),
         std::cmp::Ordering::Greater => amount / 10u64.pow((decimals - 8) as u32),
     }
 }
 
 /// Convert an e8s amount to a token's native decimals.
+/// Uses saturating arithmetic to prevent overflow on large amounts.
 pub fn normalize_from_e8s(amount_e8s: u64, decimals: u8) -> u64 {
     match decimals.cmp(&8) {
         std::cmp::Ordering::Equal => amount_e8s,
         std::cmp::Ordering::Less => amount_e8s / 10u64.pow((8 - decimals) as u32),
-        std::cmp::Ordering::Greater => amount_e8s * 10u64.pow((decimals - 8) as u32),
+        std::cmp::Ordering::Greater => amount_e8s.saturating_mul(10u64.pow((decimals - 8) as u32)),
     }
 }
 

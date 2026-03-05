@@ -100,7 +100,7 @@
     },
     "rumi_stability_pool": {
       "candid": "src/stability_pool/stability_pool.did",
-      "package": "rumi_stability_pool",
+      "package": "stability_pool",
       "type": "rust",
       "metadata": [
         {

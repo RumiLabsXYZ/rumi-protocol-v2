@@ -367,7 +367,7 @@ type StabilityPoolLiquidationResult = record {
 };
 type StableTokenType = variant { CKUSDC; CKUSDT };
 type StandardRecord = record { url : text; name : text };
-type SuccessWithFee = record { block_index : nat64; fee_amount_paid : nat64 };
+type SuccessWithFee = record { block_index : nat64; fee_amount_paid : nat64; collateral_amount_received : opt nat64 };
 type TransferError = variant {
   GenericError : record { message : text; error_code : nat };
   TemporarilyUnavailable;

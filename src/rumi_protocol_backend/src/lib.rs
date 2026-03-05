@@ -142,6 +142,11 @@ pub struct Fees {
 pub struct SuccessWithFee {
     pub block_index: u64,
     pub fee_amount_paid: u64,
+    /// Total collateral (native units) awarded to the liquidator / stability pool.
+    /// Added so the stability pool can correctly credit depositors with their
+    /// proportional share of the actual collateral received, rather than only
+    /// the liquidator bonus (`fee_amount_paid`).
+    pub collateral_amount_received: Option<u64>,
 }
 
 #[derive(candid::CandidType, Deserialize)]

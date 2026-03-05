@@ -5,6 +5,10 @@ use serde::{Serialize, Deserialize};
 
 use crate::types::*;
 
+/// Maximum number of liquidation records retained in memory.
+/// Older entries are dropped when this limit is exceeded.
+const MAX_LIQUIDATION_HISTORY: usize = 1_000;
+
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
 pub struct StabilityPoolState {
     // Depositor positions
@@ -355,6 +359,12 @@ impl StabilityPoolState {
         self.liquidation_history.push(record);
         self.total_liquidations_executed += 1;
 
+        // Cap history to prevent unbounded memory growth
+        if self.liquidation_history.len() > MAX_LIQUIDATION_HISTORY {
+            let excess = self.liquidation_history.len() - MAX_LIQUIDATION_HISTORY;
+            self.liquidation_history.drain(..excess);
+        }
+
         // Phase 6: Clean up empty positions
         self.deposits.retain(|_, pos| !pos.is_empty());
     }
@@ -445,9 +455,16 @@ pub fn save_to_stable_memory() {
         let bytes = Encode!(&*state).expect("Failed to encode stability pool state");
         let len = bytes.len() as u64;
 
+        // Only grow if current stable memory is insufficient.
+        // Pages are 64 KiB each and never shrink, so avoid redundant grows.
+        let needed_pages = (len + 8 + 65535) / 65536;
+        let current_pages = ic_cdk::api::stable::stable64_size();
+        if needed_pages > current_pages {
+            ic_cdk::api::stable::stable64_grow(needed_pages - current_pages)
+                .expect("Failed to grow stable memory");
+        }
+
         // Write length prefix (8 bytes) then data
-        ic_cdk::api::stable::stable64_grow((len + 8 + 65535) / 65536)
-            .expect("Failed to grow stable memory");
         ic_cdk::api::stable::stable64_write(0, &len.to_le_bytes());
         ic_cdk::api::stable::stable64_write(8, &bytes);
     });
