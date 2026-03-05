@@ -123,6 +123,33 @@
   $: comfortZonePct = Math.max(((vaultMinCR * 1.234 * 100) - 100) / 2, 0);    // e.g. 42.6%
 
 
+  // ── Gauge-synced color (matches meter gradient position) ──
+  const DANGER_HEX = '#e06b9f';
+  const CAUTION_HEX = '#a78bfa';
+  const SAFE_HEX = '#2DD4BF';
+
+  function lerpColor(c1: string, c2: string, t: number): string {
+    const r1 = parseInt(c1.slice(1, 3), 16), g1 = parseInt(c1.slice(3, 5), 16), b1 = parseInt(c1.slice(5, 7), 16);
+    const r2 = parseInt(c2.slice(1, 3), 16), g2 = parseInt(c2.slice(3, 5), 16), b2 = parseInt(c2.slice(5, 7), 16);
+    const r = Math.round(r1 + (r2 - r1) * t), g = Math.round(g1 + (g2 - g1) * t), b = Math.round(b1 + (b2 - b1) * t);
+    return `#${r.toString(16).padStart(2,'0')}${g.toString(16).padStart(2,'0')}${b.toString(16).padStart(2,'0')}`;
+  }
+
+  // Compute the exact color at the marker's gauge position
+  $: gaugeColor = (() => {
+    if (gaugePct <= liqZonePct) return DANGER_HEX;
+    if (gaugePct >= comfortZonePct) return SAFE_HEX;
+    const t = (gaugePct - liqZonePct) / (comfortZonePct - liqZonePct);
+    return lerpColor(DANGER_HEX, CAUTION_HEX, t);
+  })();
+
+  // CR text: white for safe, gauge-synced for everything else
+  $: crColor = riskLevel === 'safe' ? 'var(--rumi-text-primary)' : gaugeColor;
+  // Left rail: hidden for safe, gauge-synced for everything else
+  $: railStyle = riskLevel === 'safe' ? '' : `border-left: 2px solid ${gaugeColor}`;
+  // Interest rate: always gauge-synced (teal for safe)
+  $: interestColor = gaugeColor;
+
   // ── Live-ticking interest accrual (client-side interpolation) ──
   const SECONDS_PER_YEAR = 365 * 24 * 60 * 60;
   $: baseInterestRate = vaultCollateralInfo?.interestRateApr ?? 0;
@@ -506,8 +533,8 @@
 </script>
 
 <!-- ── Collapsed row ── -->
-<div class="vault-card" class:vault-card-danger={riskLevel === 'danger'} class:vault-card-warning={riskLevel === 'warning'} class:vault-card-caution={riskLevel === 'caution'}
-  style={showProjectedCr ? `border-left-color: var(--rumi-${activeProjectedRisk === 'danger' || activeProjectedRisk === 'warning' ? 'danger' : activeProjectedRisk === 'caution' ? 'caution' : 'safe'})` : ''}>
+<div class="vault-card"
+  style={showProjectedCr ? `border-left: 2px solid var(--rumi-${activeProjectedRisk === 'danger' || activeProjectedRisk === 'warning' ? 'danger' : activeProjectedRisk === 'caution' ? 'caution' : 'safe'})` : railStyle}>
   <button class="vault-row" on:click={toggleExpand}>
     <span class="vault-id"><span class="collateral-dot" style="background:{collateralColor}"></span>#{vault.vaultId}</span>
     <span class="vault-cell">
@@ -519,11 +546,6 @@
       <span class="cell-label">Borrowed</span>
       <span class="cell-value">{fmtBorrowed} icUSD</span>
       <span class="cell-sub">${fmtBorrowedUsd}</span>
-      {#if vault.accruedInterest > 0}
-        <span class="cell-sub interest-accrued">
-          incl. {formatNumber(vault.accruedInterest / 1e8, 4)} interest
-        </span>
-      {/if}
     </span>
     <span class="vault-cell vault-cell-bar">
       <span class="gauge-track">
@@ -532,10 +554,7 @@
         <span class="gauge-zone gauge-zone-teal" style="width:{100 - comfortZonePct}%; left:{comfortZonePct}%"></span>
         <span class="gauge-tick" style="left:{borrowZonePct}%"></span>
         <span class="gauge-marker"
-          class:marker-safe={riskLevel === 'safe'}
-          class:marker-caution={riskLevel === 'caution'}
-          class:marker-danger={riskLevel === 'danger' || riskLevel === 'warning'}
-          style="left:{gaugePct}%"></span>
+          style="left:{gaugePct}%; background:{gaugeColor}; box-shadow: 0 0 4px {gaugeColor}80"></span>
       </span>
       <span class="gauge-labels">
         <span class="gauge-label-abs" style="left:{liqZonePct}%">liq</span>
@@ -546,14 +565,14 @@
       <span class="cell-label">CR</span>
       {#if showProjectedCr}
         <span class="cell-value ratio-text cr-projected-row">
-          <span class="cr-old" class:ratio-warning={riskLevel === 'warning'} class:ratio-caution={riskLevel === 'caution'} class:ratio-danger={riskLevel === 'danger'}>{fmtRatio}</span>
+          <span class="cr-old" style="color:{crColor}">{fmtRatio}</span>
           <span class="cr-new" class:ratio-warning={activeProjectedRisk === 'warning'}
             class:ratio-caution={activeProjectedRisk === 'caution'}
             class:ratio-danger={activeProjectedRisk === 'danger'}
             class:ratio-healthy={activeProjectedRisk === 'safe'}>{fmtActiveProjectedCr}</span>
         </span>
       {:else}
-        <span class="cell-value ratio-text" class:ratio-warning={riskLevel === 'warning'} class:ratio-caution={riskLevel === 'caution'} class:ratio-danger={riskLevel === 'danger'} title={riskTooltip}>
+        <span class="cell-value ratio-text" style="color:{crColor}" title={riskTooltip}>
           {#if riskLevel === 'warning' || riskLevel === 'danger'}
             <svg class="warn-icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" /></svg>
           {/if}
@@ -602,8 +621,14 @@
               </div>
               {#if vaultInterestRate > 0}
                 <div class="stat-row">
-                  <span class="stat-label">Interest</span>
-                  <span class="stat-value stat-interest">{(vaultInterestRate * 100).toFixed(2)}% APR</span>
+                  <span class="stat-label">Interest Rate</span>
+                  <span class="stat-value stat-interest" style="color:{interestColor}">{(vaultInterestRate * 100).toFixed(2)}% APR</span>
+                </div>
+              {/if}
+              {#if vault.accruedInterest > 0}
+                <div class="stat-row">
+                  <span class="stat-label">Accumulated</span>
+                  <span class="stat-value stat-interest" style="color:{interestColor}">{formatNumber(vault.accruedInterest / 1e8, 4)} icUSD</span>
                 </div>
               {/if}
             {/if}
@@ -625,7 +650,7 @@
                     </span>
                   {/if}
                 {:else}
-                  <span class:ratio-warning={riskLevel === 'warning'} class:ratio-caution={riskLevel === 'caution'} class:ratio-danger={riskLevel === 'danger'}>{fmtRatio}</span>
+                  <span style="color:{crColor}">{fmtRatio}</span>
                 {/if}
               </span>
             </div>
@@ -799,9 +824,7 @@
     border-color: rgba(209,118,232,0.08);
     box-shadow: inset 0 0 20px 0 rgba(209,118,232,0.04), inset 0 1px 0 0 rgba(200,210,240,0.03), 0 2px 8px -2px rgba(8,11,22,0.6);
   }
-  .vault-card-danger { border-left: 2px solid var(--rumi-danger); }
-  .vault-card-warning { border-left: 2px solid var(--rumi-danger); }
-  .vault-card-caution { border-left: 2px solid var(--rumi-caution); }
+  /* Left rail now uses inline style via railStyle for gradient-synced color */
 
   .vault-row {
     display: grid; grid-template-columns: 3rem 8.5rem 7rem 1fr 5.5rem 1.5rem;
@@ -832,9 +855,9 @@
   }
   .gauge-track {
     position: relative; width: 100%; height: 6px; border-radius: 3px;
-    overflow: hidden; background: var(--rumi-bg-surface3);
+    overflow: visible; background: var(--rumi-bg-surface3);
   }
-  .gauge-zone { position: absolute; top: 0; height: 100%; }
+  .gauge-zone { position: absolute; top: 0; height: 100%; overflow: hidden; }
   .gauge-zone-pink { background: rgba(224, 107, 159, 0.75); left: 0; border-radius: 3px 0 0 3px; }
   .gauge-zone-gradient { background: linear-gradient(to right, rgba(224, 107, 159, 0.65), rgba(167, 139, 250, 0.6)); }
   .gauge-zone-teal { background: rgba(45, 212, 191, 0.5); border-radius: 0 3px 3px 0; }
@@ -844,13 +867,10 @@
     pointer-events: none;
   }
   .gauge-marker {
-    position: absolute; top: -3px; width: 3px; height: 12px;
+    position: absolute; top: -5px; width: 3px; height: 16px;
     border-radius: 1.5px; transform: translateX(-50%);
-    transition: left 0.3s ease;
+    transition: left 0.3s ease; z-index: 1;
   }
-  .marker-safe { background: var(--rumi-safe); box-shadow: 0 0 4px rgba(45, 212, 191, 0.5); }
-  .marker-caution { background: var(--rumi-caution); box-shadow: 0 0 4px rgba(167, 139, 250, 0.5); }
-  .marker-danger { background: var(--rumi-danger); box-shadow: 0 0 4px rgba(224, 107, 159, 0.5); }
   .gauge-labels {
     position: relative; height: 0.75rem;
     font-size: 0.5625rem; color: var(--rumi-text-muted); opacity: 0.85;
@@ -942,7 +962,7 @@
   .stat-distance { font-weight: 500; color: var(--rumi-text-secondary); }
   .stat-distance-danger { color: var(--rumi-danger); }
   .stat-distance-warning { color: var(--rumi-caution); }
-  .stat-interest { color: #d176e8; font-size: 0.8125rem; }
+  .stat-interest { font-size: 0.8125rem; }
 
   /* Safety delta inline with CR */
   .stat-safety-inline {
