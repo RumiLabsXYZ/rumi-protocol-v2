@@ -1,29 +1,29 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::cell::RefCell;
-use candid::Principal;
+use candid::{CandidType, Principal, Decode, Encode};
 use serde::{Serialize, Deserialize};
-use rust_decimal::Decimal;
-use rust_decimal::prelude::ToPrimitive;
-use rust_decimal_macros::dec;
-use rumi_protocol_backend::numeric::{ICUSD, ICP, Ratio};
 
 use crate::types::*;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
 pub struct StabilityPoolState {
-    pub deposits: BTreeMap<Principal, DepositInfo>,
-    pub total_icusd_deposits: ICUSD,
-    pub total_icp_gains: ICP,
+    // Depositor positions
+    pub deposits: BTreeMap<Principal, DepositPosition>,
 
-    pub liquidation_history: Vec<PoolLiquidationRecord>,
-    pub pending_gain_distributions: Vec<PendingGainDistribution>,
+    // Aggregate stablecoin balances per token
+    pub total_stablecoin_balances: BTreeMap<Principal, u64>,
 
+    // Registries
+    pub stablecoin_registry: BTreeMap<Principal, StablecoinConfig>,
+    pub collateral_registry: BTreeMap<Principal, CollateralInfo>,
+
+    // Canister references
     pub protocol_canister_id: Principal,
-    pub icusd_ledger_id: Principal,
-    pub icp_ledger_id: Principal,
-    pub configuration: PoolConfiguration,
 
-    pub last_liquidation_scan: u64,
+    // Admin / operational
+    pub configuration: PoolConfiguration,
+    pub liquidation_history: Vec<PoolLiquidationRecord>,
+    pub in_flight_liquidations: BTreeSet<u64>,
     pub total_liquidations_executed: u64,
     pub pool_creation_timestamp: u64,
     pub is_initialized: bool,
@@ -33,22 +33,18 @@ impl Default for StabilityPoolState {
     fn default() -> Self {
         Self {
             deposits: BTreeMap::new(),
-            total_icusd_deposits: ICUSD::from(0),
-            total_icp_gains: ICP::from(0),
-            liquidation_history: Vec::new(),
-            pending_gain_distributions: Vec::new(),
+            total_stablecoin_balances: BTreeMap::new(),
+            stablecoin_registry: BTreeMap::new(),
+            collateral_registry: BTreeMap::new(),
             protocol_canister_id: Principal::anonymous(),
-            icusd_ledger_id: Principal::anonymous(),
-            icp_ledger_id: Principal::anonymous(),
             configuration: PoolConfiguration {
-                min_deposit_amount: 1_000_000,  
-                max_single_liquidation: 1_000_000_000_000,  
-                liquidation_scan_interval: 30,  
-                max_liquidations_per_batch: 5,
+                min_deposit_e8s: 1_000_000, // 0.01 USD
+                max_liquidations_per_batch: 10,
                 emergency_pause: false,
                 authorized_admins: Vec::new(),
             },
-            last_liquidation_scan: 0,
+            liquidation_history: Vec::new(),
+            in_flight_liquidations: BTreeSet::new(),
             total_liquidations_executed: 0,
             pool_creation_timestamp: 0,
             is_initialized: false,
@@ -59,242 +55,395 @@ impl Default for StabilityPoolState {
 impl StabilityPoolState {
     pub fn initialize(&mut self, args: StabilityPoolInitArgs) {
         self.protocol_canister_id = args.protocol_canister_id;
-        self.icusd_ledger_id = args.icusd_ledger_id;
-        self.icp_ledger_id = args.icp_ledger_id;
-        self.configuration.min_deposit_amount = args.min_deposit_amount;
+        self.configuration.authorized_admins = args.authorized_admins;
         self.pool_creation_timestamp = ic_cdk::api::time();
         self.is_initialized = true;
     }
 
-    pub fn add_deposit(&mut self, user: Principal, amount: ICUSD, timestamp: u64) {
-        self.total_icusd_deposits += amount;
-
-        match self.deposits.get_mut(&user) {
-            Some(existing_deposit) => {
-                existing_deposit.icusd_amount += amount.to_u64();
-            }
-            None => {
-                self.deposits.insert(user, DepositInfo {
-                    icusd_amount: amount.to_u64(),
-                    share_percentage: "0".to_string(), 
-                    pending_icp_gains: 0,
-                    total_claimed_gains: 0,
-                    deposit_timestamp: timestamp,
-                });
-            }
-        }
-
-        self.recalculate_shares();
+    pub fn is_admin(&self, caller: &Principal) -> bool {
+        self.configuration.authorized_admins.contains(caller)
     }
 
-    pub fn process_withdrawal(&mut self, user: Principal, amount: ICUSD) -> Result<(), StabilityPoolError> {
-        let deposit_info = self.deposits.get_mut(&user)
-            .ok_or(StabilityPoolError::NoDepositorFound)?;
+    // ─── Stablecoin Registry ───
 
-        if ICUSD::from(deposit_info.icusd_amount) < amount {
-            return Err(StabilityPoolError::InsufficientDeposit {
-                required: amount.to_u64(),
-                available: deposit_info.icusd_amount,
+    pub fn register_stablecoin(&mut self, config: StablecoinConfig) {
+        self.total_stablecoin_balances.entry(config.ledger_id).or_insert(0);
+        self.stablecoin_registry.insert(config.ledger_id, config);
+    }
+
+    pub fn get_stablecoin_config(&self, ledger: &Principal) -> Option<&StablecoinConfig> {
+        self.stablecoin_registry.get(ledger)
+    }
+
+    pub fn is_accepted_stablecoin(&self, ledger: &Principal) -> bool {
+        self.stablecoin_registry.get(ledger).map(|c| c.is_active).unwrap_or(false)
+    }
+
+    // ─── Collateral Registry ───
+
+    pub fn register_collateral(&mut self, info: CollateralInfo) {
+        self.collateral_registry.insert(info.ledger_id, info);
+    }
+
+    // ─── Deposits ───
+
+    pub fn add_deposit(&mut self, user: Principal, token_ledger: Principal, amount: u64) {
+        let position = self.deposits.entry(user).or_insert_with(|| {
+            DepositPosition::new(ic_cdk::api::time())
+        });
+        *position.stablecoin_balances.entry(token_ledger).or_insert(0) += amount;
+        *self.total_stablecoin_balances.entry(token_ledger).or_insert(0) += amount;
+    }
+
+    pub fn process_withdrawal(&mut self, user: Principal, token_ledger: Principal, amount: u64) -> Result<(), StabilityPoolError> {
+        let position = self.deposits.get_mut(&user)
+            .ok_or(StabilityPoolError::NoPositionFound)?;
+
+        let balance = position.stablecoin_balances.get(&token_ledger).copied().unwrap_or(0);
+        if balance < amount {
+            return Err(StabilityPoolError::InsufficientBalance {
+                token: token_ledger,
+                required: amount,
+                available: balance,
             });
         }
 
-        deposit_info.icusd_amount -= amount.to_u64();
-        self.total_icusd_deposits -= amount;
+        *position.stablecoin_balances.get_mut(&token_ledger).unwrap() -= amount;
+        *self.total_stablecoin_balances.get_mut(&token_ledger).unwrap() -= amount;
 
-        if deposit_info.icusd_amount == 0 {
+        // Clean up zero balances
+        if position.stablecoin_balances.get(&token_ledger) == Some(&0) {
+            position.stablecoin_balances.remove(&token_ledger);
+        }
+        if position.is_empty() {
             self.deposits.remove(&user);
         }
-
-        self.recalculate_shares();
         Ok(())
     }
 
-    pub fn can_withdraw(&self, user: Principal, amount: ICUSD) -> bool {
-        match self.deposits.get(&user) {
-            Some(deposit_info) => ICUSD::from(deposit_info.icusd_amount) >= amount,
-            None => false,
+    // ─── Collateral Gains ───
+
+    pub fn get_collateral_gains(&self, user: &Principal) -> BTreeMap<Principal, u64> {
+        self.deposits.get(user)
+            .map(|p| p.collateral_gains.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn mark_gains_claimed(&mut self, user: &Principal, collateral_ledger: &Principal, amount: u64) {
+        if let Some(position) = self.deposits.get_mut(user) {
+            if let Some(gains) = position.collateral_gains.get_mut(collateral_ledger) {
+                *gains = gains.saturating_sub(amount);
+                if *gains == 0 {
+                    position.collateral_gains.remove(collateral_ledger);
+                }
+            }
+            *position.total_claimed_gains.entry(*collateral_ledger).or_insert(0) += amount;
         }
     }
 
-    pub fn get_pending_collateral_gains(&self, user: Principal) -> ICP {
-        match self.deposits.get(&user) {
-            Some(deposit_info) => ICP::from(deposit_info.pending_icp_gains),
-            None => ICP::from(0),
+    // ─── Opt-in / Opt-out ───
+
+    pub fn opt_out_collateral(&mut self, user: &Principal, collateral_type: Principal) -> Result<(), StabilityPoolError> {
+        let position = self.deposits.get_mut(user)
+            .ok_or(StabilityPoolError::NoPositionFound)?;
+        if !position.opted_out_collateral.insert(collateral_type) {
+            return Err(StabilityPoolError::AlreadyOptedOut { collateral: collateral_type });
         }
+        Ok(())
     }
 
-    pub fn mark_gains_claimed(&mut self, user: Principal, amount: ICP) {
-        if let Some(deposit_info) = self.deposits.get_mut(&user) {
-            deposit_info.pending_icp_gains = deposit_info.pending_icp_gains.saturating_sub(amount.to_u64());
-            deposit_info.total_claimed_gains += amount.to_u64();
+    pub fn opt_in_collateral(&mut self, user: &Principal, collateral_type: Principal) -> Result<(), StabilityPoolError> {
+        let position = self.deposits.get_mut(user)
+            .ok_or(StabilityPoolError::NoPositionFound)?;
+        if !position.opted_out_collateral.remove(&collateral_type) {
+            return Err(StabilityPoolError::AlreadyOptedIn { collateral: collateral_type });
         }
+        Ok(())
     }
 
-    pub fn process_liquidation_gains(&mut self, vault_id: u64, icusd_used: ICUSD, icp_gained: ICP) {
-        let liquidation_record = PoolLiquidationRecord {
-            vault_id,
-            timestamp: ic_cdk::api::time(),
-            icusd_used: icusd_used.to_u64(),
-            icp_gained: icp_gained.to_u64(),
-            liquidation_discount: "0.1".to_string(), 
-            depositors_count: self.deposits.len() as u64,
-        };
+    // ─── Effective Pool Computation ───
 
-        self.liquidation_history.push(liquidation_record);
-        self.total_liquidations_executed += 1;
-        self.total_icp_gains += icp_gained;
+    /// Compute total opted-in stablecoin value (e8s) for a given collateral type.
+    pub fn effective_pool_for_collateral(&self, collateral_type: &Principal) -> u64 {
+        self.deposits.values()
+            .filter(|pos| pos.is_opted_in(collateral_type))
+            .map(|pos| pos.total_usd_value(&self.stablecoin_registry))
+            .sum()
+    }
 
-        if self.total_icusd_deposits > ICUSD::from(0) {
-            for (_user, deposit_info) in self.deposits.iter_mut() {
-                let user_share = Decimal::from_str_exact(&deposit_info.share_percentage)
-                    .unwrap_or(dec!(0));
-                let user_gain = icp_gained * Ratio::from(user_share);
-                deposit_info.pending_icp_gains += user_gain.to_u64();
+    // ─── Liquidation Processing ───
+
+    /// Compute the stablecoin draw for a liquidation of a given debt amount (e8s).
+    /// Returns a map of token_ledger -> amount to consume (in native decimals).
+    /// Follows priority ordering: higher priority consumed first, same priority proportional.
+    pub fn compute_token_draw(&self, debt_e8s: u64, collateral_type: &Principal) -> BTreeMap<Principal, u64> {
+        let mut result = BTreeMap::new();
+        let mut remaining_e8s = debt_e8s;
+
+        // Gather available balances per priority, only from opted-in depositors
+        let mut priority_buckets: BTreeMap<u8, Vec<(Principal, u64, u8)>> = BTreeMap::new(); // priority -> [(ledger, available_native, decimals)]
+
+        for (ledger, config) in &self.stablecoin_registry {
+            // Sum balances of opted-in depositors for this token
+            let available_native: u64 = self.deposits.values()
+                .filter(|pos| pos.is_opted_in(collateral_type))
+                .map(|pos| pos.stablecoin_balances.get(ledger).copied().unwrap_or(0))
+                .sum();
+            if available_native > 0 {
+                priority_buckets.entry(config.priority).or_default()
+                    .push((*ledger, available_native, config.decimals));
             }
         }
 
-        self.total_icusd_deposits = self.total_icusd_deposits.saturating_sub(icusd_used);
+        // Process from highest priority to lowest
+        let mut priorities: Vec<u8> = priority_buckets.keys().copied().collect();
+        priorities.sort_by(|a, b| b.cmp(a)); // descending
+
+        for priority in priorities {
+            if remaining_e8s == 0 {
+                break;
+            }
+            let tokens = priority_buckets.get(&priority).unwrap();
+
+            // Total available at this priority level (in e8s)
+            let total_available_e8s: u64 = tokens.iter()
+                .map(|(_, amount, decimals)| normalize_to_e8s(*amount, *decimals))
+                .sum();
+
+            if total_available_e8s == 0 {
+                continue;
+            }
+
+            // How much to draw from this priority tier
+            let draw_e8s = remaining_e8s.min(total_available_e8s);
+
+            // Proportional draw within this tier
+            for (ledger, available_native, decimals) in tokens {
+                let token_available_e8s = normalize_to_e8s(*available_native, *decimals);
+                if token_available_e8s == 0 {
+                    continue;
+                }
+                // Proportional share: (token_available / total_available) * draw
+                let token_draw_e8s = (draw_e8s as u128 * token_available_e8s as u128 / total_available_e8s as u128) as u64;
+                let token_draw_native = normalize_from_e8s(token_draw_e8s, *decimals);
+                if token_draw_native > 0 {
+                    result.insert(*ledger, token_draw_native.min(*available_native));
+                }
+            }
+
+            remaining_e8s -= draw_e8s;
+        }
+
+        result
     }
 
-    fn recalculate_shares(&mut self) {
-        if self.total_icusd_deposits == ICUSD::from(0) {
-            for deposit_info in self.deposits.values_mut() {
-                deposit_info.share_percentage = "0".to_string();
-            }
+    /// After a successful liquidation, reduce depositor balances and distribute collateral gains.
+    /// `stables_consumed` is a map of token_ledger -> total amount consumed (native decimals).
+    /// `collateral_gained` is the collateral received by the pool (native decimals).
+    /// Only opted-in depositors for `collateral_type` participate.
+    pub fn process_liquidation_gains(
+        &mut self,
+        vault_id: u64,
+        collateral_type: Principal,
+        stables_consumed: &BTreeMap<Principal, u64>,
+        collateral_gained: u64,
+    ) {
+        // Phase 1: Compute each opted-in depositor's share of the consumed stables (in e8s)
+        let opted_in_principals: Vec<Principal> = self.deposits.iter()
+            .filter(|(_, pos)| pos.is_opted_in(&collateral_type))
+            .map(|(p, _)| *p)
+            .collect();
+
+        // For each consumed token, compute total opted-in balance for that token
+        let mut per_token_opted_in_totals: BTreeMap<Principal, u64> = BTreeMap::new();
+        for token_ledger in stables_consumed.keys() {
+            let total: u64 = opted_in_principals.iter()
+                .filter_map(|p| self.deposits.get(p))
+                .map(|pos| pos.stablecoin_balances.get(token_ledger).copied().unwrap_or(0))
+                .sum();
+            per_token_opted_in_totals.insert(*token_ledger, total);
+        }
+
+        // Phase 2: Compute total e8s consumed to determine collateral distribution shares
+        let total_consumed_e8s: u64 = stables_consumed.iter()
+            .map(|(ledger, &amount)| {
+                let decimals = self.stablecoin_registry.get(ledger).map(|c| c.decimals).unwrap_or(8);
+                normalize_to_e8s(amount, decimals)
+            })
+            .sum();
+
+        if total_consumed_e8s == 0 {
             return;
         }
 
-        for deposit_info in self.deposits.values_mut() {
-            let user_amount = Decimal::from(deposit_info.icusd_amount);
-            let total_amount = Decimal::from(self.total_icusd_deposits.to_u64());
-            let share_percentage = user_amount / total_amount;
-            deposit_info.share_percentage = share_percentage.to_string();
-        }
-    }
+        // Phase 3: For each opted-in depositor, reduce their token balances and add collateral gains
+        for principal in &opted_in_principals {
+            let mut user_consumed_e8s: u64 = 0;
 
-    pub fn get_depositor_info(&self, user: Principal) -> Option<UserStabilityPosition> {
-        self.deposits.get(&user).map(|deposit_info| {
-            UserStabilityPosition {
-                icusd_deposit: deposit_info.icusd_amount,
-                share_percentage: deposit_info.share_percentage.clone(),
-                pending_icp_gains: deposit_info.pending_icp_gains,
-                total_claimed_gains: deposit_info.total_claimed_gains,
-                deposit_timestamp: deposit_info.deposit_timestamp,
-                estimated_daily_earnings: self.estimate_daily_earnings(deposit_info),
+            if let Some(position) = self.deposits.get_mut(principal) {
+                for (token_ledger, &total_consumed) in stables_consumed {
+                    let total_opted_in = per_token_opted_in_totals.get(token_ledger).copied().unwrap_or(0);
+                    if total_opted_in == 0 {
+                        continue;
+                    }
+                    let user_balance = position.stablecoin_balances.get(token_ledger).copied().unwrap_or(0);
+                    if user_balance == 0 {
+                        continue;
+                    }
+
+                    // User's share of this token's consumption
+                    let user_share_native = (total_consumed as u128 * user_balance as u128 / total_opted_in as u128) as u64;
+                    let user_share_native = user_share_native.min(user_balance);
+
+                    // Reduce balance
+                    if let Some(bal) = position.stablecoin_balances.get_mut(token_ledger) {
+                        *bal = bal.saturating_sub(user_share_native);
+                    }
+
+                    // Track consumed value in e8s for collateral distribution
+                    let decimals = self.stablecoin_registry.get(token_ledger).map(|c| c.decimals).unwrap_or(8);
+                    user_consumed_e8s += normalize_to_e8s(user_share_native, decimals);
+                }
+
+                // Distribute collateral proportional to e8s consumed
+                if user_consumed_e8s > 0 {
+                    let user_collateral = (collateral_gained as u128 * user_consumed_e8s as u128 / total_consumed_e8s as u128) as u64;
+                    *position.collateral_gains.entry(collateral_type).or_insert(0) += user_collateral;
+                }
             }
-        })
-    }
-
-    fn estimate_daily_earnings(&self, deposit_info: &DepositInfo) -> u64 {
-        if self.liquidation_history.is_empty() {
-            return 0;
         }
 
-        let recent_gains: u64 = self.liquidation_history.iter()
-            .rev()
-            .take(10) 
-            .map(|record| record.icp_gained)
-            .sum();
+        // Phase 4: Update aggregate totals
+        for (token_ledger, &consumed) in stables_consumed {
+            if let Some(total) = self.total_stablecoin_balances.get_mut(token_ledger) {
+                *total = total.saturating_sub(consumed);
+            }
+        }
 
-        let user_share = Decimal::from_str_exact(&deposit_info.share_percentage)
-            .unwrap_or(dec!(0));
+        // Phase 5: Record in history
+        let record = PoolLiquidationRecord {
+            vault_id,
+            timestamp: ic_cdk::api::time(),
+            stables_consumed: stables_consumed.clone(),
+            collateral_gained,
+            collateral_type,
+            depositors_count: opted_in_principals.len() as u64,
+        };
+        self.liquidation_history.push(record);
+        self.total_liquidations_executed += 1;
 
-        let estimated_daily = Decimal::from(recent_gains) * user_share;
-        estimated_daily.to_u64().unwrap_or(0)
+        // Phase 6: Clean up empty positions
+        self.deposits.retain(|_, pos| !pos.is_empty());
     }
+
+    // ─── Query Helpers ───
 
     pub fn get_pool_status(&self) -> StabilityPoolStatus {
-        let utilization_ratio = if self.total_icusd_deposits > ICUSD::from(0) {
-            let total_processed: u64 = self.liquidation_history.iter()
-                .map(|record| record.icusd_used)
-                .sum();
-            let ratio = Decimal::from(total_processed) / Decimal::from(self.total_icusd_deposits.to_u64());
-            ratio.to_string()
-        } else {
-            "0".to_string()
-        };
+        let total_e8s: u64 = self.total_stablecoin_balances.iter()
+            .map(|(ledger, &amount)| {
+                let decimals = self.stablecoin_registry.get(ledger).map(|c| c.decimals).unwrap_or(8);
+                normalize_to_e8s(amount, decimals)
+            })
+            .sum();
 
-        let average_deposit_size = if self.deposits.is_empty() {
-            0
-        } else {
-            self.total_icusd_deposits.to_u64() / self.deposits.len() as u64
+        let total_collateral_gains: BTreeMap<Principal, u64> = {
+            let mut gains = BTreeMap::new();
+            for record in &self.liquidation_history {
+                *gains.entry(record.collateral_type).or_insert(0) += record.collateral_gained;
+            }
+            gains
         };
 
         StabilityPoolStatus {
-            total_icusd_deposits: self.total_icusd_deposits.to_u64(),
+            total_deposits_e8s: total_e8s,
             total_depositors: self.deposits.len() as u64,
             total_liquidations_executed: self.total_liquidations_executed,
-            total_icp_gains_distributed: self.total_icp_gains.to_u64(),
-            pool_utilization_ratio: utilization_ratio,
-            average_deposit_size,
-            current_apr_estimate: self.calculate_estimated_apr(),
+            stablecoin_balances: self.total_stablecoin_balances.clone(),
+            collateral_gains: total_collateral_gains,
+            stablecoin_registry: self.stablecoin_registry.values().cloned().collect(),
+            collateral_registry: self.collateral_registry.values().cloned().collect(),
+            emergency_paused: self.configuration.emergency_pause,
         }
     }
 
-    fn calculate_estimated_apr(&self) -> String {
-        if self.liquidation_history.is_empty() || self.total_icusd_deposits == ICUSD::from(0) {
-            return "0".to_string();
-        }
-
-        let days_active = ((ic_cdk::api::time() - self.pool_creation_timestamp) / (24 * 60 * 60 * 1_000_000_000)).max(1);
-        let total_gains_value = Decimal::from(self.total_icp_gains.to_u64());
-        let total_deposits_value = Decimal::from(self.total_icusd_deposits.to_u64());
-
-        if total_deposits_value > dec!(0) {
-            let daily_return_rate = total_gains_value / (total_deposits_value * Decimal::from(days_active));
-            let annual_rate = daily_return_rate * dec!(365) * dec!(100); 
-            annual_rate.to_string()
-        } else {
-            "0".to_string()
-        }
+    pub fn get_user_position(&self, user: &Principal) -> Option<UserStabilityPosition> {
+        self.deposits.get(user).map(|pos| UserStabilityPosition {
+            stablecoin_balances: pos.stablecoin_balances.clone(),
+            collateral_gains: pos.collateral_gains.clone(),
+            opted_out_collateral: pos.opted_out_collateral.iter().cloned().collect(),
+            deposit_timestamp: pos.deposit_timestamp,
+            total_claimed_gains: pos.total_claimed_gains.clone(),
+            total_usd_value_e8s: pos.total_usd_value(&self.stablecoin_registry),
+        })
     }
 
-    pub fn has_sufficient_funds(&self, required_amount: ICUSD) -> bool {
-        self.total_icusd_deposits >= required_amount
-    }
+    // ─── State Validation ───
 
     pub fn validate_state(&self) -> Result<(), String> {
-        let calculated_total: u64 = self.deposits.values()
-            .map(|info| info.icusd_amount)
-            .sum();
-
-        if calculated_total != self.total_icusd_deposits.to_u64() {
-            return Err(format!(
-                "Deposit totals don't match: calculated={}, stored={}",
-                calculated_total, self.total_icusd_deposits.to_u64()
-            ));
-        }
-
-        for (user, deposit_info) in &self.deposits {
-            if Decimal::from_str_exact(&deposit_info.share_percentage).is_err() {
-                return Err(format!("Invalid share percentage for user {}: {}", user, deposit_info.share_percentage));
+        for (ledger, &tracked_total) in &self.total_stablecoin_balances {
+            let computed_total: u64 = self.deposits.values()
+                .map(|pos| pos.stablecoin_balances.get(ledger).copied().unwrap_or(0))
+                .sum();
+            if computed_total != tracked_total {
+                return Err(format!(
+                    "Stablecoin total mismatch for {}: tracked={}, computed={}",
+                    ledger, tracked_total, computed_total
+                ));
             }
         }
-
         Ok(())
     }
 }
+
+// ─── Thread-local state + accessors ───
 
 thread_local! {
     static STATE: RefCell<StabilityPoolState> = RefCell::new(StabilityPoolState::default());
 }
 
 pub fn mutate_state<F, R>(f: F) -> R
-where
-    F: FnOnce(&mut StabilityPoolState) -> R,
-{
+where F: FnOnce(&mut StabilityPoolState) -> R {
     STATE.with(|s| f(&mut s.borrow_mut()))
 }
 
 pub fn read_state<F, R>(f: F) -> R
-where
-    F: FnOnce(&StabilityPoolState) -> R,
-{
+where F: FnOnce(&StabilityPoolState) -> R {
     STATE.with(|s| f(&s.borrow()))
 }
 
 pub fn replace_state(state: StabilityPoolState) {
+    STATE.with(|s| { *s.borrow_mut() = state; });
+}
+
+/// Serialize state to stable memory (called from pre_upgrade).
+pub fn save_to_stable_memory() {
     STATE.with(|s| {
-        *s.borrow_mut() = state;
+        let state = s.borrow();
+        let bytes = Encode!(&*state).expect("Failed to encode stability pool state");
+        let len = bytes.len() as u64;
+
+        // Write length prefix (8 bytes) then data
+        ic_cdk::api::stable::stable64_grow((len + 8 + 65535) / 65536)
+            .expect("Failed to grow stable memory");
+        ic_cdk::api::stable::stable64_write(0, &len.to_le_bytes());
+        ic_cdk::api::stable::stable64_write(8, &bytes);
     });
+}
+
+/// Restore state from stable memory (called from post_upgrade).
+pub fn load_from_stable_memory() {
+    let mut len_bytes = [0u8; 8];
+    ic_cdk::api::stable::stable64_read(0, &mut len_bytes);
+    let len = u64::from_le_bytes(len_bytes) as usize;
+
+    if len == 0 {
+        return; // No saved state — fresh start
+    }
+
+    let mut bytes = vec![0u8; len];
+    ic_cdk::api::stable::stable64_read(8, &mut bytes);
+
+    let state: StabilityPoolState = Decode!(&bytes, StabilityPoolState)
+        .expect("Failed to decode stability pool state from stable memory");
+    replace_state(state);
 }
