@@ -123,10 +123,13 @@
   $: comfortZonePct = Math.max(((vaultMinCR * 1.234 * 100) - 100) / 2, 0);    // e.g. 42.6%
 
 
-  // ── Gauge-synced color (matches meter gradient position) ──
+  // ── Dual-channel color system ──
+  // Meter (marker): green → purple → pink
+  // CR text + rail + interest: white → pink (no purple)
   const DANGER_HEX = '#e06b9f';
   const CAUTION_HEX = '#a78bfa';
   const SAFE_HEX = '#2DD4BF';
+  const WHITE_HEX = '#e2e8f0';
 
   function lerpColor(c1: string, c2: string, t: number): string {
     const r1 = parseInt(c1.slice(1, 3), 16), g1 = parseInt(c1.slice(3, 5), 16), b1 = parseInt(c1.slice(5, 7), 16);
@@ -135,20 +138,46 @@
     return `#${r.toString(16).padStart(2,'0')}${g.toString(16).padStart(2,'0')}${b.toString(16).padStart(2,'0')}`;
   }
 
-  // Compute the exact color at the marker's gauge position
+  // Symmetrical fade band around comfort: comfort ± (comfort - borrow) / 2
+  $: halfSpan = (comfortZonePct - borrowZonePct) / 2;
+  $: fadeStartPct = comfortZonePct + halfSpan;  // ~51.3% gauge (~202.6% CR)
+  $: fadeEndPct = comfortZonePct - halfSpan;    // ~33.8% gauge (~167.6% CR)
+
+  // Meter color (marker): green → purple → pink
   $: gaugeColor = (() => {
+    if (gaugePct >= fadeStartPct) return SAFE_HEX;
+    if (gaugePct >= fadeEndPct) {
+      const t = (fadeStartPct - gaugePct) / (fadeStartPct - fadeEndPct);
+      return lerpColor(SAFE_HEX, CAUTION_HEX, t);
+    }
     if (gaugePct <= liqZonePct) return DANGER_HEX;
-    if (gaugePct >= comfortZonePct) return SAFE_HEX;
-    const t = (gaugePct - liqZonePct) / (comfortZonePct - liqZonePct);
-    return lerpColor(DANGER_HEX, CAUTION_HEX, t);
+    const t = (fadeEndPct - gaugePct) / (fadeEndPct - liqZonePct);
+    return lerpColor(CAUTION_HEX, DANGER_HEX, t);
   })();
 
-  // CR text: white for safe, gauge-synced for everything else
-  $: crColor = riskLevel === 'safe' ? 'var(--rumi-text-primary)' : gaugeColor;
-  // Left rail: hidden for safe, gauge-synced for everything else
-  $: railStyle = riskLevel === 'safe' ? '' : `border-left: 2px solid ${gaugeColor}`;
-  // Interest rate: always gauge-synced (teal for safe)
-  $: interestColor = gaugeColor;
+  // CR text color: white → pink directly (no purple)
+  $: crColor = (() => {
+    if (gaugePct >= fadeStartPct) return WHITE_HEX;
+    if (gaugePct <= liqZonePct) return DANGER_HEX;
+    const t = (fadeStartPct - gaugePct) / (fadeStartPct - liqZonePct);
+    return lerpColor(WHITE_HEX, DANGER_HEX, t);
+  })();
+
+  // Rail: opacity fades in through the gradient zone
+  $: railStyle = (() => {
+    if (gaugePct >= fadeStartPct) return '';
+    if (gaugePct >= fadeEndPct) {
+      const opacity = (fadeStartPct - gaugePct) / (fadeStartPct - fadeEndPct);
+      const r = parseInt(crColor.slice(1, 3), 16);
+      const g = parseInt(crColor.slice(3, 5), 16);
+      const b = parseInt(crColor.slice(5, 7), 16);
+      return `border-left: 2px solid rgba(${r},${g},${b},${opacity.toFixed(2)})`;
+    }
+    return `border-left: 2px solid ${crColor}`;
+  })();
+
+  // Interest rate: same as CR text
+  $: interestColor = crColor;
 
   // ── Live-ticking interest accrual (client-side interpolation) ──
   const SECONDS_PER_YEAR = 365 * 24 * 60 * 60;
@@ -550,8 +579,9 @@
     <span class="vault-cell vault-cell-bar">
       <span class="gauge-track">
         <span class="gauge-zone gauge-zone-pink" style="width:{liqZonePct}%"></span>
-        <span class="gauge-zone gauge-zone-gradient" style="width:{comfortZonePct - liqZonePct}%; left:{liqZonePct}%"></span>
-        <span class="gauge-zone gauge-zone-teal" style="width:{100 - comfortZonePct}%; left:{comfortZonePct}%"></span>
+        <span class="gauge-zone gauge-zone-pink-purple" style="width:{fadeEndPct - liqZonePct}%; left:{liqZonePct}%"></span>
+        <span class="gauge-zone gauge-zone-purple-green" style="width:{fadeStartPct - fadeEndPct}%; left:{fadeEndPct}%"></span>
+        <span class="gauge-zone gauge-zone-teal" style="width:{100 - fadeStartPct}%; left:{fadeStartPct}%"></span>
         <span class="gauge-tick" style="left:{borrowZonePct}%"></span>
         <span class="gauge-marker"
           style="left:{gaugePct}%; background:{gaugeColor}; box-shadow: 0 0 4px {gaugeColor}80"></span>
@@ -858,8 +888,9 @@
     overflow: visible; background: var(--rumi-bg-surface3);
   }
   .gauge-zone { position: absolute; top: 0; height: 100%; overflow: hidden; }
-  .gauge-zone-pink { background: rgba(224, 107, 159, 0.75); left: 0; border-radius: 3px 0 0 3px; }
-  .gauge-zone-gradient { background: linear-gradient(to right, rgba(224, 107, 159, 0.65), rgba(167, 139, 250, 0.6)); }
+  .gauge-zone-pink { background: linear-gradient(to right, rgba(224, 107, 159, 0.75), rgba(224, 107, 159, 0.65)); left: 0; border-radius: 3px 0 0 3px; }
+  .gauge-zone-pink-purple { background: linear-gradient(to right, rgba(224, 107, 159, 0.55), rgba(167, 139, 250, 0.5)); }
+  .gauge-zone-purple-green { background: linear-gradient(to right, rgba(167, 139, 250, 0.45), rgba(45, 212, 191, 0.45)); }
   .gauge-zone-teal { background: rgba(45, 212, 191, 0.5); border-radius: 0 3px 3px 0; }
   .gauge-tick {
     position: absolute; top: 0; width: 1px; height: 100%;

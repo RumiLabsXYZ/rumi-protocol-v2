@@ -105,18 +105,26 @@
   $: borrowZone = Math.max(((selectedMinCR * 100) - 100) / 2, 0);             // e.g. 25% for 150% borrow CR
   $: comfortZone = Math.max(((selectedMinCR * 1.234 * 100) - 100) / 2, 0);    // e.g. 42.6% for ~185% comfort
 
-  // Gauge-synced color (matches meter gradient position)
+  // Dual-channel color: meter = green→purple→pink, text = white→pink
   function lerpColor(c1: string, c2: string, t: number): string {
     const r1 = parseInt(c1.slice(1, 3), 16), g1 = parseInt(c1.slice(3, 5), 16), b1 = parseInt(c1.slice(5, 7), 16);
     const r2 = parseInt(c2.slice(1, 3), 16), g2 = parseInt(c2.slice(3, 5), 16), b2 = parseInt(c2.slice(5, 7), 16);
     const r = Math.round(r1 + (r2 - r1) * t), g = Math.round(g1 + (g2 - g1) * t), b = Math.round(b1 + (b2 - b1) * t);
     return `#${r.toString(16).padStart(2,'0')}${g.toString(16).padStart(2,'0')}${b.toString(16).padStart(2,'0')}`;
   }
+  $: halfSpan = (comfortZone - borrowZone) / 2;
+  $: fadeStartPct = comfortZone + halfSpan;
+  $: fadeEndPct = comfortZone - halfSpan;
+  // Meter marker color: green → purple → pink
   $: borrowGaugeColor = (() => {
+    if (gaugePosition >= fadeStartPct) return '#2DD4BF';
+    if (gaugePosition >= fadeEndPct) {
+      const t = (fadeStartPct - gaugePosition) / (fadeStartPct - fadeEndPct);
+      return lerpColor('#2DD4BF', '#a78bfa', t);
+    }
     if (gaugePosition <= liqZone) return '#e06b9f';
-    if (gaugePosition >= comfortZone) return '#2DD4BF';
-    const t = (gaugePosition - liqZone) / (comfortZone - liqZone);
-    return lerpColor('#e06b9f', '#a78bfa', t);
+    const t = (fadeEndPct - gaugePosition) / (fadeEndPct - liqZone);
+    return lerpColor('#a78bfa', '#e06b9f', t);
   })();
 
   function selectCollateral(principalText: string) {
@@ -266,8 +274,9 @@
                 </div>
                 <div class="gauge-track">
                   <div class="gauge-zone gauge-zone-pink" style="width:{liqZone}%"></div>
-                  <div class="gauge-zone gauge-zone-gradient" style="width:{comfortZone - liqZone}%; left:{liqZone}%"></div>
-                  <div class="gauge-zone gauge-zone-teal" style="width:{100 - comfortZone}%; left:{comfortZone}%"></div>
+                  <div class="gauge-zone gauge-zone-pink-purple" style="width:{fadeEndPct - liqZone}%; left:{liqZone}%"></div>
+                  <div class="gauge-zone gauge-zone-purple-green" style="width:{fadeStartPct - fadeEndPct}%; left:{fadeEndPct}%"></div>
+                  <div class="gauge-zone gauge-zone-teal" style="width:{100 - fadeStartPct}%; left:{fadeStartPct}%"></div>
                   <div class="gauge-tick" style="left:{borrowZone}%"></div>
                   <div class="gauge-marker"
                     style="left:{gaugePosition}%; background:{borrowGaugeColor}; box-shadow: 0 0 4px {borrowGaugeColor}80"></div>
@@ -405,8 +414,9 @@
     background: var(--rumi-bg-surface3);
   }
   .gauge-zone { position: absolute; top: 0; height: 100%; overflow: hidden; }
-  .gauge-zone-pink { background: rgba(224, 107, 159, 0.75); left: 0; border-radius: 4px 0 0 4px; }
-  .gauge-zone-gradient { background: linear-gradient(to right, rgba(224, 107, 159, 0.65), rgba(167, 139, 250, 0.6)); }
+  .gauge-zone-pink { background: linear-gradient(to right, rgba(224, 107, 159, 0.75), rgba(224, 107, 159, 0.65)); left: 0; border-radius: 4px 0 0 4px; }
+  .gauge-zone-pink-purple { background: linear-gradient(to right, rgba(224, 107, 159, 0.55), rgba(167, 139, 250, 0.5)); }
+  .gauge-zone-purple-green { background: linear-gradient(to right, rgba(167, 139, 250, 0.45), rgba(45, 212, 191, 0.45)); }
   .gauge-zone-teal { background: rgba(45, 212, 191, 0.5); border-radius: 0 4px 4px 0; }
   .gauge-tick {
     position: absolute; top: 0; width: 1px; height: 100%;
