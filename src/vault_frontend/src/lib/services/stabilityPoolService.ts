@@ -1,8 +1,9 @@
 import { Principal } from '@dfinity/principal';
+import { Actor, HttpAgent, AnonymousIdentity } from '@dfinity/agent';
 import { pnp, canisterIDLs } from './pnp';
 import { walletStore } from '../stores/wallet';
 import { get } from 'svelte/store';
-import { CANISTER_IDS } from '../config';
+import { CANISTER_IDS, CONFIG } from '../config';
 
 // ──────────────────────────────────────────────────────────────
 // Types — mirrors the Candid interface
@@ -147,9 +148,34 @@ export function decimalsForLedger(ledger: Principal, registries?: { stablecoins?
 const STABILITY_POOL_CANISTER_ID = CANISTER_IDS.STABILITY_POOL;
 
 class StabilityPoolService {
-  // Returns the canister actor. PNP returns a generic Actor type,
-  // so callers use (actor as any).method() — standard ICP pattern.
-  private async getActor(): Promise<any> {
+  private _anonAgent: HttpAgent | null = null;
+
+  /**
+   * Anonymous actor for read-only queries. Bypasses wallet/ICRC-21 signer
+   * so queries like get_pool_status don't trigger consent popups or fail
+   * on canisters that don't implement icrc21_canister_call_consent_message.
+   */
+  private async getQueryActor(): Promise<any> {
+    if (!this._anonAgent) {
+      this._anonAgent = new HttpAgent({
+        host: CONFIG.host,
+        identity: new AnonymousIdentity(),
+      });
+      if (CONFIG.isLocal) {
+        await this._anonAgent.fetchRootKey();
+      }
+    }
+    return Actor.createActor(canisterIDLs.stability_pool as any, {
+      agent: this._anonAgent,
+      canisterId: STABILITY_POOL_CANISTER_ID,
+    });
+  }
+
+  /**
+   * Authenticated actor for mutations (deposit, withdraw, claim, etc.).
+   * Goes through PNP wallet for signing.
+   */
+  private async getUpdateActor(): Promise<any> {
     const actor = await pnp.getActor(
       STABILITY_POOL_CANISTER_ID,
       canisterIDLs.stability_pool,
@@ -158,28 +184,28 @@ class StabilityPoolService {
     return actor;
   }
 
-  // ── Queries ──
+  // ── Queries (anonymous, no wallet needed) ──
 
   async getPoolStatus(): Promise<PoolStatus> {
-    const actor = await this.getActor();
+    const actor = await this.getQueryActor();
     return await actor.get_pool_status() as PoolStatus;
   }
 
   async getUserPosition(userPrincipal?: Principal): Promise<UserPosition | null> {
-    const actor = await this.getActor();
+    const actor = await this.getQueryActor();
     const arg = userPrincipal ? [userPrincipal] : [];
     const result = await actor.get_user_position(arg) as [UserPosition] | [];
     return result.length > 0 ? result[0] ?? null : null;
   }
 
   async getLiquidationHistory(limit?: number): Promise<LiquidationRecord[]> {
-    const actor = await this.getActor();
+    const actor = await this.getQueryActor();
     const arg = limit !== undefined ? [BigInt(limit)] : [];
     return await actor.get_liquidation_history(arg) as LiquidationRecord[];
   }
 
   async checkPoolCapacity(tokenLedger: Principal, amount: bigint): Promise<boolean> {
-    const actor = await this.getActor();
+    const actor = await this.getQueryActor();
     return await actor.check_pool_capacity(tokenLedger, amount) as boolean;
   }
 
@@ -189,7 +215,7 @@ class StabilityPoolService {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
 
-    const actor = await this.getActor();
+    const actor = await this.getUpdateActor();
     const result = await actor.deposit(tokenLedger, amount) as { Ok: null } | { Err: any };
     if ('Err' in result) {
       throw new Error(this.formatError(result.Err));
@@ -200,7 +226,7 @@ class StabilityPoolService {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
 
-    const actor = await this.getActor();
+    const actor = await this.getUpdateActor();
     const result = await actor.withdraw(tokenLedger, amount) as { Ok: null } | { Err: any };
     if ('Err' in result) {
       throw new Error(this.formatError(result.Err));
@@ -211,7 +237,7 @@ class StabilityPoolService {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
 
-    const actor = await this.getActor();
+    const actor = await this.getUpdateActor();
     const result = await actor.claim_collateral(collateralLedger) as { Ok: bigint } | { Err: any };
     if ('Err' in result) {
       throw new Error(this.formatError(result.Err));
@@ -223,7 +249,7 @@ class StabilityPoolService {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
 
-    const actor = await this.getActor();
+    const actor = await this.getUpdateActor();
     const result = await actor.claim_all_collateral() as { Ok: Array<[Principal, bigint]> } | { Err: any };
     if ('Err' in result) {
       throw new Error(this.formatError(result.Err));
@@ -235,7 +261,7 @@ class StabilityPoolService {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
 
-    const actor = await this.getActor();
+    const actor = await this.getUpdateActor();
     const result = await actor.opt_out_collateral(collateralType) as { Ok: null } | { Err: any };
     if ('Err' in result) {
       throw new Error(this.formatError(result.Err));
@@ -246,7 +272,7 @@ class StabilityPoolService {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
 
-    const actor = await this.getActor();
+    const actor = await this.getUpdateActor();
     const result = await actor.opt_in_collateral(collateralType) as { Ok: null } | { Err: any };
     if ('Err' in result) {
       throw new Error(this.formatError(result.Err));
@@ -257,7 +283,7 @@ class StabilityPoolService {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
 
-    const actor = await this.getActor();
+    const actor = await this.getUpdateActor();
     const result = await actor.execute_liquidation(vaultId) as { Ok: any } | { Err: any };
     if ('Err' in result) {
       throw new Error(this.formatError(result.Err));
