@@ -210,7 +210,19 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
                 log!(INFO, "Liquidation call succeeded for vault {} with token {}: fee={}",
                     vault_info.vault_id, token_ledger, success.fee_amount_paid);
                 actual_consumed.insert(*token_ledger, *amount);
-                total_collateral_gained += success.fee_amount_paid; // fee_amount_paid is actually the collateral value
+                // TODO(CRITICAL): fee_amount_paid is the liquidator BONUS (collateral value
+                // above break-even), NOT the total collateral received by the pool. The pool
+                // actually receives collateral_to_liquidator (full collateral amount) via
+                // pending_transfers, but SuccessWithFee doesn't return that value.
+                // This means depositors are credited with a small fraction of actual collateral.
+                //
+                // FIX NEEDED: Either:
+                // 1. Modify backend SuccessWithFee to include collateral_amount_received, or
+                // 2. Query the pool's collateral token balance before/after liquidation calls.
+                //
+                // For now, we use fee_amount_paid as a lower bound. The actual collateral
+                // tokens are held by the pool canister but not fully credited to depositors.
+                total_collateral_gained += success.fee_amount_paid;
             },
             Ok(Err(protocol_error)) => {
                 log!(INFO, "Protocol rejected liquidation for vault {} with token {}: {:?}",

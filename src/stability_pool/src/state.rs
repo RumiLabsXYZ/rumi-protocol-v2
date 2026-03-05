@@ -108,8 +108,12 @@ impl StabilityPoolState {
             });
         }
 
+        // Safe subtraction: unwrap is justified for per-user balance (we just checked it exists
+        // with balance >= amount above), but use saturating_sub for aggregate to be defensive.
         *position.stablecoin_balances.get_mut(&token_ledger).unwrap() -= amount;
-        *self.total_stablecoin_balances.get_mut(&token_ledger).unwrap() -= amount;
+        if let Some(total) = self.total_stablecoin_balances.get_mut(&token_ledger) {
+            *total = total.saturating_sub(amount);
+        }
 
         // Clean up zero balances
         if position.stablecoin_balances.get(&token_ledger) == Some(&0) {
@@ -288,7 +292,10 @@ impl StabilityPoolState {
             return;
         }
 
-        // Phase 3: For each opted-in depositor, reduce their token balances and add collateral gains
+        // Phase 3: For each opted-in depositor, reduce their token balances and add collateral gains.
+        // Track actual deductions per token to avoid rounding drift between aggregate and individual totals.
+        let mut actual_deductions_per_token: BTreeMap<Principal, u64> = BTreeMap::new();
+
         for principal in &opted_in_principals {
             let mut user_consumed_e8s: u64 = 0;
 
@@ -312,6 +319,9 @@ impl StabilityPoolState {
                         *bal = bal.saturating_sub(user_share_native);
                     }
 
+                    // Track actual deduction for aggregate update
+                    *actual_deductions_per_token.entry(*token_ledger).or_insert(0) += user_share_native;
+
                     // Track consumed value in e8s for collateral distribution
                     let decimals = self.stablecoin_registry.get(token_ledger).map(|c| c.decimals).unwrap_or(8);
                     user_consumed_e8s += normalize_to_e8s(user_share_native, decimals);
@@ -325,10 +335,11 @@ impl StabilityPoolState {
             }
         }
 
-        // Phase 4: Update aggregate totals
-        for (token_ledger, &consumed) in stables_consumed {
+        // Phase 4: Update aggregate totals using ACTUAL deductions (not stables_consumed)
+        // to prevent rounding dust drift that would cause validate_state() to fail.
+        for (token_ledger, &actual_deducted) in &actual_deductions_per_token {
             if let Some(total) = self.total_stablecoin_balances.get_mut(token_ledger) {
-                *total = total.saturating_sub(consumed);
+                *total = total.saturating_sub(actual_deducted);
             }
         }
 
@@ -1091,5 +1102,44 @@ mod tests {
         let pos = state.deposits.get(&user_a()).unwrap();
         assert_eq!(pos.stablecoin_balances.get(&icusd_ledger()), Some(&100_00000000));
         assert_eq!(state.total_stablecoin_balances.get(&icusd_ledger()), Some(&100_00000000));
+    }
+
+    // ─── Test: Rounding dust doesn't drift aggregate totals ───
+
+    #[test]
+    fn test_liquidation_no_rounding_drift() {
+        let mut state = test_state();
+
+        // Create 3 depositors with balances that produce rounding dust:
+        // 3_333_333, 3_333_333, 3_333_334 = 10_000_000 total (in e8s icUSD)
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 3_333_333);
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 3_333_333);
+        add_deposit_direct(&mut state, user_c(), icusd_ledger(), 3_333_334);
+
+        // Total: 10_000_000
+        assert!(state.validate_state().is_ok());
+
+        // Consume 1_000_000 — proportional split produces rounding:
+        // user_a: 1_000_000 * 3_333_333 / 10_000_000 = 333_333 (truncated from 333_333.3)
+        // user_b: 333_333
+        // user_c: 1_000_000 * 3_333_334 / 10_000_000 = 333_333 (truncated from 333_333.4)
+        // Sum of shares: 999_999 (less than 1_000_000!)
+        let mut consumed = BTreeMap::new();
+        consumed.insert(icusd_ledger(), 1_000_000);
+
+        state.process_liquidation_gains_at(
+            1, icp_ledger(), &consumed, 500_000, 1_000_000_000,
+        );
+
+        // The critical assertion: aggregate should match sum of individual balances
+        // even when rounding dust occurs. validate_state() checks this.
+        assert!(state.validate_state().is_ok(), "State must remain consistent after rounding");
+
+        // Verify individual balances sum to aggregate
+        let sum: u64 = state.deposits.values()
+            .map(|p| p.stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0))
+            .sum();
+        let tracked = state.total_stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0);
+        assert_eq!(sum, tracked, "Sum of individual balances must equal aggregate");
     }
 }

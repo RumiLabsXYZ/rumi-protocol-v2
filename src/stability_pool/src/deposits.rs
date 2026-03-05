@@ -73,6 +73,11 @@ pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), Stabili
 }
 
 /// Withdraw a stablecoin from the pool (only unconsumed balances).
+///
+/// Uses deduct-before-transfer pattern to prevent TOCTOU double-spend:
+/// 1. Deduct balance from state (prevents concurrent withdrawals from passing balance check)
+/// 2. Transfer tokens to user
+/// 3. If transfer fails, rollback the deduction
 pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), StabilityPoolError> {
     let caller = ic_cdk::api::caller();
 
@@ -80,19 +85,9 @@ pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), Stabil
         return Err(StabilityPoolError::EmergencyPaused);
     }
 
-    // Validate user has sufficient balance
-    let available = read_state(|s| {
-        s.deposits.get(&caller)
-            .and_then(|pos| pos.stablecoin_balances.get(&token_ledger).copied())
-            .unwrap_or(0)
-    });
-    if available < amount {
-        return Err(StabilityPoolError::InsufficientBalance {
-            token: token_ledger,
-            required: amount,
-            available,
-        });
-    }
+    // Deduct balance BEFORE transfer to prevent double-spend during async call.
+    // If the transfer fails, we rollback below.
+    mutate_state(|s| s.process_withdrawal(caller, token_ledger, amount))?;
 
     log!(INFO, "Withdraw: {} from {} by {}", amount, token_ledger, caller);
 
@@ -113,21 +108,20 @@ pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), Stabil
     match result {
         Ok((Ok(block_index),)) => {
             log!(INFO, "Withdrawal transfer succeeded, block: {}", block_index);
-            mutate_state(|s| {
-                if let Err(e) = s.process_withdrawal(caller, token_ledger, amount) {
-                    log!(INFO, "WARNING: State update failed after transfer: {:?}", e);
-                }
-            });
             Ok(())
         },
         Ok((Err(transfer_error),)) => {
-            log!(INFO, "Withdrawal transfer failed: {:?}", transfer_error);
+            log!(INFO, "Withdrawal transfer failed, rolling back deduction: {:?}", transfer_error);
+            // Rollback: re-credit the user's balance
+            mutate_state(|s| s.add_deposit(caller, token_ledger, amount));
             Err(StabilityPoolError::LedgerTransferFailed {
                 reason: format!("{:?}", transfer_error),
             })
         },
         Err(call_error) => {
-            log!(INFO, "Inter-canister call failed: {:?}", call_error);
+            log!(INFO, "Inter-canister call failed, rolling back deduction: {:?}", call_error);
+            // Rollback: re-credit the user's balance
+            mutate_state(|s| s.add_deposit(caller, token_ledger, amount));
             Err(StabilityPoolError::InterCanisterCallFailed {
                 target: format!("{}", token_ledger),
                 method: "icrc1_transfer".to_string(),
@@ -137,6 +131,11 @@ pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), Stabil
 }
 
 /// Claim collateral gains for a single collateral type.
+///
+/// Uses deduct-before-transfer pattern to prevent TOCTOU double-claim:
+/// 1. Deduct gains from state (prevents concurrent claims from reading same gains)
+/// 2. Transfer collateral to user
+/// 3. If transfer fails, rollback the deduction
 pub async fn claim_collateral(collateral_ledger: Principal) -> Result<u64, StabilityPoolError> {
     let caller = ic_cdk::api::caller();
 
@@ -144,10 +143,16 @@ pub async fn claim_collateral(collateral_ledger: Principal) -> Result<u64, Stabi
         return Err(StabilityPoolError::EmergencyPaused);
     }
 
-    let gains = read_state(|s| {
-        s.deposits.get(&caller)
+    // Read and deduct gains atomically BEFORE transfer.
+    // mark_gains_claimed uses saturating_sub and cleans up zero entries.
+    let gains = mutate_state(|s| {
+        let amount = s.deposits.get(&caller)
             .and_then(|pos| pos.collateral_gains.get(&collateral_ledger).copied())
-            .unwrap_or(0)
+            .unwrap_or(0);
+        if amount > 0 {
+            s.mark_gains_claimed(&caller, &collateral_ledger, amount);
+        }
+        amount
     });
 
     if gains == 0 {
@@ -172,17 +177,36 @@ pub async fn claim_collateral(collateral_ledger: Principal) -> Result<u64, Stabi
     match result {
         Ok((Ok(block_index),)) => {
             log!(INFO, "Collateral claim transfer succeeded, block: {}", block_index);
-            mutate_state(|s| s.mark_gains_claimed(&caller, &collateral_ledger, gains));
             Ok(gains)
         },
         Ok((Err(transfer_error),)) => {
-            log!(INFO, "Collateral claim failed: {:?}", transfer_error);
+            log!(INFO, "Collateral claim failed, rolling back: {:?}", transfer_error);
+            // Rollback: restore the gains
+            mutate_state(|s| {
+                if let Some(pos) = s.deposits.get_mut(&caller) {
+                    *pos.collateral_gains.entry(collateral_ledger).or_insert(0) += gains;
+                    // Undo the total_claimed_gains increment from mark_gains_claimed
+                    if let Some(claimed) = pos.total_claimed_gains.get_mut(&collateral_ledger) {
+                        *claimed = claimed.saturating_sub(gains);
+                    }
+                }
+            });
             Err(StabilityPoolError::LedgerTransferFailed {
                 reason: format!("{:?}", transfer_error),
             })
         },
         Err(call_error) => {
-            log!(INFO, "Inter-canister call failed: {:?}", call_error);
+            log!(INFO, "Inter-canister call failed, rolling back: {:?}", call_error);
+            // Rollback: restore the gains
+            mutate_state(|s| {
+                if let Some(pos) = s.deposits.get_mut(&caller) {
+                    *pos.collateral_gains.entry(collateral_ledger).or_insert(0) += gains;
+                    // Undo the total_claimed_gains increment from mark_gains_claimed
+                    if let Some(claimed) = pos.total_claimed_gains.get_mut(&collateral_ledger) {
+                        *claimed = claimed.saturating_sub(gains);
+                    }
+                }
+            });
             Err(StabilityPoolError::InterCanisterCallFailed {
                 target: format!("{}", collateral_ledger),
                 method: "icrc1_transfer".to_string(),
