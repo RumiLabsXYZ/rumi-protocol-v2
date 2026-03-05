@@ -628,7 +628,7 @@
               {#if vault.accruedInterest > 0}
                 <div class="stat-row">
                   <span class="stat-label">Accumulated</span>
-                  <span class="stat-value stat-interest" style="color:{interestColor}">{formatNumber(vault.accruedInterest / 1e8, 4)} icUSD</span>
+                  <span class="stat-value">{formatNumber(vault.accruedInterest / 1e8, 4)} icUSD</span>
                 </div>
               {/if}
             {/if}
