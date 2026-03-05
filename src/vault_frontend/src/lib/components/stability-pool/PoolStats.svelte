@@ -1,207 +1,182 @@
 <script lang="ts">
-  import { stabilityPoolService } from '../../services/stabilityPoolService';
-  
-  export let poolData: any;
-  
-  $: totalDeposited = poolData ? stabilityPoolService.formatIcusd(poolData.total_deposited) : '0.00';
-  $: totalDepositors = poolData ? Number(poolData.total_depositors) : 0;
-  $: totalIcpRewards = poolData ? stabilityPoolService.formatIcp(poolData.total_icp_rewards) : '0.0000';
-  $: totalLiquidations = poolData ? Number(poolData.total_liquidations) : 0;
-  
-  // Calculate APY estimate based on recent liquidations (placeholder calculation)
-  $: estimatedAPY = totalLiquidations > 0 ? '8-15%' : 'TBD';
+  import type { PoolStatus } from '../../services/stabilityPoolService';
+  import { formatE8s, formatTokenAmount, symbolForLedger, decimalsForLedger } from '../../services/stabilityPoolService';
+
+  export let poolStatus: PoolStatus | null = null;
+
+  $: totalDepositsUsd = poolStatus ? formatE8s(poolStatus.total_deposits_e8s) : '0';
+  $: depositorCount = poolStatus ? Number(poolStatus.total_depositors) : 0;
+  $: liquidationCount = poolStatus ? Number(poolStatus.total_liquidations_executed) : 0;
+  $: isPaused = poolStatus?.emergency_paused ?? false;
+
+  $: collateralGains = poolStatus?.collateral_gains ?? [];
+  $: stablecoinBreakdown = poolStatus?.stablecoin_balances ?? [];
+  $: stablecoinRegistry = poolStatus?.stablecoin_registry ?? [];
+  $: collateralRegistry = poolStatus?.collateral_registry ?? [];
+
+  function getRegistries() {
+    return { stablecoins: stablecoinRegistry, collateral: collateralRegistry };
+  }
 </script>
 
-<div class="pool-stats">
-  <h2 class="stats-title">Pool Statistics</h2>
-  
-  <div class="stats-grid">
-    <div class="stat-card primary">
-      <div class="stat-icon">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <line x1="12" y1="1" x2="12" y2="23"/>
-          <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>
-        </svg>
+<div class="pool-overview">
+  <div class="metrics-grid">
+    <div class="metric-card hero">
+      <div class="metric-eyebrow">Total Value Locked</div>
+      <div class="metric-value">
+        <span class="dollar-sign">$</span>{totalDepositsUsd}
       </div>
-      <div class="stat-content">
-        <div class="stat-value">{totalDeposited}</div>
-        <div class="stat-label">Total icUSD Deposited</div>
-      </div>
-    </div>
-
-    <div class="stat-card">
-      <div class="stat-icon">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
-          <circle cx="9" cy="7" r="4"/>
-          <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
-          <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
-        </svg>
-      </div>
-      <div class="stat-content">
-        <div class="stat-value">{totalDepositors}</div>
-        <div class="stat-label">Active Depositors</div>
+      <div class="metric-sub">
+        {#each stablecoinBreakdown as [ledger, amount]}
+          <span class="token-chip">
+            {symbolForLedger(ledger, getRegistries())}
+            <span class="chip-amount">{formatTokenAmount(amount, decimalsForLedger(ledger, getRegistries()))}</span>
+          </span>
+        {/each}
       </div>
     </div>
 
-    <div class="stat-card">
-      <div class="stat-icon">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>
-        </svg>
-      </div>
-      <div class="stat-content">
-        <div class="stat-value">{totalIcpRewards}</div>
-        <div class="stat-label">ICP Rewards Distributed</div>
+    <div class="metric-card">
+      <div class="metric-eyebrow">Depositors</div>
+      <div class="metric-value">{depositorCount}</div>
+      <div class="metric-sub">{depositorCount === 1 ? 'active position' : 'active positions'}</div>
+    </div>
+
+    <div class="metric-card">
+      <div class="metric-eyebrow">Liquidations</div>
+      <div class="metric-value">{liquidationCount}</div>
+      <div class="metric-sub">
+        {#if liquidationCount > 0}
+          collateral distributed
+        {:else}
+          no events yet
+        {/if}
       </div>
     </div>
 
-    <div class="stat-card">
-      <div class="stat-icon">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M9 12l2 2 4-4"/>
-          <circle cx="12" cy="12" r="10"/>
-        </svg>
+    <div class="metric-card" class:paused={isPaused}>
+      <div class="metric-eyebrow">Pool Status</div>
+      <div class="metric-value status-value">
+        {#if isPaused}
+          <span class="status-dot danger"></span> Paused
+        {:else}
+          <span class="status-dot active"></span> Active
+        {/if}
       </div>
-      <div class="stat-content">
-        <div class="stat-value">{totalLiquidations}</div>
-        <div class="stat-label">Successful Liquidations</div>
-      </div>
-    </div>
-
-    <div class="stat-card accent">
-      <div class="stat-icon">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <line x1="12" y1="2" x2="12" y2="6"/>
-          <line x1="12" y1="18" x2="12" y2="22"/>
-          <line x1="4.93" y1="4.93" x2="7.76" y2="7.76"/>
-          <line x1="16.24" y1="16.24" x2="19.07" y2="19.07"/>
-          <line x1="2" y1="12" x2="6" y2="12"/>
-          <line x1="18" y1="12" x2="22" y2="12"/>
-          <line x1="4.93" y1="19.07" x2="7.76" y2="16.24"/>
-          <line x1="16.24" y1="7.76" x2="19.07" y2="4.93"/>
-        </svg>
-      </div>
-      <div class="stat-content">
-        <div class="stat-value">{estimatedAPY}</div>
-        <div class="stat-label">Estimated APY</div>
-      </div>
-    </div>
-
-    <div class="stat-card info">
-      <div class="stat-icon">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-        </svg>
-      </div>
-      <div class="stat-content">
-        <div class="stat-value">10%</div>
-        <div class="stat-label">Liquidation Bonus</div>
+      <div class="metric-sub">
+        {stablecoinRegistry.filter(s => s.is_active).length} stablecoins ·
+        {collateralRegistry.filter(c => 'Active' in c.status).length} collateral types
       </div>
     </div>
   </div>
+
+  {#if collateralGains.some(([_, a]) => a > 0n)}
+    <div class="gains-ribbon">
+      <div class="ribbon-label">Pool Collateral Gains</div>
+      <div class="ribbon-items">
+        {#each collateralGains as [ledger, amount]}
+          {@const sym = symbolForLedger(ledger, getRegistries())}
+          {@const dec = decimalsForLedger(ledger, getRegistries())}
+          {#if amount > 0n}
+            <div class="ribbon-item">
+              <span class="ribbon-symbol">{sym}</span>
+              <span class="ribbon-amount">{formatTokenAmount(amount, dec)}</span>
+            </div>
+          {/if}
+        {/each}
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
-  .pool-stats {
-    width: 100%;
-  }
+  .pool-overview { width: 100%; }
 
-  .stats-title {
-    font-size: 1.5rem;
-    font-weight: 600;
-    color: white;
-    margin-bottom: 1.5rem;
-    text-align: center;
-  }
-
-  .stats-grid {
+  .metrics-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    grid-template-columns: 1.6fr repeat(3, 1fr);
     gap: 1rem;
+    margin-bottom: 1rem;
   }
 
-  .stat-card {
-    background: rgba(15, 23, 42, 0.8);
-    backdrop-filter: blur(20px);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 1rem;
-    padding: 1.5rem;
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-    transition: all 0.3s ease;
+  .metric-card {
+    background: var(--rumi-bg-surface1);
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.75rem;
+    padding: 1.25rem 1.5rem;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    box-shadow:
+      inset 0 1px 0 0 rgba(200, 210, 240, 0.03),
+      0 2px 8px -2px rgba(8, 11, 22, 0.6);
   }
 
-  .stat-card:hover {
-    transform: translateY(-2px);
-    border-color: rgba(244, 114, 182, 0.3);
-    box-shadow: 0 10px 25px rgba(244, 114, 182, 0.1);
+  .metric-card:hover { border-color: var(--rumi-border-hover); }
+
+  .metric-card.hero {
+    border-color: rgba(45, 212, 191, 0.15);
+    background: linear-gradient(135deg, var(--rumi-bg-surface1) 0%, rgba(45, 212, 191, 0.03) 100%);
   }
 
-  .stat-card.primary {
-    border-color: rgba(244, 114, 182, 0.3);
-    background: rgba(244, 114, 182, 0.05);
+  .metric-card.paused { border-color: rgba(224, 107, 159, 0.2); }
+
+  .metric-eyebrow {
+    font-size: 0.6875rem; font-weight: 500; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--rumi-text-secondary); margin-bottom: 0.5rem;
   }
 
-  .stat-card.accent {
-    border-color: rgba(168, 85, 247, 0.3);
-    background: rgba(168, 85, 247, 0.05);
+  .metric-value {
+    font-family: 'Inter', sans-serif; font-weight: 700; font-size: 1.75rem;
+    font-variant-numeric: tabular-nums; color: var(--rumi-text-primary);
+    line-height: 1.1; margin-bottom: 0.5rem;
   }
 
-  .stat-card.info {
-    border-color: rgba(45, 212, 191, 0.3);
-    background: rgba(45, 212, 191, 0.05);
+  .dollar-sign { color: var(--rumi-text-secondary); font-weight: 400; font-size: 1.25rem; margin-right: 0.125rem; }
+
+  .status-value { display: flex; align-items: center; gap: 0.5rem; font-size: 1.375rem; }
+
+  .status-dot { width: 0.5rem; height: 0.5rem; border-radius: 50%; flex-shrink: 0; }
+  .status-dot.active { background: var(--rumi-teal); box-shadow: 0 0 8px rgba(45, 212, 191, 0.4); }
+  .status-dot.danger { background: var(--rumi-danger); box-shadow: 0 0 8px rgba(224, 107, 159, 0.4); }
+
+  .metric-sub {
+    font-size: 0.75rem; color: var(--rumi-text-muted);
+    display: flex; flex-wrap: wrap; gap: 0.375rem; align-items: center;
   }
 
-  .stat-icon {
-    width: 2.5rem;
-    height: 2.5rem;
-    color: #f472b6;
-    flex-shrink: 0;
+  .token-chip {
+    display: inline-flex; align-items: center; gap: 0.25rem;
+    padding: 0.125rem 0.5rem; background: var(--rumi-bg-surface2);
+    border: 1px solid var(--rumi-border); border-radius: 1rem;
+    font-size: 0.6875rem; color: var(--rumi-text-secondary); white-space: nowrap;
   }
 
-  .stat-card.primary .stat-icon {
-    color: #f472b6;
+  .chip-amount { color: var(--rumi-text-primary); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  .gains-ribbon {
+    display: flex; align-items: center; gap: 1rem;
+    padding: 0.75rem 1.25rem; background: var(--rumi-bg-surface1);
+    border: 1px solid var(--rumi-border); border-radius: 0.75rem;
+    box-shadow: inset 0 1px 0 0 rgba(200, 210, 240, 0.03);
   }
 
-  .stat-card.accent .stat-icon {
-    color: #a855f7;
+  .ribbon-label {
+    font-size: 0.6875rem; font-weight: 500; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--rumi-text-muted); white-space: nowrap;
   }
 
-  .stat-card.info .stat-icon {
-    color: #2DD4BF;
+  .ribbon-items { display: flex; flex-wrap: wrap; gap: 0.75rem; flex: 1; }
+  .ribbon-item { display: flex; align-items: center; gap: 0.375rem; }
+  .ribbon-symbol { font-size: 0.75rem; font-weight: 500; color: var(--rumi-text-secondary); }
+  .ribbon-amount { font-size: 0.875rem; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--rumi-teal); }
+
+  @media (max-width: 900px) {
+    .metrics-grid { grid-template-columns: 1fr 1fr; }
+    .metric-card.hero { grid-column: 1 / -1; }
   }
 
-  .stat-content {
-    flex: 1;
-  }
-
-  .stat-value {
-    font-size: 1.75rem;
-    font-weight: 700;
-    color: white;
-    line-height: 1.2;
-  }
-
-  .stat-label {
-    font-size: 0.875rem;
-    color: #d1d5db;
-    margin-top: 0.25rem;
-  }
-
-  /* Responsive Design */
-  @media (max-width: 768px) {
-    .stats-grid {
-      grid-template-columns: 1fr;
-    }
-    
-    .stat-card {
-      padding: 1rem;
-    }
-    
-    .stat-value {
-      font-size: 1.5rem;
-    }
+  @media (max-width: 520px) {
+    .metrics-grid { grid-template-columns: 1fr; }
+    .metric-value { font-size: 1.5rem; }
+    .gains-ribbon { flex-direction: column; align-items: flex-start; gap: 0.5rem; }
   }
 </style>
