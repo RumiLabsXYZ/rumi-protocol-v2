@@ -7,6 +7,8 @@
 
   let borrowingFeePct = '0.5';
   let ckstableFeePct = '0.05';
+  let interestPoolPct = '75';
+  let treasuryPct = '25';
   let collaterals: CollateralInfo[] = [];
 
   $: collateralSymbols = collaterals.map(c => c.symbol).join(', ') || 'ICP';
@@ -17,12 +19,16 @@
 
   onMount(async () => {
     try {
-      const [bFee, ckFee] = await Promise.all([
+      const [bFee, ckFee, poolShare] = await Promise.all([
         publicActor.get_borrowing_fee() as Promise<number>,
         publicActor.get_ckstable_repay_fee() as Promise<number>,
+        publicActor.get_interest_pool_share() as Promise<number>,
       ]);
       borrowingFeePct = (Number(bFee) * 100).toFixed(1);
       ckstableFeePct = (Number(ckFee) * 100).toFixed(2);
+      const ps = Number(poolShare);
+      interestPoolPct = (ps * 100).toFixed(0);
+      treasuryPct = ((1 - ps) * 100).toFixed(0);
 
       await collateralStore.fetchSupportedCollateral();
       const state = get(collateralStore);
@@ -71,12 +77,23 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Fees</h2>
-    <p>A one-time borrowing fee of {borrowingFeePct}% is deducted from the icUSD you borrow. If you borrow 100 icUSD, you receive {(100 - parseFloat(borrowingFeePct)).toFixed(1)} icUSD and owe 100 icUSD. There is no ongoing interest. During Recovery mode, per-collateral fee overrides may apply.</p>
+    <p>A one-time borrowing fee of {borrowingFeePct}% is deducted from the icUSD you borrow. If you borrow 100 icUSD, you receive {(100 - parseFloat(borrowingFeePct)).toFixed(1)} icUSD and owe 100 icUSD. During Recovery mode, per-collateral fee overrides may apply.</p>
+  </section>
+
+  <section class="doc-section">
+    <h2 class="doc-heading">Interest</h2>
+    <p>Your vault accrues interest continuously on outstanding debt. The base annual rate (APR) is shown per collateral type in <a href="/docs/parameters" class="doc-link">Protocol Parameters</a>. Two factors can increase the effective rate:</p>
+    <ul class="doc-list">
+      <li><strong>Vault CR multiplier</strong> — vaults closer to the liquidation threshold pay a higher rate than well-collateralized vaults.</li>
+      <li><strong>Recovery mode multiplier</strong> — if the system enters Recovery mode, a system-wide multiplier increases rates for all vaults.</li>
+    </ul>
+    <p>Interest is applied to your debt before every vault mutation (borrow, repay, withdraw, liquidation) and ticked forward every 5 minutes by a background timer. This means your debt grows over time — a vault sitting just above the liquidation threshold can drift into liquidation purely from accrued interest, even without any price movement.</p>
+    <p>Interest revenue is split: {interestPoolPct}% is distributed to stability pool depositors as icUSD, and {treasuryPct}% goes to the protocol treasury.</p>
   </section>
 
   <section class="doc-section">
     <h2 class="doc-heading">Repaying Your Debt</h2>
-    <p>You can repay your icUSD debt at any time — in full or partially. You can also repay using <strong>ckUSDT</strong> or <strong>ckUSDC</strong> instead of icUSD. Stablecoin repayments are treated at a 1:1 rate with icUSD, minus a {ckstableFeePct}% conversion fee. The protocol checks the stablecoin's live price and rejects repayment if it has depegged outside the $0.95–$1.05 range.</p>
+    <p>You can repay your icUSD debt at any time — in full or partially. You can also repay using <strong>ckUSDT</strong> or <strong>ckUSDC</strong> instead of icUSD. Stablecoin repayments are treated at a 1:1 rate with icUSD, minus a {ckstableFeePct}% conversion fee. The conversion fee is sent to the protocol treasury. The protocol checks the stablecoin's live price and rejects repayment if it has depegged outside the $0.95–$1.05 range.</p>
   </section>
 
   <section class="doc-section">
@@ -128,4 +145,13 @@
     font-variant-numeric: tabular-nums;
   }
   .param-val.live { color: var(--rumi-action); }
+
+  .doc-list {
+    padding-left: 1.25rem;
+    display: flex; flex-direction: column; gap: 0.35rem;
+    margin: 0.5rem 0;
+  }
+  .doc-list li {
+    font-size: 0.875rem; color: var(--rumi-text-secondary); line-height: 1.5;
+  }
 </style>
