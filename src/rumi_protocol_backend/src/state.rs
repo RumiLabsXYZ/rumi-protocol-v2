@@ -50,6 +50,7 @@ pub const DEFAULT_RESERVE_REDEMPTION_FEE: Ratio = Ratio::new(dec!(0.003)); // 0.
 pub const DEFAULT_RECOVERY_TARGET_CR: Ratio = Ratio::new(dec!(1.55)); // 155% — legacy; kept for serde backwards compat
 pub const DEFAULT_RECOVERY_CR_MULTIPLIER: Ratio = Ratio::new(dec!(1.033333333333333333)); // proportional buffer: recovery_cr = borrow_threshold × 1.0333...
 pub const DEFAULT_INTEREST_RATE_APR: Ratio = Ratio::new(dec!(0.0)); // 0% — placeholder for future accrual
+pub const DEFAULT_INTEREST_POOL_SHARE: Ratio = Ratio::new(dec!(0.75)); // 75% to stability pool
 pub const DUST_DEBT_THRESHOLD: u64 = 50_000; // 0.0005 icUSD — debt below this is forgiven on withdrawal
 
 /// Default Layer 1 multipliers at each CR marker
@@ -475,6 +476,10 @@ pub struct State {
     /// Global fraction of the liquidation bonus (liquidator's profit) that goes to the protocol treasury.
     /// e.g., 0.03 = protocol gets 3% of the bonus, liquidator keeps 97%.
     pub liquidation_protocol_share: Ratio,
+
+    /// Share of interest revenue sent to stability pool depositors (0.0-1.0).
+    /// Remainder goes to protocol treasury.
+    pub interest_pool_share: Ratio,
 }
 
 impl From<InitArg> for State {
@@ -605,6 +610,7 @@ impl From<InitArg> for State {
             pending_treasury_interest: ICUSD::new(0),
             pending_treasury_collateral: Vec::new(),
             liquidation_protocol_share: crate::DEFAULT_LIQUIDATION_PROTOCOL_SHARE,
+            interest_pool_share: DEFAULT_INTEREST_POOL_SHARE,
         }
     }
 }
@@ -3138,5 +3144,69 @@ mod tests {
             (rmr.to_f64() - 0.96).abs() < 0.001,
             "RMR above 1.5x should be capped at 0.96, got {}", rmr.to_f64()
         );
+    }
+
+    #[test]
+    fn test_interest_split_ratios() {
+        let state = test_state();
+        assert!(
+            (state.interest_pool_share.to_f64() - 0.75).abs() < 0.001,
+            "Default interest pool share should be 0.75, got {}", state.interest_pool_share.to_f64()
+        );
+
+        let interest = ICUSD::from(100_000_000_00u64); // 100 icUSD
+        let pool_share = ICUSD::from(
+            (Decimal::from(interest.to_u64()) * state.interest_pool_share.0)
+                .to_u64()
+                .unwrap_or(0)
+        );
+        let treasury_share = ICUSD::from(interest.to_u64() - pool_share.to_u64());
+
+        assert!(
+            (pool_share.to_u64() as f64 / 1e8 - 75.0).abs() < 0.01,
+            "Pool share should be ~75, got {}", pool_share.to_u64() as f64 / 1e8
+        );
+        assert!(
+            (treasury_share.to_u64() as f64 / 1e8 - 25.0).abs() < 0.01,
+            "Treasury share should be ~25, got {}", treasury_share.to_u64() as f64 / 1e8
+        );
+    }
+
+    #[test]
+    fn test_interest_split_custom_ratio() {
+        let mut state = test_state();
+        state.interest_pool_share = Ratio::from_f64(0.50); // 50/50 split
+
+        let interest = ICUSD::from(200_000_000_00u64); // 200 icUSD
+        let pool_share = ICUSD::from(
+            (Decimal::from(interest.to_u64()) * state.interest_pool_share.0)
+                .to_u64()
+                .unwrap_or(0)
+        );
+        let treasury_share = ICUSD::from(interest.to_u64() - pool_share.to_u64());
+
+        assert!(
+            (pool_share.to_u64() as f64 / 1e8 - 100.0).abs() < 0.01,
+            "Pool share should be ~100, got {}", pool_share.to_u64() as f64 / 1e8
+        );
+        assert!(
+            (treasury_share.to_u64() as f64 / 1e8 - 100.0).abs() < 0.01,
+            "Treasury share should be ~100, got {}", treasury_share.to_u64() as f64 / 1e8
+        );
+    }
+
+    #[test]
+    fn test_interest_split_zero_interest() {
+        let state = test_state();
+        let interest = ICUSD::from(0u64);
+        let pool_share = ICUSD::from(
+            (Decimal::from(interest.to_u64()) * state.interest_pool_share.0)
+                .to_u64()
+                .unwrap_or(0)
+        );
+        let treasury_share = ICUSD::from(interest.to_u64() - pool_share.to_u64());
+
+        assert_eq!(pool_share.to_u64(), 0, "Pool share should be 0 for zero interest");
+        assert_eq!(treasury_share.to_u64(), 0, "Treasury share should be 0 for zero interest");
     }
 }

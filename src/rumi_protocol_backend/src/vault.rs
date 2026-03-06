@@ -21,6 +21,7 @@ use serde::Serialize;
 use crate::DEBUG;
 use crate::management;
 use crate::PendingMarginTransfer;
+use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 
 use crate::compute_collateral_ratio;
@@ -762,7 +763,17 @@ pub async fn repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
     match transfer_icusd_from(amount, caller).await {
         Ok(block_index) => {
             let interest_share = mutate_state(|s| record_repayed_to_vault(s, arg.vault_id, amount, block_index));
-            crate::treasury::mint_interest_to_treasury(interest_share).await;
+            let (pool_share, treasury_share_amt) = read_state(|s| {
+                let pool = ICUSD::from(
+                    (Decimal::from(interest_share.to_u64()) * s.interest_pool_share.0)
+                        .to_u64()
+                        .unwrap_or(0)
+                );
+                let treasury = ICUSD::from(interest_share.to_u64() - pool.to_u64());
+                (pool, treasury)
+            });
+            crate::treasury::mint_interest_to_treasury(treasury_share_amt).await;
+            crate::treasury::mint_interest_to_stability_pool(pool_share).await;
             guard_principal.complete(); // Mark as completed
             Ok(block_index)
         }
@@ -1907,15 +1918,25 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
         interest_share
     });
 
-    // Route interest share to treasury (fire-and-forget)
-    crate::treasury::mint_interest_to_treasury(interest_share).await;
+    // Route interest share: split between stability pool and treasury
+    let (pool_share, treasury_share_amt) = read_state(|s| {
+        let pool = ICUSD::from(
+            (Decimal::from(interest_share.to_u64()) * s.interest_pool_share.0)
+                .to_u64()
+                .unwrap_or(0)
+        );
+        let treasury = ICUSD::from(interest_share.to_u64() - pool.to_u64());
+        (pool, treasury)
+    });
+    crate::treasury::mint_interest_to_treasury(treasury_share_amt).await;
+    crate::treasury::mint_interest_to_stability_pool(pool_share).await;
 
     // Send protocol's liquidation fee cut to treasury (fire-and-forget)
     if protocol_cut > 0 {
         let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
         crate::treasury::send_liquidation_fee_to_treasury(protocol_cut, vault.collateral_type, asset_type).await;
     }
-    
+
     // Step 4: Process transfer (same as complete liquidation)
     match try_process_pending_transfers_immediate(vault_id).await {
         Ok(processed_count) => {
@@ -2322,8 +2343,18 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         interest_share
     });
 
-    // Route interest share to treasury (fire-and-forget)
-    crate::treasury::mint_interest_to_treasury(interest_share).await;
+    // Route interest share: split between stability pool and treasury
+    let (pool_share, treasury_share_amt) = read_state(|s| {
+        let pool = ICUSD::from(
+            (Decimal::from(interest_share.to_u64()) * s.interest_pool_share.0)
+                .to_u64()
+                .unwrap_or(0)
+        );
+        let treasury = ICUSD::from(interest_share.to_u64() - pool.to_u64());
+        (pool, treasury)
+    });
+    crate::treasury::mint_interest_to_treasury(treasury_share_amt).await;
+    crate::treasury::mint_interest_to_stability_pool(pool_share).await;
 
     // Send protocol's liquidation fee cut to treasury (fire-and-forget)
     if protocol_cut > 0 {
@@ -2532,7 +2563,17 @@ pub async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError>
     match transfer_icusd_from(amount, caller).await {
         Ok(block_index) => {
             let interest_share = mutate_state(|s| record_repayed_to_vault(s, arg.vault_id, amount, block_index));
-            crate::treasury::mint_interest_to_treasury(interest_share).await;
+            let (pool_share, treasury_share_amt) = read_state(|s| {
+                let pool = ICUSD::from(
+                    (Decimal::from(interest_share.to_u64()) * s.interest_pool_share.0)
+                        .to_u64()
+                        .unwrap_or(0)
+                );
+                let treasury = ICUSD::from(interest_share.to_u64() - pool.to_u64());
+                (pool, treasury)
+            });
+            crate::treasury::mint_interest_to_treasury(treasury_share_amt).await;
+            crate::treasury::mint_interest_to_stability_pool(pool_share).await;
             guard_principal.complete(); // Mark as completed
             Ok(block_index)
         }
@@ -2699,8 +2740,18 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         interest_share
     });
 
-    // Route interest share to treasury (fire-and-forget)
-    crate::treasury::mint_interest_to_treasury(interest_share).await;
+    // Route interest share: split between stability pool and treasury
+    let (pool_share, treasury_share_amt) = read_state(|s| {
+        let pool = ICUSD::from(
+            (Decimal::from(interest_share.to_u64()) * s.interest_pool_share.0)
+                .to_u64()
+                .unwrap_or(0)
+        );
+        let treasury = ICUSD::from(interest_share.to_u64() - pool.to_u64());
+        (pool, treasury)
+    });
+    crate::treasury::mint_interest_to_treasury(treasury_share_amt).await;
+    crate::treasury::mint_interest_to_stability_pool(pool_share).await;
 
     // Send protocol's liquidation fee cut to treasury (fire-and-forget)
     if protocol_cut > 0 {

@@ -307,6 +307,7 @@ fn get_protocol_status() -> ProtocolStatus {
         reserve_redemption_fee: s.reserve_redemption_fee.to_f64(),
         frozen: s.frozen,
         manual_mode_override: s.manual_mode_override,
+        interest_pool_share: s.interest_pool_share.to_f64(),
     })
 }
 
@@ -1518,6 +1519,39 @@ async fn set_liquidation_protocol_share(new_share: f64) -> Result<(), ProtocolEr
 #[query]
 fn get_liquidation_protocol_share() -> f64 {
     read_state(|s| s.liquidation_protocol_share.to_f64())
+}
+
+/// Set the share of interest revenue sent to the stability pool (0.0–1.0).
+/// Remainder goes to protocol treasury. Default: 0.75 (75%).
+#[candid_method(update)]
+#[update]
+async fn set_interest_pool_share(new_share: f64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set interest pool share".to_string(),
+        ));
+    }
+    if !(0.0..=1.0).contains(&new_share) {
+        return Err(ProtocolError::GenericError(
+            "Interest pool share must be between 0.0 and 1.0".to_string(),
+        ));
+    }
+    let share = Ratio::from(rust_decimal::Decimal::try_from(new_share)
+        .map_err(|_| ProtocolError::GenericError("Invalid share value".to_string()))?);
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_interest_pool_share(s, share);
+    });
+    log!(INFO, "[set_interest_pool_share] Set to: {} ({}% to stability pool)", new_share, new_share * 100.0);
+    Ok(())
+}
+
+/// Get the current interest pool share (fraction of interest going to stability pool).
+#[candid_method(query)]
+#[query]
+fn get_interest_pool_share() -> f64 {
+    read_state(|s| s.interest_pool_share.to_f64())
 }
 
 #[derive(CandidType, Deserialize)]

@@ -252,6 +252,7 @@ type Event = variant {
     interest_rate_apr : text;
   };
   accrue_interest : record { timestamp : nat64 };
+  set_interest_pool_share : record { share : text };
 };
 type Fees = record { redemption_fee : float64; borrowing_fee : float64 };
 type GetEventsArg = record { start : nat64; length : nat64 };
@@ -325,6 +326,9 @@ type ProtocolStatus = record {
   reserve_redemptions_enabled : bool;
   recovery_cr_multiplier : float64;
   last_icp_rate : float64;
+  frozen : bool;
+  manual_mode_override : bool;
+  interest_pool_share : float64;
 };
 type ReserveBalance = record {
   balance : nat64;
@@ -423,6 +427,9 @@ service : (ProtocolArg) -> {
   claim_liquidity_returns : () -> (Result_1);
   clear_stuck_operations : (opt principal) -> (Result_1);
   close_vault : (nat64) -> (Result_3);
+  enter_recovery_mode : () -> (Result);
+  exit_recovery_mode : () -> (Result);
+  freeze_protocol : () -> (Result);
   get_borrowing_fee : () -> (float64) query;
   get_ckstable_repay_fee : () -> (float64) query;
   get_collateral_config : (principal) -> (opt CollateralConfig) query;
@@ -430,6 +437,7 @@ service : (ProtocolArg) -> {
   get_deposit_account : (opt principal) -> (Account) query;
   get_events : (GetEventsArg) -> (vec Event) query;
   get_fees : (nat64) -> (Fees) query;
+  get_interest_pool_share : () -> (float64) query;
   get_liquidatable_vaults : () -> (vec CandidVault) query;
   get_liquidation_bonus : () -> (float64) query;
   get_liquidation_protocol_share : () -> (float64) query;
@@ -485,6 +493,7 @@ service : (ProtocolArg) -> {
   set_recovery_parameters : (principal, opt float64, opt float64) -> (Result);
   set_recovery_rate_curve : (vec record { text; float64 }) -> (Result);
   set_healthy_cr : (principal, opt float64) -> (Result);
+  set_interest_pool_share : (float64) -> (Result);
   set_interest_rate : (principal, float64) -> (Result);
   set_recovery_target_cr : (float64) -> (Result);
   set_redemption_fee_ceiling : (float64) -> (Result);
@@ -496,6 +505,7 @@ service : (ProtocolArg) -> {
   set_stable_token_enabled : (StableTokenType, bool) -> (Result);
   set_treasury_principal : (principal) -> (Result);
   stability_pool_liquidate : (nat64, nat64) -> (Result_8);
+  unfreeze_protocol : () -> (Result);
   update_collateral_config : (principal, CollateralConfig) -> (Result);
   withdraw_and_close_vault : (nat64) -> (Result_3);
   withdraw_collateral : (nat64) -> (Result_1);

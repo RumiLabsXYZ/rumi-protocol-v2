@@ -312,6 +312,12 @@ pub enum Event {
     AccrueInterest {
         timestamp: u64,
     },
+
+    /// Admin set the interest revenue split ratio (stability pool share).
+    #[serde(rename = "set_interest_pool_share")]
+    SetInterestPoolShare {
+        share: String,
+    },
 }
 
 impl Event {
@@ -366,6 +372,7 @@ impl Event {
             Event::SetHealthyCr { .. } => false,
             Event::SetInterestRate { .. } => false,
             Event::AccrueInterest { .. } => false,
+            Event::SetInterestPoolShare { .. } => false,
         }
     }
 }
@@ -726,6 +733,11 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             Event::AccrueInterest { timestamp } => {
                 state.accrue_all_vault_interest(timestamp);
             },
+            Event::SetInterestPoolShare { share } => {
+                if let Ok(dec) = share.parse::<Decimal>() {
+                    state.interest_pool_share = Ratio::from(dec);
+                }
+            },
         }
     }
     state.next_available_vault_id = vault_id;
@@ -1042,6 +1054,13 @@ pub fn record_set_liquidation_protocol_share(state: &mut State, share: Ratio) {
         share: share.0.to_string(),
     });
     state.liquidation_protocol_share = share;
+}
+
+pub fn record_set_interest_pool_share(state: &mut State, share: Ratio) {
+    record_event(&Event::SetInterestPoolShare {
+        share: share.0.to_string(),
+    });
+    state.interest_pool_share = share;
 }
 
 pub fn record_add_collateral_type(

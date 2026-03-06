@@ -160,6 +160,35 @@ pub async fn mint_interest_to_treasury(interest_share: ICUSD) {
     }
 }
 
+/// Mint icUSD interest revenue to the stability pool canister.
+/// The stability pool distributes this pro-rata to depositors.
+pub async fn mint_interest_to_stability_pool(interest_share: ICUSD) {
+    if interest_share.0 == 0 {
+        return;
+    }
+    let stability_pool = read_state(|s| s.stability_pool_canister);
+    if let Some(pool_principal) = stability_pool {
+        match management::mint_icusd(interest_share, pool_principal).await {
+            Ok(block_index) => {
+                log!(
+                    INFO,
+                    "[treasury] Minted {} icUSD interest to stability pool (block {})",
+                    interest_share.to_u64(),
+                    block_index
+                );
+            }
+            Err(e) => {
+                log!(
+                    INFO,
+                    "[treasury] WARNING: stability pool interest mint failed ({} icUSD): {:?}",
+                    interest_share.to_u64(),
+                    e
+                );
+            }
+        }
+    }
+}
+
 /// Mint icUSD borrowing fee to treasury and record the deposit.
 pub async fn mint_borrowing_fee_to_treasury(fee: ICUSD) {
     if fee.0 == 0 {

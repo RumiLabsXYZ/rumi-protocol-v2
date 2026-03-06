@@ -116,6 +116,7 @@ pub struct ProtocolStatus {
     pub reserve_redemption_fee: f64,
     pub frozen: bool,
     pub manual_mode_override: bool,
+    pub interest_pool_share: f64,
 }
 
 #[derive(CandidType, Deserialize, Debug)]
