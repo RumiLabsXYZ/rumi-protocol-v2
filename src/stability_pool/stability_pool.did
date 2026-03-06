@@ -111,6 +111,70 @@ type StabilityPoolError = variant {
   AlreadyOptedIn : record { collateral : principal };
 };
 
+// ── ICRC-21: Canister Call Consent Messages ──
+
+type Icrc21ConsentMessageMetadata = record {
+  language : text;
+  utc_offset_minutes : opt int16;
+};
+
+type Icrc21DeviceSpec = variant {
+  GenericDisplay;
+  LineDisplay : record {
+    characters_per_line : nat16;
+    lines_per_page : nat16;
+  };
+};
+
+type Icrc21ConsentMessageSpec = record {
+  metadata : Icrc21ConsentMessageMetadata;
+  device_spec : opt Icrc21DeviceSpec;
+};
+
+type Icrc21ConsentMessageRequest = record {
+  method : text;
+  arg : blob;
+  user_preferences : Icrc21ConsentMessageSpec;
+};
+
+type Icrc21LineDisplayLine = record { line : text };
+type Icrc21LineDisplayPage = record { lines : vec Icrc21LineDisplayLine };
+
+type Icrc21ConsentMessage = variant {
+  GenericDisplayMessage : text;
+  LineDisplayMessage : record { pages : vec Icrc21LineDisplayPage };
+};
+
+type Icrc21ConsentMessageResponseMetadata = record {
+  language : text;
+  utc_offset_minutes : opt int16;
+};
+
+type Icrc21ConsentInfo = record {
+  consent_message : Icrc21ConsentMessage;
+  metadata : Icrc21ConsentMessageResponseMetadata;
+};
+
+type Icrc21ErrorInfo = record { description : text };
+
+type Icrc21Error = variant {
+  UnsupportedCanisterCall : Icrc21ErrorInfo;
+  ConsentMessageUnavailable : Icrc21ErrorInfo;
+  GenericError : record { error_code : nat; description : text };
+};
+
+type Icrc21ConsentMessageResponse = variant {
+  Ok : Icrc21ConsentInfo;
+  Err : Icrc21Error;
+};
+
+// ── ICRC-10: Supported Standards ──
+
+type Icrc10SupportedStandard = record {
+  name : text;
+  url : text;
+};
+
 // ──────────────────────────────────────────────────────────────
 // Service
 // ──────────────────────────────────────────────────────────────
@@ -139,6 +203,12 @@ service : (StabilityPoolInitArgs) -> {
   update_pool_configuration : (PoolConfiguration) -> (variant { Ok; Err : StabilityPoolError });
   emergency_pause : () -> (variant { Ok; Err : StabilityPoolError });
   resume_operations : () -> (variant { Ok; Err : StabilityPoolError });
+
+  // ── ICRC-21: Consent Messages ──
+  icrc21_canister_call_consent_message : (Icrc21ConsentMessageRequest) -> (Icrc21ConsentMessageResponse);
+
+  // ── ICRC-10: Supported Standards ──
+  icrc10_supported_standards : () -> (vec Icrc10SupportedStandard) query;
 
   // ── Queries ──
   get_pool_status : () -> (StabilityPoolStatus) query;

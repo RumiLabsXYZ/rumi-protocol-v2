@@ -4,6 +4,8 @@ import { pnp, canisterIDLs } from './pnp';
 import { walletStore } from '../stores/wallet';
 import { get } from 'svelte/store';
 import { CANISTER_IDS, CONFIG } from '../config';
+import { isOisyWallet } from './protocol/walletOperations';
+import { getOisySignerAgent, createOisyActor } from './oisySigner';
 
 // ──────────────────────────────────────────────────────────────
 // Types — mirrors the Candid interface
@@ -59,13 +61,30 @@ export interface LiquidationRecord {
 
 const E8S = 100_000_000;
 
-/** Convert raw token amount from native decimals to a display string. */
+/**
+ * Convert raw token amount to a display string.
+ * App rule: max 2 decimal places unless the value is tiny (e.g. 0.001 BTC).
+ * Always rounds DOWN (floor) to avoid overstating balances.
+ */
 export function formatTokenAmount(amount: bigint, decimals: number, maxFractionDigits?: number): string {
   const divisor = Math.pow(10, decimals);
   const value = Number(amount) / divisor;
-  const fracDigits = maxFractionDigits ?? Math.min(decimals, 6);
-  // Strip trailing zeros
-  const fixed = value.toFixed(fracDigits);
+
+  // Determine precision: caller override → auto (2 unless tiny value needs more)
+  let fracDigits: number;
+  if (maxFractionDigits !== undefined) {
+    fracDigits = maxFractionDigits;
+  } else if (value > 0 && value < 0.01) {
+    fracDigits = Math.min(decimals, 6);
+  } else {
+    fracDigits = 2;
+  }
+
+  // Round DOWN (floor) at the chosen precision
+  const multiplier = Math.pow(10, fracDigits);
+  const floored = Math.floor(value * multiplier) / multiplier;
+
+  const fixed = floored.toFixed(fracDigits);
   if (fixed.includes('.')) {
     let trimmed = fixed.replace(/0+$/, '');
     if (trimmed.endsWith('.')) trimmed = trimmed.slice(0, -1);
@@ -171,19 +190,6 @@ class StabilityPoolService {
     });
   }
 
-  /**
-   * Authenticated actor for mutations (deposit, withdraw, claim, etc.).
-   * Goes through PNP wallet for signing.
-   */
-  private async getUpdateActor(): Promise<any> {
-    const actor = await pnp.getActor(
-      STABILITY_POOL_CANISTER_ID,
-      canisterIDLs.stability_pool,
-    );
-    if (!actor) throw new Error('Failed to connect to stability pool');
-    return actor;
-  }
-
   // ── Queries (anonymous, no wallet needed) ──
 
   async getPoolStatus(): Promise<PoolStatus> {
@@ -215,10 +221,72 @@ class StabilityPoolService {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
 
-    const actor = await this.getUpdateActor();
-    const result = await actor.deposit(tokenLedger, amount) as { Ok: null } | { Err: any };
-    if ('Err' in result) {
-      throw new Error(this.formatError(result.Err));
+    const oisyDetected = isOisyWallet();
+
+    if (oisyDetected && wallet.principal) {
+      // ─── Oisy ICRC-112 batched path (v4 direct signer) ───
+      const signerAgent = await getOisySignerAgent(wallet.principal);
+
+      const ledgerActor = createOisyActor(
+        tokenLedger.toText(), CONFIG.icusd_ledgerIDL, signerAgent
+      );
+      const poolActor = createOisyActor(
+        STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool, signerAgent
+      );
+
+      const requestedAllowance = amount * 105n / 100n;
+
+      // Sequence 0: approve (Tier 1 — signer handles natively)
+      signerAgent.batch();
+      const approvePromise = ledgerActor.icrc2_approve({
+        amount: requestedAllowance,
+        spender: { owner: Principal.fromText(STABILITY_POOL_CANISTER_ID), subaccount: [] },
+        expires_at: [], expected_allowance: [], memo: [], fee: [],
+        from_subaccount: [], created_at_time: []
+      });
+
+      // Sequence 1: deposit (Tier 3 — blind request consent)
+      signerAgent.batch();
+      const depositPromise = poolActor.deposit(tokenLedger, amount);
+
+      // Fire both as a single ICRC-112 batch request → one Oisy popup
+      await signerAgent.execute();
+      const [approveResult, result] = await Promise.all([approvePromise, depositPromise]);
+
+      if (approveResult && 'Err' in approveResult) {
+        throw new Error(`Approval failed: ${JSON.stringify(approveResult.Err)}`);
+      }
+      if ('Err' in result) {
+        throw new Error(this.formatError(result.Err));
+      }
+    } else {
+      // ─── Non-Oisy path (Plug, II, etc.) ───
+      // Approve first, then deposit.
+      const ledgerActor = await walletStore.getActor(
+        tokenLedger.toText(), CONFIG.icusd_ledgerIDL
+      ) as any;
+
+      const approveResult = await ledgerActor.icrc2_approve({
+        amount: amount * 105n / 100n,
+        spender: { owner: Principal.fromText(STABILITY_POOL_CANISTER_ID), subaccount: [] },
+        expires_at: [], expected_allowance: [], memo: [], fee: [],
+        from_subaccount: [], created_at_time: []
+      });
+
+      if (approveResult && 'Err' in approveResult) {
+        throw new Error(`Approval failed: ${JSON.stringify(approveResult.Err)}`);
+      }
+
+      // Small delay for ledger sync
+      await new Promise(r => setTimeout(r, 2000));
+
+      const poolActor = await walletStore.getActor(
+        STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool
+      ) as any;
+      const result = await poolActor.deposit(tokenLedger, amount) as { Ok: null } | { Err: any };
+      if ('Err' in result) {
+        throw new Error(this.formatError(result.Err));
+      }
     }
   }
 
@@ -226,10 +294,26 @@ class StabilityPoolService {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
 
-    const actor = await this.getUpdateActor();
-    const result = await actor.withdraw(tokenLedger, amount) as { Ok: null } | { Err: any };
-    if ('Err' in result) {
-      throw new Error(this.formatError(result.Err));
+    if (isOisyWallet() && wallet.principal) {
+      const signerAgent = await getOisySignerAgent(wallet.principal);
+      const poolActor = createOisyActor(
+        STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool, signerAgent
+      );
+      signerAgent.batch();
+      const withdrawPromise = poolActor.withdraw(tokenLedger, amount);
+      await signerAgent.execute();
+      const result = await withdrawPromise;
+      if ('Err' in result) {
+        throw new Error(this.formatError(result.Err));
+      }
+    } else {
+      const poolActor = await walletStore.getActor(
+        STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool
+      ) as any;
+      const result = await poolActor.withdraw(tokenLedger, amount) as { Ok: null } | { Err: any };
+      if ('Err' in result) {
+        throw new Error(this.formatError(result.Err));
+      }
     }
   }
 
@@ -237,34 +321,84 @@ class StabilityPoolService {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
 
-    const actor = await this.getUpdateActor();
-    const result = await actor.claim_collateral(collateralLedger) as { Ok: bigint } | { Err: any };
-    if ('Err' in result) {
-      throw new Error(this.formatError(result.Err));
+    if (isOisyWallet() && wallet.principal) {
+      const signerAgent = await getOisySignerAgent(wallet.principal);
+      const poolActor = createOisyActor(
+        STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool, signerAgent
+      );
+      signerAgent.batch();
+      const claimPromise = poolActor.claim_collateral(collateralLedger);
+      await signerAgent.execute();
+      const result = await claimPromise;
+      if ('Err' in result) {
+        throw new Error(this.formatError(result.Err));
+      }
+      return result.Ok;
+    } else {
+      const poolActor = await walletStore.getActor(
+        STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool
+      ) as any;
+      const result = await poolActor.claim_collateral(collateralLedger) as { Ok: bigint } | { Err: any };
+      if ('Err' in result) {
+        throw new Error(this.formatError(result.Err));
+      }
+      return result.Ok;
     }
-    return result.Ok;
   }
 
   async claimAllCollateral(): Promise<Array<[Principal, bigint]>> {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
 
-    const actor = await this.getUpdateActor();
-    const result = await actor.claim_all_collateral() as { Ok: Array<[Principal, bigint]> } | { Err: any };
-    if ('Err' in result) {
-      throw new Error(this.formatError(result.Err));
+    if (isOisyWallet() && wallet.principal) {
+      const signerAgent = await getOisySignerAgent(wallet.principal);
+      const poolActor = createOisyActor(
+        STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool, signerAgent
+      );
+      signerAgent.batch();
+      const claimPromise = poolActor.claim_all_collateral();
+      await signerAgent.execute();
+      const result = await claimPromise;
+      if ('Err' in result) {
+        throw new Error(this.formatError(result.Err));
+      }
+      return result.Ok;
+    } else {
+      const poolActor = await walletStore.getActor(
+        STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool
+      ) as any;
+      const result = await poolActor.claim_all_collateral() as { Ok: Array<[Principal, bigint]> } | { Err: any };
+      if ('Err' in result) {
+        throw new Error(this.formatError(result.Err));
+      }
+      return result.Ok;
     }
-    return result.Ok;
   }
 
   async optOutCollateral(collateralType: Principal): Promise<void> {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
 
-    const actor = await this.getUpdateActor();
-    const result = await actor.opt_out_collateral(collateralType) as { Ok: null } | { Err: any };
-    if ('Err' in result) {
-      throw new Error(this.formatError(result.Err));
+    if (isOisyWallet() && wallet.principal) {
+      const signerAgent = await getOisySignerAgent(wallet.principal);
+      const poolActor = createOisyActor(
+        STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool, signerAgent
+      );
+      signerAgent.batch();
+      const optPromise = poolActor.opt_out_collateral(collateralType);
+      await signerAgent.execute();
+      const result = await optPromise;
+      if ('Err' in result) {
+        throw new Error(this.formatError(result.Err));
+      }
+    } else {
+      const poolActor = await walletStore.getActor(
+        STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool
+      ) as any;
+      const result = await poolActor.opt_out_collateral(collateralType) as { Ok: null } | { Err: any };
+      if ('Err' in result) {
+        throw new Error(this.formatError(result.Err));
+      }
     }
   }
 
@@ -272,10 +406,26 @@ class StabilityPoolService {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
 
-    const actor = await this.getUpdateActor();
-    const result = await actor.opt_in_collateral(collateralType) as { Ok: null } | { Err: any };
-    if ('Err' in result) {
-      throw new Error(this.formatError(result.Err));
+    if (isOisyWallet() && wallet.principal) {
+      const signerAgent = await getOisySignerAgent(wallet.principal);
+      const poolActor = createOisyActor(
+        STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool, signerAgent
+      );
+      signerAgent.batch();
+      const optPromise = poolActor.opt_in_collateral(collateralType);
+      await signerAgent.execute();
+      const result = await optPromise;
+      if ('Err' in result) {
+        throw new Error(this.formatError(result.Err));
+      }
+    } else {
+      const poolActor = await walletStore.getActor(
+        STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool
+      ) as any;
+      const result = await poolActor.opt_in_collateral(collateralType) as { Ok: null } | { Err: any };
+      if ('Err' in result) {
+        throw new Error(this.formatError(result.Err));
+      }
     }
   }
 
@@ -283,12 +433,29 @@ class StabilityPoolService {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
 
-    const actor = await this.getUpdateActor();
-    const result = await actor.execute_liquidation(vaultId) as { Ok: any } | { Err: any };
-    if ('Err' in result) {
-      throw new Error(this.formatError(result.Err));
+    if (isOisyWallet() && wallet.principal) {
+      const signerAgent = await getOisySignerAgent(wallet.principal);
+      const poolActor = createOisyActor(
+        STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool, signerAgent
+      );
+      signerAgent.batch();
+      const liqPromise = poolActor.execute_liquidation(vaultId);
+      await signerAgent.execute();
+      const result = await liqPromise;
+      if ('Err' in result) {
+        throw new Error(this.formatError(result.Err));
+      }
+      return result.Ok;
+    } else {
+      const poolActor = await walletStore.getActor(
+        STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool
+      ) as any;
+      const result = await poolActor.execute_liquidation(vaultId) as { Ok: any } | { Err: any };
+      if ('Err' in result) {
+        throw new Error(this.formatError(result.Err));
+      }
+      return result.Ok;
     }
-    return result.Ok;
   }
 
   // ── Error formatting ──

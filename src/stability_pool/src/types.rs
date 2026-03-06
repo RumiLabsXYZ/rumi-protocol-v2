@@ -1,4 +1,4 @@
-use candid::{CandidType, Deserialize, Principal};
+use candid::{CandidType, Deserialize, Nat, Principal};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -206,4 +206,96 @@ pub enum StabilityPoolError {
     SystemBusy,
     AlreadyOptedOut { collateral: Principal },
     AlreadyOptedIn { collateral: Principal },
+}
+
+// ──────────────────────────────────────────────────────────────
+// ICRC-21: Canister Call Consent Messages
+// ──────────────────────────────────────────────────────────────
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct Icrc21ConsentMessageRequest {
+    pub method: String,
+    pub arg: Vec<u8>,
+    pub user_preferences: Icrc21ConsentMessageSpec,
+}
+
+/// Per the ICRC-21 spec, `user_preferences` is a `consent_message_spec`
+/// containing nested metadata + an optional device_spec.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct Icrc21ConsentMessageSpec {
+    pub metadata: Icrc21ConsentMessageMetadata,
+    pub device_spec: Option<Icrc21DeviceSpec>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub enum Icrc21DeviceSpec {
+    GenericDisplay,
+    LineDisplay {
+        characters_per_line: u16,
+        lines_per_page: u16,
+    },
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct Icrc21ConsentMessageMetadata {
+    pub language: String,
+    pub utc_offset_minutes: Option<i16>,
+}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub enum Icrc21ConsentMessageResponse {
+    #[serde(rename = "Ok")]
+    Ok(Icrc21ConsentInfo),
+    #[serde(rename = "Err")]
+    Err(Icrc21Error),
+}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct Icrc21ConsentInfo {
+    pub consent_message: Icrc21ConsentMessage,
+    pub metadata: Icrc21ConsentMessageResponseMetadata,
+}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct Icrc21ConsentMessageResponseMetadata {
+    pub language: String,
+    pub utc_offset_minutes: Option<i16>,
+}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub enum Icrc21ConsentMessage {
+    GenericDisplayMessage(String),
+    LineDisplayMessage { pages: Vec<Icrc21LineDisplayPage> },
+}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct Icrc21LineDisplayPage {
+    pub lines: Vec<Icrc21LineDisplayLine>,
+}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct Icrc21LineDisplayLine {
+    pub line: String,
+}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub enum Icrc21Error {
+    UnsupportedCanisterCall(Icrc21ErrorInfo),
+    ConsentMessageUnavailable(Icrc21ErrorInfo),
+    GenericError { error_code: Nat, description: String },
+}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct Icrc21ErrorInfo {
+    pub description: String,
+}
+
+// ──────────────────────────────────────────────────────────────
+// ICRC-10: Supported Standards
+// ──────────────────────────────────────────────────────────────
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct Icrc10SupportedStandard {
+    pub name: String,
+    pub url: String,
 }

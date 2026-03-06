@@ -56,7 +56,6 @@
   onMount(() => { loadAllData(); });
 
   function handleSuccess() {
-    // Reload all data and refresh wallet balance
     loadAllData();
     walletStore.refreshBalance();
   }
@@ -70,7 +69,6 @@
   <!-- Page title -->
   <div class="page-header">
     <h1 class="page-title animate-title">Stability Pool</h1>
-    <p class="page-subtitle">Deposit stablecoins · Absorb liquidations · Earn collateral</p>
   </div>
 
   {#if loading}
@@ -91,18 +89,16 @@
       <button class="btn-primary" on:click={loadAllData}>Try Again</button>
     </div>
   {:else}
-    <!-- Pool overview stats -->
-    <section class="section-stats" style="animation-delay: 0.05s">
-      <PoolStats {poolStatus} />
-    </section>
-
     <!-- Two-column layout: action panel + position -->
     <div class="main-layout">
-      <section class="col-action" style="animation-delay: 0.1s">
+      <section class="col-action" style="animation-delay: 0.05s">
         <DepositInterface {poolStatus} {userPosition} on:success={handleSuccess} />
+        <div class="action-stats" style="animation-delay: 0.15s">
+          <PoolStats {poolStatus} />
+        </div>
       </section>
 
-      <section class="col-position" style="animation-delay: 0.15s">
+      <section class="col-position" style="animation-delay: 0.1s">
         {#if isConnected && userPosition}
           <UserAccount {poolStatus} {userPosition} on:success={handleSuccess} />
         {:else if isConnected && !userPosition}
@@ -167,7 +163,7 @@
 
 <style>
   .earn-page {
-    max-width: 1100px;
+    max-width: 820px;
     margin: 0 auto;
     padding-bottom: 4rem;
   }
@@ -178,19 +174,12 @@
     animation: fadeSlideIn 0.5s ease-out both;
   }
 
-  .page-subtitle {
-    font-size: 0.875rem;
-    color: var(--rumi-text-secondary);
-    margin-top: 0.25rem;
-    letter-spacing: 0.01em;
-  }
-
   /* ── Sections with staggered entrance ── */
-  .section-stats,
   .col-action,
   .col-position,
   .section-feed,
-  .how-it-works {
+  .how-it-works,
+  .action-stats {
     animation: fadeSlideIn 0.5s ease-out both;
   }
 
@@ -199,14 +188,14 @@
     to { opacity: 1; transform: translateY(0); }
   }
 
-  .section-stats {
-    margin-bottom: 1.5rem;
+  .action-stats {
+    margin-top: 1rem;
   }
 
   /* ── Two-column layout ── */
   .main-layout {
     display: grid;
-    grid-template-columns: 1fr 380px;
+    grid-template-columns: 1fr 340px;
     gap: 1.5rem;
     align-items: start;
     margin-bottom: 1.5rem;
@@ -341,7 +330,7 @@
   }
 
   /* ── Responsive ── */
-  @media (max-width: 900px) {
+  @media (max-width: 700px) {
     .main-layout {
       grid-template-columns: 1fr;
     }

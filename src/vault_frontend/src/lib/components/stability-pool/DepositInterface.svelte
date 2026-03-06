@@ -2,7 +2,7 @@
   import { createEventDispatcher } from 'svelte';
   import { Principal } from '@dfinity/principal';
   import { walletStore } from '../../stores/wallet';
-  import { stabilityPoolService, formatTokenAmount, parseTokenAmount, symbolForLedger } from '../../services/stabilityPoolService';
+  import { stabilityPoolService, formatTokenAmount, parseTokenAmount } from '../../services/stabilityPoolService';
   import type { PoolStatus, StablecoinConfig, UserPosition } from '../../services/stabilityPoolService';
   import { CANISTER_IDS } from '../../config';
 
@@ -16,6 +16,7 @@
   let loading = false;
   let error = '';
   let selectedTokenIndex = 0;
+  let showDropdown = false;
 
   $: isConnected = $walletStore.isConnected;
   $: activeStablecoins = poolStatus?.stablecoin_registry?.filter(s => s.is_active) ?? [];
@@ -27,6 +28,19 @@
     [CANISTER_IDS.CKUSDT_LEDGER]: 'CKUSDT',
     [CANISTER_IDS.CKUSDC_LEDGER]: 'CKUSDC',
   };
+
+  // Stablecoin dot colors (matches VaultCard pattern)
+  const TOKEN_COLORS: Record<string, string> = {
+    [CANISTER_IDS.ICUSD_LEDGER]: '#818cf8',
+    [CANISTER_IDS.CKUSDT_LEDGER]: '#26A17B',
+    [CANISTER_IDS.CKUSDC_LEDGER]: '#2775CA',
+  };
+
+  function getTokenColor(token: StablecoinConfig): string {
+    return TOKEN_COLORS[token.ledger_id.toText()] ?? '#2DD4BF';
+  }
+
+  $: selectedTokenColor = selectedToken ? getTokenColor(selectedToken) : '#2DD4BF';
 
   $: walletBalance = (() => {
     if (!selectedToken || !$walletStore.tokenBalances) return 0n;
@@ -54,15 +68,19 @@
 
   function selectToken(index: number) {
     selectedTokenIndex = index;
+    showDropdown = false;
     amount = '';
     error = '';
+  }
+
+  function closeDropdown() {
+    showDropdown = false;
   }
 
   function setMax() {
     if (!selectedToken) return;
     if (activeTab === 'deposit') {
-      // Deduct approximate ledger fee
-      const fee = selectedToken.decimals === 8 ? 100_000n : 10n; // e8s fee vs 6-dec fee
+      const fee = selectedToken.decimals === 8 ? 100_000n : 10n;
       const adjusted = walletBalance > fee ? walletBalance - fee : 0n;
       amount = formatTokenAmount(adjusted, selectedToken.decimals, selectedToken.decimals);
     } else {
@@ -82,6 +100,11 @@
       const rawAmount = parseTokenAmount(amount, selectedToken.decimals);
 
       if (activeTab === 'deposit') {
+        const oneUnit = BigInt(Math.pow(10, selectedToken.decimals));
+        if (rawAmount < oneUnit) {
+          error = `Minimum deposit is 1 ${selectedToken.symbol}`;
+          return;
+        }
         if (rawAmount > walletBalance) {
           error = 'Insufficient wallet balance';
           return;
@@ -104,6 +127,8 @@
     }
   }
 </script>
+
+<svelte:window on:click={closeDropdown} />
 
 <div class="deposit-panel">
   <!-- Tab switcher -->
@@ -131,25 +156,6 @@
       <p class="gate-text">Connect your wallet to deposit stablecoins and earn liquidation rewards</p>
     </div>
   {:else}
-    <!-- Token selector -->
-    {#if activeStablecoins.length > 1}
-      <div class="token-selector">
-        <div class="selector-label">Token</div>
-        <div class="token-options">
-          {#each activeStablecoins as token, i}
-            <button
-              class="token-option"
-              class:selected={selectedTokenIndex === i}
-              on:click={() => selectToken(i)}
-            >
-              <span class="token-symbol">{token.symbol}</span>
-              <span class="token-decimals">{token.decimals}d</span>
-            </button>
-          {/each}
-        </div>
-      </div>
-    {/if}
-
     <!-- Balance display -->
     <div class="balance-row">
       <span class="balance-label">
@@ -161,7 +167,7 @@
       </span>
     </div>
 
-    <!-- Input -->
+    <!-- Input with in-field token dropdown -->
     <div class="input-wrapper">
       <input
         type="number"
@@ -174,9 +180,35 @@
         class:has-value={amount && parseFloat(amount) > 0}
       />
       <div class="input-actions">
-        <span class="input-symbol">{selectedToken?.symbol ?? ''}</span>
+        {#if activeStablecoins.length > 1}
+          <button class="token-selector"
+            on:click|stopPropagation={() => { showDropdown = !showDropdown; }}>
+            <span class="token-dot" style="background:{selectedTokenColor}"></span>
+            {selectedToken?.symbol ?? ''}
+            <svg class="token-chevron" width="10" height="6" viewBox="0 0 10 6" fill="none">
+              <path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+        {:else}
+          <span class="input-symbol">
+            <span class="token-dot" style="background:{selectedTokenColor}"></span>
+            {selectedToken?.symbol ?? ''}
+          </span>
+        {/if}
         <button class="max-btn" on:click={setMax} disabled={loading}>MAX</button>
       </div>
+
+      {#if showDropdown}
+        <div class="token-dropdown" on:click|stopPropagation>
+          {#each activeStablecoins as token, i}
+            <button class="token-option" class:token-option-active={selectedTokenIndex === i}
+              on:click={() => selectToken(i)}>
+              <span class="token-dot" style="background:{getTokenColor(token)}"></span>
+              {token.symbol}
+            </button>
+          {/each}
+        </div>
+      {/if}
     </div>
 
     <!-- Submit -->
@@ -283,60 +315,6 @@
     margin: 0 auto;
   }
 
-  /* ── Token selector ── */
-  .token-selector {
-    margin-bottom: 1.25rem;
-  }
-
-  .selector-label {
-    font-size: 0.6875rem;
-    font-weight: 500;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--rumi-text-muted);
-    margin-bottom: 0.5rem;
-  }
-
-  .token-options {
-    display: flex;
-    gap: 0.5rem;
-  }
-
-  .token-option {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.375rem;
-    padding: 0.5rem;
-    background: var(--rumi-bg-surface2);
-    border: 1px solid var(--rumi-border);
-    border-radius: 0.5rem;
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .token-option:hover { border-color: var(--rumi-border-hover); }
-
-  .token-option.selected {
-    border-color: var(--rumi-teal);
-    background: rgba(45, 212, 191, 0.06);
-  }
-
-  .token-symbol {
-    font-size: 0.8125rem;
-    font-weight: 600;
-    color: var(--rumi-text-primary);
-  }
-
-  .token-decimals {
-    font-size: 0.625rem;
-    color: var(--rumi-text-muted);
-    padding: 0.0625rem 0.25rem;
-    background: var(--rumi-bg-surface3);
-    border-radius: 0.25rem;
-  }
-
   /* ── Balance row ── */
   .balance-row {
     display: flex;
@@ -371,7 +349,7 @@
   .amount-input {
     width: 100%;
     padding: 0.875rem 1rem;
-    padding-right: 7.5rem;
+    padding-right: 10rem;
     background: var(--rumi-bg-surface2);
     border: 1px solid var(--rumi-border);
     border-radius: 0.5rem;
@@ -416,10 +394,76 @@
     gap: 0.5rem;
   }
 
+  /* ── In-field token dropdown (matches borrow page pattern) ── */
+  .token-selector {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    background: var(--rumi-bg-surface2);
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.375rem;
+    padding: 0.25rem 0.5rem;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--rumi-text-primary);
+    cursor: pointer;
+    transition: border-color 0.15s;
+  }
+
+  .token-selector:hover { border-color: #2DD4BF; }
+
+  .token-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    display: inline-block;
+  }
+
+  .token-chevron {
+    color: var(--rumi-text-secondary);
+    flex-shrink: 0;
+  }
+
   .input-symbol {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
     font-size: 0.8125rem;
     color: var(--rumi-text-secondary);
   }
+
+  .token-dropdown {
+    position: absolute;
+    right: 3rem;
+    top: calc(50% + 1.25rem);
+    background: var(--rumi-bg-surface2);
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.5rem;
+    padding: 0.25rem;
+    z-index: 10;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    min-width: 120px;
+  }
+
+  .token-option {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    padding: 0.5rem 0.625rem;
+    border: none;
+    background: transparent;
+    color: var(--rumi-text-secondary);
+    font-size: 0.8125rem;
+    font-weight: 500;
+    cursor: pointer;
+    border-radius: 0.375rem;
+    transition: background 0.1s;
+  }
+
+  .token-option:hover { background: var(--rumi-bg-surface3); }
+  .token-option-active { color: var(--rumi-text-primary); font-weight: 600; }
 
   .max-btn {
     padding: 0.25rem 0.5rem;
@@ -496,9 +540,5 @@
     border-radius: 0.375rem;
     color: var(--rumi-danger);
     font-size: 0.8125rem;
-  }
-
-  @media (max-width: 520px) {
-    .token-options { flex-wrap: wrap; }
   }
 </style>

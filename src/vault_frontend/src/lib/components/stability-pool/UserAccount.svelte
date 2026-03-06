@@ -19,6 +19,8 @@
   let claimAllLoading = false;
   let toggleLoading: Record<string, boolean> = {};
   let error = '';
+  let showOptOutMenu = false;
+  let showOptOutTooltip = false;
 
   $: stablecoinRegistry = poolStatus?.stablecoin_registry ?? [];
   $: collateralRegistry = poolStatus?.collateral_registry ?? [];
@@ -85,7 +87,13 @@
       toggleLoading = { ...toggleLoading, [key]: false };
     }
   }
+
+  function closeOptOutMenu() {
+    showOptOutMenu = false;
+  }
 </script>
+
+<svelte:window on:click={closeOptOutMenu} />
 
 {#if userPosition}
   <div class="position-card">
@@ -123,15 +131,58 @@
     <div class="gains-section">
       <div class="gains-header">
         <h4 class="gains-title">Collateral Gains</h4>
-        {#if hasAnyGains}
-          <button class="claim-all-btn" on:click={claimAll} disabled={claimAllLoading}>
-            {#if claimAllLoading}
-              <span class="mini-spinner"></span>
-            {:else}
-              Claim All
+        <div class="gains-header-actions">
+          {#if hasAnyGains}
+            <button class="claim-all-btn" on:click={claimAll} disabled={claimAllLoading}>
+              {#if claimAllLoading}
+                <span class="mini-spinner"></span>
+              {:else}
+                Claim All
+              {/if}
+            </button>
+          {/if}
+          <div class="opt-out-wrapper" on:click|stopPropagation>
+            <!-- svelte-ignore a11y-mouse-events-have-key-events -->
+            <button
+              class="opt-out-info-btn"
+              on:mouseover={() => { showOptOutTooltip = true; }}
+              on:mouseleave={() => { showOptOutTooltip = false; }}
+              on:click|stopPropagation={() => { showOptOutMenu = !showOptOutMenu; showOptOutTooltip = false; }}
+            >
+              Opt out
+              <svg class="info-icon" width="12" height="12" viewBox="0 0 16 16" fill="none">
+                <circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5"/>
+                <path d="M8 7v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                <circle cx="8" cy="5" r="0.75" fill="currentColor"/>
+              </svg>
+            </button>
+            {#if showOptOutTooltip && !showOptOutMenu}
+              <div class="opt-out-tooltip">
+                Choose which collateral types you receive during liquidations. Opted-out collateral is redistributed to other depositors.
+              </div>
             {/if}
-          </button>
-        {/if}
+            {#if showOptOutMenu}
+              <div class="opt-out-menu">
+                {#each collateralRegistry as collateral}
+                  {@const key = collateral.ledger_id.toText()}
+                  {@const isOut = optedOut.has(key)}
+                  <button
+                    class="opt-out-row" class:is-out={isOut}
+                    on:click={() => toggleOptOut(collateral)}
+                    disabled={toggleLoading[key]}
+                  >
+                    <span class="opt-out-symbol">{collateral.symbol}</span>
+                    {#if toggleLoading[key]}
+                      <span class="mini-spinner"></span>
+                    {:else}
+                      <span class="opt-out-status" class:opted-out-label={isOut}>{isOut ? 'Opted out' : 'Receiving'}</span>
+                    {/if}
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        </div>
       </div>
 
       <div class="gains-list">
@@ -164,18 +215,6 @@
                   {claimLoading[key] ? '…' : 'Claim'}
                 </button>
               {/if}
-              <button
-                class="toggle-btn" class:is-out={isOut}
-                on:click={() => toggleOptOut(collateral)}
-                disabled={toggleLoading[key]}
-                title={isOut ? 'Opt in to receive this collateral' : 'Opt out of receiving this collateral'}
-              >
-                {#if toggleLoading[key]}
-                  <span class="mini-spinner"></span>
-                {:else}
-                  {isOut ? '✕' : '✓'}
-                {/if}
-              </button>
             </div>
           </div>
         {/each}
@@ -234,6 +273,7 @@
 
   .gains-section { border-top: 1px solid var(--rumi-border); padding-top: 1.25rem; }
   .gains-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem; }
+  .gains-header-actions { display: flex; align-items: center; gap: 0.5rem; }
 
   .gains-title {
     font-family: 'Circular Std', 'Inter', sans-serif;
@@ -247,6 +287,48 @@
   }
   .claim-all-btn:hover:not(:disabled) { background: var(--rumi-action-bright); }
   .claim-all-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* ── Opt-out button + menu ── */
+  .opt-out-wrapper { position: relative; }
+
+  .opt-out-info-btn {
+    display: flex; align-items: center; gap: 0.25rem;
+    padding: 0.1875rem 0.5rem; background: transparent;
+    border: 1px solid var(--rumi-border); border-radius: 0.375rem;
+    color: var(--rumi-text-muted); font-size: 0.6875rem; font-weight: 500;
+    cursor: pointer; transition: all 0.15s ease; white-space: nowrap;
+  }
+  .opt-out-info-btn:hover { border-color: var(--rumi-border-hover); color: var(--rumi-text-secondary); }
+  .info-icon { flex-shrink: 0; opacity: 0.6; }
+
+  .opt-out-tooltip {
+    position: absolute; top: calc(100% + 0.5rem); right: 0; z-index: 20;
+    width: 14rem; padding: 0.625rem 0.75rem;
+    background: var(--rumi-bg-surface1); border: 1px solid var(--rumi-border);
+    border-radius: 0.5rem; box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+    font-size: 0.6875rem; line-height: 1.5; color: var(--rumi-text-secondary);
+    pointer-events: none;
+  }
+
+  .opt-out-menu {
+    position: absolute; top: calc(100% + 0.375rem); right: 0; z-index: 30;
+    min-width: 10rem; padding: 0.375rem;
+    background: var(--rumi-bg-surface1); border: 1px solid var(--rumi-border);
+    border-radius: 0.5rem; box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+    display: flex; flex-direction: column; gap: 0.125rem;
+  }
+
+  .opt-out-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 0.4375rem 0.625rem; background: transparent;
+    border: none; border-radius: 0.375rem; cursor: pointer;
+    transition: background 0.15s ease; width: 100%; text-align: left;
+  }
+  .opt-out-row:hover:not(:disabled) { background: var(--rumi-bg-surface2); }
+  .opt-out-row:disabled { opacity: 0.4; cursor: not-allowed; }
+  .opt-out-symbol { font-size: 0.75rem; font-weight: 600; color: var(--rumi-text-primary); }
+  .opt-out-status { font-size: 0.6875rem; color: var(--rumi-teal); font-weight: 500; }
+  .opt-out-status.opted-out-label { color: var(--rumi-danger); }
 
   .gains-list { display: flex; flex-direction: column; gap: 0.5rem; }
 
@@ -281,17 +363,6 @@
   }
   .claim-btn:hover:not(:disabled) { background: rgba(45, 212, 191, 0.15); }
   .claim-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-
-  .toggle-btn {
-    width: 1.5rem; height: 1.5rem; padding: 0;
-    display: flex; align-items: center; justify-content: center;
-    background: transparent; border: 1px solid var(--rumi-border);
-    border-radius: 0.25rem; color: var(--rumi-teal); font-size: 0.625rem;
-    cursor: pointer; transition: all 0.15s ease;
-  }
-  .toggle-btn:hover:not(:disabled) { border-color: var(--rumi-border-hover); }
-  .toggle-btn.is-out { color: var(--rumi-danger); border-color: rgba(224, 107, 159, 0.2); }
-  .toggle-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
   .mini-spinner {
     display: inline-block; width: 0.75rem; height: 0.75rem;
