@@ -68,11 +68,12 @@ pub const DEFAULT_RECOVERY_MULTIPLIER_LIQUIDATION: Ratio = Ratio::new(dec!(2.0))
 /// Default healthy CR multiplier (healthy_cr = this * borrow_threshold_ratio)
 pub const DEFAULT_HEALTHY_CR_MULTIPLIER: Ratio = Ratio::new(dec!(1.5));
 
-/// Dynamic Redemption Margin Ratio constants.
+/// Default Redemption Margin Ratio parameters (admin-configurable).
 /// Redeemers receive RMR × face value of their icUSD.
-pub const RMR_FLOOR: Ratio = Ratio::new(dec!(0.96));     // 96% at healthy system
-pub const RMR_CEILING: Ratio = Ratio::new(dec!(1.0));     // 100% at/below recovery
-pub const RMR_HEALTHY_MULTIPLIER: Ratio = Ratio::new(dec!(1.5)); // 1.5× recovery = "healthy"
+pub const DEFAULT_RMR_FLOOR: Ratio = Ratio::new(dec!(0.96));      // 96% at healthy system
+pub const DEFAULT_RMR_CEILING: Ratio = Ratio::new(dec!(1.0));     // 100% at/below stressed CR
+pub const DEFAULT_RMR_FLOOR_CR: Ratio = Ratio::new(dec!(2.25));   // CR above which floor applies (recovery × 1.5)
+pub const DEFAULT_RMR_CEILING_CR: Ratio = Ratio::new(dec!(1.5));  // CR below which ceiling applies (= recovery)
 
 /// Collateral type identified by its ICRC-1 ledger canister principal.
 pub type CollateralType = Principal;
@@ -480,6 +481,16 @@ pub struct State {
     /// Share of interest revenue sent to stability pool depositors (0.0-1.0).
     /// Remainder goes to protocol treasury.
     pub interest_pool_share: Ratio,
+
+    /// Redemption Margin Ratio parameters.
+    /// RMR value when system CR is at or above rmr_floor_cr (e.g. 0.96 = 96%).
+    pub rmr_floor: Ratio,
+    /// RMR value when system CR is at or below rmr_ceiling_cr (e.g. 1.0 = 100%).
+    pub rmr_ceiling: Ratio,
+    /// The system CR above which rmr_floor applies. Absolute CR value (e.g. 2.25).
+    pub rmr_floor_cr: Ratio,
+    /// The system CR below which rmr_ceiling applies. Absolute CR value (e.g. 1.50).
+    pub rmr_ceiling_cr: Ratio,
 }
 
 impl From<InitArg> for State {
@@ -611,6 +622,11 @@ impl From<InitArg> for State {
             pending_treasury_collateral: Vec::new(),
             liquidation_protocol_share: crate::DEFAULT_LIQUIDATION_PROTOCOL_SHARE,
             interest_pool_share: DEFAULT_INTEREST_POOL_SHARE,
+
+            rmr_floor: DEFAULT_RMR_FLOOR,
+            rmr_ceiling: DEFAULT_RMR_CEILING,
+            rmr_floor_cr: DEFAULT_RMR_FLOOR_CR,
+            rmr_ceiling_cr: DEFAULT_RMR_CEILING_CR,
         }
     }
 }
@@ -877,29 +893,26 @@ impl State {
 
     /// Dynamic Redemption Margin Ratio.
     /// Redeemers receive RMR × face value of their icUSD.
-    /// - At/above 1.5× recovery threshold: 96% (discourages redemption when healthy)
-    /// - At/below recovery threshold: 100% (par redemption when system stressed)
+    /// - At/above rmr_floor_cr: rmr_floor (e.g. 96%, discourages redemption when healthy)
+    /// - At/below rmr_ceiling_cr: rmr_ceiling (e.g. 100%, par redemption when stressed)
     /// - Linear interpolation between
-    /// - NEVER above 100% (prevents mint-and-redeem arbitrage)
+    /// - NEVER above rmr_ceiling (prevents mint-and-redeem arbitrage)
     pub fn get_redemption_margin_ratio(&self) -> Ratio {
         let tcr = self.total_collateral_ratio;
-        let recovery = self.recovery_mode_threshold;
-        let healthy = recovery * RMR_HEALTHY_MULTIPLIER; // e.g., 1.50 × 1.5 = 2.25
 
-        if tcr <= recovery {
-            return RMR_CEILING; // 100%
+        if tcr <= self.rmr_ceiling_cr {
+            return self.rmr_ceiling;
         }
-        if tcr >= healthy {
-            return RMR_FLOOR; // 96%
+        if tcr >= self.rmr_floor_cr {
+            return self.rmr_floor;
         }
 
-        // Linear interpolation: 1.0 - ((tcr - recovery) / (healthy - recovery)) × (1.0 - 0.96)
-        let range = healthy - recovery;   // e.g., 0.75
-        let position = tcr - recovery;    // how far above recovery
-        let spread = RMR_CEILING - RMR_FLOOR; // 0.04
+        let range = self.rmr_floor_cr - self.rmr_ceiling_cr;
+        let position = tcr - self.rmr_ceiling_cr;
+        let spread = self.rmr_ceiling - self.rmr_floor;
         // Use inner Decimal for division since Div<Ratio> for Ratio is not implemented
         let discount = Ratio::from(position.0 / range.0) * spread;
-        RMR_CEILING - discount
+        self.rmr_ceiling - discount
     }
 
     pub fn get_borrowing_fee(&self) -> Ratio {

@@ -1554,6 +1554,124 @@ fn get_interest_pool_share() -> f64 {
     read_state(|s| s.interest_pool_share.to_f64())
 }
 
+// ── RMR (Redemption Margin Ratio) configuration ────────────────────────
+
+/// Get the RMR floor (ratio redeemers receive when system is healthy).
+#[candid_method(query)]
+#[query]
+fn get_rmr_floor() -> f64 {
+    read_state(|s| s.rmr_floor.to_f64())
+}
+
+/// Get the RMR ceiling (ratio redeemers receive when system is stressed).
+#[candid_method(query)]
+#[query]
+fn get_rmr_ceiling() -> f64 {
+    read_state(|s| s.rmr_ceiling.to_f64())
+}
+
+/// Get the CR above which the RMR floor applies.
+#[candid_method(query)]
+#[query]
+fn get_rmr_floor_cr() -> f64 {
+    read_state(|s| s.rmr_floor_cr.to_f64())
+}
+
+/// Get the CR below which the RMR ceiling applies.
+#[candid_method(query)]
+#[query]
+fn get_rmr_ceiling_cr() -> f64 {
+    read_state(|s| s.rmr_ceiling_cr.to_f64())
+}
+
+/// Set the RMR floor (0.0–1.0). Must be ≤ current rmr_ceiling.
+#[candid_method(update)]
+#[update]
+async fn set_rmr_floor(value: f64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let (is_dev, ceiling) = read_state(|s| (s.developer_principal == caller, s.rmr_ceiling.to_f64()));
+    if !is_dev {
+        return Err(ProtocolError::GenericError("Only the developer principal can set RMR floor".to_string()));
+    }
+    if !(0.0..=1.0).contains(&value) {
+        return Err(ProtocolError::GenericError("RMR floor must be between 0.0 and 1.0".to_string()));
+    }
+    if value > ceiling {
+        return Err(ProtocolError::GenericError(format!("RMR floor ({}) must be ≤ RMR ceiling ({})", value, ceiling)));
+    }
+    let ratio = Ratio::from(rust_decimal::Decimal::try_from(value)
+        .map_err(|_| ProtocolError::GenericError("Invalid value".to_string()))?);
+    mutate_state(|s| { rumi_protocol_backend::event::record_set_rmr_floor(s, ratio); });
+    log!(INFO, "[set_rmr_floor] Set to: {} ({}%)", value, value * 100.0);
+    Ok(())
+}
+
+/// Set the RMR ceiling (0.0–1.0). Must be ≥ current rmr_floor.
+#[candid_method(update)]
+#[update]
+async fn set_rmr_ceiling(value: f64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let (is_dev, floor) = read_state(|s| (s.developer_principal == caller, s.rmr_floor.to_f64()));
+    if !is_dev {
+        return Err(ProtocolError::GenericError("Only the developer principal can set RMR ceiling".to_string()));
+    }
+    if !(0.0..=1.0).contains(&value) {
+        return Err(ProtocolError::GenericError("RMR ceiling must be between 0.0 and 1.0".to_string()));
+    }
+    if value < floor {
+        return Err(ProtocolError::GenericError(format!("RMR ceiling ({}) must be ≥ RMR floor ({})", value, floor)));
+    }
+    let ratio = Ratio::from(rust_decimal::Decimal::try_from(value)
+        .map_err(|_| ProtocolError::GenericError("Invalid value".to_string()))?);
+    mutate_state(|s| { rumi_protocol_backend::event::record_set_rmr_ceiling(s, ratio); });
+    log!(INFO, "[set_rmr_ceiling] Set to: {} ({}%)", value, value * 100.0);
+    Ok(())
+}
+
+/// Set the CR above which the RMR floor applies (≥ 1.0). Must be ≥ current rmr_ceiling_cr.
+#[candid_method(update)]
+#[update]
+async fn set_rmr_floor_cr(value: f64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let (is_dev, ceiling_cr) = read_state(|s| (s.developer_principal == caller, s.rmr_ceiling_cr.to_f64()));
+    if !is_dev {
+        return Err(ProtocolError::GenericError("Only the developer principal can set RMR floor CR".to_string()));
+    }
+    if value < 1.0 {
+        return Err(ProtocolError::GenericError("RMR floor CR must be ≥ 1.0".to_string()));
+    }
+    if value < ceiling_cr {
+        return Err(ProtocolError::GenericError(format!("RMR floor CR ({}) must be ≥ RMR ceiling CR ({})", value, ceiling_cr)));
+    }
+    let ratio = Ratio::from(rust_decimal::Decimal::try_from(value)
+        .map_err(|_| ProtocolError::GenericError("Invalid value".to_string()))?);
+    mutate_state(|s| { rumi_protocol_backend::event::record_set_rmr_floor_cr(s, ratio); });
+    log!(INFO, "[set_rmr_floor_cr] Set to: {} ({}%)", value, value * 100.0);
+    Ok(())
+}
+
+/// Set the CR below which the RMR ceiling applies (≥ 1.0). Must be ≤ current rmr_floor_cr.
+#[candid_method(update)]
+#[update]
+async fn set_rmr_ceiling_cr(value: f64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let (is_dev, floor_cr) = read_state(|s| (s.developer_principal == caller, s.rmr_floor_cr.to_f64()));
+    if !is_dev {
+        return Err(ProtocolError::GenericError("Only the developer principal can set RMR ceiling CR".to_string()));
+    }
+    if value < 1.0 {
+        return Err(ProtocolError::GenericError("RMR ceiling CR must be ≥ 1.0".to_string()));
+    }
+    if value > floor_cr {
+        return Err(ProtocolError::GenericError(format!("RMR ceiling CR ({}) must be ≤ RMR floor CR ({})", value, floor_cr)));
+    }
+    let ratio = Ratio::from(rust_decimal::Decimal::try_from(value)
+        .map_err(|_| ProtocolError::GenericError("Invalid value".to_string()))?);
+    mutate_state(|s| { rumi_protocol_backend::event::record_set_rmr_ceiling_cr(s, ratio); });
+    log!(INFO, "[set_rmr_ceiling_cr] Set to: {} ({}%)", value, value * 100.0);
+    Ok(())
+}
+
 #[derive(CandidType, Deserialize)]
 pub struct TreasuryStats {
     pub treasury_principal: Option<Principal>,
