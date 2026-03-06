@@ -111,7 +111,7 @@ pub struct ProtocolStatus {
     pub liquidation_bonus: f64,
     pub recovery_target_cr: f64,
     pub recovery_mode_threshold: f64,
-    pub recovery_liquidation_buffer: f64,
+    pub recovery_cr_multiplier: f64,
     pub reserve_redemptions_enabled: bool,
     pub reserve_redemption_fee: f64,
     pub frozen: bool,

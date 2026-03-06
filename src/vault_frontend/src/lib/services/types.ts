@@ -95,7 +95,7 @@ export interface ProtocolStatusDTO {
   liquidationBonus: number;
   recoveryTargetCr: number;
   recoveryModeThreshold: number;
-  recoveryLiquidationBuffer: number;
+  recoveryCrMultiplier: number;
   reserveRedemptionsEnabled: boolean;
   reserveRedemptionFee: number;
 }

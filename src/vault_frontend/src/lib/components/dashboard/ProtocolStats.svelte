@@ -19,7 +19,7 @@
     liquidationBonus: number;
     recoveryTargetCr: number;
     recoveryModeThreshold: number;
-    recoveryLiquidationBuffer: number;
+    recoveryCrMultiplier: number;
     reserveRedemptionsEnabled?: boolean;
     reserveRedemptionFee?: number;
   } | undefined = undefined;
@@ -53,7 +53,7 @@
         liquidationBonus: Number(s.liquidationBonus || 0),
         recoveryTargetCr: Number(s.recoveryTargetCr || 0),
         recoveryModeThreshold: Number(s.recoveryModeThreshold || 0),
-        recoveryLiquidationBuffer: Number(s.recoveryLiquidationBuffer || 0),
+        recoveryCrMultiplier: Number(s.recoveryCrMultiplier || 0),
         reserveRedemptionsEnabled: Boolean(s.reserveRedemptionsEnabled),
         reserveRedemptionFee: Number(s.reserveRedemptionFee || 0),
       };

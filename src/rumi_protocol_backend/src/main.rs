@@ -300,9 +300,9 @@ fn get_protocol_status() -> ProtocolStatus {
         total_collateral_ratio: s.total_collateral_ratio.to_f64(),
         mode: s.mode,
         liquidation_bonus: s.liquidation_bonus.to_f64(),
-        recovery_target_cr: Ratio::from(s.recovery_mode_threshold.0 + s.recovery_liquidation_buffer.0).to_f64(),
+        recovery_target_cr: (s.recovery_mode_threshold * s.recovery_cr_multiplier).to_f64(),
         recovery_mode_threshold: s.recovery_mode_threshold.to_f64(),
-        recovery_liquidation_buffer: s.recovery_liquidation_buffer.to_f64(),
+        recovery_cr_multiplier: s.recovery_cr_multiplier.to_f64(),
         reserve_redemptions_enabled: s.reserve_redemptions_enabled,
         reserve_redemption_fee: s.reserve_redemption_fee.to_f64(),
         frozen: s.frozen,
@@ -1453,38 +1453,38 @@ fn get_max_partial_liquidation_ratio() -> f64 {
     read_state(|s| s.max_partial_liquidation_ratio.to_f64())
 }
 
-/// Set the recovery liquidation buffer (developer only).
-/// The effective recovery target CR = dynamic recovery threshold + this buffer.
-/// Example: buffer = 0.05 (5%), threshold = 1.50 → target = 1.55.
+/// Set the recovery CR multiplier (developer only).
+/// recovery_cr = borrow_threshold × multiplier.
+/// Example: multiplier = 1.0333, borrow_threshold = 1.50 → recovery_cr = 1.55.
 #[candid_method(update)]
 #[update]
-async fn set_recovery_liquidation_buffer(new_buffer: f64) -> Result<(), ProtocolError> {
+async fn set_recovery_cr_multiplier(new_multiplier: f64) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
         return Err(ProtocolError::GenericError(
-            "Only the developer principal can set recovery liquidation buffer".to_string(),
+            "Only the developer principal can set recovery CR multiplier".to_string(),
         ));
     }
-    if new_buffer < 0.01 || new_buffer > 0.5 {
+    if new_multiplier < 1.001 || new_multiplier > 1.5 {
         return Err(ProtocolError::GenericError(
-            "Recovery liquidation buffer must be between 0.01 (1%) and 0.5 (50%)".to_string(),
+            "Recovery CR multiplier must be between 1.001 (0.1% buffer) and 1.5 (50% buffer)".to_string(),
         ));
     }
-    let buffer = Ratio::from(rust_decimal::Decimal::try_from(new_buffer)
-        .map_err(|_| ProtocolError::GenericError("Invalid buffer value".to_string()))?);
+    let multiplier = Ratio::from(rust_decimal::Decimal::try_from(new_multiplier)
+        .map_err(|_| ProtocolError::GenericError("Invalid multiplier value".to_string()))?);
     mutate_state(|s| {
-        rumi_protocol_backend::event::record_set_recovery_liquidation_buffer(s, buffer);
+        rumi_protocol_backend::event::record_set_recovery_cr_multiplier(s, multiplier);
     });
-    log!(INFO, "[set_recovery_liquidation_buffer] Buffer set to: {} ({}%)", new_buffer, new_buffer * 100.0);
+    log!(INFO, "[set_recovery_cr_multiplier] Multiplier set to: {} ({}% buffer)", new_multiplier, (new_multiplier - 1.0) * 100.0);
     Ok(())
 }
 
-/// Get the current recovery liquidation buffer
+/// Get the current recovery CR multiplier
 #[candid_method(query)]
 #[query]
-fn get_recovery_liquidation_buffer() -> f64 {
-    read_state(|s| s.recovery_liquidation_buffer.to_f64())
+fn get_recovery_cr_multiplier() -> f64 {
+    read_state(|s| s.recovery_cr_multiplier.to_f64())
 }
 
 /// Set the global liquidation protocol share (fraction of liquidator's bonus profit).
@@ -1543,15 +1543,15 @@ fn get_treasury_stats() -> TreasuryStats {
     })
 }
 
-/// Get the effective recovery target CR (threshold + buffer)
+/// Get the effective recovery target CR (threshold × multiplier)
 #[candid_method(query)]
 #[query]
 fn get_recovery_target_cr() -> f64 {
-    read_state(|s| Ratio::from(s.recovery_mode_threshold.0 + s.recovery_liquidation_buffer.0).to_f64())
+    read_state(|s| (s.recovery_mode_threshold * s.recovery_cr_multiplier).to_f64())
 }
 
 /// Legacy: set the recovery target CR as an absolute value.
-/// Kept for Candid backwards compat. Internally converts to buffer.
+/// Kept for Candid backwards compat. Internally converts to multiplier.
 #[candid_method(update)]
 #[update]
 async fn set_recovery_target_cr(new_rate: f64) -> Result<(), ProtocolError> {
@@ -1562,21 +1562,26 @@ async fn set_recovery_target_cr(new_rate: f64) -> Result<(), ProtocolError> {
             "Only the developer principal can set recovery target CR".to_string(),
         ));
     }
-    // Convert absolute target to buffer: buffer = target - current threshold
+    // Convert absolute target to multiplier: multiplier = target / current threshold
     let threshold = read_state(|s| s.recovery_mode_threshold.to_f64());
-    let buffer_val = new_rate - threshold;
-    if buffer_val < 0.01 || buffer_val > 0.5 {
+    if threshold <= 0.0 {
+        return Err(ProtocolError::GenericError(
+            "Cannot compute multiplier: recovery_mode_threshold is zero".to_string(),
+        ));
+    }
+    let multiplier_val = new_rate / threshold;
+    if multiplier_val < 1.001 || multiplier_val > 1.5 {
         return Err(ProtocolError::GenericError(format!(
-            "Computed buffer {} (target {} - threshold {}) is out of range 0.01..0.5",
-            buffer_val, new_rate, threshold
+            "Computed multiplier {} (target {} / threshold {}) is out of range 1.001..1.5",
+            multiplier_val, new_rate, threshold
         )));
     }
-    let buffer = Ratio::from(rust_decimal::Decimal::try_from(buffer_val)
+    let multiplier = Ratio::from(rust_decimal::Decimal::try_from(multiplier_val)
         .map_err(|_| ProtocolError::GenericError("Invalid rate".to_string()))?);
     mutate_state(|s| {
-        rumi_protocol_backend::event::record_set_recovery_liquidation_buffer(s, buffer);
+        rumi_protocol_backend::event::record_set_recovery_cr_multiplier(s, multiplier);
     });
-    log!(INFO, "[set_recovery_target_cr] (legacy) → buffer set to: {} ({}%)", buffer_val, buffer_val * 100.0);
+    log!(INFO, "[set_recovery_target_cr] (legacy) → multiplier set to: {} ({}% buffer)", multiplier_val, (multiplier_val - 1.0) * 100.0);
     Ok(())
 }
 

@@ -207,9 +207,10 @@ pub enum Event {
         rate: String,
     },
 
-    #[serde(rename = "set_recovery_liquidation_buffer")]
-    SetRecoveryLiquidationBuffer {
-        buffer: String,
+    #[serde(rename = "set_recovery_cr_multiplier", alias = "set_recovery_liquidation_buffer")]
+    SetRecoveryCrMultiplier {
+        #[serde(alias = "buffer")]
+        multiplier: String,
     },
 
     #[serde(rename = "set_liquidation_protocol_share")]
@@ -349,7 +350,7 @@ impl Event {
             Event::SetRedemptionFeeCeiling { .. } => false,
             Event::SetMaxPartialLiquidationRatio { .. } => false,
             Event::SetRecoveryTargetCr { .. } => false,
-            Event::SetRecoveryLiquidationBuffer { .. } => false,
+            Event::SetRecoveryCrMultiplier { .. } => false,
             Event::SetLiquidationProtocolShare { .. } => false,
             Event::AddCollateralType { .. } => false,
             Event::UpdateCollateralStatus { .. } => false,
@@ -587,15 +588,22 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             Event::SetRecoveryTargetCr { rate } => {
                 // Legacy: old events stored an absolute target (e.g. 1.55).
                 // We keep replaying into recovery_target_cr for historical fidelity,
-                // but the protocol now uses recovery_liquidation_buffer for computation.
+                // but the protocol now uses recovery_cr_multiplier for computation.
                 if let Ok(dec) = rate.parse::<Decimal>() {
                     state.recovery_target_cr = Ratio::from(dec);
                     state.sync_icp_collateral_config();
                 }
             },
-            Event::SetRecoveryLiquidationBuffer { buffer } => {
-                if let Ok(dec) = buffer.parse::<Decimal>() {
-                    state.recovery_liquidation_buffer = Ratio::from(dec);
+            Event::SetRecoveryCrMultiplier { multiplier } => {
+                if let Ok(dec) = multiplier.parse::<Decimal>() {
+                    // If value < 1.0, it's a legacy additive buffer (e.g., 0.05).
+                    // Convert: multiplier ≈ 1 + buffer (conservative approximation)
+                    let effective = if dec < Decimal::ONE {
+                        Decimal::ONE + dec  // 0.05 -> 1.05
+                    } else {
+                        dec
+                    };
+                    state.recovery_cr_multiplier = Ratio::from(effective);
                     state.sync_icp_collateral_config();
                 }
             },
@@ -1021,11 +1029,11 @@ pub fn record_set_recovery_target_cr(state: &mut State, rate: Ratio) {
     state.sync_icp_collateral_config();
 }
 
-pub fn record_set_recovery_liquidation_buffer(state: &mut State, buffer: Ratio) {
-    record_event(&Event::SetRecoveryLiquidationBuffer {
-        buffer: buffer.0.to_string(),
+pub fn record_set_recovery_cr_multiplier(state: &mut State, multiplier: Ratio) {
+    record_event(&Event::SetRecoveryCrMultiplier {
+        multiplier: multiplier.0.to_string(),
     });
-    state.recovery_liquidation_buffer = buffer;
+    state.recovery_cr_multiplier = multiplier;
     state.sync_icp_collateral_config();
 }
 
