@@ -276,7 +276,7 @@
         <span class="param-val">Total CR &ge; <span class="live">{crPct(recoveryModeThreshold)}</span></span>
       </div>
       <div class="param">
-        <span class="param-label">Recovery <span class="tip" data-tip="Triggered when the system is under-collateralized. The liquidation threshold rises to the Borrowing Threshold, borrowing fee drops to 0%, and vaults in the warning zone receive partial liquidation.">?</span></span>
+        <span class="param-label">Recovery <span class="tip" data-tip="Triggered when the system is under-collateralized. The liquidation threshold rises to the Borrowing Threshold, minimum CR for borrows is raised to the recovery target, and vaults in the warning zone receive partial liquidation.">?</span></span>
         <span class="param-val">Total CR &lt; <span class="live">{crPct(recoveryModeThreshold)}</span></span>
       </div>
       <div class="param">

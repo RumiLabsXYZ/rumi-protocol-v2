@@ -71,7 +71,7 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Fees</h2>
-    <p>A one-time borrowing fee of {borrowingFeePct}% is deducted from the icUSD you borrow. If you borrow 100 icUSD, you receive {(100 - parseFloat(borrowingFeePct)).toFixed(1)} icUSD and owe 100 icUSD. There is no ongoing interest. The fee drops to 0% if the protocol enters Recovery mode.</p>
+    <p>A one-time borrowing fee of {borrowingFeePct}% is deducted from the icUSD you borrow. If you borrow 100 icUSD, you receive {(100 - parseFloat(borrowingFeePct)).toFixed(1)} icUSD and owe 100 icUSD. There is no ongoing interest. During Recovery mode, per-collateral fee overrides may apply.</p>
   </section>
 
   <section class="doc-section">

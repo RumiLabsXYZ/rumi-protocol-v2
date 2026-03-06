@@ -13,6 +13,7 @@ use crate::{
     DUST_THRESHOLD,
     StableTokenType, VaultArgWithToken,
 };
+use crate::state::Mode;
 use candid::{CandidType, Deserialize, Principal};
 use ic_canister_log::log;
 use icrc_ledger_types::icrc2::transfer_from::TransferFromError;
@@ -634,7 +635,15 @@ async fn borrow_from_vault_internal(caller: Principal, arg: VaultArg) -> Result<
     }
 
     let collateral_value = crate::numeric::collateral_usd_value(vault.collateral_amount, collateral_price, config_decimals);
-    let min_ratio = read_state(|s| s.get_min_collateral_ratio_for(&vault.collateral_type));
+    let min_ratio = read_state(|s| {
+        let base = s.get_min_collateral_ratio_for(&vault.collateral_type);
+        if s.mode == Mode::Recovery {
+            let recovery_cr = s.get_recovery_cr_for(&vault.collateral_type);
+            if recovery_cr > base { recovery_cr } else { base }
+        } else {
+            base
+        }
+    });
     let max_borrowable_amount: ICUSD = collateral_value / min_ratio;
 
     if vault.borrowed_icusd_amount + amount > max_borrowable_amount {
@@ -1452,7 +1461,15 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
         // min_collateral_value = debt * min_ratio
         // min_collateral_amount = icusd_to_collateral_amount(min_collateral_value, price, decimals)
         // max_withdrawable = current_collateral - min_collateral_amount
-        let min_ratio = read_state(|s| s.get_min_collateral_ratio_for(&vault.collateral_type));
+        let min_ratio = read_state(|s| {
+            let base = s.get_min_collateral_ratio_for(&vault.collateral_type);
+            if s.mode == Mode::Recovery {
+                let recovery_cr = s.get_recovery_cr_for(&vault.collateral_type);
+                if recovery_cr > base { recovery_cr } else { base }
+            } else {
+                base
+            }
+        });
         let min_collateral_value: ICUSD = vault.borrowed_icusd_amount * min_ratio;
         let min_collateral_raw = crate::numeric::icusd_to_collateral_amount(min_collateral_value, collateral_price, config_decimals);
         let min_collateral = ICP::from(min_collateral_raw);
