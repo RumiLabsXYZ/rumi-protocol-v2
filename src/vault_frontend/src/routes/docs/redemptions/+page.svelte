@@ -6,6 +6,8 @@
   let redemptionFeeFloor = 0;
   let redemptionFeeCeiling = 0;
   let reserveRedemptionsEnabled = false;
+  let interestPoolPct = '75';
+  let treasuryPct = '25';
   let loaded = false;
 
   function pctRaw(val: number, decimals = 1): string {
@@ -15,16 +17,20 @@
 
   onMount(async () => {
     try {
-      const [rrFee, rfFloor, rfCeil, rrEnabled] = await Promise.all([
+      const [rrFee, rfFloor, rfCeil, rrEnabled, poolShare] = await Promise.all([
         publicActor.get_reserve_redemption_fee() as Promise<number>,
         publicActor.get_redemption_fee_floor() as Promise<number>,
         publicActor.get_redemption_fee_ceiling() as Promise<number>,
         publicActor.get_reserve_redemptions_enabled() as Promise<boolean>,
+        publicActor.get_interest_pool_share() as Promise<number>,
       ]);
       reserveRedemptionFee = Number(rrFee);
       redemptionFeeFloor = Number(rfFloor);
       redemptionFeeCeiling = Number(rfCeil);
       reserveRedemptionsEnabled = rrEnabled;
+      const ps = Number(poolShare);
+      interestPoolPct = (ps * 100).toFixed(0);
+      treasuryPct = ((1 - ps) * 100).toFixed(0);
     } catch (e) {
       console.error('Failed to fetch redemption params:', e);
     }
@@ -62,7 +68,7 @@
       </div>
     {/if}
     <p>Reserve redemptions are the cleanest outcome: you burn icUSD and receive ckStables in return. No vaults are affected.</p>
-    <p>Reserves grow when users repay vault debt with ckUSDT or ckUSDC. Note that 75% of stablecoin repayment interest stays in reserves while 25% goes to the protocol treasury, so reserve growth reflects this split.</p>
+    <p>Reserves grow when users repay vault debt with ckUSDT or ckUSDC. Note that {interestPoolPct}% of stablecoin repayment interest stays in reserves while {treasuryPct}% goes to the protocol treasury, so reserve growth reflects this split.</p>
   </section>
 
   <section class="doc-section">

@@ -7,6 +7,8 @@
 
   let borrowingFeePct = '0.5';
   let ckstableFeePct = '0.05';
+  let interestPoolPct = '75';
+  let treasuryPct = '25';
   let collaterals: CollateralInfo[] = [];
 
   $: collateralSymbols = collaterals.map(c => c.symbol).join(', ') || 'ICP';
@@ -17,12 +19,16 @@
 
   onMount(async () => {
     try {
-      const [bFee, ckFee] = await Promise.all([
+      const [bFee, ckFee, poolShare] = await Promise.all([
         publicActor.get_borrowing_fee() as Promise<number>,
         publicActor.get_ckstable_repay_fee() as Promise<number>,
+        publicActor.get_interest_pool_share() as Promise<number>,
       ]);
       borrowingFeePct = (Number(bFee) * 100).toFixed(1);
       ckstableFeePct = (Number(ckFee) * 100).toFixed(2);
+      const ps = Number(poolShare);
+      interestPoolPct = (ps * 100).toFixed(0);
+      treasuryPct = ((1 - ps) * 100).toFixed(0);
 
       await collateralStore.fetchSupportedCollateral();
       const state = get(collateralStore);
@@ -82,7 +88,7 @@
       <li><strong>Recovery mode multiplier</strong> — if the system enters Recovery mode, a system-wide multiplier increases rates for all vaults.</li>
     </ul>
     <p>Interest is applied to your debt before every vault mutation (borrow, repay, withdraw, liquidation) and ticked forward every 5 minutes by a background timer. This means your debt grows over time — a vault sitting just above the liquidation threshold can drift into liquidation purely from accrued interest, even without any price movement.</p>
-    <p>Interest revenue is split: 75% is distributed to stability pool depositors as icUSD, and 25% goes to the protocol treasury.</p>
+    <p>Interest revenue is split: {interestPoolPct}% is distributed to stability pool depositors as icUSD, and {treasuryPct}% goes to the protocol treasury.</p>
   </section>
 
   <section class="doc-section">

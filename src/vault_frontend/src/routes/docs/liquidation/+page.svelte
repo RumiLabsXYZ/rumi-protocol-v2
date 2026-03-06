@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { protocolService } from '$lib/services/protocol';
+  import { publicActor } from '$lib/services/protocol/apiClient';
   import { collateralStore } from '$lib/stores/collateralStore';
   import type { CollateralInfo } from '$lib/services/types';
   import { get } from 'svelte/store';
@@ -8,6 +9,8 @@
   let liquidationBonus = 1.15;
   let recoveryTargetCr = 1.55;
   let recoveryPct = '150';
+  let liqProtocolPct = '3';
+  let liqKeepPct = '97';
   let collaterals: CollateralInfo[] = [];
   let loaded = false;
 
@@ -24,10 +27,16 @@
 
   onMount(async () => {
     try {
-      const status = await protocolService.getProtocolStatus();
+      const [status, lpShare] = await Promise.all([
+        protocolService.getProtocolStatus(),
+        publicActor.get_liquidation_protocol_share() as Promise<number>,
+      ]);
       if (status.liquidationBonus > 0) liquidationBonus = status.liquidationBonus;
       if (status.recoveryTargetCr > 0) recoveryTargetCr = status.recoveryTargetCr;
       if (status.recoveryModeThreshold > 0) recoveryPct = (status.recoveryModeThreshold * 100).toFixed(0);
+      const lps = Number(lpShare) * 100;
+      liqProtocolPct = lps.toFixed(0);
+      liqKeepPct = (100 - lps).toFixed(0);
 
       await collateralStore.fetchSupportedCollateral();
       const state = get(collateralStore);
@@ -53,7 +62,7 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Full Liquidation</h2>
-    <p>Any user can liquidate an undercollateralized vault. The liquidator pays the vault's full icUSD debt and receives collateral worth {penaltyMult}% of the debt they repaid — the extra {penaltyPct}% is the liquidation penalty, seized from the vault owner's collateral. A 3% protocol fee is taken from the bonus before payout (i.e., the liquidator receives 97% of the {penaltyPct}% bonus, and 3% goes to the protocol treasury).</p>
+    <p>Any user can liquidate an undercollateralized vault. The liquidator pays the vault's full icUSD debt and receives collateral worth {penaltyMult}% of the debt they repaid — the extra {penaltyPct}% is the liquidation penalty, seized from the vault owner's collateral. A {liqProtocolPct}% protocol fee is taken from the bonus before payout (i.e., the liquidator receives {liqKeepPct}% of the {penaltyPct}% bonus, and {liqProtocolPct}% goes to the protocol treasury).</p>
     <p>If the vault's collateral is worth less than {penaltyMult}% of the debt (deep undercollateralization), the liquidator receives all available collateral. For full liquidations, any excess collateral above the {penaltyMult}% is returned to the original vault owner. For partial liquidations, the excess remains in the vault since it stays open.</p>
   </section>
 

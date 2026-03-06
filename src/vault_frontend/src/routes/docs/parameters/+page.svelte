@@ -14,6 +14,8 @@
   let redemptionFeeCeiling = 0;
   let ckstableRepayFee = 0;
   let reserveRedemptionFee = 0;
+  let interestPoolShare = 0.75;
+  let liquidationProtocolShare = 0.03;
 
   // All supported collateral types (populated dynamically)
   let collaterals: CollateralInfo[] = [];
@@ -46,13 +48,15 @@
   onMount(async () => {
     try {
       // Fetch global parameters and per-collateral config in parallel
-      const [status, bFee, rfFloor, rfCeil, ckFee, rrFee] = await Promise.all([
+      const [status, bFee, rfFloor, rfCeil, ckFee, rrFee, ipShare, lpShare] = await Promise.all([
         protocolService.getProtocolStatus(),
         publicActor.get_borrowing_fee() as Promise<number>,
         publicActor.get_redemption_fee_floor() as Promise<number>,
         publicActor.get_redemption_fee_ceiling() as Promise<number>,
         publicActor.get_ckstable_repay_fee() as Promise<number>,
         publicActor.get_reserve_redemption_fee() as Promise<number>,
+        publicActor.get_interest_pool_share() as Promise<number>,
+        publicActor.get_liquidation_protocol_share() as Promise<number>,
       ]);
 
       liquidationBonus = status.liquidationBonus;
@@ -63,6 +67,8 @@
       redemptionFeeCeiling = Number(rfCeil);
       ckstableRepayFee = Number(ckFee);
       reserveRedemptionFee = Number(rrFee);
+      interestPoolShare = Number(ipShare);
+      liquidationProtocolShare = Number(lpShare);
 
       // Load ALL supported collateral types
       await collateralStore.fetchSupportedCollateral();
@@ -147,7 +153,7 @@
       </div>
       <div class="param">
         <span class="param-label">Liquidation Protocol Fee <span class="tip" data-tip="A percentage of the liquidation bonus (penalty) that goes to the protocol treasury. For example, if the bonus is 15% and the protocol fee is 3%, the liquidator receives 97% of the bonus and the protocol keeps 3%.">?</span></span>
-        <span class="param-val">3% of liquidation bonus</span>
+        <span class="param-val live">{pctRaw(liquidationProtocolShare)} of liquidation bonus</span>
       </div>
     </div>
   </section>
@@ -199,7 +205,7 @@
       </div>
       <div class="param">
         <span class="param-label">Interest Revenue Split <span class="tip" data-tip="Interest revenue is split between stability pool depositors (as minted icUSD) and the protocol treasury. This ratio is admin-configurable.">?</span></span>
-        <span class="param-val live">75% stability pool / 25% treasury</span>
+        <span class="param-val live">{pctRaw(interestPoolShare)} stability pool / {pctRaw(1 - interestPoolShare)} treasury</span>
       </div>
     </div>
   </section>
