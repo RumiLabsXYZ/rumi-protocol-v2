@@ -67,6 +67,12 @@ pub const DEFAULT_RECOVERY_MULTIPLIER_LIQUIDATION: Ratio = Ratio::new(dec!(2.0))
 /// Default healthy CR multiplier (healthy_cr = this * borrow_threshold_ratio)
 pub const DEFAULT_HEALTHY_CR_MULTIPLIER: Ratio = Ratio::new(dec!(1.5));
 
+/// Dynamic Redemption Margin Ratio constants.
+/// Redeemers receive RMR × face value of their icUSD.
+pub const RMR_FLOOR: Ratio = Ratio::new(dec!(0.96));     // 96% at healthy system
+pub const RMR_CEILING: Ratio = Ratio::new(dec!(1.0));     // 100% at/below recovery
+pub const RMR_HEALTHY_MULTIPLIER: Ratio = Ratio::new(dec!(1.5)); // 1.5× recovery = "healthy"
+
 /// Collateral type identified by its ICRC-1 ledger canister principal.
 pub type CollateralType = Principal;
 
@@ -861,6 +867,33 @@ impl State {
             self.redemption_fee_floor,
             self.redemption_fee_ceiling,
         )
+    }
+
+    /// Dynamic Redemption Margin Ratio.
+    /// Redeemers receive RMR × face value of their icUSD.
+    /// - At/above 1.5× recovery threshold: 96% (discourages redemption when healthy)
+    /// - At/below recovery threshold: 100% (par redemption when system stressed)
+    /// - Linear interpolation between
+    /// - NEVER above 100% (prevents mint-and-redeem arbitrage)
+    pub fn get_redemption_margin_ratio(&self) -> Ratio {
+        let tcr = self.total_collateral_ratio;
+        let recovery = self.recovery_mode_threshold;
+        let healthy = recovery * RMR_HEALTHY_MULTIPLIER; // e.g., 1.50 × 1.5 = 2.25
+
+        if tcr <= recovery {
+            return RMR_CEILING; // 100%
+        }
+        if tcr >= healthy {
+            return RMR_FLOOR; // 96%
+        }
+
+        // Linear interpolation: 1.0 - ((tcr - recovery) / (healthy - recovery)) × (1.0 - 0.96)
+        let range = healthy - recovery;   // e.g., 0.75
+        let position = tcr - recovery;    // how far above recovery
+        let spread = RMR_CEILING - RMR_FLOOR; // 0.04
+        // Use inner Decimal for division since Div<Ratio> for Ratio is not implemented
+        let discount = Ratio::from(position.0 / range.0) * spread;
+        RMR_CEILING - discount
     }
 
     pub fn get_borrowing_fee(&self) -> Ratio {
@@ -3029,6 +3062,81 @@ mod tests {
             (principal_share.to_u64() as f64 / 1e8 - 47.5).abs() < 0.01,
             "Principal share should be ~47.5 icUSD, got {}",
             principal_share.to_u64() as f64 / 1e8
+        );
+    }
+
+    /// Helper to create a minimal State for RMR tests.
+    fn test_state() -> State {
+        State::from(InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: Principal::anonymous(),
+            fee_e8s: 0,
+            developer_principal: Principal::anonymous(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        })
+    }
+
+    #[test]
+    fn test_dynamic_rmr_healthy_system() {
+        let mut state = test_state();
+        state.total_collateral_ratio = Ratio::from_f64(2.25);
+        state.recovery_mode_threshold = RECOVERY_COLLATERAL_RATIO; // 1.50
+        let rmr = state.get_redemption_margin_ratio();
+        assert!(
+            (rmr.to_f64() - 0.96).abs() < 0.001,
+            "RMR at 1.5x recovery should be 0.96, got {}", rmr.to_f64()
+        );
+    }
+
+    #[test]
+    fn test_dynamic_rmr_at_recovery() {
+        let mut state = test_state();
+        state.total_collateral_ratio = Ratio::from_f64(1.50);
+        state.recovery_mode_threshold = RECOVERY_COLLATERAL_RATIO;
+        let rmr = state.get_redemption_margin_ratio();
+        assert!(
+            (rmr.to_f64() - 1.0).abs() < 0.001,
+            "RMR at recovery threshold should be 1.0, got {}", rmr.to_f64()
+        );
+    }
+
+    #[test]
+    fn test_dynamic_rmr_midpoint() {
+        let mut state = test_state();
+        state.total_collateral_ratio = Ratio::from_f64(1.875);
+        state.recovery_mode_threshold = RECOVERY_COLLATERAL_RATIO;
+        let rmr = state.get_redemption_margin_ratio();
+        assert!(
+            (rmr.to_f64() - 0.98).abs() < 0.001,
+            "RMR at midpoint should be 0.98, got {}", rmr.to_f64()
+        );
+    }
+
+    #[test]
+    fn test_dynamic_rmr_below_recovery() {
+        let mut state = test_state();
+        state.total_collateral_ratio = Ratio::from_f64(1.30);
+        state.recovery_mode_threshold = RECOVERY_COLLATERAL_RATIO;
+        let rmr = state.get_redemption_margin_ratio();
+        assert!(
+            (rmr.to_f64() - 1.0).abs() < 0.001,
+            "RMR below recovery should be 1.0, got {}", rmr.to_f64()
+        );
+    }
+
+    #[test]
+    fn test_dynamic_rmr_above_15x() {
+        let mut state = test_state();
+        state.total_collateral_ratio = Ratio::from_f64(5.0);
+        state.recovery_mode_threshold = RECOVERY_COLLATERAL_RATIO;
+        let rmr = state.get_redemption_margin_ratio();
+        assert!(
+            (rmr.to_f64() - 0.96).abs() < 0.001,
+            "RMR above 1.5x should be capped at 0.96, got {}", rmr.to_f64()
         );
     }
 }

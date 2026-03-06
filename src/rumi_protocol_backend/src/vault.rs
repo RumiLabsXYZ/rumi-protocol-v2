@@ -154,8 +154,12 @@ pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Prin
     let fee_icusd = icusd_amount * reserve_fee_ratio;
     let net_icusd = icusd_amount - fee_icusd;
 
+    // Apply dynamic Redemption Margin Ratio: redeemers get RMR × face value
+    let rmr = read_state(|s| s.get_redemption_margin_ratio());
+    let effective_icusd = net_icusd * rmr;
+
     // Convert e8s (icUSD) to e6s (ckStable): divide by 100
-    let net_e6s = net_icusd.to_u64() / 100;
+    let net_e6s = effective_icusd.to_u64() / 100;
     let fee_e6s = fee_icusd.to_u64() / 100;
 
     if net_e6s == 0 {
@@ -260,10 +264,14 @@ pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Prin
             s.last_redemption_time = ic_cdk::api::time();
             let vault_fee = spillover_icusd * base_fee;
 
+            // Apply dynamic Redemption Margin Ratio: redeemers get RMR × face value
+            let rmr = s.get_redemption_margin_ratio();
+            let effective_spillover = (spillover_icusd - vault_fee) * rmr;
+
             record_redemption_on_vaults(
                 s,
                 caller,
-                spillover_icusd - vault_fee,
+                effective_spillover,
                 vault_fee,
                 current_price,
                 icusd_block_index,
@@ -334,10 +342,14 @@ pub async fn redeem_collateral(collateral_type: Principal, _icusd_amount: u64) -
                 s.last_redemption_time = ic_cdk::api::time();
                 let fee_amount = icusd_amount * base_fee;
 
+                // Apply dynamic Redemption Margin Ratio: redeemers get RMR × face value
+                let rmr = s.get_redemption_margin_ratio();
+                let effective_icusd = (icusd_amount - fee_amount) * rmr;
+
                 record_redemption_on_vaults(
                     s,
                     caller,
-                    icusd_amount - fee_amount,
+                    effective_icusd,
                     fee_amount,
                     current_collateral_price,
                     block_index,
