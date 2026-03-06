@@ -64,6 +64,12 @@
   </section>
 
   <section class="doc-section">
+    <h2 class="doc-heading">Interest Rate Risk</h2>
+    <p>Vaults accrue interest continuously on outstanding debt. The effective rate depends on two factors: a per-vault multiplier based on how close your CR is to liquidation, and a system-wide multiplier during Recovery mode. Both can increase your debt faster than expected.</p>
+    <p>A vault sitting just above the liquidation threshold can drift into liquidation purely from accrued interest, even without any collateral price change. Interest rates and rate curves are admin-configurable and can change without notice. See <a href="/docs/parameters" class="doc-link">Protocol Parameters</a> for current rates.</p>
+  </section>
+
+  <section class="doc-section">
     <h2 class="doc-heading">Redistribution Risk</h2>
     <p>If a vault becomes deeply undercollateralized and is not liquidated by a third party, the protocol can redistribute its remaining debt and collateral across all other vaults of the same collateral type. This means your vault can absorb extra debt from a failed vault — even if your own vault is healthy. The extra debt comes with proportional extra collateral, so the net impact is a slight CR decrease. See <a href="/docs/liquidation" class="doc-link">Liquidation Mechanics</a> for the formula.</p>
   </section>
@@ -86,7 +92,8 @@
   <section class="doc-section">
     <h2 class="doc-heading">Admin Controls</h2>
     <p>The developer principal can mint icUSD directly via an <code>admin_mint_icusd</code> function. This exists as an emergency tool — for example, to refund users who lost funds due to a failed inter-canister transfer. Guardrails: each mint is capped at 1,500 icUSD with a 72-hour cooldown. Every use is recorded on-chain with a reason. See the <a href="/transparency" class="doc-link">Transparency</a> page for a full log.</p>
-    <p>Beyond minting, the developer principal can adjust all configurable protocol parameters without a timelock or governance vote. This includes: borrowing fee, liquidation penalty, redemption fee floor/ceiling, reserve redemption fee, ckStable repay fee, recovery liquidation buffer, and per-collateral settings (liquidation ratio, borrow threshold, debt ceiling, status). The developer can also enable/disable reserve redemptions and individual stablecoin tokens.</p>
+    <p>The developer principal can also <strong>freeze the entire protocol</strong> — halting all state-changing operations as an emergency kill-switch — and <strong>manually enter or exit Recovery Mode</strong>, overriding the automatic CR-based trigger.</p>
+    <p>Beyond these emergency controls, the developer principal can adjust all configurable protocol parameters without a timelock or governance vote. This includes: borrowing fee, liquidation penalty, redemption fee floor/ceiling, reserve redemption fee, ckStable repay fee, recovery CR multiplier, interest rates, interest revenue split, and per-collateral settings (liquidation ratio, borrow threshold, debt ceiling, interest rate, status). The developer can also enable/disable reserve redemptions and individual stablecoin tokens.</p>
     <p>All parameter changes are recorded as on-chain events in the protocol's immutable event log. If the protocol transitions to SNS (DAO) governance, these functions would be controlled by governance proposals rather than a single principal.</p>
   </section>
 

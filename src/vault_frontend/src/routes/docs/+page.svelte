@@ -16,6 +16,11 @@
       description: "Protocol risks, oracle failure modes, and edge cases you should understand."
     },
     {
+      title: "Stability Pool",
+      href: "/docs/stability-pool",
+      description: "Earn yield by depositing icUSD to backstop liquidations and receive interest revenue."
+    },
+    {
       title: "Redemptions",
       href: "/docs/redemptions",
       description: "How icUSD redemptions work: reserve-backed ckStable and vault spillover."
@@ -45,7 +50,7 @@
 <div class="page-container docs-container">
   <h1 class="page-title docs-title">Documentation</h1>
   <p class="docs-subtitle">
-    Rumi Protocol is a CDP system that lets you borrow icUSD stablecoins against supported collateral on the Internet Computer.
+    Rumi Protocol is a CDP system that lets you borrow icUSD stablecoins against supported collateral on the Internet Computer. Vaults accrue interest on outstanding debt.
     These docs cover what's currently implemented — not future plans. Connect with <strong>Oisy</strong>, <strong>Plug</strong>, <strong>Internet Identity</strong>, or <strong>NFID</strong> to get started.
   </p>
 

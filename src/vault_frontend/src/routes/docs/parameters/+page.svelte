@@ -134,8 +134,8 @@
         <span class="param-val live">{crPct(recoveryModeThreshold)} (system-wide, debt-weighted)</span>
       </div>
       <div class="param">
-        <span class="param-label">Recovery Target CR <span class="tip" data-tip="During Recovery Mode, partially liquidated vaults are restored to this collateral ratio. Computed as Recovery Mode Threshold + Recovery Liquidation Buffer. Only enough debt is repaid to bring the vault back to this level.">?</span></span>
-        <span class="param-val live">{crPct(recoveryTargetCr)} (threshold + buffer)</span>
+        <span class="param-label">Recovery Target CR <span class="tip" data-tip="During Recovery Mode, partially liquidated vaults are restored to this collateral ratio. Computed as Recovery Mode Threshold × Recovery CR Multiplier. Only enough debt is repaid to bring the vault back to this level.">?</span></span>
+        <span class="param-val live">{crPct(recoveryTargetCr)} (threshold × multiplier)</span>
       </div>
       <div class="param">
         <span class="param-label">Liquidation Penalty <span class="tip" data-tip="The extra collateral seized from a liquidated vault. For example, 15% means the liquidator receives collateral worth 115% of the debt they repay — the extra 15% is your penalty for being undercollateralized.">?</span></span>
@@ -145,6 +145,10 @@
         <span class="param-label">Partial Liquidation <span class="tip" data-tip="In Recovery Mode, vaults between the Liquidation Ratio and Borrowing Threshold are not fully liquidated. Instead, only enough debt is repaid to restore the vault to the Recovery Target CR.">?</span></span>
         <span class="param-val">Restores vault CR to Recovery Target</span>
       </div>
+      <div class="param">
+        <span class="param-label">Liquidation Protocol Fee <span class="tip" data-tip="A percentage of the liquidation bonus (penalty) that goes to the protocol treasury. For example, if the bonus is 15% and the protocol fee is 3%, the liquidator receives 97% of the bonus and the protocol keeps 3%.">?</span></span>
+        <span class="param-val">3% of liquidation bonus</span>
+      </div>
     </div>
   </section>
 
@@ -152,8 +156,8 @@
     <h2 class="doc-heading">Fees</h2>
     <div class="params-table">
       <div class="param">
-        <span class="param-label">Borrowing Fee <span class="tip" data-tip="A one-time fee deducted from the icUSD you mint. For example, if 0.5%, borrowing 100 icUSD means you receive 99.5 icUSD but owe 100. Drops to 0% during Recovery Mode.">?</span></span>
-        <span class="param-val live">{pctRaw(borrowingFee)} (0% in Recovery)</span>
+        <span class="param-label">Borrowing Fee <span class="tip" data-tip="A one-time fee deducted from the icUSD you mint. For example, if 0.5%, borrowing 100 icUSD means you receive 99.5 icUSD but owe 100. In Recovery Mode, per-collateral fee overrides may apply.">?</span></span>
+        <span class="param-val live">{pctRaw(borrowingFee)} (per-collateral overrides in Recovery)</span>
       </div>
       <div class="param">
         <span class="param-label">Redemption Fee Floor <span class="tip" data-tip="The minimum fee charged when redeeming icUSD for collateral. The actual fee starts here and increases with redemption volume, then decays back over time.">?</span></span>
@@ -178,6 +182,34 @@
       <div class="param">
         <span class="param-label">icUSD Ledger Fee <span class="tip" data-tip="The network fee charged by the icUSD ledger for each transfer.">?</span></span>
         <span class="param-val">0.001 icUSD</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="doc-section">
+    <h2 class="doc-heading">Interest & Revenue</h2>
+    <div class="params-table">
+      <div class="param">
+        <span class="param-label">Interest Accrual <span class="tip" data-tip="Interest is applied to vault debt before every mutation (borrow, repay, withdraw, liquidation) and ticked forward every 5 minutes by a background timer.">?</span></span>
+        <span class="param-val">Continuous (5-min tick + on-demand)</span>
+      </div>
+      <div class="param">
+        <span class="param-label">Interest Rate Layers <span class="tip" data-tip="Layer 1: per-vault multiplier based on how close the vault's CR is to liquidation (higher rate for riskier vaults). Layer 2: system-wide multiplier active during Recovery Mode.">?</span></span>
+        <span class="param-val">Per-vault CR curve + Recovery multiplier</span>
+      </div>
+      <div class="param">
+        <span class="param-label">Interest Revenue Split <span class="tip" data-tip="Interest revenue is split between stability pool depositors (as minted icUSD) and the protocol treasury. This ratio is admin-configurable.">?</span></span>
+        <span class="param-val live">75% stability pool / 25% treasury</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="doc-section">
+    <h2 class="doc-heading">Redemption Mechanics</h2>
+    <div class="params-table">
+      <div class="param">
+        <span class="param-label">Redemption Margin Ratio (RMR) <span class="tip" data-tip="Redeemers receive this percentage of face value. 96% when the system is healthy (≥1.5× recovery threshold), scaling linearly up to 100% at the recovery threshold. Prevents mint-and-redeem arbitrage while protecting redeemers near recovery.">?</span></span>
+        <span class="param-val">96% (healthy) → 100% (at recovery)</span>
       </div>
     </div>
   </section>
@@ -282,6 +314,10 @@
       <div class="param">
         <span class="param-label">Read-Only <span class="tip" data-tip="Emergency mode where all state-changing operations are paused. Triggered by extreme under-collateralization or oracle failure.">?</span></span>
         <span class="param-val">Total CR &lt; 100% or oracle failure</span>
+      </div>
+      <div class="param">
+        <span class="param-label">Frozen <span class="tip" data-tip="Emergency kill-switch activated manually by the protocol admin. All state-changing operations are paused until the admin unfreezes the protocol.">?</span></span>
+        <span class="param-val">Admin-triggered emergency halt</span>
       </div>
     </div>
   </section>

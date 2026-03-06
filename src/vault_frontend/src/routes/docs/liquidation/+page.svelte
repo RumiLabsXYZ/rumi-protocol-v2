@@ -48,11 +48,12 @@
     <h2 class="doc-heading">When Liquidation Happens</h2>
     <p>A vault becomes eligible for liquidation when its collateral ratio drops below the liquidation threshold for that collateral type{liqSummary ? ` (${liqSummary})` : ''}. In Recovery mode, the threshold rises to the borrowing threshold{borrowSummary ? ` (${borrowSummary})` : ''}.</p>
     <p>The protocol checks vault health every time collateral prices update — approximately every 5 minutes via background polling. Price-sensitive operations (liquidations, borrows, etc.) also trigger an on-demand price refresh if the cached price is older than 30 seconds. Liquidation is not instant on price movement; it depends on the next price update.</p>
+    <p>Interest accrual also affects vault health. Since interest increases your debt over time, a vault sitting just above the liquidation threshold can drift below it purely from accrued interest — even without any price change. Interest is applied before every vault operation and ticked forward every 5 minutes.</p>
   </section>
 
   <section class="doc-section">
     <h2 class="doc-heading">Full Liquidation</h2>
-    <p>Any user can liquidate an undercollateralized vault. The liquidator pays the vault's full icUSD debt and receives collateral worth {penaltyMult}% of the debt they repaid — the extra {penaltyPct}% is the liquidation penalty, seized from the vault owner's collateral.</p>
+    <p>Any user can liquidate an undercollateralized vault. The liquidator pays the vault's full icUSD debt and receives collateral worth {penaltyMult}% of the debt they repaid — the extra {penaltyPct}% is the liquidation penalty, seized from the vault owner's collateral. A 3% protocol fee is taken from the bonus before payout (i.e., the liquidator receives 97% of the {penaltyPct}% bonus, and 3% goes to the protocol treasury).</p>
     <p>If the vault's collateral is worth less than {penaltyMult}% of the debt (deep undercollateralization), the liquidator receives all available collateral. For full liquidations, any excess collateral above the {penaltyMult}% is returned to the original vault owner. For partial liquidations, the excess remains in the vault since it stays open.</p>
   </section>
 
@@ -77,9 +78,9 @@
   <section class="doc-section">
     <h2 class="doc-heading">Recovery Mode — Targeted Liquidation</h2>
     <p>When the protocol enters Recovery mode (total system CR below {recoveryPct}%), the liquidation threshold rises to the borrowing threshold for each collateral type. Vaults between their liquidation ratio and borrowing threshold become liquidatable — but they are <strong>not</strong> fully liquidated.</p>
-    <p>Instead, the protocol calculates the minimum amount of debt that needs to be repaid to restore the vault's collateral ratio to {targetPct}%. The liquidator pays only that amount and receives proportional collateral plus the {bonusPct}% bonus. The vault remains open with reduced debt and collateral at approximately {targetPct}% CR.</p>
+    <p>Instead, the protocol calculates the minimum amount of debt that needs to be repaid to restore the vault's collateral ratio to {targetPct}%. The liquidator pays only that amount and receives proportional collateral plus the {penaltyPct}% bonus. The vault remains open with reduced debt and collateral at approximately {targetPct}% CR.</p>
     <p>The formula is:</p>
-    <p class="doc-formula">repay = ({targetPct}% &times; debt &minus; collateral value) &divide; ({targetPct}% &minus; {bonusMult}%)</p>
+    <p class="doc-formula">repay = ({targetPct}% &times; debt &minus; collateral value) &divide; ({targetPct}% &minus; {penaltyMult}%)</p>
     <p>Vaults below their liquidation ratio are still fully liquidated in both normal and Recovery mode.</p>
   </section>
 
@@ -89,6 +90,7 @@
     <p><strong>General Availability</strong> — total CR is above {recoveryPct}%. Normal operations. Liquidation uses each collateral type's own liquidation ratio.</p>
     <p><strong>Recovery</strong> — total CR drops below {recoveryPct}%. Liquidation threshold rises to the borrowing threshold for each type. The minimum collateral ratio for new borrows and withdrawals is raised to the recovery target CR. Vaults between the liquidation ratio and borrowing threshold get targeted partial liquidation.</p>
     <p><strong>Read-Only</strong> — total CR drops below 100%, or the oracle reports a price below $0.01. All state-changing operations are paused. No new borrows, no liquidations. The protocol waits for conditions to improve.</p>
+    <p><strong>Frozen</strong> — emergency kill-switch activated manually by the protocol admin. All state-changing operations are halted until the admin unfreezes the protocol.</p>
   </section>
 
   <section class="doc-section">

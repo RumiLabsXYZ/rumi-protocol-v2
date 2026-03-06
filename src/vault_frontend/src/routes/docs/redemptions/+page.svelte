@@ -39,8 +39,13 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">What Is Redemption</h2>
-    <p>Redemption lets any icUSD holder exchange their icUSD for value at face value ($1 per icUSD), minus a fee. This creates a price floor for icUSD — if icUSD trades below $1 on the open market, arbitrageurs can buy it cheaply and redeem it for $1 worth of assets, driving the price back up.</p>
+    <p>Redemption lets any icUSD holder exchange their icUSD for value at close to face value ($1 per icUSD), minus a fee and a Redemption Margin Ratio (RMR) adjustment. This creates a price floor for icUSD — if icUSD trades below $1 on the open market, arbitrageurs can buy it cheaply and redeem it for near-$1 worth of assets, driving the price back up.</p>
     <p>Redemption is a core peg-maintenance mechanism. It protects icUSD holders by ensuring their tokens are always backed by redeemable value.</p>
+    <div class="fee-box">
+      <span class="fee-label">Redemption Margin Ratio (RMR)</span>
+      <span class="fee-value">96% (healthy) → 100% (at recovery)</span>
+    </div>
+    <p>The RMR determines what fraction of face value you receive. When the system is healthy (total CR well above recovery threshold), you receive 96% of face value. As the system approaches recovery, the RMR scales linearly up to 100%. This prevents mint-and-redeem arbitrage under normal conditions while ensuring full redemption value when the system most needs peg support.</p>
   </section>
 
   <section class="doc-section">
@@ -57,6 +62,7 @@
       </div>
     {/if}
     <p>Reserve redemptions are the cleanest outcome: you burn icUSD and receive ckStables in return. No vaults are affected.</p>
+    <p>Reserves grow when users repay vault debt with ckUSDT or ckUSDC. Note that 75% of stablecoin repayment interest stays in reserves while 25% goes to the protocol treasury, so reserve growth reflects this split.</p>
   </section>
 
   <section class="doc-section">
@@ -88,7 +94,7 @@
     <h2 class="doc-heading">Impact on Vault Owners</h2>
     <p><strong>Reserve tier (Tier 1):</strong> Zero impact on vaults. The protocol draws from its own stablecoin reserves. Your vault is completely unaffected.</p>
     <p><strong>Vault tier (Tier 2):</strong> Your vault's debt is reduced, but collateral is also taken proportionally. The protocol uses a <strong>water-filling algorithm</strong> — it doesn't simply drain the single lowest-CR vault. Instead, it identifies the band of vaults with the lowest CRs and distributes the redemption proportionally by debt across the band, raising them all equally. If the redemption amount would raise the entire band above the next tier, the band merges upward and the process repeats. This means redemptions affect multiple low-CR vaults simultaneously rather than wiping out one vault at a time.</p>
-    <p>Vault redemption is not liquidation. Your vault remains open and you retain any remaining collateral and debt. The collateral taken is always at face value — there is no penalty or bonus applied. Keeping your vault well-collateralized reduces the chance of being redeemed against.</p>
+    <p>Vault redemption is not liquidation. Your vault remains open and you retain any remaining collateral and debt. The collateral taken is valued at the RMR-adjusted rate (96–100% of face value depending on system health), minus the dynamic vault redemption fee. Keeping your vault well-collateralized reduces the chance of being redeemed against.</p>
   </section>
 
   <section class="doc-section">
@@ -98,6 +104,7 @@
       <li>The icUSD is burned (removed from circulation).</li>
       <li><strong>Tier 1:</strong> The protocol checks its ckStable reserves and sends you stablecoins up to the available balance.</li>
       <li><strong>Tier 2:</strong> Any remaining amount after reserves is filled by taking ICP from the lowest-CR vaults.</li>
+      <li>The Redemption Margin Ratio (RMR) is applied — you receive 96–100% of face value depending on system health.</li>
       <li>Fees are deducted from the amount you receive — flat reserve fee for Tier 1, dynamic fee for Tier 2.</li>
       <li>Reserve fees are sent to the protocol treasury. Vault redemption fees are deducted from the ICP collateral released.</li>
     </ol>
