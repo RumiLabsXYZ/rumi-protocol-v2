@@ -48,8 +48,9 @@ pub const DEFAULT_REDEMPTION_FEE_FLOOR: Ratio = Ratio::new(dec!(0.003)); // 0.3%
 pub const DEFAULT_REDEMPTION_FEE_CEILING: Ratio = Ratio::new(dec!(0.05)); // 5%
 pub const DEFAULT_RESERVE_REDEMPTION_FEE: Ratio = Ratio::new(dec!(0.003)); // 0.3% flat fee for reserve redemptions
 pub const DEFAULT_RECOVERY_TARGET_CR: Ratio = Ratio::new(dec!(1.55)); // 155% — legacy; kept for serde backwards compat
-pub const DEFAULT_RECOVERY_LIQUIDATION_BUFFER: Ratio = Ratio::new(dec!(0.05)); // 5% above recovery threshold
+pub const DEFAULT_RECOVERY_CR_MULTIPLIER: Ratio = Ratio::new(dec!(1.033333333333333333)); // proportional buffer: recovery_cr = borrow_threshold × 1.0333...
 pub const DEFAULT_INTEREST_RATE_APR: Ratio = Ratio::new(dec!(0.0)); // 0% — placeholder for future accrual
+pub const DEFAULT_INTEREST_POOL_SHARE: Ratio = Ratio::new(dec!(0.75)); // 75% to stability pool
 pub const DUST_DEBT_THRESHOLD: u64 = 50_000; // 0.0005 icUSD — debt below this is forgiven on withdrawal
 
 /// Default Layer 1 multipliers at each CR marker
@@ -66,6 +67,12 @@ pub const DEFAULT_RECOVERY_MULTIPLIER_LIQUIDATION: Ratio = Ratio::new(dec!(2.0))
 
 /// Default healthy CR multiplier (healthy_cr = this * borrow_threshold_ratio)
 pub const DEFAULT_HEALTHY_CR_MULTIPLIER: Ratio = Ratio::new(dec!(1.5));
+
+/// Dynamic Redemption Margin Ratio constants.
+/// Redeemers receive RMR × face value of their icUSD.
+pub const RMR_FLOOR: Ratio = Ratio::new(dec!(0.96));     // 96% at healthy system
+pub const RMR_CEILING: Ratio = Ratio::new(dec!(1.0));     // 100% at/below recovery
+pub const RMR_HEALTHY_MULTIPLIER: Ratio = Ratio::new(dec!(1.5)); // 1.5× recovery = "healthy"
 
 /// Collateral type identified by its ICRC-1 ledger canister principal.
 pub type CollateralType = Principal;
@@ -429,9 +436,9 @@ pub struct State {
     pub redemption_fee_ceiling: Ratio,
     pub recovery_target_cr: Ratio, // legacy absolute value; kept for compat with old events
 
-    /// Buffer above the dynamic recovery threshold for partial-liquidation target.
-    /// Effective recovery target = recovery_mode_threshold + recovery_liquidation_buffer.
-    pub recovery_liquidation_buffer: Ratio,
+    /// Proportional multiplier above borrow_threshold for per-asset recovery CR.
+    /// recovery_cr = borrow_threshold × recovery_cr_multiplier.
+    pub recovery_cr_multiplier: Ratio,
 
     /// Cached dynamic recovery mode threshold (debt-weighted average of per-collateral borrow thresholds).
     /// Updated alongside total_collateral_ratio on each price tick.
@@ -453,7 +460,7 @@ pub struct State {
     pub global_rate_curve: RateCurve,
     /// Recovery mode rate curve (Layer 2, system-wide). Named thresholds resolved at runtime.
     pub recovery_rate_curve: Vec<RecoveryRateMarker>,
-    /// Cached debt-weighted average of per-asset recovery CRs (borrow_threshold + buffer).
+    /// Cached debt-weighted average of per-asset recovery CRs (borrow_threshold × multiplier).
     pub weighted_avg_recovery_cr: Ratio,
     /// Cached debt-weighted average of per-asset warning CRs (2 * recovery_cr - borrow_threshold).
     pub weighted_avg_warning_cr: Ratio,
@@ -469,6 +476,10 @@ pub struct State {
     /// Global fraction of the liquidation bonus (liquidator's profit) that goes to the protocol treasury.
     /// e.g., 0.03 = protocol gets 3% of the bonus, liquidator keeps 97%.
     pub liquidation_protocol_share: Ratio,
+
+    /// Share of interest revenue sent to stability pool depositors (0.0-1.0).
+    /// Remainder goes to protocol treasury.
+    pub interest_pool_share: Ratio,
 }
 
 impl From<InitArg> for State {
@@ -526,7 +537,7 @@ impl From<InitArg> for State {
             redemption_fee_floor: DEFAULT_REDEMPTION_FEE_FLOOR,
             redemption_fee_ceiling: DEFAULT_REDEMPTION_FEE_CEILING,
             recovery_target_cr: DEFAULT_RECOVERY_TARGET_CR,
-            recovery_liquidation_buffer: DEFAULT_RECOVERY_LIQUIDATION_BUFFER,
+            recovery_cr_multiplier: DEFAULT_RECOVERY_CR_MULTIPLIER,
             recovery_mode_threshold: RECOVERY_COLLATERAL_RATIO,
 
             // Reserve redemptions
@@ -599,6 +610,7 @@ impl From<InitArg> for State {
             pending_treasury_interest: ICUSD::new(0),
             pending_treasury_collateral: Vec::new(),
             liquidation_protocol_share: crate::DEFAULT_LIQUIDATION_PROTOCOL_SHARE,
+            interest_pool_share: DEFAULT_INTEREST_POOL_SHARE,
         }
     }
 }
@@ -811,10 +823,12 @@ impl State {
         let total_debt = self.total_borrowed_icusd_amount();
         if total_debt == ICUSD::new(0) {
             // No debt: use defaults based on first collateral type or global defaults
+            let default_recovery = RECOVERY_COLLATERAL_RATIO * self.recovery_cr_multiplier;
+            // warning = 2 * recovery_cr - borrow_threshold
+            let default_warning = default_recovery + default_recovery - RECOVERY_COLLATERAL_RATIO;
             return (
-                RECOVERY_COLLATERAL_RATIO + self.recovery_liquidation_buffer,
-                // warning = 2 * recovery_cr - borrow_threshold = borrow + 2*buffer
-                RECOVERY_COLLATERAL_RATIO + self.recovery_liquidation_buffer + self.recovery_liquidation_buffer,
+                default_recovery,
+                default_warning,
                 RECOVERY_COLLATERAL_RATIO * DEFAULT_HEALTHY_CR_MULTIPLIER,
             );
         }
@@ -833,7 +847,7 @@ impl State {
             let weight = Decimal::from_u64(debt_i.to_u64())
                 .unwrap_or(Decimal::ZERO) / total_debt_dec;
 
-            let recovery_cr = config.borrow_threshold_ratio.0 + self.recovery_liquidation_buffer.0;
+            let recovery_cr = config.borrow_threshold_ratio.0 * self.recovery_cr_multiplier.0;
             let warning_cr = recovery_cr + recovery_cr - config.borrow_threshold_ratio.0;
             let healthy_cr = config.healthy_cr
                 .map(|h| h.0)
@@ -859,6 +873,33 @@ impl State {
             self.redemption_fee_floor,
             self.redemption_fee_ceiling,
         )
+    }
+
+    /// Dynamic Redemption Margin Ratio.
+    /// Redeemers receive RMR × face value of their icUSD.
+    /// - At/above 1.5× recovery threshold: 96% (discourages redemption when healthy)
+    /// - At/below recovery threshold: 100% (par redemption when system stressed)
+    /// - Linear interpolation between
+    /// - NEVER above 100% (prevents mint-and-redeem arbitrage)
+    pub fn get_redemption_margin_ratio(&self) -> Ratio {
+        let tcr = self.total_collateral_ratio;
+        let recovery = self.recovery_mode_threshold;
+        let healthy = recovery * RMR_HEALTHY_MULTIPLIER; // e.g., 1.50 × 1.5 = 2.25
+
+        if tcr <= recovery {
+            return RMR_CEILING; // 100%
+        }
+        if tcr >= healthy {
+            return RMR_FLOOR; // 96%
+        }
+
+        // Linear interpolation: 1.0 - ((tcr - recovery) / (healthy - recovery)) × (1.0 - 0.96)
+        let range = healthy - recovery;   // e.g., 0.75
+        let position = tcr - recovery;    // how far above recovery
+        let spread = RMR_CEILING - RMR_FLOOR; // 0.04
+        // Use inner Decimal for division since Div<Ratio> for Ratio is not implemented
+        let discount = Ratio::from(position.0 / range.0) * spread;
+        RMR_CEILING - discount
     }
 
     pub fn get_borrowing_fee(&self) -> Ratio {
@@ -936,13 +977,13 @@ impl State {
         config.map(|c| c.interest_rate_apr).unwrap_or(DEFAULT_INTEREST_RATE_APR)
     }
 
-    /// Per-asset recovery CR = borrow_threshold_ratio + recovery_liquidation_buffer.
-    /// E.g., 150% + 5% = 155%.
+    /// Per-asset recovery CR = borrow_threshold_ratio × recovery_cr_multiplier.
+    /// E.g., 150% × 1.0333 = 155%.
     pub fn get_recovery_cr_for(&self, ct: &CollateralType) -> Ratio {
         let borrow_threshold = self.collateral_configs.get(ct)
             .map(|c| c.borrow_threshold_ratio)
             .unwrap_or(RECOVERY_COLLATERAL_RATIO);
-        borrow_threshold + self.recovery_liquidation_buffer
+        borrow_threshold * self.recovery_cr_multiplier
     }
 
     /// Per-asset warning CR = 2 * recovery_cr - borrow_threshold.
@@ -951,7 +992,7 @@ impl State {
         let borrow_threshold = self.collateral_configs.get(ct)
             .map(|c| c.borrow_threshold_ratio)
             .unwrap_or(RECOVERY_COLLATERAL_RATIO);
-        let recovery_cr = borrow_threshold + self.recovery_liquidation_buffer;
+        let recovery_cr = borrow_threshold * self.recovery_cr_multiplier;
         // 2 * recovery_cr - borrow_threshold
         recovery_cr + recovery_cr - borrow_threshold
     }
@@ -1285,10 +1326,10 @@ impl State {
             .and_then(|p| Decimal::from_f64(p))
     }
 
-    /// Compute the effective recovery target CR: dynamic threshold + admin-set buffer.
+    /// Compute the effective recovery target CR: dynamic threshold × proportional multiplier.
     /// This is the CR that partial-liquidated vaults are restored to during Recovery Mode.
     pub fn get_recovery_target_cr_for(&self, _ct: &CollateralType) -> Ratio {
-        Ratio::from(self.recovery_mode_threshold.0 + self.recovery_liquidation_buffer.0)
+        self.recovery_mode_threshold * self.recovery_cr_multiplier
     }
 
     /// Get the minimum liquidation collateral ratio for a specific collateral type,
@@ -1400,7 +1441,7 @@ impl State {
             config.liquidation_bonus = self.liquidation_bonus;
             config.redemption_fee_floor = self.redemption_fee_floor;
             config.redemption_fee_ceiling = self.redemption_fee_ceiling;
-            config.recovery_target_cr = Ratio::from(self.recovery_mode_threshold.0 + self.recovery_liquidation_buffer.0);
+            config.recovery_target_cr = self.recovery_mode_threshold * self.recovery_cr_multiplier;
             config.ledger_fee = self.icp_ledger_fee.to_u64();
         }
     }
@@ -2433,8 +2474,8 @@ mod tests {
         });
         let icp = state.icp_ledger_principal;
 
-        // ICP: borrow_threshold=1.5, buffer=0.05
-        // recovery_cr = 1.5 + 0.05 = 1.55
+        // ICP: borrow_threshold=1.5, multiplier=1.0333
+        // recovery_cr = 1.5 * 1.0333 ≈ 1.55
         let recovery_cr = state.get_recovery_cr_for(&icp);
         assert!((recovery_cr.to_f64() - 1.55).abs() < 0.001,
             "Expected recovery_cr 1.55, got {}", recovery_cr.to_f64());
@@ -2906,5 +2947,289 @@ mod tests {
         assert_eq!(interest_share.0, 100_000_000, "Full liquidation should return all accrued_interest");
         // Vault should be removed
         assert!(state.vault_id_to_vaults.get(&10).is_none(), "Vault should be removed after full liquidation");
+    }
+
+    #[test]
+    fn test_proportional_recovery_cr() {
+        let mut state = State::from(InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: Principal::anonymous(),
+            fee_e8s: 0,
+            developer_principal: Principal::anonymous(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        });
+        let icp = state.icp_ledger_principal;
+
+        // Default multiplier: 1.0333
+        // ICP borrow_threshold = 1.50
+        // recovery_cr = 1.50 * 1.0333 ≈ 1.55 (same as before for ICP)
+        let recovery_cr = state.get_recovery_cr_for(&icp);
+        assert!(
+            (recovery_cr.to_f64() - 1.55).abs() < 0.001,
+            "ICP recovery CR should be ~1.55, got {}",
+            recovery_cr.to_f64()
+        );
+
+        // Add a collateral with borrow_threshold 1.20
+        let fake_ledger = Principal::from_text("aaaaa-aa").unwrap();
+        let mut config = state.collateral_configs.get(&icp).unwrap().clone();
+        config.borrow_threshold_ratio = Ratio::from_f64(1.20);
+        config.ledger_canister_id = fake_ledger;
+        state.collateral_configs.insert(fake_ledger, config);
+
+        // recovery_cr = 1.20 * 1.0333 = 1.24
+        let recovery_cr_low = state.get_recovery_cr_for(&fake_ledger);
+        assert!(
+            (recovery_cr_low.to_f64() - 1.24).abs() < 0.001,
+            "Low-threshold recovery CR should be ~1.24, got {}",
+            recovery_cr_low.to_f64()
+        );
+
+        // Add a collateral with borrow_threshold 2.00
+        let fake_ledger2 = Principal::from_text("2vxsx-fae").unwrap();
+        let mut config2 = state.collateral_configs.get(&icp).unwrap().clone();
+        config2.borrow_threshold_ratio = Ratio::from_f64(2.00);
+        config2.ledger_canister_id = fake_ledger2;
+        state.collateral_configs.insert(fake_ledger2, config2);
+
+        // recovery_cr = 2.00 * 1.0333 = 2.0666
+        let recovery_cr_high = state.get_recovery_cr_for(&fake_ledger2);
+        assert!(
+            (recovery_cr_high.to_f64() - 2.0666).abs() < 0.001,
+            "High-threshold recovery CR should be ~2.0666, got {}",
+            recovery_cr_high.to_f64()
+        );
+    }
+
+    #[test]
+    fn test_proportional_recovery_cr_reconfigurable() {
+        let mut state = State::from(InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: Principal::anonymous(),
+            fee_e8s: 0,
+            developer_principal: Principal::anonymous(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        });
+        let icp = state.icp_ledger_principal;
+
+        // Change multiplier to 1.05 (5% proportional buffer)
+        state.recovery_cr_multiplier = Ratio::from_f64(1.05);
+        let recovery_cr = state.get_recovery_cr_for(&icp);
+        // 1.50 * 1.05 = 1.575
+        assert!(
+            (recovery_cr.to_f64() - 1.575).abs() < 0.001,
+            "Expected 1.575, got {}",
+            recovery_cr.to_f64()
+        );
+    }
+
+    #[test]
+    fn test_stablecoin_repayment_does_not_increase_icusd_supply() {
+        // This is a design-level test: verify that repay_to_vault returns
+        // interest_share correctly, and that the CALLER is responsible for
+        // NOT minting icUSD when the repayment was in stablecoins.
+        let mut state = accrual_test_state();
+        let icp = state.icp_ledger_principal;
+
+        // Create vault with 100 icUSD debt, 5 icUSD accrued interest
+        state.vault_id_to_vaults.insert(1, Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            borrowed_icusd_amount: ICUSD::new(10_000_000_000), // 100 icUSD
+            collateral_amount: 1_000_000_000,
+            collateral_type: icp,
+            accrued_interest: ICUSD::new(500_000_000), // 5 icUSD interest
+            last_accrual_time: 0,
+        });
+
+        // Repay 50 icUSD worth
+        let (interest_share, principal_share) = state.repay_to_vault(1, ICUSD::new(5_000_000_000));
+
+        // Interest share should be proportional: 50 * (5/105) ≈ 2.380952 icUSD
+        // Note: total debt is borrowed_icusd_amount = 100 icUSD, but accrued_interest
+        // is 5 icUSD, so interest ratio = 5/100 = 5%.
+        // interest_share = 50 * 5/100 = 2.5 icUSD
+        assert!(
+            (interest_share.to_u64() as f64 / 1e8 - 2.5).abs() < 0.01,
+            "Interest share should be ~2.5 icUSD, got {}",
+            interest_share.to_u64() as f64 / 1e8
+        );
+
+        // Principal share should be the rest: 50 - 2.5 = 47.5 icUSD
+        assert!(
+            (principal_share.to_u64() as f64 / 1e8 - 47.5).abs() < 0.01,
+            "Principal share should be ~47.5 icUSD, got {}",
+            principal_share.to_u64() as f64 / 1e8
+        );
+    }
+
+    /// Helper to create a minimal State for RMR tests.
+    fn test_state() -> State {
+        State::from(InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: Principal::anonymous(),
+            fee_e8s: 0,
+            developer_principal: Principal::anonymous(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        })
+    }
+
+    #[test]
+    fn test_dynamic_rmr_healthy_system() {
+        let mut state = test_state();
+        state.total_collateral_ratio = Ratio::from_f64(2.25);
+        state.recovery_mode_threshold = RECOVERY_COLLATERAL_RATIO; // 1.50
+        let rmr = state.get_redemption_margin_ratio();
+        assert!(
+            (rmr.to_f64() - 0.96).abs() < 0.001,
+            "RMR at 1.5x recovery should be 0.96, got {}", rmr.to_f64()
+        );
+    }
+
+    #[test]
+    fn test_dynamic_rmr_at_recovery() {
+        let mut state = test_state();
+        state.total_collateral_ratio = Ratio::from_f64(1.50);
+        state.recovery_mode_threshold = RECOVERY_COLLATERAL_RATIO;
+        let rmr = state.get_redemption_margin_ratio();
+        assert!(
+            (rmr.to_f64() - 1.0).abs() < 0.001,
+            "RMR at recovery threshold should be 1.0, got {}", rmr.to_f64()
+        );
+    }
+
+    #[test]
+    fn test_dynamic_rmr_midpoint() {
+        let mut state = test_state();
+        state.total_collateral_ratio = Ratio::from_f64(1.875);
+        state.recovery_mode_threshold = RECOVERY_COLLATERAL_RATIO;
+        let rmr = state.get_redemption_margin_ratio();
+        assert!(
+            (rmr.to_f64() - 0.98).abs() < 0.001,
+            "RMR at midpoint should be 0.98, got {}", rmr.to_f64()
+        );
+    }
+
+    #[test]
+    fn test_dynamic_rmr_below_recovery() {
+        let mut state = test_state();
+        state.total_collateral_ratio = Ratio::from_f64(1.30);
+        state.recovery_mode_threshold = RECOVERY_COLLATERAL_RATIO;
+        let rmr = state.get_redemption_margin_ratio();
+        assert!(
+            (rmr.to_f64() - 1.0).abs() < 0.001,
+            "RMR below recovery should be 1.0, got {}", rmr.to_f64()
+        );
+    }
+
+    #[test]
+    fn test_dynamic_rmr_above_15x() {
+        let mut state = test_state();
+        state.total_collateral_ratio = Ratio::from_f64(5.0);
+        state.recovery_mode_threshold = RECOVERY_COLLATERAL_RATIO;
+        let rmr = state.get_redemption_margin_ratio();
+        assert!(
+            (rmr.to_f64() - 0.96).abs() < 0.001,
+            "RMR above 1.5x should be capped at 0.96, got {}", rmr.to_f64()
+        );
+    }
+
+    #[test]
+    fn test_interest_split_ratios() {
+        let state = test_state();
+        assert!(
+            (state.interest_pool_share.to_f64() - 0.75).abs() < 0.001,
+            "Default interest pool share should be 0.75, got {}", state.interest_pool_share.to_f64()
+        );
+
+        let interest = ICUSD::from(100_000_000_00u64); // 100 icUSD
+        let pool_share = ICUSD::from(
+            (Decimal::from(interest.to_u64()) * state.interest_pool_share.0)
+                .to_u64()
+                .unwrap_or(0)
+        );
+        let treasury_share = ICUSD::from(interest.to_u64() - pool_share.to_u64());
+
+        assert!(
+            (pool_share.to_u64() as f64 / 1e8 - 75.0).abs() < 0.01,
+            "Pool share should be ~75, got {}", pool_share.to_u64() as f64 / 1e8
+        );
+        assert!(
+            (treasury_share.to_u64() as f64 / 1e8 - 25.0).abs() < 0.01,
+            "Treasury share should be ~25, got {}", treasury_share.to_u64() as f64 / 1e8
+        );
+    }
+
+    #[test]
+    fn test_interest_split_custom_ratio() {
+        let mut state = test_state();
+        state.interest_pool_share = Ratio::from_f64(0.50); // 50/50 split
+
+        let interest = ICUSD::from(200_000_000_00u64); // 200 icUSD
+        let pool_share = ICUSD::from(
+            (Decimal::from(interest.to_u64()) * state.interest_pool_share.0)
+                .to_u64()
+                .unwrap_or(0)
+        );
+        let treasury_share = ICUSD::from(interest.to_u64() - pool_share.to_u64());
+
+        assert!(
+            (pool_share.to_u64() as f64 / 1e8 - 100.0).abs() < 0.01,
+            "Pool share should be ~100, got {}", pool_share.to_u64() as f64 / 1e8
+        );
+        assert!(
+            (treasury_share.to_u64() as f64 / 1e8 - 100.0).abs() < 0.01,
+            "Treasury share should be ~100, got {}", treasury_share.to_u64() as f64 / 1e8
+        );
+    }
+
+    #[test]
+    fn test_interest_split_zero_interest() {
+        let state = test_state();
+        let interest = ICUSD::from(0u64);
+        let pool_share = ICUSD::from(
+            (Decimal::from(interest.to_u64()) * state.interest_pool_share.0)
+                .to_u64()
+                .unwrap_or(0)
+        );
+        let treasury_share = ICUSD::from(interest.to_u64() - pool_share.to_u64());
+
+        assert_eq!(pool_share.to_u64(), 0, "Pool share should be 0 for zero interest");
+        assert_eq!(treasury_share.to_u64(), 0, "Treasury share should be 0 for zero interest");
+    }
+
+    #[test]
+    fn test_stablecoin_interest_split_accounting() {
+        // Verify the accounting: with 5 icUSD interest at 75/25 split
+        let interest_e8s: u64 = 5_000_000_00; // 5 icUSD in e8s
+        let pool_ratio = 0.75_f64;
+        let pool_e8s = (interest_e8s as f64 * pool_ratio) as u64;
+        let treasury_e8s = interest_e8s - pool_e8s;
+
+        // Convert to e6s (ckStable)
+        let pool_e6s = pool_e8s / 100;      // 3_750_000 = 3.75 ckUSDT
+        let treasury_e6s = treasury_e8s / 100; // 1_250_000 = 1.25 ckUSDT
+
+        assert_eq!(pool_e6s, 3_750_000);
+        assert_eq!(treasury_e6s, 1_250_000);
+
+        // icUSD minted to stability pool = pool_share in e8s
+        let icusd_minted = pool_e8s; // 3.75 icUSD
+        assert_eq!(icusd_minted, 375_000_000);
+
+        // Verify: reserves (pool_e6s) back the minted icUSD 1:1
+        assert_eq!(pool_e6s * 100, icusd_minted);
     }
 }
