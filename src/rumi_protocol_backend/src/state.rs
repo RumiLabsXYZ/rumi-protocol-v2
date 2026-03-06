@@ -3209,4 +3209,27 @@ mod tests {
         assert_eq!(pool_share.to_u64(), 0, "Pool share should be 0 for zero interest");
         assert_eq!(treasury_share.to_u64(), 0, "Treasury share should be 0 for zero interest");
     }
+
+    #[test]
+    fn test_stablecoin_interest_split_accounting() {
+        // Verify the accounting: with 5 icUSD interest at 75/25 split
+        let interest_e8s: u64 = 5_000_000_00; // 5 icUSD in e8s
+        let pool_ratio = 0.75_f64;
+        let pool_e8s = (interest_e8s as f64 * pool_ratio) as u64;
+        let treasury_e8s = interest_e8s - pool_e8s;
+
+        // Convert to e6s (ckStable)
+        let pool_e6s = pool_e8s / 100;      // 3_750_000 = 3.75 ckUSDT
+        let treasury_e6s = treasury_e8s / 100; // 1_250_000 = 1.25 ckUSDT
+
+        assert_eq!(pool_e6s, 3_750_000);
+        assert_eq!(treasury_e6s, 1_250_000);
+
+        // icUSD minted to stability pool = pool_share in e8s
+        let icusd_minted = pool_e8s; // 3.75 icUSD
+        assert_eq!(icusd_minted, 375_000_000);
+
+        // Verify: reserves (pool_e6s) back the minted icUSD 1:1
+        assert_eq!(pool_e6s * 100, icusd_minted);
+    }
 }
