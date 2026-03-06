@@ -843,7 +843,14 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
     match transfer_stable_from(arg.token_type.clone(), total_pull_e6s, caller).await {
         Ok(block_index) => {
             let interest_share = mutate_state(|s| record_repayed_to_vault(s, arg.vault_id, amount, block_index));
-            crate::treasury::mint_interest_to_treasury(interest_share).await;
+            // Do NOT mint icUSD for the interest portion. The stablecoins stay in
+            // the canister as reserves. Interest will be routed in a future task
+            // (interest revenue split). For now, all stablecoins (principal +
+            // interest portion) remain as reserves.
+            log!(INFO,
+                "[repay_to_vault_with_stable] Skipping icUSD mint for interest ({} e8s) — stablecoin repayment path",
+                interest_share.to_u64()
+            );
             guard_principal.complete();
             Ok(block_index)
         }
@@ -2079,8 +2086,13 @@ pub async fn liquidate_vault_partial_with_stable(
         interest_share
     });
 
-    // Route interest share to treasury (fire-and-forget)
-    crate::treasury::mint_interest_to_treasury(interest_share).await;
+    // Do NOT mint icUSD for the interest portion. The stablecoins stay in the
+    // canister as reserves. Interest will be routed in a future task (interest
+    // revenue split).
+    log!(INFO,
+        "[liquidate_vault_stable] Skipping icUSD mint for interest ({} e8s) — stablecoin liquidation path",
+        interest_share.to_u64()
+    );
 
     // Send protocol's liquidation fee cut to treasury (fire-and-forget)
     if protocol_cut > 0 {

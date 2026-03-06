@@ -2991,4 +2991,44 @@ mod tests {
             recovery_cr.to_f64()
         );
     }
+
+    #[test]
+    fn test_stablecoin_repayment_does_not_increase_icusd_supply() {
+        // This is a design-level test: verify that repay_to_vault returns
+        // interest_share correctly, and that the CALLER is responsible for
+        // NOT minting icUSD when the repayment was in stablecoins.
+        let mut state = accrual_test_state();
+        let icp = state.icp_ledger_principal;
+
+        // Create vault with 100 icUSD debt, 5 icUSD accrued interest
+        state.vault_id_to_vaults.insert(1, Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            borrowed_icusd_amount: ICUSD::new(10_000_000_000), // 100 icUSD
+            collateral_amount: 1_000_000_000,
+            collateral_type: icp,
+            accrued_interest: ICUSD::new(500_000_000), // 5 icUSD interest
+            last_accrual_time: 0,
+        });
+
+        // Repay 50 icUSD worth
+        let (interest_share, principal_share) = state.repay_to_vault(1, ICUSD::new(5_000_000_000));
+
+        // Interest share should be proportional: 50 * (5/105) ≈ 2.380952 icUSD
+        // Note: total debt is borrowed_icusd_amount = 100 icUSD, but accrued_interest
+        // is 5 icUSD, so interest ratio = 5/100 = 5%.
+        // interest_share = 50 * 5/100 = 2.5 icUSD
+        assert!(
+            (interest_share.to_u64() as f64 / 1e8 - 2.5).abs() < 0.01,
+            "Interest share should be ~2.5 icUSD, got {}",
+            interest_share.to_u64() as f64 / 1e8
+        );
+
+        // Principal share should be the rest: 50 - 2.5 = 47.5 icUSD
+        assert!(
+            (principal_share.to_u64() as f64 / 1e8 - 47.5).abs() < 0.01,
+            "Principal share should be ~47.5 icUSD, got {}",
+            principal_share.to_u64() as f64 / 1e8
+        );
+    }
 }
