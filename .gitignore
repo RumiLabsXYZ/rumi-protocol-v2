@@ -24,3 +24,22 @@ dist/
 # environment variables
 .env
 .env.local
+
+# Claude Code local config
+.claude/
+
+# skill/plugin files
+*.skill
+*.plugin
+
+# mockup files
+homepage-mockup.html
+mockup-meters.html
+pitch-deck-mockup.html
+
+# local test artifacts
+pocket-ic
+
+# analysis/demo directories
+technical-analysis/
+xrc_demo/
