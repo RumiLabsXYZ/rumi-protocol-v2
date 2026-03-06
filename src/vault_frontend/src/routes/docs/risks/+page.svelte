@@ -59,7 +59,7 @@
   <section class="doc-section">
     <h2 class="doc-heading">Recovery Mode Cascades</h2>
     <p>If the total system collateral ratio drops below the Recovery Mode threshold (currently {recoveryPct}%), the protocol enters Recovery mode and raises the liquidation threshold to the borrowing threshold for each collateral type{borrowSummary ? ` (${borrowSummary})` : ''}. This can cause vaults that were previously safe to suddenly become liquidatable — even though those individual vaults didn't change.</p>
-    <p>The Recovery Mode threshold is a <strong>debt-weighted average</strong> of all collateral types' borrowing thresholds. If new collateral types are added with different thresholds, the trigger point for Recovery Mode changes for everyone. Borrowing is still allowed in Recovery mode, but the fee drops to 0% to encourage repayment.</p>
+    <p>The Recovery Mode threshold is a <strong>debt-weighted average</strong> of all collateral types' borrowing thresholds. If new collateral types are added with different thresholds, the trigger point for Recovery Mode changes for everyone. Borrowing is still allowed in Recovery mode, but the minimum collateral ratio is raised to the recovery target CR, and per-collateral recovery fee overrides may apply.</p>
     <p>In Recovery mode, vaults between their liquidation ratio and borrowing threshold receive <strong>targeted partial liquidation</strong> — only enough debt is repaid to restore their CR to {targetPct}%. They are not fully liquidated. Vaults below their liquidation ratio are still fully liquidated. See <a href="/docs/liquidation" class="doc-link">Liquidation Mechanics</a> for details.</p>
   </section>
 

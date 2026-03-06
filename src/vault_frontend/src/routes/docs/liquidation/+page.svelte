@@ -87,7 +87,7 @@
     <h2 class="doc-heading">Protocol Modes</h2>
     <p>The protocol operates in one of three modes based on the system-wide total collateral ratio:</p>
     <p><strong>General Availability</strong> — total CR is above {recoveryPct}%. Normal operations. Liquidation uses each collateral type's own liquidation ratio.</p>
-    <p><strong>Recovery</strong> — total CR drops below {recoveryPct}%. Liquidation threshold rises to the borrowing threshold for each type. Borrowing fee drops to 0% to encourage repayment. Vaults between the liquidation ratio and borrowing threshold get targeted partial liquidation.</p>
+    <p><strong>Recovery</strong> — total CR drops below {recoveryPct}%. Liquidation threshold rises to the borrowing threshold for each type. The minimum collateral ratio for new borrows and withdrawals is raised to the recovery target CR. Vaults between the liquidation ratio and borrowing threshold get targeted partial liquidation.</p>
     <p><strong>Read-Only</strong> — total CR drops below 100%, or the oracle reports a price below $0.01. All state-changing operations are paused. No new borrows, no liquidations. The protocol waits for conditions to improve.</p>
   </section>
 
