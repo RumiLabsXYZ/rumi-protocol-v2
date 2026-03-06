@@ -91,6 +91,12 @@ async fn validate_call() -> Result<(), ProtocolError> {
     if ic_cdk::caller() == Principal::anonymous() {
         return Err(ProtocolError::AnonymousCallerNotAllowed);
     }
+    // Freeze check — if frozen, reject ALL state-changing operations
+    if read_state(|s| s.frozen) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "Protocol is frozen. All operations are suspended pending admin review.".to_string(),
+        ));
+    }
     rumi_protocol_backend::xrc::ensure_fresh_price().await
 }
 
@@ -157,12 +163,9 @@ fn setup_timers() {
         );
     }
 
-    // Periodic cleanup timer — runs every 5 minutes instead of every heartbeat (~1s).
-    // This alone saves ~99% of the cycles previously burned by the heartbeat.
-    ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(300), || {
-        use rumi_protocol_backend::state::mutate_state;
-        mutate_state(|s| s.clean_stale_operations());
-    });
+    // clean_stale_operations timer removed — the old implementation dangerously
+    // auto-reset Recovery→GA mode based on a timeout. Mode is now managed by
+    // update_mode() (automatic) and admin functions (manual).
 }
 
 fn main() {}
@@ -302,6 +305,8 @@ fn get_protocol_status() -> ProtocolStatus {
         recovery_liquidation_buffer: s.recovery_liquidation_buffer.to_f64(),
         reserve_redemptions_enabled: s.reserve_redemptions_enabled,
         reserve_redemption_fee: s.reserve_redemption_fee.to_f64(),
+        frozen: s.frozen,
+        manual_mode_override: s.manual_mode_override,
     })
 }
 
@@ -1268,6 +1273,71 @@ async fn set_reserve_redemption_fee(new_rate: f64) -> Result<(), ProtocolError> 
 fn get_reserve_redemption_fee() -> f64 {
     read_state(|s| s.reserve_redemption_fee.to_f64())
 }
+
+// ── Admin safety functions (controller-only) ──────────────────────────────────
+
+fn require_controller() -> Result<(), ProtocolError> {
+    if ic_cdk::api::is_controller(&ic_cdk::caller()) {
+        Ok(())
+    } else {
+        Err(ProtocolError::CallerNotOwner)
+    }
+}
+
+/// Manually enter Recovery mode. Automatic mode transitions are suppressed
+/// until `exit_recovery_mode` is called.
+#[candid_method(update)]
+#[update]
+fn enter_recovery_mode() -> Result<(), ProtocolError> {
+    require_controller()?;
+    mutate_state(|s| {
+        s.mode = Mode::Recovery;
+        s.manual_mode_override = true;
+        log!(INFO, "[admin] entered Recovery mode (manual override active)");
+    });
+    Ok(())
+}
+
+/// Exit Recovery mode and re-enable automatic mode transitions based on
+/// collateral ratio.
+#[candid_method(update)]
+#[update]
+fn exit_recovery_mode() -> Result<(), ProtocolError> {
+    require_controller()?;
+    mutate_state(|s| {
+        s.mode = Mode::GeneralAvailability;
+        s.manual_mode_override = false;
+        log!(INFO, "[admin] exited Recovery mode, automatic mode management restored");
+    });
+    Ok(())
+}
+
+/// Emergency kill switch — halts ALL state-changing operations.
+/// Supersedes mode; even Recovery and GeneralAvailability are irrelevant while frozen.
+#[candid_method(update)]
+#[update]
+fn freeze_protocol() -> Result<(), ProtocolError> {
+    require_controller()?;
+    mutate_state(|s| {
+        s.frozen = true;
+        log!(INFO, "[admin] protocol FROZEN — all operations suspended");
+    });
+    Ok(())
+}
+
+/// Lift the freeze. Operations resume under whatever mode is currently active.
+#[candid_method(update)]
+#[update]
+fn unfreeze_protocol() -> Result<(), ProtocolError> {
+    require_controller()?;
+    mutate_state(|s| {
+        s.frozen = false;
+        log!(INFO, "[admin] protocol UNFROZEN — operations resumed");
+    });
+    Ok(())
+}
+
+// ── End admin safety functions ────────────────────────────────────────────────
 
 /// Redeem icUSD for ckStable tokens from reserves (with vault spillover fallback)
 #[candid_method(update)]

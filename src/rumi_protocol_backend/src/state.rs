@@ -397,6 +397,15 @@ pub struct State {
     pub is_timer_running: bool,
     pub is_fetching_rate: bool,
 
+    /// When true, automatic mode transitions (from price updates) are suppressed.
+    /// Only an admin call to `exit_recovery_mode` re-enables automatic mode management.
+    pub manual_mode_override: bool,
+
+    /// Emergency kill switch. When true, ALL state-changing operations are rejected.
+    /// Separate from mode — freeze supersedes everything.
+    /// Only an admin call to `unfreeze_protocol` can clear this.
+    pub frozen: bool,
+
     // Rate limiting for close_vault operations
     pub close_vault_requests: BTreeMap<Principal, Vec<u64>>,
     pub global_close_requests: Vec<u64>,
@@ -492,6 +501,8 @@ impl From<InitArg> for State {
             pending_excess_transfers: BTreeMap::new(),
             is_timer_running: false,
             is_fetching_rate: false,
+            manual_mode_override: false,
+            frozen: false,
             // Rate limiting initialization
             close_vault_requests: BTreeMap::new(),
             global_close_requests: Vec::new(),
@@ -1409,6 +1420,24 @@ impl State {
         self.weighted_avg_warning_cr = w_warning;
         self.weighted_avg_healthy_cr = w_healthy;
 
+        // If the protocol is frozen, don't change mode at all.
+        if self.frozen {
+            return;
+        }
+
+        // If an admin has manually set the mode, don't override it automatically.
+        // Exception: if collateral ratio drops below 100%, always go ReadOnly for safety.
+        if self.manual_mode_override {
+            if new_total_collateral_ratio < Ratio::from(dec!(1.0)) {
+                self.mode = Mode::ReadOnly;
+                log!(
+                    crate::DEBUG,
+                    "[update_mode] manual override active but ratio < 100%, forcing ReadOnly"
+                );
+            }
+            return;
+        }
+
         if new_total_collateral_ratio < dynamic_threshold {
             self.mode = Mode::Recovery;
         } else {
@@ -2019,30 +2048,10 @@ impl State {
         }
     }
     
-    // Add method to clean up stale operations regularly
-    pub fn clean_stale_operations(&mut self) {
-        // Get the current time
-        let now = ic_cdk::api::time();
-        
-        // Find any operations that are stale (older than 10 minutes).
-        // Bumped from 3m to 10m since cleanup now runs on a 5-minute timer, not every heartbeat.
-        const STALE_OPERATION_NANOS: u64 = 10 * 60 * SEC_NANOS;
-        
-        // Check for stale processing state based on actual Mode variants
-        // Mode is likely either GeneralAvailability, Recovery, or ReadOnly
-        if let Mode::Recovery = self.mode {
-            // If in recovery mode for too long, consider resetting
-            if let Some(last_timestamp) = self.last_icp_timestamp {
-                let age = now - last_timestamp;
-                
-                // If operation has been in processing mode for too long, reset it
-                if age > STALE_OPERATION_NANOS {
-                    log!(INFO, "[clean_stale_operations] Found stale recovery state, resetting mode to GeneralAvailability");
-                    self.mode = Mode::GeneralAvailability;
-                }
-            }
-        }
-    }
+    // clean_stale_operations REMOVED — it contained a dangerous Recovery→GA auto-reset
+    // that could silently exit Recovery mode based on a timeout. Mode transitions are now
+    // handled exclusively by update_mode() (automatic, based on collateral ratio) or by
+    // admin functions (enter_recovery_mode / exit_recovery_mode).
 }
 
 #[derive(Debug)]
