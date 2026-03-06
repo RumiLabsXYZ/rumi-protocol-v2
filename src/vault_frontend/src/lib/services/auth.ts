@@ -8,6 +8,7 @@ import { permissionManager } from './PermissionManager';
 import { Principal } from '@dfinity/principal';
 import { AuthClient } from '@dfinity/auth-client';
 import { HttpAgent } from '@dfinity/agent';
+import { clearOisySigner } from './oisySigner';
 
 // Storage keys for persistence
 const STORAGE_KEYS = {
@@ -421,7 +422,10 @@ function createAuthStore() {
 
     async disconnect(): Promise<void> {
       const state = get(store);
-      
+
+      // Clear Oisy direct signer agent
+      clearOisySigner();
+
       if (state.walletType === WALLET_TYPES.INTERNET_IDENTITY && authClient) {
         await authClient.logout();
       } else if (state.walletType === WALLET_TYPES.PLUG) {

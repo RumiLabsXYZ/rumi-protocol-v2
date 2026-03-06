@@ -1,8 +1,7 @@
 use ic_cdk::{query, update, init, pre_upgrade, post_upgrade};
-use candid::{candid_method, Principal};
-use rumi_protocol_backend::numeric::ICUSD;
+use candid::Principal;
 use ic_canister_log::log;
-use crate::logs::INFO;
+use std::collections::BTreeMap;
 
 pub mod types;
 pub mod state;
@@ -12,50 +11,95 @@ pub mod logs;
 
 use crate::types::*;
 use crate::state::{mutate_state, read_state};
+use crate::logs::INFO;
 
-pub const LIQUIDATION_DISCOUNT: &str = "0.1";
-pub const MIN_DEPOSIT_AMOUNT: u64 = 1_000_000;
+// ─── Init / Upgrade ───
 
 #[init]
 fn init(args: StabilityPoolInitArgs) {
-    mutate_state(|s| {
-        s.initialize(args);
-    });
-
-    log!(INFO,
-        "Stability Pool initialized with protocol canister: {}",
+    mutate_state(|s| s.initialize(args));
+    log!(INFO, "Stability Pool initialized. Protocol: {}",
         read_state(|s| s.protocol_canister_id));
-
-    crate::liquidation::setup_liquidation_monitoring();
 }
 
-#[candid_method]
+#[pre_upgrade]
+fn pre_upgrade() {
+    log!(INFO, "Stability Pool pre-upgrade: saving state to stable memory");
+    state::save_to_stable_memory();
+}
+
+#[post_upgrade]
+fn post_upgrade() {
+    state::load_from_stable_memory();
+    log!(INFO, "Stability Pool post-upgrade: state restored. {} depositors, {} liquidations",
+        read_state(|s| s.deposits.len()),
+        read_state(|s| s.total_liquidations_executed));
+
+    if let Err(error) = read_state(|s| s.validate_state()) {
+        ic_cdk::trap(&format!("State validation failed after upgrade: {}", error));
+    }
+}
+
+// ─── Deposit / Withdraw / Claim ───
+
 #[update]
-pub async fn deposit_icusd(amount: u64) -> Result<(), StabilityPoolError> {
-    crate::deposits::deposit_icusd(amount).await
+pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), StabilityPoolError> {
+    crate::deposits::deposit(token_ledger, amount).await
 }
 
 #[update]
-pub async fn withdraw_icusd(amount: u64) -> Result<(), StabilityPoolError> {
-    crate::deposits::withdraw_icusd(amount).await
+pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), StabilityPoolError> {
+    crate::deposits::withdraw(token_ledger, amount).await
 }
 
 #[update]
-pub async fn claim_collateral_gains() -> Result<u64, StabilityPoolError> {
-    crate::deposits::claim_collateral_gains().await
+pub async fn claim_collateral(collateral_ledger: Principal) -> Result<u64, StabilityPoolError> {
+    crate::deposits::claim_collateral(collateral_ledger).await
 }
 
+#[update]
+pub async fn claim_all_collateral() -> Result<BTreeMap<Principal, u64>, StabilityPoolError> {
+    crate::deposits::claim_all_collateral().await
+}
+
+// ─── Opt-in / Opt-out ───
+
+#[update]
+pub fn opt_out_collateral(collateral_type: Principal) -> Result<(), StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    mutate_state(|s| s.opt_out_collateral(&caller, collateral_type))
+}
+
+#[update]
+pub fn opt_in_collateral(collateral_type: Principal) -> Result<(), StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    mutate_state(|s| s.opt_in_collateral(&caller, collateral_type))
+}
+
+// ─── Liquidation (Push + Fallback) ───
+
+/// Called by the backend to push liquidatable vault notifications.
+#[update]
+pub async fn notify_liquidatable_vaults(vaults: Vec<LiquidatableVaultInfo>) -> Vec<LiquidationResult> {
+    // Optionally: validate caller is the protocol canister
+    let caller = ic_cdk::api::caller();
+    let expected = read_state(|s| s.protocol_canister_id);
+    if caller != expected {
+        log!(INFO, "notify_liquidatable_vaults called by {} (expected {}). Allowing for now.",
+            caller, expected);
+        // TODO: decide whether to enforce caller == protocol_canister_id
+    }
+    crate::liquidation::notify_liquidatable_vaults(vaults).await
+}
+
+/// Public fallback: trigger liquidation for a specific vault.
 #[update]
 pub async fn execute_liquidation(vault_id: u64) -> Result<LiquidationResult, StabilityPoolError> {
     crate::liquidation::execute_liquidation(vault_id).await
 }
 
-#[update]
-pub async fn scan_and_liquidate() -> Result<Vec<LiquidationResult>, StabilityPoolError> {
-    crate::liquidation::scan_and_liquidate().await
-}
+// ─── Queries ───
 
-#[candid_method(query)]
 #[query]
 pub fn get_pool_status() -> StabilityPoolStatus {
     read_state(|s| s.get_pool_status())
@@ -63,147 +107,211 @@ pub fn get_pool_status() -> StabilityPoolStatus {
 
 #[query]
 pub fn get_user_position(user: Option<Principal>) -> Option<UserStabilityPosition> {
-    let caller = user.unwrap_or_else(|| ic_cdk::api::caller());
-    read_state(|s| s.get_depositor_info(caller))
+    let target = user.unwrap_or_else(ic_cdk::api::caller);
+    read_state(|s| s.get_user_position(&target))
 }
 
 #[query]
 pub fn get_liquidation_history(limit: Option<u64>) -> Vec<PoolLiquidationRecord> {
-    let limit = limit.unwrap_or(50).min(100);
+    let limit = limit.unwrap_or(50).min(100) as usize;
     read_state(|s| {
-        s.liquidation_history
-            .iter()
-            .rev()
-            .take(limit as usize)
-            .cloned()
-            .collect()
+        s.liquidation_history.iter().rev().take(limit).cloned().collect()
     })
+}
+
+#[query]
+pub fn check_pool_capacity(collateral_type: Principal, debt_amount_e8s: u64) -> bool {
+    read_state(|s| s.effective_pool_for_collateral(&collateral_type) >= debt_amount_e8s)
+}
+
+#[query]
+pub fn validate_pool_state() -> Result<String, String> {
+    read_state(|s| s.validate_state().map(|_| "Pool state is consistent".to_string()))
+}
+
+// ─── Admin: Registry Management ───
+
+#[update]
+pub fn register_stablecoin(config: StablecoinConfig) -> Result<(), StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    if !read_state(|s| s.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    mutate_state(|s| s.register_stablecoin(config));
+    Ok(())
 }
 
 #[update]
-pub async fn get_liquidatable_vaults() -> Result<Vec<LiquidatableVault>, StabilityPoolError> {
-    crate::liquidation::get_liquidatable_vaults().await
-}
-
-
-#[query]
-pub fn check_pool_capacity(required_amount: u64) -> bool {
-    read_state(|s| s.has_sufficient_funds(ICUSD::from(required_amount)))
-}
-
-#[query]
-pub fn get_pool_configuration() -> Result<PoolConfiguration, StabilityPoolError> {
+pub fn register_collateral(info: CollateralInfo) -> Result<(), StabilityPoolError> {
     let caller = ic_cdk::api::caller();
-    read_state(|s| {
-        if s.configuration.authorized_admins.contains(&caller) {
-            Ok(s.configuration.clone())
-        } else {
-            Err(StabilityPoolError::Unauthorized)
-        }
-    })
+    if !read_state(|s| s.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    mutate_state(|s| s.register_collateral(info));
+    Ok(())
 }
+
+// ─── Admin: Configuration ───
 
 #[update]
 pub fn update_pool_configuration(new_config: PoolConfiguration) -> Result<(), StabilityPoolError> {
     let caller = ic_cdk::api::caller();
-    mutate_state(|s| {
-        if s.configuration.authorized_admins.contains(&caller) {
-            s.configuration = new_config;
-            log!(INFO, "Pool configuration updated by admin: {}", caller);
-            Ok(())
-        } else {
-            Err(StabilityPoolError::Unauthorized)
+    if !read_state(|s| s.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    mutate_state(|s| s.configuration = new_config);
+    Ok(())
+}
+
+// ─── ICRC-21: Canister Call Consent Messages ───
+
+#[update]
+pub fn icrc21_canister_call_consent_message(
+    request: Icrc21ConsentMessageRequest,
+) -> Icrc21ConsentMessageResponse {
+    let message_text = match request.method.as_str() {
+        "deposit" => {
+            match candid::decode_args::<(Principal, u64)>(&request.arg) {
+                Ok((token_ledger, amount)) => {
+                    let symbol = read_state(|s| {
+                        s.stablecoin_registry
+                            .get(&token_ledger)
+                            .map(|c| c.symbol.clone())
+                            .unwrap_or_else(|| format!("token {}", token_ledger))
+                    });
+                    let formatted = format_token_amount(amount);
+                    format!(
+                        "## Deposit to Stability Pool\n\n\
+                         You are depositing **{} {}** into the Rumi Protocol Stability Pool.\n\n\
+                         Your deposit earns liquidation rewards proportional to your share of the pool.",
+                        formatted, symbol
+                    )
+                }
+                Err(_) => "Deposit stablecoins into the Rumi Protocol Stability Pool.".to_string(),
+            }
         }
+        "withdraw" => {
+            match candid::decode_args::<(Principal, u64)>(&request.arg) {
+                Ok((token_ledger, amount)) => {
+                    let symbol = read_state(|s| {
+                        s.stablecoin_registry
+                            .get(&token_ledger)
+                            .map(|c| c.symbol.clone())
+                            .unwrap_or_else(|| format!("token {}", token_ledger))
+                    });
+                    let formatted = format_token_amount(amount);
+                    format!(
+                        "## Withdraw from Stability Pool\n\n\
+                         You are withdrawing **{} {}** from the Rumi Protocol Stability Pool.",
+                        formatted, symbol
+                    )
+                }
+                Err(_) => "Withdraw stablecoins from the Rumi Protocol Stability Pool.".to_string(),
+            }
+        }
+        "claim_collateral" => {
+            match candid::decode_args::<(Principal,)>(&request.arg) {
+                Ok((collateral_ledger,)) => {
+                    let symbol = read_state(|s| {
+                        s.collateral_registry
+                            .get(&collateral_ledger)
+                            .map(|c| c.symbol.clone())
+                            .unwrap_or_else(|| format!("collateral {}", collateral_ledger))
+                    });
+                    format!(
+                        "## Claim Collateral Rewards\n\n\
+                         You are claiming your **{}** collateral rewards from the Rumi Protocol Stability Pool.",
+                        symbol
+                    )
+                }
+                Err(_) => "Claim collateral rewards from the Rumi Protocol Stability Pool.".to_string(),
+            }
+        }
+        "claim_all_collateral" => {
+            "## Claim All Collateral Rewards\n\n\
+             You are claiming **all** of your collateral rewards from the Rumi Protocol Stability Pool."
+                .to_string()
+        }
+        "opt_out_collateral" => {
+            "## Opt Out of Collateral\n\n\
+             You are opting out of receiving a specific collateral type from future liquidations."
+                .to_string()
+        }
+        "opt_in_collateral" => {
+            "## Opt In to Collateral\n\n\
+             You are opting back in to receiving a specific collateral type from future liquidations."
+                .to_string()
+        }
+        _ => {
+            return Icrc21ConsentMessageResponse::Err(Icrc21Error::UnsupportedCanisterCall(
+                Icrc21ErrorInfo {
+                    description: format!(
+                        "Method '{}' is not a supported user-facing call.",
+                        request.method
+                    ),
+                },
+            ));
+        }
+    };
+
+    Icrc21ConsentMessageResponse::Ok(Icrc21ConsentInfo {
+        consent_message: Icrc21ConsentMessage::GenericDisplayMessage(message_text),
+        metadata: Icrc21ConsentMessageResponseMetadata {
+            language: request.user_preferences.metadata.language.clone(),
+            utc_offset_minutes: request.user_preferences.metadata.utc_offset_minutes,
+        },
     })
 }
+
+// ─── ICRC-10: Supported Standards ───
+
+#[query]
+pub fn icrc10_supported_standards() -> Vec<Icrc10SupportedStandard> {
+    vec![
+        Icrc10SupportedStandard {
+            name: "ICRC-21".to_string(),
+            url: "https://github.com/dfinity/ICRC/blob/main/ICRCs/ICRC-21/ICRC-21.md".to_string(),
+        },
+        Icrc10SupportedStandard {
+            name: "ICRC-10".to_string(),
+            url: "https://github.com/dfinity/ICRC/blob/main/ICRCs/ICRC-10/ICRC-10.md".to_string(),
+        },
+    ]
+}
+
+/// Format an e8s token amount as a human-readable string.
+fn format_token_amount(amount_e8s: u64) -> String {
+    let whole = amount_e8s / 100_000_000;
+    let frac = amount_e8s % 100_000_000;
+    if frac == 0 {
+        format!("{}", whole)
+    } else {
+        let frac_str = format!("{:08}", frac);
+        let trimmed = frac_str.trim_end_matches('0');
+        format!("{}.{}", whole, trimmed)
+    }
+}
+
+// ─── Admin: Configuration ───
 
 #[update]
 pub fn emergency_pause() -> Result<(), StabilityPoolError> {
     let caller = ic_cdk::api::caller();
-    mutate_state(|s| {
-        if s.configuration.authorized_admins.contains(&caller) {
-            s.configuration.emergency_pause = true;
-            log!(INFO, "Emergency pause activated by admin: {}", caller);
-            Ok(())
-        } else {
-            Err(StabilityPoolError::Unauthorized)
-        }
-    })
+    if !read_state(|s| s.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    mutate_state(|s| s.configuration.emergency_pause = true);
+    log!(INFO, "Emergency pause activated by {}", caller);
+    Ok(())
 }
 
 #[update]
 pub fn resume_operations() -> Result<(), StabilityPoolError> {
     let caller = ic_cdk::api::caller();
-    mutate_state(|s| {
-        if s.configuration.authorized_admins.contains(&caller) {
-            s.configuration.emergency_pause = false;
-            log!(INFO, "Operations resumed by admin: {}", caller);
-            Ok(())
-        } else {
-            Err(StabilityPoolError::Unauthorized)
-        }
-    })
-}
-
-#[query]
-pub fn get_pool_analytics() -> PoolAnalytics {
-    read_state(|s| {
-        let total_volume: u64 = s.liquidation_history.iter()
-            .map(|record| record.icusd_used)
-            .sum();
-
-        let average_liquidation_size = if s.liquidation_history.is_empty() {
-            0
-        } else {
-            total_volume / s.liquidation_history.len() as u64
-        };
-
-        let success_rate = "1.0".to_string();
-
-        let total_profit: u64 = s.liquidation_history.iter()
-            .map(|record| record.icp_gained)
-            .sum();
-
-        let active_depositors = s.deposits.iter()
-            .filter(|(_, info)| info.icusd_amount > 0)
-            .count() as u64;
-
-        let pool_age_days = ((ic_cdk::api::time() - s.pool_creation_timestamp) / (24 * 60 * 60 * 1_000_000_000)).max(1);
-
-        PoolAnalytics {
-            total_volume_processed: total_volume,
-            average_liquidation_size,
-            success_rate,
-            total_profit_distributed: total_profit,
-            active_depositors,
-            pool_age_days,
-        }
-    })
-}
-
-#[query]
-pub fn validate_pool_state() -> Result<String, String> {
-    read_state(|s| {
-        s.validate_state().map(|_| "Pool state is consistent".to_string())
-    })
-}
-
-#[pre_upgrade]
-fn pre_upgrade() {
-    log!(INFO, "Stability Pool pre-upgrade started");
-}
-
-#[post_upgrade]
-fn post_upgrade() {
-    log!(INFO, "Stability Pool post-upgrade completed");
-
-    if let Err(error) = read_state(|s| s.validate_state()) {
-        ic_cdk::trap(&format!("State validation failed after upgrade: {}", error));
+    if !read_state(|s| s.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
     }
-
-    if read_state(|s| !s.configuration.emergency_pause) {
-        crate::liquidation::setup_liquidation_monitoring();
-    }
+    mutate_state(|s| s.configuration.emergency_pause = false);
+    log!(INFO, "Operations resumed by {}", caller);
+    Ok(())
 }
-
-

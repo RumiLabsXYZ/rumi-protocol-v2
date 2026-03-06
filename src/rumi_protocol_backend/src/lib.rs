@@ -142,6 +142,11 @@ pub struct Fees {
 pub struct SuccessWithFee {
     pub block_index: u64,
     pub fee_amount_paid: u64,
+    /// Total collateral (native units) awarded to the liquidator / stability pool.
+    /// Added so the stability pool can correctly credit depositors with their
+    /// proportional share of the actual collateral received, rather than only
+    /// the liquidator bonus (`fee_amount_paid`).
+    pub collateral_amount_received: Option<u64>,
 }
 
 #[derive(candid::CandidType, Deserialize)]
@@ -230,6 +235,16 @@ impl From<GuardError> for ProtocolError {
     }
 }
 
+/// Candid-compatible struct matching the stability pool's `LiquidatableVaultInfo`.
+/// Defined inline to avoid a crate dependency between backend and pool.
+#[derive(CandidType, Clone, Debug, Deserialize)]
+struct LiquidatableVaultInfo {
+    pub vault_id: u64,
+    pub collateral_type: Principal,
+    pub debt_amount: u64,
+    pub collateral_amount: u64,
+}
+
 pub fn check_vaults() {
     let dummy_rate = read_state(|s| {
         s.last_icp_rate.unwrap_or_else(|| {
@@ -237,7 +252,7 @@ pub fn check_vaults() {
             UsdIcp::from(dec!(1.0))
         })
     });
-    
+
     // Only identify unhealthy vaults but don't liquidate them
     let (unhealthy_vaults, healthy_vaults) = read_state(|s| {
         let mut unhealthy_vaults: Vec<Vault> = vec![];
@@ -258,15 +273,15 @@ pub fn check_vaults() {
     if !unhealthy_vaults.is_empty() {
         log!(
             INFO,
-            "[check_vaults] Found {} liquidatable vaults. Waiting for external liquidators.", 
+            "[check_vaults] Found {} liquidatable vaults. Waiting for external liquidators.",
             unhealthy_vaults.len()
         );
-        
+
         // Log detailed information about each unhealthy vault
-        for vault in unhealthy_vaults {
+        for vault in &unhealthy_vaults {
             let (ratio, min_ratio) = read_state(|s| {
                 (
-                    compute_collateral_ratio(&vault, dummy_rate, s),
+                    compute_collateral_ratio(vault, dummy_rate, s),
                     s.get_min_liquidation_ratio_for(&vault.collateral_type),
                 )
             });
@@ -281,14 +296,44 @@ pub fn check_vaults() {
                 min_ratio.to_f64() * 100.0
             );
         }
+
+        // Push liquidatable vault notifications to stability pool (fire-and-forget)
+        if let Some(pool_canister) = read_state(|s| s.stability_pool_canister) {
+            let vault_notifications: Vec<LiquidatableVaultInfo> = unhealthy_vaults
+                .iter()
+                .map(|v| LiquidatableVaultInfo {
+                    vault_id: v.vault_id,
+                    collateral_type: v.collateral_type,
+                    debt_amount: v.borrowed_icusd_amount.to_u64(),
+                    collateral_amount: v.collateral_amount,
+                })
+                .collect();
+
+            let count = vault_notifications.len();
+            ic_cdk::spawn(async move {
+                let _result: Result<(), _> = ic_cdk::call(
+                    pool_canister,
+                    "notify_liquidatable_vaults",
+                    (vault_notifications,),
+                )
+                .await;
+                // Result intentionally ignored — pool failure must not affect the backend
+            });
+            log!(
+                INFO,
+                "[check_vaults] Pushed {} liquidatable vaults to stability pool {}",
+                count,
+                pool_canister
+            );
+        }
     } else {
         log!(
             DEBUG,
-            "[check_vaults] All vaults are healthy at the current ICP rate: {}", 
+            "[check_vaults] All vaults are healthy at the current ICP rate: {}",
             dummy_rate.to_f64()
         );
     }
-    
+
     // No longer calling record_liquidate_vault to trigger automatic liquidations
 }
 

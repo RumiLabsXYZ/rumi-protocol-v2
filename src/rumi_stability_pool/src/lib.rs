@@ -224,7 +224,106 @@ fn set_protocol_backend(backend_canister: candid::Principal) -> bool {
     })
 }
 
+// ── ICRC-21: Canister Call Consent Messages ──
+
+#[update]
+#[candid_method(update)]
+fn icrc21_canister_call_consent_message(
+    request: Icrc21ConsentMessageRequest,
+) -> Icrc21ConsentMessageResponse {
+    let message_text = match request.method.as_str() {
+        "deposit" => {
+            // Decode the arg to extract the amount
+            match candid::decode_one::<u64>(&request.arg) {
+                Ok(amount) => {
+                    let formatted = format_token_amount(amount);
+                    format!(
+                        "## Deposit to Stability Pool\n\n\
+                         You are depositing **{} icUSD** into the Rumi Protocol Stability Pool.\n\n\
+                         Your deposit earns liquidation rewards proportional to your share of the pool.",
+                        formatted
+                    )
+                }
+                Err(_) => "Deposit icUSD into the Rumi Protocol Stability Pool.".to_string(),
+            }
+        }
+        "withdraw" => {
+            match candid::decode_one::<u64>(&request.arg) {
+                Ok(amount) => {
+                    let formatted = format_token_amount(amount);
+                    format!(
+                        "## Withdraw from Stability Pool\n\n\
+                         You are withdrawing **{} icUSD** from the Rumi Protocol Stability Pool.",
+                        formatted
+                    )
+                }
+                Err(_) => "Withdraw icUSD from the Rumi Protocol Stability Pool.".to_string(),
+            }
+        }
+        "claim_collateral_rewards" => {
+            match candid::decode_one::<Vec<u64>>(&request.arg) {
+                Ok(ids) => {
+                    format!(
+                        "## Claim Collateral Rewards\n\n\
+                         You are claiming liquidation rewards from **{}** liquidation event(s).",
+                        ids.len()
+                    )
+                }
+                Err(_) => "Claim collateral rewards from liquidation events.".to_string(),
+            }
+        }
+        _ => {
+            return Icrc21ConsentMessageResponse::Err(Icrc21Error::UnsupportedCanisterCall(
+                Icrc21ErrorInfo {
+                    description: format!(
+                        "Method '{}' is not a supported user-facing call.",
+                        request.method
+                    ),
+                },
+            ));
+        }
+    };
+
+    Icrc21ConsentMessageResponse::Ok(Icrc21ConsentInfo {
+        consent_message: Icrc21ConsentMessage::GenericDisplayMessage(message_text),
+        metadata: Icrc21ConsentMessageResponseMetadata {
+            language: request.user_preferences.language.clone(),
+            utc_offset_minutes: request.user_preferences.utc_offset_minutes,
+        },
+    })
+}
+
+// ── ICRC-10: Supported Standards ──
+
+#[query]
+#[candid_method(query)]
+fn icrc10_supported_standards() -> Vec<Icrc10SupportedStandard> {
+    vec![
+        Icrc10SupportedStandard {
+            name: "ICRC-21".to_string(),
+            url: "https://github.com/dfinity/ICRC/blob/main/ICRCs/ICRC-21/ICRC-21.md".to_string(),
+        },
+        Icrc10SupportedStandard {
+            name: "ICRC-10".to_string(),
+            url: "https://github.com/dfinity/ICRC/blob/main/ICRCs/ICRC-10/ICRC-10.md".to_string(),
+        },
+    ]
+}
+
 // Helper functions
+
+fn format_token_amount(amount_e8s: u64) -> String {
+    let whole = amount_e8s / 100_000_000;
+    let frac = amount_e8s % 100_000_000;
+    if frac == 0 {
+        format!("{}", whole)
+    } else {
+        // Trim trailing zeros from fractional part
+        let frac_str = format!("{:08}", frac);
+        let trimmed = frac_str.trim_end_matches('0');
+        format!("{}.{}", whole, trimmed)
+    }
+}
 
 fn is_paused() -> bool {
     STATE.with(|state| state.borrow().paused)

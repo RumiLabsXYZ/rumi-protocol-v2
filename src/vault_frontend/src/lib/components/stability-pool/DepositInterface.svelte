@@ -1,415 +1,497 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
+  import { Principal } from '@dfinity/principal';
   import { walletStore } from '../../stores/wallet';
-  import { stabilityPoolService } from '../../services/stabilityPoolService';
-  import { walletOperations } from '../../services/protocol/walletOperations';
-  
-  // poolData is passed but not used directly in this component
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  export let poolData: any;
-  export let userDeposit: any;
-  
+  import { stabilityPoolService, formatTokenAmount, parseTokenAmount } from '../../services/stabilityPoolService';
+  import type { PoolStatus, StablecoinConfig, UserPosition } from '../../services/stabilityPoolService';
+  import { CANISTER_IDS } from '../../config';
+
+  export let poolStatus: PoolStatus | null = null;
+  export let userPosition: UserPosition | null = null;
+
   const dispatch = createEventDispatcher();
-  
-  let depositAmount = '';
-  let withdrawAmount = '';
+
+  let activeTab: 'deposit' | 'withdraw' = 'deposit';
+  let amount = '';
   let loading = false;
   let error = '';
-  let activeTab: 'deposit' | 'withdraw' = 'deposit';
-  let icusdBalance = 0n;
-  
+  let selectedTokenIndex = 0;
+  let showDropdown = false;
+
   $: isConnected = $walletStore.isConnected;
-  $: maxWithdrawable = userDeposit ? stabilityPoolService.formatIcusd(userDeposit.amount) : '0.00';
-  
-  // Load user's icUSD balance
-  async function loadIcusdBalance() {
-    if (!isConnected) return;
-    
-    try {
-      const balance = await walletOperations.getIcusdBalance();
-      icusdBalance = BigInt(Math.floor(balance * 100_000_000)); // Convert to smallest unit
-    } catch (err) {
-      console.error('Failed to load icUSD balance:', err);
+  $: activeStablecoins = poolStatus?.stablecoin_registry?.filter(s => s.is_active) ?? [];
+  $: selectedToken = activeStablecoins[selectedTokenIndex] ?? null;
+
+  // Map wallet balance keys to ledger IDs
+  const LEDGER_TO_WALLET_KEY: Record<string, string> = {
+    [CANISTER_IDS.ICUSD_LEDGER]: 'ICUSD',
+    [CANISTER_IDS.CKUSDT_LEDGER]: 'CKUSDT',
+    [CANISTER_IDS.CKUSDC_LEDGER]: 'CKUSDC',
+  };
+
+  // Stablecoin dot colors (matches VaultCard pattern)
+  const TOKEN_COLORS: Record<string, string> = {
+    [CANISTER_IDS.ICUSD_LEDGER]: '#818cf8',
+    [CANISTER_IDS.CKUSDT_LEDGER]: '#26A17B',
+    [CANISTER_IDS.CKUSDC_LEDGER]: '#2775CA',
+  };
+
+  function getTokenColor(token: StablecoinConfig): string {
+    return TOKEN_COLORS[token.ledger_id.toText()] ?? '#2DD4BF';
+  }
+
+  $: selectedTokenColor = selectedToken ? getTokenColor(selectedToken) : '#2DD4BF';
+
+  $: walletBalance = (() => {
+    if (!selectedToken || !$walletStore.tokenBalances) return 0n;
+    const key = LEDGER_TO_WALLET_KEY[selectedToken.ledger_id.toText()];
+    if (!key) return 0n;
+    return $walletStore.tokenBalances[key]?.raw ?? 0n;
+  })();
+
+  $: walletBalanceFormatted = selectedToken
+    ? formatTokenAmount(walletBalance, selectedToken.decimals)
+    : '0';
+
+  // User's deposited balance for the selected token
+  $: depositedBalance = (() => {
+    if (!selectedToken || !userPosition) return 0n;
+    const entry = userPosition.stablecoin_balances.find(
+      ([ledger]) => ledger.toText() === selectedToken.ledger_id.toText()
+    );
+    return entry ? entry[1] : 0n;
+  })();
+
+  $: depositedFormatted = selectedToken
+    ? formatTokenAmount(depositedBalance, selectedToken.decimals)
+    : '0';
+
+  function selectToken(index: number) {
+    selectedTokenIndex = index;
+    showDropdown = false;
+    amount = '';
+    error = '';
+  }
+
+  function closeDropdown() {
+    showDropdown = false;
+  }
+
+  function setMax() {
+    if (!selectedToken) return;
+    if (activeTab === 'deposit') {
+      const fee = selectedToken.decimals === 8 ? 100_000n : 10n;
+      const adjusted = walletBalance > fee ? walletBalance - fee : 0n;
+      amount = formatTokenAmount(adjusted, selectedToken.decimals, selectedToken.decimals);
+    } else {
+      amount = formatTokenAmount(depositedBalance, selectedToken.decimals, selectedToken.decimals);
     }
   }
-  
-  $: if (isConnected) {
-    loadIcusdBalance();
-  }
-  
-  async function handleDeposit() {
-    if (!depositAmount || parseFloat(depositAmount) <= 0) {
-      error = 'Please enter a valid deposit amount';
+
+  async function handleSubmit() {
+    if (!selectedToken || !amount || parseFloat(amount) <= 0) {
+      error = 'Enter a valid amount';
       return;
     }
-    
+
     try {
       loading = true;
       error = '';
-      
-      const amount = stabilityPoolService.parseIcusdAmount(depositAmount);
-      
-      // Check if user has sufficient balance
-      if (amount > icusdBalance) {
-        error = 'Insufficient icUSD balance';
-        return;
+      const rawAmount = parseTokenAmount(amount, selectedToken.decimals);
+
+      if (activeTab === 'deposit') {
+        const oneUnit = BigInt(Math.pow(10, selectedToken.decimals));
+        if (rawAmount < oneUnit) {
+          error = `Minimum deposit is 1 ${selectedToken.symbol}`;
+          return;
+        }
+        if (rawAmount > walletBalance) {
+          error = 'Insufficient wallet balance';
+          return;
+        }
+        await stabilityPoolService.deposit(selectedToken.ledger_id, rawAmount);
+        dispatch('success', { action: 'deposit' });
+      } else {
+        if (rawAmount > depositedBalance) {
+          error = 'Exceeds deposited amount';
+          return;
+        }
+        await stabilityPoolService.withdraw(selectedToken.ledger_id, rawAmount);
+        dispatch('success', { action: 'withdraw' });
       }
-      
-      await stabilityPoolService.deposit(amount);
-      dispatch('depositSuccess');
-      depositAmount = '';
-      
+      amount = '';
     } catch (err: any) {
-      console.error('Deposit failed:', err);
-      error = err.message || 'Failed to deposit';
+      error = err.message || `Failed to ${activeTab}`;
     } finally {
       loading = false;
-    }
-  }
-  
-  async function handleWithdraw() {
-    if (!withdrawAmount || parseFloat(withdrawAmount) <= 0) {
-      error = 'Please enter a valid withdrawal amount';
-      return;
-    }
-    
-    if (!userDeposit) {
-      error = 'No deposit found';
-      return;
-    }
-    
-    try {
-      loading = true;
-      error = '';
-      
-      const amount = stabilityPoolService.parseIcusdAmount(withdrawAmount);
-      
-      // Check if user has sufficient deposit
-      if (amount > userDeposit.amount) {
-        error = 'Insufficient deposited amount';
-        return;
-      }
-      
-      await stabilityPoolService.withdraw(amount);
-      dispatch('withdrawSuccess');
-      withdrawAmount = '';
-      
-    } catch (err: any) {
-      console.error('Withdrawal failed:', err);
-      error = err.message || 'Failed to withdraw';
-    } finally {
-      loading = false;
-    }
-  }
-  
-  function setMaxDeposit() {
-    // Deduct icUSD ledger fee (100_000 e8s = 0.001 icUSD) so deposit + fee doesn't exceed balance
-    const ICUSD_LEDGER_FEE = BigInt(100_000);
-    const adjusted = icusdBalance > ICUSD_LEDGER_FEE ? icusdBalance - ICUSD_LEDGER_FEE : BigInt(0);
-    depositAmount = stabilityPoolService.formatIcusd(adjusted);
-  }
-  
-  function setMaxWithdraw() {
-    if (userDeposit) {
-      withdrawAmount = stabilityPoolService.formatIcusd(userDeposit.amount);
     }
   }
 </script>
 
-<div class="deposit-interface">
-  <div class="interface-header">
-    <h3 class="interface-title">Manage Position</h3>
-    <div class="tab-buttons">
-      <button 
-        class="tab-button" 
-        class:active={activeTab === 'deposit'}
-        on:click={() => { activeTab = 'deposit'; error = ''; }}
-      >
-        Deposit
-      </button>
-      <button 
-        class="tab-button" 
-        class:active={activeTab === 'withdraw'}
-        on:click={() => { activeTab = 'withdraw'; error = ''; }}
-        disabled={!userDeposit}
-      >
-        Withdraw
-      </button>
-    </div>
+<svelte:window on:click={closeDropdown} />
+
+<div class="deposit-panel">
+  <!-- Tab switcher -->
+  <div class="tab-bar">
+    <button
+      class="tab" class:active={activeTab === 'deposit'}
+      on:click={() => { activeTab = 'deposit'; error = ''; }}
+    >Deposit</button>
+    <button
+      class="tab" class:active={activeTab === 'withdraw'}
+      on:click={() => { activeTab = 'withdraw'; error = ''; }}
+      disabled={!userPosition}
+    >Withdraw</button>
+    <div class="tab-indicator" class:right={activeTab === 'withdraw'}></div>
   </div>
 
   {#if !isConnected}
-    <div class="connect-prompt">
-      <div class="prompt-icon">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M9 12l2 2 4-4"/>
-          <path d="M21 12c0 4.97-4.03 9-9 9s-9-4.03-9-9 4.03-9 9-9c2.39 0 4.58.93 6.21 2.44"/>
+    <div class="connect-gate">
+      <div class="gate-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+          <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
         </svg>
       </div>
-      <p>Connect your wallet to deposit icUSD into the stability pool</p>
+      <p class="gate-text">Connect your wallet to deposit stablecoins and earn liquidation rewards</p>
     </div>
   {:else}
-    <div class="interface-content">
-      {#if activeTab === 'deposit'}
-        <div class="deposit-form">
-          <div class="balance-info">
-            <span class="balance-label">Available icUSD:</span>
-            <span class="balance-amount">{stabilityPoolService.formatIcusd(icusdBalance)}</span>
-          </div>
-          
-          <div class="input-group">
-            <label for="deposit-amount" class="input-label">Deposit Amount</label>
-            <div class="input-container">
-              <input
-                id="deposit-amount"
-                type="number"
-                step="0.01"
-                min="0"
-                placeholder="0.00"
-                bind:value={depositAmount}
-                disabled={loading}
-                class="amount-input"
-              />
-              <div class="input-suffix">
-                <span class="currency">icUSD</span>
-                <button class="max-button" on:click={setMaxDeposit} disabled={loading}>
-                  MAX
-                </button>
-              </div>
-            </div>
-          </div>
-          
-          <button 
-            class="action-button deposit-button"
-            on:click={handleDeposit}
-            disabled={loading || !depositAmount || parseFloat(depositAmount) <= 0}
-          >
-            {#if loading}
-              <div class="loading-spinner"></div>
-              Depositing...
-            {:else}
-              Deposit icUSD
-            {/if}
+    <!-- Balance display -->
+    <div class="balance-row">
+      <span class="balance-label">
+        {activeTab === 'deposit' ? 'Available' : 'Deposited'}
+      </span>
+      <span class="balance-value">
+        {activeTab === 'deposit' ? walletBalanceFormatted : depositedFormatted}
+        <span class="balance-symbol">{selectedToken?.symbol ?? ''}</span>
+      </span>
+    </div>
+
+    <!-- Input with in-field token dropdown -->
+    <div class="input-wrapper">
+      <input
+        type="number"
+        step="any"
+        min="0"
+        placeholder="0.00"
+        bind:value={amount}
+        disabled={loading}
+        class="amount-input"
+        class:has-value={amount && parseFloat(amount) > 0}
+      />
+      <div class="input-actions">
+        {#if activeStablecoins.length > 1}
+          <button class="token-selector"
+            on:click|stopPropagation={() => { showDropdown = !showDropdown; }}>
+            <span class="token-dot" style="background:{selectedTokenColor}"></span>
+            {selectedToken?.symbol ?? ''}
+            <svg class="token-chevron" width="10" height="6" viewBox="0 0 10 6" fill="none">
+              <path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
           </button>
-        </div>
-      {:else}
-        <div class="withdraw-form">
-          <div class="balance-info">
-            <span class="balance-label">Deposited Amount:</span>
-            <span class="balance-amount">{maxWithdrawable} icUSD</span>
-          </div>
-          
-          <div class="input-group">
-            <label for="withdraw-amount" class="input-label">Withdrawal Amount</label>
-            <div class="input-container">
-              <input
-                id="withdraw-amount"
-                type="number"
-                step="0.01"
-                min="0"
-                placeholder="0.00"
-                bind:value={withdrawAmount}
-                disabled={loading}
-                class="amount-input"
-              />
-              <div class="input-suffix">
-                <span class="currency">icUSD</span>
-                <button class="max-button" on:click={setMaxWithdraw} disabled={loading}>
-                  MAX
-                </button>
-              </div>
-            </div>
-          </div>
-          
-          <button 
-            class="action-button withdraw-button"
-            on:click={handleWithdraw}
-            disabled={loading || !withdrawAmount || parseFloat(withdrawAmount) <= 0}
-          >
-            {#if loading}
-              <div class="loading-spinner"></div>
-              Withdrawing...
-            {:else}
-              Withdraw icUSD
-            {/if}
-          </button>
-        </div>
-      {/if}
-      
-      {#if error}
-        <div class="error-message">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="10"/>
-            <line x1="12" y1="8" x2="12" y2="12"/>
-            <line x1="12" y1="16" x2="12.01" y2="16"/>
-          </svg>
-          {error}
+        {:else}
+          <span class="input-symbol">
+            <span class="token-dot" style="background:{selectedTokenColor}"></span>
+            {selectedToken?.symbol ?? ''}
+          </span>
+        {/if}
+        <button class="max-btn" on:click={setMax} disabled={loading}>MAX</button>
+      </div>
+
+      {#if showDropdown}
+        <div class="token-dropdown" on:click|stopPropagation>
+          {#each activeStablecoins as token, i}
+            <button class="token-option" class:token-option-active={selectedTokenIndex === i}
+              on:click={() => selectToken(i)}>
+              <span class="token-dot" style="background:{getTokenColor(token)}"></span>
+              {token.symbol}
+            </button>
+          {/each}
         </div>
       {/if}
     </div>
+
+    <!-- Submit -->
+    <button
+      class="submit-btn" class:withdraw={activeTab === 'withdraw'}
+      on:click={handleSubmit}
+      disabled={loading || !amount || parseFloat(amount) <= 0}
+    >
+      {#if loading}
+        <span class="spinner"></span>
+        {activeTab === 'deposit' ? 'Depositing…' : 'Withdrawing…'}
+      {:else}
+        {activeTab === 'deposit' ? 'Deposit' : 'Withdraw'}
+        {selectedToken?.symbol ?? ''}
+      {/if}
+    </button>
+
+    {#if error}
+      <div class="error-bar">
+        <svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14">
+          <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 10.5a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5zM8.75 8a.75.75 0 0 1-1.5 0V5a.75.75 0 0 1 1.5 0v3z"/>
+        </svg>
+        {error}
+      </div>
+    {/if}
   {/if}
 </div>
 
 <style>
-  .deposit-interface {
-    height: 100%;
-    display: flex;
-    flex-direction: column;
+  .deposit-panel {
+    background: var(--rumi-bg-surface1);
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.75rem;
+    padding: 1.5rem;
+    box-shadow:
+      inset 0 1px 0 0 rgba(200, 210, 240, 0.03),
+      0 2px 8px -2px rgba(8, 11, 22, 0.6);
   }
 
-  .interface-header {
+  /* ── Tab bar ── */
+  .tab-bar {
+    position: relative;
+    display: flex;
+    background: var(--rumi-bg-surface2);
+    border-radius: 0.5rem;
+    padding: 0.1875rem;
     margin-bottom: 1.5rem;
   }
 
-  .interface-title {
-    font-size: 1.25rem;
-    font-weight: 600;
-    color: white;
-    margin-bottom: 1rem;
-  }
-
-  .tab-buttons {
-    display: flex;
-    background: rgba(0, 0, 0, 0.2);
-    border-radius: 0.5rem;
-    padding: 0.25rem;
-  }
-
-  .tab-button {
+  .tab {
     flex: 1;
     padding: 0.5rem 1rem;
-    background: transparent;
+    background: none;
     border: none;
     border-radius: 0.375rem;
-    color: #d1d5db;
+    font-family: 'Circular Std', 'Inter', sans-serif;
+    font-size: 0.875rem;
     font-weight: 500;
+    color: var(--rumi-text-muted);
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: color 0.2s ease;
+    position: relative;
+    z-index: 1;
   }
 
-  .tab-button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
+  .tab:disabled { opacity: 0.35; cursor: not-allowed; }
+  .tab.active { color: var(--rumi-text-primary); }
+
+  .tab-indicator {
+    position: absolute;
+    top: 0.1875rem;
+    left: 0.1875rem;
+    width: calc(50% - 0.1875rem);
+    height: calc(100% - 0.375rem);
+    background: var(--rumi-bg-surface1);
+    border: 1px solid var(--rumi-border-hover);
+    border-radius: 0.375rem;
+    transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    z-index: 0;
   }
 
-  .tab-button.active {
-    background: linear-gradient(135deg, #f472b6, #a855f7);
-    color: white;
+  .tab-indicator.right {
+    transform: translateX(100%);
   }
 
-  .connect-prompt {
+  /* ── Connect gate ── */
+  .connect-gate {
     text-align: center;
-    padding: 2rem;
-    color: #d1d5db;
+    padding: 2.5rem 1rem;
   }
 
-  .prompt-icon {
-    width: 3rem;
-    height: 3rem;
-    color: #f472b6;
+  .gate-icon {
+    width: 2.5rem;
+    height: 2.5rem;
+    color: var(--rumi-text-muted);
     margin: 0 auto 1rem;
   }
 
-  .interface-content {
-    flex: 1;
+  .gate-text {
+    font-size: 0.8125rem;
+    color: var(--rumi-text-secondary);
+    line-height: 1.5;
+    max-width: 280px;
+    margin: 0 auto;
   }
 
-  .balance-info {
+  /* ── Balance row ── */
+  .balance-row {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 1rem;
-    padding: 0.75rem;
-    background: rgba(0, 0, 0, 0.2);
-    border-radius: 0.5rem;
+    margin-bottom: 0.75rem;
   }
 
   .balance-label {
-    color: #d1d5db;
-    font-size: 0.875rem;
+    font-size: 0.75rem;
+    color: var(--rumi-text-muted);
   }
 
-  .balance-amount {
-    color: white;
+  .balance-value {
+    font-size: 0.8125rem;
     font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--rumi-text-primary);
   }
 
-  .input-group {
-    margin-bottom: 1.5rem;
+  .balance-symbol {
+    color: var(--rumi-text-secondary);
+    font-weight: 400;
   }
 
-  .input-label {
-    display: block;
-    color: #d1d5db;
-    font-size: 0.875rem;
-    font-weight: 500;
-    margin-bottom: 0.5rem;
-  }
-
-  .input-container {
+  /* ── Input ── */
+  .input-wrapper {
     position: relative;
-    display: flex;
-    align-items: center;
+    margin-bottom: 1.25rem;
   }
 
   .amount-input {
     width: 100%;
-    padding: 0.75rem 1rem;
-    padding-right: 6rem;
-    background: rgba(0, 0, 0, 0.3);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    padding: 0.875rem 1rem;
+    padding-right: 10rem;
+    background: var(--rumi-bg-surface2);
+    border: 1px solid var(--rumi-border);
     border-radius: 0.5rem;
-    color: white;
-    font-size: 1rem;
+    color: var(--rumi-text-primary);
+    font-family: 'Inter', sans-serif;
+    font-size: 1.125rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+
+  .amount-input::-webkit-inner-spin-button,
+  .amount-input::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+
+  .amount-input::placeholder {
+    color: var(--rumi-text-muted);
+    font-weight: 400;
   }
 
   .amount-input:focus {
     outline: none;
-    border-color: #f472b6;
-    box-shadow: 0 0 0 3px rgba(244, 114, 182, 0.1);
+    border-color: var(--rumi-teal);
+    box-shadow: 0 0 0 2px rgba(45, 212, 191, 0.1);
   }
 
-  .input-suffix {
+  .amount-input.has-value {
+    border-color: var(--rumi-border-hover);
+  }
+
+  .input-actions {
     position: absolute;
     right: 0.75rem;
+    top: 50%;
+    transform: translateY(-50%);
     display: flex;
     align-items: center;
     gap: 0.5rem;
   }
 
-  .currency {
-    color: #d1d5db;
-    font-size: 0.875rem;
-  }
-
-  .max-button {
+  /* ── In-field token dropdown (matches borrow page pattern) ── */
+  .token-selector {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    background: var(--rumi-bg-surface2);
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.375rem;
     padding: 0.25rem 0.5rem;
-    background: rgba(244, 114, 182, 0.2);
-    border: 1px solid rgba(244, 114, 182, 0.3);
-    border-radius: 0.25rem;
-    color: #f472b6;
-    font-size: 0.75rem;
+    font-size: 0.8125rem;
     font-weight: 600;
+    color: var(--rumi-text-primary);
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: border-color 0.15s;
   }
 
-  .max-button:hover:not(:disabled) {
-    background: rgba(244, 114, 182, 0.3);
+  .token-selector:hover { border-color: #2DD4BF; }
+
+  .token-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    display: inline-block;
   }
 
-  .max-button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
+  .token-chevron {
+    color: var(--rumi-text-secondary);
+    flex-shrink: 0;
   }
 
-  .action-button {
+  .input-symbol {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    font-size: 0.8125rem;
+    color: var(--rumi-text-secondary);
+  }
+
+  .token-dropdown {
+    position: absolute;
+    right: 3rem;
+    top: calc(50% + 1.25rem);
+    background: var(--rumi-bg-surface2);
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.5rem;
+    padding: 0.25rem;
+    z-index: 10;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    min-width: 120px;
+  }
+
+  .token-option {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    padding: 0.5rem 0.625rem;
+    border: none;
+    background: transparent;
+    color: var(--rumi-text-secondary);
+    font-size: 0.8125rem;
+    font-weight: 500;
+    cursor: pointer;
+    border-radius: 0.375rem;
+    transition: background 0.1s;
+  }
+
+  .token-option:hover { background: var(--rumi-bg-surface3); }
+  .token-option-active { color: var(--rumi-text-primary); font-weight: 600; }
+
+  .max-btn {
+    padding: 0.25rem 0.5rem;
+    background: var(--rumi-teal-dim);
+    border: 1px solid var(--rumi-border-teal);
+    border-radius: 0.25rem;
+    color: var(--rumi-teal);
+    font-size: 0.6875rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .max-btn:hover:not(:disabled) { background: rgba(45, 212, 191, 0.15); }
+  .max-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* ── Submit button ── */
+  .submit-btn {
     width: 100%;
     padding: 0.875rem;
+    background: var(--rumi-action);
+    color: var(--rumi-bg-primary);
     border: none;
     border-radius: 0.5rem;
+    font-family: 'Circular Std', 'Inter', sans-serif;
+    font-size: 0.9375rem;
     font-weight: 600;
-    font-size: 1rem;
     cursor: pointer;
     transition: all 0.2s ease;
     display: flex;
@@ -418,62 +500,45 @@
     gap: 0.5rem;
   }
 
-  .action-button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
+  .submit-btn:hover:not(:disabled) {
+    background: var(--rumi-action-bright);
+    box-shadow: 0 0 20px rgba(52, 211, 153, 0.15);
   }
 
-  .deposit-button {
-    background: linear-gradient(135deg, #f472b6, #a855f7);
+  .submit-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .submit-btn.withdraw {
+    background: var(--rumi-purple-light);
     color: white;
   }
 
-  .deposit-button:hover:not(:disabled) {
-    transform: translateY(-1px);
-    box-shadow: 0 10px 25px rgba(244, 114, 182, 0.3);
+  .submit-btn.withdraw:hover:not(:disabled) {
+    box-shadow: 0 0 20px rgba(124, 58, 237, 0.2);
   }
 
-  .withdraw-button {
-    background: linear-gradient(135deg, #a855f7, #3b82f6);
-    color: white;
-  }
-
-  .withdraw-button:hover:not(:disabled) {
-    transform: translateY(-1px);
-    box-shadow: 0 10px 25px rgba(168, 85, 247, 0.3);
-  }
-
-  .loading-spinner {
+  /* ── Spinner ── */
+  .spinner {
     width: 1rem;
     height: 1rem;
     border: 2px solid transparent;
-    border-top: 2px solid currentColor;
+    border-top-color: currentColor;
     border-radius: 50%;
-    animation: spin 1s linear infinite;
+    animation: spin 0.8s linear infinite;
   }
 
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
+  @keyframes spin { to { transform: rotate(360deg); } }
 
-  .error-message {
+  /* ── Error ── */
+  .error-bar {
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    padding: 0.75rem;
-    background: rgba(224, 107, 159, 0.1);
-    border: 1px solid rgba(224, 107, 159, 0.3);
-    border-radius: 0.5rem;
-    color: #e881a8;
-    font-size: 0.875rem;
-    margin-top: 1rem;
-  }
-
-  .error-message svg {
-    width: 1rem;
-    height: 1rem;
-    flex-shrink: 0;
+    margin-top: 0.75rem;
+    padding: 0.625rem 0.75rem;
+    background: rgba(224, 107, 159, 0.08);
+    border: 1px solid rgba(224, 107, 159, 0.2);
+    border-radius: 0.375rem;
+    color: var(--rumi-danger);
+    font-size: 0.8125rem;
   }
 </style>

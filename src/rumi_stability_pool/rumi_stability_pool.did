@@ -72,24 +72,86 @@ type ManualLiquidationResult = record {
   message: text;
 };
 
+// ICRC-21 types
+type Icrc21ConsentMessageMetadata = record {
+  language: text;
+  utc_offset_minutes: opt int16;
+};
+
+type Icrc21ConsentMessageRequest = record {
+  method: text;
+  arg: blob;
+  user_preferences: Icrc21ConsentMessageMetadata;
+};
+
+type Icrc21LineDisplayLine = record {
+  line: text;
+};
+
+type Icrc21LineDisplayPage = record {
+  lines: vec Icrc21LineDisplayLine;
+};
+
+type Icrc21ConsentMessage = variant {
+  GenericDisplayMessage: text;
+  LineDisplayMessage: record { pages: vec Icrc21LineDisplayPage };
+};
+
+type Icrc21ConsentMessageResponseMetadata = record {
+  language: text;
+  utc_offset_minutes: opt int16;
+};
+
+type Icrc21ConsentInfo = record {
+  consent_message: Icrc21ConsentMessage;
+  metadata: Icrc21ConsentMessageResponseMetadata;
+};
+
+type Icrc21ErrorInfo = record {
+  description: text;
+};
+
+type Icrc21Error = variant {
+  UnsupportedCanisterCall: Icrc21ErrorInfo;
+  ConsentMessageUnavailable: Icrc21ErrorInfo;
+  GenericError: record { error_code: nat; description: text };
+};
+
+type Icrc21ConsentMessageResponse = variant {
+  Ok: Icrc21ConsentInfo;
+  Err: Icrc21Error;
+};
+
+// ICRC-10 types
+type Icrc10SupportedStandard = record {
+  name: text;
+  url: text;
+};
+
 service : (InitArgs) -> {
   // User functions
   deposit: (nat64) -> (DepositResult);
   withdraw: (nat64) -> (WithdrawResult);
   claim_collateral_rewards: (vec nat64) -> (ClaimResult);
-  
+
   // Query functions
   get_user_deposit: () -> (opt UserDeposit) query;
   get_total_pool_info: () -> (PoolInfo) query;
   get_liquidation_history: (opt nat64) -> (vec LiquidationRecord) query;
   get_pool_state: () -> (PoolState) query;
-  
+
+  // ICRC-21: Canister Call Consent Messages
+  icrc21_canister_call_consent_message: (Icrc21ConsentMessageRequest) -> (Icrc21ConsentMessageResponse);
+
+  // ICRC-10: Supported Standards
+  icrc10_supported_standards: () -> (vec Icrc10SupportedStandard) query;
+
   // Admin functions
   execute_liquidation: (nat64, nat64, nat64, CollateralType) -> (bool);
   pause_protocol: () -> (bool);
   unpause_protocol: () -> (bool);
   update_liquidation_discount: (nat8) -> (bool);
-  
+
   // Monitoring functions
   start_monitoring: () -> (bool);
   manual_liquidation_check: () -> (ManualLiquidationResult);

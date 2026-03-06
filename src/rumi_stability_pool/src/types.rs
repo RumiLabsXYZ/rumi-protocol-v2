@@ -1,4 +1,4 @@
-use candid::{CandidType, Deserialize, Principal};
+use candid::{CandidType, Deserialize, Nat, Principal};
 use ic_stable_structures::{Storable, storable::Bound};
 use serde::Serialize;
 use std::cell::RefCell;
@@ -103,6 +103,77 @@ pub struct ManualLiquidationResult {
     pub success: bool,
     pub liquidations_executed: u64,
     pub message: String,
+}
+
+// ── ICRC-21 Canister Call Consent Messages ──
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct Icrc21ConsentMessageRequest {
+    pub method: String,
+    pub arg: Vec<u8>,
+    pub user_preferences: Icrc21ConsentMessageMetadata,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct Icrc21ConsentMessageMetadata {
+    pub language: String,
+    pub utc_offset_minutes: Option<i16>,
+}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub enum Icrc21ConsentMessageResponse {
+    #[serde(rename = "Ok")]
+    Ok(Icrc21ConsentInfo),
+    #[serde(rename = "Err")]
+    Err(Icrc21Error),
+}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct Icrc21ConsentInfo {
+    pub consent_message: Icrc21ConsentMessage,
+    pub metadata: Icrc21ConsentMessageResponseMetadata,
+}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct Icrc21ConsentMessageResponseMetadata {
+    pub language: String,
+    pub utc_offset_minutes: Option<i16>,
+}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub enum Icrc21ConsentMessage {
+    GenericDisplayMessage(String),
+    LineDisplayMessage { pages: Vec<Icrc21LineDisplayPage> },
+}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct Icrc21LineDisplayPage {
+    pub lines: Vec<Icrc21LineDisplayLine>,
+}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct Icrc21LineDisplayLine {
+    pub line: String,
+}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub enum Icrc21Error {
+    UnsupportedCanisterCall(Icrc21ErrorInfo),
+    ConsentMessageUnavailable(Icrc21ErrorInfo),
+    GenericError { error_code: Nat, description: String },
+}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct Icrc21ErrorInfo {
+    pub description: String,
+}
+
+// ── ICRC-10 Supported Standards ──
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct Icrc10SupportedStandard {
+    pub name: String,
+    pub url: String,
 }
 
 // Use simple in-memory storage for now
