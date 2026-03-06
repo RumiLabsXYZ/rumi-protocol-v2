@@ -265,9 +265,9 @@ pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Prin
             s.last_redemption_time = ic_cdk::api::time();
             let vault_fee = spillover_icusd * base_fee;
 
-            // Apply dynamic Redemption Margin Ratio: redeemers get RMR × face value
-            let rmr = s.get_redemption_margin_ratio();
-            let effective_spillover = (spillover_icusd - vault_fee) * rmr;
+            // Note: RMR was already applied when computing spillover_e8s (line 160).
+            // Do NOT apply it again here — that would double-discount.
+            let effective_spillover = spillover_icusd - vault_fee;
 
             record_redemption_on_vaults(
                 s,
@@ -2225,6 +2225,33 @@ pub async fn liquidate_vault_partial_with_stable(
                             e
                         );
                     }
+                }
+            }
+        }
+    }
+
+    // Route fee surcharge to treasury as stablecoins (mirrors repay_to_vault_with_stable)
+    if fee_e6s > 0 {
+        let (treasury, stable_ledger) = read_state(|s| {
+            let ledger = match token_type {
+                StableTokenType::CKUSDT => s.ckusdt_ledger_principal,
+                StableTokenType::CKUSDC => s.ckusdc_ledger_principal,
+            };
+            (s.treasury_principal, ledger)
+        });
+        if let (Some(treasury_principal), Some(stable_ledger)) = (treasury, stable_ledger) {
+            match management::transfer_collateral(fee_e6s, treasury_principal, stable_ledger).await {
+                Ok(block) => {
+                    log!(INFO,
+                        "[liquidate_vault_stable] Transferred {} e6s fee surcharge to treasury (block {})",
+                        fee_e6s, block
+                    );
+                }
+                Err(e) => {
+                    log!(INFO,
+                        "[liquidate_vault_stable] Fee surcharge transfer to treasury failed: {:?}. Fee remains in reserves.",
+                        e
+                    );
                 }
             }
         }
