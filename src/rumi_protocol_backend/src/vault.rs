@@ -851,6 +851,35 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
                 "[repay_to_vault_with_stable] Skipping icUSD mint for interest ({} e8s) — stablecoin repayment path",
                 interest_share.to_u64()
             );
+
+            // Route fee surcharge to treasury as stablecoins
+            if fee_e6s > 0 {
+                let (treasury, stable_ledger) = read_state(|s| {
+                    let ledger = match arg.token_type {
+                        StableTokenType::CKUSDT => s.ckusdt_ledger_principal,
+                        StableTokenType::CKUSDC => s.ckusdc_ledger_principal,
+                    };
+                    (s.treasury_principal, ledger)
+                });
+                if let (Some(treasury_principal), Some(stable_ledger)) = (treasury, stable_ledger) {
+                    match management::transfer_collateral(fee_e6s, treasury_principal, stable_ledger).await {
+                        Ok(block) => {
+                            log!(INFO,
+                                "[repay_with_stable] Transferred {} e6s fee to treasury (block {})",
+                                fee_e6s, block
+                            );
+                        }
+                        Err(e) => {
+                            // Non-critical: fee stays in reserves if transfer fails
+                            log!(INFO,
+                                "[repay_with_stable] Fee transfer to treasury failed: {:?}. Fee remains in reserves.",
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+
             guard_principal.complete();
             Ok(block_index)
         }
