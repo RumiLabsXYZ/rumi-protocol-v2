@@ -3,6 +3,7 @@
   import { walletStore } from '../../lib/stores/wallet';
   import { stabilityPoolService } from '../../lib/services/stabilityPoolService';
   import type { PoolStatus, UserPosition, LiquidationRecord } from '../../lib/services/stabilityPoolService';
+  import { QueryOperations } from '../../lib/services/protocol/queryOperations';
   import PoolStats from '../../lib/components/stability-pool/PoolStats.svelte';
   import DepositInterface from '../../lib/components/stability-pool/DepositInterface.svelte';
   import UserAccount from '../../lib/components/stability-pool/UserAccount.svelte';
@@ -12,6 +13,7 @@
   let loading = true;
   let error = '';
   let poolStatus: PoolStatus | null = null;
+  let protocolStatus: any = null;
   let userPosition: UserPosition | null = null;
   let liquidationHistory: LiquidationRecord[] = [];
 
@@ -23,8 +25,13 @@
       loading = true;
       error = '';
 
-      // Always load pool status (public query)
-      poolStatus = await stabilityPoolService.getPoolStatus();
+      // Always load pool status and protocol status (public queries)
+      const [pool, proto] = await Promise.all([
+        stabilityPoolService.getPoolStatus(),
+        QueryOperations.getProtocolStatus().catch(() => null),
+      ]);
+      poolStatus = pool;
+      protocolStatus = proto;
 
       // Load user-specific data if connected
       if (isConnected && principal) {
@@ -94,7 +101,7 @@
       <section class="col-action" style="animation-delay: 0.05s">
         <DepositInterface {poolStatus} {userPosition} on:success={handleSuccess} />
         <div class="action-stats" style="animation-delay: 0.15s">
-          <PoolStats {poolStatus} />
+          <PoolStats {poolStatus} {protocolStatus} />
         </div>
       </section>
 

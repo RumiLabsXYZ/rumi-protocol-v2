@@ -1,8 +1,10 @@
 <script lang="ts">
   import type { PoolStatus } from '../../services/stabilityPoolService';
+  import type { ProtocolStatusDTO } from '../../services/types';
   import { formatE8s, formatTokenAmount, symbolForLedger, decimalsForLedger } from '../../services/stabilityPoolService';
 
   export let poolStatus: PoolStatus | null = null;
+  export let protocolStatus: ProtocolStatusDTO | null = null;
 
   $: totalDepositsUsd = poolStatus ? formatE8s(poolStatus.total_deposits_e8s) : '0';
   $: depositorCount = poolStatus ? Number(poolStatus.total_depositors) : 0;
@@ -12,6 +14,17 @@
   $: collateralGains = poolStatus?.collateral_gains ?? [];
   $: stablecoinRegistry = poolStatus?.stablecoin_registry ?? [];
   $: collateralRegistry = poolStatus?.collateral_registry ?? [];
+
+  $: poolApr = (() => {
+    if (!protocolStatus || !poolStatus || poolStatus.total_deposits_e8s === 0n) return null;
+    const weightedRate = protocolStatus.weightedAverageInterestRate;
+    const poolShare = protocolStatus.interestPoolShare;
+    const totalDebt = protocolStatus.totalIcusdBorrowed;  // already in human units (divided by E8S)
+    const poolTvl = Number(poolStatus.total_deposits_e8s) / 1e8;  // convert from e8s to human
+    if (poolTvl === 0 || totalDebt === 0 || weightedRate === 0) return null;
+    const apr = (weightedRate * poolShare * totalDebt) / poolTvl;
+    return (apr * 100).toFixed(2);
+  })();
 
   function getRegistries() {
     return { stablecoins: stablecoinRegistry, collateral: collateralRegistry };
@@ -40,6 +53,13 @@
       <span class="stat-label">Liquidations</span>
       <span class="stat-value">{liquidationCount}</span>
     </div>
+    {#if poolApr !== null}
+      <div class="stat-divider"></div>
+      <div class="stat">
+        <span class="stat-label">Interest APR</span>
+        <span class="stat-value apr-value">{poolApr}%</span>
+      </div>
+    {/if}
   </div>
 
   <!-- Deposits grid -->
@@ -114,6 +134,7 @@
   .dollar { color: var(--rumi-text-secondary); font-weight: 400; font-size: 0.875rem; margin-right: 0.0625rem; }
   .stat-divider { width: 1px; height: 2rem; background: var(--rumi-border); flex-shrink: 0; margin: 0 1rem; }
   .teal { color: var(--rumi-teal) !important; }
+  .apr-value { color: var(--rumi-teal); }
 
   .grid-section {
     margin-top: 1rem; padding-top: 1rem;
