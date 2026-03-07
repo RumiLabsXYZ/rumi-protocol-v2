@@ -147,6 +147,9 @@ pub struct PoolLiquidationRecord {
     pub collateral_gained: u64,
     pub collateral_type: Principal,
     pub depositors_count: u64,
+    /// USD price of the collateral at liquidation time (e8s), for future ROI calculations.
+    #[serde(default)]
+    pub collateral_price_e8s: u64,
 }
 
 // ──────────────────────────────────────────────────────────────

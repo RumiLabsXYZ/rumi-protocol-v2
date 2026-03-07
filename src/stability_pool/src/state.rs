@@ -416,6 +416,7 @@ impl StabilityPoolState {
             collateral_gained,
             collateral_type,
             depositors_count: opted_in_principals.len() as u64,
+            collateral_price_e8s: 0, // TODO: pass from backend in future update
         };
         self.liquidation_history.push(record);
         self.total_liquidations_executed += 1;

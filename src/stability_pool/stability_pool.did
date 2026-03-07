@@ -53,6 +53,7 @@ type StabilityPoolStatus = record {
   stablecoin_registry : vec StablecoinConfig;
   collateral_registry : vec CollateralInfo;
   emergency_paused : bool;
+  total_interest_received_e8s : nat64;
 };
 
 type UserStabilityPosition = record {
@@ -62,6 +63,7 @@ type UserStabilityPosition = record {
   deposit_timestamp : nat64;
   total_claimed_gains : vec record { principal; nat64 };
   total_usd_value_e8s : nat64;
+  total_interest_earned_e8s : nat64;
 };
 
 // ── Liquidation types ──
@@ -89,6 +91,7 @@ type PoolLiquidationRecord = record {
   collateral_gained : nat64;
   collateral_type : principal;
   depositors_count : nat64;
+  collateral_price_e8s : nat64;
 };
 
 // ── Error type ──
