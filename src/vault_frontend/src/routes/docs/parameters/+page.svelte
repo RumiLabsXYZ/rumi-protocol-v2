@@ -16,6 +16,10 @@
   let reserveRedemptionFee = 0;
   let interestPoolShare = 0.75;
   let liquidationProtocolShare = 0.03;
+  let rmrFloor = 0.96;
+  let rmrCeiling = 1.0;
+  let rmrFloorCr = 2.25;
+  let rmrCeilingCr = 1.5;
 
   // All supported collateral types (populated dynamically)
   let collaterals: CollateralInfo[] = [];
@@ -48,7 +52,7 @@
   onMount(async () => {
     try {
       // Fetch global parameters and per-collateral config in parallel
-      const [status, bFee, rfFloor, rfCeil, ckFee, rrFee, ipShare, lpShare] = await Promise.all([
+      const [status, bFee, rfFloor, rfCeil, ckFee, rrFee, ipShare, lpShare, rFloor, rCeil, rFloorCr, rCeilCr] = await Promise.all([
         protocolService.getProtocolStatus(),
         publicActor.get_borrowing_fee() as Promise<number>,
         publicActor.get_redemption_fee_floor() as Promise<number>,
@@ -57,6 +61,10 @@
         publicActor.get_reserve_redemption_fee() as Promise<number>,
         publicActor.get_interest_pool_share() as Promise<number>,
         publicActor.get_liquidation_protocol_share() as Promise<number>,
+        publicActor.get_rmr_floor() as Promise<number>,
+        publicActor.get_rmr_ceiling() as Promise<number>,
+        publicActor.get_rmr_floor_cr() as Promise<number>,
+        publicActor.get_rmr_ceiling_cr() as Promise<number>,
       ]);
 
       liquidationBonus = status.liquidationBonus;
@@ -69,6 +77,10 @@
       reserveRedemptionFee = Number(rrFee);
       interestPoolShare = Number(ipShare);
       liquidationProtocolShare = Number(lpShare);
+      rmrFloor = Number(rFloor);
+      rmrCeiling = Number(rCeil);
+      rmrFloorCr = Number(rFloorCr);
+      rmrCeilingCr = Number(rCeilCr);
 
       // Load ALL supported collateral types
       await collateralStore.fetchSupportedCollateral();
@@ -214,8 +226,8 @@
     <h2 class="doc-heading">Redemption Mechanics</h2>
     <div class="params-table">
       <div class="param">
-        <span class="param-label">Redemption Margin Ratio (RMR) <span class="tip" data-tip="Redeemers receive this percentage of face value. 96% when the system is healthy (≥1.5× recovery threshold), scaling linearly up to 100% at the recovery threshold. Prevents mint-and-redeem arbitrage while protecting redeemers near recovery.">?</span></span>
-        <span class="param-val">96% (healthy) → 100% (at recovery)</span>
+        <span class="param-label">Redemption Margin Ratio (RMR) <span class="tip" data-tip="Redeemers receive this percentage of face value. {pctRaw(rmrFloor)} when system CR ≥ {crPct(rmrFloorCr)}, scaling linearly up to {pctRaw(rmrCeiling)} when system CR ≤ {crPct(rmrCeilingCr)}. Prevents mint-and-redeem arbitrage while protecting redeemers near recovery.">?</span></span>
+        <span class="param-val live">{pctRaw(rmrFloor)} (healthy, CR ≥ {crPct(rmrFloorCr)}) → {pctRaw(rmrCeiling)} (stressed, CR ≤ {crPct(rmrCeilingCr)})</span>
       </div>
     </div>
   </section>

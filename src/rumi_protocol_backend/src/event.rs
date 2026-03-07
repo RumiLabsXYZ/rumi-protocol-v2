@@ -318,6 +318,16 @@ pub enum Event {
     SetInterestPoolShare {
         share: String,
     },
+
+    /// Admin set an RMR parameter.
+    #[serde(rename = "set_rmr_floor")]
+    SetRmrFloor { value: String },
+    #[serde(rename = "set_rmr_ceiling")]
+    SetRmrCeiling { value: String },
+    #[serde(rename = "set_rmr_floor_cr")]
+    SetRmrFloorCr { value: String },
+    #[serde(rename = "set_rmr_ceiling_cr")]
+    SetRmrCeilingCr { value: String },
 }
 
 impl Event {
@@ -373,6 +383,10 @@ impl Event {
             Event::SetInterestRate { .. } => false,
             Event::AccrueInterest { .. } => false,
             Event::SetInterestPoolShare { .. } => false,
+            Event::SetRmrFloor { .. } => false,
+            Event::SetRmrCeiling { .. } => false,
+            Event::SetRmrFloorCr { .. } => false,
+            Event::SetRmrCeilingCr { .. } => false,
         }
     }
 }
@@ -738,6 +752,26 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                     state.interest_pool_share = Ratio::from(dec);
                 }
             },
+            Event::SetRmrFloor { value } => {
+                if let Ok(dec) = value.parse::<Decimal>() {
+                    state.rmr_floor = Ratio::from(dec);
+                }
+            },
+            Event::SetRmrCeiling { value } => {
+                if let Ok(dec) = value.parse::<Decimal>() {
+                    state.rmr_ceiling = Ratio::from(dec);
+                }
+            },
+            Event::SetRmrFloorCr { value } => {
+                if let Ok(dec) = value.parse::<Decimal>() {
+                    state.rmr_floor_cr = Ratio::from(dec);
+                }
+            },
+            Event::SetRmrCeilingCr { value } => {
+                if let Ok(dec) = value.parse::<Decimal>() {
+                    state.rmr_ceiling_cr = Ratio::from(dec);
+                }
+            },
         }
     }
     state.next_available_vault_id = vault_id;
@@ -1061,6 +1095,26 @@ pub fn record_set_interest_pool_share(state: &mut State, share: Ratio) {
         share: share.0.to_string(),
     });
     state.interest_pool_share = share;
+}
+
+pub fn record_set_rmr_floor(state: &mut State, value: Ratio) {
+    record_event(&Event::SetRmrFloor { value: value.0.to_string() });
+    state.rmr_floor = value;
+}
+
+pub fn record_set_rmr_ceiling(state: &mut State, value: Ratio) {
+    record_event(&Event::SetRmrCeiling { value: value.0.to_string() });
+    state.rmr_ceiling = value;
+}
+
+pub fn record_set_rmr_floor_cr(state: &mut State, value: Ratio) {
+    record_event(&Event::SetRmrFloorCr { value: value.0.to_string() });
+    state.rmr_floor_cr = value;
+}
+
+pub fn record_set_rmr_ceiling_cr(state: &mut State, value: Ratio) {
+    record_event(&Event::SetRmrCeilingCr { value: value.0.to_string() });
+    state.rmr_ceiling_cr = value;
 }
 
 pub fn record_add_collateral_type(

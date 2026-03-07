@@ -8,6 +8,8 @@
   let reserveRedemptionsEnabled = false;
   let interestPoolPct = '75';
   let treasuryPct = '25';
+  let rmrFloorPct = '96';
+  let rmrCeilingPct = '100';
   let loaded = false;
 
   function pctRaw(val: number, decimals = 1): string {
@@ -17,12 +19,14 @@
 
   onMount(async () => {
     try {
-      const [rrFee, rfFloor, rfCeil, rrEnabled, poolShare] = await Promise.all([
+      const [rrFee, rfFloor, rfCeil, rrEnabled, poolShare, rFloor, rCeil] = await Promise.all([
         publicActor.get_reserve_redemption_fee() as Promise<number>,
         publicActor.get_redemption_fee_floor() as Promise<number>,
         publicActor.get_redemption_fee_ceiling() as Promise<number>,
         publicActor.get_reserve_redemptions_enabled() as Promise<boolean>,
         publicActor.get_interest_pool_share() as Promise<number>,
+        publicActor.get_rmr_floor() as Promise<number>,
+        publicActor.get_rmr_ceiling() as Promise<number>,
       ]);
       reserveRedemptionFee = Number(rrFee);
       redemptionFeeFloor = Number(rfFloor);
@@ -31,6 +35,8 @@
       const ps = Number(poolShare);
       interestPoolPct = (ps * 100).toFixed(0);
       treasuryPct = ((1 - ps) * 100).toFixed(0);
+      rmrFloorPct = (Number(rFloor) * 100).toFixed(0);
+      rmrCeilingPct = (Number(rCeil) * 100).toFixed(0);
     } catch (e) {
       console.error('Failed to fetch redemption params:', e);
     }
@@ -49,9 +55,9 @@
     <p>Redemption is a core peg-maintenance mechanism. It protects icUSD holders by ensuring their tokens are always backed by redeemable value.</p>
     <div class="fee-box">
       <span class="fee-label">Redemption Margin Ratio (RMR)</span>
-      <span class="fee-value">96% (healthy) → 100% (at recovery)</span>
+      <span class="fee-value live">{rmrFloorPct}% (healthy) → {rmrCeilingPct}% (at recovery)</span>
     </div>
-    <p>The RMR determines what fraction of face value you receive. When the system is healthy (total CR well above recovery threshold), you receive 96% of face value. As the system approaches recovery, the RMR scales linearly up to 100%. This prevents mint-and-redeem arbitrage under normal conditions while ensuring full redemption value when the system most needs peg support.</p>
+    <p>The RMR determines what fraction of face value you receive. When the system is healthy (total CR well above recovery threshold), you receive {rmrFloorPct}% of face value. As the system approaches recovery, the RMR scales linearly up to {rmrCeilingPct}%. This prevents mint-and-redeem arbitrage under normal conditions while ensuring full redemption value when the system most needs peg support.</p>
   </section>
 
   <section class="doc-section">
@@ -100,7 +106,7 @@
     <h2 class="doc-heading">Impact on Vault Owners</h2>
     <p><strong>Reserve tier (Tier 1):</strong> Zero impact on vaults. The protocol draws from its own stablecoin reserves. Your vault is completely unaffected.</p>
     <p><strong>Vault tier (Tier 2):</strong> Your vault's debt is reduced, but collateral is also taken proportionally. The protocol uses a <strong>water-filling algorithm</strong> — it doesn't simply drain the single lowest-CR vault. Instead, it identifies the band of vaults with the lowest CRs and distributes the redemption proportionally by debt across the band, raising them all equally. If the redemption amount would raise the entire band above the next tier, the band merges upward and the process repeats. This means redemptions affect multiple low-CR vaults simultaneously rather than wiping out one vault at a time.</p>
-    <p>Vault redemption is not liquidation. Your vault remains open and you retain any remaining collateral and debt. The collateral taken is valued at the RMR-adjusted rate (96–100% of face value depending on system health), minus the dynamic vault redemption fee. Keeping your vault well-collateralized reduces the chance of being redeemed against.</p>
+    <p>Vault redemption is not liquidation. Your vault remains open and you retain any remaining collateral and debt. The collateral taken is valued at the RMR-adjusted rate ({rmrFloorPct}–{rmrCeilingPct}% of face value depending on system health), minus the dynamic vault redemption fee. Keeping your vault well-collateralized reduces the chance of being redeemed against.</p>
   </section>
 
   <section class="doc-section">
@@ -110,7 +116,7 @@
       <li>The icUSD is burned (removed from circulation).</li>
       <li><strong>Tier 1:</strong> The protocol checks its ckStable reserves and sends you stablecoins up to the available balance.</li>
       <li><strong>Tier 2:</strong> Any remaining amount after reserves is filled by taking ICP from the lowest-CR vaults.</li>
-      <li>The Redemption Margin Ratio (RMR) is applied — you receive 96–100% of face value depending on system health.</li>
+      <li>The Redemption Margin Ratio (RMR) is applied — you receive {rmrFloorPct}–{rmrCeilingPct}% of face value depending on system health.</li>
       <li>Fees are deducted from the amount you receive — flat reserve fee for Tier 1, dynamic fee for Tier 2.</li>
       <li>Reserve fees are sent to the protocol treasury. Vault redemption fees are deducted from the ICP collateral released.</li>
     </ol>
