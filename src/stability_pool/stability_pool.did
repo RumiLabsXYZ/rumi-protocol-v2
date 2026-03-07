@@ -195,6 +195,9 @@ service : (StabilityPoolInitArgs) -> {
   notify_liquidatable_vaults : (vec LiquidatableVaultInfo) -> (vec LiquidationResult);
   execute_liquidation : (nat64) -> (variant { Ok : LiquidationResult; Err : StabilityPoolError });
 
+  // ── Interest Revenue ──
+  receive_interest_revenue : (principal, nat64) -> (variant { Ok; Err : StabilityPoolError });
+
   // ── Admin: Registry ──
   register_stablecoin : (StablecoinConfig) -> (variant { Ok; Err : StabilityPoolError });
   register_collateral : (CollateralInfo) -> (variant { Ok; Err : StabilityPoolError });

@@ -98,6 +98,32 @@ pub async fn execute_liquidation(vault_id: u64) -> Result<LiquidationResult, Sta
     crate::liquidation::execute_liquidation(vault_id).await
 }
 
+// ─── Interest Revenue ───
+
+/// Receive interest revenue from the protocol backend and distribute pro-rata to depositors.
+/// Only callable by the protocol canister.
+#[update]
+pub fn receive_interest_revenue(token_ledger: Principal, amount: u64) -> Result<(), StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    let expected = read_state(|s| s.protocol_canister_id);
+    if caller != expected {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+
+    if read_state(|s| s.configuration.emergency_pause) {
+        return Err(StabilityPoolError::EmergencyPaused);
+    }
+
+    if !read_state(|s| s.stablecoin_registry.contains_key(&token_ledger)) {
+        return Err(StabilityPoolError::TokenNotAccepted { ledger: token_ledger });
+    }
+
+    mutate_state(|s| s.distribute_interest_revenue(token_ledger, amount));
+
+    log!(INFO, "Distributed {} interest for token {} from backend", amount, token_ledger);
+    Ok(())
+}
+
 // ─── Queries ───
 
 #[query]
