@@ -54,6 +54,9 @@ pub struct DepositPosition {
     pub deposit_timestamp: u64,
     /// Lifetime claimed gains per collateral type.
     pub total_claimed_gains: BTreeMap<Principal, u64>,
+    /// Lifetime interest earned by this depositor (e8s, for display).
+    #[serde(default)]
+    pub total_interest_earned_e8s: u64,
 }
 
 impl DepositPosition {
@@ -64,6 +67,7 @@ impl DepositPosition {
             opted_out_collateral: BTreeSet::new(),
             deposit_timestamp: timestamp,
             total_claimed_gains: BTreeMap::new(),
+            total_interest_earned_e8s: 0,
         }
     }
 
@@ -173,6 +177,7 @@ pub struct StabilityPoolStatus {
     pub stablecoin_registry: Vec<StablecoinConfig>,
     pub collateral_registry: Vec<CollateralInfo>,
     pub emergency_paused: bool,
+    pub total_interest_received_e8s: u64,
 }
 
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,6 +188,7 @@ pub struct UserStabilityPosition {
     pub deposit_timestamp: u64,
     pub total_claimed_gains: BTreeMap<Principal, u64>,
     pub total_usd_value_e8s: u64,
+    pub total_interest_earned_e8s: u64,
 }
 
 // ──────────────────────────────────────────────────────────────

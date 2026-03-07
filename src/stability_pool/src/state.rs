@@ -30,6 +30,9 @@ pub struct StabilityPoolState {
     pub in_flight_liquidations: BTreeSet<u64>,
     pub total_liquidations_executed: u64,
     pub pool_creation_timestamp: u64,
+    /// Lifetime interest revenue received from backend (e8s).
+    #[serde(default)]
+    pub total_interest_received_e8s: u64,
     pub is_initialized: bool,
 }
 
@@ -51,6 +54,7 @@ impl Default for StabilityPoolState {
             in_flight_liquidations: BTreeSet::new(),
             total_liquidations_executed: 0,
             pool_creation_timestamp: 0,
+            total_interest_received_e8s: 0,
             is_initialized: false,
         }
     }
@@ -396,6 +400,7 @@ impl StabilityPoolState {
             stablecoin_registry: self.stablecoin_registry.values().cloned().collect(),
             collateral_registry: self.collateral_registry.values().cloned().collect(),
             emergency_paused: self.configuration.emergency_pause,
+            total_interest_received_e8s: self.total_interest_received_e8s,
         }
     }
 
@@ -407,6 +412,7 @@ impl StabilityPoolState {
             deposit_timestamp: pos.deposit_timestamp,
             total_claimed_gains: pos.total_claimed_gains.clone(),
             total_usd_value_e8s: pos.total_usd_value(&self.stablecoin_registry),
+            total_interest_earned_e8s: pos.total_interest_earned_e8s,
         })
     }
 
