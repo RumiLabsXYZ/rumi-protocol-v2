@@ -103,6 +103,63 @@ impl StabilityPoolState {
         *self.total_stablecoin_balances.entry(token_ledger).or_insert(0) += amount;
     }
 
+    /// Distribute interest revenue pro-rata to all depositors of a given stablecoin.
+    /// Called by the backend after minting interest to the pool canister.
+    pub fn distribute_interest_revenue(&mut self, token_ledger: Principal, amount: u64) {
+        if amount == 0 {
+            return;
+        }
+
+        let total = self.total_stablecoin_balances.get(&token_ledger).copied().unwrap_or(0);
+        if total == 0 {
+            return; // No depositors hold this token — nothing to distribute
+        }
+
+        let decimals = self.stablecoin_registry.get(&token_ledger)
+            .map(|c| c.decimals)
+            .unwrap_or(8);
+
+        let mut distributed: u64 = 0;
+        let mut first_eligible: Option<Principal> = None;
+
+        // Collect (principal, balance) pairs to avoid borrow conflict
+        let holders: Vec<(Principal, u64)> = self.deposits.iter()
+            .filter_map(|(p, pos)| {
+                let bal = pos.stablecoin_balances.get(&token_ledger).copied().unwrap_or(0);
+                if bal > 0 { Some((*p, bal)) } else { None }
+            })
+            .collect();
+
+        for (principal, balance) in &holders {
+            if first_eligible.is_none() {
+                first_eligible = Some(*principal);
+            }
+            let credit = (amount as u128 * *balance as u128 / total as u128) as u64;
+            if credit > 0 {
+                if let Some(pos) = self.deposits.get_mut(principal) {
+                    *pos.stablecoin_balances.entry(token_ledger).or_insert(0) += credit;
+                    pos.total_interest_earned_e8s += normalize_to_e8s(credit, decimals);
+                }
+                distributed += credit;
+            }
+        }
+
+        // Assign rounding dust to first eligible depositor
+        let dust = amount.saturating_sub(distributed);
+        if dust > 0 {
+            if let Some(first) = first_eligible {
+                if let Some(pos) = self.deposits.get_mut(&first) {
+                    *pos.stablecoin_balances.entry(token_ledger).or_insert(0) += dust;
+                    pos.total_interest_earned_e8s += normalize_to_e8s(dust, decimals);
+                }
+            }
+        }
+
+        // Update aggregate totals
+        *self.total_stablecoin_balances.entry(token_ledger).or_insert(0) += amount;
+        self.total_interest_received_e8s += normalize_to_e8s(amount, decimals);
+    }
+
     pub fn process_withdrawal(&mut self, user: Principal, token_ledger: Principal, amount: u64) -> Result<(), StabilityPoolError> {
         let position = self.deposits.get_mut(&user)
             .ok_or(StabilityPoolError::NoPositionFound)?;
@@ -1125,6 +1182,66 @@ mod tests {
         let pos = state.deposits.get(&user_a()).unwrap();
         assert_eq!(pos.stablecoin_balances.get(&icusd_ledger()), Some(&100_00000000));
         assert_eq!(state.total_stablecoin_balances.get(&icusd_ledger()), Some(&100_00000000));
+    }
+
+    // ─── Test: Interest Distribution ───
+
+    #[test]
+    fn test_distribute_interest_single_depositor() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
+
+        state.distribute_interest_revenue(icusd_ledger(), 5_00000000);
+
+        let pos = state.deposits.get(&user_a()).unwrap();
+        assert_eq!(pos.stablecoin_balances[&icusd_ledger()], 105_00000000);
+        assert_eq!(pos.total_interest_earned_e8s, 5_00000000); // icUSD is 8 decimals = e8s
+        assert_eq!(state.total_interest_received_e8s, 5_00000000);
+        assert_eq!(state.total_stablecoin_balances[&icusd_ledger()], 105_00000000);
+    }
+
+    #[test]
+    fn test_distribute_interest_proportional() {
+        let mut state = test_state();
+        // A has 75%, B has 25%
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 75_00000000);
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 25_00000000);
+
+        state.distribute_interest_revenue(icusd_ledger(), 10_00000000);
+
+        let a = state.deposits.get(&user_a()).unwrap();
+        let b = state.deposits.get(&user_b()).unwrap();
+        // A gets 7.5, B gets 2.5
+        assert_eq!(a.stablecoin_balances[&icusd_ledger()], 82_50000000);
+        assert_eq!(b.stablecoin_balances[&icusd_ledger()], 27_50000000);
+        // Total should be exactly original + interest
+        assert_eq!(state.total_stablecoin_balances[&icusd_ledger()], 110_00000000);
+    }
+
+    #[test]
+    fn test_distribute_interest_zero_total_noop() {
+        let mut state = test_state();
+        // No depositors for icUSD
+        state.distribute_interest_revenue(icusd_ledger(), 5_00000000);
+        assert_eq!(state.total_interest_received_e8s, 0);
+    }
+
+    #[test]
+    fn test_distribute_interest_dust_handling() {
+        let mut state = test_state();
+        // 3 depositors with equal balances, interest = 10 (not divisible by 3)
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100);
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 100);
+        add_deposit_direct(&mut state, Principal::from_slice(&[99]), icusd_ledger(), 100);
+
+        state.distribute_interest_revenue(icusd_ledger(), 10);
+
+        // Each gets floor(10 * 100/300) = 3. Dust = 10 - 9 = 1 goes to first depositor.
+        let total: u64 = state.deposits.values()
+            .map(|p| p.stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0))
+            .sum();
+        assert_eq!(total, 310, "All interest must be accounted for");
+        assert_eq!(state.total_stablecoin_balances[&icusd_ledger()], 310);
     }
 
     // ─── Test: Rounding dust doesn't drift aggregate totals ───
