@@ -125,6 +125,14 @@
         <span class="meta-label">Since</span>
         <span class="meta-value">{depositDate}</span>
       </div>
+      {#if userPosition && (userPosition as any).total_interest_earned_e8s > 0n}
+        <div class="meta-item">
+          <span class="meta-label">Interest Earned</span>
+          <span class="meta-value interest-earned">
+            <span class="tv-dollar">$</span>{formatE8s((userPosition as any).total_interest_earned_e8s)}
+          </span>
+        </div>
+      {/if}
     </div>
 
     <!-- Collateral gains -->
@@ -270,6 +278,7 @@
   .meta-item { display: flex; flex-direction: column; gap: 0.125rem; }
   .meta-label { font-size: 0.625rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--rumi-text-muted); }
   .meta-value { font-size: 0.8125rem; font-weight: 500; color: var(--rumi-text-primary); }
+  .interest-earned { color: var(--rumi-teal); font-weight: 600; }
 
   .gains-section { border-top: 1px solid var(--rumi-border); padding-top: 1.25rem; }
   .gains-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem; }
