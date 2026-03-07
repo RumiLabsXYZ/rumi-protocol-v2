@@ -31,8 +31,9 @@ pub struct StabilityPoolState {
     pub total_liquidations_executed: u64,
     pub pool_creation_timestamp: u64,
     /// Lifetime interest revenue received from backend (e8s).
+    /// `Option` is required for Candid backward-compatible stable memory upgrades.
     #[serde(default)]
-    pub total_interest_received_e8s: u64,
+    pub total_interest_received_e8s: Option<u64>,
     pub is_initialized: bool,
 }
 
@@ -54,7 +55,7 @@ impl Default for StabilityPoolState {
             in_flight_liquidations: BTreeSet::new(),
             total_liquidations_executed: 0,
             pool_creation_timestamp: 0,
-            total_interest_received_e8s: 0,
+            total_interest_received_e8s: Some(0),
             is_initialized: false,
         }
     }
@@ -138,7 +139,7 @@ impl StabilityPoolState {
             if credit > 0 {
                 if let Some(pos) = self.deposits.get_mut(principal) {
                     *pos.stablecoin_balances.entry(token_ledger).or_insert(0) += credit;
-                    pos.total_interest_earned_e8s += normalize_to_e8s(credit, decimals);
+                    *pos.total_interest_earned_e8s.get_or_insert(0) += normalize_to_e8s(credit, decimals);
                 }
                 distributed += credit;
             }
@@ -150,14 +151,14 @@ impl StabilityPoolState {
             if let Some(first) = first_eligible {
                 if let Some(pos) = self.deposits.get_mut(&first) {
                     *pos.stablecoin_balances.entry(token_ledger).or_insert(0) += dust;
-                    pos.total_interest_earned_e8s += normalize_to_e8s(dust, decimals);
+                    *pos.total_interest_earned_e8s.get_or_insert(0) += normalize_to_e8s(dust, decimals);
                 }
             }
         }
 
         // Update aggregate totals
         *self.total_stablecoin_balances.entry(token_ledger).or_insert(0) += amount;
-        self.total_interest_received_e8s += normalize_to_e8s(amount, decimals);
+        *self.total_interest_received_e8s.get_or_insert(0) += normalize_to_e8s(amount, decimals);
     }
 
     pub fn process_withdrawal(&mut self, user: Principal, token_ledger: Principal, amount: u64) -> Result<(), StabilityPoolError> {
@@ -416,7 +417,7 @@ impl StabilityPoolState {
             collateral_gained,
             collateral_type,
             depositors_count: opted_in_principals.len() as u64,
-            collateral_price_e8s: 0, // TODO: pass from backend in future update
+            collateral_price_e8s: Some(0), // TODO: pass from backend in future update
         };
         self.liquidation_history.push(record);
         self.total_liquidations_executed += 1;
@@ -458,7 +459,7 @@ impl StabilityPoolState {
             stablecoin_registry: self.stablecoin_registry.values().cloned().collect(),
             collateral_registry: self.collateral_registry.values().cloned().collect(),
             emergency_paused: self.configuration.emergency_pause,
-            total_interest_received_e8s: self.total_interest_received_e8s,
+            total_interest_received_e8s: self.total_interest_received_e8s.unwrap_or(0),
         }
     }
 
@@ -470,7 +471,7 @@ impl StabilityPoolState {
             deposit_timestamp: pos.deposit_timestamp,
             total_claimed_gains: pos.total_claimed_gains.clone(),
             total_usd_value_e8s: pos.total_usd_value(&self.stablecoin_registry),
-            total_interest_earned_e8s: pos.total_interest_earned_e8s,
+            total_interest_earned_e8s: pos.total_interest_earned_e8s.unwrap_or(0),
         })
     }
 
@@ -1196,8 +1197,8 @@ mod tests {
 
         let pos = state.deposits.get(&user_a()).unwrap();
         assert_eq!(pos.stablecoin_balances[&icusd_ledger()], 105_00000000);
-        assert_eq!(pos.total_interest_earned_e8s, 5_00000000); // icUSD is 8 decimals = e8s
-        assert_eq!(state.total_interest_received_e8s, 5_00000000);
+        assert_eq!(pos.total_interest_earned_e8s, Some(5_00000000)); // icUSD is 8 decimals = e8s
+        assert_eq!(state.total_interest_received_e8s, Some(5_00000000));
         assert_eq!(state.total_stablecoin_balances[&icusd_ledger()], 105_00000000);
     }
 
@@ -1224,7 +1225,7 @@ mod tests {
         let mut state = test_state();
         // No depositors for icUSD
         state.distribute_interest_revenue(icusd_ledger(), 5_00000000);
-        assert_eq!(state.total_interest_received_e8s, 0);
+        assert_eq!(state.total_interest_received_e8s, Some(0));
     }
 
     #[test]

@@ -55,8 +55,9 @@ pub struct DepositPosition {
     /// Lifetime claimed gains per collateral type.
     pub total_claimed_gains: BTreeMap<Principal, u64>,
     /// Lifetime interest earned by this depositor (e8s, for display).
+    /// `Option` is required for Candid backward-compatible stable memory upgrades.
     #[serde(default)]
-    pub total_interest_earned_e8s: u64,
+    pub total_interest_earned_e8s: Option<u64>,
 }
 
 impl DepositPosition {
@@ -67,7 +68,7 @@ impl DepositPosition {
             opted_out_collateral: BTreeSet::new(),
             deposit_timestamp: timestamp,
             total_claimed_gains: BTreeMap::new(),
-            total_interest_earned_e8s: 0,
+            total_interest_earned_e8s: Some(0),
         }
     }
 
@@ -148,8 +149,9 @@ pub struct PoolLiquidationRecord {
     pub collateral_type: Principal,
     pub depositors_count: u64,
     /// USD price of the collateral at liquidation time (e8s), for future ROI calculations.
+    /// `Option` is required for Candid backward-compatible stable memory upgrades.
     #[serde(default)]
-    pub collateral_price_e8s: u64,
+    pub collateral_price_e8s: Option<u64>,
 }
 
 // ──────────────────────────────────────────────────────────────
