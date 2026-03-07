@@ -117,6 +117,7 @@ pub struct ProtocolStatus {
     pub frozen: bool,
     pub manual_mode_override: bool,
     pub interest_pool_share: f64,
+    pub weighted_average_interest_rate: f64,
 }
 
 #[derive(CandidType, Deserialize, Debug)]

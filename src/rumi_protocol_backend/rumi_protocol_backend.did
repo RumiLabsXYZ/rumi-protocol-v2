@@ -329,6 +329,7 @@ type ProtocolStatus = record {
   frozen : bool;
   manual_mode_override : bool;
   interest_pool_share : float64;
+  weighted_average_interest_rate : float64;
 };
 type ReserveBalance = record {
   balance : nat64;

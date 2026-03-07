@@ -308,6 +308,7 @@ fn get_protocol_status() -> ProtocolStatus {
         frozen: s.frozen,
         manual_mode_override: s.manual_mode_override,
         interest_pool_share: s.interest_pool_share.to_f64(),
+        weighted_average_interest_rate: s.weighted_average_interest_rate().to_f64(),
     })
 }
 
