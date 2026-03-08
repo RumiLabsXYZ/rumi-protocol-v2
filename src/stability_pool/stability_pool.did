@@ -92,7 +92,7 @@ type PoolLiquidationRecord = record {
   collateral_gained : nat64;
   collateral_type : principal;
   depositors_count : nat64;
-  collateral_price_e8s : nat64;
+  collateral_price_e8s : opt nat64;
 };
 
 // ── Error type ──
@@ -200,7 +200,7 @@ service : (StabilityPoolInitArgs) -> {
   execute_liquidation : (nat64) -> (variant { Ok : LiquidationResult; Err : StabilityPoolError });
 
   // ── Interest Revenue ──
-  receive_interest_revenue : (principal, nat64) -> (variant { Ok; Err : StabilityPoolError });
+  receive_interest_revenue : (principal, nat64, opt principal) -> (variant { Ok; Err : StabilityPoolError });
 
   // ── Admin: Registry ──
   register_stablecoin : (StablecoinConfig) -> (variant { Ok; Err : StabilityPoolError });

@@ -106,36 +106,50 @@ impl StabilityPoolState {
 
     /// Distribute interest revenue pro-rata to all depositors of a given stablecoin.
     /// Called by the backend after minting interest to the pool canister.
-    pub fn distribute_interest_revenue(&mut self, token_ledger: Principal, amount: u64) {
+    ///
+    /// When `collateral_type` is provided, depositors who have opted out of that
+    /// collateral are excluded from the distribution — they should not earn
+    /// interest from vaults backed by collateral they've opted out of.
+    pub fn distribute_interest_revenue(&mut self, token_ledger: Principal, amount: u64, collateral_type: Option<Principal>) {
         if amount == 0 {
             return;
-        }
-
-        let total = self.total_stablecoin_balances.get(&token_ledger).copied().unwrap_or(0);
-        if total == 0 {
-            return; // No depositors hold this token — nothing to distribute
         }
 
         let decimals = self.stablecoin_registry.get(&token_ledger)
             .map(|c| c.decimals)
             .unwrap_or(8);
 
-        let mut distributed: u64 = 0;
-        let mut first_eligible: Option<Principal> = None;
-
-        // Collect (principal, balance) pairs to avoid borrow conflict
+        // Collect eligible (principal, balance) pairs — exclude depositors who
+        // opted out of the collateral type that generated this interest.
         let holders: Vec<(Principal, u64)> = self.deposits.iter()
             .filter_map(|(p, pos)| {
                 let bal = pos.stablecoin_balances.get(&token_ledger).copied().unwrap_or(0);
-                if bal > 0 { Some((*p, bal)) } else { None }
+                if bal == 0 {
+                    return None;
+                }
+                // If we know the collateral source, skip opted-out depositors
+                if let Some(ct) = &collateral_type {
+                    if !pos.is_opted_in(ct) {
+                        return None;
+                    }
+                }
+                Some((*p, bal))
             })
             .collect();
+
+        let eligible_total: u64 = holders.iter().map(|(_, b)| *b).sum();
+        if eligible_total == 0 {
+            return; // No eligible depositors — nothing to distribute
+        }
+
+        let mut distributed: u64 = 0;
+        let mut first_eligible: Option<Principal> = None;
 
         for (principal, balance) in &holders {
             if first_eligible.is_none() {
                 first_eligible = Some(*principal);
             }
-            let credit = (amount as u128 * *balance as u128 / total as u128) as u64;
+            let credit = (amount as u128 * *balance as u128 / eligible_total as u128) as u64;
             if credit > 0 {
                 if let Some(pos) = self.deposits.get_mut(principal) {
                     *pos.stablecoin_balances.entry(token_ledger).or_insert(0) += credit;
