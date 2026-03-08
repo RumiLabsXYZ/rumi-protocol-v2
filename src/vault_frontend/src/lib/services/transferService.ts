@@ -9,6 +9,7 @@ import { Principal } from '@dfinity/principal';
 import { canisterIDLs } from './pnp';
 import { walletStore } from '../stores/wallet';
 import { CONFIG } from '../config';
+import { ICRC1_IDL } from '../idls/ledger.idl.js';
 
 // Transfer fee in e8s (0.0001 ICP = 10,000 e8s)
 export const ICP_TRANSFER_FEE = BigInt(10_000);
@@ -80,165 +81,90 @@ function formatTransferError(err: any): string {
 }
 
 /**
- * Transfer ICP to a recipient
- * 
+ * Generic ICRC-1 transfer — works for any token (ICP, icUSD, ckUSDT, ckUSDC, etc.)
+ *
+ * @param ledgerCanisterId - The canister ID of the token's ICRC-1 ledger
  * @param recipient - The principal ID of the recipient
- * @param amountE8s - Amount to transfer in e8s (1 ICP = 100,000,000 e8s)
- * @returns TransferResult with success status and block index or error
+ * @param amountRaw - Amount in the ledger's smallest unit (e.g. e8s for ICP, e6s for ckUSDT)
  */
-export async function transferICP(
+export async function transferICRC1(
+  ledgerCanisterId: string,
   recipient: string,
-  amountE8s: bigint
+  amountRaw: bigint
 ): Promise<TransferResult> {
   try {
-    // Validate recipient
     if (!isValidPrincipal(recipient)) {
       return { success: false, error: 'Invalid recipient principal' };
     }
-
-    // Validate amount
-    if (amountE8s <= BigInt(0)) {
+    if (amountRaw <= 0n) {
       return { success: false, error: 'Amount must be greater than 0' };
     }
 
-    // Get the ICP ledger actor
-    const icpLedgerId = CONFIG.currentIcpLedgerId;
-    console.log('📤 Creating ICP ledger actor for:', icpLedgerId);
-    
-    const actor = await walletStore.getActor(icpLedgerId, canisterIDLs.icp_ledger);
-    
+    console.log('📤 Creating ICRC-1 ledger actor for:', ledgerCanisterId);
+    const actor = await walletStore.getActor(ledgerCanisterId, ICRC1_IDL);
     if (!actor) {
-      return { success: false, error: 'Failed to create ICP ledger actor. Please reconnect your wallet.' };
+      return { success: false, error: 'Failed to create ledger actor. Please reconnect your wallet.' };
     }
 
-    // Prepare transfer arguments (ICRC-1 standard)
     const transferArgs = {
       to: {
         owner: Principal.fromText(recipient.trim()),
         subaccount: [] as [] | [Uint8Array]
       },
-      amount: amountE8s,
-      fee: [] as [] | [bigint], // Use default fee
+      amount: amountRaw,
+      fee: [] as [] | [bigint],
       memo: [] as [] | [Uint8Array],
       from_subaccount: [] as [] | [Uint8Array],
       created_at_time: [] as [] | [bigint]
     };
 
-    console.log('📤 Initiating ICP transfer:', {
+    console.log('📤 Initiating ICRC-1 transfer:', {
+      ledger: ledgerCanisterId,
       to: recipient,
-      amount: Number(amountE8s) / 1e8,
-      amountE8s: amountE8s.toString()
+      amountRaw: amountRaw.toString()
     });
 
-    // Execute transfer
     const result = await (actor as any).icrc1_transfer(transferArgs);
-    
-    console.log('📤 ICP transfer result:', result);
+    console.log('📤 ICRC-1 transfer result:', result);
 
-    // Handle result variant
     if ('Ok' in result) {
-      console.log('✅ ICP transfer successful, block index:', result.Ok.toString());
-      return { 
-        success: true, 
-        blockIndex: result.Ok 
-      };
+      console.log('✅ Transfer successful, block index:', result.Ok.toString());
+      return { success: true, blockIndex: result.Ok };
     } else if ('Err' in result) {
       const errorMsg = formatTransferError(result.Err);
-      console.error('❌ ICP transfer error:', errorMsg);
-      return { 
-        success: false, 
-        error: errorMsg 
-      };
+      console.error('❌ Transfer error:', errorMsg);
+      return { success: false, error: errorMsg };
     }
 
     return { success: false, error: 'Unexpected response from ledger' };
-
   } catch (err) {
-    console.error('❌ ICP transfer exception:', err);
-    const errorMsg = err instanceof Error ? err.message : 'Transfer failed';
-    return { success: false, error: errorMsg };
+    console.error('❌ Transfer exception:', err);
+    return { success: false, error: err instanceof Error ? err.message : 'Transfer failed' };
   }
 }
 
 /**
- * Transfer icUSD to a recipient
- * 
- * @param recipient - The principal ID of the recipient
- * @param amountE8s - Amount to transfer in e8s (1 icUSD = 100,000,000 e8s)
- * @returns TransferResult with success status and block index or error
+ * Query a ledger's ICRC-1 fee (returns raw smallest-unit bigint)
  */
-export async function transferICUSD(
-  recipient: string,
-  amountE8s: bigint
-): Promise<TransferResult> {
+export async function queryICRC1Fee(ledgerCanisterId: string): Promise<bigint> {
   try {
-    // Validate recipient
-    if (!isValidPrincipal(recipient)) {
-      return { success: false, error: 'Invalid recipient principal' };
-    }
-
-    // Validate amount
-    if (amountE8s <= BigInt(0)) {
-      return { success: false, error: 'Amount must be greater than 0' };
-    }
-
-    // Get the icUSD ledger actor
-    const icusdLedgerId = CONFIG.currentIcusdLedgerId;
-    console.log('📤 Creating icUSD ledger actor for:', icusdLedgerId);
-    
-    const actor = await walletStore.getActor(icusdLedgerId, canisterIDLs.icusd_ledger);
-    
-    if (!actor) {
-      return { success: false, error: 'Failed to create icUSD ledger actor. Please reconnect your wallet.' };
-    }
-
-    // Prepare transfer arguments (ICRC-1 standard)
-    const transferArgs = {
-      to: {
-        owner: Principal.fromText(recipient.trim()),
-        subaccount: [] as [] | [Uint8Array]
-      },
-      amount: amountE8s,
-      fee: [] as [] | [bigint], // Use default fee
-      memo: [] as [] | [Uint8Array],
-      from_subaccount: [] as [] | [Uint8Array],
-      created_at_time: [] as [] | [bigint]
-    };
-
-    console.log('📤 Initiating icUSD transfer:', {
-      to: recipient,
-      amount: Number(amountE8s) / 1e8,
-      amountE8s: amountE8s.toString()
-    });
-
-    // Execute transfer
-    const result = await (actor as any).icrc1_transfer(transferArgs);
-    
-    console.log('📤 icUSD transfer result:', result);
-
-    // Handle result variant
-    if ('Ok' in result) {
-      console.log('✅ icUSD transfer successful, block index:', result.Ok.toString());
-      return { 
-        success: true, 
-        blockIndex: result.Ok 
-      };
-    } else if ('Err' in result) {
-      const errorMsg = formatTransferError(result.Err);
-      console.error('❌ icUSD transfer error:', errorMsg);
-      return { 
-        success: false, 
-        error: errorMsg 
-      };
-    }
-
-    return { success: false, error: 'Unexpected response from ledger' };
-
+    const { TokenService } = await import('./tokenService');
+    const actor = await TokenService.createAnonymousActor(ledgerCanisterId, ICRC1_IDL);
+    return await (actor as any).icrc1_fee();
   } catch (err) {
-    console.error('❌ icUSD transfer exception:', err);
-    const errorMsg = err instanceof Error ? err.message : 'Transfer failed';
-    return { success: false, error: errorMsg };
+    console.warn('Failed to query fee for', ledgerCanisterId, err);
+    return 10_000n; // fallback
   }
+}
+
+/** Transfer ICP (convenience wrapper) */
+export async function transferICP(recipient: string, amountE8s: bigint): Promise<TransferResult> {
+  return transferICRC1(CONFIG.currentIcpLedgerId, recipient, amountE8s);
+}
+
+/** Transfer icUSD (convenience wrapper) */
+export async function transferICUSD(recipient: string, amountE8s: bigint): Promise<TransferResult> {
+  return transferICRC1(CONFIG.currentIcusdLedgerId, recipient, amountE8s);
 }
 
 /**

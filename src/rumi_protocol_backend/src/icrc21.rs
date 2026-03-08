@@ -640,8 +640,9 @@ pub fn icrc28_trusted_origins() -> Icrc28TrustedOriginsResponse {
             "https://tcfua-yaaaa-aaaap-qrd7q-cai.raw.icp0.io".to_string(),
             "https://rumi.finance".to_string(),
             "https://www.rumi.finance".to_string(),
+            "https://app.rumiprotocol.com".to_string(),
+            "https://app.rumiprotocol.xyz".to_string(),
             "https://rumiprotocol.io".to_string(),
-            "https://www.rumiprotocol.io".to_string(),
         ],
     }
 }

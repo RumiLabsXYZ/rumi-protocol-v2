@@ -1,11 +1,10 @@
 <script>
   import { onMount } from 'svelte';
 
-  let appUrl = 'https://app.rumiprotocol.com';
+  let appUrl = 'https://app.rumiprotocol.xyz';
 
   onMount(() => {
-    const match = window.location.hostname.match(/rumiprotocol\.(\w+)$/);
-    appUrl = match ? `https://app.rumiprotocol.${match[1]}` : 'https://app.rumiprotocol.com';
+    // appUrl is static — no dynamic TLD detection needed
   });
 
   $: protocolSuite = [

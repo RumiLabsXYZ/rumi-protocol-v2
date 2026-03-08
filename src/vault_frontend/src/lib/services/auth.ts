@@ -2,7 +2,7 @@ import { writable, get } from 'svelte/store';
 import { browser } from '$app/environment';
 import { pnp, connectWithComprehensivePermissions, getPnpInstance, silentPlugReconnect } from './pnp';
 import { TokenService } from './tokenService';
-import { CONFIG, CANISTER_IDS, LOCAL_CANISTER_IDS } from '../config';
+import { CONFIG, CANISTER_IDS, LOCAL_CANISTER_IDS, vault_frontend } from '../config';
 import { canisterIDLs } from './pnp';
 import { permissionManager } from './PermissionManager';
 import { Principal } from '@dfinity/principal';
@@ -360,9 +360,12 @@ function createAuthStore() {
       
       return new Promise((resolve, reject) => {
         client.login({
-          identityProvider: CONFIG.isLocal 
-            ? `http://localhost:4943/?canisterId=${LOCAL_CANISTER_IDS.INTERNET_IDENTITY}` 
+          identityProvider: CONFIG.isLocal
+            ? `http://localhost:4943/?canisterId=${LOCAL_CANISTER_IDS.INTERNET_IDENTITY}`
             : "https://id.ai",
+          derivationOrigin: CONFIG.isLocal
+            ? undefined
+            : `https://${vault_frontend}.icp0.io`,
           onSuccess: async () => {
             try {
               const identity = client.getIdentity();

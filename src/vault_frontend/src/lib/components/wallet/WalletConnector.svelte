@@ -11,6 +11,8 @@
   import { CONFIG } from '../../config';
   import { collateralStore } from '../../stores/collateralStore';
   import Toast from '../common/Toast.svelte';
+  import { transferICRC1, queryICRC1Fee, isValidPrincipal } from '../../services/transferService';
+  import QRCode from 'qrcode';
 
   interface WalletInfo {
     id: string;
@@ -23,15 +25,16 @@
     symbol: string;
     icon: string;
     fallbackColor: string;
-    canisterId?: string;
+    canisterId: string;
+    decimals: number;
   }
 
   // Static token metadata for ICP, icUSD, and ck stablecoins
   const STATIC_TOKEN_META: Record<string, TokenMeta> = {
-    ICP:    { name: 'Internet Computer', symbol: 'ICP',    icon: '/icp-token-dark.svg', fallbackColor: '#3B00B9' },
-    ICUSD:  { name: 'icUSD',             symbol: 'icUSD',  icon: '/icusd-logo_v3.svg',  fallbackColor: '#8B5CF6' },
-    CKUSDT: { name: 'ckUSDT',            symbol: 'ckUSDT', icon: '',                    fallbackColor: '#26A17B', canisterId: CONFIG.ckusdtLedgerId },
-    CKUSDC: { name: 'ckUSDC',            symbol: 'ckUSDC', icon: '',                    fallbackColor: '#2775CA', canisterId: CONFIG.ckusdcLedgerId },
+    ICP:    { name: 'Internet Computer', symbol: 'ICP',    icon: '/icp-token-dark.svg', fallbackColor: '#3B00B9', canisterId: CONFIG.currentIcpLedgerId,   decimals: 8 },
+    ICUSD:  { name: 'icUSD',             symbol: 'icUSD',  icon: '/icusd-logo_v3.svg',  fallbackColor: '#8B5CF6', canisterId: CONFIG.currentIcusdLedgerId,  decimals: 8 },
+    CKUSDT: { name: 'ckUSDT',            symbol: 'ckUSDT', icon: '',                    fallbackColor: '#26A17B', canisterId: CONFIG.ckusdtLedgerId,        decimals: 6 },
+    CKUSDC: { name: 'ckUSDC',            symbol: 'ckUSDC', icon: '',                    fallbackColor: '#2775CA', canisterId: CONFIG.ckusdcLedgerId,        decimals: 6 },
   };
 
   // Build full TOKEN_META reactively from static entries + collateral store
@@ -46,6 +49,7 @@
         icon: '',  // Will be resolved via dynamicLogos
         fallbackColor: c.color || '#94A3B8',
         canisterId: c.ledgerCanisterId,
+        decimals: c.decimals,
       };
     }
     return meta;
@@ -99,6 +103,27 @@
   let abortController = new AbortController();
   let isRefreshingBalance = false;
   let copiedPrincipal = false;
+
+  // ═══ Dropdown view state ═══
+  type DropdownView = 'main' | 'send' | 'receive';
+  let dropdownView: DropdownView = 'main';
+
+  // ═══ Send form state ═══
+  let sendTokenKey = '';
+  let sendRecipient = '';
+  let sendAmount = '';
+  let sendFeeRaw = 0n;
+  let sendFeeLoading = false;
+  let sending = false;
+  let sendError = '';
+  let tokenPickerOpen = false;
+
+  // ═══ Receive state ═══
+  let qrDataUrl = '';
+  let copiedReceive = false;
+
+  // ═══ Fee cache ═══
+  const feeCache: Record<string, bigint> = {};
 
   let toasts: Array<{ id: number; message: string; type: 'success' | 'error' | 'info' }> = [];
   let toastId = 0;
@@ -179,6 +204,7 @@
     if (walletDialog && !walletDialog.contains(target) &&
         walletButton && !walletButton.contains(target)) {
       showWalletDialog = false;
+      dropdownView = 'main';
     }
   }
 
@@ -247,6 +273,7 @@
   $: account = $walletStore.principal?.toString() ?? null;
   $: currentIcon = $walletStore.icon;
   $: tokenBalances = $walletStore.tokenBalances ?? {};
+  $: isInternetIdentity = $currentWalletType === WALLET_TYPES.INTERNET_IDENTITY;
 
   // Compute total USD value
   $: totalUsdValue = Object.values(tokenBalances).reduce((sum, tb) => {
@@ -257,7 +284,7 @@
   $: activeTokens = Object.entries(tokenBalances)
     .filter(([_, tb]) => tb && tb.raw > 0n)
     .map(([key, tb]) => {
-      const baseMeta = collateralTokenMeta[key] || { name: key, symbol: key, icon: '', fallbackColor: '#666' };
+      const baseMeta = collateralTokenMeta[key] || { name: key, symbol: key, icon: '', fallbackColor: '#666', canisterId: '', decimals: 8 };
       const resolvedIcon = baseMeta.icon || dynamicLogos[key] || '';
       return {
         key,
@@ -276,6 +303,141 @@
       return (b.balance.usdValue ?? 0) - (a.balance.usdValue ?? 0);
     });
 
+  // ═══ Send helpers ═══
+
+  // Selected token's metadata and balance
+  $: sendToken = sendTokenKey ? activeTokens.find(t => t.key === sendTokenKey) : null;
+  $: sendBalanceRaw = sendToken?.balance.raw ?? 0n;
+  $: sendDecimals = sendToken?.meta.decimals ?? 8;
+  $: sendCanisterId = sendToken?.meta.canisterId ?? '';
+  $: maxSendableRaw = sendBalanceRaw > sendFeeRaw ? sendBalanceRaw - sendFeeRaw : 0n;
+
+  function formatRaw(raw: bigint, decimals: number): string {
+    const num = Number(raw) / Math.pow(10, decimals);
+    // Show up to `decimals` places, trim trailing zeros
+    return num.toFixed(decimals).replace(/\.?0+$/, '') || '0';
+  }
+
+  function parseToRaw(input: string, decimals: number): bigint {
+    const num = parseFloat(input);
+    if (isNaN(num) || num <= 0) return 0n;
+    return BigInt(Math.round(num * Math.pow(10, decimals)));
+  }
+
+  $: sendAmountRaw = parseToRaw(sendAmount, sendDecimals);
+  $: sendIsValid = sendAmountRaw > 0n && sendAmountRaw <= maxSendableRaw && sendRecipient.trim().length > 0;
+
+  async function fetchFee(canisterId: string) {
+    if (!canisterId) return;
+    if (feeCache[canisterId] !== undefined) {
+      sendFeeRaw = feeCache[canisterId];
+      return;
+    }
+    sendFeeLoading = true;
+    try {
+      const fee = await queryICRC1Fee(canisterId);
+      feeCache[canisterId] = fee;
+      sendFeeRaw = fee;
+    } finally {
+      sendFeeLoading = false;
+    }
+  }
+
+  function openSendView() {
+    dropdownView = 'send';
+    sendRecipient = '';
+    sendAmount = '';
+    sendError = '';
+    sending = false;
+    // Default to first active token
+    if (activeTokens.length > 0) {
+      sendTokenKey = activeTokens[0].key;
+      fetchFee(activeTokens[0].meta.canisterId);
+    }
+  }
+
+  function selectSendToken(key: string) {
+    sendTokenKey = key;
+    sendAmount = '';
+    sendError = '';
+    tokenPickerOpen = false;
+    const token = activeTokens.find(t => t.key === key);
+    if (token) fetchFee(token.meta.canisterId);
+  }
+
+  function setMax() {
+    if (maxSendableRaw > 0n) {
+      sendAmount = formatRaw(maxSendableRaw, sendDecimals);
+    }
+  }
+
+  async function handleSend() {
+    sendError = '';
+
+    if (!sendRecipient.trim()) { sendError = 'Enter a recipient principal'; return; }
+    if (!isValidPrincipal(sendRecipient.trim())) { sendError = 'Invalid principal ID'; return; }
+    if (sendAmountRaw <= 0n) { sendError = 'Enter an amount greater than 0'; return; }
+    if (sendAmountRaw > maxSendableRaw) {
+      sendError = `Max sendable: ${formatRaw(maxSendableRaw, sendDecimals)} ${sendToken?.meta.symbol}`;
+      return;
+    }
+    if (!sendCanisterId) { sendError = 'Token configuration error'; return; }
+
+    sending = true;
+    try {
+      const result = await transferICRC1(sendCanisterId, sendRecipient.trim(), sendAmountRaw);
+      if (result.success) {
+        addToast(`Sent ${sendAmount} ${sendToken?.meta.symbol ?? ''} successfully`, 'success');
+        walletStore.refreshBalance();
+        dropdownView = 'main';
+      } else {
+        sendError = result.error || 'Transfer failed';
+        addToast(sendError, 'error');
+      }
+    } catch (err) {
+      sendError = err instanceof Error ? err.message : 'Transfer failed';
+      addToast(sendError, 'error');
+    } finally {
+      sending = false;
+    }
+  }
+
+  // ═══ Receive helpers ═══
+
+  async function openReceiveView() {
+    dropdownView = 'receive';
+    copiedReceive = false;
+    qrDataUrl = '';
+    if (account) {
+      try {
+        qrDataUrl = await QRCode.toDataURL(account, {
+          width: 180,
+          margin: 2,
+          color: { dark: '#ffffffdd', light: '#00000000' },
+          errorCorrectionLevel: 'M'
+        });
+      } catch (err) {
+        console.error('QR generation failed:', err);
+      }
+    }
+  }
+
+  async function handleCopyReceive(e: MouseEvent) {
+    e.stopPropagation();
+    if (!account) return;
+    const success = await copyToClipboard(account);
+    if (success) {
+      copiedReceive = true;
+      addToast('Principal copied to clipboard', 'success');
+      setTimeout(() => { copiedReceive = false; }, 2000);
+    } else {
+      addToast('Failed to copy', 'error');
+    }
+  }
+
+  function goBack() {
+    dropdownView = 'main';
+  }
 </script>
 
 <div id="wallet-container">
@@ -386,7 +548,7 @@
       <button
         id="wallet-button"
         class="wallet-icon-btn"
-        on:click|stopPropagation={() => { showWalletDialog = !showWalletDialog; }}
+        on:click|stopPropagation={() => { showWalletDialog = !showWalletDialog; dropdownView = 'main'; }}
         aria-expanded={showWalletDialog}
         aria-controls="wallet-dialog"
         title="Wallet"
@@ -410,97 +572,285 @@
           role="dialog"
           aria-label="Wallet details"
         >
-          <!-- USD Total + Rumi logo -->
-          <div class="dropdown-total">
-            <div class="dropdown-total-left">
-              <span class="dropdown-total-label">Total Balance</span>
-              <span class="dropdown-total-value">${totalUsdValue.toFixed(2)}</span>
+          {#if dropdownView === 'main'}
+            <!-- ═══ MAIN VIEW ═══ -->
+            <!-- USD Total + Rumi logo -->
+            <div class="dropdown-total">
+              <div class="dropdown-total-left">
+                <span class="dropdown-total-label">Total Balance</span>
+                <span class="dropdown-total-value">${totalUsdValue.toFixed(2)}</span>
+              </div>
+              <img src="/main-logo-without-BG.png" alt="Rumi" class="dropdown-total-logo" />
             </div>
-            <img src="/main-logo-without-BG.png" alt="Rumi" class="dropdown-total-logo" />
-          </div>
 
-          <!-- Principal (full, wrapping, with inline copy) -->
-          <button
-            class="dropdown-principal-row"
-            on:click|stopPropagation={handleCopyPrincipal}
-            title={copiedPrincipal ? 'Copied!' : 'Click to copy principal'}
-          >
-            <span class="dropdown-principal-text">{account ?? ''}</span>
-            {#if copiedPrincipal}
-              <svg class="dropdown-copy-icon dropdown-copy-icon-ok" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                <polyline points="20 6 9 17 4 12"/>
-              </svg>
-            {:else}
-              <svg class="dropdown-copy-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
-                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-              </svg>
-            {/if}
-          </button>
+            <!-- Principal (full, wrapping, with inline copy) -->
+            <button
+              class="dropdown-principal-row"
+              on:click|stopPropagation={handleCopyPrincipal}
+              title={copiedPrincipal ? 'Copied!' : 'Click to copy principal'}
+            >
+              <span class="dropdown-principal-text">{account ?? ''}</span>
+              {#if copiedPrincipal}
+                <svg class="dropdown-copy-icon dropdown-copy-icon-ok" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                  <polyline points="20 6 9 17 4 12"/>
+                </svg>
+              {:else}
+                <svg class="dropdown-copy-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                </svg>
+              {/if}
+            </button>
 
-          <!-- Token Balances -->
-          <div class="dropdown-tokens">
-            {#if activeTokens.length > 0}
-              {#each activeTokens as token (token.key)}
-                <div class="dropdown-token-row">
-                  <div class="dropdown-token-left">
-                    {#if token.meta.icon}
-                      <img
-                        src={token.meta.icon}
-                        alt={token.meta.symbol}
-                        class="dropdown-token-icon"
-                      />
-                    {:else}
-                      <div class="dropdown-token-icon-fallback" style="background: {token.meta.fallbackColor}">
-                        <span>{token.meta.symbol.charAt(0)}</span>
+            <!-- Token Balances -->
+            <div class="dropdown-tokens">
+              {#if activeTokens.length > 0}
+                {#each activeTokens as token (token.key)}
+                  <div class="dropdown-token-row">
+                    <div class="dropdown-token-left">
+                      {#if token.meta.icon}
+                        <img
+                          src={token.meta.icon}
+                          alt={token.meta.symbol}
+                          class="dropdown-token-icon"
+                        />
+                      {:else}
+                        <div class="dropdown-token-icon-fallback" style="background: {token.meta.fallbackColor}">
+                          <span>{token.meta.symbol.charAt(0)}</span>
+                        </div>
+                      {/if}
+                      <div class="dropdown-token-info">
+                        <span class="dropdown-token-symbol">{token.meta.symbol}</span>
+                        <span class="dropdown-token-name">{token.meta.name}</span>
                       </div>
-                    {/if}
-                    <div class="dropdown-token-info">
-                      <span class="dropdown-token-symbol">{token.meta.symbol}</span>
-                      <span class="dropdown-token-name">{token.meta.name}</span>
+                    </div>
+                    <div class="dropdown-token-right">
+                      <span class="dropdown-token-amount">{formatTokenBalance(token.balance.formatted)}</span>
+                      {#if token.balance.usdValue !== null && token.balance.usdValue > 0}
+                        <span class="dropdown-token-usd">${token.balance.usdValue.toFixed(2)}</span>
+                      {/if}
                     </div>
                   </div>
-                  <div class="dropdown-token-right">
-                    <span class="dropdown-token-amount">{formatTokenBalance(token.balance.formatted)}</span>
-                    {#if token.balance.usdValue !== null && token.balance.usdValue > 0}
-                      <span class="dropdown-token-usd">${token.balance.usdValue.toFixed(2)}</span>
+                {/each}
+              {:else}
+                <div class="dropdown-empty">
+                  <p>No balances found</p>
+                  <p class="dropdown-empty-hint">Try refreshing your balance</p>
+                </div>
+              {/if}
+            </div>
+
+            <!-- Actions -->
+            <div class="dropdown-actions">
+              {#if isInternetIdentity}
+                <button
+                  class="dropdown-action-row dropdown-action-send"
+                  on:click|stopPropagation={openSendView}
+                >
+                  <svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="22" y1="2" x2="11" y2="13" />
+                    <polygon points="22 2 15 22 11 13 2 9 22 2" />
+                  </svg>
+                  <span>Send</span>
+                </button>
+                <button
+                  class="dropdown-action-row dropdown-action-receive"
+                  on:click|stopPropagation={openReceiveView}
+                >
+                  <svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="22 12 16 12 14 15 10 15 8 12 2 12" />
+                    <path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+                  </svg>
+                  <span>Receive</span>
+                </button>
+              {/if}
+
+              <button
+                class="dropdown-action-row dropdown-action-refresh"
+                on:click|stopPropagation={handleRefreshBalance}
+                disabled={isRefreshingBalance}
+              >
+                <svg class:animate-spin={isRefreshingBalance} class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                <span>{isRefreshingBalance ? 'Refreshing...' : 'Refresh Balance'}</span>
+              </button>
+
+              <button
+                class="dropdown-action-row dropdown-action-disconnect"
+                on:click|stopPropagation={disconnectWallet}
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                  <polyline points="16 17 21 12 16 7" />
+                  <line x1="21" y1="12" x2="9" y2="12" />
+                </svg>
+                <span>Disconnect</span>
+              </button>
+            </div>
+
+          {:else if dropdownView === 'send'}
+            <!-- ═══ SEND VIEW ═══ -->
+            <div class="inline-view">
+              <div class="inline-header">
+                <button class="back-btn" on:click|stopPropagation={goBack}>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="15 18 9 12 15 6"/>
+                  </svg>
+                </button>
+                <span class="inline-title">Send</span>
+              </div>
+
+              <div class="inline-body">
+                <!-- Token selector (custom) -->
+                <div class="field">
+                  <label class="field-label">Token</label>
+                  <div class="token-picker-wrap">
+                    <button
+                      class="token-picker-trigger"
+                      on:click|stopPropagation={() => { if (!sending) tokenPickerOpen = !tokenPickerOpen; }}
+                      disabled={sending}
+                    >
+                      {#if sendToken}
+                        {#if sendToken.meta.icon}
+                          <img src={sendToken.meta.icon} alt={sendToken.meta.symbol} class="tp-icon" />
+                        {:else}
+                          <div class="tp-icon-dot" style="background: {sendToken.meta.fallbackColor}">
+                            <span>{sendToken.meta.symbol.charAt(0)}</span>
+                          </div>
+                        {/if}
+                        <span class="tp-symbol">{sendToken.meta.symbol}</span>
+                      {:else}
+                        <span class="tp-symbol tp-placeholder">Select token</span>
+                      {/if}
+                      <svg class="tp-chevron" class:tp-chevron-open={tokenPickerOpen} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+                    </button>
+                    {#if tokenPickerOpen}
+                      <div class="token-picker-list">
+                        {#each activeTokens as token (token.key)}
+                          <button
+                            class="token-picker-item"
+                            class:token-picker-item-active={token.key === sendTokenKey}
+                            on:click|stopPropagation={() => selectSendToken(token.key)}
+                          >
+                            {#if token.meta.icon}
+                              <img src={token.meta.icon} alt={token.meta.symbol} class="tp-icon" />
+                            {:else}
+                              <div class="tp-icon-dot" style="background: {token.meta.fallbackColor}">
+                                <span>{token.meta.symbol.charAt(0)}</span>
+                              </div>
+                            {/if}
+                            <span class="tp-symbol">{token.meta.symbol}</span>
+                          </button>
+                        {/each}
+                      </div>
                     {/if}
                   </div>
                 </div>
-              {/each}
-            {:else}
-              <div class="dropdown-empty">
-                <p>No balances found</p>
-                <p class="dropdown-empty-hint">Try refreshing your balance</p>
+
+                <!-- Recipient -->
+                <div class="field">
+                  <label class="field-label" for="send-recipient">To</label>
+                  <input
+                    id="send-recipient"
+                    class="field-input"
+                    type="text"
+                    placeholder="Recipient principal"
+                    bind:value={sendRecipient}
+                    disabled={sending}
+                  />
+                </div>
+
+                <!-- Amount -->
+                <div class="field">
+                  <label class="field-label" for="send-amount">Amount</label>
+                  <div class="amount-row">
+                    <input
+                      id="send-amount"
+                      class="field-input amount-input"
+                      type="number"
+                      step="any"
+                      min="0"
+                      placeholder="0.00"
+                      bind:value={sendAmount}
+                      disabled={sending}
+                    />
+                    <button class="max-btn" on:click|stopPropagation={setMax} disabled={sending || maxSendableRaw <= 0n}>MAX</button>
+                  </div>
+                  <div class="field-meta">
+                    <span>Bal: {formatRaw(sendBalanceRaw, sendDecimals)}</span>
+                    <span>Fee: {sendFeeLoading ? '...' : formatRaw(sendFeeRaw, sendDecimals)}</span>
+                  </div>
+                </div>
+
+                {#if sendError}
+                  <div class="error-box">{sendError}</div>
+                {/if}
+
+                <button
+                  class="send-btn"
+                  on:click|stopPropagation={handleSend}
+                  disabled={sending || !sendIsValid}
+                >
+                  {#if sending}
+                    <div class="spinner"></div>
+                    Sending...
+                  {:else}
+                    Send {sendToken?.meta.symbol ?? ''}
+                  {/if}
+                </button>
               </div>
-            {/if}
-          </div>
+            </div>
 
-          <!-- Actions -->
-          <div class="dropdown-actions">
-            <button
-              class="dropdown-action-row dropdown-action-refresh"
-              on:click|stopPropagation={handleRefreshBalance}
-              disabled={isRefreshingBalance}
-            >
-              <svg class:animate-spin={isRefreshingBalance} class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-              <span>{isRefreshingBalance ? 'Refreshing...' : 'Refresh Balance'}</span>
-            </button>
+          {:else if dropdownView === 'receive'}
+            <!-- ═══ RECEIVE VIEW ═══ -->
+            <div class="inline-view">
+              <div class="inline-header">
+                <button class="back-btn" on:click|stopPropagation={goBack}>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="15 18 9 12 15 6"/>
+                  </svg>
+                </button>
+                <span class="inline-title">Receive</span>
+              </div>
 
-            <button
-              class="dropdown-action-row dropdown-action-disconnect"
-              on:click|stopPropagation={disconnectWallet}
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
-                <polyline points="16 17 21 12 16 7" />
-                <line x1="21" y1="12" x2="9" y2="12" />
-              </svg>
-              <span>Disconnect</span>
-            </button>
-          </div>
+              <div class="inline-body receive-body">
+                <!-- QR Code -->
+                {#if qrDataUrl}
+                  <div class="qr-container">
+                    <img src={qrDataUrl} alt="QR code for principal" class="qr-image" />
+                  </div>
+                {:else}
+                  <div class="qr-placeholder">
+                    <div class="qr-spinner"></div>
+                  </div>
+                {/if}
+
+                <!-- Principal -->
+                <div class="principal-box">
+                  <code class="principal-text">{account ?? ''}</code>
+                </div>
+
+                <p class="receive-hint">Use this address to receive tokens.</p>
+
+                <!-- Copy button -->
+                <button class="copy-btn" on:click|stopPropagation={handleCopyReceive}>
+                  {#if copiedReceive}
+                    <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M20 6L9 17l-5-5" />
+                    </svg>
+                    Copied!
+                  {:else}
+                    <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <rect x="9" y="9" width="13" height="13" rx="2" />
+                      <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
+                    </svg>
+                    Copy Principal
+                  {/if}
+                </button>
+              </div>
+            </div>
+          {/if}
         </div>
       {/if}
     </div>
@@ -772,6 +1122,19 @@
     cursor: pointer;
     transition: background 0.12s ease;
   }
+  .action-icon {
+    width: 1rem;
+    height: 1rem;
+    flex-shrink: 0;
+  }
+  .dropdown-action-send,
+  .dropdown-action-receive {
+    color: rgba(167, 139, 250, 0.85);
+  }
+  .dropdown-action-send:hover,
+  .dropdown-action-receive:hover {
+    background: rgba(139, 92, 246, 0.08);
+  }
   .dropdown-action-refresh {
     color: rgba(167, 139, 250, 0.85);
   }
@@ -784,6 +1147,342 @@
   .dropdown-action-disconnect:hover {
     background: rgba(255, 255, 255, 0.05);
     color: rgba(255, 255, 255, 0.6);
+  }
+
+  /* ═══ Inline view (Send / Receive) ═══ */
+  .inline-view {
+    display: flex;
+    flex-direction: column;
+  }
+  .inline-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  }
+  .back-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.5rem;
+    height: 1.5rem;
+    background: transparent;
+    border: none;
+    border-radius: 0.25rem;
+    cursor: pointer;
+    color: rgba(255, 255, 255, 0.5);
+    transition: color 0.12s ease, background 0.12s ease;
+    padding: 0;
+  }
+  .back-btn:hover {
+    color: rgba(255, 255, 255, 0.9);
+    background: rgba(255, 255, 255, 0.05);
+  }
+  .back-btn svg {
+    width: 1rem;
+    height: 1rem;
+  }
+  .inline-title {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: white;
+  }
+  .inline-body {
+    padding: 0.75rem 1rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.625rem;
+  }
+
+  /* ── Send form fields ── */
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+  .field-label {
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 0.7rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .field-input {
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 0.375rem;
+    padding: 0.5rem 0.625rem;
+    color: white;
+    font-size: 0.8rem;
+    width: 100%;
+    outline: none;
+    transition: border-color 0.15s ease;
+  }
+  .field-input:focus {
+    border-color: rgba(139, 92, 246, 0.5);
+  }
+  .field-input::placeholder {
+    color: rgba(255, 255, 255, 0.2);
+  }
+  .field-input:disabled {
+    opacity: 0.5;
+  }
+
+  /* ── Custom token picker ── */
+  .token-picker-wrap {
+    position: relative;
+  }
+  .token-picker-trigger {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    padding: 0.45rem 0.625rem;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 0.375rem;
+    cursor: pointer;
+    transition: border-color 0.15s ease;
+    color: white;
+  }
+  .token-picker-trigger:hover:not(:disabled) {
+    border-color: rgba(139, 92, 246, 0.35);
+  }
+  .token-picker-trigger:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .tp-icon {
+    width: 1.25rem;
+    height: 1.25rem;
+    border-radius: 50%;
+    flex-shrink: 0;
+    object-fit: cover;
+  }
+  .tp-icon-dot {
+    width: 1.25rem;
+    height: 1.25rem;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    font-size: 0.6rem;
+    font-weight: 700;
+    color: white;
+  }
+  .tp-symbol {
+    font-size: 0.8rem;
+    font-weight: 600;
+    flex: 1;
+    text-align: left;
+  }
+  .tp-placeholder {
+    color: rgba(255, 255, 255, 0.3);
+    font-weight: 400;
+  }
+  .tp-chevron {
+    width: 0.75rem;
+    height: 0.75rem;
+    color: rgba(255, 255, 255, 0.35);
+    flex-shrink: 0;
+    transition: transform 0.15s ease;
+  }
+  .tp-chevron-open {
+    transform: rotate(180deg);
+  }
+  .token-picker-list {
+    position: absolute;
+    top: calc(100% + 0.25rem);
+    left: 0;
+    right: 0;
+    background: rgba(18, 18, 30, 0.98);
+    border: 1px solid rgba(139, 92, 246, 0.15);
+    border-radius: 0.375rem;
+    z-index: 10;
+    max-height: 10rem;
+    overflow-y: auto;
+    box-shadow: 0 8px 20px -4px rgba(0, 0, 0, 0.5);
+  }
+  .token-picker-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    padding: 0.45rem 0.625rem;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    color: white;
+    transition: background 0.1s ease;
+  }
+  .token-picker-item:hover {
+    background: rgba(139, 92, 246, 0.1);
+  }
+  .token-picker-item-active {
+    background: rgba(139, 92, 246, 0.15);
+  }
+
+  .amount-row {
+    display: flex;
+    gap: 0.375rem;
+  }
+  .amount-input {
+    flex: 1;
+  }
+  .amount-input::-webkit-outer-spin-button,
+  .amount-input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  .amount-input[type=number] {
+    -moz-appearance: textfield;
+  }
+
+  .max-btn {
+    padding: 0.5rem 0.625rem;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 0.375rem;
+    color: rgba(139, 92, 246, 0.9);
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .max-btn:hover:not(:disabled) {
+    background: rgba(139, 92, 246, 0.12);
+  }
+  .max-btn:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+  }
+
+  .field-meta {
+    display: flex;
+    justify-content: space-between;
+    color: rgba(255, 255, 255, 0.35);
+    font-size: 0.65rem;
+  }
+
+  .error-box {
+    background: rgba(224, 107, 159, 0.12);
+    border: 1px solid rgba(224, 107, 159, 0.25);
+    border-radius: 0.375rem;
+    padding: 0.4rem 0.625rem;
+    color: #e881a8;
+    font-size: 0.75rem;
+  }
+
+  .send-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    width: 100%;
+    padding: 0.6rem;
+    background: linear-gradient(135deg, #7c3aed, #6d28d9);
+    border: none;
+    border-radius: 0.375rem;
+    color: white;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .send-btn:hover:not(:disabled) {
+    background: linear-gradient(135deg, #8b5cf6, #7c3aed);
+  }
+  .send-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
+
+  .spinner {
+    width: 0.875rem;
+    height: 0.875rem;
+    border: 2px solid rgba(255, 255, 255, 0.3);
+    border-top-color: white;
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+  }
+
+  /* ═══ Receive view ═══ */
+  .receive-body {
+    align-items: center;
+  }
+
+  .qr-container {
+    padding: 0.75rem;
+    background: rgba(255, 255, 255, 0.04);
+    border-radius: 0.625rem;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+  }
+  .qr-image {
+    width: 160px;
+    height: 160px;
+    display: block;
+    image-rendering: pixelated;
+  }
+  .qr-placeholder {
+    width: 160px;
+    height: 160px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .qr-spinner {
+    width: 1.25rem;
+    height: 1.25rem;
+    border: 2px solid rgba(255, 255, 255, 0.15);
+    border-top-color: rgba(139, 92, 246, 0.6);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  .principal-box {
+    width: 100%;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 0.375rem;
+    padding: 0.5rem 0.625rem;
+    word-break: break-all;
+    text-align: center;
+  }
+  .principal-text {
+    color: rgba(255, 255, 255, 0.65);
+    font-size: 0.65rem;
+    line-height: 1.5;
+    letter-spacing: 0.01em;
+  }
+  .receive-hint {
+    color: rgba(255, 255, 255, 0.35);
+    font-size: 0.7rem;
+    margin: 0;
+  }
+  .copy-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    width: 100%;
+    padding: 0.55rem;
+    background: rgba(139, 92, 246, 0.2);
+    border: 1px solid rgba(139, 92, 246, 0.25);
+    border-radius: 0.375rem;
+    color: white;
+    font-size: 0.8rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .copy-btn:hover {
+    background: rgba(139, 92, 246, 0.35);
+  }
+  .btn-icon {
+    width: 0.875rem;
+    height: 0.875rem;
   }
 
   /* ── Toast container ── */
@@ -800,5 +1499,9 @@
   }
   .toast-container > :global(*) {
     pointer-events: auto;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
   }
 </style>
