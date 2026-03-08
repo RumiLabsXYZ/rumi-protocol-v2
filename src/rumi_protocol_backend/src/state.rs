@@ -507,6 +507,11 @@ pub struct State {
     /// Cached debt-weighted average of per-asset healthy CRs (override or 1.5 * borrow_threshold).
     pub weighted_avg_healthy_cr: Ratio,
 
+    /// Dynamic borrowing fee multiplier curve (v2).
+    /// X-axis: projected vault CR after borrow. Y-axis: multiplier on base borrowing_fee.
+    /// None = flat fee (no dynamic multiplier).
+    pub borrowing_fee_curve: Option<RateCurveV2>,
+
     // Treasury fee routing
     /// Interest revenue from sync liquidations, minted to treasury in next timer tick.
     pub pending_treasury_interest: ICUSD,
@@ -655,6 +660,30 @@ impl From<InitArg> for State {
             weighted_avg_recovery_cr: Ratio::new(dec!(0)),
             weighted_avg_warning_cr: Ratio::new(dec!(0)),
             weighted_avg_healthy_cr: Ratio::new(dec!(0)),
+
+            borrowing_fee_curve: Some(RateCurveV2 {
+                markers: vec![
+                    RateMarkerV2 {
+                        cr_anchor: CrAnchor::Offset(
+                            Box::new(CrAnchor::SystemThreshold(SystemThreshold::BorrowThreshold)),
+                            Ratio::new(dec!(0.05)),
+                        ),
+                        multiplier: Ratio::new(dec!(3.0)),
+                    },
+                    RateMarkerV2 {
+                        cr_anchor: CrAnchor::Midpoint(
+                            Box::new(CrAnchor::SystemThreshold(SystemThreshold::BorrowThreshold)),
+                            Box::new(CrAnchor::SystemThreshold(SystemThreshold::TotalCollateralRatio)),
+                        ),
+                        multiplier: Ratio::new(dec!(1.75)),
+                    },
+                    RateMarkerV2 {
+                        cr_anchor: CrAnchor::SystemThreshold(SystemThreshold::TotalCollateralRatio),
+                        multiplier: Ratio::new(dec!(1.0)),
+                    },
+                ],
+                method: InterpolationMethod::Linear,
+            }),
 
             // Treasury fee routing
             pending_treasury_interest: ICUSD::new(0),
