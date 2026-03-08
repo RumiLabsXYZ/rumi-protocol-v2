@@ -235,6 +235,20 @@ pub enum SystemThreshold {
     TotalCollateralRatio,
 }
 
+/// A rate curve marker using dynamic CrAnchor (v2).
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct RateMarkerV2 {
+    pub cr_anchor: CrAnchor,
+    pub multiplier: Ratio,
+}
+
+/// A rate curve using dynamic anchors (v2).
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct RateCurveV2 {
+    pub markers: Vec<RateMarkerV2>,
+    pub method: InterpolationMethod,
+}
+
 /// A recovery rate marker: at this named threshold, apply this multiplier.
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub struct RecoveryRateMarker {
@@ -1151,6 +1165,60 @@ impl State {
             })
             .collect();
         resolved.sort_by(|a, b| a.0.0.cmp(&b.0.0));
+        resolved
+    }
+
+    /// Resolve a CrAnchor to a concrete Ratio.
+    /// `asset_context` is required for AssetThreshold anchors; pass None for system-wide curves.
+    pub fn resolve_anchor(
+        &self,
+        anchor: &CrAnchor,
+        asset_context: Option<&CollateralType>,
+    ) -> Ratio {
+        match anchor {
+            CrAnchor::Fixed(r) => *r,
+            CrAnchor::AssetThreshold(t) => {
+                let ct = asset_context.expect("AssetThreshold requires asset context");
+                match t {
+                    AssetThreshold::LiquidationRatio => self.get_liquidation_ratio_for(ct),
+                    AssetThreshold::BorrowThreshold => {
+                        self.collateral_configs.get(ct)
+                            .map(|c| c.borrow_threshold_ratio)
+                            .unwrap_or(RECOVERY_COLLATERAL_RATIO)
+                    }
+                    AssetThreshold::WarningCr => self.get_warning_cr_for(ct),
+                    AssetThreshold::HealthyCr => self.get_healthy_cr_for(ct),
+                }
+            }
+            CrAnchor::SystemThreshold(t) => match t {
+                SystemThreshold::LiquidationRatio => self.compute_weighted_liquidation_ratio(),
+                SystemThreshold::BorrowThreshold => self.recovery_mode_threshold,
+                SystemThreshold::WarningCr => self.weighted_avg_warning_cr,
+                SystemThreshold::HealthyCr => self.weighted_avg_healthy_cr,
+                SystemThreshold::TotalCollateralRatio => self.total_collateral_ratio,
+            },
+            CrAnchor::Midpoint(a, b) => {
+                let va = self.resolve_anchor(a, asset_context);
+                let vb = self.resolve_anchor(b, asset_context);
+                Ratio::from((va.0 + vb.0) / dec!(2))
+            }
+            CrAnchor::Offset(base, delta) => {
+                let v = self.resolve_anchor(base, asset_context);
+                Ratio::from(v.0 + delta.0)
+            }
+        }
+    }
+
+    /// Resolve all markers in a RateCurveV2 to concrete (cr_level, multiplier) pairs, sorted ascending.
+    pub fn resolve_curve(
+        &self,
+        curve: &RateCurveV2,
+        asset_context: Option<&CollateralType>,
+    ) -> Vec<(Ratio, Ratio)> {
+        let mut resolved: Vec<(Ratio, Ratio)> = curve.markers.iter()
+            .map(|m| (self.resolve_anchor(&m.cr_anchor, asset_context), m.multiplier))
+            .collect();
+        resolved.sort_by(|a, b| a.0 .0.cmp(&b.0 .0));
         resolved
     }
 
@@ -3291,5 +3359,88 @@ mod tests {
 
         // Verify: reserves (pool_e6s) back the minted icUSD 1:1
         assert_eq!(pool_e6s * 100, icusd_minted);
+    }
+
+    // --- resolve_anchor / resolve_curve tests ---
+
+    #[test]
+    fn test_resolve_anchor_fixed() {
+        let state = accrual_test_state();
+        let anchor = CrAnchor::Fixed(Ratio::from_f64(1.75));
+        let result = state.resolve_anchor(&anchor, None);
+        assert!((result.to_f64() - 1.75).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_resolve_anchor_system_threshold_tcr() {
+        let mut state = accrual_test_state();
+        state.total_collateral_ratio = Ratio::from_f64(1.85);
+        let anchor = CrAnchor::SystemThreshold(SystemThreshold::TotalCollateralRatio);
+        let result = state.resolve_anchor(&anchor, None);
+        assert!((result.to_f64() - 1.85).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_resolve_anchor_midpoint() {
+        let mut state = accrual_test_state();
+        state.total_collateral_ratio = Ratio::from_f64(2.0);
+        state.recovery_mode_threshold = Ratio::from_f64(1.5);
+        let anchor = CrAnchor::Midpoint(
+            Box::new(CrAnchor::SystemThreshold(SystemThreshold::BorrowThreshold)),
+            Box::new(CrAnchor::SystemThreshold(SystemThreshold::TotalCollateralRatio)),
+        );
+        let result = state.resolve_anchor(&anchor, None);
+        assert!((result.to_f64() - 1.75).abs() < 0.001,
+            "Midpoint of 1.5 and 2.0 should be 1.75, got {}", result.to_f64());
+    }
+
+    #[test]
+    fn test_resolve_anchor_offset() {
+        let mut state = accrual_test_state();
+        state.recovery_mode_threshold = Ratio::from_f64(1.5);
+        let anchor = CrAnchor::Offset(
+            Box::new(CrAnchor::SystemThreshold(SystemThreshold::BorrowThreshold)),
+            Ratio::from_f64(0.05),
+        );
+        let result = state.resolve_anchor(&anchor, None);
+        assert!((result.to_f64() - 1.55).abs() < 0.001,
+            "1.5 + 0.05 should be 1.55, got {}", result.to_f64());
+    }
+
+    #[test]
+    fn test_resolve_anchor_asset_threshold() {
+        let state = accrual_test_state();
+        let icp = state.icp_collateral_type();
+        let anchor = CrAnchor::AssetThreshold(AssetThreshold::BorrowThreshold);
+        let result = state.resolve_anchor(&anchor, Some(&icp));
+        // ICP borrow threshold — check what accrual_test_state sets
+        assert!(result.to_f64() > 1.0,
+            "ICP borrow threshold should be > 1.0, got {}", result.to_f64());
+    }
+
+    #[test]
+    fn test_resolve_curve_sorts_by_cr() {
+        let mut state = accrual_test_state();
+        state.total_collateral_ratio = Ratio::from_f64(2.0);
+        state.recovery_mode_threshold = Ratio::from_f64(1.5);
+        let curve = RateCurveV2 {
+            markers: vec![
+                // Intentionally out of order
+                RateMarkerV2 {
+                    cr_anchor: CrAnchor::SystemThreshold(SystemThreshold::TotalCollateralRatio),
+                    multiplier: Ratio::from_f64(1.0),
+                },
+                RateMarkerV2 {
+                    cr_anchor: CrAnchor::SystemThreshold(SystemThreshold::BorrowThreshold),
+                    multiplier: Ratio::from_f64(3.0),
+                },
+            ],
+            method: InterpolationMethod::Linear,
+        };
+        let resolved = state.resolve_curve(&curve, None);
+        assert!(resolved[0].0.to_f64() < resolved[1].0.to_f64(),
+            "Should be sorted ascending: {} < {}", resolved[0].0.to_f64(), resolved[1].0.to_f64());
+        assert!((resolved[0].0.to_f64() - 1.5).abs() < 0.01);
+        assert!((resolved[1].0.to_f64() - 2.0).abs() < 0.01);
     }
 }
