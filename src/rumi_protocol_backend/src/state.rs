@@ -1056,6 +1056,18 @@ impl State {
         config.map(|c| c.borrowing_fee).unwrap_or(self.fee)
     }
 
+    /// Get the dynamic borrowing fee multiplier for a projected vault CR.
+    /// Returns 1.0 if no borrowing_fee_curve is configured.
+    pub fn get_borrowing_fee_multiplier(&self, projected_vault_cr: Ratio) -> Ratio {
+        match &self.borrowing_fee_curve {
+            Some(curve) => {
+                let resolved = self.resolve_curve(curve, None);
+                Self::interpolate_multiplier(&resolved, projected_vault_cr)
+            }
+            None => Ratio::new(dec!(1.0)),
+        }
+    }
+
     /// Get interest rate for a specific collateral type (recovery-aware)
     pub fn get_interest_rate_for(&self, ct: &CollateralType) -> Ratio {
         let config = self.collateral_configs.get(ct);
@@ -3471,5 +3483,60 @@ mod tests {
             "Should be sorted ascending: {} < {}", resolved[0].0.to_f64(), resolved[1].0.to_f64());
         assert!((resolved[0].0.to_f64() - 1.5).abs() < 0.01);
         assert!((resolved[1].0.to_f64() - 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_borrowing_fee_multiplier_above_tcr() {
+        let mut state = accrual_test_state();
+        state.total_collateral_ratio = Ratio::from_f64(1.75);
+        state.recovery_mode_threshold = Ratio::from_f64(1.5);
+
+        // Vault CR = 2.0 (above TCR of 1.75) → multiplier should be 1.0
+        let mult = state.get_borrowing_fee_multiplier(Ratio::from_f64(2.0));
+        assert!((mult.to_f64() - 1.0).abs() < 0.01,
+            "Above TCR should be 1.0x, got {}", mult.to_f64());
+    }
+
+    #[test]
+    fn test_borrowing_fee_multiplier_at_midpoint() {
+        let mut state = accrual_test_state();
+        state.total_collateral_ratio = Ratio::from_f64(2.0);
+        state.recovery_mode_threshold = Ratio::from_f64(1.5);
+        // Midpoint = (1.5 + 2.0) / 2 = 1.75
+
+        let mult = state.get_borrowing_fee_multiplier(Ratio::from_f64(1.75));
+        assert!((mult.to_f64() - 1.75).abs() < 0.01,
+            "At midpoint should be 1.75x, got {}", mult.to_f64());
+    }
+
+    #[test]
+    fn test_borrowing_fee_multiplier_at_floor() {
+        let mut state = accrual_test_state();
+        state.total_collateral_ratio = Ratio::from_f64(2.0);
+        state.recovery_mode_threshold = Ratio::from_f64(1.5);
+        // Floor = BorrowThreshold + 0.05 = 1.55
+
+        let mult = state.get_borrowing_fee_multiplier(Ratio::from_f64(1.55));
+        assert!((mult.to_f64() - 3.0).abs() < 0.01,
+            "At floor should be 3.0x, got {}", mult.to_f64());
+    }
+
+    #[test]
+    fn test_borrowing_fee_multiplier_below_floor_capped() {
+        let mut state = accrual_test_state();
+        state.total_collateral_ratio = Ratio::from_f64(2.0);
+        state.recovery_mode_threshold = Ratio::from_f64(1.5);
+
+        let mult = state.get_borrowing_fee_multiplier(Ratio::from_f64(1.4));
+        assert!((mult.to_f64() - 3.0).abs() < 0.01,
+            "Below floor should still be 3.0x (capped), got {}", mult.to_f64());
+    }
+
+    #[test]
+    fn test_borrowing_fee_multiplier_none_curve() {
+        let mut state = accrual_test_state();
+        state.borrowing_fee_curve = None;
+        let mult = state.get_borrowing_fee_multiplier(Ratio::from_f64(1.4));
+        assert!((mult.to_f64() - 1.0).abs() < 0.001);
     }
 }

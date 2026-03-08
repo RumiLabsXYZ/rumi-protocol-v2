@@ -7,7 +7,7 @@ use crate::guard::GuardPrincipal;
 use crate::GuardError;
 use crate::logs::INFO;
 use crate::management::{mint_icusd, transfer_collateral_from, transfer_icusd_from, transfer_stable_from};
-use crate::numeric::{ICUSD, ICP, UsdIcp};
+use crate::numeric::{ICUSD, ICP, Ratio, UsdIcp};
 use crate::{
     mutate_state, read_state, ProtocolError, SuccessWithFee, MIN_ICUSD_AMOUNT,
     DUST_THRESHOLD,
@@ -22,7 +22,8 @@ use crate::DEBUG;
 use crate::management;
 use crate::PendingMarginTransfer;
 use rust_decimal::Decimal;
-use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
+use rust_decimal_macros::dec;
 
 use crate::compute_collateral_ratio;
 
@@ -666,7 +667,22 @@ async fn borrow_from_vault_internal(caller: Principal, arg: VaultArg) -> Result<
         )));
     }
 
-    let fee: ICUSD = read_state(|s| amount * s.get_borrowing_fee_for(&vault.collateral_type));
+    // Compute projected vault CR after this borrow (for dynamic fee multiplier)
+    let new_total_debt = vault.borrowed_icusd_amount + amount;
+    let projected_cr = if new_total_debt.to_u64() == 0 {
+        Ratio::new(dec!(999))
+    } else {
+        Ratio::from(
+            Decimal::from_u64(collateral_value.to_u64()).unwrap_or(Decimal::ZERO)
+                / Decimal::from_u64(new_total_debt.to_u64()).unwrap_or(Decimal::ONE)
+        )
+    };
+
+    let fee: ICUSD = read_state(|s| {
+        let base_fee = s.get_borrowing_fee_for(&vault.collateral_type);
+        let multiplier = s.get_borrowing_fee_multiplier(projected_cr);
+        amount * base_fee * multiplier
+    });
 
     match mint_icusd(amount - fee, caller).await {
         Ok(block_index) => {
