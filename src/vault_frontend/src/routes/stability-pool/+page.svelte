@@ -19,6 +19,7 @@
   import EarnInfoCard from '../../lib/components/stability-pool/EarnInfoCard.svelte';
   import LiquidationHistoryCard from '../../lib/components/stability-pool/LiquidationHistoryCard.svelte';
   import LoadingSpinner from '../../lib/components/common/LoadingSpinner.svelte';
+  import { CANISTER_IDS } from '../../lib/config';
 
   // Initialize from cache — if we have data, show it immediately (no spinner)
   let hasCachedData = _poolStatus !== null;
@@ -32,15 +33,17 @@
   $: isConnected = $walletStore.isConnected;
   $: principal = $walletStore.principal;
 
-  // APR calculation for header badge
+  // APR calculation for header badge — uses icUSD-only TVL as denominator
+  // because ckUSDC/ckUSDT depositors don't earn interest.
   $: poolApr = (() => {
-    if (!protocolStatus || !poolStatus || poolStatus.total_deposits_e8s === 0n) return null;
+    if (!protocolStatus || !poolStatus) return null;
     const weightedRate = protocolStatus.weightedAverageInterestRate;
     const poolShare = protocolStatus.interestPoolShare;
     const totalDebt = protocolStatus.totalIcusdBorrowed;
-    const poolTvl = Number(poolStatus.total_deposits_e8s) / 1e8;
-    if (poolTvl === 0 || totalDebt === 0 || weightedRate === 0) return null;
-    const apr = (weightedRate * poolShare * totalDebt) / poolTvl;
+    const icusdEntry = poolStatus.stablecoin_balances.find(([l]: [any, bigint]) => l.toText() === CANISTER_IDS.ICUSD_LEDGER);
+    const icusdTvl = icusdEntry ? Number(icusdEntry[1]) / 1e8 : 0;
+    if (icusdTvl === 0 || totalDebt === 0 || weightedRate === 0) return null;
+    const apr = (weightedRate * poolShare * totalDebt) / icusdTvl;
     return (apr * 100).toFixed(2);
   })();
 
