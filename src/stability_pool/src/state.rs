@@ -478,12 +478,37 @@ impl StabilityPoolState {
 
     // ─── Fee Accounting ───
 
-    /// Deduct a ledger fee (e.g. approve fee) from the pool's aggregate tracked balance.
-    /// The fee is socialized: it reduces `total_stablecoin_balances` but is NOT charged
-    /// to any individual depositor, since the approve benefits all depositors equally.
+    /// Deduct a ledger fee (e.g. approve fee) proportionally from all depositors
+    /// who hold `token_ledger`, then adjust the aggregate total to match.
     pub fn deduct_fee_from_pool(&mut self, token_ledger: Principal, fee: u64) {
-        if let Some(total) = self.total_stablecoin_balances.get_mut(&token_ledger) {
-            *total = total.saturating_sub(fee);
+        let total = match self.total_stablecoin_balances.get(&token_ledger).copied() {
+            Some(t) if t > 0 => t,
+            _ => return,
+        };
+
+        let mut deducted: u64 = 0;
+        let depositor_keys: Vec<Principal> = self.deposits.keys().copied().collect();
+
+        for key in &depositor_keys {
+            if let Some(pos) = self.deposits.get_mut(key) {
+                if let Some(bal) = pos.stablecoin_balances.get_mut(&token_ledger) {
+                    if *bal > 0 {
+                        // Proportional share: fee * bal / total (rounded down)
+                        let share = (fee as u128 * *bal as u128 / total as u128) as u64;
+                        let actual = share.min(*bal);
+                        *bal = bal.saturating_sub(actual);
+                        deducted += actual;
+                        if *bal == 0 {
+                            pos.stablecoin_balances.remove(&token_ledger);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Apply any rounding remainder (at most depositor_count - 1 units) to the aggregate
+        if let Some(agg) = self.total_stablecoin_balances.get_mut(&token_ledger) {
+            *agg = agg.saturating_sub(deducted);
         }
     }
 
