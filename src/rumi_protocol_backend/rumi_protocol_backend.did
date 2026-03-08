@@ -206,6 +206,9 @@ type Event = variant {
   set_recovery_rate_curve : record {
     markers : text;
   };
+  set_borrowing_fee_curve : record {
+    markers : text;
+  };
   set_healthy_cr : record {
     collateral_type : text;
     healthy_cr : opt text;
@@ -340,6 +343,7 @@ type ProtocolStatus = record {
   manual_mode_override : bool;
   interest_pool_share : float64;
   weighted_average_interest_rate : float64;
+  borrowing_fee_curve_resolved : vec record { float64; float64 };
 };
 type ReserveBalance = record {
   balance : nat64;
@@ -507,6 +511,7 @@ service : (ProtocolArg) -> {
   set_recovery_cr_multiplier : (float64) -> (Result);
   set_rate_curve_markers : (opt principal, vec record { float64; float64 }) -> (Result);
   set_recovery_parameters : (principal, opt float64, opt float64) -> (Result);
+  set_borrowing_fee_curve : (opt text) -> (Result);
   set_recovery_rate_curve : (vec record { text; float64 }) -> (Result);
   set_healthy_cr : (principal, opt float64) -> (Result);
   set_interest_pool_share : (float64) -> (Result);
