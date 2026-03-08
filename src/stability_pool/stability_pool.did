@@ -16,6 +16,7 @@ type StablecoinConfig = record {
   decimals : nat8;
   priority : nat8;
   is_active : bool;
+  transfer_fee : opt nat64;
 };
 
 type CollateralInfo = record {

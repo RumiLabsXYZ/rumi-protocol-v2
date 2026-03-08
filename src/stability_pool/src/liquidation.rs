@@ -169,7 +169,14 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
         ).await;
 
         match approve_result {
-            Ok((Ok(_),)) => {},
+            Ok((Ok(_),)) => {
+                // Deduct the approve fee from tracked balances so accounting stays accurate.
+                if let Some(fee) = stablecoin_configs.get(token_ledger).and_then(|c| c.transfer_fee) {
+                    if fee > 0 {
+                        mutate_state(|s| s.deduct_fee_from_pool(*token_ledger, fee));
+                    }
+                }
+            },
             Ok((Err(e),)) => {
                 log!(INFO, "Approve failed for {}: {:?}", token_ledger, e);
                 continue;

@@ -17,6 +17,10 @@ pub struct StablecoinConfig {
     pub priority: u8,
     /// false = no new deposits accepted, existing balances still withdrawable/consumable.
     pub is_active: bool,
+    /// ICRC-1 transfer/approve fee in native token units.
+    /// Used to deduct approve fees from tracked balances so accounting stays accurate.
+    #[serde(default)]
+    pub transfer_fee: Option<u64>,
 }
 
 /// Subset of backend CollateralConfig needed by the pool.

@@ -476,6 +476,17 @@ impl StabilityPoolState {
         })
     }
 
+    // ─── Fee Accounting ───
+
+    /// Deduct a ledger fee (e.g. approve fee) from the pool's aggregate tracked balance.
+    /// The fee is socialized: it reduces `total_stablecoin_balances` but is NOT charged
+    /// to any individual depositor, since the approve benefits all depositors equally.
+    pub fn deduct_fee_from_pool(&mut self, token_ledger: Principal, fee: u64) {
+        if let Some(total) = self.total_stablecoin_balances.get_mut(&token_ledger) {
+            *total = total.saturating_sub(fee);
+        }
+    }
+
     // ─── Admin Balance Correction ───
 
     /// Set a depositor's balance for a specific token to `correct_amount`,
