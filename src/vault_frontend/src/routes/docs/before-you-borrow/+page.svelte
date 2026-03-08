@@ -5,30 +5,43 @@
   import type { CollateralInfo } from '$lib/services/types';
   import { get } from 'svelte/store';
 
+  import { protocolService } from '$lib/services/protocol';
+
   let borrowingFeePct = '0.5';
   let ckstableFeePct = '0.05';
   let interestPoolPct = '75';
   let treasuryPct = '25';
   let collaterals: CollateralInfo[] = [];
-
+  let borrowingFeeCurve: [number, number][] = [];
   $: collateralSymbols = collaterals.map(c => c.symbol).join(', ') || 'ICP';
   // Use the lowest liquidation CR across all collaterals for the general warning
   $: lowestLiqPct = collaterals.length > 0
     ? Math.min(...collaterals.map(c => c.liquidationCr * 100)).toFixed(0)
     : '133';
 
+  // Derive min/max multiplier from the live curve
+  $: minMultiplier = borrowingFeeCurve.length > 0
+    ? Math.min(...borrowingFeeCurve.map(p => p[1]))
+    : 1;
+  $: maxMultiplier = borrowingFeeCurve.length > 0
+    ? Math.max(...borrowingFeeCurve.map(p => p[1]))
+    : 1;
+  $: maxEffectiveFeePct = (parseFloat(borrowingFeePct) * maxMultiplier).toFixed(2);
+
   onMount(async () => {
     try {
-      const [bFee, ckFee, poolShare] = await Promise.all([
+      const [bFee, ckFee, poolShare, status] = await Promise.all([
         publicActor.get_borrowing_fee() as Promise<number>,
         publicActor.get_ckstable_repay_fee() as Promise<number>,
         publicActor.get_interest_pool_share() as Promise<number>,
+        protocolService.getProtocolStatus(),
       ]);
       borrowingFeePct = (Number(bFee) * 100).toFixed(1);
       ckstableFeePct = (Number(ckFee) * 100).toFixed(2);
       const ps = Number(poolShare);
       interestPoolPct = (ps * 100).toFixed(0);
       treasuryPct = ((1 - ps) * 100).toFixed(0);
+      borrowingFeeCurve = status.borrowingFeeCurveResolved ?? [];
 
       await collateralStore.fetchSupportedCollateral();
       const state = get(collateralStore);
@@ -77,7 +90,10 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Fees</h2>
-    <p>A one-time borrowing fee of {borrowingFeePct}% is deducted from the icUSD you borrow. If you borrow 100 icUSD, you receive {(100 - parseFloat(borrowingFeePct)).toFixed(1)} icUSD and owe 100 icUSD. During Recovery mode, per-collateral fee overrides may apply.</p>
+    <p>A one-time borrowing fee is deducted from the icUSD you mint. The base rate is {borrowingFeePct}%, but the effective fee depends on how your vault's projected collateral ratio compares to the system average.</p>
+    <p>Vaults borrowing at or above the system collateral ratio pay the base rate ({borrowingFeePct}%). Vaults borrowing closer to the minimum collateral ratio pay a higher rate{maxMultiplier > 1 ? ` — up to ${maxEffectiveFeePct}%` : ''}. This dynamic fee discourages risky borrows that could weaken overall protocol health.</p>
+    <p>The fee is deducted upfront: if you borrow 100 icUSD at a {borrowingFeePct}% effective rate, you receive {(100 - parseFloat(borrowingFeePct)).toFixed(1)} icUSD and owe 100 icUSD. During Recovery mode, per-collateral fee overrides may apply.</p>
+    <p>See <a href="/docs/parameters" class="doc-link">Protocol Parameters</a> for the full fee curve.</p>
   </section>
 
   <section class="doc-section">
@@ -104,7 +120,7 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Closing Your Vault</h2>
-    <p>To close a vault, you must first repay all outstanding icUSD debt, then withdraw your collateral. The protocol also offers a <strong>withdraw-and-close</strong> operation that does both steps atomically in a single call. Dust amounts below 0.000001 icUSD are forgiven automatically on close.</p>
+    <p>To close a vault, you must first repay all outstanding icUSD debt, then withdraw your collateral. The protocol also offers a <strong>withdraw-and-close</strong> operation that does both steps atomically in a single call. Dust amounts below 0.0005 icUSD are forgiven automatically on close.</p>
   </section>
 
   <section class="doc-section">

@@ -809,7 +809,7 @@
               </div>
               {#if parsedBorrowAmount > 0 && vaultBorrowingFee > 0}
                 <div class="fee-breakdown">
-                  <div class="fee-row"><span>Fee ({(effectiveBorrowFeeRate * 100).toFixed(2)}%{borrowFeeMultiplier > 1.01 ? ` · ${borrowFeeMultiplier.toFixed(2)}x` : ''})</span><span>{formatStableTx(borrowFeeAmount)} icUSD</span></div>
+                  <div class="fee-row"><span>Fee ({(effectiveBorrowFeeRate * 100).toFixed(2)}%)</span><span>{formatStableTx(borrowFeeAmount)} icUSD</span></div>
                   <div class="fee-row"><span>You receive</span><span>{formatStableTx(borrowReceiveAmount)} icUSD</span></div>
                 </div>
               {/if}

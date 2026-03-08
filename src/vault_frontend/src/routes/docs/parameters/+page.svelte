@@ -20,6 +20,7 @@
   let rmrCeiling = 1.0;
   let rmrFloorCr = 2.25;
   let rmrCeilingCr = 1.5;
+  let borrowingFeeCurve: [number, number][] = [];
 
   // All supported collateral types (populated dynamically)
   let collaterals: CollateralInfo[] = [];
@@ -81,6 +82,7 @@
       rmrCeiling = Number(rCeil);
       rmrFloorCr = Number(rFloorCr);
       rmrCeilingCr = Number(rCeilCr);
+      borrowingFeeCurve = status.borrowingFeeCurveResolved ?? [];
 
       // Load ALL supported collateral types
       await collateralStore.fetchSupportedCollateral();
@@ -174,9 +176,19 @@
     <h2 class="doc-heading">Fees</h2>
     <div class="params-table">
       <div class="param">
-        <span class="param-label">Borrowing Fee <span class="tip" data-tip="A one-time fee deducted from the icUSD you mint. For example, if 0.5%, borrowing 100 icUSD means you receive 99.5 icUSD but owe 100. In Recovery Mode, per-collateral fee overrides may apply.">?</span></span>
-        <span class="param-val live">{pctRaw(borrowingFee)} (per-collateral overrides in Recovery)</span>
+        <span class="param-label">Borrowing Fee (base) <span class="tip" data-tip="A one-time fee deducted from the icUSD you mint. The effective rate may be higher depending on the dynamic multiplier below. In Recovery Mode, per-collateral fee overrides may apply.">?</span></span>
+        <span class="param-val live">{pctRaw(borrowingFee)}</span>
       </div>
+      {#if borrowingFeeCurve.length > 0}
+      <div class="param">
+        <span class="param-label">Borrowing Fee Curve <span class="tip" data-tip="The effective borrowing fee depends on your vault's projected collateral ratio after the borrow. Healthier vaults (higher CR) pay closer to the base fee. Riskier borrows (lower CR) pay a multiplied fee. The curve uses piecewise linear interpolation between the anchor points shown.">?</span></span>
+        <span class="param-val live curve-val">
+          {#each borrowingFeeCurve.sort((a, b) => b[0] - a[0]) as [cr, mult]}
+            <span class="curve-point">CR {(cr * 100).toFixed(0)}% → {mult.toFixed(2)}x ({(borrowingFee * mult * 100).toFixed(2)}%)</span>
+          {/each}
+        </span>
+      </div>
+      {/if}
       <div class="param">
         <span class="param-label">Redemption Fee Floor <span class="tip" data-tip="The minimum fee charged when redeeming icUSD for collateral. The actual fee starts here and increases with redemption volume, then decays back over time.">?</span></span>
         <span class="param-val live">{pctRaw(redemptionFeeFloor)}</span>
@@ -241,7 +253,7 @@
       </div>
       <div class="param">
         <span class="param-label">Dust Threshold (auto-forgiven) <span class="tip" data-tip="Debt amounts smaller than this are automatically forgiven when closing a vault, to avoid rounding issues.">?</span></span>
-        <span class="param-val">0.000001 icUSD</span>
+        <span class="param-val">0.0005 icUSD</span>
       </div>
     </div>
   </section>
@@ -407,5 +419,11 @@
   }
   .tip:hover::after {
     opacity: 1;
+  }
+  .curve-val {
+    display: flex; flex-direction: column; gap: 0.15rem; text-align: right;
+  }
+  .curve-point {
+    font-size: 0.8125rem;
   }
 </style>

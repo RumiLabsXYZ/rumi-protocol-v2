@@ -269,7 +269,7 @@
                 </div>
               </div>
               {#if icusdAmount > 0}
-                <div class="fee-row"><span>Fee ({(effectiveMintFeeRate * 100).toFixed(2)}%{mintFeeMultiplier > 1.01 ? ` · ${mintFeeMultiplier.toFixed(2)}x` : ''})</span><span>{formatStableTx(calculatedBorrowFee)} icUSD</span></div>
+                <div class="fee-row"><span>Fee ({(effectiveMintFeeRate * 100).toFixed(2)}%)</span><span>{formatStableTx(calculatedBorrowFee)} icUSD</span></div>
                 <div class="fee-row"><span>You receive</span><span>{formatStableTx(calculatedIcusdAmount)} icUSD</span></div>
               {/if}
             </div>
