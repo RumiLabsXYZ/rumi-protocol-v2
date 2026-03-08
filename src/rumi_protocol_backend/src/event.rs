@@ -735,6 +735,7 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                                 "BorrowThreshold" => SystemThreshold::BorrowThreshold,
                                 "WarningCr" => SystemThreshold::WarningCr,
                                 "HealthyCr" => SystemThreshold::HealthyCr,
+                                "TotalCollateralRatio" => SystemThreshold::TotalCollateralRatio,
                                 _ => return None,
                             };
                             let mult_dec = mult_str.parse::<Decimal>().ok()?;
@@ -1313,6 +1314,7 @@ pub fn record_set_recovery_rate_curve(
                 SystemThreshold::BorrowThreshold => "BorrowThreshold",
                 SystemThreshold::WarningCr => "WarningCr",
                 SystemThreshold::HealthyCr => "HealthyCr",
+                SystemThreshold::TotalCollateralRatio => "TotalCollateralRatio",
             };
             (thresh_str.to_string(), mult.to_string())
         })

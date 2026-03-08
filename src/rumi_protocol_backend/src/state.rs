@@ -200,6 +200,30 @@ pub struct RateCurve {
     pub method: InterpolationMethod,
 }
 
+/// Named per-asset CR thresholds, resolved from CollateralConfig at runtime.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum AssetThreshold {
+    LiquidationRatio,
+    BorrowThreshold,
+    WarningCr,
+    HealthyCr,
+}
+
+/// Anchor point for a rate curve marker. Can be a fixed CR or a dynamic reference.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum CrAnchor {
+    /// Concrete CR value (e.g., 1.5 = 150%).
+    Fixed(Ratio),
+    /// Per-asset threshold, resolved from CollateralConfig at runtime.
+    AssetThreshold(AssetThreshold),
+    /// System-wide threshold, resolved from debt-weighted averages at runtime.
+    SystemThreshold(SystemThreshold),
+    /// Midpoint of two anchors: (A + B) / 2.
+    Midpoint(Box<CrAnchor>, Box<CrAnchor>),
+    /// Offset from another anchor: base + delta (delta can be negative).
+    Offset(Box<CrAnchor>, Ratio),
+}
+
 /// Named system-wide thresholds for the recovery rate curve (Layer 2).
 /// These resolve to debt-weighted averages at runtime.
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
@@ -208,6 +232,7 @@ pub enum SystemThreshold {
     BorrowThreshold,
     WarningCr,
     HealthyCr,
+    TotalCollateralRatio,
 }
 
 /// A recovery rate marker: at this named threshold, apply this multiplier.
@@ -1120,6 +1145,7 @@ impl State {
                     SystemThreshold::BorrowThreshold => self.recovery_mode_threshold,
                     SystemThreshold::WarningCr => self.weighted_avg_warning_cr,
                     SystemThreshold::HealthyCr => self.weighted_avg_healthy_cr,
+                    SystemThreshold::TotalCollateralRatio => self.total_collateral_ratio,
                 };
                 (cr, m.multiplier)
             })

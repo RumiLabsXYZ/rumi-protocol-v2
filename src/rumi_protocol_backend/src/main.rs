@@ -1930,8 +1930,9 @@ async fn set_recovery_rate_curve(
             "BorrowThreshold" => SystemThreshold::BorrowThreshold,
             "WarningCr" => SystemThreshold::WarningCr,
             "HealthyCr" => SystemThreshold::HealthyCr,
+            "TotalCollateralRatio" => SystemThreshold::TotalCollateralRatio,
             _ => return Err(ProtocolError::GenericError(
-                format!("Unknown threshold: {}. Valid: LiquidationRatio, BorrowThreshold, WarningCr, HealthyCr", thresh_str),
+                format!("Unknown threshold: {}. Valid: LiquidationRatio, BorrowThreshold, WarningCr, HealthyCr, TotalCollateralRatio", thresh_str),
             )),
         };
         parsed.push((threshold, *mult));
