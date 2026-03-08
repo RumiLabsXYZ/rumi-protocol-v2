@@ -148,8 +148,6 @@
             <p><strong>Interest APR</strong> applies to <strong>icUSD</strong> deposits. icUSD depositors earn a share of all borrowing interest paid by vault owners.</p>
             <div class="apr-tooltip-divider"></div>
             <p><strong>ckUSDC</strong> and <strong>ckUSDT</strong> deposits don't earn interest but are used <em>first</em> for liquidations, giving priority access to discounted collateral.</p>
-            <div class="apr-tooltip-divider"></div>
-            <p>If no ckstables are in the pool, icUSD is also used for liquidations.</p>
           </div>
         {/if}
       </div>
