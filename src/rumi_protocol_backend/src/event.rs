@@ -529,8 +529,15 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             Event::MarginTransfer { vault_id, .. } => {
                 state.pending_margin_transfers.remove(&vault_id);
             }
-            Event::CollateralWithdrawn { vault_id, .. } => {
-                // The vault's margin has already been set to 0 in the vault.rs function
+            Event::CollateralWithdrawn { vault_id, amount, .. } => {
+                // Zero the vault's collateral during replay so that if a
+                // subsequent close_vault() reads the vault, the balance is
+                // accurate. (During live operation this is done in vault.rs
+                // before the transfer; during replay we must mirror it here.)
+                if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
+                    let withdraw = amount.to_u64().min(vault.collateral_amount);
+                    vault.collateral_amount -= withdraw;
+                }
             }
             Event::PartialCollateralWithdrawn {
                 vault_id,

@@ -1557,14 +1557,12 @@ impl State {
     pub fn close_vault(&mut self, vault_id: u64) {
         if let Some(vault) = self.vault_id_to_vaults.remove(&vault_id) {
             let owner = vault.owner;
-            self.pending_margin_transfers.insert(
-                vault_id,
-                PendingMarginTransfer {
-                    owner,
-                    margin: ICP::from(vault.collateral_amount),
-                    collateral_type: vault.collateral_type,
-                },
-            );
+            // NOTE: We intentionally do NOT create a pending_margin_transfer here.
+            // CloseVault requires collateral=0, and WithdrawAndCloseVault already
+            // transferred collateral directly before calling this. Inserting a
+            // pending entry would be phantom — never cleared by a MarginTransfer event.
+            // Legitimate pending transfers (liquidator rewards) are created directly
+            // by the liquidation code in vault.rs.
             if let Some(vault_ids) = self.principal_to_vault_ids.get_mut(&owner) {
                 vault_ids.remove(&vault_id);
             } else {
