@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { developerAccess } from '../lib/stores/developer';
-  import { formatNumber } from '$lib/utils/format';
+  import { formatNumber, formatStableTx } from '$lib/utils/format';
+  import { interpolateMultiplier } from '$lib/utils/interpolate';
   import { tweened } from 'svelte/motion';
   import { cubicOut } from 'svelte/easing';
   import { appDataStore, protocolStatus, isLoadingProtocol } from '$lib/stores/appDataStore';
@@ -39,6 +40,7 @@
   $: selectedMinCR = selectedCollateralInfo?.minimumCr ?? MINIMUM_CR;
   $: selectedLiqCR = selectedCollateralInfo?.liquidationCr ?? LIQUIDATION_CR;
   $: selectedBorrowingFee = selectedCollateralInfo?.borrowingFee ?? 0;
+  $: borrowingFeeCurve = $protocolStatus?.borrowingFeeCurveResolved ?? [];
 
   // Price: use per-collateral price from store, fall back to ICP from protocol status
   $: icpPrice = $protocolStatus?.lastIcpRate || 0;
@@ -53,7 +55,16 @@
   // Legacy alias for backward compat in template
   $: icpAmount = collateralAmount;
 
-  $: calculatedBorrowFee = icusdAmount * selectedBorrowingFee;
+  $: projectedMintCr = (() => {
+    if (icusdAmount <= 0 || collateralAmount <= 0 || collateralPrice <= 0) return Infinity;
+    const collateralVal = collateralAmount * collateralPrice;
+    return collateralVal / icusdAmount;
+  })();
+  $: mintFeeMultiplier = borrowingFeeCurve.length > 0
+    ? interpolateMultiplier(borrowingFeeCurve, projectedMintCr)
+    : 1;
+  $: effectiveMintFeeRate = selectedBorrowingFee * mintFeeMultiplier;
+  $: calculatedBorrowFee = icusdAmount * effectiveMintFeeRate;
   $: calculatedIcusdAmount = icusdAmount - calculatedBorrowFee;
   $: calculatedCollateralRatio = collateralAmount > 0 && icusdAmount >= 0.001
     ? ((collateralAmount * collateralPrice) / icusdAmount) * 100 : collateralAmount > 0 ? Infinity : 0;
@@ -258,8 +269,8 @@
                 </div>
               </div>
               {#if icusdAmount > 0}
-                <div class="fee-row"><span>Fee ({(selectedBorrowingFee * 100).toFixed(1)}%)</span><span>{formatNumber(calculatedBorrowFee)} icUSD</span></div>
-                <div class="fee-row"><span>You receive</span><span>{formatNumber(calculatedIcusdAmount)} icUSD</span></div>
+                <div class="fee-row"><span>Fee ({(effectiveMintFeeRate * 100).toFixed(2)}%{mintFeeMultiplier > 1.01 ? ` · ${mintFeeMultiplier.toFixed(2)}x` : ''})</span><span>{formatStableTx(calculatedBorrowFee)} icUSD</span></div>
+                <div class="fee-row"><span>You receive</span><span>{formatStableTx(calculatedIcusdAmount)} icUSD</span></div>
               {/if}
             </div>
 
