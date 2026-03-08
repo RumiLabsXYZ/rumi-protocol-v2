@@ -143,6 +143,13 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
         let is_icusd = icusd_ledger.map(|id| id == *token_ledger).unwrap_or(false);
         let token_decimals = stablecoin_configs.get(token_ledger).map(|c| c.decimals).unwrap_or(8);
 
+        // Circuit breaker: skip tokens that have failed too many times in a row.
+        // An admin must call `admin_reset_token_failures` to re-enable them.
+        if read_state(|s| s.is_token_suspended(token_ledger)) {
+            log!(INFO, "Skipping token {}: auto-suspended after consecutive failures", token_ledger);
+            continue;
+        }
+
         // Pre-check: will the backend accept this amount?
         // Backend minimum is 10_000_000 e8s (0.1 icUSD). Skip if below to avoid
         // wasting tokens on approve fees for doomed liquidation calls.
@@ -178,11 +185,13 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
                 }
             },
             Ok((Err(e),)) => {
-                log!(INFO, "Approve failed for {}: {:?}", token_ledger, e);
+                let count = mutate_state(|s| s.record_token_failure(*token_ledger));
+                log!(INFO, "Approve failed for {}: {:?} (consecutive failures: {})", token_ledger, e, count);
                 continue;
             },
             Err(e) => {
-                log!(INFO, "Approve call failed for {}: {:?}", token_ledger, e);
+                let count = mutate_state(|s| s.record_token_failure(*token_ledger));
+                log!(INFO, "Approve call failed for {}: {:?} (consecutive failures: {})", token_ledger, e, count);
                 continue;
             }
         }
@@ -231,14 +240,18 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
                     vault_info.vault_id, token_ledger, collateral, success.fee_amount_paid);
                 actual_consumed.insert(*token_ledger, *amount);
                 total_collateral_gained += collateral;
+                // Success: reset the consecutive failure counter
+                mutate_state(|s| s.reset_token_failures(token_ledger));
             },
             Ok(Err(protocol_error)) => {
-                log!(INFO, "Protocol rejected liquidation for vault {} with token {}: {:?}",
-                    vault_info.vault_id, token_ledger, protocol_error);
+                let count = mutate_state(|s| s.record_token_failure(*token_ledger));
+                log!(INFO, "Protocol rejected liquidation for vault {} with token {}: {:?} (consecutive failures: {})",
+                    vault_info.vault_id, token_ledger, protocol_error, count);
             },
             Err(call_error) => {
-                log!(INFO, "Liquidation call failed for vault {} with token {}: {:?}",
-                    vault_info.vault_id, token_ledger, call_error);
+                let count = mutate_state(|s| s.record_token_failure(*token_ledger));
+                log!(INFO, "Liquidation call failed for vault {} with token {}: {:?} (consecutive failures: {})",
+                    vault_info.vault_id, token_ledger, call_error, count);
             }
         }
     }

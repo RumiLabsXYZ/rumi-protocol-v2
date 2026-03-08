@@ -346,6 +346,25 @@ pub fn resume_operations() -> Result<(), StabilityPoolError> {
     Ok(())
 }
 
+/// Admin: reset the consecutive failure counter for a token, re-enabling it
+/// for liquidation after it was auto-suspended by the circuit breaker.
+#[update]
+pub fn admin_reset_token_failures(token_ledger: Principal) -> Result<String, StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    if !read_state(|s| s.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    let prev_count = mutate_state(|s| s.admin_reset_token_failures(&token_ledger));
+    log!(INFO, "Admin {} reset token failure counter for {}: was {}", caller, token_ledger, prev_count);
+    Ok(format!("Reset failure counter for {} (was {})", token_ledger, prev_count))
+}
+
+/// Query: return all tokens currently auto-suspended by the circuit breaker.
+#[query]
+pub fn get_suspended_tokens() -> Vec<(Principal, u32)> {
+    read_state(|s| s.get_suspended_tokens())
+}
+
 /// Admin: correct a depositor's stablecoin balance to match actual ledger state.
 /// Use when internal state tracks tokens that were never actually transferred on-chain.
 #[update]

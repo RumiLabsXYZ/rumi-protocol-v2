@@ -34,6 +34,11 @@ pub struct StabilityPoolState {
     /// `Option` is required for Candid backward-compatible stable memory upgrades.
     #[serde(default)]
     pub total_interest_received_e8s: Option<u64>,
+    /// Per-token consecutive approve/liquidation failure counter for circuit breaker.
+    /// When a token hits MAX_CONSECUTIVE_FAILURES, it is auto-suspended from liquidations
+    /// until an admin calls `admin_reset_token_failures`.
+    #[serde(default)]
+    pub token_consecutive_failures: BTreeMap<Principal, u32>,
     pub is_initialized: bool,
 }
 
@@ -56,6 +61,7 @@ impl Default for StabilityPoolState {
             total_liquidations_executed: 0,
             pool_creation_timestamp: 0,
             total_interest_received_e8s: Some(0),
+            token_consecutive_failures: BTreeMap::new(),
             is_initialized: false,
         }
     }
@@ -565,6 +571,47 @@ impl StabilityPoolState {
         format!("Corrected {} balance for {}: {} -> {}", token_ledger, user, old_amount, correct_amount)
     }
 
+    // ─── Token Failure Circuit Breaker ───
+
+    /// Maximum consecutive approve/liquidation failures before auto-suspending a token.
+    const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+
+    /// Returns true if the token has been auto-suspended due to repeated failures.
+    pub fn is_token_suspended(&self, token_ledger: &Principal) -> bool {
+        self.token_consecutive_failures
+            .get(token_ledger)
+            .map(|&count| count >= Self::MAX_CONSECUTIVE_FAILURES)
+            .unwrap_or(false)
+    }
+
+    /// Increment the consecutive failure counter for a token.
+    /// Returns the new count.
+    pub fn record_token_failure(&mut self, token_ledger: Principal) -> u32 {
+        let count = self.token_consecutive_failures.entry(token_ledger).or_insert(0);
+        *count += 1;
+        *count
+    }
+
+    /// Reset the consecutive failure counter on success.
+    pub fn reset_token_failures(&mut self, token_ledger: &Principal) {
+        self.token_consecutive_failures.remove(token_ledger);
+    }
+
+    /// Admin: reset the failure counter for a suspended token, re-enabling it.
+    /// Returns the previous failure count.
+    pub fn admin_reset_token_failures(&mut self, token_ledger: &Principal) -> u32 {
+        self.token_consecutive_failures.remove(token_ledger).unwrap_or(0)
+    }
+
+    /// Return all tokens that are currently auto-suspended.
+    pub fn get_suspended_tokens(&self) -> Vec<(Principal, u32)> {
+        self.token_consecutive_failures
+            .iter()
+            .filter(|(_, &count)| count >= Self::MAX_CONSECUTIVE_FAILURES)
+            .map(|(p, &c)| (*p, c))
+            .collect()
+    }
+
     // ─── State Validation ───
 
     pub fn validate_state(&self) -> Result<(), String> {
@@ -677,6 +724,7 @@ mod tests {
             decimals: 8,
             priority: 1,
             is_active: true,
+            transfer_fee: Some(10_000),
         });
         state.register_stablecoin(StablecoinConfig {
             ledger_id: ckusdt_ledger(),
@@ -684,6 +732,7 @@ mod tests {
             decimals: 6,
             priority: 2,
             is_active: true,
+            transfer_fee: Some(10),
         });
         state.register_stablecoin(StablecoinConfig {
             ledger_id: ckusdc_ledger(),
@@ -691,6 +740,7 @@ mod tests {
             decimals: 6,
             priority: 2,
             is_active: true,
+            transfer_fee: Some(10),
         });
 
         state.register_collateral(CollateralInfo {
@@ -1283,7 +1333,7 @@ mod tests {
         let mut state = test_state();
         add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
 
-        state.distribute_interest_revenue(icusd_ledger(), 5_00000000);
+        state.distribute_interest_revenue(icusd_ledger(), 5_00000000, None);
 
         let pos = state.deposits.get(&user_a()).unwrap();
         assert_eq!(pos.stablecoin_balances[&icusd_ledger()], 105_00000000);
@@ -1299,7 +1349,7 @@ mod tests {
         add_deposit_direct(&mut state, user_a(), icusd_ledger(), 75_00000000);
         add_deposit_direct(&mut state, user_b(), icusd_ledger(), 25_00000000);
 
-        state.distribute_interest_revenue(icusd_ledger(), 10_00000000);
+        state.distribute_interest_revenue(icusd_ledger(), 10_00000000, None);
 
         let a = state.deposits.get(&user_a()).unwrap();
         let b = state.deposits.get(&user_b()).unwrap();
@@ -1314,7 +1364,7 @@ mod tests {
     fn test_distribute_interest_zero_total_noop() {
         let mut state = test_state();
         // No depositors for icUSD
-        state.distribute_interest_revenue(icusd_ledger(), 5_00000000);
+        state.distribute_interest_revenue(icusd_ledger(), 5_00000000, None);
         assert_eq!(state.total_interest_received_e8s, Some(0));
     }
 
@@ -1326,7 +1376,7 @@ mod tests {
         add_deposit_direct(&mut state, user_b(), icusd_ledger(), 100);
         add_deposit_direct(&mut state, Principal::from_slice(&[99]), icusd_ledger(), 100);
 
-        state.distribute_interest_revenue(icusd_ledger(), 10);
+        state.distribute_interest_revenue(icusd_ledger(), 10, None);
 
         // Each gets floor(10 * 100/300) = 3. Dust = 10 - 9 = 1 goes to first depositor.
         let total: u64 = state.deposits.values()

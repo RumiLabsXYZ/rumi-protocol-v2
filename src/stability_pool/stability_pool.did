@@ -210,6 +210,7 @@ service : (StabilityPoolInitArgs) -> {
   update_pool_configuration : (PoolConfiguration) -> (variant { Ok; Err : StabilityPoolError });
   emergency_pause : () -> (variant { Ok; Err : StabilityPoolError });
   resume_operations : () -> (variant { Ok; Err : StabilityPoolError });
+  admin_reset_token_failures : (principal) -> (variant { Ok : text; Err : StabilityPoolError });
   admin_correct_balance : (principal, principal, nat64) -> (variant { Ok : text; Err : StabilityPoolError });
 
   // ── ICRC-21: Consent Messages ──
@@ -224,4 +225,5 @@ service : (StabilityPoolInitArgs) -> {
   get_liquidation_history : (opt nat64) -> (vec PoolLiquidationRecord) query;
   check_pool_capacity : (principal, nat64) -> (bool) query;
   validate_pool_state : () -> (variant { Ok : text; Err : text }) query;
+  get_suspended_tokens : () -> (vec record { principal; nat32 }) query;
 };
