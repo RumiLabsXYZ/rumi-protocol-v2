@@ -100,6 +100,7 @@ export interface ProtocolStatusDTO {
   reserveRedemptionFee: number;
   weightedAverageInterestRate: number;
   interestPoolShare: number;
+  borrowingFeeCurveResolved: [number, number][];
 }
 
 // Reserve redemption result from backend

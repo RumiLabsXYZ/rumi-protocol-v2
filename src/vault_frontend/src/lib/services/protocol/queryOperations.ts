@@ -39,6 +39,11 @@ export class QueryOperations {
         reserveRedemptionFee: Number((canisterStatus as any).reserve_redemption_fee),
         weightedAverageInterestRate: Number((canisterStatus as any).weighted_average_interest_rate),
         interestPoolShare: Number((canisterStatus as any).interest_pool_share),
+        borrowingFeeCurveResolved: Array.isArray((canisterStatus as any).borrowing_fee_curve_resolved)
+          ? (canisterStatus as any).borrowing_fee_curve_resolved.map(
+              (p: any) => [Number(p[0]), Number(p[1])] as [number, number]
+            )
+          : [],
       };
     });
   }
