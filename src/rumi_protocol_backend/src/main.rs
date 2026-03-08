@@ -6,7 +6,7 @@ use rumi_protocol_backend::{
     event::Event,
     logs::INFO,
     numeric::{ICUSD, ICP, Ratio, UsdIcp},
-    state::{read_state, replace_state, Mode, State},
+    state::{read_state, replace_state, Mode, State, RateCurveV2},
     vault::{CandidVault, OpenVaultSuccess, VaultArg},
     Fees, GetEventsArg, ProtocolArg, ProtocolError, ProtocolStatus, SuccessWithFee,
     ReserveRedemptionResult, ReserveBalance, CollateralTotals,
@@ -1947,6 +1947,48 @@ async fn set_recovery_rate_curve(
         rumi_protocol_backend::event::record_set_recovery_rate_curve(s, parsed);
     });
     log!(INFO, "[set_recovery_rate_curve] markers={:?}", markers);
+    Ok(())
+}
+
+/// Set the dynamic borrowing fee curve.
+/// Pass None to disable (revert to flat fee).
+/// Accepts a JSON-serialized RateCurveV2.
+#[candid_method(update)]
+#[update]
+async fn set_borrowing_fee_curve(
+    curve_json: Option<String>,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set borrowing fee curve".to_string(),
+        ));
+    }
+    let curve: Option<RateCurveV2> = match curve_json {
+        None => None,
+        Some(json) => {
+            let parsed: RateCurveV2 = serde_json::from_str(&json)
+                .map_err(|e| ProtocolError::GenericError(format!("Invalid curve JSON: {}", e)))?;
+            if parsed.markers.is_empty() {
+                return Err(ProtocolError::GenericError(
+                    "Curve must have at least 1 marker".to_string(),
+                ));
+            }
+            for m in &parsed.markers {
+                if m.multiplier.to_f64() <= 0.0 {
+                    return Err(ProtocolError::GenericError(
+                        "All multipliers must be positive".to_string(),
+                    ));
+                }
+            }
+            Some(parsed)
+        }
+    };
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_borrowing_fee_curve(s, curve);
+    });
+    log!(INFO, "[set_borrowing_fee_curve] Updated borrowing fee curve");
     Ok(())
 }
 

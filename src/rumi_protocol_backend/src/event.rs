@@ -1,5 +1,5 @@
 use crate::numeric::{Ratio, UsdIcp, ICUSD, ICP};
-use crate::state::{CollateralConfig, CollateralStatus, CollateralType, PendingMarginTransfer, State};
+use crate::state::{CollateralConfig, CollateralStatus, CollateralType, PendingMarginTransfer, RateCurveV2, State};
 use crate::storage::record_event;
 use crate::vault::Vault;
 use crate::{InitArg, Mode, StableTokenType, UpgradeArg};
@@ -337,6 +337,12 @@ pub enum Event {
         block_index: u64,
         reason: String,
     },
+
+    /// Admin set the dynamic borrowing fee curve.
+    #[serde(rename = "set_borrowing_fee_curve")]
+    SetBorrowingFeeCurve {
+        markers: String,
+    },
 }
 
 impl Event {
@@ -397,6 +403,7 @@ impl Event {
             Event::SetRmrFloorCr { .. } => false,
             Event::SetRmrCeilingCr { .. } => false,
             Event::AdminSweepToTreasury { .. } => false,
+            Event::SetBorrowingFeeCurve { .. } => false,
         }
     }
 }
@@ -792,6 +799,13 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             },
             Event::AdminSweepToTreasury { .. } => {
                 // Ledger-only operation; no in-memory state changes during replay.
+            },
+            Event::SetBorrowingFeeCurve { markers } => {
+                if markers == "null" {
+                    state.borrowing_fee_curve = None;
+                } else {
+                    state.borrowing_fee_curve = serde_json::from_str(&markers).ok();
+                }
             },
         }
     }
@@ -1329,6 +1343,20 @@ pub fn record_set_recovery_rate_curve(
             multiplier: Ratio::from_f64(*mult),
         })
         .collect();
+}
+
+pub fn record_set_borrowing_fee_curve(
+    state: &mut State,
+    curve: Option<RateCurveV2>,
+) {
+    let markers_json = match &curve {
+        Some(c) => serde_json::to_string(&c).unwrap_or_default(),
+        None => "null".to_string(),
+    };
+    record_event(&Event::SetBorrowingFeeCurve {
+        markers: markers_json,
+    });
+    state.borrowing_fee_curve = curve;
 }
 
 pub fn record_set_healthy_cr(
