@@ -178,8 +178,9 @@
               {@const sym = symbolForLedger(ledger, registries)}
               {@const dec = decimalsForLedger(ledger, registries)}
               <span class="breakdown-line">
+                <span class="collateral-dot breakdown-dot" style="background:{getStablecoinColor(ledger)}"></span>
                 <span class="breakdown-ticker">{sym}</span>
-                {formatStableTokenDisplay(amount, dec)}
+                <span class="gain-value">{formatStableTokenDisplay(amount, dec)}</span>
               </span>
             {/each}
           </span>
@@ -252,7 +253,7 @@
             <span class="gain-line" class:gain-dim={gainAmount === 0n}>
               <span class="collateral-dot" style="background:{getCollateralColor(col)}"></span>
               <span class="gain-ticker">{col.symbol}</span>
-              {formatTokenAmount(gainAmount, col.decimals)}
+              <span class="gain-value">{formatTokenAmount(gainAmount, col.decimals)}</span>
             </span>
           {/each}
         </span>
@@ -303,7 +304,7 @@
             <span class="gain-line">
               <span class="collateral-dot" style="background:{getStablecoinColor(ledger)}"></span>
               <span class="gain-ticker">{sym}</span>
-              {formatStableTokenDisplay(amount, dec)}
+              <span class="gain-value">{formatStableTokenDisplay(amount, dec)}</span>
             </span>
           {/each}
         </span>
@@ -409,25 +410,39 @@
 
   /* ── Ticker-first lines (collateral gains + pool deposits) ── */
   .gain-line {
+    display: flex;
+    align-items: baseline;
+    align-self: stretch;
+    gap: 0.25rem;
     white-space: nowrap;
   }
 
   .gain-ticker {
-    display: inline-block;
-    min-width: 3.25rem;
+    flex-shrink: 0;
+  }
+
+  .gain-value {
+    margin-left: auto;
   }
 
   /* ── Stablecoin breakdown under Total Deposited ── */
   .breakdown-line {
+    display: flex;
+    align-items: baseline;
+    align-self: stretch;
+    gap: 0.25rem;
     font-size: 0.75rem;
     font-weight: 500;
     color: var(--rumi-text-muted);
     white-space: nowrap;
   }
 
+  .breakdown-dot {
+    opacity: 0.45;
+  }
+
   .breakdown-ticker {
-    display: inline-block;
-    min-width: 3.25rem;
+    flex-shrink: 0;
   }
 
   /* ── Opt-out inline controls ── */
