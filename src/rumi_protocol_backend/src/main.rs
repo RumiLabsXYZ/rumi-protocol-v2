@@ -9,7 +9,7 @@ use rumi_protocol_backend::{
     state::{read_state, replace_state, Mode, State, RateCurveV2},
     vault::{CandidVault, OpenVaultSuccess, VaultArg},
     Fees, GetEventsArg, ProtocolArg, ProtocolError, ProtocolStatus, SuccessWithFee,
-    ReserveRedemptionResult, ReserveBalance, CollateralTotals,
+    ReserveRedemptionResult, ReserveBalance, CollateralTotals, CollateralInterestInfo,
     VaultArgWithToken, StableTokenType,
 };
 use rumi_protocol_backend::logs::DEBUG;
@@ -316,6 +316,13 @@ fn get_protocol_status() -> ProtocolStatus {
                 .collect(),
             None => vec![],
         },
+        per_collateral_interest: s.collateral_configs.keys()
+            .map(|ct| CollateralInterestInfo {
+                collateral_type: *ct,
+                total_debt_e8s: s.total_debt_for_collateral(ct).to_u64(),
+                weighted_interest_rate: s.weighted_interest_rate_for_collateral(ct).to_f64(),
+            })
+            .collect(),
     })
 }
 

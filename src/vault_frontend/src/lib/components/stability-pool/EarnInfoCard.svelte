@@ -37,17 +37,28 @@
   $: depositorCount = poolStatus ? Number(poolStatus.total_depositors) : 0;
   $: stablecoinBreakdown = poolStatus?.stablecoin_balances ?? [];
 
-  // Pool APR — uses icUSD-only TVL (ck stables don't earn interest)
+  // Per-collateral APR building block: for each collateral type, compute
+  // interestRate_C * poolShare * debt_C / eligible_icusd_C.
+  // Pool APR = sum over all C (fully opted-in rate).
+  // User APR = sum over C where user is opted in.
+  $: eligibleMap = new Map<string, number>(
+    (poolStatus?.eligible_icusd_per_collateral ?? []).map(([p, v]: [any, bigint]) => [p.toText(), Number(v) / 1e8])
+  );
+
   $: poolApr = (() => {
     if (!protocolStatus || !poolStatus) return null;
-    const weightedRate = protocolStatus.weightedAverageInterestRate;
     const poolShare = protocolStatus.interestPoolShare;
-    const totalDebt = protocolStatus.totalIcusdBorrowed;
-    const icusdEntry = poolStatus.stablecoin_balances.find(([l]: [any, bigint]) => l.toText() === CANISTER_IDS.ICUSD_LEDGER);
-    const icusdTvl = icusdEntry ? Number(icusdEntry[1]) / 1e8 : 0;
-    if (icusdTvl === 0 || totalDebt === 0 || weightedRate === 0) return null;
-    const apr = (weightedRate * poolShare * totalDebt) / icusdTvl;
-    return (apr * 100).toFixed(2);
+    const perC = protocolStatus.perCollateralInterest;
+    if (!perC || perC.length === 0) return null;
+
+    let totalApr = 0;
+    for (const info of perC) {
+      const eligible = eligibleMap.get(info.collateralType) ?? 0;
+      if (eligible === 0 || info.totalDebtE8s === 0 || info.weightedInterestRate === 0) continue;
+      totalApr += (info.weightedInterestRate * poolShare * info.totalDebtE8s) / eligible;
+    }
+    if (totalApr === 0) return null;
+    return (totalApr * 100).toFixed(2);
   })();
 
   // User position data
@@ -61,14 +72,23 @@
   // Does the user hold icUSD in the pool?
   $: userHasIcusd = userStables.some(([l, a]: [any, bigint]) => l.toText() === CANISTER_IDS.ICUSD_LEDGER && a > 0n);
 
-  // Personalized APR — same as headline if no opt-outs, null if no icUSD
+  // Personalized APR — only sums collateral types the user is opted in to
   $: userApr = (() => {
-    if (!userHasIcusd || !poolApr) return null;
-    // With opt-outs we can't precisely compute the reduced rate without
-    // per-collateral debt data, so show headline with a qualifier
-    return poolApr;
+    if (!userHasIcusd || !protocolStatus || !poolStatus) return null;
+    const poolShare = protocolStatus.interestPoolShare;
+    const perC = protocolStatus.perCollateralInterest;
+    if (!perC || perC.length === 0) return null;
+
+    let totalApr = 0;
+    for (const info of perC) {
+      if (optedOut.has(info.collateralType)) continue;
+      const eligible = eligibleMap.get(info.collateralType) ?? 0;
+      if (eligible === 0 || info.totalDebtE8s === 0 || info.weightedInterestRate === 0) continue;
+      totalApr += (info.weightedInterestRate * poolShare * info.totalDebtE8s) / eligible;
+    }
+    if (totalApr === 0) return null;
+    return (totalApr * 100).toFixed(2);
   })();
-  $: hasOptOuts = optedOut.size > 0;
 
   $: poolShare = (() => {
     if (!poolStatus || !userPosition || poolStatus.total_deposits_e8s === 0n) return '0.00';
@@ -164,7 +184,7 @@
       {#if userApr !== null}
         <div class="stat-row">
           <span class="stat-label">Your Interest APR</span>
-          <span class="stat-value green">{hasOptOuts ? `Up to ${userApr}` : userApr}%</span>
+          <span class="stat-value green">{userApr}%</span>
         </div>
       {/if}
 

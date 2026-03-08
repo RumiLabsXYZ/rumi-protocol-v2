@@ -326,6 +326,12 @@ type ProtocolError = variant {
   TransferFromError : record { TransferFromError; nat64 };
   CallerNotOwner;
 };
+type CollateralInterestInfo = record {
+  collateral_type : principal;
+  total_debt_e8s : nat64;
+  weighted_interest_rate : float64;
+};
+
 type ProtocolStatus = record {
   last_icp_timestamp : nat64;
   recovery_mode_threshold : float64;
@@ -344,6 +350,7 @@ type ProtocolStatus = record {
   interest_pool_share : float64;
   weighted_average_interest_rate : float64;
   borrowing_fee_curve_resolved : vec record { float64; float64 };
+  per_collateral_interest : vec CollateralInterestInfo;
 };
 type ReserveBalance = record {
   balance : nat64;

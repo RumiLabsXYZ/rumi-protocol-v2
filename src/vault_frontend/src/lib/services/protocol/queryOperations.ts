@@ -44,6 +44,13 @@ export class QueryOperations {
               (p: any) => [Number(p[0]), Number(p[1])] as [number, number]
             )
           : [],
+        perCollateralInterest: Array.isArray((canisterStatus as any).per_collateral_interest)
+          ? (canisterStatus as any).per_collateral_interest.map((info: any) => ({
+              collateralType: info.collateral_type?.toText?.() ?? String(info.collateral_type),
+              totalDebtE8s: Number(info.total_debt_e8s) / E8S,
+              weightedInterestRate: Number(info.weighted_interest_rate),
+            }))
+          : [],
       };
     });
   }

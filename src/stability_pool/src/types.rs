@@ -187,6 +187,10 @@ pub struct StabilityPoolStatus {
     pub collateral_registry: Vec<CollateralInfo>,
     pub emergency_paused: bool,
     pub total_interest_received_e8s: u64,
+    /// Per-collateral eligible icUSD (e8s): for each collateral type, the total
+    /// icUSD deposited by users who are opted in to that collateral.
+    /// Used by the frontend to compute per-collateral APR.
+    pub eligible_icusd_per_collateral: Vec<(Principal, u64)>,
 }
 
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

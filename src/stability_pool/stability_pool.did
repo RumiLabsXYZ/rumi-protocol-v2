@@ -55,6 +55,7 @@ type StabilityPoolStatus = record {
   collateral_registry : vec CollateralInfo;
   emergency_paused : bool;
   total_interest_received_e8s : nat64;
+  eligible_icusd_per_collateral : vec record { principal; nat64 };
 };
 
 type UserStabilityPosition = record {
