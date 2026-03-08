@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { protocolService } from '$lib/services/protocol';
-  import { formatNumber } from '$lib/utils/format';
+  import { formatNumber, formatStableTx } from '$lib/utils/format';
 
   export let vaultId: number;
 
@@ -45,13 +45,13 @@
       color = 'text-yellow-400';
       const borrowed = Number(event.borrow_from_vault.borrowed_amount) / E8S;
       const fee = Number(event.borrow_from_vault.fee_amount) / E8S;
-      details = `Borrowed ${formatNumber(borrowed)} icUSD (fee: ${formatNumber(fee)})`;
+      details = `Borrowed ${formatStableTx(borrowed)} icUSD (fee: ${formatStableTx(fee)})`;
     }
     else if ('repay_to_vault' in event) {
       type = 'Repaid';
       icon = '✅';
       color = 'text-green-400';
-      details = `Repaid ${formatNumber(Number(event.repay_to_vault.repayed_amount) / E8S)} icUSD`;
+      details = `Repaid ${formatStableTx(Number(event.repay_to_vault.repayed_amount) / E8S)} icUSD`;
     }
     else if ('collateral_withdrawn' in event) {
       type = 'Collateral Withdrawn';
@@ -92,7 +92,7 @@
       color = 'text-orange-400';
       const e = event.partial_liquidate_vault;
       const payment = Number(e.liquidator_payment) / E8S;
-      details = `Partial liquidation: ${formatNumber(payment)} icUSD`;
+      details = `Partial liquidation: ${formatStableTx(payment)} icUSD`;
     }
     else if ('redistribute_vault' in event) {
       type = 'Redistributed';
@@ -111,7 +111,7 @@
       icon = '🧹';
       color = 'text-gray-400';
       const amt = Number(event.dust_forgiven.amount) / E8S;
-      details = `${formatNumber(amt)} icUSD dust forgiven`;
+      details = `${formatStableTx(amt)} icUSD dust forgiven`;
     }
     else if ('redemption_on_vaults' in event) {
       type = 'Redeemed';
@@ -119,7 +119,7 @@
       color = 'text-cyan-400';
       const amt = Number(event.redemption_on_vaults.icusd_amount) / E8S;
       const fee = Number(event.redemption_on_vaults.fee_amount) / E8S;
-      details = `${formatNumber(amt)} icUSD redeemed (fee: ${formatNumber(fee)})`;
+      details = `${formatStableTx(amt)} icUSD redeemed (fee: ${formatStableTx(fee)})`;
     }
 
     return { type, icon, color, details, index: idx };

@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { walletStore as wallet } from '../../stores/wallet';
   import { stabilityPoolService } from '../../services/stabilityPool';
-  import { formatNumber } from '../../utils/format';
+  import { formatNumber, formatStableDisplay, formatStableTx } from '../../utils/format';
   import { walletOperations } from '../../services/protocol/walletOperations';
   import type { StabilityPoolStatus, UserStabilityPosition } from '../../../../../declarations/stability_pool/stability_pool.did';
 
@@ -67,7 +67,7 @@
     }
 
     if (amount > icusdBalance) {
-      depositError = `Insufficient balance. Available: ${formatNumber(icusdBalance)} icUSD`;
+      depositError = `Insufficient balance. Available: ${formatStableTx(icusdBalance)} icUSD`;
       return;
     }
 
@@ -98,7 +98,7 @@
       // Now deposit
       const result = await stabilityPoolService.depositIcusd(amount);
       if (result.success) {
-        successMessage = `Successfully deposited ${formatNumber(amount)} icUSD to Stability Pool`;
+        successMessage = `Successfully deposited ${formatStableTx(amount)} icUSD to Stability Pool`;
         depositAmount = '';
         await loadData(); // Refresh data
       } else {
@@ -126,7 +126,7 @@
     }
 
     if (amount > availableAmount) {
-      withdrawError = `Insufficient deposit. Available: ${formatNumber(availableAmount)} icUSD`;
+      withdrawError = `Insufficient deposit. Available: ${formatStableTx(availableAmount)} icUSD`;
       return;
     }
 
@@ -137,7 +137,7 @@
     try {
       const result = await stabilityPoolService.withdrawIcusd(amount);
       if (result.success) {
-        successMessage = `Successfully withdrew ${formatNumber(amount)} icUSD from Stability Pool`;
+        successMessage = `Successfully withdrew ${formatStableTx(amount)} icUSD from Stability Pool`;
         withdrawAmount = '';
         await loadData(); // Refresh data
       } else {
@@ -237,7 +237,7 @@
         <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
           <div>
             <p class="text-gray-400">Total Deposits</p>
-            <p class="font-semibold text-lg">{formatNumber(Number(poolStatus.total_icusd_deposits) / 100_000_000)} icUSD</p>
+            <p class="font-semibold text-lg">{formatStableDisplay(Number(poolStatus.total_icusd_deposits) / 100_000_000)} icUSD</p>
           </div>
           <div>
             <p class="text-gray-400">Total Depositors</p>
@@ -262,7 +262,7 @@
         <div class="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm">
           <div>
             <p class="text-gray-400">Your Deposit</p>
-            <p class="font-semibold text-lg">{formatNumber(Number(userPosition.icusd_amount) / 100_000_000)} icUSD</p>
+            <p class="font-semibold text-lg">{formatStableDisplay(Number(userPosition.icusd_amount) / 100_000_000)} icUSD</p>
           </div>
           <div>
             <p class="text-gray-400">Pool Share</p>
@@ -301,7 +301,7 @@
               step="0.01"
             />
             <p class="text-xs text-gray-400 mt-1">
-              Available: {formatNumber(icusdBalance)} icUSD
+              Available: {formatStableDisplay(icusdBalance)} icUSD
             </p>
           </div>
 
@@ -346,7 +346,7 @@
               disabled={!hasDeposit}
             />
             <p class="text-xs text-gray-400 mt-1">
-              Available: {userPosition ? formatNumber(Number(userPosition.icusd_amount) / 100_000_000) : '0'} icUSD
+              Available: {userPosition ? formatStableDisplay(Number(userPosition.icusd_amount) / 100_000_000) : '0.0000'} icUSD
             </p>
           </div>
 

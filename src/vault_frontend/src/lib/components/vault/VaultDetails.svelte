@@ -1,6 +1,6 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
-  import { formatNumber } from '$lib/utils/format';
+  import { formatNumber, formatStableDisplay } from '$lib/utils/format';
   import { protocolService } from '$lib/services/protocol';
   import type { Vault } from '$lib/services/types';
   import { onMount, onDestroy } from 'svelte';
@@ -79,7 +79,7 @@
   // Format display values
   $: formattedCollateralValue = formatNumber(collateralValueUsd, 2);
   $: formattedMargin = currentVault ? formatNumber(currentVault.icpMargin) : '0';
-  $: formattedBorrowedAmount = currentVault ? formatNumber(currentVault.borrowedIcusd) : '0';
+  $: formattedBorrowedAmount = currentVault ? formatStableDisplay(currentVault.borrowedIcusd) : '0.0000';
   $: formattedCollateralRatio = collateralRatio === Infinity 
     ? "∞" 
     : `${(collateralRatio * 100).toFixed(1)}%`;
@@ -161,7 +161,7 @@
     }
     
     if (borrowAmount > maxBorrowable) {
-      errorMessage = `Maximum borrowable amount is ${maxBorrowable.toFixed(2)} icUSD`;
+      errorMessage = `Maximum borrowable amount is ${formatStableDisplay(maxBorrowable)} icUSD`;
       return;
     }
     
@@ -602,7 +602,7 @@
           class="w-full bg-gray-800 text-white p-2 rounded border border-gray-700"
         />
         <p class="text-xs text-gray-400 mt-1">
-          Max borrowable: {maxBorrowable.toFixed(2)} icUSD
+          Max borrowable: {formatStableDisplay(maxBorrowable)} icUSD
         </p>
       </div>
       <button 

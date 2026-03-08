@@ -8,6 +8,7 @@
     symbolForLedger,
     decimalsForLedger,
   } from '../../services/stabilityPoolService';
+  import { formatStableTokenDisplay } from '../../utils/format';
   import type { PoolStatus, UserPosition, CollateralInfo } from '../../services/stabilityPoolService';
 
   export let poolStatus: PoolStatus | null = null;
@@ -27,7 +28,7 @@
   $: registries = { stablecoins: stablecoinRegistry, collateral: collateralRegistry };
 
   $: userStables = userPosition?.stablecoin_balances ?? [];
-  $: totalUsdValue = userPosition ? formatE8s(userPosition.total_usd_value_e8s) : '0';
+  $: totalUsdValue = userPosition ? formatStableTokenDisplay(userPosition.total_usd_value_e8s, 8) : '0.0000';
   $: gains = userPosition?.collateral_gains ?? [];
   $: hasAnyGains = gains.some(([_, a]) => a > 0n);
   $: optedOut = new Set((userPosition?.opted_out_collateral ?? []).map(p => p.toText()));
@@ -114,7 +115,7 @@
         {#if amount > 0n}
           <div class="breakdown-row">
             <span class="br-symbol">{sym}</span>
-            <span class="br-amount">{formatTokenAmount(amount, dec)}</span>
+            <span class="br-amount">{formatStableTokenDisplay(amount, dec)}</span>
           </div>
         {/if}
       {/each}
@@ -129,7 +130,7 @@
         <div class="meta-item">
           <span class="meta-label">Interest Earned</span>
           <span class="meta-value interest-earned">
-            <span class="tv-dollar">$</span>{formatE8s((userPosition as any).total_interest_earned_e8s)}
+            <span class="tv-dollar">$</span>{formatStableTokenDisplay((userPosition as any).total_interest_earned_e8s, 8)}
           </span>
         </div>
       {/if}

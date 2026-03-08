@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { walletStore as wallet } from "$lib/stores/wallet";
   import { protocolService } from '$lib/services/protocol';
-  import { formatNumber } from '$lib/utils/format';
+  import { formatNumber, formatStableDisplay, formatStableTx } from '$lib/utils/format';
   import { tweened } from 'svelte/motion';
   import { cubicOut } from 'svelte/easing';
   import type { CandidVault } from '$lib/services/types';
@@ -137,7 +137,7 @@
 
   function setMax(vault: CandidVault) {
     const max = getMaxLiquidation(vault);
-    if (max > 0) liquidationAmounts[vault.vault_id] = max.toFixed(4);
+    if (max > 0) liquidationAmounts[vault.vault_id] = formatStableTx(max);
   }
 
   async function loadLiquidatableVaults() {
@@ -204,7 +204,7 @@
       // Balance check
       const bal = getActiveBalance(vault.vault_id);
       if (bal < inputAmount) {
-        liquidationError = `Insufficient ${token}. Need ${formatNumber(inputAmount)}, have ${formatNumber(bal)}.`;
+        liquidationError = `Insufficient ${token}. Need ${formatStableTx(inputAmount)}, have ${formatStableTx(bal)}.`;
         processingVaultId = null; return;
       }
 
@@ -234,7 +234,7 @@
 
       if (result.success) {
         const seizure = calculateSeizure(vault, inputAmount);
-        liquidationSuccess = `Liquidated vault #${vault.vault_id}. Paid ${formatNumber(inputAmount)} ${token}, received ${formatNumber(seizure.collateralSeized, 4)} ${seizure.symbol}.`;
+        liquidationSuccess = `Liquidated vault #${vault.vault_id}. Paid ${formatStableTx(inputAmount)} ${token}, received ${formatNumber(seizure.collateralSeized, 4)} ${seizure.symbol}.`;
         liquidationAmounts[vault.vault_id] = '';
         await loadLiquidatableVaults();
       } else {
@@ -344,7 +344,7 @@
                 </span>
               </div>
               <div class="left-stats">
-                <span class="stat"><span class="stat-label">Debt</span> <span class="stat-value">{formatNumber(debt, 2)} icUSD</span></span>
+                <span class="stat"><span class="stat-label">Debt</span> <span class="stat-value">{formatStableDisplay(debt)} icUSD</span></span>
                 <span class="stat-sep">·</span>
                 <span class="stat"><span class="stat-label">Collateral</span> <span class="stat-value">{formatNumber(ci.collateralAmount, 4)} {ci.symbol}</span></span>
               </div>

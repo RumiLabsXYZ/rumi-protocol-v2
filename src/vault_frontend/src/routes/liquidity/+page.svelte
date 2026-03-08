@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { walletStore as wallet } from '$lib/stores/wallet';
   import { protocolService } from '$lib/services/protocol';
-  import { formatNumber } from '$lib/utils/format';
+  import { formatNumber, formatStableDisplay, formatStableTx } from '$lib/utils/format';
   import ProtocolStats from '$lib/components/dashboard/ProtocolStats.svelte';
   
   // Component state
@@ -156,7 +156,7 @@
       const result = await protocolService.claimLiquidityReturns();
       
       if (result.success) {
-        successMessage = `Successfully claimed ${formatNumber(liquidityStatus.availableLiquidityReward)} icUSD rewards`;
+        successMessage = `Successfully claimed ${formatStableTx(liquidityStatus.availableLiquidityReward)} icUSD rewards`;
         // Refresh data
         await fetchData();
       } else {
@@ -236,8 +236,8 @@
                 {actionInProgress ? 'Processing...' : 'Claim Rewards'}
               </button>
             </div>
-            <div class="text-xl font-bold">{formatNumber(liquidityStatus.availableLiquidityReward)} icUSD</div>
-            <div class="text-sm text-gray-400">System-wide rewards available: {formatNumber(liquidityStatus.totalAvailableReturns)} icUSD</div>
+            <div class="text-xl font-bold">{formatStableDisplay(liquidityStatus.availableLiquidityReward)} icUSD</div>
+            <div class="text-sm text-gray-400">System-wide rewards available: {formatStableDisplay(liquidityStatus.totalAvailableReturns)} icUSD</div>
           </div>
         {/if}
       </div>

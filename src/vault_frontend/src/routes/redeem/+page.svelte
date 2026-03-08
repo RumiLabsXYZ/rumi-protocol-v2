@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { walletStore as wallet } from '$lib/stores/wallet';
   import { protocolService } from '$lib/services/protocol';
-  import { formatNumber } from '$lib/utils/format';
+  import { formatNumber, formatStableDisplay, formatStableTx } from '$lib/utils/format';
   import { CANISTER_IDS } from '$lib/config';
   import { TokenService } from '$lib/services/tokenService';
   import { Principal } from '@dfinity/principal';
@@ -169,13 +169,13 @@
         const result = await protocolService.redeemReserves(icusdAmount, preferredTokenPrincipal);
         if (result.success) {
           const stableReceived = (result.stableAmountSent || 0) / 1e6;
-          let msg = `Redeemed ${formatNumber(stableReceived, 2)} stablecoins`;
+          let msg = `Redeemed ${formatStableTx(stableReceived, 6)} stablecoins`;
           if (result.vaultSpillover && result.vaultSpillover > 0) {
             const spilloverIcusd = result.vaultSpillover / 1e8;
-            msg += ` + ${formatNumber(spilloverIcusd, 2)} icUSD redeemed from vaults (ICP)`;
+            msg += ` + ${formatStableTx(spilloverIcusd)} icUSD redeemed from vaults (ICP)`;
           }
           if (result.feePaid) {
-            msg += ` (fee: ${formatNumber(result.feePaid, 4)} icUSD)`;
+            msg += ` (fee: ${formatStableTx(result.feePaid)} icUSD)`;
           }
           successMessage = msg;
           icusdAmount = 0;
@@ -196,7 +196,7 @@
         if (result.success) {
           const icpEstimate = icusdAmount > 0 && icpPrice > 0
             ? (icusdAmount - icusdAmount * vaultRedemptionFee) / icpPrice : 0;
-          successMessage = `Redeemed ~${formatNumber(icpEstimate)} ICP for ${formatNumber(icusdAmount)} icUSD`;
+          successMessage = `Redeemed ~${formatNumber(icpEstimate)} ICP for ${formatStableTx(icusdAmount)} icUSD`;
           icusdAmount = 0;
           await wallet.refreshBalance();
         } else {
@@ -235,13 +235,13 @@
           <span class="reserve-label">Protocol Reserves</span>
           <div class="reserve-amounts">
             {#if ckusdtReserve > 0}
-              <span class="reserve-token">{formatNumber(ckusdtReserve / 1e6, 2)} ckUSDT</span>
+              <span class="reserve-token">{formatStableDisplay(ckusdtReserve / 1e6)} ckUSDT</span>
             {/if}
             {#if ckusdtReserve > 0 && ckusdcReserve > 0}
               <span class="reserve-sep">|</span>
             {/if}
             {#if ckusdcReserve > 0}
-              <span class="reserve-token">{formatNumber(ckusdcReserve / 1e6, 2)} ckUSDC</span>
+              <span class="reserve-token">{formatStableDisplay(ckusdcReserve / 1e6)} ckUSDC</span>
             {/if}
             <span class="reserve-sep">|</span>
             <span class="reserve-total">${formatNumber(totalReserveUsd, 2)} total</span>
@@ -279,7 +279,7 @@
                   on:click={() => icusdAmount = Math.max(0, icusdBalance - 0.001)}
                   disabled={actionInProgress}
                 >
-                  Max: {formatNumber(Math.max(0, icusdBalance - 0.001))}
+                  Max: {formatStableTx(Math.max(0, icusdBalance - 0.001))}
                 </button>
               </div>
             {/if}
@@ -312,12 +312,12 @@
               {#if hasReserves}
                 <div class="fee-row muted">
                   <span>Reserve fee ({(reserveRedemptionFee * 100).toFixed(1)}%):</span>
-                  <span>{formatNumber(reserveFeeAmount, 4)} icUSD</span>
+                  <span>{formatStableTx(reserveFeeAmount)} icUSD</span>
                 </div>
                 {#each reserveTokenBreakdown as token, i}
                   <div class="fee-row">
                     <span>From reserves{reserveTokenBreakdown.length > 1 ? ` (${i + 1}/${reserveTokenBreakdown.length})` : ''}:</span>
-                    <span class="value-highlight">~{formatNumber(token.amount, 2)} {token.symbol}</span>
+                    <span class="value-highlight">~{formatStableTx(token.amount, 6)} {token.symbol}</span>
                   </div>
                 {/each}
                 {#if hasVaultSpillover}
@@ -329,7 +329,7 @@
               {:else}
                 <div class="fee-row muted">
                   <span>Redemption fee ({(vaultRedemptionFee * 100).toFixed(2)}%):</span>
-                  <span>{formatNumber(icusdAmount * vaultRedemptionFee, 4)} icUSD</span>
+                  <span>{formatStableTx(icusdAmount * vaultRedemptionFee)} icUSD</span>
                 </div>
                 <div class="fee-row">
                   <span>You will receive:</span>

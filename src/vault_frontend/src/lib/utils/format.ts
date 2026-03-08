@@ -123,6 +123,88 @@ export function formatTokenBalance(value: number | string | undefined | null): s
   return fixed;
 }
 
+// ── Stablecoin formatters ──────────────────────────────────────────────
+// All stablecoin amounts (icUSD, ckUSDT, ckUSDC) use these functions.
+// They always floor (never round up) — critical for financial UX.
+
+function floorToDecimals(value: number, decimals: number): number {
+  const factor = Math.pow(10, decimals);
+  return Math.floor(value * factor) / factor;
+}
+
+/**
+ * Format a stablecoin amount for display contexts (balances, stats, dashboards).
+ * Always shows exactly 4 decimal places with trailing zeros, always floors.
+ * Example: 1.198 → "1.1980", 0.002 → "0.0020"
+ */
+export function formatStableDisplay(
+  value: number | string | undefined | null,
+): string {
+  if (value === undefined || value === null) return '0.0000';
+  const num = typeof value === 'string' ? parseFloat(value) : value;
+  if (isNaN(num)) return '0.0000';
+  const floored = floorToDecimals(num, 4);
+  return floored.toLocaleString('en-US', {
+    minimumFractionDigits: 4,
+    maximumFractionDigits: 4,
+    useGrouping: true,
+  });
+}
+
+/**
+ * Format a stablecoin amount for transactional contexts (fees, deposits,
+ * withdrawals, borrows, repays — anywhere real money moves).
+ * Shows up to maxDecimals (8 for icUSD, 6 for ckUSDT/ckUSDC).
+ * Always floors. Keeps at least 4 decimal places, trims trailing zeros beyond that.
+ *
+ * Examples (maxDecimals=8):
+ *   0.998      → "0.9980"
+ *   1.00234567 → "1.00234567"
+ *   0.002      → "0.0020"
+ */
+export function formatStableTx(
+  value: number | string | undefined | null,
+  maxDecimals: number = 8,
+): string {
+  if (value === undefined || value === null) return '0';
+  const num = typeof value === 'string' ? parseFloat(value) : value;
+  if (isNaN(num) || num === 0) return '0';
+
+  const floored = floorToDecimals(num, maxDecimals);
+  const fixed = floored.toFixed(maxDecimals);
+
+  const [intPart, fracPart] = fixed.split('.');
+  if (!fracPart) return intPart;
+
+  // Keep at least 4 decimal digits, trim zeros beyond that
+  const minKeep = Math.min(4, fracPart.length);
+  let trimmed = fracPart;
+  while (trimmed.length > minKeep && trimmed.endsWith('0')) {
+    trimmed = trimmed.slice(0, -1);
+  }
+
+  const formattedInt = parseInt(intPart).toLocaleString('en-US');
+  return `${formattedInt}.${trimmed}`;
+}
+
+/**
+ * Format a BigInt token amount for display context.
+ * Converts from raw units (e.g. e8s) to human-readable, then floors to 4 decimals.
+ */
+export function formatStableTokenDisplay(amount: bigint, decimals: number): string {
+  const value = Number(amount) / Math.pow(10, decimals);
+  return formatStableDisplay(value);
+}
+
+/**
+ * Format a BigInt token amount for transactional context.
+ * Converts from raw units, floors to native precision, keeps min 4 decimals.
+ */
+export function formatStableTokenTx(amount: bigint, decimals: number): string {
+  const value = Number(amount) / Math.pow(10, decimals);
+  return formatStableTx(value, decimals);
+}
+
 /**
  * Format a date
  */

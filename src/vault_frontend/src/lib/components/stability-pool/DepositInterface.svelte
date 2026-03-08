@@ -3,6 +3,7 @@
   import { Principal } from '@dfinity/principal';
   import { walletStore } from '../../stores/wallet';
   import { stabilityPoolService, formatTokenAmount, parseTokenAmount } from '../../services/stabilityPoolService';
+  import { formatStableTokenDisplay, formatStableTokenTx } from '../../utils/format';
   import type { PoolStatus, StablecoinConfig, UserPosition } from '../../services/stabilityPoolService';
   import { CANISTER_IDS } from '../../config';
 
@@ -50,8 +51,8 @@
   })();
 
   $: walletBalanceFormatted = selectedToken
-    ? formatTokenAmount(walletBalance, selectedToken.decimals)
-    : '0';
+    ? formatStableTokenDisplay(walletBalance, selectedToken.decimals)
+    : '0.0000';
 
   // User's deposited balance for the selected token
   $: depositedBalance = (() => {
@@ -63,8 +64,8 @@
   })();
 
   $: depositedFormatted = selectedToken
-    ? formatTokenAmount(depositedBalance, selectedToken.decimals)
-    : '0';
+    ? formatStableTokenDisplay(depositedBalance, selectedToken.decimals)
+    : '0.0000';
 
   function selectToken(index: number) {
     selectedTokenIndex = index;
@@ -90,10 +91,10 @@
       // Depositing costs 2 ledger fees: one for icrc2_approve, one for icrc2_transfer_from
       const totalFees = getLedgerFee(selectedToken) * 2n;
       const adjusted = walletBalance > totalFees ? walletBalance - totalFees : 0n;
-      amount = formatTokenAmount(adjusted, selectedToken.decimals, selectedToken.decimals);
+      amount = formatStableTokenTx(adjusted, selectedToken.decimals);
     } else {
       // Withdrawals: pool canister pays the transfer fee, user gets full amount
-      amount = formatTokenAmount(depositedBalance, selectedToken.decimals, selectedToken.decimals);
+      amount = formatStableTokenTx(depositedBalance, selectedToken.decimals);
     }
   }
 

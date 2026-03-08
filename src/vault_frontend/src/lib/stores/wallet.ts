@@ -57,7 +57,10 @@ async function fetchCollateralBalances(
   const results = await Promise.allSettled(
     nonIcp.map(async (c) => {
       const raw = await TokenService.getTokenBalance(c.ledgerCanisterId, ownerPrincipal);
-      const formatted = (Number(raw) / Math.pow(10, c.decimals)).toFixed(c.decimals > 6 ? 8 : 6);
+      const value = Number(raw) / Math.pow(10, c.decimals);
+      const displayDecimals = c.decimals > 6 ? 8 : 6;
+      const factor = Math.pow(10, displayDecimals);
+      const formatted = (Math.floor(value * factor) / factor).toFixed(displayDecimals);
       const price = collateralPrices[c.symbol] ?? c.price ?? 0;
       return { symbol: c.symbol, raw, formatted, usdValue: parseFloat(formatted) * price };
     })
@@ -192,7 +195,10 @@ function createWalletStore() {
         console.warn('Failed to fetch ckstable balances:', e);
       }
 
-      const formatStable6 = (raw: bigint) => (Number(raw) / 1_000_000).toFixed(6);
+      const formatStable6 = (raw: bigint) => {
+        const value = Number(raw) / 1_000_000;
+        return (Math.floor(value * 1_000_000) / 1_000_000).toFixed(6);
+      };
 
       // Fetch collateral token balances (ckBTC, ckXAUT, etc.)
       let collateralBalances: Record<string, TokenBalance> = {};
@@ -393,7 +399,10 @@ function createWalletStore() {
             TokenService.getTokenBalance(CONFIG.ckusdcLedgerId, principal).catch(() => 0n),
           ]);
           const icpPriceValue = protocolStatus?.lastIcpRate || 0;
-          const formatStable6 = (raw: bigint) => (Number(raw) / 1_000_000).toFixed(6);
+          const formatStable6 = (raw: bigint) => {
+        const value = Number(raw) / 1_000_000;
+        return (Math.floor(value * 1_000_000) / 1_000_000).toFixed(6);
+      };
 
           let icon = '';
           if (authState.walletType === WALLET_TYPES.INTERNET_IDENTITY) {
@@ -481,7 +490,10 @@ function createWalletStore() {
           TokenService.getTokenBalance(CONFIG.ckusdcLedgerId, ownerPrincipal).catch(() => 0n),
         ]);
         const icpPriceValue = protocolStatus?.lastIcpRate || 0;
-        const formatStable6 = (raw: bigint) => (Number(raw) / 1_000_000).toFixed(6);
+        const formatStable6 = (raw: bigint) => {
+        const value = Number(raw) / 1_000_000;
+        return (Math.floor(value * 1_000_000) / 1_000_000).toFixed(6);
+      };
 
         // Fetch collateral token balances (ckBTC, ckXAUT, etc.)
         let collateralBalances: Record<string, TokenBalance> = {};

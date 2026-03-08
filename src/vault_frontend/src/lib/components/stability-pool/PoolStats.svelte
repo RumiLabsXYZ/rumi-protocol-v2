@@ -2,11 +2,12 @@
   import type { PoolStatus } from '../../services/stabilityPoolService';
   import type { ProtocolStatusDTO } from '../../services/types';
   import { formatE8s, formatTokenAmount, symbolForLedger, decimalsForLedger } from '../../services/stabilityPoolService';
+  import { formatStableTokenDisplay } from '../../utils/format';
 
   export let poolStatus: PoolStatus | null = null;
   export let protocolStatus: ProtocolStatusDTO | null = null;
 
-  $: totalDepositsUsd = poolStatus ? formatE8s(poolStatus.total_deposits_e8s) : '0';
+  $: totalDepositsUsd = poolStatus ? formatStableTokenDisplay(poolStatus.total_deposits_e8s, 8) : '0.0000';
   $: depositorCount = poolStatus ? Number(poolStatus.total_depositors) : 0;
   $: liquidationCount = poolStatus ? Number(poolStatus.total_liquidations_executed) : 0;
 
@@ -74,7 +75,7 @@
       <div class="grid-data-row">
         <span class="grid-row-label"></span>
         {#each stablecoinBreakdown as [ledger, amount]}
-          <span class="grid-cell">{formatTokenAmount(amount, decimalsForLedger(ledger, getRegistries()))}</span>
+          <span class="grid-cell">{formatStableTokenDisplay(amount, decimalsForLedger(ledger, getRegistries()))}</span>
         {/each}
       </div>
     </div>

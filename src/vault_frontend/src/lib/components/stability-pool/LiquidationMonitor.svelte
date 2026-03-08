@@ -4,6 +4,7 @@
     symbolForLedger,
     decimalsForLedger,
   } from '../../services/stabilityPoolService';
+  import { formatStableTokenTx } from '../../utils/format';
   import type { PoolStatus, LiquidationRecord } from '../../services/stabilityPoolService';
 
   export let poolStatus: PoolStatus | null = null;
@@ -66,7 +67,7 @@
                   {@const stableSym = symbolForLedger(ledger, registries)}
                   {@const stableDec = decimalsForLedger(ledger, registries)}
                   <span class="consumed-chip">
-                    −{formatTokenAmount(amount, stableDec)} {stableSym}
+                    −{formatStableTokenTx(amount, stableDec)} {stableSym}
                   </span>
                 {/each}
                 <span class="item-depositors">{Number(record.depositors_count)} depositors</span>

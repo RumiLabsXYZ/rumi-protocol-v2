@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { formatNumber, formatTokenBalance } from '$lib/utils/format';
+  import { formatNumber, formatTokenBalance, formatStableDisplay } from '$lib/utils/format';
   import { protocolService } from '$lib/services/protocol';
   import { publicActor } from '$lib/services/protocol/apiClient';
   import { collateralStore } from '$lib/stores/collateralStore';
@@ -185,17 +185,17 @@
     </div>
     <div class="stat-row">
       <span class="stat-label">Total Borrowed</span>
-      <span class="stat-value">{formatNumber(status?.totalIcusdBorrowed || 0)} icUSD</span>
+      <span class="stat-value">{formatStableDisplay(status?.totalIcusdBorrowed || 0)} icUSD</span>
     </div>
     {#if ckusdtReserve > 0 || ckusdcReserve > 0}
       <div class="stat-row">
         <span class="stat-label">Reserves</span>
         <span class="stat-value-stack">
           {#if ckusdtReserve > 0}
-            <span>{formatNumber(ckusdtReserve, 2)} ckUSDT</span>
+            <span>{formatStableDisplay(ckusdtReserve)} ckUSDT</span>
           {/if}
           {#if ckusdcReserve > 0}
-            <span>{formatNumber(ckusdcReserve, 2)} ckUSDC</span>
+            <span>{formatStableDisplay(ckusdcReserve)} ckUSDC</span>
           {/if}
         </span>
       </div>

@@ -3,6 +3,7 @@
   import { ProtocolService } from '../../services/protocol';
   import { protocolManager } from '../../services/ProtocolManager';
   import { getMinimumCR, getLiquidationCR } from '$lib/protocol';
+  import { formatStableDisplay } from '$lib/utils/format';
 
 
   interface VaultResponse {
@@ -39,7 +40,7 @@
 
   // Handle slider changes
   function updateFromSlider() {
-    mintAmount = ((maxMintAmount * sliderValue) / 100).toFixed(2);
+    mintAmount = formatStableDisplay((maxMintAmount * sliderValue) / 100);
   }
 
   function updateFromInput() {
@@ -158,7 +159,7 @@
       </div>
       <div class="flex justify-between text-sm">
         <span class="text-gray-400">Maximum Mintable:</span>
-        <span>{maxMintAmount.toFixed(2)} icUSD</span>
+        <span>{formatStableDisplay(maxMintAmount)} icUSD</span>
       </div>
       <div class="flex justify-between text-sm">
         <span class="text-gray-400">Collateral Ratio:</span>

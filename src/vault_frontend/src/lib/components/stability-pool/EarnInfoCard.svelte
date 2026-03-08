@@ -8,6 +8,7 @@
     symbolForLedger,
     decimalsForLedger,
   } from '../../services/stabilityPoolService';
+  import { formatStableTokenDisplay } from '../../utils/format';
   import type { PoolStatus, UserPosition, CollateralInfo } from '../../services/stabilityPoolService';
   import type { ProtocolStatusDTO } from '../../services/types';
   import { CANISTER_IDS } from '../../config';
@@ -32,7 +33,7 @@
   $: registries = { stablecoins: stablecoinRegistry, collateral: collateralRegistry };
 
   // Pool stats
-  $: totalDepositsUsd = poolStatus ? formatE8s(poolStatus.total_deposits_e8s) : '0';
+  $: totalDepositsUsd = poolStatus ? formatStableTokenDisplay(poolStatus.total_deposits_e8s, 8) : '0.0000';
   $: depositorCount = poolStatus ? Number(poolStatus.total_depositors) : 0;
   $: stablecoinBreakdown = poolStatus?.stablecoin_balances ?? [];
 
@@ -50,7 +51,7 @@
 
   // User position data
   $: userStables = userPosition?.stablecoin_balances ?? [];
-  $: totalUsdValue = userPosition ? formatE8s(userPosition.total_usd_value_e8s) : '0';
+  $: totalUsdValue = userPosition ? formatStableTokenDisplay(userPosition.total_usd_value_e8s, 8) : '0.0000';
   $: gains = userPosition?.collateral_gains ?? [];
   $: hasAnyGains = gains.some(([_, a]) => a > 0n);
   $: optedOut = new Set((userPosition?.opted_out_collateral ?? []).map(p => p.toText()));
@@ -69,7 +70,7 @@
     if (!userPosition) return null;
     const earned = (userPosition as any).total_interest_earned_e8s;
     if (!earned || earned === 0n) return null;
-    return formatE8s(earned);
+    return formatStableTokenDisplay(earned, 8);
   })();
 
   // Stablecoin dot colors
@@ -165,7 +166,7 @@
         {#if amount > 0n}
           <div class="stat-row">
             <span class="stat-label">{sym}</span>
-            <span class="stat-value">{formatTokenAmount(amount, dec)}</span>
+            <span class="stat-value">{formatStableTokenDisplay(amount, dec)}</span>
           </div>
         {/if}
       {/each}
@@ -284,7 +285,7 @@
             {@const dec = decimalsForLedger(ledger, registries)}
             <span>
               <span class="collateral-dot" style="background:{getStablecoinColor(ledger)}"></span>
-              {formatTokenAmount(amount, dec)} {sym}
+              {formatStableTokenDisplay(amount, dec)} {sym}
             </span>
           {/each}
         </span>
