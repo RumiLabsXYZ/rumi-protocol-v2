@@ -4,10 +4,9 @@
   import { stabilityPoolService } from '../../lib/services/stabilityPoolService';
   import type { PoolStatus, UserPosition, LiquidationRecord } from '../../lib/services/stabilityPoolService';
   import { QueryOperations } from '../../lib/services/protocol/queryOperations';
-  import PoolStats from '../../lib/components/stability-pool/PoolStats.svelte';
   import DepositInterface from '../../lib/components/stability-pool/DepositInterface.svelte';
-  import UserAccount from '../../lib/components/stability-pool/UserAccount.svelte';
-  import LiquidationMonitor from '../../lib/components/stability-pool/LiquidationMonitor.svelte';
+  import EarnInfoCard from '../../lib/components/stability-pool/EarnInfoCard.svelte';
+  import LiquidationHistoryCard from '../../lib/components/stability-pool/LiquidationHistoryCard.svelte';
   import LoadingSpinner from '../../lib/components/common/LoadingSpinner.svelte';
 
   let loading = true;
@@ -19,6 +18,20 @@
 
   $: isConnected = $walletStore.isConnected;
   $: principal = $walletStore.principal;
+
+  // APR calculation for header badge
+  $: poolApr = (() => {
+    if (!protocolStatus || !poolStatus || poolStatus.total_deposits_e8s === 0n) return null;
+    const weightedRate = protocolStatus.weightedAverageInterestRate;
+    const poolShare = protocolStatus.interestPoolShare;
+    const totalDebt = protocolStatus.totalIcusdBorrowed;
+    const poolTvl = Number(poolStatus.total_deposits_e8s) / 1e8;
+    if (poolTvl === 0 || totalDebt === 0 || weightedRate === 0) return null;
+    const apr = (weightedRate * poolShare * totalDebt) / poolTvl;
+    return (apr * 100).toFixed(2);
+  })();
+
+  let showAprTooltip = false;
 
   async function loadAllData() {
     try {
@@ -72,10 +85,34 @@
   <title>Earn — Stability Pool | Rumi Protocol</title>
 </svelte:head>
 
-<div class="earn-page">
-  <!-- Page title -->
+<div class="page-container">
+  <!-- Page header with APR badge -->
   <div class="page-header">
-    <h1 class="page-title animate-title">Stability Pool</h1>
+    <h1 class="page-title">Stability Pool</h1>
+    {#if poolApr !== null}
+      <!-- svelte-ignore a11y-mouse-events-have-key-events -->
+      <div
+        class="apr-badge"
+        on:mouseover={() => { showAprTooltip = true; }}
+        on:mouseleave={() => { showAprTooltip = false; }}
+      >
+        <svg class="apr-arrow" width="10" height="10" viewBox="0 0 10 10" fill="none">
+          <path d="M5 8V2M5 2L2 5M5 2L8 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        {poolApr}% APR<span class="apr-asterisk">*</span>
+
+        {#if showAprTooltip}
+          <div class="apr-tooltip">
+            <div class="apr-tooltip-caret"></div>
+            <p><strong>Interest APR</strong> applies to <strong>icUSD</strong> deposits. icUSD depositors earn a share of all borrowing interest paid by vault owners.</p>
+            <div class="apr-tooltip-divider"></div>
+            <p><strong>ckUSDC</strong> and <strong>ckUSDT</strong> deposits don't earn interest but are used <em>first</em> for liquidations, giving priority access to discounted collateral.</p>
+            <div class="apr-tooltip-divider"></div>
+            <p>If no ckstables are in the pool, icUSD is also used for liquidations.</p>
+          </div>
+        {/if}
+      </div>
+    {/if}
   </div>
 
   {#if loading}
@@ -96,98 +133,35 @@
       <button class="btn-primary" on:click={loadAllData}>Try Again</button>
     </div>
   {:else}
-    <!-- Two-column layout: action panel + position -->
-    <div class="main-layout">
-      <section class="col-action" style="animation-delay: 0.05s">
+    <div class="page-layout">
+      <!-- LEFT: Info card (280px, sticky) -->
+      <div class="stats-column">
+        <EarnInfoCard {poolStatus} {userPosition} {protocolStatus} {isConnected} on:success={handleSuccess} />
+      </div>
+
+      <!-- RIGHT: Deposit tool + Liquidation history -->
+      <div class="action-column">
         <DepositInterface {poolStatus} {userPosition} on:success={handleSuccess} />
-        <div class="action-stats" style="animation-delay: 0.15s">
-          <PoolStats {poolStatus} {protocolStatus} />
-        </div>
-      </section>
-
-      <section class="col-position" style="animation-delay: 0.1s">
-        {#if isConnected && userPosition}
-          <UserAccount {poolStatus} {userPosition} on:success={handleSuccess} />
-        {:else if isConnected && !userPosition}
-          <div class="no-position-card">
-            <div class="np-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M12 2v20M2 12h20"/>
-              </svg>
-            </div>
-            <h3 class="np-title">No Position Yet</h3>
-            <p class="np-text">Deposit stablecoins to start earning collateral gains from liquidations</p>
-          </div>
-        {:else}
-          <div class="no-position-card">
-            <div class="np-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
-                <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
-              </svg>
-            </div>
-            <h3 class="np-title">Connect Wallet</h3>
-            <p class="np-text">Connect your wallet to view your position and manage deposits</p>
-          </div>
-        {/if}
-      </section>
-    </div>
-
-    <!-- Liquidation history feed -->
-    <section class="section-feed" style="animation-delay: 0.2s">
-      <LiquidationMonitor {poolStatus} {liquidationHistory} />
-    </section>
-
-    <!-- How it works explainer -->
-    <section class="how-it-works" style="animation-delay: 0.25s">
-      <h3 class="hiw-title">How the Stability Pool Works</h3>
-      <div class="hiw-grid">
-        <div class="hiw-step">
-          <div class="hiw-number">1</div>
-          <div class="hiw-content">
-            <h4>Deposit Stablecoins</h4>
-            <p>Deposit icUSD, ckUSDT, or ckUSDC into the pool. Higher-priority tokens (ckstables) are consumed first during liquidations.</p>
-          </div>
-        </div>
-        <div class="hiw-step">
-          <div class="hiw-number">2</div>
-          <div class="hiw-content">
-            <h4>Absorb Liquidations</h4>
-            <p>When undercollateralized vaults are liquidated, the pool's stablecoins are used to cover debt. Your balance is proportionally reduced.</p>
-          </div>
-        </div>
-        <div class="hiw-step">
-          <div class="hiw-number">3</div>
-          <div class="hiw-content">
-            <h4>Earn Collateral</h4>
-            <p>In return, you receive the liquidated collateral (ICP, ckBTC, ckXAUT, ckETH) at a discount — your net position increases in value.</p>
-          </div>
+        <div class="liq-section">
+          <LiquidationHistoryCard {poolStatus} {liquidationHistory} />
         </div>
       </div>
-    </section>
+    </div>
   {/if}
 </div>
 
 <style>
-  .earn-page {
-    max-width: 820px;
-    margin: 0 auto;
-    padding-bottom: 4rem;
-  }
+  .page-container { max-width: 820px; margin: 0 auto; padding-bottom: 4rem; }
 
   /* ── Page header ── */
   .page-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
     margin-bottom: 1.75rem;
     animation: fadeSlideIn 0.5s ease-out both;
-  }
-
-  /* ── Sections with staggered entrance ── */
-  .col-action,
-  .col-position,
-  .section-feed,
-  .how-it-works,
-  .action-stats {
-    animation: fadeSlideIn 0.5s ease-out both;
+    position: relative;
+    z-index: 10;
   }
 
   @keyframes fadeSlideIn {
@@ -195,114 +169,105 @@
     to { opacity: 1; transform: translateY(0); }
   }
 
-  .action-stats {
-    margin-top: 1rem;
+  /* ── APR badge ── */
+  .apr-badge {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3125rem;
+    padding: 0.25rem 0.75rem;
+    background: rgba(74, 222, 128, 0.1);
+    border: 1px solid rgba(74, 222, 128, 0.3);
+    border-radius: 1.25rem;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: #4ade80;
+    cursor: default;
+    white-space: nowrap;
   }
 
-  /* ── Two-column layout ── */
-  .main-layout {
+  .apr-arrow { color: #4ade80; flex-shrink: 0; }
+
+  .apr-asterisk {
+    font-size: 0.625rem;
+    opacity: 0.6;
+    margin-left: -0.125rem;
+    vertical-align: super;
+  }
+
+  /* ── APR tooltip ── */
+  .apr-tooltip {
+    position: absolute;
+    top: calc(100% + 0.625rem);
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 50;
+    width: 17rem;
+    padding: 0.75rem 0.875rem;
+    background: #1e293b;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 0.5rem;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    font-size: 0.6875rem;
+    font-weight: 400;
+    line-height: 1.5;
+    color: #94a3b8;
+    cursor: default;
+    white-space: normal;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    animation: tooltipFade 0.15s ease-out;
+  }
+
+  @keyframes tooltipFade {
+    from { opacity: 0; transform: translateX(-50%) translateY(4px); }
+    to { opacity: 1; transform: translateX(-50%) translateY(0); }
+  }
+
+  .apr-tooltip-caret {
+    position: absolute;
+    top: -5px;
+    left: 50%;
+    transform: translateX(-50%) rotate(45deg);
+    width: 10px;
+    height: 10px;
+    background: #1e293b;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    border-left: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .apr-tooltip p { margin: 0; }
+  .apr-tooltip strong { color: #cbd5e1; font-weight: 600; }
+  .apr-tooltip em { font-style: italic; }
+
+  .apr-tooltip-divider {
+    height: 1px;
+    background: rgba(255, 255, 255, 0.06);
+    margin: 0.5rem 0;
+  }
+
+  /* ── Two-column layout (matches Borrow page exactly) ── */
+  .page-layout {
     display: grid;
-    grid-template-columns: 1fr 340px;
+    grid-template-columns: 280px 1fr;
     gap: 1.5rem;
     align-items: start;
-    margin-bottom: 1.5rem;
+    animation: fadeSlideIn 0.5s ease-out 0.05s both;
   }
 
-  /* ── No position placeholder ── */
-  .no-position-card {
-    background: var(--rumi-bg-surface1);
-    border: 1px solid var(--rumi-border);
-    border-radius: 0.75rem;
-    padding: 2.5rem 1.5rem;
-    text-align: center;
-    box-shadow: inset 0 1px 0 0 rgba(200, 210, 240, 0.03), 0 2px 8px -2px rgba(8, 11, 22, 0.6);
-  }
+  .stats-column { position: sticky; top: 5rem; }
 
-  .np-icon {
-    width: 2.5rem;
-    height: 2.5rem;
-    margin: 0 auto 1rem;
-    color: var(--rumi-text-muted);
-    opacity: 0.5;
-  }
-
-  .np-title {
-    font-family: 'Circular Std', 'Inter', sans-serif;
-    font-size: 1rem;
-    font-weight: 600;
-    color: var(--rumi-text-primary);
-    margin-bottom: 0.5rem;
-  }
-
-  .np-text {
-    font-size: 0.8125rem;
-    color: var(--rumi-text-secondary);
-    line-height: 1.5;
-    max-width: 260px;
-    margin: 0 auto;
-  }
-
-  /* ── Liquidation feed section ── */
-  .section-feed {
-    margin-bottom: 1.5rem;
-  }
-
-  /* ── How it works ── */
-  .how-it-works {
-    background: var(--rumi-bg-surface1);
-    border: 1px solid var(--rumi-border);
-    border-radius: 0.75rem;
-    padding: 1.5rem;
-    box-shadow: inset 0 1px 0 0 rgba(200, 210, 240, 0.03);
-  }
-
-  .hiw-title {
-    font-family: 'Circular Std', 'Inter', sans-serif;
-    font-size: 1rem;
-    font-weight: 600;
-    color: var(--rumi-purple-accent);
-    margin-bottom: 1.25rem;
-  }
-
-  .hiw-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 1.5rem;
-  }
-
-  .hiw-step {
+  .action-column {
+    min-width: 0;
     display: flex;
-    gap: 0.75rem;
-  }
-
-  .hiw-number {
-    width: 1.75rem;
-    height: 1.75rem;
-    display: flex;
+    flex-direction: column;
     align-items: center;
-    justify-content: center;
-    background: var(--rumi-teal-dim);
-    border: 1px solid var(--rumi-border-teal);
-    border-radius: 50%;
-    font-size: 0.75rem;
-    font-weight: 700;
-    color: var(--rumi-teal);
-    flex-shrink: 0;
+    gap: 1rem;
   }
 
-  .hiw-content h4 {
-    font-family: 'Circular Std', 'Inter', sans-serif;
-    font-size: 0.8125rem;
-    font-weight: 600;
-    color: var(--rumi-text-primary);
-    margin-bottom: 0.375rem;
-  }
-
-  .hiw-content p {
-    font-size: 0.75rem;
-    color: var(--rumi-text-secondary);
-    line-height: 1.5;
-  }
+  /* Constrain cards in right column to match Borrow page */
+  .action-column > :global(*) { width: 100%; max-width: 420px; }
+  .liq-section { width: 100%; max-width: 420px; }
 
   /* ── Loading & error states ── */
   .loading-state {
@@ -337,21 +302,31 @@
   }
 
   /* ── Responsive ── */
-  @media (max-width: 700px) {
-    .main-layout {
-      grid-template-columns: 1fr;
-    }
-
-    .hiw-grid {
-      grid-template-columns: 1fr;
-      gap: 1rem;
-    }
+  @media (max-width: 768px) {
+    .page-layout { grid-template-columns: 1fr; }
+    .stats-column { position: static; order: 2; }
+    .action-column { order: 1; }
   }
 
   @media (max-width: 520px) {
-    .earn-page {
+    .page-container {
       padding-left: 0.5rem;
       padding-right: 0.5rem;
+    }
+
+    .page-header {
+      flex-wrap: wrap;
+    }
+
+    .apr-tooltip {
+      left: 0;
+      transform: none;
+      width: calc(100vw - 2rem);
+    }
+
+    .apr-tooltip-caret {
+      left: 2rem;
+      transform: rotate(45deg);
     }
   }
 </style>

@@ -226,6 +226,16 @@
       {/if}
     </button>
 
+    <!-- Docs link -->
+    <a href="/docs#stability-pool" class="docs-link">
+      <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="8" cy="8" r="7"/>
+        <path d="M8 7v4"/>
+        <circle cx="8" cy="5" r="0.75" fill="currentColor" stroke="none"/>
+      </svg>
+      How does the stability pool work?
+    </a>
+
     {#if error}
       <div class="error-bar">
         <svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14">
@@ -527,6 +537,22 @@
   }
 
   @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Docs link ── */
+  .docs-link {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.375rem;
+    margin-top: 0.75rem;
+    font-size: 0.75rem;
+    color: var(--rumi-text-muted);
+    text-decoration: none;
+    transition: color 0.15s ease;
+  }
+  .docs-link:hover {
+    color: var(--rumi-text-secondary);
+  }
 
   /* ── Error ── */
   .error-bar {
