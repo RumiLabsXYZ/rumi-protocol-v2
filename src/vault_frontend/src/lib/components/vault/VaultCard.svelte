@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { formatNumber, formatTokenBalance } from '../../utils/format';
+  import { formatNumber, formatTokenBalance, formatStableDisplay, formatStableTx } from '../../utils/format';
   import type { Vault } from '../../services/types';
   import { protocolService } from '../../services/protocol';
   import { vaultStore } from '../../stores/vaultStore';
   import { protocolManager } from '../../services/ProtocolManager';
   import { CONFIG, CANISTER_IDS } from '../../config';
-  import { createEventDispatcher, onDestroy } from 'svelte';
+  import { createEventDispatcher, onDestroy, onMount } from 'svelte';
+  import { interpolateMultiplier } from '../../utils/interpolate';
   import { walletStore } from '../../stores/wallet';
   import { MINIMUM_CR, LIQUIDATION_CR, E8S, getMinimumCR, getLiquidationCR } from '$lib/protocol';
   import { collateralStore } from '../../stores/collateralStore';
@@ -201,10 +202,21 @@
   }, 1000);
   onDestroy(() => clearInterval(tickInterval));
 
+  // ── Borrowing fee curve for dynamic multiplier ──
+  let borrowingFeeCurve: [number, number][] = [];
+  onMount(async () => {
+    try {
+      const status = await protocolService.getProtocolStatus();
+      borrowingFeeCurve = status.borrowingFeeCurveResolved ?? [];
+    } catch (e) {
+      console.error('Failed to fetch protocol status for fee curve:', e);
+    }
+  });
+
   $: fmtMargin = formatTokenBalance(vaultCollateralAmount);
   $: fmtCollateralUsd = formatNumber(collateralValueUsd, 2);
-  $: fmtBorrowed = formatNumber(tickingDebt, 2);
-  $: fmtBorrowedUsd = formatNumber(tickingDebt, 2);
+  $: fmtBorrowed = formatStableDisplay(tickingDebt);
+  $: fmtBorrowedUsd = formatStableDisplay(tickingDebt);
   $: fmtRatio = collateralRatio === Infinity ? '—' : `${(collateralRatio * 100).toFixed(1)}%`;
   $: riskTooltip = riskLevel === 'warning'
     ? 'Approaching minimum collateral ratio'
@@ -368,6 +380,21 @@
     const v = parseFloat(borrowAmount);
     return v > 0 && maxBorrowable > 0 && v > maxBorrowable;
   })();
+  // ── Borrow fee breakdown ──
+  $: vaultBorrowingFee = vaultCollateralInfo?.borrowingFee ?? 0;
+  $: parsedBorrowAmount = parseFloat(borrowAmount) || 0;
+  $: projectedBorrowCr = (() => {
+    if (parsedBorrowAmount <= 0 || collateralValueUsd <= 0) return Infinity;
+    const newDebt = tickingDebt + parsedBorrowAmount;
+    return newDebt > 0 ? collateralValueUsd / newDebt : Infinity;
+  })();
+  $: borrowFeeMultiplier = borrowingFeeCurve.length > 0
+    ? interpolateMultiplier(borrowingFeeCurve, projectedBorrowCr)
+    : 1;
+  $: effectiveBorrowFeeRate = vaultBorrowingFee * borrowFeeMultiplier;
+  $: borrowFeeAmount = parsedBorrowAmount * effectiveBorrowFeeRate;
+  $: borrowReceiveAmount = parsedBorrowAmount - borrowFeeAmount;
+
   $: repayOverMax = (() => {
     const v = parseFloat(repayAmount);
     return v > 0 && maxRepayable > 0 && v > maxRepayable;
@@ -404,7 +431,7 @@
     if (maxWithdrawable > 0) withdrawAmount = floorTo(maxWithdrawable, collateralFloorDigits);
   }
   function setMaxBorrow() {
-    if (maxBorrowable > 0) borrowAmount = floorTo(maxBorrowable, 2);
+    if (maxBorrowable > 0) borrowAmount = floorTo(maxBorrowable, 4);
   }
   function setMaxRepay() {
     if (maxRepayable > 0) repayAmount = floorTo(maxRepayable, 4);
@@ -438,7 +465,7 @@
     };
     if (activeAction === 'borrow') return {
       label1: 'Debt', value1: `${fmtBorrowed} icUSD`,
-      label2: 'Available', value2: `${formatNumber(maxBorrowable, 2)} icUSD`,
+      label2: 'Available', value2: `${formatStableDisplay(maxBorrowable)} icUSD`,
     };
     if (activeAction === 'repay') return {
       label1: 'Debt', value1: `${fmtBorrowed} icUSD`,
@@ -506,7 +533,7 @@
     const amount = parseFloat(borrowAmount);
     if (!amount || amount <= 0) { toastStore.error('Enter a valid icUSD amount', 8000); return; }
     if (amount < MIN_ICUSD) { toastStore.error(`Minimum borrow amount is ${MIN_ICUSD} icUSD`, 8000); return; }
-    if (borrowOverMax || borrowCrInvalid) { toastStore.error(`Max: ${formatNumber(maxBorrowable, 2)} icUSD`, 8000); return; }
+    if (borrowOverMax || borrowCrInvalid) { toastStore.error(`Max: ${formatStableDisplay(maxBorrowable)} icUSD`, 8000); return; }
     clearMessages(); isProcessing = true;
     try {
       const result = await protocolService.borrowFromVault(vault.vaultId, amount);
@@ -658,7 +685,7 @@
               {#if vault.accruedInterest > 0}
                 <div class="stat-row">
                   <span class="stat-label">Accumulated</span>
-                  <span class="stat-value">{formatNumber(vault.accruedInterest / 1e8, 4)} icUSD</span>
+                  <span class="stat-value">{formatStableDisplay(vault.accruedInterest / 1e8)} icUSD</span>
                 </div>
               {/if}
             {/if}
@@ -771,7 +798,7 @@
               <div class="input-header">
                 <span class="input-label">Borrow icUSD</span>
                 {#if maxBorrowable > 0}
-                  <button class="max-text" on:click={setMaxBorrow}>Max: {floorTo(maxBorrowable, 2)}</button>
+                  <button class="max-text" on:click={setMaxBorrow}>Max: {floorTo(maxBorrowable, 4)}</button>
                 {/if}
               </div>
               <div class="action-input-row">
@@ -780,6 +807,12 @@
                   placeholder="0.00" min="0.1" step="0.1" disabled={isProcessing} />
                 <span class="input-suffix">icUSD</span>
               </div>
+              {#if parsedBorrowAmount > 0 && vaultBorrowingFee > 0}
+                <div class="fee-breakdown">
+                  <div class="fee-row"><span>Fee ({(effectiveBorrowFeeRate * 100).toFixed(2)}%{borrowFeeMultiplier > 1.01 ? ` · ${borrowFeeMultiplier.toFixed(2)}x` : ''})</span><span>{formatStableTx(borrowFeeAmount)} icUSD</span></div>
+                  <div class="fee-row"><span>You receive</span><span>{formatStableTx(borrowReceiveAmount)} icUSD</span></div>
+                </div>
+              {/if}
               <div class="input-submit-row">
                 <button class="btn-submit btn-submit-debt" on:click={handleBorrow}
                   disabled={isProcessing || !borrowAmount || borrowCrInvalid || borrowOverMax}>
@@ -1130,6 +1163,16 @@
   .action-input::-webkit-outer-spin-button,
   .action-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
   .action-input[type=number] { -moz-appearance: textfield; appearance: textfield; }
+
+  /* Fee breakdown */
+  .fee-breakdown {
+    display: flex; flex-direction: column; gap: 0.125rem;
+    margin-top: 0.25rem;
+  }
+  .fee-row {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 0.6875rem; color: var(--rumi-text-muted);
+  }
 
   @media (max-width: 640px) {
     .vault-row { grid-template-columns: 3rem 1fr 1fr 2rem; gap: 0.5rem; }
