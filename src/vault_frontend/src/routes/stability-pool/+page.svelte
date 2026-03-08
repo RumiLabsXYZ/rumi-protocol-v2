@@ -1,20 +1,33 @@
+<script lang="ts" context="module">
+  // Module-level cache survives component unmount/remount (SPA navigation).
+  // This gives us stale-while-revalidate: show cached data instantly, refresh in background.
+  import type { PoolStatus, UserPosition, LiquidationRecord } from '../../lib/services/stabilityPoolService';
+
+  let _poolStatus: PoolStatus | null = null;
+  let _protocolStatus: any = null;
+  let _userPosition: UserPosition | null = null;
+  let _liquidationHistory: LiquidationRecord[] = [];
+  let _cachedForPrincipal: string | null = null;
+</script>
+
 <script lang="ts">
   import { onMount } from 'svelte';
   import { walletStore } from '../../lib/stores/wallet';
   import { stabilityPoolService } from '../../lib/services/stabilityPoolService';
-  import type { PoolStatus, UserPosition, LiquidationRecord } from '../../lib/services/stabilityPoolService';
   import { QueryOperations } from '../../lib/services/protocol/queryOperations';
   import DepositInterface from '../../lib/components/stability-pool/DepositInterface.svelte';
   import EarnInfoCard from '../../lib/components/stability-pool/EarnInfoCard.svelte';
   import LiquidationHistoryCard from '../../lib/components/stability-pool/LiquidationHistoryCard.svelte';
   import LoadingSpinner from '../../lib/components/common/LoadingSpinner.svelte';
 
-  let loading = true;
+  // Initialize from cache — if we have data, show it immediately (no spinner)
+  let hasCachedData = _poolStatus !== null;
+  let loading = !hasCachedData;
   let error = '';
-  let poolStatus: PoolStatus | null = null;
-  let protocolStatus: any = null;
-  let userPosition: UserPosition | null = null;
-  let liquidationHistory: LiquidationRecord[] = [];
+  let poolStatus: PoolStatus | null = _poolStatus;
+  let protocolStatus: any = _protocolStatus;
+  let userPosition: UserPosition | null = _userPosition;
+  let liquidationHistory: LiquidationRecord[] = _liquidationHistory;
 
   $: isConnected = $walletStore.isConnected;
   $: principal = $walletStore.principal;
@@ -35,7 +48,10 @@
 
   async function loadAllData() {
     try {
-      loading = true;
+      // Only show spinner if we have no cached data at all
+      if (!hasCachedData) {
+        loading = true;
+      }
       error = '';
 
       // Always load pool status and protocol status (public queries)
@@ -46,6 +62,10 @@
       poolStatus = pool;
       protocolStatus = proto;
 
+      // Update module-level cache
+      _poolStatus = pool;
+      _protocolStatus = proto;
+
       // Load user-specific data if connected
       if (isConnected && principal) {
         const [position, history] = await Promise.all([
@@ -54,13 +74,26 @@
         ]);
         userPosition = position;
         liquidationHistory = history;
+
+        // Update module-level cache
+        _userPosition = position;
+        _liquidationHistory = history;
+        _cachedForPrincipal = principal.toString();
       } else {
         userPosition = null;
         liquidationHistory = [];
+        _userPosition = null;
+        _liquidationHistory = [];
+        _cachedForPrincipal = null;
       }
+
+      hasCachedData = true;
     } catch (err: any) {
       console.error('Failed to load stability pool data:', err);
-      error = err.message || 'Failed to load stability pool data';
+      // Only show error if we have no cached data to fall back on
+      if (!hasCachedData) {
+        error = err.message || 'Failed to load stability pool data';
+      }
     } finally {
       loading = false;
     }
@@ -70,6 +103,14 @@
   let previousConnected = false;
   $: if (isConnected !== previousConnected) {
     previousConnected = isConnected;
+    // Clear user-specific cache on wallet change
+    if (!isConnected || principal?.toString() !== _cachedForPrincipal) {
+      _userPosition = null;
+      _liquidationHistory = [];
+      _cachedForPrincipal = null;
+      userPosition = null;
+      liquidationHistory = [];
+    }
     loadAllData();
   }
 
