@@ -37,8 +37,10 @@ pub struct StabilityPoolState {
     /// Per-token consecutive approve/liquidation failure counter for circuit breaker.
     /// When a token hits MAX_CONSECUTIVE_FAILURES, it is auto-suspended from liquidations
     /// until an admin calls `admin_reset_token_failures`.
+    /// `Option` wrapping is required for Candid backward-compatible stable memory upgrades
+    /// (Candid `Decode!` needs `opt` for new fields, unlike serde's `#[serde(default)]`).
     #[serde(default)]
-    pub token_consecutive_failures: BTreeMap<Principal, u32>,
+    pub token_consecutive_failures: Option<BTreeMap<Principal, u32>>,
     pub is_initialized: bool,
 }
 
@@ -61,7 +63,7 @@ impl Default for StabilityPoolState {
             total_liquidations_executed: 0,
             pool_creation_timestamp: 0,
             total_interest_received_e8s: Some(0),
-            token_consecutive_failures: BTreeMap::new(),
+            token_consecutive_failures: Some(BTreeMap::new()),
             is_initialized: false,
         }
     }
@@ -579,7 +581,8 @@ impl StabilityPoolState {
     /// Returns true if the token has been auto-suspended due to repeated failures.
     pub fn is_token_suspended(&self, token_ledger: &Principal) -> bool {
         self.token_consecutive_failures
-            .get(token_ledger)
+            .as_ref()
+            .and_then(|m| m.get(token_ledger))
             .map(|&count| count >= Self::MAX_CONSECUTIVE_FAILURES)
             .unwrap_or(false)
     }
@@ -587,29 +590,37 @@ impl StabilityPoolState {
     /// Increment the consecutive failure counter for a token.
     /// Returns the new count.
     pub fn record_token_failure(&mut self, token_ledger: Principal) -> u32 {
-        let count = self.token_consecutive_failures.entry(token_ledger).or_insert(0);
+        let map = self.token_consecutive_failures.get_or_insert_with(BTreeMap::new);
+        let count = map.entry(token_ledger).or_insert(0);
         *count += 1;
         *count
     }
 
     /// Reset the consecutive failure counter on success.
     pub fn reset_token_failures(&mut self, token_ledger: &Principal) {
-        self.token_consecutive_failures.remove(token_ledger);
+        if let Some(map) = self.token_consecutive_failures.as_mut() {
+            map.remove(token_ledger);
+        }
     }
 
     /// Admin: reset the failure counter for a suspended token, re-enabling it.
     /// Returns the previous failure count.
     pub fn admin_reset_token_failures(&mut self, token_ledger: &Principal) -> u32 {
-        self.token_consecutive_failures.remove(token_ledger).unwrap_or(0)
+        self.token_consecutive_failures
+            .as_mut()
+            .and_then(|m| m.remove(token_ledger))
+            .unwrap_or(0)
     }
 
     /// Return all tokens that are currently auto-suspended.
     pub fn get_suspended_tokens(&self) -> Vec<(Principal, u32)> {
         self.token_consecutive_failures
-            .iter()
-            .filter(|(_, &count)| count >= Self::MAX_CONSECUTIVE_FAILURES)
-            .map(|(p, &c)| (*p, c))
-            .collect()
+            .as_ref()
+            .map(|m| m.iter()
+                .filter(|(_, &count)| count >= Self::MAX_CONSECUTIVE_FAILURES)
+                .map(|(p, &c)| (*p, c))
+                .collect())
+            .unwrap_or_default()
     }
 
     // ─── State Validation ───
