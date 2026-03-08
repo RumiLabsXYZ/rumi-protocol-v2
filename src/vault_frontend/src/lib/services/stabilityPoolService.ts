@@ -35,6 +35,7 @@ export interface PoolStatus {
   stablecoin_registry: StablecoinConfig[];
   collateral_registry: CollateralInfo[];
   emergency_paused: boolean;
+  eligible_icusd_per_collateral: Array<[Principal, bigint]>;
 }
 
 export interface UserPosition {

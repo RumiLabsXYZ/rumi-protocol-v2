@@ -19,7 +19,6 @@
   import EarnInfoCard from '../../lib/components/stability-pool/EarnInfoCard.svelte';
   import LiquidationHistoryCard from '../../lib/components/stability-pool/LiquidationHistoryCard.svelte';
   import LoadingSpinner from '../../lib/components/common/LoadingSpinner.svelte';
-  import { CANISTER_IDS } from '../../lib/config';
 
   // Initialize from cache — if we have data, show it immediately (no spinner)
   let hasCachedData = _poolStatus !== null;
@@ -33,18 +32,27 @@
   $: isConnected = $walletStore.isConnected;
   $: principal = $walletStore.principal;
 
-  // APR calculation for header badge — uses icUSD-only TVL as denominator
-  // because ckUSDC/ckUSDT depositors don't earn interest.
+  // APR calculation for header badge — per-collateral formula.
+  // Pool APR = sum over all collateral types C of:
+  //   rate_C * poolShare * debt_C / eligible_icusd_C
   $: poolApr = (() => {
     if (!protocolStatus || !poolStatus) return null;
-    const weightedRate = protocolStatus.weightedAverageInterestRate;
     const poolShare = protocolStatus.interestPoolShare;
-    const totalDebt = protocolStatus.totalIcusdBorrowed;
-    const icusdEntry = poolStatus.stablecoin_balances.find(([l]: [any, bigint]) => l.toText() === CANISTER_IDS.ICUSD_LEDGER);
-    const icusdTvl = icusdEntry ? Number(icusdEntry[1]) / 1e8 : 0;
-    if (icusdTvl === 0 || totalDebt === 0 || weightedRate === 0) return null;
-    const apr = (weightedRate * poolShare * totalDebt) / icusdTvl;
-    return (apr * 100).toFixed(2);
+    const perC = protocolStatus.perCollateralInterest;
+    if (!perC || perC.length === 0) return null;
+
+    const eligibleMap = new Map<string, number>(
+      (poolStatus.eligible_icusd_per_collateral ?? []).map(([p, v]: [any, bigint]) => [p.toText(), Number(v) / 1e8])
+    );
+
+    let totalApr = 0;
+    for (const info of perC) {
+      const eligible = eligibleMap.get(info.collateralType) ?? 0;
+      if (eligible === 0 || info.totalDebtE8s === 0 || info.weightedInterestRate === 0) continue;
+      totalApr += (info.weightedInterestRate * poolShare * info.totalDebtE8s) / eligible;
+    }
+    if (totalApr === 0) return null;
+    return (totalApr * 100).toFixed(2);
   })();
 
   let showAprTooltip = false;

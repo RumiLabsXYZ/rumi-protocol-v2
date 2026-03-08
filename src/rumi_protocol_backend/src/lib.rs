@@ -119,6 +119,15 @@ pub struct ProtocolStatus {
     pub interest_pool_share: f64,
     pub weighted_average_interest_rate: f64,
     pub borrowing_fee_curve_resolved: Vec<(f64, f64)>,
+    pub per_collateral_interest: Vec<CollateralInterestInfo>,
+}
+
+/// Per-collateral debt and weighted interest rate for APR calculations.
+#[derive(CandidType, Deserialize, Debug)]
+pub struct CollateralInterestInfo {
+    pub collateral_type: Principal,
+    pub total_debt_e8s: u64,
+    pub weighted_interest_rate: f64,
 }
 
 #[derive(CandidType, Deserialize, Debug)]

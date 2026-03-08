@@ -483,7 +483,37 @@ impl StabilityPoolState {
             collateral_registry: self.collateral_registry.values().cloned().collect(),
             emergency_paused: self.configuration.emergency_pause,
             total_interest_received_e8s: self.total_interest_received_e8s.unwrap_or(0),
+            eligible_icusd_per_collateral: self.eligible_icusd_per_collateral(),
         }
+    }
+
+    /// For each collateral type, compute the total icUSD balance held by
+    /// depositors who are opted in to that collateral type.
+    /// Only counts tokens with symbol "icUSD" (interest-earning stablecoin).
+    fn eligible_icusd_per_collateral(&self) -> Vec<(Principal, u64)> {
+        // Find the icUSD ledger(s) in the stablecoin registry
+        let icusd_ledgers: Vec<(Principal, u8)> = self.stablecoin_registry.iter()
+            .filter(|(_, config)| config.symbol == "icUSD")
+            .map(|(ledger, config)| (*ledger, config.decimals))
+            .collect();
+
+        if icusd_ledgers.is_empty() {
+            return Vec::new();
+        }
+
+        self.collateral_registry.keys().map(|ct| {
+            let eligible: u64 = self.deposits.values()
+                .filter(|pos| pos.is_opted_in(ct))
+                .map(|pos| {
+                    icusd_ledgers.iter()
+                        .map(|(ledger, _decimals)| {
+                            pos.stablecoin_balances.get(ledger).copied().unwrap_or(0)
+                        })
+                        .sum::<u64>()
+                })
+                .sum();
+            (*ct, eligible)
+        }).collect()
     }
 
     pub fn get_user_position(&self, user: &Principal) -> Option<UserStabilityPosition> {

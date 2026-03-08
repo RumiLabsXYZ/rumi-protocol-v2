@@ -101,6 +101,13 @@ export interface ProtocolStatusDTO {
   weightedAverageInterestRate: number;
   interestPoolShare: number;
   borrowingFeeCurveResolved: [number, number][];
+  perCollateralInterest: CollateralInterestInfoDTO[];
+}
+
+export interface CollateralInterestInfoDTO {
+  collateralType: string;  // Principal text
+  totalDebtE8s: number;
+  weightedInterestRate: number;
 }
 
 // Reserve redemption result from backend
