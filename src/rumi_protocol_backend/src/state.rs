@@ -1062,6 +1062,20 @@ impl State {
         match &self.borrowing_fee_curve {
             Some(curve) => {
                 let resolved = self.resolve_curve(curve, None);
+                // Safety: if the curve is inverted (e.g., TCR < BorrowThreshold after
+                // canister upgrade before first price fetch), the sorted markers will
+                // have the max multiplier at the high-CR end instead of the low-CR end.
+                // Return the highest multiplier to conservatively discourage risky borrows.
+                if resolved.len() >= 2 {
+                    let first_mult = &resolved.first().unwrap().1;
+                    let last_mult = &resolved.last().unwrap().1;
+                    if last_mult.0 > first_mult.0 {
+                        return resolved.iter()
+                            .max_by(|a, b| a.1 .0.cmp(&b.1 .0))
+                            .map(|(_, m)| *m)
+                            .unwrap_or(Ratio::new(dec!(1.0)));
+                    }
+                }
                 Self::interpolate_multiplier(&resolved, projected_vault_cr)
             }
             None => Ratio::new(dec!(1.0)),
@@ -3538,5 +3552,24 @@ mod tests {
         state.borrowing_fee_curve = None;
         let mult = state.get_borrowing_fee_multiplier(Ratio::from_f64(1.4));
         assert!((mult.to_f64() - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_borrowing_fee_multiplier_inverted_curve_returns_max() {
+        // Simulate TCR=0 (e.g., right after canister upgrade before first price fetch)
+        let mut state = accrual_test_state();
+        state.total_collateral_ratio = Ratio::from_f64(0.0);
+        state.recovery_mode_threshold = Ratio::from_f64(1.5);
+
+        // With TCR=0, the resolved curve inverts: (0.0, 1.0), (0.75, 1.75), (1.55, 3.0)
+        // A healthy vault at CR=2.0 should NOT get 3.0x from interpolation above the last marker.
+        // The inversion guard should return 3.0x (max multiplier) for all CRs.
+        let mult_healthy = state.get_borrowing_fee_multiplier(Ratio::from_f64(2.0));
+        assert!((mult_healthy.to_f64() - 3.0).abs() < 0.01,
+            "Inverted curve should return max multiplier (3.0x), got {}", mult_healthy.to_f64());
+
+        let mult_low = state.get_borrowing_fee_multiplier(Ratio::from_f64(1.0));
+        assert!((mult_low.to_f64() - 3.0).abs() < 0.01,
+            "Inverted curve should return max multiplier (3.0x) for low CR too, got {}", mult_low.to_f64());
     }
 }
