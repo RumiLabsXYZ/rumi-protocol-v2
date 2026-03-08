@@ -143,6 +143,15 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
         let is_icusd = icusd_ledger.map(|id| id == *token_ledger).unwrap_or(false);
         let token_decimals = stablecoin_configs.get(token_ledger).map(|c| c.decimals).unwrap_or(8);
 
+        // Pre-check: will the backend accept this amount?
+        // Backend minimum is 10_000_000 e8s (0.1 icUSD). Skip if below to avoid
+        // wasting tokens on approve fees for doomed liquidation calls.
+        let amount_e8s_check = if is_icusd { *amount } else { crate::types::normalize_to_e8s(*amount, token_decimals) };
+        if amount_e8s_check < 10_000_000 {
+            log!(INFO, "Skipping token {}: amount {} e8s below backend minimum (0.1)", token_ledger, amount_e8s_check);
+            continue;
+        }
+
         // Approve backend to spend this token (in native units for the ledger)
         let approve_args = ApproveArgs {
             from_subaccount: None,
