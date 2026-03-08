@@ -166,7 +166,8 @@ pub async fn mint_interest_to_stability_pool(interest_share: ICUSD) {
     if interest_share.0 == 0 {
         return;
     }
-    let stability_pool = read_state(|s| s.stability_pool_canister);
+    let (stability_pool, icusd_ledger) =
+        read_state(|s| (s.stability_pool_canister, s.icusd_ledger_principal));
     if let Some(pool_principal) = stability_pool {
         match management::mint_icusd(interest_share, pool_principal).await {
             Ok(block_index) => {
@@ -176,6 +177,32 @@ pub async fn mint_interest_to_stability_pool(interest_share: ICUSD) {
                     interest_share.to_u64(),
                     block_index
                 );
+
+                // Notify pool to distribute interest pro-rata to depositors.
+                // Fire-and-forget: failure is logged but does not block repayment.
+                let amount = interest_share.to_u64();
+                let result: Result<(candid::IDLValue,), _> = ic_cdk::call(
+                    pool_principal,
+                    "receive_interest_revenue",
+                    (icusd_ledger, amount),
+                )
+                .await;
+                match result {
+                    Ok(_) => {
+                        log!(
+                            INFO,
+                            "[treasury] Pool acknowledged interest distribution ({} icUSD)",
+                            amount
+                        );
+                    }
+                    Err(e) => {
+                        log!(
+                            INFO,
+                            "[treasury] WARNING: pool interest notification call failed: {:?}",
+                            e
+                        );
+                    }
+                }
             }
             Err(e) => {
                 log!(

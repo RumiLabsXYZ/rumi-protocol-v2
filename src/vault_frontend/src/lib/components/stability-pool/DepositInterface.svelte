@@ -77,13 +77,22 @@
     showDropdown = false;
   }
 
+  // Ledger transfer fee per token (approve + transfer_from both charge a fee)
+  function getLedgerFee(token: StablecoinConfig): bigint {
+    // icUSD (8 decimals) = 0.001 = 100_000 e8s
+    // ckUSDC / ckUSDT (6 decimals) = 0.01 = 10_000
+    return token.decimals === 8 ? 100_000n : 10_000n;
+  }
+
   function setMax() {
     if (!selectedToken) return;
     if (activeTab === 'deposit') {
-      const fee = selectedToken.decimals === 8 ? 100_000n : 10n;
-      const adjusted = walletBalance > fee ? walletBalance - fee : 0n;
+      // Depositing costs 2 ledger fees: one for icrc2_approve, one for icrc2_transfer_from
+      const totalFees = getLedgerFee(selectedToken) * 2n;
+      const adjusted = walletBalance > totalFees ? walletBalance - totalFees : 0n;
       amount = formatTokenAmount(adjusted, selectedToken.decimals, selectedToken.decimals);
     } else {
+      // Withdrawals: pool canister pays the transfer fee, user gets full amount
       amount = formatTokenAmount(depositedBalance, selectedToken.decimals, selectedToken.decimals);
     }
   }
@@ -105,8 +114,10 @@
           error = `Minimum deposit is 1 ${selectedToken.symbol}`;
           return;
         }
-        if (rawAmount > walletBalance) {
-          error = 'Insufficient wallet balance';
+        // User needs amount + 2 fees (approve + transfer_from)
+        const totalFees = getLedgerFee(selectedToken) * 2n;
+        if (rawAmount + totalFees > walletBalance) {
+          error = 'Insufficient balance (amount + fees)';
           return;
         }
         await stabilityPoolService.deposit(selectedToken.ledger_id, rawAmount);
@@ -225,6 +236,16 @@
         {selectedToken?.symbol ?? ''}
       {/if}
     </button>
+
+    <!-- Docs link -->
+    <a href="/docs/stability-pool" class="docs-link">
+      <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="8" cy="8" r="7"/>
+        <path d="M8 7v4"/>
+        <circle cx="8" cy="5" r="0.75" fill="currentColor" stroke="none"/>
+      </svg>
+      How does the stability pool work?
+    </a>
 
     {#if error}
       <div class="error-bar">
@@ -527,6 +548,22 @@
   }
 
   @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Docs link ── */
+  .docs-link {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.375rem;
+    margin-top: 0.75rem;
+    font-size: 0.75rem;
+    color: var(--rumi-text-muted);
+    text-decoration: none;
+    transition: color 0.15s ease;
+  }
+  .docs-link:hover {
+    color: var(--rumi-text-secondary);
+  }
 
   /* ── Error ── */
   .error-bar {

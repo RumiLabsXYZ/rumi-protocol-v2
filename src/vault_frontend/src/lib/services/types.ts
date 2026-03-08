@@ -98,6 +98,8 @@ export interface ProtocolStatusDTO {
   recoveryCrMultiplier: number;
   reserveRedemptionsEnabled: boolean;
   reserveRedemptionFee: number;
+  weightedAverageInterestRate: number;
+  interestPoolShare: number;
 }
 
 // Reserve redemption result from backend

@@ -37,6 +37,8 @@ export class QueryOperations {
         recoveryCrMultiplier: Number(canisterStatus.recovery_cr_multiplier),
         reserveRedemptionsEnabled: Boolean((canisterStatus as any).reserve_redemptions_enabled),
         reserveRedemptionFee: Number((canisterStatus as any).reserve_redemption_fee),
+        weightedAverageInterestRate: Number((canisterStatus as any).weighted_average_interest_rate),
+        interestPoolShare: Number((canisterStatus as any).interest_pool_share),
       };
     });
   }
