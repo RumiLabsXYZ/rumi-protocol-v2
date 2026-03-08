@@ -265,9 +265,10 @@ impl StabilityPoolState {
             }
         }
 
-        // Process from highest priority (lowest number) to lowest priority
+        // Process from highest priority number first: ckUSDC/ckUSDT (2) before icUSD (1).
+        // icUSD is the reserve stablecoin, only used when ck stables are exhausted.
         let mut priorities: Vec<u8> = priority_buckets.keys().copied().collect();
-        priorities.sort(); // ascending: priority 1 consumed before priority 2
+        priorities.sort_by(|a, b| b.cmp(a)); // descending: priority 2 consumed before priority 1
 
         for priority in priorities {
             if remaining_e8s == 0 {
