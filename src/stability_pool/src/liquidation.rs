@@ -141,8 +141,9 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
 
     for (token_ledger, amount) in &token_draw {
         let is_icusd = icusd_ledger.map(|id| id == *token_ledger).unwrap_or(false);
+        let token_decimals = stablecoin_configs.get(token_ledger).map(|c| c.decimals).unwrap_or(8);
 
-        // Approve backend to spend this token
+        // Approve backend to spend this token (in native units for the ledger)
         let approve_args = ApproveArgs {
             from_subaccount: None,
             spender: Account { owner: protocol_id, subaccount: None },
@@ -171,8 +172,9 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
         }
 
         // Call the appropriate backend endpoint
+        // Backend expects amounts in e8s; normalize native decimals → e8s for non-icUSD tokens
         let liq_result = if is_icusd {
-            // liquidate_vault_partial(vault_id, amount_e8s)
+            // icUSD is already 8 decimals (e8s), no conversion needed
             let call_result: Result<(Result<rumi_protocol_backend::SuccessWithFee, rumi_protocol_backend::ProtocolError>,), _> = call(
                 protocol_id,
                 "liquidate_vault_partial",
@@ -187,12 +189,13 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
             let token_type = determine_stable_token_type(*token_ledger, &stablecoin_configs);
             match token_type {
                 Some(tt) => {
+                    let amount_e8s = crate::types::normalize_to_e8s(*amount, token_decimals);
                     let call_result: Result<(Result<rumi_protocol_backend::SuccessWithFee, rumi_protocol_backend::ProtocolError>,), _> = call(
                         protocol_id,
                         "liquidate_vault_partial_with_stable",
                         (rumi_protocol_backend::VaultArgWithToken {
                             vault_id: vault_info.vault_id,
-                            amount: *amount,
+                            amount: amount_e8s,
                             token_type: tt,
                         },)
                     ).await;

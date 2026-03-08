@@ -341,3 +341,20 @@ pub fn resume_operations() -> Result<(), StabilityPoolError> {
     log!(INFO, "Operations resumed by {}", caller);
     Ok(())
 }
+
+/// Admin: correct a depositor's stablecoin balance to match actual ledger state.
+/// Use when internal state tracks tokens that were never actually transferred on-chain.
+#[update]
+pub fn admin_correct_balance(
+    user: Principal,
+    token_ledger: Principal,
+    correct_amount: u64,
+) -> Result<String, StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    if !read_state(|s| s.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    let msg = mutate_state(|s| s.correct_balance(user, token_ledger, correct_amount));
+    log!(INFO, "Admin balance correction by {}: {}", caller, msg);
+    Ok(msg)
+}

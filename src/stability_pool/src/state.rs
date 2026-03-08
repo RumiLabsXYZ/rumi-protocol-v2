@@ -265,9 +265,9 @@ impl StabilityPoolState {
             }
         }
 
-        // Process from highest priority to lowest
+        // Process from highest priority (lowest number) to lowest priority
         let mut priorities: Vec<u8> = priority_buckets.keys().copied().collect();
-        priorities.sort_by(|a, b| b.cmp(a)); // descending
+        priorities.sort(); // ascending: priority 1 consumed before priority 2
 
         for priority in priorities {
             if remaining_e8s == 0 {
@@ -473,6 +473,45 @@ impl StabilityPoolState {
             total_usd_value_e8s: pos.total_usd_value(&self.stablecoin_registry),
             total_interest_earned_e8s: pos.total_interest_earned_e8s.unwrap_or(0),
         })
+    }
+
+    // ─── Admin Balance Correction ───
+
+    /// Set a depositor's balance for a specific token to `correct_amount`,
+    /// adjusting the aggregate total accordingly.  Used to fix phantom balances
+    /// that exist in state but not on the actual ledger.
+    pub fn correct_balance(&mut self, user: Principal, token_ledger: Principal, correct_amount: u64) -> String {
+        let old_amount = self.deposits.get(&user)
+            .and_then(|pos| pos.stablecoin_balances.get(&token_ledger).copied())
+            .unwrap_or(0);
+
+        if old_amount == correct_amount {
+            return format!("No change needed: user {} balance for {} is already {}", user, token_ledger, correct_amount);
+        }
+
+        let diff = old_amount as i128 - correct_amount as i128;
+
+        if let Some(pos) = self.deposits.get_mut(&user) {
+            if correct_amount == 0 {
+                pos.stablecoin_balances.remove(&token_ledger);
+            } else {
+                pos.stablecoin_balances.insert(token_ledger, correct_amount);
+            }
+            if pos.is_empty() {
+                self.deposits.remove(&user);
+            }
+        }
+
+        // Adjust aggregate total
+        if let Some(total) = self.total_stablecoin_balances.get_mut(&token_ledger) {
+            if diff > 0 {
+                *total = total.saturating_sub(diff as u64);
+            } else {
+                *total = total.saturating_add((-diff) as u64);
+            }
+        }
+
+        format!("Corrected {} balance for {}: {} -> {}", token_ledger, user, old_amount, correct_amount)
     }
 
     // ─── State Validation ───
