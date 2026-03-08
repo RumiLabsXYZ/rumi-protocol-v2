@@ -102,8 +102,12 @@ pub async fn execute_liquidation(vault_id: u64) -> Result<LiquidationResult, Sta
 
 /// Receive interest revenue from the protocol backend and distribute pro-rata to depositors.
 /// Only callable by the protocol canister.
+///
+/// `collateral_type` identifies which collateral's vault generated the interest.
+/// Depositors who opted out of that collateral are excluded from the distribution.
+/// The parameter is optional for backward compatibility with older backend versions.
 #[update]
-pub fn receive_interest_revenue(token_ledger: Principal, amount: u64) -> Result<(), StabilityPoolError> {
+pub fn receive_interest_revenue(token_ledger: Principal, amount: u64, collateral_type: Option<Principal>) -> Result<(), StabilityPoolError> {
     let caller = ic_cdk::api::caller();
     let expected = read_state(|s| s.protocol_canister_id);
     if caller != expected {
@@ -118,9 +122,9 @@ pub fn receive_interest_revenue(token_ledger: Principal, amount: u64) -> Result<
         return Err(StabilityPoolError::TokenNotAccepted { ledger: token_ledger });
     }
 
-    mutate_state(|s| s.distribute_interest_revenue(token_ledger, amount));
+    mutate_state(|s| s.distribute_interest_revenue(token_ledger, amount, collateral_type));
 
-    log!(INFO, "Distributed {} interest for token {} from backend", amount, token_ledger);
+    log!(INFO, "Distributed {} interest for token {} (collateral: {:?}) from backend", amount, token_ledger, collateral_type);
     Ok(())
 }
 
@@ -340,4 +344,40 @@ pub fn resume_operations() -> Result<(), StabilityPoolError> {
     mutate_state(|s| s.configuration.emergency_pause = false);
     log!(INFO, "Operations resumed by {}", caller);
     Ok(())
+}
+
+/// Admin: reset the consecutive failure counter for a token, re-enabling it
+/// for liquidation after it was auto-suspended by the circuit breaker.
+#[update]
+pub fn admin_reset_token_failures(token_ledger: Principal) -> Result<String, StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    if !read_state(|s| s.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    let prev_count = mutate_state(|s| s.admin_reset_token_failures(&token_ledger));
+    log!(INFO, "Admin {} reset token failure counter for {}: was {}", caller, token_ledger, prev_count);
+    Ok(format!("Reset failure counter for {} (was {})", token_ledger, prev_count))
+}
+
+/// Query: return all tokens currently auto-suspended by the circuit breaker.
+#[query]
+pub fn get_suspended_tokens() -> Vec<(Principal, u32)> {
+    read_state(|s| s.get_suspended_tokens())
+}
+
+/// Admin: correct a depositor's stablecoin balance to match actual ledger state.
+/// Use when internal state tracks tokens that were never actually transferred on-chain.
+#[update]
+pub fn admin_correct_balance(
+    user: Principal,
+    token_ledger: Principal,
+    correct_amount: u64,
+) -> Result<String, StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    if !read_state(|s| s.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    let msg = mutate_state(|s| s.correct_balance(user, token_ledger, correct_amount));
+    log!(INFO, "Admin balance correction by {}: {}", caller, msg);
+    Ok(msg)
 }

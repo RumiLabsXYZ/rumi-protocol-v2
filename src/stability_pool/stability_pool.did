@@ -16,6 +16,7 @@ type StablecoinConfig = record {
   decimals : nat8;
   priority : nat8;
   is_active : bool;
+  transfer_fee : opt nat64;
 };
 
 type CollateralInfo = record {
@@ -91,7 +92,7 @@ type PoolLiquidationRecord = record {
   collateral_gained : nat64;
   collateral_type : principal;
   depositors_count : nat64;
-  collateral_price_e8s : nat64;
+  collateral_price_e8s : opt nat64;
 };
 
 // ── Error type ──
@@ -199,7 +200,7 @@ service : (StabilityPoolInitArgs) -> {
   execute_liquidation : (nat64) -> (variant { Ok : LiquidationResult; Err : StabilityPoolError });
 
   // ── Interest Revenue ──
-  receive_interest_revenue : (principal, nat64) -> (variant { Ok; Err : StabilityPoolError });
+  receive_interest_revenue : (principal, nat64, opt principal) -> (variant { Ok; Err : StabilityPoolError });
 
   // ── Admin: Registry ──
   register_stablecoin : (StablecoinConfig) -> (variant { Ok; Err : StabilityPoolError });
@@ -209,6 +210,8 @@ service : (StabilityPoolInitArgs) -> {
   update_pool_configuration : (PoolConfiguration) -> (variant { Ok; Err : StabilityPoolError });
   emergency_pause : () -> (variant { Ok; Err : StabilityPoolError });
   resume_operations : () -> (variant { Ok; Err : StabilityPoolError });
+  admin_reset_token_failures : (principal) -> (variant { Ok : text; Err : StabilityPoolError });
+  admin_correct_balance : (principal, principal, nat64) -> (variant { Ok : text; Err : StabilityPoolError });
 
   // ── ICRC-21: Consent Messages ──
   icrc21_canister_call_consent_message : (Icrc21ConsentMessageRequest) -> (Icrc21ConsentMessageResponse);
@@ -222,4 +225,5 @@ service : (StabilityPoolInitArgs) -> {
   get_liquidation_history : (opt nat64) -> (vec PoolLiquidationRecord) query;
   check_pool_capacity : (principal, nat64) -> (bool) query;
   validate_pool_state : () -> (variant { Ok : text; Err : text }) query;
+  get_suspended_tokens : () -> (vec record { principal; nat32 }) query;
 };

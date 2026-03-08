@@ -162,7 +162,10 @@ pub async fn mint_interest_to_treasury(interest_share: ICUSD) {
 
 /// Mint icUSD interest revenue to the stability pool canister.
 /// The stability pool distributes this pro-rata to depositors.
-pub async fn mint_interest_to_stability_pool(interest_share: ICUSD) {
+///
+/// `collateral_type` identifies which collateral's vault generated this interest.
+/// The pool uses it to exclude depositors who opted out of that collateral.
+pub async fn mint_interest_to_stability_pool(interest_share: ICUSD, collateral_type: Principal) {
     if interest_share.0 == 0 {
         return;
     }
@@ -181,18 +184,20 @@ pub async fn mint_interest_to_stability_pool(interest_share: ICUSD) {
                 // Notify pool to distribute interest pro-rata to depositors.
                 // Fire-and-forget: failure is logged but does not block repayment.
                 let amount = interest_share.to_u64();
+                let ct: Option<Principal> = Some(collateral_type);
                 let result: Result<(candid::IDLValue,), _> = ic_cdk::call(
                     pool_principal,
                     "receive_interest_revenue",
-                    (icusd_ledger, amount),
+                    (icusd_ledger, amount, ct),
                 )
                 .await;
                 match result {
                     Ok(_) => {
                         log!(
                             INFO,
-                            "[treasury] Pool acknowledged interest distribution ({} icUSD)",
-                            amount
+                            "[treasury] Pool acknowledged interest distribution ({} icUSD, collateral {})",
+                            amount,
+                            collateral_type
                         );
                     }
                     Err(e) => {

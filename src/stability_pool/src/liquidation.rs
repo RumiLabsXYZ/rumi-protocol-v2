@@ -141,8 +141,25 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
 
     for (token_ledger, amount) in &token_draw {
         let is_icusd = icusd_ledger.map(|id| id == *token_ledger).unwrap_or(false);
+        let token_decimals = stablecoin_configs.get(token_ledger).map(|c| c.decimals).unwrap_or(8);
 
-        // Approve backend to spend this token
+        // Circuit breaker: skip tokens that have failed too many times in a row.
+        // An admin must call `admin_reset_token_failures` to re-enable them.
+        if read_state(|s| s.is_token_suspended(token_ledger)) {
+            log!(INFO, "Skipping token {}: auto-suspended after consecutive failures", token_ledger);
+            continue;
+        }
+
+        // Pre-check: will the backend accept this amount?
+        // Backend minimum is 10_000_000 e8s (0.1 icUSD). Skip if below to avoid
+        // wasting tokens on approve fees for doomed liquidation calls.
+        let amount_e8s_check = if is_icusd { *amount } else { crate::types::normalize_to_e8s(*amount, token_decimals) };
+        if amount_e8s_check < 10_000_000 {
+            log!(INFO, "Skipping token {}: amount {} e8s below backend minimum (0.1)", token_ledger, amount_e8s_check);
+            continue;
+        }
+
+        // Approve backend to spend this token (in native units for the ledger)
         let approve_args = ApproveArgs {
             from_subaccount: None,
             spender: Account { owner: protocol_id, subaccount: None },
@@ -159,20 +176,30 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
         ).await;
 
         match approve_result {
-            Ok((Ok(_),)) => {},
+            Ok((Ok(_),)) => {
+                // Deduct the approve fee from tracked balances so accounting stays accurate.
+                if let Some(fee) = stablecoin_configs.get(token_ledger).and_then(|c| c.transfer_fee) {
+                    if fee > 0 {
+                        mutate_state(|s| s.deduct_fee_from_pool(*token_ledger, fee));
+                    }
+                }
+            },
             Ok((Err(e),)) => {
-                log!(INFO, "Approve failed for {}: {:?}", token_ledger, e);
+                let count = mutate_state(|s| s.record_token_failure(*token_ledger));
+                log!(INFO, "Approve failed for {}: {:?} (consecutive failures: {})", token_ledger, e, count);
                 continue;
             },
             Err(e) => {
-                log!(INFO, "Approve call failed for {}: {:?}", token_ledger, e);
+                let count = mutate_state(|s| s.record_token_failure(*token_ledger));
+                log!(INFO, "Approve call failed for {}: {:?} (consecutive failures: {})", token_ledger, e, count);
                 continue;
             }
         }
 
         // Call the appropriate backend endpoint
+        // Backend expects amounts in e8s; normalize native decimals → e8s for non-icUSD tokens
         let liq_result = if is_icusd {
-            // liquidate_vault_partial(vault_id, amount_e8s)
+            // icUSD is already 8 decimals (e8s), no conversion needed
             let call_result: Result<(Result<rumi_protocol_backend::SuccessWithFee, rumi_protocol_backend::ProtocolError>,), _> = call(
                 protocol_id,
                 "liquidate_vault_partial",
@@ -187,12 +214,13 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
             let token_type = determine_stable_token_type(*token_ledger, &stablecoin_configs);
             match token_type {
                 Some(tt) => {
+                    let amount_e8s = crate::types::normalize_to_e8s(*amount, token_decimals);
                     let call_result: Result<(Result<rumi_protocol_backend::SuccessWithFee, rumi_protocol_backend::ProtocolError>,), _> = call(
                         protocol_id,
                         "liquidate_vault_partial_with_stable",
                         (rumi_protocol_backend::VaultArgWithToken {
                             vault_id: vault_info.vault_id,
-                            amount: *amount,
+                            amount: amount_e8s,
                             token_type: tt,
                         },)
                     ).await;
@@ -212,14 +240,18 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
                     vault_info.vault_id, token_ledger, collateral, success.fee_amount_paid);
                 actual_consumed.insert(*token_ledger, *amount);
                 total_collateral_gained += collateral;
+                // Success: reset the consecutive failure counter
+                mutate_state(|s| s.reset_token_failures(token_ledger));
             },
             Ok(Err(protocol_error)) => {
-                log!(INFO, "Protocol rejected liquidation for vault {} with token {}: {:?}",
-                    vault_info.vault_id, token_ledger, protocol_error);
+                let count = mutate_state(|s| s.record_token_failure(*token_ledger));
+                log!(INFO, "Protocol rejected liquidation for vault {} with token {}: {:?} (consecutive failures: {})",
+                    vault_info.vault_id, token_ledger, protocol_error, count);
             },
             Err(call_error) => {
-                log!(INFO, "Liquidation call failed for vault {} with token {}: {:?}",
-                    vault_info.vault_id, token_ledger, call_error);
+                let count = mutate_state(|s| s.record_token_failure(*token_ledger));
+                log!(INFO, "Liquidation call failed for vault {} with token {}: {:?} (consecutive failures: {})",
+                    vault_info.vault_id, token_ledger, call_error, count);
             }
         }
     }

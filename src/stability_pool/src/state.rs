@@ -34,6 +34,13 @@ pub struct StabilityPoolState {
     /// `Option` is required for Candid backward-compatible stable memory upgrades.
     #[serde(default)]
     pub total_interest_received_e8s: Option<u64>,
+    /// Per-token consecutive approve/liquidation failure counter for circuit breaker.
+    /// When a token hits MAX_CONSECUTIVE_FAILURES, it is auto-suspended from liquidations
+    /// until an admin calls `admin_reset_token_failures`.
+    /// `Option` wrapping is required for Candid backward-compatible stable memory upgrades
+    /// (Candid `Decode!` needs `opt` for new fields, unlike serde's `#[serde(default)]`).
+    #[serde(default)]
+    pub token_consecutive_failures: Option<BTreeMap<Principal, u32>>,
     pub is_initialized: bool,
 }
 
@@ -56,6 +63,7 @@ impl Default for StabilityPoolState {
             total_liquidations_executed: 0,
             pool_creation_timestamp: 0,
             total_interest_received_e8s: Some(0),
+            token_consecutive_failures: Some(BTreeMap::new()),
             is_initialized: false,
         }
     }
@@ -106,36 +114,50 @@ impl StabilityPoolState {
 
     /// Distribute interest revenue pro-rata to all depositors of a given stablecoin.
     /// Called by the backend after minting interest to the pool canister.
-    pub fn distribute_interest_revenue(&mut self, token_ledger: Principal, amount: u64) {
+    ///
+    /// When `collateral_type` is provided, depositors who have opted out of that
+    /// collateral are excluded from the distribution — they should not earn
+    /// interest from vaults backed by collateral they've opted out of.
+    pub fn distribute_interest_revenue(&mut self, token_ledger: Principal, amount: u64, collateral_type: Option<Principal>) {
         if amount == 0 {
             return;
-        }
-
-        let total = self.total_stablecoin_balances.get(&token_ledger).copied().unwrap_or(0);
-        if total == 0 {
-            return; // No depositors hold this token — nothing to distribute
         }
 
         let decimals = self.stablecoin_registry.get(&token_ledger)
             .map(|c| c.decimals)
             .unwrap_or(8);
 
-        let mut distributed: u64 = 0;
-        let mut first_eligible: Option<Principal> = None;
-
-        // Collect (principal, balance) pairs to avoid borrow conflict
+        // Collect eligible (principal, balance) pairs — exclude depositors who
+        // opted out of the collateral type that generated this interest.
         let holders: Vec<(Principal, u64)> = self.deposits.iter()
             .filter_map(|(p, pos)| {
                 let bal = pos.stablecoin_balances.get(&token_ledger).copied().unwrap_or(0);
-                if bal > 0 { Some((*p, bal)) } else { None }
+                if bal == 0 {
+                    return None;
+                }
+                // If we know the collateral source, skip opted-out depositors
+                if let Some(ct) = &collateral_type {
+                    if !pos.is_opted_in(ct) {
+                        return None;
+                    }
+                }
+                Some((*p, bal))
             })
             .collect();
+
+        let eligible_total: u64 = holders.iter().map(|(_, b)| *b).sum();
+        if eligible_total == 0 {
+            return; // No eligible depositors — nothing to distribute
+        }
+
+        let mut distributed: u64 = 0;
+        let mut first_eligible: Option<Principal> = None;
 
         for (principal, balance) in &holders {
             if first_eligible.is_none() {
                 first_eligible = Some(*principal);
             }
-            let credit = (amount as u128 * *balance as u128 / total as u128) as u64;
+            let credit = (amount as u128 * *balance as u128 / eligible_total as u128) as u64;
             if credit > 0 {
                 if let Some(pos) = self.deposits.get_mut(principal) {
                     *pos.stablecoin_balances.entry(token_ledger).or_insert(0) += credit;
@@ -265,9 +287,10 @@ impl StabilityPoolState {
             }
         }
 
-        // Process from highest priority to lowest
+        // Process from highest priority number first: ckUSDC/ckUSDT (2) before icUSD (1).
+        // icUSD is the reserve stablecoin, only used when ck stables are exhausted.
         let mut priorities: Vec<u8> = priority_buckets.keys().copied().collect();
-        priorities.sort_by(|a, b| b.cmp(a)); // descending
+        priorities.sort_by(|a, b| b.cmp(a)); // descending: priority 2 consumed before priority 1
 
         for priority in priorities {
             if remaining_e8s == 0 {
@@ -475,6 +498,131 @@ impl StabilityPoolState {
         })
     }
 
+    // ─── Fee Accounting ───
+
+    /// Deduct a ledger fee (e.g. approve fee) proportionally from all depositors
+    /// who hold `token_ledger`, then adjust the aggregate total to match.
+    pub fn deduct_fee_from_pool(&mut self, token_ledger: Principal, fee: u64) {
+        let total = match self.total_stablecoin_balances.get(&token_ledger).copied() {
+            Some(t) if t > 0 => t,
+            _ => return,
+        };
+
+        let mut deducted: u64 = 0;
+        let depositor_keys: Vec<Principal> = self.deposits.keys().copied().collect();
+
+        for key in &depositor_keys {
+            if let Some(pos) = self.deposits.get_mut(key) {
+                if let Some(bal) = pos.stablecoin_balances.get_mut(&token_ledger) {
+                    if *bal > 0 {
+                        // Proportional share: fee * bal / total (rounded down)
+                        let share = (fee as u128 * *bal as u128 / total as u128) as u64;
+                        let actual = share.min(*bal);
+                        *bal = bal.saturating_sub(actual);
+                        deducted += actual;
+                        if *bal == 0 {
+                            pos.stablecoin_balances.remove(&token_ledger);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Apply any rounding remainder (at most depositor_count - 1 units) to the aggregate
+        if let Some(agg) = self.total_stablecoin_balances.get_mut(&token_ledger) {
+            *agg = agg.saturating_sub(deducted);
+        }
+    }
+
+    // ─── Admin Balance Correction ───
+
+    /// Set a depositor's balance for a specific token to `correct_amount`,
+    /// adjusting the aggregate total accordingly.  Used to fix phantom balances
+    /// that exist in state but not on the actual ledger.
+    pub fn correct_balance(&mut self, user: Principal, token_ledger: Principal, correct_amount: u64) -> String {
+        let old_amount = self.deposits.get(&user)
+            .and_then(|pos| pos.stablecoin_balances.get(&token_ledger).copied())
+            .unwrap_or(0);
+
+        if old_amount == correct_amount {
+            return format!("No change needed: user {} balance for {} is already {}", user, token_ledger, correct_amount);
+        }
+
+        let diff = old_amount as i128 - correct_amount as i128;
+
+        if let Some(pos) = self.deposits.get_mut(&user) {
+            if correct_amount == 0 {
+                pos.stablecoin_balances.remove(&token_ledger);
+            } else {
+                pos.stablecoin_balances.insert(token_ledger, correct_amount);
+            }
+            if pos.is_empty() {
+                self.deposits.remove(&user);
+            }
+        }
+
+        // Adjust aggregate total
+        if let Some(total) = self.total_stablecoin_balances.get_mut(&token_ledger) {
+            if diff > 0 {
+                *total = total.saturating_sub(diff as u64);
+            } else {
+                *total = total.saturating_add((-diff) as u64);
+            }
+        }
+
+        format!("Corrected {} balance for {}: {} -> {}", token_ledger, user, old_amount, correct_amount)
+    }
+
+    // ─── Token Failure Circuit Breaker ───
+
+    /// Maximum consecutive approve/liquidation failures before auto-suspending a token.
+    const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+
+    /// Returns true if the token has been auto-suspended due to repeated failures.
+    pub fn is_token_suspended(&self, token_ledger: &Principal) -> bool {
+        self.token_consecutive_failures
+            .as_ref()
+            .and_then(|m| m.get(token_ledger))
+            .map(|&count| count >= Self::MAX_CONSECUTIVE_FAILURES)
+            .unwrap_or(false)
+    }
+
+    /// Increment the consecutive failure counter for a token.
+    /// Returns the new count.
+    pub fn record_token_failure(&mut self, token_ledger: Principal) -> u32 {
+        let map = self.token_consecutive_failures.get_or_insert_with(BTreeMap::new);
+        let count = map.entry(token_ledger).or_insert(0);
+        *count += 1;
+        *count
+    }
+
+    /// Reset the consecutive failure counter on success.
+    pub fn reset_token_failures(&mut self, token_ledger: &Principal) {
+        if let Some(map) = self.token_consecutive_failures.as_mut() {
+            map.remove(token_ledger);
+        }
+    }
+
+    /// Admin: reset the failure counter for a suspended token, re-enabling it.
+    /// Returns the previous failure count.
+    pub fn admin_reset_token_failures(&mut self, token_ledger: &Principal) -> u32 {
+        self.token_consecutive_failures
+            .as_mut()
+            .and_then(|m| m.remove(token_ledger))
+            .unwrap_or(0)
+    }
+
+    /// Return all tokens that are currently auto-suspended.
+    pub fn get_suspended_tokens(&self) -> Vec<(Principal, u32)> {
+        self.token_consecutive_failures
+            .as_ref()
+            .map(|m| m.iter()
+                .filter(|(_, &count)| count >= Self::MAX_CONSECUTIVE_FAILURES)
+                .map(|(p, &c)| (*p, c))
+                .collect())
+            .unwrap_or_default()
+    }
+
     // ─── State Validation ───
 
     pub fn validate_state(&self) -> Result<(), String> {
@@ -587,6 +735,7 @@ mod tests {
             decimals: 8,
             priority: 1,
             is_active: true,
+            transfer_fee: Some(10_000),
         });
         state.register_stablecoin(StablecoinConfig {
             ledger_id: ckusdt_ledger(),
@@ -594,6 +743,7 @@ mod tests {
             decimals: 6,
             priority: 2,
             is_active: true,
+            transfer_fee: Some(10),
         });
         state.register_stablecoin(StablecoinConfig {
             ledger_id: ckusdc_ledger(),
@@ -601,6 +751,7 @@ mod tests {
             decimals: 6,
             priority: 2,
             is_active: true,
+            transfer_fee: Some(10),
         });
 
         state.register_collateral(CollateralInfo {
@@ -1193,7 +1344,7 @@ mod tests {
         let mut state = test_state();
         add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
 
-        state.distribute_interest_revenue(icusd_ledger(), 5_00000000);
+        state.distribute_interest_revenue(icusd_ledger(), 5_00000000, None);
 
         let pos = state.deposits.get(&user_a()).unwrap();
         assert_eq!(pos.stablecoin_balances[&icusd_ledger()], 105_00000000);
@@ -1209,7 +1360,7 @@ mod tests {
         add_deposit_direct(&mut state, user_a(), icusd_ledger(), 75_00000000);
         add_deposit_direct(&mut state, user_b(), icusd_ledger(), 25_00000000);
 
-        state.distribute_interest_revenue(icusd_ledger(), 10_00000000);
+        state.distribute_interest_revenue(icusd_ledger(), 10_00000000, None);
 
         let a = state.deposits.get(&user_a()).unwrap();
         let b = state.deposits.get(&user_b()).unwrap();
@@ -1224,7 +1375,7 @@ mod tests {
     fn test_distribute_interest_zero_total_noop() {
         let mut state = test_state();
         // No depositors for icUSD
-        state.distribute_interest_revenue(icusd_ledger(), 5_00000000);
+        state.distribute_interest_revenue(icusd_ledger(), 5_00000000, None);
         assert_eq!(state.total_interest_received_e8s, Some(0));
     }
 
@@ -1236,7 +1387,7 @@ mod tests {
         add_deposit_direct(&mut state, user_b(), icusd_ledger(), 100);
         add_deposit_direct(&mut state, Principal::from_slice(&[99]), icusd_ledger(), 100);
 
-        state.distribute_interest_revenue(icusd_ledger(), 10);
+        state.distribute_interest_revenue(icusd_ledger(), 10, None);
 
         // Each gets floor(10 * 100/300) = 3. Dust = 10 - 9 = 1 goes to first depositor.
         let total: u64 = state.deposits.values()

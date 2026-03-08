@@ -37,28 +37,38 @@
   $: depositorCount = poolStatus ? Number(poolStatus.total_depositors) : 0;
   $: stablecoinBreakdown = poolStatus?.stablecoin_balances ?? [];
 
-  // Pool APR
+  // Pool APR — uses icUSD-only TVL (ck stables don't earn interest)
   $: poolApr = (() => {
-    if (!protocolStatus || !poolStatus || poolStatus.total_deposits_e8s === 0n) return null;
+    if (!protocolStatus || !poolStatus) return null;
     const weightedRate = protocolStatus.weightedAverageInterestRate;
     const poolShare = protocolStatus.interestPoolShare;
     const totalDebt = protocolStatus.totalIcusdBorrowed;
-    const poolTvl = Number(poolStatus.total_deposits_e8s) / 1e8;
-    if (poolTvl === 0 || totalDebt === 0 || weightedRate === 0) return null;
-    const apr = (weightedRate * poolShare * totalDebt) / poolTvl;
+    const icusdEntry = poolStatus.stablecoin_balances.find(([l]: [any, bigint]) => l.toText() === CANISTER_IDS.ICUSD_LEDGER);
+    const icusdTvl = icusdEntry ? Number(icusdEntry[1]) / 1e8 : 0;
+    if (icusdTvl === 0 || totalDebt === 0 || weightedRate === 0) return null;
+    const apr = (weightedRate * poolShare * totalDebt) / icusdTvl;
     return (apr * 100).toFixed(2);
   })();
 
   // User position data
   $: userStables = userPosition?.stablecoin_balances ?? [];
+  $: activeStables = userStables.filter(([_, amount]: [any, bigint]) => amount > 0n);
   $: totalUsdValue = userPosition ? formatStableTokenDisplay(userPosition.total_usd_value_e8s, 8) : '0.0000';
   $: gains = userPosition?.collateral_gains ?? [];
   $: hasAnyGains = gains.some(([_, a]) => a > 0n);
   $: optedOut = new Set((userPosition?.opted_out_collateral ?? []).map(p => p.toText()));
 
-  $: depositDate = userPosition?.deposit_timestamp
-    ? new Date(Number(userPosition.deposit_timestamp) / 1_000_000).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-    : '—';
+  // Does the user hold icUSD in the pool?
+  $: userHasIcusd = userStables.some(([l, a]: [any, bigint]) => l.toText() === CANISTER_IDS.ICUSD_LEDGER && a > 0n);
+
+  // Personalized APR — same as headline if no opt-outs, null if no icUSD
+  $: userApr = (() => {
+    if (!userHasIcusd || !poolApr) return null;
+    // With opt-outs we can't precisely compute the reduced rate without
+    // per-collateral debt data, so show headline with a qualifier
+    return poolApr;
+  })();
+  $: hasOptOuts = optedOut.size > 0;
 
   $: poolShare = (() => {
     if (!poolStatus || !userPosition || poolStatus.total_deposits_e8s === 0n) return '0.00';
@@ -150,28 +160,41 @@
   {#if isConnected && userPosition}
     <h4 class="group-heading">Your Position</h4>
     <div class="stats-stack">
-      <div class="stat-row">
+      <!-- Personalized Interest APR (top row, only if user holds icUSD) -->
+      {#if userApr !== null}
+        <div class="stat-row">
+          <span class="stat-label">Your Interest APR</span>
+          <span class="stat-value green">{hasOptOuts ? `Up to ${userApr}` : userApr}%</span>
+        </div>
+      {/if}
+
+      <!-- Total Deposited with optional stablecoin breakdown -->
+      <div class="stat-row" class:align-top={activeStables.length > 1}>
         <span class="stat-label">Total Deposited</span>
-        <span class="stat-value bold">${totalUsdValue}</span>
+        {#if activeStables.length > 1}
+          <span class="stat-value-stack">
+            <span class="stat-value bold">${totalUsdValue}</span>
+            {#each activeStables as [ledger, amount]}
+              {@const sym = symbolForLedger(ledger, registries)}
+              {@const dec = decimalsForLedger(ledger, registries)}
+              <span class="breakdown-line">
+                <span class="collateral-dot breakdown-dot" style="background:{getStablecoinColor(ledger)}"></span>
+                <span class="breakdown-ticker">{sym}</span>
+                <span class="gain-value">{formatStableTokenDisplay(amount, dec)}</span>
+              </span>
+            {/each}
+          </span>
+        {:else}
+          <span class="stat-value bold">${totalUsdValue}</span>
+        {/if}
       </div>
+
       <div class="stat-row">
         <span class="stat-label">Pool Share</span>
-        <span class="stat-value"><span class="pool-share-badge">{poolShare}%</span></span>
+        <span class="stat-value">{poolShare}%</span>
       </div>
 
-      <!-- Per-token breakdown -->
-      {#each userStables as [ledger, amount]}
-        {@const sym = symbolForLedger(ledger, registries)}
-        {@const dec = decimalsForLedger(ledger, registries)}
-        {#if amount > 0n}
-          <div class="stat-row">
-            <span class="stat-label">{sym}</span>
-            <span class="stat-value">{formatStableTokenDisplay(amount, dec)}</span>
-          </div>
-        {/if}
-      {/each}
-
-      <!-- Collateral Gains row (stacked values) -->
+      <!-- Collateral Gains row (stacked values, ticker-first) -->
       <div class="stat-row align-top">
         <span class="stat-label">
           Collateral Gains
@@ -227,9 +250,10 @@
             {@const key = col.ledger_id.toText()}
             {@const gainEntry = gains.find(([l]) => l.toText() === key)}
             {@const gainAmount = gainEntry ? gainEntry[1] : 0n}
-            <span class:gain-dim={gainAmount === 0n}>
+            <span class="gain-line" class:gain-dim={gainAmount === 0n}>
               <span class="collateral-dot" style="background:{getCollateralColor(col)}"></span>
-              {formatTokenAmount(gainAmount, col.decimals)} {col.symbol}
+              <span class="gain-ticker">{col.symbol}</span>
+              <span class="gain-value">{formatTokenAmount(gainAmount, col.decimals)}</span>
             </span>
           {/each}
         </span>
@@ -242,12 +266,6 @@
           <span class="stat-value green">${interestEarned}</span>
         </div>
       {/if}
-
-      <!-- Deposit date -->
-      <div class="stat-row">
-        <span class="stat-label">Deposited</span>
-        <span class="stat-value">{depositDate}</span>
-      </div>
     </div>
 
     {#if error}
@@ -267,7 +285,7 @@
     {#if poolApr !== null}
       <div class="stat-row">
         <span class="stat-label">Interest APR</span>
-        <span class="stat-value green">{poolApr}%</span>
+        <span class="stat-value">{poolApr}%</span>
       </div>
     {/if}
     <div class="stat-row">
@@ -275,7 +293,7 @@
       <span class="stat-value">{depositorCount}</span>
     </div>
 
-    <!-- Pool deposits (stacked values) -->
+    <!-- Pool deposits (stacked values, ticker-first) -->
     {#if stablecoinBreakdown.length > 0}
       <div class="stat-row align-top">
         <span class="stat-label">Deposits</span>
@@ -283,9 +301,10 @@
           {#each stablecoinBreakdown as [ledger, amount]}
             {@const sym = symbolForLedger(ledger, registries)}
             {@const dec = decimalsForLedger(ledger, registries)}
-            <span>
+            <span class="gain-line">
               <span class="collateral-dot" style="background:{getStablecoinColor(ledger)}"></span>
-              {formatStableTokenDisplay(amount, dec)} {sym}
+              <span class="gain-ticker">{sym}</span>
+              <span class="gain-value">{formatStableTokenDisplay(amount, dec)}</span>
             </span>
           {/each}
         </span>
@@ -389,16 +408,41 @@
     color: var(--rumi-text-muted);
   }
 
-  /* ── Pool share badge ── */
-  .pool-share-badge {
-    display: inline-block;
-    padding: 0.0625rem 0.4375rem;
-    background: rgba(74, 222, 128, 0.1);
-    border: 1px solid rgba(74, 222, 128, 0.25);
-    border-radius: 1rem;
-    font-size: 0.6875rem;
-    font-weight: 600;
-    color: #4ade80;
+  /* ── Ticker-first lines (collateral gains + pool deposits) ── */
+  .gain-line {
+    display: flex;
+    align-items: baseline;
+    align-self: stretch;
+    gap: 0.25rem;
+    white-space: nowrap;
+  }
+
+  .gain-ticker {
+    flex-shrink: 0;
+  }
+
+  .gain-value {
+    margin-left: auto;
+  }
+
+  /* ── Stablecoin breakdown under Total Deposited ── */
+  .breakdown-line {
+    display: flex;
+    align-items: baseline;
+    align-self: stretch;
+    gap: 0.25rem;
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--rumi-text-muted);
+    white-space: nowrap;
+  }
+
+  .breakdown-dot {
+    opacity: 0.45;
+  }
+
+  .breakdown-ticker {
+    flex-shrink: 0;
   }
 
   /* ── Opt-out inline controls ── */

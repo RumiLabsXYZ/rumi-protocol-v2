@@ -789,7 +789,7 @@ pub async fn repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
                 (pool, treasury)
             });
             crate::treasury::mint_interest_to_treasury(treasury_share_amt).await;
-            crate::treasury::mint_interest_to_stability_pool(pool_share).await;
+            crate::treasury::mint_interest_to_stability_pool(pool_share, vault.collateral_type).await;
             guard_principal.complete(); // Mark as completed
             Ok(block_index)
         }
@@ -897,7 +897,7 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
                 // 1. Mint icUSD equal to pool_share to stability pool
                 //    (backed 1:1 by the stablecoins remaining in reserves)
                 let pool_icusd = ICUSD::from(pool_share_e8s);
-                crate::treasury::mint_interest_to_stability_pool(pool_icusd).await;
+                crate::treasury::mint_interest_to_stability_pool(pool_icusd, vault.collateral_type).await;
 
                 // 2. Transfer treasury_share as stablecoins to treasury
                 let treasury_e6s = treasury_share_e8s / 100; // e8s → e6s
@@ -1982,7 +1982,7 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
         (pool, treasury)
     });
     crate::treasury::mint_interest_to_treasury(treasury_share_amt).await;
-    crate::treasury::mint_interest_to_stability_pool(pool_share).await;
+    crate::treasury::mint_interest_to_stability_pool(pool_share, vault.collateral_type).await;
 
     // Send protocol's liquidation fee cut to treasury (fire-and-forget)
     if protocol_cut > 0 {
@@ -2215,7 +2215,7 @@ pub async fn liquidate_vault_partial_with_stable(
         // 1. Mint icUSD equal to pool_share to stability pool
         //    (backed 1:1 by the stablecoins remaining in reserves)
         let pool_icusd = ICUSD::from(pool_share_e8s);
-        crate::treasury::mint_interest_to_stability_pool(pool_icusd).await;
+        crate::treasury::mint_interest_to_stability_pool(pool_icusd, vault.collateral_type).await;
 
         // 2. Transfer treasury_share as stablecoins to treasury
         let treasury_e6s = treasury_share_e8s / 100; // e8s → e6s
@@ -2471,7 +2471,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         (pool, treasury)
     });
     crate::treasury::mint_interest_to_treasury(treasury_share_amt).await;
-    crate::treasury::mint_interest_to_stability_pool(pool_share).await;
+    crate::treasury::mint_interest_to_stability_pool(pool_share, vault.collateral_type).await;
 
     // Send protocol's liquidation fee cut to treasury (fire-and-forget)
     if protocol_cut > 0 {
@@ -2690,7 +2690,7 @@ pub async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError>
                 (pool, treasury)
             });
             crate::treasury::mint_interest_to_treasury(treasury_share_amt).await;
-            crate::treasury::mint_interest_to_stability_pool(pool_share).await;
+            crate::treasury::mint_interest_to_stability_pool(pool_share, vault.collateral_type).await;
             guard_principal.complete(); // Mark as completed
             Ok(block_index)
         }
@@ -2868,7 +2868,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         (pool, treasury)
     });
     crate::treasury::mint_interest_to_treasury(treasury_share_amt).await;
-    crate::treasury::mint_interest_to_stability_pool(pool_share).await;
+    crate::treasury::mint_interest_to_stability_pool(pool_share, vault.collateral_type).await;
 
     // Send protocol's liquidation fee cut to treasury (fire-and-forget)
     if protocol_cut > 0 {
