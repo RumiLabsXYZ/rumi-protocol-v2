@@ -328,6 +328,15 @@ pub enum Event {
     SetRmrFloorCr { value: String },
     #[serde(rename = "set_rmr_ceiling_cr")]
     SetRmrCeilingCr { value: String },
+
+    /// Admin sweep of untracked collateral from backend to treasury.
+    #[serde(rename = "admin_sweep_to_treasury")]
+    AdminSweepToTreasury {
+        amount: u64,
+        treasury: Principal,
+        block_index: u64,
+        reason: String,
+    },
 }
 
 impl Event {
@@ -387,6 +396,7 @@ impl Event {
             Event::SetRmrCeiling { .. } => false,
             Event::SetRmrFloorCr { .. } => false,
             Event::SetRmrCeilingCr { .. } => false,
+            Event::AdminSweepToTreasury { .. } => false,
         }
     }
 }
@@ -771,6 +781,9 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                 if let Ok(dec) = value.parse::<Decimal>() {
                     state.rmr_ceiling_cr = Ratio::from(dec);
                 }
+            },
+            Event::AdminSweepToTreasury { .. } => {
+                // Ledger-only operation; no in-memory state changes during replay.
             },
         }
     }
@@ -1234,6 +1247,20 @@ pub fn record_admin_vault_correction(
     if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
         vault.collateral_amount = new_amount;
     }
+}
+
+pub fn record_admin_sweep_to_treasury(
+    amount: u64,
+    treasury: Principal,
+    block_index: u64,
+    reason: String,
+) {
+    record_event(&Event::AdminSweepToTreasury {
+        amount,
+        treasury,
+        block_index,
+        reason,
+    });
 }
 
 pub fn record_set_rate_curve_markers(

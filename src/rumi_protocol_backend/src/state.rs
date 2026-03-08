@@ -748,6 +748,16 @@ impl State {
     pub fn increment_vault_id(&mut self) -> u64 {
         let vault_id = self.next_available_vault_id;
         self.next_available_vault_id += 1;
+        // Safety net: reject if this ID already exists (e.g. counter was reset by
+        // an accidental reinstall). Better to fail loudly than silently overwrite
+        // another user's vault.
+        if self.vault_id_to_vaults.contains_key(&vault_id) {
+            ic_cdk::trap(&format!(
+                "BUG: vault_id {} already exists — refusing to overwrite. \
+                 Was the canister reinstalled?",
+                vault_id
+            ));
+        }
         vault_id
     }
 
@@ -1516,6 +1526,19 @@ impl State {
     pub fn open_vault(&mut self, vault: Vault) {
         let vault_id = vault.vault_id;
         let collateral_type = vault.collateral_type;
+        // If this vault_id already exists with a different owner (e.g. duplicate
+        // OpenVault events in the log), remove the stale index entry so
+        // principal_to_vault_ids stays consistent with vault_id_to_vaults.
+        if let Some(old_vault) = self.vault_id_to_vaults.get(&vault_id) {
+            if old_vault.owner != vault.owner {
+                if let Some(old_ids) = self.principal_to_vault_ids.get_mut(&old_vault.owner) {
+                    old_ids.remove(&vault_id);
+                    if old_ids.is_empty() {
+                        self.principal_to_vault_ids.remove(&old_vault.owner);
+                    }
+                }
+            }
+        }
         self.vault_id_to_vaults.insert(vault_id, vault.clone());
         match self.principal_to_vault_ids.get_mut(&vault.owner) {
             Some(vault_ids) => {

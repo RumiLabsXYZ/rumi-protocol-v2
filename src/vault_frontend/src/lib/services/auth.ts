@@ -128,7 +128,7 @@ function createAuthStore() {
             
             // Create agent for Internet Identity
             agent = new HttpAgent({
-              identity: identity as any,
+              identity,
               host: CONFIG.isLocal ? 'http://localhost:4943' : 'https://ic0.app'
             });
             
@@ -370,8 +370,7 @@ function createAuthStore() {
               
               // Create agent for Internet Identity
               agent = new HttpAgent({
-                // Cast to any to avoid type incompatibility when multiple copies of @dfinity packages exist
-                identity: identity as any,
+                identity,
                 host: CONFIG.isLocal ? 'http://localhost:4943' : 'https://ic0.app'
               });
               
@@ -479,7 +478,7 @@ function createAuthStore() {
         if (!agent) {
           throw new Error('Internet Identity agent not initialized');
         }
-        
+
         // Create actor using Internet Identity agent
         const { Actor } = await import('@dfinity/agent');
         return Actor.createActor(idl, {

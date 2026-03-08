@@ -82,7 +82,7 @@ pub fn collateral_to_asset_type(ct: &Principal) -> AssetType {
 
 /// Notify the treasury canister about a deposit (for bookkeeping).
 /// Non-critical: failures are logged but don't affect protocol operation.
-async fn notify_treasury_deposit(
+pub async fn notify_treasury_deposit(
     treasury: Principal,
     deposit_type: DepositType,
     asset_type: AssetType,

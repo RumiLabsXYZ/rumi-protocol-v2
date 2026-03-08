@@ -193,6 +193,12 @@ type Event = variant {
     new_amount : nat64;
     reason : text;
   };
+  admin_sweep_to_treasury : record {
+    amount : nat64;
+    treasury : principal;
+    block_index : nat64;
+    reason : text;
+  };
   set_rate_curve_markers : record {
     collateral_type : opt text;
     markers : text;
@@ -206,6 +212,10 @@ type Event = variant {
   };
   set_liquidation_bonus : record { rate : text };
   set_liquidation_protocol_share : record { share : text };
+  set_rmr_floor : record { value : text };
+  set_rmr_ceiling : record { value : text };
+  set_rmr_floor_cr : record { value : text };
+  set_rmr_ceiling_cr : record { value : text };
   reserve_redemption : record {
     icusd_amount : nat64;
     icusd_block_index : nat64;
@@ -424,6 +434,7 @@ service : (ProtocolArg) -> {
   add_margin_with_deposit : (nat64) -> (Result_1);
   admin_correct_vault_collateral : (nat64, nat64, text) -> (Result);
   admin_mint_icusd : (nat64, principal, text) -> (Result_1);
+  admin_sweep_to_treasury : (text) -> (Result_1);
   borrow_from_vault : (VaultArg) -> (Result_2);
   claim_liquidity_returns : () -> (Result_1);
   clear_stuck_operations : (opt principal) -> (Result_1);
@@ -459,6 +470,10 @@ service : (ProtocolArg) -> {
   get_supported_collateral_types : () -> (
       vec record { principal; CollateralStatus },
     ) query;
+  get_rmr_ceiling : () -> (float64) query;
+  get_rmr_ceiling_cr : () -> (float64) query;
+  get_rmr_floor : () -> (float64) query;
+  get_rmr_floor_cr : () -> (float64) query;
   get_treasury_principal : () -> (opt principal) query;
   get_treasury_stats : () -> (TreasuryStats) query;
   get_vault_history : (nat64) -> (vec Event) query;
@@ -501,6 +516,10 @@ service : (ProtocolArg) -> {
   set_redemption_fee_floor : (float64) -> (Result);
   set_reserve_redemption_fee : (float64) -> (Result);
   set_reserve_redemptions_enabled : (bool) -> (Result);
+  set_rmr_ceiling : (float64) -> (Result);
+  set_rmr_ceiling_cr : (float64) -> (Result);
+  set_rmr_floor : (float64) -> (Result);
+  set_rmr_floor_cr : (float64) -> (Result);
   set_stability_pool_principal : (principal) -> (Result);
   set_stable_ledger_principal : (StableTokenType, principal) -> (Result);
   set_stable_token_enabled : (StableTokenType, bool) -> (Result);

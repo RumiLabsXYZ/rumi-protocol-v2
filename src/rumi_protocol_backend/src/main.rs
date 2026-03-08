@@ -16,6 +16,7 @@ use rumi_protocol_backend::logs::DEBUG;
 use rumi_protocol_backend::state::mutate_state;
 use rumi_protocol_backend::management;
 use rumi_protocol_backend::event;
+use rumi_protocol_backend::treasury;
 use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
@@ -2306,6 +2307,20 @@ async fn admin_correct_vault_collateral(
             .ok_or(ProtocolError::GenericError(format!("Vault #{} not found", vault_id)))
     })?;
 
+    // Safety: only allow downward corrections. Reducing collateral is conservative
+    // (protects protocol solvency). Increasing collateral could let someone borrow
+    // against phantom value — if collateral was under-reported, the safe fix is for
+    // the user to deposit more.
+    if new_collateral_amount > old_amount {
+        return Err(ProtocolError::GenericError(
+            format!(
+                "Admin corrections can only reduce collateral (current: {}, requested: {}). \
+                 To increase collateral, the vault owner should deposit more.",
+                old_amount, new_collateral_amount
+            )
+        ));
+    }
+
     mutate_state(|s| {
         event::record_admin_vault_correction(s, vault_id, old_amount, new_collateral_amount, reason.clone());
     });
@@ -2313,6 +2328,124 @@ async fn admin_correct_vault_collateral(
     log!(INFO, "[admin_correct_vault_collateral] Vault #{}: {} -> {} raw units. Reason: {}",
         vault_id, old_amount, new_collateral_amount, reason);
     Ok(())
+}
+
+/// Sweep untracked ICP surplus from the backend to treasury.
+///
+/// Auto-calculates the surplus: actual ICP balance minus the sum of all
+/// ICP vault collateral, pending margin/excess/redemption transfers, and
+/// pending treasury collateral. Only the surplus can be swept — it is
+/// physically impossible to touch tracked collateral with this function.
+#[update]
+async fn admin_sweep_to_treasury(reason: String) -> Result<u64, ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only developer can sweep to treasury".to_string(),
+        ));
+    }
+
+    let (treasury, icp_ledger, icp_fee) = read_state(|s| {
+        (s.treasury_principal, s.icp_ledger_principal, s.icp_ledger_fee)
+    });
+    let treasury = treasury.ok_or(ProtocolError::GenericError(
+        "Treasury principal not configured".to_string(),
+    ))?;
+
+    // 1. Query actual ICP balance of this canister
+    let actual_balance = management::get_token_balance(icp_ledger)
+        .await
+        .map_err(|e| ProtocolError::GenericError(format!("Failed to query ICP balance: {}", e)))?;
+
+    // 2. Sum all tracked ICP obligations
+    let tracked = read_state(|s| {
+        let mut total: u64 = 0;
+
+        // All ICP vault collateral
+        for vault in s.vault_id_to_vaults.values() {
+            if vault.collateral_type == s.icp_ledger_principal {
+                total = total.saturating_add(vault.collateral_amount);
+            }
+        }
+
+        // Pending margin transfers (ICP only)
+        for pmt in s.pending_margin_transfers.values() {
+            if pmt.collateral_type == s.icp_ledger_principal
+                || pmt.collateral_type == Principal::anonymous()
+            {
+                total = total.saturating_add(pmt.margin.0);
+            }
+        }
+
+        // Pending excess transfers (ICP only)
+        for pmt in s.pending_excess_transfers.values() {
+            if pmt.collateral_type == s.icp_ledger_principal
+                || pmt.collateral_type == Principal::anonymous()
+            {
+                total = total.saturating_add(pmt.margin.0);
+            }
+        }
+
+        // Pending redemption transfers (ICP only)
+        for pmt in s.pending_redemption_transfer.values() {
+            if pmt.collateral_type == s.icp_ledger_principal
+                || pmt.collateral_type == Principal::anonymous()
+            {
+                total = total.saturating_add(pmt.margin.0);
+            }
+        }
+
+        // Pending treasury collateral (ICP only)
+        for (amount, ledger) in &s.pending_treasury_collateral {
+            if *ledger == s.icp_ledger_principal {
+                total = total.saturating_add(*amount);
+            }
+        }
+
+        total
+    });
+
+    // 3. Compute surplus (leave 1 transfer fee as buffer)
+    let fee_buffer = icp_fee.0;
+    let surplus = actual_balance
+        .saturating_sub(tracked)
+        .saturating_sub(fee_buffer);
+
+    if surplus == 0 {
+        return Err(ProtocolError::GenericError(format!(
+            "No surplus to sweep (actual: {}, tracked: {}, fee buffer: {})",
+            actual_balance, tracked, fee_buffer
+        )));
+    }
+
+    // 4. Transfer surplus to treasury
+    let block_index = management::transfer_collateral(surplus, treasury, icp_ledger)
+        .await
+        .map_err(|e| ProtocolError::GenericError(format!("Transfer failed: {:?}", e)))?;
+
+    log!(
+        INFO,
+        "[admin_sweep_to_treasury] Swept {} e8s ICP to treasury (block {}). Reason: {}",
+        surplus,
+        block_index,
+        reason
+    );
+
+    // 5. Record audit event
+    event::record_admin_sweep_to_treasury(surplus, treasury, block_index, reason.clone());
+
+    // 6. Notify treasury for bookkeeping (non-critical)
+    let _ = treasury::notify_treasury_deposit(
+        treasury,
+        treasury::DepositType::LiquidationFee, // closest category for recovered funds
+        treasury::AssetType::ICP,
+        surplus,
+        block_index,
+    )
+    .await;
+
+    Ok(block_index)
 }
 
 // ICRC-21 Consent Message (delegates to icrc21 module)
