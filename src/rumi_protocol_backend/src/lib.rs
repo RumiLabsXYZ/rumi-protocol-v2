@@ -118,6 +118,7 @@ pub struct ProtocolStatus {
     pub manual_mode_override: bool,
     pub interest_pool_share: f64,
     pub weighted_average_interest_rate: f64,
+    pub borrowing_fee_curve_resolved: Vec<(f64, f64)>,
 }
 
 #[derive(CandidType, Deserialize, Debug)]
