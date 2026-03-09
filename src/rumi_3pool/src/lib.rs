@@ -8,6 +8,7 @@ pub mod math;
 pub mod swap;
 pub mod liquidity;
 pub mod transfers;
+pub mod admin;
 
 mod logs;
 
@@ -410,4 +411,33 @@ pub fn calc_swap(i: u8, j: u8, dx: u128) -> Result<u128, ThreePoolError> {
 #[query]
 pub fn get_admin_fees() -> Vec<u128> {
     read_state(|s| s.admin_fees.to_vec())
+}
+
+// ─── Admin Endpoints ───
+
+#[update]
+pub fn ramp_a(future_a: u64, future_a_time: u64) -> Result<(), ThreePoolError> {
+    let caller = ic_cdk::api::caller();
+    let now = ic_cdk::api::time() / 1_000_000_000;
+    admin::ramp_a(future_a, future_a_time, caller, now)
+}
+
+#[update]
+pub fn stop_ramp_a() -> Result<(), ThreePoolError> {
+    let caller = ic_cdk::api::caller();
+    let now = ic_cdk::api::time() / 1_000_000_000;
+    admin::stop_ramp_a(caller, now)
+}
+
+#[update]
+pub async fn withdraw_admin_fees() -> Result<Vec<u128>, ThreePoolError> {
+    let caller = ic_cdk::api::caller();
+    let fees = admin::withdraw_admin_fees(caller).await?;
+    Ok(fees.to_vec())
+}
+
+#[update]
+pub fn set_paused(paused: bool) -> Result<(), ThreePoolError> {
+    let caller = ic_cdk::api::caller();
+    admin::set_paused(caller, paused)
 }
