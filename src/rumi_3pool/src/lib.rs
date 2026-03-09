@@ -4,6 +4,7 @@ use ic_canister_log::log;
 pub mod types;
 pub mod state;
 pub mod math;
+pub mod swap;
 
 mod logs;
 
