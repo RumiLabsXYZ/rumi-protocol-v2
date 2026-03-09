@@ -3,7 +3,6 @@
 
 use ethnum::U256;
 
-const N_COINS: u64 = 3;
 const N_COINS_U256: U256 = U256::new(3);
 const MAX_ITERATIONS: usize = 256;
 
@@ -167,6 +166,30 @@ pub fn get_y_d(j: usize, xp: &[U256; 3], amp: u64, d: U256) -> Option<U256> {
     }
 
     None
+}
+
+// ─── Task 8: Precision normalization helpers ───
+
+/// Normalize a raw token balance to 18-decimal precision.
+/// `precision_mul` is the multiplier to go from native decimals to 18 decimals.
+/// e.g., for a 6-decimal token, precision_mul = 10^12.
+pub fn normalize_balance(raw: u128, precision_mul: u64) -> U256 {
+    U256::from(raw) * U256::from(precision_mul)
+}
+
+/// Convert a 18-decimal normalized balance back to native decimals.
+/// `precision_mul` is the same multiplier used in normalize_balance.
+pub fn denormalize_balance(normalized: U256, precision_mul: u64) -> u128 {
+    (normalized / U256::from(precision_mul)).as_u128()
+}
+
+/// Normalize all 3 balances using their respective precision multipliers.
+pub fn normalize_all(balances: &[u128; 3], precision_muls: &[u64; 3]) -> [U256; 3] {
+    [
+        normalize_balance(balances[0], precision_muls[0]),
+        normalize_balance(balances[1], precision_muls[1]),
+        normalize_balance(balances[2], precision_muls[2]),
+    ]
 }
 
 #[cfg(test)]
@@ -351,5 +374,66 @@ mod tests {
             "500k swap should have >0.1% slippage, slippage = {}",
             slippage
         );
+    }
+
+    // ─── Task 8 tests: precision normalization ───
+
+    #[test]
+    fn test_normalize_6_decimal() {
+        // 1M USDC in 6-decimal: 1_000_000 * 10^6 = 1_000_000_000_000
+        let raw: u128 = 1_000_000_000_000; // 1M with 6 decimals
+        let precision_mul: u64 = 1_000_000_000_000; // 10^12 (to go from 6 to 18 decimals)
+        let normalized = normalize_balance(raw, precision_mul);
+
+        // Expected: 1M * 10^18
+        let expected = U256::from(1_000_000u128) * U256::from(ONE_18);
+        assert_eq!(normalized, expected);
+    }
+
+    #[test]
+    fn test_normalize_8_decimal() {
+        // 1.0 icUSD in 8-decimal: 10^8 = 100_000_000
+        let raw: u128 = 100_000_000; // 1.0 with 8 decimals
+        let precision_mul: u64 = 10_000_000_000; // 10^10 (to go from 8 to 18 decimals)
+        let normalized = normalize_balance(raw, precision_mul);
+
+        // Expected: 10^18
+        let expected = U256::from(ONE_18);
+        assert_eq!(normalized, expected);
+    }
+
+    #[test]
+    fn test_denormalize_balance() {
+        // Reverse of normalize: 1M * 10^18 with mul=10^12 → 1M * 10^6
+        let normalized = U256::from(1_000_000u128) * U256::from(ONE_18);
+        let precision_mul: u64 = 1_000_000_000_000; // 10^12
+        let raw = denormalize_balance(normalized, precision_mul);
+
+        let expected: u128 = 1_000_000_000_000; // 1M in 6-decimal
+        assert_eq!(raw, expected);
+    }
+
+    #[test]
+    fn test_normalize_all() {
+        // Token 0: icUSD (8 decimals, mul = 10^10)
+        // Token 1: ckUSDT (6 decimals, mul = 10^12)
+        // Token 2: ckUSDC (6 decimals, mul = 10^12)
+        let balances: [u128; 3] = [
+            100_000_000,        // 1.0 icUSD (8 dec)
+            1_000_000,          // 1.0 ckUSDT (6 dec)
+            2_000_000,          // 2.0 ckUSDC (6 dec)
+        ];
+        let precision_muls: [u64; 3] = [
+            10_000_000_000,     // 10^10
+            1_000_000_000_000,  // 10^12
+            1_000_000_000_000,  // 10^12
+        ];
+
+        let result = normalize_all(&balances, &precision_muls);
+
+        let one_18 = U256::from(ONE_18);
+        assert_eq!(result[0], one_18);                       // 1.0 * 10^18
+        assert_eq!(result[1], one_18);                       // 1.0 * 10^18
+        assert_eq!(result[2], U256::from(2u64) * one_18);    // 2.0 * 10^18
     }
 }
