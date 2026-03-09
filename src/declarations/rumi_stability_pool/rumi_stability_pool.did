@@ -1,0 +1,230 @@
+// ──────────────────────────────────────────────────────────────
+// Rumi Stability Pool — Multi-Token Candid Interface
+// ──────────────────────────────────────────────────────────────
+
+// Init args
+type StabilityPoolInitArgs = record {
+  protocol_canister_id : principal;
+  authorized_admins : vec principal;
+};
+
+// ── Registry types ──
+
+type StablecoinConfig = record {
+  ledger_id : principal;
+  symbol : text;
+  decimals : nat8;
+  priority : nat8;
+  is_active : bool;
+  transfer_fee : opt nat64;
+};
+
+type CollateralInfo = record {
+  ledger_id : principal;
+  symbol : text;
+  decimals : nat8;
+  status : CollateralStatus;
+};
+
+type CollateralStatus = variant {
+  Active;
+  Paused;
+  Frozen;
+  Sunset;
+  Deprecated;
+};
+
+// ── Configuration ──
+
+type PoolConfiguration = record {
+  min_deposit_e8s : nat64;
+  max_liquidations_per_batch : nat64;
+  emergency_pause : bool;
+  authorized_admins : vec principal;
+};
+
+// ── Pool status / user position ──
+
+type StabilityPoolStatus = record {
+  total_deposits_e8s : nat64;
+  total_depositors : nat64;
+  total_liquidations_executed : nat64;
+  stablecoin_balances : vec record { principal; nat64 };
+  collateral_gains : vec record { principal; nat64 };
+  stablecoin_registry : vec StablecoinConfig;
+  collateral_registry : vec CollateralInfo;
+  emergency_paused : bool;
+  total_interest_received_e8s : nat64;
+  eligible_icusd_per_collateral : vec record { principal; nat64 };
+};
+
+type UserStabilityPosition = record {
+  stablecoin_balances : vec record { principal; nat64 };
+  collateral_gains : vec record { principal; nat64 };
+  opted_out_collateral : vec principal;
+  deposit_timestamp : nat64;
+  total_claimed_gains : vec record { principal; nat64 };
+  total_usd_value_e8s : nat64;
+  total_interest_earned_e8s : nat64;
+};
+
+// ── Liquidation types ──
+
+type LiquidatableVaultInfo = record {
+  vault_id : nat64;
+  collateral_type : principal;
+  debt_amount : nat64;
+  collateral_amount : nat64;
+};
+
+type LiquidationResult = record {
+  vault_id : nat64;
+  stables_consumed : vec record { principal; nat64 };
+  collateral_gained : nat64;
+  collateral_type : principal;
+  success : bool;
+  error_message : opt text;
+};
+
+type PoolLiquidationRecord = record {
+  vault_id : nat64;
+  timestamp : nat64;
+  stables_consumed : vec record { principal; nat64 };
+  collateral_gained : nat64;
+  collateral_type : principal;
+  depositors_count : nat64;
+  collateral_price_e8s : opt nat64;
+};
+
+// ── Error type ──
+
+type StabilityPoolError = variant {
+  InsufficientBalance : record { token : principal; required : nat64; available : nat64 };
+  AmountTooLow : record { minimum_e8s : nat64 };
+  NoPositionFound;
+  InsufficientPoolBalance;
+  Unauthorized;
+  TokenNotAccepted : record { ledger : principal };
+  TokenNotActive : record { ledger : principal };
+  CollateralNotFound : record { ledger : principal };
+  LedgerTransferFailed : record { reason : text };
+  InterCanisterCallFailed : record { target : text; method : text };
+  LiquidationFailed : record { vault_id : nat64; reason : text };
+  EmergencyPaused;
+  SystemBusy;
+  AlreadyOptedOut : record { collateral : principal };
+  AlreadyOptedIn : record { collateral : principal };
+};
+
+// ── ICRC-21: Canister Call Consent Messages ──
+
+type Icrc21ConsentMessageMetadata = record {
+  language : text;
+  utc_offset_minutes : opt int16;
+};
+
+type Icrc21DeviceSpec = variant {
+  GenericDisplay;
+  LineDisplay : record {
+    characters_per_line : nat16;
+    lines_per_page : nat16;
+  };
+};
+
+type Icrc21ConsentMessageSpec = record {
+  metadata : Icrc21ConsentMessageMetadata;
+  device_spec : opt Icrc21DeviceSpec;
+};
+
+type Icrc21ConsentMessageRequest = record {
+  method : text;
+  arg : blob;
+  user_preferences : Icrc21ConsentMessageSpec;
+};
+
+type Icrc21LineDisplayLine = record { line : text };
+type Icrc21LineDisplayPage = record { lines : vec Icrc21LineDisplayLine };
+
+type Icrc21ConsentMessage = variant {
+  GenericDisplayMessage : text;
+  LineDisplayMessage : record { pages : vec Icrc21LineDisplayPage };
+};
+
+type Icrc21ConsentMessageResponseMetadata = record {
+  language : text;
+  utc_offset_minutes : opt int16;
+};
+
+type Icrc21ConsentInfo = record {
+  consent_message : Icrc21ConsentMessage;
+  metadata : Icrc21ConsentMessageResponseMetadata;
+};
+
+type Icrc21ErrorInfo = record { description : text };
+
+type Icrc21Error = variant {
+  UnsupportedCanisterCall : Icrc21ErrorInfo;
+  ConsentMessageUnavailable : Icrc21ErrorInfo;
+  GenericError : record { error_code : nat; description : text };
+};
+
+type Icrc21ConsentMessageResponse = variant {
+  Ok : Icrc21ConsentInfo;
+  Err : Icrc21Error;
+};
+
+// ── ICRC-10: Supported Standards ──
+
+type Icrc10SupportedStandard = record {
+  name : text;
+  url : text;
+};
+
+// ──────────────────────────────────────────────────────────────
+// Service
+// ──────────────────────────────────────────────────────────────
+
+service : (StabilityPoolInitArgs) -> {
+
+  // ── Deposit / Withdraw / Claim ──
+  deposit : (principal, nat64) -> (variant { Ok; Err : StabilityPoolError });
+  withdraw : (principal, nat64) -> (variant { Ok; Err : StabilityPoolError });
+  claim_collateral : (principal) -> (variant { Ok : nat64; Err : StabilityPoolError });
+  claim_all_collateral : () -> (variant { Ok : vec record { principal; nat64 }; Err : StabilityPoolError });
+
+  // ── Opt-in / Opt-out ──
+  opt_out_collateral : (principal) -> (variant { Ok; Err : StabilityPoolError });
+  opt_in_collateral : (principal) -> (variant { Ok; Err : StabilityPoolError });
+
+  // ── Liquidation ──
+  notify_liquidatable_vaults : (vec LiquidatableVaultInfo) -> (vec LiquidationResult);
+  execute_liquidation : (nat64) -> (variant { Ok : LiquidationResult; Err : StabilityPoolError });
+
+  // ── Interest Revenue ──
+  receive_interest_revenue : (principal, nat64, opt principal) -> (variant { Ok; Err : StabilityPoolError });
+
+  // ── Admin: Registry ──
+  register_stablecoin : (StablecoinConfig) -> (variant { Ok; Err : StabilityPoolError });
+  register_collateral : (CollateralInfo) -> (variant { Ok; Err : StabilityPoolError });
+
+  // ── Admin: Configuration ──
+  update_pool_configuration : (PoolConfiguration) -> (variant { Ok; Err : StabilityPoolError });
+  emergency_pause : () -> (variant { Ok; Err : StabilityPoolError });
+  resume_operations : () -> (variant { Ok; Err : StabilityPoolError });
+  admin_reset_token_failures : (principal) -> (variant { Ok : text; Err : StabilityPoolError });
+  admin_correct_balance : (principal, principal, nat64) -> (variant { Ok : text; Err : StabilityPoolError });
+
+  // ── ICRC-21: Consent Messages ──
+  icrc21_canister_call_consent_message : (Icrc21ConsentMessageRequest) -> (Icrc21ConsentMessageResponse);
+
+  // ── ICRC-10: Supported Standards ──
+  icrc10_supported_standards : () -> (vec Icrc10SupportedStandard) query;
+
+  // ── Queries ──
+  get_pool_status : () -> (StabilityPoolStatus) query;
+  get_user_position : (opt principal) -> (opt UserStabilityPosition) query;
+  get_liquidation_history : (opt nat64) -> (vec PoolLiquidationRecord) query;
+  check_pool_capacity : (principal, nat64) -> (bool) query;
+  validate_pool_state : () -> (variant { Ok : text; Err : text }) query;
+  get_suspended_tokens : () -> (vec record { principal; nat32 }) query;
+};

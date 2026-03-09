@@ -10,8 +10,9 @@
 # dfx temporary files
 .dfx/
 
-# generated files
-**/declarations/
+# generated files — tracked in git so frontend builds from clean clone
+# Run `dfx generate` after changing .did files to update
+# **/declarations/
 
 # rust
 target/
