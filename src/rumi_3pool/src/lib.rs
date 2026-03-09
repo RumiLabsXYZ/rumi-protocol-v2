@@ -146,3 +146,223 @@ pub async fn swap(i: u8, j: u8, dx: u128, min_dy: u128) -> Result<u128, ThreePoo
 
     Ok(output)
 }
+
+// ─── Add Liquidity ───
+
+#[update]
+pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, ThreePoolError> {
+    // 1. Check not paused
+    if read_state(|s| s.is_paused) {
+        return Err(ThreePoolError::PoolPaused);
+    }
+
+    // 2. Convert Vec to [u128; 3]
+    if amounts.len() != 3 {
+        return Err(ThreePoolError::InvalidCoinIndex);
+    }
+    let amounts_arr: [u128; 3] = [amounts[0], amounts[1], amounts[2]];
+
+    // 3. Compute A and precision_muls
+    let amp = get_current_a();
+    let precision_muls = get_precision_muls();
+
+    // 4. Read current state
+    let (old_balances, lp_total_supply, swap_fee_bps) = read_state(|s| {
+        (s.balances, s.lp_total_supply, s.config.swap_fee_bps)
+    });
+
+    // 5. Calculate LP tokens to mint
+    let (lp_minted, _fees) = calc_add_liquidity(
+        &amounts_arr,
+        &old_balances,
+        &precision_muls,
+        lp_total_supply,
+        amp,
+        swap_fee_bps,
+    )?;
+
+    // 6. Slippage check
+    if lp_minted < min_lp {
+        return Err(ThreePoolError::SlippageExceeded);
+    }
+
+    // 7. Transfer each non-zero amount from user to pool
+    let caller = ic_cdk::api::caller();
+    for k in 0..3 {
+        if amounts_arr[k] > 0 {
+            let (ledger, symbol) = read_state(|s| {
+                (s.config.tokens[k].ledger_id, s.config.tokens[k].symbol.clone())
+            });
+            transfer_from_user(ledger, caller, amounts_arr[k])
+                .await
+                .map_err(|reason| ThreePoolError::TransferFailed {
+                    token: symbol,
+                    reason,
+                })?;
+        }
+    }
+
+    // 8. Update state
+    mutate_state(|s| {
+        for k in 0..3 {
+            s.balances[k] += amounts_arr[k];
+        }
+        let entry = s.lp_balances.entry(caller).or_insert(0);
+        *entry += lp_minted;
+        s.lp_total_supply += lp_minted;
+        s.is_initialized = true;
+    });
+
+    log!(INFO, "AddLiquidity: {:?} -> {} LP for {}", amounts_arr, lp_minted, caller);
+
+    Ok(lp_minted)
+}
+
+// ─── Remove Liquidity (proportional) ───
+
+#[update]
+pub async fn remove_liquidity(
+    lp_burn: u128,
+    min_amounts: Vec<u128>,
+) -> Result<Vec<u128>, ThreePoolError> {
+    // 1. Validate min_amounts length
+    if min_amounts.len() != 3 {
+        return Err(ThreePoolError::InvalidCoinIndex);
+    }
+    let min_arr: [u128; 3] = [min_amounts[0], min_amounts[1], min_amounts[2]];
+
+    if lp_burn == 0 {
+        return Err(ThreePoolError::ZeroAmount);
+    }
+
+    let caller = ic_cdk::api::caller();
+
+    // 2. Check caller has enough LP
+    let (user_lp, balances, lp_total_supply) = read_state(|s| {
+        let user_lp = s.lp_balances.get(&caller).copied().unwrap_or(0);
+        (user_lp, s.balances, s.lp_total_supply)
+    });
+
+    if user_lp < lp_burn {
+        return Err(ThreePoolError::InsufficientLiquidity);
+    }
+
+    if lp_total_supply == 0 {
+        return Err(ThreePoolError::PoolEmpty);
+    }
+
+    // 3. Calculate withdrawal amounts
+    let amounts = calc_remove_liquidity(lp_burn, &balances, lp_total_supply);
+
+    // 4. Check each amount >= min_amounts
+    for k in 0..3 {
+        if amounts[k] < min_arr[k] {
+            return Err(ThreePoolError::SlippageExceeded);
+        }
+    }
+
+    // 5. Deduct LP first (deduct-before-transfer pattern)
+    mutate_state(|s| {
+        let entry = s.lp_balances.get_mut(&caller).unwrap();
+        *entry -= lp_burn;
+        s.lp_total_supply -= lp_burn;
+        for k in 0..3 {
+            s.balances[k] -= amounts[k];
+        }
+    });
+
+    // 6. Transfer each non-zero amount to user
+    for k in 0..3 {
+        if amounts[k] > 0 {
+            let (ledger, symbol) = read_state(|s| {
+                (s.config.tokens[k].ledger_id, s.config.tokens[k].symbol.clone())
+            });
+            transfer_to_user(ledger, caller, amounts[k])
+                .await
+                .map_err(|reason| ThreePoolError::TransferFailed {
+                    token: symbol,
+                    reason,
+                })?;
+        }
+    }
+
+    log!(INFO, "RemoveLiquidity: {} LP -> {:?} for {}", lp_burn, amounts, caller);
+
+    Ok(amounts.to_vec())
+}
+
+// ─── Remove One Coin ───
+
+#[update]
+pub async fn remove_one_coin(
+    lp_burn: u128,
+    coin_index: u8,
+    min_amount: u128,
+) -> Result<u128, ThreePoolError> {
+    let idx = coin_index as usize;
+    if idx >= 3 {
+        return Err(ThreePoolError::InvalidCoinIndex);
+    }
+
+    let caller = ic_cdk::api::caller();
+
+    // 1. Check caller has enough LP
+    let (user_lp, balances, lp_total_supply) = read_state(|s| {
+        let user_lp = s.lp_balances.get(&caller).copied().unwrap_or(0);
+        (user_lp, s.balances, s.lp_total_supply)
+    });
+
+    if user_lp < lp_burn {
+        return Err(ThreePoolError::InsufficientLiquidity);
+    }
+
+    // 2. Compute A, precision_muls
+    let amp = get_current_a();
+    let precision_muls = get_precision_muls();
+    let fee_bps = read_state(|s| s.config.swap_fee_bps);
+
+    // 3. Calculate withdrawal
+    let (amount, fee) = calc_remove_one_coin(
+        lp_burn,
+        idx,
+        &balances,
+        &precision_muls,
+        lp_total_supply,
+        amp,
+        fee_bps,
+    )?;
+
+    // 4. Slippage check
+    if amount < min_amount {
+        return Err(ThreePoolError::SlippageExceeded);
+    }
+
+    // 5. Deduct LP and balance first
+    let admin_fee_bps = read_state(|s| s.config.admin_fee_bps);
+    let admin_fee_share = fee * (admin_fee_bps as u128) / 10_000;
+
+    mutate_state(|s| {
+        let entry = s.lp_balances.get_mut(&caller).unwrap();
+        *entry -= lp_burn;
+        s.lp_total_supply -= lp_burn;
+        s.balances[idx] -= amount + fee;
+        s.admin_fees[idx] += admin_fee_share;
+    });
+
+    // 6. Transfer to user
+    let (ledger, symbol) = read_state(|s| {
+        (s.config.tokens[idx].ledger_id, s.config.tokens[idx].symbol.clone())
+    });
+
+    transfer_to_user(ledger, caller, amount)
+        .await
+        .map_err(|reason| ThreePoolError::TransferFailed {
+            token: symbol,
+            reason,
+        })?;
+
+    log!(INFO, "RemoveOneCoin: {} LP -> {} of token {} for {} (fee: {})",
+        lp_burn, amount, coin_index, caller, fee);
+
+    Ok(amount)
+}
