@@ -333,6 +333,36 @@
     <div class="empty-state">
       <p class="empty-text">No liquidatable vaults. All positions are healthy.</p>
     </div>
+
+    {#if nonLiquidatableVaults.length > 0}
+      <div class="liq-list">
+        <div class="section-divider"></div>
+        <div class="section-header">Other Vaults</div>
+        {#each nonLiquidatableVaults as vault (vault.vault_id)}
+          {@const cr = calculateCollateralRatio(vault)}
+          {@const debt = getVaultDebt(vault)}
+          {@const ci = getVaultCollateralInfo(vault)}
+
+          <div class="liq-card liq-card-inactive">
+            <div class="card-body">
+              <div class="card-left">
+                <div class="left-header">
+                  <span class="vault-id">#{vault.vault_id}</span>
+                  <span class="cr-badge">
+                    {formatNumber(cr, 1)}%
+                  </span>
+                </div>
+                <div class="left-stats">
+                  <span class="stat"><span class="stat-label">Debt</span> <span class="stat-value">{formatStableDisplay(debt)} icUSD</span></span>
+                  <span class="stat-sep">·</span>
+                  <span class="stat"><span class="stat-label">Collateral</span> <span class="stat-value">{formatNumber(ci.collateralAmount, 4)} {ci.symbol}</span></span>
+                </div>
+              </div>
+            </div>
+          </div>
+        {/each}
+      </div>
+    {/if}
   {:else}
     <div class="liq-list">
       {#each sortedVaults as vault (vault.vault_id)}
