@@ -5,6 +5,7 @@ pub mod types;
 pub mod state;
 pub mod math;
 pub mod swap;
+pub mod liquidity;
 
 mod logs;
 
