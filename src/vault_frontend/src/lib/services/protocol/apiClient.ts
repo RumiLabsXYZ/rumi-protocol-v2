@@ -2222,6 +2222,16 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
         return [];
       }
     }
+
+    static async getAllVaults(): Promise<CandidVault[]> {
+      try {
+        const vaults = await ApiClient.getPublicData<CandidVault[]>('get_all_vaults');
+        return vaults;
+      } catch (err) {
+        console.error('Failed to get all vaults:', err);
+        return [];
+      }
+    }
   
     /**
      * Partially liquidate a specific vault

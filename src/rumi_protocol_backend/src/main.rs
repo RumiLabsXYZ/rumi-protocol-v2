@@ -37,6 +37,7 @@ pub struct StabilityPoolLiquidationResult {
     pub collateral_type: String,
     pub block_index: u64,
     pub fee: u64,
+    pub collateral_price_e8s: u64,
 }
 
 /// Stability pool configuration
@@ -602,7 +603,7 @@ async fn stability_pool_liquidate(vault_id: u64, max_debt_to_liquidate: u64) -> 
     }
 
     // Get vault info and validate it's liquidatable
-    let (vault, _collateral_price_usd, liquidatable_debt, collateral_available) = read_state(|s| {
+    let (vault, collateral_price_usd, liquidatable_debt, collateral_available) = read_state(|s| {
         match s.vault_id_to_vaults.get(&vault_id) {
             Some(vault) => {
                 // Per-collateral price lookup
@@ -653,6 +654,7 @@ async fn stability_pool_liquidate(vault_id: u64, max_debt_to_liquidate: u64) -> 
         collateral_type: vault.collateral_type.to_string(),
         block_index: result.block_index,
         fee: result.fee_amount_paid,
+        collateral_price_e8s: collateral_price_usd.to_e8s(),
     })
 }
 
@@ -696,6 +698,18 @@ fn get_liquidatable_vaults() -> Vec<CandidVault> {
                 }
                 ratio < s.get_min_liquidation_ratio_for(&vault.collateral_type)
             })
+            .cloned()
+            .map(CandidVault::from)
+            .collect::<Vec<CandidVault>>()
+    })
+}
+
+#[candid_method(query)]
+#[query]
+fn get_all_vaults() -> Vec<CandidVault> {
+    read_state(|s| {
+        s.vault_id_to_vaults
+            .values()
             .cloned()
             .map(CandidVault::from)
             .collect::<Vec<CandidVault>>()
