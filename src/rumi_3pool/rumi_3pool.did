@@ -1,3 +1,54 @@
-service : {
+type TokenConfig = record {
+  ledger_id : principal;
+  symbol : text;
+  decimals : nat8;
+  precision_mul : nat64;
+};
+
+type ThreePoolInitArgs = record {
+  tokens : vec TokenConfig;
+  initial_a : nat64;
+  swap_fee_bps : nat64;
+  admin_fee_bps : nat64;
+  admin : principal;
+};
+
+type PoolStatus = record {
+  balances : vec nat;
+  lp_total_supply : nat;
+  current_a : nat64;
+  virtual_price : nat;
+  swap_fee_bps : nat64;
+  admin_fee_bps : nat64;
+  tokens : vec TokenConfig;
+};
+
+type ThreePoolError = variant {
+  InsufficientOutput : record { expected_min : nat; actual : nat };
+  InsufficientLiquidity;
+  InvalidCoinIndex;
+  ZeroAmount;
+  PoolEmpty;
+  SlippageExceeded;
+  TransferFailed : record { token : text; reason : text };
+  Unauthorized;
+  MathOverflow;
+  InvariantNotConverged;
+  PoolPaused;
+};
+
+service : (ThreePoolInitArgs) -> {
   health : () -> (text) query;
+  swap : (nat8, nat8, nat, nat) -> (variant { Ok : nat; Err : ThreePoolError });
+  add_liquidity : (vec nat, nat) -> (variant { Ok : nat; Err : ThreePoolError });
+  remove_liquidity : (nat, vec nat) -> (variant { Ok : vec nat; Err : ThreePoolError });
+  remove_one_coin : (nat, nat8, nat) -> (variant { Ok : nat; Err : ThreePoolError });
+  get_pool_status : () -> (PoolStatus) query;
+  get_lp_balance : (principal) -> (nat) query;
+  calc_swap : (nat8, nat8, nat) -> (variant { Ok : nat; Err : ThreePoolError }) query;
+  get_admin_fees : () -> (vec nat) query;
+  ramp_a : (nat64, nat64) -> (variant { Ok; Err : ThreePoolError });
+  stop_ramp_a : () -> (variant { Ok; Err : ThreePoolError });
+  withdraw_admin_fees : () -> (variant { Ok : vec nat; Err : ThreePoolError });
+  set_paused : (bool) -> (variant { Ok; Err : ThreePoolError });
 }

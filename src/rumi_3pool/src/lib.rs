@@ -366,3 +366,48 @@ pub async fn remove_one_coin(
 
     Ok(amount)
 }
+
+// ─── Query Endpoints ───
+
+#[query]
+pub fn get_pool_status() -> PoolStatus {
+    let amp = get_current_a();
+    let precision_muls = get_precision_muls();
+
+    read_state(|s| {
+        let vp = virtual_price(&s.balances, &precision_muls, amp, s.lp_total_supply)
+            .unwrap_or(0);
+
+        PoolStatus {
+            balances: s.balances,
+            lp_total_supply: s.lp_total_supply,
+            current_a: amp,
+            virtual_price: vp,
+            swap_fee_bps: s.config.swap_fee_bps,
+            admin_fee_bps: s.config.admin_fee_bps,
+            tokens: s.config.tokens.clone(),
+        }
+    })
+}
+
+#[query]
+pub fn get_lp_balance(user: Principal) -> u128 {
+    read_state(|s| s.lp_balances.get(&user).copied().unwrap_or(0))
+}
+
+#[query]
+pub fn calc_swap(i: u8, j: u8, dx: u128) -> Result<u128, ThreePoolError> {
+    let amp = get_current_a();
+    let precision_muls = get_precision_muls();
+    let (balances, swap_fee_bps) = read_state(|s| (s.balances, s.config.swap_fee_bps));
+
+    let (output, _fee) =
+        calc_swap_output(i as usize, j as usize, dx, &balances, &precision_muls, amp, swap_fee_bps)?;
+
+    Ok(output)
+}
+
+#[query]
+pub fn get_admin_fees() -> Vec<u128> {
+    read_state(|s| s.admin_fees.to_vec())
+}
