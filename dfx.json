@@ -108,6 +108,16 @@
         }
       ]
     },
+    "rumi_3pool": {
+      "candid": "src/rumi_3pool/rumi_3pool.did",
+      "package": "rumi_3pool",
+      "type": "rust",
+      "metadata": [
+        {
+          "name": "candid:service"
+        }
+      ]
+    },
     "xrc": {
       "type": "pull",
       "id": "uf6dk-hyaaa-aaaaq-qaaaq-cai"
