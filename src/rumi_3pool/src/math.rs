@@ -192,6 +192,30 @@ pub fn normalize_all(balances: &[u128; 3], precision_muls: &[u64; 3]) -> [U256; 
     ]
 }
 
+// ─── Task 12: Virtual price ───
+
+/// Virtual price = D / lp_total_supply, scaled to 18 decimals.
+/// Returns None if lp_total_supply is 0.
+pub fn virtual_price(
+    balances: &[u128; 3],
+    precision_muls: &[u64; 3],
+    amp: u64,
+    lp_total_supply: u128,
+) -> Option<u128> {
+    if lp_total_supply == 0 {
+        return None;
+    }
+
+    let xp = normalize_all(balances, precision_muls);
+    let d = get_d(&xp, amp)?;
+
+    // virtual_price = D * 10^18 / lp_total_supply
+    let one_18 = U256::from(1_000_000_000_000_000_000u128);
+    let vp = d * one_18 / U256::from(lp_total_supply);
+
+    Some(vp.as_u128())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,5 +459,51 @@ mod tests {
         assert_eq!(result[0], one_18);                       // 1.0 * 10^18
         assert_eq!(result[1], one_18);                       // 1.0 * 10^18
         assert_eq!(result[2], U256::from(2u64) * one_18);    // 2.0 * 10^18
+    }
+
+    // ─── Task 12 tests: virtual_price ───
+
+    #[test]
+    fn test_virtual_price_initial() {
+        // Equal deposit of 1M each token
+        let balances: [u128; 3] = [
+            1_000_000 * 100_000_000,   // 1M icUSD (8 dec)
+            1_000_000 * 1_000_000,     // 1M ckUSDT (6 dec)
+            1_000_000 * 1_000_000,     // 1M ckUSDC (6 dec)
+        ];
+        let precision_muls: [u64; 3] = [
+            10_000_000_000,     // 10^10
+            1_000_000_000_000,  // 10^12
+            1_000_000_000_000,  // 10^12
+        ];
+        let amp = 100u64;
+
+        // For an equal initial deposit, D ≈ 3M * 10^18, and lp_supply = D
+        // So virtual_price should be ~1.0 * 10^18
+        let xp = normalize_all(&balances, &precision_muls);
+        let d = get_d(&xp, amp).unwrap();
+        let lp_supply = d.as_u128(); // First deposit mints D tokens
+
+        let vp = virtual_price(&balances, &precision_muls, amp, lp_supply)
+            .expect("virtual_price should return Some");
+
+        let one_18: u128 = 1_000_000_000_000_000_000;
+        let diff = if vp > one_18 { vp - one_18 } else { one_18 - vp };
+
+        // Should be very close to 1.0 * 10^18 (within rounding)
+        assert!(
+            diff < 1_000,
+            "virtual_price should be ~1e18, got {}, diff {}",
+            vp, diff
+        );
+    }
+
+    #[test]
+    fn test_virtual_price_zero_supply() {
+        let balances = [0u128; 3];
+        let precision_muls: [u64; 3] = [10_000_000_000, 1_000_000_000_000, 1_000_000_000_000];
+
+        let result = virtual_price(&balances, &precision_muls, 100, 0);
+        assert!(result.is_none(), "virtual_price should be None for zero supply");
     }
 }
