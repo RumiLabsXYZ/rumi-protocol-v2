@@ -390,6 +390,7 @@ type StabilityPoolLiquidationResult = record {
   success : bool;
   collateral_type : text;
   collateral_received : nat64;
+  collateral_price_e8s : nat64;
 };
 type StableTokenType = variant { CKUSDC; CKUSDT };
 type StandardRecord = record { url : text; name : text };
@@ -453,6 +454,7 @@ service : (ProtocolArg) -> {
   enter_recovery_mode : () -> (Result);
   exit_recovery_mode : () -> (Result);
   freeze_protocol : () -> (Result);
+  get_all_vaults : () -> (vec CandidVault) query;
   get_borrowing_fee : () -> (float64) query;
   get_ckstable_repay_fee : () -> (float64) query;
   get_collateral_config : (principal) -> (opt CollateralConfig) query;
