@@ -64,6 +64,7 @@ export class ProtocolService {
   static partialLiquidateVault = ApiClient.liquidateVaultPartial;
   static partialLiquidateVaultWithStable = ApiClient.liquidateVaultPartialWithStable;
   static getLiquidatableVaults = ApiClient.getLiquidatableVaults;
+  static getAllVaults = ApiClient.getAllVaults;
 
 
 
@@ -117,6 +118,7 @@ export const protocolService = {
   withdrawPartialCollateral: ProtocolService.withdrawPartialCollateral,
   getVaultById: ProtocolService.getVaultById,
   getLiquidatableVaults: ProtocolService.getLiquidatableVaults,
+  getAllVaults: ProtocolService.getAllVaults,
   liquidateVault: ProtocolService.liquidate_vault,
   partialLiquidateVault: ProtocolService.partialLiquidateVault,
   partialLiquidateVaultWithStable: ProtocolService.partialLiquidateVaultWithStable,

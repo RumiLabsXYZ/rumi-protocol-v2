@@ -12,6 +12,7 @@
   import { getLiquidationCR } from '$lib/protocol';
 
   let liquidatableVaults: CandidVault[] = [];
+  let allVaults: CandidVault[] = [];
   let icpPrice = 0;
   let liquidationBonus = 1.15; // Fallback; fetched dynamically from protocol
   let recoveryTargetCr = 1.55; // Fallback; fetched dynamically from protocol
@@ -47,6 +48,10 @@
 
   let animatedPrice = tweened(0, { duration: 600, easing: cubicOut });
   $: if (icpPrice > 0) { animatedPrice.set(icpPrice); }
+
+  $: nonLiquidatableVaults = allVaults
+    .filter(v => !liquidatableVaults.some(lv => lv.vault_id === v.vault_id))
+    .sort((a, b) => calculateCollateralRatio(a) - calculateCollateralRatio(b));
 
   $: sortedVaults = [...liquidatableVaults].sort((a, b) => {
     const crA = calculateCollateralRatio(a);
@@ -160,6 +165,24 @@
     } finally { isLoading = false; }
   }
 
+  async function loadAllVaults() {
+    try {
+      const vaults = await protocolService.getAllVaults();
+      allVaults = vaults.map(vault => ({
+        ...vault,
+        original_icp_margin_amount: vault.icp_margin_amount,
+        original_borrowed_icusd_amount: vault.borrowed_icusd_amount,
+        icp_margin_amount: Number(vault.icp_margin_amount || 0),
+        collateral_amount: Number(vault.collateral_amount || vault.icp_margin_amount || 0),
+        borrowed_icusd_amount: Number(vault.borrowed_icusd_amount || 0),
+        vault_id: Number(vault.vault_id || 0),
+        owner: vault.owner.toString()
+      }));
+    } catch (error) {
+      console.error("Error loading all vaults:", error);
+    }
+  }
+
   async function checkAndApproveAllowance(icusdAmount: number): Promise<boolean> {
     try {
       isApprovingAllowance = true;
@@ -265,11 +288,10 @@
   }
 
   onMount(() => {
-    refreshIcpPrice(); loadLiquidatableVaults();
-    // Trigger an immediate wallet balance refresh so Max is available without waiting
+    refreshIcpPrice(); loadLiquidatableVaults(); loadAllVaults();
     if ($wallet.isConnected) wallet.refreshBalance().catch(() => {});
     const pi = setInterval(refreshIcpPrice, 30000);
-    const vi = setInterval(loadLiquidatableVaults, 60000);
+    const vi = setInterval(() => { loadLiquidatableVaults(); loadAllVaults(); }, 60000);
     return () => { clearInterval(pi); clearInterval(vi); };
   });
 
@@ -297,7 +319,7 @@
   </div>
 
   <div class="liq-summary">
-    <span class="summary-stat">{sortedVaults.length} liquidatable vault{sortedVaults.length !== 1 ? 's' : ''}</span>
+    <span class="summary-stat">{sortedVaults.length} liquidatable vault{sortedVaults.length !== 1 ? 's' : ''} · {allVaults.length} total</span>
     <span class="summary-sep">·</span>
     <button class="summary-refresh" on:click={loadLiquidatableVaults} disabled={isLoading}>
       {isLoading ? 'Loading…' : 'Refresh'}
@@ -399,6 +421,34 @@
           </div>
         </div>
       {/each}
+
+      {#if nonLiquidatableVaults.length > 0}
+        <div class="section-divider"></div>
+        <div class="section-header">All Vaults</div>
+        {#each nonLiquidatableVaults as vault (vault.vault_id)}
+          {@const cr = calculateCollateralRatio(vault)}
+          {@const debt = getVaultDebt(vault)}
+          {@const ci = getVaultCollateralInfo(vault)}
+
+          <div class="liq-card liq-card-inactive">
+            <div class="card-body">
+              <div class="card-left">
+                <div class="left-header">
+                  <span class="vault-id">#{vault.vault_id}</span>
+                  <span class="cr-badge">
+                    {formatNumber(cr, 1)}%
+                  </span>
+                </div>
+                <div class="left-stats">
+                  <span class="stat"><span class="stat-label">Debt</span> <span class="stat-value">{formatStableDisplay(debt)} icUSD</span></span>
+                  <span class="stat-sep">·</span>
+                  <span class="stat"><span class="stat-label">Collateral</span> <span class="stat-value">{formatNumber(ci.collateralAmount, 4)} {ci.symbol}</span></span>
+                </div>
+              </div>
+            </div>
+          </div>
+        {/each}
+      {/if}
     </div>
   {/if}
 </div>
@@ -572,6 +622,22 @@
   .liq-input::-webkit-outer-spin-button,
   .liq-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
   .liq-input[type=number] { -moz-appearance: textfield; appearance: textfield; }
+
+  .liq-card-inactive { opacity: 0.7; }
+  .section-divider {
+    height: 1px;
+    background: var(--rumi-border);
+    margin: 0.75rem 0;
+    opacity: 0.5;
+  }
+  .section-header {
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--rumi-text-muted);
+    margin-bottom: 0.375rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
 
   @media (max-width: 640px) {
     .liq-header { flex-wrap: wrap; }
