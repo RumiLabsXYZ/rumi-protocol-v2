@@ -38,7 +38,7 @@ impl TryFrom<u8> for CoinIndex {
 // ─── Token & Pool Config ───
 
 /// Configuration for a single token in the pool.
-#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenConfig {
     /// Ledger canister principal for this token.
     pub ledger_id: Principal,
@@ -124,7 +124,7 @@ pub struct PoolStatus {
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
 pub enum ThreePoolError {
     /// Output amount is below the caller's minimum.
-    InsufficientOutput,
+    InsufficientOutput { expected_min: u128, actual: u128 },
     /// Not enough liquidity in the pool for this operation.
     InsufficientLiquidity,
     /// Coin index is out of range (must be 0, 1, or 2).
@@ -136,7 +136,7 @@ pub enum ThreePoolError {
     /// Slippage tolerance exceeded.
     SlippageExceeded,
     /// ICRC-1 ledger transfer failed.
-    TransferFailed { reason: String },
+    TransferFailed { token: String, reason: String },
     /// Caller is not authorized for this operation.
     Unauthorized,
     /// Arithmetic overflow in u256 math.
