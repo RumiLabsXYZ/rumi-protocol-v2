@@ -79,6 +79,96 @@ pub fn get_d(xp: &[U256; 3], amp: u64) -> Option<U256> {
     None // Did not converge
 }
 
+// ─── Task 7: Solve for single token balance via Newton's method ───
+
+/// Given a swap where token `i` has new balance `x`, compute the new balance
+/// of token `j` that maintains the invariant D.
+///
+/// `xp` contains the current normalized balances (before the swap).
+/// `amp` is the raw amplification coefficient.
+/// `d` is the current invariant.
+pub fn get_y(i: usize, j: usize, x: U256, xp: &[U256; 3], amp: u64, d: U256) -> Option<U256> {
+    assert!(i != j, "get_y: i must not equal j");
+    assert!(i < 3 && j < 3, "get_y: indices must be < 3");
+
+    let ann = U256::from(amp) * N_COINS_U256;
+
+    // Build c and S_ from the known balances (all except j)
+    // For k == i, use x (new balance); for k == j, skip; else use xp[k]
+    let mut s_ = U256::ZERO;
+    let mut c = d;
+    for k in 0..3 {
+        let x_k = if k == i {
+            x
+        } else if k == j {
+            continue;
+        } else {
+            xp[k]
+        };
+        s_ += x_k;
+        // c = c * D / (x_k * N_COINS)
+        c = c * d / (x_k * N_COINS_U256);
+    }
+    // c = c * D / (Ann * N_COINS)
+    c = c * d / (ann * N_COINS_U256);
+
+    let b = s_ + d / ann; // b = S_ + D/Ann
+
+    // Newton's method: y starts at D
+    let mut y = d;
+    for _ in 0..MAX_ITERATIONS {
+        // y_new = (y^2 + c) / (2*y + b - D)
+        let y_new = (y * y + c) / (U256::from(2u64) * y + b - d);
+
+        let diff = if y_new > y { y_new - y } else { y - y_new };
+        if diff <= U256::ONE {
+            return Some(y_new);
+        }
+        y = y_new;
+    }
+
+    None // Did not converge
+}
+
+/// Variant of get_y that solves for xp[j] given the other balances and a
+/// target D. Used for `remove_liquidity_one_coin` where we need to find what
+/// balance of token j corresponds to a reduced D.
+///
+/// Unlike get_y, there's no "input swap" -- we just solve for one balance
+/// given the others remain unchanged and D changes.
+pub fn get_y_d(j: usize, xp: &[U256; 3], amp: u64, d: U256) -> Option<U256> {
+    assert!(j < 3, "get_y_d: j must be < 3");
+
+    let ann = U256::from(amp) * N_COINS_U256;
+
+    let mut s_ = U256::ZERO;
+    let mut c = d;
+    for k in 0..3 {
+        if k == j {
+            continue;
+        }
+        let x_k = xp[k];
+        s_ += x_k;
+        c = c * d / (x_k * N_COINS_U256);
+    }
+    c = c * d / (ann * N_COINS_U256);
+
+    let b = s_ + d / ann;
+
+    let mut y = d;
+    for _ in 0..MAX_ITERATIONS {
+        let y_new = (y * y + c) / (U256::from(2u64) * y + b - d);
+
+        let diff = if y_new > y { y_new - y } else { y - y_new };
+        if diff <= U256::ONE {
+            return Some(y_new);
+        }
+        y = y_new;
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,5 +259,97 @@ mod tests {
                 amp
             );
         }
+    }
+
+    // ─── Task 7 tests: get_y, get_y_d ───
+
+    #[test]
+    fn test_get_y_identity() {
+        // When we "swap" but the input balance doesn't actually change,
+        // the output balance should remain approximately the same.
+        let one_million = U256::from(1_000_000u128) * U256::from(ONE_18);
+        let xp = [one_million, one_million, one_million];
+        let amp = 100u64;
+        let d = get_d(&xp, amp).unwrap();
+
+        // Swap token 0 -> token 1, but input x = xp[0] (no change)
+        let y = get_y(0, 1, xp[0], &xp, amp, d).unwrap();
+
+        let diff = if y > xp[1] { y - xp[1] } else { xp[1] - y };
+        // Should be within 1 unit (Newton's convergence threshold)
+        assert!(
+            diff <= U256::from(2u64),
+            "Identity swap: y should ≈ xp[1], diff = {}",
+            diff
+        );
+    }
+
+    #[test]
+    fn test_get_y_swap_output_reasonable() {
+        // Pool: 1M/1M/1M with A=100. Swap 1000 of token 0 for token 1.
+        let one_million = U256::from(1_000_000u128) * U256::from(ONE_18);
+        let xp = [one_million, one_million, one_million];
+        let amp = 100u64;
+        let d = get_d(&xp, amp).unwrap();
+
+        let swap_in = U256::from(1_000u128) * U256::from(ONE_18);
+        let new_x = xp[0] + swap_in;
+        let y = get_y(0, 1, new_x, &xp, amp, d).unwrap();
+
+        // Token 1's new balance should be less than before (user receives tokens)
+        assert!(y < xp[1], "y should be less than original balance");
+
+        let output = xp[1] - y;
+        let expected_output = swap_in; // ~1000 for a balanced pool
+
+        // Output should be within 1% of input for a balanced pool
+        let tolerance = expected_output / U256::from(100u64); // 1%
+        let diff = if output > expected_output {
+            output - expected_output
+        } else {
+            expected_output - output
+        };
+        assert!(
+            diff < tolerance,
+            "Output ~{} should be within 1% of input ~{}",
+            output,
+            expected_output
+        );
+    }
+
+    #[test]
+    fn test_get_y_large_swap_has_slippage() {
+        // Pool: 1M/1M/1M with A=100. Swap 500k of token 0 (50% of pool).
+        let one_million = U256::from(1_000_000u128) * U256::from(ONE_18);
+        let xp = [one_million, one_million, one_million];
+        let amp = 100u64;
+        let d = get_d(&xp, amp).unwrap();
+
+        let swap_in = U256::from(500_000u128) * U256::from(ONE_18);
+        let new_x = xp[0] + swap_in;
+        let y = get_y(0, 1, new_x, &xp, amp, d).unwrap();
+
+        let output = xp[1] - y;
+
+        // With 50% of pool swapped, there should be meaningful slippage
+        // Output should be significantly less than 500k
+        assert!(
+            output < swap_in,
+            "Large swap should have slippage: output {} < input {}",
+            output,
+            swap_in
+        );
+
+        // With A=100, a 500k swap in a 1M/1M/1M 3pool produces ~0.65% slippage.
+        // Verify slippage is meaningful (> 0.1%) -- StableSwap is designed to
+        // minimize slippage, so even large trades have relatively low slippage
+        // compared to a constant-product AMM.
+        let slippage_threshold = swap_in / U256::from(1000u64); // 0.1%
+        let slippage = swap_in - output;
+        assert!(
+            slippage > slippage_threshold,
+            "500k swap should have >0.1% slippage, slippage = {}",
+            slippage
+        );
     }
 }
