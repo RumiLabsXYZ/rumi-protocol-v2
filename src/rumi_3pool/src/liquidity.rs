@@ -89,6 +89,90 @@ pub fn calc_add_liquidity(
     Ok((lp_minted.as_u128(), fees_native))
 }
 
+/// Proportional withdrawal: no fees, returns array of amounts in native decimals.
+pub fn calc_remove_liquidity(
+    lp_burn: u128,
+    balances: &[u128; 3],
+    lp_total_supply: u128,
+) -> [u128; 3] {
+    [
+        balances[0] * lp_burn / lp_total_supply,
+        balances[1] * lp_burn / lp_total_supply,
+        balances[2] * lp_burn / lp_total_supply,
+    ]
+}
+
+/// Single-token withdrawal: user burns LP and receives one token.
+/// Returns (amount_native, fee_native).
+pub fn calc_remove_one_coin(
+    lp_burn: u128,
+    coin_index: usize,
+    balances: &[u128; 3],
+    precision_muls: &[u64; 3],
+    lp_total_supply: u128,
+    amp: u64,
+    fee_bps: u64,
+) -> Result<(u128, u128), ThreePoolError> {
+    if coin_index >= 3 {
+        return Err(ThreePoolError::InvalidCoinIndex);
+    }
+    if lp_burn == 0 {
+        return Err(ThreePoolError::ZeroAmount);
+    }
+    if lp_total_supply == 0 {
+        return Err(ThreePoolError::PoolEmpty);
+    }
+
+    let xp = normalize_all(balances, precision_muls);
+
+    // D0: current invariant
+    let d0 = get_d(&xp, amp).ok_or(ThreePoolError::InvariantNotConverged)?;
+
+    // D1: new invariant after burning LP
+    // D1 = D0 - lp_burn * D0 / lp_supply
+    let d1 = d0 - U256::from(lp_burn) * d0 / U256::from(lp_total_supply);
+
+    // new_y without fees: what token j balance would be at D1
+    let new_y = get_y_d(coin_index, &xp, amp, d1).ok_or(ThreePoolError::InvariantNotConverged)?;
+
+    // Imbalance fee: fee_bps * N / (4 * (N-1))
+    let imbalance_fee_bps = fee_bps * 3 / (4 * 2);
+
+    // Compute reduced xp with fees applied
+    let mut xp_reduced = xp;
+    for k in 0..3 {
+        // ideal = xp[k] * D1 / D0
+        let ideal = xp[k] * d1 / d0;
+
+        // diff = |xp[k] - ideal|
+        let diff = if xp[k] > ideal {
+            xp[k] - ideal
+        } else {
+            ideal - xp[k]
+        };
+
+        // Subtract fee from the balance
+        xp_reduced[k] = xp[k] - diff * U256::from(imbalance_fee_bps) / U256::from(10_000u64);
+    }
+
+    // new_y_reduced: what token j balance would be after fee adjustment
+    let new_y_reduced = get_y_d(coin_index, &xp_reduced, amp, d1)
+        .ok_or(ThreePoolError::InvariantNotConverged)?;
+
+    // dy (amount user receives, after fees) = xp_reduced[coin_index] - new_y_reduced
+    let dy = xp_reduced[coin_index] - new_y_reduced;
+
+    // fee = (xp[coin_index] - new_y) - dy
+    // This is the difference between the no-fee withdrawal and the after-fee withdrawal
+    let dy_no_fee = xp[coin_index] - new_y;
+    let fee_normalized = dy_no_fee - dy;
+
+    Ok((
+        denormalize_balance(dy, precision_muls[coin_index]),
+        denormalize_balance(fee_normalized, precision_muls[coin_index]),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,5 +316,70 @@ mod tests {
             &[0, 0, 0], &test_balances(), &test_precision_muls(), 1000, 100, 4,
         );
         assert!(matches!(result, Err(ThreePoolError::ZeroAmount)));
+    }
+
+    // ─── Task 11 tests: remove_liquidity ───
+
+    #[test]
+    fn test_calc_remove_liquidity_proportional() {
+        let balances = test_balances();
+        let lp_supply = 3_000_000u128 * 1_000_000_000_000_000_000u128; // ~3M * 10^18
+
+        // Burn 10% of LP
+        let lp_burn = lp_supply / 10;
+
+        let amounts = calc_remove_liquidity(lp_burn, &balances, lp_supply);
+
+        // Should get 10% of each balance
+        for k in 0..3 {
+            let expected = balances[k] / 10;
+            assert_eq!(
+                amounts[k], expected,
+                "proportional withdrawal: amounts[{}] = {}, expected {}",
+                k, amounts[k], expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_calc_remove_one_coin() {
+        let balances = test_balances();
+        let precision_muls = test_precision_muls();
+        let amp = 100u64;
+        let fee_bps = 4u64;
+
+        // Get initial LP supply from a first deposit
+        let (lp_supply, _) = calc_add_liquidity(
+            &balances, &[0u128; 3], &precision_muls, 0, amp, fee_bps,
+        ).unwrap();
+
+        // Burn 10% of LP to get ckUSDT (token 1)
+        let lp_burn = lp_supply / 10;
+
+        let (amount, fee) = calc_remove_one_coin(
+            lp_burn, 1, &balances, &precision_muls, lp_supply, amp, fee_bps,
+        ).expect("remove_one_coin should succeed");
+
+        // Amount should be meaningful (close to 10% of 3M worth, withdrawn in ckUSDT)
+        // Due to single-token withdrawal penalty, it'll be somewhat less than
+        // the proportional value
+        assert!(amount > 0, "should receive some tokens");
+
+        // Should be roughly 300k ckUSDT (10% of 3M pool value, all in one token)
+        // but less due to slippage
+        let expected_approx = 300_000 * 1_000_000u128; // 300k ckUSDT in native
+        assert!(
+            amount < expected_approx,
+            "single-coin withdrawal should be less than ideal amount: {} < {}",
+            amount, expected_approx
+        );
+        assert!(
+            amount > expected_approx * 95 / 100,
+            "single-coin withdrawal should be close to ideal: {} > 95% of {}",
+            amount, expected_approx
+        );
+
+        // Fee should be nonzero
+        assert!(fee > 0, "single-token removal should have a fee, got {}", fee);
     }
 }
