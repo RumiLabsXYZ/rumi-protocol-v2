@@ -145,20 +145,24 @@
     if (max > 0) liquidationAmounts[vault.vault_id] = formatStableTx(max);
   }
 
+  function normalizeVault(vault: CandidVault): CandidVault {
+    return {
+      ...vault,
+      original_icp_margin_amount: vault.icp_margin_amount,
+      original_borrowed_icusd_amount: vault.borrowed_icusd_amount,
+      icp_margin_amount: Number(vault.icp_margin_amount || 0),
+      collateral_amount: Number(vault.collateral_amount || vault.icp_margin_amount || 0),
+      borrowed_icusd_amount: Number(vault.borrowed_icusd_amount || 0),
+      vault_id: Number(vault.vault_id || 0),
+      owner: vault.owner.toString()
+    };
+  }
+
   async function loadLiquidatableVaults() {
     isLoading = true; liquidationError = "";
     try {
       const vaults = await protocolService.getLiquidatableVaults();
-      liquidatableVaults = vaults.map(vault => ({
-        ...vault,
-        original_icp_margin_amount: vault.icp_margin_amount,
-        original_borrowed_icusd_amount: vault.borrowed_icusd_amount,
-        icp_margin_amount: Number(vault.icp_margin_amount || 0),
-        collateral_amount: Number(vault.collateral_amount || vault.icp_margin_amount || 0),
-        borrowed_icusd_amount: Number(vault.borrowed_icusd_amount || 0),
-        vault_id: Number(vault.vault_id || 0),
-        owner: vault.owner.toString()
-      }));
+      liquidatableVaults = vaults.map(normalizeVault);
     } catch (error) {
       console.error("Error loading liquidatable vaults:", error);
       liquidationError = "Failed to load liquidatable vaults.";
@@ -168,16 +172,7 @@
   async function loadAllVaults() {
     try {
       const vaults = await protocolService.getAllVaults();
-      allVaults = vaults.map(vault => ({
-        ...vault,
-        original_icp_margin_amount: vault.icp_margin_amount,
-        original_borrowed_icusd_amount: vault.borrowed_icusd_amount,
-        icp_margin_amount: Number(vault.icp_margin_amount || 0),
-        collateral_amount: Number(vault.collateral_amount || vault.icp_margin_amount || 0),
-        borrowed_icusd_amount: Number(vault.borrowed_icusd_amount || 0),
-        vault_id: Number(vault.vault_id || 0),
-        owner: vault.owner.toString()
-      }));
+      allVaults = vaults.map(normalizeVault);
     } catch (error) {
       console.error("Error loading all vaults:", error);
     }
@@ -321,7 +316,7 @@
   <div class="liq-summary">
     <span class="summary-stat">{sortedVaults.length} liquidatable vault{sortedVaults.length !== 1 ? 's' : ''} · {allVaults.length} total</span>
     <span class="summary-sep">·</span>
-    <button class="summary-refresh" on:click={loadLiquidatableVaults} disabled={isLoading}>
+    <button class="summary-refresh" on:click={() => { loadLiquidatableVaults(); loadAllVaults(); }} disabled={isLoading}>
       {isLoading ? 'Loading…' : 'Refresh'}
     </button>
   </div>
@@ -424,7 +419,7 @@
 
       {#if nonLiquidatableVaults.length > 0}
         <div class="section-divider"></div>
-        <div class="section-header">All Vaults</div>
+        <div class="section-header">Other Vaults</div>
         {#each nonLiquidatableVaults as vault (vault.vault_id)}
           {@const cr = calculateCollateralRatio(vault)}
           {@const debt = getVaultDebt(vault)}
