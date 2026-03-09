@@ -1,16 +1,8 @@
 <script>
-  import { onMount } from 'svelte';
+  import { page } from '$app/stores';
   import '../app.css';
 
-  let currentPath = '/';
   let appUrl = 'https://app.rumiprotocol.xyz';
-
-  onMount(() => {
-    currentPath = window.location.pathname;
-    window.addEventListener('popstate', () => {
-      currentPath = window.location.pathname;
-    });
-  });
 </script>
 
 <div class="min-h-screen flex flex-col relative z-10">
@@ -21,8 +13,8 @@
     </a>
 
     <nav class="top-nav">
-      <a href="/" class="nav-link" class:active={currentPath === '/'}>Home</a>
-      <a href="/about" class="nav-link" class:active={currentPath === '/about'}>About</a>
+      <a href="/" class="nav-link" class:active={$page.url.pathname === '/'}>Home</a>
+      <a href="/about" class="nav-link" class:active={$page.url.pathname === '/about'}>About</a>
       <a href="/Rumi-Protocol-v2-Whitepaper.pdf" target="_blank" class="nav-link">Whitepaper</a>
       <a href="/AVAI_Security_Audit_Rumi_Protocol_Professional.pdf" target="_blank" class="nav-link">Audit</a>
     </nav>

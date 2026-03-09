@@ -11,63 +11,81 @@
 
   <div class="prose-section">
     <p>
-      Rumi Labs builds decentralized financial protocols natively on the Internet Computer. 
-      Our flagship product is <strong>icUSD</strong> — a CDP stablecoin that lets ICP holders 
-      borrow a stable dollar against their tokens without selling.
+      Rumi Labs builds decentralized financial protocols natively on the Internet Computer.
+      Our flagship product is <strong>icUSD</strong>, a CDP stablecoin that lets you borrow
+      a stable dollar against your crypto without selling it.
     </p>
 
     <p>
-      The protocol is fully on-chain. The frontend, the backend, the ledger, the price feeds — 
-      everything runs inside ICP canisters. There are no bridges, no off-chain oracles, 
-      no external dependencies. When you interact with Rumi Protocol, you're interacting 
-      directly with smart contracts served from the blockchain to your browser.
+      The protocol is fully on-chain. The frontend, the backend, the ledger, the price
+      feeds: everything runs inside ICP canisters. No bridges, no off-chain oracles,
+      no external dependencies. When you interact with Rumi Protocol, you're interacting
+      directly with canisters served from the blockchain to your browser.
     </p>
 
     <h2>How it works</h2>
 
     <p>
-      Users deposit ICP into personal vaults and mint icUSD stablecoins against that collateral. 
-      Vaults must maintain a minimum 133% collateral ratio. If a vault falls below this threshold 
-      during a market downturn, it can be liquidated — and anyone can participate as a liquidator 
-      to earn a reward.
+      Users deposit collateral (ICP, ckBTC, or ckXAUT) into personal vaults and mint
+      icUSD against it. Each collateral type has its own minimum collateral ratio,
+      liquidation threshold, and interest rate. If a vault's collateral ratio drops too
+      low during a market downturn, it can be liquidated, and anyone can participate as
+      a liquidator.
     </p>
 
     <p>
-      The Stability Pool provides a second layer of protection: depositors supply icUSD that 
-      absorbs liquidated debt, earning discounted ICP collateral in return. This mechanism 
-      keeps the system solvent without requiring a central operator.
+      The Stability Pool is the protocol's second layer of protection. Depositors supply
+      icUSD that absorbs liquidated debt, earning discounted collateral and interest from
+      borrowers in return. This keeps the system solvent without requiring a central operator.
+    </p>
+
+    <p>
+      icUSD holders can redeem against the protocol's reserve of ckUSDT and ckUSDC
+      (accumulated from repayments) at a 0.3% fee, or directly against vaults for the
+      underlying collateral. Both paths are subject to the Redemption Margin Ratio (RMR),
+      a dynamic discount that adjusts based on the system's overall collateral health.
+      When the system is well-collateralized, redeemers receive a small discount; when
+      it needs rebalancing, redemptions approach par.
     </p>
 
     <h2>Why ICP</h2>
 
     <p>
-      The Internet Computer excels at things most blockchains can't do: serve web applications 
-      directly, run autonomous services on timers, and provide on-chain price feeds through its 
-      Exchange Rate Canister. These properties make it possible to build a complete lending 
-      protocol with zero off-chain infrastructure.
+      The Internet Computer can do things most blockchains can't: serve full web applications
+      directly, run autonomous canister logic on timers, and provide native price feeds through
+      the Exchange Rate Canister. That makes it possible to build a complete CDP protocol with
+      zero off-chain infrastructure.
     </p>
 
     <p>
-      That said, DeFi on ICP is harder in some ways — there's no atomic composability between 
-      canisters, cross-canister calls are asynchronous, and the ecosystem tooling is still 
-      maturing. We build here because the ICP ecosystem needs foundational DeFi primitives, 
+      That said, DeFi on ICP is harder in some ways. There's no atomic composability between
+      canisters, cross-canister calls are asynchronous, and the ecosystem tooling is still
+      maturing. We build here because the ICP ecosystem needs foundational DeFi primitives,
       and a CDP stablecoin is the most fundamental one.
     </p>
 
     <h2>Open source & audited</h2>
 
     <p>
-      The entire codebase is public on <a href="https://github.com/RumiLabsXYZ/rumi-protocol-v2" target="_blank" rel="noopener">GitHub</a>. 
-      A security audit was completed by AVAI — the full report is available on this site. 
-      All canister IDs are public so anyone can verify the code running the protocol.
+      The entire codebase is public on <a href="https://github.com/RumiLabsXYZ/rumi-protocol-v2" target="_blank" rel="noopener">GitHub</a>.
+      A security audit was completed by AVAI, with a Code4rena audit contest planned to
+      further harden the protocol. All canister IDs are public so anyone can verify the
+      code that's running.
+    </p>
+
+    <p>
+      All canisters are currently mutable and under developer control. The plan is to
+      transition governance to an SNS DAO, but that comes after the protocol is
+      battle-tested and the code has been thoroughly audited.
     </p>
 
     <h2>What's next</h2>
 
     <p>
-      We're working toward multi-collateral support (ckBTC, ckETH), yield strategies, 
-      and eventual transition to decentralized governance through the ICP Service Nervous System (SNS). 
-      The goal is a protocol that runs without anyone's permission — owned and governed by its users.
+      Adding new collateral types is essentially drag and drop at this point, with more
+      assets on the way. Beyond that, we're working toward in-app stableswap LPs with
+      routing to external liquidity, cross-chain collateral and borrowing, and eventual
+      transition to decentralized governance through the ICP Service Nervous System (SNS).
     </p>
   </div>
 </section>
