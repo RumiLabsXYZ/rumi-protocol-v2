@@ -24,6 +24,11 @@
   let isApprovingAllowance = false;
   let liquidationAmounts: { [vaultId: number]: string } = {};
   let liquidationTokens: { [vaultId: number]: 'icUSD' | 'CKUSDT' | 'CKUSDC' } = {};
+  let otherVaultsPage = 0;
+  let otherVaultsPageSize = 25;
+
+  // Subscribe to collateral store so template re-renders when prices load
+  let collateralVersion = 0;
 
   function getLiqToken(vaultId: number): 'icUSD' | 'CKUSDT' | 'CKUSDC' {
     return liquidationTokens[vaultId] || 'icUSD';
@@ -49,9 +54,12 @@
   let animatedPrice = tweened(0, { duration: 600, easing: cubicOut });
   $: if (icpPrice > 0) { animatedPrice.set(icpPrice); }
 
-  $: nonLiquidatableVaults = allVaults
-    .filter(v => !liquidatableVaults.some(lv => lv.vault_id === v.vault_id))
-    .sort((a, b) => calculateCollateralRatio(a) - calculateCollateralRatio(b));
+  $: nonLiquidatableVaults = (() => {
+    void collateralVersion; // force re-compute when collateral data refreshes
+    return allVaults
+      .filter(v => !liquidatableVaults.some(lv => lv.vault_id === v.vault_id))
+      .sort((a, b) => calculateCollateralRatio(a) - calculateCollateralRatio(b));
+  })();
 
   $: sortedVaults = [...liquidatableVaults].sort((a, b) => {
     const crA = calculateCollateralRatio(a);
@@ -283,10 +291,18 @@
   }
 
   onMount(() => {
-    refreshIcpPrice(); loadLiquidatableVaults(); loadAllVaults();
+    // Fetch collateral store first so symbols/prices resolve correctly
+    collateralStore.fetchSupportedCollateral().then(() => {
+      collateralVersion++;
+      loadLiquidatableVaults(); loadAllVaults();
+    });
+    refreshIcpPrice();
     if ($wallet.isConnected) wallet.refreshBalance().catch(() => {});
     const pi = setInterval(refreshIcpPrice, 30000);
-    const vi = setInterval(() => { loadLiquidatableVaults(); loadAllVaults(); }, 60000);
+    const vi = setInterval(() => {
+      collateralStore.fetchSupportedCollateral(true).then(() => { collateralVersion++; });
+      loadLiquidatableVaults(); loadAllVaults();
+    }, 60000);
     return () => { clearInterval(pi); clearInterval(vi); };
   });
 
@@ -333,36 +349,6 @@
     <div class="empty-state">
       <p class="empty-text">No liquidatable vaults. All positions are healthy.</p>
     </div>
-
-    {#if nonLiquidatableVaults.length > 0}
-      <div class="liq-list">
-        <div class="section-divider"></div>
-        <div class="section-header">Other Vaults</div>
-        {#each nonLiquidatableVaults as vault (vault.vault_id)}
-          {@const cr = calculateCollateralRatio(vault)}
-          {@const debt = getVaultDebt(vault)}
-          {@const ci = getVaultCollateralInfo(vault)}
-
-          <div class="liq-card liq-card-inactive">
-            <div class="card-body">
-              <div class="card-left">
-                <div class="left-header">
-                  <span class="vault-id">#{vault.vault_id}</span>
-                  <span class="cr-badge">
-                    {formatNumber(cr, 1)}%
-                  </span>
-                </div>
-                <div class="left-stats">
-                  <span class="stat"><span class="stat-label">Debt</span> <span class="stat-value">{formatStableDisplay(debt)} icUSD</span></span>
-                  <span class="stat-sep">·</span>
-                  <span class="stat"><span class="stat-label">Collateral</span> <span class="stat-value">{formatNumber(ci.collateralAmount, 4)} {ci.symbol}</span></span>
-                </div>
-              </div>
-            </div>
-          </div>
-        {/each}
-      </div>
-    {/if}
   {:else}
     <div class="liq-list">
       {#each sortedVaults as vault (vault.vault_id)}
@@ -447,32 +433,65 @@
         </div>
       {/each}
 
-      {#if nonLiquidatableVaults.length > 0}
-        <div class="section-divider"></div>
-        <div class="section-header">Other Vaults</div>
-        {#each nonLiquidatableVaults as vault (vault.vault_id)}
-          {@const cr = calculateCollateralRatio(vault)}
-          {@const debt = getVaultDebt(vault)}
-          {@const ci = getVaultCollateralInfo(vault)}
+    </div>
+  {/if}
 
-          <div class="liq-card liq-card-inactive">
-            <div class="card-body">
-              <div class="card-left">
-                <div class="left-header">
-                  <span class="vault-id">#{vault.vault_id}</span>
-                  <span class="cr-badge">
-                    {formatNumber(cr, 1)}%
-                  </span>
-                </div>
-                <div class="left-stats">
-                  <span class="stat"><span class="stat-label">Debt</span> <span class="stat-value">{formatStableDisplay(debt)} icUSD</span></span>
-                  <span class="stat-sep">·</span>
-                  <span class="stat"><span class="stat-label">Collateral</span> <span class="stat-value">{formatNumber(ci.collateralAmount, 4)} {ci.symbol}</span></span>
-                </div>
+  {#if !isLoading && nonLiquidatableVaults.length > 0}
+    {@const totalPages = Math.ceil(nonLiquidatableVaults.length / otherVaultsPageSize)}
+    {@const pagedVaults = nonLiquidatableVaults.slice(otherVaultsPage * otherVaultsPageSize, (otherVaultsPage + 1) * otherVaultsPageSize)}
+    <div class="liq-list other-vaults-section">
+      <div class="section-divider"></div>
+      <div class="section-header-row">
+        <span class="section-header">Other Vaults</span>
+        <span class="section-count">{nonLiquidatableVaults.length} vault{nonLiquidatableVaults.length !== 1 ? 's' : ''}</span>
+      </div>
+      {#each pagedVaults as vault (vault.vault_id)}
+        {@const cr = calculateCollateralRatio(vault)}
+        {@const debt = getVaultDebt(vault)}
+        {@const ci = getVaultCollateralInfo(vault)}
+        {@const crDanger = cr < 130}
+        {@const crCaution = cr >= 130 && cr < 150}
+
+        <div class="liq-card liq-card-inactive">
+          <div class="card-body">
+            <div class="card-left">
+              <div class="left-header">
+                <span class="vault-id">#{vault.vault_id}</span>
+                <span class="cr-badge" class:cr-danger={crDanger} class:cr-caution={crCaution}>
+                  {#if crDanger}
+                    <svg class="warn-icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" /></svg>
+                  {/if}
+                  {formatNumber(cr, 1)}%
+                </span>
+              </div>
+              <div class="left-stats">
+                <span class="stat"><span class="stat-label">Debt</span> <span class="stat-value">{formatStableDisplay(debt)} icUSD</span></span>
+                <span class="stat-sep">·</span>
+                <span class="stat"><span class="stat-label">Collateral</span> <span class="stat-value">{formatNumber(ci.collateralAmount, 4)} {ci.symbol}</span></span>
               </div>
             </div>
           </div>
-        {/each}
+        </div>
+      {/each}
+
+      {#if totalPages > 1 || otherVaultsPageSize !== 25}
+        <div class="pagination-row">
+          <div class="page-size-select">
+            <span class="page-size-label">Show</span>
+            <select class="page-size-dropdown" bind:value={otherVaultsPageSize} on:change={() => { otherVaultsPage = 0; }}>
+              <option value={25}>25</option>
+              <option value={50}>50</option>
+              <option value={100}>100</option>
+            </select>
+          </div>
+          {#if totalPages > 1}
+            <div class="page-nav">
+              <button class="page-btn" disabled={otherVaultsPage === 0} on:click={() => otherVaultsPage--}>&lsaquo;</button>
+              <span class="page-info">{otherVaultsPage + 1} / {totalPages}</span>
+              <button class="page-btn" disabled={otherVaultsPage >= totalPages - 1} on:click={() => otherVaultsPage++}>&rsaquo;</button>
+            </div>
+          {/if}
+        </div>
       {/if}
     </div>
   {/if}
@@ -649,19 +668,61 @@
   .liq-input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 
   .liq-card-inactive { opacity: 0.7; }
+  .other-vaults-section { margin-top: 0.5rem; }
   .section-divider {
     height: 1px;
     background: var(--rumi-border);
     margin: 0.75rem 0;
     opacity: 0.5;
   }
+  .section-header-row {
+    display: flex; align-items: baseline; gap: 0.5rem;
+    margin-bottom: 0.375rem;
+  }
   .section-header {
     font-size: 0.75rem;
     font-weight: 500;
     color: var(--rumi-text-muted);
-    margin-bottom: 0.375rem;
     text-transform: uppercase;
     letter-spacing: 0.05em;
+  }
+  .section-count {
+    font-size: 0.6875rem;
+    color: var(--rumi-text-muted);
+    opacity: 0.6;
+  }
+
+  .pagination-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0.5rem 0; margin-top: 0.25rem;
+  }
+  .page-size-select {
+    display: flex; align-items: center; gap: 0.375rem;
+  }
+  .page-size-label {
+    font-size: 0.6875rem; color: var(--rumi-text-muted);
+  }
+  .page-size-dropdown {
+    background: var(--rumi-bg-surface2); border: 1px solid var(--rumi-border);
+    border-radius: 0.25rem; color: var(--rumi-text-secondary);
+    font-size: 0.6875rem; padding: 0.125rem 0.25rem; cursor: pointer;
+  }
+  .page-size-dropdown:focus { outline: none; border-color: var(--rumi-teal); }
+  .page-size-dropdown option { background: var(--rumi-bg-surface2); color: var(--rumi-text-primary); }
+  .page-nav {
+    display: flex; align-items: center; gap: 0.5rem;
+  }
+  .page-btn {
+    background: none; border: 1px solid var(--rumi-border); border-radius: 0.25rem;
+    color: var(--rumi-text-secondary); cursor: pointer;
+    font-size: 0.8125rem; padding: 0.125rem 0.375rem; line-height: 1;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .page-btn:hover:not(:disabled) { border-color: var(--rumi-text-muted); color: var(--rumi-text-primary); }
+  .page-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+  .page-info {
+    font-size: 0.6875rem; color: var(--rumi-text-muted);
+    font-variant-numeric: tabular-nums;
   }
 
   @media (max-width: 640px) {
