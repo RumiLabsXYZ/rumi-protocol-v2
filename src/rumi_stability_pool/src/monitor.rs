@@ -163,4 +163,5 @@ pub struct StabilityPoolLiquidationResult {
     pub collateral_type: String,
     pub block_index: u64,
     pub fee: u64,
+    pub collateral_price_e8s: u64,
 }

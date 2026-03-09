@@ -340,8 +340,9 @@ impl StabilityPoolState {
         collateral_type: Principal,
         stables_consumed: &BTreeMap<Principal, u64>,
         collateral_gained: u64,
+        collateral_price_e8s: u64,
     ) {
-        self.process_liquidation_gains_at(vault_id, collateral_type, stables_consumed, collateral_gained, ic_cdk::api::time());
+        self.process_liquidation_gains_at(vault_id, collateral_type, stables_consumed, collateral_gained, collateral_price_e8s, ic_cdk::api::time());
     }
 
     /// Core liquidation gain processing logic with explicit timestamp (testable without IC runtime).
@@ -351,6 +352,7 @@ impl StabilityPoolState {
         collateral_type: Principal,
         stables_consumed: &BTreeMap<Principal, u64>,
         collateral_gained: u64,
+        collateral_price_e8s: u64,
         timestamp: u64,
     ) {
         // Phase 1: Compute each opted-in depositor's share of the consumed stables (in e8s)
@@ -440,7 +442,7 @@ impl StabilityPoolState {
             collateral_gained,
             collateral_type,
             depositors_count: opted_in_principals.len() as u64,
-            collateral_price_e8s: Some(0), // TODO: pass from backend in future update
+            collateral_price_e8s: Some(collateral_price_e8s),
         };
         self.liquidation_history.push(record);
         self.total_liquidations_executed += 1;
@@ -960,6 +962,7 @@ mod tests {
             icp_ledger(),
             &stables_consumed,
             5_00000000, // 5 ICP
+            7_50000000, // collateral price $7.50
             1_000_000_000, // timestamp
         );
 
@@ -1026,7 +1029,7 @@ mod tests {
         stables_consumed.insert(icusd_ledger(), 20_00000000);
 
         state.process_liquidation_gains_at(
-            2, icp_ledger(), &stables_consumed, 10_00000000, 2_000_000_000,
+            2, icp_ledger(), &stables_consumed, 10_00000000, 7_50000000, 2_000_000_000,
         );
 
         // user_a should lose all 20 icUSD (only opted-in depositor)
@@ -1249,7 +1252,7 @@ mod tests {
         // total consumed = 40 USD
 
         state.process_liquidation_gains_at(
-            10, icp_ledger(), &stables_consumed, 20_00000000, 3_000_000_000,
+            10, icp_ledger(), &stables_consumed, 20_00000000, 7_50000000, 3_000_000_000,
         );
 
         // user_a has all the ckUSDT, so consumes all 20 ckUSDT
@@ -1282,7 +1285,7 @@ mod tests {
         stables_consumed.insert(icusd_ledger(), 100_00000000); // consume all 100 icUSD
 
         state.process_liquidation_gains_at(
-            5, icp_ledger(), &stables_consumed, 50_00000000, 4_000_000_000,
+            5, icp_ledger(), &stables_consumed, 50_00000000, 7_50000000, 4_000_000_000,
         );
 
         // user_a's stablecoin balance is zero, but they have collateral gains
@@ -1451,7 +1454,7 @@ mod tests {
         consumed.insert(icusd_ledger(), 1_000_000);
 
         state.process_liquidation_gains_at(
-            1, icp_ledger(), &consumed, 500_000, 1_000_000_000,
+            1, icp_ledger(), &consumed, 500_000, 7_50000000, 1_000_000_000,
         );
 
         // The critical assertion: aggregate should match sum of individual balances

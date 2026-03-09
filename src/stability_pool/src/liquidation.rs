@@ -264,6 +264,7 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
                 vault_info.collateral_type,
                 &actual_consumed,
                 total_collateral_gained,
+                0, // price not available from direct liquidation path
             );
         });
 
