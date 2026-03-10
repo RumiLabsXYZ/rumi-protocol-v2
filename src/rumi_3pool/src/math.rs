@@ -57,7 +57,9 @@ pub fn get_d(xp: &[U256; 3], amp: u64) -> Option<U256> {
         let mut d_p = d;
         for x in xp.iter() {
             // D_P = D_P * D / (x_i * N_COINS)
-            // Note: x should never be 0 when S > 0, but guard anyway
+            if *x == U256::ZERO {
+                return None; // Cannot compute invariant with zero balance
+            }
             d_p = d_p * d / (*x * N_COINS_U256);
         }
 
