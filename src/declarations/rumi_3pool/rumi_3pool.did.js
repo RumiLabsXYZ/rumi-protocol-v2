@@ -37,6 +37,48 @@ export const idlFactory = ({ IDL }) => {
     'lp_total_supply' : IDL.Nat,
     'balances' : IDL.Vec(IDL.Nat),
   });
+  const StandardRecord = IDL.Record({ 'url' : IDL.Text, 'name' : IDL.Text });
+  const ConsentMessageMetadata = IDL.Record({
+    'utc_offset_minutes' : IDL.Opt(IDL.Int16),
+    'language' : IDL.Text,
+  });
+  const DeviceSpec = IDL.Variant({
+    'GenericDisplay' : IDL.Null,
+    'LineDisplay' : IDL.Record({
+      'characters_per_line' : IDL.Nat16,
+      'lines_per_page' : IDL.Nat16,
+    }),
+  });
+  const ConsentMessageSpec = IDL.Record({
+    'metadata' : ConsentMessageMetadata,
+    'device_spec' : IDL.Opt(DeviceSpec),
+  });
+  const ConsentMessageRequest = IDL.Record({
+    'arg' : IDL.Vec(IDL.Nat8),
+    'method' : IDL.Text,
+    'user_preferences' : ConsentMessageSpec,
+  });
+  const LineDisplayPage = IDL.Record({ 'lines' : IDL.Vec(IDL.Text) });
+  const ConsentMessage = IDL.Variant({
+    'LineDisplayMessage' : IDL.Record({ 'pages' : IDL.Vec(LineDisplayPage) }),
+    'GenericDisplayMessage' : IDL.Text,
+  });
+  const ConsentInfo = IDL.Record({
+    'metadata' : ConsentMessageMetadata,
+    'consent_message' : ConsentMessage,
+  });
+  const ErrorInfo = IDL.Record({ 'description' : IDL.Text });
+  const Icrc21Error = IDL.Variant({
+    'GenericError' : IDL.Record({
+      'description' : IDL.Text,
+      'error_code' : IDL.Nat64,
+    }),
+    'UnsupportedCanisterCall' : ErrorInfo,
+    'ConsentMessageUnavailable' : ErrorInfo,
+  });
+  const Icrc28TrustedOriginsResponse = IDL.Record({
+    'trusted_origins' : IDL.Vec(IDL.Text),
+  });
   return IDL.Service({
     'add_liquidity' : IDL.Func(
         [IDL.Vec(IDL.Nat), IDL.Nat],
@@ -67,6 +109,21 @@ export const idlFactory = ({ IDL }) => {
     'get_lp_balance' : IDL.Func([IDL.Principal], [IDL.Nat], ['query']),
     'get_pool_status' : IDL.Func([], [PoolStatus], ['query']),
     'health' : IDL.Func([], [IDL.Text], ['query']),
+    'icrc10_supported_standards' : IDL.Func(
+        [],
+        [IDL.Vec(StandardRecord)],
+        ['query'],
+      ),
+    'icrc21_canister_call_consent_message' : IDL.Func(
+        [ConsentMessageRequest],
+        [IDL.Variant({ 'Ok' : ConsentInfo, 'Err' : Icrc21Error })],
+        [],
+      ),
+    'icrc28_trusted_origins' : IDL.Func(
+        [],
+        [Icrc28TrustedOriginsResponse],
+        ['query'],
+      ),
     'ramp_a' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : ThreePoolError })],

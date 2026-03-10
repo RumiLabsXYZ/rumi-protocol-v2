@@ -4,6 +4,7 @@ import { idlFactory as rumi_backendIDL } from '$declarations/rumi_protocol_backe
 import { idlFactory as icp_ledgerIDL } from '$declarations/icp_ledger/icp_ledger.did.js';
 import { idlFactory as icusd_ledgerIDL } from '$declarations/icusd_ledger/icusd_ledger.did.js';
 import { idlFactory as stabilityPoolIDL } from '$declarations/rumi_stability_pool/rumi_stability_pool.did.js';
+import { idlFactory as threePoolIDL } from '$declarations/rumi_3pool/rumi_3pool.did.js';
 import { createPNP, type PNP, ConfigBuilder, BaseSignerAdapter } from '@windoge98/plug-n-play';
 
 // Define types for supported canisters
@@ -11,7 +12,8 @@ export type CanisterType =
   | "rumi_backend"
   | "icp_ledger"
   | "icusd_ledger"
-  | "stability_pool";
+  | "stability_pool"
+  | "three_pool";
 
 // Collect all canister IDLs in one place
 export const canisterIDLs = {
@@ -19,6 +21,7 @@ export const canisterIDLs = {
   icp_ledger: icp_ledgerIDL,
   icusd_ledger: icusd_ledgerIDL,
   stability_pool: stabilityPoolIDL,
+  three_pool: threePoolIDL,
 };
 
 let globalPnp: PNP | null = null;
@@ -36,7 +39,8 @@ const getAllDelegationTargets = (): string[] => {
     CONFIG.currentCanisterId,      // Protocol canister
     CONFIG.currentIcpLedgerId,     // ICP Ledger  
     CONFIG.currentIcusdLedgerId,   // icUSD Ledger
-    CANISTER_IDS.STABILITY_POOL    // Stability Pool canister
+    CANISTER_IDS.STABILITY_POOL,   // Stability Pool canister
+    CANISTER_IDS.THREEPOOL         // 3pool (StableSwap)
   ].filter(Boolean); // Filter out any undefined values
 };
 

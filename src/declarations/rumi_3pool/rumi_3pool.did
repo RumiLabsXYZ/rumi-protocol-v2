@@ -37,6 +37,58 @@ type ThreePoolError = variant {
   PoolPaused;
 };
 
+// ─── ICRC-21 / ICRC-28 / ICRC-10 Types ───
+
+type ConsentMessageMetadata = record {
+  language : text;
+  utc_offset_minutes : opt int16;
+};
+
+type DeviceSpec = variant {
+  GenericDisplay;
+  LineDisplay : record { characters_per_line : nat16; lines_per_page : nat16 };
+};
+
+type ConsentMessageSpec = record {
+  metadata : ConsentMessageMetadata;
+  device_spec : opt DeviceSpec;
+};
+
+type ConsentMessageRequest = record {
+  method : text;
+  arg : blob;
+  user_preferences : ConsentMessageSpec;
+};
+
+type LineDisplayPage = record { lines : vec text };
+
+type ConsentMessage = variant {
+  GenericDisplayMessage : text;
+  LineDisplayMessage : record { pages : vec LineDisplayPage };
+};
+
+type ConsentInfo = record {
+  metadata : ConsentMessageMetadata;
+  consent_message : ConsentMessage;
+};
+
+type ErrorInfo = record { description : text };
+
+type Icrc21Error = variant {
+  GenericError : record { error_code : nat64; description : text };
+  UnsupportedCanisterCall : ErrorInfo;
+  ConsentMessageUnavailable : ErrorInfo;
+};
+
+type Icrc28TrustedOriginsResponse = record {
+  trusted_origins : vec text;
+};
+
+type StandardRecord = record {
+  name : text;
+  url : text;
+};
+
 service : (ThreePoolInitArgs) -> {
   health : () -> (text) query;
   swap : (nat8, nat8, nat, nat) -> (variant { Ok : nat; Err : ThreePoolError });
@@ -54,4 +106,7 @@ service : (ThreePoolInitArgs) -> {
   stop_ramp_a : () -> (variant { Ok; Err : ThreePoolError });
   withdraw_admin_fees : () -> (variant { Ok : vec nat; Err : ThreePoolError });
   set_paused : (bool) -> (variant { Ok; Err : ThreePoolError });
+  icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (variant { Ok : ConsentInfo; Err : Icrc21Error });
+  icrc28_trusted_origins : () -> (Icrc28TrustedOriginsResponse) query;
+  icrc10_supported_standards : () -> (vec StandardRecord) query;
 }

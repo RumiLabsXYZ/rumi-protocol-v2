@@ -519,15 +519,7 @@
 
 <style>
   .liquidity-panel {
-    background: var(--rumi-bg-surface1);
-    border: 1px solid var(--rumi-border);
-    border-radius: 0.75rem;
-    padding: 1.5rem;
-    box-shadow:
-      inset 0 1px 0 0 rgba(200, 210, 240, 0.03),
-      0 2px 8px -2px rgba(8, 11, 22, 0.6);
     width: 100%;
-    max-width: 420px;
   }
 
   /* ── Sub-tabs ── */

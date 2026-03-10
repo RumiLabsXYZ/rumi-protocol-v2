@@ -1,14 +1,17 @@
 <script lang="ts" context="module">
   import type { PoolStatus } from '../../lib/services/threePoolService';
   let _poolStatus: PoolStatus | null = null;
+  let _userLpBalance: bigint | null = null;
+  let _cachedForPrincipal: string | null = null;
 </script>
 
 <script lang="ts">
   import { onMount } from 'svelte';
   import { walletStore } from '../../lib/stores/wallet';
-  import { threePoolService, POOL_TOKENS, formatTokenAmount } from '../../lib/services/threePoolService';
+  import { threePoolService } from '../../lib/services/threePoolService';
   import SwapInterface from '../../lib/components/swap/SwapInterface.svelte';
   import LiquidityInterface from '../../lib/components/swap/LiquidityInterface.svelte';
+  import PoolInfoCard from '../../lib/components/swap/PoolInfoCard.svelte';
   import LoadingSpinner from '../../lib/components/common/LoadingSpinner.svelte';
 
   type PageTab = 'swap' | 'liquidity';
@@ -18,21 +21,32 @@
   let loading = !hasCachedData;
   let error = '';
   let poolStatus: PoolStatus | null = _poolStatus;
+  let userLpBalance: bigint = _userLpBalance ?? 0n;
 
   $: isConnected = $walletStore.isConnected;
+  $: principal = $walletStore.principal;
 
-  $: pageTitle = activePageTab === 'swap' ? 'Swap' : 'Liquidity';
-  $: pageSubtitle = activePageTab === 'swap'
-    ? 'Exchange stablecoins at low slippage'
-    : 'Add or remove pool liquidity';
-
-  async function loadPoolData() {
+  async function loadAllData() {
     try {
       if (!hasCachedData) loading = true;
       error = '';
+
       const status = await threePoolService.getPoolStatus();
       poolStatus = status;
       _poolStatus = status;
+
+      // Load user LP balance if connected
+      if (isConnected && principal) {
+        const lp = await threePoolService.getLpBalance(principal).catch(() => 0n);
+        userLpBalance = lp;
+        _userLpBalance = lp;
+        _cachedForPrincipal = principal.toString();
+      } else {
+        userLpBalance = 0n;
+        _userLpBalance = null;
+        _cachedForPrincipal = null;
+      }
+
       hasCachedData = true;
     } catch (err: any) {
       console.error('Failed to load 3pool data:', err);
@@ -44,32 +58,33 @@
     }
   }
 
-  onMount(() => { loadPoolData(); });
+  // Reload on wallet connection changes
+  let previousConnected = false;
+  $: if (isConnected !== previousConnected) {
+    previousConnected = isConnected;
+    if (!isConnected || principal?.toString() !== _cachedForPrincipal) {
+      _userLpBalance = null;
+      _cachedForPrincipal = null;
+      userLpBalance = 0n;
+    }
+    loadAllData();
+  }
+
+  onMount(() => { loadAllData(); });
 
   function handleSuccess() {
-    loadPoolData();
+    loadAllData();
     walletStore.refreshBalance();
   }
 </script>
 
 <svelte:head>
-  <title>{pageTitle} — Stablecoin Exchange | Rumi Protocol</title>
+  <title>Swap — Stablecoin Exchange | Rumi Protocol</title>
 </svelte:head>
 
 <div class="page-container">
   <div class="page-header">
-    <h1 class="page-title">{pageTitle}</h1>
-    <span class="page-subtitle">{pageSubtitle}</span>
-  </div>
-
-  <!-- Top-level tab switcher -->
-  <div class="page-tabs">
-    <button class="page-tab" class:active={activePageTab === 'swap'} on:click={() => { activePageTab = 'swap'; }}>
-      Swap
-    </button>
-    <button class="page-tab" class:active={activePageTab === 'liquidity'} on:click={() => { activePageTab = 'liquidity'; }}>
-      Liquidity
-    </button>
+    <h1 class="page-title">Stablecoin Exchange</h1>
   </div>
 
   {#if loading}
@@ -87,31 +102,38 @@
         </svg>
       </div>
       <p class="error-text">{error}</p>
-      <button class="btn-primary" on:click={loadPoolData}>Try Again</button>
+      <button class="btn-primary" on:click={loadAllData}>Try Again</button>
     </div>
   {:else}
-    <!-- Pool balance summary (shown on Liquidity tab) -->
-    {#if activePageTab === 'liquidity' && poolStatus}
-      <div class="pool-summary">
-        <div class="pool-summary-title">Pool Balances</div>
-        <div class="pool-summary-grid">
-          {#each POOL_TOKENS as token, i}
-            <div class="pool-balance-item">
-              <span class="token-dot" style="background:{token.color}"></span>
-              <span class="pool-balance-symbol">{token.symbol}</span>
-              <span class="pool-balance-amount">{formatTokenAmount(poolStatus.balances[i], token.decimals)}</span>
-            </div>
-          {/each}
+    <div class="page-layout">
+      <!-- LEFT: Info card (280px, sticky) -->
+      <div class="stats-column">
+        <PoolInfoCard {poolStatus} {userLpBalance} />
+      </div>
+
+      <!-- RIGHT: Swap/Liquidity panel -->
+      <div class="action-column">
+        <div class="action-panel">
+          <!-- Tab switcher (matches DepositInterface style) -->
+          <div class="tab-bar">
+            <button
+              class="tab" class:active={activePageTab === 'swap'}
+              on:click={() => { activePageTab = 'swap'; }}
+            >Swap</button>
+            <button
+              class="tab" class:active={activePageTab === 'liquidity'}
+              on:click={() => { activePageTab = 'liquidity'; }}
+            >Liquidity</button>
+            <div class="tab-indicator" class:right={activePageTab === 'liquidity'}></div>
+          </div>
+
+          {#if activePageTab === 'swap'}
+            <SwapInterface on:success={handleSuccess} />
+          {:else}
+            <LiquidityInterface on:success={handleSuccess} />
+          {/if}
         </div>
       </div>
-    {/if}
-
-    <div class="swap-layout">
-      {#if activePageTab === 'swap'}
-        <SwapInterface on:success={handleSuccess} />
-      {:else}
-        <LiquidityInterface on:success={handleSuccess} />
-      {/if}
     </div>
   {/if}
 </div>
@@ -119,17 +141,15 @@
 <style>
   .page-container { max-width: 820px; margin: 0 auto; padding-bottom: 4rem; }
 
+  /* ── Page header ── */
   .page-header {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     gap: 0.75rem;
-    margin-bottom: 1rem;
+    margin-bottom: 1.75rem;
     animation: fadeSlideIn 0.5s ease-out both;
-  }
-
-  .page-subtitle {
-    font-size: 0.8125rem;
-    color: var(--rumi-text-muted);
+    position: relative;
+    z-index: 10;
   }
 
   @keyframes fadeSlideIn {
@@ -137,105 +157,84 @@
     to { opacity: 1; transform: translateY(0); }
   }
 
-  /* ── Page-level tabs ── */
-  .page-tabs {
-    display: flex;
-    justify-content: center;
-    gap: 0;
-    margin-bottom: 1.5rem;
-    animation: fadeSlideIn 0.5s ease-out 0.02s both;
-  }
-
-  .page-tab {
-    padding: 0.5rem 1.25rem;
-    background: transparent;
-    border: 1px solid var(--rumi-border);
-    font-size: 0.8125rem;
-    font-weight: 500;
-    color: var(--rumi-text-muted);
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .page-tab:first-child {
-    border-radius: 0.5rem 0 0 0.5rem;
-    border-right: none;
-  }
-
-  .page-tab:last-child {
-    border-radius: 0 0.5rem 0.5rem 0;
-  }
-
-  .page-tab.active {
-    background: var(--rumi-bg-surface1);
-    color: var(--rumi-teal);
-    border-color: var(--rumi-teal);
-    font-weight: 600;
-  }
-
-  .page-tab:hover:not(.active) {
-    color: var(--rumi-text-secondary);
-    border-color: var(--rumi-border-hover);
-  }
-
-  /* ── Pool summary ── */
-  .pool-summary {
-    max-width: 420px;
-    margin: 0 auto 1rem;
-    padding: 0.75rem 1rem;
-    background: var(--rumi-bg-surface1);
-    border: 1px solid var(--rumi-border);
-    border-radius: 0.5rem;
-    animation: fadeSlideIn 0.5s ease-out 0.04s both;
-  }
-
-  .pool-summary-title {
-    font-size: 0.6875rem;
-    font-weight: 500;
-    color: var(--rumi-text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    margin-bottom: 0.5rem;
-  }
-
-  .pool-summary-grid {
-    display: flex;
-    gap: 1rem;
-    flex-wrap: wrap;
-  }
-
-  .pool-balance-item {
-    display: flex;
-    align-items: center;
-    gap: 0.375rem;
-  }
-
-  .token-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-
-  .pool-balance-symbol {
-    font-size: 0.75rem;
-    color: var(--rumi-text-secondary);
-    font-weight: 500;
-  }
-
-  .pool-balance-amount {
-    font-size: 0.75rem;
-    font-weight: 600;
-    color: var(--rumi-text-primary);
-    font-variant-numeric: tabular-nums;
-  }
-
-  .swap-layout {
-    display: flex;
-    justify-content: center;
+  /* ── Two-column layout (matches Earn page exactly) ── */
+  .page-layout {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    gap: 1.5rem;
+    align-items: start;
     animation: fadeSlideIn 0.5s ease-out 0.05s both;
   }
 
+  .stats-column { position: sticky; top: 5rem; }
+
+  .action-column {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1rem;
+  }
+
+  .action-column > :global(*) { width: 100%; max-width: 420px; }
+
+  /* ── Action panel (wraps tab-bar + swap/liquidity content) ── */
+  .action-panel {
+    background: var(--rumi-bg-surface1);
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.75rem;
+    padding: 1.5rem;
+    box-shadow:
+      inset 0 1px 0 0 rgba(200, 210, 240, 0.03),
+      0 2px 8px -2px rgba(8, 11, 22, 0.6);
+  }
+
+  /* ── Tab bar (matches DepositInterface exactly) ── */
+  .tab-bar {
+    position: relative;
+    display: flex;
+    background: var(--rumi-bg-surface2);
+    border-radius: 0.5rem;
+    padding: 0.1875rem;
+    margin-bottom: 1.5rem;
+  }
+
+  .tab {
+    flex: 1;
+    padding: 0.5rem 1rem;
+    background: none;
+    border: none;
+    border-radius: 0.375rem;
+    font-family: 'Circular Std', 'Inter', sans-serif;
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--rumi-text-muted);
+    cursor: pointer;
+    transition: color 0.2s ease;
+    position: relative;
+    z-index: 1;
+  }
+
+  .tab.active { color: var(--rumi-text-primary); }
+
+  .tab-indicator {
+    position: absolute;
+    top: 0.1875rem;
+    left: 0.1875rem;
+    width: calc(50% - 0.1875rem);
+    height: calc(100% - 0.375rem);
+    background: var(--rumi-bg-surface1);
+    border: 1px solid var(--rumi-border-hover);
+    border-radius: 0.375rem;
+    transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    z-index: 0;
+  }
+
+  .tab-indicator.right {
+    transform: translateX(100%);
+  }
+
+  /* ── Loading & error states ── */
   .loading-state {
     display: flex;
     flex-direction: column;
@@ -265,5 +264,19 @@
     font-size: 0.875rem;
     color: var(--rumi-danger);
     margin-bottom: 1.5rem;
+  }
+
+  /* ── Responsive ── */
+  @media (max-width: 768px) {
+    .page-layout { grid-template-columns: 1fr; }
+    .stats-column { position: static; order: 2; }
+    .action-column { order: 1; }
+  }
+
+  @media (max-width: 520px) {
+    .page-container {
+      padding-left: 0.5rem;
+      padding-right: 0.5rem;
+    }
   }
 </style>

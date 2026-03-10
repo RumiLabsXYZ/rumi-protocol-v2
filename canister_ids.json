@@ -5,11 +5,14 @@
   "icusd_ledger": {
     "ic": "t6bor-paaaa-aaaap-qrd5q-cai"
   },
-  "rumi_protocol_backend": {
-    "ic": "tfesu-vyaaa-aaaap-qrd7a-cai"
+  "rumi_3pool": {
+    "ic": "fohh4-yyaaa-aaaap-qtkpa-cai"
   },
   "rumi_homepage": {
     "ic": "t2xrh-2aaaa-aaaap-qreaa-cai"
+  },
+  "rumi_protocol_backend": {
+    "ic": "tfesu-vyaaa-aaaap-qrd7a-cai"
   },
   "rumi_stability_pool": {
     "ic": "tmhzi-dqaaa-aaaap-qrd6q-cai"

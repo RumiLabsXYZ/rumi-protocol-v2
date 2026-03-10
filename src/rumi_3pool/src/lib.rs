@@ -9,6 +9,7 @@ pub mod swap;
 pub mod liquidity;
 pub mod transfers;
 pub mod admin;
+pub mod icrc21;
 
 mod logs;
 
@@ -494,4 +495,23 @@ pub async fn withdraw_admin_fees() -> Result<Vec<u128>, ThreePoolError> {
 pub fn set_paused(paused: bool) -> Result<(), ThreePoolError> {
     let caller = ic_cdk::api::caller();
     admin::set_paused(caller, paused)
+}
+
+// ─── ICRC-21 / ICRC-28 / ICRC-10 ───
+
+#[update]
+pub fn icrc21_canister_call_consent_message(
+    request: icrc21::ConsentMessageRequest,
+) -> icrc21::Icrc21ConsentMessageResult {
+    icrc21::icrc21_canister_call_consent_message(request)
+}
+
+#[query]
+pub fn icrc28_trusted_origins() -> icrc21::Icrc28TrustedOriginsResponse {
+    icrc21::icrc28_trusted_origins()
+}
+
+#[query]
+pub fn icrc10_supported_standards() -> Vec<icrc21::StandardRecord> {
+    icrc21::icrc10_supported_standards()
 }
