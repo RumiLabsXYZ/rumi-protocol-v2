@@ -79,6 +79,11 @@ export function getLedgerFee(decimals: number): bigint {
   return decimals === 8 ? 100_000n : 10_000n;
 }
 
+/** Compute approval amount: transfer amount + ledger fee (for transfer_from). */
+function approvalAmount(amount: bigint, decimals: number): bigint {
+  return amount + getLedgerFee(decimals);
+}
+
 // ──────────────────────────────────────────────────────────────
 // Service
 // ──────────────────────────────────────────────────────────────
@@ -166,12 +171,10 @@ class ThreePoolService {
         THREEPOOL_CANISTER_ID, canisterIDLs.three_pool, signerAgent
       );
 
-      const requestedAllowance = dxRaw * 105n / 100n;
-
       // Sequence 0: approve
       signerAgent.batch();
       const approvePromise = ledgerActor.icrc2_approve({
-        amount: requestedAllowance,
+        amount: approvalAmount(dxRaw, fromToken.decimals),
         spender: { owner: Principal.fromText(THREEPOOL_CANISTER_ID), subaccount: [] },
         expires_at: [], expected_allowance: [], memo: [], fee: [],
         from_subaccount: [], created_at_time: []
@@ -198,7 +201,7 @@ class ThreePoolService {
       ) as any;
 
       const approveResult = await ledgerActor.icrc2_approve({
-        amount: dxRaw * 105n / 100n,
+        amount: approvalAmount(dxRaw, fromToken.decimals),
         spender: { owner: Principal.fromText(THREEPOOL_CANISTER_ID), subaccount: [] },
         expires_at: [], expected_allowance: [], memo: [], fee: [],
         from_subaccount: [], created_at_time: []
@@ -241,7 +244,7 @@ class ThreePoolService {
           const ledgerActor = createOisyActor(token.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent);
           signerAgent.batch();
           approvePromises.push(ledgerActor.icrc2_approve({
-            amount: amounts[k] * 105n / 100n,
+            amount: approvalAmount(amounts[k], POOL_TOKENS[k].decimals),
             spender, expires_at: [], expected_allowance: [], memo: [], fee: [],
             from_subaccount: [], created_at_time: []
           }));
@@ -272,7 +275,7 @@ class ThreePoolService {
           const token = POOL_TOKENS[k];
           const ledgerActor = await walletStore.getActor(token.ledgerId, CONFIG.icusd_ledgerIDL) as any;
           const approveResult = await ledgerActor.icrc2_approve({
-            amount: amounts[k] * 105n / 100n,
+            amount: approvalAmount(amounts[k], POOL_TOKENS[k].decimals),
             spender, expires_at: [], expected_allowance: [], memo: [], fee: [],
             from_subaccount: [], created_at_time: []
           });
