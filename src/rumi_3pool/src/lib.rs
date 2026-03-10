@@ -409,6 +409,60 @@ pub fn calc_swap(i: u8, j: u8, dx: u128) -> Result<u128, ThreePoolError> {
 }
 
 #[query]
+pub fn calc_add_liquidity_query(amounts: Vec<u128>, min_lp: u128) -> Result<u128, ThreePoolError> {
+    if amounts.len() != 3 {
+        return Err(ThreePoolError::InvalidCoinIndex);
+    }
+    let amounts_arr: [u128; 3] = [amounts[0], amounts[1], amounts[2]];
+    let amp = get_current_a();
+    let precision_muls = get_precision_muls();
+    let (old_balances, lp_total_supply, swap_fee_bps) = read_state(|s| {
+        (s.balances, s.lp_total_supply, s.config.swap_fee_bps)
+    });
+    let (lp_minted, _fees) = calc_add_liquidity(
+        &amounts_arr, &old_balances, &precision_muls, lp_total_supply, amp, swap_fee_bps,
+    )?;
+    let _ = min_lp; // reserved for future use
+    Ok(lp_minted)
+}
+
+#[query]
+pub fn calc_remove_liquidity_query(lp_burn: u128) -> Result<Vec<u128>, ThreePoolError> {
+    if lp_burn == 0 {
+        return Err(ThreePoolError::ZeroAmount);
+    }
+    let (balances, lp_total_supply) = read_state(|s| (s.balances, s.lp_total_supply));
+    if lp_total_supply == 0 {
+        return Err(ThreePoolError::PoolEmpty);
+    }
+    let amounts = calc_remove_liquidity(lp_burn, &balances, lp_total_supply);
+    Ok(amounts.to_vec())
+}
+
+#[query]
+pub fn calc_remove_one_coin_query(lp_burn: u128, coin_index: u8) -> Result<u128, ThreePoolError> {
+    let idx = coin_index as usize;
+    if idx >= 3 {
+        return Err(ThreePoolError::InvalidCoinIndex);
+    }
+    if lp_burn == 0 {
+        return Err(ThreePoolError::ZeroAmount);
+    }
+    let amp = get_current_a();
+    let precision_muls = get_precision_muls();
+    let (balances, lp_total_supply, fee_bps) = read_state(|s| {
+        (s.balances, s.lp_total_supply, s.config.swap_fee_bps)
+    });
+    if lp_total_supply == 0 {
+        return Err(ThreePoolError::PoolEmpty);
+    }
+    let (amount, _fee) = calc_remove_one_coin(
+        lp_burn, idx, &balances, &precision_muls, lp_total_supply, amp, fee_bps,
+    )?;
+    Ok(amount)
+}
+
+#[query]
 pub fn get_admin_fees() -> Vec<u128> {
     read_state(|s| s.admin_fees.to_vec())
 }
