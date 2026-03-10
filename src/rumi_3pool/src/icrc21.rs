@@ -115,6 +115,15 @@ fn generate_consent_message(method: &str) -> String {
             *An imbalance fee may apply.*".to_string()
         }
 
+        "donate" => {
+            "## Donate to Pool\n\n\
+            You are donating tokens to the Rumi 3pool.\n\n\
+            This will:\n\
+            - Transfer tokens from your wallet to the pool\n\
+            - Increase the virtual price for all LP holders\n\n\
+            *No LP tokens are minted — this is a pure yield contribution.*".to_string()
+        }
+
         // Query methods
         "health" | "get_pool_status" | "get_lp_balance" | "calc_swap" |
         "calc_add_liquidity_query" | "calc_remove_liquidity_query" |

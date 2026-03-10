@@ -369,6 +369,53 @@ pub async fn remove_one_coin(
     Ok(amount)
 }
 
+// ─── Donate (yield injection) ───
+
+/// Donate tokens to the pool, increasing virtual_price for all LP holders.
+/// No LP tokens are minted — this is pure yield injection.
+/// Permissionless: anyone (admin, treasury, or user) can donate.
+#[update]
+pub async fn donate(token_index: u8, amount: u128) -> Result<(), ThreePoolError> {
+    if read_state(|s| s.is_paused) {
+        return Err(ThreePoolError::PoolPaused);
+    }
+    if amount == 0 {
+        return Err(ThreePoolError::ZeroAmount);
+    }
+
+    let idx = token_index as usize;
+    if idx >= 3 {
+        return Err(ThreePoolError::InvalidCoinIndex);
+    }
+
+    // Must have LP holders to donate to
+    if read_state(|s| s.lp_total_supply) == 0 {
+        return Err(ThreePoolError::PoolEmpty);
+    }
+
+    // Transfer token from caller to pool
+    let caller = ic_cdk::api::caller();
+    let (ledger, symbol) = read_state(|s| {
+        (s.config.tokens[idx].ledger_id, s.config.tokens[idx].symbol.clone())
+    });
+
+    transfer_from_user(ledger, caller, amount)
+        .await
+        .map_err(|reason| ThreePoolError::TransferFailed {
+            token: symbol.clone(),
+            reason,
+        })?;
+
+    // Update balance — NO LP minted
+    mutate_state(|s| {
+        s.balances[idx] += amount;
+    });
+
+    log!(INFO, "Donate: {} of {} (token {}) from {}", amount, symbol, token_index, caller);
+
+    Ok(())
+}
+
 // ─── Query Endpoints ───
 
 #[query]

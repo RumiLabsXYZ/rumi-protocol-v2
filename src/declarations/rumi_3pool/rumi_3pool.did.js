@@ -105,6 +105,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Nat, 'Err' : ThreePoolError })],
         ['query'],
       ),
+    'donate' : IDL.Func(
+        [IDL.Nat8, IDL.Nat],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : ThreePoolError })],
+        [],
+      ),
     'get_admin_fees' : IDL.Func([], [IDL.Vec(IDL.Nat)], ['query']),
     'get_lp_balance' : IDL.Func([IDL.Principal], [IDL.Nat], ['query']),
     'get_pool_status' : IDL.Func([], [PoolStatus], ['query']),

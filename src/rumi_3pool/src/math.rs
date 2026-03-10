@@ -508,4 +508,87 @@ mod tests {
         let result = virtual_price(&balances, &precision_muls, 100, 0);
         assert!(result.is_none(), "virtual_price should be None for zero supply");
     }
+
+    // ─── Donate tests: virtual_price increases when balances grow without new LP ───
+
+    #[test]
+    fn test_donate_increases_virtual_price() {
+        // Start with balanced 1M pool
+        let balances: [u128; 3] = [
+            1_000_000 * 100_000_000,   // 1M icUSD (8 dec)
+            1_000_000 * 1_000_000,     // 1M ckUSDT (6 dec)
+            1_000_000 * 1_000_000,     // 1M ckUSDC (6 dec)
+        ];
+        let precision_muls: [u64; 3] = [10_000_000_000, 1_000_000_000_000, 1_000_000_000_000];
+        let amp = 100u64;
+
+        let xp = normalize_all(&balances, &precision_muls);
+        let d = get_d(&xp, amp).unwrap();
+        let lp_supply = d.as_u128();
+
+        let vp_before = virtual_price(&balances, &precision_muls, amp, lp_supply).unwrap();
+
+        // Donate 1000 icUSD (no new LP minted)
+        let donated_balances: [u128; 3] = [
+            balances[0] + 1_000 * 100_000_000, // +1000 icUSD
+            balances[1],
+            balances[2],
+        ];
+
+        let vp_after = virtual_price(&donated_balances, &precision_muls, amp, lp_supply).unwrap();
+
+        assert!(
+            vp_after > vp_before,
+            "virtual_price should increase after donate: before={}, after={}",
+            vp_before, vp_after
+        );
+
+        // 1000 donated into 3M pool ≈ 0.033% increase
+        let increase_bps = ((vp_after - vp_before) * 10_000) / vp_before;
+        assert!(
+            increase_bps > 0 && increase_bps < 100,
+            "increase should be modest (got {} bps)",
+            increase_bps
+        );
+    }
+
+    #[test]
+    fn test_donate_to_all_tokens_increases_virtual_price() {
+        let balances: [u128; 3] = [
+            1_000_000 * 100_000_000,
+            1_000_000 * 1_000_000,
+            1_000_000 * 1_000_000,
+        ];
+        let precision_muls: [u64; 3] = [10_000_000_000, 1_000_000_000_000, 1_000_000_000_000];
+        let amp = 100u64;
+
+        let xp = normalize_all(&balances, &precision_muls);
+        let d = get_d(&xp, amp).unwrap();
+        let lp_supply = d.as_u128();
+
+        let vp_before = virtual_price(&balances, &precision_muls, amp, lp_supply).unwrap();
+
+        // Donate proportionally across all 3 tokens
+        let donated_balances: [u128; 3] = [
+            balances[0] + 1_000 * 100_000_000,
+            balances[1] + 1_000 * 1_000_000,
+            balances[2] + 1_000 * 1_000_000,
+        ];
+
+        let vp_after = virtual_price(&donated_balances, &precision_muls, amp, lp_supply).unwrap();
+
+        assert!(
+            vp_after > vp_before,
+            "virtual_price should increase after proportional donate: before={}, after={}",
+            vp_before, vp_after
+        );
+
+        // 3000 donated into 3M pool ≈ 0.1% increase
+        let increase_bps = ((vp_after - vp_before) * 10_000) / vp_before;
+        assert!(
+            increase_bps >= 9 && increase_bps <= 11,
+            "proportional donate of 0.1% should give ~10 bps increase (got {} bps)",
+            increase_bps
+        );
+    }
 }

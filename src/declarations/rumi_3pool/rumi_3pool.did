@@ -95,6 +95,7 @@ service : (ThreePoolInitArgs) -> {
   add_liquidity : (vec nat, nat) -> (variant { Ok : nat; Err : ThreePoolError });
   remove_liquidity : (nat, vec nat) -> (variant { Ok : vec nat; Err : ThreePoolError });
   remove_one_coin : (nat, nat8, nat) -> (variant { Ok : nat; Err : ThreePoolError });
+  donate : (nat8, nat) -> (variant { Ok; Err : ThreePoolError });
   get_pool_status : () -> (PoolStatus) query;
   get_lp_balance : (principal) -> (nat) query;
   calc_swap : (nat8, nat8, nat) -> (variant { Ok : nat; Err : ThreePoolError }) query;

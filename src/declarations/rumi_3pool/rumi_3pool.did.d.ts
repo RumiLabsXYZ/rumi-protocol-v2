@@ -105,6 +105,11 @@ export interface _SERVICE {
     { 'Ok' : bigint } |
       { 'Err' : ThreePoolError }
   >,
+  'donate' : ActorMethod<
+    [number, bigint],
+    { 'Ok' : null } |
+      { 'Err' : ThreePoolError }
+  >,
   'get_admin_fees' : ActorMethod<[], Array<bigint>>,
   'get_lp_balance' : ActorMethod<[Principal], bigint>,
   'get_pool_status' : ActorMethod<[], PoolStatus>,

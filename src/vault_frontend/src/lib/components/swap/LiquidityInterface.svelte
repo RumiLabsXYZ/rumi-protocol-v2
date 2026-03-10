@@ -9,7 +9,6 @@
     getLedgerFee,
   } from '../../services/threePoolService';
   import { formatStableTokenDisplay } from '../../utils/format';
-  import { Principal } from '@dfinity/principal';
 
   const dispatch = createEventDispatcher();
 
@@ -70,9 +69,11 @@
   async function loadLpBalance() {
     try {
       if ($walletStore.principal) {
-        lpBalance = await threePoolService.getLpBalance(Principal.fromText($walletStore.principal));
+        lpBalance = await threePoolService.getLpBalance($walletStore.principal);
       }
-    } catch { /* ignore */ }
+    } catch (e) {
+      console.warn('Failed to load LP balance:', e);
+    }
   }
 
   // LP in human-readable format (18 decimals)
@@ -84,6 +85,21 @@
     if (value < 0.01) return value.toFixed(6);
     return value.toFixed(4).replace(/0+$/, '').replace(/\.$/, '.00');
   }
+
+  // ── Balance validation ──
+  $: addExceedsBalance = addAmounts.some((a, i) => {
+    const val = parseFloat(a);
+    if (!val || val <= 0) return false;
+    const raw = parseTokenAmount(a, POOL_TOKENS[i].decimals);
+    const fees = getLedgerFee(POOL_TOKENS[i].decimals) * 2n;
+    return raw + fees > getBalance(i);
+  });
+
+  $: removeExceedsBalance = (() => {
+    const val = parseFloat(removeLpAmount || '0');
+    if (!val || val <= 0) return false;
+    return BigInt(Math.floor(val * 1e18)) > lpBalance;
+  })();
 
   // ── Add: debounced quote ──
   $: {
@@ -319,6 +335,13 @@
           disabled={addLoading}
           class="amount-input"
           class:has-value={addAmounts[i] && parseFloat(addAmounts[i]) > 0}
+          class:exceeds-balance={(() => {
+            const val = parseFloat(addAmounts[i]);
+            if (!val || val <= 0) return false;
+            const raw = parseTokenAmount(addAmounts[i], token.decimals);
+            const fees = getLedgerFee(token.decimals) * 2n;
+            return raw + fees > getBalance(i);
+          })()}
         />
       </div>
     {/each}
@@ -361,7 +384,7 @@
     <button
       class="submit-btn"
       on:click={handleAdd}
-      disabled={addLoading || addAmounts.every(a => !a || parseFloat(a) <= 0) || addLpEstimate === null}
+      disabled={addLoading || addAmounts.every(a => !a || parseFloat(a) <= 0) || addLpEstimate === null || addExceedsBalance}
     >
       {#if addLoading}
         <span class="spinner"></span>
@@ -400,6 +423,7 @@
         disabled={removeLoading}
         class="amount-input"
         class:has-value={removeLpAmount && parseFloat(removeLpAmount) > 0}
+        class:exceeds-balance={removeExceedsBalance}
       />
     </div>
 
@@ -496,7 +520,7 @@
     <button
       class="submit-btn"
       on:click={handleRemove}
-      disabled={removeLoading || !removeLpAmount || parseFloat(removeLpAmount) <= 0 || (removeMode === 'proportional' ? !removeEstimates : removeSingleEstimate === null)}
+      disabled={removeLoading || !removeLpAmount || parseFloat(removeLpAmount) <= 0 || removeExceedsBalance || (removeMode === 'proportional' ? !removeEstimates : removeSingleEstimate === null)}
     >
       {#if removeLoading}
         <span class="spinner"></span>
@@ -652,6 +676,11 @@
 
   .amount-input.has-value {
     border-color: var(--rumi-border-hover);
+  }
+
+  .amount-input.exceeds-balance {
+    border-color: #ef4444;
+    box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.15);
   }
 
   /* ── Max button ── */
