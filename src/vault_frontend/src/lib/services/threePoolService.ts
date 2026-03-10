@@ -1,0 +1,333 @@
+import { Principal } from '@dfinity/principal';
+import { Actor, HttpAgent, AnonymousIdentity } from '@dfinity/agent';
+import { canisterIDLs } from './pnp';
+import { walletStore } from '../stores/wallet';
+import { get } from 'svelte/store';
+import { CANISTER_IDS, CONFIG } from '../config';
+import { isOisyWallet } from './protocol/walletOperations';
+import { getOisySignerAgent, createOisyActor } from './oisySigner';
+
+// ──────────────────────────────────────────────────────────────
+// Types — mirrors the Candid interface
+// ──────────────────────────────────────────────────────────────
+
+export interface TokenConfig {
+  ledger_id: Principal;
+  symbol: string;
+  decimals: number;
+  precision_mul: bigint;
+}
+
+export interface PoolStatus {
+  balances: bigint[];
+  lp_total_supply: bigint;
+  current_a: bigint;
+  virtual_price: bigint;
+  swap_fee_bps: bigint;
+  admin_fee_bps: bigint;
+  tokens: TokenConfig[];
+}
+
+// ──────────────────────────────────────────────────────────────
+// Token metadata for the 3pool (matches canister init config)
+// ──────────────────────────────────────────────────────────────
+
+export interface SwapToken {
+  index: number;
+  symbol: string;
+  ledgerId: string;
+  decimals: number;
+  color: string;
+}
+
+export const POOL_TOKENS: SwapToken[] = [
+  { index: 0, symbol: 'icUSD',  ledgerId: CANISTER_IDS.ICUSD_LEDGER,  decimals: 8, color: '#818cf8' },
+  { index: 1, symbol: 'ckUSDT', ledgerId: CANISTER_IDS.CKUSDT_LEDGER, decimals: 6, color: '#26A17B' },
+  { index: 2, symbol: 'ckUSDC', ledgerId: CANISTER_IDS.CKUSDC_LEDGER, decimals: 6, color: '#2775CA' },
+];
+
+// ──────────────────────────────────────────────────────────────
+// Helpers
+// ──────────────────────────────────────────────────────────────
+
+export function parseTokenAmount(amount: string, decimals: number): bigint {
+  const value = parseFloat(amount);
+  if (isNaN(value) || value < 0) throw new Error('Invalid amount');
+  return BigInt(Math.floor(value * Math.pow(10, decimals)));
+}
+
+export function formatTokenAmount(amount: bigint, decimals: number): string {
+  const divisor = Math.pow(10, decimals);
+  const value = Number(amount) / divisor;
+  if (value > 0 && value < 0.01) {
+    return value.toFixed(Math.min(decimals, 6));
+  }
+  const fixed = value.toFixed(4);
+  // Trim trailing zeros but keep at least 2 decimal places
+  let trimmed = fixed.replace(/0+$/, '');
+  if (trimmed.endsWith('.')) trimmed += '00';
+  else if (trimmed.indexOf('.') !== -1 && trimmed.split('.')[1].length < 2) {
+    trimmed += '0';
+  }
+  return trimmed;
+}
+
+/** Ledger transfer fee per token (approve + transfer_from both charge a fee). */
+export function getLedgerFee(decimals: number): bigint {
+  // icUSD (8 decimals) = 0.001 = 100_000 e8s
+  // ckUSDC / ckUSDT (6 decimals) = 0.01 = 10_000
+  return decimals === 8 ? 100_000n : 10_000n;
+}
+
+// ──────────────────────────────────────────────────────────────
+// Service
+// ──────────────────────────────────────────────────────────────
+
+const THREEPOOL_CANISTER_ID = CANISTER_IDS.THREEPOOL;
+
+class ThreePoolService {
+  private _anonAgent: HttpAgent | null = null;
+
+  private async getQueryActor(): Promise<any> {
+    if (!this._anonAgent) {
+      this._anonAgent = new HttpAgent({
+        host: CONFIG.host,
+        identity: new AnonymousIdentity(),
+      });
+      if (CONFIG.isLocal) {
+        await this._anonAgent.fetchRootKey();
+      }
+    }
+    return Actor.createActor(canisterIDLs.three_pool as any, {
+      agent: this._anonAgent,
+      canisterId: THREEPOOL_CANISTER_ID,
+    });
+  }
+
+  // ── Queries (anonymous, no wallet needed) ──
+
+  async getPoolStatus(): Promise<PoolStatus> {
+    const actor = await this.getQueryActor();
+    return await actor.get_pool_status() as PoolStatus;
+  }
+
+  async calcSwap(fromIndex: number, toIndex: number, dxRaw: bigint): Promise<bigint> {
+    const actor = await this.getQueryActor();
+    const result = await actor.calc_swap(fromIndex, toIndex, dxRaw) as { Ok: bigint } | { Err: any };
+    if ('Err' in result) {
+      throw new Error(this.formatError(result.Err));
+    }
+    return result.Ok;
+  }
+
+  async getLpBalance(principal: Principal): Promise<bigint> {
+    const actor = await this.getQueryActor();
+    return await actor.get_lp_balance(principal) as bigint;
+  }
+
+  async calcAddLiquidity(amounts: bigint[]): Promise<bigint> {
+    const actor = await this.getQueryActor();
+    const result = await actor.calc_add_liquidity_query(amounts, BigInt(0)) as { Ok: bigint } | { Err: any };
+    if ('Err' in result) throw new Error(this.formatError(result.Err));
+    return result.Ok;
+  }
+
+  async calcRemoveLiquidity(lpBurn: bigint): Promise<bigint[]> {
+    const actor = await this.getQueryActor();
+    const result = await actor.calc_remove_liquidity_query(lpBurn) as { Ok: bigint[] } | { Err: any };
+    if ('Err' in result) throw new Error(this.formatError(result.Err));
+    return result.Ok;
+  }
+
+  async calcRemoveOneCoin(lpBurn: bigint, coinIndex: number): Promise<bigint> {
+    const actor = await this.getQueryActor();
+    const result = await actor.calc_remove_one_coin_query(lpBurn, coinIndex) as { Ok: bigint } | { Err: any };
+    if ('Err' in result) throw new Error(this.formatError(result.Err));
+    return result.Ok;
+  }
+
+  // ── Mutations ──
+
+  async swap(fromIndex: number, toIndex: number, dxRaw: bigint, minDyRaw: bigint): Promise<bigint> {
+    const wallet = get(walletStore);
+    if (!wallet.isConnected) throw new Error('Wallet not connected');
+
+    const fromToken = POOL_TOKENS[fromIndex];
+    const oisyDetected = isOisyWallet();
+
+    if (oisyDetected && wallet.principal) {
+      // ─── Oisy ICRC-112 batched path ───
+      const signerAgent = await getOisySignerAgent(wallet.principal);
+
+      const ledgerActor = createOisyActor(
+        fromToken.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent
+      );
+      const poolActor = createOisyActor(
+        THREEPOOL_CANISTER_ID, canisterIDLs.three_pool, signerAgent
+      );
+
+      const requestedAllowance = dxRaw * 105n / 100n;
+
+      // Sequence 0: approve
+      signerAgent.batch();
+      const approvePromise = ledgerActor.icrc2_approve({
+        amount: requestedAllowance,
+        spender: { owner: Principal.fromText(THREEPOOL_CANISTER_ID), subaccount: [] },
+        expires_at: [], expected_allowance: [], memo: [], fee: [],
+        from_subaccount: [], created_at_time: []
+      });
+
+      // Sequence 1: swap
+      signerAgent.batch();
+      const swapPromise = poolActor.swap(fromIndex, toIndex, dxRaw, minDyRaw);
+
+      await signerAgent.execute();
+      const [approveResult, swapResult] = await Promise.all([approvePromise, swapPromise]);
+
+      if (approveResult && 'Err' in approveResult) {
+        throw new Error(`Approval failed: ${JSON.stringify(approveResult.Err)}`);
+      }
+      if ('Err' in swapResult) {
+        throw new Error(this.formatError(swapResult.Err));
+      }
+      return swapResult.Ok;
+    } else {
+      // ─── Non-Oisy path (Plug, II, etc.) ───
+      const ledgerActor = await walletStore.getActor(
+        fromToken.ledgerId, CONFIG.icusd_ledgerIDL
+      ) as any;
+
+      const approveResult = await ledgerActor.icrc2_approve({
+        amount: dxRaw * 105n / 100n,
+        spender: { owner: Principal.fromText(THREEPOOL_CANISTER_ID), subaccount: [] },
+        expires_at: [], expected_allowance: [], memo: [], fee: [],
+        from_subaccount: [], created_at_time: []
+      });
+
+      if (approveResult && 'Err' in approveResult) {
+        throw new Error(`Approval failed: ${JSON.stringify(approveResult.Err)}`);
+      }
+
+      // Small delay for ledger sync
+      await new Promise(r => setTimeout(r, 2000));
+
+      const poolActor = await walletStore.getActor(
+        THREEPOOL_CANISTER_ID, canisterIDLs.three_pool
+      ) as any;
+      const result = await poolActor.swap(fromIndex, toIndex, dxRaw, minDyRaw) as { Ok: bigint } | { Err: any };
+      if ('Err' in result) {
+        throw new Error(this.formatError(result.Err));
+      }
+      return result.Ok;
+    }
+  }
+
+  async addLiquidity(amounts: bigint[], minLp: bigint): Promise<bigint> {
+    const wallet = get(walletStore);
+    if (!wallet.isConnected) throw new Error('Wallet not connected');
+
+    const oisyDetected = isOisyWallet();
+    const spender = { owner: Principal.fromText(THREEPOOL_CANISTER_ID), subaccount: [] };
+
+    if (oisyDetected && wallet.principal) {
+      // ─── Oisy ICRC-112 batched path ───
+      const signerAgent = await getOisySignerAgent(wallet.principal);
+
+      // Queue approvals for each non-zero token
+      const approvePromises: Promise<any>[] = [];
+      for (let k = 0; k < 3; k++) {
+        if (amounts[k] > 0n) {
+          const token = POOL_TOKENS[k];
+          const ledgerActor = createOisyActor(token.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent);
+          signerAgent.batch();
+          approvePromises.push(ledgerActor.icrc2_approve({
+            amount: amounts[k] * 105n / 100n,
+            spender, expires_at: [], expected_allowance: [], memo: [], fee: [],
+            from_subaccount: [], created_at_time: []
+          }));
+        }
+      }
+
+      // Queue add_liquidity call
+      const poolActor = createOisyActor(THREEPOOL_CANISTER_ID, canisterIDLs.three_pool, signerAgent);
+      signerAgent.batch();
+      const addPromise = poolActor.add_liquidity(amounts, minLp);
+
+      await signerAgent.execute();
+      const results = await Promise.all([...approvePromises, addPromise]);
+
+      // Check approve results
+      for (let i = 0; i < approvePromises.length; i++) {
+        const r = results[i];
+        if (r && 'Err' in r) throw new Error(`Approval failed: ${JSON.stringify(r.Err)}`);
+      }
+
+      const addResult = results[results.length - 1] as { Ok: bigint } | { Err: any };
+      if ('Err' in addResult) throw new Error(this.formatError(addResult.Err));
+      return addResult.Ok;
+    } else {
+      // ─── Non-Oisy path: sequential approvals ───
+      for (let k = 0; k < 3; k++) {
+        if (amounts[k] > 0n) {
+          const token = POOL_TOKENS[k];
+          const ledgerActor = await walletStore.getActor(token.ledgerId, CONFIG.icusd_ledgerIDL) as any;
+          const approveResult = await ledgerActor.icrc2_approve({
+            amount: amounts[k] * 105n / 100n,
+            spender, expires_at: [], expected_allowance: [], memo: [], fee: [],
+            from_subaccount: [], created_at_time: []
+          });
+          if (approveResult && 'Err' in approveResult) {
+            throw new Error(`Approval failed for ${token.symbol}: ${JSON.stringify(approveResult.Err)}`);
+          }
+          await new Promise(r => setTimeout(r, 2000));
+        }
+      }
+
+      const poolActor = await walletStore.getActor(THREEPOOL_CANISTER_ID, canisterIDLs.three_pool) as any;
+      const result = await poolActor.add_liquidity(amounts, minLp) as { Ok: bigint } | { Err: any };
+      if ('Err' in result) throw new Error(this.formatError(result.Err));
+      return result.Ok;
+    }
+  }
+
+  async removeLiquidity(lpBurn: bigint, minAmounts: bigint[]): Promise<bigint[]> {
+    const wallet = get(walletStore);
+    if (!wallet.isConnected) throw new Error('Wallet not connected');
+
+    const poolActor = await walletStore.getActor(THREEPOOL_CANISTER_ID, canisterIDLs.three_pool) as any;
+    const result = await poolActor.remove_liquidity(lpBurn, minAmounts) as { Ok: bigint[] } | { Err: any };
+    if ('Err' in result) throw new Error(this.formatError(result.Err));
+    return result.Ok;
+  }
+
+  async removeOneCoin(lpBurn: bigint, coinIndex: number, minAmount: bigint): Promise<bigint> {
+    const wallet = get(walletStore);
+    if (!wallet.isConnected) throw new Error('Wallet not connected');
+
+    const poolActor = await walletStore.getActor(THREEPOOL_CANISTER_ID, canisterIDLs.three_pool) as any;
+    const result = await poolActor.remove_one_coin(lpBurn, coinIndex, minAmount) as { Ok: bigint } | { Err: any };
+    if ('Err' in result) throw new Error(this.formatError(result.Err));
+    return result.Ok;
+  }
+
+  // ── Error formatting ──
+
+  private formatError(err: any): string {
+    if ('InsufficientOutput' in err) {
+      return `Insufficient output: expected at least ${err.InsufficientOutput.expected_min}, got ${err.InsufficientOutput.actual}`;
+    }
+    if ('InsufficientLiquidity' in err) return 'Insufficient liquidity in the pool';
+    if ('InvalidCoinIndex' in err) return 'Invalid token index';
+    if ('ZeroAmount' in err) return 'Amount must be greater than zero';
+    if ('PoolEmpty' in err) return 'Pool has no liquidity';
+    if ('SlippageExceeded' in err) return 'Slippage tolerance exceeded';
+    if ('TransferFailed' in err) return `Transfer failed (${err.TransferFailed.token}): ${err.TransferFailed.reason}`;
+    if ('Unauthorized' in err) return 'Unauthorized';
+    if ('MathOverflow' in err) return 'Math overflow';
+    if ('InvariantNotConverged' in err) return 'Invariant calculation failed';
+    if ('PoolPaused' in err) return 'Pool is currently paused';
+    return 'Unknown error';
+  }
+}
+
+export const threePoolService = new ThreePoolService();
