@@ -4,6 +4,7 @@ members = [
     "src/rumi_treasury",
     "src/rumi_stability_pool",
     "src/stability_pool",
+    "src/rumi_3pool",
     "xrc_demo/xrc_mock",
 ]
 resolver = "2"

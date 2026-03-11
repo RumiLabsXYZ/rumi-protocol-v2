@@ -1,0 +1,228 @@
+type TokenConfig = record {
+  ledger_id : principal;
+  symbol : text;
+  decimals : nat8;
+  precision_mul : nat64;
+};
+
+type ThreePoolInitArgs = record {
+  tokens : vec TokenConfig;
+  initial_a : nat64;
+  swap_fee_bps : nat64;
+  admin_fee_bps : nat64;
+  admin : principal;
+};
+
+type PoolStatus = record {
+  balances : vec nat;
+  lp_total_supply : nat;
+  current_a : nat64;
+  virtual_price : nat;
+  swap_fee_bps : nat64;
+  admin_fee_bps : nat64;
+  tokens : vec TokenConfig;
+};
+
+type VirtualPriceSnapshot = record {
+  timestamp_secs : nat64;
+  virtual_price : nat;
+  lp_total_supply : nat;
+};
+
+type ThreePoolError = variant {
+  InsufficientOutput : record { expected_min : nat; actual : nat };
+  InsufficientLiquidity;
+  InvalidCoinIndex;
+  ZeroAmount;
+  PoolEmpty;
+  SlippageExceeded;
+  TransferFailed : record { token : text; reason : text };
+  Unauthorized;
+  MathOverflow;
+  InvariantNotConverged;
+  PoolPaused;
+};
+
+// ─── ICRC-21 / ICRC-28 / ICRC-10 Types ───
+
+type ConsentMessageMetadata = record {
+  language : text;
+  utc_offset_minutes : opt int16;
+};
+
+type DeviceSpec = variant {
+  GenericDisplay;
+  LineDisplay : record { characters_per_line : nat16; lines_per_page : nat16 };
+};
+
+type ConsentMessageSpec = record {
+  metadata : ConsentMessageMetadata;
+  device_spec : opt DeviceSpec;
+};
+
+type ConsentMessageRequest = record {
+  method : text;
+  arg : blob;
+  user_preferences : ConsentMessageSpec;
+};
+
+type LineDisplayPage = record { lines : vec text };
+
+type ConsentMessage = variant {
+  GenericDisplayMessage : text;
+  LineDisplayMessage : record { pages : vec LineDisplayPage };
+};
+
+type ConsentInfo = record {
+  metadata : ConsentMessageMetadata;
+  consent_message : ConsentMessage;
+};
+
+type ErrorInfo = record { description : text };
+
+type Icrc21Error = variant {
+  GenericError : record { error_code : nat64; description : text };
+  UnsupportedCanisterCall : ErrorInfo;
+  ConsentMessageUnavailable : ErrorInfo;
+};
+
+type Icrc28TrustedOriginsResponse = record {
+  trusted_origins : vec text;
+};
+
+type StandardRecord = record {
+  name : text;
+  url : text;
+};
+
+// ─── ICRC-1 / ICRC-2 Types ───
+
+type Account = record {
+  owner : principal;
+  subaccount : opt blob;
+};
+
+type MetadataValue = variant {
+  Nat : nat;
+  Int : int;
+  Text : text;
+  Blob : blob;
+};
+
+type TransferArg = record {
+  from_subaccount : opt blob;
+  to : Account;
+  amount : nat;
+  fee : opt nat;
+  memo : opt blob;
+  created_at_time : opt nat64;
+};
+
+type TransferError = variant {
+  BadFee : record { expected_fee : nat };
+  BadBurn : record { min_burn_amount : nat };
+  InsufficientFunds : record { balance : nat };
+  TooOld;
+  CreatedInFuture : record { ledger_time : nat64 };
+  TemporarilyUnavailable;
+  Duplicate : record { duplicate_of : nat };
+  GenericError : record { error_code : nat; message : text };
+};
+
+type ApproveArgs = record {
+  from_subaccount : opt blob;
+  spender : Account;
+  amount : nat;
+  expected_allowance : opt nat;
+  expires_at : opt nat64;
+  fee : opt nat;
+  memo : opt blob;
+  created_at_time : opt nat64;
+};
+
+type ApproveError = variant {
+  BadFee : record { expected_fee : nat };
+  InsufficientFunds : record { balance : nat };
+  AllowanceChanged : record { current_allowance : nat };
+  Expired : record { ledger_time : nat64 };
+  TooOld;
+  CreatedInFuture : record { ledger_time : nat64 };
+  Duplicate : record { duplicate_of : nat };
+  TemporarilyUnavailable;
+  GenericError : record { error_code : nat; message : text };
+};
+
+type AllowanceArgs = record {
+  account : Account;
+  spender : Account;
+};
+
+type Allowance = record {
+  allowance : nat;
+  expires_at : opt nat64;
+};
+
+type TransferFromArgs = record {
+  spender_subaccount : opt blob;
+  from : Account;
+  to : Account;
+  amount : nat;
+  fee : opt nat;
+  memo : opt blob;
+  created_at_time : opt nat64;
+};
+
+type TransferFromError = variant {
+  BadFee : record { expected_fee : nat };
+  BadBurn : record { min_burn_amount : nat };
+  InsufficientFunds : record { balance : nat };
+  InsufficientAllowance : record { allowance : nat };
+  TooOld;
+  CreatedInFuture : record { ledger_time : nat64 };
+  Duplicate : record { duplicate_of : nat };
+  TemporarilyUnavailable;
+  GenericError : record { error_code : nat; message : text };
+};
+
+service : (ThreePoolInitArgs) -> {
+  health : () -> (text) query;
+  swap : (nat8, nat8, nat, nat) -> (variant { Ok : nat; Err : ThreePoolError });
+  add_liquidity : (vec nat, nat) -> (variant { Ok : nat; Err : ThreePoolError });
+  remove_liquidity : (nat, vec nat) -> (variant { Ok : vec nat; Err : ThreePoolError });
+  remove_one_coin : (nat, nat8, nat) -> (variant { Ok : nat; Err : ThreePoolError });
+  donate : (nat8, nat) -> (variant { Ok; Err : ThreePoolError });
+  get_pool_status : () -> (PoolStatus) query;
+  get_lp_balance : (principal) -> (nat) query;
+  calc_swap : (nat8, nat8, nat) -> (variant { Ok : nat; Err : ThreePoolError }) query;
+  calc_add_liquidity_query : (vec nat, nat) -> (variant { Ok : nat; Err : ThreePoolError }) query;
+  calc_remove_liquidity_query : (nat) -> (variant { Ok : vec nat; Err : ThreePoolError }) query;
+  calc_remove_one_coin_query : (nat, nat8) -> (variant { Ok : nat; Err : ThreePoolError }) query;
+  get_admin_fees : () -> (vec nat) query;
+  get_vp_snapshots : () -> (vec VirtualPriceSnapshot) query;
+  ramp_a : (nat64, nat64) -> (variant { Ok; Err : ThreePoolError });
+  stop_ramp_a : () -> (variant { Ok; Err : ThreePoolError });
+  withdraw_admin_fees : () -> (variant { Ok : vec nat; Err : ThreePoolError });
+  set_paused : (bool) -> (variant { Ok; Err : ThreePoolError });
+  set_swap_fee : (nat64) -> (variant { Ok; Err : ThreePoolError });
+  set_admin_fee : (nat64) -> (variant { Ok; Err : ThreePoolError });
+  icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (variant { Ok : ConsentInfo; Err : Icrc21Error });
+  icrc28_trusted_origins : () -> (Icrc28TrustedOriginsResponse) query;
+  icrc10_supported_standards : () -> (vec StandardRecord) query;
+
+  // ICRC-1 (3USD LP Token)
+  icrc1_name : () -> (text) query;
+  icrc1_symbol : () -> (text) query;
+  icrc1_decimals : () -> (nat8) query;
+  icrc1_fee : () -> (nat) query;
+  icrc1_total_supply : () -> (nat) query;
+  icrc1_minting_account : () -> (opt Account) query;
+  icrc1_balance_of : (Account) -> (nat) query;
+  icrc1_metadata : () -> (vec record { text; MetadataValue }) query;
+  icrc1_supported_standards : () -> (vec StandardRecord) query;
+  icrc1_transfer : (TransferArg) -> (variant { Ok : nat; Err : TransferError });
+
+  // ICRC-2
+  icrc2_approve : (ApproveArgs) -> (variant { Ok : nat; Err : ApproveError });
+  icrc2_allowance : (AllowanceArgs) -> (Allowance) query;
+  icrc2_transfer_from : (TransferFromArgs) -> (variant { Ok : nat; Err : TransferFromError });
+}

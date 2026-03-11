@@ -38,6 +38,12 @@
       "wasm": "src/ledger/ic-icrc1-index-ng.wasm.gz",
       "shrink": false
     },
+    "threeusd_index": {
+      "candid": "src/ledger/index-ng.did",
+      "type": "custom",
+      "wasm": "src/ledger/ic-icrc1-index-ng.wasm.gz",
+      "shrink": false
+    },
     "icp_ledger_canister": {
       "candid": "src/ledger/ledger.did",
       "type": "custom",
@@ -101,6 +107,16 @@
     "rumi_stability_pool": {
       "candid": "src/stability_pool/stability_pool.did",
       "package": "stability_pool",
+      "type": "rust",
+      "metadata": [
+        {
+          "name": "candid:service"
+        }
+      ]
+    },
+    "rumi_3pool": {
+      "candid": "src/rumi_3pool/rumi_3pool.did",
+      "package": "rumi_3pool",
       "type": "rust",
       "metadata": [
         {
