@@ -23,6 +23,9 @@
   "test_icp_ledger_canister": {
     "ic": "pspic-iaaaa-aaaap-qrkna-cai"
   },
+  "threeusd_index": {
+    "ic": "jagpu-pyaaa-aaaap-qtm6q-cai"
+  },
   "vault_frontend": {
     "ic": "tcfua-yaaaa-aaaap-qrd7q-cai"
   }

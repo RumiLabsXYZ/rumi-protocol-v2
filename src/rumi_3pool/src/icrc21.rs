@@ -124,10 +124,41 @@ fn generate_consent_message(method: &str) -> String {
             *No LP tokens are minted — this is a pure yield contribution.*".to_string()
         }
 
+        "icrc1_transfer" => {
+            "## Transfer 3USD LP Tokens\n\n\
+            You are transferring 3USD LP tokens to another account.\n\n\
+            This will:\n\
+            - Deduct LP tokens from your balance\n\
+            - Credit them to the recipient\n\n\
+            *No fee applies.*".to_string()
+        }
+
+        "icrc2_approve" => {
+            "## Approve 3USD LP Token Spending\n\n\
+            You are approving a spender to transfer 3USD LP tokens on your behalf.\n\n\
+            This will:\n\
+            - Set an allowance for the spender\n\
+            - The spender can transfer up to the approved amount\n\n\
+            *Review the spender and amount carefully.*".to_string()
+        }
+
+        "icrc2_transfer_from" => {
+            "## Transfer 3USD LP Tokens (on behalf)\n\n\
+            You are transferring 3USD LP tokens from another account using your allowance.\n\n\
+            This will:\n\
+            - Deduct tokens from the owner's balance\n\
+            - Credit them to the recipient\n\
+            - Reduce your allowance accordingly\n\n\
+            *No fee applies.*".to_string()
+        }
+
         // Query methods
         "health" | "get_pool_status" | "get_lp_balance" | "calc_swap" |
         "calc_add_liquidity_query" | "calc_remove_liquidity_query" |
-        "calc_remove_one_coin_query" | "get_admin_fees" => {
+        "calc_remove_one_coin_query" | "get_admin_fees" | "get_vp_snapshots" |
+        "icrc1_name" | "icrc1_symbol" | "icrc1_decimals" | "icrc1_fee" |
+        "icrc1_total_supply" | "icrc1_minting_account" | "icrc1_balance_of" |
+        "icrc1_metadata" | "icrc1_supported_standards" | "icrc2_allowance" => {
             format!(
                 "## Query: {}\n\n\
                 This is a read-only query that does not modify any state.",
@@ -238,6 +269,22 @@ pub fn icrc28_trusted_origins() -> Icrc28TrustedOriginsResponse {
 
 pub fn icrc10_supported_standards() -> Vec<StandardRecord> {
     vec![
+        StandardRecord {
+            name: "ICRC-1".to_string(),
+            url: "https://github.com/dfinity/ICRC-1/blob/main/standards/ICRC-1/README.md".to_string(),
+        },
+        StandardRecord {
+            name: "ICRC-2".to_string(),
+            url: "https://github.com/dfinity/ICRC-1/blob/main/standards/ICRC-2/README.md".to_string(),
+        },
+        StandardRecord {
+            name: "ICRC-3".to_string(),
+            url: "https://github.com/dfinity/ICRC-1/tree/main/standards/ICRC-3".to_string(),
+        },
+        StandardRecord {
+            name: "ICRC-10".to_string(),
+            url: "https://github.com/dfinity/ICRC/blob/main/ICRCs/ICRC-10/ICRC-10.md".to_string(),
+        },
         StandardRecord {
             name: "ICRC-21".to_string(),
             url: "https://github.com/dfinity/ICRC/blob/main/ICRCs/ICRC-21/ICRC-21.md".to_string(),

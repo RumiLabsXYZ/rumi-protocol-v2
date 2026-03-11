@@ -97,6 +97,51 @@ pub struct LpBalance {
     pub amount: u128,
 }
 
+// ─── ICRC-2 Allowance ───
+
+/// ICRC-2 allowance for LP token transfers.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct LpAllowance {
+    pub amount: u128,
+    pub expires_at: Option<u64>,
+}
+
+// ─── ICRC-3 Block Types ───
+
+/// A single block in the ICRC-3 transaction log.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct Icrc3Block {
+    /// Sequential block index (matches lp_tx_count).
+    pub id: u64,
+    /// Timestamp in nanoseconds since UNIX epoch.
+    pub timestamp: u64,
+    /// The transaction recorded in this block.
+    pub tx: Icrc3Transaction,
+}
+
+/// A transaction recorded in the ICRC-3 block log.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub enum Icrc3Transaction {
+    Mint { to: Principal, amount: u128 },
+    Burn { from: Principal, amount: u128 },
+    Transfer { from: Principal, to: Principal, amount: u128, spender: Option<Principal> },
+    Approve { from: Principal, spender: Principal, amount: u128, expires_at: Option<u64> },
+}
+
+// ─── Virtual Price Snapshots (for APY calculation) ───
+
+/// A point-in-time snapshot of virtual_price, taken every 6 hours.
+/// Used to compute APY from virtual_price growth over 24h/7d/30d windows.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct VirtualPriceSnapshot {
+    /// Unix timestamp in seconds.
+    pub timestamp_secs: u64,
+    /// Virtual price scaled by 1e18.
+    pub virtual_price: u128,
+    /// Total LP supply at snapshot time.
+    pub lp_total_supply: u128,
+}
+
 // ─── Pool Status (query response) ───
 
 /// Snapshot of pool state returned by queries.

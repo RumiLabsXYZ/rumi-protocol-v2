@@ -7108,6 +7108,7 @@ name = "rumi_3pool"
 version = "0.1.0"
 dependencies = [
  "assert_matches",
+ "base64 0.22.1",
  "candid",
  "ethnum",
  "ic-canister-log 0.2.0 (git+https://github.com/Rumi-Protocol/ic?rev=fc278709)",

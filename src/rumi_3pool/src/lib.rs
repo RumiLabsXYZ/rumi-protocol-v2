@@ -1,6 +1,7 @@
 use candid::Principal;
 use ic_cdk::{query, update, init, pre_upgrade, post_upgrade};
 use ic_canister_log::log;
+use std::time::Duration;
 
 pub mod types;
 pub mod state;
@@ -10,6 +11,8 @@ pub mod liquidity;
 pub mod transfers;
 pub mod admin;
 pub mod icrc21;
+pub mod icrc_token;
+pub mod icrc3;
 
 mod logs;
 
@@ -26,6 +29,7 @@ use crate::logs::INFO;
 #[init]
 fn init(args: ThreePoolInitArgs) {
     mutate_state(|s| s.initialize(args));
+    setup_timers();
     log!(INFO, "Rumi 3pool initialized. Admin: {}, A: {}, swap_fee: {} bps",
         read_state(|s| s.config.admin),
         read_state(|s| s.config.initial_a),
@@ -41,9 +45,47 @@ fn pre_upgrade() {
 #[post_upgrade]
 fn post_upgrade() {
     state::load_from_stable_memory();
+    setup_timers();
     log!(INFO, "Rumi 3pool post-upgrade: state restored. LP supply: {}, initialized: {}",
         read_state(|s| s.lp_total_supply),
         read_state(|s| s.is_initialized));
+}
+
+// ─── Timers ───
+
+/// Set up recurring timers for VP snapshots.
+fn setup_timers() {
+    // Take an immediate snapshot so we have data right away.
+    take_vp_snapshot();
+    // Then every 6 hours.
+    ic_cdk_timers::set_timer_interval(Duration::from_secs(6 * 60 * 60), || {
+        take_vp_snapshot();
+    });
+}
+
+/// Record a virtual_price snapshot for APY calculations.
+fn take_vp_snapshot() {
+    let precision_muls = get_precision_muls();
+    let amp = get_current_a();
+
+    mutate_state(|s| {
+        if s.lp_total_supply == 0 {
+            return; // No LPs — virtual_price is meaningless.
+        }
+        let vp = match virtual_price(&s.balances, &precision_muls, amp, s.lp_total_supply) {
+            Some(v) => v,
+            None => return,
+        };
+        let now_secs = ic_cdk::api::time() / 1_000_000_000;
+        let lp_supply = s.lp_total_supply;
+        let snapshot = VirtualPriceSnapshot {
+            timestamp_secs: now_secs,
+            virtual_price: vp,
+            lp_total_supply: lp_supply,
+        };
+        s.snapshots_mut().push(snapshot);
+    });
+    log!(INFO, "VP snapshot taken");
 }
 
 // ─── Queries ───
@@ -213,6 +255,8 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
         *entry += lp_minted;
         s.lp_total_supply += lp_minted;
         s.is_initialized = true;
+        // Log mint block for ICRC-3 index
+        s.log_block(Icrc3Transaction::Mint { to: caller, amount: lp_minted });
     });
 
     log!(INFO, "AddLiquidity: {:?} -> {} LP for {}", amounts_arr, lp_minted, caller);
@@ -271,6 +315,8 @@ pub async fn remove_liquidity(
         for k in 0..3 {
             s.balances[k] -= amounts[k];
         }
+        // Log burn block for ICRC-3 index
+        s.log_block(Icrc3Transaction::Burn { from: caller, amount: lp_burn });
     });
 
     // 6. Transfer each non-zero amount to user
@@ -349,6 +395,8 @@ pub async fn remove_one_coin(
         s.lp_total_supply -= lp_burn;
         s.balances[idx] -= amount + fee;
         s.admin_fees[idx] += admin_fee_share;
+        // Log burn block for ICRC-3 index
+        s.log_block(Icrc3Transaction::Burn { from: caller, amount: lp_burn });
     });
 
     // 6. Transfer to user
@@ -515,6 +563,12 @@ pub fn get_admin_fees() -> Vec<u128> {
     read_state(|s| s.admin_fees.to_vec())
 }
 
+/// Returns all virtual_price snapshots for APY calculation and historical charts.
+#[query]
+pub fn get_vp_snapshots() -> Vec<VirtualPriceSnapshot> {
+    read_state(|s| s.snapshots().clone())
+}
+
 // ─── Admin Endpoints ───
 
 #[update]
@@ -573,4 +627,103 @@ pub fn icrc28_trusted_origins() -> icrc21::Icrc28TrustedOriginsResponse {
 #[query]
 pub fn icrc10_supported_standards() -> Vec<icrc21::StandardRecord> {
     icrc21::icrc10_supported_standards()
+}
+
+// ─── ICRC-1 Token Endpoints ───
+
+#[query]
+pub fn icrc1_name() -> String {
+    icrc_token::icrc1_name()
+}
+
+#[query]
+pub fn icrc1_symbol() -> String {
+    icrc_token::icrc1_symbol()
+}
+
+#[query]
+pub fn icrc1_decimals() -> u8 {
+    icrc_token::icrc1_decimals()
+}
+
+#[query]
+pub fn icrc1_fee() -> candid::Nat {
+    icrc_token::icrc1_fee()
+}
+
+#[query]
+pub fn icrc1_total_supply() -> candid::Nat {
+    icrc_token::icrc1_total_supply()
+}
+
+#[query]
+pub fn icrc1_minting_account() -> Option<icrc_ledger_types::icrc1::account::Account> {
+    icrc_token::icrc1_minting_account()
+}
+
+#[query]
+pub fn icrc1_balance_of(account: icrc_ledger_types::icrc1::account::Account) -> candid::Nat {
+    icrc_token::icrc1_balance_of(account)
+}
+
+#[query]
+pub fn icrc1_metadata() -> Vec<(String, icrc_ledger_types::icrc::generic_metadata_value::MetadataValue)> {
+    icrc_token::icrc1_metadata()
+}
+
+#[query]
+pub fn icrc1_supported_standards() -> Vec<icrc21::StandardRecord> {
+    icrc21::icrc10_supported_standards()
+}
+
+#[update]
+pub fn icrc1_transfer(
+    args: icrc_ledger_types::icrc1::transfer::TransferArg,
+) -> Result<candid::Nat, icrc_ledger_types::icrc1::transfer::TransferError> {
+    icrc_token::icrc1_transfer(ic_cdk::api::caller(), args)
+}
+
+// ─── ICRC-2 Endpoints ───
+
+#[update]
+pub fn icrc2_approve(
+    args: icrc_ledger_types::icrc2::approve::ApproveArgs,
+) -> Result<candid::Nat, icrc_ledger_types::icrc2::approve::ApproveError> {
+    icrc_token::icrc2_approve(ic_cdk::api::caller(), args)
+}
+
+#[query]
+pub fn icrc2_allowance(
+    args: icrc_ledger_types::icrc2::allowance::AllowanceArgs,
+) -> icrc_ledger_types::icrc2::allowance::Allowance {
+    icrc_token::icrc2_allowance(args)
+}
+
+#[update]
+pub fn icrc2_transfer_from(
+    args: icrc_ledger_types::icrc2::transfer_from::TransferFromArgs,
+) -> Result<candid::Nat, icrc_ledger_types::icrc2::transfer_from::TransferFromError> {
+    icrc_token::icrc2_transfer_from(ic_cdk::api::caller(), args)
+}
+
+// ─── ICRC-3 Endpoints ───
+
+#[query]
+pub fn icrc3_get_blocks(args: Vec<icrc3::GetBlocksArgs>) -> icrc3::GetBlocksResult {
+    icrc3::icrc3_get_blocks(args)
+}
+
+#[query]
+pub fn icrc3_get_archives(args: icrc3::GetArchivesArgs) -> icrc3::GetArchivesResult {
+    icrc3::icrc3_get_archives(args)
+}
+
+#[query]
+pub fn icrc3_get_tip_certificate() -> Option<icrc3::Icrc3DataCertificate> {
+    icrc3::icrc3_get_tip_certificate()
+}
+
+#[query]
+pub fn icrc3_supported_block_types() -> Vec<icrc3::SupportedBlockType> {
+    icrc3::icrc3_supported_block_types()
 }

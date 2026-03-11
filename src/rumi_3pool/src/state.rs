@@ -17,6 +17,18 @@ pub struct ThreePoolState {
     pub lp_balances: BTreeMap<Principal, u128>,
     /// Total LP tokens in circulation.
     pub lp_total_supply: u128,
+    /// ICRC-2 LP token allowances: (owner, spender) -> allowance.
+    /// Option for upgrade compatibility — old state won't have this field.
+    pub lp_allowances: Option<BTreeMap<(Principal, Principal), crate::types::LpAllowance>>,
+    /// Transaction counter for ICRC-1/2 block index.
+    /// Option for upgrade compatibility — old state won't have this field.
+    pub lp_tx_count: Option<u64>,
+    /// Virtual price snapshots for APY calculation (taken every 6 hours).
+    /// Option for upgrade compatibility — old state won't have this field.
+    pub vp_snapshots: Option<Vec<crate::types::VirtualPriceSnapshot>>,
+    /// ICRC-3 transaction log for index canister support.
+    /// Option for upgrade compatibility — old state won't have this field.
+    pub blocks: Option<Vec<crate::types::Icrc3Block>>,
     /// Accumulated admin fees per coin (claimable by admin).
     pub admin_fees: [u128; 3],
     /// Whether the pool is paused (no swaps/deposits/withdrawals).
@@ -47,6 +59,10 @@ impl Default for ThreePoolState {
             balances: [0; 3],
             lp_balances: BTreeMap::new(),
             lp_total_supply: 0,
+            lp_allowances: Some(BTreeMap::new()),
+            lp_tx_count: Some(0),
+            blocks: Some(Vec::new()),
+            vp_snapshots: Some(Vec::new()),
             admin_fees: [0; 3],
             is_paused: false,
             is_initialized: false,
@@ -55,6 +71,70 @@ impl Default for ThreePoolState {
 }
 
 impl ThreePoolState {
+    /// Get LP allowances map (initializes if None for upgrade compat).
+    pub fn allowances(&self) -> &BTreeMap<(Principal, Principal), crate::types::LpAllowance> {
+        // SAFETY: Default impl always sets to Some; only None from old state that was never mutated.
+        // In that case the caller should use allowances_mut() first.
+        static EMPTY: std::sync::LazyLock<BTreeMap<(Principal, Principal), crate::types::LpAllowance>> =
+            std::sync::LazyLock::new(BTreeMap::new);
+        self.lp_allowances.as_ref().unwrap_or(&EMPTY)
+    }
+
+    /// Get mutable LP allowances map (initializes if None for upgrade compat).
+    pub fn allowances_mut(&mut self) -> &mut BTreeMap<(Principal, Principal), crate::types::LpAllowance> {
+        self.lp_allowances.get_or_insert_with(BTreeMap::new)
+    }
+
+    /// Get current tx count.
+    pub fn tx_count(&self) -> u64 {
+        self.lp_tx_count.unwrap_or(0)
+    }
+
+    /// Increment and return new tx count.
+    pub fn next_tx_count(&mut self) -> u64 {
+        let count = self.lp_tx_count.get_or_insert(0);
+        *count += 1;
+        *count
+    }
+
+    /// Get blocks vec (empty if None for upgrade compat).
+    pub fn blocks(&self) -> &Vec<crate::types::Icrc3Block> {
+        static EMPTY: std::sync::LazyLock<Vec<crate::types::Icrc3Block>> =
+            std::sync::LazyLock::new(Vec::new);
+        self.blocks.as_ref().unwrap_or(&EMPTY)
+    }
+
+    /// Get mutable blocks vec (initializes if None for upgrade compat).
+    pub fn blocks_mut(&mut self) -> &mut Vec<crate::types::Icrc3Block> {
+        self.blocks.get_or_insert_with(Vec::new)
+    }
+
+    /// Log a transaction block and return its index.
+    /// Block IDs are sequential starting from 0, matching Vec position,
+    /// so that ICRC-3 `log_length` == `blocks.len()` and `start` indexing works.
+    pub fn log_block(&mut self, tx: crate::types::Icrc3Transaction) -> u64 {
+        let blocks = self.blocks_mut();
+        let id = blocks.len() as u64;
+        blocks.push(crate::types::Icrc3Block {
+            id,
+            timestamp: ic_cdk::api::time(),
+            tx,
+        });
+        id
+    }
+
+    /// Get VP snapshots vec (empty if None for upgrade compat).
+    pub fn snapshots(&self) -> &Vec<crate::types::VirtualPriceSnapshot> {
+        static EMPTY: std::sync::LazyLock<Vec<crate::types::VirtualPriceSnapshot>> =
+            std::sync::LazyLock::new(Vec::new);
+        self.vp_snapshots.as_ref().unwrap_or(&EMPTY)
+    }
+
+    /// Get mutable VP snapshots vec (initializes if None for upgrade compat).
+    pub fn snapshots_mut(&mut self) -> &mut Vec<crate::types::VirtualPriceSnapshot> {
+        self.vp_snapshots.get_or_insert_with(Vec::new)
+    }
+
     /// Initialize pool state from deploy args.
     pub fn initialize(&mut self, args: ThreePoolInitArgs) {
         self.config = PoolConfig {
