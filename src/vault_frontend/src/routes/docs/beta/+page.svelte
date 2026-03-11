@@ -1,4 +1,4 @@
-<svelte:head><title>Beta Disclaimer - Rumi Docs</title></svelte:head>
+<svelte:head><title>Beta Disclaimer | Rumi Docs</title></svelte:head>
 
 <article class="doc-page">
   <h1 class="doc-title">Beta Disclaimer</h1>

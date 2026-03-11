@@ -32,10 +32,9 @@
   $: isConnected = $walletStore.isConnected;
   $: principal = $walletStore.principal;
 
-  // APR calculation for header badge — per-collateral formula.
-  // Pool APR = sum over all collateral types C of:
-  //   rate_C * poolShare * debt_C / eligible_icusd_C
-  $: poolApr = (() => {
+  // APY calculation for header badge — per-collateral formula.
+  // First compute APR as a decimal, then convert to APY via daily compounding.
+  $: poolApy = (() => {
     if (!protocolStatus || !poolStatus) return null;
     const poolShare = protocolStatus.interestPoolShare;
     const perC = protocolStatus.perCollateralInterest;
@@ -52,10 +51,12 @@
       totalApr += (info.weightedInterestRate * poolShare * info.totalDebtE8s) / eligible;
     }
     if (totalApr === 0) return null;
-    return (totalApr * 100).toFixed(2);
+    // Convert APR (decimal) to APY via daily compounding
+    const apy = Math.pow(1 + totalApr / 365, 365) - 1;
+    return (apy * 100).toFixed(2);
   })();
 
-  let showAprTooltip = false;
+  let showApyTooltip = false;
 
   async function loadAllData() {
     try {
@@ -134,30 +135,30 @@
 </script>
 
 <svelte:head>
-  <title>Earn — Stability Pool | Rumi Protocol</title>
+  <title>Stake | Rumi Protocol</title>
 </svelte:head>
 
 <div class="page-container">
   <!-- Page header with APR badge -->
   <div class="page-header">
     <h1 class="page-title">Stability Pool</h1>
-    {#if poolApr !== null}
+    {#if poolApy !== null}
       <!-- svelte-ignore a11y-mouse-events-have-key-events -->
       <div
-        class="apr-badge"
-        on:mouseover={() => { showAprTooltip = true; }}
-        on:mouseleave={() => { showAprTooltip = false; }}
+        class="apy-badge"
+        on:mouseover={() => { showApyTooltip = true; }}
+        on:mouseleave={() => { showApyTooltip = false; }}
       >
-        <svg class="apr-arrow" width="10" height="10" viewBox="0 0 10 10" fill="none">
+        <svg class="apy-arrow" width="10" height="10" viewBox="0 0 10 10" fill="none">
           <path d="M5 8V2M5 2L2 5M5 2L8 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
-        {poolApr}% APR<span class="apr-asterisk">*</span>
+        {poolApy}% APY<span class="apy-asterisk">*</span>
 
-        {#if showAprTooltip}
-          <div class="apr-tooltip">
-            <div class="apr-tooltip-caret"></div>
-            <p><strong>Interest APR</strong> applies to <strong>icUSD</strong> deposits. icUSD depositors earn a share of all borrowing interest paid by vault owners.</p>
-            <div class="apr-tooltip-divider"></div>
+        {#if showApyTooltip}
+          <div class="apy-tooltip">
+            <div class="apy-tooltip-caret"></div>
+            <p><strong>Interest APY</strong> applies to <strong>icUSD</strong> deposits. icUSD depositors earn a share of all borrowing interest paid by vault owners.</p>
+            <div class="apy-tooltip-divider"></div>
             <p><strong>ckUSDC</strong> and <strong>ckUSDT</strong> deposits don't earn interest but are used <em>first</em> for liquidations, giving priority access to discounted collateral.</p>
           </div>
         {/if}
@@ -220,7 +221,7 @@
   }
 
   /* ── APR badge ── */
-  .apr-badge {
+  .apy-badge {
     position: relative;
     display: inline-flex;
     align-items: center;
@@ -236,9 +237,9 @@
     white-space: nowrap;
   }
 
-  .apr-arrow { color: #4ade80; flex-shrink: 0; }
+  .apy-arrow { color: #4ade80; flex-shrink: 0; }
 
-  .apr-asterisk {
+  .apy-asterisk {
     font-size: 0.625rem;
     opacity: 0.6;
     margin-left: -0.125rem;
@@ -246,7 +247,7 @@
   }
 
   /* ── APR tooltip ── */
-  .apr-tooltip {
+  .apy-tooltip {
     position: absolute;
     top: calc(100% + 0.625rem);
     left: 50%;
@@ -274,7 +275,7 @@
     to { opacity: 1; transform: translateX(-50%) translateY(0); }
   }
 
-  .apr-tooltip-caret {
+  .apy-tooltip-caret {
     position: absolute;
     top: -5px;
     left: 50%;
@@ -286,11 +287,11 @@
     border-left: 1px solid rgba(255, 255, 255, 0.08);
   }
 
-  .apr-tooltip p { margin: 0; }
-  .apr-tooltip strong { color: #cbd5e1; font-weight: 600; }
-  .apr-tooltip em { font-style: italic; }
+  .apy-tooltip p { margin: 0; }
+  .apy-tooltip strong { color: #cbd5e1; font-weight: 600; }
+  .apy-tooltip em { font-style: italic; }
 
-  .apr-tooltip-divider {
+  .apy-tooltip-divider {
     height: 1px;
     background: rgba(255, 255, 255, 0.06);
     margin: 0.5rem 0;
@@ -368,13 +369,13 @@
       flex-wrap: wrap;
     }
 
-    .apr-tooltip {
+    .apy-tooltip {
       left: 0;
       transform: none;
       width: calc(100vw - 2rem);
     }
 
-    .apr-tooltip-caret {
+    .apy-tooltip-caret {
       left: 2rem;
       transform: rotate(45deg);
     }

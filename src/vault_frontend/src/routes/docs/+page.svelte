@@ -44,7 +44,7 @@
 </script>
 
 <svelte:head>
-  <title>Docs - Rumi Protocol</title>
+  <title>Docs | Rumi Protocol</title>
 </svelte:head>
 
 <div class="page-container docs-container">

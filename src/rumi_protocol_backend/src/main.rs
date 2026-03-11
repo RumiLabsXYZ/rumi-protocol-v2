@@ -10,7 +10,7 @@ use rumi_protocol_backend::{
     vault::{CandidVault, OpenVaultSuccess, VaultArg},
     Fees, GetEventsArg, ProtocolArg, ProtocolError, ProtocolStatus, SuccessWithFee,
     ReserveRedemptionResult, ReserveBalance, CollateralTotals, CollateralInterestInfo,
-    VaultArgWithToken, StableTokenType,
+    VaultArgWithToken, StableTokenType, InterestSplitArg,
 };
 use rumi_protocol_backend::logs::DEBUG;
 use rumi_protocol_backend::state::mutate_state;
@@ -1583,6 +1583,144 @@ fn get_interest_pool_share() -> f64 {
     read_state(|s| s.interest_pool_share.to_f64())
 }
 
+// ── Interest split (N-way) configuration ────────────────────────────────
+
+/// Set the N-way interest revenue split. Each recipient is a (destination, bps) pair.
+/// Destination: "stability_pool", "treasury", or "three_pool".
+/// All bps must sum to exactly 10,000.
+#[candid_method(update)]
+#[update]
+async fn set_interest_split(recipients: Vec<InterestSplitArg>) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set interest split".to_string(),
+        ));
+    }
+
+    // Validate bps sum
+    let total_bps: u64 = recipients.iter().map(|r| r.bps).sum();
+    if total_bps != 10_000 {
+        return Err(ProtocolError::GenericError(
+            format!("Interest split bps must sum to 10000, got {}", total_bps),
+        ));
+    }
+
+    // Validate no zero-bps entries and no duplicate destinations
+    let mut seen = std::collections::HashSet::new();
+    for r in &recipients {
+        if r.bps == 0 {
+            return Err(ProtocolError::GenericError(
+                "Interest split entries must have bps > 0".to_string(),
+            ));
+        }
+        if !seen.insert(r.destination.clone()) {
+            return Err(ProtocolError::GenericError(
+                format!("Duplicate destination: {}", r.destination),
+            ));
+        }
+    }
+
+    // Convert string destinations to enum
+    let split: Vec<rumi_protocol_backend::state::InterestRecipient> = recipients.iter().map(|r| {
+        let dest = match r.destination.as_str() {
+            "stability_pool" => rumi_protocol_backend::state::InterestDestination::StabilityPool,
+            "treasury" => rumi_protocol_backend::state::InterestDestination::Treasury,
+            "three_pool" => rumi_protocol_backend::state::InterestDestination::ThreePool,
+            _ => rumi_protocol_backend::state::InterestDestination::Treasury, // fallback
+        };
+        rumi_protocol_backend::state::InterestRecipient { destination: dest, bps: r.bps }
+    }).collect();
+
+    // Validate destinations are known
+    for r in &recipients {
+        if !["stability_pool", "treasury", "three_pool"].contains(&r.destination.as_str()) {
+            return Err(ProtocolError::GenericError(
+                format!("Unknown destination: '{}'. Valid: stability_pool, treasury, three_pool", r.destination),
+            ));
+        }
+    }
+
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_interest_split(s, split);
+    });
+
+    log!(INFO, "[set_interest_split] Updated: {:?}", recipients);
+    Ok(())
+}
+
+/// Get the current interest split configuration.
+#[candid_method(query)]
+#[query]
+fn get_interest_split() -> Vec<InterestSplitArg> {
+    read_state(|s| {
+        s.interest_split.iter().map(|r| {
+            let dest = match &r.destination {
+                rumi_protocol_backend::state::InterestDestination::StabilityPool => "stability_pool".to_string(),
+                rumi_protocol_backend::state::InterestDestination::Treasury => "treasury".to_string(),
+                rumi_protocol_backend::state::InterestDestination::ThreePool => "three_pool".to_string(),
+            };
+            InterestSplitArg { destination: dest, bps: r.bps }
+        }).collect()
+    })
+}
+
+/// Set the interest flush threshold (developer only).
+/// Interest is accumulated per collateral type and flushed to pools/treasury
+/// when any bucket reaches this threshold. Default is 10_000_000 (0.1 icUSD).
+#[candid_method(update)]
+#[update]
+async fn set_interest_flush_threshold(threshold_e8s: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set interest flush threshold".to_string(),
+        ));
+    }
+    if threshold_e8s == 0 {
+        return Err(ProtocolError::GenericError(
+            "Threshold must be greater than 0".to_string(),
+        ));
+    }
+    mutate_state(|s| {
+        s.interest_flush_threshold_e8s = threshold_e8s;
+    });
+    log!(
+        INFO,
+        "[set_interest_flush_threshold] Set to {} e8s ({} icUSD)",
+        threshold_e8s,
+        threshold_e8s as f64 / 100_000_000.0
+    );
+    Ok(())
+}
+
+/// Set the 3pool canister principal for interest donations (developer only).
+#[candid_method(update)]
+#[update]
+async fn set_three_pool_canister(canister_id: Principal) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set 3pool canister".to_string(),
+        ));
+    }
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_three_pool_canister(s, canister_id);
+    });
+    log!(INFO, "[set_three_pool_canister] Set to: {}", canister_id);
+    Ok(())
+}
+
+/// Get the configured 3pool canister principal.
+#[candid_method(query)]
+#[query]
+fn get_three_pool_canister() -> Option<Principal> {
+    read_state(|s| s.three_pool_canister)
+}
+
 // ── RMR (Redemption Margin Ratio) configuration ────────────────────────
 
 /// Get the RMR floor (ratio redeemers receive when system is healthy).
@@ -1708,6 +1846,8 @@ pub struct TreasuryStats {
     pub pending_treasury_interest: u64,
     pub pending_treasury_collateral_entries: u64,
     pub liquidation_protocol_share: f64,
+    pub pending_interest_for_pools_total: u64,
+    pub interest_flush_threshold_e8s: u64,
 }
 
 /// Get treasury-related statistics including accrued interest across all vaults.
@@ -1721,6 +1861,8 @@ fn get_treasury_stats() -> TreasuryStats {
         pending_treasury_interest: s.pending_treasury_interest.to_u64(),
         pending_treasury_collateral_entries: s.pending_treasury_collateral.len() as u64,
         liquidation_protocol_share: s.liquidation_protocol_share.to_f64(),
+        pending_interest_for_pools_total: s.pending_interest_for_pools.values().sum(),
+        interest_flush_threshold_e8s: s.interest_flush_threshold_e8s,
     })
 }
 

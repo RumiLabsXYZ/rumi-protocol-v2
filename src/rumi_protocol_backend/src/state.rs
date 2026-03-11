@@ -50,7 +50,36 @@ pub const DEFAULT_RESERVE_REDEMPTION_FEE: Ratio = Ratio::new(dec!(0.003)); // 0.
 pub const DEFAULT_RECOVERY_TARGET_CR: Ratio = Ratio::new(dec!(1.55)); // 155% — legacy; kept for serde backwards compat
 pub const DEFAULT_RECOVERY_CR_MULTIPLIER: Ratio = Ratio::new(dec!(1.033333333333333333)); // proportional buffer: recovery_cr = borrow_threshold × 1.0333...
 pub const DEFAULT_INTEREST_RATE_APR: Ratio = Ratio::new(dec!(0.0)); // 0% — placeholder for future accrual
-pub const DEFAULT_INTEREST_POOL_SHARE: Ratio = Ratio::new(dec!(0.75)); // 75% to stability pool
+pub const DEFAULT_INTEREST_POOL_SHARE: Ratio = Ratio::new(dec!(0.75)); // 75% to stability pool — legacy, kept for old event replay
+
+/// Where a share of interest revenue is routed.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum InterestDestination {
+    /// Stability pool (distributes pro-rata to depositors).
+    StabilityPool,
+    /// Protocol treasury canister.
+    Treasury,
+    /// 3pool AMM (donated as icUSD to grow virtual_price for 3USD holders).
+    ThreePool,
+}
+
+/// One slice of the interest split: destination + share in basis points.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct InterestRecipient {
+    pub destination: InterestDestination,
+    pub bps: u64, // basis points out of 10_000
+}
+
+/// Default interest split: 50% 3pool, 40% stability pool, 10% treasury.
+fn default_flush_threshold() -> u64 { 10_000_000 } // 0.1 icUSD
+
+pub fn default_interest_split() -> Vec<InterestRecipient> {
+    vec![
+        InterestRecipient { destination: InterestDestination::ThreePool, bps: 5000 },
+        InterestRecipient { destination: InterestDestination::StabilityPool, bps: 4000 },
+        InterestRecipient { destination: InterestDestination::Treasury, bps: 1000 },
+    ]
+}
 pub const DUST_DEBT_THRESHOLD: u64 = 50_000; // 0.0005 icUSD — debt below this is forgiven on withdrawal
 
 /// Default Layer 1 multipliers at each CR marker
@@ -512,6 +541,15 @@ pub struct State {
     /// None = flat fee (no dynamic multiplier).
     pub borrowing_fee_curve: Option<RateCurveV2>,
 
+    // Periodic interest distribution
+    /// Accumulated interest per collateral type, waiting to be flushed to pools.
+    /// Key = collateral_type Principal, Value = total interest in e8s.
+    pub pending_interest_for_pools: BTreeMap<Principal, u64>,
+
+    /// Minimum interest (e8s) per collateral bucket before flushing. Admin-settable.
+    /// Default = 10_000_000 (0.1 icUSD). At 0.01 the ledger fee eats ~10%.
+    pub interest_flush_threshold_e8s: u64,
+
     // Treasury fee routing
     /// Interest revenue from sync liquidations, minted to treasury in next timer tick.
     pub pending_treasury_interest: ICUSD,
@@ -524,7 +562,16 @@ pub struct State {
 
     /// Share of interest revenue sent to stability pool depositors (0.0-1.0).
     /// Remainder goes to protocol treasury.
+    /// LEGACY: kept for backwards compat with old SetInterestPoolShare events.
+    /// New code uses `interest_split` instead.
     pub interest_pool_share: Ratio,
+
+    /// N-way interest revenue split. Each recipient gets `bps/10000` of interest.
+    /// All bps must sum to exactly 10_000. Replaces `interest_pool_share`.
+    pub interest_split: Vec<InterestRecipient>,
+
+    /// 3pool AMM canister for interest donations.
+    pub three_pool_canister: Option<Principal>,
 
     /// Redemption Margin Ratio parameters.
     /// RMR value when system CR is at or above rmr_floor_cr (e.g. 0.96 = 96%).
@@ -685,11 +732,17 @@ impl From<InitArg> for State {
                 method: InterpolationMethod::Linear,
             }),
 
+            // Periodic interest distribution
+            pending_interest_for_pools: BTreeMap::new(),
+            interest_flush_threshold_e8s: default_flush_threshold(),
+
             // Treasury fee routing
             pending_treasury_interest: ICUSD::new(0),
             pending_treasury_collateral: Vec::new(),
             liquidation_protocol_share: crate::DEFAULT_LIQUIDATION_PROTOCOL_SHARE,
             interest_pool_share: DEFAULT_INTEREST_POOL_SHARE,
+            interest_split: default_interest_split(),
+            three_pool_canister: None,
 
             rmr_floor: DEFAULT_RMR_FLOOR,
             rmr_ceiling: DEFAULT_RMR_CEILING,
@@ -1417,6 +1470,23 @@ impl State {
                 vault.accrued_interest += ICUSD::from(interest_delta);
                 vault.borrowed_icusd_amount = ICUSD::from(new_debt);
                 vault.last_accrual_time = now_nanos;
+            }
+        }
+    }
+
+    /// Harvest accrued interest from all vaults into the pending distribution map.
+    /// After this, per-vault `accrued_interest` is zeroed (only ≤5 min of new interest
+    /// will re-accumulate before the next harvest). `borrowed_icusd_amount` is unchanged
+    /// so user debt is unaffected.
+    pub fn harvest_accrued_interest(&mut self) {
+        for vault in self.vault_id_to_vaults.values_mut() {
+            let interest = vault.accrued_interest.to_u64();
+            if interest > 0 {
+                *self
+                    .pending_interest_for_pools
+                    .entry(vault.collateral_type)
+                    .or_insert(0) += interest;
+                vault.accrued_interest = ICUSD::new(0);
             }
         }
     }

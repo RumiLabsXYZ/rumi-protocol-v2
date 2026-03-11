@@ -221,6 +221,197 @@ pub async fn mint_interest_to_stability_pool(interest_share: ICUSD, collateral_t
     }
 }
 
+// ---------------------------------------------------------------------------
+// Interest distribution — N-way split
+// ---------------------------------------------------------------------------
+
+/// Distribute interest revenue according to the configured interest_split.
+/// Mints icUSD to each destination: stability pool, treasury, and/or 3pool.
+///
+/// For the 3pool destination, mints icUSD to self, approves the 3pool canister,
+/// then calls `donate(0, amount)` to inject yield into the pool.
+///
+/// `collateral_type` is needed for stability pool interest routing.
+pub async fn distribute_interest(interest: ICUSD, collateral_type: Principal) {
+    if interest.0 == 0 {
+        return;
+    }
+
+    let (split, three_pool) = read_state(|s| {
+        (s.interest_split.clone(), s.three_pool_canister)
+    });
+
+    let total_e8s = interest.to_u64();
+
+    for recipient in &split {
+        let share_e8s = ((total_e8s as u128) * (recipient.bps as u128) / 10_000) as u64;
+        if share_e8s == 0 {
+            continue;
+        }
+        let share = ICUSD::from(share_e8s);
+
+        match &recipient.destination {
+            crate::state::InterestDestination::StabilityPool => {
+                mint_interest_to_stability_pool(share, collateral_type).await;
+            }
+            crate::state::InterestDestination::Treasury => {
+                mint_interest_to_treasury(share).await;
+            }
+            crate::state::InterestDestination::ThreePool => {
+                if let Some(pool_canister) = three_pool {
+                    donate_to_three_pool(pool_canister, share_e8s).await;
+                } else {
+                    log!(INFO, "[treasury] WARNING: 3pool interest share ({} icUSD) has no target canister configured, sending to treasury instead", share_e8s);
+                    mint_interest_to_treasury(share).await;
+                }
+            }
+        }
+    }
+}
+
+/// Distribute stablecoin-denominated interest revenue.
+/// Similar to `distribute_interest` but handles the stablecoin-specific case:
+/// - StabilityPool: mint icUSD (backed by stablecoins in reserves)
+/// - Treasury: transfer actual stablecoins
+/// - ThreePool: mint icUSD + donate to pool
+///
+/// `interest_e8s` is in icUSD-equivalent e8s (8 decimals).
+/// `token_type` and the corresponding ledger are used for treasury stablecoin transfers.
+pub async fn distribute_stablecoin_interest(
+    interest_e8s: u64,
+    collateral_type: Principal,
+    token_type: crate::StableTokenType,
+) {
+    if interest_e8s == 0 {
+        return;
+    }
+
+    let (split, three_pool) = read_state(|s| {
+        (s.interest_split.clone(), s.three_pool_canister)
+    });
+
+    for recipient in &split {
+        let share_e8s = ((interest_e8s as u128) * (recipient.bps as u128) / 10_000) as u64;
+        if share_e8s == 0 {
+            continue;
+        }
+
+        match &recipient.destination {
+            crate::state::InterestDestination::StabilityPool => {
+                let pool_icusd = ICUSD::from(share_e8s);
+                mint_interest_to_stability_pool(pool_icusd, collateral_type).await;
+            }
+            crate::state::InterestDestination::Treasury => {
+                // Transfer stablecoins (not icUSD) to treasury
+                let treasury_e6s = share_e8s / 100; // e8s → e6s
+                if treasury_e6s > 0 {
+                    let (treasury_principal, stable_ledger) = read_state(|s| {
+                        let ledger = match token_type {
+                            crate::StableTokenType::CKUSDT => s.ckusdt_ledger_principal,
+                            crate::StableTokenType::CKUSDC => s.ckusdc_ledger_principal,
+                        };
+                        (s.treasury_principal, ledger)
+                    });
+                    if let (Some(tp), Some(ledger)) = (treasury_principal, stable_ledger) {
+                        match crate::management::transfer_collateral(treasury_e6s, tp, ledger).await {
+                            Ok(block_index) => {
+                                log!(INFO, "[treasury] Transferred {} {:?} interest to treasury (block {})", treasury_e6s, token_type, block_index);
+                                let asset_type = match token_type {
+                                    crate::StableTokenType::CKUSDT => AssetType::CKUSDT,
+                                    crate::StableTokenType::CKUSDC => AssetType::CKUSDC,
+                                };
+                                let _ = notify_treasury_deposit(tp, DepositType::InterestRevenue, asset_type, treasury_e6s, block_index).await;
+                            }
+                            Err(e) => log!(INFO, "[treasury] WARNING: stablecoin interest transfer failed: {:?}", e),
+                        }
+                    }
+                }
+            }
+            crate::state::InterestDestination::ThreePool => {
+                if let Some(pool_canister) = three_pool {
+                    donate_to_three_pool(pool_canister, share_e8s).await;
+                } else {
+                    // Fallback: mint icUSD to treasury (same as distribute_interest)
+                    log!(INFO, "[treasury] WARNING: 3pool interest share ({} icUSD) has no target canister, sending to treasury instead", share_e8s);
+                    mint_interest_to_treasury(ICUSD::from(share_e8s)).await;
+                }
+            }
+        }
+    }
+}
+
+/// Mint icUSD to self, approve 3pool, and call `donate(0, amount)`.
+/// Non-critical: failures are logged but don't block protocol operations.
+async fn donate_to_three_pool(pool_canister: Principal, amount_e8s: u64) {
+    let protocol_id = ic_cdk::id();
+    let icusd_fee: u64 = 10_000; // icUSD ledger fee (0.0001 icUSD)
+
+    // 1. Mint icUSD to self (the backend canister)
+    // Must mint extra to cover: approve fee + transfer_from fee
+    let mint_amount = amount_e8s + 2 * icusd_fee;
+    let icusd = ICUSD::from(mint_amount);
+    match crate::management::mint_icusd(icusd, protocol_id).await {
+        Ok(block_index) => {
+            log!(INFO, "[treasury] Minted {} icUSD to self for 3pool donation (block {})", mint_amount, block_index);
+        }
+        Err(e) => {
+            log!(INFO, "[treasury] WARNING: 3pool donation mint failed: {:?}", e);
+            return;
+        }
+    }
+
+    // 2. Approve 3pool canister to spend it
+    // Allowance must cover amount + transfer_from fee
+    let approve_amount = amount_e8s + icusd_fee;
+    match crate::management::approve_icusd(pool_canister, approve_amount).await {
+        Ok(_) => {
+            log!(INFO, "[treasury] Approved 3pool {} for {} icUSD", pool_canister, approve_amount);
+        }
+        Err(e) => {
+            log!(INFO, "[treasury] WARNING: 3pool approval failed: {:?}", e);
+            return;
+        }
+    }
+
+    // 3. Call donate(0, amount) on the 3pool canister
+    // token_index 0 = icUSD, amount in e8s (icUSD uses 8 decimals)
+    let donate_amount = candid::Nat::from(amount_e8s);
+    let result: Result<(Result<(), ThreePoolDonateError>,), _> =
+        ic_cdk::call(pool_canister, "donate", (0u8, donate_amount)).await;
+    match result {
+        Ok((Ok(()),)) => {
+            log!(INFO, "[treasury] Donated {} icUSD to 3pool", amount_e8s);
+        }
+        Ok((Err(e),)) => {
+            log!(INFO, "[treasury] WARNING: 3pool donate call returned error: {:?}", e);
+        }
+        Err((code, msg)) => {
+            log!(INFO, "[treasury] WARNING: 3pool donate inter-canister call failed: {:?} {}", code, msg);
+        }
+    }
+}
+
+/// Mirror of the 3pool ThreePoolError for the donate response.
+/// We only need this for deserialization of the Result.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+enum ThreePoolDonateError {
+    InsufficientOutput { expected_min: candid::Nat, actual: candid::Nat },
+    InsufficientLiquidity,
+    InvalidCoinIndex,
+    ZeroAmount,
+    PoolEmpty,
+    SlippageExceeded,
+    TransferFailed { token: String, reason: String },
+    Unauthorized,
+    MathOverflow,
+    InvariantNotConverged,
+    PoolPaused,
+}
+
+// ---------------------------------------------------------------------------
+// Public helpers — mint/transfer + notify
+// ---------------------------------------------------------------------------
+
 /// Mint icUSD borrowing fee to treasury and record the deposit.
 pub async fn mint_borrowing_fee_to_treasury(fee: ICUSD) {
     if fee.0 == 0 {
@@ -287,6 +478,26 @@ pub async fn send_liquidation_fee_to_treasury(
                 "[treasury] WARNING: liquidation fee transfer failed: {:?}",
                 e
             ),
+        }
+    }
+}
+
+/// Flush accumulated interest from periodic harvesting to pools/treasury.
+/// For each collateral bucket that has reached the threshold, calls
+/// `distribute_interest` which handles the N-way split (3pool, stability pool, treasury).
+pub async fn flush_pending_interest() {
+    let (pending, threshold) = read_state(|s| {
+        (s.pending_interest_for_pools.clone(), s.interest_flush_threshold_e8s)
+    });
+
+    for (collateral_type, amount) in pending {
+        if amount >= threshold {
+            log!(INFO, "[treasury] Flushing {} icUSD interest for collateral {}", amount, collateral_type);
+            // Zero out this bucket BEFORE the async call to prevent double-flush
+            crate::state::mutate_state(|s| {
+                s.pending_interest_for_pools.remove(&collateral_type);
+            });
+            distribute_interest(ICUSD::from(amount), collateral_type).await;
         }
     }
 }

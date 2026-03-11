@@ -73,6 +73,10 @@ pub async fn fetch_icp_rate() {
     if read_state(|s| s.mode != crate::Mode::ReadOnly) {
         let now = ic_cdk::api::time();
         mutate_state(|s| crate::event::record_accrue_interest(s, now));
+        // Harvest accrued interest from vaults into pending distribution map.
+        // This zeroes per-vault accrued_interest so interest won't be double-counted
+        // if a repayment happens before the next tick.
+        mutate_state(|s| s.harvest_accrued_interest());
     }
     if read_state(|s| s.mode != crate::Mode::ReadOnly) {
         crate::check_vaults();
@@ -81,6 +85,9 @@ pub async fn fetch_icp_rate() {
     // Drain any pending treasury interest/collateral accumulated from sync liquidations
     crate::treasury::drain_pending_treasury_interest().await;
     crate::treasury::drain_pending_treasury_collateral().await;
+
+    // Flush accumulated interest to pools/treasury when threshold is reached
+    crate::treasury::flush_pending_interest().await;
 }
 
 /// Ensures the price for the given collateral type is fresh enough for

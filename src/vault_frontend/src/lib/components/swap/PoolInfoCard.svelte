@@ -9,6 +9,7 @@
 
   export let poolStatus: PoolStatus | null = null;
   export let userLpBalance: bigint = 0n;
+  export let apy: number | null = null;
 
   $: isConnected = $walletStore.isConnected;
 
@@ -16,9 +17,10 @@
   $: totalLp = poolStatus?.lp_total_supply ?? 0n;
   $: swapFeePct = poolStatus ? (Number(poolStatus.swap_fee_bps) / 100).toFixed(2) : '0.00';
   $: virtualPrice = poolStatus?.virtual_price ?? 0n;
-  $: virtualPriceFormatted = virtualPrice > 0n
-    ? (Number(virtualPrice) / 1e18).toFixed(4)
+  $: tokenPrice = virtualPrice > 0n
+    ? '$' + (Number(virtualPrice) / 1e18).toFixed(4)
     : '—';
+  $: apyFormatted = apy !== null ? (apy * 100).toFixed(2) + '%' : '—';
 
   // User share
   $: userSharePct = (() => {
@@ -96,8 +98,12 @@
       <span class="stat-value">{swapFeePct}%</span>
     </div>
     <div class="stat-row">
-      <span class="stat-label">Virtual Price</span>
-      <span class="stat-value">{virtualPriceFormatted}</span>
+      <span class="stat-label">3USD Price</span>
+      <span class="stat-value">{tokenPrice}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">APY</span>
+      <span class="stat-value apy">{apyFormatted}</span>
     </div>
 
     <!-- Pool balances (stacked, ticker-first) -->
@@ -181,6 +187,10 @@
   .stat-value.bold {
     font-weight: 700;
     color: white;
+  }
+
+  .stat-value.apy {
+    color: #4ade80;
   }
 
   /* ── Stacked values (match EarnInfoCard) ── */

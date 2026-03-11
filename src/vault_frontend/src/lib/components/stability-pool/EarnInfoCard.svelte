@@ -37,15 +37,14 @@
   $: depositorCount = poolStatus ? Number(poolStatus.total_depositors) : 0;
   $: stablecoinBreakdown = poolStatus?.stablecoin_balances ?? [];
 
-  // Per-collateral APR building block: for each collateral type, compute
-  // interestRate_C * poolShare * debt_C / eligible_icusd_C.
-  // Pool APR = sum over all C (fully opted-in rate).
-  // User APR = sum over C where user is opted in.
+  // Per-collateral APY building block: for each collateral type, compute
+  // interestRate_C * poolShare * debt_C / eligible_icusd_C (= APR),
+  // then convert total APR → APY via daily compounding.
   $: eligibleMap = new Map<string, number>(
     (poolStatus?.eligible_icusd_per_collateral ?? []).map(([p, v]: [any, bigint]) => [p.toText(), Number(v) / 1e8])
   );
 
-  $: poolApr = (() => {
+  $: poolApy = (() => {
     if (!protocolStatus || !poolStatus) return null;
     const poolShare = protocolStatus.interestPoolShare;
     const perC = protocolStatus.perCollateralInterest;
@@ -58,7 +57,8 @@
       totalApr += (info.weightedInterestRate * poolShare * info.totalDebtE8s) / eligible;
     }
     if (totalApr === 0) return null;
-    return (totalApr * 100).toFixed(2);
+    const apy = Math.pow(1 + totalApr / 365, 365) - 1;
+    return (apy * 100).toFixed(2);
   })();
 
   // User position data
@@ -72,8 +72,8 @@
   // Does the user hold icUSD in the pool?
   $: userHasIcusd = userStables.some(([l, a]: [any, bigint]) => l.toText() === CANISTER_IDS.ICUSD_LEDGER && a > 0n);
 
-  // Personalized APR — only sums collateral types the user is opted in to
-  $: userApr = (() => {
+  // Personalized APY — only sums collateral types the user is opted in to
+  $: userApy = (() => {
     if (!userHasIcusd || !protocolStatus || !poolStatus) return null;
     const poolShare = protocolStatus.interestPoolShare;
     const perC = protocolStatus.perCollateralInterest;
@@ -87,7 +87,8 @@
       totalApr += (info.weightedInterestRate * poolShare * info.totalDebtE8s) / eligible;
     }
     if (totalApr === 0) return null;
-    return (totalApr * 100).toFixed(2);
+    const apy = Math.pow(1 + totalApr / 365, 365) - 1;
+    return (apy * 100).toFixed(2);
   })();
 
   $: poolShare = (() => {
@@ -180,11 +181,11 @@
   {#if isConnected && userPosition}
     <h4 class="group-heading">Your Position</h4>
     <div class="stats-stack">
-      <!-- Personalized Interest APR (top row, only if user holds icUSD) -->
-      {#if userApr !== null}
+      <!-- Personalized Interest APY (top row, only if user holds icUSD) -->
+      {#if userApy !== null}
         <div class="stat-row">
-          <span class="stat-label">Your Interest APR</span>
-          <span class="stat-value green">{userApr}%</span>
+          <span class="stat-label">Your Interest APY</span>
+          <span class="stat-value green">{userApy}%</span>
         </div>
       {/if}
 
@@ -302,10 +303,10 @@
       <span class="stat-label">TVL</span>
       <span class="stat-value bold">${totalDepositsUsd}</span>
     </div>
-    {#if poolApr !== null}
+    {#if poolApy !== null}
       <div class="stat-row">
-        <span class="stat-label">Interest APR</span>
-        <span class="stat-value">{poolApr}%</span>
+        <span class="stat-label">Interest APY</span>
+        <span class="stat-value">{poolApy}%</span>
       </div>
     {/if}
     <div class="stat-row">

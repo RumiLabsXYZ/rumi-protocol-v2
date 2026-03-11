@@ -183,7 +183,7 @@
 </script>
 
 <svelte:head>
-  <title>Rumi Protocol - Liquidity</title>
+  <title>Liquidity | Rumi Protocol</title>
 </svelte:head>
 
 <div class="container mx-auto px-4 max-w-6xl">
