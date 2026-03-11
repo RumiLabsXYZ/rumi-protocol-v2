@@ -130,3 +130,37 @@ pub fn set_paused(caller: Principal, paused: bool) -> Result<(), ThreePoolError>
 
     Ok(())
 }
+
+/// Update the swap fee (in basis points). Max 100bp (1%).
+pub fn set_swap_fee(caller: Principal, fee_bps: u64) -> Result<(), ThreePoolError> {
+    let admin = read_state(|s| s.config.admin);
+    if caller != admin {
+        return Err(ThreePoolError::Unauthorized);
+    }
+    if fee_bps > 100 {
+        return Err(ThreePoolError::InvalidCoinIndex); // reuse for "invalid param"
+    }
+
+    mutate_state(|s| {
+        s.config.swap_fee_bps = fee_bps;
+    });
+
+    Ok(())
+}
+
+/// Update the admin fee (share of swap fees taken by admin, in basis points). Max 10000.
+pub fn set_admin_fee(caller: Principal, fee_bps: u64) -> Result<(), ThreePoolError> {
+    let admin = read_state(|s| s.config.admin);
+    if caller != admin {
+        return Err(ThreePoolError::Unauthorized);
+    }
+    if fee_bps > 10_000 {
+        return Err(ThreePoolError::InvalidCoinIndex);
+    }
+
+    mutate_state(|s| {
+        s.config.admin_fee_bps = fee_bps;
+    });
+
+    Ok(())
+}

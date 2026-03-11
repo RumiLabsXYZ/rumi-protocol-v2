@@ -136,7 +136,8 @@ fn generate_consent_message(method: &str) -> String {
         }
 
         // Admin methods
-        "ramp_a" | "stop_ramp_a" | "withdraw_admin_fees" | "set_paused" => {
+        "ramp_a" | "stop_ramp_a" | "withdraw_admin_fees" | "set_paused" |
+        "set_swap_fee" | "set_admin_fee" => {
             format!(
                 "## Admin: {}\n\n\
                 You are calling an admin method on the Rumi 3pool.\n\n\

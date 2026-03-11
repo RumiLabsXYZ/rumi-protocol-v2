@@ -544,6 +544,18 @@ pub fn set_paused(paused: bool) -> Result<(), ThreePoolError> {
     admin::set_paused(caller, paused)
 }
 
+#[update]
+pub fn set_swap_fee(fee_bps: u64) -> Result<(), ThreePoolError> {
+    let caller = ic_cdk::api::caller();
+    admin::set_swap_fee(caller, fee_bps)
+}
+
+#[update]
+pub fn set_admin_fee(fee_bps: u64) -> Result<(), ThreePoolError> {
+    let caller = ic_cdk::api::caller();
+    admin::set_admin_fee(caller, fee_bps)
+}
+
 // ─── ICRC-21 / ICRC-28 / ICRC-10 ───
 
 #[update]

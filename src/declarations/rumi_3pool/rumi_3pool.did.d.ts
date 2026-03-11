@@ -136,8 +136,18 @@ export interface _SERVICE {
     { 'Ok' : bigint } |
       { 'Err' : ThreePoolError }
   >,
+  'set_admin_fee' : ActorMethod<
+    [bigint],
+    { 'Ok' : null } |
+      { 'Err' : ThreePoolError }
+  >,
   'set_paused' : ActorMethod<
     [boolean],
+    { 'Ok' : null } |
+      { 'Err' : ThreePoolError }
+  >,
+  'set_swap_fee' : ActorMethod<
+    [bigint],
     { 'Ok' : null } |
       { 'Err' : ThreePoolError }
   >,

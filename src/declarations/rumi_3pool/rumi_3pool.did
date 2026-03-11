@@ -107,6 +107,8 @@ service : (ThreePoolInitArgs) -> {
   stop_ramp_a : () -> (variant { Ok; Err : ThreePoolError });
   withdraw_admin_fees : () -> (variant { Ok : vec nat; Err : ThreePoolError });
   set_paused : (bool) -> (variant { Ok; Err : ThreePoolError });
+  set_swap_fee : (nat64) -> (variant { Ok; Err : ThreePoolError });
+  set_admin_fee : (nat64) -> (variant { Ok; Err : ThreePoolError });
   icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (variant { Ok : ConsentInfo; Err : Icrc21Error });
   icrc28_trusted_origins : () -> (Icrc28TrustedOriginsResponse) query;
   icrc10_supported_standards : () -> (vec StandardRecord) query;
