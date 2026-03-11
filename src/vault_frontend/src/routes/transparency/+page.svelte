@@ -70,7 +70,7 @@
   }
 </script>
 
-<svelte:head><title>Transparency - Rumi Protocol</title></svelte:head>
+<svelte:head><title>Transparency | Rumi Protocol</title></svelte:head>
 
 <article class="doc-page">
   <h1 class="doc-title">Transparency</h1>

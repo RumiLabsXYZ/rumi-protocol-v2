@@ -100,7 +100,7 @@
   });
 </script>
 
-<svelte:head><title>Protocol Parameters - Rumi Docs</title></svelte:head>
+<svelte:head><title>Protocol Parameters | Rumi Docs</title></svelte:head>
 
 <article class="doc-page">
   <h1 class="doc-title">Protocol Parameters</h1>

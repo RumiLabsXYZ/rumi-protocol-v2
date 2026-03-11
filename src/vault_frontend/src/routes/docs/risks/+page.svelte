@@ -27,7 +27,7 @@
   });
 </script>
 
-<svelte:head><title>What Can Go Wrong - Rumi Docs</title></svelte:head>
+<svelte:head><title>What Can Go Wrong | Rumi Docs</title></svelte:head>
 
 <article class="doc-page">
   <h1 class="doc-title">What Can Go Wrong</h1>

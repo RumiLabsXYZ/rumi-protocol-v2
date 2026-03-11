@@ -69,6 +69,8 @@
   });
 </script>
 
+<svelte:head><title>Vaults | Rumi Protocol</title></svelte:head>
+
 <div class="page-container">
   <div class="page-header">
     <h1 class="page-title">My Vaults</h1>

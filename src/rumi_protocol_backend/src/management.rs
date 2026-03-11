@@ -5,6 +5,7 @@ use candid::{Nat, Principal};
 use ic_xrc_types::{Asset, AssetClass, GetExchangeRateRequest, GetExchangeRateResult};
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
+use icrc_ledger_types::icrc2::approve::{ApproveArgs, ApproveError};
 use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromError};
 use icrc_ledger_client_cdk::{CdkRuntime, ICRC1Client};
 use num_traits::ToPrimitive;
@@ -584,4 +585,32 @@ pub async fn sweep_deposit(
     );
 
     Ok((transfer_amount, block_index_u64))
+}
+
+/// Approve a spender to transfer icUSD from the protocol canister.
+/// Used by interest distribution to approve the 3pool for `donate`.
+pub async fn approve_icusd(spender: Principal, amount: u64) -> Result<u64, ApproveError> {
+    let ledger = read_state(|s| s.icusd_ledger_principal);
+    let result: Result<(Result<Nat, ApproveError>,), _> = ic_cdk::call(
+        ledger,
+        "icrc2_approve",
+        (ApproveArgs {
+            from_subaccount: None,
+            spender: Account { owner: spender, subaccount: None },
+            amount: Nat::from(amount),
+            expected_allowance: None,
+            expires_at: None,
+            fee: None,
+            created_at_time: None,
+            memo: None,
+        },),
+    ).await;
+    match result {
+        Ok((Ok(block_index),)) => Ok(block_index.0.to_u64().unwrap_or(0)),
+        Ok((Err(e),)) => Err(e),
+        Err((code, msg)) => Err(ApproveError::GenericError {
+            error_code: Nat::from(code as u64),
+            message: msg,
+        }),
+    }
 }

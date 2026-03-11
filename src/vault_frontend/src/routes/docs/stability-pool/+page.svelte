@@ -19,7 +19,7 @@
   });
 </script>
 
-<svelte:head><title>Stability Pool - Rumi Docs</title></svelte:head>
+<svelte:head><title>Stability Pool | Rumi Docs</title></svelte:head>
 
 <article class="doc-page">
   <h1 class="doc-title">Stability Pool</h1>

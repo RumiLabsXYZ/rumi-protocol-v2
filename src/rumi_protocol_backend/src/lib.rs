@@ -130,6 +130,13 @@ pub struct CollateralInterestInfo {
     pub weighted_interest_rate: f64,
 }
 
+/// Candid-compatible representation of an interest split entry for the API.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InterestSplitArg {
+    pub destination: String, // "stability_pool", "treasury", "three_pool"
+    pub bps: u64,
+}
+
 #[derive(CandidType, Deserialize, Debug)]
 pub struct ReserveRedemptionResult {
     pub icusd_block_index: u64,

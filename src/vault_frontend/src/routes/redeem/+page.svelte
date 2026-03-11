@@ -215,7 +215,7 @@
 </script>
 
 <svelte:head>
-  <title>Rumi Protocol - Redeem icUSD</title>
+  <title>Redeem | Rumi Protocol</title>
 </svelte:head>
 
 <div class="page-container">

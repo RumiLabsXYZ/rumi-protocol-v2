@@ -343,6 +343,19 @@ pub enum Event {
     SetBorrowingFeeCurve {
         markers: String,
     },
+
+    /// Admin set the N-way interest split (replaces interest_pool_share).
+    #[serde(rename = "set_interest_split")]
+    SetInterestSplit {
+        /// JSON-encoded Vec<InterestRecipient>
+        split: String,
+    },
+
+    /// Admin set the 3pool canister principal for interest donations.
+    #[serde(rename = "set_three_pool_canister")]
+    SetThreePoolCanister {
+        canister: Principal,
+    },
 }
 
 impl Event {
@@ -404,6 +417,8 @@ impl Event {
             Event::SetRmrCeilingCr { .. } => false,
             Event::AdminSweepToTreasury { .. } => false,
             Event::SetBorrowingFeeCurve { .. } => false,
+            Event::SetInterestSplit { .. } => false,
+            Event::SetThreePoolCanister { .. } => false,
         }
     }
 }
@@ -806,6 +821,14 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                 } else {
                     state.borrowing_fee_curve = serde_json::from_str(&markers).ok();
                 }
+            },
+            Event::SetInterestSplit { split } => {
+                if let Ok(recipients) = serde_json::from_str::<Vec<crate::state::InterestRecipient>>(&split) {
+                    state.interest_split = recipients;
+                }
+            },
+            Event::SetThreePoolCanister { canister } => {
+                state.three_pool_canister = Some(canister);
             },
         }
     }
@@ -1371,6 +1394,17 @@ pub fn record_set_healthy_cr(
     if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
         config.healthy_cr = healthy_cr;
     }
+}
+
+pub fn record_set_interest_split(state: &mut State, split: Vec<crate::state::InterestRecipient>) {
+    let split_json = serde_json::to_string(&split).unwrap_or_default();
+    record_event(&Event::SetInterestSplit { split: split_json });
+    state.interest_split = split;
+}
+
+pub fn record_set_three_pool_canister(state: &mut State, canister: Principal) {
+    record_event(&Event::SetThreePoolCanister { canister });
+    state.three_pool_canister = Some(canister);
 }
 
 /// Record an interest accrual event and apply to all vaults.

@@ -28,6 +28,12 @@ export interface PoolStatus {
   tokens: TokenConfig[];
 }
 
+export interface VirtualPriceSnapshot {
+  timestamp_secs: bigint;
+  virtual_price: bigint;
+  lp_total_supply: bigint;
+}
+
 // ──────────────────────────────────────────────────────────────
 // Token metadata for the 3pool (matches canister init config)
 // ──────────────────────────────────────────────────────────────
@@ -82,6 +88,92 @@ export function getLedgerFee(decimals: number): bigint {
 /** Compute approval amount: transfer amount + ledger fee (for transfer_from). */
 function approvalAmount(amount: bigint, decimals: number): bigint {
   return amount + getLedgerFee(decimals);
+}
+
+// ──────────────────────────────────────────────────────────────
+// APY Calculation
+// ──────────────────────────────────────────────────────────────
+
+/**
+ * Calculate APY from virtual price snapshots over a given window.
+ * @param currentVp Current virtual price (scaled by 1e18)
+ * @param snapshots Historical VP snapshots sorted oldest-first
+ * @param days Window in days (e.g. 1, 7, 30)
+ * @returns APY as a decimal (e.g. 0.05 = 5%), or null if insufficient data
+ */
+export function calculateApy(
+  currentVp: bigint,
+  snapshots: VirtualPriceSnapshot[],
+  days: number
+): number | null {
+  if (snapshots.length === 0 || currentVp === 0n) return null;
+
+  const nowSecs = Math.floor(Date.now() / 1000);
+  const targetSecs = nowSecs - days * 86400;
+
+  // Find the snapshot closest to `days` ago
+  let closest: VirtualPriceSnapshot | null = null;
+  let closestDist = Infinity;
+
+  for (const snap of snapshots) {
+    const ts = Number(snap.timestamp_secs);
+    const dist = Math.abs(ts - targetSecs);
+    if (dist < closestDist) {
+      closestDist = dist;
+      closest = snap;
+    }
+  }
+
+  if (!closest || closest.virtual_price === 0n) return null;
+
+  // Need at least 1 hour of elapsed time for meaningful APY
+  const elapsedSecs = nowSecs - Number(closest.timestamp_secs);
+  if (elapsedSecs < 3600) return null;
+
+  const vpNow = Number(currentVp);
+  const vpThen = Number(closest.virtual_price);
+  const periodReturn = vpNow / vpThen - 1;
+
+  if (periodReturn < 0) return 0; // VP shouldn't decrease, but clamp to 0
+
+  const daysElapsed = elapsedSecs / 86400;
+  const apy = Math.pow(1 + periodReturn, 365 / daysElapsed) - 1;
+
+  return apy;
+}
+
+/**
+ * Calculate theoretical APY for 3pool LPs based on protocol borrowing interest.
+ *
+ * Formula:
+ *   totalApr = sum over collaterals of (weightedRate × threePoolShare × totalDebt / poolTvl)
+ *   apy = (1 + totalApr / 365)^365 - 1
+ *
+ * @param threePoolShareBps  3pool's share of interest in basis points (e.g. 5000 = 50%)
+ * @param perCollateralInterest  Array of { totalDebtE8s, weightedInterestRate } per collateral
+ * @param poolTvlE8s  Total stablecoin balance in the 3pool (in e8s, normalized)
+ * @returns APY as a decimal (e.g. 0.047 = 4.7%), or null if insufficient data
+ */
+export function calculateTheoreticalApy(
+  threePoolShareBps: number,
+  perCollateralInterest: { totalDebtE8s: number; weightedInterestRate: number }[],
+  poolTvlE8s: number,
+): number | null {
+  if (poolTvlE8s <= 0 || perCollateralInterest.length === 0) return null;
+
+  const threePoolShare = threePoolShareBps / 10_000;
+  let totalApr = 0;
+
+  for (const info of perCollateralInterest) {
+    if (info.totalDebtE8s === 0 || info.weightedInterestRate === 0) continue;
+    totalApr += (info.weightedInterestRate * threePoolShare * info.totalDebtE8s) / poolTvlE8s;
+  }
+
+  if (totalApr === 0) return null;
+
+  // Daily compounding: APY = (1 + APR/365)^365 - 1
+  const apy = Math.pow(1 + totalApr / 365, 365) - 1;
+  return apy;
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -149,6 +241,11 @@ class ThreePoolService {
     const result = await actor.calc_remove_one_coin_query(lpBurn, coinIndex) as { Ok: bigint } | { Err: any };
     if ('Err' in result) throw new Error(this.formatError(result.Err));
     return result.Ok;
+  }
+
+  async getVpSnapshots(): Promise<VirtualPriceSnapshot[]> {
+    const actor = await this.getQueryActor();
+    return await actor.get_vp_snapshots() as VirtualPriceSnapshot[];
   }
 
   // ── Mutations ──

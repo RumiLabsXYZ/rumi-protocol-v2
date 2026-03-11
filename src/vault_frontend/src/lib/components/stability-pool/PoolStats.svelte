@@ -17,7 +17,7 @@
   $: stablecoinRegistry = poolStatus?.stablecoin_registry ?? [];
   $: collateralRegistry = poolStatus?.collateral_registry ?? [];
 
-  $: poolApr = (() => {
+  $: poolApy = (() => {
     if (!protocolStatus || !poolStatus) return null;
     const weightedRate = protocolStatus.weightedAverageInterestRate;
     const poolShare = protocolStatus.interestPoolShare;
@@ -26,7 +26,8 @@
     const icusdTvl = icusdEntry ? Number(icusdEntry[1]) / 1e8 : 0;
     if (icusdTvl === 0 || totalDebt === 0 || weightedRate === 0) return null;
     const apr = (weightedRate * poolShare * totalDebt) / icusdTvl;
-    return (apr * 100).toFixed(2);
+    const apy = Math.pow(1 + apr / 365, 365) - 1;
+    return (apy * 100).toFixed(2);
   })();
 
   function getRegistries() {
@@ -56,11 +57,11 @@
       <span class="stat-label">Liquidations</span>
       <span class="stat-value">{liquidationCount}</span>
     </div>
-    {#if poolApr !== null}
+    {#if poolApy !== null}
       <div class="stat-divider"></div>
       <div class="stat">
-        <span class="stat-label">Interest APR</span>
-        <span class="stat-value">{poolApr}%</span>
+        <span class="stat-label">Interest APY</span>
+        <span class="stat-value">{poolApy}%</span>
       </div>
     {/if}
   </div>

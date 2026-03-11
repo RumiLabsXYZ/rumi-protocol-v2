@@ -384,7 +384,7 @@
   }
 </script>
 
-<svelte:head><title>Rumi Protocol - Liquidations</title></svelte:head>
+<svelte:head><title>Liquidations | Rumi Protocol</title></svelte:head>
 
 <div class="liq-page">
   <div class="liq-header">
