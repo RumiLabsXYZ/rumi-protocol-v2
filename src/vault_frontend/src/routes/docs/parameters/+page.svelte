@@ -5,6 +5,7 @@
   import { collateralStore } from '$lib/stores/collateralStore';
   import type { CollateralInfo } from '$lib/services/types';
   import { get } from 'svelte/store';
+  import { threePoolService } from '$lib/services/threePoolService';
 
   let liquidationBonus = 0;
   let recoveryTargetCr = 0;
@@ -14,13 +15,35 @@
   let redemptionFeeCeiling = 0;
   let ckstableRepayFee = 0;
   let reserveRedemptionFee = 0;
-  let interestPoolShare = 0.75;
   let liquidationProtocolShare = 0.03;
   let rmrFloor = 0.96;
   let rmrCeiling = 1.0;
   let rmrFloorCr = 2.25;
   let rmrCeilingCr = 1.5;
   let borrowingFeeCurve: [number, number][] = [];
+
+  type InterestSplitEntry = { destination: string; bps: bigint };
+  let interestSplit: InterestSplitEntry[] = [];
+
+  function splitPct(dest: string): string {
+    const entry = interestSplit.find(s => s.destination === dest);
+    return entry ? (Number(entry.bps) / 100).toFixed(0) + '%' : '—';
+  }
+
+  function destLabel(dest: string): string {
+    switch (dest) {
+      case 'stability_pool': return 'Stability Pool';
+      case 'treasury': return 'Treasury';
+      case 'three_pool': return '3pool';
+      default: return dest;
+    }
+  }
+
+  // 3pool state
+  let poolSwapFeeBps = 0n;
+  let poolAdminFeeBps = 0n;
+  let poolCurrentA = 0n;
+  let poolTokenSymbols: string[] = [];
 
   // All supported collateral types (populated dynamically)
   let collaterals: CollateralInfo[] = [];
@@ -53,19 +76,20 @@
   onMount(async () => {
     try {
       // Fetch global parameters and per-collateral config in parallel
-      const [status, bFee, rfFloor, rfCeil, ckFee, rrFee, ipShare, lpShare, rFloor, rCeil, rFloorCr, rCeilCr] = await Promise.all([
+      const [status, bFee, rfFloor, rfCeil, ckFee, rrFee, split, lpShare, rFloor, rCeil, rFloorCr, rCeilCr, poolStatus] = await Promise.all([
         protocolService.getProtocolStatus(),
         publicActor.get_borrowing_fee() as Promise<number>,
         publicActor.get_redemption_fee_floor() as Promise<number>,
         publicActor.get_redemption_fee_ceiling() as Promise<number>,
         publicActor.get_ckstable_repay_fee() as Promise<number>,
         publicActor.get_reserve_redemption_fee() as Promise<number>,
-        publicActor.get_interest_pool_share() as Promise<number>,
+        publicActor.get_interest_split() as Promise<InterestSplitEntry[]>,
         publicActor.get_liquidation_protocol_share() as Promise<number>,
         publicActor.get_rmr_floor() as Promise<number>,
         publicActor.get_rmr_ceiling() as Promise<number>,
         publicActor.get_rmr_floor_cr() as Promise<number>,
         publicActor.get_rmr_ceiling_cr() as Promise<number>,
+        threePoolService.getPoolStatus(),
       ]);
 
       liquidationBonus = status.liquidationBonus;
@@ -76,13 +100,19 @@
       redemptionFeeCeiling = Number(rfCeil);
       ckstableRepayFee = Number(ckFee);
       reserveRedemptionFee = Number(rrFee);
-      interestPoolShare = Number(ipShare);
+      interestSplit = split;
       liquidationProtocolShare = Number(lpShare);
       rmrFloor = Number(rFloor);
       rmrCeiling = Number(rCeil);
       rmrFloorCr = Number(rFloorCr);
       rmrCeilingCr = Number(rCeilCr);
       borrowingFeeCurve = status.borrowingFeeCurveResolved ?? [];
+
+      // 3pool parameters
+      poolSwapFeeBps = poolStatus.swap_fee_bps;
+      poolAdminFeeBps = poolStatus.admin_fee_bps;
+      poolCurrentA = poolStatus.current_a;
+      poolTokenSymbols = poolStatus.tokens.map(t => t.symbol);
 
       // Load ALL supported collateral types
       await collateralStore.fetchSupportedCollateral();
@@ -228,8 +258,8 @@
         <span class="param-val">Per-vault CR curve + Recovery multiplier</span>
       </div>
       <div class="param">
-        <span class="param-label">Interest Revenue Split <span class="tip" data-tip="Interest revenue is split between stability pool depositors (as minted icUSD) and the protocol treasury. This ratio is admin-configurable.">?</span></span>
-        <span class="param-val live">{pctRaw(interestPoolShare)} stability pool / {pctRaw(1 - interestPoolShare)} treasury</span>
+        <span class="param-label">Interest Revenue Split <span class="tip" data-tip="Interest revenue is split between the 3pool (donated as icUSD, boosting LP token value), stability pool depositors (minted as icUSD), and the protocol treasury. This split is admin-configurable.">?</span></span>
+        <span class="param-val live">{#each interestSplit as entry, i}{#if i > 0} / {/if}{(Number(entry.bps) / 100).toFixed(0)}% {destLabel(entry.destination)}{/each}</span>
       </div>
     </div>
   </section>
@@ -240,6 +270,36 @@
       <div class="param">
         <span class="param-label">Redemption Margin Ratio (RMR) <span class="tip" data-tip="Redeemers receive this percentage of face value. {pctRaw(rmrFloor)} when system CR ≥ {crPct(rmrFloorCr)}, scaling linearly up to {pctRaw(rmrCeiling)} when system CR ≤ {crPct(rmrCeilingCr)}. Prevents mint-and-redeem arbitrage while protecting redeemers near recovery.">?</span></span>
         <span class="param-val live">{pctRaw(rmrFloor)} (healthy, CR ≥ {crPct(rmrFloorCr)}) → {pctRaw(rmrCeiling)} (stressed, CR ≤ {crPct(rmrCeilingCr)})</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="doc-section">
+    <h2 class="doc-heading">3pool (Stablecoin AMM)</h2>
+    <div class="params-table">
+      <div class="param">
+        <span class="param-label">Pool Tokens <span class="tip" data-tip="The three stablecoins that can be swapped in the 3pool.">?</span></span>
+        <span class="param-val live">{poolTokenSymbols.join(', ') || '—'}</span>
+      </div>
+      <div class="param">
+        <span class="param-label">LP Token</span>
+        <span class="param-val">3USD (ICRC-1)</span>
+      </div>
+      <div class="param">
+        <span class="param-label">Swap Fee <span class="tip" data-tip="Fee charged on each swap, in basis points. For example, 4 bps = 0.04%. Admin-configurable via set_swap_fee.">?</span></span>
+        <span class="param-val live">{(Number(poolSwapFeeBps) / 100).toFixed(2)}%</span>
+      </div>
+      <div class="param">
+        <span class="param-label">Admin Fee <span class="tip" data-tip="The fraction of the swap fee retained by the protocol. For example, 50% means half the swap fee goes to protocol admin fees. Admin-configurable via set_admin_fee.">?</span></span>
+        <span class="param-val live">{(Number(poolAdminFeeBps) / 100).toFixed(0)}% of swap fee</span>
+      </div>
+      <div class="param">
+        <span class="param-label">Amplification Coefficient (A) <span class="tip" data-tip="Controls the curvature of the StableSwap invariant. Higher A means tighter peg (lower slippage near 1:1). Admin-configurable via ramp_a (gradual change over time).">?</span></span>
+        <span class="param-val live">{poolCurrentA.toString()}</span>
+      </div>
+      <div class="param">
+        <span class="param-label">Interest Donation Share <span class="tip" data-tip="The percentage of all vault interest revenue donated to the 3pool. This increases the virtual price of LP tokens, generating yield for liquidity providers. Admin-configurable via set_interest_split.">?</span></span>
+        <span class="param-val live">{splitPct('three_pool')}</span>
       </div>
     </div>
   </section>
@@ -369,6 +429,7 @@
     font-variant-numeric: tabular-nums;
   }
   .param-val.live, .param-val .live { color: var(--rumi-action); }
+  .live { color: var(--rumi-action); font-weight: 600; }
   .live-indicator { color: var(--rumi-action); font-weight: 600; }
   .doc-loading {
     font-size: 0.875rem; color: var(--rumi-text-muted);

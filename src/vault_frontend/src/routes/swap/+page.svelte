@@ -11,6 +11,7 @@
   import { walletStore } from '../../lib/stores/wallet';
   import { threePoolService, calculateApy, calculateTheoreticalApy, POOL_TOKENS } from '../../lib/services/threePoolService';
   import { ProtocolService } from '../../lib/services/protocol';
+  import { publicActor } from '$lib/services/protocol/apiClient';
   import SwapInterface from '../../lib/components/swap/SwapInterface.svelte';
   import LiquidityInterface from '../../lib/components/swap/LiquidityInterface.svelte';
   import PoolInfoCard from '../../lib/components/swap/PoolInfoCard.svelte';
@@ -36,10 +37,11 @@
       if (!hasCachedData) loading = true;
       error = '';
 
-      const [status, snapshots, protocolStatus] = await Promise.all([
+      const [status, snapshots, protocolStatus, interestSplit] = await Promise.all([
         threePoolService.getPoolStatus(),
         threePoolService.getVpSnapshots().catch(() => [] as VirtualPriceSnapshot[]),
         ProtocolService.getProtocolStatus().catch(() => null),
+        (publicActor.get_interest_split() as Promise<{ destination: string; bps: bigint }[]>).catch(() => null),
       ]);
       poolStatus = status;
       _poolStatus = status;
@@ -62,8 +64,9 @@
           }
         }
 
-        // Extract 3pool share from interest_split (default 50%)
-        const threePoolShareBps = 5000; // TODO: fetch from get_interest_split() when available in DTO
+        // Extract 3pool share from on-chain interest_split config
+        const threePoolEntry = interestSplit?.find(e => e.destination === 'three_pool');
+        const threePoolShareBps = threePoolEntry ? Number(threePoolEntry.bps) : 5000;
 
         theoreticalApy = calculateTheoreticalApy(
           threePoolShareBps,

@@ -464,6 +464,72 @@ pub async fn donate(token_index: u8, amount: u128) -> Result<(), ThreePoolError>
     Ok(())
 }
 
+/// Receive a donation that was already transferred to the pool (e.g. minted directly).
+/// Admin or controller only. Verifies the pool's on-chain ledger balance covers the
+/// claimed amount before updating internal accounting.
+#[update]
+pub async fn receive_donation(token_index: u8, amount: u128) -> Result<(), ThreePoolError> {
+    let caller = ic_cdk::api::caller();
+    let admin = read_state(|s| s.config.admin);
+    if caller != admin && !ic_cdk::api::is_controller(&caller) {
+        return Err(ThreePoolError::Unauthorized);
+    }
+    if read_state(|s| s.is_paused) {
+        return Err(ThreePoolError::PoolPaused);
+    }
+    if amount == 0 {
+        return Err(ThreePoolError::ZeroAmount);
+    }
+    let idx = token_index as usize;
+    if idx >= 3 {
+        return Err(ThreePoolError::InvalidCoinIndex);
+    }
+    if read_state(|s| s.lp_total_supply) == 0 {
+        return Err(ThreePoolError::PoolEmpty);
+    }
+
+    // Verify the pool actually holds enough tokens on the ledger
+    let (ledger, symbol) = read_state(|s| {
+        (s.config.tokens[idx].ledger_id, s.config.tokens[idx].symbol.clone())
+    });
+    let pool_id = ic_cdk::id();
+    let balance: Result<(candid::Nat,), _> = ic_cdk::call(
+        ledger,
+        "icrc1_balance_of",
+        (icrc_ledger_types::icrc1::account::Account {
+            owner: pool_id,
+            subaccount: None,
+        },),
+    )
+    .await;
+    let on_chain_balance: u128 = match balance {
+        Ok((nat,)) => nat.0.try_into().unwrap_or(0),
+        Err((code, msg)) => {
+            log!(INFO, "receive_donation: balance check failed: {:?} {}", code, msg);
+            return Err(ThreePoolError::TransferFailed {
+                token: symbol,
+                reason: format!("balance check failed: {:?} {}", code, msg),
+            });
+        }
+    };
+    let expected_min = read_state(|s| s.balances[idx]) + amount;
+    if on_chain_balance < expected_min {
+        log!(INFO, "receive_donation: on-chain balance {} < expected {}", on_chain_balance, expected_min);
+        return Err(ThreePoolError::TransferFailed {
+            token: symbol,
+            reason: format!("on-chain balance {} < expected {}", on_chain_balance, expected_min),
+        });
+    }
+
+    mutate_state(|s| {
+        s.balances[idx] += amount;
+    });
+
+    log!(INFO, "ReceiveDonation: {} of {} (token {}) from {}", amount, symbol, token_index, caller);
+
+    Ok(())
+}
+
 // ─── Query Endpoints ───
 
 #[query]

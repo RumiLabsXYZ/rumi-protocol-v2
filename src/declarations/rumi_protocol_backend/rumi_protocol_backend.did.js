@@ -301,6 +301,7 @@ export const idlFactory = ({ IDL }) => {
       'amount' : IDL.Nat64,
       'reason' : IDL.Text,
     }),
+    'set_three_pool_canister' : IDL.Record({ 'canister' : IDL.Principal }),
     'set_liquidation_bonus' : IDL.Record({ 'rate' : IDL.Text }),
     'reserve_redemption' : IDL.Record({
       'icusd_amount' : IDL.Nat64,
@@ -332,6 +333,7 @@ export const idlFactory = ({ IDL }) => {
     'set_stability_pool_principal' : IDL.Record({
       'principal' : IDL.Principal,
     }),
+    'set_interest_split' : IDL.Record({ 'split' : IDL.Text }),
     'set_rmr_floor' : IDL.Record({ 'value' : IDL.Text }),
     'set_redemption_fee_floor' : IDL.Record({ 'rate' : IDL.Text }),
     'set_interest_rate' : IDL.Record({
@@ -362,6 +364,10 @@ export const idlFactory = ({ IDL }) => {
   const Fees = IDL.Record({
     'redemption_fee' : IDL.Float64,
     'borrowing_fee' : IDL.Float64,
+  });
+  const InterestSplitArg = IDL.Record({
+    'bps' : IDL.Nat64,
+    'destination' : IDL.Text,
   });
   const LiquidityStatus = IDL.Record({
     'liquidity_provided' : IDL.Nat64,
@@ -410,9 +416,11 @@ export const idlFactory = ({ IDL }) => {
   const TreasuryStats = IDL.Record({
     'pending_treasury_collateral_entries' : IDL.Nat64,
     'liquidation_protocol_share' : IDL.Float64,
+    'interest_flush_threshold_e8s' : IDL.Nat64,
     'pending_treasury_interest' : IDL.Nat64,
     'treasury_principal' : IDL.Opt(IDL.Principal),
     'total_accrued_interest_system' : IDL.Nat64,
+    'pending_interest_for_pools_total' : IDL.Nat64,
   });
   const Result_9 = IDL.Variant({ 'Ok' : IDL.Float64, 'Err' : ProtocolError });
   const HttpRequest = IDL.Record({
@@ -555,6 +563,7 @@ export const idlFactory = ({ IDL }) => {
     'get_events' : IDL.Func([GetEventsArg], [IDL.Vec(Event)], ['query']),
     'get_fees' : IDL.Func([IDL.Nat64], [Fees], ['query']),
     'get_interest_pool_share' : IDL.Func([], [IDL.Float64], ['query']),
+    'get_interest_split' : IDL.Func([], [IDL.Vec(InterestSplitArg)], ['query']),
     'get_liquidatable_vaults' : IDL.Func([], [IDL.Vec(CandidVault)], ['query']),
     'get_liquidation_bonus' : IDL.Func([], [IDL.Float64], ['query']),
     'get_liquidation_protocol_share' : IDL.Func([], [IDL.Float64], ['query']),
@@ -599,6 +608,11 @@ export const idlFactory = ({ IDL }) => {
     'get_supported_collateral_types' : IDL.Func(
         [],
         [IDL.Vec(IDL.Tuple(IDL.Principal, CollateralStatus))],
+        ['query'],
+      ),
+    'get_three_pool_canister' : IDL.Func(
+        [],
+        [IDL.Opt(IDL.Principal)],
         ['query'],
       ),
     'get_treasury_principal' : IDL.Func(
@@ -682,8 +696,10 @@ export const idlFactory = ({ IDL }) => {
         [Result],
         [],
       ),
+    'set_interest_flush_threshold' : IDL.Func([IDL.Nat64], [Result], []),
     'set_interest_pool_share' : IDL.Func([IDL.Float64], [Result], []),
     'set_interest_rate' : IDL.Func([IDL.Principal, IDL.Float64], [Result], []),
+    'set_interest_split' : IDL.Func([IDL.Vec(InterestSplitArg)], [Result], []),
     'set_liquidation_bonus' : IDL.Func([IDL.Float64], [Result], []),
     'set_liquidation_protocol_share' : IDL.Func([IDL.Float64], [Result], []),
     'set_max_partial_liquidation_ratio' : IDL.Func([IDL.Float64], [Result], []),
@@ -723,6 +739,7 @@ export const idlFactory = ({ IDL }) => {
         [Result],
         [],
       ),
+    'set_three_pool_canister' : IDL.Func([IDL.Principal], [Result], []),
     'set_treasury_principal' : IDL.Func([IDL.Principal], [Result], []),
     'stability_pool_liquidate' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],

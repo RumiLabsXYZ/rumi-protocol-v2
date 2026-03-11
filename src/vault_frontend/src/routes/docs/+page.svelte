@@ -26,6 +26,11 @@
       description: "How icUSD redemptions work: reserve-backed ckStable and vault spillover."
     },
     {
+      title: "3pool (Stablecoin AMM)",
+      href: "/docs/three-pool",
+      description: "How the stablecoin swap pool works: swapping, adding liquidity, LP tokens, and yield."
+    },
+    {
       title: "Protocol Parameters",
       href: "/docs/parameters",
       description: "Current constants, fees, ratios, and operational thresholds."

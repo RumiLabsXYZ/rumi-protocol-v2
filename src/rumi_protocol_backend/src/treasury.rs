@@ -340,19 +340,15 @@ pub async fn distribute_stablecoin_interest(
     }
 }
 
-/// Mint icUSD to self, approve 3pool, and call `donate(0, amount)`.
+/// Mint icUSD directly to the 3pool canister, then call `receive_donation`
+/// so the pool updates its internal balances.
 /// Non-critical: failures are logged but don't block protocol operations.
 async fn donate_to_three_pool(pool_canister: Principal, amount_e8s: u64) {
-    let protocol_id = ic_cdk::id();
-    let icusd_fee: u64 = 10_000; // icUSD ledger fee (0.0001 icUSD)
-
-    // 1. Mint icUSD to self (the backend canister)
-    // Must mint extra to cover: approve fee + transfer_from fee
-    let mint_amount = amount_e8s + 2 * icusd_fee;
-    let icusd = ICUSD::from(mint_amount);
-    match crate::management::mint_icusd(icusd, protocol_id).await {
+    // 1. Mint icUSD directly to the 3pool canister
+    let icusd = ICUSD::from(amount_e8s);
+    match crate::management::mint_icusd(icusd, pool_canister).await {
         Ok(block_index) => {
-            log!(INFO, "[treasury] Minted {} icUSD to self for 3pool donation (block {})", mint_amount, block_index);
+            log!(INFO, "[treasury] Minted {} icUSD to 3pool for donation (block {})", amount_e8s, block_index);
         }
         Err(e) => {
             log!(INFO, "[treasury] WARNING: 3pool donation mint failed: {:?}", e);
@@ -360,33 +356,19 @@ async fn donate_to_three_pool(pool_canister: Principal, amount_e8s: u64) {
         }
     }
 
-    // 2. Approve 3pool canister to spend it
-    // Allowance must cover amount + transfer_from fee
-    let approve_amount = amount_e8s + icusd_fee;
-    match crate::management::approve_icusd(pool_canister, approve_amount).await {
-        Ok(_) => {
-            log!(INFO, "[treasury] Approved 3pool {} for {} icUSD", pool_canister, approve_amount);
-        }
-        Err(e) => {
-            log!(INFO, "[treasury] WARNING: 3pool approval failed: {:?}", e);
-            return;
-        }
-    }
-
-    // 3. Call donate(0, amount) on the 3pool canister
-    // token_index 0 = icUSD, amount in e8s (icUSD uses 8 decimals)
+    // 2. Call receive_donation(0, amount) so 3pool updates internal balances
     let donate_amount = candid::Nat::from(amount_e8s);
     let result: Result<(Result<(), ThreePoolDonateError>,), _> =
-        ic_cdk::call(pool_canister, "donate", (0u8, donate_amount)).await;
+        ic_cdk::call(pool_canister, "receive_donation", (0u8, donate_amount)).await;
     match result {
         Ok((Ok(()),)) => {
-            log!(INFO, "[treasury] Donated {} icUSD to 3pool", amount_e8s);
+            log!(INFO, "[treasury] 3pool acknowledged donation of {} icUSD", amount_e8s);
         }
         Ok((Err(e),)) => {
-            log!(INFO, "[treasury] WARNING: 3pool donate call returned error: {:?}", e);
+            log!(INFO, "[treasury] WARNING: 3pool receive_donation returned error: {:?}", e);
         }
         Err((code, msg)) => {
-            log!(INFO, "[treasury] WARNING: 3pool donate inter-canister call failed: {:?} {}", code, msg);
+            log!(INFO, "[treasury] WARNING: 3pool receive_donation call failed: {:?} {}", code, msg);
         }
     }
 }

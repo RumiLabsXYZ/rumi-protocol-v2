@@ -259,6 +259,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'reason' : string,
     }
   } |
+  { 'set_three_pool_canister' : { 'canister' : Principal } } |
   { 'set_liquidation_bonus' : { 'rate' : string } } |
   {
     'reserve_redemption' : {
@@ -293,6 +294,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     }
   } |
   { 'set_stability_pool_principal' : { 'principal' : Principal } } |
+  { 'set_interest_split' : { 'split' : string } } |
   { 'set_rmr_floor' : { 'value' : string } } |
   { 'set_redemption_fee_floor' : { 'rate' : string } } |
   {
@@ -361,6 +363,7 @@ export interface InitArg {
   'developer_principal' : Principal,
   'icusd_ledger_principal' : Principal,
 }
+export interface InterestSplitArg { 'bps' : bigint, 'destination' : string }
 export type InterpolationMethod = { 'Linear' : null };
 export interface LineDisplayPage { 'lines' : Array<string> }
 export interface LiquidityStatus {
@@ -510,9 +513,11 @@ export type TransferFromError = {
 export interface TreasuryStats {
   'pending_treasury_collateral_entries' : bigint,
   'liquidation_protocol_share' : number,
+  'interest_flush_threshold_e8s' : bigint,
   'pending_treasury_interest' : bigint,
   'treasury_principal' : [] | [Principal],
   'total_accrued_interest_system' : bigint,
+  'pending_interest_for_pools_total' : bigint,
 }
 export interface UpgradeArg { 'mode' : [] | [Mode] }
 export interface Vault {
@@ -558,6 +563,7 @@ export interface _SERVICE {
   'get_events' : ActorMethod<[GetEventsArg], Array<Event>>,
   'get_fees' : ActorMethod<[bigint], Fees>,
   'get_interest_pool_share' : ActorMethod<[], number>,
+  'get_interest_split' : ActorMethod<[], Array<InterestSplitArg>>,
   'get_liquidatable_vaults' : ActorMethod<[], Array<CandidVault>>,
   'get_liquidation_bonus' : ActorMethod<[], number>,
   'get_liquidation_protocol_share' : ActorMethod<[], number>,
@@ -583,6 +589,7 @@ export interface _SERVICE {
     [],
     Array<[Principal, CollateralStatus]>
   >,
+  'get_three_pool_canister' : ActorMethod<[], [] | [Principal]>,
   'get_treasury_principal' : ActorMethod<[], [] | [Principal]>,
   'get_treasury_stats' : ActorMethod<[], TreasuryStats>,
   'get_vault_history' : ActorMethod<[bigint], Array<Event>>,
@@ -621,8 +628,10 @@ export interface _SERVICE {
   'set_ckstable_repay_fee' : ActorMethod<[number], Result>,
   'set_collateral_status' : ActorMethod<[Principal, CollateralStatus], Result>,
   'set_healthy_cr' : ActorMethod<[Principal, [] | [number]], Result>,
+  'set_interest_flush_threshold' : ActorMethod<[bigint], Result>,
   'set_interest_pool_share' : ActorMethod<[number], Result>,
   'set_interest_rate' : ActorMethod<[Principal, number], Result>,
+  'set_interest_split' : ActorMethod<[Array<InterestSplitArg>], Result>,
   'set_liquidation_bonus' : ActorMethod<[number], Result>,
   'set_liquidation_protocol_share' : ActorMethod<[number], Result>,
   'set_max_partial_liquidation_ratio' : ActorMethod<[number], Result>,
@@ -651,6 +660,7 @@ export interface _SERVICE {
     Result
   >,
   'set_stable_token_enabled' : ActorMethod<[StableTokenType, boolean], Result>,
+  'set_three_pool_canister' : ActorMethod<[Principal], Result>,
   'set_treasury_principal' : ActorMethod<[Principal], Result>,
   'stability_pool_liquidate' : ActorMethod<[bigint, bigint], Result_8>,
   'unfreeze_protocol' : ActorMethod<[], Result>,

@@ -9,10 +9,16 @@
 
   let borrowingFeePct = '0.5';
   let ckstableFeePct = '0.05';
-  let interestPoolPct = '75';
-  let treasuryPct = '25';
   let collaterals: CollateralInfo[] = [];
   let borrowingFeeCurve: [number, number][] = [];
+
+  type InterestSplitEntry = { destination: string; bps: bigint };
+  let interestSplit: InterestSplitEntry[] = [];
+
+  function splitPct(dest: string): string {
+    const entry = interestSplit.find(s => s.destination === dest);
+    return entry ? (Number(entry.bps) / 100).toFixed(0) + '%' : '—';
+  }
   $: collateralSymbols = collaterals.map(c => c.symbol).join(', ') || 'ICP';
   // Use the lowest liquidation CR across all collaterals for the general warning
   $: lowestLiqPct = collaterals.length > 0
@@ -30,17 +36,15 @@
 
   onMount(async () => {
     try {
-      const [bFee, ckFee, poolShare, status] = await Promise.all([
+      const [bFee, ckFee, split, status] = await Promise.all([
         publicActor.get_borrowing_fee() as Promise<number>,
         publicActor.get_ckstable_repay_fee() as Promise<number>,
-        publicActor.get_interest_pool_share() as Promise<number>,
+        publicActor.get_interest_split() as Promise<InterestSplitEntry[]>,
         protocolService.getProtocolStatus(),
       ]);
       borrowingFeePct = (Number(bFee) * 100).toFixed(1);
       ckstableFeePct = (Number(ckFee) * 100).toFixed(2);
-      const ps = Number(poolShare);
-      interestPoolPct = (ps * 100).toFixed(0);
-      treasuryPct = ((1 - ps) * 100).toFixed(0);
+      interestSplit = split;
       borrowingFeeCurve = status.borrowingFeeCurveResolved ?? [];
 
       await collateralStore.fetchSupportedCollateral();
@@ -104,7 +108,7 @@
       <li><strong>Recovery mode multiplier</strong> — if the system enters Recovery mode, a system-wide multiplier increases rates for all vaults.</li>
     </ul>
     <p>Interest is applied to your debt before every vault mutation (borrow, repay, withdraw, liquidation) and ticked forward every 5 minutes by a background timer. This means your debt grows over time — a vault sitting just above the liquidation threshold can drift into liquidation purely from accrued interest, even without any price movement.</p>
-    <p>Interest revenue is split: {interestPoolPct}% is distributed to stability pool depositors as icUSD, and {treasuryPct}% goes to the protocol treasury.</p>
+    <p>Interest revenue is split three ways: <span class="live">{splitPct('three_pool')}</span> is donated to the <a href="/docs/three-pool" class="doc-link">3pool</a> (boosting LP token value), <span class="live">{splitPct('stability_pool')}</span> is distributed to stability pool depositors as icUSD, and <span class="live">{splitPct('treasury')}</span> goes to the protocol treasury.</p>
   </section>
 
   <section class="doc-section">
@@ -161,6 +165,7 @@
     font-variant-numeric: tabular-nums;
   }
   .param-val.live { color: var(--rumi-action); }
+  .live { color: var(--rumi-action); font-weight: 600; }
 
   .doc-list {
     padding-left: 1.25rem;

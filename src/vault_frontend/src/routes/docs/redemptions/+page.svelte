@@ -6,11 +6,17 @@
   let redemptionFeeFloor = 0;
   let redemptionFeeCeiling = 0;
   let reserveRedemptionsEnabled = false;
-  let interestPoolPct = '75';
-  let treasuryPct = '25';
   let rmrFloorPct = '96';
   let rmrCeilingPct = '100';
   let loaded = false;
+
+  type InterestSplitEntry = { destination: string; bps: bigint };
+  let interestSplit: InterestSplitEntry[] = [];
+
+  function splitPct(dest: string): string {
+    const entry = interestSplit.find(s => s.destination === dest);
+    return entry ? (Number(entry.bps) / 100).toFixed(0) + '%' : '—';
+  }
 
   function pctRaw(val: number, decimals = 1): string {
     if (val === undefined || val === null) return '—';
@@ -19,12 +25,12 @@
 
   onMount(async () => {
     try {
-      const [rrFee, rfFloor, rfCeil, rrEnabled, poolShare, rFloor, rCeil] = await Promise.all([
+      const [rrFee, rfFloor, rfCeil, rrEnabled, split, rFloor, rCeil] = await Promise.all([
         publicActor.get_reserve_redemption_fee() as Promise<number>,
         publicActor.get_redemption_fee_floor() as Promise<number>,
         publicActor.get_redemption_fee_ceiling() as Promise<number>,
         publicActor.get_reserve_redemptions_enabled() as Promise<boolean>,
-        publicActor.get_interest_pool_share() as Promise<number>,
+        publicActor.get_interest_split() as Promise<InterestSplitEntry[]>,
         publicActor.get_rmr_floor() as Promise<number>,
         publicActor.get_rmr_ceiling() as Promise<number>,
       ]);
@@ -32,9 +38,7 @@
       redemptionFeeFloor = Number(rfFloor);
       redemptionFeeCeiling = Number(rfCeil);
       reserveRedemptionsEnabled = rrEnabled;
-      const ps = Number(poolShare);
-      interestPoolPct = (ps * 100).toFixed(0);
-      treasuryPct = ((1 - ps) * 100).toFixed(0);
+      interestSplit = split;
       rmrFloorPct = (Number(rFloor) * 100).toFixed(0);
       rmrCeilingPct = (Number(rCeil) * 100).toFixed(0);
     } catch (e) {
@@ -74,7 +78,7 @@
       </div>
     {/if}
     <p>Reserve redemptions are the cleanest outcome: you burn icUSD and receive ckStables in return. No vaults are affected.</p>
-    <p>Reserves grow when users repay vault debt with ckUSDT or ckUSDC. Note that {interestPoolPct}% of stablecoin repayment interest stays in reserves while {treasuryPct}% goes to the protocol treasury, so reserve growth reflects this split.</p>
+    <p>Reserves grow when users repay vault debt with ckUSDT or ckUSDC. Note that interest revenue from stablecoin repayments is split according to the protocol's interest split — currently <span class="live">{splitPct('stability_pool')}</span> to the stability pool, <span class="live">{splitPct('three_pool')}</span> to the 3pool, and <span class="live">{splitPct('treasury')}</span> to treasury.</p>
   </section>
 
   <section class="doc-section">
@@ -145,6 +149,7 @@
     font-variant-numeric: tabular-nums;
   }
   .fee-value.live { color: var(--rumi-action); }
+  .live { color: var(--rumi-action); font-weight: 600; }
   .fee-value.enabled { color: var(--rumi-safe); }
   .fee-value.disabled { color: var(--rumi-danger); }
 
