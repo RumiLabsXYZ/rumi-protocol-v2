@@ -174,7 +174,7 @@
           {#if borrowingFeeCurve.length > 0}
             {#each [...borrowingFeeCurve].sort((a, b) => b[0] - a[0]) as [cr, mult], i}
               <tr class="curve-row">
-                <td class="ct-label ct-label-indent">{#if i === 0}<span class="curve-label">Fee at CR</span>{/if} {i === 0 ? '≥' : i === borrowingFeeCurve.length - 1 ? '≤' : '~'}{(cr * 100).toFixed(0)}%</td>
+                <td class="ct-label ct-label-indent">{#if i === 0}<span class="curve-label">Fee Curve</span>{/if} {mult.toFixed(2)}× at {(cr * 100).toFixed(0)}% TCR</td>
                 {#each collaterals as c}<td class="ct-val live ct-val-sm">{(c.borrowingFee * mult * 100).toFixed(2)}%</td>{/each}
               </tr>
             {/each}
