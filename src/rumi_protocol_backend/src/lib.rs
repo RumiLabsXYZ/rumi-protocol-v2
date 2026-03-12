@@ -116,6 +116,7 @@ pub struct ProtocolStatus {
     pub reserve_redemption_fee: f64,
     pub ckstable_repay_fee: f64,
     pub min_icusd_amount: u64,
+    pub global_icusd_mint_cap: u64,
     pub frozen: bool,
     pub manual_mode_override: bool,
     pub interest_pool_share: f64,

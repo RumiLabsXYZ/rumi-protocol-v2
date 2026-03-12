@@ -120,6 +120,7 @@ type Event = variant {
     amount : nat64;
   };
   set_ckstable_repay_fee : record { rate : text };
+  set_global_icusd_mint_cap : record { amount : text };
   set_treasury_principal : record { "principal" : principal };
   set_max_partial_liquidation_ratio : record { rate : text };
   withdraw_and_close_vault : record {
@@ -356,6 +357,9 @@ type ProtocolStatus = record {
   weighted_average_interest_rate : float64;
   borrowing_fee_curve_resolved : vec record { float64; float64 };
   per_collateral_interest : vec CollateralInterestInfo;
+  min_icusd_amount : nat64;
+  ckstable_repay_fee : float64;
+  global_icusd_mint_cap : nat64;
 };
 type ReserveBalance = record {
   balance : nat64;
@@ -525,6 +529,8 @@ service : (ProtocolArg) -> {
   set_ckstable_repay_fee : (float64) -> (Result);
   set_collateral_borrowing_fee : (principal, float64) -> (Result);
   set_collateral_status : (principal, CollateralStatus) -> (Result);
+  set_global_icusd_mint_cap : (nat64) -> (Result);
+  get_global_icusd_mint_cap : () -> (nat64) query;
   set_liquidation_bonus : (float64) -> (Result);
   set_liquidation_protocol_share : (float64) -> (Result);
   set_max_partial_liquidation_ratio : (float64) -> (Result);

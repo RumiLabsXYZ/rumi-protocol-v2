@@ -496,6 +496,9 @@ pub struct State {
     /// Admin-settable minimum icUSD amount for borrow/repay/redemption operations (in e8s).
     /// Default set in `From<InitArg>`, updated via `record_set_min_icusd_amount` event.
     pub min_icusd_amount: ICUSD,
+    /// Global cap on total icUSD that can be minted across all collateral types (in e8s).
+    /// Default u64::MAX = uncapped. Updated via `record_set_global_icusd_mint_cap` event.
+    pub global_icusd_mint_cap: u64,
     pub ckusdt_enabled: bool,
     pub ckusdc_enabled: bool,
     // Cached ckstable prices (from XRC, on-demand only)
@@ -633,6 +636,7 @@ impl From<InitArg> for State {
             ckusdc_ledger_principal: args.ckusdc_ledger_principal,
             ckstable_repay_fee: DEFAULT_CKSTABLE_REPAY_FEE,
             min_icusd_amount: DEFAULT_MIN_ICUSD_AMOUNT,
+            global_icusd_mint_cap: u64::MAX,
             ckusdt_enabled: true,
             ckusdc_enabled: true,
             last_ckusdt_rate: None,

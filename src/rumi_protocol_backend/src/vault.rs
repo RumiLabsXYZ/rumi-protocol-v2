@@ -648,6 +648,15 @@ async fn borrow_from_vault_internal(caller: Principal, arg: VaultArg) -> Result<
         )));
     }
 
+    // Check global icUSD mint cap
+    let (global_cap, total_borrowed) = read_state(|s| (s.global_icusd_mint_cap, s.total_borrowed_icusd_amount()));
+    if total_borrowed.to_u64() + amount.to_u64() > global_cap {
+        return Err(ProtocolError::GenericError(format!(
+            "Borrow would exceed global icUSD mint cap ({} + {} > {})",
+            total_borrowed.to_u64(), amount.to_u64(), global_cap
+        )));
+    }
+
     let collateral_value = crate::numeric::collateral_usd_value(vault.collateral_amount, collateral_price, config_decimals);
     let min_ratio = read_state(|s| {
         let base = s.get_min_collateral_ratio_for(&vault.collateral_type);

@@ -309,6 +309,7 @@ fn get_protocol_status() -> ProtocolStatus {
         reserve_redemption_fee: s.reserve_redemption_fee.to_f64(),
         ckstable_repay_fee: s.ckstable_repay_fee.to_f64(),
         min_icusd_amount: s.min_icusd_amount.to_u64(),
+        global_icusd_mint_cap: s.global_icusd_mint_cap,
         frozen: s.frozen,
         manual_mode_override: s.manual_mode_override,
         interest_pool_share: s.interest_pool_share.to_f64(),
@@ -1120,6 +1121,33 @@ async fn set_min_icusd_amount(new_amount_e8s: u64) -> Result<(), ProtocolError> 
 #[query]
 fn get_min_icusd_amount() -> u64 {
     read_state(|s| s.min_icusd_amount.to_u64())
+}
+
+/// Set the global cap on total icUSD that can be minted (developer only).
+/// Amount is in e8s. e.g. 3_000_000_000_000 = 30,000 icUSD.
+#[candid_method(update)]
+#[update]
+async fn set_global_icusd_mint_cap(amount_e8s: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can set global icUSD mint cap".to_string()));
+    }
+    if amount_e8s == 0 {
+        return Err(ProtocolError::GenericError("Amount must be > 0".to_string()));
+    }
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_global_icusd_mint_cap(s, amount_e8s);
+    });
+    log!(INFO, "[set_global_icusd_mint_cap] Global icUSD mint cap set to: {} e8s ({} icUSD)", amount_e8s, amount_e8s as f64 / 1e8);
+    Ok(())
+}
+
+/// Get the current global icUSD mint cap (in e8s). u64::MAX = uncapped.
+#[candid_method(query)]
+#[query]
+fn get_global_icusd_mint_cap() -> u64 {
+    read_state(|s| s.global_icusd_mint_cap)
 }
 
 /// Enable or disable a specific stable token for repayments/liquidations (developer only)

@@ -160,6 +160,12 @@ pub enum Event {
         amount: String,
     },
 
+    /// Admin set global icUSD mint cap
+    #[serde(rename = "set_global_icusd_mint_cap")]
+    SetGlobalIcusdMintCap {
+        amount: String,
+    },
+
     #[serde(rename = "set_stable_token_enabled")]
     SetStableTokenEnabled {
         token_type: StableTokenType,
@@ -397,6 +403,7 @@ impl Event {
             Event::DustForgiven { vault_id, .. } => vault_id == filter_vault_id,
             Event::SetCkstableRepayFee { .. } => false,
             Event::SetMinIcusdAmount { .. } => false,
+            Event::SetGlobalIcusdMintCap { .. } => false,
             Event::SetStableTokenEnabled { .. } => false,
             Event::SetStableLedgerPrincipal { .. } => false,
             Event::SetTreasuryPrincipal { .. } => false,
@@ -615,6 +622,11 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             Event::SetMinIcusdAmount { amount } => {
                 if let Ok(val) = amount.parse::<u64>() {
                     state.min_icusd_amount = ICUSD::new(val);
+                }
+            },
+            Event::SetGlobalIcusdMintCap { amount } => {
+                if let Ok(val) = amount.parse::<u64>() {
+                    state.global_icusd_mint_cap = val;
                 }
             },
             Event::SetStableTokenEnabled { token_type, enabled } => {
@@ -1085,6 +1097,13 @@ pub fn record_set_min_icusd_amount(state: &mut State, amount: ICUSD) {
         amount: amount.to_u64().to_string(),
     });
     state.min_icusd_amount = amount;
+}
+
+pub fn record_set_global_icusd_mint_cap(state: &mut State, amount: u64) {
+    record_event(&Event::SetGlobalIcusdMintCap {
+        amount: amount.to_string(),
+    });
+    state.global_icusd_mint_cap = amount;
 }
 
 pub fn record_set_stable_token_enabled(state: &mut State, token_type: StableTokenType, enabled: bool) {
