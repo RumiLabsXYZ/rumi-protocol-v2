@@ -494,8 +494,7 @@
   }
   /* Collateral comparison table */
   .collateral-table-wrap {
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
+    overflow: visible;
   }
   .collateral-table {
     width: 100%;
