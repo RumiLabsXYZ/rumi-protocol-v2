@@ -1972,7 +1972,6 @@ fn setup_protocol_with_cketh() -> (PocketIc, Principal, Principal, Principal, Pr
         debt_ceiling: u64::MAX,
         min_vault_debt: 100_000_000, // 1 ICUSD
         interest_rate_apr: 0.0,
-        recovery_target_cr: 2.0,
         min_collateral_deposit: 0,
         display_color: None,
         redemption_fee_floor: None,
@@ -2100,7 +2099,6 @@ fn test_add_collateral_token() {
         debt_ceiling: u64::MAX,
         min_vault_debt: 100_000_000,
         interest_rate_apr: 0.0,
-        recovery_target_cr: 2.0,
         min_collateral_deposit: 0,
         display_color: None,
         redemption_fee_floor: None,
@@ -3088,7 +3086,6 @@ fn test_add_collateral_non_developer_rejected() {
         debt_ceiling: u64::MAX,
         min_vault_debt: 100_000_000,
         interest_rate_apr: 0.0,
-        recovery_target_cr: 2.0,
         min_collateral_deposit: 0,
         display_color: None,
         redemption_fee_floor: None,

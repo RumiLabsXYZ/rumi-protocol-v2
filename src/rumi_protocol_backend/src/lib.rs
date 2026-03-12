@@ -220,8 +220,6 @@ pub struct AddCollateralArg {
     pub min_vault_debt: u64,
     /// Ongoing annual interest rate (e.g., 0.02 = 2% APR)
     pub interest_rate_apr: f64,
-    /// Target CR after recovery liquidation (e.g., 1.55)
-    pub recovery_target_cr: f64,
     /// Minimum collateral deposit in native token units (e.g., 100_000 for 0.001 ICP)
     pub min_collateral_deposit: u64,
     /// Hex color for frontend display (e.g., "#F7931A")

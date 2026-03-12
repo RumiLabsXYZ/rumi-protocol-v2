@@ -4,7 +4,6 @@ type AddCollateralArg = record {
   min_vault_debt : nat64;
   min_collateral_deposit : nat64;
   borrow_threshold_ratio : float64;
-  recovery_target_cr : float64;
   ledger_canister_id : principal;
   price_source : PriceSource;
   liquidation_bonus : float64;

@@ -1721,7 +1721,7 @@ impl State {
             config.liquidation_bonus = self.liquidation_bonus;
             config.redemption_fee_floor = self.redemption_fee_floor;
             config.redemption_fee_ceiling = self.redemption_fee_ceiling;
-            config.recovery_target_cr = self.recovery_mode_threshold * self.recovery_cr_multiplier;
+            config.recovery_target_cr = config.borrow_threshold_ratio * self.recovery_cr_multiplier;
             config.ledger_fee = self.icp_ledger_fee.to_u64();
         }
     }

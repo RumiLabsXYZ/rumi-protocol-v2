@@ -2391,7 +2391,8 @@ async fn add_collateral_token(arg: rumi_protocol_backend::AddCollateralArg) -> R
         redemption_fee_ceiling: Ratio::from_f64(arg.redemption_fee_ceiling.unwrap_or(0.05)),
         current_base_rate: Ratio::from_f64(0.0),
         last_redemption_time: 0,
-        recovery_target_cr: Ratio::from_f64(arg.recovery_target_cr),
+        // Computed from borrow_threshold_ratio × recovery_cr_multiplier; not user-supplied.
+        recovery_target_cr: Ratio::from_f64(arg.borrow_threshold_ratio) * read_state(|s| s.recovery_cr_multiplier),
         min_collateral_deposit: arg.min_collateral_deposit,
         recovery_borrowing_fee: None,
         recovery_interest_rate_apr: None,
@@ -2449,7 +2450,14 @@ async fn set_collateral_status(
 #[candid_method(query)]
 #[query]
 fn get_collateral_config(collateral_type: Principal) -> Option<rumi_protocol_backend::state::CollateralConfig> {
-    read_state(|s| s.get_collateral_config(&collateral_type).cloned())
+    read_state(|s| {
+        s.get_collateral_config(&collateral_type).cloned().map(|mut config| {
+            // Always compute recovery_target_cr from the formula rather than returning
+            // the cached value, which may be stale if the multiplier changed after config creation.
+            config.recovery_target_cr = config.borrow_threshold_ratio * s.recovery_cr_multiplier;
+            config
+        })
+    })
 }
 
 #[candid_method(query)]
