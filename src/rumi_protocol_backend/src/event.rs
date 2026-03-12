@@ -338,6 +338,23 @@ pub enum Event {
         reason: String,
     },
 
+    /// Admin set a per-collateral borrowing fee (legacy event, kept for replay compat).
+    #[serde(rename = "set_collateral_borrowing_fee")]
+    SetCollateralBorrowingFee {
+        collateral_type: Principal,
+        #[serde(default)]
+        rate: Option<String>,
+        #[serde(default)]
+        fee: Option<String>,
+    },
+
+    /// Admin set a global icUSD mint cap (legacy event, kept for replay compat).
+    #[serde(rename = "set_global_icusd_mint_cap")]
+    SetGlobalIcusdMintCap {
+        #[serde(default)]
+        cap: Option<String>,
+    },
+
     /// Admin set the dynamic borrowing fee curve.
     #[serde(rename = "set_borrowing_fee_curve")]
     SetBorrowingFeeCurve {
@@ -416,6 +433,8 @@ impl Event {
             Event::SetRmrFloorCr { .. } => false,
             Event::SetRmrCeilingCr { .. } => false,
             Event::AdminSweepToTreasury { .. } => false,
+            Event::SetCollateralBorrowingFee { .. } => false,
+            Event::SetGlobalIcusdMintCap { .. } => false,
             Event::SetBorrowingFeeCurve { .. } => false,
             Event::SetInterestSplit { .. } => false,
             Event::SetThreePoolCanister { .. } => false,
@@ -814,6 +833,17 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             },
             Event::AdminSweepToTreasury { .. } => {
                 // Ledger-only operation; no in-memory state changes during replay.
+            },
+            Event::SetCollateralBorrowingFee { collateral_type, rate, fee } => {
+                let value = rate.as_deref().or(fee.as_deref());
+                if let Some(Ok(dec)) = value.map(|s| s.parse::<Decimal>()) {
+                    if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+                        config.borrowing_fee = Ratio::from(dec);
+                    }
+                }
+            },
+            Event::SetGlobalIcusdMintCap { .. } => {
+                // Legacy: no-op during replay (mint cap not stored in current state).
             },
             Event::SetBorrowingFeeCurve { markers } => {
                 if markers == "null" {
