@@ -155,6 +155,17 @@ pub enum Event {
         rate: String,
     },
 
+    #[serde(rename = "set_min_icusd_amount")]
+    SetMinIcusdAmount {
+        amount: String,
+    },
+
+    /// Admin set global icUSD mint cap
+    #[serde(rename = "set_global_icusd_mint_cap")]
+    SetGlobalIcusdMintCap {
+        amount: String,
+    },
+
     #[serde(rename = "set_stable_token_enabled")]
     SetStableTokenEnabled {
         token_type: StableTokenType,
@@ -299,6 +310,13 @@ pub enum Event {
         healthy_cr: Option<String>,
     },
 
+    /// Admin set per-collateral borrowing fee
+    #[serde(rename = "set_collateral_borrowing_fee")]
+    SetCollateralBorrowingFee {
+        collateral_type: CollateralType,
+        borrowing_fee: String,
+    },
+
     /// Admin set interest rate APR for a collateral type
     #[serde(rename = "set_interest_rate")]
     SetInterestRate {
@@ -384,6 +402,8 @@ impl Event {
             Event::WithdrawAndCloseVault { vault_id, .. } => vault_id == filter_vault_id,
             Event::DustForgiven { vault_id, .. } => vault_id == filter_vault_id,
             Event::SetCkstableRepayFee { .. } => false,
+            Event::SetMinIcusdAmount { .. } => false,
+            Event::SetGlobalIcusdMintCap { .. } => false,
             Event::SetStableTokenEnabled { .. } => false,
             Event::SetStableLedgerPrincipal { .. } => false,
             Event::SetTreasuryPrincipal { .. } => false,
@@ -408,6 +428,7 @@ impl Event {
             Event::SetRateCurveMarkers { .. } => false,
             Event::SetRecoveryRateCurve { .. } => false,
             Event::SetHealthyCr { .. } => false,
+            Event::SetCollateralBorrowingFee { .. } => false,
             Event::SetInterestRate { .. } => false,
             Event::AccrueInterest { .. } => false,
             Event::SetInterestPoolShare { .. } => false,
@@ -598,6 +619,16 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                     state.ckstable_repay_fee = Ratio::from(dec);
                 }
             },
+            Event::SetMinIcusdAmount { amount } => {
+                if let Ok(val) = amount.parse::<u64>() {
+                    state.min_icusd_amount = ICUSD::new(val);
+                }
+            },
+            Event::SetGlobalIcusdMintCap { amount } => {
+                if let Ok(val) = amount.parse::<u64>() {
+                    state.global_icusd_mint_cap = val;
+                }
+            },
             Event::SetStableTokenEnabled { token_type, enabled } => {
                 match token_type {
                     StableTokenType::CKUSDT => state.ckusdt_enabled = enabled,
@@ -774,6 +805,13 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                             .as_ref()
                             .and_then(|s| s.parse::<Decimal>().ok())
                             .map(Ratio::from);
+                    }
+                }
+            },
+            Event::SetCollateralBorrowingFee { collateral_type, borrowing_fee } => {
+                if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+                    if let Ok(fee) = borrowing_fee.parse::<Decimal>() {
+                        config.borrowing_fee = Ratio::from(fee);
                     }
                 }
             },
@@ -1052,6 +1090,20 @@ pub fn record_set_ckstable_repay_fee(state: &mut State, rate: Ratio) {
         rate: rate.0.to_string(),
     });
     state.ckstable_repay_fee = rate;
+}
+
+pub fn record_set_min_icusd_amount(state: &mut State, amount: ICUSD) {
+    record_event(&Event::SetMinIcusdAmount {
+        amount: amount.to_u64().to_string(),
+    });
+    state.min_icusd_amount = amount;
+}
+
+pub fn record_set_global_icusd_mint_cap(state: &mut State, amount: u64) {
+    record_event(&Event::SetGlobalIcusdMintCap {
+        amount: amount.to_string(),
+    });
+    state.global_icusd_mint_cap = amount;
 }
 
 pub fn record_set_stable_token_enabled(state: &mut State, token_type: StableTokenType, enabled: bool) {
@@ -1405,6 +1457,20 @@ pub fn record_set_interest_split(state: &mut State, split: Vec<crate::state::Int
 pub fn record_set_three_pool_canister(state: &mut State, canister: Principal) {
     record_event(&Event::SetThreePoolCanister { canister });
     state.three_pool_canister = Some(canister);
+}
+
+pub fn record_set_collateral_borrowing_fee(
+    state: &mut State,
+    collateral_type: CollateralType,
+    borrowing_fee: Ratio,
+) {
+    record_event(&Event::SetCollateralBorrowingFee {
+        collateral_type,
+        borrowing_fee: borrowing_fee.0.to_string(),
+    });
+    if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+        config.borrowing_fee = borrowing_fee;
+    }
 }
 
 /// Record an interest accrual event and apply to all vaults.

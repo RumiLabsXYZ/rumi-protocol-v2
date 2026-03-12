@@ -95,7 +95,13 @@
   // Deduct the repay token's ledger fee: icUSD = 0.001, ckUSDT/ckUSDC = 0.01
   $: repayLedgerFee = (repayTokenType === 'CKUSDT' || repayTokenType === 'CKUSDC') ? 0.01 : 0.001;
   $: effectiveRepayBalance = Math.max(0, activeRepayBalance - repayLedgerFee);
-  $: maxRepayable = Math.min(effectiveRepayBalance, tickingDebt);
+  // For ckStables, the backend tacks on a protocol fee (e.g. 1%) on top of the base amount.
+  // Divide by (1 + feeRate) so user's wallet can cover base + fee.
+  $: isCkStableRepay = repayTokenType === 'CKUSDT' || repayTokenType === 'CKUSDC';
+  $: maxRepayBase = isCkStableRepay && ckstableRepayFee > 0
+    ? effectiveRepayBalance / (1 + ckstableRepayFee)
+    : effectiveRepayBalance;
+  $: maxRepayable = Math.min(maxRepayBase, tickingDebt);
 
   // ── Withdraw max: keeps CR at minimum for this collateral ──
   // 0.5% haircut when debt exists so Max never overshoots backend oracle price
@@ -204,10 +210,13 @@
 
   // ── Borrowing fee curve for dynamic multiplier ──
   let borrowingFeeCurve: [number, number][] = [];
+  let ckstableRepayFee = 0; // Protocol repay fee rate for ckStables (e.g., 0.01 = 1%)
   onMount(async () => {
     try {
       const status = await protocolService.getProtocolStatus();
       borrowingFeeCurve = status.borrowingFeeCurveResolved ?? [];
+      ckstableRepayFee = status.ckstableRepayFee || 0;
+      MIN_ICUSD = (status.minIcusdAmount || 10_000_000) / 1e8;
     } catch (e) {
       console.error('Failed to fetch protocol status for fee curve:', e);
     }
@@ -527,7 +536,7 @@
     } finally { isProcessing = false; }
   }
 
-  const MIN_ICUSD = 0.1;
+  let MIN_ICUSD = 0.1; // Default; updated from protocol status in onMount
 
   async function handleBorrow() {
     const amount = parseFloat(borrowAmount);
