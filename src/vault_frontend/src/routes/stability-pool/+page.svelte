@@ -36,7 +36,7 @@
   // First compute APR as a decimal, then convert to APY via daily compounding.
   $: poolApy = (() => {
     if (!protocolStatus || !poolStatus) return null;
-    const poolShare = protocolStatus.interestPoolShare;
+    const poolShare = (protocolStatus.interestSplit?.find(e => e.destination === 'stability_pool')?.bps ?? 0) / 10000;
     const perC = protocolStatus.perCollateralInterest;
     if (!perC || perC.length === 0) return null;
 

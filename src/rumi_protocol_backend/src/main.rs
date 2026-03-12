@@ -6,10 +6,10 @@ use rumi_protocol_backend::{
     event::Event,
     logs::INFO,
     numeric::{ICUSD, ICP, Ratio, UsdIcp},
-    state::{read_state, replace_state, Mode, State, RateCurveV2},
+    state::{read_state, replace_state, Mode, State, RateCurveV2, DEFAULT_INTEREST_RATE_APR},
     vault::{CandidVault, OpenVaultSuccess, VaultArg},
     Fees, GetEventsArg, ProtocolArg, ProtocolError, ProtocolStatus, SuccessWithFee,
-    ReserveRedemptionResult, ReserveBalance, CollateralTotals, CollateralInterestInfo,
+    ReserveRedemptionResult, ReserveBalance, CollateralTotals, CollateralInterestInfo, PerCollateralRateCurve,
     VaultArgWithToken, StableTokenType, InterestSplitArg,
 };
 use rumi_protocol_backend::logs::DEBUG;
@@ -327,6 +327,25 @@ fn get_protocol_status() -> ProtocolStatus {
                 weighted_interest_rate: s.weighted_interest_rate_for_collateral(ct).to_f64(),
             })
             .collect(),
+        per_collateral_rate_curves: s.collateral_configs.keys()
+            .map(|ct| {
+                let markers = s.resolve_layer1_markers(ct);
+                let base = s.collateral_configs.get(ct)
+                    .map(|c| c.interest_rate_apr).unwrap_or(DEFAULT_INTEREST_RATE_APR);
+                PerCollateralRateCurve {
+                    collateral_type: *ct,
+                    base_rate: base.to_f64(),
+                    markers: markers.iter().map(|(cr, m)| (cr.to_f64(), m.to_f64())).collect(),
+                }
+            }).collect(),
+        interest_split: s.interest_split.iter().map(|r| {
+            let dest = match &r.destination {
+                rumi_protocol_backend::state::InterestDestination::StabilityPool => "stability_pool".to_string(),
+                rumi_protocol_backend::state::InterestDestination::Treasury => "treasury".to_string(),
+                rumi_protocol_backend::state::InterestDestination::ThreePool => "three_pool".to_string(),
+            };
+            InterestSplitArg { destination: dest, bps: r.bps }
+        }).collect(),
     })
 }
 

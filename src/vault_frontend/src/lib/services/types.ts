@@ -104,6 +104,19 @@ export interface ProtocolStatusDTO {
   interestPoolShare: number;
   borrowingFeeCurveResolved: [number, number][];
   perCollateralInterest: CollateralInterestInfoDTO[];
+  perCollateralRateCurves: PerCollateralRateCurveDTO[];
+  interestSplit: InterestSplitEntryDTO[];
+}
+
+export interface InterestSplitEntryDTO {
+  destination: string;  // "stability_pool", "treasury", "three_pool"
+  bps: number;
+}
+
+export interface PerCollateralRateCurveDTO {
+  collateralType: string;  // Principal text
+  baseRate: number;
+  markers: [number, number][];  // (cr_level, multiplier) pairs
 }
 
 export interface CollateralInterestInfoDTO {

@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from "svelte";
   import { developerAccess } from '../lib/stores/developer';
   import { formatNumber, formatStableTx } from '$lib/utils/format';
-  import { interpolateMultiplier } from '$lib/utils/interpolate';
+  import { interpolateMultiplier, computeProjectedRate } from '$lib/utils/interpolate';
   import { tweened } from 'svelte/motion';
   import { cubicOut } from 'svelte/easing';
   import { appDataStore, protocolStatus, isLoadingProtocol } from '$lib/stores/appDataStore';
@@ -66,6 +66,18 @@
   $: effectiveMintFeeRate = selectedBorrowingFee * mintFeeMultiplier;
   $: calculatedBorrowFee = icusdAmount * effectiveMintFeeRate;
   $: calculatedIcusdAmount = icusdAmount - calculatedBorrowFee;
+  // ── Projected interest rate from rate curve ──
+  $: rateCurve = $protocolStatus?.perCollateralRateCurves?.find(
+    (c) => c.collateralType === selectedCollateralPrincipal
+  );
+  $: mintRecoveryMultiplier = (() => {
+    const m = $protocolStatus?.mode;
+    if (m && typeof m === 'object' && 'Recovery' in m) return $protocolStatus?.recoveryCrMultiplier ?? 1;
+    return 1;
+  })();
+  $: projectedMintRate = rateCurve
+    ? computeProjectedRate(rateCurve.baseRate, rateCurve.markers, projectedMintCr, mintRecoveryMultiplier)
+    : (selectedCollateralInfo?.interestRateApr ?? 0);
   $: calculatedCollateralRatio = collateralAmount > 0 && icusdAmount >= 0.001
     ? ((collateralAmount * collateralPrice) / icusdAmount) * 100 : collateralAmount > 0 ? Infinity : 0;
   $: formattedCollateralRatio = calculatedCollateralRatio === Infinity
@@ -271,6 +283,9 @@
               {#if icusdAmount > 0}
                 <div class="fee-row"><span>Fee ({(effectiveMintFeeRate * 100).toFixed(2)}%)</span><span>{formatStableTx(calculatedBorrowFee)} icUSD</span></div>
                 <div class="fee-row"><span>You receive</span><span>{formatStableTx(calculatedIcusdAmount)} icUSD</span></div>
+                {#if rateCurve}
+                  <div class="fee-row"><span>Interest Rate</span><span>{(projectedMintRate * 100).toFixed(2)}% APR</span></div>
+                {/if}
               {/if}
             </div>
 

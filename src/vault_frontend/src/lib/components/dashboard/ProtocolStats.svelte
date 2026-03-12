@@ -236,7 +236,7 @@
       <span class="stat-value">{formatNumber(paramBorrowFee)}%</span>
     </div>
     <div class="stat-row">
-      <span class="stat-label">Interest APR</span>
+      <span class="stat-label">Base Interest</span>
       <span class="stat-value">{interestApr > 0 ? `${formatNumber(interestApr * 100)}%` : '0%'}</span>
     </div>
   </div>

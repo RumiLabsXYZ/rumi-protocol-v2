@@ -46,9 +46,9 @@
 
   $: poolApy = (() => {
     if (!protocolStatus || !poolStatus) return null;
-    const poolShare = protocolStatus.interestPoolShare;
+    const poolShare = (protocolStatus.interestSplit?.find(e => e.destination === 'stability_pool')?.bps ?? 0) / 10000;
     const perC = protocolStatus.perCollateralInterest;
-    if (!perC || perC.length === 0) return null;
+    if (!perC || perC.length === 0 || poolShare === 0) return null;
 
     let totalApr = 0;
     for (const info of perC) {
@@ -75,7 +75,7 @@
   // Personalized APY — only sums collateral types the user is opted in to
   $: userApy = (() => {
     if (!userHasIcusd || !protocolStatus || !poolStatus) return null;
-    const poolShare = protocolStatus.interestPoolShare;
+    const poolShare = (protocolStatus.interestSplit?.find(e => e.destination === 'stability_pool')?.bps ?? 0) / 10000;
     const perC = protocolStatus.perCollateralInterest;
     if (!perC || perC.length === 0) return null;
 

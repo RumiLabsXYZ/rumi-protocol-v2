@@ -6,7 +6,7 @@
   import { protocolManager } from '../../services/ProtocolManager';
   import { CONFIG, CANISTER_IDS } from '../../config';
   import { createEventDispatcher, onDestroy, onMount } from 'svelte';
-  import { interpolateMultiplier } from '../../utils/interpolate';
+  import { interpolateMultiplier, computeProjectedRate } from '../../utils/interpolate';
   import { walletStore } from '../../stores/wallet';
   import { MINIMUM_CR, LIQUIDATION_CR, E8S, getMinimumCR, getLiquidationCR } from '$lib/protocol';
   import { collateralStore } from '../../stores/collateralStore';
@@ -210,11 +210,28 @@
 
   // ── Borrowing fee curve for dynamic multiplier ──
   let borrowingFeeCurve: [number, number][] = [];
+  // ── Interest rate curve for dynamic APR display ──
+  let rateCurveMarkers: [number, number][] = [];
+  let rateCurveBaseRate: number = 0;
+  let recoveryMultiplier: number = 1;
   let ckstableRepayFee = 0; // Protocol repay fee rate for ckStables (e.g., 0.01 = 1%)
   onMount(async () => {
     try {
       const status = await protocolService.getProtocolStatus();
       borrowingFeeCurve = status.borrowingFeeCurveResolved ?? [];
+      // Find the rate curve for this vault's collateral type
+      const curve = status.perCollateralRateCurves?.find(
+        (c) => c.collateralType === vaultCollateralType
+      );
+      if (curve) {
+        rateCurveMarkers = curve.markers;
+        rateCurveBaseRate = curve.baseRate;
+      }
+      // Layer 2: apply recovery mode multiplier when system is in Recovery
+      const m = status.mode;
+      if (m && typeof m === 'object' && 'Recovery' in m) {
+        recoveryMultiplier = status.recoveryCrMultiplier ?? 1;
+      }
       ckstableRepayFee = status.ckstableRepayFee || 0;
       MIN_ICUSD = (status.minIcusdAmount || 10_000_000) / 1e8;
     } catch (e) {
@@ -226,6 +243,10 @@
   $: fmtCollateralUsd = formatNumber(collateralValueUsd, 2);
   $: fmtBorrowed = formatStableDisplay(tickingDebt);
   $: fmtBorrowedUsd = formatStableDisplay(tickingDebt);
+  // ── Client-side dynamic APR from rate curve ──
+  $: computedRate = rateCurveMarkers.length > 0
+    ? computeProjectedRate(rateCurveBaseRate, rateCurveMarkers, collateralRatio, recoveryMultiplier)
+    : baseInterestRate;
   $: fmtRatio = collateralRatio === Infinity ? '—' : `${(collateralRatio * 100).toFixed(1)}%`;
   $: riskTooltip = riskLevel === 'warning'
     ? 'Approaching minimum collateral ratio'
@@ -403,6 +424,10 @@
   $: effectiveBorrowFeeRate = vaultBorrowingFee * borrowFeeMultiplier;
   $: borrowFeeAmount = parsedBorrowAmount * effectiveBorrowFeeRate;
   $: borrowReceiveAmount = parsedBorrowAmount - borrowFeeAmount;
+  // Projected interest rate after borrowing more
+  $: projectedBorrowRate = rateCurveMarkers.length > 0
+    ? computeProjectedRate(rateCurveBaseRate, rateCurveMarkers, projectedBorrowCr, recoveryMultiplier)
+    : baseInterestRate;
 
   $: repayOverMax = (() => {
     const v = parseFloat(repayAmount);
@@ -610,7 +635,7 @@
     <span class="vault-cell">
       <span class="cell-label">Borrowed</span>
       <span class="cell-value">{fmtBorrowed} icUSD</span>
-      <span class="cell-sub">${fmtBorrowedUsd}</span>
+      <span class="cell-sub" style="color:{interestColor}">{(computedRate * 100).toFixed(2)}% APR</span>
     </span>
     <span class="vault-cell vault-cell-bar">
       <span class="gauge-track">
@@ -820,6 +845,14 @@
                 <div class="fee-breakdown">
                   <div class="fee-row"><span>Fee ({(effectiveBorrowFeeRate * 100).toFixed(2)}%)</span><span>{formatStableTx(borrowFeeAmount)} icUSD</span></div>
                   <div class="fee-row"><span>You receive</span><span>{formatStableTx(borrowReceiveAmount)} icUSD</span></div>
+                </div>
+              {/if}
+              {#if parsedBorrowAmount > 0 && rateCurveMarkers.length > 0}
+                <div class="fee-breakdown">
+                  <div class="fee-row">
+                    <span>Interest Rate</span>
+                    <span style="color:{interestColor}">{(computedRate * 100).toFixed(2)}% → {(projectedBorrowRate * 100).toFixed(2)}% APR</span>
+                  </div>
                 </div>
               {/if}
               <div class="input-submit-row">
