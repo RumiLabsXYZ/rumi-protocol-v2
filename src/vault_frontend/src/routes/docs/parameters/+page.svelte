@@ -7,10 +7,8 @@
   import { get } from 'svelte/store';
   import { threePoolService } from '$lib/services/threePoolService';
 
-  let liquidationBonus = 0;
   let recoveryTargetCr = 0;
   let recoveryModeThreshold = 0;
-  let borrowingFee = 0;
   let redemptionFeeFloor = 0;
   let redemptionFeeCeiling = 0;
   let ckstableRepayFee = 0;
@@ -76,9 +74,8 @@
   onMount(async () => {
     try {
       // Fetch global parameters and per-collateral config in parallel
-      const [status, bFee, rfFloor, rfCeil, ckFee, rrFee, split, lpShare, rFloor, rCeil, rFloorCr, rCeilCr, poolStatus] = await Promise.all([
+      const [status, rfFloor, rfCeil, ckFee, rrFee, split, lpShare, rFloor, rCeil, rFloorCr, rCeilCr, poolStatus] = await Promise.all([
         protocolService.getProtocolStatus(),
-        publicActor.get_borrowing_fee() as Promise<number>,
         publicActor.get_redemption_fee_floor() as Promise<number>,
         publicActor.get_redemption_fee_ceiling() as Promise<number>,
         publicActor.get_ckstable_repay_fee() as Promise<number>,
@@ -92,10 +89,8 @@
         threePoolService.getPoolStatus(),
       ]);
 
-      liquidationBonus = status.liquidationBonus;
       recoveryTargetCr = status.recoveryTargetCr;
       recoveryModeThreshold = status.recoveryModeThreshold;
-      borrowingFee = Number(bFee);
       redemptionFeeFloor = Number(rfFloor);
       redemptionFeeCeiling = Number(rfCeil);
       ckstableRepayFee = Number(ckFee);
@@ -119,10 +114,6 @@
       const state = get(collateralStore);
       collaterals = state.collaterals;
 
-      // Use first collateral's borrowing fee as the global default if available
-      if (collaterals.length > 0 && collaterals[0].borrowingFee !== undefined) {
-        borrowingFee = collaterals[0].borrowingFee;
-      }
     } catch (e) {
       console.error('Failed to fetch protocol parameters:', e);
     }
@@ -169,6 +160,22 @@
         <span class="param-val">{fmtLedgerFee(c)}</span>
       </div>
       <div class="param">
+        <span class="param-label">Borrowing Fee <span class="tip" data-tip="A one-time fee deducted from the icUSD you mint when borrowing against {c.symbol}. The effective rate depends on your vault's projected collateral ratio — healthier vaults pay closer to the base fee, riskier borrows pay more.">?</span></span>
+        {#if borrowingFeeCurve.length > 0}
+        <span class="param-val live curve-val">
+          {#each borrowingFeeCurve.sort((a, b) => b[0] - a[0]) as [cr, mult]}
+            <span class="curve-point">CR {(cr * 100).toFixed(0)}% → {(c.borrowingFee * mult * 100).toFixed(2)}%</span>
+          {/each}
+        </span>
+        {:else}
+        <span class="param-val live">{pctRaw(c.borrowingFee)}</span>
+        {/if}
+      </div>
+      <div class="param">
+        <span class="param-label">Liquidation Penalty <span class="tip" data-tip="The extra collateral seized from a liquidated {c.symbol} vault. For example, 15% means the liquidator receives collateral worth 115% of the debt they repay — the extra 15% is your penalty for being undercollateralized.">?</span></span>
+        <span class="param-val live">{pct(c.liquidationBonus)}</span>
+      </div>
+      <div class="param">
         <span class="param-label">Status <span class="tip" data-tip="Current operational status of this collateral type.">?</span></span>
         <span class="param-val" class:live={c.status === 'Active'}>{c.status}</span>
       </div>
@@ -188,10 +195,6 @@
         <span class="param-val live">{crPct(recoveryTargetCr)} (threshold × multiplier)</span>
       </div>
       <div class="param">
-        <span class="param-label">Liquidation Penalty <span class="tip" data-tip="The extra collateral seized from a liquidated vault. For example, 15% means the liquidator receives collateral worth 115% of the debt they repay — the extra 15% is your penalty for being undercollateralized.">?</span></span>
-        <span class="param-val live">{pct(liquidationBonus)}</span>
-      </div>
-      <div class="param">
         <span class="param-label">Partial Liquidation <span class="tip" data-tip="In Recovery Mode, vaults between the Liquidation Ratio and Borrowing Threshold are not fully liquidated. Instead, only enough debt is repaid to restore the vault to the Recovery Target CR.">?</span></span>
         <span class="param-val">Restores vault CR to Recovery Target</span>
       </div>
@@ -205,20 +208,6 @@
   <section class="doc-section">
     <h2 class="doc-heading">Fees</h2>
     <div class="params-table">
-      <div class="param">
-        <span class="param-label">Borrowing Fee (base) <span class="tip" data-tip="A one-time fee deducted from the icUSD you mint. The effective rate may be higher depending on the dynamic multiplier below. In Recovery Mode, per-collateral fee overrides may apply.">?</span></span>
-        <span class="param-val live">{pctRaw(borrowingFee)}</span>
-      </div>
-      {#if borrowingFeeCurve.length > 0}
-      <div class="param">
-        <span class="param-label">Borrowing Fee Curve <span class="tip" data-tip="The effective borrowing fee depends on your vault's projected collateral ratio after the borrow. Healthier vaults (higher CR) pay closer to the base fee. Riskier borrows (lower CR) pay a multiplied fee. The curve uses piecewise linear interpolation between the anchor points shown.">?</span></span>
-        <span class="param-val live curve-val">
-          {#each borrowingFeeCurve.sort((a, b) => b[0] - a[0]) as [cr, mult]}
-            <span class="curve-point">CR {(cr * 100).toFixed(0)}% → {mult.toFixed(2)}x ({(borrowingFee * mult * 100).toFixed(2)}%)</span>
-          {/each}
-        </span>
-      </div>
-      {/if}
       <div class="param">
         <span class="param-label">Redemption Fee Floor <span class="tip" data-tip="The minimum fee charged when redeeming icUSD for collateral. The actual fee starts here and increases with redemption volume, then decays back over time.">?</span></span>
         <span class="param-val live">{pctRaw(redemptionFeeFloor)}</span>

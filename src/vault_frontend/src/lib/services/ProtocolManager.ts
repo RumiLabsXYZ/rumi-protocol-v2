@@ -529,7 +529,10 @@ export class ProtocolManager {
         const spenderCanisterId = CONFIG.currentCanisterId;
 
         const STABLE_LEDGER_FEE = BigInt(10_000); // 0.01 USDT/USDC
-        const protocolFee = amountE6s / BigInt(2000); // 0.05%
+        // Fetch the admin-settable repay fee rate from protocol status
+        const status = await QueryOperations.getProtocolStatus();
+        const feeRate = status.ckstableRepayFee || 0;
+        const protocolFee = BigInt(Math.ceil(Number(amountE6s) * feeRate));
         const requiredAllowance = amountE6s + protocolFee + STABLE_LEDGER_FEE + STABLE_LEDGER_FEE;
 
         try {

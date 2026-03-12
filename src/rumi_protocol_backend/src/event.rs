@@ -155,6 +155,11 @@ pub enum Event {
         rate: String,
     },
 
+    #[serde(rename = "set_min_icusd_amount")]
+    SetMinIcusdAmount {
+        amount: String,
+    },
+
     #[serde(rename = "set_stable_token_enabled")]
     SetStableTokenEnabled {
         token_type: StableTokenType,
@@ -384,6 +389,7 @@ impl Event {
             Event::WithdrawAndCloseVault { vault_id, .. } => vault_id == filter_vault_id,
             Event::DustForgiven { vault_id, .. } => vault_id == filter_vault_id,
             Event::SetCkstableRepayFee { .. } => false,
+            Event::SetMinIcusdAmount { .. } => false,
             Event::SetStableTokenEnabled { .. } => false,
             Event::SetStableLedgerPrincipal { .. } => false,
             Event::SetTreasuryPrincipal { .. } => false,
@@ -596,6 +602,11 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             Event::SetCkstableRepayFee { rate } => {
                 if let Ok(dec) = rate.parse::<Decimal>() {
                     state.ckstable_repay_fee = Ratio::from(dec);
+                }
+            },
+            Event::SetMinIcusdAmount { amount } => {
+                if let Ok(val) = amount.parse::<u64>() {
+                    state.min_icusd_amount = ICUSD::new(val);
                 }
             },
             Event::SetStableTokenEnabled { token_type, enabled } => {
@@ -1052,6 +1063,13 @@ pub fn record_set_ckstable_repay_fee(state: &mut State, rate: Ratio) {
         rate: rate.0.to_string(),
     });
     state.ckstable_repay_fee = rate;
+}
+
+pub fn record_set_min_icusd_amount(state: &mut State, amount: ICUSD) {
+    record_event(&Event::SetMinIcusdAmount {
+        amount: amount.to_u64().to_string(),
+    });
+    state.min_icusd_amount = amount;
 }
 
 pub fn record_set_stable_token_enabled(state: &mut State, token_type: StableTokenType, enabled: bool) {

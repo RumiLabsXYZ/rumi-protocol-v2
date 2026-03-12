@@ -42,6 +42,7 @@ pub const ICP_TRANSFER_FEE: ICP = ICP::new(10_000); // 0.0001 ICP — standard I
 pub type VaultId = u64;
 pub const DEFAULT_BORROW_FEE: Ratio = Ratio::new(dec!(0.005));
 pub const DEFAULT_CKSTABLE_REPAY_FEE: Ratio = Ratio::new(dec!(0.0005)); // 0.05%
+pub const DEFAULT_MIN_ICUSD_AMOUNT: ICUSD = ICUSD::new(10_000_000); // 0.1 icUSD
 pub const DEFAULT_LIQUIDATION_BONUS: Ratio = Ratio::new(dec!(1.15)); // 115% (15% bonus)
 pub const DEFAULT_MAX_PARTIAL_LIQUIDATION_RATIO: Ratio = Ratio::new(dec!(0.5)); // 50% max
 pub const DEFAULT_REDEMPTION_FEE_FLOOR: Ratio = Ratio::new(dec!(0.003)); // 0.3%
@@ -492,6 +493,9 @@ pub struct State {
     pub ckusdt_ledger_principal: Option<Principal>,
     pub ckusdc_ledger_principal: Option<Principal>,
     pub ckstable_repay_fee: Ratio,
+    /// Admin-settable minimum icUSD amount for borrow/repay/redemption operations (in e8s).
+    /// Default set in `From<InitArg>`, updated via `record_set_min_icusd_amount` event.
+    pub min_icusd_amount: ICUSD,
     pub ckusdt_enabled: bool,
     pub ckusdc_enabled: bool,
     // Cached ckstable prices (from XRC, on-demand only)
@@ -628,6 +632,7 @@ impl From<InitArg> for State {
             ckusdt_ledger_principal: args.ckusdt_ledger_principal,
             ckusdc_ledger_principal: args.ckusdc_ledger_principal,
             ckstable_repay_fee: DEFAULT_CKSTABLE_REPAY_FEE,
+            min_icusd_amount: DEFAULT_MIN_ICUSD_AMOUNT,
             ckusdt_enabled: true,
             ckusdc_enabled: true,
             last_ckusdt_rate: None,

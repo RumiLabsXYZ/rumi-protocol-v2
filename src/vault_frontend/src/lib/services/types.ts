@@ -98,6 +98,8 @@ export interface ProtocolStatusDTO {
   recoveryCrMultiplier: number;
   reserveRedemptionsEnabled: boolean;
   reserveRedemptionFee: number;
+  ckstableRepayFee: number;
+  minIcusdAmount: number;
   weightedAverageInterestRate: number;
   interestPoolShare: number;
   borrowingFeeCurveResolved: [number, number][];

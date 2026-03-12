@@ -114,6 +114,8 @@ pub struct ProtocolStatus {
     pub recovery_cr_multiplier: f64,
     pub reserve_redemptions_enabled: bool,
     pub reserve_redemption_fee: f64,
+    pub ckstable_repay_fee: f64,
+    pub min_icusd_amount: u64,
     pub frozen: bool,
     pub manual_mode_override: bool,
     pub interest_pool_share: f64,

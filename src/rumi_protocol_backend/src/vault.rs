@@ -9,7 +9,7 @@ use crate::logs::INFO;
 use crate::management::{mint_icusd, transfer_collateral_from, transfer_icusd_from, transfer_stable_from};
 use crate::numeric::{ICUSD, ICP, Ratio, UsdIcp};
 use crate::{
-    mutate_state, read_state, ProtocolError, SuccessWithFee, MIN_ICUSD_AMOUNT,
+    mutate_state, read_state, ProtocolError, SuccessWithFee,
     DUST_THRESHOLD,
     StableTokenType, VaultArgWithToken,
 };
@@ -114,9 +114,9 @@ pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Prin
 
     let icusd_amount: ICUSD = icusd_amount_raw.into();
 
-    if icusd_amount < MIN_ICUSD_AMOUNT {
+    if icusd_amount < read_state(|s| s.min_icusd_amount) {
         return Err(ProtocolError::AmountTooLow {
-            minimum_amount: MIN_ICUSD_AMOUNT.to_u64(),
+            minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
         });
     }
 
@@ -312,9 +312,9 @@ pub async fn redeem_collateral(collateral_type: Principal, _icusd_amount: u64) -
 
     let icusd_amount: ICUSD = _icusd_amount.into();
 
-    if icusd_amount < MIN_ICUSD_AMOUNT {
+    if icusd_amount < read_state(|s| s.min_icusd_amount) {
         return Err(ProtocolError::AmountTooLow {
-            minimum_amount: MIN_ICUSD_AMOUNT.to_u64(),
+            minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
         });
     }
 
@@ -594,9 +594,9 @@ pub async fn open_vault_and_borrow(
 async fn borrow_from_vault_internal(caller: Principal, arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {
     let amount: ICUSD = arg.amount.into();
 
-    if amount < MIN_ICUSD_AMOUNT {
+    if amount < read_state(|s| s.min_icusd_amount) {
         return Err(ProtocolError::AmountTooLow {
-            minimum_amount: MIN_ICUSD_AMOUNT.to_u64(),
+            minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
         });
     }
 
@@ -761,10 +761,10 @@ pub async fn repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
         return Err(ProtocolError::CallerNotOwner);
     }
 
-    if amount < MIN_ICUSD_AMOUNT {
+    if amount < read_state(|s| s.min_icusd_amount) {
         guard_principal.fail();
         return Err(ProtocolError::AmountTooLow {
-            minimum_amount: MIN_ICUSD_AMOUNT.to_u64(),
+            minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
         });
     }
 
@@ -846,10 +846,10 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
         return Err(ProtocolError::CallerNotOwner);
     }
 
-    if amount < MIN_ICUSD_AMOUNT {
+    if amount < read_state(|s| s.min_icusd_amount) {
         guard_principal.fail();
         return Err(ProtocolError::AmountTooLow {
-            minimum_amount: MIN_ICUSD_AMOUNT.to_u64(),
+            minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
         });
     }
 
@@ -1787,10 +1787,10 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
     
     let liquidation_amount: ICUSD = icusd_amount.into();
     
-    if liquidation_amount < MIN_ICUSD_AMOUNT {
+    if liquidation_amount < read_state(|s| s.min_icusd_amount) {
         guard_principal.fail();
         return Err(ProtocolError::AmountTooLow {
-            minimum_amount: MIN_ICUSD_AMOUNT.to_u64(),
+            minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
         });
     }
     
@@ -2001,10 +2001,10 @@ pub async fn liquidate_vault_partial_with_stable(
     let raw_amount_e8s = stable_amount - (stable_amount % 100);
     let liquidation_amount: ICUSD = raw_amount_e8s.into();
 
-    if liquidation_amount < MIN_ICUSD_AMOUNT {
+    if liquidation_amount < read_state(|s| s.min_icusd_amount) {
         guard_principal.fail();
         return Err(ProtocolError::AmountTooLow {
-            minimum_amount: MIN_ICUSD_AMOUNT.to_u64(),
+            minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
         });
     }
 
@@ -2560,10 +2560,10 @@ pub async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError>
         return Err(ProtocolError::CallerNotOwner);
     }
 
-    if amount < MIN_ICUSD_AMOUNT {
+    if amount < read_state(|s| s.min_icusd_amount) {
         guard_principal.fail();
         return Err(ProtocolError::AmountTooLow {
-            minimum_amount: MIN_ICUSD_AMOUNT.to_u64(),
+            minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
         });
     }
 
@@ -2643,10 +2643,10 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
     };
 
     // Step 2: Validate liquidator payment amount
-    if liquidator_payment < MIN_ICUSD_AMOUNT {
+    if liquidator_payment < read_state(|s| s.min_icusd_amount) {
         guard_principal.fail();
         return Err(ProtocolError::AmountTooLow {
-            minimum_amount: MIN_ICUSD_AMOUNT.to_u64(),
+            minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
         });
     }
 

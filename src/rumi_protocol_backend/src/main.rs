@@ -307,6 +307,8 @@ fn get_protocol_status() -> ProtocolStatus {
         recovery_cr_multiplier: s.recovery_cr_multiplier.to_f64(),
         reserve_redemptions_enabled: s.reserve_redemptions_enabled,
         reserve_redemption_fee: s.reserve_redemption_fee.to_f64(),
+        ckstable_repay_fee: s.ckstable_repay_fee.to_f64(),
+        min_icusd_amount: s.min_icusd_amount.to_u64(),
         frozen: s.frozen,
         manual_mode_override: s.manual_mode_override,
         interest_pool_share: s.interest_pool_share.to_f64(),
@@ -1090,6 +1092,34 @@ async fn set_ckstable_repay_fee(new_rate: f64) -> Result<(), ProtocolError> {
 #[query]
 fn get_ckstable_repay_fee() -> f64 {
     read_state(|s| s.ckstable_repay_fee.to_f64())
+}
+
+/// Set the minimum icUSD amount for borrow/repay/redemption/liquidation operations (developer only).
+/// Amount is in e8s. Must be > 0 and <= 10_000_000_000 (100 icUSD).
+#[candid_method(update)]
+#[update]
+async fn set_min_icusd_amount(new_amount_e8s: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can set min icUSD amount".to_string()));
+    }
+    if new_amount_e8s == 0 || new_amount_e8s > 10_000_000_000 {
+        return Err(ProtocolError::GenericError("Amount must be > 0 and <= 100 icUSD (10_000_000_000 e8s)".to_string()));
+    }
+    let amount = ICUSD::new(new_amount_e8s);
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_min_icusd_amount(s, amount);
+    });
+    log!(INFO, "[set_min_icusd_amount] Min icUSD amount set to: {} e8s", new_amount_e8s);
+    Ok(())
+}
+
+/// Get the current minimum icUSD amount (in e8s)
+#[candid_method(query)]
+#[query]
+fn get_min_icusd_amount() -> u64 {
+    read_state(|s| s.min_icusd_amount.to_u64())
 }
 
 /// Enable or disable a specific stable token for repayments/liquidations (developer only)
