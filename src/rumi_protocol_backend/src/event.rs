@@ -304,6 +304,13 @@ pub enum Event {
         healthy_cr: Option<String>,
     },
 
+    /// Admin set per-collateral borrowing fee
+    #[serde(rename = "set_collateral_borrowing_fee")]
+    SetCollateralBorrowingFee {
+        collateral_type: CollateralType,
+        borrowing_fee: String,
+    },
+
     /// Admin set interest rate APR for a collateral type
     #[serde(rename = "set_interest_rate")]
     SetInterestRate {
@@ -414,6 +421,7 @@ impl Event {
             Event::SetRateCurveMarkers { .. } => false,
             Event::SetRecoveryRateCurve { .. } => false,
             Event::SetHealthyCr { .. } => false,
+            Event::SetCollateralBorrowingFee { .. } => false,
             Event::SetInterestRate { .. } => false,
             Event::AccrueInterest { .. } => false,
             Event::SetInterestPoolShare { .. } => false,
@@ -785,6 +793,13 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                             .as_ref()
                             .and_then(|s| s.parse::<Decimal>().ok())
                             .map(Ratio::from);
+                    }
+                }
+            },
+            Event::SetCollateralBorrowingFee { collateral_type, borrowing_fee } => {
+                if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+                    if let Ok(fee) = borrowing_fee.parse::<Decimal>() {
+                        config.borrowing_fee = Ratio::from(fee);
                     }
                 }
             },
@@ -1423,6 +1438,20 @@ pub fn record_set_interest_split(state: &mut State, split: Vec<crate::state::Int
 pub fn record_set_three_pool_canister(state: &mut State, canister: Principal) {
     record_event(&Event::SetThreePoolCanister { canister });
     state.three_pool_canister = Some(canister);
+}
+
+pub fn record_set_collateral_borrowing_fee(
+    state: &mut State,
+    collateral_type: CollateralType,
+    borrowing_fee: Ratio,
+) {
+    record_event(&Event::SetCollateralBorrowingFee {
+        collateral_type,
+        borrowing_fee: borrowing_fee.0.to_string(),
+    });
+    if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+        config.borrowing_fee = borrowing_fee;
+    }
 }
 
 /// Record an interest accrual event and apply to all vaults.

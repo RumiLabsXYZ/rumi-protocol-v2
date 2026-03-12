@@ -2046,6 +2046,48 @@ async fn set_interest_rate(
     Ok(())
 }
 
+/// Set the borrowing fee for a specific collateral type (developer only).
+/// e.g. 0.005 = 0.5%, 0.001 = 0.1%. Range 0.0–0.10.
+#[candid_method(update)]
+#[update]
+async fn set_collateral_borrowing_fee(
+    collateral_type: Principal,
+    borrowing_fee: f64,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set borrowing fees".to_string(),
+        ));
+    }
+    let exists = read_state(|s| s.collateral_configs.contains_key(&collateral_type));
+    if !exists {
+        return Err(ProtocolError::GenericError(
+            "Unknown collateral type".to_string(),
+        ));
+    }
+    if borrowing_fee < 0.0 || borrowing_fee > 0.10 {
+        return Err(ProtocolError::GenericError(
+            "Borrowing fee must be between 0 and 0.10 (10%)".to_string(),
+        ));
+    }
+    let fee = Ratio::from(
+        Decimal::try_from(borrowing_fee)
+            .map_err(|_| ProtocolError::GenericError("Invalid fee value".to_string()))?,
+    );
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_collateral_borrowing_fee(s, collateral_type, fee);
+    });
+    log!(
+        INFO,
+        "[set_collateral_borrowing_fee] collateral={}, borrowing_fee={}",
+        collateral_type,
+        borrowing_fee
+    );
+    Ok(())
+}
+
 /// Set rate curve markers for a collateral type or the global default.
 /// `collateral_type`: None = update global default curve; Some(principal) = per-asset curve.
 /// `markers`: Vec of (cr_level, multiplier) pairs, sorted ascending by cr_level.

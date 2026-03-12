@@ -259,6 +259,10 @@ type Event = variant {
     enabled : bool;
     token_type : StableTokenType;
   };
+  set_collateral_borrowing_fee : record {
+    collateral_type : principal;
+    borrowing_fee : text;
+  };
   set_interest_rate : record {
     collateral_type : principal;
     interest_rate_apr : text;
@@ -519,6 +523,7 @@ service : (ProtocolArg) -> {
   repay_to_vault_with_stable : (VaultArgWithToken) -> (Result_1);
   set_borrowing_fee : (float64) -> (Result);
   set_ckstable_repay_fee : (float64) -> (Result);
+  set_collateral_borrowing_fee : (principal, float64) -> (Result);
   set_collateral_status : (principal, CollateralStatus) -> (Result);
   set_liquidation_bonus : (float64) -> (Result);
   set_liquidation_protocol_share : (float64) -> (Result);
