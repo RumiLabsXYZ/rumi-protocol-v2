@@ -168,12 +168,13 @@
             {#each collaterals as c}<td class="ct-val live">{pct(c.liquidationBonus)}</td>{/each}
           </tr>
           {#if borrowingFeeCurve.length > 0}
-            <tr>
+            <tr class="curve-row">
               <td class="ct-label">Borrowing Fee <span class="tip" data-tip="One-time fee deducted from minted icUSD. Scales with the system's Total Collateral Ratio (TCR) — as TCR drops toward recovery, a multiplier increases the effective fee for all assets.">?</span></td>
               {#each collaterals as c}<td class="ct-val"></td>{/each}
             </tr>
-            {#each [...borrowingFeeCurve].sort((a, b) => b[0] - a[0]) as [cr, mult]}
-              <tr class="curve-row">
+            {@const sortedCurve = [...borrowingFeeCurve].sort((a, b) => b[0] - a[0])}
+            {#each sortedCurve as [cr, mult], i}
+              <tr class="curve-row {i === sortedCurve.length - 1 ? 'curve-row-last' : ''}">
                 <td class="ct-label ct-label-indent">{mult.toFixed(2)}× at {(cr * 100).toFixed(0)}%</td>
                 {#each collaterals as c}<td class="ct-val live ct-val-sm">{(c.borrowingFee * mult * 100).toFixed(2)}%</td>{/each}
               </tr>
@@ -548,7 +549,7 @@
     margin-right: 0.25rem;
   }
   .curve-row td { padding-top: 0.25rem; padding-bottom: 0.25rem; border-bottom-color: transparent; }
-  .curve-row:last-of-type td { border-bottom-color: var(--rumi-border); }
+  .curve-row-last td { border-bottom-color: var(--rumi-border); }
   .ct-val {
     text-align: right;
     font-weight: 600;
