@@ -38,7 +38,12 @@ import { collateralStore } from '$lib/stores/collateralStore';
 
 // Constants from backend
 export const E8S = 100_000_000;
-export const MIN_ICUSD_AMOUNT = 10_000_000; // 0.10 icUSD (10 cents)
+export let MIN_ICUSD_AMOUNT = 10_000_000; // 0.10 icUSD default; updated from protocol status
+
+/** Update the minimum icUSD amount from protocol status (called after fetching status). */
+export function updateMinIcusdAmount(amountE8s: number) {
+  if (amountE8s > 0) MIN_ICUSD_AMOUNT = amountE8s;
+}
 // CRITICAL CHANGE: Set this to false to use real data from the backend
 export const USE_MOCK_DATA = false;
 
@@ -2402,7 +2407,10 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
           const STABLE_LEDGER_FEE = BigInt(10_000); // 0.01 USDT/USDC
           const amountE8s = Math.floor(icusdAmount * E8S);
           const stableE6s = Math.floor(amountE8s / 100);
-          const protocolFee = BigInt(stableE6s) / BigInt(2000); // 0.05%
+          // Fetch the admin-settable repay fee rate
+          const status = await QueryOperations.getProtocolStatus();
+          const feeRate = status.ckstableRepayFee || 0;
+          const protocolFee = BigInt(Math.ceil(stableE6s * feeRate));
           const bufferedE6s = BigInt(stableE6s) + protocolFee + STABLE_LEDGER_FEE + STABLE_LEDGER_FEE;
           const spenderCanisterId = CONFIG.currentCanisterId;
 

@@ -79,7 +79,7 @@
       {/each}
       <div class="param">
         <span class="param-label">LP Token Supply (3USD)</span>
-        <span class="param-val live">{fmtBalance(lpTotalSupply, 8)}</span>
+        <span class="param-val live">{fmtBalance(lpTotalSupply, 18)}</span>
       </div>
       <div class="param">
         <span class="param-label">Virtual Price</span>
