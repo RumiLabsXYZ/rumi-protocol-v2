@@ -120,6 +120,8 @@ pub struct ProtocolStatus {
     pub weighted_average_interest_rate: f64,
     pub borrowing_fee_curve_resolved: Vec<(f64, f64)>,
     pub per_collateral_interest: Vec<CollateralInterestInfo>,
+    pub per_collateral_rate_curves: Vec<PerCollateralRateCurve>,
+    pub interest_split: Vec<InterestSplitArg>,
 }
 
 /// Per-collateral debt and weighted interest rate for APR calculations.
@@ -128,6 +130,14 @@ pub struct CollateralInterestInfo {
     pub collateral_type: Principal,
     pub total_debt_e8s: u64,
     pub weighted_interest_rate: f64,
+}
+
+/// Per-collateral Layer 1 interest rate curve for frontend interpolation.
+#[derive(CandidType, Deserialize, Debug)]
+pub struct PerCollateralRateCurve {
+    pub collateral_type: Principal,
+    pub base_rate: f64,
+    pub markers: Vec<(f64, f64)>,
 }
 
 /// Candid-compatible representation of an interest split entry for the API.

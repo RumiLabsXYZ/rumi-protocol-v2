@@ -20,7 +20,7 @@
   $: poolApy = (() => {
     if (!protocolStatus || !poolStatus) return null;
     const weightedRate = protocolStatus.weightedAverageInterestRate;
-    const poolShare = protocolStatus.interestPoolShare;
+    const poolShare = (protocolStatus.interestSplit?.find(e => e.destination === 'stability_pool')?.bps ?? 0) / 10000;
     const totalDebt = protocolStatus.totalIcusdBorrowed;
     const icusdEntry = poolStatus.stablecoin_balances.find(([l]: [any, bigint]) => l.toText() === CANISTER_IDS.ICUSD_LEDGER);
     const icusdTvl = icusdEntry ? Number(icusdEntry[1]) / 1e8 : 0;

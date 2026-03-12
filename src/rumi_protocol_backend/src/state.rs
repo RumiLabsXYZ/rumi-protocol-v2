@@ -1223,7 +1223,7 @@ impl State {
     /// for a given collateral type, using that asset's own threshold values.
     /// Markers in global_rate_curve store cr_level=0 as placeholders; the actual CR levels
     /// come from the asset's liquidation_ratio, borrow_threshold, warning_cr, healthy_cr.
-    fn resolve_layer1_markers(&self, ct: &CollateralType) -> Vec<(Ratio, Ratio)> {
+    pub fn resolve_layer1_markers(&self, ct: &CollateralType) -> Vec<(Ratio, Ratio)> {
         let config = self.collateral_configs.get(ct);
 
         // If asset has a per-asset rate_curve, use it directly (markers already have concrete CRs)
@@ -1238,8 +1238,10 @@ impl State {
         let borrow_threshold = config
             .map(|c| c.borrow_threshold_ratio)
             .unwrap_or(RECOVERY_COLLATERAL_RATIO);
-        let warning_cr = self.get_warning_cr_for(ct);
         let healthy_cr = self.get_healthy_cr_for(ct);
+        // Midpoint between borrow threshold and healthy CR for even curve distribution.
+        // (Replaces get_warning_cr_for which used 2*recovery_cr - borrow_threshold.)
+        let warning_cr = Ratio::from((borrow_threshold.0 + healthy_cr.0) / Decimal::TWO);
 
         // Map global markers to per-asset CR levels.
         // Global curve has exactly 4 markers in order: liq, borrow, warning, healthy.

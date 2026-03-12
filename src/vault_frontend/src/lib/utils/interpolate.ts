@@ -17,3 +17,14 @@ export function interpolateMultiplier(curve: [number, number][], cr: number): nu
   }
   return 1;
 }
+
+/**
+ * Compute the projected interest rate for a given CR using the rate curve.
+ * baseRate: the base APR (e.g. 0.02 for 2%)
+ * markers: the resolved Layer 1 (cr, multiplier) pairs
+ * cr: the vault's collateral ratio as a decimal (e.g. 1.97 for 197%)
+ * recoveryMultiplier: Layer 2 system-wide multiplier applied during Recovery mode (default 1)
+ */
+export function computeProjectedRate(baseRate: number, markers: [number, number][], cr: number, recoveryMultiplier: number = 1): number {
+  return baseRate * interpolateMultiplier(markers, cr) * recoveryMultiplier;
+}

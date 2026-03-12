@@ -51,6 +51,21 @@ export class QueryOperations {
               weightedInterestRate: Number(info.weighted_interest_rate),
             }))
           : [],
+        perCollateralRateCurves: Array.isArray((canisterStatus as any).per_collateral_rate_curves)
+          ? (canisterStatus as any).per_collateral_rate_curves.map((curve: any) => ({
+              collateralType: curve.collateral_type?.toText?.() ?? String(curve.collateral_type),
+              baseRate: Number(curve.base_rate),
+              markers: Array.isArray(curve.markers)
+                ? curve.markers.map((p: any) => [Number(p[0]), Number(p[1])] as [number, number])
+                : [],
+            }))
+          : [],
+        interestSplit: Array.isArray((canisterStatus as any).interest_split)
+          ? (canisterStatus as any).interest_split.map((entry: any) => ({
+              destination: String(entry.destination),
+              bps: Number(entry.bps),
+            }))
+          : [],
       };
     });
   }
