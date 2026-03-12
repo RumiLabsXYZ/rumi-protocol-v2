@@ -167,14 +167,14 @@
             <td class="ct-label">Liquidation Penalty <span class="tip" data-tip="The extra collateral seized from a liquidated vault above the debt repaid.">?</span></td>
             {#each collaterals as c}<td class="ct-val live">{pct(c.liquidationBonus)}</td>{/each}
           </tr>
-          <tr>
-            <td class="ct-label">Borrowing Fee <span class="tip" data-tip="One-time fee deducted from minted icUSD. The effective rate scales with your vault's projected CR — lower CR means a higher fee (see curve below).">?</span></td>
-            {#each collaterals as c}<td class="ct-val live">{pctRaw(c.borrowingFee)}</td>{/each}
-          </tr>
           {#if borrowingFeeCurve.length > 0}
-            {#each [...borrowingFeeCurve].sort((a, b) => b[0] - a[0]) as [cr, mult], i}
+            <tr>
+              <td class="ct-label">Borrowing Fee <span class="tip" data-tip="One-time fee deducted from minted icUSD. Scales with the system's Total Collateral Ratio (TCR) — as TCR drops toward recovery, a multiplier increases the effective fee for all assets.">?</span></td>
+              {#each collaterals as c}<td class="ct-val"></td>{/each}
+            </tr>
+            {#each [...borrowingFeeCurve].sort((a, b) => b[0] - a[0]) as [cr, mult]}
               <tr class="curve-row">
-                <td class="ct-label ct-label-indent">{#if i === 0}<span class="curve-label">Fee Curve</span>{/if} {mult.toFixed(2)}× at {(cr * 100).toFixed(0)}% TCR</td>
+                <td class="ct-label ct-label-indent">{mult.toFixed(2)}× at {(cr * 100).toFixed(0)}%</td>
                 {#each collaterals as c}<td class="ct-val live ct-val-sm">{(c.borrowingFee * mult * 100).toFixed(2)}%</td>{/each}
               </tr>
             {/each}
