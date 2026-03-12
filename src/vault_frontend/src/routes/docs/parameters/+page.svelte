@@ -138,63 +138,71 @@
     <p class="doc-loading">Loading parameters from canister...</p>
   {:else}
 
-  {#each collaterals as c (c.principal)}
   <section class="doc-section">
-    <h2 class="doc-heading">Collateral & Liquidation ({c.symbol})</h2>
-    <div class="params-table">
-      <div class="param">
-        <span class="param-label">Borrowing Threshold (Min CR) <span class="tip" data-tip="The minimum collateral ratio required to open a vault or borrow more icUSD with {c.symbol} collateral.">?</span></span>
-        <span class="param-val live">{crPct(c.minimumCr)}</span>
-      </div>
-      <div class="param">
-        <span class="param-label">Liquidation Ratio <span class="tip" data-tip="If your {c.symbol} vault's collateral ratio drops below this level, it becomes eligible for liquidation.">?</span></span>
-        <span class="param-val live">{crPct(c.liquidationCr)}</span>
-      </div>
-      <div class="param">
-        <span class="param-label">Recovery Target CR <span class="tip" data-tip="During Recovery Mode, partially liquidated {c.symbol} vaults are restored to this collateral ratio. Computed as Borrowing Threshold × Recovery CR Multiplier.">?</span></span>
-        <span class="param-val live">{crPct(c.recoveryTargetCr)}</span>
-      </div>
-      <div class="param">
-        <span class="param-label">Liquidation Penalty <span class="tip" data-tip="The extra collateral seized from a liquidated {c.symbol} vault. For example, {pct(c.liquidationBonus)} means the liquidator receives collateral worth {crPct(c.liquidationBonus)} of the debt they repay.">?</span></span>
-        <span class="param-val live">{pct(c.liquidationBonus)}</span>
-      </div>
-      <div class="param">
-        <span class="param-label">Borrowing Fee (base) <span class="tip" data-tip="A one-time fee deducted from the icUSD you mint in a {c.symbol} vault. The effective rate may be higher depending on the dynamic multiplier curve below.">?</span></span>
-        <span class="param-val live">{pctRaw(c.borrowingFee)}</span>
-      </div>
-      {#if borrowingFeeCurve.length > 0}
-      <div class="param">
-        <span class="param-label">Borrowing Fee Curve <span class="tip" data-tip="The effective borrowing fee depends on your {c.symbol} vault's projected collateral ratio after the borrow. Healthier vaults (higher CR) pay closer to the base fee. Riskier borrows (lower CR) pay a multiplied fee.">?</span></span>
-        <span class="param-val live curve-val">
-          {#each borrowingFeeCurve.sort((a, b) => b[0] - a[0]) as [cr, mult]}
-            <span class="curve-point">CR {(cr * 100).toFixed(0)}% → {mult.toFixed(2)}x ({(c.borrowingFee * mult * 100).toFixed(2)}%)</span>
-          {/each}
-        </span>
-      </div>
-      {/if}
-      <div class="param">
-        <span class="param-label">Interest Rate (APR) <span class="tip" data-tip="Annual interest charged on outstanding {c.symbol} vault debt.">?</span></span>
-        <span class="param-val live">{pctRaw(c.interestRateApr)}</span>
-      </div>
-      <div class="param">
-        <span class="param-label">Minimum Borrow Amount <span class="tip" data-tip="The smallest amount of icUSD you can borrow in a {c.symbol} vault.">?</span></span>
-        <span class="param-val live">{c.minVaultDebt > 0 ? `${c.minVaultDebt / 1e8} icUSD` : '—'}</span>
-      </div>
-      <div class="param">
-        <span class="param-label">Debt Ceiling <span class="tip" data-tip="The maximum total icUSD that can be borrowed against {c.symbol} across all vaults.">?</span></span>
-        <span class="param-val live">{fmtDebtCeiling(c)}</span>
-      </div>
-      <div class="param">
-        <span class="param-label">Ledger Fee <span class="tip" data-tip="The network fee charged by the {c.symbol} ledger for each transfer. This is an Internet Computer system fee, not a Rumi fee.">?</span></span>
-        <span class="param-val">{fmtLedgerFee(c)}</span>
-      </div>
-      <div class="param">
-        <span class="param-label">Status <span class="tip" data-tip="Current operational status of this collateral type.">?</span></span>
-        <span class="param-val" class:live={c.status === 'Active'}>{c.status}</span>
-      </div>
+    <h2 class="doc-heading">Collateral Parameters</h2>
+    <div class="collateral-table-wrap">
+      <table class="collateral-table">
+        <thead>
+          <tr>
+            <th class="ct-label-col"></th>
+            {#each collaterals as c (c.principal)}
+              <th class="ct-val-col"><span class="ct-symbol live">{c.symbol}</span></th>
+            {/each}
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="ct-label">Borrowing Threshold <span class="tip" data-tip="The minimum collateral ratio required to open a vault or borrow more icUSD.">?</span></td>
+            {#each collaterals as c}<td class="ct-val live">{crPct(c.minimumCr)}</td>{/each}
+          </tr>
+          <tr>
+            <td class="ct-label">Liquidation Ratio <span class="tip" data-tip="If your vault's collateral ratio drops below this level, it becomes eligible for liquidation.">?</span></td>
+            {#each collaterals as c}<td class="ct-val live">{crPct(c.liquidationCr)}</td>{/each}
+          </tr>
+          <tr>
+            <td class="ct-label">Recovery Target CR <span class="tip" data-tip="During Recovery Mode, partially liquidated vaults are restored to this CR. Equal to Borrowing Threshold × Recovery CR Multiplier ({(recoveryCrMultiplier * 100).toFixed(1)}%).">?</span></td>
+            {#each collaterals as c}<td class="ct-val live">{crPct(c.recoveryTargetCr)}</td>{/each}
+          </tr>
+          <tr>
+            <td class="ct-label">Liquidation Penalty <span class="tip" data-tip="The extra collateral seized from a liquidated vault above the debt repaid.">?</span></td>
+            {#each collaterals as c}<td class="ct-val live">{pct(c.liquidationBonus)}</td>{/each}
+          </tr>
+          <tr>
+            <td class="ct-label">Borrowing Fee <span class="tip" data-tip="One-time fee deducted from minted icUSD. The effective rate scales with your vault's projected CR — lower CR means a higher fee (see curve below).">?</span></td>
+            {#each collaterals as c}<td class="ct-val live">{pctRaw(c.borrowingFee)}</td>{/each}
+          </tr>
+          {#if borrowingFeeCurve.length > 0}
+            {#each [...borrowingFeeCurve].sort((a, b) => b[0] - a[0]) as [cr, mult], i}
+              <tr class="curve-row">
+                <td class="ct-label ct-label-indent">{#if i === 0}<span class="curve-label">Fee at CR</span>{/if} {i === 0 ? '≥' : i === borrowingFeeCurve.length - 1 ? '≤' : '~'}{(cr * 100).toFixed(0)}%</td>
+                {#each collaterals as c}<td class="ct-val live ct-val-sm">{(c.borrowingFee * mult * 100).toFixed(2)}%</td>{/each}
+              </tr>
+            {/each}
+          {/if}
+          <tr>
+            <td class="ct-label">Interest Rate <span class="tip" data-tip="Annual interest charged on outstanding vault debt (APR).">?</span></td>
+            {#each collaterals as c}<td class="ct-val live">{pctRaw(c.interestRateApr)}</td>{/each}
+          </tr>
+          <tr>
+            <td class="ct-label">Min Borrow <span class="tip" data-tip="The smallest amount of icUSD you can borrow in a vault.">?</span></td>
+            {#each collaterals as c}<td class="ct-val live">{c.minVaultDebt > 0 ? `${c.minVaultDebt / 1e8}` : '—'}</td>{/each}
+          </tr>
+          <tr>
+            <td class="ct-label">Debt Ceiling <span class="tip" data-tip="Maximum total icUSD that can be borrowed against this collateral across all vaults.">?</span></td>
+            {#each collaterals as c}<td class="ct-val live">{fmtDebtCeiling(c)}</td>{/each}
+          </tr>
+          <tr>
+            <td class="ct-label">Ledger Fee <span class="tip" data-tip="Network fee charged by the token's ledger for each transfer. This is an Internet Computer system fee, not a Rumi fee.">?</span></td>
+            {#each collaterals as c}<td class="ct-val">{fmtLedgerFee(c)}</td>{/each}
+          </tr>
+          <tr>
+            <td class="ct-label">Status</td>
+            {#each collaterals as c}<td class="ct-val" class:live={c.status === 'Active'}>{c.status}</td>{/each}
+          </tr>
+        </tbody>
+      </table>
     </div>
   </section>
-  {/each}
 
   <section class="doc-section">
     <h2 class="doc-heading">Global Liquidation Parameters</h2>
@@ -483,10 +491,59 @@
   .tip:hover::after {
     opacity: 1;
   }
-  .curve-val {
-    display: flex; flex-direction: column; gap: 0.15rem; text-align: right;
+  /* Collateral comparison table */
+  .collateral-table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
   }
-  .curve-point {
+  .collateral-table {
+    width: 100%;
+    border-collapse: collapse;
     font-size: 0.8125rem;
   }
+  .collateral-table th,
+  .collateral-table td {
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--rumi-border);
+    white-space: nowrap;
+  }
+  .collateral-table thead th {
+    border-bottom: 2px solid var(--rumi-border);
+    padding-bottom: 0.625rem;
+  }
+  .collateral-table tbody tr:last-child td { border-bottom: none; }
+  .ct-label-col { text-align: left; }
+  .ct-val-col { text-align: right; }
+  .ct-symbol {
+    font-size: 0.9375rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+  }
+  .ct-label {
+    color: var(--rumi-text-secondary);
+    text-align: left;
+    font-weight: 400;
+  }
+  .ct-label-indent {
+    padding-left: 1.5rem;
+    font-size: 0.75rem;
+    color: var(--rumi-text-muted);
+  }
+  .curve-label {
+    color: var(--rumi-text-secondary);
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-right: 0.25rem;
+  }
+  .curve-row td { padding-top: 0.25rem; padding-bottom: 0.25rem; border-bottom-color: transparent; }
+  .curve-row:last-of-type td { border-bottom-color: var(--rumi-border); }
+  .ct-val {
+    text-align: right;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--rumi-text-primary);
+  }
+  .ct-val.live { color: var(--rumi-action); }
+  .ct-val-sm { font-size: 0.75rem; }
 </style>
