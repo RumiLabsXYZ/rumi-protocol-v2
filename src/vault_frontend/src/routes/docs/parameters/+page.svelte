@@ -10,6 +10,7 @@
   let liquidationBonus = 0;
   let recoveryTargetCr = 0;
   let recoveryModeThreshold = 0;
+  let recoveryCrMultiplier = 0;
   let borrowingFee = 0;
   let redemptionFeeFloor = 0;
   let redemptionFeeCeiling = 0;
@@ -95,6 +96,7 @@
       liquidationBonus = status.liquidationBonus;
       recoveryTargetCr = status.recoveryTargetCr;
       recoveryModeThreshold = status.recoveryModeThreshold;
+      recoveryCrMultiplier = status.recoveryCrMultiplier;
       borrowingFee = Number(bFee);
       redemptionFeeFloor = Number(rfFloor);
       redemptionFeeCeiling = Number(rfCeil);
@@ -119,10 +121,6 @@
       const state = get(collateralStore);
       collaterals = state.collaterals;
 
-      // Use first collateral's borrowing fee as the global default if available
-      if (collaterals.length > 0 && collaterals[0].borrowingFee !== undefined) {
-        borrowingFee = collaterals[0].borrowingFee;
-      }
     } catch (e) {
       console.error('Failed to fetch protocol parameters:', e);
     }
@@ -152,6 +150,28 @@
         <span class="param-label">Liquidation Ratio <span class="tip" data-tip="If your {c.symbol} vault's collateral ratio drops below this level, it becomes eligible for liquidation.">?</span></span>
         <span class="param-val live">{crPct(c.liquidationCr)}</span>
       </div>
+      <div class="param">
+        <span class="param-label">Recovery Target CR <span class="tip" data-tip="During Recovery Mode, partially liquidated {c.symbol} vaults are restored to this collateral ratio. Computed as Borrowing Threshold × Recovery CR Multiplier.">?</span></span>
+        <span class="param-val live">{crPct(c.recoveryTargetCr)}</span>
+      </div>
+      <div class="param">
+        <span class="param-label">Liquidation Penalty <span class="tip" data-tip="The extra collateral seized from a liquidated {c.symbol} vault. For example, {pct(c.liquidationBonus)} means the liquidator receives collateral worth {crPct(c.liquidationBonus)} of the debt they repay.">?</span></span>
+        <span class="param-val live">{pct(c.liquidationBonus)}</span>
+      </div>
+      <div class="param">
+        <span class="param-label">Borrowing Fee (base) <span class="tip" data-tip="A one-time fee deducted from the icUSD you mint in a {c.symbol} vault. The effective rate may be higher depending on the dynamic multiplier curve below.">?</span></span>
+        <span class="param-val live">{pctRaw(c.borrowingFee)}</span>
+      </div>
+      {#if borrowingFeeCurve.length > 0}
+      <div class="param">
+        <span class="param-label">Borrowing Fee Curve <span class="tip" data-tip="The effective borrowing fee depends on your {c.symbol} vault's projected collateral ratio after the borrow. Healthier vaults (higher CR) pay closer to the base fee. Riskier borrows (lower CR) pay a multiplied fee.">?</span></span>
+        <span class="param-val live curve-val">
+          {#each borrowingFeeCurve.sort((a, b) => b[0] - a[0]) as [cr, mult]}
+            <span class="curve-point">CR {(cr * 100).toFixed(0)}% → {mult.toFixed(2)}x ({(c.borrowingFee * mult * 100).toFixed(2)}%)</span>
+          {/each}
+        </span>
+      </div>
+      {/if}
       <div class="param">
         <span class="param-label">Interest Rate (APR) <span class="tip" data-tip="Annual interest charged on outstanding {c.symbol} vault debt.">?</span></span>
         <span class="param-val live">{pctRaw(c.interestRateApr)}</span>
@@ -184,15 +204,11 @@
         <span class="param-val live">{crPct(recoveryModeThreshold)} (system-wide, debt-weighted)</span>
       </div>
       <div class="param">
-        <span class="param-label">Recovery Target CR <span class="tip" data-tip="During Recovery Mode, partially liquidated vaults are restored to this collateral ratio. Computed as Recovery Mode Threshold × Recovery CR Multiplier. Only enough debt is repaid to bring the vault back to this level.">?</span></span>
-        <span class="param-val live">{crPct(recoveryTargetCr)} (threshold × multiplier)</span>
+        <span class="param-label">Recovery CR Multiplier <span class="tip" data-tip="Multiplied by each collateral type's Borrowing Threshold to determine its per-asset Recovery Target CR. For example, {(recoveryCrMultiplier * 100).toFixed(1)}% × 150% threshold = {(recoveryCrMultiplier * 1.5 * 100).toFixed(0)}% recovery target.">?</span></span>
+        <span class="param-val live">{(recoveryCrMultiplier * 100).toFixed(1)}%</span>
       </div>
       <div class="param">
-        <span class="param-label">Liquidation Penalty <span class="tip" data-tip="The extra collateral seized from a liquidated vault. For example, 15% means the liquidator receives collateral worth 115% of the debt they repay — the extra 15% is your penalty for being undercollateralized.">?</span></span>
-        <span class="param-val live">{pct(liquidationBonus)}</span>
-      </div>
-      <div class="param">
-        <span class="param-label">Partial Liquidation <span class="tip" data-tip="In Recovery Mode, vaults between the Liquidation Ratio and Borrowing Threshold are not fully liquidated. Instead, only enough debt is repaid to restore the vault to the Recovery Target CR.">?</span></span>
+        <span class="param-label">Partial Liquidation <span class="tip" data-tip="In Recovery Mode, vaults between the Liquidation Ratio and Borrowing Threshold are not fully liquidated. Instead, only enough debt is repaid to restore the vault to its per-asset Recovery Target CR.">?</span></span>
         <span class="param-val">Restores vault CR to Recovery Target</span>
       </div>
       <div class="param">
@@ -205,20 +221,6 @@
   <section class="doc-section">
     <h2 class="doc-heading">Fees</h2>
     <div class="params-table">
-      <div class="param">
-        <span class="param-label">Borrowing Fee (base) <span class="tip" data-tip="A one-time fee deducted from the icUSD you mint. The effective rate may be higher depending on the dynamic multiplier below. In Recovery Mode, per-collateral fee overrides may apply.">?</span></span>
-        <span class="param-val live">{pctRaw(borrowingFee)}</span>
-      </div>
-      {#if borrowingFeeCurve.length > 0}
-      <div class="param">
-        <span class="param-label">Borrowing Fee Curve <span class="tip" data-tip="The effective borrowing fee depends on your vault's projected collateral ratio after the borrow. Healthier vaults (higher CR) pay closer to the base fee. Riskier borrows (lower CR) pay a multiplied fee. The curve uses piecewise linear interpolation between the anchor points shown.">?</span></span>
-        <span class="param-val live curve-val">
-          {#each borrowingFeeCurve.sort((a, b) => b[0] - a[0]) as [cr, mult]}
-            <span class="curve-point">CR {(cr * 100).toFixed(0)}% → {mult.toFixed(2)}x ({(borrowingFee * mult * 100).toFixed(2)}%)</span>
-          {/each}
-        </span>
-      </div>
-      {/if}
       <div class="param">
         <span class="param-label">Redemption Fee Floor <span class="tip" data-tip="The minimum fee charged when redeeming icUSD for collateral. The actual fee starts here and increases with redemption volume, then decays back over time.">?</span></span>
         <span class="param-val live">{pctRaw(redemptionFeeFloor)}</span>
