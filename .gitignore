@@ -44,3 +44,4 @@ pocket-ic
 # analysis/demo directories
 technical-analysis/
 xrc_demo/
+.playwright-mcp/
