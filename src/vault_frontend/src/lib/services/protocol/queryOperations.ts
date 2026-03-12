@@ -1,4 +1,4 @@
-import { ApiClient, E8S } from './apiClient';
+import { ApiClient, E8S, updateMinIcusdAmount } from './apiClient';
 import type { FeesInfo, ProtocolStatus, FeesDTO, ProtocolStatusDTO, CollateralInfo } from '../types';
 import type {
     ProtocolStatus as CanisterProtocolStatus,
@@ -24,7 +24,7 @@ export class QueryOperations {
       
       console.log('Raw protocol status:', canisterStatus);
       
-      return {
+      const result = {
         mode: canisterStatus.mode,
         totalIcpMargin: Number(canisterStatus.total_icp_margin) / E8S,
         totalIcusdBorrowed: Number(canisterStatus.total_icusd_borrowed) / E8S,
@@ -37,6 +37,8 @@ export class QueryOperations {
         recoveryCrMultiplier: Number(canisterStatus.recovery_cr_multiplier),
         reserveRedemptionsEnabled: Boolean((canisterStatus as any).reserve_redemptions_enabled),
         reserveRedemptionFee: Number((canisterStatus as any).reserve_redemption_fee),
+        ckstableRepayFee: Number((canisterStatus as any).ckstable_repay_fee ?? 0),
+        minIcusdAmount: Number((canisterStatus as any).min_icusd_amount ?? 10_000_000),
         weightedAverageInterestRate: Number((canisterStatus as any).weighted_average_interest_rate),
         interestPoolShare: Number((canisterStatus as any).interest_pool_share),
         borrowingFeeCurveResolved: Array.isArray((canisterStatus as any).borrowing_fee_curve_resolved)
@@ -67,6 +69,9 @@ export class QueryOperations {
             }))
           : [],
       };
+      // Keep the module-level MIN_ICUSD_AMOUNT in sync for client-side validations
+      updateMinIcusdAmount(result.minIcusdAmount);
+      return result;
     });
   }
 

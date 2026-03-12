@@ -4,7 +4,6 @@ type AddCollateralArg = record {
   min_vault_debt : nat64;
   min_collateral_deposit : nat64;
   borrow_threshold_ratio : float64;
-  recovery_target_cr : float64;
   ledger_canister_id : principal;
   price_source : PriceSource;
   liquidation_bonus : float64;
@@ -121,6 +120,7 @@ type Event = variant {
     amount : nat64;
   };
   set_ckstable_repay_fee : record { rate : text };
+  set_global_icusd_mint_cap : record { amount : text };
   set_treasury_principal : record { "principal" : principal };
   set_max_partial_liquidation_ratio : record { rate : text };
   withdraw_and_close_vault : record {
@@ -260,6 +260,10 @@ type Event = variant {
     enabled : bool;
     token_type : StableTokenType;
   };
+  set_collateral_borrowing_fee : record {
+    collateral_type : principal;
+    borrowing_fee : text;
+  };
   set_interest_rate : record {
     collateral_type : principal;
     interest_rate_apr : text;
@@ -361,6 +365,9 @@ type ProtocolStatus = record {
   per_collateral_interest : vec CollateralInterestInfo;
   per_collateral_rate_curves : vec PerCollateralRateCurve;
   interest_split : vec InterestSplitArg;
+  min_icusd_amount : nat64;
+  ckstable_repay_fee : float64;
+  global_icusd_mint_cap : nat64;
 };
 type ReserveBalance = record {
   balance : nat64;
@@ -528,7 +535,10 @@ service : (ProtocolArg) -> {
   repay_to_vault_with_stable : (VaultArgWithToken) -> (Result_1);
   set_borrowing_fee : (float64) -> (Result);
   set_ckstable_repay_fee : (float64) -> (Result);
+  set_collateral_borrowing_fee : (principal, float64) -> (Result);
   set_collateral_status : (principal, CollateralStatus) -> (Result);
+  set_global_icusd_mint_cap : (nat64) -> (Result);
+  get_global_icusd_mint_cap : () -> (nat64) query;
   set_liquidation_bonus : (float64) -> (Result);
   set_liquidation_protocol_share : (float64) -> (Result);
   set_max_partial_liquidation_ratio : (float64) -> (Result);

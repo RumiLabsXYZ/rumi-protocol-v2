@@ -7,11 +7,9 @@
   import { get } from 'svelte/store';
   import { threePoolService } from '$lib/services/threePoolService';
 
-  let liquidationBonus = 0;
   let recoveryTargetCr = 0;
   let recoveryModeThreshold = 0;
   let recoveryCrMultiplier = 0;
-  let borrowingFee = 0;
   let redemptionFeeFloor = 0;
   let redemptionFeeCeiling = 0;
   let ckstableRepayFee = 0;
@@ -77,9 +75,8 @@
   onMount(async () => {
     try {
       // Fetch global parameters and per-collateral config in parallel
-      const [status, bFee, rfFloor, rfCeil, ckFee, rrFee, split, lpShare, rFloor, rCeil, rFloorCr, rCeilCr, poolStatus] = await Promise.all([
+      const [status, rfFloor, rfCeil, ckFee, rrFee, split, lpShare, rFloor, rCeil, rFloorCr, rCeilCr, poolStatus] = await Promise.all([
         protocolService.getProtocolStatus(),
-        publicActor.get_borrowing_fee() as Promise<number>,
         publicActor.get_redemption_fee_floor() as Promise<number>,
         publicActor.get_redemption_fee_ceiling() as Promise<number>,
         publicActor.get_ckstable_repay_fee() as Promise<number>,
@@ -93,11 +90,9 @@
         threePoolService.getPoolStatus(),
       ]);
 
-      liquidationBonus = status.liquidationBonus;
       recoveryTargetCr = status.recoveryTargetCr;
       recoveryModeThreshold = status.recoveryModeThreshold;
       recoveryCrMultiplier = status.recoveryCrMultiplier;
-      borrowingFee = Number(bFee);
       redemptionFeeFloor = Number(rfFloor);
       redemptionFeeCeiling = Number(rfCeil);
       ckstableRepayFee = Number(ckFee);

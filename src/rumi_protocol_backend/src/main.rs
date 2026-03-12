@@ -307,6 +307,9 @@ fn get_protocol_status() -> ProtocolStatus {
         recovery_cr_multiplier: s.recovery_cr_multiplier.to_f64(),
         reserve_redemptions_enabled: s.reserve_redemptions_enabled,
         reserve_redemption_fee: s.reserve_redemption_fee.to_f64(),
+        ckstable_repay_fee: s.ckstable_repay_fee.to_f64(),
+        min_icusd_amount: s.min_icusd_amount.to_u64(),
+        global_icusd_mint_cap: s.global_icusd_mint_cap,
         frozen: s.frozen,
         manual_mode_override: s.manual_mode_override,
         interest_pool_share: s.interest_pool_share.to_f64(),
@@ -1109,6 +1112,61 @@ async fn set_ckstable_repay_fee(new_rate: f64) -> Result<(), ProtocolError> {
 #[query]
 fn get_ckstable_repay_fee() -> f64 {
     read_state(|s| s.ckstable_repay_fee.to_f64())
+}
+
+/// Set the minimum icUSD amount for borrow/repay/redemption/liquidation operations (developer only).
+/// Amount is in e8s. Must be > 0 and <= 10_000_000_000 (100 icUSD).
+#[candid_method(update)]
+#[update]
+async fn set_min_icusd_amount(new_amount_e8s: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can set min icUSD amount".to_string()));
+    }
+    if new_amount_e8s == 0 || new_amount_e8s > 10_000_000_000 {
+        return Err(ProtocolError::GenericError("Amount must be > 0 and <= 100 icUSD (10_000_000_000 e8s)".to_string()));
+    }
+    let amount = ICUSD::new(new_amount_e8s);
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_min_icusd_amount(s, amount);
+    });
+    log!(INFO, "[set_min_icusd_amount] Min icUSD amount set to: {} e8s", new_amount_e8s);
+    Ok(())
+}
+
+/// Get the current minimum icUSD amount (in e8s)
+#[candid_method(query)]
+#[query]
+fn get_min_icusd_amount() -> u64 {
+    read_state(|s| s.min_icusd_amount.to_u64())
+}
+
+/// Set the global cap on total icUSD that can be minted (developer only).
+/// Amount is in e8s. e.g. 3_000_000_000_000 = 30,000 icUSD.
+#[candid_method(update)]
+#[update]
+async fn set_global_icusd_mint_cap(amount_e8s: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can set global icUSD mint cap".to_string()));
+    }
+    if amount_e8s == 0 {
+        return Err(ProtocolError::GenericError("Amount must be > 0".to_string()));
+    }
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_global_icusd_mint_cap(s, amount_e8s);
+    });
+    log!(INFO, "[set_global_icusd_mint_cap] Global icUSD mint cap set to: {} e8s ({} icUSD)", amount_e8s, amount_e8s as f64 / 1e8);
+    Ok(())
+}
+
+/// Get the current global icUSD mint cap (in e8s). u64::MAX = uncapped.
+#[candid_method(query)]
+#[query]
+fn get_global_icusd_mint_cap() -> u64 {
+    read_state(|s| s.global_icusd_mint_cap)
 }
 
 /// Enable or disable a specific stable token for repayments/liquidations (developer only)
@@ -2035,6 +2093,48 @@ async fn set_interest_rate(
     Ok(())
 }
 
+/// Set the borrowing fee for a specific collateral type (developer only).
+/// e.g. 0.005 = 0.5%, 0.001 = 0.1%. Range 0.0–0.10.
+#[candid_method(update)]
+#[update]
+async fn set_collateral_borrowing_fee(
+    collateral_type: Principal,
+    borrowing_fee: f64,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set borrowing fees".to_string(),
+        ));
+    }
+    let exists = read_state(|s| s.collateral_configs.contains_key(&collateral_type));
+    if !exists {
+        return Err(ProtocolError::GenericError(
+            "Unknown collateral type".to_string(),
+        ));
+    }
+    if borrowing_fee < 0.0 || borrowing_fee > 0.10 {
+        return Err(ProtocolError::GenericError(
+            "Borrowing fee must be between 0 and 0.10 (10%)".to_string(),
+        ));
+    }
+    let fee = Ratio::from(
+        Decimal::try_from(borrowing_fee)
+            .map_err(|_| ProtocolError::GenericError("Invalid fee value".to_string()))?,
+    );
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_collateral_borrowing_fee(s, collateral_type, fee);
+    });
+    log!(
+        INFO,
+        "[set_collateral_borrowing_fee] collateral={}, borrowing_fee={}",
+        collateral_type,
+        borrowing_fee
+    );
+    Ok(())
+}
+
 /// Set rate curve markers for a collateral type or the global default.
 /// `collateral_type`: None = update global default curve; Some(principal) = per-asset curve.
 /// `markers`: Vec of (cr_level, multiplier) pairs, sorted ascending by cr_level.
@@ -2380,7 +2480,8 @@ async fn add_collateral_token(arg: rumi_protocol_backend::AddCollateralArg) -> R
         redemption_fee_ceiling: Ratio::from_f64(arg.redemption_fee_ceiling.unwrap_or(0.05)),
         current_base_rate: Ratio::from_f64(0.0),
         last_redemption_time: 0,
-        recovery_target_cr: Ratio::from_f64(arg.recovery_target_cr),
+        // Computed from borrow_threshold_ratio × recovery_cr_multiplier; not user-supplied.
+        recovery_target_cr: Ratio::from_f64(arg.borrow_threshold_ratio) * read_state(|s| s.recovery_cr_multiplier),
         min_collateral_deposit: arg.min_collateral_deposit,
         recovery_borrowing_fee: None,
         recovery_interest_rate_apr: None,
@@ -2438,7 +2539,14 @@ async fn set_collateral_status(
 #[candid_method(query)]
 #[query]
 fn get_collateral_config(collateral_type: Principal) -> Option<rumi_protocol_backend::state::CollateralConfig> {
-    read_state(|s| s.get_collateral_config(&collateral_type).cloned())
+    read_state(|s| {
+        s.get_collateral_config(&collateral_type).cloned().map(|mut config| {
+            // Always compute recovery_target_cr from the formula rather than returning
+            // the cached value, which may be stale if the multiplier changed after config creation.
+            config.recovery_target_cr = config.borrow_threshold_ratio * s.recovery_cr_multiplier;
+            config
+        })
+    })
 }
 
 #[candid_method(query)]
