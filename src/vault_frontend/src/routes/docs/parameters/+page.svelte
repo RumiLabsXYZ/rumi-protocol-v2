@@ -146,7 +146,7 @@
           <tr>
             <th class="ct-label-col"></th>
             {#each collaterals as c (c.principal)}
-              <th class="ct-val-col"><span class="ct-symbol live">{c.symbol}</span></th>
+              <th class="ct-val-col"><span class="ct-symbol"><span class="ct-dot" style="background:{c.color}"></span>{c.symbol}</span></th>
             {/each}
           </tr>
         </thead>
@@ -515,9 +515,20 @@
   .ct-label-col { text-align: left; }
   .ct-val-col { text-align: right; }
   .ct-symbol {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
     font-size: 0.9375rem;
     font-weight: 700;
     letter-spacing: 0.02em;
+    color: var(--rumi-text-primary);
+  }
+  .ct-dot {
+    display: inline-block;
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    flex-shrink: 0;
   }
   .ct-label {
     color: var(--rumi-text-secondary);
