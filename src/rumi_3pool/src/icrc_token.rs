@@ -3,7 +3,7 @@
 // The LP token balances are tracked internally in ThreePoolState::lp_balances.
 // This module exposes them as a proper ICRC-1/ICRC-2 compliant token.
 //
-// Token: 3USD | Decimals: 18 | Fee: 0 | Subaccounts: default-only
+// Token: 3USD | Decimals: 8 | Fee: 0 | Subaccounts: default-only
 
 use candid::{Nat, Principal};
 use icrc_ledger_types::icrc::generic_metadata_value::MetadataValue;
@@ -75,7 +75,7 @@ pub fn icrc1_symbol() -> String {
 }
 
 pub fn icrc1_decimals() -> u8 {
-    18
+    8
 }
 
 pub fn icrc1_fee() -> Nat {
@@ -101,7 +101,7 @@ pub fn icrc1_metadata() -> Vec<(String, MetadataValue)> {
     vec![
         ("icrc1:name".to_string(), MetadataValue::Text("3USD".to_string())),
         ("icrc1:symbol".to_string(), MetadataValue::Text("3USD".to_string())),
-        ("icrc1:decimals".to_string(), MetadataValue::Nat(Nat::from(18u64))),
+        ("icrc1:decimals".to_string(), MetadataValue::Nat(Nat::from(8u64))),
         ("icrc1:fee".to_string(), MetadataValue::Nat(Nat::from(0u64))),
         ("icrc1:logo".to_string(), MetadataValue::Text(logo_data_uri())),
     ]

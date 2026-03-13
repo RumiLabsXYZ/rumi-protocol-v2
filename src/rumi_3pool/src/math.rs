@@ -197,6 +197,8 @@ pub fn normalize_all(balances: &[u128; 3], precision_muls: &[u64; 3]) -> [U256; 
 // ─── Task 12: Virtual price ───
 
 /// Virtual price = D / lp_total_supply, scaled to 18 decimals.
+/// D is in 18-decimal internal precision, lp_total_supply is in 8-decimal
+/// LP token precision, so we multiply by 10^8 (not 10^18) to get VP ≈ 1e18.
 /// Returns None if lp_total_supply is 0.
 pub fn virtual_price(
     balances: &[u128; 3],
@@ -211,9 +213,10 @@ pub fn virtual_price(
     let xp = normalize_all(balances, precision_muls);
     let d = get_d(&xp, amp)?;
 
-    // virtual_price = D * 10^18 / lp_total_supply
-    let one_18 = U256::from(1_000_000_000_000_000_000u128);
-    let vp = d * one_18 / U256::from(lp_total_supply);
+    // virtual_price = D * 10^8 / lp_total_supply
+    // D is 18-decimal, supply is 8-decimal → VP ≈ 1e18 when balanced.
+    let one_8 = U256::from(100_000_000u128);
+    let vp = d * one_8 / U256::from(lp_total_supply);
 
     Some(vp.as_u128())
 }
@@ -480,11 +483,11 @@ mod tests {
         ];
         let amp = 100u64;
 
-        // For an equal initial deposit, D ≈ 3M * 10^18, and lp_supply = D
+        // For an equal initial deposit, D ≈ 3M * 10^18, and lp_supply = D / 10^10 (8-decimal LP)
         // So virtual_price should be ~1.0 * 10^18
         let xp = normalize_all(&balances, &precision_muls);
         let d = get_d(&xp, amp).unwrap();
-        let lp_supply = d.as_u128(); // First deposit mints D tokens
+        let lp_supply = (d / U256::from(10_000_000_000u128)).as_u128(); // 8-decimal LP
 
         let vp = virtual_price(&balances, &precision_muls, amp, lp_supply)
             .expect("virtual_price should return Some");
@@ -494,7 +497,7 @@ mod tests {
 
         // Should be very close to 1.0 * 10^18 (within rounding)
         assert!(
-            diff < 1_000,
+            diff < 1_000_000, // slightly more tolerance due to integer division
             "virtual_price should be ~1e18, got {}, diff {}",
             vp, diff
         );
@@ -524,7 +527,7 @@ mod tests {
 
         let xp = normalize_all(&balances, &precision_muls);
         let d = get_d(&xp, amp).unwrap();
-        let lp_supply = d.as_u128();
+        let lp_supply = (d / U256::from(10_000_000_000u128)).as_u128(); // 8-decimal LP
 
         let vp_before = virtual_price(&balances, &precision_muls, amp, lp_supply).unwrap();
 
@@ -564,7 +567,7 @@ mod tests {
 
         let xp = normalize_all(&balances, &precision_muls);
         let d = get_d(&xp, amp).unwrap();
-        let lp_supply = d.as_u128();
+        let lp_supply = (d / U256::from(10_000_000_000u128)).as_u128(); // 8-decimal LP
 
         let vp_before = virtual_price(&balances, &precision_muls, amp, lp_supply).unwrap();
 

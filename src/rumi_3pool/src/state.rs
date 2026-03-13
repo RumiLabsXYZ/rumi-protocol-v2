@@ -29,6 +29,9 @@ pub struct ThreePoolState {
     /// ICRC-3 transaction log for index canister support.
     /// Option for upgrade compatibility — old state won't have this field.
     pub blocks: Option<Vec<crate::types::Icrc3Block>>,
+    /// Hash of the last ICRC-3 block (for hash-chain certification).
+    /// Option for upgrade compatibility — recomputed from blocks on upgrade.
+    pub last_block_hash: Option<[u8; 32]>,
     /// Accumulated admin fees per coin (claimable by admin).
     pub admin_fees: [u128; 3],
     /// Whether the pool is paused (no swaps/deposits/withdrawals).
@@ -62,6 +65,7 @@ impl Default for ThreePoolState {
             lp_allowances: Some(BTreeMap::new()),
             lp_tx_count: Some(0),
             blocks: Some(Vec::new()),
+            last_block_hash: None,
             vp_snapshots: Some(Vec::new()),
             admin_fees: [0; 3],
             is_paused: false,
@@ -109,17 +113,26 @@ impl ThreePoolState {
         self.blocks.get_or_insert_with(Vec::new)
     }
 
-    /// Log a transaction block and return its index.
+    /// Log a transaction block, compute its hash, update certified data,
+    /// and return its index.
     /// Block IDs are sequential starting from 0, matching Vec position,
     /// so that ICRC-3 `log_length` == `blocks.len()` and `start` indexing works.
     pub fn log_block(&mut self, tx: crate::types::Icrc3Transaction) -> u64 {
-        let blocks = self.blocks_mut();
-        let id = blocks.len() as u64;
-        blocks.push(crate::types::Icrc3Block {
+        let id = self.blocks().len() as u64;
+        let block = crate::types::Icrc3Block {
             id,
             timestamp: ic_cdk::api::time(),
             tx,
-        });
+        };
+        // Compute hash: encode block with parent hash, then hash the value.
+        // Copy last_block_hash before mutating to avoid borrow conflict.
+        let prev_hash = self.last_block_hash;
+        let encoded = crate::icrc3::encode_block_with_phash(&block, prev_hash.as_ref());
+        let block_hash = crate::certification::hash_value(&encoded);
+        self.blocks_mut().push(block);
+        self.last_block_hash = Some(block_hash);
+        // Update IC certified data so index-ng can verify the chain tip
+        crate::certification::set_certified_tip(id, &block_hash);
         id
     }
 

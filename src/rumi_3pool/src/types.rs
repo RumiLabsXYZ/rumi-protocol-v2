@@ -136,7 +136,7 @@ pub enum Icrc3Transaction {
 pub struct VirtualPriceSnapshot {
     /// Unix timestamp in seconds.
     pub timestamp_secs: u64,
-    /// Virtual price scaled by 1e18.
+    /// Virtual price scaled by 1e18 (D_18dec * 1e8 / supply_8dec).
     pub virtual_price: u128,
     /// Total LP supply at snapshot time.
     pub lp_total_supply: u128,
@@ -153,7 +153,7 @@ pub struct PoolStatus {
     pub lp_total_supply: u128,
     /// Current effective amplification coefficient.
     pub current_a: u64,
-    /// Virtual price of LP token (scaled by 1e18).
+    /// Virtual price of LP token (scaled by 1e18; LP token has 8 decimals).
     pub virtual_price: u128,
     /// Swap fee in basis points.
     pub swap_fee_bps: u64,

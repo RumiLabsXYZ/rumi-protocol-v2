@@ -7110,6 +7110,7 @@ dependencies = [
  "assert_matches",
  "base64 0.22.1",
  "candid",
+ "ciborium",
  "ethnum",
  "ic-canister-log 0.2.0 (git+https://github.com/Rumi-Protocol/ic?rev=fc278709)",
  "ic-cdk 0.12.2",
@@ -7121,6 +7122,7 @@ dependencies = [
  "pocket-ic",
  "serde",
  "serde_bytes",
+ "sha2",
 ]
 
 [[package]]
