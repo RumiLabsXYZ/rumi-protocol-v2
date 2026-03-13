@@ -261,8 +261,13 @@
     const p = $walletStore.principal;
     if (!p) { threeUsdBalance = 0n; return; }
     try {
-      threeUsdBalance = await threePoolService.getLpBalance(p);
-    } catch { threeUsdBalance = 0n; }
+      const bal = await threePoolService.getLpBalance(p);
+      threeUsdBalance = BigInt(bal);
+      console.log('[3USD] LP balance for', p.toText(), ':', threeUsdBalance.toString());
+    } catch (err) {
+      console.warn('[3USD] Failed to fetch LP balance:', err);
+      threeUsdBalance = 0n;
+    }
   }
 
   async function handleRefreshBalance(e: MouseEvent | KeyboardEvent) {
