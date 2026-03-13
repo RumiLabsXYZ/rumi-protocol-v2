@@ -651,21 +651,21 @@
                       {/if}
                     </div>
                   </div>
-                {/each}
-                {#if threeUsdBalance > 0n}
-                  <div class="dropdown-token-row">
-                    <div class="dropdown-token-left">
-                      <img src="/3pool-logo-v5.svg" alt="3USD" class="dropdown-token-icon" />
-                      <div class="dropdown-token-info">
-                        <span class="dropdown-token-symbol">3USD</span>
-                        <span class="dropdown-token-name">3USD Stablecoin</span>
+                  {#if token.meta.symbol === 'icUSD' && threeUsdBalance > 0n}
+                    <div class="dropdown-token-row">
+                      <div class="dropdown-token-left">
+                        <img src="/3pool-logo-v5.svg" alt="3USD" class="dropdown-token-icon" />
+                        <div class="dropdown-token-info">
+                          <span class="dropdown-token-symbol">3USD</span>
+                          <span class="dropdown-token-name">3USD Stablecoin</span>
+                        </div>
+                      </div>
+                      <div class="dropdown-token-right">
+                        <span class="dropdown-token-amount">{formatTokenAmount(threeUsdBalance, 18)}</span>
                       </div>
                     </div>
-                    <div class="dropdown-token-right">
-                      <span class="dropdown-token-amount">{formatTokenAmount(threeUsdBalance, 18)}</span>
-                    </div>
-                  </div>
-                {/if}
+                  {/if}
+                {/each}
               {:else}
                 <div class="dropdown-empty">
                   <p>No balances found</p>
