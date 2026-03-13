@@ -650,9 +650,7 @@
                 {#if threeUsdBalance > 0n}
                   <div class="dropdown-token-row">
                     <div class="dropdown-token-left">
-                      <div class="dropdown-token-icon-fallback" style="background: #4ade80">
-                        <span>3</span>
-                      </div>
+                      <img src="/3pool-logo-v5.svg" alt="3USD" class="dropdown-token-icon" />
                       <div class="dropdown-token-info">
                         <span class="dropdown-token-symbol">3USD</span>
                         <span class="dropdown-token-name">3USD Stablecoin</span>
