@@ -12,6 +12,8 @@
   import { collateralStore } from '../../stores/collateralStore';
   import Toast from '../common/Toast.svelte';
   import { transferICRC1, queryICRC1Fee, isValidPrincipal } from '../../services/transferService';
+  import { threePoolService } from '../../services/threePoolService';
+  import { formatTokenAmount } from '../../services/threePoolService';
   import QRCode from 'qrcode';
 
   interface WalletInfo {
@@ -125,6 +127,9 @@
   // ═══ Fee cache ═══
   const feeCache: Record<string, bigint> = {};
 
+  // ═══ 3USD (LP) balance ═══
+  let threeUsdBalance: bigint = 0n;
+
   let toasts: Array<{ id: number; message: string; type: 'success' | 'error' | 'info' }> = [];
   let toastId = 0;
 
@@ -170,7 +175,7 @@
 
       setTimeout(async () => {
         try {
-          await walletStore.refreshBalance();
+          await Promise.all([walletStore.refreshBalance(), fetchThreeUsdBalance()]);
         } catch (err) {
           console.warn('Initial balance refresh failed:', err);
         }
@@ -187,6 +192,7 @@
   async function disconnectWallet() {
     try {
       await walletStore.disconnect();
+      threeUsdBalance = 0n;
       showWalletDialog = false;
     } catch (err) {
       console.error('Disconnection failed:', err);
@@ -240,6 +246,7 @@
       walletStore.refreshBalance().catch(err => {
         console.warn('Initial balance refresh failed:', err);
       });
+      fetchThreeUsdBalance();
     }
 
     // Fetch logos from ledger metadata for tokens without local icons (non-blocking)
@@ -250,13 +257,26 @@
     };
   });
 
+  async function fetchThreeUsdBalance() {
+    const p = $walletStore.principal;
+    if (!p) { threeUsdBalance = 0n; return; }
+    try {
+      const bal = await threePoolService.getLpBalance(p);
+      threeUsdBalance = BigInt(bal);
+      console.log('[3USD] LP balance for', p.toText(), ':', threeUsdBalance.toString());
+    } catch (err) {
+      console.warn('[3USD] Failed to fetch LP balance:', err);
+      threeUsdBalance = 0n;
+    }
+  }
+
   async function handleRefreshBalance(e: MouseEvent | KeyboardEvent) {
     e.stopPropagation();
     if (isRefreshingBalance) return;
 
     try {
       isRefreshingBalance = true;
-      await walletStore.refreshBalance();
+      await Promise.all([walletStore.refreshBalance(), fetchThreeUsdBalance()]);
     } catch (err) {
       console.error('Manual balance refresh failed:', err);
     } finally {
@@ -604,7 +624,7 @@
 
             <!-- Token Balances -->
             <div class="dropdown-tokens">
-              {#if activeTokens.length > 0}
+              {#if activeTokens.length > 0 || threeUsdBalance > 0n}
                 {#each activeTokens as token (token.key)}
                   <div class="dropdown-token-row">
                     <div class="dropdown-token-left">
@@ -631,6 +651,20 @@
                       {/if}
                     </div>
                   </div>
+                  {#if token.meta.symbol === 'icUSD' && threeUsdBalance > 0n}
+                    <div class="dropdown-token-row">
+                      <div class="dropdown-token-left">
+                        <img src="/3pool-logo-v5.svg" alt="3USD" class="dropdown-token-icon" />
+                        <div class="dropdown-token-info">
+                          <span class="dropdown-token-symbol">3USD</span>
+                          <span class="dropdown-token-name">3USD Stablecoin</span>
+                        </div>
+                      </div>
+                      <div class="dropdown-token-right">
+                        <span class="dropdown-token-amount">{formatTokenAmount(threeUsdBalance, 18)}</span>
+                      </div>
+                    </div>
+                  {/if}
                 {/each}
               {:else}
                 <div class="dropdown-empty">

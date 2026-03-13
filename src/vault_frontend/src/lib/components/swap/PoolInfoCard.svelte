@@ -58,7 +58,7 @@
     <h4 class="group-heading">Your Position</h4>
     <div class="stats-stack">
       <div class="stat-row">
-        <span class="stat-label">LP Tokens</span>
+        <span class="stat-label">3USD Balance</span>
         <span class="stat-value bold">{formatTokenAmount(userLpBalance, 18)}</span>
       </div>
       <div class="stat-row">
@@ -86,8 +86,8 @@
     <div class="group-divider"></div>
   {/if}
 
-  <!-- POOL section (always shown) -->
-  <h4 class="group-heading">Pool</h4>
+  <!-- 3USD Stats section (always shown) -->
+  <h4 class="group-heading">3USD Stats</h4>
   <div class="stats-stack">
     <div class="stat-row">
       <span class="stat-label">TVL</span>

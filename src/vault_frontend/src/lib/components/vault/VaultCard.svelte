@@ -216,6 +216,10 @@
   let recoveryMultiplier: number = 1;
   let ckstableRepayFee = 0; // Protocol repay fee rate for ckStables (e.g., 0.01 = 1%)
   onMount(async () => {
+    // Fetch per-vault dynamic rate eagerly so collapsed card shows actual APR
+    ApiClient.getVaultInterestRate(vault.vaultId).then(rate => {
+      if (rate !== null) dynamicInterestRate = rate;
+    });
     try {
       const status = await protocolService.getProtocolStatus();
       borrowingFeeCurve = status.borrowingFeeCurveResolved ?? [];
@@ -635,7 +639,7 @@
     <span class="vault-cell">
       <span class="cell-label">Borrowed</span>
       <span class="cell-value">{fmtBorrowed} icUSD</span>
-      <span class="cell-sub" style="color:{interestColor}">{(computedRate * 100).toFixed(2)}% APR</span>
+      <span class="cell-sub" style="color:{interestColor}">{(vaultInterestRate * 100).toFixed(2)}% APR</span>
     </span>
     <span class="vault-cell vault-cell-bar">
       <span class="gauge-track">

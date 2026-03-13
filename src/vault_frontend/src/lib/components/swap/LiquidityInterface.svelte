@@ -13,8 +13,12 @@
   const dispatch = createEventDispatcher();
 
   // ── Tab state ──
-  type Tab = 'add' | 'remove';
-  let activeTab: Tab = 'add';
+  type Tab = 'mint' | 'redeem';
+  let activeTab: Tab = 'mint';
+
+  // ── Slippage custom input ──
+  let customAddSlippage = '';
+  let customRemoveSlippage = '';
 
   // ── Add liquidity state ──
   let addAmounts = ['', '', ''];
@@ -236,7 +240,7 @@
       addLpEstimate = null;
       loadLpBalance();
     } catch (err: any) {
-      addError = err.message || 'Add liquidity failed';
+      addError = err.message || 'Mint failed';
     } finally {
       addLoading = false;
     }
@@ -246,12 +250,12 @@
   async function handleRemove() {
     const val = parseFloat(removeLpAmount);
     if (!val || val <= 0) {
-      removeError = 'Enter LP amount';
+      removeError = 'Enter 3USD amount';
       return;
     }
     const lpRaw = BigInt(Math.floor(val * 1e18));
     if (lpRaw > lpBalance) {
-      removeError = 'Insufficient LP balance';
+      removeError = 'Insufficient 3USD balance';
       return;
     }
 
@@ -277,7 +281,7 @@
       removeSingleEstimate = null;
       loadLpBalance();
     } catch (err: any) {
-      removeError = err.message || 'Remove liquidity failed';
+      removeError = err.message || 'Redeem failed';
     } finally {
       removeLoading = false;
     }
@@ -291,13 +295,13 @@
 <svelte:window on:click={closeDropdowns} />
 
 <div class="liquidity-panel">
-  <!-- Sub-tabs: Add | Remove -->
+  <!-- Sub-tabs: Mint | Redeem -->
   <div class="sub-tabs">
-    <button class="sub-tab" class:active={activeTab === 'add'} on:click={() => { activeTab = 'add'; }}>
-      Add
+    <button class="sub-tab" class:active={activeTab === 'mint'} on:click={() => { activeTab = 'mint'; }}>
+      Mint
     </button>
-    <button class="sub-tab" class:active={activeTab === 'remove'} on:click={() => { activeTab = 'remove'; }}>
-      Remove
+    <button class="sub-tab" class:active={activeTab === 'redeem'} on:click={() => { activeTab = 'redeem'; }}>
+      Redeem
     </button>
   </div>
 
@@ -309,10 +313,10 @@
           <path d="M12 8v4l2 2"/>
         </svg>
       </div>
-      <p class="gate-text">Connect your wallet to manage liquidity</p>
+      <p class="gate-text">Connect your wallet to mint or redeem 3USD</p>
     </div>
-  {:else if activeTab === 'add'}
-    <!-- ─── ADD LIQUIDITY ─── -->
+  {:else if activeTab === 'mint'}
+    <!-- ─── MINT 3USD ─── -->
     {#each POOL_TOKENS as token, i}
       <div class="token-input-group">
         <div class="token-input-header">
@@ -346,40 +350,51 @@
       </div>
     {/each}
 
-    <!-- Estimated LP output -->
-    <div class="estimate-section">
-      <span class="estimate-label">Estimated LP tokens</span>
-      <span class="estimate-value">
+    <!-- Inline estimate + slippage row -->
+    <div class="inline-info-row">
+      <span class="inline-estimate">
+        Est. 3USD:&nbsp;
         {#if addQuoting}
-          Calculating…
+          <span class="calculating">…</span>
         {:else if addLpEstimate !== null}
-          {formatLpDisplay(addLpEstimate)}
+          <span class="estimate-val">{formatLpDisplay(addLpEstimate)}</span>
         {:else}
-          —
+          <span class="estimate-val">—</span>
         {/if}
       </span>
-    </div>
-
-    <!-- Slippage -->
-    <div class="info-rows">
-      <div class="info-row">
-        <span class="info-label">Slippage tolerance</span>
+      <div class="slippage-anchor">
         <button class="slippage-toggle" on:click|stopPropagation={() => { showAddSlippage = !showAddSlippage; }}>
-          {(addSlippageBps / 100).toFixed(1)}%
+          Slippage: {(addSlippageBps / 100).toFixed(1)}%
           <svg class="token-chevron" width="8" height="5" viewBox="0 0 10 6" fill="none">
             <path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
         </button>
+        {#if showAddSlippage}
+          <div class="slippage-popover" on:click|stopPropagation>
+            <div class="slip-presets">
+              <button class="slip-btn" class:active={addSlippageBps === 10} on:click={() => { addSlippageBps = 10; customAddSlippage = ''; }}>0.1%</button>
+              <button class="slip-btn" class:active={addSlippageBps === 50} on:click={() => { addSlippageBps = 50; customAddSlippage = ''; }}>0.5%</button>
+              <button class="slip-btn" class:active={addSlippageBps === 100} on:click={() => { addSlippageBps = 100; customAddSlippage = ''; }}>1%</button>
+            </div>
+            <div class="slip-custom">
+              <input
+                type="number"
+                step="0.1"
+                min="0.01"
+                max="50"
+                placeholder="Custom %"
+                bind:value={customAddSlippage}
+                on:input={() => {
+                  const val = parseFloat(customAddSlippage);
+                  if (val > 0 && val <= 50) addSlippageBps = Math.round(val * 100);
+                }}
+                class="slip-input"
+              />
+            </div>
+          </div>
+        {/if}
       </div>
     </div>
-
-    {#if showAddSlippage}
-      <div class="slippage-bar">
-        <button class="slip-btn" class:active={addSlippageBps === 10} on:click={() => { addSlippageBps = 10; }}>0.1%</button>
-        <button class="slip-btn" class:active={addSlippageBps === 50} on:click={() => { addSlippageBps = 50; }}>0.5%</button>
-        <button class="slip-btn" class:active={addSlippageBps === 100} on:click={() => { addSlippageBps = 100; }}>1%</button>
-      </div>
-    {/if}
 
     <button
       class="submit-btn"
@@ -388,9 +403,9 @@
     >
       {#if addLoading}
         <span class="spinner"></span>
-        Adding Liquidity…
+        Minting 3USD…
       {:else}
-        Add Liquidity
+        Mint 3USD
       {/if}
     </button>
 
@@ -404,10 +419,10 @@
     {/if}
 
   {:else}
-    <!-- ─── REMOVE LIQUIDITY ─── -->
+    <!-- ─── REDEEM 3USD ─── -->
     <div class="token-input-group">
       <div class="token-input-header">
-        <div class="token-label">LP Tokens</div>
+        <div class="token-label">3USD</div>
         <div class="balance-info">
           <span class="balance-label">Bal:</span>
           <span class="balance-value">{lpBalanceFormatted}</span>
@@ -427,13 +442,13 @@
       />
     </div>
 
-    <!-- Mode toggle: Proportional / Single Token -->
+    <!-- Mode toggle: Redeem to all / Redeem to one -->
     <div class="mode-toggle">
       <button class="mode-btn" class:active={removeMode === 'proportional'} on:click={() => setRemoveMode('proportional')}>
-        Proportional
+        Redeem to all
       </button>
       <button class="mode-btn" class:active={removeMode === 'single'} on:click={() => setRemoveMode('single')}>
-        Single Token
+        Redeem to one
       </button>
     </div>
 
@@ -496,26 +511,41 @@
       </div>
     {/if}
 
-    <!-- Slippage -->
-    <div class="info-rows">
-      <div class="info-row">
-        <span class="info-label">Slippage tolerance</span>
+    <!-- Inline slippage row -->
+    <div class="inline-info-row" style="justify-content: flex-end;">
+      <div class="slippage-anchor">
         <button class="slippage-toggle" on:click|stopPropagation={() => { showRemoveSlippage = !showRemoveSlippage; }}>
-          {(removeSlippageBps / 100).toFixed(1)}%
+          Slippage: {(removeSlippageBps / 100).toFixed(1)}%
           <svg class="token-chevron" width="8" height="5" viewBox="0 0 10 6" fill="none">
             <path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
         </button>
+        {#if showRemoveSlippage}
+          <div class="slippage-popover" on:click|stopPropagation>
+            <div class="slip-presets">
+              <button class="slip-btn" class:active={removeSlippageBps === 10} on:click={() => { removeSlippageBps = 10; customRemoveSlippage = ''; }}>0.1%</button>
+              <button class="slip-btn" class:active={removeSlippageBps === 50} on:click={() => { removeSlippageBps = 50; customRemoveSlippage = ''; }}>0.5%</button>
+              <button class="slip-btn" class:active={removeSlippageBps === 100} on:click={() => { removeSlippageBps = 100; customRemoveSlippage = ''; }}>1%</button>
+            </div>
+            <div class="slip-custom">
+              <input
+                type="number"
+                step="0.1"
+                min="0.01"
+                max="50"
+                placeholder="Custom %"
+                bind:value={customRemoveSlippage}
+                on:input={() => {
+                  const val = parseFloat(customRemoveSlippage);
+                  if (val > 0 && val <= 50) removeSlippageBps = Math.round(val * 100);
+                }}
+                class="slip-input"
+              />
+            </div>
+          </div>
+        {/if}
       </div>
     </div>
-
-    {#if showRemoveSlippage}
-      <div class="slippage-bar">
-        <button class="slip-btn" class:active={removeSlippageBps === 10} on:click={() => { removeSlippageBps = 10; }}>0.1%</button>
-        <button class="slip-btn" class:active={removeSlippageBps === 50} on:click={() => { removeSlippageBps = 50; }}>0.5%</button>
-        <button class="slip-btn" class:active={removeSlippageBps === 100} on:click={() => { removeSlippageBps = 100; }}>1%</button>
-      </div>
-    {/if}
 
     <button
       class="submit-btn"
@@ -524,9 +554,9 @@
     >
       {#if removeLoading}
         <span class="spinner"></span>
-        Removing Liquidity…
+        Redeeming 3USD…
       {:else}
-        Remove Liquidity
+        Redeem 3USD
       {/if}
     </button>
 
@@ -709,7 +739,88 @@
     display: inline-block;
   }
 
-  /* ── Estimate section ── */
+  /* ── Inline info row (estimate + slippage) ── */
+  .inline-info-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.25rem;
+    padding: 0.25rem 0;
+  }
+
+  .inline-estimate {
+    font-size: 0.75rem;
+    color: var(--rumi-text-muted);
+    display: flex;
+    align-items: center;
+  }
+
+  .inline-estimate .estimate-val {
+    font-weight: 600;
+    color: var(--rumi-text-primary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .inline-estimate .calculating {
+    color: var(--rumi-text-muted);
+  }
+
+  .slippage-anchor {
+    position: relative;
+  }
+
+  .slippage-popover {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 0.375rem);
+    background: var(--rumi-bg-surface2);
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.5rem;
+    padding: 0.625rem;
+    z-index: 20;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+    min-width: 180px;
+  }
+
+  .slip-presets {
+    display: flex;
+    gap: 0.375rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .slip-custom {
+    display: flex;
+  }
+
+  .slip-input {
+    width: 100%;
+    padding: 0.375rem 0.5rem;
+    background: var(--rumi-bg-surface1);
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.375rem;
+    color: var(--rumi-text-primary);
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+
+  .slip-input::-webkit-inner-spin-button,
+  .slip-input::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+
+  .slip-input::placeholder {
+    color: var(--rumi-text-muted);
+  }
+
+  .slip-input:focus {
+    outline: none;
+    border-color: var(--rumi-teal);
+  }
+
+  /* ── Estimate section (kept for single-token redeem output) ── */
   .estimate-section {
     display: flex;
     justify-content: space-between;
@@ -862,22 +973,7 @@
   .token-option:hover { background: var(--rumi-bg-surface3); }
   .token-option-active { color: var(--rumi-text-primary); font-weight: 600; }
 
-  /* ── Info rows & slippage ── */
-  .info-rows {
-    padding: 0.5rem 0.75rem;
-    background: var(--rumi-bg-surface2);
-    border: 1px solid var(--rumi-border);
-    border-radius: 0.5rem;
-    margin-bottom: 0.5rem;
-  }
-
-  .info-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 0.25rem 0;
-  }
-
+  /* ── Info label & slippage toggle ── */
   .info-label {
     font-size: 0.75rem;
     color: var(--rumi-text-muted);
@@ -894,13 +990,6 @@
     color: var(--rumi-teal);
     cursor: pointer;
     padding: 0;
-  }
-
-  .slippage-bar {
-    display: flex;
-    gap: 0.375rem;
-    margin-bottom: 0.5rem;
-    justify-content: center;
   }
 
   .slip-btn {
