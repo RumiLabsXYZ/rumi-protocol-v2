@@ -95,11 +95,16 @@ fn account_to_value(principal: Principal) -> Icrc3Value {
     ])
 }
 
-fn encode_block(block: &Icrc3Block) -> Icrc3Value {
+/// Encode a block as an ICRC-3 Value with optional parent hash.
+/// This is the canonical encoding used for both:
+///   - `icrc3_get_blocks` responses (with phash included)
+///   - block hashing (representation-independent hash of this value)
+pub fn encode_block_with_phash(block: &Icrc3Block, phash: Option<&[u8; 32]>) -> Icrc3Value {
     let (btype, tx_map) = match &block.tx {
         Icrc3Transaction::Mint { to, amount } => (
             "1mint",
             vec![
+                ("op".to_string(), Icrc3Value::Text("mint".to_string())),
                 ("to".to_string(), account_to_value(*to)),
                 ("amt".to_string(), Icrc3Value::Nat(Nat::from(*amount))),
             ],
@@ -107,12 +112,14 @@ fn encode_block(block: &Icrc3Block) -> Icrc3Value {
         Icrc3Transaction::Burn { from, amount } => (
             "1burn",
             vec![
+                ("op".to_string(), Icrc3Value::Text("burn".to_string())),
                 ("from".to_string(), account_to_value(*from)),
                 ("amt".to_string(), Icrc3Value::Nat(Nat::from(*amount))),
             ],
         ),
         Icrc3Transaction::Transfer { from, to, amount, spender } => {
             let mut fields = vec![
+                ("op".to_string(), Icrc3Value::Text("xfer".to_string())),
                 ("from".to_string(), account_to_value(*from)),
                 ("to".to_string(), account_to_value(*to)),
                 ("amt".to_string(), Icrc3Value::Nat(Nat::from(*amount))),
@@ -124,6 +131,7 @@ fn encode_block(block: &Icrc3Block) -> Icrc3Value {
         }
         Icrc3Transaction::Approve { from, spender, amount, expires_at } => {
             let mut fields = vec![
+                ("op".to_string(), Icrc3Value::Text("approve".to_string())),
                 ("from".to_string(), account_to_value(*from)),
                 ("spender".to_string(), account_to_value(*spender)),
                 ("amt".to_string(), Icrc3Value::Nat(Nat::from(*amount))),
@@ -135,12 +143,18 @@ fn encode_block(block: &Icrc3Block) -> Icrc3Value {
         }
     };
 
-    Icrc3Value::Map(vec![
-        ("btype".to_string(), Icrc3Value::Text(btype.to_string())),
-        ("ts".to_string(), Icrc3Value::Nat(Nat::from(block.timestamp))),
-        ("tx".to_string(), Icrc3Value::Map(tx_map)),
-    ])
+    let mut block_map = Vec::new();
+    // phash must be present for all blocks except block 0
+    if let Some(h) = phash {
+        block_map.push(("phash".to_string(), Icrc3Value::Blob(h.to_vec())));
+    }
+    block_map.push(("btype".to_string(), Icrc3Value::Text(btype.to_string())));
+    block_map.push(("ts".to_string(), Icrc3Value::Nat(Nat::from(block.timestamp))));
+    block_map.push(("tx".to_string(), Icrc3Value::Map(tx_map)));
+
+    Icrc3Value::Map(block_map)
 }
+
 
 // ─── Query implementations ───
 
@@ -159,11 +173,21 @@ pub fn icrc3_get_blocks(args: Vec<GetBlocksArgs>) -> GetBlocksResult {
             }
 
             let end = std::cmp::min(start + length, all_blocks.len());
-            for block in &all_blocks[start..end] {
-                result_blocks.push(BlockWithId {
-                    id: Nat::from(block.id),
-                    block: encode_block(block),
-                });
+
+            // Rebuild hash chain for the requested range so we can include phash.
+            // We need to compute hashes from block 0 up to `start` to get the
+            // parent hash for the first requested block.
+            let mut prev_hash: Option<[u8; 32]> = None;
+            for block in &all_blocks[..end] {
+                let encoded = encode_block_with_phash(block, prev_hash.as_ref());
+                let block_hash = crate::certification::hash_value(&encoded);
+                if block.id as usize >= start {
+                    result_blocks.push(BlockWithId {
+                        id: Nat::from(block.id),
+                        block: encoded,
+                    });
+                }
+                prev_hash = Some(block_hash);
             }
         }
 
@@ -180,7 +204,11 @@ pub fn icrc3_get_archives(_args: GetArchivesArgs) -> GetArchivesResult {
 }
 
 pub fn icrc3_get_tip_certificate() -> Option<Icrc3DataCertificate> {
-    None // Certification not implemented — index-ng works without it
+    read_state(|s| {
+        let last_hash = s.last_block_hash.as_ref()?;
+        let last_index = s.blocks().len().checked_sub(1)? as u64;
+        crate::certification::get_tip_certificate(last_index, last_hash)
+    })
 }
 
 pub fn icrc3_supported_block_types() -> Vec<SupportedBlockType> {

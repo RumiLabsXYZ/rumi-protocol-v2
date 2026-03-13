@@ -45,9 +45,10 @@ pub fn calc_add_liquidity(
         return Err(ThreePoolError::ZeroAmount);
     }
 
-    // First deposit: mint D1 LP tokens, no fees
+    // First deposit: mint D1 / 10^10 LP tokens (D is 18-decimal, LP is 8-decimal), no fees
     if lp_total_supply == 0 {
-        return Ok((d1.as_u128(), [0u128; 3]));
+        let lp_8dec = (d1 / ethnum::U256::from(10_000_000_000u128)).as_u128();
+        return Ok((lp_8dec, [0u128; 3]));
     }
 
     // Imbalance fee: fee_bps * N_COINS / (4 * (N_COINS - 1))
@@ -211,17 +212,17 @@ mod tests {
             &amounts, &old_balances, &precision_muls, lp_supply, amp, fee_bps,
         ).expect("first deposit should succeed");
 
-        // D for equal 1M * 3 = ~3M * 10^18
-        let three_million_18 = 3_000_000u128 * 1_000_000_000_000_000_000u128;
-        let diff = if lp_minted > three_million_18 {
-            lp_minted - three_million_18
+        // D for equal 1M * 3 = ~3M * 10^18, LP = D / 10^10 = ~3M * 10^8
+        let three_million_8 = 3_000_000u128 * 100_000_000u128;
+        let diff = if lp_minted > three_million_8 {
+            lp_minted - three_million_8
         } else {
-            three_million_18 - lp_minted
+            three_million_8 - lp_minted
         };
-        // Should be very close to 3M * 10^18
+        // Should be very close to 3M * 10^8
         assert!(
-            diff < 1_000, // within 1000 units of 10^18
-            "first deposit LP should be ~3M*10^18, got {}, diff {}",
+            diff < 1_000, // within 1000 units of 10^8
+            "first deposit LP should be ~3M*10^8, got {}, diff {}",
             lp_minted, diff
         );
 
@@ -323,7 +324,7 @@ mod tests {
     #[test]
     fn test_calc_remove_liquidity_proportional() {
         let balances = test_balances();
-        let lp_supply = 3_000_000u128 * 1_000_000_000_000_000_000u128; // ~3M * 10^18
+        let lp_supply = 3_000_000u128 * 100_000_000u128; // ~3M * 10^8 (8-decimal LP)
 
         // Burn 10% of LP
         let lp_burn = lp_supply / 10;

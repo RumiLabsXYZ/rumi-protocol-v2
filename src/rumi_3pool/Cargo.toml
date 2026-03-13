@@ -18,6 +18,8 @@ icrc-ledger-client-cdk = { git = "https://github.com/Rumi-Protocol/ic", rev = "f
 base64 = "0.22"
 serde = "1.0.210"
 serde_bytes = "0.11"
+sha2 = "0.10"
+ciborium = "0.2"
 ethnum = "1.5"
 num-traits = "0.2"
 
