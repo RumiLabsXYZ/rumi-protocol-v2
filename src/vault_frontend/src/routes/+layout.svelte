@@ -62,7 +62,6 @@
     <div class="footer-links">
       <a href="/redeem" class="footer-link">Redeem</a>
       <a href="/liquidations" class="footer-link">Liquidate</a>
-      <a href="/stability-pool" class="footer-link">Stake</a>
       <a href="/transparency" class="footer-link">Transparency</a>
       <a href="/docs" class="footer-link">Docs</a>
       <a href="mailto:info@rumiprotocol.com" class="footer-link">Contact</a>

@@ -84,7 +84,7 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Depositing and Withdrawing</h2>
-    <p>You can deposit icUSD, ckUSDC, or ckUSDT into the stability pool at any time via the <a href="/stability-pool" class="doc-link">Stability Pool</a> page. You can deposit multiple stablecoins simultaneously. Withdrawals are also available at any time — there is no lock-up period. When you withdraw, you receive your remaining stablecoin deposits plus any accumulated collateral from liquidations.</p>
+    <p>You can deposit icUSD, ckUSDC, or ckUSDT into the stability pool at any time via the <a href="/liquidations" class="doc-link">Liquidate</a> page. You can deposit multiple stablecoins simultaneously. Withdrawals are also available at any time — there is no lock-up period. When you withdraw, you receive your remaining stablecoin deposits plus any accumulated collateral from liquidations.</p>
     <p>If you are using the <strong>Oisy</strong> wallet, deposits and withdrawals are batched into a single signer popup via ICRC-112 for a smoother experience.</p>
   </section>
 </article>
