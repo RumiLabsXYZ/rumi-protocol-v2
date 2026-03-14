@@ -28,6 +28,15 @@ export const idlFactory = ({ IDL }) => {
       'base_asset_class' : XrcAssetClass,
       'base_asset' : IDL.Text,
     }),
+    'LstWrapped' : IDL.Record({
+      'quote_asset_class' : XrcAssetClass,
+      'haircut' : IDL.Float64,
+      'rate_canister_id' : IDL.Principal,
+      'quote_asset' : IDL.Text,
+      'base_asset_class' : XrcAssetClass,
+      'base_asset' : IDL.Text,
+      'rate_method' : IDL.Text,
+    }),
   });
   const AddCollateralArg = IDL.Record({
     'redemption_fee_ceiling' : IDL.Opt(IDL.Float64),

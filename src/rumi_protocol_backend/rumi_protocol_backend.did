@@ -320,6 +320,15 @@ type PriceSource = variant {
     base_asset_class : XrcAssetClass;
     base_asset : text;
   };
+  LstWrapped : record {
+    quote_asset_class : XrcAssetClass;
+    quote_asset : text;
+    base_asset_class : XrcAssetClass;
+    base_asset : text;
+    rate_canister_id : principal;
+    rate_method : text;
+    haircut : float64;
+  };
 };
 type ProtocolArg = variant { Upgrade : UpgradeArg; Init : InitArg };
 type ProtocolError = variant {

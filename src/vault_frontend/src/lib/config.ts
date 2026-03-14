@@ -42,17 +42,13 @@ export const CONFIG = {
   
   // Improved network detection - check multiple environment indicators
   get isLocal() {
-    // Check server-side environment variables first
-    if (typeof window === 'undefined') {
-      return process.env.DFX_NETWORK === 'local' || 
-             process.env.NODE_ENV === 'development';
+    // Client-side: check hostname at runtime (not build-time flags that get constant-folded)
+    if (typeof window !== 'undefined') {
+      const host = window.location?.hostname ?? '';
+      return host === 'localhost' || host === '127.0.0.1';
     }
-    
-    // Client-side checks
-    return process.env.DFX_NETWORK === 'local' || 
-           import.meta.env.DEV || 
-           window?.location?.hostname === 'localhost' ||
-           window?.location?.hostname?.includes('127.0.0.1');
+    // SSR/build-time: default to production
+    return false;
   },
   
   // Use proper ICP ledger ID based on network

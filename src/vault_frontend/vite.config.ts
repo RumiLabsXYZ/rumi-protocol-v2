@@ -4,6 +4,10 @@ import path from 'path';
 
 export default defineConfig({
   plugins: [sveltekit()],
+  define: {
+    'process.env.DFX_NETWORK': JSON.stringify(process.env.DFX_NETWORK ?? 'ic'),
+    'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV ?? 'production'),
+  },
   resolve: {
     alias: {
       '$declarations': path.resolve(__dirname, '../../declarations')

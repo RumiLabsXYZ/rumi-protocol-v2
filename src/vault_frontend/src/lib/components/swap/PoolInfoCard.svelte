@@ -59,7 +59,7 @@
     <div class="stats-stack">
       <div class="stat-row">
         <span class="stat-label">3USD Balance</span>
-        <span class="stat-value bold">{formatTokenAmount(userLpBalance, 18)}</span>
+        <span class="stat-value bold">{formatTokenAmount(userLpBalance, 8)}</span>
       </div>
       <div class="stat-row">
         <span class="stat-label">Pool Share</span>

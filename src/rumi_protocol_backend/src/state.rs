@@ -190,7 +190,7 @@ fn default_fiat() -> XrcAssetClass {
 }
 
 /// Price source configuration for a collateral type.
-#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+#[derive(candid::CandidType, Clone, Debug, serde::Deserialize, Serialize)]
 pub enum PriceSource {
     /// Use the ICP Exchange Rate Canister (XRC) with specified asset pair
     Xrc {
@@ -201,7 +201,49 @@ pub enum PriceSource {
         #[serde(default = "default_fiat")]
         quote_asset_class: XrcAssetClass,
     },
+    /// Liquid staking token: price = underlying_xrc_price × redemption_rate × (1 - haircut)
+    LstWrapped {
+        /// Underlying asset for XRC lookup (e.g., "ICP")
+        base_asset: String,
+        #[serde(default)]
+        base_asset_class: XrcAssetClass,
+        /// Quote asset (e.g., "USD")
+        quote_asset: String,
+        #[serde(default = "default_fiat")]
+        quote_asset_class: XrcAssetClass,
+        /// Canister to query for the LST→underlying exchange rate
+        rate_canister_id: candid::Principal,
+        /// Method name to call on rate_canister_id (e.g., "get_info")
+        rate_method: String,
+        /// Conservative discount applied to redemption value (e.g., 0.15 = 15%)
+        haircut: f64,
+    },
 }
+
+impl PartialEq for PriceSource {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                PriceSource::Xrc { base_asset: ba1, base_asset_class: bac1, quote_asset: qa1, quote_asset_class: qac1 },
+                PriceSource::Xrc { base_asset: ba2, base_asset_class: bac2, quote_asset: qa2, quote_asset_class: qac2 },
+            ) => ba1 == ba2 && bac1 == bac2 && qa1 == qa2 && qac1 == qac2,
+            (
+                PriceSource::LstWrapped {
+                    base_asset: ba1, base_asset_class: bac1, quote_asset: qa1, quote_asset_class: qac1,
+                    rate_canister_id: rc1, rate_method: rm1, haircut: h1,
+                },
+                PriceSource::LstWrapped {
+                    base_asset: ba2, base_asset_class: bac2, quote_asset: qa2, quote_asset_class: qac2,
+                    rate_canister_id: rc2, rate_method: rm2, haircut: h2,
+                },
+            ) => ba1 == ba2 && bac1 == bac2 && qa1 == qa2 && qac1 == qac2
+                && rc1 == rc2 && rm1 == rm2 && h1.to_bits() == h2.to_bits(),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for PriceSource {}
 
 /// How to interpolate between rate curve markers.
 /// Linear for now; enum allows adding Exponential, Polynomial, etc. via upgrade.

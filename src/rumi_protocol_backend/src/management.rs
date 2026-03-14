@@ -171,6 +171,13 @@ pub async fn fetch_stable_price(symbol: &str) -> Result<GetExchangeRateResult, S
     }
 }
 
+/// Minimal subset of WaterNeuron's CanisterInfo response.
+/// Candid deserialization ignores unknown fields, so we only define what we need.
+#[derive(candid::CandidType, serde::Deserialize)]
+struct LstCanisterInfo {
+    exchange_rate: u64,
+}
+
 /// Generic price fetch for any collateral type using its PriceSource config.
 /// Reads the asset pair and classes from CollateralConfig, calls XRC, and
 /// stores the result in last_price / last_price_timestamp.
@@ -195,7 +202,13 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
         }
     };
 
-    let PriceSource::Xrc { base_asset, base_asset_class, quote_asset, quote_asset_class } = price_source;
+    // Extract XRC fields from either variant (both have the same base/quote structure)
+    let (base_asset, base_asset_class, quote_asset, quote_asset_class) = match &price_source {
+        PriceSource::Xrc { base_asset, base_asset_class, quote_asset, quote_asset_class }
+        | PriceSource::LstWrapped { base_asset, base_asset_class, quote_asset, quote_asset_class, .. } => {
+            (base_asset.clone(), base_asset_class.clone(), quote_asset.clone(), quote_asset_class.clone())
+        }
+    };
 
     let base = Asset {
         symbol: base_asset.clone(),
@@ -230,7 +243,7 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
     )
     .await;
 
-    match res_xrc {
+    let underlying_rate = match res_xrc {
         Ok((GetExchangeRateResult::Ok(exchange_rate_result),)) => {
             let rate = rust_decimal::Decimal::from_u64(exchange_rate_result.rate).unwrap()
                 / rust_decimal::Decimal::from_u64(10_u64.pow(exchange_rate_result.metadata.decimals)).unwrap();
@@ -241,27 +254,70 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
                 base_asset, rate, exchange_rate_result.timestamp
             );
 
-            let ts_nanos = exchange_rate_result.timestamp * 1_000_000_000;
-            mutate_state(|s| {
-                if let Some(config) = s.collateral_configs.get_mut(&collateral_type) {
-                    let should_update = match config.last_price_timestamp {
-                        Some(last_ts) => last_ts < ts_nanos,
-                        None => true,
-                    };
-                    if should_update {
-                        config.last_price = rate.to_f64();
-                        config.last_price_timestamp = Some(ts_nanos);
-                    }
-                }
-            });
+            Some((rate, exchange_rate_result.timestamp * 1_000_000_000))
         }
         Ok((GetExchangeRateResult::Err(error),)) => {
             log!(TRACE_XRC, "[fetch_collateral_price] XRC error for {}: {:?}", base_asset, error);
+            None
         }
         Err((code, msg)) => {
             log!(TRACE_XRC, "[fetch_collateral_price] Call error for {}: {:?} {}", base_asset, code, msg);
+            None
         }
-    }
+    };
+
+    let Some((rate, ts_nanos)) = underlying_rate else { return };
+
+    // For LstWrapped, multiply by the redemption rate and apply haircut
+    let final_rate = match &price_source {
+        PriceSource::Xrc { .. } => rate,
+        PriceSource::LstWrapped { rate_canister_id, rate_method, haircut, .. } => {
+            let rate_result: Result<(LstCanisterInfo,), _> =
+                ic_cdk::call(*rate_canister_id, rate_method.as_str(), ()).await;
+
+            match rate_result {
+                Ok((info,)) => {
+                    if info.exchange_rate == 0 {
+                        log!(TRACE_XRC, "[fetch_collateral_price] LstWrapped exchange_rate is 0, skipping");
+                        return;
+                    }
+                    let multiplier = rust_decimal::Decimal::from(crate::E8S)
+                        / rust_decimal::Decimal::from(info.exchange_rate);
+                    let haircut_dec = rust_decimal::Decimal::from_f64(*haircut)
+                        .unwrap_or(rust_decimal::Decimal::ZERO);
+                    let adjusted = rate * multiplier * (rust_decimal::Decimal::ONE - haircut_dec);
+
+                    log!(
+                        TRACE_XRC,
+                        "[fetch_collateral_price] LstWrapped final: {} (underlying={}, multiplier={}, haircut={})",
+                        adjusted, rate, multiplier, haircut
+                    );
+                    adjusted
+                }
+                Err((code, msg)) => {
+                    log!(
+                        TRACE_XRC,
+                        "[fetch_collateral_price] LstWrapped rate canister error: {:?} {}",
+                        code, msg
+                    );
+                    return;
+                }
+            }
+        }
+    };
+
+    mutate_state(|s| {
+        if let Some(config) = s.collateral_configs.get_mut(&collateral_type) {
+            let should_update = match config.last_price_timestamp {
+                Some(last_ts) => last_ts < ts_nanos,
+                None => true,
+            };
+            if should_update {
+                config.last_price = final_rate.to_f64();
+                config.last_price_timestamp = Some(ts_nanos);
+            }
+        }
+    });
 }
 
 pub async fn mint_icusd(amount: ICUSD, to: Principal) -> Result<u64, TransferError> {

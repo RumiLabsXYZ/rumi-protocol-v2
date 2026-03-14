@@ -661,7 +661,7 @@
                         </div>
                       </div>
                       <div class="dropdown-token-right">
-                        <span class="dropdown-token-amount">{formatTokenAmount(threeUsdBalance, 18)}</span>
+                        <span class="dropdown-token-amount">{formatTokenAmount(threeUsdBalance, 8)}</span>
                       </div>
                     </div>
                   {/if}

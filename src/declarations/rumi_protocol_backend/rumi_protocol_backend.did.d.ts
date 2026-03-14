@@ -387,6 +387,16 @@ export type PriceSource = {
       'base_asset_class' : XrcAssetClass,
       'base_asset' : string,
     }
+  } | {
+    'LstWrapped' : {
+      'quote_asset_class' : XrcAssetClass,
+      'haircut' : number,
+      'rate_canister_id' : Principal,
+      'quote_asset' : string,
+      'base_asset_class' : XrcAssetClass,
+      'base_asset' : string,
+      'rate_method' : string,
+    }
   };
 export type ProtocolArg = { 'Upgrade' : UpgradeArg } |
   { 'Init' : InitArg };
