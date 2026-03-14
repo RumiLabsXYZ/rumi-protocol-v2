@@ -2536,6 +2536,33 @@ async fn set_collateral_status(
     Ok(())
 }
 
+#[candid_method(update)]
+#[update]
+async fn set_collateral_debt_ceiling(
+    collateral_type: Principal,
+    debt_ceiling: u64,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can change debt ceiling".to_string()));
+    }
+
+    let exists = read_state(|s| s.collateral_configs.contains_key(&collateral_type));
+    if !exists {
+        return Err(ProtocolError::GenericError("Collateral type not found".to_string()));
+    }
+
+    mutate_state(|s| {
+        if let Some(config) = s.collateral_configs.get_mut(&collateral_type) {
+            config.debt_ceiling = debt_ceiling;
+        }
+    });
+
+    log!(INFO, "[set_collateral_debt_ceiling] Collateral {} debt ceiling set to {}", collateral_type, debt_ceiling);
+    Ok(())
+}
+
 #[candid_method(query)]
 #[query]
 fn get_collateral_config(collateral_type: Principal) -> Option<rumi_protocol_backend::state::CollateralConfig> {

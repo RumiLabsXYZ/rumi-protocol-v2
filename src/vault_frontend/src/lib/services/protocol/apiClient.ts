@@ -342,7 +342,7 @@ private static async refreshVaultData(): Promise<void> {
     else if ('TransferFromError' in error) {
       const tfe = error.TransferFromError[0];
       if ('InsufficientAllowance' in tfe) {
-        return `Insufficient allowance (have: ${Number(tfe.InsufficientAllowance.allowance) / 1_000_000}). Please approve the tokens first.`;
+        return `Insufficient allowance (have: ${Number(tfe.InsufficientAllowance.allowance) / E8S}). Please approve the tokens first.`;
       }
       if ('InsufficientFunds' in tfe) {
         return `Insufficient ${error.TransferFromError[1] ? 'token' : ''} funds. Your balance is too low for this amount.`;
@@ -667,7 +667,8 @@ static async openVaultAndBorrow(
 
         if (signerAgent) {
           console.log(`[Oisy] Using ICRC-112 batched approve+open_vault_and_borrow`);
-          const requestedAllowance = amountRaw * 105n / 100n;
+          const oisyLedgerFee = BigInt(collateralInfo?.ledgerFee ?? 10_000);
+          const requestedAllowance = amountRaw + oisyLedgerFee * 2n;
 
           const ledgerActor = await walletStore.getActor(ledgerCanisterId, CONFIG.icp_ledgerIDL) as any;
 
@@ -715,8 +716,10 @@ static async openVaultAndBorrow(
         const spenderCanisterId = CONFIG.currentCanisterId;
 
         const currentAllowance = await walletOperations.checkCollateralAllowance(spenderCanisterId, ledgerCanisterId);
-        if (currentAllowance < amountRaw) {
-          const requestedAllowance = amountRaw * 105n / 100n;
+        const ledgerFee = BigInt(collateralInfo?.ledgerFee ?? 10_000);
+        const requiredAllowance = amountRaw + ledgerFee;
+        if (currentAllowance < requiredAllowance) {
+          const requestedAllowance = amountRaw + ledgerFee * 2n;
           const approvalResult = await walletOperations.approveCollateralTransfer(
             requestedAllowance, spenderCanisterId, ledgerCanisterId
           );

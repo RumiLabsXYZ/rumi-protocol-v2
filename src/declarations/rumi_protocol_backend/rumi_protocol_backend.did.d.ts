@@ -408,6 +408,15 @@ export type ProtocolError = { 'GenericError' : string } |
   { 'AmountTooLow' : { 'minimum_amount' : bigint } } |
   { 'TransferFromError' : [TransferFromError, bigint] } |
   { 'CallerNotOwner' : null };
+export interface PerCollateralRateCurve {
+  'markers' : Array<[number, number]>,
+  'base_rate' : number,
+  'collateral_type' : Principal,
+}
+export interface InterestSplitArg {
+  'bps' : bigint,
+  'destination' : string,
+}
 export interface ProtocolStatus {
   'last_icp_timestamp' : bigint,
   'borrowing_fee_curve_resolved' : Array<[number, number]>,
@@ -427,6 +436,11 @@ export interface ProtocolStatus {
   'liquidation_bonus' : number,
   'reserve_redemptions_enabled' : boolean,
   'last_icp_rate' : number,
+  'per_collateral_rate_curves' : Array<PerCollateralRateCurve>,
+  'interest_split' : Array<InterestSplitArg>,
+  'min_icusd_amount' : bigint,
+  'ckstable_repay_fee' : number,
+  'global_icusd_mint_cap' : bigint,
 }
 export interface RateCurve {
   'method' : InterpolationMethod,

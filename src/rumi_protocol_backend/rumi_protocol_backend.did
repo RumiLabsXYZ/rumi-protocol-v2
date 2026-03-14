@@ -545,6 +545,7 @@ service : (ProtocolArg) -> {
   set_borrowing_fee : (float64) -> (Result);
   set_ckstable_repay_fee : (float64) -> (Result);
   set_collateral_borrowing_fee : (principal, float64) -> (Result);
+  set_collateral_debt_ceiling : (principal, nat64) -> (Result);
   set_collateral_status : (principal, CollateralStatus) -> (Result);
   set_global_icusd_mint_cap : (nat64) -> (Result);
   get_global_icusd_mint_cap : () -> (nat64) query;

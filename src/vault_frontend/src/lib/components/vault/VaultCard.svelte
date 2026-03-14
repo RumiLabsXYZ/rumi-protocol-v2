@@ -433,6 +433,19 @@
     ? computeProjectedRate(rateCurveBaseRate, rateCurveMarkers, projectedBorrowCr, recoveryMultiplier)
     : baseInterestRate;
 
+  // Projected interest rate for any active action (shown in stats panel)
+  $: projectedActiveRate = (() => {
+    if (activeProjectedCr === null) return null;
+    const cr = activeProjectedCr === Infinity ? 1e6 : activeProjectedCr;
+    if (rateCurveMarkers.length > 0) {
+      return computeProjectedRate(rateCurveBaseRate, rateCurveMarkers, cr, recoveryMultiplier);
+    }
+    // Fallback: scale current rate by ratio of CR multipliers (approximate)
+    // If no curve, rate doesn't change with CR, so just return current rate
+    return vaultInterestRate;
+  })();
+  $: showProjectedRate = projectedActiveRate !== null && Math.abs(projectedActiveRate - computedRate) > 0.0001;
+
   $: repayOverMax = (() => {
     const v = parseFloat(repayAmount);
     return v > 0 && maxRepayable > 0 && v > maxRepayable;
@@ -717,7 +730,15 @@
               {#if vaultInterestRate > 0}
                 <div class="stat-row">
                   <span class="stat-label">Interest Rate</span>
-                  <span class="stat-value stat-interest" style="color:{interestColor}">{(vaultInterestRate * 100).toFixed(2)}% APR</span>
+                  <span class="stat-value stat-interest">
+                    {#if showProjectedRate}
+                      <span class="stat-cr-old">{(computedRate * 100).toFixed(2)}%</span>
+                      <span class="stat-arrow">→</span>
+                      <span style="color:{interestColor}">{((projectedActiveRate ?? 0) * 100).toFixed(2)}% APR</span>
+                    {:else}
+                      <span style="color:{interestColor}">{(vaultInterestRate * 100).toFixed(2)}% APR</span>
+                    {/if}
+                  </span>
                 </div>
               {/if}
               {#if vault.accruedInterest > 0}

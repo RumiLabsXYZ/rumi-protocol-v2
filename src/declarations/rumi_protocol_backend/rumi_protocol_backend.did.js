@@ -390,6 +390,11 @@ export const idlFactory = ({ IDL }) => {
     'collateral_type' : IDL.Principal,
     'weighted_interest_rate' : IDL.Float64,
   });
+  const PerCollateralRateCurve = IDL.Record({
+    'markers' : IDL.Vec(IDL.Tuple(IDL.Float64, IDL.Float64)),
+    'base_rate' : IDL.Float64,
+    'collateral_type' : IDL.Principal,
+  });
   const ProtocolStatus = IDL.Record({
     'last_icp_timestamp' : IDL.Nat64,
     'borrowing_fee_curve_resolved' : IDL.Vec(
@@ -411,6 +416,11 @@ export const idlFactory = ({ IDL }) => {
     'liquidation_bonus' : IDL.Float64,
     'reserve_redemptions_enabled' : IDL.Bool,
     'last_icp_rate' : IDL.Float64,
+    'per_collateral_rate_curves' : IDL.Vec(PerCollateralRateCurve),
+    'interest_split' : IDL.Vec(InterestSplitArg),
+    'min_icusd_amount' : IDL.Nat64,
+    'ckstable_repay_fee' : IDL.Float64,
+    'global_icusd_mint_cap' : IDL.Nat64,
   });
   const ReserveBalance = IDL.Record({
     'balance' : IDL.Nat64,

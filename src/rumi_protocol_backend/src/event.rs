@@ -160,10 +160,14 @@ pub enum Event {
         amount: String,
     },
 
-    /// Admin set global icUSD mint cap
+    /// Admin set global icUSD mint cap.
+    /// Field `cap` is a legacy alias kept for replay compat.
     #[serde(rename = "set_global_icusd_mint_cap")]
     SetGlobalIcusdMintCap {
-        amount: String,
+        #[serde(default)]
+        amount: Option<String>,
+        #[serde(default)]
+        cap: Option<String>,
     },
 
     #[serde(rename = "set_stable_token_enabled")]
@@ -310,11 +314,17 @@ pub enum Event {
         healthy_cr: Option<String>,
     },
 
-    /// Admin set per-collateral borrowing fee
+    /// Admin set per-collateral borrowing fee.
+    /// Fields `rate` and `fee` are legacy aliases kept for replay compat.
     #[serde(rename = "set_collateral_borrowing_fee")]
     SetCollateralBorrowingFee {
         collateral_type: CollateralType,
-        borrowing_fee: String,
+        #[serde(default)]
+        borrowing_fee: Option<String>,
+        #[serde(default)]
+        rate: Option<String>,
+        #[serde(default)]
+        fee: Option<String>,
     },
 
     /// Admin set interest rate APR for a collateral type
@@ -356,22 +366,7 @@ pub enum Event {
         reason: String,
     },
 
-    /// Admin set a per-collateral borrowing fee (legacy event, kept for replay compat).
-    #[serde(rename = "set_collateral_borrowing_fee")]
-    SetCollateralBorrowingFee {
-        collateral_type: Principal,
-        #[serde(default)]
-        rate: Option<String>,
-        #[serde(default)]
-        fee: Option<String>,
-    },
-
-    /// Admin set a global icUSD mint cap (legacy event, kept for replay compat).
-    #[serde(rename = "set_global_icusd_mint_cap")]
-    SetGlobalIcusdMintCap {
-        #[serde(default)]
-        cap: Option<String>,
-    },
+    // (Legacy duplicates removed — merged into primary definitions above)
 
     /// Admin set the dynamic borrowing fee curve.
     #[serde(rename = "set_borrowing_fee_curve")]
@@ -454,8 +449,6 @@ impl Event {
             Event::SetRmrFloorCr { .. } => false,
             Event::SetRmrCeilingCr { .. } => false,
             Event::AdminSweepToTreasury { .. } => false,
-            Event::SetCollateralBorrowingFee { .. } => false,
-            Event::SetGlobalIcusdMintCap { .. } => false,
             Event::SetBorrowingFeeCurve { .. } => false,
             Event::SetInterestSplit { .. } => false,
             Event::SetThreePoolCanister { .. } => false,
@@ -643,8 +636,9 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                     state.min_icusd_amount = ICUSD::new(val);
                 }
             },
-            Event::SetGlobalIcusdMintCap { amount } => {
-                if let Ok(val) = amount.parse::<u64>() {
+            Event::SetGlobalIcusdMintCap { amount, cap } => {
+                let value = amount.as_deref().or(cap.as_deref());
+                if let Some(Ok(val)) = value.map(|s| s.parse::<u64>()) {
                     state.global_icusd_mint_cap = val;
                 }
             },
@@ -827,10 +821,14 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                     }
                 }
             },
-            Event::SetCollateralBorrowingFee { collateral_type, borrowing_fee } => {
-                if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
-                    if let Ok(fee) = borrowing_fee.parse::<Decimal>() {
-                        config.borrowing_fee = Ratio::from(fee);
+            Event::SetCollateralBorrowingFee { collateral_type, borrowing_fee, rate, fee } => {
+                // Try borrowing_fee first, then legacy rate/fee fields
+                let value = borrowing_fee.as_deref()
+                    .or(rate.as_deref())
+                    .or(fee.as_deref());
+                if let Some(Ok(dec)) = value.map(|s| s.parse::<Decimal>()) {
+                    if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+                        config.borrowing_fee = Ratio::from(dec);
                     }
                 }
             },
@@ -871,17 +869,6 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             },
             Event::AdminSweepToTreasury { .. } => {
                 // Ledger-only operation; no in-memory state changes during replay.
-            },
-            Event::SetCollateralBorrowingFee { collateral_type, rate, fee } => {
-                let value = rate.as_deref().or(fee.as_deref());
-                if let Some(Ok(dec)) = value.map(|s| s.parse::<Decimal>()) {
-                    if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
-                        config.borrowing_fee = Ratio::from(dec);
-                    }
-                }
-            },
-            Event::SetGlobalIcusdMintCap { .. } => {
-                // Legacy: no-op during replay (mint cap not stored in current state).
             },
             Event::SetBorrowingFeeCurve { markers } => {
                 if markers == "null" {
@@ -1131,7 +1118,8 @@ pub fn record_set_min_icusd_amount(state: &mut State, amount: ICUSD) {
 
 pub fn record_set_global_icusd_mint_cap(state: &mut State, amount: u64) {
     record_event(&Event::SetGlobalIcusdMintCap {
-        amount: amount.to_string(),
+        amount: Some(amount.to_string()),
+        cap: None,
     });
     state.global_icusd_mint_cap = amount;
 }
@@ -1496,7 +1484,9 @@ pub fn record_set_collateral_borrowing_fee(
 ) {
     record_event(&Event::SetCollateralBorrowingFee {
         collateral_type,
-        borrowing_fee: borrowing_fee.0.to_string(),
+        borrowing_fee: Some(borrowing_fee.0.to_string()),
+        rate: None,
+        fee: None,
     });
     if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
         config.borrowing_fee = borrowing_fee;
