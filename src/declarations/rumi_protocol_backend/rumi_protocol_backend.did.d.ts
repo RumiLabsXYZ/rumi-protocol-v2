@@ -6,6 +6,20 @@ export interface Account {
   'owner' : Principal,
   'subaccount' : [] | [Uint8Array | number[]],
 }
+export interface BotLiquidationResult {
+  'vault_id' : bigint,
+  'collateral_amount' : bigint,
+  'debt_covered' : bigint,
+  'collateral_price_e8s' : bigint,
+}
+export interface BotStatsResponse {
+  'liquidation_bot_principal' : [] | [Principal],
+  'budget_total_e8s' : bigint,
+  'budget_remaining_e8s' : bigint,
+  'budget_start_timestamp' : bigint,
+  'total_debt_covered_e8s' : bigint,
+  'total_icusd_deposited_e8s' : bigint,
+}
 export interface AddCollateralArg {
   'redemption_fee_ceiling' : [] | [number],
   'debt_ceiling' : bigint,
@@ -486,6 +500,8 @@ export type Result_8 = { 'Ok' : StabilityPoolLiquidationResult } |
   { 'Err' : ProtocolError };
 export type Result_9 = { 'Ok' : number } |
   { 'Err' : ProtocolError };
+export type Result_10 = { 'Ok' : BotLiquidationResult } |
+  { 'Err' : ProtocolError };
 export interface StabilityPoolConfig {
   'enabled' : boolean,
   'liquidation_discount' : bigint,
@@ -571,6 +587,8 @@ export interface _SERVICE {
   >,
   'admin_mint_icusd' : ActorMethod<[bigint, Principal, string], Result_1>,
   'admin_sweep_to_treasury' : ActorMethod<[string], Result_1>,
+  'bot_deposit_to_reserves' : ActorMethod<[bigint], Result>,
+  'bot_liquidate' : ActorMethod<[bigint], Result_10>,
   'borrow_from_vault' : ActorMethod<[VaultArg], Result_2>,
   'claim_liquidity_returns' : ActorMethod<[], Result_1>,
   'clear_stuck_operations' : ActorMethod<[[] | [Principal]], Result_1>,
@@ -580,6 +598,7 @@ export interface _SERVICE {
   'freeze_protocol' : ActorMethod<[], Result>,
   'get_all_vaults' : ActorMethod<[], Array<CandidVault>>,
   'get_borrowing_fee' : ActorMethod<[], number>,
+  'get_bot_stats' : ActorMethod<[], BotStatsResponse>,
   'get_ckstable_repay_fee' : ActorMethod<[], number>,
   'get_collateral_config' : ActorMethod<[Principal], [] | [CollateralConfig]>,
   'get_collateral_totals' : ActorMethod<[], Array<CollateralTotals>>,
@@ -647,6 +666,7 @@ export interface _SERVICE {
   'redeem_reserves' : ActorMethod<[bigint, [] | [Principal]], Result_7>,
   'repay_to_vault' : ActorMethod<[VaultArg], Result_1>,
   'repay_to_vault_with_stable' : ActorMethod<[VaultArgWithToken], Result_1>,
+  'reset_bot_budget' : ActorMethod<[bigint], Result>,
   'set_borrowing_fee' : ActorMethod<[number], Result>,
   'set_borrowing_fee_curve' : ActorMethod<[[] | [string]], Result>,
   'set_ckstable_repay_fee' : ActorMethod<[number], Result>,
@@ -655,6 +675,7 @@ export interface _SERVICE {
   'set_interest_flush_threshold' : ActorMethod<[bigint], Result>,
   'set_interest_pool_share' : ActorMethod<[number], Result>,
   'set_interest_rate' : ActorMethod<[Principal, number], Result>,
+  'set_liquidation_bot_config' : ActorMethod<[Principal, bigint], Result>,
   'set_interest_split' : ActorMethod<[Array<InterestSplitArg>], Result>,
   'set_liquidation_bonus' : ActorMethod<[number], Result>,
   'set_liquidation_protocol_share' : ActorMethod<[number], Result>,
