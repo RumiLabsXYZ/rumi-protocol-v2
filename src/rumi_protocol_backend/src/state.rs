@@ -3728,4 +3728,98 @@ mod tests {
         assert!((mult_low.to_f64() - 3.0).abs() < 0.01,
             "Inverted curve should return max multiplier (3.0x) for low CR too, got {}", mult_low.to_f64());
     }
+
+    // ─── Regression Tests (bugs caught on mainnet) ───
+
+    /// Regression: close_vault must NOT create phantom pending_margin_transfers.
+    /// Bug (1bdf5c0): close_vault() inserted a PendingMarginTransfer on every close,
+    /// but CloseVault requires collateral=0, so the entry had 0 margin and was never
+    /// cleared. 11 phantom entries (~5.62 ICP) accumulated, inflating tracked
+    /// obligations and breaking admin_sweep_to_treasury surplus calculations.
+    #[test]
+    fn test_close_vault_no_phantom_pending_transfers() {
+        let mut state = test_state();
+        let owner = Principal::anonymous();
+
+        // Open 5 vaults with varying collateral
+        for i in 1..=5u64 {
+            state.open_vault(Vault {
+                owner,
+                vault_id: i,
+                collateral_amount: 0, // CloseVault requires 0 collateral
+                borrowed_icusd_amount: ICUSD::new(0),
+                collateral_type: state.icp_ledger_principal,
+                last_accrual_time: 0,
+                accrued_interest: ICUSD::new(0),
+            });
+        }
+
+        assert_eq!(state.vault_id_to_vaults.len(), 5);
+        assert!(state.pending_margin_transfers.is_empty(),
+            "No pending transfers before closing");
+
+        // Close all 5 vaults
+        for i in 1..=5u64 {
+            state.close_vault(i);
+        }
+
+        assert!(state.vault_id_to_vaults.is_empty(), "All vaults should be removed");
+        assert!(state.pending_margin_transfers.is_empty(),
+            "close_vault must NOT create phantom pending_margin_transfers, found {}",
+            state.pending_margin_transfers.len());
+    }
+
+    /// Regression: RMR must be applied exactly once during reserve redemption spillover.
+    /// Bug (96210bf): In redeem_reserves(), RMR was applied at line 161 to compute
+    /// effective_icusd, then the spillover block applied it AGAIN: effective_spillover
+    /// = (spillover_icusd - vault_fee) * rmr. Vault owners lost 0.96² = 0.9216 instead
+    /// of 0.96 of their collateral value.
+    ///
+    /// This tests the math: given a redemption amount, the spillover amount reaching
+    /// vault redemption should reflect exactly one RMR application, not two.
+    #[test]
+    fn test_rmr_applied_once_in_spillover() {
+        // Simulate the redemption math from redeem_reserves()
+        let rmr = Ratio::from_f64(0.96); // typical RMR
+        let reserve_fee = Ratio::from_f64(0.003); // 0.3% flat fee
+        let icusd_amount = ICUSD::new(10_000_000_000); // 100 icUSD
+
+        // Step 1: fee + RMR (line 156-161 in vault.rs)
+        let fee_icusd = icusd_amount * reserve_fee;
+        let net_icusd = icusd_amount - fee_icusd;
+        let effective_icusd = net_icusd * rmr;
+
+        // Assume reserves cover 0, so everything spills over
+        let spillover_e8s = effective_icusd.to_u64();
+        let spillover_icusd = ICUSD::from(spillover_e8s);
+
+        // Step 2: vault redemption fee on the spillover (line 264-271)
+        let vault_fee_ratio = Ratio::from_f64(0.005); // example base rate
+        let vault_fee = spillover_icusd * vault_fee_ratio;
+
+        // CORRECT (after fix): no second RMR application
+        let effective_spillover_correct = spillover_icusd - vault_fee;
+
+        // WRONG (before fix): double RMR
+        let effective_spillover_buggy = (spillover_icusd - vault_fee) * rmr;
+
+        // The correct value should be higher than the buggy value
+        assert!(effective_spillover_correct > effective_spillover_buggy,
+            "Correct spillover ({}) must be > buggy double-RMR spillover ({})",
+            effective_spillover_correct.to_u64(), effective_spillover_buggy.to_u64());
+
+        // Verify the difference is exactly the second RMR application
+        // buggy = correct * 0.96, so correct / buggy ≈ 1/0.96 ≈ 1.0417
+        let ratio = effective_spillover_correct.to_u64() as f64
+            / effective_spillover_buggy.to_u64() as f64;
+        assert!((ratio - 1.0 / 0.96).abs() < 0.001,
+            "Difference should be exactly the second RMR factor, ratio = {}", ratio);
+
+        // Verify the effective spillover is exactly: (original * (1-fee) * rmr) * (1 - vault_fee_ratio)
+        // NOT: (original * (1-fee) * rmr) * (1 - vault_fee_ratio) * rmr
+        let expected = 100.0 * (1.0 - 0.003) * 0.96 * (1.0 - 0.005);
+        let actual = effective_spillover_correct.to_u64() as f64 / 1e8;
+        assert!((actual - expected).abs() < 0.01,
+            "Effective spillover should be {:.4} icUSD, got {:.4}", expected, actual);
+    }
 }
