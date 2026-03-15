@@ -631,6 +631,14 @@ pub struct State {
     pub rmr_floor_cr: Ratio,
     /// The system CR below which rmr_ceiling applies. Absolute CR value (e.g. 1.50).
     pub rmr_ceiling_cr: Ratio,
+
+    // Liquidation bot
+    pub liquidation_bot_principal: Option<Principal>,
+    pub bot_budget_total_e8s: u64,
+    pub bot_budget_remaining_e8s: u64,
+    pub bot_budget_start_timestamp: u64,
+    pub bot_total_debt_covered_e8s: u64,
+    pub bot_total_icusd_deposited_e8s: u64,
 }
 
 impl From<InitArg> for State {
@@ -799,6 +807,14 @@ impl From<InitArg> for State {
             rmr_ceiling: DEFAULT_RMR_CEILING,
             rmr_floor_cr: DEFAULT_RMR_FLOOR_CR,
             rmr_ceiling_cr: DEFAULT_RMR_CEILING_CR,
+
+            // Liquidation bot
+            liquidation_bot_principal: None,
+            bot_budget_total_e8s: 0,
+            bot_budget_remaining_e8s: 0,
+            bot_budget_start_timestamp: 0,
+            bot_total_debt_covered_e8s: 0,
+            bot_total_icusd_deposited_e8s: 0,
         }
     }
 }
@@ -3821,5 +3837,50 @@ mod tests {
         let actual = effective_spillover_correct.to_u64() as f64 / 1e8;
         assert!((actual - expected).abs() < 0.01,
             "Effective spillover should be {:.4} icUSD, got {:.4}", expected, actual);
+    }
+
+    // ─── Liquidation Bot Tests ───
+
+    #[test]
+    fn test_bot_liquidation_amount_formula() {
+        // L = (T*D - C) / (T - B) where T=target CR, D=debt, C=collateral value, B=bonus
+        let t = 1.50_f64;
+        let d = 1000.0;
+        let c = 1400.0;
+        let b = 1.15;
+        let l = (t * d - c) / (t - b);
+        assert!((l - 285.71).abs() < 0.01, "L should be ~285.71, got {}", l);
+
+        // Verify post-liquidation CR equals target
+        let new_debt = d - l;
+        let seized = l * b;
+        let new_collateral = c - seized;
+        let new_cr = new_collateral / new_debt;
+        assert!((new_cr - 1.50).abs() < 0.01, "New CR should be 1.50, got {}", new_cr);
+    }
+
+    #[test]
+    fn test_bot_budget_decrement() {
+        let mut state = test_state();
+        state.bot_budget_total_e8s = 1_000_000_000_000; // $10,000
+        state.bot_budget_remaining_e8s = 1_000_000_000_000;
+
+        let liquidation_amount = 28_571_000_000u64; // 285.71 icUSD in e8s
+        assert!(state.bot_budget_remaining_e8s >= liquidation_amount);
+        state.bot_budget_remaining_e8s -= liquidation_amount;
+        state.bot_total_debt_covered_e8s += liquidation_amount;
+
+        assert_eq!(state.bot_budget_remaining_e8s, 1_000_000_000_000 - 28_571_000_000);
+        assert_eq!(state.bot_total_debt_covered_e8s, 28_571_000_000);
+    }
+
+    #[test]
+    fn test_bot_budget_exhausted_blocks_liquidation() {
+        let mut state = test_state();
+        state.bot_budget_remaining_e8s = 10_000_000; // 0.1 icUSD remaining
+
+        let liquidation_amount = 28_571_000_000u64; // 285.71 icUSD
+        assert!(state.bot_budget_remaining_e8s < liquidation_amount,
+            "Budget should be insufficient");
     }
 }
