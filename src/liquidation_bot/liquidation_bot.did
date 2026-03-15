@@ -1,0 +1,54 @@
+type BotConfig = record {
+  backend_principal : principal;
+  three_pool_principal : principal;
+  kong_swap_principal : principal;
+  treasury_principal : principal;
+  admin : principal;
+  max_slippage_bps : nat16;
+  icp_ledger : principal;
+  ckusdc_ledger : principal;
+  ckusdt_ledger : principal;
+  icusd_ledger : principal;
+};
+
+type BotInitArgs = record {
+  config : BotConfig;
+};
+
+type BotLiquidationEvent = record {
+  timestamp : nat64;
+  vault_id : nat64;
+  debt_covered_e8s : nat64;
+  collateral_received_e8s : nat64;
+  icusd_burned_e8s : nat64;
+  collateral_to_treasury_e8s : nat64;
+  swap_route : text;
+  effective_price_e8s : nat64;
+  slippage_bps : int32;
+  success : bool;
+  error_message : opt text;
+};
+
+type BotStats = record {
+  total_debt_covered_e8s : nat64;
+  total_icusd_burned_e8s : nat64;
+  total_collateral_received_e8s : nat64;
+  total_collateral_to_treasury_e8s : nat64;
+  events_count : nat64;
+};
+
+type LiquidatableVaultInfo = record {
+  vault_id : nat64;
+  collateral_type : principal;
+  debt_amount : nat64;
+  collateral_amount : nat64;
+  recommended_liquidation_amount : nat64;
+  collateral_price_e8s : nat64;
+};
+
+service : (BotInitArgs) -> {
+  notify_liquidatable_vaults : (vec LiquidatableVaultInfo) -> ();
+  get_bot_stats : () -> (BotStats) query;
+  get_liquidation_events : (nat64, nat64) -> (vec BotLiquidationEvent) query;
+  set_config : (BotConfig) -> ();
+};

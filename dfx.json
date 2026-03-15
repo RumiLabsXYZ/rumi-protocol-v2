@@ -124,6 +124,16 @@
         }
       ]
     },
+    "liquidation_bot": {
+      "candid": "src/liquidation_bot/liquidation_bot.did",
+      "package": "liquidation_bot",
+      "type": "rust",
+      "metadata": [
+        {
+          "name": "candid:service"
+        }
+      ]
+    },
     "xrc": {
       "type": "pull",
       "id": "uf6dk-hyaaa-aaaaq-qaaaq-cai"
