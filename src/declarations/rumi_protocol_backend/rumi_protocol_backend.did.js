@@ -535,6 +535,24 @@ export const idlFactory = ({ IDL }) => {
     'Ok' : StabilityPoolLiquidationResult,
     'Err' : ProtocolError,
   });
+  const BotLiquidationResult = IDL.Record({
+    'vault_id' : IDL.Nat64,
+    'collateral_amount' : IDL.Nat64,
+    'debt_covered' : IDL.Nat64,
+    'collateral_price_e8s' : IDL.Nat64,
+  });
+  const Result_10 = IDL.Variant({
+    'Ok' : BotLiquidationResult,
+    'Err' : ProtocolError,
+  });
+  const BotStatsResponse = IDL.Record({
+    'liquidation_bot_principal' : IDL.Opt(IDL.Principal),
+    'budget_total_e8s' : IDL.Nat64,
+    'budget_remaining_e8s' : IDL.Nat64,
+    'budget_start_timestamp' : IDL.Nat64,
+    'total_debt_covered_e8s' : IDL.Nat64,
+    'total_icusd_deposited_e8s' : IDL.Nat64,
+  });
   return IDL.Service({
     'add_collateral_token' : IDL.Func([AddCollateralArg], [Result], []),
     'add_margin_to_vault' : IDL.Func([VaultArg], [Result_1], []),
@@ -550,6 +568,8 @@ export const idlFactory = ({ IDL }) => {
         [],
       ),
     'admin_sweep_to_treasury' : IDL.Func([IDL.Text], [Result_1], []),
+    'bot_deposit_to_reserves' : IDL.Func([IDL.Nat64], [Result], []),
+    'bot_liquidate' : IDL.Func([IDL.Nat64], [Result_10], []),
     'borrow_from_vault' : IDL.Func([VaultArg], [Result_2], []),
     'claim_liquidity_returns' : IDL.Func([], [Result_1], []),
     'clear_stuck_operations' : IDL.Func(
@@ -563,6 +583,7 @@ export const idlFactory = ({ IDL }) => {
     'freeze_protocol' : IDL.Func([], [Result], []),
     'get_all_vaults' : IDL.Func([], [IDL.Vec(CandidVault)], ['query']),
     'get_borrowing_fee' : IDL.Func([], [IDL.Float64], ['query']),
+    'get_bot_stats' : IDL.Func([], [BotStatsResponse], ['query']),
     'get_ckstable_repay_fee' : IDL.Func([], [IDL.Float64], ['query']),
     'get_collateral_config' : IDL.Func(
         [IDL.Principal],
@@ -702,6 +723,7 @@ export const idlFactory = ({ IDL }) => {
         [Result_1],
         [],
       ),
+    'reset_bot_budget' : IDL.Func([IDL.Nat64], [Result], []),
     'set_borrowing_fee' : IDL.Func([IDL.Float64], [Result], []),
     'set_borrowing_fee_curve' : IDL.Func([IDL.Opt(IDL.Text)], [Result], []),
     'set_ckstable_repay_fee' : IDL.Func([IDL.Float64], [Result], []),
@@ -718,6 +740,7 @@ export const idlFactory = ({ IDL }) => {
     'set_interest_flush_threshold' : IDL.Func([IDL.Nat64], [Result], []),
     'set_interest_pool_share' : IDL.Func([IDL.Float64], [Result], []),
     'set_interest_rate' : IDL.Func([IDL.Principal, IDL.Float64], [Result], []),
+    'set_liquidation_bot_config' : IDL.Func([IDL.Principal, IDL.Nat64], [Result], []),
     'set_interest_split' : IDL.Func([IDL.Vec(InterestSplitArg)], [Result], []),
     'set_liquidation_bonus' : IDL.Func([IDL.Float64], [Result], []),
     'set_liquidation_protocol_share' : IDL.Func([IDL.Float64], [Result], []),

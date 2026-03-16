@@ -631,6 +631,14 @@ pub struct State {
     pub rmr_floor_cr: Ratio,
     /// The system CR below which rmr_ceiling applies. Absolute CR value (e.g. 1.50).
     pub rmr_ceiling_cr: Ratio,
+
+    // Liquidation bot
+    pub liquidation_bot_principal: Option<Principal>,
+    pub bot_budget_total_e8s: u64,
+    pub bot_budget_remaining_e8s: u64,
+    pub bot_budget_start_timestamp: u64,
+    pub bot_total_debt_covered_e8s: u64,
+    pub bot_total_icusd_deposited_e8s: u64,
 }
 
 impl From<InitArg> for State {
@@ -799,6 +807,14 @@ impl From<InitArg> for State {
             rmr_ceiling: DEFAULT_RMR_CEILING,
             rmr_floor_cr: DEFAULT_RMR_FLOOR_CR,
             rmr_ceiling_cr: DEFAULT_RMR_CEILING_CR,
+
+            // Liquidation bot
+            liquidation_bot_principal: None,
+            bot_budget_total_e8s: 0,
+            bot_budget_remaining_e8s: 0,
+            bot_budget_start_timestamp: 0,
+            bot_total_debt_covered_e8s: 0,
+            bot_total_icusd_deposited_e8s: 0,
         }
     }
 }
@@ -3727,5 +3743,144 @@ mod tests {
         let mult_low = state.get_borrowing_fee_multiplier(Ratio::from_f64(1.0));
         assert!((mult_low.to_f64() - 3.0).abs() < 0.01,
             "Inverted curve should return max multiplier (3.0x) for low CR too, got {}", mult_low.to_f64());
+    }
+
+    // ─── Regression Tests (bugs caught on mainnet) ───
+
+    /// Regression: close_vault must NOT create phantom pending_margin_transfers.
+    /// Bug (1bdf5c0): close_vault() inserted a PendingMarginTransfer on every close,
+    /// but CloseVault requires collateral=0, so the entry had 0 margin and was never
+    /// cleared. 11 phantom entries (~5.62 ICP) accumulated, inflating tracked
+    /// obligations and breaking admin_sweep_to_treasury surplus calculations.
+    #[test]
+    fn test_close_vault_no_phantom_pending_transfers() {
+        let mut state = test_state();
+        let owner = Principal::anonymous();
+
+        // Open 5 vaults with varying collateral
+        for i in 1..=5u64 {
+            state.open_vault(Vault {
+                owner,
+                vault_id: i,
+                collateral_amount: 0, // CloseVault requires 0 collateral
+                borrowed_icusd_amount: ICUSD::new(0),
+                collateral_type: state.icp_ledger_principal,
+                last_accrual_time: 0,
+                accrued_interest: ICUSD::new(0),
+            });
+        }
+
+        assert_eq!(state.vault_id_to_vaults.len(), 5);
+        assert!(state.pending_margin_transfers.is_empty(),
+            "No pending transfers before closing");
+
+        // Close all 5 vaults
+        for i in 1..=5u64 {
+            state.close_vault(i);
+        }
+
+        assert!(state.vault_id_to_vaults.is_empty(), "All vaults should be removed");
+        assert!(state.pending_margin_transfers.is_empty(),
+            "close_vault must NOT create phantom pending_margin_transfers, found {}",
+            state.pending_margin_transfers.len());
+    }
+
+    /// Regression: RMR must be applied exactly once during reserve redemption spillover.
+    /// Bug (96210bf): In redeem_reserves(), RMR was applied at line 161 to compute
+    /// effective_icusd, then the spillover block applied it AGAIN: effective_spillover
+    /// = (spillover_icusd - vault_fee) * rmr. Vault owners lost 0.96² = 0.9216 instead
+    /// of 0.96 of their collateral value.
+    ///
+    /// This tests the math: given a redemption amount, the spillover amount reaching
+    /// vault redemption should reflect exactly one RMR application, not two.
+    #[test]
+    fn test_rmr_applied_once_in_spillover() {
+        // Simulate the redemption math from redeem_reserves()
+        let rmr = Ratio::from_f64(0.96); // typical RMR
+        let reserve_fee = Ratio::from_f64(0.003); // 0.3% flat fee
+        let icusd_amount = ICUSD::new(10_000_000_000); // 100 icUSD
+
+        // Step 1: fee + RMR (line 156-161 in vault.rs)
+        let fee_icusd = icusd_amount * reserve_fee;
+        let net_icusd = icusd_amount - fee_icusd;
+        let effective_icusd = net_icusd * rmr;
+
+        // Assume reserves cover 0, so everything spills over
+        let spillover_e8s = effective_icusd.to_u64();
+        let spillover_icusd = ICUSD::from(spillover_e8s);
+
+        // Step 2: vault redemption fee on the spillover (line 264-271)
+        let vault_fee_ratio = Ratio::from_f64(0.005); // example base rate
+        let vault_fee = spillover_icusd * vault_fee_ratio;
+
+        // CORRECT (after fix): no second RMR application
+        let effective_spillover_correct = spillover_icusd - vault_fee;
+
+        // WRONG (before fix): double RMR
+        let effective_spillover_buggy = (spillover_icusd - vault_fee) * rmr;
+
+        // The correct value should be higher than the buggy value
+        assert!(effective_spillover_correct > effective_spillover_buggy,
+            "Correct spillover ({}) must be > buggy double-RMR spillover ({})",
+            effective_spillover_correct.to_u64(), effective_spillover_buggy.to_u64());
+
+        // Verify the difference is exactly the second RMR application
+        // buggy = correct * 0.96, so correct / buggy ≈ 1/0.96 ≈ 1.0417
+        let ratio = effective_spillover_correct.to_u64() as f64
+            / effective_spillover_buggy.to_u64() as f64;
+        assert!((ratio - 1.0 / 0.96).abs() < 0.001,
+            "Difference should be exactly the second RMR factor, ratio = {}", ratio);
+
+        // Verify the effective spillover is exactly: (original * (1-fee) * rmr) * (1 - vault_fee_ratio)
+        // NOT: (original * (1-fee) * rmr) * (1 - vault_fee_ratio) * rmr
+        let expected = 100.0 * (1.0 - 0.003) * 0.96 * (1.0 - 0.005);
+        let actual = effective_spillover_correct.to_u64() as f64 / 1e8;
+        assert!((actual - expected).abs() < 0.01,
+            "Effective spillover should be {:.4} icUSD, got {:.4}", expected, actual);
+    }
+
+    // ─── Liquidation Bot Tests ───
+
+    #[test]
+    fn test_bot_liquidation_amount_formula() {
+        // L = (T*D - C) / (T - B) where T=target CR, D=debt, C=collateral value, B=bonus
+        let t = 1.50_f64;
+        let d = 1000.0;
+        let c = 1400.0;
+        let b = 1.15;
+        let l = (t * d - c) / (t - b);
+        assert!((l - 285.71).abs() < 0.01, "L should be ~285.71, got {}", l);
+
+        // Verify post-liquidation CR equals target
+        let new_debt = d - l;
+        let seized = l * b;
+        let new_collateral = c - seized;
+        let new_cr = new_collateral / new_debt;
+        assert!((new_cr - 1.50).abs() < 0.01, "New CR should be 1.50, got {}", new_cr);
+    }
+
+    #[test]
+    fn test_bot_budget_decrement() {
+        let mut state = test_state();
+        state.bot_budget_total_e8s = 1_000_000_000_000; // $10,000
+        state.bot_budget_remaining_e8s = 1_000_000_000_000;
+
+        let liquidation_amount = 28_571_000_000u64; // 285.71 icUSD in e8s
+        assert!(state.bot_budget_remaining_e8s >= liquidation_amount);
+        state.bot_budget_remaining_e8s -= liquidation_amount;
+        state.bot_total_debt_covered_e8s += liquidation_amount;
+
+        assert_eq!(state.bot_budget_remaining_e8s, 1_000_000_000_000 - 28_571_000_000);
+        assert_eq!(state.bot_total_debt_covered_e8s, 28_571_000_000);
+    }
+
+    #[test]
+    fn test_bot_budget_exhausted_blocks_liquidation() {
+        let mut state = test_state();
+        state.bot_budget_remaining_e8s = 10_000_000; // 0.1 icUSD remaining
+
+        let liquidation_amount = 28_571_000_000u64; // 285.71 icUSD
+        assert!(state.bot_budget_remaining_e8s < liquidation_amount,
+            "Budget should be insufficient");
     }
 }

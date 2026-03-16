@@ -6,5 +6,6 @@ members = [
     "src/stability_pool",
     "src/rumi_3pool",
     "xrc_demo/xrc_mock",
+    "src/liquidation_bot",
 ]
 resolver = "2"

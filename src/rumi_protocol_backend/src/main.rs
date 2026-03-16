@@ -1083,6 +1083,268 @@ fn get_stability_pool_principal() -> Option<Principal> {
     read_state(|s| s.stability_pool_canister)
 }
 
+// ---- Liquidation bot admin functions ----
+
+/// Result returned to the bot after a credit-based liquidation.
+#[derive(CandidType, Deserialize, Debug)]
+pub struct BotLiquidationResult {
+    pub vault_id: u64,
+    pub collateral_amount: u64,
+    pub debt_covered: u64,
+    pub collateral_price_e8s: u64,
+}
+
+/// Bot stats exposed to the frontend.
+#[derive(CandidType, Deserialize, Debug)]
+pub struct BotStatsResponse {
+    pub liquidation_bot_principal: Option<Principal>,
+    pub budget_total_e8s: u64,
+    pub budget_remaining_e8s: u64,
+    pub budget_start_timestamp: u64,
+    pub total_debt_covered_e8s: u64,
+    pub total_icusd_deposited_e8s: u64,
+}
+
+#[candid_method(update)]
+#[update]
+async fn set_liquidation_bot_config(bot_principal: Principal, monthly_budget_e8s: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can set liquidation bot config".to_string()));
+    }
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_liquidation_bot_principal(s, bot_principal);
+        rumi_protocol_backend::event::record_set_bot_budget(s, monthly_budget_e8s, ic_cdk::api::time());
+    });
+    log!(INFO, "[set_liquidation_bot_config] Bot principal: {}, budget: {} e8s", bot_principal, monthly_budget_e8s);
+    Ok(())
+}
+
+#[candid_method(update)]
+#[update]
+async fn reset_bot_budget(new_budget_e8s: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can reset bot budget".to_string()));
+    }
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_bot_budget(s, new_budget_e8s, ic_cdk::api::time());
+    });
+    log!(INFO, "[reset_bot_budget] Budget reset to {} e8s", new_budget_e8s);
+    Ok(())
+}
+
+/// Bot calls this to liquidate a vault on credit. Backend seizes collateral,
+/// reduces vault debt, and creates a pending transfer to send ICP to the bot.
+#[candid_method(update)]
+#[update]
+async fn bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, ProtocolError> {
+    validate_call().await?;
+    validate_price_for_liquidation()?;
+    let caller = ic_cdk::api::caller();
+
+    let is_bot = read_state(|s| {
+        s.liquidation_bot_principal.map_or(false, |bp| bp == caller)
+    });
+    if !is_bot {
+        return Err(ProtocolError::GenericError(
+            "Caller is not the registered liquidation bot canister".to_string(),
+        ));
+    }
+
+    // Get vault info, compute liquidatable amount, and validate budget
+    let (collateral_price_usd, liquidatable_debt, collateral_to_seize, collateral_type) = read_state(|s| {
+        let vault = s.vault_id_to_vaults.get(&vault_id)
+            .ok_or_else(|| ProtocolError::GenericError(format!("Vault #{} not found", vault_id)))?;
+
+        let price = s.get_collateral_price_decimal(&vault.collateral_type)
+            .ok_or_else(|| ProtocolError::GenericError("No price available".to_string()))?;
+        let collateral_price_usd = UsdIcp::from(price);
+        let ratio = rumi_protocol_backend::compute_collateral_ratio(vault, collateral_price_usd, s);
+        let min_ratio = s.get_min_liquidation_ratio_for(&vault.collateral_type);
+
+        if ratio >= min_ratio {
+            return Err(ProtocolError::GenericError(format!(
+                "Vault #{} is not liquidatable (CR {:.2}% >= {:.2}%)",
+                vault_id, ratio.to_f64() * 100.0, min_ratio.to_f64() * 100.0
+            )));
+        }
+
+        // Use max_partial_liquidation_ratio (same as stability pool)
+        let max_liquidatable = vault.borrowed_icusd_amount * s.max_partial_liquidation_ratio;
+        let actual = max_liquidatable.min(vault.borrowed_icusd_amount);
+
+        // Check budget
+        if s.bot_budget_remaining_e8s < actual.to_u64() {
+            return Err(ProtocolError::GenericError(format!(
+                "Bot budget insufficient: {} remaining, need {}",
+                s.bot_budget_remaining_e8s, actual.to_u64()
+            )));
+        }
+
+        // Calculate collateral to seize (debt + liquidation bonus)
+        let decimals = s.get_collateral_config(&vault.collateral_type)
+            .map(|c| c.decimals)
+            .unwrap_or(8);
+        let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
+        let collateral_raw = rumi_protocol_backend::numeric::icusd_to_collateral_amount(actual, price, decimals);
+        let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
+        let collateral_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
+
+        Ok((collateral_price_usd, actual, collateral_to_seize, vault.collateral_type))
+    })?;
+
+    // Credit-based: directly update vault state (no icUSD pull from bot)
+    mutate_state(|s| {
+        if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
+            vault.borrowed_icusd_amount -= liquidatable_debt;
+            vault.collateral_amount -= collateral_to_seize.to_u64();
+        }
+
+        // Record event
+        let event = rumi_protocol_backend::event::Event::PartialLiquidateVault {
+            vault_id,
+            liquidator_payment: liquidatable_debt,
+            icp_to_liquidator: collateral_to_seize,
+            liquidator: Some(caller),
+            icp_rate: Some(collateral_price_usd),
+            protocol_fee_collateral: None,
+        };
+        rumi_protocol_backend::storage::record_event(&event);
+
+        // Decrement budget, increment running totals
+        let debt = liquidatable_debt.to_u64();
+        s.bot_budget_remaining_e8s = s.bot_budget_remaining_e8s.saturating_sub(debt);
+        s.bot_total_debt_covered_e8s += debt;
+    });
+
+    // Transfer collateral directly to bot
+    match rumi_protocol_backend::management::transfer_icp(collateral_to_seize, caller).await {
+        Ok(block) => log!(INFO, "[bot_liquidate] Transferred {} ICP to bot for vault #{}, block {}",
+            collateral_to_seize.to_u64(), vault_id, block),
+        Err(e) => {
+            log!(INFO, "[bot_liquidate] ICP transfer to bot failed for vault #{}: {:?}", vault_id, e);
+            return Err(ProtocolError::GenericError(format!("Collateral transfer failed: {:?}", e)));
+        }
+    }
+
+    Ok(BotLiquidationResult {
+        vault_id,
+        collateral_amount: collateral_to_seize.to_u64(),
+        debt_covered: liquidatable_debt.to_u64(),
+        collateral_price_e8s: collateral_price_usd.to_e8s(),
+    })
+}
+
+/// Developer-only: force the bot to liquidate a vault regardless of health ratio.
+/// Used for testing the liquidation pipeline end-to-end.
+#[candid_method(update)]
+#[update]
+async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, ProtocolError> {
+    validate_call().await?;
+    let caller = ic_cdk::caller();
+    let is_authorized = read_state(|s| {
+        s.developer_principal == caller
+            || s.liquidation_bot_principal.map_or(false, |bp| bp == caller)
+    });
+    if !is_authorized {
+        return Err(ProtocolError::GenericError("Only developer or bot can force bot liquidation".to_string()));
+    }
+
+    // Get vault info — NO CR check (force liquidation)
+    let (collateral_price_usd, debt_to_cover, collateral_to_seize, collateral_type, config_decimals) = read_state(|s| {
+        let vault = s.vault_id_to_vaults.get(&vault_id)
+            .ok_or_else(|| ProtocolError::GenericError(format!("Vault #{} not found", vault_id)))?;
+
+        let price = s.get_collateral_price_decimal(&vault.collateral_type)
+            .ok_or_else(|| ProtocolError::GenericError("No price available".to_string()))?;
+        let collateral_price_usd = UsdIcp::from(price);
+        let decimals = s.get_collateral_config(&vault.collateral_type)
+            .map(|c| c.decimals)
+            .unwrap_or(8);
+
+        // Full debt, calculate proportional collateral
+        let debt = vault.borrowed_icusd_amount;
+        let collateral_raw = rumi_protocol_backend::numeric::icusd_to_collateral_amount(debt, price, decimals);
+        // Add liquidation bonus
+        let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
+        let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
+        let collateral_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
+
+        Ok::<_, ProtocolError>((collateral_price_usd, debt, collateral_to_seize, vault.collateral_type, decimals))
+    })?;
+
+    // Directly update vault state — no icUSD transfer needed (credit-based)
+    mutate_state(|s| {
+        if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
+            vault.borrowed_icusd_amount -= debt_to_cover;
+            vault.collateral_amount -= collateral_to_seize.to_u64();
+        }
+
+        // Record event
+        let event = rumi_protocol_backend::event::Event::PartialLiquidateVault {
+            vault_id,
+            liquidator_payment: debt_to_cover,
+            icp_to_liquidator: collateral_to_seize,
+            liquidator: Some(caller),
+            icp_rate: Some(collateral_price_usd),
+            protocol_fee_collateral: None,
+        };
+        rumi_protocol_backend::storage::record_event(&event);
+    });
+
+    // Transfer collateral directly to caller (bot)
+    match rumi_protocol_backend::management::transfer_icp(collateral_to_seize, caller).await {
+        Ok(block) => log!(INFO, "[dev_force_bot_liquidate] Transferred {} ICP to bot, block {}", collateral_to_seize.to_u64(), block),
+        Err(e) => log!(INFO, "[dev_force_bot_liquidate] ICP transfer failed: {:?}", e),
+    }
+
+    log!(INFO, "[dev_force_bot_liquidate] Force-liquidated vault #{}: debt={}, collateral={}",
+        vault_id, debt_to_cover.to_u64(), collateral_to_seize.to_u64());
+
+    Ok(BotLiquidationResult {
+        vault_id,
+        collateral_amount: collateral_to_seize.to_u64(),
+        debt_covered: debt_to_cover.to_u64(),
+        collateral_price_e8s: collateral_price_usd.to_e8s(),
+    })
+}
+
+/// Bot calls this after swapping collateral → icUSD to repay its obligation.
+#[candid_method(update)]
+#[update]
+async fn bot_deposit_to_reserves(amount_e8s: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let is_bot = read_state(|s| {
+        s.liquidation_bot_principal.map_or(false, |bp| bp == caller)
+    });
+    if !is_bot {
+        return Err(ProtocolError::GenericError(
+            "Caller is not the registered liquidation bot canister".to_string(),
+        ));
+    }
+    mutate_state(|s| {
+        s.bot_total_icusd_deposited_e8s += amount_e8s;
+    });
+    log!(INFO, "[bot_deposit_to_reserves] Bot deposited {} e8s icUSD to reserves", amount_e8s);
+    Ok(())
+}
+
+#[candid_method(query)]
+#[query]
+fn get_bot_stats() -> BotStatsResponse {
+    read_state(|s| BotStatsResponse {
+        liquidation_bot_principal: s.liquidation_bot_principal,
+        budget_total_e8s: s.bot_budget_total_e8s,
+        budget_remaining_e8s: s.bot_budget_remaining_e8s,
+        budget_start_timestamp: s.bot_budget_start_timestamp,
+        total_debt_covered_e8s: s.bot_total_debt_covered_e8s,
+        total_icusd_deposited_e8s: s.bot_total_icusd_deposited_e8s,
+    })
+}
+
 // ---- Stable token repayment admin functions ----
 
 /// Set the fee rate charged on ckUSDT/ckUSDC repayments (developer only)

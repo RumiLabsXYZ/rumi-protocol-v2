@@ -192,6 +192,17 @@ pub enum Event {
         principal: Principal,
     },
 
+    #[serde(rename = "set_liquidation_bot_principal")]
+    SetLiquidationBotPrincipal {
+        principal: Principal,
+    },
+
+    #[serde(rename = "set_bot_budget")]
+    SetBotBudget {
+        total_e8s: u64,
+        start_timestamp: u64,
+    },
+
     #[serde(rename = "set_liquidation_bonus")]
     SetLiquidationBonus {
         rate: String,
@@ -420,6 +431,8 @@ impl Event {
             Event::SetStableLedgerPrincipal { .. } => false,
             Event::SetTreasuryPrincipal { .. } => false,
             Event::SetStabilityPoolPrincipal { .. } => false,
+            Event::SetLiquidationBotPrincipal { .. } => false,
+            Event::SetBotBudget { .. } => false,
             Event::SetLiquidationBonus { .. } => false,
             Event::SetBorrowingFee { .. } => false,
             Event::SetRedemptionFeeFloor { .. } => false,
@@ -659,6 +672,14 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             },
             Event::SetStabilityPoolPrincipal { principal } => {
                 state.stability_pool_canister = Some(principal);
+            },
+            Event::SetLiquidationBotPrincipal { principal } => {
+                state.liquidation_bot_principal = Some(principal);
+            },
+            Event::SetBotBudget { total_e8s, start_timestamp } => {
+                state.bot_budget_total_e8s = total_e8s;
+                state.bot_budget_remaining_e8s = total_e8s;
+                state.bot_budget_start_timestamp = start_timestamp;
             },
             Event::SetLiquidationBonus { rate } => {
                 if let Ok(dec) = rate.parse::<Decimal>() {
@@ -1154,6 +1175,18 @@ pub fn record_set_treasury_principal(state: &mut State, principal: Principal) {
 pub fn record_set_stability_pool_principal(state: &mut State, principal: Principal) {
     record_event(&Event::SetStabilityPoolPrincipal { principal });
     state.stability_pool_canister = Some(principal);
+}
+
+pub fn record_set_liquidation_bot_principal(state: &mut State, principal: Principal) {
+    record_event(&Event::SetLiquidationBotPrincipal { principal });
+    state.liquidation_bot_principal = Some(principal);
+}
+
+pub fn record_set_bot_budget(state: &mut State, total_e8s: u64, start_timestamp: u64) {
+    record_event(&Event::SetBotBudget { total_e8s, start_timestamp });
+    state.bot_budget_total_e8s = total_e8s;
+    state.bot_budget_remaining_e8s = total_e8s;
+    state.bot_budget_start_timestamp = start_timestamp;
 }
 
 pub fn record_set_liquidation_bonus(state: &mut State, rate: Ratio) {

@@ -5,6 +5,9 @@
   "icusd_ledger": {
     "ic": "t6bor-paaaa-aaaap-qrd5q-cai"
   },
+  "liquidation_bot": {
+    "ic": "nygob-3qaaa-aaaap-qttcq-cai"
+  },
   "rumi_3pool": {
     "ic": "fohh4-yyaaa-aaaap-qtkpa-cai"
   },

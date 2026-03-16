@@ -267,14 +267,16 @@ impl From<GuardError> for ProtocolError {
     }
 }
 
-/// Candid-compatible struct matching the stability pool's `LiquidatableVaultInfo`.
-/// Defined inline to avoid a crate dependency between backend and pool.
+/// Candid-compatible struct matching the stability pool's and bot's `LiquidatableVaultInfo`.
+/// Defined inline to avoid a crate dependency between backend and pool/bot.
 #[derive(CandidType, Clone, Debug, Deserialize)]
 struct LiquidatableVaultInfo {
     pub vault_id: u64,
     pub collateral_type: Principal,
     pub debt_amount: u64,
     pub collateral_amount: u64,
+    pub recommended_liquidation_amount: u64,
+    pub collateral_price_e8s: u64,
 }
 
 pub fn check_vaults() {
@@ -329,33 +331,62 @@ pub fn check_vaults() {
             );
         }
 
-        // Push liquidatable vault notifications to stability pool (fire-and-forget)
-        if let Some(pool_canister) = read_state(|s| s.stability_pool_canister) {
-            let vault_notifications: Vec<LiquidatableVaultInfo> = unhealthy_vaults
-                .iter()
-                .map(|v| LiquidatableVaultInfo {
+        // Build enriched notification payload
+        let vault_notifications: Vec<LiquidatableVaultInfo> = read_state(|s| {
+            unhealthy_vaults.iter().map(|v| {
+                let price = s.get_collateral_price_decimal(&v.collateral_type)
+                    .map(|p| UsdIcp::from(p).to_e8s())
+                    .unwrap_or(0);
+                let max_liq = (v.borrowed_icusd_amount * s.max_partial_liquidation_ratio)
+                    .min(v.borrowed_icusd_amount);
+                LiquidatableVaultInfo {
                     vault_id: v.vault_id,
                     collateral_type: v.collateral_type,
                     debt_amount: v.borrowed_icusd_amount.to_u64(),
                     collateral_amount: v.collateral_amount,
-                })
-                .collect();
+                    recommended_liquidation_amount: max_liq.to_u64(),
+                    collateral_price_e8s: price,
+                }
+            }).collect()
+        });
 
-            let count = vault_notifications.len();
+        // Push to stability pool (fire-and-forget)
+        if let Some(pool_canister) = read_state(|s| s.stability_pool_canister) {
+            let notifications = vault_notifications.clone();
+            let count = notifications.len();
             ic_cdk::spawn(async move {
                 let _result: Result<(), _> = ic_cdk::call(
                     pool_canister,
                     "notify_liquidatable_vaults",
-                    (vault_notifications,),
+                    (notifications,),
                 )
                 .await;
-                // Result intentionally ignored — pool failure must not affect the backend
             });
             log!(
                 INFO,
                 "[check_vaults] Pushed {} liquidatable vaults to stability pool {}",
                 count,
                 pool_canister
+            );
+        }
+
+        // Push to liquidation bot (fire-and-forget)
+        if let Some(bot_canister) = read_state(|s| s.liquidation_bot_principal) {
+            let notifications = vault_notifications.clone();
+            let count = notifications.len();
+            ic_cdk::spawn(async move {
+                let _result: Result<(), _> = ic_cdk::call(
+                    bot_canister,
+                    "notify_liquidatable_vaults",
+                    (notifications,),
+                )
+                .await;
+            });
+            log!(
+                INFO,
+                "[check_vaults] Pushed {} liquidatable vaults to bot {}",
+                count,
+                bot_canister
             );
         }
     } else {
