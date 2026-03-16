@@ -75,6 +75,13 @@
   </section>
 
   <section class="doc-section">
+    <h2 class="doc-heading">Liquidation Bot Risk</h2>
+    <p>The <a href="/docs/liquidation-bot" class="doc-link">Liquidation Bot</a> relies on external DEX liquidity (KongSwap and the 3pool) to convert seized collateral into icUSD. If DEX liquidity is thin, swaps may fail or execute with high slippage, reducing the icUSD recovered below the debt covered. This creates a deficit that the protocol absorbs.</p>
+    <p>The bot has a configurable monthly budget that limits total exposure. If many vaults become undercollateralized simultaneously (e.g., during a market crash), the budget may be exhausted before all vaults are processed. Remaining vaults fall through to the stability pool and manual liquidators.</p>
+    <p>There is also a timing risk: collateral prices can move between when the bot seizes collateral and when the swap completes. A sharp price drop during this window means less icUSD is recovered.</p>
+  </section>
+
+  <section class="doc-section">
     <h2 class="doc-heading">Peg Stability</h2>
     <p>icUSD is designed to be worth $1, but there is no hard guarantee. The peg is maintained through overcollateralization and a redemption mechanism. If confidence in the protocol drops, icUSD could trade below $1. Rumi does not control secondary market pricing.</p>
   </section>

@@ -61,6 +61,17 @@
   </section>
 
   <section class="doc-section">
+    <h2 class="doc-heading">Who Liquidates</h2>
+    <p>The protocol uses a three-tier liquidation system. When an unhealthy vault is detected, all tiers are notified simultaneously, but they typically act in this order:</p>
+    <ol class="flow-list">
+      <li><strong><a href="/docs/liquidation-bot" class="doc-link">Liquidation Bot</a></strong> — An autonomous canister that liquidates vaults on credit, swaps collateral for icUSD via DEXes, and deposits the proceeds back to protocol reserves. Handles most liquidations within minutes.</li>
+      <li><strong><a href="/docs/stability-pool" class="doc-link">Stability Pool</a></strong> — Uses depositors' stablecoins to cover vault debt. Acts as backup if the bot fails or runs out of budget.</li>
+      <li><strong>Manual Liquidators</strong> — Any user can liquidate directly via the <a href="/liquidations?tab=manual" class="doc-link">Liquidate</a> page using icUSD, ckUSDC, or ckUSDT.</li>
+    </ol>
+    <p>The sections below describe the mechanics that apply to all liquidation methods.</p>
+  </section>
+
+  <section class="doc-section">
     <h2 class="doc-heading">Full Liquidation</h2>
     <p>Any user can liquidate an undercollateralized vault. The liquidator pays the vault's full icUSD debt and receives collateral worth {penaltyMult}% of the debt they repaid — the extra {penaltyPct}% is the liquidation penalty, seized from the vault owner's collateral. A {liqProtocolPct}% protocol fee is taken from the bonus before payout (i.e., the liquidator receives {liqKeepPct}% of the {penaltyPct}% bonus, and {liqProtocolPct}% goes to the protocol treasury).</p>
     <p>If the vault's collateral is worth less than {penaltyMult}% of the debt (deep undercollateralization), the liquidator receives all available collateral. For full liquidations, any excess collateral above the {penaltyMult}% is returned to the original vault owner. For partial liquidations, the excess remains in the vault since it stays open.</p>
@@ -126,5 +137,13 @@
     text-align: center;
     color: var(--rumi-text-primary);
     font-weight: 500;
+  }
+  .flow-list {
+    padding-left: 1.25rem;
+    display: flex; flex-direction: column; gap: 0.5rem;
+    margin: 0.5rem 0;
+  }
+  .flow-list li {
+    font-size: 0.875rem; color: var(--rumi-text-secondary); line-height: 1.5;
   }
 </style>

@@ -11,6 +11,11 @@
       description: "How liquidations work, when they trigger, and what happens to your collateral."
     },
     {
+      title: "Liquidation Bot",
+      href: "/docs/liquidation-bot",
+      description: "How the autonomous liquidation bot works: credit-based liquidation, DEX swaps, and failure escalation."
+    },
+    {
       title: "What Can Go Wrong",
       href: "/docs/risks",
       description: "Protocol risks, oracle failure modes, and edge cases you should understand."
