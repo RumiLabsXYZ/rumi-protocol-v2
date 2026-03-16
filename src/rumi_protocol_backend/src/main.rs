@@ -1155,7 +1155,7 @@ async fn bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, ProtocolEr
     }
 
     // Get vault info, compute liquidatable amount, and validate budget
-    let (collateral_price_usd, liquidatable_debt) = read_state(|s| {
+    let (collateral_price_usd, liquidatable_debt, collateral_to_seize, collateral_type) = read_state(|s| {
         let vault = s.vault_id_to_vaults.get(&vault_id)
             .ok_or_else(|| ProtocolError::GenericError(format!("Vault #{} not found", vault_id)))?;
 
@@ -1184,23 +1184,130 @@ async fn bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, ProtocolEr
             )));
         }
 
-        Ok((collateral_price_usd, actual))
+        // Calculate collateral to seize (debt + liquidation bonus)
+        let decimals = s.get_collateral_config(&vault.collateral_type)
+            .map(|c| c.decimals)
+            .unwrap_or(8);
+        let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
+        let collateral_raw = rumi_protocol_backend::numeric::icusd_to_collateral_amount(actual, price, decimals);
+        let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
+        let collateral_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
+
+        Ok((collateral_price_usd, actual, collateral_to_seize, vault.collateral_type))
     })?;
 
-    // Execute partial liquidation (reuses existing logic — transfers collateral to caller)
-    let result = rumi_protocol_backend::vault::liquidate_vault_partial(vault_id, liquidatable_debt.to_u64()).await?;
-
-    // Decrement budget, increment running totals
+    // Credit-based: directly update vault state (no icUSD pull from bot)
     mutate_state(|s| {
+        if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
+            vault.borrowed_icusd_amount -= liquidatable_debt;
+            vault.collateral_amount -= collateral_to_seize.to_u64();
+        }
+
+        // Record event
+        let event = rumi_protocol_backend::event::Event::PartialLiquidateVault {
+            vault_id,
+            liquidator_payment: liquidatable_debt,
+            icp_to_liquidator: collateral_to_seize,
+            liquidator: Some(caller),
+            icp_rate: Some(collateral_price_usd),
+            protocol_fee_collateral: None,
+        };
+        rumi_protocol_backend::storage::record_event(&event);
+
+        // Decrement budget, increment running totals
         let debt = liquidatable_debt.to_u64();
         s.bot_budget_remaining_e8s = s.bot_budget_remaining_e8s.saturating_sub(debt);
         s.bot_total_debt_covered_e8s += debt;
     });
 
+    // Transfer collateral directly to bot
+    match rumi_protocol_backend::management::transfer_icp(collateral_to_seize, caller).await {
+        Ok(block) => log!(INFO, "[bot_liquidate] Transferred {} ICP to bot for vault #{}, block {}",
+            collateral_to_seize.to_u64(), vault_id, block),
+        Err(e) => {
+            log!(INFO, "[bot_liquidate] ICP transfer to bot failed for vault #{}: {:?}", vault_id, e);
+            return Err(ProtocolError::GenericError(format!("Collateral transfer failed: {:?}", e)));
+        }
+    }
+
     Ok(BotLiquidationResult {
         vault_id,
-        collateral_amount: result.block_index,
+        collateral_amount: collateral_to_seize.to_u64(),
         debt_covered: liquidatable_debt.to_u64(),
+        collateral_price_e8s: collateral_price_usd.to_e8s(),
+    })
+}
+
+/// Developer-only: force the bot to liquidate a vault regardless of health ratio.
+/// Used for testing the liquidation pipeline end-to-end.
+#[candid_method(update)]
+#[update]
+async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, ProtocolError> {
+    validate_call().await?;
+    let caller = ic_cdk::caller();
+    let is_authorized = read_state(|s| {
+        s.developer_principal == caller
+            || s.liquidation_bot_principal.map_or(false, |bp| bp == caller)
+    });
+    if !is_authorized {
+        return Err(ProtocolError::GenericError("Only developer or bot can force bot liquidation".to_string()));
+    }
+
+    // Get vault info — NO CR check (force liquidation)
+    let (collateral_price_usd, debt_to_cover, collateral_to_seize, collateral_type, config_decimals) = read_state(|s| {
+        let vault = s.vault_id_to_vaults.get(&vault_id)
+            .ok_or_else(|| ProtocolError::GenericError(format!("Vault #{} not found", vault_id)))?;
+
+        let price = s.get_collateral_price_decimal(&vault.collateral_type)
+            .ok_or_else(|| ProtocolError::GenericError("No price available".to_string()))?;
+        let collateral_price_usd = UsdIcp::from(price);
+        let decimals = s.get_collateral_config(&vault.collateral_type)
+            .map(|c| c.decimals)
+            .unwrap_or(8);
+
+        // Full debt, calculate proportional collateral
+        let debt = vault.borrowed_icusd_amount;
+        let collateral_raw = rumi_protocol_backend::numeric::icusd_to_collateral_amount(debt, price, decimals);
+        // Add liquidation bonus
+        let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
+        let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
+        let collateral_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
+
+        Ok::<_, ProtocolError>((collateral_price_usd, debt, collateral_to_seize, vault.collateral_type, decimals))
+    })?;
+
+    // Directly update vault state — no icUSD transfer needed (credit-based)
+    mutate_state(|s| {
+        if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
+            vault.borrowed_icusd_amount -= debt_to_cover;
+            vault.collateral_amount -= collateral_to_seize.to_u64();
+        }
+
+        // Record event
+        let event = rumi_protocol_backend::event::Event::PartialLiquidateVault {
+            vault_id,
+            liquidator_payment: debt_to_cover,
+            icp_to_liquidator: collateral_to_seize,
+            liquidator: Some(caller),
+            icp_rate: Some(collateral_price_usd),
+            protocol_fee_collateral: None,
+        };
+        rumi_protocol_backend::storage::record_event(&event);
+    });
+
+    // Transfer collateral directly to caller (bot)
+    match rumi_protocol_backend::management::transfer_icp(collateral_to_seize, caller).await {
+        Ok(block) => log!(INFO, "[dev_force_bot_liquidate] Transferred {} ICP to bot, block {}", collateral_to_seize.to_u64(), block),
+        Err(e) => log!(INFO, "[dev_force_bot_liquidate] ICP transfer failed: {:?}", e),
+    }
+
+    log!(INFO, "[dev_force_bot_liquidate] Force-liquidated vault #{}: debt={}, collateral={}",
+        vault_id, debt_to_cover.to_u64(), collateral_to_seize.to_u64());
+
+    Ok(BotLiquidationResult {
+        vault_id,
+        collateral_amount: collateral_to_seize.to_u64(),
+        debt_covered: debt_to_cover.to_u64(),
         collateral_price_e8s: collateral_price_usd.to_e8s(),
     })
 }

@@ -46,9 +46,30 @@ type LiquidatableVaultInfo = record {
   collateral_price_e8s : nat64;
 };
 
+type TestSwapResult = record {
+  icp_input_e8s : nat64;
+  stable_output_native : nat64;
+  stable_route : text;
+  icusd_output_e8s : nat64;
+  icusd_sent_to : text;
+};
+
+type TestForceResult = record {
+  vault_id : nat64;
+  collateral_received_e8s : nat64;
+  debt_covered_e8s : nat64;
+  stable_output_native : nat64;
+  stable_route : text;
+  icusd_output_e8s : nat64;
+  icusd_deposited_to_reserves : bool;
+  icp_to_treasury_e8s : nat64;
+};
+
 service : (BotInitArgs) -> {
   notify_liquidatable_vaults : (vec LiquidatableVaultInfo) -> ();
   get_bot_stats : () -> (BotStats) query;
   get_liquidation_events : (nat64, nat64) -> (vec BotLiquidationEvent) query;
   set_config : (BotConfig) -> ();
+  test_swap_pipeline : (nat64) -> (TestSwapResult);
+  test_force_liquidate : (nat64) -> (TestForceResult);
 };

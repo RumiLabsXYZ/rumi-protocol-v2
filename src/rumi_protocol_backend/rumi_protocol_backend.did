@@ -493,6 +493,7 @@ service : (ProtocolArg) -> {
   admin_sweep_to_treasury : (text) -> (Result_1);
   bot_deposit_to_reserves : (nat64) -> (Result);
   bot_liquidate : (nat64) -> (Result_10);
+  dev_force_bot_liquidate : (nat64) -> (Result_10);
   borrow_from_vault : (VaultArg) -> (Result_2);
   claim_liquidity_returns : () -> (Result_1);
   clear_stuck_operations : (opt principal) -> (Result_1);

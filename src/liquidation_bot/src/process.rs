@@ -5,7 +5,7 @@ use icrc_ledger_types::icrc1::account::Account;
 use crate::state::{self, BotConfig, BotLiquidationEvent, LiquidatableVaultInfo};
 use crate::swap;
 
-/// Result returned by the backend's `bot_liquidate` endpoint.
+/// Result returned by the backend's `bot_liquidate` and `dev_force_bot_liquidate` endpoints.
 #[derive(CandidType, Deserialize, Debug)]
 pub struct BotLiquidationResult {
     pub vault_id: u64,
@@ -65,7 +65,7 @@ pub async fn process_pending() {
     };
 
     // 2. Swap ICP → ckStable (best of ckUSDC/ckUSDT on KongSwap)
-    let swap_amount = calculate_swap_amount(collateral_amount, debt_covered, collateral_price);
+    let swap_amount = calculate_swap_amount_internal(collateral_amount, debt_covered, collateral_price);
     let stable_result = swap::swap_icp_for_stable(&config, swap_amount).await;
     let (stable_amount, stable_token, route) = match stable_result {
         Ok(r) => (r.output_amount, r.target_token, r.route),
@@ -208,9 +208,7 @@ async fn transfer_icp_to_treasury(config: &BotConfig, amount_e8s: u64) -> Result
     }
 }
 
-/// Calculate how much ICP to swap for stablecoins.
-/// We need enough stablecoins to cover the debt. The rest goes to treasury as profit.
-fn calculate_swap_amount(collateral_e8s: u64, debt_e8s: u64, collateral_price_e8s: u64) -> u64 {
+fn calculate_swap_amount_internal(collateral_e8s: u64, debt_e8s: u64, collateral_price_e8s: u64) -> u64 {
     if collateral_price_e8s == 0 {
         return collateral_e8s;
     }
@@ -231,6 +229,20 @@ fn calculate_slippage(effective_price_e8s: u64, oracle_price_e8s: u64) -> i32 {
     // Positive = got less than expected (bad), negative = got more (good)
     let diff = oracle_price_e8s as i64 - effective_price_e8s as i64;
     (diff * 10_000 / oracle_price_e8s as i64) as i32
+}
+
+// ─── Public wrappers for test functions ───
+
+pub async fn call_bot_deposit_to_reserves_pub(config: &BotConfig, amount_e8s: u64) -> Result<(), String> {
+    call_bot_deposit_to_reserves(config, amount_e8s).await
+}
+
+pub async fn transfer_icp_to_treasury_pub(config: &BotConfig, amount_e8s: u64) -> Result<(), String> {
+    transfer_icp_to_treasury(config, amount_e8s).await
+}
+
+pub fn calculate_swap_amount(collateral_e8s: u64, debt_e8s: u64, collateral_price_e8s: u64) -> u64 {
+    calculate_swap_amount_internal(collateral_e8s, debt_e8s, collateral_price_e8s)
 }
 
 fn log_failed_event(vault: &LiquidatableVaultInfo, error: &str) {

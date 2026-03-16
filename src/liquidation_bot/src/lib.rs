@@ -1,6 +1,7 @@
-use candid::{CandidType, Deserialize};
+use candid::{CandidType, Deserialize, Nat};
 use ic_cdk_macros::{init, post_upgrade, pre_upgrade, query, update};
 use ic_canister_log::{declare_log_buffer, log};
+use icrc_ledger_types::icrc1::account::Account;
 
 mod state;
 mod process;
@@ -84,4 +85,196 @@ fn set_config(config: BotConfig) {
         ic_cdk::trap("Unauthorized: only admin can set config");
     }
     state::mutate_state(|s| s.config = Some(config));
+}
+
+// ─── Test Functions ───
+
+#[derive(CandidType, Deserialize)]
+pub struct TestSwapResult {
+    pub icp_input_e8s: u64,
+    pub stable_output_native: u64,
+    pub stable_route: String,
+    pub icusd_output_e8s: u64,
+    pub icusd_sent_to: String,
+}
+
+#[derive(CandidType, Deserialize)]
+pub struct TestForceResult {
+    pub vault_id: u64,
+    pub collateral_received_e8s: u64,
+    pub debt_covered_e8s: u64,
+    pub stable_output_native: u64,
+    pub stable_route: String,
+    pub icusd_output_e8s: u64,
+    pub icusd_deposited_to_reserves: bool,
+    pub icp_to_treasury_e8s: u64,
+}
+
+fn require_admin() {
+    let caller = ic_cdk::api::caller();
+    let is_admin = state::read_state(|s| {
+        s.config.as_ref().map(|c| c.admin == caller).unwrap_or(false)
+    });
+    if !is_admin {
+        ic_cdk::trap("Unauthorized: only admin can call test functions");
+    }
+}
+
+/// Test the swap pipeline: ICP → ckStable → icUSD.
+/// Send ICP to the bot first, then call this. The icUSD output is sent back to the caller.
+#[update]
+async fn test_swap_pipeline(amount_e8s: u64) -> TestSwapResult {
+    require_admin();
+
+    let config = state::read_state(|s| s.config.clone())
+        .expect("Bot not configured");
+
+    log!(INFO, "[test_swap_pipeline] Starting with {} e8s ICP", amount_e8s);
+
+    // Step 1: ICP → ckStable (KongSwap)
+    let stable_result = swap::swap_icp_for_stable(&config, amount_e8s).await;
+    let (stable_amount, _stable_token, route) = match stable_result {
+        Ok(r) => {
+            log!(INFO, "[test_swap_pipeline] KongSwap OK: {} native via {}", r.output_amount, r.route);
+            (r.output_amount, r.target_token, r.route)
+        }
+        Err(e) => ic_cdk::trap(&format!("KongSwap failed: {}", e)),
+    };
+
+    // Step 2: ckStable → icUSD (3pool)
+    let icusd_amount = match swap::swap_stable_for_icusd(&config, stable_amount, _stable_token).await {
+        Ok(amount) => {
+            log!(INFO, "[test_swap_pipeline] 3pool OK: {} e8s icUSD", amount);
+            amount
+        }
+        Err(e) => ic_cdk::trap(&format!("3pool swap failed: {}", e)),
+    };
+
+    // Step 3: Send icUSD back to caller
+    let caller = ic_cdk::api::caller();
+    let transfer_args = icrc_ledger_types::icrc1::transfer::TransferArg {
+        from_subaccount: None,
+        to: Account { owner: caller, subaccount: None },
+        amount: Nat::from(icusd_amount),
+        fee: None,
+        memo: None,
+        created_at_time: None,
+    };
+
+    let sent_to = match ic_cdk::call::<_, (Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,)>(
+        config.icusd_ledger, "icrc1_transfer", (transfer_args,)
+    ).await {
+        Ok((Ok(_),)) => {
+            log!(INFO, "[test_swap_pipeline] Sent {} e8s icUSD to {}", icusd_amount, caller);
+            format!("{}", caller)
+        }
+        Ok((Err(e),)) => {
+            log!(INFO, "[test_swap_pipeline] icUSD transfer failed: {:?}, keeping in bot", e);
+            "bot (transfer failed)".to_string()
+        }
+        Err((code, msg)) => {
+            log!(INFO, "[test_swap_pipeline] icUSD transfer call failed: {:?} {}", code, msg);
+            "bot (call failed)".to_string()
+        }
+    };
+
+    TestSwapResult {
+        icp_input_e8s: amount_e8s,
+        stable_output_native: stable_amount,
+        stable_route: route,
+        icusd_output_e8s: icusd_amount,
+        icusd_sent_to: sent_to,
+    }
+}
+
+/// Force-liquidate a vault (bypasses health ratio check on backend).
+/// The vault must exist. Creates a test entry in the event log.
+#[update]
+async fn test_force_liquidate(vault_id: u64) -> TestForceResult {
+    require_admin();
+
+    let config = state::read_state(|s| s.config.clone())
+        .expect("Bot not configured");
+
+    log!(INFO, "[test_force_liquidate] Force-liquidating vault #{}", vault_id);
+
+    // Step 1: Call dev_force_bot_liquidate on backend
+    let liq_result: Result<(process::BackendResult<process::BotLiquidationResult>,), _> =
+        ic_cdk::call(config.backend_principal, "dev_force_bot_liquidate", (vault_id,)).await;
+
+    let (collateral_amount, debt_covered, collateral_price) = match liq_result {
+        Ok((process::BackendResult::Ok(r),)) => {
+            log!(INFO, "[test_force_liquidate] Got {} e8s collateral, {} e8s debt", r.collateral_amount, r.debt_covered);
+            (r.collateral_amount, r.debt_covered, r.collateral_price_e8s)
+        }
+        Ok((process::BackendResult::Err(e),)) => ic_cdk::trap(&format!("dev_force_bot_liquidate error: {}", e)),
+        Err((code, msg)) => ic_cdk::trap(&format!("dev_force_bot_liquidate call failed: {:?} {}", code, msg)),
+    };
+
+    // Step 2: Calculate swap amount and swap ICP → ckStable
+    let swap_amount = process::calculate_swap_amount(collateral_amount, debt_covered, collateral_price);
+    let stable_result = swap::swap_icp_for_stable(&config, swap_amount).await;
+    let (stable_amount, stable_token, route) = match stable_result {
+        Ok(r) => {
+            log!(INFO, "[test_force_liquidate] KongSwap OK: {} native via {}", r.output_amount, r.route);
+            (r.output_amount, r.target_token, r.route)
+        }
+        Err(e) => ic_cdk::trap(&format!("KongSwap failed: {}", e)),
+    };
+
+    // Step 3: ckStable → icUSD (3pool)
+    let icusd_amount = match swap::swap_stable_for_icusd(&config, stable_amount, stable_token).await {
+        Ok(amount) => {
+            log!(INFO, "[test_force_liquidate] 3pool OK: {} e8s icUSD", amount);
+            amount
+        }
+        Err(e) => ic_cdk::trap(&format!("3pool swap failed: {}", e)),
+    };
+
+    // Step 4: Deposit icUSD to backend reserves
+    let deposited = match process::call_bot_deposit_to_reserves_pub(&config, icusd_amount).await {
+        Ok(()) => {
+            log!(INFO, "[test_force_liquidate] Deposited {} e8s icUSD to reserves", icusd_amount);
+            true
+        }
+        Err(e) => {
+            log!(INFO, "[test_force_liquidate] Deposit failed: {}, icUSD stays in bot", e);
+            false
+        }
+    };
+
+    // Step 5: Send remaining ICP to treasury
+    let icp_to_treasury = collateral_amount.saturating_sub(swap_amount);
+    if icp_to_treasury > 0 {
+        let _ = process::transfer_icp_to_treasury_pub(&config, icp_to_treasury).await;
+    }
+
+    // Log event
+    state::mutate_state(|s| {
+        s.stats.events_count += 1;
+        s.liquidation_events.push(BotLiquidationEvent {
+            timestamp: ic_cdk::api::time(),
+            vault_id,
+            debt_covered_e8s: debt_covered,
+            collateral_received_e8s: collateral_amount,
+            icusd_burned_e8s: icusd_amount,
+            collateral_to_treasury_e8s: icp_to_treasury,
+            swap_route: route.clone(),
+            effective_price_e8s: 0,
+            slippage_bps: 0,
+            success: true,
+            error_message: Some("test_force_liquidate".to_string()),
+        });
+    });
+
+    TestForceResult {
+        vault_id,
+        collateral_received_e8s: collateral_amount,
+        debt_covered_e8s: debt_covered,
+        stable_output_native: stable_amount,
+        stable_route: route,
+        icusd_output_e8s: icusd_amount,
+        icusd_deposited_to_reserves: deposited,
+        icp_to_treasury_e8s: icp_to_treasury,
+    }
 }
