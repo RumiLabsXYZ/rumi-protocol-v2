@@ -2825,6 +2825,43 @@ async fn set_collateral_debt_ceiling(
     Ok(())
 }
 
+/// Set the LST haircut for a collateral type that uses LstWrapped price source.
+/// Haircut is a decimal: 0.07 = 7%, range 0.0–0.50.
+#[candid_method(update)]
+#[update]
+async fn set_lst_haircut(
+    collateral_type: Principal,
+    haircut: f64,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError("Only developer can set LST haircut".to_string()));
+    }
+
+    if haircut < 0.0 || haircut > 0.50 {
+        return Err(ProtocolError::GenericError(
+            format!("Haircut must be between 0.0 and 0.50, got {}", haircut),
+        ));
+    }
+
+    mutate_state(|s| {
+        if let Some(config) = s.collateral_configs.get_mut(&collateral_type) {
+            match &mut config.price_source {
+                rumi_protocol_backend::state::PriceSource::LstWrapped { haircut: h, .. } => {
+                    *h = haircut;
+                    log!(INFO, "[set_lst_haircut] Collateral {} haircut set to {}", collateral_type, haircut);
+                }
+                _ => {
+                    log!(INFO, "[set_lst_haircut] Collateral {} is not LstWrapped, ignoring", collateral_type);
+                }
+            }
+        }
+    });
+
+    Ok(())
+}
+
 #[candid_method(query)]
 #[query]
 fn get_collateral_config(collateral_type: Principal) -> Option<rumi_protocol_backend::state::CollateralConfig> {
