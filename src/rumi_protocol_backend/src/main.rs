@@ -23,8 +23,6 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use rumi_protocol_backend::storage::events;
 use rumi_protocol_backend::LiquidityStatus;
-use candid_parser::utils::CandidSource;
-use candid_parser::utils::service_equal;
 use candid::{CandidType, Deserialize};
 
 /// Result from stability pool liquidation
@@ -518,7 +516,7 @@ async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
 /// then calls open_vault_with_deposit or add_margin_with_deposit.
 #[candid_method(query)]
 #[query]
-fn get_deposit_account(collateral_type: Option<Principal>) -> icrc_ledger_types::icrc1::account::Account {
+fn get_deposit_account(_collateral_type: Option<Principal>) -> icrc_ledger_types::icrc1::account::Account {
     let caller = ic_cdk::caller();
     rumi_protocol_backend::management::get_deposit_account_for(&caller)
 }
@@ -1039,7 +1037,7 @@ async fn set_treasury_principal(treasury_principal: Principal) -> Result<(), Pro
     
     // Only developer can set treasury principal
     let is_developer = read_state(|s| s.developer_principal == caller);
-    if (!is_developer) {
+    if !is_developer {
         return Err(ProtocolError::GenericError("Only developer can set treasury principal".to_string()));
     }
     
@@ -1155,7 +1153,7 @@ async fn bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, ProtocolEr
     }
 
     // Get vault info, compute liquidatable amount, and validate budget
-    let (collateral_price_usd, liquidatable_debt, collateral_to_seize, collateral_type) = read_state(|s| {
+    let (collateral_price_usd, liquidatable_debt, collateral_to_seize, _collateral_type) = read_state(|s| {
         let vault = s.vault_id_to_vaults.get(&vault_id)
             .ok_or_else(|| ProtocolError::GenericError(format!("Vault #{} not found", vault_id)))?;
 
@@ -1254,7 +1252,7 @@ async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, 
     }
 
     // Get vault info — NO CR check (force liquidation)
-    let (collateral_price_usd, debt_to_cover, collateral_to_seize, collateral_type, config_decimals) = read_state(|s| {
+    let (collateral_price_usd, debt_to_cover, collateral_to_seize, _collateral_type, _config_decimals) = read_state(|s| {
         let vault = s.vault_id_to_vaults.get(&vault_id)
             .ok_or_else(|| ProtocolError::GenericError(format!("Vault #{} not found", vault_id)))?;
 

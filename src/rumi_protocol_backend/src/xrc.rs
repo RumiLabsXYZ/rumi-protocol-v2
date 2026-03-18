@@ -5,7 +5,7 @@ use crate::Decimal;
 use crate::Mode;
 use ic_canister_log::log;
 use ic_xrc_types::GetExchangeRateResult;
-use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
+use rust_decimal::prelude::FromPrimitive;
 use rust_decimal_macros::dec;
 use std::time::Duration;
 

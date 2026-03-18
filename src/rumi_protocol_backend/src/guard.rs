@@ -23,7 +23,7 @@ pub enum OperationState {
 pub struct GuardPrincipal {
     principal: Principal,
     _created_at: u64,
-    operation_name: String,
+    _operation_name: String,
     _marker: PhantomData<GuardPrincipal>,
 }
 
@@ -123,7 +123,7 @@ impl GuardPrincipal {
             Ok(Self {
                 principal,
                 _created_at: current_time,
-                operation_name: operation_name.to_string(),
+                _operation_name: operation_name.to_string(),
                 _marker: PhantomData,
             })
         })

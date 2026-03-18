@@ -2,7 +2,6 @@ use crate::event::{
     record_add_margin_to_vault, record_borrow_from_vault, record_open_vault,
     record_redemption_on_vaults, record_repayed_to_vault,
 };
-use ic_cdk::update;
 use crate::guard::GuardPrincipal;
 use crate::GuardError;
 use crate::logs::INFO;
@@ -2282,7 +2281,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
     // Step 2: Calculate liquidation amounts
     // Check if this is a recovery-mode targeted liquidation (vault CR between 133-150%)
     let vault_collateral = ICP::from(vault.collateral_amount);
-    let (debt_amount, collateral_to_liquidator, total_to_seize, protocol_cut, excess_collateral, is_recovery_partial) = read_state(|s| {
+    let (debt_amount, collateral_to_liquidator, _total_to_seize, protocol_cut, excess_collateral, is_recovery_partial) = read_state(|s| {
         let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
         let protocol_share = s.get_liquidation_protocol_share();
         if let Some(repay_cap) = s.compute_recovery_repay_cap(&vault, collateral_price_usd) {
