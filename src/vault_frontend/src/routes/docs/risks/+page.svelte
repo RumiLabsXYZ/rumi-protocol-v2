@@ -5,17 +5,12 @@
   import type { CollateralInfo } from '$lib/services/types';
   import { get } from 'svelte/store';
 
-  let targetPct = '155';
-  let recoveryPct = '150';
+  let recoveryPct = '—';
   let collaterals: CollateralInfo[] = [];
-
-  $: liqSummary = collaterals.map(c => `${(c.liquidationCr * 100).toFixed(0)}% for ${c.symbol}`).join(', ');
-  $: borrowSummary = collaterals.map(c => `${(c.minimumCr * 100).toFixed(0)}% for ${c.symbol}`).join(', ');
 
   onMount(async () => {
     try {
       const status = await protocolService.getProtocolStatus();
-      if (status.recoveryTargetCr > 0) targetPct = (status.recoveryTargetCr * 100).toFixed(0);
       if (status.recoveryModeThreshold > 0) recoveryPct = (status.recoveryModeThreshold * 100).toFixed(0);
 
       await collateralStore.fetchSupportedCollateral();
@@ -34,14 +29,14 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Price Volatility</h2>
-    <p>Collateral assets can move sharply. A vault at 140% collateral ratio is only one bad candle away from liquidation. The protocol polls prices every 5 minutes and refreshes on-demand for operations — if a collateral asset drops sharply between updates, your vault could go from safe to liquidated with no intermediate warning.</p>
+    <p>Collateral assets can move sharply. A vault at 140% collateral ratio is only one bad candle away from liquidation. The protocol polls prices every 5 minutes and refreshes on-demand for operations. If a collateral asset drops sharply between updates, your vault could go from safe to liquidated with no intermediate warning.</p>
     <p>There is no notification system. You are responsible for monitoring your own vaults.</p>
   </section>
 
   <section class="doc-section">
     <h2 class="doc-heading">Oracle Failure</h2>
     <p>The protocol gets collateral prices from the Internet Computer's Exchange Rate Canister (XRC). If the XRC fails to return a price, the protocol continues using the last known price. If the XRC returns a price below $0.01, the protocol switches to Read-Only mode and halts all operations.</p>
-    <p>Risks include: stale prices leading to delayed liquidations (bad for the protocol) or premature liquidations if the XRC reports an incorrect price (bad for vault owners). The XRC is an IC system canister — Rumi has no control over its availability or accuracy.</p>
+    <p>Risks include: stale prices leading to delayed liquidations (bad for the protocol) or premature liquidations if the XRC reports an incorrect price (bad for vault owners). The XRC is an IC system canister, and Rumi has no control over its availability or accuracy.</p>
   </section>
 
   <section class="doc-section">
@@ -52,15 +47,15 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Ledger and Transfer Failures</h2>
-    <p>Operations involve multiple ledger calls (collateral transfers, icUSD minting). If a transfer fails mid-operation, the protocol uses guards to prevent double-processing and queues failed transfers for retry. However, edge cases could result in temporary inconsistencies — for example, a vault state updating before a transfer completes.</p>
+    <p>Operations involve multiple ledger calls (collateral transfers, icUSD minting). If a transfer fails mid-operation, the protocol uses guards to prevent double-processing and queues failed transfers for retry. However, edge cases could result in temporary inconsistencies, such as a vault state updating before a transfer completes.</p>
     <p>The protocol includes a health monitor that checks for stuck transfers every 5 minutes and retries them, but transfers stuck for over 15 minutes may require manual intervention.</p>
   </section>
 
   <section class="doc-section">
     <h2 class="doc-heading">Recovery Mode Cascades</h2>
-    <p>If the total system collateral ratio drops below the Recovery Mode threshold (currently {recoveryPct}%), the protocol enters Recovery mode and raises the liquidation threshold to the borrowing threshold for each collateral type{borrowSummary ? ` (${borrowSummary})` : ''}. This can cause vaults that were previously safe to suddenly become liquidatable — even though those individual vaults didn't change.</p>
-    <p>The Recovery Mode threshold is a <strong>debt-weighted average</strong> of all collateral types' borrowing thresholds. If new collateral types are added with different thresholds, the trigger point for Recovery Mode changes for everyone. Borrowing is still allowed in Recovery mode, but the minimum collateral ratio is raised to the recovery target CR, and per-collateral recovery fee overrides may apply.</p>
-    <p>In Recovery mode, vaults between their liquidation ratio and borrowing threshold receive <strong>targeted partial liquidation</strong> — only enough debt is repaid to restore their CR to {targetPct}%. They are not fully liquidated. Vaults below their liquidation ratio are still fully liquidated. See <a href="/docs/liquidation" class="doc-link">Liquidation Mechanics</a> for details.</p>
+    <p>If the total system collateral ratio drops below the Recovery Mode threshold (currently <span class="live">{recoveryPct}%</span>), the protocol enters Recovery mode and raises the liquidation threshold to the <a href="/docs/parameters" class="doc-link">borrowing threshold</a> for each collateral type. This can cause vaults that were previously safe to suddenly become liquidatable, even though those individual vaults didn't change.</p>
+    <p>The Recovery Mode threshold is a <strong>debt-weighted average</strong> of all collateral types' borrowing thresholds, and it shifts as the system's collateral composition changes. See <a href="/docs/parameters" class="doc-link">Protocol Parameters</a> for the current value. If new collateral types are added with different thresholds, the trigger point for Recovery Mode changes for everyone. Borrowing is still allowed in Recovery mode, but the minimum collateral ratio is raised to the <a href="/docs/parameters" class="doc-link">Recovery Target CR</a>.</p>
+    <p>In Recovery mode, vaults between their liquidation ratio and borrowing threshold receive <strong>targeted partial liquidation</strong>: only enough debt is repaid to restore their CR to the <a href="/docs/parameters" class="doc-link">Recovery Target CR</a> for that collateral type. They are not fully liquidated. Vaults below their liquidation ratio are still fully liquidated. See <a href="/docs/liquidation" class="doc-link">Liquidation Mechanics</a> for details.</p>
   </section>
 
   <section class="doc-section">
@@ -71,7 +66,7 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Redistribution Risk</h2>
-    <p>If a vault becomes deeply undercollateralized and is not liquidated by a third party, the protocol can redistribute its remaining debt and collateral across all other vaults of the same collateral type. This means your vault can absorb extra debt from a failed vault — even if your own vault is healthy. The extra debt comes with proportional extra collateral, so the net impact is a slight CR decrease. See <a href="/docs/liquidation" class="doc-link">Liquidation Mechanics</a> for the formula.</p>
+    <p>If a vault becomes deeply undercollateralized and is not liquidated by a third party, the protocol can redistribute its remaining debt and collateral across all other vaults of the same collateral type. This means your vault can absorb extra debt from a failed vault, even if your own vault is healthy. The extra debt comes with proportional extra collateral, so the net impact is a slight CR decrease. See <a href="/docs/liquidation" class="doc-link">Liquidation Mechanics</a> for the formula.</p>
   </section>
 
   <section class="doc-section">
@@ -98,8 +93,8 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Admin Controls</h2>
-    <p>The developer principal can mint icUSD directly via an <code>admin_mint_icusd</code> function. This exists as an emergency tool — for example, to refund users who lost funds due to a failed inter-canister transfer. Guardrails: each mint is capped at 1,500 icUSD with a 72-hour cooldown. Every use is recorded on-chain with a reason. See the <a href="/transparency" class="doc-link">Transparency</a> page for a full log.</p>
-    <p>The developer principal can also <strong>freeze the entire protocol</strong> — halting all state-changing operations as an emergency kill-switch — and <strong>manually enter or exit Recovery Mode</strong>, overriding the automatic CR-based trigger.</p>
+    <p>The developer principal can mint icUSD directly via an <code>admin_mint_icusd</code> function. This exists as an emergency tool to refund users who lost funds due to a failed inter-canister transfer. Guardrails: each mint is capped at 1,500 icUSD with a 72-hour cooldown. Every use is recorded on-chain with a reason. See the <a href="/transparency" class="doc-link">Transparency</a> page for a full log.</p>
+    <p>The developer principal can also <strong>freeze the entire protocol</strong>, halting all state-changing operations as an emergency kill-switch, and <strong>manually enter or exit Recovery Mode</strong>, overriding the automatic CR-based trigger.</p>
     <p>Beyond these emergency controls, the developer principal can adjust all configurable protocol parameters without a timelock or governance vote. This includes: borrowing fee, liquidation penalty, redemption fee floor/ceiling, reserve redemption fee, ckStable repay fee, recovery CR multiplier, interest rates, interest revenue split, and per-collateral settings (liquidation ratio, borrow threshold, debt ceiling, interest rate, status). The developer can also enable/disable reserve redemptions and individual stablecoin tokens.</p>
     <p>All parameter changes are recorded as on-chain events in the protocol's immutable event log. If the protocol transitions to SNS (DAO) governance, these functions would be controlled by governance proposals rather than a single principal.</p>
   </section>
@@ -107,6 +102,10 @@
   <section class="doc-section">
     <h2 class="doc-heading">Reserve Depletion</h2>
     <p>The protocol accumulates ckUSDT and ckUSDC reserves when users repay vault debt with stablecoins. These reserves are used to fill <a href="/docs/redemptions" class="doc-link">reserve redemptions</a> (Tier 1). If redemption demand exceeds the available reserves, the remainder spills over into vault redemptions, which take collateral from the lowest-CR vaults.</p>
-    <p>Heavy redemption activity can drain reserves entirely, causing all subsequent redemptions to hit vaults directly. The protocol admin can disable reserve redemptions if reserve levels become critically low. Vault owners should be aware that redemptions can reduce their collateral even if they maintain healthy collateral ratios — vaults with the lowest CRs are targeted first.</p>
+    <p>Heavy redemption activity can drain reserves entirely, causing all subsequent redemptions to hit vaults directly. The protocol admin can disable reserve redemptions if reserve levels become critically low. Vault owners should be aware that redemptions can reduce their collateral even if they maintain healthy collateral ratios, because vaults with the lowest CRs are targeted first.</p>
   </section>
 </article>
+
+<style>
+  .live { color: var(--rumi-action); font-weight: 600; }
+</style>

@@ -21,8 +21,8 @@
   let rmrCeilingCr = 1.5;
   let borrowingFeeCurve: [number, number][] = [];
 
-  type InterestSplitEntry = { destination: string; bps: bigint };
-  let interestSplit: InterestSplitEntry[] = [];
+  import type { InterestSplitEntryDTO } from '$lib/services/types';
+  let interestSplit: InterestSplitEntryDTO[] = [];
 
   function splitPct(dest: string): string {
     const entry = interestSplit.find(s => s.destination === dest);
@@ -131,13 +131,13 @@
 
   onMount(async () => {
     try {
-      const [status, rfFloor, rfCeil, ckFee, rrFee, split, lpShare, rFloor, rCeil, rFloorCr, rCeilCr, poolStatus] = await Promise.all([
+      // Fetch global parameters and per-collateral config in parallel
+      const [status, rfFloor, rfCeil, ckFee, rrFee, lpShare, rFloor, rCeil, rFloorCr, rCeilCr, poolStatus] = await Promise.all([
         protocolService.getProtocolStatus(),
         publicActor.get_redemption_fee_floor() as Promise<number>,
         publicActor.get_redemption_fee_ceiling() as Promise<number>,
         publicActor.get_ckstable_repay_fee() as Promise<number>,
         publicActor.get_reserve_redemption_fee() as Promise<number>,
-        publicActor.get_interest_split() as Promise<InterestSplitEntry[]>,
         publicActor.get_liquidation_protocol_share() as Promise<number>,
         publicActor.get_rmr_floor() as Promise<number>,
         publicActor.get_rmr_ceiling() as Promise<number>,
@@ -153,7 +153,7 @@
       redemptionFeeCeiling = Number(rfCeil);
       ckstableRepayFee = Number(ckFee);
       reserveRedemptionFee = Number(rrFee);
-      interestSplit = split;
+      interestSplit = status.interestSplit ?? [];
       liquidationProtocolShare = Number(lpShare);
       rmrFloor = Number(rFloor);
       rmrCeiling = Number(rCeil);
@@ -536,7 +536,7 @@
     <h2 class="doc-heading">Precision & Rounding</h2>
     <div class="params-table">
       <div class="param">
-        <span class="param-label">Token Arithmetic <span class="tip" data-tip="All internal token division operations (e.g., converting icUSD to ICP at a given price) round down (floor). This means the protocol never overpays — rounding always favors the protocol by a fraction of a unit.">?</span></span>
+        <span class="param-label">Token Arithmetic <span class="tip" data-tip="All internal token division operations (e.g., converting icUSD to ICP at a given price) round down (floor). This means the protocol never overpays; rounding always favors the protocol by a fraction of a unit.">?</span></span>
         <span class="param-val">Floor rounding (truncation)</span>
       </div>
       <div class="param">
@@ -545,7 +545,7 @@
       </div>
       <div class="param">
         <span class="param-label">ckStable Precision <span class="tip" data-tip="ckUSDT and ckUSDC use 6 decimal places (e6s). When converting between icUSD (8 decimals) and ckStables (6 decimals), amounts are truncated to the nearest 100 e8s. Up to 0.00000099 icUSD may be lost per conversion.">?</span></span>
-        <span class="param-val">6 decimals (e6s) — 100:1 conversion from e8s</span>
+        <span class="param-val">6 decimals (e6s), 100:1 conversion from e8s</span>
       </div>
     </div>
   </section>

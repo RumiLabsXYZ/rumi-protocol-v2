@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { publicActor } from '$lib/services/protocol/apiClient';
+  import { protocolService } from '$lib/services/protocol';
   import { threePoolService } from '$lib/services/threePoolService';
+  import type { InterestSplitEntryDTO } from '$lib/services/types';
 
-  type InterestSplitEntry = { destination: string; bps: bigint };
-  let interestSplit: InterestSplitEntry[] = [];
+  let interestSplit: InterestSplitEntryDTO[] = [];
 
   function splitPct(dest: string): string {
     const entry = interestSplit.find(s => s.destination === dest);
@@ -34,9 +34,9 @@
 
   onMount(async () => {
     try {
-      const [poolStatus, split] = await Promise.all([
+      const [poolStatus, status] = await Promise.all([
         threePoolService.getPoolStatus(),
-        publicActor.get_interest_split() as Promise<InterestSplitEntry[]>,
+        protocolService.getProtocolStatus(),
       ]);
 
       tokenSymbols = poolStatus.tokens.map(t => t.symbol);
@@ -47,7 +47,7 @@
       balances = poolStatus.balances;
       lpTotalSupply = poolStatus.lp_total_supply;
       virtualPrice = poolStatus.virtual_price;
-      interestSplit = split;
+      interestSplit = status.interestSplit ?? [];
     } catch (e) {
       console.error('Failed to fetch 3pool data:', e);
     }
@@ -106,15 +106,15 @@
     <h2 class="doc-heading">Removing Liquidity</h2>
     <p>There are two ways to remove liquidity:</p>
     <ul class="doc-list">
-      <li><strong>Proportional withdrawal</strong> — burns LP tokens and returns a proportional share of all three pool tokens. No fee applies.</li>
-      <li><strong>Single-token withdrawal</strong> — burns LP tokens and returns only one chosen token. An imbalance fee may apply since this shifts the pool balance.</li>
+      <li><strong>Proportional withdrawal:</strong> burns LP tokens and returns a proportional share of all three pool tokens. No fee applies.</li>
+      <li><strong>Single-token withdrawal:</strong> burns LP tokens and returns only one chosen token. An imbalance fee may apply since this shifts the pool balance.</li>
     </ul>
     <p>There is no lock-up period. You can withdraw liquidity at any time.</p>
   </section>
 
   <section class="doc-section">
     <h2 class="doc-heading">LP Token (3USD)</h2>
-    <p>When you add liquidity, you receive 3USD — an ICRC-1 token minted by the 3pool canister. 3USD represents your proportional share of the pool's total value. It is a standard ICRC-1 token: you can transfer it, check your balance, and use it in any ICRC-1-compatible application.</p>
+    <p>When you add liquidity, you receive 3USD, an ICRC-1 token minted by the 3pool canister. 3USD represents your proportional share of the pool's total value. It is a standard ICRC-1 token: you can transfer it, check your balance, and use it in any ICRC-1-compatible application.</p>
     <p>The value of 3USD is tracked by the <strong>virtual price</strong>, which represents how much underlying value each LP token is worth. The virtual price starts at 1.0 and grows over time as the pool earns revenue from swap fees and interest donations. It never decreases under normal conditions.</p>
     <p>Current virtual price: <span class="live">{loaded ? fmtVirtualPrice(virtualPrice) : '—'}</span></p>
   </section>
@@ -122,17 +122,17 @@
   <section class="doc-section">
     <h2 class="doc-heading">Interest Revenue</h2>
     <p>The Rumi Protocol donates a share of all vault interest revenue to the 3pool. Currently, <span class="live">{splitPct('three_pool')}</span> of all interest collected from borrowers is sent to the pool via the <code>donate</code> function. This increases the virtual price of 3USD, meaning LP holders earn yield passively without taking any action.</p>
-    <p>The remaining interest is split between the <a href="/docs/stability-pool" class="doc-link">stability pool</a> (<span class="live">{splitPct('stability_pool')}</span>) and the protocol treasury (<span class="live">{splitPct('treasury')}</span>). This split is admin-configurable — see <a href="/docs/parameters" class="doc-link">Protocol Parameters</a> for current values.</p>
+    <p>The remaining interest is split between the <a href="/docs/stability-pool" class="doc-link">stability pool</a> (<span class="live">{splitPct('stability_pool')}</span>) and the protocol treasury (<span class="live">{splitPct('treasury')}</span>). This split is admin-configurable; see <a href="/docs/parameters" class="doc-link">Protocol Parameters</a> for current values.</p>
   </section>
 
   <section class="doc-section">
     <h2 class="doc-heading">APY</h2>
     <p>The 3pool APY comes from two sources:</p>
     <ul class="doc-list">
-      <li><strong>Swap fee revenue</strong> — every swap generates fees, a portion of which accrues to LP holders via virtual price growth.</li>
-      <li><strong>Interest donations</strong> — the protocol donates vault interest to the pool, directly increasing virtual price.</li>
+      <li><strong>Swap fee revenue:</strong> every swap generates fees, a portion of which accrues to LP holders via virtual price growth.</li>
+      <li><strong>Interest donations:</strong> the protocol donates vault interest to the pool, directly increasing virtual price.</li>
     </ul>
-    <p>APY is calculated from observed virtual price growth over time (24 hours, 7 days, or 30 days). The pool takes snapshots of the virtual price every 6 hours for this purpose. Past performance does not guarantee future returns — APY depends on swap volume and protocol interest revenue.</p>
+    <p>APY is calculated from observed virtual price growth over time (24 hours, 7 days, or 30 days). The pool takes snapshots of the virtual price every 6 hours for this purpose. Past performance does not guarantee future returns. APY depends on swap volume and protocol interest revenue.</p>
   </section>
 
   {#if loaded}
@@ -163,7 +163,7 @@
   <section class="doc-section">
     <h2 class="doc-heading">Amplification Coefficient</h2>
     <p>The amplification coefficient (A) controls how tightly the pool prices assets near 1:1. A higher A means the pool behaves more like a constant-sum (x + y = k) curve near equilibrium, providing very low slippage for small trades. A lower A means the pool behaves more like a constant-product (x × y = k) curve, with more slippage but better protection against extreme imbalances.</p>
-    <p>The A parameter can be changed by the pool admin using a gradual ramp — it transitions linearly over a set period (typically hours to days) to avoid sudden liquidity disruption. The current value is <span class="live">{loaded ? currentA.toString() : '—'}</span>.</p>
+    <p>The A parameter can be changed by the pool admin using a gradual ramp, transitioning linearly over a set period (typically hours to days) to avoid sudden liquidity disruption. The current value is <span class="live">{loaded ? currentA.toString() : '—'}</span>.</p>
   </section>
 
   <section class="doc-section">
