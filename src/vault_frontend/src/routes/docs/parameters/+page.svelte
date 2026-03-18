@@ -3,7 +3,7 @@
   import { protocolService } from '$lib/services/protocol';
   import { publicActor } from '$lib/services/protocol/apiClient';
   import { collateralStore } from '$lib/stores/collateralStore';
-  import type { CollateralInfo } from '$lib/services/types';
+  import type { CollateralInfo, PerCollateralRateCurveDTO } from '$lib/services/types';
   import { get } from 'svelte/store';
   import { threePoolService } from '$lib/services/threePoolService';
 
@@ -47,6 +47,11 @@
   // All supported collateral types (populated dynamically)
   let collaterals: CollateralInfo[] = [];
 
+  // Rate curve visualization
+  let perCollateralRateCurves: PerCollateralRateCurveDTO[] = [];
+  let selectedBorrowAsset = '';
+  let selectedInterestAsset = '';
+
   let loaded = false;
 
   function pct(ratio: number, decimals = 1): string {
@@ -71,6 +76,58 @@
     }
     return 'Unlimited';
   }
+
+  // ── SVG helpers for rate curve visualization ──
+  type CurvePoint = { cr: number; rate: number; mult: number };
+
+  function curveX(cr: number, crMin: number, crMax: number): number {
+    const range = crMax - crMin || 1;
+    return 55 + ((cr - crMin) / range) * 385;
+  }
+  function curveY(rate: number, rateMax: number): number {
+    if (rateMax <= 0) return 120;
+    return 120 - (rate / rateMax) * 95;
+  }
+  function buildPolyline(pts: CurvePoint[], crMin: number, crMax: number, rateMax: number): string {
+    if (pts.length === 0) return '';
+    const extended = [
+      { cr: crMin, rate: pts[0].rate, mult: pts[0].mult },
+      ...pts,
+      { cr: crMax, rate: pts[pts.length - 1].rate, mult: pts[pts.length - 1].mult }
+    ];
+    return extended.map(p => `${curveX(p.cr, crMin, crMax)},${curveY(p.rate, rateMax)}`).join(' ');
+  }
+  function buildAreaPath(pts: CurvePoint[], crMin: number, crMax: number, rateMax: number): string {
+    if (pts.length === 0) return '';
+    const extended = [
+      { cr: crMin, rate: pts[0].rate },
+      ...pts,
+      { cr: crMax, rate: pts[pts.length - 1].rate }
+    ];
+    const coords = extended.map(p => `${curveX(p.cr, crMin, crMax)},${curveY(p.rate, rateMax)}`);
+    const x1 = curveX(crMin, crMin, crMax);
+    const x2 = curveX(crMax, crMin, crMax);
+    return `M ${x1},120 L ${coords.join(' L ')} L ${x2},120 Z`;
+  }
+
+  // ── Reactive curve data ──
+  $: selectedBorrowCollateral = collaterals.find(c => c.principal === selectedBorrowAsset);
+  $: borrowFeePoints = (() => {
+    if (!selectedBorrowCollateral || borrowingFeeCurve.length === 0) return [] as CurvePoint[];
+    const base = selectedBorrowCollateral.borrowingFee;
+    return [...borrowingFeeCurve]
+      .sort((a, b) => a[0] - b[0])
+      .map(([cr, mult]) => ({ cr: cr * 100, rate: base * mult * 100, mult }));
+  })();
+
+  $: selectedInterestCurve = perCollateralRateCurves.find(c => c.collateralType === selectedInterestAsset);
+  $: interestRatePoints = (() => {
+    if (!selectedInterestCurve || selectedInterestCurve.markers.length === 0) return [] as CurvePoint[];
+    const { baseRate, markers } = selectedInterestCurve;
+    return [...markers]
+      .sort((a, b) => a[0] - b[0])
+      .map(([cr, mult]) => ({ cr: cr * 100, rate: baseRate * mult * 100, mult }));
+  })();
 
   onMount(async () => {
     try {
@@ -103,6 +160,7 @@
       rmrFloorCr = Number(rFloorCr);
       rmrCeilingCr = Number(rCeilCr);
       borrowingFeeCurve = status.borrowingFeeCurveResolved ?? [];
+      perCollateralRateCurves = status.perCollateralRateCurves ?? [];
 
       // 3pool parameters
       poolSwapFeeBps = poolStatus.swap_fee_bps;
@@ -114,6 +172,12 @@
       await collateralStore.fetchSupportedCollateral();
       const state = get(collateralStore);
       collaterals = state.collaterals;
+
+      // Default selections
+      if (collaterals.length > 0) {
+        selectedBorrowAsset = collaterals[0].principal;
+        selectedInterestAsset = collaterals[0].principal;
+      }
 
     } catch (e) {
       console.error('Failed to fetch protocol parameters:', e);
@@ -161,21 +225,12 @@
             <td class="ct-label">Liquidation Penalty <span class="tip" data-tip="The extra collateral seized from a liquidated vault above the debt repaid.">?</span></td>
             {#each collaterals as c}<td class="ct-val live">{pct(c.liquidationBonus)}</td>{/each}
           </tr>
-          {#if borrowingFeeCurve.length > 0}
-            <tr class="curve-row">
-              <td class="ct-label">Borrowing Fee <span class="tip" data-tip="One-time fee deducted from minted icUSD. Scales with the system's Total Collateral Ratio (TCR). As TCR drops toward recovery, a multiplier increases the effective fee for all assets.">?</span></td>
-              {#each collaterals as c}<td class="ct-val"></td>{/each}
-            </tr>
-            {@const sortedCurve = [...borrowingFeeCurve].sort((a, b) => b[0] - a[0])}
-            {#each sortedCurve as [cr, mult], i}
-              <tr class="curve-row {i === sortedCurve.length - 1 ? 'curve-row-last' : ''}">
-                <td class="ct-label ct-label-indent">{mult.toFixed(2)}× at {(cr * 100).toFixed(0)}%</td>
-                {#each collaterals as c}<td class="ct-val live ct-val-sm">{(c.borrowingFee * mult * 100).toFixed(2)}%</td>{/each}
-              </tr>
-            {/each}
-          {/if}
           <tr>
-            <td class="ct-label">Interest Rate <span class="tip" data-tip="Annual interest charged on outstanding vault debt (APR).">?</span></td>
+            <td class="ct-label">Borrowing Fee (base) <span class="tip" data-tip="One-time fee deducted from minted icUSD. This is the base rate — see the curve visualization below for how it scales with the system's Total Collateral Ratio.">?</span></td>
+            {#each collaterals as c}<td class="ct-val live">{pctRaw(c.borrowingFee)}</td>{/each}
+          </tr>
+          <tr>
+            <td class="ct-label">Interest Rate (base APR) <span class="tip" data-tip="Annual interest charged on outstanding vault debt. This is the base rate — see the curve visualization below for how it scales with individual vault CR.">?</span></td>
             {#each collaterals as c}<td class="ct-val live">{pctRaw(c.interestRateApr)}</td>{/each}
           </tr>
           <tr>
@@ -196,6 +251,144 @@
           </tr>
         </tbody>
       </table>
+    </div>
+  </section>
+
+  <!-- Rate Curve Visualizations -->
+  <section class="doc-section">
+    <h2 class="doc-heading">Rate Curves</h2>
+    <p class="doc-note">How borrowing fees and interest rates scale with collateral ratio. Select an asset to see its effective rates at each curve node.</p>
+
+    <!-- Borrowing Fee Curve -->
+    <div class="curve-viz">
+      <div class="curve-viz-header">
+        <h3 class="curve-viz-title">Borrowing Fee Curve <span class="tip" data-tip="Shows how the one-time borrowing fee scales with Total Collateral Ratio (TCR). As the system becomes less collateralized, a multiplier increases the fee. The line slopes up from right (healthy) to left (stressed).">?</span></h3>
+        <select class="curve-select" bind:value={selectedBorrowAsset}>
+          {#each collaterals as c}
+            <option value={c.principal}>{c.symbol} — base {pctRaw(c.borrowingFee)}</option>
+          {/each}
+        </select>
+      </div>
+      {#if borrowFeePoints.length > 0}
+        {@const pts = borrowFeePoints}
+        {@const crMin = Math.min(...pts.map(p => p.cr)) - 10}
+        {@const crMax = Math.max(...pts.map(p => p.cr)) + 15}
+        {@const rateMax = Math.max(...pts.map(p => p.rate)) * 1.3}
+        <svg viewBox="0 0 480 190" class="curve-svg" preserveAspectRatio="xMidYMid meet">
+          <!-- Subtle grid lines -->
+          {#each [0.25, 0.5, 0.75, 1.0] as frac}
+            {@const gy = curveY(rateMax * frac, rateMax)}
+            <line x1="55" y1={gy} x2="440" y2={gy} stroke="var(--rumi-border, #333)" stroke-width="0.5" stroke-dasharray="3,3" />
+            <text x="50" y={gy + 3} text-anchor="end" fill="var(--rumi-text-muted, #888)" font-size="9" font-family="Inter, sans-serif">{(rateMax * frac).toFixed(2)}%</text>
+          {/each}
+
+          <!-- Area fill -->
+          <path d={buildAreaPath(pts, crMin, crMax, rateMax)} fill="var(--rumi-action, #34d399)" opacity="0.07" />
+
+          <!-- Rate line -->
+          <polyline points={buildPolyline(pts, crMin, crMax, rateMax)} fill="none" stroke="var(--rumi-action, #34d399)" stroke-width="2" stroke-linejoin="round" />
+
+          <!-- Data point circles, rate labels, and multiplier labels -->
+          {#each pts as p}
+            {@const px = curveX(p.cr, crMin, crMax)}
+            {@const py = curveY(p.rate, rateMax)}
+            <circle cx={px} cy={py} r="4.5" fill="var(--rumi-action, #34d399)" />
+            <circle cx={px} cy={py} r="2" fill="var(--rumi-bg-surface, #0d0d1a)" />
+            <text x={px} y={py - 10} text-anchor="middle" fill="var(--rumi-text-primary, #eee)" font-size="10" font-weight="600" font-family="Inter, sans-serif">{p.rate.toFixed(2)}%</text>
+            {#if p.mult !== 1}
+              <text x={px} y={py - 22} text-anchor="middle" fill="var(--rumi-text-muted, #888)" font-size="8" font-family="Inter, sans-serif">{p.mult.toFixed(2)}x</text>
+            {/if}
+          {/each}
+
+          <!-- Meter bar -->
+          <defs>
+            <linearGradient id="meter-borrow" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0%" stop-color="#e06b9f" stop-opacity="0.75" />
+              <stop offset="40%" stop-color="#a78bfa" stop-opacity="0.5" />
+              <stop offset="100%" stop-color="#2DD4BF" stop-opacity="0.5" />
+            </linearGradient>
+          </defs>
+          <rect x="55" y="135" width="385" height="12" rx="6" fill="url(#meter-borrow)" />
+
+          <!-- Tick marks and CR labels on meter -->
+          {#each pts as p}
+            {@const px = curveX(p.cr, crMin, crMax)}
+            <line x1={px} y1="133" x2={px} y2="149" stroke="var(--rumi-text-primary, #eee)" stroke-width="1.5" opacity="0.6" />
+            <circle cx={px} cy="141" r="2.5" fill="var(--rumi-text-primary, #eee)" opacity="0.8" />
+            <text x={px} y="165" text-anchor="middle" fill="var(--rumi-text-secondary, #b0b0c0)" font-size="10" font-family="Inter, sans-serif">{p.cr.toFixed(0)}%</text>
+          {/each}
+
+          <text x="247" y="182" text-anchor="middle" fill="var(--rumi-text-muted, #888)" font-size="9" font-family="Inter, sans-serif">Total Collateral Ratio</text>
+        </svg>
+      {:else}
+        <p class="curve-empty">No borrowing fee curve data available.</p>
+      {/if}
+    </div>
+
+    <!-- Interest Rate Curve -->
+    <div class="curve-viz">
+      <div class="curve-viz-header">
+        <h3 class="curve-viz-title">Interest Rate Curve <span class="tip" data-tip="Shows how the annual interest rate scales with individual vault CR. Vaults closer to liquidation pay a higher multiplier on their base rate. The line slopes up from right (safe) to left (risky).">?</span></h3>
+        <select class="curve-select" bind:value={selectedInterestAsset}>
+          {#each collaterals as c}
+            <option value={c.principal}>{c.symbol} — base {pctRaw(c.interestRateApr)}</option>
+          {/each}
+        </select>
+      </div>
+      {#if interestRatePoints.length > 0}
+        {@const pts = interestRatePoints}
+        {@const crMin = Math.min(...pts.map(p => p.cr)) - 10}
+        {@const crMax = Math.max(...pts.map(p => p.cr)) + 15}
+        {@const rateMax = Math.max(...pts.map(p => p.rate)) * 1.3}
+        <svg viewBox="0 0 480 190" class="curve-svg" preserveAspectRatio="xMidYMid meet">
+          <!-- Subtle grid lines -->
+          {#each [0.25, 0.5, 0.75, 1.0] as frac}
+            {@const gy = curveY(rateMax * frac, rateMax)}
+            <line x1="55" y1={gy} x2="440" y2={gy} stroke="var(--rumi-border, #333)" stroke-width="0.5" stroke-dasharray="3,3" />
+            <text x="50" y={gy + 3} text-anchor="end" fill="var(--rumi-text-muted, #888)" font-size="9" font-family="Inter, sans-serif">{(rateMax * frac).toFixed(2)}%</text>
+          {/each}
+
+          <!-- Area fill -->
+          <path d={buildAreaPath(pts, crMin, crMax, rateMax)} fill="var(--rumi-action, #34d399)" opacity="0.07" />
+
+          <!-- Rate line -->
+          <polyline points={buildPolyline(pts, crMin, crMax, rateMax)} fill="none" stroke="var(--rumi-action, #34d399)" stroke-width="2" stroke-linejoin="round" />
+
+          <!-- Data point circles and labels -->
+          {#each pts as p}
+            {@const px = curveX(p.cr, crMin, crMax)}
+            {@const py = curveY(p.rate, rateMax)}
+            <circle cx={px} cy={py} r="4.5" fill="var(--rumi-action, #34d399)" />
+            <circle cx={px} cy={py} r="2" fill="var(--rumi-bg-surface, #0d0d1a)" />
+            <text x={px} y={py - 10} text-anchor="middle" fill="var(--rumi-text-primary, #eee)" font-size="10" font-weight="600" font-family="Inter, sans-serif">{p.rate.toFixed(2)}%</text>
+            {#if p.mult !== 1}
+              <text x={px} y={py - 22} text-anchor="middle" fill="var(--rumi-text-muted, #888)" font-size="8" font-family="Inter, sans-serif">{p.mult.toFixed(2)}x</text>
+            {/if}
+          {/each}
+
+          <!-- Meter bar -->
+          <defs>
+            <linearGradient id="meter-interest" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0%" stop-color="#e06b9f" stop-opacity="0.75" />
+              <stop offset="40%" stop-color="#a78bfa" stop-opacity="0.5" />
+              <stop offset="100%" stop-color="#2DD4BF" stop-opacity="0.5" />
+            </linearGradient>
+          </defs>
+          <rect x="55" y="135" width="385" height="12" rx="6" fill="url(#meter-interest)" />
+
+          <!-- Tick marks and CR labels on meter -->
+          {#each pts as p}
+            {@const px = curveX(p.cr, crMin, crMax)}
+            <line x1={px} y1="133" x2={px} y2="149" stroke="var(--rumi-text-primary, #eee)" stroke-width="1.5" opacity="0.6" />
+            <circle cx={px} cy="141" r="2.5" fill="var(--rumi-text-primary, #eee)" opacity="0.8" />
+            <text x={px} y="165" text-anchor="middle" fill="var(--rumi-text-secondary, #b0b0c0)" font-size="10" font-family="Inter, sans-serif">{p.cr.toFixed(0)}%</text>
+          {/each}
+
+          <text x="247" y="182" text-anchor="middle" fill="var(--rumi-text-muted, #888)" font-size="9" font-family="Inter, sans-serif">Vault Collateral Ratio</text>
+        </svg>
+      {:else}
+        <p class="curve-empty">No interest rate curve data for this asset.</p>
+      {/if}
     </div>
   </section>
 
@@ -440,6 +633,11 @@
     font-size: 0.875rem; color: var(--rumi-text-muted);
     text-align: center; padding: 2rem 0;
   }
+  .doc-note {
+    font-size: 0.8125rem;
+    color: var(--rumi-text-muted);
+    margin-bottom: 1.25rem;
+  }
   .tip {
     display: inline-flex;
     align-items: center;
@@ -529,20 +727,6 @@
     text-align: left;
     font-weight: 400;
   }
-  .ct-label-indent {
-    padding-left: 1.5rem;
-    font-size: 0.75rem;
-    color: var(--rumi-text-muted);
-  }
-  .curve-label {
-    color: var(--rumi-text-secondary);
-    font-size: 0.6875rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    margin-right: 0.25rem;
-  }
-  .curve-row td { padding-top: 0.25rem; padding-bottom: 0.25rem; border-bottom-color: transparent; }
-  .curve-row-last td { border-bottom-color: var(--rumi-border); }
   .ct-val {
     text-align: right;
     font-weight: 600;
@@ -550,5 +734,48 @@
     color: var(--rumi-text-primary);
   }
   .ct-val.live { color: var(--rumi-action); }
-  .ct-val-sm { font-size: 0.75rem; }
+  /* Rate curve visualization */
+  .curve-viz {
+    margin-bottom: 2rem;
+  }
+  .curve-viz-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.75rem;
+    gap: 1rem;
+  }
+  .curve-viz-title {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--rumi-text-primary);
+    margin: 0;
+  }
+  .curve-select {
+    appearance: none;
+    background: var(--rumi-bg-surface1, #1e1e2e);
+    color: var(--rumi-text-primary, #eee);
+    border: 1px solid var(--rumi-border, #333);
+    border-radius: 0.5rem;
+    padding: 0.375rem 2rem 0.375rem 0.75rem;
+    font-size: 0.8125rem;
+    font-family: 'Inter', sans-serif;
+    cursor: pointer;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23888' d='M3 5l3 3 3-3'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.5rem center;
+  }
+  .curve-select:hover {
+    border-color: var(--rumi-text-secondary, #666);
+  }
+  .curve-svg {
+    width: 100%;
+    max-width: 520px;
+    height: auto;
+  }
+  .curve-empty {
+    font-size: 0.8125rem;
+    color: var(--rumi-text-muted);
+    font-style: italic;
+  }
 </style>

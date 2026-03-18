@@ -11,8 +11,10 @@
   import { isDevelopment } from "../lib/config";
   import { developerAccess } from "../lib/stores/developer";
   import ToastContainer from "../lib/components/common/ToastContainer.svelte";
+  import { ApiClient } from "../lib/services/protocol/apiClient";
   let permissionInitialized = false;
   let showDebug = false;
+  let hasLiquidatableVaults = false;
   $: currentPath = $page.url.pathname;
   $: ({ isConnected } = $wallet);
   $: isDeveloperMode = isDevelopment || ($permissionStore.initialized && $permissionStore.isDeveloper);
@@ -26,6 +28,11 @@
       try { await wallet.initialize(); } catch (e) { console.error('Wallet init failed:', e); }
       if (isConnected && !permissionInitialized) { try { if (await permissionStore.init()) permissionInitialized = true; } catch (e) { permissionInitialized = true; } }
       protocolService.getICPPrice().catch(() => {});
+      // Check for liquidatable vaults
+      try {
+        const vaults = await ApiClient.getPublicData<any[]>('get_liquidatable_vaults');
+        hasLiquidatableVaults = vaults && vaults.length > 0;
+      } catch { hasLiquidatableVaults = false; }
     })();
     // Ctrl+D toggles debug panels in dev mode
     const handleKey = (e: KeyboardEvent) => { if (e.ctrlKey && e.key === 'd') { e.preventDefault(); showDebug = !showDebug; } };
@@ -61,7 +68,7 @@
   <div class="footer-inner">
     <div class="footer-links">
       <a href="/redeem" class="footer-link">Redeem</a>
-      <a href="/liquidations" class="footer-link">Liquidate</a>
+      <a href="/liquidations?tab=manual" class="footer-link">Liquidate{#if hasLiquidatableVaults}<span class="liq-alert-dot"></span>{/if}</a>
       <a href="/transparency" class="footer-link">Transparency</a>
       <a href="/docs" class="footer-link">Docs</a>
       <a href="mailto:info@rumiprotocol.com" class="footer-link">Contact</a>
@@ -128,6 +135,8 @@
   .footer-bottom { display:flex;align-items:center;gap:2rem;font-size:0.6875rem;color:var(--rumi-text-muted); }
   .footer-status { display:flex;align-items:center;gap:0.375rem; }
   .status-dot { width:0.375rem;height:0.375rem;background:var(--rumi-safe);border-radius:50%;box-shadow:0 0 6px rgba(45,212,191,0.4); }
+  .liq-alert-dot { display:inline-block;width:0.375rem;height:0.375rem;background:#ef4444;border-radius:50%;margin-left:0.25rem;vertical-align:super;animation:pulse-alert 1.5s infinite; }
+  @keyframes pulse-alert { 0%,100%{opacity:1;box-shadow:0 0 0 0 rgba(239,68,68,0.6)} 50%{opacity:0.8;box-shadow:0 0 0 4px rgba(239,68,68,0)} }
 
   /* ── Mobile bottom nav ── */
   .mobile-nav { display:none;position:fixed;bottom:0;left:0;right:0;height:3.5rem;background:var(--rumi-bg-surface-1);border-top:1px solid var(--rumi-border);z-index:100;justify-content:space-around;align-items:center; }

@@ -55,15 +55,8 @@
       }
     },
     "internet_identity": {
-      "type": "custom",
-      "candid": "https://github.com/dfinity/internet-identity/releases/latest/download/internet_identity.did",
-      "wasm": "https://github.com/dfinity/internet-identity/releases/latest/download/internet_identity_dev.wasm.gz",
-      "remote": {
-        "id": {
-          "ic": "rdmx6-jaaaa-aaaaa-aaadq-cai"
-        }
-      },
-      "frontend": {}
+      "type": "pull",
+      "id": "rdmx6-jaaaa-aaaaa-aaadq-cai"
     },
     "test_vault_frontend": {
       "source": [
@@ -117,6 +110,16 @@
     "rumi_3pool": {
       "candid": "src/rumi_3pool/rumi_3pool.did",
       "package": "rumi_3pool",
+      "type": "rust",
+      "metadata": [
+        {
+          "name": "candid:service"
+        }
+      ]
+    },
+    "liquidation_bot": {
+      "candid": "src/liquidation_bot/liquidation_bot.did",
+      "package": "liquidation_bot",
       "type": "rust",
       "metadata": [
         {

@@ -1,18 +1,19 @@
 <script lang="ts">
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
+  import LiquidationBotTab from '$lib/components/liquidations/LiquidationBotTab.svelte';
   import StabilityPoolTab from '$lib/components/liquidations/StabilityPoolTab.svelte';
   import ManualLiquidations from '$lib/components/liquidations/ManualLiquidations.svelte';
 
-  type Tab = 'pool' | 'manual';
+  type Tab = 'bot' | 'pool' | 'manual';
 
-  // Read initial tab from URL query param, default to 'pool'
+  // Read initial tab from URL query param, default to 'bot'
   $: tabParam = $page.url.searchParams.get('tab');
-  $: activeTab = (tabParam === 'manual' ? 'manual' : 'pool') as Tab;
+  $: activeTab = (tabParam === 'pool' ? 'pool' : tabParam === 'manual' ? 'manual' : 'bot') as Tab;
 
   function switchTab(tab: Tab) {
     const url = new URL($page.url);
-    if (tab === 'pool') {
+    if (tab === 'bot') {
       url.searchParams.delete('tab');
     } else {
       url.searchParams.set('tab', tab);
@@ -31,6 +32,13 @@
   <div class="tab-bar">
     <button
       class="tab-btn"
+      class:active={activeTab === 'bot'}
+      on:click={() => switchTab('bot')}
+    >
+      Liquidation Bot
+    </button>
+    <button
+      class="tab-btn"
       class:active={activeTab === 'pool'}
       on:click={() => switchTab('pool')}
     >
@@ -46,7 +54,9 @@
   </div>
 
   <div class="tab-content">
-    {#if activeTab === 'pool'}
+    {#if activeTab === 'bot'}
+      <LiquidationBotTab />
+    {:else if activeTab === 'pool'}
       <StabilityPoolTab />
     {:else}
       <ManualLiquidations />

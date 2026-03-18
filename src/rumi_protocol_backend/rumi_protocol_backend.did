@@ -55,6 +55,20 @@ type CollateralConfig = record {
   healthy_cr : opt blob;
   rate_curve : opt RateCurve;
 };
+type BotLiquidationResult = record {
+  vault_id : nat64;
+  collateral_amount : nat64;
+  debt_covered : nat64;
+  collateral_price_e8s : nat64;
+};
+type BotStatsResponse = record {
+  liquidation_bot_principal : opt principal;
+  budget_total_e8s : nat64;
+  budget_remaining_e8s : nat64;
+  budget_start_timestamp : nat64;
+  total_debt_covered_e8s : nat64;
+  total_icusd_deposited_e8s : nat64;
+};
 type CollateralStatus = variant { Paused; Active; Deprecated; Sunset; Frozen };
 type CollateralTotals = record {
   decimals : nat8;
@@ -403,6 +417,7 @@ type Result_8 = variant {
   Err : ProtocolError;
 };
 type Result_9 = variant { Ok : float64; Err : ProtocolError };
+type Result_10 = variant { Ok : BotLiquidationResult; Err : ProtocolError };
 type StabilityPoolConfig = record {
   enabled : bool;
   liquidation_discount : nat64;
@@ -476,6 +491,9 @@ service : (ProtocolArg) -> {
   admin_correct_vault_collateral : (nat64, nat64, text) -> (Result);
   admin_mint_icusd : (nat64, principal, text) -> (Result_1);
   admin_sweep_to_treasury : (text) -> (Result_1);
+  bot_deposit_to_reserves : (nat64) -> (Result);
+  bot_liquidate : (nat64) -> (Result_10);
+  dev_force_bot_liquidate : (nat64) -> (Result_10);
   borrow_from_vault : (VaultArg) -> (Result_2);
   claim_liquidity_returns : () -> (Result_1);
   clear_stuck_operations : (opt principal) -> (Result_1);
@@ -485,6 +503,7 @@ service : (ProtocolArg) -> {
   freeze_protocol : () -> (Result);
   get_all_vaults : () -> (vec CandidVault) query;
   get_borrowing_fee : () -> (float64) query;
+  get_bot_stats : () -> (BotStatsResponse) query;
   get_ckstable_repay_fee : () -> (float64) query;
   get_collateral_config : (principal) -> (opt CollateralConfig) query;
   get_collateral_totals : () -> (vec CollateralTotals) query;
@@ -542,6 +561,7 @@ service : (ProtocolArg) -> {
   redeem_reserves : (nat64, opt principal) -> (Result_7);
   repay_to_vault : (VaultArg) -> (Result_1);
   repay_to_vault_with_stable : (VaultArgWithToken) -> (Result_1);
+  reset_bot_budget : (nat64) -> (Result);
   set_borrowing_fee : (float64) -> (Result);
   set_ckstable_repay_fee : (float64) -> (Result);
   set_collateral_borrowing_fee : (principal, float64) -> (Result);
@@ -562,6 +582,7 @@ service : (ProtocolArg) -> {
   set_interest_split : (vec InterestSplitArg) -> (Result);
   set_interest_flush_threshold : (nat64) -> (Result);
   set_interest_rate : (principal, float64) -> (Result);
+  set_liquidation_bot_config : (principal, nat64) -> (Result);
   set_recovery_target_cr : (float64) -> (Result);
   set_redemption_fee_ceiling : (float64) -> (Result);
   set_redemption_fee_floor : (float64) -> (Result);
