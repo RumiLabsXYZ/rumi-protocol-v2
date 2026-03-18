@@ -2,7 +2,7 @@ use crate::numeric::{Ratio, UsdIcp, ICUSD, ICP};
 use crate::vault::Vault;
 use crate::{
     compute_collateral_ratio, InitArg, ProtocolError, UpgradeArg, MINIMUM_COLLATERAL_RATIO,
-    RECOVERY_COLLATERAL_RATIO, INFO, SEC_NANOS,
+    RECOVERY_COLLATERAL_RATIO,
 };
 use candid::Principal;
 use ic_canister_log::log;
@@ -1149,7 +1149,6 @@ impl State {
     /// Set the ICP rate on both the global field AND the ICP CollateralConfig's `last_price`.
     /// This is the ONLY correct way to update the ICP price.
     pub fn set_icp_rate(&mut self, rate: crate::numeric::UsdIcp, timestamp_nanos: Option<u64>) {
-        use rust_decimal::prelude::ToPrimitive;
         self.last_icp_rate = Some(rate);
         if let Some(ts) = timestamp_nanos {
             self.last_icp_timestamp = Some(ts);
@@ -2252,7 +2251,6 @@ impl State {
                     &band_vault_ids, &band_debts, total_band_debt,
                     remaining, price, decimals,
                 );
-                remaining = 0;
                 break;
             }
 
@@ -2267,7 +2265,6 @@ impl State {
                     &band_vault_ids, &band_debts, total_band_debt,
                     remaining, price, decimals,
                 );
-                remaining = 0;
                 break;
             }
 
@@ -2298,7 +2295,6 @@ impl State {
                     &band_vault_ids, &band_debts, total_band_debt,
                     remaining, price, decimals,
                 );
-                remaining = 0;
                 break;
             }
         }
@@ -2448,13 +2444,6 @@ impl State {
     // that could silently exit Recovery mode based on a timeout. Mode transitions are now
     // handled exclusively by update_mode() (automatic, based on collateral ratio) or by
     // admin functions (enter_recovery_mode / exit_recovery_mode).
-}
-
-#[derive(Debug)]
-pub(crate) struct DistributeEntry {
-    pub owner: Principal,
-    pub icp_share: ICP,
-    pub icusd_to_debit: ICUSD,
 }
 
 pub(crate) struct DistributeToVaultEntry {
