@@ -1,4 +1,4 @@
-import { ApiClient, E8S, updateMinIcusdAmount } from './apiClient';
+import { ApiClient, E8S, updateMinIcusdAmount, publicActor } from './apiClient';
 import type { FeesInfo, ProtocolStatus, FeesDTO, ProtocolStatusDTO, CollateralInfo } from '../types';
 import type {
     ProtocolStatus as CanisterProtocolStatus,
@@ -62,13 +62,27 @@ export class QueryOperations {
                 : [],
             }))
           : [],
-        interestSplit: Array.isArray((canisterStatus as any).interest_split)
+        interestSplit: Array.isArray((canisterStatus as any).interest_split) && (canisterStatus as any).interest_split.length > 0
           ? (canisterStatus as any).interest_split.map((entry: any) => ({
               destination: String(entry.destination),
               bps: Number(entry.bps),
             }))
           : [],
       };
+      // If interest_split wasn't included in protocol status, fetch it directly
+      if (result.interestSplit.length === 0) {
+        try {
+          const split = await (publicActor.get_interest_split() as Promise<{ destination: string; bps: bigint }[]>);
+          if (Array.isArray(split) && split.length > 0) {
+            result.interestSplit = split.map((entry: any) => ({
+              destination: String(entry.destination),
+              bps: Number(entry.bps),
+            }));
+          }
+        } catch {
+          // leave interestSplit empty
+        }
+      }
       // Keep the module-level MIN_ICUSD_AMOUNT in sync for client-side validations
       updateMinIcusdAmount(result.minIcusdAmount);
       return result;
