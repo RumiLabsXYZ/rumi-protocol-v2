@@ -3134,6 +3134,8 @@ fn icrc10_supported_standards() -> Vec<rumi_protocol_backend::icrc21::StandardRe
 // Checks the real candid interface against the one declared in the did file
 #[test]
 fn check_candid_interface_compatibility() {
+    use candid_parser::utils::{service_equal, CandidSource};
+
     fn source_to_str(source: &CandidSource) -> String {
         match source {
             CandidSource::File(f) => {
