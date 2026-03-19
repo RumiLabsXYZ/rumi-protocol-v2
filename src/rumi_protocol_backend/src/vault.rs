@@ -26,7 +26,29 @@ use rust_decimal_macros::dec;
 
 use crate::compute_collateral_ratio;
 
-
+/// Checks that a partial repayment won't leave the vault with dust debt below `min_vault_debt`.
+/// Returns Ok(()) if remaining debt is zero or >= min_vault_debt, Err otherwise.
+fn check_min_vault_debt_after_repay(
+    vault: &Vault,
+    repay_amount: ICUSD,
+) -> Result<(), ProtocolError> {
+    let remaining_debt = vault.borrowed_icusd_amount - repay_amount;
+    if remaining_debt > ICUSD::new(0) {
+        let min_vault_debt = read_state(|s| {
+            s.get_collateral_config(&vault.collateral_type)
+                .map(|c| c.min_vault_debt)
+                .unwrap_or(ICUSD::new(0))
+        });
+        if remaining_debt < min_vault_debt {
+            return Err(ProtocolError::GenericError(format!(
+                "Partial repayment would leave {} icUSD debt, below the minimum of {}. \
+                 Repay the full amount or leave at least {} icUSD.",
+                remaining_debt, min_vault_debt, min_vault_debt
+            )));
+        }
+    }
+    Ok(())
+}
 
 #[derive(CandidType, Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct OpenVaultSuccess {
@@ -784,6 +806,11 @@ pub async fn repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
         )));
     }
 
+    if let Err(e) = check_min_vault_debt_after_repay(&vault, amount) {
+        guard_principal.fail();
+        return Err(e);
+    }
+
     match transfer_icusd_from(amount, caller).await {
         Ok(block_index) => {
             let interest_share = mutate_state(|s| record_repayed_to_vault(s, arg.vault_id, amount, block_index));
@@ -867,6 +894,11 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
             "cannot repay more than borrowed: {} ICUSD, repay: {} ICUSD",
             vault.borrowed_icusd_amount, amount
         )));
+    }
+
+    if let Err(e) = check_min_vault_debt_after_repay(&vault, amount) {
+        guard_principal.fail();
+        return Err(e);
     }
 
     // Convert e8s (icUSD) to e6s (ckstable) and add fee surcharge
@@ -2581,6 +2613,11 @@ pub async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError>
             "cannot repay more than borrowed: {} ICUSD, repay: {} ICUSD",
             vault.borrowed_icusd_amount, amount
         )));
+    }
+
+    if let Err(e) = check_min_vault_debt_after_repay(&vault, amount) {
+        guard_principal.fail();
+        return Err(e);
     }
 
     match transfer_icusd_from(amount, caller).await {
