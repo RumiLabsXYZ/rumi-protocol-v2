@@ -12,7 +12,7 @@ use rumi_protocol_backend::{
     ReserveRedemptionResult, ReserveBalance, CollateralTotals, CollateralInterestInfo, PerCollateralRateCurve,
     VaultArgWithToken, StableTokenType, InterestSplitArg,
     GetSnapshotsArg, ProtocolSnapshot, CollateralSnapshot,
-    GetEventsFilteredResponse,
+    GetEventsFilteredResponse, StabilityPoolLiquidationResult,
 };
 use rumi_protocol_backend::logs::DEBUG;
 use rumi_protocol_backend::state::mutate_state;
@@ -26,19 +26,6 @@ use rust_decimal_macros::dec;
 use rumi_protocol_backend::storage::events;
 use rumi_protocol_backend::LiquidityStatus;
 use candid::{CandidType, Deserialize};
-
-/// Result from stability pool liquidation
-#[derive(CandidType, Deserialize, Debug)]
-pub struct StabilityPoolLiquidationResult {
-    pub success: bool,
-    pub vault_id: u64,
-    pub liquidated_debt: u64,
-    pub collateral_received: u64,
-    pub collateral_type: String,
-    pub block_index: u64,
-    pub fee: u64,
-    pub collateral_price_e8s: u64,
-}
 
 /// Stability pool configuration
 #[derive(CandidType, Deserialize, Debug)]
@@ -815,6 +802,31 @@ async fn stability_pool_liquidate(vault_id: u64, max_debt_to_liquidate: u64) -> 
         fee: result.fee_amount_paid,
         collateral_price_e8s: collateral_price_usd.to_e8s(),
     })
+}
+
+/// Called by the stability pool after it has already burned icUSD (via 3pool atomic burn).
+/// Writes down the vault's debt and releases proportional collateral to the caller.
+/// Only callable by the registered stability pool canister.
+#[update]
+#[candid_method(update)]
+async fn stability_pool_liquidate_debt_burned(
+    vault_id: u64,
+    icusd_burned_e8s: u64,
+) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
+    validate_call().await?;
+    validate_price_for_liquidation()?;
+    let caller = ic_cdk::api::caller();
+
+    let is_stability_pool = read_state(|s| {
+        s.stability_pool_canister.map_or(false, |sp| sp == caller)
+    });
+    if !is_stability_pool {
+        return Err(ProtocolError::GenericError(
+            "Caller is not the registered stability pool canister".to_string(),
+        ));
+    }
+
+    rumi_protocol_backend::vault::liquidate_vault_debt_already_burned(vault_id, icusd_burned_e8s, caller).await
 }
 
 // Get stability pool configuration

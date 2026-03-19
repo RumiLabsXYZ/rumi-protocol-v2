@@ -9,6 +9,7 @@ use crate::management::{mint_icusd, transfer_collateral_from, transfer_icusd_fro
 use crate::numeric::{ICUSD, ICP, Ratio, UsdIcp};
 use crate::{
     mutate_state, read_state, ProtocolError, SuccessWithFee,
+    StabilityPoolLiquidationResult,
     DUST_THRESHOLD,
     StableTokenType, VaultArgWithToken,
 };
@@ -2265,6 +2266,183 @@ pub async fn liquidate_vault_partial_with_stable(
         block_index: stable_block_index,
         fee_amount_paid: fee_amount.to_u64(),
         collateral_amount_received: Some(collateral_to_liquidator.to_u64()),
+    })
+}
+
+/// Liquidate a vault when icUSD has already been burned atomically (e.g., via 3pool burn).
+/// Mirrors `liquidate_vault_partial` but skips the icUSD pull step since the debt was
+/// already covered by destroying icUSD inside the 3pool.
+///
+/// Called by the stability pool canister after a successful `authorized_redeem_and_burn`.
+pub async fn liquidate_vault_debt_already_burned(
+    vault_id: u64,
+    icusd_burned_e8s: u64,
+    caller: Principal,
+) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
+    let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_debt_burned_{}", vault_id))?;
+
+    let liquidation_amount: ICUSD = icusd_burned_e8s.into();
+
+    if liquidation_amount < read_state(|s| s.min_icusd_amount) {
+        guard_principal.fail();
+        return Err(ProtocolError::AmountTooLow {
+            minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
+        });
+    }
+
+    // Step 1: Validate vault is liquidatable and compute collateral to release
+    let (vault, collateral_price, config_decimals, collateral_price_usd, max_liquidatable_debt, collateral_to_liquidator, total_to_seize, protocol_cut) = match read_state(|s| {
+        match s.vault_id_to_vaults.get(&vault_id) {
+            Some(vault) => {
+                if let Some(status) = s.get_collateral_status(&vault.collateral_type) {
+                    if !status.allows_liquidation() {
+                        return Err("Liquidation is not allowed for this collateral type.".to_string());
+                    }
+                }
+
+                let price = s.get_collateral_price_decimal(&vault.collateral_type)
+                    .ok_or_else(|| "No price available for collateral. Price feed may be down.".to_string())?;
+                let decimals = s.get_collateral_config(&vault.collateral_type)
+                    .map(|c| c.decimals)
+                    .unwrap_or(8);
+                let collateral_price_usd = UsdIcp::from(price);
+                let ratio = compute_collateral_ratio(vault, collateral_price_usd, s);
+                let min_liq_ratio = s.get_min_liquidation_ratio_for(&vault.collateral_type);
+
+                if ratio >= min_liq_ratio {
+                    Err(format!(
+                        "Vault #{} is not liquidatable. Current ratio: {}, minimum: {}",
+                        vault_id, ratio.to_f64(), min_liq_ratio.to_f64()
+                    ))
+                } else {
+                    let max_liquidatable = s.compute_partial_liquidation_cap(vault, collateral_price_usd);
+                    let actual_liquidation_amount = liquidation_amount.min(max_liquidatable).min(vault.borrowed_icusd_amount);
+
+                    if actual_liquidation_amount == ICUSD::new(0) {
+                        return Err("Cannot liquidate zero amount".to_string());
+                    }
+
+                    let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
+                    let protocol_share = s.get_liquidation_protocol_share();
+                    let collateral_raw = crate::numeric::icusd_to_collateral_amount(actual_liquidation_amount, price, decimals);
+                    let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
+                    let total_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
+
+                    let bonus_portion = total_to_seize.to_u64().saturating_sub(collateral_raw);
+                    let protocol_cut = (rust_decimal::Decimal::from(bonus_portion) * protocol_share.0)
+                        .to_u64().unwrap_or(0);
+                    let collateral_to_liquidator = ICP::from(total_to_seize.to_u64() - protocol_cut);
+
+                    Ok((vault.clone(), price, decimals, collateral_price_usd, actual_liquidation_amount, collateral_to_liquidator, total_to_seize, protocol_cut))
+                }
+            },
+            None => Err(format!("Vault #{} not found", vault_id)),
+        }
+    }) {
+        Ok(result) => result,
+        Err(msg) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(msg));
+        }
+    };
+
+    log!(INFO,
+        "[liquidate_vault_debt_burned] Vault #{}: writing down {} icUSD (burned via 3pool), releasing {} collateral (protocol fee: {})",
+        vault_id, max_liquidatable_debt.to_u64(), collateral_to_liquidator.to_u64(), protocol_cut
+    );
+
+    // Step 2: SKIPPED — icUSD was already burned atomically in the 3pool.
+    // The icUSD supply has already been reduced by `icusd_burned_e8s`.
+
+    // Step 3: Update protocol state (partial liquidation)
+    let interest_share = mutate_state(|s| {
+        let interest_share = if let Some(vault) = s.vault_id_to_vaults.get(&vault_id) {
+            if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
+                let share = (rust_decimal::Decimal::from(max_liquidatable_debt.0)
+                    * rust_decimal::Decimal::from(vault.accrued_interest.0)
+                    / rust_decimal::Decimal::from(vault.borrowed_icusd_amount.0))
+                    .to_u64().unwrap_or(0);
+                ICUSD::new(share.min(vault.accrued_interest.0))
+            } else { ICUSD::new(0) }
+        } else { ICUSD::new(0) };
+
+        if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
+            vault.borrowed_icusd_amount -= max_liquidatable_debt;
+            vault.collateral_amount -= total_to_seize.to_u64();
+            vault.accrued_interest -= interest_share;
+        }
+
+        let event = crate::event::Event::PartialLiquidateVault {
+            vault_id,
+            liquidator_payment: max_liquidatable_debt,
+            icp_to_liquidator: collateral_to_liquidator,
+            liquidator: Some(caller),
+            icp_rate: Some(collateral_price_usd),
+            protocol_fee_collateral: if protocol_cut > 0 { Some(protocol_cut) } else { None },
+            timestamp: Some(ic_cdk::api::time()),
+        };
+        crate::storage::record_event(&event);
+
+        s.pending_margin_transfers.insert(
+            vault_id,
+            PendingMarginTransfer {
+                owner: caller,
+                margin: collateral_to_liquidator,
+                collateral_type: vault.collateral_type,
+            },
+        );
+
+        interest_share
+    });
+
+    // Route interest share via N-way split
+    crate::treasury::distribute_interest(interest_share, vault.collateral_type).await;
+
+    // Send protocol's liquidation fee cut to treasury
+    if protocol_cut > 0 {
+        let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
+        crate::treasury::send_liquidation_fee_to_treasury(protocol_cut, vault.collateral_type, asset_type).await;
+    }
+
+    // Step 4: Process collateral transfer to stability pool
+    match try_process_pending_transfers_immediate(vault_id).await {
+        Ok(processed_count) => {
+            log!(INFO, "[liquidate_vault_debt_burned] Processed {} transfers immediately", processed_count);
+        },
+        Err(e) => {
+            log!(INFO, "[liquidate_vault_debt_burned] Immediate processing failed: {}. Retrying via timer", e);
+            schedule_transfer_retry(vault_id, 0);
+        }
+    }
+
+    ic_cdk_timers::set_timer(std::time::Duration::from_secs(2), move || {
+        ic_cdk::spawn(async move {
+            log!(INFO, "[liquidate_vault_debt_burned] Backup timer for vault #{}", vault_id);
+            let _ = crate::process_pending_transfer().await;
+        })
+    });
+
+    guard_principal.complete();
+
+    let liquidator_value_received = crate::numeric::collateral_usd_value(collateral_to_liquidator.to_u64(), collateral_price, config_decimals);
+    let fee_amount = if liquidator_value_received > max_liquidatable_debt {
+        liquidator_value_received - max_liquidatable_debt
+    } else {
+        ICUSD::new(0)
+    };
+
+    log!(INFO, "[liquidate_vault_debt_burned] Completed. Fee: {}, Collateral: {}",
+         fee_amount.to_u64(), collateral_to_liquidator.to_u64());
+
+    Ok(StabilityPoolLiquidationResult {
+        success: true,
+        vault_id,
+        liquidated_debt: max_liquidatable_debt.to_u64(),
+        collateral_received: collateral_to_liquidator.to_u64(),
+        collateral_type: vault.collateral_type.to_string(),
+        block_index: 0, // No ledger block — icUSD was burned in 3pool
+        fee: fee_amount.to_u64(),
+        collateral_price_e8s: collateral_price_usd.to_e8s(),
     })
 }
 

@@ -173,6 +173,19 @@ pub struct SuccessWithFee {
     pub collateral_amount_received: Option<u64>,
 }
 
+/// Result from stability pool liquidation (both standard and debt-already-burned paths).
+#[derive(CandidType, Deserialize, Debug)]
+pub struct StabilityPoolLiquidationResult {
+    pub success: bool,
+    pub vault_id: u64,
+    pub liquidated_debt: u64,
+    pub collateral_received: u64,
+    pub collateral_type: String,
+    pub block_index: u64,
+    pub fee: u64,
+    pub collateral_price_e8s: u64,
+}
+
 #[derive(candid::CandidType, Deserialize)]
 pub struct GetEventsArg {
     pub start: u64,
