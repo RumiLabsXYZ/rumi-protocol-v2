@@ -148,6 +148,37 @@ pub fn set_swap_fee(caller: Principal, fee_bps: u64) -> Result<(), ThreePoolErro
     Ok(())
 }
 
+// ─── Authorized Burn Callers ───
+
+/// Add a canister to the authorized burn callers set.
+pub fn add_authorized_burn_caller(caller: Principal, canister: Principal) -> Result<(), ThreePoolError> {
+    let admin = read_state(|s| s.config.admin);
+    if caller != admin {
+        return Err(ThreePoolError::Unauthorized);
+    }
+    mutate_state(|s| {
+        s.burn_callers_mut().insert(canister);
+    });
+    Ok(())
+}
+
+/// Remove a canister from the authorized burn callers set.
+pub fn remove_authorized_burn_caller(caller: Principal, canister: Principal) -> Result<(), ThreePoolError> {
+    let admin = read_state(|s| s.config.admin);
+    if caller != admin {
+        return Err(ThreePoolError::Unauthorized);
+    }
+    mutate_state(|s| {
+        s.burn_callers_mut().remove(&canister);
+    });
+    Ok(())
+}
+
+/// Get all authorized burn callers.
+pub fn get_authorized_burn_callers() -> Vec<Principal> {
+    read_state(|s| s.burn_callers().iter().copied().collect())
+}
+
 /// Update the admin fee (share of swap fees taken by admin, in basis points). Max 10000.
 pub fn set_admin_fee(caller: Principal, fee_bps: u64) -> Result<(), ThreePoolError> {
     let admin = read_state(|s| s.config.admin);

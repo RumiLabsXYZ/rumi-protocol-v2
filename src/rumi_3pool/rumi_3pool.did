@@ -41,6 +41,24 @@ type ThreePoolError = variant {
   MathOverflow;
   InvariantNotConverged;
   PoolPaused;
+  NotAuthorizedBurnCaller;
+  BurnSlippageExceeded : record { max_bps : nat16; actual_bps : nat16 };
+  InsufficientPoolBalance : record { token : text; required : nat; available : nat };
+  InsufficientLpBalance : record { required : nat; available : nat };
+  BurnFailed : record { token : text; reason : text };
+};
+
+type AuthorizedRedeemAndBurnArgs = record {
+  token_ledger : principal;
+  token_amount : nat;
+  lp_amount : nat;
+  max_slippage_bps : nat16;
+};
+
+type RedeemAndBurnResult = record {
+  token_amount_burned : nat;
+  lp_amount_burned : nat;
+  burn_block_index : nat64;
 };
 
 // ─── ICRC-21 / ICRC-28 / ICRC-10 Types ───
@@ -263,6 +281,10 @@ service : (ThreePoolInitArgs) -> {
   set_paused : (bool) -> (variant { Ok; Err : ThreePoolError });
   set_swap_fee : (nat64) -> (variant { Ok; Err : ThreePoolError });
   set_admin_fee : (nat64) -> (variant { Ok; Err : ThreePoolError });
+  add_authorized_burn_caller : (principal) -> (variant { Ok; Err : ThreePoolError });
+  remove_authorized_burn_caller : (principal) -> (variant { Ok; Err : ThreePoolError });
+  get_authorized_burn_callers : () -> (vec principal) query;
+  authorized_redeem_and_burn : (AuthorizedRedeemAndBurnArgs) -> (variant { Ok : RedeemAndBurnResult; Err : ThreePoolError });
   icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (variant { Ok : ConsentInfo; Err : Icrc21Error });
   icrc28_trusted_origins : () -> (Icrc28TrustedOriginsResponse) query;
   icrc10_supported_standards : () -> (vec StandardRecord) query;
