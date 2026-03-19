@@ -86,7 +86,7 @@
                 <a href="/explorer/address/{formatValue(val)}" class="value link">{formatValue(val)}</a>
               {:else if field === 'vault' && typeof val === 'object'}
                 <span class="value">Vault #{val.vault_id?.toString()}</span>
-              {:else if field.includes('amount') || field.includes('margin') || field.includes('payment') || field.includes('fee')}
+              {:else if (field.includes('amount') || field.includes('margin') || field.includes('payment') || field === 'fee_amount') && (typeof val === 'bigint' || typeof val === 'number')}
                 <span class="value key-number">{formatAmount(val as any)}</span>
               {:else}
                 <span class="value">{formatValue(val)}</span>
