@@ -183,8 +183,8 @@ export function formatStableTx(
     trimmed = trimmed.slice(0, -1);
   }
 
-  const formattedInt = parseInt(intPart).toLocaleString('en-US');
-  return `${formattedInt}.${trimmed}`;
+  // No locale formatting (no commas) — this value is used in <input type="number">
+  return `${intPart}.${trimmed}`;
 }
 
 /**

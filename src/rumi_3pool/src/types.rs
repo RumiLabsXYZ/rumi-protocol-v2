@@ -190,4 +190,40 @@ pub enum ThreePoolError {
     InvariantNotConverged,
     /// Pool is paused by admin.
     PoolPaused,
+    /// Caller is not in the authorized burn callers set.
+    NotAuthorizedBurnCaller,
+    /// LP/token ratio exceeds max slippage tolerance.
+    BurnSlippageExceeded { max_bps: u16, actual_bps: u16 },
+    /// Insufficient pool balance of the target token.
+    InsufficientPoolBalance { token: String, required: u128, available: u128 },
+    /// Insufficient LP balance for the caller.
+    InsufficientLpBalance { required: u128, available: u128 },
+    /// The token burn on the ledger failed.
+    BurnFailed { token: String, reason: String },
+}
+
+// ─── Authorized Redeem-and-Burn Types ───
+
+/// Arguments for the authorized redeem-and-burn operation.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct AuthorizedRedeemAndBurnArgs {
+    /// Which token to remove from the pool and burn (by ledger principal).
+    pub token_ledger: Principal,
+    /// Amount of the token to remove and burn (native decimals).
+    pub token_amount: u128,
+    /// Amount of LP tokens to burn in exchange.
+    pub lp_amount: u128,
+    /// Maximum acceptable slippage from virtual price (basis points).
+    pub max_slippage_bps: u16,
+}
+
+/// Result of a successful redeem-and-burn operation.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct RedeemAndBurnResult {
+    /// Actual token amount burned on the ledger.
+    pub token_amount_burned: u128,
+    /// LP tokens burned.
+    pub lp_amount_burned: u128,
+    /// Block index from the token ledger burn call.
+    pub burn_block_index: u64,
 }

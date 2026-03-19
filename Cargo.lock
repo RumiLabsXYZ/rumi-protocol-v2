@@ -7837,6 +7837,7 @@ dependencies = [
  "icrc-ledger-types 0.1.8 (git+https://github.com/Rumi-Protocol/ic?rev=fc278709)",
  "num-traits",
  "pocket-ic",
+ "rumi_3pool",
  "rumi_protocol_backend",
  "rust_decimal",
  "rust_decimal_macros",

@@ -28,6 +28,7 @@
     [CANISTER_IDS.ICUSD_LEDGER]: 'ICUSD',
     [CANISTER_IDS.CKUSDT_LEDGER]: 'CKUSDT',
     [CANISTER_IDS.CKUSDC_LEDGER]: 'CKUSDC',
+    [CANISTER_IDS.THREEPOOL]: 'THREEUSD',
   };
 
   // Stablecoin dot colors (matches VaultCard pattern)
@@ -35,6 +36,7 @@
     [CANISTER_IDS.ICUSD_LEDGER]: '#818cf8',
     [CANISTER_IDS.CKUSDT_LEDGER]: '#26A17B',
     [CANISTER_IDS.CKUSDC_LEDGER]: '#2775CA',
+    [CANISTER_IDS.THREEPOOL]: '#F59E0B',
   };
 
   function getTokenColor(token: StablecoinConfig): string {
@@ -80,6 +82,7 @@
 
   // Ledger transfer fee per token (approve + transfer_from both charge a fee)
   function getLedgerFee(token: StablecoinConfig): bigint {
+    // 3USD LP token (8 decimals) = 0.001 = 100_000 e8s (same as icUSD)
     // icUSD (8 decimals) = 0.001 = 100_000 e8s
     // ckUSDC / ckUSDT (6 decimals) = 0.01 = 10_000
     return token.decimals === 8 ? 100_000n : 10_000n;

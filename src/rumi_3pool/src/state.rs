@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::cell::RefCell;
 use candid::{CandidType, Principal, Decode, Encode};
 use serde::{Serialize, Deserialize};
@@ -38,6 +38,10 @@ pub struct ThreePoolState {
     pub is_paused: bool,
     /// Whether the pool has been initialized via `init`.
     pub is_initialized: bool,
+    /// Canisters authorized to call `authorized_redeem_and_burn`.
+    /// Option for upgrade compatibility — old state won't have this field.
+    #[serde(default)]
+    pub authorized_burn_callers: Option<BTreeSet<Principal>>,
 }
 
 impl Default for ThreePoolState {
@@ -70,6 +74,7 @@ impl Default for ThreePoolState {
             admin_fees: [0; 3],
             is_paused: false,
             is_initialized: false,
+            authorized_burn_callers: Some(BTreeSet::new()),
         }
     }
 }
@@ -146,6 +151,18 @@ impl ThreePoolState {
     /// Get mutable VP snapshots vec (initializes if None for upgrade compat).
     pub fn snapshots_mut(&mut self) -> &mut Vec<crate::types::VirtualPriceSnapshot> {
         self.vp_snapshots.get_or_insert_with(Vec::new)
+    }
+
+    /// Get authorized burn callers (empty if None for upgrade compat).
+    pub fn burn_callers(&self) -> &BTreeSet<Principal> {
+        static EMPTY: std::sync::LazyLock<BTreeSet<Principal>> =
+            std::sync::LazyLock::new(BTreeSet::new);
+        self.authorized_burn_callers.as_ref().unwrap_or(&EMPTY)
+    }
+
+    /// Get mutable burn callers set (initializes if None for upgrade compat).
+    pub fn burn_callers_mut(&mut self) -> &mut BTreeSet<Principal> {
+        self.authorized_burn_callers.get_or_insert_with(BTreeSet::new)
     }
 
     /// Initialize pool state from deploy args.

@@ -17,6 +17,9 @@ export interface StablecoinConfig {
   decimals: number;
   priority: number;
   is_active: boolean;
+  transfer_fee?: bigint;
+  is_lp_token?: boolean;
+  underlying_pool?: Principal;
 }
 
 export interface CollateralInfo {
@@ -129,6 +132,7 @@ const KNOWN_SYMBOLS: Record<string, string> = {
   [CANISTER_IDS.CKUSDT_LEDGER]: 'ckUSDT',
   [CANISTER_IDS.CKUSDC_LEDGER]: 'ckUSDC',
   [CANISTER_IDS.ICP_LEDGER]: 'ICP',
+  [CANISTER_IDS.THREEPOOL]: '3USD',
 };
 
 export function symbolForLedger(ledger: Principal, registries?: { stablecoins?: StablecoinConfig[]; collateral?: CollateralInfo[] }): string {

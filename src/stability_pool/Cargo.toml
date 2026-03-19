@@ -32,3 +32,4 @@ rumi_protocol_backend = { path = "../rumi_protocol_backend" }
 assert_matches = "1.3.0"
 ic-state-machine-tests = { git = "https://github.com/Rumi-Protocol/ic", rev = "fc278709" }
 pocket-ic = "6.0.0"
+rumi_3pool = { path = "../rumi_3pool" }

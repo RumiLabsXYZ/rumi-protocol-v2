@@ -645,6 +645,7 @@ service : (ProtocolArg) -> {
   set_three_pool_canister : (principal) -> (Result);
   set_treasury_principal : (principal) -> (Result);
   stability_pool_liquidate : (nat64, nat64) -> (Result_10);
+  stability_pool_liquidate_debt_burned : (nat64, nat64) -> (Result_10);
   unfreeze_protocol : () -> (Result);
   update_collateral_config : (principal, CollateralConfig) -> (Result);
   withdraw_and_close_vault : (nat64) -> (Result_4);

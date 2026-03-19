@@ -41,6 +41,24 @@ type ThreePoolError = variant {
   MathOverflow;
   InvariantNotConverged;
   PoolPaused;
+  NotAuthorizedBurnCaller;
+  BurnSlippageExceeded : record { max_bps : nat16; actual_bps : nat16 };
+  InsufficientPoolBalance : record { token : text; required : nat; available : nat };
+  InsufficientLpBalance : record { required : nat; available : nat };
+  BurnFailed : record { token : text; reason : text };
+};
+
+type AuthorizedRedeemAndBurnArgs = record {
+  token_ledger : principal;
+  token_amount : nat;
+  lp_amount : nat;
+  max_slippage_bps : nat16;
+};
+
+type RedeemAndBurnResult = record {
+  token_amount_burned : nat;
+  lp_amount_burned : nat;
+  burn_block_index : nat64;
 };
 
 // ─── ICRC-21 / ICRC-28 / ICRC-10 Types ───
@@ -92,6 +110,64 @@ type Icrc28TrustedOriginsResponse = record {
 
 type StandardRecord = record {
   name : text;
+  url : text;
+};
+
+// ─── ICRC-3 Types ───
+
+type Icrc3Value = variant {
+  Blob : blob;
+  Text : text;
+  Nat : nat;
+  Int : int;
+  Array : vec Icrc3Value;
+  Map : vec record { text; Icrc3Value };
+};
+
+type GetBlocksArgs = record {
+  start : nat;
+  length : nat;
+};
+
+type BlockWithId = record {
+  id : nat;
+  block : Icrc3Value;
+};
+
+type ArchivedBlocksCallback = func (vec GetBlocksArgs) -> (GetBlocksResult) query;
+
+type ArchivedBlocks = record {
+  args : vec GetBlocksArgs;
+  callback : ArchivedBlocksCallback;
+};
+
+type GetBlocksResult = record {
+  log_length : nat;
+  blocks : vec BlockWithId;
+  archived_blocks : vec ArchivedBlocks;
+};
+
+type GetArchivesArgs = record {
+  from : opt principal;
+};
+
+type ArchiveInfo = record {
+  canister_id : principal;
+  start : nat;
+  end : nat;
+};
+
+type GetArchivesResult = record {
+  archives : vec ArchiveInfo;
+};
+
+type Icrc3DataCertificate = record {
+  certificate : blob;
+  hash_tree : blob;
+};
+
+type SupportedBlockType = record {
+  block_type : text;
   url : text;
 };
 
@@ -205,6 +281,10 @@ service : (ThreePoolInitArgs) -> {
   set_paused : (bool) -> (variant { Ok; Err : ThreePoolError });
   set_swap_fee : (nat64) -> (variant { Ok; Err : ThreePoolError });
   set_admin_fee : (nat64) -> (variant { Ok; Err : ThreePoolError });
+  add_authorized_burn_caller : (principal) -> (variant { Ok; Err : ThreePoolError });
+  remove_authorized_burn_caller : (principal) -> (variant { Ok; Err : ThreePoolError });
+  get_authorized_burn_callers : () -> (vec principal) query;
+  authorized_redeem_and_burn : (AuthorizedRedeemAndBurnArgs) -> (variant { Ok : RedeemAndBurnResult; Err : ThreePoolError });
   icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (variant { Ok : ConsentInfo; Err : Icrc21Error });
   icrc28_trusted_origins : () -> (Icrc28TrustedOriginsResponse) query;
   icrc10_supported_standards : () -> (vec StandardRecord) query;
@@ -225,4 +305,10 @@ service : (ThreePoolInitArgs) -> {
   icrc2_approve : (ApproveArgs) -> (variant { Ok : nat; Err : ApproveError });
   icrc2_allowance : (AllowanceArgs) -> (Allowance) query;
   icrc2_transfer_from : (TransferFromArgs) -> (variant { Ok : nat; Err : TransferFromError });
+
+  // ICRC-3 (Transaction Log)
+  icrc3_get_blocks : (vec GetBlocksArgs) -> (GetBlocksResult) query;
+  icrc3_get_archives : (GetArchivesArgs) -> (GetArchivesResult) query;
+  icrc3_get_tip_certificate : () -> (opt Icrc3DataCertificate) query;
+  icrc3_supported_block_types : () -> (vec SupportedBlockType) query;
 }

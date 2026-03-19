@@ -41,6 +41,13 @@ pub struct StabilityPoolState {
     /// (Candid `Decode!` needs `opt` for new fields, unlike serde's `#[serde(default)]`).
     #[serde(default)]
     pub token_consecutive_failures: Option<BTreeMap<Principal, u32>>,
+    /// Cached virtual price for LP tokens (fetched from 3pool periodically).
+    /// Keyed by LP token ledger principal. Scaled by 1e18.
+    #[serde(default)]
+    pub cached_virtual_prices: Option<BTreeMap<Principal, u128>>,
+    /// Backend canister to receive 3USD as fallback protocol reserves.
+    #[serde(default)]
+    pub protocol_reserve_address: Option<Principal>,
     pub is_initialized: bool,
 }
 
@@ -64,6 +71,8 @@ impl Default for StabilityPoolState {
             pool_creation_timestamp: 0,
             total_interest_received_e8s: Some(0),
             token_consecutive_failures: Some(BTreeMap::new()),
+            cached_virtual_prices: Some(BTreeMap::new()),
+            protocol_reserve_address: None,
             is_initialized: false,
         }
     }
@@ -94,6 +103,13 @@ impl StabilityPoolState {
 
     pub fn is_accepted_stablecoin(&self, ledger: &Principal) -> bool {
         self.stablecoin_registry.get(ledger).map(|c| c.is_active).unwrap_or(false)
+    }
+
+    /// Get cached virtual prices (empty if None for upgrade compat).
+    pub fn virtual_prices(&self) -> &BTreeMap<Principal, u128> {
+        static EMPTY: std::sync::LazyLock<BTreeMap<Principal, u128>> =
+            std::sync::LazyLock::new(BTreeMap::new);
+        self.cached_virtual_prices.as_ref().unwrap_or(&EMPTY)
     }
 
     // ─── Collateral Registry ───
@@ -257,9 +273,10 @@ impl StabilityPoolState {
 
     /// Compute total opted-in stablecoin value (e8s) for a given collateral type.
     pub fn effective_pool_for_collateral(&self, collateral_type: &Principal) -> u64 {
+        let vps = self.virtual_prices();
         self.deposits.values()
             .filter(|pos| pos.is_opted_in(collateral_type))
-            .map(|pos| pos.total_usd_value(&self.stablecoin_registry))
+            .map(|pos| pos.total_usd_value(&self.stablecoin_registry, vps))
             .sum()
     }
 
@@ -268,29 +285,31 @@ impl StabilityPoolState {
     /// Compute the stablecoin draw for a liquidation of a given debt amount (e8s).
     /// Returns a map of token_ledger -> amount to consume (in native decimals).
     /// Follows priority ordering: higher priority consumed first, same priority proportional.
+    /// LP tokens (3USD) are valued at their virtual price, not 1:1.
     pub fn compute_token_draw(&self, debt_e8s: u64, collateral_type: &Principal) -> BTreeMap<Principal, u64> {
         let mut result = BTreeMap::new();
         let mut remaining_e8s = debt_e8s;
+        let vps = self.virtual_prices();
 
         // Gather available balances per priority, only from opted-in depositors
-        let mut priority_buckets: BTreeMap<u8, Vec<(Principal, u64, u8)>> = BTreeMap::new(); // priority -> [(ledger, available_native, decimals)]
+        // Tuple: (ledger, available_native, decimals, is_lp)
+        let mut priority_buckets: BTreeMap<u8, Vec<(Principal, u64, u8, bool)>> = BTreeMap::new();
 
         for (ledger, config) in &self.stablecoin_registry {
-            // Sum balances of opted-in depositors for this token
             let available_native: u64 = self.deposits.values()
                 .filter(|pos| pos.is_opted_in(collateral_type))
                 .map(|pos| pos.stablecoin_balances.get(ledger).copied().unwrap_or(0))
                 .sum();
             if available_native > 0 {
+                let is_lp = config.is_lp_token.unwrap_or(false);
                 priority_buckets.entry(config.priority).or_default()
-                    .push((*ledger, available_native, config.decimals));
+                    .push((*ledger, available_native, config.decimals, is_lp));
             }
         }
 
-        // Process from highest priority number first: ckUSDC/ckUSDT (2) before icUSD (1).
-        // icUSD is the reserve stablecoin, only used when ck stables are exhausted.
+        // Process from highest priority number first: ckUSDC/ckUSDT (2) before icUSD (1), 3USD (0) last.
         let mut priorities: Vec<u8> = priority_buckets.keys().copied().collect();
-        priorities.sort_by(|a, b| b.cmp(a)); // descending: priority 2 consumed before priority 1
+        priorities.sort_by(|a, b| b.cmp(a)); // descending
 
         for priority in priorities {
             if remaining_e8s == 0 {
@@ -300,25 +319,36 @@ impl StabilityPoolState {
 
             // Total available at this priority level (in e8s)
             let total_available_e8s: u64 = tokens.iter()
-                .map(|(_, amount, decimals)| normalize_to_e8s(*amount, *decimals))
+                .map(|(ledger, amount, decimals, is_lp)| {
+                    if *is_lp {
+                        vps.get(ledger).map(|&vp| lp_to_usd_e8s(*amount, vp)).unwrap_or(0)
+                    } else {
+                        normalize_to_e8s(*amount, *decimals)
+                    }
+                })
                 .sum();
 
             if total_available_e8s == 0 {
                 continue;
             }
 
-            // How much to draw from this priority tier
             let draw_e8s = remaining_e8s.min(total_available_e8s);
 
-            // Proportional draw within this tier
-            for (ledger, available_native, decimals) in tokens {
-                let token_available_e8s = normalize_to_e8s(*available_native, *decimals);
+            for (ledger, available_native, decimals, is_lp) in tokens {
+                let token_available_e8s = if *is_lp {
+                    vps.get(ledger).map(|&vp| lp_to_usd_e8s(*available_native, vp)).unwrap_or(0)
+                } else {
+                    normalize_to_e8s(*available_native, *decimals)
+                };
                 if token_available_e8s == 0 {
                     continue;
                 }
-                // Proportional share: (token_available / total_available) * draw
                 let token_draw_e8s = (draw_e8s as u128 * token_available_e8s as u128 / total_available_e8s as u128) as u64;
-                let token_draw_native = normalize_from_e8s(token_draw_e8s, *decimals);
+                let token_draw_native = if *is_lp {
+                    vps.get(ledger).map(|&vp| usd_e8s_to_lp(token_draw_e8s, vp)).unwrap_or(0)
+                } else {
+                    normalize_from_e8s(token_draw_e8s, *decimals)
+                };
                 if token_draw_native > 0 {
                     result.insert(*ledger, token_draw_native.min(*available_native));
                 }
@@ -371,11 +401,25 @@ impl StabilityPoolState {
             per_token_opted_in_totals.insert(*token_ledger, total);
         }
 
-        // Phase 2: Compute total e8s consumed to determine collateral distribution shares
+        // Phase 2: Compute total e8s consumed to determine collateral distribution shares.
+        // LP tokens are valued at virtual price, not face value.
+        // Clone virtual prices and registry info upfront to avoid borrow conflicts with Phase 3.
+        let vps = self.virtual_prices().clone();
+        let registry_snapshot: BTreeMap<Principal, (u8, bool)> = stables_consumed.keys()
+            .filter_map(|ledger| {
+                self.stablecoin_registry.get(ledger).map(|c| {
+                    (*ledger, (c.decimals, c.is_lp_token.unwrap_or(false)))
+                })
+            })
+            .collect();
         let total_consumed_e8s: u64 = stables_consumed.iter()
             .map(|(ledger, &amount)| {
-                let decimals = self.stablecoin_registry.get(ledger).map(|c| c.decimals).unwrap_or(8);
-                normalize_to_e8s(amount, decimals)
+                let (decimals, is_lp) = registry_snapshot.get(ledger).copied().unwrap_or((8, false));
+                if is_lp {
+                    vps.get(ledger).map(|&vp| lp_to_usd_e8s(amount, vp)).unwrap_or(0)
+                } else {
+                    normalize_to_e8s(amount, decimals)
+                }
             })
             .sum();
 
@@ -413,9 +457,15 @@ impl StabilityPoolState {
                     // Track actual deduction for aggregate update
                     *actual_deductions_per_token.entry(*token_ledger).or_insert(0) += user_share_native;
 
-                    // Track consumed value in e8s for collateral distribution
-                    let decimals = self.stablecoin_registry.get(token_ledger).map(|c| c.decimals).unwrap_or(8);
-                    user_consumed_e8s += normalize_to_e8s(user_share_native, decimals);
+                    // Track consumed value in e8s for collateral distribution.
+                    // LP tokens valued at virtual price, not face value.
+                    let (decimals, is_lp) = registry_snapshot.get(token_ledger).copied().unwrap_or((8, false));
+                    let share_e8s = if is_lp {
+                        vps.get(token_ledger).map(|&vp| lp_to_usd_e8s(user_share_native, vp)).unwrap_or(0)
+                    } else {
+                        normalize_to_e8s(user_share_native, decimals)
+                    };
+                    user_consumed_e8s += share_e8s;
                 }
 
                 // Distribute collateral proportional to e8s consumed
@@ -460,10 +510,16 @@ impl StabilityPoolState {
     // ─── Query Helpers ───
 
     pub fn get_pool_status(&self) -> StabilityPoolStatus {
+        let vps = self.virtual_prices();
         let total_e8s: u64 = self.total_stablecoin_balances.iter()
             .map(|(ledger, &amount)| {
-                let decimals = self.stablecoin_registry.get(ledger).map(|c| c.decimals).unwrap_or(8);
-                normalize_to_e8s(amount, decimals)
+                let config = self.stablecoin_registry.get(ledger);
+                if config.map(|c| c.is_lp_token.unwrap_or(false)).unwrap_or(false) {
+                    vps.get(ledger).map(|&vp| lp_to_usd_e8s(amount, vp)).unwrap_or(0)
+                } else {
+                    let decimals = config.map(|c| c.decimals).unwrap_or(8);
+                    normalize_to_e8s(amount, decimals)
+                }
             })
             .sum();
 
@@ -525,7 +581,7 @@ impl StabilityPoolState {
             opted_out_collateral: pos.opted_out_collateral.iter().cloned().collect(),
             deposit_timestamp: pos.deposit_timestamp,
             total_claimed_gains: pos.total_claimed_gains.clone(),
-            total_usd_value_e8s: pos.total_usd_value(&self.stablecoin_registry),
+            total_usd_value_e8s: pos.total_usd_value(&self.stablecoin_registry, self.virtual_prices()),
             total_interest_earned_e8s: pos.total_interest_earned_e8s.unwrap_or(0),
         })
     }
@@ -768,6 +824,8 @@ mod tests {
             priority: 1,
             is_active: true,
             transfer_fee: Some(10_000),
+            is_lp_token: None,
+            underlying_pool: None,
         });
         state.register_stablecoin(StablecoinConfig {
             ledger_id: ckusdt_ledger(),
@@ -776,6 +834,8 @@ mod tests {
             priority: 2,
             is_active: true,
             transfer_fee: Some(10),
+            is_lp_token: None,
+            underlying_pool: None,
         });
         state.register_stablecoin(StablecoinConfig {
             ledger_id: ckusdc_ledger(),
@@ -784,6 +844,8 @@ mod tests {
             priority: 2,
             is_active: true,
             transfer_fee: Some(10),
+            is_lp_token: None,
+            underlying_pool: None,
         });
 
         state.register_collateral(CollateralInfo {
@@ -1163,7 +1225,7 @@ mod tests {
         pos.stablecoin_balances.insert(icusd_ledger(), 10_00000000);
         pos.stablecoin_balances.insert(ckusdt_ledger(), 5_000_000);
 
-        let total = pos.total_usd_value(&state.stablecoin_registry);
+        let total = pos.total_usd_value(&state.stablecoin_registry, state.virtual_prices());
         assert_eq!(total, 15_00000000, "10 icUSD + 5 ckUSDT = 15 USD in e8s");
     }
 
@@ -1467,5 +1529,125 @@ mod tests {
             .sum();
         let tracked = state.total_stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0);
         assert_eq!(sum, tracked, "Sum of individual balances must equal aggregate");
+    }
+
+    // ─── 3USD / LP Token Tests ───
+
+    fn three_usd_ledger() -> Principal { Principal::from_slice(&[30]) }
+    fn three_pool_canister() -> Principal { Principal::from_slice(&[31]) }
+
+    /// Build a test state with 3USD LP token registered.
+    fn test_state_with_3usd() -> StabilityPoolState {
+        let mut state = test_state();
+        state.register_stablecoin(StablecoinConfig {
+            ledger_id: three_usd_ledger(),
+            symbol: "3USD".to_string(),
+            decimals: 8,
+            priority: 0, // consumed last
+            is_active: true,
+            transfer_fee: Some(10_000),
+            is_lp_token: Some(true),
+            underlying_pool: Some(three_pool_canister()),
+        });
+        // Set virtual price to ~1.0492 (scaled 1e18)
+        state.cached_virtual_prices
+            .get_or_insert_with(BTreeMap::new)
+            .insert(three_usd_ledger(), 1_049_200_000_000_000_000u128);
+        state
+    }
+
+    #[test]
+    fn test_lp_to_usd_e8s_conversion() {
+        // 1 3USD at vp=1.0492 → 1.0492 USD
+        let vp = 1_049_200_000_000_000_000u128;
+        assert_eq!(lp_to_usd_e8s(100_000_000, vp), 104_920_000);
+
+        // 10 3USD
+        assert_eq!(lp_to_usd_e8s(1_000_000_000, vp), 1_049_200_000);
+
+        // 0 3USD
+        assert_eq!(lp_to_usd_e8s(0, vp), 0);
+
+        // vp=1.0 (exactly 1e18)
+        assert_eq!(lp_to_usd_e8s(100_000_000, 1_000_000_000_000_000_000), 100_000_000);
+    }
+
+    #[test]
+    fn test_usd_e8s_to_lp_conversion() {
+        let vp = 1_049_200_000_000_000_000u128;
+        // 1 USD → ~0.9531 3USD LP
+        let lp = usd_e8s_to_lp(100_000_000, vp);
+        assert!(lp > 95_000_000 && lp < 96_000_000, "Expected ~95.3M, got {}", lp);
+
+        // Round-trip: lp_to_usd then back (may lose 1 unit to rounding)
+        let usd = lp_to_usd_e8s(lp, vp);
+        assert!((usd as i64 - 100_000_000i64).abs() <= 1, "Round-trip drift too large");
+
+        // Zero virtual price → 0
+        assert_eq!(usd_e8s_to_lp(100_000_000, 0), 0);
+    }
+
+    #[test]
+    fn test_total_usd_value_with_lp_token() {
+        let state = test_state_with_3usd();
+        let vp_map = state.virtual_prices();
+
+        let mut pos = DepositPosition::new(0);
+        // 1 icUSD (e8s)
+        pos.stablecoin_balances.insert(icusd_ledger(), 100_000_000);
+        // 1 3USD LP (worth ~1.0492 USD)
+        pos.stablecoin_balances.insert(three_usd_ledger(), 100_000_000);
+
+        let total = pos.total_usd_value(&state.stablecoin_registry, vp_map);
+        // 100_000_000 + 104_920_000 = 204_920_000
+        assert_eq!(total, 204_920_000);
+    }
+
+    #[test]
+    fn test_total_usd_value_lp_without_virtual_price() {
+        let mut state = test_state_with_3usd();
+        // Remove cached virtual price
+        state.cached_virtual_prices = Some(BTreeMap::new());
+
+        let mut pos = DepositPosition::new(0);
+        pos.stablecoin_balances.insert(three_usd_ledger(), 100_000_000);
+
+        // Without virtual price, LP tokens valued at 0
+        let total = pos.total_usd_value(&state.stablecoin_registry, state.virtual_prices());
+        assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn test_compute_token_draw_with_3usd() {
+        let mut state = test_state_with_3usd();
+
+        // Add deposits: 1 icUSD (priority 1), 2 ckUSDT (priority 2), 5 3USD (priority 0)
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_000_000); // 1 icUSD
+        add_deposit_direct(&mut state, user_a(), ckusdt_ledger(), 2_000_000);  // 2 ckUSDT
+        add_deposit_direct(&mut state, user_a(), three_usd_ledger(), 500_000_000); // 5 3USD
+
+        // Draw 3 USD — should consume ckUSDT first (priority 2), then icUSD (priority 1)
+        let draw = state.compute_token_draw(300_000_000, &icp_ledger()); // 3 USD e8s
+        assert!(draw.contains_key(&ckusdt_ledger()), "Should draw from ckUSDT (priority 2)");
+        assert!(draw.contains_key(&icusd_ledger()), "Should draw from icUSD (priority 1)");
+        assert!(!draw.contains_key(&three_usd_ledger()), "Should NOT draw from 3USD yet (priority 0)");
+
+        // Draw 5 USD — should consume all ckUSDT + icUSD, then dip into 3USD
+        let draw = state.compute_token_draw(500_000_000, &icp_ledger()); // 5 USD e8s
+        assert!(draw.contains_key(&ckusdt_ledger()), "Should draw from ckUSDT");
+        assert!(draw.contains_key(&icusd_ledger()), "Should draw from icUSD");
+        assert!(draw.contains_key(&three_usd_ledger()), "Should draw from 3USD for remainder");
+    }
+
+    #[test]
+    fn test_effective_pool_includes_3usd_at_virtual_price() {
+        let mut state = test_state_with_3usd();
+
+        // Only 3USD deposit: 10 LP tokens at vp=1.0492
+        add_deposit_direct(&mut state, user_a(), three_usd_ledger(), 1_000_000_000); // 10 3USD
+
+        let effective = state.effective_pool_for_collateral(&icp_ledger());
+        // 10 * 1.0492 = 10.492 USD = 1_049_200_000 e8s
+        assert_eq!(effective, 1_049_200_000);
     }
 }

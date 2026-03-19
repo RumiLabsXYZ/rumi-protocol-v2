@@ -35,6 +35,26 @@ export type ApproveError = {
   { 'TooOld' : null } |
   { 'Expired' : { 'ledger_time' : bigint } } |
   { 'InsufficientFunds' : { 'balance' : bigint } };
+export interface ArchiveInfo {
+  'end' : bigint,
+  'canister_id' : Principal,
+  'start' : bigint,
+}
+export interface ArchivedBlocks {
+  'args' : Array<GetBlocksArgs>,
+  'callback' : [Principal, string],
+}
+export type ArchivedBlocksCallback = ActorMethod<
+  [Array<GetBlocksArgs>],
+  GetBlocksResult
+>;
+export interface AuthorizedRedeemAndBurnArgs {
+  'token_amount' : bigint,
+  'lp_amount' : bigint,
+  'max_slippage_bps' : number,
+  'token_ledger' : Principal,
+}
+export interface BlockWithId { 'id' : bigint, 'block' : Icrc3Value }
 export interface ConsentInfo {
   'metadata' : ConsentMessageMetadata,
   'consent_message' : ConsentMessage,
@@ -67,6 +87,14 @@ export type DeviceSpec = { 'GenericDisplay' : null } |
     }
   };
 export interface ErrorInfo { 'description' : string }
+export interface GetArchivesArgs { 'from' : [] | [Principal] }
+export interface GetArchivesResult { 'archives' : Array<ArchiveInfo> }
+export interface GetBlocksArgs { 'start' : bigint, 'length' : bigint }
+export interface GetBlocksResult {
+  'log_length' : bigint,
+  'blocks' : Array<BlockWithId>,
+  'archived_blocks' : Array<ArchivedBlocks>,
+}
 export type Icrc21Error = {
     'GenericError' : { 'description' : string, 'error_code' : bigint }
   } |
@@ -75,6 +103,19 @@ export type Icrc21Error = {
 export interface Icrc28TrustedOriginsResponse {
   'trusted_origins' : Array<string>,
 }
+export interface Icrc3DataCertificate {
+  'certificate' : Uint8Array | number[],
+  'hash_tree' : Uint8Array | number[],
+}
+/**
+ * ─── ICRC-3 Types ───
+ */
+export type Icrc3Value = { 'Int' : bigint } |
+  { 'Map' : Array<[string, Icrc3Value]> } |
+  { 'Nat' : bigint } |
+  { 'Blob' : Uint8Array | number[] } |
+  { 'Text' : string } |
+  { 'Array' : Array<Icrc3Value> };
 export interface LineDisplayPage { 'lines' : Array<string> }
 export type MetadataValue = { 'Int' : bigint } |
   { 'Nat' : bigint } |
@@ -89,20 +130,37 @@ export interface PoolStatus {
   'lp_total_supply' : bigint,
   'balances' : Array<bigint>,
 }
+export interface RedeemAndBurnResult {
+  'lp_amount_burned' : bigint,
+  'burn_block_index' : bigint,
+  'token_amount_burned' : bigint,
+}
 export interface StandardRecord { 'url' : string, 'name' : string }
+export interface SupportedBlockType { 'url' : string, 'block_type' : string }
 export type ThreePoolError = {
     'InsufficientOutput' : { 'actual' : bigint, 'expected_min' : bigint }
   } |
   { 'PoolPaused' : null } |
   { 'InvalidCoinIndex' : null } |
+  { 'BurnSlippageExceeded' : { 'actual_bps' : number, 'max_bps' : number } } |
+  { 'NotAuthorizedBurnCaller' : null } |
   { 'ZeroAmount' : null } |
+  { 'InsufficientLpBalance' : { 'available' : bigint, 'required' : bigint } } |
+  { 'BurnFailed' : { 'token' : string, 'reason' : string } } |
   { 'MathOverflow' : null } |
   { 'Unauthorized' : null } |
   { 'InvariantNotConverged' : null } |
   { 'InsufficientLiquidity' : null } |
   { 'TransferFailed' : { 'token' : string, 'reason' : string } } |
   { 'SlippageExceeded' : null } |
-  { 'PoolEmpty' : null };
+  { 'PoolEmpty' : null } |
+  {
+    'InsufficientPoolBalance' : {
+      'token' : string,
+      'available' : bigint,
+      'required' : bigint,
+    }
+  };
 export interface ThreePoolInitArgs {
   'admin_fee_bps' : bigint,
   'admin' : Principal,
@@ -160,9 +218,19 @@ export interface VirtualPriceSnapshot {
   'lp_total_supply' : bigint,
 }
 export interface _SERVICE {
+  'add_authorized_burn_caller' : ActorMethod<
+    [Principal],
+    { 'Ok' : null } |
+      { 'Err' : ThreePoolError }
+  >,
   'add_liquidity' : ActorMethod<
     [Array<bigint>, bigint],
     { 'Ok' : bigint } |
+      { 'Err' : ThreePoolError }
+  >,
+  'authorized_redeem_and_burn' : ActorMethod<
+    [AuthorizedRedeemAndBurnArgs],
+    { 'Ok' : RedeemAndBurnResult } |
       { 'Err' : ThreePoolError }
   >,
   'calc_add_liquidity_query' : ActorMethod<
@@ -191,6 +259,7 @@ export interface _SERVICE {
       { 'Err' : ThreePoolError }
   >,
   'get_admin_fees' : ActorMethod<[], Array<bigint>>,
+  'get_authorized_burn_callers' : ActorMethod<[], Array<Principal>>,
   'get_lp_balance' : ActorMethod<[Principal], bigint>,
   'get_pool_status' : ActorMethod<[], PoolStatus>,
   'get_vp_snapshots' : ActorMethod<[], Array<VirtualPriceSnapshot>>,
@@ -233,8 +302,20 @@ export interface _SERVICE {
     { 'Ok' : bigint } |
       { 'Err' : TransferFromError }
   >,
+  'icrc3_get_archives' : ActorMethod<[GetArchivesArgs], GetArchivesResult>,
+  /**
+   * ICRC-3 (Transaction Log)
+   */
+  'icrc3_get_blocks' : ActorMethod<[Array<GetBlocksArgs>], GetBlocksResult>,
+  'icrc3_get_tip_certificate' : ActorMethod<[], [] | [Icrc3DataCertificate]>,
+  'icrc3_supported_block_types' : ActorMethod<[], Array<SupportedBlockType>>,
   'ramp_a' : ActorMethod<
     [bigint, bigint],
+    { 'Ok' : null } |
+      { 'Err' : ThreePoolError }
+  >,
+  'remove_authorized_burn_caller' : ActorMethod<
+    [Principal],
     { 'Ok' : null } |
       { 'Err' : ThreePoolError }
   >,

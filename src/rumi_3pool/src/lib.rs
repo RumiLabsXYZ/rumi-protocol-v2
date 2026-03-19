@@ -732,6 +732,200 @@ pub fn set_admin_fee(fee_bps: u64) -> Result<(), ThreePoolError> {
     admin::set_admin_fee(caller, fee_bps)
 }
 
+// ─── Authorized Burn Caller Admin ───
+
+#[update]
+pub fn add_authorized_burn_caller(canister: Principal) -> Result<(), ThreePoolError> {
+    admin::add_authorized_burn_caller(ic_cdk::caller(), canister)
+}
+
+#[update]
+pub fn remove_authorized_burn_caller(canister: Principal) -> Result<(), ThreePoolError> {
+    admin::remove_authorized_burn_caller(ic_cdk::caller(), canister)
+}
+
+#[query]
+pub fn get_authorized_burn_callers() -> Vec<Principal> {
+    admin::get_authorized_burn_callers()
+}
+
+// ─── Authorized Redeem-and-Burn ───
+
+/// Authorized redeem-and-burn: an authorized canister burns its LP tokens
+/// and a corresponding amount of one token is removed from pool reserves
+/// and burned on that token's ledger.
+///
+/// General-purpose function for protocol operations like stability pool
+/// liquidations and peg management.
+#[update]
+pub async fn authorized_redeem_and_burn(
+    args: AuthorizedRedeemAndBurnArgs,
+) -> Result<RedeemAndBurnResult, ThreePoolError> {
+    let caller = ic_cdk::caller();
+
+    // 1. Authorization check
+    if !read_state(|s| s.burn_callers().contains(&caller)) {
+        return Err(ThreePoolError::NotAuthorizedBurnCaller);
+    }
+
+    // 2. Resolve token index
+    let (token_idx, token_symbol) = read_state(|s| {
+        for (i, tc) in s.config.tokens.iter().enumerate() {
+            if tc.ledger_id == args.token_ledger {
+                return Ok((i, tc.symbol.clone()));
+            }
+        }
+        Err(ThreePoolError::InvalidCoinIndex)
+    })?;
+
+    // 3. Validate LP balance
+    let caller_lp = read_state(|s| s.lp_balances.get(&caller).copied().unwrap_or(0));
+    if caller_lp < args.lp_amount {
+        return Err(ThreePoolError::InsufficientLpBalance {
+            required: args.lp_amount,
+            available: caller_lp,
+        });
+    }
+
+    // 4. Validate pool has enough of the target token
+    let pool_balance = read_state(|s| s.balances[token_idx]);
+    if pool_balance < args.token_amount {
+        return Err(ThreePoolError::InsufficientPoolBalance {
+            token: token_symbol.clone(),
+            required: args.token_amount,
+            available: pool_balance,
+        });
+    }
+
+    // 5. Validate slippage: compare LP-to-token ratio against virtual price
+    let vp = read_state(|s| {
+        let pms = [
+            s.config.tokens[0].precision_mul,
+            s.config.tokens[1].precision_mul,
+            s.config.tokens[2].precision_mul,
+        ];
+        let a = get_a(
+            s.config.initial_a, s.config.future_a,
+            s.config.initial_a_time, s.config.future_a_time,
+            ic_cdk::api::time(),
+        );
+        virtual_price(&s.balances, &pms, a, s.lp_total_supply)
+    });
+
+    if let Some(vp) = vp {
+        // Expected token value of the LP being burned (in 18-dec)
+        let expected_value_18 = args.lp_amount as u128 * vp / 100_000_000; // LP is 8-dec
+        // token_amount in 18-dec for comparison
+        let token_decimals = read_state(|s| s.config.tokens[token_idx].decimals);
+        let token_amount_18 = args.token_amount * 10u128.pow((18 - token_decimals) as u32);
+
+        // Check slippage: token_amount should not exceed expected_value * (1 + slippage)
+        let max_token_18 = expected_value_18 * (10_000 + args.max_slippage_bps as u128) / 10_000;
+        if token_amount_18 > max_token_18 {
+            let actual_bps = if expected_value_18 > 0 {
+                ((token_amount_18 - expected_value_18) * 10_000 / expected_value_18) as u16
+            } else {
+                u16::MAX
+            };
+            return Err(ThreePoolError::BurnSlippageExceeded {
+                max_bps: args.max_slippage_bps,
+                actual_bps,
+            });
+        }
+    }
+
+    // 6. Deduct LP and pool balance BEFORE the async burn call (deduct-before-transfer)
+    mutate_state(|s| {
+        if let Some(lp) = s.lp_balances.get_mut(&caller) {
+            *lp -= args.lp_amount;
+        }
+        s.lp_total_supply -= args.lp_amount;
+        s.balances[token_idx] -= args.token_amount;
+    });
+
+    // 7. Burn the token on its ledger (transfer to minting account)
+    let burn_result = burn_token_on_ledger(args.token_ledger, args.token_amount).await;
+
+    match burn_result {
+        Ok(block_index) => {
+            // Log ICRC-3 block for the LP burn
+            mutate_state(|s| {
+                s.log_block(Icrc3Transaction::Burn {
+                    from: caller,
+                    amount: args.lp_amount,
+                });
+            });
+
+            log!(INFO, "AuthorizedRedeemAndBurn: {} burned {} LP, {} {} destroyed (block {})",
+                caller, args.lp_amount, args.token_amount, token_symbol, block_index);
+
+            Ok(RedeemAndBurnResult {
+                token_amount_burned: args.token_amount,
+                lp_amount_burned: args.lp_amount,
+                burn_block_index: block_index,
+            })
+        }
+        Err(reason) => {
+            // Rollback: restore LP and pool balance
+            mutate_state(|s| {
+                *s.lp_balances.entry(caller).or_insert(0) += args.lp_amount;
+                s.lp_total_supply += args.lp_amount;
+                s.balances[token_idx] += args.token_amount;
+            });
+
+            log!(INFO, "AuthorizedRedeemAndBurn: FAILED for {} — rolling back. Reason: {}", caller, reason);
+
+            Err(ThreePoolError::BurnFailed {
+                token: token_symbol,
+                reason,
+            })
+        }
+    }
+}
+
+/// Burn tokens by transferring to the minting account (ICRC-1 burn standard).
+async fn burn_token_on_ledger(ledger: Principal, amount: u128) -> Result<u64, String> {
+    use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
+    use icrc_ledger_types::icrc1::account::Account;
+
+    // Query the minting account from the ledger
+    let minting_result: Result<(Option<Account>,), _> = ic_cdk::call(
+        ledger, "icrc1_minting_account", ()
+    ).await;
+
+    let minting_account = match minting_result {
+        Ok((Some(account),)) => account,
+        Ok((None,)) => {
+            return Err("Ledger has no minting account — cannot burn".to_string());
+        }
+        Err(e) => {
+            return Err(format!("Failed to query minting account: {:?}", e));
+        }
+    };
+
+    let transfer_args = TransferArg {
+        to: minting_account,
+        amount: amount.into(),
+        fee: None,
+        memo: None,
+        created_at_time: Some(ic_cdk::api::time()),
+        from_subaccount: None,
+    };
+
+    let result: Result<(Result<candid::Nat, TransferError>,), _> = ic_cdk::call(
+        ledger, "icrc1_transfer", (transfer_args,)
+    ).await;
+
+    match result {
+        Ok((Ok(block_index),)) => {
+            let idx: u64 = block_index.0.try_into().unwrap_or(0);
+            Ok(idx)
+        }
+        Ok((Err(e),)) => Err(format!("Transfer error: {:?}", e)),
+        Err(e) => Err(format!("Call error: {:?}", e)),
+    }
+}
+
 // ─── ICRC-21 / ICRC-28 / ICRC-10 ───
 
 #[update]

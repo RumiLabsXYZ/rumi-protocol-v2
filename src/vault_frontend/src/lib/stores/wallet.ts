@@ -183,16 +183,18 @@ function createWalletStore() {
       const protocolStatus = await appDataStore.fetchProtocolStatus();
       const icpPriceValue = protocolStatus?.lastIcpRate || 0;
 
-      // Fetch ckUSDT/ckUSDC balances (6 decimal tokens — format with 6 decimals)
+      // Fetch ckUSDT/ckUSDC/3USD balances
       let ckusdtBalance = 0n;
       let ckusdcBalance = 0n;
+      let threeUsdBalance = 0n;
       try {
-        [ckusdtBalance, ckusdcBalance] = await Promise.all([
+        [ckusdtBalance, ckusdcBalance, threeUsdBalance] = await Promise.all([
           TokenService.getTokenBalance(CONFIG.ckusdtLedgerId, state.principal),
           TokenService.getTokenBalance(CONFIG.ckusdcLedgerId, state.principal),
+          TokenService.getTokenBalance(CONFIG.threePoolCanisterId, state.principal),
         ]);
       } catch (e) {
-        console.warn('Failed to fetch ckstable balances:', e);
+        console.warn('Failed to fetch stablecoin balances:', e);
       }
 
       const formatStable6 = (raw: bigint) => {
@@ -231,6 +233,11 @@ function createWalletStore() {
             raw: ckusdcBalance,
             formatted: formatStable6(ckusdcBalance),
             usdValue: Number(formatStable6(ckusdcBalance))
+          },
+          THREEUSD: {
+            raw: threeUsdBalance,
+            formatted: TokenService.formatBalance(threeUsdBalance),
+            usdValue: Number(TokenService.formatBalance(threeUsdBalance))
           },
           ...collateralBalances
         },
@@ -392,11 +399,12 @@ function createWalletStore() {
 
           appDataStore.setWalletState(true, principal);
 
-          const [{ icpBalance, icusdBalance }, protocolStatus, ckusdtBalance, ckusdcBalance] = await Promise.all([
+          const [{ icpBalance, icusdBalance }, protocolStatus, ckusdtBalance, ckusdcBalance, threeUsdBalance] = await Promise.all([
             appDataStore.fetchBalances(principal),
             appDataStore.fetchProtocolStatus(),
             TokenService.getTokenBalance(CONFIG.ckusdtLedgerId, principal).catch(() => 0n),
             TokenService.getTokenBalance(CONFIG.ckusdcLedgerId, principal).catch(() => 0n),
+            TokenService.getTokenBalance(CONFIG.threePoolCanisterId, principal).catch(() => 0n),
           ]);
           const icpPriceValue = protocolStatus?.lastIcpRate || 0;
           const formatStable6 = (raw: bigint) => {
@@ -447,6 +455,11 @@ function createWalletStore() {
                 formatted: formatStable6(ckusdcBalance),
                 usdValue: Number(formatStable6(ckusdcBalance))
               },
+              THREEUSD: {
+                raw: threeUsdBalance,
+                formatted: TokenService.formatBalance(threeUsdBalance),
+                usdValue: Number(TokenService.formatBalance(threeUsdBalance))
+              },
               ...collateralBalances
             },
             loading: false,
@@ -483,11 +496,12 @@ function createWalletStore() {
 
         appDataStore.setWalletState(true, ownerPrincipal);
 
-        const [{ icpBalance, icusdBalance }, protocolStatus, ckusdtBalance, ckusdcBalance] = await Promise.all([
+        const [{ icpBalance, icusdBalance }, protocolStatus, ckusdtBalance, ckusdcBalance, threeUsdBalance] = await Promise.all([
           appDataStore.fetchBalances(ownerPrincipal),
           appDataStore.fetchProtocolStatus(),
           TokenService.getTokenBalance(CONFIG.ckusdtLedgerId, ownerPrincipal).catch(() => 0n),
           TokenService.getTokenBalance(CONFIG.ckusdcLedgerId, ownerPrincipal).catch(() => 0n),
+          TokenService.getTokenBalance(CONFIG.threePoolCanisterId, ownerPrincipal).catch(() => 0n),
         ]);
         const icpPriceValue = protocolStatus?.lastIcpRate || 0;
         const formatStable6 = (raw: bigint) => {
@@ -528,6 +542,11 @@ function createWalletStore() {
               raw: ckusdcBalance,
               formatted: formatStable6(ckusdcBalance),
               usdValue: Number(formatStable6(ckusdcBalance))
+            },
+            THREEUSD: {
+              raw: threeUsdBalance,
+              formatted: TokenService.formatBalance(threeUsdBalance),
+              usdValue: Number(TokenService.formatBalance(threeUsdBalance))
             },
             ...collateralBalances
           },

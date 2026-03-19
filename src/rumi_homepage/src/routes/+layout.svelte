@@ -60,7 +60,7 @@
           style="background: var(--rumi-bg-surface1); border-color: var(--rumi-border);">
     <div class="max-w-6xl mx-auto flex flex-col md:flex-row justify-between items-center gap-4">
       <div class="flex items-center gap-6 text-sm" style="color: var(--rumi-text-muted);">
-        <span>&copy; 2025-2026 Rumi Labs LLC</span>
+        <span>&copy; 2025–{new Date().getFullYear()} Rumi Labs LLC</span>
         <a href="https://github.com/RumiLabsXYZ/rumi-protocol-v2" target="_blank" rel="noopener" class="footer-link">GitHub</a>
         <a href="/Rumi-Protocol-v2-Whitepaper.pdf" target="_blank" class="footer-link">Whitepaper</a>
         <a href="/AVAI_Security_Audit_Rumi_Protocol_Professional.pdf" target="_blank" class="footer-link">Audit</a>

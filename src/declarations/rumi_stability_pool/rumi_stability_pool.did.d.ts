@@ -157,8 +157,10 @@ export interface StablecoinConfig {
   'decimals' : number,
   'transfer_fee' : [] | [bigint],
   'ledger_id' : Principal,
+  'underlying_pool' : [] | [Principal],
   'priority' : number,
   'is_active' : boolean,
+  'is_lp_token' : [] | [boolean],
   'symbol' : string,
 }
 export interface UserStabilityPosition {
@@ -203,6 +205,11 @@ export interface _SERVICE {
   'deposit' : ActorMethod<
     [Principal, bigint],
     { 'Ok' : null } |
+      { 'Err' : StabilityPoolError }
+  >,
+  'deposit_as_3usd' : ActorMethod<
+    [Principal, bigint],
+    { 'Ok' : bigint } |
       { 'Err' : StabilityPoolError }
   >,
   'emergency_pause' : ActorMethod<

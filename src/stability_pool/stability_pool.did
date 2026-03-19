@@ -17,6 +17,8 @@ type StablecoinConfig = record {
   priority : nat8;
   is_active : bool;
   transfer_fee : opt nat64;
+  is_lp_token : opt bool;
+  underlying_pool : opt principal;
 };
 
 type CollateralInfo = record {
@@ -189,6 +191,7 @@ service : (StabilityPoolInitArgs) -> {
   // ── Deposit / Withdraw / Claim ──
   deposit : (principal, nat64) -> (variant { Ok; Err : StabilityPoolError });
   withdraw : (principal, nat64) -> (variant { Ok; Err : StabilityPoolError });
+  deposit_as_3usd : (principal, nat64) -> (variant { Ok : nat64; Err : StabilityPoolError });
   claim_collateral : (principal) -> (variant { Ok : nat64; Err : StabilityPoolError });
   claim_all_collateral : () -> (variant { Ok : vec record { principal; nat64 }; Err : StabilityPoolError });
 
