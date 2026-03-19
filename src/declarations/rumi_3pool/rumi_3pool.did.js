@@ -1,4 +1,6 @@
 export const idlFactory = ({ IDL }) => {
+  const GetBlocksResult = IDL.Rec();
+  const Icrc3Value = IDL.Rec();
   const TokenConfig = IDL.Record({
     'decimals' : IDL.Nat8,
     'precision_mul' : IDL.Nat64,
@@ -19,7 +21,17 @@ export const idlFactory = ({ IDL }) => {
     }),
     'PoolPaused' : IDL.Null,
     'InvalidCoinIndex' : IDL.Null,
+    'BurnSlippageExceeded' : IDL.Record({
+      'actual_bps' : IDL.Nat16,
+      'max_bps' : IDL.Nat16,
+    }),
+    'NotAuthorizedBurnCaller' : IDL.Null,
     'ZeroAmount' : IDL.Null,
+    'InsufficientLpBalance' : IDL.Record({
+      'available' : IDL.Nat,
+      'required' : IDL.Nat,
+    }),
+    'BurnFailed' : IDL.Record({ 'token' : IDL.Text, 'reason' : IDL.Text }),
     'MathOverflow' : IDL.Null,
     'Unauthorized' : IDL.Null,
     'InvariantNotConverged' : IDL.Null,
@@ -27,6 +39,22 @@ export const idlFactory = ({ IDL }) => {
     'TransferFailed' : IDL.Record({ 'token' : IDL.Text, 'reason' : IDL.Text }),
     'SlippageExceeded' : IDL.Null,
     'PoolEmpty' : IDL.Null,
+    'InsufficientPoolBalance' : IDL.Record({
+      'token' : IDL.Text,
+      'available' : IDL.Nat,
+      'required' : IDL.Nat,
+    }),
+  });
+  const AuthorizedRedeemAndBurnArgs = IDL.Record({
+    'token_amount' : IDL.Nat,
+    'lp_amount' : IDL.Nat,
+    'max_slippage_bps' : IDL.Nat16,
+    'token_ledger' : IDL.Principal,
+  });
+  const RedeemAndBurnResult = IDL.Record({
+    'lp_amount_burned' : IDL.Nat,
+    'burn_block_index' : IDL.Nat64,
+    'token_amount_burned' : IDL.Nat,
   });
   const PoolStatus = IDL.Record({
     'virtual_price' : IDL.Nat,
@@ -170,10 +198,63 @@ export const idlFactory = ({ IDL }) => {
     'TooOld' : IDL.Null,
     'InsufficientFunds' : IDL.Record({ 'balance' : IDL.Nat }),
   });
+  const GetArchivesArgs = IDL.Record({ 'from' : IDL.Opt(IDL.Principal) });
+  const ArchiveInfo = IDL.Record({
+    'end' : IDL.Nat,
+    'canister_id' : IDL.Principal,
+    'start' : IDL.Nat,
+  });
+  const GetArchivesResult = IDL.Record({ 'archives' : IDL.Vec(ArchiveInfo) });
+  const GetBlocksArgs = IDL.Record({ 'start' : IDL.Nat, 'length' : IDL.Nat });
+  Icrc3Value.fill(
+    IDL.Variant({
+      'Int' : IDL.Int,
+      'Map' : IDL.Vec(IDL.Tuple(IDL.Text, Icrc3Value)),
+      'Nat' : IDL.Nat,
+      'Blob' : IDL.Vec(IDL.Nat8),
+      'Text' : IDL.Text,
+      'Array' : IDL.Vec(Icrc3Value),
+    })
+  );
+  const BlockWithId = IDL.Record({ 'id' : IDL.Nat, 'block' : Icrc3Value });
+  const ArchivedBlocksCallback = IDL.Func(
+      [IDL.Vec(GetBlocksArgs)],
+      [GetBlocksResult],
+      ['query'],
+    );
+  const ArchivedBlocks = IDL.Record({
+    'args' : IDL.Vec(GetBlocksArgs),
+    'callback' : ArchivedBlocksCallback,
+  });
+  GetBlocksResult.fill(
+    IDL.Record({
+      'log_length' : IDL.Nat,
+      'blocks' : IDL.Vec(BlockWithId),
+      'archived_blocks' : IDL.Vec(ArchivedBlocks),
+    })
+  );
+  const Icrc3DataCertificate = IDL.Record({
+    'certificate' : IDL.Vec(IDL.Nat8),
+    'hash_tree' : IDL.Vec(IDL.Nat8),
+  });
+  const SupportedBlockType = IDL.Record({
+    'url' : IDL.Text,
+    'block_type' : IDL.Text,
+  });
   return IDL.Service({
+    'add_authorized_burn_caller' : IDL.Func(
+        [IDL.Principal],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : ThreePoolError })],
+        [],
+      ),
     'add_liquidity' : IDL.Func(
         [IDL.Vec(IDL.Nat), IDL.Nat],
         [IDL.Variant({ 'Ok' : IDL.Nat, 'Err' : ThreePoolError })],
+        [],
+      ),
+    'authorized_redeem_and_burn' : IDL.Func(
+        [AuthorizedRedeemAndBurnArgs],
+        [IDL.Variant({ 'Ok' : RedeemAndBurnResult, 'Err' : ThreePoolError })],
         [],
       ),
     'calc_add_liquidity_query' : IDL.Func(
@@ -202,6 +283,11 @@ export const idlFactory = ({ IDL }) => {
         [],
       ),
     'get_admin_fees' : IDL.Func([], [IDL.Vec(IDL.Nat)], ['query']),
+    'get_authorized_burn_callers' : IDL.Func(
+        [],
+        [IDL.Vec(IDL.Principal)],
+        ['query'],
+      ),
     'get_lp_balance' : IDL.Func([IDL.Principal], [IDL.Nat], ['query']),
     'get_pool_status' : IDL.Func([], [PoolStatus], ['query']),
     'get_vp_snapshots' : IDL.Func(
@@ -258,8 +344,33 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Nat, 'Err' : TransferFromError })],
         [],
       ),
+    'icrc3_get_archives' : IDL.Func(
+        [GetArchivesArgs],
+        [GetArchivesResult],
+        ['query'],
+      ),
+    'icrc3_get_blocks' : IDL.Func(
+        [IDL.Vec(GetBlocksArgs)],
+        [GetBlocksResult],
+        ['query'],
+      ),
+    'icrc3_get_tip_certificate' : IDL.Func(
+        [],
+        [IDL.Opt(Icrc3DataCertificate)],
+        ['query'],
+      ),
+    'icrc3_supported_block_types' : IDL.Func(
+        [],
+        [IDL.Vec(SupportedBlockType)],
+        ['query'],
+      ),
     'ramp_a' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : ThreePoolError })],
+        [],
+      ),
+    'remove_authorized_burn_caller' : IDL.Func(
+        [IDL.Principal],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : ThreePoolError })],
         [],
       ),

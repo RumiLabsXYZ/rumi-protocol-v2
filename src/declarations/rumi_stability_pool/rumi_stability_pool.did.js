@@ -51,8 +51,10 @@ export const idlFactory = ({ IDL }) => {
     'decimals' : IDL.Nat8,
     'transfer_fee' : IDL.Opt(IDL.Nat64),
     'ledger_id' : IDL.Principal,
+    'underlying_pool' : IDL.Opt(IDL.Principal),
     'priority' : IDL.Nat8,
     'is_active' : IDL.Bool,
+    'is_lp_token' : IDL.Opt(IDL.Bool),
     'symbol' : IDL.Text,
   });
   const CollateralStatus = IDL.Variant({
@@ -192,6 +194,11 @@ export const idlFactory = ({ IDL }) => {
     'deposit' : IDL.Func(
         [IDL.Principal, IDL.Nat64],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
+        [],
+      ),
+    'deposit_as_3usd' : IDL.Func(
+        [IDL.Principal, IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : StabilityPoolError })],
         [],
       ),
     'emergency_pause' : IDL.Func(

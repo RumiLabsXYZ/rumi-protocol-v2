@@ -109,6 +109,7 @@
     [CANISTER_IDS.ICUSD_LEDGER]: '#818cf8',
     [CANISTER_IDS.CKUSDT_LEDGER]: '#26A17B',
     [CANISTER_IDS.CKUSDC_LEDGER]: '#2775CA',
+    [CANISTER_IDS.THREEPOOL]: '#F59E0B',
   };
 
   function getStablecoinColor(ledgerId: any): string {
