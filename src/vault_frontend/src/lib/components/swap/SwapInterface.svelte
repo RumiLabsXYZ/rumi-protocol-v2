@@ -53,7 +53,7 @@
     ? formatTokenAmount(quoteOutput, toToken.decimals)
     : '';
 
-  // Effective rate: output / input
+  // Effective rate: output / input (per 1 unit of input token)
   $: effectiveRate = (() => {
     if (!quoteOutput || !amount || parseFloat(amount) <= 0) return null;
     const inputValue = parseFloat(amount);
@@ -61,17 +61,28 @@
     return (outputValue / inputValue).toFixed(4);
   })();
 
-  // Price impact estimate: compare to 1:1 ideal
+  // Swap fee (from pool config, 20 bps = 0.20%)
+  const SWAP_FEE_BPS = 20;
+  $: swapFeeDisplay = (SWAP_FEE_BPS / 100).toFixed(2);
+
+  // Price impact: isolate curve impact by removing the fee component
+  // impact = (1 - output/input / (1 - fee_rate)) * 100
   $: priceImpact = (() => {
     if (!quoteOutput || !amount || parseFloat(amount) <= 0) return null;
     const inputValue = parseFloat(amount);
     const outputValue = Number(quoteOutput) / Math.pow(10, toToken.decimals);
-    const impact = ((1 - outputValue / inputValue) * 100);
+    const feeRate = SWAP_FEE_BPS / 10000;
+    const rateAfterFeeRemoval = (outputValue / inputValue) / (1 - feeRate);
+    const impact = (1 - rateAfterFeeRemoval) * 100;
+    // Clamp near-zero values to avoid showing -0.00%
+    if (Math.abs(impact) < 0.005) return '0.00';
     return impact.toFixed(2);
   })();
 
   // Fetch quote when amount changes (debounced)
+  // Clear stale output immediately to prevent showing old output with new input
   $: if (amount && parseFloat(amount) > 0) {
+    quoteOutput = null;
     debouncedQuote();
   } else {
     quoteOutput = null;
@@ -290,10 +301,14 @@
           <span class="info-label">Rate</span>
           <span class="info-value">1 {fromToken.symbol} = {effectiveRate} {toToken.symbol}</span>
         </div>
+        <div class="info-row">
+          <span class="info-label">Swap fee</span>
+          <span class="info-value">{swapFeeDisplay}%</span>
+        </div>
         {#if priceImpact !== null}
           <div class="info-row">
             <span class="info-label">Price impact</span>
-            <span class="info-value" class:impact-warn={parseFloat(priceImpact) > 1}>{priceImpact}%</span>
+            <span class="info-value" class:impact-warn={parseFloat(priceImpact) > 1} class:impact-favorable={parseFloat(priceImpact) < 0}>{parseFloat(priceImpact) < 0 ? priceImpact : priceImpact}%</span>
           </div>
         {/if}
         <div class="info-row">
@@ -626,6 +641,10 @@
 
   .info-value.impact-warn {
     color: var(--rumi-danger);
+  }
+
+  .info-value.impact-favorable {
+    color: var(--rumi-safe);
   }
 
   /* ── Slippage ── */
