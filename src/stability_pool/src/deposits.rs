@@ -3,6 +3,7 @@ use candid::Principal;
 use ic_canister_log::log;
 use ic_cdk::call;
 use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromError};
+use icrc_ledger_types::icrc2::approve::{ApproveArgs, ApproveError};
 use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
 use icrc_ledger_types::icrc1::account::Account;
 use crate::logs::INFO;
@@ -246,4 +247,159 @@ pub async fn claim_all_collateral() -> Result<BTreeMap<Principal, u64>, Stabilit
     }
 
     Ok(claimed)
+}
+
+/// Convenience deposit: user sends icUSD (or ckUSDT/ckUSDC) and the pool
+/// deposits it into the 3pool on their behalf, crediting the resulting 3USD.
+pub async fn deposit_as_3usd(
+    token_ledger: Principal,
+    amount: u64,
+) -> Result<u64, StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+
+    let config = read_state(|s| s.get_stablecoin_config(&token_ledger).cloned())
+        .ok_or(StabilityPoolError::TokenNotAccepted { ledger: token_ledger })?;
+    if !config.is_active {
+        return Err(StabilityPoolError::TokenNotActive { ledger: token_ledger });
+    }
+    if config.is_lp_token.unwrap_or(false) {
+        return Err(StabilityPoolError::TokenNotAccepted { ledger: token_ledger });
+    }
+
+    if read_state(|s| s.configuration.emergency_pause) {
+        return Err(StabilityPoolError::EmergencyPaused);
+    }
+
+    let amount_e8s = normalize_to_e8s(amount, config.decimals);
+    let min_deposit = read_state(|s| s.configuration.min_deposit_e8s);
+    if amount_e8s < min_deposit {
+        return Err(StabilityPoolError::AmountTooLow { minimum_e8s: min_deposit });
+    }
+
+    // Find the 3USD config (LP token with underlying_pool set)
+    let (three_usd_ledger, three_pool_canister) = read_state(|s| {
+        s.stablecoin_registry.iter()
+            .find(|(_, c)| c.is_lp_token.unwrap_or(false) && c.underlying_pool.is_some() && c.is_active)
+            .map(|(ledger, c)| (*ledger, c.underlying_pool.unwrap()))
+            .ok_or(StabilityPoolError::TokenNotAccepted { ledger: token_ledger })
+    })?;
+
+    log!(INFO, "deposit_as_3usd: {} depositing {} of {} via 3pool", caller, amount, token_ledger);
+
+    // Step 1: Pull tokens from user
+    let transfer_args = TransferFromArgs {
+        from: Account { owner: caller, subaccount: None },
+        to: Account { owner: ic_cdk::api::id(), subaccount: None },
+        amount: amount.into(),
+        fee: None,
+        memo: None,
+        created_at_time: Some(ic_cdk::api::time()),
+        spender_subaccount: None,
+    };
+
+    let result: Result<(Result<candid::Nat, TransferFromError>,), _> = call(
+        token_ledger, "icrc2_transfer_from", (transfer_args,)
+    ).await;
+
+    match result {
+        Ok((Ok(_),)) => {},
+        Ok((Err(e),)) => return Err(StabilityPoolError::LedgerTransferFailed {
+            reason: format!("{:?}", e),
+        }),
+        Err(_e) => return Err(StabilityPoolError::InterCanisterCallFailed {
+            target: format!("{}", token_ledger),
+            method: "icrc2_transfer_from".to_string(),
+        }),
+    }
+
+    // Step 2: Approve 3pool to spend the token
+    let approve_args = ApproveArgs {
+        from_subaccount: None,
+        spender: Account { owner: three_pool_canister, subaccount: None },
+        amount: candid::Nat::from(amount as u128 * 2), // 2x buffer for fees
+        expected_allowance: None,
+        expires_at: Some(ic_cdk::api::time() + 300_000_000_000), // 5 min
+        fee: None,
+        memo: None,
+        created_at_time: Some(ic_cdk::api::time()),
+    };
+
+    let approve_result: Result<(Result<candid::Nat, ApproveError>,), _> = call(
+        token_ledger, "icrc2_approve", (approve_args,)
+    ).await;
+
+    if let Err(_) | Ok((Err(_),)) = approve_result {
+        refund_user(caller, token_ledger, amount).await;
+        return Err(StabilityPoolError::InterCanisterCallFailed {
+            target: format!("{}", token_ledger),
+            method: "icrc2_approve".to_string(),
+        });
+    }
+
+    // Step 3: Query 3pool to find which coin index this token is
+    let pool_status_result: Result<(ThreePoolStatus,), _> = call(
+        three_pool_canister, "get_pool_status", ()
+    ).await;
+
+    let pool_status = match pool_status_result {
+        Ok((status,)) => status,
+        Err(_) => {
+            refund_user(caller, token_ledger, amount).await;
+            return Err(StabilityPoolError::InterCanisterCallFailed {
+                target: "3pool".to_string(),
+                method: "get_pool_status".to_string(),
+            });
+        }
+    };
+
+    let coin_index = pool_status.tokens.iter().position(|t| t.ledger_id == token_ledger);
+    let coin_index = match coin_index {
+        Some(idx) => idx,
+        None => {
+            refund_user(caller, token_ledger, amount).await;
+            return Err(StabilityPoolError::TokenNotAccepted { ledger: token_ledger });
+        }
+    };
+
+    let mut amounts = vec![0u128; 3];
+    amounts[coin_index] = amount as u128;
+
+    // Step 4: Call add_liquidity on the 3pool
+    let lp_result: Result<(Result<u128, ThreePoolErrorRemote>,), _> = call(
+        three_pool_canister, "add_liquidity", (amounts, 0u128)
+    ).await;
+
+    let lp_minted = match lp_result {
+        Ok((Ok(lp),)) => lp,
+        _ => {
+            refund_user(caller, token_ledger, amount).await;
+            return Err(StabilityPoolError::InterCanisterCallFailed {
+                target: "3pool".to_string(),
+                method: "add_liquidity".to_string(),
+            });
+        }
+    };
+
+    // Step 5: Credit user's 3USD balance
+    let lp_amount_u64 = lp_minted as u64;
+    mutate_state(|s| s.add_deposit(caller, three_usd_ledger, lp_amount_u64));
+
+    log!(INFO, "deposit_as_3usd: {} deposited {} of {} → {} 3USD LP", caller, amount, token_ledger, lp_amount_u64);
+
+    Ok(lp_amount_u64)
+}
+
+/// Best-effort refund of tokens to user after a failed deposit_as_3usd.
+async fn refund_user(user: Principal, token_ledger: Principal, amount: u64) {
+    let transfer_args = TransferArg {
+        to: Account { owner: user, subaccount: None },
+        amount: amount.into(),
+        fee: None,
+        memo: None,
+        created_at_time: Some(ic_cdk::api::time()),
+        from_subaccount: None,
+    };
+    let _ = call::<_, (Result<candid::Nat, TransferError>,)>(
+        token_ledger, "icrc1_transfer", (transfer_args,)
+    ).await;
 }

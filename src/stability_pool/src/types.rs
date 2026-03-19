@@ -21,6 +21,12 @@ pub struct StablecoinConfig {
     /// Used to deduct approve fees from tracked balances so accounting stays accurate.
     #[serde(default)]
     pub transfer_fee: Option<u64>,
+    /// True if this token is an LP token requiring special liquidation handling.
+    #[serde(default)]
+    pub is_lp_token: Option<bool>,
+    /// Pool canister to call for LP token burn operations (e.g., 3pool canister).
+    #[serde(default)]
+    pub underlying_pool: Option<Principal>,
 }
 
 /// Subset of backend CollateralConfig needed by the pool.
@@ -78,9 +84,19 @@ impl DepositPosition {
 
     /// Total stablecoin value in e8s (USD-equivalent).
     /// Converts each token to e8s using its decimal config.
-    pub fn total_usd_value(&self, stablecoin_registry: &BTreeMap<Principal, StablecoinConfig>) -> u64 {
+    /// LP tokens are valued using their virtual price instead of 1:1 normalization.
+    pub fn total_usd_value(
+        &self,
+        stablecoin_registry: &BTreeMap<Principal, StablecoinConfig>,
+        virtual_prices: &BTreeMap<Principal, u128>,
+    ) -> u64 {
         self.stablecoin_balances.iter().map(|(ledger, &amount)| {
             match stablecoin_registry.get(ledger) {
+                Some(config) if config.is_lp_token.unwrap_or(false) => {
+                    virtual_prices.get(ledger)
+                        .map(|&vp| lp_to_usd_e8s(amount, vp))
+                        .unwrap_or(0)
+                }
                 Some(config) => normalize_to_e8s(amount, config.decimals),
                 None => 0,
             }
@@ -107,6 +123,19 @@ pub fn normalize_to_e8s(amount: u64, decimals: u8) -> u64 {
         std::cmp::Ordering::Less => amount.saturating_mul(10u64.pow((8 - decimals) as u32)),
         std::cmp::Ordering::Greater => amount / 10u64.pow((decimals - 8) as u32),
     }
+}
+
+/// Convert a 3USD (LP token) amount to its USD value in e8s using virtual price.
+/// `virtual_price` is scaled by 1e18, LP token has 8 decimals.
+/// Result: amount_e8s = lp_amount * virtual_price / 1e18
+pub fn lp_to_usd_e8s(lp_amount: u64, virtual_price: u128) -> u64 {
+    (lp_amount as u128 * virtual_price / 1_000_000_000_000_000_000u128) as u64
+}
+
+/// Convert a USD e8s amount to the equivalent 3USD LP token amount.
+pub fn usd_e8s_to_lp(usd_e8s: u64, virtual_price: u128) -> u64 {
+    if virtual_price == 0 { return 0; }
+    (usd_e8s as u128 * 1_000_000_000_000_000_000u128 / virtual_price) as u64
 }
 
 /// Convert an e8s amount to a token's native decimals.
@@ -317,4 +346,61 @@ pub struct Icrc21ErrorInfo {
 pub struct Icrc10SupportedStandard {
     pub name: String,
     pub url: String,
+}
+
+// ──────────────────────────────────────────────────────────────
+// 3Pool Interop Types (for virtual price queries and deposits)
+// ──────────────────────────────────────────────────────────────
+
+/// Minimal subset of the 3pool's PoolStatus for virtual price queries.
+/// Fields we don't need are omitted — Candid deserialization skips unknown fields.
+#[derive(CandidType, Clone, Debug, Deserialize)]
+pub struct ThreePoolStatus {
+    pub virtual_price: u128,
+    pub tokens: Vec<ThreePoolTokenInfo>,
+}
+
+#[derive(CandidType, Clone, Debug, Deserialize)]
+pub struct ThreePoolTokenInfo {
+    pub ledger_id: Principal,
+    pub symbol: String,
+    pub decimals: u8,
+}
+
+/// Remote 3pool error (for deserialization only).
+#[derive(CandidType, Clone, Debug, Deserialize)]
+pub enum ThreePoolErrorRemote {
+    InsufficientOutput { expected_min: u128, actual: u128 },
+    InsufficientLiquidity,
+    InvalidCoinIndex,
+    ZeroAmount,
+    PoolEmpty,
+    SlippageExceeded,
+    TransferFailed { token: String, reason: String },
+    Unauthorized,
+    MathOverflow,
+    InvariantNotConverged,
+    PoolPaused,
+    NotAuthorizedBurnCaller,
+    BurnSlippageExceeded { max_bps: u16, actual_bps: u16 },
+    InsufficientPoolBalance { token: String, required: u128, available: u128 },
+    InsufficientLpBalance { required: u128, available: u128 },
+    BurnFailed { token: String, reason: String },
+}
+
+/// Arguments for the 3pool's authorized redeem-and-burn operation.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct AuthorizedRedeemAndBurnArgs {
+    pub token_ledger: Principal,
+    pub token_amount: u128,
+    pub lp_amount: u128,
+    pub max_slippage_bps: u16,
+}
+
+/// Result of a successful 3pool redeem-and-burn operation.
+#[derive(CandidType, Clone, Debug, Deserialize)]
+pub struct RedeemAndBurnResult {
+    pub token_amount_burned: u128,
+    pub lp_amount_burned: u128,
+    pub burn_block_index: u64,
 }

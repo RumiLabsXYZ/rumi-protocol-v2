@@ -2,6 +2,7 @@ use ic_cdk::{query, update, init, pre_upgrade, post_upgrade};
 use candid::Principal;
 use ic_canister_log::log;
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 pub mod types;
 pub mod state;
@@ -38,6 +39,46 @@ fn post_upgrade() {
     if let Err(error) = read_state(|s| s.validate_state()) {
         ic_cdk::trap(&format!("State validation failed after upgrade: {}", error));
     }
+
+    setup_virtual_price_timer();
+}
+
+// ─── Virtual Price Timer ───
+
+fn setup_virtual_price_timer() {
+    // Fetch immediately on startup, then every 5 minutes.
+    ic_cdk::spawn(fetch_virtual_prices());
+    ic_cdk_timers::set_timer_interval(Duration::from_secs(300), || {
+        ic_cdk::spawn(fetch_virtual_prices());
+    });
+}
+
+async fn fetch_virtual_prices() {
+    let lp_configs: Vec<(Principal, Principal)> = read_state(|s| {
+        s.stablecoin_registry.iter()
+            .filter(|(_, c)| c.is_lp_token.unwrap_or(false))
+            .filter_map(|(ledger, c)| c.underlying_pool.map(|pool| (*ledger, pool)))
+            .collect()
+    });
+
+    for (lp_ledger, pool_canister) in lp_configs {
+        let result: Result<(ThreePoolStatus,), _> = ic_cdk::call(
+            pool_canister, "get_pool_status", ()
+        ).await;
+
+        match result {
+            Ok((status,)) => {
+                mutate_state(|s| {
+                    s.cached_virtual_prices
+                        .get_or_insert_with(BTreeMap::new)
+                        .insert(lp_ledger, status.virtual_price);
+                });
+            }
+            Err(e) => {
+                log!(INFO, "Failed to fetch virtual price from {}: {:?}", pool_canister, e);
+            }
+        }
+    }
 }
 
 // ─── Deposit / Withdraw / Claim ───
@@ -60,6 +101,13 @@ pub async fn claim_collateral(collateral_ledger: Principal) -> Result<u64, Stabi
 #[update]
 pub async fn claim_all_collateral() -> Result<BTreeMap<Principal, u64>, StabilityPoolError> {
     crate::deposits::claim_all_collateral().await
+}
+
+/// Convenience: deposit a stablecoin (icUSD, ckUSDT, ckUSDC) and have the pool
+/// mint 3USD on the user's behalf by depositing into the 3pool.
+#[update]
+pub async fn deposit_as_3usd(token_ledger: Principal, amount: u64) -> Result<u64, StabilityPoolError> {
+    crate::deposits::deposit_as_3usd(token_ledger, amount).await
 }
 
 // ─── Opt-in / Opt-out ───
