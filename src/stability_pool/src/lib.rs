@@ -320,6 +320,27 @@ pub fn icrc21_canister_call_consent_message(
              You are opting back in to receiving a specific collateral type from future liquidations."
                 .to_string()
         }
+        "deposit_as_3usd" => {
+            match candid::decode_args::<(Principal, u64)>(&request.arg) {
+                Ok((token_ledger, amount)) => {
+                    let symbol = read_state(|s| {
+                        s.stablecoin_registry
+                            .get(&token_ledger)
+                            .map(|c| c.symbol.clone())
+                            .unwrap_or_else(|| format!("token {}", token_ledger))
+                    });
+                    let formatted = format_token_amount(amount);
+                    format!(
+                        "## Deposit as 3USD\n\n\
+                         You are depositing **{} {}** into the Rumi Protocol Stability Pool \
+                         via the 3pool. Your tokens will be converted to 3USD LP tokens, \
+                         which earn swap fees while backing liquidations.",
+                        formatted, symbol
+                    )
+                }
+                Err(_) => "Deposit stablecoins into the Stability Pool via the 3pool as 3USD LP tokens.".to_string(),
+            }
+        }
         _ => {
             return Icrc21ConsentMessageResponse::Err(Icrc21Error::UnsupportedCanisterCall(
                 Icrc21ErrorInfo {
