@@ -69,6 +69,13 @@ type CollateralInterestInfo = record {
   collateral_type : principal;
   weighted_interest_rate : float64;
 };
+type CollateralSnapshot = record {
+  total_collateral : nat64;
+  total_debt : nat64;
+  collateral_type : principal;
+  price : float64;
+  vault_count : nat64;
+};
 type CollateralStatus = variant { Paused; Active; Deprecated; Sunset; Frozen };
 type CollateralTotals = record {
   decimals : nat8;
@@ -360,6 +367,13 @@ type ProtocolError = variant {
   TransferFromError : record { TransferFromError; nat64 };
   CallerNotOwner;
 };
+type ProtocolSnapshot = record {
+  total_debt : nat64;
+  collateral_snapshots : vec CollateralSnapshot;
+  timestamp : nat64;
+  total_vault_count : nat64;
+  total_collateral_value_usd : nat64;
+};
 type ProtocolStatus = record {
   last_icp_timestamp : nat64;
   borrowing_fee_curve_resolved : vec record { float64; float64 };
@@ -509,6 +523,7 @@ service : (ProtocolArg) -> {
   get_collateral_config : (principal) -> (opt CollateralConfig) query;
   get_collateral_totals : () -> (vec CollateralTotals) query;
   get_deposit_account : (opt principal) -> (Account) query;
+  get_event_count : () -> (nat64) query;
   get_events : (GetEventsArg) -> (vec Event) query;
   get_fees : (nat64) -> (Fees) query;
   get_global_icusd_mint_cap : () -> (nat64) query;
@@ -520,6 +535,7 @@ service : (ProtocolArg) -> {
   get_liquidity_status : (principal) -> (LiquidityStatus) query;
   get_max_partial_liquidation_ratio : () -> (float64) query;
   get_min_icusd_amount : () -> (nat64) query;
+  get_protocol_snapshots : (GetEventsArg) -> (vec ProtocolSnapshot) query;
   get_protocol_status : () -> (ProtocolStatus) query;
   get_recovery_cr_multiplier : () -> (float64) query;
   get_recovery_target_cr : () -> (float64) query;
@@ -533,6 +549,7 @@ service : (ProtocolArg) -> {
   get_rmr_ceiling_cr : () -> (float64) query;
   get_rmr_floor : () -> (float64) query;
   get_rmr_floor_cr : () -> (float64) query;
+  get_snapshot_count : () -> (nat64) query;
   get_stability_pool_config : () -> (StabilityPoolConfig) query;
   get_stability_pool_principal : () -> (opt principal) query;
   get_stable_token_enabled : (StableTokenType) -> (bool) query;

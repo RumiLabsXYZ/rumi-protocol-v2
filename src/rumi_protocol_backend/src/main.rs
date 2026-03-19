@@ -11,6 +11,7 @@ use rumi_protocol_backend::{
     Fees, GetEventsArg, ProtocolArg, ProtocolError, ProtocolStatus, SuccessWithFee,
     ReserveRedemptionResult, ReserveBalance, CollateralTotals, CollateralInterestInfo, PerCollateralRateCurve,
     VaultArgWithToken, StableTokenType, InterestSplitArg,
+    GetSnapshotsArg, ProtocolSnapshot, CollateralSnapshot,
 };
 use rumi_protocol_backend::logs::DEBUG;
 use rumi_protocol_backend::state::mutate_state;
@@ -166,6 +167,63 @@ fn setup_timers() {
     // clean_stale_operations timer removed — the old implementation dangerously
     // auto-reset Recovery→GA mode based on a timeout. Mode is now managed by
     // update_mode() (automatic) and admin functions (manual).
+
+    // ── Hourly protocol snapshot ────────────────────────────────────────────
+    // First snapshot fires after 5 seconds (let prices load first).
+    ic_cdk_timers::set_timer(std::time::Duration::from_secs(5), || {
+        capture_protocol_snapshot();
+    });
+    ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(3600), || {
+        capture_protocol_snapshot();
+    });
+}
+
+fn capture_protocol_snapshot() {
+    let snapshot = read_state(|s| {
+        let mut total_collateral_value_usd: u64 = 0;
+        let mut total_debt: u64 = 0;
+        let mut total_vault_count: u64 = 0;
+        let mut collateral_snapshots = Vec::new();
+
+        for (ct, config) in s.collateral_configs.iter() {
+            let col_total = s.total_collateral_for(ct);
+            let debt = s.total_debt_for_collateral(ct).to_u64();
+            let vault_count = s.collateral_to_vault_ids
+                .get(ct)
+                .map(|ids| ids.len() as u64)
+                .unwrap_or(0);
+            let price = config.last_price.unwrap_or(0.0);
+
+            // Convert collateral to USD value (e8s)
+            let col_decimal = Decimal::from(col_total)
+                / Decimal::from(10u64.pow(config.decimals as u32));
+            let usd_value = (col_decimal * Decimal::try_from(price).unwrap_or_default())
+                * Decimal::from(100_000_000u64);
+            let usd_e8s = usd_value.to_u64().unwrap_or(0);
+
+            total_collateral_value_usd += usd_e8s;
+            total_debt += debt;
+            total_vault_count += vault_count;
+
+            collateral_snapshots.push(CollateralSnapshot {
+                collateral_type: *ct,
+                total_collateral: col_total,
+                total_debt: debt,
+                vault_count,
+                price,
+            });
+        }
+
+        ProtocolSnapshot {
+            timestamp: ic_cdk::api::time(),
+            total_collateral_value_usd,
+            total_debt,
+            total_vault_count,
+            collateral_snapshots,
+        }
+    });
+
+    rumi_protocol_backend::storage::record_snapshot(&snapshot);
 }
 
 fn main() {}
@@ -384,6 +442,32 @@ fn get_events(args: GetEventsArg) -> Vec<Event> {
         .skip(args.start as usize)
         .take(MAX_EVENTS_PER_QUERY.min(args.length as usize))
         .collect()
+}
+
+#[candid_method(query)]
+#[query]
+fn get_event_count() -> u64 {
+    rumi_protocol_backend::storage::count_events()
+}
+
+#[candid_method(query)]
+#[query]
+fn get_protocol_snapshots(args: GetSnapshotsArg) -> Vec<ProtocolSnapshot> {
+    if ic_cdk::api::data_certificate().is_none() {
+        ic_cdk::trap("update call rejected");
+    }
+    const MAX_SNAPSHOTS_PER_QUERY: usize = 2000;
+
+    rumi_protocol_backend::storage::snapshots()
+        .skip(args.start as usize)
+        .take(MAX_SNAPSHOTS_PER_QUERY.min(args.length as usize))
+        .collect()
+}
+
+#[candid_method(query)]
+#[query]
+fn get_snapshot_count() -> u64 {
+    rumi_protocol_backend::storage::count_snapshots()
 }
 
 #[candid_method(query)]
