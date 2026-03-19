@@ -77,7 +77,7 @@
       <a href="/Rumi-Protocol-Whitepaper.pdf" target="_blank" rel="noopener noreferrer" class="footer-link">Whitepaper</a>
     </div>
     <div class="footer-bottom">
-      <span>&copy; 2025 Rumi Labs LLC</span>
+      <span>&copy; {new Date().getFullYear()} Rumi Labs LLC</span>
       {#if isConnected}<span class="footer-status"><span class="status-dot"></span>Connected to IC</span>{/if}
     </div>
   </div>
