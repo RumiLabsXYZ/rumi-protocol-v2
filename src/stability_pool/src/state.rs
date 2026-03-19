@@ -401,11 +401,25 @@ impl StabilityPoolState {
             per_token_opted_in_totals.insert(*token_ledger, total);
         }
 
-        // Phase 2: Compute total e8s consumed to determine collateral distribution shares
+        // Phase 2: Compute total e8s consumed to determine collateral distribution shares.
+        // LP tokens are valued at virtual price, not face value.
+        // Clone virtual prices and registry info upfront to avoid borrow conflicts with Phase 3.
+        let vps = self.virtual_prices().clone();
+        let registry_snapshot: BTreeMap<Principal, (u8, bool)> = stables_consumed.keys()
+            .filter_map(|ledger| {
+                self.stablecoin_registry.get(ledger).map(|c| {
+                    (*ledger, (c.decimals, c.is_lp_token.unwrap_or(false)))
+                })
+            })
+            .collect();
         let total_consumed_e8s: u64 = stables_consumed.iter()
             .map(|(ledger, &amount)| {
-                let decimals = self.stablecoin_registry.get(ledger).map(|c| c.decimals).unwrap_or(8);
-                normalize_to_e8s(amount, decimals)
+                let (decimals, is_lp) = registry_snapshot.get(ledger).copied().unwrap_or((8, false));
+                if is_lp {
+                    vps.get(ledger).map(|&vp| lp_to_usd_e8s(amount, vp)).unwrap_or(0)
+                } else {
+                    normalize_to_e8s(amount, decimals)
+                }
             })
             .sum();
 
@@ -443,9 +457,15 @@ impl StabilityPoolState {
                     // Track actual deduction for aggregate update
                     *actual_deductions_per_token.entry(*token_ledger).or_insert(0) += user_share_native;
 
-                    // Track consumed value in e8s for collateral distribution
-                    let decimals = self.stablecoin_registry.get(token_ledger).map(|c| c.decimals).unwrap_or(8);
-                    user_consumed_e8s += normalize_to_e8s(user_share_native, decimals);
+                    // Track consumed value in e8s for collateral distribution.
+                    // LP tokens valued at virtual price, not face value.
+                    let (decimals, is_lp) = registry_snapshot.get(token_ledger).copied().unwrap_or((8, false));
+                    let share_e8s = if is_lp {
+                        vps.get(token_ledger).map(|&vp| lp_to_usd_e8s(user_share_native, vp)).unwrap_or(0)
+                    } else {
+                        normalize_to_e8s(user_share_native, decimals)
+                    };
+                    user_consumed_e8s += share_e8s;
                 }
 
                 // Distribute collateral proportional to e8s consumed
