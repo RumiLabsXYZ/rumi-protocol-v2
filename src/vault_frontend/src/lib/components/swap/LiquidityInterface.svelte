@@ -84,7 +84,7 @@
   $: lpBalanceFormatted = formatLpDisplay(lpBalance);
 
   function formatLpDisplay(raw: bigint): string {
-    const value = Number(raw) / 1e18;
+    const value = Number(raw) / 1e8;
     if (value === 0) return '0.00';
     if (value < 0.01) return value.toFixed(6);
     return value.toFixed(4).replace(/0+$/, '').replace(/\.$/, '.00');
@@ -102,7 +102,7 @@
   $: removeExceedsBalance = (() => {
     const val = parseFloat(removeLpAmount || '0');
     if (!val || val <= 0) return false;
-    return BigInt(Math.floor(val * 1e18)) > lpBalance;
+    return BigInt(Math.floor(val * 1e8)) > lpBalance;
   })();
 
   // ── Add: debounced quote ──
@@ -155,7 +155,7 @@
     if (!val || val <= 0) { removeEstimates = null; removeSingleEstimate = null; return; }
     try {
       removeQuoting = true;
-      const lpRaw = BigInt(Math.floor(val * 1e18));
+      const lpRaw = BigInt(Math.floor(val * 1e8));
       if (removeMode === 'proportional') {
         removeEstimates = await threePoolService.calcRemoveLiquidity(lpRaw);
         removeSingleEstimate = null;
@@ -197,8 +197,8 @@
   }
 
   function setRemoveMax() {
-    const val = Number(lpBalance) / 1e18;
-    removeLpAmount = val.toFixed(18).replace(/0+$/, '').replace(/\.$/, '');
+    const val = Number(lpBalance) / 1e8;
+    removeLpAmount = val.toFixed(8).replace(/0+$/, '').replace(/\.$/, '');
   }
 
   // ── Submit: Add Liquidity ──
@@ -253,7 +253,7 @@
       removeError = 'Enter 3USD amount';
       return;
     }
-    const lpRaw = BigInt(Math.floor(val * 1e18));
+    const lpRaw = BigInt(Math.floor(val * 1e8));
     if (lpRaw > lpBalance) {
       removeError = 'Insufficient 3USD balance';
       return;
