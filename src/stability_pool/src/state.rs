@@ -1510,4 +1510,124 @@ mod tests {
         let tracked = state.total_stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0);
         assert_eq!(sum, tracked, "Sum of individual balances must equal aggregate");
     }
+
+    // ─── 3USD / LP Token Tests ───
+
+    fn three_usd_ledger() -> Principal { Principal::from_slice(&[30]) }
+    fn three_pool_canister() -> Principal { Principal::from_slice(&[31]) }
+
+    /// Build a test state with 3USD LP token registered.
+    fn test_state_with_3usd() -> StabilityPoolState {
+        let mut state = test_state();
+        state.register_stablecoin(StablecoinConfig {
+            ledger_id: three_usd_ledger(),
+            symbol: "3USD".to_string(),
+            decimals: 8,
+            priority: 0, // consumed last
+            is_active: true,
+            transfer_fee: Some(10_000),
+            is_lp_token: Some(true),
+            underlying_pool: Some(three_pool_canister()),
+        });
+        // Set virtual price to ~1.0492 (scaled 1e18)
+        state.cached_virtual_prices
+            .get_or_insert_with(BTreeMap::new)
+            .insert(three_usd_ledger(), 1_049_200_000_000_000_000u128);
+        state
+    }
+
+    #[test]
+    fn test_lp_to_usd_e8s_conversion() {
+        // 1 3USD at vp=1.0492 → 1.0492 USD
+        let vp = 1_049_200_000_000_000_000u128;
+        assert_eq!(lp_to_usd_e8s(100_000_000, vp), 104_920_000);
+
+        // 10 3USD
+        assert_eq!(lp_to_usd_e8s(1_000_000_000, vp), 1_049_200_000);
+
+        // 0 3USD
+        assert_eq!(lp_to_usd_e8s(0, vp), 0);
+
+        // vp=1.0 (exactly 1e18)
+        assert_eq!(lp_to_usd_e8s(100_000_000, 1_000_000_000_000_000_000), 100_000_000);
+    }
+
+    #[test]
+    fn test_usd_e8s_to_lp_conversion() {
+        let vp = 1_049_200_000_000_000_000u128;
+        // 1 USD → ~0.9531 3USD LP
+        let lp = usd_e8s_to_lp(100_000_000, vp);
+        assert!(lp > 95_000_000 && lp < 96_000_000, "Expected ~95.3M, got {}", lp);
+
+        // Round-trip: lp_to_usd then back (may lose 1 unit to rounding)
+        let usd = lp_to_usd_e8s(lp, vp);
+        assert!((usd as i64 - 100_000_000i64).abs() <= 1, "Round-trip drift too large");
+
+        // Zero virtual price → 0
+        assert_eq!(usd_e8s_to_lp(100_000_000, 0), 0);
+    }
+
+    #[test]
+    fn test_total_usd_value_with_lp_token() {
+        let state = test_state_with_3usd();
+        let vp_map = state.virtual_prices();
+
+        let mut pos = DepositPosition::new(0);
+        // 1 icUSD (e8s)
+        pos.stablecoin_balances.insert(icusd_ledger(), 100_000_000);
+        // 1 3USD LP (worth ~1.0492 USD)
+        pos.stablecoin_balances.insert(three_usd_ledger(), 100_000_000);
+
+        let total = pos.total_usd_value(&state.stablecoin_registry, vp_map);
+        // 100_000_000 + 104_920_000 = 204_920_000
+        assert_eq!(total, 204_920_000);
+    }
+
+    #[test]
+    fn test_total_usd_value_lp_without_virtual_price() {
+        let mut state = test_state_with_3usd();
+        // Remove cached virtual price
+        state.cached_virtual_prices = Some(BTreeMap::new());
+
+        let mut pos = DepositPosition::new(0);
+        pos.stablecoin_balances.insert(three_usd_ledger(), 100_000_000);
+
+        // Without virtual price, LP tokens valued at 0
+        let total = pos.total_usd_value(&state.stablecoin_registry, state.virtual_prices());
+        assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn test_compute_token_draw_with_3usd() {
+        let mut state = test_state_with_3usd();
+
+        // Add deposits: 1 icUSD (priority 1), 2 ckUSDT (priority 2), 5 3USD (priority 0)
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_000_000); // 1 icUSD
+        add_deposit_direct(&mut state, user_a(), ckusdt_ledger(), 2_000_000);  // 2 ckUSDT
+        add_deposit_direct(&mut state, user_a(), three_usd_ledger(), 500_000_000); // 5 3USD
+
+        // Draw 3 USD — should consume ckUSDT first (priority 2), then icUSD (priority 1)
+        let draw = state.compute_token_draw(300_000_000, &icp_ledger()); // 3 USD e8s
+        assert!(draw.contains_key(&ckusdt_ledger()), "Should draw from ckUSDT (priority 2)");
+        assert!(draw.contains_key(&icusd_ledger()), "Should draw from icUSD (priority 1)");
+        assert!(!draw.contains_key(&three_usd_ledger()), "Should NOT draw from 3USD yet (priority 0)");
+
+        // Draw 5 USD — should consume all ckUSDT + icUSD, then dip into 3USD
+        let draw = state.compute_token_draw(500_000_000, &icp_ledger()); // 5 USD e8s
+        assert!(draw.contains_key(&ckusdt_ledger()), "Should draw from ckUSDT");
+        assert!(draw.contains_key(&icusd_ledger()), "Should draw from icUSD");
+        assert!(draw.contains_key(&three_usd_ledger()), "Should draw from 3USD for remainder");
+    }
+
+    #[test]
+    fn test_effective_pool_includes_3usd_at_virtual_price() {
+        let mut state = test_state_with_3usd();
+
+        // Only 3USD deposit: 10 LP tokens at vp=1.0492
+        add_deposit_direct(&mut state, user_a(), three_usd_ledger(), 1_000_000_000); // 10 3USD
+
+        let effective = state.effective_pool_for_collateral(&icp_ledger());
+        // 10 * 1.0492 = 10.492 USD = 1_049_200_000 e8s
+        assert_eq!(effective, 1_049_200_000);
+    }
 }
