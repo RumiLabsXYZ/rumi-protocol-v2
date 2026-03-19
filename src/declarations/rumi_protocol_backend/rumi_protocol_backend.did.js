@@ -216,21 +216,27 @@ export const idlFactory = ({ IDL }) => {
     }),
     'claim_liquidity_returns' : IDL.Record({
       'block_index' : IDL.Nat64,
+      'timestamp' : IDL.Opt(IDL.Nat64),
       'caller' : IDL.Principal,
       'amount' : IDL.Nat64,
     }),
     'collateral_withdrawn' : IDL.Record({
       'block_index' : IDL.Nat64,
       'vault_id' : IDL.Nat64,
+      'timestamp' : IDL.Opt(IDL.Nat64),
+      'caller' : IDL.Opt(IDL.Principal),
       'amount' : IDL.Nat64,
     }),
     'repay_to_vault' : IDL.Record({
       'block_index' : IDL.Nat64,
       'vault_id' : IDL.Nat64,
       'repayed_amount' : IDL.Nat64,
+      'timestamp' : IDL.Opt(IDL.Nat64),
+      'caller' : IDL.Opt(IDL.Principal),
     }),
     'provide_liquidity' : IDL.Record({
       'block_index' : IDL.Nat64,
+      'timestamp' : IDL.Opt(IDL.Nat64),
       'caller' : IDL.Principal,
       'amount' : IDL.Nat64,
     }),
@@ -243,6 +249,8 @@ export const idlFactory = ({ IDL }) => {
     'withdraw_and_close_vault' : IDL.Record({
       'block_index' : IDL.Opt(IDL.Nat64),
       'vault_id' : IDL.Nat64,
+      'timestamp' : IDL.Opt(IDL.Nat64),
+      'caller' : IDL.Opt(IDL.Principal),
       'amount' : IDL.Nat64,
     }),
     'admin_vault_correction' : IDL.Record({
@@ -257,11 +265,16 @@ export const idlFactory = ({ IDL }) => {
       'principal' : IDL.Principal,
       'token_type' : StableTokenType,
     }),
-    'open_vault' : IDL.Record({ 'block_index' : IDL.Nat64, 'vault' : Vault }),
+    'open_vault' : IDL.Record({
+      'block_index' : IDL.Nat64,
+      'vault' : Vault,
+      'timestamp' : IDL.Opt(IDL.Nat64),
+    }),
     'redemption_on_vaults' : IDL.Record({
       'icusd_amount' : IDL.Nat64,
       'icusd_block_index' : IDL.Nat64,
       'owner' : IDL.Principal,
+      'timestamp' : IDL.Opt(IDL.Nat64),
       'fee_amount' : IDL.Nat64,
       'current_icp_rate' : IDL.Vec(IDL.Nat8),
     }),
@@ -279,6 +292,7 @@ export const idlFactory = ({ IDL }) => {
     'margin_transfer' : IDL.Record({
       'block_index' : IDL.Nat64,
       'vault_id' : IDL.Nat64,
+      'timestamp' : IDL.Opt(IDL.Nat64),
     }),
     'admin_sweep_to_treasury' : IDL.Record({
       'block_index' : IDL.Nat64,
@@ -296,7 +310,9 @@ export const idlFactory = ({ IDL }) => {
     'borrow_from_vault' : IDL.Record({
       'block_index' : IDL.Nat64,
       'vault_id' : IDL.Nat64,
+      'timestamp' : IDL.Opt(IDL.Nat64),
       'fee_amount' : IDL.Nat64,
+      'caller' : IDL.Opt(IDL.Principal),
       'borrowed_amount' : IDL.Nat64,
     }),
     'set_reserve_redemptions_enabled' : IDL.Record({ 'enabled' : IDL.Bool }),
@@ -308,33 +324,45 @@ export const idlFactory = ({ IDL }) => {
       'config' : CollateralConfig,
       'collateral_type' : IDL.Principal,
     }),
-    'redistribute_vault' : IDL.Record({ 'vault_id' : IDL.Nat64 }),
+    'redistribute_vault' : IDL.Record({
+      'vault_id' : IDL.Nat64,
+      'timestamp' : IDL.Opt(IDL.Nat64),
+    }),
     'partial_collateral_withdrawn' : IDL.Record({
       'block_index' : IDL.Nat64,
       'vault_id' : IDL.Nat64,
+      'timestamp' : IDL.Opt(IDL.Nat64),
+      'caller' : IDL.Opt(IDL.Principal),
       'amount' : IDL.Nat64,
     }),
     'set_rate_curve_markers' : IDL.Record({
       'markers' : IDL.Text,
       'collateral_type' : IDL.Opt(IDL.Text),
     }),
-    'dust_forgiven' : VaultArg,
+    'dust_forgiven' : IDL.Record({
+      'vault_id' : IDL.Nat64,
+      'timestamp' : IDL.Opt(IDL.Nat64),
+      'amount' : IDL.Nat64,
+    }),
     'partial_liquidate_vault' : IDL.Record({
       'protocol_fee_collateral' : IDL.Opt(IDL.Nat64),
       'icp_rate' : IDL.Opt(IDL.Vec(IDL.Nat8)),
       'liquidator_payment' : IDL.Nat64,
       'vault_id' : IDL.Nat64,
+      'timestamp' : IDL.Opt(IDL.Nat64),
       'liquidator' : IDL.Opt(IDL.Principal),
       'icp_to_liquidator' : IDL.Nat64,
     }),
     'withdraw_liquidity' : IDL.Record({
       'block_index' : IDL.Nat64,
+      'timestamp' : IDL.Opt(IDL.Nat64),
       'caller' : IDL.Principal,
       'amount' : IDL.Nat64,
     }),
     'admin_mint' : IDL.Record({
       'to' : IDL.Principal,
       'block_index' : IDL.Nat64,
+      'timestamp' : IDL.Opt(IDL.Nat64),
       'amount' : IDL.Nat64,
       'reason' : IDL.Text,
     }),
@@ -345,6 +373,7 @@ export const idlFactory = ({ IDL }) => {
       'icusd_block_index' : IDL.Nat64,
       'fee_stable_amount' : IDL.Nat64,
       'owner' : IDL.Principal,
+      'timestamp' : IDL.Opt(IDL.Nat64),
       'fee_amount' : IDL.Nat64,
       'stable_amount_sent' : IDL.Nat64,
       'stable_token_ledger' : IDL.Principal,
@@ -352,6 +381,7 @@ export const idlFactory = ({ IDL }) => {
     'close_vault' : IDL.Record({
       'block_index' : IDL.Opt(IDL.Nat64),
       'vault_id' : IDL.Nat64,
+      'timestamp' : IDL.Opt(IDL.Nat64),
     }),
     'update_collateral_status' : IDL.Record({
       'status' : CollateralStatus,
@@ -365,6 +395,8 @@ export const idlFactory = ({ IDL }) => {
     'add_margin_to_vault' : IDL.Record({
       'block_index' : IDL.Nat64,
       'vault_id' : IDL.Nat64,
+      'timestamp' : IDL.Opt(IDL.Nat64),
+      'caller' : IDL.Opt(IDL.Principal),
       'margin_added' : IDL.Nat64,
     }),
     'set_stability_pool_principal' : IDL.Record({
@@ -385,6 +417,7 @@ export const idlFactory = ({ IDL }) => {
     'redemption_transfered' : IDL.Record({
       'icusd_block_index' : IDL.Nat64,
       'icp_block_index' : IDL.Nat64,
+      'timestamp' : IDL.Opt(IDL.Nat64),
     }),
     'set_liquidation_bot_principal' : IDL.Record({
       'principal' : IDL.Principal,
@@ -393,6 +426,7 @@ export const idlFactory = ({ IDL }) => {
       'mode' : Mode,
       'icp_rate' : IDL.Vec(IDL.Nat8),
       'vault_id' : IDL.Nat64,
+      'timestamp' : IDL.Opt(IDL.Nat64),
       'liquidator' : IDL.Opt(IDL.Principal),
     }),
     'add_collateral_type' : IDL.Record({
@@ -404,6 +438,10 @@ export const idlFactory = ({ IDL }) => {
       'token_type' : StableTokenType,
     }),
     'set_recovery_cr_multiplier' : IDL.Record({ 'multiplier' : IDL.Text }),
+  });
+  const GetEventsFilteredResponse = IDL.Record({
+    'total' : IDL.Nat64,
+    'events' : IDL.Vec(IDL.Tuple(IDL.Nat64, Event)),
   });
   const Fees = IDL.Record({
     'redemption_fee' : IDL.Float64,
@@ -634,6 +672,16 @@ export const idlFactory = ({ IDL }) => {
       ),
     'get_event_count' : IDL.Func([], [IDL.Nat64], ['query']),
     'get_events' : IDL.Func([GetEventsArg], [IDL.Vec(Event)], ['query']),
+    'get_events_by_principal' : IDL.Func(
+        [IDL.Principal],
+        [IDL.Vec(IDL.Tuple(IDL.Nat64, Event))],
+        ['query'],
+      ),
+    'get_events_filtered' : IDL.Func(
+        [GetEventsArg],
+        [GetEventsFilteredResponse],
+        ['query'],
+      ),
     'get_fees' : IDL.Func([IDL.Nat64], [Fees], ['query']),
     'get_global_icusd_mint_cap' : IDL.Func([], [IDL.Nat64], ['query']),
     'get_interest_pool_share' : IDL.Func([], [IDL.Float64], ['query']),

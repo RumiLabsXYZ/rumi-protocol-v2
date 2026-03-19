@@ -103,6 +103,37 @@ export function formatTimestamp(nanos: bigint | number): string {
 	});
 }
 
+// Extract timestamp from event data (returns null for old events without timestamps)
+export function getEventTimestamp(event: any): bigint | null {
+	const key = getEventKey(event);
+	const data = event[key];
+	if (!data) return null;
+	// Most events have timestamp as opt nat64 (comes as [bigint] or [])
+	const ts = data.timestamp;
+	if (Array.isArray(ts) && ts.length > 0) return BigInt(ts[0]);
+	if (typeof ts === 'bigint' || typeof ts === 'number') return BigInt(ts);
+	return null;
+}
+
+// Extract caller/principal from event data
+export function getEventCaller(event: any): string | null {
+	const key = getEventKey(event);
+	const data = event[key];
+	if (!data) return null;
+	// Check caller (opt principal = [Principal] or [])
+	const caller = data.caller;
+	if (Array.isArray(caller) && caller.length > 0) return caller[0]?.toString?.() ?? null;
+	if (caller?.toString) return caller.toString();
+	// Check owner
+	if (data.owner?.toString) return data.owner.toString();
+	// Check liquidator
+	const liq = data.liquidator;
+	if (Array.isArray(liq) && liq.length > 0) return liq[0]?.toString?.() ?? null;
+	// Check vault.owner for OpenVault
+	if (data.vault?.owner?.toString) return data.vault.owner.toString();
+	return null;
+}
+
 // Format e8s amount to human-readable
 export function formatAmount(e8s: bigint | number, decimals: number = 8): string {
 	const value = Number(BigInt(e8s)) / Math.pow(10, decimals);

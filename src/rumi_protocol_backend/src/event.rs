@@ -11,16 +11,28 @@ use serde::{Deserialize, Serialize};
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Event {
     #[serde(rename = "open_vault")]
-    OpenVault { vault: Vault, block_index: u64 },
+    OpenVault {
+        vault: Vault,
+        block_index: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<u64>,
+    },
 
     #[serde(rename = "close_vault")]
     CloseVault {
         vault_id: u64,
         block_index: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<u64>,
     },
 
     #[serde(rename = "margin_transfer")]
-    MarginTransfer { vault_id: u64, block_index: u64 },
+    MarginTransfer {
+        vault_id: u64,
+        block_index: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<u64>,
+    },
 
     #[serde(rename = "liquidate_vault")]
     LiquidateVault {
@@ -29,6 +41,8 @@ pub enum Event {
         icp_rate: UsdIcp,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         liquidator: Option<Principal>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<u64>,
     },
 
     #[serde(rename = "partial_liquidate_vault")]
@@ -46,6 +60,8 @@ pub enum Event {
         /// Old events deserialize as None (protocol_cut was 0 before this field existed).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         protocol_fee_collateral: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<u64>,
     },
 
     #[serde(rename = "redemption_on_vaults")]
@@ -55,16 +71,24 @@ pub enum Event {
         icusd_amount: ICUSD,
         fee_amount: ICUSD,
         icusd_block_index: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<u64>,
     },
 
     #[serde(rename = "redemption_transfered")]
     RedemptionTransfered {
         icusd_block_index: u64,
         icp_block_index: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<u64>,
     },
 
     #[serde(rename = "redistribute_vault")]
-    RedistributeVault { vault_id: u64 },
+    RedistributeVault {
+        vault_id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<u64>,
+    },
 
     #[serde(rename = "borrow_from_vault")]
     BorrowFromVault {
@@ -72,6 +96,10 @@ pub enum Event {
         borrowed_amount: ICUSD,
         fee_amount: ICUSD,
         block_index: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller: Option<Principal>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<u64>,
     },
 
     #[serde(rename = "repay_to_vault")]
@@ -79,6 +107,10 @@ pub enum Event {
         vault_id: u64,
         repayed_amount: ICUSD,
         block_index: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller: Option<Principal>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<u64>,
     },
 
     #[serde(rename = "add_margin_to_vault")]
@@ -86,6 +118,10 @@ pub enum Event {
         vault_id: u64,
         margin_added: ICP,
         block_index: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller: Option<Principal>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<u64>,
     },
 
     #[serde(rename = "provide_liquidity")]
@@ -93,6 +129,8 @@ pub enum Event {
         amount: ICUSD,
         block_index: u64,
         caller: Principal,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<u64>,
     },
 
     #[serde(rename = "withdraw_liquidity")]
@@ -100,6 +138,8 @@ pub enum Event {
         amount: ICUSD,
         block_index: u64,
         caller: Principal,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<u64>,
     },
 
     #[serde(rename = "claim_liquidity_returns")]
@@ -107,6 +147,8 @@ pub enum Event {
         amount: ICP,
         block_index: u64,
         caller: Principal,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<u64>,
     },
 
     #[serde(rename = "init")]
@@ -120,6 +162,10 @@ pub enum Event {
         vault_id: u64,
         amount: ICP,
         block_index: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller: Option<Principal>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<u64>,
     },
 
     // TODO(multi-collateral): amount type will need to be generic or token-tagged
@@ -128,6 +174,10 @@ pub enum Event {
         vault_id: u64,
         amount: ICP,
         block_index: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller: Option<Principal>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<u64>,
     },
 
     VaultWithdrawnAndClosed {
@@ -142,12 +192,18 @@ pub enum Event {
         vault_id: u64,
         amount: ICP,
         block_index: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller: Option<Principal>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<u64>,
     },
 
     #[serde(rename = "dust_forgiven")]
     DustForgiven {
         vault_id: u64,
         amount: ICUSD,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<u64>,
     },
 
     #[serde(rename = "set_ckstable_repay_fee")]
@@ -281,6 +337,8 @@ pub enum Event {
         stable_amount_sent: u64,
         fee_stable_amount: u64,
         icusd_block_index: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<u64>,
     },
     #[serde(rename = "admin_mint")]
     AdminMint {
@@ -288,6 +346,8 @@ pub enum Event {
         to: Principal,
         reason: String,
         block_index: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<u64>,
     },
     #[serde(rename = "set_recovery_parameters")]
     SetRecoveryParameters {
@@ -467,6 +527,34 @@ impl Event {
             Event::SetThreePoolCanister { .. } => false,
         }
     }
+
+    /// Returns true if this is an AccrueInterest event (noisy, hidden from explorer).
+    pub fn is_accrue_interest(&self) -> bool {
+        matches!(self, Event::AccrueInterest { .. })
+    }
+
+    /// Check if a given principal is involved in this event (as owner, caller, or liquidator).
+    pub fn involves_principal(&self, p: &Principal) -> bool {
+        match self {
+            Event::OpenVault { vault, .. } => &vault.owner == p,
+            Event::BorrowFromVault { caller, .. } => caller.as_ref() == Some(p),
+            Event::RepayToVault { caller, .. } => caller.as_ref() == Some(p),
+            Event::AddMarginToVault { caller, .. } => caller.as_ref() == Some(p),
+            Event::CollateralWithdrawn { caller, .. } => caller.as_ref() == Some(p),
+            Event::PartialCollateralWithdrawn { caller, .. } => caller.as_ref() == Some(p),
+            Event::WithdrawAndCloseVault { caller, .. } => caller.as_ref() == Some(p),
+            Event::VaultWithdrawnAndClosed { caller, .. } => caller == p,
+            Event::LiquidateVault { liquidator, .. } => liquidator.as_ref() == Some(p),
+            Event::PartialLiquidateVault { liquidator, .. } => liquidator.as_ref() == Some(p),
+            Event::RedemptionOnVaults { owner, .. } => owner == p,
+            Event::ReserveRedemption { owner, .. } => owner == p,
+            Event::ProvideLiquidity { caller, .. } => caller == p,
+            Event::WithdrawLiquidity { caller, .. } => caller == p,
+            Event::ClaimLiquidityReturns { caller, .. } => caller == p,
+            Event::AdminMint { to, .. } => to == p,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -494,6 +582,7 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             Event::OpenVault {
                 mut vault,
                 block_index: _,
+                ..
             } => {
                 vault_id += 1;
                 // Fix up legacy events that lack collateral_type (serde default = anonymous)
@@ -504,21 +593,20 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             }
             Event::CloseVault {
                 vault_id,
-                block_index: _,
+                ..
             } => state.close_vault(vault_id),
             Event::LiquidateVault {
                 vault_id,
                 mode,
                 icp_rate,
-                liquidator: _,
+                ..
             } => { let _ = state.liquidate_vault(vault_id, mode, icp_rate); },
             Event::PartialLiquidateVault {
                 vault_id,
                 liquidator_payment,
                 icp_to_liquidator,
-                liquidator: _,
-                icp_rate: _,
                 protocol_fee_collateral,
+                ..
             } => {
                 // Reduce vault debt and collateral, accounting for interest share
                 if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
@@ -539,12 +627,11 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                     vault.accrued_interest -= interest_share;
                 }
             },
-            Event::RedistributeVault { vault_id } => state.redistribute_vault(vault_id),
+            Event::RedistributeVault { vault_id, .. } => state.redistribute_vault(vault_id),
             Event::BorrowFromVault {
                 vault_id,
                 borrowed_amount,
-                fee_amount: _,
-                block_index: _,
+                ..
             } => {
                 // Fee was phantom (never minted) in old events; now routed to treasury in async caller.
                 state.borrow_from_vault(vault_id, borrowed_amount)
@@ -555,6 +642,7 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                 icusd_amount,
                 fee_amount,
                 icusd_block_index,
+                ..
             } => {
                 state.provide_liquidity(fee_amount, state.developer_principal);
                 let redeem_ct = state.icp_collateral_type();
@@ -610,7 +698,7 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             Event::PartialCollateralWithdrawn {
                 vault_id,
                 amount,
-                block_index: _,
+                ..
             } => {
                 state.remove_margin_from_vault(vault_id, amount);
             }
@@ -627,16 +715,12 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             // Add this case:
             Event::WithdrawAndCloseVault {
                 vault_id,
-                amount: _,
-                block_index: _,
+                ..
             } => {
                 // Close the vault during replay
                 state.close_vault(vault_id);
             },
-            Event::DustForgiven {
-                vault_id: _,
-                amount: _,
-            } => {
+            Event::DustForgiven { .. } => {
                 // Dust forgiveness doesn't need state changes during replay
             },
             Event::SetCkstableRepayFee { rate } => {
@@ -912,18 +996,22 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
     Ok(state)
 }
 
+/// Helper: current canister time in nanoseconds.
+fn now() -> u64 { ic_cdk::api::time() }
+
 pub fn record_liquidate_vault(state: &mut State, vault_id: u64, mode: Mode, collateral_price: UsdIcp) {
     record_event(&Event::LiquidateVault {
         vault_id,
         mode,
         icp_rate: collateral_price,
         liquidator: None,
+        timestamp: Some(now()),
     });
     let _ = state.liquidate_vault(vault_id, mode, collateral_price);
 }
 
 pub fn record_redistribute_vault(state: &mut State, vault_id: u64) {
-    record_event(&Event::RedistributeVault { vault_id });
+    record_event(&Event::RedistributeVault { vault_id, timestamp: Some(now()) });
     state.redistribute_vault(vault_id);
 }
 
@@ -937,6 +1025,7 @@ pub fn record_provide_liquidity(
         amount,
         block_index,
         caller,
+        timestamp: Some(now()),
     });
     state.provide_liquidity(amount, caller);
 }
@@ -951,6 +1040,7 @@ pub fn record_withdraw_liquidity(
         amount,
         block_index,
         caller,
+        timestamp: Some(now()),
     });
     state.withdraw_liquidity(amount, caller);
 }
@@ -965,6 +1055,7 @@ pub fn record_claim_liquidity_returns(
         amount,
         block_index,
         caller,
+        timestamp: Some(now()),
     });
     state.claim_liquidity_returns(amount, caller);
 }
@@ -973,6 +1064,7 @@ pub fn record_open_vault(state: &mut State, vault: Vault, block_index: u64) {
     record_event(&Event::OpenVault {
         vault: vault.clone(),
         block_index,
+        timestamp: Some(now()),
     });
     state.open_vault(vault);
 }
@@ -981,6 +1073,7 @@ pub fn record_close_vault(state: &mut State, vault_id: u64, block_index: Option<
     record_event(&Event::CloseVault {
         vault_id,
         block_index,
+        timestamp: Some(now()),
     });
     state.close_vault(vault_id);
 }
@@ -989,6 +1082,7 @@ pub fn record_margin_transfer(state: &mut State, vault_id: u64, block_index: u64
     record_event(&Event::MarginTransfer {
         vault_id,
         block_index,
+        timestamp: Some(now()),
     });
     state.pending_margin_transfers.remove(&vault_id);
 }
@@ -1005,6 +1099,8 @@ pub fn record_borrow_from_vault(
         block_index,
         fee_amount,
         borrowed_amount,
+        caller: Some(ic_cdk::caller()),
+        timestamp: Some(now()),
     });
     state.borrow_from_vault(vault_id, borrowed_amount);
     // Fee is now minted to treasury in the async caller — no longer credited to liquidity pool.
@@ -1022,6 +1118,8 @@ pub fn record_repayed_to_vault(
         vault_id,
         block_index,
         repayed_amount,
+        caller: Some(ic_cdk::caller()),
+        timestamp: Some(now()),
     });
     let (interest_share, _) = state.repay_to_vault(vault_id, repayed_amount);
     interest_share
@@ -1037,6 +1135,8 @@ pub fn record_add_margin_to_vault(
         vault_id,
         margin_added,
         block_index,
+        caller: Some(ic_cdk::caller()),
+        timestamp: Some(now()),
     });
     state.add_margin_to_vault(vault_id, margin_added);
 }
@@ -1055,6 +1155,7 @@ pub fn record_redemption_on_vaults(
         icusd_amount,
         fee_amount,
         icusd_block_index,
+        timestamp: Some(now()),
     });
     // Fee is already deducted from icusd_amount before calling redeem_on_vaults,
     // so vault owners effectively keep the fee (less collateral seized for their debt).
@@ -1075,6 +1176,7 @@ pub fn record_redemption_transfered(
     record_event(&Event::RedemptionTransfered {
         icusd_block_index,
         icp_block_index,
+        timestamp: Some(now()),
     });
     state.pending_redemption_transfer.remove(&icusd_block_index);
 }
@@ -1089,8 +1191,9 @@ pub fn record_collateral_withdrawn(
         vault_id,
         amount,
         block_index,
+        caller: Some(ic_cdk::caller()),
+        timestamp: Some(now()),
     });
-
 }
 
 pub fn record_partial_collateral_withdrawn(
@@ -1103,6 +1206,8 @@ pub fn record_partial_collateral_withdrawn(
         vault_id,
         amount,
         block_index,
+        caller: Some(ic_cdk::caller()),
+        timestamp: Some(now()),
     });
     state.remove_margin_from_vault(vault_id, amount);
 }
@@ -1117,8 +1222,10 @@ pub fn record_withdraw_and_close_vault(
         vault_id,
         amount,
         block_index,
+        caller: Some(ic_cdk::caller()),
+        timestamp: Some(now()),
     });
-    
+
     // Close the vault (withdrawal is already handled in vault.rs)
     state.close_vault(vault_id);
 }
@@ -1345,6 +1452,7 @@ pub fn record_reserve_redemption(
         stable_amount_sent,
         fee_stable_amount,
         icusd_block_index,
+        timestamp: Some(now()),
     });
 }
 
@@ -1359,6 +1467,7 @@ pub fn record_admin_mint(
         to,
         reason,
         block_index,
+        timestamp: Some(now()),
     });
 }
 

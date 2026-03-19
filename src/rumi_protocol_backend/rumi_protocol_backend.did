@@ -124,21 +124,27 @@ type Event = variant {
     block_index : nat64;
     caller : principal;
     amount : nat64;
+    timestamp : opt nat64;
   };
   collateral_withdrawn : record {
     block_index : nat64;
     vault_id : nat64;
     amount : nat64;
+    caller : opt principal;
+    timestamp : opt nat64;
   };
   repay_to_vault : record {
     block_index : nat64;
     vault_id : nat64;
     repayed_amount : nat64;
+    caller : opt principal;
+    timestamp : opt nat64;
   };
   provide_liquidity : record {
     block_index : nat64;
     caller : principal;
     amount : nat64;
+    timestamp : opt nat64;
   };
   set_rmr_ceiling_cr : record { value : text };
   set_recovery_rate_curve : record { markers : text };
@@ -150,6 +156,8 @@ type Event = variant {
     block_index : opt nat64;
     vault_id : nat64;
     amount : nat64;
+    caller : opt principal;
+    timestamp : opt nat64;
   };
   admin_vault_correction : record {
     vault_id : nat64;
@@ -163,13 +171,14 @@ type Event = variant {
     "principal" : principal;
     token_type : StableTokenType;
   };
-  open_vault : record { block_index : nat64; vault : Vault };
+  open_vault : record { block_index : nat64; vault : Vault; timestamp : opt nat64 };
   redemption_on_vaults : record {
     icusd_amount : nat64;
     icusd_block_index : nat64;
     owner : principal;
     fee_amount : nat64;
     current_icp_rate : blob;
+    timestamp : opt nat64;
   };
   set_recovery_parameters : record {
     recovery_interest_rate_apr : opt text;
@@ -182,7 +191,7 @@ type Event = variant {
     collateral_type : principal;
     borrowing_fee : opt text;
   };
-  margin_transfer : record { block_index : nat64; vault_id : nat64 };
+  margin_transfer : record { block_index : nat64; vault_id : nat64; timestamp : opt nat64 };
   admin_sweep_to_treasury : record {
     block_index : nat64;
     amount : nat64;
@@ -198,6 +207,8 @@ type Event = variant {
     vault_id : nat64;
     fee_amount : nat64;
     borrowed_amount : nat64;
+    caller : opt principal;
+    timestamp : opt nat64;
   };
   set_reserve_redemptions_enabled : record { enabled : bool };
   set_min_icusd_amount : record { amount : text };
@@ -208,17 +219,19 @@ type Event = variant {
     config : CollateralConfig;
     collateral_type : principal;
   };
-  redistribute_vault : record { vault_id : nat64 };
+  redistribute_vault : record { vault_id : nat64; timestamp : opt nat64 };
   partial_collateral_withdrawn : record {
     block_index : nat64;
     vault_id : nat64;
     amount : nat64;
+    caller : opt principal;
+    timestamp : opt nat64;
   };
   set_rate_curve_markers : record {
     markers : text;
     collateral_type : opt text;
   };
-  dust_forgiven : VaultArg;
+  dust_forgiven : record { vault_id : nat64; amount : nat64; timestamp : opt nat64 };
   partial_liquidate_vault : record {
     protocol_fee_collateral : opt nat64;
     icp_rate : opt blob;
@@ -226,17 +239,20 @@ type Event = variant {
     vault_id : nat64;
     liquidator : opt principal;
     icp_to_liquidator : nat64;
+    timestamp : opt nat64;
   };
   withdraw_liquidity : record {
     block_index : nat64;
     caller : principal;
     amount : nat64;
+    timestamp : opt nat64;
   };
   admin_mint : record {
     to : principal;
     block_index : nat64;
     amount : nat64;
     reason : text;
+    timestamp : opt nat64;
   };
   set_three_pool_canister : record { canister : principal };
   set_liquidation_bonus : record { rate : text };
@@ -248,8 +264,9 @@ type Event = variant {
     fee_amount : nat64;
     stable_amount_sent : nat64;
     stable_token_ledger : principal;
+    timestamp : opt nat64;
   };
-  close_vault : record { block_index : opt nat64; vault_id : nat64 };
+  close_vault : record { block_index : opt nat64; vault_id : nat64; timestamp : opt nat64 };
   update_collateral_status : record {
     status : CollateralStatus;
     collateral_type : principal;
@@ -260,6 +277,8 @@ type Event = variant {
     block_index : nat64;
     vault_id : nat64;
     margin_added : nat64;
+    caller : opt principal;
+    timestamp : opt nat64;
   };
   set_stability_pool_principal : record { "principal" : principal };
   set_interest_split : record { split : text };
@@ -274,6 +293,7 @@ type Event = variant {
   redemption_transfered : record {
     icusd_block_index : nat64;
     icp_block_index : nat64;
+    timestamp : opt nat64;
   };
   set_liquidation_bot_principal : record { "principal" : principal };
   liquidate_vault : record {
@@ -281,6 +301,7 @@ type Event = variant {
     icp_rate : blob;
     vault_id : nat64;
     liquidator : opt principal;
+    timestamp : opt nat64;
   };
   add_collateral_type : record {
     config : CollateralConfig;
@@ -294,6 +315,7 @@ type Event = variant {
 };
 type Fees = record { redemption_fee : float64; borrowing_fee : float64 };
 type GetEventsArg = record { start : nat64; length : nat64 };
+type GetEventsFilteredResponse = record { total : nat64; events : vec record { nat64; Event } };
 type HttpRequest = record {
   url : text;
   method : text;
@@ -525,6 +547,8 @@ service : (ProtocolArg) -> {
   get_deposit_account : (opt principal) -> (Account) query;
   get_event_count : () -> (nat64) query;
   get_events : (GetEventsArg) -> (vec Event) query;
+  get_events_filtered : (GetEventsArg) -> (GetEventsFilteredResponse) query;
+  get_events_by_principal : (principal) -> (vec record { nat64; Event }) query;
   get_fees : (nat64) -> (Fees) query;
   get_global_icusd_mint_cap : () -> (nat64) query;
   get_interest_pool_share : () -> (float64) query;

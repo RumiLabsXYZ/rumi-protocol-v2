@@ -1280,6 +1280,7 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
         crate::storage::record_event(&crate::event::Event::DustForgiven {
             vault_id,
             amount: vault.borrowed_icusd_amount,
+            timestamp: Some(ic_cdk::api::time()),
         });
     } else if vault.borrowed_icusd_amount > ICUSD::new(0) {
         mutate_state(|s| s.complete_close_vault_request());
@@ -1948,6 +1949,7 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
             liquidator: Some(caller),
             icp_rate: Some(collateral_price_usd),
             protocol_fee_collateral: if protocol_cut > 0 { Some(protocol_cut) } else { None },
+            timestamp: Some(ic_cdk::api::time()),
         };
         crate::storage::record_event(&event);
 
@@ -2168,6 +2170,7 @@ pub async fn liquidate_vault_partial_with_stable(
             liquidator: Some(caller),
             icp_rate: Some(collateral_price_usd),
             protocol_fee_collateral: if protocol_cut > 0 { Some(protocol_cut) } else { None },
+            timestamp: Some(ic_cdk::api::time()),
         };
         crate::storage::record_event(&event);
 
@@ -2376,6 +2379,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
             mode,
             icp_rate: collateral_price_usd,
             liquidator: Some(caller),
+            timestamp: Some(ic_cdk::api::time()),
         };
         crate::storage::record_event(&event);
 
@@ -2773,6 +2777,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
             liquidator: Some(caller),
             icp_rate: Some(collateral_price_usd),
             protocol_fee_collateral: if protocol_cut > 0 { Some(protocol_cut) } else { None },
+            timestamp: Some(ic_cdk::api::time()),
         };
         crate::storage::record_event(&event);
 

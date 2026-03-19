@@ -138,6 +138,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
   {
     'claim_liquidity_returns' : {
       'block_index' : bigint,
+      'timestamp' : [] | [bigint],
       'caller' : Principal,
       'amount' : bigint,
     }
@@ -146,6 +147,8 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     'collateral_withdrawn' : {
       'block_index' : bigint,
       'vault_id' : bigint,
+      'timestamp' : [] | [bigint],
+      'caller' : [] | [Principal],
       'amount' : bigint,
     }
   } |
@@ -154,11 +157,14 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'block_index' : bigint,
       'vault_id' : bigint,
       'repayed_amount' : bigint,
+      'timestamp' : [] | [bigint],
+      'caller' : [] | [Principal],
     }
   } |
   {
     'provide_liquidity' : {
       'block_index' : bigint,
+      'timestamp' : [] | [bigint],
       'caller' : Principal,
       'amount' : bigint,
     }
@@ -173,6 +179,8 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     'withdraw_and_close_vault' : {
       'block_index' : [] | [bigint],
       'vault_id' : bigint,
+      'timestamp' : [] | [bigint],
+      'caller' : [] | [Principal],
       'amount' : bigint,
     }
   } |
@@ -192,12 +200,19 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'token_type' : StableTokenType,
     }
   } |
-  { 'open_vault' : { 'block_index' : bigint, 'vault' : Vault } } |
+  {
+    'open_vault' : {
+      'block_index' : bigint,
+      'vault' : Vault,
+      'timestamp' : [] | [bigint],
+    }
+  } |
   {
     'redemption_on_vaults' : {
       'icusd_amount' : bigint,
       'icusd_block_index' : bigint,
       'owner' : Principal,
+      'timestamp' : [] | [bigint],
       'fee_amount' : bigint,
       'current_icp_rate' : Uint8Array | number[],
     }
@@ -217,7 +232,13 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'borrowing_fee' : [] | [string],
     }
   } |
-  { 'margin_transfer' : { 'block_index' : bigint, 'vault_id' : bigint } } |
+  {
+    'margin_transfer' : {
+      'block_index' : bigint,
+      'vault_id' : bigint,
+      'timestamp' : [] | [bigint],
+    }
+  } |
   {
     'admin_sweep_to_treasury' : {
       'block_index' : bigint,
@@ -239,7 +260,9 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     'borrow_from_vault' : {
       'block_index' : bigint,
       'vault_id' : bigint,
+      'timestamp' : [] | [bigint],
       'fee_amount' : bigint,
+      'caller' : [] | [Principal],
       'borrowed_amount' : bigint,
     }
   } |
@@ -254,11 +277,15 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'collateral_type' : Principal,
     }
   } |
-  { 'redistribute_vault' : { 'vault_id' : bigint } } |
+  {
+    'redistribute_vault' : { 'vault_id' : bigint, 'timestamp' : [] | [bigint] }
+  } |
   {
     'partial_collateral_withdrawn' : {
       'block_index' : bigint,
       'vault_id' : bigint,
+      'timestamp' : [] | [bigint],
+      'caller' : [] | [Principal],
       'amount' : bigint,
     }
   } |
@@ -268,13 +295,20 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'collateral_type' : [] | [string],
     }
   } |
-  { 'dust_forgiven' : VaultArg } |
+  {
+    'dust_forgiven' : {
+      'vault_id' : bigint,
+      'timestamp' : [] | [bigint],
+      'amount' : bigint,
+    }
+  } |
   {
     'partial_liquidate_vault' : {
       'protocol_fee_collateral' : [] | [bigint],
       'icp_rate' : [] | [Uint8Array | number[]],
       'liquidator_payment' : bigint,
       'vault_id' : bigint,
+      'timestamp' : [] | [bigint],
       'liquidator' : [] | [Principal],
       'icp_to_liquidator' : bigint,
     }
@@ -282,6 +316,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
   {
     'withdraw_liquidity' : {
       'block_index' : bigint,
+      'timestamp' : [] | [bigint],
       'caller' : Principal,
       'amount' : bigint,
     }
@@ -290,6 +325,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     'admin_mint' : {
       'to' : Principal,
       'block_index' : bigint,
+      'timestamp' : [] | [bigint],
       'amount' : bigint,
       'reason' : string,
     }
@@ -302,12 +338,19 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'icusd_block_index' : bigint,
       'fee_stable_amount' : bigint,
       'owner' : Principal,
+      'timestamp' : [] | [bigint],
       'fee_amount' : bigint,
       'stable_amount_sent' : bigint,
       'stable_token_ledger' : Principal,
     }
   } |
-  { 'close_vault' : { 'block_index' : [] | [bigint], 'vault_id' : bigint } } |
+  {
+    'close_vault' : {
+      'block_index' : [] | [bigint],
+      'vault_id' : bigint,
+      'timestamp' : [] | [bigint],
+    }
+  } |
   {
     'update_collateral_status' : {
       'status' : CollateralStatus,
@@ -325,6 +368,8 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     'add_margin_to_vault' : {
       'block_index' : bigint,
       'vault_id' : bigint,
+      'timestamp' : [] | [bigint],
+      'caller' : [] | [Principal],
       'margin_added' : bigint,
     }
   } |
@@ -344,6 +389,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     'redemption_transfered' : {
       'icusd_block_index' : bigint,
       'icp_block_index' : bigint,
+      'timestamp' : [] | [bigint],
     }
   } |
   { 'set_liquidation_bot_principal' : { 'principal' : Principal } } |
@@ -352,6 +398,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'mode' : Mode,
       'icp_rate' : Uint8Array | number[],
       'vault_id' : bigint,
+      'timestamp' : [] | [bigint],
       'liquidator' : [] | [Principal],
     }
   } |
@@ -370,6 +417,10 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
   { 'set_recovery_cr_multiplier' : { 'multiplier' : string } };
 export interface Fees { 'redemption_fee' : number, 'borrowing_fee' : number }
 export interface GetEventsArg { 'start' : bigint, 'length' : bigint }
+export interface GetEventsFilteredResponse {
+  'total' : bigint,
+  'events' : Array<[bigint, Event]>,
+}
 export interface HttpRequest {
   'url' : string,
   'method' : string,
@@ -625,6 +676,11 @@ export interface _SERVICE {
   'get_deposit_account' : ActorMethod<[[] | [Principal]], Account>,
   'get_event_count' : ActorMethod<[], bigint>,
   'get_events' : ActorMethod<[GetEventsArg], Array<Event>>,
+  'get_events_by_principal' : ActorMethod<[Principal], Array<[bigint, Event]>>,
+  'get_events_filtered' : ActorMethod<
+    [GetEventsArg],
+    GetEventsFilteredResponse
+  >,
   'get_fees' : ActorMethod<[bigint], Fees>,
   'get_global_icusd_mint_cap' : ActorMethod<[], bigint>,
   'get_interest_pool_share' : ActorMethod<[], number>,

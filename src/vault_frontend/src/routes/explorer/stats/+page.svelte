@@ -3,10 +3,12 @@
   import SearchBar from '$lib/components/explorer/SearchBar.svelte';
   import { publicActor } from '$lib/services/protocol/apiClient';
   import { fetchSnapshots, protocolSnapshots, snapshotsLoading } from '$lib/stores/explorerStore';
+  import { collateralStore } from '$lib/stores/collateralStore';
+  import { get } from 'svelte/store';
   import { formatAmount } from '$lib/utils/eventFormatters';
 
   let protocolStatus: any = null;
-  let collateralTotals: any[] = [];
+  let collateralTotals: { symbol: string; amount: number; debt: number; vaultCount: number; price: number; color: string }[] = [];
   let loading = true;
   let timeRange: '24h' | '7d' | '30d' | '90d' | 'all' = '7d';
 
@@ -70,12 +72,28 @@
   onMount(async () => {
     loading = true;
     try {
+      await collateralStore.fetchSupportedCollateral();
       const [status, totals] = await Promise.all([
         publicActor.get_protocol_status(),
         publicActor.get_collateral_totals(),
       ]);
       protocolStatus = status;
-      collateralTotals = totals;
+
+      const collaterals = get(collateralStore).collaterals;
+      collateralTotals = (totals as any[]).map((t: any) => {
+        const ct = t.collateral_type?.toText?.() || '';
+        const info = collaterals.find(c => c.principal === ct);
+        const decimals = info?.decimals ?? Number(t.decimals);
+        return {
+          symbol: info?.symbol ?? ct.substring(0, 5),
+          amount: Number(t.total_collateral) / Math.pow(10, decimals),
+          debt: Number(t.total_debt) / 1e8,
+          vaultCount: Number(t.vault_count),
+          price: Number(t.price),
+          color: info?.color ?? '#94A3B8',
+        };
+      }).filter(t => t.amount > 0);
+
       await fetchSnapshots();
     } catch (e) {
       console.error('Failed to load stats:', e);
@@ -98,7 +116,7 @@
     <div class="metrics-row">
       <div class="metric glass-card">
         <span class="metric-label">Total TVL</span>
-        <span class="metric-value key-number">${collateralTotals.reduce((sum, ct) => sum + Number(ct.total_collateral) / Math.pow(10, Number(ct.decimals)) * Number(ct.price), 0).toLocaleString('en-US', {maximumFractionDigits: 0})}</span>
+        <span class="metric-value key-number">${collateralTotals.reduce((sum, ct) => sum + ct.amount * ct.price, 0).toLocaleString('en-US', {maximumFractionDigits: 0})}</span>
       </div>
       <div class="metric glass-card">
         <span class="metric-label">Total Debt</span>
@@ -126,11 +144,11 @@
         </div>
         {#each collateralTotals as ct}
           <div class="table-row">
-            <span>{ct.collateral_type.toString().slice(0, 5)}…</span>
-            <span class="key-number">{formatAmount(BigInt(ct.total_collateral), Number(ct.decimals))}</span>
-            <span class="key-number">{formatAmount(BigInt(ct.total_debt))} icUSD</span>
-            <span class="key-number">{Number(ct.vault_count)}</span>
-            <span class="key-number">${Number(ct.price).toFixed(2)}</span>
+            <span style="color:{ct.color}; font-weight:500;">{ct.symbol}</span>
+            <span class="key-number">{ct.amount.toLocaleString('en-US', {maximumFractionDigits: 4})}</span>
+            <span class="key-number">{ct.debt.toLocaleString('en-US', {maximumFractionDigits: 2})} icUSD</span>
+            <span class="key-number">{ct.vaultCount}</span>
+            <span class="key-number">${ct.price.toFixed(2)}</span>
           </div>
         {/each}
       </div>

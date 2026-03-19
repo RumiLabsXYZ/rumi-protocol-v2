@@ -12,6 +12,7 @@ use rumi_protocol_backend::{
     ReserveRedemptionResult, ReserveBalance, CollateralTotals, CollateralInterestInfo, PerCollateralRateCurve,
     VaultArgWithToken, StableTokenType, InterestSplitArg,
     GetSnapshotsArg, ProtocolSnapshot, CollateralSnapshot,
+    GetEventsFilteredResponse,
 };
 use rumi_protocol_backend::logs::DEBUG;
 use rumi_protocol_backend::state::mutate_state;
@@ -448,6 +449,60 @@ fn get_events(args: GetEventsArg) -> Vec<Event> {
 #[query]
 fn get_event_count() -> u64 {
     rumi_protocol_backend::storage::count_events()
+}
+
+/// Return events excluding AccrueInterest, paginated newest-first.
+/// `start` is the page number (0-indexed), `length` is page size.
+#[candid_method(query)]
+#[query]
+fn get_events_filtered(args: GetEventsArg) -> GetEventsFilteredResponse {
+    if ic_cdk::api::data_certificate().is_none() {
+        ic_cdk::trap("update call rejected");
+    }
+    const MAX_PAGE_SIZE: usize = 200;
+    let page_size = MAX_PAGE_SIZE.min(args.length as usize);
+    let page = args.start as usize; // reinterpret `start` as page number
+
+    // Collect all non-AccrueInterest events with their original indices
+    let filtered: Vec<(u64, Event)> = events()
+        .enumerate()
+        .filter(|(_, e)| !e.is_accrue_interest())
+        .map(|(i, e)| (i as u64, e))
+        .collect();
+
+    let total = filtered.len() as u64;
+    // Reverse for newest-first, then paginate
+    let start_idx = page * page_size;
+    let page_events: Vec<(u64, Event)> = filtered.into_iter()
+        .rev()
+        .skip(start_idx)
+        .take(page_size)
+        .collect();
+
+    GetEventsFilteredResponse {
+        total,
+        events: page_events,
+    }
+}
+
+/// Return all events involving a given principal (as owner, caller, or liquidator).
+#[candid_method(query)]
+#[query]
+fn get_events_by_principal(principal: Principal) -> Vec<(u64, Event)> {
+    if ic_cdk::api::data_certificate().is_none() {
+        ic_cdk::trap("update call rejected");
+    }
+    const MAX_RESULTS: usize = 500;
+
+    events()
+        .enumerate()
+        .filter(|(_, e)| !e.is_accrue_interest() && e.involves_principal(&principal))
+        .map(|(i, e)| (i as u64, e))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .take(MAX_RESULTS)
+        .collect()
 }
 
 #[candid_method(query)]
@@ -1293,6 +1348,7 @@ async fn bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, ProtocolEr
             liquidator: Some(caller),
             icp_rate: Some(collateral_price_usd),
             protocol_fee_collateral: None,
+            timestamp: Some(ic_cdk::api::time()),
         };
         rumi_protocol_backend::storage::record_event(&event);
 
@@ -1373,6 +1429,7 @@ async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, 
             liquidator: Some(caller),
             icp_rate: Some(collateral_price_usd),
             protocol_fee_collateral: None,
+            timestamp: Some(ic_cdk::api::time()),
         };
         rumi_protocol_backend::storage::record_event(&event);
     });

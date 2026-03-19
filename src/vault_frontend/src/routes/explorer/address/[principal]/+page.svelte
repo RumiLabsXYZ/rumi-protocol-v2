@@ -5,7 +5,7 @@
   import SearchBar from '$lib/components/explorer/SearchBar.svelte';
   import VaultSummaryCard from '$lib/components/explorer/VaultSummaryCard.svelte';
   import EventRow from '$lib/components/explorer/EventRow.svelte';
-  import { fetchVaultsByOwner, fetchVaultHistory } from '$lib/stores/explorerStore';
+  import { fetchVaultsByOwner, fetchEventsByPrincipal } from '$lib/stores/explorerStore';
   import { publicActor } from '$lib/services/protocol/apiClient';
   import { truncatePrincipal, copyToClipboard } from '$lib/utils/principalHelpers';
   import { formatAmount } from '$lib/utils/eventFormatters';
@@ -42,11 +42,8 @@
       }
       collateralConfigs = collateralConfigs; // trigger reactivity
 
-      // Fetch and merge all vault histories
-      const histories = await Promise.all(
-        vaults.map((v: any) => fetchVaultHistory(Number(v.vault_id)))
-      );
-      allHistory = histories.flat();
+      // Fetch all events involving this principal (vault ops, stability pool, redemptions, etc.)
+      allHistory = await fetchEventsByPrincipal(principalStr);
     } catch (e) {
       console.error('Failed to load address:', e);
       toastStore.error('Invalid principal or failed to load data');
@@ -100,10 +97,10 @@
     {/if}
 
     {#if allHistory.length > 0}
-      <h2 class="section-title">Activity</h2>
+      <h2 class="section-title">Activity ({allHistory.length} events)</h2>
       <div class="events-list glass-card">
-        {#each allHistory as event}
-          <EventRow {event} />
+        {#each allHistory as item}
+          <EventRow event={item.event ?? item} index={item.globalIndex} />
         {/each}
       </div>
     {/if}

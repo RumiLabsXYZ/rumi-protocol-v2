@@ -179,6 +179,12 @@ pub struct GetEventsArg {
     pub length: u64,
 }
 
+#[derive(candid::CandidType)]
+pub struct GetEventsFilteredResponse {
+    pub total: u64,
+    pub events: Vec<(u64, crate::event::Event)>,
+}
+
 #[derive(CandidType, Deserialize, Debug)]
 pub struct LiquidityStatus {
     pub liquidity_provided: u64,
