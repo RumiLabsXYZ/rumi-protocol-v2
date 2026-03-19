@@ -15,8 +15,8 @@
     {type}
   </span>
   <span class="event-summary">{summary}</span>
-  {#if event[Object.keys(event)[0]]?.vault?.last_accrual_time}
-    <span class="event-time">{formatTimestamp(event[Object.keys(event)[0]].vault.last_accrual_time)}</span>
+  {#if index !== null}
+    <span class="event-index">#{index}</span>
   {/if}
 </a>
 
@@ -33,5 +33,5 @@
     border-radius:9999px; white-space:nowrap;
   }
   .event-summary { font-size:0.875rem; color:var(--rumi-text-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .event-time { font-size:0.75rem; color:var(--rumi-text-muted); white-space:nowrap; font-variant-numeric:tabular-nums; }
+  .event-index { font-size:0.75rem; color:var(--rumi-text-muted); white-space:nowrap; font-variant-numeric:tabular-nums; }
 </style>

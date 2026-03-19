@@ -21,6 +21,7 @@ export function getEventType(event: any): string {
 		partial_collateral_withdrawn: 'Withdraw Collateral',
 		withdraw_and_close_vault: 'Withdraw & Close',
 		vault_withdrawn_and_closed: 'Withdraw & Close',
+		VaultWithdrawnAndClosed: 'Withdraw & Close',
 		liquidate_vault: 'Liquidation',
 		partial_liquidate_vault: 'Partial Liquidation',
 		redistribute_vault: 'Redistribution',
@@ -55,6 +56,7 @@ export function getEventCategory(event: any): EventCategory {
 		'partial_collateral_withdrawn',
 		'withdraw_and_close_vault',
 		'vault_withdrawn_and_closed',
+		'VaultWithdrawnAndClosed',
 		'margin_transfer',
 		'dust_forgiven'
 	];
@@ -135,6 +137,7 @@ export function getEventSummary(event: any): string {
 			return `Withdrew ${formatAmount(data.amount)} collateral from Vault #${data.vault_id}`;
 		case 'withdraw_and_close_vault':
 		case 'vault_withdrawn_and_closed':
+		case 'VaultWithdrawnAndClosed':
 			return `Withdrew and closed Vault #${data.vault_id}`;
 		case 'liquidate_vault':
 			return `Vault #${data.vault_id} fully liquidated`;
