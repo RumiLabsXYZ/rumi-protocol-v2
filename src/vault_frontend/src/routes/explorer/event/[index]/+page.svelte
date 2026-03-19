@@ -33,10 +33,15 @@
 
   function formatValue(val: any): string {
     if (val === null || val === undefined) return '—';
+    // Candid optionals: [] = None, [value] = Some(value)
+    if (Array.isArray(val)) {
+      if (val.length === 0) return '—';
+      if (val.length === 1) return formatValue(val[0]);
+    }
     if (typeof val === 'bigint') return val.toLocaleString();
     if (typeof val === 'number') return val.toLocaleString();
-    if (typeof val === 'object' && val._isPrincipal) return val.toString();
-    if (typeof val === 'object' && val.toString) return val.toString();
+    if (typeof val === 'object' && (val._isPrincipal || val.toText)) return val.toString();
+    if (typeof val === 'object' && val.toString && val.toString !== Object.prototype.toString) return val.toString();
     return String(val);
   }
 </script>

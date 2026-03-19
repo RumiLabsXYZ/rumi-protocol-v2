@@ -11,14 +11,18 @@
 
   let selectedFilter: EventCategory | 'all' = 'all';
 
-  $: filteredEvents = selectedFilter === 'all'
-    ? $explorerEvents
-    : $explorerEvents.filter(e => getEventCategory(e) === selectedFilter);
-
   $: totalPages = Math.ceil($explorerEventsTotalCount / PAGE_SIZE);
 
-  // Calculate the global event index for each event (for linking to detail pages)
+  // Attach global event index to each event before filtering
   $: eventStartIndex = Math.max(0, $explorerEventsTotalCount - (($explorerEventsPage + 1) * PAGE_SIZE));
+  $: indexedEvents = $explorerEvents.map((event, i) => ({
+    event,
+    globalIndex: eventStartIndex + ($explorerEvents.length - 1 - i)
+  }));
+
+  $: filteredEvents = selectedFilter === 'all'
+    ? indexedEvents
+    : indexedEvents.filter(e => getEventCategory(e.event) === selectedFilter);
 
   function handlePageChange(page: number) {
     fetchEvents(page);
@@ -66,8 +70,8 @@
     <div class="empty">No events found.</div>
   {:else}
     <div class="events-list glass-card">
-      {#each filteredEvents as event, i}
-        <EventRow {event} index={eventStartIndex + (filteredEvents.length - 1 - i)} />
+      {#each filteredEvents as { event, globalIndex }}
+        <EventRow {event} index={globalIndex} />
       {/each}
     </div>
   {/if}

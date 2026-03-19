@@ -98,7 +98,7 @@
     <div class="metrics-row">
       <div class="metric glass-card">
         <span class="metric-label">Total TVL</span>
-        <span class="metric-value key-number">${(Number(protocolStatus.total_icp_margin) / 1e8 * protocolStatus.last_icp_rate).toLocaleString('en-US', {maximumFractionDigits: 0})}</span>
+        <span class="metric-value key-number">${collateralTotals.reduce((sum, ct) => sum + Number(ct.total_collateral) / Math.pow(10, Number(ct.decimals)) * Number(ct.price), 0).toLocaleString('en-US', {maximumFractionDigits: 0})}</span>
       </div>
       <div class="metric glass-card">
         <span class="metric-label">Total Debt</span>
