@@ -8,9 +8,12 @@ use std::cell::RefCell;
 
 const LOG_INDEX_MEMORY_ID: MemoryId = MemoryId::new(0);
 const LOG_DATA_MEMORY_ID: MemoryId = MemoryId::new(1);
+const SNAPSHOT_INDEX_MEMORY_ID: MemoryId = MemoryId::new(2);
+const SNAPSHOT_DATA_MEMORY_ID: MemoryId = MemoryId::new(3);
 
 type VMem = VirtualMemory<DefaultMemoryImpl>;
 type EventLog = StableLog<Vec<u8>, VMem, VMem>;
+type SnapshotLog = StableLog<Vec<u8>, VMem, VMem>;
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> = RefCell::new(
@@ -28,6 +31,16 @@ thread_local! {
               )
         );
 
+    /// Hourly protocol snapshots for historical charts.
+    static SNAPSHOTS: RefCell<SnapshotLog> = MEMORY_MANAGER
+        .with(|m|
+              RefCell::new(
+                  StableLog::init(
+                      m.borrow().get(SNAPSHOT_INDEX_MEMORY_ID),
+                      m.borrow().get(SNAPSHOT_DATA_MEMORY_ID)
+                  ).expect("failed to initialize snapshot log")
+              )
+        );
 }
 
 pub struct EventIterator {
@@ -94,4 +107,61 @@ pub fn record_event(event: &Event) {
             .append(&bytes)
             .expect("failed to append an entry to the event log")
     });
+}
+
+// ── Protocol Snapshots ─────────────────────────────────────────────────────
+
+fn encode_snapshot(snapshot: &crate::ProtocolSnapshot) -> Vec<u8> {
+    let mut buf = Vec::new();
+    ciborium::ser::into_writer(snapshot, &mut buf).expect("failed to encode snapshot");
+    buf
+}
+
+fn decode_snapshot(buf: &[u8]) -> crate::ProtocolSnapshot {
+    ciborium::de::from_reader(buf).expect("failed to decode snapshot")
+}
+
+pub fn record_snapshot(snapshot: &crate::ProtocolSnapshot) {
+    let bytes = encode_snapshot(snapshot);
+    SNAPSHOTS.with(|log| {
+        log.borrow().append(&bytes).expect("failed to append snapshot");
+    });
+}
+
+pub fn snapshots() -> SnapshotIterator {
+    SnapshotIterator {
+        buf: vec![],
+        pos: 0,
+    }
+}
+
+pub fn count_snapshots() -> u64 {
+    SNAPSHOTS.with(|log| log.borrow().len())
+}
+
+pub struct SnapshotIterator {
+    buf: Vec<u8>,
+    pos: u64,
+}
+
+impl Iterator for SnapshotIterator {
+    type Item = crate::ProtocolSnapshot;
+
+    fn next(&mut self) -> Option<crate::ProtocolSnapshot> {
+        SNAPSHOTS.with(|snapshots| {
+            let snapshots = snapshots.borrow();
+            match snapshots.read_entry(self.pos, &mut self.buf) {
+                Ok(()) => {
+                    self.pos = self.pos.saturating_add(1);
+                    Some(decode_snapshot(&self.buf))
+                }
+                Err(NoSuchEntry) => None,
+            }
+        })
+    }
+
+    fn nth(&mut self, n: usize) -> Option<crate::ProtocolSnapshot> {
+        self.pos = self.pos.saturating_add(n as u64);
+        self.next()
+    }
 }

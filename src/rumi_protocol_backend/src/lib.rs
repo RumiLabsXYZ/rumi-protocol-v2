@@ -200,6 +200,32 @@ pub struct CollateralTotals {
     pub price: f64,                 // Last USD price
 }
 
+/// Per-collateral data captured in each hourly protocol snapshot.
+#[derive(CandidType, Deserialize, Serialize, Debug, Clone)]
+pub struct CollateralSnapshot {
+    pub collateral_type: Principal,
+    pub total_collateral: u64,
+    pub total_debt: u64,
+    pub vault_count: u64,
+    pub price: f64,
+}
+
+/// Hourly protocol snapshot for historical charts.
+#[derive(CandidType, Deserialize, Serialize, Debug, Clone)]
+pub struct ProtocolSnapshot {
+    pub timestamp: u64,
+    pub total_collateral_value_usd: u64,
+    pub total_debt: u64,
+    pub total_vault_count: u64,
+    pub collateral_snapshots: Vec<CollateralSnapshot>,
+}
+
+#[derive(CandidType, Deserialize)]
+pub struct GetSnapshotsArg {
+    pub start: u64,
+    pub length: u64,
+}
+
 /// Argument for adding a new collateral type via admin endpoint.
 #[derive(CandidType, Clone, Debug, Deserialize)]
 pub struct AddCollateralArg {
