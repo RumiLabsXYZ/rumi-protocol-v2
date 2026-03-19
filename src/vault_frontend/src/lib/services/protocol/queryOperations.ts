@@ -1,4 +1,4 @@
-import { ApiClient, E8S, updateMinIcusdAmount, publicActor } from './apiClient';
+import { ApiClient, E8S, updateMinIcusdAmount } from './apiClient';
 import type { FeesInfo, ProtocolStatus, FeesDTO, ProtocolStatusDTO, CollateralInfo } from '../types';
 import type {
     ProtocolStatus as CanisterProtocolStatus,
@@ -72,7 +72,7 @@ export class QueryOperations {
       // If interest_split wasn't included in protocol status, fetch it directly
       if (result.interestSplit.length === 0) {
         try {
-          const split = await (publicActor.get_interest_split() as Promise<{ destination: string; bps: bigint }[]>);
+          const split = await ApiClient.getPublicData<{ destination: string; bps: bigint }[]>('get_interest_split');
           if (Array.isArray(split) && split.length > 0) {
             result.interestSplit = split.map((entry: any) => ({
               destination: String(entry.destination),
