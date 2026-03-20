@@ -385,44 +385,125 @@ pub fn check_vaults() {
             }).collect()
         });
 
-        // Push to stability pool (fire-and-forget)
-        if let Some(pool_canister) = read_state(|s| s.stability_pool_canister) {
-            let notifications = vault_notifications.clone();
-            let count = notifications.len();
-            ic_cdk::spawn(async move {
-                let _result: Result<(), _> = ic_cdk::call(
-                    pool_canister,
-                    "notify_liquidatable_vaults",
-                    (notifications,),
-                )
-                .await;
-            });
-            log!(
-                INFO,
-                "[check_vaults] Pushed {} liquidatable vaults to stability pool {}",
-                count,
-                pool_canister
-            );
+        // ── Priority-ordered liquidation cascade ──
+        // 1. Bot gets first shot at vaults with bot-eligible collateral
+        // 2. Stability pool handles: non-bot-eligible immediately + bot-eligible after timeout
+        // 3. Manual liquidation is always available as last resort (via get_liquidatable_vaults)
+
+        let now = ic_cdk::api::time();
+        // Bot gets one check_vaults cycle (5 min = 300s) before fallback
+        let bot_timeout_ns: u64 = 300_000_000_000;
+
+        let (bot_allowed, bot_canister, pool_canister) = read_state(|s| {
+            (
+                s.bot_allowed_collateral_types.clone(),
+                s.liquidation_bot_principal,
+                s.stability_pool_canister,
+            )
+        });
+
+        let mut for_bot: Vec<LiquidatableVaultInfo> = Vec::new();
+        let mut for_pool: Vec<LiquidatableVaultInfo> = Vec::new();
+
+        for vault_info in &vault_notifications {
+            let bot_eligible = bot_canister.is_some()
+                && bot_allowed.contains(&vault_info.collateral_type);
+
+            if !bot_eligible {
+                // Not bot-eligible → stability pool immediately
+                for_pool.push(vault_info.clone());
+            } else {
+                // Bot-eligible: check if we already sent it and it timed out
+                let pending_since = read_state(|s| {
+                    s.bot_pending_vaults.get(&vault_info.vault_id).copied()
+                });
+                match pending_since {
+                    None => {
+                        // First time seeing this vault → send to bot
+                        for_bot.push(vault_info.clone());
+                    }
+                    Some(ts) if now.saturating_sub(ts) >= bot_timeout_ns => {
+                        // Bot had its chance and didn't liquidate → fallback to pool
+                        log!(
+                            INFO,
+                            "[check_vaults] Bot timeout for vault #{}, falling back to stability pool",
+                            vault_info.vault_id
+                        );
+                        for_pool.push(vault_info.clone());
+                    }
+                    Some(_) => {
+                        // Still within bot's window → re-send to bot
+                        for_bot.push(vault_info.clone());
+                    }
+                }
+            }
         }
 
-        // Push to liquidation bot (fire-and-forget)
-        if let Some(bot_canister) = read_state(|s| s.liquidation_bot_principal) {
-            let notifications = vault_notifications.clone();
-            let count = notifications.len();
-            ic_cdk::spawn(async move {
-                let _result: Result<(), _> = ic_cdk::call(
-                    bot_canister,
-                    "notify_liquidatable_vaults",
-                    (notifications,),
-                )
-                .await;
-            });
-            log!(
-                INFO,
-                "[check_vaults] Pushed {} liquidatable vaults to bot {}",
-                count,
-                bot_canister
-            );
+        // Update bot_pending_vaults tracking
+        let unhealthy_ids: std::collections::BTreeSet<u64> = vault_notifications
+            .iter()
+            .map(|v| v.vault_id)
+            .collect();
+        let bot_vault_ids: Vec<u64> = for_bot.iter().map(|v| v.vault_id).collect();
+
+        mutate_state(|s| {
+            // Record newly-sent bot vaults
+            for vid in &bot_vault_ids {
+                s.bot_pending_vaults.entry(*vid).or_insert(now);
+            }
+            // Keep entries that are still unhealthy AND haven't timed out yet.
+            // Timed-out entries stay deleted so they keep going to the pool on
+            // subsequent cycles (instead of resetting the clock).
+            s.bot_pending_vaults
+                .retain(|vid, ts| unhealthy_ids.contains(vid) && now.saturating_sub(*ts) < bot_timeout_ns);
+        });
+
+        // Push to bot (fire-and-forget with error logging)
+        if let Some(bot) = bot_canister {
+            if !for_bot.is_empty() {
+                let count = for_bot.len();
+                ic_cdk::spawn(async move {
+                    let result: Result<(), _> = ic_cdk::call(
+                        bot,
+                        "notify_liquidatable_vaults",
+                        (for_bot,),
+                    )
+                    .await;
+                    if let Err((code, msg)) = result {
+                        log!(INFO, "[check_vaults] ERROR: bot notification failed: {:?} {}", code, msg);
+                    }
+                });
+                log!(
+                    INFO,
+                    "[check_vaults] Sent {} bot-eligible vaults to bot {}",
+                    count,
+                    bot
+                );
+            }
+        }
+
+        // Push to stability pool (fire-and-forget with error logging)
+        if let Some(pool) = pool_canister {
+            if !for_pool.is_empty() {
+                let count = for_pool.len();
+                ic_cdk::spawn(async move {
+                    let result: Result<(), _> = ic_cdk::call(
+                        pool,
+                        "notify_liquidatable_vaults",
+                        (for_pool,),
+                    )
+                    .await;
+                    if let Err((code, msg)) = result {
+                        log!(INFO, "[check_vaults] ERROR: stability pool notification failed: {:?} {}", code, msg);
+                    }
+                });
+                log!(
+                    INFO,
+                    "[check_vaults] Sent {} vaults to stability pool {} (non-bot-eligible or bot timeout)",
+                    count,
+                    pool
+                );
+            }
         }
     } else {
         log!(
