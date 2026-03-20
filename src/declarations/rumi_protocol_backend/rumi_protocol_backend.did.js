@@ -28,6 +28,10 @@ export const idlFactory = ({ IDL }) => {
       'base_asset_class' : XrcAssetClass,
       'base_asset' : IDL.Text,
     }),
+    'CoinGecko' : IDL.Record({
+      'coin_id' : IDL.Text,
+      'vs_currency' : IDL.Text,
+    }),
     'LstWrapped' : IDL.Record({
       'quote_asset_class' : XrcAssetClass,
       'haircut' : IDL.Float64,
@@ -647,6 +651,30 @@ export const idlFactory = ({ IDL }) => {
         [],
       ),
     'close_vault' : IDL.Func([IDL.Nat64], [Result_4], []),
+    'coingecko_transform' : IDL.Func(
+        [
+          IDL.Record({
+            'context' : IDL.Vec(IDL.Nat8),
+            'response' : IDL.Record({
+              'status' : IDL.Nat,
+              'body' : IDL.Vec(IDL.Nat8),
+              'headers' : IDL.Vec(
+                IDL.Record({ 'value' : IDL.Text, 'name' : IDL.Text })
+              ),
+            }),
+          }),
+        ],
+        [
+          IDL.Record({
+            'status' : IDL.Nat,
+            'body' : IDL.Vec(IDL.Nat8),
+            'headers' : IDL.Vec(
+              IDL.Record({ 'value' : IDL.Text, 'name' : IDL.Text })
+            ),
+          }),
+        ],
+        ['query'],
+      ),
     'dev_force_bot_liquidate' : IDL.Func([IDL.Nat64], [Result_3], []),
     'enter_recovery_mode' : IDL.Func([], [Result], []),
     'exit_recovery_mode' : IDL.Func([], [Result], []),
@@ -890,6 +918,11 @@ export const idlFactory = ({ IDL }) => {
     'set_three_pool_canister' : IDL.Func([IDL.Principal], [Result], []),
     'set_treasury_principal' : IDL.Func([IDL.Principal], [Result], []),
     'stability_pool_liquidate' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [Result_10],
+        [],
+      ),
+    'stability_pool_liquidate_debt_burned' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
         [Result_10],
         [],
