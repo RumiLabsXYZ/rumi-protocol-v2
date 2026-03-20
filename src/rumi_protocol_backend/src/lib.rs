@@ -451,10 +451,11 @@ pub fn check_vaults() {
             for vid in &bot_vault_ids {
                 s.bot_pending_vaults.entry(*vid).or_insert(now);
             }
-            // Clean up: remove vaults that are no longer unhealthy (liquidated or topped up)
-            // and vaults that timed out (now going to stability pool)
+            // Keep entries that are still unhealthy AND haven't timed out yet.
+            // Timed-out entries stay deleted so they keep going to the pool on
+            // subsequent cycles (instead of resetting the clock).
             s.bot_pending_vaults
-                .retain(|vid, _| unhealthy_ids.contains(vid) && bot_vault_ids.contains(vid));
+                .retain(|vid, ts| unhealthy_ids.contains(vid) && now.saturating_sub(*ts) < bot_timeout_ns);
         });
 
         // Push to bot (fire-and-forget)
