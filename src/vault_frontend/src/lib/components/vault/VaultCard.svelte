@@ -645,6 +645,9 @@
 <!-- ── Collapsed row ── -->
 <div class="vault-card {themeClass}"
   style={showProjectedCr ? `border-left: 2px solid var(--rumi-${activeProjectedRisk === 'danger' || activeProjectedRisk === 'warning' ? 'danger' : activeProjectedRisk === 'caution' ? 'caution' : 'safe'})` : railStyle}>
+  {#if themeClass === 'theme-exe'}
+    <img src="/windoge98-logo.webp" alt="" class="exe-watermark" aria-hidden="true" />
+  {/if}
   <button class="vault-row" on:click={toggleExpand}>
     <span class="vault-id"><span class="collateral-dot" style="background:{collateralColor}"></span>#{vault.vaultId}</span>
     <span class="vault-cell">
@@ -1258,94 +1261,111 @@
   }
 
   /* ═══════════════════════════════════════════════════════════════
-     EASTER EGG: BOB — brutalist / terminal (bob.fun)
+     EASTER EGG: BOB — brutalist / bob.fun
+     White background, black text, monospace, hard borders.
      ═══════════════════════════════════════════════════════════════ */
   .theme-bob {
-    background: #000 !important;
-    border: 2px solid #fff !important;
+    background: #fff !important;
+    border: 2px solid #000 !important;
     border-radius: 0 !important;
     box-shadow: none !important;
     font-family: 'Courier New', Courier, monospace !important;
   }
   .theme-bob:hover {
-    border-color: #fff !important;
-    box-shadow: none !important;
+    border-color: #000 !important;
+    box-shadow: 4px 4px 0 #000 !important;
   }
   .theme-bob .vault-row { font-family: 'Courier New', Courier, monospace; }
-  .theme-bob .vault-id { font-family: 'Courier New', Courier, monospace; color: #fff; text-transform: uppercase; letter-spacing: 0.05em; }
-  .theme-bob .cell-label { color: #888; font-family: 'Courier New', Courier, monospace; letter-spacing: 0.08em; }
-  .theme-bob .cell-value { color: #fff; font-family: 'Courier New', Courier, monospace; }
-  .theme-bob .cell-sub { color: #888; font-family: 'Courier New', Courier, monospace; }
-  .theme-bob .vault-chevron svg { color: #fff; }
-  .theme-bob .vault-actions { border-top: 2px solid #fff; }
+  .theme-bob .vault-id { font-family: 'Courier New', Courier, monospace; color: #000; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700; }
+  .theme-bob .collateral-dot { background: #000 !important; }
+  .theme-bob .cell-label { color: #666; font-family: 'Courier New', Courier, monospace; letter-spacing: 0.08em; }
+  .theme-bob .cell-value { color: #000; font-family: 'Courier New', Courier, monospace; }
+  .theme-bob .cell-sub { color: #666; font-family: 'Courier New', Courier, monospace; }
+  .theme-bob .vault-chevron svg { color: #000; }
+  .theme-bob .vault-actions { border-top: 2px solid #000; background: #fff; }
   .theme-bob .stats-panel {
-    background: #000; border: 1px solid #555; border-radius: 0;
+    background: #f5f5f5; border: 1px solid #000; border-radius: 0;
   }
-  .theme-bob .stat-label { color: #888; font-family: 'Courier New', Courier, monospace; }
-  .theme-bob .stat-value { color: #fff; font-family: 'Courier New', Courier, monospace; }
-  .theme-bob .pill-group { border-radius: 0; border-color: #555; }
+  .theme-bob .stat-label { color: #666; font-family: 'Courier New', Courier, monospace; }
+  .theme-bob .stat-value { color: #000; font-family: 'Courier New', Courier, monospace; }
+  .theme-bob .pill-group { border-radius: 0; border-color: #000; }
   .theme-bob .pill {
-    background: #000; border-radius: 0;
+    background: #fff; border-radius: 0;
     font-family: 'Courier New', Courier, monospace; text-transform: uppercase;
-    color: #aaa; letter-spacing: 0.06em;
+    color: #333; letter-spacing: 0.06em;
   }
-  .theme-bob .pill:first-child { border-right: 1px solid #555; }
-  .theme-bob .pill-collateral:hover:not(:disabled) { color: #fff; background: #222; }
-  .theme-bob .pill-active-collateral { background: #fff; color: #000; font-weight: 700; }
-  .theme-bob .pill-debt:hover:not(:disabled) { color: #fff; background: #222; }
-  .theme-bob .pill-active-debt { background: #fff; color: #000; font-weight: 700; }
-  .theme-bob .input-panel { border-radius: 0; border-color: #555; }
+  .theme-bob .pill:first-child { border-right: 1px solid #000; }
+  .theme-bob .pill-collateral:hover:not(:disabled) { color: #000; background: #eee; }
+  .theme-bob .pill-active-collateral { background: #000; color: #fff; font-weight: 700; }
+  .theme-bob .pill-debt:hover:not(:disabled) { color: #000; background: #eee; }
+  .theme-bob .pill-active-debt { background: #000; color: #fff; font-weight: 700; }
+  .theme-bob .input-panel { border-radius: 0; border-color: #000; background: #fff; }
   .theme-bob .action-input {
-    background: #111; border: 1px solid #555; border-radius: 0;
-    color: #fff; font-family: 'Courier New', Courier, monospace;
+    background: #fff; border: 1px solid #000; border-radius: 0;
+    color: #000; font-family: 'Courier New', Courier, monospace;
   }
-  .theme-bob .action-input:focus { border-color: #fff; box-shadow: none; }
-  .theme-bob .input-label { font-family: 'Courier New', Courier, monospace; color: #888; text-transform: uppercase; }
-  .theme-bob .input-suffix { font-family: 'Courier New', Courier, monospace; color: #555; }
+  .theme-bob .action-input:focus { border-color: #000; box-shadow: 2px 2px 0 #000; }
+  .theme-bob .input-label { font-family: 'Courier New', Courier, monospace; color: #666; text-transform: uppercase; }
+  .theme-bob .input-suffix { font-family: 'Courier New', Courier, monospace; color: #999; }
   .theme-bob .btn-submit {
     border-radius: 0; font-family: 'Courier New', Courier, monospace;
     text-transform: uppercase; letter-spacing: 0.08em;
   }
   .theme-bob .btn-submit-collateral {
-    background: #fff; color: #000; border: 2px solid #fff;
+    background: #000; color: #fff; border: 2px solid #000;
   }
-  .theme-bob .btn-submit-collateral:hover:not(:disabled) { background: #ddd; }
+  .theme-bob .btn-submit-collateral:hover:not(:disabled) { background: #333; }
   .theme-bob .btn-submit-debt {
-    background: #fff; color: #000; border: 2px solid #fff;
+    background: #000; color: #fff; border: 2px solid #000;
   }
-  .theme-bob .btn-submit-debt:hover:not(:disabled) { background: #ddd; }
-  .theme-bob .fee-row { font-family: 'Courier New', Courier, monospace; color: #888; }
-  .theme-bob .max-text { color: #aaa; font-family: 'Courier New', Courier, monospace; text-transform: uppercase; }
-  .theme-bob .gauge-track { border-radius: 0; background: #222; }
+  .theme-bob .btn-submit-debt:hover:not(:disabled) { background: #333; }
+  .theme-bob .fee-row { font-family: 'Courier New', Courier, monospace; color: #666; }
+  .theme-bob .max-text { color: #000; font-family: 'Courier New', Courier, monospace; text-transform: uppercase; text-decoration: underline; }
+  .theme-bob .vault-cell-bar { filter: grayscale(1); }
+  .theme-bob .gauge-track { border-radius: 0; background: #e0e0e0; }
   .theme-bob .gauge-zone-pink { border-radius: 0; }
   .theme-bob .gauge-zone-teal { border-radius: 0; }
-  .theme-bob .gauge-marker { border-radius: 0; }
-  .theme-bob .stat-divider { background: #333; }
+  .theme-bob .gauge-marker { border-radius: 0; box-shadow: none !important; }
+  .theme-bob .gauge-labels { color: #666; }
+  .theme-bob .stat-divider { background: #ccc; }
   .theme-bob .token-selector {
-    background: #111; border: 1px solid #555; border-radius: 0;
-    font-family: 'Courier New', Courier, monospace; color: #fff;
+    background: #fff; border: 1px solid #000; border-radius: 0;
+    font-family: 'Courier New', Courier, monospace; color: #000;
   }
-  .theme-bob .token-selector:hover:not(:disabled) { border-color: #fff; }
+  .theme-bob .token-selector:hover:not(:disabled) { background: #eee; }
 
   /* ═══════════════════════════════════════════════════════════════
      EASTER EGG: EXE — Windows 98 (windoge98.com)
      ═══════════════════════════════════════════════════════════════ */
   .theme-exe {
-    background: #C0C0C0 !important;
+    background: linear-gradient(180deg, #4a90d9 0%, #87ceeb 40%, #b0d4f1 60%, #C0C0C0 60%) !important;
     border: none !important;
     border-radius: 0 !important;
     box-shadow: inset -1px -1px 0 #000, inset 1px 1px 0 #fff,
                 inset -2px -2px 0 #808080, inset 2px 2px 0 #dfdfdf !important;
+    position: relative;
+    overflow: hidden;
   }
   .theme-exe:hover {
     border: none !important;
     box-shadow: inset -1px -1px 0 #000, inset 1px 1px 0 #fff,
                 inset -2px -2px 0 #808080, inset 2px 2px 0 #dfdfdf !important;
   }
+  .exe-watermark {
+    position: absolute;
+    right: 0.5rem;
+    top: 0.125rem;
+    width: 3rem;
+    height: auto;
+    opacity: 0.7;
+    pointer-events: none;
+    z-index: 0;
+  }
   /* Win98 title bar */
   .theme-exe .vault-row {
     font-family: 'MS Sans Serif', 'Arial', 'Helvetica', sans-serif;
     position: relative;
+    z-index: 1;
   }
   .theme-exe .vault-id {
     font-family: 'MS Sans Serif', 'Arial', sans-serif; font-weight: 700;
@@ -1367,6 +1387,8 @@
   .theme-exe .vault-actions {
     border-top: 1px solid #808080;
     background: #C0C0C0;
+    position: relative;
+    z-index: 1;
   }
   .theme-exe .stats-panel {
     background: #fff; border: none; border-radius: 0;
