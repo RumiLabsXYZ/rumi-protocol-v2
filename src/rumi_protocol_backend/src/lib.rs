@@ -458,17 +458,20 @@ pub fn check_vaults() {
                 .retain(|vid, ts| unhealthy_ids.contains(vid) && now.saturating_sub(*ts) < bot_timeout_ns);
         });
 
-        // Push to bot (fire-and-forget)
+        // Push to bot (fire-and-forget with error logging)
         if let Some(bot) = bot_canister {
             if !for_bot.is_empty() {
                 let count = for_bot.len();
                 ic_cdk::spawn(async move {
-                    let _result: Result<(), _> = ic_cdk::call(
+                    let result: Result<(), _> = ic_cdk::call(
                         bot,
                         "notify_liquidatable_vaults",
                         (for_bot,),
                     )
                     .await;
+                    if let Err((code, msg)) = result {
+                        log!(INFO, "[check_vaults] ERROR: bot notification failed: {:?} {}", code, msg);
+                    }
                 });
                 log!(
                     INFO,
@@ -479,17 +482,20 @@ pub fn check_vaults() {
             }
         }
 
-        // Push to stability pool (fire-and-forget)
+        // Push to stability pool (fire-and-forget with error logging)
         if let Some(pool) = pool_canister {
             if !for_pool.is_empty() {
                 let count = for_pool.len();
                 ic_cdk::spawn(async move {
-                    let _result: Result<(), _> = ic_cdk::call(
+                    let result: Result<(), _> = ic_cdk::call(
                         pool,
                         "notify_liquidatable_vaults",
                         (for_pool,),
                     )
                     .await;
+                    if let Err((code, msg)) = result {
+                        log!(INFO, "[check_vaults] ERROR: stability pool notification failed: {:?} {}", code, msg);
+                    }
                 });
                 log!(
                     INFO,
