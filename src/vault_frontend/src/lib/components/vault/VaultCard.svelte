@@ -1392,9 +1392,9 @@
   }
   .exe-watermark {
     position: absolute;
-    left: 15rem;
+    left: 27%;
     top: 50%;
-    transform: translateY(-50%);
+    transform: translate(-50%, -50%);
     width: 5rem;
     height: auto;
     opacity: 0.8;
