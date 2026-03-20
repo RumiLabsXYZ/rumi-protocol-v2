@@ -207,7 +207,9 @@ async fn kong_execute_swap(
     }
 }
 
-/// Swap ICP for the best-rate stablecoin (ckUSDC or ckUSDT) on KongSwap.
+/// Swap ICP for a stablecoin (ckUSDT preferred, ckUSDC fallback) on KongSwap.
+/// Tries the best-quoted token first; if execution fails (e.g. slippage),
+/// falls back to the other token before giving up.
 pub async fn swap_icp_for_stable(
     config: &BotConfig,
     amount_e8s: u64,
@@ -228,25 +230,28 @@ pub async fn swap_icp_for_stable(
 
     let (usdc_result, usdt_result) = futures::future::join(usdc_quote, usdt_quote).await;
 
-    // Pick the better rate (higher output amount)
-    let (target_ledger, target_name, _quote_amount) = match (usdc_result, usdt_result) {
+    // Build ordered list: best quote first, fallback second
+    let mut candidates: Vec<(Principal, &str)> = Vec::new();
+
+    match (usdc_result, usdt_result) {
         (Ok((usdc_amt, _)), Ok((usdt_amt, _))) => {
-            // Both are 6 decimals — compare directly
-            if usdc_amt >= usdt_amt {
-                log!(crate::INFO, "Best rate: ckUSDC ({} vs {} ckUSDT)", usdc_amt, usdt_amt);
-                (config.ckusdc_ledger, "ckUSDC", usdc_amt)
-            } else {
+            if usdt_amt >= usdc_amt {
                 log!(crate::INFO, "Best rate: ckUSDT ({} vs {} ckUSDC)", usdt_amt, usdc_amt);
-                (config.ckusdt_ledger, "ckUSDT", usdt_amt)
+                candidates.push((config.ckusdt_ledger, "ckUSDT"));
+                candidates.push((config.ckusdc_ledger, "ckUSDC"));
+            } else {
+                log!(crate::INFO, "Best rate: ckUSDC ({} vs {} ckUSDT)", usdc_amt, usdt_amt);
+                candidates.push((config.ckusdc_ledger, "ckUSDC"));
+                candidates.push((config.ckusdt_ledger, "ckUSDT"));
             }
         }
-        (Ok((usdc_amt, _)), Err(e)) => {
-            log!(crate::INFO, "ckUSDT quote failed ({}), using ckUSDC", e);
-            (config.ckusdc_ledger, "ckUSDC", usdc_amt)
+        (Ok((_usdc_amt, _)), Err(e)) => {
+            log!(crate::INFO, "ckUSDT quote failed ({}), using ckUSDC only", e);
+            candidates.push((config.ckusdc_ledger, "ckUSDC"));
         }
-        (Err(e), Ok((usdt_amt, _))) => {
-            log!(crate::INFO, "ckUSDC quote failed ({}), using ckUSDT", e);
-            (config.ckusdt_ledger, "ckUSDT", usdt_amt)
+        (Err(e), Ok((_usdt_amt, _))) => {
+            log!(crate::INFO, "ckUSDC quote failed ({}), using ckUSDT only", e);
+            candidates.push((config.ckusdt_ledger, "ckUSDT"));
         }
         (Err(e1), Err(e2)) => {
             return Err(SwapError::DexCallFailed(format!(
@@ -256,21 +261,33 @@ pub async fn swap_icp_for_stable(
         }
     };
 
-    // Execute the swap with the better rate
-    let (output_amount, _price) = kong_execute_swap(
-        config.kong_swap_principal,
-        config.icp_ledger,
-        target_ledger,
-        amount_e8s,
-        config.max_slippage_bps,
-    )
-    .await?;
+    // Try each candidate in order; fall back on failure
+    let mut last_error = None;
+    for (ledger, name) in &candidates {
+        match kong_execute_swap(
+            config.kong_swap_principal,
+            config.icp_ledger,
+            *ledger,
+            amount_e8s,
+            config.max_slippage_bps,
+        )
+        .await
+        {
+            Ok((output_amount, _price)) => {
+                return Ok(SwapResult {
+                    output_amount,
+                    route: format!("ICP→{}→icUSD", name),
+                    target_token: *ledger,
+                });
+            }
+            Err(e) => {
+                log!(crate::INFO, "{} swap failed ({}), trying fallback", name, e);
+                last_error = Some(e);
+            }
+        }
+    }
 
-    Ok(SwapResult {
-        output_amount,
-        route: format!("ICP→{}→icUSD", target_name),
-        target_token: target_ledger,
-    })
+    Err(last_error.unwrap_or(SwapError::DexCallFailed("No candidates available".to_string())))
 }
 
 /// Swap a stablecoin (ckUSDC or ckUSDT) for icUSD via our 3pool.
