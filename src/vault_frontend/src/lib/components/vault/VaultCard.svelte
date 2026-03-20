@@ -658,10 +658,10 @@
 <!-- ── Collapsed row ── -->
 <div class="vault-card {themeClass}"
   style={showProjectedCr ? `border-left: 2px solid var(--rumi-${activeProjectedRisk === 'danger' || activeProjectedRisk === 'warning' ? 'danger' : activeProjectedRisk === 'caution' ? 'caution' : 'safe'})` : railStyle}>
-  {#if themeClass === 'theme-exe'}
-    <img src="/windoge98-logo.webp" alt="" class="exe-watermark" aria-hidden="true" />
-  {/if}
   <button class="vault-row" on:click={toggleExpand}>
+    {#if themeClass === 'theme-exe'}
+      <img src="/windoge98-logo.webp" alt="" class="exe-watermark" aria-hidden="true" />
+    {/if}
     <span class="vault-id"><span class="collateral-dot" style="background:{collateralColor}"></span>#{vault.vaultId}</span>
     <span class="vault-cell">
       <span class="cell-label">Collateral</span>
@@ -1305,48 +1305,48 @@
     border-color: #000 !important;
     box-shadow: 4px 4px 0 #000 !important;
   }
-  .theme-bob .vault-row { font-family: 'Courier New', Courier, monospace; }
-  .theme-bob .vault-id { font-family: 'Courier New', Courier, monospace; color: #000; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700; }
+  .theme-bob .vault-row { font-family: 'Courier New', Courier, monospace; position: relative; font-weight: 500; }
+  .theme-bob .vault-id { font-family: 'Courier New', Courier, monospace; color: #000; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 800; }
   .theme-bob .collateral-dot { background: #000 !important; }
-  .theme-bob .cell-label { color: #000 !important; font-family: 'Courier New', Courier, monospace; letter-spacing: 0.08em; }
-  .theme-bob .cell-value { color: #000 !important; font-family: 'Courier New', Courier, monospace; }
-  .theme-bob .cell-sub { color: #000 !important; font-family: 'Courier New', Courier, monospace; }
+  .theme-bob .cell-label { color: #000 !important; font-family: 'Courier New', Courier, monospace; letter-spacing: 0.08em; font-weight: 600; text-transform: uppercase; }
+  .theme-bob .cell-value { color: #000 !important; font-family: 'Courier New', Courier, monospace; font-weight: 800; }
+  .theme-bob .cell-sub { color: #000 !important; font-family: 'Courier New', Courier, monospace; font-weight: 500; }
   .theme-bob .vault-chevron svg { color: #000; }
-  .theme-bob .ratio-text { color: #000 !important; }
+  .theme-bob .ratio-text { color: #000 !important; font-weight: 800 !important; }
   .theme-bob .vault-actions { border-top: 2px solid #000; background: #fff; }
   .theme-bob .stats-panel {
     background: #fff; border: 1px solid #000; border-radius: 0;
   }
-  .theme-bob .stat-label { color: #000 !important; font-family: 'Courier New', Courier, monospace; }
-  .theme-bob .stat-value { color: #000 !important; font-family: 'Courier New', Courier, monospace; }
-  .theme-bob .stat-distance { color: #000 !important; }
-  .theme-bob .stat-cr-old { color: #000 !important; }
+  .theme-bob .stat-label { color: #000 !important; font-family: 'Courier New', Courier, monospace; font-weight: 600; text-transform: uppercase; }
+  .theme-bob .stat-value { color: #000 !important; font-family: 'Courier New', Courier, monospace; font-weight: 800; }
+  .theme-bob .stat-distance { color: #000 !important; font-weight: 500; }
+  .theme-bob .stat-cr-old { color: #000 !important; font-weight: 500; }
   .theme-bob .stat-arrow { color: #000 !important; }
-  .theme-bob .stat-cr-new { color: #000 !important; }
+  .theme-bob .stat-cr-new { color: #000 !important; font-weight: 800; }
   .theme-bob .stat-safety-inline { color: #000 !important; }
   .theme-bob .pill-group { border-radius: 0; border-color: #000; }
   .theme-bob .pill {
     background: #fff; border-radius: 0;
     font-family: 'Courier New', Courier, monospace; text-transform: uppercase;
-    color: #000; letter-spacing: 0.06em;
+    color: #000; letter-spacing: 0.06em; font-weight: 600;
   }
   .theme-bob .pill:first-child { border-right: 1px solid #000; }
   .theme-bob .pill-collateral:hover:not(:disabled) { color: #000; background: #eee; }
-  .theme-bob .pill-active-collateral { background: #000; color: #fff; font-weight: 700; }
+  .theme-bob .pill-active-collateral { background: #000; color: #fff; font-weight: 800; }
   .theme-bob .pill-debt:hover:not(:disabled) { color: #000; background: #eee; }
-  .theme-bob .pill-active-debt { background: #000; color: #fff; font-weight: 700; }
+  .theme-bob .pill-active-debt { background: #000; color: #fff; font-weight: 800; }
   .theme-bob .input-panel { border-radius: 0; border-color: #000; background: #fff; }
   .theme-bob .action-input {
     background: #fff; border: 1px solid #000; border-radius: 0;
-    color: #000; font-family: 'Courier New', Courier, monospace;
+    color: #000; font-family: 'Courier New', Courier, monospace; font-weight: 500;
   }
   .theme-bob .action-input:focus { border-color: #000; box-shadow: 2px 2px 0 #000; }
-  .theme-bob .input-label { font-family: 'Courier New', Courier, monospace; color: #000 !important; text-transform: uppercase; }
-  .theme-bob .input-suffix { font-family: 'Courier New', Courier, monospace; color: #000 !important; }
-  .theme-bob .input-hint { color: #000 !important; }
+  .theme-bob .input-label { font-family: 'Courier New', Courier, monospace; color: #000 !important; text-transform: uppercase; font-weight: 600; }
+  .theme-bob .input-suffix { font-family: 'Courier New', Courier, monospace; color: #000 !important; font-weight: 500; }
+  .theme-bob .input-hint { color: #000 !important; font-weight: 500; }
   .theme-bob .btn-submit {
     border-radius: 0; font-family: 'Courier New', Courier, monospace;
-    text-transform: uppercase; letter-spacing: 0.08em;
+    text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600;
   }
   .theme-bob .btn-submit-collateral {
     background: #000; color: #fff; border: 2px solid #000;
@@ -1356,22 +1356,39 @@
     background: #000; color: #fff; border: 2px solid #000;
   }
   .theme-bob .btn-submit-debt:hover:not(:disabled) { background: #333; }
-  .theme-bob .fee-row { font-family: 'Courier New', Courier, monospace; color: #000 !important; }
-  .theme-bob .max-text { color: #000 !important; font-family: 'Courier New', Courier, monospace; text-transform: uppercase; text-decoration: underline; }
-  .theme-bob .vault-cell-bar { filter: grayscale(1); }
-  .theme-bob .gauge-track { border-radius: 0; background: #e0e0e0; }
-  .theme-bob .gauge-zone-pink { border-radius: 0; }
-  .theme-bob .gauge-zone-teal { border-radius: 0; }
-  .theme-bob .gauge-marker { border-radius: 0; box-shadow: none !important; }
-  .theme-bob .gauge-labels { color: #000 !important; }
+  .theme-bob .fee-row { font-family: 'Courier New', Courier, monospace; color: #000 !important; font-weight: 500; }
+  .theme-bob .max-text { color: #000 !important; font-family: 'Courier New', Courier, monospace; text-transform: uppercase; text-decoration: underline; font-weight: 600; }
+  .theme-bob .vault-cell-bar { filter: none; }
+  .theme-bob .gauge-track { border-radius: 0; background: #fff; border: 2px solid #000; }
+  .theme-bob .gauge-zone-pink { border-radius: 0; background: #000 !important; }
+  .theme-bob .gauge-zone-pink-purple { background: transparent !important; }
+  .theme-bob .gauge-zone-purple-green { background: transparent !important; }
+  .theme-bob .gauge-zone-teal { border-radius: 0; background: transparent !important; }
+  .theme-bob .gauge-tick { background: #000 !important; width: 2px; }
+  .theme-bob .gauge-marker { border-radius: 0; background: #000 !important; box-shadow: none !important; }
+  .theme-bob .gauge-labels { color: #000 !important; font-family: 'Courier New', Courier, monospace; }
   .theme-bob .stat-divider { background: #000; }
   .theme-bob .token-selector {
     background: #fff; border: 1px solid #000; border-radius: 0;
-    font-family: 'Courier New', Courier, monospace; color: #000;
+    font-family: 'Courier New', Courier, monospace; color: #000; font-weight: 600;
   }
   .theme-bob .token-selector:hover:not(:disabled) { background: #eee; }
   .theme-bob .interest-accrued { color: #000 !important; }
+  .theme-bob .stat-value span { color: #000 !important; }
+  .theme-bob .vault-actions span[style] { color: #000 !important; }
   .theme-bob .theme-toggle { color: #000; }
+  .theme-bob .token-dot { background: #000 !important; }
+  .theme-bob .ratio-text span { color: #000 !important; }
+  .theme-bob .warn-icon { color: #000 !important; }
+  .theme-bob .token-hint { color: #000 !important; opacity: 1; font-weight: 500; }
+  .theme-bob .input-usd-hint { color: #000 !important; font-weight: 500; }
+  .theme-bob .cr-old { color: #000 !important; }
+  .theme-bob .cr-new { color: #000 !important; }
+  .theme-bob .btn-submit:disabled {
+    opacity: 1; background: #fff !important; color: #000 !important;
+    border: 2px solid #000 !important;
+  }
+  .theme-bob .btn-submit:disabled:hover { background: #fff !important; }
 
   /* ═══════════════════════════════════════════════════════════════
      EASTER EGG: EXE — Windows 98 (windoge98.com)
@@ -1392,12 +1409,12 @@
   }
   .exe-watermark {
     position: absolute;
-    left: 27%;
+    left: 23%;
     top: 50%;
     transform: translate(-50%, -50%);
-    width: 5rem;
+    width: 4.5rem;
     height: auto;
-    opacity: 0.8;
+    opacity: 0.7;
     pointer-events: none;
     z-index: 0;
   }
@@ -1405,7 +1422,7 @@
   .theme-exe .vault-row {
     font-family: 'MS Sans Serif', 'Arial', 'Helvetica', sans-serif;
     position: relative;
-    z-index: 1;
+    z-index: 2;
   }
   .theme-exe .vault-id {
     font-family: 'MS Sans Serif', 'Arial', sans-serif; font-weight: 700;
@@ -1422,7 +1439,10 @@
   .theme-exe .cell-value {
     color: #000; font-family: 'MS Sans Serif', 'Arial', sans-serif; font-weight: 700;
   }
-  .theme-exe .cell-sub { color: #444; font-family: 'MS Sans Serif', 'Arial', sans-serif; }
+  .theme-exe .cell-sub { color: #000 !important; font-family: 'MS Sans Serif', 'Arial', sans-serif; }
+  .theme-exe .ratio-text { color: #000 !important; }
+  .theme-exe .ratio-text span { color: #000 !important; }
+  .theme-exe .warn-icon { color: #000 !important; }
   .theme-exe .vault-chevron svg { color: #000; }
   .theme-exe .vault-actions {
     border-top: 1px solid #808080;
