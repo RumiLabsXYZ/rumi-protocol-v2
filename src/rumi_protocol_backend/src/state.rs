@@ -650,6 +650,10 @@ pub struct State {
     pub bot_budget_start_timestamp: u64,
     pub bot_total_debt_covered_e8s: u64,
     pub bot_total_icusd_deposited_e8s: u64,
+    /// Which collateral types the bot is allowed to liquidate.
+    /// Vaults with collateral not in this set are rejected by bot_liquidate,
+    /// leaving the stability pool to handle them.
+    pub bot_allowed_collateral_types: BTreeSet<Principal>,
 }
 
 impl From<InitArg> for State {
@@ -826,6 +830,7 @@ impl From<InitArg> for State {
             bot_budget_start_timestamp: 0,
             bot_total_debt_covered_e8s: 0,
             bot_total_icusd_deposited_e8s: 0,
+            bot_allowed_collateral_types: BTreeSet::new(),
         }
     }
 }

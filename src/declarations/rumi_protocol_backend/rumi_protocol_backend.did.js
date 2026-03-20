@@ -681,6 +681,7 @@ export const idlFactory = ({ IDL }) => {
     'freeze_protocol' : IDL.Func([], [Result], []),
     'get_all_vaults' : IDL.Func([], [IDL.Vec(CandidVault)], ['query']),
     'get_borrowing_fee' : IDL.Func([], [IDL.Float64], ['query']),
+    'get_bot_allowed_collateral_types' : IDL.Func([], [IDL.Vec(IDL.Principal)], ['query']),
     'get_bot_stats' : IDL.Func([], [BotStatsResponse], ['query']),
     'get_ckstable_repay_fee' : IDL.Func([], [IDL.Float64], ['query']),
     'get_collateral_config' : IDL.Func(
@@ -870,6 +871,11 @@ export const idlFactory = ({ IDL }) => {
     'set_interest_rate' : IDL.Func([IDL.Principal, IDL.Float64], [Result], []),
     'set_interest_split' : IDL.Func([IDL.Vec(InterestSplitArg)], [Result], []),
     'set_liquidation_bonus' : IDL.Func([IDL.Float64], [Result], []),
+    'set_bot_allowed_collateral_types' : IDL.Func(
+        [IDL.Vec(IDL.Principal)],
+        [Result],
+        [],
+      ),
     'set_liquidation_bot_config' : IDL.Func(
         [IDL.Principal, IDL.Nat64],
         [Result],

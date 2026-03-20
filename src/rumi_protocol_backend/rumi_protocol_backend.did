@@ -544,6 +544,7 @@ service : (ProtocolArg) -> {
   freeze_protocol : () -> (Result);
   get_all_vaults : () -> (vec CandidVault) query;
   get_borrowing_fee : () -> (float64) query;
+  get_bot_allowed_collateral_types : () -> (vec principal) query;
   get_bot_stats : () -> (BotStatsResponse) query;
   get_ckstable_repay_fee : () -> (float64) query;
   get_collateral_config : (principal) -> (opt CollateralConfig) query;
@@ -624,6 +625,7 @@ service : (ProtocolArg) -> {
   set_interest_rate : (principal, float64) -> (Result);
   set_interest_split : (vec InterestSplitArg) -> (Result);
   set_liquidation_bonus : (float64) -> (Result);
+  set_bot_allowed_collateral_types : (vec principal) -> (Result);
   set_liquidation_bot_config : (principal, nat64) -> (Result);
   set_liquidation_protocol_share : (float64) -> (Result);
   set_lst_haircut : (principal, float64) -> (Result);
