@@ -201,6 +201,13 @@ pub enum PriceSource {
         #[serde(default = "default_fiat")]
         quote_asset_class: XrcAssetClass,
     },
+    /// Use CoinGecko HTTPS outcall with a specific coin ID
+    CoinGecko {
+        /// CoinGecko API coin ID (e.g., "bob-3", "internet-computer")
+        coin_id: String,
+        /// Quote currency (e.g., "usd")
+        vs_currency: String,
+    },
     /// Liquid staking token: price = underlying_xrc_price × redemption_rate × (1 - haircut)
     LstWrapped {
         /// Underlying asset for XRC lookup (e.g., "ICP")
@@ -238,6 +245,10 @@ impl PartialEq for PriceSource {
                 },
             ) => ba1 == ba2 && bac1 == bac2 && qa1 == qa2 && qac1 == qac2
                 && rc1 == rc2 && rm1 == rm2 && h1.to_bits() == h2.to_bits(),
+            (
+                PriceSource::CoinGecko { coin_id: c1, vs_currency: v1 },
+                PriceSource::CoinGecko { coin_id: c2, vs_currency: v2 },
+            ) => c1 == c2 && v1 == v2,
             _ => false,
         }
     }

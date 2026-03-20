@@ -179,16 +179,12 @@ struct LstCanisterInfo {
 }
 
 /// Generic price fetch for any collateral type using its PriceSource config.
-/// Reads the asset pair and classes from CollateralConfig, calls XRC, and
-/// stores the result in last_price / last_price_timestamp.
+/// Routes to XRC, CoinGecko HTTPS outcall, or LstWrapped depending on config.
 pub async fn fetch_collateral_price(collateral_type: Principal) {
     use crate::state::{mutate_state, PriceSource, XrcAssetClass};
     use ic_canister_log::log;
     use crate::logs::TRACE_XRC;
     use rust_decimal::prelude::FromPrimitive;
-
-    const XRC_CALL_COST_CYCLES: u64 = 1_000_000_000;
-    const XRC_MARGIN_SEC: u64 = 60;
 
     let price_source = read_state(|s| {
         s.get_collateral_config(&collateral_type).map(|c| c.price_source.clone())
@@ -202,12 +198,47 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
         }
     };
 
-    // Extract XRC fields from either variant (both have the same base/quote structure)
+    // CoinGecko variant uses HTTPS outcalls — completely separate path from XRC
+    if let PriceSource::CoinGecko { ref coin_id, ref vs_currency } = price_source {
+        let result = fetch_coingecko_price(coin_id, vs_currency).await;
+        match result {
+            Some(price) => {
+                let ts_nanos = ic_cdk::api::time();
+                log!(
+                    TRACE_XRC,
+                    "[fetch_collateral_price] CoinGecko {} price: {} at {}",
+                    coin_id, price, ts_nanos
+                );
+                mutate_state(|s| {
+                    if let Some(config) = s.collateral_configs.get_mut(&collateral_type) {
+                        let should_update = match config.last_price_timestamp {
+                            Some(last_ts) => last_ts < ts_nanos,
+                            None => true,
+                        };
+                        if should_update {
+                            config.last_price = Some(price);
+                            config.last_price_timestamp = Some(ts_nanos);
+                        }
+                    }
+                });
+            }
+            None => {
+                log!(TRACE_XRC, "[fetch_collateral_price] CoinGecko failed for {}", coin_id);
+            }
+        }
+        return;
+    }
+
+    // XRC-based path (Xrc and LstWrapped variants)
+    const XRC_CALL_COST_CYCLES: u64 = 1_000_000_000;
+    const XRC_MARGIN_SEC: u64 = 60;
+
     let (base_asset, base_asset_class, quote_asset, quote_asset_class) = match &price_source {
         PriceSource::Xrc { base_asset, base_asset_class, quote_asset, quote_asset_class }
         | PriceSource::LstWrapped { base_asset, base_asset_class, quote_asset, quote_asset_class, .. } => {
             (base_asset.clone(), base_asset_class.clone(), quote_asset.clone(), quote_asset_class.clone())
         }
+        PriceSource::CoinGecko { .. } => unreachable!(), // handled above
     };
 
     let base = Asset {
@@ -304,6 +335,7 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
                 }
             }
         }
+        PriceSource::CoinGecko { .. } => unreachable!(),
     };
 
     mutate_state(|s| {
@@ -318,6 +350,74 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
             }
         }
     });
+}
+
+/// Fetch a token price from the CoinGecko simple/price API via HTTPS outcall.
+/// Returns the price as f64, or None on failure.
+async fn fetch_coingecko_price(coin_id: &str, vs_currency: &str) -> Option<f64> {
+    use ic_cdk::api::management_canister::http_request::{
+        http_request, CanisterHttpRequestArgument, HttpHeader, HttpMethod,
+        TransformContext,
+    };
+    use ic_canister_log::log;
+    use crate::logs::TRACE_XRC;
+
+    // Response body is small (~50 bytes) but headers can be large (~2-3 KB).
+    // IC counts headers + body against this limit before transform strips headers.
+    const MAX_RESPONSE_BYTES: u64 = 4096;
+    // HTTPS outcall cost: base 49_140_000 + 5_200 per request byte + 10_400 per response byte
+    // Plus per-node scaling. 100M gives comfortable headroom for 13-node subnets.
+    const OUTCALL_CYCLES: u128 = 100_000_000;
+
+    let url = format!(
+        "https://api.coingecko.com/api/v3/simple/price?ids={}&vs_currencies={}",
+        coin_id, vs_currency
+    );
+
+    let request = CanisterHttpRequestArgument {
+        url,
+        max_response_bytes: Some(MAX_RESPONSE_BYTES),
+        method: HttpMethod::GET,
+        headers: vec![
+            HttpHeader {
+                name: "Accept".to_string(),
+                value: "application/json".to_string(),
+            },
+        ],
+        body: None,
+        transform: Some(TransformContext::from_name(
+            "coingecko_transform".to_string(),
+            vec![],
+        )),
+    };
+
+    let result = http_request(request, OUTCALL_CYCLES).await;
+
+    match result {
+        Ok((response,)) => {
+            let status = response.status.0.to_u64().unwrap_or(0);
+            if status != 200 {
+                log!(TRACE_XRC, "[coingecko] HTTP {} for {}", status, coin_id);
+                return None;
+            }
+
+            let body = String::from_utf8(response.body).ok()?;
+            // Response format: {"bob-3":{"usd":0.0957}}
+            let json: serde_json::Value = serde_json::from_str(&body).ok()?;
+            let price = json.get(coin_id)?.get(vs_currency)?.as_f64()?;
+
+            if price <= 0.0 {
+                log!(TRACE_XRC, "[coingecko] Non-positive price {} for {}", price, coin_id);
+                return None;
+            }
+
+            Some(price)
+        }
+        Err((code, msg)) => {
+            log!(TRACE_XRC, "[coingecko] Outcall error for {}: {:?} {}", coin_id, code, msg);
+            None
+        }
+    }
 }
 
 pub async fn mint_icusd(amount: ICUSD, to: Principal) -> Result<u64, TransferError> {
