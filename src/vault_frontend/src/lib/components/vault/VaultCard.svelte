@@ -24,6 +24,9 @@
   $: vaultCollateralInfo = collateralStore.getCollateralInfo(vaultCollateralType);
   $: collateralSymbol = vault.collateralSymbol || vaultCollateralInfo?.symbol || 'ICP';
   $: collateralColor = vaultCollateralInfo?.color ?? '#94A3B8';
+  // Easter egg themes for specific tokens
+  $: themeClass = collateralSymbol === 'BOB' ? 'theme-bob'
+    : collateralSymbol === 'EXE' ? 'theme-exe' : '';
   $: collateralDecimals = vault.collateralDecimals ?? vaultCollateralInfo?.decimals ?? 8;
   $: collateralDecimalsFactor = Math.pow(10, collateralDecimals);
   $: vaultCollateralPrice = vaultCollateralInfo?.price || (vaultCollateralType === CANISTER_IDS.ICP_LEDGER ? icpPrice : 0);
@@ -640,7 +643,7 @@
 </script>
 
 <!-- ── Collapsed row ── -->
-<div class="vault-card"
+<div class="vault-card {themeClass}"
   style={showProjectedCr ? `border-left: 2px solid var(--rumi-${activeProjectedRisk === 'danger' || activeProjectedRisk === 'warning' ? 'danger' : activeProjectedRisk === 'caution' ? 'caution' : 'safe'})` : railStyle}>
   <button class="vault-row" on:click={toggleExpand}>
     <span class="vault-id"><span class="collateral-dot" style="background:{collateralColor}"></span>#{vault.vaultId}</span>
@@ -1252,5 +1255,205 @@
     .pill { flex: 1; }
     .stats-panel { grid-column: 1; grid-row: auto; order: 2; }
     .input-panel { grid-column: 1; grid-row: auto; order: 1; }
+  }
+
+  /* ═══════════════════════════════════════════════════════════════
+     EASTER EGG: BOB — brutalist / terminal (bob.fun)
+     ═══════════════════════════════════════════════════════════════ */
+  .theme-bob {
+    background: #000 !important;
+    border: 2px solid #fff !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    font-family: 'Courier New', Courier, monospace !important;
+  }
+  .theme-bob:hover {
+    border-color: #fff !important;
+    box-shadow: none !important;
+  }
+  .theme-bob .vault-row { font-family: 'Courier New', Courier, monospace; }
+  .theme-bob .vault-id { font-family: 'Courier New', Courier, monospace; color: #fff; text-transform: uppercase; letter-spacing: 0.05em; }
+  .theme-bob .cell-label { color: #888; font-family: 'Courier New', Courier, monospace; letter-spacing: 0.08em; }
+  .theme-bob .cell-value { color: #fff; font-family: 'Courier New', Courier, monospace; }
+  .theme-bob .cell-sub { color: #888; font-family: 'Courier New', Courier, monospace; }
+  .theme-bob .vault-chevron svg { color: #fff; }
+  .theme-bob .vault-actions { border-top: 2px solid #fff; }
+  .theme-bob .stats-panel {
+    background: #000; border: 1px solid #555; border-radius: 0;
+  }
+  .theme-bob .stat-label { color: #888; font-family: 'Courier New', Courier, monospace; }
+  .theme-bob .stat-value { color: #fff; font-family: 'Courier New', Courier, monospace; }
+  .theme-bob .pill-group { border-radius: 0; border-color: #555; }
+  .theme-bob .pill {
+    background: #000; border-radius: 0;
+    font-family: 'Courier New', Courier, monospace; text-transform: uppercase;
+    color: #aaa; letter-spacing: 0.06em;
+  }
+  .theme-bob .pill:first-child { border-right: 1px solid #555; }
+  .theme-bob .pill-collateral:hover:not(:disabled) { color: #fff; background: #222; }
+  .theme-bob .pill-active-collateral { background: #fff; color: #000; font-weight: 700; }
+  .theme-bob .pill-debt:hover:not(:disabled) { color: #fff; background: #222; }
+  .theme-bob .pill-active-debt { background: #fff; color: #000; font-weight: 700; }
+  .theme-bob .input-panel { border-radius: 0; border-color: #555; }
+  .theme-bob .action-input {
+    background: #111; border: 1px solid #555; border-radius: 0;
+    color: #fff; font-family: 'Courier New', Courier, monospace;
+  }
+  .theme-bob .action-input:focus { border-color: #fff; box-shadow: none; }
+  .theme-bob .input-label { font-family: 'Courier New', Courier, monospace; color: #888; text-transform: uppercase; }
+  .theme-bob .input-suffix { font-family: 'Courier New', Courier, monospace; color: #555; }
+  .theme-bob .btn-submit {
+    border-radius: 0; font-family: 'Courier New', Courier, monospace;
+    text-transform: uppercase; letter-spacing: 0.08em;
+  }
+  .theme-bob .btn-submit-collateral {
+    background: #fff; color: #000; border: 2px solid #fff;
+  }
+  .theme-bob .btn-submit-collateral:hover:not(:disabled) { background: #ddd; }
+  .theme-bob .btn-submit-debt {
+    background: #fff; color: #000; border: 2px solid #fff;
+  }
+  .theme-bob .btn-submit-debt:hover:not(:disabled) { background: #ddd; }
+  .theme-bob .fee-row { font-family: 'Courier New', Courier, monospace; color: #888; }
+  .theme-bob .max-text { color: #aaa; font-family: 'Courier New', Courier, monospace; text-transform: uppercase; }
+  .theme-bob .gauge-track { border-radius: 0; background: #222; }
+  .theme-bob .gauge-zone-pink { border-radius: 0; }
+  .theme-bob .gauge-zone-teal { border-radius: 0; }
+  .theme-bob .gauge-marker { border-radius: 0; }
+  .theme-bob .stat-divider { background: #333; }
+  .theme-bob .token-selector {
+    background: #111; border: 1px solid #555; border-radius: 0;
+    font-family: 'Courier New', Courier, monospace; color: #fff;
+  }
+  .theme-bob .token-selector:hover:not(:disabled) { border-color: #fff; }
+
+  /* ═══════════════════════════════════════════════════════════════
+     EASTER EGG: EXE — Windows 98 (windoge98.com)
+     ═══════════════════════════════════════════════════════════════ */
+  .theme-exe {
+    background: #C0C0C0 !important;
+    border: none !important;
+    border-radius: 0 !important;
+    box-shadow: inset -1px -1px 0 #000, inset 1px 1px 0 #fff,
+                inset -2px -2px 0 #808080, inset 2px 2px 0 #dfdfdf !important;
+  }
+  .theme-exe:hover {
+    border: none !important;
+    box-shadow: inset -1px -1px 0 #000, inset 1px 1px 0 #fff,
+                inset -2px -2px 0 #808080, inset 2px 2px 0 #dfdfdf !important;
+  }
+  /* Win98 title bar */
+  .theme-exe .vault-row {
+    font-family: 'MS Sans Serif', 'Arial', 'Helvetica', sans-serif;
+    position: relative;
+  }
+  .theme-exe .vault-id {
+    font-family: 'MS Sans Serif', 'Arial', sans-serif; font-weight: 700;
+    color: #fff; font-size: 0.75rem;
+    background: linear-gradient(to right, #000080, #1084d0);
+    padding: 2px 4px; margin: -2px 0;
+    align-self: center;
+  }
+  .theme-exe .collateral-dot { display: none; }
+  .theme-exe .cell-label {
+    color: #000; font-family: 'MS Sans Serif', 'Arial', sans-serif;
+    font-size: 0.625rem; letter-spacing: 0;
+  }
+  .theme-exe .cell-value {
+    color: #000; font-family: 'MS Sans Serif', 'Arial', sans-serif; font-weight: 700;
+  }
+  .theme-exe .cell-sub { color: #444; font-family: 'MS Sans Serif', 'Arial', sans-serif; }
+  .theme-exe .vault-chevron svg { color: #000; }
+  .theme-exe .vault-actions {
+    border-top: 1px solid #808080;
+    background: #C0C0C0;
+  }
+  .theme-exe .stats-panel {
+    background: #fff; border: none; border-radius: 0;
+    box-shadow: inset 1px 1px 0 #808080, inset -1px -1px 0 #fff,
+                inset 2px 2px 0 #000, inset -2px -2px 0 #dfdfdf;
+  }
+  .theme-exe .stat-label { color: #000; font-family: 'MS Sans Serif', 'Arial', sans-serif; }
+  .theme-exe .stat-value { color: #000; font-family: 'MS Sans Serif', 'Arial', sans-serif; }
+  .theme-exe .stat-divider { background: #808080; }
+  .theme-exe .pill-group {
+    border-radius: 0; border: none;
+    box-shadow: inset -1px -1px 0 #000, inset 1px 1px 0 #fff,
+                inset -2px -2px 0 #808080, inset 2px 2px 0 #dfdfdf;
+  }
+  .theme-exe .pill {
+    background: #C0C0C0; border-radius: 0;
+    font-family: 'MS Sans Serif', 'Arial', sans-serif; color: #000;
+  }
+  .theme-exe .pill:first-child { border-right: 1px solid #808080; }
+  .theme-exe .pill-collateral:hover:not(:disabled) { color: #000; background: #dfdfdf; }
+  .theme-exe .pill-active-collateral {
+    background: #dfdfdf; color: #000080; font-weight: 700;
+    box-shadow: inset 1px 1px 0 #808080, inset -1px -1px 0 #fff;
+  }
+  .theme-exe .pill-debt:hover:not(:disabled) { color: #000; background: #dfdfdf; }
+  .theme-exe .pill-active-debt {
+    background: #dfdfdf; color: #000080; font-weight: 700;
+    box-shadow: inset 1px 1px 0 #808080, inset -1px -1px 0 #fff;
+  }
+  .theme-exe .input-panel {
+    border-radius: 0; border: none;
+    box-shadow: inset 1px 1px 0 #808080, inset -1px -1px 0 #fff,
+                inset 2px 2px 0 #000, inset -2px -2px 0 #dfdfdf;
+    background: #fff;
+  }
+  .theme-exe .action-input {
+    background: #fff; border: none; border-radius: 0;
+    color: #000; font-family: 'MS Sans Serif', 'Arial', sans-serif;
+    box-shadow: inset 1px 1px 0 #808080, inset -1px -1px 0 #dfdfdf;
+  }
+  .theme-exe .action-input:focus { border: none; box-shadow: inset 1px 1px 0 #000080, inset -1px -1px 0 #dfdfdf; }
+  .theme-exe .input-label { font-family: 'MS Sans Serif', 'Arial', sans-serif; color: #000; }
+  .theme-exe .input-suffix { font-family: 'MS Sans Serif', 'Arial', sans-serif; color: #808080; }
+  .theme-exe .btn-submit {
+    border-radius: 0; font-family: 'MS Sans Serif', 'Arial', sans-serif;
+    box-shadow: inset -1px -1px 0 #000, inset 1px 1px 0 #fff,
+                inset -2px -2px 0 #808080, inset 2px 2px 0 #dfdfdf;
+  }
+  .theme-exe .btn-submit-collateral {
+    background: #C0C0C0; color: #000; border: none;
+  }
+  .theme-exe .btn-submit-collateral:hover:not(:disabled) {
+    background: #dfdfdf;
+  }
+  .theme-exe .btn-submit-collateral:active:not(:disabled) {
+    box-shadow: inset 1px 1px 0 #000, inset -1px -1px 0 #fff,
+                inset 2px 2px 0 #808080, inset -2px -2px 0 #dfdfdf;
+  }
+  .theme-exe .btn-submit-debt {
+    background: #C0C0C0; color: #000; border: none;
+  }
+  .theme-exe .btn-submit-debt:hover:not(:disabled) {
+    background: #dfdfdf;
+  }
+  .theme-exe .btn-submit-debt:active:not(:disabled) {
+    box-shadow: inset 1px 1px 0 #000, inset -1px -1px 0 #fff,
+                inset 2px 2px 0 #808080, inset -2px -2px 0 #dfdfdf;
+  }
+  .theme-exe .fee-row { font-family: 'MS Sans Serif', 'Arial', sans-serif; color: #444; }
+  .theme-exe .max-text { color: #000080; font-family: 'MS Sans Serif', 'Arial', sans-serif; text-decoration: underline; }
+  .theme-exe .max-text:hover { color: #0000ff; }
+  .theme-exe .gauge-track {
+    border-radius: 0; background: #fff;
+    box-shadow: inset 1px 1px 0 #808080, inset -1px -1px 0 #dfdfdf;
+  }
+  .theme-exe .gauge-zone-pink { border-radius: 0; background: #ff0000; }
+  .theme-exe .gauge-zone-pink-purple { background: linear-gradient(to right, #ff0000, #800080); }
+  .theme-exe .gauge-zone-purple-green { background: linear-gradient(to right, #800080, #008000); }
+  .theme-exe .gauge-zone-teal { border-radius: 0; background: #008000; }
+  .theme-exe .gauge-marker { border-radius: 0; background: #000080 !important; box-shadow: none !important; }
+  .theme-exe .gauge-labels { color: #000; }
+  .theme-exe .token-selector {
+    background: #C0C0C0; border: none; border-radius: 0;
+    font-family: 'MS Sans Serif', 'Arial', sans-serif; color: #000;
+    box-shadow: inset -1px -1px 0 #000, inset 1px 1px 0 #fff;
+  }
+  .theme-exe .token-selector:hover:not(:disabled) {
+    background: #dfdfdf;
   }
 </style>
