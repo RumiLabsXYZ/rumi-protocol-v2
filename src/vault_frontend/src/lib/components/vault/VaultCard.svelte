@@ -658,6 +658,9 @@
 <!-- ── Collapsed row ── -->
 <div class="vault-card {themeClass}"
   style={showProjectedCr ? `border-left: 2px solid var(--rumi-${activeProjectedRisk === 'danger' || activeProjectedRisk === 'warning' ? 'danger' : activeProjectedRisk === 'caution' ? 'caution' : 'safe'})` : railStyle}>
+  {#if themeClass === 'theme-exe'}
+    <img src="/windoge98-logo.webp" alt="" class="exe-watermark" aria-hidden="true" />
+  {/if}
   <button class="vault-row" on:click={toggleExpand}>
     <span class="vault-id"><span class="collateral-dot" style="background:{collateralColor}"></span>#{vault.vaultId}</span>
     <span class="vault-cell">
@@ -665,9 +668,6 @@
       <span class="cell-value">{fmtMargin} {collateralSymbol}</span>
       <span class="cell-sub">${fmtCollateralUsd}</span>
     </span>
-    {#if themeClass === 'theme-exe'}
-      <img src="/windoge98-logo.webp" alt="" class="exe-watermark" aria-hidden="true" />
-    {/if}
     <span class="vault-cell">
       <span class="cell-label">Borrowed</span>
       <span class="cell-value">{fmtBorrowed} icUSD</span>
@@ -1391,20 +1391,21 @@
                 inset -2px -2px 0 #808080, inset 2px 2px 0 #dfdfdf !important;
   }
   .exe-watermark {
+    position: absolute;
+    left: 15rem;
+    top: 50%;
+    transform: translateY(-50%);
     width: 5rem;
     height: auto;
-    opacity: 0.85;
+    opacity: 0.8;
     pointer-events: none;
-    align-self: center;
-    flex-shrink: 0;
-    margin: -0.5rem -0.25rem;
+    z-index: 0;
   }
-  /* Win98 layout: extra column for the logo between collateral and borrowed */
+  /* Win98 title bar */
   .theme-exe .vault-row {
     font-family: 'MS Sans Serif', 'Arial', 'Helvetica', sans-serif;
     position: relative;
     z-index: 1;
-    grid-template-columns: 3rem 8.5rem 5rem 7rem 1fr 5.5rem 1.5rem;
   }
   .theme-exe .vault-id {
     font-family: 'MS Sans Serif', 'Arial', sans-serif; font-weight: 700;
