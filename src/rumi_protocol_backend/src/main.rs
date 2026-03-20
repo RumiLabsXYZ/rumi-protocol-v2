@@ -909,6 +909,19 @@ async fn claim_liquidity_returns() -> Result<u64, ProtocolError> {
     check_postcondition(rumi_protocol_backend::liquidity_pool::claim_liquidity_returns().await)
 }
 
+/// Transform function for HTTPS outcalls (CoinGecko price fetches).
+/// Strips response headers so all replicas reach consensus on the same payload.
+#[query]
+fn coingecko_transform(
+    args: ic_cdk::api::management_canister::http_request::TransformArgs,
+) -> ic_cdk::api::management_canister::http_request::HttpResponse {
+    ic_cdk::api::management_canister::http_request::HttpResponse {
+        status: args.response.status,
+        headers: vec![], // Strip headers — they vary across replicas
+        body: args.response.body,
+    }
+}
+
 #[query]
 fn http_request(req: HttpRequest) -> HttpResponse {
     use ic_metrics_encoder::MetricsEncoder;

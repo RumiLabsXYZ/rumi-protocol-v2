@@ -368,6 +368,10 @@ type PriceSource = variant {
     base_asset_class : XrcAssetClass;
     base_asset : text;
   };
+  CoinGecko : record {
+    coin_id : text;
+    vs_currency : text;
+  };
   LstWrapped : record {
     quote_asset_class : XrcAssetClass;
     haircut : float64;
@@ -586,6 +590,7 @@ service : (ProtocolArg) -> {
   get_vault_history : (nat64) -> (vec Event) query;
   get_vault_interest_rate : (nat64) -> (Result_5) query;
   get_vaults : (opt principal) -> (vec CandidVault) query;
+  coingecko_transform : (record { response : record { status : nat; headers : vec record { name : text; value : text }; body : blob }; context : blob }) -> (record { status : nat; headers : vec record { name : text; value : text }; body : blob }) query;
   http_request : (HttpRequest) -> (HttpResponse) query;
   icrc10_supported_standards : () -> (vec StandardRecord) query;
   icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (Result_6);
@@ -645,6 +650,7 @@ service : (ProtocolArg) -> {
   set_three_pool_canister : (principal) -> (Result);
   set_treasury_principal : (principal) -> (Result);
   stability_pool_liquidate : (nat64, nat64) -> (Result_10);
+  stability_pool_liquidate_debt_burned : (nat64, nat64) -> (Result_10);
   unfreeze_protocol : () -> (Result);
   update_collateral_config : (principal, CollateralConfig) -> (Result);
   withdraw_and_close_vault : (nat64) -> (Result_4);

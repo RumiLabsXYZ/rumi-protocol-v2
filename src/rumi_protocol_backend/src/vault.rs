@@ -799,13 +799,20 @@ pub async fn repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
         });
     }
 
-    if vault.borrowed_icusd_amount < amount {
-        guard_principal.fail();
-        return Err(ProtocolError::GenericError(format!(
-            "cannot repay more than borrowed: {} ICUSD, repay: {} ICUSD",
-            vault.borrowed_icusd_amount, amount
-        )));
-    }
+    // Cap repay amount to actual debt. Interest accrued between when the
+    // frontend read the balance and now can push debt slightly above what
+    // the user entered. If the requested amount exceeds or nearly matches
+    // the current debt (within 1% or 0.01 icUSD — whichever is larger),
+    // treat it as a full repayment to avoid leaving un-repayable dust.
+    let debt = vault.borrowed_icusd_amount;
+    let dust_threshold = std::cmp::max(debt.0 / 100, 1_000_000); // 1% or 0.01 icUSD
+    let amount = if amount > debt {
+        debt
+    } else if debt.0.saturating_sub(amount.0) <= dust_threshold {
+        debt
+    } else {
+        amount
+    };
 
     if let Err(e) = check_min_vault_debt_after_repay(&vault, amount) {
         guard_principal.fail();
@@ -889,13 +896,20 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
         });
     }
 
-    if vault.borrowed_icusd_amount < amount {
-        guard_principal.fail();
-        return Err(ProtocolError::GenericError(format!(
-            "cannot repay more than borrowed: {} ICUSD, repay: {} ICUSD",
-            vault.borrowed_icusd_amount, amount
-        )));
-    }
+    // Cap repay amount to actual debt. Interest accrued between when the
+    // frontend read the balance and now can push debt slightly above what
+    // the user entered. If the requested amount exceeds or nearly matches
+    // the current debt (within 1% or 0.01 icUSD — whichever is larger),
+    // treat it as a full repayment to avoid leaving un-repayable dust.
+    let debt = vault.borrowed_icusd_amount;
+    let dust_threshold = std::cmp::max(debt.0 / 100, 1_000_000); // 1% or 0.01 icUSD
+    let amount = if amount > debt {
+        debt
+    } else if debt.0.saturating_sub(amount.0) <= dust_threshold {
+        debt
+    } else {
+        amount
+    };
 
     if let Err(e) = check_min_vault_debt_after_repay(&vault, amount) {
         guard_principal.fail();
@@ -2789,13 +2803,20 @@ pub async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError>
         });
     }
 
-    if vault.borrowed_icusd_amount < amount {
-        guard_principal.fail();
-        return Err(ProtocolError::GenericError(format!(
-            "cannot repay more than borrowed: {} ICUSD, repay: {} ICUSD",
-            vault.borrowed_icusd_amount, amount
-        )));
-    }
+    // Cap repay amount to actual debt. Interest accrued between when the
+    // frontend read the balance and now can push debt slightly above what
+    // the user entered. If the requested amount exceeds or nearly matches
+    // the current debt (within 1% or 0.01 icUSD — whichever is larger),
+    // treat it as a full repayment to avoid leaving un-repayable dust.
+    let debt = vault.borrowed_icusd_amount;
+    let dust_threshold = std::cmp::max(debt.0 / 100, 1_000_000); // 1% or 0.01 icUSD
+    let amount = if amount > debt {
+        debt
+    } else if debt.0.saturating_sub(amount.0) <= dust_threshold {
+        debt
+    } else {
+        amount
+    };
 
     if let Err(e) = check_min_vault_debt_after_repay(&vault, amount) {
         guard_principal.fail();

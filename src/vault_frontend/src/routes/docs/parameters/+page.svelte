@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { protocolService } from '$lib/services/protocol';
   import { publicActor } from '$lib/services/protocol/apiClient';
-  import { collateralStore } from '$lib/stores/collateralStore';
+  import { collateralStore, COLLATERAL_DISPLAY_ORDER } from '$lib/stores/collateralStore';
   import type { CollateralInfo, PerCollateralRateCurveDTO } from '$lib/services/types';
   import { get } from 'svelte/store';
   import { threePoolService } from '$lib/services/threePoolService';
@@ -171,7 +171,14 @@
       // Load ALL supported collateral types
       await collateralStore.fetchSupportedCollateral();
       const state = get(collateralStore);
-      collaterals = state.collaterals;
+      collaterals = [...state.collaterals].sort((a, b) => {
+        const ai = COLLATERAL_DISPLAY_ORDER.indexOf(a.symbol);
+        const bi = COLLATERAL_DISPLAY_ORDER.indexOf(b.symbol);
+        const ao = ai === -1 ? COLLATERAL_DISPLAY_ORDER.length : ai;
+        const bo = bi === -1 ? COLLATERAL_DISPLAY_ORDER.length : bi;
+        if (ao !== bo) return ao - bo;
+        return a.symbol.localeCompare(b.symbol);
+      });
 
       // Default selections
       if (collaterals.length > 0) {

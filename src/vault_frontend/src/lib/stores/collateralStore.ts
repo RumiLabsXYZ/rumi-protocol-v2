@@ -198,11 +198,30 @@ function createCollateralStore() {
 export const collateralStore = createCollateralStore();
 
 /**
+ * Preferred display order for collateral tokens.
+ * Tokens not in this list appear at the end, sorted alphabetically.
+ */
+export const COLLATERAL_DISPLAY_ORDER: string[] = [
+  'ICP', 'ckBTC', 'ckETH', 'ckXAUT', 'nICP', 'BOB', 'EXE',
+];
+
+/**
  * Derived store: only Active collateral types (for dropdowns, etc.)
+ * Sorted in the preferred display order defined above.
  */
 export const activeCollateralTypes = derived(
   collateralStore,
-  $store => $store.collaterals.filter(c => c.status === 'Active')
+  $store => {
+    const active = $store.collaterals.filter(c => c.status === 'Active');
+    return active.sort((a, b) => {
+      const ai = COLLATERAL_DISPLAY_ORDER.indexOf(a.symbol);
+      const bi = COLLATERAL_DISPLAY_ORDER.indexOf(b.symbol);
+      const ao = ai === -1 ? COLLATERAL_DISPLAY_ORDER.length : ai;
+      const bo = bi === -1 ? COLLATERAL_DISPLAY_ORDER.length : bi;
+      if (ao !== bo) return ao - bo;
+      return a.symbol.localeCompare(b.symbol);
+    });
+  }
 );
 
 /**

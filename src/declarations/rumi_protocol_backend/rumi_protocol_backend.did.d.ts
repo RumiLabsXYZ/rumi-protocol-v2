@@ -481,6 +481,7 @@ export type PriceSource = {
       'base_asset' : string,
     }
   } |
+  { 'CoinGecko' : { 'coin_id' : string, 'vs_currency' : string } } |
   {
     'LstWrapped' : {
       'quote_asset_class' : XrcAssetClass,
@@ -663,6 +664,23 @@ export interface _SERVICE {
   'claim_liquidity_returns' : ActorMethod<[], Result_1>,
   'clear_stuck_operations' : ActorMethod<[[] | [Principal]], Result_1>,
   'close_vault' : ActorMethod<[bigint], Result_4>,
+  'coingecko_transform' : ActorMethod<
+    [
+      {
+        'context' : Uint8Array | number[],
+        'response' : {
+          'status' : bigint,
+          'body' : Uint8Array | number[],
+          'headers' : Array<{ 'value' : string, 'name' : string }>,
+        },
+      },
+    ],
+    {
+      'status' : bigint,
+      'body' : Uint8Array | number[],
+      'headers' : Array<{ 'value' : string, 'name' : string }>,
+    }
+  >,
   'dev_force_bot_liquidate' : ActorMethod<[bigint], Result_3>,
   'enter_recovery_mode' : ActorMethod<[], Result>,
   'exit_recovery_mode' : ActorMethod<[], Result>,
@@ -797,6 +815,10 @@ export interface _SERVICE {
   'set_three_pool_canister' : ActorMethod<[Principal], Result>,
   'set_treasury_principal' : ActorMethod<[Principal], Result>,
   'stability_pool_liquidate' : ActorMethod<[bigint, bigint], Result_10>,
+  'stability_pool_liquidate_debt_burned' : ActorMethod<
+    [bigint, bigint],
+    Result_10
+  >,
   'unfreeze_protocol' : ActorMethod<[], Result>,
   'update_collateral_config' : ActorMethod<
     [Principal, CollateralConfig],
