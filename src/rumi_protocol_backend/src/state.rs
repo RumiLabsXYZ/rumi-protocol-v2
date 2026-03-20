@@ -654,6 +654,10 @@ pub struct State {
     /// Vaults with collateral not in this set are rejected by bot_liquidate,
     /// leaving the stability pool to handle them.
     pub bot_allowed_collateral_types: BTreeSet<Principal>,
+    /// Tracks vault_id → timestamp (nanos) when notified to bot.
+    /// Used by check_vaults() to implement priority cascade:
+    /// bot gets one cycle, then stability pool takes over.
+    pub bot_pending_vaults: BTreeMap<u64, u64>,
 }
 
 impl From<InitArg> for State {
@@ -831,6 +835,7 @@ impl From<InitArg> for State {
             bot_total_debt_covered_e8s: 0,
             bot_total_icusd_deposited_e8s: 0,
             bot_allowed_collateral_types: BTreeSet::new(),
+            bot_pending_vaults: BTreeMap::new(),
         }
     }
 }
