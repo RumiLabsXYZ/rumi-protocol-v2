@@ -24,9 +24,22 @@
   $: vaultCollateralInfo = collateralStore.getCollateralInfo(vaultCollateralType);
   $: collateralSymbol = vault.collateralSymbol || vaultCollateralInfo?.symbol || 'ICP';
   $: collateralColor = vaultCollateralInfo?.color ?? '#94A3B8';
-  // Easter egg themes for specific tokens
-  $: themeClass = collateralSymbol === 'BOB' ? 'theme-bob'
-    : collateralSymbol === 'EXE' ? 'theme-exe' : '';
+  // Easter egg themes for specific tokens (user can toggle off via localStorage)
+  import { writable } from 'svelte/store';
+  const easterEggsEnabled = writable(
+    typeof localStorage !== 'undefined' ? localStorage.getItem('rumi-easter-eggs') !== 'off' : true
+  );
+  function toggleEasterEggs() {
+    easterEggsEnabled.update(v => {
+      const next = !v;
+      if (typeof localStorage !== 'undefined') localStorage.setItem('rumi-easter-eggs', next ? 'on' : 'off');
+      return next;
+    });
+  }
+  $: themeClass = $easterEggsEnabled
+    ? (collateralSymbol === 'BOB' ? 'theme-bob' : collateralSymbol === 'EXE' ? 'theme-exe' : '')
+    : '';
+  $: hasTheme = collateralSymbol === 'BOB' || collateralSymbol === 'EXE';
   $: collateralDecimals = vault.collateralDecimals ?? vaultCollateralInfo?.decimals ?? 8;
   $: collateralDecimalsFactor = Math.pow(10, collateralDecimals);
   $: vaultCollateralPrice = vaultCollateralInfo?.price || (vaultCollateralType === CANISTER_IDS.ICP_LEDGER ? icpPrice : 0);
@@ -645,9 +658,6 @@
 <!-- ── Collapsed row ── -->
 <div class="vault-card {themeClass}"
   style={showProjectedCr ? `border-left: 2px solid var(--rumi-${activeProjectedRisk === 'danger' || activeProjectedRisk === 'warning' ? 'danger' : activeProjectedRisk === 'caution' ? 'caution' : 'safe'})` : railStyle}>
-  {#if themeClass === 'theme-exe'}
-    <img src="/windoge98-logo.webp" alt="" class="exe-watermark" aria-hidden="true" />
-  {/if}
   <button class="vault-row" on:click={toggleExpand}>
     <span class="vault-id"><span class="collateral-dot" style="background:{collateralColor}"></span>#{vault.vaultId}</span>
     <span class="vault-cell">
@@ -655,6 +665,9 @@
       <span class="cell-value">{fmtMargin} {collateralSymbol}</span>
       <span class="cell-sub">${fmtCollateralUsd}</span>
     </span>
+    {#if themeClass === 'theme-exe'}
+      <img src="/windoge98-logo.webp" alt="" class="exe-watermark" aria-hidden="true" />
+    {/if}
     <span class="vault-cell">
       <span class="cell-label">Borrowed</span>
       <span class="cell-value">{fmtBorrowed} icUSD</span>
@@ -698,6 +711,12 @@
       <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" /></svg>
     </span>
   </button>
+  {#if hasTheme}
+    <button class="theme-toggle" on:click|stopPropagation={toggleEasterEggs}
+      title={$easterEggsEnabled ? 'Switch to default theme' : 'Enable easter egg theme'}>
+      {$easterEggsEnabled ? '🎨' : '✨'}
+    </button>
+  {/if}
 
   <!-- ── Expanded: pill groups + two-column layout ── -->
   {#if expanded}
@@ -1260,9 +1279,20 @@
     .input-panel { grid-column: 1; grid-row: auto; order: 1; }
   }
 
+  /* ── Easter egg toggle ── */
+  .theme-toggle {
+    position: absolute; top: 0.25rem; right: 0.25rem; z-index: 2;
+    background: none; border: none; cursor: pointer;
+    font-size: 0.625rem; line-height: 1; padding: 0.125rem;
+    opacity: 0; transition: opacity 0.2s;
+  }
+  .vault-card:hover .theme-toggle { opacity: 0.6; }
+  .theme-toggle:hover { opacity: 1 !important; }
+  .vault-card { position: relative; }
+
   /* ═══════════════════════════════════════════════════════════════
      EASTER EGG: BOB — brutalist / bob.fun
-     White background, black text, monospace, hard borders.
+     White background, pure black text, monospace, hard borders.
      ═══════════════════════════════════════════════════════════════ */
   .theme-bob {
     background: #fff !important;
@@ -1278,21 +1308,27 @@
   .theme-bob .vault-row { font-family: 'Courier New', Courier, monospace; }
   .theme-bob .vault-id { font-family: 'Courier New', Courier, monospace; color: #000; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700; }
   .theme-bob .collateral-dot { background: #000 !important; }
-  .theme-bob .cell-label { color: #666; font-family: 'Courier New', Courier, monospace; letter-spacing: 0.08em; }
-  .theme-bob .cell-value { color: #000; font-family: 'Courier New', Courier, monospace; }
-  .theme-bob .cell-sub { color: #666; font-family: 'Courier New', Courier, monospace; }
+  .theme-bob .cell-label { color: #000 !important; font-family: 'Courier New', Courier, monospace; letter-spacing: 0.08em; }
+  .theme-bob .cell-value { color: #000 !important; font-family: 'Courier New', Courier, monospace; }
+  .theme-bob .cell-sub { color: #000 !important; font-family: 'Courier New', Courier, monospace; }
   .theme-bob .vault-chevron svg { color: #000; }
+  .theme-bob .ratio-text { color: #000 !important; }
   .theme-bob .vault-actions { border-top: 2px solid #000; background: #fff; }
   .theme-bob .stats-panel {
-    background: #f5f5f5; border: 1px solid #000; border-radius: 0;
+    background: #fff; border: 1px solid #000; border-radius: 0;
   }
-  .theme-bob .stat-label { color: #666; font-family: 'Courier New', Courier, monospace; }
-  .theme-bob .stat-value { color: #000; font-family: 'Courier New', Courier, monospace; }
+  .theme-bob .stat-label { color: #000 !important; font-family: 'Courier New', Courier, monospace; }
+  .theme-bob .stat-value { color: #000 !important; font-family: 'Courier New', Courier, monospace; }
+  .theme-bob .stat-distance { color: #000 !important; }
+  .theme-bob .stat-cr-old { color: #000 !important; }
+  .theme-bob .stat-arrow { color: #000 !important; }
+  .theme-bob .stat-cr-new { color: #000 !important; }
+  .theme-bob .stat-safety-inline { color: #000 !important; }
   .theme-bob .pill-group { border-radius: 0; border-color: #000; }
   .theme-bob .pill {
     background: #fff; border-radius: 0;
     font-family: 'Courier New', Courier, monospace; text-transform: uppercase;
-    color: #333; letter-spacing: 0.06em;
+    color: #000; letter-spacing: 0.06em;
   }
   .theme-bob .pill:first-child { border-right: 1px solid #000; }
   .theme-bob .pill-collateral:hover:not(:disabled) { color: #000; background: #eee; }
@@ -1305,8 +1341,9 @@
     color: #000; font-family: 'Courier New', Courier, monospace;
   }
   .theme-bob .action-input:focus { border-color: #000; box-shadow: 2px 2px 0 #000; }
-  .theme-bob .input-label { font-family: 'Courier New', Courier, monospace; color: #666; text-transform: uppercase; }
-  .theme-bob .input-suffix { font-family: 'Courier New', Courier, monospace; color: #999; }
+  .theme-bob .input-label { font-family: 'Courier New', Courier, monospace; color: #000 !important; text-transform: uppercase; }
+  .theme-bob .input-suffix { font-family: 'Courier New', Courier, monospace; color: #000 !important; }
+  .theme-bob .input-hint { color: #000 !important; }
   .theme-bob .btn-submit {
     border-radius: 0; font-family: 'Courier New', Courier, monospace;
     text-transform: uppercase; letter-spacing: 0.08em;
@@ -1319,26 +1356,28 @@
     background: #000; color: #fff; border: 2px solid #000;
   }
   .theme-bob .btn-submit-debt:hover:not(:disabled) { background: #333; }
-  .theme-bob .fee-row { font-family: 'Courier New', Courier, monospace; color: #666; }
-  .theme-bob .max-text { color: #000; font-family: 'Courier New', Courier, monospace; text-transform: uppercase; text-decoration: underline; }
+  .theme-bob .fee-row { font-family: 'Courier New', Courier, monospace; color: #000 !important; }
+  .theme-bob .max-text { color: #000 !important; font-family: 'Courier New', Courier, monospace; text-transform: uppercase; text-decoration: underline; }
   .theme-bob .vault-cell-bar { filter: grayscale(1); }
   .theme-bob .gauge-track { border-radius: 0; background: #e0e0e0; }
   .theme-bob .gauge-zone-pink { border-radius: 0; }
   .theme-bob .gauge-zone-teal { border-radius: 0; }
   .theme-bob .gauge-marker { border-radius: 0; box-shadow: none !important; }
-  .theme-bob .gauge-labels { color: #666; }
-  .theme-bob .stat-divider { background: #ccc; }
+  .theme-bob .gauge-labels { color: #000 !important; }
+  .theme-bob .stat-divider { background: #000; }
   .theme-bob .token-selector {
     background: #fff; border: 1px solid #000; border-radius: 0;
     font-family: 'Courier New', Courier, monospace; color: #000;
   }
   .theme-bob .token-selector:hover:not(:disabled) { background: #eee; }
+  .theme-bob .interest-accrued { color: #000 !important; }
+  .theme-bob .theme-toggle { color: #000; }
 
   /* ═══════════════════════════════════════════════════════════════
      EASTER EGG: EXE — Windows 98 (windoge98.com)
      ═══════════════════════════════════════════════════════════════ */
   .theme-exe {
-    background: linear-gradient(180deg, #4a90d9 0%, #87ceeb 40%, #b0d4f1 60%, #C0C0C0 60%) !important;
+    background: linear-gradient(180deg, #4a90d9 0%, #87ceeb 50%, #b0d4f1 100%) !important;
     border: none !important;
     border-radius: 0 !important;
     box-shadow: inset -1px -1px 0 #000, inset 1px 1px 0 #fff,
@@ -1352,20 +1391,20 @@
                 inset -2px -2px 0 #808080, inset 2px 2px 0 #dfdfdf !important;
   }
   .exe-watermark {
-    position: absolute;
-    right: 0.5rem;
-    top: 0.125rem;
-    width: 3rem;
+    width: 5rem;
     height: auto;
-    opacity: 0.7;
+    opacity: 0.85;
     pointer-events: none;
-    z-index: 0;
+    align-self: center;
+    flex-shrink: 0;
+    margin: -0.5rem -0.25rem;
   }
-  /* Win98 title bar */
+  /* Win98 layout: extra column for the logo between collateral and borrowed */
   .theme-exe .vault-row {
     font-family: 'MS Sans Serif', 'Arial', 'Helvetica', sans-serif;
     position: relative;
     z-index: 1;
+    grid-template-columns: 3rem 8.5rem 5rem 7rem 1fr 5.5rem 1.5rem;
   }
   .theme-exe .vault-id {
     font-family: 'MS Sans Serif', 'Arial', sans-serif; font-weight: 700;
