@@ -818,7 +818,7 @@ mod tests {
             decimals: 8,
             priority: 1,
             is_active: true,
-            transfer_fee: Some(10_000),
+            transfer_fee: Some(100_000),
             is_lp_token: None,
             underlying_pool: None,
         });
@@ -1588,7 +1588,7 @@ mod tests {
             decimals: 8,
             priority: 0, // consumed last
             is_active: true,
-            transfer_fee: Some(10_000),
+            transfer_fee: Some(0),
             is_lp_token: Some(true),
             underlying_pool: Some(three_pool_canister()),
         });

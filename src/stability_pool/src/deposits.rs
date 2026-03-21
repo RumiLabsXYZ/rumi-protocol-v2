@@ -86,16 +86,32 @@ pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), Stabil
         return Err(StabilityPoolError::EmergencyPaused);
     }
 
-    // Deduct balance BEFORE transfer to prevent double-spend during async call.
+    // Look up the transfer fee so we can deduct it from what the user receives.
+    // The ledger charges the fee on top of the transfer amount, so without this
+    // the pool's ledger balance drifts below its recorded state on every withdrawal.
+    let ledger_fee = read_state(|s| {
+        s.stablecoin_registry.get(&token_ledger)
+            .and_then(|c| c.transfer_fee)
+            .unwrap_or(0)
+    });
+
+    if amount <= ledger_fee {
+        return Err(StabilityPoolError::AmountTooLow {
+            minimum_e8s: ledger_fee + 1,
+        });
+    }
+
+    // Deduct full amount from state BEFORE transfer to prevent double-spend.
     // If the transfer fails, we rollback below.
     mutate_state(|s| s.process_withdrawal(caller, token_ledger, amount))?;
 
-    log!(INFO, "Withdraw: {} from {} by {}", amount, token_ledger, caller);
+    // User receives amount minus fee; pool pays amount total (transfer + fee)
+    let transfer_amount = amount - ledger_fee;
+    log!(INFO, "Withdraw: {} (transfer {} - fee {}) from {} by {}", amount, transfer_amount, ledger_fee, token_ledger, caller);
 
-    // ICRC-1 transfer: send tokens from pool to user
     let transfer_args = TransferArg {
         to: Account { owner: caller, subaccount: None },
-        amount: amount.into(),
+        amount: transfer_amount.into(),
         fee: None,
         memo: None,
         created_at_time: Some(ic_cdk::api::time()),

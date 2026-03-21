@@ -40,6 +40,18 @@ fn post_upgrade(_args: StabilityPoolInitArgs) {
         ic_cdk::trap(&format!("State validation failed after upgrade: {}", error));
     }
 
+    // Migration: fix stablecoin transfer_fee values
+    mutate_state(|s| {
+        for config in s.stablecoin_registry.values_mut() {
+            match config.symbol.as_str() {
+                "icUSD" => { config.transfer_fee = Some(100_000); }
+                "3USD"  => { config.transfer_fee = Some(0); }
+                _ => {}
+            }
+        }
+    });
+    log!(INFO, "Migration: corrected icUSD and 3USD transfer fees");
+
     // Defer timer setup to avoid ic0_call_new restriction during upgrade
     ic_cdk_timers::set_timer(Duration::ZERO, || {
         setup_virtual_price_timer();
