@@ -233,8 +233,10 @@ export function getEventSummary(event: any, vaultCollateralMap?: Map<number, any
 			return `Reserve redemption: ${formatAmount(data.icusd_amount)} icUSD`;
 		case 'init':
 			return 'Protocol initialized';
-		case 'upgrade':
-			return 'Protocol upgraded';
+		case 'upgrade': {
+			const desc = Array.isArray(data?.description) ? data.description[0] : data?.description;
+			return desc ? `Protocol upgraded — ${desc}` : 'Protocol upgraded';
+		}
 		default:
 			return getEventType(event);
 	}

@@ -88,6 +88,9 @@ pub struct InitArg {
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpgradeArg {
     pub mode: Option<Mode>,
+    /// Human-readable description of what changed in this upgrade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(CandidType, Deserialize, Debug)]
