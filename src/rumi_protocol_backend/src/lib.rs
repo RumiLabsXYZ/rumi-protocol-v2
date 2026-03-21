@@ -308,7 +308,7 @@ impl From<GuardError> for ProtocolError {
 /// Candid-compatible struct matching the stability pool's and bot's `LiquidatableVaultInfo`.
 /// Defined inline to avoid a crate dependency between backend and pool/bot.
 #[derive(CandidType, Clone, Debug, Deserialize)]
-struct LiquidatableVaultInfo {
+pub struct LiquidatableVaultInfo {
     pub vault_id: u64,
     pub collateral_type: Principal,
     pub debt_amount: u64,

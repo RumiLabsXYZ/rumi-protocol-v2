@@ -1657,6 +1657,146 @@ async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, 
     })
 }
 
+/// Developer test: force a vault to be liquidated by the stability pool, bypassing the bot.
+/// Calls the stability pool's notify_liquidatable_vaults with just this vault.
+#[candid_method(update)]
+#[update]
+async fn dev_test_pool_only_liquidation(vault_id: u64) -> Result<String, ProtocolError> {
+    validate_call().await?;
+    let caller = ic_cdk::caller();
+    let is_dev = read_state(|s| s.developer_principal == caller);
+    if !is_dev {
+        return Err(ProtocolError::GenericError("Developer only".to_string()));
+    }
+
+    let pool_canister = read_state(|s| s.stability_pool_canister)
+        .ok_or_else(|| ProtocolError::GenericError("No stability pool configured".to_string()))?;
+
+    // Build vault notification (skips CR check — force test)
+    let vault_info = read_state(|s| {
+        let vault = s.vault_id_to_vaults.get(&vault_id)
+            .ok_or_else(|| ProtocolError::GenericError(format!("Vault #{} not found", vault_id)))?;
+
+        if vault.bot_processing {
+            return Err(ProtocolError::GenericError(format!(
+                "Vault #{} is locked by bot_processing", vault_id
+            )));
+        }
+
+        let price = s.get_collateral_price_decimal(&vault.collateral_type)
+            .map(|p| UsdIcp::from(p).to_e8s())
+            .unwrap_or(0);
+        let max_liq = (vault.borrowed_icusd_amount * s.max_partial_liquidation_ratio)
+            .min(vault.borrowed_icusd_amount);
+
+        Ok(rumi_protocol_backend::LiquidatableVaultInfo {
+            vault_id: vault.vault_id,
+            collateral_type: vault.collateral_type,
+            debt_amount: vault.borrowed_icusd_amount.to_u64(),
+            collateral_amount: vault.collateral_amount,
+            recommended_liquidation_amount: max_liq.to_u64(),
+            collateral_price_e8s: price,
+        })
+    })?;
+
+    // Send directly to the stability pool
+    let result: Result<(), _> = ic_cdk::call(
+        pool_canister,
+        "notify_liquidatable_vaults",
+        (vec![vault_info],),
+    ).await;
+
+    match result {
+        Ok(()) => {
+            log!(INFO, "[dev_test_pool_only_liquidation] Sent vault #{} to stability pool", vault_id);
+            Ok(format!("Vault #{} sent to stability pool for liquidation", vault_id))
+        }
+        Err((code, msg)) => {
+            Err(ProtocolError::GenericError(format!(
+                "Stability pool notification failed: {:?} {}", code, msg
+            )))
+        }
+    }
+}
+
+/// Developer test: simulate the full liquidation cascade.
+/// Sends vault to bot and stability pool. First to succeed wins.
+#[candid_method(update)]
+#[update]
+async fn dev_test_cascade_liquidation(vault_id: u64) -> Result<String, ProtocolError> {
+    validate_call().await?;
+    let caller = ic_cdk::caller();
+    let is_dev = read_state(|s| s.developer_principal == caller);
+    if !is_dev {
+        return Err(ProtocolError::GenericError("Developer only".to_string()));
+    }
+
+    let (bot_canister, pool_canister) = read_state(|s| {
+        (s.liquidation_bot_principal, s.stability_pool_canister)
+    });
+
+    // Build vault notification
+    let vault_info = read_state(|s| {
+        let vault = s.vault_id_to_vaults.get(&vault_id)
+            .ok_or_else(|| ProtocolError::GenericError(format!("Vault #{} not found", vault_id)))?;
+
+        if vault.bot_processing {
+            return Err(ProtocolError::GenericError(format!(
+                "Vault #{} is locked by bot_processing", vault_id
+            )));
+        }
+
+        let price = s.get_collateral_price_decimal(&vault.collateral_type)
+            .map(|p| UsdIcp::from(p).to_e8s())
+            .unwrap_or(0);
+        let max_liq = (vault.borrowed_icusd_amount * s.max_partial_liquidation_ratio)
+            .min(vault.borrowed_icusd_amount);
+
+        Ok(rumi_protocol_backend::LiquidatableVaultInfo {
+            vault_id: vault.vault_id,
+            collateral_type: vault.collateral_type,
+            debt_amount: vault.borrowed_icusd_amount.to_u64(),
+            collateral_amount: vault.collateral_amount,
+            recommended_liquidation_amount: max_liq.to_u64(),
+            collateral_price_e8s: price,
+        })
+    })?;
+
+    let mut steps = Vec::new();
+
+    // Step 1: Send to bot
+    if let Some(bot) = bot_canister {
+        let bot_vaults = vec![vault_info.clone()];
+        let result: Result<(), _> = ic_cdk::call(
+            bot, "notify_liquidatable_vaults", (bot_vaults,)
+        ).await;
+        match result {
+            Ok(()) => steps.push("Sent to bot".to_string()),
+            Err((code, msg)) => steps.push(format!("Bot notification failed: {:?} {}", code, msg)),
+        }
+    } else {
+        steps.push("No bot configured, skipping".to_string());
+    }
+
+    // Step 2: Also send to stability pool (simulates the fallback)
+    if let Some(pool) = pool_canister {
+        let pool_vaults = vec![vault_info];
+        let result: Result<(), _> = ic_cdk::call(
+            pool, "notify_liquidatable_vaults", (pool_vaults,)
+        ).await;
+        match result {
+            Ok(()) => steps.push("Sent to stability pool".to_string()),
+            Err((code, msg)) => steps.push(format!("Pool notification failed: {:?} {}", code, msg)),
+        }
+    } else {
+        steps.push("No stability pool configured, skipping".to_string());
+    }
+
+    let summary = steps.join("; ");
+    log!(INFO, "[dev_test_cascade_liquidation] Vault #{}: {}", vault_id, summary);
+    Ok(format!("Vault #{} cascade test: {}", vault_id, summary))
+}
+
 /// Bot calls this after swapping collateral → icUSD to repay its obligation.
 #[candid_method(update)]
 #[update]
