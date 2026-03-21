@@ -3,7 +3,7 @@
   import { formatNumber, formatTokenBalance, formatStableDisplay } from '$lib/utils/format';
   import { protocolService } from '$lib/services/protocol';
   import { publicActor } from '$lib/services/protocol/apiClient';
-  import { collateralStore } from '$lib/stores/collateralStore';
+  import { collateralStore, COLLATERAL_DISPLAY_ORDER } from '$lib/stores/collateralStore';
   import { get } from 'svelte/store';
   import { TokenService } from '$lib/services/tokenService';
   import { CANISTER_IDS } from '$lib/config';
@@ -93,7 +93,14 @@
             price: Number(t.price || 0),
           };
         })
-        .filter((t: any) => t.amount > 0);
+        .filter((t: any) => t.amount > 0)
+        .sort((a, b) => {
+          const ai = COLLATERAL_DISPLAY_ORDER.indexOf(a.symbol);
+          const bi = COLLATERAL_DISPLAY_ORDER.indexOf(b.symbol);
+          const ao = ai === -1 ? COLLATERAL_DISPLAY_ORDER.length : ai;
+          const bo = bi === -1 ? COLLATERAL_DISPLAY_ORDER.length : bi;
+          return ao !== bo ? ao - bo : a.symbol.localeCompare(b.symbol);
+        });
     } catch (e) { console.error('CollateralTotals fetch error:', e); }
   }
 
