@@ -7,9 +7,9 @@
 
   type Tab = 'bot' | 'pool' | 'manual';
 
-  // Read initial tab from URL query param, default to 'bot'
+  // Read initial tab from URL query param, default to 'pool'
   $: tabParam = $page.url.searchParams.get('tab');
-  $: activeTab = (tabParam === 'pool' ? 'pool' : tabParam === 'manual' ? 'manual' : 'bot') as Tab;
+  $: activeTab = (tabParam === 'bot' ? 'bot' : tabParam === 'manual' ? 'manual' : 'pool') as Tab;
 
   function switchTab(tab: Tab) {
     const url = new URL($page.url);
