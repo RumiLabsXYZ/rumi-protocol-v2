@@ -101,6 +101,10 @@
     if (!protocolStatus) {
       fetchStatus();
       refreshInterval = setInterval(fetchStatus, 15000);
+    } else {
+      // Even when protocolStatus is provided as a prop, fetch per-collateral totals
+      collateralStore.fetchSupportedCollateral().then(() => fetchCollateralTotals());
+      fetchCkStableReserves();
     }
     return () => { if (refreshInterval) clearInterval(refreshInterval); };
   });

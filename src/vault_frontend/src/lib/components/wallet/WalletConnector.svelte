@@ -36,7 +36,8 @@
     ICP:    { name: 'Internet Computer', symbol: 'ICP',    icon: '/icp-token-dark.svg', fallbackColor: '#3B00B9', canisterId: CONFIG.currentIcpLedgerId,   decimals: 8 },
     ICUSD:  { name: 'icUSD',             symbol: 'icUSD',  icon: '/icusd-logo_v3.svg',  fallbackColor: '#8B5CF6', canisterId: CONFIG.currentIcusdLedgerId,  decimals: 8 },
     CKUSDT: { name: 'ckUSDT',            symbol: 'ckUSDT', icon: '',                    fallbackColor: '#26A17B', canisterId: CONFIG.ckusdtLedgerId,        decimals: 6 },
-    CKUSDC: { name: 'ckUSDC',            symbol: 'ckUSDC', icon: '',                    fallbackColor: '#2775CA', canisterId: CONFIG.ckusdcLedgerId,        decimals: 6 },
+    CKUSDC:    { name: 'ckUSDC',            symbol: 'ckUSDC', icon: '',                    fallbackColor: '#2775CA', canisterId: CONFIG.ckusdcLedgerId,        decimals: 6 },
+    THREEUSD:  { name: '3USD Stablecoin',   symbol: '3USD',   icon: '/3pool-logo-v5.svg',  fallbackColor: '#8B5CF6', canisterId: CONFIG.threePoolCanisterId,   decimals: 8 },
   };
 
   // Build full TOKEN_META reactively from static entries + collateral store
@@ -316,7 +317,10 @@
       // icUSD always first
       if (a.key === 'ICUSD') return -1;
       if (b.key === 'ICUSD') return 1;
-      // ICP always second
+      // 3USD always second
+      if (a.key === 'THREEUSD') return -1;
+      if (b.key === 'THREEUSD') return 1;
+      // ICP always third
       if (a.key === 'ICP') return -1;
       if (b.key === 'ICP') return 1;
       // Rest sorted by USD value descending
@@ -651,20 +655,6 @@
                       {/if}
                     </div>
                   </div>
-                  {#if token.meta.symbol === 'icUSD' && threeUsdBalance > 0n}
-                    <div class="dropdown-token-row">
-                      <div class="dropdown-token-left">
-                        <img src="/3pool-logo-v5.svg" alt="3USD" class="dropdown-token-icon" />
-                        <div class="dropdown-token-info">
-                          <span class="dropdown-token-symbol">3USD</span>
-                          <span class="dropdown-token-name">3USD Stablecoin</span>
-                        </div>
-                      </div>
-                      <div class="dropdown-token-right">
-                        <span class="dropdown-token-amount">{formatTokenAmount(threeUsdBalance, 8)}</span>
-                      </div>
-                    </div>
-                  {/if}
                 {/each}
               {:else}
                 <div class="dropdown-empty">
