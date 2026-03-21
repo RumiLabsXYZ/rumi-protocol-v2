@@ -60,7 +60,7 @@
     <ol class="flow-list">
       <li><strong><a href="/docs/liquidation-bot" class="doc-link">Liquidation Bot</a></strong> — An autonomous canister that liquidates vaults on credit, swaps collateral for icUSD via DEXes, and deposits the proceeds back to protocol reserves. Handles most liquidations within minutes.</li>
       <li><strong><a href="/docs/stability-pool" class="doc-link">Stability Pool</a></strong> — Uses depositors' stablecoins to cover vault debt. Acts as backup if the bot fails or runs out of budget.</li>
-      <li><strong>Manual Liquidators</strong> — Any user can liquidate directly via the <a href="/liquidations?tab=manual" class="doc-link">Liquidate</a> page using icUSD, ckUSDC, or ckUSDT.</li>
+      <li><strong>Manual Liquidators</strong> — Any user can liquidate directly via the <a href="/liquidations" class="doc-link">Liquidate</a> page using icUSD, ckUSDC, or ckUSDT.</li>
     </ol>
     <p>The sections below describe the mechanics that apply to all liquidation methods.</p>
   </section>

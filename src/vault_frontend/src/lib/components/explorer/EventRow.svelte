@@ -33,7 +33,7 @@
 
 <style>
 	.event-row {
-		display:grid; grid-template-columns:auto 1fr auto; gap:0.75rem; align-items:center;
+		display:grid; grid-template-columns:11rem 1fr auto; gap:0.75rem; align-items:center;
 		padding:0.625rem 0.875rem; border-bottom:1px solid var(--rumi-border);
 		text-decoration:none; color:var(--rumi-text-primary);
 		transition:background 0.15s;

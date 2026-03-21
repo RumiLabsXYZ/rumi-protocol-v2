@@ -58,7 +58,7 @@
     <ol class="flow-list">
       <li><strong>Bot fails</strong> — The vault remains undercollateralized.</li>
       <li><strong>Stability Pool</strong> — On the next price check cycle (up to 5 minutes), the backend notifies the stability pool, which can liquidate using depositors' funds.</li>
-      <li><strong>Manual liquidation</strong> — If neither the bot nor the stability pool handles it, the vault appears on the <a href="/liquidations?tab=manual" class="doc-link">Manual Liquidation</a> page where any user can liquidate it directly.</li>
+      <li><strong>Manual liquidation</strong> — If neither the bot nor the stability pool handles it, the vault appears on the <a href="/liquidations" class="doc-link">Manual Liquidation</a> page where any user can liquidate it directly.</li>
     </ol>
     <p>This design avoids compounding failures. If a DEX is down or liquidity is thin, repeatedly retrying the same swap would waste cycles and could leave partial state. Failing fast and escalating is safer.</p>
   </section>
@@ -96,7 +96,7 @@
     <ol class="flow-list">
       <li><strong>Liquidation Bot</strong> — Automated, fastest response. Credit-based (no upfront capital). Limited by budget.</li>
       <li><strong>Stability Pool</strong> — Automated on next cycle. Uses depositors' stablecoins. No budget limit (constrained by pool size).</li>
-      <li><strong>Manual Liquidators</strong> — Any user with icUSD, ckUSDC, or ckUSDT can liquidate directly. Available 24/7 via the <a href="/liquidations?tab=manual" class="doc-link">Liquidate</a> page.</li>
+      <li><strong>Manual Liquidators</strong> — Any user with icUSD, ckUSDC, or ckUSDT can liquidate directly. Available 24/7 via the <a href="/liquidations" class="doc-link">Liquidate</a> page.</li>
     </ol>
   </section>
 
@@ -108,7 +108,7 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">What This Means for Manual Liquidators</h2>
-    <p>The bot handles most liquidations automatically. Manual liquidation opportunities will be rarer — they primarily arise when the bot's budget is exhausted, the stability pool is depleted, or a DEX swap fails. The <a href="/liquidations?tab=manual" class="doc-link">Manual Liquidation</a> page shows any vaults that remain undercollateralized after the bot and stability pool have had their chance.</p>
+    <p>The bot handles most liquidations automatically. Manual liquidation opportunities will be rarer — they primarily arise when the bot's budget is exhausted, the stability pool is depleted, or a DEX swap fails. The <a href="/liquidations" class="doc-link">Manual Liquidation</a> page shows any vaults that remain undercollateralized after the bot and stability pool have had their chance.</p>
   </section>
 
   <section class="doc-section">
