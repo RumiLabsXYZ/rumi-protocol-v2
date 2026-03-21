@@ -5,7 +5,7 @@ use icrc_ledger_types::icrc1::account::Account;
 use crate::state::{self, BotConfig, BotLiquidationEvent, LiquidatableVaultInfo};
 use crate::swap;
 
-/// Result returned by the backend's `bot_liquidate` and `dev_force_bot_liquidate` endpoints.
+/// Result returned by the backend's `bot_claim_liquidation` and `dev_force_bot_liquidate` endpoints.
 #[derive(CandidType, Deserialize, Debug)]
 pub struct BotLiquidationResult {
     pub vault_id: u64,
@@ -54,50 +54,82 @@ pub async fn process_pending() {
 
     log!(crate::INFO, "Processing vault #{}", vault.vault_id);
 
-    // 1. Call bot_liquidate on backend — gets us collateral on credit
-    let liq_result = call_bot_liquidate(&config, vault.vault_id).await;
+    // Phase 1: CLAIM the vault (gets collateral, locks vault, but debt unchanged)
+    let liq_result = call_bot_claim_liquidation(&config, vault.vault_id).await;
     let (collateral_amount, debt_covered, collateral_price) = match liq_result {
         Ok(r) => (r.collateral_amount, r.debt_covered, r.collateral_price_e8s),
         Err(e) => {
-            log_failed_event(&vault, &format!("bot_liquidate failed: {}", e));
+            log_failed_event(&vault, &format!("bot_claim_liquidation failed: {}", e));
             return;
         }
     };
 
-    // 2. Swap ICP → ckStable (best of ckUSDC/ckUSDT on KongSwap)
+    // Phase 2: Try to swap collateral → icUSD
     let swap_amount = calculate_swap_amount_internal(collateral_amount, debt_covered, collateral_price);
-    let stable_result = swap::swap_icp_for_stable(&config, swap_amount).await;
-    let (stable_amount, stable_token, route) = match stable_result {
+    let swap_result = swap::swap_icp_for_stable(&config, swap_amount).await;
+
+    let (stable_amount, stable_token, route) = match swap_result {
         Ok(r) => (r.output_amount, r.target_token, r.route),
         Err(e) => {
-            log_failed_event(&vault, &format!("DEX swap failed: {}", e));
+            // SWAP FAILED — return collateral and cancel the claim
+            log!(crate::INFO, "DEX swap failed for vault #{}: {}. Returning collateral and cancelling.", vault.vault_id, e);
+
+            if let Err(return_err) = return_collateral_to_backend(&config, collateral_amount, vault.collateral_type).await {
+                log!(crate::INFO, "WARNING: Failed to return collateral for vault #{}: {}", vault.vault_id, return_err);
+            }
+
+            if let Err(cancel_err) = call_bot_cancel_liquidation(&config, vault.vault_id).await {
+                log!(crate::INFO, "WARNING: Failed to cancel claim for vault #{}: {}", vault.vault_id, cancel_err);
+            }
+
+            log_failed_event(&vault, &format!("DEX swap failed (claim cancelled): {}", e));
             return;
         }
     };
 
-    // 3. Swap ckStable → icUSD (via 3pool)
+    // Phase 2b: ckStable → icUSD (3pool)
     let icusd_result = swap::swap_stable_for_icusd(&config, stable_amount, stable_token).await;
     let icusd_amount = match icusd_result {
         Ok(amount) => amount,
         Err(e) => {
-            log_failed_event(&vault, &format!("3pool swap failed: {}", e));
+            // 3pool swap failed — we already swapped ICP to ckStable, can't easily reverse that.
+            // Cancel the claim so the stability pool can handle the vault.
+            // The bot keeps the ckStable (can be manually recovered).
+            log!(crate::INFO, "3pool swap failed for vault #{}: {}. Cancelling claim.", vault.vault_id, e);
+
+            if let Err(cancel_err) = call_bot_cancel_liquidation(&config, vault.vault_id).await {
+                log!(crate::INFO, "WARNING: Failed to cancel claim for vault #{}: {}", vault.vault_id, cancel_err);
+            }
+
+            log_failed_event(&vault, &format!("3pool swap failed (claim cancelled, ckStable held by bot): {}", e));
             return;
         }
     };
 
-    // 4. Deposit icUSD to backend reserves
+    // Phase 2c: Deposit icUSD to backend reserves
     if let Err(e) = call_bot_deposit_to_reserves(&config, icusd_amount).await {
-        log_failed_event(&vault, &format!("deposit_to_reserves failed: {}", e));
+        log!(crate::INFO, "deposit_to_reserves failed for vault #{}: {}. Cancelling claim.", vault.vault_id, e);
+        if let Err(cancel_err) = call_bot_cancel_liquidation(&config, vault.vault_id).await {
+            log!(crate::INFO, "WARNING: Failed to cancel claim for vault #{}: {}", vault.vault_id, cancel_err);
+        }
+        log_failed_event(&vault, &format!("deposit_to_reserves failed (claim cancelled): {}", e));
         return;
     }
 
-    // 5. Send remaining ICP to treasury (liquidation bonus portion)
+    // Phase 3: CONFIRM — everything succeeded, finalize the liquidation
+    if let Err(e) = call_bot_confirm_liquidation(&config, vault.vault_id).await {
+        log!(crate::INFO, "CRITICAL: bot_confirm_liquidation failed for vault #{}: {}. icUSD already deposited!", vault.vault_id, e);
+        log_failed_event(&vault, &format!("CRITICAL: confirm failed after deposit: {}", e));
+        return;
+    }
+
+    // Phase 4: Send remaining ICP to treasury (liquidation bonus)
     let icp_to_treasury = collateral_amount.saturating_sub(swap_amount);
     if icp_to_treasury > 0 {
         let _ = transfer_icp_to_treasury(&config, icp_to_treasury).await;
     }
 
-    // 6. Log success event
+    // Phase 5: Log success
     let effective_price = if swap_amount > 0 {
         (stable_amount as u128 * 100_000_000 / swap_amount as u128) as u64
     } else {
@@ -135,14 +167,61 @@ pub async fn process_pending() {
 
 // ─── Helper Functions ───
 
-async fn call_bot_liquidate(config: &BotConfig, vault_id: u64) -> Result<BotLiquidationResult, String> {
+async fn call_bot_claim_liquidation(config: &BotConfig, vault_id: u64) -> Result<BotLiquidationResult, String> {
     let result: Result<(BackendResult<BotLiquidationResult>,), _> =
-        ic_cdk::call(config.backend_principal, "bot_liquidate", (vault_id,)).await;
+        ic_cdk::call(config.backend_principal, "bot_claim_liquidation", (vault_id,)).await;
 
     match result {
         Ok((BackendResult::Ok(r),)) => Ok(r),
         Ok((BackendResult::Err(e),)) => Err(format!("{}", e)),
         Err((code, msg)) => Err(format!("{:?}: {}", code, msg)),
+    }
+}
+
+async fn call_bot_confirm_liquidation(config: &BotConfig, vault_id: u64) -> Result<(), String> {
+    let result: Result<(BackendResult<()>,), _> =
+        ic_cdk::call(config.backend_principal, "bot_confirm_liquidation", (vault_id,)).await;
+
+    match result {
+        Ok((BackendResult::Ok(()),)) => Ok(()),
+        Ok((BackendResult::Err(e),)) => Err(format!("{}", e)),
+        Err((code, msg)) => Err(format!("{:?}: {}", code, msg)),
+    }
+}
+
+async fn call_bot_cancel_liquidation(config: &BotConfig, vault_id: u64) -> Result<(), String> {
+    let result: Result<(BackendResult<()>,), _> =
+        ic_cdk::call(config.backend_principal, "bot_cancel_liquidation", (vault_id,)).await;
+
+    match result {
+        Ok((BackendResult::Ok(()),)) => Ok(()),
+        Ok((BackendResult::Err(e),)) => Err(format!("{}", e)),
+        Err((code, msg)) => Err(format!("{:?}: {}", code, msg)),
+    }
+}
+
+/// Transfer collateral back to the backend canister via direct icrc1_transfer.
+/// No approve needed — the bot is sending from its own account.
+async fn return_collateral_to_backend(config: &BotConfig, amount: u64, collateral_ledger: Principal) -> Result<(), String> {
+    let transfer_args = icrc_ledger_types::icrc1::transfer::TransferArg {
+        from_subaccount: None,
+        to: Account {
+            owner: config.backend_principal,
+            subaccount: None,
+        },
+        amount: Nat::from(amount),
+        fee: None,
+        memo: None,
+        created_at_time: None,
+    };
+
+    let result: Result<(Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,), _> =
+        ic_cdk::call(collateral_ledger, "icrc1_transfer", (transfer_args,)).await;
+
+    match result {
+        Ok((Ok(_),)) => Ok(()),
+        Ok((Err(e),)) => Err(format!("Transfer error: {:?}", e)),
+        Err((code, msg)) => Err(format!("Transfer call failed: {:?} {}", code, msg)),
     }
 }
 
@@ -212,12 +291,8 @@ fn calculate_swap_amount_internal(collateral_e8s: u64, debt_e8s: u64, collateral
     if collateral_price_e8s == 0 {
         return collateral_e8s;
     }
-    // debt_e8s is in icUSD (8 decimals), collateral_price_e8s is USD per ICP (8 decimals)
-    // ICP needed = debt / price (both in e8s, so units cancel correctly)
     let icp_needed = (debt_e8s as u128 * 100_000_000 / collateral_price_e8s as u128) as u64;
-    // Add 5% buffer for slippage
     let with_buffer = icp_needed.saturating_mul(105) / 100;
-    // Don't swap more than we have
     with_buffer.min(collateral_e8s)
 }
 
@@ -226,7 +301,6 @@ fn calculate_slippage(effective_price_e8s: u64, oracle_price_e8s: u64) -> i32 {
     if oracle_price_e8s == 0 || effective_price_e8s == 0 {
         return 0;
     }
-    // Positive = got less than expected (bad), negative = got more (good)
     let diff = oracle_price_e8s as i64 - effective_price_e8s as i64;
     (diff * 10_000 / oracle_price_e8s as i64) as i32
 }
@@ -243,6 +317,14 @@ pub async fn transfer_icp_to_treasury_pub(config: &BotConfig, amount_e8s: u64) -
 
 pub fn calculate_swap_amount(collateral_e8s: u64, debt_e8s: u64, collateral_price_e8s: u64) -> u64 {
     calculate_swap_amount_internal(collateral_e8s, debt_e8s, collateral_price_e8s)
+}
+
+pub async fn call_bot_cancel_liquidation_pub(config: &BotConfig, vault_id: u64) -> Result<(), String> {
+    call_bot_cancel_liquidation(config, vault_id).await
+}
+
+pub async fn call_bot_confirm_liquidation_pub(config: &BotConfig, vault_id: u64) -> Result<(), String> {
+    call_bot_confirm_liquidation(config, vault_id).await
 }
 
 fn log_failed_event(vault: &LiquidatableVaultInfo, error: &str) {
