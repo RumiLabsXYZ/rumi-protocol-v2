@@ -509,7 +509,7 @@ type TreasuryStats = record {
   total_accrued_interest_system : nat64;
   pending_interest_for_pools_total : nat64;
 };
-type UpgradeArg = record { mode : opt Mode };
+type UpgradeArg = record { mode : opt Mode; description : opt text };
 type Vault = record {
   collateral_amount : nat64;
   owner : principal;
