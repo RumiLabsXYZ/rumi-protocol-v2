@@ -2087,15 +2087,17 @@ impl State {
         } else {
             return vault.borrowed_icusd_amount;
         };
-        let recovery_target = self.get_recovery_target_cr_for(ct);
+        // Use the per-asset minimum collateral ratio (borrow_threshold_ratio, e.g. 150% for ICP)
+        // as the target CR to restore the vault to after partial liquidation.
+        let target_cr = self.get_min_collateral_ratio_for(ct);
         let liq_bonus = self.get_liquidation_bonus_for(ct);
-        let numerator_icusd = vault.borrowed_icusd_amount * recovery_target;
+        let numerator_icusd = vault.borrowed_icusd_amount * target_cr;
         if numerator_icusd <= collateral_value {
             // Already at or above target — shouldn't be liquidatable, but return 0
             return ICUSD::new(0);
         }
         let deficit = numerator_icusd - collateral_value;
-        let denominator = recovery_target - liq_bonus;
+        let denominator = target_cr - liq_bonus;
         // If target CR <= bonus (misconfigured or deeply underwater), full liquidation
         if denominator <= Ratio::from(dec!(0)) {
             return vault.borrowed_icusd_amount;
