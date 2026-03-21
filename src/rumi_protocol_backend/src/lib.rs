@@ -318,6 +318,31 @@ struct LiquidatableVaultInfo {
 }
 
 pub fn check_vaults() {
+    // Auto-cancel bot claims that have been pending too long (10 minutes).
+    // This prevents vaults from being permanently locked if the bot crashes.
+    const BOT_CLAIM_TIMEOUT_NS: u64 = 600_000_000_000; // 10 minutes
+    let now = ic_cdk::api::time();
+
+    let expired_claims: Vec<(u64, crate::state::BotClaim)> = read_state(|s| {
+        s.bot_claims.iter()
+            .filter(|(_, claim)| now.saturating_sub(claim.claimed_at) >= BOT_CLAIM_TIMEOUT_NS)
+            .map(|(vid, claim)| (*vid, claim.clone()))
+            .collect()
+    });
+
+    for (vault_id, claim) in &expired_claims {
+        log!(INFO, "[check_vaults] Auto-cancelling stuck bot claim for vault #{} (claimed {}s ago)",
+            vault_id, (now - claim.claimed_at) / 1_000_000_000);
+
+        mutate_state(|s| {
+            if let Some(vault) = s.vault_id_to_vaults.get_mut(vault_id) {
+                vault.bot_processing = false;
+            }
+            s.bot_budget_remaining_e8s += claim.debt_amount;
+            s.bot_claims.remove(vault_id);
+        });
+    }
+
     let dummy_rate = read_state(|s| {
         s.last_icp_rate.unwrap_or_else(|| {
             log!(INFO, "[check_vaults] No ICP rate available, using default rate");
@@ -330,6 +355,10 @@ pub fn check_vaults() {
         let mut unhealthy_vaults: Vec<Vault> = vec![];
         let mut healthy_vaults: Vec<Vault> = vec![];
         for vault in s.vault_id_to_vaults.values() {
+            if vault.bot_processing {
+                // Skip — bot is actively processing this vault
+                continue;
+            }
             if compute_collateral_ratio(vault, dummy_rate, s)
                 < s.get_min_liquidation_ratio_for(&vault.collateral_type)
             {
