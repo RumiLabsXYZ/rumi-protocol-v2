@@ -714,7 +714,6 @@ export interface _SERVICE {
   'get_liquidation_bonus' : ActorMethod<[], number>,
   'get_liquidation_protocol_share' : ActorMethod<[], number>,
   'get_liquidity_status' : ActorMethod<[Principal], LiquidityStatus>,
-  'get_max_partial_liquidation_ratio' : ActorMethod<[], number>,
   'get_min_icusd_amount' : ActorMethod<[], bigint>,
   'get_protocol_snapshots' : ActorMethod<
     [GetEventsArg],
@@ -793,7 +792,6 @@ export interface _SERVICE {
   'set_liquidation_bot_config' : ActorMethod<[Principal, bigint], Result>,
   'set_liquidation_protocol_share' : ActorMethod<[number], Result>,
   'set_lst_haircut' : ActorMethod<[Principal, number], Result>,
-  'set_max_partial_liquidation_ratio' : ActorMethod<[number], Result>,
   'set_min_icusd_amount' : ActorMethod<[bigint], Result>,
   'set_rate_curve_markers' : ActorMethod<
     [[] | [Principal], Array<[number, number]>],

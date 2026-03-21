@@ -768,9 +768,9 @@ async fn stability_pool_liquidate(vault_id: u64, max_debt_to_liquidate: u64) -> 
                     ));
                 }
 
-                // Calculate how much can be liquidated
-                let max_liquidatable = vault.borrowed_icusd_amount * s.max_partial_liquidation_ratio;
-                let actual_liquidatable_debt = max_liquidatable.min(vault.borrowed_icusd_amount).min(max_debt_to_liquidate.into());
+                // Calculate optimal amount to restore vault to target CR
+                let optimal_amount = s.compute_partial_liquidation_cap(vault, collateral_price_usd);
+                let actual_liquidatable_debt = optimal_amount.min(vault.borrowed_icusd_amount).min(max_debt_to_liquidate.into());
 
                 // Calculate collateral that will be seized (debt + liquidation bonus)
                 let liquidation_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
@@ -1388,8 +1388,7 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
             )));
         }
 
-        let max_liquidatable = vault.borrowed_icusd_amount * s.max_partial_liquidation_ratio;
-        let actual = max_liquidatable.min(vault.borrowed_icusd_amount);
+        let actual = s.compute_partial_liquidation_cap(vault, collateral_price_usd);
 
         if s.bot_budget_remaining_e8s < actual.to_u64() {
             return Err(ProtocolError::GenericError(format!(
@@ -1683,19 +1682,19 @@ async fn dev_test_pool_only_liquidation(vault_id: u64) -> Result<String, Protoco
             )));
         }
 
-        let price = s.get_collateral_price_decimal(&vault.collateral_type)
-            .map(|p| UsdIcp::from(p).to_e8s())
-            .unwrap_or(0);
-        let max_liq = (vault.borrowed_icusd_amount * s.max_partial_liquidation_ratio)
-            .min(vault.borrowed_icusd_amount);
+        let collateral_price_usd = s.get_collateral_price_decimal(&vault.collateral_type)
+            .map(|p| UsdIcp::from(p))
+            .ok_or(ProtocolError::GenericError("No price available".to_string()))?;
+        let price_e8s = collateral_price_usd.to_e8s();
+        let optimal_liq = s.compute_partial_liquidation_cap(vault, collateral_price_usd);
 
         Ok(rumi_protocol_backend::LiquidatableVaultInfo {
             vault_id: vault.vault_id,
             collateral_type: vault.collateral_type,
             debt_amount: vault.borrowed_icusd_amount.to_u64(),
             collateral_amount: vault.collateral_amount,
-            recommended_liquidation_amount: max_liq.to_u64(),
-            collateral_price_e8s: price,
+            recommended_liquidation_amount: optimal_liq.to_u64(),
+            collateral_price_e8s: price_e8s,
         })
     })?;
 
@@ -1746,19 +1745,19 @@ async fn dev_test_cascade_liquidation(vault_id: u64) -> Result<String, ProtocolE
             )));
         }
 
-        let price = s.get_collateral_price_decimal(&vault.collateral_type)
-            .map(|p| UsdIcp::from(p).to_e8s())
-            .unwrap_or(0);
-        let max_liq = (vault.borrowed_icusd_amount * s.max_partial_liquidation_ratio)
-            .min(vault.borrowed_icusd_amount);
+        let collateral_price_usd = s.get_collateral_price_decimal(&vault.collateral_type)
+            .map(|p| UsdIcp::from(p))
+            .ok_or(ProtocolError::GenericError("No price available".to_string()))?;
+        let price_e8s = collateral_price_usd.to_e8s();
+        let optimal_liq = s.compute_partial_liquidation_cap(vault, collateral_price_usd);
 
         Ok(rumi_protocol_backend::LiquidatableVaultInfo {
             vault_id: vault.vault_id,
             collateral_type: vault.collateral_type,
             debt_amount: vault.borrowed_icusd_amount.to_u64(),
             collateral_amount: vault.collateral_amount,
-            recommended_liquidation_amount: max_liq.to_u64(),
-            collateral_price_e8s: price,
+            recommended_liquidation_amount: optimal_liq.to_u64(),
+            collateral_price_e8s: price_e8s,
         })
     })?;
 
@@ -2276,35 +2275,6 @@ async fn admin_mint_icusd(amount_e8s: u64, to: Principal, reason: String) -> Res
     log!(INFO, "[admin_mint_icusd] Minted {} e8s icUSD to {} (block {}). Reason: {}",
         amount_e8s, to, block_index, reason);
     Ok(block_index)
-}
-
-/// Set the max partial liquidation ratio (developer only)
-/// Rate is a decimal: 0.5 = 50%, range 0.1–1.0
-#[candid_method(update)]
-#[update]
-async fn set_max_partial_liquidation_ratio(new_rate: f64) -> Result<(), ProtocolError> {
-    let caller = ic_cdk::caller();
-    let is_developer = read_state(|s| s.developer_principal == caller);
-    if !is_developer {
-        return Err(ProtocolError::GenericError("Only developer can set max partial liquidation ratio".to_string()));
-    }
-    if new_rate < 0.1 || new_rate > 1.0 {
-        return Err(ProtocolError::GenericError("Max partial liquidation ratio must be between 0.1 and 1.0".to_string()));
-    }
-    let rate = Ratio::from(rust_decimal::Decimal::try_from(new_rate)
-        .map_err(|_| ProtocolError::GenericError("Invalid rate".to_string()))?);
-    mutate_state(|s| {
-        rumi_protocol_backend::event::record_set_max_partial_liquidation_ratio(s, rate);
-    });
-    log!(INFO, "[set_max_partial_liquidation_ratio] Max partial liquidation ratio set to: {}", new_rate);
-    Ok(())
-}
-
-/// Get the current max partial liquidation ratio
-#[candid_method(query)]
-#[query]
-fn get_max_partial_liquidation_ratio() -> f64 {
-    read_state(|s| s.max_partial_liquidation_ratio.to_f64())
 }
 
 /// Set the recovery CR multiplier (developer only).

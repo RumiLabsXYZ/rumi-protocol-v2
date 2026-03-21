@@ -567,7 +567,6 @@ service : (ProtocolArg) -> {
   get_liquidation_bonus : () -> (float64) query;
   get_liquidation_protocol_share : () -> (float64) query;
   get_liquidity_status : (principal) -> (LiquidityStatus) query;
-  get_max_partial_liquidation_ratio : () -> (float64) query;
   get_min_icusd_amount : () -> (nat64) query;
   get_protocol_snapshots : (GetEventsArg) -> (vec ProtocolSnapshot) query;
   get_protocol_status : () -> (ProtocolStatus) query;
@@ -634,7 +633,6 @@ service : (ProtocolArg) -> {
   set_liquidation_bot_config : (principal, nat64) -> (Result);
   set_liquidation_protocol_share : (float64) -> (Result);
   set_lst_haircut : (principal, float64) -> (Result);
-  set_max_partial_liquidation_ratio : (float64) -> (Result);
   set_min_icusd_amount : (nat64) -> (Result);
   set_rate_curve_markers : (opt principal, vec record { float64; float64 }) -> (
       Result,

@@ -401,18 +401,17 @@ pub fn check_vaults() {
         // Build enriched notification payload
         let vault_notifications: Vec<LiquidatableVaultInfo> = read_state(|s| {
             unhealthy_vaults.iter().map(|v| {
-                let price = s.get_collateral_price_decimal(&v.collateral_type)
-                    .map(|p| UsdIcp::from(p).to_e8s())
-                    .unwrap_or(0);
-                let max_liq = (v.borrowed_icusd_amount * s.max_partial_liquidation_ratio)
-                    .min(v.borrowed_icusd_amount);
+                let collateral_price_usd = s.get_collateral_price_decimal(&v.collateral_type)
+                    .map(|p| UsdIcp::from(p))
+                    .unwrap_or(UsdIcp::from(rust_decimal::Decimal::ZERO));
+                let optimal_liq = s.compute_partial_liquidation_cap(v, collateral_price_usd);
                 LiquidatableVaultInfo {
                     vault_id: v.vault_id,
                     collateral_type: v.collateral_type,
                     debt_amount: v.borrowed_icusd_amount.to_u64(),
                     collateral_amount: v.collateral_amount,
-                    recommended_liquidation_amount: max_liq.to_u64(),
-                    collateral_price_e8s: price,
+                    recommended_liquidation_amount: optimal_liq.to_u64(),
+                    collateral_price_e8s: collateral_price_usd.to_e8s(),
                 }
             }).collect()
         });

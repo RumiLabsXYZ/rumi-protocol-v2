@@ -731,11 +731,6 @@ export const idlFactory = ({ IDL }) => {
         [LiquidityStatus],
         ['query'],
       ),
-    'get_max_partial_liquidation_ratio' : IDL.Func(
-        [],
-        [IDL.Float64],
-        ['query'],
-      ),
     'get_min_icusd_amount' : IDL.Func([], [IDL.Nat64], ['query']),
     'get_protocol_snapshots' : IDL.Func(
         [GetEventsArg],
@@ -891,7 +886,6 @@ export const idlFactory = ({ IDL }) => {
       ),
     'set_liquidation_protocol_share' : IDL.Func([IDL.Float64], [Result], []),
     'set_lst_haircut' : IDL.Func([IDL.Principal, IDL.Float64], [Result], []),
-    'set_max_partial_liquidation_ratio' : IDL.Func([IDL.Float64], [Result], []),
     'set_min_icusd_amount' : IDL.Func([IDL.Nat64], [Result], []),
     'set_rate_curve_markers' : IDL.Func(
         [IDL.Opt(IDL.Principal), IDL.Vec(IDL.Tuple(IDL.Float64, IDL.Float64))],
