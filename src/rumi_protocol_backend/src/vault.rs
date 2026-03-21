@@ -97,6 +97,10 @@ pub struct Vault {
     /// Defaults to 0 for existing vaults (backward compat).
     #[serde(default = "default_zero_icusd")]
     pub accrued_interest: ICUSD,
+    /// True while the bot has claimed this vault for liquidation but hasn't
+    /// confirmed or cancelled yet. Blocks ALL user operations on the vault.
+    #[serde(default)]
+    pub bot_processing: bool,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Debug)]
@@ -455,6 +459,7 @@ pub async fn open_vault(collateral_amount_raw: u64, collateral_type_opt: Option<
                         collateral_type,
                         last_accrual_time: ic_cdk::api::time(),
                         accrued_interest: ICUSD::new(0),
+                        bot_processing: false,
                     },
                     block_index,
                 );
@@ -581,6 +586,7 @@ pub async fn open_vault_and_borrow(
                 collateral_type,
                 last_accrual_time: ic_cdk::api::time(),
                 accrued_interest: ICUSD::new(0),
+                bot_processing: false,
             },
             block_index,
         );
@@ -1117,6 +1123,7 @@ pub async fn open_vault_with_deposit(
                 collateral_type,
                 last_accrual_time: ic_cdk::api::time(),
                 accrued_interest: ICUSD::new(0),
+                bot_processing: false,
             },
             sweep_block_index,
         );

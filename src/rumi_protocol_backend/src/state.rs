@@ -171,6 +171,23 @@ impl CollateralStatus {
     }
 }
 
+/// Tracks a bot's pending liquidation claim on a vault.
+#[derive(candid::CandidType, Clone, Debug, serde::Deserialize, Serialize)]
+pub struct BotClaim {
+    /// Vault ID being liquidated
+    pub vault_id: u64,
+    /// Amount of collateral transferred to the bot
+    pub collateral_amount: u64,
+    /// Debt amount the bot committed to cover
+    pub debt_amount: u64,
+    /// Collateral type (ledger principal)
+    pub collateral_type: Principal,
+    /// Timestamp (nanos) when claim was created
+    pub claimed_at: u64,
+    /// Collateral price at time of claim (for event logging)
+    pub collateral_price_e8s: u64,
+}
+
 /// Asset class for XRC price queries (mirrors ic_xrc_types::AssetClass but with serde support).
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub enum XrcAssetClass {
@@ -658,6 +675,9 @@ pub struct State {
     /// Used by check_vaults() to implement priority cascade:
     /// bot gets one cycle, then stability pool takes over.
     pub bot_pending_vaults: BTreeMap<u64, u64>,
+    /// Active bot claims — tracks collateral transferred to bot but not yet confirmed.
+    /// Key = vault_id. Auto-cancelled after `BOT_CLAIM_TIMEOUT_NS`.
+    pub bot_claims: BTreeMap<u64, BotClaim>,
 }
 
 impl From<InitArg> for State {
@@ -836,6 +856,7 @@ impl From<InitArg> for State {
             bot_total_icusd_deposited_e8s: 0,
             bot_allowed_collateral_types: BTreeSet::new(),
             bot_pending_vaults: BTreeMap::new(),
+            bot_claims: BTreeMap::new(),
         }
     }
 }
