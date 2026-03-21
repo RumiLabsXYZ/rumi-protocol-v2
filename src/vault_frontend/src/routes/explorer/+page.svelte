@@ -10,11 +10,16 @@
 	} from '$lib/stores/explorerStore';
 	import type { UnifiedEvent } from '$lib/stores/explorerStore';
 	import { getEventCategory, type EventCategory } from '$lib/utils/eventFormatters';
+	import { formatAmount } from '$lib/utils/eventFormatters';
+	import { stabilityPoolService } from '$lib/services/stabilityPoolService';
+	import { threePoolService } from '$lib/services/threePoolService';
 
 	type ExplorerFilter = EventCategory | 'all' | '3pool';
 
 	let selectedFilter: ExplorerFilter = 'all';
 	let vaultCollateralMap: Map<number, any> = new Map();
+	let spStatus: any = null;
+	let tpStatus: any = null;
 
 	$: totalPages = Math.ceil($explorerEventsTotalCount / PAGE_SIZE);
 
@@ -55,6 +60,8 @@
 	onMount(async () => {
 		fetchEvents(0);
 		fetchPoolEvents();
+		try { spStatus = await stabilityPoolService.getPoolStatus(); } catch {}
+		try { tpStatus = await threePoolService.getPoolStatus(); } catch {}
 		// Build vault_id -> collateral_type lookup for event summaries
 		const vaults = await fetchAllVaults();
 		const map = new Map<number, any>();
@@ -74,9 +81,26 @@
 
 	<div class="stats-row">
 		<div class="stat glass-card">
-			<span class="stat-label">Total Events</span>
+			<span class="stat-label">Protocol Events</span>
 			<span class="stat-value key-number">{$explorerEventsTotalCount.toLocaleString()}</span>
 		</div>
+		{#if spStatus}
+			<div class="stat glass-card">
+				<span class="stat-label">Stability Pool</span>
+				<span class="stat-value key-number">{formatAmount(spStatus.total_deposits_e8s)} icUSD</span>
+			</div>
+		{/if}
+		{#if tpStatus}
+			<div class="stat glass-card">
+				<span class="stat-label">3Pool TVL</span>
+				<span class="stat-value key-number">
+					{formatAmount(
+						tpStatus.balances.reduce((sum: bigint, b: bigint, i: number) =>
+							sum + (i === 0 ? b : b * 100n), 0n)
+					)} USD
+				</span>
+			</div>
+		{/if}
 	</div>
 
 	<div class="filter-row">

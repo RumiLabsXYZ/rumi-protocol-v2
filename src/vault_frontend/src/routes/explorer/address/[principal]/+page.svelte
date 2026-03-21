@@ -10,6 +10,8 @@
   import { truncatePrincipal, copyToClipboard } from '$lib/utils/principalHelpers';
   import { resolveCollateralSymbol } from '$lib/utils/eventFormatters';
   import { formatAmount } from '$lib/utils/eventFormatters';
+  import { stabilityPoolService } from '$lib/services/stabilityPoolService';
+  import { threePoolService } from '$lib/services/threePoolService';
   import { toastStore } from '$lib/stores/toast';
 
   let vaults: any[] = [];
@@ -17,6 +19,9 @@
   let loading = true;
   let collateralConfigs: Map<string, any> = new Map();
   let copied = false;
+  let spPosition: any = null;
+  let lpBalance: bigint = 0n;
+  let poolStatus: any = null;
 
   $: principalStr = $page.params.principal;
 
@@ -45,6 +50,23 @@
 
       // Fetch events involving this principal
       allHistory = await fetchEventsByPrincipal(principalStr);
+
+      // Fetch stability pool position
+      try {
+        spPosition = await stabilityPoolService.getUserPosition(Principal.fromText(principalStr));
+      } catch (e) {
+        console.error('Failed to fetch SP position:', e);
+      }
+
+      // Fetch 3pool LP balance
+      try {
+        lpBalance = await threePoolService.getLpBalance(Principal.fromText(principalStr));
+        if (lpBalance > 0n) {
+          poolStatus = await threePoolService.getPoolStatus();
+        }
+      } catch (e) {
+        console.error('Failed to fetch 3pool position:', e);
+      }
     } catch (e) {
       console.error('Failed to load address:', e);
       toastStore.error('Invalid principal or failed to load data');
@@ -97,6 +119,45 @@
       <div class="empty">No vaults found for this address.</div>
     {/if}
 
+    {#if spPosition}
+      <h2 class="section-title">Stability Pool</h2>
+      <div class="pool-position glass-card">
+        <div class="position-row">
+          <span class="position-label">Deposited</span>
+          <span class="position-value">{formatAmount(spPosition.total_usd_value_e8s ?? 0n)} icUSD</span>
+        </div>
+        {#if spPosition.collateral_gains?.length > 0}
+          {#each spPosition.collateral_gains as [ledger, amount]}
+            {#if Number(amount) > 0}
+              <div class="position-row">
+                <span class="position-label">Collateral Gain</span>
+                <span class="position-value">{formatAmount(amount)} {resolveCollateralSymbol(ledger)}</span>
+              </div>
+            {/if}
+          {/each}
+        {/if}
+      </div>
+    {/if}
+
+    {#if lpBalance > 0n}
+      <h2 class="section-title">3Pool</h2>
+      <div class="pool-position glass-card">
+        <div class="position-row">
+          <span class="position-label">LP Balance</span>
+          <span class="position-value">{formatAmount(lpBalance)} 3USD</span>
+        </div>
+        {#if poolStatus}
+          {@const share = poolStatus.lp_total_supply > 0n
+            ? Number(lpBalance) / Number(poolStatus.lp_total_supply)
+            : 0}
+          <div class="position-row">
+            <span class="position-label">Pool Share</span>
+            <span class="position-value">{(share * 100).toFixed(2)}%</span>
+          </div>
+        {/if}
+      </div>
+    {/if}
+
     {#if allHistory.length > 0}
       <h2 class="section-title">Activity ({allHistory.length} events)</h2>
       <div class="events-list glass-card">
@@ -125,4 +186,8 @@
   .section-title { margin-bottom:0.75rem; }
   .events-list { padding:0; overflow:hidden; }
   .loading, .empty { text-align:center; padding:3rem; color:var(--rumi-text-muted); }
+  .pool-position { padding: 1rem; margin-bottom: 1.5rem; }
+  .position-row { display: flex; justify-content: space-between; align-items: center; padding: 0.375rem 0; }
+  .position-label { font-size: 0.8125rem; color: var(--rumi-text-muted); }
+  .position-value { font-size: 0.9375rem; font-weight: 500; }
 </style>
