@@ -36,6 +36,15 @@ export function getEventType(event: any): string {
 		admin_vault_correction: 'Vault Correction',
 		admin_sweep_to_treasury: 'Treasury Sweep',
 		reserve_redemption: 'Reserve Redemption',
+		update_collateral_config: 'Update Collateral Config',
+		add_collateral_type: 'Add Collateral Type',
+		update_collateral_status: 'Update Collateral Status',
+		set_recovery_parameters: 'Recovery Parameters',
+		set_recovery_target_cr: 'Recovery Target CR',
+		set_recovery_cr_multiplier: 'Recovery CR Multiplier',
+		set_max_partial_liquidation_ratio: 'Max Partial Liquidation',
+		set_stability_pool_liquidation_share: 'SP Liquidation Share',
+		set_recovery_rate_curve: 'Recovery Rate Curve',
 		init: 'Protocol Init',
 		upgrade: 'Protocol Upgrade'
 	};
@@ -231,6 +240,40 @@ export function getEventSummary(event: any, vaultCollateralMap?: Map<number, any
 			return `Admin minted ${formatAmount(data.amount)} icUSD`;
 		case 'reserve_redemption':
 			return `Reserve redemption: ${formatAmount(data.icusd_amount)} icUSD`;
+		case 'update_collateral_config': {
+			const symbol = resolveCollateralSymbol(data.collateral_type);
+			return `Updated ${symbol} collateral configuration`;
+		}
+		case 'add_collateral_type': {
+			const symbol = resolveCollateralSymbol(data.collateral_type);
+			return `Added new collateral type: ${symbol}`;
+		}
+		case 'update_collateral_status': {
+			const symbol = resolveCollateralSymbol(data.collateral_type);
+			const statusObj = data.status;
+			const statusName = typeof statusObj === 'object' && statusObj !== null
+				? Object.keys(statusObj).find(k => statusObj[k] === null) || 'Unknown'
+				: String(statusObj);
+			return `Set ${symbol} status to ${statusName}`;
+		}
+		case 'set_recovery_parameters': {
+			const symbol = resolveCollateralSymbol(data.collateral_type);
+			return `Updated recovery parameters for ${symbol}`;
+		}
+		case 'admin_vault_correction':
+			return `Admin corrected Vault #${data.vault_id} collateral: ${formatAmount(data.old_amount)} → ${formatAmount(data.new_amount)}`;
+		case 'admin_sweep_to_treasury':
+			return `Swept ${formatAmount(data.amount)} to treasury`;
+		case 'set_recovery_target_cr':
+			return `Set recovery target CR to ${data.rate}`;
+		case 'set_recovery_cr_multiplier':
+			return `Set recovery CR multiplier to ${data.multiplier ?? data.buffer}`;
+		case 'set_max_partial_liquidation_ratio':
+			return `Set max partial liquidation ratio to ${data.rate}`;
+		case 'set_stability_pool_liquidation_share':
+			return `Set stability pool liquidation share to ${data.share}`;
+		case 'set_recovery_rate_curve':
+			return 'Updated recovery rate curve';
 		case 'init':
 			return 'Protocol initialized';
 		case 'upgrade': {
