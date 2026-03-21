@@ -103,6 +103,17 @@ pub struct Vault {
     pub bot_processing: bool,
 }
 
+/// Returns an error if the vault is locked for bot processing.
+pub fn require_vault_not_processing(vault: &Vault) -> Result<(), ProtocolError> {
+    if vault.bot_processing {
+        Err(ProtocolError::GenericError(format!(
+            "Vault #{} is locked — bot liquidation in progress", vault.vault_id
+        )))
+    } else {
+        Ok(())
+    }
+}
+
 #[derive(CandidType, Serialize, Deserialize, Debug)]
 pub struct CandidVault {
     pub owner: Principal,
@@ -648,6 +659,8 @@ async fn borrow_from_vault_internal(caller: Principal, arg: VaultArg) -> Result<
         }
     }).map_err(|msg: &str| ProtocolError::GenericError(msg.to_string()))?;
 
+    require_vault_not_processing(&vault)?;
+
     // Check collateral status allows borrowing
     let collateral_status = read_state(|s| s.get_collateral_status(&vault.collateral_type));
     if let Some(status) = collateral_status {
@@ -782,6 +795,11 @@ pub async fn repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
         }
     };
 
+    if let Err(e) = require_vault_not_processing(&vault) {
+        guard_principal.fail();
+        return Err(e);
+    }
+
     // Check collateral status allows repayment
     let collateral_status = read_state(|s| s.get_collateral_status(&vault.collateral_type));
     if let Some(status) = collateral_status {
@@ -878,6 +896,11 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
             return Err(ProtocolError::GenericError("Vault not found".to_string()));
         }
     };
+
+    if let Err(e) = require_vault_not_processing(&vault) {
+        guard_principal.fail();
+        return Err(e);
+    }
 
     // Check collateral status allows repayment
     let collateral_status = read_state(|s| s.get_collateral_status(&vault.collateral_type));
@@ -1005,6 +1028,11 @@ pub async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
             return Err(ProtocolError::GenericError(msg.to_string()));
         }
     };
+
+    if let Err(e) = require_vault_not_processing(&vault) {
+        guard_principal.fail();
+        return Err(e);
+    }
 
     if min_deposit > 0 && amount < ICP::new(min_deposit) {
         guard_principal.fail();
@@ -1180,6 +1208,11 @@ pub async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError
         }
     };
 
+    if let Err(e) = require_vault_not_processing(&vault) {
+        guard_principal.fail();
+        return Err(e);
+    }
+
     // Check collateral status
     let collateral_status = read_state(|s| s.get_collateral_status(&vault.collateral_type));
     if let Some(status) = collateral_status {
@@ -1259,6 +1292,8 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
             .cloned()
             .ok_or(ProtocolError::GenericError("Vault not found".to_string()))
     })?;
+
+    require_vault_not_processing(&vault)?;
 
     // Check collateral status allows closing
     let collateral_status = read_state(|s| s.get_collateral_status(&vault.collateral_type));
@@ -1392,6 +1427,8 @@ pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
             .cloned()
             .ok_or(ProtocolError::GenericError("Vault not found".to_string()))
     })?;
+
+    require_vault_not_processing(&vault)?;
 
     // Check collateral status allows withdrawal
     let collateral_status = read_state(|s| s.get_collateral_status(&vault.collateral_type));
@@ -1529,6 +1566,8 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
         Ok(result) => result,
         Err(msg) => return Err(ProtocolError::GenericError(msg.to_string())),
     };
+
+    require_vault_not_processing(&vault)?;
 
     if min_deposit > 0 && withdraw_amount < ICP::new(min_deposit) {
         return Err(ProtocolError::AmountTooLow {
@@ -1690,6 +1729,8 @@ pub async fn withdraw_and_close_vault(vault_id: u64) -> Result<Option<u64>, Prot
             .cloned()
             .ok_or(ProtocolError::GenericError(format!("Vault #{} not found", vault_id)))
     })?;
+
+    require_vault_not_processing(&vault)?;
 
     // Check collateral status allows withdraw + close
     let collateral_status = read_state(|s| s.get_collateral_status(&vault.collateral_type));
