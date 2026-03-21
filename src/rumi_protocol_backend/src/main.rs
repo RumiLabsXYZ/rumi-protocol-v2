@@ -1563,6 +1563,117 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
     })
 }
 
+/// Bot calls this after successfully swapping collateral (phase 2 of 2).
+/// Finalizes the liquidation: reduces vault debt and collateral, records event.
+#[candid_method(update)]
+#[update]
+async fn bot_confirm_liquidation(vault_id: u64) -> Result<(), ProtocolError> {
+    validate_call().await?;
+    let caller = ic_cdk::api::caller();
+
+    let is_bot = read_state(|s| {
+        s.liquidation_bot_principal.map_or(false, |bp| bp == caller)
+    });
+    if !is_bot {
+        return Err(ProtocolError::GenericError(
+            "Caller is not the registered liquidation bot canister".to_string(),
+        ));
+    }
+
+    let claim = read_state(|s| s.bot_claims.get(&vault_id).cloned())
+        .ok_or_else(|| ProtocolError::GenericError(format!(
+            "No active claim for vault #{}", vault_id
+        )))?;
+
+    mutate_state(|s| {
+        if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
+            vault.borrowed_icusd_amount -= ICUSD::new(claim.debt_amount);
+            vault.collateral_amount = vault.collateral_amount.saturating_sub(claim.collateral_amount);
+            vault.bot_processing = false;
+        }
+
+        let event = rumi_protocol_backend::event::Event::PartialLiquidateVault {
+            vault_id,
+            liquidator_payment: ICUSD::new(claim.debt_amount),
+            icp_to_liquidator: ICP::from(claim.collateral_amount),
+            liquidator: Some(caller),
+            icp_rate: Some(UsdIcp::from(Decimal::from(claim.collateral_price_e8s) / dec!(100_000_000))),
+            protocol_fee_collateral: None,
+            timestamp: Some(ic_cdk::api::time()),
+        };
+        rumi_protocol_backend::storage::record_event(&event);
+
+        s.bot_total_debt_covered_e8s += claim.debt_amount;
+        s.bot_claims.remove(&vault_id);
+    });
+
+    log!(INFO, "[bot_confirm_liquidation] Confirmed liquidation for vault #{}: debt={}, collateral={}",
+        vault_id, claim.debt_amount, claim.collateral_amount);
+
+    Ok(())
+}
+
+/// Bot calls this when the swap failed and collateral has been returned (cancel phase).
+/// Unlocks the vault, restores budget, and clears the claim.
+/// The bot MUST transfer the collateral back to the backend canister BEFORE calling this.
+#[candid_method(update)]
+#[update]
+async fn bot_cancel_liquidation(vault_id: u64) -> Result<(), ProtocolError> {
+    validate_call().await?;
+    let caller = ic_cdk::api::caller();
+
+    let is_bot = read_state(|s| {
+        s.liquidation_bot_principal.map_or(false, |bp| bp == caller)
+    });
+    if !is_bot {
+        return Err(ProtocolError::GenericError(
+            "Caller is not the registered liquidation bot canister".to_string(),
+        ));
+    }
+
+    let claim = read_state(|s| s.bot_claims.get(&vault_id).cloned())
+        .ok_or_else(|| ProtocolError::GenericError(format!(
+            "No active claim for vault #{}", vault_id
+        )))?;
+
+    // Verify the collateral was actually returned by checking the backend's balance
+    let backend_id = ic_cdk::id();
+    let balance_result: Result<(candid::Nat,), _> = ic_cdk::call(
+        claim.collateral_type,
+        "icrc1_balance_of",
+        (icrc_ledger_types::icrc1::account::Account {
+            owner: backend_id,
+            subaccount: None,
+        },),
+    ).await;
+
+    match balance_result {
+        Ok((balance,)) => {
+            let balance_u64 = balance.0.to_u64().unwrap_or(0);
+            log!(INFO, "[bot_cancel_liquidation] Backend collateral balance: {} (type {})",
+                balance_u64, claim.collateral_type);
+        }
+        Err((code, msg)) => {
+            log!(INFO, "[bot_cancel_liquidation] WARNING: Could not verify collateral return: {:?} {}",
+                code, msg);
+        }
+    }
+
+    mutate_state(|s| {
+        if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
+            vault.bot_processing = false;
+        }
+        // Restore budget since this liquidation didn't go through
+        s.bot_budget_remaining_e8s += claim.debt_amount;
+        s.bot_claims.remove(&vault_id);
+    });
+
+    log!(INFO, "[bot_cancel_liquidation] Cancelled claim for vault #{}: collateral={}, debt={} (budget restored)",
+        vault_id, claim.collateral_amount, claim.debt_amount);
+
+    Ok(())
+}
+
 /// Developer-only: force the bot to liquidate a vault regardless of health ratio.
 /// Used for testing the liquidation pipeline end-to-end.
 /// Only vaults whose collateral type is in `bot_allowed_collateral_types` are accepted.
