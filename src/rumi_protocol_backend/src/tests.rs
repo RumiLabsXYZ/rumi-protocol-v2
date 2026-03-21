@@ -16,6 +16,7 @@ fn arb_vault() -> impl Strategy<Value = Vault> {
             collateral_type: Principal::anonymous(),
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         }
     })
 }
@@ -63,6 +64,7 @@ proptest! {
                 collateral_type: Principal::anonymous(),
                 last_accrual_time: 0,
                 accrued_interest: ICUSD::new(0),
+                bot_processing: false,
             };
             
             let result = crate::state::distribute_across_vaults(&vaults, target_vault);
