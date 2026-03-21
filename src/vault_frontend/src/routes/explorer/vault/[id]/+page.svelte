@@ -6,7 +6,7 @@
   import { fetchVaultHistory, fetchAllVaults } from '$lib/stores/explorerStore';
   import { publicActor } from '$lib/services/protocol/apiClient';
   import { truncatePrincipal } from '$lib/utils/principalHelpers';
-  import { formatAmount, formatTimestamp } from '$lib/utils/eventFormatters';
+  import { formatAmount, formatTimestamp, resolveCollateralSymbol } from '$lib/utils/eventFormatters';
 
   let vault: any = null;
   let history: any[] = [];
@@ -16,7 +16,8 @@
   $: vaultId = Number($page.params.id);
 
   $: ownerStr = vault?.owner?.toString?.() || '';
-  $: collateralSymbol = collateralConfig ? (collateralConfig.ledger_canister_id?.toString?.()?.startsWith('ryjl3') ? 'ICP' : 'tokens') : 'tokens';
+  $: collateralSymbol = vault?.collateral_type ? resolveCollateralSymbol(vault.collateral_type) : 'tokens';
+  $: vaultCollateralMap = vault ? new Map([[Number(vault.vault_id), vault.collateral_type]]) : undefined;
   $: decimals = collateralConfig?.decimals ? Number(collateralConfig.decimals) : 8;
   $: price = collateralConfig?.last_price?.[0] ?? 0;
   $: collateralValue = vault ? Number(vault.collateral_amount) / Math.pow(10, decimals) * price : 0;
@@ -89,7 +90,7 @@
     {:else}
       <div class="events-list glass-card">
         {#each history as event}
-          <EventRow {event} />
+          <EventRow {event} {vaultCollateralMap} />
         {/each}
       </div>
     {/if}

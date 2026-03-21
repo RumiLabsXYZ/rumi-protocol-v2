@@ -4,10 +4,11 @@
 
 	export let event: any;
 	export let index: number | null = null;
+	export let vaultCollateralMap: Map<number, any> | undefined = undefined;
 
 	$: type = getEventType(event);
 	$: badgeColor = getEventBadgeColor(event);
-	$: summary = getEventSummary(event);
+	$: summary = getEventSummary(event, vaultCollateralMap);
 	$: timestamp = getEventTimestamp(event);
 	$: caller = getEventCaller(event);
 </script>

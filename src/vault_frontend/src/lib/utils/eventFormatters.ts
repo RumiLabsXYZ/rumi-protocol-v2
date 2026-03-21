@@ -146,26 +146,67 @@ export function formatAmount(e8s: bigint | number, decimals: number = 8): string
 	return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: places });
 }
 
+// Resolve a collateral principal to a human-readable symbol.
+// If a resolver function is provided, use it; otherwise try well-known principals.
+const KNOWN_COLLATERAL: Record<string, string> = {
+	'ryjl3-tyaaa-aaaaa-aaaba-cai': 'ICP',
+	'mxzaz-hqaaa-aaaar-qaada-cai': 'ckBTC',
+	'ss2fx-dyaaa-aaaar-qacoq-cai': 'ckETH',
+	'o7oak-6yaaa-aaaap-qhgbq-cai': 'ckXAUT',
+	'7pail-xaaaa-aaaas-aabmq-cai': 'BOB',
+	'rh2pm-ryaaa-aaaan-qeniq-cai': 'EXE',
+};
+
+export function resolveCollateralSymbol(principal: any, resolver?: (p: string) => string): string {
+	const text = principal?.toString?.() ?? principal?.toText?.() ?? String(principal);
+	if (resolver) return resolver(text);
+	return KNOWN_COLLATERAL[text] ?? text.substring(0, 5) + '…';
+}
+
 // Get a one-line human-readable summary of an event
-export function getEventSummary(event: any): string {
+export function getEventSummary(event: any, vaultCollateralMap?: Map<number, any>): string {
 	const key = getEventKey(event);
 	const data = event[key];
 
+	// Resolve collateral symbol: check event data first, then vault lookup map, then known principals
+	function collateralLabel(vaultId?: number): string {
+		// 1. Check if event data has collateral_type directly
+		const ct = data?.collateral_type;
+		if (ct) return resolveCollateralSymbol(ct);
+		// 2. Check vault struct (for open_vault events)
+		const vaultCt = data?.vault?.collateral_type;
+		if (vaultCt) return resolveCollateralSymbol(vaultCt);
+		// 3. Look up vault's collateral type from the map
+		if (vaultId !== undefined && vaultCollateralMap) {
+			const mapped = vaultCollateralMap.get(vaultId);
+			if (mapped) return resolveCollateralSymbol(mapped);
+		}
+		return 'collateral';
+	}
+
 	switch (key) {
-		case 'open_vault':
-			return `Vault #${data.vault.vault_id} opened with ${formatAmount(data.vault.collateral_amount)} collateral`;
+		case 'open_vault': {
+			const label = collateralLabel(Number(data.vault?.vault_id));
+			return `Vault #${data.vault.vault_id} opened with ${formatAmount(data.vault.collateral_amount)} ${label}`;
+		}
 		case 'close_vault':
 			return `Vault #${data.vault_id} closed`;
 		case 'borrow_from_vault':
 			return `Borrowed ${formatAmount(data.borrowed_amount)} icUSD from Vault #${data.vault_id}`;
 		case 'repay_to_vault':
 			return `Repaid ${formatAmount(data.repayed_amount)} icUSD to Vault #${data.vault_id}`;
-		case 'add_margin_to_vault':
-			return `Added ${formatAmount(data.margin_added)} collateral to Vault #${data.vault_id}`;
-		case 'collateral_withdrawn':
-			return `Withdrew all collateral from Vault #${data.vault_id}`;
-		case 'partial_collateral_withdrawn':
-			return `Withdrew ${formatAmount(data.amount)} collateral from Vault #${data.vault_id}`;
+		case 'add_margin_to_vault': {
+			const label = collateralLabel(Number(data.vault_id));
+			return `Added ${formatAmount(data.margin_added)} ${label} to Vault #${data.vault_id}`;
+		}
+		case 'collateral_withdrawn': {
+			const label = collateralLabel(Number(data.vault_id));
+			return `Withdrew all ${label} from Vault #${data.vault_id}`;
+		}
+		case 'partial_collateral_withdrawn': {
+			const label = collateralLabel(Number(data.vault_id));
+			return `Withdrew ${formatAmount(data.amount)} ${label} from Vault #${data.vault_id}`;
+		}
 		case 'withdraw_and_close_vault':
 		case 'vault_withdrawn_and_closed':
 		case 'VaultWithdrawnAndClosed':

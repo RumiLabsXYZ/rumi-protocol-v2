@@ -8,6 +8,7 @@
   import { fetchVaultsByOwner, fetchEventsByPrincipal, fetchVaultHistory } from '$lib/stores/explorerStore';
   import { publicActor } from '$lib/services/protocol/apiClient';
   import { truncatePrincipal, copyToClipboard } from '$lib/utils/principalHelpers';
+  import { resolveCollateralSymbol } from '$lib/utils/eventFormatters';
   import { formatAmount } from '$lib/utils/eventFormatters';
   import { toastStore } from '$lib/stores/toast';
 
@@ -99,7 +100,7 @@
           {@const config = collateralConfigs.get(ct)}
           <VaultSummaryCard
             {vault}
-            collateralSymbol={ct.startsWith('ryjl3') ? 'ICP' : 'tokens'}
+            collateralSymbol={resolveCollateralSymbol(ct)}
             collateralDecimals={config?.decimals ? Number(config.decimals) : 8}
             collateralPrice={config?.last_price?.[0] ?? 0}
           />

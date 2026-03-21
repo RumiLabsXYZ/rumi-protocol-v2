@@ -5,11 +5,12 @@
 	import Pagination from '$lib/components/explorer/Pagination.svelte';
 	import {
 		explorerEvents, explorerEventsLoading, explorerEventsPage,
-		explorerEventsTotalCount, fetchEvents, PAGE_SIZE
+		explorerEventsTotalCount, fetchEvents, fetchAllVaults, PAGE_SIZE
 	} from '$lib/stores/explorerStore';
 	import { getEventCategory, type EventCategory } from '$lib/utils/eventFormatters';
 
 	let selectedFilter: EventCategory | 'all' = 'all';
+	let vaultCollateralMap: Map<number, any> = new Map();
 
 	$: totalPages = Math.ceil($explorerEventsTotalCount / PAGE_SIZE);
 
@@ -31,7 +32,16 @@
 		{ label: 'Admin', value: 'admin' },
 	];
 
-	onMount(() => { fetchEvents(0); });
+	onMount(async () => {
+		fetchEvents(0);
+		// Build vault_id → collateral_type lookup for event summaries
+		const vaults = await fetchAllVaults();
+		const map = new Map<number, any>();
+		for (const v of vaults) {
+			map.set(Number(v.vault_id), v.collateral_type);
+		}
+		vaultCollateralMap = map;
+	});
 </script>
 
 <div class="explorer-page">
@@ -65,7 +75,7 @@
 	{:else}
 		<div class="events-list glass-card">
 			{#each filteredEvents as { event, globalIndex }}
-				<EventRow {event} index={globalIndex} />
+				<EventRow {event} index={globalIndex} {vaultCollateralMap} />
 			{/each}
 		</div>
 	{/if}
