@@ -202,14 +202,27 @@ async fn call_bot_cancel_liquidation(config: &BotConfig, vault_id: u64) -> Resul
 
 /// Transfer collateral back to the backend canister via direct icrc1_transfer.
 /// No approve needed — the bot is sending from its own account.
+/// Subtracts the ledger fee from the amount since the bot's balance is exactly `amount`.
 async fn return_collateral_to_backend(config: &BotConfig, amount: u64, collateral_ledger: Principal) -> Result<(), String> {
+    // Query the ledger fee so we send amount - fee (bot balance is exactly `amount`)
+    let fee_result: Result<(Nat,), _> =
+        ic_cdk::call(collateral_ledger, "icrc1_fee", ()).await;
+    let fee = match fee_result {
+        Ok((f,)) => u64::try_from(f.0).unwrap_or(10_000),
+        Err(_) => 10_000, // fallback to ICP default
+    };
+    let send_amount = amount.saturating_sub(fee);
+    if send_amount == 0 {
+        return Err("Collateral amount too small to cover transfer fee".to_string());
+    }
+
     let transfer_args = icrc_ledger_types::icrc1::transfer::TransferArg {
         from_subaccount: None,
         to: Account {
             owner: config.backend_principal,
             subaccount: None,
         },
-        amount: Nat::from(amount),
+        amount: Nat::from(send_amount),
         fee: None,
         memo: None,
         created_at_time: None,

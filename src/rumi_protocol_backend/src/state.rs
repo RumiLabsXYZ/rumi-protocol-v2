@@ -2096,6 +2096,10 @@ impl State {
         }
         let deficit = numerator_icusd - collateral_value;
         let denominator = recovery_target - liq_bonus;
+        // If target CR <= bonus (misconfigured or deeply underwater), full liquidation
+        if denominator <= Ratio::from(dec!(0)) {
+            return vault.borrowed_icusd_amount;
+        }
         let repay_amount = deficit / denominator;
         repay_amount.min(vault.borrowed_icusd_amount)
     }
