@@ -131,6 +131,12 @@ impl StabilityPoolState {
     /// Distribute interest revenue pro-rata to all depositors of a given stablecoin.
     /// Called by the backend after minting interest to the pool canister.
     ///
+    /// Interest is distributed pro-rata based on each depositor's **total USD
+    /// value** across all stablecoins (icUSD, 3USD, ckUSDT, etc.), not just
+    /// their balance of the token being distributed. This ensures all depositors
+    /// earn interest proportional to their total deposit, regardless of which
+    /// stablecoin(s) they deposited.
+    ///
     /// When `collateral_type` is provided, depositors who have opted out of that
     /// collateral are excluded from the distribution — they should not earn
     /// interest from vaults backed by collateral they've opted out of.
@@ -143,12 +149,15 @@ impl StabilityPoolState {
             .map(|c| c.decimals)
             .unwrap_or(8);
 
-        // Collect eligible (principal, balance) pairs — exclude depositors who
-        // opted out of the collateral type that generated this interest.
+        let vps = self.virtual_prices().clone();
+
+        // Collect eligible (principal, total_usd_value_e8s) pairs — use total
+        // deposit value across ALL stablecoins for share calculation.
+        // Exclude depositors who opted out of the collateral type.
         let holders: Vec<(Principal, u64)> = self.deposits.iter()
             .filter_map(|(p, pos)| {
-                let bal = pos.stablecoin_balances.get(&token_ledger).copied().unwrap_or(0);
-                if bal == 0 {
+                let total_value = pos.total_usd_value(&self.stablecoin_registry, &vps);
+                if total_value == 0 {
                     return None;
                 }
                 // If we know the collateral source, skip opted-out depositors
@@ -157,7 +166,7 @@ impl StabilityPoolState {
                         return None;
                     }
                 }
-                Some((*p, bal))
+                Some((*p, total_value))
             })
             .collect();
 
@@ -545,30 +554,16 @@ impl StabilityPoolState {
         }
     }
 
-    /// For each collateral type, compute the total icUSD balance held by
-    /// depositors who are opted in to that collateral type.
-    /// Only counts tokens with symbol "icUSD" (interest-earning stablecoin).
+    /// For each collateral type, compute the total USD value (e8s) of deposits
+    /// held by depositors who are opted in to that collateral type.
+    /// Counts all stablecoins (icUSD, 3USD, ckUSDT, etc.) since all depositors
+    /// now earn interest proportional to their total deposit value.
     fn eligible_icusd_per_collateral(&self) -> Vec<(Principal, u64)> {
-        // Find the icUSD ledger(s) in the stablecoin registry
-        let icusd_ledgers: Vec<(Principal, u8)> = self.stablecoin_registry.iter()
-            .filter(|(_, config)| config.symbol == "icUSD")
-            .map(|(ledger, config)| (*ledger, config.decimals))
-            .collect();
-
-        if icusd_ledgers.is_empty() {
-            return Vec::new();
-        }
-
+        let vps = self.virtual_prices();
         self.collateral_registry.keys().map(|ct| {
             let eligible: u64 = self.deposits.values()
                 .filter(|pos| pos.is_opted_in(ct))
-                .map(|pos| {
-                    icusd_ledgers.iter()
-                        .map(|(ledger, _decimals)| {
-                            pos.stablecoin_balances.get(ledger).copied().unwrap_or(0)
-                        })
-                        .sum::<u64>()
-                })
+                .map(|pos| pos.total_usd_value(&self.stablecoin_registry, vps))
                 .sum();
             (*ct, eligible)
         }).collect()
@@ -1490,6 +1485,54 @@ mod tests {
             .sum();
         assert_eq!(total, 310, "All interest must be accounted for");
         assert_eq!(state.total_stablecoin_balances[&icusd_ledger()], 310);
+    }
+
+    #[test]
+    fn test_distribute_interest_cross_stablecoin() {
+        // A ckUSDT-only depositor should earn interest proportional to their total value
+        let mut state = test_state(); // Already has ckUSDT registered (6 decimals, priority 2)
+
+        // A deposits 50 icUSD, B deposits 50 ckUSDT (both worth $50)
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 50_00000000);
+        add_deposit_direct(&mut state, user_b(), ckusdt_ledger(), 50_000_000); // 50 * 10^6
+
+        // Distribute 10 icUSD interest
+        state.distribute_interest_revenue(icusd_ledger(), 10_00000000, None);
+
+        let a = state.deposits.get(&user_a()).unwrap();
+        let b = state.deposits.get(&user_b()).unwrap();
+        // Both have equal $50 deposits, so each gets 5 icUSD
+        assert_eq!(a.stablecoin_balances[&icusd_ledger()], 55_00000000, "A: 50 + 5 icUSD");
+        assert_eq!(b.stablecoin_balances[&icusd_ledger()], 5_00000000, "B: 0 + 5 icUSD (newly created)");
+        assert_eq!(b.stablecoin_balances[&ckusdt_ledger()], 50_000_000, "B: ckUSDT unchanged");
+        assert_eq!(state.total_stablecoin_balances[&icusd_ledger()], 60_00000000);
+    }
+
+    #[test]
+    fn test_distribute_interest_3usd_lp_depositor() {
+        // 3USD LP depositor should earn interest based on virtual-price-adjusted value
+        let mut state = test_state_with_3usd();
+
+        // A deposits 100 icUSD ($100), B deposits 100 3USD (worth ~$104.92 at vp=1.0492)
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
+        add_deposit_direct(&mut state, user_b(), three_usd_ledger(), 100_00000000);
+
+        // Total value: A=$100 + B=~$104.92 = ~$204.92
+        // Distribute 20 icUSD interest
+        state.distribute_interest_revenue(icusd_ledger(), 20_00000000, None);
+
+        let a = state.deposits.get(&user_a()).unwrap();
+        let b = state.deposits.get(&user_b()).unwrap();
+        // A's share: 20 * 100_00000000 / 204_92000000 ≈ 9.76 icUSD
+        // B's share: 20 * 104_92000000 / 204_92000000 ≈ 10.24 icUSD
+        let a_interest = a.stablecoin_balances[&icusd_ledger()] - 100_00000000;
+        let b_interest = b.stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0);
+        // Total interest must equal 20 icUSD
+        assert_eq!(a_interest + b_interest, 20_00000000, "All interest accounted for");
+        // B (3USD depositor) should have earned interest
+        assert!(b_interest > 0, "3USD depositor must earn interest");
+        // B should get slightly more than A since 3USD is worth more at vp > 1.0
+        assert!(b_interest > a_interest, "3USD depositor earns more due to higher value");
     }
 
     // ─── Test: Rounding dust doesn't drift aggregate totals ───
