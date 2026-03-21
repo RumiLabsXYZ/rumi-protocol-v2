@@ -30,7 +30,7 @@ fn pre_upgrade() {
 }
 
 #[post_upgrade]
-fn post_upgrade() {
+fn post_upgrade(_args: StabilityPoolInitArgs) {
     state::load_from_stable_memory();
     log!(INFO, "Stability Pool post-upgrade: state restored. {} depositors, {} liquidations",
         read_state(|s| s.deposits.len()),
@@ -40,7 +40,10 @@ fn post_upgrade() {
         ic_cdk::trap(&format!("State validation failed after upgrade: {}", error));
     }
 
-    setup_virtual_price_timer();
+    // Defer timer setup to avoid ic0_call_new restriction during upgrade
+    ic_cdk_timers::set_timer(Duration::ZERO, || {
+        setup_virtual_price_timer();
+    });
 }
 
 // ─── Virtual Price Timer ───
