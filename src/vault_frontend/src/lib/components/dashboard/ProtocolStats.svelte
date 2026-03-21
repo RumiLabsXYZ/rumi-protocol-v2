@@ -170,6 +170,14 @@
       <span class="stat-value">{formattedCR}%</span>
     </div>
     <div class="stat-row">
+      <span class="stat-label">Collateral Value</span>
+      <span class="stat-value">${formatNumber(collateralValueUsd)}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Total Borrowed</span>
+      <span class="stat-value">{formatStableDisplay(status?.totalIcusdBorrowed || 0)} icUSD</span>
+    </div>
+    <div class="stat-row">
       <span class="stat-label">Total Collateral</span>
       <span class="stat-value-stack">
         {#if collateralTotals.length > 0}
@@ -180,14 +188,6 @@
           <span>{formatNumber(status?.totalIcpMargin || 0)} ICP</span>
         {/if}
       </span>
-    </div>
-    <div class="stat-row">
-      <span class="stat-label">Collateral Value</span>
-      <span class="stat-value">${formatNumber(collateralValueUsd)}</span>
-    </div>
-    <div class="stat-row">
-      <span class="stat-label">Total Borrowed</span>
-      <span class="stat-value">{formatStableDisplay(status?.totalIcusdBorrowed || 0)} icUSD</span>
     </div>
     {#if ckusdtReserve > 0 || ckusdcReserve > 0}
       <div class="stat-row">
