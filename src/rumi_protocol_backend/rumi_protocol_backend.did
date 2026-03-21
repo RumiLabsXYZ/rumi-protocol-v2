@@ -456,6 +456,7 @@ type Result_6 = variant { Ok : ConsentInfo; Err : Icrc21Error };
 type Result_7 = variant { Ok : OpenVaultSuccess; Err : ProtocolError };
 type Result_8 = variant { Ok : bool; Err : ProtocolError };
 type Result_9 = variant { Ok : ReserveRedemptionResult; Err : ProtocolError };
+type Result_11 = variant { Ok : text; Err : ProtocolError };
 type StabilityPoolConfig = record {
   enabled : bool;
   liquidation_discount : nat64;
@@ -533,12 +534,16 @@ service : (ProtocolArg) -> {
   admin_mint_icusd : (nat64, principal, text) -> (Result_1);
   admin_sweep_to_treasury : (text) -> (Result_1);
   borrow_from_vault : (VaultArg) -> (Result_2);
+  bot_cancel_liquidation : (nat64) -> (Result);
+  bot_claim_liquidation : (nat64) -> (Result_3);
+  bot_confirm_liquidation : (nat64) -> (Result);
   bot_deposit_to_reserves : (nat64) -> (Result);
-  bot_liquidate : (nat64) -> (Result_3);
   claim_liquidity_returns : () -> (Result_1);
   clear_stuck_operations : (opt principal) -> (Result_1);
   close_vault : (nat64) -> (Result_4);
   dev_force_bot_liquidate : (nat64) -> (Result_3);
+  dev_test_cascade_liquidation : (nat64) -> (Result_11);
+  dev_test_pool_only_liquidation : (nat64) -> (Result_11);
   enter_recovery_mode : () -> (Result);
   exit_recovery_mode : () -> (Result);
   freeze_protocol : () -> (Result);

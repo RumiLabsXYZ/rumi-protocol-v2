@@ -577,6 +577,8 @@ export type Result_8 = { 'Ok' : boolean } |
   { 'Err' : ProtocolError };
 export type Result_9 = { 'Ok' : ReserveRedemptionResult } |
   { 'Err' : ProtocolError };
+export type Result_11 = { 'Ok' : string } |
+  { 'Err' : ProtocolError };
 export interface StabilityPoolConfig {
   'enabled' : boolean,
   'liquidation_discount' : bigint,
@@ -659,8 +661,10 @@ export interface _SERVICE {
   'admin_mint_icusd' : ActorMethod<[bigint, Principal, string], Result_1>,
   'admin_sweep_to_treasury' : ActorMethod<[string], Result_1>,
   'borrow_from_vault' : ActorMethod<[VaultArg], Result_2>,
+  'bot_cancel_liquidation' : ActorMethod<[bigint], Result>,
+  'bot_claim_liquidation' : ActorMethod<[bigint], Result_3>,
+  'bot_confirm_liquidation' : ActorMethod<[bigint], Result>,
   'bot_deposit_to_reserves' : ActorMethod<[bigint], Result>,
-  'bot_liquidate' : ActorMethod<[bigint], Result_3>,
   'claim_liquidity_returns' : ActorMethod<[], Result_1>,
   'clear_stuck_operations' : ActorMethod<[[] | [Principal]], Result_1>,
   'close_vault' : ActorMethod<[bigint], Result_4>,
@@ -682,6 +686,8 @@ export interface _SERVICE {
     }
   >,
   'dev_force_bot_liquidate' : ActorMethod<[bigint], Result_3>,
+  'dev_test_cascade_liquidation' : ActorMethod<[bigint], Result_11>,
+  'dev_test_pool_only_liquidation' : ActorMethod<[bigint], Result_11>,
   'enter_recovery_mode' : ActorMethod<[], Result>,
   'exit_recovery_mode' : ActorMethod<[], Result>,
   'freeze_protocol' : ActorMethod<[], Result>,

@@ -626,6 +626,10 @@ export const idlFactory = ({ IDL }) => {
     'Ok' : StabilityPoolLiquidationResult,
     'Err' : ProtocolError,
   });
+  const Result_11 = IDL.Variant({
+    'Ok' : IDL.Text,
+    'Err' : ProtocolError,
+  });
   return IDL.Service({
     'add_collateral_token' : IDL.Func([AddCollateralArg], [Result], []),
     'add_margin_to_vault' : IDL.Func([VaultArg], [Result_1], []),
@@ -643,7 +647,9 @@ export const idlFactory = ({ IDL }) => {
     'admin_sweep_to_treasury' : IDL.Func([IDL.Text], [Result_1], []),
     'borrow_from_vault' : IDL.Func([VaultArg], [Result_2], []),
     'bot_deposit_to_reserves' : IDL.Func([IDL.Nat64], [Result], []),
-    'bot_liquidate' : IDL.Func([IDL.Nat64], [Result_3], []),
+    'bot_cancel_liquidation' : IDL.Func([IDL.Nat64], [Result], []),
+    'bot_claim_liquidation' : IDL.Func([IDL.Nat64], [Result_3], []),
+    'bot_confirm_liquidation' : IDL.Func([IDL.Nat64], [Result], []),
     'claim_liquidity_returns' : IDL.Func([], [Result_1], []),
     'clear_stuck_operations' : IDL.Func(
         [IDL.Opt(IDL.Principal)],
@@ -676,6 +682,8 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'dev_force_bot_liquidate' : IDL.Func([IDL.Nat64], [Result_3], []),
+    'dev_test_cascade_liquidation' : IDL.Func([IDL.Nat64], [Result_11], []),
+    'dev_test_pool_only_liquidation' : IDL.Func([IDL.Nat64], [Result_11], []),
     'enter_recovery_mode' : IDL.Func([], [Result], []),
     'exit_recovery_mode' : IDL.Func([], [Result], []),
     'freeze_protocol' : IDL.Func([], [Result], []),
