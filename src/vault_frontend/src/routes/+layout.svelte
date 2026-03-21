@@ -69,7 +69,7 @@
   <div class="footer-inner">
     <div class="footer-links">
       <a href="/redeem" class="footer-link">Redeem</a>
-      <a href="/liquidations?tab=manual" class="footer-link">Liquidate{#if hasLiquidatableVaults}<span class="liq-alert-dot"></span>{/if}</a>
+      <a href="/liquidations" class="footer-link">Liquidate{#if hasLiquidatableVaults}<span class="liq-alert-dot"></span>{/if}</a>
       <a href="/transparency" class="footer-link">Transparency</a>
       <a href="/docs" class="footer-link">Docs</a>
       <a href="mailto:info@rumiprotocol.com" class="footer-link">Contact</a>

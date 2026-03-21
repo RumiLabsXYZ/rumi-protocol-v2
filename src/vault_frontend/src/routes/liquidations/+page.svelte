@@ -13,7 +13,7 @@
 
   function switchTab(tab: Tab) {
     const url = new URL($page.url);
-    if (tab === 'bot') {
+    if (tab === 'pool') {
       url.searchParams.delete('tab');
     } else {
       url.searchParams.set('tab', tab);
