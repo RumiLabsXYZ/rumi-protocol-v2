@@ -31,8 +31,8 @@
   let ckusdcReserve = 0;
   let refreshInterval: ReturnType<typeof setInterval>;
 
-  // Per-collateral totals: { symbol, amount (human-readable), color }[]
-  let collateralTotals: { symbol: string; amount: number; color: string }[] = [];
+  // Per-collateral totals: { symbol, amount (human-readable), color, price }[]
+  let collateralTotals: { symbol: string; amount: number; color: string; price: number }[] = [];
 
   const protocolPrincipal = Principal.fromText(CANISTER_IDS.PROTOCOL);
 
@@ -79,7 +79,6 @@
 
   async function fetchCollateralTotals() {
     try {
-      // Use lightweight backend aggregate instead of fetching all vaults
       const totals = await publicActor.get_collateral_totals() as any[];
       const collaterals = get(collateralStore).collaterals;
       collateralTotals = totals
@@ -91,6 +90,7 @@
             symbol: info?.symbol ?? ct.substring(0, 5),
             amount: Number(t.total_collateral) / Math.pow(10, decimals),
             color: info?.color ?? '#94A3B8',
+            price: Number(t.price || 0),
           };
         })
         .filter((t: any) => t.amount > 0);
@@ -103,7 +103,8 @@
       refreshInterval = setInterval(fetchStatus, 15000);
     } else {
       // Even when protocolStatus is provided as a prop, fetch per-collateral totals
-      collateralStore.fetchSupportedCollateral().then(() => fetchCollateralTotals());
+      collateralStore.fetchSupportedCollateral().catch(() => {});
+      fetchCollateralTotals();
       fetchCkStableReserves();
     }
     return () => { if (refreshInterval) clearInterval(refreshInterval); };
@@ -113,10 +114,7 @@
   $: status = protocolStatus || selfFetchedStatus;
   $: icpPrice = status?.lastIcpRate || 0;
   $: collateralValueUsd = collateralTotals.length > 0
-    ? collateralTotals.reduce((sum, ct) => {
-        const info = $collateralStore.collaterals.find(c => c.symbol === ct.symbol);
-        return sum + ct.amount * (info?.price || 0);
-      }, 0)
+    ? collateralTotals.reduce((sum, ct) => sum + ct.amount * ct.price, 0)
     : (status?.totalIcpMargin || 0) * icpPrice;
   $: collateralPercent = (status?.totalIcusdBorrowed || 0) > 0
     ? (status?.totalCollateralRatio || 0) * 100
