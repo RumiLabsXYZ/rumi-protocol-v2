@@ -142,6 +142,27 @@ pub struct VirtualPriceSnapshot {
     pub lp_total_supply: u128,
 }
 
+/// A recorded swap event for explorer/analytics.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct SwapEvent {
+    /// Sequential event index.
+    pub id: u64,
+    /// Timestamp in nanoseconds since UNIX epoch.
+    pub timestamp: u64,
+    /// The principal who initiated the swap.
+    pub caller: Principal,
+    /// Index of the input token (0, 1, or 2).
+    pub token_in: u8,
+    /// Index of the output token (0, 1, or 2).
+    pub token_out: u8,
+    /// Amount of input token (native decimals).
+    pub amount_in: u128,
+    /// Amount of output token received (native decimals).
+    pub amount_out: u128,
+    /// Fee charged (in output token units, native decimals).
+    pub fee: u128,
+}
+
 // ─── Pool Status (query response) ───
 
 /// Snapshot of pool state returned by queries.
