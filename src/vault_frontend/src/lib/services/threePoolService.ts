@@ -248,6 +248,16 @@ class ThreePoolService {
     return await actor.get_vp_snapshots() as VirtualPriceSnapshot[];
   }
 
+  async getSwapEvents(start: bigint, length: bigint): Promise<any[]> {
+    const actor = await this.getQueryActor();
+    return await actor.get_swap_events(start, length) as any[];
+  }
+
+  async getSwapEventCount(): Promise<bigint> {
+    const actor = await this.getQueryActor();
+    return await actor.get_swap_event_count() as bigint;
+  }
+
   // ── Mutations ──
 
   async swap(fromIndex: number, toIndex: number, dxRaw: bigint, minDyRaw: bigint): Promise<bigint> {

@@ -5,11 +5,15 @@
 	import Pagination from '$lib/components/explorer/Pagination.svelte';
 	import {
 		explorerEvents, explorerEventsLoading, explorerEventsPage,
-		explorerEventsTotalCount, fetchEvents, fetchAllVaults, PAGE_SIZE
+		explorerEventsTotalCount, fetchEvents, fetchAllVaults, PAGE_SIZE,
+		poolEvents, poolEventsLoading, fetchPoolEvents
 	} from '$lib/stores/explorerStore';
+	import type { UnifiedEvent } from '$lib/stores/explorerStore';
 	import { getEventCategory, type EventCategory } from '$lib/utils/eventFormatters';
 
-	let selectedFilter: EventCategory | 'all' = 'all';
+	type ExplorerFilter = EventCategory | 'all' | '3pool';
+
+	let selectedFilter: ExplorerFilter = 'all';
 	let vaultCollateralMap: Map<number, any> = new Map();
 
 	$: totalPages = Math.ceil($explorerEventsTotalCount / PAGE_SIZE);
@@ -17,24 +21,41 @@
 	// Events already come as {event, globalIndex} from the store (server-side filtered, no AccrueInterest)
 	$: filteredEvents = selectedFilter === 'all'
 		? $explorerEvents
+		: selectedFilter === '3pool'
+		? []
 		: $explorerEvents.filter((e: any) => getEventCategory(e.event) === selectedFilter);
+
+	$: filteredPoolEvents = (() => {
+		if (selectedFilter === '3pool') {
+			return $poolEvents.filter(e => e.source === '3pool_swap' || e.source === '3pool_lp');
+		}
+		if (selectedFilter === 'stability') {
+			return $poolEvents.filter(e => e.source === 'stability_pool');
+		}
+		if (selectedFilter === 'all') {
+			return $poolEvents;
+		}
+		return [];
+	})();
 
 	function handlePageChange(page: number) {
 		fetchEvents(page);
 	}
 
-	const filters: { label: string; value: EventCategory | 'all' }[] = [
+	const filters: { label: string; value: ExplorerFilter }[] = [
 		{ label: 'All', value: 'all' },
 		{ label: 'Vault Ops', value: 'vault' },
 		{ label: 'Liquidations', value: 'liquidation' },
 		{ label: 'Stability Pool', value: 'stability' },
+		{ label: '3Pool', value: '3pool' },
 		{ label: 'Redemptions', value: 'redemption' },
 		{ label: 'Admin', value: 'admin' },
 	];
 
 	onMount(async () => {
 		fetchEvents(0);
-		// Build vault_id → collateral_type lookup for event summaries
+		fetchPoolEvents();
+		// Build vault_id -> collateral_type lookup for event summaries
 		const vaults = await fetchAllVaults();
 		const map = new Map<number, any>();
 		for (const v of vaults) {
@@ -69,15 +90,30 @@
 	</div>
 
 	{#if $explorerEventsLoading}
-		<div class="loading">Loading events…</div>
-	{:else if filteredEvents.length === 0}
+		<div class="loading">Loading events...</div>
+	{:else if filteredEvents.length === 0 && filteredPoolEvents.length === 0}
 		<div class="empty">No events found.</div>
 	{:else}
-		<div class="events-list glass-card">
-			{#each filteredEvents as { event, globalIndex }}
-				<EventRow {event} index={globalIndex} {vaultCollateralMap} />
-			{/each}
-		</div>
+		{#if filteredEvents.length > 0}
+			<div class="events-list glass-card">
+				{#each filteredEvents as { event, globalIndex }}
+					<EventRow {event} index={globalIndex} {vaultCollateralMap} />
+				{/each}
+			</div>
+		{/if}
+	{/if}
+
+	{#if filteredPoolEvents.length > 0}
+		<h2 class="section-title" style="margin-top:1.5rem;">Pool Activity</h2>
+		{#if $poolEventsLoading}
+			<div class="loading">Loading pool events...</div>
+		{:else}
+			<div class="events-list glass-card">
+				{#each filteredPoolEvents as unified}
+					<EventRow event={unified.event} poolSource={unified.source} index={unified.globalIndex} />
+				{/each}
+			</div>
+		{/if}
 	{/if}
 
 	<Pagination currentPage={$explorerEventsPage} {totalPages} onPageChange={handlePageChange} />
@@ -99,5 +135,6 @@
 	.filter-btn:hover { border-color:var(--rumi-border-hover); }
 	.filter-btn.active { background:var(--rumi-purple-accent); color:white; border-color:var(--rumi-purple-accent); }
 	.events-list { padding:0; overflow:hidden; }
+	.section-title { font-size:1rem; font-weight:600; color:var(--rumi-text-primary); }
 	.loading, .empty { text-align:center; padding:3rem; color:var(--rumi-text-muted); }
 </style>

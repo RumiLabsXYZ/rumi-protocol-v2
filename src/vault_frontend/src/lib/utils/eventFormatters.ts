@@ -299,3 +299,60 @@ export function isLiquidationEvent(event: any): boolean {
 	const key = getEventKey(event);
 	return ['liquidate_vault', 'partial_liquidate_vault', 'redistribute_vault'].includes(key);
 }
+
+// ─── Pool Event Formatting ───
+
+const THREE_POOL_TOKENS: Record<number, string> = { 0: 'icUSD', 1: 'ckUSDT', 2: 'ckUSDC' };
+const THREE_POOL_DECIMALS: Record<number, number> = { 0: 8, 1: 6, 2: 6 };
+
+/** Get display type for a pool event. */
+export function getPoolEventType(source: string): string {
+	switch (source) {
+		case 'stability_pool': return 'SP Liquidation';
+		case '3pool_swap': return '3Pool Swap';
+		case '3pool_lp': return '3Pool Liquidity';
+		default: return 'Pool Event';
+	}
+}
+
+/** Get badge color for a pool event. */
+export function getPoolEventBadgeColor(source: string): string {
+	switch (source) {
+		case 'stability_pool': return 'var(--rumi-danger)';
+		case '3pool_swap': return 'var(--rumi-info, #60a5fa)';
+		case '3pool_lp': return 'var(--rumi-purple-accent)';
+		default: return 'var(--rumi-text-muted)';
+	}
+}
+
+/** Get one-line summary for a pool event. */
+export function getPoolEventSummary(source: string, event: any): string {
+	switch (source) {
+		case 'stability_pool': {
+			const debt = event.stables_consumed?.[0]?.[1];
+			const debtStr = debt ? formatAmount(debt) : '?';
+			return `Stability Pool absorbed Vault #${event.vault_id} debt (${debtStr} icUSD)`;
+		}
+		case '3pool_swap': {
+			const tokenIn = THREE_POOL_TOKENS[event.token_in] ?? `token${event.token_in}`;
+			const tokenOut = THREE_POOL_TOKENS[event.token_out] ?? `token${event.token_out}`;
+			const decimalsIn = THREE_POOL_DECIMALS[event.token_in] ?? 8;
+			const decimalsOut = THREE_POOL_DECIMALS[event.token_out] ?? 8;
+			return `Swapped ${formatAmount(event.amount_in, decimalsIn)} ${tokenIn} → ${formatAmount(event.amount_out, decimalsOut)} ${tokenOut}`;
+		}
+		default:
+			return 'Pool event';
+	}
+}
+
+/** Get caller principal from a pool event. */
+export function getPoolEventCaller(source: string, event: any): string | null {
+	switch (source) {
+		case '3pool_swap':
+			return event.caller?.toString?.() ?? event.caller?.toText?.() ?? null;
+		case 'stability_pool':
+			return null;
+		default:
+			return null;
+	}
+}

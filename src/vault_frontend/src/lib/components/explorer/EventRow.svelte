@@ -1,31 +1,42 @@
 <script lang="ts">
-	import { getEventType, getEventBadgeColor, getEventSummary, formatTimestamp, getEventTimestamp, getEventCaller } from '$lib/utils/eventFormatters';
+	import { getEventType, getEventBadgeColor, getEventSummary, formatTimestamp, getEventTimestamp, getEventCaller, getPoolEventType, getPoolEventBadgeColor, getPoolEventSummary, getPoolEventCaller } from '$lib/utils/eventFormatters';
 	import { truncatePrincipal } from '$lib/utils/principalHelpers';
 
 	export let event: any;
 	export let index: number | null = null;
 	export let vaultCollateralMap: Map<number, any> | undefined = undefined;
+	export let poolSource: string | null = null;
 
-	$: type = getEventType(event);
-	$: badgeColor = getEventBadgeColor(event);
-	$: summary = getEventSummary(event, vaultCollateralMap);
-	$: timestamp = getEventTimestamp(event);
-	$: caller = getEventCaller(event);
+	$: isPoolEvent = poolSource !== null;
+	$: displayType = isPoolEvent ? getPoolEventType(poolSource!) : getEventType(event);
+	$: displayColor = isPoolEvent ? getPoolEventBadgeColor(poolSource!) : getEventBadgeColor(event);
+	$: displaySummary = isPoolEvent ? getPoolEventSummary(poolSource!, event) : getEventSummary(event, vaultCollateralMap);
+	$: displayCaller = isPoolEvent ? getPoolEventCaller(poolSource!, event) : getEventCaller(event);
+	$: displayTimestamp = (() => {
+		if (isPoolEvent) {
+			const ts = event?.timestamp;
+			if (ts) return formatTimestamp(ts);
+			return '';
+		}
+		const ts = getEventTimestamp(event);
+		return ts ? formatTimestamp(ts) : '';
+	})();
+	$: href = isPoolEvent ? undefined : (index !== null ? `/explorer/event/${index}` : undefined);
 </script>
 
-<a class="event-row" href={index !== null ? `/explorer/event/${index}` : undefined}>
-	<span class="event-badge" style="background:{badgeColor}20; color:{badgeColor}; border:1px solid {badgeColor}40;">
-		{type}
+<a class="event-row" href={href}>
+	<span class="event-badge" style="background:{displayColor}20; color:{displayColor}; border:1px solid {displayColor}40;">
+		{displayType}
 	</span>
-	<span class="event-summary">{summary}</span>
+	<span class="event-summary">{displaySummary}</span>
 	<span class="event-meta">
-		{#if caller}
-			<a class="caller-link" href="/explorer/address/{caller}" on:click|stopPropagation>{truncatePrincipal(caller)}</a>
+		{#if displayCaller}
+			<a class="caller-link" href="/explorer/address/{displayCaller}" on:click|stopPropagation>{truncatePrincipal(displayCaller)}</a>
 		{/if}
-		{#if timestamp}
-			<span class="event-time">{formatTimestamp(timestamp)}</span>
+		{#if displayTimestamp}
+			<span class="event-time">{displayTimestamp}</span>
 		{/if}
-		{#if index !== null}
+		{#if index !== null && !isPoolEvent}
 			<span class="event-index">#{index}</span>
 		{/if}
 	</span>
