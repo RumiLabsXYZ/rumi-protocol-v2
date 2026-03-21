@@ -5,7 +5,7 @@
   import SearchBar from '$lib/components/explorer/SearchBar.svelte';
   import VaultSummaryCard from '$lib/components/explorer/VaultSummaryCard.svelte';
   import EventRow from '$lib/components/explorer/EventRow.svelte';
-  import { fetchVaultsByOwner, fetchEventsByPrincipal, fetchVaultHistory } from '$lib/stores/explorerStore';
+  import { fetchVaultsByOwner, fetchEventsByPrincipal } from '$lib/stores/explorerStore';
   import { publicActor } from '$lib/services/protocol/apiClient';
   import { truncatePrincipal, copyToClipboard } from '$lib/utils/principalHelpers';
   import { resolveCollateralSymbol } from '$lib/utils/eventFormatters';
@@ -43,21 +43,8 @@
       }
       collateralConfigs = collateralConfigs; // trigger reactivity
 
-      // Fetch events by principal (new endpoint) + vault history (catches old events without caller)
-      const [principalEvents, vaultHistories] = await Promise.all([
-        fetchEventsByPrincipal(principalStr),
-        Promise.all(vaults.map((v: any) => fetchVaultHistory(Number(v.vault_id))))
-      ]);
-      // Merge and deduplicate by globalIndex
-      const vaultEvents = vaultHistories.flat().map((e: any, i: number) => ({
-        event: e, globalIndex: i
-      }));
-      const seen = new Set(principalEvents.map((e: any) => e.globalIndex));
-      const merged = [...principalEvents];
-      for (const ve of vaultEvents) {
-        if (!seen.has(ve.globalIndex)) merged.push(ve);
-      }
-      allHistory = merged;
+      // Fetch events involving this principal
+      allHistory = await fetchEventsByPrincipal(principalStr);
     } catch (e) {
       console.error('Failed to load address:', e);
       toastStore.error('Invalid principal or failed to load data');
