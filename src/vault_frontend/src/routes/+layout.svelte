@@ -23,21 +23,28 @@
     permissionStore.init().then(s => { if (s) permissionInitialized = true; }).catch(() => { permissionInitialized = true; });
   } else if (!isConnected && permissionInitialized) { permissionStore.clear(); permissionInitialized = false; }
   onMount(() => {
+    const cleanups: (() => void)[] = [];
     // Fire-and-forget async init (async onMount can't return cleanup)
     (async () => {
       try { await wallet.initialize(); } catch (e) { console.error('Wallet init failed:', e); }
       if (isConnected && !permissionInitialized) { try { if (await permissionStore.init()) permissionInitialized = true; } catch (e) { permissionInitialized = true; } }
       protocolService.getICPPrice().catch(() => {});
-      // Check for liquidatable vaults
-      try {
-        const vaults = await ApiClient.getPublicData<any[]>('get_liquidatable_vaults');
-        hasLiquidatableVaults = vaults && vaults.length > 0;
-      } catch { hasLiquidatableVaults = false; }
+      // Check for liquidatable vaults (poll every 60s)
+      const checkLiquidatable = async () => {
+        try {
+          const vaults = await ApiClient.getPublicData<any[]>('get_liquidatable_vaults');
+          hasLiquidatableVaults = vaults && vaults.length > 0;
+        } catch { hasLiquidatableVaults = false; }
+      };
+      await checkLiquidatable();
+      const liqInterval = setInterval(checkLiquidatable, 60_000);
+      cleanups.push(() => clearInterval(liqInterval));
     })();
     // Ctrl+D toggles debug panels in dev mode
     const handleKey = (e: KeyboardEvent) => { if (e.ctrlKey && e.key === 'd') { e.preventDefault(); showDebug = !showDebug; } };
     window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
+    cleanups.push(() => window.removeEventListener('keydown', handleKey));
+    return () => cleanups.forEach(fn => fn());
   });
 </script>
 <header class="top-bar">
@@ -52,6 +59,12 @@
     <a href="/explorer" class="nav-link" class:active={currentPath.startsWith('/explorer')}><span>Explorer</span></a>
   </nav>
   <div class="top-actions">
+    {#if hasLiquidatableVaults}
+      <a href="/liquidations" class="liq-alert" title="Vaults available for manual liquidation">
+        <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16"><path fill-rule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.168 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z" clip-rule="evenodd"/></svg>
+        <span class="liq-dot"></span>
+      </a>
+    {/if}
     <span class="beta-chip" title="This protocol is in beta. Use at your own risk.">Beta</span>
     <div class="top-social">
       <a href="mailto:info@rumiprotocol.com" class="header-icon-link" aria-label="Email"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg></a>
@@ -107,8 +120,22 @@
   .nav-link.active { color:var(--rumi-text-primary); }
   .nav-link.active::after { content:'';position:absolute;bottom:0;left:1rem;right:1rem;height:2px;background:var(--rumi-action);border-radius:1px 1px 0 0; }
 
-  /* ── Right side: beta + social + wallet ── */
+  /* ── Right side: alert + beta + social + wallet ── */
   .top-actions { display:flex;align-items:center;gap:0.75rem;justify-self:end; }
+  .liq-alert {
+    position:relative;display:flex;align-items:center;color:#e05252;
+    text-decoration:none;transition:color 0.15s ease;
+  }
+  .liq-alert:hover { color:#ff6b6b; }
+  .liq-dot {
+    position:absolute;top:-1px;right:-3px;width:6px;height:6px;
+    background:#e05252;border-radius:50%;
+    animation:liq-pulse 2s ease-in-out infinite;
+  }
+  @keyframes liq-pulse {
+    0%,100% { opacity:1; }
+    50% { opacity:0.4; }
+  }
   .beta-chip {
     font-size:0.625rem;font-weight:500;padding:0.125rem 0.4375rem;border-radius:999px;
     background:rgba(217,165,60,0.10);color:#c9952a;letter-spacing:0.02em;cursor:default;
