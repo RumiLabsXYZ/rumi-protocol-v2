@@ -3,7 +3,6 @@ use candid::Principal;
 use ic_canister_log::log;
 use ic_cdk::call;
 use icrc_ledger_types::icrc1::account::Account;
-use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
 use icrc_ledger_types::icrc2::approve::{ApproveArgs, ApproveError};
 
 use crate::logs::INFO;
@@ -95,6 +94,8 @@ pub async fn execute_liquidation(vault_id: u64) -> Result<LiquidationResult, Sta
         collateral_type: vault.collateral_type,
         debt_amount: vault.borrowed_icusd_amount,
         collateral_amount: vault.icp_margin_amount,
+        recommended_liquidation_amount: 0,
+        collateral_price_e8s: 0,
     };
 
     // Check pool coverage
@@ -111,11 +112,25 @@ pub async fn execute_liquidation(vault_id: u64) -> Result<LiquidationResult, Sta
 }
 
 /// Core liquidation logic for a single vault.
+///
+/// Strategy:
+/// 1. Non-LP stablecoins (icUSD, ckUSDC, ckUSDT): approve backend → call liquidate_vault_partial
+/// 2. LP tokens (3USD): burn on 3pool via authorized_redeem_and_burn → call backend
+///    stability_pool_liquidate_debt_burned to write down debt and release collateral
+///
+/// No circuit breaker / suspension mechanism — if a token fails, we skip it and try the
+/// next one. If they all fail, the liquidation simply doesn't happen this round.
 async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> LiquidationResult {
     let protocol_id = read_state(|s| s.protocol_canister_id);
 
     // Step 1: Compute token draw
-    let token_draw = read_state(|s| s.compute_token_draw(vault_info.debt_amount, &vault_info.collateral_type));
+    // Use recommended_liquidation_amount (partial cap) if available, otherwise full debt
+    let draw_amount = if vault_info.recommended_liquidation_amount > 0 {
+        vault_info.recommended_liquidation_amount
+    } else {
+        vault_info.debt_amount
+    };
+    let token_draw = read_state(|s| s.compute_token_draw(draw_amount, &vault_info.collateral_type));
 
     if token_draw.is_empty() {
         return LiquidationResult {
@@ -130,18 +145,18 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
 
     log!(INFO, "Token draw for vault {}: {:?}", vault_info.vault_id, token_draw);
 
-    // Step 2: Approve backend for each token and call appropriate liquidation endpoint
+    // Step 2: Process each token in the draw
     let mut total_collateral_gained: u64 = 0;
     let mut actual_consumed: BTreeMap<Principal, u64> = BTreeMap::new();
 
-    // Get stablecoin configs for classification
     let stablecoin_configs: BTreeMap<Principal, StablecoinConfig> = read_state(|s| s.stablecoin_registry.clone());
     let icusd_ledger = stablecoin_configs.iter()
         .find(|(_, c)| c.symbol == "icUSD")
         .map(|(id, _)| *id);
 
+    // --- Non-LP tokens: approve + liquidate_vault_partial ---
     for (token_ledger, amount) in &token_draw {
-        // Skip LP tokens here — they're handled in the LP token loop below
+        // Skip LP tokens — handled separately below
         if stablecoin_configs.get(token_ledger).map(|c| c.is_lp_token.unwrap_or(false)).unwrap_or(false) {
             continue;
         }
@@ -149,23 +164,14 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
         let is_icusd = icusd_ledger.map(|id| id == *token_ledger).unwrap_or(false);
         let token_decimals = stablecoin_configs.get(token_ledger).map(|c| c.decimals).unwrap_or(8);
 
-        // Circuit breaker: skip tokens that have failed too many times in a row.
-        // An admin must call `admin_reset_token_failures` to re-enable them.
-        if read_state(|s| s.is_token_suspended(token_ledger)) {
-            log!(INFO, "Skipping token {}: auto-suspended after consecutive failures", token_ledger);
-            continue;
-        }
-
-        // Pre-check: will the backend accept this amount?
-        // Backend minimum is 10_000_000 e8s (0.1 icUSD). Skip if below to avoid
-        // wasting tokens on approve fees for doomed liquidation calls.
+        // Pre-check: backend minimum is 10_000_000 e8s (0.1 icUSD)
         let amount_e8s_check = if is_icusd { *amount } else { crate::types::normalize_to_e8s(*amount, token_decimals) };
         if amount_e8s_check < 10_000_000 {
             log!(INFO, "Skipping token {}: amount {} e8s below backend minimum (0.1)", token_ledger, amount_e8s_check);
             continue;
         }
 
-        // Approve backend to spend this token (in native units for the ledger)
+        // Approve backend to spend this token
         let approve_args = ApproveArgs {
             from_subaccount: None,
             spender: Account { owner: protocol_id, subaccount: None },
@@ -183,7 +189,7 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
 
         match approve_result {
             Ok((Ok(_),)) => {
-                // Deduct the approve fee from tracked balances so accounting stays accurate.
+                // Deduct the approve fee from tracked balances
                 if let Some(fee) = stablecoin_configs.get(token_ledger).and_then(|c| c.transfer_fee) {
                     if fee > 0 {
                         mutate_state(|s| s.deduct_fee_from_pool(*token_ledger, fee));
@@ -191,21 +197,21 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
                 }
             },
             Ok((Err(e),)) => {
-                let count = mutate_state(|s| s.record_token_failure(*token_ledger));
-                log!(INFO, "Approve failed for {}: {:?} (consecutive failures: {})", token_ledger, e, count);
+                log!(INFO, "Approve failed for {}: {:?}", token_ledger, e);
                 continue;
             },
             Err(e) => {
-                let count = mutate_state(|s| s.record_token_failure(*token_ledger));
-                log!(INFO, "Approve call failed for {}: {:?} (consecutive failures: {})", token_ledger, e, count);
+                log!(INFO, "Approve call failed for {}: {:?}", token_ledger, e);
                 continue;
             }
         }
 
+        // Deduct-before-call: conservatively assume tokens will be consumed.
+        // Rollback if backend explicitly rejects; leave deducted if call fails (conservative).
+        mutate_state(|s| s.deduct_burned_lp_from_balances(*token_ledger, *amount));
+
         // Call the appropriate backend endpoint
-        // Backend expects amounts in e8s; normalize native decimals → e8s for non-icUSD tokens
         let liq_result = if is_icusd {
-            // icUSD is already 8 decimals (e8s), no conversion needed
             let call_result: Result<(Result<rumi_protocol_backend::SuccessWithFee, rumi_protocol_backend::ProtocolError>,), _> = call(
                 protocol_id,
                 "liquidate_vault_partial",
@@ -216,7 +222,6 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
             ).await;
             call_result.map(|(r,)| r)
         } else {
-            // Determine StableTokenType from ledger principal
             let token_type = determine_stable_token_type(*token_ledger, &stablecoin_configs);
             match token_type {
                 Some(tt) => {
@@ -233,7 +238,9 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
                     call_result.map(|(r,)| r)
                 },
                 None => {
-                    log!(INFO, "Unknown stable token type for {}, skipping", token_ledger);
+                    // Never called the backend — rollback the deduction
+                    log!(INFO, "Unknown stable token type for {}, rolling back deduction", token_ledger);
+                    mutate_state(|s| s.credit_tokens_to_pool(*token_ledger, *amount));
                     continue;
                 }
             }
@@ -242,27 +249,29 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
         match liq_result {
             Ok(Ok(success)) => {
                 let collateral = success.collateral_amount_received.unwrap_or(success.fee_amount_paid);
-                log!(INFO, "Liquidation call succeeded for vault {} with token {}: collateral={}, fee={}",
+                log!(INFO, "Liquidation succeeded for vault {} with token {}: collateral={}, fee={}",
                     vault_info.vault_id, token_ledger, collateral, success.fee_amount_paid);
+                // Deduction stands — record in actual_consumed
                 actual_consumed.insert(*token_ledger, *amount);
                 total_collateral_gained += collateral;
-                // Success: reset the consecutive failure counter
-                mutate_state(|s| s.reset_token_failures(token_ledger));
+                // Bug 7: one token per vault per round — vault state changed, remaining draws are stale
+                break;
             },
             Ok(Err(protocol_error)) => {
-                let count = mutate_state(|s| s.record_token_failure(*token_ledger));
-                log!(INFO, "Protocol rejected liquidation for vault {} with token {}: {:?} (consecutive failures: {})",
-                    vault_info.vault_id, token_ledger, protocol_error, count);
+                // Backend explicitly rejected — rollback the deduction
+                log!(INFO, "Protocol rejected liquidation for vault {} with token {}: {:?}. Rolling back deduction.",
+                    vault_info.vault_id, token_ledger, protocol_error);
+                mutate_state(|s| s.credit_tokens_to_pool(*token_ledger, *amount));
             },
             Err(call_error) => {
-                let count = mutate_state(|s| s.record_token_failure(*token_ledger));
-                log!(INFO, "Liquidation call failed for vault {} with token {}: {:?} (consecutive failures: {})",
-                    vault_info.vault_id, token_ledger, call_error, count);
+                // Inter-canister call failed — leave deduction in place (conservative: assume tokens consumed)
+                log!(INFO, "Liquidation call failed for vault {} with token {}: {:?}. Deduction kept (conservative).",
+                    vault_info.vault_id, token_ledger, call_error);
             }
         }
     }
 
-    // Handle LP token draws (3USD) — uses atomic burn on 3pool
+    // --- LP tokens (3USD): atomic burn on 3pool + backend debt write-down ---
     for (token_ledger, amount) in &token_draw {
         let config = match stablecoin_configs.get(token_ledger) {
             Some(c) if c.is_lp_token.unwrap_or(false) => c,
@@ -270,20 +279,22 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
         };
         let pool_canister = match config.underlying_pool {
             Some(p) => p,
-            None => continue,
+            None => {
+                log!(INFO, "LP token {} has no underlying_pool configured, skipping", token_ledger);
+                continue;
+            }
         };
-
-        // Circuit breaker check
-        if read_state(|s| s.is_token_suspended(token_ledger)) {
-            log!(INFO, "Skipping LP token {}: auto-suspended after consecutive failures", token_ledger);
-            continue;
-        }
 
         // Calculate icUSD equivalent using cached virtual price
         let vp = read_state(|s| {
             s.virtual_prices().get(token_ledger).copied().unwrap_or(1_000_000_000_000_000_000)
         });
         let icusd_equiv_e8s = lp_to_usd_e8s(*amount, vp);
+
+        if icusd_equiv_e8s < 10_000_000 {
+            log!(INFO, "Skipping LP token {}: icUSD equivalent {} e8s below backend minimum", token_ledger, icusd_equiv_e8s);
+            continue;
+        }
 
         let icusd_ledger_id = match icusd_ledger {
             Some(id) => id,
@@ -293,7 +304,7 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
             }
         };
 
-        // Try atomic burn on 3pool: burn LP tokens and destroy icUSD from pool reserves
+        // Step A: Burn LP tokens on 3pool — destroys icUSD from the pool's reserves
         let burn_args = AuthorizedRedeemAndBurnArgs {
             token_ledger: icusd_ledger_id,
             token_amount: icusd_equiv_e8s as u128,
@@ -306,48 +317,50 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
         ).await;
 
         match burn_result {
-            Ok((Ok(_result),)) => {
-                log!(INFO, "3pool atomic burn succeeded: {} LP → {} icUSD burned for vault {}",
+            Ok((Ok(result),)) => {
+                log!(INFO, "3pool burn succeeded: {} LP → {} icUSD burned for vault {}",
                     amount, icusd_equiv_e8s, vault_info.vault_id);
 
-                // icUSD burned — tell backend to write down debt and release collateral
+                // Step B: Tell backend to write down debt and release collateral
                 let liq_result: Result<(Result<StabilityPoolLiquidationResult, rumi_protocol_backend::ProtocolError>,), _> = call(
                     protocol_id,
                     "stability_pool_liquidate_debt_burned",
-                    (vault_info.vault_id, icusd_equiv_e8s),
+                    (vault_info.vault_id, result.token_amount_burned as u64),
                 ).await;
 
                 match liq_result {
                     Ok((Ok(success),)) => {
-                        actual_consumed.insert(*token_ledger, *amount);
+                        let actual_lp_burned = result.lp_amount_burned as u64;
+                        actual_consumed.insert(*token_ledger, actual_lp_burned);
                         total_collateral_gained += success.collateral_received;
-                        mutate_state(|s| s.reset_token_failures(token_ledger));
-                        log!(INFO, "Backend debt-burned liquidation succeeded for vault {}: {} collateral",
-                            vault_info.vault_id, success.collateral_received);
+                        log!(INFO, "Backend debt-burned liquidation succeeded for vault {}: {} collateral, {} LP burned",
+                            vault_info.vault_id, success.collateral_received, actual_lp_burned);
+                        // Bug 7: one token per vault per round — vault state changed
+                        break;
                     }
                     Ok((Err(e),)) => {
-                        let count = mutate_state(|s| s.record_token_failure(*token_ledger));
-                        log!(INFO, "WARN: Backend rejected debt-burned liquidation for vault {} (icUSD already burned!): {:?} (failures: {})",
-                            vault_info.vault_id, e, count);
+                        // icUSD was already burned but backend rejected the debt write-down.
+                        // Deduct actual burned LP tokens from tracked balances to keep accounting accurate.
+                        let actual_lp_burned = result.lp_amount_burned as u64;
+                        log!(INFO, "CRITICAL: Backend rejected debt write-down for vault {} after icUSD already burned: {:?}. Deducting {} LP from tracked balances.",
+                            vault_info.vault_id, e, actual_lp_burned);
+                        mutate_state(|s| s.deduct_burned_lp_from_balances(*token_ledger, actual_lp_burned));
                     }
                     Err(e) => {
-                        let count = mutate_state(|s| s.record_token_failure(*token_ledger));
-                        log!(INFO, "WARN: Backend call failed for debt-burned liquidation vault {} (icUSD already burned!): {:?} (failures: {})",
-                            vault_info.vault_id, e, count);
+                        // Inter-canister call failed after burn — same accounting fix needed.
+                        let actual_lp_burned = result.lp_amount_burned as u64;
+                        log!(INFO, "CRITICAL: Backend call failed for debt write-down vault {} after icUSD already burned: {:?}. Deducting {} LP from tracked balances.",
+                            vault_info.vault_id, e, actual_lp_burned);
+                        mutate_state(|s| s.deduct_burned_lp_from_balances(*token_ledger, actual_lp_burned));
                     }
                 }
             }
             Ok((Err(e),)) => {
-                log!(INFO, "3pool burn failed for vault {}: {:?}, falling back to protocol reserves", vault_info.vault_id, e);
-                fallback_to_protocol_reserves(*token_ledger, *amount, vault_info, protocol_id).await;
-                let count = mutate_state(|s| s.record_token_failure(*token_ledger));
-                log!(INFO, "LP token {} consecutive failures: {}", token_ledger, count);
+                // 3pool burn failed — no tokens were consumed, no state changed. Safe to skip.
+                log!(INFO, "3pool burn failed for vault {}: {:?}", vault_info.vault_id, e);
             }
             Err(e) => {
-                log!(INFO, "3pool call failed for vault {}: {:?}, falling back to protocol reserves", vault_info.vault_id, e);
-                fallback_to_protocol_reserves(*token_ledger, *amount, vault_info, protocol_id).await;
-                let count = mutate_state(|s| s.record_token_failure(*token_ledger));
-                log!(INFO, "LP token {} consecutive failures: {}", token_ledger, count);
+                log!(INFO, "3pool burn call failed for vault {}: {:?}", vault_info.vault_id, e);
             }
         }
     }
@@ -360,7 +373,7 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
                 vault_info.collateral_type,
                 &actual_consumed,
                 total_collateral_gained,
-                0, // price not available from direct liquidation path
+                vault_info.collateral_price_e8s,
             );
         });
 
@@ -385,7 +398,6 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
 }
 
 /// Thin translation layer: map a ledger principal to the backend's StableTokenType enum.
-/// This goes away when the backend gets a dynamic stablecoin registry.
 fn determine_stable_token_type(
     ledger: Principal,
     configs: &BTreeMap<Principal, StablecoinConfig>,
@@ -394,53 +406,11 @@ fn determine_stable_token_type(
     match config.symbol.as_str() {
         "ckUSDT" => Some(rumi_protocol_backend::StableTokenType::CKUSDT),
         "ckUSDC" => Some(rumi_protocol_backend::StableTokenType::CKUSDC),
-        _ => None, // icUSD uses a different endpoint, other tokens not yet mapped
-    }
-}
-
-/// Fallback: transfer 3USD LP tokens to the backend as protocol reserves.
-/// Used when the 3pool atomic burn fails — ensures liquidity isn't stranded.
-/// Deducts pro-rata from depositors before transfer, rolls back on failure.
-async fn fallback_to_protocol_reserves(
-    lp_ledger: Principal,
-    lp_amount: u64,
-    vault_info: &LiquidatableVaultInfo,
-    protocol_id: Principal,
-) {
-    // Deduct the LP balance pro-rata from depositors before transferring
-    mutate_state(|s| {
-        s.deduct_fee_from_pool(lp_ledger, lp_amount);
-    });
-
-    let transfer_args = TransferArg {
-        to: Account { owner: protocol_id, subaccount: None },
-        amount: (lp_amount as u128).into(),
-        fee: None,
-        memo: None,
-        created_at_time: Some(ic_cdk::api::time()),
-        from_subaccount: None,
-    };
-
-    let result: Result<(Result<candid::Nat, TransferError>,), _> = call(
-        lp_ledger, "icrc1_transfer", (transfer_args,)
-    ).await;
-
-    match result {
-        Ok((Ok(_),)) => {
-            log!(INFO, "Transferred {} 3USD to protocol reserves for vault {}", lp_amount, vault_info.vault_id);
-        }
-        _ => {
-            log!(INFO, "CRITICAL: Failed to transfer 3USD to protocol reserves for vault {}. Tokens stranded in pool canister.", vault_info.vault_id);
-            // Rollback: re-credit the LP balance since the transfer failed.
-            // Use add_deposit with a system principal since this is a pool-level operation,
-            // but actually the tokens are still in the canister — just the accounting was wrong.
-            // For now, log and let admin fix manually. The tokens are safe in the canister.
-        }
+        _ => None,
     }
 }
 
 /// Backend result type for debt-already-burned liquidations.
-/// Matches the StabilityPoolLiquidationResult struct in the backend.
 #[derive(candid::CandidType, candid::Deserialize, Debug)]
 struct StabilityPoolLiquidationResult {
     pub success: bool,
