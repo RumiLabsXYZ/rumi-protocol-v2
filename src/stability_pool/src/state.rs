@@ -34,11 +34,8 @@ pub struct StabilityPoolState {
     /// `Option` is required for Candid backward-compatible stable memory upgrades.
     #[serde(default)]
     pub total_interest_received_e8s: Option<u64>,
-    /// Per-token consecutive approve/liquidation failure counter for circuit breaker.
-    /// When a token hits MAX_CONSECUTIVE_FAILURES, it is auto-suspended from liquidations
-    /// until an admin calls `admin_reset_token_failures`.
-    /// `Option` wrapping is required for Candid backward-compatible stable memory upgrades
-    /// (Candid `Decode!` needs `opt` for new fields, unlike serde's `#[serde(default)]`).
+    /// DEPRECATED: Circuit breaker was removed — liquidations now skip failed tokens without
+    /// suspending them. Field retained for upgrade compatibility (serde default).
     #[serde(default)]
     pub token_consecutive_failures: Option<BTreeMap<Principal, u32>>,
     /// Cached virtual price for LP tokens (fetched from 3pool periodically).
@@ -266,6 +263,22 @@ impl StabilityPoolState {
                 }
             }
             total_deducted += user_share;
+        }
+
+        // Assign rounding dust to largest holder to prevent aggregate/individual drift
+        let dust = actual_deduct.saturating_sub(total_deducted);
+        if dust > 0 {
+            if let Some(largest_p) = depositors.iter()
+                .max_by_key(|(_, bal)| *bal)
+                .map(|(p, _)| *p)
+            {
+                if let Some(pos) = self.deposits.get_mut(&largest_p) {
+                    if let Some(bal) = pos.stablecoin_balances.get_mut(&token_ledger) {
+                        *bal = bal.saturating_sub(dust);
+                    }
+                }
+                total_deducted += dust;
+            }
         }
 
         if let Some(agg) = self.total_stablecoin_balances.get_mut(&token_ledger) {
@@ -573,6 +586,7 @@ impl StabilityPoolState {
         // Phase 3: For each opted-in depositor, reduce their token balances and add collateral gains.
         // Track actual deductions per token to avoid rounding drift between aggregate and individual totals.
         let mut actual_deductions_per_token: BTreeMap<Principal, u64> = BTreeMap::new();
+        let mut total_collateral_distributed: u64 = 0;
 
         for principal in &opted_in_principals {
             let mut user_consumed_e8s: u64 = 0;
@@ -615,6 +629,17 @@ impl StabilityPoolState {
                 if user_consumed_e8s > 0 {
                     let user_collateral = (collateral_gained as u128 * user_consumed_e8s as u128 / total_consumed_e8s as u128) as u64;
                     *position.collateral_gains.entry(collateral_type).or_insert(0) += user_collateral;
+                    total_collateral_distributed += user_collateral;
+                }
+            }
+        }
+
+        // Phase 3b: Assign collateral rounding dust to first opted-in depositor
+        let collateral_dust = collateral_gained.saturating_sub(total_collateral_distributed);
+        if collateral_dust > 0 {
+            if let Some(first) = opted_in_principals.first() {
+                if let Some(pos) = self.deposits.get_mut(first) {
+                    *pos.collateral_gains.entry(collateral_type).or_insert(0) += collateral_dust;
                 }
             }
         }
@@ -788,56 +813,6 @@ impl StabilityPoolState {
         }
 
         format!("Corrected {} balance for {}: {} -> {}", token_ledger, user, old_amount, correct_amount)
-    }
-
-    // ─── Token Failure Circuit Breaker ───
-
-    /// Maximum consecutive approve/liquidation failures before auto-suspending a token.
-    const MAX_CONSECUTIVE_FAILURES: u32 = 3;
-
-    /// Returns true if the token has been auto-suspended due to repeated failures.
-    pub fn is_token_suspended(&self, token_ledger: &Principal) -> bool {
-        self.token_consecutive_failures
-            .as_ref()
-            .and_then(|m| m.get(token_ledger))
-            .map(|&count| count >= Self::MAX_CONSECUTIVE_FAILURES)
-            .unwrap_or(false)
-    }
-
-    /// Increment the consecutive failure counter for a token.
-    /// Returns the new count.
-    pub fn record_token_failure(&mut self, token_ledger: Principal) -> u32 {
-        let map = self.token_consecutive_failures.get_or_insert_with(BTreeMap::new);
-        let count = map.entry(token_ledger).or_insert(0);
-        *count += 1;
-        *count
-    }
-
-    /// Reset the consecutive failure counter on success.
-    pub fn reset_token_failures(&mut self, token_ledger: &Principal) {
-        if let Some(map) = self.token_consecutive_failures.as_mut() {
-            map.remove(token_ledger);
-        }
-    }
-
-    /// Admin: reset the failure counter for a suspended token, re-enabling it.
-    /// Returns the previous failure count.
-    pub fn admin_reset_token_failures(&mut self, token_ledger: &Principal) -> u32 {
-        self.token_consecutive_failures
-            .as_mut()
-            .and_then(|m| m.remove(token_ledger))
-            .unwrap_or(0)
-    }
-
-    /// Return all tokens that are currently auto-suspended.
-    pub fn get_suspended_tokens(&self) -> Vec<(Principal, u32)> {
-        self.token_consecutive_failures
-            .as_ref()
-            .map(|m| m.iter()
-                .filter(|(_, &count)| count >= Self::MAX_CONSECUTIVE_FAILURES)
-                .map(|(p, &c)| (*p, c))
-                .collect())
-            .unwrap_or_default()
     }
 
     // ─── State Validation ───
