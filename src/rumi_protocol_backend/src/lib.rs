@@ -308,7 +308,7 @@ impl From<GuardError> for ProtocolError {
 /// Candid-compatible struct matching the stability pool's and bot's `LiquidatableVaultInfo`.
 /// Defined inline to avoid a crate dependency between backend and pool/bot.
 #[derive(CandidType, Clone, Debug, Deserialize)]
-struct LiquidatableVaultInfo {
+pub struct LiquidatableVaultInfo {
     pub vault_id: u64,
     pub collateral_type: Principal,
     pub debt_amount: u64,
@@ -318,6 +318,31 @@ struct LiquidatableVaultInfo {
 }
 
 pub fn check_vaults() {
+    // Auto-cancel bot claims that have been pending too long (10 minutes).
+    // This prevents vaults from being permanently locked if the bot crashes.
+    const BOT_CLAIM_TIMEOUT_NS: u64 = 600_000_000_000; // 10 minutes
+    let now = ic_cdk::api::time();
+
+    let expired_claims: Vec<(u64, crate::state::BotClaim)> = read_state(|s| {
+        s.bot_claims.iter()
+            .filter(|(_, claim)| now.saturating_sub(claim.claimed_at) >= BOT_CLAIM_TIMEOUT_NS)
+            .map(|(vid, claim)| (*vid, claim.clone()))
+            .collect()
+    });
+
+    for (vault_id, claim) in &expired_claims {
+        log!(INFO, "[check_vaults] Auto-cancelling stuck bot claim for vault #{} (claimed {}s ago)",
+            vault_id, (now - claim.claimed_at) / 1_000_000_000);
+
+        mutate_state(|s| {
+            if let Some(vault) = s.vault_id_to_vaults.get_mut(vault_id) {
+                vault.bot_processing = false;
+            }
+            s.bot_budget_remaining_e8s += claim.debt_amount;
+            s.bot_claims.remove(vault_id);
+        });
+    }
+
     let dummy_rate = read_state(|s| {
         s.last_icp_rate.unwrap_or_else(|| {
             log!(INFO, "[check_vaults] No ICP rate available, using default rate");
@@ -330,6 +355,10 @@ pub fn check_vaults() {
         let mut unhealthy_vaults: Vec<Vault> = vec![];
         let mut healthy_vaults: Vec<Vault> = vec![];
         for vault in s.vault_id_to_vaults.values() {
+            if vault.bot_processing {
+                // Skip — bot is actively processing this vault
+                continue;
+            }
             if compute_collateral_ratio(vault, dummy_rate, s)
                 < s.get_min_liquidation_ratio_for(&vault.collateral_type)
             {
@@ -372,18 +401,17 @@ pub fn check_vaults() {
         // Build enriched notification payload
         let vault_notifications: Vec<LiquidatableVaultInfo> = read_state(|s| {
             unhealthy_vaults.iter().map(|v| {
-                let price = s.get_collateral_price_decimal(&v.collateral_type)
-                    .map(|p| UsdIcp::from(p).to_e8s())
-                    .unwrap_or(0);
-                let max_liq = (v.borrowed_icusd_amount * s.max_partial_liquidation_ratio)
-                    .min(v.borrowed_icusd_amount);
+                let collateral_price_usd = s.get_collateral_price_decimal(&v.collateral_type)
+                    .map(|p| UsdIcp::from(p))
+                    .unwrap_or(UsdIcp::from(rust_decimal::Decimal::ZERO));
+                let optimal_liq = s.compute_partial_liquidation_cap(v, collateral_price_usd);
                 LiquidatableVaultInfo {
                     vault_id: v.vault_id,
                     collateral_type: v.collateral_type,
                     debt_amount: v.borrowed_icusd_amount.to_u64(),
                     collateral_amount: v.collateral_amount,
-                    recommended_liquidation_amount: max_liq.to_u64(),
-                    collateral_price_e8s: price,
+                    recommended_liquidation_amount: optimal_liq.to_u64(),
+                    collateral_price_e8s: collateral_price_usd.to_e8s(),
                 }
             }).collect()
         });
@@ -412,8 +440,15 @@ pub fn check_vaults() {
             let bot_eligible = bot_canister.is_some()
                 && bot_allowed.contains(&vault_info.collateral_type);
 
+            let sp_already_tried = read_state(|s| s.sp_attempted_vaults.contains(&vault_info.vault_id));
+
+            if sp_already_tried {
+                // SP already had its shot → manual only, skip entirely
+                continue;
+            }
+
             if !bot_eligible {
-                // Not bot-eligible → stability pool immediately
+                // Not bot-eligible → stability pool (one shot)
                 for_pool.push(vault_info.clone());
             } else {
                 // Bot-eligible: check if we already sent it and it timed out
@@ -426,7 +461,7 @@ pub fn check_vaults() {
                         for_bot.push(vault_info.clone());
                     }
                     Some(ts) if now.saturating_sub(ts) >= bot_timeout_ns => {
-                        // Bot had its chance and didn't liquidate → fallback to pool
+                        // Bot had its chance and didn't liquidate → fallback to pool (one shot)
                         log!(
                             INFO,
                             "[check_vaults] Bot timeout for vault #{}, falling back to stability pool",
@@ -442,23 +477,29 @@ pub fn check_vaults() {
             }
         }
 
-        // Update bot_pending_vaults tracking
+        // Update tracking state
         let unhealthy_ids: std::collections::BTreeSet<u64> = vault_notifications
             .iter()
             .map(|v| v.vault_id)
             .collect();
         let bot_vault_ids: Vec<u64> = for_bot.iter().map(|v| v.vault_id).collect();
+        let pool_vault_ids: Vec<u64> = for_pool.iter().map(|v| v.vault_id).collect();
 
         mutate_state(|s| {
             // Record newly-sent bot vaults
             for vid in &bot_vault_ids {
                 s.bot_pending_vaults.entry(*vid).or_insert(now);
             }
-            // Keep entries that are still unhealthy AND haven't timed out yet.
-            // Timed-out entries stay deleted so they keep going to the pool on
-            // subsequent cycles (instead of resetting the clock).
+            // Keep bot entries that are still unhealthy AND haven't timed out yet.
             s.bot_pending_vaults
                 .retain(|vid, ts| unhealthy_ids.contains(vid) && now.saturating_sub(*ts) < bot_timeout_ns);
+
+            // Mark vaults sent to SP — they only get one shot
+            for vid in &pool_vault_ids {
+                s.sp_attempted_vaults.insert(*vid);
+            }
+            // Clear SP tracking for vaults that are now healthy (owner repaid/added collateral)
+            s.sp_attempted_vaults.retain(|vid| unhealthy_ids.contains(vid));
         });
 
         // Push to bot (fire-and-forget with error logging)

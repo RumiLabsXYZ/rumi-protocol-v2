@@ -65,6 +65,16 @@ export const idlFactory = ({ IDL }) => {
     'lp_total_supply' : IDL.Nat,
     'balances' : IDL.Vec(IDL.Nat),
   });
+  const SwapEvent = IDL.Record({
+    'id' : IDL.Nat64,
+    'fee' : IDL.Nat,
+    'token_in' : IDL.Nat8,
+    'amount_out' : IDL.Nat,
+    'timestamp' : IDL.Nat64,
+    'caller' : IDL.Principal,
+    'amount_in' : IDL.Nat,
+    'token_out' : IDL.Nat8,
+  });
   const VirtualPriceSnapshot = IDL.Record({
     'virtual_price' : IDL.Nat,
     'timestamp_secs' : IDL.Nat64,
@@ -290,6 +300,12 @@ export const idlFactory = ({ IDL }) => {
       ),
     'get_lp_balance' : IDL.Func([IDL.Principal], [IDL.Nat], ['query']),
     'get_pool_status' : IDL.Func([], [PoolStatus], ['query']),
+    'get_swap_event_count' : IDL.Func([], [IDL.Nat64], ['query']),
+    'get_swap_events' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [IDL.Vec(SwapEvent)],
+        ['query'],
+      ),
     'get_vp_snapshots' : IDL.Func(
         [],
         [IDL.Vec(VirtualPriceSnapshot)],

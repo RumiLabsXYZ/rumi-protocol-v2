@@ -188,7 +188,7 @@ async fn test_swap_pipeline(amount_e8s: u64) -> TestSwapResult {
 }
 
 /// Force-liquidate a vault (bypasses health ratio check on backend).
-/// The vault must exist. Creates a test entry in the event log.
+/// Uses the two-phase claim/confirm/cancel pattern.
 #[update]
 async fn test_force_liquidate(vault_id: u64) -> TestForceResult {
     require_admin();
@@ -198,20 +198,20 @@ async fn test_force_liquidate(vault_id: u64) -> TestForceResult {
 
     log!(INFO, "[test_force_liquidate] Force-liquidating vault #{}", vault_id);
 
-    // Step 1: Call dev_force_bot_liquidate on backend
+    // Step 1: Call dev_force_bot_liquidate (now uses claim pattern — locks vault, gets collateral)
     let liq_result: Result<(process::BackendResult<process::BotLiquidationResult>,), _> =
         ic_cdk::call(config.backend_principal, "dev_force_bot_liquidate", (vault_id,)).await;
 
     let (collateral_amount, debt_covered, collateral_price) = match liq_result {
         Ok((process::BackendResult::Ok(r),)) => {
-            log!(INFO, "[test_force_liquidate] Got {} e8s collateral, {} e8s debt", r.collateral_amount, r.debt_covered);
+            log!(INFO, "[test_force_liquidate] Claimed {} e8s collateral, {} e8s debt", r.collateral_amount, r.debt_covered);
             (r.collateral_amount, r.debt_covered, r.collateral_price_e8s)
         }
         Ok((process::BackendResult::Err(e),)) => ic_cdk::trap(&format!("dev_force_bot_liquidate error: {}", e)),
         Err((code, msg)) => ic_cdk::trap(&format!("dev_force_bot_liquidate call failed: {:?} {}", code, msg)),
     };
 
-    // Step 2: Calculate swap amount and swap ICP → ckStable
+    // Step 2: Swap ICP → ckStable
     let swap_amount = process::calculate_swap_amount(collateral_amount, debt_covered, collateral_price);
     let stable_result = swap::swap_icp_for_stable(&config, swap_amount).await;
     let (stable_amount, stable_token, route) = match stable_result {
@@ -219,31 +219,44 @@ async fn test_force_liquidate(vault_id: u64) -> TestForceResult {
             log!(INFO, "[test_force_liquidate] KongSwap OK: {} native via {}", r.output_amount, r.route);
             (r.output_amount, r.target_token, r.route)
         }
-        Err(e) => ic_cdk::trap(&format!("KongSwap failed: {}", e)),
+        Err(e) => {
+            // Cancel and trap
+            let _ = process::call_bot_cancel_liquidation_pub(&config, vault_id).await;
+            ic_cdk::trap(&format!("KongSwap failed (claim cancelled): {}", e));
+        }
     };
 
-    // Step 3: ckStable → icUSD (3pool)
+    // Step 3: ckStable → icUSD
     let icusd_amount = match swap::swap_stable_for_icusd(&config, stable_amount, stable_token).await {
-        Ok(amount) => {
-            log!(INFO, "[test_force_liquidate] 3pool OK: {} e8s icUSD", amount);
-            amount
+        Ok(amount) => amount,
+        Err(e) => {
+            let _ = process::call_bot_cancel_liquidation_pub(&config, vault_id).await;
+            ic_cdk::trap(&format!("3pool swap failed (claim cancelled): {}", e));
         }
-        Err(e) => ic_cdk::trap(&format!("3pool swap failed: {}", e)),
     };
 
     // Step 4: Deposit icUSD to backend reserves
     let deposited = match process::call_bot_deposit_to_reserves_pub(&config, icusd_amount).await {
-        Ok(()) => {
-            log!(INFO, "[test_force_liquidate] Deposited {} e8s icUSD to reserves", icusd_amount);
-            true
-        }
+        Ok(()) => true,
         Err(e) => {
-            log!(INFO, "[test_force_liquidate] Deposit failed: {}, icUSD stays in bot", e);
+            log!(INFO, "[test_force_liquidate] Deposit failed: {}", e);
             false
         }
     };
 
-    // Step 5: Send remaining ICP to treasury
+    // Step 5: CONFIRM the liquidation (finalize vault state)
+    let confirmed = match process::call_bot_confirm_liquidation_pub(&config, vault_id).await {
+        Ok(()) => {
+            log!(INFO, "[test_force_liquidate] Confirmed liquidation for vault #{}", vault_id);
+            true
+        }
+        Err(e) => {
+            log!(INFO, "[test_force_liquidate] Confirm failed: {}", e);
+            false
+        }
+    };
+
+    // Step 6: Send remaining ICP to treasury
     let icp_to_treasury = collateral_amount.saturating_sub(swap_amount);
     if icp_to_treasury > 0 {
         let _ = process::transfer_icp_to_treasury_pub(&config, icp_to_treasury).await;
@@ -262,8 +275,112 @@ async fn test_force_liquidate(vault_id: u64) -> TestForceResult {
             swap_route: route.clone(),
             effective_price_e8s: 0,
             slippage_bps: 0,
-            success: true,
-            error_message: Some("test_force_liquidate".to_string()),
+            success: confirmed && deposited,
+            error_message: if confirmed { Some("test_force_liquidate".to_string()) } else { Some("confirm failed".to_string()) },
+        });
+    });
+
+    TestForceResult {
+        vault_id,
+        collateral_received_e8s: collateral_amount,
+        debt_covered_e8s: debt_covered,
+        stable_output_native: stable_amount,
+        stable_route: route,
+        icusd_output_e8s: icusd_amount,
+        icusd_deposited_to_reserves: deposited,
+        icp_to_treasury_e8s: icp_to_treasury,
+    }
+}
+
+/// Force a PARTIAL liquidation of a vault (bypasses health ratio check, uses partial cap).
+/// Same as test_force_liquidate but calls dev_force_partial_bot_liquidate on backend.
+#[update]
+async fn test_force_partial_liquidate(vault_id: u64) -> TestForceResult {
+    require_admin();
+
+    let config = state::read_state(|s| s.config.clone())
+        .expect("Bot not configured");
+
+    log!(INFO, "[test_force_partial_liquidate] Partial-liquidating vault #{}", vault_id);
+
+    // Step 1: Call dev_force_partial_bot_liquidate (uses partial cap, skips CR check)
+    let liq_result: Result<(process::BackendResult<process::BotLiquidationResult>,), _> =
+        ic_cdk::call(config.backend_principal, "dev_force_partial_bot_liquidate", (vault_id,)).await;
+
+    let (collateral_amount, debt_covered, collateral_price) = match liq_result {
+        Ok((process::BackendResult::Ok(r),)) => {
+            log!(INFO, "[test_force_partial_liquidate] Claimed {} e8s collateral, {} e8s debt", r.collateral_amount, r.debt_covered);
+            (r.collateral_amount, r.debt_covered, r.collateral_price_e8s)
+        }
+        Ok((process::BackendResult::Err(e),)) => ic_cdk::trap(&format!("dev_force_partial_bot_liquidate error: {}", e)),
+        Err((code, msg)) => ic_cdk::trap(&format!("dev_force_partial_bot_liquidate call failed: {:?} {}", code, msg)),
+    };
+
+    // Step 2: Swap ICP → ckStable
+    let swap_amount = process::calculate_swap_amount(collateral_amount, debt_covered, collateral_price);
+    let stable_result = swap::swap_icp_for_stable(&config, swap_amount).await;
+    let (stable_amount, stable_token, route) = match stable_result {
+        Ok(r) => {
+            log!(INFO, "[test_force_partial_liquidate] KongSwap OK: {} native via {}", r.output_amount, r.route);
+            (r.output_amount, r.target_token, r.route)
+        }
+        Err(e) => {
+            let _ = process::call_bot_cancel_liquidation_pub(&config, vault_id).await;
+            ic_cdk::trap(&format!("KongSwap failed (claim cancelled): {}", e));
+        }
+    };
+
+    // Step 3: ckStable → icUSD
+    let icusd_amount = match swap::swap_stable_for_icusd(&config, stable_amount, stable_token).await {
+        Ok(amount) => amount,
+        Err(e) => {
+            let _ = process::call_bot_cancel_liquidation_pub(&config, vault_id).await;
+            ic_cdk::trap(&format!("3pool swap failed (claim cancelled): {}", e));
+        }
+    };
+
+    // Step 4: Deposit icUSD to backend reserves
+    let deposited = match process::call_bot_deposit_to_reserves_pub(&config, icusd_amount).await {
+        Ok(()) => true,
+        Err(e) => {
+            log!(INFO, "[test_force_partial_liquidate] Deposit failed: {}", e);
+            false
+        }
+    };
+
+    // Step 5: CONFIRM the liquidation
+    let confirmed = match process::call_bot_confirm_liquidation_pub(&config, vault_id).await {
+        Ok(()) => {
+            log!(INFO, "[test_force_partial_liquidate] Confirmed liquidation for vault #{}", vault_id);
+            true
+        }
+        Err(e) => {
+            log!(INFO, "[test_force_partial_liquidate] Confirm failed: {}", e);
+            false
+        }
+    };
+
+    // Step 6: Send remaining ICP to treasury
+    let icp_to_treasury = collateral_amount.saturating_sub(swap_amount);
+    if icp_to_treasury > 0 {
+        let _ = process::transfer_icp_to_treasury_pub(&config, icp_to_treasury).await;
+    }
+
+    // Log event
+    state::mutate_state(|s| {
+        s.stats.events_count += 1;
+        s.liquidation_events.push(BotLiquidationEvent {
+            timestamp: ic_cdk::api::time(),
+            vault_id,
+            debt_covered_e8s: debt_covered,
+            collateral_received_e8s: collateral_amount,
+            icusd_burned_e8s: icusd_amount,
+            collateral_to_treasury_e8s: icp_to_treasury,
+            swap_route: route.clone(),
+            effective_price_e8s: 0,
+            slippage_bps: 0,
+            success: confirmed && deposited,
+            error_message: if confirmed { Some("test_force_partial_liquidate".to_string()) } else { Some("confirm failed".to_string()) },
         });
     });
 

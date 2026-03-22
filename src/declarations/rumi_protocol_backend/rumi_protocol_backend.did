@@ -456,6 +456,7 @@ type Result_6 = variant { Ok : ConsentInfo; Err : Icrc21Error };
 type Result_7 = variant { Ok : OpenVaultSuccess; Err : ProtocolError };
 type Result_8 = variant { Ok : bool; Err : ProtocolError };
 type Result_9 = variant { Ok : ReserveRedemptionResult; Err : ProtocolError };
+type Result_11 = variant { Ok : text; Err : ProtocolError };
 type StabilityPoolConfig = record {
   enabled : bool;
   liquidation_discount : nat64;
@@ -508,7 +509,7 @@ type TreasuryStats = record {
   total_accrued_interest_system : nat64;
   pending_interest_for_pools_total : nat64;
 };
-type UpgradeArg = record { mode : opt Mode };
+type UpgradeArg = record { mode : opt Mode; description : opt text };
 type Vault = record {
   collateral_amount : nat64;
   owner : principal;
@@ -533,12 +534,17 @@ service : (ProtocolArg) -> {
   admin_mint_icusd : (nat64, principal, text) -> (Result_1);
   admin_sweep_to_treasury : (text) -> (Result_1);
   borrow_from_vault : (VaultArg) -> (Result_2);
+  bot_cancel_liquidation : (nat64) -> (Result);
+  bot_claim_liquidation : (nat64) -> (Result_3);
+  bot_confirm_liquidation : (nat64) -> (Result);
   bot_deposit_to_reserves : (nat64) -> (Result);
-  bot_liquidate : (nat64) -> (Result_3);
   claim_liquidity_returns : () -> (Result_1);
   clear_stuck_operations : (opt principal) -> (Result_1);
   close_vault : (nat64) -> (Result_4);
   dev_force_bot_liquidate : (nat64) -> (Result_3);
+  dev_force_partial_bot_liquidate : (nat64) -> (Result_3);
+  dev_test_cascade_liquidation : (nat64) -> (Result_11);
+  dev_test_pool_only_liquidation : (nat64) -> (Result_11);
   enter_recovery_mode : () -> (Result);
   exit_recovery_mode : () -> (Result);
   freeze_protocol : () -> (Result);
@@ -562,7 +568,6 @@ service : (ProtocolArg) -> {
   get_liquidation_bonus : () -> (float64) query;
   get_liquidation_protocol_share : () -> (float64) query;
   get_liquidity_status : (principal) -> (LiquidityStatus) query;
-  get_max_partial_liquidation_ratio : () -> (float64) query;
   get_min_icusd_amount : () -> (nat64) query;
   get_protocol_snapshots : (GetEventsArg) -> (vec ProtocolSnapshot) query;
   get_protocol_status : () -> (ProtocolStatus) query;
@@ -629,7 +634,6 @@ service : (ProtocolArg) -> {
   set_liquidation_bot_config : (principal, nat64) -> (Result);
   set_liquidation_protocol_share : (float64) -> (Result);
   set_lst_haircut : (principal, float64) -> (Result);
-  set_max_partial_liquidation_ratio : (float64) -> (Result);
   set_min_icusd_amount : (nat64) -> (Result);
   set_rate_curve_markers : (opt principal, vec record { float64; float64 }) -> (
       Result,

@@ -72,4 +72,5 @@ service : (BotInitArgs) -> {
   set_config : (BotConfig) -> ();
   test_swap_pipeline : (nat64) -> (TestSwapResult);
   test_force_liquidate : (nat64) -> (TestForceResult);
+  test_force_partial_liquidate : (nat64) -> (TestForceResult);
 };

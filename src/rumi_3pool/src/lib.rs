@@ -151,6 +151,26 @@ pub fn health() -> String {
     "ok".to_string()
 }
 
+/// Query swap events for explorer. Returns events in the requested range.
+#[query]
+pub fn get_swap_events(start: u64, length: u64) -> Vec<SwapEvent> {
+    read_state(|s| {
+        let events = s.swap_events();
+        let total = events.len() as u64;
+        if start >= total {
+            return vec![];
+        }
+        let end = (start + length).min(total) as usize;
+        events[start as usize..end].to_vec()
+    })
+}
+
+/// Query total number of swap events.
+#[query]
+pub fn get_swap_event_count() -> u64 {
+    read_state(|s| s.swap_events().len() as u64)
+}
+
 // ─── Helper: extract precision_muls from config ───
 
 fn get_precision_muls() -> [u64; 3] {
@@ -239,6 +259,19 @@ pub async fn swap(i: u8, j: u8, dx: u128, min_dy: u128) -> Result<u128, ThreePoo
         s.balances[i_idx] += dx;
         s.balances[j_idx] -= output + fee;
         s.admin_fees[j_idx] += admin_fee_share;
+
+        // Record swap event for explorer
+        let id = s.swap_events().len() as u64;
+        s.swap_events_mut().push(SwapEvent {
+            id,
+            timestamp: ic_cdk::api::time(),
+            caller,
+            token_in: i,
+            token_out: j,
+            amount_in: dx,
+            amount_out: output,
+            fee,
+        });
     });
 
     log!(INFO, "Swap: {} of token {} -> {} of token {} (fee: {}, admin_fee: {})",

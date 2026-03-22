@@ -176,11 +176,35 @@ pub async fn claim_collateral(collateral_ledger: Principal) -> Result<u64, Stabi
         return Ok(0);
     }
 
-    log!(INFO, "Claim: {} of collateral {} by {}", gains, collateral_ledger, caller);
+    // Query the collateral ledger's transfer fee so we can deduct it from
+    // what the user receives, keeping the pool's ledger balance in sync.
+    let ledger_fee: u64 = match call::<(), (candid::Nat,)>(collateral_ledger, "icrc1_fee", ()).await {
+        Ok((fee_nat,)) => {
+            let fee_u128: u128 = fee_nat.0.try_into().unwrap_or(0);
+            fee_u128 as u64
+        },
+        Err(_) => 0, // If we can't query the fee, transfer the full amount (old behavior)
+    };
+
+    if gains <= ledger_fee {
+        // Gains too small to cover the fee — rollback and return 0
+        mutate_state(|s| {
+            if let Some(pos) = s.deposits.get_mut(&caller) {
+                *pos.collateral_gains.entry(collateral_ledger).or_insert(0) += gains;
+                if let Some(claimed) = pos.total_claimed_gains.get_mut(&collateral_ledger) {
+                    *claimed = claimed.saturating_sub(gains);
+                }
+            }
+        });
+        return Ok(0);
+    }
+
+    let transfer_amount = gains - ledger_fee;
+    log!(INFO, "Claim: {} of collateral {} (transfer {} - fee {}) by {}", gains, collateral_ledger, transfer_amount, ledger_fee, caller);
 
     let transfer_args = TransferArg {
         to: Account { owner: caller, subaccount: None },
-        amount: gains.into(),
+        amount: transfer_amount.into(),
         fee: None,
         memo: None,
         created_at_time: Some(ic_cdk::api::time()),
@@ -194,7 +218,7 @@ pub async fn claim_collateral(collateral_ledger: Principal) -> Result<u64, Stabi
     match result {
         Ok((Ok(block_index),)) => {
             log!(INFO, "Collateral claim transfer succeeded, block: {}", block_index);
-            Ok(gains)
+            Ok(transfer_amount)
         },
         Ok((Err(transfer_error),)) => {
             log!(INFO, "Collateral claim failed, rolling back: {:?}", transfer_error);

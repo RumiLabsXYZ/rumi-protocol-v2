@@ -42,6 +42,10 @@ pub struct ThreePoolState {
     /// Option for upgrade compatibility — old state won't have this field.
     #[serde(default)]
     pub authorized_burn_callers: Option<BTreeSet<Principal>>,
+    /// Swap event log for explorer/analytics queries.
+    /// Option for upgrade compatibility — old state won't have this field.
+    #[serde(default)]
+    pub swap_events: Option<Vec<SwapEvent>>,
 }
 
 impl Default for ThreePoolState {
@@ -75,6 +79,7 @@ impl Default for ThreePoolState {
             is_paused: false,
             is_initialized: false,
             authorized_burn_callers: Some(BTreeSet::new()),
+            swap_events: Some(Vec::new()),
         }
     }
 }
@@ -163,6 +168,18 @@ impl ThreePoolState {
     /// Get mutable burn callers set (initializes if None for upgrade compat).
     pub fn burn_callers_mut(&mut self) -> &mut BTreeSet<Principal> {
         self.authorized_burn_callers.get_or_insert_with(BTreeSet::new)
+    }
+
+    /// Get swap events vec (empty if None for upgrade compat).
+    pub fn swap_events(&self) -> &Vec<SwapEvent> {
+        static EMPTY: std::sync::LazyLock<Vec<SwapEvent>> =
+            std::sync::LazyLock::new(Vec::new);
+        self.swap_events.as_ref().unwrap_or(&EMPTY)
+    }
+
+    /// Get mutable swap events vec (initializes if None for upgrade compat).
+    pub fn swap_events_mut(&mut self) -> &mut Vec<SwapEvent> {
+        self.swap_events.get_or_insert_with(Vec::new)
     }
 
     /// Initialize pool state from deploy args.

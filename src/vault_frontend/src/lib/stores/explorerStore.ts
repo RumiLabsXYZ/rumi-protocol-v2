@@ -1,6 +1,17 @@
 import { writable } from 'svelte/store';
 import { publicActor } from '$lib/services/protocol/apiClient';
 import { Principal } from '@dfinity/principal';
+import { stabilityPoolService } from '$lib/services/stabilityPoolService';
+import { threePoolService } from '$lib/services/threePoolService';
+
+export type EventSource = 'backend' | 'stability_pool' | '3pool_swap' | '3pool_lp';
+
+export interface UnifiedEvent {
+	source: EventSource;
+	timestamp: bigint | null;
+	event: any;
+	globalIndex: number;
+}
 
 const PAGE_SIZE = 100;
 
@@ -147,3 +158,56 @@ export function getEventsTotalPages(): number {
 }
 
 export { PAGE_SIZE };
+
+// ── Pool Events (Stability Pool + 3Pool) ──
+
+export const poolEvents = writable<UnifiedEvent[]>([]);
+export const poolEventsLoading = writable(false);
+
+export async function fetchPoolEvents() {
+	poolEventsLoading.set(true);
+	try {
+		const results: UnifiedEvent[] = [];
+
+		// Stability Pool: liquidation history
+		try {
+			const spLiquidations = await stabilityPoolService.getLiquidationHistory(100);
+			for (const liq of spLiquidations) {
+				results.push({
+					source: 'stability_pool',
+					timestamp: liq.timestamp,
+					event: liq,
+					globalIndex: Number(liq.vault_id),
+				});
+			}
+		} catch (e) {
+			console.error('Failed to fetch SP liquidations:', e);
+		}
+
+		// 3Pool: swap events
+		try {
+			const swapCount = await threePoolService.getSwapEventCount();
+			if (swapCount > 0n) {
+				const fetchCount = 200n;
+				const start = swapCount > fetchCount ? swapCount - fetchCount : 0n;
+				const swapEvents = await threePoolService.getSwapEvents(start, fetchCount);
+				for (const evt of swapEvents) {
+					results.push({
+						source: '3pool_swap',
+						timestamp: evt.timestamp,
+						event: evt,
+						globalIndex: Number(evt.id),
+					});
+				}
+			}
+		} catch (e) {
+			console.error('Failed to fetch 3pool swap events:', e);
+		}
+
+		poolEvents.set(results);
+	} catch (e) {
+		console.error('Failed to fetch pool events:', e);
+	} finally {
+		poolEventsLoading.set(false);
+	}
+}

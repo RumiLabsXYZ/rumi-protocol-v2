@@ -137,6 +137,16 @@ export interface RedeemAndBurnResult {
 }
 export interface StandardRecord { 'url' : string, 'name' : string }
 export interface SupportedBlockType { 'url' : string, 'block_type' : string }
+export interface SwapEvent {
+  'id' : bigint,
+  'fee' : bigint,
+  'token_in' : number,
+  'amount_out' : bigint,
+  'timestamp' : bigint,
+  'caller' : Principal,
+  'amount_in' : bigint,
+  'token_out' : number,
+}
 export type ThreePoolError = {
     'InsufficientOutput' : { 'actual' : bigint, 'expected_min' : bigint }
   } |
@@ -262,6 +272,8 @@ export interface _SERVICE {
   'get_authorized_burn_callers' : ActorMethod<[], Array<Principal>>,
   'get_lp_balance' : ActorMethod<[Principal], bigint>,
   'get_pool_status' : ActorMethod<[], PoolStatus>,
+  'get_swap_event_count' : ActorMethod<[], bigint>,
+  'get_swap_events' : ActorMethod<[bigint, bigint], Array<SwapEvent>>,
   'get_vp_snapshots' : ActorMethod<[], Array<VirtualPriceSnapshot>>,
   'health' : ActorMethod<[], string>,
   'icrc10_supported_standards' : ActorMethod<[], Array<StandardRecord>>,

@@ -34,11 +34,8 @@ pub struct StabilityPoolState {
     /// `Option` is required for Candid backward-compatible stable memory upgrades.
     #[serde(default)]
     pub total_interest_received_e8s: Option<u64>,
-    /// Per-token consecutive approve/liquidation failure counter for circuit breaker.
-    /// When a token hits MAX_CONSECUTIVE_FAILURES, it is auto-suspended from liquidations
-    /// until an admin calls `admin_reset_token_failures`.
-    /// `Option` wrapping is required for Candid backward-compatible stable memory upgrades
-    /// (Candid `Decode!` needs `opt` for new fields, unlike serde's `#[serde(default)]`).
+    /// DEPRECATED: Circuit breaker was removed — liquidations now skip failed tokens without
+    /// suspending them. Field retained for upgrade compatibility (serde default).
     #[serde(default)]
     pub token_consecutive_failures: Option<BTreeMap<Principal, u32>>,
     /// Cached virtual price for LP tokens (fetched from 3pool periodically).
@@ -238,6 +235,106 @@ impl StabilityPoolState {
         Ok(())
     }
 
+    /// Emergency accounting fix: deduct LP tokens that were burned on the 3pool
+    /// but whose debt write-down was rejected by the backend. Distributes the loss
+    /// proportionally across all depositors who hold this token.
+    pub fn deduct_burned_lp_from_balances(&mut self, token_ledger: Principal, burned_amount: u64) {
+        let total = self.total_stablecoin_balances.get(&token_ledger).copied().unwrap_or(0);
+        if total == 0 || burned_amount == 0 {
+            return;
+        }
+        let actual_deduct = burned_amount.min(total);
+
+        // Distribute proportionally across depositors
+        let depositors: Vec<(Principal, u64)> = self.deposits.iter()
+            .filter_map(|(p, pos)| {
+                let bal = pos.stablecoin_balances.get(&token_ledger).copied().unwrap_or(0);
+                if bal > 0 { Some((*p, bal)) } else { None }
+            })
+            .collect();
+
+        let mut total_deducted = 0u64;
+        for (principal, user_bal) in &depositors {
+            let user_share = (*user_bal as u128 * actual_deduct as u128 / total as u128) as u64;
+            let user_share = user_share.min(*user_bal);
+            if let Some(pos) = self.deposits.get_mut(principal) {
+                if let Some(bal) = pos.stablecoin_balances.get_mut(&token_ledger) {
+                    *bal = bal.saturating_sub(user_share);
+                }
+            }
+            total_deducted += user_share;
+        }
+
+        // Assign rounding dust to largest holder to prevent aggregate/individual drift
+        let dust = actual_deduct.saturating_sub(total_deducted);
+        if dust > 0 {
+            if let Some(largest_p) = depositors.iter()
+                .max_by_key(|(_, bal)| *bal)
+                .map(|(p, _)| *p)
+            {
+                if let Some(pos) = self.deposits.get_mut(&largest_p) {
+                    if let Some(bal) = pos.stablecoin_balances.get_mut(&token_ledger) {
+                        *bal = bal.saturating_sub(dust);
+                    }
+                }
+                total_deducted += dust;
+            }
+        }
+
+        if let Some(agg) = self.total_stablecoin_balances.get_mut(&token_ledger) {
+            *agg = agg.saturating_sub(total_deducted);
+        }
+    }
+
+    /// Re-credit tokens to depositor balances (rollback after failed backend call).
+    /// Inverse of deduct_burned_lp_from_balances.
+    pub fn credit_tokens_to_pool(&mut self, token_ledger: Principal, amount: u64) {
+        if amount == 0 {
+            return;
+        }
+        // Add back to aggregate
+        *self.total_stablecoin_balances.entry(token_ledger).or_insert(0) += amount;
+
+        // Distribute proportionally across depositors who hold this token
+        let holders: Vec<(Principal, u64)> = self.deposits.iter()
+            .filter_map(|(p, pos)| {
+                let bal = pos.stablecoin_balances.get(&token_ledger).copied().unwrap_or(0);
+                if bal > 0 { Some((*p, bal)) } else { None }
+            })
+            .collect();
+
+        if holders.is_empty() {
+            // Edge case: no holders, credit to first depositor
+            if let Some((first_p, _)) = self.deposits.iter().next() {
+                let first_p = *first_p;
+                if let Some(pos) = self.deposits.get_mut(&first_p) {
+                    *pos.stablecoin_balances.entry(token_ledger).or_insert(0) += amount;
+                }
+            }
+            return;
+        }
+
+        let holder_total: u64 = holders.iter().map(|(_, b)| *b).sum();
+        let mut credited = 0u64;
+        for (principal, bal) in &holders {
+            let share = (amount as u128 * *bal as u128 / holder_total as u128) as u64;
+            if let Some(pos) = self.deposits.get_mut(principal) {
+                *pos.stablecoin_balances.entry(token_ledger).or_insert(0) += share;
+            }
+            credited += share;
+        }
+
+        // Assign dust to first holder
+        let dust = amount.saturating_sub(credited);
+        if dust > 0 {
+            if let Some((first_p, _)) = holders.first() {
+                if let Some(pos) = self.deposits.get_mut(first_p) {
+                    *pos.stablecoin_balances.entry(token_ledger).or_insert(0) += dust;
+                }
+            }
+        }
+    }
+
     // ─── Collateral Gains ───
 
     pub fn get_collateral_gains(&self, user: &Principal) -> BTreeMap<Principal, u64> {
@@ -293,17 +390,68 @@ impl StabilityPoolState {
 
     /// Compute the stablecoin draw for a liquidation of a given debt amount (e8s).
     /// Returns a map of token_ledger -> amount to consume (in native decimals).
-    /// Follows priority ordering: higher priority consumed first, same priority proportional.
-    /// LP tokens (3USD) are valued at their virtual price, not 1:1.
+    ///
+    /// For small debts (< 1 icUSD / 100_000_000 e8s), uses a single token — whichever
+    /// has the highest balance — to avoid splitting into amounts too small for the backend.
+    /// For larger debts, follows priority ordering with proportional splits.
     pub fn compute_token_draw(&self, debt_e8s: u64, collateral_type: &Principal) -> BTreeMap<Principal, u64> {
-        let mut result = BTreeMap::new();
-        let mut remaining_e8s = debt_e8s;
         let vps = self.virtual_prices();
 
-        // Gather available balances per priority, only from opted-in depositors
-        // Tuple: (ledger, available_native, decimals, is_lp)
-        let mut priority_buckets: BTreeMap<u8, Vec<(Principal, u64, u8, bool)>> = BTreeMap::new();
+        // Gather all available tokens with their e8s-equivalent balances
+        // Tuple: (ledger, available_native, decimals, is_lp, available_e8s)
+        let mut all_tokens: Vec<(Principal, u64, u8, bool, u64)> = Vec::new();
 
+        for (ledger, config) in &self.stablecoin_registry {
+            let available_native: u64 = self.deposits.values()
+                .filter(|pos| pos.is_opted_in(collateral_type))
+                .map(|pos| pos.stablecoin_balances.get(ledger).copied().unwrap_or(0))
+                .sum();
+            if available_native > 0 {
+                let is_lp = config.is_lp_token.unwrap_or(false);
+                let available_e8s = if is_lp {
+                    vps.get(ledger).map(|&vp| lp_to_usd_e8s(available_native, vp)).unwrap_or(0)
+                } else {
+                    normalize_to_e8s(available_native, config.decimals)
+                };
+                if available_e8s > 0 {
+                    all_tokens.push((*ledger, available_native, config.decimals, is_lp, available_e8s));
+                }
+            }
+        }
+
+        if all_tokens.is_empty() {
+            return BTreeMap::new();
+        }
+
+        // Small debt optimization: use the single token with the highest balance.
+        // This avoids splitting into amounts that all fall below the backend minimum.
+        const SMALL_DEBT_THRESHOLD: u64 = 100_000_000; // 1 icUSD
+        if debt_e8s < SMALL_DEBT_THRESHOLD {
+            let best = all_tokens.iter()
+                .max_by_key(|(_, _, _, _, e8s)| *e8s)
+                .unwrap(); // safe: all_tokens is non-empty
+
+            let (ledger, available_native, decimals, is_lp, available_e8s) = *best;
+            let draw_e8s = debt_e8s.min(available_e8s);
+            let draw_native = if is_lp {
+                vps.get(&ledger).map(|&vp| usd_e8s_to_lp(draw_e8s, vp)).unwrap_or(0)
+            } else {
+                normalize_from_e8s(draw_e8s, decimals)
+            };
+
+            let mut result = BTreeMap::new();
+            if draw_native > 0 {
+                result.insert(ledger, draw_native.min(available_native));
+            }
+            return result;
+        }
+
+        // Normal path: priority-based proportional draw
+        let mut result = BTreeMap::new();
+        let mut remaining_e8s = debt_e8s;
+
+        // Group by priority
+        let mut priority_buckets: BTreeMap<u8, Vec<(Principal, u64, u8, bool)>> = BTreeMap::new();
         for (ledger, config) in &self.stablecoin_registry {
             let available_native: u64 = self.deposits.values()
                 .filter(|pos| pos.is_opted_in(collateral_type))
@@ -316,7 +464,7 @@ impl StabilityPoolState {
             }
         }
 
-        // Process from highest priority number first: ckUSDC/ckUSDT (2) before icUSD (1), 3USD (0) last.
+        // Process from highest priority first
         let mut priorities: Vec<u8> = priority_buckets.keys().copied().collect();
         priorities.sort_by(|a, b| b.cmp(a)); // descending
 
@@ -326,7 +474,6 @@ impl StabilityPoolState {
             }
             let tokens = priority_buckets.get(&priority).unwrap();
 
-            // Total available at this priority level (in e8s)
             let total_available_e8s: u64 = tokens.iter()
                 .map(|(ledger, amount, decimals, is_lp)| {
                     if *is_lp {
@@ -439,6 +586,7 @@ impl StabilityPoolState {
         // Phase 3: For each opted-in depositor, reduce their token balances and add collateral gains.
         // Track actual deductions per token to avoid rounding drift between aggregate and individual totals.
         let mut actual_deductions_per_token: BTreeMap<Principal, u64> = BTreeMap::new();
+        let mut total_collateral_distributed: u64 = 0;
 
         for principal in &opted_in_principals {
             let mut user_consumed_e8s: u64 = 0;
@@ -481,6 +629,17 @@ impl StabilityPoolState {
                 if user_consumed_e8s > 0 {
                     let user_collateral = (collateral_gained as u128 * user_consumed_e8s as u128 / total_consumed_e8s as u128) as u64;
                     *position.collateral_gains.entry(collateral_type).or_insert(0) += user_collateral;
+                    total_collateral_distributed += user_collateral;
+                }
+            }
+        }
+
+        // Phase 3b: Assign collateral rounding dust to first opted-in depositor
+        let collateral_dust = collateral_gained.saturating_sub(total_collateral_distributed);
+        if collateral_dust > 0 {
+            if let Some(first) = opted_in_principals.first() {
+                if let Some(pos) = self.deposits.get_mut(first) {
+                    *pos.collateral_gains.entry(collateral_type).or_insert(0) += collateral_dust;
                 }
             }
         }
@@ -654,56 +813,6 @@ impl StabilityPoolState {
         }
 
         format!("Corrected {} balance for {}: {} -> {}", token_ledger, user, old_amount, correct_amount)
-    }
-
-    // ─── Token Failure Circuit Breaker ───
-
-    /// Maximum consecutive approve/liquidation failures before auto-suspending a token.
-    const MAX_CONSECUTIVE_FAILURES: u32 = 3;
-
-    /// Returns true if the token has been auto-suspended due to repeated failures.
-    pub fn is_token_suspended(&self, token_ledger: &Principal) -> bool {
-        self.token_consecutive_failures
-            .as_ref()
-            .and_then(|m| m.get(token_ledger))
-            .map(|&count| count >= Self::MAX_CONSECUTIVE_FAILURES)
-            .unwrap_or(false)
-    }
-
-    /// Increment the consecutive failure counter for a token.
-    /// Returns the new count.
-    pub fn record_token_failure(&mut self, token_ledger: Principal) -> u32 {
-        let map = self.token_consecutive_failures.get_or_insert_with(BTreeMap::new);
-        let count = map.entry(token_ledger).or_insert(0);
-        *count += 1;
-        *count
-    }
-
-    /// Reset the consecutive failure counter on success.
-    pub fn reset_token_failures(&mut self, token_ledger: &Principal) {
-        if let Some(map) = self.token_consecutive_failures.as_mut() {
-            map.remove(token_ledger);
-        }
-    }
-
-    /// Admin: reset the failure counter for a suspended token, re-enabling it.
-    /// Returns the previous failure count.
-    pub fn admin_reset_token_failures(&mut self, token_ledger: &Principal) -> u32 {
-        self.token_consecutive_failures
-            .as_mut()
-            .and_then(|m| m.remove(token_ledger))
-            .unwrap_or(0)
-    }
-
-    /// Return all tokens that are currently auto-suspended.
-    pub fn get_suspended_tokens(&self) -> Vec<(Principal, u32)> {
-        self.token_consecutive_failures
-            .as_ref()
-            .map(|m| m.iter()
-                .filter(|(_, &count)| count >= Self::MAX_CONSECUTIVE_FAILURES)
-                .map(|(p, &c)| (*p, c))
-                .collect())
-            .unwrap_or_default()
     }
 
     // ─── State Validation ───

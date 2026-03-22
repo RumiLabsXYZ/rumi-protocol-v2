@@ -4,7 +4,10 @@ export const idlFactory = ({ IDL }) => {
     'GeneralAvailability' : IDL.Null,
     'Recovery' : IDL.Null,
   });
-  const UpgradeArg = IDL.Record({ 'mode' : IDL.Opt(Mode) });
+  const UpgradeArg = IDL.Record({
+    'mode' : IDL.Opt(Mode),
+    'description' : IDL.Opt(IDL.Text),
+  });
   const InitArg = IDL.Record({
     'ckusdc_ledger_principal' : IDL.Opt(IDL.Principal),
     'xrc_principal' : IDL.Principal,
@@ -120,6 +123,7 @@ export const idlFactory = ({ IDL }) => {
     'Ok' : IDL.Opt(IDL.Nat64),
     'Err' : ProtocolError,
   });
+  const Result_11 = IDL.Variant({ 'Ok' : IDL.Text, 'Err' : ProtocolError });
   const CandidVault = IDL.Record({
     'collateral_amount' : IDL.Nat64,
     'owner' : IDL.Principal,
@@ -642,8 +646,10 @@ export const idlFactory = ({ IDL }) => {
       ),
     'admin_sweep_to_treasury' : IDL.Func([IDL.Text], [Result_1], []),
     'borrow_from_vault' : IDL.Func([VaultArg], [Result_2], []),
+    'bot_cancel_liquidation' : IDL.Func([IDL.Nat64], [Result], []),
+    'bot_claim_liquidation' : IDL.Func([IDL.Nat64], [Result_3], []),
+    'bot_confirm_liquidation' : IDL.Func([IDL.Nat64], [Result], []),
     'bot_deposit_to_reserves' : IDL.Func([IDL.Nat64], [Result], []),
-    'bot_liquidate' : IDL.Func([IDL.Nat64], [Result_3], []),
     'claim_liquidity_returns' : IDL.Func([], [Result_1], []),
     'clear_stuck_operations' : IDL.Func(
         [IDL.Opt(IDL.Principal)],
@@ -676,12 +682,19 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'dev_force_bot_liquidate' : IDL.Func([IDL.Nat64], [Result_3], []),
+    'dev_force_partial_bot_liquidate' : IDL.Func([IDL.Nat64], [Result_3], []),
+    'dev_test_cascade_liquidation' : IDL.Func([IDL.Nat64], [Result_11], []),
+    'dev_test_pool_only_liquidation' : IDL.Func([IDL.Nat64], [Result_11], []),
     'enter_recovery_mode' : IDL.Func([], [Result], []),
     'exit_recovery_mode' : IDL.Func([], [Result], []),
     'freeze_protocol' : IDL.Func([], [Result], []),
     'get_all_vaults' : IDL.Func([], [IDL.Vec(CandidVault)], ['query']),
     'get_borrowing_fee' : IDL.Func([], [IDL.Float64], ['query']),
-    'get_bot_allowed_collateral_types' : IDL.Func([], [IDL.Vec(IDL.Principal)], ['query']),
+    'get_bot_allowed_collateral_types' : IDL.Func(
+        [],
+        [IDL.Vec(IDL.Principal)],
+        ['query'],
+      ),
     'get_bot_stats' : IDL.Func([], [BotStatsResponse], ['query']),
     'get_ckstable_repay_fee' : IDL.Func([], [IDL.Float64], ['query']),
     'get_collateral_config' : IDL.Func(
@@ -721,11 +734,6 @@ export const idlFactory = ({ IDL }) => {
     'get_liquidity_status' : IDL.Func(
         [IDL.Principal],
         [LiquidityStatus],
-        ['query'],
-      ),
-    'get_max_partial_liquidation_ratio' : IDL.Func(
-        [],
-        [IDL.Float64],
         ['query'],
       ),
     'get_min_icusd_amount' : IDL.Func([], [IDL.Nat64], ['query']),
@@ -844,6 +852,11 @@ export const idlFactory = ({ IDL }) => {
     'reset_bot_budget' : IDL.Func([IDL.Nat64], [Result], []),
     'set_borrowing_fee' : IDL.Func([IDL.Float64], [Result], []),
     'set_borrowing_fee_curve' : IDL.Func([IDL.Opt(IDL.Text)], [Result], []),
+    'set_bot_allowed_collateral_types' : IDL.Func(
+        [IDL.Vec(IDL.Principal)],
+        [Result],
+        [],
+      ),
     'set_ckstable_repay_fee' : IDL.Func([IDL.Float64], [Result], []),
     'set_collateral_borrowing_fee' : IDL.Func(
         [IDL.Principal, IDL.Float64],
@@ -871,11 +884,6 @@ export const idlFactory = ({ IDL }) => {
     'set_interest_rate' : IDL.Func([IDL.Principal, IDL.Float64], [Result], []),
     'set_interest_split' : IDL.Func([IDL.Vec(InterestSplitArg)], [Result], []),
     'set_liquidation_bonus' : IDL.Func([IDL.Float64], [Result], []),
-    'set_bot_allowed_collateral_types' : IDL.Func(
-        [IDL.Vec(IDL.Principal)],
-        [Result],
-        [],
-      ),
     'set_liquidation_bot_config' : IDL.Func(
         [IDL.Principal, IDL.Nat64],
         [Result],
@@ -883,7 +891,6 @@ export const idlFactory = ({ IDL }) => {
       ),
     'set_liquidation_protocol_share' : IDL.Func([IDL.Float64], [Result], []),
     'set_lst_haircut' : IDL.Func([IDL.Principal, IDL.Float64], [Result], []),
-    'set_max_partial_liquidation_ratio' : IDL.Func([IDL.Float64], [Result], []),
     'set_min_icusd_amount' : IDL.Func([IDL.Nat64], [Result], []),
     'set_rate_curve_markers' : IDL.Func(
         [IDL.Opt(IDL.Principal), IDL.Vec(IDL.Tuple(IDL.Float64, IDL.Float64))],
@@ -951,7 +958,10 @@ export const init = ({ IDL }) => {
     'GeneralAvailability' : IDL.Null,
     'Recovery' : IDL.Null,
   });
-  const UpgradeArg = IDL.Record({ 'mode' : IDL.Opt(Mode) });
+  const UpgradeArg = IDL.Record({
+    'mode' : IDL.Opt(Mode),
+    'description' : IDL.Opt(IDL.Text),
+  });
   const InitArg = IDL.Record({
     'ckusdc_ledger_principal' : IDL.Opt(IDL.Principal),
     'xrc_principal' : IDL.Principal,

@@ -171,6 +171,23 @@ impl CollateralStatus {
     }
 }
 
+/// Tracks a bot's pending liquidation claim on a vault.
+#[derive(candid::CandidType, Clone, Debug, serde::Deserialize, Serialize)]
+pub struct BotClaim {
+    /// Vault ID being liquidated
+    pub vault_id: u64,
+    /// Amount of collateral transferred to the bot
+    pub collateral_amount: u64,
+    /// Debt amount the bot committed to cover
+    pub debt_amount: u64,
+    /// Collateral type (ledger principal)
+    pub collateral_type: Principal,
+    /// Timestamp (nanos) when claim was created
+    pub claimed_at: u64,
+    /// Collateral price at time of claim (for event logging)
+    pub collateral_price_e8s: u64,
+}
+
 /// Asset class for XRC price queries (mirrors ic_xrc_types::AssetClass but with serde support).
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub enum XrcAssetClass {
@@ -658,6 +675,13 @@ pub struct State {
     /// Used by check_vaults() to implement priority cascade:
     /// bot gets one cycle, then stability pool takes over.
     pub bot_pending_vaults: BTreeMap<u64, u64>,
+    /// Vaults that have already been sent to the stability pool.
+    /// No retries — once the SP has been notified, subsequent cycles skip the vault
+    /// and leave it for manual liquidation. Cleared when vault becomes healthy.
+    pub sp_attempted_vaults: BTreeSet<u64>,
+    /// Active bot claims — tracks collateral transferred to bot but not yet confirmed.
+    /// Key = vault_id. Auto-cancelled after `BOT_CLAIM_TIMEOUT_NS`.
+    pub bot_claims: BTreeMap<u64, BotClaim>,
 }
 
 impl From<InitArg> for State {
@@ -836,6 +860,8 @@ impl From<InitArg> for State {
             bot_total_icusd_deposited_e8s: 0,
             bot_allowed_collateral_types: BTreeSet::new(),
             bot_pending_vaults: BTreeMap::new(),
+            sp_attempted_vaults: BTreeSet::new(),
+            bot_claims: BTreeMap::new(),
         }
     }
 }
@@ -2066,15 +2092,21 @@ impl State {
         } else {
             return vault.borrowed_icusd_amount;
         };
-        let recovery_target = self.get_recovery_target_cr_for(ct);
+        // Use the per-asset minimum collateral ratio (borrow_threshold_ratio, e.g. 150% for ICP)
+        // as the target CR to restore the vault to after partial liquidation.
+        let target_cr = self.get_min_collateral_ratio_for(ct);
         let liq_bonus = self.get_liquidation_bonus_for(ct);
-        let numerator_icusd = vault.borrowed_icusd_amount * recovery_target;
+        let numerator_icusd = vault.borrowed_icusd_amount * target_cr;
         if numerator_icusd <= collateral_value {
             // Already at or above target — shouldn't be liquidatable, but return 0
             return ICUSD::new(0);
         }
         let deficit = numerator_icusd - collateral_value;
-        let denominator = recovery_target - liq_bonus;
+        let denominator = target_cr - liq_bonus;
+        // If target CR <= bonus (misconfigured or deeply underwater), full liquidation
+        if denominator <= Ratio::from(dec!(0)) {
+            return vault.borrowed_icusd_amount;
+        }
         let repay_amount = deficit / denominator;
         repay_amount.min(vault.borrowed_icusd_amount)
     }
@@ -2588,6 +2620,7 @@ mod tests {
             collateral_type: Principal::anonymous(),
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         };
 
         let vault2 = Vault {
@@ -2598,6 +2631,7 @@ mod tests {
             collateral_type: Principal::anonymous(),
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         };
 
         vaults.insert(1, vault1);
@@ -2611,6 +2645,7 @@ mod tests {
             collateral_type: Principal::anonymous(),
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         };
 
         let result = distribute_across_vaults(&vaults, target_vault);
@@ -2648,6 +2683,7 @@ mod tests {
             collateral_type: Principal::anonymous(),
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         });
 
         // Repay 0.01 icUSD (minimum partial repay in e8s is 1_000_000)
@@ -2672,6 +2708,7 @@ mod tests {
             collateral_type: icp,
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(100_000_000), // 1 icUSD is interest
+            bot_processing: false,
         });
 
         let (interest_share, principal_share) = state.repay_to_vault(1, ICUSD::new(250_000_000));
@@ -2701,6 +2738,7 @@ mod tests {
             collateral_type: icp,
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         });
 
         crate::event::record_borrow_from_vault(&mut state, 1, ICUSD::new(100_000_000), ICUSD::new(500_000), 0);
@@ -2740,6 +2778,7 @@ mod tests {
             collateral_type: Principal::anonymous(),
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         });
 
         // Move state into global so mutate_state/read_state work in this test.
@@ -2992,6 +3031,7 @@ mod tests {
             collateral_type: icp,
             last_accrual_time: 0, // t=0
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         };
         state.vault_id_to_vaults.insert(1, vault);
 
@@ -3025,6 +3065,7 @@ mod tests {
             collateral_type: icp,
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(10_000_000), // 0.1 icUSD pre-existing
+            bot_processing: false,
         });
 
         state.accrue_single_vault(1, crate::numeric::NANOS_PER_YEAR);
@@ -3049,6 +3090,7 @@ mod tests {
             collateral_type: icp,
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         };
         state.vault_id_to_vaults.insert(1, vault);
 
@@ -3073,6 +3115,7 @@ mod tests {
             collateral_type: icp,
             last_accrual_time: 1000, // already accrued up to t=1000
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         };
         state.vault_id_to_vaults.insert(1, vault);
 
@@ -3096,6 +3139,7 @@ mod tests {
             collateral_type: icp,
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         });
 
         // Vault 2: 2 ICP, 5 icUSD → CR = 400% (above healthy 225%)
@@ -3107,6 +3151,7 @@ mod tests {
             collateral_type: icp,
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         });
 
         // Vault 3: zero debt (should be skipped)
@@ -3118,6 +3163,7 @@ mod tests {
             collateral_type: icp,
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         });
 
         let one_year = crate::numeric::NANOS_PER_YEAR;
@@ -3155,6 +3201,7 @@ mod tests {
             collateral_type: icp,
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         });
 
         // 300 seconds in nanos
@@ -3193,6 +3240,7 @@ mod tests {
             collateral_type: icp,
             last_accrual_time: start,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         });
 
         let initial_debt = state.vault_id_to_vaults.get(&1).unwrap().borrowed_icusd_amount;
@@ -3243,6 +3291,7 @@ mod tests {
             collateral_type: icp,
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         });
 
         let avg = state.weighted_average_interest_rate();
@@ -3274,6 +3323,7 @@ mod tests {
             collateral_type: icp,
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(100_000_000), // 1 icUSD of accrued interest
+            bot_processing: false,
         });
 
         // Simulate partial liquidation: liquidator pays 5 icUSD
@@ -3413,6 +3463,7 @@ mod tests {
             collateral_type: icp,
             accrued_interest: ICUSD::new(500_000_000), // 5 icUSD interest
             last_accrual_time: 0,
+            bot_processing: false,
         });
 
         // Repay 50 icUSD worth
@@ -3777,6 +3828,7 @@ mod tests {
                 collateral_type: state.icp_ledger_principal,
                 last_accrual_time: 0,
                 accrued_interest: ICUSD::new(0),
+                bot_processing: false,
             });
         }
 
