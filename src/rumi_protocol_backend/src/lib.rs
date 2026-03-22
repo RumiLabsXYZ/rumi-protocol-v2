@@ -440,8 +440,15 @@ pub fn check_vaults() {
             let bot_eligible = bot_canister.is_some()
                 && bot_allowed.contains(&vault_info.collateral_type);
 
+            let sp_already_tried = read_state(|s| s.sp_attempted_vaults.contains(&vault_info.vault_id));
+
+            if sp_already_tried {
+                // SP already had its shot → manual only, skip entirely
+                continue;
+            }
+
             if !bot_eligible {
-                // Not bot-eligible → stability pool immediately
+                // Not bot-eligible → stability pool (one shot)
                 for_pool.push(vault_info.clone());
             } else {
                 // Bot-eligible: check if we already sent it and it timed out
@@ -454,7 +461,7 @@ pub fn check_vaults() {
                         for_bot.push(vault_info.clone());
                     }
                     Some(ts) if now.saturating_sub(ts) >= bot_timeout_ns => {
-                        // Bot had its chance and didn't liquidate → fallback to pool
+                        // Bot had its chance and didn't liquidate → fallback to pool (one shot)
                         log!(
                             INFO,
                             "[check_vaults] Bot timeout for vault #{}, falling back to stability pool",
@@ -470,23 +477,29 @@ pub fn check_vaults() {
             }
         }
 
-        // Update bot_pending_vaults tracking
+        // Update tracking state
         let unhealthy_ids: std::collections::BTreeSet<u64> = vault_notifications
             .iter()
             .map(|v| v.vault_id)
             .collect();
         let bot_vault_ids: Vec<u64> = for_bot.iter().map(|v| v.vault_id).collect();
+        let pool_vault_ids: Vec<u64> = for_pool.iter().map(|v| v.vault_id).collect();
 
         mutate_state(|s| {
             // Record newly-sent bot vaults
             for vid in &bot_vault_ids {
                 s.bot_pending_vaults.entry(*vid).or_insert(now);
             }
-            // Keep entries that are still unhealthy AND haven't timed out yet.
-            // Timed-out entries stay deleted so they keep going to the pool on
-            // subsequent cycles (instead of resetting the clock).
+            // Keep bot entries that are still unhealthy AND haven't timed out yet.
             s.bot_pending_vaults
                 .retain(|vid, ts| unhealthy_ids.contains(vid) && now.saturating_sub(*ts) < bot_timeout_ns);
+
+            // Mark vaults sent to SP — they only get one shot
+            for vid in &pool_vault_ids {
+                s.sp_attempted_vaults.insert(*vid);
+            }
+            // Clear SP tracking for vaults that are now healthy (owner repaid/added collateral)
+            s.sp_attempted_vaults.retain(|vid| unhealthy_ids.contains(vid));
         });
 
         // Push to bot (fire-and-forget with error logging)

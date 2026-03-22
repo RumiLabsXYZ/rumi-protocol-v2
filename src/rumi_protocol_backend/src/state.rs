@@ -675,6 +675,10 @@ pub struct State {
     /// Used by check_vaults() to implement priority cascade:
     /// bot gets one cycle, then stability pool takes over.
     pub bot_pending_vaults: BTreeMap<u64, u64>,
+    /// Vaults that have already been sent to the stability pool.
+    /// No retries — once the SP has been notified, subsequent cycles skip the vault
+    /// and leave it for manual liquidation. Cleared when vault becomes healthy.
+    pub sp_attempted_vaults: BTreeSet<u64>,
     /// Active bot claims — tracks collateral transferred to bot but not yet confirmed.
     /// Key = vault_id. Auto-cancelled after `BOT_CLAIM_TIMEOUT_NS`.
     pub bot_claims: BTreeMap<u64, BotClaim>,
@@ -856,6 +860,7 @@ impl From<InitArg> for State {
             bot_total_icusd_deposited_e8s: 0,
             bot_allowed_collateral_types: BTreeSet::new(),
             bot_pending_vaults: BTreeMap::new(),
+            sp_attempted_vaults: BTreeSet::new(),
             bot_claims: BTreeMap::new(),
         }
     }
