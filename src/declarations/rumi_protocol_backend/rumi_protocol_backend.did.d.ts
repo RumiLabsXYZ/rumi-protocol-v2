@@ -561,6 +561,8 @@ export type Result_1 = { 'Ok' : bigint } |
   { 'Err' : ProtocolError };
 export type Result_10 = { 'Ok' : StabilityPoolLiquidationResult } |
   { 'Err' : ProtocolError };
+export type Result_11 = { 'Ok' : string } |
+  { 'Err' : ProtocolError };
 export type Result_2 = { 'Ok' : SuccessWithFee } |
   { 'Err' : ProtocolError };
 export type Result_3 = { 'Ok' : BotLiquidationResult } |
@@ -576,8 +578,6 @@ export type Result_7 = { 'Ok' : OpenVaultSuccess } |
 export type Result_8 = { 'Ok' : boolean } |
   { 'Err' : ProtocolError };
 export type Result_9 = { 'Ok' : ReserveRedemptionResult } |
-  { 'Err' : ProtocolError };
-export type Result_11 = { 'Ok' : string } |
   { 'Err' : ProtocolError };
 export interface StabilityPoolConfig {
   'enabled' : boolean,
@@ -632,7 +632,10 @@ export interface TreasuryStats {
   'total_accrued_interest_system' : bigint,
   'pending_interest_for_pools_total' : bigint,
 }
-export interface UpgradeArg { 'mode' : [] | [Mode] }
+export interface UpgradeArg {
+  'mode' : [] | [Mode],
+  'description' : [] | [string],
+}
 export interface Vault {
   'collateral_amount' : bigint,
   'owner' : Principal,
@@ -686,6 +689,7 @@ export interface _SERVICE {
     }
   >,
   'dev_force_bot_liquidate' : ActorMethod<[bigint], Result_3>,
+  'dev_force_partial_bot_liquidate' : ActorMethod<[bigint], Result_3>,
   'dev_test_cascade_liquidation' : ActorMethod<[bigint], Result_11>,
   'dev_test_pool_only_liquidation' : ActorMethod<[bigint], Result_11>,
   'enter_recovery_mode' : ActorMethod<[], Result>,
@@ -777,6 +781,7 @@ export interface _SERVICE {
   'reset_bot_budget' : ActorMethod<[bigint], Result>,
   'set_borrowing_fee' : ActorMethod<[number], Result>,
   'set_borrowing_fee_curve' : ActorMethod<[[] | [string]], Result>,
+  'set_bot_allowed_collateral_types' : ActorMethod<[Array<Principal>], Result>,
   'set_ckstable_repay_fee' : ActorMethod<[number], Result>,
   'set_collateral_borrowing_fee' : ActorMethod<[Principal, number], Result>,
   'set_collateral_debt_ceiling' : ActorMethod<[Principal, bigint], Result>,
@@ -788,7 +793,6 @@ export interface _SERVICE {
   'set_interest_rate' : ActorMethod<[Principal, number], Result>,
   'set_interest_split' : ActorMethod<[Array<InterestSplitArg>], Result>,
   'set_liquidation_bonus' : ActorMethod<[number], Result>,
-  'set_bot_allowed_collateral_types' : ActorMethod<[Array<Principal>], Result>,
   'set_liquidation_bot_config' : ActorMethod<[Principal, bigint], Result>,
   'set_liquidation_protocol_share' : ActorMethod<[number], Result>,
   'set_lst_haircut' : ActorMethod<[Principal, number], Result>,

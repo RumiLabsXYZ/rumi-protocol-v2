@@ -159,6 +159,12 @@ pub struct LiquidatableVaultInfo {
     pub collateral_type: Principal,
     pub debt_amount: u64,         // icUSD e8s
     pub collateral_amount: u64,   // native decimals
+    /// Recommended partial liquidation amount (e8s). Sent by backend, 0 if unknown.
+    #[serde(default)]
+    pub recommended_liquidation_amount: u64,
+    /// Collateral price in e8s (USD). Sent by backend, 0 if unknown.
+    #[serde(default)]
+    pub collateral_price_e8s: u64,
 }
 
 /// Result of a single liquidation attempt.

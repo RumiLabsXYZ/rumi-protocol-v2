@@ -2026,6 +2026,21 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
             },
         );
 
+        // Clean up fully liquidated vaults (zero debt and zero collateral)
+        if let Some(vault) = s.vault_id_to_vaults.get(&vault_id) {
+            if vault.borrowed_icusd_amount.0 == 0 && vault.collateral_amount == 0 {
+                let owner = vault.owner;
+                s.vault_id_to_vaults.remove(&vault_id);
+                if let Some(ids) = s.principal_to_vault_ids.get_mut(&owner) {
+                    ids.retain(|id| *id != vault_id);
+                    if ids.is_empty() {
+                        s.principal_to_vault_ids.remove(&owner);
+                    }
+                }
+                log!(INFO, "[liquidate_vault_partial] Vault #{} fully liquidated — removed", vault_id);
+            }
+        }
+
         log!(INFO, "[liquidate_vault_partial] Partial liquidation completed, {} pending transfers created", 1);
         interest_share
     });
@@ -2368,17 +2383,12 @@ pub async fn liquidate_vault_debt_already_burned(
                     .map(|c| c.decimals)
                     .unwrap_or(8);
                 let collateral_price_usd = UsdIcp::from(price);
-                let ratio = compute_collateral_ratio(vault, collateral_price_usd, s);
-                let min_liq_ratio = s.get_min_liquidation_ratio_for(&vault.collateral_type);
 
-                if ratio >= min_liq_ratio {
-                    Err(format!(
-                        "Vault #{} is not liquidatable. Current ratio: {}, minimum: {}",
-                        vault_id, ratio.to_f64(), min_liq_ratio.to_f64()
-                    ))
-                } else {
-                    let max_liquidatable = s.compute_partial_liquidation_cap(vault, collateral_price_usd);
-                    let actual_liquidation_amount = liquidation_amount.min(max_liquidatable).min(vault.borrowed_icusd_amount);
+                // NO CR CHECK HERE — icUSD was already burned by the 3pool.
+                // The backend MUST honor the write-down regardless of vault health.
+                // Rejecting would leave burned icUSD unaccounted for.
+                {
+                    let actual_liquidation_amount = liquidation_amount.min(vault.borrowed_icusd_amount);
 
                     if actual_liquidation_amount == ICUSD::new(0) {
                         return Err("Cannot liquidate zero amount".to_string());
@@ -2453,6 +2463,21 @@ pub async fn liquidate_vault_debt_already_burned(
                 collateral_type: vault.collateral_type,
             },
         );
+
+        // Clean up fully liquidated vaults (zero debt and zero collateral)
+        if let Some(vault) = s.vault_id_to_vaults.get(&vault_id) {
+            if vault.borrowed_icusd_amount.0 == 0 && vault.collateral_amount == 0 {
+                let owner = vault.owner;
+                s.vault_id_to_vaults.remove(&vault_id);
+                if let Some(ids) = s.principal_to_vault_ids.get_mut(&owner) {
+                    ids.retain(|id| *id != vault_id);
+                    if ids.is_empty() {
+                        s.principal_to_vault_ids.remove(&owner);
+                    }
+                }
+                log!(INFO, "[liquidate_vault_debt_burned] Vault #{} fully liquidated — removed", vault_id);
+            }
+        }
 
         interest_share
     });

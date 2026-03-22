@@ -542,6 +542,7 @@ service : (ProtocolArg) -> {
   clear_stuck_operations : (opt principal) -> (Result_1);
   close_vault : (nat64) -> (Result_4);
   dev_force_bot_liquidate : (nat64) -> (Result_3);
+  dev_force_partial_bot_liquidate : (nat64) -> (Result_3);
   dev_test_cascade_liquidation : (nat64) -> (Result_11);
   dev_test_pool_only_liquidation : (nat64) -> (Result_11);
   enter_recovery_mode : () -> (Result);

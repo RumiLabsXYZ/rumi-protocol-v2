@@ -259,6 +259,11 @@ pub enum Event {
         start_timestamp: u64,
     },
 
+    #[serde(rename = "set_bot_allowed_collateral_types")]
+    SetBotAllowedCollateralTypes {
+        collateral_types: Vec<Principal>,
+    },
+
     #[serde(rename = "set_liquidation_bonus")]
     SetLiquidationBonus {
         rate: String,
@@ -493,6 +498,7 @@ impl Event {
             Event::SetStabilityPoolPrincipal { .. } => false,
             Event::SetLiquidationBotPrincipal { .. } => false,
             Event::SetBotBudget { .. } => false,
+            Event::SetBotAllowedCollateralTypes { .. } => false,
             Event::SetLiquidationBonus { .. } => false,
             Event::SetBorrowingFee { .. } => false,
             Event::SetRedemptionFeeFloor { .. } => false,
@@ -764,6 +770,9 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                 state.bot_budget_total_e8s = total_e8s;
                 state.bot_budget_remaining_e8s = total_e8s;
                 state.bot_budget_start_timestamp = start_timestamp;
+            },
+            Event::SetBotAllowedCollateralTypes { collateral_types } => {
+                state.bot_allowed_collateral_types = collateral_types.iter().copied().collect();
             },
             Event::SetLiquidationBonus { rate } => {
                 if let Ok(dec) = rate.parse::<Decimal>() {
@@ -1294,6 +1303,11 @@ pub fn record_set_bot_budget(state: &mut State, total_e8s: u64, start_timestamp:
     state.bot_budget_total_e8s = total_e8s;
     state.bot_budget_remaining_e8s = total_e8s;
     state.bot_budget_start_timestamp = start_timestamp;
+}
+
+pub fn record_set_bot_allowed_collateral_types(state: &mut State, collateral_types: Vec<Principal>) {
+    record_event(&Event::SetBotAllowedCollateralTypes { collateral_types: collateral_types.clone() });
+    state.bot_allowed_collateral_types = collateral_types.into_iter().collect();
 }
 
 pub fn record_set_liquidation_bonus(state: &mut State, rate: Ratio) {

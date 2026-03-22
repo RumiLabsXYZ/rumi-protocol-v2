@@ -284,6 +284,40 @@ fn post_upgrade(arg: ProtocolArg) {
         log!(INFO, "[upgrade]: migrated {} vaults: set last_accrual_time to {}", migrated, now);
     }
 
+    // Safety net: if bot is configured but allowlist is empty, default to ICP
+    mutate_state(|s| {
+        if s.liquidation_bot_principal.is_some() && s.bot_allowed_collateral_types.is_empty() {
+            s.bot_allowed_collateral_types.insert(s.icp_ledger_principal);
+            log!(INFO, "[upgrade]: bot_allowed_collateral_types was empty, defaulted to ICP");
+        }
+    });
+
+    // One-time: remove PHASMA test collateral and clean up empty vaults
+    mutate_state(|s| {
+        let phasma = candid::Principal::from_text("np5km-uyaaa-aaaaq-aadrq-cai").unwrap();
+        if s.collateral_configs.remove(&phasma).is_some() {
+            log!(INFO, "[upgrade]: removed PHASMA test collateral from configs");
+        }
+        // Remove empty vaults (fully liquidated shells with zero debt and zero collateral)
+        let empty_vault_ids: Vec<u64> = s.vault_id_to_vaults.iter()
+            .filter(|(_, v)| v.borrowed_icusd_amount.0 == 0 && v.collateral_amount == 0)
+            .map(|(id, _)| *id)
+            .collect();
+        for vault_id in &empty_vault_ids {
+            if let Some(vault) = s.vault_id_to_vaults.remove(vault_id) {
+                if let Some(ids) = s.principal_to_vault_ids.get_mut(&vault.owner) {
+                    ids.retain(|id| id != vault_id);
+                    if ids.is_empty() {
+                        s.principal_to_vault_ids.remove(&vault.owner);
+                    }
+                }
+            }
+        }
+        if !empty_vault_ids.is_empty() {
+            log!(INFO, "[upgrade]: cleaned up {} empty vaults: {:?}", empty_vault_ids.len(), empty_vault_ids);
+        }
+    });
+
     let end = ic_cdk::api::instruction_counter();
 
     log!(
@@ -1315,7 +1349,7 @@ async fn set_bot_allowed_collateral_types(collateral_types: Vec<Principal>) -> R
         ));
     }
     mutate_state(|s| {
-        s.bot_allowed_collateral_types = collateral_types.iter().copied().collect();
+        rumi_protocol_backend::event::record_set_bot_allowed_collateral_types(s, collateral_types.clone());
     });
     log!(INFO, "[set_bot_allowed_collateral_types] Set {} allowed types: {:?}",
         collateral_types.len(), collateral_types);
@@ -1656,6 +1690,103 @@ async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, 
     })
 }
 
+/// Developer test: force a PARTIAL bot liquidation, bypassing the CR health check.
+/// Uses compute_partial_liquidation_cap to determine debt amount (same as bot_claim_liquidation)
+/// but skips the requirement that the vault be below the liquidation threshold.
+#[candid_method(update)]
+#[update]
+async fn dev_force_partial_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, ProtocolError> {
+    validate_call().await?;
+    let caller = ic_cdk::caller();
+    let is_authorized = read_state(|s| {
+        s.developer_principal == caller
+            || s.liquidation_bot_principal.map_or(false, |bp| bp == caller)
+    });
+    if !is_authorized {
+        return Err(ProtocolError::GenericError("Only developer or bot can force partial bot liquidation".to_string()));
+    }
+
+    let existing_claim = read_state(|s| s.bot_claims.contains_key(&vault_id));
+    if existing_claim {
+        return Err(ProtocolError::GenericError(format!(
+            "Vault #{} already has an active bot claim", vault_id
+        )));
+    }
+
+    // Get vault info — NO CR check, uses partial liquidation cap, checks collateral allowlist
+    let (collateral_price_usd, debt_to_cover, collateral_to_seize, collateral_type) = read_state(|s| {
+        let vault = s.vault_id_to_vaults.get(&vault_id)
+            .ok_or_else(|| ProtocolError::GenericError(format!("Vault #{} not found", vault_id)))?;
+
+        if vault.bot_processing {
+            return Err(ProtocolError::GenericError(format!(
+                "Vault #{} is already being processed", vault_id
+            )));
+        }
+
+        if !s.bot_allowed_collateral_types.contains(&vault.collateral_type) {
+            return Err(ProtocolError::GenericError(format!(
+                "Collateral type {} is not in the bot's allowed list.", vault.collateral_type
+            )));
+        }
+
+        let price = s.get_collateral_price_decimal(&vault.collateral_type)
+            .ok_or_else(|| ProtocolError::GenericError("No price available".to_string()))?;
+        let collateral_price_usd = UsdIcp::from(price);
+        let decimals = s.get_collateral_config(&vault.collateral_type)
+            .map(|c| c.decimals)
+            .unwrap_or(8);
+
+        // Use partial liquidation cap — same as bot_claim_liquidation
+        let actual = s.compute_partial_liquidation_cap(vault, collateral_price_usd);
+
+        let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
+        let collateral_raw = rumi_protocol_backend::numeric::icusd_to_collateral_amount(actual, price, decimals);
+        let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
+        let collateral_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
+
+        Ok::<_, ProtocolError>((collateral_price_usd, actual, collateral_to_seize, vault.collateral_type))
+    })?;
+
+    // Transfer collateral
+    match rumi_protocol_backend::management::transfer_collateral(
+        collateral_to_seize.to_u64(), caller, collateral_type
+    ).await {
+        Ok(block) => {
+            log!(INFO, "[dev_force_partial_bot_liquidate] Transferred {} collateral to caller, block {}", collateral_to_seize.to_u64(), block);
+        }
+        Err(e) => {
+            return Err(ProtocolError::GenericError(format!("Collateral transfer failed: {:?}", e)));
+        }
+    }
+
+    // Lock vault and record claim
+    let now = ic_cdk::api::time();
+    mutate_state(|s| {
+        if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
+            vault.bot_processing = true;
+        }
+        s.bot_claims.insert(vault_id, rumi_protocol_backend::state::BotClaim {
+            vault_id,
+            collateral_amount: collateral_to_seize.to_u64(),
+            debt_amount: debt_to_cover.to_u64(),
+            collateral_type,
+            claimed_at: now,
+            collateral_price_e8s: collateral_price_usd.to_e8s(),
+        });
+    });
+
+    log!(INFO, "[dev_force_partial_bot_liquidate] Force-partial-claimed vault #{}: debt={}, collateral={}",
+        vault_id, debt_to_cover.to_u64(), collateral_to_seize.to_u64());
+
+    Ok(BotLiquidationResult {
+        vault_id,
+        collateral_amount: collateral_to_seize.to_u64(),
+        debt_covered: debt_to_cover.to_u64(),
+        collateral_price_e8s: collateral_price_usd.to_e8s(),
+    })
+}
+
 /// Developer test: force a vault to be liquidated by the stability pool, bypassing the bot.
 /// Calls the stability pool's notify_liquidatable_vaults with just this vault.
 #[candid_method(update)]
@@ -1718,11 +1849,11 @@ async fn dev_test_pool_only_liquidation(vault_id: u64) -> Result<String, Protoco
     }
 }
 
-/// Developer test: simulate the full liquidation cascade.
-/// Sends vault to bot and stability pool. First to succeed wins.
+/// Developer test: manually set the cached price for any collateral type.
+/// Bypasses XRC — useful for testing liquidation flows with synthetic assets.
 #[candid_method(update)]
 #[update]
-async fn dev_test_cascade_liquidation(vault_id: u64) -> Result<String, ProtocolError> {
+async fn dev_set_collateral_price(collateral_type: Principal, price_usd: f64) -> Result<String, ProtocolError> {
     validate_call().await?;
     let caller = ic_cdk::caller();
     let is_dev = read_state(|s| s.developer_principal == caller);
@@ -1730,70 +1861,23 @@ async fn dev_test_cascade_liquidation(vault_id: u64) -> Result<String, ProtocolE
         return Err(ProtocolError::GenericError("Developer only".to_string()));
     }
 
-    let (bot_canister, pool_canister) = read_state(|s| {
-        (s.liquidation_bot_principal, s.stability_pool_canister)
-    });
-
-    // Build vault notification
-    let vault_info = read_state(|s| {
-        let vault = s.vault_id_to_vaults.get(&vault_id)
-            .ok_or_else(|| ProtocolError::GenericError(format!("Vault #{} not found", vault_id)))?;
-
-        if vault.bot_processing {
-            return Err(ProtocolError::GenericError(format!(
-                "Vault #{} is locked by bot_processing", vault_id
-            )));
+    let ts = ic_cdk::api::time();
+    let old_price = mutate_state(|s| {
+        match s.collateral_configs.get_mut(&collateral_type) {
+            Some(config) => {
+                let old = config.last_price;
+                config.last_price = Some(price_usd);
+                config.last_price_timestamp = Some(ts);
+                Ok(old)
+            }
+            None => Err(ProtocolError::GenericError(
+                format!("Collateral type {} not found in configs", collateral_type)
+            ))
         }
-
-        let collateral_price_usd = s.get_collateral_price_decimal(&vault.collateral_type)
-            .map(|p| UsdIcp::from(p))
-            .ok_or(ProtocolError::GenericError("No price available".to_string()))?;
-        let price_e8s = collateral_price_usd.to_e8s();
-        let optimal_liq = s.compute_partial_liquidation_cap(vault, collateral_price_usd);
-
-        Ok(rumi_protocol_backend::LiquidatableVaultInfo {
-            vault_id: vault.vault_id,
-            collateral_type: vault.collateral_type,
-            debt_amount: vault.borrowed_icusd_amount.to_u64(),
-            collateral_amount: vault.collateral_amount,
-            recommended_liquidation_amount: optimal_liq.to_u64(),
-            collateral_price_e8s: price_e8s,
-        })
     })?;
 
-    let mut steps = Vec::new();
-
-    // Step 1: Send to bot
-    if let Some(bot) = bot_canister {
-        let bot_vaults = vec![vault_info.clone()];
-        let result: Result<(), _> = ic_cdk::call(
-            bot, "notify_liquidatable_vaults", (bot_vaults,)
-        ).await;
-        match result {
-            Ok(()) => steps.push("Sent to bot".to_string()),
-            Err((code, msg)) => steps.push(format!("Bot notification failed: {:?} {}", code, msg)),
-        }
-    } else {
-        steps.push("No bot configured, skipping".to_string());
-    }
-
-    // Step 2: Also send to stability pool (simulates the fallback)
-    if let Some(pool) = pool_canister {
-        let pool_vaults = vec![vault_info];
-        let result: Result<(), _> = ic_cdk::call(
-            pool, "notify_liquidatable_vaults", (pool_vaults,)
-        ).await;
-        match result {
-            Ok(()) => steps.push("Sent to stability pool".to_string()),
-            Err((code, msg)) => steps.push(format!("Pool notification failed: {:?} {}", code, msg)),
-        }
-    } else {
-        steps.push("No stability pool configured, skipping".to_string());
-    }
-
-    let summary = steps.join("; ");
-    log!(INFO, "[dev_test_cascade_liquidation] Vault #{}: {}", vault_id, summary);
-    Ok(format!("Vault #{} cascade test: {}", vault_id, summary))
+    log!(INFO, "[dev_set_collateral_price] {} price set: {:?} → {}", collateral_type, old_price, price_usd);
+    Ok(format!("Price for {} set to ${:.6} (was {:?})", collateral_type, price_usd, old_price))
 }
 
 /// Bot calls this after swapping collateral → icUSD to repay its obligation.
@@ -3225,6 +3309,50 @@ async fn add_collateral_token(arg: rumi_protocol_backend::AddCollateralArg) -> R
     }
 
     log!(INFO, "[add_collateral_token] Added collateral type: {} (decimals={})", arg.ledger_canister_id, decimals);
+
+    // Best-effort: register the new collateral on the stability pool so it
+    // can accept liquidation proceeds in this token.  If the SP call fails
+    // we log a warning but don't fail the overall operation — the admin can
+    // always call register_collateral on the SP manually.
+    if let Some(sp_canister) = read_state(|s| s.stability_pool_canister) {
+        // Query the ledger symbol for the SP registry entry.
+        let symbol = match ic_cdk::call::<(), (String,)>(ledger_id, "icrc1_symbol", ()).await {
+            Ok((s,)) => s,
+            Err((code, msg)) => {
+                log!(INFO, "[add_collateral_token] WARNING: Failed to query icrc1_symbol from {}: {:?} {} — skipping SP registration", ledger_id, code, msg);
+                return Ok(());
+            }
+        };
+
+        #[derive(candid::CandidType)]
+        struct SpCollateralInfo {
+            ledger_id: Principal,
+            symbol: String,
+            decimals: u8,
+            status: SpCollateralStatus,
+        }
+        #[derive(candid::CandidType)]
+        enum SpCollateralStatus { Active }
+
+        let info = SpCollateralInfo {
+            ledger_id: ledger_id,
+            symbol: symbol.clone(),
+            decimals,
+            status: SpCollateralStatus::Active,
+        };
+
+        // We ignore the SP's Result return value — if the call itself succeeds,
+        // registration worked (or the collateral already existed, which is fine).
+        match ic_cdk::call::<(SpCollateralInfo,), ()>(sp_canister, "register_collateral", (info,)).await {
+            Ok(()) => {
+                log!(INFO, "[add_collateral_token] Registered {} ({}) on stability pool {}", symbol, ledger_id, sp_canister);
+            }
+            Err((code, msg)) => {
+                log!(INFO, "[add_collateral_token] WARNING: Failed to register collateral on SP: {:?} {} — register manually", code, msg);
+            }
+        }
+    }
+
     Ok(())
 }
 
