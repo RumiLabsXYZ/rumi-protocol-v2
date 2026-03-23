@@ -29,7 +29,11 @@
 
   // Registries
   $: stablecoinRegistry = poolStatus?.stablecoin_registry ?? [];
-  $: collateralRegistry = poolStatus?.collateral_registry ?? [];
+  const HIDDEN_COLLATERAL = new Set(['PHASMA']);
+  const COLLATERAL_ORDER: Record<string, number> = { ICP: 0, ckBTC: 1, ckETH: 2, ckXAUT: 3, nICP: 4, BOB: 5, EXE: 6 };
+  $: collateralRegistry = (poolStatus?.collateral_registry ?? [])
+    .filter(c => !HIDDEN_COLLATERAL.has(c.symbol))
+    .sort((a, b) => (COLLATERAL_ORDER[a.symbol] ?? 99) - (COLLATERAL_ORDER[b.symbol] ?? 99));
   $: registries = { stablecoins: stablecoinRegistry, collateral: collateralRegistry };
 
   // Pool stats

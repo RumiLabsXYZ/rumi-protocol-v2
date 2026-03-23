@@ -446,3 +446,18 @@ pub fn admin_correct_balance(
     log!(INFO, "Admin balance correction by {}: {}", caller, msg);
     Ok(msg)
 }
+
+#[update]
+pub fn admin_correct_collateral_gain(
+    user: Principal,
+    collateral_ledger: Principal,
+    correct_amount: u64,
+) -> Result<String, StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    if !read_state(|s| s.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    let msg = mutate_state(|s| s.correct_collateral_gain(user, collateral_ledger, correct_amount));
+    log!(INFO, "Admin collateral gain correction by {}: {}", caller, msg);
+    Ok(msg)
+}
