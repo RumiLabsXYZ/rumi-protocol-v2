@@ -2,6 +2,7 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import type { Snippet } from 'svelte';
+  import { CANISTER_IDS } from '$lib/config';
 
   let { children }: { children: Snippet } = $props();
   let searchQuery = $state('');
@@ -14,6 +15,17 @@
     { href: '/explorer/liquidations', label: 'Liquidations', exact: false },
     { href: '/explorer/stats', label: 'Stats', exact: false },
   ];
+
+  // Token symbol → ledger principal mapping
+  const TOKEN_SYMBOL_MAP: Record<string, string> = {
+    'icp': CANISTER_IDS.ICP_LEDGER,
+    'ckbtc': 'mxzaz-hqaaa-aaaar-qaada-cai',
+    'cketh': 'ss2fx-dyaaa-aaaar-qacoq-cai',
+    'ckxaut': 'o7oak-6yaaa-aaaap-qhgbq-cai',
+    'icusd': CANISTER_IDS.ICUSD_LEDGER,
+    'ckusdt': CANISTER_IDS.CKUSDT_LEDGER,
+    'ckusdc': CANISTER_IDS.CKUSDC_LEDGER,
+  };
 
   function isActive(link: { href: string; exact: boolean }): boolean {
     if (link.exact) return currentPath === link.href;
@@ -31,9 +43,22 @@
       return;
     }
 
-    // Event index prefixed with #
+    // Event index prefixed with # or e (e.g. #42 or e42)
     if (/^#\d+$/.test(q)) {
       goto(`/explorer/event/${q.slice(1)}`);
+      searchQuery = '';
+      return;
+    }
+    if (/^e\d+$/i.test(q)) {
+      goto(`/explorer/event/${q.slice(1)}`);
+      searchQuery = '';
+      return;
+    }
+
+    // Known token symbol
+    const tokenPrincipal = TOKEN_SYMBOL_MAP[q.toLowerCase()];
+    if (tokenPrincipal) {
+      goto(`/explorer/token/${tokenPrincipal}`);
       searchQuery = '';
       return;
     }
@@ -73,7 +98,7 @@
         type="text"
         bind:value={searchQuery}
         onkeydown={handleKeydown}
-        placeholder="Search vault, address, event..."
+        placeholder="Vault ID, address, #event, token symbol..."
         class="subnav-search-input"
       />
       <button onclick={handleSearch} class="subnav-search-btn" aria-label="Search">

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import DashboardCard from '$lib/components/explorer/DashboardCard.svelte';
   import CollateralBreakdownTable from '$lib/components/explorer/CollateralBreakdownTable.svelte';
   import LiquidationRiskTable from '$lib/components/explorer/LiquidationRiskTable.svelte';
@@ -36,6 +36,9 @@
   let riskLoading = $state(true);
   let eventsLoading = $state(true);
   let revenueLoading = $state(true);
+
+  // Refresh indicator (shown during background refresh after initial load)
+  let isRefreshing = $state(false);
 
   // Error states
   let heroError = $state(false);
@@ -196,16 +199,20 @@
 
   // ── Data loading ────────────────────────────────────────────────────────────
 
-  onMount(async () => {
+  async function loadData(isRefresh = false) {
+    if (isRefresh) {
+      isRefreshing = true;
+    }
+
     // Fire all data fetches in parallel, handling each independently
     const heroPromise = (async () => {
       try {
         protocolStatus = await fetchProtocolStatus();
       } catch (e) {
         console.error('Failed to load protocol status:', e);
-        heroError = true;
+        if (!isRefresh) heroError = true;
       } finally {
-        revenueLoading = false;
+        if (!isRefresh) revenueLoading = false;
       }
     })();
 
@@ -214,7 +221,7 @@
         collateralConfigs = await fetchAllCollateralConfigs();
       } catch (e) {
         console.error('Failed to load collateral configs:', e);
-        collateralError = true;
+        if (!isRefresh) collateralError = true;
       }
     })();
 
@@ -240,7 +247,7 @@
         } catch {}
       } catch (e) {
         console.error('Failed to load SP status:', e);
-        poolsError = true;
+        if (!isRefresh) poolsError = true;
       }
     })();
 
@@ -263,20 +270,20 @@
     // Wait for all to settle
     await Promise.allSettled([heroPromise, collateralPromise, vaultsPromise, spPromise, tpPromise, eventsPromise]);
 
-    // Compute derived data that needs multiple sources
-    heroLoading = false;
-    collateralLoading = false;
-    poolsLoading = false;
-    riskLoading = false;
+    if (!isRefresh) {
+      heroLoading = false;
+      collateralLoading = false;
+      poolsLoading = false;
+      riskLoading = false;
+    }
 
     // Get recent events from the store
     const unsub = explorerEvents.subscribe(evts => {
       recentEvents = evts.slice(0, 10);
     });
     unsub();
-    // Re-subscribe to get current value
     recentEvents = [...recentEvents];
-    eventsLoading = false;
+    if (!isRefresh) eventsLoading = false;
 
     // Calculate 3pool APY if we have both protocol status and pool data
     if (protocolStatus && tpStatus) {
@@ -285,7 +292,6 @@
         let poolTvlE8s = 0;
         for (let i = 0; i < tpStatus.balances.length; i++) {
           const decimals = tpStatus.tokens?.[i]?.decimals ?? (i === 0 ? 8 : 6);
-          // Normalize to e8s
           const balance = Number(tpStatus.balances[i]);
           poolTvlE8s += decimals === 8 ? balance : balance * Math.pow(10, 8 - decimals);
         }
@@ -296,10 +302,36 @@
         );
       }
     }
+
+    if (isRefresh) {
+      isRefreshing = false;
+    }
+  }
+
+  let refreshInterval: ReturnType<typeof setInterval>;
+
+  onMount(async () => {
+    await loadData(false);
+    // Auto-refresh every 30 seconds
+    refreshInterval = setInterval(() => loadData(true), 30_000);
+  });
+
+  onDestroy(() => {
+    clearInterval(refreshInterval);
   });
 </script>
 
 <div class="dashboard-page max-w-6xl mx-auto px-4 py-6 space-y-6">
+  <!-- ── Refresh indicator ───────────────────────────────────────────────── -->
+  {#if isRefreshing}
+    <div class="flex items-center justify-end gap-1.5 text-xs text-gray-500">
+      <svg class="animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
+        <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+      </svg>
+      <span>Refreshing...</span>
+    </div>
+  {/if}
+
   <!-- ── Hero Stats ─────────────────────────────────────────────────────── -->
   <section>
     <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
