@@ -24,7 +24,15 @@
   let showOptOutTooltip = false;
 
   $: stablecoinRegistry = poolStatus?.stablecoin_registry ?? [];
-  $: collateralRegistry = poolStatus?.collateral_registry ?? [];
+  // Filter collateral: only show assets with non-zero gains OR that are production assets.
+  // Hides test tokens (PHASMA, EXE, BOB) unless user actually has gains in them.
+  const PRODUCTION_COLLATERAL = new Set(['ICP', 'ckBTC', 'ckXAUT', 'ckETH', 'nICP']);
+  $: collateralRegistryRaw = poolStatus?.collateral_registry ?? [];
+  $: collateralRegistry = collateralRegistryRaw.filter(c => {
+    if (PRODUCTION_COLLATERAL.has(c.symbol)) return true;
+    const gainEntry = (userPosition?.collateral_gains ?? []).find(([l]) => l.toText() === c.ledger_id.toText());
+    return gainEntry && gainEntry[1] > 0n;
+  });
   $: registries = { stablecoins: stablecoinRegistry, collateral: collateralRegistry };
 
   $: userStables = userPosition?.stablecoin_balances ?? [];
