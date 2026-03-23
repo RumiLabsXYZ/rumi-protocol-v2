@@ -46,6 +46,11 @@
       description: "On-chain log of every admin action, including emergency icUSD mints."
     },
     {
+      title: "Dev Tooling",
+      href: "/docs/dev-tooling",
+      description: "All developer and admin endpoints: testing, configuration, emergency controls, and accounting corrections."
+    },
+    {
       title: "Beta Disclaimer",
       href: "/docs/beta",
       description: "This protocol is in beta. Read the full disclosure."
