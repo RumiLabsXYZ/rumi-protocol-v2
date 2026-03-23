@@ -215,6 +215,7 @@ service : (StabilityPoolInitArgs) -> {
   emergency_pause : () -> (variant { Ok; Err : StabilityPoolError });
   resume_operations : () -> (variant { Ok; Err : StabilityPoolError });
   admin_correct_balance : (principal, principal, nat64) -> (variant { Ok : text; Err : StabilityPoolError });
+  admin_correct_collateral_gain : (principal, principal, nat64) -> (variant { Ok : text; Err : StabilityPoolError });
 
   // ── ICRC-21: Consent Messages ──
   icrc21_canister_call_consent_message : (Icrc21ConsentMessageRequest) -> (Icrc21ConsentMessageResponse);

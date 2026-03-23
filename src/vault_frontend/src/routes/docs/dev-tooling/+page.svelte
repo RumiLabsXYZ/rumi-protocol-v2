@@ -377,7 +377,7 @@
   </ol>
 
   <p class="doc-intro">
-    The no-retry design prevents the $975 burn bug where the SP repeatedly burned 3USD tokens every 5 minutes trying to liquidate the same vault.
+    The no-retry design ensures each tier of the liquidation cascade gets exactly one attempt per vault. If it fails, the vault moves to the next tier rather than retrying and burning tokens on repeated failures.
   </p>
 
 </article>

@@ -24,15 +24,13 @@
   let showOptOutTooltip = false;
 
   $: stablecoinRegistry = poolStatus?.stablecoin_registry ?? [];
-  // Filter collateral: only show assets with non-zero gains OR that are production assets.
-  // Hides test tokens (PHASMA, EXE, BOB) unless user actually has gains in them.
-  const PRODUCTION_COLLATERAL = new Set(['ICP', 'ckBTC', 'ckXAUT', 'ckETH', 'nICP']);
+  // Hide PHASMA (test-only collateral) and enforce display order matching borrow page.
+  const HIDDEN_COLLATERAL = new Set(['PHASMA']);
+  const COLLATERAL_ORDER: Record<string, number> = { ICP: 0, ckBTC: 1, ckETH: 2, ckXAUT: 3, nICP: 4, BOB: 5, EXE: 6 };
   $: collateralRegistryRaw = poolStatus?.collateral_registry ?? [];
-  $: collateralRegistry = collateralRegistryRaw.filter(c => {
-    if (PRODUCTION_COLLATERAL.has(c.symbol)) return true;
-    const gainEntry = (userPosition?.collateral_gains ?? []).find(([l]) => l.toText() === c.ledger_id.toText());
-    return gainEntry && gainEntry[1] > 0n;
-  });
+  $: collateralRegistry = collateralRegistryRaw
+    .filter(c => !HIDDEN_COLLATERAL.has(c.symbol))
+    .sort((a, b) => (COLLATERAL_ORDER[a.symbol] ?? 99) - (COLLATERAL_ORDER[b.symbol] ?? 99));
   $: registries = { stablecoins: stablecoinRegistry, collateral: collateralRegistry };
 
   $: userStables = userPosition?.stablecoin_balances ?? [];

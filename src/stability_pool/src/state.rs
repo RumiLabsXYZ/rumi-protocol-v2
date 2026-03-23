@@ -815,6 +815,28 @@ impl StabilityPoolState {
         format!("Corrected {} balance for {}: {} -> {}", token_ledger, user, old_amount, correct_amount)
     }
 
+    /// Set a depositor's collateral gain for a specific collateral type to `correct_amount`.
+    /// Used to fix drift between tracked gains and actual ledger balance (e.g., transfer fee dust).
+    pub fn correct_collateral_gain(&mut self, user: Principal, collateral_ledger: Principal, correct_amount: u64) -> String {
+        let old_amount = self.deposits.get(&user)
+            .and_then(|pos| pos.collateral_gains.get(&collateral_ledger).copied())
+            .unwrap_or(0);
+
+        if old_amount == correct_amount {
+            return format!("No change needed: user {} gain for {} is already {}", user, collateral_ledger, correct_amount);
+        }
+
+        if let Some(pos) = self.deposits.get_mut(&user) {
+            if correct_amount == 0 {
+                pos.collateral_gains.remove(&collateral_ledger);
+            } else {
+                pos.collateral_gains.insert(collateral_ledger, correct_amount);
+            }
+        }
+
+        format!("Corrected {} collateral gain for {}: {} -> {}", collateral_ledger, user, old_amount, correct_amount)
+    }
+
     // ─── State Validation ───
 
     pub fn validate_state(&self) -> Result<(), String> {

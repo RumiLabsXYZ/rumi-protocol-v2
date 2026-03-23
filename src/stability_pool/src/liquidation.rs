@@ -367,12 +367,25 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
 
     // Step 3: If any liquidation calls succeeded, process gains
     if !actual_consumed.is_empty() && total_collateral_gained > 0 {
+        // Deduct the collateral ledger's transfer fee from gains — the backend reports
+        // gross collateral but the transfer to the SP deducts one fee.
+        let collateral_fee: u64 = match call::<(), (candid::Nat,)>(
+            vault_info.collateral_type, "icrc1_fee", ()
+        ).await {
+            Ok((fee_nat,)) => {
+                let fee: u128 = fee_nat.0.try_into().unwrap_or(0);
+                fee as u64
+            },
+            Err(_) => 0,
+        };
+        let net_collateral = total_collateral_gained.saturating_sub(collateral_fee);
+
         mutate_state(|s| {
             s.process_liquidation_gains(
                 vault_info.vault_id,
                 vault_info.collateral_type,
                 &actual_consumed,
-                total_collateral_gained,
+                net_collateral,
                 vault_info.collateral_price_e8s,
             );
         });
@@ -380,7 +393,7 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
         LiquidationResult {
             vault_id: vault_info.vault_id,
             stables_consumed: actual_consumed,
-            collateral_gained: total_collateral_gained,
+            collateral_gained: net_collateral,
             collateral_type: vault_info.collateral_type,
             success: true,
             error_message: None,
