@@ -707,9 +707,9 @@
 
           <!-- Interest split visualization -->
           {#if splitEntries.length > 0}
+            {@const totalBps = splitEntries.reduce((sum: number, e: any) => sum + (e.bps ?? 0), 0)}
             <div class="space-y-3">
               <p class="text-xs text-gray-500 uppercase tracking-wider font-medium">Interest Split</p>
-              {@const totalBps = splitEntries.reduce((sum: number, e: any) => sum + (e.bps ?? 0), 0)}
               <div class="flex h-2.5 rounded-full overflow-hidden bg-gray-700">
                 {#each splitEntries as entry}
                   {@const dest = entry.destination ?? entry.dest ?? ''}
