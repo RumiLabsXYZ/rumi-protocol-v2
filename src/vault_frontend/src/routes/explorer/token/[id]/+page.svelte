@@ -190,9 +190,9 @@
         fetchCollateralTotals(),
       ]);
 
-      // Find matching config
+      // Find matching config — CollateralConfig uses ledger_canister_id, not collateral_type
       const match = configs.find((c: any) => {
-        const ct = c.collateral_type?.toText?.() ?? c.collateral_type?.toString?.() ?? '';
+        const ct = c.ledger_canister_id?.toText?.() ?? c.collateral_type?.toText?.() ?? c.ledger_canister_id?.toString?.() ?? '';
         return ct === tokenId;
       });
 
