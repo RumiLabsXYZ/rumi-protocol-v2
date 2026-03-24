@@ -376,6 +376,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
   { 'set_stability_pool_principal' : { 'principal' : Principal } } |
   { 'set_interest_split' : { 'split' : string } } |
   { 'set_bot_budget' : { 'start_timestamp' : bigint, 'total_e8s' : bigint } } |
+  { 'set_bot_allowed_collateral_types' : { 'collateral_types' : Array<Principal> } } |
   { 'set_rmr_floor' : { 'value' : string } } |
   { 'set_redemption_fee_floor' : { 'rate' : string } } |
   {
@@ -690,6 +691,7 @@ export interface _SERVICE {
   >,
   'dev_force_bot_liquidate' : ActorMethod<[bigint], Result_3>,
   'dev_force_partial_bot_liquidate' : ActorMethod<[bigint], Result_3>,
+  'dev_set_collateral_price' : ActorMethod<[Principal, number], Result_11>,
   'dev_test_cascade_liquidation' : ActorMethod<[bigint], Result_11>,
   'dev_test_pool_only_liquidation' : ActorMethod<[bigint], Result_11>,
   'enter_recovery_mode' : ActorMethod<[], Result>,
