@@ -415,6 +415,9 @@ export const idlFactory = ({ IDL }) => {
       'start_timestamp' : IDL.Nat64,
       'total_e8s' : IDL.Nat64,
     }),
+    'set_bot_allowed_collateral_types' : IDL.Record({
+      'collateral_types' : IDL.Vec(IDL.Principal),
+    }),
     'set_rmr_floor' : IDL.Record({ 'value' : IDL.Text }),
     'set_redemption_fee_floor' : IDL.Record({ 'rate' : IDL.Text }),
     'set_interest_rate' : IDL.Record({

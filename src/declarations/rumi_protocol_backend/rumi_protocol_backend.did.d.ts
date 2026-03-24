@@ -376,6 +376,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
   { 'set_stability_pool_principal' : { 'principal' : Principal } } |
   { 'set_interest_split' : { 'split' : string } } |
   { 'set_bot_budget' : { 'start_timestamp' : bigint, 'total_e8s' : bigint } } |
+  { 'set_bot_allowed_collateral_types' : { 'collateral_types' : Array<Principal> } } |
   { 'set_rmr_floor' : { 'value' : string } } |
   { 'set_redemption_fee_floor' : { 'rate' : string } } |
   {

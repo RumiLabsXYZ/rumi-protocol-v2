@@ -283,6 +283,7 @@ type Event = variant {
   set_stability_pool_principal : record { "principal" : principal };
   set_interest_split : record { split : text };
   set_bot_budget : record { start_timestamp : nat64; total_e8s : nat64 };
+  set_bot_allowed_collateral_types : record { collateral_types : vec principal };
   set_rmr_floor : record { value : text };
   set_redemption_fee_floor : record { rate : text };
   set_interest_rate : record {
