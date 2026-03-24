@@ -207,18 +207,25 @@ export function isKnownCanister(principal: string): boolean {
 export type HealthStatus = 'healthy' | 'caution' | 'danger' | 'liquidatable';
 
 /**
- * Classify vault health based on collateral ratio and liquidation ratio.
- * - liquidatable: CR ≤ liquidation ratio
- * - danger: CR ≤ liquidation ratio + 25%
- * - caution: CR ≤ liquidation ratio + 50%
- * - healthy: everything else
+ * Classify vault health based on collateral ratio, liquidation ratio, and borrow threshold.
+ * - liquidatable: CR ≤ liquidation ratio (e.g., ≤ 1.1)
+ * - danger: CR < borrow threshold ratio (e.g., < 1.5)
+ * - caution: CR < borrow threshold * 1.2 (e.g., < 1.8)
+ * - healthy: above that
+ *
+ * If borrowThreshold is not provided, falls back to liquidationRatio-based thresholds.
  */
-export function classifyVaultHealth(cr: number | bigint, liquidationRatio: number | bigint): HealthStatus {
+export function classifyVaultHealth(
+  cr: number | bigint,
+  liquidationRatio: number | bigint,
+  borrowThreshold?: number | bigint,
+): HealthStatus {
   const c = Number(cr);
   const l = Number(liquidationRatio);
+  const bt = borrowThreshold != null ? Number(borrowThreshold) : l * 1.36; // fallback heuristic
   if (c <= l) return 'liquidatable';
-  if (c <= l + 0.25) return 'danger';
-  if (c <= l + 0.50) return 'caution';
+  if (c < bt) return 'danger';
+  if (c < bt * 1.2) return 'caution';
   return 'healthy';
 }
 

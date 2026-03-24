@@ -40,8 +40,7 @@
   <!-- Type badge -->
   <td class="px-4 py-3">
     <span
-      class="inline-block text-xs font-medium px-2.5 py-0.5 rounded-full whitespace-nowrap"
-      style="background: {formatted.badgeColor}20; color: {formatted.badgeColor}; border: 1px solid {formatted.badgeColor}40;"
+      class="inline-block text-xs font-medium px-2.5 py-0.5 rounded-full whitespace-nowrap {formatted.badgeColor}"
     >
       {formatted.typeName}
     </span>

@@ -18,6 +18,7 @@
     formatE8s, formatUsd, formatUsdRaw, formatCR, formatPercent, formatBps,
     getTokenSymbol, classifyVaultHealth, healthColor
   } from '$utils/explorerHelpers';
+  import { decodeRustDecimal } from '$utils/decimalUtils';
 
   const E8S = 100_000_000;
 
@@ -94,28 +95,47 @@
     return map;
   });
 
-  // Collateral rows for Section 2
+  // Collateral rows for Section 2 — use collateralTotals (which has symbol, price, etc.)
+  // enriched with config data (debt_ceiling, interest_rate_apr, status) from collateralConfigs.
   let collateralRows = $derived.by(() => {
     const rows: any[] = [];
-    for (const cfg of collateralConfigs) {
-      const principal = cfg.ledger_canister_id?.toText?.() ?? cfg.collateral_type?.toText?.() ?? '';
-      const matchingVaults = vaults.filter((v: any) => {
-        const vType = v.collateral_type?.toText?.() ?? String(v.collateral_type);
-        return vType === principal;
-      });
-      const totalCollateral = matchingVaults.reduce((sum: number, v: any) => sum + Number(v.collateral_amount ?? 0n), 0);
-      const totalDebt = matchingVaults.reduce((sum: number, v: any) => sum + Number(v.borrowed_icusd_amount ?? 0n), 0);
-      const price = Number(priceMap.get(principal) ?? 0);
-      const decimals = Number(cfg.decimals ?? 8n);
+    for (const totals of collateralTotals) {
+      const principal = totals.collateral_type?.toText?.() ?? String(totals.collateral_type);
+      const symbol = totals.symbol ?? getTokenSymbol(principal);
+      const price = totals.price ?? 0;
+      const decimals = Number(totals.decimals ?? 8);
+      const totalCollateral = Number(totals.total_collateral ?? 0n);
+      const totalDebt = Number(totals.total_debt ?? 0n);
       const collateralHuman = totalCollateral / Math.pow(10, decimals);
       const collateralUsd = collateralHuman * price;
       const debtHuman = totalDebt / E8S;
-      const debtCeiling = Number(cfg.debt_ceiling ?? cfg.debtCeiling ?? 0n);
+      const vaultCount = Number(totals.vault_count ?? 0n);
+
+      // Enrich with config data
+      const cfg = configMap.get(principal);
+      const debtCeiling = cfg?.debt_ceiling != null ? Number(cfg.debt_ceiling) : 0;
       const debtCeilingHuman = debtCeiling / E8S;
       const utilization = debtCeilingHuman > 0 ? (debtHuman / debtCeilingHuman) * 100 : 0;
-      const interestRate = Number(cfg.interest_rate ?? cfg.borrowing_fee ?? cfg.borrowingFee ?? 0n);
-      const symbol = getTokenSymbol(principal);
-      const statusKey = cfg.status ? (typeof cfg.status === 'object' ? Object.keys(cfg.status)[0] : String(cfg.status)) : 'Active';
+
+      // interest_rate_apr is a Uint8Array (Rust Decimal) — decode it.
+      // Also check per_collateral_interest from status for the effective rate.
+      let interestRate = 0;
+      if (cfg?.interest_rate_apr && (cfg.interest_rate_apr instanceof Uint8Array || Array.isArray(cfg.interest_rate_apr))) {
+        interestRate = decodeRustDecimal(cfg.interest_rate_apr);
+      }
+      // Override with effective weighted rate from ProtocolStatus if available
+      if (status?.per_collateral_interest) {
+        const match = status.per_collateral_interest.find((ci: any) => {
+          const ciPrincipal = ci.collateral_type?.toText?.() ?? String(ci.collateral_type);
+          return ciPrincipal === principal;
+        });
+        if (match && match.weighted_interest_rate != null) {
+          interestRate = Number(match.weighted_interest_rate);
+        }
+      }
+
+      const statusKey = cfg?.status ? (typeof cfg.status === 'object' ? Object.keys(cfg.status)[0] : String(cfg.status)) : 'Active';
+
       rows.push({
         principal,
         symbol,
@@ -126,7 +146,7 @@
         collateralUsd,
         totalDebt,
         debtHuman,
-        vaultCount: matchingVaults.length,
+        vaultCount,
         utilization,
         interestRate,
         status: statusKey,
@@ -171,7 +191,15 @@
       const debtValue = debt / E8S;
       const cr = debtValue > 0 ? collateralValue / debtValue : Infinity;
 
-      const liquidationRatio = Number(cfg.liquidation_ratio ?? cfg.liquidationCr ?? cfg.min_collateral_ratio ?? 1.5);
+      // liquidation_ratio and borrow_threshold_ratio are Uint8Array (Rust Decimal) — decode them
+      let liquidationRatio = 1.1;
+      if (cfg.liquidation_ratio && (cfg.liquidation_ratio instanceof Uint8Array || Array.isArray(cfg.liquidation_ratio))) {
+        liquidationRatio = decodeRustDecimal(cfg.liquidation_ratio);
+      }
+      let borrowThreshold = 1.5;
+      if (cfg.borrow_threshold_ratio && (cfg.borrow_threshold_ratio instanceof Uint8Array || Array.isArray(cfg.borrow_threshold_ratio))) {
+        borrowThreshold = decodeRustDecimal(cfg.borrow_threshold_ratio);
+      }
 
       vaultsWithCr.push({
         vault_id: Number(vault.vault_id),
@@ -179,6 +207,7 @@
         collateral_ratio: cr,
         collateral_type: collateralType,
         liquidation_ratio: liquidationRatio,
+        borrow_threshold_ratio: borrowThreshold,
         debt,
         collateral_amount: Number(vault.collateral_amount),
         decimals,
@@ -406,41 +435,29 @@
       </div>
     {:else}
       <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-        <StatCard label="Protocol Mode">
-          <StatusBadge status={protocolMode} variant={modeVariant} />
-        </StatCard>
+        <StatCard label="Protocol Mode" value={protocolMode} />
 
-        <StatCard label="Total TVL" subtitle="All collateral locked">
-          {#if status?.total_icp_margin != null}
-            <span>{formatUsd(status.total_icp_margin)}</span>
-          {:else}
-            <span class="text-gray-500">--</span>
-          {/if}
-        </StatCard>
+        <StatCard
+          label="Total TVL"
+          value={status?.total_icp_margin != null ? formatUsd(status.total_icp_margin) : '--'}
+          subtitle="All collateral locked"
+        />
 
-        <StatCard label="Total Debt" subtitle="icUSD minted">
-          {#if status?.total_icusd_borrowed != null}
-            <span>{formatE8s(status.total_icusd_borrowed)} <span class="text-sm text-gray-400">icUSD</span></span>
-          {:else}
-            <span class="text-gray-500">--</span>
-          {/if}
-        </StatCard>
+        <StatCard
+          label="Total Debt"
+          value={status?.total_icusd_borrowed != null ? `${formatE8s(status.total_icusd_borrowed)} icUSD` : '--'}
+          subtitle="icUSD minted"
+        />
 
-        <StatCard label="System CR" subtitle="Collateral ratio">
-          {#if status?.total_collateral_ratio != null}
-            <span>{formatCR(status.total_collateral_ratio)}</span>
-          {:else}
-            <span class="text-gray-500">--</span>
-          {/if}
-        </StatCard>
+        <StatCard
+          label="System CR"
+          value={status?.total_collateral_ratio != null ? formatCR(status.total_collateral_ratio) : '--'}
+          subtitle="Collateral ratio"
+        />
 
-        <StatCard label="Active Vaults">
-          <span>{activeVaultCount.toLocaleString()}</span>
-        </StatCard>
+        <StatCard label="Active Vaults" value={activeVaultCount.toLocaleString()} />
 
-        <StatCard label="Total Events">
-          <span>{Number(eventCount).toLocaleString()}</span>
-        </StatCard>
+        <StatCard label="Total Events" value={Number(eventCount).toLocaleString()} />
       </div>
     {/if}
   </section>
@@ -480,7 +497,7 @@
               {#each collateralRows as row}
                 <tr class="border-b border-gray-700/30 hover:bg-gray-700/20 transition-colors">
                   <td class="px-4 py-3">
-                    <EntityLink type="token" value={row.principal} />
+                    <TokenBadge symbol={row.symbol} principalId={row.principal} size="sm" />
                   </td>
                   <td class="px-4 py-3 text-right text-gray-200 tabular-nums">{formatPrice(row.price)}</td>
                   <td class="px-4 py-3 text-right text-gray-200 tabular-nums">{formatCompactAmount(row.collateralHuman)}</td>
@@ -500,7 +517,7 @@
                   </td>
                   <td class="px-4 py-3 text-right text-gray-300 tabular-nums">
                     {#if row.interestRate > 0}
-                      {row.interestRate < 1 ? (row.interestRate * 100).toFixed(1) : row.interestRate.toFixed(1)}%
+                      {(row.interestRate * 100).toFixed(2)}%
                     {:else}
                       --
                     {/if}
@@ -759,19 +776,20 @@
           <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl p-4">
             <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">Bot Budget Remaining</p>
             <p class="text-lg font-semibold text-white tabular-nums">
-              {formatE8s(botStats.budget_remaining ?? botStats.budgetRemaining ?? 0)} <span class="text-sm text-gray-400">ICP</span>
+              {formatE8s(botStats.budget_remaining_e8s ?? 0n)} <span class="text-sm text-gray-400">ICP</span>
+            </p>
+            <p class="text-xs text-gray-500 mt-0.5">of {formatE8s(botStats.budget_total_e8s ?? 0n)} total</p>
+          </div>
+          <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl p-4">
+            <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">Debt Covered</p>
+            <p class="text-lg font-semibold text-white tabular-nums">
+              {formatE8s(botStats.total_debt_covered_e8s ?? 0n)} <span class="text-sm text-gray-400">icUSD</span>
             </p>
           </div>
           <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl p-4">
-            <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">Total Liquidations</p>
+            <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">icUSD Deposited</p>
             <p class="text-lg font-semibold text-white tabular-nums">
-              {Number(botStats.total_liquidations ?? botStats.totalLiquidations ?? 0)}
-            </p>
-          </div>
-          <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl p-4">
-            <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">Fees Paid</p>
-            <p class="text-lg font-semibold text-white tabular-nums">
-              {formatE8s(botStats.total_fees_paid ?? botStats.totalFeesPaid ?? 0)} <span class="text-sm text-gray-400">ICP</span>
+              {formatE8s(botStats.total_icusd_deposited_e8s ?? 0n)} <span class="text-sm text-gray-400">icUSD</span>
             </p>
           </div>
         {:else}
@@ -821,7 +839,7 @@
               </thead>
               <tbody>
                 {#each atRiskVaults as vault}
-                  {@const health = classifyVaultHealth(vault.collateral_ratio, vault.liquidation_ratio)}
+                  {@const health = classifyVaultHealth(vault.collateral_ratio, vault.liquidation_ratio, vault.borrow_threshold_ratio)}
                   <tr class="border-b border-gray-700/30 hover:bg-gray-700/20 transition-colors">
                     <td class="px-4 py-2.5">
                       <EntityLink type="vault" value={String(vault.vault_id)} />
