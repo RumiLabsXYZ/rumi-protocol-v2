@@ -1,427 +1,575 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
-  import DashboardCard from '$lib/components/explorer/DashboardCard.svelte';
-  import CollateralBreakdownTable from '$lib/components/explorer/CollateralBreakdownTable.svelte';
-  import LiquidationRiskTable from '$lib/components/explorer/LiquidationRiskTable.svelte';
-  import RevenueBreakdown from '$lib/components/explorer/RevenueBreakdown.svelte';
-  import ActivityFeed from '$lib/components/explorer/ActivityFeed.svelte';
-  import { fetchProtocolStatus, fetchAllCollateralConfigs } from '$lib/services/explorer/explorerDataLayer';
-  import { fetchEvents, fetchAllVaults, explorerEvents, explorerEventsTotalCount } from '$lib/stores/explorerStore';
-  import { stabilityPoolService } from '$lib/services/stabilityPoolService';
-  import { threePoolService, calculateTheoreticalApy, POOL_TOKENS } from '$lib/services/threePoolService';
-  import { formatE8s } from '$lib/services/stabilityPoolService';
-  import type { ProtocolStatusDTO, CollateralInfo } from '$lib/services/types';
-  import { ApiClient } from '$lib/services/protocol/apiClient';
-  import { resolveCollateralSymbol } from '$lib/utils/eventFormatters';
+  import { onMount } from 'svelte';
+  import StatCard from '$components/explorer/StatCard.svelte';
+  import EntityLink from '$components/explorer/EntityLink.svelte';
+  import StatusBadge from '$components/explorer/StatusBadge.svelte';
+  import EventRow from '$components/explorer/EventRow.svelte';
+  import AmountDisplay from '$components/explorer/AmountDisplay.svelte';
+  import TokenBadge from '$components/explorer/TokenBadge.svelte';
+  import VaultHealthBar from '$components/explorer/VaultHealthBar.svelte';
+  import {
+    fetchProtocolStatus, fetchCollateralTotals, fetchCollateralPrices,
+    fetchAllVaults, fetchEventCount, fetchTreasuryStats,
+    fetchInterestSplit, fetchBotStats, fetchStabilityPoolStatus,
+    fetchThreePoolStatus, fetchEvents, fetchCollateralConfigs,
+    fetchPendingLiquidations
+  } from '$services/explorer/explorerService';
+  import {
+    formatE8s, formatUsd, formatUsdRaw, formatCR, formatPercent, formatBps,
+    getTokenSymbol, classifyVaultHealth, healthColor
+  } from '$utils/explorerHelpers';
 
   const E8S = 100_000_000;
 
-  // ── State ───────────────────────────────────────────────────────────────────
+  // ── State ─────────────────────────────────────────────────────────────
 
-  let protocolStatus: ProtocolStatusDTO | null = $state(null);
-  let collateralConfigs: CollateralInfo[] = $state([]);
-  let allVaults: any[] = $state([]);
+  // Section 1: Hero
+  let status: any = $state(null);
+  let vaults: any[] = $state([]);
+  let eventCount: bigint = $state(0n);
+  let heroLoading = $state(true);
+  let heroError: string | null = $state(null);
+
+  // Section 2: Collateral
+  let collateralTotals: any[] = $state([]);
+  let collateralPrices: [any, number][] = $state([]);
+  let collateralConfigs: any[] = $state([]);
+  let collateralLoading = $state(true);
+  let collateralError: string | null = $state(null);
+
+  // Section 3: Pools
   let spStatus: any = $state(null);
   let tpStatus: any = $state(null);
-  let tpApy: number | null = $state(null);
-  let liquidatableVaults: any[] = $state([]);
-  let recentEvents: Array<{ event: any; globalIndex: number }> = $state([]);
-  let vaultCollateralMap: Map<number, any> = $state(new Map());
-  let spLiquidations: any[] = $state([]);
-
-  // Loading states
-  let heroLoading = $state(true);
-  let collateralLoading = $state(true);
   let poolsLoading = $state(true);
-  let riskLoading = $state(true);
-  let eventsLoading = $state(true);
-  let revenueLoading = $state(true);
+  let poolsError: string | null = $state(null);
 
-  // Refresh indicator (shown during background refresh after initial load)
+  // Section 4: Treasury & Revenue
+  let treasuryStats: any = $state(null);
+  let interestSplit: any = $state(null);
+  let treasuryLoading = $state(true);
+  let treasuryError: string | null = $state(null);
+
+  // Section 5: Liquidation Health
+  let botStats: any = $state(null);
+  let pendingLiquidations: any[] = $state([]);
+  let liquidationLoading = $state(true);
+  let liquidationError: string | null = $state(null);
+
+  // Section 6: Recent Events
+  let recentEvents: [bigint, any][] = $state([]);
+  let eventsLoading = $state(true);
+  let eventsError: string | null = $state(null);
+
+  // Global
   let isRefreshing = $state(false);
 
-  // Error states
-  let heroError = $state(false);
-  let collateralError = $state(false);
-  let poolsError = $state(false);
+  // ── Derived ───────────────────────────────────────────────────────────
 
-  // ── Derived values ─────────────────────────────────────────────────────────
-
-  let isRecoveryMode = $derived.by(() => {
-    const mode = protocolStatus?.mode;
-    return mode && typeof mode === 'object' && 'Recovery' in mode;
+  let protocolMode = $derived.by(() => {
+    if (!status?.mode) return 'Unknown';
+    return Object.keys(status.mode)[0] ?? 'Unknown';
   });
 
-  let totalTvl = $derived.by(() => {
-    if (!collateralConfigs.length || !allVaults.length) return 0;
-    let total = 0;
-    for (const vault of allVaults) {
-      const collateralType = vault.collateral_type?.toText?.() ?? String(vault.collateral_type);
-      const config = collateralConfigs.find(c => c.principal === collateralType);
-      if (!config) continue;
-      const amount = Number(vault.collateral_amount) / Math.pow(10, config.decimals);
-      total += amount * config.price;
-    }
-    // Add SP deposits
-    if (spStatus) {
-      total += Number(spStatus.total_deposits_e8s) / E8S;
-    }
-    // Add 3pool TVL
-    if (tpStatus) {
-      for (let i = 0; i < tpStatus.balances.length; i++) {
-        const decimals = tpStatus.tokens?.[i]?.decimals ?? (i === 0 ? 8 : 6);
-        total += Number(tpStatus.balances[i]) / Math.pow(10, decimals);
-      }
-    }
-    return total;
+  let modeVariant = $derived.by((): 'normal' | 'recovery' | 'frozen' => {
+    const m = protocolMode.toLowerCase();
+    if (m === 'recovery') return 'recovery';
+    if (m === 'frozen') return 'frozen';
+    return 'normal';
   });
 
-  let totalOpenVaults = $derived(allVaults.filter((v: any) => Number(v.borrowed_icusd_amount) > 0 || Number(v.collateral_amount) > 0).length);
+  let activeVaultCount = $derived(
+    vaults.filter((v: any) => Number(v.borrowed_icusd_amount) > 0 || Number(v.collateral_amount) > 0).length
+  );
 
-  let mintCapUtilization = $derived.by(() => {
-    if (!collateralConfigs.length) return 0;
-    const totalCeiling = collateralConfigs.reduce((sum, c) => sum + c.debtCeiling, 0);
-    if (totalCeiling === 0) return 0;
-    const totalBorrowed = (protocolStatus?.totalIcusdBorrowed ?? 0) * E8S;
-    return (totalBorrowed / totalCeiling) * 100;
+  // Build a price map from collateralPrices: principal string -> price float
+  let priceMap = $derived.by(() => {
+    const map = new Map<string, number>();
+    for (const [principal, price] of collateralPrices) {
+      const key = principal?.toText?.() ?? String(principal);
+      map.set(key, price);
+    }
+    return map;
   });
 
-  // Collateral rows for the breakdown table
+  // Build a config map from collateralConfigs: principal string -> config
+  let configMap = $derived.by(() => {
+    const map = new Map<string, any>();
+    for (const cfg of collateralConfigs) {
+      const key = cfg.ledger_canister_id?.toText?.() ?? cfg.collateral_type?.toText?.() ?? String(cfg.ledger_canister_id ?? cfg.collateral_type ?? '');
+      if (key) map.set(key, cfg);
+    }
+    return map;
+  });
+
+  // Collateral rows for Section 2
   let collateralRows = $derived.by(() => {
-    return collateralConfigs.map(config => {
-      const matchingVaults = allVaults.filter((v: any) => {
+    return collateralConfigs.map((cfg: any) => {
+      const principal = cfg.ledger_canister_id?.toText?.() ?? cfg.collateral_type?.toText?.() ?? '';
+      const matchingVaults = vaults.filter((v: any) => {
         const vType = v.collateral_type?.toText?.() ?? String(v.collateral_type);
-        return vType === config.principal;
+        return vType === principal;
       });
       const totalCollateral = matchingVaults.reduce((sum: number, v: any) => sum + Number(v.collateral_amount), 0);
       const totalDebt = matchingVaults.reduce((sum: number, v: any) => sum + Number(v.borrowed_icusd_amount), 0);
+      const price = priceMap.get(principal) ?? 0;
+      const decimals = Number(cfg.decimals ?? 8);
+      const collateralHuman = totalCollateral / Math.pow(10, decimals);
+      const collateralUsd = collateralHuman * price;
+      const debtHuman = totalDebt / E8S;
+      const debtCeiling = Number(cfg.debt_ceiling ?? cfg.debtCeiling ?? 0);
+      const debtCeilingHuman = debtCeiling / E8S;
+      const utilization = debtCeilingHuman > 0 ? (debtHuman / debtCeilingHuman) * 100 : 0;
+      const interestRate = Number(cfg.interest_rate ?? cfg.borrowing_fee ?? cfg.borrowingFee ?? 0);
+      const symbol = getTokenSymbol(principal);
+      const statusKey = cfg.status ? (typeof cfg.status === 'object' ? Object.keys(cfg.status)[0] : String(cfg.status)) : 'Active';
       return {
-        config,
-        vaultCount: matchingVaults.length,
+        principal,
+        symbol,
+        price,
+        decimals,
         totalCollateral,
+        collateralHuman,
+        collateralUsd,
         totalDebt,
+        debtHuman,
+        vaultCount: matchingVaults.length,
+        utilization,
+        interestRate,
+        status: statusKey,
       };
     });
   });
 
-  // At-risk vaults (sorted by CR ascending)
+  // SP utilization
+  let spUtilization = $derived.by(() => {
+    if (!spStatus) return 0;
+    const deposits = Number(spStatus.total_deposits_e8s ?? 0);
+    if (deposits === 0) return 0;
+    // Approximate utilization: how much has been used in liquidations
+    return 0; // SP doesn't have a standard utilization metric
+  });
+
+  // Interest split entries
+  let splitEntries = $derived.by(() => {
+    if (!interestSplit) return [];
+    if (Array.isArray(interestSplit)) return interestSplit;
+    if (interestSplit.destinations) return interestSplit.destinations;
+    return [];
+  });
+
+  // At-risk vaults sorted by CR ascending (top 10)
   let atRiskVaults = $derived.by(() => {
-    if (!allVaults.length || !collateralConfigs.length) return [];
+    if (!vaults.length || !collateralConfigs.length) return [];
 
     const vaultsWithCr: any[] = [];
-    for (const vault of allVaults) {
+    for (const vault of vaults) {
       const debt = Number(vault.borrowed_icusd_amount);
       if (debt === 0) continue;
 
       const collateralType = vault.collateral_type?.toText?.() ?? String(vault.collateral_type);
-      const config = collateralConfigs.find(c => c.principal === collateralType);
-      if (!config || config.price === 0) continue;
+      const price = priceMap.get(collateralType) ?? 0;
+      const cfg = configMap.get(collateralType);
+      if (!cfg || price === 0) continue;
 
-      const collateralValue = (Number(vault.collateral_amount) / Math.pow(10, config.decimals)) * config.price;
+      const decimals = Number(cfg.decimals ?? 8);
+      const collateralValue = (Number(vault.collateral_amount) / Math.pow(10, decimals)) * price;
       const debtValue = debt / E8S;
-      const cr = debtValue > 0 ? (collateralValue / debtValue) * 100 : Infinity;
+      const cr = debtValue > 0 ? collateralValue / debtValue : Infinity;
 
-      // Show vaults within 150% of liquidation ratio (generous threshold)
-      if (cr < config.liquidationCr * 1.5) {
-        vaultsWithCr.push({
-          vault_id: Number(vault.vault_id),
-          owner: vault.owner?.toText?.() ?? String(vault.owner),
-          collateral_ratio: cr,
-          collateral_type: vault.collateral_type,
-          liquidation_ratio: config.liquidationCr,
-          borrowed_icusd_amount: debt,
-          collateral_amount: Number(vault.collateral_amount),
-          collateral_decimals: config.decimals,
-        });
-      }
+      const liquidationRatio = Number(cfg.liquidation_ratio ?? cfg.liquidationCr ?? cfg.min_collateral_ratio ?? 1.5);
+
+      vaultsWithCr.push({
+        vault_id: Number(vault.vault_id),
+        owner: vault.owner?.toText?.() ?? String(vault.owner),
+        collateral_ratio: cr,
+        collateral_type: collateralType,
+        liquidation_ratio: liquidationRatio,
+        debt,
+        collateral_amount: Number(vault.collateral_amount),
+        decimals,
+        symbol: getTokenSymbol(collateralType),
+      });
     }
+
     vaultsWithCr.sort((a, b) => a.collateral_ratio - b.collateral_ratio);
-    return vaultsWithCr.slice(0, 5);
+    return vaultsWithCr.slice(0, 10);
   });
 
-  let totalAtRiskCount = $derived.by(() => {
-    if (!allVaults.length || !collateralConfigs.length) return 0;
-    let count = 0;
-    for (const vault of allVaults) {
-      const debt = Number(vault.borrowed_icusd_amount);
-      if (debt === 0) continue;
-      const collateralType = vault.collateral_type?.toText?.() ?? String(vault.collateral_type);
-      const config = collateralConfigs.find(c => c.principal === collateralType);
-      if (!config || config.price === 0) continue;
-      const collateralValue = (Number(vault.collateral_amount) / Math.pow(10, config.decimals)) * config.price;
-      const cr = (collateralValue / (debt / E8S)) * 100;
-      if (cr < config.liquidationCr * 1.2) count++;
+  // Vault collateral map for EventRow
+  let vaultCollateralMap = $derived.by(() => {
+    const map = new Map<number, any>();
+    for (const v of vaults) {
+      map.set(Number(v.vault_id), v.collateral_type);
     }
-    return count;
+    return map;
   });
 
-  // 3Pool TVL in USD
-  let threePoolTvl = $derived.by(() => {
-    if (!tpStatus) return 0;
-    let total = 0;
-    for (let i = 0; i < tpStatus.balances.length; i++) {
-      const decimals = tpStatus.tokens?.[i]?.decimals ?? (i === 0 ? 8 : 6);
-      total += Number(tpStatus.balances[i]) / Math.pow(10, decimals);
-    }
-    return total;
+  // ── Data Loading ──────────────────────────────────────────────────────
+
+  async function loadData(isRefresh = false) {
+    if (isRefresh) isRefreshing = true;
+
+    // Section 1: Hero
+    const heroPromise = (async () => {
+      try {
+        const [s, v, ec] = await Promise.all([
+          fetchProtocolStatus(),
+          fetchAllVaults(),
+          fetchEventCount()
+        ]);
+        status = s;
+        vaults = v;
+        eventCount = ec;
+      } catch (e) {
+        console.error('[explorer] Hero load failed:', e);
+        if (!isRefresh) heroError = 'Failed to load protocol status';
+      } finally {
+        if (!isRefresh) heroLoading = false;
+      }
+    })();
+
+    // Section 2: Collateral
+    const collateralPromise = (async () => {
+      try {
+        const [totals, prices, configs] = await Promise.all([
+          fetchCollateralTotals(),
+          fetchCollateralPrices(),
+          fetchCollateralConfigs()
+        ]);
+        collateralTotals = totals;
+        collateralPrices = prices;
+        collateralConfigs = configs;
+      } catch (e) {
+        console.error('[explorer] Collateral load failed:', e);
+        if (!isRefresh) collateralError = 'Failed to load collateral data';
+      } finally {
+        if (!isRefresh) collateralLoading = false;
+      }
+    })();
+
+    // Section 3: Pools
+    const poolsPromise = (async () => {
+      try {
+        const [sp, tp] = await Promise.all([
+          fetchStabilityPoolStatus(),
+          fetchThreePoolStatus()
+        ]);
+        spStatus = sp;
+        tpStatus = tp;
+      } catch (e) {
+        console.error('[explorer] Pools load failed:', e);
+        if (!isRefresh) poolsError = 'Failed to load pool data';
+      } finally {
+        if (!isRefresh) poolsLoading = false;
+      }
+    })();
+
+    // Section 4: Treasury
+    const treasuryPromise = (async () => {
+      try {
+        const [ts, is] = await Promise.all([
+          fetchTreasuryStats(),
+          fetchInterestSplit()
+        ]);
+        treasuryStats = ts;
+        interestSplit = is;
+      } catch (e) {
+        console.error('[explorer] Treasury load failed:', e);
+        if (!isRefresh) treasuryError = 'Failed to load treasury data';
+      } finally {
+        if (!isRefresh) treasuryLoading = false;
+      }
+    })();
+
+    // Section 5: Liquidation Health
+    const liquidationPromise = (async () => {
+      try {
+        const [bs, pl] = await Promise.all([
+          fetchBotStats(),
+          fetchPendingLiquidations()
+        ]);
+        botStats = bs;
+        pendingLiquidations = pl;
+      } catch (e) {
+        console.error('[explorer] Liquidation load failed:', e);
+        if (!isRefresh) liquidationError = 'Failed to load liquidation data';
+      } finally {
+        if (!isRefresh) liquidationLoading = false;
+      }
+    })();
+
+    // Section 6: Recent Events
+    const eventsPromise = (async () => {
+      try {
+        recentEvents = await fetchEvents(0n, 20n, []);
+      } catch (e) {
+        console.error('[explorer] Events load failed:', e);
+        if (!isRefresh) eventsError = 'Failed to load events';
+      } finally {
+        if (!isRefresh) eventsLoading = false;
+      }
+    })();
+
+    await Promise.allSettled([
+      heroPromise, collateralPromise, poolsPromise,
+      treasuryPromise, liquidationPromise, eventsPromise
+    ]);
+
+    if (isRefresh) isRefreshing = false;
+  }
+
+  let refreshInterval: ReturnType<typeof setInterval>;
+
+  onMount(() => {
+    loadData(false);
+    refreshInterval = setInterval(() => loadData(true), 30_000);
+    return () => clearInterval(refreshInterval);
   });
 
-  // 3Pool token ratios
-  let threePoolRatios = $derived.by(() => {
-    if (!tpStatus || !tpStatus.balances.length) return [];
-    const amounts: number[] = [];
-    for (let i = 0; i < tpStatus.balances.length; i++) {
-      const decimals = tpStatus.tokens?.[i]?.decimals ?? (i === 0 ? 8 : 6);
-      amounts.push(Number(tpStatus.balances[i]) / Math.pow(10, decimals));
-    }
-    const total = amounts.reduce((s, a) => s + a, 0);
-    if (total === 0) return amounts.map((_, i) => ({ symbol: POOL_TOKENS[i]?.symbol ?? `Token ${i}`, pct: 0, color: POOL_TOKENS[i]?.color ?? '#94a3b8' }));
-    return amounts.map((a, i) => ({
-      symbol: POOL_TOKENS[i]?.symbol ?? `Token ${i}`,
-      pct: (a / total) * 100,
-      color: POOL_TOKENS[i]?.color ?? '#94a3b8',
-    }));
-  });
+  // ── Format helpers ────────────────────────────────────────────────────
 
-  // ── Format helpers ──────────────────────────────────────────────────────────
-
-  function formatUsd(value: number): string {
+  function formatCompactUsd(value: number): string {
     if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(2)}M`;
     if (value >= 1_000) return `$${(value / 1_000).toFixed(1)}K`;
     return `$${value.toFixed(2)}`;
   }
 
-  function formatCompact(value: number): string {
+  function formatPrice(value: number): string {
+    if (value >= 1000) return `$${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+    if (value >= 1) return `$${value.toFixed(2)}`;
+    return `$${value.toFixed(4)}`;
+  }
+
+  function formatCompactAmount(value: number): string {
     if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
     if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
-    return value.toFixed(2);
+    if (value >= 1) return value.toFixed(2);
+    return value.toFixed(4);
   }
 
-  // ── Data loading ────────────────────────────────────────────────────────────
-
-  async function loadData(isRefresh = false) {
-    if (isRefresh) {
-      isRefreshing = true;
-    }
-
-    // Fire all data fetches in parallel, handling each independently
-    const heroPromise = (async () => {
-      try {
-        protocolStatus = await fetchProtocolStatus();
-      } catch (e) {
-        console.error('Failed to load protocol status:', e);
-        if (!isRefresh) heroError = true;
-      } finally {
-        if (!isRefresh) revenueLoading = false;
-      }
-    })();
-
-    const collateralPromise = (async () => {
-      try {
-        collateralConfigs = await fetchAllCollateralConfigs();
-      } catch (e) {
-        console.error('Failed to load collateral configs:', e);
-        if (!isRefresh) collateralError = true;
-      }
-    })();
-
-    const vaultsPromise = (async () => {
-      try {
-        const vaults = await fetchAllVaults();
-        allVaults = vaults;
-        const map = new Map<number, any>();
-        for (const v of vaults) {
-          map.set(Number(v.vault_id), v.collateral_type);
-        }
-        vaultCollateralMap = map;
-      } catch (e) {
-        console.error('Failed to load vaults:', e);
-      }
-    })();
-
-    const spPromise = (async () => {
-      try {
-        spStatus = await stabilityPoolService.getPoolStatus();
-        try {
-          spLiquidations = await stabilityPoolService.getLiquidationHistory(20);
-        } catch {}
-      } catch (e) {
-        console.error('Failed to load SP status:', e);
-        if (!isRefresh) poolsError = true;
-      }
-    })();
-
-    const tpPromise = (async () => {
-      try {
-        tpStatus = await threePoolService.getPoolStatus();
-      } catch (e) {
-        console.error('Failed to load 3Pool status:', e);
-      }
-    })();
-
-    const eventsPromise = (async () => {
-      try {
-        await fetchEvents(0);
-      } catch (e) {
-        console.error('Failed to load events:', e);
-      }
-    })();
-
-    // Wait for all to settle
-    await Promise.allSettled([heroPromise, collateralPromise, vaultsPromise, spPromise, tpPromise, eventsPromise]);
-
-    if (!isRefresh) {
-      heroLoading = false;
-      collateralLoading = false;
-      poolsLoading = false;
-      riskLoading = false;
-    }
-
-    // Get recent events from the store
-    const unsub = explorerEvents.subscribe(evts => {
-      recentEvents = evts.slice(0, 10);
-    });
-    unsub();
-    recentEvents = [...recentEvents];
-    if (!isRefresh) eventsLoading = false;
-
-    // Calculate 3pool APY if we have both protocol status and pool data
-    if (protocolStatus && tpStatus) {
-      const threePoolSplit = protocolStatus.interestSplit.find(s => s.destination === 'three_pool');
-      if (threePoolSplit && protocolStatus.perCollateralInterest.length > 0) {
-        let poolTvlE8s = 0;
-        for (let i = 0; i < tpStatus.balances.length; i++) {
-          const decimals = tpStatus.tokens?.[i]?.decimals ?? (i === 0 ? 8 : 6);
-          const balance = Number(tpStatus.balances[i]);
-          poolTvlE8s += decimals === 8 ? balance : balance * Math.pow(10, 8 - decimals);
-        }
-        tpApy = calculateTheoreticalApy(
-          threePoolSplit.bps,
-          protocolStatus.perCollateralInterest,
-          poolTvlE8s
-        );
-      }
-    }
-
-    if (isRefresh) {
-      isRefreshing = false;
-    }
+  function shortenOwner(principal: string): string {
+    if (principal.length <= 15) return principal;
+    return `${principal.slice(0, 5)}...${principal.slice(-5)}`;
   }
 
-  let refreshInterval: ReturnType<typeof setInterval>;
+  // Interest split color mapping
+  const splitColors: Record<string, string> = {
+    stability_pool: '#34d399',
+    treasury: '#818cf8',
+    three_pool: '#f59e0b',
+  };
 
-  onMount(async () => {
-    await loadData(false);
-    // Auto-refresh every 30 seconds
-    refreshInterval = setInterval(() => loadData(true), 30_000);
-  });
-
-  onDestroy(() => {
-    clearInterval(refreshInterval);
-  });
+  const splitLabels: Record<string, string> = {
+    stability_pool: 'Stability Pool',
+    treasury: 'Treasury',
+    three_pool: '3Pool',
+  };
 </script>
 
-<div class="dashboard-page max-w-6xl mx-auto px-4 py-6 space-y-6">
-  <!-- ── Refresh indicator ───────────────────────────────────────────────── -->
-  {#if isRefreshing}
-    <div class="flex items-center justify-end gap-1.5 text-xs text-gray-500">
-      <svg class="animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
-        <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
-      </svg>
-      <span>Refreshing...</span>
-    </div>
-  {/if}
+<svelte:head>
+  <title>Explorer - Rumi Protocol</title>
+</svelte:head>
 
-  <!-- ── Hero Stats ─────────────────────────────────────────────────────── -->
+<div class="max-w-7xl mx-auto px-4 py-8 space-y-8">
+
+  <!-- Page header -->
+  <div class="flex items-center justify-between">
+    <div>
+      <h1 class="text-2xl font-bold text-white">Protocol Explorer</h1>
+      <p class="text-sm text-gray-400 mt-1">Real-time protocol health and activity dashboard</p>
+    </div>
+    {#if isRefreshing}
+      <div class="flex items-center gap-1.5 text-xs text-gray-500">
+        <svg class="animate-spin w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+        </svg>
+        Refreshing...
+      </div>
+    {/if}
+  </div>
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       Section 1 — Hero Stats
+       ════════════════════════════════════════════════════════════════════ -->
   <section>
-    <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-      {#if heroLoading}
+    {#if heroLoading}
+      <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
         {#each Array(6) as _}
           <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl p-5 animate-pulse">
-            <div class="h-3 w-20 bg-gray-700 rounded mb-2"></div>
+            <div class="h-3 w-20 bg-gray-700 rounded mb-3"></div>
             <div class="h-7 w-16 bg-gray-700 rounded"></div>
           </div>
         {/each}
-      {:else if heroError}
-        <div class="col-span-full bg-gray-800/50 border border-red-800/30 rounded-xl p-5 text-center text-red-400 text-sm">
-          Failed to load protocol status
-        </div>
+      </div>
+    {:else if heroError}
+      <div class="bg-gray-800/50 border border-red-800/30 rounded-xl p-6 text-center text-red-400 text-sm">
+        {heroError}
+      </div>
+    {:else}
+      <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+        <StatCard label="Protocol Mode">
+          <StatusBadge status={protocolMode} variant={modeVariant} />
+        </StatCard>
+
+        <StatCard label="Total TVL" subtitle="All collateral locked">
+          {#if status?.total_collateral_usd != null}
+            <span>{typeof status.total_collateral_usd === 'bigint' ? formatUsd(status.total_collateral_usd) : formatUsdRaw(Number(status.total_collateral_usd))}</span>
+          {:else}
+            <span class="text-gray-500">--</span>
+          {/if}
+        </StatCard>
+
+        <StatCard label="Total Debt" subtitle="icUSD minted">
+          {#if status?.total_debt_icusd != null}
+            <span>{formatE8s(status.total_debt_icusd)} <span class="text-sm text-gray-400">icUSD</span></span>
+          {:else}
+            <span class="text-gray-500">--</span>
+          {/if}
+        </StatCard>
+
+        <StatCard label="System CR" subtitle="Collateral ratio">
+          {#if status?.system_collateral_ratio != null}
+            <span>{formatCR(status.system_collateral_ratio)}</span>
+          {:else if status?.totalCollateralRatio != null}
+            <span>{formatCR(status.totalCollateralRatio)}</span>
+          {:else}
+            <span class="text-gray-500">--</span>
+          {/if}
+        </StatCard>
+
+        <StatCard label="Active Vaults">
+          <span>{activeVaultCount.toLocaleString()}</span>
+        </StatCard>
+
+        <StatCard label="Total Events">
+          <span>{Number(eventCount).toLocaleString()}</span>
+        </StatCard>
+      </div>
+    {/if}
+  </section>
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       Section 2 — Collateral Breakdown
+       ════════════════════════════════════════════════════════════════════ -->
+  <section>
+    <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl overflow-hidden">
+      <div class="px-5 py-4 border-b border-gray-700/50">
+        <h2 class="text-sm font-semibold text-gray-200">Collateral Breakdown</h2>
+      </div>
+
+      {#if collateralLoading}
+        <div class="px-5 py-12 text-center text-gray-500 text-sm animate-pulse">Loading collateral data...</div>
+      {:else if collateralError}
+        <div class="px-5 py-8 text-center text-red-400 text-sm">{collateralError}</div>
+      {:else if collateralRows.length === 0}
+        <div class="px-5 py-8 text-center text-gray-500 text-sm">No collateral types configured</div>
       {:else}
-        <DashboardCard
-          label="Protocol Mode"
-          value={isRecoveryMode ? 'Recovery' : 'Normal'}
-          subtitle={isRecoveryMode ? 'Elevated liquidation risk' : 'Operating normally'}
-          trend={isRecoveryMode ? 'down' : 'up'}
-        />
-        <DashboardCard
-          label="Global CR"
-          value="{protocolStatus?.totalCollateralRatio?.toFixed(0) ?? '—'}%"
-          subtitle="Total collateral ratio"
-        />
-        <DashboardCard
-          label="Total TVL"
-          value={formatUsd(totalTvl)}
-          subtitle="Across all pools"
-        />
-        <DashboardCard
-          label="icUSD Supply"
-          value={formatCompact(protocolStatus?.totalIcusdBorrowed ?? 0)}
-          subtitle="Total minted"
-        />
-        <DashboardCard
-          label="Open Vaults"
-          value={String(totalOpenVaults)}
-          subtitle="Active positions"
-        />
-        <DashboardCard
-          label="Mint Cap"
-          value="{mintCapUtilization.toFixed(1)}%"
-          subtitle="Debt ceiling usage"
-          trend={mintCapUtilization > 80 ? 'down' : mintCapUtilization > 50 ? 'neutral' : 'up'}
-        />
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="border-b border-gray-700/50">
+                <th class="px-4 py-3 text-xs font-medium text-gray-400 uppercase tracking-wider text-left">Token</th>
+                <th class="px-4 py-3 text-xs font-medium text-gray-400 uppercase tracking-wider text-right">Price</th>
+                <th class="px-4 py-3 text-xs font-medium text-gray-400 uppercase tracking-wider text-right">Total Locked</th>
+                <th class="px-4 py-3 text-xs font-medium text-gray-400 uppercase tracking-wider text-right">Locked (USD)</th>
+                <th class="px-4 py-3 text-xs font-medium text-gray-400 uppercase tracking-wider text-right">Total Debt</th>
+                <th class="px-4 py-3 text-xs font-medium text-gray-400 uppercase tracking-wider text-right">Vaults</th>
+                <th class="px-4 py-3 text-xs font-medium text-gray-400 uppercase tracking-wider text-right">Utilization</th>
+                <th class="px-4 py-3 text-xs font-medium text-gray-400 uppercase tracking-wider text-right">Interest Rate</th>
+                <th class="px-4 py-3 text-xs font-medium text-gray-400 uppercase tracking-wider text-center">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each collateralRows as row}
+                <tr class="border-b border-gray-700/30 hover:bg-gray-700/20 transition-colors">
+                  <td class="px-4 py-3">
+                    <EntityLink type="token" value={row.principal} />
+                  </td>
+                  <td class="px-4 py-3 text-right text-gray-200 tabular-nums">{formatPrice(row.price)}</td>
+                  <td class="px-4 py-3 text-right text-gray-200 tabular-nums">{formatCompactAmount(row.collateralHuman)}</td>
+                  <td class="px-4 py-3 text-right text-gray-200 tabular-nums">{formatCompactUsd(row.collateralUsd)}</td>
+                  <td class="px-4 py-3 text-right text-gray-200 tabular-nums">{formatCompactUsd(row.debtHuman)}</td>
+                  <td class="px-4 py-3 text-right text-gray-300 tabular-nums">{row.vaultCount}</td>
+                  <td class="px-4 py-3 text-right">
+                    <div class="flex items-center justify-end gap-2">
+                      <div class="w-16 h-1.5 bg-gray-700 rounded-full overflow-hidden">
+                        <div
+                          class="h-full rounded-full transition-all duration-300 {row.utilization > 80 ? 'bg-red-400' : row.utilization > 50 ? 'bg-yellow-400' : 'bg-green-400'}"
+                          style="width: {Math.min(100, row.utilization)}%"
+                        ></div>
+                      </div>
+                      <span class="text-xs text-gray-400 tabular-nums w-10 text-right">{row.utilization.toFixed(0)}%</span>
+                    </div>
+                  </td>
+                  <td class="px-4 py-3 text-right text-gray-300 tabular-nums">
+                    {#if row.interestRate > 0}
+                      {row.interestRate < 1 ? (row.interestRate * 100).toFixed(1) : row.interestRate.toFixed(1)}%
+                    {:else}
+                      --
+                    {/if}
+                  </td>
+                  <td class="px-4 py-3 text-center">
+                    <StatusBadge
+                      status={row.status}
+                      variant={row.status === 'Active' ? 'active' : row.status === 'Paused' ? 'paused' : row.status === 'Frozen' ? 'frozen' : 'info'}
+                    />
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
       {/if}
     </div>
   </section>
 
-  <!-- ── Collateral Breakdown ───────────────────────────────────────────── -->
-  <section>
-    <CollateralBreakdownTable rows={collateralRows} loading={collateralLoading} />
-  </section>
-
-  <!-- ── Stability Pool + 3Pool Side-by-Side ────────────────────────────── -->
+  <!-- ════════════════════════════════════════════════════════════════════
+       Section 3 — Pools (Stability Pool + 3Pool)
+       ════════════════════════════════════════════════════════════════════ -->
   <section class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-    <!-- Stability Pool Card -->
+    <!-- Stability Pool -->
     <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl overflow-hidden">
-      <div class="px-5 py-4 border-b border-gray-700/50">
-        <h3 class="text-sm font-semibold text-gray-200">Stability Pool</h3>
+      <div class="px-5 py-4 border-b border-gray-700/50 flex items-center justify-between">
+        <h2 class="text-sm font-semibold text-gray-200">Stability Pool</h2>
+        {#if spStatus}
+          <StatusBadge
+            status={spStatus.is_paused ? 'Paused' : 'Active'}
+            variant={spStatus.is_paused ? 'paused' : 'active'}
+          />
+        {/if}
       </div>
+
       {#if poolsLoading}
         <div class="p-5 space-y-3 animate-pulse">
           <div class="h-4 w-32 bg-gray-700 rounded"></div>
           <div class="h-4 w-24 bg-gray-700 rounded"></div>
+          <div class="h-4 w-28 bg-gray-700 rounded"></div>
         </div>
       {:else if !spStatus}
-        <div class="p-5 text-gray-500 text-sm">Failed to load</div>
+        <div class="p-5 text-gray-500 text-sm">Failed to load stability pool data</div>
       {:else}
         <div class="p-5 space-y-3">
           <div class="flex justify-between items-center">
             <span class="text-sm text-gray-400">Total Deposits</span>
-            <span class="text-sm font-semibold text-gray-200 tabular-nums">{formatE8s(spStatus.total_deposits_e8s)} icUSD</span>
+            <span class="text-sm font-semibold text-gray-200 tabular-nums">
+              {formatE8s(spStatus.total_deposits_e8s)} <span class="text-gray-400">icUSD</span>
+            </span>
           </div>
           <div class="flex justify-between items-center">
             <span class="text-sm text-gray-400">Depositors</span>
-            <span class="text-sm font-semibold text-gray-200 tabular-nums">{Number(spStatus.total_depositors)}</span>
+            <span class="text-sm font-semibold text-gray-200 tabular-nums">{Number(spStatus.total_depositors ?? spStatus.depositor_count ?? 0)}</span>
           </div>
           <div class="flex justify-between items-center">
             <span class="text-sm text-gray-400">Liquidations Executed</span>
-            <span class="text-sm font-semibold text-gray-200 tabular-nums">{Number(spStatus.total_liquidations_executed)}</span>
+            <span class="text-sm font-semibold text-gray-200 tabular-nums">{Number(spStatus.total_liquidations_executed ?? 0)}</span>
           </div>
           {#if spStatus.collateral_gains && spStatus.collateral_gains.length > 0}
             <div class="pt-2 border-t border-gray-700/30">
               <p class="text-xs text-gray-500 mb-2 uppercase tracking-wider font-medium">Collateral Gains</p>
               <div class="space-y-1">
                 {#each spStatus.collateral_gains as [ledger, amount]}
-                  {@const symbol = ledger?.toText ? resolveCollateralSymbol(ledger) : '?'}
+                  {@const principal = ledger?.toText?.() ?? String(ledger)}
+                  {@const symbol = getTokenSymbol(principal)}
                   {@const humanAmount = Number(amount) / E8S}
                   {#if humanAmount > 0}
                     <div class="flex justify-between text-xs">
@@ -437,52 +585,71 @@
       {/if}
     </div>
 
-    <!-- 3Pool Card -->
+    <!-- 3Pool -->
     <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl overflow-hidden">
       <div class="px-5 py-4 border-b border-gray-700/50">
-        <h3 class="text-sm font-semibold text-gray-200">3Pool (StableSwap)</h3>
+        <h2 class="text-sm font-semibold text-gray-200">3Pool (StableSwap)</h2>
       </div>
+
       {#if poolsLoading}
         <div class="p-5 space-y-3 animate-pulse">
           <div class="h-4 w-32 bg-gray-700 rounded"></div>
           <div class="h-4 w-24 bg-gray-700 rounded"></div>
         </div>
       {:else if !tpStatus}
-        <div class="p-5 text-gray-500 text-sm">Failed to load</div>
+        <div class="p-5 text-gray-500 text-sm">Failed to load 3Pool data</div>
       {:else}
+        {@const balances = tpStatus.balances ?? []}
+        {@const tokens = tpStatus.tokens ?? []}
+        {@const tvl = (() => {
+          let total = 0;
+          for (let i = 0; i < balances.length; i++) {
+            const decimals = tokens[i]?.decimals ?? (i === 0 ? 8 : 6);
+            total += Number(balances[i]) / Math.pow(10, decimals);
+          }
+          return total;
+        })()}
         <div class="p-5 space-y-3">
           <div class="flex justify-between items-center">
             <span class="text-sm text-gray-400">TVL</span>
-            <span class="text-sm font-semibold text-gray-200 tabular-nums">{formatUsd(threePoolTvl)}</span>
+            <span class="text-sm font-semibold text-gray-200 tabular-nums">{formatCompactUsd(tvl)}</span>
           </div>
-          {#if tpApy !== null}
-            <div class="flex justify-between items-center">
-              <span class="text-sm text-gray-400">Theoretical APY</span>
-              <span class="text-sm font-semibold text-green-400 tabular-nums">{(tpApy * 100).toFixed(2)}%</span>
-            </div>
-          {/if}
           <div class="flex justify-between items-center">
             <span class="text-sm text-gray-400">Swap Fee</span>
-            <span class="text-sm font-semibold text-gray-200 tabular-nums">{Number(tpStatus.swap_fee_bps) / 100}%</span>
+            <span class="text-sm font-semibold text-gray-200 tabular-nums">{Number(tpStatus.swap_fee_bps ?? 0) / 100}%</span>
           </div>
-          {#if threePoolRatios.length > 0}
+          {#if tpStatus.total_lp_tokens != null}
+            <div class="flex justify-between items-center">
+              <span class="text-sm text-gray-400">LP Tokens</span>
+              <span class="text-sm font-semibold text-gray-200 tabular-nums">{formatE8s(tpStatus.total_lp_tokens, 18)}</span>
+            </div>
+          {/if}
+          {#if balances.length > 0}
+            {@const poolTokenSymbols = ['icUSD', 'ckUSDT', 'ckUSDC']}
+            {@const poolTokenColors = ['#818cf8', '#26A17B', '#2775CA']}
+            {@const amounts = balances.map((b: any, i: number) => {
+              const decimals = tokens[i]?.decimals ?? (i === 0 ? 8 : 6);
+              return Number(b) / Math.pow(10, decimals);
+            })}
+            {@const total = amounts.reduce((s: number, a: number) => s + a, 0)}
             <div class="pt-2 border-t border-gray-700/30">
               <p class="text-xs text-gray-500 mb-2 uppercase tracking-wider font-medium">Token Ratios</p>
-              <!-- Ratio bar -->
               <div class="flex h-2.5 rounded-full overflow-hidden bg-gray-700 mb-2">
-                {#each threePoolRatios as ratio}
+                {#each amounts as amount, i}
+                  {@const pct = total > 0 ? (amount / total) * 100 : 0}
                   <div
                     class="h-full transition-all duration-300"
-                    style="width: {ratio.pct}%; background: {ratio.color};"
+                    style="width: {pct}%; background: {poolTokenColors[i] ?? '#94a3b8'};"
                   ></div>
                 {/each}
               </div>
               <div class="flex flex-wrap gap-x-3 gap-y-1">
-                {#each threePoolRatios as ratio}
+                {#each amounts as amount, i}
+                  {@const pct = total > 0 ? (amount / total) * 100 : 0}
                   <div class="flex items-center gap-1.5">
-                    <div class="w-2 h-2 rounded-full" style="background: {ratio.color};"></div>
-                    <span class="text-xs text-gray-400">{ratio.symbol}</span>
-                    <span class="text-xs font-medium text-gray-300 tabular-nums">{ratio.pct.toFixed(1)}%</span>
+                    <div class="w-2 h-2 rounded-full" style="background: {poolTokenColors[i] ?? '#94a3b8'};"></div>
+                    <span class="text-xs text-gray-400">{poolTokenSymbols[i] ?? `Token ${i}`}</span>
+                    <span class="text-xs font-medium text-gray-300 tabular-nums">{pct.toFixed(1)}%</span>
                   </div>
                 {/each}
               </div>
@@ -493,30 +660,225 @@
     </div>
   </section>
 
-  <!-- ── Treasury & Revenue ─────────────────────────────────────────────── -->
+  <!-- ════════════════════════════════════════════════════════════════════
+       Section 4 — Treasury & Revenue
+       ════════════════════════════════════════════════════════════════════ -->
   <section>
-    <RevenueBreakdown
-      interestSplit={protocolStatus?.interestSplit ?? []}
-      weightedAvgRate={protocolStatus?.weightedAverageInterestRate ?? 0}
-      loading={revenueLoading}
-    />
+    <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl overflow-hidden">
+      <div class="px-5 py-4 border-b border-gray-700/50">
+        <h2 class="text-sm font-semibold text-gray-200">Treasury & Revenue</h2>
+      </div>
+
+      {#if treasuryLoading}
+        <div class="px-5 py-8 text-center text-gray-500 text-sm animate-pulse">Loading treasury data...</div>
+      {:else if treasuryError}
+        <div class="px-5 py-8 text-center text-red-400 text-sm">{treasuryError}</div>
+      {:else}
+        <div class="p-5 space-y-5">
+          <!-- Treasury stats -->
+          {#if treasuryStats}
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {#if treasuryStats.total_accrued_interest != null || treasuryStats.totalAccruedInterest != null}
+                <div class="bg-gray-700/30 rounded-lg p-4">
+                  <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">Total Accrued Interest</p>
+                  <p class="text-lg font-semibold text-white tabular-nums">
+                    {formatE8s(treasuryStats.total_accrued_interest ?? treasuryStats.totalAccruedInterest ?? 0)} <span class="text-sm text-gray-400">icUSD</span>
+                  </p>
+                </div>
+              {/if}
+              {#if treasuryStats.pending_amount != null || treasuryStats.pendingAmount != null}
+                <div class="bg-gray-700/30 rounded-lg p-4">
+                  <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">Pending Treasury</p>
+                  <p class="text-lg font-semibold text-white tabular-nums">
+                    {formatE8s(treasuryStats.pending_amount ?? treasuryStats.pendingAmount ?? 0)} <span class="text-sm text-gray-400">icUSD</span>
+                  </p>
+                </div>
+              {/if}
+              {#if treasuryStats.total_distributed != null || treasuryStats.totalDistributed != null}
+                <div class="bg-gray-700/30 rounded-lg p-4">
+                  <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">Total Distributed</p>
+                  <p class="text-lg font-semibold text-white tabular-nums">
+                    {formatE8s(treasuryStats.total_distributed ?? treasuryStats.totalDistributed ?? 0)} <span class="text-sm text-gray-400">icUSD</span>
+                  </p>
+                </div>
+              {/if}
+            </div>
+          {/if}
+
+          <!-- Interest split visualization -->
+          {#if splitEntries.length > 0}
+            <div class="space-y-3">
+              <p class="text-xs text-gray-500 uppercase tracking-wider font-medium">Interest Split</p>
+              {@const totalBps = splitEntries.reduce((sum: number, e: any) => sum + (e.bps ?? 0), 0)}
+              <div class="flex h-2.5 rounded-full overflow-hidden bg-gray-700">
+                {#each splitEntries as entry}
+                  {@const dest = entry.destination ?? entry.dest ?? ''}
+                  {@const pct = totalBps > 0 ? ((entry.bps ?? 0) / totalBps) * 100 : 0}
+                  <div
+                    class="h-full transition-all duration-300"
+                    style="width: {pct}%; background: {splitColors[dest] ?? '#94a3b8'};"
+                    title="{splitLabels[dest] ?? dest}: {formatBps(entry.bps ?? 0)}"
+                  ></div>
+                {/each}
+              </div>
+              <div class="flex flex-wrap gap-x-4 gap-y-1.5">
+                {#each splitEntries as entry}
+                  {@const dest = entry.destination ?? entry.dest ?? ''}
+                  <div class="flex items-center gap-1.5">
+                    <div class="w-2.5 h-2.5 rounded-full" style="background: {splitColors[dest] ?? '#94a3b8'};"></div>
+                    <span class="text-xs text-gray-400">{splitLabels[dest] ?? dest}</span>
+                    <span class="text-xs font-medium text-gray-300 tabular-nums">{formatBps(entry.bps ?? 0)}</span>
+                  </div>
+                {/each}
+              </div>
+            </div>
+          {:else}
+            <div class="text-sm text-gray-500">No interest split data available</div>
+          {/if}
+        </div>
+      {/if}
+    </div>
   </section>
 
-  <!-- ── Liquidation Risk ───────────────────────────────────────────────── -->
-  <section>
-    <LiquidationRiskTable
-      vaults={atRiskVaults}
-      totalAtRisk={totalAtRiskCount}
-      loading={riskLoading}
-    />
+  <!-- ════════════════════════════════════════════════════════════════════
+       Section 5 — Liquidation Health
+       ════════════════════════════════════════════════════════════════════ -->
+  <section class="space-y-4">
+    <h2 class="text-sm font-semibold text-gray-200 px-1">Liquidation Health</h2>
+
+    {#if liquidationLoading}
+      <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl p-8 text-center text-gray-500 text-sm animate-pulse">
+        Loading liquidation data...
+      </div>
+    {:else if liquidationError}
+      <div class="bg-gray-800/50 border border-red-800/30 rounded-xl p-6 text-center text-red-400 text-sm">
+        {liquidationError}
+      </div>
+    {:else}
+      <!-- Bot stats + pending liquidations cards -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {#if botStats}
+          <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl p-4">
+            <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">Bot Budget Remaining</p>
+            <p class="text-lg font-semibold text-white tabular-nums">
+              {formatE8s(botStats.budget_remaining ?? botStats.budgetRemaining ?? 0)} <span class="text-sm text-gray-400">ICP</span>
+            </p>
+          </div>
+          <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl p-4">
+            <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">Total Liquidations</p>
+            <p class="text-lg font-semibold text-white tabular-nums">
+              {Number(botStats.total_liquidations ?? botStats.totalLiquidations ?? 0)}
+            </p>
+          </div>
+          <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl p-4">
+            <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">Fees Paid</p>
+            <p class="text-lg font-semibold text-white tabular-nums">
+              {formatE8s(botStats.total_fees_paid ?? botStats.totalFeesPaid ?? 0)} <span class="text-sm text-gray-400">ICP</span>
+            </p>
+          </div>
+        {:else}
+          <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl p-4 col-span-full text-gray-500 text-sm">
+            Bot stats unavailable
+          </div>
+        {/if}
+      </div>
+
+      <!-- Pending liquidations notice -->
+      {#if pendingLiquidations.length > 0}
+        <div class="bg-red-500/10 border border-red-500/30 rounded-xl p-4 flex items-center gap-3">
+          <span class="text-red-400 font-semibold text-sm">{pendingLiquidations.length} pending liquidation{pendingLiquidations.length > 1 ? 's' : ''}</span>
+          <span class="text-red-400/70 text-xs">Vaults awaiting liquidation processing</span>
+        </div>
+      {/if}
+
+      <!-- At-risk vaults table -->
+      <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl overflow-hidden">
+        <div class="px-5 py-4 border-b border-gray-700/50 flex items-center justify-between">
+          <h3 class="text-sm font-semibold text-gray-200">At-Risk Vaults</h3>
+          {#if atRiskVaults.length > 0}
+            <span class="text-xs font-medium px-2 py-0.5 rounded-full bg-orange-400/10 text-orange-400 border border-orange-400/30">
+              {atRiskVaults.length} vault{atRiskVaults.length > 1 ? 's' : ''}
+            </span>
+          {:else}
+            <span class="text-xs font-medium px-2 py-0.5 rounded-full bg-green-400/10 text-green-400 border border-green-400/30">
+              All healthy
+            </span>
+          {/if}
+        </div>
+
+        {#if atRiskVaults.length === 0}
+          <div class="px-5 py-8 text-center text-gray-500 text-sm">No vaults near liquidation</div>
+        {:else}
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead>
+                <tr class="border-b border-gray-700/50">
+                  <th class="px-4 py-2.5 text-xs font-medium text-gray-400 uppercase tracking-wider text-left">Vault</th>
+                  <th class="px-4 py-2.5 text-xs font-medium text-gray-400 uppercase tracking-wider text-left">Owner</th>
+                  <th class="px-4 py-2.5 text-xs font-medium text-gray-400 uppercase tracking-wider text-left">Collateral</th>
+                  <th class="px-4 py-2.5 text-xs font-medium text-gray-400 uppercase tracking-wider text-right">Debt</th>
+                  <th class="px-4 py-2.5 text-xs font-medium text-gray-400 uppercase tracking-wider text-right">CR</th>
+                  <th class="px-4 py-2.5 text-xs font-medium text-gray-400 uppercase tracking-wider text-left w-48">Health</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each atRiskVaults as vault}
+                  {@const health = classifyVaultHealth(vault.collateral_ratio, vault.liquidation_ratio)}
+                  <tr class="border-b border-gray-700/30 hover:bg-gray-700/20 transition-colors">
+                    <td class="px-4 py-2.5">
+                      <EntityLink type="vault" value={String(vault.vault_id)} />
+                    </td>
+                    <td class="px-4 py-2.5">
+                      <EntityLink type="address" value={vault.owner} />
+                    </td>
+                    <td class="px-4 py-2.5">
+                      <TokenBadge symbol={vault.symbol} principalId={vault.collateral_type} size="sm" />
+                    </td>
+                    <td class="px-4 py-2.5 text-right text-gray-200 tabular-nums text-xs">
+                      {formatE8s(vault.debt)} icUSD
+                    </td>
+                    <td class="px-4 py-2.5 text-right tabular-nums">
+                      <span class="{healthColor(health)} font-medium text-xs">{formatCR(vault.collateral_ratio)}</span>
+                    </td>
+                    <td class="px-4 py-2.5">
+                      <VaultHealthBar collateralRatio={vault.collateral_ratio * 100} liquidationRatio={vault.liquidation_ratio * 100} />
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/if}
+      </div>
+    {/if}
   </section>
 
-  <!-- ── Recent Activity Feed ───────────────────────────────────────────── -->
+  <!-- ════════════════════════════════════════════════════════════════════
+       Section 6 — Recent Activity
+       ════════════════════════════════════════════════════════════════════ -->
   <section>
-    <ActivityFeed
-      events={recentEvents}
-      loading={eventsLoading}
-      {vaultCollateralMap}
-    />
+    <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl overflow-hidden">
+      <div class="px-5 py-4 border-b border-gray-700/50 flex items-center justify-between">
+        <h2 class="text-sm font-semibold text-gray-200">Recent Activity</h2>
+        <a href="/explorer/events" class="text-xs text-blue-400 hover:text-blue-300 transition-colors">
+          View All Events &rarr;
+        </a>
+      </div>
+
+      {#if eventsLoading}
+        <div class="px-5 py-8 text-center text-gray-500 text-sm animate-pulse">Loading events...</div>
+      {:else if eventsError}
+        <div class="px-5 py-8 text-center text-red-400 text-sm">{eventsError}</div>
+      {:else if recentEvents.length === 0}
+        <div class="px-5 py-8 text-center text-gray-500 text-sm">No recent events</div>
+      {:else}
+        <div class="divide-y divide-gray-700/30">
+          {#each recentEvents as [globalIndex, event]}
+            <EventRow {event} index={Number(globalIndex)} {vaultCollateralMap} />
+          {/each}
+        </div>
+      {/if}
+    </div>
   </section>
+
 </div>

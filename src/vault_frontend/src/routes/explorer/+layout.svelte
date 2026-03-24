@@ -1,11 +1,16 @@
 <script lang="ts">
-  import { page } from '$app/stores';
   import { goto } from '$app/navigation';
+  import { page } from '$app/stores';
+  import SearchBar from '$lib/components/explorer/SearchBar.svelte';
+  import {
+    isVaultId, isEventIndex, parseEventIndex, isPrincipal, resolveTokenAlias
+  } from '$lib/utils/explorerHelpers';
   import type { Snippet } from 'svelte';
-  import { CANISTER_IDS } from '$lib/config';
 
   let { children }: { children: Snippet } = $props();
-  let searchQuery = $state('');
+
+  let mobileNavOpen = $state(false);
+  let mobileSearchOpen = $state(false);
 
   let currentPath = $derived($page.url.pathname);
 
@@ -16,228 +21,120 @@
     { href: '/explorer/stats', label: 'Stats', exact: false },
   ];
 
-  // Token symbol → ledger principal mapping
-  const TOKEN_SYMBOL_MAP: Record<string, string> = {
-    'icp': CANISTER_IDS.ICP_LEDGER,
-    'ckbtc': 'mxzaz-hqaaa-aaaar-qaada-cai',
-    'cketh': 'ss2fx-dyaaa-aaaar-qacoq-cai',
-    'ckxaut': 'o7oak-6yaaa-aaaap-qhgbq-cai',
-    'icusd': CANISTER_IDS.ICUSD_LEDGER,
-    'ckusdt': CANISTER_IDS.CKUSDT_LEDGER,
-    'ckusdc': CANISTER_IDS.CKUSDC_LEDGER,
-  };
-
   function isActive(link: { href: string; exact: boolean }): boolean {
     if (link.exact) return currentPath === link.href;
     return currentPath.startsWith(link.href);
   }
 
-  function handleSearch() {
-    const q = searchQuery.trim();
+  function handleSearch(query: string) {
+    const q = query.trim();
     if (!q) return;
-
-    // Pure numeric -> vault ID
-    if (/^\d+$/.test(q)) {
-      goto(`/explorer/vault/${q}`);
-      searchQuery = '';
-      return;
-    }
-
-    // Event index prefixed with # or e (e.g. #42 or e42)
-    if (/^#\d+$/.test(q)) {
-      goto(`/explorer/event/${q.slice(1)}`);
-      searchQuery = '';
-      return;
-    }
-    if (/^e\d+$/i.test(q)) {
-      goto(`/explorer/event/${q.slice(1)}`);
-      searchQuery = '';
-      return;
-    }
-
-    // Known token symbol
-    const tokenPrincipal = TOKEN_SYMBOL_MAP[q.toLowerCase()];
-    if (tokenPrincipal) {
-      goto(`/explorer/token/${tokenPrincipal}`);
-      searchQuery = '';
-      return;
-    }
-
-    // Principal-like (contains dashes, at least 10 chars)
-    if (q.includes('-') && q.length >= 10) {
-      goto(`/explorer/address/${q}`);
-      searchQuery = '';
-      return;
-    }
-
-    // Fallback: treat as address
-    goto(`/explorer/address/${q}`);
-    searchQuery = '';
+    if (isVaultId(q)) goto(`/explorer/vault/${q}`);
+    else if (isEventIndex(q)) goto(`/explorer/event/${parseEventIndex(q)}`);
+    else if (resolveTokenAlias(q)) goto(`/explorer/token/${resolveTokenAlias(q)}`);
+    else if (isPrincipal(q)) goto(`/explorer/address/${q}`);
+    mobileSearchOpen = false;
+    mobileNavOpen = false;
   }
 
-  function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Enter') handleSearch();
+  function handleNavClick() {
+    mobileNavOpen = false;
   }
 </script>
 
-<div class="explorer-subnav">
-  <div class="subnav-inner">
-    <nav class="subnav-links">
+<!-- Explorer Header Bar -->
+<header class="sticky top-0 z-40 border-b border-white/10 bg-gray-950/80 backdrop-blur-md">
+  <div class="mx-auto flex h-14 max-w-7xl items-center justify-between px-4">
+    <!-- Left: Title -->
+    <a href="/explorer" class="flex items-center gap-2 text-lg font-semibold text-white hover:text-indigo-400 transition-colors">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="h-5 w-5 text-indigo-400">
+        <path d="M3.75 3v11.25A2.25 2.25 0 006 16.5h2.25M3.75 3h-1.5m1.5 0h16.5m0 0h1.5m-1.5 0v11.25A2.25 2.25 0 0118 16.5h-2.25m-7.5 0h7.5m-7.5 0l-1 3m8.5-3l1 3m0 0l.5 1.5m-.5-1.5h-9.5m0 0l-.5 1.5" />
+      </svg>
+      <span class="hidden sm:inline">Rumi Explorer</span>
+    </a>
+
+    <!-- Center: Nav tabs (desktop) -->
+    <nav class="hidden md:flex items-center gap-1">
       {#each navLinks as link}
         <a
           href={link.href}
-          class="subnav-link"
-          class:active={isActive(link)}
+          class="relative px-3 py-1.5 text-sm font-medium rounded-md transition-colors
+                 {isActive(link)
+                   ? 'text-white bg-white/10'
+                   : 'text-white/50 hover:text-white/80 hover:bg-white/5'}"
+        >
+          {link.label}
+          {#if isActive(link)}
+            <span class="absolute -bottom-[1.125rem] left-3 right-3 h-0.5 rounded-t bg-indigo-500"></span>
+          {/if}
+        </a>
+      {/each}
+    </nav>
+
+    <!-- Right: Search + mobile toggles -->
+    <div class="flex items-center gap-2">
+      <!-- Search bar (desktop) -->
+      <div class="hidden md:block w-72">
+        <SearchBar onSearch={handleSearch} />
+      </div>
+
+      <!-- Search toggle (mobile) -->
+      <button
+        onclick={() => { mobileSearchOpen = !mobileSearchOpen; mobileNavOpen = false; }}
+        class="md:hidden flex items-center justify-center w-9 h-9 rounded-md text-white/60 hover:text-white hover:bg-white/10 transition-colors"
+        aria-label="Toggle search"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-5 h-5">
+          <circle cx="11" cy="11" r="8" /><path d="M21 21l-4.35-4.35" />
+        </svg>
+      </button>
+
+      <!-- Hamburger (mobile) -->
+      <button
+        onclick={() => { mobileNavOpen = !mobileNavOpen; mobileSearchOpen = false; }}
+        class="md:hidden flex items-center justify-center w-9 h-9 rounded-md text-white/60 hover:text-white hover:bg-white/10 transition-colors"
+        aria-label="Toggle navigation"
+      >
+        {#if mobileNavOpen}
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-5 h-5">
+            <path d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        {:else}
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-5 h-5">
+            <path d="M4 6h16M4 12h16M4 18h16" />
+          </svg>
+        {/if}
+      </button>
+    </div>
+  </div>
+
+  <!-- Mobile search dropdown -->
+  {#if mobileSearchOpen}
+    <div class="md:hidden border-t border-white/10 bg-gray-950/95 px-4 py-3">
+      <SearchBar onSearch={handleSearch} />
+    </div>
+  {/if}
+
+  <!-- Mobile nav dropdown -->
+  {#if mobileNavOpen}
+    <nav class="md:hidden border-t border-white/10 bg-gray-950/95 px-4 py-2">
+      {#each navLinks as link}
+        <a
+          href={link.href}
+          onclick={handleNavClick}
+          class="block rounded-md px-3 py-2 text-sm font-medium transition-colors
+                 {isActive(link)
+                   ? 'text-white bg-indigo-500/20'
+                   : 'text-white/60 hover:text-white hover:bg-white/5'}"
         >
           {link.label}
         </a>
       {/each}
     </nav>
-    <div class="subnav-search">
-      <input
-        type="text"
-        bind:value={searchQuery}
-        onkeydown={handleKeydown}
-        placeholder="Vault ID, address, #event, token symbol..."
-        class="subnav-search-input"
-      />
-      <button onclick={handleSearch} class="subnav-search-btn" aria-label="Search">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-          <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
-        </svg>
-      </button>
-    </div>
-  </div>
-</div>
+  {/if}
+</header>
 
-{@render children()}
-
-<style>
-  .explorer-subnav {
-    border-bottom: 1px solid var(--rumi-border);
-    background: var(--rumi-bg-surface-1);
-  }
-
-  .subnav-inner {
-    max-width: 1200px;
-    margin: 0 auto;
-    padding: 0 1rem;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    height: 2.75rem;
-  }
-
-  .subnav-links {
-    display: flex;
-    align-items: center;
-    gap: 0.125rem;
-  }
-
-  .subnav-link {
-    position: relative;
-    display: flex;
-    align-items: center;
-    padding: 0.5rem 0.75rem;
-    font-size: 0.8125rem;
-    font-weight: 500;
-    color: var(--rumi-text-muted);
-    text-decoration: none;
-    border-radius: 0.375rem;
-    transition: color 0.15s ease, background 0.15s ease;
-  }
-
-  .subnav-link:hover {
-    color: var(--rumi-text-secondary);
-    background: rgba(255, 255, 255, 0.03);
-  }
-
-  .subnav-link.active {
-    color: var(--rumi-text-primary);
-  }
-
-  .subnav-link.active::after {
-    content: '';
-    position: absolute;
-    bottom: -0.6875rem;
-    left: 0.75rem;
-    right: 0.75rem;
-    height: 2px;
-    background: var(--rumi-action);
-    border-radius: 1px 1px 0 0;
-  }
-
-  .subnav-search {
-    display: flex;
-    align-items: center;
-    gap: 0.25rem;
-  }
-
-  .subnav-search-input {
-    width: 14rem;
-    padding: 0.375rem 0.625rem;
-    font-size: 0.75rem;
-    border-radius: 0.375rem;
-    border: 1px solid var(--rumi-border);
-    background: var(--rumi-bg-surface-2);
-    color: var(--rumi-text-primary);
-    outline: none;
-    transition: border-color 0.15s;
-  }
-
-  .subnav-search-input::placeholder {
-    color: var(--rumi-text-muted);
-  }
-
-  .subnav-search-input:focus {
-    border-color: var(--rumi-border-hover);
-  }
-
-  .subnav-search-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 1.75rem;
-    height: 1.75rem;
-    border-radius: 0.375rem;
-    border: 1px solid var(--rumi-border);
-    background: var(--rumi-bg-surface-2);
-    color: var(--rumi-text-muted);
-    cursor: pointer;
-    transition: color 0.15s, border-color 0.15s;
-  }
-
-  .subnav-search-btn:hover {
-    color: var(--rumi-text-primary);
-    border-color: var(--rumi-border-hover);
-  }
-
-  @media (max-width: 640px) {
-    .subnav-inner {
-      flex-direction: column;
-      height: auto;
-      padding: 0.5rem 1rem;
-      gap: 0.5rem;
-    }
-
-    .subnav-links {
-      width: 100%;
-      overflow-x: auto;
-      -webkit-overflow-scrolling: touch;
-    }
-
-    .subnav-search {
-      width: 100%;
-    }
-
-    .subnav-search-input {
-      flex: 1;
-      width: auto;
-    }
-
-    .subnav-link.active::after {
-      bottom: -0.5rem;
-    }
-  }
-</style>
+<!-- Content area -->
+<main class="mx-auto max-w-7xl px-4 py-6">
+  {@render children()}
+</main>

@@ -1,122 +1,156 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
   import { page } from '$app/stores';
-  import EntityLink from '$lib/components/explorer/EntityLink.svelte';
-  import TokenBadge from '$lib/components/explorer/TokenBadge.svelte';
-  import { publicActor } from '$lib/services/protocol/apiClient';
-  import {
-    getEventType, getEventBadgeColor, getEventSummary, getEventKey,
-    getEventVaultId, getEventCaller, getEventTimestamp, formatTimestamp,
-    resolveCollateralSymbol
-  } from '$lib/utils/eventFormatters';
-  import { extractEventFields, getEventTypeDescription, type EventField } from '$lib/utils/explorerFormatters';
-  import { truncatePrincipal } from '$lib/utils/principalHelpers';
+  import { onMount } from 'svelte';
+  import EntityLink from '$components/explorer/EntityLink.svelte';
+  import CopyButton from '$components/explorer/CopyButton.svelte';
+  import TimeAgo from '$components/explorer/TimeAgo.svelte';
+  import { fetchEvents } from '$services/explorer/explorerService';
+  import { formatEvent } from '$utils/explorerFormatters';
+  import type { EventField } from '$utils/explorerFormatters';
+  import { formatTimestamp } from '$utils/explorerHelpers';
 
   let event: any = $state(null);
+  let globalIndex: bigint | null = $state(null);
   let loading = $state(true);
+  let error: string | null = $state(null);
 
   const eventIndex = $derived(Number($page.params.index));
-  const key = $derived(event ? getEventKey(event) : '');
-  const type = $derived(event ? getEventType(event) : '');
-  const badgeColor = $derived(event ? getEventBadgeColor(event) : '');
-  const summary = $derived(event ? getEventSummary(event) : '');
-  const vaultId = $derived(event ? getEventVaultId(event) : null);
-  const caller = $derived(event ? getEventCaller(event) : null);
-  const timestamp = $derived(event ? getEventTimestamp(event) : null);
-  const description = $derived(key ? getEventTypeDescription(key) : '');
-  const fields = $derived(event ? extractEventFields(event) : []);
 
-  // Collateral info for context section
-  const collateralInfo = $derived((() => {
-    if (!event) return null;
-    const data = event[key];
-    if (!data) return null;
-    const ct = data.collateral_type ?? data.vault?.collateral_type;
-    if (!ct) return null;
-    const principalId = ct?.toString?.() ?? ct?.toText?.() ?? String(ct);
-    const symbol = resolveCollateralSymbol(ct);
-    return { principalId, symbol };
-  })());
+  const formatted = $derived(event ? formatEvent(event) : null);
 
-  // Relative time for display
-  function relativeTime(nanos: bigint | number): string {
-    const ms = Number(BigInt(nanos) / BigInt(1_000_000));
-    const diff = Date.now() - ms;
-    if (diff < 60_000) return 'just now';
-    if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
-    if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
-    if (diff < 2_592_000_000) return `${Math.floor(diff / 86_400_000)}d ago`;
-    return '';
-  }
+  // Extract unique related entities from fields for the sidebar
+  const relatedEntities = $derived.by(() => {
+    if (!formatted) return { vaults: [] as string[], addresses: [] as string[], tokens: [] as string[] };
+    const vaults = new Set<string>();
+    const addresses = new Set<string>();
+    const tokens = new Set<string>();
+    for (const field of formatted.fields) {
+      if (field.type === 'vault' && field.linkTarget) vaults.add(field.linkTarget);
+      if ((field.type === 'address' || field.type === 'canister') && field.linkTarget) addresses.add(field.linkTarget);
+      if (field.type === 'token' && field.linkTarget) tokens.add(field.linkTarget);
+    }
+    return { vaults: [...vaults], addresses: [...addresses], tokens: [...tokens] };
+  });
+
+  const hasRelated = $derived(
+    relatedEntities.vaults.length > 0 ||
+    relatedEntities.addresses.length > 0 ||
+    relatedEntities.tokens.length > 0
+  );
+
+  // Get raw timestamp from the event for TimeAgo
+  const rawTimestamp = $derived.by(() => {
+    if (!formatted) return null;
+    const tsField = formatted.fields.find(f => f.type === 'timestamp');
+    if (tsField?.linkTarget) return BigInt(tsField.linkTarget);
+    return null;
+  });
 
   onMount(async () => {
     loading = true;
+    error = null;
     try {
-      const events = await publicActor.get_events({
-        start: BigInt(eventIndex),
-        length: BigInt(1)
-      });
-      event = events[0] || null;
+      const results = await fetchEvents(BigInt(eventIndex), BigInt(1));
+      if (results.length > 0) {
+        const [idx, evt] = results[0];
+        globalIndex = idx;
+        event = evt;
+      } else {
+        error = `Event #${eventIndex} not found.`;
+      }
     } catch (e) {
       console.error('Failed to load event:', e);
+      error = 'Failed to load event. Please try again.';
     } finally {
       loading = false;
     }
   });
 </script>
 
-<div class="max-w-[900px] mx-auto px-4 py-8">
+<svelte:head>
+  <title>Event #{eventIndex} | Rumi Explorer</title>
+</svelte:head>
+
+<div class="max-w-[960px] mx-auto px-4 py-8">
+  <!-- Back link -->
   <a href="/explorer/events" class="text-sm text-blue-400 hover:text-blue-300 hover:underline inline-flex items-center gap-1 mb-6">
     &larr; Back to Events
   </a>
 
   {#if loading}
-    <div class="text-center py-16 text-gray-500">Loading event #{eventIndex}...</div>
-  {:else if !event}
-    <div class="text-center py-16 text-gray-500">Event #{eventIndex} not found.</div>
+    <div class="flex flex-col items-center justify-center py-24 gap-3">
+      <div class="w-8 h-8 border-2 border-gray-600 border-t-blue-400 rounded-full animate-spin"></div>
+      <p class="text-gray-500 text-sm">Loading event #{eventIndex}...</p>
+    </div>
+  {:else if error || !formatted}
+    <div class="text-center py-24">
+      <p class="text-gray-400 text-lg mb-2">{error ?? `Event #${eventIndex} not found.`}</p>
+      <a href="/explorer/events" class="text-sm text-blue-400 hover:underline">Return to Events</a>
+    </div>
   {:else}
     <!-- Header -->
     <div class="mb-8">
       <div class="flex items-center gap-3 mb-3 flex-wrap">
-        <span
-          class="inline-block text-sm font-semibold px-4 py-1.5 rounded-full"
-          style="background:{badgeColor}20; color:{badgeColor}; border:1px solid {badgeColor}40;"
-        >
-          {type}
+        <h1 class="text-2xl font-bold text-white">Event #{eventIndex}</h1>
+        <span class="inline-block text-sm font-semibold px-3 py-1 rounded-full {formatted.badgeColor}">
+          {formatted.typeName}
         </span>
-        <span class="text-gray-500 text-sm font-mono">Event #{eventIndex}</span>
       </div>
-      <p class="text-gray-400 text-sm mb-2">{description}</p>
-      {#if timestamp}
-        <p class="text-xs text-gray-500">
-          {formatTimestamp(timestamp)}
-          {#if relativeTime(timestamp)}
-            <span class="text-gray-600 ml-1">({relativeTime(timestamp)})</span>
-          {/if}
+
+      {#if rawTimestamp}
+        <p class="text-sm text-gray-400 mb-2">
+          <TimeAgo timestamp={rawTimestamp} />
+          <span class="text-gray-600 mx-1">&middot;</span>
+          <span class="text-gray-500">{formatTimestamp(rawTimestamp)}</span>
         </p>
       {/if}
+
+      <p class="text-gray-300 text-sm leading-relaxed">{formatted.summary}</p>
     </div>
 
     <!-- Structured Fields -->
     <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl p-5 mb-6">
-      <h3 class="text-sm font-semibold text-gray-300 mb-4">Details</h3>
-      <div class="flex flex-col gap-0">
-        {#each fields as field}
+      <h2 class="text-sm font-semibold text-gray-300 mb-4 uppercase tracking-wider">Details</h2>
+      <div class="flex flex-col">
+        {#each formatted.fields as field}
           <div class="flex justify-between items-baseline gap-4 py-2.5 border-b border-gray-700/30 last:border-b-0">
-            <span class="text-xs text-gray-500 capitalize shrink-0">{field.label}</span>
+            <span class="text-xs text-gray-400 capitalize shrink-0 min-w-[120px]">{field.label}</span>
             <span class="text-sm text-right break-all">
-              {#if field.type === 'vault' && field.linkId !== undefined}
-                <EntityLink type="vault" id={field.linkId} label={field.value} />
-              {:else if field.type === 'address' && field.linkId}
-                <EntityLink type="address" id={String(field.linkId)} />
-              {:else if field.type === 'token' && field.linkId}
-                <TokenBadge symbol={field.value} principalId={String(field.linkId)} size="sm" linked={true} />
+              {#if field.type === 'vault' && field.linkTarget}
+                <EntityLink type="vault" value={field.linkTarget} />
+              {:else if (field.type === 'address' || field.type === 'canister') && field.linkTarget}
+                <span class="inline-flex items-center gap-1.5">
+                  <EntityLink type="address" value={field.linkTarget} />
+                  <CopyButton text={field.linkTarget} />
+                </span>
+              {:else if field.type === 'token' && field.linkTarget}
+                <EntityLink type="token" value={field.linkTarget} />
+              {:else if field.type === 'event' && field.linkTarget}
+                <EntityLink type="event" value={field.linkTarget} />
               {:else if field.type === 'amount'}
                 <span class="text-white font-mono">{field.value}</span>
-              {:else if field.type === 'percentage'}
-                <span class="text-gray-300">{field.value}</span>
+              {:else if field.type === 'usd'}
+                <span class="text-green-400 font-mono">{field.value}</span>
               {:else if field.type === 'timestamp'}
-                <span class="text-gray-400">{field.value}</span>
+                {#if field.linkTarget}
+                  <span class="inline-flex items-center gap-2">
+                    <TimeAgo timestamp={BigInt(field.linkTarget)} />
+                    <span class="text-gray-500 text-xs">({formatTimestamp(BigInt(field.linkTarget))})</span>
+                  </span>
+                {:else}
+                  <span class="text-gray-400">{field.value}</span>
+                {/if}
+              {:else if field.type === 'percentage' || field.type === 'ratio'}
+                <span class="text-gray-300 font-mono">{field.value}</span>
+              {:else if field.type === 'block_index'}
+                <span class="text-gray-300 font-mono">Block #{field.value}</span>
+              {:else if field.type === 'json'}
+                <details class="text-left">
+                  <summary class="cursor-pointer text-xs text-gray-500 hover:text-gray-400 transition-colors">
+                    Expand
+                  </summary>
+                  <pre class="mt-2 text-xs overflow-x-auto bg-gray-900/50 border border-gray-700/30 rounded-lg p-3 text-gray-400 font-mono whitespace-pre-wrap">{field.value}</pre>
+                </details>
               {:else}
                 <span class="text-gray-300">{field.value}</span>
               {/if}
@@ -126,39 +160,60 @@
       </div>
     </div>
 
-    <!-- Context Links -->
-    {#if vaultId !== null || caller || collateralInfo}
+    <!-- Related Entities -->
+    {#if hasRelated}
       <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-5 mb-6">
-        <h3 class="text-sm font-semibold text-gray-300 mb-3">Related</h3>
+        <h2 class="text-sm font-semibold text-gray-300 mb-3 uppercase tracking-wider">Related Entities</h2>
         <div class="flex flex-col gap-2.5">
-          {#if vaultId !== null}
+          {#each relatedEntities.vaults as vaultId}
             <div class="flex items-center gap-2 text-sm">
-              <span class="text-gray-500">Vault:</span>
-              <EntityLink type="vault" id={vaultId} label="View Vault #{vaultId}" />
+              <span class="text-gray-500 min-w-[60px]">Vault</span>
+              <EntityLink type="vault" value={vaultId} />
             </div>
-          {/if}
-          {#if caller}
+          {/each}
+          {#each relatedEntities.addresses as address}
             <div class="flex items-center gap-2 text-sm">
-              <span class="text-gray-500">Address:</span>
-              <EntityLink type="address" id={caller} label="View all activity for {truncatePrincipal(caller)}" />
+              <span class="text-gray-500 min-w-[60px]">Address</span>
+              <EntityLink type="address" value={address} />
+              <CopyButton text={address} />
             </div>
-          {/if}
-          {#if collateralInfo}
+          {/each}
+          {#each relatedEntities.tokens as token}
             <div class="flex items-center gap-2 text-sm">
-              <span class="text-gray-500">Token:</span>
-              <TokenBadge symbol={collateralInfo.symbol} principalId={collateralInfo.principalId} size="sm" linked={true} />
+              <span class="text-gray-500 min-w-[60px]">Token</span>
+              <EntityLink type="token" value={token} />
             </div>
-          {/if}
+          {/each}
         </div>
       </div>
     {/if}
 
-    <!-- Raw Data -->
-    <details class="group">
-      <summary class="cursor-pointer text-xs text-gray-500 hover:text-gray-400 transition-colors py-2">
+    <!-- Raw Event Data -->
+    <details class="group mb-8">
+      <summary class="cursor-pointer text-xs text-gray-500 hover:text-gray-400 transition-colors py-2 select-none">
         Raw Event Data
       </summary>
-      <pre class="mt-2 text-xs overflow-x-auto bg-gray-900/50 border border-gray-700/30 rounded-lg p-4 text-gray-400 font-mono">{JSON.stringify(event, (_, v) => typeof v === 'bigint' ? v.toString() : v, 2)}</pre>
+      <pre class="mt-2 text-xs overflow-x-auto bg-gray-900/50 border border-gray-700/30 rounded-lg p-4 text-gray-400 font-mono whitespace-pre-wrap">{JSON.stringify(event, (_, v) => typeof v === 'bigint' ? v.toString() : v, 2)}</pre>
     </details>
+
+    <!-- Navigation -->
+    <div class="flex items-center justify-between pt-4 border-t border-gray-700/30">
+      {#if eventIndex > 0}
+        <a
+          href="/explorer/event/{eventIndex - 1}"
+          class="text-sm text-blue-400 hover:text-blue-300 hover:underline inline-flex items-center gap-1"
+        >
+          &larr; Previous Event
+        </a>
+      {:else}
+        <span></span>
+      {/if}
+      <a
+        href="/explorer/event/{eventIndex + 1}"
+        class="text-sm text-blue-400 hover:text-blue-300 hover:underline inline-flex items-center gap-1"
+      >
+        Next Event &rarr;
+      </a>
+    </div>
   {/if}
 </div>

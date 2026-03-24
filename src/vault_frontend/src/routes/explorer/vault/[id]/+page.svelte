@@ -1,345 +1,349 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
   import { page } from '$app/stores';
-  import SearchBar from '$lib/components/explorer/SearchBar.svelte';
-  import EntityLink from '$lib/components/explorer/EntityLink.svelte';
-  import TokenBadge from '$lib/components/explorer/TokenBadge.svelte';
-  import VaultHealthBar from '$lib/components/explorer/VaultHealthBar.svelte';
-  import DashboardCard from '$lib/components/explorer/DashboardCard.svelte';
-  import DataTable from '$lib/components/explorer/DataTable.svelte';
-  import { fetchVaultHistory, fetchAllVaults } from '$lib/stores/explorerStore';
-  import { publicActor } from '$lib/services/protocol/apiClient';
-  import { formatAmount, resolveCollateralSymbol, getEventType, getEventBadgeColor, getEventSummary, getEventTimestamp, formatTimestamp } from '$lib/utils/eventFormatters';
+  import { onMount } from 'svelte';
+  import StatCard from '$components/explorer/StatCard.svelte';
+  import EntityLink from '$components/explorer/EntityLink.svelte';
+  import CopyButton from '$components/explorer/CopyButton.svelte';
+  import StatusBadge from '$components/explorer/StatusBadge.svelte';
+  import VaultHealthBar from '$components/explorer/VaultHealthBar.svelte';
+  import EventRow from '$components/explorer/EventRow.svelte';
+  import AmountDisplay from '$components/explorer/AmountDisplay.svelte';
+  import TimeAgo from '$components/explorer/TimeAgo.svelte';
+  import {
+    fetchVault, fetchVaultInterestRate, fetchCollateralConfigs,
+    fetchCollateralPrices, fetchVaultHistory
+  } from '$services/explorer/explorerService';
+  import {
+    formatE8s, formatUsd, formatUsdRaw, formatCR, formatPercent, formatTokenAmount,
+    getTokenSymbol, getTokenDecimals, classifyVaultHealth, healthColor, healthBg
+  } from '$utils/explorerHelpers';
+
+  // ── Route param ────────────────────────────────────────────────────────────
+  const vaultId = $derived(Number($page.params.id));
 
   // ── State ──────────────────────────────────────────────────────────────────
   let vault = $state<any>(null);
+  let interestRate = $state<number | null>(null);
+  let collateralConfigs = $state<any[]>([]);
+  let collateralPrices = $state<[any, number][]>([]);
   let history = $state<any[]>([]);
-  let loading = $state(true);
-  let collateralConfig = $state<any>(null);
 
-  // ── Derived ────────────────────────────────────────────────────────────────
-  const vaultId = $derived(Number($page.params.id));
+  let loadingVault = $state(true);
+  let loadingRate = $state(true);
+  let loadingConfigs = $state(true);
+  let loadingPrices = $state(true);
+  let loadingHistory = $state(true);
+  let vaultError = $state(false);
+  let newestFirst = $state(true);
 
-  const ownerStr = $derived(vault?.owner?.toString?.() ?? '');
-
-  const collateralType = $derived(vault?.collateral_type ?? null);
-
-  const collateralSymbol = $derived(
-    collateralType ? resolveCollateralSymbol(collateralType) : 'tokens'
-  );
-
+  // ── Derived: collateral config for this vault ──────────────────────────────
   const collateralPrincipalStr = $derived(
-    collateralType ? (collateralType?.toString?.() ?? collateralType?.toText?.() ?? String(collateralType)) : ''
+    vault?.collateral_type ? (vault.collateral_type.toString?.() ?? vault.collateral_type.toText?.() ?? String(vault.collateral_type)) : ''
   );
 
-  const decimals = $derived(collateralConfig?.decimals ? Number(collateralConfig.decimals) : 8);
-
-  const price = $derived(collateralConfig?.last_price?.[0] ?? 0);
-
-  const collateralAmount = $derived(vault ? Number(vault.collateral_amount) : 0);
-
-  const collateralHuman = $derived(collateralAmount / Math.pow(10, decimals));
-
-  const collateralValueUsd = $derived(collateralHuman * price);
-
-  const debtRaw = $derived(vault ? Number(vault.borrowed_icusd_amount) : 0);
-  const interestRaw = $derived(vault ? Number(vault.accrued_interest ?? 0n) : 0);
-  const totalDebtRaw = $derived(debtRaw + interestRaw);
-
-  const debtHuman = $derived(debtRaw / 1e8);
-  const interestHuman = $derived(interestRaw / 1e8);
-  const totalDebtHuman = $derived(totalDebtRaw / 1e8);
-
-  // CR in percent
-  const cr = $derived(totalDebtHuman > 0 ? (collateralValueUsd / totalDebtHuman) * 100 : Infinity);
-
-  // Liquidation ratio from config (typically 1.1 = 110%)
-  const liquidationRatioPct = $derived(
-    collateralConfig?.liquidation_threshold
-      ? Number(collateralConfig.liquidation_threshold) * 100
-      : 110
-  );
-
-  // Liquidation price = total debt / collateral * liquidation_ratio
-  const liquidationPrice = $derived(
-    collateralHuman > 0 && totalDebtHuman > 0
-      ? (totalDebtHuman * (liquidationRatioPct / 100)) / collateralHuman
-      : 0
-  );
-
-  // Distance to liquidation as %: (price - liqPrice) / price
-  const distanceToLiqPct = $derived(
-    price > 0 && liquidationPrice > 0
-      ? ((price - liquidationPrice) / price) * 100
-      : null
-  );
-
-  // Vault status
-  const vaultStatus = $derived.by<'Open' | 'Liquidated' | 'Closed'>(() => {
-    if (!vault) return 'Open';
-    const key = vault.status ? Object.keys(vault.status)[0] : null;
-    if (key === 'Closed' || key === 'closed') return 'Closed';
-    if (key === 'Liquidated' || key === 'liquidated') return 'Liquidated';
-    return 'Open';
+  const config = $derived.by(() => {
+    if (!vault || collateralConfigs.length === 0) return null;
+    return collateralConfigs.find((c: any) => {
+      const cPrincipal = c.collateral_type?.toString?.() ?? c.collateral_type?.toText?.() ?? String(c.collateral_type ?? '');
+      return cPrincipal === collateralPrincipalStr;
+    }) ?? null;
   });
 
-  const statusBadgeClass = $derived(
-    vaultStatus === 'Open'
-      ? 'bg-green-500/20 text-green-400 border border-green-500/30'
-      : vaultStatus === 'Liquidated'
-        ? 'bg-red-500/20 text-red-400 border border-red-500/30'
-        : 'bg-gray-500/20 text-gray-400 border border-gray-500/30'
+  const decimals = $derived(
+    collateralPrincipalStr ? getTokenDecimals(collateralPrincipalStr) : 8
   );
 
-  // Quick stats from history
-  const totalBorrowed = $derived(
-    history.reduce((sum: number, item: any) => {
-      const evt = item.event ?? item;
-      const key = Object.keys(evt)[0];
-      if (key === 'borrow_from_vault') {
-        const amt = evt[key]?.borrowed_amount;
-        return sum + (amt ? Number(amt) : 0);
-      }
-      return sum;
-    }, 0)
+  const tokenSymbol = $derived(
+    collateralPrincipalStr ? getTokenSymbol(collateralPrincipalStr) : 'tokens'
   );
 
-  const totalRepaid = $derived(
-    history.reduce((sum: number, item: any) => {
-      const evt = item.event ?? item;
-      const key = Object.keys(evt)[0];
-      if (key === 'repay_to_vault') {
-        const amt = evt[key]?.repayed_amount;
-        return sum + (amt ? Number(amt) : 0);
-      }
-      return sum;
-    }, 0)
-  );
+  // ── Derived: price ─────────────────────────────────────────────────────────
+  const price = $derived.by(() => {
+    if (!vault || collateralPrices.length === 0) return 0;
+    const match = collateralPrices.find(([p]) => {
+      const pStr = p.toString?.() ?? p.toText?.() ?? String(p);
+      return pStr === collateralPrincipalStr;
+    });
+    return match ? match[1] : 0;
+  });
 
-  // Vault collateral map for event summaries
+  // ── Derived: vault amounts ─────────────────────────────────────────────────
+  const ownerStr = $derived(vault?.owner?.toString?.() ?? vault?.owner?.toText?.() ?? '');
+
+  const collateralAmount = $derived(vault ? BigInt(vault.collateral_amount ?? 0) : 0n);
+  const collateralHuman = $derived(Number(collateralAmount) / 10 ** decimals);
+  const collateralValueUsd = $derived(collateralHuman * price);
+
+  const borrowedAmount = $derived(vault ? BigInt(vault.borrowed_icusd_amount ?? 0) : 0n);
+  const accruedInterest = $derived(vault ? BigInt(vault.accrued_interest ?? 0) : 0n);
+  const totalDebt = $derived(borrowedAmount + accruedInterest);
+  const totalDebtHuman = $derived(Number(totalDebt) / 1e8);
+
+  const isActive = $derived(collateralAmount > 0n);
+
+  // ── Derived: collateral ratio (as ratio, e.g. 1.5 = 150%) ─────────────────
+  const cr = $derived(totalDebtHuman > 0 ? collateralValueUsd / totalDebtHuman : Infinity);
+  const crPct = $derived(cr === Infinity ? Infinity : cr * 100);
+
+  // ── Derived: config values ─────────────────────────────────────────────────
+  const minCR = $derived(config?.min_collateral_ratio ? Number(config.min_collateral_ratio) : 1.5);
+  const liquidationRatio = $derived(config?.liquidation_threshold ? Number(config.liquidation_threshold) : 1.1);
+  const liquidationBonus = $derived(config?.liquidation_bonus ? Number(config.liquidation_bonus) : 0.1);
+  const borrowingFee = $derived(config?.borrowing_fee ? Number(config.borrowing_fee) : 0);
+  const debtCeiling = $derived(config?.debt_ceiling ? BigInt(config.debt_ceiling) : null);
+  const minVaultDebt = $derived(config?.min_vault_debt ? BigInt(config.min_vault_debt) : null);
+  const ledgerFee = $derived(config?.transfer_fee ? BigInt(config.transfer_fee) : null);
+
+  // ── Derived: liquidation price ─────────────────────────────────────────────
+  const liquidationPrice = $derived.by(() => {
+    if (collateralHuman <= 0 || totalDebtHuman <= 0) return 0;
+    return (totalDebtHuman * liquidationRatio) / collateralHuman;
+  });
+
+  // ── Derived: health classification ─────────────────────────────────────────
+  const health = $derived(cr !== Infinity ? classifyVaultHealth(cr, liquidationRatio) : 'healthy' as const);
+
+  // ── Derived: vault status ──────────────────────────────────────────────────
+  const vaultStatus = $derived.by(() => {
+    if (!vault) return 'Active';
+    if (collateralAmount === 0n && totalDebt === 0n) return 'Closed';
+    return 'Active';
+  });
+
+  // ── Derived: vault collateral map for EventRow ─────────────────────────────
   const vaultCollateralMap = $derived(
     vault ? new Map([[Number(vault.vault_id), vault.collateral_type]]) : new Map<number, any>()
   );
 
-  // History sorted newest-first (history from API is already in event order; reverse for newest-first)
-  const historySorted = $derived([...history].reverse());
-
-  // DataTable columns
-  const historyColumns = [
-    { key: 'index', label: '#', align: 'right' as const, width: '3rem' },
-    { key: 'time', label: 'Time', align: 'left' as const },
-    { key: 'type', label: 'Type', align: 'left' as const },
-    { key: 'summary', label: 'Summary', align: 'left' as const },
-  ];
+  // ── Derived: sorted history ────────────────────────────────────────────────
+  const sortedHistory = $derived(
+    newestFirst ? [...history].reverse() : [...history]
+  );
 
   // ── Load ───────────────────────────────────────────────────────────────────
   onMount(async () => {
-    loading = true;
-    try {
-      const id = Number($page.params.id);
-      const [allVaults, vaultHistory] = await Promise.all([
-        fetchAllVaults(),
-        fetchVaultHistory(id)
-      ]);
-      vault = allVaults.find((v: any) => Number(v.vault_id) === id) ?? null;
-      history = Array.isArray(vaultHistory) ? vaultHistory : [];
+    const id = BigInt(vaultId);
 
-      if (vault) {
-        const config = await publicActor.get_collateral_config(vault.collateral_type);
-        collateralConfig = config[0] ?? null;
-      }
-    } catch (e) {
-      console.error('Failed to load vault:', e);
-    } finally {
-      loading = false;
-    }
+    const vaultPromise = fetchVault(id).then(v => {
+      vault = v;
+      if (!v) vaultError = true;
+      loadingVault = false;
+    }).catch(() => { vaultError = true; loadingVault = false; });
+
+    const ratePromise = fetchVaultInterestRate(id).then(r => {
+      interestRate = r;
+      loadingRate = false;
+    }).catch(() => { loadingRate = false; });
+
+    const configsPromise = fetchCollateralConfigs().then(c => {
+      collateralConfigs = c;
+      loadingConfigs = false;
+    }).catch(() => { loadingConfigs = false; });
+
+    const pricesPromise = fetchCollateralPrices().then(p => {
+      collateralPrices = p;
+      loadingPrices = false;
+    }).catch(() => { loadingPrices = false; });
+
+    const historyPromise = fetchVaultHistory(id).then(h => {
+      history = Array.isArray(h) ? h : [];
+      loadingHistory = false;
+    }).catch(() => { loadingHistory = false; });
+
+    await Promise.all([vaultPromise, ratePromise, configsPromise, pricesPromise, historyPromise]);
   });
 </script>
 
-<div class="vault-page">
-  <a href="/explorer" class="back-link">← Back to Explorer</a>
+<svelte:head>
+  <title>Vault #{vaultId} | Rumi Explorer</title>
+</svelte:head>
 
-  <div class="search-row"><SearchBar /></div>
+<div class="max-w-5xl mx-auto px-4 py-8 space-y-8">
+  <!-- Back nav -->
+  <a href="/explorer" class="inline-flex items-center gap-1.5 text-sm text-blue-400 hover:text-blue-300 transition-colors">
+    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7" />
+    </svg>
+    Back to Explorer
+  </a>
 
-  {#if loading}
-    <div class="empty">Loading vault #{$page.params.id}…</div>
-  {:else if !vault}
-    <div class="empty">Vault #{$page.params.id} not found.</div>
+  <!-- Loading / Error states -->
+  {#if loadingVault}
+    <div class="text-center py-16 text-gray-400">
+      <div class="inline-block w-6 h-6 border-2 border-gray-500 border-t-blue-400 rounded-full animate-spin mb-3"></div>
+      <p>Loading Vault #{vaultId}...</p>
+    </div>
+  {:else if vaultError || !vault}
+    <div class="text-center py-16">
+      <p class="text-2xl font-bold text-gray-300 mb-2">Vault Not Found</p>
+      <p class="text-gray-500">Vault #{vaultId} does not exist or could not be loaded.</p>
+      <a href="/explorer" class="inline-block mt-4 text-blue-400 hover:underline text-sm">Return to Explorer</a>
+    </div>
   {:else}
-    <!-- ── Header ───────────────────────────────────────────────────────────── -->
-    <div class="vault-header">
-      <div class="vault-title-row">
-        <h1 class="page-title">Vault #{vaultId}</h1>
-        <span class="status-badge {statusBadgeClass}">{vaultStatus}</span>
+    <!-- ── Header ──────────────────────────────────────────────────────── -->
+    <div class="space-y-4">
+      <div class="flex flex-wrap items-center gap-3">
+        <h1 class="text-2xl sm:text-3xl font-bold text-white">Vault #{vaultId}</h1>
+        <StatusBadge status={vaultStatus === 'Closed' ? 'paused' : 'active'} size="md" />
+        <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-gray-800/60 border border-gray-700/50 text-sm">
+          <EntityLink type="token" value={collateralPrincipalStr} label={tokenSymbol} />
+        </span>
       </div>
-      <div class="vault-meta">
-        <div class="meta-item">
-          <span class="meta-label">Owner</span>
-          <EntityLink type="address" id={ownerStr} />
+
+      <div class="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+        <div class="flex items-center gap-2">
+          <span class="text-gray-500">Owner:</span>
+          <EntityLink type="address" value={ownerStr} />
+          <CopyButton text={ownerStr} />
         </div>
-        <div class="meta-item">
-          <span class="meta-label">Collateral Type</span>
-          <TokenBadge symbol={collateralSymbol} principalId={collateralPrincipalStr} size="sm" linked={true} />
+        <div class="flex items-center gap-2">
+          <span class="text-gray-500">Created:</span>
+          {#if vault.creation_timestamp}
+            <TimeAgo timestamp={vault.creation_timestamp} showFull={true} />
+          {:else}
+            <span class="text-gray-400 text-sm">--</span>
+          {/if}
         </div>
       </div>
     </div>
 
-    <!-- ── Health Section ─────────────────────────────────────────────────── -->
-    <section class="section">
-      <h2 class="section-title">Health</h2>
-      <div class="health-bar-wrap glass-card">
-        {#if cr !== Infinity}
-          <VaultHealthBar collateralRatio={cr} liquidationRatio={liquidationRatioPct} />
-        {:else}
-          <span class="text-gray-400 text-sm">No debt — vault is fully collateralised</span>
-        {/if}
+    <!-- ── Stats Cards ─────────────────────────────────────────────────── -->
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+      <StatCard
+        label="Collateral"
+        value="{formatE8s(collateralAmount, decimals)} {tokenSymbol}"
+        subtitle={price > 0 ? formatUsdRaw(collateralValueUsd) : undefined}
+      />
+
+      <StatCard
+        label="Total Debt"
+        value="{formatE8s(totalDebt, 8)} icUSD"
+        subtitle={accruedInterest > 0n ? `incl. ${formatE8s(accruedInterest, 8)} interest` : undefined}
+      />
+
+      <StatCard
+        label="Collateral Ratio"
+        value={crPct === Infinity ? '--' : `${crPct.toFixed(1)}%`}
+        subtitle={`Liq. at ${(liquidationRatio * 100).toFixed(0)}%`}
+      />
+
+      {#if !loadingRate}
+        <StatCard
+          label="Interest Rate"
+          value={interestRate !== null ? formatPercent(interestRate) : '--'}
+          subtitle="APR"
+        />
+      {:else}
+        <StatCard label="Interest Rate" value="..." subtitle="Loading" />
+      {/if}
+
+      <StatCard
+        label="Liquidation Price"
+        value={liquidationPrice > 0 ? formatUsdRaw(liquidationPrice) : '--'}
+        subtitle={liquidationPrice > 0 && price > 0
+          ? `Current: ${formatUsdRaw(price)}`
+          : undefined}
+        trend={liquidationPrice > 0 && price > 0 && price < liquidationPrice * 1.2 ? 'down' : undefined}
+      />
+    </div>
+
+    <!-- ── Health Bar ──────────────────────────────────────────────────── -->
+    <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl p-5 space-y-2">
+      <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide">Vault Health</h2>
+      {#if crPct !== Infinity && crPct > 0}
+        <VaultHealthBar collateralRatio={crPct} liquidationRatio={liquidationRatio * 100} />
+      {:else}
+        <p class="text-gray-500 text-sm">No debt -- vault is fully collateralized.</p>
+      {/if}
+    </div>
+
+    <!-- ── Collateral Configuration ────────────────────────────────────── -->
+    <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl overflow-hidden">
+      <div class="px-5 py-4 border-b border-gray-700/50">
+        <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide">Collateral Configuration</h2>
       </div>
-
-      <div class="stats-grid">
-        <DashboardCard
-          label="Collateral"
-          value="{formatAmount(BigInt(collateralAmount), decimals)} {collateralSymbol}"
-          subtitle={collateralValueUsd > 0 ? `≈ $${collateralValueUsd.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : undefined}
-        />
-        <DashboardCard
-          label="Debt (icUSD)"
-          value={formatAmount(BigInt(debtRaw))}
-          subtitle={interestHuman > 0 ? `+ ${formatAmount(BigInt(interestRaw))} accrued interest` : undefined}
-        />
-        <DashboardCard
-          label="Collateral Ratio"
-          value={cr === Infinity ? '∞' : `${cr.toFixed(1)}%`}
-          subtitle={`Liquidation at ${liquidationRatioPct.toFixed(0)}%`}
-        />
-        {#if liquidationPrice > 0}
-          <DashboardCard
-            label="Liquidation Price"
-            value={`$${liquidationPrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`}
-            subtitle={distanceToLiqPct !== null
-              ? distanceToLiqPct >= 0
-                ? `${distanceToLiqPct.toFixed(1)}% above current price`
-                : `${Math.abs(distanceToLiqPct).toFixed(1)}% below current price`
-              : undefined}
-            trend={distanceToLiqPct !== null && distanceToLiqPct < 20 ? 'down' : 'neutral'}
-          />
-        {/if}
-      </div>
-    </section>
-
-    <!-- ── Quick Stats ─────────────────────────────────────────────────────── -->
-    {#if history.length > 0}
-      <section class="section">
-        <h2 class="section-title">Lifetime Stats</h2>
-        <div class="stats-grid stats-grid--3">
-          <DashboardCard label="Total Borrowed" value="{formatAmount(BigInt(totalBorrowed))} icUSD" />
-          <DashboardCard label="Total Repaid" value="{formatAmount(BigInt(totalRepaid))} icUSD" />
-          <DashboardCard label="Operations" value={String(history.length)} />
-        </div>
-      </section>
-    {/if}
-
-    <!-- ── Vault History ───────────────────────────────────────────────────── -->
-    <section class="section">
-      <h2 class="section-title">Event History ({history.length})</h2>
-      <div class="glass-card overflow-hidden">
-        <DataTable
-          columns={historyColumns}
-          rows={historySorted}
-          emptyMessage="No events found for this vault."
-          loading={false}
-        >
-          {#snippet row(item: any, i: number)}
-            {@const evt = item.event ?? item}
-            {@const evtKey = Object.keys(evt)[0]}
-            {@const ts = getEventTimestamp(evt)}
-            {@const badgeColor = getEventBadgeColor(evt)}
-            {@const summary = getEventSummary(evt, vaultCollateralMap)}
-            {@const globalIdx = item.globalIndex ?? null}
-            <tr class="history-row">
-              <td class="px-4 py-3 text-right text-gray-500 text-xs font-mono">
-                {#if globalIdx !== null}
-                  <a href="/explorer/event/{globalIdx}" class="hover:text-blue-400 transition-colors">#{globalIdx}</a>
-                {:else}
-                  {i + 1}
-                {/if}
-              </td>
-              <td class="px-4 py-3 text-gray-400 text-xs whitespace-nowrap">
-                {ts ? formatTimestamp(ts) : '—'}
-              </td>
-              <td class="px-4 py-3">
-                <span
-                  class="event-badge"
-                  style="background:{badgeColor}20; color:{badgeColor}; border:1px solid {badgeColor}40;"
-                >
-                  {getEventType(evt)}
-                </span>
-              </td>
-              <td class="px-4 py-3 text-gray-300 text-sm">
-                {summary}
+      {#if loadingConfigs}
+        <div class="px-5 py-8 text-center text-gray-500">Loading configuration...</div>
+      {:else if config}
+        <table class="w-full text-sm">
+          <tbody>
+            <tr class="border-b border-gray-700/30">
+              <td class="px-5 py-3 text-gray-400">Min Collateral Ratio</td>
+              <td class="px-5 py-3 text-white font-mono text-right">{(minCR * 100).toFixed(0)}%</td>
+            </tr>
+            <tr class="border-b border-gray-700/30">
+              <td class="px-5 py-3 text-gray-400">Liquidation Ratio</td>
+              <td class="px-5 py-3 text-white font-mono text-right">{(liquidationRatio * 100).toFixed(0)}%</td>
+            </tr>
+            <tr class="border-b border-gray-700/30">
+              <td class="px-5 py-3 text-gray-400">Liquidation Bonus</td>
+              <td class="px-5 py-3 text-white font-mono text-right">{formatPercent(liquidationBonus)}</td>
+            </tr>
+            <tr class="border-b border-gray-700/30">
+              <td class="px-5 py-3 text-gray-400">Borrowing Fee</td>
+              <td class="px-5 py-3 text-white font-mono text-right">{formatPercent(borrowingFee)}</td>
+            </tr>
+            <tr class="border-b border-gray-700/30">
+              <td class="px-5 py-3 text-gray-400">Interest Rate APR</td>
+              <td class="px-5 py-3 text-white font-mono text-right">
+                {interestRate !== null ? formatPercent(interestRate) : '--'}
               </td>
             </tr>
-          {/snippet}
-        </DataTable>
+            {#if debtCeiling !== null}
+              <tr class="border-b border-gray-700/30">
+                <td class="px-5 py-3 text-gray-400">Debt Ceiling</td>
+                <td class="px-5 py-3 text-white font-mono text-right">{formatE8s(debtCeiling, 8)} icUSD</td>
+              </tr>
+            {/if}
+            {#if minVaultDebt !== null}
+              <tr class="border-b border-gray-700/30">
+                <td class="px-5 py-3 text-gray-400">Min Vault Debt</td>
+                <td class="px-5 py-3 text-white font-mono text-right">{formatE8s(minVaultDebt, 8)} icUSD</td>
+              </tr>
+            {/if}
+            {#if ledgerFee !== null}
+              <tr>
+                <td class="px-5 py-3 text-gray-400">Ledger Fee</td>
+                <td class="px-5 py-3 text-white font-mono text-right">{formatE8s(ledgerFee, decimals)} {tokenSymbol}</td>
+              </tr>
+            {/if}
+          </tbody>
+        </table>
+      {:else}
+        <div class="px-5 py-8 text-center text-gray-500">Configuration not available.</div>
+      {/if}
+    </div>
+
+    <!-- ── Vault History ───────────────────────────────────────────────── -->
+    <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl overflow-hidden">
+      <div class="px-5 py-4 border-b border-gray-700/50 flex items-center justify-between">
+        <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide">
+          Event History ({history.length})
+        </h2>
+        {#if history.length > 1}
+          <button
+            onclick={() => newestFirst = !newestFirst}
+            class="text-xs text-gray-400 hover:text-gray-200 transition-colors px-2 py-1 rounded border border-gray-700/50 hover:border-gray-600"
+          >
+            {newestFirst ? 'Oldest first' : 'Newest first'}
+          </button>
+        {/if}
       </div>
-    </section>
+      {#if loadingHistory}
+        <div class="px-5 py-8 text-center text-gray-500">Loading history...</div>
+      {:else if sortedHistory.length === 0}
+        <div class="px-5 py-8 text-center text-gray-500">No events found for this vault.</div>
+      {:else}
+        <div class="divide-y divide-gray-700/30">
+          {#each sortedHistory as evt, i}
+            <EventRow
+              event={evt.event ?? evt}
+              index={evt.globalIndex ?? null}
+              vaultCollateralMap={vaultCollateralMap}
+            />
+          {/each}
+        </div>
+      {/if}
+    </div>
   {/if}
 </div>
-
-<style>
-  .vault-page { max-width: 960px; margin: 0 auto; padding: 2rem 1rem; }
-
-  .back-link {
-    color: var(--rumi-purple-accent);
-    text-decoration: none;
-    font-size: 0.875rem;
-    display: inline-block;
-    margin-bottom: 1rem;
-  }
-  .back-link:hover { text-decoration: underline; }
-
-  .search-row { margin-bottom: 1.5rem; display: flex; justify-content: center; }
-
-  /* Header */
-  .vault-header { margin-bottom: 2rem; }
-  .vault-title-row { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem; }
-  .page-title { font-size: 1.75rem; font-weight: 700; color: var(--rumi-text-primary); margin: 0; }
-  .status-badge {
-    font-size: 0.75rem;
-    font-weight: 500;
-    padding: 0.25rem 0.625rem;
-    border-radius: 9999px;
-  }
-  .vault-meta { display: flex; align-items: center; gap: 1.5rem; flex-wrap: wrap; }
-  .meta-item { display: flex; align-items: center; gap: 0.5rem; }
-  .meta-label { font-size: 0.75rem; color: var(--rumi-text-muted); }
-
-  /* Sections */
-  .section { margin-bottom: 2rem; }
-  .section-title { font-size: 1rem; font-weight: 600; color: var(--rumi-text-secondary); margin-bottom: 0.75rem; }
-
-  .health-bar-wrap { padding: 1rem 1.25rem; margin-bottom: 1rem; }
-
-  .stats-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 1rem;
-  }
-  .stats-grid--3 {
-    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  }
-
-  /* History table rows */
-  .history-row { border-bottom: 1px solid rgba(255,255,255,0.05); }
-  .history-row:last-child { border-bottom: none; }
-  .history-row:hover { background: var(--rumi-bg-surface-2, rgba(255,255,255,0.03)); }
-
-  .event-badge {
-    font-size: 0.7rem;
-    font-weight: 500;
-    padding: 0.125rem 0.5rem;
-    border-radius: 9999px;
-    white-space: nowrap;
-  }
-
-  .empty { text-align: center; padding: 3rem; color: var(--rumi-text-muted); }
-</style>

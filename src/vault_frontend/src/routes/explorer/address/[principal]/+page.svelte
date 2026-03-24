@@ -1,428 +1,343 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
   import { page } from '$app/stores';
+  import { onMount } from 'svelte';
   import { Principal } from '@dfinity/principal';
-  import SearchBar from '$lib/components/explorer/SearchBar.svelte';
-  import EntityLink from '$lib/components/explorer/EntityLink.svelte';
-  import TokenBadge from '$lib/components/explorer/TokenBadge.svelte';
-  import VaultHealthBar from '$lib/components/explorer/VaultHealthBar.svelte';
-  import DashboardCard from '$lib/components/explorer/DashboardCard.svelte';
-  import DataTable from '$lib/components/explorer/DataTable.svelte';
-  import { fetchVaultsByOwner, fetchEventsByPrincipal } from '$lib/stores/explorerStore';
-  import { publicActor } from '$lib/services/protocol/apiClient';
-  import { copyToClipboard } from '$lib/utils/principalHelpers';
-  import { formatAmount, resolveCollateralSymbol, getEventType, getEventBadgeColor, getEventSummary, getEventTimestamp, formatTimestamp } from '$lib/utils/eventFormatters';
-  import { stabilityPoolService } from '$lib/services/stabilityPoolService';
-  import { threePoolService } from '$lib/services/threePoolService';
-  import { toastStore } from '$lib/stores/toast';
+  import StatCard from '$components/explorer/StatCard.svelte';
+  import EntityLink from '$components/explorer/EntityLink.svelte';
+  import CopyButton from '$components/explorer/CopyButton.svelte';
+  import StatusBadge from '$components/explorer/StatusBadge.svelte';
+  import EventRow from '$components/explorer/EventRow.svelte';
+  import VaultHealthBar from '$components/explorer/VaultHealthBar.svelte';
+  import {
+    fetchVaultsByOwner, fetchVault, fetchEventsByPrincipal,
+    fetchCollateralConfigs, fetchCollateralPrices
+  } from '$services/explorer/explorerService';
+  import {
+    formatE8s, formatUsdRaw, formatCR, getTokenSymbol, getCanisterName,
+    isKnownCanister, classifyVaultHealth, healthColor, shortenPrincipal
+  } from '$utils/explorerHelpers';
+  import { getEventCategory, EVENT_CATEGORIES } from '$utils/explorerFormatters';
+  import type { EventCategory } from '$utils/explorerFormatters';
 
-  // ── State ──────────────────────────────────────────────────────────────────
-  let vaults = $state<any[]>([]);
-  let allHistory = $state<any[]>([]);
+  // ── State ────────────────────────────────────────────────────────────
   let loading = $state(true);
-  let collateralConfigs = $state<Map<string, any>>(new Map());
-  let copied = $state(false);
-  let spPosition = $state<any>(null);
-  let lpBalance = $state<bigint>(0n);
-  let poolStatus = $state<any>(null);
+  let error: string | null = $state(null);
+  let vaults: any[] = $state([]);
+  let events: [bigint, any][] = $state([]);
+  let configMap = $state(new Map<string, any>());
+  let priceMap = $state(new Map<string, number>());
+  let selectedCategory: EventCategory | 'all' = $state('all');
 
-  // ── Derived ────────────────────────────────────────────────────────────────
+  // ── Derived ──────────────────────────────────────────────────────────
   const principalStr = $derived($page.params.principal);
 
-  const totalCollateralByType = $derived.by(() => {
-    const map = new Map<string, number>();
-    for (const v of vaults) {
-      const ct = v.collateral_type?.toString?.() ?? '';
-      const cfg = collateralConfigs.get(ct);
-      const dec = cfg?.decimals ? Number(cfg.decimals) : 8;
-      const human = Number(v.collateral_amount) / Math.pow(10, dec);
-      map.set(ct, (map.get(ct) ?? 0) + human);
-    }
-    return map;
-  });
+  const knownCanister = $derived(isKnownCanister(principalStr));
+  const canisterName = $derived(getCanisterName(principalStr));
 
-  const totalDebtHuman = $derived(
-    vaults.reduce((sum, v) => sum + Number(v.borrowed_icusd_amount) / 1e8, 0)
+  const activeVaults = $derived(
+    vaults.filter((v) => {
+      if (!v.status) return true;
+      const key = Object.keys(v.status)[0];
+      return key !== 'Closed' && key !== 'closed' && key !== 'Liquidated' && key !== 'liquidated';
+    })
   );
 
-  const openVaults = $derived(vaults.filter((v) => {
-    if (!v.status) return true;
-    const key = Object.keys(v.status)[0];
-    return key !== 'Closed' && key !== 'closed' && key !== 'Liquidated' && key !== 'liquidated';
-  }));
-
-  // DataTable columns for vaults
-  const vaultColumns = [
-    { key: 'id', label: 'Vault', align: 'left' as const },
-    { key: 'collateral', label: 'Collateral Type', align: 'left' as const },
-    { key: 'amount', label: 'Collateral Amount', align: 'right' as const },
-    { key: 'debt', label: 'Debt (icUSD)', align: 'right' as const },
-    { key: 'cr', label: 'CR', align: 'left' as const, width: '12rem' },
-    { key: 'status', label: 'Status', align: 'center' as const },
-  ];
-
-  // DataTable columns for activity
-  const activityColumns = [
-    { key: 'index', label: '#', align: 'right' as const, width: '3rem' },
-    { key: 'time', label: 'Time', align: 'left' as const },
-    { key: 'type', label: 'Type', align: 'left' as const },
-    { key: 'summary', label: 'Summary', align: 'left' as const },
-  ];
-
-  // History sorted newest-first
-  const historySorted = $derived([...allHistory].sort((a, b) => (b.globalIndex ?? 0) - (a.globalIndex ?? 0)));
-
-  // ── Helpers ────────────────────────────────────────────────────────────────
-  function getVaultCr(vault: any): number {
-    const ct = vault.collateral_type?.toString?.() ?? '';
-    const cfg = collateralConfigs.get(ct);
-    const dec = cfg?.decimals ? Number(cfg.decimals) : 8;
-    const price = cfg?.last_price?.[0] ?? 0;
-    const collValue = (Number(vault.collateral_amount) / Math.pow(10, dec)) * price;
-    const debt = (Number(vault.borrowed_icusd_amount) + Number(vault.accrued_interest ?? 0n)) / 1e8;
-    return debt > 0 ? (collValue / debt) * 100 : Infinity;
+  // Compute CR, collateral USD, and debt for each vault
+  function vaultCollateralUsd(vault: any): number {
+    const ct = vault.collateral_type?.toText?.() ?? vault.collateral_type?.toString?.() ?? '';
+    const cfg = configMap.get(ct);
+    const decimals = cfg?.decimals ? Number(cfg.decimals) : 8;
+    const price = priceMap.get(ct) ?? 0;
+    return (Number(vault.collateral_amount) / 10 ** decimals) * price;
   }
 
-  function getVaultLiqRatio(vault: any): number {
-    const ct = vault.collateral_type?.toString?.() ?? '';
-    const cfg = collateralConfigs.get(ct);
+  function vaultDebt(vault: any): number {
+    return (Number(vault.borrowed_icusd_amount) + Number(vault.accrued_interest ?? 0n)) / 1e8;
+  }
+
+  function vaultCR(vault: any): number {
+    const debt = vaultDebt(vault);
+    if (debt <= 0) return Infinity;
+    return vaultCollateralUsd(vault) / debt;
+  }
+
+  function vaultLiqRatio(vault: any): number {
+    const ct = vault.collateral_type?.toText?.() ?? vault.collateral_type?.toString?.() ?? '';
+    const cfg = configMap.get(ct);
     return cfg?.liquidation_threshold ? Number(cfg.liquidation_threshold) * 100 : 110;
   }
 
-  function getVaultStatus(vault: any): 'Open' | 'Closed' | 'Liquidated' {
-    if (!vault.status) return 'Open';
+  function vaultStatus(vault: any): string {
+    if (!vault.status) return 'Active';
     const key = Object.keys(vault.status)[0];
     if (key === 'Closed' || key === 'closed') return 'Closed';
     if (key === 'Liquidated' || key === 'liquidated') return 'Liquidated';
-    return 'Open';
+    return 'Active';
   }
 
-  async function handleCopy() {
-    const ok = await copyToClipboard(principalStr);
-    if (ok) { copied = true; setTimeout(() => (copied = false), 2000); }
+  function vaultCollateralSymbol(vault: any): string {
+    const ct = vault.collateral_type?.toText?.() ?? vault.collateral_type?.toString?.() ?? '';
+    return getTokenSymbol(ct);
   }
 
-  // ── Load ───────────────────────────────────────────────────────────────────
+  function vaultCollateralDecimals(vault: any): number {
+    const ct = vault.collateral_type?.toText?.() ?? vault.collateral_type?.toString?.() ?? '';
+    const cfg = configMap.get(ct);
+    return cfg?.decimals ? Number(cfg.decimals) : 8;
+  }
+
+  // Totals
+  const totalCollateralUsd = $derived(vaults.reduce((sum, v) => sum + vaultCollateralUsd(v), 0));
+  const totalDebt = $derived(vaults.reduce((sum, v) => sum + vaultDebt(v), 0));
+  const weightedCR = $derived(totalDebt > 0 ? totalCollateralUsd / totalDebt : 0);
+
+  // Event filtering
+  const tabs: { key: EventCategory | 'all'; label: string }[] = [
+    { key: 'all', label: 'All' },
+    ...EVENT_CATEGORIES.map((c) => ({ key: c.key, label: c.label }))
+  ];
+
+  const sortedEvents = $derived(
+    [...events].sort(([a], [b]) => Number(b) - Number(a))
+  );
+
+  const filteredEvents = $derived(
+    selectedCategory === 'all'
+      ? sortedEvents
+      : sortedEvents.filter(([_, event]) => getEventCategory(event) === selectedCategory)
+  );
+
+  // ── Load ─────────────────────────────────────────────────────────────
   onMount(async () => {
     loading = true;
-    try {
-      const principal = Principal.fromText($page.params.principal);
+    error = null;
 
-      const [ownerVaults, events] = await Promise.all([
+    let principal: Principal;
+    try {
+      principal = Principal.fromText($page.params.principal);
+    } catch {
+      error = `Invalid principal: "${$page.params.principal}"`;
+      loading = false;
+      return;
+    }
+
+    try {
+      // Fetch vaults IDs, events, configs, and prices in parallel
+      const [vaultIds, eventsResult, configs, prices] = await Promise.all([
         fetchVaultsByOwner(principal),
-        fetchEventsByPrincipal($page.params.principal),
+        fetchEventsByPrincipal(principal),
+        fetchCollateralConfigs(),
+        fetchCollateralPrices()
       ]);
 
-      vaults = ownerVaults;
-      allHistory = events;
+      events = eventsResult;
 
-      // Fetch collateral configs for all vault collateral types
-      const types = [...new Set(ownerVaults.map((v: any) => v.collateral_type?.toString?.() ?? ''))].filter(Boolean);
-      const cfgMap = new Map<string, any>();
-      await Promise.all(
-        types.map(async (ct: string) => {
-          try {
-            const config = await publicActor.get_collateral_config(Principal.fromText(ct));
-            if (config[0]) cfgMap.set(ct, config[0]);
-          } catch {}
-        })
+      // Build config map keyed by principal text
+      const cMap = new Map<string, any>();
+      for (const cfg of configs) {
+        const key = cfg.ledger_id?.toText?.() ?? cfg.ledger_id?.toString?.() ?? '';
+        if (key) cMap.set(key, cfg);
+      }
+      configMap = cMap;
+
+      // Build price map keyed by principal text
+      const pMap = new Map<string, number>();
+      for (const [p, price] of prices) {
+        const key = typeof p === 'string' ? p : p?.toText?.() ?? p?.toString?.() ?? '';
+        if (key) pMap.set(key, Number(price));
+      }
+      priceMap = pMap;
+
+      // Fetch full vault data for each vault ID
+      const vaultResults = await Promise.all(
+        vaultIds.map((id: bigint) => fetchVault(id))
       );
-      collateralConfigs = cfgMap;
-
-      // Stability Pool position
-      try {
-        spPosition = await stabilityPoolService.getUserPosition(principal);
-      } catch (e) {
-        console.error('Failed to fetch SP position:', e);
-      }
-
-      // 3Pool LP balance
-      try {
-        lpBalance = await threePoolService.getLpBalance(principal);
-        if (lpBalance > 0n) {
-          poolStatus = await threePoolService.getPoolStatus();
-        }
-      } catch (e) {
-        console.error('Failed to fetch 3pool position:', e);
-      }
+      vaults = vaultResults.filter((v: any) => v !== null);
     } catch (e) {
-      console.error('Failed to load address:', e);
-      toastStore.error('Invalid principal or failed to load data');
+      console.error('[address page] Failed to load data:', e);
+      error = 'Failed to load address data. Please try again.';
     } finally {
       loading = false;
     }
   });
 </script>
 
-<div class="address-page">
-  <a href="/explorer" class="back-link">← Back to Explorer</a>
+<svelte:head>
+  <title>{principalStr ? shortenPrincipal(principalStr) : 'Address'} | Rumi Explorer</title>
+</svelte:head>
 
-  <div class="search-row"><SearchBar /></div>
+<div class="max-w-[1100px] mx-auto px-4 py-8">
 
+  <!-- Loading -->
   {#if loading}
-    <div class="empty">Loading address…</div>
+    <div class="flex items-center justify-center py-20">
+      <div class="flex flex-col items-center gap-3">
+        <div class="w-8 h-8 border-2 border-gray-600 border-t-blue-400 rounded-full animate-spin"></div>
+        <span class="text-sm text-gray-500">Loading address...</span>
+      </div>
+    </div>
+
+  <!-- Error -->
+  {:else if error}
+    <div class="text-center py-16">
+      <p class="text-red-400 text-sm mb-4">{error}</p>
+      <a href="/explorer" class="text-blue-400 hover:underline text-sm">Back to Explorer</a>
+    </div>
+
   {:else}
-    <!-- ── Header ─────────────────────────────────────────────────────────── -->
-    <div class="addr-header">
-      <h1 class="page-title">Address</h1>
-      <div class="principal-row">
-        <code class="principal-full">{principalStr}</code>
-        <button class="copy-btn" onclick={handleCopy}>{copied ? 'Copied!' : 'Copy'}</button>
+    <!-- ── Header ──────────────────────────────────────────────────────── -->
+    <div class="mb-8">
+      <div class="flex items-center gap-3 mb-3">
+        <h1 class="text-2xl font-bold text-white">
+          {#if knownCanister}
+            {canisterName}
+          {:else}
+            Address
+          {/if}
+        </h1>
+        {#if knownCanister}
+          <StatusBadge status="Canister" />
+        {:else}
+          <span class="text-xs text-gray-500 bg-gray-800/50 border border-gray-700/50 rounded-full px-2.5 py-0.5">
+            User Account
+          </span>
+        {/if}
+      </div>
+      <div class="flex items-center gap-2">
+        <code class="text-sm text-gray-300 font-mono bg-gray-800/50 border border-gray-700/50 rounded-lg px-3 py-2 break-all">
+          {principalStr}
+        </code>
+        <CopyButton text={principalStr} />
       </div>
     </div>
 
-    <!-- ── Summary Stats ─────────────────────────────────────────────────── -->
-    <div class="stats-grid">
-      <DashboardCard label="Total Vaults" value={String(vaults.length)} subtitle={openVaults.length > 0 ? `${openVaults.length} open` : undefined} />
-      <DashboardCard label="Total Debt" value="{totalDebtHuman.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} icUSD" />
-      {#if spPosition && Number(spPosition.total_usd_value_e8s ?? 0n) > 0}
-        <DashboardCard label="SP Deposit" value="{formatAmount(spPosition.total_usd_value_e8s ?? 0n)} icUSD" />
-      {/if}
-      {#if lpBalance > 0n}
-        <DashboardCard label="3Pool LP Balance" value="{formatAmount(lpBalance)} 3USD" />
-      {/if}
+    <!-- ── Summary Cards ───────────────────────────────────────────────── -->
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+      <StatCard
+        label="Total Vaults"
+        value={String(vaults.length)}
+        subtitle="{activeVaults.length} active / {vaults.length} total"
+      />
+      <StatCard
+        label="Total Collateral Value"
+        value={formatUsdRaw(totalCollateralUsd)}
+      />
+      <StatCard
+        label="Total Debt"
+        value="{formatE8s(BigInt(Math.round(totalDebt * 1e8)))} icUSD"
+      />
+      <StatCard
+        label="Weighted Avg CR"
+        value={totalDebt > 0 ? formatCR(weightedCR) : 'N/A'}
+        subtitle={totalDebt > 0 ? 'collateral / debt' : 'No debt'}
+      />
     </div>
 
-    <!-- ── Vaults Section ─────────────────────────────────────────────────── -->
-    <section class="section">
-      <h2 class="section-title">Vaults ({vaults.length})</h2>
-      <div class="glass-card overflow-hidden">
-        <DataTable
-          columns={vaultColumns}
-          rows={vaults}
-          emptyMessage="No vaults found for this address."
-          loading={false}
-        >
-          {#snippet row(vault: any, _i: number)}
-            {@const ct = vault.collateral_type?.toString?.() ?? ''}
-            {@const cfg = collateralConfigs.get(ct)}
-            {@const dec = cfg?.decimals ? Number(cfg.decimals) : 8}
-            {@const symbol = resolveCollateralSymbol(ct)}
-            {@const vaultCr = getVaultCr(vault)}
-            {@const liqRatio = getVaultLiqRatio(vault)}
-            {@const status = getVaultStatus(vault)}
-            {@const statusClass = status === 'Open'
-              ? 'bg-green-500/20 text-green-400 border border-green-500/30'
-              : status === 'Liquidated'
-                ? 'bg-red-500/20 text-red-400 border border-red-500/30'
-                : 'bg-gray-500/20 text-gray-400 border border-gray-500/30'}
-            <tr class="vault-row">
-              <td class="px-4 py-3">
-                <EntityLink type="vault" id={Number(vault.vault_id)} />
-              </td>
-              <td class="px-4 py-3">
-                <TokenBadge symbol={symbol} principalId={ct} size="sm" linked={true} />
-              </td>
-              <td class="px-4 py-3 text-right text-gray-200 text-sm font-mono">
-                {formatAmount(vault.collateral_amount, dec)} {symbol}
-              </td>
-              <td class="px-4 py-3 text-right text-gray-200 text-sm font-mono">
-                {formatAmount(vault.borrowed_icusd_amount)} icUSD
-              </td>
-              <td class="px-4 py-3" style="min-width: 11rem;">
-                {#if vaultCr === Infinity}
-                  <span class="text-gray-400 text-xs">No debt</span>
-                {:else}
-                  <VaultHealthBar collateralRatio={vaultCr} liquidationRatio={liqRatio} />
-                {/if}
-              </td>
-              <td class="px-4 py-3 text-center">
-                <span class="status-badge {statusClass}">{status}</span>
-              </td>
-            </tr>
-          {/snippet}
-        </DataTable>
-      </div>
+    <!-- ── Vaults Section ──────────────────────────────────────────────── -->
+    <section class="mb-10">
+      <h2 class="text-lg font-semibold text-white mb-4">Vaults ({vaults.length})</h2>
+
+      {#if vaults.length === 0}
+        <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-12 text-center">
+          <p class="text-gray-500 text-sm">No vaults found for this address</p>
+        </div>
+      {:else}
+        <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl overflow-hidden">
+          <div class="overflow-x-auto">
+            <table class="w-full">
+              <thead>
+                <tr class="border-b border-gray-700/50 text-left">
+                  <th class="px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Vault</th>
+                  <th class="px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Collateral</th>
+                  <th class="px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider text-right">Amount</th>
+                  <th class="px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider text-right">Debt (icUSD)</th>
+                  <th class="px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider" style="min-width: 12rem;">CR</th>
+                  <th class="px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider text-center">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each vaults as vault (vault.vault_id)}
+                  {@const cr = vaultCR(vault)}
+                  {@const liqRatio = vaultLiqRatio(vault)}
+                  {@const status = vaultStatus(vault)}
+                  <tr
+                    class="border-b border-gray-700/30 last:border-b-0 hover:bg-gray-700/20 transition-colors cursor-pointer"
+                    onclick={() => { window.location.href = `/explorer/vault/${vault.vault_id}`; }}
+                  >
+                    <td class="px-4 py-3">
+                      <EntityLink type="vault" value={String(vault.vault_id)} />
+                    </td>
+                    <td class="px-4 py-3">
+                      <EntityLink
+                        type="token"
+                        value={vault.collateral_type?.toText?.() ?? vault.collateral_type?.toString?.() ?? ''}
+                        label={vaultCollateralSymbol(vault)}
+                      />
+                    </td>
+                    <td class="px-4 py-3 text-right text-gray-200 text-sm font-mono">
+                      {formatE8s(vault.collateral_amount, vaultCollateralDecimals(vault))}
+                      <span class="text-gray-500 ml-1">{vaultCollateralSymbol(vault)}</span>
+                    </td>
+                    <td class="px-4 py-3 text-right text-gray-200 text-sm font-mono">
+                      {formatE8s(BigInt(Number(vault.borrowed_icusd_amount) + Number(vault.accrued_interest ?? 0n)))}
+                    </td>
+                    <td class="px-4 py-3" style="min-width: 12rem;">
+                      {#if cr === Infinity}
+                        <span class="text-gray-500 text-xs">No debt</span>
+                      {:else}
+                        <VaultHealthBar collateralRatio={cr * 100} liquidationRatio={liqRatio} />
+                      {/if}
+                    </td>
+                    <td class="px-4 py-3 text-center">
+                      <StatusBadge
+                        status={status === 'Active' ? 'Active'
+                          : status === 'Liquidated' ? 'Liquidated'
+                          : 'Closed'}
+                      />
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      {/if}
     </section>
 
-    <!-- ── Positions Section ─────────────────────────────────────────────── -->
-    {#if (spPosition && Number(spPosition.total_usd_value_e8s ?? 0n) > 0) || lpBalance > 0n}
-      <section class="section">
-        <h2 class="section-title">Positions</h2>
-        <div class="positions-grid">
-          {#if spPosition && Number(spPosition.total_usd_value_e8s ?? 0n) > 0}
-            <div class="glass-card position-card">
-              <h3 class="position-title">Stability Pool</h3>
-              <div class="position-row">
-                <span class="position-label">Deposited</span>
-                <span class="position-value">{formatAmount(spPosition.total_usd_value_e8s ?? 0n)} icUSD</span>
-              </div>
-              {#if spPosition.collateral_gains?.length > 0}
-                {#each spPosition.collateral_gains as [ledger, amount]}
-                  {#if Number(amount) > 0}
-                    <div class="position-row">
-                      <span class="position-label">Collateral Gain</span>
-                      <span class="position-value">
-                        {formatAmount(amount)}
-                        <TokenBadge symbol={resolveCollateralSymbol(ledger)} principalId={ledger?.toString?.() ?? ''} size="sm" linked={true} />
-                      </span>
-                    </div>
-                  {/if}
-                {/each}
-              {/if}
-            </div>
-          {/if}
+    <!-- ── Activity Feed ───────────────────────────────────────────────── -->
+    <section>
+      <h2 class="text-lg font-semibold text-white mb-4">Activity ({events.length} events)</h2>
 
-          {#if lpBalance > 0n}
-            <div class="glass-card position-card">
-              <h3 class="position-title">3Pool</h3>
-              <div class="position-row">
-                <span class="position-label">LP Balance</span>
-                <span class="position-value">{formatAmount(lpBalance)} 3USD</span>
-              </div>
-              {#if poolStatus}
-                {@const share = poolStatus.lp_total_supply > 0n
-                  ? Number(lpBalance) / Number(poolStatus.lp_total_supply)
-                  : 0}
-                <div class="position-row">
-                  <span class="position-label">Pool Share</span>
-                  <span class="position-value">{(share * 100).toFixed(4)}%</span>
-                </div>
-              {/if}
-            </div>
-          {/if}
-        </div>
-      </section>
-    {/if}
-
-    <!-- ── Activity History ───────────────────────────────────────────────── -->
-    <section class="section">
-      <h2 class="section-title">Activity ({allHistory.length} events)</h2>
-      <div class="glass-card overflow-hidden">
-        <DataTable
-          columns={activityColumns}
-          rows={historySorted}
-          emptyMessage="No events found for this address."
-          loading={false}
-        >
-          {#snippet row(item: any, _i: number)}
-            {@const evt = item.event ?? item}
-            {@const ts = getEventTimestamp(evt)}
-            {@const badgeColor = getEventBadgeColor(evt)}
-            {@const summary = getEventSummary(evt)}
-            {@const globalIdx = item.globalIndex ?? null}
-            <tr class="history-row">
-              <td class="px-4 py-3 text-right text-gray-500 text-xs font-mono">
-                {#if globalIdx !== null}
-                  <a href="/explorer/event/{globalIdx}" class="hover:text-blue-400 transition-colors">#{globalIdx}</a>
-                {:else}
-                  —
-                {/if}
-              </td>
-              <td class="px-4 py-3 text-gray-400 text-xs whitespace-nowrap">
-                {ts ? formatTimestamp(ts) : '—'}
-              </td>
-              <td class="px-4 py-3">
-                <span
-                  class="event-badge"
-                  style="background:{badgeColor}20; color:{badgeColor}; border:1px solid {badgeColor}40;"
-                >
-                  {getEventType(evt)}
-                </span>
-              </td>
-              <td class="px-4 py-3 text-gray-300 text-sm">
-                {summary}
-                {#if item.vaultId !== undefined}
-                  <EntityLink type="vault" id={item.vaultId} />
-                {/if}
-              </td>
-            </tr>
-          {/snippet}
-        </DataTable>
+      <!-- Category filter tabs -->
+      <div class="flex gap-0 border-b border-gray-700/50 mb-4 overflow-x-auto">
+        {#each tabs as tab}
+          <button
+            class="px-4 py-2.5 text-sm font-medium whitespace-nowrap transition-colors
+              {selectedCategory === tab.key
+              ? 'text-blue-400 border-b-2 border-blue-400'
+              : 'text-gray-400 border-b-2 border-transparent hover:text-gray-300 hover:border-gray-600'}"
+            onclick={() => (selectedCategory = tab.key)}
+          >
+            {tab.label}
+          </button>
+        {/each}
       </div>
+
+      {#if filteredEvents.length === 0}
+        <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-12 text-center">
+          <p class="text-gray-500 text-sm">
+            {selectedCategory === 'all'
+              ? 'No activity found'
+              : `No ${tabs.find((t) => t.key === selectedCategory)?.label ?? ''} events found`}
+          </p>
+        </div>
+      {:else}
+        <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl overflow-hidden">
+          {#each filteredEvents as [globalIndex, event] (globalIndex)}
+            <EventRow {event} index={Number(globalIndex)} />
+          {/each}
+        </div>
+      {/if}
     </section>
   {/if}
 </div>
-
-<style>
-  .address-page { max-width: 960px; margin: 0 auto; padding: 2rem 1rem; }
-
-  .back-link {
-    color: var(--rumi-purple-accent);
-    text-decoration: none;
-    font-size: 0.875rem;
-    display: inline-block;
-    margin-bottom: 1rem;
-  }
-  .back-link:hover { text-decoration: underline; }
-
-  .search-row { margin-bottom: 1.5rem; display: flex; justify-content: center; }
-
-  /* Header */
-  .addr-header { margin-bottom: 1.5rem; }
-  .page-title { font-size: 1.75rem; font-weight: 700; color: var(--rumi-text-primary); margin: 0 0 0.75rem; }
-
-  .principal-row { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
-  .principal-full {
-    font-size: 0.8125rem;
-    color: var(--rumi-text-secondary);
-    word-break: break-all;
-    background: var(--rumi-bg-surface-2);
-    padding: 0.5rem 0.75rem;
-    border-radius: 0.375rem;
-    font-family: monospace;
-  }
-  .copy-btn {
-    padding: 0.375rem 0.75rem;
-    font-size: 0.75rem;
-    border: 1px solid var(--rumi-border);
-    border-radius: 0.375rem;
-    background: transparent;
-    color: var(--rumi-text-secondary);
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .copy-btn:hover { border-color: var(--rumi-border-hover); }
-
-  /* Stats */
-  .stats-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-    gap: 1rem;
-    margin-bottom: 2rem;
-  }
-
-  /* Sections */
-  .section { margin-bottom: 2rem; }
-  .section-title { font-size: 1rem; font-weight: 600; color: var(--rumi-text-secondary); margin-bottom: 0.75rem; }
-
-  /* Vault table rows */
-  .vault-row { border-bottom: 1px solid rgba(255,255,255,0.05); }
-  .vault-row:last-child { border-bottom: none; }
-  .vault-row:hover { background: var(--rumi-bg-surface-2, rgba(255,255,255,0.03)); }
-
-  .status-badge {
-    font-size: 0.7rem;
-    font-weight: 500;
-    padding: 0.2rem 0.5rem;
-    border-radius: 9999px;
-  }
-
-  /* Positions */
-  .positions-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-    gap: 1rem;
-  }
-  .position-card { padding: 1rem 1.25rem; }
-  .position-title { font-size: 0.875rem; font-weight: 600; color: var(--rumi-text-secondary); margin: 0 0 0.75rem; }
-  .position-row { display: flex; justify-content: space-between; align-items: center; padding: 0.375rem 0; border-top: 1px solid rgba(255,255,255,0.05); }
-  .position-row:first-of-type { border-top: none; }
-  .position-label { font-size: 0.8125rem; color: var(--rumi-text-muted); }
-  .position-value { font-size: 0.875rem; font-weight: 500; display: flex; align-items: center; gap: 0.375rem; }
-
-  /* History rows */
-  .history-row { border-bottom: 1px solid rgba(255,255,255,0.05); }
-  .history-row:last-child { border-bottom: none; }
-  .history-row:hover { background: var(--rumi-bg-surface-2, rgba(255,255,255,0.03)); }
-
-  .event-badge {
-    font-size: 0.7rem;
-    font-weight: 500;
-    padding: 0.125rem 0.5rem;
-    border-radius: 9999px;
-    white-space: nowrap;
-  }
-
-  .empty { text-align: center; padding: 3rem; color: var(--rumi-text-muted); }
-</style>

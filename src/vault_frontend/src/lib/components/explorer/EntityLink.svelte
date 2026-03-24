@@ -1,34 +1,68 @@
 <script lang="ts">
-  import { truncatePrincipal } from '$lib/utils/principalHelpers';
-
-  type EntityType = 'vault' | 'address' | 'token' | 'canister' | 'event';
+  import { shortenPrincipal, getCanisterName, getTokenSymbol, isKnownCanister } from '$utils/explorerHelpers';
 
   interface Props {
-    type: EntityType;
-    id: string | number;
+    type: 'vault' | 'address' | 'token' | 'event' | 'canister' | 'block_index';
+    value: string;
     label?: string;
+    short?: boolean;
   }
 
-  let { type, id, label }: Props = $props();
+  let { type, value, label, short = true }: Props = $props();
 
-  const routes: Record<EntityType, string> = {
-    vault: '/explorer/vault/',
-    address: '/explorer/address/',
-    token: '/explorer/token/',
-    canister: '/explorer/canister/',
-    event: '/explorer/event/',
+  const icons: Record<string, string> = {
+    vault: '🏦',
+    address: '👤',
+    canister: '📦',
+    token: '🪙',
+    event: '📋',
+    block_index: '🔗',
   };
 
-  const href = `${routes[type]}${id}`;
+  const icon = $derived(icons[type] ?? '');
 
-  const displayLabel = $derived(
-    label ??
-    (type === 'address' || type === 'canister' || type === 'token'
-      ? truncatePrincipal(String(id))
-      : String(id))
-  );
+  const href = $derived.by(() => {
+    switch (type) {
+      case 'vault': return `/explorer/vault/${value}`;
+      case 'address': return `/explorer/address/${value}`;
+      case 'token': return `/explorer/token/${value}`;
+      case 'event': return `/explorer/event/${value}`;
+      case 'canister': return `/explorer/address/${value}`;
+      case 'block_index': return null;
+    }
+  });
+
+  const addressIcon = $derived(isKnownCanister(value) ? '📦' : '👤');
+
+  const displayIcon = $derived(type === 'address' ? addressIcon : icon);
+
+  const displayText = $derived.by(() => {
+    if (label) return label;
+    switch (type) {
+      case 'vault': return `Vault #${value}`;
+      case 'address': {
+        const name = getCanisterName(value);
+        if (name) return name;
+        return short ? shortenPrincipal(value) : value;
+      }
+      case 'token': return getTokenSymbol(value) ?? (short ? shortenPrincipal(value) : value);
+      case 'event': return `Event #${value}`;
+      case 'canister': {
+        const name = getCanisterName(value);
+        if (name) return name;
+        return short ? shortenPrincipal(value) : value;
+      }
+      case 'block_index': return `#${value}`;
+    }
+  });
 </script>
 
-<a {href} class="text-blue-400 hover:text-blue-300 hover:underline font-mono text-sm transition-colors">
-  {displayLabel}
-</a>
+{#if href}
+  <a {href} class="inline-flex items-center gap-1 text-blue-400 hover:underline font-mono text-sm" title={value}>
+    <span>{displayIcon}</span><span>{displayText}</span>
+  </a>
+{:else}
+  <span class="inline-flex items-center gap-1 text-gray-300 font-mono text-sm" title={value}>
+    <span>{displayIcon}</span><span>{displayText}</span>
+  </span>
+{/if}
