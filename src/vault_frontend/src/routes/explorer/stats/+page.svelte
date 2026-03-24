@@ -16,7 +16,7 @@
   let loading = $state(true);
   let protocolStatus: any = $state(null);
   let collateralTotals: any[] = $state([]);
-  let collateralPrices: [any, number][] = $state([]);
+  let collateralPrices: Map<string, number> = $state(new Map());
   let collateralConfigs: any[] = $state([]);
   let allVaults: any[] = $state([]);
   let allSnapshots: any[] = $state([]);
@@ -223,7 +223,7 @@
       ]);
       protocolStatus = status;
       collateralTotals = totals ?? [];
-      collateralPrices = prices ?? [];
+      collateralPrices = prices ?? new Map();
       collateralConfigs = configs ?? [];
       allVaults = vaults ?? [];
       allSnapshots = snapshots ?? [];

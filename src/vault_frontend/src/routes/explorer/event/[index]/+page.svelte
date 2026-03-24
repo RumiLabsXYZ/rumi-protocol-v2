@@ -4,7 +4,7 @@
   import EntityLink from '$components/explorer/EntityLink.svelte';
   import CopyButton from '$components/explorer/CopyButton.svelte';
   import TimeAgo from '$components/explorer/TimeAgo.svelte';
-  import { fetchEvents } from '$services/explorer/explorerService';
+  import { publicActor } from '$lib/services/protocol/apiClient';
   import { formatEvent } from '$utils/explorerFormatters';
   import type { EventField } from '$utils/explorerFormatters';
   import { formatTimestamp } from '$utils/explorerHelpers';
@@ -50,11 +50,10 @@
     loading = true;
     error = null;
     try {
-      const results = await fetchEvents(BigInt(eventIndex), BigInt(1));
+      const results = await publicActor.get_events({ start: BigInt(eventIndex), length: 1n });
       if (results.length > 0) {
-        const [idx, evt] = results[0];
-        globalIndex = idx;
-        event = evt;
+        globalIndex = BigInt(eventIndex);
+        event = results[0];
       } else {
         error = `Event #${eventIndex} not found.`;
       }

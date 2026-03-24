@@ -9,7 +9,7 @@
   import EventRow from '$components/explorer/EventRow.svelte';
   import VaultHealthBar from '$components/explorer/VaultHealthBar.svelte';
   import {
-    fetchVaultsByOwner, fetchVault, fetchEventsByPrincipal,
+    fetchVaultsByOwner, fetchEventsByPrincipal,
     fetchCollateralConfigs, fetchCollateralPrices
   } from '$services/explorer/explorerService';
   import {
@@ -122,8 +122,8 @@
     }
 
     try {
-      // Fetch vaults IDs, events, configs, and prices in parallel
-      const [vaultIds, eventsResult, configs, prices] = await Promise.all([
+      // Fetch vaults, events, configs, and prices in parallel
+      const [vaultResults, eventsResult, configs, prices] = await Promise.all([
         fetchVaultsByOwner(principal),
         fetchEventsByPrincipal(principal),
         fetchCollateralConfigs(),
@@ -131,6 +131,7 @@
       ]);
 
       events = eventsResult;
+      vaults = vaultResults;
 
       // Build config map keyed by principal text
       const cMap = new Map<string, any>();
@@ -140,19 +141,8 @@
       }
       configMap = cMap;
 
-      // Build price map keyed by principal text
-      const pMap = new Map<string, number>();
-      for (const [p, price] of prices) {
-        const key = typeof p === 'string' ? p : p?.toText?.() ?? p?.toString?.() ?? '';
-        if (key) pMap.set(key, Number(price));
-      }
-      priceMap = pMap;
-
-      // Fetch full vault data for each vault ID
-      const vaultResults = await Promise.all(
-        vaultIds.map((id: bigint) => fetchVault(id))
-      );
-      vaults = vaultResults.filter((v: any) => v !== null);
+      // prices is already Map<string, number>
+      priceMap = prices;
     } catch (e) {
       console.error('[address page] Failed to load data:', e);
       error = 'Failed to load address data. Please try again.';

@@ -1,7 +1,6 @@
 <script lang="ts">
   import { page } from '$app/stores';
   import { onMount } from 'svelte';
-  import { Principal } from '@dfinity/principal';
   import StatCard from '$components/explorer/StatCard.svelte';
   import EntityLink from '$components/explorer/EntityLink.svelte';
   import CopyButton from '$components/explorer/CopyButton.svelte';
@@ -10,11 +9,11 @@
   import TokenBadge from '$components/explorer/TokenBadge.svelte';
   import {
     fetchCollateralConfigs, fetchAllVaults, fetchCollateralPrices,
-    fetchCollateralTotals, fetchEvents, fetchEventCount
+    fetchCollateralTotals, fetchEvents
   } from '$services/explorer/explorerService';
   import {
-    formatE8s, formatUsdRaw, formatCR, formatPercent, formatTokenAmount,
-    getTokenSymbol, getTokenDecimals, shortenPrincipal
+    formatE8s, formatUsdRaw, formatCR, formatPercent,
+    getTokenSymbol, getTokenDecimals
   } from '$utils/explorerHelpers';
   import { decodeRustDecimal } from '$utils/decimalUtils';
 
@@ -23,7 +22,7 @@
   let error = $state<string | null>(null);
   let rawConfig = $state<any>(null);
   let allVaults = $state<any[]>([]);
-  let prices = $state<[Principal, number][]>([]);
+  let prices = $state<Map<string, number>>(new Map());
   let totals = $state<any[]>([]);
   let events = $state<[bigint, any][]>([]);
 
@@ -59,9 +58,9 @@
 
   // ── Derived: current price ─────────────────────────────────────────────
   const currentPrice = $derived.by(() => {
-    // Try from prices array first
-    const match = prices.find(([p]) => p.toText() === tokenId);
-    if (match) return Number(match[1]);
+    // Try from prices map first
+    const price = prices.get(tokenId);
+    if (price !== undefined) return price;
     // Fallback to config's last_price
     if (rawConfig?.last_price?.length > 0) return Number(rawConfig.last_price[0]);
     return 0;
@@ -184,12 +183,11 @@
     loading = true;
     error = null;
     try {
-      const [configs, vaults, priceData, totalData, eventCount] = await Promise.all([
+      const [configs, vaults, priceData, totalData] = await Promise.all([
         fetchCollateralConfigs(),
         fetchAllVaults(),
         fetchCollateralPrices(),
         fetchCollateralTotals(),
-        fetchEventCount(),
       ]);
 
       // Find matching config
@@ -210,10 +208,9 @@
       totals = totalData;
 
       // Fetch recent events (last 100) for client-side filtering
-      const count = Number(eventCount);
-      const start = count > 100 ? BigInt(count - 100) : 0n;
-      const length = count > 100 ? 100n : BigInt(count);
-      events = await fetchEvents(start, length);
+      // fetchEvents(page, pageSize) is 0-indexed and returns { total, events }
+      const result = await fetchEvents(0n, 100n);
+      events = result.events;
     } catch (e: any) {
       console.error('Failed to load token page:', e);
       error = 'Failed to load token data. Please try again.';

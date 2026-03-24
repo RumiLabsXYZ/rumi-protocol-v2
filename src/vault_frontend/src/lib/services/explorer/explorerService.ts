@@ -79,18 +79,11 @@ export async function fetchProtocolStatus(): Promise<any | null> {
 
 // ── Protocol mode ────────────────────────────────────────────────────────────
 
-export async function fetchProtocolMode(): Promise<any | null> {
-	const key = 'status:mode';
-	const cached = getCached<any>(key, TTL.STATUS);
-	if (cached) return cached;
-
-	try {
-		const result = await publicActor.get_protocol_mode();
-		return setCache(key, result);
-	} catch (err) {
-		console.error('[explorerService] fetchProtocolMode failed:', err);
-		return null;
-	}
+/** Protocol mode is derived from protocol status (status.mode). */
+export async function fetchProtocolMode(): Promise<string> {
+	const status = await fetchProtocolStatus();
+	if (!status?.mode) return 'Unknown';
+	return Object.keys(status.mode)[0] ?? 'Unknown';
 }
 
 // ── Collateral ───────────────────────────────────────────────────────────────
@@ -135,17 +128,27 @@ export async function fetchCollateralTotals(): Promise<any[]> {
 	}
 }
 
-export async function fetchCollateralPrices(): Promise<[Principal, number][]> {
+/**
+ * Derive collateral prices from collateral configs (each has `last_price`).
+ * Returns a Map of principal string → price number.
+ */
+export async function fetchCollateralPrices(): Promise<Map<string, number>> {
 	const key = 'collateral:prices';
-	const cached = getCached<[Principal, number][]>(key, TTL.COLLATERAL);
+	const cached = getCached<Map<string, number>>(key, TTL.COLLATERAL);
 	if (cached) return cached;
 
 	try {
-		const result = await publicActor.get_latest_collateral_prices();
-		return setCache(key, result);
+		const configs = await fetchCollateralConfigs();
+		const priceMap = new Map<string, number>();
+		for (const cfg of configs) {
+			const pid = cfg.ledger_canister_id?.toText?.() ?? cfg.collateral_type?.toText?.() ?? '';
+			const price = cfg.last_price?.[0] ?? cfg.last_price ?? 0;
+			if (pid) priceMap.set(pid, Number(price));
+		}
+		return setCache(key, priceMap);
 	} catch (err) {
 		console.error('[explorerService] fetchCollateralPrices failed:', err);
-		return [];
+		return new Map();
 	}
 }
 
@@ -165,17 +168,17 @@ export async function fetchAllVaults(): Promise<any[]> {
 	}
 }
 
-export async function fetchVault(vaultId: bigint): Promise<any | null> {
-	const key = `vaults:${vaultId}`;
+/** Fetch a single vault by ID. Uses get_all_vaults and filters. */
+export async function fetchVault(vaultId: bigint | number): Promise<any | null> {
+	const id = Number(vaultId);
+	const key = `vaults:single:${id}`;
 	const cached = getCached<any>(key, TTL.VAULTS);
 	if (cached) return cached;
 
 	try {
-		const result = await publicActor.get_vault(vaultId);
-		if ('Ok' in result) {
-			return setCache(key, result.Ok);
-		}
-		console.warn('[explorerService] fetchVault error result:', result.Err);
+		const allVaults = await fetchAllVaults();
+		const vault = allVaults.find((v: any) => Number(v.vault_id) === id);
+		if (vault) return setCache(key, vault);
 		return null;
 	} catch (err) {
 		console.error('[explorerService] fetchVault failed:', err);
@@ -200,13 +203,14 @@ export async function fetchVaultInterestRate(vaultId: bigint): Promise<number | 
 	}
 }
 
-export async function fetchVaultsByOwner(principal: Principal): Promise<bigint[]> {
+/** Fetch all vaults owned by a principal using get_vaults(Some(principal)). */
+export async function fetchVaultsByOwner(principal: Principal): Promise<any[]> {
 	const key = `vaults:owner:${principal.toText()}`;
-	const cached = getCached<bigint[]>(key, TTL.VAULTS);
+	const cached = getCached<any[]>(key, TTL.VAULTS);
 	if (cached) return cached;
 
 	try {
-		const result = await publicActor.get_vaults_by_principal(principal);
+		const result = await publicActor.get_vaults([principal]);
 		return setCache(key, result);
 	} catch (err) {
 		console.error('[explorerService] fetchVaultsByOwner failed:', err);
@@ -246,32 +250,31 @@ export async function fetchEventCount(): Promise<bigint> {
 
 /**
  * Fetch events with their global indices using the filtered endpoint.
- * Returns tuples of [global_index, Event].
- * Pass an empty event_types array to get all events except AccrueInterest.
+ * Returns { total, events: Array<[bigint, Event]> }.
+ *
+ * get_events_filtered takes {start, length} where:
+ *   - start = page number (0-indexed)
+ *   - length = page size
+ * It excludes AccrueInterest events automatically.
  */
 export async function fetchEvents(
-	start: bigint,
-	length: bigint,
-	eventTypes: string[] = []
-): Promise<[bigint, any][]> {
-	const key = `events:filtered:${start}:${length}:${eventTypes.join(',')}`;
-	const cached = getCached<[bigint, any][]>(key, TTL.EVENTS);
+	page: bigint,
+	pageSize: bigint
+): Promise<{ total: bigint; events: [bigint, any][] }> {
+	const key = `events:filtered:${page}:${pageSize}`;
+	const cached = getCached<{ total: bigint; events: [bigint, any][] }>(key, TTL.EVENTS);
 	if (cached) return cached;
 
 	try {
 		const result = await publicActor.get_events_filtered({
-			start,
-			length,
-			event_types: eventTypes
+			start: page,
+			length: pageSize
 		});
-		if ('Ok' in result) {
-			return setCache(key, result.Ok);
-		}
-		console.warn('[explorerService] fetchEvents error result:', result);
-		return [];
+		const data = { total: result.total, events: result.events ?? [] };
+		return setCache(key, data);
 	} catch (err) {
 		console.error('[explorerService] fetchEvents failed:', err);
-		return [];
+		return { total: 0n, events: [] };
 	}
 }
 
@@ -291,44 +294,21 @@ export async function fetchEventsByPrincipal(principal: Principal): Promise<[big
 
 // ── Liquidations ─────────────────────────────────────────────────────────────
 
-export async function fetchLiquidationRecords(start: bigint, length: bigint): Promise<any[]> {
-	const key = `liquidations:records:${start}:${length}`;
+// Note: get_liquidation_records / get_liquidation_record_count don't exist in the backend.
+// Liquidation events are accessed via the event log (fetchEvents) filtered by event type,
+// and via the stability pool's getLiquidationHistory.
+
+/** Fetch vaults that are currently liquidatable. */
+export async function fetchLiquidatableVaults(): Promise<any[]> {
+	const key = 'liquidations:liquidatable';
 	const cached = getCached<any[]>(key, TTL.LIQUIDATIONS);
 	if (cached) return cached;
 
 	try {
-		const result = await publicActor.get_liquidation_records(start, length);
+		const result = await publicActor.get_liquidatable_vaults();
 		return setCache(key, result);
 	} catch (err) {
-		console.error('[explorerService] fetchLiquidationRecords failed:', err);
-		return [];
-	}
-}
-
-export async function fetchLiquidationCount(): Promise<bigint> {
-	const key = 'liquidations:count';
-	const cached = getCached<bigint>(key, TTL.LIQUIDATIONS);
-	if (cached !== null) return cached;
-
-	try {
-		const result = await publicActor.get_liquidation_record_count();
-		return setCache(key, result);
-	} catch (err) {
-		console.error('[explorerService] fetchLiquidationCount failed:', err);
-		return 0n;
-	}
-}
-
-export async function fetchPendingLiquidations(): Promise<any[]> {
-	const key = 'liquidations:pending';
-	const cached = getCached<any[]>(key, TTL.LIQUIDATIONS);
-	if (cached) return cached;
-
-	try {
-		const result = await publicActor.get_pending_liquidations();
-		return setCache(key, result);
-	} catch (err) {
-		console.error('[explorerService] fetchPendingLiquidations failed:', err);
+		console.error('[explorerService] fetchLiquidatableVaults failed:', err);
 		return [];
 	}
 }
@@ -385,7 +365,7 @@ export async function fetchSnapshotCount(): Promise<bigint> {
 	if (cached !== null) return cached;
 
 	try {
-		const result = await publicActor.get_protocol_snapshot_count();
+		const result = await publicActor.get_snapshot_count();
 		return setCache(key, result);
 	} catch (err) {
 		console.error('[explorerService] fetchSnapshotCount failed:', err);
@@ -399,7 +379,7 @@ export async function fetchSnapshots(start: bigint, length: bigint): Promise<any
 	if (cached) return cached;
 
 	try {
-		const result = await publicActor.get_protocol_snapshots(start, length);
+		const result = await publicActor.get_protocol_snapshots({ start, length });
 		return setCache(key, result);
 	} catch (err) {
 		console.error('[explorerService] fetchSnapshots failed:', err);

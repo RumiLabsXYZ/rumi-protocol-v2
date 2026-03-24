@@ -25,7 +25,7 @@
   let vault = $state<any>(null);
   let interestRate = $state<number | null>(null);
   let collateralConfigs = $state<any[]>([]);
-  let collateralPrices = $state<[any, number][]>([]);
+  let collateralPrices = $state<Map<string, number>>(new Map());
   let history = $state<any[]>([]);
 
   let loadingVault = $state(true);
@@ -59,12 +59,8 @@
 
   // ── Derived: price ─────────────────────────────────────────────────────────
   const price = $derived.by(() => {
-    if (!vault || collateralPrices.length === 0) return 0;
-    const match = collateralPrices.find(([p]) => {
-      const pStr = p.toString?.() ?? p.toText?.() ?? String(p);
-      return pStr === collateralPrincipalStr;
-    });
-    return match ? match[1] : 0;
+    if (!vault || collateralPrices.size === 0) return 0;
+    return collateralPrices.get(collateralPrincipalStr) ?? 0;
   });
 
   // ── Derived: vault amounts ─────────────────────────────────────────────────

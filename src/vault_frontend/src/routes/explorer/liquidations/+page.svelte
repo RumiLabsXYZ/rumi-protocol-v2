@@ -6,29 +6,32 @@
 	import TimeAgo from '$components/explorer/TimeAgo.svelte';
 	import StatusBadge from '$components/explorer/StatusBadge.svelte';
 	import {
-		fetchLiquidationRecords,
-		fetchLiquidationCount,
-		fetchPendingLiquidations,
+		fetchEvents,
+		fetchLiquidatableVaults,
 		fetchBotStats,
 		fetchStabilityPoolLiquidations
 	} from '$services/explorer/explorerService';
 	import { formatE8s, formatUsdRaw, getTokenSymbol } from '$utils/explorerHelpers';
+	import { getEventCategory, formatEvent } from '$utils/explorerFormatters';
+	import type { FormattedEvent } from '$utils/explorerFormatters';
 
 	// ── Constants ──────────────────────────────────────────────────────────
-	const PAGE_SIZE = 50;
+	const EVENTS_PAGE_SIZE = 200n; // Fetch larger pages since we filter client-side
+	const DISPLAY_PAGE_SIZE = 50;
 
 	// ── State ──────────────────────────────────────────────────────────────
-	// Liquidation records (paginated)
-	let totalCount: number = $state(0);
-	let records: any[] = $state([]);
+	// Liquidation events (from event log, filtered client-side)
+	let liquidationEvents: { id: bigint; event: any; formatted: FormattedEvent }[] = $state([]);
+	let displayedEvents: { id: bigint; event: any; formatted: FormattedEvent }[] = $state([]);
+	let totalLiquidationCount: number = $state(0);
 	let currentPage: number = $state(0);
 	let recordsLoading: boolean = $state(true);
 	let recordsError: string | null = $state(null);
 
-	// Pending liquidations
-	let pending: any[] = $state([]);
-	let pendingLoading: boolean = $state(true);
-	let pendingError: string | null = $state(null);
+	// Liquidatable vaults
+	let liquidatable: any[] = $state([]);
+	let liquidatableLoading: boolean = $state(true);
+	let liquidatableError: string | null = $state(null);
 
 	// Bot stats
 	let botStats: any | null = $state(null);
@@ -41,7 +44,7 @@
 	let spError: string | null = $state(null);
 
 	// ── Derived ────────────────────────────────────────────────────────────
-	const totalPages = $derived(Math.ceil(totalCount / PAGE_SIZE));
+	const totalPages = $derived(Math.ceil(totalLiquidationCount / DISPLAY_PAGE_SIZE));
 
 	const botBudgetRemaining = $derived(
 		botStats ? formatE8s(botStats.budget_remaining_e8s) + ' ICP' : '--'
@@ -52,60 +55,84 @@
 	);
 
 	// ── Data Loading ───────────────────────────────────────────────────────
-	async function loadRecordsPage(page: number) {
+	async function loadLiquidationEvents() {
 		recordsLoading = true;
 		recordsError = null;
 		try {
-			// Fetch newest first: calculate start from end
-			const start = BigInt(Math.max(0, totalCount - (page + 1) * PAGE_SIZE));
-			const length = BigInt(
-				page === totalPages - 1
-					? totalCount - (totalPages - 1) * PAGE_SIZE
-					: Math.min(PAGE_SIZE, totalCount)
-			);
-			const result = await fetchLiquidationRecords(start, length);
-			// Reverse so newest appear first
-			records = [...result].reverse();
-			currentPage = page;
+			// Fetch multiple pages of events and filter for liquidation category
+			const allLiquidationEvents: { id: bigint; event: any; formatted: FormattedEvent }[] = [];
+			let page = 0n;
+			let hasMore = true;
+
+			// Scan through event pages to find liquidation events
+			// We fetch up to a few pages to get a reasonable amount of liquidation history
+			const MAX_PAGES_TO_SCAN = 10;
+			let pagesScanned = 0;
+
+			while (hasMore && pagesScanned < MAX_PAGES_TO_SCAN) {
+				const result = await fetchEvents(page, EVENTS_PAGE_SIZE);
+				if (result.events.length === 0) {
+					hasMore = false;
+					break;
+				}
+
+				for (const [id, event] of result.events) {
+					if (getEventCategory(event) === 'liquidation') {
+						allLiquidationEvents.push({
+							id,
+							event,
+							formatted: formatEvent(event)
+						});
+					}
+				}
+
+				// Check if we've reached the end
+				if (result.events.length < Number(EVENTS_PAGE_SIZE)) {
+					hasMore = false;
+				}
+				page += 1n;
+				pagesScanned++;
+			}
+
+			// Sort by event ID descending (newest first)
+			allLiquidationEvents.sort((a, b) => (b.id > a.id ? 1 : b.id < a.id ? -1 : 0));
+
+			liquidationEvents = allLiquidationEvents;
+			totalLiquidationCount = allLiquidationEvents.length;
+			updateDisplayedEvents(0);
 		} catch (e) {
-			recordsError = 'Failed to load liquidation records.';
-			console.error('[liquidations] loadRecordsPage error:', e);
+			recordsError = 'Failed to load liquidation events.';
+			console.error('[liquidations] loadLiquidationEvents error:', e);
 		} finally {
 			recordsLoading = false;
 		}
 	}
 
+	function updateDisplayedEvents(page: number) {
+		const start = page * DISPLAY_PAGE_SIZE;
+		const end = start + DISPLAY_PAGE_SIZE;
+		displayedEvents = liquidationEvents.slice(start, end);
+		currentPage = page;
+	}
+
 	function handlePageChange(page: number) {
-		loadRecordsPage(page);
+		updateDisplayedEvents(page);
 	}
 
 	onMount(async () => {
 		// Load all sections in parallel
-		const countPromise = fetchLiquidationCount()
-			.then(async (count) => {
-				totalCount = Number(count);
-				if (totalCount > 0) {
-					await loadRecordsPage(0);
-				} else {
-					recordsLoading = false;
-				}
-			})
-			.catch((e) => {
-				recordsError = 'Failed to load liquidation count.';
-				recordsLoading = false;
-				console.error('[liquidations] count error:', e);
-			});
+		const eventsPromise = loadLiquidationEvents();
 
-		const pendingPromise = fetchPendingLiquidations()
+		const liquidatablePromise = fetchLiquidatableVaults()
 			.then((result) => {
-				pending = result;
+				liquidatable = result;
 			})
 			.catch((e) => {
-				pendingError = 'Failed to load pending liquidations.';
-				console.error('[liquidations] pending error:', e);
+				liquidatableError = 'Failed to load liquidatable vaults.';
+				console.error('[liquidations] liquidatable error:', e);
 			})
 			.finally(() => {
-				pendingLoading = false;
+				liquidatableLoading = false;
 			});
 
 		const botPromise = fetchBotStats()
@@ -132,31 +159,13 @@
 				spLoading = false;
 			});
 
-		await Promise.allSettled([countPromise, pendingPromise, botPromise, spPromise]);
+		await Promise.allSettled([eventsPromise, liquidatablePromise, botPromise, spPromise]);
 	});
 
 	// ── Helpers ─────────────────────────────────────────────────────────────
-	function getLiquidationType(record: any): { label: string; classes: string } {
-		// Detect bot vs partial vs full based on available fields
-		if (record.is_bot_liquidation) {
-			return { label: 'Bot', classes: 'bg-purple-500/20 text-purple-300 border-purple-500/30' };
-		}
-		if (record.is_partial) {
-			return { label: 'Partial', classes: 'bg-yellow-500/20 text-yellow-300 border-yellow-500/30' };
-		}
-		return { label: 'Full', classes: 'bg-red-500/20 text-red-300 border-red-500/30' };
-	}
-
-	function getCollateralTypeStr(record: any): string {
-		if (record.collateral_type) {
-			// Could be a principal or variant
-			if (typeof record.collateral_type === 'string') return record.collateral_type;
-			if (record.collateral_type?.toString) {
-				const str = record.collateral_type.toString();
-				return getTokenSymbol(str);
-			}
-		}
-		return 'ICP';
+	function getFieldValue(formatted: FormattedEvent, label: string): string | null {
+		const field = formatted.fields.find((f) => f.label === label);
+		return field?.value ?? null;
 	}
 
 	function getSpCollateralType(record: any): string {
@@ -173,9 +182,9 @@
 	<!-- Header -->
 	<div class="flex items-baseline justify-between mb-6">
 		<h1 class="text-2xl font-bold text-white">Liquidations</h1>
-		{#if totalCount > 0}
+		{#if totalLiquidationCount > 0}
 			<span class="text-lg font-semibold text-gray-400">
-				{totalCount.toLocaleString()} total
+				{totalLiquidationCount.toLocaleString()} found
 			</span>
 		{/if}
 	</div>
@@ -183,14 +192,14 @@
 	<!-- Summary Cards -->
 	<div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
 		<StatCard
-			label="Total Liquidations"
-			value={recordsLoading ? '--' : totalCount.toLocaleString()}
+			label="Liquidation Events"
+			value={recordsLoading ? '--' : totalLiquidationCount.toLocaleString()}
 			subtitle={recordsLoading ? 'Loading...' : undefined}
 		/>
 		<StatCard
-			label="Pending Liquidations"
-			value={pendingLoading ? '--' : pending.length.toLocaleString()}
-			subtitle={pendingLoading ? 'Loading...' : pending.length > 0 ? 'In-flight' : 'None active'}
+			label="Liquidatable Vaults"
+			value={liquidatableLoading ? '--' : liquidatable.length.toLocaleString()}
+			subtitle={liquidatableLoading ? 'Loading...' : liquidatable.length > 0 ? 'At risk' : 'None at risk'}
 		/>
 		<StatCard
 			label="Bot Budget Remaining"
@@ -213,85 +222,46 @@
 				<div
 					class="w-5 h-5 border-2 border-gray-600 border-t-purple-500 rounded-full animate-spin"
 				></div>
-				<span>Loading liquidation records...</span>
+				<span>Loading liquidation events...</span>
 			</div>
 		{:else if recordsError}
 			<div class="text-center py-16 text-red-400">{recordsError}</div>
-		{:else if records.length === 0}
-			<div class="text-center py-16 text-gray-500">No liquidation records found.</div>
+		{:else if displayedEvents.length === 0}
+			<div class="text-center py-16 text-gray-500">No liquidation events found.</div>
 		{:else}
 			<div class="bg-gray-800/50 border border-gray-700/50 rounded-xl overflow-x-auto">
 				<table class="w-full text-sm">
 					<thead>
 						<tr class="border-b border-gray-700/50 text-gray-400 text-xs uppercase tracking-wide">
-							<th class="text-left px-4 py-3 font-medium">Time</th>
-							<th class="text-left px-4 py-3 font-medium">Vault</th>
+							<th class="text-left px-4 py-3 font-medium">ID</th>
 							<th class="text-left px-4 py-3 font-medium">Type</th>
-							<th class="text-right px-4 py-3 font-medium">Debt Covered</th>
-							<th class="text-right px-4 py-3 font-medium">Collateral Seized</th>
-							<th class="text-left px-4 py-3 font-medium">Collateral</th>
-							<th class="text-left px-4 py-3 font-medium">Liquidator</th>
+							<th class="text-left px-4 py-3 font-medium">Summary</th>
+							<th class="text-left px-4 py-3 font-medium">Vault</th>
 						</tr>
 					</thead>
 					<tbody>
-						{#each records as record}
-							{@const typeInfo = getLiquidationType(record)}
+						{#each displayedEvents as { id, formatted }}
 							<tr
 								class="border-b border-gray-700/30 hover:bg-gray-700/20 transition-colors"
 							>
-								<td class="px-4 py-3 whitespace-nowrap">
-									{#if record.timestamp}
-										<TimeAgo timestamp={record.timestamp} />
-									{:else}
-										<span class="text-gray-500">--</span>
-									{/if}
-								</td>
-								<td class="px-4 py-3">
-									{#if record.vault_id !== undefined}
-										<EntityLink
-											type="vault"
-											value={String(record.vault_id)}
-										/>
-									{:else}
-										<span class="text-gray-500">--</span>
-									{/if}
+								<td class="px-4 py-3 font-mono text-gray-400 text-xs">
+									#{id.toString()}
 								</td>
 								<td class="px-4 py-3">
 									<span
-										class="inline-flex items-center px-2 py-0.5 rounded-full border text-xs font-medium {typeInfo.classes}"
+										class="inline-flex items-center px-2 py-0.5 rounded-full border text-xs font-medium {formatted.badgeColor}"
 									>
-										{typeInfo.label}
+										{formatted.typeName}
 									</span>
 								</td>
-								<td class="px-4 py-3 text-right font-mono text-gray-300">
-									{#if record.debt_covered_e8s !== undefined}
-										{formatE8s(record.debt_covered_e8s)}
-									{:else if record.liquidator_payment !== undefined}
-										{formatE8s(record.liquidator_payment)}
-									{:else}
-										<span class="text-gray-500">--</span>
-									{/if}
-								</td>
-								<td class="px-4 py-3 text-right font-mono text-gray-300">
-									{#if record.collateral_seized_e8s !== undefined}
-										{formatE8s(record.collateral_seized_e8s)}
-									{:else if record.icp_to_liquidator !== undefined}
-										{formatE8s(record.icp_to_liquidator)}
-									{:else}
-										<span class="text-gray-500">--</span>
-									{/if}
-								</td>
-								<td class="px-4 py-3 text-gray-300">
-									{getCollateralTypeStr(record)}
+								<td class="px-4 py-3 text-gray-300 text-xs max-w-md truncate">
+									{formatted.summary}
 								</td>
 								<td class="px-4 py-3">
-									{#if record.liquidator}
+									{#if getFieldValue(formatted, 'Vault')}
 										<EntityLink
-											type="address"
-											value={typeof record.liquidator === 'string'
-												? record.liquidator
-												: record.liquidator?.toString?.() ?? '--'}
-											short={true}
+											type="vault"
+											value={getFieldValue(formatted, 'Vault')}
 										/>
 									{:else}
 										<span class="text-gray-500">--</span>
@@ -315,19 +285,19 @@
 		{/if}
 	</section>
 
-	<!-- Pending Liquidations -->
-	{#if pendingLoading}
+	<!-- Liquidatable Vaults -->
+	{#if liquidatableLoading}
 		<!-- Don't show section while loading -->
-	{:else if pendingError}
+	{:else if liquidatableError}
 		<section class="mb-10">
-			<h2 class="text-lg font-semibold text-white mb-4">Pending Liquidations</h2>
-			<div class="text-red-400 text-sm">{pendingError}</div>
+			<h2 class="text-lg font-semibold text-white mb-4">Liquidatable Vaults</h2>
+			<div class="text-red-400 text-sm">{liquidatableError}</div>
 		</section>
-	{:else if pending.length > 0}
+	{:else if liquidatable.length > 0}
 		<section class="mb-10">
 			<h2 class="text-lg font-semibold text-white mb-4">
-				Pending Liquidations
-				<span class="text-sm font-normal text-gray-400 ml-2">({pending.length})</span>
+				Liquidatable Vaults
+				<span class="text-sm font-normal text-gray-400 ml-2">({liquidatable.length})</span>
 			</h2>
 			<div class="bg-gray-800/50 border border-gray-700/50 rounded-xl overflow-x-auto">
 				<table class="w-full text-sm">
@@ -336,38 +306,54 @@
 							class="border-b border-gray-700/50 text-gray-400 text-xs uppercase tracking-wide"
 						>
 							<th class="text-left px-4 py-3 font-medium">Vault</th>
+							<th class="text-left px-4 py-3 font-medium">Owner</th>
+							<th class="text-right px-4 py-3 font-medium">Debt</th>
+							<th class="text-right px-4 py-3 font-medium">Collateral</th>
 							<th class="text-left px-4 py-3 font-medium">Status</th>
-							<th class="text-left px-4 py-3 font-medium">Claimant</th>
 						</tr>
 					</thead>
 					<tbody>
-						{#each pending as item}
+						{#each liquidatable as vault}
 							<tr class="border-b border-gray-700/30 hover:bg-gray-700/20 transition-colors">
 								<td class="px-4 py-3">
-									{#if item.vault_id !== undefined}
+									{#if vault.vault_id !== undefined}
 										<EntityLink
 											type="vault"
-											value={String(item.vault_id)}
+											value={String(vault.vault_id)}
 										/>
 									{:else}
 										<span class="text-gray-500">--</span>
 									{/if}
 								</td>
 								<td class="px-4 py-3">
-									<StatusBadge status={item.status ?? 'pending'} />
-								</td>
-								<td class="px-4 py-3">
-									{#if item.claimant}
+									{#if vault.owner}
 										<EntityLink
 											type="address"
-											value={typeof item.claimant === 'string'
-												? item.claimant
-												: item.claimant?.toString?.() ?? '--'}
+											value={typeof vault.owner === 'string'
+												? vault.owner
+												: vault.owner?.toString?.() ?? '--'}
 											short={true}
 										/>
 									{:else}
 										<span class="text-gray-500">--</span>
 									{/if}
+								</td>
+								<td class="px-4 py-3 text-right font-mono text-gray-300">
+									{#if vault.borrowed_icusd_e8s !== undefined}
+										{formatE8s(vault.borrowed_icusd_e8s)} icUSD
+									{:else}
+										<span class="text-gray-500">--</span>
+									{/if}
+								</td>
+								<td class="px-4 py-3 text-right font-mono text-gray-300">
+									{#if vault.collateral_amount_e8s !== undefined}
+										{formatE8s(vault.collateral_amount_e8s)}
+									{:else}
+										<span class="text-gray-500">--</span>
+									{/if}
+								</td>
+								<td class="px-4 py-3">
+									<StatusBadge status="liquidatable" />
 								</td>
 							</tr>
 						{/each}

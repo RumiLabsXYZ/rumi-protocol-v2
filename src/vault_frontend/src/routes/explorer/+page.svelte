@@ -12,7 +12,7 @@
     fetchAllVaults, fetchEventCount, fetchTreasuryStats,
     fetchInterestSplit, fetchBotStats, fetchStabilityPoolStatus,
     fetchThreePoolStatus, fetchEvents, fetchCollateralConfigs,
-    fetchPendingLiquidations
+    fetchLiquidatableVaults
   } from '$services/explorer/explorerService';
   import {
     formatE8s, formatUsd, formatUsdRaw, formatCR, formatPercent, formatBps,
@@ -32,7 +32,7 @@
 
   // Section 2: Collateral
   let collateralTotals: any[] = $state([]);
-  let collateralPrices: [any, number][] = $state([]);
+  let collateralPrices: Map<string, number> = $state(new Map());
   let collateralConfigs: any[] = $state([]);
   let collateralLoading = $state(true);
   let collateralError: string | null = $state(null);
@@ -51,7 +51,7 @@
 
   // Section 5: Liquidation Health
   let botStats: any = $state(null);
-  let pendingLiquidations: any[] = $state([]);
+  let liquidatableVaults: any[] = $state([]);
   let liquidationLoading = $state(true);
   let liquidationError: string | null = $state(null);
 
@@ -81,15 +81,8 @@
     vaults.filter((v: any) => Number(v.borrowed_icusd_amount) > 0 || Number(v.collateral_amount) > 0).length
   );
 
-  // Build a price map from collateralPrices: principal string -> price float
-  let priceMap = $derived.by(() => {
-    const map = new Map<string, number>();
-    for (const [principal, price] of collateralPrices) {
-      const key = principal?.toText?.() ?? String(principal);
-      map.set(key, price);
-    }
-    return map;
-  });
+  // collateralPrices is already a Map<string, number> from the service
+  let priceMap = $derived(collateralPrices);
 
   // Build a config map from collateralConfigs: principal string -> config
   let configMap = $derived.by(() => {
@@ -284,12 +277,12 @@
     // Section 5: Liquidation Health
     const liquidationPromise = (async () => {
       try {
-        const [bs, pl] = await Promise.all([
+        const [bs, lv] = await Promise.all([
           fetchBotStats(),
-          fetchPendingLiquidations()
+          fetchLiquidatableVaults()
         ]);
         botStats = bs;
-        pendingLiquidations = pl;
+        liquidatableVaults = lv;
       } catch (e) {
         console.error('[explorer] Liquidation load failed:', e);
         if (!isRefresh) liquidationError = 'Failed to load liquidation data';
@@ -301,7 +294,8 @@
     // Section 6: Recent Events
     const eventsPromise = (async () => {
       try {
-        recentEvents = await fetchEvents(0n, 20n, []);
+        const result = await fetchEvents(0n, 20n);
+        recentEvents = result.events;
       } catch (e) {
         console.error('[explorer] Events load failed:', e);
         if (!isRefresh) eventsError = 'Failed to load events';
@@ -784,9 +778,9 @@
       </div>
 
       <!-- Pending liquidations notice -->
-      {#if pendingLiquidations.length > 0}
+      {#if liquidatableVaults.length > 0}
         <div class="bg-red-500/10 border border-red-500/30 rounded-xl p-4 flex items-center gap-3">
-          <span class="text-red-400 font-semibold text-sm">{pendingLiquidations.length} pending liquidation{pendingLiquidations.length > 1 ? 's' : ''}</span>
+          <span class="text-red-400 font-semibold text-sm">{liquidatableVaults.length} liquidatable vault{liquidatableVaults.length > 1 ? 's' : ''}</span>
           <span class="text-red-400/70 text-xs">Vaults awaiting liquidation processing</span>
         </div>
       {/if}

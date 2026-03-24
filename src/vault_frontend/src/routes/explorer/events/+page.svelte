@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import EventRow from '$components/explorer/EventRow.svelte';
 	import Pagination from '$components/explorer/Pagination.svelte';
-	import { fetchEvents, fetchEventCount } from '$services/explorer/explorerService';
+	import { fetchEvents } from '$services/explorer/explorerService';
 	import { getEventCategory, EVENT_CATEGORIES } from '$utils/explorerFormatters';
 	import type { EventCategory } from '$utils/explorerFormatters';
 
@@ -32,15 +32,9 @@
 		loading = true;
 		error = null;
 		try {
-			const start = BigInt(Math.max(0, totalCount - (page + 1) * PAGE_SIZE));
-			const length = BigInt(
-				page === totalPages - 1
-					? totalCount - (totalPages - 1) * PAGE_SIZE
-					: Math.min(PAGE_SIZE, totalCount)
-			);
-			const result = await fetchEvents(start, length);
-			// fetchEvents returns oldest-first; reverse for newest-first display
-			events = [...result].reverse();
+			const result = await fetchEvents(BigInt(page), BigInt(PAGE_SIZE));
+			totalCount = Number(result.total);
+			events = result.events;
 			currentPage = page;
 		} catch (e) {
 			error = 'Failed to load events.';
@@ -54,20 +48,8 @@
 		loadPage(page);
 	}
 
-	onMount(async () => {
-		try {
-			const count = await fetchEventCount();
-			totalCount = Number(count);
-			if (totalCount > 0) {
-				await loadPage(0);
-			} else {
-				loading = false;
-			}
-		} catch (e) {
-			error = 'Failed to load event count.';
-			loading = false;
-			console.error('[events page] onMount error:', e);
-		}
+	onMount(() => {
+		loadPage(0);
 	});
 </script>
 
