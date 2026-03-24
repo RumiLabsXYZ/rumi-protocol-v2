@@ -690,6 +690,7 @@ export interface _SERVICE {
   >,
   'dev_force_bot_liquidate' : ActorMethod<[bigint], Result_3>,
   'dev_force_partial_bot_liquidate' : ActorMethod<[bigint], Result_3>,
+  'dev_set_collateral_price' : ActorMethod<[Principal, number], Result_11>,
   'dev_test_cascade_liquidation' : ActorMethod<[bigint], Result_11>,
   'dev_test_pool_only_liquidation' : ActorMethod<[bigint], Result_11>,
   'enter_recovery_mode' : ActorMethod<[], Result>,

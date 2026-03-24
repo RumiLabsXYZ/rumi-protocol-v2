@@ -683,6 +683,11 @@ export const idlFactory = ({ IDL }) => {
       ),
     'dev_force_bot_liquidate' : IDL.Func([IDL.Nat64], [Result_3], []),
     'dev_force_partial_bot_liquidate' : IDL.Func([IDL.Nat64], [Result_3], []),
+    'dev_set_collateral_price' : IDL.Func(
+        [IDL.Principal, IDL.Float64],
+        [Result_11],
+        [],
+      ),
     'dev_test_cascade_liquidation' : IDL.Func([IDL.Nat64], [Result_11], []),
     'dev_test_pool_only_liquidation' : IDL.Func([IDL.Nat64], [Result_11], []),
     'enter_recovery_mode' : IDL.Func([], [Result], []),

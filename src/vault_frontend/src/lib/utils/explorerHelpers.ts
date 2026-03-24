@@ -100,11 +100,20 @@ export interface TokenInfo {
 }
 
 export const KNOWN_TOKENS: Record<string, TokenInfo> = {
+  // Core protocol tokens
   [CANISTER_IDS.ICP_LEDGER]: { symbol: 'ICP', name: 'Internet Computer', decimals: 8 },
   [CANISTER_IDS.ICUSD_LEDGER]: { symbol: 'icUSD', name: 'icUSD Stablecoin', decimals: 8 },
   [CANISTER_IDS.CKUSDT_LEDGER]: { symbol: 'ckUSDT', name: 'Chain-Key USDT', decimals: 6 },
   [CANISTER_IDS.CKUSDC_LEDGER]: { symbol: 'ckUSDC', name: 'Chain-Key USDC', decimals: 6 },
   [CANISTER_IDS.THREEPOOL]: { symbol: '3USD LP', name: 'Rumi 3Pool LP Token', decimals: 18 },
+  // Collateral tokens
+  'mxzaz-hqaaa-aaaar-qaada-cai': { symbol: 'ckBTC', name: 'Chain-Key Bitcoin', decimals: 8 },
+  'ss2fx-dyaaa-aaaar-qacoq-cai': { symbol: 'ckETH', name: 'Chain-Key Ethereum', decimals: 18 },
+  'o7oak-6yaaa-aaaap-qhgbq-cai': { symbol: 'ckXAUT', name: 'Chain-Key Gold', decimals: 6 },
+  'buwm7-7yaaa-aaaar-qagva-cai': { symbol: 'nICP', name: 'WaterNeuron Staked ICP', decimals: 8 },
+  'nza5v-qaaaa-aaaar-qahzq-cai': { symbol: 'ckUSDC', name: 'ckUSDC (alt)', decimals: 6 },
+  '7pail-xaaaa-aaaas-aabmq-cai': { symbol: 'BOB', name: 'BOB Token', decimals: 8 },
+  'rh2pm-ryaaa-aaaan-qeniq-cai': { symbol: 'EXE', name: 'EXE Token', decimals: 8 },
 };
 
 /** Register a token dynamically (e.g. from canister discovery). */
