@@ -896,7 +896,7 @@
                       <span class="{healthColor(health)} font-medium text-xs">{formatCR(vault.collateral_ratio)}</span>
                     </td>
                     <td class="px-4 py-2.5">
-                      <VaultHealthBar collateralRatio={vault.collateral_ratio * 100} liquidationRatio={vault.liquidation_ratio * 100} />
+                      <VaultHealthBar collateralRatio={vault.collateral_ratio * 100} liquidationRatio={vault.liquidation_ratio * 100} borrowThreshold={vault.borrow_threshold_ratio * 100} />
                     </td>
                   </tr>
                 {/each}
