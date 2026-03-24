@@ -406,26 +406,24 @@
         </StatCard>
 
         <StatCard label="Total TVL" subtitle="All collateral locked">
-          {#if status?.total_collateral_usd != null}
-            <span>{typeof status.total_collateral_usd === 'bigint' ? formatUsd(status.total_collateral_usd) : formatUsdRaw(Number(status.total_collateral_usd))}</span>
+          {#if status?.total_icp_margin != null}
+            <span>{formatUsd(status.total_icp_margin)}</span>
           {:else}
             <span class="text-gray-500">--</span>
           {/if}
         </StatCard>
 
         <StatCard label="Total Debt" subtitle="icUSD minted">
-          {#if status?.total_debt_icusd != null}
-            <span>{formatE8s(status.total_debt_icusd)} <span class="text-sm text-gray-400">icUSD</span></span>
+          {#if status?.total_icusd_borrowed != null}
+            <span>{formatE8s(status.total_icusd_borrowed)} <span class="text-sm text-gray-400">icUSD</span></span>
           {:else}
             <span class="text-gray-500">--</span>
           {/if}
         </StatCard>
 
         <StatCard label="System CR" subtitle="Collateral ratio">
-          {#if status?.system_collateral_ratio != null}
-            <span>{formatCR(status.system_collateral_ratio)}</span>
-          {:else if status?.totalCollateralRatio != null}
-            <span>{formatCR(status.totalCollateralRatio)}</span>
+          {#if status?.total_collateral_ratio != null}
+            <span>{formatCR(status.total_collateral_ratio)}</span>
           {:else}
             <span class="text-gray-500">--</span>
           {/if}
