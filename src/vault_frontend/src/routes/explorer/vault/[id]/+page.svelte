@@ -129,17 +129,18 @@
   // ── Derived: creation timestamp from first event (open_vault) ────────────
   const creationTimestamp = $derived.by(() => {
     if (!history.length) return null;
-    // First event chronologically is the open_vault event
     const first = history[0];
     const evt = first?.event ?? first;
-    // Try to extract timestamp from the event
-    const key = evt?.event_type ? Object.keys(evt.event_type)[0] : null;
-    const data = key ? evt.event_type[key] : null;
+    // Event can be {event_type: {variant: data}} or directly {variant: data}
+    const variantObj = evt?.event_type ?? evt;
+    const key = variantObj ? Object.keys(variantObj)[0] : null;
+    const data = key ? variantObj[key] : null;
     if (data?.timestamp) {
-      // Timestamp can be opt nat64 → [bigint] or just bigint
       const ts = Array.isArray(data.timestamp) ? data.timestamp[0] : data.timestamp;
       return ts;
     }
+    // Fallback: check vault.last_accrual_time in open_vault events
+    if (data?.vault?.last_accrual_time) return data.vault.last_accrual_time;
     return null;
   });
 
