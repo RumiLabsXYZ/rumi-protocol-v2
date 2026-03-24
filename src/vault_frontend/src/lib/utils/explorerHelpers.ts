@@ -26,23 +26,27 @@ export function formatUsd(e8s: bigint | number): string {
 }
 
 /** Format a raw floating-point number as USD. */
-export function formatUsdRaw(val: number): string {
-  return `$${val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+export function formatUsdRaw(val: number | bigint): string {
+  const n = Number(val);
+  return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 /** Format a ratio as a percentage (0.015 → "1.50%"). */
-export function formatPercent(ratio: number, decimals = 2): string {
-  return `${(ratio * 100).toFixed(decimals)}%`;
+export function formatPercent(ratio: number | bigint, decimals = 2): string {
+  const n = Number(ratio);
+  return `${(n * 100).toFixed(decimals)}%`;
 }
 
 /** Format a collateral ratio (1.5 → "150.0%"). */
-export function formatCR(ratio: number): string {
-  return `${(ratio * 100).toFixed(1)}%`;
+export function formatCR(ratio: number | bigint): string {
+  const n = Number(ratio);
+  return `${(n * 100).toFixed(1)}%`;
 }
 
 /** Format basis points as percentage (500 → "5.00%"). */
-export function formatBps(bps: number): string {
-  return `${(bps / 100).toFixed(2)}%`;
+export function formatBps(bps: number | bigint): string {
+  const n = Number(bps);
+  return `${(n / 100).toFixed(2)}%`;
 }
 
 // ─── Time Formatting ─────────────────────────────────────────────────
@@ -209,10 +213,12 @@ export type HealthStatus = 'healthy' | 'caution' | 'danger' | 'liquidatable';
  * - caution: CR ≤ liquidation ratio + 50%
  * - healthy: everything else
  */
-export function classifyVaultHealth(cr: number, liquidationRatio: number): HealthStatus {
-  if (cr <= liquidationRatio) return 'liquidatable';
-  if (cr <= liquidationRatio + 0.25) return 'danger';
-  if (cr <= liquidationRatio + 0.50) return 'caution';
+export function classifyVaultHealth(cr: number | bigint, liquidationRatio: number | bigint): HealthStatus {
+  const c = Number(cr);
+  const l = Number(liquidationRatio);
+  if (c <= l) return 'liquidatable';
+  if (c <= l + 0.25) return 'danger';
+  if (c <= l + 0.50) return 'caution';
   return 'healthy';
 }
 

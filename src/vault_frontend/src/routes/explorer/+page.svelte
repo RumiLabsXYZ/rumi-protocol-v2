@@ -33,7 +33,7 @@
   // Section 2: Collateral
   let collateralTotals: any[] = $state([]);
   let collateralPrices: Map<string, number> = $state(new Map());
-  let collateralConfigs: Map<string, any> = $state(new Map());
+  let collateralConfigs: any[] = $state([]);
   let collateralLoading = $state(true);
   let collateralError: string | null = $state(null);
 
@@ -84,28 +84,36 @@
   // collateralPrices is already a Map<string, number> from the service
   let priceMap = $derived(collateralPrices);
 
-  // collateralConfigs is a Map<string, config> — alias for convenience
-  let configMap = $derived(collateralConfigs);
+  // Build a config map from collateralConfigs array: principal string -> config
+  let configMap = $derived.by(() => {
+    const map = new Map<string, any>();
+    for (const cfg of collateralConfigs) {
+      const key = cfg.ledger_canister_id?.toText?.() ?? cfg.collateral_type?.toText?.() ?? '';
+      if (key) map.set(key, cfg);
+    }
+    return map;
+  });
 
   // Collateral rows for Section 2
   let collateralRows = $derived.by(() => {
     const rows: any[] = [];
-    for (const [principal, cfg] of collateralConfigs.entries()) {
+    for (const cfg of collateralConfigs) {
+      const principal = cfg.ledger_canister_id?.toText?.() ?? cfg.collateral_type?.toText?.() ?? '';
       const matchingVaults = vaults.filter((v: any) => {
         const vType = v.collateral_type?.toText?.() ?? String(v.collateral_type);
         return vType === principal;
       });
-      const totalCollateral = matchingVaults.reduce((sum: number, v: any) => sum + Number(v.collateral_amount ?? 0), 0);
-      const totalDebt = matchingVaults.reduce((sum: number, v: any) => sum + Number(v.borrowed_icusd_amount ?? 0), 0);
-      const price = priceMap.get(principal) ?? 0;
-      const decimals = Number(cfg.decimals ?? 8);
+      const totalCollateral = matchingVaults.reduce((sum: number, v: any) => sum + Number(v.collateral_amount ?? 0n), 0);
+      const totalDebt = matchingVaults.reduce((sum: number, v: any) => sum + Number(v.borrowed_icusd_amount ?? 0n), 0);
+      const price = Number(priceMap.get(principal) ?? 0);
+      const decimals = Number(cfg.decimals ?? 8n);
       const collateralHuman = totalCollateral / Math.pow(10, decimals);
       const collateralUsd = collateralHuman * price;
       const debtHuman = totalDebt / E8S;
-      const debtCeiling = Number(cfg.debt_ceiling ?? cfg.debtCeiling ?? 0);
+      const debtCeiling = Number(cfg.debt_ceiling ?? cfg.debtCeiling ?? 0n);
       const debtCeilingHuman = debtCeiling / E8S;
       const utilization = debtCeilingHuman > 0 ? (debtHuman / debtCeilingHuman) * 100 : 0;
-      const interestRate = Number(cfg.interest_rate ?? cfg.borrowing_fee ?? cfg.borrowingFee ?? 0);
+      const interestRate = Number(cfg.interest_rate ?? cfg.borrowing_fee ?? cfg.borrowingFee ?? 0n);
       const symbol = getTokenSymbol(principal);
       const statusKey = cfg.status ? (typeof cfg.status === 'object' ? Object.keys(cfg.status)[0] : String(cfg.status)) : 'Active';
       rows.push({
@@ -130,7 +138,7 @@
   // SP utilization
   let spUtilization = $derived.by(() => {
     if (!spStatus) return 0;
-    const deposits = Number(spStatus.total_deposits_e8s ?? 0);
+    const deposits = Number(spStatus.total_deposits_e8s ?? 0n);
     if (deposits === 0) return 0;
     // Approximate utilization: how much has been used in liquidations
     return 0; // SP doesn't have a standard utilization metric
@@ -146,7 +154,7 @@
 
   // At-risk vaults sorted by CR ascending (top 10)
   let atRiskVaults = $derived.by(() => {
-    if (!vaults.length || !collateralConfigs.size) return [];
+    if (!vaults.length || !collateralConfigs.length) return [];
 
     const vaultsWithCr: any[] = [];
     for (const vault of vaults) {
@@ -316,23 +324,26 @@
 
   // ── Format helpers ────────────────────────────────────────────────────
 
-  function formatCompactUsd(value: number): string {
-    if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(2)}M`;
-    if (value >= 1_000) return `$${(value / 1_000).toFixed(1)}K`;
-    return `$${value.toFixed(2)}`;
+  function formatCompactUsd(value: number | bigint): string {
+    const v = Number(value);
+    if (v >= 1_000_000) return `$${(v / 1_000_000).toFixed(2)}M`;
+    if (v >= 1_000) return `$${(v / 1_000).toFixed(1)}K`;
+    return `$${v.toFixed(2)}`;
   }
 
-  function formatPrice(value: number): string {
-    if (value >= 1000) return `$${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
-    if (value >= 1) return `$${value.toFixed(2)}`;
-    return `$${value.toFixed(4)}`;
+  function formatPrice(value: number | bigint): string {
+    const v = Number(value);
+    if (v >= 1000) return `$${v.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+    if (v >= 1) return `$${v.toFixed(2)}`;
+    return `$${v.toFixed(4)}`;
   }
 
-  function formatCompactAmount(value: number): string {
-    if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
-    if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
-    if (value >= 1) return value.toFixed(2);
-    return value.toFixed(4);
+  function formatCompactAmount(value: number | bigint): string {
+    const v = Number(value);
+    if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(2)}M`;
+    if (v >= 1_000) return `${(v / 1_000).toFixed(1)}K`;
+    if (v >= 1) return v.toFixed(2);
+    return v.toFixed(4);
   }
 
   function shortenOwner(principal: string): string {
@@ -602,7 +613,7 @@
           </div>
           <div class="flex justify-between items-center">
             <span class="text-sm text-gray-400">Swap Fee</span>
-            <span class="text-sm font-semibold text-gray-200 tabular-nums">{Number(tpStatus.swap_fee_bps ?? 0) / 100}%</span>
+            <span class="text-sm font-semibold text-gray-200 tabular-nums">{(Number(tpStatus.swap_fee_bps ?? 0) / 100).toFixed(2)}%</span>
           </div>
           {#if tpStatus.total_lp_tokens != null}
             <div class="flex justify-between items-center">
@@ -693,17 +704,18 @@
 
           <!-- Interest split visualization -->
           {#if splitEntries.length > 0}
-            {@const totalBps = splitEntries.reduce((sum: number, e: any) => sum + (e.bps ?? 0), 0)}
+            {@const totalBps = splitEntries.reduce((sum: number, e: any) => sum + Number(e.bps ?? 0), 0)}
             <div class="space-y-3">
               <p class="text-xs text-gray-500 uppercase tracking-wider font-medium">Interest Split</p>
               <div class="flex h-2.5 rounded-full overflow-hidden bg-gray-700">
                 {#each splitEntries as entry}
                   {@const dest = entry.destination ?? entry.dest ?? ''}
-                  {@const pct = totalBps > 0 ? ((entry.bps ?? 0) / totalBps) * 100 : 0}
+                  {@const bpsNum = Number(entry.bps ?? 0)}
+                  {@const pct = totalBps > 0 ? (bpsNum / totalBps) * 100 : 0}
                   <div
                     class="h-full transition-all duration-300"
                     style="width: {pct}%; background: {splitColors[dest] ?? '#94a3b8'};"
-                    title="{splitLabels[dest] ?? dest}: {formatBps(entry.bps ?? 0)}"
+                    title="{splitLabels[dest] ?? dest}: {formatBps(bpsNum)}"
                   ></div>
                 {/each}
               </div>
@@ -713,7 +725,7 @@
                   <div class="flex items-center gap-1.5">
                     <div class="w-2.5 h-2.5 rounded-full" style="background: {splitColors[dest] ?? '#94a3b8'};"></div>
                     <span class="text-xs text-gray-400">{splitLabels[dest] ?? dest}</span>
-                    <span class="text-xs font-medium text-gray-300 tabular-nums">{formatBps(entry.bps ?? 0)}</span>
+                    <span class="text-xs font-medium text-gray-300 tabular-nums">{formatBps(Number(entry.bps ?? 0))}</span>
                   </div>
                 {/each}
               </div>
