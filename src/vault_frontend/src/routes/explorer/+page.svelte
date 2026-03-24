@@ -33,7 +33,7 @@
   // Section 2: Collateral
   let collateralTotals: any[] = $state([]);
   let collateralPrices: Map<string, number> = $state(new Map());
-  let collateralConfigs: any[] = $state([]);
+  let collateralConfigs: Map<string, any> = $state(new Map());
   let collateralLoading = $state(true);
   let collateralError: string | null = $state(null);
 
@@ -84,26 +84,19 @@
   // collateralPrices is already a Map<string, number> from the service
   let priceMap = $derived(collateralPrices);
 
-  // Build a config map from collateralConfigs: principal string -> config
-  let configMap = $derived.by(() => {
-    const map = new Map<string, any>();
-    for (const cfg of collateralConfigs) {
-      const key = cfg.ledger_canister_id?.toText?.() ?? cfg.collateral_type?.toText?.() ?? String(cfg.ledger_canister_id ?? cfg.collateral_type ?? '');
-      if (key) map.set(key, cfg);
-    }
-    return map;
-  });
+  // collateralConfigs is a Map<string, config> — alias for convenience
+  let configMap = $derived(collateralConfigs);
 
   // Collateral rows for Section 2
   let collateralRows = $derived.by(() => {
-    return collateralConfigs.map((cfg: any) => {
-      const principal = cfg.ledger_canister_id?.toText?.() ?? cfg.collateral_type?.toText?.() ?? '';
+    const rows: any[] = [];
+    for (const [principal, cfg] of collateralConfigs.entries()) {
       const matchingVaults = vaults.filter((v: any) => {
         const vType = v.collateral_type?.toText?.() ?? String(v.collateral_type);
         return vType === principal;
       });
-      const totalCollateral = matchingVaults.reduce((sum: number, v: any) => sum + Number(v.collateral_amount), 0);
-      const totalDebt = matchingVaults.reduce((sum: number, v: any) => sum + Number(v.borrowed_icusd_amount), 0);
+      const totalCollateral = matchingVaults.reduce((sum: number, v: any) => sum + Number(v.collateral_amount ?? 0), 0);
+      const totalDebt = matchingVaults.reduce((sum: number, v: any) => sum + Number(v.borrowed_icusd_amount ?? 0), 0);
       const price = priceMap.get(principal) ?? 0;
       const decimals = Number(cfg.decimals ?? 8);
       const collateralHuman = totalCollateral / Math.pow(10, decimals);
@@ -115,7 +108,7 @@
       const interestRate = Number(cfg.interest_rate ?? cfg.borrowing_fee ?? cfg.borrowingFee ?? 0);
       const symbol = getTokenSymbol(principal);
       const statusKey = cfg.status ? (typeof cfg.status === 'object' ? Object.keys(cfg.status)[0] : String(cfg.status)) : 'Active';
-      return {
+      rows.push({
         principal,
         symbol,
         price,
@@ -129,8 +122,9 @@
         utilization,
         interestRate,
         status: statusKey,
-      };
-    });
+      });
+    }
+    return rows;
   });
 
   // SP utilization
@@ -152,7 +146,7 @@
 
   // At-risk vaults sorted by CR ascending (top 10)
   let atRiskVaults = $derived.by(() => {
-    if (!vaults.length || !collateralConfigs.length) return [];
+    if (!vaults.length || !collateralConfigs.size) return [];
 
     const vaultsWithCr: any[] = [];
     for (const vault of vaults) {
