@@ -131,8 +131,10 @@
 
       // Enrich with config data
       const cfg = configMap.get(principal);
-      const debtCeiling = cfg?.debt_ceiling != null ? Number(cfg.debt_ceiling) : 0;
-      const debtCeilingHuman = debtCeiling / E8S;
+      const debtCeilingRaw = cfg?.debt_ceiling != null ? Number(cfg.debt_ceiling) : 0;
+      // u64::MAX (18446744073709551615) means no limit — treat as unlimited
+      const isUnlimited = debtCeilingRaw > 1e18;
+      const debtCeilingHuman = isUnlimited ? 0 : debtCeilingRaw / E8S;
       const utilization = debtCeilingHuman > 0 ? (debtHuman / debtCeilingHuman) * 100 : 0;
 
       // interest_rate_apr is a Uint8Array (Rust Decimal) — decode it.
@@ -166,6 +168,7 @@
         debtHuman,
         vaultCount,
         utilization,
+        isUnlimited,
         interestRate,
         status: statusKey,
       });
@@ -530,15 +533,26 @@
                   <td class="px-4 py-3 text-right text-gray-200 tabular-nums">{formatCompactUsd(row.debtHuman)}</td>
                   <td class="px-4 py-3 text-right text-gray-300 tabular-nums">{row.vaultCount}</td>
                   <td class="px-4 py-3 text-right">
-                    <div class="flex items-center justify-end gap-2">
-                      <div class="w-16 h-1.5 bg-gray-700 rounded-full overflow-hidden">
-                        <div
-                          class="h-full rounded-full transition-all duration-300 {row.utilization > 80 ? 'bg-red-400' : row.utilization > 50 ? 'bg-yellow-400' : 'bg-green-400'}"
-                          style="width: {Math.min(100, row.utilization)}%"
-                        ></div>
+                    {#if row.isUnlimited}
+                      <span class="text-xs text-gray-500">No limit</span>
+                    {:else if row.utilization > 999}
+                      <div class="flex items-center justify-end gap-2">
+                        <div class="w-16 h-1.5 bg-gray-700 rounded-full overflow-hidden">
+                          <div class="h-full rounded-full bg-red-400" style="width: 100%"></div>
+                        </div>
+                        <span class="text-xs text-red-400 tabular-nums w-10 text-right">&gt;999%</span>
                       </div>
-                      <span class="text-xs text-gray-400 tabular-nums w-10 text-right">{row.utilization > 999 ? '>999' : row.utilization.toFixed(0)}%</span>
-                    </div>
+                    {:else}
+                      <div class="flex items-center justify-end gap-2">
+                        <div class="w-16 h-1.5 bg-gray-700 rounded-full overflow-hidden">
+                          <div
+                            class="h-full rounded-full transition-all duration-300 {row.utilization > 80 ? 'bg-red-400' : row.utilization > 50 ? 'bg-yellow-400' : 'bg-green-400'}"
+                            style="width: {Math.min(100, row.utilization)}%"
+                          ></div>
+                        </div>
+                        <span class="text-xs text-gray-400 tabular-nums w-10 text-right">{row.utilization.toFixed(0)}%</span>
+                      </div>
+                    {/if}
                   </td>
                   <td class="px-4 py-3 text-right text-gray-300 tabular-nums">
                     {#if row.interestRate > 0}

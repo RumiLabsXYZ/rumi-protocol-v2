@@ -111,7 +111,7 @@ export const KNOWN_TOKENS: Record<string, TokenInfo> = {
   'ss2fx-dyaaa-aaaar-qacoq-cai': { symbol: 'ckETH', name: 'Chain-Key Ethereum', decimals: 18 },
   'o7oak-6yaaa-aaaap-qhgbq-cai': { symbol: 'ckXAUT', name: 'Chain-Key Gold', decimals: 6 },
   'buwm7-7yaaa-aaaar-qagva-cai': { symbol: 'nICP', name: 'WaterNeuron Staked ICP', decimals: 8 },
-  'nza5v-qaaaa-aaaar-qahzq-cai': { symbol: 'ckUSDC', name: 'ckUSDC (alt)', decimals: 6 },
+  'nza5v-qaaaa-aaaar-qahzq-cai': { symbol: 'ckXAUT', name: 'Chain-Key Gold (XAUT)', decimals: 6 },
   '7pail-xaaaa-aaaas-aabmq-cai': { symbol: 'BOB', name: 'BOB Token', decimals: 8 },
   'rh2pm-ryaaa-aaaan-qeniq-cai': { symbol: 'EXE', name: 'EXE Token', decimals: 8 },
 };
@@ -234,7 +234,9 @@ export function classifyVaultHealth(
   const bt = borrowThreshold != null ? Number(borrowThreshold) : l * 1.36; // fallback heuristic
   if (c <= l) return 'liquidatable';
   if (c < bt) return 'danger';
-  if (c < bt * 1.2) return 'caution';
+  // Vaults within 5% of borrow threshold should still feel dangerous
+  if (c < bt * 1.05) return 'danger';
+  if (c < bt * 1.25) return 'caution';
   return 'healthy';
 }
 
