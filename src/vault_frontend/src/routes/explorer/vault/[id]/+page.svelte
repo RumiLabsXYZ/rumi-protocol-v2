@@ -44,7 +44,7 @@
   const config = $derived.by(() => {
     if (!vault || collateralConfigs.length === 0) return null;
     return collateralConfigs.find((c: any) => {
-      const cPrincipal = c.collateral_type?.toString?.() ?? c.collateral_type?.toText?.() ?? String(c.collateral_type ?? '');
+      const cPrincipal = c.ledger_canister_id?.toText?.() ?? c.collateral_type?.toText?.() ?? String(c.ledger_canister_id ?? '');
       return cPrincipal === collateralPrincipalStr;
     }) ?? null;
   });
@@ -115,6 +115,23 @@
   const sortedHistory = $derived(
     newestFirst ? [...history].reverse() : [...history]
   );
+
+  // ── Derived: creation timestamp from first event (open_vault) ────────────
+  const creationTimestamp = $derived.by(() => {
+    if (!history.length) return null;
+    // First event chronologically is the open_vault event
+    const first = history[0];
+    const evt = first?.event ?? first;
+    // Try to extract timestamp from the event
+    const key = evt?.event_type ? Object.keys(evt.event_type)[0] : null;
+    const data = key ? evt.event_type[key] : null;
+    if (data?.timestamp) {
+      // Timestamp can be opt nat64 → [bigint] or just bigint
+      const ts = Array.isArray(data.timestamp) ? data.timestamp[0] : data.timestamp;
+      return ts;
+    }
+    return null;
+  });
 
   // ── Load ───────────────────────────────────────────────────────────────────
   onMount(async () => {
@@ -194,8 +211,8 @@
         </div>
         <div class="flex items-center gap-2">
           <span class="text-gray-500">Created:</span>
-          {#if vault.creation_timestamp}
-            <TimeAgo timestamp={vault.creation_timestamp} showFull={true} />
+          {#if creationTimestamp}
+            <TimeAgo timestamp={creationTimestamp} showFull={true} />
           {:else}
             <span class="text-gray-400 text-sm">--</span>
           {/if}

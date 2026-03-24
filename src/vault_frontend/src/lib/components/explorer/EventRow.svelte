@@ -6,11 +6,14 @@
 
   interface Props {
     event: any;
-    index: number;
+    index: number | null;
     showTimestamp?: boolean;
+    [key: string]: any;
   }
 
-  let { event, index, showTimestamp = true }: Props = $props();
+  let { event, index, showTimestamp = true, ...rest }: Props = $props();
+
+  const hasIndex = $derived(index != null && index >= 0);
 
   const formatted = $derived(formatEvent(event));
 
@@ -23,7 +26,11 @@
 <tr class="border-b border-gray-700/50 hover:bg-gray-800/30 transition-colors group">
   <!-- Event index -->
   <td class="px-4 py-3">
-    <EntityLink type="event" value={String(index)} />
+    {#if hasIndex}
+      <EntityLink type="event" value={String(index)} />
+    {:else}
+      <span class="text-gray-600 text-xs">—</span>
+    {/if}
   </td>
 
   <!-- Timestamp -->
@@ -53,11 +60,13 @@
 
   <!-- Details link -->
   <td class="px-4 py-3 text-right">
-    <a
-      href="/explorer/event/{index}"
-      class="text-xs text-blue-400 hover:text-blue-300 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap"
-    >
-      Details &rarr;
-    </a>
+    {#if hasIndex}
+      <a
+        href="/explorer/event/{index}"
+        class="text-xs text-blue-400 hover:text-blue-300 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap"
+      >
+        Details &rarr;
+      </a>
+    {/if}
   </td>
 </tr>
