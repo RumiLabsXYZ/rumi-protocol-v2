@@ -17,6 +17,7 @@
     formatE8s, formatUsd, formatUsdRaw, formatCR, formatPercent, formatTokenAmount,
     getTokenSymbol, getTokenDecimals, classifyVaultHealth, healthColor, healthBg
   } from '$utils/explorerHelpers';
+  import { decodeRustDecimal } from '$utils/decimalUtils';
 
   // ── Route param ────────────────────────────────────────────────────────────
   const vaultId = $derived(Number($page.params.id));
@@ -82,13 +83,22 @@
   const crPct = $derived(cr === Infinity ? Infinity : cr * 100);
 
   // ── Derived: config values ─────────────────────────────────────────────────
-  const minCR = $derived(config?.min_collateral_ratio ? Number(config.min_collateral_ratio) : 1.5);
-  const liquidationRatio = $derived(config?.liquidation_threshold ? Number(config.liquidation_threshold) : 1.1);
-  const liquidationBonus = $derived(config?.liquidation_bonus ? Number(config.liquidation_bonus) : 0.1);
-  const borrowingFee = $derived(config?.borrowing_fee ? Number(config.borrowing_fee) : 0);
-  const debtCeiling = $derived(config?.debt_ceiling ? BigInt(config.debt_ceiling) : null);
-  const minVaultDebt = $derived(config?.min_vault_debt ? BigInt(config.min_vault_debt) : null);
-  const ledgerFee = $derived(config?.transfer_fee ? BigInt(config.transfer_fee) : null);
+  // CollateralConfig fields: borrow_threshold_ratio, liquidation_ratio, liquidation_bonus,
+  // borrowing_fee are all Uint8Array (Rust Decimal) — use decodeRustDecimal.
+  function decodeField(field: any, fallback: number = 0): number {
+    if (!field) return fallback;
+    if (field instanceof Uint8Array || Array.isArray(field)) return decodeRustDecimal(field);
+    return Number(field) || fallback;
+  }
+
+  const minCR = $derived(decodeField(config?.borrow_threshold_ratio, 1.5));
+  const liquidationRatio = $derived(decodeField(config?.liquidation_ratio, 1.1));
+  const liquidationBonus = $derived(decodeField(config?.liquidation_bonus, 0.1));
+  const borrowingFee = $derived(decodeField(config?.borrowing_fee, 0));
+  const debtCeiling = $derived(config?.debt_ceiling != null ? BigInt(config.debt_ceiling) : null);
+  const isUnlimitedDebtCeiling = $derived(debtCeiling != null && debtCeiling > 1_000_000_000_000_000_000n);
+  const minVaultDebt = $derived(config?.min_vault_debt != null ? BigInt(config.min_vault_debt) : null);
+  const ledgerFee = $derived(config?.ledger_fee != null ? BigInt(config.ledger_fee) : null);
 
   // ── Derived: liquidation price ─────────────────────────────────────────────
   const liquidationPrice = $derived.by(() => {
@@ -264,7 +274,7 @@
     <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl p-5 space-y-2">
       <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide">Vault Health</h2>
       {#if crPct !== Infinity && crPct > 0}
-        <VaultHealthBar collateralRatio={crPct} liquidationRatio={liquidationRatio * 100} />
+        <VaultHealthBar collateralRatio={crPct} liquidationRatio={liquidationRatio * 100} borrowThreshold={minCR * 100} />
       {:else}
         <p class="text-gray-500 text-sm">No debt -- vault is fully collateralized.</p>
       {/if}
@@ -305,7 +315,9 @@
             {#if debtCeiling !== null}
               <tr class="border-b border-gray-700/30">
                 <td class="px-5 py-3 text-gray-400">Debt Ceiling</td>
-                <td class="px-5 py-3 text-white font-mono text-right">{formatE8s(debtCeiling, 8)} icUSD</td>
+                <td class="px-5 py-3 text-white font-mono text-right">
+                  {isUnlimitedDebtCeiling ? 'No limit' : `${formatE8s(debtCeiling, 8)} icUSD`}
+                </td>
               </tr>
             {/if}
             {#if minVaultDebt !== null}
