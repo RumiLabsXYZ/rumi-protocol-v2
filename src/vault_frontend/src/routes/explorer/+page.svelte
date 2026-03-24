@@ -16,7 +16,7 @@
   } from '$services/explorer/explorerService';
   import {
     formatE8s, formatUsd, formatUsdRaw, formatCR, formatPercent, formatBps,
-    getTokenSymbol, classifyVaultHealth, healthColor
+    getTokenSymbol, registerToken, classifyVaultHealth, healthColor
   } from '$utils/explorerHelpers';
   import { decodeRustDecimal } from '$utils/decimalUtils';
 
@@ -68,7 +68,15 @@
 
   let protocolMode = $derived.by(() => {
     if (!status?.mode) return 'Unknown';
-    return Object.keys(status.mode)[0] ?? 'Unknown';
+    const key = Object.keys(status.mode)[0] ?? 'Unknown';
+    // Make mode names human-readable
+    const modeNames: Record<string, string> = {
+      'GeneralAvailability': 'Normal',
+      'Normal': 'Normal',
+      'Recovery': 'Recovery',
+      'Frozen': 'Frozen',
+    };
+    return modeNames[key] ?? key.replace(/([A-Z])/g, ' $1').trim();
   });
 
   let modeVariant = $derived.by((): 'normal' | 'recovery' | 'frozen' => {
@@ -80,6 +88,16 @@
 
   let activeVaultCount = $derived(
     vaults.filter((v: any) => Number(v.borrowed_icusd_amount) > 0 || Number(v.collateral_amount) > 0).length
+  );
+
+  // Total TVL in USD — sum of all collateral USD values from collateral rows
+  let totalTvlUsd = $derived(
+    collateralRows.reduce((sum: number, row: any) => sum + (row.collateralUsd || 0), 0)
+  );
+
+  // Total debt in icUSD from collateral rows
+  let totalDebtIcusd = $derived(
+    collateralRows.reduce((sum: number, row: any) => sum + (row.debtHuman || 0), 0)
   );
 
   // collateralPrices is already a Map<string, number> from the service
@@ -101,7 +119,7 @@
     const rows: any[] = [];
     for (const totals of collateralTotals) {
       const principal = totals.collateral_type?.toText?.() ?? String(totals.collateral_type);
-      const symbol = totals.symbol ?? getTokenSymbol(principal);
+      const symbol = (totals.symbol && totals.symbol.length > 0) ? totals.symbol : getTokenSymbol(principal);
       const price = totals.price ?? 0;
       const decimals = Number(totals.decimals ?? 8);
       const totalCollateral = Number(totals.total_collateral ?? 0n);
@@ -263,6 +281,13 @@
         collateralTotals = totals;
         collateralPrices = prices;
         collateralConfigs = configs;
+        // Register tokens dynamically so getTokenSymbol() works for all collateral types
+        for (const total of totals) {
+          const pid = total.collateral_type?.toText?.() ?? '';
+          if (pid && total.symbol) {
+            registerToken(pid, total.symbol, total.symbol, Number(total.decimals ?? 8));
+          }
+        }
       } catch (e) {
         console.error('[explorer] Collateral load failed:', e);
         if (!isRefresh) collateralError = 'Failed to load collateral data';
@@ -439,13 +464,13 @@
 
         <StatCard
           label="Total TVL"
-          value={status?.total_icp_margin != null ? formatUsd(status.total_icp_margin) : '--'}
+          value={totalTvlUsd > 0 ? formatCompactUsd(totalTvlUsd) : (status?.total_icp_margin != null ? formatUsd(status.total_icp_margin) : '--')}
           subtitle="All collateral locked"
         />
 
         <StatCard
           label="Total Debt"
-          value={status?.total_icusd_borrowed != null ? `${formatE8s(status.total_icusd_borrowed)} icUSD` : '--'}
+          value={totalDebtIcusd > 0 ? `${formatCompactUsd(totalDebtIcusd)}` : (status?.total_icusd_borrowed != null ? `${formatE8s(status.total_icusd_borrowed)} icUSD` : '--')}
           subtitle="icUSD minted"
         />
 
@@ -512,7 +537,7 @@
                           style="width: {Math.min(100, row.utilization)}%"
                         ></div>
                       </div>
-                      <span class="text-xs text-gray-400 tabular-nums w-10 text-right">{row.utilization.toFixed(0)}%</span>
+                      <span class="text-xs text-gray-400 tabular-nums w-10 text-right">{row.utilization > 999 ? '>999' : row.utilization.toFixed(0)}%</span>
                     </div>
                   </td>
                   <td class="px-4 py-3 text-right text-gray-300 tabular-nums">
