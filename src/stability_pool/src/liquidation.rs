@@ -271,18 +271,11 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
         }
     }
 
-    // --- LP tokens (3USD): atomic burn on 3pool + backend debt write-down ---
+    // --- LP tokens (3USD): approve + backend pull (atomic) ---
     for (token_ledger, amount) in &token_draw {
         let config = match stablecoin_configs.get(token_ledger) {
             Some(c) if c.is_lp_token.unwrap_or(false) => c,
             _ => continue,
-        };
-        let pool_canister = match config.underlying_pool {
-            Some(p) => p,
-            None => {
-                log!(INFO, "LP token {} has no underlying_pool configured, skipping", token_ledger);
-                continue;
-            }
         };
 
         // Calculate icUSD equivalent using cached virtual price
@@ -296,71 +289,68 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
             continue;
         }
 
-        let icusd_ledger_id = match icusd_ledger {
-            Some(id) => id,
-            None => {
-                log!(INFO, "No icUSD ledger found, skipping LP burn for {}", token_ledger);
-                continue;
-            }
+        // Step A: Approve backend to pull 3USD (same pattern as non-LP tokens)
+        let approve_args = ApproveArgs {
+            from_subaccount: None,
+            spender: Account { owner: protocol_id, subaccount: None },
+            amount: candid::Nat::from(*amount as u128 * 2), // 2x buffer for fees
+            expected_allowance: None,
+            expires_at: Some(ic_cdk::api::time() + 300_000_000_000), // 5 min
+            fee: None,
+            memo: None,
+            created_at_time: Some(ic_cdk::api::time()),
         };
 
-        // Step A: Burn LP tokens on 3pool — destroys icUSD from the pool's reserves
-        let burn_args = AuthorizedRedeemAndBurnArgs {
-            token_ledger: icusd_ledger_id,
-            token_amount: icusd_equiv_e8s as u128,
-            lp_amount: *amount as u128,
-            max_slippage_bps: 50, // 0.5% tolerance
-        };
-
-        let burn_result: Result<(Result<RedeemAndBurnResult, ThreePoolErrorRemote>,), _> = call(
-            pool_canister, "authorized_redeem_and_burn", (burn_args,)
+        let approve_result: Result<(Result<candid::Nat, ApproveError>,), _> = call(
+            *token_ledger, "icrc2_approve", (approve_args,)
         ).await;
 
-        match burn_result {
-            Ok((Ok(result),)) => {
-                log!(INFO, "3pool burn succeeded: {} LP → {} icUSD burned for vault {}",
-                    amount, icusd_equiv_e8s, vault_info.vault_id);
-
-                // Step B: Tell backend to write down debt and release collateral
-                let liq_result: Result<(Result<StabilityPoolLiquidationResult, rumi_protocol_backend::ProtocolError>,), _> = call(
-                    protocol_id,
-                    "stability_pool_liquidate_debt_burned",
-                    (vault_info.vault_id, result.token_amount_burned as u64),
-                ).await;
-
-                match liq_result {
-                    Ok((Ok(success),)) => {
-                        let actual_lp_burned = result.lp_amount_burned as u64;
-                        actual_consumed.insert(*token_ledger, actual_lp_burned);
-                        total_collateral_gained += success.collateral_received;
-                        log!(INFO, "Backend debt-burned liquidation succeeded for vault {}: {} collateral, {} LP burned",
-                            vault_info.vault_id, success.collateral_received, actual_lp_burned);
-                        // Bug 7: one token per vault per round — vault state changed
-                        break;
-                    }
-                    Ok((Err(e),)) => {
-                        // icUSD was already burned but backend rejected the debt write-down.
-                        // Deduct actual burned LP tokens from tracked balances to keep accounting accurate.
-                        let actual_lp_burned = result.lp_amount_burned as u64;
-                        log!(INFO, "CRITICAL: Backend rejected debt write-down for vault {} after icUSD already burned: {:?}. Deducting {} LP from tracked balances.",
-                            vault_info.vault_id, e, actual_lp_burned);
-                        mutate_state(|s| s.deduct_burned_lp_from_balances(*token_ledger, actual_lp_burned));
-                    }
-                    Err(e) => {
-                        // Inter-canister call failed after burn — same accounting fix needed.
-                        let actual_lp_burned = result.lp_amount_burned as u64;
-                        log!(INFO, "CRITICAL: Backend call failed for debt write-down vault {} after icUSD already burned: {:?}. Deducting {} LP from tracked balances.",
-                            vault_info.vault_id, e, actual_lp_burned);
-                        mutate_state(|s| s.deduct_burned_lp_from_balances(*token_ledger, actual_lp_burned));
+        match approve_result {
+            Ok((Ok(_),)) => {
+                // Deduct the approve fee from tracked balances
+                if let Some(fee) = config.transfer_fee {
+                    if fee > 0 {
+                        mutate_state(|s| s.deduct_fee_from_pool(*token_ledger, fee));
                     }
                 }
+            },
+            Ok((Err(e),)) => {
+                log!(INFO, "3USD approve failed for vault {}: {:?}", vault_info.vault_id, e);
+                continue;
+            },
+            Err(e) => {
+                log!(INFO, "3USD approve call failed for vault {}: {:?}", vault_info.vault_id, e);
+                continue;
+            }
+        }
+
+        // Step B: Deduct-before-call, then ask backend to pull 3USD + write down debt atomically
+        mutate_state(|s| s.deduct_burned_lp_from_balances(*token_ledger, *amount));
+
+        let liq_result: Result<(Result<StabilityPoolLiquidationResult, rumi_protocol_backend::ProtocolError>,), _> = call(
+            protocol_id,
+            "stability_pool_liquidate_with_reserves",
+            (vault_info.vault_id, icusd_equiv_e8s, *amount, *token_ledger),
+        ).await;
+
+        match liq_result {
+            Ok((Ok(success),)) => {
+                actual_consumed.insert(*token_ledger, *amount);
+                total_collateral_gained += success.collateral_received;
+                log!(INFO, "3USD reserves liquidation succeeded for vault {}: {} collateral, {} 3USD consumed",
+                    vault_info.vault_id, success.collateral_received, amount);
+                break; // one token per vault per round
             }
             Ok((Err(e),)) => {
-                // 3pool burn failed — no tokens were consumed, no state changed. Safe to skip.
-                log!(INFO, "3pool burn failed for vault {}: {:?}", vault_info.vault_id, e);
+                // Backend explicitly rejected — rollback the deduction, approval expires harmlessly
+                log!(INFO, "Backend rejected 3USD reserves liquidation for vault {}: {:?}. Rolling back.",
+                    vault_info.vault_id, e);
+                mutate_state(|s| s.credit_tokens_to_pool(*token_ledger, *amount));
             }
             Err(e) => {
-                log!(INFO, "3pool burn call failed for vault {}: {:?}", vault_info.vault_id, e);
+                // Inter-canister call failed — leave deduction in place (conservative)
+                log!(INFO, "3USD reserves liquidation call failed for vault {}: {:?}. Deduction kept (conservative).",
+                    vault_info.vault_id, e);
             }
         }
     }

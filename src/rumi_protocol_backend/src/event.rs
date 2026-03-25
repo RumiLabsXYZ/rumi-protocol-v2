@@ -62,6 +62,10 @@ pub enum Event {
         protocol_fee_collateral: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timestamp: Option<u64>,
+        /// 3USD (LP tokens) credited to protocol reserves during this liquidation.
+        /// None for legacy burn-path liquidations; Some(amount_e8s) for reserves-path.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        three_usd_reserves_e8s: Option<u64>,
     },
 
     #[serde(rename = "redemption_on_vaults")]
@@ -612,6 +616,7 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                 liquidator_payment,
                 icp_to_liquidator,
                 protocol_fee_collateral,
+                three_usd_reserves_e8s,
                 ..
             } => {
                 // Reduce vault debt and collateral, accounting for interest share
@@ -631,6 +636,10 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                         + protocol_fee_collateral.unwrap_or(0);
                     vault.collateral_amount -= total_collateral_seized;
                     vault.accrued_interest -= interest_share;
+                }
+                // Track 3USD reserves from stability pool liquidations
+                if let Some(reserves_e8s) = three_usd_reserves_e8s {
+                    state.protocol_3usd_reserves += reserves_e8s;
                 }
             },
             Event::RedistributeVault { vault_id, .. } => state.redistribute_vault(vault_id),

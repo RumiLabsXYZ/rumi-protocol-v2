@@ -2013,6 +2013,7 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
             icp_rate: Some(collateral_price_usd),
             protocol_fee_collateral: if protocol_cut > 0 { Some(protocol_cut) } else { None },
             timestamp: Some(ic_cdk::api::time()),
+            three_usd_reserves_e8s: None,
         };
         crate::storage::record_event(&event);
 
@@ -2249,6 +2250,7 @@ pub async fn liquidate_vault_partial_with_stable(
             icp_rate: Some(collateral_price_usd),
             protocol_fee_collateral: if protocol_cut > 0 { Some(protocol_cut) } else { None },
             timestamp: Some(ic_cdk::api::time()),
+            three_usd_reserves_e8s: None,
         };
         crate::storage::record_event(&event);
 
@@ -2346,15 +2348,20 @@ pub async fn liquidate_vault_partial_with_stable(
     })
 }
 
-/// Liquidate a vault when icUSD has already been burned atomically (e.g., via 3pool burn).
-/// Mirrors `liquidate_vault_partial` but skips the icUSD pull step since the debt was
-/// already covered by destroying icUSD inside the 3pool.
+/// Liquidate a vault when the debt has already been covered externally.
 ///
-/// Called by the stability pool canister after a successful `authorized_redeem_and_burn`.
+/// Two modes:
+/// - `three_usd_received_e8s: None` — legacy burn path: icUSD was destroyed via 3pool.
+/// - `three_usd_received_e8s: Some(amount)` — reserves path: 3USD was transferred to
+///   the backend's protocol reserves subaccount. No icUSD was burned; the 3USD in
+///   reserves serves as backing for the written-off debt.
+///
+/// Called by the stability pool canister.
 pub async fn liquidate_vault_debt_already_burned(
     vault_id: u64,
     icusd_burned_e8s: u64,
     caller: Principal,
+    three_usd_received_e8s: Option<u64>,
 ) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
     let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_debt_burned_{}", vault_id))?;
 
@@ -2452,8 +2459,14 @@ pub async fn liquidate_vault_debt_already_burned(
             icp_rate: Some(collateral_price_usd),
             protocol_fee_collateral: if protocol_cut > 0 { Some(protocol_cut) } else { None },
             timestamp: Some(ic_cdk::api::time()),
+            three_usd_reserves_e8s: three_usd_received_e8s,
         };
         crate::storage::record_event(&event);
+
+        // Track 3USD reserves at runtime (also persisted via event replay)
+        if let Some(three_usd_e8s) = three_usd_received_e8s {
+            s.protocol_3usd_reserves += three_usd_e8s;
+        }
 
         s.pending_margin_transfers.insert(
             vault_id,
@@ -3050,6 +3063,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
             icp_rate: Some(collateral_price_usd),
             protocol_fee_collateral: if protocol_cut > 0 { Some(protocol_cut) } else { None },
             timestamp: Some(ic_cdk::api::time()),
+            three_usd_reserves_e8s: None,
         };
         crate::storage::record_event(&event);
 

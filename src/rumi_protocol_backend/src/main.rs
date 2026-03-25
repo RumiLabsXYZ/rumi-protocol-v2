@@ -860,7 +860,90 @@ async fn stability_pool_liquidate_debt_burned(
         ));
     }
 
-    rumi_protocol_backend::vault::liquidate_vault_debt_already_burned(vault_id, icusd_burned_e8s, caller).await
+    rumi_protocol_backend::vault::liquidate_vault_debt_already_burned(vault_id, icusd_burned_e8s, caller, None).await
+}
+
+/// Called by the stability pool to liquidate a vault using 3USD reserves.
+/// The SP must have approved this canister to spend `three_usd_amount_e8s` on `three_usd_ledger`.
+/// Validates vault first, then pulls 3USD, then writes down debt and releases collateral.
+/// Only callable by the registered stability pool canister.
+#[update]
+#[candid_method(update)]
+async fn stability_pool_liquidate_with_reserves(
+    vault_id: u64,
+    icusd_debt_covered_e8s: u64,
+    three_usd_amount_e8s: u64,
+    three_usd_ledger: Principal,
+) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
+    validate_call().await?;
+    validate_price_for_liquidation()?;
+    let caller = ic_cdk::api::caller();
+
+    let is_stability_pool = read_state(|s| {
+        s.stability_pool_canister.map_or(false, |sp| sp == caller)
+    });
+    if !is_stability_pool {
+        return Err(ProtocolError::GenericError(
+            "Caller is not the registered stability pool canister".to_string(),
+        ));
+    }
+
+    // Pre-validate: vault exists, has debt, price available — before pulling any tokens.
+    // This prevents pulling 3USD and then failing on a stale/removed vault.
+    let liquidation_amount: rumi_protocol_backend::numeric::ICUSD = icusd_debt_covered_e8s.into();
+    if liquidation_amount < read_state(|s| s.min_icusd_amount) {
+        return Err(ProtocolError::AmountTooLow {
+            minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
+        });
+    }
+    read_state(|s| {
+        match s.vault_id_to_vaults.get(&vault_id) {
+            Some(vault) => {
+                if let Some(status) = s.get_collateral_status(&vault.collateral_type) {
+                    if !status.allows_liquidation() {
+                        return Err(ProtocolError::GenericError(
+                            "Liquidation is not allowed for this collateral type".to_string(),
+                        ));
+                    }
+                }
+                if s.get_collateral_price_decimal(&vault.collateral_type).is_none() {
+                    return Err(ProtocolError::GenericError(
+                        "No price available for collateral. Price feed may be down.".to_string(),
+                    ));
+                }
+                let capped = liquidation_amount.min(vault.borrowed_icusd_amount);
+                if capped == rumi_protocol_backend::numeric::ICUSD::new(0) {
+                    return Err(ProtocolError::GenericError(
+                        "Cannot liquidate zero amount — vault has no debt".to_string(),
+                    ));
+                }
+                Ok(())
+            }
+            None => Err(ProtocolError::GenericError(
+                format!("Vault #{} not found", vault_id),
+            )),
+        }
+    })?;
+
+    // Pull 3USD from the SP into protocol reserves subaccount (ICRC-2 transfer_from).
+    // Only runs after validation passes — no tokens move if vault is stale.
+    rumi_protocol_backend::management::transfer_3usd_to_reserves(
+        three_usd_ledger, caller, three_usd_amount_e8s
+    ).await.map_err(|e| ProtocolError::GenericError(
+        format!("Failed to pull 3USD from stability pool: {:?}", e)
+    ))?;
+
+    // 3USD is now in our reserves subaccount — write down debt and release collateral
+    rumi_protocol_backend::vault::liquidate_vault_debt_already_burned(
+        vault_id, icusd_debt_covered_e8s, caller, Some(three_usd_amount_e8s)
+    ).await
+}
+
+/// Cumulative 3USD held in protocol reserves from stability pool liquidations (e8s).
+#[query]
+#[candid_method(query)]
+fn get_protocol_3usd_reserves() -> u64 {
+    read_state(|s| s.protocol_3usd_reserves)
 }
 
 // Get stability pool configuration
@@ -1522,6 +1605,7 @@ async fn bot_confirm_liquidation(vault_id: u64) -> Result<(), ProtocolError> {
             icp_rate: Some(UsdIcp::from(Decimal::from(claim.collateral_price_e8s) / dec!(100_000_000))),
             protocol_fee_collateral: None,
             timestamp: Some(ic_cdk::api::time()),
+            three_usd_reserves_e8s: None,
         };
         rumi_protocol_backend::storage::record_event(&event);
 

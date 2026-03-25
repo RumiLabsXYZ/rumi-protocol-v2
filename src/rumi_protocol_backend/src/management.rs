@@ -649,6 +649,53 @@ pub async fn get_token_balance(ledger: Principal) -> Result<u64, String> {
     }
 }
 
+// ─── Protocol 3USD reserves ───
+
+/// Deterministic subaccount for protocol-held 3USD reserves from SP liquidations.
+pub fn protocol_3usd_reserves_subaccount() -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"protocol_3usd_reserves");
+    hasher.finalize().into()
+}
+
+/// Pull 3USD from the stability pool into the protocol's reserves subaccount via ICRC-2.
+/// The SP must have approved this canister to spend `amount` on `ledger` beforehand.
+pub async fn transfer_3usd_to_reserves(
+    ledger: Principal,
+    from: Principal,
+    amount: u64,
+) -> Result<u64, TransferFromError> {
+    let client = ICRC1Client {
+        runtime: CdkRuntime,
+        ledger_canister_id: ledger,
+    };
+    let protocol_id = ic_cdk::id();
+    let block_index = client
+        .transfer_from(TransferFromArgs {
+            spender_subaccount: None,
+            from: Account {
+                owner: from,
+                subaccount: None,
+            },
+            to: Account {
+                owner: protocol_id,
+                subaccount: Some(protocol_3usd_reserves_subaccount()),
+            },
+            amount: Nat::from(amount),
+            fee: None,
+            created_at_time: None,
+            memo: None,
+        })
+        .await
+        .map_err(|e| TransferFromError::GenericError {
+            error_code: Nat::from(e.0.max(0) as u64),
+            message: e.1,
+        })?;
+
+    let nat = block_index.map_err(|e| e)?;
+    Ok(nat.0.to_u64().unwrap())
+}
+
 // ─── Push-deposit helpers (Oisy wallet integration) ───
 
 /// Compute a deterministic deposit subaccount for a given caller.

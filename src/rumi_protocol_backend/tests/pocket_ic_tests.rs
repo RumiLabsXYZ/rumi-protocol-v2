@@ -12,7 +12,7 @@ use icrc_ledger_types::icrc2::approve::ApproveArgs;
 use rumi_protocol_backend::{
     vault::{OpenVaultSuccess, CandidVault, VaultArg},
     ProtocolError, SuccessWithFee, Fees, GetEventsArg, LiquidityStatus,
-    AddCollateralArg,
+    AddCollateralArg, StabilityPoolLiquidationResult,
 };
 use rumi_protocol_backend::event::Event;
 use rumi_protocol_backend::state::{CollateralConfig, CollateralStatus, PriceSource, XrcAssetClass};
@@ -3279,7 +3279,7 @@ fn test_admin_mint_success() {
     }).collect();
     assert_eq!(admin_mint_events.len(), 1, "Should have exactly one AdminMint event");
 
-    if let Event::AdminMint { amount, to, reason, block_index: evt_block } = admin_mint_events[0] {
+    if let Event::AdminMint { amount, to, reason, block_index: evt_block, .. } = admin_mint_events[0] {
         assert!(*amount == mint_amount, "Minted amount should match");
         assert_eq!(*to, recipient);
         assert_eq!(reason, "Refund for failed operation #42");
@@ -3408,4 +3408,440 @@ fn test_admin_mint_cooldown_enforced() {
     assert_eq!(admin_mint_count, 2, "Should have exactly 2 AdminMint events (first + after cooldown)");
 
     log("🎉 TEST PASSED: test_admin_mint_cooldown_enforced");
+}
+
+// ─── 3USD Reserves Liquidation Tests ───
+
+/// Deploy a standalone ICRC-1/2 ledger to serve as the 3USD LP token for testing.
+/// Mints `initial_balance` to `initial_holder`.
+fn deploy_3usd_ledger(
+    pic: &PocketIc,
+    minting_principal: Principal,
+    initial_holder: Principal,
+    initial_balance: u64,
+) -> Principal {
+    let ledger_id = pic.create_canister();
+    pic.add_cycles(ledger_id, 2_000_000_000_000);
+
+    let init_args = InitArgs {
+        minting_account: Account { owner: minting_principal, subaccount: None },
+        fee_collector_account: None,
+        transfer_fee: candid::Nat::from(0u64), // Zero fee for clean testing
+        decimals: Some(8),
+        max_memo_length: Some(32),
+        token_name: "3USD LP Token".into(),
+        token_symbol: "3USD".into(),
+        metadata: vec![],
+        initial_balances: vec![(
+            Account { owner: initial_holder, subaccount: None },
+            candid::Nat::from(initial_balance as u128),
+        )],
+        feature_flags: Some(FeatureFlags { icrc2: true }),
+        maximum_number_of_accounts: None,
+        accounts_overflow_trim_quantity: None,
+        archive_options: ArchiveOptions {
+            num_blocks_to_archive: 2000,
+            trigger_threshold: 1000,
+            controller_id: minting_principal,
+            max_transactions_per_response: None,
+            max_message_size_bytes: None,
+            cycles_for_archive_creation: None,
+            node_max_memory_size_bytes: None,
+            more_controller_ids: None,
+        },
+    };
+
+    let encoded = encode_args((LedgerArg::Init(init_args),)).expect("encode 3USD ledger init");
+    pic.install_canister(ledger_id, icrc1_ledger_wasm(), encoded, None);
+    log(&format!("✅ Deployed 3USD ledger: {}", ledger_id));
+    ledger_id
+}
+
+/// Helper: get balance of any ICRC-1 ledger for a given account
+fn get_balance(pic: &PocketIc, ledger: Principal, owner: Principal, subaccount: Option<[u8; 32]>) -> u64 {
+    let account = Account { owner, subaccount };
+    let result = pic.query_call(ledger, Principal::anonymous(), "icrc1_balance_of", encode_args((account,)).unwrap())
+        .expect("balance_of call failed");
+    let balance: candid::Nat = match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode balance"),
+        WasmResult::Reject(msg) => panic!("balance_of rejected: {}", msg),
+    };
+    balance.0.to_u64().unwrap_or(0)
+}
+
+/// Self-contained protocol setup for 3USD tests.
+/// Uses tick() to trigger the timer-based XRC fetch instead of the broken fetch_icp_rate endpoint.
+fn setup_protocol_for_3usd_test() -> (PocketIc, Principal, Principal, Principal, Principal, Principal, Principal) {
+    log("🔧 Setting up protocol for 3USD test");
+
+    let pic = PocketIcBuilder::new()
+        .with_nns_subnet()
+        .build();
+
+    let test_user = Principal::self_authenticating(&[1, 2, 3, 4]);
+    let developer = Principal::self_authenticating(&[5, 6, 7, 8]);
+    let sp_principal = Principal::self_authenticating(&[20, 21, 22, 23]);
+
+    // Create protocol canister first (used as minting principal for icUSD)
+    let protocol_id = pic.create_canister();
+    pic.add_cycles(protocol_id, 2_000_000_000_000);
+
+    // Deploy ICP ledger
+    let icp_ledger_id = pic.create_canister();
+    pic.add_cycles(icp_ledger_id, 2_000_000_000_000);
+    let icp_init = InitArgs {
+        minting_account: Account { owner: protocol_id, subaccount: None },
+        fee_collector_account: None,
+        transfer_fee: candid::Nat::from(10_000u64),
+        decimals: Some(8),
+        max_memo_length: Some(32),
+        token_name: "Internet Computer Protocol".into(),
+        token_symbol: "ICP".into(),
+        metadata: vec![],
+        initial_balances: vec![(
+            Account { owner: test_user, subaccount: None },
+            candid::Nat::from(1_000_000_000_000u64),
+        )],
+        feature_flags: Some(FeatureFlags { icrc2: true }),
+        maximum_number_of_accounts: None,
+        accounts_overflow_trim_quantity: None,
+        archive_options: ArchiveOptions {
+            num_blocks_to_archive: 2000, trigger_threshold: 1000, controller_id: developer,
+            max_transactions_per_response: None, max_message_size_bytes: None,
+            cycles_for_archive_creation: None, node_max_memory_size_bytes: None,
+            more_controller_ids: None,
+        },
+    };
+    pic.install_canister(icp_ledger_id, icrc1_ledger_wasm(), encode_args((LedgerArg::Init(icp_init),)).unwrap(), None);
+
+    // Deploy icUSD ledger
+    let icusd_ledger_id = pic.create_canister();
+    pic.add_cycles(icusd_ledger_id, 2_000_000_000_000);
+    let icusd_init = InitArgs {
+        minting_account: Account { owner: protocol_id, subaccount: None },
+        fee_collector_account: None,
+        transfer_fee: candid::Nat::from(10_000u64),
+        decimals: Some(8),
+        max_memo_length: Some(32),
+        token_name: "icUSD".into(),
+        token_symbol: "icUSD".into(),
+        metadata: vec![],
+        initial_balances: vec![(
+            Account { owner: test_user, subaccount: None },
+            candid::Nat::from(1_000_000_000_000u64),
+        )],
+        feature_flags: Some(FeatureFlags { icrc2: true }),
+        maximum_number_of_accounts: None,
+        accounts_overflow_trim_quantity: None,
+        archive_options: ArchiveOptions {
+            num_blocks_to_archive: 2000, trigger_threshold: 1000, controller_id: developer,
+            max_transactions_per_response: None, max_message_size_bytes: None,
+            cycles_for_archive_creation: None, node_max_memory_size_bytes: None,
+            more_controller_ids: None,
+        },
+    };
+    pic.install_canister(icusd_ledger_id, icrc1_ledger_wasm(), encode_args((LedgerArg::Init(icusd_init),)).unwrap(), None);
+
+    // Deploy XRC mock
+    let xrc_id = pic.create_canister();
+    pic.add_cycles(xrc_id, 1_000_000_000_000);
+    pic.install_canister(xrc_id, xrc_wasm(), prepare_mock_xrc(), None);
+
+    // Deploy 3USD ledger with balance for SP
+    let three_usd_amount = 100_00000000u64; // 100 3USD
+    let three_usd_ledger = deploy_3usd_ledger(&pic, developer, sp_principal, three_usd_amount);
+
+    // Set time to a recent date BEFORE installing protocol to avoid interest calc overflows.
+    let target_time = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1711324800); // 2024-03-25
+    pic.set_time(target_time);
+
+    // Install protocol
+    let protocol_init = ProtocolArgVariant::Init(ProtocolInitArg {
+        fee_e8s: 10_000,
+        icp_ledger_principal: icp_ledger_id,
+        xrc_principal: xrc_id,
+        icusd_ledger_principal: icusd_ledger_id,
+        developer_principal: developer,
+    });
+    pic.install_canister(protocol_id, protocol_wasm(), encode_args((protocol_init,)).unwrap(), None);
+
+    // Tick to trigger the Duration::ZERO timer (XRC price fetch)
+    pic.advance_time(std::time::Duration::from_secs(1));
+    for _ in 0..10 { pic.tick(); }
+
+    log("✅ Protocol setup complete for 3USD test");
+    (pic, protocol_id, icp_ledger_id, icusd_ledger_id, three_usd_ledger, sp_principal, developer)
+}
+
+/// Test: stability_pool_liquidate_with_reserves pulls 3USD and writes down vault debt
+#[test]
+fn test_3usd_reserves_liquidation_happy_path() {
+    log("🧪 TEST STARTING: test_3usd_reserves_liquidation_happy_path");
+
+    let (pic, protocol_id, icp_ledger_id, _icusd_ledger_id, three_usd_ledger, sp_principal, developer) =
+        setup_protocol_for_3usd_test();
+    let test_user = Principal::self_authenticating(&[1, 2, 3, 4]);
+    let three_usd_amount = 100_00000000u64;
+
+    // ICP price is set via the timer + tick in setup_protocol_for_3usd_test().
+
+    // Disable the borrowing fee curve and set 0% fee + 0% interest to avoid
+    // rust_decimal overflow in PocketIC's default curve resolution.
+    // set_rate_curve_markers with simple Fixed markers avoids system-threshold resolution.
+    let markers: Vec<(f64, f64)> = vec![(1.5, 1.0), (3.0, 1.0)]; // flat 1x multiplier
+    let _ = pic.update_call(
+        protocol_id, developer, "set_rate_curve_markers",
+        encode_args((None::<Principal>, markers)).unwrap(),
+    );
+    let _ = pic.update_call(
+        protocol_id, developer, "set_borrowing_fee",
+        encode_args((0.0f64,)).unwrap(),
+    );
+    let _ = pic.update_call(
+        protocol_id, developer, "set_interest_rate",
+        encode_args((icp_ledger_id, 0.0f64)).unwrap(),
+    );
+
+    // Register the SP in the backend
+    let result = pic.update_call(
+        protocol_id, developer, "set_stability_pool_principal",
+        encode_args((sp_principal,)).unwrap(),
+    ).expect("set_stability_pool_principal call failed");
+    match result {
+        WasmResult::Reply(bytes) => {
+            let r: Result<(), ProtocolError> = decode_one(&bytes).expect("decode");
+            r.expect("set_stability_pool_principal failed");
+        }
+        WasmResult::Reject(msg) => panic!("set_stability_pool_principal rejected: {}", msg),
+    }
+    log(&format!("✅ Registered SP principal: {}", sp_principal));
+
+    // Open vault: approve ICP, open vault, borrow icUSD
+    let collateral_amount = 5_000_000_000u64; // 50 ICP
+    let borrow_amount = 2_000_000_000u64; // 20 icUSD
+
+    // Approve ICP
+    let approve_args = ApproveArgs {
+        fee: None, memo: None, from_subaccount: None, created_at_time: None,
+        amount: candid::Nat::from(collateral_amount as u128),
+        expected_allowance: None, expires_at: None,
+        spender: Account { owner: protocol_id, subaccount: None },
+    };
+    pic.update_call(icp_ledger_id, test_user, "icrc2_approve", encode_args((approve_args,)).unwrap())
+        .expect("ICP approve failed");
+
+    // Open vault
+    let open_result = pic.update_call(protocol_id, test_user, "open_vault", encode_args((collateral_amount,)).unwrap())
+        .expect("open_vault failed");
+    let vault_id: u64 = match open_result {
+        WasmResult::Reply(bytes) => {
+            let r: Result<OpenVaultSuccess, ProtocolError> = decode_one(&bytes).expect("decode");
+            r.expect("open_vault error").vault_id
+        }
+        WasmResult::Reject(msg) => panic!("open_vault rejected: {}", msg),
+    };
+    log(&format!("🏦 Opened vault #{}", vault_id));
+
+    // Borrow
+    let borrow_arg = VaultArg { vault_id, amount: borrow_amount };
+    let borrow_result = pic.update_call(protocol_id, test_user, "borrow_from_vault", encode_args((borrow_arg,)).unwrap())
+        .expect("borrow failed");
+    match borrow_result {
+        WasmResult::Reply(bytes) => {
+            let r: Result<SuccessWithFee, ProtocolError> = decode_one(&bytes).expect("decode");
+            r.expect("borrow error");
+        }
+        WasmResult::Reject(msg) => panic!("borrow rejected: {}", msg),
+    }
+    log(&format!("💸 Borrowed {} icUSD against vault #{}", borrow_amount, vault_id));
+
+    // Record vault state before liquidation
+    let vault_before = get_vault(&pic, protocol_id, test_user, vault_id);
+    let debt_before = vault_before.borrowed_icusd_amount;
+    let collateral_before = vault_before.icp_margin_amount;
+    log(&format!("📊 Vault before: debt={}, collateral={}", debt_before, collateral_before));
+
+    // SP approves backend to spend 3USD
+    let icusd_debt_to_liquidate = borrow_amount; // Liquidate all debt
+    // 3USD amount = icusd_debt / virtual_price. For testing, virtual_price ≈ 1.0 so use 1:1
+    let three_usd_to_send = icusd_debt_to_liquidate; // In real flow, divided by virtual price
+
+    let approve_3usd = ApproveArgs {
+        fee: None, memo: None, from_subaccount: None, created_at_time: None,
+        amount: candid::Nat::from(three_usd_to_send as u128 * 2), // 2x buffer
+        expected_allowance: None, expires_at: None,
+        spender: Account { owner: protocol_id, subaccount: None },
+    };
+    pic.update_call(three_usd_ledger, sp_principal, "icrc2_approve", encode_args((approve_3usd,)).unwrap())
+        .expect("3USD approve failed");
+    log("✅ SP approved backend to spend 3USD");
+
+    // Call stability_pool_liquidate_with_reserves AS the SP
+    let liq_result = pic.update_call(
+        protocol_id, sp_principal, "stability_pool_liquidate_with_reserves",
+        encode_args((vault_id, icusd_debt_to_liquidate, three_usd_to_send, three_usd_ledger)).unwrap(),
+    ).expect("liquidate_with_reserves call failed");
+
+    let liq: StabilityPoolLiquidationResult = match liq_result {
+        WasmResult::Reply(bytes) => {
+            let r: Result<StabilityPoolLiquidationResult, ProtocolError> = decode_one(&bytes).expect("decode");
+            r.expect("liquidation error")
+        }
+        WasmResult::Reject(msg) => panic!("liquidation rejected: {}", msg),
+    };
+    log(&format!("✅ Liquidation succeeded: debt_written_down={}, collateral_released={}", liq.liquidated_debt, liq.collateral_received));
+    assert!(liq.success, "Liquidation should report success");
+    assert!(liq.liquidated_debt > 0, "Should have written down some debt");
+    assert!(liq.collateral_received > 0, "Should have released some collateral");
+
+    // Verify: 3USD was pulled from SP into reserves subaccount
+    let sp_3usd_after = get_balance(&pic, three_usd_ledger, sp_principal, None);
+    log(&format!("📊 SP 3USD balance after: {}", sp_3usd_after));
+    assert!(sp_3usd_after < three_usd_amount, "SP should have less 3USD after liquidation");
+    let three_usd_consumed = three_usd_amount - sp_3usd_after;
+    assert_eq!(three_usd_consumed, three_usd_to_send, "Consumed 3USD should match requested amount");
+
+    // Verify 3USD arrived in reserves subaccount
+    let reserves_subaccount = rumi_protocol_backend::management::protocol_3usd_reserves_subaccount();
+    let reserves_balance = get_balance(&pic, three_usd_ledger, protocol_id, Some(reserves_subaccount));
+    log(&format!("📊 Reserves subaccount balance: {}", reserves_balance));
+    assert_eq!(reserves_balance, three_usd_to_send, "Reserves subaccount should hold the transferred 3USD");
+
+    // Verify: protocol_3usd_reserves state was incremented
+    let reserves_state = pic.query_call(
+        protocol_id, Principal::anonymous(), "get_protocol_3usd_reserves",
+        encode_args(()).unwrap(),
+    ).expect("get_protocol_3usd_reserves failed");
+    let reserves_e8s: u64 = match reserves_state {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode reserves"),
+        WasmResult::Reject(msg) => panic!("get_protocol_3usd_reserves rejected: {}", msg),
+    };
+    log(&format!("📊 protocol_3usd_reserves: {}", reserves_e8s));
+    assert_eq!(reserves_e8s, three_usd_to_send, "Protocol reserves should track the 3USD received");
+
+    // Verify: vault debt was written down
+    // Note: vault may have been fully liquidated and removed, so check carefully
+    let vaults_result = pic.query_call(
+        protocol_id, test_user, "get_vaults",
+        encode_args((Some(test_user),)).unwrap(),
+    ).expect("get_vaults failed");
+    let vaults: Vec<CandidVault> = match vaults_result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode vaults"),
+        WasmResult::Reject(msg) => panic!("get_vaults rejected: {}", msg),
+    };
+    if let Some(vault_after) = vaults.iter().find(|v| v.vault_id == vault_id) {
+        log(&format!("📊 Vault after: debt={}, collateral={}", vault_after.borrowed_icusd_amount, vault_after.icp_margin_amount));
+        assert!(vault_after.borrowed_icusd_amount < debt_before, "Vault debt should have decreased");
+        assert!(vault_after.icp_margin_amount < collateral_before, "Vault collateral should have decreased");
+    } else {
+        log("📊 Vault was fully liquidated and removed (debt=0, collateral=0)");
+        // This is also valid — full liquidation removes the vault
+    }
+
+    // Verify: collateral was sent to SP (via pending transfer)
+    let sp_icp_balance = get_icp_balance(&pic, icp_ledger_id, sp_principal);
+    log(&format!("📊 SP ICP balance after liquidation: {}", sp_icp_balance));
+    assert!(sp_icp_balance > 0, "SP should have received collateral from liquidation");
+
+    log("🎉 TEST PASSED: test_3usd_reserves_liquidation_happy_path");
+}
+
+/// Test: pre-validation rejects when vault doesn't exist (no 3USD should move)
+#[test]
+fn test_3usd_reserves_liquidation_vault_not_found() {
+    log("🧪 TEST STARTING: test_3usd_reserves_liquidation_vault_not_found");
+
+    let (pic, protocol_id, _icp_ledger_id, _icusd_ledger_id, three_usd_ledger, sp_principal, developer) =
+        setup_protocol_for_3usd_test();
+    let three_usd_amount = 100_00000000u64;
+
+    // Register SP
+    let result = pic.update_call(
+        protocol_id, developer, "set_stability_pool_principal",
+        encode_args((sp_principal,)).unwrap(),
+    ).expect("set_stability_pool_principal failed");
+    match result {
+        WasmResult::Reply(bytes) => {
+            let r: Result<(), ProtocolError> = decode_one(&bytes).expect("decode");
+            r.expect("set_stability_pool_principal error");
+        }
+        WasmResult::Reject(msg) => panic!("rejected: {}", msg),
+    }
+
+    // SP approves backend
+    let approve_3usd = ApproveArgs {
+        fee: None, memo: None, from_subaccount: None, created_at_time: None,
+        amount: candid::Nat::from(three_usd_amount as u128),
+        expected_allowance: None, expires_at: None,
+        spender: Account { owner: protocol_id, subaccount: None },
+    };
+    pic.update_call(three_usd_ledger, sp_principal, "icrc2_approve", encode_args((approve_3usd,)).unwrap())
+        .expect("approve failed");
+
+    // Call with a non-existent vault ID
+    let liq_result = pic.update_call(
+        protocol_id, sp_principal, "stability_pool_liquidate_with_reserves",
+        encode_args((99999u64, 1_000_000_000u64, 1_000_000_000u64, three_usd_ledger)).unwrap(),
+    ).expect("call failed");
+
+    match liq_result {
+        WasmResult::Reply(bytes) => {
+            let r: Result<StabilityPoolLiquidationResult, ProtocolError> = decode_one(&bytes).expect("decode");
+            assert!(r.is_err(), "Should have returned an error for non-existent vault");
+            log(&format!("✅ Correctly rejected: {:?}", r.unwrap_err()));
+        }
+        WasmResult::Reject(msg) => {
+            log(&format!("✅ Correctly rejected (trap): {}", msg));
+        }
+    }
+
+    // Verify: NO 3USD was moved (pre-validation caught it)
+    let sp_balance_after = get_balance(&pic, three_usd_ledger, sp_principal, None);
+    assert_eq!(sp_balance_after, three_usd_amount, "SP 3USD balance should be unchanged — no tokens should have moved");
+    log("✅ Pre-validation prevented 3USD transfer to non-existent vault");
+
+    log("🎉 TEST PASSED: test_3usd_reserves_liquidation_vault_not_found");
+}
+
+/// Test: non-SP caller is rejected
+#[test]
+fn test_3usd_reserves_liquidation_non_sp_rejected() {
+    log("🧪 TEST STARTING: test_3usd_reserves_liquidation_non_sp_rejected");
+
+    let (pic, protocol_id, _icp_ledger_id, _icusd_ledger_id, three_usd_ledger, sp_principal, developer) =
+        setup_protocol_for_3usd_test();
+    let random_caller = Principal::self_authenticating(&[30, 31, 32, 33]);
+
+    // Register the SP
+    let result = pic.update_call(
+        protocol_id, developer, "set_stability_pool_principal",
+        encode_args((sp_principal,)).unwrap(),
+    ).expect("set_stability_pool_principal failed");
+    match result {
+        WasmResult::Reply(bytes) => {
+            let r: Result<(), ProtocolError> = decode_one(&bytes).expect("decode");
+            r.expect("set_stability_pool_principal error");
+        }
+        WasmResult::Reject(msg) => panic!("rejected: {}", msg),
+    }
+
+    // Random caller tries to call the endpoint (NOT the registered SP)
+    let liq_result = pic.update_call(
+        protocol_id, random_caller, "stability_pool_liquidate_with_reserves",
+        encode_args((1u64, 1_000_000_000u64, 1_000_000_000u64, three_usd_ledger)).unwrap(),
+    ).expect("call failed");
+
+    match liq_result {
+        WasmResult::Reply(bytes) => {
+            let r: Result<StabilityPoolLiquidationResult, ProtocolError> = decode_one(&bytes).expect("decode");
+            assert!(r.is_err(), "Should reject non-SP caller");
+            let err = r.unwrap_err();
+            log(&format!("✅ Correctly rejected non-SP caller: {:?}", err));
+        }
+        WasmResult::Reject(msg) => {
+            log(&format!("✅ Correctly rejected (trap): {}", msg));
+        }
+    }
+
+    log("🎉 TEST PASSED: test_3usd_reserves_liquidation_non_sp_rejected");
 }
