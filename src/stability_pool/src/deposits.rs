@@ -53,7 +53,10 @@ pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), Stabili
     match result {
         Ok((Ok(block_index),)) => {
             log!(INFO, "Transfer succeeded, block: {}", block_index);
-            mutate_state(|s| s.add_deposit(caller, token_ledger, amount));
+            mutate_state(|s| {
+                s.add_deposit(caller, token_ledger, amount);
+                s.push_event(caller, PoolEventType::Deposit { token_ledger, amount });
+            });
             log!(INFO, "Deposit recorded for {}", caller);
             Ok(())
         },
@@ -125,6 +128,7 @@ pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), Stabil
     match result {
         Ok((Ok(block_index),)) => {
             log!(INFO, "Withdrawal transfer succeeded, block: {}", block_index);
+            mutate_state(|s| s.push_event(caller, PoolEventType::Withdraw { token_ledger, amount }));
             Ok(())
         },
         Ok((Err(transfer_error),)) => {
@@ -218,6 +222,10 @@ pub async fn claim_collateral(collateral_ledger: Principal) -> Result<u64, Stabi
     match result {
         Ok((Ok(block_index),)) => {
             log!(INFO, "Collateral claim transfer succeeded, block: {}", block_index);
+            mutate_state(|s| s.push_event(caller, PoolEventType::ClaimCollateral {
+                collateral_ledger,
+                amount: transfer_amount,
+            }));
             Ok(transfer_amount)
         },
         Ok((Err(transfer_error),)) => {
@@ -422,7 +430,14 @@ pub async fn deposit_as_3usd(
 
     // Step 5: Credit user's 3USD balance
     let lp_amount_u64 = lp_minted as u64;
-    mutate_state(|s| s.add_deposit(caller, three_usd_ledger, lp_amount_u64));
+    mutate_state(|s| {
+        s.add_deposit(caller, three_usd_ledger, lp_amount_u64);
+        s.push_event(caller, PoolEventType::DepositAs3USD {
+            token_ledger,
+            amount_in: amount,
+            lp_minted: lp_amount_u64,
+        });
+    });
 
     log!(INFO, "deposit_as_3usd: {} deposited {} of {} → {} 3USD LP", caller, amount, token_ledger, lp_amount_u64);
 

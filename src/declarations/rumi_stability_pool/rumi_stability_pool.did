@@ -177,6 +177,23 @@ type Icrc21ConsentMessageResponse = variant {
 
 // ── ICRC-10: Supported Standards ──
 
+// ── Pool Events ──
+
+type PoolEventType = variant {
+  Deposit : record { token_ledger : principal; amount : nat64 };
+  Withdraw : record { token_ledger : principal; amount : nat64 };
+  ClaimCollateral : record { collateral_ledger : principal; amount : nat64 };
+  DepositAs3USD : record { token_ledger : principal; amount_in : nat64; lp_minted : nat64 };
+  InterestReceived : record { token_ledger : principal; amount : nat64 };
+};
+
+type PoolEvent = record {
+  id : nat64;
+  timestamp : nat64;
+  caller : principal;
+  event_type : PoolEventType;
+};
+
 type Icrc10SupportedStandard = record {
   name : text;
   url : text;
@@ -214,8 +231,8 @@ service : (StabilityPoolInitArgs) -> {
   update_pool_configuration : (PoolConfiguration) -> (variant { Ok; Err : StabilityPoolError });
   emergency_pause : () -> (variant { Ok; Err : StabilityPoolError });
   resume_operations : () -> (variant { Ok; Err : StabilityPoolError });
-  admin_reset_token_failures : (principal) -> (variant { Ok : text; Err : StabilityPoolError });
   admin_correct_balance : (principal, principal, nat64) -> (variant { Ok : text; Err : StabilityPoolError });
+  admin_correct_collateral_gain : (principal, principal, nat64) -> (variant { Ok : text; Err : StabilityPoolError });
 
   // ── ICRC-21: Consent Messages ──
   icrc21_canister_call_consent_message : (Icrc21ConsentMessageRequest) -> (Icrc21ConsentMessageResponse);
@@ -230,4 +247,6 @@ service : (StabilityPoolInitArgs) -> {
   check_pool_capacity : (principal, nat64) -> (bool) query;
   validate_pool_state : () -> (variant { Ok : text; Err : text }) query;
   get_suspended_tokens : () -> (vec record { principal; nat32 }) query;
+  get_pool_events : (nat64, nat64) -> (vec PoolEvent) query;
+  get_pool_event_count : () -> (nat64) query;
 };

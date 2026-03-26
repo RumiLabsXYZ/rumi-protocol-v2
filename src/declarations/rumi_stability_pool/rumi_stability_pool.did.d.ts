@@ -13,9 +13,6 @@ export type CollateralStatus = { 'Paused' : null } |
   { 'Deprecated' : null } |
   { 'Sunset' : null } |
   { 'Frozen' : null };
-/**
- * ── ICRC-10: Supported Standards ──
- */
 export interface Icrc10SupportedStandard { 'url' : string, 'name' : string }
 export interface Icrc21ConsentInfo {
   'metadata' : Icrc21ConsentMessageResponseMetadata,
@@ -90,6 +87,31 @@ export interface PoolConfiguration {
   'authorized_admins' : Array<Principal>,
   'max_liquidations_per_batch' : bigint,
 }
+export interface PoolEvent {
+  'id' : bigint,
+  'timestamp' : bigint,
+  'caller' : Principal,
+  'event_type' : PoolEventType,
+}
+/**
+ * ── ICRC-10: Supported Standards ──
+ * ── Pool Events ──
+ */
+export type PoolEventType = {
+    'Withdraw' : { 'amount' : bigint, 'token_ledger' : Principal }
+  } |
+  { 'Deposit' : { 'amount' : bigint, 'token_ledger' : Principal } } |
+  { 'InterestReceived' : { 'amount' : bigint, 'token_ledger' : Principal } } |
+  {
+    'DepositAs3USD' : {
+      'amount_in' : bigint,
+      'lp_minted' : bigint,
+      'token_ledger' : Principal,
+    }
+  } |
+  {
+    'ClaimCollateral' : { 'collateral_ledger' : Principal, 'amount' : bigint }
+  };
 export interface PoolLiquidationRecord {
   'collateral_price_e8s' : [] | [bigint],
   'stables_consumed' : Array<[Principal, bigint]>,
@@ -183,8 +205,8 @@ export interface _SERVICE {
     { 'Ok' : string } |
       { 'Err' : StabilityPoolError }
   >,
-  'admin_reset_token_failures' : ActorMethod<
-    [Principal],
+  'admin_correct_collateral_gain' : ActorMethod<
+    [Principal, Principal, bigint],
     { 'Ok' : string } |
       { 'Err' : StabilityPoolError }
   >,
@@ -226,6 +248,8 @@ export interface _SERVICE {
     [[] | [bigint]],
     Array<PoolLiquidationRecord>
   >,
+  'get_pool_event_count' : ActorMethod<[], bigint>,
+  'get_pool_events' : ActorMethod<[bigint, bigint], Array<PoolEvent>>,
   /**
    * ── Queries ──
    */

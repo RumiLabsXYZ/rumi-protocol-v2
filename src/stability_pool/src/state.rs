@@ -46,6 +46,12 @@ pub struct StabilityPoolState {
     #[serde(default)]
     pub protocol_reserve_address: Option<Principal>,
     pub is_initialized: bool,
+    /// Event log for deposits, withdrawals, claims, interest.
+    /// `Option` for backward-compatible upgrade (deserializes as None from old state).
+    #[serde(default)]
+    pub pool_events: Option<Vec<PoolEvent>>,
+    #[serde(default)]
+    pub next_event_id: Option<u64>,
 }
 
 impl Default for StabilityPoolState {
@@ -71,9 +77,14 @@ impl Default for StabilityPoolState {
             cached_virtual_prices: Some(BTreeMap::new()),
             protocol_reserve_address: None,
             is_initialized: false,
+            pool_events: Some(Vec::new()),
+            next_event_id: Some(0),
         }
     }
 }
+
+/// Maximum pool events retained in memory.
+const MAX_POOL_EVENTS: usize = 10_000;
 
 impl StabilityPoolState {
     pub fn initialize(&mut self, args: StabilityPoolInitArgs) {
@@ -81,6 +92,37 @@ impl StabilityPoolState {
         self.configuration.authorized_admins = args.authorized_admins;
         self.pool_creation_timestamp = ic_cdk::api::time();
         self.is_initialized = true;
+    }
+
+    /// Append a pool event. Trims oldest events if over capacity.
+    pub fn push_event(&mut self, caller: Principal, event_type: PoolEventType) {
+        let id = self.next_event_id.unwrap_or(0);
+        self.next_event_id = Some(id + 1);
+
+        let events = self.pool_events.get_or_insert_with(Vec::new);
+        events.push(PoolEvent {
+            id,
+            timestamp: ic_cdk::api::time(),
+            caller,
+            event_type,
+        });
+
+        // Trim oldest events when over capacity
+        if events.len() > MAX_POOL_EVENTS {
+            let excess = events.len() - MAX_POOL_EVENTS;
+            events.drain(..excess);
+        }
+    }
+
+    pub fn pool_events(&self) -> &[PoolEvent] {
+        match &self.pool_events {
+            Some(v) => v,
+            None => &[],
+        }
+    }
+
+    pub fn pool_event_count(&self) -> u64 {
+        self.pool_events.as_ref().map(|v| v.len() as u64).unwrap_or(0)
     }
 
     pub fn is_admin(&self, caller: &Principal) -> bool {

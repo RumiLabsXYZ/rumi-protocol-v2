@@ -394,6 +394,43 @@ pub enum ThreePoolErrorRemote {
     BurnFailed { token: String, reason: String },
 }
 
+// ──────────────────────────────────────────────────────────────
+// Pool Events (audit trail for deposits, withdrawals, claims, interest)
+// ──────────────────────────────────────────────────────────────
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct PoolEvent {
+    pub id: u64,
+    pub timestamp: u64,
+    pub caller: Principal,
+    pub event_type: PoolEventType,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub enum PoolEventType {
+    Deposit {
+        token_ledger: Principal,
+        amount: u64,
+    },
+    Withdraw {
+        token_ledger: Principal,
+        amount: u64,
+    },
+    ClaimCollateral {
+        collateral_ledger: Principal,
+        amount: u64,
+    },
+    DepositAs3USD {
+        token_ledger: Principal,
+        amount_in: u64,
+        lp_minted: u64,
+    },
+    InterestReceived {
+        token_ledger: Principal,
+        amount: u64,
+    },
+}
+
 /// Arguments for the 3pool's authorized redeem-and-burn operation.
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
 pub struct AuthorizedRedeemAndBurnArgs {

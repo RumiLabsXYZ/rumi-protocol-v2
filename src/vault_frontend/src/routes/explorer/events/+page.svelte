@@ -2,8 +2,8 @@
 	import { onMount } from 'svelte';
 	import EventRow from '$components/explorer/EventRow.svelte';
 	import Pagination from '$components/explorer/Pagination.svelte';
-	import { fetchEvents } from '$services/explorer/explorerService';
-	import { getEventCategory, EVENT_CATEGORIES } from '$utils/explorerFormatters';
+	import { fetchEvents, fetchSwapEvents, fetchSwapEventCount, fetchStabilityPoolEvents, fetchStabilityPoolEventCount } from '$services/explorer/explorerService';
+	import { getEventCategory, formatSwapEvent, formatStabilityPoolEvent, EVENT_CATEGORIES } from '$utils/explorerFormatters';
 	import type { EventCategory } from '$utils/explorerFormatters';
 
 	const PAGE_SIZE = 100;
@@ -15,10 +15,14 @@
 	let loading: boolean = $state(true);
 	let error: string | null = $state(null);
 
+	// Track whether we're showing canister-specific events (separate data sources)
+	const isThreePool = $derived((selectedCategory as string) === 'threepool');
+	const isStabilityPool = $derived((selectedCategory as string) === 'stability_pool');
+
 	const totalPages = $derived(Math.ceil(totalCount / PAGE_SIZE));
 
 	const filteredEvents = $derived(
-		selectedCategory === 'all'
+		selectedCategory === 'all' || isThreePool || isStabilityPool
 			? events
 			: events.filter(([_, event]) => getEventCategory(event) === selectedCategory)
 	);
@@ -28,7 +32,7 @@
 		...EVENT_CATEGORIES.map((c) => ({ key: c.key, label: c.label }))
 	];
 
-	async function loadPage(page: number) {
+	async function loadProtocolPage(page: number) {
 		loading = true;
 		error = null;
 		try {
@@ -38,14 +42,97 @@
 			currentPage = page;
 		} catch (e) {
 			error = 'Failed to load events.';
-			console.error('[events page] loadPage error:', e);
+			console.error('[events page] loadProtocolPage error:', e);
 		} finally {
 			loading = false;
 		}
 	}
 
+	async function loadThreePoolPage(page: number) {
+		loading = true;
+		error = null;
+		try {
+			const count = await fetchSwapEventCount();
+			totalCount = Number(count);
+
+			// 3pool stores events oldest-first; reverse to show newest-first like protocol events
+			const total = Number(count);
+			const reverseStart = Math.max(0, total - (page + 1) * PAGE_SIZE);
+			const length = Math.min(PAGE_SIZE, total - page * PAGE_SIZE);
+
+			if (length <= 0) {
+				events = [];
+			} else {
+				const swapEvents = await fetchSwapEvents(BigInt(reverseStart), BigInt(length));
+				// Reverse so newest is first, wrap as [id, event] tuples
+				events = swapEvents
+					.slice()
+					.reverse()
+					.map((swap: any) => [BigInt(swap.id), swap] as [bigint, any]);
+			}
+			currentPage = page;
+		} catch (e) {
+			error = 'Failed to load 3Pool events.';
+			console.error('[events page] loadThreePoolPage error:', e);
+		} finally {
+			loading = false;
+		}
+	}
+
+	async function loadStabilityPoolPage(page: number) {
+		loading = true;
+		error = null;
+		try {
+			const count = await fetchStabilityPoolEventCount();
+			totalCount = Number(count);
+
+			// SP stores events oldest-first; reverse to show newest-first
+			const total = Number(count);
+			const reverseStart = Math.max(0, total - (page + 1) * PAGE_SIZE);
+			const length = Math.min(PAGE_SIZE, total - page * PAGE_SIZE);
+
+			if (length <= 0) {
+				events = [];
+			} else {
+				const poolEvents = await fetchStabilityPoolEvents(BigInt(reverseStart), BigInt(length));
+				events = poolEvents
+					.slice()
+					.reverse()
+					.map((evt: any) => [BigInt(evt.id), evt] as [bigint, any]);
+			}
+			currentPage = page;
+		} catch (e) {
+			error = 'Failed to load Stability Pool events.';
+			console.error('[events page] loadStabilityPoolPage error:', e);
+		} finally {
+			loading = false;
+		}
+	}
+
+	function loadPage(page: number) {
+		if (isThreePool) {
+			loadThreePoolPage(page);
+		} else if (isStabilityPool) {
+			loadStabilityPoolPage(page);
+		} else {
+			loadProtocolPage(page);
+		}
+	}
+
 	function handlePageChange(page: number) {
 		loadPage(page);
+	}
+
+	function handleTabChange(key: EventCategory | 'all') {
+		const wasSeparateSource = selectedCategory === 'threepool' || selectedCategory === 'stability_pool';
+		const willBeSeparateSource = key === 'threepool' || key === 'stability_pool';
+		const prevCategory = selectedCategory;
+		selectedCategory = key;
+
+		// Reload from page 0 when switching between different data sources
+		if (wasSeparateSource !== willBeSeparateSource || (wasSeparateSource && prevCategory !== key)) {
+			loadPage(0);
+		}
 	}
 
 	onMount(() => {
@@ -71,7 +158,7 @@
 					{selectedCategory === tab.key
 					? 'text-blue-400 border-b-2 border-blue-400'
 					: 'text-gray-400 border-b-2 border-transparent hover:text-gray-300 hover:border-gray-600'}"
-				onclick={() => (selectedCategory = tab.key)}
+				onclick={() => handleTabChange(tab.key)}
 			>
 				{tab.label}
 			</button>
@@ -120,7 +207,36 @@
 				</thead>
 				<tbody>
 					{#each filteredEvents as [globalIndex, event] (globalIndex)}
-						<EventRow {event} index={Number(globalIndex)} />
+						{#if isThreePool || isStabilityPool}
+							{@const formatted = isThreePool ? formatSwapEvent(event) : formatStabilityPoolEvent(event)}
+							<tr class="border-b border-gray-700/50 hover:bg-gray-800/30 transition-colors group">
+								<td class="px-4 py-3">
+									<span class="text-xs text-gray-500 font-mono">{Number(globalIndex)}</span>
+								</td>
+								<td class="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">
+									{#if event.timestamp}
+										{@const ts = Number(event.timestamp) > 1e15 ? Number(event.timestamp) : Number(event.timestamp) * 1e9}
+										{@const ago = (() => { const s = Math.floor((Date.now() - ts / 1e6) / 1000); if (s < 60) return `${s}s ago`; if (s < 3600) return `${Math.floor(s/60)}m ago`; if (s < 86400) return `${Math.floor(s/3600)}h ago`; return `${Math.floor(s/86400)}d ago`; })()}
+										<span title={new Date(ts / 1e6).toISOString()}>{ago}</span>
+									{:else}
+										<span class="text-gray-600">&mdash;</span>
+									{/if}
+								</td>
+								<td class="px-4 py-3">
+									<span class="inline-block text-xs font-medium px-2.5 py-0.5 rounded-full whitespace-nowrap {formatted.badgeColor}">
+										{formatted.typeName}
+									</span>
+								</td>
+								<td class="px-4 py-3 text-sm text-gray-300 truncate max-w-[300px]">
+									{formatted.summary}
+								</td>
+								<td class="px-4 py-3 text-right">
+									<!-- No detail page for pool events yet -->
+								</td>
+							</tr>
+						{:else}
+							<EventRow {event} index={Number(globalIndex)} />
+						{/if}
 					{/each}
 				</tbody>
 			</table>
