@@ -594,6 +594,10 @@ pub struct State {
     pub reserve_redemptions_enabled: bool,
     pub reserve_redemption_fee: Ratio,
 
+    /// Cumulative 3USD (LP tokens) received from stability pool liquidations (e8s).
+    /// These sit in subaccount hash("protocol_3usd_reserves") on the 3USD ledger.
+    pub protocol_3usd_reserves: u64,
+
     // Admin mint cooldown tracking
     pub last_admin_mint_time: u64,
 
@@ -747,6 +751,7 @@ impl From<InitArg> for State {
             // Reserve redemptions
             reserve_redemptions_enabled: false,
             reserve_redemption_fee: DEFAULT_RESERVE_REDEMPTION_FEE,
+            protocol_3usd_reserves: 0,
 
             // Admin mint cooldown
             last_admin_mint_time: 0,
@@ -1423,11 +1428,19 @@ impl State {
             CrAnchor::Midpoint(a, b) => {
                 let va = self.resolve_anchor(a, asset_context);
                 let vb = self.resolve_anchor(b, asset_context);
-                Ratio::from((va.0 + vb.0) / dec!(2))
+                // Use checked_add to avoid overflow when total_collateral_ratio is Decimal::MAX
+                // (no vaults with debt yet). Fall back to the larger of the two values.
+                match va.0.checked_add(vb.0) {
+                    Some(sum) => Ratio::from(sum / dec!(2)),
+                    None => Ratio::from(va.0.max(vb.0)),
+                }
             }
             CrAnchor::Offset(base, delta) => {
                 let v = self.resolve_anchor(base, asset_context);
-                Ratio::from(v.0 + delta.0)
+                match v.0.checked_add(delta.0) {
+                    Some(sum) => Ratio::from(sum),
+                    None => Ratio::from(Decimal::MAX),
+                }
             }
         }
     }
