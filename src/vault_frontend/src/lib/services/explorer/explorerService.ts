@@ -445,6 +445,34 @@ export async function fetchStabilityPoolLiquidations(limit?: number): Promise<an
 	}
 }
 
+export async function fetchStabilityPoolEvents(start: bigint, length: bigint): Promise<any[]> {
+	const key = `pool:stability:events:${start}:${length}`;
+	const cached = getCached<any[]>(key, TTL.POOL);
+	if (cached) return cached;
+
+	try {
+		const result = await stabilityPoolService.getPoolEvents(start, length);
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchStabilityPoolEvents failed:', err);
+		return [];
+	}
+}
+
+export async function fetchStabilityPoolEventCount(): Promise<bigint> {
+	const key = 'pool:stability:eventcount';
+	const cached = getCached<bigint>(key, TTL.POOL);
+	if (cached !== null) return cached;
+
+	try {
+		const result = await stabilityPoolService.getPoolEventCount();
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchStabilityPoolEventCount failed:', err);
+		return 0n;
+	}
+}
+
 // ── 3Pool ────────────────────────────────────────────────────────────────────
 
 export async function fetchThreePoolStatus(): Promise<any | null> {

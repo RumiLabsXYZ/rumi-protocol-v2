@@ -97,6 +97,135 @@ const SYSTEM_KEYS = new Set([
   'init', 'upgrade', 'accrue_interest',
 ]);
 
+// ─── 3Pool Token Lookup ───────────────────────────────────────────────
+
+const THREE_POOL_TOKEN_NAMES: Record<number, string> = { 0: 'icUSD', 1: 'ckUSDT', 2: 'ckUSDC' };
+const THREE_POOL_TOKEN_DECIMALS: Record<number, number> = { 0: 8, 1: 6, 2: 6 };
+
+function fmtPoolAmount(amount: bigint | number, tokenIndex: number): string {
+  const decimals = THREE_POOL_TOKEN_DECIMALS[tokenIndex] ?? 8;
+  const val = Number(amount) / Math.pow(10, decimals);
+  return val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+}
+
+/**
+ * Format a 3Pool SwapEvent into the same FormattedEvent shape used by protocol events.
+ * SwapEvent: { id, fee, token_in, amount_out, timestamp, caller, amount_in, token_out }
+ */
+export function formatSwapEvent(swap: any): FormattedEvent {
+  const tokenIn = THREE_POOL_TOKEN_NAMES[swap.token_in] ?? `token${swap.token_in}`;
+  const tokenOut = THREE_POOL_TOKEN_NAMES[swap.token_out] ?? `token${swap.token_out}`;
+  const amtIn = fmtPoolAmount(swap.amount_in, swap.token_in);
+  const amtOut = fmtPoolAmount(swap.amount_out, swap.token_out);
+  const feeAmt = fmtPoolAmount(swap.fee, swap.token_out);
+
+  const fields: EventField[] = [
+    { label: 'Token In', value: `${amtIn} ${tokenIn}`, type: 'amount' },
+    { label: 'Token Out', value: `${amtOut} ${tokenOut}`, type: 'amount' },
+    { label: 'Fee', value: `${feeAmt} ${tokenOut}`, type: 'amount' },
+  ];
+
+  const callerText = swap.caller?.toText?.() ?? swap.caller?.toString?.() ?? null;
+  if (callerText) {
+    fields.push({
+      label: 'Caller',
+      value: shortenPrincipal(callerText),
+      type: 'address',
+      linkTarget: callerText,
+    });
+  }
+
+  if (swap.timestamp) {
+    fields.push({ label: 'Timestamp', value: formatTimestamp(swap.timestamp), type: 'timestamp' });
+  }
+
+  return {
+    summary: `Swapped ${amtIn} ${tokenIn} → ${amtOut} ${tokenOut}`,
+    typeName: '3Pool Swap',
+    category: 'threepool',
+    badgeColor: BADGE_COLORS.threepool,
+    fields,
+  };
+}
+
+/**
+ * Format a Stability Pool PoolEvent into FormattedEvent.
+ * PoolEvent: { id, timestamp, caller, event_type: Deposit|Withdraw|ClaimCollateral|DepositAs3USD|InterestReceived }
+ */
+export function formatStabilityPoolEvent(evt: any): FormattedEvent {
+  const eventType = evt.event_type ?? {};
+  const key = Object.keys(eventType)[0] ?? 'unknown';
+  const data = eventType[key] ?? {};
+
+  const fields: EventField[] = [];
+  let summary = '';
+  let typeName = '';
+
+  if (key === 'Deposit') {
+    const sym = getTokenSymbol(data.token_ledger?.toText?.() ?? '');
+    const dec = getTokenDecimals(data.token_ledger?.toText?.() ?? '');
+    const amt = formatE8s(data.amount, dec);
+    typeName = 'Deposit';
+    summary = `Deposited ${amt} ${sym}`;
+    fields.push({ label: 'Amount', value: `${amt} ${sym}`, type: 'amount' });
+  } else if (key === 'Withdraw') {
+    const sym = getTokenSymbol(data.token_ledger?.toText?.() ?? '');
+    const dec = getTokenDecimals(data.token_ledger?.toText?.() ?? '');
+    const amt = formatE8s(data.amount, dec);
+    typeName = 'Withdraw';
+    summary = `Withdrew ${amt} ${sym}`;
+    fields.push({ label: 'Amount', value: `${amt} ${sym}`, type: 'amount' });
+  } else if (key === 'ClaimCollateral') {
+    const sym = getTokenSymbol(data.collateral_ledger?.toText?.() ?? '');
+    const dec = getTokenDecimals(data.collateral_ledger?.toText?.() ?? '');
+    const amt = formatE8s(data.amount, dec);
+    typeName = 'Claim Collateral';
+    summary = `Claimed ${amt} ${sym}`;
+    fields.push({ label: 'Amount', value: `${amt} ${sym}`, type: 'amount' });
+  } else if (key === 'DepositAs3USD') {
+    const sym = getTokenSymbol(data.token_ledger?.toText?.() ?? '');
+    const dec = getTokenDecimals(data.token_ledger?.toText?.() ?? '');
+    const amtIn = formatE8s(data.amount_in, dec);
+    const lpMinted = formatE8s(data.lp_minted, 18);
+    typeName = 'Deposit as 3USD';
+    summary = `Deposited ${amtIn} ${sym} → ${lpMinted} 3USD LP`;
+    fields.push({ label: 'Amount In', value: `${amtIn} ${sym}`, type: 'amount' });
+    fields.push({ label: 'LP Minted', value: `${lpMinted} 3USD`, type: 'amount' });
+  } else if (key === 'InterestReceived') {
+    const sym = getTokenSymbol(data.token_ledger?.toText?.() ?? '');
+    const dec = getTokenDecimals(data.token_ledger?.toText?.() ?? '');
+    const amt = formatE8s(data.amount, dec);
+    typeName = 'Interest Received';
+    summary = `Received ${amt} ${sym} interest`;
+    fields.push({ label: 'Amount', value: `${amt} ${sym}`, type: 'amount' });
+  } else {
+    typeName = key;
+    summary = key;
+  }
+
+  const callerText = evt.caller?.toText?.() ?? evt.caller?.toString?.() ?? null;
+  if (callerText) {
+    fields.push({
+      label: 'Caller',
+      value: shortenPrincipal(callerText),
+      type: 'address',
+      linkTarget: callerText,
+    });
+  }
+
+  if (evt.timestamp) {
+    fields.push({ label: 'Timestamp', value: formatTimestamp(evt.timestamp), type: 'timestamp' });
+  }
+
+  return {
+    summary,
+    typeName,
+    category: 'stability_pool',
+    badgeColor: BADGE_COLORS.stability_pool,
+    fields,
+  };
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────
 
 function getVariantKey(event: any): string {

@@ -185,7 +185,10 @@ pub fn receive_interest_revenue(token_ledger: Principal, amount: u64, collateral
         return Err(StabilityPoolError::TokenNotAccepted { ledger: token_ledger });
     }
 
-    mutate_state(|s| s.distribute_interest_revenue(token_ledger, amount, collateral_type));
+    mutate_state(|s| {
+        s.distribute_interest_revenue(token_ledger, amount, collateral_type);
+        s.push_event(caller, PoolEventType::InterestReceived { token_ledger, amount });
+    });
 
     log!(INFO, "Distributed {} interest for token {} (collateral: {:?}) from backend", amount, token_ledger, collateral_type);
     Ok(())
@@ -210,6 +213,24 @@ pub fn get_liquidation_history(limit: Option<u64>) -> Vec<PoolLiquidationRecord>
     read_state(|s| {
         s.liquidation_history.iter().rev().take(limit).cloned().collect()
     })
+}
+
+#[query]
+pub fn get_pool_events(start: u64, length: u64) -> Vec<PoolEvent> {
+    read_state(|s| {
+        let events = s.pool_events();
+        let total = events.len() as u64;
+        if start >= total {
+            return vec![];
+        }
+        let end = (start + length).min(total) as usize;
+        events[start as usize..end].to_vec()
+    })
+}
+
+#[query]
+pub fn get_pool_event_count() -> u64 {
+    read_state(|s| s.pool_event_count())
 }
 
 #[query]

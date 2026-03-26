@@ -47,6 +47,35 @@ export const idlFactory = ({ IDL }) => {
     'timestamp' : IDL.Nat64,
     'collateral_type' : IDL.Principal,
   });
+  const PoolEventType = IDL.Variant({
+    'Withdraw' : IDL.Record({
+      'amount' : IDL.Nat64,
+      'token_ledger' : IDL.Principal,
+    }),
+    'Deposit' : IDL.Record({
+      'amount' : IDL.Nat64,
+      'token_ledger' : IDL.Principal,
+    }),
+    'InterestReceived' : IDL.Record({
+      'amount' : IDL.Nat64,
+      'token_ledger' : IDL.Principal,
+    }),
+    'DepositAs3USD' : IDL.Record({
+      'amount_in' : IDL.Nat64,
+      'lp_minted' : IDL.Nat64,
+      'token_ledger' : IDL.Principal,
+    }),
+    'ClaimCollateral' : IDL.Record({
+      'collateral_ledger' : IDL.Principal,
+      'amount' : IDL.Nat64,
+    }),
+  });
+  const PoolEvent = IDL.Record({
+    'id' : IDL.Nat64,
+    'timestamp' : IDL.Nat64,
+    'caller' : IDL.Principal,
+    'event_type' : PoolEventType,
+  });
   const StablecoinConfig = IDL.Record({
     'decimals' : IDL.Nat8,
     'transfer_fee' : IDL.Opt(IDL.Nat64),
@@ -166,8 +195,8 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Text, 'Err' : StabilityPoolError })],
         [],
       ),
-    'admin_reset_token_failures' : IDL.Func(
-        [IDL.Principal],
+    'admin_correct_collateral_gain' : IDL.Func(
+        [IDL.Principal, IDL.Principal, IDL.Nat64],
         [IDL.Variant({ 'Ok' : IDL.Text, 'Err' : StabilityPoolError })],
         [],
       ),
@@ -214,6 +243,12 @@ export const idlFactory = ({ IDL }) => {
     'get_liquidation_history' : IDL.Func(
         [IDL.Opt(IDL.Nat64)],
         [IDL.Vec(PoolLiquidationRecord)],
+        ['query'],
+      ),
+    'get_pool_event_count' : IDL.Func([], [IDL.Nat64], ['query']),
+    'get_pool_events' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [IDL.Vec(PoolEvent)],
         ['query'],
       ),
     'get_pool_status' : IDL.Func([], [StabilityPoolStatus], ['query']),

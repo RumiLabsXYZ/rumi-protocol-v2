@@ -215,6 +215,16 @@ class StabilityPoolService {
     return await actor.get_liquidation_history(arg) as LiquidationRecord[];
   }
 
+  async getPoolEvents(start: bigint, length: bigint): Promise<any[]> {
+    const actor = await this.getQueryActor();
+    return await actor.get_pool_events(start, length) as any[];
+  }
+
+  async getPoolEventCount(): Promise<bigint> {
+    const actor = await this.getQueryActor();
+    return await actor.get_pool_event_count() as bigint;
+  }
+
   async checkPoolCapacity(tokenLedger: Principal, amount: bigint): Promise<boolean> {
     const actor = await this.getQueryActor();
     return await actor.check_pool_capacity(tokenLedger, amount) as boolean;
