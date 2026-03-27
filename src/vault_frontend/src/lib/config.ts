@@ -2,6 +2,7 @@ import { idlFactory as rumi_backendIDL } from '$declarations/rumi_protocol_backe
 import { idlFactory as icp_ledgerIDL } from '$declarations/icp_ledger/icp_ledger.did.js';
 import { idlFactory as icusd_ledgerIDL } from '$declarations/icusd_ledger/icusd_ledger.did.js';
 import { idlFactory as threePoolIDL } from '$declarations/rumi_3pool/rumi_3pool.did.js';
+import { idlFactory as rumiAmmIDL } from '$declarations/rumi_amm/rumi_amm.did.js';
 
 // Canister IDs for production (Rumi Protocol v2 - mainnet)
 export const CANISTER_IDS = {
@@ -17,6 +18,8 @@ export const CANISTER_IDS = {
   ICUSD_INDEX: "6niqu-siaaa-aaaap-qrjeq-cai",
   // Rumi 3pool (StableSwap for icUSD/ckUSDT/ckUSDC)
   THREEPOOL: "fohh4-yyaaa-aaaap-qtkpa-cai",
+  // Rumi AMM (3USD/ICP constant-product pool)
+  RUMI_AMM: "PLACEHOLDER_CANISTER_ID",
 } as const;
 
 // Canister IDs for local development
@@ -84,6 +87,10 @@ export const CONFIG = {
     return CANISTER_IDS.THREEPOOL;
   },
 
+  get ammCanisterId() {
+    return CANISTER_IDS.RUMI_AMM;
+  },
+
   getStableLedgerId(tokenType: 'CKUSDT' | 'CKUSDC'): string {
     return tokenType === 'CKUSDT' ? CANISTER_IDS.CKUSDT_LEDGER : CANISTER_IDS.CKUSDC_LEDGER;
   },
@@ -120,5 +127,6 @@ export const CONFIG = {
   rumi_backendIDL,
   icp_ledgerIDL,
   icusd_ledgerIDL,
-  threePoolIDL
+  threePoolIDL,
+  rumiAmmIDL,
 };
