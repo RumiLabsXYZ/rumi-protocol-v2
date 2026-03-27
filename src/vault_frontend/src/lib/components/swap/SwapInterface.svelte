@@ -3,7 +3,6 @@
   import { walletStore } from '../../stores/wallet';
   import { AMM_TOKENS, parseTokenAmount, formatTokenAmount, getLedgerFee, type AmmToken } from '../../services/ammService';
   import { resolveRoute, executeRoute, type SwapRoute } from '../../services/swapRouter';
-  import { formatStableTokenDisplay } from '../../utils/format';
 
   const dispatch = createEventDispatcher();
 
