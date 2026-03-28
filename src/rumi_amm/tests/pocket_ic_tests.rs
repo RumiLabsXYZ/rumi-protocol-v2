@@ -941,3 +941,105 @@ fn test_set_fee_validation() {
         WasmResult::Reject(msg) => panic!("set_fee rejected: {}", msg),
     }
 }
+
+#[test]
+fn test_anonymous_caller_rejected() {
+    let env = setup();
+    let pool_id = create_test_pool(&env);
+
+    approve_amm(&env, env.token_a_id);
+    approve_amm(&env, env.token_b_id);
+
+    let liq_amount: u128 = 50_000_00000000;
+    env.pic.update_call(
+        env.amm_id, env.user, "add_liquidity",
+        encode_args((pool_id.clone(), liq_amount, liq_amount, 0u128)).unwrap(),
+    ).expect("add_liquidity failed");
+
+    // Anonymous swap should fail
+    let result = env.pic
+        .update_call(
+            env.amm_id, Principal::anonymous(), "swap",
+            encode_args((pool_id.clone(), env.token_a_id, 1_000_00000000u128, 0u128)).unwrap(),
+        )
+        .expect("swap call failed");
+    match result {
+        WasmResult::Reply(bytes) => {
+            let res: Result<SwapResult, AmmError> = decode_one(&bytes).expect("decode failed");
+            assert!(matches!(res, Err(AmmError::Unauthorized)));
+        }
+        WasmResult::Reject(msg) => panic!("swap rejected: {}", msg),
+    }
+
+    // Anonymous add_liquidity should fail
+    let result = env.pic
+        .update_call(
+            env.amm_id, Principal::anonymous(), "add_liquidity",
+            encode_args((pool_id.clone(), 1_000_00000000u128, 1_000_00000000u128, 0u128)).unwrap(),
+        )
+        .expect("add_liquidity call failed");
+    match result {
+        WasmResult::Reply(bytes) => {
+            let res: Result<candid::Nat, AmmError> = decode_one(&bytes).expect("decode failed");
+            assert!(matches!(res, Err(AmmError::Unauthorized)));
+        }
+        WasmResult::Reject(msg) => panic!("add_liquidity rejected: {}", msg),
+    }
+
+    // Anonymous remove_liquidity should fail
+    let result = env.pic
+        .update_call(
+            env.amm_id, Principal::anonymous(), "remove_liquidity",
+            encode_args((pool_id.clone(), 1_000u128, 0u128, 0u128)).unwrap(),
+        )
+        .expect("remove_liquidity call failed");
+    match result {
+        WasmResult::Reply(bytes) => {
+            let res: Result<(candid::Nat, candid::Nat), AmmError> = decode_one(&bytes).expect("decode failed");
+            assert!(matches!(res, Err(AmmError::Unauthorized)));
+        }
+        WasmResult::Reject(msg) => panic!("remove_liquidity rejected: {}", msg),
+    }
+}
+
+#[test]
+fn test_pending_claims_endpoints() {
+    let env = setup();
+    let _pool_id = create_test_pool(&env);
+
+    // get_pending_claims should return empty vec initially
+    let result = env.pic
+        .query_call(env.amm_id, Principal::anonymous(), "get_pending_claims", encode_args(()).unwrap())
+        .expect("get_pending_claims failed");
+    match result {
+        WasmResult::Reply(bytes) => {
+            let claims: Vec<PendingClaim> = decode_one(&bytes).expect("decode failed");
+            assert!(claims.is_empty(), "Should have no pending claims initially");
+        }
+        WasmResult::Reject(msg) => panic!("get_pending_claims rejected: {}", msg),
+    }
+
+    // claim_pending for non-existent claim should fail
+    let result = env.pic
+        .update_call(env.amm_id, env.admin, "claim_pending", encode_one(999u64).unwrap())
+        .expect("claim_pending failed");
+    match result {
+        WasmResult::Reply(bytes) => {
+            let res: Result<(), AmmError> = decode_one(&bytes).expect("decode failed");
+            assert!(matches!(res, Err(AmmError::ClaimNotFound)));
+        }
+        WasmResult::Reject(msg) => panic!("claim_pending rejected: {}", msg),
+    }
+
+    // resolve_pending_claim for non-existent claim should fail
+    let result = env.pic
+        .update_call(env.amm_id, env.admin, "resolve_pending_claim", encode_one(999u64).unwrap())
+        .expect("resolve_pending_claim failed");
+    match result {
+        WasmResult::Reply(bytes) => {
+            let res: Result<(), AmmError> = decode_one(&bytes).expect("decode failed");
+            assert!(matches!(res, Err(AmmError::ClaimNotFound)));
+        }
+        WasmResult::Reject(msg) => panic!("resolve_pending_claim rejected: {}", msg),
+    }
+}
