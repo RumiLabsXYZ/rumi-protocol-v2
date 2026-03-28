@@ -4,6 +4,8 @@
   import { ammService, AMM_TOKENS, parseTokenAmount, formatTokenAmount, getLedgerFee, approvalAmount } from '../../services/ammService';
   import type { PoolInfo } from '../../services/ammService';
   import { CANISTER_IDS } from '../../config';
+  import { priceService } from '../../services/priceService';
+  import { threePoolService } from '../../services/threePoolService';
 
   const dispatch = createEventDispatcher();
 
@@ -22,6 +24,12 @@
   let addAmountB = ''; // ICP
   let addLoading = false;
   let slippageBps = 50;
+
+  // Price data for auto-pairing (only needed for empty pool / initial deposit)
+  let icpPriceUsd: number | null = null;
+  let threeUsdPriceUsd: number | null = null;
+  let priceLoading = false;
+  let lastEdited: 'A' | 'B' | null = null;
 
   // Remove liquidity state
   let removePercent = 0;
@@ -43,6 +51,8 @@
   // Pool reserves mapped to the correct token regardless of pool ordering
   $: threeUsdReserve = pool ? (tokenAIs3USD ? pool.reserve_a : pool.reserve_b) : 0n;
   $: icpReserve = pool ? (tokenAIs3USD ? pool.reserve_b : pool.reserve_a) : 0n;
+
+  $: isEmptyPool = !pool || (pool.reserve_a === 0n && pool.reserve_b === 0n);
 
   // Estimated removal amounts
   $: removeEstimate3USD = (() => {
@@ -76,11 +86,94 @@
       if (pool && isConnected && $walletStore.principal) {
         userLpShares = await ammService.getLpBalance(pool.pool_id, $walletStore.principal);
       }
+      // Fetch external prices if pool is empty (needed for initial deposit pairing)
+      if (!pool || (pool.reserve_a === 0n && pool.reserve_b === 0n)) {
+        priceLoading = true;
+        try {
+          const [icpP, tpStatus] = await Promise.all([
+            priceService.getCurrentIcpPrice(),
+            threePoolService.getPoolStatus(),
+          ]);
+          icpPriceUsd = icpP;
+          // virtual_price is scaled by 1e18: divide to get USD value of 1 3USD LP token
+          threeUsdPriceUsd = Number(tpStatus.virtual_price) / 1e18;
+        } catch (e) {
+          console.error('Failed to load prices for auto-pairing:', e);
+        } finally {
+          priceLoading = false;
+        }
+      }
     } catch (e) {
       console.error('Failed to load AMM pool:', e);
       error = 'Failed to load pool data. Please try refreshing.';
     } finally {
       poolLoading = false;
+    }
+  }
+
+  function onAmountAInput(e: Event) {
+    const val = (e.target as HTMLInputElement).value;
+    addAmountA = val;
+    lastEdited = 'A';
+    autoPairFromA(val);
+  }
+
+  function onAmountBInput(e: Event) {
+    const val = (e.target as HTMLInputElement).value;
+    addAmountB = val;
+    lastEdited = 'B';
+    autoPairFromB(val);
+  }
+
+  function autoPairFromA(val: string) {
+    if (!val || val === '.' || parseFloat(val) === 0) {
+      addAmountB = '';
+      return;
+    }
+    try {
+      const amtA = parseFloat(val);
+      if (isNaN(amtA)) return;
+
+      if (!isEmptyPool && pool) {
+        // Use pool reserve ratio
+        const reserveA = Number(threeUsdReserve) / 1e8; // 3USD has 8 decimals
+        const reserveB = Number(icpReserve) / 1e8;       // ICP has 8 decimals
+        if (reserveA > 0) {
+          addAmountB = (amtA * reserveB / reserveA).toFixed(8).replace(/\.?0+$/, '');
+        }
+      } else if (icpPriceUsd && threeUsdPriceUsd) {
+        // Empty pool: use external prices
+        // amtA is in 3USD. Value = amtA * threeUsdPriceUsd. Equivalent ICP = value / icpPriceUsd
+        const icpAmount = amtA * threeUsdPriceUsd / icpPriceUsd;
+        addAmountB = icpAmount.toFixed(8).replace(/\.?0+$/, '');
+      }
+    } catch {
+      // Parse error — don't update the other field
+    }
+  }
+
+  function autoPairFromB(val: string) {
+    if (!val || val === '.' || parseFloat(val) === 0) {
+      addAmountA = '';
+      return;
+    }
+    try {
+      const amtB = parseFloat(val);
+      if (isNaN(amtB)) return;
+
+      if (!isEmptyPool && pool) {
+        const reserveA = Number(threeUsdReserve) / 1e8;
+        const reserveB = Number(icpReserve) / 1e8;
+        if (reserveB > 0) {
+          addAmountA = (amtB * reserveA / reserveB).toFixed(8).replace(/\.?0+$/, '');
+        }
+      } else if (icpPriceUsd && threeUsdPriceUsd) {
+        // amtB is in ICP. Value = amtB * icpPriceUsd. Equivalent 3USD = value / threeUsdPriceUsd
+        const threeUsdAmount = amtB * icpPriceUsd / threeUsdPriceUsd;
+        addAmountA = threeUsdAmount.toFixed(8).replace(/\.?0+$/, '');
+      }
+    } catch {
+      // Parse error — don't update the other field
     }
   }
 
@@ -189,12 +282,16 @@
     {:else}
       <div class="input-group">
         <label class="input-label">3USD</label>
-        <input type="number" step="any" min="0" placeholder="0.00" bind:value={addAmountA} disabled={addLoading} class="token-input" />
+        <input type="number" step="any" min="0" placeholder="0.00"
+               value={addAmountA} on:input={onAmountAInput}
+               disabled={addLoading} class="token-input" />
         <span class="input-balance">Bal: {formatTokenAmount(threeUsdBalance, 8)}</span>
       </div>
       <div class="input-group">
         <label class="input-label">ICP</label>
-        <input type="number" step="any" min="0" placeholder="0.00" bind:value={addAmountB} disabled={addLoading} class="token-input" />
+        <input type="number" step="any" min="0" placeholder="0.00"
+               value={addAmountB} on:input={onAmountBInput}
+               disabled={addLoading} class="token-input" />
         <span class="input-balance">Bal: {formatTokenAmount(icpBalance, 8)}</span>
       </div>
       <button class="submit-btn" on:click={handleAdd} disabled={addLoading}>
