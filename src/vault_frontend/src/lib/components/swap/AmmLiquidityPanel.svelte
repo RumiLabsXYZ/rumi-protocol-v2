@@ -294,6 +294,21 @@
                disabled={addLoading} class="token-input" />
         <span class="input-balance">Bal: {formatTokenAmount(icpBalance, 8)}</span>
       </div>
+      {#if pool && pool.reserve_a > 0n && pool.reserve_b > 0n}
+        {@const reserveA_f = Number(threeUsdReserve) / 1e8}
+        {@const reserveB_f = Number(icpReserve) / 1e8}
+        {@const rate = reserveA_f > 0 ? (reserveB_f / reserveA_f) : 0}
+        <div class="price-info">
+          1 3USD = {rate.toFixed(4)} ICP <span class="price-source">(pool ratio)</span>
+        </div>
+      {:else if icpPriceUsd && threeUsdPriceUsd}
+        {@const rate = threeUsdPriceUsd / icpPriceUsd}
+        <div class="price-info">
+          1 3USD = {rate.toFixed(4)} ICP <span class="price-source">(price feeds)</span>
+        </div>
+      {:else if priceLoading}
+        <div class="price-info">Loading prices...</div>
+      {/if}
       <button class="submit-btn" on:click={handleAdd} disabled={addLoading}>
         {#if addLoading}
           <span class="spinner"></span> Adding...
@@ -618,6 +633,19 @@
   }
 
   @keyframes spin { to { transform: rotate(360deg); } }
+
+  .price-info {
+    text-align: center;
+    font-size: 0.75rem;
+    color: var(--rumi-text-muted);
+    padding: 0.375rem 0;
+    margin-bottom: 0.25rem;
+  }
+
+  .price-source {
+    opacity: 0.6;
+    font-style: italic;
+  }
 
   .error-bar {
     display: flex;
