@@ -455,21 +455,27 @@ async fn swap(
             });
         }
         Err(reason) => {
-            // Output transfer failed — rollback input reserve change.
-            // The input tokens are stuck in our subaccount but reserves
-            // won't reflect them, keeping state consistent. Admin can
-            // recover via a future reconciliation endpoint if needed.
+            // Output transfer failed — rollback input reserve change
             mutate_state(|s| {
-                if let Some(pool) = s.pools.get_mut(&pool_id) {
-                    if is_a_to_b {
-                        pool.reserve_a -= amount_in - protocol_fee;
-                        pool.protocol_fees_a -= protocol_fee;
-                    } else {
-                        pool.reserve_b -= amount_in - protocol_fee;
-                        pool.protocol_fees_b -= protocol_fee;
-                    }
+                let pool = s.pools.get_mut(&pool_id).expect("pool must exist: verified at start of swap");
+                if is_a_to_b {
+                    pool.reserve_a -= amount_in - protocol_fee;
+                    pool.protocol_fees_a -= protocol_fee;
+                } else {
+                    pool.reserve_b -= amount_in - protocol_fee;
+                    pool.protocol_fees_b -= protocol_fee;
                 }
             });
+
+            // Attempt to refund input tokens to user
+            if let Err(refund_err) = transfer_to_user(ledger_in, sub_in, caller, amount_in).await {
+                log!(INFO, "CRITICAL: swap output failed AND input refund failed for {}: {}. \
+                     Recording pending claim for {} of {} tokens.", pool_id, refund_err, amount_in, ledger_in);
+                record_pending_claim(&pool_id, caller, ledger_in, sub_in, amount_in, &format!(
+                    "Swap output transfer failed, then refund failed: {}", refund_err
+                ));
+            }
+
             return Err(AmmError::TransferFailed {
                 token: "output".to_string(),
                 reason,
