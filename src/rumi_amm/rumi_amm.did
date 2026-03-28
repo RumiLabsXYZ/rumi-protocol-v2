@@ -1,0 +1,81 @@
+type AmmInitArgs = record {
+  admin : principal;
+};
+
+type CurveType = variant {
+  ConstantProduct;
+};
+
+type CreatePoolArgs = record {
+  token_a : principal;
+  token_b : principal;
+  fee_bps : nat16;
+  curve : CurveType;
+};
+
+type PoolInfo = record {
+  pool_id : text;
+  token_a : principal;
+  token_b : principal;
+  reserve_a : nat;
+  reserve_b : nat;
+  fee_bps : nat16;
+  protocol_fee_bps : nat16;
+  curve : CurveType;
+  total_lp_shares : nat;
+  paused : bool;
+};
+
+type SwapResult = record {
+  amount_out : nat;
+  fee : nat;
+};
+
+type AmmError = variant {
+  PoolNotFound;
+  PoolAlreadyExists;
+  PoolPaused;
+  ZeroAmount;
+  InsufficientOutput : record { expected_min : nat; actual : nat };
+  InsufficientLiquidity;
+  InsufficientLpShares : record { required : nat; available : nat };
+  InvalidToken;
+  TransferFailed : record { token : text; reason : text };
+  Unauthorized;
+  MathOverflow;
+  DisproportionateLiquidity;
+  PoolCreationClosed;
+  FeeBpsOutOfRange;
+  MaintenanceMode;
+};
+
+service : (AmmInitArgs) -> {
+  // ── Health ──
+  health : () -> (text) query;
+
+  // ── Core AMM ──
+  swap : (text, principal, nat, nat) -> (variant { Ok : SwapResult; Err : AmmError });
+  add_liquidity : (text, nat, nat, nat) -> (variant { Ok : nat; Err : AmmError });
+  remove_liquidity : (text, nat, nat, nat) -> (variant { Ok : record { nat; nat }; Err : AmmError });
+
+  // ── Queries ──
+  get_pool : (text) -> (opt PoolInfo) query;
+  get_pools : () -> (vec PoolInfo) query;
+  get_quote : (text, principal, nat) -> (variant { Ok : nat; Err : AmmError }) query;
+  get_lp_balance : (text, principal) -> (nat) query;
+
+  is_pool_creation_open : () -> (bool) query;
+  is_maintenance_mode : () -> (bool) query;
+  set_maintenance_mode : (bool) -> (variant { Ok; Err : AmmError });
+
+  // ── Pool Creation (permissionless when open, otherwise admin-only) ──
+  create_pool : (CreatePoolArgs) -> (variant { Ok : text; Err : AmmError });
+
+  // ── Admin ──
+  set_pool_creation_open : (bool) -> (variant { Ok; Err : AmmError });
+  set_fee : (text, nat16) -> (variant { Ok; Err : AmmError });
+  set_protocol_fee : (text, nat16) -> (variant { Ok; Err : AmmError });
+  withdraw_protocol_fees : (text) -> (variant { Ok : record { nat; nat }; Err : AmmError });
+  pause_pool : (text) -> (variant { Ok; Err : AmmError });
+  unpause_pool : (text) -> (variant { Ok; Err : AmmError });
+};
