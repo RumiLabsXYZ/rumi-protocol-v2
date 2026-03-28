@@ -47,6 +47,13 @@ pub async fn transfer_from_user(
 }
 
 /// Transfer tokens FROM a pool's subaccount TO a user.
+///
+/// NOTE: The ICRC-1 ledger deducts its transfer fee from the `amount` sent,
+/// so the user receives `amount - ledger_fee`. The reserve bookkeeping in
+/// lib.rs uses the full `amount`, meaning the canister accumulates a small
+/// surplus (one ledger fee per outbound transfer). This surplus stays in the
+/// subaccount and accrues to the protocol — it's safe (protocol has MORE
+/// tokens than reserves track, not fewer).
 pub async fn transfer_to_user(
     ledger: Principal,
     from_subaccount: [u8; 32],
