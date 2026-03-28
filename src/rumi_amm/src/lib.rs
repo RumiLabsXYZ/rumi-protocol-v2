@@ -644,21 +644,25 @@ async fn remove_liquidity(
     });
 
     // Send tokens to user. If either fails, shares are already burned
-    // but tokens remain in the pool subaccount. Admin can reconcile.
+    // but tokens remain in the pool subaccount. Record pending claims.
     let mut transfer_errors = Vec::new();
 
     if amount_a > 0 {
         if let Err(reason) = transfer_to_user(token_a, sub_a, caller, amount_a).await {
-            log!(INFO, "WARN: remove_liquidity transfer_a failed for {}: {}. \
-                 {} tokens stuck in subaccount.", pool_id, reason, amount_a);
+            log!(INFO, "WARN: remove_liquidity transfer_a failed for {}: {}. Recording pending claim.", pool_id, reason);
+            record_pending_claim(&pool_id, caller, token_a, sub_a, amount_a, &format!(
+                "remove_liquidity transfer_a failed: {}", reason
+            ));
             transfer_errors.push(format!("token_a: {}", reason));
         }
     }
 
     if amount_b > 0 {
         if let Err(reason) = transfer_to_user(token_b, sub_b, caller, amount_b).await {
-            log!(INFO, "WARN: remove_liquidity transfer_b failed for {}: {}. \
-                 {} tokens stuck in subaccount.", pool_id, reason, amount_b);
+            log!(INFO, "WARN: remove_liquidity transfer_b failed for {}: {}. Recording pending claim.", pool_id, reason);
+            record_pending_claim(&pool_id, caller, token_b, sub_b, amount_b, &format!(
+                "remove_liquidity transfer_b failed: {}", reason
+            ));
             transfer_errors.push(format!("token_b: {}", reason));
         }
     }
@@ -666,7 +670,7 @@ async fn remove_liquidity(
     if !transfer_errors.is_empty() {
         return Err(AmmError::TransferFailed {
             token: "output".to_string(),
-            reason: transfer_errors.join("; "),
+            reason: format!("{}. Pending claims recorded — retry via claim_pending().", transfer_errors.join("; ")),
         });
     }
 
