@@ -89,6 +89,20 @@ pub struct CreatePoolArgs {
     pub curve: CurveType,
 }
 
+// ─── Pending Claims ───
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct PendingClaim {
+    pub id: u64,
+    pub pool_id: PoolId,
+    pub claimant: Principal,
+    pub token: Principal,
+    pub subaccount: [u8; 32],
+    pub amount: u128,
+    pub reason: String,
+    pub created_at: u64,
+}
+
 // ─── Errors ───
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
@@ -108,4 +122,5 @@ pub enum AmmError {
     PoolCreationClosed,
     FeeBpsOutOfRange,
     MaintenanceMode,
+    ClaimNotFound,
 }
