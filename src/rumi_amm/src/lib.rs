@@ -8,6 +8,7 @@ pub mod types;
 pub mod state;
 pub mod math;
 pub mod transfers;
+pub mod icrc21;
 mod logs;
 
 use crate::types::*;
@@ -756,4 +757,23 @@ fn is_maintenance_mode() -> bool {
 fn health() -> String {
     let pool_count = read_state(|s| s.pools.len());
     format!("Rumi AMM OK — {} pool(s)", pool_count)
+}
+
+// ─── ICRC-21 / ICRC-28 / ICRC-10 ───
+
+#[update]
+fn icrc21_canister_call_consent_message(
+    request: icrc21::ConsentMessageRequest,
+) -> icrc21::Icrc21ConsentMessageResult {
+    icrc21::icrc21_canister_call_consent_message(request)
+}
+
+#[query]
+fn icrc28_trusted_origins() -> icrc21::Icrc28TrustedOriginsResponse {
+    icrc21::icrc28_trusted_origins()
+}
+
+#[query]
+fn icrc10_supported_standards() -> Vec<icrc21::StandardRecord> {
+    icrc21::icrc10_supported_standards()
 }
