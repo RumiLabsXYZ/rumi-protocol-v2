@@ -49,6 +49,13 @@ fn caller_is_admin() -> Result<(), AmmError> {
     Ok(())
 }
 
+fn reject_anonymous() -> Result<(), AmmError> {
+    if ic_cdk::caller() == Principal::anonymous() {
+        return Err(AmmError::Unauthorized);
+    }
+    Ok(())
+}
+
 /// Derive a deterministic 32-byte subaccount from a pool ID and token label.
 fn derive_subaccount(pool_id: &str, token_label: &str) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -216,10 +223,9 @@ async fn withdraw_protocol_fees(pool_id: PoolId) -> Result<(u128, u128), AmmErro
 
     // Optimistic deduct: zero out fees in state BEFORE transferring.
     mutate_state(|s| {
-        if let Some(pool) = s.pools.get_mut(&pool_id) {
-            pool.protocol_fees_a = 0;
-            pool.protocol_fees_b = 0;
-        }
+        let pool = s.pools.get_mut(&pool_id).expect("pool must exist: verified at start of withdraw_protocol_fees");
+        pool.protocol_fees_a = 0;
+        pool.protocol_fees_b = 0;
     });
 
     let mut withdrawn_a = 0u128;
@@ -251,10 +257,9 @@ async fn withdraw_protocol_fees(pool_id: PoolId) -> Result<(u128, u128), AmmErro
     let rollback_b = fees_b - withdrawn_b;
     if rollback_a > 0 || rollback_b > 0 {
         mutate_state(|s| {
-            if let Some(pool) = s.pools.get_mut(&pool_id) {
-                pool.protocol_fees_a += rollback_a;
-                pool.protocol_fees_b += rollback_b;
-            }
+            let pool = s.pools.get_mut(&pool_id).expect("pool must exist: verified at start of withdraw_protocol_fees");
+            pool.protocol_fees_a += rollback_a;
+            pool.protocol_fees_b += rollback_b;
         });
     }
 
@@ -377,6 +382,7 @@ async fn swap(
     if read_state(|s| s.maintenance_mode) {
         return Err(AmmError::MaintenanceMode);
     }
+    reject_anonymous()?;
 
     let caller = ic_cdk::caller();
 
@@ -429,14 +435,13 @@ async fn swap(
     // Input tokens are now on-ledger in our subaccount — record immediately
     // so state matches on-chain reality even if the output transfer fails.
     mutate_state(|s| {
-        if let Some(pool) = s.pools.get_mut(&pool_id) {
-            if is_a_to_b {
-                pool.reserve_a += amount_in - protocol_fee;
-                pool.protocol_fees_a += protocol_fee;
-            } else {
-                pool.reserve_b += amount_in - protocol_fee;
-                pool.protocol_fees_b += protocol_fee;
-            }
+        let pool = s.pools.get_mut(&pool_id).expect("pool must exist: verified at start of swap");
+        if is_a_to_b {
+            pool.reserve_a += amount_in - protocol_fee;
+            pool.protocol_fees_a += protocol_fee;
+        } else {
+            pool.reserve_b += amount_in - protocol_fee;
+            pool.protocol_fees_b += protocol_fee;
         }
     });
 
@@ -445,12 +450,11 @@ async fn swap(
         Ok(_) => {
             // Output sent — deduct from reserves
             mutate_state(|s| {
-                if let Some(pool) = s.pools.get_mut(&pool_id) {
-                    if is_a_to_b {
-                        pool.reserve_b -= amount_out;
-                    } else {
-                        pool.reserve_a -= amount_out;
-                    }
+                let pool = s.pools.get_mut(&pool_id).expect("pool must exist: verified at start of swap");
+                if is_a_to_b {
+                    pool.reserve_b -= amount_out;
+                } else {
+                    pool.reserve_a -= amount_out;
                 }
             });
         }
@@ -502,6 +506,7 @@ async fn add_liquidity(
     if read_state(|s| s.maintenance_mode) {
         return Err(AmmError::MaintenanceMode);
     }
+    reject_anonymous()?;
 
     let caller = ic_cdk::caller();
 
@@ -592,6 +597,7 @@ async fn remove_liquidity(
     min_amount_a: u128,
     min_amount_b: u128,
 ) -> Result<(u128, u128), AmmError> {
+    reject_anonymous()?;
     let caller = ic_cdk::caller();
 
     let (token_a, token_b, reserve_a, reserve_b, total_shares, sub_a, sub_b, user_shares, paused) =
