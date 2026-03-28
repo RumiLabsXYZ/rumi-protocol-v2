@@ -353,6 +353,9 @@ class AmmService {
     if ('Unauthorized' in err) return 'Unauthorized';
     if ('MathOverflow' in err) return 'Math overflow';
     if ('DisproportionateLiquidity' in err) return 'Amounts must be proportional to pool reserves';
+    if ('PoolCreationClosed' in err) return 'Pool creation is currently closed';
+    if ('FeeBpsOutOfRange' in err) return 'Fee must be between 0.01% and 10%';
+    if ('MaintenanceMode' in err) return 'AMM is in maintenance mode — swaps and deposits are temporarily disabled';
     return 'Unknown AMM error';
   }
 }

@@ -2,56 +2,62 @@ import type { Principal } from '@dfinity/principal';
 import type { ActorMethod } from '@dfinity/agent';
 import type { IDL } from '@dfinity/candid';
 
-export interface AmmInitArgs { 'admin' : Principal }
-export type AmmError = { 'PoolNotFound' : null } |
-  { 'PoolAlreadyExists' : null } |
+export type AmmError = {
+    'InsufficientOutput' : { 'actual' : bigint, 'expected_min' : bigint }
+  } |
   { 'PoolPaused' : null } |
+  { 'PoolCreationClosed' : null } |
+  { 'PoolNotFound' : null } |
   { 'ZeroAmount' : null } |
-  { 'InsufficientOutput' : { 'expected_min' : bigint, 'actual' : bigint } } |
-  { 'InsufficientLiquidity' : null } |
-  { 'InsufficientLpShares' : { 'required' : bigint, 'available' : bigint } } |
+  { 'DisproportionateLiquidity' : null } |
+  { 'FeeBpsOutOfRange' : null } |
   { 'InvalidToken' : null } |
-  { 'TransferFailed' : { 'token' : string, 'reason' : string } } |
-  { 'Unauthorized' : null } |
+  { 'InsufficientLpShares' : { 'available' : bigint, 'required' : bigint } } |
   { 'MathOverflow' : null } |
-  { 'DisproportionateLiquidity' : null };
-export type CurveType = { 'ConstantProduct' : null };
+  { 'Unauthorized' : null } |
+  { 'PoolAlreadyExists' : null } |
+  { 'InsufficientLiquidity' : null } |
+  { 'MaintenanceMode' : null } |
+  { 'TransferFailed' : { 'token' : string, 'reason' : string } };
+export interface AmmInitArgs { 'admin' : Principal }
 export interface CreatePoolArgs {
   'token_a' : Principal,
   'token_b' : Principal,
-  'fee_bps' : number,
   'curve' : CurveType,
+  'fee_bps' : number,
 }
+export type CurveType = { 'ConstantProduct' : null };
 export interface PoolInfo {
-  'pool_id' : string,
   'token_a' : Principal,
   'token_b' : Principal,
+  'curve' : CurveType,
+  'fee_bps' : number,
   'reserve_a' : bigint,
   'reserve_b' : bigint,
-  'fee_bps' : number,
-  'protocol_fee_bps' : number,
-  'curve' : CurveType,
   'total_lp_shares' : bigint,
+  'pool_id' : string,
+  'protocol_fee_bps' : number,
   'paused' : boolean,
 }
-export interface SwapResult { 'amount_out' : bigint, 'fee' : bigint }
+export interface SwapResult { 'fee' : bigint, 'amount_out' : bigint }
 export interface _SERVICE {
-  'health' : ActorMethod<[], string>,
-  'swap' : ActorMethod<
-    [string, Principal, bigint, bigint],
-    { 'Ok' : SwapResult } |
-      { 'Err' : AmmError }
-  >,
   'add_liquidity' : ActorMethod<
     [string, bigint, bigint, bigint],
     { 'Ok' : bigint } |
       { 'Err' : AmmError }
   >,
-  'remove_liquidity' : ActorMethod<
-    [string, bigint, bigint, bigint],
-    { 'Ok' : [bigint, bigint] } |
+  /**
+   * ── Pool Creation (permissionless when open, otherwise admin-only) ──
+   */
+  'create_pool' : ActorMethod<
+    [CreatePoolArgs],
+    { 'Ok' : string } |
       { 'Err' : AmmError }
   >,
+  'get_lp_balance' : ActorMethod<[string, Principal], bigint>,
+  /**
+   * ── Queries ──
+   */
   'get_pool' : ActorMethod<[string], [] | [PoolInfo]>,
   'get_pools' : ActorMethod<[], Array<PoolInfo>>,
   'get_quote' : ActorMethod<
@@ -59,14 +65,33 @@ export interface _SERVICE {
     { 'Ok' : bigint } |
       { 'Err' : AmmError }
   >,
-  'get_lp_balance' : ActorMethod<[string, Principal], bigint>,
-  'create_pool' : ActorMethod<
-    [CreatePoolArgs],
-    { 'Ok' : string } |
+  /**
+   * ── Health ──
+   */
+  'health' : ActorMethod<[], string>,
+  'is_maintenance_mode' : ActorMethod<[], boolean>,
+  'is_pool_creation_open' : ActorMethod<[], boolean>,
+  'pause_pool' : ActorMethod<[string], { 'Ok' : null } | { 'Err' : AmmError }>,
+  'remove_liquidity' : ActorMethod<
+    [string, bigint, bigint, bigint],
+    { 'Ok' : [bigint, bigint] } |
       { 'Err' : AmmError }
   >,
   'set_fee' : ActorMethod<
     [string, number],
+    { 'Ok' : null } |
+      { 'Err' : AmmError }
+  >,
+  'set_maintenance_mode' : ActorMethod<
+    [boolean],
+    { 'Ok' : null } |
+      { 'Err' : AmmError }
+  >,
+  /**
+   * ── Admin ──
+   */
+  'set_pool_creation_open' : ActorMethod<
+    [boolean],
     { 'Ok' : null } |
       { 'Err' : AmmError }
   >,
@@ -75,19 +100,22 @@ export interface _SERVICE {
     { 'Ok' : null } |
       { 'Err' : AmmError }
   >,
-  'withdraw_protocol_fees' : ActorMethod<
-    [string],
-    { 'Ok' : [bigint, bigint] } |
-      { 'Err' : AmmError }
-  >,
-  'pause_pool' : ActorMethod<
-    [string],
-    { 'Ok' : null } |
+  /**
+   * ── Core AMM ──
+   */
+  'swap' : ActorMethod<
+    [string, Principal, bigint, bigint],
+    { 'Ok' : SwapResult } |
       { 'Err' : AmmError }
   >,
   'unpause_pool' : ActorMethod<
     [string],
     { 'Ok' : null } |
+      { 'Err' : AmmError }
+  >,
+  'withdraw_protocol_fees' : ActorMethod<
+    [string],
+    { 'Ok' : [bigint, bigint] } |
       { 'Err' : AmmError }
   >,
 }
