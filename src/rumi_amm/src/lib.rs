@@ -72,6 +72,34 @@ fn make_pool_id(token_a: Principal, token_b: Principal) -> PoolId {
     }
 }
 
+/// Record a failed outbound transfer as a pending claim so the user can retry.
+fn record_pending_claim(
+    pool_id: &PoolId,
+    claimant: Principal,
+    token: Principal,
+    subaccount: [u8; 32],
+    amount: u128,
+    reason: &str,
+) -> u64 {
+    mutate_state(|s| {
+        let id = s.next_claim_id;
+        s.next_claim_id += 1;
+        s.pending_claims.push(PendingClaim {
+            id,
+            pool_id: pool_id.clone(),
+            claimant,
+            token,
+            subaccount,
+            amount,
+            reason: reason.to_string(),
+            created_at: ic_cdk::api::time() / 1_000_000_000,
+        });
+        log!(INFO, "Pending claim #{} recorded: {} owes {} of token {} (pool {})",
+            id, claimant, amount, token, pool_id);
+        id
+    })
+}
+
 // ─── Admin Endpoints ───
 
 #[update]
@@ -277,6 +305,64 @@ fn set_maintenance_mode(enabled: bool) -> Result<(), AmmError> {
     mutate_state(|s| s.maintenance_mode = enabled);
     log!(INFO, "Maintenance mode: {}", enabled);
     Ok(())
+}
+
+// ─── Claims ───
+
+/// Retry a failed outbound transfer. The original claimant or admin can call this.
+#[update]
+async fn claim_pending(claim_id: u64) -> Result<(), AmmError> {
+    let caller = ic_cdk::caller();
+
+    let claim = read_state(|s| {
+        s.pending_claims
+            .iter()
+            .find(|c| c.id == claim_id)
+            .cloned()
+            .ok_or(AmmError::ClaimNotFound)
+    })?;
+
+    let is_admin = caller_is_admin().is_ok();
+    if caller != claim.claimant && !is_admin {
+        return Err(AmmError::Unauthorized);
+    }
+
+    transfer_to_user(claim.token, claim.subaccount, claim.claimant, claim.amount)
+        .await
+        .map_err(|reason| AmmError::TransferFailed {
+            token: claim.token.to_string(),
+            reason,
+        })?;
+
+    mutate_state(|s| {
+        s.pending_claims.retain(|c| c.id != claim_id);
+    });
+
+    log!(INFO, "Pending claim #{} resolved: {} received {} of token {}",
+        claim_id, claim.claimant, claim.amount, claim.token);
+
+    Ok(())
+}
+
+/// View all pending claims.
+#[query]
+fn get_pending_claims() -> Vec<PendingClaim> {
+    read_state(|s| s.pending_claims.clone())
+}
+
+/// Admin: force-remove a pending claim without transferring (e.g., after manual resolution).
+#[update]
+fn resolve_pending_claim(claim_id: u64) -> Result<(), AmmError> {
+    caller_is_admin()?;
+    mutate_state(|s| {
+        let before = s.pending_claims.len();
+        s.pending_claims.retain(|c| c.id != claim_id);
+        if s.pending_claims.len() == before {
+            return Err(AmmError::ClaimNotFound);
+        }
+        log!(INFO, "Pending claim #{} force-resolved by admin", claim_id);
+        Ok(())
+    })
 }
 
 // ─── Core AMM ───
