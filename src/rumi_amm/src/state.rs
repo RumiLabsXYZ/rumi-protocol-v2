@@ -15,6 +15,10 @@ pub struct AmmState {
     pub pool_creation_open: bool,
     #[serde(default)]
     pub maintenance_mode: bool,
+    #[serde(default)]
+    pub pending_claims: Vec<PendingClaim>,
+    #[serde(default)]
+    pub next_claim_id: u64,
 }
 
 impl Default for AmmState {
@@ -24,6 +28,8 @@ impl Default for AmmState {
             pools: BTreeMap::new(),
             pool_creation_open: false,
             maintenance_mode: false,
+            pending_claims: Vec::new(),
+            next_claim_id: 0,
         }
     }
 }
@@ -80,6 +86,16 @@ pub fn save_to_stable_memory() {
     });
 }
 
+/// V3 state shape (has pool_creation_open + maintenance_mode, but no pending_claims).
+/// This is what's currently on-chain.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+struct AmmStateV3 {
+    pub admin: Principal,
+    pub pools: BTreeMap<PoolId, Pool>,
+    pub pool_creation_open: bool,
+    pub maintenance_mode: bool,
+}
+
 /// V2 state shape (has pool_creation_open but not maintenance_mode).
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
 struct AmmStateV2 {
@@ -107,24 +123,37 @@ pub fn load_from_stable_memory() {
     let mut bytes = vec![0u8; len];
     ic_cdk::api::stable::stable64_read(8, &mut bytes);
 
-    // Try current shape first, then V2 (has pool_creation_open), then V1 (original)
+    // Try current shape first, then V3 (on-chain), then V2, then V1 (original)
     if let Ok(state) = Decode!(&bytes, AmmState) {
         replace_state(state);
+    } else if let Ok(v3) = Decode!(&bytes, AmmStateV3) {
+        replace_state(AmmState {
+            admin: v3.admin,
+            pools: v3.pools,
+            pool_creation_open: v3.pool_creation_open,
+            maintenance_mode: v3.maintenance_mode,
+            pending_claims: Vec::new(),
+            next_claim_id: 0,
+        });
     } else if let Ok(v2) = Decode!(&bytes, AmmStateV2) {
         replace_state(AmmState {
             admin: v2.admin,
             pools: v2.pools,
             pool_creation_open: v2.pool_creation_open,
             maintenance_mode: false,
+            pending_claims: Vec::new(),
+            next_claim_id: 0,
         });
     } else {
         let v1: AmmStateV1 = Decode!(&bytes, AmmStateV1)
-            .expect("Failed to decode AMM state from stable memory (tried V3, V2, V1)");
+            .expect("Failed to decode AMM state from stable memory (tried V4, V3, V2, V1)");
         replace_state(AmmState {
             admin: v1.admin,
             pools: v1.pools,
             pool_creation_open: false,
             maintenance_mode: false,
+            pending_claims: Vec::new(),
+            next_claim_id: 0,
         });
     }
 }
