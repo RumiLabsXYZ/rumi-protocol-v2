@@ -18,7 +18,8 @@ export type AmmError = {
   { 'PoolAlreadyExists' : null } |
   { 'InsufficientLiquidity' : null } |
   { 'MaintenanceMode' : null } |
-  { 'TransferFailed' : { 'token' : string, 'reason' : string } };
+  { 'TransferFailed' : { 'token' : string, 'reason' : string } } |
+  { 'ClaimNotFound' : null };
 export interface AmmInitArgs { 'admin' : Principal }
 export interface CreatePoolArgs {
   'token_a' : Principal,
@@ -27,6 +28,16 @@ export interface CreatePoolArgs {
   'fee_bps' : number,
 }
 export type CurveType = { 'ConstantProduct' : null };
+export interface PendingClaim {
+  'id' : bigint,
+  'token' : Principal,
+  'claimant' : Principal,
+  'subaccount' : Uint8Array | number[],
+  'created_at' : bigint,
+  'pool_id' : string,
+  'amount' : bigint,
+  'reason' : string,
+}
 export interface PoolInfo {
   'token_a' : Principal,
   'token_b' : Principal,
@@ -47,6 +58,14 @@ export interface _SERVICE {
       { 'Err' : AmmError }
   >,
   /**
+   * ── Claims ──
+   */
+  'claim_pending' : ActorMethod<
+    [bigint],
+    { 'Ok' : null } |
+      { 'Err' : AmmError }
+  >,
+  /**
    * ── Pool Creation (permissionless when open, otherwise admin-only) ──
    */
   'create_pool' : ActorMethod<
@@ -55,6 +74,7 @@ export interface _SERVICE {
       { 'Err' : AmmError }
   >,
   'get_lp_balance' : ActorMethod<[string, Principal], bigint>,
+  'get_pending_claims' : ActorMethod<[], Array<PendingClaim>>,
   /**
    * ── Queries ──
    */
@@ -75,6 +95,11 @@ export interface _SERVICE {
   'remove_liquidity' : ActorMethod<
     [string, bigint, bigint, bigint],
     { 'Ok' : [bigint, bigint] } |
+      { 'Err' : AmmError }
+  >,
+  'resolve_pending_claim' : ActorMethod<
+    [bigint],
+    { 'Ok' : null } |
       { 'Err' : AmmError }
   >,
   'set_fee' : ActorMethod<

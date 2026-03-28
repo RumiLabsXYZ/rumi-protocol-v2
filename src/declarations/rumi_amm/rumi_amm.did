@@ -31,6 +31,17 @@ type SwapResult = record {
   fee : nat;
 };
 
+type PendingClaim = record {
+  id : nat64;
+  pool_id : text;
+  claimant : principal;
+  token : principal;
+  subaccount : blob;
+  amount : nat;
+  reason : text;
+  created_at : nat64;
+};
+
 type AmmError = variant {
   PoolNotFound;
   PoolAlreadyExists;
@@ -47,6 +58,7 @@ type AmmError = variant {
   PoolCreationClosed;
   FeeBpsOutOfRange;
   MaintenanceMode;
+  ClaimNotFound;
 };
 
 service : (AmmInitArgs) -> {
@@ -70,6 +82,11 @@ service : (AmmInitArgs) -> {
 
   // ── Pool Creation (permissionless when open, otherwise admin-only) ──
   create_pool : (CreatePoolArgs) -> (variant { Ok : text; Err : AmmError });
+
+  // ── Claims ──
+  claim_pending : (nat64) -> (variant { Ok; Err : AmmError });
+  get_pending_claims : () -> (vec PendingClaim) query;
+  resolve_pending_claim : (nat64) -> (variant { Ok; Err : AmmError });
 
   // ── Admin ──
   set_pool_creation_open : (bool) -> (variant { Ok; Err : AmmError });

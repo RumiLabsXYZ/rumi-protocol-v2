@@ -22,6 +22,7 @@ export const idlFactory = ({ IDL }) => {
     'InsufficientLiquidity' : IDL.Null,
     'MaintenanceMode' : IDL.Null,
     'TransferFailed' : IDL.Record({ 'token' : IDL.Text, 'reason' : IDL.Text }),
+    'ClaimNotFound' : IDL.Null,
   });
   const CurveType = IDL.Variant({ 'ConstantProduct' : IDL.Null });
   const CreatePoolArgs = IDL.Record({
@@ -29,6 +30,16 @@ export const idlFactory = ({ IDL }) => {
     'token_b' : IDL.Principal,
     'curve' : CurveType,
     'fee_bps' : IDL.Nat16,
+  });
+  const PendingClaim = IDL.Record({
+    'id' : IDL.Nat64,
+    'token' : IDL.Principal,
+    'claimant' : IDL.Principal,
+    'subaccount' : IDL.Vec(IDL.Nat8),
+    'created_at' : IDL.Nat64,
+    'pool_id' : IDL.Text,
+    'amount' : IDL.Nat,
+    'reason' : IDL.Text,
   });
   const PoolInfo = IDL.Record({
     'token_a' : IDL.Principal,
@@ -49,6 +60,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Nat, 'Err' : AmmError })],
         [],
       ),
+    'claim_pending' : IDL.Func(
+        [IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : AmmError })],
+        [],
+      ),
     'create_pool' : IDL.Func(
         [CreatePoolArgs],
         [IDL.Variant({ 'Ok' : IDL.Text, 'Err' : AmmError })],
@@ -59,6 +75,7 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Nat],
         ['query'],
       ),
+    'get_pending_claims' : IDL.Func([], [IDL.Vec(PendingClaim)], ['query']),
     'get_pool' : IDL.Func([IDL.Text], [IDL.Opt(PoolInfo)], ['query']),
     'get_pools' : IDL.Func([], [IDL.Vec(PoolInfo)], ['query']),
     'get_quote' : IDL.Func(
@@ -77,6 +94,11 @@ export const idlFactory = ({ IDL }) => {
     'remove_liquidity' : IDL.Func(
         [IDL.Text, IDL.Nat, IDL.Nat, IDL.Nat],
         [IDL.Variant({ 'Ok' : IDL.Tuple(IDL.Nat, IDL.Nat), 'Err' : AmmError })],
+        [],
+      ),
+    'resolve_pending_claim' : IDL.Func(
+        [IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : AmmError })],
         [],
       ),
     'set_fee' : IDL.Func(
