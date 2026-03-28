@@ -76,6 +76,7 @@ fn make_pool_id(token_a: Principal, token_b: Principal) -> PoolId {
 
 #[update]
 fn create_pool(args: CreatePoolArgs) -> Result<PoolId, AmmError> {
+    // Admin exempt from maintenance mode — can set up pools while canister is locked
     if read_state(|s| s.maintenance_mode) && caller_is_admin().is_err() {
         return Err(AmmError::MaintenanceMode);
     }
