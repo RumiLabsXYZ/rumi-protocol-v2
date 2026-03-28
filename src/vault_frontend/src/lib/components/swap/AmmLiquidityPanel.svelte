@@ -33,21 +33,28 @@
   const threeUsdToken = AMM_TOKENS.find(t => t.is3USD)!;
   const icpToken = AMM_TOKENS.find(t => t.symbol === 'ICP')!;
 
+  // Whether token_a in the pool is 3USD (vs ICP). Determined at load time.
+  let tokenAIs3USD = true;
+
   // Balances
   $: threeUsdBalance = $walletStore.tokenBalances?.THREEUSD?.raw ?? 0n;
   $: icpBalance = $walletStore.tokenBalances?.ICP?.raw ?? 0n;
 
+  // Pool reserves mapped to the correct token regardless of pool ordering
+  $: threeUsdReserve = pool ? (tokenAIs3USD ? pool.reserve_a : pool.reserve_b) : 0n;
+  $: icpReserve = pool ? (tokenAIs3USD ? pool.reserve_b : pool.reserve_a) : 0n;
+
   // Estimated removal amounts
-  $: removeEstimateA = (() => {
+  $: removeEstimate3USD = (() => {
     if (!pool || pool.total_lp_shares === 0n || userLpShares === 0n || removePercent === 0) return 0n;
     const sharesToBurn = userLpShares * BigInt(removePercent) / 100n;
-    return pool.reserve_a * sharesToBurn / pool.total_lp_shares;
+    return threeUsdReserve * sharesToBurn / pool.total_lp_shares;
   })();
 
-  $: removeEstimateB = (() => {
+  $: removeEstimateICP = (() => {
     if (!pool || pool.total_lp_shares === 0n || userLpShares === 0n || removePercent === 0) return 0n;
     const sharesToBurn = userLpShares * BigInt(removePercent) / 100n;
-    return pool.reserve_b * sharesToBurn / pool.total_lp_shares;
+    return icpReserve * sharesToBurn / pool.total_lp_shares;
   })();
 
   onMount(loadPool);
@@ -63,11 +70,15 @@
         const b = p.token_b.toText();
         return (a === threePoolId && b === icpLedgerId) || (a === icpLedgerId && b === threePoolId);
       }) ?? null;
+      if (pool) {
+        tokenAIs3USD = pool.token_a.toText() === threePoolId;
+      }
       if (pool && isConnected && $walletStore.principal) {
         userLpShares = await ammService.getLpBalance(pool.pool_id, $walletStore.principal);
       }
     } catch (e) {
       console.error('Failed to load AMM pool:', e);
+      error = 'Failed to load pool data. Please try refreshing.';
     } finally {
       poolLoading = false;
     }
@@ -85,17 +96,23 @@
     try {
       addLoading = true;
       error = '';
+      // Map UI amounts (3USD, ICP) to pool ordering (amountA, amountB)
+      const poolAmountA = tokenAIs3USD ? amtA : amtB;
+      const poolAmountB = tokenAIs3USD ? amtB : amtA;
+      const poolTokenA = tokenAIs3USD ? threeUsdToken : icpToken;
+      const poolTokenB = tokenAIs3USD ? icpToken : threeUsdToken;
+
       // Estimate LP shares and apply slippage protection
       // For initial deposit (empty pool), minLp=0 is fine since there's nothing to front-run
       let minLp = 0n;
       if (pool.total_lp_shares > 0n) {
         // Proportional estimate: min(amtA * total / reserveA, amtB * total / reserveB)
-        const estA = amtA > 0n ? amtA * pool.total_lp_shares / pool.reserve_a : BigInt(Number.MAX_SAFE_INTEGER);
-        const estB = amtB > 0n ? amtB * pool.total_lp_shares / pool.reserve_b : BigInt(Number.MAX_SAFE_INTEGER);
+        const estA = poolAmountA > 0n ? poolAmountA * pool.total_lp_shares / pool.reserve_a : BigInt(Number.MAX_SAFE_INTEGER);
+        const estB = poolAmountB > 0n ? poolAmountB * pool.total_lp_shares / pool.reserve_b : BigInt(Number.MAX_SAFE_INTEGER);
         const lpEstimate = estA < estB ? estA : estB;
         minLp = lpEstimate * BigInt(10000 - slippageBps) / 10000n;
       }
-      await ammService.addLiquidity(pool.pool_id, amtA, amtB, minLp, threeUsdToken, icpToken);
+      await ammService.addLiquidity(pool.pool_id, poolAmountA, poolAmountB, minLp, poolTokenA, poolTokenB);
       dispatch('success', { action: 'add_liquidity' });
       addAmountA = '';
       addAmountB = '';
@@ -114,9 +131,11 @@
       removeLoading = true;
       error = '';
       const sharesToBurn = userLpShares * BigInt(removePercent) / 100n;
-      // Apply slippage to estimates
-      const minA = removeEstimateA * BigInt(10000 - slippageBps) / 10000n;
-      const minB = removeEstimateB * BigInt(10000 - slippageBps) / 10000n;
+      // Apply slippage to estimates — map back to pool ordering for minAmountA/minAmountB
+      const min3USD = removeEstimate3USD * BigInt(10000 - slippageBps) / 10000n;
+      const minICP = removeEstimateICP * BigInt(10000 - slippageBps) / 10000n;
+      const minA = tokenAIs3USD ? min3USD : minICP;
+      const minB = tokenAIs3USD ? minICP : min3USD;
       await ammService.removeLiquidity(pool.pool_id, sharesToBurn, minA, minB);
       dispatch('success', { action: 'remove_liquidity' });
       removePercent = 0;
@@ -148,8 +167,8 @@
       <span class="overview-name">3USD / ICP</span>
     </div>
     <div class="overview-stats">
-      <span>3USD: {formatTokenAmount(pool.reserve_a, 8)}</span>
-      <span>ICP: {formatTokenAmount(pool.reserve_b, 8)}</span>
+      <span>3USD: {formatTokenAmount(threeUsdReserve, 8)}</span>
+      <span>ICP: {formatTokenAmount(icpReserve, 8)}</span>
     </div>
     {#if isConnected && userLpShares > 0n}
       <div class="user-position">
@@ -212,11 +231,11 @@
         <div class="remove-estimates">
           <div class="estimate-row">
             <span>3USD</span>
-            <span>{formatTokenAmount(removeEstimateA, 8)}</span>
+            <span>{formatTokenAmount(removeEstimate3USD, 8)}</span>
           </div>
           <div class="estimate-row">
             <span>ICP</span>
-            <span>{formatTokenAmount(removeEstimateB, 8)}</span>
+            <span>{formatTokenAmount(removeEstimateICP, 8)}</span>
           </div>
         </div>
       {/if}
