@@ -315,38 +315,47 @@ fn set_maintenance_mode(enabled: bool) -> Result<(), AmmError> {
 // ─── Claims ───
 
 /// Retry a failed outbound transfer. The original claimant or admin can call this.
+///
+/// To prevent double-claim races (two concurrent calls both reading the same claim
+/// then both transferring), we remove the claim from state BEFORE the async transfer.
+/// If the transfer fails, we re-add the claim.
 #[update]
 async fn claim_pending(claim_id: u64) -> Result<(), AmmError> {
     let caller = ic_cdk::caller();
 
-    let claim = read_state(|s| {
-        s.pending_claims
+    // Atomically find and remove the claim from state (prevents double-claim).
+    let claim = mutate_state(|s| {
+        let idx = s.pending_claims
             .iter()
-            .find(|c| c.id == claim_id)
-            .cloned()
-            .ok_or(AmmError::ClaimNotFound)
+            .position(|c| c.id == claim_id)
+            .ok_or(AmmError::ClaimNotFound)?;
+        let claim = s.pending_claims.remove(idx);
+        Ok::<_, AmmError>(claim)
     })?;
 
     let is_admin = caller_is_admin().is_ok();
     if caller != claim.claimant && !is_admin {
+        // Not authorized — re-add the claim before returning error
+        mutate_state(|s| s.pending_claims.push(claim));
         return Err(AmmError::Unauthorized);
     }
 
-    transfer_to_user(claim.token, claim.subaccount, claim.claimant, claim.amount)
-        .await
-        .map_err(|reason| AmmError::TransferFailed {
-            token: claim.token.to_string(),
-            reason,
-        })?;
-
-    mutate_state(|s| {
-        s.pending_claims.retain(|c| c.id != claim_id);
-    });
-
-    log!(INFO, "Pending claim #{} resolved: {} received {} of token {}",
-        claim_id, claim.claimant, claim.amount, claim.token);
-
-    Ok(())
+    match transfer_to_user(claim.token, claim.subaccount, claim.claimant, claim.amount).await {
+        Ok(_) => {
+            log!(INFO, "Pending claim #{} resolved: {} received {} of token {}",
+                claim_id, claim.claimant, claim.amount, claim.token);
+            Ok(())
+        }
+        Err(reason) => {
+            // Transfer failed — re-add the claim so user can retry
+            log!(INFO, "claim_pending #{} transfer failed: {}. Re-adding claim.", claim_id, reason);
+            mutate_state(|s| s.pending_claims.push(claim));
+            Err(AmmError::TransferFailed {
+                token: claim_id.to_string(),
+                reason,
+            })
+        }
+    }
 }
 
 /// View all pending claims.
@@ -551,10 +560,13 @@ async fn add_liquidity(
         })?;
 
     if let Err(reason) = transfer_from_user(token_b, caller, sub_b, amount_b).await {
-        // Refund token_a back to user (best-effort — log if refund also fails)
+        // Refund token_a back to user. If refund fails, record a pending claim.
         if let Err(refund_err) = transfer_to_user(token_a, sub_a, caller, amount_a).await {
             log!(INFO, "CRITICAL: token_b transfer failed AND token_a refund failed: {}. \
-                 {} token_a stuck in pool subaccount for {}.", refund_err, amount_a, pool_id);
+                 Recording pending claim for {} of token_a in pool {}.", refund_err, amount_a, pool_id);
+            record_pending_claim(&pool_id, caller, token_a, sub_a, amount_a, &format!(
+                "add_liquidity token_b failed, then token_a refund failed: {}", refund_err
+            ));
         }
         return Err(AmmError::TransferFailed {
             token: "token_b".to_string(),
