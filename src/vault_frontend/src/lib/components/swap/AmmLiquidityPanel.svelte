@@ -4,7 +4,7 @@
   import { ammService, AMM_TOKENS, parseTokenAmount, formatTokenAmount, getLedgerFee, approvalAmount } from '../../services/ammService';
   import type { PoolInfo } from '../../services/ammService';
   import { CANISTER_IDS } from '../../config';
-  import { priceService } from '../../services/priceService';
+  import { ProtocolService } from '../../services/protocol';
   import { threePoolService } from '../../services/threePoolService';
 
   const dispatch = createEventDispatcher();
@@ -91,7 +91,7 @@
         priceLoading = true;
         try {
           const [icpP, tpStatus] = await Promise.all([
-            priceService.getCurrentIcpPrice(),
+            ProtocolService.getICPPrice(),
             threePoolService.getPoolStatus(),
           ]);
           icpPriceUsd = icpP;
