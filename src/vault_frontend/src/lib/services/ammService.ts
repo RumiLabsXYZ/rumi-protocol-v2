@@ -106,22 +106,52 @@ export function approvalAmount(amount: bigint, token: AmmToken): bigint {
 }
 
 export function parseTokenAmount(amount: string, decimals: number): bigint {
-  const value = parseFloat(amount);
-  if (isNaN(value) || value < 0) throw new Error('Invalid amount');
-  return BigInt(Math.floor(value * Math.pow(10, decimals)));
+  const trimmed = amount.trim();
+  if (trimmed === '' || trimmed === '.') throw new Error('Invalid amount');
+
+  const parts = trimmed.split('.');
+  if (parts.length > 2) throw new Error('Invalid amount');
+
+  const whole = parts[0] || '0';
+  let frac = parts.length === 2 ? parts[1] : '';
+
+  // Pad or truncate fractional part to exact `decimals` digits
+  if (frac.length > decimals) {
+    frac = frac.slice(0, decimals);
+  } else {
+    frac = frac.padEnd(decimals, '0');
+  }
+
+  const raw = BigInt(whole) * BigInt(10 ** decimals) + BigInt(frac);
+  if (raw < 0n) throw new Error('Invalid amount');
+  return raw;
 }
 
 export function formatTokenAmount(amount: bigint, decimals: number): string {
-  const divisor = Math.pow(10, decimals);
-  const value = Number(amount) / divisor;
-  if (value > 0 && value < 0.01) return value.toFixed(Math.min(decimals, 6));
-  const fixed = value.toFixed(4);
-  let trimmed = fixed.replace(/0+$/, '');
-  if (trimmed.endsWith('.')) trimmed += '00';
-  else if (trimmed.indexOf('.') !== -1 && trimmed.split('.')[1].length < 2) {
-    trimmed += '0';
+  const divisor = 10n ** BigInt(decimals);
+  const whole = amount / divisor;
+  const frac = amount % divisor;
+
+  // Pad fractional part to full decimals width
+  const fracStr = frac.toString().padStart(decimals, '0');
+
+  // Show up to 4 decimal places for normal values, more for tiny values
+  const threshold = divisor / 100n; // 0.01 in token units
+
+  if (amount > 0n && amount < threshold) {
+    // Tiny value — show up to 6 decimals
+    const places = Math.min(decimals, 6);
+    const trimmedFrac = fracStr.slice(0, places).replace(/0+$/, '') || '0';
+    return `${whole}.${trimmedFrac}`;
   }
-  return trimmed;
+
+  // Normal: 4 decimal places, trim trailing zeros but keep at least 2
+  let display = fracStr.slice(0, 4);
+  display = display.replace(/0+$/, '');
+  if (display.length === 0) display = '00';
+  else if (display.length === 1) display += '0';
+
+  return `${whole}.${display}`;
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -356,6 +386,7 @@ class AmmService {
     if ('PoolCreationClosed' in err) return 'Pool creation is currently closed';
     if ('FeeBpsOutOfRange' in err) return 'Fee must be between 0.01% and 10%';
     if ('MaintenanceMode' in err) return 'AMM is in maintenance mode — swaps and deposits are temporarily disabled';
+    if ('ClaimNotFound' in err) return 'Claim not found — it may have already been resolved';
     return 'Unknown AMM error';
   }
 }
