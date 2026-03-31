@@ -3,7 +3,9 @@
 // The LP token balances are tracked internally in ThreePoolState::lp_balances.
 // This module exposes them as a proper ICRC-1/ICRC-2 compliant token.
 //
-// Token: 3USD | Decimals: 8 | Fee: 0 | Subaccounts: default-only
+// Token: 3USD | Decimals: 8 | Fee: 0
+// Subaccounts: source (from/spender) must be default; destination (to) accepts any
+// subaccount but credits are tracked by owner principal only.
 
 use candid::{Nat, Principal};
 use icrc_ledger_types::icrc::generic_metadata_value::MetadataValue;
@@ -127,13 +129,8 @@ pub fn icrc1_transfer(caller: Principal, args: TransferArg) -> Result<Nat, Trans
         });
     }
 
-    // Validate to account
-    let to_principal = account_to_principal(&args.to).map_err(|_| {
-        TransferError::GenericError {
-            error_code: Nat::from(1u64),
-            message: "non-default subaccounts are not supported".to_string(),
-        }
-    })?;
+    // Destination: accept any subaccount, credit goes to the owner principal.
+    let to_principal = args.to.owner;
 
     let amount = nat_to_u128(&args.amount).map_err(|_| TransferError::GenericError {
         error_code: Nat::from(2u64),
@@ -312,12 +309,8 @@ pub fn icrc2_transfer_from(
         })
     })?;
 
-    let to_principal = account_to_principal(&args.to).map_err(|_| {
-        subaccount_error(|code, msg| TransferFromError::GenericError {
-            error_code: code,
-            message: msg,
-        })
-    })?;
+    // Destination: accept any subaccount, credit goes to the owner principal.
+    let to_principal = args.to.owner;
 
     let amount = nat_to_u128(&args.amount).map_err(|_| TransferFromError::GenericError {
         error_code: Nat::from(2u64),
