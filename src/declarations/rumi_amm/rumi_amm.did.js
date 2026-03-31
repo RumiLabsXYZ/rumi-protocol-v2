@@ -53,6 +53,47 @@ export const idlFactory = ({ IDL }) => {
     'protocol_fee_bps' : IDL.Nat16,
     'paused' : IDL.Bool,
   });
+  const StandardRecord = IDL.Record({ 'url' : IDL.Text, 'name' : IDL.Text });
+  const ConsentMessageMetadata = IDL.Record({
+    'utc_offset_minutes' : IDL.Opt(IDL.Int16),
+    'language' : IDL.Text,
+  });
+  const DeviceSpec = IDL.Variant({
+    'GenericDisplay' : IDL.Null,
+    'LineDisplay' : IDL.Record({
+      'characters_per_line' : IDL.Nat16,
+      'lines_per_page' : IDL.Nat16,
+    }),
+  });
+  const ConsentMessageSpec = IDL.Record({
+    'metadata' : ConsentMessageMetadata,
+    'device_spec' : IDL.Opt(DeviceSpec),
+  });
+  const ConsentMessageRequest = IDL.Record({
+    'arg' : IDL.Vec(IDL.Nat8),
+    'method' : IDL.Text,
+    'user_preferences' : ConsentMessageSpec,
+  });
+  const LineDisplayPage = IDL.Record({ 'lines' : IDL.Vec(IDL.Text) });
+  const ConsentMessage = IDL.Variant({
+    'LineDisplayMessage' : IDL.Record({ 'pages' : IDL.Vec(LineDisplayPage) }),
+    'GenericDisplayMessage' : IDL.Text,
+  });
+  const ConsentInfo = IDL.Record({
+    'metadata' : ConsentMessageMetadata,
+    'consent_message' : ConsentMessage,
+  });
+  const Icrc21Error = IDL.Variant({
+    'GenericError' : IDL.Record({
+      'description' : IDL.Text,
+      'error_code' : IDL.Nat64,
+    }),
+    'UnsupportedCanisterCall' : IDL.Record({ 'description' : IDL.Text }),
+    'ConsentMessageUnavailable' : IDL.Record({ 'description' : IDL.Text }),
+  });
+  const Icrc28TrustedOriginsResponse = IDL.Record({
+    'trusted_origins' : IDL.Vec(IDL.Text),
+  });
   const SwapResult = IDL.Record({ 'fee' : IDL.Nat, 'amount_out' : IDL.Nat });
   return IDL.Service({
     'add_liquidity' : IDL.Func(
@@ -84,6 +125,21 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'health' : IDL.Func([], [IDL.Text], ['query']),
+    'icrc10_supported_standards' : IDL.Func(
+        [],
+        [IDL.Vec(StandardRecord)],
+        ['query'],
+      ),
+    'icrc21_canister_call_consent_message' : IDL.Func(
+        [ConsentMessageRequest],
+        [IDL.Variant({ 'Ok' : ConsentInfo, 'Err' : Icrc21Error })],
+        [],
+      ),
+    'icrc28_trusted_origins' : IDL.Func(
+        [],
+        [Icrc28TrustedOriginsResponse],
+        ['query'],
+      ),
     'is_maintenance_mode' : IDL.Func([], [IDL.Bool], ['query']),
     'is_pool_creation_open' : IDL.Func([], [IDL.Bool], ['query']),
     'pause_pool' : IDL.Func(

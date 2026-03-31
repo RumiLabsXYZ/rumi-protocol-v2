@@ -117,6 +117,16 @@
         }
       ]
     },
+    "rumi_amm": {
+      "candid": "src/rumi_amm/rumi_amm.did",
+      "package": "rumi_amm",
+      "type": "rust",
+      "metadata": [
+        {
+          "name": "candid:service"
+        }
+      ]
+    },
     "liquidation_bot": {
       "candid": "src/liquidation_bot/liquidation_bot.did",
       "package": "liquidation_bot",

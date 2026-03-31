@@ -2,6 +2,9 @@ import type { Principal } from '@dfinity/principal';
 import type { ActorMethod } from '@dfinity/agent';
 import type { IDL } from '@dfinity/candid';
 
+/**
+ * ── AMM Errors ──
+ */
 export type AmmError = {
     'InsufficientOutput' : { 'actual' : bigint, 'expected_min' : bigint }
   } |
@@ -21,6 +24,30 @@ export type AmmError = {
   { 'TransferFailed' : { 'token' : string, 'reason' : string } } |
   { 'ClaimNotFound' : null };
 export interface AmmInitArgs { 'admin' : Principal }
+export interface ConsentInfo {
+  'metadata' : ConsentMessageMetadata,
+  'consent_message' : ConsentMessage,
+}
+export type ConsentMessage = {
+    'LineDisplayMessage' : { 'pages' : Array<LineDisplayPage> }
+  } |
+  { 'GenericDisplayMessage' : string };
+/**
+ * ── ICRC-21 Consent Messages ──
+ */
+export interface ConsentMessageMetadata {
+  'utc_offset_minutes' : [] | [number],
+  'language' : string,
+}
+export interface ConsentMessageRequest {
+  'arg' : Uint8Array | number[],
+  'method' : string,
+  'user_preferences' : ConsentMessageSpec,
+}
+export interface ConsentMessageSpec {
+  'metadata' : ConsentMessageMetadata,
+  'device_spec' : [] | [DeviceSpec],
+}
 export interface CreatePoolArgs {
   'token_a' : Principal,
   'token_b' : Principal,
@@ -28,6 +55,22 @@ export interface CreatePoolArgs {
   'fee_bps' : number,
 }
 export type CurveType = { 'ConstantProduct' : null };
+export type DeviceSpec = { 'GenericDisplay' : null } |
+  {
+    'LineDisplay' : {
+      'characters_per_line' : number,
+      'lines_per_page' : number,
+    }
+  };
+export type Icrc21Error = {
+    'GenericError' : { 'description' : string, 'error_code' : bigint }
+  } |
+  { 'UnsupportedCanisterCall' : { 'description' : string } } |
+  { 'ConsentMessageUnavailable' : { 'description' : string } };
+export interface Icrc28TrustedOriginsResponse {
+  'trusted_origins' : Array<string>,
+}
+export interface LineDisplayPage { 'lines' : Array<string> }
 export interface PendingClaim {
   'id' : bigint,
   'token' : Principal,
@@ -50,6 +93,7 @@ export interface PoolInfo {
   'protocol_fee_bps' : number,
   'paused' : boolean,
 }
+export interface StandardRecord { 'url' : string, 'name' : string }
 export interface SwapResult { 'fee' : bigint, 'amount_out' : bigint }
 export interface _SERVICE {
   'add_liquidity' : ActorMethod<
@@ -89,6 +133,16 @@ export interface _SERVICE {
    * ── Health ──
    */
   'health' : ActorMethod<[], string>,
+  'icrc10_supported_standards' : ActorMethod<[], Array<StandardRecord>>,
+  /**
+   * ── ICRC-21 / ICRC-28 / ICRC-10 ──
+   */
+  'icrc21_canister_call_consent_message' : ActorMethod<
+    [ConsentMessageRequest],
+    { 'Ok' : ConsentInfo } |
+      { 'Err' : Icrc21Error }
+  >,
+  'icrc28_trusted_origins' : ActorMethod<[], Icrc28TrustedOriginsResponse>,
   'is_maintenance_mode' : ActorMethod<[], boolean>,
   'is_pool_creation_open' : ActorMethod<[], boolean>,
   'pause_pool' : ActorMethod<[string], { 'Ok' : null } | { 'Err' : AmmError }>,
