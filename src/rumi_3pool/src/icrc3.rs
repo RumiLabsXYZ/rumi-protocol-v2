@@ -136,8 +136,9 @@ pub fn encode_block_with_phash(block: &Icrc3Block, phash: Option<&[u8; 32]>) -> 
                 ("spender".to_string(), account_to_value(*spender)),
                 ("amt".to_string(), Icrc3Value::Nat(Nat::from(*amount))),
             ];
+            // index-ng expects "expected_allowance" and "expires_at" (full names, not abbreviated)
             if let Some(exp) = expires_at {
-                fields.push(("exp".to_string(), Icrc3Value::Nat(Nat::from(*exp))));
+                fields.push(("expires_at".to_string(), Icrc3Value::Nat(Nat::from(*exp))));
             }
             ("2approve", fields)
         }
@@ -148,8 +149,12 @@ pub fn encode_block_with_phash(block: &Icrc3Block, phash: Option<&[u8; 32]>) -> 
     if let Some(h) = phash {
         block_map.push(("phash".to_string(), Icrc3Value::Blob(h.to_vec())));
     }
-    block_map.push(("btype".to_string(), Icrc3Value::Text(btype.to_string())));
+    // Note: btype (ICRC-3) is intentionally omitted — the index-ng rejects unknown
+    // fields and determines tx type from the "op" field inside tx instead.
+    let _ = btype;
     block_map.push(("ts".to_string(), Icrc3Value::Nat(Nat::from(block.timestamp))));
+    // fee at block level (required by index-ng to track ledger fee)
+    block_map.push(("fee".to_string(), Icrc3Value::Nat(Nat::from(0u64))));
     block_map.push(("tx".to_string(), Icrc3Value::Map(tx_map)));
 
     Icrc3Value::Map(block_map)

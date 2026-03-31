@@ -1,0 +1,157 @@
+type AmmInitArgs = record {
+  admin : principal;
+};
+
+type CurveType = variant {
+  ConstantProduct;
+};
+
+type CreatePoolArgs = record {
+  token_a : principal;
+  token_b : principal;
+  fee_bps : nat16;
+  curve : CurveType;
+};
+
+type PoolInfo = record {
+  pool_id : text;
+  token_a : principal;
+  token_b : principal;
+  reserve_a : nat;
+  reserve_b : nat;
+  fee_bps : nat16;
+  protocol_fee_bps : nat16;
+  curve : CurveType;
+  total_lp_shares : nat;
+  paused : bool;
+};
+
+type SwapResult = record {
+  amount_out : nat;
+  fee : nat;
+};
+
+type PendingClaim = record {
+  id : nat64;
+  pool_id : text;
+  claimant : principal;
+  token : principal;
+  subaccount : blob;
+  amount : nat;
+  reason : text;
+  created_at : nat64;
+};
+
+// ── ICRC-21 Consent Messages ──
+
+type ConsentMessageMetadata = record {
+  language : text;
+  utc_offset_minutes : opt int16;
+};
+
+type DeviceSpec = variant {
+  GenericDisplay;
+  LineDisplay : record { characters_per_line : nat16; lines_per_page : nat16 };
+};
+
+type ConsentMessageSpec = record {
+  metadata : ConsentMessageMetadata;
+  device_spec : opt DeviceSpec;
+};
+
+type ConsentMessageRequest = record {
+  method : text;
+  arg : blob;
+  user_preferences : ConsentMessageSpec;
+};
+
+type LineDisplayPage = record {
+  lines : vec text;
+};
+
+type ConsentMessage = variant {
+  GenericDisplayMessage : text;
+  LineDisplayMessage : record { pages : vec LineDisplayPage };
+};
+
+type ConsentInfo = record {
+  metadata : ConsentMessageMetadata;
+  consent_message : ConsentMessage;
+};
+
+type Icrc21Error = variant {
+  GenericError : record { error_code : nat64; description : text };
+  UnsupportedCanisterCall : record { description : text };
+  ConsentMessageUnavailable : record { description : text };
+};
+
+type Icrc28TrustedOriginsResponse = record {
+  trusted_origins : vec text;
+};
+
+type StandardRecord = record {
+  name : text;
+  url : text;
+};
+
+// ── AMM Errors ──
+
+type AmmError = variant {
+  PoolNotFound;
+  PoolAlreadyExists;
+  PoolPaused;
+  ZeroAmount;
+  InsufficientOutput : record { expected_min : nat; actual : nat };
+  InsufficientLiquidity;
+  InsufficientLpShares : record { required : nat; available : nat };
+  InvalidToken;
+  TransferFailed : record { token : text; reason : text };
+  Unauthorized;
+  MathOverflow;
+  DisproportionateLiquidity;
+  PoolCreationClosed;
+  FeeBpsOutOfRange;
+  MaintenanceMode;
+  ClaimNotFound;
+};
+
+service : (AmmInitArgs) -> {
+  // ── Health ──
+  health : () -> (text) query;
+
+  // ── Core AMM ──
+  swap : (text, principal, nat, nat) -> (variant { Ok : SwapResult; Err : AmmError });
+  add_liquidity : (text, nat, nat, nat) -> (variant { Ok : nat; Err : AmmError });
+  remove_liquidity : (text, nat, nat, nat) -> (variant { Ok : record { nat; nat }; Err : AmmError });
+
+  // ── Queries ──
+  get_pool : (text) -> (opt PoolInfo) query;
+  get_pools : () -> (vec PoolInfo) query;
+  get_quote : (text, principal, nat) -> (variant { Ok : nat; Err : AmmError }) query;
+  get_lp_balance : (text, principal) -> (nat) query;
+
+  is_pool_creation_open : () -> (bool) query;
+  is_maintenance_mode : () -> (bool) query;
+  set_maintenance_mode : (bool) -> (variant { Ok; Err : AmmError });
+
+  // ── Pool Creation (permissionless when open, otherwise admin-only) ──
+  create_pool : (CreatePoolArgs) -> (variant { Ok : text; Err : AmmError });
+
+  // ── Claims ──
+  claim_pending : (nat64) -> (variant { Ok; Err : AmmError });
+  get_pending_claims : () -> (vec PendingClaim) query;
+  resolve_pending_claim : (nat64) -> (variant { Ok; Err : AmmError });
+
+  // ── Admin ──
+  set_pool_creation_open : (bool) -> (variant { Ok; Err : AmmError });
+  set_fee : (text, nat16) -> (variant { Ok; Err : AmmError });
+  set_protocol_fee : (text, nat16) -> (variant { Ok; Err : AmmError });
+  withdraw_protocol_fees : (text) -> (variant { Ok : record { nat; nat }; Err : AmmError });
+  pause_pool : (text) -> (variant { Ok; Err : AmmError });
+  unpause_pool : (text) -> (variant { Ok; Err : AmmError });
+
+  // ── ICRC-21 / ICRC-28 / ICRC-10 ──
+  icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (variant { Ok : ConsentInfo; Err : Icrc21Error });
+  icrc28_trusted_origins : () -> (Icrc28TrustedOriginsResponse) query;
+  icrc10_supported_standards : () -> (vec StandardRecord) query;
+};

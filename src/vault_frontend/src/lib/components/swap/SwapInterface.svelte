@@ -1,91 +1,84 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import { walletStore } from '../../stores/wallet';
-  import {
-    threePoolService,
-    POOL_TOKENS,
-    parseTokenAmount,
-    formatTokenAmount,
-    getLedgerFee,
-    type SwapToken,
-  } from '../../services/threePoolService';
-  import { formatStableTokenDisplay } from '../../utils/format';
+  import { ammService, AMM_TOKENS, parseTokenAmount, formatTokenAmount, getLedgerFee, type AmmToken } from '../../services/ammService';
+  import { resolveRoute, executeRoute, preWarmOisySigner, type SwapRoute } from '../../services/swapRouter';
+  import { CANISTER_IDS } from '../../config';
 
   const dispatch = createEventDispatcher();
 
-  let fromIndex = 0;
-  let toIndex = 1;
+  let fromIdx = 0; // Index into AMM_TOKENS
+  let toIdx = 1;
   let amount = '';
   let loading = false;
   let quoting = false;
   let error = '';
-  let quoteOutput: bigint | null = null;
-  let slippageBps = 50; // 0.5% default
+  let currentRoute: SwapRoute | null = null;
+  let midMarketRate: number | null = null;
+  let slippageBps = 50;
   let showSlippage = false;
   let showFromDropdown = false;
   let showToDropdown = false;
 
-  // Debounce timer for quote
   let quoteTimer: ReturnType<typeof setTimeout> | null = null;
 
   $: isConnected = $walletStore.isConnected;
-  $: fromToken = POOL_TOKENS[fromIndex];
-  $: toToken = POOL_TOKENS[toIndex];
+  $: fromToken = AMM_TOKENS[fromIdx];
+  $: toToken = AMM_TOKENS[toIdx];
 
-  // Wallet balance for the "from" token
-  const LEDGER_TO_KEY: Record<string, string> = {
-    [POOL_TOKENS[0].ledgerId]: 'ICUSD',
-    [POOL_TOKENS[1].ledgerId]: 'CKUSDT',
-    [POOL_TOKENS[2].ledgerId]: 'CKUSDC',
-  };
-
+  // Wallet balance for "from" token
   $: walletBalance = (() => {
     if (!$walletStore.tokenBalances) return 0n;
-    const key = LEDGER_TO_KEY[fromToken.ledgerId];
+    const key = fromToken.balanceKey;
     if (!key) return 0n;
     return $walletStore.tokenBalances[key]?.raw ?? 0n;
   })();
 
-  $: walletBalanceFormatted = formatStableTokenDisplay(walletBalance, fromToken.decimals);
+  $: walletBalanceFormatted = formatTokenAmount(walletBalance, fromToken.decimals);
 
-  // Formatted output for display
-  $: outputFormatted = quoteOutput !== null
-    ? formatTokenAmount(quoteOutput, toToken.decimals)
+  // Formatted output
+  $: outputFormatted = currentRoute
+    ? formatTokenAmount(currentRoute.estimatedOutput, toToken.decimals)
     : '';
 
-  // Effective rate: output / input (per 1 unit of input token)
+  // Effective rate
   $: effectiveRate = (() => {
-    if (!quoteOutput || !amount || parseFloat(amount) <= 0) return null;
+    if (!currentRoute || !amount || parseFloat(amount) <= 0) return null;
     const inputValue = parseFloat(amount);
-    const outputValue = Number(quoteOutput) / Math.pow(10, toToken.decimals);
-    return (outputValue / inputValue).toFixed(4);
+    const outputValue = Number(currentRoute.estimatedOutput) / Math.pow(10, toToken.decimals);
+    return (outputValue / inputValue).toFixed(6);
   })();
 
-  // Swap fee (from pool config, 20 bps = 0.20%)
-  const SWAP_FEE_BPS = 20;
-  $: swapFeeDisplay = (SWAP_FEE_BPS / 100).toFixed(2);
-
-  // Price impact: isolate curve impact by removing the fee component
-  // impact = (1 - output/input / (1 - fee_rate)) * 100
+  // Price impact: pure slippage only (excludes swap fee)
   $: priceImpact = (() => {
-    if (!quoteOutput || !amount || parseFloat(amount) <= 0) return null;
+    if (!currentRoute || !amount || parseFloat(amount) <= 0 || !midMarketRate) return null;
     const inputValue = parseFloat(amount);
-    const outputValue = Number(quoteOutput) / Math.pow(10, toToken.decimals);
-    const feeRate = SWAP_FEE_BPS / 10000;
-    const rateAfterFeeRemoval = (outputValue / inputValue) / (1 - feeRate);
-    const impact = (1 - rateAfterFeeRemoval) * 100;
-    // Clamp near-zero values to avoid showing -0.00%
+    const outputValue = Number(currentRoute.estimatedOutput) / Math.pow(10, toToken.decimals);
+    const effectiveRate = outputValue / inputValue;
+    // Remove fee component: output already has fee deducted, so divide it out
+    const feeBps = parseFloat(currentRoute.feeDisplay.replace(/[~%]/g, '')) * 100;
+    const feeRate = feeBps / 10000;
+    const rateExFee = effectiveRate / (1 - feeRate);
+    const impact = ((midMarketRate - rateExFee) / midMarketRate) * 100;
     if (Math.abs(impact) < 0.005) return '0.00';
     return impact.toFixed(2);
   })();
 
-  // Fetch quote when amount changes (debounced)
-  // Clear stale output immediately to prevent showing old output with new input
+  // Price impact warning levels: 2% yellow, 5% red
+  $: impactLevel = (() => {
+    if (priceImpact === null) return 'none';
+    const val = Math.abs(parseFloat(priceImpact));
+    if (val >= 5) return 'danger';
+    if (val >= 2) return 'warn';
+    return 'none';
+  })();
+
+  // Debounced quote
   $: if (amount && parseFloat(amount) > 0) {
-    quoteOutput = null;
+    currentRoute = null;
     debouncedQuote();
   } else {
-    quoteOutput = null;
+    currentRoute = null;
   }
 
   function debouncedQuote() {
@@ -95,47 +88,68 @@
 
   async function fetchQuote() {
     const val = parseFloat(amount);
-    if (!val || val <= 0) { quoteOutput = null; return; }
+    if (!val || val <= 0) { currentRoute = null; return; }
     try {
       quoting = true;
-      const dxRaw = parseTokenAmount(amount, fromToken.decimals);
-      quoteOutput = await threePoolService.calcSwap(fromIndex, toIndex, dxRaw);
+      error = '';
+      const amountRaw = parseTokenAmount(String(amount), fromToken.decimals);
+      // Run quote + signer pre-warm in parallel so both are ready before click
+      const [route] = await Promise.all([
+        resolveRoute(fromToken, toToken, amountRaw),
+        preWarmOisySigner(),
+      ]);
+      currentRoute = route;
+      midMarketRate = await fetchMidMarketRate(currentRoute);
     } catch (err: any) {
-      quoteOutput = null;
+      currentRoute = null;
+      error = `Quote failed: ${err.message}`;
+      console.warn('Quote failed:', err.message, err);
     } finally {
       quoting = false;
     }
   }
 
+  /** Approximate zero-slippage rate by quoting a tiny amount. Works for all route types. */
+  async function fetchMidMarketRate(route: SwapRoute): Promise<number | null> {
+    try {
+      // Quote 0.01 of the input token — small enough for negligible impact even on thin pools
+      const tinyAmount = BigInt(Math.pow(10, Math.max(fromToken.decimals - 2, 0)));
+      const tinyRoute = await resolveRoute(fromToken, toToken, tinyAmount);
+      const tinyOut = Number(tinyRoute.estimatedOutput) / Math.pow(10, toToken.decimals);
+      return tinyOut * 100; // scale up to per-1-token rate
+    } catch {
+      return null;
+    }
+  }
+
   function flipTokens() {
-    const tmp = fromIndex;
-    fromIndex = toIndex;
-    toIndex = tmp;
+    const tmp = fromIdx;
+    fromIdx = toIdx;
+    toIdx = tmp;
     amount = '';
-    quoteOutput = null;
+    currentRoute = null;
     error = '';
   }
 
   function selectFrom(index: number) {
-    if (index === toIndex) toIndex = fromIndex;
-    fromIndex = index;
+    if (index === toIdx) toIdx = fromIdx;
+    fromIdx = index;
     showFromDropdown = false;
     amount = '';
-    quoteOutput = null;
+    currentRoute = null;
     error = '';
   }
 
   function selectTo(index: number) {
-    if (index === fromIndex) fromIndex = toIndex;
-    toIndex = index;
+    if (index === fromIdx) fromIdx = toIdx;
+    toIdx = index;
     showToDropdown = false;
-    quoteOutput = null;
+    currentRoute = null;
     error = '';
   }
 
   function setMax() {
-    // Swap costs 2 ledger fees: approve + transfer_from
-    const totalFees = getLedgerFee(fromToken.decimals) * 2n;
+    const totalFees = getLedgerFee(fromToken) * 2n;
     const adjusted = walletBalance > totalFees ? walletBalance - totalFees : 0n;
     const divisor = Math.pow(10, fromToken.decimals);
     amount = (Number(adjusted) / divisor).toFixed(fromToken.decimals);
@@ -150,30 +164,32 @@
       error = 'Enter a valid amount';
       return;
     }
-    if (quoteOutput === null) {
+    if (!currentRoute) {
       error = 'Waiting for quote';
       return;
+    }
+
+    // Red warning gate at 5%
+    if (impactLevel === 'danger') {
+      const confirmed = confirm(`Price impact is ${priceImpact}%. Are you sure you want to proceed?`);
+      if (!confirmed) return;
     }
 
     try {
       loading = true;
       error = '';
-      const dxRaw = parseTokenAmount(amount, fromToken.decimals);
+      const amountRaw = parseTokenAmount(String(amount), fromToken.decimals);
 
-      // Check balance + fees
-      const totalFees = getLedgerFee(fromToken.decimals) * 2n;
-      if (dxRaw + totalFees > walletBalance) {
+      const totalFees = getLedgerFee(fromToken) * 2n;
+      if (amountRaw + totalFees > walletBalance) {
         error = 'Insufficient balance (amount + fees)';
         return;
       }
 
-      // min_dy = quote * (1 - slippage)
-      const minDy = quoteOutput * BigInt(10000 - slippageBps) / 10000n;
-
-      await threePoolService.swap(fromIndex, toIndex, dxRaw, minDy);
+      await executeRoute(currentRoute, fromToken, toToken, amountRaw, slippageBps);
       dispatch('success', { action: 'swap' });
       amount = '';
-      quoteOutput = null;
+      currentRoute = null;
     } catch (err: any) {
       error = err.message || 'Swap failed';
     } finally {
@@ -200,7 +216,7 @@
           <path d="M21 13v2a4 4 0 0 1-4 4H3"/>
         </svg>
       </div>
-      <p class="gate-text">Connect your wallet to swap stablecoins</p>
+      <p class="gate-text">Connect your wallet to swap tokens</p>
     </div>
   {:else}
     <!-- FROM section -->
@@ -237,8 +253,8 @@
 
       {#if showFromDropdown}
         <div class="token-dropdown" on:click|stopPropagation>
-          {#each POOL_TOKENS as token, i}
-            <button class="token-option" class:token-option-active={fromIndex === i}
+          {#each AMM_TOKENS as token, i}
+            <button class="token-option" class:token-option-active={fromIdx === i}
               on:click={() => selectFrom(i)}>
               <span class="token-dot" style="background:{token.color}"></span>
               {token.symbol}
@@ -261,10 +277,10 @@
     <!-- TO section -->
     <div class="section-label">To (estimated)</div>
     <div class="input-wrapper">
-      <div class="output-display" class:has-value={quoteOutput !== null}>
+      <div class="output-display" class:has-value={currentRoute !== null}>
         {#if quoting}
           <span class="quoting-text">Fetching quote…</span>
-        {:else if quoteOutput !== null}
+        {:else if currentRoute !== null}
           {outputFormatted}
         {:else}
           <span class="placeholder-text">0.00</span>
@@ -283,8 +299,8 @@
 
       {#if showToDropdown}
         <div class="token-dropdown" on:click|stopPropagation>
-          {#each POOL_TOKENS as token, i}
-            <button class="token-option" class:token-option-active={toIndex === i}
+          {#each AMM_TOKENS as token, i}
+            <button class="token-option" class:token-option-active={toIdx === i}
               on:click={() => selectTo(i)}>
               <span class="token-dot" style="background:{token.color}"></span>
               {token.symbol}
@@ -303,12 +319,21 @@
         </div>
         <div class="info-row">
           <span class="info-label">Swap fee</span>
-          <span class="info-value">{swapFeeDisplay}%</span>
+          <span class="info-value">{currentRoute?.feeDisplay ?? '—'}</span>
         </div>
         {#if priceImpact !== null}
           <div class="info-row">
             <span class="info-label">Price impact</span>
-            <span class="info-value" class:impact-warn={parseFloat(priceImpact) > 1} class:impact-favorable={parseFloat(priceImpact) < 0}>{parseFloat(priceImpact) < 0 ? priceImpact : priceImpact}%</span>
+            <span class="info-value"
+              class:impact-warn={impactLevel === 'warn'}
+              class:impact-danger={impactLevel === 'danger'}
+              class:impact-favorable={parseFloat(priceImpact) < 0}>{priceImpact}%</span>
+          </div>
+        {/if}
+        {#if currentRoute && currentRoute.hops > 1}
+          <div class="info-row">
+            <span class="info-label">Route</span>
+            <span class="info-value route-path">{currentRoute.pathDisplay}</span>
           </div>
         {/if}
         <div class="info-row">
@@ -335,7 +360,7 @@
     <button
       class="submit-btn"
       on:click={handleSwap}
-      disabled={loading || !amount || parseFloat(amount) <= 0 || quoteOutput === null}
+      disabled={loading || !amount || parseFloat(amount) <= 0 || currentRoute === null}
     >
       {#if loading}
         <span class="spinner"></span>
@@ -640,11 +665,21 @@
   }
 
   .info-value.impact-warn {
+    color: #fbbf24;
+  }
+
+  .info-value.impact-danger {
     color: var(--rumi-danger);
+    font-weight: 600;
   }
 
   .info-value.impact-favorable {
     color: var(--rumi-safe);
+  }
+
+  .route-path {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    letter-spacing: -0.01em;
   }
 
   /* ── Slippage ── */
