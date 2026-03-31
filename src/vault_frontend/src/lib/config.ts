@@ -19,7 +19,7 @@ export const CANISTER_IDS = {
   // Rumi 3pool (StableSwap for icUSD/ckUSDT/ckUSDC)
   THREEPOOL: "fohh4-yyaaa-aaaap-qtkpa-cai",
   // Rumi AMM (3USD/ICP constant-product pool)
-  RUMI_AMM: "PLACEHOLDER_CANISTER_ID",
+  RUMI_AMM: "ijlzs-2yaaa-aaaap-quaaq-cai",
 } as const;
 
 // Canister IDs for local development

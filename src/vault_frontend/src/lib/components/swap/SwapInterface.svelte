@@ -1,8 +1,9 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import { walletStore } from '../../stores/wallet';
-  import { AMM_TOKENS, parseTokenAmount, formatTokenAmount, getLedgerFee, type AmmToken } from '../../services/ammService';
-  import { resolveRoute, executeRoute, type SwapRoute } from '../../services/swapRouter';
+  import { ammService, AMM_TOKENS, parseTokenAmount, formatTokenAmount, getLedgerFee, type AmmToken } from '../../services/ammService';
+  import { resolveRoute, executeRoute, preWarmOisySigner, type SwapRoute } from '../../services/swapRouter';
+  import { CANISTER_IDS } from '../../config';
 
   const dispatch = createEventDispatcher();
 
@@ -13,6 +14,7 @@
   let quoting = false;
   let error = '';
   let currentRoute: SwapRoute | null = null;
+  let midMarketRate: number | null = null;
   let slippageBps = 50;
   let showSlippage = false;
   let showFromDropdown = false;
@@ -47,15 +49,17 @@
     return (outputValue / inputValue).toFixed(6);
   })();
 
-  // Price impact (approximate)
+  // Price impact: pure slippage only (excludes swap fee)
   $: priceImpact = (() => {
-    if (!currentRoute || !amount || parseFloat(amount) <= 0) return null;
+    if (!currentRoute || !amount || parseFloat(amount) <= 0 || !midMarketRate) return null;
     const inputValue = parseFloat(amount);
     const outputValue = Number(currentRoute.estimatedOutput) / Math.pow(10, toToken.decimals);
+    const effectiveRate = outputValue / inputValue;
+    // Remove fee component: output already has fee deducted, so divide it out
     const feeBps = parseFloat(currentRoute.feeDisplay.replace(/[~%]/g, '')) * 100;
     const feeRate = feeBps / 10000;
-    const rateAfterFeeRemoval = (outputValue / inputValue) / (1 - feeRate);
-    const impact = (1 - rateAfterFeeRemoval) * 100;
+    const rateExFee = effectiveRate / (1 - feeRate);
+    const impact = ((midMarketRate - rateExFee) / midMarketRate) * 100;
     if (Math.abs(impact) < 0.005) return '0.00';
     return impact.toFixed(2);
   })();
@@ -87,13 +91,34 @@
     if (!val || val <= 0) { currentRoute = null; return; }
     try {
       quoting = true;
-      const amountRaw = parseTokenAmount(amount, fromToken.decimals);
-      currentRoute = await resolveRoute(fromToken, toToken, amountRaw);
+      error = '';
+      const amountRaw = parseTokenAmount(String(amount), fromToken.decimals);
+      // Run quote + signer pre-warm in parallel so both are ready before click
+      const [route] = await Promise.all([
+        resolveRoute(fromToken, toToken, amountRaw),
+        preWarmOisySigner(),
+      ]);
+      currentRoute = route;
+      midMarketRate = await fetchMidMarketRate(currentRoute);
     } catch (err: any) {
       currentRoute = null;
-      console.warn('Quote failed:', err.message);
+      error = `Quote failed: ${err.message}`;
+      console.warn('Quote failed:', err.message, err);
     } finally {
       quoting = false;
+    }
+  }
+
+  /** Approximate zero-slippage rate by quoting a tiny amount. Works for all route types. */
+  async function fetchMidMarketRate(route: SwapRoute): Promise<number | null> {
+    try {
+      // Quote 0.01 of the input token — small enough for negligible impact even on thin pools
+      const tinyAmount = BigInt(Math.pow(10, Math.max(fromToken.decimals - 2, 0)));
+      const tinyRoute = await resolveRoute(fromToken, toToken, tinyAmount);
+      const tinyOut = Number(tinyRoute.estimatedOutput) / Math.pow(10, toToken.decimals);
+      return tinyOut * 100; // scale up to per-1-token rate
+    } catch {
+      return null;
     }
   }
 
@@ -153,7 +178,7 @@
     try {
       loading = true;
       error = '';
-      const amountRaw = parseTokenAmount(amount, fromToken.decimals);
+      const amountRaw = parseTokenAmount(String(amount), fromToken.decimals);
 
       const totalFees = getLedgerFee(fromToken) * 2n;
       if (amountRaw + totalFees > walletBalance) {

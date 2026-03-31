@@ -29,6 +29,7 @@
   let icpPriceUsd: number | null = null;
   let threeUsdPriceUsd: number | null = null;
   let priceLoading = false;
+  let priceFlipped = false;
   let lastEdited: 'A' | 'B' | null = null;
 
   // Remove liquidity state
@@ -298,13 +299,25 @@
         {@const reserveA_f = Number(threeUsdReserve) / 1e8}
         {@const reserveB_f = Number(icpReserve) / 1e8}
         {@const rate = reserveA_f > 0 ? (reserveB_f / reserveA_f) : 0}
-        <div class="price-info">
-          1 3USD = {rate.toFixed(4)} ICP <span class="price-source">(pool ratio)</span>
+        <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+        <div class="price-info clickable" on:click={() => priceFlipped = !priceFlipped}>
+          {#if priceFlipped}
+            1 ICP = {rate > 0 ? (1 / rate).toFixed(4) : '—'} 3USD
+          {:else}
+            1 3USD = {rate.toFixed(4)} ICP
+          {/if}
+          <span class="price-source">(pool ratio)</span> <span class="flip-icon">⇄</span>
         </div>
       {:else if icpPriceUsd && threeUsdPriceUsd}
         {@const rate = threeUsdPriceUsd / icpPriceUsd}
-        <div class="price-info">
-          1 3USD = {rate.toFixed(4)} ICP <span class="price-source">(price feeds)</span>
+        <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+        <div class="price-info clickable" on:click={() => priceFlipped = !priceFlipped}>
+          {#if priceFlipped}
+            1 ICP = {rate > 0 ? (1 / rate).toFixed(4) : '—'} 3USD
+          {:else}
+            1 3USD = {rate.toFixed(4)} ICP
+          {/if}
+          <span class="price-source">(price feeds)</span> <span class="flip-icon">⇄</span>
         </div>
       {:else if priceLoading}
         <div class="price-info">Loading prices...</div>
@@ -645,6 +658,25 @@
   .price-source {
     opacity: 0.6;
     font-style: italic;
+  }
+
+  .price-info.clickable {
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .price-info.clickable:hover {
+    color: var(--rumi-accent, #6ee7b7);
+  }
+
+  .flip-icon {
+    opacity: 0.4;
+    font-size: 0.7rem;
+    margin-left: 0.15rem;
+  }
+
+  .price-info.clickable:hover .flip-icon {
+    opacity: 0.8;
   }
 
   .error-bar {
