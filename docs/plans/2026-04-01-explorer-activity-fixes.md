@@ -226,6 +226,32 @@ Message: `Add liquidity event tracking to 3Pool canister`
 
 ---
 
+## Phase 3b: Remove Dead Code — `src/rumi_stability_pool/`
+
+The `src/rumi_stability_pool/` directory is an old, unused copy of the stability pool canister. The real canister lives at `src/stability_pool/` (referenced by dfx.json as package `stability_pool`). The dead code has no pre/post_upgrade hooks, no event tracking, and is not compiled or deployed.
+
+### Task 3b.1: Remove the directory
+
+```bash
+rm -rf src/rumi_stability_pool/
+```
+
+### Task 3b.2: Remove from Cargo.toml workspace members (if listed)
+
+Check `Cargo.toml` at the repo root — if `rumi_stability_pool` is listed in `[workspace] members`, remove it.
+
+### Task 3b.3: Build to verify nothing breaks
+
+```bash
+cargo build --target wasm32-unknown-unknown --release -p stability_pool
+```
+
+### Task 3b.4: Commit
+
+Message: `Remove dead code: src/rumi_stability_pool/ (real canister is src/stability_pool/)`
+
+---
+
 ## Phase 4: Deploy AMM + 3Pool Canisters
 
 (No stability pool deploy needed — it already tracks events.)
