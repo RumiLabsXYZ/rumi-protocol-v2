@@ -21,6 +21,7 @@
   import { decodeRustDecimal } from '$utils/decimalUtils';
 
   const E8S = 100_000_000;
+  const COLLATERAL_ORDER: Record<string, number> = { ICP: 0, ckBTC: 1, ckETH: 2, ckXAUT: 3, nICP: 4, BOB: 5, EXE: 6 };
 
   // ── State ─────────────────────────────────────────────────────────────
 
@@ -190,6 +191,7 @@
         status: statusKey,
       });
     }
+    rows.sort((a, b) => (COLLATERAL_ORDER[a.symbol] ?? 99) - (COLLATERAL_ORDER[b.symbol] ?? 99));
     return rows;
   });
 

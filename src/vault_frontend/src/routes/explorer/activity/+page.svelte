@@ -57,6 +57,8 @@
 
 	// Vault collateral type lookup map (vault_id → collateral_type principal string)
 	let vaultCollateralMap: Map<number, string> = $state(new Map());
+	// Vault owner lookup map (vault_id → owner principal string)
+	let vaultOwnerMap: Map<number, string> = $state(new Map());
 
 	const totalPages = $derived(Math.ceil(totalCount / PAGE_SIZE));
 
@@ -100,9 +102,25 @@
 				const owner = data.vault.owner;
 				if (typeof owner === 'object' && typeof owner.toText === 'function') return owner.toText();
 			}
+			// Fall back to vault owner map
+			if (data.vault_id != null) {
+				const owner = vaultOwnerMap.get(Number(data.vault_id));
+				if (owner) return owner;
+			}
 		}
 		return null;
 	}
+
+	// ── Source label for non-backend event IDs ──
+	const SOURCE_LABELS: Record<string, string> = {
+		'3pool_swap': '3Pool',
+		'amm_swap': 'AMM',
+		'amm_liquidity': 'AMM',
+		'amm_admin': 'AMM',
+		'3pool_liquidity': '3Pool',
+		'3pool_admin': '3Pool',
+		'stability_pool': 'SP',
+	};
 
 	// ── Format event for display ──
 
@@ -454,15 +472,19 @@
 		// Load vault collateral type map for proper event formatting
 		try {
 			const vaults = await fetchAllVaults();
-			const map = new Map<number, string>();
+			const collMap = new Map<number, string>();
+			const ownerMap = new Map<number, string>();
 			for (const v of vaults) {
 				const id = Number(v.vault_id);
 				const collType = v.collateral_type?.toText?.() ?? String(v.collateral_type ?? '');
-				if (collType) map.set(id, collType);
+				if (collType) collMap.set(id, collType);
+				const owner = v.owner?.toText?.() ?? (typeof v.owner === 'string' ? v.owner : '');
+				if (owner) ownerMap.set(id, owner);
 			}
-			vaultCollateralMap = map;
+			vaultCollateralMap = collMap;
+			vaultOwnerMap = ownerMap;
 		} catch (e) {
-			console.error('[activity] Failed to load vault collateral map:', e);
+			console.error('[activity] Failed to load vault maps:', e);
 		}
 
 		const urlFilter = $page.url.searchParams.get('filter');
@@ -570,14 +592,15 @@
 					{#each displayEvents as de (String(de.globalIndex) + de.source)}
 						{#if de.source === 'backend'}
 							<!-- Backend events use EventRow which has its own formatting -->
-							<EventRow event={de.event} index={Number(de.globalIndex)} {vaultCollateralMap} />
+							<EventRow event={de.event} index={Number(de.globalIndex)} {vaultCollateralMap} {vaultOwnerMap} />
 						{:else}
 							<!-- Non-backend events use the unified rendering -->
 							{@const formatted = formatDisplayEvent(de)}
 							{@const principal = extractPrincipal(de.event, de.source)}
+							{@const sourceLabel = SOURCE_LABELS[de.source] ?? de.source}
 							<tr class="border-b border-gray-700/50 hover:bg-gray-800/30 transition-colors group">
 								<td class="px-4 py-3">
-									<span class="text-xs text-gray-500 font-mono">{Number(de.globalIndex)}</span>
+									<a href="/explorer/dex/{de.source}/{Number(de.globalIndex)}" class="text-xs text-blue-400 hover:text-blue-300 font-mono" title="{sourceLabel} Event #{Number(de.globalIndex)}">{sourceLabel} #{Number(de.globalIndex)}</a>
 								</td>
 								<td class="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">
 									{#if de.timestamp}
@@ -604,7 +627,12 @@
 									{formatted.summary}
 								</td>
 								<td class="px-4 py-3 text-right">
-									<!-- No detail page for non-backend events yet -->
+									<a
+										href="/explorer/dex/{de.source}/{Number(de.globalIndex)}"
+										class="text-xs text-blue-400 hover:text-blue-300 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap"
+									>
+										Details &rarr;
+									</a>
 								</td>
 							</tr>
 						{/if}

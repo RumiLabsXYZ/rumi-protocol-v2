@@ -12,6 +12,7 @@ export type EventCategory =
   | 'redemption'
   | 'stability_pool'
   | 'threepool'
+  | 'amm'
   | 'admin'
   | 'system';
 
@@ -54,6 +55,7 @@ export const BADGE_COLORS: Record<EventCategory, string> = {
   redemption: 'bg-purple-500/15 text-purple-400 border border-purple-500/30',
   stability_pool: 'bg-teal-500/15 text-teal-400 border border-teal-500/30',
   threepool: 'bg-cyan-500/15 text-cyan-400 border border-cyan-500/30',
+  amm: 'bg-indigo-500/15 text-indigo-400 border border-indigo-500/30',
   admin: 'bg-amber-500/15 text-amber-400 border border-amber-500/30',
   system: 'bg-gray-500/15 text-gray-400 border border-gray-500/30',
 };
@@ -149,51 +151,93 @@ export function formatSwapEvent(swap: any): FormattedEvent {
 }
 
 /**
- * Format an AMM swap event into a simple display object.
+ * Format an AMM swap event into FormattedEvent.
  */
-export function formatAmmSwapEvent(event: any): { summary: string; typeName: string; badgeColor: string } {
+export function formatAmmSwapEvent(event: any): FormattedEvent {
   const poolId = event.pool_id ?? '?';
-  const amountIn = event.amount_in != null ? formatTokenAmount(BigInt(event.amount_in), 8) : '?';
-  const amountOut = event.amount_out != null ? formatTokenAmount(BigInt(event.amount_out), 8) : '?';
-  const tokenIn = event.token_in ? shortenPrincipal(event.token_in.toText?.() ?? String(event.token_in)) : '?';
-  const tokenOut = event.token_out ? shortenPrincipal(event.token_out.toText?.() ?? String(event.token_out)) : '?';
+  const tokenInPrincipal = event.token_in?.toText?.() ?? String(event.token_in ?? '');
+  const tokenOutPrincipal = event.token_out?.toText?.() ?? String(event.token_out ?? '');
+  const tokenInSym = getTokenSymbol(tokenInPrincipal);
+  const tokenOutSym = getTokenSymbol(tokenOutPrincipal);
+  const tokenInDec = getTokenDecimals(tokenInPrincipal);
+  const tokenOutDec = getTokenDecimals(tokenOutPrincipal);
+  const amountIn = event.amount_in != null ? formatTokenAmount(BigInt(event.amount_in), tokenInDec) : '?';
+  const amountOut = event.amount_out != null ? formatTokenAmount(BigInt(event.amount_out), tokenOutDec) : '?';
+
+  const fields: EventField[] = [
+    { label: 'Token In', value: `${amountIn} ${tokenInSym}`, type: 'amount' },
+    { label: 'Token Out', value: `${amountOut} ${tokenOutSym}`, type: 'amount' },
+    { label: 'Pool', value: String(poolId), type: 'text' },
+  ];
+
+  if (tokenInPrincipal) fields.push({ label: 'Token In Ledger', value: shortenPrincipal(tokenInPrincipal), type: 'token', linkTarget: tokenInPrincipal });
+  if (tokenOutPrincipal) fields.push({ label: 'Token Out Ledger', value: shortenPrincipal(tokenOutPrincipal), type: 'token', linkTarget: tokenOutPrincipal });
+
+  const callerText = event.caller?.toText?.() ?? (typeof event.caller === 'string' ? event.caller : null);
+  if (callerText) fields.push({ label: 'Caller', value: shortenPrincipal(callerText), type: 'address', linkTarget: callerText });
+
+  if (event.timestamp) fields.push({ label: 'Timestamp', value: formatTimestamp(event.timestamp), type: 'timestamp', linkTarget: String(event.timestamp) });
 
   return {
-    summary: `Swapped ${amountIn} (${tokenIn}) → ${amountOut} (${tokenOut}) on ${poolId}`,
+    summary: `Swapped ${amountIn} ${tokenInSym} → ${amountOut} ${tokenOutSym}`,
     typeName: 'AMM Swap',
-    badgeColor: 'bg-indigo-500/15 text-indigo-400 border border-indigo-500/30',
+    category: 'amm',
+    badgeColor: BADGE_COLORS.amm,
+    fields,
   };
 }
 
 /**
- * Format an AMM liquidity event into a simple display object.
+ * Format an AMM liquidity event into FormattedEvent.
  */
-export function formatAmmLiquidityEvent(event: any): { summary: string; typeName: string; badgeColor: string } {
+export function formatAmmLiquidityEvent(event: any): FormattedEvent {
   const action = event.action ? Object.keys(event.action)[0] : '?';
   const poolId = event.pool_id ?? '?';
-  const tokenA = event.token_a ? getTokenSymbol(event.token_a.toText?.() ?? String(event.token_a)) : '?';
-  const tokenB = event.token_b ? getTokenSymbol(event.token_b.toText?.() ?? String(event.token_b)) : '?';
-  const amtA = event.amount_a != null ? formatTokenAmount(BigInt(event.amount_a), 8) : '?';
-  const amtB = event.amount_b != null ? formatTokenAmount(BigInt(event.amount_b), 8) : '?';
+  const tokenAPrincipal = event.token_a?.toText?.() ?? String(event.token_a ?? '');
+  const tokenBPrincipal = event.token_b?.toText?.() ?? String(event.token_b ?? '');
+  const tokenA = getTokenSymbol(tokenAPrincipal);
+  const tokenB = getTokenSymbol(tokenBPrincipal);
+  const tokenADec = getTokenDecimals(tokenAPrincipal);
+  const tokenBDec = getTokenDecimals(tokenBPrincipal);
+  const amtA = event.amount_a != null ? formatTokenAmount(BigInt(event.amount_a), tokenADec) : '?';
+  const amtB = event.amount_b != null ? formatTokenAmount(BigInt(event.amount_b), tokenBDec) : '?';
   const lpShares = event.lp_shares != null ? formatTokenAmount(BigInt(event.lp_shares), 8) : '?';
 
   const isAdd = action === 'AddLiquidity';
   const typeName = isAdd ? 'AMM Add Liquidity' : 'AMM Remove Liquidity';
   const summary = isAdd
-    ? `Added ${amtA} ${tokenA} + ${amtB} ${tokenB} → ${lpShares} LP on ${poolId}`
-    : `Removed ${lpShares} LP → ${amtA} ${tokenA} + ${amtB} ${tokenB} on ${poolId}`;
+    ? `Added ${amtA} ${tokenA} + ${amtB} ${tokenB} → ${lpShares} LP`
+    : `Removed ${lpShares} LP → ${amtA} ${tokenA} + ${amtB} ${tokenB}`;
+
+  const fields: EventField[] = [
+    { label: 'Action', value: isAdd ? 'Add Liquidity' : 'Remove Liquidity', type: 'text' },
+    { label: 'Token A', value: `${amtA} ${tokenA}`, type: 'amount' },
+    { label: 'Token B', value: `${amtB} ${tokenB}`, type: 'amount' },
+    { label: 'LP Shares', value: lpShares, type: 'amount' },
+    { label: 'Pool', value: String(poolId), type: 'text' },
+  ];
+
+  if (tokenAPrincipal) fields.push({ label: 'Token A Ledger', value: shortenPrincipal(tokenAPrincipal), type: 'token', linkTarget: tokenAPrincipal });
+  if (tokenBPrincipal) fields.push({ label: 'Token B Ledger', value: shortenPrincipal(tokenBPrincipal), type: 'token', linkTarget: tokenBPrincipal });
+
+  const callerText = event.caller?.toText?.() ?? (typeof event.caller === 'string' ? event.caller : null);
+  if (callerText) fields.push({ label: 'Caller', value: shortenPrincipal(callerText), type: 'address', linkTarget: callerText });
+
+  if (event.timestamp) fields.push({ label: 'Timestamp', value: formatTimestamp(event.timestamp), type: 'timestamp', linkTarget: String(event.timestamp) });
 
   return {
     summary,
     typeName,
-    badgeColor: 'bg-indigo-500/15 text-indigo-400 border border-indigo-500/30',
+    category: 'amm',
+    badgeColor: BADGE_COLORS.amm,
+    fields,
   };
 }
 
 /**
- * Format an AMM admin event into a simple display object.
+ * Format an AMM admin event into FormattedEvent.
  */
-export function formatAmmAdminEvent(event: any): { summary: string; typeName: string; badgeColor: string } {
+export function formatAmmAdminEvent(event: any): FormattedEvent {
   const action = event.action ? Object.keys(event.action)[0] : 'Unknown';
   const data = event.action?.[action] ?? {};
 
@@ -211,17 +255,31 @@ export function formatAmmAdminEvent(event: any): { summary: string; typeName: st
     case 'ResolvePendingClaim': summary = `Resolved pending claim #${data.claim_id}`; break;
   }
 
+  const fields: EventField[] = [
+    { label: 'Action', value: action, type: 'text' },
+  ];
+  if (data.pool_id != null) fields.push({ label: 'Pool', value: String(data.pool_id), type: 'text' });
+  if (data.fee_bps != null) fields.push({ label: 'Fee', value: `${data.fee_bps} bps`, type: 'text' });
+  if (data.protocol_fee_bps != null) fields.push({ label: 'Protocol Fee', value: `${data.protocol_fee_bps} bps`, type: 'text' });
+
+  const callerText = event.caller?.toText?.() ?? (typeof event.caller === 'string' ? event.caller : null);
+  if (callerText) fields.push({ label: 'Caller', value: shortenPrincipal(callerText), type: 'address', linkTarget: callerText });
+
+  if (event.timestamp) fields.push({ label: 'Timestamp', value: formatTimestamp(event.timestamp), type: 'timestamp', linkTarget: String(event.timestamp) });
+
   return {
     summary,
     typeName: 'AMM Admin',
+    category: 'admin',
     badgeColor: BADGE_COLORS.admin,
+    fields,
   };
 }
 
 /**
- * Format a 3Pool liquidity event into a simple display object.
+ * Format a 3Pool liquidity event into FormattedEvent.
  */
-export function format3PoolLiquidityEvent(event: any): { summary: string; typeName: string; badgeColor: string } {
+export function format3PoolLiquidityEvent(event: any): FormattedEvent {
   const action = event.action ? Object.keys(event.action)[0] : '?';
   const amounts = event.amounts ?? [];
   const lpAmount = event.lp_amount != null ? formatTokenAmount(BigInt(event.lp_amount), 8) : '?';
@@ -229,6 +287,7 @@ export function format3PoolLiquidityEvent(event: any): { summary: string; typeNa
 
   let summary = '';
   let typeName = '';
+  const fields: EventField[] = [];
 
   switch (action) {
     case 'AddLiquidity': {
@@ -239,6 +298,13 @@ export function format3PoolLiquidityEvent(event: any): { summary: string; typeNa
       }).filter(Boolean).join(' + ');
       typeName = '3Pool Add Liquidity';
       summary = `Added ${parts || '0'} → ${lpAmount} LP`;
+      fields.push({ label: 'Action', value: 'Add Liquidity', type: 'text' });
+      for (let i = 0; i < amounts.length; i++) {
+        if (Number(amounts[i]) > 0) {
+          fields.push({ label: THREE_POOL_TOKEN_NAMES[i] ?? `token${i}`, value: fmtPoolAmount(amounts[i], i), type: 'amount' });
+        }
+      }
+      fields.push({ label: 'LP Tokens Minted', value: lpAmount, type: 'amount' });
       break;
     }
     case 'RemoveLiquidity': {
@@ -249,6 +315,13 @@ export function format3PoolLiquidityEvent(event: any): { summary: string; typeNa
       }).filter(Boolean).join(' + ');
       typeName = '3Pool Remove Liquidity';
       summary = `Removed ${lpAmount} LP → ${parts || '0'}`;
+      fields.push({ label: 'Action', value: 'Remove Liquidity', type: 'text' });
+      fields.push({ label: 'LP Tokens Burned', value: lpAmount, type: 'amount' });
+      for (let i = 0; i < amounts.length; i++) {
+        if (Number(amounts[i]) > 0) {
+          fields.push({ label: THREE_POOL_TOKEN_NAMES[i] ?? `token${i}`, value: fmtPoolAmount(amounts[i], i), type: 'amount' });
+        }
+      }
       break;
     }
     case 'RemoveOneCoin': {
@@ -257,6 +330,9 @@ export function format3PoolLiquidityEvent(event: any): { summary: string; typeNa
       const amt = amounts[idx] != null ? fmtPoolAmount(amounts[idx], idx) : '?';
       typeName = '3Pool Remove One Coin';
       summary = `Removed ${lpAmount} LP → ${amt} ${sym}`;
+      fields.push({ label: 'Action', value: 'Remove One Coin', type: 'text' });
+      fields.push({ label: 'LP Tokens Burned', value: lpAmount, type: 'amount' });
+      fields.push({ label: sym, value: amt, type: 'amount' });
       break;
     }
     case 'Donate': {
@@ -265,24 +341,34 @@ export function format3PoolLiquidityEvent(event: any): { summary: string; typeNa
       const amt = amounts[idx] != null ? fmtPoolAmount(amounts[idx], idx) : '?';
       typeName = '3Pool Donate';
       summary = `Donated ${amt} ${sym}`;
+      fields.push({ label: 'Action', value: 'Donate', type: 'text' });
+      fields.push({ label: sym, value: amt, type: 'amount' });
       break;
     }
     default:
       typeName = `3Pool ${action}`;
       summary = action;
+      fields.push({ label: 'Action', value: action, type: 'text' });
   }
+
+  const callerText = event.caller?.toText?.() ?? (typeof event.caller === 'string' ? event.caller : null);
+  if (callerText) fields.push({ label: 'Caller', value: shortenPrincipal(callerText), type: 'address', linkTarget: callerText });
+
+  if (event.timestamp) fields.push({ label: 'Timestamp', value: formatTimestamp(event.timestamp), type: 'timestamp', linkTarget: String(event.timestamp) });
 
   return {
     summary,
     typeName,
+    category: 'threepool',
     badgeColor: BADGE_COLORS.threepool,
+    fields,
   };
 }
 
 /**
- * Format a 3Pool admin event into a simple display object.
+ * Format a 3Pool admin event into FormattedEvent.
  */
-export function format3PoolAdminEvent(event: any): { summary: string; typeName: string; badgeColor: string } {
+export function format3PoolAdminEvent(event: any): FormattedEvent {
   const action = event.action ? Object.keys(event.action)[0] : 'Unknown';
   const data = event.action?.[action] ?? {};
 
@@ -298,10 +384,27 @@ export function format3PoolAdminEvent(event: any): { summary: string; typeName: 
     case 'RemoveAuthorizedBurnCaller': summary = `Removed burn caller ${shortenPrincipal(data.canister?.toText?.() ?? '')}`; break;
   }
 
+  const fields: EventField[] = [
+    { label: 'Action', value: action, type: 'text' },
+  ];
+  if (data.fee_bps != null) fields.push({ label: 'Fee', value: `${data.fee_bps} bps`, type: 'text' });
+  if (data.future_a != null) fields.push({ label: 'Future A', value: String(data.future_a), type: 'text' });
+  if (data.canister) {
+    const p = data.canister.toText?.() ?? String(data.canister);
+    fields.push({ label: 'Canister', value: shortenPrincipal(p), type: 'canister', linkTarget: p });
+  }
+
+  const callerText = event.caller?.toText?.() ?? (typeof event.caller === 'string' ? event.caller : null);
+  if (callerText) fields.push({ label: 'Caller', value: shortenPrincipal(callerText), type: 'address', linkTarget: callerText });
+
+  if (event.timestamp) fields.push({ label: 'Timestamp', value: formatTimestamp(event.timestamp), type: 'timestamp', linkTarget: String(event.timestamp) });
+
   return {
     summary,
     typeName: '3Pool Admin',
+    category: 'admin',
     badgeColor: BADGE_COLORS.admin,
+    fields,
   };
 }
 

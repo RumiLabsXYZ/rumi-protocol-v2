@@ -38,6 +38,7 @@
   let dexEvents: [bigint, any][] = $state([]);
   let dexLoading: boolean = $state(false);
   let vaultCollateralMap: Map<number, string> = $state(new Map());
+  let vaultOwnerMap: Map<number, string> = $state(new Map());
 
   // ── Derived ──────────────────────────────────────────────────────────
   const principalStr = $derived($page.params.principal);
@@ -195,12 +196,16 @@
 
       // Build vault collateral type map for event formatting
       const vcMap = new Map<number, string>();
+      const voMap = new Map<number, string>();
       for (const v of allVaults) {
         const id = Number(v.vault_id);
         const collType = v.collateral_type?.toText?.() ?? String(v.collateral_type ?? '');
         if (collType) vcMap.set(id, collType);
+        const owner = v.owner?.toText?.() ?? (typeof v.owner === 'string' ? v.owner : '');
+        if (owner) voMap.set(id, owner);
       }
       vaultCollateralMap = vcMap;
+      vaultOwnerMap = voMap;
 
       // Build config map keyed by principal text
       const cMap = new Map<string, any>();
@@ -446,7 +451,7 @@
       {:else}
         <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl overflow-hidden">
           {#each filteredEvents as [globalIndex, event] (globalIndex)}
-            <EventRow {event} index={Number(globalIndex)} {vaultCollateralMap} />
+            <EventRow {event} index={Number(globalIndex)} {vaultCollateralMap} {vaultOwnerMap} />
           {/each}
         </div>
       {/if}

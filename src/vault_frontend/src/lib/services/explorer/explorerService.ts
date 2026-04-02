@@ -675,3 +675,43 @@ export async function fetch3PoolAdminEventCount(): Promise<bigint> {
 		return 0n;
 	}
 }
+
+// ── Single DEX Event Fetch ─────────────────────────────────────────────────
+
+export type DexEventSource = '3pool_swap' | 'amm_swap' | 'amm_liquidity' | 'amm_admin' | '3pool_liquidity' | '3pool_admin' | 'stability_pool';
+
+/**
+ * Fetch a single event from a non-backend source by its local ID.
+ * Fetches a small window around the ID and finds the matching event.
+ */
+export async function fetchDexEvent(source: DexEventSource, id: number): Promise<any | null> {
+	const key = `dex:event:${source}:${id}`;
+	const cached = getCached<any>(key, TTL.EVENTS);
+	if (cached) return cached;
+
+	try {
+		// Fetch events that include the target ID
+		// Most canister event APIs take (start, length) where start is the first ID
+		const start = BigInt(Math.max(0, id));
+		const length = 1n;
+		let events: any[];
+
+		switch (source) {
+			case '3pool_swap': events = await threePoolService.getSwapEvents(start, length); break;
+			case 'amm_swap': events = await ammService.getSwapEvents(start, length); break;
+			case 'amm_liquidity': events = await ammService.getLiquidityEvents(start, length); break;
+			case 'amm_admin': events = await ammService.getAdminEvents(start, length); break;
+			case '3pool_liquidity': events = await threePoolService.getLiquidityEvents(start, length); break;
+			case '3pool_admin': events = await threePoolService.getAdminEvents(start, length); break;
+			case 'stability_pool': events = await stabilityPoolService.getPoolEvents(start, length); break;
+			default: return null;
+		}
+
+		const match = events.find((e: any) => Number(e.id ?? 0) === id) ?? events[0] ?? null;
+		if (match) return setCache(key, match);
+		return null;
+	} catch (err) {
+		console.error(`[explorerService] fetchDexEvent(${source}, ${id}) failed:`, err);
+		return null;
+	}
+}

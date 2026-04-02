@@ -9,10 +9,11 @@
     index: number | null;
     showTimestamp?: boolean;
     vaultCollateralMap?: Map<number, string>;
+    vaultOwnerMap?: Map<number, string>;
     [key: string]: any;
   }
 
-  let { event, index, showTimestamp = true, vaultCollateralMap, ...rest }: Props = $props();
+  let { event, index, showTimestamp = true, vaultCollateralMap, vaultOwnerMap, ...rest }: Props = $props();
 
   const hasIndex = $derived(index != null && index >= 0);
 
@@ -46,6 +47,12 @@
     if (data.vault?.owner) {
       const owner = data.vault.owner;
       if (typeof owner === 'object' && typeof owner.toText === 'function') return owner.toText();
+    }
+
+    // Fall back to vault owner map for events that reference a vault_id
+    if (vaultOwnerMap && data.vault_id != null) {
+      const owner = vaultOwnerMap.get(Number(data.vault_id));
+      if (owner) return owner;
     }
 
     return null;
