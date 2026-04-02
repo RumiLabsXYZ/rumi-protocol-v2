@@ -204,6 +204,36 @@ class AmmService {
     return await actor.get_lp_balance(poolId, owner);
   }
 
+  async getSwapEvents(start: bigint, length: bigint): Promise<any[]> {
+    const actor = await this.getQueryActor();
+    return await actor.get_amm_swap_events(start, length);
+  }
+
+  async getSwapEventCount(): Promise<bigint> {
+    const actor = await this.getQueryActor();
+    return await actor.get_amm_swap_event_count();
+  }
+
+  async getLiquidityEvents(start: bigint, length: bigint): Promise<any[]> {
+    const actor = await this.getQueryActor();
+    return await actor.get_amm_liquidity_events(start, length);
+  }
+
+  async getLiquidityEventCount(): Promise<bigint> {
+    const actor = await this.getQueryActor();
+    return await actor.get_amm_liquidity_event_count();
+  }
+
+  async getAdminEvents(start: bigint, length: bigint): Promise<any[]> {
+    const actor = await this.getQueryActor();
+    return await actor.get_amm_admin_events(start, length);
+  }
+
+  async getAdminEventCount(): Promise<bigint> {
+    const actor = await this.getQueryActor();
+    return await actor.get_amm_admin_event_count();
+  }
+
   // ── Mutations ──
 
   async swap(

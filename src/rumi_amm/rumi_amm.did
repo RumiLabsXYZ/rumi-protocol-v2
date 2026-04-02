@@ -42,6 +42,18 @@ type PendingClaim = record {
   created_at : nat64;
 };
 
+type AmmSwapEvent = record {
+  id : nat64;
+  caller : principal;
+  pool_id : text;
+  token_in : principal;
+  amount_in : nat;
+  token_out : principal;
+  amount_out : nat;
+  fee : nat;
+  timestamp : nat64;
+};
+
 // ── ICRC-21 Consent Messages ──
 
 type ConsentMessageMetadata = record {
@@ -92,6 +104,48 @@ type Icrc28TrustedOriginsResponse = record {
 type StandardRecord = record {
   name : text;
   url : text;
+};
+
+// ── Liquidity Events ──
+
+type AmmLiquidityAction = variant {
+  AddLiquidity;
+  RemoveLiquidity;
+};
+
+type AmmLiquidityEvent = record {
+  id : nat64;
+  caller : principal;
+  pool_id : text;
+  action : AmmLiquidityAction;
+  token_a : principal;
+  amount_a : nat;
+  token_b : principal;
+  amount_b : nat;
+  lp_shares : nat;
+  timestamp : nat64;
+};
+
+// ── Admin Events ──
+
+type AmmAdminAction = variant {
+  CreatePool : record { pool_id : text; token_a : principal; token_b : principal; fee_bps : nat16 };
+  SetFee : record { pool_id : text; fee_bps : nat16 };
+  SetProtocolFee : record { pool_id : text; protocol_fee_bps : nat16 };
+  WithdrawProtocolFees : record { pool_id : text; amount_a : nat; amount_b : nat };
+  PausePool : record { pool_id : text };
+  UnpausePool : record { pool_id : text };
+  SetPoolCreationOpen : record { open : bool };
+  SetMaintenanceMode : record { enabled : bool };
+  ClaimPending : record { claim_id : nat64; claimant : principal; amount : nat };
+  ResolvePendingClaim : record { claim_id : nat64 };
+};
+
+type AmmAdminEvent = record {
+  id : nat64;
+  caller : principal;
+  action : AmmAdminAction;
+  timestamp : nat64;
 };
 
 // ── AMM Errors ──
@@ -149,6 +203,18 @@ service : (AmmInitArgs) -> {
   withdraw_protocol_fees : (text) -> (variant { Ok : record { nat; nat }; Err : AmmError });
   pause_pool : (text) -> (variant { Ok; Err : AmmError });
   unpause_pool : (text) -> (variant { Ok; Err : AmmError });
+
+  // ── Swap Event History ──
+  get_amm_swap_events : (nat64, nat64) -> (vec AmmSwapEvent) query;
+  get_amm_swap_event_count : () -> (nat64) query;
+
+  // ── Liquidity Event History ──
+  get_amm_liquidity_events : (nat64, nat64) -> (vec AmmLiquidityEvent) query;
+  get_amm_liquidity_event_count : () -> (nat64) query;
+
+  // ── Admin Event History ──
+  get_amm_admin_events : (nat64, nat64) -> (vec AmmAdminEvent) query;
+  get_amm_admin_event_count : () -> (nat64) query;
 
   // ── ICRC-21 / ICRC-28 / ICRC-10 ──
   icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (variant { Ok : ConsentInfo; Err : Icrc21Error });

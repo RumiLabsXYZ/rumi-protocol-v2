@@ -171,6 +171,46 @@ pub fn get_swap_event_count() -> u64 {
     read_state(|s| s.swap_events().len() as u64)
 }
 
+/// Query liquidity events for explorer. Returns events in the requested range.
+#[query]
+pub fn get_liquidity_events(start: u64, length: u64) -> Vec<LiquidityEvent> {
+    read_state(|s| {
+        let events = s.liquidity_events();
+        let total = events.len() as u64;
+        if start >= total {
+            return vec![];
+        }
+        let end = (start + length).min(total) as usize;
+        events[start as usize..end].to_vec()
+    })
+}
+
+/// Query total number of liquidity events.
+#[query]
+pub fn get_liquidity_event_count() -> u64 {
+    read_state(|s| s.liquidity_events().len() as u64)
+}
+
+/// Query admin events for explorer. Returns events in the requested range.
+#[query]
+pub fn get_admin_events(start: u64, length: u64) -> Vec<ThreePoolAdminEvent> {
+    read_state(|s| {
+        let events = s.admin_events();
+        let total = events.len() as u64;
+        if start >= total {
+            return vec![];
+        }
+        let end = (start + length).min(total) as usize;
+        events[start as usize..end].to_vec()
+    })
+}
+
+/// Query total number of admin events.
+#[query]
+pub fn get_admin_event_count() -> u64 {
+    read_state(|s| s.admin_events().len() as u64)
+}
+
 // ─── Helper: extract precision_muls from config ───
 
 fn get_precision_muls() -> [u64; 3] {
@@ -348,6 +388,21 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
         s.log_block(Icrc3Transaction::Mint { to: caller, amount: lp_minted });
     });
 
+    // Record liquidity event
+    mutate_state(|s| {
+        let id = s.liquidity_events().len() as u64;
+        s.liquidity_events_mut().push(LiquidityEvent {
+            id,
+            timestamp: ic_cdk::api::time(),
+            caller,
+            action: LiquidityAction::AddLiquidity,
+            amounts: amounts_arr,
+            lp_amount: lp_minted,
+            coin_index: None,
+            fee: None,
+        });
+    });
+
     log!(INFO, "AddLiquidity: {:?} -> {} LP for {}", amounts_arr, lp_minted, caller);
 
     Ok(lp_minted)
@@ -422,6 +477,21 @@ pub async fn remove_liquidity(
                 })?;
         }
     }
+
+    // Record liquidity event
+    mutate_state(|s| {
+        let id = s.liquidity_events().len() as u64;
+        s.liquidity_events_mut().push(LiquidityEvent {
+            id,
+            timestamp: ic_cdk::api::time(),
+            caller,
+            action: LiquidityAction::RemoveLiquidity,
+            amounts,
+            lp_amount: lp_burn,
+            coin_index: None,
+            fee: None,
+        });
+    });
 
     log!(INFO, "RemoveLiquidity: {} LP -> {:?} for {}", lp_burn, amounts, caller);
 
@@ -500,6 +570,23 @@ pub async fn remove_one_coin(
             reason,
         })?;
 
+    // Record liquidity event
+    mutate_state(|s| {
+        let id = s.liquidity_events().len() as u64;
+        let mut amounts = [0u128; 3];
+        amounts[idx] = amount;
+        s.liquidity_events_mut().push(LiquidityEvent {
+            id,
+            timestamp: ic_cdk::api::time(),
+            caller,
+            action: LiquidityAction::RemoveOneCoin,
+            amounts,
+            lp_amount: lp_burn,
+            coin_index: Some(coin_index),
+            fee: Some(fee),
+        });
+    });
+
     log!(INFO, "RemoveOneCoin: {} LP -> {} of token {} for {} (fee: {})",
         lp_burn, amount, coin_index, caller, fee);
 
@@ -546,6 +633,23 @@ pub async fn donate(token_index: u8, amount: u128) -> Result<(), ThreePoolError>
     // Update balance — NO LP minted
     mutate_state(|s| {
         s.balances[idx] += amount;
+    });
+
+    // Record liquidity event
+    mutate_state(|s| {
+        let id = s.liquidity_events().len() as u64;
+        let mut amounts = [0u128; 3];
+        amounts[idx] = amount;
+        s.liquidity_events_mut().push(LiquidityEvent {
+            id,
+            timestamp: ic_cdk::api::time(),
+            caller,
+            action: LiquidityAction::Donate,
+            amounts,
+            lp_amount: 0,
+            coin_index: Some(token_index),
+            fee: None,
+        });
     });
 
     log!(INFO, "Donate: {} of {} (token {}) from {}", amount, symbol, token_index, caller);

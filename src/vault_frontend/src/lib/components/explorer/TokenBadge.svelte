@@ -15,6 +15,10 @@
     ckBTC: '/ckBTC_logo.svg',
     ckXAUT: '/ckXAUT_logo.svg',
     icUSD: '/icusd-logo_v3.svg',
+    BOB: '/bob-logo.png',
+    EXE: '/windoge98-logo.webp',
+    ckETH: '/cketh-logo.svg',
+    nICP: '/nicp-logo.png',
   };
 
   const sizeClasses = size === 'sm'

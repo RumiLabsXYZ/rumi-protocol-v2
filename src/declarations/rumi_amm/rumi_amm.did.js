@@ -94,6 +94,51 @@ export const idlFactory = ({ IDL }) => {
   const Icrc28TrustedOriginsResponse = IDL.Record({
     'trusted_origins' : IDL.Vec(IDL.Text),
   });
+  const AmmSwapEvent = IDL.Record({
+    'id' : IDL.Nat64,
+    'caller' : IDL.Principal,
+    'pool_id' : IDL.Text,
+    'token_in' : IDL.Principal,
+    'amount_in' : IDL.Nat,
+    'token_out' : IDL.Principal,
+    'amount_out' : IDL.Nat,
+    'fee' : IDL.Nat,
+    'timestamp' : IDL.Nat64,
+  });
+  const AmmLiquidityAction = IDL.Variant({
+    'AddLiquidity' : IDL.Null,
+    'RemoveLiquidity' : IDL.Null,
+  });
+  const AmmLiquidityEvent = IDL.Record({
+    'id' : IDL.Nat64,
+    'caller' : IDL.Principal,
+    'pool_id' : IDL.Text,
+    'action' : AmmLiquidityAction,
+    'token_a' : IDL.Principal,
+    'amount_a' : IDL.Nat,
+    'token_b' : IDL.Principal,
+    'amount_b' : IDL.Nat,
+    'lp_shares' : IDL.Nat,
+    'timestamp' : IDL.Nat64,
+  });
+  const AmmAdminAction = IDL.Variant({
+    'CreatePool' : IDL.Record({ 'pool_id' : IDL.Text, 'token_a' : IDL.Principal, 'token_b' : IDL.Principal, 'fee_bps' : IDL.Nat16 }),
+    'SetFee' : IDL.Record({ 'pool_id' : IDL.Text, 'fee_bps' : IDL.Nat16 }),
+    'SetProtocolFee' : IDL.Record({ 'pool_id' : IDL.Text, 'protocol_fee_bps' : IDL.Nat16 }),
+    'WithdrawProtocolFees' : IDL.Record({ 'pool_id' : IDL.Text, 'amount_a' : IDL.Nat, 'amount_b' : IDL.Nat }),
+    'PausePool' : IDL.Record({ 'pool_id' : IDL.Text }),
+    'UnpausePool' : IDL.Record({ 'pool_id' : IDL.Text }),
+    'SetPoolCreationOpen' : IDL.Record({ 'open' : IDL.Bool }),
+    'SetMaintenanceMode' : IDL.Record({ 'enabled' : IDL.Bool }),
+    'ClaimPending' : IDL.Record({ 'claim_id' : IDL.Nat64, 'claimant' : IDL.Principal, 'amount' : IDL.Nat }),
+    'ResolvePendingClaim' : IDL.Record({ 'claim_id' : IDL.Nat64 }),
+  });
+  const AmmAdminEvent = IDL.Record({
+    'id' : IDL.Nat64,
+    'caller' : IDL.Principal,
+    'action' : AmmAdminAction,
+    'timestamp' : IDL.Nat64,
+  });
   const SwapResult = IDL.Record({ 'fee' : IDL.Nat, 'amount_out' : IDL.Nat });
   return IDL.Service({
     'add_liquidity' : IDL.Func(
@@ -192,6 +237,24 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Tuple(IDL.Nat, IDL.Nat), 'Err' : AmmError })],
         [],
       ),
+    'get_amm_swap_events' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [IDL.Vec(AmmSwapEvent)],
+        ['query'],
+      ),
+    'get_amm_swap_event_count' : IDL.Func([], [IDL.Nat64], ['query']),
+    'get_amm_liquidity_events' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [IDL.Vec(AmmLiquidityEvent)],
+        ['query'],
+      ),
+    'get_amm_liquidity_event_count' : IDL.Func([], [IDL.Nat64], ['query']),
+    'get_amm_admin_events' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [IDL.Vec(AmmAdminEvent)],
+        ['query'],
+      ),
+    'get_amm_admin_event_count' : IDL.Func([], [IDL.Nat64], ['query']),
   });
 };
 export const init = ({ IDL }) => {

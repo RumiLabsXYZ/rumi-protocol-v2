@@ -105,7 +105,7 @@ export const KNOWN_TOKENS: Record<string, TokenInfo> = {
   [CANISTER_IDS.ICUSD_LEDGER]: { symbol: 'icUSD', name: 'icUSD Stablecoin', decimals: 8 },
   [CANISTER_IDS.CKUSDT_LEDGER]: { symbol: 'ckUSDT', name: 'Chain-Key USDT', decimals: 6 },
   [CANISTER_IDS.CKUSDC_LEDGER]: { symbol: 'ckUSDC', name: 'Chain-Key USDC', decimals: 6 },
-  [CANISTER_IDS.THREEPOOL]: { symbol: '3USD LP', name: 'Rumi 3Pool LP Token', decimals: 18 },
+  [CANISTER_IDS.THREEPOOL]: { symbol: '3USD LP', name: 'Rumi 3Pool LP Token', decimals: 8 },
   // Collateral tokens
   'mxzaz-hqaaa-aaaar-qaada-cai': { symbol: 'ckBTC', name: 'Chain-Key Bitcoin', decimals: 8 },
   'ss2fx-dyaaa-aaaar-qacoq-cai': { symbol: 'ckETH', name: 'Chain-Key Ethereum', decimals: 18 },

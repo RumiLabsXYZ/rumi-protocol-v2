@@ -50,12 +50,27 @@ pub struct LiquidatableVaultInfo {
     pub collateral_price_e8s: u64,
 }
 
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct BotAdminEvent {
+    pub timestamp: u64,
+    pub caller: String,
+    pub action: BotAdminAction,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub enum BotAdminAction {
+    ConfigUpdated,
+    VaultsNotified { count: u64 },
+}
+
 #[derive(Serialize, Deserialize, Default)]
 pub struct BotState {
     pub config: Option<BotConfig>,
     pub stats: BotStats,
     pub liquidation_events: Vec<BotLiquidationEvent>,
     pub pending_vaults: Vec<LiquidatableVaultInfo>,
+    #[serde(default)]
+    pub admin_events: Vec<BotAdminEvent>,
 }
 
 thread_local! {

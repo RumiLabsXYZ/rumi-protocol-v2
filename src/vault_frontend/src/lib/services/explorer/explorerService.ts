@@ -10,6 +10,7 @@ import { Principal } from '@dfinity/principal';
 import { publicActor } from '$services/protocol/apiClient';
 import { stabilityPoolService } from '$services/stabilityPoolService';
 import { threePoolService } from '$services/threePoolService';
+import { ammService } from '$services/ammService';
 
 // ── TTL constants (ms) ───────────────────────────────────────────────────────
 
@@ -513,6 +514,164 @@ export async function fetchSwapEventCount(): Promise<bigint> {
 		return setCache(key, result);
 	} catch (err) {
 		console.error('[explorerService] fetchSwapEventCount failed:', err);
+		return 0n;
+	}
+}
+
+// ── AMM ─────────────────────────────────────────────────────────────────────
+
+export async function fetchAmmPools(): Promise<any[]> {
+	const key = 'pool:amm:pools';
+	const cached = getCached<any[]>(key, TTL.POOL);
+	if (cached) return cached;
+
+	try {
+		const result = await ammService.getPools();
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchAmmPools failed:', err);
+		return [];
+	}
+}
+
+export async function fetchAmmSwapEvents(start: bigint, length: bigint): Promise<any[]> {
+	const key = `pool:amm:swaps:${start}:${length}`;
+	const cached = getCached<any[]>(key, TTL.POOL);
+	if (cached) return cached;
+
+	try {
+		const result = await ammService.getSwapEvents(start, length);
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchAmmSwapEvents failed:', err);
+		return [];
+	}
+}
+
+export async function fetchAmmSwapEventCount(): Promise<bigint> {
+	const key = 'pool:amm:swapcount';
+	const cached = getCached<bigint>(key, TTL.POOL);
+	if (cached !== null) return cached;
+
+	try {
+		const result = await ammService.getSwapEventCount();
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchAmmSwapEventCount failed:', err);
+		return 0n;
+	}
+}
+
+export async function fetchAmmLiquidityEvents(start: bigint, length: bigint): Promise<any[]> {
+	const key = `pool:amm:liquidity:${start}:${length}`;
+	const cached = getCached<any[]>(key, TTL.POOL);
+	if (cached) return cached;
+
+	try {
+		const result = await ammService.getLiquidityEvents(start, length);
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchAmmLiquidityEvents failed:', err);
+		return [];
+	}
+}
+
+export async function fetchAmmLiquidityEventCount(): Promise<bigint> {
+	const key = 'pool:amm:liquiditycount';
+	const cached = getCached<bigint>(key, TTL.POOL);
+	if (cached !== null) return cached;
+
+	try {
+		const result = await ammService.getLiquidityEventCount();
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchAmmLiquidityEventCount failed:', err);
+		return 0n;
+	}
+}
+
+export async function fetchAmmAdminEvents(start: bigint, length: bigint): Promise<any[]> {
+	const key = `pool:amm:admin:${start}:${length}`;
+	const cached = getCached<any[]>(key, TTL.POOL);
+	if (cached) return cached;
+
+	try {
+		const result = await ammService.getAdminEvents(start, length);
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchAmmAdminEvents failed:', err);
+		return [];
+	}
+}
+
+export async function fetchAmmAdminEventCount(): Promise<bigint> {
+	const key = 'pool:amm:admincount';
+	const cached = getCached<bigint>(key, TTL.POOL);
+	if (cached !== null) return cached;
+
+	try {
+		const result = await ammService.getAdminEventCount();
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchAmmAdminEventCount failed:', err);
+		return 0n;
+	}
+}
+
+// ── 3Pool Liquidity & Admin Events ──────────────────────────────────────────
+
+export async function fetch3PoolLiquidityEvents(start: bigint, length: bigint): Promise<any[]> {
+	const key = `pool:3pool:liquidity:${start}:${length}`;
+	const cached = getCached<any[]>(key, TTL.POOL);
+	if (cached) return cached;
+
+	try {
+		const result = await threePoolService.getLiquidityEvents(start, length);
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetch3PoolLiquidityEvents failed:', err);
+		return [];
+	}
+}
+
+export async function fetch3PoolLiquidityEventCount(): Promise<bigint> {
+	const key = 'pool:3pool:liquiditycount';
+	const cached = getCached<bigint>(key, TTL.POOL);
+	if (cached !== null) return cached;
+
+	try {
+		const result = await threePoolService.getLiquidityEventCount();
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetch3PoolLiquidityEventCount failed:', err);
+		return 0n;
+	}
+}
+
+export async function fetch3PoolAdminEvents(start: bigint, length: bigint): Promise<any[]> {
+	const key = `pool:3pool:admin:${start}:${length}`;
+	const cached = getCached<any[]>(key, TTL.POOL);
+	if (cached) return cached;
+
+	try {
+		const result = await threePoolService.getAdminEvents(start, length);
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetch3PoolAdminEvents failed:', err);
+		return [];
+	}
+}
+
+export async function fetch3PoolAdminEventCount(): Promise<bigint> {
+	const key = 'pool:3pool:admincount';
+	const cached = getCached<bigint>(key, TTL.POOL);
+	if (cached !== null) return cached;
+
+	try {
+		const result = await threePoolService.getAdminEventCount();
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetch3PoolAdminEventCount failed:', err);
 		return 0n;
 	}
 }

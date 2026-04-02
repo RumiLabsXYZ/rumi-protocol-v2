@@ -1,4 +1,4 @@
-use crate::types::{AssetBalance, AssetType, BalancesSnapshot, DepositRecord, TreasuryInitArgs};
+use crate::types::{AssetBalance, AssetType, BalancesSnapshot, DepositRecord, TreasuryAction, TreasuryEvent, TreasuryInitArgs};
 use candid::Principal;
 use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
 use ic_stable_structures::{DefaultMemoryImpl, StableBTreeMap, StableCell};
@@ -24,6 +24,10 @@ pub struct TreasuryState {
     pub config: StableCell<TreasuryConfig, Memory>,
     /// Next available deposit ID
     pub next_deposit_id: u64,
+    /// Event log (audit trail for all operations)
+    pub events: StableBTreeMap<u64, TreasuryEvent, Memory>,
+    /// Next available event ID
+    pub next_event_id: u64,
 }
 
 /// Treasury configuration stored in stable memory
@@ -59,6 +63,20 @@ impl ic_stable_structures::Storable for TreasuryConfig {
 
 // Storable implementation for DepositRecord
 impl ic_stable_structures::Storable for DepositRecord {
+    fn to_bytes(&self) -> std::borrow::Cow<'_, [u8]> {
+        std::borrow::Cow::Owned(candid::encode_one(self).unwrap())
+    }
+
+    fn from_bytes(bytes: std::borrow::Cow<[u8]>) -> Self {
+        candid::decode_one(&bytes).unwrap()
+    }
+
+    const BOUND: ic_stable_structures::storable::Bound =
+        ic_stable_structures::storable::Bound::Unbounded;
+}
+
+// Storable implementation for TreasuryEvent
+impl ic_stable_structures::Storable for TreasuryEvent {
     fn to_bytes(&self) -> std::borrow::Cow<'_, [u8]> {
         std::borrow::Cow::Owned(candid::encode_one(self).unwrap())
     }
@@ -130,6 +148,8 @@ impl TreasuryState {
                 balances,
                 config: StableCell::init(memory_manager.get(MemoryId::new(1)), config).unwrap(),
                 next_deposit_id: 1,
+                events: StableBTreeMap::init(memory_manager.get(MemoryId::new(3))),
+                next_event_id: 1,
             }
         })
     }
@@ -151,6 +171,37 @@ impl TreasuryState {
         // Ignore the error — StableCell::set only fails if the value is too
         // large for the memory region, which won't happen for 5 balance entries.
         let _ = self.balances_cell.set(snapshot);
+    }
+
+    // ------------------------------------------------------------------
+    // Event logging
+    // ------------------------------------------------------------------
+
+    /// Record an event in the audit trail.
+    pub fn push_event(&mut self, caller: Principal, action: TreasuryAction) {
+        let event_id = self.next_event_id;
+        self.next_event_id += 1;
+        self.events.insert(event_id, TreasuryEvent {
+            id: event_id,
+            timestamp: ic_cdk::api::time(),
+            caller,
+            action,
+        });
+    }
+
+    /// Get events (paginated).
+    pub fn get_events(&self, start: Option<u64>, limit: usize) -> Vec<TreasuryEvent> {
+        let start_key = start.unwrap_or(0);
+        self.events
+            .range(start_key..)
+            .take(limit)
+            .map(|(_, event)| event)
+            .collect()
+    }
+
+    /// Get total events count.
+    pub fn get_events_count(&self) -> u64 {
+        self.events.len()
     }
 
     // ------------------------------------------------------------------
@@ -318,12 +369,20 @@ pub fn restore_state() {
             let max_id = deposits.iter().map(|(id, _)| id).last().unwrap_or(0);
             let next_deposit_id = if max_id > 0 { max_id + 1 } else { 1 };
 
+            // Re-open events stable map (MemoryId 3)
+            let events: StableBTreeMap<u64, TreasuryEvent, Memory> =
+                StableBTreeMap::init(memory_manager.get(MemoryId::new(3)));
+            let max_event_id = events.iter().map(|(id, _)| id).last().unwrap_or(0);
+            let next_event_id = if max_event_id > 0 { max_event_id + 1 } else { 1 };
+
             *s.borrow_mut() = Some(TreasuryState {
                 deposits,
                 balances,
                 balances_cell,
                 config,
                 next_deposit_id,
+                events,
+                next_event_id,
             });
         });
     });

@@ -69,6 +69,43 @@ export const idlFactory = ({ IDL }) => {
       'collateral_ledger' : IDL.Principal,
       'amount' : IDL.Nat64,
     }),
+    'OptOutCollateral' : IDL.Record({
+      'collateral_type' : IDL.Principal,
+    }),
+    'OptInCollateral' : IDL.Record({
+      'collateral_type' : IDL.Principal,
+    }),
+    'LiquidationNotification' : IDL.Record({
+      'vault_count' : IDL.Nat64,
+    }),
+    'LiquidationExecuted' : IDL.Record({
+      'vault_id' : IDL.Nat64,
+      'stables_consumed_e8s' : IDL.Nat64,
+      'collateral_gained' : IDL.Nat64,
+      'collateral_type' : IDL.Principal,
+      'success' : IDL.Bool,
+    }),
+    'StablecoinRegistered' : IDL.Record({
+      'ledger' : IDL.Principal,
+      'symbol' : IDL.Text,
+    }),
+    'CollateralRegistered' : IDL.Record({
+      'ledger' : IDL.Principal,
+      'symbol' : IDL.Text,
+    }),
+    'ConfigurationUpdated' : IDL.Null,
+    'EmergencyPauseActivated' : IDL.Null,
+    'OperationsResumed' : IDL.Null,
+    'BalanceCorrected' : IDL.Record({
+      'user' : IDL.Principal,
+      'token_ledger' : IDL.Principal,
+      'new_amount' : IDL.Nat64,
+    }),
+    'CollateralGainCorrected' : IDL.Record({
+      'user' : IDL.Principal,
+      'collateral_ledger' : IDL.Principal,
+      'new_amount' : IDL.Nat64,
+    }),
   });
   const PoolEvent = IDL.Record({
     'id' : IDL.Nat64,

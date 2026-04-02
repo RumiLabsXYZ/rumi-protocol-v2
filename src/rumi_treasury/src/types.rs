@@ -137,3 +137,30 @@ pub struct WithdrawResult {
 pub struct BalancesSnapshot {
     pub entries: Vec<(AssetType, AssetBalance)>,
 }
+
+// ─── Treasury Events (audit trail) ───
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub enum TreasuryAction {
+    Deposit {
+        deposit_type: DepositType,
+        asset_type: AssetType,
+        amount: u64,
+    },
+    Withdraw {
+        asset_type: AssetType,
+        amount: u64,
+        to: Principal,
+    },
+    SetPaused {
+        paused: bool,
+    },
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct TreasuryEvent {
+    pub id: u64,
+    pub timestamp: u64,
+    pub caller: Principal,
+    pub action: TreasuryAction,
+}

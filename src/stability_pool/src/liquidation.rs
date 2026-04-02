@@ -355,6 +355,22 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
         }
     }
 
+    // Record liquidation event
+    let stables_consumed_e8s: u64 = actual_consumed.values().sum();
+    let liq_success = !actual_consumed.is_empty() && total_collateral_gained > 0;
+    mutate_state(|s| {
+        s.push_event(
+            s.protocol_canister_id,
+            PoolEventType::LiquidationExecuted {
+                vault_id: vault_info.vault_id,
+                stables_consumed_e8s,
+                collateral_gained: total_collateral_gained,
+                collateral_type: vault_info.collateral_type,
+                success: liq_success,
+            },
+        );
+    });
+
     // Step 3: If any liquidation calls succeeded, process gains
     if !actual_consumed.is_empty() && total_collateral_gained > 0 {
         // Deduct the collateral ledger's transfer fee from gains — the backend reports

@@ -103,6 +103,67 @@ pub struct PendingClaim {
     pub created_at: u64,
 }
 
+// ─── Swap Events ───
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct AmmSwapEvent {
+    pub id: u64,
+    pub caller: Principal,
+    pub pool_id: PoolId,
+    pub token_in: Principal,
+    pub amount_in: u128,
+    pub token_out: Principal,
+    pub amount_out: u128,
+    pub fee: u128,
+    pub timestamp: u64,
+}
+
+// ─── Liquidity Events ───
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub enum AmmLiquidityAction {
+    AddLiquidity,
+    RemoveLiquidity,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct AmmLiquidityEvent {
+    pub id: u64,
+    pub caller: Principal,
+    pub pool_id: PoolId,
+    pub action: AmmLiquidityAction,
+    pub token_a: Principal,
+    pub amount_a: u128,
+    pub token_b: Principal,
+    pub amount_b: u128,
+    pub lp_shares: u128,
+    pub timestamp: u64,
+}
+
+// ─── Admin Events ───
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub enum AmmAdminAction {
+    CreatePool { pool_id: PoolId, token_a: Principal, token_b: Principal, fee_bps: u16 },
+    SetFee { pool_id: PoolId, fee_bps: u16 },
+    SetProtocolFee { pool_id: PoolId, protocol_fee_bps: u16 },
+    WithdrawProtocolFees { pool_id: PoolId, amount_a: u128, amount_b: u128 },
+    PausePool { pool_id: PoolId },
+    UnpausePool { pool_id: PoolId },
+    SetPoolCreationOpen { open: bool },
+    SetMaintenanceMode { enabled: bool },
+    ClaimPending { claim_id: u64, claimant: Principal, amount: u128 },
+    ResolvePendingClaim { claim_id: u64 },
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct AmmAdminEvent {
+    pub id: u64,
+    pub caller: Principal,
+    pub action: AmmAdminAction,
+    pub timestamp: u64,
+}
+
 // ─── Errors ───
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]

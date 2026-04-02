@@ -130,13 +130,21 @@ pub async fn deposit_as_3usd(token_ledger: Principal, amount: u64) -> Result<u64
 #[update]
 pub fn opt_out_collateral(collateral_type: Principal) -> Result<(), StabilityPoolError> {
     let caller = ic_cdk::api::caller();
-    mutate_state(|s| s.opt_out_collateral(&caller, collateral_type))
+    let result = mutate_state(|s| s.opt_out_collateral(&caller, collateral_type));
+    if result.is_ok() {
+        mutate_state(|s| s.push_event(caller, PoolEventType::OptOutCollateral { collateral_type }));
+    }
+    result
 }
 
 #[update]
 pub fn opt_in_collateral(collateral_type: Principal) -> Result<(), StabilityPoolError> {
     let caller = ic_cdk::api::caller();
-    mutate_state(|s| s.opt_in_collateral(&caller, collateral_type))
+    let result = mutate_state(|s| s.opt_in_collateral(&caller, collateral_type));
+    if result.is_ok() {
+        mutate_state(|s| s.push_event(caller, PoolEventType::OptInCollateral { collateral_type }));
+    }
+    result
 }
 
 // ─── Liquidation (Push + Fallback) ───
@@ -152,6 +160,8 @@ pub async fn notify_liquidatable_vaults(vaults: Vec<LiquidatableVaultInfo>) -> V
             caller, expected);
         // TODO: decide whether to enforce caller == protocol_canister_id
     }
+    let vault_count = vaults.len() as u64;
+    mutate_state(|s| s.push_event(caller, PoolEventType::LiquidationNotification { vault_count }));
     crate::liquidation::notify_liquidatable_vaults(vaults).await
 }
 
@@ -251,7 +261,12 @@ pub fn register_stablecoin(config: StablecoinConfig) -> Result<(), StabilityPool
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
     }
-    mutate_state(|s| s.register_stablecoin(config));
+    let ledger = config.ledger_id;
+    let symbol = config.symbol.clone();
+    mutate_state(|s| {
+        s.register_stablecoin(config);
+        s.push_event(caller, PoolEventType::StablecoinRegistered { ledger, symbol });
+    });
     Ok(())
 }
 
@@ -261,7 +276,12 @@ pub fn register_collateral(info: CollateralInfo) -> Result<(), StabilityPoolErro
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
     }
-    mutate_state(|s| s.register_collateral(info));
+    let ledger = info.ledger_id;
+    let symbol = info.symbol.clone();
+    mutate_state(|s| {
+        s.register_collateral(info);
+        s.push_event(caller, PoolEventType::CollateralRegistered { ledger, symbol });
+    });
     Ok(())
 }
 
@@ -273,7 +293,10 @@ pub fn update_pool_configuration(new_config: PoolConfiguration) -> Result<(), St
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
     }
-    mutate_state(|s| s.configuration = new_config);
+    mutate_state(|s| {
+        s.configuration = new_config;
+        s.push_event(caller, PoolEventType::ConfigurationUpdated);
+    });
     Ok(())
 }
 
@@ -435,7 +458,10 @@ pub fn emergency_pause() -> Result<(), StabilityPoolError> {
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
     }
-    mutate_state(|s| s.configuration.emergency_pause = true);
+    mutate_state(|s| {
+        s.configuration.emergency_pause = true;
+        s.push_event(caller, PoolEventType::EmergencyPauseActivated);
+    });
     log!(INFO, "Emergency pause activated by {}", caller);
     Ok(())
 }
@@ -446,7 +472,10 @@ pub fn resume_operations() -> Result<(), StabilityPoolError> {
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
     }
-    mutate_state(|s| s.configuration.emergency_pause = false);
+    mutate_state(|s| {
+        s.configuration.emergency_pause = false;
+        s.push_event(caller, PoolEventType::OperationsResumed);
+    });
     log!(INFO, "Operations resumed by {}", caller);
     Ok(())
 }
@@ -463,7 +492,15 @@ pub fn admin_correct_balance(
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
     }
-    let msg = mutate_state(|s| s.correct_balance(user, token_ledger, correct_amount));
+    let msg = mutate_state(|s| {
+        let result = s.correct_balance(user, token_ledger, correct_amount);
+        s.push_event(caller, PoolEventType::BalanceCorrected {
+            user,
+            token_ledger,
+            new_amount: correct_amount,
+        });
+        result
+    });
     log!(INFO, "Admin balance correction by {}: {}", caller, msg);
     Ok(msg)
 }
@@ -478,7 +515,15 @@ pub fn admin_correct_collateral_gain(
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
     }
-    let msg = mutate_state(|s| s.correct_collateral_gain(user, collateral_ledger, correct_amount));
+    let msg = mutate_state(|s| {
+        let result = s.correct_collateral_gain(user, collateral_ledger, correct_amount);
+        s.push_event(caller, PoolEventType::CollateralGainCorrected {
+            user,
+            collateral_ledger,
+            new_amount: correct_amount,
+        });
+        result
+    });
     log!(INFO, "Admin collateral gain correction by {}: {}", caller, msg);
     Ok(msg)
 }

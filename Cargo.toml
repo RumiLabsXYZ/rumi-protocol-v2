@@ -2,7 +2,6 @@
 members = [
     "src/rumi_protocol_backend",
     "src/rumi_treasury",
-    "src/rumi_stability_pool",
     "src/stability_pool",
     "src/rumi_3pool",
     "src/rumi_amm",

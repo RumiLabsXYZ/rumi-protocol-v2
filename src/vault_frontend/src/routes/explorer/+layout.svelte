@@ -15,10 +15,8 @@
   let currentPath = $derived($page.url.pathname);
 
   const navLinks = [
-    { href: '/explorer', label: 'Dashboard', exact: true },
-    { href: '/explorer/events', label: 'Events', exact: false },
-    { href: '/explorer/liquidations', label: 'Liquidations', exact: false },
-    { href: '/explorer/stats', label: 'Stats', exact: false },
+    { href: '/explorer', label: 'Overview', exact: true },
+    { href: '/explorer/activity', label: 'Activity', exact: false },
   ];
 
   function isActive(link: { href: string; exact: boolean }): boolean {
@@ -43,7 +41,7 @@
 </script>
 
 <!-- Explorer Header Bar -->
-<header class="sticky top-0 z-40 border-b border-white/10 bg-gray-950/80 backdrop-blur-md">
+<header class="border-b border-white/10 bg-gray-950/80">
   <div class="mx-auto flex h-14 max-w-7xl items-center justify-between px-4">
     <!-- Left: Title -->
     <a href="/explorer" class="flex items-center gap-2 text-lg font-semibold text-white hover:text-indigo-400 transition-colors">
