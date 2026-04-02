@@ -70,8 +70,8 @@
         return cp === principal;
       });
 
-      const interestRate = config ? Number(config.interest_rate_apr) : 0;
-      const borrowingFee = config ? Number(config.borrowing_fee) : 0;
+      const interestRate = config?.interest_rate_apr != null ? Number(config.interest_rate_apr) : null;
+      const borrowingFee = config?.borrowing_fee != null ? Number(config.borrowing_fee) : null;
       const debtCeiling = config ? Number(config.debt_ceiling) / 1e8 : 0;
       const status = config?.status ? Object.keys(config.status)[0] : 'Unknown';
 
@@ -330,10 +330,10 @@
                       {row.vaultCount}
                     </td>
                     <td class="text-right px-4 py-3 font-mono text-gray-200">
-                      {formatPercent(row.interestRate)}
+                      {row.interestRate != null ? formatPercent(row.interestRate) : '—'}
                     </td>
                     <td class="text-right px-4 py-3 font-mono text-gray-200">
-                      {formatPercent(row.borrowingFee)}
+                      {row.borrowingFee != null ? formatPercent(row.borrowingFee) : '—'}
                     </td>
                     <td class="text-right px-4 py-3 font-mono text-gray-200">
                       {row.debtCeiling >= 1e10 ? 'Unlimited' : formatUsdRaw(row.debtCeiling)}

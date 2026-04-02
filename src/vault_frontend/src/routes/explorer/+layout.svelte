@@ -43,7 +43,7 @@
 </script>
 
 <!-- Explorer Header Bar -->
-<header class="sticky top-0 z-40 border-b border-white/10 bg-gray-950/80 backdrop-blur-md">
+<header class="border-b border-white/10 bg-gray-950/80">
   <div class="mx-auto flex h-14 max-w-7xl items-center justify-between px-4">
     <!-- Left: Title -->
     <a href="/explorer" class="flex items-center gap-2 text-lg font-semibold text-white hover:text-indigo-400 transition-colors">

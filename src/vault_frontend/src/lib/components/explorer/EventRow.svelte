@@ -1,7 +1,7 @@
 <script lang="ts">
   import { formatEvent } from '$utils/explorerFormatters';
   import EntityLink from './EntityLink.svelte';
-  import { timeAgo } from '$utils/explorerHelpers';
+  import { timeAgo, shortenPrincipal } from '$utils/explorerHelpers';
   import { getEventTimestamp } from '$utils/eventFormatters';
 
   interface Props {
@@ -21,6 +21,24 @@
     const ts = getEventTimestamp(event);
     return ts ? timeAgo(ts) : null;
   });
+
+  function extractPrincipal(event: any): string | null {
+    const variant = Object.keys(event)[0];
+    const data = event[variant];
+    if (!data) return null;
+    for (const key of ['owner', 'caller', 'from', 'liquidator', 'redeemer']) {
+      const val = data[key];
+      if (val && typeof val === 'object' && typeof val.toText === 'function') {
+        return val.toText();
+      }
+      if (typeof val === 'string' && val.length > 20) {
+        return val;
+      }
+    }
+    return null;
+  }
+
+  const principal = $derived(extractPrincipal(event));
 </script>
 
 <tr class="border-b border-gray-700/50 hover:bg-gray-800/30 transition-colors group">
@@ -43,6 +61,17 @@
       {/if}
     </td>
   {/if}
+
+  <!-- Principal -->
+  <td class="px-4 py-3 text-xs text-gray-400 whitespace-nowrap">
+    {#if principal}
+      <a href="/explorer/address/{principal}" class="hover:text-blue-400 transition-colors font-mono">
+        {shortenPrincipal(principal)}
+      </a>
+    {:else}
+      <span class="text-gray-600">&mdash;</span>
+    {/if}
+  </td>
 
   <!-- Type badge -->
   <td class="px-4 py-3">
