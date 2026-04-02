@@ -12,7 +12,7 @@
     fetchAllVaults, fetchEventCount, fetchTreasuryStats,
     fetchInterestSplit, fetchBotStats, fetchStabilityPoolStatus,
     fetchThreePoolStatus, fetchEvents, fetchCollateralConfigs,
-    fetchLiquidatableVaults
+    fetchLiquidatableVaults, fetchAllSnapshots
   } from '$services/explorer/explorerService';
   import {
     formatE8s, formatUsd, formatUsdRaw, formatCR, formatPercent, formatBps,
@@ -60,6 +60,22 @@
   let recentEvents: [bigint, any][] = $state([]);
   let eventsLoading = $state(true);
   let eventsError: string | null = $state(null);
+
+  // Section 7: Historical Charts
+  let allSnapshots: any[] = $state([]);
+  let chartsLoading = $state(true);
+  let chartsError: string | null = $state(null);
+
+  type TimeRange = '24h' | '7d' | '30d' | '90d' | 'all';
+  let timeRange: TimeRange = $state('7d');
+
+  const timeRanges: { label: string; value: TimeRange }[] = [
+    { label: '24h', value: '24h' },
+    { label: '7d',  value: '7d' },
+    { label: '30d', value: '30d' },
+    { label: '90d', value: '90d' },
+    { label: 'All', value: 'all' },
+  ];
 
   // Global
   let isRefreshing = $state(false);
@@ -363,9 +379,22 @@
       }
     })();
 
+    // Section 7: Historical Charts
+    const chartsPromise = (async () => {
+      try {
+        const snapshots = await fetchAllSnapshots();
+        allSnapshots = snapshots ?? [];
+      } catch (e) {
+        console.error('[explorer] Charts load failed:', e);
+        if (!isRefresh) chartsError = 'Failed to load historical data';
+      } finally {
+        if (!isRefresh) chartsLoading = false;
+      }
+    })();
+
     await Promise.allSettled([
       heroPromise, collateralPromise, poolsPromise,
-      treasuryPromise, liquidationPromise, eventsPromise
+      treasuryPromise, liquidationPromise, eventsPromise, chartsPromise
     ]);
 
     if (isRefresh) isRefreshing = false;
@@ -420,6 +449,110 @@
     treasury: 'Treasury',
     three_pool: '3Pool',
   };
+
+  // ── Historical Chart Logic ────────────────────────────────────────────
+
+  const filteredSnapshots = $derived(filterByTimeRange(allSnapshots, timeRange));
+
+  function filterByTimeRange(snaps: any[], range: TimeRange): any[] {
+    if (!snaps.length || range === 'all') return snaps;
+    const nowNs = Date.now() * 1_000_000;
+    const ranges: Record<string, number> = {
+      '24h': 24 * 3600e9,
+      '7d':  7  * 24 * 3600e9,
+      '30d': 30 * 24 * 3600e9,
+      '90d': 90 * 24 * 3600e9,
+    };
+    const cutoff = nowNs - (ranges[range] ?? ranges['7d']);
+    return snaps.filter((s) => Number(s.timestamp) >= cutoff);
+  }
+
+  interface ChartPoint { x: number; y: number }
+
+  const tvlData: ChartPoint[] = $derived(
+    filteredSnapshots.map((s) => ({
+      x: Number(s.timestamp) / 1e6,
+      y: Number(s.total_collateral_value_usd) / 1e8,
+    }))
+  );
+
+  const debtData: ChartPoint[] = $derived(
+    filteredSnapshots.map((s) => ({
+      x: Number(s.timestamp) / 1e6,
+      y: Number(s.total_debt) / 1e8,
+    }))
+  );
+
+  const crData: ChartPoint[] = $derived(
+    filteredSnapshots.map((s) => {
+      const collUsd = Number(s.total_collateral_value_usd) / 1e8;
+      const debt = Number(s.total_debt) / 1e8;
+      return {
+        x: Number(s.timestamp) / 1e6,
+        y: debt > 0 ? (collUsd / debt) * 100 : 0,
+      };
+    })
+  );
+
+  const chartW = 600;
+  const chartH = 160;
+  const chartPad = 4;
+
+  function buildPolyline(data: ChartPoint[]): string {
+    if (data.length < 2) return '';
+    const xMin = data[0].x;
+    const xMax = data[data.length - 1].x;
+    const yMin = 0;
+    const yMax = Math.max(...data.map((d) => d.y)) * 1.1 || 1;
+    const xRange = xMax - xMin || 1;
+    return data
+      .map((d) => {
+        const x = chartPad + ((d.x - xMin) / xRange) * (chartW - chartPad * 2);
+        const y = chartPad + (chartH - chartPad * 2) - ((d.y - yMin) / (yMax - yMin)) * (chartH - chartPad * 2);
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      })
+      .join(' ');
+  }
+
+  function buildFill(points: string): string {
+    if (!points) return '';
+    const firstX = points.split(' ')[0]?.split(',')[0] ?? '0';
+    return `${firstX},${chartH} ${points} ${chartW - chartPad},${chartH}`;
+  }
+
+  function buildYLabels(data: ChartPoint[], count = 4): { y: number; label: string }[] {
+    if (!data.length) return [];
+    const yMax = Math.max(...data.map((d) => d.y)) * 1.1 || 1;
+    return Array.from({ length: count }, (_, i) => {
+      const frac = (count - 1 - i) / (count - 1);
+      const val = yMax * frac;
+      return {
+        y: chartPad + (i / (count - 1)) * (chartH - chartPad * 2),
+        label:
+          val >= 1_000_000
+            ? `${(val / 1_000_000).toFixed(1)}M`
+            : val >= 1_000
+              ? `${(val / 1_000).toFixed(0)}k`
+              : val.toFixed(1),
+      };
+    });
+  }
+
+  const tvlPoints = $derived(buildPolyline(tvlData));
+  const debtPoints = $derived(buildPolyline(debtData));
+  const crPoints = $derived(buildPolyline(crData));
+
+  const tvlFill = $derived(buildFill(tvlPoints));
+  const debtFill = $derived(buildFill(debtPoints));
+  const crFill = $derived(buildFill(crPoints));
+
+  const tvlLabels = $derived(buildYLabels(tvlData));
+  const debtLabels = $derived(buildYLabels(debtData));
+  const crLabels = $derived(buildYLabels(crData));
+
+  const latestTvlChart = $derived(tvlData.length > 0 ? tvlData[tvlData.length - 1].y : 0);
+  const latestDebtChart = $derived(debtData.length > 0 ? debtData[debtData.length - 1].y : 0);
+  const latestCrChart = $derived(crData.length > 0 ? crData[crData.length - 1].y : 0);
 </script>
 
 <svelte:head>
@@ -429,11 +562,7 @@
 <div class="max-w-7xl mx-auto px-4 py-8 space-y-8">
 
   <!-- Page header -->
-  <div class="flex items-center justify-between">
-    <div>
-      <h1 class="text-2xl font-bold text-white">Protocol Explorer</h1>
-      <p class="text-sm text-gray-400 mt-1">Real-time protocol health and activity dashboard</p>
-    </div>
+  <div class="flex items-center justify-end">
     {#if isRefreshing}
       <div class="flex items-center gap-1.5 text-xs text-gray-500">
         <svg class="animate-spin w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -792,6 +921,125 @@
         </div>
       {/if}
     </div>
+  </section>
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       Section 4b — Historical Trends
+       ════════════════════════════════════════════════════════════════════ -->
+  <section>
+    <div class="flex items-center justify-between flex-wrap gap-3 mb-4">
+      <h2 class="text-sm font-semibold uppercase tracking-wide text-gray-400">Historical Trends</h2>
+      <div class="flex gap-1">
+        {#each timeRanges as tr}
+          <button
+            class="px-3 py-1 text-xs rounded-full border transition-all {timeRange === tr.value
+              ? 'bg-blue-500 text-white border-blue-500'
+              : 'bg-transparent text-gray-400 border-gray-600 hover:border-gray-400 hover:text-gray-200'}"
+            onclick={() => timeRange = tr.value}
+          >
+            {tr.label}
+          </button>
+        {/each}
+      </div>
+    </div>
+
+    {#if chartsLoading}
+      <div class="flex items-center justify-center py-16 text-gray-500 text-sm animate-pulse">
+        Loading historical data...
+      </div>
+    {:else if chartsError}
+      <div class="text-center py-8 text-red-400 text-sm">{chartsError}</div>
+    {:else if filteredSnapshots.length < 2}
+      <div class="flex items-center justify-center py-16 text-gray-500">
+        No historical data available for this range. Snapshots are captured hourly.
+      </div>
+    {:else}
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <!-- TVL Chart -->
+        <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl p-5">
+          <div class="flex items-baseline justify-between mb-3">
+            <h3 class="text-xs font-medium text-gray-400 uppercase tracking-wide">TVL (USD)</h3>
+            <span class="text-sm font-mono text-emerald-400">{formatCompactUsd(latestTvlChart)}</span>
+          </div>
+          <div class="relative" style="padding-left: 2.5rem;">
+            <div class="absolute left-0 top-0 bottom-0 w-9 pointer-events-none">
+              {#each tvlLabels as lbl}
+                <span
+                  class="absolute right-0 text-[10px] text-gray-500 -translate-y-1/2 whitespace-nowrap"
+                  style="top: {lbl.y}px"
+                >{lbl.label}</span>
+              {/each}
+            </div>
+            <svg viewBox="0 0 {chartW} {chartH}" class="w-full h-auto block" preserveAspectRatio="none">
+              <defs>
+                <linearGradient id="tvl-grad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stop-color="#10b981" stop-opacity="0.25" />
+                  <stop offset="100%" stop-color="#10b981" stop-opacity="0.02" />
+                </linearGradient>
+              </defs>
+              {#if tvlFill}<polygon points={tvlFill} fill="url(#tvl-grad)" />{/if}
+              {#if tvlPoints}<polyline points={tvlPoints} fill="none" stroke="#10b981" stroke-width="2" stroke-linejoin="round" />{/if}
+            </svg>
+          </div>
+        </div>
+
+        <!-- Debt Chart -->
+        <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl p-5">
+          <div class="flex items-baseline justify-between mb-3">
+            <h3 class="text-xs font-medium text-gray-400 uppercase tracking-wide">Total Debt (icUSD)</h3>
+            <span class="text-sm font-mono text-purple-400">{formatCompactUsd(latestDebtChart)}</span>
+          </div>
+          <div class="relative" style="padding-left: 2.5rem;">
+            <div class="absolute left-0 top-0 bottom-0 w-9 pointer-events-none">
+              {#each debtLabels as lbl}
+                <span
+                  class="absolute right-0 text-[10px] text-gray-500 -translate-y-1/2 whitespace-nowrap"
+                  style="top: {lbl.y}px"
+                >{lbl.label}</span>
+              {/each}
+            </div>
+            <svg viewBox="0 0 {chartW} {chartH}" class="w-full h-auto block" preserveAspectRatio="none">
+              <defs>
+                <linearGradient id="debt-grad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stop-color="#a855f7" stop-opacity="0.25" />
+                  <stop offset="100%" stop-color="#a855f7" stop-opacity="0.02" />
+                </linearGradient>
+              </defs>
+              {#if debtFill}<polygon points={debtFill} fill="url(#debt-grad)" />{/if}
+              {#if debtPoints}<polyline points={debtPoints} fill="none" stroke="#a855f7" stroke-width="2" stroke-linejoin="round" />{/if}
+            </svg>
+          </div>
+        </div>
+
+        <!-- CR Chart -->
+        <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl p-5 lg:col-span-2">
+          <div class="flex items-baseline justify-between mb-3">
+            <h3 class="text-xs font-medium text-gray-400 uppercase tracking-wide">System Collateral Ratio (%)</h3>
+            <span class="text-sm font-mono text-yellow-400">{latestCrChart.toFixed(1)}%</span>
+          </div>
+          <div class="relative" style="padding-left: 2.5rem;">
+            <div class="absolute left-0 top-0 bottom-0 w-9 pointer-events-none">
+              {#each crLabels as lbl}
+                <span
+                  class="absolute right-0 text-[10px] text-gray-500 -translate-y-1/2 whitespace-nowrap"
+                  style="top: {lbl.y}px"
+                >{lbl.label}</span>
+              {/each}
+            </div>
+            <svg viewBox="0 0 {chartW} {chartH}" class="w-full h-auto block" preserveAspectRatio="none">
+              <defs>
+                <linearGradient id="cr-grad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stop-color="#eab308" stop-opacity="0.25" />
+                  <stop offset="100%" stop-color="#eab308" stop-opacity="0.02" />
+                </linearGradient>
+              </defs>
+              {#if crFill}<polygon points={crFill} fill="url(#cr-grad)" />{/if}
+              {#if crPoints}<polyline points={crPoints} fill="none" stroke="#eab308" stroke-width="2" stroke-linejoin="round" />{/if}
+            </svg>
+          </div>
+        </div>
+      </div>
+    {/if}
   </section>
 
   <!-- ════════════════════════════════════════════════════════════════════

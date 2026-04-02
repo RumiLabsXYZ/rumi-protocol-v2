@@ -15,10 +15,8 @@
   let currentPath = $derived($page.url.pathname);
 
   const navLinks = [
-    { href: '/explorer', label: 'Dashboard', exact: true },
-    { href: '/explorer/events', label: 'Events', exact: false },
-    { href: '/explorer/liquidations', label: 'Liquidations', exact: false },
-    { href: '/explorer/stats', label: 'Stats', exact: false },
+    { href: '/explorer', label: 'Overview', exact: true },
+    { href: '/explorer/activity', label: 'Activity', exact: false },
   ];
 
   function isActive(link: { href: string; exact: boolean }): boolean {
