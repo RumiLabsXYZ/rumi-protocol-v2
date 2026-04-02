@@ -209,113 +209,26 @@ Message: `Add liquidity event tracking to 3Pool canister`
 
 ---
 
-## Phase 3: Stability Pool — Add Deposit/Withdraw Event Tracking
+## Phase 3: NO BACKEND WORK NEEDED — Stability Pool Already Tracks Events
 
-**Important note:** The stability pool canister uses thread_local `RefCell<HashMap>` with no `pre_upgrade`/`post_upgrade` hooks. Events added here will be lost on canister upgrade — same as the existing DEPOSITS and LIQUIDATIONS data. This is a known limitation to address separately (adding stable memory persistence). For now, we add event recording using the same in-memory pattern.
+**Investigation result:** The REAL stability pool canister lives at `src/stability_pool/` (NOT `src/rumi_stability_pool/` which is dead code). It already has:
 
-### Task 3.1: Add StabilityPoolEvent type
+- ✅ `PoolEvent` type with `Deposit`, `Withdraw`, `ClaimCollateral`, `DepositAs3USD`, `InterestReceived` variants
+- ✅ `push_event()` method called on every deposit, withdraw, claim, and interest receipt
+- ✅ `pre_upgrade` / `post_upgrade` hooks with stable memory persistence
+- ✅ `#[serde(default)]` on event fields for upgrade compatibility
+- ✅ `get_pool_events(start, length)` and `get_pool_event_count()` query endpoints
+- ✅ Frontend service layer (`stabilityPoolService.getPoolEvents()`) and caching (`fetchStabilityPoolEvents()`)
 
-**File:** `src/rumi_stability_pool/src/types.rs`
+**Why Rob only sees InterestReceived:** Interest accrual events fire frequently and vastly outnumber deposit/withdraw events. The frontend loads the most recent page of events, which is dominated by InterestReceived spam. Per Rob's original instruction, InterestReceived should be filtered OUT of the explorer display since it's noise.
 
-```rust
-#[derive(CandidType, Deserialize, Serialize, Clone, Debug)]
-pub enum StabilityPoolEventType {
-    Deposit { amount: u64, new_balance: u64 },
-    Withdraw { amount: u64, remaining_balance: u64 },
-    ClaimCollateral { rewards: Vec<CollateralReward> },
-    LiquidationProcessed { liquidation_id: u64, vault_id: u64, debt: u64, collateral: u64, collateral_type: CollateralType },
-}
-
-#[derive(CandidType, Deserialize, Serialize, Clone, Debug)]
-pub struct StabilityPoolEvent {
-    pub id: u64,
-    pub timestamp: u64,
-    pub caller: Principal,
-    pub event_type: StabilityPoolEventType,
-}
-```
-
-Add thread_local storage:
-```rust
-thread_local! {
-    // ... existing DEPOSITS, LIQUIDATIONS, STATE ...
-    pub static EVENTS: RefCell<Vec<StabilityPoolEvent>> = RefCell::new(Vec::new());
-    pub static NEXT_EVENT_ID: RefCell<u64> = RefCell::new(0);
-}
-```
-
-### Task 3.2: Add event recording helper
-
-**File:** `src/rumi_stability_pool/src/pool.rs`
-
-```rust
-pub fn record_event(caller: Principal, event_type: StabilityPoolEventType) {
-    EVENTS.with(|events| {
-        NEXT_EVENT_ID.with(|next_id| {
-            let id = *next_id.borrow();
-            *next_id.borrow_mut() = id + 1;
-            events.borrow_mut().push(StabilityPoolEvent {
-                id,
-                timestamp: ic_cdk::api::time(),
-                caller,
-                event_type,
-            });
-        });
-    });
-}
-```
-
-### Task 3.3: Record events in deposit, withdraw, claim, process_liquidation
-
-**File:** `src/rumi_stability_pool/src/pool.rs`
-
-- `deposit_icusd()`: After each successful `deposits.insert(...)`, call `record_event(user, StabilityPoolEventType::Deposit { amount, new_balance })`.
-- `withdraw_icusd()`: After successful withdrawal, call `record_event(user, StabilityPoolEventType::Withdraw { amount, remaining_balance })`.
-- `claim_collateral()`: After successful claim, call `record_event(user, StabilityPoolEventType::ClaimCollateral { rewards })`.
-- `process_liquidation()`: After recording liquidation, call `record_event` with `LiquidationProcessed`.
-
-### Task 3.4: Add query endpoints
-
-**File:** `src/rumi_stability_pool/src/lib.rs`
-
-```rust
-#[query]
-#[candid_method(query)]
-fn get_pool_events(start: u64, length: u64) -> Vec<StabilityPoolEvent> {
-    EVENTS.with(|events| {
-        let events = events.borrow();
-        let start = start as usize;
-        let length = length as usize;
-        if start >= events.len() { return vec![]; }
-        let end = std::cmp::min(start + length, events.len());
-        events[start..end].to_vec()
-    })
-}
-
-#[query]
-#[candid_method(query)]
-fn get_pool_event_count() -> u64 {
-    EVENTS.with(|events| events.borrow().len() as u64)
-}
-```
-
-### Task 3.5: Update Candid interface
-
-**File:** `src/rumi_stability_pool/rumi_stability_pool.did`
-
-### Task 3.6: Build and verify
-
-```bash
-cargo build --target wasm32-unknown-unknown --release -p rumi_stability_pool
-```
-
-### Task 3.7: Commit
-
-Message: `Add deposit/withdraw/claim event tracking to stability pool canister`
+**Frontend fix needed in Phase 6:** Filter out `InterestReceived` events from stability pool display. Show only Deposit, Withdraw, ClaimCollateral, and DepositAs3USD.
 
 ---
 
-## Phase 4: Deploy All Three Canisters
+## Phase 4: Deploy AMM + 3Pool Canisters
+
+(No stability pool deploy needed — it already tracks events.)
 
 ### Task 4.1: Deploy AMM canister
 
@@ -326,12 +239,6 @@ dfx deploy rumi_amm --network ic --argument '(record { admin = principal "fd7h3-
 ### Task 4.2: Deploy 3Pool canister
 
 Check how 3Pool is deployed (may need specific upgrade args).
-
-### Task 4.3: Deploy Stability Pool canister
-
-Per CLAUDE.md memory: requires `--argument` with init args even on upgrade. Use `dfx deploy`, never `dfx canister install`.
-
-### Task 4.4: Commit (if any deploy config changes)
 
 ---
 
@@ -366,9 +273,9 @@ Add cached fetch functions for:
 - `fetchStabilityPoolEvents(start, length)` (update to use new canister endpoint)
 - `fetchStabilityPoolEventCount()`
 
-### Task 5.3: Update threePoolService / stabilityPoolService
+### Task 5.3: Update threePoolService
 
-Add the query methods for the new canister endpoints.
+Add query methods for the new 3Pool liquidity event canister endpoints. (Stability pool service already has `getPoolEvents` and `getPoolEventCount`.)
 
 ### Task 5.4: Update explorerFormatters.ts
 
@@ -468,9 +375,19 @@ When filter is `'dex'`, load:
 - AMM swap events + AMM liquidity events
 - Merge all four, sort by timestamp, paginate
 
-### Task 6.6: Update Stability Pool tab
+### Task 6.6: Fix Stability Pool tab — filter out InterestReceived spam
 
-When filter is `'stability_pool'`, load from the NEW stability pool `get_pool_events` endpoint (which now has deposit/withdraw/claim events) instead of from the backend's `claim_liquidity_returns` events.
+The stability pool already returns Deposit, Withdraw, ClaimCollateral, DepositAs3USD, and InterestReceived events. The problem is InterestReceived fires constantly and drowns out meaningful events. Filter it out client-side after fetching:
+
+```typescript
+const poolEvents = await fetchStabilityPoolEvents(BigInt(reverseStart), BigInt(length));
+const meaningful = poolEvents.filter((evt: any) => {
+    const key = Object.keys(evt.event_type ?? {})[0];
+    return key !== 'InterestReceived';
+});
+```
+
+This means pagination needs adjustment — we may need to fetch more than one page and filter, or load all events and paginate the filtered set (stability pool event counts are small enough for this).
 
 ### Task 6.7: Update System tab
 
