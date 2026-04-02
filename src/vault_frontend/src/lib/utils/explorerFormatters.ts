@@ -149,6 +149,23 @@ export function formatSwapEvent(swap: any): FormattedEvent {
 }
 
 /**
+ * Format an AMM swap event into a simple display object.
+ */
+export function formatAmmSwapEvent(event: any): { summary: string; typeName: string; badgeColor: string } {
+  const poolId = event.pool_id ?? '?';
+  const amountIn = event.amount_in != null ? formatTokenAmount(BigInt(event.amount_in), 8) : '?';
+  const amountOut = event.amount_out != null ? formatTokenAmount(BigInt(event.amount_out), 8) : '?';
+  const tokenIn = event.token_in ? shortenPrincipal(event.token_in.toText?.() ?? String(event.token_in)) : '?';
+  const tokenOut = event.token_out ? shortenPrincipal(event.token_out.toText?.() ?? String(event.token_out)) : '?';
+
+  return {
+    summary: `Swapped ${amountIn} (${tokenIn}) → ${amountOut} (${tokenOut}) on ${poolId}`,
+    typeName: 'AMM Swap',
+    badgeColor: 'bg-indigo-500/15 text-indigo-400 border border-indigo-500/30',
+  };
+}
+
+/**
  * Format a Stability Pool PoolEvent into FormattedEvent.
  * PoolEvent: { id, timestamp, caller, event_type: Deposit|Withdraw|ClaimCollateral|DepositAs3USD|InterestReceived }
  */

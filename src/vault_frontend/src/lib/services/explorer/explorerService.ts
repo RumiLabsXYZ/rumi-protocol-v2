@@ -10,6 +10,7 @@ import { Principal } from '@dfinity/principal';
 import { publicActor } from '$services/protocol/apiClient';
 import { stabilityPoolService } from '$services/stabilityPoolService';
 import { threePoolService } from '$services/threePoolService';
+import { ammService } from '$services/ammService';
 
 // ── TTL constants (ms) ───────────────────────────────────────────────────────
 
@@ -513,6 +514,50 @@ export async function fetchSwapEventCount(): Promise<bigint> {
 		return setCache(key, result);
 	} catch (err) {
 		console.error('[explorerService] fetchSwapEventCount failed:', err);
+		return 0n;
+	}
+}
+
+// ── AMM ─────────────────────────────────────────────────────────────────────
+
+export async function fetchAmmPools(): Promise<any[]> {
+	const key = 'pool:amm:pools';
+	const cached = getCached<any[]>(key, TTL.POOL);
+	if (cached) return cached;
+
+	try {
+		const result = await ammService.getPools();
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchAmmPools failed:', err);
+		return [];
+	}
+}
+
+export async function fetchAmmSwapEvents(start: bigint, length: bigint): Promise<any[]> {
+	const key = `pool:amm:swaps:${start}:${length}`;
+	const cached = getCached<any[]>(key, TTL.POOL);
+	if (cached) return cached;
+
+	try {
+		const result = await ammService.getSwapEvents(start, length);
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchAmmSwapEvents failed:', err);
+		return [];
+	}
+}
+
+export async function fetchAmmSwapEventCount(): Promise<bigint> {
+	const key = 'pool:amm:swapcount';
+	const cached = getCached<bigint>(key, TTL.POOL);
+	if (cached !== null) return cached;
+
+	try {
+		const result = await ammService.getSwapEventCount();
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchAmmSwapEventCount failed:', err);
 		return 0n;
 	}
 }
