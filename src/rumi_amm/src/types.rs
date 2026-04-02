@@ -103,6 +103,21 @@ pub struct PendingClaim {
     pub created_at: u64,
 }
 
+// ─── Swap Events ───
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct AmmSwapEvent {
+    pub id: u64,
+    pub caller: Principal,
+    pub pool_id: PoolId,
+    pub token_in: Principal,
+    pub amount_in: u128,
+    pub token_out: Principal,
+    pub amount_out: u128,
+    pub fee: u128,
+    pub timestamp: u64,
+}
+
 // ─── Errors ───
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]

@@ -497,6 +497,11 @@ async fn swap(
         }
     }
 
+    // Record swap event for explorer history
+    mutate_state(|s| {
+        s.record_swap_event(caller, pool_id.clone(), token_in, amount_in, ledger_out, amount_out, total_fee);
+    });
+
     log!(INFO, "Swap on {}: {} in -> {} out (fee: {}, proto: {})",
         pool_id, amount_in, amount_out, total_fee, protocol_fee);
 
@@ -757,6 +762,26 @@ fn is_maintenance_mode() -> bool {
 fn health() -> String {
     let pool_count = read_state(|s| s.pools.len());
     format!("Rumi AMM OK — {} pool(s)", pool_count)
+}
+
+// ─── Swap Event History ───
+
+#[query]
+fn get_amm_swap_events(start: u64, length: u64) -> Vec<AmmSwapEvent> {
+    read_state(|s| {
+        let start = start as usize;
+        let length = length as usize;
+        if start >= s.swap_events.len() {
+            return vec![];
+        }
+        let end = std::cmp::min(start + length, s.swap_events.len());
+        s.swap_events[start..end].to_vec()
+    })
+}
+
+#[query]
+fn get_amm_swap_event_count() -> u64 {
+    read_state(|s| s.swap_events.len() as u64)
 }
 
 // ─── ICRC-21 / ICRC-28 / ICRC-10 ───

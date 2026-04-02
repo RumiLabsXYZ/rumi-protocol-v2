@@ -42,6 +42,18 @@ type PendingClaim = record {
   created_at : nat64;
 };
 
+type AmmSwapEvent = record {
+  id : nat64;
+  caller : principal;
+  pool_id : text;
+  token_in : principal;
+  amount_in : nat;
+  token_out : principal;
+  amount_out : nat;
+  fee : nat;
+  timestamp : nat64;
+};
+
 // ── ICRC-21 Consent Messages ──
 
 type ConsentMessageMetadata = record {
@@ -149,6 +161,10 @@ service : (AmmInitArgs) -> {
   withdraw_protocol_fees : (text) -> (variant { Ok : record { nat; nat }; Err : AmmError });
   pause_pool : (text) -> (variant { Ok; Err : AmmError });
   unpause_pool : (text) -> (variant { Ok; Err : AmmError });
+
+  // ── Swap Event History ──
+  get_amm_swap_events : (nat64, nat64) -> (vec AmmSwapEvent) query;
+  get_amm_swap_event_count : () -> (nat64) query;
 
   // ── ICRC-21 / ICRC-28 / ICRC-10 ──
   icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (variant { Ok : ConsentInfo; Err : Icrc21Error });
