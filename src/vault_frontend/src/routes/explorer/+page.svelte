@@ -12,7 +12,8 @@
     fetchAllVaults, fetchEventCount, fetchTreasuryStats,
     fetchInterestSplit, fetchBotStats, fetchStabilityPoolStatus,
     fetchThreePoolStatus, fetchEvents, fetchCollateralConfigs,
-    fetchLiquidatableVaults, fetchAllSnapshots
+    fetchLiquidatableVaults, fetchAllSnapshots,
+    fetchAmmPools, fetchAmmSwapEventCount, fetchSwapEventCount
   } from '$services/explorer/explorerService';
   import {
     formatE8s, formatUsd, formatUsdRaw, formatCR, formatPercent, formatBps,
@@ -41,6 +42,7 @@
   // Section 3: Pools
   let spStatus: any = $state(null);
   let tpStatus: any = $state(null);
+  let ammPools: any[] = $state([]);
   let poolsLoading = $state(true);
   let poolsError: string | null = $state(null);
 
@@ -273,14 +275,16 @@
     // Section 1: Hero
     const heroPromise = (async () => {
       try {
-        const [s, v, ec] = await Promise.all([
+        const [s, v, ec, tpSwapCount, ammSwapCount] = await Promise.all([
           fetchProtocolStatus(),
           fetchAllVaults(),
-          fetchEventCount()
+          fetchEventCount(),
+          fetchSwapEventCount(),
+          fetchAmmSwapEventCount()
         ]);
         status = s;
         vaults = v;
-        eventCount = ec;
+        eventCount = ec + tpSwapCount + ammSwapCount;
       } catch (e) {
         console.error('[explorer] Hero load failed:', e);
         if (!isRefresh) heroError = 'Failed to load protocol status';
@@ -318,12 +322,14 @@
     // Section 3: Pools
     const poolsPromise = (async () => {
       try {
-        const [sp, tp] = await Promise.all([
+        const [sp, tp, amm] = await Promise.all([
           fetchStabilityPoolStatus(),
-          fetchThreePoolStatus()
+          fetchThreePoolStatus(),
+          fetchAmmPools()
         ]);
         spStatus = sp;
         tpStatus = tp;
+        ammPools = amm;
       } catch (e) {
         console.error('[explorer] Pools load failed:', e);
         if (!isRefresh) poolsError = 'Failed to load pool data';
@@ -708,7 +714,7 @@
   <!-- ════════════════════════════════════════════════════════════════════
        Section 3 — Pools (Stability Pool + 3Pool)
        ════════════════════════════════════════════════════════════════════ -->
-  <section class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+  <section class="grid grid-cols-1 lg:grid-cols-3 gap-4">
     <!-- Stability Pool -->
     <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl overflow-hidden">
       <div class="px-5 py-4 border-b border-gray-700/50 flex items-center justify-between">
@@ -837,6 +843,55 @@
               </div>
             </div>
           {/if}
+        </div>
+      {/if}
+    </div>
+
+    <!-- AMM (Constant Product) -->
+    <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl overflow-hidden">
+      <div class="px-5 py-4 border-b border-gray-700/50">
+        <h2 class="text-sm font-semibold text-gray-200">AMM (Constant Product)</h2>
+      </div>
+
+      {#if poolsLoading}
+        <div class="p-5 space-y-3 animate-pulse">
+          <div class="h-4 w-32 bg-gray-700 rounded"></div>
+          <div class="h-4 w-24 bg-gray-700 rounded"></div>
+        </div>
+      {:else if ammPools.length === 0}
+        <div class="p-5 text-gray-500 text-sm">No AMM pools found</div>
+      {:else}
+        {@const activePools = ammPools.filter(p => !p.paused)}
+        {@const pausedPools = ammPools.filter(p => p.paused)}
+        <div class="p-5 space-y-3">
+          <div class="flex justify-between items-center">
+            <span class="text-sm text-gray-400">Pools</span>
+            <span class="text-sm font-semibold text-gray-200 tabular-nums">
+              {activePools.length} active{#if pausedPools.length > 0}<span class="text-gray-500"> / {pausedPools.length} paused</span>{/if}
+            </span>
+          </div>
+          {#each ammPools as pool}
+            {@const tokenA = pool.token_a?.toText?.() ?? String(pool.token_a)}
+            {@const tokenB = pool.token_b?.toText?.() ?? String(pool.token_b)}
+            {@const symbolA = getTokenSymbol(tokenA)}
+            {@const symbolB = getTokenSymbol(tokenB)}
+            <div class="pt-2 border-t border-gray-700/30">
+              <div class="flex justify-between items-center mb-1">
+                <span class="text-xs font-medium text-gray-300">{symbolA} / {symbolB}</span>
+                {#if pool.paused}
+                  <span class="text-xs text-yellow-400">Paused</span>
+                {/if}
+              </div>
+              <div class="flex justify-between items-center">
+                <span class="text-xs text-gray-400">Fee</span>
+                <span class="text-xs text-gray-300 tabular-nums">{(Number(pool.fee_bps) / 100).toFixed(2)}%</span>
+              </div>
+              <div class="flex justify-between items-center">
+                <span class="text-xs text-gray-400">LP Shares</span>
+                <span class="text-xs text-gray-300 tabular-nums">{Number(pool.total_lp_shares).toLocaleString()}</span>
+              </div>
+            </div>
+          {/each}
         </div>
       {/if}
     </div>
