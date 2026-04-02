@@ -18,7 +18,7 @@
     formatE8s, formatUsdRaw, formatCR, getTokenSymbol, getCanisterName,
     isKnownCanister, classifyVaultHealth, healthColor, shortenPrincipal
   } from '$utils/explorerHelpers';
-  import { getEventCategory, EVENT_CATEGORIES, formatSwapEvent, formatAmmSwapEvent } from '$utils/explorerFormatters';
+  import { getEventCategory, formatSwapEvent, formatAmmSwapEvent } from '$utils/explorerFormatters';
   import type { EventCategory } from '$utils/explorerFormatters';
 
   // ── State ────────────────────────────────────────────────────────────

@@ -38,7 +38,6 @@
 	let error: string | null = $state(null);
 
 	// Liquidation summary (shown when filter === 'liquidations')
-	let liquidationEventCount: number = $state(0);
 	let liquidatableVaults: any[] = $state([]);
 	let botStats: any = $state(null);
 
@@ -239,7 +238,8 @@
 		<div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
 			<StatCard
 				label="Liquidation Events"
-				value={String(liquidationEventCount || '—')}
+				value={filteredEvents.length > 0 ? String(filteredEvents.length) : '—'}
+				subtitle={filteredEvents.length > 0 ? 'This page' : ''}
 			/>
 			<StatCard
 				label="Liquidatable Vaults"

@@ -4,7 +4,6 @@
   import EntityLink from '$components/explorer/EntityLink.svelte';
   import StatusBadge from '$components/explorer/StatusBadge.svelte';
   import EventRow from '$components/explorer/EventRow.svelte';
-  import AmountDisplay from '$components/explorer/AmountDisplay.svelte';
   import TokenBadge from '$components/explorer/TokenBadge.svelte';
   import VaultHealthBar from '$components/explorer/VaultHealthBar.svelte';
   import {
@@ -16,7 +15,7 @@
     fetchAmmPools, fetchAmmSwapEventCount, fetchSwapEventCount
   } from '$services/explorer/explorerService';
   import {
-    formatE8s, formatUsd, formatUsdRaw, formatCR, formatPercent, formatBps,
+    formatE8s, formatUsd, formatCR, formatBps,
     getTokenSymbol, registerToken, classifyVaultHealth, healthColor
   } from '$utils/explorerHelpers';
   import { decodeRustDecimal } from '$utils/decimalUtils';
@@ -284,7 +283,7 @@
         ]);
         status = s;
         vaults = v;
-        eventCount = ec + tpSwapCount + ammSwapCount;
+        eventCount = (ec ?? 0n) + (tpSwapCount ?? 0n) + (ammSwapCount ?? 0n);
       } catch (e) {
         console.error('[explorer] Hero load failed:', e);
         if (!isRefresh) heroError = 'Failed to load protocol status';
