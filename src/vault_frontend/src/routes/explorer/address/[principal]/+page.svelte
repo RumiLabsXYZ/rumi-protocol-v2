@@ -10,13 +10,15 @@
   import VaultHealthBar from '$components/explorer/VaultHealthBar.svelte';
   import {
     fetchVaultsByOwner, fetchEventsByPrincipal,
-    fetchCollateralConfigs, fetchCollateralPrices
+    fetchCollateralConfigs, fetchCollateralPrices,
+    fetchSwapEvents, fetchSwapEventCount,
+    fetchAmmSwapEvents, fetchAmmSwapEventCount
   } from '$services/explorer/explorerService';
   import {
     formatE8s, formatUsdRaw, formatCR, getTokenSymbol, getCanisterName,
     isKnownCanister, classifyVaultHealth, healthColor, shortenPrincipal
   } from '$utils/explorerHelpers';
-  import { getEventCategory, EVENT_CATEGORIES } from '$utils/explorerFormatters';
+  import { getEventCategory, EVENT_CATEGORIES, formatSwapEvent, formatAmmSwapEvent } from '$utils/explorerFormatters';
   import type { EventCategory } from '$utils/explorerFormatters';
 
   // ── State ────────────────────────────────────────────────────────────
@@ -27,6 +29,8 @@
   let configMap = $state(new Map<string, any>());
   let priceMap = $state(new Map<string, number>());
   let selectedCategory: EventCategory | 'all' = $state('all');
+  let dexEvents: [bigint, any][] = $state([]);
+  let dexLoading: boolean = $state(false);
 
   // ── Derived ──────────────────────────────────────────────────────────
   const principalStr = $derived($page.params.principal);
@@ -91,11 +95,50 @@
   const totalDebt = $derived(vaults.reduce((sum, v) => sum + vaultDebt(v), 0));
   const weightedCR = $derived(totalDebt > 0 ? totalCollateralUsd / totalDebt : 0);
 
-  // Event filtering
-  const tabs: { key: EventCategory | 'all'; label: string }[] = [
+  // Event filtering — only user-relevant categories for address pages
+  const addressTabs: { key: string; label: string }[] = [
     { key: 'all', label: 'All' },
-    ...EVENT_CATEGORIES.map((c) => ({ key: c.key, label: c.label }))
+    { key: 'vault_ops', label: 'Vault Operations' },
+    { key: 'liquidation', label: 'Liquidations' },
+    { key: 'stability_pool', label: 'Stability Pool' },
+    { key: 'dex', label: 'DEX' },
   ];
+
+  async function loadDexEvents(principalId: string) {
+    dexLoading = true;
+    try {
+      const [threePoolCount, ammCount] = await Promise.all([
+        fetchSwapEventCount(),
+        fetchAmmSwapEventCount(),
+      ]);
+
+      const [threePoolEvents, ammEvents] = await Promise.all([
+        Number(threePoolCount) > 0 ? fetchSwapEvents(0n, threePoolCount) : Promise.resolve([]),
+        Number(ammCount) > 0 ? fetchAmmSwapEvents(0n, ammCount) : Promise.resolve([]),
+      ]);
+
+      // Filter by caller matching this principal
+      const matchingThreePool = threePoolEvents.filter((e: any) => {
+        const caller = e.caller?.toText?.() ?? String(e.caller ?? '');
+        return caller === principalId;
+      }).map((e: any) => [BigInt(e.id ?? 0), { ...e, _source: '3pool' }] as [bigint, any]);
+
+      const matchingAmm = ammEvents.filter((e: any) => {
+        const caller = e.caller?.toText?.() ?? String(e.caller ?? '');
+        return caller === principalId;
+      }).map((e: any) => [BigInt(e.id ?? 0), { ...e, _source: 'amm' }] as [bigint, any]);
+
+      // Merge and sort by timestamp descending
+      const merged = [...matchingThreePool, ...matchingAmm];
+      merged.sort((a, b) => Number(b[1].timestamp ?? 0) - Number(a[1].timestamp ?? 0));
+      dexEvents = merged;
+    } catch (e) {
+      console.error('[address] loadDexEvents error:', e);
+      dexEvents = [];
+    } finally {
+      dexLoading = false;
+    }
+  }
 
   const sortedEvents = $derived(
     [...events].sort(([a], [b]) => Number(b) - Number(a))
@@ -300,25 +343,72 @@
 
       <!-- Category filter tabs -->
       <div class="flex gap-0 border-b border-gray-700/50 mb-4 overflow-x-auto">
-        {#each tabs as tab}
+        {#each addressTabs as tab}
           <button
             class="px-4 py-2.5 text-sm font-medium whitespace-nowrap transition-colors
               {selectedCategory === tab.key
               ? 'text-blue-400 border-b-2 border-blue-400'
               : 'text-gray-400 border-b-2 border-transparent hover:text-gray-300 hover:border-gray-600'}"
-            onclick={() => (selectedCategory = tab.key)}
+            onclick={() => {
+              selectedCategory = tab.key as EventCategory | 'all';
+              if (tab.key === 'dex') loadDexEvents(principalStr);
+            }}
           >
             {tab.label}
           </button>
         {/each}
       </div>
 
-      {#if filteredEvents.length === 0}
+      {#if selectedCategory === 'dex'}
+        {#if dexLoading}
+          <div class="flex items-center justify-center py-10">
+            <div class="w-6 h-6 border-2 border-gray-600 border-t-blue-400 rounded-full animate-spin"></div>
+          </div>
+        {:else if dexEvents.length === 0}
+          <p class="text-gray-500 text-sm text-center py-10">No DEX activity found for this address.</p>
+        {:else}
+          <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl overflow-hidden">
+            <table class="w-full">
+              <thead>
+                <tr class="border-b border-gray-700/50 text-left">
+                  <th class="px-4 py-3 text-xs font-medium text-gray-500 uppercase">#</th>
+                  <th class="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Time</th>
+                  <th class="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Type</th>
+                  <th class="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Summary</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each dexEvents as [id, event]}
+                  {@const formatted = event._source === 'amm' ? formatAmmSwapEvent(event) : formatSwapEvent(event)}
+                  <tr class="border-b border-gray-700/50 hover:bg-gray-800/30 transition-colors">
+                    <td class="px-4 py-3 text-xs text-gray-500 font-mono">{Number(id)}</td>
+                    <td class="px-4 py-3 text-xs text-gray-500">
+                      {#if event.timestamp}
+                        {@const ts = Number(event.timestamp) > 1e15 ? Number(event.timestamp) : Number(event.timestamp) * 1e9}
+                        {@const ago = (() => { const s = Math.floor((Date.now() - ts / 1e6) / 1000); if (s < 60) return `${s}s ago`; if (s < 3600) return `${Math.floor(s/60)}m ago`; if (s < 86400) return `${Math.floor(s/3600)}h ago`; return `${Math.floor(s/86400)}d ago`; })()}
+                        {ago}
+                      {:else}
+                        &mdash;
+                      {/if}
+                    </td>
+                    <td class="px-4 py-3">
+                      <span class="inline-block text-xs font-medium px-2.5 py-0.5 rounded-full {formatted.badgeColor}">
+                        {formatted.typeName}
+                      </span>
+                    </td>
+                    <td class="px-4 py-3 text-sm text-gray-300 truncate max-w-[300px]">{formatted.summary}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/if}
+      {:else if filteredEvents.length === 0}
         <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-12 text-center">
           <p class="text-gray-500 text-sm">
             {selectedCategory === 'all'
               ? 'No activity found'
-              : `No ${tabs.find((t) => t.key === selectedCategory)?.label ?? ''} events found`}
+              : `No ${addressTabs.find((t) => t.key === selectedCategory)?.label ?? ''} events found`}
           </p>
         </div>
       {:else}
