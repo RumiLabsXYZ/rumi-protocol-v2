@@ -172,12 +172,19 @@ fn create_pool(args: CreatePoolArgs) -> Result<PoolId, AmmError> {
 
         log!(INFO, "Pool created: {} (fee: {} bps, admin: {})", pool_id, args.fee_bps, is_admin);
         s.pools.insert(pool_id.clone(), pool);
+        s.record_admin_event(ic_cdk::caller(), AmmAdminAction::CreatePool {
+            pool_id: pool_id.clone(),
+            token_a,
+            token_b,
+            fee_bps: args.fee_bps,
+        });
         Ok(pool_id)
     })
 }
 
 #[update]
 fn set_fee(pool_id: PoolId, fee_bps: u16) -> Result<(), AmmError> {
+    let caller = ic_cdk::caller();
     caller_is_admin()?;
     if fee_bps > 10_000 {
         return Err(AmmError::FeeBpsOutOfRange);
@@ -186,12 +193,14 @@ fn set_fee(pool_id: PoolId, fee_bps: u16) -> Result<(), AmmError> {
         let pool = s.pools.get_mut(&pool_id).ok_or(AmmError::PoolNotFound)?;
         pool.fee_bps = fee_bps;
         log!(INFO, "Pool {} fee set to {} bps", pool_id, fee_bps);
+        s.record_admin_event(caller, AmmAdminAction::SetFee { pool_id: pool_id.clone(), fee_bps });
         Ok(())
     })
 }
 
 #[update]
 fn set_protocol_fee(pool_id: PoolId, protocol_fee_bps: u16) -> Result<(), AmmError> {
+    let caller = ic_cdk::caller();
     caller_is_admin()?;
     if protocol_fee_bps > 10_000 {
         return Err(AmmError::FeeBpsOutOfRange);
@@ -200,6 +209,7 @@ fn set_protocol_fee(pool_id: PoolId, protocol_fee_bps: u16) -> Result<(), AmmErr
         let pool = s.pools.get_mut(&pool_id).ok_or(AmmError::PoolNotFound)?;
         pool.protocol_fee_bps = protocol_fee_bps;
         log!(INFO, "Pool {} protocol fee set to {} bps", pool_id, protocol_fee_bps);
+        s.record_admin_event(caller, AmmAdminAction::SetProtocolFee { pool_id: pool_id.clone(), protocol_fee_bps });
         Ok(())
     })
 }
@@ -272,27 +282,38 @@ async fn withdraw_protocol_fees(pool_id: PoolId) -> Result<(u128, u128), AmmErro
     }
 
     log!(INFO, "Protocol fees withdrawn from {}: ({}, {})", pool_id, withdrawn_a, withdrawn_b);
+    mutate_state(|s| {
+        s.record_admin_event(ic_cdk::caller(), AmmAdminAction::WithdrawProtocolFees {
+            pool_id: pool_id.clone(),
+            amount_a: withdrawn_a,
+            amount_b: withdrawn_b,
+        });
+    });
     Ok((withdrawn_a, withdrawn_b))
 }
 
 #[update]
 fn pause_pool(pool_id: PoolId) -> Result<(), AmmError> {
+    let caller = ic_cdk::caller();
     caller_is_admin()?;
     mutate_state(|s| {
         let pool = s.pools.get_mut(&pool_id).ok_or(AmmError::PoolNotFound)?;
         pool.paused = true;
         log!(INFO, "Pool {} paused", pool_id);
+        s.record_admin_event(caller, AmmAdminAction::PausePool { pool_id: pool_id.clone() });
         Ok(())
     })
 }
 
 #[update]
 fn unpause_pool(pool_id: PoolId) -> Result<(), AmmError> {
+    let caller = ic_cdk::caller();
     caller_is_admin()?;
     mutate_state(|s| {
         let pool = s.pools.get_mut(&pool_id).ok_or(AmmError::PoolNotFound)?;
         pool.paused = false;
         log!(INFO, "Pool {} unpaused", pool_id);
+        s.record_admin_event(caller, AmmAdminAction::UnpausePool { pool_id: pool_id.clone() });
         Ok(())
     })
 }
@@ -302,6 +323,9 @@ fn set_pool_creation_open(open: bool) -> Result<(), AmmError> {
     caller_is_admin()?;
     mutate_state(|s| s.pool_creation_open = open);
     log!(INFO, "Pool creation open: {}", open);
+    mutate_state(|s| {
+        s.record_admin_event(ic_cdk::caller(), AmmAdminAction::SetPoolCreationOpen { open });
+    });
     Ok(())
 }
 
@@ -310,6 +334,9 @@ fn set_maintenance_mode(enabled: bool) -> Result<(), AmmError> {
     caller_is_admin()?;
     mutate_state(|s| s.maintenance_mode = enabled);
     log!(INFO, "Maintenance mode: {}", enabled);
+    mutate_state(|s| {
+        s.record_admin_event(ic_cdk::caller(), AmmAdminAction::SetMaintenanceMode { enabled });
+    });
     Ok(())
 }
 
@@ -341,10 +368,20 @@ async fn claim_pending(claim_id: u64) -> Result<(), AmmError> {
         return Err(AmmError::Unauthorized);
     }
 
+    let claim_claimant = claim.claimant;
+    let claim_amount = claim.amount;
+
     match transfer_to_user(claim.token, claim.subaccount, claim.claimant, claim.amount).await {
         Ok(_) => {
             log!(INFO, "Pending claim #{} resolved: {} received {} of token {}",
-                claim_id, claim.claimant, claim.amount, claim.token);
+                claim_id, claim_claimant, claim_amount, claim.token);
+            mutate_state(|s| {
+                s.record_admin_event(caller, AmmAdminAction::ClaimPending {
+                    claim_id,
+                    claimant: claim_claimant,
+                    amount: claim_amount,
+                });
+            });
             Ok(())
         }
         Err(reason) => {
@@ -368,6 +405,7 @@ fn get_pending_claims() -> Vec<PendingClaim> {
 /// Admin: force-remove a pending claim without transferring (e.g., after manual resolution).
 #[update]
 fn resolve_pending_claim(claim_id: u64) -> Result<(), AmmError> {
+    let caller = ic_cdk::caller();
     caller_is_admin()?;
     mutate_state(|s| {
         let before = s.pending_claims.len();
@@ -376,6 +414,7 @@ fn resolve_pending_claim(claim_id: u64) -> Result<(), AmmError> {
             return Err(AmmError::ClaimNotFound);
         }
         log!(INFO, "Pending claim #{} force-resolved by admin", claim_id);
+        s.record_admin_event(caller, AmmAdminAction::ResolvePendingClaim { claim_id });
         Ok(())
     })
 }
@@ -602,6 +641,13 @@ async fn add_liquidity(
         pool.reserve_b += amount_b;
     });
 
+    mutate_state(|s| {
+        s.record_liquidity_event(
+            caller, pool_id.clone(), AmmLiquidityAction::AddLiquidity,
+            token_a, amount_a, token_b, amount_b, shares,
+        );
+    });
+
     log!(INFO, "Add liquidity to {}: ({}, {}) -> {} shares for {}",
         pool_id, amount_a, amount_b, shares, caller);
 
@@ -698,6 +744,13 @@ async fn remove_liquidity(
         });
     }
 
+    mutate_state(|s| {
+        s.record_liquidity_event(
+            caller, pool_id.clone(), AmmLiquidityAction::RemoveLiquidity,
+            token_a, amount_a, token_b, amount_b, lp_shares,
+        );
+    });
+
     log!(INFO, "Remove liquidity from {}: {} shares -> ({}, {}) for {}",
         pool_id, lp_shares, amount_a, amount_b, caller);
 
@@ -782,6 +835,46 @@ fn get_amm_swap_events(start: u64, length: u64) -> Vec<AmmSwapEvent> {
 #[query]
 fn get_amm_swap_event_count() -> u64 {
     read_state(|s| s.swap_events.len() as u64)
+}
+
+// ─── Liquidity Event History ───
+
+#[query]
+fn get_amm_liquidity_events(start: u64, length: u64) -> Vec<AmmLiquidityEvent> {
+    read_state(|s| {
+        let start = start as usize;
+        let length = length as usize;
+        if start >= s.liquidity_events.len() {
+            return vec![];
+        }
+        let end = std::cmp::min(start + length, s.liquidity_events.len());
+        s.liquidity_events[start..end].to_vec()
+    })
+}
+
+#[query]
+fn get_amm_liquidity_event_count() -> u64 {
+    read_state(|s| s.liquidity_events.len() as u64)
+}
+
+// ─── Admin Event History ───
+
+#[query]
+fn get_amm_admin_events(start: u64, length: u64) -> Vec<AmmAdminEvent> {
+    read_state(|s| {
+        let start = start as usize;
+        let length = length as usize;
+        if start >= s.admin_events.len() {
+            return vec![];
+        }
+        let end = std::cmp::min(start + length, s.admin_events.len());
+        s.admin_events[start..end].to_vec()
+    })
+}
+
+#[query]
+fn get_amm_admin_event_count() -> u64 {
+    read_state(|s| s.admin_events.len() as u64)
 }
 
 // ─── ICRC-21 / ICRC-28 / ICRC-10 ───

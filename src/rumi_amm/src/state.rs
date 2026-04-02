@@ -23,6 +23,14 @@ pub struct AmmState {
     pub swap_events: Vec<AmmSwapEvent>,
     #[serde(default)]
     pub next_swap_event_id: u64,
+    #[serde(default)]
+    pub liquidity_events: Vec<AmmLiquidityEvent>,
+    #[serde(default)]
+    pub next_liquidity_event_id: u64,
+    #[serde(default)]
+    pub admin_events: Vec<AmmAdminEvent>,
+    #[serde(default)]
+    pub next_admin_event_id: u64,
 }
 
 impl Default for AmmState {
@@ -36,6 +44,10 @@ impl Default for AmmState {
             next_claim_id: 0,
             swap_events: Vec::new(),
             next_swap_event_id: 0,
+            liquidity_events: Vec::new(),
+            next_liquidity_event_id: 0,
+            admin_events: Vec::new(),
+            next_admin_event_id: 0,
         }
     }
 }
@@ -59,6 +71,44 @@ impl AmmState {
         };
         self.swap_events.push(event);
         self.next_swap_event_id += 1;
+    }
+
+    pub fn record_liquidity_event(
+        &mut self,
+        caller: Principal,
+        pool_id: PoolId,
+        action: AmmLiquidityAction,
+        token_a: Principal,
+        amount_a: u128,
+        token_b: Principal,
+        amount_b: u128,
+        lp_shares: u128,
+    ) {
+        let event = AmmLiquidityEvent {
+            id: self.next_liquidity_event_id,
+            caller,
+            pool_id,
+            action,
+            token_a,
+            amount_a,
+            token_b,
+            amount_b,
+            lp_shares,
+            timestamp: ic_cdk::api::time(),
+        };
+        self.liquidity_events.push(event);
+        self.next_liquidity_event_id += 1;
+    }
+
+    pub fn record_admin_event(&mut self, caller: Principal, action: AmmAdminAction) {
+        let event = AmmAdminEvent {
+            id: self.next_admin_event_id,
+            caller,
+            action,
+            timestamp: ic_cdk::api::time(),
+        };
+        self.admin_events.push(event);
+        self.next_admin_event_id += 1;
     }
 }
 
@@ -168,6 +218,10 @@ pub fn load_from_stable_memory() {
             next_claim_id: v4.next_claim_id,
             swap_events: Vec::new(),
             next_swap_event_id: 0,
+            liquidity_events: Vec::new(),
+            next_liquidity_event_id: 0,
+            admin_events: Vec::new(),
+            next_admin_event_id: 0,
         });
     } else if let Ok(v3) = Decode!(&bytes, AmmStateV3) {
         replace_state(AmmState {
@@ -179,6 +233,10 @@ pub fn load_from_stable_memory() {
             next_claim_id: 0,
             swap_events: Vec::new(),
             next_swap_event_id: 0,
+            liquidity_events: Vec::new(),
+            next_liquidity_event_id: 0,
+            admin_events: Vec::new(),
+            next_admin_event_id: 0,
         });
     } else if let Ok(v2) = Decode!(&bytes, AmmStateV2) {
         replace_state(AmmState {
@@ -190,6 +248,10 @@ pub fn load_from_stable_memory() {
             next_claim_id: 0,
             swap_events: Vec::new(),
             next_swap_event_id: 0,
+            liquidity_events: Vec::new(),
+            next_liquidity_event_id: 0,
+            admin_events: Vec::new(),
+            next_admin_event_id: 0,
         });
     } else {
         let v1: AmmStateV1 = Decode!(&bytes, AmmStateV1)
@@ -203,6 +265,10 @@ pub fn load_from_stable_memory() {
             next_claim_id: 0,
             swap_events: Vec::new(),
             next_swap_event_id: 0,
+            liquidity_events: Vec::new(),
+            next_liquidity_event_id: 0,
+            admin_events: Vec::new(),
+            next_admin_event_id: 0,
         });
     }
 }

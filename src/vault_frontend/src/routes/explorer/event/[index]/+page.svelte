@@ -8,15 +8,17 @@
   import { formatEvent } from '$utils/explorerFormatters';
   import type { EventField } from '$utils/explorerFormatters';
   import { formatTimestamp } from '$utils/explorerHelpers';
+  import { fetchAllVaults } from '$services/explorer/explorerService';
 
   let event: any = $state(null);
   let globalIndex: bigint | null = $state(null);
   let loading = $state(true);
   let error: string | null = $state(null);
+  let vaultCollateralMap: Map<number, string> = $state(new Map());
 
   const eventIndex = $derived(Number($page.params.index));
 
-  const formatted = $derived(event ? formatEvent(event) : null);
+  const formatted = $derived(event ? formatEvent(event, vaultCollateralMap) : null);
 
   // Extract unique related entities from fields for the sidebar
   const relatedEntities = $derived.by(() => {
@@ -50,7 +52,19 @@
     loading = true;
     error = null;
     try {
-      const results = await publicActor.get_events({ start: BigInt(eventIndex), length: 1n });
+      const [results, vaults] = await Promise.all([
+        publicActor.get_events({ start: BigInt(eventIndex), length: 1n }),
+        fetchAllVaults(),
+      ]);
+      // Build vault collateral map
+      const map = new Map<number, string>();
+      for (const v of vaults) {
+        const id = Number(v.vault_id);
+        const collType = v.collateral_type?.toText?.() ?? String(v.collateral_type ?? '');
+        if (collType) map.set(id, collType);
+      }
+      vaultCollateralMap = map;
+
       if (results.length > 0) {
         globalIndex = BigInt(eventIndex);
         event = results[0];

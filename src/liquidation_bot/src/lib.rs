@@ -7,7 +7,7 @@ mod state;
 mod process;
 mod swap;
 
-use state::{BotConfig, BotLiquidationEvent, BotState, LiquidatableVaultInfo};
+use state::{BotAdminAction, BotAdminEvent, BotConfig, BotLiquidationEvent, BotState, LiquidatableVaultInfo};
 
 declare_log_buffer!(name = INFO, capacity = 1000);
 
@@ -56,6 +56,11 @@ fn notify_liquidatable_vaults(vaults: Vec<LiquidatableVaultInfo>) {
     let count = vaults.len();
     state::mutate_state(|s| {
         s.pending_vaults = vaults;
+        s.admin_events.push(BotAdminEvent {
+            timestamp: ic_cdk::api::time(),
+            caller: caller.to_text(),
+            action: BotAdminAction::VaultsNotified { count: count as u64 },
+        });
     });
     log!(INFO, "Received {} liquidatable vaults from backend", count);
 }
@@ -75,6 +80,22 @@ fn get_liquidation_events(offset: u64, limit: u64) -> Vec<BotLiquidationEvent> {
     })
 }
 
+#[query]
+fn get_admin_events(offset: u64, limit: u64) -> Vec<state::BotAdminEvent> {
+    state::read_state(|s| {
+        let len = s.admin_events.len();
+        let start = (len as u64).saturating_sub(offset + limit) as usize;
+        let end = (len as u64).saturating_sub(offset) as usize;
+        if start >= end { return vec![]; }
+        s.admin_events[start..end].to_vec()
+    })
+}
+
+#[query]
+fn get_admin_event_count() -> u64 {
+    state::read_state(|s| s.admin_events.len() as u64)
+}
+
 #[update]
 fn set_config(config: BotConfig) {
     let caller = ic_cdk::api::caller();
@@ -84,7 +105,14 @@ fn set_config(config: BotConfig) {
     if !is_admin {
         ic_cdk::trap("Unauthorized: only admin can set config");
     }
-    state::mutate_state(|s| s.config = Some(config));
+    state::mutate_state(|s| {
+        s.config = Some(config);
+        s.admin_events.push(BotAdminEvent {
+            timestamp: ic_cdk::api::time(),
+            caller: caller.to_text(),
+            action: BotAdminAction::ConfigUpdated,
+        });
+    });
 }
 
 // ─── Test Functions ───

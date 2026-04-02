@@ -8,14 +8,15 @@
     event: any;
     index: number | null;
     showTimestamp?: boolean;
+    vaultCollateralMap?: Map<number, string>;
     [key: string]: any;
   }
 
-  let { event, index, showTimestamp = true, ...rest }: Props = $props();
+  let { event, index, showTimestamp = true, vaultCollateralMap, ...rest }: Props = $props();
 
   const hasIndex = $derived(index != null && index >= 0);
 
-  const formatted = $derived(formatEvent(event));
+  const formatted = $derived(formatEvent(event, vaultCollateralMap));
 
   const timestamp = $derived.by(() => {
     const ts = getEventTimestamp(event);
@@ -23,9 +24,14 @@
   });
 
   function extractPrincipal(event: any): string | null {
-    const variant = Object.keys(event)[0];
-    const data = event[variant];
+    // Backend events wrap data in event_type variant
+    const eventType = event.event_type ?? event;
+    const variant = Object.keys(eventType)[0];
+    if (!variant) return null;
+    const data = eventType[variant];
     if (!data) return null;
+
+    // Check common principal fields
     for (const key of ['owner', 'caller', 'from', 'liquidator', 'redeemer']) {
       const val = data[key];
       if (val && typeof val === 'object' && typeof val.toText === 'function') {
@@ -35,6 +41,13 @@
         return val;
       }
     }
+
+    // Check nested vault owner
+    if (data.vault?.owner) {
+      const owner = data.vault.owner;
+      if (typeof owner === 'object' && typeof owner.toText === 'function') return owner.toText();
+    }
+
     return null;
   }
 

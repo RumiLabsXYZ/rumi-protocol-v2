@@ -163,6 +163,54 @@ pub struct SwapEvent {
     pub fee: u128,
 }
 
+// ─── Liquidity Events ───
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub enum LiquidityAction {
+    AddLiquidity,
+    RemoveLiquidity,
+    RemoveOneCoin,
+    Donate,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct LiquidityEvent {
+    pub id: u64,
+    pub timestamp: u64,
+    pub caller: Principal,
+    pub action: LiquidityAction,
+    /// Per-token amounts (3 elements: icUSD, ckUSDT, ckUSDC)
+    pub amounts: [u128; 3],
+    /// LP tokens minted or burned
+    pub lp_amount: u128,
+    /// For RemoveOneCoin: which coin index was withdrawn
+    pub coin_index: Option<u8>,
+    /// Fee charged (for RemoveOneCoin)
+    pub fee: Option<u128>,
+}
+
+// ─── Admin Events ───
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub enum ThreePoolAdminAction {
+    RampA { future_a: u64, future_a_time: u64 },
+    StopRampA { frozen_a: u64 },
+    WithdrawAdminFees { amounts: [u128; 3] },
+    SetPaused { paused: bool },
+    SetSwapFee { fee_bps: u64 },
+    SetAdminFee { fee_bps: u64 },
+    AddAuthorizedBurnCaller { canister: Principal },
+    RemoveAuthorizedBurnCaller { canister: Principal },
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct ThreePoolAdminEvent {
+    pub id: u64,
+    pub timestamp: u64,
+    pub caller: Principal,
+    pub action: ThreePoolAdminAction,
+}
+
 // ─── Pool Status (query response) ───
 
 /// Snapshot of pool state returned by queries.

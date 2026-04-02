@@ -166,6 +166,146 @@ export function formatAmmSwapEvent(event: any): { summary: string; typeName: str
 }
 
 /**
+ * Format an AMM liquidity event into a simple display object.
+ */
+export function formatAmmLiquidityEvent(event: any): { summary: string; typeName: string; badgeColor: string } {
+  const action = event.action ? Object.keys(event.action)[0] : '?';
+  const poolId = event.pool_id ?? '?';
+  const tokenA = event.token_a ? getTokenSymbol(event.token_a.toText?.() ?? String(event.token_a)) : '?';
+  const tokenB = event.token_b ? getTokenSymbol(event.token_b.toText?.() ?? String(event.token_b)) : '?';
+  const amtA = event.amount_a != null ? formatTokenAmount(BigInt(event.amount_a), 8) : '?';
+  const amtB = event.amount_b != null ? formatTokenAmount(BigInt(event.amount_b), 8) : '?';
+  const lpShares = event.lp_shares != null ? formatTokenAmount(BigInt(event.lp_shares), 8) : '?';
+
+  const isAdd = action === 'AddLiquidity';
+  const typeName = isAdd ? 'AMM Add Liquidity' : 'AMM Remove Liquidity';
+  const summary = isAdd
+    ? `Added ${amtA} ${tokenA} + ${amtB} ${tokenB} → ${lpShares} LP on ${poolId}`
+    : `Removed ${lpShares} LP → ${amtA} ${tokenA} + ${amtB} ${tokenB} on ${poolId}`;
+
+  return {
+    summary,
+    typeName,
+    badgeColor: 'bg-indigo-500/15 text-indigo-400 border border-indigo-500/30',
+  };
+}
+
+/**
+ * Format an AMM admin event into a simple display object.
+ */
+export function formatAmmAdminEvent(event: any): { summary: string; typeName: string; badgeColor: string } {
+  const action = event.action ? Object.keys(event.action)[0] : 'Unknown';
+  const data = event.action?.[action] ?? {};
+
+  let summary = action;
+  switch (action) {
+    case 'CreatePool': summary = `Created pool ${data.pool_id}`; break;
+    case 'SetFee': summary = `Set fee to ${data.fee_bps}bps on ${data.pool_id}`; break;
+    case 'SetProtocolFee': summary = `Set protocol fee to ${data.protocol_fee_bps}bps on ${data.pool_id}`; break;
+    case 'WithdrawProtocolFees': summary = `Withdrew protocol fees from ${data.pool_id}`; break;
+    case 'PausePool': summary = `Paused pool ${data.pool_id}`; break;
+    case 'UnpausePool': summary = `Unpaused pool ${data.pool_id}`; break;
+    case 'SetPoolCreationOpen': summary = `Pool creation ${data.open ? 'opened' : 'closed'}`; break;
+    case 'SetMaintenanceMode': summary = `Maintenance mode ${data.enabled ? 'enabled' : 'disabled'}`; break;
+    case 'ClaimPending': summary = `Claimed pending #${data.claim_id}`; break;
+    case 'ResolvePendingClaim': summary = `Resolved pending claim #${data.claim_id}`; break;
+  }
+
+  return {
+    summary,
+    typeName: 'AMM Admin',
+    badgeColor: BADGE_COLORS.admin,
+  };
+}
+
+/**
+ * Format a 3Pool liquidity event into a simple display object.
+ */
+export function format3PoolLiquidityEvent(event: any): { summary: string; typeName: string; badgeColor: string } {
+  const action = event.action ? Object.keys(event.action)[0] : '?';
+  const amounts = event.amounts ?? [];
+  const lpAmount = event.lp_amount != null ? formatTokenAmount(BigInt(event.lp_amount), 8) : '?';
+  const coinIndex = event.coin_index?.[0] ?? null;
+
+  let summary = '';
+  let typeName = '';
+
+  switch (action) {
+    case 'AddLiquidity': {
+      const parts = amounts.map((a: any, i: number) => {
+        const sym = THREE_POOL_TOKEN_NAMES[i] ?? `token${i}`;
+        const amt = fmtPoolAmount(a, i);
+        return Number(a) > 0 ? `${amt} ${sym}` : null;
+      }).filter(Boolean).join(' + ');
+      typeName = '3Pool Add Liquidity';
+      summary = `Added ${parts || '0'} → ${lpAmount} LP`;
+      break;
+    }
+    case 'RemoveLiquidity': {
+      const parts = amounts.map((a: any, i: number) => {
+        const sym = THREE_POOL_TOKEN_NAMES[i] ?? `token${i}`;
+        const amt = fmtPoolAmount(a, i);
+        return Number(a) > 0 ? `${amt} ${sym}` : null;
+      }).filter(Boolean).join(' + ');
+      typeName = '3Pool Remove Liquidity';
+      summary = `Removed ${lpAmount} LP → ${parts || '0'}`;
+      break;
+    }
+    case 'RemoveOneCoin': {
+      const idx = coinIndex ?? 0;
+      const sym = THREE_POOL_TOKEN_NAMES[idx] ?? `token${idx}`;
+      const amt = amounts[idx] != null ? fmtPoolAmount(amounts[idx], idx) : '?';
+      typeName = '3Pool Remove One Coin';
+      summary = `Removed ${lpAmount} LP → ${amt} ${sym}`;
+      break;
+    }
+    case 'Donate': {
+      const idx = coinIndex ?? 0;
+      const sym = THREE_POOL_TOKEN_NAMES[idx] ?? `token${idx}`;
+      const amt = amounts[idx] != null ? fmtPoolAmount(amounts[idx], idx) : '?';
+      typeName = '3Pool Donate';
+      summary = `Donated ${amt} ${sym}`;
+      break;
+    }
+    default:
+      typeName = `3Pool ${action}`;
+      summary = action;
+  }
+
+  return {
+    summary,
+    typeName,
+    badgeColor: BADGE_COLORS.threepool,
+  };
+}
+
+/**
+ * Format a 3Pool admin event into a simple display object.
+ */
+export function format3PoolAdminEvent(event: any): { summary: string; typeName: string; badgeColor: string } {
+  const action = event.action ? Object.keys(event.action)[0] : 'Unknown';
+  const data = event.action?.[action] ?? {};
+
+  let summary = action;
+  switch (action) {
+    case 'RampA': summary = `Ramping A to ${data.future_a}`; break;
+    case 'StopRampA': summary = `Stopped A ramp at ${data.frozen_a}`; break;
+    case 'WithdrawAdminFees': summary = 'Withdrew admin fees'; break;
+    case 'SetPaused': summary = `Pool ${data.paused ? 'paused' : 'unpaused'}`; break;
+    case 'SetSwapFee': summary = `Set swap fee to ${data.fee_bps}bps`; break;
+    case 'SetAdminFee': summary = `Set admin fee to ${data.fee_bps}bps`; break;
+    case 'AddAuthorizedBurnCaller': summary = `Added burn caller ${shortenPrincipal(data.canister?.toText?.() ?? '')}`; break;
+    case 'RemoveAuthorizedBurnCaller': summary = `Removed burn caller ${shortenPrincipal(data.canister?.toText?.() ?? '')}`; break;
+  }
+
+  return {
+    summary,
+    typeName: '3Pool Admin',
+    badgeColor: BADGE_COLORS.admin,
+  };
+}
+
+/**
  * Format a Stability Pool PoolEvent into FormattedEvent.
  * PoolEvent: { id, timestamp, caller, event_type: Deposit|Withdraw|ClaimCollateral|DepositAs3USD|InterestReceived }
  */
@@ -203,7 +343,7 @@ export function formatStabilityPoolEvent(evt: any): FormattedEvent {
     const sym = getTokenSymbol(data.token_ledger?.toText?.() ?? '');
     const dec = getTokenDecimals(data.token_ledger?.toText?.() ?? '');
     const amtIn = formatE8s(data.amount_in, dec);
-    const lpMinted = formatE8s(data.lp_minted, 18);
+    const lpMinted = formatE8s(data.lp_minted, 8);
     typeName = 'Deposit as 3USD';
     summary = `Deposited ${amtIn} ${sym} → ${lpMinted} 3USD LP`;
     fields.push({ label: 'Amount In', value: `${amtIn} ${sym}`, type: 'amount' });
@@ -215,6 +355,57 @@ export function formatStabilityPoolEvent(evt: any): FormattedEvent {
     typeName = 'Interest Received';
     summary = `Received ${amt} ${sym} interest`;
     fields.push({ label: 'Amount', value: `${amt} ${sym}`, type: 'amount' });
+  } else if (key === 'OptOutCollateral') {
+    const sym = getTokenSymbol(data.collateral_type?.toText?.() ?? '');
+    typeName = 'Opt Out Collateral';
+    summary = `Opted out of ${sym} collateral`;
+  } else if (key === 'OptInCollateral') {
+    const sym = getTokenSymbol(data.collateral_type?.toText?.() ?? '');
+    typeName = 'Opt In Collateral';
+    summary = `Opted in to ${sym} collateral`;
+  } else if (key === 'LiquidationNotification') {
+    typeName = 'Liquidation Notification';
+    summary = `Liquidation notification: ${data.vault_count} vaults`;
+  } else if (key === 'LiquidationExecuted') {
+    const sym = getTokenSymbol(data.collateral_type?.toText?.() ?? '');
+    const collAmt = formatE8s(data.collateral_gained, 8);
+    const stables = formatE8s(data.stables_consumed_e8s, 8);
+    typeName = data.success ? 'Liquidation Executed' : 'Liquidation Failed';
+    summary = data.success
+      ? `Liquidated vault #${data.vault_id}: consumed ${stables} stables, gained ${collAmt} ${sym}`
+      : `Liquidation failed for vault #${data.vault_id}`;
+    fields.push({ label: 'Vault', value: `#${data.vault_id}`, type: 'vault', linkTarget: String(data.vault_id) });
+    fields.push({ label: 'Stables Consumed', value: `${stables}`, type: 'amount' });
+    fields.push({ label: 'Collateral Gained', value: `${collAmt} ${sym}`, type: 'amount' });
+  } else if (key === 'StablecoinRegistered') {
+    typeName = 'Stablecoin Registered';
+    summary = `Registered stablecoin: ${data.symbol}`;
+  } else if (key === 'CollateralRegistered') {
+    typeName = 'Collateral Registered';
+    summary = `Registered collateral: ${data.symbol}`;
+  } else if (key === 'ConfigurationUpdated') {
+    typeName = 'Config Updated';
+    summary = 'Pool configuration updated';
+  } else if (key === 'EmergencyPauseActivated') {
+    typeName = 'Emergency Pause';
+    summary = 'Emergency pause activated';
+  } else if (key === 'OperationsResumed') {
+    typeName = 'Operations Resumed';
+    summary = 'Operations resumed';
+  } else if (key === 'BalanceCorrected') {
+    const tokenId = data.token_ledger?.toText?.() ?? '';
+    const sym = getTokenSymbol(tokenId);
+    const dec = getTokenDecimals(tokenId);
+    const amt = formatE8s(data.new_amount, dec);
+    typeName = 'Balance Corrected';
+    summary = `Balance corrected for ${shortenPrincipal(data.user?.toText?.() ?? '')}: ${amt} ${sym}`;
+  } else if (key === 'CollateralGainCorrected') {
+    const collId = data.collateral_ledger?.toText?.() ?? '';
+    const sym = getTokenSymbol(collId);
+    const dec = getTokenDecimals(collId);
+    const amt = formatE8s(data.new_amount, dec);
+    typeName = 'Collateral Gain Corrected';
+    summary = `Collateral gain corrected for ${shortenPrincipal(data.user?.toText?.() ?? '')}: ${amt} ${sym}`;
   } else {
     typeName = key;
     summary = key;
@@ -478,7 +669,14 @@ function getTypeName(key: string): string {
 
 // ─── Main Format Function ─────────────────────────────────────────────
 
-export function formatEvent(event: any): FormattedEvent {
+/**
+ * Format a backend protocol event for display.
+ * @param event - Raw event from the backend canister
+ * @param vaultCollateralMap - Optional map of vault_id → collateral_type principal string.
+ *   Used to look up the correct collateral token for events that don't include it
+ *   (e.g. partial_collateral_withdrawn, add_margin_to_vault, collateral_withdrawn).
+ */
+export function formatEvent(event: any, vaultCollateralMap?: Map<number, string>): FormattedEvent {
   const key = getVariantKey(event);
   const d = getVariantData(event);
   const category = getEventCategory(event);
@@ -488,6 +686,12 @@ export function formatEvent(event: any): FormattedEvent {
 
   // Timestamp helper — appended at the end for most events
   const ts = optValue<any>(d?.timestamp);
+
+  // Look up vault collateral type from the map when the event doesn't include it
+  function vaultCollateral(vaultId: any): string {
+    if (vaultId == null) return 'unknown';
+    return vaultCollateralMap?.get(Number(vaultId)) ?? 'unknown';
+  }
 
   switch (key) {
     // ── Vault Lifecycle ─────────────────────────────────────────────
@@ -584,12 +788,13 @@ export function formatEvent(event: any): FormattedEvent {
     // ── Collateral ──────────────────────────────────────────────────
 
     case 'add_margin_to_vault': {
-      const sym = tokenSymbol(d.collateral_type ?? 'unknown');
-      const dec = tokenDecimals(d.collateral_type ?? 'unknown');
+      const collType = d.collateral_type ?? vaultCollateral(d.vault_id);
+      const sym = tokenSymbol(collType);
+      const dec = tokenDecimals(collType);
       const amt = fmtE8s(d.margin_added, dec);
       fields.push(vaultField(d.vault_id));
-      if (d.collateral_type) fields.push(tokenField(d.collateral_type));
-      fields.push(tokenAmountField('Collateral Added', d.margin_added, d.collateral_type ?? 'unknown'));
+      if (collType !== 'unknown') fields.push(tokenField(collType));
+      fields.push(tokenAmountField('Collateral Added', d.margin_added, collType));
       if (d.block_index !== undefined) fields.push(blockIndexField('Block Index', d.block_index));
       pushIfPresent(fields, addressField('Caller', d.caller));
       if (ts) fields.push(timestampField(ts));
@@ -600,27 +805,35 @@ export function formatEvent(event: any): FormattedEvent {
     }
 
     case 'collateral_withdrawn': {
-      const amt = fmtE8s(d.amount);
+      const collType = vaultCollateral(d.vault_id);
+      const sym = tokenSymbol(collType);
+      const dec = tokenDecimals(collType);
+      const amt = fmtE8s(d.amount, dec);
       fields.push(vaultField(d.vault_id));
-      fields.push(amountField('Amount', d.amount, 8, 'ICP'));
+      if (collType !== 'unknown') fields.push(tokenField(collType));
+      fields.push(amountField('Amount', d.amount, dec, sym));
       if (d.block_index !== undefined) fields.push(blockIndexField('Block Index', d.block_index));
       pushIfPresent(fields, addressField('Caller', d.caller));
       if (ts) fields.push(timestampField(ts));
       return {
-        summary: `Withdrew all collateral from Vault #${d.vault_id} (${amt} ICP)`,
+        summary: `Withdrew all collateral from Vault #${d.vault_id} (${amt} ${sym})`,
         typeName, category, badgeColor, fields,
       };
     }
 
     case 'partial_collateral_withdrawn': {
-      const amt = fmtE8s(d.amount);
+      const collType = vaultCollateral(d.vault_id);
+      const sym = tokenSymbol(collType);
+      const dec = tokenDecimals(collType);
+      const amt = fmtE8s(d.amount, dec);
       fields.push(vaultField(d.vault_id));
-      fields.push(amountField('Amount Withdrawn', d.amount, 8, 'ICP'));
+      if (collType !== 'unknown') fields.push(tokenField(collType));
+      fields.push(amountField('Amount Withdrawn', d.amount, dec, sym));
       if (d.block_index !== undefined) fields.push(blockIndexField('Block Index', d.block_index));
       pushIfPresent(fields, addressField('Caller', d.caller));
       if (ts) fields.push(timestampField(ts));
       return {
-        summary: `Withdrew ${amt} ICP from Vault #${d.vault_id}`,
+        summary: `Withdrew ${amt} ${sym} from Vault #${d.vault_id}`,
         typeName, category, badgeColor, fields,
       };
     }

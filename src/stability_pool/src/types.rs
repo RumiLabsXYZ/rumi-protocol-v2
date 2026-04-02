@@ -429,6 +429,48 @@ pub enum PoolEventType {
         token_ledger: Principal,
         amount: u64,
     },
+    // ─── Collateral Opt-in/Opt-out ───
+    OptOutCollateral {
+        collateral_type: Principal,
+    },
+    OptInCollateral {
+        collateral_type: Principal,
+    },
+    // ─── Liquidation Events ───
+    LiquidationNotification {
+        vault_count: u64,
+    },
+    LiquidationExecuted {
+        vault_id: u64,
+        stables_consumed_e8s: u64,
+        collateral_gained: u64,
+        collateral_type: Principal,
+        success: bool,
+    },
+    // ─── Admin: Registry ───
+    StablecoinRegistered {
+        ledger: Principal,
+        symbol: String,
+    },
+    CollateralRegistered {
+        ledger: Principal,
+        symbol: String,
+    },
+    // ─── Admin: Configuration ───
+    ConfigurationUpdated,
+    EmergencyPauseActivated,
+    OperationsResumed,
+    // ─── Admin: Balance Corrections ───
+    BalanceCorrected {
+        user: Principal,
+        token_ledger: Principal,
+        new_amount: u64,
+    },
+    CollateralGainCorrected {
+        user: Principal,
+        collateral_ledger: Principal,
+        new_amount: u64,
+    },
 }
 
 /// Arguments for the 3pool's authorized redeem-and-burn operation.

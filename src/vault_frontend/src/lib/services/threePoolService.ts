@@ -258,6 +258,26 @@ class ThreePoolService {
     return await actor.get_swap_event_count() as bigint;
   }
 
+  async getLiquidityEvents(start: bigint, length: bigint): Promise<any[]> {
+    const actor = await this.getQueryActor();
+    return await actor.get_liquidity_events(start, length) as any[];
+  }
+
+  async getLiquidityEventCount(): Promise<bigint> {
+    const actor = await this.getQueryActor();
+    return await actor.get_liquidity_event_count() as bigint;
+  }
+
+  async getAdminEvents(start: bigint, length: bigint): Promise<any[]> {
+    const actor = await this.getQueryActor();
+    return await actor.get_admin_events(start, length) as any[];
+  }
+
+  async getAdminEventCount(): Promise<bigint> {
+    const actor = await this.getQueryActor();
+    return await actor.get_admin_event_count() as bigint;
+  }
+
   // ── Mutations ──
 
   async swap(fromIndex: number, toIndex: number, dxRaw: bigint, minDyRaw: bigint): Promise<bigint> {

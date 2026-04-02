@@ -12,13 +12,19 @@
     fetchVaultsByOwner, fetchEventsByPrincipal,
     fetchCollateralConfigs, fetchCollateralPrices,
     fetchSwapEvents, fetchSwapEventCount,
-    fetchAmmSwapEvents, fetchAmmSwapEventCount
+    fetchAmmSwapEvents, fetchAmmSwapEventCount,
+    fetchAmmLiquidityEvents, fetchAmmLiquidityEventCount,
+    fetch3PoolLiquidityEvents, fetch3PoolLiquidityEventCount,
+    fetchAllVaults,
   } from '$services/explorer/explorerService';
   import {
     formatE8s, formatUsdRaw, formatCR, getTokenSymbol, getCanisterName,
     isKnownCanister, classifyVaultHealth, healthColor, shortenPrincipal
   } from '$utils/explorerHelpers';
-  import { getEventCategory, formatSwapEvent, formatAmmSwapEvent } from '$utils/explorerFormatters';
+  import {
+    getEventCategory, formatSwapEvent, formatAmmSwapEvent,
+    formatAmmLiquidityEvent, format3PoolLiquidityEvent,
+  } from '$utils/explorerFormatters';
   import type { EventCategory } from '$utils/explorerFormatters';
 
   // ── State ────────────────────────────────────────────────────────────
@@ -28,9 +34,10 @@
   let events: [bigint, any][] = $state([]);
   let configMap = $state(new Map<string, any>());
   let priceMap = $state(new Map<string, number>());
-  let selectedCategory: EventCategory | 'all' = $state('all');
+  let selectedCategory: EventCategory | 'all' | 'dex' = $state('all');
   let dexEvents: [bigint, any][] = $state([]);
   let dexLoading: boolean = $state(false);
+  let vaultCollateralMap: Map<number, string> = $state(new Map());
 
   // ── Derived ──────────────────────────────────────────────────────────
   const principalStr = $derived($page.params.principal);
@@ -107,29 +114,38 @@
   async function loadDexEvents(principalId: string) {
     dexLoading = true;
     try {
-      const [threePoolCount, ammCount] = await Promise.all([
+      const [threePoolSwapCount, ammSwapCount, ammLiqCount, threePoolLiqCount] = await Promise.all([
         fetchSwapEventCount(),
         fetchAmmSwapEventCount(),
+        fetchAmmLiquidityEventCount(),
+        fetch3PoolLiquidityEventCount(),
       ]);
 
-      const [threePoolEvents, ammEvents] = await Promise.all([
-        Number(threePoolCount) > 0 ? fetchSwapEvents(0n, threePoolCount) : Promise.resolve([]),
-        Number(ammCount) > 0 ? fetchAmmSwapEvents(0n, ammCount) : Promise.resolve([]),
+      const [threePoolSwaps, ammSwaps, ammLiqEvents, threePoolLiqEvents] = await Promise.all([
+        Number(threePoolSwapCount) > 0 ? fetchSwapEvents(0n, threePoolSwapCount) : Promise.resolve([]),
+        Number(ammSwapCount) > 0 ? fetchAmmSwapEvents(0n, ammSwapCount) : Promise.resolve([]),
+        Number(ammLiqCount) > 0 ? fetchAmmLiquidityEvents(0n, ammLiqCount) : Promise.resolve([]),
+        Number(threePoolLiqCount) > 0 ? fetch3PoolLiquidityEvents(0n, threePoolLiqCount) : Promise.resolve([]),
       ]);
 
-      // Filter by caller matching this principal
-      const matchingThreePool = threePoolEvents.filter((e: any) => {
+      // Helper to check if an event's caller matches this principal
+      const matchesCaller = (e: any) => {
         const caller = e.caller?.toText?.() ?? String(e.caller ?? '');
         return caller === principalId;
-      }).map((e: any) => [BigInt(e.id ?? 0), { ...e, _source: '3pool' }] as [bigint, any]);
+      };
 
-      const matchingAmm = ammEvents.filter((e: any) => {
-        const caller = e.caller?.toText?.() ?? String(e.caller ?? '');
-        return caller === principalId;
-      }).map((e: any) => [BigInt(e.id ?? 0), { ...e, _source: 'amm' }] as [bigint, any]);
+      // Filter by caller and tag with source
+      const matching3PoolSwaps = threePoolSwaps.filter(matchesCaller)
+        .map((e: any) => [BigInt(e.id ?? 0), { ...e, _source: '3pool' }] as [bigint, any]);
+      const matchingAmmSwaps = ammSwaps.filter(matchesCaller)
+        .map((e: any) => [BigInt(e.id ?? 0), { ...e, _source: 'amm' }] as [bigint, any]);
+      const matchingAmmLiq = ammLiqEvents.filter(matchesCaller)
+        .map((e: any) => [BigInt(e.id ?? 0), { ...e, _source: 'amm_liquidity' }] as [bigint, any]);
+      const matching3PoolLiq = threePoolLiqEvents.filter(matchesCaller)
+        .map((e: any) => [BigInt(e.id ?? 0), { ...e, _source: '3pool_liquidity' }] as [bigint, any]);
 
       // Merge and sort by timestamp descending
-      const merged = [...matchingThreePool, ...matchingAmm];
+      const merged = [...matching3PoolSwaps, ...matchingAmmSwaps, ...matchingAmmLiq, ...matching3PoolLiq];
       merged.sort((a, b) => Number(b[1].timestamp ?? 0) - Number(a[1].timestamp ?? 0));
       dexEvents = merged;
     } catch (e) {
@@ -165,16 +181,26 @@
     }
 
     try {
-      // Fetch vaults, events, configs, and prices in parallel
-      const [vaultResults, eventsResult, configs, prices] = await Promise.all([
+      // Fetch vaults, events, configs, prices, and all vaults (for collateral type lookup) in parallel
+      const [vaultResults, eventsResult, configs, prices, allVaults] = await Promise.all([
         fetchVaultsByOwner(principal),
         fetchEventsByPrincipal(principal),
         fetchCollateralConfigs(),
-        fetchCollateralPrices()
+        fetchCollateralPrices(),
+        fetchAllVaults(),
       ]);
 
       events = eventsResult;
       vaults = vaultResults;
+
+      // Build vault collateral type map for event formatting
+      const vcMap = new Map<number, string>();
+      for (const v of allVaults) {
+        const id = Number(v.vault_id);
+        const collType = v.collateral_type?.toText?.() ?? String(v.collateral_type ?? '');
+        if (collType) vcMap.set(id, collType);
+      }
+      vaultCollateralMap = vcMap;
 
       // Build config map keyed by principal text
       const cMap = new Map<string, any>();
@@ -350,7 +376,7 @@
               ? 'text-blue-400 border-b-2 border-blue-400'
               : 'text-gray-400 border-b-2 border-transparent hover:text-gray-300 hover:border-gray-600'}"
             onclick={() => {
-              selectedCategory = tab.key as EventCategory | 'all';
+              selectedCategory = tab.key as EventCategory | 'all' | 'dex';
               if (tab.key === 'dex') loadDexEvents(principalStr);
             }}
           >
@@ -379,7 +405,13 @@
               </thead>
               <tbody>
                 {#each dexEvents as [id, event]}
-                  {@const formatted = event._source === 'amm' ? formatAmmSwapEvent(event) : formatSwapEvent(event)}
+                  {@const formatted = event._source === 'amm_liquidity'
+                    ? formatAmmLiquidityEvent(event)
+                    : event._source === '3pool_liquidity'
+                    ? format3PoolLiquidityEvent(event)
+                    : event._source === 'amm'
+                    ? formatAmmSwapEvent(event)
+                    : formatSwapEvent(event)}
                   <tr class="border-b border-gray-700/50 hover:bg-gray-800/30 transition-colors">
                     <td class="px-4 py-3 text-xs text-gray-500 font-mono">{Number(id)}</td>
                     <td class="px-4 py-3 text-xs text-gray-500">
@@ -414,7 +446,7 @@
       {:else}
         <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl overflow-hidden">
           {#each filteredEvents as [globalIndex, event] (globalIndex)}
-            <EventRow {event} index={Number(globalIndex)} />
+            <EventRow {event} index={Number(globalIndex)} {vaultCollateralMap} />
           {/each}
         </div>
       {/if}

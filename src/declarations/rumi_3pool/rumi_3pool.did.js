@@ -80,6 +80,38 @@ export const idlFactory = ({ IDL }) => {
     'timestamp_secs' : IDL.Nat64,
     'lp_total_supply' : IDL.Nat,
   });
+  const LiquidityAction = IDL.Variant({
+    'AddLiquidity' : IDL.Null,
+    'RemoveLiquidity' : IDL.Null,
+    'RemoveOneCoin' : IDL.Null,
+    'Donate' : IDL.Null,
+  });
+  const LiquidityEvent = IDL.Record({
+    'id' : IDL.Nat64,
+    'timestamp' : IDL.Nat64,
+    'caller' : IDL.Principal,
+    'action' : LiquidityAction,
+    'amounts' : IDL.Vec(IDL.Nat),
+    'lp_amount' : IDL.Nat,
+    'coin_index' : IDL.Opt(IDL.Nat8),
+    'fee' : IDL.Opt(IDL.Nat),
+  });
+  const ThreePoolAdminAction = IDL.Variant({
+    'RampA' : IDL.Record({ 'future_a' : IDL.Nat64, 'future_a_time' : IDL.Nat64 }),
+    'StopRampA' : IDL.Record({ 'frozen_a' : IDL.Nat64 }),
+    'WithdrawAdminFees' : IDL.Record({ 'amounts' : IDL.Vec(IDL.Nat) }),
+    'SetPaused' : IDL.Record({ 'paused' : IDL.Bool }),
+    'SetSwapFee' : IDL.Record({ 'fee_bps' : IDL.Nat64 }),
+    'SetAdminFee' : IDL.Record({ 'fee_bps' : IDL.Nat64 }),
+    'AddAuthorizedBurnCaller' : IDL.Record({ 'canister' : IDL.Principal }),
+    'RemoveAuthorizedBurnCaller' : IDL.Record({ 'canister' : IDL.Principal }),
+  });
+  const ThreePoolAdminEvent = IDL.Record({
+    'id' : IDL.Nat64,
+    'timestamp' : IDL.Nat64,
+    'caller' : IDL.Principal,
+    'action' : ThreePoolAdminAction,
+  });
   const StandardRecord = IDL.Record({ 'url' : IDL.Text, 'name' : IDL.Text });
   const Account = IDL.Record({
     'owner' : IDL.Principal,
@@ -306,6 +338,18 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Vec(SwapEvent)],
         ['query'],
       ),
+    'get_liquidity_events' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [IDL.Vec(LiquidityEvent)],
+        ['query'],
+      ),
+    'get_liquidity_event_count' : IDL.Func([], [IDL.Nat64], ['query']),
+    'get_admin_events' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [IDL.Vec(ThreePoolAdminEvent)],
+        ['query'],
+      ),
+    'get_admin_event_count' : IDL.Func([], [IDL.Nat64], ['query']),
     'get_vp_snapshots' : IDL.Func(
         [],
         [IDL.Vec(VirtualPriceSnapshot)],

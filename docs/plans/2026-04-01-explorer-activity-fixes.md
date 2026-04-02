@@ -2,9 +2,11 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Fix all broken functionality on the Explorer Activity page: principal extraction, filtering, pagination, event tracking gaps in 3Pool/AMM/Stability Pool canisters, and missing liquidity events.
+**Goal:** Log EVERY operation across ALL 5 non-backend canisters (AMM, 3Pool, Stability Pool, Treasury, Liquidation Bot) and fix all broken frontend Activity page functionality.
 
-**Architecture:** Three-layer fix — (1) backend canister upgrades to record liquidity events in 3Pool + AMM, (2) stability pool event tracking, (3) frontend Activity page rewrite to fix filtering, pagination, principal display, and data merging.
+**Architecture:** Five-layer fix — (1) AMM canister: liquidity + admin events, (2) 3Pool canister: liquidity + admin events, (3) Stability Pool: 11 new event types, (4) Treasury: full event infrastructure from scratch, (5) Liquidation Bot: production event logging. Then frontend Activity page rewrite to fix filtering, pagination, principal display, and data merging.
+
+**Total operations being logged:** 35+ across 5 canisters (was 0 for liquidity/admin events).
 
 **Tech Stack:** Rust (IC canisters), Svelte 5 (frontend), Candid IDL
 

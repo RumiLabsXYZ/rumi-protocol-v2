@@ -5,7 +5,7 @@ use candid::Principal;
 use crate::math::get_a;
 use crate::state::{mutate_state, read_state};
 use crate::transfers::transfer_to_user;
-use crate::types::ThreePoolError;
+use crate::types::{ThreePoolError, ThreePoolAdminEvent, ThreePoolAdminAction};
 
 /// Minimum time for an A parameter ramp (1 day in seconds).
 const MIN_RAMP_TIME: u64 = 86400;
@@ -55,6 +55,14 @@ pub fn ramp_a(
         s.config.future_a = future_a;
         s.config.initial_a_time = now;
         s.config.future_a_time = future_a_time;
+
+        let id = s.admin_events().len() as u64;
+        s.admin_events_mut().push(ThreePoolAdminEvent {
+            id,
+            timestamp: ic_cdk::api::time(),
+            caller,
+            action: ThreePoolAdminAction::RampA { future_a, future_a_time },
+        });
     });
 
     Ok(())
@@ -82,6 +90,14 @@ pub fn stop_ramp_a(caller: Principal, now: u64) -> Result<(), ThreePoolError> {
         s.config.future_a = current_a;
         s.config.initial_a_time = 0;
         s.config.future_a_time = 0;
+
+        let id = s.admin_events().len() as u64;
+        s.admin_events_mut().push(ThreePoolAdminEvent {
+            id,
+            timestamp: ic_cdk::api::time(),
+            caller,
+            action: ThreePoolAdminAction::StopRampA { frozen_a: current_a },
+        });
     });
 
     Ok(())
@@ -114,6 +130,17 @@ pub async fn withdraw_admin_fees(caller: Principal) -> Result<[u128; 3], ThreePo
         }
     }
 
+    // Record admin event
+    mutate_state(|s| {
+        let id = s.admin_events().len() as u64;
+        s.admin_events_mut().push(ThreePoolAdminEvent {
+            id,
+            timestamp: ic_cdk::api::time(),
+            caller,
+            action: ThreePoolAdminAction::WithdrawAdminFees { amounts: fees },
+        });
+    });
+
     Ok(fees)
 }
 
@@ -126,6 +153,14 @@ pub fn set_paused(caller: Principal, paused: bool) -> Result<(), ThreePoolError>
 
     mutate_state(|s| {
         s.is_paused = paused;
+
+        let id = s.admin_events().len() as u64;
+        s.admin_events_mut().push(ThreePoolAdminEvent {
+            id,
+            timestamp: ic_cdk::api::time(),
+            caller,
+            action: ThreePoolAdminAction::SetPaused { paused },
+        });
     });
 
     Ok(())
@@ -143,6 +178,14 @@ pub fn set_swap_fee(caller: Principal, fee_bps: u64) -> Result<(), ThreePoolErro
 
     mutate_state(|s| {
         s.config.swap_fee_bps = fee_bps;
+
+        let id = s.admin_events().len() as u64;
+        s.admin_events_mut().push(ThreePoolAdminEvent {
+            id,
+            timestamp: ic_cdk::api::time(),
+            caller,
+            action: ThreePoolAdminAction::SetSwapFee { fee_bps },
+        });
     });
 
     Ok(())
@@ -158,6 +201,14 @@ pub fn add_authorized_burn_caller(caller: Principal, canister: Principal) -> Res
     }
     mutate_state(|s| {
         s.burn_callers_mut().insert(canister);
+
+        let id = s.admin_events().len() as u64;
+        s.admin_events_mut().push(ThreePoolAdminEvent {
+            id,
+            timestamp: ic_cdk::api::time(),
+            caller,
+            action: ThreePoolAdminAction::AddAuthorizedBurnCaller { canister },
+        });
     });
     Ok(())
 }
@@ -170,6 +221,14 @@ pub fn remove_authorized_burn_caller(caller: Principal, canister: Principal) -> 
     }
     mutate_state(|s| {
         s.burn_callers_mut().remove(&canister);
+
+        let id = s.admin_events().len() as u64;
+        s.admin_events_mut().push(ThreePoolAdminEvent {
+            id,
+            timestamp: ic_cdk::api::time(),
+            caller,
+            action: ThreePoolAdminAction::RemoveAuthorizedBurnCaller { canister },
+        });
     });
     Ok(())
 }
@@ -191,6 +250,14 @@ pub fn set_admin_fee(caller: Principal, fee_bps: u64) -> Result<(), ThreePoolErr
 
     mutate_state(|s| {
         s.config.admin_fee_bps = fee_bps;
+
+        let id = s.admin_events().len() as u64;
+        s.admin_events_mut().push(ThreePoolAdminEvent {
+            id,
+            timestamp: ic_cdk::api::time(),
+            caller,
+            action: ThreePoolAdminAction::SetAdminFee { fee_bps },
+        });
     });
 
     Ok(())

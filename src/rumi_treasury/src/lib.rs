@@ -12,8 +12,8 @@ use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
 use icrc_ledger_types::icrc1::account::Account;
 use state::{init_state, restore_state, with_state, with_state_mut};
 use types::{
-    AssetType, DepositArgs, DepositRecord, TreasuryInitArgs,
-    TreasuryStatus, WithdrawArgs, WithdrawResult
+    AssetType, DepositArgs, DepositRecord, TreasuryAction, TreasuryEvent,
+    TreasuryInitArgs, TreasuryStatus, WithdrawArgs, WithdrawResult
 };
 
 // Declare log buffer for debugging
@@ -68,6 +68,11 @@ async fn deposit(args: DepositArgs) -> Result<u64, String> {
     log!(LOG, "Processing deposit: {:?} {} {:?}",
          args.deposit_type, args.amount, args.asset_type);
 
+    let dep_type = args.deposit_type.clone();
+    let asset = args.asset_type.clone();
+    let amount = args.amount;
+    let deposit_caller = caller();
+
     let record = DepositRecord {
         id: 0, // Will be set by add_deposit
         deposit_type: args.deposit_type,
@@ -79,6 +84,12 @@ async fn deposit(args: DepositArgs) -> Result<u64, String> {
     };
 
     let deposit_id = with_state_mut(|s| s.add_deposit(record));
+
+    with_state_mut(|s| s.push_event(deposit_caller, TreasuryAction::Deposit {
+        deposit_type: dep_type,
+        asset_type: asset,
+        amount,
+    }));
 
     log!(LOG, "Deposit {} recorded successfully", deposit_id);
     Ok(deposit_id)
@@ -131,6 +142,12 @@ async fn withdraw(args: WithdrawArgs) -> Result<WithdrawResult, String> {
         }
     };
 
+    with_state_mut(|s| s.push_event(caller(), TreasuryAction::Withdraw {
+        asset_type: args.asset_type.clone(),
+        amount: args.amount,
+        to: args.to,
+    }));
+
     log!(LOG, "Withdrawal completed, block index: {}", block_index);
 
     Ok(WithdrawResult {
@@ -167,13 +184,33 @@ fn get_deposits(start: Option<u64>, limit: Option<usize>) -> Vec<DepositRecord> 
     with_state(|s| s.get_deposits(start, limit))
 }
 
+/// Get treasury events (paginated)
+#[query]
+#[candid_method(query)]
+fn get_events(start: Option<u64>, limit: Option<usize>) -> Vec<TreasuryEvent> {
+    let limit = limit.unwrap_or(100).min(1000);
+    with_state(|s| s.get_events(start, limit))
+}
+
+/// Get total number of treasury events
+#[query]
+#[candid_method(query)]
+fn get_event_count() -> u64 {
+    with_state(|s| s.get_events_count())
+}
+
 /// Pause/unpause treasury (controllers only)
 #[update]
 #[candid_method(update)]
 fn set_paused(paused: bool) -> Result<(), String> {
     ensure_controller()?;
+    let c = caller();
     log!(LOG, "Setting treasury paused state to: {}", paused);
-    with_state_mut(|s| s.set_paused(paused))
+    let result = with_state_mut(|s| s.set_paused(paused));
+    if result.is_ok() {
+        with_state_mut(|s| s.push_event(c, TreasuryAction::SetPaused { paused }));
+    }
+    result
 }
 
 /// Make actual ledger transfer call

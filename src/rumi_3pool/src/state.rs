@@ -46,6 +46,12 @@ pub struct ThreePoolState {
     /// Option for upgrade compatibility — old state won't have this field.
     #[serde(default)]
     pub swap_events: Option<Vec<SwapEvent>>,
+    /// Liquidity event log for explorer.
+    #[serde(default)]
+    pub liquidity_events: Option<Vec<LiquidityEvent>>,
+    /// Admin event log for explorer.
+    #[serde(default)]
+    pub admin_events: Option<Vec<ThreePoolAdminEvent>>,
 }
 
 impl Default for ThreePoolState {
@@ -80,6 +86,8 @@ impl Default for ThreePoolState {
             is_initialized: false,
             authorized_burn_callers: Some(BTreeSet::new()),
             swap_events: Some(Vec::new()),
+            liquidity_events: Some(Vec::new()),
+            admin_events: Some(Vec::new()),
         }
     }
 }
@@ -180,6 +188,30 @@ impl ThreePoolState {
     /// Get mutable swap events vec (initializes if None for upgrade compat).
     pub fn swap_events_mut(&mut self) -> &mut Vec<SwapEvent> {
         self.swap_events.get_or_insert_with(Vec::new)
+    }
+
+    /// Get liquidity events vec (empty if None for upgrade compat).
+    pub fn liquidity_events(&self) -> &Vec<LiquidityEvent> {
+        static EMPTY: std::sync::LazyLock<Vec<LiquidityEvent>> =
+            std::sync::LazyLock::new(Vec::new);
+        self.liquidity_events.as_ref().unwrap_or(&EMPTY)
+    }
+
+    /// Get mutable liquidity events vec (initializes if None for upgrade compat).
+    pub fn liquidity_events_mut(&mut self) -> &mut Vec<LiquidityEvent> {
+        self.liquidity_events.get_or_insert_with(Vec::new)
+    }
+
+    /// Get admin events vec (empty if None for upgrade compat).
+    pub fn admin_events(&self) -> &Vec<ThreePoolAdminEvent> {
+        static EMPTY: std::sync::LazyLock<Vec<ThreePoolAdminEvent>> =
+            std::sync::LazyLock::new(Vec::new);
+        self.admin_events.as_ref().unwrap_or(&EMPTY)
+    }
+
+    /// Get mutable admin events vec (initializes if None for upgrade compat).
+    pub fn admin_events_mut(&mut self) -> &mut Vec<ThreePoolAdminEvent> {
+        self.admin_events.get_or_insert_with(Vec::new)
     }
 
     /// Initialize pool state from deploy args.
