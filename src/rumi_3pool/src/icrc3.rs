@@ -130,11 +130,15 @@ pub fn encode_block_with_phash(block: &Icrc3Block, phash: Option<&[u8; 32]>) -> 
             ("1xfer", fields)
         }
         Icrc3Transaction::Approve { from, spender, amount, expires_at } => {
+            // Cap approve amounts to u64::MAX for index-ng compatibility.
+            // The standard index-ng deserializes amounts as u64 and rejects
+            // blocks with larger values. Approvals often use u128::MAX.
+            let capped = std::cmp::min(*amount, u64::MAX as u128) as u64;
             let mut fields = vec![
                 ("op".to_string(), Icrc3Value::Text("approve".to_string())),
                 ("from".to_string(), account_to_value(*from)),
                 ("spender".to_string(), account_to_value(*spender)),
-                ("amt".to_string(), Icrc3Value::Nat(Nat::from(*amount))),
+                ("amt".to_string(), Icrc3Value::Nat(Nat::from(capped))),
             ];
             // index-ng expects "expected_allowance" and "expires_at" (full names, not abbreviated)
             if let Some(exp) = expires_at {
