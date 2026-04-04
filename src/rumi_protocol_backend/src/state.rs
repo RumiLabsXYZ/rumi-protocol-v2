@@ -2748,6 +2748,62 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_vault_health_score() {
+        use crate::vault::Vault;
+
+        let vault = Vault {
+            owner: Principal::anonymous(),
+            borrowed_icusd_amount: ICUSD::new(100_0000_0000), // 100 icUSD
+            collateral_amount: 200_0000_0000,
+            vault_id: 1,
+            collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        };
+
+        // ICP vault: CR = 1.50, liq_ratio = 1.33 → health = 1.50 / 1.33 ≈ 1.1278
+        let health = vault.health_score(1.50, 1.33);
+        assert!((health - 1.1278).abs() < 0.001, "Expected ~1.1278, got {}", health);
+
+        // ckBTC vault: CR = 1.25, liq_ratio = 1.15 → health = 1.25 / 1.15 ≈ 1.0870
+        let health2 = vault.health_score(1.25, 1.15);
+        assert!((health2 - 1.0870).abs() < 0.001, "Expected ~1.0870, got {}", health2);
+
+        // At exact liquidation threshold: health = 1.0
+        let health3 = vault.health_score(1.33, 1.33);
+        assert!((health3 - 1.0).abs() < 0.0001, "Expected 1.0, got {}", health3);
+
+        // Zero-debt vault: should return f64::MAX (infinite health)
+        let zero_debt_vault = Vault {
+            borrowed_icusd_amount: ICUSD::new(0),
+            ..vault.clone()
+        };
+        let health4 = zero_debt_vault.health_score(1.50, 1.33);
+        assert!(health4 > 1_000_000.0, "Zero-debt vault should have very high health score");
+    }
+
+    #[test]
+    fn test_tiered_redemption_ordering() {
+        // Verify sort logic: tier ascending, then health score ascending
+        let mut entries: Vec<(u8, f64, u64)> = vec![
+            (2, 1.05, 10),  // tier 2, low health
+            (1, 1.20, 20),  // tier 1, moderate health
+            (1, 1.08, 30),  // tier 1, low health
+            (3, 1.01, 40),  // tier 3, very low health
+            (1, 1.15, 50),  // tier 1, moderate health
+        ];
+
+        entries.sort_by(|a, b| {
+            a.0.cmp(&b.0).then_with(|| a.1.partial_cmp(&b.1).unwrap())
+        });
+
+        let order: Vec<u64> = entries.iter().map(|e| e.2).collect();
+        assert_eq!(order, vec![30, 50, 20, 10, 40],
+            "Expected tier-1 vaults first (health-sorted), then tier-2, then tier-3");
+    }
+
+    #[test]
     fn test_distribute_across_vaults() {
         let mut vaults = BTreeMap::new();
         let vault1 = Vault {
