@@ -1242,17 +1242,26 @@ pub fn record_redemption_on_vaults(
         .copied()
         .unwrap_or_else(|| state.icp_collateral_type()); // fallback to ICP
 
-    let vault_redemptions = state.redeem_on_vaults(icusd_amount, collateral_price, &redeem_ct);
+    // Use the selected collateral type's price for both water-filling and
+    // pending transfer amount calculation. The caller's collateral_price
+    // parameter may be for a different collateral type.
+    let ct_price = state.get_collateral_config(&redeem_ct)
+        .and_then(|c| c.last_price)
+        .and_then(rust_decimal::Decimal::from_f64_retain)
+        .map(UsdIcp::from)
+        .unwrap_or(collateral_price); // fallback to parameter if no config price
+
+    let vault_redemptions = state.redeem_on_vaults(icusd_amount, ct_price, &redeem_ct);
     record_event(&Event::RedemptionOnVaults {
         owner,
-        current_icp_rate: collateral_price,
+        current_icp_rate: ct_price,
         icusd_amount,
         fee_amount,
         icusd_block_index,
         timestamp: Some(now()),
         vault_redemptions: if vault_redemptions.is_empty() { None } else { Some(vault_redemptions) },
     });
-    let margin: ICP = icusd_amount / collateral_price;
+    let margin: ICP = icusd_amount / ct_price;
     state
         .pending_redemption_transfer
         .insert(icusd_block_index, PendingMarginTransfer { owner, margin, collateral_type: redeem_ct });

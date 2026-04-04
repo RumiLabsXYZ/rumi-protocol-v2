@@ -1326,8 +1326,9 @@ impl State {
             if !config.status.allows_redemption() {
                 continue;
             }
-            let price = match config.last_price {
-                Some(p) if p > 0.0 => p,
+            // Verify price exists (needed for CR computation inside compute_collateral_ratio)
+            match config.last_price {
+                Some(p) if p > 0.0 => { /* price is available */ },
                 _ => continue,
             };
 
@@ -1343,12 +1344,11 @@ impl State {
                             continue;
                         }
                         has_debt = true;
+                        // Note: compute_collateral_ratio ignores the rate parameter
+                        // (reads from config.last_price instead), so we pass a dummy value.
                         let cr = crate::compute_collateral_ratio(
                             vault,
-                            crate::numeric::UsdIcp::from(
-                                rust_decimal::Decimal::from_f64_retain(price)
-                                    .unwrap_or(rust_decimal::Decimal::ZERO)
-                            ),
+                            crate::numeric::UsdIcp::from(rust_decimal::Decimal::ZERO),
                             self,
                         );
                         let health = vault.health_score(cr.to_f64(), liq_ratio);
