@@ -20,6 +20,7 @@ export interface AddCollateralArg {
   'borrowing_fee' : number,
   'interest_rate_apr' : number,
   'liquidation_ratio' : number,
+  'redemption_tier' : [] | [number],
 }
 export interface BotLiquidationResult {
   'collateral_amount' : bigint,
@@ -43,6 +44,11 @@ export interface CandidVault {
   'accrued_interest' : bigint,
   'icp_margin_amount' : bigint,
   'borrowed_icusd_amount' : bigint,
+}
+export interface VaultRedemptionImpact {
+  'vault_id' : bigint,
+  'debt_reduced' : bigint,
+  'collateral_seized' : bigint,
 }
 export interface CollateralConfig {
   'last_redemption_time' : bigint,
@@ -215,6 +221,8 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'timestamp' : [] | [bigint],
       'fee_amount' : bigint,
       'current_icp_rate' : Uint8Array | number[],
+      'collateral_type' : [] | [Principal],
+      'vault_impacts' : [] | [Array<VaultRedemptionImpact>],
     }
   } |
   {
@@ -564,6 +572,8 @@ export type Result_10 = { 'Ok' : StabilityPoolLiquidationResult } |
   { 'Err' : ProtocolError };
 export type Result_11 = { 'Ok' : string } |
   { 'Err' : ProtocolError };
+export type Result_12 = { 'Ok' : number } |
+  { 'Err' : ProtocolError };
 export type Result_2 = { 'Ok' : SuccessWithFee } |
   { 'Err' : ProtocolError };
 export type Result_3 = { 'Ok' : BotLiquidationResult } |
@@ -812,6 +822,8 @@ export interface _SERVICE {
   'set_recovery_target_cr' : ActorMethod<[number], Result>,
   'set_redemption_fee_ceiling' : ActorMethod<[number], Result>,
   'set_redemption_fee_floor' : ActorMethod<[number], Result>,
+  'set_redemption_tier' : ActorMethod<[Principal, number], Result>,
+  'get_redemption_tier' : ActorMethod<[Principal], Result_12>,
   'set_reserve_redemption_fee' : ActorMethod<[number], Result>,
   'set_reserve_redemptions_enabled' : ActorMethod<[boolean], Result>,
   'set_rmr_ceiling' : ActorMethod<[number], Result>,
