@@ -1,8 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { publicActor } from '$lib/services/protocol/apiClient';
-  import { protocolService } from '$lib/services/protocol';
-  import type { InterestSplitEntryDTO } from '$lib/services/types';
+  import type { InterestSplitArg } from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did';
 
   let reserveRedemptionFee = 0;
   let redemptionFeeFloor = 0;
@@ -12,7 +11,7 @@
   let rmrCeilingPct = '100';
   let loaded = false;
 
-  let interestSplit: InterestSplitEntryDTO[] = [];
+  let interestSplit: InterestSplitArg[] = [];
 
   function splitPct(dest: string): string {
     const entry = interestSplit.find(s => s.destination === dest);
@@ -26,22 +25,22 @@
 
   onMount(async () => {
     try {
-      const [rrFee, rfFloor, rfCeil, rrEnabled, status, rFloor, rCeil] = await Promise.all([
+      const [rrFee, rfFloor, rfCeil, rrEnabled, rFloor, rCeil, split] = await Promise.all([
         publicActor.get_reserve_redemption_fee() as Promise<number>,
         publicActor.get_redemption_fee_floor() as Promise<number>,
         publicActor.get_redemption_fee_ceiling() as Promise<number>,
         publicActor.get_reserve_redemptions_enabled() as Promise<boolean>,
-        protocolService.getProtocolStatus(),
         publicActor.get_rmr_floor() as Promise<number>,
         publicActor.get_rmr_ceiling() as Promise<number>,
+        publicActor.get_interest_split(),
       ]);
       reserveRedemptionFee = Number(rrFee);
       redemptionFeeFloor = Number(rfFloor);
       redemptionFeeCeiling = Number(rfCeil);
       reserveRedemptionsEnabled = rrEnabled;
-      interestSplit = status.interestSplit ?? [];
       rmrFloorPct = (Number(rFloor) * 100).toFixed(0);
       rmrCeilingPct = (Number(rCeil) * 100).toFixed(0);
+      interestSplit = split;
     } catch (e) {
       console.error('Failed to fetch redemption params:', e);
     }
@@ -84,7 +83,7 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Vault Redemptions (Tier 2: Spillover)</h2>
-    <p>If the protocol's reserves don't have enough ckStables to fill the full redemption amount, the remainder "spills over" into vault redemptions. The protocol identifies the vaults with the <strong>lowest collateral ratios</strong> and redeems against them, reducing their debt but also taking an equivalent value of their ICP collateral.</p>
+    <p>If the protocol's reserves don't have enough ckStables to fill the full redemption amount, the remainder "spills over" into vault redemptions. The protocol identifies the vaults with the <strong>lowest collateral ratios</strong> and redeems against them, reducing their debt but also taking an equivalent value of their collateral.</p>
     {#if loaded}
       <div class="fee-box">
         <span class="fee-label">Vault Redemption Fee Floor</span>
@@ -98,7 +97,7 @@
     <p>The vault redemption fee is dynamic. It is calculated using a base rate that increases with each redemption and decays over time:</p>
     <p class="doc-formula">fee = base_rate &times; 0.94<sup>hours_since_last_redemption</sup> + (redeemed / total_borrowed) &times; 0.5</p>
     <p>The base rate starts at zero and increases with each redemption. The 0.94 decay factor means the rate halves roughly every 11 hours of inactivity. The result is clamped between the floor and ceiling shown above. After each redemption, the base rate is updated to the newly computed fee.</p>
-    <p>You receive ICP (not ckStables) from vault redemptions. The ICP is sent directly to your account.</p>
+    <p>You receive the vault's collateral asset (not ckStables) from vault redemptions. The collateral is sent directly to your account.</p>
   </section>
 
   <section class="doc-section">
@@ -120,10 +119,10 @@
       <li>You submit icUSD for redemption.</li>
       <li>The icUSD is burned (removed from circulation).</li>
       <li><strong>Tier 1:</strong> The protocol checks its ckStable reserves and sends you stablecoins up to the available balance.</li>
-      <li><strong>Tier 2:</strong> Any remaining amount after reserves is filled by taking ICP from the lowest-CR vaults.</li>
+      <li><strong>Tier 2:</strong> Any remaining amount after reserves is filled by taking collateral from the lowest-CR vaults.</li>
       <li>The Redemption Margin Ratio (RMR) is applied. You receive {rmrFloorPct}–{rmrCeilingPct}% of face value depending on system health.</li>
       <li>Fees are deducted from the amount you receive: flat reserve fee for Tier 1, dynamic fee for Tier 2.</li>
-      <li>Reserve fees are sent to the protocol treasury. Vault redemption fees are deducted from the ICP collateral released.</li>
+      <li>Reserve fees are sent to the protocol treasury. Vault redemption fees are deducted from the collateral released.</li>
     </ol>
   </section>
 
