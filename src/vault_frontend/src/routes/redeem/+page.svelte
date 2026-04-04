@@ -8,6 +8,8 @@
   import { Principal } from '@dfinity/principal';
   import { publicActor } from '$lib/services/protocol/apiClient';
   import ProtocolStats from '$lib/components/dashboard/ProtocolStats.svelte';
+  import { resolveRoute } from '$lib/services/swapRouter';
+  import { AMM_TOKENS } from '$lib/services/ammService';
 
   // ── State ───────────────────────────────────────────────────────────
   let isConnected = false;
@@ -105,6 +107,84 @@
       }
     }, 300);
   }
+
+  // ── Swap quote comparison ────────────────────────────────────────
+  const icusdToken = AMM_TOKENS.find(t => t.symbol === 'icUSD')!;
+  const ckusdtToken = AMM_TOKENS.find(t => t.symbol === 'ckUSDT')!;
+  const ckusdcToken = AMM_TOKENS.find(t => t.symbol === 'ckUSDC')!;
+  const icpToken = AMM_TOKENS.find(t => t.symbol === 'ICP')!;
+
+  interface SwapQuote {
+    symbol: string;
+    outputRaw: bigint;
+    outputHuman: number;
+    valueUsd: number;
+  }
+
+  let swapQuotes: SwapQuote[] = [];
+  let bestSwapQuote: SwapQuote | null = null;
+  let isFetchingSwapQuotes = false;
+  let swapQuoteDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  $: if (icusdAmount > 0.01) {
+    debouncedFetchSwapQuotes(icusdAmount);
+  } else {
+    swapQuotes = [];
+    bestSwapQuote = null;
+  }
+
+  function debouncedFetchSwapQuotes(amount: number) {
+    if (swapQuoteDebounceTimer) clearTimeout(swapQuoteDebounceTimer);
+    swapQuoteDebounceTimer = setTimeout(() => fetchSwapQuotes(amount), 500);
+  }
+
+  async function fetchSwapQuotes(amount: number) {
+    isFetchingSwapQuotes = true;
+    const amountRaw = BigInt(Math.round(amount * 1e8)); // icUSD has 8 decimals
+
+    const targets = [
+      { token: ckusdtToken, symbol: 'ckUSDT', decimals: 6 },
+      { token: ckusdcToken, symbol: 'ckUSDC', decimals: 6 },
+      { token: icpToken, symbol: 'ICP', decimals: 8 },
+    ];
+
+    const results: SwapQuote[] = [];
+    await Promise.allSettled(
+      targets.map(async ({ token, symbol, decimals }) => {
+        try {
+          const route = await resolveRoute(icusdToken, token, amountRaw);
+          const outputHuman = Number(route.estimatedOutput) / 10 ** decimals;
+          // For stablecoins, value ≈ outputHuman; for ICP, multiply by price
+          const valueUsd = symbol === 'ICP' ? outputHuman * icpPrice : outputHuman;
+          results.push({ symbol, outputRaw: route.estimatedOutput, outputHuman, valueUsd });
+        } catch (e) {
+          console.warn(`Swap quote for icUSD→${symbol} failed:`, e);
+        }
+      })
+    );
+
+    swapQuotes = results;
+    bestSwapQuote = results.length > 0
+      ? results.reduce((best, q) => q.valueUsd > best.valueUsd ? q : best)
+      : null;
+    isFetchingSwapQuotes = false;
+  }
+
+  // Total redemption value in USD (reserves + vault spillover)
+  $: totalRedemptionValueUsd = (() => {
+    let val = 0;
+    // Reserve portion is 1:1 stablecoins (minus fee already deducted)
+    if (hasReserves) val += reservePortion;
+    // Vault spillover portion
+    if (hasVaultSpillover) val += icpValueUsd;
+    // If no reserves, it's all vault
+    if (!hasReserves) val = icpValueUsd;
+    return val;
+  })();
+
+  // Is swapping a better deal?
+  $: swapIsBetter = bestSwapQuote !== null && bestSwapQuote.valueUsd > totalRedemptionValueUsd && totalRedemptionValueUsd > 0;
+  $: swapAdvantageUsd = bestSwapQuote ? bestSwapQuote.valueUsd - totalRedemptionValueUsd : 0;
 
   // Current RMR based on system CR (mirrors backend compute_current_rmr logic)
   $: currentRmr = systemCR >= rmrFloorCr
@@ -374,6 +454,37 @@
             </div>
           {/if}
 
+          <!-- Swap comparison banner (only shown when swapping gives more) -->
+          {#if icusdAmount > 0.01 && swapIsBetter && bestSwapQuote}
+            <div class="swap-banner">
+              <div class="swap-banner-header">
+                <span class="swap-banner-icon">&#x2191;</span>
+                <span class="swap-banner-title">You could get more by swapping</span>
+              </div>
+              <div class="swap-banner-body">
+                <div class="swap-compare-row">
+                  <span>Redeeming:</span>
+                  <span class="swap-compare-val">~${formatNumber(totalRedemptionValueUsd, 2)}</span>
+                </div>
+                <div class="swap-compare-row highlight">
+                  <span>Swapping to {bestSwapQuote.symbol}:</span>
+                  <span class="swap-compare-val">~${formatNumber(bestSwapQuote.valueUsd, 2)}
+                    {#if bestSwapQuote.symbol === 'ICP'}
+                      ({formatNumber(bestSwapQuote.outputHuman, 4)} ICP)
+                    {:else}
+                      ({formatNumber(bestSwapQuote.outputHuman, 2)} {bestSwapQuote.symbol})
+                    {/if}
+                  </span>
+                </div>
+                <div class="swap-compare-row advantage">
+                  <span>Advantage:</span>
+                  <span class="swap-compare-val">+${formatNumber(swapAdvantageUsd, 2)}</span>
+                </div>
+              </div>
+              <a href="/swap" class="swap-banner-link">Go to Swap &rarr;</a>
+            </div>
+          {/if}
+
           <!-- Messages -->
           {#if errorMessage}
             <div class="msg msg-error">{errorMessage}</div>
@@ -639,6 +750,62 @@
   .value-highlight {
     font-weight: 600;
     color: var(--rumi-text-primary);
+  }
+
+  /* ── Swap comparison banner ─────────────────────────────────────── */
+  .swap-banner {
+    padding: 0.75rem;
+    background: rgba(45, 212, 191, 0.06);
+    border: 1px solid rgba(45, 212, 191, 0.2);
+    border-radius: 0.5rem;
+  }
+  .swap-banner-header {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    margin-bottom: 0.5rem;
+  }
+  .swap-banner-icon {
+    font-size: 0.875rem;
+    color: #5eead4;
+  }
+  .swap-banner-title {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: #5eead4;
+  }
+  .swap-banner-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1875rem;
+    margin-bottom: 0.5rem;
+  }
+  .swap-compare-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.75rem;
+    color: var(--rumi-text-muted);
+  }
+  .swap-compare-row.highlight {
+    color: var(--rumi-text-primary);
+  }
+  .swap-compare-row.advantage {
+    color: #5eead4;
+    font-weight: 600;
+  }
+  .swap-compare-val {
+    font-variant-numeric: tabular-nums;
+  }
+  .swap-banner-link {
+    display: inline-block;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #5eead4;
+    text-decoration: none;
+    transition: opacity 0.15s ease;
+  }
+  .swap-banner-link:hover {
+    opacity: 0.8;
   }
 
   /* ── Messages ──────────────────────────────────────────────────── */
