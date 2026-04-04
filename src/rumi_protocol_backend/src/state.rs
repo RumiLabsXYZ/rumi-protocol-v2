@@ -1314,6 +1314,68 @@ impl State {
         self.icp_ledger_principal
     }
 
+    /// Return collateral types ordered by redemption priority:
+    /// primary sort by `redemption_tier` ascending (tier 1 first), secondary sort
+    /// by worst health score among that type's vaults (lowest health first).
+    /// Only includes active collateral types that have a price and at least one vault with debt.
+    pub fn get_collateral_types_by_redemption_priority(&self) -> Vec<CollateralType> {
+        let mut entries: Vec<(u8, f64, CollateralType)> = Vec::new();
+
+        for (ct, config) in &self.collateral_configs {
+            // Skip inactive or no-price collateral
+            if !config.status.allows_redemption() {
+                continue;
+            }
+            let price = match config.last_price {
+                Some(p) if p > 0.0 => p,
+                _ => continue,
+            };
+
+            // Find the worst (lowest) health score among this type's vaults
+            let liq_ratio = config.liquidation_ratio.to_f64();
+            let mut worst_health: f64 = f64::MAX;
+            let mut has_debt = false;
+
+            if let Some(vault_ids) = self.collateral_to_vault_ids.get(ct) {
+                for vid in vault_ids {
+                    if let Some(vault) = self.vault_id_to_vaults.get(vid) {
+                        if vault.borrowed_icusd_amount == 0 {
+                            continue;
+                        }
+                        has_debt = true;
+                        let cr = crate::compute_collateral_ratio(
+                            vault,
+                            crate::numeric::UsdIcp::from(
+                                rust_decimal::Decimal::from_f64_retain(price)
+                                    .unwrap_or(rust_decimal::Decimal::ZERO)
+                            ),
+                            self,
+                        );
+                        let health = vault.health_score(cr.to_f64(), liq_ratio);
+                        if health < worst_health {
+                            worst_health = health;
+                        }
+                    }
+                }
+            }
+
+            if !has_debt {
+                continue; // no point redeeming from a type with no debt
+            }
+
+            entries.push((config.redemption_tier, worst_health, *ct));
+        }
+
+        // Sort: tier ascending, then worst health ascending (most vulnerable first)
+        entries.sort_by(|a, b| {
+            a.0.cmp(&b.0).then_with(|| {
+                a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+            })
+        });
+
+        entries.into_iter().map(|(_, _, ct)| ct).collect()
+    }
+
     /// Set the ICP rate on both the global field AND the ICP CollateralConfig's `last_price`.
     /// This is the ONLY correct way to update the ICP price.
     pub fn set_icp_rate(&mut self, rate: crate::numeric::UsdIcp, timestamp_nanos: Option<u64>) {

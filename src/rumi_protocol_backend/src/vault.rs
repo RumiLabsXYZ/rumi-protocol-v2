@@ -309,10 +309,15 @@ pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Prin
 
     // Handle vault spillover if reserves didn't cover everything
     if spillover_e8s > 0 {
-        // Use ICP vault redemption for the remainder with dynamic fee
-        let icp_ledger = read_state(|s| s.icp_collateral_type());
-        let collateral_price = read_state(|s| s.get_collateral_price_decimal(&icp_ledger))
-            .ok_or(ProtocolError::TemporarilyUnavailable("No ICP price for vault spillover".to_string()))?;
+        // Pick the best collateral type for vault redemption based on tier priority
+        let best_ct = read_state(|s| {
+            s.get_collateral_types_by_redemption_priority()
+                .first()
+                .copied()
+                .unwrap_or_else(|| s.icp_collateral_type())
+        });
+        let collateral_price = read_state(|s| s.get_collateral_price_decimal(&best_ct))
+            .ok_or(ProtocolError::TemporarilyUnavailable("No price for vault spillover collateral".to_string()))?;
         let current_price = UsdIcp::from(collateral_price);
 
         mutate_state(|s| {
