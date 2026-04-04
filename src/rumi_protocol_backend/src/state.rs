@@ -2885,6 +2885,59 @@ mod tests {
     }
 
     #[test]
+    fn test_redemption_vault_impacts_replay() {
+        // Verify that deduct_amount_from_vault correctly applies per-vault deltas
+        // (simulating what the replay handler does with vault_impacts)
+        let mut state = test_state();
+        let icp_ct = state.icp_collateral_type();
+
+        // Open two vaults with known amounts
+        state.open_vault(crate::vault::Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            collateral_amount: 500_000_000, // 5 ICP
+            borrowed_icusd_amount: ICUSD::new(300_000_000), // 3 icUSD
+            collateral_type: icp_ct,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        });
+        state.open_vault(crate::vault::Vault {
+            owner: Principal::anonymous(),
+            vault_id: 2,
+            collateral_amount: 800_000_000, // 8 ICP
+            borrowed_icusd_amount: ICUSD::new(500_000_000), // 5 icUSD
+            collateral_type: icp_ct,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        });
+
+        // Apply deltas as the replay handler would
+        let impacts = vec![
+            VaultRedemptionImpact { vault_id: 1, debt_reduced: 100_000_000, collateral_seized: 50_000_000 },
+            VaultRedemptionImpact { vault_id: 2, debt_reduced: 150_000_000, collateral_seized: 75_000_000 },
+        ];
+        for impact in &impacts {
+            state.deduct_amount_from_vault(
+                impact.collateral_seized,
+                ICUSD::from(impact.debt_reduced),
+                impact.vault_id,
+            );
+        }
+
+        // Verify vault 1: 3 - 1 = 2 icUSD debt, 5 - 0.5 = 4.5 ICP
+        let v1 = state.vault_id_to_vaults.get(&1).unwrap();
+        assert_eq!(v1.borrowed_icusd_amount, ICUSD::new(200_000_000));
+        assert_eq!(v1.collateral_amount, 450_000_000);
+
+        // Verify vault 2: 5 - 1.5 = 3.5 icUSD debt, 8 - 0.75 = 7.25 ICP
+        let v2 = state.vault_id_to_vaults.get(&2).unwrap();
+        assert_eq!(v2.borrowed_icusd_amount, ICUSD::new(350_000_000));
+        assert_eq!(v2.collateral_amount, 725_000_000);
+    }
+
+    #[test]
     fn test_distribute_across_vaults() {
         let mut vaults = BTreeMap::new();
         let vault1 = Vault {
