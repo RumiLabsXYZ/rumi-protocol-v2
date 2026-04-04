@@ -19,7 +19,29 @@
   let rmrCeiling = 1.0;
   let rmrFloorCr = 2.25;
   let rmrCeilingCr = 1.5;
+  let systemCR = 2.0;
   let borrowingFeeCurve: [number, number][] = [];
+
+  // RMR curve computed values
+  $: rmrFloorPctVal = rmrFloor * 100;
+  $: rmrCeilingPctVal = rmrCeiling * 100;
+  $: rmrFloorCrPct = rmrFloorCr * 100;
+  $: rmrCeilingCrPct = rmrCeilingCr * 100;
+  $: rmrCrPadding = (rmrFloorCrPct - rmrCeilingCrPct) * 0.15;
+  $: rmrCrMin = rmrCeilingCrPct - rmrCrPadding;
+  $: rmrCrMax = rmrFloorCrPct + rmrCrPadding;
+  $: rmrRateMin = rmrFloorPctVal - (rmrCeilingPctVal - rmrFloorPctVal) * 0.3;
+  $: rmrRateMax = rmrCeilingPctVal + (rmrCeilingPctVal - rmrFloorPctVal) * 0.3;
+  $: currentRmrVal = systemCR >= rmrFloorCr ? rmrFloor : systemCR <= rmrCeilingCr ? rmrCeiling : rmrCeiling - ((systemCR - rmrCeilingCr) / (rmrFloorCr - rmrCeilingCr)) * (rmrCeiling - rmrFloor);
+  $: currentRmrPct = currentRmrVal * 100;
+  $: currentCrPct = Math.min(Math.max(systemCR * 100, rmrCeilingCrPct), rmrFloorCrPct);
+
+  function rmrX(cr: number): number {
+    return 55 + ((cr - rmrCrMin) / (rmrCrMax - rmrCrMin || 1)) * 385;
+  }
+  function rmrY(rate: number): number {
+    return 120 - ((rate - rmrRateMin) / (rmrRateMax - rmrRateMin || 1)) * 95;
+  }
 
   import type { InterestSplitEntryDTO } from '$lib/services/types';
   let interestSplit: InterestSplitEntryDTO[] = [];
@@ -159,6 +181,7 @@
       rmrCeiling = Number(rCeil);
       rmrFloorCr = Number(rFloorCr);
       rmrCeilingCr = Number(rCeilCr);
+      systemCR = status.totalCollateralRatio ?? 2.0;
       borrowingFeeCurve = status.borrowingFeeCurveResolved ?? [];
       perCollateralRateCurves = status.perCollateralRateCurves ?? [];
 
@@ -476,6 +499,65 @@
         <span class="param-label">Redemption Margin Ratio (RMR) <span class="tip" data-tip="Redeemers receive this percentage of face value. {pctRaw(rmrFloor)} when system CR ≥ {crPct(rmrFloorCr)}, scaling linearly up to {pctRaw(rmrCeiling)} when system CR ≤ {crPct(rmrCeilingCr)}. Prevents mint-and-redeem arbitrage while protecting redeemers near recovery.">?</span></span>
         <span class="param-val live">{pctRaw(rmrFloor)} (healthy, CR ≥ {crPct(rmrFloorCr)}) → {pctRaw(rmrCeiling)} (stressed, CR ≤ {crPct(rmrCeilingCr)})</span>
       </div>
+    </div>
+
+    <!-- RMR Curve Visualization -->
+    <div class="curve-viz">
+      <div class="curve-viz-header">
+        <h3 class="curve-viz-title">RMR Curve <span class="tip" data-tip="Shows how the Redemption Margin Ratio scales with the system-wide collateral ratio. Lower system CR → higher RMR (more value returned to redeemers when the system needs peg support).">?</span></h3>
+      </div>
+      <svg viewBox="0 0 480 190" class="curve-svg" preserveAspectRatio="xMidYMid meet">
+        <!-- Grid lines -->
+        {#each [rmrFloorPctVal, (rmrFloorPctVal + rmrCeilingPctVal) / 2, rmrCeilingPctVal] as gridRate}
+          <line x1="55" y1={rmrY(gridRate)} x2="440" y2={rmrY(gridRate)} stroke="var(--rumi-border, #333)" stroke-width="0.5" stroke-dasharray="3,3" />
+          <text x="50" y={rmrY(gridRate) + 3} text-anchor="end" fill="var(--rumi-text-muted, #888)" font-size="9" font-family="Inter, sans-serif">{gridRate.toFixed(0)}%</text>
+        {/each}
+
+        <!-- Area fill -->
+        <path d="M {rmrX(rmrCrMin)},{rmrY(rmrCeilingPctVal)} L {rmrX(rmrCeilingCrPct)},{rmrY(rmrCeilingPctVal)} L {rmrX(rmrFloorCrPct)},{rmrY(rmrFloorPctVal)} L {rmrX(rmrCrMax)},{rmrY(rmrFloorPctVal)} L {rmrX(rmrCrMax)},120 L {rmrX(rmrCrMin)},120 Z" fill="var(--rumi-action, #34d399)" opacity="0.07" />
+
+        <!-- RMR line: flat at ceiling, linear slope, flat at floor -->
+        <polyline
+          points="{rmrX(rmrCrMin)},{rmrY(rmrCeilingPctVal)} {rmrX(rmrCeilingCrPct)},{rmrY(rmrCeilingPctVal)} {rmrX(rmrFloorCrPct)},{rmrY(rmrFloorPctVal)} {rmrX(rmrCrMax)},{rmrY(rmrFloorPctVal)}"
+          fill="none" stroke="var(--rumi-action, #34d399)" stroke-width="2" stroke-linejoin="round"
+        />
+
+        <!-- Endpoint circles -->
+        <circle cx={rmrX(rmrCeilingCrPct)} cy={rmrY(rmrCeilingPctVal)} r="4.5" fill="var(--rumi-action, #34d399)" />
+        <circle cx={rmrX(rmrCeilingCrPct)} cy={rmrY(rmrCeilingPctVal)} r="2" fill="var(--rumi-bg-surface, #0d0d1a)" />
+        <text x={rmrX(rmrCeilingCrPct)} y={rmrY(rmrCeilingPctVal) - 10} text-anchor="middle" fill="var(--rumi-text-primary, #eee)" font-size="10" font-weight="600" font-family="Inter, sans-serif">{rmrCeilingPctVal.toFixed(0)}%</text>
+
+        <circle cx={rmrX(rmrFloorCrPct)} cy={rmrY(rmrFloorPctVal)} r="4.5" fill="var(--rumi-action, #34d399)" />
+        <circle cx={rmrX(rmrFloorCrPct)} cy={rmrY(rmrFloorPctVal)} r="2" fill="var(--rumi-bg-surface, #0d0d1a)" />
+        <text x={rmrX(rmrFloorCrPct)} y={rmrY(rmrFloorPctVal) - 10} text-anchor="middle" fill="var(--rumi-text-primary, #eee)" font-size="10" font-weight="600" font-family="Inter, sans-serif">{rmrFloorPctVal.toFixed(0)}%</text>
+
+        <!-- Current position marker -->
+        {#if loaded}
+          <line x1={rmrX(currentCrPct)} y1={rmrY(currentRmrPct) + 6} x2={rmrX(currentCrPct)} y2="133" stroke="#d176e8" stroke-width="1.5" stroke-dasharray="3,2" />
+          <circle cx={rmrX(currentCrPct)} cy={rmrY(currentRmrPct)} r="5.5" fill="#d176e8" />
+          <circle cx={rmrX(currentCrPct)} cy={rmrY(currentRmrPct)} r="2.5" fill="var(--rumi-bg-surface, #0d0d1a)" />
+          <text x={rmrX(currentCrPct)} y={rmrY(currentRmrPct) - 12} text-anchor="middle" fill="#d176e8" font-size="10" font-weight="700" font-family="Inter, sans-serif">Now: {currentRmrPct.toFixed(0)}%</text>
+        {/if}
+
+        <!-- Meter bar -->
+        <defs>
+          <linearGradient id="meter-rmr" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%" stop-color="#e06b9f" stop-opacity="0.75" />
+            <stop offset="40%" stop-color="#a78bfa" stop-opacity="0.5" />
+            <stop offset="100%" stop-color="#2DD4BF" stop-opacity="0.5" />
+          </linearGradient>
+        </defs>
+        <rect x="55" y="135" width="385" height="12" rx="6" fill="url(#meter-rmr)" />
+
+        <!-- Tick marks for endpoints -->
+        {#each [[rmrCeilingCrPct, 'Stressed'], [rmrFloorCrPct, 'Healthy']] as [crVal, _label]}
+          <line x1={rmrX(crVal)} y1="133" x2={rmrX(crVal)} y2="149" stroke="var(--rumi-text-primary, #eee)" stroke-width="1.5" opacity="0.6" />
+          <circle cx={rmrX(crVal)} cy="141" r="2.5" fill="var(--rumi-text-primary, #eee)" opacity="0.8" />
+          <text x={rmrX(crVal)} y="165" text-anchor="middle" fill="var(--rumi-text-secondary, #b0b0c0)" font-size="10" font-family="Inter, sans-serif">{crVal.toFixed(0)}%</text>
+        {/each}
+
+        <text x="247" y="182" text-anchor="middle" fill="var(--rumi-text-muted, #888)" font-size="9" font-family="Inter, sans-serif">System Collateral Ratio</text>
+      </svg>
     </div>
   </section>
 

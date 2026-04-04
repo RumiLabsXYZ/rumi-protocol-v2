@@ -6,6 +6,7 @@
   import EventRow from '$components/explorer/EventRow.svelte';
   import TokenBadge from '$components/explorer/TokenBadge.svelte';
   import VaultHealthBar from '$components/explorer/VaultHealthBar.svelte';
+  import { publicActor } from '$services/protocol/apiClient';
   import {
     fetchProtocolStatus, fetchCollateralTotals, fetchCollateralPrices,
     fetchAllVaults, fetchEventCount, fetchTreasuryStats,
@@ -79,8 +80,23 @@
     { label: 'All', value: 'all' },
   ];
 
+  // RMR & Redemption Fee
+  let rmrFloor = $state(0.96);
+  let rmrCeiling = $state(1.0);
+  let rmrFloorCr = $state(2.25);
+  let rmrCeilingCr = $state(1.5);
+  let redemptionFeeFloor = $state(0);
+
   // Global
   let isRefreshing = $state(false);
+
+  // Current RMR based on system CR
+  let currentRmr = $derived.by(() => {
+    const cr = status?.total_collateral_ratio ?? 2.0;
+    if (cr >= rmrFloorCr) return rmrFloor;
+    if (cr <= rmrCeilingCr) return rmrCeiling;
+    return rmrCeiling - ((cr - rmrCeilingCr) / (rmrFloorCr - rmrCeilingCr)) * (rmrCeiling - rmrFloor);
+  });
 
   // ── Derived ───────────────────────────────────────────────────────────
 
@@ -276,16 +292,26 @@
     // Section 1: Hero
     const heroPromise = (async () => {
       try {
-        const [s, v, ec, tpSwapCount, ammSwapCount] = await Promise.all([
+        const [s, v, ec, tpSwapCount, ammSwapCount, rFloor, rCeiling, rFloorCr, rCeilingCr, rFee] = await Promise.all([
           fetchProtocolStatus(),
           fetchAllVaults(),
           fetchEventCount(),
           fetchSwapEventCount(),
-          fetchAmmSwapEventCount()
+          fetchAmmSwapEventCount(),
+          publicActor.get_rmr_floor() as Promise<number>,
+          publicActor.get_rmr_ceiling() as Promise<number>,
+          publicActor.get_rmr_floor_cr() as Promise<number>,
+          publicActor.get_rmr_ceiling_cr() as Promise<number>,
+          publicActor.get_redemption_fee_floor() as Promise<number>,
         ]);
         status = s;
         vaults = v;
         eventCount = (ec ?? 0n) + (tpSwapCount ?? 0n) + (ammSwapCount ?? 0n);
+        rmrFloor = Number(rFloor);
+        rmrCeiling = Number(rCeiling);
+        rmrFloorCr = Number(rFloorCr);
+        rmrCeilingCr = Number(rCeilingCr);
+        redemptionFeeFloor = Number(rFee);
       } catch (e) {
         console.error('[explorer] Hero load failed:', e);
         if (!isRefresh) heroError = 'Failed to load protocol status';
@@ -585,8 +611,8 @@
        ════════════════════════════════════════════════════════════════════ -->
   <section>
     {#if heroLoading}
-      <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-        {#each Array(6) as _}
+      <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-4 gap-3">
+        {#each Array(8) as _}
           <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl p-5 animate-pulse">
             <div class="h-3 w-20 bg-gray-700 rounded mb-3"></div>
             <div class="h-7 w-16 bg-gray-700 rounded"></div>
@@ -598,7 +624,7 @@
         {heroError}
       </div>
     {:else}
-      <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+      <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-4 gap-3">
         <StatCard label="Protocol Mode" value={protocolMode} />
 
         <StatCard
@@ -620,6 +646,10 @@
         />
 
         <StatCard label="Active Vaults" value={activeVaultCount.toLocaleString()} />
+
+        <StatCard label="RMR" value={`${(currentRmr * 100).toFixed(0)}%`} subtitle="Redemption Margin Ratio" />
+
+        <StatCard label="Redemption Fee" value={`${(redemptionFeeFloor * 100).toFixed(1)}%`} subtitle="Current floor" />
 
         <StatCard label="Total Events" value={Number(eventCount).toLocaleString()} />
       </div>

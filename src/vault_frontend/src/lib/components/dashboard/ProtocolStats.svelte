@@ -31,6 +31,13 @@
   let ckusdcReserve = 0;
   let refreshInterval: ReturnType<typeof setInterval>;
 
+  // RMR and redemption fee
+  let rmrFloor = 0.96;
+  let rmrCeiling = 1.0;
+  let rmrFloorCr = 2.25;
+  let rmrCeilingCr = 1.5;
+  let currentRedemptionFee = 0;
+
   // Per-collateral totals: { symbol, amount (human-readable), color, price }[]
   let collateralTotals: { symbol: string; amount: number; color: string; price: number }[] = [];
 
@@ -38,11 +45,21 @@
 
   async function fetchStatus() {
     try {
-      const [s, bFee] = await Promise.all([
+      const [s, bFee, rFloor, rCeiling, rFloorCr, rCeilingCr, rFee] = await Promise.all([
         protocolService.getProtocolStatus(),
         publicActor.get_borrowing_fee() as Promise<number>,
+        publicActor.get_rmr_floor() as Promise<number>,
+        publicActor.get_rmr_ceiling() as Promise<number>,
+        publicActor.get_rmr_floor_cr() as Promise<number>,
+        publicActor.get_rmr_ceiling_cr() as Promise<number>,
+        publicActor.get_redemption_fee_floor() as Promise<number>,
       ]);
       selfFetchedBorrowFee = Number(bFee);
+      rmrFloor = Number(rFloor);
+      rmrCeiling = Number(rCeiling);
+      rmrFloorCr = Number(rFloorCr);
+      rmrCeilingCr = Number(rCeilingCr);
+      currentRedemptionFee = Number(rFee);
       selfFetchedStatus = {
         mode: s.mode || 'GeneralAvailability',
         totalIcpMargin: Number(s.totalIcpMargin || 0),
@@ -166,6 +183,12 @@
   $: interestApr = activeConfig?.interestRateApr ?? 0;
   $: recoveryThreshold = status?.recoveryModeThreshold ?? 1.5;
   $: recoveryTargetCr = activeConfig?.recoveryTargetCr ?? 1.55;
+  $: systemCR = status?.totalCollateralRatio ?? 2.0;
+  $: currentRmr = systemCR >= rmrFloorCr
+    ? rmrFloor
+    : systemCR <= rmrCeilingCr
+      ? rmrCeiling
+      : rmrCeiling - ((systemCR - rmrCeilingCr) / (rmrFloorCr - rmrCeilingCr)) * (rmrCeiling - rmrFloor);
 </script>
 
 <div class="protocol-stats">
@@ -209,6 +232,14 @@
         </span>
       </div>
     {/if}
+    <div class="stat-row">
+      <span class="stat-label">RMR</span>
+      <span class="stat-value">{(currentRmr * 100).toFixed(0)}%</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Redemption Fee</span>
+      <span class="stat-value">{(currentRedemptionFee * 100).toFixed(1)}%</span>
+    </div>
     <div class="stat-row">
       <span class="stat-label">Recovery Threshold</span>
       <span class="stat-value">{(recoveryThreshold * 100).toFixed(0)}%</span>

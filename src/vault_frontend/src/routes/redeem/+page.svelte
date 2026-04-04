@@ -280,8 +280,6 @@
 
       <!-- Main redeem card -->
       <div class="action-card">
-        <h2 class="card-heading">Redeem icUSD</h2>
-
         <div class="card-body">
           <!-- Amount input -->
           <div>
@@ -455,10 +453,11 @@
   }
   .page-title {
     font-family: 'Circular Std', 'Inter', sans-serif;
-    font-size: 1.75rem;
+    font-size: 2rem;
     font-weight: 700;
-    color: var(--rumi-text-primary);
-    margin-bottom: 1.5rem;
+    color: var(--rumi-purple-accent);
+    letter-spacing: -0.02em;
+    margin-bottom: 0.5rem;
   }
   .page-layout {
     display: grid;
@@ -516,13 +515,6 @@
     border: 1px solid var(--rumi-border);
     border-radius: 0.75rem;
     padding: 1.5rem;
-  }
-  .card-heading {
-    font-family: 'Circular Std', 'Inter', sans-serif;
-    font-size: 1.25rem;
-    font-weight: 600;
-    color: var(--rumi-text-primary);
-    margin-bottom: 1.25rem;
   }
   .card-body {
     display: flex;
