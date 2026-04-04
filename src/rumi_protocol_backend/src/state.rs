@@ -525,6 +525,16 @@ pub struct PendingMarginTransfer {
     pub collateral_type: Principal,
 }
 
+/// Per-vault breakdown of a redemption: how much debt was reduced and collateral seized.
+#[derive(candid::CandidType, Copy, Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct VaultRedemptionImpact {
+    pub vault_id: u64,
+    /// icUSD debt reduced from this vault (e8s)
+    pub debt_reduced: u64,
+    /// Collateral seized from this vault (smallest unit, e.g. e8s for ICP)
+    pub collateral_seized: u64,
+}
+
 thread_local! {
     static __STATE: RefCell<Option<State>> = RefCell::default();
 }

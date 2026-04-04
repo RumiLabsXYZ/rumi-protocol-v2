@@ -1,5 +1,5 @@
 use crate::numeric::{Ratio, UsdIcp, ICUSD, ICP};
-use crate::state::{CollateralConfig, CollateralStatus, CollateralType, PendingMarginTransfer, RateCurveV2, State};
+use crate::state::{CollateralConfig, CollateralStatus, CollateralType, PendingMarginTransfer, RateCurveV2, State, VaultRedemptionImpact};
 use crate::storage::record_event;
 use crate::vault::Vault;
 use crate::{InitArg, Mode, StableTokenType, UpgradeArg};
@@ -84,6 +84,12 @@ pub enum Event {
         icusd_amount: ICUSD,
         fee_amount: ICUSD,
         icusd_block_index: u64,
+        /// Which collateral type was redeemed. None for old events (pre-tiering).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        collateral_type: Option<CollateralType>,
+        /// Per-vault breakdown: debt reduced and collateral seized. None for old events.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        vault_impacts: Option<Vec<VaultRedemptionImpact>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timestamp: Option<u64>,
         /// Per-vault breakdown: how much was redeemed from each vault.
@@ -703,6 +709,8 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                 icusd_amount,
                 fee_amount,
                 icusd_block_index,
+                collateral_type,
+                vault_impacts,
                 ..
             } => {
                 state.provide_liquidity(fee_amount, state.developer_principal);
@@ -1258,6 +1266,8 @@ pub fn record_redemption_on_vaults(
         icusd_amount,
         fee_amount,
         icusd_block_index,
+        collateral_type: Some(redeem_ct),
+        vault_impacts: None, // populated in Task 2
         timestamp: Some(now()),
         vault_redemptions: if vault_redemptions.is_empty() { None } else { Some(vault_redemptions) },
     });
