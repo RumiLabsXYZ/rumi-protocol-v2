@@ -1976,6 +1976,7 @@ fn setup_protocol_with_cketh() -> (PocketIc, Principal, Principal, Principal, Pr
         display_color: None,
         redemption_fee_floor: None,
         redemption_fee_ceiling: None,
+        redemption_tier: None,
     };
     register_collateral(&pic, protocol_id, add_arg)
         .expect("Failed to register ckETH collateral");
@@ -2103,6 +2104,7 @@ fn test_add_collateral_token() {
         display_color: None,
         redemption_fee_floor: None,
         redemption_fee_ceiling: None,
+        redemption_tier: None,
     };
     register_collateral(&pic, protocol_id, add_arg)
         .expect("Failed to register ckETH collateral");
@@ -3090,6 +3092,7 @@ fn test_add_collateral_non_developer_rejected() {
         display_color: None,
         redemption_fee_floor: None,
         redemption_fee_ceiling: None,
+        redemption_tier: None,
     };
 
     let encoded = encode_args((add_arg,)).unwrap();
