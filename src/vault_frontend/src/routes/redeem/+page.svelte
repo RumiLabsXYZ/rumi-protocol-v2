@@ -6,6 +6,7 @@
   import { CANISTER_IDS } from '$lib/config';
   import { TokenService } from '$lib/services/tokenService';
   import { Principal } from '@dfinity/principal';
+  import { publicActor } from '$lib/services/protocol/apiClient';
   import ProtocolStats from '$lib/components/dashboard/ProtocolStats.svelte';
 
   // ── State ───────────────────────────────────────────────────────────
@@ -14,6 +15,13 @@
   let vaultRedemptionFee = 0;     // dynamic vault redemption fee (from get_fees)
   let reserveRedemptionFee = 0;   // flat reserve fee (from protocol status)
   let reserveRedemptionsEnabled = false;
+
+  // RMR (Redemption Margin Ratio) state
+  let rmrFloor = 0.96;      // RMR when system is healthy (e.g. 0.96 = 96%)
+  let rmrCeiling = 1.0;     // RMR when system is stressed (e.g. 1.0 = 100%)
+  let rmrFloorCr = 2.25;    // System CR above which rmrFloor applies
+  let rmrCeilingCr = 1.5;   // System CR below which rmrCeiling applies
+  let systemCR = 2.0;       // Current system collateral ratio
   let icusdBalance = 0;
   let icusdAmount = 0;
   let isLoading = true;
@@ -98,10 +106,19 @@
     }, 300);
   }
 
-  // ICP estimate for the vault portion
+  // Current RMR based on system CR (mirrors backend compute_current_rmr logic)
+  $: currentRmr = systemCR >= rmrFloorCr
+    ? rmrFloor
+    : systemCR <= rmrCeilingCr
+      ? rmrCeiling
+      : rmrCeiling - ((systemCR - rmrCeilingCr) / (rmrFloorCr - rmrCeilingCr)) * (rmrCeiling - rmrFloor);
+
+  // ICP estimate for the vault portion (RMR applied to face value, then fee deducted)
   $: vaultFeeOnSpillover = vaultSpilloverAmount * vaultRedemptionFee;
   $: icpFromVaults = hasVaultSpillover && icpPrice > 0
-    ? (vaultSpilloverAmount - vaultFeeOnSpillover) / icpPrice : 0;
+    ? ((vaultSpilloverAmount * currentRmr) - vaultFeeOnSpillover) / icpPrice : 0;
+  // Dollar value of ICP received
+  $: icpValueUsd = icpFromVaults * icpPrice;
 
   // Display fee — flat reserve fee if fully covered by reserves, otherwise blended
   $: displayFee = hasReserves
@@ -119,14 +136,26 @@
   async function fetchData() {
     isLoading = true;
     try {
-      const status = await protocolService.getProtocolStatus();
+      const [status, rFloor, rCeiling, rFloorCr, rCeilingCr] = await Promise.all([
+        protocolService.getProtocolStatus(),
+        publicActor.get_rmr_floor() as Promise<number>,
+        publicActor.get_rmr_ceiling() as Promise<number>,
+        publicActor.get_rmr_floor_cr() as Promise<number>,
+        publicActor.get_rmr_ceiling_cr() as Promise<number>,
+      ]);
 
       icpPrice = status.lastIcpRate;
+      systemCR = status.totalCollateralRatio;
       // Initialize vault fee to 0 — the reactive $: block will fetch the
       // actual fee once the user enters an amount and we know the spillover.
       vaultRedemptionFee = 0;
       reserveRedemptionFee = status.reserveRedemptionFee || 0;
       reserveRedemptionsEnabled = status.reserveRedemptionsEnabled || false;
+
+      rmrFloor = Number(rFloor);
+      rmrCeiling = Number(rCeiling);
+      rmrFloorCr = Number(rFloorCr);
+      rmrCeilingCr = Number(rCeilingCr);
 
       // Fetch reserve balances directly from ledger canisters
       // (backend query can't do inter-canister calls, so it always returns 0)
@@ -322,11 +351,15 @@
                 {/each}
                 {#if hasVaultSpillover}
                   <div class="fee-row spillover">
-                    <span>Vault spillover ({(vaultRedemptionFee * 100).toFixed(2)}% fee):</span>
-                    <span>~{formatNumber(icpFromVaults, 4)} ICP</span>
+                    <span>Vault spillover (RMR {(currentRmr * 100).toFixed(0)}%, fee {(vaultRedemptionFee * 100).toFixed(2)}%):</span>
+                    <span>~{formatNumber(icpFromVaults, 4)} ICP (~${formatNumber(icpValueUsd, 2)})</span>
                   </div>
                 {/if}
               {:else}
+                <div class="fee-row muted">
+                  <span>RMR ({(currentRmr * 100).toFixed(0)}%):</span>
+                  <span>{formatStableTx(icusdAmount * currentRmr)} icUSD value</span>
+                </div>
                 <div class="fee-row muted">
                   <span>Redemption fee ({(vaultRedemptionFee * 100).toFixed(2)}%):</span>
                   <span>{formatStableTx(icusdAmount * vaultRedemptionFee)} icUSD</span>
@@ -335,9 +368,9 @@
                   <span>You will receive:</span>
                   <span class="value-highlight">~{formatNumber(icpFromVaults, 4)} ICP</span>
                 </div>
-                <div class="fee-row price-row">
-                  <span>Current ICP price:</span>
-                  <span>${formatNumber(icpPrice)}</span>
+                <div class="fee-row">
+                  <span>Value:</span>
+                  <span class="value-highlight">~${formatNumber(icpValueUsd, 2)}</span>
                 </div>
               {/if}
             </div>
@@ -390,8 +423,8 @@
               </li>
             {:else}
               <li>
-                <strong>Pay dynamic fee</strong>
-                <p>A dynamic fee ({(vaultRedemptionFee * 100).toFixed(2)}%) is charged, increasing with volume to protect vault owners.</p>
+                <strong>Apply RMR + fee</strong>
+                <p>The Redemption Margin Ratio (currently {(currentRmr * 100).toFixed(0)}%) determines what fraction of face value you receive. A dynamic fee ({(vaultRedemptionFee * 100).toFixed(2)}%) is also deducted.</p>
               </li>
               <li>
                 <strong>Receive ICP</strong>
@@ -609,11 +642,6 @@
   }
   .fee-row.spillover {
     color: #fbbf24;
-    margin-top: 0.25rem;
-  }
-  .fee-row.price-row {
-    color: var(--rumi-text-muted);
-    font-size: 0.6875rem;
     margin-top: 0.25rem;
   }
   .value-highlight {
