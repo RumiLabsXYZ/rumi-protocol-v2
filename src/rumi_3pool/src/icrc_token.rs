@@ -4,8 +4,10 @@
 // This module exposes them as a proper ICRC-1/ICRC-2 compliant token.
 //
 // Token: 3USD | Decimals: 8 | Fee: 0
-// Subaccounts: source (from/spender) must be default; destination (to) accepts any
-// subaccount but credits are tracked by owner principal only.
+// Subaccounts: balances are tracked by owner principal only — subaccounts are
+// accepted on all fields (from, to, spender) but effectively ignored for
+// balance lookups. This allows DEX canisters that use per-pool subaccounts
+// (e.g. the Rumi AMM) to hold and transfer 3USD without issues.
 
 use candid::{Nat, Principal};
 use icrc_ledger_types::icrc::generic_metadata_value::MetadataValue;
@@ -20,34 +22,9 @@ use crate::types::{LpAllowance, Icrc3Transaction};
 
 // ─── Helpers ───
 
-const DEFAULT_SUBACCOUNT: [u8; 32] = [0u8; 32];
-
-fn is_default_subaccount(sub: &Option<[u8; 32]>) -> bool {
-    match sub {
-        None => true,
-        Some(s) => *s == DEFAULT_SUBACCOUNT,
-    }
-}
-
-fn account_to_principal(account: &Account) -> Result<Principal, ()> {
-    let sub = account.subaccount.unwrap_or(DEFAULT_SUBACCOUNT);
-    if sub == DEFAULT_SUBACCOUNT {
-        Ok(account.owner)
-    } else {
-        Err(())
-    }
-}
-
 fn nat_to_u128(n: &Nat) -> Result<u128, ()> {
     use num_traits::cast::ToPrimitive;
     n.0.to_u128().ok_or(())
-}
-
-fn subaccount_error<E>(make: impl FnOnce(Nat, String) -> E) -> E {
-    make(
-        Nat::from(1u64),
-        "non-default subaccounts are not supported".to_string(),
-    )
 }
 
 fn effective_allowance(a: &LpAllowance) -> u128 {
@@ -93,10 +70,8 @@ pub fn icrc1_minting_account() -> Option<Account> {
 }
 
 pub fn icrc1_balance_of(account: Account) -> Nat {
-    match account_to_principal(&account) {
-        Ok(p) => Nat::from(read_state(|s| s.lp_balances.get(&p).copied().unwrap_or(0))),
-        Err(_) => Nat::from(0u64), // non-default subaccount → 0
-    }
+    let p = account.owner;
+    Nat::from(read_state(|s| s.lp_balances.get(&p).copied().unwrap_or(0)))
 }
 
 pub fn icrc1_metadata() -> Vec<(String, MetadataValue)> {
@@ -121,15 +96,8 @@ pub fn icrc1_transfer(caller: Principal, args: TransferArg) -> Result<Nat, Trans
         }
     }
 
-    // Validate from_subaccount
-    if !is_default_subaccount(&args.from_subaccount) {
-        return Err(TransferError::GenericError {
-            error_code: Nat::from(1u64),
-            message: "non-default subaccounts are not supported".to_string(),
-        });
-    }
-
-    // Destination: accept any subaccount, credit goes to the owner principal.
+    // Both from_subaccount and to accept any subaccount — balances are keyed
+    // by owner principal only, so subaccounts are effectively ignored.
     let to_principal = args.to.owner;
 
     let amount = nat_to_u128(&args.amount).map_err(|_| TransferError::GenericError {
@@ -191,20 +159,8 @@ pub fn icrc2_approve(caller: Principal, args: ApproveArgs) -> Result<Nat, Approv
         }
     }
 
-    // Validate subaccounts
-    if !is_default_subaccount(&args.from_subaccount) {
-        return Err(subaccount_error(|code, msg| ApproveError::GenericError {
-            error_code: code,
-            message: msg,
-        }));
-    }
-
-    let spender_principal = account_to_principal(&args.spender).map_err(|_| {
-        subaccount_error(|code, msg| ApproveError::GenericError {
-            error_code: code,
-            message: msg,
-        })
-    })?;
+    // Subaccounts accepted but ignored — balances keyed by principal only.
+    let spender_principal = args.spender.owner;
 
     let amount = nat_to_u128(&args.amount).map_err(|_| ApproveError::GenericError {
         error_code: Nat::from(2u64),
@@ -259,8 +215,8 @@ pub fn icrc2_approve(caller: Principal, args: ApproveArgs) -> Result<Nat, Approv
 // ─── ICRC-2 Allowance Query ───
 
 pub fn icrc2_allowance(args: AllowanceArgs) -> Allowance {
-    let owner = account_to_principal(&args.account).unwrap_or(Principal::anonymous());
-    let spender = account_to_principal(&args.spender).unwrap_or(Principal::anonymous());
+    let owner = args.account.owner;
+    let spender = args.spender.owner;
 
     read_state(|s| match s.allowances().get(&(owner, spender)) {
         Some(a) => {
@@ -292,24 +248,8 @@ pub fn icrc2_transfer_from(
         }
     }
 
-    // Validate subaccounts
-    if !is_default_subaccount(&args.spender_subaccount) {
-        return Err(subaccount_error(|code, msg| {
-            TransferFromError::GenericError {
-                error_code: code,
-                message: msg,
-            }
-        }));
-    }
-
-    let from_principal = account_to_principal(&args.from).map_err(|_| {
-        subaccount_error(|code, msg| TransferFromError::GenericError {
-            error_code: code,
-            message: msg,
-        })
-    })?;
-
-    // Destination: accept any subaccount, credit goes to the owner principal.
+    // Subaccounts accepted but ignored — balances keyed by principal only.
+    let from_principal = args.from.owner;
     let to_principal = args.to.owner;
 
     let amount = nat_to_u128(&args.amount).map_err(|_| TransferFromError::GenericError {
