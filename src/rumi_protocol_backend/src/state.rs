@@ -423,7 +423,14 @@ pub struct CollateralConfig {
     /// Per-asset rate curve markers. None = use global_rate_curve from State.
     #[serde(default)]
     pub rate_curve: Option<RateCurve>,
+    /// Redemption priority tier (1 = first redeemed, 2 = second, 3 = last).
+    /// Tier 1 vaults are redeemed before tier 2, which are redeemed before tier 3.
+    /// Default: 1 (most exposed — safe default for new/unknown collateral).
+    #[serde(default = "default_redemption_tier")]
+    pub redemption_tier: u8,
 }
+
+fn default_redemption_tier() -> u8 { 1 }
 
 impl PartialEq for CollateralConfig {
     fn eq(&self, other: &Self) -> bool {
@@ -452,6 +459,7 @@ impl PartialEq for CollateralConfig {
             && self.display_color == other.display_color
             && self.healthy_cr == other.healthy_cr
             && self.rate_curve == other.rate_curve
+            && self.redemption_tier == other.redemption_tier
     }
 }
 
@@ -897,6 +905,7 @@ impl From<InitArg> for State {
                     display_color: Some("#2DD4BF".to_string()),
                     healthy_cr: None,
                     rate_curve: None,
+                    redemption_tier: 1,
                 });
                 configs
             },

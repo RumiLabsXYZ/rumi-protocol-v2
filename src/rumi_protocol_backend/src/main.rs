@@ -2179,6 +2179,43 @@ fn get_liquidation_bonus() -> f64 {
     read_state(|s| s.liquidation_bonus.to_f64())
 }
 
+/// Set the redemption priority tier for a collateral type (developer only).
+/// Tier 1 = redeemed first, tier 3 = redeemed last.
+#[candid_method(update)]
+#[update]
+fn set_redemption_tier(ledger_canister_id: Principal, tier: u8) -> Result<(), String> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err("Only developer can set redemption tier".to_string());
+    }
+    if tier < 1 || tier > 3 {
+        return Err("Tier must be 1, 2, or 3".to_string());
+    }
+    mutate_state(|s| {
+        match s.collateral_configs.get_mut(&ledger_canister_id) {
+            Some(config) => {
+                config.redemption_tier = tier;
+                log!(INFO, "[set_redemption_tier] {} set to tier {}", ledger_canister_id, tier);
+                Ok(())
+            }
+            None => Err(format!("No collateral config for {}", ledger_canister_id)),
+        }
+    })
+}
+
+/// Get the redemption priority tier for a collateral type.
+#[candid_method(query)]
+#[query]
+fn get_redemption_tier(ledger_canister_id: Principal) -> Result<u8, String> {
+    read_state(|s| {
+        match s.collateral_configs.get(&ledger_canister_id) {
+            Some(config) => Ok(config.redemption_tier),
+            None => Err(format!("No collateral config for {}", ledger_canister_id)),
+        }
+    })
+}
+
 /// Set the borrowing fee rate (developer only)
 /// Rate is a decimal: 0.005 = 0.5%, range 0.0–0.10 (10%)
 #[candid_method(update)]
@@ -3398,6 +3435,7 @@ async fn add_collateral_token(arg: rumi_protocol_backend::AddCollateralArg) -> R
         display_color: arg.display_color,
         healthy_cr: None,
         rate_curve: None,
+        redemption_tier: arg.redemption_tier.unwrap_or(1).clamp(1, 3),
     };
 
     mutate_state(|s| {
