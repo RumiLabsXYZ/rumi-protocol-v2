@@ -103,6 +103,25 @@ pub struct Vault {
     pub bot_processing: bool,
 }
 
+impl Vault {
+    /// Compute the vault's health score: CR / liquidation_ratio.
+    /// A score of 1.0 means the vault is at its liquidation threshold.
+    /// Higher is healthier. Normalizes across collateral types so that
+    /// vaults with different liquidation thresholds can be compared.
+    ///
+    /// `cr` — the vault's current collateral ratio (from compute_collateral_ratio)
+    /// `liquidation_ratio` — the collateral type's liquidation threshold (e.g. 1.33)
+    pub fn health_score(&self, cr: f64, liquidation_ratio: f64) -> f64 {
+        if self.borrowed_icusd_amount == 0 {
+            return f64::MAX;
+        }
+        if liquidation_ratio <= 0.0 {
+            return f64::MAX; // defensive: avoid division by zero
+        }
+        cr / liquidation_ratio
+    }
+}
+
 /// Returns an error if the vault is locked for bot processing.
 pub fn require_vault_not_processing(vault: &Vault) -> Result<(), ProtocolError> {
     if vault.bot_processing {
@@ -290,10 +309,15 @@ pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Prin
 
     // Handle vault spillover if reserves didn't cover everything
     if spillover_e8s > 0 {
-        // Use ICP vault redemption for the remainder with dynamic fee
-        let icp_ledger = read_state(|s| s.icp_collateral_type());
-        let collateral_price = read_state(|s| s.get_collateral_price_decimal(&icp_ledger))
-            .ok_or(ProtocolError::TemporarilyUnavailable("No ICP price for vault spillover".to_string()))?;
+        // Pick the best collateral type for vault redemption based on tier priority
+        let best_ct = read_state(|s| {
+            s.get_collateral_types_by_redemption_priority()
+                .first()
+                .copied()
+                .unwrap_or_else(|| s.icp_collateral_type())
+        });
+        let collateral_price = read_state(|s| s.get_collateral_price_decimal(&best_ct))
+            .ok_or(ProtocolError::TemporarilyUnavailable("No price for vault spillover collateral".to_string()))?;
         let current_price = UsdIcp::from(collateral_price);
 
         mutate_state(|s| {

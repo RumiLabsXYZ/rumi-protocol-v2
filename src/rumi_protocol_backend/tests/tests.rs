@@ -966,6 +966,7 @@ mod multi_collateral_helpers {
             display_color: None,
             healthy_cr: None,
             rate_curve: None,
+            redemption_tier: 1,
         }
     }
 

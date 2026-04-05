@@ -84,6 +84,9 @@ pub enum Event {
         icusd_amount: ICUSD,
         fee_amount: ICUSD,
         icusd_block_index: u64,
+        /// Which collateral type was redeemed. None for old events (pre-tiering).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        collateral_type: Option<CollateralType>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timestamp: Option<u64>,
         /// Per-vault breakdown: how much was redeemed from each vault.
@@ -1233,21 +1236,39 @@ pub fn record_redemption_on_vaults(
     // Fee is already deducted from icusd_amount before calling redeem_on_vaults,
     // so vault owners effectively keep the fee (less collateral seized for their debt).
     // The fee portion of icUSD stays in the protocol canister (burned).
-    let redeem_ct = state.icp_collateral_type();
-    let vault_redemptions = state.redeem_on_vaults(icusd_amount, collateral_price, &redeem_ct);
+
+    // Pick the best collateral type based on redemption tier priority.
+    // Tier 1 (most exposed) is redeemed first; within a tier, the collateral
+    // type whose worst vault has the lowest health score goes first.
+    let priority_types = state.get_collateral_types_by_redemption_priority();
+    let redeem_ct = priority_types.first()
+        .copied()
+        .unwrap_or_else(|| state.icp_collateral_type()); // fallback to ICP
+
+    // Use the selected collateral type's price for both water-filling and
+    // pending transfer amount calculation. The caller's collateral_price
+    // parameter may be for a different collateral type.
+    let ct_price = state.get_collateral_config(&redeem_ct)
+        .and_then(|c| c.last_price)
+        .and_then(rust_decimal::Decimal::from_f64_retain)
+        .map(UsdIcp::from)
+        .unwrap_or(collateral_price); // fallback to parameter if no config price
+
+    let vault_redemptions = state.redeem_on_vaults(icusd_amount, ct_price, &redeem_ct);
     record_event(&Event::RedemptionOnVaults {
         owner,
-        current_icp_rate: collateral_price,
+        current_icp_rate: ct_price,
         icusd_amount,
         fee_amount,
         icusd_block_index,
+        collateral_type: Some(redeem_ct),
         timestamp: Some(now()),
         vault_redemptions: if vault_redemptions.is_empty() { None } else { Some(vault_redemptions) },
     });
-    let margin: ICP = icusd_amount / collateral_price;
+    let margin: ICP = icusd_amount / ct_price;
     state
         .pending_redemption_transfer
-        .insert(icusd_block_index, PendingMarginTransfer { owner, margin, collateral_type: crate::vault::default_collateral_type() });
+        .insert(icusd_block_index, PendingMarginTransfer { owner, margin, collateral_type: redeem_ct });
 }
 
 pub fn record_redemption_transfered(

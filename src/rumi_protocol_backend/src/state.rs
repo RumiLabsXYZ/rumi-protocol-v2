@@ -423,7 +423,14 @@ pub struct CollateralConfig {
     /// Per-asset rate curve markers. None = use global_rate_curve from State.
     #[serde(default)]
     pub rate_curve: Option<RateCurve>,
+    /// Redemption priority tier (1 = first redeemed, 2 = second, 3 = last).
+    /// Tier 1 vaults are redeemed before tier 2, which are redeemed before tier 3.
+    /// Default: 1 (most exposed — safe default for new/unknown collateral).
+    #[serde(default = "default_redemption_tier")]
+    pub redemption_tier: u8,
 }
+
+fn default_redemption_tier() -> u8 { 1 }
 
 impl PartialEq for CollateralConfig {
     fn eq(&self, other: &Self) -> bool {
@@ -452,6 +459,7 @@ impl PartialEq for CollateralConfig {
             && self.display_color == other.display_color
             && self.healthy_cr == other.healthy_cr
             && self.rate_curve == other.rate_curve
+            && self.redemption_tier == other.redemption_tier
     }
 }
 
@@ -516,6 +524,7 @@ pub struct PendingMarginTransfer {
     #[serde(default = "crate::vault::default_collateral_type")]
     pub collateral_type: Principal,
 }
+
 
 thread_local! {
     static __STATE: RefCell<Option<State>> = RefCell::default();
@@ -897,6 +906,7 @@ impl From<InitArg> for State {
                     display_color: Some("#2DD4BF".to_string()),
                     healthy_cr: None,
                     rate_curve: None,
+                    redemption_tier: 1,
                 });
                 configs
             },
@@ -1303,6 +1313,68 @@ impl State {
     /// Get the ICP collateral type (convenience)
     pub fn icp_collateral_type(&self) -> CollateralType {
         self.icp_ledger_principal
+    }
+
+    /// Return collateral types ordered by redemption priority:
+    /// primary sort by `redemption_tier` ascending (tier 1 first), secondary sort
+    /// by worst health score among that type's vaults (lowest health first).
+    /// Only includes active collateral types that have a price and at least one vault with debt.
+    pub fn get_collateral_types_by_redemption_priority(&self) -> Vec<CollateralType> {
+        let mut entries: Vec<(u8, f64, CollateralType)> = Vec::new();
+
+        for (ct, config) in &self.collateral_configs {
+            // Skip inactive or no-price collateral
+            if !config.status.allows_redemption() {
+                continue;
+            }
+            // Verify price exists (needed for CR computation inside compute_collateral_ratio)
+            match config.last_price {
+                Some(p) if p > 0.0 => { /* price is available */ },
+                _ => continue,
+            };
+
+            // Find the worst (lowest) health score among this type's vaults
+            let liq_ratio = config.liquidation_ratio.to_f64();
+            let mut worst_health: f64 = f64::MAX;
+            let mut has_debt = false;
+
+            if let Some(vault_ids) = self.collateral_to_vault_ids.get(ct) {
+                for vid in vault_ids {
+                    if let Some(vault) = self.vault_id_to_vaults.get(vid) {
+                        if vault.borrowed_icusd_amount == 0 {
+                            continue;
+                        }
+                        has_debt = true;
+                        // Note: compute_collateral_ratio ignores the rate parameter
+                        // (reads from config.last_price instead), so we pass a dummy value.
+                        let cr = crate::compute_collateral_ratio(
+                            vault,
+                            crate::numeric::UsdIcp::from(rust_decimal::Decimal::ZERO),
+                            self,
+                        );
+                        let health = vault.health_score(cr.to_f64(), liq_ratio);
+                        if health < worst_health {
+                            worst_health = health;
+                        }
+                    }
+                }
+            }
+
+            if !has_debt {
+                continue; // no point redeeming from a type with no debt
+            }
+
+            entries.push((config.redemption_tier, worst_health, *ct));
+        }
+
+        // Sort: tier ascending, then worst health ascending (most vulnerable first)
+        entries.sort_by(|a, b| {
+            a.0.cmp(&b.0).then_with(|| {
+                a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+            })
+        });
+
+        entries.into_iter().map(|(_, _, ct)| ct).collect()
     }
 
     /// Set the ICP rate on both the global field AND the ICP CollateralConfig's `last_price`.
@@ -2746,6 +2818,106 @@ pub fn replace_state(state: State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_vault_health_score() {
+        use crate::vault::Vault;
+
+        let vault = Vault {
+            owner: Principal::anonymous(),
+            borrowed_icusd_amount: ICUSD::new(100_0000_0000), // 100 icUSD
+            collateral_amount: 200_0000_0000,
+            vault_id: 1,
+            collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        };
+
+        // ICP vault: CR = 1.50, liq_ratio = 1.33 → health = 1.50 / 1.33 ≈ 1.1278
+        let health = vault.health_score(1.50, 1.33);
+        assert!((health - 1.1278).abs() < 0.001, "Expected ~1.1278, got {}", health);
+
+        // ckBTC vault: CR = 1.25, liq_ratio = 1.15 → health = 1.25 / 1.15 ≈ 1.0870
+        let health2 = vault.health_score(1.25, 1.15);
+        assert!((health2 - 1.0870).abs() < 0.001, "Expected ~1.0870, got {}", health2);
+
+        // At exact liquidation threshold: health = 1.0
+        let health3 = vault.health_score(1.33, 1.33);
+        assert!((health3 - 1.0).abs() < 0.0001, "Expected 1.0, got {}", health3);
+
+        // Zero-debt vault: should return f64::MAX (infinite health)
+        let zero_debt_vault = Vault {
+            borrowed_icusd_amount: ICUSD::new(0),
+            ..vault.clone()
+        };
+        let health4 = zero_debt_vault.health_score(1.50, 1.33);
+        assert!(health4 > 1_000_000.0, "Zero-debt vault should have very high health score");
+    }
+
+    #[test]
+    fn test_tiered_redemption_ordering() {
+        // Verify sort logic: tier ascending, then health score ascending
+        let mut entries: Vec<(u8, f64, u64)> = vec![
+            (2, 1.05, 10),  // tier 2, low health
+            (1, 1.20, 20),  // tier 1, moderate health
+            (1, 1.08, 30),  // tier 1, low health
+            (3, 1.01, 40),  // tier 3, very low health
+            (1, 1.15, 50),  // tier 1, moderate health
+        ];
+
+        entries.sort_by(|a, b| {
+            a.0.cmp(&b.0).then_with(|| a.1.partial_cmp(&b.1).unwrap())
+        });
+
+        let order: Vec<u64> = entries.iter().map(|e| e.2).collect();
+        assert_eq!(order, vec![30, 50, 20, 10, 40],
+            "Expected tier-1 vaults first (health-sorted), then tier-2, then tier-3");
+    }
+
+    #[test]
+    fn test_redemption_vault_impacts_replay() {
+        // Verify that deduct_amount_from_vault correctly applies per-vault deltas
+        // (simulating what the replay handler does with vault_impacts)
+        let mut state = test_state();
+        let icp_ct = state.icp_collateral_type();
+
+        // Open two vaults with known amounts
+        state.open_vault(crate::vault::Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            collateral_amount: 500_000_000, // 5 ICP
+            borrowed_icusd_amount: ICUSD::new(300_000_000), // 3 icUSD
+            collateral_type: icp_ct,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        });
+        state.open_vault(crate::vault::Vault {
+            owner: Principal::anonymous(),
+            vault_id: 2,
+            collateral_amount: 800_000_000, // 8 ICP
+            borrowed_icusd_amount: ICUSD::new(500_000_000), // 5 icUSD
+            collateral_type: icp_ct,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        });
+
+        // Apply deltas as the replay handler would
+        state.deduct_amount_from_vault(50_000_000, ICUSD::from(100_000_000u64), 1);
+        state.deduct_amount_from_vault(75_000_000, ICUSD::from(150_000_000u64), 2);
+
+        // Verify vault 1: 3 - 1 = 2 icUSD debt, 5 - 0.5 = 4.5 ICP
+        let v1 = state.vault_id_to_vaults.get(&1).unwrap();
+        assert_eq!(v1.borrowed_icusd_amount, ICUSD::new(200_000_000));
+        assert_eq!(v1.collateral_amount, 450_000_000);
+
+        // Verify vault 2: 5 - 1.5 = 3.5 icUSD debt, 8 - 0.75 = 7.25 ICP
+        let v2 = state.vault_id_to_vaults.get(&2).unwrap();
+        assert_eq!(v2.borrowed_icusd_amount, ICUSD::new(350_000_000));
+        assert_eq!(v2.collateral_amount, 725_000_000);
+    }
 
     #[test]
     fn test_distribute_across_vaults() {

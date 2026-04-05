@@ -117,9 +117,23 @@
       type = 'Redeemed';
       icon = '🔁';
       color = 'text-cyan-400';
-      const amt = Number(event.redemption_on_vaults.icusd_amount) / E8S;
-      const fee = Number(event.redemption_on_vaults.fee_amount) / E8S;
-      details = `${formatStableTx(amt)} icUSD redeemed (fee: ${formatStableTx(fee)})`;
+      const e = event.redemption_on_vaults;
+      const totalAmt = Number(e.icusd_amount) / E8S;
+      const fee = Number(e.fee_amount) / E8S;
+      // Unwrap Candid opt: [] = None, [value] = Some(value)
+      const redemptions = Array.isArray(e.vault_redemptions) && e.vault_redemptions.length > 0 ? e.vault_redemptions[0] : null;
+      if (redemptions && Array.isArray(redemptions)) {
+        const myRedemption = redemptions.find((r: any) => Number(r.vault_id) === vaultId);
+        if (myRedemption) {
+          const debtReduced = Number(myRedemption.icusd_redeemed_e8s) / E8S;
+          const collSeized = Number(myRedemption.collateral_seized) / E8S;
+          details = `Debt reduced by ${formatStableTx(debtReduced)} icUSD, ${formatNumber(collSeized)} collateral seized`;
+        } else {
+          details = `${formatStableTx(totalAmt)} icUSD redeemed across vaults (fee: ${formatStableTx(fee)})`;
+        }
+      } else {
+        details = `${formatStableTx(totalAmt)} icUSD redeemed (fee: ${formatStableTx(fee)})`;
+      }
     }
 
     return { type, icon, color, details, index: idx };

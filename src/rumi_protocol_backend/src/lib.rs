@@ -277,6 +277,8 @@ pub struct AddCollateralArg {
     pub redemption_fee_floor: Option<f64>,
     /// Maximum redemption fee (ceiling), e.g., 0.05 = 5%
     pub redemption_fee_ceiling: Option<f64>,
+    /// Redemption priority tier (1/2/3). Default: 1 if omitted.
+    pub redemption_tier: Option<u8>,
 }
 
 #[derive(CandidType, Debug, Clone, Deserialize)]
