@@ -20,6 +20,7 @@
     getTokenSymbol, registerToken, classifyVaultHealth, healthColor
   } from '$utils/explorerHelpers';
   import { decodeRustDecimal } from '$utils/decimalUtils';
+  import { CANISTER_IDS } from '$lib/config';
 
   const E8S = 100_000_000;
   const COLLATERAL_ORDER: Record<string, number> = { ICP: 0, ckBTC: 1, ckETH: 2, ckXAUT: 3, nICP: 4, BOB: 5, EXE: 6 };
@@ -124,10 +125,69 @@
     vaults.filter((v: any) => Number(v.borrowed_icusd_amount) > 0 || Number(v.collateral_amount) > 0).length
   );
 
-  // Total TVL in USD — sum of all collateral USD values from collateral rows
-  let totalTvlUsd = $derived(
-    collateralRows.reduce((sum: number, row: any) => sum + (row.collateralUsd || 0), 0)
-  );
+  // Total TVL in USD — vault collateral + AMM ICP reserves + 3pool ckUSDT/ckUSDC + SP ckUSDT/ckUSDC + SP collateral gains.
+  // icUSD and 3USD are excluded everywhere (backed by vault collateral already counted).
+  let totalTvlUsd = $derived.by(() => {
+    // 1. Vault collateral (ICP, ckBTC, ckETH, ckXAUT, nICP, BOB, EXE)
+    let total = collateralRows.reduce((sum: number, row: any) => sum + (row.collateralUsd || 0), 0);
+
+    const icpLedger = CANISTER_IDS.ICP_LEDGER;
+    const icusdLedger = CANISTER_IDS.ICUSD_LEDGER;
+    const ckusdtLedger = CANISTER_IDS.CKUSDT_LEDGER;
+    const ckusdcLedger = CANISTER_IDS.CKUSDC_LEDGER;
+
+    // 2. AMM constant-product pool reserves (count ICP side only; 3USD side is an LP token)
+    for (const pool of ammPools) {
+      const tokenA = pool.token_a?.toText?.() ?? String(pool.token_a);
+      const tokenB = pool.token_b?.toText?.() ?? String(pool.token_b);
+      const reserveA = Number(pool.reserve_a ?? 0n);
+      const reserveB = Number(pool.reserve_b ?? 0n);
+      // Value any non-icUSD, non-3USD reserve using priceMap
+      if (tokenA === icpLedger) {
+        const price = priceMap.get(tokenA) ?? 0;
+        total += (reserveA / 1e8) * price;
+      }
+      if (tokenB === icpLedger) {
+        const price = priceMap.get(tokenB) ?? 0;
+        total += (reserveB / 1e8) * price;
+      }
+    }
+
+    // 3. 3pool: count ckUSDT (index 1) and ckUSDC (index 2) at $1 each; skip icUSD (index 0)
+    if (tpStatus?.balances) {
+      const balances = tpStatus.balances;
+      const tokens = tpStatus.tokens ?? [];
+      for (let i = 1; i < balances.length; i++) {
+        const decimals = tokens[i]?.decimals ?? 6;
+        total += Number(balances[i]) / Math.pow(10, decimals);
+      }
+    }
+
+    // 4. Stability pool: count ckUSDT + ckUSDC deposits at $1 each (skip icUSD)
+    if (spStatus?.stablecoin_balances) {
+      for (const [ledger, amount] of spStatus.stablecoin_balances) {
+        const principal = ledger?.toText?.() ?? String(ledger);
+        if (principal === icusdLedger) continue; // skip icUSD
+        if (principal === ckusdtLedger || principal === ckusdcLedger) {
+          // ckUSDT and ckUSDC use 6 decimals
+          total += Number(amount) / 1e6;
+        }
+      }
+    }
+
+    // 5. Stability pool collateral gains (ICP etc. seized from liquidations, sitting in SP)
+    if (spStatus?.collateral_gains) {
+      for (const [ledger, amount] of spStatus.collateral_gains) {
+        const principal = ledger?.toText?.() ?? String(ledger);
+        const price = priceMap.get(principal) ?? 0;
+        if (price > 0 && Number(amount) > 0) {
+          total += (Number(amount) / 1e8) * price;
+        }
+      }
+    }
+
+    return total;
+  });
 
   // Total debt in icUSD from collateral rows
   let totalDebtIcusd = $derived(
@@ -639,7 +699,7 @@
         <StatCard
           label="Total TVL"
           value={totalTvlUsd > 0 ? formatCompactUsd(totalTvlUsd) : (status?.total_icp_margin != null ? formatUsd(status.total_icp_margin) : '--')}
-          subtitle="All collateral locked"
+          subtitle="Vaults + pools"
         />
 
         <StatCard

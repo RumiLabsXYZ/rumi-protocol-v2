@@ -7,10 +7,14 @@
   import { isDevelopment, CANISTER_IDS } from '$lib/config';
   import { developerAccess } from '$lib/stores/developer';
   import { collateralStore } from '$lib/stores/collateralStore';
-  import { getMinimumCR, getLiquidationCR } from '$lib/protocol';
+  import { LIQUIDATION_CR } from '$lib/protocol';
+  import type { CollateralInfo } from '$lib/services/types';
 
   let icpPrice = 0;
   let expandedVaultId: number | null = null;
+
+  // Subscribe to collateral store so sort re-runs when configs load
+  $: collateralState = $collateralStore;
 
   function handleToggle(e: CustomEvent<{ vaultId: number }>) {
     expandedVaultId = expandedVaultId === e.detail.vaultId ? null : e.detail.vaultId;
@@ -19,38 +23,30 @@
   $: canViewVaults = isDevelopment || $developerAccess || $isConnected
     || ($permissionStore.initialized && $permissionStore.canViewVaults);
 
-  // Sort vaults by risk level group (red → purple → white), then CR ascending within each group.
-  // Uses per-collateral price + per-collateral liquidation/minimum ratios.
-  function vaultRiskBucket(cr: number, ct: string): number {
-    const minCR = getMinimumCR(ct);
-    const liqCR = getLiquidationCR(ct);
-    const comfortCR = minCR * 1.234;
-    if (cr === Infinity || cr >= comfortCR) return 2; // safe (white)
-    if (cr >= minCR) return 1;                        // caution (purple)
-    return 0;                                          // danger/warning (red)
+  // Look up collateral info from the subscribed store state (reactive)
+  function getInfoFromState(principalText: string): CollateralInfo | undefined {
+    return collateralState.collaterals.find(c => c.principal === principalText);
   }
 
   // Health score = CR / liquidation_ratio. A score of 1.0 means at liquidation threshold.
   // Sort by health score ascending so the most at-risk vaults appear first.
-  function calculateHealthScore(cr: number, collateralType: string): number {
-    if (cr === Infinity) return Infinity;
-    const liqCR = getLiquidationCR(collateralType);
-    return liqCR > 0 ? cr / liqCR : Infinity;
-  }
-
   $: sortedVaults = [...$userVaults].sort((a, b) => {
     const ctA = a.collateralType || CANISTER_IDS.ICP_LEDGER;
     const ctB = b.collateralType || CANISTER_IDS.ICP_LEDGER;
-    const priceA = collateralStore.getCollateralPrice(ctA) || (ctA === CANISTER_IDS.ICP_LEDGER ? icpPrice : 0);
-    const priceB = collateralStore.getCollateralPrice(ctB) || (ctB === CANISTER_IDS.ICP_LEDGER ? icpPrice : 0);
+    const infoA = getInfoFromState(ctA);
+    const infoB = getInfoFromState(ctB);
+    const priceA = infoA?.price || (ctA === CANISTER_IDS.ICP_LEDGER ? icpPrice : 0);
+    const priceB = infoB?.price || (ctB === CANISTER_IDS.ICP_LEDGER ? icpPrice : 0);
+    const liqA = infoA?.liquidationCr ?? LIQUIDATION_CR;
+    const liqB = infoB?.liquidationCr ?? LIQUIDATION_CR;
     const amountA = a.collateralAmount ?? a.icpMargin;
     const amountB = b.collateralAmount ?? b.icpMargin;
     const crA = a.borrowedIcusd > 0 && priceA > 0
       ? (amountA * priceA) / a.borrowedIcusd : Infinity;
     const crB = b.borrowedIcusd > 0 && priceB > 0
       ? (amountB * priceB) / b.borrowedIcusd : Infinity;
-    const healthA = calculateHealthScore(crA, ctA);
-    const healthB = calculateHealthScore(crB, ctB);
+    const healthA = crA === Infinity ? Infinity : (liqA > 0 ? crA / liqA : Infinity);
+    const healthB = crB === Infinity ? Infinity : (liqB > 0 ? crB / liqB : Infinity);
     if (healthA !== healthB) return healthA - healthB;
     return a.vaultId - b.vaultId;
   });
