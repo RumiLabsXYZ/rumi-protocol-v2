@@ -50,6 +50,7 @@ export const idlFactory = ({ IDL }) => {
     'debt_ceiling' : IDL.Nat64,
     'min_vault_debt' : IDL.Nat64,
     'min_collateral_deposit' : IDL.Nat64,
+    'redemption_tier' : IDL.Opt(IDL.Nat8),
     'redemption_fee_floor' : IDL.Opt(IDL.Float64),
     'borrow_threshold_ratio' : IDL.Float64,
     'ledger_canister_id' : IDL.Principal,
@@ -59,7 +60,6 @@ export const idlFactory = ({ IDL }) => {
     'borrowing_fee' : IDL.Float64,
     'interest_rate_apr' : IDL.Float64,
     'liquidation_ratio' : IDL.Float64,
-    'redemption_tier' : IDL.Opt(IDL.Nat8),
   });
   const TransferError = IDL.Variant({
     'GenericError' : IDL.Record({
@@ -101,6 +101,12 @@ export const idlFactory = ({ IDL }) => {
   const Result = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : ProtocolError });
   const VaultArg = IDL.Record({ 'vault_id' : IDL.Nat64, 'amount' : IDL.Nat64 });
   const Result_1 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : ProtocolError });
+  const VaultDebtCorrection = IDL.Record({
+    'correct_accrued_interest_e8s' : IDL.Nat64,
+    'vault_id' : IDL.Nat64,
+    'correct_borrowed_e8s' : IDL.Nat64,
+  });
+  const Result_11 = IDL.Variant({ 'Ok' : IDL.Text, 'Err' : ProtocolError });
   const SuccessWithFee = IDL.Record({
     'block_index' : IDL.Nat64,
     'fee_amount_paid' : IDL.Nat64,
@@ -124,8 +130,6 @@ export const idlFactory = ({ IDL }) => {
     'Ok' : IDL.Opt(IDL.Nat64),
     'Err' : ProtocolError,
   });
-  const Result_11 = IDL.Variant({ 'Ok' : IDL.Text, 'Err' : ProtocolError });
-  const Result_12 = IDL.Variant({ 'Ok' : IDL.Nat8, 'Err' : ProtocolError });
   const CandidVault = IDL.Record({
     'collateral_amount' : IDL.Nat64,
     'owner' : IDL.Principal,
@@ -216,6 +220,16 @@ export const idlFactory = ({ IDL }) => {
     'accrued_interest' : IDL.Nat64,
     'borrowed_icusd_amount' : IDL.Nat64,
   });
+  const VaultRedemptionImpact = IDL.Record({
+    'vault_id' : IDL.Nat64,
+    'collateral_seized' : IDL.Nat64,
+    'debt_reduced' : IDL.Nat64,
+  });
+  const VaultRedemption = IDL.Record({
+    'icusd_redeemed_e8s' : IDL.Nat64,
+    'vault_id' : IDL.Nat64,
+    'collateral_seized' : IDL.Nat64,
+  });
   const Event = IDL.Variant({
     'set_borrowing_fee' : IDL.Record({ 'rate' : IDL.Text }),
     'VaultWithdrawnAndClosed' : IDL.Record({
@@ -249,6 +263,11 @@ export const idlFactory = ({ IDL }) => {
       'timestamp' : IDL.Opt(IDL.Nat64),
       'caller' : IDL.Principal,
       'amount' : IDL.Nat64,
+    }),
+    'price_update' : IDL.Record({
+      'timestamp' : IDL.Nat64,
+      'collateral_type' : IDL.Principal,
+      'price' : IDL.Text,
     }),
     'set_rmr_ceiling_cr' : IDL.Record({ 'value' : IDL.Text }),
     'set_recovery_rate_curve' : IDL.Record({ 'markers' : IDL.Text }),
@@ -284,15 +303,12 @@ export const idlFactory = ({ IDL }) => {
       'icusd_amount' : IDL.Nat64,
       'icusd_block_index' : IDL.Nat64,
       'owner' : IDL.Principal,
+      'vault_impacts' : IDL.Opt(IDL.Vec(VaultRedemptionImpact)),
       'timestamp' : IDL.Opt(IDL.Nat64),
       'fee_amount' : IDL.Nat64,
-      'current_icp_rate' : IDL.Vec(IDL.Nat8),
       'collateral_type' : IDL.Opt(IDL.Principal),
-      'vault_impacts' : IDL.Opt(IDL.Vec(IDL.Record({
-        'vault_id' : IDL.Nat64,
-        'debt_reduced' : IDL.Nat64,
-        'collateral_seized' : IDL.Nat64,
-      }))),
+      'vault_redemptions' : IDL.Opt(IDL.Vec(VaultRedemption)),
+      'current_icp_rate' : IDL.Vec(IDL.Nat8),
     }),
     'set_recovery_parameters' : IDL.Record({
       'recovery_interest_rate_apr' : IDL.Opt(IDL.Text),
@@ -350,6 +366,14 @@ export const idlFactory = ({ IDL }) => {
       'timestamp' : IDL.Opt(IDL.Nat64),
       'caller' : IDL.Opt(IDL.Principal),
       'amount' : IDL.Nat64,
+    }),
+    'admin_debt_correction' : IDL.Record({
+      'new_accrued' : IDL.Nat64,
+      'new_borrowed' : IDL.Nat64,
+      'old_accrued' : IDL.Nat64,
+      'vault_id' : IDL.Nat64,
+      'timestamp' : IDL.Opt(IDL.Nat64),
+      'old_borrowed' : IDL.Nat64,
     }),
     'set_rate_curve_markers' : IDL.Record({
       'markers' : IDL.Text,
@@ -422,9 +446,6 @@ export const idlFactory = ({ IDL }) => {
     'set_bot_budget' : IDL.Record({
       'start_timestamp' : IDL.Nat64,
       'total_e8s' : IDL.Nat64,
-    }),
-    'set_bot_allowed_collateral_types' : IDL.Record({
-      'collateral_types' : IDL.Vec(IDL.Principal),
     }),
     'set_rmr_floor' : IDL.Record({ 'value' : IDL.Text }),
     'set_redemption_fee_floor' : IDL.Record({ 'rate' : IDL.Text }),
@@ -528,6 +549,7 @@ export const idlFactory = ({ IDL }) => {
     'global_icusd_mint_cap' : IDL.Nat64,
     'last_icp_rate' : IDL.Float64,
   });
+  const Result_12 = IDL.Variant({ 'Ok' : IDL.Nat8, 'Err' : ProtocolError });
   const ReserveBalance = IDL.Record({
     'balance' : IDL.Nat64,
     'ledger' : IDL.Principal,
@@ -650,6 +672,11 @@ export const idlFactory = ({ IDL }) => {
         [Result],
         [],
       ),
+    'admin_correct_vault_debts' : IDL.Func(
+        [IDL.Vec(VaultDebtCorrection)],
+        [Result_11],
+        [],
+      ),
     'admin_mint_icusd' : IDL.Func(
         [IDL.Nat64, IDL.Principal, IDL.Text],
         [Result_1],
@@ -764,6 +791,7 @@ export const idlFactory = ({ IDL }) => {
     'get_redemption_fee_ceiling' : IDL.Func([], [IDL.Float64], ['query']),
     'get_redemption_fee_floor' : IDL.Func([], [IDL.Float64], ['query']),
     'get_redemption_rate' : IDL.Func([], [IDL.Float64], ['query']),
+    'get_redemption_tier' : IDL.Func([IDL.Principal], [Result_12], ['query']),
     'get_reserve_balances' : IDL.Func([], [IDL.Vec(ReserveBalance)], ['query']),
     'get_reserve_redemption_fee' : IDL.Func([], [IDL.Float64], ['query']),
     'get_reserve_redemptions_enabled' : IDL.Func([], [IDL.Bool], ['query']),
@@ -928,7 +956,6 @@ export const idlFactory = ({ IDL }) => {
     'set_redemption_fee_ceiling' : IDL.Func([IDL.Float64], [Result], []),
     'set_redemption_fee_floor' : IDL.Func([IDL.Float64], [Result], []),
     'set_redemption_tier' : IDL.Func([IDL.Principal, IDL.Nat8], [Result], []),
-    'get_redemption_tier' : IDL.Func([IDL.Principal], [Result_12], ['query']),
     'set_reserve_redemption_fee' : IDL.Func([IDL.Float64], [Result], []),
     'set_reserve_redemptions_enabled' : IDL.Func([IDL.Bool], [Result], []),
     'set_rmr_ceiling' : IDL.Func([IDL.Float64], [Result], []),

@@ -1076,20 +1076,25 @@ export function formatEvent(event: any, vaultCollateralMap?: Map<number, string>
       pushIfPresent(fields, addressField('Redeemer', d.owner));
 
       // If per-vault data exists and we're viewing a specific vault, show that vault's amount
-      const vaultRedemptions: any[] | undefined = d.vault_redemptions;
-      const contextVaultId = vaultCollateralMap?.size === 1 ? [...vaultCollateralMap.keys()][0] : undefined;
-      const vaultEntry = contextVaultId != null && vaultRedemptions
-        ? vaultRedemptions.find((vr: any) => Number(vr.vault_id) === contextVaultId)
+      // Unwrap Candid opt: [] = None, [entries] = Some(entries)
+      const rawRedemptions = d.vault_redemptions;
+      const vaultRedemptions: any[] | undefined = Array.isArray(rawRedemptions) && rawRedemptions.length > 0
+        ? rawRedemptions[0]
         : undefined;
+      const contextVaultId = vaultCollateralMap?.size === 1 ? [...vaultCollateralMap.keys()][0] : undefined;
+      // A vault can appear multiple times (iterative rounds), so aggregate all entries
+      const vaultEntries = contextVaultId != null && vaultRedemptions && Array.isArray(vaultRedemptions)
+        ? vaultRedemptions.filter((vr: any) => Number(vr.vault_id) === contextVaultId)
+        : [];
 
-      if (vaultEntry) {
-        const vaultAmt = fmtE8s(vaultEntry.icusd_redeemed_e8s);
-        fields.push(amountField('icUSD Redeemed (this vault)', vaultEntry.icusd_redeemed_e8s));
-        const collateralSeized = vaultEntry.collateral_seized;
+      if (vaultEntries.length > 0) {
+        const totalRedeemed = vaultEntries.reduce((sum: bigint, vr: any) => sum + BigInt(vr.icusd_redeemed_e8s), 0n);
+        const totalSeized = vaultEntries.reduce((sum: bigint, vr: any) => sum + BigInt(vr.collateral_seized), 0n);
+        const vaultAmt = fmtE8s(totalRedeemed);
+        fields.push(amountField('icUSD Redeemed (this vault)', totalRedeemed));
         const ctPrincipal = vaultCollateralMap?.get(contextVaultId!) ?? '';
         const sym = getTokenSymbol(ctPrincipal);
-        const dec = getTokenDecimals(ctPrincipal);
-        fields.push(textField('Collateral Seized', `${formatTokenAmount(BigInt(collateralSeized), dec)} ${sym}`));
+        fields.push(textField('Collateral Seized', `${formatTokenAmount(totalSeized, ctPrincipal)} ${sym}`));
         fields.push(amountField('Total Redemption', d.icusd_amount));
         fields.push(amountField('Fee', d.fee_amount));
         if (d.current_icp_rate !== undefined) {

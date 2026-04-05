@@ -228,8 +228,8 @@
     return [];
   });
 
-  // At-risk vaults sorted by CR ascending (top 10)
-  let atRiskVaults = $derived.by(() => {
+  // At-risk vaults sorted by health score ascending (CR / liquidation_ratio)
+  let allRankedVaults = $derived.by(() => {
     if (!vaults.length || !collateralConfigs.length) return [];
 
     const vaultsWithCr: any[] = [];
@@ -257,10 +257,13 @@
         borrowThreshold = decodeRustDecimal(cfg.borrow_threshold_ratio);
       }
 
+      const healthScore = liquidationRatio > 0 ? cr / liquidationRatio : Infinity;
+
       vaultsWithCr.push({
         vault_id: Number(vault.vault_id),
         owner: vault.owner?.toText?.() ?? String(vault.owner),
         collateral_ratio: cr,
+        health_score: healthScore,
         collateral_type: collateralType,
         liquidation_ratio: liquidationRatio,
         borrow_threshold_ratio: borrowThreshold,
@@ -271,9 +274,15 @@
       });
     }
 
-    vaultsWithCr.sort((a, b) => a.collateral_ratio - b.collateral_ratio);
-    return vaultsWithCr.slice(0, 10);
+    vaultsWithCr.sort((a, b) => a.health_score - b.health_score);
+    return vaultsWithCr;
   });
+
+  // Pagination for at-risk vaults
+  const VAULTS_PER_PAGE = 10;
+  let atRiskPage = $state(0);
+  let atRiskTotalPages = $derived(Math.max(1, Math.ceil(allRankedVaults.length / VAULTS_PER_PAGE)));
+  let atRiskVaults = $derived(allRankedVaults.slice(atRiskPage * VAULTS_PER_PAGE, (atRiskPage + 1) * VAULTS_PER_PAGE));
 
   // Vault collateral map for EventRow
   let vaultCollateralMap = $derived.by(() => {
@@ -1183,10 +1192,10 @@
       <!-- At-risk vaults table -->
       <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl overflow-hidden">
         <div class="px-5 py-4 border-b border-gray-700/50 flex items-center justify-between">
-          <h3 class="text-sm font-semibold text-gray-200">At-Risk Vaults</h3>
-          {#if atRiskVaults.length > 0}
+          <h3 class="text-sm font-semibold text-gray-200">All Vaults by Health Score</h3>
+          {#if allRankedVaults.length > 0}
             <span class="text-xs font-medium px-2 py-0.5 rounded-full bg-orange-400/10 text-orange-400 border border-orange-400/30">
-              {atRiskVaults.length} vault{atRiskVaults.length > 1 ? 's' : ''}
+              {allRankedVaults.length} vault{allRankedVaults.length > 1 ? 's' : ''}
             </span>
           {:else}
             <span class="text-xs font-medium px-2 py-0.5 rounded-full bg-green-400/10 text-green-400 border border-green-400/30">
@@ -1195,7 +1204,7 @@
           {/if}
         </div>
 
-        {#if atRiskVaults.length === 0}
+        {#if allRankedVaults.length === 0}
           <div class="px-5 py-8 text-center text-gray-500 text-sm">No vaults near liquidation</div>
         {:else}
           <div class="overflow-x-auto">
@@ -1237,6 +1246,29 @@
               </tbody>
             </table>
           </div>
+          {#if atRiskTotalPages > 1}
+            <div class="px-5 py-3 border-t border-gray-700/50 flex items-center justify-between">
+              <span class="text-xs text-gray-500">
+                Page {atRiskPage + 1} of {atRiskTotalPages}
+              </span>
+              <div class="flex gap-2">
+                <button
+                  onclick={() => atRiskPage = Math.max(0, atRiskPage - 1)}
+                  disabled={atRiskPage === 0}
+                  class="px-3 py-1 text-xs rounded bg-gray-700/50 text-gray-300 hover:bg-gray-600/50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                >
+                  Prev
+                </button>
+                <button
+                  onclick={() => atRiskPage = Math.min(atRiskTotalPages - 1, atRiskPage + 1)}
+                  disabled={atRiskPage >= atRiskTotalPages - 1}
+                  class="px-3 py-1 text-xs rounded bg-gray-700/50 text-gray-300 hover:bg-gray-600/50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          {/if}
         {/if}
       </div>
     {/if}

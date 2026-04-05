@@ -30,6 +30,14 @@
     return 0;                                          // danger/warning (red)
   }
 
+  // Health score = CR / liquidation_ratio. A score of 1.0 means at liquidation threshold.
+  // Sort by health score ascending so the most at-risk vaults appear first.
+  function calculateHealthScore(cr: number, collateralType: string): number {
+    if (cr === Infinity) return Infinity;
+    const liqCR = getLiquidationCR(collateralType);
+    return liqCR > 0 ? cr / liqCR : Infinity;
+  }
+
   $: sortedVaults = [...$userVaults].sort((a, b) => {
     const ctA = a.collateralType || CANISTER_IDS.ICP_LEDGER;
     const ctB = b.collateralType || CANISTER_IDS.ICP_LEDGER;
@@ -41,10 +49,9 @@
       ? (amountA * priceA) / a.borrowedIcusd : Infinity;
     const crB = b.borrowedIcusd > 0 && priceB > 0
       ? (amountB * priceB) / b.borrowedIcusd : Infinity;
-    const bucketA = vaultRiskBucket(crA, ctA);
-    const bucketB = vaultRiskBucket(crB, ctB);
-    if (bucketA !== bucketB) return bucketA - bucketB;
-    if (crA !== crB) return crA - crB;
+    const healthA = calculateHealthScore(crA, ctA);
+    const healthB = calculateHealthScore(crB, ctB);
+    if (healthA !== healthB) return healthA - healthB;
     return a.vaultId - b.vaultId;
   });
 

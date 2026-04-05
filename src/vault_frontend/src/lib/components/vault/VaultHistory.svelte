@@ -123,10 +123,11 @@
       // Unwrap Candid opt: [] = None, [value] = Some(value)
       const redemptions = Array.isArray(e.vault_redemptions) && e.vault_redemptions.length > 0 ? e.vault_redemptions[0] : null;
       if (redemptions && Array.isArray(redemptions)) {
-        const myRedemption = redemptions.find((r: any) => Number(r.vault_id) === vaultId);
-        if (myRedemption) {
-          const debtReduced = Number(myRedemption.icusd_redeemed_e8s) / E8S;
-          const collSeized = Number(myRedemption.collateral_seized) / E8S;
+        // A vault can appear multiple times (iterative rounds), so aggregate all entries
+        const myEntries = redemptions.filter((r: any) => Number(r.vault_id) === vaultId);
+        if (myEntries.length > 0) {
+          const debtReduced = myEntries.reduce((sum: number, r: any) => sum + Number(r.icusd_redeemed_e8s), 0) / E8S;
+          const collSeized = myEntries.reduce((sum: number, r: any) => sum + Number(r.collateral_seized), 0) / E8S;
           details = `Debt reduced by ${formatStableTx(debtReduced)} icUSD, ${formatNumber(collSeized)} collateral seized`;
         } else {
           details = `${formatStableTx(totalAmt)} icUSD redeemed across vaults (fee: ${formatStableTx(fee)})`;

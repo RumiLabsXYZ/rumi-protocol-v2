@@ -11,6 +11,7 @@ export interface AddCollateralArg {
   'debt_ceiling' : bigint,
   'min_vault_debt' : bigint,
   'min_collateral_deposit' : bigint,
+  'redemption_tier' : [] | [number],
   'redemption_fee_floor' : [] | [number],
   'borrow_threshold_ratio' : number,
   'ledger_canister_id' : Principal,
@@ -20,7 +21,6 @@ export interface AddCollateralArg {
   'borrowing_fee' : number,
   'interest_rate_apr' : number,
   'liquidation_ratio' : number,
-  'redemption_tier' : [] | [number],
 }
 export interface BotLiquidationResult {
   'collateral_amount' : bigint,
@@ -44,11 +44,6 @@ export interface CandidVault {
   'accrued_interest' : bigint,
   'icp_margin_amount' : bigint,
   'borrowed_icusd_amount' : bigint,
-}
-export interface VaultRedemptionImpact {
-  'vault_id' : bigint,
-  'debt_reduced' : bigint,
-  'collateral_seized' : bigint,
 }
 export interface CollateralConfig {
   'last_redemption_time' : bigint,
@@ -175,6 +170,13 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'amount' : bigint,
     }
   } |
+  {
+    'price_update' : {
+      'timestamp' : bigint,
+      'collateral_type' : Principal,
+      'price' : string,
+    }
+  } |
   { 'set_rmr_ceiling_cr' : { 'value' : string } } |
   { 'set_recovery_rate_curve' : { 'markers' : string } } |
   { 'set_ckstable_repay_fee' : { 'rate' : string } } |
@@ -218,11 +220,12 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'icusd_amount' : bigint,
       'icusd_block_index' : bigint,
       'owner' : Principal,
+      'vault_impacts' : [] | [Array<VaultRedemptionImpact>],
       'timestamp' : [] | [bigint],
       'fee_amount' : bigint,
-      'current_icp_rate' : Uint8Array | number[],
       'collateral_type' : [] | [Principal],
-      'vault_impacts' : [] | [Array<VaultRedemptionImpact>],
+      'vault_redemptions' : [] | [Array<VaultRedemption>],
+      'current_icp_rate' : Uint8Array | number[],
     }
   } |
   {
@@ -295,6 +298,16 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'timestamp' : [] | [bigint],
       'caller' : [] | [Principal],
       'amount' : bigint,
+    }
+  } |
+  {
+    'admin_debt_correction' : {
+      'new_accrued' : bigint,
+      'new_borrowed' : bigint,
+      'old_accrued' : bigint,
+      'vault_id' : bigint,
+      'timestamp' : [] | [bigint],
+      'old_borrowed' : bigint,
     }
   } |
   {
@@ -384,7 +397,6 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
   { 'set_stability_pool_principal' : { 'principal' : Principal } } |
   { 'set_interest_split' : { 'split' : string } } |
   { 'set_bot_budget' : { 'start_timestamp' : bigint, 'total_e8s' : bigint } } |
-  { 'set_bot_allowed_collateral_types' : { 'collateral_types' : Array<Principal> } } |
   { 'set_rmr_floor' : { 'value' : string } } |
   { 'set_redemption_fee_floor' : { 'rate' : string } } |
   {
@@ -662,6 +674,21 @@ export interface VaultArgWithToken {
   'amount' : bigint,
   'token_type' : StableTokenType,
 }
+export interface VaultDebtCorrection {
+  'correct_accrued_interest_e8s' : bigint,
+  'vault_id' : bigint,
+  'correct_borrowed_e8s' : bigint,
+}
+export interface VaultRedemption {
+  'icusd_redeemed_e8s' : bigint,
+  'vault_id' : bigint,
+  'collateral_seized' : bigint,
+}
+export interface VaultRedemptionImpact {
+  'vault_id' : bigint,
+  'collateral_seized' : bigint,
+  'debt_reduced' : bigint,
+}
 export type XrcAssetClass = { 'Cryptocurrency' : null } |
   { 'FiatCurrency' : null };
 export interface _SERVICE {
@@ -671,6 +698,10 @@ export interface _SERVICE {
   'admin_correct_vault_collateral' : ActorMethod<
     [bigint, bigint, string],
     Result
+  >,
+  'admin_correct_vault_debts' : ActorMethod<
+    [Array<VaultDebtCorrection>],
+    Result_11
   >,
   'admin_mint_icusd' : ActorMethod<[bigint, Principal, string], Result_1>,
   'admin_sweep_to_treasury' : ActorMethod<[string], Result_1>,
@@ -741,6 +772,7 @@ export interface _SERVICE {
   'get_redemption_fee_ceiling' : ActorMethod<[], number>,
   'get_redemption_fee_floor' : ActorMethod<[], number>,
   'get_redemption_rate' : ActorMethod<[], number>,
+  'get_redemption_tier' : ActorMethod<[Principal], Result_12>,
   'get_reserve_balances' : ActorMethod<[], Array<ReserveBalance>>,
   'get_reserve_redemption_fee' : ActorMethod<[], number>,
   'get_reserve_redemptions_enabled' : ActorMethod<[], boolean>,
@@ -823,7 +855,6 @@ export interface _SERVICE {
   'set_redemption_fee_ceiling' : ActorMethod<[number], Result>,
   'set_redemption_fee_floor' : ActorMethod<[number], Result>,
   'set_redemption_tier' : ActorMethod<[Principal, number], Result>,
-  'get_redemption_tier' : ActorMethod<[Principal], Result_12>,
   'set_reserve_redemption_fee' : ActorMethod<[number], Result>,
   'set_reserve_redemptions_enabled' : ActorMethod<[boolean], Result>,
   'set_rmr_ceiling' : ActorMethod<[number], Result>,
