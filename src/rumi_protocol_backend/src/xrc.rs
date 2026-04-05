@@ -52,6 +52,8 @@ pub async fn fetch_icp_rate() {
                     };
                     if should_update {
                         s.set_icp_rate(UsdIcp::from(rate), Some(ts_nanos));
+                        let icp_ct = s.icp_collateral_type();
+                        crate::event::record_price_update(icp_ct, rate, ts_nanos);
                     }
                 });
             }

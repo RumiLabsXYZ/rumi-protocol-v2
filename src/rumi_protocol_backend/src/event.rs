@@ -8,6 +8,15 @@ use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
 
+/// Per-vault breakdown of a redemption: how much icUSD was redeemed and how much
+/// collateral was seized from each individual vault.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultRedemption {
+    pub vault_id: u64,
+    pub icusd_redeemed_e8s: u64,
+    pub collateral_seized: u64,
+}
+
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Event {
     #[serde(rename = "open_vault")]
@@ -77,6 +86,10 @@ pub enum Event {
         icusd_block_index: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timestamp: Option<u64>,
+        /// Per-vault breakdown: how much was redeemed from each vault.
+        /// None for legacy events recorded before this field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        vault_redemptions: Option<Vec<VaultRedemption>>,
     },
 
     #[serde(rename = "redemption_transfered")]
@@ -466,6 +479,28 @@ pub enum Event {
     SetThreePoolCanister {
         canister: Principal,
     },
+
+    /// Price update from XRC or other oracle. Recorded every time a collateral
+    /// price is fetched so we have a complete price history.
+    #[serde(rename = "price_update")]
+    PriceUpdate {
+        collateral_type: CollateralType,
+        /// Price as a string for full Decimal precision.
+        price: String,
+        timestamp: u64,
+    },
+
+    /// Admin correction of vault debt to fix replay interest drift.
+    #[serde(rename = "admin_debt_correction")]
+    AdminDebtCorrection {
+        vault_id: u64,
+        old_borrowed: u64,
+        new_borrowed: u64,
+        old_accrued: u64,
+        new_accrued: u64,
+        #[serde(default)]
+        timestamp: Option<u64>,
+    },
 }
 
 impl Event {
@@ -477,7 +512,12 @@ impl Event {
             Event::MarginTransfer { vault_id, .. } => vault_id == filter_vault_id,
             Event::LiquidateVault { vault_id, .. } => vault_id == filter_vault_id,
             Event::PartialLiquidateVault { vault_id, .. } => vault_id == filter_vault_id,
-            Event::RedemptionOnVaults { .. } => true,
+            Event::RedemptionOnVaults { vault_redemptions, .. } => {
+                match vault_redemptions {
+                    Some(vrs) => vrs.iter().any(|vr| &vr.vault_id == filter_vault_id),
+                    None => true, // Legacy events without per-vault data: show on all vaults
+                }
+            }
             Event::RedemptionTransfered { .. } => false,
             Event::RedistributeVault { vault_id, .. } => vault_id == filter_vault_id,
             Event::BorrowFromVault { vault_id, .. } => vault_id == filter_vault_id,
@@ -535,12 +575,14 @@ impl Event {
             Event::SetBorrowingFeeCurve { .. } => false,
             Event::SetInterestSplit { .. } => false,
             Event::SetThreePoolCanister { .. } => false,
+            Event::PriceUpdate { .. } => false,
+            Event::AdminDebtCorrection { vault_id: vid, .. } => vid == filter_vault_id,
         }
     }
 
-    /// Returns true if this is an AccrueInterest event (noisy, hidden from explorer).
+    /// Returns true if this is a noisy periodic event (hidden from explorer).
     pub fn is_accrue_interest(&self) -> bool {
-        matches!(self, Event::AccrueInterest { .. })
+        matches!(self, Event::AccrueInterest { .. } | Event::PriceUpdate { .. })
     }
 
     /// Check if a given principal is involved in this event (as owner, caller, or liquidator).
@@ -629,13 +671,17 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                             .to_u64().unwrap_or(0);
                         ICUSD::new(share.min(vault.accrued_interest.0))
                     } else { ICUSD::new(0) };
-                    vault.borrowed_icusd_amount -= liquidator_payment;
+                    // Use saturating_sub during replay: interest drift can inflate
+                    // vault debts, making the payment exceed the (drifted) balance.
+                    // This is safe because the replay path is only used once (first
+                    // upgrade); subsequent upgrades restore from stable memory.
+                    vault.borrowed_icusd_amount = vault.borrowed_icusd_amount.saturating_sub(liquidator_payment);
                     // Vault loses icp_to_liquidator + protocol_fee_collateral
                     // (old events have protocol_fee_collateral=None → 0, which is correct)
                     let total_collateral_seized = icp_to_liquidator.to_u64()
                         + protocol_fee_collateral.unwrap_or(0);
-                    vault.collateral_amount -= total_collateral_seized;
-                    vault.accrued_interest -= interest_share;
+                    vault.collateral_amount = vault.collateral_amount.saturating_sub(total_collateral_seized);
+                    vault.accrued_interest = vault.accrued_interest.saturating_sub(interest_share);
                 }
                 // Track 3USD reserves from stability pool liquidations
                 if let Some(reserves_e8s) = three_usd_reserves_e8s {
@@ -682,7 +728,11 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                 repayed_amount,
                 ..
             } => {
-                let _ = state.repay_to_vault(vault_id, repayed_amount);
+                // Cap repayment at current debt to survive replay drift
+                let capped = if let Some(vault) = state.vault_id_to_vaults.get(&vault_id) {
+                    ICUSD::new(repayed_amount.0.min(vault.borrowed_icusd_amount.0))
+                } else { repayed_amount };
+                let _ = state.repay_to_vault(vault_id, capped);
             }
             Event::ProvideLiquidity { amount, caller, .. } => {
                 state.provide_liquidity(amount, caller);
@@ -715,7 +765,11 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                 amount,
                 ..
             } => {
-                state.remove_margin_from_vault(vault_id, amount);
+                // Cap at vault's actual collateral to survive replay drift
+                if let Some(vault) = state.vault_id_to_vaults.get(&vault_id) {
+                    let capped = ICP::new(amount.to_u64().min(vault.collateral_amount));
+                    state.remove_margin_from_vault(vault_id, capped);
+                }
             }
             // In the match statement inside replay function
             Event::VaultWithdrawnAndClosed {
@@ -1008,6 +1062,15 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             Event::SetThreePoolCanister { canister } => {
                 state.three_pool_canister = Some(canister);
             },
+            Event::PriceUpdate { .. } => {
+                // Price history only; no state mutation needed during replay.
+            },
+            Event::AdminDebtCorrection { vault_id: vid, new_borrowed, new_accrued, .. } => {
+                if let Some(vault) = state.vault_id_to_vaults.get_mut(&vid) {
+                    vault.borrowed_icusd_amount = ICUSD::new(new_borrowed);
+                    vault.accrued_interest = ICUSD::new(new_accrued);
+                }
+            },
         }
     }
     state.next_available_vault_id = vault_id;
@@ -1167,6 +1230,11 @@ pub fn record_redemption_on_vaults(
     collateral_price: UsdIcp,
     icusd_block_index: u64,
 ) {
+    // Fee is already deducted from icusd_amount before calling redeem_on_vaults,
+    // so vault owners effectively keep the fee (less collateral seized for their debt).
+    // The fee portion of icUSD stays in the protocol canister (burned).
+    let redeem_ct = state.icp_collateral_type();
+    let vault_redemptions = state.redeem_on_vaults(icusd_amount, collateral_price, &redeem_ct);
     record_event(&Event::RedemptionOnVaults {
         owner,
         current_icp_rate: collateral_price,
@@ -1174,12 +1242,8 @@ pub fn record_redemption_on_vaults(
         fee_amount,
         icusd_block_index,
         timestamp: Some(now()),
+        vault_redemptions: if vault_redemptions.is_empty() { None } else { Some(vault_redemptions) },
     });
-    // Fee is already deducted from icusd_amount before calling redeem_on_vaults,
-    // so vault owners effectively keep the fee (less collateral seized for their debt).
-    // The fee portion of icUSD stays in the protocol canister (burned).
-    let redeem_ct = state.icp_collateral_type();
-    state.redeem_on_vaults(icusd_amount, collateral_price, &redeem_ct);
     let margin: ICP = icusd_amount / collateral_price;
     state
         .pending_redemption_transfer
@@ -1676,4 +1740,12 @@ pub fn record_set_interest_rate(
 pub fn record_accrue_interest(state: &mut State, now_nanos: u64) {
     record_event(&Event::AccrueInterest { timestamp: now_nanos });
     state.accrue_all_vault_interest(now_nanos);
+}
+
+pub fn record_price_update(collateral_type: CollateralType, price: Decimal, timestamp: u64) {
+    record_event(&Event::PriceUpdate {
+        collateral_type,
+        price: price.to_string(),
+        timestamp,
+    });
 }

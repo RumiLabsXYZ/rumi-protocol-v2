@@ -10,8 +10,9 @@ const MAX_CONCURRENT: usize = 100;
 const GUARD_TIMEOUT_NANOS: u64 = 5 * 60 * 1_000_000_000; // 5 minutes in nanoseconds
 
 // Track operation state
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum OperationState {
+    #[default]
     InProgress,
     Completed,
     Failed,

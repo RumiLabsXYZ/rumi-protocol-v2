@@ -764,6 +764,8 @@ const TYPE_NAMES: Record<string, string> = {
   init: 'Protocol Init',
   upgrade: 'Protocol Upgrade',
   accrue_interest: 'Accrue Interest',
+  price_update: 'Price Update',
+  admin_debt_correction: 'Admin Debt Correction',
 };
 
 function getTypeName(key: string): string {
@@ -1070,9 +1072,38 @@ export function formatEvent(event: any, vaultCollateralMap?: Map<number, string>
     // ── Redemptions ─────────────────────────────────────────────────
 
     case 'redemption_on_vaults': {
-      const amt = fmtE8s(d.icusd_amount);
       const fee = fmtE8s(d.fee_amount);
       pushIfPresent(fields, addressField('Redeemer', d.owner));
+
+      // If per-vault data exists and we're viewing a specific vault, show that vault's amount
+      const vaultRedemptions: any[] | undefined = d.vault_redemptions;
+      const contextVaultId = vaultCollateralMap?.size === 1 ? [...vaultCollateralMap.keys()][0] : undefined;
+      const vaultEntry = contextVaultId != null && vaultRedemptions
+        ? vaultRedemptions.find((vr: any) => Number(vr.vault_id) === contextVaultId)
+        : undefined;
+
+      if (vaultEntry) {
+        const vaultAmt = fmtE8s(vaultEntry.icusd_redeemed_e8s);
+        fields.push(amountField('icUSD Redeemed (this vault)', vaultEntry.icusd_redeemed_e8s));
+        const collateralSeized = vaultEntry.collateral_seized;
+        const ctPrincipal = vaultCollateralMap?.get(contextVaultId!) ?? '';
+        const sym = getTokenSymbol(ctPrincipal);
+        const dec = getTokenDecimals(ctPrincipal);
+        fields.push(textField('Collateral Seized', `${formatTokenAmount(BigInt(collateralSeized), dec)} ${sym}`));
+        fields.push(amountField('Total Redemption', d.icusd_amount));
+        fields.push(amountField('Fee', d.fee_amount));
+        if (d.current_icp_rate !== undefined) {
+          fields.push(textField('ICP Rate', `$${Number(d.current_icp_rate).toFixed(4)}`));
+        }
+        if (d.icusd_block_index !== undefined) fields.push(blockIndexField('icUSD Block Index', d.icusd_block_index));
+        if (ts) fields.push(timestampField(ts));
+        return {
+          summary: `Redeemed ${vaultAmt} icUSD from this vault`,
+          typeName, category, badgeColor, fields,
+        };
+      }
+
+      const amt = fmtE8s(d.icusd_amount);
       fields.push(amountField('icUSD Redeemed', d.icusd_amount));
       fields.push(amountField('Fee', d.fee_amount));
       if (d.current_icp_rate !== undefined) {

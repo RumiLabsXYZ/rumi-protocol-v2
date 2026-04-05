@@ -179,6 +179,7 @@ type Event = variant {
     fee_amount : nat64;
     current_icp_rate : blob;
     timestamp : opt nat64;
+    vault_redemptions : opt vec VaultRedemption;
   };
   set_recovery_parameters : record {
     recovery_interest_rate_apr : opt text;
@@ -312,6 +313,24 @@ type Event = variant {
     token_type : StableTokenType;
   };
   set_recovery_cr_multiplier : record { multiplier : text };
+  price_update : record {
+    collateral_type : principal;
+    price : text;
+    timestamp : nat64;
+  };
+  admin_debt_correction : record {
+    vault_id : nat64;
+    old_borrowed : nat64;
+    new_borrowed : nat64;
+    old_accrued : nat64;
+    new_accrued : nat64;
+    timestamp : opt nat64;
+  };
+};
+type VaultRedemption = record {
+  vault_id : nat64;
+  icusd_redeemed_e8s : nat64;
+  collateral_seized : nat64;
 };
 type Fees = record { redemption_fee : float64; borrowing_fee : float64 };
 type GetEventsArg = record { start : nat64; length : nat64 };
@@ -520,6 +539,11 @@ type Vault = record {
   borrowed_icusd_amount : nat64;
 };
 type VaultArg = record { vault_id : nat64; amount : nat64 };
+type VaultDebtCorrection = record {
+  vault_id : nat64;
+  correct_borrowed_e8s : nat64;
+  correct_accrued_interest_e8s : nat64;
+};
 type VaultArgWithToken = record {
   vault_id : nat64;
   amount : nat64;
@@ -531,6 +555,7 @@ service : (ProtocolArg) -> {
   add_margin_to_vault : (VaultArg) -> (Result_1);
   add_margin_with_deposit : (nat64) -> (Result_1);
   admin_correct_vault_collateral : (nat64, nat64, text) -> (Result);
+  admin_correct_vault_debts : (vec VaultDebtCorrection) -> (Result_11);
   admin_mint_icusd : (nat64, principal, text) -> (Result_1);
   admin_sweep_to_treasury : (text) -> (Result_1);
   borrow_from_vault : (VaultArg) -> (Result_2);
