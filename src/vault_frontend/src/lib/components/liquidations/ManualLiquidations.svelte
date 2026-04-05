@@ -11,6 +11,15 @@
   import { collateralStore } from '$lib/stores/collateralStore';
   import { getLiquidationCR, getMinimumCR } from '$lib/protocol';
 
+  const ANON_PRINCIPAL = '2vxsx-fae';
+
+  function resolveCollateralPrincipal(vault: CandidVault): string {
+    const raw = vault.collateral_type;
+    if (!raw) return CANISTER_IDS.ICP_LEDGER;
+    const text = typeof raw === 'string' ? raw : raw.toText?.() || CANISTER_IDS.ICP_LEDGER;
+    return text === ANON_PRINCIPAL ? CANISTER_IDS.ICP_LEDGER : text;
+  }
+
   // ── Color interpolation for health gauge (from VaultCard) ──
   const DANGER_HEX = '#e06b9f';
   const CAUTION_HEX = '#a78bfa';
@@ -124,18 +133,21 @@
     void collateralVersion;
     return allVaults
       .filter(v => !liquidatableVaults.some(lv => lv.vault_id === v.vault_id))
-      .sort((a, b) => calculateCollateralRatio(a) - calculateCollateralRatio(b));
+      .sort((a, b) => calculateHealthScore(a) - calculateHealthScore(b));
   })();
 
-  $: sortedVaults = [...liquidatableVaults].sort((a, b) => {
-    const crA = calculateCollateralRatio(a);
-    const crB = calculateCollateralRatio(b);
-    if (crA !== crB) return crA - crB;
-    return a.vault_id - b.vault_id;
-  });
+  $: sortedVaults = (() => {
+    void collateralVersion;
+    return [...liquidatableVaults].sort((a, b) => {
+      const hsA = calculateHealthScore(a);
+      const hsB = calculateHealthScore(b);
+      if (hsA !== hsB) return hsA - hsB;
+      return a.vault_id - b.vault_id;
+    });
+  })();
 
   function calculateCollateralRatio(vault: CandidVault): number {
-    const ctPrincipal = vault.collateral_type ? (typeof vault.collateral_type === 'string' ? vault.collateral_type : vault.collateral_type.toText?.() || CANISTER_IDS.ICP_LEDGER) : CANISTER_IDS.ICP_LEDGER;
+    const ctPrincipal = resolveCollateralPrincipal(vault);
     const ctInfo = collateralStore.getCollateralInfo(ctPrincipal);
     const decimals = ctInfo?.decimals ?? 8;
     const price = ctInfo?.price || (ctPrincipal === CANISTER_IDS.ICP_LEDGER ? icpPrice : 0);
@@ -146,12 +158,21 @@
     return isFinite(ratio) ? ratio : 0;
   }
 
+  function calculateHealthScore(vault: CandidVault): number {
+    const cr = calculateCollateralRatio(vault);
+    if (cr === Infinity) return Infinity;
+    const ci = getVaultCollateralInfo(vault);
+    const liqCR = getLiquidationCR(ci.ctPrincipal) * 100;
+    if (liqCR <= 0) return Infinity;
+    return cr / liqCR;
+  }
+
   function getVaultDebt(vault: CandidVault): number {
     return Number(vault.borrowed_icusd_amount || 0) / 1e8;
   }
 
   function getVaultCollateralInfo(vault: CandidVault) {
-    const ctPrincipal = vault.collateral_type ? (typeof vault.collateral_type === 'string' ? vault.collateral_type : vault.collateral_type.toText?.() || CANISTER_IDS.ICP_LEDGER) : CANISTER_IDS.ICP_LEDGER;
+    const ctPrincipal = resolveCollateralPrincipal(vault);
     const ctInfo = collateralStore.getCollateralInfo(ctPrincipal);
     const decimals = ctInfo?.decimals ?? 8;
     const price = ctInfo?.price || (ctPrincipal === CANISTER_IDS.ICP_LEDGER ? icpPrice : 0);

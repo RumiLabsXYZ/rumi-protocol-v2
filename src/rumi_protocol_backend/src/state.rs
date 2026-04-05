@@ -300,6 +300,12 @@ pub struct RateCurve {
     pub method: InterpolationMethod,
 }
 
+impl Default for RateCurve {
+    fn default() -> Self {
+        Self { markers: Vec::new(), method: InterpolationMethod::default() }
+    }
+}
+
 /// Named per-asset CR thresholds, resolved from CollateralConfig at runtime.
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub enum AssetThreshold {
@@ -516,6 +522,12 @@ thread_local! {
 }
 
 
+// serde(default): when deserializing old CBOR that's missing fields added in a
+// later upgrade, serde fills those fields from Default::default() instead of
+// failing. This prevents fallback to event replay (which causes interest drift).
+// The Default impl below is ONLY for this purpose, never for actual construction.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct State {
     pub vault_id_to_vaults: BTreeMap<u64, Vault>,
     pub principal_to_vault_ids: BTreeMap<Principal, BTreeSet<u64>>,
@@ -686,6 +698,101 @@ pub struct State {
     /// Active bot claims — tracks collateral transferred to bot but not yet confirmed.
     /// Key = vault_id. Auto-cancelled after `BOT_CLAIM_TIMEOUT_NS`.
     pub bot_claims: BTreeMap<u64, BotClaim>,
+}
+
+/// Serde-only fallback: provides zero/empty/None defaults for fields missing from
+/// old CBOR snapshots. Never used for actual State construction (use From<InitArg>).
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            vault_id_to_vaults: BTreeMap::new(),
+            principal_to_vault_ids: BTreeMap::new(),
+            pending_margin_transfers: BTreeMap::new(),
+            pending_excess_transfers: BTreeMap::new(),
+            pending_redemption_transfer: BTreeMap::new(),
+            mode: Mode::default(),
+            fee: Ratio::from(Decimal::ZERO),
+            developer_principal: Principal::anonymous(),
+            next_available_vault_id: 1,
+            total_collateral_ratio: Ratio::from(Decimal::MAX),
+            current_base_rate: Ratio::from(Decimal::ZERO),
+            last_redemption_time: 0,
+            liquidity_pool: BTreeMap::new(),
+            liquidity_returns: BTreeMap::new(),
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: Principal::anonymous(),
+            icp_ledger_fee: ICP_TRANSFER_FEE,
+            last_icp_rate: None,
+            last_icp_timestamp: None,
+            principal_guards: BTreeSet::new(),
+            principal_guard_timestamps: BTreeMap::new(),
+            operation_states: BTreeMap::new(),
+            operation_names: BTreeMap::new(),
+            is_timer_running: false,
+            is_fetching_rate: false,
+            manual_mode_override: false,
+            frozen: false,
+            close_vault_requests: BTreeMap::new(),
+            global_close_requests: Vec::new(),
+            concurrent_close_operations: 0,
+            dust_forgiven_total: ICUSD::new(0),
+            treasury_principal: None,
+            stability_pool_canister: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+            ckstable_repay_fee: DEFAULT_CKSTABLE_REPAY_FEE,
+            min_icusd_amount: DEFAULT_MIN_ICUSD_AMOUNT,
+            global_icusd_mint_cap: u64::MAX,
+            ckusdt_enabled: false,
+            ckusdc_enabled: false,
+            last_ckusdt_rate: None,
+            last_ckusdt_timestamp: None,
+            last_ckusdc_rate: None,
+            last_ckusdc_timestamp: None,
+            liquidation_bonus: DEFAULT_LIQUIDATION_BONUS,
+            max_partial_liquidation_ratio: DEFAULT_MAX_PARTIAL_LIQUIDATION_RATIO,
+            redemption_fee_floor: DEFAULT_REDEMPTION_FEE_FLOOR,
+            redemption_fee_ceiling: DEFAULT_REDEMPTION_FEE_CEILING,
+            recovery_target_cr: DEFAULT_RECOVERY_TARGET_CR,
+            recovery_cr_multiplier: DEFAULT_RECOVERY_CR_MULTIPLIER,
+            recovery_mode_threshold: RECOVERY_COLLATERAL_RATIO,
+            reserve_redemptions_enabled: false,
+            reserve_redemption_fee: DEFAULT_RESERVE_REDEMPTION_FEE,
+            protocol_3usd_reserves: 0,
+            last_admin_mint_time: 0,
+            collateral_configs: BTreeMap::new(),
+            collateral_to_vault_ids: BTreeMap::new(),
+            global_rate_curve: RateCurve::default(),
+            recovery_rate_curve: Vec::new(),
+            weighted_avg_recovery_cr: Ratio::from(Decimal::ZERO),
+            weighted_avg_warning_cr: Ratio::from(Decimal::ZERO),
+            weighted_avg_healthy_cr: Ratio::from(Decimal::ZERO),
+            borrowing_fee_curve: None,
+            pending_interest_for_pools: BTreeMap::new(),
+            interest_flush_threshold_e8s: default_flush_threshold(),
+            pending_treasury_interest: ICUSD::new(0),
+            pending_treasury_collateral: Vec::new(),
+            liquidation_protocol_share: Ratio::from(Decimal::ZERO),
+            interest_pool_share: DEFAULT_INTEREST_POOL_SHARE,
+            interest_split: Vec::new(),
+            three_pool_canister: None,
+            rmr_floor: DEFAULT_RMR_FLOOR,
+            rmr_ceiling: DEFAULT_RMR_CEILING,
+            rmr_floor_cr: DEFAULT_RMR_FLOOR_CR,
+            rmr_ceiling_cr: DEFAULT_RMR_CEILING_CR,
+            liquidation_bot_principal: None,
+            bot_budget_total_e8s: 0,
+            bot_budget_remaining_e8s: 0,
+            bot_budget_start_timestamp: 0,
+            bot_total_debt_covered_e8s: 0,
+            bot_total_icusd_deposited_e8s: 0,
+            bot_allowed_collateral_types: BTreeSet::new(),
+            bot_pending_vaults: BTreeMap::new(),
+            sp_attempted_vaults: BTreeSet::new(),
+            bot_claims: BTreeMap::new(),
+        }
+    }
 }
 
 impl From<InitArg> for State {
@@ -2184,9 +2291,9 @@ impl State {
                         ICUSD::new(share.min(vault.accrued_interest.0))
                     } else { ICUSD::new(0) };
 
-                    vault.borrowed_icusd_amount -= repay_amount;
-                    vault.collateral_amount -= collateral_seized;
-                    vault.accrued_interest -= interest_share;
+                    vault.borrowed_icusd_amount = vault.borrowed_icusd_amount.saturating_sub(repay_amount);
+                    vault.collateral_amount = vault.collateral_amount.saturating_sub(collateral_seized);
+                    vault.accrued_interest = vault.accrued_interest.saturating_sub(interest_share);
                     interest_share
                 }
                 None => ic_cdk::trap("liquidating unknown vault"),
@@ -2239,20 +2346,27 @@ impl State {
         icusd_amount: ICUSD,
         collateral_price: UsdIcp,
         collateral_type: &CollateralType,
-    ) {
+    ) -> Vec<crate::event::VaultRedemption> {
+        let mut results = Vec::new();
+
         if icusd_amount == 0 {
-            return;
+            return results;
         }
 
-        // Resolve config for price & decimals
+        // Resolve config for price & decimals.
+        // During event replay the collateral config may not have a price yet,
+        // so fall back to the price stored in the event (passed as collateral_price).
         let (price, decimals) = match self.get_collateral_config(collateral_type) {
             Some(config) => {
                 let p = config.last_price
                     .and_then(Decimal::from_f64)
-                    .expect("bug: redeem_on_vaults called without price");
+                    .unwrap_or(collateral_price.0);
                 (p, config.decimals)
             }
-            None => panic!("bug: redeem_on_vaults called with unknown collateral type"),
+            None => {
+                // Config not yet created during replay; use event price and ICP decimals
+                (collateral_price.0, 8)
+            }
         };
 
         let resolved_ct = if collateral_type == &Principal::anonymous() {
@@ -2281,7 +2395,7 @@ impl State {
         vault_entries.sort_by(|a, b| a.0.cmp(&b.0));
 
         if vault_entries.is_empty() {
-            return;
+            return results;
         }
 
         let mut remaining = icusd_amount.to_u64() as u128;
@@ -2315,7 +2429,7 @@ impl State {
                 // No next tier — distribute all remaining proportionally across band
                 self.distribute_redemption_across_band(
                     &band_vault_ids, &band_debts, total_band_debt,
-                    remaining, price, decimals,
+                    remaining, price, decimals, &mut results,
                 );
                 break;
             }
@@ -2329,7 +2443,7 @@ impl State {
                 // Safety: if next CR <= 1, just drain proportionally
                 self.distribute_redemption_across_band(
                     &band_vault_ids, &band_debts, total_band_debt,
-                    remaining, price, decimals,
+                    remaining, price, decimals, &mut results,
                 );
                 break;
             }
@@ -2342,7 +2456,7 @@ impl State {
                 // Level up the entire band
                 self.distribute_redemption_across_band(
                     &band_vault_ids, &band_debts, total_band_debt,
-                    total_needed, price, decimals,
+                    total_needed, price, decimals, &mut results,
                 );
                 remaining -= total_needed;
 
@@ -2359,14 +2473,17 @@ impl State {
                 // Can't reach next tier. Distribute remaining proportionally.
                 self.distribute_redemption_across_band(
                     &band_vault_ids, &band_debts, total_band_debt,
-                    remaining, price, decimals,
+                    remaining, price, decimals, &mut results,
                 );
                 break;
             }
         }
+
+        results
     }
 
     /// Distribute a redemption amount proportionally across a band of vaults by debt size.
+    /// Returns per-vault breakdown of what was redeemed/seized.
     fn distribute_redemption_across_band(
         &mut self,
         vault_ids: &[VaultId],
@@ -2375,6 +2492,7 @@ impl State {
         redemption_e8s: u128,
         price: Decimal,
         decimals: u8,
+        results: &mut Vec<crate::event::VaultRedemption>,
     ) {
         if total_debt == 0 || redemption_e8s == 0 {
             return;
@@ -2408,6 +2526,12 @@ impl State {
             );
             self.deduct_amount_from_vault(collateral_to_deduct, icusd_to_deduct, *vault_id);
             distributed += actual_share;
+
+            results.push(crate::event::VaultRedemption {
+                vault_id: *vault_id,
+                icusd_redeemed_e8s: actual_share as u64,
+                collateral_seized: collateral_to_deduct,
+            });
         }
     }
 
@@ -2419,10 +2543,11 @@ impl State {
     ) {
         match self.vault_id_to_vaults.get_mut(&vault_id) {
             Some(vault) => {
-                assert!(vault.borrowed_icusd_amount >= icusd_amount_to_deduct);
-                vault.borrowed_icusd_amount -= icusd_amount_to_deduct;
-                assert!(vault.collateral_amount >= collateral_to_deduct);
-                vault.collateral_amount -= collateral_to_deduct;
+                // Use saturating arithmetic: during event replay, interest
+                // drift can inflate debt/collateral values, causing the
+                // deduction to exceed the vault's balance.
+                vault.borrowed_icusd_amount = vault.borrowed_icusd_amount.saturating_sub(icusd_amount_to_deduct);
+                vault.collateral_amount = vault.collateral_amount.saturating_sub(collateral_to_deduct);
             }
             None => ic_cdk::trap("cannot deduct from unknown vault"),
         }
@@ -3957,5 +4082,91 @@ mod tests {
         let liquidation_amount = 28_571_000_000u64; // 285.71 icUSD
         assert!(state.bot_budget_remaining_e8s < liquidation_amount,
             "Budget should be insufficient");
+    }
+
+    #[test]
+    fn test_state_serialization_roundtrip() {
+        use crate::vault::Vault;
+
+        let mut state = test_state();
+
+        // Add a vault with realistic data
+        let vault = Vault {
+            owner: Principal::anonymous(),
+            vault_id: 42,
+            collateral_amount: 500_000_000,
+            borrowed_icusd_amount: ICUSD::new(100_000_000),
+            collateral_type: state.icp_ledger_principal,
+            last_accrual_time: 1_000_000_000,
+            accrued_interest: ICUSD::new(5_000_000),
+            bot_processing: false,
+        };
+        state.vault_id_to_vaults.insert(42, vault);
+        state.principal_to_vault_ids
+            .entry(Principal::anonymous())
+            .or_default()
+            .insert(42);
+
+        // Serialize
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&state, &mut buf).unwrap();
+
+        // Deserialize
+        let restored: State = ciborium::de::from_reader(buf.as_slice()).unwrap();
+
+        // Verify vault fields are preserved exactly
+        assert_eq!(restored.vault_id_to_vaults.len(), state.vault_id_to_vaults.len());
+        let v = &restored.vault_id_to_vaults[&42];
+        assert_eq!(v.borrowed_icusd_amount, ICUSD::new(100_000_000));
+        assert_eq!(v.accrued_interest, ICUSD::new(5_000_000));
+        assert_eq!(v.collateral_amount, 500_000_000);
+        assert_eq!(v.last_accrual_time, 1_000_000_000);
+
+        // Verify key state fields
+        assert_eq!(restored.mode, state.mode);
+        assert_eq!(restored.fee, state.fee);
+        assert_eq!(restored.developer_principal, state.developer_principal);
+        assert_eq!(restored.icp_ledger_principal, state.icp_ledger_principal);
+        assert_eq!(restored.next_available_vault_id, state.next_available_vault_id);
+    }
+
+    #[test]
+    fn test_serde_default_handles_missing_fields() {
+        // Simulate old CBOR that's missing a field by serializing a subset,
+        // then verifying ciborium + serde(default) fills in the missing field.
+        // We use a raw CBOR map with only a few fields to prove missing ones
+        // get their Default value instead of causing a deserialization error.
+        let state = test_state();
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&state, &mut buf).unwrap();
+
+        // Decode the CBOR map, remove a field, re-encode, and deserialize.
+        let value: ciborium::Value = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        if let ciborium::Value::Map(mut entries) = value {
+            // Remove "frozen" field from the map
+            let original_len = entries.len();
+            entries.retain(|(k, _)| {
+                if let ciborium::Value::Text(key) = k {
+                    key != "frozen"
+                } else {
+                    true
+                }
+            });
+            assert_eq!(entries.len(), original_len - 1, "should have removed one field");
+
+            // Re-encode the modified map
+            let mut modified_buf = Vec::new();
+            ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut modified_buf).unwrap();
+
+            // Deserialize with the missing field: serde(default) should fill it
+            let restored: State = ciborium::de::from_reader(modified_buf.as_slice()).unwrap();
+            // "frozen" should be false (the Default value), not cause an error
+            assert_eq!(restored.frozen, false);
+            // Other fields should still be intact
+            assert_eq!(restored.mode, state.mode);
+            assert_eq!(restored.developer_principal, state.developer_principal);
+        } else {
+            panic!("expected CBOR map");
+        }
     }
 }

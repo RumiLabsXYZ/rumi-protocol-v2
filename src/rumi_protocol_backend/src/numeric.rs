@@ -23,6 +23,12 @@ pub const NANOS_PER_YEAR: u64 = 365 * 24 * 60 * 60 * 1_000_000_000;
 #[derive(PartialEq, Eq, Debug, Ord, PartialOrd, Clone, Copy)]
 pub struct Amount<T>(pub Decimal, pub PhantomData<T>);
 
+impl<T> Default for Amount<T> {
+    fn default() -> Self {
+        Amount(Decimal::ZERO, PhantomData)
+    }
+}
+
 impl<T> Serialize for Amount<T> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -70,6 +76,12 @@ impl<T> Amount<T> {
 
 #[derive(PartialEq, Eq, Debug, Ord, PartialOrd, Clone, Copy)]
 pub struct Token<T>(pub u64, pub PhantomData<T>);
+
+impl<T> Default for Token<T> {
+    fn default() -> Self {
+        Token(0, PhantomData)
+    }
+}
 
 impl<T> Serialize for Token<T> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>

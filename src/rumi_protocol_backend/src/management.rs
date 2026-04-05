@@ -218,6 +218,9 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
                         if should_update {
                             config.last_price = Some(price);
                             config.last_price_timestamp = Some(ts_nanos);
+                            if let Some(price_dec) = rust_decimal::Decimal::from_f64(price) {
+                                crate::event::record_price_update(collateral_type, price_dec, ts_nanos);
+                            }
                         }
                     }
                 });
@@ -347,6 +350,7 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
             if should_update {
                 config.last_price = final_rate.to_f64();
                 config.last_price_timestamp = Some(ts_nanos);
+                crate::event::record_price_update(collateral_type, final_rate, ts_nanos);
             }
         }
     });

@@ -1394,7 +1394,8 @@ static async repayToVaultWithStable(
           const vaultId = Number(v.vault_id);
 
           // Resolve collateral type
-          const ctPrincipal = v.collateral_type.toText();
+          const ctRaw = v.collateral_type.toText();
+          const ctPrincipal = ctRaw === '2vxsx-fae' ? CANISTER_IDS.ICP_LEDGER : ctRaw;
           const ctInfo = collateralStore.getCollateralInfo(ctPrincipal);
           const ctDecimals = ctInfo?.decimals ?? 8;
           const ctDecimalsFactor = Math.pow(10, ctDecimals);

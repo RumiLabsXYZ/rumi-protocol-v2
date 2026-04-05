@@ -1,7 +1,7 @@
 use candid::{candid_method, Principal};
 use ic_canister_log::log;
 use ic_canisters_http_types::{HttpRequest, HttpResponse, HttpResponseBuilder};
-use ic_cdk_macros::{init, post_upgrade, query, update};
+use ic_cdk_macros::{init, pre_upgrade, post_upgrade, query, update};
 use rumi_protocol_backend::{
     event::Event,
     logs::INFO,
@@ -234,6 +234,17 @@ fn init(arg: ProtocolArg) {
     setup_timers();
 }
 
+#[pre_upgrade]
+fn pre_upgrade() {
+    use rumi_protocol_backend::storage::save_state_to_stable;
+
+    read_state(|state| {
+        save_state_to_stable(state);
+    });
+
+    log!(INFO, "[pre_upgrade]: state serialized to stable memory");
+}
+
 #[post_upgrade]
 fn post_upgrade(arg: ProtocolArg) {
     use rumi_protocol_backend::event::replay;
@@ -241,26 +252,40 @@ fn post_upgrade(arg: ProtocolArg) {
 
     let start = ic_cdk::api::instruction_counter();
 
-    log!(INFO, "[upgrade]: replaying {} events", count_events());
-
-    match arg {
+    // Extract and record the upgrade event
+    let upgrade_args = match arg {
         ProtocolArg::Init(_) => ic_cdk::trap("expected Upgrade got Init"),
-        ProtocolArg::Upgrade(upgrade_args) => {
+        ProtocolArg::Upgrade(args) => {
             log!(
                 INFO,
                 "[upgrade]: updating configuration with {:?}",
-                upgrade_args
+                args
             );
-            record_event(&Event::Upgrade(upgrade_args));
+            record_event(&Event::Upgrade(args.clone()));
+            args
         }
-    }
+    };
 
-    let state = replay(events()).unwrap_or_else(|e| {
-        ic_cdk::trap(&format!(
-            "[upgrade]: failed to replay the event log: {:?}",
-            e
-        ))
-    });
+    // Try to restore from stable memory (fast path, no drift)
+    let state = match rumi_protocol_backend::storage::load_state_from_stable() {
+        Some(mut state) => {
+            log!(INFO, "[upgrade]: restored state from stable memory (skipped event replay of {} events)", count_events());
+            // Apply upgrade args to the restored state (the snapshot was taken
+            // before this upgrade event, so we must apply it explicitly)
+            state.upgrade(upgrade_args);
+            state
+        }
+        None => {
+            // Fallback: replay events (first upgrade after this change, or recovery)
+            log!(INFO, "[upgrade]: no stable state found, replaying {} events", count_events());
+            replay(events()).unwrap_or_else(|e| {
+                ic_cdk::trap(&format!(
+                    "[upgrade]: failed to replay the event log: {:?}",
+                    e
+                ))
+            })
+        }
+    };
 
     // Post-upgrade validation: ensure collateral_configs is consistent
     validate_collateral_state(&state);
@@ -3778,6 +3803,63 @@ async fn admin_sweep_to_treasury(reason: String) -> Result<u64, ProtocolError> {
     .await;
 
     Ok(block_index)
+}
+
+// ── Admin Debt Correction ─────────────────────────────────────────────────
+
+#[derive(CandidType, Deserialize)]
+struct VaultDebtCorrection {
+    vault_id: u64,
+    correct_borrowed_e8s: u64,
+    correct_accrued_interest_e8s: u64,
+}
+
+/// Admin-only: correct vault debt amounts that were inflated by replay interest drift.
+/// Records an auditable event for each correction.
+#[update]
+#[candid_method(update)]
+fn admin_correct_vault_debts(corrections: Vec<VaultDebtCorrection>) -> Result<String, ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only developer can correct vault debts".to_string(),
+        ));
+    }
+
+    let now = ic_cdk::api::time();
+    let mut results = Vec::new();
+
+    mutate_state(|s| {
+        for c in &corrections {
+            if let Some(vault) = s.vault_id_to_vaults.get_mut(&c.vault_id) {
+                let old_borrowed = vault.borrowed_icusd_amount.0;
+                let old_accrued = vault.accrued_interest.0;
+                vault.borrowed_icusd_amount = ICUSD::new(c.correct_borrowed_e8s);
+                vault.accrued_interest = ICUSD::new(c.correct_accrued_interest_e8s);
+
+                rumi_protocol_backend::storage::record_event(&Event::AdminDebtCorrection {
+                    vault_id: c.vault_id,
+                    old_borrowed,
+                    new_borrowed: c.correct_borrowed_e8s,
+                    old_accrued,
+                    new_accrued: c.correct_accrued_interest_e8s,
+                    timestamp: Some(now),
+                });
+
+                results.push(format!(
+                    "vault#{}: borrowed {}→{}, accrued {}→{}",
+                    c.vault_id, old_borrowed, c.correct_borrowed_e8s,
+                    old_accrued, c.correct_accrued_interest_e8s
+                ));
+            } else {
+                results.push(format!("vault#{}: NOT FOUND", c.vault_id));
+            }
+        }
+    });
+
+    log!(INFO, "[admin_correct_vault_debts] Applied {} corrections", results.len());
+    Ok(results.join("\n"))
 }
 
 // ICRC-21 Consent Message (delegates to icrc21 module)
