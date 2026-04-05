@@ -525,15 +525,6 @@ pub struct PendingMarginTransfer {
     pub collateral_type: Principal,
 }
 
-/// Per-vault breakdown of a redemption: how much debt was reduced and collateral seized.
-#[derive(candid::CandidType, Copy, Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct VaultRedemptionImpact {
-    pub vault_id: u64,
-    /// icUSD debt reduced from this vault (e8s)
-    pub debt_reduced: u64,
-    /// Collateral seized from this vault (smallest unit, e.g. e8s for ICP)
-    pub collateral_seized: u64,
-}
 
 thread_local! {
     static __STATE: RefCell<Option<State>> = RefCell::default();
@@ -2914,17 +2905,8 @@ mod tests {
         });
 
         // Apply deltas as the replay handler would
-        let impacts = vec![
-            VaultRedemptionImpact { vault_id: 1, debt_reduced: 100_000_000, collateral_seized: 50_000_000 },
-            VaultRedemptionImpact { vault_id: 2, debt_reduced: 150_000_000, collateral_seized: 75_000_000 },
-        ];
-        for impact in &impacts {
-            state.deduct_amount_from_vault(
-                impact.collateral_seized,
-                ICUSD::from(impact.debt_reduced),
-                impact.vault_id,
-            );
-        }
+        state.deduct_amount_from_vault(50_000_000, ICUSD::from(100_000_000u64), 1);
+        state.deduct_amount_from_vault(75_000_000, ICUSD::from(150_000_000u64), 2);
 
         // Verify vault 1: 3 - 1 = 2 icUSD debt, 5 - 0.5 = 4.5 ICP
         let v1 = state.vault_id_to_vaults.get(&1).unwrap();
