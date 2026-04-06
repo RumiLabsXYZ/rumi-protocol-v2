@@ -13,7 +13,8 @@
     fetchInterestSplit, fetchBotStats, fetchStabilityPoolStatus,
     fetchThreePoolStatus, fetchEvents, fetchCollateralConfigs,
     fetchLiquidatableVaults, fetchAllSnapshots,
-    fetchAmmPools, fetchAmmSwapEventCount, fetchSwapEventCount
+    fetchAmmPools, fetchAmmSwapEventCount, fetchSwapEventCount,
+    fetchProtocolConfig
   } from '$services/explorer/explorerService';
   import {
     formatE8s, formatUsd, formatCR, formatBps,
@@ -69,6 +70,11 @@
   let allSnapshots: any[] = $state([]);
   let chartsLoading = $state(true);
   let chartsError: string | null = $state(null);
+
+  // Section 8: Protocol Config
+  let protocolConfig: any = $state(null);
+  let configLoading = $state(true);
+  let configError: string | null = $state(null);
 
   type TimeRange = '24h' | '7d' | '30d' | '90d' | 'all';
   let timeRange: TimeRange = $state('7d');
@@ -494,9 +500,21 @@
       }
     })();
 
+    // Section 8: Protocol Config
+    const configPromise = (async () => {
+      try {
+        protocolConfig = await fetchProtocolConfig();
+      } catch (e) {
+        console.error('[explorer] Config load failed:', e);
+        if (!isRefresh) configError = 'Failed to load protocol config';
+      } finally {
+        if (!isRefresh) configLoading = false;
+      }
+    })();
+
     await Promise.allSettled([
       heroPromise, collateralPromise, poolsPromise,
-      treasuryPromise, liquidationPromise, eventsPromise, chartsPromise
+      treasuryPromise, liquidationPromise, eventsPromise, chartsPromise, configPromise
     ]);
 
     if (isRefresh) isRefreshing = false;
@@ -537,6 +555,17 @@
   function shortenOwner(principal: string): string {
     if (principal.length <= 15) return principal;
     return `${principal.slice(0, 5)}...${principal.slice(-5)}`;
+  }
+
+  function shortenPrincipal(p: any): string {
+    const s = p?.toText?.() ?? String(p ?? '');
+    if (!s || s === '' || s === 'undefined') return 'N/A';
+    if (s.length <= 15) return s;
+    return `${s.slice(0, 5)}...${s.slice(-5)}`;
+  }
+
+  function formatPct(v: number): string {
+    return `${(v * 100).toFixed(2)}%`;
   }
 
   // Interest split color mapping
@@ -1358,6 +1387,354 @@
             <EventRow {event} index={Number(globalIndex)} {vaultCollateralMap} />
           {/each}
         </div>
+      {/if}
+    </div>
+  </section>
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       Section 7 — Protocol Config
+       ════════════════════════════════════════════════════════════════════ -->
+  <section>
+    <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl overflow-hidden">
+      <div class="px-5 py-4 border-b border-gray-700/50">
+        <h2 class="text-sm font-semibold text-gray-200">Protocol Configuration</h2>
+      </div>
+
+      {#if configLoading}
+        <div class="px-5 py-8 text-center text-gray-500 text-sm animate-pulse">Loading config...</div>
+      {:else if configError}
+        <div class="px-5 py-8 text-center text-red-400 text-sm">{configError}</div>
+      {:else if protocolConfig}
+        <div class="p-5 space-y-6">
+
+          <!-- Mode & Safety -->
+          <div>
+            <p class="text-xs text-gray-500 uppercase tracking-wider font-medium mb-3">Mode & Safety</p>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div class="bg-gray-700/30 rounded-lg p-3">
+                <p class="text-[11px] text-gray-400 mb-0.5">Mode</p>
+                <p class="text-sm font-medium text-white">{protocolConfig.mode ? Object.keys(protocolConfig.mode)[0] : 'Unknown'}</p>
+              </div>
+              <div class="bg-gray-700/30 rounded-lg p-3">
+                <p class="text-[11px] text-gray-400 mb-0.5">Frozen</p>
+                <p class="text-sm font-medium {protocolConfig.frozen ? 'text-red-400' : 'text-emerald-400'}">{protocolConfig.frozen ? 'Yes' : 'No'}</p>
+              </div>
+              <div class="bg-gray-700/30 rounded-lg p-3">
+                <p class="text-[11px] text-gray-400 mb-0.5">Manual Override</p>
+                <p class="text-sm font-medium text-white">{protocolConfig.manual_mode_override ? 'On' : 'Off'}</p>
+              </div>
+              <div class="bg-gray-700/30 rounded-lg p-3">
+                <p class="text-[11px] text-gray-400 mb-0.5">Recovery Threshold</p>
+                <p class="text-sm font-medium text-white tabular-nums">{formatPct(protocolConfig.recovery_mode_threshold)}</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Fees -->
+          <div>
+            <p class="text-xs text-gray-500 uppercase tracking-wider font-medium mb-3">Fees</p>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div class="bg-gray-700/30 rounded-lg p-3">
+                <p class="text-[11px] text-gray-400 mb-0.5">Borrowing Fee</p>
+                <p class="text-sm font-medium text-white tabular-nums">{formatPct(protocolConfig.borrowing_fee)}</p>
+              </div>
+              <div class="bg-gray-700/30 rounded-lg p-3">
+                <p class="text-[11px] text-gray-400 mb-0.5">Liquidation Bonus</p>
+                <p class="text-sm font-medium text-white tabular-nums">{formatPct(protocolConfig.liquidation_bonus)}</p>
+              </div>
+              <div class="bg-gray-700/30 rounded-lg p-3">
+                <p class="text-[11px] text-gray-400 mb-0.5">Liquidation Protocol Share</p>
+                <p class="text-sm font-medium text-white tabular-nums">{formatPct(protocolConfig.liquidation_protocol_share)}</p>
+              </div>
+              <div class="bg-gray-700/30 rounded-lg p-3">
+                <p class="text-[11px] text-gray-400 mb-0.5">ckStable Repay Fee</p>
+                <p class="text-sm font-medium text-white tabular-nums">{formatPct(protocolConfig.ckstable_repay_fee)}</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- RMR -->
+          <div>
+            <p class="text-xs text-gray-500 uppercase tracking-wider font-medium mb-3">Redemption Market Rate (RMR)</p>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div class="bg-gray-700/30 rounded-lg p-3">
+                <p class="text-[11px] text-gray-400 mb-0.5">RMR Floor</p>
+                <p class="text-sm font-medium text-white tabular-nums">{protocolConfig.rmr_floor.toFixed(4)}</p>
+              </div>
+              <div class="bg-gray-700/30 rounded-lg p-3">
+                <p class="text-[11px] text-gray-400 mb-0.5">RMR Ceiling</p>
+                <p class="text-sm font-medium text-white tabular-nums">{protocolConfig.rmr_ceiling.toFixed(4)}</p>
+              </div>
+              <div class="bg-gray-700/30 rounded-lg p-3">
+                <p class="text-[11px] text-gray-400 mb-0.5">Floor CR</p>
+                <p class="text-sm font-medium text-white tabular-nums">{formatPct(protocolConfig.rmr_floor_cr)}</p>
+              </div>
+              <div class="bg-gray-700/30 rounded-lg p-3">
+                <p class="text-[11px] text-gray-400 mb-0.5">Ceiling CR</p>
+                <p class="text-sm font-medium text-white tabular-nums">{formatPct(protocolConfig.rmr_ceiling_cr)}</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Redemption Fees -->
+          <div>
+            <p class="text-xs text-gray-500 uppercase tracking-wider font-medium mb-3">Redemption Fees</p>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div class="bg-gray-700/30 rounded-lg p-3">
+                <p class="text-[11px] text-gray-400 mb-0.5">Fee Floor</p>
+                <p class="text-sm font-medium text-white tabular-nums">{formatPct(protocolConfig.redemption_fee_floor)}</p>
+              </div>
+              <div class="bg-gray-700/30 rounded-lg p-3">
+                <p class="text-[11px] text-gray-400 mb-0.5">Fee Ceiling</p>
+                <p class="text-sm font-medium text-white tabular-nums">{formatPct(protocolConfig.redemption_fee_ceiling)}</p>
+              </div>
+              <div class="bg-gray-700/30 rounded-lg p-3">
+                <p class="text-[11px] text-gray-400 mb-0.5">Reserve Fee</p>
+                <p class="text-sm font-medium text-white tabular-nums">{formatPct(protocolConfig.reserve_redemption_fee)}</p>
+              </div>
+              <div class="bg-gray-700/30 rounded-lg p-3">
+                <p class="text-[11px] text-gray-400 mb-0.5">Reserve Redemptions</p>
+                <p class="text-sm font-medium {protocolConfig.reserve_redemptions_enabled ? 'text-emerald-400' : 'text-gray-400'}">{protocolConfig.reserve_redemptions_enabled ? 'Enabled' : 'Disabled'}</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Recovery Mode -->
+          <div>
+            <p class="text-xs text-gray-500 uppercase tracking-wider font-medium mb-3">Recovery Mode</p>
+            <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
+              <div class="bg-gray-700/30 rounded-lg p-3">
+                <p class="text-[11px] text-gray-400 mb-0.5">CR Multiplier</p>
+                <p class="text-sm font-medium text-white tabular-nums">{protocolConfig.recovery_cr_multiplier.toFixed(4)}</p>
+              </div>
+              <div class="bg-gray-700/30 rounded-lg p-3">
+                <p class="text-[11px] text-gray-400 mb-0.5">Max Partial Liq. Ratio</p>
+                <p class="text-sm font-medium text-white tabular-nums">{formatPct(protocolConfig.max_partial_liquidation_ratio)}</p>
+              </div>
+            </div>
+            {#if protocolConfig.recovery_rate_curve?.length}
+              <div class="mt-3">
+                <p class="text-[11px] text-gray-400 mb-2">Recovery Rate Curve</p>
+                <div class="flex flex-wrap gap-2">
+                  {#each protocolConfig.recovery_rate_curve as [threshold, rate]}
+                    <div class="bg-gray-700/30 rounded px-2.5 py-1.5 text-xs">
+                      <span class="text-gray-400">{threshold}:</span>
+                      <span class="text-white font-medium tabular-nums">{formatPct(rate)}</span>
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+          </div>
+
+          <!-- Limits -->
+          <div>
+            <p class="text-xs text-gray-500 uppercase tracking-wider font-medium mb-3">Limits</p>
+            <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
+              <div class="bg-gray-700/30 rounded-lg p-3">
+                <p class="text-[11px] text-gray-400 mb-0.5">Global Mint Cap</p>
+                <p class="text-sm font-medium text-white tabular-nums">{formatE8s(protocolConfig.global_icusd_mint_cap)} icUSD</p>
+              </div>
+              <div class="bg-gray-700/30 rounded-lg p-3">
+                <p class="text-[11px] text-gray-400 mb-0.5">Min icUSD Amount</p>
+                <p class="text-sm font-medium text-white tabular-nums">{formatE8s(protocolConfig.min_icusd_amount)} icUSD</p>
+              </div>
+              <div class="bg-gray-700/30 rounded-lg p-3">
+                <p class="text-[11px] text-gray-400 mb-0.5">Interest Flush Threshold</p>
+                <p class="text-sm font-medium text-white tabular-nums">{formatE8s(protocolConfig.interest_flush_threshold_e8s)} icUSD</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Interest Split -->
+          {#if protocolConfig.interest_split?.length}
+            <div>
+              <p class="text-xs text-gray-500 uppercase tracking-wider font-medium mb-3">Interest Split</p>
+              <div class="flex flex-wrap gap-2">
+                {#each protocolConfig.interest_split as entry}
+                  {@const dest = entry.destination ?? entry.dest ?? ''}
+                  <div class="bg-gray-700/30 rounded px-2.5 py-1.5 text-xs">
+                    <span class="text-gray-400">{splitLabels[dest] ?? dest}:</span>
+                    <span class="text-white font-medium tabular-nums">{formatBps(Number(entry.bps ?? 0))}</span>
+                  </div>
+                {/each}
+              </div>
+            </div>
+          {/if}
+
+          <!-- Rate Curves -->
+          {#if protocolConfig.global_rate_curve?.length}
+            <div>
+              <p class="text-xs text-gray-500 uppercase tracking-wider font-medium mb-3">Global Rate Curve</p>
+              <div class="flex flex-wrap gap-2">
+                {#each protocolConfig.global_rate_curve as [cr, rate]}
+                  <div class="bg-gray-700/30 rounded px-2.5 py-1.5 text-xs">
+                    <span class="text-gray-400">CR {formatPct(cr)}:</span>
+                    <span class="text-white font-medium tabular-nums">{formatPct(rate)}</span>
+                  </div>
+                {/each}
+              </div>
+            </div>
+          {/if}
+
+          {#if protocolConfig.borrowing_fee_curve?.length}
+            <div>
+              <p class="text-xs text-gray-500 uppercase tracking-wider font-medium mb-3">Borrowing Fee Curve</p>
+              <div class="flex flex-wrap gap-2">
+                {#each protocolConfig.borrowing_fee_curve as [cr, fee]}
+                  <div class="bg-gray-700/30 rounded px-2.5 py-1.5 text-xs">
+                    <span class="text-gray-400">CR {formatPct(cr)}:</span>
+                    <span class="text-white font-medium tabular-nums">{formatPct(fee)}</span>
+                  </div>
+                {/each}
+              </div>
+            </div>
+          {/if}
+
+          <!-- ckStable Tokens -->
+          <div>
+            <p class="text-xs text-gray-500 uppercase tracking-wider font-medium mb-3">Stablecoin Tokens</p>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div class="bg-gray-700/30 rounded-lg p-3">
+                <p class="text-[11px] text-gray-400 mb-0.5">ckUSDT</p>
+                <p class="text-sm font-medium {protocolConfig.ckusdt_enabled ? 'text-emerald-400' : 'text-gray-400'}">{protocolConfig.ckusdt_enabled ? 'Enabled' : 'Disabled'}</p>
+              </div>
+              <div class="bg-gray-700/30 rounded-lg p-3">
+                <p class="text-[11px] text-gray-400 mb-0.5">ckUSDC</p>
+                <p class="text-sm font-medium {protocolConfig.ckusdc_enabled ? 'text-emerald-400' : 'text-gray-400'}">{protocolConfig.ckusdc_enabled ? 'Enabled' : 'Disabled'}</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- External Principals -->
+          <div>
+            <p class="text-xs text-gray-500 uppercase tracking-wider font-medium mb-3">External Canisters</p>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {#if protocolConfig.treasury_principal?.[0]}
+                <div class="bg-gray-700/30 rounded-lg p-3">
+                  <p class="text-[11px] text-gray-400 mb-0.5">Treasury</p>
+                  <p class="text-xs font-mono text-white">{shortenPrincipal(protocolConfig.treasury_principal[0])}</p>
+                </div>
+              {/if}
+              {#if protocolConfig.stability_pool_canister?.[0]}
+                <div class="bg-gray-700/30 rounded-lg p-3">
+                  <p class="text-[11px] text-gray-400 mb-0.5">Stability Pool</p>
+                  <p class="text-xs font-mono text-white">{shortenPrincipal(protocolConfig.stability_pool_canister[0])}</p>
+                </div>
+              {/if}
+              {#if protocolConfig.three_pool_canister?.[0]}
+                <div class="bg-gray-700/30 rounded-lg p-3">
+                  <p class="text-[11px] text-gray-400 mb-0.5">3Pool</p>
+                  <p class="text-xs font-mono text-white">{shortenPrincipal(protocolConfig.three_pool_canister[0])}</p>
+                </div>
+              {/if}
+              {#if protocolConfig.liquidation_bot_principal?.[0]}
+                <div class="bg-gray-700/30 rounded-lg p-3">
+                  <p class="text-[11px] text-gray-400 mb-0.5">Liquidation Bot</p>
+                  <p class="text-xs font-mono text-white">{shortenPrincipal(protocolConfig.liquidation_bot_principal[0])}</p>
+                </div>
+              {/if}
+            </div>
+          </div>
+
+          <!-- Bot Config -->
+          <div>
+            <p class="text-xs text-gray-500 uppercase tracking-wider font-medium mb-3">Liquidation Bot</p>
+            <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
+              <div class="bg-gray-700/30 rounded-lg p-3">
+                <p class="text-[11px] text-gray-400 mb-0.5">Budget Total</p>
+                <p class="text-sm font-medium text-white tabular-nums">{formatE8s(protocolConfig.bot_budget_total_e8s)} icUSD</p>
+              </div>
+              <div class="bg-gray-700/30 rounded-lg p-3">
+                <p class="text-[11px] text-gray-400 mb-0.5">Budget Remaining</p>
+                <p class="text-sm font-medium text-white tabular-nums">{formatE8s(protocolConfig.bot_budget_remaining_e8s)} icUSD</p>
+              </div>
+              {#if protocolConfig.bot_allowed_collateral_types?.length}
+                <div class="bg-gray-700/30 rounded-lg p-3">
+                  <p class="text-[11px] text-gray-400 mb-0.5">Allowed Collateral</p>
+                  <p class="text-xs text-white">{protocolConfig.bot_allowed_collateral_types.map((p: any) => getTokenSymbol(p?.toText?.() ?? String(p))).join(', ')}</p>
+                </div>
+              {/if}
+            </div>
+          </div>
+
+          <!-- Per-Collateral Configs -->
+          {#if protocolConfig.collateral_configs?.length}
+            <div>
+              <p class="text-xs text-gray-500 uppercase tracking-wider font-medium mb-3">Per-Collateral Configuration</p>
+              <div class="space-y-3">
+                {#each protocolConfig.collateral_configs as [principal, cfg]}
+                  {@const pid = principal?.toText?.() ?? String(principal)}
+                  {@const symbol = getTokenSymbol(pid)}
+                  {@const statusKey = cfg.status ? (typeof cfg.status === 'object' ? Object.keys(cfg.status)[0] : String(cfg.status)) : 'Unknown'}
+                  {@const liqRatio = cfg.liquidation_ratio instanceof Uint8Array || Array.isArray(cfg.liquidation_ratio) ? decodeRustDecimal(cfg.liquidation_ratio) : 0}
+                  {@const borrowThreshold = cfg.borrow_threshold_ratio instanceof Uint8Array || Array.isArray(cfg.borrow_threshold_ratio) ? decodeRustDecimal(cfg.borrow_threshold_ratio) : 0}
+                  {@const interestRate = cfg.interest_rate_apr instanceof Uint8Array || Array.isArray(cfg.interest_rate_apr) ? decodeRustDecimal(cfg.interest_rate_apr) : 0}
+                  {@const borrowingFee = cfg.borrowing_fee instanceof Uint8Array || Array.isArray(cfg.borrowing_fee) ? decodeRustDecimal(cfg.borrowing_fee) : 0}
+                  {@const liqBonus = cfg.liquidation_bonus instanceof Uint8Array || Array.isArray(cfg.liquidation_bonus) ? decodeRustDecimal(cfg.liquidation_bonus) : 0}
+                  {@const recoveryTargetCr = cfg.recovery_target_cr instanceof Uint8Array || Array.isArray(cfg.recovery_target_cr) ? decodeRustDecimal(cfg.recovery_target_cr) : 0}
+                  {@const debtCeiling = Number(cfg.debt_ceiling ?? 0n)}
+                  {@const isUnlimited = debtCeiling > 1e18}
+                  <div class="bg-gray-700/20 border border-gray-700/40 rounded-lg p-4">
+                    <div class="flex items-center gap-2 mb-3">
+                      <span class="text-sm font-semibold text-white">{symbol}</span>
+                      <StatusBadge status={statusKey} />
+                      <span class="text-[10px] text-gray-500 font-mono ml-auto">{pid}</span>
+                    </div>
+                    <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+                      <div>
+                        <span class="text-gray-400">Liq. Ratio:</span>
+                        <span class="text-white font-medium tabular-nums ml-1">{formatPct(liqRatio)}</span>
+                      </div>
+                      <div>
+                        <span class="text-gray-400">Borrow Threshold:</span>
+                        <span class="text-white font-medium tabular-nums ml-1">{formatPct(borrowThreshold)}</span>
+                      </div>
+                      <div>
+                        <span class="text-gray-400">Interest APR:</span>
+                        <span class="text-white font-medium tabular-nums ml-1">{formatPct(interestRate)}</span>
+                      </div>
+                      <div>
+                        <span class="text-gray-400">Borrowing Fee:</span>
+                        <span class="text-white font-medium tabular-nums ml-1">{formatPct(borrowingFee)}</span>
+                      </div>
+                      <div>
+                        <span class="text-gray-400">Liq. Bonus:</span>
+                        <span class="text-white font-medium tabular-nums ml-1">{formatPct(liqBonus)}</span>
+                      </div>
+                      <div>
+                        <span class="text-gray-400">Recovery Target CR:</span>
+                        <span class="text-white font-medium tabular-nums ml-1">{formatPct(recoveryTargetCr)}</span>
+                      </div>
+                      <div>
+                        <span class="text-gray-400">Debt Ceiling:</span>
+                        <span class="text-white font-medium tabular-nums ml-1">{isUnlimited ? 'Unlimited' : formatE8s(debtCeiling) + ' icUSD'}</span>
+                      </div>
+                      <div>
+                        <span class="text-gray-400">Min Deposit:</span>
+                        <span class="text-white font-medium tabular-nums ml-1">{(Number(cfg.min_collateral_deposit ?? 0n) / Math.pow(10, cfg.decimals ?? 8)).toFixed(cfg.decimals <= 6 ? cfg.decimals : 4)}</span>
+                      </div>
+                    </div>
+                    {#if cfg.rate_curve?.[0]}
+                      {@const curve = cfg.rate_curve[0]}
+                      <div class="mt-2 text-xs">
+                        <span class="text-gray-400">Rate Curve ({curve.method ? Object.keys(curve.method)[0] : 'Unknown'}):</span>
+                        <span class="text-white ml-1">
+                          {#each curve.markers ?? [] as marker, i}
+                            <span class="tabular-nums">{formatPct(marker.cr)} &rarr; {formatPct(marker.rate)}</span>{#if i < (curve.markers?.length ?? 0) - 1}<span class="text-gray-500">, </span>{/if}
+                          {/each}
+                        </span>
+                      </div>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            </div>
+          {/if}
+
+        </div>
+      {:else}
+        <div class="px-5 py-8 text-center text-gray-500 text-sm">No config data available</div>
       {/if}
     </div>
   </section>

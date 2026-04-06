@@ -78,6 +78,22 @@ export async function fetchProtocolStatus(): Promise<any | null> {
 	}
 }
 
+// ── Protocol config (all admin-settable parameters) ─────────────────────────
+
+export async function fetchProtocolConfig(): Promise<any | null> {
+	const key = 'config:protocol';
+	const cached = getCached<any>(key, TTL.STATUS);
+	if (cached) return cached;
+
+	try {
+		const result = await (publicActor as any).get_protocol_config();
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchProtocolConfig failed:', err);
+		return null;
+	}
+}
+
 // ── Protocol mode ────────────────────────────────────────────────────────────
 
 /** Protocol mode is derived from protocol status (status.mode). */
