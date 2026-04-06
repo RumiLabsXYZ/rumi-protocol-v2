@@ -21,6 +21,17 @@
   // Interest split from protocol status
   let interestSplit: { destination: string; bps: number }[] = [];
 
+  // Reactive interest split values (Svelte can't track interestSplit inside splitPct calls)
+  $: stabilityPoolSplit = interestSplit.length > 0
+    ? (Number(interestSplit.find(s => s.destination === 'stability_pool')?.bps ?? 0) / 100).toFixed(0) + '%'
+    : '—';
+  $: threePoolSplit = interestSplit.length > 0
+    ? (Number(interestSplit.find(s => s.destination === 'three_pool')?.bps ?? 0) / 100).toFixed(0) + '%'
+    : '—';
+  $: treasurySplit = interestSplit.length > 0
+    ? (Number(interestSplit.find(s => s.destination === 'treasury')?.bps ?? 0) / 100).toFixed(0) + '%'
+    : '—';
+
   $: rmrFloorPct = (rmrFloor * 100).toFixed(0);
   $: rmrCeilingPct = (rmrCeiling * 100).toFixed(0);
   $: currentRmr = systemCR >= rmrFloorCr
@@ -47,15 +58,6 @@
   }
   function rmrCurveY(rate: number): number {
     return 120 - ((rate - rmrRateMin) / (rmrRateMax - rmrRateMin || 1)) * 95;
-  }
-
-  function splitPct(dest: string): string {
-    if (!interestSplit || interestSplit.length === 0) return '—';
-    const entry = interestSplit.find((s: any) => {
-      const d = s.destination ?? s.dest ?? '';
-      return d === dest;
-    });
-    return entry ? (Number(entry.bps) / 100).toFixed(0) + '%' : '—';
   }
 
   function pctRaw(val: number, decimals = 1): string {
@@ -203,7 +205,7 @@
       </div>
     {/if}
     <p>Reserve redemptions are the cleanest outcome: you burn icUSD and receive ckStables in return. No vaults are affected.</p>
-    <p>Reserves grow when users repay vault debt with ckUSDT or ckUSDC. Note that interest revenue from stablecoin repayments is split according to the protocol's interest split: currently <span class="live">{splitPct('stability_pool')}</span> to the stability pool, <span class="live">{splitPct('three_pool')}</span> to the 3pool, and <span class="live">{splitPct('treasury')}</span> to treasury.</p>
+    <p>Reserves grow when users repay vault debt with ckUSDT or ckUSDC. Note that interest revenue from stablecoin repayments is split according to the protocol's interest split: currently <span class="live">{stabilityPoolSplit}</span> to the stability pool, <span class="live">{threePoolSplit}</span> to the 3pool, and <span class="live">{treasurySplit}</span> to treasury.</p>
   </section>
 
   <section class="doc-section">
