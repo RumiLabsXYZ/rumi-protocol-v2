@@ -4,8 +4,6 @@
   import { protocolService } from '$lib/services/protocol';
   import { fetchProtocolConfig } from '$services/explorer/explorerService';
   import { getTokenSymbol } from '$utils/explorerHelpers';
-  import type { InterestSplitArg } from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did';
-
   let reserveRedemptionFee = 0;
   let redemptionFeeFloor = 0;
   let redemptionFeeCeiling = 0;
@@ -19,6 +17,9 @@
 
   // Collateral priority tiers: Map<tierNumber, symbolList>
   let collateralTiers: Map<number, string[]> = new Map();
+
+  // Interest split from protocol status
+  let interestSplit: { destination: string; bps: number }[] = [];
 
   $: rmrFloorPct = (rmrFloor * 100).toFixed(0);
   $: rmrCeilingPct = (rmrCeiling * 100).toFixed(0);
@@ -48,10 +49,12 @@
     return 120 - ((rate - rmrRateMin) / (rmrRateMax - rmrRateMin || 1)) * 95;
   }
 
-  let interestSplit: InterestSplitArg[] = [];
-
   function splitPct(dest: string): string {
-    const entry = interestSplit.find(s => s.destination === dest);
+    if (!interestSplit || interestSplit.length === 0) return '—';
+    const entry = interestSplit.find((s: any) => {
+      const d = s.destination ?? s.dest ?? '';
+      return d === dest;
+    });
     return entry ? (Number(entry.bps) / 100).toFixed(0) + '%' : '—';
   }
 
@@ -67,7 +70,7 @@
 
   onMount(async () => {
     try {
-      const [rrFee, rfFloor, rfCeil, rrEnabled, rFloor, rCeil, rFloorCr, rCeilCr, split, status, config] = await Promise.all([
+      const [rrFee, rfFloor, rfCeil, rrEnabled, rFloor, rCeil, rFloorCr, rCeilCr, status] = await Promise.all([
         publicActor.get_reserve_redemption_fee() as Promise<number>,
         publicActor.get_redemption_fee_floor() as Promise<number>,
         publicActor.get_redemption_fee_ceiling() as Promise<number>,
@@ -76,9 +79,7 @@
         publicActor.get_rmr_ceiling() as Promise<number>,
         publicActor.get_rmr_floor_cr() as Promise<number>,
         publicActor.get_rmr_ceiling_cr() as Promise<number>,
-        publicActor.get_interest_split(),
         protocolService.getProtocolStatus(),
-        fetchProtocolConfig(),
       ]);
       reserveRedemptionFee = Number(rrFee);
       redemptionFeeFloor = Number(rfFloor);
@@ -89,9 +90,14 @@
       rmrFloorCr = Number(rFloorCr);
       rmrCeilingCr = Number(rCeilCr);
       systemCR = status.totalCollateralRatio ?? 2.0;
-      interestSplit = split;
+      interestSplit = status.interestSplit ?? [];
+    } catch (e) {
+      console.error('Failed to fetch redemption params:', e);
+    }
 
-      // Build collateral tier map from protocol config
+    // Fetch collateral tiers separately so a failure doesn't break the rest
+    try {
+      const config = await fetchProtocolConfig();
       if (config?.collateral_configs) {
         const tierMap = new Map<number, string[]>();
         for (const [principal, cfg] of config.collateral_configs) {
@@ -104,8 +110,9 @@
         collateralTiers = tierMap;
       }
     } catch (e) {
-      console.error('Failed to fetch redemption params:', e);
+      console.error('Failed to fetch collateral tiers:', e);
     }
+
     loaded = true;
   });
 </script>
