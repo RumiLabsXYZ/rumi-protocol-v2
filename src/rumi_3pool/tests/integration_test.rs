@@ -410,3 +410,320 @@ fn query_pool_status(
         WasmResult::Reject(msg) => panic!("get_pool_status rejected: {}", msg),
     }
 }
+
+// ─── Dynamic fee + bot/explorer endpoint tests ───
+
+struct TestEnv {
+    pic: pocket_ic::PocketIc,
+    pool_id: Principal,
+    test_user: Principal,
+    admin: Principal,
+}
+
+/// Build a fully initialized 3pool environment with a balanced 1M / 1M / 1M pool.
+fn setup_balanced_pool() -> TestEnv {
+    let pic = PocketIcBuilder::new().with_application_subnet().build();
+
+    let minting_account = Principal::self_authenticating(&[100, 100, 100]);
+    let test_user = Principal::self_authenticating(&[1, 2, 3, 4]);
+    let admin = Principal::self_authenticating(&[5, 6, 7, 8]);
+
+    struct LedgerSpec {
+        name: &'static str,
+        symbol: &'static str,
+        decimals: u8,
+        initial_balance: u128,
+    }
+
+    let ledger_specs = [
+        LedgerSpec { name: "icUSD", symbol: "icUSD", decimals: 8, initial_balance: 1_000_000_000_000_000 },
+        LedgerSpec { name: "ckUSDT", symbol: "ckUSDT", decimals: 6, initial_balance: 10_000_000_000_000 },
+        LedgerSpec { name: "ckUSDC", symbol: "ckUSDC", decimals: 6, initial_balance: 10_000_000_000_000 },
+    ];
+
+    let mut ledger_ids = Vec::new();
+    for spec in &ledger_specs {
+        let ledger_id = pic.create_canister();
+        pic.add_cycles(ledger_id, 2_000_000_000_000);
+        let init_args = LedgerInitArgs {
+            minting_account: Account { owner: minting_account, subaccount: None },
+            fee_collector_account: None,
+            transfer_fee: candid::Nat::from(0u64),
+            decimals: Some(spec.decimals),
+            max_memo_length: Some(32),
+            token_name: spec.name.to_string(),
+            token_symbol: spec.symbol.to_string(),
+            metadata: vec![],
+            initial_balances: vec![(
+                Account { owner: test_user, subaccount: None },
+                candid::Nat::from(spec.initial_balance),
+            )],
+            feature_flags: Some(FeatureFlags { icrc2: true }),
+            maximum_number_of_accounts: None,
+            accounts_overflow_trim_quantity: None,
+            archive_options: ArchiveOptions {
+                num_blocks_to_archive: 2000,
+                trigger_threshold: 1000,
+                controller_id: admin,
+                max_transactions_per_response: None,
+                max_message_size_bytes: None,
+                cycles_for_archive_creation: None,
+                node_max_memory_size_bytes: None,
+                more_controller_ids: None,
+            },
+        };
+        let encoded = encode_args((LedgerArg::Init(init_args),)).unwrap();
+        pic.install_canister(ledger_id, icrc1_ledger_wasm(), encoded, None);
+        ledger_ids.push(ledger_id);
+    }
+
+    let pool_init_args = ThreePoolInitArgs {
+        tokens: [
+            TokenConfig { ledger_id: ledger_ids[0], symbol: "icUSD".to_string(), decimals: 8, precision_mul: 10_000_000_000 },
+            TokenConfig { ledger_id: ledger_ids[1], symbol: "ckUSDT".to_string(), decimals: 6, precision_mul: 1_000_000_000_000 },
+            TokenConfig { ledger_id: ledger_ids[2], symbol: "ckUSDC".to_string(), decimals: 6, precision_mul: 1_000_000_000_000 },
+        ],
+        initial_a: 100,
+        swap_fee_bps: 4,
+        admin_fee_bps: 5000,
+        admin,
+    };
+
+    let pool_id = pic.create_canister();
+    pic.add_cycles(pool_id, 2_000_000_000_000);
+    pic.install_canister(pool_id, three_pool_wasm(), encode_one(pool_init_args).unwrap(), None);
+
+    // Approve pool on all 3 ledgers.
+    for ledger_id in &ledger_ids {
+        let approve_args = ApproveArgs {
+            from_subaccount: None,
+            spender: Account { owner: pool_id, subaccount: None },
+            amount: candid::Nat::from(u128::MAX),
+            expected_allowance: None,
+            expires_at: None,
+            fee: None,
+            memo: None,
+            created_at_time: None,
+        };
+        pic.update_call(*ledger_id, test_user, "icrc2_approve", encode_one(approve_args).unwrap())
+            .expect("icrc2_approve failed");
+    }
+
+    // Seed pool with 1M / 1M / 1M.
+    let add_liq_amounts: Vec<u128> = vec![100_000_000_000_000, 1_000_000_000_000, 1_000_000_000_000];
+    let res = pic
+        .update_call(pool_id, test_user, "add_liquidity", encode_args((add_liq_amounts, 0u128)).unwrap())
+        .expect("add_liquidity failed");
+    if let WasmResult::Reply(bytes) = res {
+        let r: Result<candid::Nat, ThreePoolError> = decode_one(&bytes).unwrap();
+        r.expect("add_liquidity err");
+    }
+
+    TestEnv { pic, pool_id, test_user, admin }
+}
+
+fn quote_swap(env: &TestEnv, i: u8, j: u8, dx: u128) -> QuoteSwapResult {
+    let res = env
+        .pic
+        .query_call(env.pool_id, Principal::anonymous(), "quote_swap", encode_args((i, j, dx)).unwrap())
+        .expect("quote_swap failed");
+    match res {
+        WasmResult::Reply(bytes) => {
+            let r: Result<QuoteSwapResult, ThreePoolError> = decode_one(&bytes).unwrap();
+            r.expect("quote_swap returned err")
+        }
+        WasmResult::Reject(msg) => panic!("quote_swap rejected: {}", msg),
+    }
+}
+
+fn do_swap(env: &TestEnv, i: u8, j: u8, dx: u128) -> u128 {
+    let res = env
+        .pic
+        .update_call(env.pool_id, env.test_user, "swap", encode_args((i, j, dx, 0u128)).unwrap())
+        .expect("swap failed");
+    match res {
+        WasmResult::Reply(bytes) => {
+            let r: Result<candid::Nat, ThreePoolError> = decode_one(&bytes).unwrap();
+            r.expect("swap returned err").0.try_into().unwrap()
+        }
+        WasmResult::Reject(msg) => panic!("swap rejected: {}", msg),
+    }
+}
+
+fn get_swap_events_v2(env: &TestEnv) -> Vec<SwapEventV2> {
+    let res = env
+        .pic
+        .query_call(env.pool_id, Principal::anonymous(), "get_swap_events_v2", encode_args((1000u64, 0u64)).unwrap())
+        .expect("get_swap_events_v2 failed");
+    match res {
+        WasmResult::Reply(bytes) => decode_one::<Vec<SwapEventV2>>(&bytes).unwrap(),
+        WasmResult::Reject(msg) => panic!("rejected: {}", msg),
+    }
+}
+
+fn last_swap_event(env: &TestEnv) -> SwapEventV2 {
+    // get_swap_events_v2 returns newest-first.
+    get_swap_events_v2(env).into_iter().next().expect("no swap events")
+}
+
+/// Lower the imbalance saturation so that modest swaps clearly exercise the
+/// dynamic fee curve (default saturation of 0.25 requires very large swaps to
+/// move the SSD-based imbalance metric meaningfully on a 1M/1M/1M pool).
+fn set_aggressive_fee_curve(env: &TestEnv) {
+    let params = FeeCurveParams { min_fee_bps: 1, max_fee_bps: 99, imb_saturation: 1_000_000 };
+    let res = env
+        .pic
+        .update_call(env.pool_id, env.admin, "set_fee_curve_params", encode_one(params).unwrap())
+        .expect("set_fee_curve_params call failed");
+    if let WasmResult::Reply(bytes) = res {
+        let r: Result<(), ThreePoolError> = decode_one(&bytes).unwrap();
+        r.expect("set_fee_curve_params returned err");
+    }
+}
+
+#[test]
+fn test_dynamic_fee_imbalancing_swap_pays_more() {
+    let env = setup_balanced_pool();
+    set_aggressive_fee_curve(&env);
+    // Imbalance the pool with a sizeable icUSD -> ckUSDT swap.
+    let dx: u128 = 100_000 * 100_000_000; // 100k icUSD
+    do_swap(&env, 0, 1, dx);
+    let ev = last_swap_event(&env);
+    assert!(
+        ev.fee_bps > 1,
+        "imbalancing swap fee_bps should exceed MIN (got {}, imb_after={})",
+        ev.fee_bps, ev.imbalance_after
+    );
+    assert!(!ev.is_rebalancing, "swap should be marked imbalancing");
+}
+
+#[test]
+fn test_dynamic_fee_rebalancing_swap_pays_min() {
+    let env = setup_balanced_pool();
+    // First push the pool out of balance: icUSD -> ckUSDT.
+    do_swap(&env, 0, 1, 50_000 * 100_000_000);
+    // Now swap back the other way (ckUSDT -> icUSD): rebalancing.
+    let q = quote_swap(&env, 1, 0, 1_000 * 1_000_000);
+    assert!(q.is_rebalancing, "expected rebalancing quote");
+    assert_eq!(q.fee_bps, 1, "rebalancing trades must pay MIN_FEE (1 bps)");
+}
+
+#[test]
+fn test_dominant_flow_taxed() {
+    let env = setup_balanced_pool();
+    set_aggressive_fee_curve(&env);
+    // Repeatedly do icUSD -> ckUSDT, the dominant direction. Fee should grow.
+    let dx: u128 = 50_000 * 100_000_000;
+    let mut fees = Vec::new();
+    for _ in 0..4 {
+        do_swap(&env, 0, 1, dx);
+        fees.push(last_swap_event(&env).fee_bps);
+    }
+    assert!(
+        fees.last().unwrap() > fees.first().unwrap(),
+        "dominant flow fee should grow: {:?}",
+        fees
+    );
+    assert!(
+        *fees.last().unwrap() > 1,
+        "later dominant-flow fee should exceed MIN, got {:?}",
+        fees
+    );
+}
+
+#[test]
+fn test_set_fee_curve_params_admin_only() {
+    let env = setup_balanced_pool();
+    let new_params = FeeCurveParams {
+        min_fee_bps: 2,
+        max_fee_bps: 80,
+        imb_saturation: 200_000_000,
+    };
+
+    // Non-admin attempt: should fail.
+    let non_admin = Principal::self_authenticating(&[42, 42, 42]);
+    let res = env
+        .pic
+        .update_call(env.pool_id, non_admin, "set_fee_curve_params", encode_one(new_params.clone()).unwrap())
+        .expect("call returned");
+    if let WasmResult::Reply(bytes) = res {
+        let r: Result<(), ThreePoolError> = decode_one(&bytes).unwrap();
+        assert!(matches!(r, Err(ThreePoolError::Unauthorized)), "non-admin must be rejected");
+    }
+
+    // Admin: should succeed.
+    let res = env
+        .pic
+        .update_call(env.pool_id, env.admin, "set_fee_curve_params", encode_one(new_params.clone()).unwrap())
+        .expect("call returned");
+    if let WasmResult::Reply(bytes) = res {
+        let r: Result<(), ThreePoolError> = decode_one(&bytes).unwrap();
+        r.expect("admin set_fee_curve_params failed");
+    }
+
+    // Verify it stuck.
+    let res = env
+        .pic
+        .query_call(env.pool_id, Principal::anonymous(), "get_fee_curve_params", encode_args(()).unwrap())
+        .expect("query failed");
+    if let WasmResult::Reply(bytes) = res {
+        let got: FeeCurveParams = decode_one(&bytes).unwrap();
+        assert_eq!(got.min_fee_bps, 2);
+        assert_eq!(got.max_fee_bps, 80);
+        assert_eq!(got.imb_saturation, 200_000_000);
+    }
+}
+
+#[test]
+fn test_quote_swap_matches_swap() {
+    let env = setup_balanced_pool();
+    let dx: u128 = 10_000 * 100_000_000;
+    let q = quote_swap(&env, 0, 1, dx);
+    let actual = do_swap(&env, 0, 1, dx);
+    assert_eq!(actual, q.amount_out, "quote and swap output must match");
+    let ev = last_swap_event(&env);
+    assert_eq!(ev.fee_bps, q.fee_bps, "fee_bps must match between quote and swap");
+}
+
+#[test]
+fn test_get_pool_health_basic() {
+    let env = setup_balanced_pool();
+    let res = env
+        .pic
+        .query_call(env.pool_id, Principal::anonymous(), "get_pool_health", encode_args(()).unwrap())
+        .expect("get_pool_health failed");
+    match res {
+        WasmResult::Reply(bytes) => {
+            let h: PoolHealth = decode_one(&bytes).unwrap();
+            // Balanced pool: imbalance should be very small.
+            assert!(h.current_imbalance < 10_000_000, "balanced pool imbalance should be ~0, got {}", h.current_imbalance);
+            assert_eq!(h.fee_at_min, 1, "fee_at_min should be MIN_FEE_BPS=1");
+            assert!(h.fee_at_max_imbalance_swap >= h.fee_at_min);
+        }
+        WasmResult::Reject(msg) => panic!("get_pool_health rejected: {}", msg),
+    }
+}
+
+// ─── Task 23: Migration / upgrade test ───
+
+#[test]
+fn test_upgrade_preserves_swap_events() {
+    let env = setup_balanced_pool();
+    // Do a few swaps.
+    for _ in 0..3 {
+        do_swap(&env, 0, 1, 1_000 * 100_000_000);
+    }
+    // Snapshot v2 events before upgrade.
+    let before = get_swap_events_v2(&env);
+    assert_eq!(before.len(), 3);
+
+    // Upgrade canister to itself (re-runs post_upgrade migration).
+    env.pic
+        .upgrade_canister(env.pool_id, three_pool_wasm(), encode_args(()).unwrap(), None)
+        .expect("upgrade failed");
+
+    let after = get_swap_events_v2(&env);
+    assert_eq!(after.len(), 3, "events must survive upgrade");
+    assert_eq!(after[0].id, before[0].id);
+    assert_eq!(after[2].id, before[2].id);
+}
