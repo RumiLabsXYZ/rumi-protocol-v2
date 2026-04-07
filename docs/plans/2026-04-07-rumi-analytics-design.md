@@ -74,7 +74,8 @@ src/rumi_analytics/
 
 Reused verbatim from the 3pool Phase A migration:
 
-- `SlimState` lives in `StableCell<MemoryId(0)>` and holds only: admin principal, source-canister ids config, cursors per source stream, backfill flags, last-snapshot timestamps per collector, balance-tracker bookmarks, per-source error counters.
+- `SlimState` lives in `StableCell<MemoryId(0)>` and holds only: admin principal, source-canister ids config, last-snapshot timestamps per collector, per-source error counters, and the cached `circulating_supply_icusd` / `circulating_supply_3usd` values that the HTTP `/api/supply` endpoint reads (refreshed by the pull cycle, see below).
+- **Cursors are NOT in SlimState.** Each source stream gets its own dedicated `StableCell<u64>` at a reserved MemoryId so cursor advancement is atomic with the StableLog write that uses it. This avoids the failure mode where a SlimState write succeeds but the corresponding event log write fails (or vice versa). Bookmark and cursor are written in the same tier callback.
 - All series go to `StableLog`s with reserved MemoryIds.
 - All keyed lookups go to `StableBTreeMap`s.
 - `pre_upgrade` does `set_slim(snapshot_slim())`. That is the entire body. No giant blob serialization.
@@ -149,17 +150,30 @@ pub const MEM_EVT_VAULTS_IDX:           MemoryId = MemoryId::new(50);
 pub const MEM_EVT_VAULTS_DATA:          MemoryId = MemoryId::new(51);
 // 52-55 reserved
 
-// BalanceTracker maps
+// BalanceTracker maps (StableBTreeMap<Account, u128>)
 pub const MEM_BAL_ICUSD:                MemoryId = MemoryId::new(56);
 pub const MEM_BAL_3USD:                 MemoryId = MemoryId::new(57);
+// First-seen maps (StableBTreeMap<Account, u64> = first-non-zero timestamp)
 pub const MEM_FIRSTSEEN_ICUSD:          MemoryId = MemoryId::new(58);
 pub const MEM_FIRSTSEEN_3USD:           MemoryId = MemoryId::new(59);
 // 60-63 reserved
 ```
 
+**Structure type per MemoryId**:
+- MemoryId 0: `StableCell<SlimState>`.
+- MemoryIds 1-7: `StableCell<u64>` (one per cursor).
+- MemoryIds 10-51 (paired IDX/DATA): `StableLog<RowType>`.
+- MemoryIds 56-59: `StableBTreeMap`.
+
+This labeling is non-negotiable. Wrapping the wrong structure type around a MemoryId at Phase 1 corrupts the layout for the canister's lifetime.
+
 ### Row types
 
 Every snapshot row carries a `timestamp_ns: u64` as its first field. That is the natural primary key for time-range queries (binary-searchable on the StableLog index). All row types are versioned via Candid with `Option<T>` for new fields, same upgrade-compat discipline as 3pool's state.
+
+### BalanceTracker FirstSeen semantics
+
+`FirstSeen[account]` is set to the timestamp of the first ICRC-3 block that gives the account a non-zero balance, and is **never overwritten thereafter**. If a holder drains to zero and later receives funds again, FirstSeen is preserved as the original first-seen-ever timestamp. The "new vs returning" daily metric is then computed as: an account is "new today" if `FirstSeen >= today_start`, otherwise "returning". Accounts that go to zero and back are always "returning."
 
 ### Pagination scheme
 
@@ -180,7 +194,7 @@ Implementation: binary-search the StableLog index for `from_ts`, walk forward em
 
 Conventions: `Daily` = 00:00 UTC timer. `Fast` = 5min timer. `Hourly` = top of hour. `Event` = pulled on the 60s cursor poll, mirrored into a per-event StableLog. `Live` = computed on demand, no storage.
 
-### `collectors/tvl.rs` — Daily TVL & system health
+### `collectors/tvl.rs` - Daily TVL & system health
 
 | Metric | Source | Cadence | Storage |
 |---|---|---|---|
@@ -191,7 +205,7 @@ Conventions: `Daily` = 00:00 UTC timer. `Fast` = 5min timer. `Hourly` = top of h
 | Stability pool TVL, depositor count, avg deposit | stability_pool `get_pool_stats` | Daily | DAILY_STABILITY |
 | Stability pool realized ICP gains, APY estimate | stability_pool | Daily | DAILY_STABILITY |
 
-### `collectors/vaults.rs` — Daily vault behavior
+### `collectors/vaults.rs` - Daily vault behavior
 
 | Metric | Source | Cadence | Storage |
 |---|---|---|---|
@@ -204,7 +218,7 @@ Conventions: `Daily` = 00:00 UTC timer. `Fast` = 5min timer. `Hourly` = top of h
 | Vault create→first borrow latency | derived from EVT_VAULTS | Live | (computed) |
 | Borrow size distribution | derived from EVT_VAULTS | Live | (computed) |
 
-### `collectors/holders.rs` — Holders & distribution
+### `collectors/holders.rs` - Holders & distribution
 
 Powered by BalanceTracker: tails ICRC-3 blocks per ledger via cursors, maintains `StableBTreeMap<Account, u128>` and `StableBTreeMap<Account, FirstSeen>`. Updated every 60s as part of the pull cycle.
 
@@ -252,33 +266,132 @@ Powered by BalanceTracker: tails ICRC-3 blocks per ledger via cursors, maintains
 
 ### `collectors/cycles.rs`
 
+**Important**: management canister `canister_status` is an `update` call requiring controller status, which would violate the "zero update calls to source canisters" invariant and require analytics to be a controller of every Rumi canister. Instead, **each Rumi canister exposes its own `get_cycle_balance() -> nat` query method**, callable by anyone. Analytics calls those public queries. This is added to the Phase 0 source-canister query checklist.
+
 | Metric | Source | Cadence | Storage |
 |---|---|---|---|
-| Cycle balance per canister | each canister's status | Hourly | HOURLY_CYCLES |
+| Cycle balance per canister | each canister's `get_cycle_balance()` (NEW) | Hourly | HOURLY_CYCLES |
 | Cycle burn rate | derived | Live | (computed) |
 | Time-to-empty projection | derived | Live | (computed) |
 | XRC fetch success/failure rate | backend (NEW counters) | Hourly | HOURLY_CYCLES |
+| Analytics canister's own cycle balance | `ic_cdk::api::canister_balance()` | Hourly | HOURLY_CYCLES |
 
-### `queries/live.rs` — Quant signals (all on-demand, zero storage)
+### `queries/live.rs` - Quant signals (on-demand, derived from existing logs)
 
-TWAPs (5min, 1h, 24h, configurable), VWAPs (same intervals), rolling realized volatility (1h, 24h, 7d), daily OHLC for icUSD and 3USD, peg deviation, cross-venue spread, fee curve position, liquidation queue depth, trade size distribution, order flow imbalance, price impact curves, stability pool ICP gain projection, liquidation EV calculator, vault risk score, 3pool LP APY, stability pool APY, effective annualized CDP cost, open interest, liquidation cascade simulator. Each function reads a bounded window from the relevant `StableLog` and computes. No caching.
+All of these are computed on demand from already-stored data. None require their own snapshot log.
+
+| Metric | Computed from | Notes |
+|---|---|---|
+| TWAP / VWAP (5min, 1h, 24h, configurable window) | FAST_PRICES, EVT_SWAPS | Window length is a query parameter |
+| Rolling realized volatility (1h, 24h, 7d) | FAST_PRICES | |
+| Daily OHLC for icUSD / 3USD | FAST_PRICES | |
+| Peg deviation (current) | FAST_PRICES (latest row) | History readable via `/api/series/prices` |
+| Cross-venue spread | FAST_PRICES (3pool vs AMM legs) | |
+| Fee curve position | HOURLY_FEE_CURVE (latest) | |
+| Liquidation queue depth | DAILY_VAULTS (latest histogram) plus FAST_PRICES (current ICP price) | Day-stale on the vault list; for fresher data the explorer can call backend's `list_open_vaults` directly |
+| Trade size distribution | EVT_SWAPS (last N rows) | |
+| Order flow imbalance | EVT_SWAPS (last 1h rows) | |
+| Price impact curves | 3pool current state via cached FAST_3POOL row | |
+| Stability pool ICP gain projection | DAILY_STABILITY (recent rows) | |
+| Liquidation EV calculator | DAILY_VAULTS + FAST_PRICES | |
+| Vault risk score | DAILY_VAULTS + FAST_PRICES | |
+| 3pool LP APY | FAST_3POOL (virtual price growth) plus DAILY_FEES | |
+| Stability pool APY | DAILY_STABILITY | |
+| Effective annualized CDP cost | DAILY_FEES + HOURLY_FEE_CURVE | |
+| Open interest | DAILY_VAULTS (sum of debt) | |
+| Liquidation cascade simulator | DAILY_VAULTS + FAST_PRICES | |
+
+Each function reads a bounded window from the relevant `StableLog` and computes. No caching, no inter-canister calls (so each is callable from a `query` context).
+
+**Note on liquidation queue depth freshness**: the most accurate version requires the current vault list, which is only refreshed daily in DAILY_VAULTS. If the explorer needs sub-daily freshness it should call `rumi_protocol_backend.list_open_vaults` directly rather than going through analytics; analytics will not proxy that call (per the best-effort architecture).
 
 ### New source-canister queries needed
 
 Each is additive, no semantic changes. Verified precisely in Phase 0 by reading every source `.did` file:
 
 1. **rumi_protocol_backend**:
-   - `list_open_vaults(offset, limit) -> (Vec<VaultSummary>, next_offset)` — paginated, returns id/owner/collateral/debt/cr.
-   - `get_events_since(cursor, limit) -> (Vec<BackendEvent>, next_cursor)` — unified event stream (vault open/close/borrow/repay, liquidations).
+   - `list_open_vaults(offset, limit) -> (Vec<VaultSummary>, next_offset)` - paginated, returns id/owner/collateral/debt/cr.
+   - `get_events_since(cursor, limit) -> (Vec<BackendEvent>, next_cursor)` - unified event stream (vault open/close/borrow/repay, liquidations).
+   - `get_cycle_balance() -> nat` (public query).
    - Optional: `get_xrc_stats() -> XrcStats`.
-2. **rumi_3pool**: `get_swap_events_since`, `get_liquidity_events_since`. ICRC-3 `icrc3_get_blocks` already exists on the standard interface.
-3. **rumi_amm**: `get_swap_events_since`. Almost certainly needs to be added since the AMM still uses heap-blob upgrade.
-4. **rumi_stability_pool**: `get_events_since` cursor for deposit/withdraw/gain-distribution events.
-5. **icusd_ledger / icusd_index**: standard ICRC-3 `get_blocks` already exists on the stock wasm. No changes needed.
+2. **rumi_3pool**: `get_swap_events_since`, `get_liquidity_events_since`, `get_cycle_balance`. ICRC-3 `icrc3_get_blocks` already exists on the standard interface.
+3. **rumi_amm**: `get_swap_events_since`, `get_cycle_balance`. Almost certainly needs to be added since the AMM still uses heap-blob upgrade.
+4. **rumi_stability_pool**: `get_events_since` cursor for deposit/withdraw/gain-distribution events, `get_cycle_balance`.
+5. **rumi_treasury**, **liquidation_bot**: `get_cycle_balance`.
+6. **icusd_ledger / icusd_index**: standard ICRC-3 `get_blocks` already exists on the stock wasm. No changes needed. Cycle balance comes from existing wallet/dashboard tooling and is omitted from analytics.
+
+### Row type sketches (load-bearing for Phase 2 PRs)
+
+```candid
+type VaultSummary = record {
+  id: nat64;
+  owner: principal;
+  collateral_e8s: nat;
+  debt_e8s: nat;
+  cr_bps: nat32;          // collateralization ratio in basis points
+  opened_at_ns: nat64;
+};
+
+type BackendEvent = record {
+  block_index: nat64;
+  timestamp_ns: nat64;
+  payload: variant {
+    VaultOpened: record { id: nat64; owner: principal; collateral_e8s: nat };
+    VaultClosed: record { id: nat64 };
+    Borrow:      record { id: nat64; amount_e8s: nat };
+    Repay:       record { id: nat64; amount_e8s: nat };
+    Liquidation: record {
+      id: nat64;
+      collateral_seized_e8s: nat;
+      debt_cleared_e8s: nat;
+      liquidator: principal;
+      icp_price_at_time_e8s: nat;
+    };
+  };
+};
+
+type SwapEvent = record {
+  block_index: nat64;
+  timestamp_ns: nat64;
+  venue: variant { ThreePool; Amm };
+  user: principal;
+  in_coin: text; out_coin: text;
+  in_amount: nat; out_amount: nat;
+  fee: nat;
+  realized_slippage_bps: nat32;
+};
+
+type LiquidityEvent = record {
+  block_index: nat64;
+  timestamp_ns: nat64;
+  user: principal;
+  kind: variant { Add; Remove };
+  amounts: vec nat;
+  lp_delta: nat;
+};
+
+type StabilityEvent = record {
+  block_index: nat64;
+  timestamp_ns: nat64;
+  user: principal;
+  kind: variant { Deposit; Withdraw; GainDistribution };
+  icusd_amount: nat;
+  icp_gain: nat;
+};
+
+type XrcStats = record {
+  success_count: nat64;
+  failure_count: nat64;
+  last_error: opt text;
+  last_success_ts: nat64;
+};
+```
+
+These shapes are the contract between source-canister PRs and analytics. Source canisters may already have similar internal types; the Phase 0 audit determines whether to expose those directly or wrap them.
 
 ## Cadences, timers, cycle cost
 
-### Five timers, all in `setup_timers()`
+### Four timers, all in `setup_timers()`
 
 ```rust
 pub fn setup_timers() {
@@ -289,27 +402,29 @@ pub fn setup_timers() {
 }
 ```
 
-**No `#[ic_cdk::heartbeat]`** — that macro is the #1 cycle burner per project memory and is forbidden.
+**No `#[ic_cdk::heartbeat]`** - that macro is the #1 cycle burner per project memory and is forbidden.
 
-### Tier 1 — Pull cycle (60s)
+### Tier 1 - Pull cycle (60s)
 
 Drains every cursor. One inter-canister `query` call per source stream (currently 7 streams). Each call is bounded by `limit` (default 500 events). The cursor advances atomically only after the events are written to the corresponding EVT_* StableLog. If a source is unreachable, that cursor doesn't advance and the next pull retries. **No silent failures**: any non-`Ok` result increments a per-source error counter in `SlimState`, gets logged via `ic_cdk::println!`, and is exposed via `get_collector_health()`. The pull cycle also drives BalanceTracker for icusd_ledger and 3pool blocks.
 
-### Tier 2 — Fast snapshot (5min)
+The pull cycle additionally **refreshes the cached `circulating_supply_*` values** in `SlimState` by calling `icrc1_total_supply` on each ledger and subtracting the configured exclusion list. This is what `/api/supply` reads from a query context.
+
+### Tier 2 - Fast snapshot (5min)
 
 Reads current state from 3pool (`get_pool_state`, `get_virtual_price`) and backend (`get_protocol_status`). Writes one row to FAST_PRICES and one row to FAST_3POOL. ~5 inter-canister calls per tick.
 
-### Tier 3 — Hourly snapshot
+### Tier 3 - Hourly snapshot
 
 Walks every Rumi canister, calls `canister_status` (or a dedicated cycles endpoint if added), writes one HOURLY_CYCLES row containing all balances. Reads borrowing fee curve params, writes one HOURLY_FEE_CURVE row. ~12 calls per hour.
 
-### Tier 4 — Daily snapshot (00:00 UTC)
+### Tier 4 - Daily snapshot (00:00 UTC)
 
 The big rollup. Calls `list_open_vaults` paginated, aggregates into vault distribution / histogram / leaderboard rows, writes DAILY_TVL, DAILY_VAULTS, DAILY_LIQUIDATIONS, DAILY_SWAPS, DAILY_FEES, DAILY_STABILITY, DAILY_HOLDERS_ICUSD, DAILY_HOLDERS_3USD. The holder snapshots come from BalanceTracker which is already up-to-date from the 60s pull cycle, so they are free.
 
-### Tier 5 — Daily housekeeping (00:00 UTC, after Tier 4)
+### Daily housekeeping (folded into the Tier 4 callback, runs after rollups)
 
-Recompute Gini, top-10/100 share, churn from BalanceTracker. All in-memory work over one BTreeMap, no external calls.
+Recompute Gini, top-10/100 share, churn from BalanceTracker. All in-memory work over one BTreeMap, no external calls. This is part of the same daily timer callback, not a separate timer.
 
 ### Wall-clock alignment
 
@@ -338,7 +453,7 @@ Implemented via `ic-canisters-http-types`.
 
 | Path | Response | Notes |
 |---|---|---|
-| `GET /api/supply` | `text/plain` decimal `f64` icUSD circulating | CoinGecko's strict format. Computed live from `icusd_ledger.icrc1_total_supply()`. |
+| `GET /api/supply` | `text/plain` decimal `f64` icUSD circulating | CoinGecko's strict format. **Served from a cached value in `SlimState`** because `http_request` runs in a query context and cannot make inter-canister calls. The pull cycle (60s) refreshes the cache by calling `icusd_ledger.icrc1_total_supply()` and subtracting any addresses on the `excluded_from_circulating` list (default: protocol treasury, stability pool, backend canister). The exclusion list is admin-configurable. |
 | `GET /api/supply/raw` | `text/plain` u128 e8s integer | For consumers that want exact precision. |
 | `GET /api/supply/3usd` | same `f64` format | 3USD circulating. |
 | `GET /api/supply/3usd/raw` | u128 e8s | |
@@ -348,7 +463,7 @@ Implemented via `ic-canisters-http-types`.
 
 ### Bulk historical export
 
-All paginated, all share the `RangeQuery` shape. CSV by default; `Accept: application/json` for JSON. Pagination uses HTTP `Link: <...>; rel="next"` headers in addition to `next_cursor` in JSON responses.
+All paginated, all share the `RangeQuery` shape. CSV by default; `Accept: application/json` for JSON. Pagination uses HTTP `Link: <...>; rel="next"` headers in addition to `next_cursor` in JSON responses. The `next` URL is the same path with the query string `?from_ts=<last_ts+1>&to_ts=<original_to>&limit=<original_limit>` so consumers can follow the chain without parsing the body.
 
 | Path | Returns |
 |---|---|
@@ -393,7 +508,7 @@ Analytics is read-only-from-source, public-write-nothing, and never on a money p
 2. **Admin gating on mutating analytics endpoints.** `set_admin`, `trigger_backfill`, `set_collector_enabled`, `set_top_n_holders`, `set_source_canister_id` all require `caller() == admin`. Public queries are open.
 3. **No new PII surface.** ICP principals are already public on-chain via existing `icrc3_get_blocks` on the ledgers and `get_all_lp_holders` on 3pool. Analytics doesn't add a new disclosure beyond existing public data.
 4. **DoS resistance.** Every paginated query is hard-capped at `limit=2000`. HTTP endpoints answer from the same pagination layer. No unbounded reads. The 60s pull cycle has bounded work per tick.
-5. **Upgrade safety.** `pre_upgrade` is `set_slim` only (small, fast, can't OOM). `post_upgrade` re-arms timers and verifies cursor consistency by checking each cursor is `<= source.log_length`. If a cursor is ahead of the source, the canister logs and refuses to advance until admin intervention.
+5. **Upgrade safety.** `pre_upgrade` is `set_slim` only (small, fast, can't OOM). `post_upgrade` re-arms timers; cursor consistency is checked lazily on the next pull cycle by comparing the current cursor against the next batch returned from the source (if the source returns 0 new events for a cursor that should have data, the per-source error counter increments and admin can investigate). No `log_length` query is required on source canisters.
 6. **No sensitive admin secrets stored.** The admin principal is the only privileged value, stored in `SlimState`. No API keys, no signing material.
 7. **Public API documented as best-effort.** `/api/events/since` and live-query endpoints carry an explicit warning that they are observability tooling, not a trading oracle. This is the social contract that lets us upgrade analytics without coordinating with downstream consumers.
 
@@ -401,7 +516,7 @@ Analytics is read-only-from-source, public-write-nothing, and never on a money p
 
 ### Unit tests (`cargo test`)
 
-- Pure functions in `queries/live.rs` (TWAP, VWAP, Gini, OHLC, EV calc, cascade sim) — property-tested with synthetic logs.
+- Pure functions in `queries/live.rs` (TWAP, VWAP, Gini, OHLC, EV calc, cascade sim) - property-tested with synthetic logs.
 - Pagination correctness in `queries/historical.rs`.
 - Cursor advancement and idempotency in `sources/*.rs`.
 - BalanceTracker state machine: applying ICRC-3 blocks in order produces correct balances.
@@ -431,28 +546,28 @@ A `scripts/check-analytics.sh` (or documented `dfx canister call` invocations) h
 
 ## Phased implementation plan
 
-### Phase 0 — Source canister audit (no analytics code yet)
+### Phase 0 - Source canister audit (no analytics code yet)
 
 Read every `.did` file for source canisters. Produce a precise diff: which queries already exist vs which we need to add. Output is a checklist appended to this doc. Reading task, gates Phase 2.
 
-### Phase 1 — Skeleton + storage layer + one metric end-to-end
+### Phase 1 - Skeleton + storage layer + one metric end-to-end
 
 Smallest thing that proves the architecture works.
 
 - Create `src/rumi_analytics/` crate, `Cargo.toml`, `rumi_analytics.did`, register in `dfx.json`.
-- Implement `storage.rs` with the full MemoryId map.
-- Implement `state.rs` (SlimState, snapshot/hydrate, pre/post_upgrade).
-- Implement `timers.rs` with all five timers wired but most callbacks empty.
+- Implement `storage.rs` with the full MemoryId map. Each MemoryId is documented with its structure type (StableLog / StableBTreeMap / StableCell).
+- Implement `state.rs` (SlimState including the `circulating_supply_*` cache fields, snapshot/hydrate, pre/post_upgrade).
+- Implement `timers.rs` with all four timers (60s, 5min, hourly, daily) wired but most callbacks empty. The 60s pull cycle ships in Phase 1 with **only** the supply-cache refresh logic populated; the event-tail logic comes in Phase 4.
 - Implement **one collector**: `collectors/tvl.rs` daily snapshot only, sourced from `backend.get_protocol_status()`, written to DAILY_TVL.
 - Implement **one query**: `get_tvl_series(RangeQuery)` reading DAILY_TVL.
-- Implement **one HTTP endpoint**: `/api/supply` (live read of `icusd_ledger.icrc1_total_supply`).
+- Implement **one HTTP endpoint**: `/api/supply`, served from the cached `circulating_supply_icusd` value in `SlimState` which the 60s pull cycle refreshes by calling `icusd_ledger.icrc1_total_supply()`. This validates the cache-then-serve pattern that all CoinGecko endpoints use.
 - Generate declarations into `src/declarations/rumi_analytics/`.
-- PocketIC integration test: deploy analytics + mock backend, advance time, confirm daily row written, query series, confirm pagination.
-- Deploy to mainnet. Verify `/api/supply` responds and the daily timer fires.
+- PocketIC integration test: deploy analytics + mock backend + mock icusd_ledger, advance time past one pull cycle, confirm supply cache populated. Advance time past one daily tick, confirm daily row written, query series, confirm pagination.
+- Deploy to mainnet. Verify `/api/supply` responds (after the first 60s pull) and the daily timer fires.
 
 **Exit criteria**: `curl https://<analytics-id>.icp0.io/api/supply` returns a number, and `dfx canister call rumi_analytics get_tvl_series '(record {})'` returns rows.
 
-### Phase 2 — Source-canister query additions
+### Phase 2 - Source-canister query additions
 
 Land the small additive PRs identified in Phase 0. Each is its own PR against the relevant canister, gated by the normal pre-deploy hook. Likely list:
 - `rumi_protocol_backend`: `list_open_vaults`, `get_events_since`, optional `get_xrc_stats`.
@@ -462,11 +577,19 @@ Land the small additive PRs identified in Phase 0. Each is its own PR against th
 
 Each PR is purely additive (new query method, no changes to existing logic) so risk is low.
 
-### Phase 3 — All daily collectors
+### Phase 3 - Current-state daily collectors (no event dependency)
 
-With source queries in place, implement remaining daily collectors: `vaults.rs`, `liquidations.rs` (daily rollup only), `swaps.rs` (daily rollup only), `prices.rs` (daily-cumulative parts), `cycles.rs` skeleton. Parallelizable: each collector is one file, one timer hookup, one stable log already reserved. PocketIC tests for each.
+These collectors derive entirely from current-state queries against source canisters and do **not** depend on the event tail. Safe to ship before Phase 4.
 
-### Phase 4 — Event tailing & BalanceTracker
+- `collectors/vaults.rs` - daily snapshot from `list_open_vaults` (CR distribution, leaderboards, avg/median).
+- `collectors/tvl.rs` - extend Phase 1 to also write the stability-pool TVL fields and 3pool reserves.
+- A `collectors/stability.rs` daily snapshot from `stability_pool.get_pool_stats`.
+
+Each collector is one file, one timer hookup, one stable log already reserved. PocketIC tests for each.
+
+**Daily rollups for liquidations and swaps are deferred to Phase 5** because they derive from EVT_LIQUIDATIONS / EVT_SWAPS, which only exist after Phase 4 lands the event tail.
+
+### Phase 4 - Event tailing & BalanceTracker
 
 The pull cycle goes live.
 - `sources/*.rs` cursor functions for all source streams.
@@ -478,24 +601,28 @@ The pull cycle goes live.
 
 PocketIC test: simulate transfers, advance time, confirm BalanceTracker map matches expected balances and Gini computes correctly.
 
-### Phase 5 — Fast & hourly tiers
+### Phase 5 - Event-derived rollups + Fast & hourly tiers
 
+Now that EVT_LIQUIDATIONS / EVT_SWAPS / EVT_LIQUIDITY exist (Phase 4), implement the rollups and fast/hourly cadences:
+
+- `collectors/liquidations.rs` daily rollup over EVT_LIQUIDATIONS.
+- `collectors/swaps.rs` daily rollup over EVT_SWAPS.
 - `collectors/swaps.rs` Fast snapshot for 3pool imbalance & virtual price.
 - `collectors/prices.rs` Fast snapshot for icUSD/3USD/ICP.
-- `collectors/cycles.rs` Hourly snapshot.
+- `collectors/cycles.rs` Hourly snapshot (after the per-canister `get_cycle_balance` queries land in Phase 2).
 - Borrowing fee curve hourly snapshot.
 
-### Phase 6 — Live query layer
+### Phase 6 - Live query layer
 
-`queries/live.rs`: TWAPs, VWAPs, realized vol, OHLC, peg deviation, queue depth, trade size distribution, EV calc, vault risk score, cascade simulator, LP/SP APYs, OI, effective CDP cost. Each function is independent and reads from existing StableLogs. Heavy unit-test target — pure functions, easy to property-test.
+`queries/live.rs`: TWAPs, VWAPs, realized vol, OHLC, peg deviation, queue depth, trade size distribution, EV calc, vault risk score, cascade simulator, LP/SP APYs, OI, effective CDP cost. Each function is independent and reads from existing StableLogs. Heavy unit-test target - pure functions, easy to property-test.
 
-### Phase 7 — HTTP layer & frontend
+### Phase 7 - HTTP layer & frontend
 
 - All `/api/series/*` CSV endpoints + `/metrics` Prometheus + `/api/events/since` + `/api/health`.
 - Submit CoinGecko listing application using `/api/supply`.
 - New explorer routes in `vault_frontend`, sourced from `analyticsService.ts`. Re-target the in-progress holders page at the new analytics canister.
 
-### Phase 8 — Polish
+### Phase 8 - Polish
 
 - Hardening based on whatever Phases 1-7 surface.
 - `src/rumi_analytics/README.md` covering storage map, cadences, how to add a new metric.
@@ -505,12 +632,12 @@ PocketIC test: simulate transfers, advance time, confirm BalanceTracker map matc
 
 The greenfield canister has no historical data on day one. Backfill is selective and admin-triggered, not automatic.
 
-- **BalanceTracker (icUSD, 3USD)**: walk ICRC-3 blocks from index 0 once per ledger. Idempotent via backfill flags in SlimState. Run as the first action after Phase 4 deploys. Cheap because both ledgers are young.
-- **Liquidation events**: backfill from `backend.get_events_since(0)` after Phase 2 lands the cursor query. Reconstructs the full liquidation history.
+- **BalanceTracker (icUSD, 3USD)**: walk ICRC-3 blocks from index 0 once per ledger.
+- **Liquidation events**: backfill from `backend.get_events_since(0)` after Phase 2 lands the cursor query.
 - **Swap events**: same pattern from `3pool.get_swap_events_since(0)` and `amm.get_swap_events_since(0)`.
-- **Daily snapshots**: forward-only. Historical daily TVL/CR/etc. is reconstructed lazily-or-not-at-all from event logs as needed; not a Phase 1 deliverable.
+- **Daily snapshots**: forward-only. Historical daily TVL/CR/etc. is reconstructed lazily-or-not-at-all from event logs as needed.
 
-Backfill is admin-gated via `trigger_backfill(source)` and tracked via flags in `SlimState` so a partial run can resume and a completed run never re-runs.
+Backfill is admin-gated via `trigger_backfill(source)`. Each source has its own **high-water-mark cursor** stored in a dedicated `StableCell<u64>` (the same cursor cells used in steady state - the backfill simply walks the cursor forward from 0 until it catches up to the source, then steady-state polling takes over). Resume on partial runs is automatic because the cursor is persisted after every batch. Idempotency comes from the cursor itself, not a separate boolean flag.
 
 ## Open questions deferred to implementation
 
@@ -522,7 +649,7 @@ Backfill is admin-gated via `trigger_backfill(source)` and tracked via flags in 
 ## Conventions
 
 - No em dashes anywhere in code or docs.
-- Rust workspace, ic-cdk 0.12.0, ic-stable-structures 0.6.7, candid 0.10.6.
+- Rust workspace, ic-cdk 0.12.0, ic-stable-structures 0.6.5 (matching the workspace pin), candid 0.10.6.
 - Forked DFINITY IC repo at `github.com/Rumi-Protocol/ic` rev `fc278709`.
 - DFX-managed (not icp-cli yet).
 - Declarations tracked in git.
