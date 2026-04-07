@@ -416,7 +416,7 @@ Reads current state from 3pool (`get_pool_state`, `get_virtual_price`) and backe
 
 ### Tier 3 - Hourly snapshot
 
-Walks every Rumi canister, calls `canister_status` (or a dedicated cycles endpoint if added), writes one HOURLY_CYCLES row containing all balances. Reads borrowing fee curve params, writes one HOURLY_FEE_CURVE row. ~12 calls per hour.
+Walks every Rumi canister, calls each one's `get_cycle_balance()` query (added in Phase 2, see source-canister query list), writes one HOURLY_CYCLES row containing all balances. Reads borrowing fee curve params, writes one HOURLY_FEE_CURVE row. ~12 calls per hour.
 
 ### Tier 4 - Daily snapshot (00:00 UTC)
 
@@ -595,7 +595,7 @@ The pull cycle goes live.
 - `sources/*.rs` cursor functions for all source streams.
 - 60s pull tick draining every cursor into EVT_* logs.
 - `collectors/holders.rs` BalanceTracker walking icusd_ledger and 3pool ICRC-3 blocks, populating BAL_* and FIRSTSEEN_* maps.
-- One-shot historical backfill in `backfill.rs`, admin-gated, idempotent (uses backfill flags in SlimState). Run once per ledger, then leave the steady-state cursor running.
+- One-shot historical backfill in `backfill.rs`, admin-gated, idempotent via the cursor StableCells (not flags). Run once per ledger, then leave the steady-state cursor running.
 - Daily holder snapshots writing into DAILY_HOLDERS_*.
 - `get_collector_health()` query.
 
@@ -644,7 +644,6 @@ Backfill is admin-gated via `trigger_backfill(source)`. Each source has its own 
 - Exact charting library used by `vault_frontend` (verify in Phase 7).
 - Whether `rumi_protocol_backend` already has an internal event log we can expose via `get_events_since`, or whether that needs to be built. Determined in Phase 0.
 - Whether `rumi_amm` swap events live in any form today, or whether the cursor query has to ship alongside an internal event log. Determined in Phase 0.
-- Whether the management canister `canister_status` call from analytics is acceptable, or whether each Rumi canister should expose its own `get_cycle_balance` query. Determined in Phase 5.
 
 ## Conventions
 
