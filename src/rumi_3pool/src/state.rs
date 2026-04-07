@@ -287,6 +287,7 @@ impl ThreePoolState {
                     is_rebalancing: false,
                     pool_balances_after: [0; 3],
                     virtual_price_after: 0,
+                    migrated: true,
                 });
                 swap_added += 1;
             }
@@ -318,6 +319,7 @@ impl ThreePoolState {
                     is_rebalancing: false,
                     pool_balances_after: [0; 3],
                     virtual_price_after: 0,
+                    migrated: true,
                 });
                 liq_added += 1;
             }
@@ -463,8 +465,11 @@ mod migration_tests {
         assert!(!e0.is_rebalancing);
         assert_eq!(e0.pool_balances_after, [0; 3]);
         assert_eq!(e0.virtual_price_after, 0);
+        assert!(e0.migrated, "backfilled swap should be tagged migrated");
+        assert!(s.swap_events_v2()[1].migrated);
 
         let l0 = &s.liquidity_events_v2()[0];
+        assert!(l0.migrated, "backfilled liquidity should be tagged migrated");
         assert_eq!(l0.id, 0);
         assert_eq!(l0.amounts, [10, 20, 30]);
         assert_eq!(l0.fee_bps, None);
@@ -527,6 +532,10 @@ mod migration_tests {
             assert!(!ev.is_rebalancing);
             assert_eq!(ev.pool_balances_after, [0; 3]);
             assert_eq!(ev.virtual_price_after, 0);
+            assert!(ev.migrated);
+        }
+        for ev in decoded.liquidity_events_v2() {
+            assert!(ev.migrated);
         }
 
         // Idempotency: a second migration is a no-op.
@@ -559,6 +568,7 @@ mod migration_tests {
             is_rebalancing: false,
             pool_balances_after: [1, 2, 3],
             virtual_price_after: 42,
+            migrated: false,
         });
 
         let (sw, _) = s.migrate_events_to_v2();
@@ -572,5 +582,9 @@ mod migration_tests {
         assert_eq!(s.swap_events_v2()[1].fee_bps, 0);
         assert_eq!(s.swap_events_v2()[2].id, 2);
         assert_eq!(s.swap_events_v2()[2].fee_bps, 0);
+        // Pre-existing v2 entry remains non-migrated; backfilled entries are tagged.
+        assert!(!s.swap_events_v2()[0].migrated);
+        assert!(s.swap_events_v2()[1].migrated);
+        assert!(s.swap_events_v2()[2].migrated);
     }
 }

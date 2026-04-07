@@ -98,6 +98,7 @@ type SwapEventV2 = record {
   is_rebalancing : bool;
   pool_balances_after : vec nat;
   virtual_price_after : nat;
+  migrated : bool;
 };
 
 type LiquidityEventV2 = record {
@@ -115,6 +116,7 @@ type LiquidityEventV2 = record {
   is_rebalancing : bool;
   pool_balances_after : vec nat;
   virtual_price_after : nat;
+  migrated : bool;
 };
 
 type QuoteSwapResult = record {

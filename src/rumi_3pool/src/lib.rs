@@ -341,6 +341,7 @@ pub async fn swap(i: u8, j: u8, dx: u128, min_dy: u128) -> Result<u128, ThreePoo
             is_rebalancing: outcome.is_rebalancing,
             pool_balances_after: balances_after,
             virtual_price_after: vp_after,
+            migrated: false,
         });
     });
 
@@ -441,6 +442,7 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
             is_rebalancing: liq_outcome.is_rebalancing,
             pool_balances_after: balances_after,
             virtual_price_after: vp_after,
+            migrated: false,
         });
     });
 
@@ -546,6 +548,7 @@ pub async fn remove_liquidity(
             is_rebalancing: false,
             pool_balances_after: balances_after,
             virtual_price_after: vp_after,
+            migrated: false,
         });
     });
 
@@ -657,6 +660,7 @@ pub async fn remove_one_coin(
             is_rebalancing: roc_outcome.is_rebalancing,
             pool_balances_after: balances_after,
             virtual_price_after: vp_after,
+            migrated: false,
         });
     });
 
@@ -737,6 +741,7 @@ pub async fn donate(token_index: u8, amount: u128) -> Result<(), ThreePoolError>
             is_rebalancing: imbalance_after < imbalance_before,
             pool_balances_after: balances_after,
             virtual_price_after: vp_after,
+            migrated: false,
         });
     });
 
@@ -1171,7 +1176,7 @@ pub fn simulate_swap_path(path: Vec<(u8, u8, u128)>) -> Result<Vec<QuoteSwapResu
 pub fn get_imbalance_history(limit: u64, offset: u64) -> Vec<ImbalanceSnapshot> {
     read_state(|s| {
         let mut all: Vec<ImbalanceSnapshot> = Vec::new();
-        for e in s.swap_events_v2() {
+        for e in s.swap_events_v2().iter().filter(|e| !e.migrated) {
             all.push(ImbalanceSnapshot {
                 timestamp: e.timestamp,
                 imbalance_after: e.imbalance_after,
@@ -1179,7 +1184,7 @@ pub fn get_imbalance_history(limit: u64, offset: u64) -> Vec<ImbalanceSnapshot> 
                 event_kind: ImbalanceEventKind::Swap,
             });
         }
-        for e in s.liquidity_events_v2() {
+        for e in s.liquidity_events_v2().iter().filter(|e| !e.migrated) {
             all.push(ImbalanceSnapshot {
                 timestamp: e.timestamp,
                 imbalance_after: e.imbalance_after,
@@ -1318,7 +1323,7 @@ pub fn get_pool_stats(window: StatsWindow) -> PoolStats {
         let mut swappers: std::collections::BTreeSet<Principal> =
             std::collections::BTreeSet::new();
 
-        for e in s.swap_events_v2().iter().filter(|e| e.timestamp >= cutoff) {
+        for e in s.swap_events_v2().iter().filter(|e| !e.migrated && e.timestamp >= cutoff) {
             count += 1;
             let ti = e.token_in as usize;
             let to = e.token_out as usize;
@@ -1339,7 +1344,7 @@ pub fn get_pool_stats(window: StatsWindow) -> PoolStats {
         for e in s
             .liquidity_events_v2()
             .iter()
-            .filter(|e| e.timestamp >= cutoff)
+            .filter(|e| !e.migrated && e.timestamp >= cutoff)
         {
             match e.action {
                 LiquidityAction::AddLiquidity => adds += 1,
@@ -1379,7 +1384,7 @@ pub fn get_imbalance_stats(window: StatsWindow) -> ImbalanceStats {
         let mut sum: u128 = 0;
         let mut count: u128 = 0;
         let mut samples: Vec<(u64, u64)> = Vec::new();
-        for e in s.swap_events_v2().iter().filter(|e| e.timestamp >= cutoff) {
+        for e in s.swap_events_v2().iter().filter(|e| !e.migrated && e.timestamp >= cutoff) {
             let imb = e.imbalance_after;
             if imb < min_v {
                 min_v = imb;
@@ -1421,7 +1426,7 @@ pub fn get_fee_stats(window: StatsWindow) -> FeeStats {
             .collect();
         let mut rebalancing = 0u64;
         let mut total = 0u64;
-        for e in s.swap_events_v2().iter().filter(|e| e.timestamp >= cutoff) {
+        for e in s.swap_events_v2().iter().filter(|e| !e.migrated && e.timestamp >= cutoff) {
             total += 1;
             if e.is_rebalancing {
                 rebalancing += 1;
@@ -1456,7 +1461,7 @@ pub fn get_top_swappers(window: StatsWindow, limit: u64) -> Vec<(Principal, u64,
     read_state(|s| {
         let mut acc: std::collections::BTreeMap<Principal, (u64, u128)> =
             std::collections::BTreeMap::new();
-        for e in s.swap_events_v2().iter().filter(|e| e.timestamp >= cutoff) {
+        for e in s.swap_events_v2().iter().filter(|e| !e.migrated && e.timestamp >= cutoff) {
             let entry = acc.entry(e.caller).or_insert((0, 0));
             entry.0 += 1;
             entry.1 = entry.1.saturating_add(e.amount_in);
@@ -1500,7 +1505,7 @@ pub fn get_volume_series(window: StatsWindow, bucket_seconds: u64) -> Vec<Volume
     read_state(|s| {
         let mut map: std::collections::BTreeMap<u64, [u128; 3]> =
             std::collections::BTreeMap::new();
-        for e in s.swap_events_v2().iter().filter(|e| e.timestamp >= cutoff) {
+        for e in s.swap_events_v2().iter().filter(|e| !e.migrated && e.timestamp >= cutoff) {
             let bucket = bucket_floor(e.timestamp, bucket_seconds);
             let entry = map.entry(bucket).or_insert([0; 3]);
             let ti = e.token_in as usize;
@@ -1526,7 +1531,7 @@ pub fn get_balance_series(window: StatsWindow, bucket_seconds: u64) -> Vec<Balan
     read_state(|s| {
         let mut map: std::collections::BTreeMap<u64, [u128; 3]> =
             std::collections::BTreeMap::new();
-        for e in s.swap_events_v2().iter().filter(|e| e.timestamp >= cutoff) {
+        for e in s.swap_events_v2().iter().filter(|e| !e.migrated && e.timestamp >= cutoff) {
             let bucket = bucket_floor(e.timestamp, bucket_seconds);
             map.insert(bucket, e.pool_balances_after);
         }
@@ -1580,7 +1585,7 @@ pub fn get_fee_series(window: StatsWindow, bucket_seconds: u64) -> Vec<FeePoint>
     read_state(|s| {
         let mut sums: std::collections::BTreeMap<u64, (u128, u128)> =
             std::collections::BTreeMap::new();
-        for e in s.swap_events_v2().iter().filter(|e| e.timestamp >= cutoff) {
+        for e in s.swap_events_v2().iter().filter(|e| !e.migrated && e.timestamp >= cutoff) {
             let bucket = bucket_floor(e.timestamp, bucket_seconds);
             let entry = sums.entry(bucket).or_insert((0, 0));
             entry.0 = entry
@@ -1614,7 +1619,7 @@ pub fn get_pool_health() -> PoolHealth {
         let past_imb = s
             .swap_events_v2()
             .iter()
-            .find(|e| e.timestamp >= one_hour_ago)
+            .find(|e| !e.migrated && e.timestamp >= one_hour_ago)
             .map(|e| e.imbalance_before)
             .unwrap_or(current_imbalance);
         let trend = current_imbalance as i64 - past_imb as i64;
@@ -1622,7 +1627,9 @@ pub fn get_pool_health() -> PoolHealth {
 
         let last_swap_age_seconds = s
             .swap_events_v2()
-            .last()
+            .iter()
+            .rev()
+            .find(|e| !e.migrated)
             .map(|e| now.saturating_sub(e.timestamp) / 1_000_000_000)
             .unwrap_or(u64::MAX);
 
@@ -2177,6 +2184,7 @@ mod explorer_tests {
             is_rebalancing: is_reb,
             pool_balances_after: [100, 200, 300],
             virtual_price_after: 1_000_000_000_000_000_000u128 + id as u128,
+            migrated: false,
         }
     }
 

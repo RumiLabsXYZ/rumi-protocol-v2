@@ -196,6 +196,11 @@ pub struct SwapEventV2 {
     pub pool_balances_after: [u128; 3],
     /// Virtual price (scaled by 1e18) after the swap.
     pub virtual_price_after: u128,
+    /// True if this entry was backfilled from a v1 event during migration.
+    /// Migrated entries have sentinel values for the v2-only fields and are
+    /// excluded from explorer aggregations to keep stats accurate.
+    #[serde(default)]
+    pub migrated: bool,
 }
 
 // ─── Liquidity Events ───
@@ -251,6 +256,11 @@ pub struct LiquidityEventV2 {
     pub pool_balances_after: [u128; 3],
     /// Virtual price (scaled by 1e18) after the operation.
     pub virtual_price_after: u128,
+    /// True if this entry was backfilled from a v1 event during migration.
+    /// Migrated entries have sentinel values for the v2-only fields and are
+    /// excluded from explorer aggregations to keep stats accurate.
+    #[serde(default)]
+    pub migrated: bool,
 }
 
 // ─── Admin Events ───
