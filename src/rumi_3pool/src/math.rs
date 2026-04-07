@@ -246,8 +246,8 @@ pub fn compute_imbalance(balances: &[u128; 3], precision_muls: &[u64; 3]) -> u64
     let target = scale / U256::from(3u64); // 1/3 in 1e18 fp
 
     let mut ssd = U256::ZERO;
-    for i in 0..3 {
-        let w = xp[i] * scale / total; // weight in 1e18 fp
+    for x in &xp {
+        let w = *x * scale / total; // weight in 1e18 fp
         let dev = if w > target { w - target } else { target - w };
         // dev^2 / scale -> result stays in 1e18 fp
         ssd += (dev * dev) / scale;
@@ -276,6 +276,9 @@ pub fn compute_fee_bps(
     params: &crate::types::FeeCurveParams,
 ) -> u16 {
     if imb_after <= imb_before {
+        return params.min_fee_bps;
+    }
+    if params.max_fee_bps <= params.min_fee_bps {
         return params.min_fee_bps;
     }
     if params.imb_saturation == 0 {
@@ -702,7 +705,50 @@ mod tests {
     fn test_fee_bps_imbalancing_below_saturation() {
         let p = default_params();
         let fee = compute_fee_bps(50_000_000, 60_000_000, &p);
-        assert!(fee >= 24 && fee <= 25, "expected ~24-25, got {}", fee);
+        assert_eq!(fee, 24);
+    }
+
+    #[test]
+    fn test_fee_bps_defensive_against_inverted_params() {
+        let p = crate::types::FeeCurveParams {
+            min_fee_bps: 50,
+            max_fee_bps: 30,
+            imb_saturation: 250_000_000,
+        };
+        // Imbalancing swap with inverted params should safely return min (50)
+        let fee = compute_fee_bps(10_000_000, 100_000_000, &p);
+        assert_eq!(fee, 50);
+    }
+
+    #[test]
+    fn test_fee_bps_defensive_against_zero_saturation() {
+        let p = crate::types::FeeCurveParams {
+            min_fee_bps: 1,
+            max_fee_bps: 99,
+            imb_saturation: 0,
+        };
+        // Imbalancing swap with zero saturation returns max
+        let fee = compute_fee_bps(0, 100_000_000, &p);
+        assert_eq!(fee, 99);
+    }
+
+    #[test]
+    fn test_compute_imbalance_all_zero() {
+        let balances: [u128; 3] = [0, 0, 0];
+        let precision_muls: [u64; 3] = [10_000_000_000, 1_000_000_000_000, 1_000_000_000_000];
+        let imb = compute_imbalance(&balances, &precision_muls);
+        assert_eq!(imb, 0);
+    }
+
+    #[test]
+    fn test_compute_imbalance_single_nonzero_balance() {
+        // Only icUSD has any balance — maximally imbalanced
+        let balances: [u128; 3] = [1_000_000 * 100_000_000, 0, 0];
+        let precision_muls: [u64; 3] = [10_000_000_000, 1_000_000_000_000, 1_000_000_000_000];
+        let imb = compute_imbalance(&balances, &precision_muls);
+        // Should be at or very near IMB_SCALE (1e9), the theoretical max
+        assert!(imb > 990_000_000, "expected near-max imbalance, got {}", imb);
+        assert!(imb <= 1_000_000_000, "expected <= 1e9, got {}", imb);
     }
 
     #[test]
