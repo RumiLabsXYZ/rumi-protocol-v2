@@ -439,8 +439,13 @@ pub mod daily_tvl {
 
     /// Iterate rows whose `timestamp_ns` falls in `[from_ts, to_ts)`, returning
     /// at most `limit` rows starting at the row whose timestamp is `>= from_ts`.
-    /// Uses linear scan for now; binary search is added in Task 5 once query
-    /// volume justifies it. Phase 1 logs have at most ~30 rows so linear is fine.
+    ///
+    /// **Phase 1 simplification (deviation from spec)**: this uses a linear
+    /// scan instead of the binary search the spec calls for. Phase 1 ships
+    /// with at most ~30 daily rows in the log; linear scan is O(n) over a
+    /// trivially small n. Binary search is added in a later phase once any
+    /// historical log grows past ~10k rows. Documenting the deviation here
+    /// so the next phase has an obvious place to fix it.
     pub fn range(from_ts: u64, to_ts: u64, limit: usize) -> Vec<DailyTvlRow> {
         let mut out = Vec::new();
         DAILY_TVL_LOG.with(|log| {
@@ -803,6 +808,10 @@ pub struct RangeQuery {
     pub from_ts: Option<u64>,
     pub to_ts: Option<u64>,
     pub limit: Option<u32>,
+    /// Skip the first N matching rows. Phase 1 ignores this field but it's
+    /// declared in the candid interface from day one so future phases can
+    /// honor it without breaking the public API.
+    pub offset: Option<u64>,
 }
 
 pub const DEFAULT_LIMIT: u32 = 500;
@@ -892,6 +901,7 @@ type RangeQuery = record {
   from_ts : opt nat64;
   to_ts : opt nat64;
   limit : opt nat32;
+  offset : opt nat64;
 };
 
 type DailyTvlRow = record {
@@ -1099,7 +1109,7 @@ git commit -m "feat(rumi_analytics): timers + 60s supply cache refresh"
 
 ### Task 7: HTTP layer with `/api/supply` served from cache
 
-The HTTP endpoint runs in a query context and **cannot** make inter-canister calls. It reads `circulating_supply_icusd_e8s` from the heap-mirrored `SlimState`, which the 60s pull cycle keeps fresh. If the cache hasn't been populated yet (canister just started), return 503.
+The HTTP endpoint runs in a query context and **cannot** make inter-canister calls. It reads `circulating_supply_icusd_e8s` from the heap-mirrored `SlimState`, which the 60s pull cycle keeps fresh. If the cache hasn't been populated yet (canister just started), return 500 via `HttpResponseBuilder::server_error` with a "supply not yet cached" body. (The spec mentioned 503 in passing; the standard helper from `ic-canisters-http-types` returns 500, which we use for consistency with how other Rumi canisters handle this case.)
 
 **Files:**
 - Modify: `src/rumi_analytics/Cargo.toml` (add `ic-canisters-http-types`)
@@ -1115,7 +1125,7 @@ Add to `[dependencies]` in `src/rumi_analytics/Cargo.toml`:
 ic-canisters-http-types = { git = "https://github.com/Rumi-Protocol/ic", rev = "fc278709" }
 ```
 
-If the fork doesn't expose this crate, fall back to defining the types inline (the crate is small - just `HttpRequest` and `HttpResponse` Candid records). Check by running `cargo build` first.
+Confirmed available in the fork: `src/rumi_amm/Cargo.toml` already pulls this from the same rev, and `src/rumi_amm/src/lib.rs` uses `ic_canisters_http_types::{HttpRequest, HttpResponse, HttpResponseBuilder}`. Match that import path.
 
 - [ ] **Step 2: Create `http.rs`**
 
@@ -1230,114 +1240,260 @@ This test stands up a PocketIC instance with the analytics canister, a stub back
 3. After advancing time past the daily timer, a row exists in the TVL log and `get_tvl_series` returns it.
 4. After upgrading the canister mid-run, the supply cache and TVL log survive (the critical Phase A-style upgrade check).
 
-- [ ] **Step 1: Look at the existing pocket_ic test scaffolding**
+- [ ] **Step 1: Read the reference test file**
 
-Run: `ls src/rumi_3pool/tests/` and inspect one of the test files there to see how the project wires PocketIC, loads canister wasms, and advances time. Match that pattern. The test infrastructure (pocket-ic binary at project root, test fixtures, helper modules) is project-wide.
+Read `src/rumi_amm/tests/pocket_ic_tests.rs`. It is the canonical PocketIC test pattern in this repo and contains every helper Phase 1 needs:
+
+- `PocketIcBuilder::new().with_application_subnet().build()` for setup
+- `icrc1_ledger_wasm()` reading from `src/ledger/ic-icrc1-ledger.wasm` via `include_bytes!`
+- `deploy_ledger(pic, minting_account, admin, user, name, symbol, decimals, initial_balance)` which deploys the real `ic-icrc1-ledger` wasm with configurable init args
+- `pic.create_canister_with_settings(Some(admin), None)`, `pic.add_cycles`, `pic.install_canister`
+- `LedgerInitArgs`, `ArchiveOptions`, `FeatureFlags`, `MetadataValue`, `LedgerArg` Candid types matching the stock ICRC-1 ledger wasm
+
+Phase 1's test file copies these helpers verbatim (the `LedgerInitArgs` block etc) and adds analytics-specific helpers.
+
+For the **backend stub**, use the existing `test_rumi_protocol_backend` canister that the project already has wired into other test suites - it's the same wasm as `rumi_protocol_backend` and accepts a real init payload. If wiring it is too heavy for Phase 1, the simpler alternative is to deploy the real `rumi_protocol_backend` wasm from `target/wasm32-unknown-unknown/release/rumi_protocol_backend.wasm` with a minimal init that gives it a non-zero `total_icp_margin` and `total_icusd_borrowed`. **Pick whichever the existing test suites already do** - read `src/rumi_protocol_backend/tests/pocket_ic_tests.rs` first to see the established pattern and follow it.
 
 - [ ] **Step 2: Write the test file**
 
-Create `src/rumi_analytics/tests/pocket_ic_analytics.rs`. The exact wasm-loading helper and `PocketIc` builder calls vary by project convention - copy from a sibling test in `src/rumi_3pool/tests/` rather than inventing a new pattern. Pseudocode for the actual scenarios:
+Create `src/rumi_analytics/tests/pocket_ic_analytics.rs`. Start by copying the entire header block (imports + ICRC-1 candid types + `icrc1_ledger_wasm()` + `deploy_ledger()`) from `src/rumi_amm/tests/pocket_ic_tests.rs` verbatim, then add the analytics-specific scaffolding:
 
 ```rust
-//! Phase 1 PocketIC integration tests for rumi_analytics.
+// ... copied header from rumi_amm/tests/pocket_ic_tests.rs ...
 
-use candid::{encode_args, encode_one, Decode, Encode, Principal};
-use pocket_ic::PocketIc;
+use candid::{decode_one, encode_one, CandidType, Deserialize, Principal};
+use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
 
-// Helper: build the analytics InitArgs encoded as Candid bytes.
-fn init_args(admin: Principal, backend: Principal, ledger: Principal) -> Vec<u8> {
-    // ... encode the InitArgs record matching the .did
-    todo!("see sibling tests for exact pattern")
+// (LedgerInitArgs / FeatureFlags / ArchiveOptions / MetadataValue / LedgerArg
+//  blocks + icrc1_ledger_wasm() + deploy_ledger() copied verbatim from rumi_amm)
+
+fn analytics_wasm() -> Vec<u8> {
+    include_bytes!("../../../target/wasm32-unknown-unknown/release/rumi_analytics.wasm")
+        .to_vec()
 }
 
-// Helper: deploy a stub backend canister whose get_protocol_status returns a
-// fixed ProtocolStatus matching the subset analytics decodes.
-fn deploy_stub_backend(pic: &PocketIc) -> Principal {
-    todo!("deploy a tiny rust canister or use the test_rumi_protocol_backend fixture")
+fn backend_wasm() -> Vec<u8> {
+    include_bytes!("../../../target/wasm32-unknown-unknown/release/rumi_protocol_backend.wasm")
+        .to_vec()
 }
 
-// Helper: deploy a stub icusd_ledger whose icrc1_total_supply returns a fixed Nat.
-fn deploy_stub_ledger(pic: &PocketIc) -> Principal {
-    todo!("use the existing icusd_ledger wasm with a known initial total supply")
+#[derive(CandidType, Deserialize)]
+struct AnalyticsInitArgs {
+    admin: Principal,
+    backend: Principal,
+    icusd_ledger: Principal,
+    three_pool: Principal,
+    stability_pool: Principal,
+    amm: Principal,
+}
+
+#[derive(CandidType, Deserialize)]
+struct RangeQueryArg {
+    from_ts: Option<u64>,
+    to_ts: Option<u64>,
+    limit: Option<u32>,
+    offset: Option<u64>,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct DailyTvlRow {
+    timestamp_ns: u64,
+    total_icp_collateral_e8s: candid::Nat,
+    total_icusd_supply_e8s: candid::Nat,
+    system_collateral_ratio_bps: u32,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct TvlSeriesResponse {
+    rows: Vec<DailyTvlRow>,
+    next_from_ts: Option<u64>,
+}
+
+#[derive(CandidType, Deserialize)]
+struct HeaderField(String, String);
+
+#[derive(CandidType, Deserialize)]
+struct HttpRequest {
+    method: String,
+    url: String,
+    headers: Vec<HeaderField>,
+    body: Vec<u8>,
+}
+
+#[derive(CandidType, Deserialize)]
+struct HttpResponse {
+    status_code: u16,
+    headers: Vec<HeaderField>,
+    body: Vec<u8>,
+}
+
+struct Env {
+    pic: PocketIc,
+    analytics: Principal,
+    icusd_ledger: Principal,
+    backend: Principal,
+    admin: Principal,
+}
+
+fn setup() -> Env {
+    let pic = PocketIcBuilder::new().with_application_subnet().build();
+
+    let minting = Principal::self_authenticating(&[100, 100, 100]);
+    let admin = Principal::self_authenticating(&[5, 6, 7, 8]);
+    let user = Principal::self_authenticating(&[1, 2, 3, 4]);
+
+    // Deploy a real ICRC-1 ledger as the icusd_ledger fixture with an
+    // initial balance giving it a non-zero total supply.
+    let icusd_ledger = deploy_ledger(
+        &pic, minting, admin, user, "icUSD test", "ICUSDT", 8, 1_000_000_00000000,
+    );
+
+    // Deploy the real backend wasm. Init args depend on the backend's actual
+    // signature; copy from src/rumi_protocol_backend/tests/pocket_ic_tests.rs.
+    let backend = deploy_backend(&pic, admin, icusd_ledger);
+
+    // Deploy analytics.
+    let analytics = pic.create_canister_with_settings(Some(admin), None);
+    pic.add_cycles(analytics, 2_000_000_000_000);
+    let init = AnalyticsInitArgs {
+        admin,
+        backend,
+        icusd_ledger,
+        three_pool: Principal::anonymous(),
+        stability_pool: Principal::anonymous(),
+        amm: Principal::anonymous(),
+    };
+    pic.install_canister(
+        analytics,
+        analytics_wasm(),
+        encode_one(init).unwrap(),
+        Some(admin),
+    );
+
+    Env { pic, analytics, icusd_ledger, backend, admin }
+}
+
+fn deploy_backend(pic: &PocketIc, admin: Principal, _icusd_ledger: Principal) -> Principal {
+    // Read src/rumi_protocol_backend/tests/pocket_ic_tests.rs and copy its
+    // backend deployment helper. The backend init signature is fixed by the
+    // candid interface; do not invent your own.
+    todo!("copy from src/rumi_protocol_backend/tests/pocket_ic_tests.rs::setup")
+}
+
+fn http_get(env: &Env, path: &str) -> HttpResponse {
+    let req = HttpRequest {
+        method: "GET".into(),
+        url: path.into(),
+        headers: vec![],
+        body: vec![],
+    };
+    let result = env
+        .pic
+        .query_call(env.analytics, env.admin, "http_request", encode_one(req).unwrap())
+        .expect("http_request query");
+    match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).unwrap(),
+        WasmResult::Reject(msg) => panic!("http_request rejected: {}", msg),
+    }
+}
+
+fn get_tvl_series(env: &Env, q: RangeQueryArg) -> TvlSeriesResponse {
+    let result = env
+        .pic
+        .query_call(env.analytics, env.admin, "get_tvl_series", encode_one(q).unwrap())
+        .expect("get_tvl_series query");
+    match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).unwrap(),
+        WasmResult::Reject(msg) => panic!("get_tvl_series rejected: {}", msg),
+    }
 }
 
 #[test]
 fn supply_cache_populated_after_pull_cycle() {
-    let pic = PocketIc::new();
-    let backend = deploy_stub_backend(&pic);
-    let ledger = deploy_stub_ledger(&pic);
-    let analytics = deploy_analytics(&pic, backend, ledger);
+    let env = setup();
 
-    // Before any pull cycle: /api/supply returns 503.
-    let resp_before = http_get(&pic, analytics, "/api/supply");
-    assert_eq!(resp_before.status_code, 500); // server_error in our impl
+    // Before any pull cycle: cache is empty, /api/supply returns 500.
+    let before = http_get(&env, "/api/supply");
+    assert_eq!(before.status_code, 500);
 
-    // Advance past the 60s pull interval.
-    pic.advance_time(std::time::Duration::from_secs(65));
-    pic.tick();
+    // Advance past one 60s pull cycle and tick to drive the timer.
+    env.pic.advance_time(std::time::Duration::from_secs(65));
+    env.pic.tick();
 
-    let resp_after = http_get(&pic, analytics, "/api/supply");
-    assert_eq!(resp_after.status_code, 200);
-    let body = String::from_utf8(resp_after.body).unwrap();
-    let supply: f64 = body.parse().expect("parse supply");
+    let after = http_get(&env, "/api/supply");
+    assert_eq!(after.status_code, 200);
+    let body = String::from_utf8(after.body).unwrap();
+    let supply: f64 = body.trim().parse().expect("parse supply");
     assert!(supply > 0.0, "supply should be > 0, got {}", supply);
 }
 
 #[test]
 fn daily_tvl_row_written_after_daily_timer() {
-    let pic = PocketIc::new();
-    let backend = deploy_stub_backend(&pic);
-    let ledger = deploy_stub_ledger(&pic);
-    let analytics = deploy_analytics(&pic, backend, ledger);
+    let env = setup();
+    env.pic.advance_time(std::time::Duration::from_secs(86_400 + 65));
+    env.pic.tick();
 
-    // Advance past one day.
-    pic.advance_time(std::time::Duration::from_secs(86_400 + 65));
-    pic.tick();
-
-    // Query the series.
-    let resp: TvlSeriesResponse = call_query(&pic, analytics, "get_tvl_series", RangeQuery::default());
+    let resp = get_tvl_series(&env, RangeQueryArg {
+        from_ts: None, to_ts: None, limit: None, offset: None,
+    });
     assert!(!resp.rows.is_empty(), "expected at least one TVL row");
     let row = &resp.rows[0];
-    assert!(row.total_icp_collateral_e8s > 0);
-    assert!(row.total_icusd_supply_e8s > 0);
+    assert!(row.total_icp_collateral_e8s > candid::Nat::from(0u64));
 }
 
 #[test]
 fn pagination_returns_next_cursor_when_full() {
-    // Write 3 rows by ticking the daily timer 3 times. Query with limit=2.
-    // Verify next_from_ts is set and points past the second row.
-    todo!("see sibling pagination tests for the pattern")
+    let env = setup();
+    // Tick the daily timer three times.
+    for _ in 0..3 {
+        env.pic.advance_time(std::time::Duration::from_secs(86_400 + 65));
+        env.pic.tick();
+    }
+
+    let resp = get_tvl_series(&env, RangeQueryArg {
+        from_ts: None, to_ts: None, limit: Some(2), offset: None,
+    });
+    assert_eq!(resp.rows.len(), 2);
+    assert!(resp.next_from_ts.is_some(), "expected continuation cursor");
 }
 
 #[test]
 fn upgrade_preserves_supply_cache_and_tvl_log() {
-    let pic = PocketIc::new();
-    let backend = deploy_stub_backend(&pic);
-    let ledger = deploy_stub_ledger(&pic);
-    let analytics = deploy_analytics(&pic, backend, ledger);
+    let env = setup();
+    env.pic.advance_time(std::time::Duration::from_secs(86_400 + 65));
+    env.pic.tick();
 
-    // Populate cache + write one daily row.
-    pic.advance_time(std::time::Duration::from_secs(86_400 + 65));
-    pic.tick();
+    let before_rows = get_tvl_series(&env, RangeQueryArg {
+        from_ts: None, to_ts: None, limit: None, offset: None,
+    }).rows.len();
+    let before_supply = http_get(&env, "/api/supply").body;
+    assert!(before_rows > 0);
 
-    let resp_before: TvlSeriesResponse =
-        call_query(&pic, analytics, "get_tvl_series", RangeQuery::default());
-    let cached_before = http_get(&pic, analytics, "/api/supply").body;
-    assert!(!resp_before.rows.is_empty());
+    // Upgrade analytics with the same wasm.
+    env.pic.upgrade_canister(
+        env.analytics,
+        analytics_wasm(),
+        encode_one(AnalyticsInitArgs {
+            admin: env.admin,
+            backend: env.backend,
+            icusd_ledger: env.icusd_ledger,
+            three_pool: Principal::anonymous(),
+            stability_pool: Principal::anonymous(),
+            amm: Principal::anonymous(),
+        }).unwrap(),
+        Some(env.admin),
+    ).expect("upgrade analytics");
 
-    // Upgrade with the same wasm.
-    upgrade_analytics(&pic, analytics);
-
-    // Verify both survive.
-    let resp_after: TvlSeriesResponse =
-        call_query(&pic, analytics, "get_tvl_series", RangeQuery::default());
-    let cached_after = http_get(&pic, analytics, "/api/supply").body;
-    assert_eq!(resp_before.rows.len(), resp_after.rows.len());
-    assert_eq!(cached_before, cached_after);
+    let after_rows = get_tvl_series(&env, RangeQueryArg {
+        from_ts: None, to_ts: None, limit: None, offset: None,
+    }).rows.len();
+    let after_supply = http_get(&env, "/api/supply").body;
+    assert_eq!(before_rows, after_rows, "TVL log lost rows on upgrade");
+    assert_eq!(before_supply, after_supply, "supply cache lost on upgrade");
 }
 ```
 
-The `todo!()` markers mean: copy the corresponding helper from `src/rumi_3pool/tests/` rather than reinventing it. There is project-wide test infrastructure already; do not duplicate it.
+The single remaining `todo!()` is in `deploy_backend`. Resolve it by reading `src/rumi_protocol_backend/tests/pocket_ic_tests.rs` and copying its setup helper. Do not invent backend init args from scratch; the canister has a fixed Candid interface and the test suite already knows how to drive it.
 
 - [ ] **Step 3: Run the tests**
 
