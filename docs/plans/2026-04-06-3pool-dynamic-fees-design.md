@@ -8,22 +8,22 @@
 
 The 3pool currently uses a static 20 bps swap fee with amplification A=500. The dominant user flow (mint icUSD, swap to ckUSDT/ckUSDC, exit) creates a persistent imbalance: icUSD accumulates, the two external stablecoins drain. At A=500 the curve heavily suppresses the price signal from imbalance, so there is no organic arbitrage incentive to bring ckUSDT/ckUSDC back into the pool. The protocol needs a long-term, market-driven mechanism (no token emissions) that prices the externality of imbalancing trades and rewards rebalancing trades.
 
-A secondary problem: swap and liquidity events are stored in a heap `Vec` and serialized through `pre_upgrade`. As the event count grows, this hits the upgrade instruction limit and bricks the canister. This must be fixed before the protocol scales.
+(Note: a separate concern about heap-Vec event storage and the canister's `pre_upgrade` brick risk has been deferred to a dedicated follow-up PR that migrates the entire canister to `MemoryManager` + stable structures. That work is too large and too risky to bundle with dynamic fees.)
 
 ## Goals
 
 1. Replace the static swap fee with a directional dynamic fee that taxes imbalancing trades and minimally charges rebalancing trades.
 2. Apply the same dynamic fee model to single-sided liquidity add/remove operations.
-3. Migrate swap and liquidity event storage from heap `Vec` to `StableLog` to eliminate the upgrade-brick risk.
-4. Extend event schemas to capture the data needed by explorers and the rebalancing bot.
-5. Add bot-facing query endpoints so the rebalancing bot can compute profitability locally without polling.
-6. Add explorer/admin endpoints for pool analytics, time-series, and health.
+3. Extend event schemas to capture the data needed by explorers and the rebalancing bot.
+4. Add bot-facing query endpoints so the rebalancing bot can compute profitability locally without polling.
+5. Add explorer/admin endpoints for pool analytics, time-series, and health.
 
 ## Non-Goals
 
 - Token emissions, LP incentive programs, or any non-organic incentive (out of scope on purpose).
 - Changing the amplification coefficient A (stays at 500).
-- ICRC-3 wrapping of swap/liquidity events (deferred; `StableLog` is the underlying primitive and leaves this door open).
+- **Migrating canister state to `MemoryManager` / stable structures.** Deferred to a dedicated follow-up PR that touches every growable collection (lp_balances, ICRC-3 blocks, vp_snapshots, events, etc.) in one careful refactor. Events stay in heap `Vec` for this PR.
+- ICRC-3 wrapping of swap/liquidity events.
 - Frontend redesign (the dynamic fee UI affordances are noted but not specified here).
 - Changes to the rumi_amm icUSD/ICP pool.
 
@@ -140,54 +140,19 @@ pub struct LiquidityEventV2 {
 }
 ```
 
-### 3. Stable Log Migration
+### 3. In-Place Event Schema Migration
 
-Move swap and liquidity events from heap `Vec` to `StableLog`.
+Events remain in heap `Vec` (no `StableLog` in this PR — see Non-Goals). The existing `swap_events: Option<Vec<SwapEvent>>` and `liquidity_events: Option<Vec<LiquidityEvent>>` fields are **renamed and re-typed** to hold v2 events:
 
-```rust
-const SWAP_LOG_INDEX_MEM:  MemoryId = MemoryId::new(10);
-const SWAP_LOG_DATA_MEM:   MemoryId = MemoryId::new(11);
-const LIQ_LOG_INDEX_MEM:   MemoryId = MemoryId::new(12);
-const LIQ_LOG_DATA_MEM:    MemoryId = MemoryId::new(13);
+- Rename current `SwapEvent` -> `SwapEventV1`, `LiquidityEvent` -> `LiquidityEventV1`. Keep them defined for deserialization of legacy state only.
+- New `SwapEvent` and `LiquidityEvent` types are the v2 schemas.
+- Add new fields `swap_events_v2: Option<Vec<SwapEvent>>` and `liquidity_events_v2: Option<Vec<LiquidityEvent>>` to `ThreePoolState`.
+- In `post_upgrade`, after `load_from_stable_memory()`, run a one-shot migration: drain `swap_events` (v1) into `swap_events_v2` (v2) using a `From<SwapEventV1> for SwapEvent` conversion that fills new fields with sentinel values. Same for liquidity. Then `swap_events = None`.
+- All read/write paths use the v2 fields. The v1 fields stay in the struct definition until a follow-up upgrade removes them.
 
-thread_local! {
-    static SWAP_EVENTS: RefCell<StableLog<SwapEventV2, Memory, Memory>> = ...;
-    static LIQUIDITY_EVENTS: RefCell<StableLog<LiquidityEventV2, Memory, Memory>> = ...;
-}
-```
+Sentinel values for migrated v1 events: `fee_bps = 0`, `imbalance_before = 0`, `imbalance_after = 0`, `is_rebalancing = false`, `pool_balances_after = [0; 3]`, `virtual_price_after = 0`. Explorer/bot consumers must treat these zero values as "unknown — pre-migration event."
 
-Both event types implement `Storable` with `Bound::Unbounded`, encoded via `ciborium`.
-
-**MemoryId allocation:** verify against existing assignments before claiming 10-13. If any are taken, pick the next free range. Document the allocation in `state.rs`.
-
-**One-shot migration in `post_upgrade`:**
-
-```rust
-fn migrate_events_to_stable_log() {
-    mutate_state(|s| {
-        if let Some(legacy_swaps) = s.swap_events.take() {
-            SWAP_EVENTS.with(|log| {
-                let log = log.borrow();
-                for evt in legacy_swaps {
-                    log.append(&evt.into()).expect("append swap event");
-                }
-            });
-        }
-        if let Some(legacy_liq) = s.liquidity_events.take() {
-            LIQUIDITY_EVENTS.with(|log| {
-                let log = log.borrow();
-                for evt in legacy_liq {
-                    log.append(&evt.into()).expect("append liquidity event");
-                }
-            });
-        }
-    });
-}
-```
-
-The legacy `Option<Vec<...>>` fields stay in the state struct (now permanently `None`) until a future upgrade removes them. The `From<SwapEvent> for SwapEventV2` impl fills new fields with sentinel values (`fee_bps = 0`, `imbalance_* = 0`, `is_rebalancing = false`, `pool_balances_after = [0; 3]`) since we cannot reconstruct them retroactively. Explorer/bot consumers must treat zero values on pre-migration events as "unknown."
-
-Migration is idempotent: it only runs if the legacy field is `Some`, then `take()` ensures it's gone. Re-running post_upgrade is safe.
+Migration is idempotent: it checks `swap_events.is_some()` before running, takes the vec, and leaves `swap_events = None`. Re-running `post_upgrade` is a no-op.
 
 ### 4. Bot Endpoints
 
@@ -297,8 +262,8 @@ The upgrade `description` arg should read something like: `"Dynamic fees + Stabl
 
 | Risk | Mitigation |
 |---|---|
-| Migration traps mid-upgrade if legacy Vec is huge | Pool is small now (low event count). Risk is highest if we wait. Migrate now while volumes are tractable. |
-| Sentinel zero values in migrated events confuse explorer | Explorer code treats `imbalance_after == 0 && pool_balances_after == [0; 3]` as "pre-migration unknown" and renders accordingly |
+| Sentinel zero values in migrated v1 events confuse explorer | Explorer code treats `imbalance_after == 0 && pool_balances_after == [0; 3]` as "pre-migration unknown" and renders accordingly |
+| Heap-Vec event growth still risks pre_upgrade brick (long-term) | Tracked in a separate follow-up PR (`MemoryManager` migration). Out of scope here. Event count is small today, runway exists. |
 | Aggregation queries get slow at scale | Acceptable for now. Add cached running totals only if metrics show actual problem. |
 | Admin sets `imb_saturation` too low and fees saturate constantly | Validation enforces bounds; audit log records every change; can be reverted in seconds |
 | Fee param change mid-flight desyncs the bot's local fee math | Bot polls `get_fee_curve_params` each loop. Change is atomic per swap. |
@@ -309,10 +274,9 @@ The upgrade `description` arg should read something like: `"Dynamic fees + Stabl
 
 None blocking. Items deferred to implementation:
 
-- Exact MemoryId allocation (need to scan existing usages)
-- Whether to rename `SwapEvent` -> `SwapEventV1` and use `SwapEvent` as the v2 name, or keep `SwapEventV2` indefinitely (cosmetic)
 - Frontend changes to display dynamic fees in the swap UI (separate task)
 - Bot updates to consume new endpoints (separate session, separate working folder per Rob)
+- Full canister state migration to MemoryManager (separate follow-up PR)
 
 ## Files Touched
 
@@ -322,7 +286,7 @@ None blocking. Items deferred to implementation:
 | `src/rumi_3pool/src/swap.rs` | Replace static fee with dynamic; populate v2 event fields |
 | `src/rumi_3pool/src/liquidity.rs` | Replace 3/8 imbalance fee with dynamic model; populate v2 event fields |
 | `src/rumi_3pool/src/types.rs` | `SwapEventV2`, `LiquidityEventV2`, `FeeCurveParams`, `SwapQuote`, `PoolState`, `RebalanceQuote`, etc. |
-| `src/rumi_3pool/src/state.rs` | StableLog declarations, MemoryIds, post_upgrade migration, dynamic_fee_params in config |
+| `src/rumi_3pool/src/state.rs` | v1/v2 event field rename, post_upgrade in-place migration, dynamic_fee_params in config |
 | `src/rumi_3pool/src/admin.rs` | `set_dynamic_fee_params` |
 | `src/rumi_3pool/src/lib.rs` | All new bot + explorer endpoints |
 | `src/rumi_3pool/rumi_3pool.did` | Candid updates for new types and methods |
