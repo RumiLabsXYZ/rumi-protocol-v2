@@ -92,23 +92,22 @@ fn take_vp_snapshot() {
     let precision_muls = get_precision_muls();
     let amp = get_current_a();
 
-    mutate_state(|s| {
+    let snapshot = read_state(|s| {
         if s.lp_total_supply == 0 {
-            return; // No LPs — virtual_price is meaningless.
+            return None; // No LPs — virtual_price is meaningless.
         }
-        let vp = match virtual_price(&s.balances, &precision_muls, amp, s.lp_total_supply) {
-            Some(v) => v,
-            None => return,
-        };
-        let now_secs = ic_cdk::api::time() / 1_000_000_000;
-        let lp_supply = s.lp_total_supply;
-        let snapshot = VirtualPriceSnapshot {
-            timestamp_secs: now_secs,
+        let vp = virtual_price(&s.balances, &precision_muls, amp, s.lp_total_supply)?;
+        Some(VirtualPriceSnapshot {
+            timestamp_secs: ic_cdk::api::time() / 1_000_000_000,
             virtual_price: vp,
-            lp_total_supply: lp_supply,
-        };
-        s.snapshots_mut().push(snapshot);
+            lp_total_supply: s.lp_total_supply,
+        })
     });
+    if let Some(snap) = snapshot {
+        storage::vp_snap::push(snap);
+    } else {
+        return;
+    }
     log!(INFO, "VP snapshot taken");
 }
 
@@ -122,61 +121,37 @@ pub fn health() -> String {
 /// Query swap events for explorer. Returns events in the requested range.
 #[query]
 pub fn get_swap_events(start: u64, length: u64) -> Vec<SwapEvent> {
-    read_state(|s| {
-        let events = s.swap_events();
-        let total = events.len() as u64;
-        if start >= total {
-            return vec![];
-        }
-        let end = (start + length).min(total) as usize;
-        events[start as usize..end].to_vec()
-    })
+    storage::swap_v1::range(start, length)
 }
 
 /// Query total number of swap events.
 #[query]
 pub fn get_swap_event_count() -> u64 {
-    read_state(|s| s.swap_events().len() as u64)
+    storage::swap_v1::len()
 }
 
 /// Query liquidity events for explorer. Returns events in the requested range.
 #[query]
 pub fn get_liquidity_events(start: u64, length: u64) -> Vec<LiquidityEvent> {
-    read_state(|s| {
-        let events = s.liquidity_events();
-        let total = events.len() as u64;
-        if start >= total {
-            return vec![];
-        }
-        let end = (start + length).min(total) as usize;
-        events[start as usize..end].to_vec()
-    })
+    storage::liq_v1::range(start, length)
 }
 
 /// Query total number of liquidity events.
 #[query]
 pub fn get_liquidity_event_count() -> u64 {
-    read_state(|s| s.liquidity_events().len() as u64)
+    storage::liq_v1::len()
 }
 
 /// Query admin events for explorer. Returns events in the requested range.
 #[query]
 pub fn get_admin_events(start: u64, length: u64) -> Vec<ThreePoolAdminEvent> {
-    read_state(|s| {
-        let events = s.admin_events();
-        let total = events.len() as u64;
-        if start >= total {
-            return vec![];
-        }
-        let end = (start + length).min(total) as usize;
-        events[start as usize..end].to_vec()
-    })
+    storage::admin_ev::range(start, length)
 }
 
 /// Query total number of admin events.
 #[query]
 pub fn get_admin_event_count() -> u64 {
-    read_state(|s| s.admin_events().len() as u64)
+    storage::admin_ev::len()
 }
 
 // ─── Helper: extract precision_muls from config ───
@@ -887,7 +862,7 @@ pub fn get_admin_fees() -> Vec<u128> {
 /// Returns all virtual_price snapshots for APY calculation and historical charts.
 #[query]
 pub fn get_vp_snapshots() -> Vec<VirtualPriceSnapshot> {
-    read_state(|s| s.snapshots().clone())
+    storage::vp_snap::iter_all()
 }
 
 // ─── Bot Query Endpoints ───
@@ -1505,23 +1480,22 @@ pub fn get_virtual_price_series(
     }
     let now = ic_cdk::api::time();
     let cutoff = window_cutoff_ns(window, now);
-    read_state(|s| {
-        let mut map: std::collections::BTreeMap<u64, u128> = std::collections::BTreeMap::new();
-        for snap in s.snapshots().iter() {
-            let ts_ns = snap.timestamp_secs.saturating_mul(1_000_000_000);
-            if ts_ns < cutoff {
-                continue;
-            }
-            let bucket = bucket_floor(ts_ns, bucket_seconds);
-            map.insert(bucket, snap.virtual_price);
+    let snapshots = storage::vp_snap::iter_all();
+    let mut map: std::collections::BTreeMap<u64, u128> = std::collections::BTreeMap::new();
+    for snap in snapshots.iter() {
+        let ts_ns = snap.timestamp_secs.saturating_mul(1_000_000_000);
+        if ts_ns < cutoff {
+            continue;
         }
-        map.into_iter()
-            .map(|(t, vp)| VirtualPricePoint {
-                timestamp: t,
-                virtual_price: vp,
-            })
-            .collect()
-    })
+        let bucket = bucket_floor(ts_ns, bucket_seconds);
+        map.insert(bucket, snap.virtual_price);
+    }
+    map.into_iter()
+        .map(|(t, vp)| VirtualPricePoint {
+            timestamp: t,
+            virtual_price: vp,
+        })
+        .collect()
 }
 
 // ── E13: bucketed average fee bps series (volume-weighted) ──
@@ -1686,7 +1660,7 @@ pub async fn authorized_redeem_and_burn(
     let caller = ic_cdk::caller();
 
     // 1. Authorization check
-    if !read_state(|s| s.burn_callers().contains(&caller)) {
+    if !storage::burn_caller_contains(&caller) {
         return Err(ThreePoolError::NotAuthorizedBurnCaller);
     }
 
