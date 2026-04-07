@@ -221,6 +221,46 @@ pub fn virtual_price(
     Some(vp.as_u128())
 }
 
+// ─── Dynamic fee curve: imbalance metric ───
+
+/// Fixed-point scale for imbalance values: 1.0 = 1_000_000_000.
+pub const IMB_SCALE: u64 = 1_000_000_000;
+
+/// Compute the pool's imbalance metric (sum of squared deviations from equal weights),
+/// normalized to [0, IMB_SCALE]. Returns a u64 in 1e9 fixed-point.
+///
+/// For N=3 coins, MAX_SSD = 2/3 (one coin holds everything). We compute
+/// SSD / MAX_SSD so the returned value is in [0, 1] (scaled to 1e9 fp).
+///
+/// Returns 0 for an empty pool (all balances zero).
+pub fn compute_imbalance(balances: &[u128; 3], precision_muls: &[u64; 3]) -> u64 {
+    // Normalize balances to common 18-decimal precision so weights are comparable.
+    let xp = normalize_all(balances, precision_muls);
+    let total: U256 = xp[0] + xp[1] + xp[2];
+    if total == U256::ZERO {
+        return 0;
+    }
+
+    // Work in 1e18 fixed-point for weights (avoids losing precision in division).
+    let scale = U256::from(1_000_000_000_000_000_000u128); // 1e18
+    let target = scale / U256::from(3u64); // 1/3 in 1e18 fp
+
+    let mut ssd = U256::ZERO;
+    for i in 0..3 {
+        let w = xp[i] * scale / total; // weight in 1e18 fp
+        let dev = if w > target { w - target } else { target - w };
+        // dev^2 / scale -> result stays in 1e18 fp
+        ssd += (dev * dev) / scale;
+    }
+
+    // MAX_SSD = 2/3 in 1e18 fp
+    let max_ssd = (U256::from(2u64) * scale) / U256::from(3u64);
+
+    // Normalize: ssd / max_ssd, rescaled to IMB_SCALE (1e9)
+    let normalized = (ssd * U256::from(IMB_SCALE)) / max_ssd;
+    normalized.as_u64()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,6 +593,61 @@ mod tests {
             "increase should be modest (got {} bps)",
             increase_bps
         );
+    }
+
+    // ─── compute_imbalance tests ───
+
+    #[test]
+    fn test_compute_imbalance_perfectly_balanced() {
+        let balances: [u128; 3] = [
+            1_000_000 * 100_000_000,   // icUSD (8 dec)
+            1_000_000 * 1_000_000,     // ckUSDT (6 dec)
+            1_000_000 * 1_000_000,     // ckUSDC (6 dec)
+        ];
+        let precision_muls: [u64; 3] = [10_000_000_000, 1_000_000_000_000, 1_000_000_000_000];
+        let imb = compute_imbalance(&balances, &precision_muls);
+        assert!(imb < 1_000_000, "expected near-zero imbalance, got {}", imb);
+    }
+
+    #[test]
+    fn test_compute_imbalance_50_25_25() {
+        let balances: [u128; 3] = [
+            2_000_000 * 100_000_000,   // icUSD (50%)
+            1_000_000 * 1_000_000,     // ckUSDT (25%)
+            1_000_000 * 1_000_000,     // ckUSDC (25%)
+        ];
+        let precision_muls: [u64; 3] = [10_000_000_000, 1_000_000_000_000, 1_000_000_000_000];
+        let imb = compute_imbalance(&balances, &precision_muls);
+        assert!(imb > 50_000_000 && imb < 75_000_000, "expected ~62.5M, got {}", imb);
+    }
+
+    #[test]
+    fn test_compute_imbalance_extreme() {
+        let balances: [u128; 3] = [
+            9_000_000 * 100_000_000,
+            500_000 * 1_000_000,
+            500_000 * 1_000_000,
+        ];
+        let precision_muls: [u64; 3] = [10_000_000_000, 1_000_000_000_000, 1_000_000_000_000];
+        let imb = compute_imbalance(&balances, &precision_muls);
+        assert!(imb > 700_000_000 && imb < 750_000_000, "expected ~722M, got {}", imb);
+    }
+
+    #[test]
+    fn test_compute_imbalance_monotonic() {
+        let precision_muls: [u64; 3] = [10_000_000_000, 1_000_000_000_000, 1_000_000_000_000];
+        let mut last_imb = 0u64;
+        for icusd_share in [34u128, 40, 50, 60, 75, 90] {
+            let other = (100 - icusd_share) / 2;
+            let balances: [u128; 3] = [
+                icusd_share * 10_000 * 100_000_000,
+                other * 10_000 * 1_000_000,
+                other * 10_000 * 1_000_000,
+            ];
+            let imb = compute_imbalance(&balances, &precision_muls);
+            assert!(imb > last_imb, "imbalance should grow: {} -> {}", last_imb, imb);
+            last_imb = imb;
+        }
     }
 
     #[test]
