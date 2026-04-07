@@ -48,56 +48,17 @@ fn pre_upgrade() {
 fn post_upgrade() {
     state::load_from_stable_memory();
 
-    // ── One-time migration: LP token 18 → 8 decimals ──
-    // Divide all LP balances by 1e10, reset block log, and re-log mints.
-    // Safe to run once: after this upgrade, lp_total_supply will be ~1e8 scale.
-    // Detect by checking if supply is > 1e15 (would be impossible at 8-decimal scale
-    // since that would mean >10M LP tokens, but our pool only has ~$84 TVL).
+    // NOTE: The one-time 18→8 decimals migration used to live here. It
+    // already ran on mainnet many upgrades ago — live `lp_total_supply`
+    // is well below the 1e15 trigger threshold — so the branch was dead
+    // code. Phase A removes it entirely.
     mutate_state(|s| {
-        const SCALE_DOWN: u128 = 10_000_000_000; // 1e10
-        if s.lp_total_supply > 1_000_000_000_000_000 {
-            // Scale down all LP balances
-            let mut new_total: u128 = 0;
-            let holders: Vec<(candid::Principal, u128)> = s.lp_balances.iter()
-                .map(|(p, b)| (*p, *b))
-                .collect();
-            s.lp_balances.clear();
-            for (principal, old_balance) in &holders {
-                let new_balance = old_balance / SCALE_DOWN;
-                if new_balance > 0 {
-                    s.lp_balances.insert(*principal, new_balance);
-                    new_total += new_balance;
-                }
-            }
-            s.lp_total_supply = new_total;
-
-            // Reset ICRC-3 block log — old blocks have 18-decimal amounts
-            *s.blocks_mut() = Vec::new();
-            s.last_block_hash = None;
-            s.lp_tx_count = Some(0);
-
-            // Log fresh mint blocks for each holder with their new 8-decimal balances
-            for (principal, new_balance) in &holders {
-                let new_bal = new_balance / SCALE_DOWN;
-                if new_bal > 0 {
-                    s.log_block(Icrc3Transaction::Mint { to: *principal, amount: new_bal });
-                }
-            }
-
-            // Also clear VP snapshots — old ones used 18-decimal supply
-            *s.snapshots_mut() = Vec::new();
-
-            ic_canister_log::log!(crate::logs::INFO,
-                "LP decimal migration 18→8: scaled {} holders, new total supply: {}",
-                holders.len(), new_total);
-        } else {
-            // Normal startup: recompute hash chain and set certified data
-            let hash = certification::recompute_hash_chain(s.blocks());
-            s.last_block_hash = hash;
-            if let Some(ref h) = s.last_block_hash {
-                let last_idx = s.blocks().len().saturating_sub(1) as u64;
-                certification::set_certified_tip(last_idx, h);
-            }
+        // Normal startup: recompute hash chain and set certified data.
+        let hash = certification::recompute_hash_chain(s.blocks());
+        s.last_block_hash = hash;
+        if let Some(ref h) = s.last_block_hash {
+            let last_idx = s.blocks().len().saturating_sub(1) as u64;
+            certification::set_certified_tip(last_idx, h);
         }
     });
 
