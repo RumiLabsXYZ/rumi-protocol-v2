@@ -413,10 +413,14 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
         s.log_block(Icrc3Transaction::Mint { to: caller, amount: lp_minted });
     });
 
-    // Record liquidity event
+    // Record liquidity event v2 (dynamic-fee schema). v1 writes are stopped —
+    // v1 entries remain as frozen historical state for the migration.
     mutate_state(|s| {
-        let id = s.liquidity_events().len() as u64;
-        s.liquidity_events_mut().push(LiquidityEvent {
+        let lp_supply = s.lp_total_supply;
+        let vp_after = virtual_price(&s.balances, &precision_muls, amp, lp_supply).unwrap_or(0);
+        let balances_after = s.balances;
+        let id = s.liquidity_events_v2().len() as u64;
+        s.liquidity_events_v2_mut().push(LiquidityEventV2 {
             id,
             timestamp: ic_cdk::api::time(),
             caller,
@@ -425,6 +429,12 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
             lp_amount: lp_minted,
             coin_index: None,
             fee: None,
+            fee_bps: Some(liq_outcome.fee_bps_used),
+            imbalance_before: liq_outcome.imbalance_before,
+            imbalance_after: liq_outcome.imbalance_after,
+            is_rebalancing: liq_outcome.is_rebalancing,
+            pool_balances_after: balances_after,
+            virtual_price_after: vp_after,
         });
     });
 
@@ -466,6 +476,10 @@ pub async fn remove_liquidity(
         return Err(ThreePoolError::PoolEmpty);
     }
 
+    let precision_muls = get_precision_muls();
+    let amp = get_current_a();
+    let imbalance_before = crate::math::compute_imbalance(&balances, &precision_muls);
+
     // 3. Calculate withdrawal amounts
     let amounts = calc_remove_liquidity(lp_burn, &balances, lp_total_supply);
 
@@ -503,10 +517,15 @@ pub async fn remove_liquidity(
         }
     }
 
-    // Record liquidity event
+    // Record liquidity event v2. Proportional remove preserves pool weights,
+    // so it is neither rebalancing nor imbalancing and pays no fee.
     mutate_state(|s| {
-        let id = s.liquidity_events().len() as u64;
-        s.liquidity_events_mut().push(LiquidityEvent {
+        let lp_supply = s.lp_total_supply;
+        let vp_after = virtual_price(&s.balances, &precision_muls, amp, lp_supply).unwrap_or(0);
+        let balances_after = s.balances;
+        let imbalance_after = crate::math::compute_imbalance(&balances_after, &precision_muls);
+        let id = s.liquidity_events_v2().len() as u64;
+        s.liquidity_events_v2_mut().push(LiquidityEventV2 {
             id,
             timestamp: ic_cdk::api::time(),
             caller,
@@ -515,6 +534,12 @@ pub async fn remove_liquidity(
             lp_amount: lp_burn,
             coin_index: None,
             fee: None,
+            fee_bps: None,
+            imbalance_before,
+            imbalance_after,
+            is_rebalancing: false,
+            pool_balances_after: balances_after,
+            virtual_price_after: vp_after,
         });
     });
 
@@ -597,12 +622,15 @@ pub async fn remove_one_coin(
             reason,
         })?;
 
-    // Record liquidity event
+    // Record liquidity event v2 (dynamic-fee schema).
     mutate_state(|s| {
-        let id = s.liquidity_events().len() as u64;
+        let lp_supply = s.lp_total_supply;
+        let vp_after = virtual_price(&s.balances, &precision_muls, amp, lp_supply).unwrap_or(0);
+        let balances_after = s.balances;
         let mut amounts = [0u128; 3];
         amounts[idx] = amount;
-        s.liquidity_events_mut().push(LiquidityEvent {
+        let id = s.liquidity_events_v2().len() as u64;
+        s.liquidity_events_v2_mut().push(LiquidityEventV2 {
             id,
             timestamp: ic_cdk::api::time(),
             caller,
@@ -611,6 +639,12 @@ pub async fn remove_one_coin(
             lp_amount: lp_burn,
             coin_index: Some(coin_index),
             fee: Some(fee),
+            fee_bps: Some(roc_outcome.fee_bps_used),
+            imbalance_before: roc_outcome.imbalance_before,
+            imbalance_after: roc_outcome.imbalance_after,
+            is_rebalancing: roc_outcome.is_rebalancing,
+            pool_balances_after: balances_after,
+            virtual_price_after: vp_after,
         });
     });
 
@@ -657,17 +691,26 @@ pub async fn donate(token_index: u8, amount: u128) -> Result<(), ThreePoolError>
             reason,
         })?;
 
+    let precision_muls = get_precision_muls();
+    let amp = get_current_a();
+    let imbalance_before =
+        read_state(|s| crate::math::compute_imbalance(&s.balances, &precision_muls));
+
     // Update balance — NO LP minted
     mutate_state(|s| {
         s.balances[idx] += amount;
     });
 
-    // Record liquidity event
+    // Record liquidity event v2
     mutate_state(|s| {
-        let id = s.liquidity_events().len() as u64;
+        let lp_supply = s.lp_total_supply;
+        let vp_after = virtual_price(&s.balances, &precision_muls, amp, lp_supply).unwrap_or(0);
+        let balances_after = s.balances;
+        let imbalance_after = crate::math::compute_imbalance(&balances_after, &precision_muls);
         let mut amounts = [0u128; 3];
         amounts[idx] = amount;
-        s.liquidity_events_mut().push(LiquidityEvent {
+        let id = s.liquidity_events_v2().len() as u64;
+        s.liquidity_events_v2_mut().push(LiquidityEventV2 {
             id,
             timestamp: ic_cdk::api::time(),
             caller,
@@ -676,6 +719,12 @@ pub async fn donate(token_index: u8, amount: u128) -> Result<(), ThreePoolError>
             lp_amount: 0,
             coin_index: Some(token_index),
             fee: None,
+            fee_bps: None,
+            imbalance_before,
+            imbalance_after,
+            is_rebalancing: imbalance_after < imbalance_before,
+            pool_balances_after: balances_after,
+            virtual_price_after: vp_after,
         });
     });
 
