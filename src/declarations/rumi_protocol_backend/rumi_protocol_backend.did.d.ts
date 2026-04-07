@@ -516,6 +516,45 @@ export type PriceSource = {
   };
 export type ProtocolArg = { 'Upgrade' : UpgradeArg } |
   { 'Init' : InitArg };
+export interface ProtocolConfig {
+  'global_rate_curve' : Array<[number, number]>,
+  'bot_budget_remaining_e8s' : bigint,
+  'recovery_rate_curve' : Array<[string, number]>,
+  'redemption_fee_ceiling' : number,
+  'ckusdc_ledger_principal' : [] | [Principal],
+  'recovery_mode_threshold' : number,
+  'bot_allowed_collateral_types' : Array<Principal>,
+  'liquidation_bot_principal' : [] | [Principal],
+  'reserve_redemption_fee' : number,
+  'liquidation_protocol_share' : number,
+  'mode' : Mode,
+  'interest_split' : Array<InterestSplitArg>,
+  'recovery_cr_multiplier' : number,
+  'borrowing_fee_curve' : Array<[number, number]>,
+  'ckusdt_ledger_principal' : [] | [Principal],
+  'min_icusd_amount' : bigint,
+  'redemption_fee_floor' : number,
+  'interest_flush_threshold_e8s' : bigint,
+  'three_pool_canister' : [] | [Principal],
+  'collateral_configs' : Array<[Principal, CollateralConfig]>,
+  'rmr_ceiling' : number,
+  'ckstable_repay_fee' : number,
+  'treasury_principal' : [] | [Principal],
+  'rmr_ceiling_cr' : number,
+  'frozen' : boolean,
+  'ckusdc_enabled' : boolean,
+  'ckusdt_enabled' : boolean,
+  'rmr_floor' : number,
+  'manual_mode_override' : boolean,
+  'liquidation_bonus' : number,
+  'reserve_redemptions_enabled' : boolean,
+  'borrowing_fee' : number,
+  'bot_budget_total_e8s' : bigint,
+  'max_partial_liquidation_ratio' : number,
+  'global_icusd_mint_cap' : bigint,
+  'stability_pool_canister' : [] | [Principal],
+  'rmr_floor_cr' : number,
+}
 export type ProtocolError = { 'GenericError' : string } |
   { 'TemporarilyUnavailable' : string } |
   { 'TransferError' : TransferError } |
@@ -762,6 +801,7 @@ export interface _SERVICE {
   'get_liquidation_protocol_share' : ActorMethod<[], number>,
   'get_liquidity_status' : ActorMethod<[Principal], LiquidityStatus>,
   'get_min_icusd_amount' : ActorMethod<[], bigint>,
+  'get_protocol_config' : ActorMethod<[], ProtocolConfig>,
   'get_protocol_snapshots' : ActorMethod<
     [GetEventsArg],
     Array<ProtocolSnapshot>

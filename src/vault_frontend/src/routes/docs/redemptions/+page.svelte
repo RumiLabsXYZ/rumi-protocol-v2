@@ -2,8 +2,8 @@
   import { onMount } from 'svelte';
   import { publicActor } from '$lib/services/protocol/apiClient';
   import { protocolService } from '$lib/services/protocol';
-  import type { InterestSplitArg } from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did';
-
+  import { fetchProtocolConfig } from '$services/explorer/explorerService';
+  import { getTokenSymbol } from '$utils/explorerHelpers';
   let reserveRedemptionFee = 0;
   let redemptionFeeFloor = 0;
   let redemptionFeeCeiling = 0;
@@ -14,6 +14,23 @@
   let rmrCeilingCr = 1.5;
   let systemCR = 2.0;
   let loaded = false;
+
+  // Collateral priority tiers: Map<tierNumber, symbolList>
+  let collateralTiers: Map<number, string[]> = new Map();
+
+  // Interest split from protocol status
+  let interestSplit: { destination: string; bps: number }[] = [];
+
+  // Reactive interest split values (Svelte can't track interestSplit inside splitPct calls)
+  $: stabilityPoolSplit = interestSplit.length > 0
+    ? (Number(interestSplit.find(s => s.destination === 'stability_pool')?.bps ?? 0) / 100).toFixed(0) + '%'
+    : '—';
+  $: threePoolSplit = interestSplit.length > 0
+    ? (Number(interestSplit.find(s => s.destination === 'three_pool')?.bps ?? 0) / 100).toFixed(0) + '%'
+    : '—';
+  $: treasurySplit = interestSplit.length > 0
+    ? (Number(interestSplit.find(s => s.destination === 'treasury')?.bps ?? 0) / 100).toFixed(0) + '%'
+    : '—';
 
   $: rmrFloorPct = (rmrFloor * 100).toFixed(0);
   $: rmrCeilingPct = (rmrCeiling * 100).toFixed(0);
@@ -43,21 +60,19 @@
     return 120 - ((rate - rmrRateMin) / (rmrRateMax - rmrRateMin || 1)) * 95;
   }
 
-  let interestSplit: InterestSplitArg[] = [];
-
-  function splitPct(dest: string): string {
-    const entry = interestSplit.find(s => s.destination === dest);
-    return entry ? (Number(entry.bps) / 100).toFixed(0) + '%' : '—';
-  }
-
   function pctRaw(val: number, decimals = 1): string {
     if (val === undefined || val === null) return '—';
     return (val * 100).toFixed(decimals) + '%';
   }
 
+  function tierSymbols(tier: number): string {
+    const symbols = collateralTiers.get(tier);
+    return symbols?.length ? symbols.join(', ') : 'None';
+  }
+
   onMount(async () => {
     try {
-      const [rrFee, rfFloor, rfCeil, rrEnabled, rFloor, rCeil, rFloorCr, rCeilCr, split, status] = await Promise.all([
+      const [rrFee, rfFloor, rfCeil, rrEnabled, rFloor, rCeil, rFloorCr, rCeilCr, status] = await Promise.all([
         publicActor.get_reserve_redemption_fee() as Promise<number>,
         publicActor.get_redemption_fee_floor() as Promise<number>,
         publicActor.get_redemption_fee_ceiling() as Promise<number>,
@@ -66,7 +81,6 @@
         publicActor.get_rmr_ceiling() as Promise<number>,
         publicActor.get_rmr_floor_cr() as Promise<number>,
         publicActor.get_rmr_ceiling_cr() as Promise<number>,
-        publicActor.get_interest_split(),
         protocolService.getProtocolStatus(),
       ]);
       reserveRedemptionFee = Number(rrFee);
@@ -78,10 +92,29 @@
       rmrFloorCr = Number(rFloorCr);
       rmrCeilingCr = Number(rCeilCr);
       systemCR = status.totalCollateralRatio ?? 2.0;
-      interestSplit = split;
+      interestSplit = status.interestSplit ?? [];
     } catch (e) {
       console.error('Failed to fetch redemption params:', e);
     }
+
+    // Fetch collateral tiers separately so a failure doesn't break the rest
+    try {
+      const config = await fetchProtocolConfig();
+      if (config?.collateral_configs) {
+        const tierMap = new Map<number, string[]>();
+        for (const [principal, cfg] of config.collateral_configs) {
+          const pid = principal?.toText?.() ?? String(principal);
+          const tier = cfg.redemption_tier?.[0] ?? 1;
+          const symbol = getTokenSymbol(pid);
+          if (!tierMap.has(tier)) tierMap.set(tier, []);
+          tierMap.get(tier)!.push(symbol);
+        }
+        collateralTiers = tierMap;
+      }
+    } catch (e) {
+      console.error('Failed to fetch collateral tiers:', e);
+    }
+
     loaded = true;
   });
 </script>
@@ -159,7 +192,7 @@
   </section>
 
   <section class="doc-section">
-    <h2 class="doc-heading">Reserve Redemptions (Tier 1)</h2>
+    <h2 class="doc-heading">Reserve Redemptions</h2>
     <p>The protocol holds reserves of <strong>ckUSDT</strong> and <strong>ckUSDC</strong>, real stablecoins that accumulate when users repay vault debt with ckStables. When you redeem icUSD, the protocol first tries to fill your redemption from these reserves.</p>
     {#if loaded}
       <div class="fee-box">
@@ -172,12 +205,12 @@
       </div>
     {/if}
     <p>Reserve redemptions are the cleanest outcome: you burn icUSD and receive ckStables in return. No vaults are affected.</p>
-    <p>Reserves grow when users repay vault debt with ckUSDT or ckUSDC. Note that interest revenue from stablecoin repayments is split according to the protocol's interest split: currently <span class="live">{splitPct('stability_pool')}</span> to the stability pool, <span class="live">{splitPct('three_pool')}</span> to the 3pool, and <span class="live">{splitPct('treasury')}</span> to treasury.</p>
+    <p>Reserves grow when users repay vault debt with ckUSDT or ckUSDC. Note that interest revenue from stablecoin repayments is split according to the protocol's interest split: currently <span class="live">{stabilityPoolSplit}</span> to the stability pool, <span class="live">{threePoolSplit}</span> to the 3pool, and <span class="live">{treasurySplit}</span> to treasury.</p>
   </section>
 
   <section class="doc-section">
-    <h2 class="doc-heading">Vault Redemptions (Tier 2: Spillover)</h2>
-    <p>If the protocol's reserves don't have enough ckStables to fill the full redemption amount, the remainder "spills over" into vault redemptions. The protocol identifies the vaults with the <strong>lowest collateral ratios</strong> and redeems against them, reducing their debt but also taking an equivalent value of their collateral.</p>
+    <h2 class="doc-heading">Vault Redemptions</h2>
+    <p>If the protocol's reserves don't have enough ckStables to fill the full redemption amount, the remainder "spills over" into vault redemptions. The protocol first targets vaults holding <strong>Tier 1 collateral</strong>, then Tier 2, then Tier 3. Within each tier, vaults with the <strong>lowest collateral ratios</strong> are redeemed against first, reducing their debt but also taking an equivalent value of their collateral.</p>
     {#if loaded}
       <div class="fee-box">
         <span class="fee-label">Vault Redemption Fee Floor</span>
@@ -195,6 +228,24 @@
   </section>
 
   <section class="doc-section">
+    <h2 class="doc-heading">Collateral Priority Tiers</h2>
+    <p>When vault redemptions occur, not all collateral types are treated equally. Each collateral asset is assigned to a <strong>priority tier</strong> that determines the order in which vaults are redeemed against. Tier 1 collateral is redeemed first, then Tier 2, then Tier 3. Within a tier, vaults are selected by lowest collateral ratio.</p>
+    {#if loaded && collateralTiers.size > 0}
+      <div class="tier-table">
+        {#each [1, 2, 3] as tier}
+          {#if collateralTiers.has(tier)}
+            <div class="tier-row">
+              <span class="tier-label">Tier {tier}{tier === 1 ? ' (redeemed first)' : tier === 3 ? ' (redeemed last)' : ''}</span>
+              <span class="tier-assets live">{tierSymbols(tier)}</span>
+            </div>
+          {/if}
+        {/each}
+      </div>
+    {/if}
+    <p>This tiering protects certain asset classes from being redeemed against unless necessary. Tier 1 assets (typically native or high-liquidity tokens) absorb redemptions first, shielding Tier 2 and Tier 3 assets (wrapped or bridged tokens) from unnecessary exposure.</p>
+  </section>
+
+  <section class="doc-section">
     <h2 class="doc-heading">Token Preference</h2>
     <p>When redeeming through reserves, you can choose whether to receive <strong>ckUSDT</strong> or <strong>ckUSDC</strong>. If the protocol doesn't have enough of your preferred token, it falls back to the other. If neither reserve is sufficient, the remainder spills over to vault redemptions.</p>
     <p>By default, the protocol fills ckUSDT first. You can override this by specifying your preferred token ledger when calling the redemption function.</p>
@@ -202,8 +253,8 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Impact on Vault Owners</h2>
-    <p><strong>Reserve tier (Tier 1):</strong> Zero impact on vaults. The protocol draws from its own stablecoin reserves. Your vault is completely unaffected.</p>
-    <p><strong>Vault tier (Tier 2):</strong> Your vault's debt is reduced, but collateral is also taken proportionally. The protocol uses a <strong>water-filling algorithm</strong> rather than simply draining the single lowest-CR vault. Instead, it identifies the band of vaults with the lowest CRs and distributes the redemption proportionally by debt across the band, raising them all equally. If the redemption amount would raise the entire band above the next tier, the band merges upward and the process repeats. This means redemptions affect multiple low-CR vaults simultaneously rather than wiping out one vault at a time.</p>
+    <p><strong>Reserve redemptions:</strong> Zero impact on vaults. The protocol draws from its own stablecoin reserves. Your vault is completely unaffected.</p>
+    <p><strong>Vault redemptions:</strong> Your vault's debt is reduced, but collateral is also taken proportionally. The protocol uses a <strong>water-filling algorithm</strong> rather than simply draining the single lowest-CR vault. Instead, it identifies the band of vaults with the lowest CRs and distributes the redemption proportionally by debt across the band, raising them all equally. If the redemption amount would raise the entire band above the next band, it merges upward and the process repeats. This means redemptions affect multiple low-CR vaults simultaneously rather than wiping out one vault at a time.</p>
     <p>Vault redemption is not liquidation. Your vault remains open and you retain any remaining collateral and debt. The collateral taken is valued at the RMR-adjusted rate ({rmrFloorPct}–{rmrCeilingPct}% of face value depending on system health), minus the dynamic vault redemption fee. Keeping your vault well-collateralized reduces the chance of being redeemed against.</p>
   </section>
 
@@ -212,10 +263,10 @@
     <ol class="flow-list">
       <li>You submit icUSD for redemption.</li>
       <li>The icUSD is burned (removed from circulation).</li>
-      <li><strong>Tier 1:</strong> The protocol checks its ckStable reserves and sends you stablecoins up to the available balance.</li>
-      <li><strong>Tier 2:</strong> Any remaining amount after reserves is filled by taking collateral from the lowest-CR vaults.</li>
+      <li><strong>Reserves first:</strong> The protocol checks its ckStable reserves and sends you stablecoins up to the available balance.</li>
+      <li><strong>Vault spillover:</strong> Any remaining amount after reserves is filled by taking collateral from the lowest-CR vaults, prioritized by collateral tier (see below).</li>
       <li>The Redemption Margin Ratio (RMR) is applied. You receive {rmrFloorPct}–{rmrCeilingPct}% of face value depending on system health.</li>
-      <li>Fees are deducted from the amount you receive: flat reserve fee for Tier 1, dynamic fee for Tier 2.</li>
+      <li>Fees are deducted from the amount you receive: flat fee for reserve redemptions, dynamic fee for vault redemptions.</li>
       <li>Reserve fees are sent to the protocol treasury. Vault redemption fees are deducted from the collateral released.</li>
     </ol>
   </section>
@@ -275,5 +326,24 @@
   }
   .flow-list li {
     font-size: 0.875rem; color: var(--rumi-text-secondary); line-height: 1.5;
+  }
+
+  .tier-table {
+    display: flex; flex-direction: column; gap: 0.375rem;
+    margin: 0.5rem 0;
+  }
+  .tier-row {
+    display: flex; justify-content: space-between; align-items: baseline;
+    padding: 0.5rem 0.75rem;
+    background: var(--rumi-bg-surface1);
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.5rem;
+  }
+  .tier-label {
+    font-size: 0.8125rem; color: var(--rumi-text-secondary);
+  }
+  .tier-assets {
+    font-family: 'Inter', sans-serif; font-size: 0.875rem;
+    font-weight: 600;
   }
 </style>

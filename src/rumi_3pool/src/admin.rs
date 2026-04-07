@@ -2,10 +2,23 @@
 
 use candid::Principal;
 
-use crate::math::get_a;
+use crate::math::{get_a, IMB_SCALE};
 use crate::state::{mutate_state, read_state};
 use crate::transfers::transfer_to_user;
-use crate::types::{ThreePoolError, ThreePoolAdminEvent, ThreePoolAdminAction};
+use crate::types::{FeeCurveParams, ThreePoolError, ThreePoolAdminEvent, ThreePoolAdminAction};
+
+/// Hard cap on the dynamic fee curve max fee (10% in basis points).
+pub const MAX_FEE_CURVE_BPS: u16 = 1_000;
+
+#[cfg(not(test))]
+fn now_ns() -> u64 {
+    ic_cdk::api::time()
+}
+
+#[cfg(test)]
+fn now_ns() -> u64 {
+    0
+}
 
 /// Minimum time for an A parameter ramp (1 day in seconds).
 const MIN_RAMP_TIME: u64 = 86400;
@@ -261,4 +274,181 @@ pub fn set_admin_fee(caller: Principal, fee_bps: u64) -> Result<(), ThreePoolErr
     });
 
     Ok(())
+}
+
+/// Update the dynamic fee curve parameters. Admin-only.
+///
+/// Validation:
+/// - `min_fee_bps <= max_fee_bps`
+/// - `max_fee_bps <= MAX_FEE_CURVE_BPS` (10% hard cap)
+/// - `imb_saturation > 0` and `imb_saturation <= IMB_SCALE`
+pub fn set_fee_curve_params(
+    caller: Principal,
+    params: FeeCurveParams,
+) -> Result<(), ThreePoolError> {
+    let admin = read_state(|s| s.config.admin);
+    if caller != admin {
+        return Err(ThreePoolError::Unauthorized);
+    }
+
+    if params.min_fee_bps > params.max_fee_bps {
+        return Err(ThreePoolError::InvalidCoinIndex);
+    }
+    if params.max_fee_bps > MAX_FEE_CURVE_BPS {
+        return Err(ThreePoolError::InvalidCoinIndex);
+    }
+    if params.imb_saturation == 0 || params.imb_saturation > IMB_SCALE {
+        return Err(ThreePoolError::InvalidCoinIndex);
+    }
+
+    mutate_state(|s| {
+        let old = s.config.fee_curve;
+        s.config.fee_curve = Some(params);
+
+        let id = s.admin_events().len() as u64;
+        s.admin_events_mut().push(ThreePoolAdminEvent {
+            id,
+            timestamp: now_ns(),
+            caller,
+            action: ThreePoolAdminAction::FeeCurveParamsUpdated { old, new: params },
+        });
+    });
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{mutate_state, read_state, replace_state, ThreePoolState};
+
+    fn admin_principal() -> Principal {
+        Principal::from_slice(&[0xAA; 29])
+    }
+
+    fn other_principal() -> Principal {
+        Principal::from_slice(&[0xBB; 29])
+    }
+
+    fn reset_state() {
+        let mut s = ThreePoolState::default();
+        s.config.admin = admin_principal();
+        s.config.fee_curve = None;
+        s.admin_events = Some(Vec::new());
+        replace_state(s);
+    }
+
+    fn valid_params() -> FeeCurveParams {
+        FeeCurveParams {
+            min_fee_bps: 2,
+            max_fee_bps: 50,
+            imb_saturation: 250_000_000,
+        }
+    }
+
+    #[test]
+    fn admin_can_update_fee_curve_params() {
+        reset_state();
+        let params = valid_params();
+        set_fee_curve_params(admin_principal(), params).expect("admin update");
+
+        let stored = read_state(|s| s.config.fee_curve);
+        assert_eq!(stored, Some(params));
+
+        let events = read_state(|s| s.admin_events().clone());
+        assert_eq!(events.len(), 1);
+        match &events[0].action {
+            ThreePoolAdminAction::FeeCurveParamsUpdated { old, new } => {
+                assert_eq!(*old, None);
+                assert_eq!(*new, params);
+            }
+            other => panic!("unexpected action: {:?}", other),
+        }
+        assert_eq!(events[0].caller, admin_principal());
+    }
+
+    #[test]
+    fn non_admin_rejected() {
+        reset_state();
+        let err = set_fee_curve_params(other_principal(), valid_params()).unwrap_err();
+        assert!(matches!(err, ThreePoolError::Unauthorized));
+        // No state change, no event.
+        assert_eq!(read_state(|s| s.config.fee_curve), None);
+        assert_eq!(read_state(|s| s.admin_events().len()), 0);
+    }
+
+    #[test]
+    fn rejects_max_below_min() {
+        reset_state();
+        let bad = FeeCurveParams {
+            min_fee_bps: 100,
+            max_fee_bps: 50,
+            imb_saturation: 250_000_000,
+        };
+        let err = set_fee_curve_params(admin_principal(), bad).unwrap_err();
+        assert!(matches!(err, ThreePoolError::InvalidCoinIndex));
+    }
+
+    #[test]
+    fn rejects_max_above_hard_cap() {
+        reset_state();
+        let bad = FeeCurveParams {
+            min_fee_bps: 1,
+            max_fee_bps: MAX_FEE_CURVE_BPS + 1,
+            imb_saturation: 250_000_000,
+        };
+        let err = set_fee_curve_params(admin_principal(), bad).unwrap_err();
+        assert!(matches!(err, ThreePoolError::InvalidCoinIndex));
+    }
+
+    #[test]
+    fn rejects_zero_saturation() {
+        reset_state();
+        let bad = FeeCurveParams {
+            min_fee_bps: 1,
+            max_fee_bps: 50,
+            imb_saturation: 0,
+        };
+        let err = set_fee_curve_params(admin_principal(), bad).unwrap_err();
+        assert!(matches!(err, ThreePoolError::InvalidCoinIndex));
+    }
+
+    #[test]
+    fn rejects_saturation_above_scale() {
+        reset_state();
+        let bad = FeeCurveParams {
+            min_fee_bps: 1,
+            max_fee_bps: 50,
+            imb_saturation: IMB_SCALE + 1,
+        };
+        let err = set_fee_curve_params(admin_principal(), bad).unwrap_err();
+        assert!(matches!(err, ThreePoolError::InvalidCoinIndex));
+    }
+
+    #[test]
+    fn admin_event_records_old_value() {
+        reset_state();
+        let first = valid_params();
+        set_fee_curve_params(admin_principal(), first).unwrap();
+
+        let second = FeeCurveParams {
+            min_fee_bps: 5,
+            max_fee_bps: 75,
+            imb_saturation: 500_000_000,
+        };
+        set_fee_curve_params(admin_principal(), second).unwrap();
+
+        let events = read_state(|s| s.admin_events().clone());
+        assert_eq!(events.len(), 2);
+        match &events[1].action {
+            ThreePoolAdminAction::FeeCurveParamsUpdated { old, new } => {
+                assert_eq!(*old, Some(first));
+                assert_eq!(*new, second);
+            }
+            other => panic!("unexpected action: {:?}", other),
+        }
+
+        // Avoid leaking state to other tests on the same thread.
+        let _ = mutate_state(|s| std::mem::take(&mut s.admin_events));
+    }
 }

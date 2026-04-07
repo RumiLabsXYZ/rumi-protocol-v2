@@ -210,6 +210,71 @@ pub struct LiquidityStatus {
     pub total_available_returns: u64,
 }
 
+/// Read-only dump of all admin-settable protocol parameters in one call.
+/// Returned by `get_protocol_config()` so operators can eyeball every threshold,
+/// fee, ceiling, and collateral setting without multiple queries.
+#[derive(CandidType, Deserialize, Debug)]
+pub struct ProtocolConfig {
+    // -- Protocol mode & safety --
+    pub mode: Mode,
+    pub frozen: bool,
+    pub manual_mode_override: bool,
+
+    // -- Global fees --
+    pub borrowing_fee: f64,
+    pub redemption_fee_floor: f64,
+    pub redemption_fee_ceiling: f64,
+    pub reserve_redemption_fee: f64,
+    pub ckstable_repay_fee: f64,
+    pub liquidation_bonus: f64,
+    pub liquidation_protocol_share: f64,
+
+    // -- RMR parameters --
+    pub rmr_floor: f64,
+    pub rmr_ceiling: f64,
+    pub rmr_floor_cr: f64,
+    pub rmr_ceiling_cr: f64,
+
+    // -- Recovery mode --
+    pub recovery_cr_multiplier: f64,
+    pub recovery_mode_threshold: f64,
+    pub max_partial_liquidation_ratio: f64,
+
+    // -- Limits --
+    pub min_icusd_amount: u64,
+    pub global_icusd_mint_cap: u64,
+    pub interest_flush_threshold_e8s: u64,
+
+    // -- Interest split --
+    pub interest_split: Vec<InterestSplitArg>,
+
+    // -- Rate curves --
+    pub global_rate_curve: Vec<(f64, f64)>,
+    pub recovery_rate_curve: Vec<(String, f64)>,
+    pub borrowing_fee_curve: Vec<(f64, f64)>,
+
+    // -- Reserve redemptions --
+    pub reserve_redemptions_enabled: bool,
+    pub ckusdt_enabled: bool,
+    pub ckusdc_enabled: bool,
+
+    // -- External principals --
+    pub treasury_principal: Option<Principal>,
+    pub stability_pool_canister: Option<Principal>,
+    pub three_pool_canister: Option<Principal>,
+    pub ckusdt_ledger_principal: Option<Principal>,
+    pub ckusdc_ledger_principal: Option<Principal>,
+
+    // -- Bot config --
+    pub liquidation_bot_principal: Option<Principal>,
+    pub bot_budget_total_e8s: u64,
+    pub bot_budget_remaining_e8s: u64,
+    pub bot_allowed_collateral_types: Vec<Principal>,
+
+    // -- Per-collateral configs (all collateral types) --
+    pub collateral_configs: Vec<(Principal, state::CollateralConfig)>,
+}
+
 /// Per-collateral aggregate totals — lightweight alternative to fetching all vaults.
 #[derive(CandidType, Deserialize, Debug)]
 pub struct CollateralTotals {

@@ -77,6 +77,92 @@ type LiquidityEvent = record {
   fee : opt nat;
 };
 
+type FeeCurveParams = record {
+  min_fee_bps : nat16;
+  max_fee_bps : nat16;
+  imb_saturation : nat64;
+};
+
+type SwapEventV2 = record {
+  id : nat64;
+  timestamp : nat64;
+  caller : principal;
+  token_in : nat8;
+  token_out : nat8;
+  amount_in : nat;
+  amount_out : nat;
+  fee : nat;
+  fee_bps : nat16;
+  imbalance_before : nat64;
+  imbalance_after : nat64;
+  is_rebalancing : bool;
+  pool_balances_after : vec nat;
+  virtual_price_after : nat;
+  migrated : bool;
+};
+
+type LiquidityEventV2 = record {
+  id : nat64;
+  timestamp : nat64;
+  caller : principal;
+  action : LiquidityAction;
+  amounts : vec nat;
+  lp_amount : nat;
+  coin_index : opt nat8;
+  fee : opt nat;
+  fee_bps : opt nat16;
+  imbalance_before : nat64;
+  imbalance_after : nat64;
+  is_rebalancing : bool;
+  pool_balances_after : vec nat;
+  virtual_price_after : nat;
+  migrated : bool;
+};
+
+type QuoteSwapResult = record {
+  token_in : nat8;
+  token_out : nat8;
+  amount_in : nat;
+  amount_out : nat;
+  fee_native : nat;
+  fee_bps : nat16;
+  imbalance_before : nat64;
+  imbalance_after : nat64;
+  is_rebalancing : bool;
+  virtual_price_before : nat;
+  virtual_price_after : nat;
+};
+
+type PoolStateView = record {
+  balances : vec nat;
+  normalized_balances : vec nat;
+  imbalance : nat64;
+  virtual_price : nat;
+  lp_total_supply : nat;
+  fee_curve : FeeCurveParams;
+  amp : nat64;
+};
+
+type OptimalRebalanceQuote = record {
+  token_in : nat8;
+  token_out : nat8;
+  dx : nat;
+  amount_out : nat;
+  fee_bps : nat16;
+  imbalance_before : nat64;
+  imbalance_after : nat64;
+  profit_bps_estimate : nat64;
+};
+
+type ImbalanceEventKind = variant { Swap; Liquidity };
+
+type ImbalanceSnapshot = record {
+  timestamp : nat64;
+  imbalance_after : nat64;
+  virtual_price_after : nat;
+  event_kind : ImbalanceEventKind;
+};
+
 type ThreePoolAdminAction = variant {
   RampA : record { future_a : nat64; future_a_time : nat64 };
   StopRampA : record { frozen_a : nat64 };
@@ -86,6 +172,7 @@ type ThreePoolAdminAction = variant {
   SetAdminFee : record { fee_bps : nat64 };
   AddAuthorizedBurnCaller : record { canister : principal };
   RemoveAuthorizedBurnCaller : record { canister : principal };
+  FeeCurveParamsUpdated : record { old : opt FeeCurveParams; new : FeeCurveParams };
 };
 
 type ThreePoolAdminEvent = record {
@@ -307,6 +394,77 @@ type TransferFromError = variant {
   GenericError : record { error_code : nat; message : text };
 };
 
+// ─── Explorer types ───
+
+type StatsWindow = variant {
+  Last24h;
+  Last7d;
+  Last30d;
+  AllTime;
+};
+
+type PoolStats = record {
+  swap_count : nat64;
+  swap_volume_per_token : vec nat;
+  total_fees_collected : vec nat;
+  unique_swappers : nat64;
+  liquidity_added_count : nat64;
+  liquidity_removed_count : nat64;
+  avg_fee_bps : nat32;
+  arb_swap_count : nat64;
+  arb_volume_per_token : vec nat;
+};
+
+type ImbalanceStats = record {
+  current : nat64;
+  min : nat64;
+  max : nat64;
+  avg : nat64;
+  samples : vec record { nat64; nat64 };
+};
+
+type FeeBucket = record {
+  min_bps : nat16;
+  max_bps : nat16;
+  swap_count : nat64;
+  volume_per_token : vec nat;
+};
+
+type FeeStats = record {
+  buckets : vec FeeBucket;
+  rebalancing_swap_count : nat64;
+  rebalancing_swap_pct : nat32;
+};
+
+type VolumePoint = record {
+  timestamp : nat64;
+  volume_per_token : vec nat;
+};
+
+type BalancePoint = record {
+  timestamp : nat64;
+  balances : vec nat;
+};
+
+type VirtualPricePoint = record {
+  timestamp : nat64;
+  virtual_price : nat;
+};
+
+type FeePoint = record {
+  timestamp : nat64;
+  avg_fee_bps : nat32;
+};
+
+type PoolHealth = record {
+  current_imbalance : nat64;
+  imbalance_trend_1h : int32;
+  last_swap_age_seconds : nat64;
+  fee_at_min : nat16;
+  fee_at_max_imbalance_swap : nat16;
+  arb_opportunity_score : nat8;
+};
+
 service : (ThreePoolInitArgs) -> {
   health : () -> (text) query;
   swap : (nat8, nat8, nat, nat) -> (variant { Ok : nat; Err : ThreePoolError });
@@ -316,6 +474,7 @@ service : (ThreePoolInitArgs) -> {
   donate : (nat8, nat) -> (variant { Ok; Err : ThreePoolError });
   get_pool_status : () -> (PoolStatus) query;
   get_lp_balance : (principal) -> (nat) query;
+  get_all_lp_holders : () -> (vec record { principal; nat }) query;
   calc_swap : (nat8, nat8, nat) -> (variant { Ok : nat; Err : ThreePoolError }) query;
   calc_add_liquidity_query : (vec nat, nat) -> (variant { Ok : nat; Err : ThreePoolError }) query;
   calc_remove_liquidity_query : (nat) -> (variant { Ok : vec nat; Err : ThreePoolError }) query;
@@ -328,6 +487,7 @@ service : (ThreePoolInitArgs) -> {
   set_paused : (bool) -> (variant { Ok; Err : ThreePoolError });
   set_swap_fee : (nat64) -> (variant { Ok; Err : ThreePoolError });
   set_admin_fee : (nat64) -> (variant { Ok; Err : ThreePoolError });
+  set_fee_curve_params : (FeeCurveParams) -> (variant { Ok; Err : ThreePoolError });
   add_authorized_burn_caller : (principal) -> (variant { Ok; Err : ThreePoolError });
   remove_authorized_burn_caller : (principal) -> (variant { Ok; Err : ThreePoolError });
   get_authorized_burn_callers : () -> (vec principal) query;
@@ -337,6 +497,28 @@ service : (ThreePoolInitArgs) -> {
   get_liquidity_event_count : () -> (nat64) query;
   get_admin_events : (nat64, nat64) -> (vec ThreePoolAdminEvent) query;
   get_admin_event_count : () -> (nat64) query;
+  quote_swap : (nat8, nat8, nat) -> (variant { Ok : QuoteSwapResult; Err : ThreePoolError }) query;
+  get_pool_state : () -> (PoolStateView) query;
+  get_fee_curve_params : () -> (FeeCurveParams) query;
+  quote_optimal_rebalance : (nat8, nat8) -> (variant { Ok : OptimalRebalanceQuote; Err : ThreePoolError }) query;
+  simulate_swap_path : (vec record { nat8; nat8; nat }) -> (variant { Ok : vec QuoteSwapResult; Err : ThreePoolError }) query;
+  get_imbalance_history : (nat64, nat64) -> (vec ImbalanceSnapshot) query;
+  get_swap_events_v2 : (nat64, nat64) -> (vec SwapEventV2) query;
+
+  // Explorer endpoints (E1-E14)
+  get_liquidity_events_by_principal : (principal, nat64, nat64) -> (vec LiquidityEventV2) query;
+  get_swap_events_by_principal : (principal, nat64, nat64) -> (vec SwapEventV2) query;
+  get_swap_events_by_time_range : (nat64, nat64, nat64) -> (vec SwapEventV2) query;
+  get_pool_stats : (StatsWindow) -> (PoolStats) query;
+  get_imbalance_stats : (StatsWindow) -> (ImbalanceStats) query;
+  get_fee_stats : (StatsWindow) -> (FeeStats) query;
+  get_top_swappers : (StatsWindow, nat64) -> (vec record { principal; nat64; nat }) query;
+  get_top_lps : (nat64) -> (vec record { principal; nat; nat32 }) query;
+  get_volume_series : (StatsWindow, nat64) -> (vec VolumePoint) query;
+  get_balance_series : (StatsWindow, nat64) -> (vec BalancePoint) query;
+  get_virtual_price_series : (StatsWindow, nat64) -> (vec VirtualPricePoint) query;
+  get_fee_series : (StatsWindow, nat64) -> (vec FeePoint) query;
+  get_pool_health : () -> (PoolHealth) query;
   authorized_redeem_and_burn : (AuthorizedRedeemAndBurnArgs) -> (variant { Ok : RedeemAndBurnResult; Err : ThreePoolError });
   icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (variant { Ok : ConsentInfo; Err : Icrc21Error });
   icrc28_trusted_origins : () -> (Icrc28TrustedOriginsResponse) query;

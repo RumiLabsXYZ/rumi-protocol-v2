@@ -454,6 +454,83 @@ fn get_protocol_status() -> ProtocolStatus {
 
 #[candid_method(query)]
 #[query]
+fn get_protocol_config() -> rumi_protocol_backend::ProtocolConfig {
+    use rumi_protocol_backend::ProtocolConfig;
+    read_state(|s| ProtocolConfig {
+        mode: s.mode,
+        frozen: s.frozen,
+        manual_mode_override: s.manual_mode_override,
+
+        borrowing_fee: s.get_borrowing_fee().to_f64(),
+        redemption_fee_floor: s.redemption_fee_floor.to_f64(),
+        redemption_fee_ceiling: s.redemption_fee_ceiling.to_f64(),
+        reserve_redemption_fee: s.reserve_redemption_fee.to_f64(),
+        ckstable_repay_fee: s.ckstable_repay_fee.to_f64(),
+        liquidation_bonus: s.liquidation_bonus.to_f64(),
+        liquidation_protocol_share: s.get_liquidation_protocol_share().to_f64(),
+
+        rmr_floor: s.rmr_floor.to_f64(),
+        rmr_ceiling: s.rmr_ceiling.to_f64(),
+        rmr_floor_cr: s.rmr_floor_cr.to_f64(),
+        rmr_ceiling_cr: s.rmr_ceiling_cr.to_f64(),
+
+        recovery_cr_multiplier: s.recovery_cr_multiplier.to_f64(),
+        recovery_mode_threshold: s.recovery_mode_threshold.to_f64(),
+        max_partial_liquidation_ratio: s.max_partial_liquidation_ratio.to_f64(),
+
+        min_icusd_amount: s.min_icusd_amount.to_u64(),
+        global_icusd_mint_cap: s.global_icusd_mint_cap,
+        interest_flush_threshold_e8s: s.interest_flush_threshold_e8s,
+
+        interest_split: s.interest_split.iter().map(|r| {
+            let dest = match &r.destination {
+                rumi_protocol_backend::state::InterestDestination::StabilityPool => "stability_pool".to_string(),
+                rumi_protocol_backend::state::InterestDestination::Treasury => "treasury".to_string(),
+                rumi_protocol_backend::state::InterestDestination::ThreePool => "three_pool".to_string(),
+            };
+            InterestSplitArg { destination: dest, bps: r.bps }
+        }).collect(),
+
+        global_rate_curve: s.global_rate_curve.markers.iter()
+            .map(|m| (m.cr_level.to_f64(), m.multiplier.to_f64()))
+            .collect(),
+        recovery_rate_curve: s.recovery_rate_curve.iter()
+            .map(|m| (format!("{:?}", m.threshold), m.multiplier.to_f64()))
+            .collect(),
+        borrowing_fee_curve: match &s.borrowing_fee_curve {
+            Some(curve) => s.resolve_curve(curve, None).iter()
+                .map(|(cr, mult)| (cr.to_f64(), mult.to_f64()))
+                .collect(),
+            None => vec![],
+        },
+
+        reserve_redemptions_enabled: s.reserve_redemptions_enabled,
+        ckusdt_enabled: s.ckusdt_enabled,
+        ckusdc_enabled: s.ckusdc_enabled,
+
+        treasury_principal: s.treasury_principal,
+        stability_pool_canister: s.stability_pool_canister,
+        three_pool_canister: s.three_pool_canister,
+        ckusdt_ledger_principal: s.ckusdt_ledger_principal,
+        ckusdc_ledger_principal: s.ckusdc_ledger_principal,
+
+        liquidation_bot_principal: s.liquidation_bot_principal,
+        bot_budget_total_e8s: s.bot_budget_total_e8s,
+        bot_budget_remaining_e8s: s.bot_budget_remaining_e8s,
+        bot_allowed_collateral_types: s.bot_allowed_collateral_types.iter().cloned().collect(),
+
+        collateral_configs: s.collateral_configs.iter()
+            .map(|(ct, config)| {
+                let mut cfg = config.clone();
+                cfg.recovery_target_cr = cfg.borrow_threshold_ratio * s.recovery_cr_multiplier;
+                (*ct, cfg)
+            })
+            .collect(),
+    })
+}
+
+#[candid_method(query)]
+#[query]
 fn get_fees(redeemed_amount: u64) -> Fees {
     read_state(|s| Fees {
         borrowing_fee: s.get_borrowing_fee().to_f64(),
