@@ -296,3 +296,29 @@ pub struct RedeemAndBurnResult {
     /// Block index from the token ledger burn call.
     pub burn_block_index: u64,
 }
+
+// ─── Dynamic Fee Curve ───
+
+/// Parameters for the directional dynamic fee curve.
+///
+/// `imb_saturation` is in 1e9 fixed-point (so 1.0 = 1_000_000_000).
+/// Imbalance metric values are in the same fixed-point representation.
+#[derive(CandidType, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeeCurveParams {
+    /// Minimum fee in basis points (charged on rebalancing trades).
+    pub min_fee_bps: u16,
+    /// Maximum fee in basis points (saturation cap on imbalancing trades).
+    pub max_fee_bps: u16,
+    /// Imbalance level (1e9 fixed-point) at which the imbalancing fee saturates to max.
+    pub imb_saturation: u64,
+}
+
+impl Default for FeeCurveParams {
+    fn default() -> Self {
+        Self {
+            min_fee_bps: 1,
+            max_fee_bps: 99,
+            imb_saturation: 250_000_000, // 0.25 in 1e9 fixed-point
+        }
+    }
+}
