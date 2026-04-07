@@ -70,6 +70,11 @@ pub struct PoolConfig {
     pub admin_fee_bps: u64,
     /// Admin principal who can adjust parameters.
     pub admin: Principal,
+    /// Dynamic fee curve parameters. Optional for upgrade compatibility:
+    /// pre-upgrade state won't have this field and will deserialize to None,
+    /// which callers should treat as `FeeCurveParams::default()`.
+    #[serde(default)]
+    pub fee_curve: Option<FeeCurveParams>,
 }
 
 // ─── Init Args ───

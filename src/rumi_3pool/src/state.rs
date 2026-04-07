@@ -79,6 +79,7 @@ impl Default for ThreePoolState {
                 swap_fee_bps: 4,       // 0.04%
                 admin_fee_bps: 5000,   // 50% of swap fee
                 admin: Principal::anonymous(),
+                fee_curve: Some(FeeCurveParams::default()),
             },
             balances: [0; 3],
             lp_balances: BTreeMap::new(),
@@ -336,6 +337,7 @@ impl ThreePoolState {
             swap_fee_bps: args.swap_fee_bps,
             admin_fee_bps: args.admin_fee_bps,
             admin: args.admin,
+            fee_curve: Some(FeeCurveParams::default()),
         };
         self.is_initialized = true;
     }

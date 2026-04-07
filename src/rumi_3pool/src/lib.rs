@@ -262,11 +262,11 @@ pub async fn swap(i: u8, j: u8, dx: u128, min_dy: u128) -> Result<u128, ThreePoo
     let precision_muls = get_precision_muls();
 
     // 3. Read current state
-    let (balances, swap_fee_bps, admin_fee_bps, token_i_ledger, token_j_ledger, token_j_symbol) =
+    let (balances, fee_curve, admin_fee_bps, token_i_ledger, token_j_ledger, token_j_symbol) =
         read_state(|s| {
             (
                 s.balances,
-                s.config.swap_fee_bps,
+                s.config.fee_curve.unwrap_or_default(),
                 s.config.admin_fee_bps,
                 s.config.tokens[i_idx].ledger_id,
                 s.config.tokens[j_idx].ledger_id,
@@ -274,21 +274,9 @@ pub async fn swap(i: u8, j: u8, dx: u128, min_dy: u128) -> Result<u128, ThreePoo
             )
         });
 
-    // 4. Calculate swap output. Task 7: signature now takes `&FeeCurveParams`
-    // and returns a `SwapOutcome`. Wiring fee_curve through PoolConfig + v2
-    // event emission lands in Task 8; here we preserve existing behavior with
-    // a default curve and ignore the new fields.
-    let _ = swap_fee_bps;
-    let _default_curve = crate::types::FeeCurveParams::default();
-    let outcome = calc_swap_output(
-        i_idx,
-        j_idx,
-        dx,
-        &balances,
-        &precision_muls,
-        amp,
-        &_default_curve,
-    )?;
+    // 4. Calculate swap output using the dynamic fee curve
+    let outcome =
+        calc_swap_output(i_idx, j_idx, dx, &balances, &precision_muls, amp, &fee_curve)?;
     let output = outcome.output_native;
     let fee = outcome.fee_native;
 
@@ -323,9 +311,16 @@ pub async fn swap(i: u8, j: u8, dx: u128, min_dy: u128) -> Result<u128, ThreePoo
         s.balances[j_idx] -= output + fee;
         s.admin_fees[j_idx] += admin_fee_share;
 
-        // Record swap event for explorer
-        let id = s.swap_events().len() as u64;
-        s.swap_events_mut().push(SwapEvent {
+        // Compute virtual price after the swap. `None` (e.g. lp_total_supply==0
+        // or invariant fails to converge) falls back to 0 as a sentinel.
+        let lp_supply = s.lp_total_supply;
+        let vp_after = virtual_price(&s.balances, &precision_muls, amp, lp_supply).unwrap_or(0);
+        let balances_after = s.balances;
+
+        // Record swap event v2 (dynamic-fee schema). v1 writes are stopped —
+        // v1 entries remain as frozen historical state for the migration.
+        let id = s.swap_events_v2().len() as u64;
+        s.swap_events_v2_mut().push(SwapEventV2 {
             id,
             timestamp: ic_cdk::api::time(),
             caller,
@@ -334,6 +329,12 @@ pub async fn swap(i: u8, j: u8, dx: u128, min_dy: u128) -> Result<u128, ThreePoo
             amount_in: dx,
             amount_out: output,
             fee,
+            fee_bps: outcome.fee_bps_used,
+            imbalance_before: outcome.imbalance_before,
+            imbalance_after: outcome.imbalance_after,
+            is_rebalancing: outcome.is_rebalancing,
+            pool_balances_after: balances_after,
+            virtual_price_after: vp_after,
         });
     });
 
@@ -792,11 +793,12 @@ pub fn get_all_lp_holders() -> Vec<(Principal, u128)> {
 pub fn calc_swap(i: u8, j: u8, dx: u128) -> Result<u128, ThreePoolError> {
     let amp = get_current_a();
     let precision_muls = get_precision_muls();
-    let (balances, _swap_fee_bps) = read_state(|s| (s.balances, s.config.swap_fee_bps));
-    let curve = crate::types::FeeCurveParams::default();
+    let (balances, fee_curve) = read_state(|s| {
+        (s.balances, s.config.fee_curve.unwrap_or_default())
+    });
 
     let outcome =
-        calc_swap_output(i as usize, j as usize, dx, &balances, &precision_muls, amp, &curve)?;
+        calc_swap_output(i as usize, j as usize, dx, &balances, &precision_muls, amp, &fee_curve)?;
 
     Ok(outcome.output_native)
 }
