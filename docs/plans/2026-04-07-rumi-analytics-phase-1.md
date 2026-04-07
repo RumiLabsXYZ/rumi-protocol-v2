@@ -1584,7 +1584,7 @@ Wait ~70 seconds for the first pull cycle to populate the cache, then:
 curl https://<analytics-canister-id>.icp0.io/api/supply
 ```
 
-Expected: a decimal number (e.g. `12345.67000000`). If you get a 503 "supply not yet cached," wait another minute and retry.
+Expected: a decimal number (e.g. `12345.67000000`). If you get a 500 "supply not yet cached," wait another minute and retry.
 
 - [ ] **Step 4: Smoke check `get_tvl_series`**
 

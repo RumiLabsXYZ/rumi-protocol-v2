@@ -31,6 +31,8 @@ pub struct AmmState {
     pub admin_events: Vec<AmmAdminEvent>,
     #[serde(default)]
     pub next_admin_event_id: u64,
+    #[serde(default)]
+    pub holder_snapshots: Vec<HolderSnapshot>,
 }
 
 impl Default for AmmState {
@@ -48,6 +50,7 @@ impl Default for AmmState {
             next_liquidity_event_id: 0,
             admin_events: Vec::new(),
             next_admin_event_id: 0,
+            holder_snapshots: Vec::new(),
         }
     }
 }
@@ -222,6 +225,7 @@ pub fn load_from_stable_memory() {
             next_liquidity_event_id: 0,
             admin_events: Vec::new(),
             next_admin_event_id: 0,
+            holder_snapshots: Vec::new(),
         });
     } else if let Ok(v3) = Decode!(&bytes, AmmStateV3) {
         replace_state(AmmState {
@@ -237,6 +241,7 @@ pub fn load_from_stable_memory() {
             next_liquidity_event_id: 0,
             admin_events: Vec::new(),
             next_admin_event_id: 0,
+            holder_snapshots: Vec::new(),
         });
     } else if let Ok(v2) = Decode!(&bytes, AmmStateV2) {
         replace_state(AmmState {
@@ -252,6 +257,7 @@ pub fn load_from_stable_memory() {
             next_liquidity_event_id: 0,
             admin_events: Vec::new(),
             next_admin_event_id: 0,
+            holder_snapshots: Vec::new(),
         });
     } else {
         let v1: AmmStateV1 = Decode!(&bytes, AmmStateV1)
@@ -269,6 +275,7 @@ pub fn load_from_stable_memory() {
             next_liquidity_event_id: 0,
             admin_events: Vec::new(),
             next_admin_event_id: 0,
+            holder_snapshots: Vec::new(),
         });
     }
 }

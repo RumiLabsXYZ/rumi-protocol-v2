@@ -3,6 +3,7 @@ import { idlFactory as icp_ledgerIDL } from '$declarations/icp_ledger/icp_ledger
 import { idlFactory as icusd_ledgerIDL } from '$declarations/icusd_ledger/icusd_ledger.did.js';
 import { idlFactory as threePoolIDL } from '$declarations/rumi_3pool/rumi_3pool.did.js';
 import { idlFactory as rumiAmmIDL } from '$declarations/rumi_amm/rumi_amm.did.js';
+import { idlFactory as icusdIndexIDL } from '$declarations/icusd_index/icusd_index.did.js';
 
 // Canister IDs for production (Rumi Protocol v2 - mainnet)
 export const CANISTER_IDS = {
@@ -129,4 +130,5 @@ export const CONFIG = {
   icusd_ledgerIDL,
   threePoolIDL,
   rumiAmmIDL,
+  icusdIndexIDL,
 };

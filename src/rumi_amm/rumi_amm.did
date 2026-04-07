@@ -169,6 +169,38 @@ type AmmError = variant {
   ClaimNotFound;
 };
 
+// ── Holder Snapshots ──
+
+type HolderEntry = record {
+  holder : principal;
+  balance : nat;
+};
+
+type HolderSnapshot = record {
+  token : text;
+  timestamp : nat64;
+  holder_count : nat64;
+  total_supply : nat;
+  top_holders : vec HolderEntry;
+};
+
+// ── HTTP Request ──
+
+type HeaderField = record { text; text };
+
+type HttpRequest = record {
+  method : text;
+  url : text;
+  headers : vec HeaderField;
+  body : blob;
+};
+
+type HttpResponse = record {
+  status_code : nat16;
+  headers : vec HeaderField;
+  body : blob;
+};
+
 service : (AmmInitArgs) -> {
   // ── Health ──
   health : () -> (text) query;
@@ -215,6 +247,14 @@ service : (AmmInitArgs) -> {
   // ── Admin Event History ──
   get_amm_admin_events : (nat64, nat64) -> (vec AmmAdminEvent) query;
   get_amm_admin_event_count : () -> (nat64) query;
+
+  // ── Holder Snapshots ──
+  get_holder_snapshots : (text, nat64, nat64) -> (vec HolderSnapshot) query;
+  get_holder_snapshot_count : (text) -> (nat64) query;
+  get_latest_holder_snapshot : (text) -> (opt HolderSnapshot) query;
+
+  // ── HTTP ──
+  http_request : (HttpRequest) -> (HttpResponse) query;
 
   // ── ICRC-21 / ICRC-28 / ICRC-10 ──
   icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (variant { Ok : ConsentInfo; Err : Icrc21Error });
