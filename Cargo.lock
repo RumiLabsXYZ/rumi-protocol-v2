@@ -7142,6 +7142,7 @@ dependencies = [
  "ic-cdk 0.12.2",
  "ic-cdk-macros 0.8.4",
  "ic-cdk-timers 0.10.0",
+ "ic-stable-structures",
  "icrc-ledger-client-cdk",
  "icrc-ledger-types 0.1.8 (git+https://github.com/Rumi-Protocol/ic?rev=fc278709)",
  "num-traits",
