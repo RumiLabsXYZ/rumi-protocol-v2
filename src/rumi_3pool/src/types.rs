@@ -142,9 +142,9 @@ pub struct VirtualPriceSnapshot {
     pub lp_total_supply: u128,
 }
 
-/// A recorded swap event for explorer/analytics.
+/// A recorded swap event for explorer/analytics (v1 schema, pre dynamic fees).
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
-pub struct SwapEvent {
+pub struct SwapEventV1 {
     /// Sequential event index.
     pub id: u64,
     /// Timestamp in nanoseconds since UNIX epoch.
@@ -163,6 +163,36 @@ pub struct SwapEvent {
     pub fee: u128,
 }
 
+/// Back-compat alias so existing call sites continue to compile.
+/// New code should use `SwapEventV2`.
+pub type SwapEvent = SwapEventV1;
+
+/// Swap event schema v2 with dynamic-fee metadata.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct SwapEventV2 {
+    pub id: u64,
+    pub timestamp: u64,
+    pub caller: Principal,
+    pub token_in: u8,
+    pub token_out: u8,
+    pub amount_in: u128,
+    pub amount_out: u128,
+    /// Fee charged (in output token units, native decimals).
+    pub fee: u128,
+    /// Actual fee rate charged in basis points.
+    pub fee_bps: u16,
+    /// Imbalance metric (1e9 fixed-point) before the swap.
+    pub imbalance_before: u64,
+    /// Imbalance metric (1e9 fixed-point) after the swap.
+    pub imbalance_after: u64,
+    /// True if the swap strictly reduced pool imbalance.
+    pub is_rebalancing: bool,
+    /// Pool balances (native decimals) after the swap.
+    pub pool_balances_after: [u128; 3],
+    /// Virtual price (scaled by 1e18) after the swap.
+    pub virtual_price_after: u128,
+}
+
 // ─── Liquidity Events ───
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
@@ -174,7 +204,7 @@ pub enum LiquidityAction {
 }
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
-pub struct LiquidityEvent {
+pub struct LiquidityEventV1 {
     pub id: u64,
     pub timestamp: u64,
     pub caller: Principal,
@@ -187,6 +217,35 @@ pub struct LiquidityEvent {
     pub coin_index: Option<u8>,
     /// Fee charged (for RemoveOneCoin)
     pub fee: Option<u128>,
+}
+
+/// Back-compat alias so existing call sites continue to compile.
+/// New code should use `LiquidityEventV2`.
+pub type LiquidityEvent = LiquidityEventV1;
+
+/// Liquidity event schema v2 with dynamic-fee metadata.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct LiquidityEventV2 {
+    pub id: u64,
+    pub timestamp: u64,
+    pub caller: Principal,
+    pub action: LiquidityAction,
+    pub amounts: [u128; 3],
+    pub lp_amount: u128,
+    pub coin_index: Option<u8>,
+    pub fee: Option<u128>,
+    /// Fee rate in basis points (None for ops that charge no fee, e.g. proportional remove).
+    pub fee_bps: Option<u16>,
+    /// Imbalance metric (1e9 fixed-point) before the operation.
+    pub imbalance_before: u64,
+    /// Imbalance metric (1e9 fixed-point) after the operation.
+    pub imbalance_after: u64,
+    /// True if the operation strictly reduced pool imbalance.
+    pub is_rebalancing: bool,
+    /// Pool balances (native decimals) after the operation.
+    pub pool_balances_after: [u128; 3],
+    /// Virtual price (scaled by 1e18) after the operation.
+    pub virtual_price_after: u128,
 }
 
 // ─── Admin Events ───
