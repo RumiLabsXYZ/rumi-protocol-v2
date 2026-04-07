@@ -920,6 +920,282 @@ pub fn get_vp_snapshots() -> Vec<VirtualPriceSnapshot> {
     read_state(|s| s.snapshots().clone())
 }
 
+// ─── Bot Query Endpoints ───
+//
+// Pure helpers below are independently unit-tested. The `#[query]` wrappers
+// just plumb live state into them.
+
+/// Pure quote_swap: simulates a swap against the supplied balances.
+pub fn pure_quote_swap(
+    i: u8,
+    j: u8,
+    dx: u128,
+    balances: &[u128; 3],
+    precision_muls: &[u64; 3],
+    amp: u64,
+    fee_curve: &FeeCurveParams,
+    lp_total_supply: u128,
+) -> Result<QuoteSwapResult, ThreePoolError> {
+    let i_idx = i as usize;
+    let j_idx = j as usize;
+    let outcome = calc_swap_output(i_idx, j_idx, dx, balances, precision_muls, amp, fee_curve)?;
+    let vp_before = virtual_price(balances, precision_muls, amp, lp_total_supply).unwrap_or(0);
+    let mut balances_after = *balances;
+    balances_after[i_idx] = balances_after[i_idx].saturating_add(dx);
+    balances_after[j_idx] = balances_after[j_idx]
+        .saturating_sub(outcome.output_native + outcome.fee_native);
+    let vp_after = virtual_price(&balances_after, precision_muls, amp, lp_total_supply).unwrap_or(0);
+    Ok(QuoteSwapResult {
+        token_in: i,
+        token_out: j,
+        amount_in: dx,
+        amount_out: outcome.output_native,
+        fee_native: outcome.fee_native,
+        fee_bps: outcome.fee_bps_used,
+        imbalance_before: outcome.imbalance_before,
+        imbalance_after: outcome.imbalance_after,
+        is_rebalancing: outcome.is_rebalancing,
+        virtual_price_before: vp_before,
+        virtual_price_after: vp_after,
+    })
+}
+
+/// Pure quote_optimal_rebalance: ternary search over dx in [1, balances[i]].
+pub fn pure_quote_optimal_rebalance(
+    i: u8,
+    j: u8,
+    balances: &[u128; 3],
+    precision_muls: &[u64; 3],
+    amp: u64,
+    fee_curve: &FeeCurveParams,
+) -> Result<OptimalRebalanceQuote, ThreePoolError> {
+    let i_idx = i as usize;
+    let j_idx = j as usize;
+    if i_idx >= 3 || j_idx >= 3 || i_idx == j_idx {
+        return Err(ThreePoolError::InvalidCoinIndex);
+    }
+    let imbalance_before = crate::math::compute_imbalance(balances, precision_muls);
+    let upper_bound = balances[i_idx];
+    let empty = OptimalRebalanceQuote {
+        token_in: i,
+        token_out: j,
+        dx: 0,
+        amount_out: 0,
+        fee_bps: 0,
+        imbalance_before,
+        imbalance_after: imbalance_before,
+        profit_bps_estimate: 0,
+    };
+    if upper_bound == 0 {
+        return Ok(empty);
+    }
+    let probe = (precision_muls[i_idx] as u128).max(1).min(upper_bound);
+    let probe_outcome =
+        calc_swap_output(i_idx, j_idx, probe, balances, precision_muls, amp, fee_curve);
+    if !matches!(&probe_outcome, Ok(o) if o.is_rebalancing) {
+        return Ok(empty);
+    }
+
+    let try_dx = |dx: u128| -> Option<crate::swap::SwapOutcome> {
+        if dx == 0 { return None; }
+        calc_swap_output(i_idx, j_idx, dx, balances, precision_muls, amp, fee_curve).ok()
+    };
+    let drop_for = |dx: u128| -> i128 {
+        match try_dx(dx) {
+            Some(o) if o.is_rebalancing => imbalance_before as i128 - o.imbalance_after as i128,
+            _ => i128::MIN,
+        }
+    };
+
+    let mut lo: u128 = 1;
+    let mut hi: u128 = upper_bound;
+    for _ in 0..50 {
+        if hi <= lo + 1 { break; }
+        let m1 = lo + (hi - lo) / 3;
+        let m2 = hi - (hi - lo) / 3;
+        if drop_for(m1) < drop_for(m2) {
+            lo = m1;
+        } else {
+            hi = m2;
+        }
+    }
+    let mid = lo + (hi - lo) / 2;
+    let mut best_dx: u128 = 0;
+    let mut best_drop: i128 = -1;
+    for cand in [lo, mid, hi] {
+        let d = drop_for(cand);
+        if d > best_drop {
+            best_drop = d;
+            best_dx = cand;
+        }
+    }
+    if best_dx == 0 || best_drop <= 0 {
+        return Ok(empty);
+    }
+    let outcome = try_dx(best_dx).expect("best_dx valid");
+    Ok(OptimalRebalanceQuote {
+        token_in: i,
+        token_out: j,
+        dx: best_dx,
+        amount_out: outcome.output_native,
+        fee_bps: outcome.fee_bps_used,
+        imbalance_before,
+        imbalance_after: outcome.imbalance_after,
+        profit_bps_estimate: imbalance_before - outcome.imbalance_after,
+    })
+}
+
+/// Pure simulate_swap_path: applies hops against a local mutable balances copy.
+pub fn pure_simulate_swap_path(
+    path: &[(u8, u8, u128)],
+    initial_balances: &[u128; 3],
+    precision_muls: &[u64; 3],
+    amp: u64,
+    fee_curve: &FeeCurveParams,
+    lp_total_supply: u128,
+) -> Result<Vec<QuoteSwapResult>, ThreePoolError> {
+    let mut balances = *initial_balances;
+    let mut out = Vec::with_capacity(path.len());
+    for &(i, j, dx) in path {
+        let i_idx = i as usize;
+        let j_idx = j as usize;
+        if i_idx >= 3 || j_idx >= 3 || i_idx == j_idx {
+            return Err(ThreePoolError::InvalidCoinIndex);
+        }
+        let q = pure_quote_swap(i, j, dx, &balances, precision_muls, amp, fee_curve, lp_total_supply)?;
+        balances[i_idx] = balances[i_idx].saturating_add(dx);
+        balances[j_idx] = balances[j_idx].saturating_sub(q.amount_out + q.fee_native);
+        out.push(q);
+    }
+    Ok(out)
+}
+
+
+
+/// Quote a swap without mutating state. Wraps `calc_swap_output` and adds the
+/// virtual_price impact of the simulated trade so a bot can score it.
+#[query]
+pub fn quote_swap(i: u8, j: u8, dx: u128) -> Result<QuoteSwapResult, ThreePoolError> {
+    let amp = get_current_a();
+    let precision_muls = get_precision_muls();
+    let (balances, fee_curve, lp_total_supply) = read_state(|s| {
+        (s.balances, s.config.fee_curve.unwrap_or_default(), s.lp_total_supply)
+    });
+    pure_quote_swap(i, j, dx, &balances, &precision_muls, amp, &fee_curve, lp_total_supply)
+}
+
+/// Snapshot of the live pool: balances, weights, imbalance, vp, fee curve, A.
+#[query]
+pub fn get_pool_state() -> PoolStateView {
+    let amp = get_current_a();
+    let precision_muls = get_precision_muls();
+    read_state(|s| {
+        let xp = crate::math::normalize_all(&s.balances, &precision_muls);
+        let normalized_balances: [u128; 3] = [
+            xp[0].as_u128(),
+            xp[1].as_u128(),
+            xp[2].as_u128(),
+        ];
+        let imbalance = crate::math::compute_imbalance(&s.balances, &precision_muls);
+        let vp = virtual_price(&s.balances, &precision_muls, amp, s.lp_total_supply).unwrap_or(0);
+        PoolStateView {
+            balances: s.balances,
+            normalized_balances,
+            imbalance,
+            virtual_price: vp,
+            lp_total_supply: s.lp_total_supply,
+            fee_curve: s.config.fee_curve.unwrap_or_default(),
+            amp,
+        }
+    })
+}
+
+/// Live fee curve parameters.
+#[query]
+pub fn get_fee_curve_params() -> FeeCurveParams {
+    read_state(|s| s.config.fee_curve.unwrap_or_default())
+}
+
+/// Ternary search for the dx that maximally reduces imbalance for a swap from
+/// token `i` to token `j`, constrained to strictly rebalancing trades. Returns
+/// dx=0 when no rebalancing trade exists.
+#[query]
+pub fn quote_optimal_rebalance(i: u8, j: u8) -> Result<OptimalRebalanceQuote, ThreePoolError> {
+    let amp = get_current_a();
+    let precision_muls = get_precision_muls();
+    let (balances, fee_curve) = read_state(|s| {
+        (s.balances, s.config.fee_curve.unwrap_or_default())
+    });
+    pure_quote_optimal_rebalance(i, j, &balances, &precision_muls, amp, &fee_curve)
+}
+
+/// Sequentially apply a list of swap quotes against a local mutable copy of
+/// the pool balances. Does not mutate canister state. Returns one
+/// `QuoteSwapResult` per hop, in order. If any hop fails the entire call
+/// errors.
+#[query]
+pub fn simulate_swap_path(path: Vec<(u8, u8, u128)>) -> Result<Vec<QuoteSwapResult>, ThreePoolError> {
+    let amp = get_current_a();
+    let precision_muls = get_precision_muls();
+    let (balances, fee_curve, lp_total_supply) = read_state(|s| {
+        (s.balances, s.config.fee_curve.unwrap_or_default(), s.lp_total_supply)
+    });
+    pure_simulate_swap_path(&path, &balances, &precision_muls, amp, &fee_curve, lp_total_supply)
+}
+
+/// Returns merged imbalance snapshots from swap and liquidity v2 events,
+/// sorted newest-first, paginated. Each snapshot is a (timestamp,
+/// imbalance_after, virtual_price_after, kind) tuple.
+#[query]
+pub fn get_imbalance_history(limit: u64, offset: u64) -> Vec<ImbalanceSnapshot> {
+    read_state(|s| {
+        let mut all: Vec<ImbalanceSnapshot> = Vec::new();
+        for e in s.swap_events_v2() {
+            all.push(ImbalanceSnapshot {
+                timestamp: e.timestamp,
+                imbalance_after: e.imbalance_after,
+                virtual_price_after: e.virtual_price_after,
+                event_kind: ImbalanceEventKind::Swap,
+            });
+        }
+        for e in s.liquidity_events_v2() {
+            all.push(ImbalanceSnapshot {
+                timestamp: e.timestamp,
+                imbalance_after: e.imbalance_after,
+                virtual_price_after: e.virtual_price_after,
+                event_kind: ImbalanceEventKind::Liquidity,
+            });
+        }
+        all.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        let total = all.len() as u64;
+        if offset >= total {
+            return Vec::new();
+        }
+        let start = offset as usize;
+        let end = ((offset + limit).min(total)) as usize;
+        all[start..end].to_vec()
+    })
+}
+
+/// Paginated newest-first read of the v2 swap event log.
+#[query]
+pub fn get_swap_events_v2(limit: u64, offset: u64) -> Vec<SwapEventV2> {
+    read_state(|s| {
+        let events = s.swap_events_v2();
+        let total = events.len() as u64;
+        if offset >= total {
+            return Vec::new();
+        }
+        // Newest first: index from the end.
+        let take = ((total - offset).min(limit)) as usize;
+        let end = (total - offset) as usize;
+        let start = end - take;
+        let mut out: Vec<SwapEventV2> = events[start..end].to_vec();
+        out.reverse();
+        out
+    })
+}
+
 // ─── Admin Endpoints ───
 
 #[update]
@@ -1277,4 +1553,152 @@ pub fn icrc3_get_tip_certificate() -> Option<icrc3::Icrc3DataCertificate> {
 #[query]
 pub fn icrc3_supported_block_types() -> Vec<icrc3::SupportedBlockType> {
     icrc3::icrc3_supported_block_types()
+}
+
+#[cfg(test)]
+mod bot_endpoint_tests {
+    use super::*;
+    use crate::swap::calc_swap_output;
+
+    fn precision_muls() -> [u64; 3] {
+        [10_000_000_000, 1_000_000_000_000, 1_000_000_000_000]
+    }
+
+    fn balanced_pool() -> [u128; 3] {
+        [1_000_000 * 100_000_000, 1_000_000 * 1_000_000, 1_000_000 * 1_000_000]
+    }
+
+    fn imbalanced_pool() -> [u128; 3] {
+        [2_000_000 * 100_000_000, 500_000 * 1_000_000, 500_000 * 1_000_000]
+    }
+
+    #[test]
+    fn quote_swap_matches_calc_swap_output() {
+        let bal = balanced_pool();
+        let pms = precision_muls();
+        let fc = FeeCurveParams::default();
+        let dx = 1_000 * 100_000_000u128;
+        let q = pure_quote_swap(0, 1, dx, &bal, &pms, 500, &fc, 1_000_000_000_000).unwrap();
+        let raw = calc_swap_output(0, 1, dx, &bal, &pms, 500, &fc).unwrap();
+        assert_eq!(q.amount_out, raw.output_native);
+        assert_eq!(q.fee_native, raw.fee_native);
+        assert_eq!(q.fee_bps, raw.fee_bps_used);
+        assert_eq!(q.imbalance_before, raw.imbalance_before);
+        assert_eq!(q.imbalance_after, raw.imbalance_after);
+        assert_eq!(q.is_rebalancing, raw.is_rebalancing);
+        assert!(q.virtual_price_before > 0);
+        assert!(q.virtual_price_after > 0);
+    }
+
+    #[test]
+    fn quote_optimal_rebalance_balanced_pool_returns_zero() {
+        // Both directions in a perfectly balanced pool should yield no
+        // rebalancing trade.
+        let bal = balanced_pool();
+        let pms = precision_muls();
+        let fc = FeeCurveParams::default();
+        let q = pure_quote_optimal_rebalance(0, 1, &bal, &pms, 500, &fc).unwrap();
+        assert_eq!(q.dx, 0);
+        assert_eq!(q.profit_bps_estimate, 0);
+    }
+
+    #[test]
+    fn quote_optimal_rebalance_imbalanced_pool_returns_nonzero() {
+        // Pool is icUSD-heavy: pushing ckUSDT in (1 -> 0) is rebalancing.
+        let bal = imbalanced_pool();
+        let pms = precision_muls();
+        let fc = FeeCurveParams::default();
+        let q = pure_quote_optimal_rebalance(1, 0, &bal, &pms, 500, &fc).unwrap();
+        assert!(q.dx > 0, "expected nonzero dx for rebalancing direction");
+        assert!(q.amount_out > 0);
+        assert!(q.profit_bps_estimate > 0);
+        assert!(q.imbalance_after < q.imbalance_before);
+        assert_eq!(q.fee_bps, fc.min_fee_bps);
+    }
+
+    #[test]
+    fn quote_optimal_rebalance_wrong_direction_returns_zero() {
+        // icUSD -> ckUSDT in an icUSD-heavy pool would be imbalancing.
+        let bal = imbalanced_pool();
+        let pms = precision_muls();
+        let fc = FeeCurveParams::default();
+        let q = pure_quote_optimal_rebalance(0, 1, &bal, &pms, 500, &fc).unwrap();
+        assert_eq!(q.dx, 0);
+    }
+
+    #[test]
+    fn simulate_swap_path_chains_correctly() {
+        let bal = balanced_pool();
+        let pms = precision_muls();
+        let fc = FeeCurveParams::default();
+        let path = vec![
+            (0u8, 1u8, 1_000 * 100_000_000u128),
+            (1u8, 2u8, 500 * 1_000_000u128),
+        ];
+        let results = pure_simulate_swap_path(&path, &bal, &pms, 500, &fc, 1_000_000_000_000).unwrap();
+        assert_eq!(results.len(), 2);
+        // Second hop's imbalance_before should equal first hop's imbalance_after
+        // (within the chained-balances simulation).
+        assert_eq!(results[1].imbalance_before, results[0].imbalance_after);
+        assert!(results[0].amount_out > 0);
+        assert!(results[1].amount_out > 0);
+    }
+
+    #[test]
+    fn simulate_swap_path_propagates_errors() {
+        let bal = balanced_pool();
+        let pms = precision_muls();
+        let fc = FeeCurveParams::default();
+        let path = vec![(0u8, 0u8, 100u128)]; // same index
+        assert!(pure_simulate_swap_path(&path, &bal, &pms, 500, &fc, 1).is_err());
+    }
+
+    // ─── Pagination tests ───
+    //
+    // get_imbalance_history and get_swap_events_v2 are thin wrappers around the
+    // event vecs. The pagination math is the load-bearing piece, so we test it
+    // directly with synthetic vecs.
+
+    fn paginate_newest_first<T: Clone>(events: &[T], limit: u64, offset: u64) -> Vec<T> {
+        let total = events.len() as u64;
+        if offset >= total {
+            return Vec::new();
+        }
+        let take = ((total - offset).min(limit)) as usize;
+        let end = (total - offset) as usize;
+        let start = end - take;
+        let mut out: Vec<T> = events[start..end].to_vec();
+        out.reverse();
+        out
+    }
+
+    #[test]
+    fn pagination_newest_first_full_page() {
+        let v: Vec<u32> = (0..10).collect();
+        let page = paginate_newest_first(&v, 5, 0);
+        assert_eq!(page, vec![9, 8, 7, 6, 5]);
+    }
+
+    #[test]
+    fn pagination_newest_first_with_offset() {
+        let v: Vec<u32> = (0..10).collect();
+        let page = paginate_newest_first(&v, 3, 5);
+        // skip newest 5, take next 3
+        assert_eq!(page, vec![4, 3, 2]);
+    }
+
+    #[test]
+    fn pagination_newest_first_offset_past_end() {
+        let v: Vec<u32> = (0..3).collect();
+        let page = paginate_newest_first(&v, 10, 100);
+        assert!(page.is_empty());
+    }
+
+    #[test]
+    fn pagination_newest_first_partial_last_page() {
+        let v: Vec<u32> = (0..5).collect();
+        let page = paginate_newest_first(&v, 10, 3);
+        // skip newest 3 (indices 4,3,2), then take up to 10 of remaining (1,0)
+        assert_eq!(page, vec![1, 0]);
+    }
 }

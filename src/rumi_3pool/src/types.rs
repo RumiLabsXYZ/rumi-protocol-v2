@@ -378,6 +378,84 @@ pub struct FeeCurveParams {
     pub imb_saturation: u64,
 }
 
+// ─── Bot Query Endpoint Types ───
+
+/// Result of a non-mutating swap quote. Mirrors `SwapOutcome` plus the
+/// virtual-price impact (1e18 fixed-point delta) of the simulated trade.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct QuoteSwapResult {
+    pub token_in: u8,
+    pub token_out: u8,
+    pub amount_in: u128,
+    pub amount_out: u128,
+    pub fee_native: u128,
+    pub fee_bps: u16,
+    pub imbalance_before: u64,
+    pub imbalance_after: u64,
+    pub is_rebalancing: bool,
+    /// Virtual price (1e18 fp) before the simulated trade.
+    pub virtual_price_before: u128,
+    /// Virtual price (1e18 fp) after the simulated trade.
+    pub virtual_price_after: u128,
+}
+
+/// Snapshot of the live pool state suitable for the rebalancing bot's
+/// per-loop polling. All values are reads, no projections.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct PoolStateView {
+    /// Native-decimal balances for each of the 3 coins.
+    pub balances: [u128; 3],
+    /// 18-decimal-normalized balances for each of the 3 coins.
+    pub normalized_balances: [u128; 3],
+    /// Current imbalance (1e9 fp).
+    pub imbalance: u64,
+    /// Current virtual price (1e18 fp). Zero if pool empty.
+    pub virtual_price: u128,
+    /// LP token total supply (8-decimal).
+    pub lp_total_supply: u128,
+    /// Live fee curve parameters.
+    pub fee_curve: FeeCurveParams,
+    /// Effective amplification coefficient at query time.
+    pub amp: u64,
+}
+
+/// A bot-facing answer to "what is the most rebalancing dx I can push from
+/// token i to token j right now?"
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct OptimalRebalanceQuote {
+    pub token_in: u8,
+    pub token_out: u8,
+    /// Recommended dx (native units of token_in). Zero means no rebalancing
+    /// trade exists in this direction.
+    pub dx: u128,
+    /// Expected output (native units of token_out) for that dx.
+    pub amount_out: u128,
+    /// Fee bps that would be charged.
+    pub fee_bps: u16,
+    /// Imbalance before (1e9 fp).
+    pub imbalance_before: u64,
+    /// Imbalance after the recommended trade (1e9 fp).
+    pub imbalance_after: u64,
+    /// Drop in imbalance (imb_before - imb_after), in 1e9 fp. The bot uses this
+    /// as a profitability proxy.
+    pub profit_bps_estimate: u64,
+}
+
+/// Imbalance snapshot derived from a recorded swap or liquidity event.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct ImbalanceSnapshot {
+    pub timestamp: u64,
+    pub imbalance_after: u64,
+    pub virtual_price_after: u128,
+    pub event_kind: ImbalanceEventKind,
+}
+
+#[derive(CandidType, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ImbalanceEventKind {
+    Swap,
+    Liquidity,
+}
+
 impl Default for FeeCurveParams {
     fn default() -> Self {
         Self {

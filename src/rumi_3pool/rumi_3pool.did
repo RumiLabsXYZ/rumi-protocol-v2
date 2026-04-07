@@ -83,6 +83,67 @@ type FeeCurveParams = record {
   imb_saturation : nat64;
 };
 
+type SwapEventV2 = record {
+  id : nat64;
+  timestamp : nat64;
+  caller : principal;
+  token_in : nat8;
+  token_out : nat8;
+  amount_in : nat;
+  amount_out : nat;
+  fee : nat;
+  fee_bps : nat16;
+  imbalance_before : nat64;
+  imbalance_after : nat64;
+  is_rebalancing : bool;
+  pool_balances_after : vec nat;
+  virtual_price_after : nat;
+};
+
+type QuoteSwapResult = record {
+  token_in : nat8;
+  token_out : nat8;
+  amount_in : nat;
+  amount_out : nat;
+  fee_native : nat;
+  fee_bps : nat16;
+  imbalance_before : nat64;
+  imbalance_after : nat64;
+  is_rebalancing : bool;
+  virtual_price_before : nat;
+  virtual_price_after : nat;
+};
+
+type PoolStateView = record {
+  balances : vec nat;
+  normalized_balances : vec nat;
+  imbalance : nat64;
+  virtual_price : nat;
+  lp_total_supply : nat;
+  fee_curve : FeeCurveParams;
+  amp : nat64;
+};
+
+type OptimalRebalanceQuote = record {
+  token_in : nat8;
+  token_out : nat8;
+  dx : nat;
+  amount_out : nat;
+  fee_bps : nat16;
+  imbalance_before : nat64;
+  imbalance_after : nat64;
+  profit_bps_estimate : nat64;
+};
+
+type ImbalanceEventKind = variant { Swap; Liquidity };
+
+type ImbalanceSnapshot = record {
+  timestamp : nat64;
+  imbalance_after : nat64;
+  virtual_price_after : nat;
+  event_kind : ImbalanceEventKind;
+};
+
 type ThreePoolAdminAction = variant {
   RampA : record { future_a : nat64; future_a_time : nat64 };
   StopRampA : record { frozen_a : nat64 };
@@ -346,6 +407,13 @@ service : (ThreePoolInitArgs) -> {
   get_liquidity_event_count : () -> (nat64) query;
   get_admin_events : (nat64, nat64) -> (vec ThreePoolAdminEvent) query;
   get_admin_event_count : () -> (nat64) query;
+  quote_swap : (nat8, nat8, nat) -> (variant { Ok : QuoteSwapResult; Err : ThreePoolError }) query;
+  get_pool_state : () -> (PoolStateView) query;
+  get_fee_curve_params : () -> (FeeCurveParams) query;
+  quote_optimal_rebalance : (nat8, nat8) -> (variant { Ok : OptimalRebalanceQuote; Err : ThreePoolError }) query;
+  simulate_swap_path : (vec record { nat8; nat8; nat }) -> (variant { Ok : vec QuoteSwapResult; Err : ThreePoolError }) query;
+  get_imbalance_history : (nat64, nat64) -> (vec ImbalanceSnapshot) query;
+  get_swap_events_v2 : (nat64, nat64) -> (vec SwapEventV2) query;
   authorized_redeem_and_burn : (AuthorizedRedeemAndBurnArgs) -> (variant { Ok : RedeemAndBurnResult; Err : ThreePoolError });
   icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (variant { Ok : ConsentInfo; Err : Icrc21Error });
   icrc28_trusted_origins : () -> (Icrc28TrustedOriginsResponse) query;
