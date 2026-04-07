@@ -1,3 +1,13 @@
-service : {
+type InitArgs = record {
+  admin : principal;
+  backend : principal;
+  icusd_ledger : principal;
+  three_pool : principal;
+  stability_pool : principal;
+  amm : principal;
+};
+
+service : (InitArgs) -> {
   ping : () -> (text) query;
+  get_admin : () -> (principal) query;
 }
