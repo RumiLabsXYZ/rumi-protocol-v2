@@ -52,6 +52,13 @@ pub struct ThreePoolState {
     /// Admin event log for explorer.
     #[serde(default)]
     pub admin_events: Option<Vec<ThreePoolAdminEvent>>,
+    /// Swap event log v2 (dynamic-fee metadata).
+    /// Option + serde(default) so legacy stable state still deserializes.
+    #[serde(default)]
+    pub swap_events_v2: Option<Vec<SwapEventV2>>,
+    /// Liquidity event log v2 (dynamic-fee metadata).
+    #[serde(default)]
+    pub liquidity_events_v2: Option<Vec<LiquidityEventV2>>,
 }
 
 impl Default for ThreePoolState {
@@ -88,6 +95,8 @@ impl Default for ThreePoolState {
             swap_events: Some(Vec::new()),
             liquidity_events: Some(Vec::new()),
             admin_events: Some(Vec::new()),
+            swap_events_v2: Some(Vec::new()),
+            liquidity_events_v2: Some(Vec::new()),
         }
     }
 }
@@ -200,6 +209,30 @@ impl ThreePoolState {
     /// Get mutable liquidity events vec (initializes if None for upgrade compat).
     pub fn liquidity_events_mut(&mut self) -> &mut Vec<LiquidityEvent> {
         self.liquidity_events.get_or_insert_with(Vec::new)
+    }
+
+    /// Get swap events v2 vec (empty if None for upgrade compat).
+    pub fn swap_events_v2(&self) -> &Vec<SwapEventV2> {
+        static EMPTY: std::sync::LazyLock<Vec<SwapEventV2>> =
+            std::sync::LazyLock::new(Vec::new);
+        self.swap_events_v2.as_ref().unwrap_or(&EMPTY)
+    }
+
+    /// Get mutable swap events v2 vec (initializes if None for upgrade compat).
+    pub fn swap_events_v2_mut(&mut self) -> &mut Vec<SwapEventV2> {
+        self.swap_events_v2.get_or_insert_with(Vec::new)
+    }
+
+    /// Get liquidity events v2 vec (empty if None for upgrade compat).
+    pub fn liquidity_events_v2(&self) -> &Vec<LiquidityEventV2> {
+        static EMPTY: std::sync::LazyLock<Vec<LiquidityEventV2>> =
+            std::sync::LazyLock::new(Vec::new);
+        self.liquidity_events_v2.as_ref().unwrap_or(&EMPTY)
+    }
+
+    /// Get mutable liquidity events v2 vec (initializes if None for upgrade compat).
+    pub fn liquidity_events_v2_mut(&mut self) -> &mut Vec<LiquidityEventV2> {
+        self.liquidity_events_v2.get_or_insert_with(Vec::new)
     }
 
     /// Get admin events vec (empty if None for upgrade compat).
