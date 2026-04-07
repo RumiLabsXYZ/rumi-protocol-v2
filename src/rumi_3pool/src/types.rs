@@ -456,6 +456,102 @@ pub enum ImbalanceEventKind {
     Liquidity,
 }
 
+// ─── Explorer Types ───
+
+/// Time window selector used by aggregated/series explorer queries.
+#[derive(CandidType, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StatsWindow {
+    Last24h,
+    Last7d,
+    Last30d,
+    AllTime,
+}
+
+/// Aggregated swap and liquidity stats over a window.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct PoolStats {
+    pub swap_count: u64,
+    pub swap_volume_per_token: [u128; 3],
+    pub total_fees_collected: [u128; 3],
+    pub unique_swappers: u64,
+    pub liquidity_added_count: u64,
+    pub liquidity_removed_count: u64,
+    pub avg_fee_bps: u32,
+    pub arb_swap_count: u64,
+    pub arb_volume_per_token: [u128; 3],
+}
+
+/// Imbalance stats over a window with per-event samples.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct ImbalanceStats {
+    pub current: u64,
+    pub min: u64,
+    pub max: u64,
+    pub avg: u64,
+    /// (timestamp_ns, imbalance_after_1e9fp) per swap in the window.
+    pub samples: Vec<(u64, u64)>,
+}
+
+/// One bucket in the fee distribution.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct FeeBucket {
+    pub min_bps: u16,
+    pub max_bps: u16,
+    pub swap_count: u64,
+    pub volume_per_token: [u128; 3],
+}
+
+/// Fee bucket distribution and rebalancing share over a window.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct FeeStats {
+    pub buckets: Vec<FeeBucket>,
+    pub rebalancing_swap_count: u64,
+    /// Rebalancing share in basis points (0..10000).
+    pub rebalancing_swap_pct: u32,
+}
+
+/// Bucketed swap volume time-series point.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct VolumePoint {
+    pub timestamp: u64,
+    pub volume_per_token: [u128; 3],
+}
+
+/// Bucketed pool-balance time-series point (last balances seen in the bucket).
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct BalancePoint {
+    pub timestamp: u64,
+    pub balances: [u128; 3],
+}
+
+/// Bucketed virtual price time-series point.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct VirtualPricePoint {
+    pub timestamp: u64,
+    pub virtual_price: u128,
+}
+
+/// Bucketed average fee bps time-series point (volume-weighted).
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct FeePoint {
+    pub timestamp: u64,
+    pub avg_fee_bps: u32,
+}
+
+/// Snapshot of pool health for at-a-glance dashboards.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct PoolHealth {
+    pub current_imbalance: u64,
+    /// Signed delta vs the imbalance recorded ~1h ago (negative = improving).
+    pub imbalance_trend_1h: i32,
+    pub last_swap_age_seconds: u64,
+    pub fee_at_min: u16,
+    /// Fee bps that would be charged on a hypothetical worst-case imbalancing trade.
+    pub fee_at_max_imbalance_swap: u16,
+    /// 0..100 linear in current imbalance up to saturation.
+    pub arb_opportunity_score: u8,
+}
+
 impl Default for FeeCurveParams {
     fn default() -> Self {
         Self {
