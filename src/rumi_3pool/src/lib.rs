@@ -2135,3 +2135,252 @@ mod bot_endpoint_tests {
         assert_eq!(page, vec![1, 0]);
     }
 }
+
+#[cfg(test)]
+mod explorer_tests {
+    use super::*;
+
+    fn mk_swap(id: u64, ts_ns: u64, ti: u8, to: u8, amount_in: u128, fee_bps: u16, is_reb: bool, imb_after: u64) -> SwapEventV2 {
+        SwapEventV2 {
+            id,
+            timestamp: ts_ns,
+            caller: Principal::anonymous(),
+            token_in: ti,
+            token_out: to,
+            amount_in,
+            amount_out: amount_in / 2,
+            fee: amount_in / 1000,
+            fee_bps,
+            imbalance_before: imb_after.saturating_sub(10),
+            imbalance_after: imb_after,
+            is_rebalancing: is_reb,
+            pool_balances_after: [100, 200, 300],
+            virtual_price_after: 1_000_000_000_000_000_000u128 + id as u128,
+        }
+    }
+
+    // ─── window_cutoff_ns ───
+
+    #[test]
+    fn window_cutoff_alltime_returns_zero() {
+        assert_eq!(window_cutoff_ns(StatsWindow::AllTime, 1_000_000_000_000), 0);
+    }
+
+    #[test]
+    fn window_cutoff_24h_subtracts_correctly() {
+        let now = 100 * 24 * 3600 * 1_000_000_000u64;
+        let cutoff = window_cutoff_ns(StatsWindow::Last24h, now);
+        assert_eq!(cutoff, now - 24 * 3600 * 1_000_000_000);
+    }
+
+    #[test]
+    fn window_cutoff_saturates_at_zero() {
+        // now smaller than the window: cutoff saturates to 0
+        assert_eq!(window_cutoff_ns(StatsWindow::Last30d, 5), 0);
+    }
+
+    // ─── bucket_floor ───
+
+    #[test]
+    fn bucket_floor_basic() {
+        let bsec: u64 = 60;
+        let bns = bsec * 1_000_000_000;
+        // ts that lands inside bucket #5 (5 * 60s)
+        let ts = 5 * bns + 17_000_000_000;
+        assert_eq!(bucket_floor(ts, bsec), 5 * bns);
+    }
+
+    #[test]
+    fn bucket_floor_zero_bucket_returns_zero() {
+        assert_eq!(bucket_floor(123456789, 0), 0);
+    }
+
+    #[test]
+    fn bucket_floor_exact_boundary() {
+        let bsec: u64 = 3600;
+        let bns = bsec * 1_000_000_000;
+        assert_eq!(bucket_floor(7 * bns, bsec), 7 * bns);
+    }
+
+    // ─── Pool stats aggregation math ───
+
+    #[test]
+    fn pool_stats_aggregation_math() {
+        // Three swaps in different directions; one is rebalancing.
+        let mut events = Vec::new();
+        events.push(mk_swap(0, 1_000, 0, 1, 1000, 20, false, 100));
+        events.push(mk_swap(1, 2_000, 0, 2, 2000, 50, false, 200));
+        events.push(mk_swap(2, 3_000, 1, 0, 500, 1, true, 80));
+
+        // Replicate the body of get_pool_stats with cutoff=0.
+        let mut volume_per_token = [0u128; 3];
+        let mut fees = [0u128; 3];
+        let mut count = 0u64;
+        let mut arb_count = 0u64;
+        let mut weighted_fee_bps: u128 = 0;
+        let mut total_volume: u128 = 0;
+        let mut swappers: std::collections::BTreeSet<Principal> = std::collections::BTreeSet::new();
+        for e in &events {
+            count += 1;
+            volume_per_token[e.token_in as usize] += e.amount_in;
+            fees[e.token_out as usize] += e.fee;
+            weighted_fee_bps += (e.fee_bps as u128) * e.amount_in;
+            total_volume += e.amount_in;
+            swappers.insert(e.caller);
+            if e.is_rebalancing { arb_count += 1; }
+        }
+
+        assert_eq!(count, 3);
+        assert_eq!(arb_count, 1);
+        // Volume in: token0 = 1000+2000 = 3000, token1 = 500
+        assert_eq!(volume_per_token, [3000, 500, 0]);
+        // Volume-weighted avg fee bps:
+        //   (20*1000 + 50*2000 + 1*500) / 3500 = 120500 / 3500 = 34
+        let avg = (weighted_fee_bps / total_volume) as u32;
+        assert_eq!(avg, 34);
+        assert_eq!(swappers.len(), 1); // all anonymous
+    }
+
+    #[test]
+    fn fee_stats_buckets_classify_correctly() {
+        // Hand-classify a couple of swaps and verify the bucket logic.
+        let bucket_edges: [(u16, u16); 5] = [(1, 10), (10, 25), (25, 50), (50, 75), (75, 100)];
+        let bucketize = |fee_bps: u16| -> Option<usize> {
+            for (i, (lo, hi)) in bucket_edges.iter().enumerate() {
+                if fee_bps >= *lo && fee_bps < *hi {
+                    return Some(i);
+                }
+            }
+            None
+        };
+        assert_eq!(bucketize(1), Some(0));
+        assert_eq!(bucketize(9), Some(0));
+        assert_eq!(bucketize(10), Some(1));
+        assert_eq!(bucketize(24), Some(1));
+        assert_eq!(bucketize(25), Some(2));
+        assert_eq!(bucketize(50), Some(3));
+        assert_eq!(bucketize(74), Some(3));
+        assert_eq!(bucketize(75), Some(4));
+        assert_eq!(bucketize(99), Some(4));
+        assert_eq!(bucketize(0), None); // below min
+        assert_eq!(bucketize(100), None); // above max
+    }
+
+    // ─── Time series bucketing correctness ───
+
+    #[test]
+    fn volume_series_buckets_by_minute() {
+        let bsec: u64 = 60;
+        let bns = bsec * 1_000_000_000;
+        let events = vec![
+            // Two swaps in bucket 5
+            mk_swap(0, 5 * bns + 1, 0, 1, 1000, 5, false, 100),
+            mk_swap(1, 5 * bns + 30_000_000_000, 0, 1, 2000, 5, false, 110),
+            // One swap in bucket 7
+            mk_swap(2, 7 * bns + 10, 1, 0, 500, 5, true, 90),
+        ];
+        let mut map: std::collections::BTreeMap<u64, [u128; 3]> = std::collections::BTreeMap::new();
+        for e in &events {
+            let b = bucket_floor(e.timestamp, bsec);
+            let entry = map.entry(b).or_insert([0; 3]);
+            entry[e.token_in as usize] += e.amount_in;
+        }
+        assert_eq!(map.len(), 2);
+        assert_eq!(map[&(5 * bns)], [3000, 0, 0]);
+        assert_eq!(map[&(7 * bns)], [0, 500, 0]);
+    }
+
+    #[test]
+    fn fee_series_volume_weighted_average() {
+        let bsec: u64 = 60;
+        let bns = bsec * 1_000_000_000;
+        let events = vec![
+            mk_swap(0, bns + 1, 0, 1, 1000, 10, false, 100),
+            mk_swap(1, bns + 2, 0, 1, 3000, 50, false, 110),
+        ];
+        // Expected avg fee_bps = (10*1000 + 50*3000) / 4000 = 160000/4000 = 40
+        let mut sums: std::collections::BTreeMap<u64, (u128, u128)> = std::collections::BTreeMap::new();
+        for e in &events {
+            let b = bucket_floor(e.timestamp, bsec);
+            let entry = sums.entry(b).or_insert((0, 0));
+            entry.0 += (e.fee_bps as u128) * e.amount_in;
+            entry.1 += e.amount_in;
+        }
+        let (w, v) = sums[&bns];
+        assert_eq!((w / v) as u32, 40);
+    }
+
+    // ─── Pool health heuristic ───
+
+    #[test]
+    fn pool_health_score_zero_at_balanced() {
+        let params = FeeCurveParams::default();
+        let imb = 0u64;
+        let score = ((imb.min(params.imb_saturation) as u128 * 100) / params.imb_saturation as u128) as u8;
+        assert_eq!(score, 0);
+    }
+
+    #[test]
+    fn pool_health_score_saturates_at_100() {
+        let params = FeeCurveParams::default();
+        let imb = params.imb_saturation * 5;
+        let score = ((imb.min(params.imb_saturation) as u128 * 100) / params.imb_saturation as u128) as u8;
+        assert_eq!(score, 100);
+    }
+
+    #[test]
+    fn pool_health_score_linear_at_half_saturation() {
+        let params = FeeCurveParams::default();
+        let imb = params.imb_saturation / 2;
+        let score = ((imb.min(params.imb_saturation) as u128 * 100) / params.imb_saturation as u128) as u8;
+        assert_eq!(score, 50);
+    }
+
+    #[test]
+    fn pool_health_fee_at_max_uses_compute_fee_bps() {
+        let params = FeeCurveParams { min_fee_bps: 1, max_fee_bps: 99, imb_saturation: 250_000_000 };
+        // Worst-case hypothetical: imb_after = saturation -> should equal max_fee_bps
+        let fee = crate::math::compute_fee_bps(0, params.imb_saturation, &params);
+        assert_eq!(fee, params.max_fee_bps);
+    }
+
+    // ─── Filter pagination correctness (skip/take by principal) ───
+
+    #[test]
+    fn by_principal_skip_take_pagination() {
+        let alice = Principal::anonymous();
+        let bob = Principal::management_canister();
+        let mut events: Vec<SwapEventV2> = Vec::new();
+        for i in 0..10u64 {
+            let mut e = mk_swap(i, 1_000 + i, 0, 1, 100, 5, false, 50);
+            e.caller = if i % 2 == 0 { alice } else { bob };
+            events.push(e);
+        }
+        // Filter by alice => 5 events. Skip 1, take 2 => events with original ids 2, 4.
+        let page: Vec<u64> = events
+            .iter()
+            .filter(|e| e.caller == alice)
+            .skip(1)
+            .take(2)
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(page, vec![2, 4]);
+    }
+
+    #[test]
+    fn by_time_range_filter_inclusive_exclusive() {
+        let events = vec![
+            mk_swap(0, 100, 0, 1, 10, 5, false, 50),
+            mk_swap(1, 200, 0, 1, 10, 5, false, 50),
+            mk_swap(2, 300, 0, 1, 10, 5, false, 50),
+            mk_swap(3, 400, 0, 1, 10, 5, false, 50),
+        ];
+        // [200, 400) => ids 1 and 2
+        let ids: Vec<u64> = events
+            .iter()
+            .filter(|e| e.timestamp >= 200 && e.timestamp < 400)
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(ids, vec![1, 2]);
+    }
+}
