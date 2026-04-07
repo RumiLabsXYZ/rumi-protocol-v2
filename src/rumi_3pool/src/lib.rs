@@ -1196,6 +1196,439 @@ pub fn get_swap_events_v2(limit: u64, offset: u64) -> Vec<SwapEventV2> {
     })
 }
 
+// ─── Explorer Endpoints (E1-E14) ───
+//
+// These are pure query methods over the v2 event log. Aggregations iterate
+// the in-memory Vec, which is fine at current event volumes. If aggregation
+// performance ever becomes hot we can cache running totals on event append.
+
+/// Returns the cutoff timestamp (ns) such that events with `timestamp >= cutoff`
+/// fall inside the requested window. `AllTime` returns 0.
+fn window_cutoff_ns(window: StatsWindow, now: u64) -> u64 {
+    let secs: u64 = match window {
+        StatsWindow::Last24h => 24 * 3600,
+        StatsWindow::Last7d => 7 * 24 * 3600,
+        StatsWindow::Last30d => 30 * 24 * 3600,
+        StatsWindow::AllTime => return 0,
+    };
+    now.saturating_sub(secs * 1_000_000_000)
+}
+
+/// Floor a nanosecond timestamp to the start of its bucket. Returns 0 if
+/// `bucket_secs == 0` (caller should validate).
+fn bucket_floor(ts_ns: u64, bucket_secs: u64) -> u64 {
+    if bucket_secs == 0 {
+        return 0;
+    }
+    let bucket_ns = bucket_secs.saturating_mul(1_000_000_000);
+    (ts_ns / bucket_ns) * bucket_ns
+}
+
+// ── E1: liquidity events by principal ──
+#[query]
+pub fn get_liquidity_events_by_principal(
+    principal: Principal,
+    start: u64,
+    length: u64,
+) -> Vec<LiquidityEventV2> {
+    read_state(|s| {
+        s.liquidity_events_v2()
+            .iter()
+            .filter(|e| e.caller == principal)
+            .skip(start as usize)
+            .take(length as usize)
+            .cloned()
+            .collect()
+    })
+}
+
+// ── E2: swap events by principal ──
+#[query]
+pub fn get_swap_events_by_principal(
+    principal: Principal,
+    start: u64,
+    length: u64,
+) -> Vec<SwapEventV2> {
+    read_state(|s| {
+        s.swap_events_v2()
+            .iter()
+            .filter(|e| e.caller == principal)
+            .skip(start as usize)
+            .take(length as usize)
+            .cloned()
+            .collect()
+    })
+}
+
+// ── E3: swap events in a time range ──
+#[query]
+pub fn get_swap_events_by_time_range(
+    from_ts: u64,
+    to_ts: u64,
+    limit: u64,
+) -> Vec<SwapEventV2> {
+    read_state(|s| {
+        s.swap_events_v2()
+            .iter()
+            .filter(|e| e.timestamp >= from_ts && e.timestamp < to_ts)
+            .take(limit as usize)
+            .cloned()
+            .collect()
+    })
+}
+
+// (E4 = `get_admin_events`, defined above with the other event readers.)
+
+// ─── Aggregated stats (E5-E9) ───
+
+// ── E5: pool stats over a window ──
+#[query]
+pub fn get_pool_stats(window: StatsWindow) -> PoolStats {
+    let now = ic_cdk::api::time();
+    let cutoff = window_cutoff_ns(window, now);
+    read_state(|s| {
+        let mut volume_per_token = [0u128; 3];
+        let mut fees = [0u128; 3];
+        let mut count = 0u64;
+        let mut arb_count = 0u64;
+        let mut arb_volume = [0u128; 3];
+        let mut weighted_fee_bps: u128 = 0;
+        let mut total_volume: u128 = 0;
+        let mut swappers: std::collections::BTreeSet<Principal> =
+            std::collections::BTreeSet::new();
+
+        for e in s.swap_events_v2().iter().filter(|e| e.timestamp >= cutoff) {
+            count += 1;
+            let ti = e.token_in as usize;
+            let to = e.token_out as usize;
+            volume_per_token[ti] = volume_per_token[ti].saturating_add(e.amount_in);
+            fees[to] = fees[to].saturating_add(e.fee);
+            weighted_fee_bps =
+                weighted_fee_bps.saturating_add((e.fee_bps as u128).saturating_mul(e.amount_in));
+            total_volume = total_volume.saturating_add(e.amount_in);
+            swappers.insert(e.caller);
+            if e.is_rebalancing {
+                arb_count += 1;
+                arb_volume[ti] = arb_volume[ti].saturating_add(e.amount_in);
+            }
+        }
+
+        let mut adds = 0u64;
+        let mut removes = 0u64;
+        for e in s
+            .liquidity_events_v2()
+            .iter()
+            .filter(|e| e.timestamp >= cutoff)
+        {
+            match e.action {
+                LiquidityAction::AddLiquidity => adds += 1,
+                LiquidityAction::RemoveLiquidity | LiquidityAction::RemoveOneCoin => removes += 1,
+                LiquidityAction::Donate => {}
+            }
+        }
+
+        PoolStats {
+            swap_count: count,
+            swap_volume_per_token: volume_per_token,
+            total_fees_collected: fees,
+            unique_swappers: swappers.len() as u64,
+            liquidity_added_count: adds,
+            liquidity_removed_count: removes,
+            avg_fee_bps: if total_volume == 0 {
+                0
+            } else {
+                (weighted_fee_bps / total_volume) as u32
+            },
+            arb_swap_count: arb_count,
+            arb_volume_per_token: arb_volume,
+        }
+    })
+}
+
+// ── E6: imbalance stats over a window ──
+#[query]
+pub fn get_imbalance_stats(window: StatsWindow) -> ImbalanceStats {
+    let now = ic_cdk::api::time();
+    let cutoff = window_cutoff_ns(window, now);
+    let precision_muls = get_precision_muls();
+    read_state(|s| {
+        let current = crate::math::compute_imbalance(&s.balances, &precision_muls);
+        let mut min_v = u64::MAX;
+        let mut max_v = 0u64;
+        let mut sum: u128 = 0;
+        let mut count: u128 = 0;
+        let mut samples: Vec<(u64, u64)> = Vec::new();
+        for e in s.swap_events_v2().iter().filter(|e| e.timestamp >= cutoff) {
+            let imb = e.imbalance_after;
+            if imb < min_v {
+                min_v = imb;
+            }
+            if imb > max_v {
+                max_v = imb;
+            }
+            sum += imb as u128;
+            count += 1;
+            samples.push((e.timestamp, imb));
+        }
+        ImbalanceStats {
+            current,
+            min: if count == 0 { current } else { min_v },
+            max: if count == 0 { current } else { max_v },
+            avg: if count == 0 { current } else { (sum / count) as u64 },
+            samples,
+        }
+    })
+}
+
+// ── E7: fee bucket distribution + rebalancing share ──
+#[query]
+pub fn get_fee_stats(window: StatsWindow) -> FeeStats {
+    let now = ic_cdk::api::time();
+    let cutoff = window_cutoff_ns(window, now);
+    // Half-open buckets [lo, hi) covering 1..=99 bps. The last bucket is
+    // intentionally [75, 100) so a fee_bps == 99 lands in it.
+    let bucket_edges: [(u16, u16); 5] = [(1, 10), (10, 25), (25, 50), (50, 75), (75, 100)];
+    read_state(|s| {
+        let mut buckets: Vec<FeeBucket> = bucket_edges
+            .iter()
+            .map(|(lo, hi)| FeeBucket {
+                min_bps: *lo,
+                max_bps: *hi,
+                swap_count: 0,
+                volume_per_token: [0; 3],
+            })
+            .collect();
+        let mut rebalancing = 0u64;
+        let mut total = 0u64;
+        for e in s.swap_events_v2().iter().filter(|e| e.timestamp >= cutoff) {
+            total += 1;
+            if e.is_rebalancing {
+                rebalancing += 1;
+            }
+            for b in buckets.iter_mut() {
+                if e.fee_bps >= b.min_bps && e.fee_bps < b.max_bps {
+                    b.swap_count += 1;
+                    let ti = e.token_in as usize;
+                    b.volume_per_token[ti] = b.volume_per_token[ti].saturating_add(e.amount_in);
+                    break;
+                }
+            }
+        }
+        let pct = if total == 0 {
+            0
+        } else {
+            ((rebalancing.saturating_mul(10_000)) / total) as u32
+        };
+        FeeStats {
+            buckets,
+            rebalancing_swap_count: rebalancing,
+            rebalancing_swap_pct: pct,
+        }
+    })
+}
+
+// ── E8: top swappers by volume in a window ──
+#[query]
+pub fn get_top_swappers(window: StatsWindow, limit: u64) -> Vec<(Principal, u64, u128)> {
+    let now = ic_cdk::api::time();
+    let cutoff = window_cutoff_ns(window, now);
+    read_state(|s| {
+        let mut acc: std::collections::BTreeMap<Principal, (u64, u128)> =
+            std::collections::BTreeMap::new();
+        for e in s.swap_events_v2().iter().filter(|e| e.timestamp >= cutoff) {
+            let entry = acc.entry(e.caller).or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 = entry.1.saturating_add(e.amount_in);
+        }
+        let mut v: Vec<(Principal, u64, u128)> = acc
+            .into_iter()
+            .map(|(p, (c, vol))| (p, c, vol))
+            .collect();
+        v.sort_by(|a, b| b.2.cmp(&a.2));
+        v.truncate(limit as usize);
+        v
+    })
+}
+
+// ── E9: top LP holders by balance ──
+#[query]
+pub fn get_top_lps(limit: u64) -> Vec<(Principal, u128, u32)> {
+    read_state(|s| {
+        let total = s.lp_total_supply.max(1);
+        let mut v: Vec<(Principal, u128, u32)> = s
+            .lp_balances
+            .iter()
+            .map(|(p, lp)| (*p, *lp, ((lp.saturating_mul(10_000)) / total) as u32))
+            .collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1));
+        v.truncate(limit as usize);
+        v
+    })
+}
+
+// ─── Time series (E10-E13) ───
+
+// ── E10: bucketed swap volume series ──
+#[query]
+pub fn get_volume_series(window: StatsWindow, bucket_seconds: u64) -> Vec<VolumePoint> {
+    if bucket_seconds == 0 {
+        return Vec::new();
+    }
+    let now = ic_cdk::api::time();
+    let cutoff = window_cutoff_ns(window, now);
+    read_state(|s| {
+        let mut map: std::collections::BTreeMap<u64, [u128; 3]> =
+            std::collections::BTreeMap::new();
+        for e in s.swap_events_v2().iter().filter(|e| e.timestamp >= cutoff) {
+            let bucket = bucket_floor(e.timestamp, bucket_seconds);
+            let entry = map.entry(bucket).or_insert([0; 3]);
+            let ti = e.token_in as usize;
+            entry[ti] = entry[ti].saturating_add(e.amount_in);
+        }
+        map.into_iter()
+            .map(|(t, v)| VolumePoint {
+                timestamp: t,
+                volume_per_token: v,
+            })
+            .collect()
+    })
+}
+
+// ── E11: bucketed pool balance series (last balance in each bucket wins) ──
+#[query]
+pub fn get_balance_series(window: StatsWindow, bucket_seconds: u64) -> Vec<BalancePoint> {
+    if bucket_seconds == 0 {
+        return Vec::new();
+    }
+    let now = ic_cdk::api::time();
+    let cutoff = window_cutoff_ns(window, now);
+    read_state(|s| {
+        let mut map: std::collections::BTreeMap<u64, [u128; 3]> =
+            std::collections::BTreeMap::new();
+        for e in s.swap_events_v2().iter().filter(|e| e.timestamp >= cutoff) {
+            let bucket = bucket_floor(e.timestamp, bucket_seconds);
+            map.insert(bucket, e.pool_balances_after);
+        }
+        map.into_iter()
+            .map(|(t, b)| BalancePoint {
+                timestamp: t,
+                balances: b,
+            })
+            .collect()
+    })
+}
+
+// ── E12: bucketed virtual price series (sourced from VP snapshots) ──
+#[query]
+pub fn get_virtual_price_series(
+    window: StatsWindow,
+    bucket_seconds: u64,
+) -> Vec<VirtualPricePoint> {
+    if bucket_seconds == 0 {
+        return Vec::new();
+    }
+    let now = ic_cdk::api::time();
+    let cutoff = window_cutoff_ns(window, now);
+    read_state(|s| {
+        let mut map: std::collections::BTreeMap<u64, u128> = std::collections::BTreeMap::new();
+        for snap in s.snapshots().iter() {
+            let ts_ns = snap.timestamp_secs.saturating_mul(1_000_000_000);
+            if ts_ns < cutoff {
+                continue;
+            }
+            let bucket = bucket_floor(ts_ns, bucket_seconds);
+            map.insert(bucket, snap.virtual_price);
+        }
+        map.into_iter()
+            .map(|(t, vp)| VirtualPricePoint {
+                timestamp: t,
+                virtual_price: vp,
+            })
+            .collect()
+    })
+}
+
+// ── E13: bucketed average fee bps series (volume-weighted) ──
+#[query]
+pub fn get_fee_series(window: StatsWindow, bucket_seconds: u64) -> Vec<FeePoint> {
+    if bucket_seconds == 0 {
+        return Vec::new();
+    }
+    let now = ic_cdk::api::time();
+    let cutoff = window_cutoff_ns(window, now);
+    read_state(|s| {
+        let mut sums: std::collections::BTreeMap<u64, (u128, u128)> =
+            std::collections::BTreeMap::new();
+        for e in s.swap_events_v2().iter().filter(|e| e.timestamp >= cutoff) {
+            let bucket = bucket_floor(e.timestamp, bucket_seconds);
+            let entry = sums.entry(bucket).or_insert((0, 0));
+            entry.0 = entry
+                .0
+                .saturating_add((e.fee_bps as u128).saturating_mul(e.amount_in));
+            entry.1 = entry.1.saturating_add(e.amount_in);
+        }
+        sums.into_iter()
+            .map(|(t, (w, v))| FeePoint {
+                timestamp: t,
+                avg_fee_bps: if v == 0 { 0 } else { (w / v) as u32 },
+            })
+            .collect()
+    })
+}
+
+// ─── Pool health (E14) ───
+
+#[query]
+pub fn get_pool_health() -> PoolHealth {
+    let now = ic_cdk::api::time();
+    let precision_muls = get_precision_muls();
+    read_state(|s| {
+        let current_imbalance = crate::math::compute_imbalance(&s.balances, &precision_muls);
+        let params = s.config.fee_curve.unwrap_or_default();
+
+        // imbalance_trend_1h: compare current vs the imbalance recorded by the
+        // first swap that landed in the last hour. If no swaps in the last
+        // hour, trend is 0.
+        let one_hour_ago = now.saturating_sub(3600 * 1_000_000_000);
+        let past_imb = s
+            .swap_events_v2()
+            .iter()
+            .find(|e| e.timestamp >= one_hour_ago)
+            .map(|e| e.imbalance_before)
+            .unwrap_or(current_imbalance);
+        let trend = current_imbalance as i64 - past_imb as i64;
+        let imbalance_trend_1h: i32 = trend.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+
+        let last_swap_age_seconds = s
+            .swap_events_v2()
+            .last()
+            .map(|e| now.saturating_sub(e.timestamp) / 1_000_000_000)
+            .unwrap_or(u64::MAX);
+
+        // fee_at_max_imbalance_swap: fee that would be charged if a hypothetical
+        // worst-case imbalancing trade pushed imbalance to saturation.
+        let fee_at_max =
+            crate::math::compute_fee_bps(current_imbalance, params.imb_saturation, &params);
+
+        // arb_opportunity_score: linear in current imbalance up to saturation.
+        let score = if params.imb_saturation == 0 {
+            0
+        } else {
+            ((current_imbalance.min(params.imb_saturation) as u128 * 100)
+                / params.imb_saturation as u128) as u8
+        };
+
+        PoolHealth {
+            current_imbalance,
+            imbalance_trend_1h,
+            last_swap_age_seconds,
+            fee_at_min: params.min_fee_bps,
+            fee_at_max_imbalance_swap: fee_at_max,
+            arb_opportunity_score: score,
+        }
+    })
+}
+
 // ─── Admin Endpoints ───
 
 #[update]
