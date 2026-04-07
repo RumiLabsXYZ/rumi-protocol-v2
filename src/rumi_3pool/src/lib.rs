@@ -305,10 +305,16 @@ pub async fn swap(i: u8, j: u8, dx: u128, min_dy: u128) -> Result<u128, ThreePoo
         })?;
 
     // 8. Update state
+    //
+    // The pool sent `output` to the user and reserves `admin_fee_share` of the
+    // fee for admin withdrawal. The LP-fee portion (`fee - admin_fee_share`)
+    // stays inside `s.balances[j_idx]` so it accrues to LPs via virtual_price.
+    // Therefore the internal balance must only decrease by `output + admin_fee_share`,
+    // not by `output + fee` (which would double-deduct the LP fee).
     let admin_fee_share = fee * (admin_fee_bps as u128) / 10_000;
     mutate_state(|s| {
         s.balances[i_idx] += dx;
-        s.balances[j_idx] -= output + fee;
+        s.balances[j_idx] -= output + admin_fee_share;
         s.admin_fees[j_idx] += admin_fee_share;
 
         // Compute virtual price after the swap. `None` (e.g. lp_total_supply==0
@@ -600,11 +606,15 @@ pub async fn remove_one_coin(
     let admin_fee_bps = read_state(|s| s.config.admin_fee_bps);
     let admin_fee_share = fee * (admin_fee_bps as u128) / 10_000;
 
+    // The pool sends `amount` to the user and reserves `admin_fee_share` for
+    // admin withdrawal. The LP-fee portion stays inside `s.balances[idx]` so
+    // virtual_price grows for remaining LPs. Subtracting `amount + fee` would
+    // double-deduct the LP fee.
     mutate_state(|s| {
         let entry = s.lp_balances.get_mut(&caller).unwrap();
         *entry -= lp_burn;
         s.lp_total_supply -= lp_burn;
-        s.balances[idx] -= amount + fee;
+        s.balances[idx] -= amount + admin_fee_share;
         s.admin_fees[idx] += admin_fee_share;
         // Log burn block for ICRC-3 index
         s.log_block(Icrc3Transaction::Burn { from: caller, amount: lp_burn });
@@ -935,15 +945,19 @@ pub fn pure_quote_swap(
     amp: u64,
     fee_curve: &FeeCurveParams,
     lp_total_supply: u128,
+    admin_fee_bps: u64,
 ) -> Result<QuoteSwapResult, ThreePoolError> {
     let i_idx = i as usize;
     let j_idx = j as usize;
     let outcome = calc_swap_output(i_idx, j_idx, dx, balances, precision_muls, amp, fee_curve)?;
     let vp_before = virtual_price(balances, precision_muls, amp, lp_total_supply).unwrap_or(0);
+    // Mirror on-chain accounting: only `output + admin_fee_share` leaves the
+    // pool. The LP-fee portion stays in `s.balances[j]` and accrues to VP.
+    let admin_fee_share = outcome.fee_native * (admin_fee_bps as u128) / 10_000;
     let mut balances_after = *balances;
     balances_after[i_idx] = balances_after[i_idx].saturating_add(dx);
     balances_after[j_idx] = balances_after[j_idx]
-        .saturating_sub(outcome.output_native + outcome.fee_native);
+        .saturating_sub(outcome.output_native + admin_fee_share);
     let vp_after = virtual_price(&balances_after, precision_muls, amp, lp_total_supply).unwrap_or(0);
     Ok(QuoteSwapResult {
         token_in: i,
@@ -1053,6 +1067,7 @@ pub fn pure_simulate_swap_path(
     amp: u64,
     fee_curve: &FeeCurveParams,
     lp_total_supply: u128,
+    admin_fee_bps: u64,
 ) -> Result<Vec<QuoteSwapResult>, ThreePoolError> {
     let mut balances = *initial_balances;
     let mut out = Vec::with_capacity(path.len());
@@ -1062,9 +1077,12 @@ pub fn pure_simulate_swap_path(
         if i_idx >= 3 || j_idx >= 3 || i_idx == j_idx {
             return Err(ThreePoolError::InvalidCoinIndex);
         }
-        let q = pure_quote_swap(i, j, dx, &balances, precision_muls, amp, fee_curve, lp_total_supply)?;
+        let q = pure_quote_swap(i, j, dx, &balances, precision_muls, amp, fee_curve, lp_total_supply, admin_fee_bps)?;
+        // Mirror on-chain accounting: only `amount_out + admin_fee_share` leaves
+        // the pool. LP fee stays in the pool and grows VP for subsequent hops.
+        let admin_fee_share = q.fee_native * (admin_fee_bps as u128) / 10_000;
         balances[i_idx] = balances[i_idx].saturating_add(dx);
-        balances[j_idx] = balances[j_idx].saturating_sub(q.amount_out + q.fee_native);
+        balances[j_idx] = balances[j_idx].saturating_sub(q.amount_out + admin_fee_share);
         out.push(q);
     }
     Ok(out)
@@ -1078,10 +1096,10 @@ pub fn pure_simulate_swap_path(
 pub fn quote_swap(i: u8, j: u8, dx: u128) -> Result<QuoteSwapResult, ThreePoolError> {
     let amp = get_current_a();
     let precision_muls = get_precision_muls();
-    let (balances, fee_curve, lp_total_supply) = read_state(|s| {
-        (s.balances, s.config.fee_curve.unwrap_or_default(), s.lp_total_supply)
+    let (balances, fee_curve, lp_total_supply, admin_fee_bps) = read_state(|s| {
+        (s.balances, s.config.fee_curve.unwrap_or_default(), s.lp_total_supply, s.config.admin_fee_bps)
     });
-    pure_quote_swap(i, j, dx, &balances, &precision_muls, amp, &fee_curve, lp_total_supply)
+    pure_quote_swap(i, j, dx, &balances, &precision_muls, amp, &fee_curve, lp_total_supply, admin_fee_bps)
 }
 
 /// Snapshot of the live pool: balances, weights, imbalance, vp, fee curve, A.
@@ -1137,10 +1155,10 @@ pub fn quote_optimal_rebalance(i: u8, j: u8) -> Result<OptimalRebalanceQuote, Th
 pub fn simulate_swap_path(path: Vec<(u8, u8, u128)>) -> Result<Vec<QuoteSwapResult>, ThreePoolError> {
     let amp = get_current_a();
     let precision_muls = get_precision_muls();
-    let (balances, fee_curve, lp_total_supply) = read_state(|s| {
-        (s.balances, s.config.fee_curve.unwrap_or_default(), s.lp_total_supply)
+    let (balances, fee_curve, lp_total_supply, admin_fee_bps) = read_state(|s| {
+        (s.balances, s.config.fee_curve.unwrap_or_default(), s.lp_total_supply, s.config.admin_fee_bps)
     });
-    pure_simulate_swap_path(&path, &balances, &precision_muls, amp, &fee_curve, lp_total_supply)
+    pure_simulate_swap_path(&path, &balances, &precision_muls, amp, &fee_curve, lp_total_supply, admin_fee_bps)
 }
 
 /// Returns merged imbalance snapshots from swap and liquidity v2 events,
@@ -2011,7 +2029,7 @@ mod bot_endpoint_tests {
         let pms = precision_muls();
         let fc = FeeCurveParams::default();
         let dx = 1_000 * 100_000_000u128;
-        let q = pure_quote_swap(0, 1, dx, &bal, &pms, 500, &fc, 1_000_000_000_000).unwrap();
+        let q = pure_quote_swap(0, 1, dx, &bal, &pms, 500, &fc, 1_000_000_000_000, 5000).unwrap();
         let raw = calc_swap_output(0, 1, dx, &bal, &pms, 500, &fc).unwrap();
         assert_eq!(q.amount_out, raw.output_native);
         assert_eq!(q.fee_native, raw.fee_native);
@@ -2068,7 +2086,7 @@ mod bot_endpoint_tests {
             (0u8, 1u8, 1_000 * 100_000_000u128),
             (1u8, 2u8, 500 * 1_000_000u128),
         ];
-        let results = pure_simulate_swap_path(&path, &bal, &pms, 500, &fc, 1_000_000_000_000).unwrap();
+        let results = pure_simulate_swap_path(&path, &bal, &pms, 500, &fc, 1_000_000_000_000, 5000).unwrap();
         assert_eq!(results.len(), 2);
         // Second hop's imbalance_before should equal first hop's imbalance_after
         // (within the chained-balances simulation).
@@ -2083,7 +2101,7 @@ mod bot_endpoint_tests {
         let pms = precision_muls();
         let fc = FeeCurveParams::default();
         let path = vec![(0u8, 0u8, 100u128)]; // same index
-        assert!(pure_simulate_swap_path(&path, &bal, &pms, 500, &fc, 1).is_err());
+        assert!(pure_simulate_swap_path(&path, &bal, &pms, 500, &fc, 1, 5000).is_err());
     }
 
     // ─── Pagination tests ───

@@ -727,3 +727,98 @@ fn test_upgrade_preserves_swap_events() {
     assert_eq!(after[0].id, before[0].id);
     assert_eq!(after[2].id, before[2].id);
 }
+
+// ─── C1 regression: virtual_price grows from swap and remove_one_coin fees ───
+//
+// Before the fix, swap and remove_one_coin both subtracted `output + fee` from
+// the pool's internal balance, double-deducting the LP-fee portion. That kept
+// virtual_price flat (or even shrank it on heavy fees) since the LP fee never
+// actually stayed in the pool. After the fix only `output + admin_fee_share`
+// is deducted, so the LP-fee portion accrues to LPs via VP growth.
+
+fn get_lp_balance(env: &TestEnv, who: Principal) -> u128 {
+    let res = env
+        .pic
+        .query_call(env.pool_id, Principal::anonymous(), "get_lp_balance", encode_one(who).unwrap())
+        .expect("get_lp_balance failed");
+    match res {
+        WasmResult::Reply(bytes) => {
+            let nat: candid::Nat = decode_one(&bytes).unwrap();
+            nat.0.try_into().unwrap()
+        }
+        WasmResult::Reject(msg) => panic!("get_lp_balance rejected: {}", msg),
+    }
+}
+
+fn do_remove_one_coin(env: &TestEnv, lp_burn: u128, idx: u8) -> u128 {
+    let res = env
+        .pic
+        .update_call(env.pool_id, env.test_user, "remove_one_coin", encode_args((lp_burn, idx, 0u128)).unwrap())
+        .expect("remove_one_coin failed");
+    match res {
+        WasmResult::Reply(bytes) => {
+            let r: Result<candid::Nat, ThreePoolError> = decode_one(&bytes).unwrap();
+            r.expect("remove_one_coin err").0.try_into().unwrap()
+        }
+        WasmResult::Reject(msg) => panic!("remove_one_coin rejected: {}", msg),
+    }
+}
+
+fn get_liquidity_events_v2(env: &TestEnv) -> Vec<LiquidityEventV2> {
+    let res = env
+        .pic
+        .query_call(
+            env.pool_id,
+            Principal::anonymous(),
+            "get_liquidity_events_by_principal",
+            encode_args((env.test_user, 0u64, 1000u64)).unwrap(),
+        )
+        .expect("get_liquidity_events_by_principal failed");
+    match res {
+        WasmResult::Reply(bytes) => decode_one::<Vec<LiquidityEventV2>>(&bytes).unwrap(),
+        WasmResult::Reject(msg) => panic!("rejected: {}", msg),
+    }
+}
+
+#[test]
+fn test_virtual_price_grows_from_swap_and_remove_one_coin_fees() {
+    let env = setup_balanced_pool();
+    set_aggressive_fee_curve(&env);
+
+    // ── Phase 1: Swap path. Do a sizeable swap and verify VP grew. ──
+    //
+    // VP before the swap is the VP after the initial add_liquidity. Read it
+    // from the seeded liquidity event.
+    let liq_events_initial = get_liquidity_events_v2(&env);
+    assert!(!liq_events_initial.is_empty(), "expected initial add_liquidity event");
+    let vp_after_seed = liq_events_initial[0].virtual_price_after;
+    assert!(vp_after_seed > 0, "seeded VP must be > 0");
+
+    // Imbalancing icUSD -> ckUSDT swap exercises the dynamic fee curve.
+    do_swap(&env, 0, 1, 100_000 * 100_000_000);
+    let swap_ev = last_swap_event(&env);
+    assert!(swap_ev.fee > 0, "swap should have charged a fee");
+    assert!(swap_ev.fee_bps > 1, "should pay more than min fee");
+    assert!(
+        swap_ev.virtual_price_after > vp_after_seed,
+        "VP must grow after a fee-bearing swap: before={}, after={}, fee={}, fee_bps={}",
+        vp_after_seed, swap_ev.virtual_price_after, swap_ev.fee, swap_ev.fee_bps
+    );
+
+    let vp_after_swap = swap_ev.virtual_price_after;
+
+    // ── Phase 2: remove_one_coin path. Burn a small fraction and verify VP grew. ──
+    let user_lp = get_lp_balance(&env, env.test_user);
+    let lp_burn = user_lp / 100; // 1% — leaves plenty in the pool
+    assert!(lp_burn > 0, "user must hold LP");
+    do_remove_one_coin(&env, lp_burn, 1); // pull ckUSDT, imbalancing
+    let liq_events = get_liquidity_events_v2(&env);
+    let last_liq = liq_events.last().expect("expected remove_one_coin event");
+    assert!(matches!(last_liq.action, LiquidityAction::RemoveOneCoin));
+    assert!(last_liq.fee.unwrap_or(0) > 0, "remove_one_coin should charge a fee");
+    assert!(
+        last_liq.virtual_price_after > vp_after_swap,
+        "VP must grow after a fee-bearing remove_one_coin: before={}, after={}, fee={:?}",
+        vp_after_swap, last_liq.virtual_price_after, last_liq.fee
+    );
+}
