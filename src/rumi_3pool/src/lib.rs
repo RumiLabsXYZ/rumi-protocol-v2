@@ -372,8 +372,8 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
         for k in 0..3 {
             s.balances[k] += amounts_arr[k];
         }
-        let entry = s.lp_balances.entry(caller).or_insert(0);
-        *entry += lp_minted;
+        let cur = storage::lp_balance_get(&caller);
+        storage::lp_balance_set(caller, cur + lp_minted);
         s.lp_total_supply += lp_minted;
         s.is_initialized = true;
         // Log mint block for ICRC-3 index
@@ -431,10 +431,8 @@ pub async fn remove_liquidity(
     let caller = ic_cdk::api::caller();
 
     // 2. Check caller has enough LP
-    let (user_lp, balances, lp_total_supply) = read_state(|s| {
-        let user_lp = s.lp_balances.get(&caller).copied().unwrap_or(0);
-        (user_lp, s.balances, s.lp_total_supply)
-    });
+    let user_lp = storage::lp_balance_get(&caller);
+    let (balances, lp_total_supply) = read_state(|s| (s.balances, s.lp_total_supply));
 
     if user_lp < lp_burn {
         return Err(ThreePoolError::InsufficientLiquidity);
@@ -460,8 +458,8 @@ pub async fn remove_liquidity(
 
     // 5. Deduct LP first (deduct-before-transfer pattern)
     mutate_state(|s| {
-        let entry = s.lp_balances.get_mut(&caller).unwrap();
-        *entry -= lp_burn;
+        let cur = storage::lp_balance_get(&caller);
+        storage::lp_balance_set(caller, cur - lp_burn);
         s.lp_total_supply -= lp_burn;
         for k in 0..3 {
             s.balances[k] -= amounts[k];
@@ -533,10 +531,8 @@ pub async fn remove_one_coin(
     let caller = ic_cdk::api::caller();
 
     // 1. Check caller has enough LP
-    let (user_lp, balances, lp_total_supply) = read_state(|s| {
-        let user_lp = s.lp_balances.get(&caller).copied().unwrap_or(0);
-        (user_lp, s.balances, s.lp_total_supply)
-    });
+    let user_lp = storage::lp_balance_get(&caller);
+    let (balances, lp_total_supply) = read_state(|s| (s.balances, s.lp_total_supply));
 
     if user_lp < lp_burn {
         return Err(ThreePoolError::InsufficientLiquidity);
@@ -576,8 +572,8 @@ pub async fn remove_one_coin(
     // virtual_price grows for remaining LPs. Subtracting `amount + fee` would
     // double-deduct the LP fee.
     mutate_state(|s| {
-        let entry = s.lp_balances.get_mut(&caller).unwrap();
-        *entry -= lp_burn;
+        let cur = storage::lp_balance_get(&caller);
+        storage::lp_balance_set(caller, cur - lp_burn);
         s.lp_total_supply -= lp_burn;
         s.balances[idx] -= amount + admin_fee_share;
         s.admin_fees[idx] += admin_fee_share;
@@ -801,21 +797,18 @@ pub fn get_pool_status() -> PoolStatus {
 
 #[query]
 pub fn get_lp_balance(user: Principal) -> u128 {
-    read_state(|s| s.lp_balances.get(&user).copied().unwrap_or(0))
+    storage::lp_balance_get(&user)
 }
 
 /// Returns all LP holders and their balances, sorted by balance descending.
 #[query]
 pub fn get_all_lp_holders() -> Vec<(Principal, u128)> {
-    read_state(|s| {
-        let mut holders: Vec<(Principal, u128)> = s.lp_balances
-            .iter()
-            .filter(|(_, &balance)| balance > 0)
-            .map(|(&p, &b)| (p, b))
-            .collect();
-        holders.sort_by(|a, b| b.1.cmp(&a.1));
-        holders
-    })
+    let mut holders: Vec<(Principal, u128)> = storage::lp_balance_iter()
+        .into_iter()
+        .filter(|(_, b)| *b > 0)
+        .collect();
+    holders.sort_by(|a, b| b.1.cmp(&a.1));
+    holders
 }
 
 #[query]
@@ -1439,17 +1432,14 @@ pub fn get_top_swappers(window: StatsWindow, limit: u64) -> Vec<(Principal, u64,
 // ── E9: top LP holders by balance ──
 #[query]
 pub fn get_top_lps(limit: u64) -> Vec<(Principal, u128, u32)> {
-    read_state(|s| {
-        let total = s.lp_total_supply.max(1);
-        let mut v: Vec<(Principal, u128, u32)> = s
-            .lp_balances
-            .iter()
-            .map(|(p, lp)| (*p, *lp, ((lp.saturating_mul(10_000)) / total) as u32))
-            .collect();
-        v.sort_by(|a, b| b.1.cmp(&a.1));
-        v.truncate(limit as usize);
-        v
-    })
+    let total = read_state(|s| s.lp_total_supply).max(1);
+    let mut v: Vec<(Principal, u128, u32)> = storage::lp_balance_iter()
+        .into_iter()
+        .map(|(p, lp)| (p, lp, ((lp.saturating_mul(10_000)) / total) as u32))
+        .collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v.truncate(limit as usize);
+    v
 }
 
 // ─── Time series (E10-E13) ───
@@ -1711,7 +1701,7 @@ pub async fn authorized_redeem_and_burn(
     })?;
 
     // 3. Validate LP balance
-    let caller_lp = read_state(|s| s.lp_balances.get(&caller).copied().unwrap_or(0));
+    let caller_lp = storage::lp_balance_get(&caller);
     if caller_lp < args.lp_amount {
         return Err(ThreePoolError::InsufficientLpBalance {
             required: args.lp_amount,
@@ -1768,9 +1758,8 @@ pub async fn authorized_redeem_and_burn(
 
     // 6. Deduct LP and pool balance BEFORE the async burn call (deduct-before-transfer)
     mutate_state(|s| {
-        if let Some(lp) = s.lp_balances.get_mut(&caller) {
-            *lp -= args.lp_amount;
-        }
+        let cur = storage::lp_balance_get(&caller);
+        storage::lp_balance_set(caller, cur.saturating_sub(args.lp_amount));
         s.lp_total_supply -= args.lp_amount;
         s.balances[token_idx] -= args.token_amount;
     });
@@ -1800,7 +1789,8 @@ pub async fn authorized_redeem_and_burn(
         Err(reason) => {
             // Rollback: restore LP and pool balance
             mutate_state(|s| {
-                *s.lp_balances.entry(caller).or_insert(0) += args.lp_amount;
+                let cur = storage::lp_balance_get(&caller);
+                storage::lp_balance_set(caller, cur + args.lp_amount);
                 s.lp_total_supply += args.lp_amount;
                 s.balances[token_idx] += args.token_amount;
             });

@@ -71,7 +71,7 @@ pub fn icrc1_minting_account() -> Option<Account> {
 
 pub fn icrc1_balance_of(account: Account) -> Nat {
     let p = account.owner;
-    Nat::from(read_state(|s| s.lp_balances.get(&p).copied().unwrap_or(0)))
+    Nat::from(crate::storage::lp_balance_get(&p))
 }
 
 pub fn icrc1_metadata() -> Vec<(String, MetadataValue)> {
@@ -120,22 +120,19 @@ pub fn icrc1_transfer(caller: Principal, args: TransferArg) -> Result<Nat, Trans
     }
 
     mutate_state(|s| {
-        let from_balance = s.lp_balances.get(&caller).copied().unwrap_or(0);
+        let from_balance = crate::storage::lp_balance_get(&caller);
         if from_balance < amount {
             return Err(TransferError::InsufficientFunds {
                 balance: Nat::from(from_balance),
             });
         }
 
-        // Debit
-        let from_entry = s.lp_balances.get_mut(&caller).unwrap();
-        *from_entry -= amount;
-        if *from_entry == 0 {
-            s.lp_balances.remove(&caller);
-        }
+        // Debit (set-to-0 removes the entry from stable storage)
+        crate::storage::lp_balance_set(caller, from_balance - amount);
 
         // Credit
-        *s.lp_balances.entry(to_principal).or_insert(0) += amount;
+        let to_balance = crate::storage::lp_balance_get(&to_principal);
+        crate::storage::lp_balance_set(to_principal, to_balance + amount);
 
         let id = s.log_block(Icrc3Transaction::Transfer {
             from: caller,
@@ -176,14 +173,10 @@ pub fn icrc2_approve(caller: Principal, args: ApproveArgs) -> Result<Nat, Approv
     }
 
     mutate_state(|s| {
-        let key = (caller, spender_principal);
-
         // CAS: check expected_allowance
         if let Some(ref expected) = args.expected_allowance {
-            let current = s
-                .allowances()
-                .get(&key)
-                .map(|a| effective_allowance(a))
+            let current = crate::storage::allowance_get(&caller, &spender_principal)
+                .map(|a| effective_allowance(&a))
                 .unwrap_or(0);
             let expected_u128 = nat_to_u128(expected).unwrap_or(u128::MAX);
             if current != expected_u128 {
@@ -194,8 +187,9 @@ pub fn icrc2_approve(caller: Principal, args: ApproveArgs) -> Result<Nat, Approv
         }
 
         // Set allowance
-        s.allowances_mut().insert(
-            key,
+        crate::storage::allowance_set(
+            caller,
+            spender_principal,
             LpAllowance {
                 amount,
                 expires_at: args.expires_at,
@@ -218,9 +212,9 @@ pub fn icrc2_allowance(args: AllowanceArgs) -> Allowance {
     let owner = args.account.owner;
     let spender = args.spender.owner;
 
-    read_state(|s| match s.allowances().get(&(owner, spender)) {
+    match crate::storage::allowance_get(&owner, &spender) {
         Some(a) => {
-            let eff = effective_allowance(a);
+            let eff = effective_allowance(&a);
             Allowance {
                 allowance: Nat::from(eff),
                 expires_at: if eff > 0 { a.expires_at } else { None },
@@ -230,7 +224,7 @@ pub fn icrc2_allowance(args: AllowanceArgs) -> Allowance {
             allowance: Nat::from(0u64),
             expires_at: None,
         },
-    })
+    }
 }
 
 // ─── ICRC-2 Transfer From ───
@@ -267,10 +261,9 @@ pub fn icrc2_transfer_from(
     mutate_state(|s| {
         // Check and deduct allowance (unless self-transfer)
         if caller != from_principal {
-            let key = (from_principal, caller);
-            let current_allowance = s
-                .allowances()
-                .get(&key)
+            let existing = crate::storage::allowance_get(&from_principal, &caller);
+            let current_allowance = existing
+                .as_ref()
                 .map(|a| effective_allowance(a))
                 .unwrap_or(0);
             if current_allowance < amount {
@@ -280,31 +273,29 @@ pub fn icrc2_transfer_from(
             }
 
             // Deduct allowance
-            let allowances = s.allowances_mut();
-            let entry = allowances.get_mut(&key).unwrap();
+            let mut entry = existing.unwrap();
             entry.amount = entry.amount.saturating_sub(amount);
             if entry.amount == 0 {
-                allowances.remove(&key);
+                crate::storage::allowance_remove(&from_principal, &caller);
+            } else {
+                crate::storage::allowance_set(from_principal, caller, entry);
             }
         }
 
         // Check balance
-        let from_balance = s.lp_balances.get(&from_principal).copied().unwrap_or(0);
+        let from_balance = crate::storage::lp_balance_get(&from_principal);
         if from_balance < amount {
             return Err(TransferFromError::InsufficientFunds {
                 balance: Nat::from(from_balance),
             });
         }
 
-        // Debit
-        let from_entry = s.lp_balances.get_mut(&from_principal).unwrap();
-        *from_entry -= amount;
-        if *from_entry == 0 {
-            s.lp_balances.remove(&from_principal);
-        }
+        // Debit (set-to-0 removes the entry from stable storage)
+        crate::storage::lp_balance_set(from_principal, from_balance - amount);
 
         // Credit
-        *s.lp_balances.entry(to_principal).or_insert(0) += amount;
+        let to_balance = crate::storage::lp_balance_get(&to_principal);
+        crate::storage::lp_balance_set(to_principal, to_balance + amount);
 
         let id = s.log_block(Icrc3Transaction::Transfer {
             from: from_principal,
