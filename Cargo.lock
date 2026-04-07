@@ -7149,6 +7149,7 @@ dependencies = [
  "pocket-ic",
  "serde",
  "serde_bytes",
+ "serde_json",
  "sha2",
 ]
 

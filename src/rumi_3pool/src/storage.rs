@@ -530,45 +530,178 @@ pub mod migration {
     //! The drain runs inside a single `post_upgrade` message:
     //!
     //!   1. Read the raw blob from offsets 0/8 into a Rust `Vec<u8>`.
-    //!   2. Candid-decode the blob into the legacy `ThreePoolState` shape.
+    //!   2. Candid-decode the blob into `LegacyThreePoolState`.
     //!      **At this point every LP balance, event, and block is in RAM.**
-    //!   3. Call `MemoryManager::init`. This writes `MGR` magic over the
-    //!      first few bytes of stable memory — the on-disk blob is now
-    //!      corrupted, but we already have the data in RAM.
-    //!   4. Drain every heap collection from the decoded RAM state into its
-    //!      new stable structure (LP balances → BTreeMap, events → logs,
-    //!      blocks → log).
-    //!   5. Write the residual bounded fields to the SlimState cell with
-    //!      `storage_migrated = true`.
+    //!   3. Drain into `crate::storage::*` thread-locals. The first such
+    //!      access lazy-inits MemoryManager, which writes `MGR` over the
+    //!      first bytes of stable memory; the legacy blob is destroyed,
+    //!      but we already have the data in RAM.
+    //!   4. Write SlimState to its cell with `storage_migrated = true`.
     //!
-    //! If any step traps, the entire `post_upgrade` message is rolled back
-    //! by IC upgrade semantics and the canister remains on the old wasm
-    //! with the legacy blob intact. The drain is therefore all-or-nothing:
-    //! either we end up in the fully migrated state or we roll back cleanly.
-    //!
-    //! The drain is guarded by `storage_migrated`: on every subsequent
-    //! upgrade `post_upgrade` reads `SlimState` from the cell, sees
-    //! `storage_migrated = true`, and skips the drain entirely.
+    //! If any step traps, IC `post_upgrade` semantics roll back stable
+    //! memory atomically (IC Interface Spec lines 1432, 1450, 1454), and
+    //! the canister stays on the old wasm with the legacy blob intact.
 
-    // NOTE: The actual drain implementation lands in A6. This module
-    // currently holds only the safety documentation and type signatures so
-    // the rest of the codebase can reference `storage::migration::...`
-    // without a compile error during A1–A5.
+    use super::*;
+    use crate::types::{
+        Icrc3Block, LiquidityEventV1, LiquidityEventV2, LpAllowance, PoolConfig,
+        SwapEventV1, SwapEventV2, ThreePoolAdminEvent, VirtualPriceSnapshot,
+    };
+    use candid::{CandidType, Decode};
+    use serde::{Deserialize, Serialize};
+    use std::collections::{BTreeMap, BTreeSet};
 
-    /// Returns true if the `MGR` magic bytes are present at physical stable
-    /// memory offset 0. Callers use this to decide whether to take the drain
-    /// path or the normal load path.
+    /// Candid-compatible mirror of the pre-Phase-A `ThreePoolState`. Every
+    /// collection field is `Option<...>` with `#[serde(default)]` so the
+    /// decode tolerates older blobs that predate any given field. The
+    /// `swap_events_v2` / `liquidity_events_v2` fields were removed from
+    /// the live state in A2 but still exist in the mainnet blob — declaring
+    /// them here is the only way to recover that data.
+    #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+    pub struct LegacyThreePoolState {
+        pub config: PoolConfig,
+        pub balances: [u128; 3],
+        #[serde(default)]
+        pub lp_balances: BTreeMap<Principal, u128>,
+        pub lp_total_supply: u128,
+        #[serde(default)]
+        pub lp_allowances: Option<BTreeMap<(Principal, Principal), LpAllowance>>,
+        #[serde(default)]
+        pub lp_tx_count: Option<u64>,
+        #[serde(default)]
+        pub vp_snapshots: Option<Vec<VirtualPriceSnapshot>>,
+        #[serde(default)]
+        pub blocks: Option<Vec<Icrc3Block>>,
+        #[serde(default)]
+        pub last_block_hash: Option<[u8; 32]>,
+        pub admin_fees: [u128; 3],
+        pub is_paused: bool,
+        pub is_initialized: bool,
+        #[serde(default)]
+        pub authorized_burn_callers: Option<BTreeSet<Principal>>,
+        #[serde(default)]
+        pub swap_events: Option<Vec<SwapEventV1>>,
+        #[serde(default)]
+        pub liquidity_events: Option<Vec<LiquidityEventV1>>,
+        #[serde(default)]
+        pub admin_events: Option<Vec<ThreePoolAdminEvent>>,
+        #[serde(default)]
+        pub swap_events_v2: Option<Vec<SwapEventV2>>,
+        #[serde(default)]
+        pub liquidity_events_v2: Option<Vec<LiquidityEventV2>>,
+    }
+
+    /// Defensive cap on the legacy blob size: anything larger is almost
+    /// certainly garbage (e.g. MGR magic re-interpreted as a length).
+    /// Live mainnet blob is < 16 MiB.
+    const MAX_LEGACY_BLOB: u64 = 64 * 1024 * 1024;
+
+    /// Read and Candid-decode the legacy length-prefixed blob from physical
+    /// stable memory offset 0. Returns `None` for fresh canisters (empty
+    /// stable memory) and for any canister that already has `MGR` magic at
+    /// offset 0 (already-migrated or any future MM-using canister).
     ///
-    /// Implementation detail: MemoryManager's magic is `b"MGR"`. We check
-    /// this BEFORE calling `MemoryManager::init` because `init` would
-    /// destructively write `MGR` over a non-matching prefix.
-    pub fn has_memory_manager_magic() -> bool {
-        if ic_cdk::api::stable::stable64_size() == 0 {
-            return false;
+    /// Traps on decode failure of a non-empty, non-MGR blob, so that
+    /// `post_upgrade` rolls back rather than continuing with corrupt state.
+    ///
+    /// This function only touches `ic_cdk::api::stable::*` directly and does
+    /// NOT access any `crate::storage::*` thread-local, so it is safe to
+    /// call BEFORE `MemoryManager::init` runs.
+    pub fn read_legacy_blob() -> Option<LegacyThreePoolState> {
+        let size_pages = ic_cdk::api::stable::stable64_size();
+        if size_pages == 0 {
+            return None;
         }
+        // MGR-first check: if MemoryManager has already claimed offset 0,
+        // there is no legacy blob to drain.
         let mut magic = [0u8; 3];
         ic_cdk::api::stable::stable64_read(0, &mut magic);
-        &magic == b"MGR"
+        if &magic == b"MGR" {
+            return None;
+        }
+        let mut len_bytes = [0u8; 8];
+        ic_cdk::api::stable::stable64_read(0, &mut len_bytes);
+        let len = u64::from_le_bytes(len_bytes);
+        if len == 0 {
+            return None;
+        }
+        if len > MAX_LEGACY_BLOB {
+            ic_cdk::trap(&format!(
+                "legacy blob length {len} exceeds safety cap {MAX_LEGACY_BLOB}"
+            ));
+        }
+        let mut bytes = vec![0u8; len as usize];
+        ic_cdk::api::stable::stable64_read(8, &mut bytes);
+        match Decode!(&bytes, LegacyThreePoolState) {
+            Ok(state) => Some(state),
+            Err(e) => ic_cdk::trap(&format!("legacy blob decode failed: {e}")),
+        }
+    }
+
+    /// Drain a decoded legacy state into the live stable structures.
+    ///
+    /// MUST be called AFTER `read_legacy_blob` (which reads raw offsets).
+    /// The first `crate::storage::*` access here triggers lazy
+    /// `MemoryManager::init`, which overwrites the legacy blob bytes at
+    /// offset 0 with `MGR` magic. The data is already in `legacy`'s RAM
+    /// copy at this point, so the destruction of on-disk bytes is fine.
+    ///
+    /// Iteration order matches the legacy `Vec` order so log indices in
+    /// every `StableLog` equal the original positions and ICRC-3 hash
+    /// chain remains valid.
+    pub fn drain_legacy_state(legacy: LegacyThreePoolState) {
+        // 1. Maps.
+        for (principal, balance) in legacy.lp_balances.into_iter() {
+            if balance > 0 {
+                crate::storage::lp_balance_set(principal, balance);
+            }
+        }
+        if let Some(allowances) = legacy.lp_allowances {
+            for ((owner, spender), allowance) in allowances.into_iter() {
+                crate::storage::allowance_set(owner, spender, allowance);
+            }
+        }
+        if let Some(burn_callers) = legacy.authorized_burn_callers {
+            for principal in burn_callers.into_iter() {
+                crate::storage::burn_caller_insert(principal);
+            }
+        }
+        // 2. Logs (preserve original Vec ordering).
+        if let Some(events) = legacy.swap_events {
+            for e in events.into_iter() {
+                crate::storage::swap_v1::push(e);
+            }
+        }
+        if let Some(events) = legacy.liquidity_events {
+            for e in events.into_iter() {
+                crate::storage::liq_v1::push(e);
+            }
+        }
+        if let Some(events) = legacy.swap_events_v2 {
+            for e in events.into_iter() {
+                crate::storage::swap_v2::push(e);
+            }
+        }
+        if let Some(events) = legacy.liquidity_events_v2 {
+            for e in events.into_iter() {
+                crate::storage::liq_v2::push(e);
+            }
+        }
+        if let Some(events) = legacy.admin_events {
+            for e in events.into_iter() {
+                crate::storage::admin_ev::push(e);
+            }
+        }
+        if let Some(snaps) = legacy.vp_snapshots {
+            for s in snaps.into_iter() {
+                crate::storage::vp_snap::push(s);
+            }
+        }
+        if let Some(blocks) = legacy.blocks {
+            for b in blocks.into_iter() {
+                crate::storage::blocks::push(b);
+            }
+        }
     }
 }
 
@@ -635,4 +768,155 @@ mod tests {
     // MemoryManager to be initialized over a concrete memory, which the
     // thread_local above does lazily on first touch. Those tests live in
     // `tests/stable_storage.rs` where we can use a dedicated memory.
+
+    // ─── A6 migration: LegacyThreePoolState Candid round-trips ───
+
+    #[test]
+    fn legacy_state_candid_roundtrip_with_v2_events() {
+        use crate::storage::migration::LegacyThreePoolState;
+        use crate::types::{
+            Icrc3Block, Icrc3Transaction, LiquidityAction, LiquidityEventV1,
+            LiquidityEventV2, LpAllowance, SwapEventV1, SwapEventV2,
+            ThreePoolAdminAction, ThreePoolAdminEvent, VirtualPriceSnapshot,
+        };
+        use candid::{Decode, Encode};
+
+        let p = Principal::from_text("2vxsx-fae").unwrap();
+
+        let mut lp_balances = std::collections::BTreeMap::new();
+        lp_balances.insert(p, 1_234_567_890u128);
+
+        let mut allowances = std::collections::BTreeMap::new();
+        allowances.insert(
+            (p, Principal::anonymous()),
+            LpAllowance { amount: 999, expires_at: Some(123) },
+        );
+
+        let mut burn = std::collections::BTreeSet::new();
+        burn.insert(p);
+
+        let swap_v1 = SwapEventV1 {
+            id: 0, timestamp: 1, caller: p,
+            token_in: 0, token_out: 1,
+            amount_in: 10, amount_out: 9, fee: 1,
+        };
+        let swap_v2 = SwapEventV2 {
+            id: 0, timestamp: 1, caller: p,
+            token_in: 0, token_out: 1,
+            amount_in: 10, amount_out: 9, fee: 1,
+            fee_bps: 4,
+            imbalance_before: 0, imbalance_after: 0,
+            is_rebalancing: false,
+            pool_balances_after: [1, 2, 3],
+            virtual_price_after: 1_000_000_000_000_000_000,
+            migrated: false,
+        };
+        let liq_v1 = LiquidityEventV1 {
+            id: 0, timestamp: 1, caller: p,
+            action: LiquidityAction::AddLiquidity,
+            amounts: [1, 2, 3], lp_amount: 5,
+            coin_index: None, fee: None,
+        };
+        let liq_v2 = LiquidityEventV2 {
+            id: 0, timestamp: 1, caller: p,
+            action: LiquidityAction::RemoveLiquidity,
+            amounts: [1, 2, 3], lp_amount: 5,
+            coin_index: None, fee: None,
+            fee_bps: None,
+            imbalance_before: 0, imbalance_after: 0,
+            is_rebalancing: false,
+            pool_balances_after: [1, 2, 3],
+            virtual_price_after: 1_000_000_000_000_000_000,
+            migrated: false,
+        };
+
+        let legacy = LegacyThreePoolState {
+            config: SlimState::default().config,
+            balances: [1, 2, 3],
+            lp_balances,
+            lp_total_supply: 1_234_567_890,
+            lp_allowances: Some(allowances),
+            lp_tx_count: Some(42),
+            vp_snapshots: Some(vec![VirtualPriceSnapshot {
+                timestamp_secs: 1,
+                virtual_price: 1_000_000,
+                lp_total_supply: 1_000,
+            }]),
+            blocks: Some(vec![Icrc3Block {
+                id: 0,
+                timestamp: 1,
+                tx: Icrc3Transaction::Mint { to: p, amount: 1 },
+            }]),
+            last_block_hash: Some([7u8; 32]),
+            admin_fees: [4, 5, 6],
+            is_paused: false,
+            is_initialized: true,
+            authorized_burn_callers: Some(burn),
+            swap_events: Some(vec![swap_v1]),
+            liquidity_events: Some(vec![liq_v1]),
+            admin_events: Some(vec![ThreePoolAdminEvent {
+                id: 0,
+                timestamp: 1,
+                caller: p,
+                action: ThreePoolAdminAction::SetPaused { paused: true },
+            }]),
+            swap_events_v2: Some(vec![swap_v2]),
+            liquidity_events_v2: Some(vec![liq_v2]),
+        };
+
+        let bytes = Encode!(&legacy).expect("encode");
+        let back = Decode!(&bytes, LegacyThreePoolState).expect("decode");
+
+        assert_eq!(back.balances, [1, 2, 3]);
+        assert_eq!(back.lp_total_supply, 1_234_567_890);
+        assert_eq!(back.admin_fees, [4, 5, 6]);
+        assert_eq!(back.lp_tx_count, Some(42));
+        assert_eq!(back.last_block_hash, Some([7u8; 32]));
+        assert_eq!(back.lp_balances.get(&p).copied(), Some(1_234_567_890));
+        assert_eq!(back.swap_events.as_ref().unwrap().len(), 1);
+        assert_eq!(back.swap_events_v2.as_ref().unwrap().len(), 1);
+        assert_eq!(back.liquidity_events_v2.as_ref().unwrap().len(), 1);
+        assert_eq!(back.admin_events.as_ref().unwrap().len(), 1);
+        assert_eq!(back.vp_snapshots.as_ref().unwrap().len(), 1);
+        assert_eq!(back.blocks.as_ref().unwrap().len(), 1);
+        assert_eq!(back.authorized_burn_callers.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn legacy_state_decodes_from_minimal_blob() {
+        use crate::storage::migration::LegacyThreePoolState;
+        use candid::{Decode, Encode};
+
+        // Build a "minimal" legacy state where every Optional field is None
+        // and every collection is empty. This simulates an extremely old
+        // mainnet blob that predates every later field addition.
+        let legacy = LegacyThreePoolState {
+            config: SlimState::default().config,
+            balances: [0; 3],
+            lp_balances: std::collections::BTreeMap::new(),
+            lp_total_supply: 0,
+            lp_allowances: None,
+            lp_tx_count: None,
+            vp_snapshots: None,
+            blocks: None,
+            last_block_hash: None,
+            admin_fees: [0; 3],
+            is_paused: false,
+            is_initialized: false,
+            authorized_burn_callers: None,
+            swap_events: None,
+            liquidity_events: None,
+            admin_events: None,
+            swap_events_v2: None,
+            liquidity_events_v2: None,
+        };
+
+        let bytes = Encode!(&legacy).expect("encode");
+        let back = Decode!(&bytes, LegacyThreePoolState).expect("decode");
+        assert!(back.lp_balances.is_empty());
+        assert!(back.lp_allowances.is_none());
+        assert!(back.swap_events_v2.is_none());
+        assert!(back.blocks.is_none());
+        assert_eq!(back.lp_total_supply, 0);
+    }
 }

@@ -19,7 +19,7 @@ pub mod certification;
 mod logs;
 
 use crate::types::*;
-use crate::state::{mutate_state, read_state};
+use crate::state::{mutate_state, read_state, ThreePoolState};
 use crate::math::{get_a, virtual_price};
 use crate::swap::calc_swap_output;
 use crate::liquidity::{calc_add_liquidity, calc_remove_liquidity, calc_remove_one_coin};
@@ -40,39 +40,97 @@ fn init(args: ThreePoolInitArgs) {
 
 #[pre_upgrade]
 fn pre_upgrade() {
-    log!(INFO, "Rumi 3pool pre-upgrade: saving state to stable memory");
-    state::save_to_stable_memory();
+    log!(INFO, "Rumi 3pool pre-upgrade: flushing SlimState to stable cell");
+    let slim = state::snapshot_slim();
+    storage::set_slim(slim);
 }
 
 #[post_upgrade]
 fn post_upgrade() {
-    state::load_from_stable_memory();
+    // Step 1: BEFORE touching any storage::* thread-local, try to read a
+    // legacy raw-offset-0 Candid blob. The first storage::* access lazily
+    // initializes MemoryManager, which destructively writes MGR magic at
+    // offset 0, so this read MUST happen first.
+    let legacy = storage::migration::read_legacy_blob();
 
-    // NOTE: The one-time 18→8 decimals migration used to live here. It
-    // already ran on mainnet many upgrades ago — live `lp_total_supply`
-    // is well below the 1e15 trigger threshold — so the branch was dead
-    // code. Phase A removes it entirely.
-    mutate_state(|s| {
-        // Normal startup: recompute hash chain and set certified data.
-        let hash = certification::recompute_hash_chain(s.blocks());
-        s.last_block_hash = hash;
-        if let Some(ref h) = s.last_block_hash {
-            let last_idx = s.blocks().len().saturating_sub(1) as u64;
-            certification::set_certified_tip(last_idx, h);
+    // The drain is gated on the SlimState `storage_migrated` flag, which
+    // is only readable after touching storage::*. We capture the legacy
+    // blob first (in RAM), then ask the SlimState cell whether the drain
+    // already ran on a previous upgrade. If it has, the legacy bytes (if
+    // any) are stale and we discard them.
+    let already_drained = storage::get_slim().storage_migrated;
+
+    match legacy {
+        Some(legacy_state) if !already_drained => {
+            log!(INFO, "Rumi 3pool post-upgrade: draining legacy state");
+
+            // Hydrate heap state with bounded fields from the legacy blob.
+            let heap = ThreePoolState {
+                config: legacy_state.config.clone(),
+                balances: legacy_state.balances,
+                admin_fees: legacy_state.admin_fees,
+                lp_total_supply: legacy_state.lp_total_supply,
+                lp_tx_count: legacy_state.lp_tx_count,
+                last_block_hash: legacy_state.last_block_hash,
+                is_paused: legacy_state.is_paused,
+                is_initialized: legacy_state.is_initialized,
+                ..ThreePoolState::default()
+            };
+            state::replace_state(heap);
+
+            // Drain every collection into stable structures.
+            storage::migration::drain_legacy_state(legacy_state);
+
+            // Defensive cross-check: recompute the ICRC-3 hash chain from
+            // the drained blocks. Trap on mismatch — better to fail loudly
+            // than certify a wrong tip.
+            let blocks = storage::blocks::iter_all();
+            let recomputed = certification::recompute_hash_chain(&blocks);
+            let legacy_tip = read_state(|s| s.last_block_hash);
+            if recomputed != legacy_tip {
+                ic_cdk::trap(&format!(
+                    "post_upgrade drain: ICRC-3 hash chain mismatch. \
+                     legacy={:?} recomputed={:?}",
+                    legacy_tip, recomputed
+                ));
+            }
+
+            // Flush SlimState with storage_migrated=true. snapshot_slim
+            // reads the cell's current flag (false on first drain), so we
+            // override it explicitly afterward.
+            let mut slim = state::snapshot_slim();
+            slim.storage_migrated = true;
+            storage::set_slim(slim);
+
+            log!(INFO, "Rumi 3pool post-upgrade: drain complete. \
+                LP supply: {}, holders: {}, blocks: {}, swap_v2: {}",
+                read_state(|s| s.lp_total_supply),
+                storage::lp_balance_len(),
+                storage::blocks::len(),
+                storage::swap_v2::len());
         }
-    });
+        _ => {
+            // Normal path. SlimState is already in the stable cell; no
+            // legacy blob to drain (or it was stale).
+            let slim = storage::get_slim();
+            state::hydrate_from_slim(&slim);
+            log!(INFO, "Rumi 3pool post-upgrade: loaded from SlimState. \
+                LP supply: {}, holders: {}, blocks: {}",
+                slim.lp_total_supply,
+                storage::lp_balance_len(),
+                storage::blocks::len());
+        }
+    }
 
-    // v1 → v2 event backfill used to live here and operated against the
-    // heap `swap_events_v2` vec. In Phase A the v2 vecs moved to
-    // `storage::swap_v2` / `storage::liq_v2` stable logs, and the
-    // backfill moved into `storage::migration::drain_legacy_state` which
-    // runs as part of the one-shot post_upgrade drain below.
+    // Set certified ICRC-3 tip from the now-live blocks log.
+    if let Some(h) = read_state(|s| s.last_block_hash) {
+        let len = storage::blocks::len();
+        if len > 0 {
+            certification::set_certified_tip(len - 1, &h);
+        }
+    }
 
     setup_timers();
-    log!(INFO, "Rumi 3pool post-upgrade: state restored. LP supply: {}, initialized: {}, blocks: {}",
-        read_state(|s| s.lp_total_supply),
-        read_state(|s| s.is_initialized),
-        read_state(|s| s.blocks().len()));
 }
 
 // ─── Timers ───

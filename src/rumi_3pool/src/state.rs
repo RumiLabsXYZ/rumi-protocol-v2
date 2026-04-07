@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::cell::RefCell;
-use candid::{CandidType, Principal, Decode, Encode};
+use candid::{CandidType, Principal};
 use serde::{Serialize, Deserialize};
 
 use crate::types::*;
@@ -292,45 +292,48 @@ pub fn replace_state(state: ThreePoolState) {
     });
 }
 
-// ─── Stable memory persistence ───
+// ─── SlimState bridge ───
 
-/// Serialize state to stable memory (called from pre_upgrade).
-pub fn save_to_stable_memory() {
-    STATE.with(|s| {
-        let state = s.borrow();
-        let bytes = Encode!(&*state).expect("Failed to encode 3pool state");
-        let len = bytes.len() as u64;
-
-        // Only grow if current stable memory is insufficient.
-        // Pages are 64 KiB each and never shrink, so avoid redundant grows.
-        let needed_pages = (len + 8 + 65535) / 65536;
-        let current_pages = ic_cdk::api::stable::stable64_size();
-        if needed_pages > current_pages {
-            ic_cdk::api::stable::stable64_grow(needed_pages - current_pages)
-                .expect("Failed to grow stable memory");
-        }
-
-        // Write length prefix (8 bytes) then data
-        ic_cdk::api::stable::stable64_write(0, &len.to_le_bytes());
-        ic_cdk::api::stable::stable64_write(8, &bytes);
-    });
+/// Populate the heap `ThreePoolState` from a `storage::SlimState`.
+///
+/// Used by `post_upgrade` on both the drain path and the normal path.
+/// Collection fields on the heap state are left at their `Default`
+/// (empty `Option::Some(...)`); live code reads collections through
+/// `crate::storage::*`, not these stubs (A7 removes them).
+pub fn hydrate_from_slim(slim: &crate::storage::SlimState) {
+    let s = ThreePoolState {
+        config: slim.config.clone(),
+        balances: slim.balances,
+        admin_fees: slim.admin_fees,
+        lp_total_supply: slim.lp_total_supply,
+        lp_tx_count: Some(slim.lp_tx_count),
+        last_block_hash: slim.last_block_hash,
+        is_paused: slim.is_paused,
+        is_initialized: slim.is_initialized,
+        ..ThreePoolState::default()
+    };
+    replace_state(s);
 }
 
-/// Restore state from stable memory (called from post_upgrade).
-pub fn load_from_stable_memory() {
-    let mut len_bytes = [0u8; 8];
-    ic_cdk::api::stable::stable64_read(0, &mut len_bytes);
-    let len = u64::from_le_bytes(len_bytes) as usize;
-
-    if len == 0 {
-        return; // No saved state — fresh start
-    }
-
-    let mut bytes = vec![0u8; len];
-    ic_cdk::api::stable::stable64_read(8, &mut bytes);
-
-    let state: ThreePoolState = Decode!(&bytes, ThreePoolState)
-        .expect("Failed to decode 3pool state from stable memory");
-    replace_state(state);
+/// Build a `storage::SlimState` snapshot of the heap's bounded fields.
+/// Called from `pre_upgrade` to flush into the stable cell, and from the
+/// drain path in `post_upgrade`.
+///
+/// The `storage_migrated` flag is preserved from the current cell value
+/// (true once the one-shot drain has run). Callers on the drain path
+/// must explicitly overwrite it to `true` after calling this.
+pub fn snapshot_slim() -> crate::storage::SlimState {
+    let prior_migrated = crate::storage::get_slim().storage_migrated;
+    read_state(|s| crate::storage::SlimState {
+        config: s.config.clone(),
+        balances: s.balances,
+        admin_fees: s.admin_fees,
+        lp_total_supply: s.lp_total_supply,
+        lp_tx_count: s.lp_tx_count.unwrap_or(0),
+        last_block_hash: s.last_block_hash,
+        is_paused: s.is_paused,
+        is_initialized: s.is_initialized,
+        storage_migrated: prior_migrated,
+    })
 }
 
