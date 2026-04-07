@@ -276,7 +276,7 @@ pub async fn swap(i: u8, j: u8, dx: u128, min_dy: u128) -> Result<u128, ThreePoo
 
     // 4. Calculate swap output using the dynamic fee curve
     let outcome =
-        calc_swap_output(i_idx, j_idx, dx, &balances, &precision_muls, amp, &fee_curve)?;
+        calc_swap_output(i_idx, j_idx, dx, &balances, &precision_muls, amp, &fee_curve, admin_fee_bps)?;
     let output = outcome.output_native;
     let fee = outcome.fee_native;
 
@@ -582,7 +582,9 @@ pub async fn remove_one_coin(
     // 2. Compute A, precision_muls
     let amp = get_current_a();
     let precision_muls = get_precision_muls();
-    let fee_curve = read_state(|s| s.config.fee_curve.unwrap_or_default());
+    let (fee_curve, admin_fee_bps) = read_state(|s| {
+        (s.config.fee_curve.unwrap_or_default(), s.config.admin_fee_bps)
+    });
 
     // 3. Calculate withdrawal (dynamic fee curve)
     let roc_outcome = calc_remove_one_coin(
@@ -593,6 +595,7 @@ pub async fn remove_one_coin(
         lp_total_supply,
         amp,
         &fee_curve,
+        admin_fee_bps,
     )?;
     let amount = roc_outcome.amount_native;
     let fee = roc_outcome.fee_native;
@@ -603,7 +606,6 @@ pub async fn remove_one_coin(
     }
 
     // 5. Deduct LP and balance first
-    let admin_fee_bps = read_state(|s| s.config.admin_fee_bps);
     let admin_fee_share = fee * (admin_fee_bps as u128) / 10_000;
 
     // The pool sends `amount` to the user and reserves `admin_fee_share` for
@@ -855,12 +857,12 @@ pub fn get_all_lp_holders() -> Vec<(Principal, u128)> {
 pub fn calc_swap(i: u8, j: u8, dx: u128) -> Result<u128, ThreePoolError> {
     let amp = get_current_a();
     let precision_muls = get_precision_muls();
-    let (balances, fee_curve) = read_state(|s| {
-        (s.balances, s.config.fee_curve.unwrap_or_default())
+    let (balances, fee_curve, admin_fee_bps) = read_state(|s| {
+        (s.balances, s.config.fee_curve.unwrap_or_default(), s.config.admin_fee_bps)
     });
 
     let outcome =
-        calc_swap_output(i as usize, j as usize, dx, &balances, &precision_muls, amp, &fee_curve)?;
+        calc_swap_output(i as usize, j as usize, dx, &balances, &precision_muls, amp, &fee_curve, admin_fee_bps)?;
 
     Ok(outcome.output_native)
 }
@@ -907,14 +909,14 @@ pub fn calc_remove_one_coin_query(lp_burn: u128, coin_index: u8) -> Result<u128,
     }
     let amp = get_current_a();
     let precision_muls = get_precision_muls();
-    let (balances, lp_total_supply, fee_curve) = read_state(|s| {
-        (s.balances, s.lp_total_supply, s.config.fee_curve.unwrap_or_default())
+    let (balances, lp_total_supply, fee_curve, admin_fee_bps) = read_state(|s| {
+        (s.balances, s.lp_total_supply, s.config.fee_curve.unwrap_or_default(), s.config.admin_fee_bps)
     });
     if lp_total_supply == 0 {
         return Err(ThreePoolError::PoolEmpty);
     }
     let outcome = calc_remove_one_coin(
-        lp_burn, idx, &balances, &precision_muls, lp_total_supply, amp, &fee_curve,
+        lp_burn, idx, &balances, &precision_muls, lp_total_supply, amp, &fee_curve, admin_fee_bps,
     )?;
     Ok(outcome.amount_native)
 }
@@ -949,7 +951,7 @@ pub fn pure_quote_swap(
 ) -> Result<QuoteSwapResult, ThreePoolError> {
     let i_idx = i as usize;
     let j_idx = j as usize;
-    let outcome = calc_swap_output(i_idx, j_idx, dx, balances, precision_muls, amp, fee_curve)?;
+    let outcome = calc_swap_output(i_idx, j_idx, dx, balances, precision_muls, amp, fee_curve, admin_fee_bps)?;
     let vp_before = virtual_price(balances, precision_muls, amp, lp_total_supply).unwrap_or(0);
     // Mirror on-chain accounting: only `output + admin_fee_share` leaves the
     // pool. The LP-fee portion stays in `s.balances[j]` and accrues to VP.
@@ -982,6 +984,7 @@ pub fn pure_quote_optimal_rebalance(
     precision_muls: &[u64; 3],
     amp: u64,
     fee_curve: &FeeCurveParams,
+    admin_fee_bps: u64,
 ) -> Result<OptimalRebalanceQuote, ThreePoolError> {
     let i_idx = i as usize;
     let j_idx = j as usize;
@@ -1005,14 +1008,14 @@ pub fn pure_quote_optimal_rebalance(
     }
     let probe = (precision_muls[i_idx] as u128).max(1).min(upper_bound);
     let probe_outcome =
-        calc_swap_output(i_idx, j_idx, probe, balances, precision_muls, amp, fee_curve);
+        calc_swap_output(i_idx, j_idx, probe, balances, precision_muls, amp, fee_curve, admin_fee_bps);
     if !matches!(&probe_outcome, Ok(o) if o.is_rebalancing) {
         return Ok(empty);
     }
 
     let try_dx = |dx: u128| -> Option<crate::swap::SwapOutcome> {
         if dx == 0 { return None; }
-        calc_swap_output(i_idx, j_idx, dx, balances, precision_muls, amp, fee_curve).ok()
+        calc_swap_output(i_idx, j_idx, dx, balances, precision_muls, amp, fee_curve, admin_fee_bps).ok()
     };
     let drop_for = |dx: u128| -> i128 {
         match try_dx(dx) {
@@ -1141,10 +1144,10 @@ pub fn get_fee_curve_params() -> FeeCurveParams {
 pub fn quote_optimal_rebalance(i: u8, j: u8) -> Result<OptimalRebalanceQuote, ThreePoolError> {
     let amp = get_current_a();
     let precision_muls = get_precision_muls();
-    let (balances, fee_curve) = read_state(|s| {
-        (s.balances, s.config.fee_curve.unwrap_or_default())
+    let (balances, fee_curve, admin_fee_bps) = read_state(|s| {
+        (s.balances, s.config.fee_curve.unwrap_or_default(), s.config.admin_fee_bps)
     });
-    pure_quote_optimal_rebalance(i, j, &balances, &precision_muls, amp, &fee_curve)
+    pure_quote_optimal_rebalance(i, j, &balances, &precision_muls, amp, &fee_curve, admin_fee_bps)
 }
 
 /// Sequentially apply a list of swap quotes against a local mutable copy of
@@ -2030,7 +2033,7 @@ mod bot_endpoint_tests {
         let fc = FeeCurveParams::default();
         let dx = 1_000 * 100_000_000u128;
         let q = pure_quote_swap(0, 1, dx, &bal, &pms, 500, &fc, 1_000_000_000_000, 5000).unwrap();
-        let raw = calc_swap_output(0, 1, dx, &bal, &pms, 500, &fc).unwrap();
+        let raw = calc_swap_output(0, 1, dx, &bal, &pms, 500, &fc, 5000).unwrap();
         assert_eq!(q.amount_out, raw.output_native);
         assert_eq!(q.fee_native, raw.fee_native);
         assert_eq!(q.fee_bps, raw.fee_bps_used);
@@ -2048,7 +2051,7 @@ mod bot_endpoint_tests {
         let bal = balanced_pool();
         let pms = precision_muls();
         let fc = FeeCurveParams::default();
-        let q = pure_quote_optimal_rebalance(0, 1, &bal, &pms, 500, &fc).unwrap();
+        let q = pure_quote_optimal_rebalance(0, 1, &bal, &pms, 500, &fc, 5000).unwrap();
         assert_eq!(q.dx, 0);
         assert_eq!(q.profit_bps_estimate, 0);
     }
@@ -2059,7 +2062,7 @@ mod bot_endpoint_tests {
         let bal = imbalanced_pool();
         let pms = precision_muls();
         let fc = FeeCurveParams::default();
-        let q = pure_quote_optimal_rebalance(1, 0, &bal, &pms, 500, &fc).unwrap();
+        let q = pure_quote_optimal_rebalance(1, 0, &bal, &pms, 500, &fc, 5000).unwrap();
         assert!(q.dx > 0, "expected nonzero dx for rebalancing direction");
         assert!(q.amount_out > 0);
         assert!(q.profit_bps_estimate > 0);
@@ -2073,7 +2076,7 @@ mod bot_endpoint_tests {
         let bal = imbalanced_pool();
         let pms = precision_muls();
         let fc = FeeCurveParams::default();
-        let q = pure_quote_optimal_rebalance(0, 1, &bal, &pms, 500, &fc).unwrap();
+        let q = pure_quote_optimal_rebalance(0, 1, &bal, &pms, 500, &fc, 5000).unwrap();
         assert_eq!(q.dx, 0);
     }
 

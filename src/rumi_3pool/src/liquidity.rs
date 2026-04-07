@@ -164,6 +164,7 @@ pub fn calc_remove_one_coin(
     lp_total_supply: u128,
     amp: u64,
     fee_curve: &FeeCurveParams,
+    admin_fee_bps: u64,
 ) -> Result<RemoveOneCoinOutcome, ThreePoolError> {
     if coin_index >= 3 {
         return Err(ThreePoolError::InvalidCoinIndex);
@@ -187,17 +188,33 @@ pub fn calc_remove_one_coin(
     // new_y without fees: what token j balance would be at D1
     let new_y = get_y_d(coin_index, &xp, amp, d1).ok_or(ThreePoolError::InvariantNotConverged)?;
 
-    // Dynamic fee rate: measure imbalance before and after the (pre-fee) withdrawal.
-    // For `after`, we use the balance state where the withdrawn token is reduced
-    // by the no-fee dy and the other tokens are unchanged (same as post-withdraw).
+    // Dynamic fee rate: measure imbalance before and after the withdrawal.
+    // Two-pass refinement: the LP-fee portion stays in the pool, so the actual
+    // post-trade balance is `balance - dy_no_fee + lp_fee`. Pass 1 uses the
+    // gross dy_no_fee to seed fee_bps; pass 2 refines using the LP-fee retention.
     let imbalance_before = compute_imbalance(balances, precision_muls);
 
     let dy_no_fee_native = denormalize_balance(
         xp[coin_index] - new_y,
         precision_muls[coin_index],
     );
+    let mut balances_after_gross = *balances;
+    balances_after_gross[coin_index] =
+        balances_after_gross[coin_index].saturating_sub(dy_no_fee_native);
+    let imbalance_after_gross = compute_imbalance(&balances_after_gross, precision_muls);
+    let fee_bps_first = compute_fee_bps(imbalance_before, imbalance_after_gross, fee_curve);
+
+    // LP-fee portion (in native units of `coin_index`) that stays in the pool.
+    // dy_no_fee * fee_bps_first / 10_000 * (10_000 - admin_fee_bps) / 10_000.
+    let lp_fee_first_native = dy_no_fee_native
+        * (fee_bps_first as u128)
+        * (10_000u128 - admin_fee_bps as u128)
+        / 10_000
+        / 10_000;
+    let dy_minus_lp_fee_native = dy_no_fee_native.saturating_sub(lp_fee_first_native);
     let mut balances_after = *balances;
-    balances_after[coin_index] = balances_after[coin_index].saturating_sub(dy_no_fee_native);
+    balances_after[coin_index] =
+        balances_after[coin_index].saturating_sub(dy_minus_lp_fee_native);
     let imbalance_after = compute_imbalance(&balances_after, precision_muls);
     let fee_bps_used = compute_fee_bps(imbalance_before, imbalance_after, fee_curve);
     let is_rebalancing = imbalance_after < imbalance_before;
@@ -438,7 +455,7 @@ mod tests {
         let lp_burn = lp_supply / 10;
 
         let out = calc_remove_one_coin(
-            lp_burn, 1, &balances, &precision_muls, lp_supply, amp, &curve,
+            lp_burn, 1, &balances, &precision_muls, lp_supply, amp, &curve, 5000,
         ).expect("remove_one_coin should succeed");
         let amount = out.amount_native;
         let fee = out.fee_native;
@@ -576,7 +593,7 @@ mod tests {
 
         let lp_burn = lp_supply / 20; // 5%
         let out = calc_remove_one_coin(
-            lp_burn, 1, &balances, &precision_muls, lp_supply, amp, &curve,
+            lp_burn, 1, &balances, &precision_muls, lp_supply, amp, &curve, 5000,
         ).unwrap();
 
         assert!(!out.is_rebalancing);
@@ -599,7 +616,7 @@ mod tests {
 
         let lp_burn = lp_supply / 50; // 2%
         let out = calc_remove_one_coin(
-            lp_burn, 0, &balances, &precision_muls, lp_supply, amp, &curve,
+            lp_burn, 0, &balances, &precision_muls, lp_supply, amp, &curve, 5000,
         ).unwrap();
 
         assert!(
