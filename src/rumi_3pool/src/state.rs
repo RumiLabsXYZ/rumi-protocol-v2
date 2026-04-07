@@ -490,6 +490,53 @@ mod migration_tests {
     }
 
     #[test]
+    fn migrate_events_survives_candid_roundtrip_simulating_upgrade() {
+        // Build a state populated with v1 events but no v2 events (the
+        // pre-upgrade shape).
+        let mut s = ThreePoolState::default();
+        for id in 0..5 {
+            s.swap_events_mut().push(v1_swap(id));
+        }
+        for id in 0..2 {
+            s.liquidity_events_mut().push(v1_liq(id));
+        }
+
+        // Simulate upgrade: encode + decode through Candid.
+        let bytes = candid::Encode!(&s).expect("encode failed");
+        let mut decoded: ThreePoolState =
+            candid::Decode!(&bytes, ThreePoolState).expect("decode failed");
+
+        // The decoded state still has only v1 events.
+        assert_eq!(decoded.swap_events().len(), 5);
+        assert_eq!(decoded.liquidity_events().len(), 2);
+        assert_eq!(decoded.swap_events_v2().len(), 0);
+        assert_eq!(decoded.liquidity_events_v2().len(), 0);
+
+        // Run the migration the way post_upgrade does.
+        let (sw, lq) = decoded.migrate_events_to_v2();
+        assert_eq!(sw, 5);
+        assert_eq!(lq, 2);
+        assert_eq!(decoded.swap_events_v2().len(), 5);
+        assert_eq!(decoded.liquidity_events_v2().len(), 2);
+
+        // Sentinel fields are zeroed for migrated entries.
+        for ev in decoded.swap_events_v2() {
+            assert_eq!(ev.fee_bps, 0);
+            assert_eq!(ev.imbalance_before, 0);
+            assert_eq!(ev.imbalance_after, 0);
+            assert!(!ev.is_rebalancing);
+            assert_eq!(ev.pool_balances_after, [0; 3]);
+            assert_eq!(ev.virtual_price_after, 0);
+        }
+
+        // Idempotency: a second migration is a no-op.
+        let again = decoded.migrate_events_to_v2();
+        assert_eq!(again, (0, 0));
+        assert_eq!(decoded.swap_events_v2().len(), 5);
+        assert_eq!(decoded.liquidity_events_v2().len(), 2);
+    }
+
+    #[test]
     fn migrate_events_only_backfills_tail() {
         let mut s = ThreePoolState::default();
         // v1 has 3 entries, v2 already has the first one (not a sentinel — but
