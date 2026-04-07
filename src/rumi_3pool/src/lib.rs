@@ -101,14 +101,11 @@ fn post_upgrade() {
         }
     });
 
-    // Idempotent backfill of v2 event vecs from legacy v1 events.
-    // Uses sentinel values for the new dynamic-fee fields (pre-migration unknown).
-    mutate_state(|s| {
-        let (sw, lq) = s.migrate_events_to_v2();
-        if sw > 0 || lq > 0 {
-            log!(INFO, "3pool v2 event backfill: {} swap, {} liquidity entries added", sw, lq);
-        }
-    });
+    // v1 → v2 event backfill used to live here and operated against the
+    // heap `swap_events_v2` vec. In Phase A the v2 vecs moved to
+    // `storage::swap_v2` / `storage::liq_v2` stable logs, and the
+    // backfill moved into `storage::migration::drain_legacy_state` which
+    // runs as part of the one-shot post_upgrade drain below.
 
     setup_timers();
     log!(INFO, "Rumi 3pool post-upgrade: state restored. LP supply: {}, initialized: {}, blocks: {}",
@@ -324,10 +321,11 @@ pub async fn swap(i: u8, j: u8, dx: u128, min_dy: u128) -> Result<u128, ThreePoo
         let vp_after = virtual_price(&s.balances, &precision_muls, amp, lp_supply).unwrap_or(0);
         let balances_after = s.balances;
 
-        // Record swap event v2 (dynamic-fee schema). v1 writes are stopped —
-        // v1 entries remain as frozen historical state for the migration.
-        let id = s.swap_events_v2().len() as u64;
-        s.swap_events_v2_mut().push(SwapEventV2 {
+        // Record swap event v2 (dynamic-fee schema). Appends to the stable
+        // swap_v2 log. `migrated: false` distinguishes live writes from the
+        // one-shot backfill populated during the Phase A drain.
+        let id = storage::swap_v2::len();
+        storage::swap_v2::push(SwapEventV2 {
             id,
             timestamp: ic_cdk::api::time(),
             caller,
@@ -427,8 +425,8 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
         let lp_supply = s.lp_total_supply;
         let vp_after = virtual_price(&s.balances, &precision_muls, amp, lp_supply).unwrap_or(0);
         let balances_after = s.balances;
-        let id = s.liquidity_events_v2().len() as u64;
-        s.liquidity_events_v2_mut().push(LiquidityEventV2 {
+        let id = storage::liq_v2::len();
+        storage::liq_v2::push(LiquidityEventV2 {
             id,
             timestamp: ic_cdk::api::time(),
             caller,
@@ -533,8 +531,8 @@ pub async fn remove_liquidity(
         let vp_after = virtual_price(&s.balances, &precision_muls, amp, lp_supply).unwrap_or(0);
         let balances_after = s.balances;
         let imbalance_after = crate::math::compute_imbalance(&balances_after, &precision_muls);
-        let id = s.liquidity_events_v2().len() as u64;
-        s.liquidity_events_v2_mut().push(LiquidityEventV2 {
+        let id = storage::liq_v2::len();
+        storage::liq_v2::push(LiquidityEventV2 {
             id,
             timestamp: ic_cdk::api::time(),
             caller,
@@ -645,8 +643,8 @@ pub async fn remove_one_coin(
         let balances_after = s.balances;
         let mut amounts = [0u128; 3];
         amounts[idx] = amount;
-        let id = s.liquidity_events_v2().len() as u64;
-        s.liquidity_events_v2_mut().push(LiquidityEventV2 {
+        let id = storage::liq_v2::len();
+        storage::liq_v2::push(LiquidityEventV2 {
             id,
             timestamp: ic_cdk::api::time(),
             caller,
@@ -726,8 +724,8 @@ pub async fn donate(token_index: u8, amount: u128) -> Result<(), ThreePoolError>
         let imbalance_after = crate::math::compute_imbalance(&balances_after, &precision_muls);
         let mut amounts = [0u128; 3];
         amounts[idx] = amount;
-        let id = s.liquidity_events_v2().len() as u64;
-        s.liquidity_events_v2_mut().push(LiquidityEventV2 {
+        let id = storage::liq_v2::len();
+        storage::liq_v2::push(LiquidityEventV2 {
             id,
             timestamp: ic_cdk::api::time(),
             caller,
