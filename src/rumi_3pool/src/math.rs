@@ -261,6 +261,34 @@ pub fn compute_imbalance(balances: &[u128; 3], precision_muls: &[u64; 3]) -> u64
     normalized.as_u64()
 }
 
+/// Compute the fee in basis points for a swap that moves the pool from
+/// `imb_before` to `imb_after`.
+///
+/// Strict binary on rebalancing: any trade that does not increase imbalance
+/// (`imb_after <= imb_before`) pays exactly `params.min_fee_bps`.
+///
+/// Linear scaling on imbalancing: if `imb_after > imb_before`, fee scales
+/// linearly from `min_fee_bps` at `imb_after = 0` to `max_fee_bps` at
+/// `imb_after >= params.imb_saturation`.
+pub fn compute_fee_bps(
+    imb_before: u64,
+    imb_after: u64,
+    params: &crate::types::FeeCurveParams,
+) -> u16 {
+    if imb_after <= imb_before {
+        return params.min_fee_bps;
+    }
+    if params.imb_saturation == 0 {
+        // Defensive: invalid config -> charge max
+        return params.max_fee_bps;
+    }
+    let capped = imb_after.min(params.imb_saturation);
+    let span = (params.max_fee_bps - params.min_fee_bps) as u128;
+    let fee = params.min_fee_bps as u128
+        + (span * capped as u128) / params.imb_saturation as u128;
+    fee.min(params.max_fee_bps as u128) as u16
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,6 +675,63 @@ mod tests {
             let imb = compute_imbalance(&balances, &precision_muls);
             assert!(imb > last_imb, "imbalance should grow: {} -> {}", last_imb, imb);
             last_imb = imb;
+        }
+    }
+
+    // ─── compute_fee_bps tests ───
+
+    fn default_params() -> crate::types::FeeCurveParams {
+        crate::types::FeeCurveParams::default()
+    }
+
+    #[test]
+    fn test_fee_bps_rebalancing_returns_min() {
+        let p = default_params();
+        let fee = compute_fee_bps(100_000_000, 50_000_000, &p);
+        assert_eq!(fee, 1);
+    }
+
+    #[test]
+    fn test_fee_bps_rebalancing_when_imbalanced() {
+        let p = default_params();
+        let fee = compute_fee_bps(500_000_000, 400_000_000, &p);
+        assert_eq!(fee, 1);
+    }
+
+    #[test]
+    fn test_fee_bps_imbalancing_below_saturation() {
+        let p = default_params();
+        let fee = compute_fee_bps(50_000_000, 60_000_000, &p);
+        assert!(fee >= 24 && fee <= 25, "expected ~24-25, got {}", fee);
+    }
+
+    #[test]
+    fn test_fee_bps_imbalancing_at_saturation() {
+        let p = default_params();
+        let fee = compute_fee_bps(100_000_000, 250_000_000, &p);
+        assert_eq!(fee, 99);
+    }
+
+    #[test]
+    fn test_fee_bps_imbalancing_above_saturation() {
+        let p = default_params();
+        let fee = compute_fee_bps(100_000_000, 500_000_000, &p);
+        assert_eq!(fee, 99);
+    }
+
+    #[test]
+    fn test_fee_bps_perfectly_balanced_neutral() {
+        let p = default_params();
+        let fee = compute_fee_bps(50_000_000, 50_000_000, &p);
+        assert_eq!(fee, 1);
+    }
+
+    #[test]
+    fn test_fee_bps_bounded() {
+        let p = default_params();
+        for imb_after in (0..=1_000_000_000u64).step_by(50_000_000) {
+            let fee = compute_fee_bps(0, imb_after, &p);
+            assert!(fee >= p.min_fee_bps && fee <= p.max_fee_bps);
         }
     }
 
