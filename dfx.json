@@ -127,6 +127,14 @@
         }
       ]
     },
+    "rumi_analytics": {
+      "candid": "src/rumi_analytics/rumi_analytics.did",
+      "package": "rumi_analytics",
+      "type": "rust",
+      "metadata": [
+        { "name": "candid:service" }
+      ]
+    },
     "liquidation_bot": {
       "candid": "src/liquidation_bot/liquidation_bot.did",
       "package": "liquidation_bot",
