@@ -961,6 +961,12 @@ pub fn set_admin_fee(fee_bps: u64) -> Result<(), ThreePoolError> {
     admin::set_admin_fee(caller, fee_bps)
 }
 
+#[update]
+pub fn set_fee_curve_params(params: crate::types::FeeCurveParams) -> Result<(), ThreePoolError> {
+    let caller = ic_cdk::api::caller();
+    admin::set_fee_curve_params(caller, params)
+}
+
 // ─── Authorized Burn Caller Admin ───
 
 #[update]

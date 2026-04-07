@@ -77,6 +77,12 @@ type LiquidityEvent = record {
   fee : opt nat;
 };
 
+type FeeCurveParams = record {
+  min_fee_bps : nat16;
+  max_fee_bps : nat16;
+  imb_saturation : nat64;
+};
+
 type ThreePoolAdminAction = variant {
   RampA : record { future_a : nat64; future_a_time : nat64 };
   StopRampA : record { frozen_a : nat64 };
@@ -86,6 +92,7 @@ type ThreePoolAdminAction = variant {
   SetAdminFee : record { fee_bps : nat64 };
   AddAuthorizedBurnCaller : record { canister : principal };
   RemoveAuthorizedBurnCaller : record { canister : principal };
+  FeeCurveParamsUpdated : record { old : opt FeeCurveParams; new : FeeCurveParams };
 };
 
 type ThreePoolAdminEvent = record {
@@ -316,6 +323,7 @@ service : (ThreePoolInitArgs) -> {
   donate : (nat8, nat) -> (variant { Ok; Err : ThreePoolError });
   get_pool_status : () -> (PoolStatus) query;
   get_lp_balance : (principal) -> (nat) query;
+  get_all_lp_holders : () -> (vec record { principal; nat }) query;
   calc_swap : (nat8, nat8, nat) -> (variant { Ok : nat; Err : ThreePoolError }) query;
   calc_add_liquidity_query : (vec nat, nat) -> (variant { Ok : nat; Err : ThreePoolError }) query;
   calc_remove_liquidity_query : (nat) -> (variant { Ok : vec nat; Err : ThreePoolError }) query;
@@ -328,6 +336,7 @@ service : (ThreePoolInitArgs) -> {
   set_paused : (bool) -> (variant { Ok; Err : ThreePoolError });
   set_swap_fee : (nat64) -> (variant { Ok; Err : ThreePoolError });
   set_admin_fee : (nat64) -> (variant { Ok; Err : ThreePoolError });
+  set_fee_curve_params : (FeeCurveParams) -> (variant { Ok; Err : ThreePoolError });
   add_authorized_burn_caller : (principal) -> (variant { Ok; Err : ThreePoolError });
   remove_authorized_burn_caller : (principal) -> (variant { Ok; Err : ThreePoolError });
   get_authorized_burn_callers : () -> (vec principal) query;

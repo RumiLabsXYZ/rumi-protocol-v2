@@ -265,6 +265,7 @@ pub enum ThreePoolAdminAction {
     SetAdminFee { fee_bps: u64 },
     AddAuthorizedBurnCaller { canister: Principal },
     RemoveAuthorizedBurnCaller { canister: Principal },
+    FeeCurveParamsUpdated { old: Option<FeeCurveParams>, new: FeeCurveParams },
 }
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
