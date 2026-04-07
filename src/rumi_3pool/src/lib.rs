@@ -274,9 +274,23 @@ pub async fn swap(i: u8, j: u8, dx: u128, min_dy: u128) -> Result<u128, ThreePoo
             )
         });
 
-    // 4. Calculate swap output
-    let (output, fee) =
-        calc_swap_output(i_idx, j_idx, dx, &balances, &precision_muls, amp, swap_fee_bps)?;
+    // 4. Calculate swap output. Task 7: signature now takes `&FeeCurveParams`
+    // and returns a `SwapOutcome`. Wiring fee_curve through PoolConfig + v2
+    // event emission lands in Task 8; here we preserve existing behavior with
+    // a default curve and ignore the new fields.
+    let _ = swap_fee_bps;
+    let _default_curve = crate::types::FeeCurveParams::default();
+    let outcome = calc_swap_output(
+        i_idx,
+        j_idx,
+        dx,
+        &balances,
+        &precision_muls,
+        amp,
+        &_default_curve,
+    )?;
+    let output = outcome.output_native;
+    let fee = outcome.fee_native;
 
     // 5. Slippage check
     if output < min_dy {
@@ -778,12 +792,13 @@ pub fn get_all_lp_holders() -> Vec<(Principal, u128)> {
 pub fn calc_swap(i: u8, j: u8, dx: u128) -> Result<u128, ThreePoolError> {
     let amp = get_current_a();
     let precision_muls = get_precision_muls();
-    let (balances, swap_fee_bps) = read_state(|s| (s.balances, s.config.swap_fee_bps));
+    let (balances, _swap_fee_bps) = read_state(|s| (s.balances, s.config.swap_fee_bps));
+    let curve = crate::types::FeeCurveParams::default();
 
-    let (output, _fee) =
-        calc_swap_output(i as usize, j as usize, dx, &balances, &precision_muls, amp, swap_fee_bps)?;
+    let outcome =
+        calc_swap_output(i as usize, j as usize, dx, &balances, &precision_muls, amp, &curve)?;
 
-    Ok(output)
+    Ok(outcome.output_native)
 }
 
 #[query]
