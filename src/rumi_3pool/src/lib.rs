@@ -364,19 +364,20 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
     let precision_muls = get_precision_muls();
 
     // 4. Read current state
-    let (old_balances, lp_total_supply, swap_fee_bps) = read_state(|s| {
-        (s.balances, s.lp_total_supply, s.config.swap_fee_bps)
+    let (old_balances, lp_total_supply, fee_curve) = read_state(|s| {
+        (s.balances, s.lp_total_supply, s.config.fee_curve.unwrap_or_default())
     });
 
-    // 5. Calculate LP tokens to mint
-    let (lp_minted, _fees) = calc_add_liquidity(
+    // 5. Calculate LP tokens to mint (dynamic fee curve)
+    let liq_outcome = calc_add_liquidity(
         &amounts_arr,
         &old_balances,
         &precision_muls,
         lp_total_supply,
         amp,
-        swap_fee_bps,
+        &fee_curve,
     )?;
+    let lp_minted = liq_outcome.lp_minted;
 
     // 6. Slippage check
     if lp_minted < min_lp {
@@ -550,18 +551,20 @@ pub async fn remove_one_coin(
     // 2. Compute A, precision_muls
     let amp = get_current_a();
     let precision_muls = get_precision_muls();
-    let fee_bps = read_state(|s| s.config.swap_fee_bps);
+    let fee_curve = read_state(|s| s.config.fee_curve.unwrap_or_default());
 
-    // 3. Calculate withdrawal
-    let (amount, fee) = calc_remove_one_coin(
+    // 3. Calculate withdrawal (dynamic fee curve)
+    let roc_outcome = calc_remove_one_coin(
         lp_burn,
         idx,
         &balances,
         &precision_muls,
         lp_total_supply,
         amp,
-        fee_bps,
+        &fee_curve,
     )?;
+    let amount = roc_outcome.amount_native;
+    let fee = roc_outcome.fee_native;
 
     // 4. Slippage check
     if amount < min_amount {
@@ -811,14 +814,14 @@ pub fn calc_add_liquidity_query(amounts: Vec<u128>, min_lp: u128) -> Result<u128
     let amounts_arr: [u128; 3] = [amounts[0], amounts[1], amounts[2]];
     let amp = get_current_a();
     let precision_muls = get_precision_muls();
-    let (old_balances, lp_total_supply, swap_fee_bps) = read_state(|s| {
-        (s.balances, s.lp_total_supply, s.config.swap_fee_bps)
+    let (old_balances, lp_total_supply, fee_curve) = read_state(|s| {
+        (s.balances, s.lp_total_supply, s.config.fee_curve.unwrap_or_default())
     });
-    let (lp_minted, _fees) = calc_add_liquidity(
-        &amounts_arr, &old_balances, &precision_muls, lp_total_supply, amp, swap_fee_bps,
+    let outcome = calc_add_liquidity(
+        &amounts_arr, &old_balances, &precision_muls, lp_total_supply, amp, &fee_curve,
     )?;
     let _ = min_lp; // reserved for future use
-    Ok(lp_minted)
+    Ok(outcome.lp_minted)
 }
 
 #[query]
@@ -845,16 +848,16 @@ pub fn calc_remove_one_coin_query(lp_burn: u128, coin_index: u8) -> Result<u128,
     }
     let amp = get_current_a();
     let precision_muls = get_precision_muls();
-    let (balances, lp_total_supply, fee_bps) = read_state(|s| {
-        (s.balances, s.lp_total_supply, s.config.swap_fee_bps)
+    let (balances, lp_total_supply, fee_curve) = read_state(|s| {
+        (s.balances, s.lp_total_supply, s.config.fee_curve.unwrap_or_default())
     });
     if lp_total_supply == 0 {
         return Err(ThreePoolError::PoolEmpty);
     }
-    let (amount, _fee) = calc_remove_one_coin(
-        lp_burn, idx, &balances, &precision_muls, lp_total_supply, amp, fee_bps,
+    let outcome = calc_remove_one_coin(
+        lp_burn, idx, &balances, &precision_muls, lp_total_supply, amp, &fee_curve,
     )?;
-    Ok(amount)
+    Ok(outcome.amount_native)
 }
 
 #[query]
