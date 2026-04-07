@@ -100,6 +100,15 @@ fn post_upgrade() {
         }
     });
 
+    // Idempotent backfill of v2 event vecs from legacy v1 events.
+    // Uses sentinel values for the new dynamic-fee fields (pre-migration unknown).
+    mutate_state(|s| {
+        let (sw, lq) = s.migrate_events_to_v2();
+        if sw > 0 || lq > 0 {
+            log!(INFO, "3pool v2 event backfill: {} swap, {} liquidity entries added", sw, lq);
+        }
+    });
+
     setup_timers();
     log!(INFO, "Rumi 3pool post-upgrade: state restored. LP supply: {}, initialized: {}, blocks: {}",
         read_state(|s| s.lp_total_supply),
@@ -749,6 +758,20 @@ pub fn get_pool_status() -> PoolStatus {
 #[query]
 pub fn get_lp_balance(user: Principal) -> u128 {
     read_state(|s| s.lp_balances.get(&user).copied().unwrap_or(0))
+}
+
+/// Returns all LP holders and their balances, sorted by balance descending.
+#[query]
+pub fn get_all_lp_holders() -> Vec<(Principal, u128)> {
+    read_state(|s| {
+        let mut holders: Vec<(Principal, u128)> = s.lp_balances
+            .iter()
+            .filter(|(_, &balance)| balance > 0)
+            .map(|(&p, &b)| (p, b))
+            .collect();
+        holders.sort_by(|a, b| b.1.cmp(&a.1));
+        holders
+    })
 }
 
 #[query]
