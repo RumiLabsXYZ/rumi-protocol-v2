@@ -1,0 +1,40 @@
+{
+  "_comment": "Ground-truth snapshot of rumi_3pool mainnet state captured 2026-04-07 before Phase A stable memory migration. Used by the upgrade round-trip pocket-ic test to assert that every LP balance, event, and block survives the migration to stable structures. DO NOT EDIT.",
+  "captured_at_utc": "2026-04-07",
+  "canister_id": "fohh4-yyaaa-aaaap-qtkpa-cai",
+  "pool_status": {
+    "lp_total_supply": "260185697420",
+    "balances": ["137225054196", "699518465", "688523829"],
+    "virtual_price": "1060767404685091468",
+    "current_a": 500,
+    "swap_fee_bps": 20,
+    "admin_fee_bps": 0,
+    "tokens": [
+      { "symbol": "icUSD", "ledger_id": "t6bor-paaaa-aaaap-qrd5q-cai", "decimals": 8, "precision_mul": 10000000000 },
+      { "symbol": "ckUSDT", "ledger_id": "cngnf-vqaaa-aaaar-qag4q-cai", "decimals": 6, "precision_mul": 1000000000000 },
+      { "symbol": "ckUSDC", "ledger_id": "xevnm-gaaaa-aaaar-qafnq-cai", "decimals": 6, "precision_mul": 1000000000000 }
+    ]
+  },
+  "admin_fees": ["40219", "0", "0"],
+  "lp_holders": [
+    { "principal": "ijlzs-2yaaa-aaaap-quaaq-cai", "balance": "140840608177", "label": "rumi_amm" },
+    { "principal": "tmhzi-dqaaa-aaaap-qrd6q-cai", "balance": "100000065375", "label": "stability_pool" },
+    { "principal": "ucjxv-nqaaa-aaaaj-qrsaq-cai", "balance": "18560300485", "label": null },
+    { "principal": "tfesu-vyaaa-aaaap-qrd7a-cai", "balance": "280756268", "label": "rumi_protocol_backend" },
+    { "principal": "zegjz-jpi6k-qkand-c2bgf-qw6za-xk4si-nz3gx-qzzia-fk6fg-snepb-tae", "balance": "203570733", "label": null },
+    { "principal": "4alqm-afk6k-bybok-qvdyo-cnv7y-klel6-xm2pz-7h7jk-utmys-kttf3-vqe", "balance": "200196382", "label": null },
+    { "principal": "stzp3-bnvwm-zqzjh-o6mv6-ci53m-wj5k6-xyhe7-fnyp2-c64o3-7vokj-bqe", "balance": "100000000", "label": null },
+    { "principal": "nqh27-eplay-bkspf-s4aho-uhvlu-mvwgx-gepgb-6jb3h-tm5qg-egucg-7qe", "balance": "200000", "label": null }
+  ],
+  "counts": {
+    "holders": 8,
+    "swap_events_v1": 48,
+    "liquidity_events_v1": 13,
+    "admin_events": 0,
+    "icrc3_blocks": 132,
+    "vp_snapshots": 112
+  },
+  "invariants": {
+    "sum_of_lp_balances_equals_total_supply": "140840608177 + 100000065375 + 18560300485 + 280756268 + 203570733 + 200196382 + 100000000 + 200000 = 260185697420"
+  }
+}

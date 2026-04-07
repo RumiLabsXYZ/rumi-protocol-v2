@@ -168,44 +168,44 @@ pub fn encode_block_with_phash(block: &Icrc3Block, phash: Option<&[u8; 32]>) -> 
 // ─── Query implementations ───
 
 pub fn icrc3_get_blocks(args: Vec<GetBlocksArgs>) -> GetBlocksResult {
-    read_state(|s| {
-        let all_blocks = s.blocks();
-        let log_length = all_blocks.len() as u64;
+    let log_length = crate::storage::blocks::len();
 
-        let mut result_blocks = Vec::new();
-        for arg in &args {
-            let start = nat_to_u64(&arg.start) as usize;
-            let length = nat_to_u64(&arg.length) as usize;
+    let mut result_blocks = Vec::new();
+    for arg in &args {
+        let start = nat_to_u64(&arg.start);
+        let length = nat_to_u64(&arg.length);
 
-            if start >= all_blocks.len() {
-                continue;
-            }
-
-            let end = std::cmp::min(start + length, all_blocks.len());
-
-            // Rebuild hash chain for the requested range so we can include phash.
-            // We need to compute hashes from block 0 up to `start` to get the
-            // parent hash for the first requested block.
-            let mut prev_hash: Option<[u8; 32]> = None;
-            for block in &all_blocks[..end] {
-                let encoded = encode_block_with_phash(block, prev_hash.as_ref());
-                let block_hash = crate::certification::hash_value(&encoded);
-                if block.id as usize >= start {
-                    result_blocks.push(BlockWithId {
-                        id: Nat::from(block.id),
-                        block: encoded,
-                    });
-                }
-                prev_hash = Some(block_hash);
-            }
+        if start >= log_length {
+            continue;
         }
 
-        GetBlocksResult {
-            log_length: Nat::from(log_length),
-            blocks: result_blocks,
-            archived_blocks: vec![], // No archiving
+        let end = std::cmp::min(start.saturating_add(length), log_length);
+
+        // Rebuild hash chain for the requested range so we can include phash.
+        // We must compute hashes from block 0 up to `end` to get the parent
+        // hash for the first requested block. This is O(end) per request —
+        // acceptable for typical index-ng polling windows; if it becomes a
+        // hot path we can cache cumulative hashes alongside the blocks log.
+        let prefix = crate::storage::blocks::range(0, end);
+        let mut prev_hash: Option<[u8; 32]> = None;
+        for block in &prefix {
+            let encoded = encode_block_with_phash(block, prev_hash.as_ref());
+            let block_hash = crate::certification::hash_value(&encoded);
+            if block.id >= start {
+                result_blocks.push(BlockWithId {
+                    id: Nat::from(block.id),
+                    block: encoded,
+                });
+            }
+            prev_hash = Some(block_hash);
         }
-    })
+    }
+
+    GetBlocksResult {
+        log_length: Nat::from(log_length),
+        blocks: result_blocks,
+        archived_blocks: vec![], // No archiving
+    }
 }
 
 pub fn icrc3_get_archives(_args: GetArchivesArgs) -> GetArchivesResult {
@@ -213,11 +213,9 @@ pub fn icrc3_get_archives(_args: GetArchivesArgs) -> GetArchivesResult {
 }
 
 pub fn icrc3_get_tip_certificate() -> Option<Icrc3DataCertificate> {
-    read_state(|s| {
-        let last_hash = s.last_block_hash.as_ref()?;
-        let last_index = s.blocks().len().checked_sub(1)? as u64;
-        crate::certification::get_tip_certificate(last_index, last_hash)
-    })
+    let last_hash = read_state(|s| s.last_block_hash)?;
+    let last_index = crate::storage::blocks::len().checked_sub(1)?;
+    crate::certification::get_tip_certificate(last_index, &last_hash)
 }
 
 pub fn icrc3_supported_block_types() -> Vec<SupportedBlockType> {

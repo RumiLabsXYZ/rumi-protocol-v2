@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::cell::RefCell;
-use candid::{CandidType, Principal, Decode, Encode};
+use candid::{CandidType, Principal};
 use serde::{Serialize, Deserialize};
 
 use crate::types::*;
@@ -52,13 +52,14 @@ pub struct ThreePoolState {
     /// Admin event log for explorer.
     #[serde(default)]
     pub admin_events: Option<Vec<ThreePoolAdminEvent>>,
-    /// Swap event log v2 (dynamic-fee metadata).
-    /// Option + serde(default) so legacy stable state still deserializes.
-    #[serde(default)]
-    pub swap_events_v2: Option<Vec<SwapEventV2>>,
-    /// Liquidity event log v2 (dynamic-fee metadata).
-    #[serde(default)]
-    pub liquidity_events_v2: Option<Vec<LiquidityEventV2>>,
+    // NOTE: swap_events_v2 and liquidity_events_v2 used to live here as
+    // `Option<Vec<...>>` heap collections. Phase A moved them into
+    // `storage::swap_v2` / `storage::liq_v2` (StableLog, MemoryIds 8-11).
+    //
+    // The legacy state layout is still decoded through a separate
+    // `LegacyThreePoolState` shape in `storage::migration` during the
+    // one-shot drain in `post_upgrade`. Live code reads/writes v2 events
+    // exclusively through the `storage::*` API.
 }
 
 impl Default for ThreePoolState {
@@ -96,8 +97,6 @@ impl Default for ThreePoolState {
             swap_events: Some(Vec::new()),
             liquidity_events: Some(Vec::new()),
             admin_events: Some(Vec::new()),
-            swap_events_v2: Some(Vec::new()),
-            liquidity_events_v2: Some(Vec::new()),
         }
     }
 }
@@ -146,18 +145,20 @@ impl ThreePoolState {
     /// Block IDs are sequential starting from 0, matching Vec position,
     /// so that ICRC-3 `log_length` == `blocks.len()` and `start` indexing works.
     pub fn log_block(&mut self, tx: crate::types::Icrc3Transaction) -> u64 {
-        let id = self.blocks().len() as u64;
+        // Block IDs are sequential starting from 0; the StableLog index
+        // provides the ordering. After the A6 drain, storage::blocks::len()
+        // equals the legacy heap len, so new IDs continue uninterrupted.
+        let id = crate::storage::blocks::len();
         let block = crate::types::Icrc3Block {
             id,
             timestamp: ic_cdk::api::time(),
             tx,
         };
         // Compute hash: encode block with parent hash, then hash the value.
-        // Copy last_block_hash before mutating to avoid borrow conflict.
         let prev_hash = self.last_block_hash;
         let encoded = crate::icrc3::encode_block_with_phash(&block, prev_hash.as_ref());
         let block_hash = crate::certification::hash_value(&encoded);
-        self.blocks_mut().push(block);
+        crate::storage::blocks::push(block);
         self.last_block_hash = Some(block_hash);
         // Update IC certified data so index-ng can verify the chain tip
         crate::certification::set_certified_tip(id, &block_hash);
@@ -212,28 +213,20 @@ impl ThreePoolState {
         self.liquidity_events.get_or_insert_with(Vec::new)
     }
 
-    /// Get swap events v2 vec (empty if None for upgrade compat).
-    pub fn swap_events_v2(&self) -> &Vec<SwapEventV2> {
-        static EMPTY: std::sync::LazyLock<Vec<SwapEventV2>> =
-            std::sync::LazyLock::new(Vec::new);
-        self.swap_events_v2.as_ref().unwrap_or(&EMPTY)
+    /// Snapshot every v2 swap event currently stored in `storage::swap_v2`.
+    ///
+    /// Returns a freshly allocated `Vec` — reads go through the stable log,
+    /// not a heap mirror, so this allocates on every call. Explorer
+    /// endpoints that iterate many times per query should collect once and
+    /// reuse the `Vec`. At current event volumes (<1k) this is still much
+    /// cheaper than the Candid upgrade serialization it replaces.
+    pub fn swap_events_v2(&self) -> Vec<SwapEventV2> {
+        crate::storage::swap_v2::iter_all()
     }
 
-    /// Get mutable swap events v2 vec (initializes if None for upgrade compat).
-    pub fn swap_events_v2_mut(&mut self) -> &mut Vec<SwapEventV2> {
-        self.swap_events_v2.get_or_insert_with(Vec::new)
-    }
-
-    /// Get liquidity events v2 vec (empty if None for upgrade compat).
-    pub fn liquidity_events_v2(&self) -> &Vec<LiquidityEventV2> {
-        static EMPTY: std::sync::LazyLock<Vec<LiquidityEventV2>> =
-            std::sync::LazyLock::new(Vec::new);
-        self.liquidity_events_v2.as_ref().unwrap_or(&EMPTY)
-    }
-
-    /// Get mutable liquidity events v2 vec (initializes if None for upgrade compat).
-    pub fn liquidity_events_v2_mut(&mut self) -> &mut Vec<LiquidityEventV2> {
-        self.liquidity_events_v2.get_or_insert_with(Vec::new)
+    /// Snapshot every v2 liquidity event. See `swap_events_v2` for notes.
+    pub fn liquidity_events_v2(&self) -> Vec<LiquidityEventV2> {
+        crate::storage::liq_v2::iter_all()
     }
 
     /// Get admin events vec (empty if None for upgrade compat).
@@ -248,85 +241,13 @@ impl ThreePoolState {
         self.admin_events.get_or_insert_with(Vec::new)
     }
 
-    /// Idempotently backfill v2 event vecs from v1 events using sentinel values.
-    ///
-    /// For any v1 events not yet copied into v2, push a v2 entry preserving
-    /// chronology. Sentinel values (fee_bps=0, imbalance_*=0, is_rebalancing=false,
-    /// pool_balances_after=[0;3], virtual_price_after=0) mark these entries as
-    /// "pre-migration unknown" so downstream consumers can render accordingly.
-    ///
-    /// Idempotent: only runs when the v2 vec is shorter than the v1 vec. Does
-    /// NOT delete or modify v1 data. Safe to call repeatedly on post_upgrade.
-    ///
-    /// Returns `(swap_added, liquidity_added)` for logging.
-    pub fn migrate_events_to_v2(&mut self) -> (usize, usize) {
-        let swap_v1_len = self.swap_events.as_ref().map(|v| v.len()).unwrap_or(0);
-        let swap_v2_len = self.swap_events_v2.as_ref().map(|v| v.len()).unwrap_or(0);
-        let mut swap_added = 0;
-        if swap_v2_len < swap_v1_len {
-            // Clone the tail of v1 we still need (avoid borrow conflict with v2_mut).
-            let tail: Vec<SwapEventV1> = self
-                .swap_events
-                .as_ref()
-                .map(|v| v[swap_v2_len..].to_vec())
-                .unwrap_or_default();
-            let v2 = self.swap_events_v2_mut();
-            for e in tail {
-                v2.push(SwapEventV2 {
-                    id: e.id,
-                    timestamp: e.timestamp,
-                    caller: e.caller,
-                    token_in: e.token_in,
-                    token_out: e.token_out,
-                    amount_in: e.amount_in,
-                    amount_out: e.amount_out,
-                    fee: e.fee,
-                    fee_bps: 0,
-                    imbalance_before: 0,
-                    imbalance_after: 0,
-                    is_rebalancing: false,
-                    pool_balances_after: [0; 3],
-                    virtual_price_after: 0,
-                    migrated: true,
-                });
-                swap_added += 1;
-            }
-        }
-
-        let liq_v1_len = self.liquidity_events.as_ref().map(|v| v.len()).unwrap_or(0);
-        let liq_v2_len = self.liquidity_events_v2.as_ref().map(|v| v.len()).unwrap_or(0);
-        let mut liq_added = 0;
-        if liq_v2_len < liq_v1_len {
-            let tail: Vec<LiquidityEventV1> = self
-                .liquidity_events
-                .as_ref()
-                .map(|v| v[liq_v2_len..].to_vec())
-                .unwrap_or_default();
-            let v2 = self.liquidity_events_v2_mut();
-            for e in tail {
-                v2.push(LiquidityEventV2 {
-                    id: e.id,
-                    timestamp: e.timestamp,
-                    caller: e.caller,
-                    action: e.action,
-                    amounts: e.amounts,
-                    lp_amount: e.lp_amount,
-                    coin_index: e.coin_index,
-                    fee: e.fee,
-                    fee_bps: None,
-                    imbalance_before: 0,
-                    imbalance_after: 0,
-                    is_rebalancing: false,
-                    pool_balances_after: [0; 3],
-                    virtual_price_after: 0,
-                    migrated: true,
-                });
-                liq_added += 1;
-            }
-        }
-
-        (swap_added, liq_added)
-    }
+    // NOTE: `migrate_events_to_v2` used to live here and did its work against
+    // the heap `swap_events_v2` / `liquidity_events_v2` vecs. The v2 vecs
+    // moved to stable logs in Phase A, so the backfill logic moved with them
+    // into `storage::migration::drain_legacy_state`. That function is the
+    // one-shot drain invoked from `post_upgrade` on the first upgrade after
+    // Phase A ships; it takes the decoded legacy state as input and populates
+    // the stable logs. After that flag flips, the drain is never run again.
 
     /// Initialize pool state from deploy args.
     pub fn initialize(&mut self, args: ThreePoolInitArgs) {
@@ -371,220 +292,48 @@ pub fn replace_state(state: ThreePoolState) {
     });
 }
 
-// ─── Stable memory persistence ───
+// ─── SlimState bridge ───
 
-/// Serialize state to stable memory (called from pre_upgrade).
-pub fn save_to_stable_memory() {
-    STATE.with(|s| {
-        let state = s.borrow();
-        let bytes = Encode!(&*state).expect("Failed to encode 3pool state");
-        let len = bytes.len() as u64;
-
-        // Only grow if current stable memory is insufficient.
-        // Pages are 64 KiB each and never shrink, so avoid redundant grows.
-        let needed_pages = (len + 8 + 65535) / 65536;
-        let current_pages = ic_cdk::api::stable::stable64_size();
-        if needed_pages > current_pages {
-            ic_cdk::api::stable::stable64_grow(needed_pages - current_pages)
-                .expect("Failed to grow stable memory");
-        }
-
-        // Write length prefix (8 bytes) then data
-        ic_cdk::api::stable::stable64_write(0, &len.to_le_bytes());
-        ic_cdk::api::stable::stable64_write(8, &bytes);
-    });
+/// Populate the heap `ThreePoolState` from a `storage::SlimState`.
+///
+/// Used by `post_upgrade` on both the drain path and the normal path.
+/// Collection fields on the heap state are left at their `Default`
+/// (empty `Option::Some(...)`); live code reads collections through
+/// `crate::storage::*`, not these stubs (A7 removes them).
+pub fn hydrate_from_slim(slim: &crate::storage::SlimState) {
+    let s = ThreePoolState {
+        config: slim.config.clone(),
+        balances: slim.balances,
+        admin_fees: slim.admin_fees,
+        lp_total_supply: slim.lp_total_supply,
+        lp_tx_count: Some(slim.lp_tx_count),
+        last_block_hash: slim.last_block_hash,
+        is_paused: slim.is_paused,
+        is_initialized: slim.is_initialized,
+        ..ThreePoolState::default()
+    };
+    replace_state(s);
 }
 
-/// Restore state from stable memory (called from post_upgrade).
-pub fn load_from_stable_memory() {
-    let mut len_bytes = [0u8; 8];
-    ic_cdk::api::stable::stable64_read(0, &mut len_bytes);
-    let len = u64::from_le_bytes(len_bytes) as usize;
-
-    if len == 0 {
-        return; // No saved state — fresh start
-    }
-
-    let mut bytes = vec![0u8; len];
-    ic_cdk::api::stable::stable64_read(8, &mut bytes);
-
-    let state: ThreePoolState = Decode!(&bytes, ThreePoolState)
-        .expect("Failed to decode 3pool state from stable memory");
-    replace_state(state);
+/// Build a `storage::SlimState` snapshot of the heap's bounded fields.
+/// Called from `pre_upgrade` to flush into the stable cell, and from the
+/// drain path in `post_upgrade`.
+///
+/// The `storage_migrated` flag is preserved from the current cell value
+/// (true once the one-shot drain has run). Callers on the drain path
+/// must explicitly overwrite it to `true` after calling this.
+pub fn snapshot_slim() -> crate::storage::SlimState {
+    let prior_migrated = crate::storage::get_slim().storage_migrated;
+    read_state(|s| crate::storage::SlimState {
+        config: s.config.clone(),
+        balances: s.balances,
+        admin_fees: s.admin_fees,
+        lp_total_supply: s.lp_total_supply,
+        lp_tx_count: s.lp_tx_count.unwrap_or(0),
+        last_block_hash: s.last_block_hash,
+        is_paused: s.is_paused,
+        is_initialized: s.is_initialized,
+        storage_migrated: prior_migrated,
+    })
 }
 
-#[cfg(test)]
-mod migration_tests {
-    use super::*;
-
-    fn v1_swap(id: u64) -> SwapEventV1 {
-        SwapEventV1 {
-            id,
-            timestamp: 1_000 + id,
-            caller: Principal::anonymous(),
-            token_in: 0,
-            token_out: 1,
-            amount_in: 100,
-            amount_out: 99,
-            fee: 1,
-        }
-    }
-
-    fn v1_liq(id: u64) -> LiquidityEventV1 {
-        LiquidityEventV1 {
-            id,
-            timestamp: 2_000 + id,
-            caller: Principal::anonymous(),
-            action: LiquidityAction::AddLiquidity,
-            amounts: [10, 20, 30],
-            lp_amount: 60,
-            coin_index: None,
-            fee: None,
-        }
-    }
-
-    #[test]
-    fn migrate_events_backfills_v2_with_sentinels() {
-        let mut s = ThreePoolState::default();
-        s.swap_events_mut().push(v1_swap(0));
-        s.swap_events_mut().push(v1_swap(1));
-        s.liquidity_events_mut().push(v1_liq(0));
-
-        let (sw, lq) = s.migrate_events_to_v2();
-        assert_eq!(sw, 2);
-        assert_eq!(lq, 1);
-        assert_eq!(s.swap_events_v2().len(), 2);
-        assert_eq!(s.liquidity_events_v2().len(), 1);
-
-        let e0 = &s.swap_events_v2()[0];
-        assert_eq!(e0.id, 0);
-        assert_eq!(e0.amount_in, 100);
-        assert_eq!(e0.fee_bps, 0);
-        assert_eq!(e0.imbalance_before, 0);
-        assert_eq!(e0.imbalance_after, 0);
-        assert!(!e0.is_rebalancing);
-        assert_eq!(e0.pool_balances_after, [0; 3]);
-        assert_eq!(e0.virtual_price_after, 0);
-        assert!(e0.migrated, "backfilled swap should be tagged migrated");
-        assert!(s.swap_events_v2()[1].migrated);
-
-        let l0 = &s.liquidity_events_v2()[0];
-        assert!(l0.migrated, "backfilled liquidity should be tagged migrated");
-        assert_eq!(l0.id, 0);
-        assert_eq!(l0.amounts, [10, 20, 30]);
-        assert_eq!(l0.fee_bps, None);
-        assert_eq!(l0.pool_balances_after, [0; 3]);
-
-        // v1 data preserved.
-        assert_eq!(s.swap_events().len(), 2);
-        assert_eq!(s.liquidity_events().len(), 1);
-    }
-
-    #[test]
-    fn migrate_events_is_idempotent() {
-        let mut s = ThreePoolState::default();
-        s.swap_events_mut().push(v1_swap(0));
-        s.liquidity_events_mut().push(v1_liq(0));
-
-        let first = s.migrate_events_to_v2();
-        let second = s.migrate_events_to_v2();
-        assert_eq!(first, (1, 1));
-        assert_eq!(second, (0, 0));
-        assert_eq!(s.swap_events_v2().len(), 1);
-        assert_eq!(s.liquidity_events_v2().len(), 1);
-    }
-
-    #[test]
-    fn migrate_events_survives_candid_roundtrip_simulating_upgrade() {
-        // Build a state populated with v1 events but no v2 events (the
-        // pre-upgrade shape).
-        let mut s = ThreePoolState::default();
-        for id in 0..5 {
-            s.swap_events_mut().push(v1_swap(id));
-        }
-        for id in 0..2 {
-            s.liquidity_events_mut().push(v1_liq(id));
-        }
-
-        // Simulate upgrade: encode + decode through Candid.
-        let bytes = candid::Encode!(&s).expect("encode failed");
-        let mut decoded: ThreePoolState =
-            candid::Decode!(&bytes, ThreePoolState).expect("decode failed");
-
-        // The decoded state still has only v1 events.
-        assert_eq!(decoded.swap_events().len(), 5);
-        assert_eq!(decoded.liquidity_events().len(), 2);
-        assert_eq!(decoded.swap_events_v2().len(), 0);
-        assert_eq!(decoded.liquidity_events_v2().len(), 0);
-
-        // Run the migration the way post_upgrade does.
-        let (sw, lq) = decoded.migrate_events_to_v2();
-        assert_eq!(sw, 5);
-        assert_eq!(lq, 2);
-        assert_eq!(decoded.swap_events_v2().len(), 5);
-        assert_eq!(decoded.liquidity_events_v2().len(), 2);
-
-        // Sentinel fields are zeroed for migrated entries.
-        for ev in decoded.swap_events_v2() {
-            assert_eq!(ev.fee_bps, 0);
-            assert_eq!(ev.imbalance_before, 0);
-            assert_eq!(ev.imbalance_after, 0);
-            assert!(!ev.is_rebalancing);
-            assert_eq!(ev.pool_balances_after, [0; 3]);
-            assert_eq!(ev.virtual_price_after, 0);
-            assert!(ev.migrated);
-        }
-        for ev in decoded.liquidity_events_v2() {
-            assert!(ev.migrated);
-        }
-
-        // Idempotency: a second migration is a no-op.
-        let again = decoded.migrate_events_to_v2();
-        assert_eq!(again, (0, 0));
-        assert_eq!(decoded.swap_events_v2().len(), 5);
-        assert_eq!(decoded.liquidity_events_v2().len(), 2);
-    }
-
-    #[test]
-    fn migrate_events_only_backfills_tail() {
-        let mut s = ThreePoolState::default();
-        // v1 has 3 entries, v2 already has the first one (not a sentinel — but
-        // for the purposes of this test we just need a non-empty v2 vec).
-        s.swap_events_mut().push(v1_swap(0));
-        s.swap_events_mut().push(v1_swap(1));
-        s.swap_events_mut().push(v1_swap(2));
-        s.swap_events_v2_mut().push(SwapEventV2 {
-            id: 0,
-            timestamp: 1_000,
-            caller: Principal::anonymous(),
-            token_in: 0,
-            token_out: 1,
-            amount_in: 100,
-            amount_out: 99,
-            fee: 1,
-            fee_bps: 5,
-            imbalance_before: 1,
-            imbalance_after: 2,
-            is_rebalancing: false,
-            pool_balances_after: [1, 2, 3],
-            virtual_price_after: 42,
-            migrated: false,
-        });
-
-        let (sw, _) = s.migrate_events_to_v2();
-        assert_eq!(sw, 2);
-        assert_eq!(s.swap_events_v2().len(), 3);
-        // Pre-existing v2 entry untouched.
-        assert_eq!(s.swap_events_v2()[0].fee_bps, 5);
-        assert_eq!(s.swap_events_v2()[0].virtual_price_after, 42);
-        // New entries carry sentinels and preserve chronology.
-        assert_eq!(s.swap_events_v2()[1].id, 1);
-        assert_eq!(s.swap_events_v2()[1].fee_bps, 0);
-        assert_eq!(s.swap_events_v2()[2].id, 2);
-        assert_eq!(s.swap_events_v2()[2].fee_bps, 0);
-        // Pre-existing v2 entry remains non-migrated; backfilled entries are tagged.
-        assert!(!s.swap_events_v2()[0].migrated);
-        assert!(s.swap_events_v2()[1].migrated);
-        assert!(s.swap_events_v2()[2].migrated);
-    }
-}

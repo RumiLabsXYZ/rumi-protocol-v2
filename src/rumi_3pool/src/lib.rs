@@ -5,6 +5,7 @@ use std::time::Duration;
 
 pub mod types;
 pub mod state;
+pub mod storage;
 pub mod math;
 pub mod swap;
 pub mod liquidity;
@@ -18,7 +19,7 @@ pub mod certification;
 mod logs;
 
 use crate::types::*;
-use crate::state::{mutate_state, read_state};
+use crate::state::{mutate_state, read_state, ThreePoolState};
 use crate::math::{get_a, virtual_price};
 use crate::swap::calc_swap_output;
 use crate::liquidity::{calc_add_liquidity, calc_remove_liquidity, calc_remove_one_coin};
@@ -39,81 +40,97 @@ fn init(args: ThreePoolInitArgs) {
 
 #[pre_upgrade]
 fn pre_upgrade() {
-    log!(INFO, "Rumi 3pool pre-upgrade: saving state to stable memory");
-    state::save_to_stable_memory();
+    log!(INFO, "Rumi 3pool pre-upgrade: flushing SlimState to stable cell");
+    let slim = state::snapshot_slim();
+    storage::set_slim(slim);
 }
 
 #[post_upgrade]
 fn post_upgrade() {
-    state::load_from_stable_memory();
+    // Step 1: BEFORE touching any storage::* thread-local, try to read a
+    // legacy raw-offset-0 Candid blob. The first storage::* access lazily
+    // initializes MemoryManager, which destructively writes MGR magic at
+    // offset 0, so this read MUST happen first.
+    let legacy = storage::migration::read_legacy_blob();
 
-    // ── One-time migration: LP token 18 → 8 decimals ──
-    // Divide all LP balances by 1e10, reset block log, and re-log mints.
-    // Safe to run once: after this upgrade, lp_total_supply will be ~1e8 scale.
-    // Detect by checking if supply is > 1e15 (would be impossible at 8-decimal scale
-    // since that would mean >10M LP tokens, but our pool only has ~$84 TVL).
-    mutate_state(|s| {
-        const SCALE_DOWN: u128 = 10_000_000_000; // 1e10
-        if s.lp_total_supply > 1_000_000_000_000_000 {
-            // Scale down all LP balances
-            let mut new_total: u128 = 0;
-            let holders: Vec<(candid::Principal, u128)> = s.lp_balances.iter()
-                .map(|(p, b)| (*p, *b))
-                .collect();
-            s.lp_balances.clear();
-            for (principal, old_balance) in &holders {
-                let new_balance = old_balance / SCALE_DOWN;
-                if new_balance > 0 {
-                    s.lp_balances.insert(*principal, new_balance);
-                    new_total += new_balance;
-                }
+    // The drain is gated on the SlimState `storage_migrated` flag, which
+    // is only readable after touching storage::*. We capture the legacy
+    // blob first (in RAM), then ask the SlimState cell whether the drain
+    // already ran on a previous upgrade. If it has, the legacy bytes (if
+    // any) are stale and we discard them.
+    let already_drained = storage::get_slim().storage_migrated;
+
+    match legacy {
+        Some(legacy_state) if !already_drained => {
+            log!(INFO, "Rumi 3pool post-upgrade: draining legacy state");
+
+            // Hydrate heap state with bounded fields from the legacy blob.
+            let heap = ThreePoolState {
+                config: legacy_state.config.clone(),
+                balances: legacy_state.balances,
+                admin_fees: legacy_state.admin_fees,
+                lp_total_supply: legacy_state.lp_total_supply,
+                lp_tx_count: legacy_state.lp_tx_count,
+                last_block_hash: legacy_state.last_block_hash,
+                is_paused: legacy_state.is_paused,
+                is_initialized: legacy_state.is_initialized,
+                ..ThreePoolState::default()
+            };
+            state::replace_state(heap);
+
+            // Drain every collection into stable structures.
+            storage::migration::drain_legacy_state(legacy_state);
+
+            // Defensive cross-check: recompute the ICRC-3 hash chain from
+            // the drained blocks. Trap on mismatch — better to fail loudly
+            // than certify a wrong tip.
+            let blocks = storage::blocks::iter_all();
+            let recomputed = certification::recompute_hash_chain(&blocks);
+            let legacy_tip = read_state(|s| s.last_block_hash);
+            if recomputed != legacy_tip {
+                ic_cdk::trap(&format!(
+                    "post_upgrade drain: ICRC-3 hash chain mismatch. \
+                     legacy={:?} recomputed={:?}",
+                    legacy_tip, recomputed
+                ));
             }
-            s.lp_total_supply = new_total;
 
-            // Reset ICRC-3 block log — old blocks have 18-decimal amounts
-            *s.blocks_mut() = Vec::new();
-            s.last_block_hash = None;
-            s.lp_tx_count = Some(0);
+            // Flush SlimState with storage_migrated=true. snapshot_slim
+            // reads the cell's current flag (false on first drain), so we
+            // override it explicitly afterward.
+            let mut slim = state::snapshot_slim();
+            slim.storage_migrated = true;
+            storage::set_slim(slim);
 
-            // Log fresh mint blocks for each holder with their new 8-decimal balances
-            for (principal, new_balance) in &holders {
-                let new_bal = new_balance / SCALE_DOWN;
-                if new_bal > 0 {
-                    s.log_block(Icrc3Transaction::Mint { to: *principal, amount: new_bal });
-                }
-            }
-
-            // Also clear VP snapshots — old ones used 18-decimal supply
-            *s.snapshots_mut() = Vec::new();
-
-            ic_canister_log::log!(crate::logs::INFO,
-                "LP decimal migration 18→8: scaled {} holders, new total supply: {}",
-                holders.len(), new_total);
-        } else {
-            // Normal startup: recompute hash chain and set certified data
-            let hash = certification::recompute_hash_chain(s.blocks());
-            s.last_block_hash = hash;
-            if let Some(ref h) = s.last_block_hash {
-                let last_idx = s.blocks().len().saturating_sub(1) as u64;
-                certification::set_certified_tip(last_idx, h);
-            }
+            log!(INFO, "Rumi 3pool post-upgrade: drain complete. \
+                LP supply: {}, holders: {}, blocks: {}, swap_v2: {}",
+                read_state(|s| s.lp_total_supply),
+                storage::lp_balance_len(),
+                storage::blocks::len(),
+                storage::swap_v2::len());
         }
-    });
-
-    // Idempotent backfill of v2 event vecs from legacy v1 events.
-    // Uses sentinel values for the new dynamic-fee fields (pre-migration unknown).
-    mutate_state(|s| {
-        let (sw, lq) = s.migrate_events_to_v2();
-        if sw > 0 || lq > 0 {
-            log!(INFO, "3pool v2 event backfill: {} swap, {} liquidity entries added", sw, lq);
+        _ => {
+            // Normal path. SlimState is already in the stable cell; no
+            // legacy blob to drain (or it was stale).
+            let slim = storage::get_slim();
+            state::hydrate_from_slim(&slim);
+            log!(INFO, "Rumi 3pool post-upgrade: loaded from SlimState. \
+                LP supply: {}, holders: {}, blocks: {}",
+                slim.lp_total_supply,
+                storage::lp_balance_len(),
+                storage::blocks::len());
         }
-    });
+    }
+
+    // Set certified ICRC-3 tip from the now-live blocks log.
+    if let Some(h) = read_state(|s| s.last_block_hash) {
+        let len = storage::blocks::len();
+        if len > 0 {
+            certification::set_certified_tip(len - 1, &h);
+        }
+    }
 
     setup_timers();
-    log!(INFO, "Rumi 3pool post-upgrade: state restored. LP supply: {}, initialized: {}, blocks: {}",
-        read_state(|s| s.lp_total_supply),
-        read_state(|s| s.is_initialized),
-        read_state(|s| s.blocks().len()));
 }
 
 // ─── Timers ───
@@ -133,23 +150,22 @@ fn take_vp_snapshot() {
     let precision_muls = get_precision_muls();
     let amp = get_current_a();
 
-    mutate_state(|s| {
+    let snapshot = read_state(|s| {
         if s.lp_total_supply == 0 {
-            return; // No LPs — virtual_price is meaningless.
+            return None; // No LPs — virtual_price is meaningless.
         }
-        let vp = match virtual_price(&s.balances, &precision_muls, amp, s.lp_total_supply) {
-            Some(v) => v,
-            None => return,
-        };
-        let now_secs = ic_cdk::api::time() / 1_000_000_000;
-        let lp_supply = s.lp_total_supply;
-        let snapshot = VirtualPriceSnapshot {
-            timestamp_secs: now_secs,
+        let vp = virtual_price(&s.balances, &precision_muls, amp, s.lp_total_supply)?;
+        Some(VirtualPriceSnapshot {
+            timestamp_secs: ic_cdk::api::time() / 1_000_000_000,
             virtual_price: vp,
-            lp_total_supply: lp_supply,
-        };
-        s.snapshots_mut().push(snapshot);
+            lp_total_supply: s.lp_total_supply,
+        })
     });
+    if let Some(snap) = snapshot {
+        storage::vp_snap::push(snap);
+    } else {
+        return;
+    }
     log!(INFO, "VP snapshot taken");
 }
 
@@ -163,61 +179,37 @@ pub fn health() -> String {
 /// Query swap events for explorer. Returns events in the requested range.
 #[query]
 pub fn get_swap_events(start: u64, length: u64) -> Vec<SwapEvent> {
-    read_state(|s| {
-        let events = s.swap_events();
-        let total = events.len() as u64;
-        if start >= total {
-            return vec![];
-        }
-        let end = (start + length).min(total) as usize;
-        events[start as usize..end].to_vec()
-    })
+    storage::swap_v1::range(start, length)
 }
 
 /// Query total number of swap events.
 #[query]
 pub fn get_swap_event_count() -> u64 {
-    read_state(|s| s.swap_events().len() as u64)
+    storage::swap_v1::len()
 }
 
 /// Query liquidity events for explorer. Returns events in the requested range.
 #[query]
 pub fn get_liquidity_events(start: u64, length: u64) -> Vec<LiquidityEvent> {
-    read_state(|s| {
-        let events = s.liquidity_events();
-        let total = events.len() as u64;
-        if start >= total {
-            return vec![];
-        }
-        let end = (start + length).min(total) as usize;
-        events[start as usize..end].to_vec()
-    })
+    storage::liq_v1::range(start, length)
 }
 
 /// Query total number of liquidity events.
 #[query]
 pub fn get_liquidity_event_count() -> u64 {
-    read_state(|s| s.liquidity_events().len() as u64)
+    storage::liq_v1::len()
 }
 
 /// Query admin events for explorer. Returns events in the requested range.
 #[query]
 pub fn get_admin_events(start: u64, length: u64) -> Vec<ThreePoolAdminEvent> {
-    read_state(|s| {
-        let events = s.admin_events();
-        let total = events.len() as u64;
-        if start >= total {
-            return vec![];
-        }
-        let end = (start + length).min(total) as usize;
-        events[start as usize..end].to_vec()
-    })
+    storage::admin_ev::range(start, length)
 }
 
 /// Query total number of admin events.
 #[query]
 pub fn get_admin_event_count() -> u64 {
-    read_state(|s| s.admin_events().len() as u64)
+    storage::admin_ev::len()
 }
 
 // ─── Helper: extract precision_muls from config ───
@@ -323,10 +315,11 @@ pub async fn swap(i: u8, j: u8, dx: u128, min_dy: u128) -> Result<u128, ThreePoo
         let vp_after = virtual_price(&s.balances, &precision_muls, amp, lp_supply).unwrap_or(0);
         let balances_after = s.balances;
 
-        // Record swap event v2 (dynamic-fee schema). v1 writes are stopped —
-        // v1 entries remain as frozen historical state for the migration.
-        let id = s.swap_events_v2().len() as u64;
-        s.swap_events_v2_mut().push(SwapEventV2 {
+        // Record swap event v2 (dynamic-fee schema). Appends to the stable
+        // swap_v2 log. `migrated: false` distinguishes live writes from the
+        // one-shot backfill populated during the Phase A drain.
+        let id = storage::swap_v2::len();
+        storage::swap_v2::push(SwapEventV2 {
             id,
             timestamp: ic_cdk::api::time(),
             caller,
@@ -412,8 +405,8 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
         for k in 0..3 {
             s.balances[k] += amounts_arr[k];
         }
-        let entry = s.lp_balances.entry(caller).or_insert(0);
-        *entry += lp_minted;
+        let cur = storage::lp_balance_get(&caller);
+        storage::lp_balance_set(caller, cur + lp_minted);
         s.lp_total_supply += lp_minted;
         s.is_initialized = true;
         // Log mint block for ICRC-3 index
@@ -426,8 +419,8 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
         let lp_supply = s.lp_total_supply;
         let vp_after = virtual_price(&s.balances, &precision_muls, amp, lp_supply).unwrap_or(0);
         let balances_after = s.balances;
-        let id = s.liquidity_events_v2().len() as u64;
-        s.liquidity_events_v2_mut().push(LiquidityEventV2 {
+        let id = storage::liq_v2::len();
+        storage::liq_v2::push(LiquidityEventV2 {
             id,
             timestamp: ic_cdk::api::time(),
             caller,
@@ -471,10 +464,8 @@ pub async fn remove_liquidity(
     let caller = ic_cdk::api::caller();
 
     // 2. Check caller has enough LP
-    let (user_lp, balances, lp_total_supply) = read_state(|s| {
-        let user_lp = s.lp_balances.get(&caller).copied().unwrap_or(0);
-        (user_lp, s.balances, s.lp_total_supply)
-    });
+    let user_lp = storage::lp_balance_get(&caller);
+    let (balances, lp_total_supply) = read_state(|s| (s.balances, s.lp_total_supply));
 
     if user_lp < lp_burn {
         return Err(ThreePoolError::InsufficientLiquidity);
@@ -500,8 +491,8 @@ pub async fn remove_liquidity(
 
     // 5. Deduct LP first (deduct-before-transfer pattern)
     mutate_state(|s| {
-        let entry = s.lp_balances.get_mut(&caller).unwrap();
-        *entry -= lp_burn;
+        let cur = storage::lp_balance_get(&caller);
+        storage::lp_balance_set(caller, cur - lp_burn);
         s.lp_total_supply -= lp_burn;
         for k in 0..3 {
             s.balances[k] -= amounts[k];
@@ -532,8 +523,8 @@ pub async fn remove_liquidity(
         let vp_after = virtual_price(&s.balances, &precision_muls, amp, lp_supply).unwrap_or(0);
         let balances_after = s.balances;
         let imbalance_after = crate::math::compute_imbalance(&balances_after, &precision_muls);
-        let id = s.liquidity_events_v2().len() as u64;
-        s.liquidity_events_v2_mut().push(LiquidityEventV2 {
+        let id = storage::liq_v2::len();
+        storage::liq_v2::push(LiquidityEventV2 {
             id,
             timestamp: ic_cdk::api::time(),
             caller,
@@ -573,10 +564,8 @@ pub async fn remove_one_coin(
     let caller = ic_cdk::api::caller();
 
     // 1. Check caller has enough LP
-    let (user_lp, balances, lp_total_supply) = read_state(|s| {
-        let user_lp = s.lp_balances.get(&caller).copied().unwrap_or(0);
-        (user_lp, s.balances, s.lp_total_supply)
-    });
+    let user_lp = storage::lp_balance_get(&caller);
+    let (balances, lp_total_supply) = read_state(|s| (s.balances, s.lp_total_supply));
 
     if user_lp < lp_burn {
         return Err(ThreePoolError::InsufficientLiquidity);
@@ -616,8 +605,8 @@ pub async fn remove_one_coin(
     // virtual_price grows for remaining LPs. Subtracting `amount + fee` would
     // double-deduct the LP fee.
     mutate_state(|s| {
-        let entry = s.lp_balances.get_mut(&caller).unwrap();
-        *entry -= lp_burn;
+        let cur = storage::lp_balance_get(&caller);
+        storage::lp_balance_set(caller, cur - lp_burn);
         s.lp_total_supply -= lp_burn;
         s.balances[idx] -= amount + admin_fee_share;
         s.admin_fees[idx] += admin_fee_share;
@@ -644,8 +633,8 @@ pub async fn remove_one_coin(
         let balances_after = s.balances;
         let mut amounts = [0u128; 3];
         amounts[idx] = amount;
-        let id = s.liquidity_events_v2().len() as u64;
-        s.liquidity_events_v2_mut().push(LiquidityEventV2 {
+        let id = storage::liq_v2::len();
+        storage::liq_v2::push(LiquidityEventV2 {
             id,
             timestamp: ic_cdk::api::time(),
             caller,
@@ -725,8 +714,8 @@ pub async fn donate(token_index: u8, amount: u128) -> Result<(), ThreePoolError>
         let imbalance_after = crate::math::compute_imbalance(&balances_after, &precision_muls);
         let mut amounts = [0u128; 3];
         amounts[idx] = amount;
-        let id = s.liquidity_events_v2().len() as u64;
-        s.liquidity_events_v2_mut().push(LiquidityEventV2 {
+        let id = storage::liq_v2::len();
+        storage::liq_v2::push(LiquidityEventV2 {
             id,
             timestamp: ic_cdk::api::time(),
             caller,
@@ -841,21 +830,18 @@ pub fn get_pool_status() -> PoolStatus {
 
 #[query]
 pub fn get_lp_balance(user: Principal) -> u128 {
-    read_state(|s| s.lp_balances.get(&user).copied().unwrap_or(0))
+    storage::lp_balance_get(&user)
 }
 
 /// Returns all LP holders and their balances, sorted by balance descending.
 #[query]
 pub fn get_all_lp_holders() -> Vec<(Principal, u128)> {
-    read_state(|s| {
-        let mut holders: Vec<(Principal, u128)> = s.lp_balances
-            .iter()
-            .filter(|(_, &balance)| balance > 0)
-            .map(|(&p, &b)| (p, b))
-            .collect();
-        holders.sort_by(|a, b| b.1.cmp(&a.1));
-        holders
-    })
+    let mut holders: Vec<(Principal, u128)> = storage::lp_balance_iter()
+        .into_iter()
+        .filter(|(_, b)| *b > 0)
+        .collect();
+    holders.sort_by(|a, b| b.1.cmp(&a.1));
+    holders
 }
 
 #[query]
@@ -934,7 +920,7 @@ pub fn get_admin_fees() -> Vec<u128> {
 /// Returns all virtual_price snapshots for APY calculation and historical charts.
 #[query]
 pub fn get_vp_snapshots() -> Vec<VirtualPriceSnapshot> {
-    read_state(|s| s.snapshots().clone())
+    storage::vp_snap::iter_all()
 }
 
 // ─── Bot Query Endpoints ───
@@ -1479,17 +1465,14 @@ pub fn get_top_swappers(window: StatsWindow, limit: u64) -> Vec<(Principal, u64,
 // ── E9: top LP holders by balance ──
 #[query]
 pub fn get_top_lps(limit: u64) -> Vec<(Principal, u128, u32)> {
-    read_state(|s| {
-        let total = s.lp_total_supply.max(1);
-        let mut v: Vec<(Principal, u128, u32)> = s
-            .lp_balances
-            .iter()
-            .map(|(p, lp)| (*p, *lp, ((lp.saturating_mul(10_000)) / total) as u32))
-            .collect();
-        v.sort_by(|a, b| b.1.cmp(&a.1));
-        v.truncate(limit as usize);
-        v
-    })
+    let total = read_state(|s| s.lp_total_supply).max(1);
+    let mut v: Vec<(Principal, u128, u32)> = storage::lp_balance_iter()
+        .into_iter()
+        .map(|(p, lp)| (p, lp, ((lp.saturating_mul(10_000)) / total) as u32))
+        .collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v.truncate(limit as usize);
+    v
 }
 
 // ─── Time series (E10-E13) ───
@@ -1555,23 +1538,22 @@ pub fn get_virtual_price_series(
     }
     let now = ic_cdk::api::time();
     let cutoff = window_cutoff_ns(window, now);
-    read_state(|s| {
-        let mut map: std::collections::BTreeMap<u64, u128> = std::collections::BTreeMap::new();
-        for snap in s.snapshots().iter() {
-            let ts_ns = snap.timestamp_secs.saturating_mul(1_000_000_000);
-            if ts_ns < cutoff {
-                continue;
-            }
-            let bucket = bucket_floor(ts_ns, bucket_seconds);
-            map.insert(bucket, snap.virtual_price);
+    let snapshots = storage::vp_snap::iter_all();
+    let mut map: std::collections::BTreeMap<u64, u128> = std::collections::BTreeMap::new();
+    for snap in snapshots.iter() {
+        let ts_ns = snap.timestamp_secs.saturating_mul(1_000_000_000);
+        if ts_ns < cutoff {
+            continue;
         }
-        map.into_iter()
-            .map(|(t, vp)| VirtualPricePoint {
-                timestamp: t,
-                virtual_price: vp,
-            })
-            .collect()
-    })
+        let bucket = bucket_floor(ts_ns, bucket_seconds);
+        map.insert(bucket, snap.virtual_price);
+    }
+    map.into_iter()
+        .map(|(t, vp)| VirtualPricePoint {
+            timestamp: t,
+            virtual_price: vp,
+        })
+        .collect()
 }
 
 // ── E13: bucketed average fee bps series (volume-weighted) ──
@@ -1736,7 +1718,7 @@ pub async fn authorized_redeem_and_burn(
     let caller = ic_cdk::caller();
 
     // 1. Authorization check
-    if !read_state(|s| s.burn_callers().contains(&caller)) {
+    if !storage::burn_caller_contains(&caller) {
         return Err(ThreePoolError::NotAuthorizedBurnCaller);
     }
 
@@ -1751,7 +1733,7 @@ pub async fn authorized_redeem_and_burn(
     })?;
 
     // 3. Validate LP balance
-    let caller_lp = read_state(|s| s.lp_balances.get(&caller).copied().unwrap_or(0));
+    let caller_lp = storage::lp_balance_get(&caller);
     if caller_lp < args.lp_amount {
         return Err(ThreePoolError::InsufficientLpBalance {
             required: args.lp_amount,
@@ -1808,9 +1790,8 @@ pub async fn authorized_redeem_and_burn(
 
     // 6. Deduct LP and pool balance BEFORE the async burn call (deduct-before-transfer)
     mutate_state(|s| {
-        if let Some(lp) = s.lp_balances.get_mut(&caller) {
-            *lp -= args.lp_amount;
-        }
+        let cur = storage::lp_balance_get(&caller);
+        storage::lp_balance_set(caller, cur.saturating_sub(args.lp_amount));
         s.lp_total_supply -= args.lp_amount;
         s.balances[token_idx] -= args.token_amount;
     });
@@ -1840,7 +1821,8 @@ pub async fn authorized_redeem_and_burn(
         Err(reason) => {
             // Rollback: restore LP and pool balance
             mutate_state(|s| {
-                *s.lp_balances.entry(caller).or_insert(0) += args.lp_amount;
+                let cur = storage::lp_balance_get(&caller);
+                storage::lp_balance_set(caller, cur + args.lp_amount);
                 s.lp_total_supply += args.lp_amount;
                 s.balances[token_idx] += args.token_amount;
             });
