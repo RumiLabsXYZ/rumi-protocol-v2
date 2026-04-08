@@ -7,10 +7,14 @@
  */
 
 import { Principal } from '@dfinity/principal';
+import { Actor, HttpAgent } from '@dfinity/agent';
 import { publicActor } from '$services/protocol/apiClient';
 import { stabilityPoolService } from '$services/stabilityPoolService';
 import { threePoolService } from '$services/threePoolService';
 import { ammService } from '$services/ammService';
+import { CANISTER_IDS, CONFIG } from '$lib/config';
+import type { _SERVICE as IcusdLedgerService } from '$declarations/icusd_ledger/icusd_ledger.did';
+import type { _SERVICE as IcusdIndexService } from '$declarations/icusd_index/icusd_index.did';
 
 // ── TTL constants (ms) ───────────────────────────────────────────────────────
 
@@ -729,5 +733,294 @@ export async function fetchDexEvent(source: DexEventSource, id: number): Promise
 	} catch (err) {
 		console.error(`[explorerService] fetchDexEvent(${source}, ${id}) failed:`, err);
 		return null;
+	}
+}
+
+// ── icUSD Holders ──────────────────────────────────────────────────────
+
+export interface TokenHolder {
+	account: string;       // "principal" or "principal:subaccount_hex"
+	principal: string;
+	subaccount: string | null;
+	balance: bigint;
+	balanceNumber: number; // for sorting in DataTable
+}
+
+function accountToKey(owner: Principal, subaccount?: Uint8Array | number[] | null): string {
+	if (!subaccount || subaccount.length === 0) return owner.toText();
+	const bytes = subaccount instanceof Uint8Array ? subaccount : new Uint8Array(subaccount);
+	// Skip all-zero default subaccounts
+	if (bytes.every(b => b === 0)) return owner.toText();
+	const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+	return `${owner.toText()}:${hex}`;
+}
+
+let _icusdLedgerActor: IcusdLedgerService | null = null;
+
+function getIcusdLedgerActor(): IcusdLedgerService {
+	if (_icusdLedgerActor) return _icusdLedgerActor;
+	const agent = new HttpAgent({ host: CONFIG.host });
+	if (CONFIG.isLocal) agent.fetchRootKey().catch(() => {});
+	_icusdLedgerActor = Actor.createActor<IcusdLedgerService>(CONFIG.icusd_ledgerIDL as any, {
+		agent,
+		canisterId: CANISTER_IDS.ICUSD_LEDGER,
+	});
+	return _icusdLedgerActor;
+}
+
+let _icusdIndexActor: IcusdIndexService | null = null;
+
+function getIcusdIndexActor(): IcusdIndexService {
+	if (_icusdIndexActor) return _icusdIndexActor;
+	const agent = new HttpAgent({ host: CONFIG.host });
+	if (CONFIG.isLocal) agent.fetchRootKey().catch(() => {});
+	_icusdIndexActor = Actor.createActor<IcusdIndexService>(CONFIG.icusdIndexIDL as any, {
+		agent,
+		canisterId: CANISTER_IDS.ICUSD_INDEX,
+	});
+	return _icusdIndexActor;
+}
+
+/**
+ * Fetch all icUSD holders by replaying ledger transactions.
+ * Returns holders sorted by balance descending.
+ */
+export async function fetchIcusdHolders(): Promise<{ holders: TokenHolder[]; totalSupply: bigint; txCount: bigint }> {
+	const key = 'holders:icusd';
+	const cached = getCached<{ holders: TokenHolder[]; totalSupply: bigint; txCount: bigint }>(key, TTL.VAULTS);
+	if (cached) return cached;
+
+	try {
+		const ledger = getIcusdLedgerActor();
+		const balances = new Map<string, { principal: string; subaccount: string | null; balance: bigint }>();
+
+		function credit(owner: Principal, subaccount: any, amount: bigint) {
+			const k = accountToKey(owner, subaccount?.[0] ?? null);
+			const existing = balances.get(k);
+			if (existing) {
+				existing.balance += amount;
+			} else {
+				const sub = subaccount?.[0] ?? null;
+				const subHex = sub ? Array.from(sub instanceof Uint8Array ? sub : new Uint8Array(sub)).map((b: number) => b.toString(16).padStart(2, '0')).join('') : null;
+				balances.set(k, { principal: owner.toText(), subaccount: subHex, balance: amount });
+			}
+		}
+
+		function debit(owner: Principal, subaccount: any, amount: bigint) {
+			const k = accountToKey(owner, subaccount?.[0] ?? null);
+			const existing = balances.get(k);
+			if (existing) {
+				existing.balance -= amount;
+			}
+		}
+
+		// Fetch all transactions in batches
+		const BATCH_SIZE = 2000n;
+		let start = 0n;
+		let totalTxCount = 0n;
+
+		while (true) {
+			const resp = await ledger.get_transactions({ start, length: BATCH_SIZE });
+			totalTxCount = resp.log_length;
+			const txs = resp.transactions;
+			if (txs.length === 0) break;
+
+			for (const tx of txs) {
+				const mint = tx.mint[0];
+				if (mint) {
+					credit(mint.to.owner, mint.to.subaccount, mint.amount);
+				}
+				const burn = tx.burn[0];
+				if (burn) {
+					debit(burn.from.owner, burn.from.subaccount, burn.amount);
+				}
+				const xfer = tx.transfer[0];
+				if (xfer) {
+					debit(xfer.from.owner, xfer.from.subaccount, xfer.amount);
+					credit(xfer.to.owner, xfer.to.subaccount, xfer.amount);
+					const fee = xfer.fee[0];
+					if (fee !== undefined) {
+						debit(xfer.from.owner, xfer.from.subaccount, fee);
+					}
+				}
+				// approve transactions don't affect balances
+			}
+
+			start += BigInt(txs.length);
+			if (start >= totalTxCount) break;
+		}
+
+		// Filter out zero/negative balances and sort descending
+		const holders: TokenHolder[] = [];
+		let totalSupply = 0n;
+		for (const [account, info] of balances) {
+			if (info.balance > 0n) {
+				totalSupply += info.balance;
+				holders.push({
+					account,
+					principal: info.principal,
+					subaccount: info.subaccount,
+					balance: info.balance,
+					balanceNumber: Number(info.balance) / 1e8,
+				});
+			}
+		}
+		holders.sort((a, b) => (b.balance > a.balance ? 1 : b.balance < a.balance ? -1 : 0));
+
+		const result = { holders, totalSupply, txCount: totalTxCount };
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchIcusdHolders failed:', err);
+		return { holders: [], totalSupply: 0n, txCount: 0n };
+	}
+}
+
+// ── 3USD Holders ───────────────────────────────────────────────────────
+
+const THREEUSD_INDEX = 'jagpu-pyaaa-aaaap-qtm6q-cai';
+
+let _threeusdIndexActor: IcusdIndexService | null = null;
+
+function getThreeusdIndexActor(): IcusdIndexService {
+	if (_threeusdIndexActor) return _threeusdIndexActor;
+	const agent = new HttpAgent({ host: CONFIG.host });
+	if (CONFIG.isLocal) agent.fetchRootKey().catch(() => {});
+	// Same WASM/IDL as icusd_index (both are ic-icrc1-index-ng)
+	_threeusdIndexActor = Actor.createActor<IcusdIndexService>(CONFIG.icusdIndexIDL as any, {
+		agent,
+		canisterId: THREEUSD_INDEX,
+	});
+	return _threeusdIndexActor;
+}
+
+/**
+ * Extract all unique account keys from ICRC-3 Value blocks.
+ * Accounts are encoded as Array([Blob(principal_bytes)]) or
+ * Array([Blob(principal_bytes), Blob(subaccount_bytes)]).
+ */
+function extractAccountsFromBlocks(blocks: any[]): Set<string> {
+	const accounts = new Set<string>();
+
+	function extractFromValue(val: any): void {
+		if (!val) return;
+		if ('Map' in val) {
+			const map = val.Map as [string, any][];
+			for (const [key, v] of map) {
+				if (key === 'to' || key === 'from' || key === 'spender') {
+					const acct = parseAccountValue(v);
+					if (acct) accounts.add(acct);
+				} else {
+					extractFromValue(v);
+				}
+			}
+		} else if ('Array' in val) {
+			// Don't recurse into account arrays (they contain Blobs, not Maps)
+		}
+	}
+
+	function parseAccountValue(val: any): string | null {
+		if (!val || !('Array' in val)) return null;
+		const arr = val.Array as any[];
+		if (arr.length === 0) return null;
+		const firstBlob = arr[0];
+		if (!firstBlob || !('Blob' in firstBlob)) return null;
+		const bytes = firstBlob.Blob instanceof Uint8Array
+			? firstBlob.Blob
+			: new Uint8Array(firstBlob.Blob);
+		try {
+			const principal = Principal.fromUint8Array(bytes);
+			// Check for subaccount
+			if (arr.length > 1 && arr[1] && 'Blob' in arr[1]) {
+				const subBytes = arr[1].Blob instanceof Uint8Array
+					? arr[1].Blob
+					: new Uint8Array(arr[1].Blob);
+				if (!subBytes.every((b: number) => b === 0)) {
+					const hex = Array.from(subBytes).map((b) => (b as number).toString(16).padStart(2, '0')).join('');
+					return `${principal.toText()}:${hex}`;
+				}
+			}
+			return principal.toText();
+		} catch {
+			return null;
+		}
+	}
+
+	for (const block of blocks) {
+		extractFromValue(block);
+	}
+	return accounts;
+}
+
+/**
+ * Fetch all 3USD holders by scanning index blocks and querying balances.
+ * Returns holders sorted by balance descending.
+ */
+export async function fetchThreeUsdHolders(): Promise<{ holders: TokenHolder[]; totalSupply: bigint; txCount: bigint }> {
+	const key = 'holders:3usd';
+	const cached = getCached<{ holders: TokenHolder[]; totalSupply: bigint; txCount: bigint }>(key, TTL.VAULTS);
+	if (cached) return cached;
+
+	try {
+		const index = getThreeusdIndexActor();
+
+		// Get block count
+		const status = await index.status();
+		const blockCount = status.num_blocks_synced;
+		if (blockCount === 0n) {
+			return setCache(key, { holders: [], totalSupply: 0n, txCount: 0n });
+		}
+
+		// Fetch all blocks (tiny dataset, ~125 blocks)
+		const resp = await index.get_blocks({ start: 0n, length: blockCount });
+		const uniqueAccounts = extractAccountsFromBlocks(resp.blocks);
+
+		// Query icrc1_balance_of for each account via the index (which proxies to ledger)
+		const holders: TokenHolder[] = [];
+		let totalSupply = 0n;
+
+		const balancePromises = Array.from(uniqueAccounts).map(async (acctKey) => {
+			const parts = acctKey.split(':');
+			const principalText = parts[0];
+			const subaccountHex = parts[1] || null;
+
+			let subaccount: number[] | null = null;
+			if (subaccountHex) {
+				subaccount = [];
+				for (let i = 0; i < subaccountHex.length; i += 2) {
+					subaccount.push(parseInt(subaccountHex.substring(i, i + 2), 16));
+				}
+			}
+
+			const account = {
+				owner: Principal.fromText(principalText),
+				subaccount: subaccount ? [new Uint8Array(subaccount)] : [],
+			};
+
+			const balance = await index.icrc1_balance_of(account as any);
+			return { acctKey, principalText, subaccountHex, balance };
+		});
+
+		const results = await Promise.all(balancePromises);
+
+		for (const { acctKey, principalText, subaccountHex, balance } of results) {
+			if (balance > 0n) {
+				totalSupply += balance;
+				holders.push({
+					account: acctKey,
+					principal: principalText,
+					subaccount: subaccountHex,
+					balance,
+					balanceNumber: Number(balance) / 1e8,
+				});
+			}
+		}
+
+		holders.sort((a, b) => (b.balance > a.balance ? 1 : b.balance < a.balance ? -1 : 0));
+
+		const result = { holders, totalSupply, txCount: blockCount };
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchThreeUsdHolders failed:', err);
+		return { holders: [], totalSupply: 0n, txCount: 0n };
 	}
 }

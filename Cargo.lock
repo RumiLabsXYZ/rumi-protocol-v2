@@ -7160,6 +7160,7 @@ dependencies = [
  "candid",
  "ciborium",
  "ic-canister-log 0.2.0 (git+https://github.com/Rumi-Protocol/ic?rev=fc278709)",
+ "ic-canisters-http-types",
  "ic-cdk 0.12.2",
  "ic-cdk-macros 0.8.4",
  "ic-cdk-timers 0.10.0",
@@ -7168,6 +7169,25 @@ dependencies = [
  "serde",
  "serde_bytes",
  "sha2",
+]
+
+[[package]]
+name = "rumi_analytics"
+version = "0.1.0"
+dependencies = [
+ "candid",
+ "ciborium",
+ "ic-canister-log 0.2.0 (git+https://github.com/Rumi-Protocol/ic?rev=fc278709)",
+ "ic-canisters-http-types",
+ "ic-cdk 0.12.2",
+ "ic-cdk-macros 0.8.4",
+ "ic-cdk-timers 0.10.0",
+ "ic-stable-structures",
+ "icrc-ledger-client-cdk",
+ "icrc-ledger-types 0.1.8 (git+https://github.com/Rumi-Protocol/ic?rev=fc278709)",
+ "pocket-ic",
+ "serde",
+ "serde_bytes",
 ]
 
 [[package]]

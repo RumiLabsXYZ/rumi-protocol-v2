@@ -1,7 +1,10 @@
-use candid::Principal;
+use candid::{CandidType, Nat, Principal};
 use ic_cdk::{query, update, init, pre_upgrade, post_upgrade};
 use ic_canister_log::log;
+use ic_canisters_http_types::{HttpRequest, HttpResponse, HttpResponseBuilder};
+use serde::Deserialize;
 use sha2::{Sha256, Digest};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 pub mod types;
@@ -18,11 +21,269 @@ use crate::math::{compute_swap, compute_initial_lp_shares, compute_proportional_
 use crate::transfers::{transfer_from_user, transfer_to_user};
 use crate::logs::INFO;
 
+// ─── Supply Cache (not persisted to stable memory) ───
+
+/// icUSD ledger canister ID on mainnet.
+const ICUSD_LEDGER: &str = "t6bor-paaaa-aaaap-qrd5q-cai";
+/// 3pool canister ID on mainnet (also the 3USD token ledger).
+const THREEPOOL: &str = "fohh4-yyaaa-aaaap-qtkpa-cai";
+
+#[derive(Clone, Default)]
+struct SupplyCache {
+    total_supply_e8s: u128,
+    last_updated_ns: u64,
+}
+
+thread_local! {
+    static SUPPLY_CACHE: RefCell<SupplyCache> = RefCell::new(SupplyCache::default());
+}
+
+fn setup_supply_timer() {
+    // Fetch immediately, then every 5 minutes
+    ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), || {
+        ic_cdk::spawn(refresh_supply());
+    });
+    ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(300), || {
+        ic_cdk::spawn(refresh_supply());
+    });
+}
+
+async fn refresh_supply() {
+    let ledger = Principal::from_text(ICUSD_LEDGER).expect("invalid icUSD ledger principal");
+    match ic_cdk::call::<(), (Nat,)>(ledger, "icrc1_total_supply", ()).await {
+        Ok((supply,)) => {
+            let supply_u128 = supply.0.try_into().unwrap_or(0u128);
+            SUPPLY_CACHE.with(|c| {
+                let mut cache = c.borrow_mut();
+                cache.total_supply_e8s = supply_u128;
+                cache.last_updated_ns = ic_cdk::api::time();
+            });
+            log!(INFO, "Supply cache refreshed: {} e8s", supply_u128);
+        }
+        Err((code, msg)) => {
+            log!(INFO, "Failed to fetch icUSD total supply: {:?} {}", code, msg);
+        }
+    }
+}
+
+// ─── Holder Snapshot (daily) ───
+
+/// Types for calling icUSD ledger's get_transactions.
+#[derive(CandidType, Deserialize)]
+struct LedgerAccount {
+    owner: Principal,
+    subaccount: Option<serde_bytes::ByteBuf>,
+}
+
+#[derive(CandidType, Deserialize)]
+struct Mint {
+    to: LedgerAccount,
+    amount: Nat,
+}
+
+#[derive(CandidType, Deserialize)]
+struct Burn {
+    from: LedgerAccount,
+    amount: Nat,
+}
+
+#[derive(CandidType, Deserialize)]
+struct LedgerTransfer {
+    from: LedgerAccount,
+    to: LedgerAccount,
+    amount: Nat,
+    fee: Option<Nat>,
+}
+
+#[derive(CandidType, Deserialize)]
+struct Transaction {
+    kind: String,
+    mint: Option<Mint>,
+    burn: Option<Burn>,
+    transfer: Option<LedgerTransfer>,
+}
+
+#[derive(CandidType, Deserialize)]
+struct GetTransactionsRequest {
+    start: Nat,
+    length: Nat,
+}
+
+#[derive(CandidType, Deserialize)]
+struct GetTransactionsResponse {
+    log_length: Nat,
+    transactions: Vec<Transaction>,
+}
+
+/// 24-hour interval in seconds.
+const SNAPSHOT_INTERVAL_SECS: u64 = 86_400;
+/// Max holders to store per snapshot.
+const MAX_SNAPSHOT_HOLDERS: usize = 50;
+fn setup_snapshot_timer() {
+    // First snapshot 60 seconds after boot (let supply cache warm up first),
+    // then every 24 hours.
+    ic_cdk_timers::set_timer(std::time::Duration::from_secs(60), || {
+        ic_cdk::spawn(take_holder_snapshots());
+    });
+    ic_cdk_timers::set_timer_interval(
+        std::time::Duration::from_secs(SNAPSHOT_INTERVAL_SECS),
+        || { ic_cdk::spawn(take_holder_snapshots()); },
+    );
+}
+
+async fn take_holder_snapshots() {
+    log!(INFO, "Starting daily holder snapshot collection...");
+
+    // Collect icUSD holders
+    match collect_icusd_holders().await {
+        Ok(snapshot) => {
+            log!(INFO, "icUSD snapshot: {} holders, supply {}",
+                snapshot.holder_count, snapshot.total_supply);
+            mutate_state(|s| {
+                s.holder_snapshots.push(snapshot);
+            });
+        }
+        Err(e) => log!(INFO, "Failed to collect icUSD holder snapshot: {}", e),
+    }
+
+    // Collect 3USD holders
+    match collect_3usd_holders().await {
+        Ok(snapshot) => {
+            log!(INFO, "3USD snapshot: {} holders, supply {}",
+                snapshot.holder_count, snapshot.total_supply);
+            mutate_state(|s| {
+                s.holder_snapshots.push(snapshot);
+            });
+        }
+        Err(e) => log!(INFO, "Failed to collect 3USD holder snapshot: {}", e),
+    }
+
+    log!(INFO, "Holder snapshot collection complete.");
+}
+
+/// Replay all icUSD ledger transactions to build a holder balance map.
+async fn collect_icusd_holders() -> Result<HolderSnapshot, String> {
+    let ledger = Principal::from_text(ICUSD_LEDGER).map_err(|e| format!("{}", e))?;
+    let mut balances: BTreeMap<Principal, u128> = BTreeMap::new();
+    let mut start: u64 = 0;
+    let batch_size: u64 = 2000;
+    let mut total_supply: u128 = 0;
+
+    loop {
+        let request = GetTransactionsRequest {
+            start: Nat::from(start),
+            length: Nat::from(batch_size),
+        };
+
+        let (response,): (GetTransactionsResponse,) = ic_cdk::call(
+            ledger, "get_transactions", (request,)
+        ).await.map_err(|(code, msg)| format!("get_transactions failed: {:?} {}", code, msg))?;
+
+        if response.transactions.is_empty() {
+            break;
+        }
+
+        for tx in &response.transactions {
+            match tx.kind.as_str() {
+                "mint" => {
+                    if let Some(mint) = &tx.mint {
+                        let amount: u128 = mint.amount.0.clone().try_into().unwrap_or(0u128);
+                        *balances.entry(mint.to.owner).or_insert(0) += amount;
+                        total_supply += amount;
+                    }
+                }
+                "burn" => {
+                    if let Some(burn) = &tx.burn {
+                        let amount: u128 = burn.amount.0.clone().try_into().unwrap_or(0u128);
+                        let entry = balances.entry(burn.from.owner).or_insert(0);
+                        *entry = entry.saturating_sub(amount);
+                        total_supply = total_supply.saturating_sub(amount);
+                    }
+                }
+                "transfer" => {
+                    if let Some(xfer) = &tx.transfer {
+                        let amount: u128 = xfer.amount.0.clone().try_into().unwrap_or(0u128);
+                        let fee: u128 = xfer.fee.as_ref()
+                            .map(|f| f.0.clone().try_into().unwrap_or(0u128))
+                            .unwrap_or(0);
+                        let from_entry = balances.entry(xfer.from.owner).or_insert(0);
+                        *from_entry = from_entry.saturating_sub(amount + fee);
+                        *balances.entry(xfer.to.owner).or_insert(0) += amount;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let log_length: u64 = response.log_length.0.clone().try_into().unwrap_or(0u64);
+        start += response.transactions.len() as u64;
+        if start >= log_length {
+            break;
+        }
+    }
+
+    // Remove zero-balance accounts
+    balances.retain(|_, balance| *balance > 0);
+
+    // Sort by balance descending and take top holders
+    let mut sorted: Vec<(Principal, u128)> = balances.into_iter().collect();
+    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    let holder_count = sorted.len() as u64;
+
+    let top_holders: Vec<HolderEntry> = sorted
+        .into_iter()
+        .take(MAX_SNAPSHOT_HOLDERS)
+        .map(|(holder, balance)| HolderEntry { holder, balance })
+        .collect();
+
+    Ok(HolderSnapshot {
+        token: "icUSD".to_string(),
+        timestamp: ic_cdk::api::time(),
+        holder_count,
+        total_supply,
+        top_holders,
+    })
+}
+
+/// Call the 3pool canister's get_all_lp_holders to get 3USD holder data.
+async fn collect_3usd_holders() -> Result<HolderSnapshot, String> {
+    let threepool = Principal::from_text(THREEPOOL).map_err(|e| format!("{}", e))?;
+
+    // Get total supply
+    let (supply,): (Nat,) = ic_cdk::call(threepool, "icrc1_total_supply", ())
+        .await
+        .map_err(|(code, msg)| format!("icrc1_total_supply failed: {:?} {}", code, msg))?;
+    let total_supply: u128 = supply.0.try_into().unwrap_or(0u128);
+
+    // Get all holders (already sorted by balance descending from the 3pool)
+    let (holders,): (Vec<(Principal, u128)>,) = ic_cdk::call(threepool, "get_all_lp_holders", ())
+        .await
+        .map_err(|(code, msg)| format!("get_all_lp_holders failed: {:?} {}", code, msg))?;
+
+    let holder_count = holders.len() as u64;
+
+    let top_holders: Vec<HolderEntry> = holders
+        .into_iter()
+        .take(MAX_SNAPSHOT_HOLDERS)
+        .map(|(holder, balance)| HolderEntry { holder, balance })
+        .collect();
+
+    Ok(HolderSnapshot {
+        token: "3USD".to_string(),
+        timestamp: ic_cdk::api::time(),
+        holder_count,
+        total_supply,
+        top_holders,
+    })
+}
+
 // ─── Init / Upgrade ───
 
 #[init]
 fn init(args: AmmInitArgs) {
     mutate_state(|s| s.initialize(args));
+    setup_supply_timer();
+    setup_snapshot_timer();
     log!(INFO, "Rumi AMM initialized. Admin: {}", read_state(|s| s.admin));
 }
 
@@ -35,8 +296,11 @@ fn pre_upgrade() {
 #[post_upgrade]
 fn post_upgrade(_args: AmmInitArgs) {
     state::load_from_stable_memory();
-    log!(INFO, "Rumi AMM post-upgrade: state restored. {} pools",
-        read_state(|s| s.pools.len()));
+    setup_supply_timer();
+    setup_snapshot_timer();
+    log!(INFO, "Rumi AMM post-upgrade: state restored. {} pools, {} snapshots",
+        read_state(|s| s.pools.len()),
+        read_state(|s| s.holder_snapshots.len()));
 }
 
 // ─── Helpers ───
@@ -877,6 +1141,44 @@ fn get_amm_admin_event_count() -> u64 {
     read_state(|s| s.admin_events.len() as u64)
 }
 
+// ─── Holder Snapshots ───
+
+#[query]
+fn get_holder_snapshots(token: String, start: u64, length: u64) -> Vec<HolderSnapshot> {
+    read_state(|s| {
+        let filtered: Vec<&HolderSnapshot> = s.holder_snapshots
+            .iter()
+            .filter(|snap| snap.token == token)
+            .collect();
+        let start = start as usize;
+        let length = length as usize;
+        if start >= filtered.len() {
+            return vec![];
+        }
+        let end = std::cmp::min(start + length, filtered.len());
+        filtered[start..end].iter().map(|s| (*s).clone()).collect()
+    })
+}
+
+#[query]
+fn get_holder_snapshot_count(token: String) -> u64 {
+    read_state(|s| {
+        s.holder_snapshots.iter().filter(|snap| snap.token == token).count() as u64
+    })
+}
+
+/// Get the most recent snapshot for a given token.
+#[query]
+fn get_latest_holder_snapshot(token: String) -> Option<HolderSnapshot> {
+    read_state(|s| {
+        s.holder_snapshots
+            .iter()
+            .filter(|snap| snap.token == token)
+            .last()
+            .cloned()
+    })
+}
+
 // ─── ICRC-21 / ICRC-28 / ICRC-10 ───
 
 #[update]
@@ -894,4 +1196,40 @@ fn icrc28_trusted_origins() -> icrc21::Icrc28TrustedOriginsResponse {
 #[query]
 fn icrc10_supported_standards() -> Vec<icrc21::StandardRecord> {
     icrc21::icrc10_supported_standards()
+}
+
+// ─── HTTP Request (CoinGecko API) ───
+
+#[query]
+fn http_request(req: HttpRequest) -> HttpResponse {
+    let path = req.path();
+
+    match path {
+        "/api/supply" => {
+            let (supply_e8s, _updated_ns) = SUPPLY_CACHE.with(|c| {
+                let cache = c.borrow();
+                (cache.total_supply_e8s, cache.last_updated_ns)
+            });
+            // Return total supply with decimals included (CoinGecko requirement)
+            let supply_with_decimals = supply_e8s as f64 / 1e8;
+            HttpResponseBuilder::ok()
+                .header("Content-Type", "text/plain")
+                .header("Access-Control-Allow-Origin", "*")
+                .with_body_and_content_length(format!("{}", supply_with_decimals))
+                .build()
+        }
+        "/api/supply/raw" => {
+            let supply_e8s = SUPPLY_CACHE.with(|c| c.borrow().total_supply_e8s);
+            HttpResponseBuilder::ok()
+                .header("Content-Type", "text/plain")
+                .header("Access-Control-Allow-Origin", "*")
+                .with_body_and_content_length(format!("{}", supply_e8s))
+                .build()
+        }
+        _ => {
+            HttpResponseBuilder::not_found()
+                .with_body_and_content_length("Not found")
+                .build()
+        }
+    }
 }

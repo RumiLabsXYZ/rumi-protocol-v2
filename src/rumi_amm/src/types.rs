@@ -164,6 +164,23 @@ pub struct AmmAdminEvent {
     pub timestamp: u64,
 }
 
+// ─── Holder Snapshots ───
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct HolderEntry {
+    pub holder: Principal,
+    pub balance: u128,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct HolderSnapshot {
+    pub token: String,           // "icUSD" or "3USD"
+    pub timestamp: u64,          // nanoseconds
+    pub holder_count: u64,
+    pub total_supply: u128,
+    pub top_holders: Vec<HolderEntry>, // top 50
+}
+
 // ─── Errors ───
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
