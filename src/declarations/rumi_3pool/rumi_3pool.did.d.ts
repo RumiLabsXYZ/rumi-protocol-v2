@@ -54,6 +54,10 @@ export interface AuthorizedRedeemAndBurnArgs {
   'max_slippage_bps' : number,
   'token_ledger' : Principal,
 }
+export interface BalancePoint {
+  'timestamp' : bigint,
+  'balances' : Array<bigint>,
+}
 export interface BlockWithId { 'id' : bigint, 'block' : Icrc3Value }
 export interface ConsentInfo {
   'metadata' : ConsentMessageMetadata,
@@ -87,6 +91,23 @@ export type DeviceSpec = { 'GenericDisplay' : null } |
     }
   };
 export interface ErrorInfo { 'description' : string }
+export interface FeeBucket {
+  'volume_per_token' : Array<bigint>,
+  'min_bps' : number,
+  'swap_count' : bigint,
+  'max_bps' : number,
+}
+export interface FeeCurveParams {
+  'max_fee_bps' : number,
+  'imb_saturation' : bigint,
+  'min_fee_bps' : number,
+}
+export interface FeePoint { 'timestamp' : bigint, 'avg_fee_bps' : number }
+export interface FeeStats {
+  'rebalancing_swap_count' : bigint,
+  'rebalancing_swap_pct' : number,
+  'buckets' : Array<FeeBucket>,
+}
 export interface GetArchivesArgs { 'from' : [] | [Principal] }
 export interface GetArchivesResult { 'archives' : Array<ArchiveInfo> }
 export interface GetBlocksArgs { 'start' : bigint, 'length' : bigint }
@@ -116,11 +137,95 @@ export type Icrc3Value = { 'Int' : bigint } |
   { 'Blob' : Uint8Array | number[] } |
   { 'Text' : string } |
   { 'Array' : Array<Icrc3Value> };
+export type ImbalanceEventKind = { 'Swap' : null } |
+  { 'Liquidity' : null };
+export interface ImbalanceSnapshot {
+  'imbalance_after' : bigint,
+  'virtual_price_after' : bigint,
+  'timestamp' : bigint,
+  'event_kind' : ImbalanceEventKind,
+}
+export interface ImbalanceStats {
+  'avg' : bigint,
+  'max' : bigint,
+  'min' : bigint,
+  'samples' : Array<[bigint, bigint]>,
+  'current' : bigint,
+}
 export interface LineDisplayPage { 'lines' : Array<string> }
+export type LiquidityAction = { 'AddLiquidity' : null } |
+  { 'Donate' : null } |
+  { 'RemoveOneCoin' : null } |
+  { 'RemoveLiquidity' : null };
+export interface LiquidityEvent {
+  'id' : bigint,
+  'fee' : [] | [bigint],
+  'action' : LiquidityAction,
+  'lp_amount' : bigint,
+  'amounts' : Array<bigint>,
+  'timestamp' : bigint,
+  'caller' : Principal,
+  'coin_index' : [] | [number],
+}
+export interface LiquidityEventV2 {
+  'id' : bigint,
+  'fee' : [] | [bigint],
+  'action' : LiquidityAction,
+  'imbalance_after' : bigint,
+  'is_rebalancing' : boolean,
+  'virtual_price_after' : bigint,
+  'lp_amount' : bigint,
+  'pool_balances_after' : Array<bigint>,
+  'fee_bps' : [] | [number],
+  'imbalance_before' : bigint,
+  'migrated' : boolean,
+  'amounts' : Array<bigint>,
+  'timestamp' : bigint,
+  'caller' : Principal,
+  'coin_index' : [] | [number],
+}
 export type MetadataValue = { 'Int' : bigint } |
   { 'Nat' : bigint } |
   { 'Blob' : Uint8Array | number[] } |
   { 'Text' : string };
+export interface OptimalRebalanceQuote {
+  'dx' : bigint,
+  'imbalance_after' : bigint,
+  'token_in' : number,
+  'profit_bps_estimate' : bigint,
+  'fee_bps' : number,
+  'imbalance_before' : bigint,
+  'amount_out' : bigint,
+  'token_out' : number,
+}
+export interface PoolHealth {
+  'imbalance_trend_1h' : number,
+  'current_imbalance' : bigint,
+  'fee_at_max_imbalance_swap' : number,
+  'last_swap_age_seconds' : bigint,
+  'arb_opportunity_score' : number,
+  'fee_at_min' : number,
+}
+export interface PoolStateView {
+  'amp' : bigint,
+  'imbalance' : bigint,
+  'virtual_price' : bigint,
+  'fee_curve' : FeeCurveParams,
+  'lp_total_supply' : bigint,
+  'balances' : Array<bigint>,
+  'normalized_balances' : Array<bigint>,
+}
+export interface PoolStats {
+  'liquidity_added_count' : bigint,
+  'liquidity_removed_count' : bigint,
+  'arb_swap_count' : bigint,
+  'swap_volume_per_token' : Array<bigint>,
+  'swap_count' : bigint,
+  'total_fees_collected' : Array<bigint>,
+  'arb_volume_per_token' : Array<bigint>,
+  'avg_fee_bps' : number,
+  'unique_swappers' : bigint,
+}
 export interface PoolStatus {
   'virtual_price' : bigint,
   'admin_fee_bps' : bigint,
@@ -130,12 +235,32 @@ export interface PoolStatus {
   'lp_total_supply' : bigint,
   'balances' : Array<bigint>,
 }
+export interface QuoteSwapResult {
+  'imbalance_after' : bigint,
+  'token_in' : number,
+  'is_rebalancing' : boolean,
+  'virtual_price_after' : bigint,
+  'fee_bps' : number,
+  'imbalance_before' : bigint,
+  'virtual_price_before' : bigint,
+  'amount_out' : bigint,
+  'amount_in' : bigint,
+  'token_out' : number,
+  'fee_native' : bigint,
+}
 export interface RedeemAndBurnResult {
   'lp_amount_burned' : bigint,
   'burn_block_index' : bigint,
   'token_amount_burned' : bigint,
 }
 export interface StandardRecord { 'url' : string, 'name' : string }
+/**
+ * ─── Explorer types ───
+ */
+export type StatsWindow = { 'AllTime' : null } |
+  { 'Last7d' : null } |
+  { 'Last24h' : null } |
+  { 'Last30d' : null };
 export interface SupportedBlockType { 'url' : string, 'block_type' : string }
 export interface SwapEvent {
   'id' : bigint,
@@ -146,6 +271,43 @@ export interface SwapEvent {
   'caller' : Principal,
   'amount_in' : bigint,
   'token_out' : number,
+}
+export interface SwapEventV2 {
+  'id' : bigint,
+  'fee' : bigint,
+  'imbalance_after' : bigint,
+  'token_in' : number,
+  'is_rebalancing' : boolean,
+  'virtual_price_after' : bigint,
+  'pool_balances_after' : Array<bigint>,
+  'fee_bps' : number,
+  'imbalance_before' : bigint,
+  'migrated' : boolean,
+  'amount_out' : bigint,
+  'timestamp' : bigint,
+  'caller' : Principal,
+  'amount_in' : bigint,
+  'token_out' : number,
+}
+export type ThreePoolAdminAction = { 'SetAdminFee' : { 'fee_bps' : bigint } } |
+  { 'RampA' : { 'future_a_time' : bigint, 'future_a' : bigint } } |
+  { 'StopRampA' : { 'frozen_a' : bigint } } |
+  { 'RemoveAuthorizedBurnCaller' : { 'canister' : Principal } } |
+  { 'WithdrawAdminFees' : { 'amounts' : Array<bigint> } } |
+  { 'SetSwapFee' : { 'fee_bps' : bigint } } |
+  {
+    'FeeCurveParamsUpdated' : {
+      'new' : FeeCurveParams,
+      'old' : [] | [FeeCurveParams],
+    }
+  } |
+  { 'AddAuthorizedBurnCaller' : { 'canister' : Principal } } |
+  { 'SetPaused' : { 'paused' : boolean } };
+export interface ThreePoolAdminEvent {
+  'id' : bigint,
+  'action' : ThreePoolAdminAction,
+  'timestamp' : bigint,
+  'caller' : Principal,
 }
 export type ThreePoolError = {
     'InsufficientOutput' : { 'actual' : bigint, 'expected_min' : bigint }
@@ -222,10 +384,18 @@ export type TransferFromError = {
   { 'CreatedInFuture' : { 'ledger_time' : bigint } } |
   { 'TooOld' : null } |
   { 'InsufficientFunds' : { 'balance' : bigint } };
+export interface VirtualPricePoint {
+  'virtual_price' : bigint,
+  'timestamp' : bigint,
+}
 export interface VirtualPriceSnapshot {
   'virtual_price' : bigint,
   'timestamp_secs' : bigint,
   'lp_total_supply' : bigint,
+}
+export interface VolumePoint {
+  'volume_per_token' : Array<bigint>,
+  'timestamp' : bigint,
 }
 export interface _SERVICE {
   'add_authorized_burn_caller' : ActorMethod<
@@ -268,12 +438,61 @@ export interface _SERVICE {
     { 'Ok' : null } |
       { 'Err' : ThreePoolError }
   >,
+  'get_admin_event_count' : ActorMethod<[], bigint>,
+  'get_admin_events' : ActorMethod<
+    [bigint, bigint],
+    Array<ThreePoolAdminEvent>
+  >,
   'get_admin_fees' : ActorMethod<[], Array<bigint>>,
+  'get_all_lp_holders' : ActorMethod<[], Array<[Principal, bigint]>>,
   'get_authorized_burn_callers' : ActorMethod<[], Array<Principal>>,
+  'get_balance_series' : ActorMethod<
+    [StatsWindow, bigint],
+    Array<BalancePoint>
+  >,
+  'get_fee_curve_params' : ActorMethod<[], FeeCurveParams>,
+  'get_fee_series' : ActorMethod<[StatsWindow, bigint], Array<FeePoint>>,
+  'get_fee_stats' : ActorMethod<[StatsWindow], FeeStats>,
+  'get_imbalance_history' : ActorMethod<
+    [bigint, bigint],
+    Array<ImbalanceSnapshot>
+  >,
+  'get_imbalance_stats' : ActorMethod<[StatsWindow], ImbalanceStats>,
+  'get_liquidity_event_count' : ActorMethod<[], bigint>,
+  'get_liquidity_events' : ActorMethod<[bigint, bigint], Array<LiquidityEvent>>,
+  /**
+   * Explorer endpoints (E1-E14)
+   */
+  'get_liquidity_events_by_principal' : ActorMethod<
+    [Principal, bigint, bigint],
+    Array<LiquidityEventV2>
+  >,
   'get_lp_balance' : ActorMethod<[Principal], bigint>,
+  'get_pool_health' : ActorMethod<[], PoolHealth>,
+  'get_pool_state' : ActorMethod<[], PoolStateView>,
+  'get_pool_stats' : ActorMethod<[StatsWindow], PoolStats>,
   'get_pool_status' : ActorMethod<[], PoolStatus>,
   'get_swap_event_count' : ActorMethod<[], bigint>,
   'get_swap_events' : ActorMethod<[bigint, bigint], Array<SwapEvent>>,
+  'get_swap_events_by_principal' : ActorMethod<
+    [Principal, bigint, bigint],
+    Array<SwapEventV2>
+  >,
+  'get_swap_events_by_time_range' : ActorMethod<
+    [bigint, bigint, bigint],
+    Array<SwapEventV2>
+  >,
+  'get_swap_events_v2' : ActorMethod<[bigint, bigint], Array<SwapEventV2>>,
+  'get_top_lps' : ActorMethod<[bigint], Array<[Principal, bigint, number]>>,
+  'get_top_swappers' : ActorMethod<
+    [StatsWindow, bigint],
+    Array<[Principal, bigint, bigint]>
+  >,
+  'get_virtual_price_series' : ActorMethod<
+    [StatsWindow, bigint],
+    Array<VirtualPricePoint>
+  >,
+  'get_volume_series' : ActorMethod<[StatsWindow, bigint], Array<VolumePoint>>,
   'get_vp_snapshots' : ActorMethod<[], Array<VirtualPriceSnapshot>>,
   'health' : ActorMethod<[], string>,
   'icrc10_supported_standards' : ActorMethod<[], Array<StandardRecord>>,
@@ -321,6 +540,16 @@ export interface _SERVICE {
   'icrc3_get_blocks' : ActorMethod<[Array<GetBlocksArgs>], GetBlocksResult>,
   'icrc3_get_tip_certificate' : ActorMethod<[], [] | [Icrc3DataCertificate]>,
   'icrc3_supported_block_types' : ActorMethod<[], Array<SupportedBlockType>>,
+  'quote_optimal_rebalance' : ActorMethod<
+    [number, number],
+    { 'Ok' : OptimalRebalanceQuote } |
+      { 'Err' : ThreePoolError }
+  >,
+  'quote_swap' : ActorMethod<
+    [number, number, bigint],
+    { 'Ok' : QuoteSwapResult } |
+      { 'Err' : ThreePoolError }
+  >,
   'ramp_a' : ActorMethod<
     [bigint, bigint],
     { 'Ok' : null } |
@@ -346,6 +575,11 @@ export interface _SERVICE {
     { 'Ok' : null } |
       { 'Err' : ThreePoolError }
   >,
+  'set_fee_curve_params' : ActorMethod<
+    [FeeCurveParams],
+    { 'Ok' : null } |
+      { 'Err' : ThreePoolError }
+  >,
   'set_paused' : ActorMethod<
     [boolean],
     { 'Ok' : null } |
@@ -354,6 +588,11 @@ export interface _SERVICE {
   'set_swap_fee' : ActorMethod<
     [bigint],
     { 'Ok' : null } |
+      { 'Err' : ThreePoolError }
+  >,
+  'simulate_swap_path' : ActorMethod<
+    [Array<[number, number, bigint]>],
+    { 'Ok' : Array<QuoteSwapResult> } |
       { 'Err' : ThreePoolError }
   >,
   'stop_ramp_a' : ActorMethod<[], { 'Ok' : null } | { 'Err' : ThreePoolError }>,

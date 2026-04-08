@@ -34,6 +34,20 @@ export interface VirtualPriceSnapshot {
   lp_total_supply: bigint;
 }
 
+export interface QuoteSwapResult {
+  token_in: number;
+  token_out: number;
+  amount_in: bigint;
+  amount_out: bigint;
+  fee_native: bigint;
+  fee_bps: number;
+  imbalance_before: bigint;
+  imbalance_after: bigint;
+  is_rebalancing: boolean;
+  virtual_price_before: bigint;
+  virtual_price_after: bigint;
+}
+
 // ──────────────────────────────────────────────────────────────
 // Token metadata for the 3pool (matches canister init config)
 // ──────────────────────────────────────────────────────────────
@@ -211,6 +225,15 @@ class ThreePoolService {
   async calcSwap(fromIndex: number, toIndex: number, dxRaw: bigint): Promise<bigint> {
     const actor = await this.getQueryActor();
     const result = await actor.calc_swap(fromIndex, toIndex, dxRaw) as { Ok: bigint } | { Err: any };
+    if ('Err' in result) {
+      throw new Error(this.formatError(result.Err));
+    }
+    return result.Ok;
+  }
+
+  async quoteSwap(fromIndex: number, toIndex: number, dxRaw: bigint): Promise<QuoteSwapResult> {
+    const actor = await this.getQueryActor();
+    const result = await actor.quote_swap(fromIndex, toIndex, dxRaw) as { Ok: QuoteSwapResult } | { Err: any };
     if ('Err' in result) {
       throw new Error(this.formatError(result.Err));
     }
