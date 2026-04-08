@@ -1,0 +1,49 @@
+type InitArgs = record {
+  admin : principal;
+  backend : principal;
+  icusd_ledger : principal;
+  three_pool : principal;
+  stability_pool : principal;
+  amm : principal;
+};
+
+type RangeQuery = record {
+  from_ts : opt nat64;
+  to_ts : opt nat64;
+  limit : opt nat32;
+  offset : opt nat64;
+};
+
+type DailyTvlRow = record {
+  timestamp_ns : nat64;
+  total_icp_collateral_e8s : nat;
+  total_icusd_supply_e8s : nat;
+  system_collateral_ratio_bps : nat32;
+};
+
+type TvlSeriesResponse = record {
+  rows : vec DailyTvlRow;
+  next_from_ts : opt nat64;
+};
+
+type HeaderField = record { text; text };
+
+type HttpRequest = record {
+  method : text;
+  url : text;
+  headers : vec HeaderField;
+  body : blob;
+};
+
+type HttpResponse = record {
+  status_code : nat16;
+  headers : vec HeaderField;
+  body : blob;
+};
+
+service : (InitArgs) -> {
+  ping : () -> (text) query;
+  get_admin : () -> (principal) query;
+  get_tvl_series : (RangeQuery) -> (TvlSeriesResponse) query;
+  http_request : (HttpRequest) -> (HttpResponse) query;
+}
