@@ -8,6 +8,7 @@ mod storage;
 mod collectors;
 mod sources;
 mod queries;
+mod timers;
 mod types;
 
 use crate::storage::{SlimState, SourceCanisterIds};
@@ -37,6 +38,7 @@ fn init(args: InitArgs) {
     };
     storage::set_slim(s);
     state::hydrate_from_slim();
+    timers::setup_timers();
 }
 
 #[ic_cdk_macros::pre_upgrade]
@@ -47,6 +49,7 @@ fn pre_upgrade() {
 #[ic_cdk_macros::post_upgrade]
 fn post_upgrade() {
     state::hydrate_from_slim();
+    timers::setup_timers();
 }
 
 #[ic_cdk_macros::query]
