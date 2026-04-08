@@ -7,6 +7,8 @@ mod state;
 mod storage;
 mod collectors;
 mod sources;
+mod queries;
+mod types;
 
 use crate::storage::{SlimState, SourceCanisterIds};
 
@@ -55,6 +57,11 @@ fn ping() -> &'static str {
 #[ic_cdk_macros::query]
 fn get_admin() -> Principal {
     state::read_state(|s| s.admin)
+}
+
+#[ic_cdk_macros::query]
+fn get_tvl_series(query: types::RangeQuery) -> types::TvlSeriesResponse {
+    queries::historical::get_tvl_series(query)
 }
 
 ic_cdk::export_candid!();
