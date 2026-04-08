@@ -3684,9 +3684,9 @@ async fn set_collateral_liquidation_ratio(
             "Only the developer principal can set liquidation ratio".to_string(),
         ));
     }
-    if liquidation_ratio < 1.0 || liquidation_ratio > 5.0 {
+    if liquidation_ratio <= 1.0 || liquidation_ratio > 5.0 {
         return Err(ProtocolError::GenericError(format!(
-            "liquidation_ratio ({}) must be between 1.0 and 5.0",
+            "liquidation_ratio ({}) must be > 1.0 and ≤ 5.0",
             liquidation_ratio
         )));
     }
@@ -3732,9 +3732,9 @@ async fn set_collateral_borrow_threshold(
             "Only the developer principal can set borrow threshold".to_string(),
         ));
     }
-    if borrow_threshold_ratio < 1.0 || borrow_threshold_ratio > 5.0 {
+    if borrow_threshold_ratio <= 1.0 || borrow_threshold_ratio > 5.0 {
         return Err(ProtocolError::GenericError(format!(
-            "borrow_threshold_ratio ({}) must be between 1.0 and 5.0",
+            "borrow_threshold_ratio ({}) must be > 1.0 and ≤ 5.0",
             borrow_threshold_ratio
         )));
     }

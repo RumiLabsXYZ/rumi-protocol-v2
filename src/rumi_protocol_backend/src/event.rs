@@ -1148,9 +1148,14 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                 }
             },
             Event::SetCollateralBorrowThreshold { collateral_type, borrow_threshold_ratio } => {
-                if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
-                    if let Ok(dec) = borrow_threshold_ratio.parse::<Decimal>() {
-                        config.borrow_threshold_ratio = Ratio::from(dec);
+                if let Ok(dec) = borrow_threshold_ratio.parse::<Decimal>() {
+                    let new_ratio = Ratio::from(dec);
+                    // Snapshot the global multiplier before taking a mutable borrow of configs
+                    // so the replay path mirrors record_set_collateral_borrow_threshold exactly.
+                    let multiplier = state.recovery_cr_multiplier;
+                    if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+                        config.borrow_threshold_ratio = new_ratio;
+                        config.recovery_target_cr = new_ratio * multiplier;
                     }
                 }
             },
