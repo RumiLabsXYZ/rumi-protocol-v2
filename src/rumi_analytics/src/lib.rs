@@ -4,6 +4,7 @@
 use candid::Principal;
 
 mod state;
+mod http;
 mod storage;
 mod collectors;
 mod sources;
@@ -65,6 +66,11 @@ fn get_admin() -> Principal {
 #[ic_cdk_macros::query]
 fn get_tvl_series(query: types::RangeQuery) -> types::TvlSeriesResponse {
     queries::historical::get_tvl_series(query)
+}
+
+#[ic_cdk_macros::query]
+fn http_request(req: ic_canisters_http_types::HttpRequest) -> ic_canisters_http_types::HttpResponse {
+    http::http_request(req)
 }
 
 ic_cdk::export_candid!();

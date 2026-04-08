@@ -26,8 +26,24 @@ type TvlSeriesResponse = record {
   next_from_ts : opt nat64;
 };
 
+type HeaderField = record { text; text };
+
+type HttpRequest = record {
+  method : text;
+  url : text;
+  headers : vec HeaderField;
+  body : blob;
+};
+
+type HttpResponse = record {
+  status_code : nat16;
+  headers : vec HeaderField;
+  body : blob;
+};
+
 service : (InitArgs) -> {
   ping : () -> (text) query;
   get_admin : () -> (principal) query;
   get_tvl_series : (RangeQuery) -> (TvlSeriesResponse) query;
+  http_request : (HttpRequest) -> (HttpResponse) query;
 }
