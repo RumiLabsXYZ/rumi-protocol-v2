@@ -5,6 +5,8 @@ use candid::Principal;
 
 mod state;
 mod storage;
+mod collectors;
+mod sources;
 
 use crate::storage::{SlimState, SourceCanisterIds};
 
