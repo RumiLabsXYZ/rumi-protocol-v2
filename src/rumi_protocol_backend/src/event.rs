@@ -493,6 +493,69 @@ pub enum Event {
         timestamp: u64,
     },
 
+    /// Admin set per-collateral liquidation ratio.
+    #[serde(rename = "set_collateral_liquidation_ratio")]
+    SetCollateralLiquidationRatio {
+        collateral_type: CollateralType,
+        liquidation_ratio: String,
+    },
+
+    /// Admin set per-collateral borrow threshold ratio (recovery-mode trigger).
+    #[serde(rename = "set_collateral_borrow_threshold")]
+    SetCollateralBorrowThreshold {
+        collateral_type: CollateralType,
+        borrow_threshold_ratio: String,
+    },
+
+    /// Admin set per-collateral liquidation bonus.
+    #[serde(rename = "set_collateral_liquidation_bonus")]
+    SetCollateralLiquidationBonus {
+        collateral_type: CollateralType,
+        liquidation_bonus: String,
+    },
+
+    /// Admin set per-collateral minimum vault debt (dust threshold).
+    #[serde(rename = "set_collateral_min_vault_debt")]
+    SetCollateralMinVaultDebt {
+        collateral_type: CollateralType,
+        min_vault_debt: u64,
+    },
+
+    /// Admin set per-collateral ledger fee (native units).
+    #[serde(rename = "set_collateral_ledger_fee")]
+    SetCollateralLedgerFee {
+        collateral_type: CollateralType,
+        ledger_fee: u64,
+    },
+
+    /// Admin set per-collateral redemption fee floor.
+    #[serde(rename = "set_collateral_redemption_fee_floor")]
+    SetCollateralRedemptionFeeFloor {
+        collateral_type: CollateralType,
+        redemption_fee_floor: String,
+    },
+
+    /// Admin set per-collateral redemption fee ceiling.
+    #[serde(rename = "set_collateral_redemption_fee_ceiling")]
+    SetCollateralRedemptionFeeCeiling {
+        collateral_type: CollateralType,
+        redemption_fee_ceiling: String,
+    },
+
+    /// Admin set per-collateral minimum deposit amount (native units).
+    #[serde(rename = "set_collateral_min_deposit")]
+    SetCollateralMinDeposit {
+        collateral_type: CollateralType,
+        min_collateral_deposit: u64,
+    },
+
+    /// Admin set per-collateral display color (hex) for frontend.
+    #[serde(rename = "set_collateral_display_color")]
+    SetCollateralDisplayColor {
+        collateral_type: CollateralType,
+        display_color: Option<String>,
+    },
+
     /// Admin correction of vault debt to fix replay interest drift.
     #[serde(rename = "admin_debt_correction")]
     AdminDebtCorrection {
@@ -579,6 +642,15 @@ impl Event {
             Event::SetInterestSplit { .. } => false,
             Event::SetThreePoolCanister { .. } => false,
             Event::PriceUpdate { .. } => false,
+            Event::SetCollateralLiquidationRatio { .. } => false,
+            Event::SetCollateralBorrowThreshold { .. } => false,
+            Event::SetCollateralLiquidationBonus { .. } => false,
+            Event::SetCollateralMinVaultDebt { .. } => false,
+            Event::SetCollateralLedgerFee { .. } => false,
+            Event::SetCollateralRedemptionFeeFloor { .. } => false,
+            Event::SetCollateralRedemptionFeeCeiling { .. } => false,
+            Event::SetCollateralMinDeposit { .. } => false,
+            Event::SetCollateralDisplayColor { .. } => false,
             Event::AdminDebtCorrection { vault_id: vid, .. } => vid == filter_vault_id,
         }
     }
@@ -1067,6 +1139,61 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             },
             Event::PriceUpdate { .. } => {
                 // Price history only; no state mutation needed during replay.
+            },
+            Event::SetCollateralLiquidationRatio { collateral_type, liquidation_ratio } => {
+                if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+                    if let Ok(dec) = liquidation_ratio.parse::<Decimal>() {
+                        config.liquidation_ratio = Ratio::from(dec);
+                    }
+                }
+            },
+            Event::SetCollateralBorrowThreshold { collateral_type, borrow_threshold_ratio } => {
+                if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+                    if let Ok(dec) = borrow_threshold_ratio.parse::<Decimal>() {
+                        config.borrow_threshold_ratio = Ratio::from(dec);
+                    }
+                }
+            },
+            Event::SetCollateralLiquidationBonus { collateral_type, liquidation_bonus } => {
+                if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+                    if let Ok(dec) = liquidation_bonus.parse::<Decimal>() {
+                        config.liquidation_bonus = Ratio::from(dec);
+                    }
+                }
+            },
+            Event::SetCollateralMinVaultDebt { collateral_type, min_vault_debt } => {
+                if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+                    config.min_vault_debt = ICUSD::new(min_vault_debt);
+                }
+            },
+            Event::SetCollateralLedgerFee { collateral_type, ledger_fee } => {
+                if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+                    config.ledger_fee = ledger_fee;
+                }
+            },
+            Event::SetCollateralRedemptionFeeFloor { collateral_type, redemption_fee_floor } => {
+                if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+                    if let Ok(dec) = redemption_fee_floor.parse::<Decimal>() {
+                        config.redemption_fee_floor = Ratio::from(dec);
+                    }
+                }
+            },
+            Event::SetCollateralRedemptionFeeCeiling { collateral_type, redemption_fee_ceiling } => {
+                if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+                    if let Ok(dec) = redemption_fee_ceiling.parse::<Decimal>() {
+                        config.redemption_fee_ceiling = Ratio::from(dec);
+                    }
+                }
+            },
+            Event::SetCollateralMinDeposit { collateral_type, min_collateral_deposit } => {
+                if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+                    config.min_collateral_deposit = min_collateral_deposit;
+                }
+            },
+            Event::SetCollateralDisplayColor { collateral_type, display_color } => {
+                if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+                    config.display_color = display_color;
+                }
             },
             Event::AdminDebtCorrection { vault_id: vid, new_borrowed, new_accrued, .. } => {
                 if let Some(vault) = state.vault_id_to_vaults.get_mut(&vid) {
@@ -1755,6 +1882,134 @@ pub fn record_set_interest_rate(
     });
     if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
         config.interest_rate_apr = interest_rate_apr;
+    }
+}
+
+pub fn record_set_collateral_liquidation_ratio(
+    state: &mut State,
+    collateral_type: CollateralType,
+    liquidation_ratio: Ratio,
+) {
+    record_event(&Event::SetCollateralLiquidationRatio {
+        collateral_type,
+        liquidation_ratio: liquidation_ratio.0.to_string(),
+    });
+    if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+        config.liquidation_ratio = liquidation_ratio;
+    }
+}
+
+pub fn record_set_collateral_borrow_threshold(
+    state: &mut State,
+    collateral_type: CollateralType,
+    borrow_threshold_ratio: Ratio,
+) {
+    record_event(&Event::SetCollateralBorrowThreshold {
+        collateral_type,
+        borrow_threshold_ratio: borrow_threshold_ratio.0.to_string(),
+    });
+    if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+        config.borrow_threshold_ratio = borrow_threshold_ratio;
+        // Keep the stored (but largely derived) recovery_target_cr in sync.
+        config.recovery_target_cr = borrow_threshold_ratio * state.recovery_cr_multiplier;
+    }
+}
+
+pub fn record_set_collateral_liquidation_bonus(
+    state: &mut State,
+    collateral_type: CollateralType,
+    liquidation_bonus: Ratio,
+) {
+    record_event(&Event::SetCollateralLiquidationBonus {
+        collateral_type,
+        liquidation_bonus: liquidation_bonus.0.to_string(),
+    });
+    if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+        config.liquidation_bonus = liquidation_bonus;
+    }
+}
+
+pub fn record_set_collateral_min_vault_debt(
+    state: &mut State,
+    collateral_type: CollateralType,
+    min_vault_debt: u64,
+) {
+    record_event(&Event::SetCollateralMinVaultDebt {
+        collateral_type,
+        min_vault_debt,
+    });
+    if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+        config.min_vault_debt = ICUSD::new(min_vault_debt);
+    }
+}
+
+pub fn record_set_collateral_ledger_fee(
+    state: &mut State,
+    collateral_type: CollateralType,
+    ledger_fee: u64,
+) {
+    record_event(&Event::SetCollateralLedgerFee {
+        collateral_type,
+        ledger_fee,
+    });
+    if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+        config.ledger_fee = ledger_fee;
+    }
+}
+
+pub fn record_set_collateral_redemption_fee_floor(
+    state: &mut State,
+    collateral_type: CollateralType,
+    redemption_fee_floor: Ratio,
+) {
+    record_event(&Event::SetCollateralRedemptionFeeFloor {
+        collateral_type,
+        redemption_fee_floor: redemption_fee_floor.0.to_string(),
+    });
+    if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+        config.redemption_fee_floor = redemption_fee_floor;
+    }
+}
+
+pub fn record_set_collateral_redemption_fee_ceiling(
+    state: &mut State,
+    collateral_type: CollateralType,
+    redemption_fee_ceiling: Ratio,
+) {
+    record_event(&Event::SetCollateralRedemptionFeeCeiling {
+        collateral_type,
+        redemption_fee_ceiling: redemption_fee_ceiling.0.to_string(),
+    });
+    if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+        config.redemption_fee_ceiling = redemption_fee_ceiling;
+    }
+}
+
+pub fn record_set_collateral_min_deposit(
+    state: &mut State,
+    collateral_type: CollateralType,
+    min_collateral_deposit: u64,
+) {
+    record_event(&Event::SetCollateralMinDeposit {
+        collateral_type,
+        min_collateral_deposit,
+    });
+    if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+        config.min_collateral_deposit = min_collateral_deposit;
+    }
+}
+
+pub fn record_set_collateral_display_color(
+    state: &mut State,
+    collateral_type: CollateralType,
+    display_color: Option<String>,
+) {
+    record_event(&Event::SetCollateralDisplayColor {
+        collateral_type,
+        display_color: display_color.clone(),
+    });
+    if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+        config.display_color = display_color;
     }
 }
 

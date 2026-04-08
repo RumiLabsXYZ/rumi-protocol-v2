@@ -3669,6 +3669,352 @@ async fn set_lst_haircut(
     Ok(())
 }
 
+/// Set the liquidation ratio for a specific collateral type (developer only).
+/// e.g. 1.25 = 125%. Must be strictly less than borrow_threshold_ratio.
+#[candid_method(update)]
+#[update]
+async fn set_collateral_liquidation_ratio(
+    collateral_type: Principal,
+    liquidation_ratio: f64,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set liquidation ratio".to_string(),
+        ));
+    }
+    if liquidation_ratio < 1.0 || liquidation_ratio > 5.0 {
+        return Err(ProtocolError::GenericError(format!(
+            "liquidation_ratio ({}) must be between 1.0 and 5.0",
+            liquidation_ratio
+        )));
+    }
+    let borrow_threshold = read_state(|s| {
+        s.collateral_configs
+            .get(&collateral_type)
+            .map(|c| c.borrow_threshold_ratio.to_f64())
+    });
+    let borrow_threshold = match borrow_threshold {
+        Some(bt) => bt,
+        None => return Err(ProtocolError::GenericError("Unknown collateral type".to_string())),
+    };
+    if liquidation_ratio >= borrow_threshold {
+        return Err(ProtocolError::GenericError(format!(
+            "liquidation_ratio ({}) must be strictly less than borrow_threshold_ratio ({})",
+            liquidation_ratio, borrow_threshold
+        )));
+    }
+    let ratio = Ratio::from(
+        Decimal::try_from(liquidation_ratio)
+            .map_err(|_| ProtocolError::GenericError("Invalid liquidation_ratio value".to_string()))?,
+    );
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_collateral_liquidation_ratio(s, collateral_type, ratio);
+    });
+    log!(INFO, "[set_collateral_liquidation_ratio] collateral={}, liquidation_ratio={}", collateral_type, liquidation_ratio);
+    Ok(())
+}
+
+/// Set the borrow threshold ratio for a specific collateral type (developer only).
+/// e.g. 1.55 = 155%. Must be strictly greater than liquidation_ratio
+/// and strictly less than healthy_cr if healthy_cr is set.
+#[candid_method(update)]
+#[update]
+async fn set_collateral_borrow_threshold(
+    collateral_type: Principal,
+    borrow_threshold_ratio: f64,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set borrow threshold".to_string(),
+        ));
+    }
+    if borrow_threshold_ratio < 1.0 || borrow_threshold_ratio > 5.0 {
+        return Err(ProtocolError::GenericError(format!(
+            "borrow_threshold_ratio ({}) must be between 1.0 and 5.0",
+            borrow_threshold_ratio
+        )));
+    }
+    let (liq_ratio, healthy_cr) = read_state(|s| {
+        s.collateral_configs
+            .get(&collateral_type)
+            .map(|c| (
+                c.liquidation_ratio.to_f64(),
+                c.healthy_cr.map(|r| r.to_f64()),
+            ))
+            .unwrap_or((0.0, None))
+    });
+    let exists = read_state(|s| s.collateral_configs.contains_key(&collateral_type));
+    if !exists {
+        return Err(ProtocolError::GenericError("Unknown collateral type".to_string()));
+    }
+    if borrow_threshold_ratio <= liq_ratio {
+        return Err(ProtocolError::GenericError(format!(
+            "borrow_threshold_ratio ({}) must be strictly greater than liquidation_ratio ({})",
+            borrow_threshold_ratio, liq_ratio
+        )));
+    }
+    if let Some(hcr) = healthy_cr {
+        if borrow_threshold_ratio >= hcr {
+            return Err(ProtocolError::GenericError(format!(
+                "borrow_threshold_ratio ({}) must be strictly less than healthy_cr ({})",
+                borrow_threshold_ratio, hcr
+            )));
+        }
+    }
+    let ratio = Ratio::from(
+        Decimal::try_from(borrow_threshold_ratio)
+            .map_err(|_| ProtocolError::GenericError("Invalid borrow_threshold_ratio value".to_string()))?,
+    );
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_collateral_borrow_threshold(s, collateral_type, ratio);
+    });
+    log!(INFO, "[set_collateral_borrow_threshold] collateral={}, borrow_threshold_ratio={}", collateral_type, borrow_threshold_ratio);
+    Ok(())
+}
+
+/// Set the liquidation bonus for a specific collateral type (developer only).
+/// e.g. 1.10 = 10% bonus. Range 1.0–1.5.
+#[candid_method(update)]
+#[update]
+async fn set_collateral_liquidation_bonus(
+    collateral_type: Principal,
+    liquidation_bonus: f64,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set liquidation bonus".to_string(),
+        ));
+    }
+    if liquidation_bonus < 1.0 || liquidation_bonus > 1.5 {
+        return Err(ProtocolError::GenericError(
+            "liquidation_bonus must be between 1.0 and 1.5".to_string(),
+        ));
+    }
+    let exists = read_state(|s| s.collateral_configs.contains_key(&collateral_type));
+    if !exists {
+        return Err(ProtocolError::GenericError("Unknown collateral type".to_string()));
+    }
+    let ratio = Ratio::from(
+        Decimal::try_from(liquidation_bonus)
+            .map_err(|_| ProtocolError::GenericError("Invalid liquidation_bonus value".to_string()))?,
+    );
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_collateral_liquidation_bonus(s, collateral_type, ratio);
+    });
+    log!(INFO, "[set_collateral_liquidation_bonus] collateral={}, liquidation_bonus={}", collateral_type, liquidation_bonus);
+    Ok(())
+}
+
+/// Set the minimum vault debt (dust threshold) for a specific collateral type (developer only).
+/// `min_vault_debt` is in icUSD e8s.
+#[candid_method(update)]
+#[update]
+async fn set_collateral_min_vault_debt(
+    collateral_type: Principal,
+    min_vault_debt: u64,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set min vault debt".to_string(),
+        ));
+    }
+    let exists = read_state(|s| s.collateral_configs.contains_key(&collateral_type));
+    if !exists {
+        return Err(ProtocolError::GenericError("Unknown collateral type".to_string()));
+    }
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_collateral_min_vault_debt(s, collateral_type, min_vault_debt);
+    });
+    log!(INFO, "[set_collateral_min_vault_debt] collateral={}, min_vault_debt={}", collateral_type, min_vault_debt);
+    Ok(())
+}
+
+/// Set the ledger fee for a specific collateral type (developer only).
+/// `ledger_fee` is in the collateral token's native units.
+/// Note: the backend also auto-syncs this from BadFee errors during transfers.
+#[candid_method(update)]
+#[update]
+async fn set_collateral_ledger_fee(
+    collateral_type: Principal,
+    ledger_fee: u64,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set ledger fee".to_string(),
+        ));
+    }
+    let exists = read_state(|s| s.collateral_configs.contains_key(&collateral_type));
+    if !exists {
+        return Err(ProtocolError::GenericError("Unknown collateral type".to_string()));
+    }
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_collateral_ledger_fee(s, collateral_type, ledger_fee);
+    });
+    log!(INFO, "[set_collateral_ledger_fee] collateral={}, ledger_fee={}", collateral_type, ledger_fee);
+    Ok(())
+}
+
+/// Set the redemption fee floor for a specific collateral type (developer only).
+/// e.g. 0.005 = 0.5%. Must be ≤ redemption_fee_ceiling.
+#[candid_method(update)]
+#[update]
+async fn set_collateral_redemption_fee_floor(
+    collateral_type: Principal,
+    redemption_fee_floor: f64,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set redemption fee floor".to_string(),
+        ));
+    }
+    if redemption_fee_floor < 0.0 || redemption_fee_floor > 0.10 {
+        return Err(ProtocolError::GenericError(
+            "redemption_fee_floor must be between 0 and 0.10 (10%)".to_string(),
+        ));
+    }
+    let ceiling = read_state(|s| {
+        s.collateral_configs
+            .get(&collateral_type)
+            .map(|c| c.redemption_fee_ceiling.to_f64())
+    });
+    let ceiling = match ceiling {
+        Some(c) => c,
+        None => return Err(ProtocolError::GenericError("Unknown collateral type".to_string())),
+    };
+    if redemption_fee_floor > ceiling {
+        return Err(ProtocolError::GenericError(format!(
+            "redemption_fee_floor ({}) must be ≤ redemption_fee_ceiling ({})",
+            redemption_fee_floor, ceiling
+        )));
+    }
+    let ratio = Ratio::from(
+        Decimal::try_from(redemption_fee_floor)
+            .map_err(|_| ProtocolError::GenericError("Invalid redemption_fee_floor value".to_string()))?,
+    );
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_collateral_redemption_fee_floor(s, collateral_type, ratio);
+    });
+    log!(INFO, "[set_collateral_redemption_fee_floor] collateral={}, redemption_fee_floor={}", collateral_type, redemption_fee_floor);
+    Ok(())
+}
+
+/// Set the redemption fee ceiling for a specific collateral type (developer only).
+/// e.g. 0.05 = 5%. Must be ≥ redemption_fee_floor. Range 0.0–0.50.
+#[candid_method(update)]
+#[update]
+async fn set_collateral_redemption_fee_ceiling(
+    collateral_type: Principal,
+    redemption_fee_ceiling: f64,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set redemption fee ceiling".to_string(),
+        ));
+    }
+    if redemption_fee_ceiling < 0.0 || redemption_fee_ceiling > 0.50 {
+        return Err(ProtocolError::GenericError(
+            "redemption_fee_ceiling must be between 0 and 0.50 (50%)".to_string(),
+        ));
+    }
+    let floor = read_state(|s| {
+        s.collateral_configs
+            .get(&collateral_type)
+            .map(|c| c.redemption_fee_floor.to_f64())
+    });
+    let floor = match floor {
+        Some(f) => f,
+        None => return Err(ProtocolError::GenericError("Unknown collateral type".to_string())),
+    };
+    if redemption_fee_ceiling < floor {
+        return Err(ProtocolError::GenericError(format!(
+            "redemption_fee_ceiling ({}) must be ≥ redemption_fee_floor ({})",
+            redemption_fee_ceiling, floor
+        )));
+    }
+    let ratio = Ratio::from(
+        Decimal::try_from(redemption_fee_ceiling)
+            .map_err(|_| ProtocolError::GenericError("Invalid redemption_fee_ceiling value".to_string()))?,
+    );
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_collateral_redemption_fee_ceiling(s, collateral_type, ratio);
+    });
+    log!(INFO, "[set_collateral_redemption_fee_ceiling] collateral={}, redemption_fee_ceiling={}", collateral_type, redemption_fee_ceiling);
+    Ok(())
+}
+
+/// Set the minimum collateral deposit for a specific collateral type (developer only).
+/// `min_collateral_deposit` is in the collateral token's native units.
+#[candid_method(update)]
+#[update]
+async fn set_collateral_min_deposit(
+    collateral_type: Principal,
+    min_collateral_deposit: u64,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set min collateral deposit".to_string(),
+        ));
+    }
+    let exists = read_state(|s| s.collateral_configs.contains_key(&collateral_type));
+    if !exists {
+        return Err(ProtocolError::GenericError("Unknown collateral type".to_string()));
+    }
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_collateral_min_deposit(s, collateral_type, min_collateral_deposit);
+    });
+    log!(INFO, "[set_collateral_min_deposit] collateral={}, min_collateral_deposit={}", collateral_type, min_collateral_deposit);
+    Ok(())
+}
+
+/// Set the display color (hex) for a collateral type, used by frontend (developer only).
+/// Pass None to clear.
+#[candid_method(update)]
+#[update]
+async fn set_collateral_display_color(
+    collateral_type: Principal,
+    display_color: Option<String>,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set display color".to_string(),
+        ));
+    }
+    if let Some(ref c) = display_color {
+        if !c.starts_with('#') || (c.len() != 4 && c.len() != 7 && c.len() != 9) {
+            return Err(ProtocolError::GenericError(
+                "display_color must be a hex color like #RGB, #RRGGBB, or #RRGGBBAA".to_string(),
+            ));
+        }
+    }
+    let exists = read_state(|s| s.collateral_configs.contains_key(&collateral_type));
+    if !exists {
+        return Err(ProtocolError::GenericError("Unknown collateral type".to_string()));
+    }
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_collateral_display_color(s, collateral_type, display_color.clone());
+    });
+    log!(INFO, "[set_collateral_display_color] collateral={}, display_color={:?}", collateral_type, display_color);
+    Ok(())
+}
+
 #[candid_method(query)]
 #[query]
 fn get_collateral_config(collateral_type: Principal) -> Option<rumi_protocol_backend::state::CollateralConfig> {

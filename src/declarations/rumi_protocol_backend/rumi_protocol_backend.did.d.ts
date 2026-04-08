@@ -867,8 +867,26 @@ export interface _SERVICE {
   'set_borrowing_fee_curve' : ActorMethod<[[] | [string]], Result>,
   'set_bot_allowed_collateral_types' : ActorMethod<[Array<Principal>], Result>,
   'set_ckstable_repay_fee' : ActorMethod<[number], Result>,
+  'set_collateral_borrow_threshold' : ActorMethod<[Principal, number], Result>,
   'set_collateral_borrowing_fee' : ActorMethod<[Principal, number], Result>,
   'set_collateral_debt_ceiling' : ActorMethod<[Principal, bigint], Result>,
+  'set_collateral_display_color' : ActorMethod<
+    [Principal, [] | [string]],
+    Result
+  >,
+  'set_collateral_ledger_fee' : ActorMethod<[Principal, bigint], Result>,
+  'set_collateral_liquidation_bonus' : ActorMethod<[Principal, number], Result>,
+  'set_collateral_liquidation_ratio' : ActorMethod<[Principal, number], Result>,
+  'set_collateral_min_deposit' : ActorMethod<[Principal, bigint], Result>,
+  'set_collateral_min_vault_debt' : ActorMethod<[Principal, bigint], Result>,
+  'set_collateral_redemption_fee_ceiling' : ActorMethod<
+    [Principal, number],
+    Result
+  >,
+  'set_collateral_redemption_fee_floor' : ActorMethod<
+    [Principal, number],
+    Result
+  >,
   'set_collateral_status' : ActorMethod<[Principal, CollateralStatus], Result>,
   'set_global_icusd_mint_cap' : ActorMethod<[bigint], Result>,
   'set_healthy_cr' : ActorMethod<[Principal, [] | [number]], Result>,
