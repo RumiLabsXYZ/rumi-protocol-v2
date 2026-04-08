@@ -942,6 +942,11 @@ export const idlFactory = ({ IDL }) => {
         [],
       ),
     'set_ckstable_repay_fee' : IDL.Func([IDL.Float64], [Result], []),
+    'set_collateral_borrow_threshold' : IDL.Func(
+        [IDL.Principal, IDL.Float64],
+        [Result],
+        [],
+      ),
     'set_collateral_borrowing_fee' : IDL.Func(
         [IDL.Principal, IDL.Float64],
         [Result],
@@ -949,6 +954,46 @@ export const idlFactory = ({ IDL }) => {
       ),
     'set_collateral_debt_ceiling' : IDL.Func(
         [IDL.Principal, IDL.Nat64],
+        [Result],
+        [],
+      ),
+    'set_collateral_display_color' : IDL.Func(
+        [IDL.Principal, IDL.Opt(IDL.Text)],
+        [Result],
+        [],
+      ),
+    'set_collateral_ledger_fee' : IDL.Func(
+        [IDL.Principal, IDL.Nat64],
+        [Result],
+        [],
+      ),
+    'set_collateral_liquidation_bonus' : IDL.Func(
+        [IDL.Principal, IDL.Float64],
+        [Result],
+        [],
+      ),
+    'set_collateral_liquidation_ratio' : IDL.Func(
+        [IDL.Principal, IDL.Float64],
+        [Result],
+        [],
+      ),
+    'set_collateral_min_deposit' : IDL.Func(
+        [IDL.Principal, IDL.Nat64],
+        [Result],
+        [],
+      ),
+    'set_collateral_min_vault_debt' : IDL.Func(
+        [IDL.Principal, IDL.Nat64],
+        [Result],
+        [],
+      ),
+    'set_collateral_redemption_fee_ceiling' : IDL.Func(
+        [IDL.Principal, IDL.Float64],
+        [Result],
+        [],
+      ),
+    'set_collateral_redemption_fee_floor' : IDL.Func(
+        [IDL.Principal, IDL.Float64],
         [Result],
         [],
       ),

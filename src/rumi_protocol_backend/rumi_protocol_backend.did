@@ -695,8 +695,17 @@ service : (ProtocolArg) -> {
   set_borrowing_fee : (float64) -> (Result);
   set_borrowing_fee_curve : (opt text) -> (Result);
   set_ckstable_repay_fee : (float64) -> (Result);
+  set_collateral_borrow_threshold : (principal, float64) -> (Result);
   set_collateral_borrowing_fee : (principal, float64) -> (Result);
   set_collateral_debt_ceiling : (principal, nat64) -> (Result);
+  set_collateral_display_color : (principal, opt text) -> (Result);
+  set_collateral_ledger_fee : (principal, nat64) -> (Result);
+  set_collateral_liquidation_bonus : (principal, float64) -> (Result);
+  set_collateral_liquidation_ratio : (principal, float64) -> (Result);
+  set_collateral_min_deposit : (principal, nat64) -> (Result);
+  set_collateral_min_vault_debt : (principal, nat64) -> (Result);
+  set_collateral_redemption_fee_ceiling : (principal, float64) -> (Result);
+  set_collateral_redemption_fee_floor : (principal, float64) -> (Result);
   set_collateral_status : (principal, CollateralStatus) -> (Result);
   set_global_icusd_mint_cap : (nat64) -> (Result);
   set_healthy_cr : (principal, opt float64) -> (Result);
