@@ -85,15 +85,16 @@ export async function resolveRoute(
   amountIn: bigint,
 ): Promise<SwapRoute> {
 
-  // Case 1: Stablecoin <-> Stablecoin (3pool swap)
+  // Case 1: Stablecoin <-> Stablecoin (3pool swap, dynamic fee)
   if (isStablecoin(from) && isStablecoin(to)) {
-    const output = await threePoolService.calcSwap(from.threePoolIndex, to.threePoolIndex, amountIn);
+    const quote = await threePoolService.quoteSwap(from.threePoolIndex, to.threePoolIndex, amountIn);
+    const feePct = (quote.fee_bps / 100).toFixed(2);
     return {
       type: 'three_pool_swap',
       pathDisplay: `${from.symbol} → ${to.symbol}`,
       hops: 1,
-      estimatedOutput: output,
-      feeDisplay: '0.20%',
+      estimatedOutput: quote.amount_out,
+      feeDisplay: `${feePct}%${quote.is_rebalancing ? ' (rebalancing)' : ''}`,
     };
   }
 
