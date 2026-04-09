@@ -47,7 +47,7 @@
 
 ## Task Dependency Graph
 
-Tasks 1-4 are foundational (storage + sources) and can be done in order. Tasks 5-8 are the tailing functions (depend on 1-4). Task 9 is the holder collector (depends on 1-4). Tasks 10-11 are wiring (depend on 5-9). Task 12 is the Candid interface. Task 13 is integration tests. Task 14 is deploy.
+Tasks 1-4 are foundational (storage + sources) and can be done in order. Task 5 extends SlimState with Phase 4 fields (depends on 1). Tasks 6-8 are source wrappers and tailing functions (depend on 1-5). Task 9 is the holder collector (depends on 1-4). Tasks 10-11 are wiring (depend on 5-9). Task 12 is the Candid interface. Task 13 is integration tests. Task 14 is deploy.
 
 ---
 
@@ -657,7 +657,9 @@ impl Storable for AccountKey {
     };
 }
 
-/// u64 value wrapper for StableBTreeMap.
+#[derive(Clone, Debug)]
+pub struct BalVal(pub u64);
+
 impl Storable for BalVal {
     fn to_bytes(&self) -> Cow<[u8]> {
         Cow::Owned(self.0.to_le_bytes().to_vec())
@@ -672,9 +674,6 @@ impl Storable for BalVal {
         is_fixed_size: true,
     };
 }
-
-#[derive(Clone, Debug)]
-pub struct BalVal(pub u64);
 
 thread_local! {
     static BAL_ICUSD_MAP: RefCell<StableBTreeMap<AccountKey, BalVal, Memory>> = RefCell::new(
@@ -1367,7 +1366,7 @@ pub async fn get_event_count(backend: Principal) -> Result<u64, String> {
 }
 ```
 
-**Important note for the implementer:** The `#[serde(other)]` approach requires that Candid deserialization treats unknown variants as a catch-all. Test this carefully. If Candid does not support `#[serde(other)]` for variants (it may not), the alternative is to use `candid::IDLValue` for raw deserialization and manually match variant names. If `#[serde(other)]` doesn't work, change the approach: deserialize as `Vec<(u64, candid::IDLValue)>` using `get_events_filtered` instead, and pattern-match on variant names. Test during implementation.
+**Important note for the implementer:** Candid deserialization does NOT use serde's `#[serde(other)]`. The `candid::Deserialize` derive has its own mechanism. Test the `Unknown` catch-all variant immediately after writing this code. If Candid rejects unknown variants at deserialization time, switch to this alternative: define all 62 backend event variants explicitly (copy from the .did file), or deserialize as `Vec<candid::IDLValue>` and pattern-match variant names. The priority is: get it compiling and correctly handling unknown variants before moving on to the routing logic. If you need to switch to IDLValue, define a helper `fn try_extract_backend_event(val: &candid::IDLValue) -> Option<BackendEvent>` that matches on variant name strings.
 
 - [ ] **Step 2: Add 3pool event + ICRC-3 wrappers to sources/three_pool.rs**
 
@@ -1613,7 +1612,7 @@ pub async fn run() {
             ic_cdk::println!("[tail_backend] get_event_count failed: {}", e);
             state::mutate_state(|s| {
                 s.error_counters.backend += 1;
-                update_cursor_error(&mut s, cursors::CURSOR_ID_BACKEND_EVENTS, e);
+                update_cursor_error(s, cursors::CURSOR_ID_BACKEND_EVENTS, e.clone());
             });
             return;
         }
@@ -2042,45 +2041,68 @@ fn process_block(token: Token, block: &sources::icusd_ledger::ICRC3Value) -> Res
 // The implementer must adapt these to the actual ICRC3Value type used
 // (either from icrc-ledger-types or locally defined).
 
-fn extract_map_field(
-    _value: &sources::icusd_ledger::ICRC3Value,
-    _field: &str,
-) -> Option<sources::icusd_ledger::ICRC3Value> {
-    // TODO: implement based on actual ICRC3Value structure
-    // Pattern: match Map variant, find entry with matching key
-    todo!("implement ICRC3Value map extraction")
+use sources::icusd_ledger::ICRC3Value;
+
+fn extract_map_field(value: &ICRC3Value, field: &str) -> Option<ICRC3Value> {
+    match value {
+        ICRC3Value::Map(entries) => entries
+            .iter()
+            .find(|(k, _)| k == field)
+            .map(|(_, v)| v.clone()),
+        _ => None,
+    }
 }
 
-fn extract_nat_field(
-    _value: &sources::icusd_ledger::ICRC3Value,
-    _field: &str,
-) -> Option<u64> {
-    todo!("implement ICRC3Value nat extraction")
+fn extract_nat_field(value: &ICRC3Value, field: &str) -> Option<u64> {
+    match extract_map_field(value, field)? {
+        ICRC3Value::Nat(n) => Some(nat_to_u64(&n)),
+        _ => None,
+    }
 }
 
-fn extract_text_field(
-    _value: &sources::icusd_ledger::ICRC3Value,
-    _field: &str,
-) -> Option<String> {
-    todo!("implement ICRC3Value text extraction")
+fn extract_text_field(value: &ICRC3Value, field: &str) -> Option<String> {
+    match extract_map_field(value, field)? {
+        ICRC3Value::Text(s) => Some(s),
+        _ => None,
+    }
 }
 
-fn extract_account_field(
-    _value: &sources::icusd_ledger::ICRC3Value,
-    _field: &str,
-) -> Option<Account> {
-    // Account in ICRC-3 blocks is encoded as a Map with "owner" (blob) and optional "subaccount" (blob)
-    // or as an Array [owner_blob, subaccount_blob]
-    todo!("implement ICRC3Value account extraction")
+fn extract_account_field(value: &ICRC3Value, field: &str) -> Option<Account> {
+    // Account in ICRC-3 blocks is encoded as a Map with "owner" (Blob) and optional "subaccount" (Blob),
+    // or as an Array [owner_blob] / [owner_blob, subaccount_blob].
+    let acct_val = extract_map_field(value, field)?;
+    match &acct_val {
+        ICRC3Value::Map(entries) => {
+            let owner_blob = entries.iter().find(|(k, _)| k == "owner")
+                .and_then(|(_, v)| match v { ICRC3Value::Blob(b) => Some(b.clone()), _ => None })?;
+            let owner = Principal::from_slice(&owner_blob);
+            let subaccount = entries.iter().find(|(k, _)| k == "subaccount")
+                .and_then(|(_, v)| match v { ICRC3Value::Blob(b) => {
+                    let mut sa = [0u8; 32];
+                    if b.len() == 32 { sa.copy_from_slice(b); Some(sa) } else { None }
+                }, _ => None });
+            Some(Account { owner, subaccount })
+        }
+        ICRC3Value::Array(arr) => {
+            let owner_blob = match arr.first()? { ICRC3Value::Blob(b) => b, _ => return None };
+            let owner = Principal::from_slice(owner_blob);
+            let subaccount = arr.get(1).and_then(|v| match v { ICRC3Value::Blob(b) => {
+                let mut sa = [0u8; 32]; if b.len() == 32 { sa.copy_from_slice(b); Some(sa) } else { None }
+            }, _ => None });
+            Some(Account { owner, subaccount })
+        }
+        _ => None,
+    }
 }
 
-fn nat_to_u64(nat: &Nat) -> u64 {
-    use candid::utils::decode_one;
+fn nat_to_u64(nat: &candid::Nat) -> u64 {
+    // candid::Nat wraps num_bigint::BigUint. Convert to u64, clamping to MAX.
+    use num_traits::ToPrimitive;
     nat.0.to_u64().unwrap_or(u64::MAX)
 }
 ```
 
-**Important note for the implementer:** The `todo!()` functions MUST be implemented before this compiles. The ICRC3Value extraction logic depends on the exact ICRC3Value type available. If using `icrc-ledger-types`, check the actual enum variant names. If defining locally, match on `ICRC3Value::Map(entries)` where entries is `Vec<(String, ICRC3Value)>`, and for `Nat` values extract via `ICRC3Value::Nat(n)`. Account fields in ICRC-3 are typically encoded as arrays `[owner_blob]` or `[owner_blob, subaccount_blob]`.
+**Important note for the implementer:** The ICRC3Value extraction helpers above assume a locally-defined ICRC3Value enum with variants `Map(Vec<(String, ICRC3Value)>)`, `Nat(candid::Nat)`, `Text(String)`, `Blob(Vec<u8>)`, `Array(Vec<ICRC3Value>)`. If using `icrc-ledger-types`, check the actual enum variant names and adapt accordingly. The `num_traits` crate must be in Cargo.toml for `ToPrimitive` in `nat_to_u64`.
 
 - [ ] **Step 3: Run unit tests for block parsing**
 
