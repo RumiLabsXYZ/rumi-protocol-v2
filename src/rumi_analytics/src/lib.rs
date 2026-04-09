@@ -10,6 +10,7 @@ mod collectors;
 mod sources;
 mod queries;
 mod timers;
+mod tailing;
 mod types;
 
 use crate::storage::{SlimState, SourceCanisterIds};
