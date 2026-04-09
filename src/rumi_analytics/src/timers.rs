@@ -22,15 +22,15 @@ pub fn setup_timers() {
 async fn pull_cycle() {
     refresh_supply_cache().await;
 
-    // Event tailing (Phase 4)
-    tailing::backend_events::run().await;
-    tailing::three_pool_swaps::run().await;
-    tailing::three_pool_liquidity::run().await;
-    tailing::amm_swaps::run().await;
-
-    // ICRC-3 block tailing (Phase 4)
-    tailing::icrc3::tail_icusd_blocks().await;
-    tailing::icrc3::tail_3pool_blocks().await;
+    // Event tailing (Phase 4) - all sources are independent, run concurrently.
+    futures::join!(
+        tailing::backend_events::run(),
+        tailing::three_pool_swaps::run(),
+        tailing::three_pool_liquidity::run(),
+        tailing::amm_swaps::run(),
+        tailing::icrc3::tail_icusd_blocks(),
+        tailing::icrc3::tail_3pool_blocks(),
+    );
 
     // Update pull cycle timestamp
     state::mutate_state(|s| {

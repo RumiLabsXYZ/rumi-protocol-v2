@@ -141,6 +141,10 @@ fn process_block(token: Token, block: &ICRC3Value) -> Result<(), String> {
                 .ok_or_else(|| "1xfer missing to".to_string())?;
             let amt = extract_nat_field(&tx, "amt")
                 .ok_or_else(|| "1xfer missing amt".to_string())?;
+            // NOTE: When fee is absent from the block, ICRC-1 charged the default
+            // fee. We default to 0 here, which may cause tracked sender balances
+            // to drift slightly high if the ledger's default fee is nonzero.
+            // Acceptable for analytics; revisit if precision matters.
             let fee = extract_nat_field(&tx, "fee").unwrap_or(0);
             balance_tracker::apply_transfer(token, &from, &to, amt, fee, timestamp_ns);
         }
