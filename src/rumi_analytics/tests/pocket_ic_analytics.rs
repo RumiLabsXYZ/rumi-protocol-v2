@@ -17,6 +17,74 @@ use candid::{decode_one, encode_args, encode_one, CandidType, Deserialize, Princ
 use icrc_ledger_types::icrc1::account::Account;
 use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
 
+// Phase 4 test-side types (mirror rumi_analytics candid interface)
+
+#[derive(CandidType, Deserialize, Debug)]
+struct CollectorHealth {
+    cursors: Vec<CursorStatus>,
+    error_counters: ErrorCounters,
+    backfill_active: Vec<Principal>,
+    last_pull_cycle_ns: u64,
+    balance_tracker_stats: Vec<BalanceTrackerStats>,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct CursorStatus {
+    name: String,
+    cursor_position: u64,
+    source_count: u64,
+    last_success_ns: u64,
+    last_error: Option<String>,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct ErrorCounters {
+    backend: u64,
+    icusd_ledger: u64,
+    three_pool: u64,
+    stability_pool: u64,
+    amm: u64,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct BalanceTrackerStats {
+    token: Principal,
+    holder_count: u64,
+    total_tracked_e8s: u64,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct DailyHolderRow {
+    timestamp_ns: u64,
+    token: Principal,
+    total_holders: u32,
+    total_supply_tracked_e8s: u64,
+    median_balance_e8s: u64,
+    top_50: Vec<(Principal, u64)>,
+    top_10_pct_bps: u32,
+    gini_bps: u32,
+    new_holders_today: u32,
+    distribution_buckets: Vec<u32>,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct HolderSeriesResponse {
+    rows: Vec<DailyHolderRow>,
+    next_from_ts: Option<u64>,
+}
+
+// ICRC-1 TransferArg defined locally (icrc_ledger_types is a non-dev dep, but
+// we keep a local copy to avoid pulling in the full type with all its derives).
+#[derive(CandidType, Deserialize)]
+struct TransferArg {
+    from_subaccount: Option<[u8; 32]>,
+    to: Account,
+    fee: Option<candid::Nat>,
+    created_at_time: Option<u64>,
+    memo: Option<Vec<u8>>,
+    amount: candid::Nat,
+}
+
 // ─── ICRC-1 ledger init types (copied from rumi_amm tests) ───
 
 #[derive(CandidType, Deserialize)]
@@ -385,6 +453,48 @@ fn get_stability_series(env: &Env, q: RangeQueryArg) -> StabilitySeriesResponse 
     }
 }
 
+// ─── Phase 4 helpers ───
+
+fn get_collector_health(env: &Env) -> CollectorHealth {
+    let result = env.pic.query_call(
+        env.analytics, env.admin, "get_collector_health", encode_one(()).unwrap(),
+    ).expect("get_collector_health query");
+    match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).unwrap(),
+        WasmResult::Reject(msg) => panic!("get_collector_health rejected: {}", msg),
+    }
+}
+
+fn get_holder_series(env: &Env, q: RangeQueryArg, token: Principal) -> HolderSeriesResponse {
+    let result = env.pic.query_call(
+        env.analytics, env.admin, "get_holder_series",
+        encode_args((q, token)).expect("encode holder series args"),
+    ).expect("get_holder_series query");
+    match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).unwrap(),
+        WasmResult::Reject(msg) => panic!("get_holder_series rejected: {}", msg),
+    }
+}
+
+fn call_start_backfill(env: &Env, token: Principal) -> String {
+    let result = env.pic.update_call(
+        env.analytics, env.admin, "start_backfill",
+        encode_one(token).unwrap(),
+    ).expect("start_backfill update");
+    match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).unwrap(),
+        WasmResult::Reject(msg) => panic!("start_backfill rejected: {}", msg),
+    }
+}
+
+/// Advance time and tick enough for the 60s pull cycle to fire and inter-canister calls to settle.
+fn advance_pull_cycle(env: &Env) {
+    env.pic.advance_time(std::time::Duration::from_secs(65));
+    for _ in 0..10 {
+        env.pic.tick();
+    }
+}
+
 // ─── Tests ───
 
 #[test]
@@ -551,4 +661,184 @@ fn upgrade_preserves_supply_cache_and_tvl_log() {
     assert_eq!(before_rows, after_rows, "TVL log lost rows on upgrade");
     assert_eq!(before_vault_rows, after_vault_rows, "vault log lost rows on upgrade");
     assert_eq!(before_supply, after_supply, "supply cache lost on upgrade");
+}
+
+// ─── Phase 4 Tests ───
+
+#[test]
+fn collector_health_reports_cursor_positions() {
+    let env = setup();
+    advance_pull_cycle(&env);
+
+    let health = get_collector_health(&env);
+
+    // Should have 6 cursors
+    assert_eq!(health.cursors.len(), 6, "expected 6 cursors");
+
+    // last_pull_cycle_ns should be non-zero after a pull cycle
+    assert!(health.last_pull_cycle_ns > 0, "last_pull_cycle_ns should be set");
+
+    // The icusd_blocks cursor should have advanced (the ledger has blocks from initial mint)
+    let icusd_cursor = health.cursors.iter().find(|c| c.name == "icusd_blocks");
+    assert!(icusd_cursor.is_some(), "icusd_blocks cursor should exist");
+    let icusd_cursor = icusd_cursor.unwrap();
+    assert!(icusd_cursor.cursor_position > 0, "icusd_blocks cursor should have advanced past initial mint block");
+
+    // Backend events cursor - the backend was deployed so there may be init events.
+    // At minimum, cursor should exist with position >= 0.
+    let be_cursor = health.cursors.iter().find(|c| c.name == "backend_events");
+    assert!(be_cursor.is_some(), "backend_events cursor should exist");
+
+    // balance_tracker_stats should have 2 entries (icUSD and 3USD)
+    assert_eq!(health.balance_tracker_stats.len(), 2, "should track 2 tokens");
+
+    // The icUSD tracker should show holders from the initial mint
+    let icusd_stats = health.balance_tracker_stats.iter().find(|s| s.token == env.icusd_ledger);
+    assert!(icusd_stats.is_some(), "icUSD stats should exist");
+    let icusd_stats = icusd_stats.unwrap();
+    assert!(icusd_stats.holder_count > 0, "should have at least 1 icUSD holder from initial mint");
+    assert!(icusd_stats.total_tracked_e8s > 0, "should have tracked icUSD supply");
+}
+
+#[test]
+fn icrc3_balance_tracking_after_transfer() {
+    let env = setup();
+    let user_a = Principal::self_authenticating(&[1, 2, 3, 4]); // same as holder in setup
+    let user_b = Principal::self_authenticating(&[10, 20, 30, 40]);
+
+    // First pull cycle picks up the initial mint
+    advance_pull_cycle(&env);
+
+    let health_before = get_collector_health(&env);
+    let icusd_before = health_before.balance_tracker_stats.iter()
+        .find(|s| s.token == env.icusd_ledger).unwrap();
+    let holders_before = icusd_before.holder_count;
+
+    // Transfer from user_a to user_b via the ledger
+    let transfer_arg = TransferArg {
+        from_subaccount: None,
+        to: Account { owner: user_b, subaccount: None },
+        fee: None,
+        created_at_time: None,
+        memo: None,
+        amount: candid::Nat::from(500_000_00000000u64),
+    };
+    let result = env.pic.update_call(
+        env.icusd_ledger, user_a, "icrc1_transfer",
+        encode_one(transfer_arg).unwrap(),
+    ).expect("icrc1_transfer");
+    match result {
+        WasmResult::Reply(_) => {},
+        WasmResult::Reject(msg) => panic!("transfer rejected: {}", msg),
+    }
+
+    // Next pull cycle picks up the transfer block
+    advance_pull_cycle(&env);
+
+    let health_after = get_collector_health(&env);
+    let icusd_after = health_after.balance_tracker_stats.iter()
+        .find(|s| s.token == env.icusd_ledger).unwrap();
+
+    // Should now have 2 holders (user_a and user_b)
+    assert!(icusd_after.holder_count > holders_before,
+        "holder count should increase after transfer to new account: before={}, after={}",
+        holders_before, icusd_after.holder_count);
+}
+
+#[test]
+fn daily_holder_snapshot_computed() {
+    let env = setup();
+
+    // Run pull cycles to populate balance tracker
+    advance_pull_cycle(&env);
+
+    // Advance past daily timer (86400s)
+    env.pic.advance_time(std::time::Duration::from_secs(86_400));
+    for _ in 0..10 {
+        env.pic.tick();
+    }
+
+    let resp = get_holder_series(
+        &env,
+        RangeQueryArg { from_ts: None, to_ts: None, limit: None, offset: None },
+        env.icusd_ledger,
+    );
+
+    assert!(!resp.rows.is_empty(), "should have at least one holder snapshot row");
+    let row = &resp.rows[0];
+    assert!(row.total_holders > 0, "total_holders should be > 0");
+    assert!(row.total_supply_tracked_e8s > 0, "total_supply should be > 0");
+    // distribution_buckets has one entry per bucket threshold plus one overflow bucket.
+    // The implementation uses 4 thresholds so there are 5 buckets total.
+    assert!(!row.distribution_buckets.is_empty(), "distribution_buckets should be non-empty");
+}
+
+#[test]
+fn start_backfill_requires_admin() {
+    let env = setup();
+    let non_admin = Principal::self_authenticating(&[99, 99, 99]);
+
+    // Non-admin call should return unauthorized message
+    let result = env.pic.update_call(
+        env.analytics, non_admin, "start_backfill",
+        encode_one(env.icusd_ledger).unwrap(),
+    ).expect("start_backfill update");
+    match result {
+        WasmResult::Reply(bytes) => {
+            let msg: String = decode_one(&bytes).unwrap();
+            assert!(msg.contains("unauthorized"), "non-admin should get unauthorized: {}", msg);
+        }
+        WasmResult::Reject(msg) => panic!("unexpected reject: {}", msg),
+    }
+
+    // Admin call should succeed
+    let msg = call_start_backfill(&env, env.icusd_ledger);
+    assert!(msg.contains("backfill started"), "admin should succeed: {}", msg);
+
+    // Verify backfill is active in health
+    let health = get_collector_health(&env);
+    assert!(!health.backfill_active.is_empty(), "backfill should be active");
+}
+
+#[test]
+fn upgrade_preserves_phase4_state() {
+    let env = setup();
+
+    // Run pull cycles to populate cursors and balance tracker
+    advance_pull_cycle(&env);
+    advance_pull_cycle(&env);
+
+    let health_before = get_collector_health(&env);
+
+    // Upgrade the canister
+    env.pic.upgrade_canister(
+        env.analytics,
+        analytics_wasm(),
+        encode_one(AnalyticsInitArgs {
+            admin: env.admin,
+            backend: env.backend,
+            icusd_ledger: env.icusd_ledger,
+            three_pool: Principal::anonymous(),
+            stability_pool: Principal::anonymous(),
+            amm: Principal::anonymous(),
+        }).unwrap(),
+        Some(env.admin),
+    ).expect("upgrade analytics");
+
+    let health_after = get_collector_health(&env);
+
+    // Cursor positions should survive upgrade
+    for (before, after) in health_before.cursors.iter().zip(health_after.cursors.iter()) {
+        assert_eq!(before.cursor_position, after.cursor_position,
+            "cursor {} position changed on upgrade: {} -> {}",
+            before.name, before.cursor_position, after.cursor_position);
+    }
+
+    // Balance tracker should survive upgrade
+    for (before, after) in health_before.balance_tracker_stats.iter().zip(health_after.balance_tracker_stats.iter()) {
+        assert_eq!(before.holder_count, after.holder_count,
+            "holder count changed on upgrade for token {:?}", before.token);
+        assert_eq!(before.total_tracked_e8s, after.total_tracked_e8s,
+            "tracked supply changed on upgrade for token {:?}", before.token);
+    }
 }

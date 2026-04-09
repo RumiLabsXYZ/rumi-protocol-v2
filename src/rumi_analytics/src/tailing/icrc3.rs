@@ -114,7 +114,24 @@ fn process_block(token: Token, block: &ICRC3Value) -> Result<(), String> {
     let tx = extract_map_field(block, "tx")
         .ok_or_else(|| "missing tx field".to_string())?;
 
-    let btype = extract_text_field(block, "btype").unwrap_or_default();
+    // Resolve block type. ICRC-3 canonical form puts it at the block level as
+    // "btype" (e.g., "1mint", "1xfer"). The DFINITY reference ic-icrc1-ledger
+    // and some older implementations instead put "op" inside the "tx" map
+    // (e.g., "mint", "burn", "xfer"). We handle both conventions.
+    let btype: String = if let Some(bt) = extract_text_field(block, "btype") {
+        bt
+    } else if let Some(op) = extract_text_field(&tx, "op") {
+        // Normalize "op" values to the ICRC-3 btype convention.
+        match op.as_str() {
+            "mint" => "1mint".to_string(),
+            "burn" => "1burn".to_string(),
+            "xfer" | "transfer" => "1xfer".to_string(),
+            "approve" => "2approve".to_string(),
+            other => other.to_string(),
+        }
+    } else {
+        String::new()
+    };
 
     match btype.as_str() {
         "1xfer" => {
