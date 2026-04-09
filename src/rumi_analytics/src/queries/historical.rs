@@ -1,7 +1,7 @@
 //! Read-only paginated readers over StableLogs. Pure functions, no state mutation.
 
 use crate::storage;
-use crate::types::{RangeQuery, TvlSeriesResponse, VaultSeriesResponse, StabilitySeriesResponse};
+use crate::types::{RangeQuery, TvlSeriesResponse, VaultSeriesResponse, StabilitySeriesResponse, HolderSeriesResponse};
 
 pub fn get_tvl_series(query: RangeQuery) -> TvlSeriesResponse {
     let limit = query.resolved_limit() as usize;
@@ -45,6 +45,27 @@ pub fn get_stability_series(query: RangeQuery) -> StabilitySeriesResponse {
         None
     };
     StabilitySeriesResponse { rows, next_from_ts }
+}
+
+pub fn get_holder_series(query: RangeQuery, token: candid::Principal) -> HolderSeriesResponse {
+    let limit = query.resolved_limit() as usize;
+    let from = query.resolved_from();
+    let to = query.resolved_to();
+
+    let icusd_ledger = crate::state::read_state(|s| s.sources.icusd_ledger);
+    let rows = if token == icusd_ledger {
+        storage::holders::daily_holders_icusd::range(from, to, limit)
+    } else {
+        storage::holders::daily_holders_3usd::range(from, to, limit)
+    };
+
+    let next_from_ts = if rows.len() == limit && limit > 0 {
+        rows.last().map(|r| r.timestamp_ns.saturating_add(1))
+    } else {
+        None
+    };
+
+    HolderSeriesResponse { rows, next_from_ts }
 }
 
 #[cfg(test)]
