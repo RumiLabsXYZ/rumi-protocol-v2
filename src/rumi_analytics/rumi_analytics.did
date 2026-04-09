@@ -19,10 +19,56 @@ type DailyTvlRow = record {
   total_icp_collateral_e8s : nat;
   total_icusd_supply_e8s : nat;
   system_collateral_ratio_bps : nat32;
+  stability_pool_deposits_e8s : opt nat64;
+  three_pool_reserve_0_e8s : opt nat;
+  three_pool_reserve_1_e8s : opt nat;
+  three_pool_reserve_2_e8s : opt nat;
+  three_pool_virtual_price_e18 : opt nat;
+  three_pool_lp_supply_e8s : opt nat;
 };
 
 type TvlSeriesResponse = record {
   rows : vec DailyTvlRow;
+  next_from_ts : opt nat64;
+};
+
+type CollateralStats = record {
+  collateral_type : principal;
+  vault_count : nat32;
+  total_collateral_e8s : nat64;
+  total_debt_e8s : nat64;
+  min_cr_bps : nat32;
+  max_cr_bps : nat32;
+  median_cr_bps : nat32;
+  price_usd_e8s : nat64;
+};
+
+type DailyVaultSnapshotRow = record {
+  timestamp_ns : nat64;
+  total_vault_count : nat32;
+  total_collateral_usd_e8s : nat64;
+  total_debt_e8s : nat64;
+  median_cr_bps : nat32;
+  collaterals : vec CollateralStats;
+};
+
+type VaultSeriesResponse = record {
+  rows : vec DailyVaultSnapshotRow;
+  next_from_ts : opt nat64;
+};
+
+type DailyStabilityRow = record {
+  timestamp_ns : nat64;
+  total_deposits_e8s : nat64;
+  total_depositors : nat64;
+  total_liquidations_executed : nat64;
+  total_interest_received_e8s : nat64;
+  stablecoin_balances : vec record { principal; nat64 };
+  collateral_gains : vec record { principal; nat64 };
+};
+
+type StabilitySeriesResponse = record {
+  rows : vec DailyStabilityRow;
   next_from_ts : opt nat64;
 };
 
@@ -45,5 +91,7 @@ service : (InitArgs) -> {
   ping : () -> (text) query;
   get_admin : () -> (principal) query;
   get_tvl_series : (RangeQuery) -> (TvlSeriesResponse) query;
+  get_vault_series : (RangeQuery) -> (VaultSeriesResponse) query;
+  get_stability_series : (RangeQuery) -> (StabilitySeriesResponse) query;
   http_request : (HttpRequest) -> (HttpResponse) query;
 }
