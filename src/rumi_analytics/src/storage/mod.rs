@@ -118,6 +118,15 @@ pub struct SlimState {
     pub last_daily_snapshot_ns: u64,
     /// Per-source error counters incremented on inter-canister call failures.
     pub error_counters: ErrorCounters,
+    // Phase 4: Cursor metadata (persisted across upgrades)
+    pub cursor_last_success: Option<std::collections::HashMap<u8, u64>>,
+    pub cursor_last_error: Option<std::collections::HashMap<u8, String>>,
+    pub cursor_source_counts: Option<std::collections::HashMap<u8, u64>>,
+    // Phase 4: Backfill flags
+    pub backfill_active_icusd: Option<bool>,
+    pub backfill_active_3usd: Option<bool>,
+    // Phase 4: Pull cycle tracking
+    pub last_pull_cycle_ns: Option<u64>,
 }
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
@@ -153,6 +162,12 @@ impl Default for SlimState {
             circulating_supply_3usd_e8s: None,
             last_daily_snapshot_ns: 0,
             error_counters: ErrorCounters::default(),
+            cursor_last_success: None,
+            cursor_last_error: None,
+            cursor_source_counts: None,
+            backfill_active_icusd: None,
+            backfill_active_3usd: None,
+            last_pull_cycle_ns: None,
         }
     }
 }
