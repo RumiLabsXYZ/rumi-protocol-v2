@@ -192,6 +192,7 @@ fn route_backend_event(event_id: u64, event: &sources::backend::BackendEvent) {
                 amount: *icusd_amount,
             });
         }
-        Unknown => {}
+        // All other variants (admin/config events) are not routed
+        _ => {}
     }
 }

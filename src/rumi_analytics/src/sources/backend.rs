@@ -81,10 +81,14 @@ pub struct GetEventsArg {
     pub length: u64,
 }
 
-/// Minimal subset of the backend Event variant.
-/// Uses `#[serde(other)]` to catch variants we don't need to decode.
+/// Backend Event variant. We enumerate ALL variants from the backend .did so
+/// that Candid deserialization succeeds for every event type. Variants we
+/// actually process have their fields; all others use empty structs (Candid
+/// skips extra record fields). This avoids reliance on `#[serde(other)]` which
+/// does not work reliably with the candid crate's deserializer.
 #[derive(CandidType, Deserialize, Clone, Debug)]
 pub enum BackendEvent {
+    // --- Variants we process ---
     #[serde(rename = "open_vault")]
     OpenVault {
         block_index: u64,
@@ -173,8 +177,137 @@ pub enum BackendEvent {
         vault_id: u64,
         timestamp: Option<u64>,
     },
-    #[serde(other)]
-    Unknown,
+    // --- Variants we don't process (empty structs skip all fields) ---
+    #[serde(rename = "init")]
+    Init {},
+    #[serde(rename = "upgrade")]
+    Upgrade {},
+    #[serde(rename = "set_borrowing_fee")]
+    SetBorrowingFee {},
+    #[serde(rename = "claim_liquidity_returns")]
+    ClaimLiquidityReturns {},
+    #[serde(rename = "provide_liquidity")]
+    ProvideLiquidity {},
+    #[serde(rename = "set_rmr_ceiling_cr")]
+    SetRmrCeilingCr {},
+    #[serde(rename = "set_recovery_rate_curve")]
+    SetRecoveryRateCurve {},
+    #[serde(rename = "set_ckstable_repay_fee")]
+    SetCkstableRepayFee {},
+    #[serde(rename = "set_treasury_principal")]
+    SetTreasuryPrincipal {},
+    #[serde(rename = "accrue_interest")]
+    AccrueInterest {},
+    #[serde(rename = "set_max_partial_liquidation_ratio")]
+    SetMaxPartialLiquidationRatio {},
+    #[serde(rename = "admin_vault_correction")]
+    AdminVaultCorrection {},
+    #[serde(rename = "set_recovery_target_cr")]
+    SetRecoveryTargetCr {},
+    #[serde(rename = "set_stable_ledger_principal")]
+    SetStableLedgerPrincipal {},
+    #[serde(rename = "set_recovery_parameters")]
+    SetRecoveryParameters {},
+    #[serde(rename = "set_collateral_borrowing_fee")]
+    SetCollateralBorrowingFee {},
+    #[serde(rename = "set_collateral_liquidation_ratio")]
+    SetCollateralLiquidationRatio {},
+    #[serde(rename = "set_collateral_borrow_threshold")]
+    SetCollateralBorrowThreshold {},
+    #[serde(rename = "set_collateral_liquidation_bonus")]
+    SetCollateralLiquidationBonus {},
+    #[serde(rename = "set_collateral_min_vault_debt")]
+    SetCollateralMinVaultDebt {},
+    #[serde(rename = "set_collateral_ledger_fee")]
+    SetCollateralLedgerFee {},
+    #[serde(rename = "set_collateral_redemption_fee_floor")]
+    SetCollateralRedemptionFeeFloor {},
+    #[serde(rename = "set_collateral_redemption_fee_ceiling")]
+    SetCollateralRedemptionFeeCeiling {},
+    #[serde(rename = "set_collateral_min_deposit")]
+    SetCollateralMinDeposit {},
+    #[serde(rename = "set_collateral_display_color")]
+    SetCollateralDisplayColor {},
+    #[serde(rename = "set_bot_allowed_collateral_types")]
+    SetBotAllowedCollateralTypes {},
+    #[serde(rename = "margin_transfer")]
+    MarginTransfer {},
+    #[serde(rename = "admin_sweep_to_treasury")]
+    AdminSweepToTreasury {},
+    #[serde(rename = "set_rmr_floor_cr")]
+    SetRmrFloorCr {},
+    #[serde(rename = "set_rmr_ceiling")]
+    SetRmrCeiling {},
+    #[serde(rename = "set_global_icusd_mint_cap")]
+    SetGlobalIcusdMintCap {},
+    #[serde(rename = "set_reserve_redemptions_enabled")]
+    SetReserveRedemptionsEnabled {},
+    #[serde(rename = "set_min_icusd_amount")]
+    SetMinIcusdAmount {},
+    #[serde(rename = "set_borrowing_fee_curve")]
+    SetBorrowingFeeCurve {},
+    #[serde(rename = "set_interest_pool_share")]
+    SetInterestPoolShare {},
+    #[serde(rename = "set_liquidation_protocol_share")]
+    SetLiquidationProtocolShare {},
+    #[serde(rename = "update_collateral_config")]
+    UpdateCollateralConfig {},
+    #[serde(rename = "set_rate_curve_markers")]
+    SetRateCurveMarkers {},
+    #[serde(rename = "withdraw_liquidity")]
+    WithdrawLiquidity {},
+    #[serde(rename = "admin_mint")]
+    AdminMint {},
+    #[serde(rename = "set_three_pool_canister")]
+    SetThreePoolCanister {},
+    #[serde(rename = "set_liquidation_bonus")]
+    SetLiquidationBonus {},
+    #[serde(rename = "reserve_redemption")]
+    ReserveRedemption {},
+    #[serde(rename = "close_vault")]
+    CloseVault {},
+    #[serde(rename = "update_collateral_status")]
+    UpdateCollateralStatus {},
+    #[serde(rename = "set_healthy_cr")]
+    SetHealthyCr {},
+    #[serde(rename = "set_redemption_fee_ceiling")]
+    SetRedemptionFeeCeiling {},
+    #[serde(rename = "add_margin_to_vault")]
+    AddMarginToVault {},
+    #[serde(rename = "set_stability_pool_principal")]
+    SetStabilityPoolPrincipal {},
+    #[serde(rename = "set_interest_split")]
+    SetInterestSplit {},
+    #[serde(rename = "set_bot_budget")]
+    SetBotBudget {},
+    #[serde(rename = "set_rmr_floor")]
+    SetRmrFloor {},
+    #[serde(rename = "set_redemption_fee_floor")]
+    SetRedemptionFeeFloor {},
+    #[serde(rename = "set_interest_rate")]
+    SetInterestRate {},
+    #[serde(rename = "set_reserve_redemption_fee")]
+    SetReserveRedemptionFee {},
+    #[serde(rename = "redemption_transfered")]
+    RedemptionTransfered {},
+    #[serde(rename = "set_liquidation_bot_principal")]
+    SetLiquidationBotPrincipal {},
+    #[serde(rename = "add_collateral_type")]
+    AddCollateralType {},
+    #[serde(rename = "set_stable_token_enabled")]
+    SetStableTokenEnabled {},
+    #[serde(rename = "set_recovery_cr_multiplier")]
+    SetRecoveryCrMultiplier {},
+    #[serde(rename = "price_update")]
+    PriceUpdate {},
+    #[serde(rename = "admin_debt_correction")]
+    AdminDebtCorrection {},
+    #[serde(rename = "set_collateral_debt_ceiling")]
+    SetCollateralDebtCeiling {},
+    #[serde(rename = "set_collateral_interest_rate")]
+    SetCollateralInterestRate {},
+    #[serde(rename = "set_collateral_redemption_tier")]
+    SetCollateralRedemptionTier {},
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
