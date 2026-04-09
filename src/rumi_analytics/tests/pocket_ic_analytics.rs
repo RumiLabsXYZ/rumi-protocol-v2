@@ -123,11 +123,62 @@ struct DailyTvlRow {
     total_icp_collateral_e8s: candid::Nat,
     total_icusd_supply_e8s: candid::Nat,
     system_collateral_ratio_bps: u32,
+    stability_pool_deposits_e8s: Option<u64>,
+    three_pool_reserve_0_e8s: Option<candid::Nat>,
+    three_pool_reserve_1_e8s: Option<candid::Nat>,
+    three_pool_reserve_2_e8s: Option<candid::Nat>,
+    three_pool_virtual_price_e18: Option<candid::Nat>,
+    three_pool_lp_supply_e8s: Option<candid::Nat>,
 }
 
 #[derive(CandidType, Deserialize, Debug)]
 struct TvlSeriesResponse {
     rows: Vec<DailyTvlRow>,
+    next_from_ts: Option<u64>,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct CollateralStats {
+    collateral_type: Principal,
+    vault_count: u32,
+    total_collateral_e8s: u64,
+    total_debt_e8s: u64,
+    min_cr_bps: u32,
+    max_cr_bps: u32,
+    median_cr_bps: u32,
+    price_usd_e8s: u64,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct DailyVaultSnapshotRow {
+    timestamp_ns: u64,
+    total_vault_count: u32,
+    total_collateral_usd_e8s: u64,
+    total_debt_e8s: u64,
+    median_cr_bps: u32,
+    collaterals: Vec<CollateralStats>,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct VaultSeriesResponse {
+    rows: Vec<DailyVaultSnapshotRow>,
+    next_from_ts: Option<u64>,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct DailyStabilityRow {
+    timestamp_ns: u64,
+    total_deposits_e8s: u64,
+    total_depositors: u64,
+    total_liquidations_executed: u64,
+    total_interest_received_e8s: u64,
+    stablecoin_balances: Vec<(Principal, u64)>,
+    collateral_gains: Vec<(Principal, u64)>,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct StabilitySeriesResponse {
+    rows: Vec<DailyStabilityRow>,
     next_from_ts: Option<u64>,
 }
 
@@ -314,6 +365,26 @@ fn get_tvl_series(env: &Env, q: RangeQueryArg) -> TvlSeriesResponse {
     }
 }
 
+fn get_vault_series(env: &Env, q: RangeQueryArg) -> VaultSeriesResponse {
+    let result = env.pic.query_call(
+        env.analytics, env.admin, "get_vault_series", encode_one(q).unwrap(),
+    ).expect("get_vault_series query");
+    match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).unwrap(),
+        WasmResult::Reject(msg) => panic!("get_vault_series rejected: {}", msg),
+    }
+}
+
+fn get_stability_series(env: &Env, q: RangeQueryArg) -> StabilitySeriesResponse {
+    let result = env.pic.query_call(
+        env.analytics, env.admin, "get_stability_series", encode_one(q).unwrap(),
+    ).expect("get_stability_series query");
+    match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).unwrap(),
+        WasmResult::Reject(msg) => panic!("get_stability_series rejected: {}", msg),
+    }
+}
+
 // ─── Tests ───
 
 #[test]
@@ -373,6 +444,62 @@ fn pagination_returns_next_cursor_when_full() {
 }
 
 #[test]
+fn tvl_extended_fields_none_when_sources_unavailable() {
+    let env = setup();
+    env.pic.advance_time(std::time::Duration::from_secs(86_400 + 65));
+    for _ in 0..10 {
+        env.pic.tick();
+    }
+
+    let resp = get_tvl_series(
+        &env,
+        RangeQueryArg { from_ts: None, to_ts: None, limit: None, offset: None },
+    );
+    assert!(!resp.rows.is_empty(), "TVL row should be written even with SP/3pool failures");
+    let row = &resp.rows[0];
+    assert!(row.stability_pool_deposits_e8s.is_none(), "SP should be None when unavailable");
+    assert!(row.three_pool_reserve_0_e8s.is_none(), "3pool reserve should be None when unavailable");
+}
+
+#[test]
+fn vault_snapshot_written_with_empty_protocol() {
+    let env = setup();
+    env.pic.advance_time(std::time::Duration::from_secs(86_400 + 65));
+    for _ in 0..10 {
+        env.pic.tick();
+    }
+
+    let resp = get_vault_series(
+        &env,
+        RangeQueryArg { from_ts: None, to_ts: None, limit: None, offset: None },
+    );
+    assert!(!resp.rows.is_empty(), "vault snapshot should be written even with 0 vaults");
+    let row = &resp.rows[0];
+    assert_eq!(row.total_vault_count, 0);
+    assert_eq!(row.total_debt_e8s, 0);
+    // With no vaults, each configured collateral type should report zero vault_count and zero debt.
+    for col in &row.collaterals {
+        assert_eq!(col.vault_count, 0, "expected zero vault_count per collateral with no vaults");
+        assert_eq!(col.total_debt_e8s, 0, "expected zero debt per collateral with no vaults");
+    }
+}
+
+#[test]
+fn stability_snapshot_skipped_when_source_unavailable() {
+    let env = setup();
+    env.pic.advance_time(std::time::Duration::from_secs(86_400 + 65));
+    for _ in 0..10 {
+        env.pic.tick();
+    }
+
+    let resp = get_stability_series(
+        &env,
+        RangeQueryArg { from_ts: None, to_ts: None, limit: None, offset: None },
+    );
+    assert!(resp.rows.is_empty(), "no stability row when source canister unavailable");
+}
+
+#[test]
 fn upgrade_preserves_supply_cache_and_tvl_log() {
     let env = setup();
     env.pic.advance_time(std::time::Duration::from_secs(86_400 + 65));
@@ -386,6 +513,10 @@ fn upgrade_preserves_supply_cache_and_tvl_log() {
     )
     .rows
     .len();
+    let before_vault_rows = get_vault_series(
+        &env,
+        RangeQueryArg { from_ts: None, to_ts: None, limit: None, offset: None },
+    ).rows.len();
     let before_supply = http_get(&env, "/api/supply").body;
     assert!(before_rows > 0, "precondition: TVL log should have a row");
 
@@ -412,7 +543,12 @@ fn upgrade_preserves_supply_cache_and_tvl_log() {
     )
     .rows
     .len();
+    let after_vault_rows = get_vault_series(
+        &env,
+        RangeQueryArg { from_ts: None, to_ts: None, limit: None, offset: None },
+    ).rows.len();
     let after_supply = http_get(&env, "/api/supply").body;
     assert_eq!(before_rows, after_rows, "TVL log lost rows on upgrade");
+    assert_eq!(before_vault_rows, after_vault_rows, "vault log lost rows on upgrade");
     assert_eq!(before_supply, after_supply, "supply cache lost on upgrade");
 }
