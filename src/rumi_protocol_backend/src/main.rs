@@ -557,9 +557,6 @@ fn get_vault_history(vault_id: u64) -> Vec<Event> {
 #[candid_method(query)]
 #[query]
 fn get_events(args: GetEventsArg) -> Vec<Event> {
-    if ic_cdk::api::data_certificate().is_none() {
-        ic_cdk::trap("update call rejected");
-    }
     const MAX_EVENTS_PER_QUERY: usize = 2000;
 
     events()
