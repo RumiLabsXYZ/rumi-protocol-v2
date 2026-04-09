@@ -7,11 +7,53 @@ export const idlFactory = ({ IDL }) => {
     'stability_pool' : IDL.Principal,
     'backend' : IDL.Principal,
   });
+  const BalanceTrackerStats = IDL.Record({
+    'token' : IDL.Principal,
+    'total_tracked_e8s' : IDL.Nat64,
+    'holder_count' : IDL.Nat64,
+  });
+  const ErrorCounters = IDL.Record({
+    'amm' : IDL.Nat64,
+    'three_pool' : IDL.Nat64,
+    'icusd_ledger' : IDL.Nat64,
+    'stability_pool' : IDL.Nat64,
+    'backend' : IDL.Nat64,
+  });
+  const CursorStatus = IDL.Record({
+    'last_error' : IDL.Opt(IDL.Text),
+    'source_count' : IDL.Nat64,
+    'name' : IDL.Text,
+    'last_success_ns' : IDL.Nat64,
+    'cursor_position' : IDL.Nat64,
+  });
+  const CollectorHealth = IDL.Record({
+    'balance_tracker_stats' : IDL.Vec(BalanceTrackerStats),
+    'backfill_active' : IDL.Vec(IDL.Principal),
+    'error_counters' : ErrorCounters,
+    'last_pull_cycle_ns' : IDL.Nat64,
+    'cursors' : IDL.Vec(CursorStatus),
+  });
   const RangeQuery = IDL.Record({
     'to_ts' : IDL.Opt(IDL.Nat64),
     'from_ts' : IDL.Opt(IDL.Nat64),
     'offset' : IDL.Opt(IDL.Nat64),
     'limit' : IDL.Opt(IDL.Nat32),
+  });
+  const DailyHolderRow = IDL.Record({
+    'total_supply_tracked_e8s' : IDL.Nat64,
+    'token' : IDL.Principal,
+    'new_holders_today' : IDL.Nat32,
+    'timestamp_ns' : IDL.Nat64,
+    'median_balance_e8s' : IDL.Nat64,
+    'total_holders' : IDL.Nat32,
+    'top_10_pct_bps' : IDL.Nat32,
+    'top_50' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
+    'distribution_buckets' : IDL.Vec(IDL.Nat32),
+    'gini_bps' : IDL.Nat32,
+  });
+  const HolderSeriesResponse = IDL.Record({
+    'rows' : IDL.Vec(DailyHolderRow),
+    'next_from_ts' : IDL.Opt(IDL.Nat64),
   });
   const DailyStabilityRow = IDL.Record({
     'collateral_gains' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
@@ -64,20 +106,25 @@ export const idlFactory = ({ IDL }) => {
     'rows' : IDL.Vec(DailyVaultSnapshotRow),
     'next_from_ts' : IDL.Opt(IDL.Nat64),
   });
-  const HeaderField = IDL.Tuple(IDL.Text, IDL.Text);
   const HttpRequest = IDL.Record({
     'url' : IDL.Text,
     'method' : IDL.Text,
     'body' : IDL.Vec(IDL.Nat8),
-    'headers' : IDL.Vec(HeaderField),
+    'headers' : IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text)),
   });
   const HttpResponse = IDL.Record({
     'body' : IDL.Vec(IDL.Nat8),
-    'headers' : IDL.Vec(HeaderField),
+    'headers' : IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text)),
     'status_code' : IDL.Nat16,
   });
   return IDL.Service({
     'get_admin' : IDL.Func([], [IDL.Principal], ['query']),
+    'get_collector_health' : IDL.Func([], [CollectorHealth], ['query']),
+    'get_holder_series' : IDL.Func(
+        [RangeQuery, IDL.Principal],
+        [HolderSeriesResponse],
+        ['query'],
+      ),
     'get_stability_series' : IDL.Func(
         [RangeQuery],
         [StabilitySeriesResponse],
@@ -91,6 +138,7 @@ export const idlFactory = ({ IDL }) => {
       ),
     'http_request' : IDL.Func([HttpRequest], [HttpResponse], ['query']),
     'ping' : IDL.Func([], [IDL.Text], ['query']),
+    'start_backfill' : IDL.Func([IDL.Principal], [IDL.Text], []),
   });
 };
 export const init = ({ IDL }) => {
