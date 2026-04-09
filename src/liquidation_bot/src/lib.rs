@@ -72,6 +72,9 @@ fn pre_upgrade() {
 fn post_upgrade() {
     // STEP 1: Rescue legacy JSON blob BEFORE MemoryManager::init.
     // Raw stable64_read is safe here because MemoryManager hasn't been initialized yet.
+    // On second+ upgrades, offset 0 contains the MemoryManager header (magic 0x4D474943 + version).
+    // Interpreted as a little-endian u64, this exceeds 10_000_000, so the len check below
+    // correctly returns None and we fall through to load_config_from_stable().
     let size = ic_cdk::api::stable::stable64_size();
     let legacy_state: Option<BotState> = if size > 0 {
         let mut len_bytes = [0u8; 8];
@@ -386,6 +389,21 @@ async fn admin_retry_stuck_claim(vault_id: u64) {
 
     match process::call_bot_confirm_liquidation(&config, vault_id).await {
         Ok(()) => {
+            // Find and update the stuck record for this vault
+            let count = history::record_count();
+            for id in (0..count).rev() {
+                if let Some(record) = history::get_record(id) {
+                    match &record {
+                        history::LiquidationRecordVersioned::V1(r) => {
+                            if r.vault_id == vault_id && r.status == history::LiquidationStatus::ConfirmFailed {
+                                history::update_record_status(id, history::LiquidationStatus::Completed);
+                                log!(INFO, "admin_retry_stuck_claim: marked record #{} as Completed", id);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
             log!(INFO, "admin_retry_stuck_claim: confirmed vault #{}", vault_id);
         }
         Err(e) => {

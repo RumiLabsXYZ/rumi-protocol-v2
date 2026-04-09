@@ -136,12 +136,12 @@ pub async fn process_pending() {
         match call_bot_confirm_liquidation(&config, vault.vault_id).await {
             Ok(()) => {
                 confirm_ok = true;
-                confirm_retries = attempt;
+                confirm_retries = attempt + 1;
                 break;
             }
             Err(e) => {
                 last_confirm_err = e;
-                confirm_retries = attempt;
+                confirm_retries = attempt + 1;
                 if attempt + 1 < CONFIRM_ATTEMPTS {
                     log!(crate::INFO, "Confirm attempt {}/{} failed for vault #{}: {}. Retrying.",
                         attempt + 1, CONFIRM_ATTEMPTS, vault.vault_id, last_confirm_err);
