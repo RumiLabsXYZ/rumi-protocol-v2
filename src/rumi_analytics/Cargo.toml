@@ -20,6 +20,7 @@ ic-canisters-http-types = { git = "https://github.com/Rumi-Protocol/ic", rev = "
 serde = { version = "1.0.210", features = ["derive"] }
 serde_bytes = "0.11"
 ciborium = "0.2"
+futures = "0.3"
 
 [dev-dependencies]
 pocket-ic = "6.0.0"
