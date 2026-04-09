@@ -61,7 +61,8 @@ pub async fn run() -> Result<(), String> {
     let mut all_crs: Vec<u32> = Vec::new();
 
     for vault in &vaults {
-        if vault.borrowed_icusd_amount == 0 {
+        let debt = vault.borrowed_icusd_amount.saturating_add(vault.accrued_interest);
+        if debt == 0 {
             continue;
         }
         let price = match price_map.get(&vault.collateral_type) {
@@ -69,7 +70,7 @@ pub async fn run() -> Result<(), String> {
             None => continue,
         };
         let cr_bps = (vault.collateral_amount as f64 * price
-            / vault.borrowed_icusd_amount as f64
+            / debt as f64
             * 10_000.0)
             .clamp(0.0, u32::MAX as f64) as u32;
 
@@ -122,7 +123,7 @@ pub async fn run() -> Result<(), String> {
     // collateral type, converted to e8s.
     let total_collateral_usd_e8s: u64 = collateral_totals
         .iter()
-        .map(|ct| (ct.total_collateral as f64 * ct.price * 1e8) as u64)
+        .map(|ct| (ct.total_collateral as f64 * ct.price) as u64)
         .fold(0u64, |acc, x| acc.saturating_add(x));
 
     let total_debt_e8s: u64 = collateral_totals
