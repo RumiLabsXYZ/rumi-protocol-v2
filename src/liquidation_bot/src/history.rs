@@ -109,6 +109,7 @@ pub fn get_record(id: u64) -> Option<LiquidationRecordVersioned> {
 }
 
 pub fn get_records(offset: u64, limit: u64) -> Vec<LiquidationRecordVersioned> {
+    let limit = limit.min(1000);
     HISTORY.with(|h| {
         let borrow = h.borrow();
         let map = borrow.as_ref().expect("History not initialized");
@@ -116,7 +117,7 @@ pub fn get_records(offset: u64, limit: u64) -> Vec<LiquidationRecordVersioned> {
         if count == 0 || offset >= count {
             return vec![];
         }
-        let start = count.saturating_sub(offset + limit);
+        let start = count.saturating_sub(offset.saturating_add(limit));
         let end = count.saturating_sub(offset);
         (start..end).filter_map(|id| map.get(&id)).collect()
     })

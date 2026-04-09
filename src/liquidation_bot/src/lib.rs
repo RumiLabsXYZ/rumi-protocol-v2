@@ -181,9 +181,10 @@ fn get_bot_stats() -> state::BotStats {
 
 #[query]
 fn get_admin_events(offset: u64, limit: u64) -> Vec<state::BotAdminEvent> {
+    let limit = limit.min(1000);
     state::read_state(|s| {
         let len = s.admin_events.len();
-        let start = (len as u64).saturating_sub(offset + limit) as usize;
+        let start = (len as u64).saturating_sub(offset.saturating_add(limit)) as usize;
         let end = (len as u64).saturating_sub(offset) as usize;
         if start >= end {
             return vec![];
@@ -273,7 +274,7 @@ async fn admin_resolve_pool_ordering() {
     let _guard = ProcessingGuard::acquire()
         .unwrap_or_else(|_| ic_cdk::trap("Another operation is in progress"));
     let (pool, icp_ledger) = state::read_state(|s| {
-        let c = s.config.as_ref().unwrap();
+        let c = s.config.as_ref().expect("Config not set");
         (c.icpswap_pool, c.icp_ledger)
     });
 
@@ -305,7 +306,7 @@ async fn admin_approve_pool() {
     let _guard = ProcessingGuard::acquire()
         .unwrap_or_else(|_| ic_cdk::trap("Another operation is in progress"));
     let (icp_ledger, pool) = state::read_state(|s| {
-        let c = s.config.as_ref().unwrap();
+        let c = s.config.as_ref().expect("Config not set");
         (c.icp_ledger, c.icpswap_pool)
     });
 
@@ -323,7 +324,9 @@ async fn admin_sweep_ckusdc(target: Principal, record_id: Option<u64>) {
     require_admin();
     let _guard = ProcessingGuard::acquire()
         .unwrap_or_else(|_| ic_cdk::trap("Another operation is in progress"));
-    let ckusdc_ledger = state::read_state(|s| s.config.as_ref().unwrap().ckusdc_ledger);
+    let ckusdc_ledger = state::read_state(|s| {
+        s.config.as_ref().expect("Config not set").ckusdc_ledger
+    });
 
     let balance_result: Result<(Nat,), _> = ic_cdk::call(
         ckusdc_ledger,
@@ -337,7 +340,7 @@ async fn admin_sweep_ckusdc(target: Principal, record_id: Option<u64>) {
 
     let balance = match balance_result {
         Ok((b,)) => {
-            let val: u64 = b.0.to_string().parse().unwrap_or(0);
+            let val: u64 = b.0.to_string().parse().unwrap_or(u64::MAX);
             if val == 0 {
                 ic_cdk::trap("Bot has zero ckUSDC balance");
             }
@@ -346,7 +349,7 @@ async fn admin_sweep_ckusdc(target: Principal, record_id: Option<u64>) {
         Err((code, msg)) => ic_cdk::trap(&format!("Balance query failed: {:?} {}", code, msg)),
     };
 
-    let fee = state::read_state(|s| s.config.as_ref().unwrap().ckusdc_fee_e6.unwrap_or(10));
+    let fee = state::read_state(|s| s.config.as_ref().expect("Config not set").ckusdc_fee_e6.unwrap_or(10));
     let send_amount = balance.saturating_sub(fee);
 
     let transfer_args = icrc_ledger_types::icrc1::transfer::TransferArg {
