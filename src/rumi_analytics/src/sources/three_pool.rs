@@ -61,3 +61,75 @@ pub async fn get_pool_status(three_pool: Principal) -> Result<ThreePoolStatusSub
         Err((code, msg)) => Err(format!("get_pool_status: {:?} {}", code, msg)),
     }
 }
+
+// --- Event tailing (Phase 4) ---
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct ThreePoolSwapEvent {
+    pub id: u64,
+    pub timestamp: u64,
+    pub caller: Principal,
+    pub token_in: u8,
+    pub token_out: u8,
+    pub amount_in: Nat,
+    pub amount_out: Nat,
+    pub fee: Nat,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub enum ThreePoolLiquidityAction {
+    AddLiquidity,
+    RemoveLiquidity,
+    RemoveOneCoin,
+    Donate,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct ThreePoolLiquidityEvent {
+    pub id: u64,
+    pub timestamp: u64,
+    pub caller: Principal,
+    pub action: ThreePoolLiquidityAction,
+    pub amounts: Vec<Nat>,
+    pub lp_amount: Nat,
+    pub coin_index: Option<u8>,
+    pub fee: Option<Nat>,
+}
+
+pub async fn get_swap_events(
+    three_pool: Principal,
+    start: u64,
+    length: u64,
+) -> Result<Vec<ThreePoolSwapEvent>, String> {
+    let (events,): (Vec<ThreePoolSwapEvent>,) =
+        ic_cdk::call(three_pool, "get_swap_events", (start, length))
+            .await
+            .map_err(|(code, msg)| format!("get_swap_events: {:?} {}", code, msg))?;
+    Ok(events)
+}
+
+pub async fn get_swap_event_count(three_pool: Principal) -> Result<u64, String> {
+    let (count,): (u64,) = ic_cdk::call(three_pool, "get_swap_event_count", ())
+        .await
+        .map_err(|(code, msg)| format!("get_swap_event_count: {:?} {}", code, msg))?;
+    Ok(count)
+}
+
+pub async fn get_liquidity_events(
+    three_pool: Principal,
+    start: u64,
+    length: u64,
+) -> Result<Vec<ThreePoolLiquidityEvent>, String> {
+    let (events,): (Vec<ThreePoolLiquidityEvent>,) =
+        ic_cdk::call(three_pool, "get_liquidity_events", (start, length))
+            .await
+            .map_err(|(code, msg)| format!("get_liquidity_events: {:?} {}", code, msg))?;
+    Ok(events)
+}
+
+pub async fn get_liquidity_event_count(three_pool: Principal) -> Result<u64, String> {
+    let (count,): (u64,) = ic_cdk::call(three_pool, "get_liquidity_event_count", ())
+        .await
+        .map_err(|(code, msg)| format!("get_liquidity_event_count: {:?} {}", code, msg))?;
+    Ok(count)
+}

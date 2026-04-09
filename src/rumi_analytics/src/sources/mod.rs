@@ -1,3 +1,4 @@
+pub mod amm;
 pub mod backend;
 pub mod icusd_ledger;
 pub mod stability_pool;
