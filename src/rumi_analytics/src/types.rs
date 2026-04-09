@@ -3,7 +3,7 @@
 use candid::CandidType;
 use serde::Deserialize;
 
-use crate::storage::DailyTvlRow;
+use crate::storage::{DailyTvlRow, DailyVaultSnapshotRow, DailyStabilityRow};
 
 #[derive(CandidType, Deserialize, Clone, Debug, Default)]
 pub struct RangeQuery {
@@ -34,5 +34,17 @@ impl RangeQuery {
 #[derive(CandidType, Clone, Debug)]
 pub struct TvlSeriesResponse {
     pub rows: Vec<DailyTvlRow>,
+    pub next_from_ts: Option<u64>,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct VaultSeriesResponse {
+    pub rows: Vec<DailyVaultSnapshotRow>,
+    pub next_from_ts: Option<u64>,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct StabilitySeriesResponse {
+    pub rows: Vec<DailyStabilityRow>,
     pub next_from_ts: Option<u64>,
 }

@@ -69,6 +69,16 @@ fn get_tvl_series(query: types::RangeQuery) -> types::TvlSeriesResponse {
 }
 
 #[ic_cdk_macros::query]
+fn get_vault_series(query: types::RangeQuery) -> types::VaultSeriesResponse {
+    queries::historical::get_vault_series(query)
+}
+
+#[ic_cdk_macros::query]
+fn get_stability_series(query: types::RangeQuery) -> types::StabilitySeriesResponse {
+    queries::historical::get_stability_series(query)
+}
+
+#[ic_cdk_macros::query]
 fn http_request(req: ic_canisters_http_types::HttpRequest) -> ic_canisters_http_types::HttpResponse {
     http::http_request(req)
 }

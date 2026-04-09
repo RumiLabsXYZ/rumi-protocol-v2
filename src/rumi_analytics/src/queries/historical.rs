@@ -1,7 +1,7 @@
 //! Read-only paginated readers over StableLogs. Pure functions, no state mutation.
 
 use crate::storage;
-use crate::types::{RangeQuery, TvlSeriesResponse};
+use crate::types::{RangeQuery, TvlSeriesResponse, VaultSeriesResponse, StabilitySeriesResponse};
 
 pub fn get_tvl_series(query: RangeQuery) -> TvlSeriesResponse {
     let limit = query.resolved_limit() as usize;
@@ -19,6 +19,32 @@ pub fn get_tvl_series(query: RangeQuery) -> TvlSeriesResponse {
     };
 
     TvlSeriesResponse { rows, next_from_ts }
+}
+
+pub fn get_vault_series(query: RangeQuery) -> VaultSeriesResponse {
+    let limit = query.resolved_limit() as usize;
+    let from = query.resolved_from();
+    let to = query.resolved_to();
+    let rows = storage::daily_vaults::range(from, to, limit);
+    let next_from_ts = if rows.len() == limit && limit > 0 {
+        rows.last().map(|r| r.timestamp_ns.saturating_add(1))
+    } else {
+        None
+    };
+    VaultSeriesResponse { rows, next_from_ts }
+}
+
+pub fn get_stability_series(query: RangeQuery) -> StabilitySeriesResponse {
+    let limit = query.resolved_limit() as usize;
+    let from = query.resolved_from();
+    let to = query.resolved_to();
+    let rows = storage::daily_stability::range(from, to, limit);
+    let next_from_ts = if rows.len() == limit && limit > 0 {
+        rows.last().map(|r| r.timestamp_ns.saturating_add(1))
+    } else {
+        None
+    };
+    StabilitySeriesResponse { rows, next_from_ts }
 }
 
 #[cfg(test)]
