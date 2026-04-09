@@ -434,3 +434,13 @@ pub mod daily_stability {
         out
     }
 }
+
+pub mod cursors;
+pub mod events;
+pub mod balance_tracker;
+pub mod holders;
+
+/// Get a virtual memory from the shared MemoryManager. Used by submodules.
+pub(crate) fn get_memory(id: MemoryId) -> Memory {
+    MEMORY_MANAGER.with(|m| m.borrow().get(id))
+}
