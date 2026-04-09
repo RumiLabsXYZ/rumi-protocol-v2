@@ -34,7 +34,6 @@ export interface BotStatsResponse {
   'liquidation_bot_principal' : [] | [Principal],
   'budget_total_e8s' : bigint,
   'budget_start_timestamp' : bigint,
-  'total_icusd_deposited_e8s' : bigint,
 }
 export interface CandidVault {
   'collateral_amount' : bigint,
@@ -831,12 +830,12 @@ export interface _SERVICE {
     Result_11
   >,
   'admin_mint_icusd' : ActorMethod<[bigint, Principal, string], Result_1>,
+  'admin_resolve_stuck_claim' : ActorMethod<[bigint, boolean], Result>,
   'admin_sweep_to_treasury' : ActorMethod<[string], Result_1>,
   'borrow_from_vault' : ActorMethod<[VaultArg], Result_2>,
   'bot_cancel_liquidation' : ActorMethod<[bigint], Result>,
   'bot_claim_liquidation' : ActorMethod<[bigint], Result_3>,
   'bot_confirm_liquidation' : ActorMethod<[bigint], Result>,
-  'bot_deposit_to_reserves' : ActorMethod<[bigint], Result>,
   'claim_liquidity_returns' : ActorMethod<[], Result_1>,
   'clear_stuck_operations' : ActorMethod<[[] | [Principal]], Result_1>,
   'close_vault' : ActorMethod<[bigint], Result_4>,

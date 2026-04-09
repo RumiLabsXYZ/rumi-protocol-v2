@@ -80,10 +80,6 @@
           <span class="stat-label">Total debt covered (all time)</span>
           <span class="stat-value">{formatUsd(Number(stats.total_debt_covered_e8s))}</span>
         </div>
-        <div class="stat-row">
-          <span class="stat-label">Total icUSD deposited (all time)</span>
-          <span class="stat-value">{formatUsd(Number(stats.total_icusd_deposited_e8s))}</span>
-        </div>
       </div>
     {/if}
     <p>When the budget is exhausted, the bot stops liquidating and the stability pool and manual liquidators take over. The budget resets when the admin sets a new period.</p>

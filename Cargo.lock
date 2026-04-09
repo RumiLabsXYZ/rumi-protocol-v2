@@ -5480,7 +5480,6 @@ name = "liquidation_bot"
 version = "0.1.0"
 dependencies = [
  "candid",
- "futures",
  "ic-canister-log 0.2.0 (git+https://github.com/Rumi-Protocol/ic?rev=fc278709)",
  "ic-cdk 0.12.2",
  "ic-cdk-macros 0.8.4",

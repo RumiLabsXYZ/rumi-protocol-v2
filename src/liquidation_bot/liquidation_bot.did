@@ -1,37 +1,28 @@
 type BotConfig = record {
   backend_principal : principal;
-  three_pool_principal : principal;
-  kong_swap_principal : principal;
   treasury_principal : principal;
   admin : principal;
   max_slippage_bps : nat16;
   icp_ledger : principal;
   ckusdc_ledger : principal;
-  ckusdt_ledger : principal;
-  icusd_ledger : principal;
+  icpswap_pool : principal;
+  icpswap_zero_for_one : opt bool;
+  icp_fee_e8s : opt nat64;
+  ckusdc_fee_e6 : opt nat64;
+  // Legacy fields (ignored, kept for deserialization compat)
+  three_pool_principal : opt principal;
+  kong_swap_principal : opt principal;
+  ckusdt_ledger : opt principal;
+  icusd_ledger : opt principal;
 };
 
 type BotInitArgs = record {
   config : BotConfig;
 };
 
-type BotLiquidationEvent = record {
-  timestamp : nat64;
-  vault_id : nat64;
-  debt_covered_e8s : nat64;
-  collateral_received_e8s : nat64;
-  icusd_burned_e8s : nat64;
-  collateral_to_treasury_e8s : nat64;
-  swap_route : text;
-  effective_price_e8s : nat64;
-  slippage_bps : int32;
-  success : bool;
-  error_message : opt text;
-};
-
 type BotStats = record {
   total_debt_covered_e8s : nat64;
-  total_icusd_burned_e8s : nat64;
+  total_ckusdc_deposited_e6 : nat64;
   total_collateral_received_e8s : nat64;
   total_collateral_to_treasury_e8s : nat64;
   events_count : nat64;
@@ -46,31 +37,70 @@ type LiquidatableVaultInfo = record {
   collateral_price_e8s : nat64;
 };
 
-type TestSwapResult = record {
-  icp_input_e8s : nat64;
-  stable_output_native : nat64;
-  stable_route : text;
-  icusd_output_e8s : nat64;
-  icusd_sent_to : text;
+type LiquidationStatus = variant {
+  Completed;
+  SwapFailed;
+  TransferFailed;
+  ConfirmFailed;
+  ClaimFailed;
+  AdminResolved;
 };
 
-type TestForceResult = record {
+type LiquidationRecordV1 = record {
+  id : nat64;
   vault_id : nat64;
-  collateral_received_e8s : nat64;
-  debt_covered_e8s : nat64;
-  stable_output_native : nat64;
-  stable_route : text;
-  icusd_output_e8s : nat64;
-  icusd_deposited_to_reserves : bool;
+  timestamp : nat64;
+  status : LiquidationStatus;
+  collateral_claimed_e8s : nat64;
+  debt_to_cover_e8s : nat64;
+  icp_swapped_e8s : nat64;
+  ckusdc_received_e6 : nat64;
+  ckusdc_transferred_e6 : nat64;
   icp_to_treasury_e8s : nat64;
+  oracle_price_e8s : nat64;
+  effective_price_e8s : nat64;
+  slippage_bps : int32;
+  error_message : opt text;
+  confirm_retry_count : nat8;
+};
+
+type LiquidationRecordVersioned = variant {
+  V1 : LiquidationRecordV1;
+};
+
+type BotAdminAction = variant {
+  ConfigUpdated;
+  VaultsNotified : record { count : nat64 };
+};
+
+type BotAdminEvent = record {
+  timestamp : nat64;
+  caller : text;
+  action : BotAdminAction;
 };
 
 service : (BotInitArgs) -> {
+  // Core
   notify_liquidatable_vaults : (vec LiquidatableVaultInfo) -> ();
-  get_bot_stats : () -> (BotStats) query;
-  get_liquidation_events : (nat64, nat64) -> (vec BotLiquidationEvent) query;
   set_config : (BotConfig) -> ();
-  test_swap_pipeline : (nat64) -> (TestSwapResult);
-  test_force_liquidate : (nat64) -> (TestForceResult);
-  test_force_partial_liquidate : (nat64) -> (TestForceResult);
+
+  // Stats
+  get_bot_stats : () -> (BotStats) query;
+
+  // History
+  get_liquidation : (nat64) -> (opt LiquidationRecordVersioned) query;
+  get_liquidations : (nat64, nat64) -> (vec LiquidationRecordVersioned) query;
+  get_liquidation_count : () -> (nat64) query;
+  get_stuck_liquidations : () -> (vec LiquidationRecordVersioned) query;
+  get_liquidation_events : (nat64, nat64) -> (vec LiquidationRecordVersioned) query;
+
+  // Admin events
+  get_admin_events : (nat64, nat64) -> (vec BotAdminEvent) query;
+  get_admin_event_count : () -> (nat64) query;
+
+  // Admin actions
+  admin_resolve_pool_ordering : () -> ();
+  admin_approve_pool : () -> ();
+  admin_sweep_ckusdc : (principal, opt nat64) -> ();
+  admin_retry_stuck_claim : (nat64) -> ();
 };
