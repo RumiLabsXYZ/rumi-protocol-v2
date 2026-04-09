@@ -131,23 +131,30 @@ pub fn record_count() -> u64 {
     })
 }
 
+/// Returns stuck records (TransferFailed or ConfirmFailed), scanning from newest first.
+/// Capped at 100 results to avoid hitting the instruction limit on large histories.
 pub fn get_stuck_records() -> Vec<LiquidationRecordVersioned> {
+    const MAX_RESULTS: usize = 100;
     HISTORY.with(|h| {
         let borrow = h.borrow();
         let map = borrow.as_ref().expect("History not initialized");
         let count = record_count();
-        (0..count)
-            .filter_map(|id| {
-                let record = map.get(&id)?;
+        let mut results = Vec::new();
+        for id in (0..count).rev() {
+            if results.len() >= MAX_RESULTS {
+                break;
+            }
+            if let Some(record) = map.get(&id) {
                 match &record {
                     LiquidationRecordVersioned::V1(r) => match r.status {
                         LiquidationStatus::TransferFailed
-                        | LiquidationStatus::ConfirmFailed => Some(record),
-                        _ => None,
+                        | LiquidationStatus::ConfirmFailed => results.push(record),
+                        _ => {}
                     },
                 }
-            })
-            .collect()
+            }
+        }
+        results
     })
 }
 
@@ -167,7 +174,10 @@ pub fn update_record_status(id: u64, new_status: LiquidationStatus) {
 }
 
 /// Migrate legacy BotLiquidationEvent entries into the new stable map.
+/// Capped at 500 entries to avoid trapping in post_upgrade due to instruction limit.
+/// In practice the bot has far fewer legacy events than this.
 pub fn migrate_legacy_events(events: &[crate::state::BotLiquidationEvent]) {
+    let events = if events.len() > 500 { &events[..500] } else { events };
     for event in events {
         let id = next_id();
         let status = if event.success {

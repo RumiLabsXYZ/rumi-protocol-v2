@@ -150,5 +150,12 @@ pub async fn fetch_metadata(pool: Principal) -> Result<PoolMetadata, String> {
 }
 
 fn nat_to_u64(n: &Nat) -> u64 {
-    n.0.to_string().parse::<u64>().unwrap_or(0)
+    let s = n.0.to_string();
+    match s.parse::<u64>() {
+        Ok(v) => v,
+        Err(_) => {
+            ic_canister_log::log!(crate::INFO, "WARNING: Nat value {} overflows u64, clamping to MAX", s);
+            u64::MAX
+        }
+    }
 }

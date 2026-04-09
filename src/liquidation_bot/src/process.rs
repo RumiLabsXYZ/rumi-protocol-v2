@@ -42,6 +42,11 @@ impl std::fmt::Display for BackendError {
 }
 
 pub async fn process_pending() {
+    let _guard = match crate::ProcessingGuard::acquire() {
+        Ok(g) => g,
+        Err(_) => return, // Another liquidation is already in flight
+    };
+
     let vault = state::mutate_state(|s| s.pending_vaults.pop());
     let Some(vault) = vault else { return };
 

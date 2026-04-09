@@ -2,6 +2,7 @@ use candid::{CandidType, Deserialize, Nat, Principal};
 use ic_cdk_macros::{init, post_upgrade, pre_upgrade, query, update};
 use ic_canister_log::{declare_log_buffer, log};
 use icrc_ledger_types::icrc1::account::Account;
+use std::cell::RefCell;
 
 mod history;
 mod icpswap;
@@ -13,6 +14,32 @@ mod swap;
 use state::{BotAdminAction, BotAdminEvent, BotConfig, BotState, LiquidatableVaultInfo};
 
 declare_log_buffer!(name = INFO, capacity = 1000);
+
+thread_local! {
+    /// Reentrancy guard: true while process_pending or an admin async endpoint is running.
+    static PROCESSING: RefCell<bool> = RefCell::new(false);
+}
+
+struct ProcessingGuard;
+
+impl ProcessingGuard {
+    fn acquire() -> Result<Self, &'static str> {
+        PROCESSING.with(|p| {
+            let mut flag = p.borrow_mut();
+            if *flag {
+                return Err("Already processing");
+            }
+            *flag = true;
+            Ok(Self)
+        })
+    }
+}
+
+impl Drop for ProcessingGuard {
+    fn drop(&mut self) {
+        PROCESSING.with(|p| *p.borrow_mut() = false);
+    }
+}
 
 #[derive(CandidType, Deserialize)]
 pub struct BotInitArgs {
@@ -102,6 +129,24 @@ fn setup_timer() {
     );
 }
 
+// ---- Inspect message (cycle optimization, NOT a security boundary) ----
+
+#[ic_cdk_macros::inspect_message]
+fn inspect_message() {
+    let method = ic_cdk::api::call::method_name();
+    match method.as_str() {
+        // Admin/auth methods: reject anonymous to save cycles on Candid decoding
+        "set_config" | "admin_resolve_pool_ordering" | "admin_approve_pool"
+        | "admin_sweep_ckusdc" | "admin_retry_stuck_claim" => {
+            if ic_cdk::api::caller() != Principal::anonymous() {
+                ic_cdk::api::call::accept_message();
+            }
+        }
+        // All other methods (queries, notify from backend): accept
+        _ => ic_cdk::api::call::accept_message(),
+    }
+}
+
 // ---- Core endpoints ----
 
 #[update]
@@ -114,12 +159,14 @@ fn notify_liquidatable_vaults(vaults: Vec<LiquidatableVaultInfo>) {
     }
     let count = vaults.len();
     state::mutate_state(|s| {
+        // Replace (not append): backend sends the full current set each cycle.
         s.pending_vaults = vaults;
         s.admin_events.push(BotAdminEvent {
             timestamp: ic_cdk::api::time(),
             caller: caller.to_text(),
             action: BotAdminAction::VaultsNotified { count: count as u64 },
         });
+        trim_admin_events(&mut s.admin_events);
     });
     log!(INFO, "Received {} liquidatable vaults from backend", count);
 }
@@ -147,6 +194,17 @@ fn get_admin_event_count() -> u64 {
     state::read_state(|s| s.admin_events.len() as u64)
 }
 
+/// Cap admin_events to prevent unbounded heap growth.
+/// Keeps the most recent MAX entries, discards oldest.
+const MAX_ADMIN_EVENTS: usize = 10_000;
+
+fn trim_admin_events(events: &mut Vec<BotAdminEvent>) {
+    if events.len() > MAX_ADMIN_EVENTS {
+        let drain_count = events.len() - MAX_ADMIN_EVENTS;
+        events.drain(..drain_count);
+    }
+}
+
 #[update]
 fn set_config(config: BotConfig) {
     require_admin();
@@ -157,6 +215,7 @@ fn set_config(config: BotConfig) {
             caller: ic_cdk::api::caller().to_text(),
             action: BotAdminAction::ConfigUpdated,
         });
+        trim_admin_events(&mut s.admin_events);
     });
 }
 
@@ -193,6 +252,9 @@ fn get_liquidation_events(offset: u64, limit: u64) -> Vec<history::LiquidationRe
 
 fn require_admin() {
     let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() {
+        ic_cdk::trap("Anonymous caller not allowed");
+    }
     let is_admin = state::read_state(|s| {
         s.config.as_ref().map(|c| c.admin == caller).unwrap_or(false)
     });
@@ -205,6 +267,8 @@ fn require_admin() {
 #[update]
 async fn admin_resolve_pool_ordering() {
     require_admin();
+    let _guard = ProcessingGuard::acquire()
+        .unwrap_or_else(|_| ic_cdk::trap("Another operation is in progress"));
     let (pool, icp_ledger) = state::read_state(|s| {
         let c = s.config.as_ref().unwrap();
         (c.icpswap_pool, c.icp_ledger)
@@ -235,6 +299,8 @@ async fn admin_resolve_pool_ordering() {
 #[update]
 async fn admin_approve_pool() {
     require_admin();
+    let _guard = ProcessingGuard::acquire()
+        .unwrap_or_else(|_| ic_cdk::trap("Another operation is in progress"));
     let (icp_ledger, pool) = state::read_state(|s| {
         let c = s.config.as_ref().unwrap();
         (c.icp_ledger, c.icpswap_pool)
@@ -252,6 +318,8 @@ async fn admin_approve_pool() {
 #[update]
 async fn admin_sweep_ckusdc(target: Principal, record_id: Option<u64>) {
     require_admin();
+    let _guard = ProcessingGuard::acquire()
+        .unwrap_or_else(|_| ic_cdk::trap("Another operation is in progress"));
     let ckusdc_ledger = state::read_state(|s| s.config.as_ref().unwrap().ckusdc_ledger);
 
     let balance_result: Result<(Nat,), _> = ic_cdk::call(
@@ -312,6 +380,8 @@ async fn admin_sweep_ckusdc(target: Principal, record_id: Option<u64>) {
 #[update]
 async fn admin_retry_stuck_claim(vault_id: u64) {
     require_admin();
+    let _guard = ProcessingGuard::acquire()
+        .unwrap_or_else(|_| ic_cdk::trap("Another operation is in progress"));
     let config = state::read_state(|s| s.config.clone()).expect("Not configured");
 
     match process::call_bot_confirm_liquidation(&config, vault_id).await {
