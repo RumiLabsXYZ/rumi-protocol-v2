@@ -200,7 +200,19 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'reason' : string,
     }
   } |
+  {
+    'set_collateral_min_vault_debt' : {
+      'min_vault_debt' : bigint,
+      'collateral_type' : Principal,
+    }
+  } |
   { 'set_recovery_target_cr' : { 'rate' : string } } |
+  {
+    'set_collateral_redemption_fee_floor' : {
+      'redemption_fee_floor' : string,
+      'collateral_type' : Principal,
+    }
+  } |
   { 'init' : InitArg } |
   {
     'set_stable_ledger_principal' : {
@@ -213,6 +225,12 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'block_index' : bigint,
       'vault' : Vault,
       'timestamp' : [] | [bigint],
+    }
+  } |
+  {
+    'set_collateral_display_color' : {
+      'collateral_type' : Principal,
+      'display_color' : [] | [string],
     }
   } |
   {
@@ -244,6 +262,12 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     }
   } |
   {
+    'set_collateral_redemption_fee_ceiling' : {
+      'redemption_fee_ceiling' : string,
+      'collateral_type' : Principal,
+    }
+  } |
+  {
     'margin_transfer' : {
       'block_index' : bigint,
       'vault_id' : bigint,
@@ -261,6 +285,12 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
   { 'set_rmr_floor_cr' : { 'value' : string } } |
   { 'set_rmr_ceiling' : { 'value' : string } } |
   {
+    'set_collateral_liquidation_bonus' : {
+      'collateral_type' : Principal,
+      'liquidation_bonus' : string,
+    }
+  } |
+  {
     'set_global_icusd_mint_cap' : {
       'cap' : [] | [string],
       'amount' : [] | [string],
@@ -275,6 +305,11 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'fee_amount' : bigint,
       'caller' : [] | [Principal],
       'borrowed_amount' : bigint,
+    }
+  } |
+  {
+    'set_bot_allowed_collateral_types' : {
+      'collateral_types' : Array<Principal>,
     }
   } |
   { 'set_reserve_redemptions_enabled' : { 'enabled' : boolean } } |
@@ -314,6 +349,12 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     'set_rate_curve_markers' : {
       'markers' : string,
       'collateral_type' : [] | [string],
+    }
+  } |
+  {
+    'set_collateral_liquidation_ratio' : {
+      'collateral_type' : Principal,
+      'liquidation_ratio' : string,
     }
   } |
   {
@@ -373,6 +414,12 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     }
   } |
   {
+    'set_collateral_min_deposit' : {
+      'min_collateral_deposit' : bigint,
+      'collateral_type' : Principal,
+    }
+  } |
+  {
     'update_collateral_status' : {
       'status' : CollateralStatus,
       'collateral_type' : Principal,
@@ -424,8 +471,20 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     }
   } |
   {
+    'set_collateral_borrow_threshold' : {
+      'borrow_threshold_ratio' : string,
+      'collateral_type' : Principal,
+    }
+  } |
+  {
     'add_collateral_type' : {
       'config' : CollateralConfig,
+      'collateral_type' : Principal,
+    }
+  } |
+  {
+    'set_collateral_ledger_fee' : {
+      'ledger_fee' : bigint,
       'collateral_type' : Principal,
     }
   } |
