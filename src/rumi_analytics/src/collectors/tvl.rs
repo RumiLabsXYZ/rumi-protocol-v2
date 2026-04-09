@@ -27,6 +27,12 @@ pub async fn run() -> Result<(), String> {
         total_icp_collateral_e8s: status.total_icp_margin as u128,
         total_icusd_supply_e8s: status.total_icusd_borrowed as u128,
         system_collateral_ratio_bps: cr_bps,
+        stability_pool_deposits_e8s: None,
+        three_pool_reserve_0_e8s: None,
+        three_pool_reserve_1_e8s: None,
+        three_pool_reserve_2_e8s: None,
+        three_pool_virtual_price_e18: None,
+        three_pool_lp_supply_e8s: None,
     };
     storage::daily_tvl::push(row);
 
