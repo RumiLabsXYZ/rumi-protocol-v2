@@ -6,7 +6,7 @@ use crate::{sources, state, storage};
 use storage::balance_tracker::{self, Account, Token};
 use storage::cursors;
 use sources::icusd_ledger::ICRC3Value;
-use super::{BATCH_SIZE, BACKFILL_BATCH_SIZE, update_cursor_success, update_cursor_source_count};
+use super::{BATCH_SIZE, BACKFILL_BATCH_SIZE, update_cursor_success, update_cursor_error, update_cursor_source_count};
 
 pub async fn tail_icusd_blocks() {
     let ledger = state::read_state(|s| s.sources.icusd_ledger);
@@ -63,6 +63,7 @@ async fn tail_blocks<G, S>(
                     Token::IcUsd => s.error_counters.icusd_ledger += 1,
                     Token::ThreeUsd => s.error_counters.three_pool += 1,
                 }
+                update_cursor_error(s, cursor_id, e.clone());
             });
             return;
         }
