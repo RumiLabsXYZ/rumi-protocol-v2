@@ -1,9 +1,6 @@
-//! Timer wiring. Phase 1 sets up all four tier intervals but only the daily
-//! tier (TVL collector) and the pull-cycle supply refresh do real work.
-//! Subsequent phases populate the other callbacks.
+//! Timer wiring. Phase 3 populates the daily tier with three collectors.
 
 use std::time::Duration;
-
 use crate::{collectors, sources, state};
 
 pub fn setup_timers() {
@@ -21,8 +18,6 @@ pub fn setup_timers() {
     });
 }
 
-/// Pull cycle: Phase 1 only refreshes the supply cache. Phase 4 extends this
-/// with event tailing across every source stream.
 async fn pull_cycle() {
     refresh_supply_cache().await;
 }
@@ -41,7 +36,19 @@ async fn refresh_supply_cache() {
 }
 
 async fn daily_snapshot() {
-    if let Err(e) = collectors::tvl::run().await {
+    let (tvl_res, vaults_res, stability_res) = futures::join!(
+        collectors::tvl::run(),
+        collectors::vaults::run(),
+        collectors::stability::run(),
+    );
+
+    if let Err(e) = tvl_res {
         ic_cdk::println!("rumi_analytics: daily TVL snapshot failed: {}", e);
+    }
+    if let Err(e) = vaults_res {
+        ic_cdk::println!("rumi_analytics: daily vault snapshot failed: {}", e);
+    }
+    if let Err(e) = stability_res {
+        ic_cdk::println!("rumi_analytics: daily stability snapshot failed: {}", e);
     }
 }
