@@ -14,18 +14,9 @@ fn gauge(out: &mut String, name: &str, help: &str, value: f64) {
     ));
 }
 
-fn counter(out: &mut String, name: &str, help: &str, label: &str, value: f64) {
-    // Emit the HELP/TYPE header only once per metric family. The caller must
-    // push the header before the first labeled series and skip it for
-    // subsequent ones. We therefore split header emission from the series line.
-    let _ = (name, help, label, value); // suppress lint; see render() below
-}
-
 // ── Public entry point ────────────────────────────────────────────────────────
 
 pub fn render() -> String {
-    let _ = counter; // silence dead-code warning; header logic is inline below
-
     let mut out = String::with_capacity(2048);
 
     // ── Supply gauges ────────────────────────────────────────────────────────
