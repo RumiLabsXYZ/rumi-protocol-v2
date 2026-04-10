@@ -12,10 +12,11 @@
     fetchAllVaults, fetchEventCount, fetchTreasuryStats,
     fetchInterestSplit, fetchBotStats, fetchStabilityPoolStatus,
     fetchThreePoolStatus, fetchEvents, fetchCollateralConfigs,
-    fetchLiquidatableVaults, fetchAllSnapshots,
+    fetchLiquidatableVaults,
     fetchAmmPools, fetchAmmSwapEventCount, fetchSwapEventCount,
     fetchProtocolConfig
   } from '$services/explorer/explorerService';
+  import { fetchVaultSeries } from '$services/explorer/analyticsService';
   import {
     formatE8s, formatUsd, formatCR, formatBps,
     getTokenSymbol, registerToken, classifyVaultHealth, healthColor
@@ -490,8 +491,12 @@
     // Section 7: Historical Charts
     const chartsPromise = (async () => {
       try {
-        const snapshots = await fetchAllSnapshots();
-        allSnapshots = snapshots ?? [];
+        const vaultData = await fetchVaultSeries(365);
+        allSnapshots = (vaultData ?? []).map((r: any) => ({
+          timestamp: r.timestamp_ns,
+          total_collateral_value_usd: r.total_collateral_usd_e8s,
+          total_debt: r.total_debt_e8s,
+        }));
       } catch (e) {
         console.error('[explorer] Charts load failed:', e);
         if (!isRefresh) chartsError = 'Failed to load historical data';
