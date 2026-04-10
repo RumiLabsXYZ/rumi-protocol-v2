@@ -5,6 +5,7 @@
   import StatCard from '$components/explorer/StatCard.svelte';
   import { fetchIcusdHolders, fetchThreeUsdHolders, type TokenHolder } from '$services/explorer/explorerService';
   import { formatE8s } from '$utils/explorerHelpers';
+  import { Principal } from '@dfinity/principal';
   import { CANISTER_IDS } from '$lib/config';
   import { fetchHolderSeries } from '$services/explorer/analyticsService';
 
@@ -99,8 +100,8 @@
   async function loadTrends(token: TokenTab) {
     trendsLoading = true;
     try {
-      const ledger = token === 'icusd' ? CANISTER_IDS.ICUSD_LEDGER : CANISTER_IDS.THREEPOOL;
-      holderTrends = await fetchHolderSeries(ledger, 90);
+      const ledgerId = token === 'icusd' ? CANISTER_IDS.ICUSD_LEDGER : CANISTER_IDS.THREEPOOL;
+      holderTrends = await fetchHolderSeries(Principal.fromText(ledgerId), 90);
     } catch (e) {
       console.error('[holders] trends load failed:', e);
       holderTrends = [];
