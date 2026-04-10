@@ -1,7 +1,7 @@
 //! Shared candid types for analytics queries and responses.
 
 use candid::CandidType;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::storage::{DailyTvlRow, DailyVaultSnapshotRow, DailyStabilityRow};
 
@@ -123,4 +123,121 @@ pub struct BalanceTrackerStats {
     pub token: Principal,
     pub holder_count: u64,
     pub total_tracked_e8s: u64,
+}
+
+// --- Phase 6: Live query types ---
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct OhlcQuery {
+    pub collateral: Principal,
+    pub bucket_secs: Option<u64>,
+    pub from_ts: Option<u64>,
+    pub to_ts: Option<u64>,
+    pub limit: Option<u32>,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize)]
+pub struct OhlcCandle {
+    pub timestamp_ns: u64,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct OhlcResponse {
+    pub candles: Vec<OhlcCandle>,
+    pub collateral: Principal,
+    pub symbol: String,
+    pub bucket_secs: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct TwapQuery {
+    pub window_secs: Option<u64>,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct TwapEntry {
+    pub collateral: Principal,
+    pub symbol: String,
+    pub twap_price: f64,
+    pub latest_price: f64,
+    pub sample_count: u32,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct TwapResponse {
+    pub entries: Vec<TwapEntry>,
+    pub window_secs: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct VolatilityQuery {
+    pub collateral: Principal,
+    pub window_secs: Option<u64>,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct VolatilityResponse {
+    pub collateral: Principal,
+    pub symbol: String,
+    pub annualized_vol_pct: f64,
+    pub sample_count: u32,
+    pub window_secs: u64,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct PegStatus {
+    pub timestamp_ns: u64,
+    pub pool_balances: Vec<u128>,
+    pub virtual_price: u128,
+    pub balance_ratios: Vec<f64>,
+    pub max_imbalance_pct: f64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct ApyQuery {
+    pub window_days: Option<u32>,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct ApyResponse {
+    pub lp_apy_pct: Option<f64>,
+    pub sp_apy_pct: Option<f64>,
+    pub window_days: u32,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct ProtocolSummary {
+    pub timestamp_ns: u64,
+    pub total_collateral_usd_e8s: u64,
+    pub total_debt_e8s: u64,
+    pub system_cr_bps: u32,
+    pub total_vault_count: u32,
+    pub circulating_supply_icusd_e8s: Option<u128>,
+    pub volume_24h_e8s: u64,
+    pub swap_count_24h: u32,
+    pub peg: Option<PegStatus>,
+    pub lp_apy_pct: Option<f64>,
+    pub sp_apy_pct: Option<f64>,
+    pub prices: Vec<TwapEntry>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct TradeActivityQuery {
+    pub window_secs: Option<u64>,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct TradeActivityResponse {
+    pub window_secs: u64,
+    pub total_swaps: u32,
+    pub three_pool_swaps: u32,
+    pub amm_swaps: u32,
+    pub total_volume_e8s: u64,
+    pub total_fees_e8s: u64,
+    pub unique_traders: u32,
+    pub avg_trade_size_e8s: u64,
 }
