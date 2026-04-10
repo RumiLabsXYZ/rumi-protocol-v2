@@ -9,10 +9,10 @@ pub fn setup_timers() {
         ic_cdk::spawn(pull_cycle());
     });
     ic_cdk_timers::set_timer_interval(Duration::from_secs(300), || {
-        // Phase 5: fast snapshot.
+        ic_cdk::spawn(fast_snapshot());
     });
     ic_cdk_timers::set_timer_interval(Duration::from_secs(3600), || {
-        // Phase 5: hourly snapshot.
+        ic_cdk::spawn(hourly_snapshot());
     });
     ic_cdk_timers::set_timer_interval(Duration::from_secs(86400), || {
         ic_cdk::spawn(daily_snapshot());
@@ -70,5 +70,20 @@ async fn daily_snapshot() {
     }
     if let Err(e) = holders_res {
         ic_cdk::println!("rumi_analytics: daily holder snapshot failed: {}", e);
+    }
+
+    // Daily rollups (sync, no inter-canister calls)
+    collectors::rollups::run();
+}
+
+async fn fast_snapshot() {
+    if let Err(e) = collectors::fast::run().await {
+        ic_cdk::println!("rumi_analytics: fast snapshot failed: {}", e);
+    }
+}
+
+async fn hourly_snapshot() {
+    if let Err(e) = collectors::hourly::run().await {
+        ic_cdk::println!("rumi_analytics: hourly snapshot failed: {}", e);
     }
 }
