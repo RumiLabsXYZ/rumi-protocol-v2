@@ -4,6 +4,7 @@ import { idlFactory as icusd_ledgerIDL } from '$declarations/icusd_ledger/icusd_
 import { idlFactory as threePoolIDL } from '$declarations/rumi_3pool/rumi_3pool.did.js';
 import { idlFactory as rumiAmmIDL } from '$declarations/rumi_amm/rumi_amm.did.js';
 import { idlFactory as icusdIndexIDL } from '$declarations/icusd_index/icusd_index.did.js';
+import { idlFactory as analyticsIDL } from '$declarations/rumi_analytics/rumi_analytics.did.js';
 
 // Canister IDs for production (Rumi Protocol v2 - mainnet)
 export const CANISTER_IDS = {
@@ -21,6 +22,8 @@ export const CANISTER_IDS = {
   THREEPOOL: "fohh4-yyaaa-aaaap-qtkpa-cai",
   // Rumi AMM (3USD/ICP constant-product pool)
   RUMI_AMM: "ijlzs-2yaaa-aaaap-quaaq-cai",
+  // Rumi Analytics (time-series data, protocol metrics)
+  ANALYTICS: "dtlu2-uqaaa-aaaap-qugcq-cai",
 } as const;
 
 // Canister IDs for local development
@@ -131,4 +134,5 @@ export const CONFIG = {
   threePoolIDL,
   rumiAmmIDL,
   icusdIndexIDL,
+  analyticsIDL,
 };

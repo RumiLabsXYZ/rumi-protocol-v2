@@ -1176,3 +1176,52 @@ fn live_queries_survive_upgrade() {
     let summary_after = get_protocol_summary(&env);
     assert_eq!(summary_before.total_vault_count, summary_after.total_vault_count);
 }
+
+// ─── Phase 7 HTTP tests ───
+
+#[test]
+fn http_health_returns_json() {
+    let env = setup();
+    advance_pull_cycle(&env);
+
+    let resp = http_get(&env, "/api/health");
+    assert_eq!(resp.status_code, 200);
+    let body = String::from_utf8(resp.body).unwrap();
+    assert!(body.contains("\"status\":\"ok\""), "health body: {}", body);
+    assert!(body.contains("\"storage_rows\""), "health body: {}", body);
+}
+
+#[test]
+fn http_metrics_returns_prometheus() {
+    let env = setup();
+    advance_pull_cycle(&env);
+
+    let resp = http_get(&env, "/metrics");
+    assert_eq!(resp.status_code, 200);
+    let body = String::from_utf8(resp.body).unwrap();
+    assert!(body.contains("rumi_icusd_supply_e8s"), "metrics body missing supply gauge");
+}
+
+#[test]
+fn http_csv_tvl_returns_header() {
+    let env = setup();
+    // Trigger daily snapshot so there's at least one TVL row
+    advance_pull_cycle(&env);
+    env.pic.advance_time(std::time::Duration::from_secs(86_400 + 65));
+    for _ in 0..10 { env.pic.tick(); }
+
+    let resp = http_get(&env, "/api/series/tvl");
+    assert_eq!(resp.status_code, 200);
+    let body = String::from_utf8(resp.body).unwrap();
+    assert!(body.starts_with("timestamp_ns,"), "CSV should start with header, got: {}", &body[..50.min(body.len())]);
+    // Should have at least header + 1 data row
+    let lines: Vec<&str> = body.lines().collect();
+    assert!(lines.len() >= 2, "expected header + data row, got {} lines", lines.len());
+}
+
+#[test]
+fn http_not_found() {
+    let env = setup();
+    let resp = http_get(&env, "/nonexistent");
+    assert_eq!(resp.status_code, 404);
+}
