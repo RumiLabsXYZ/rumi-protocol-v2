@@ -63,6 +63,7 @@
 		"@windoge98/plug-n-play": "^0.1.0-beta.26",
 		"dexie": "^4.0.11",
 		"dotenv": "^16.4.7",
+		"lightweight-charts": "^5.1.0",
 		"vite-plugin-environment": "^1.1.3"
 	}
 }
