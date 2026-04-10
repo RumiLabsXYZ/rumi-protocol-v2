@@ -125,6 +125,41 @@ fn get_fee_curve_series(query: types::RangeQuery) -> types::FeeCurveSeriesRespon
 }
 
 #[ic_cdk_macros::query]
+fn get_ohlc(query: types::OhlcQuery) -> types::OhlcResponse {
+    queries::live::get_ohlc(query)
+}
+
+#[ic_cdk_macros::query]
+fn get_twap(query: types::TwapQuery) -> types::TwapResponse {
+    queries::live::get_twap(query)
+}
+
+#[ic_cdk_macros::query]
+fn get_volatility(query: types::VolatilityQuery) -> types::VolatilityResponse {
+    queries::live::get_volatility(query)
+}
+
+#[ic_cdk_macros::query]
+fn get_peg_status() -> Option<types::PegStatus> {
+    queries::live::get_peg_status()
+}
+
+#[ic_cdk_macros::query]
+fn get_apys(query: types::ApyQuery) -> types::ApyResponse {
+    queries::live::get_apys(query)
+}
+
+#[ic_cdk_macros::query]
+fn get_protocol_summary() -> types::ProtocolSummary {
+    queries::live::get_protocol_summary()
+}
+
+#[ic_cdk_macros::query]
+fn get_trade_activity(query: types::TradeActivityQuery) -> types::TradeActivityResponse {
+    queries::live::get_trade_activity(query)
+}
+
+#[ic_cdk_macros::query]
 fn get_collector_health() -> types::CollectorHealth {
     use storage::cursors;
 

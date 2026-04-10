@@ -1,3 +1,9 @@
+type ApyQuery = record { window_days : opt nat32 };
+type ApyResponse = record {
+  lp_apy_pct : opt float64;
+  window_days : nat32;
+  sp_apy_pct : opt float64;
+};
 type BalanceTrackerStats = record {
   token : principal;
   total_tracked_e8s : nat64;
@@ -157,9 +163,50 @@ type LiquidationSeriesResponse = record {
   rows : vec DailyLiquidationRollup;
   next_from_ts : opt nat64;
 };
+type OhlcCandle = record {
+  low : float64;
+  timestamp_ns : nat64;
+  high : float64;
+  close : float64;
+  open : float64;
+};
+type OhlcQuery = record {
+  to_ts : opt nat64;
+  collateral : principal;
+  from_ts : opt nat64;
+  limit : opt nat32;
+  bucket_secs : opt nat64;
+};
+type OhlcResponse = record {
+  collateral : principal;
+  candles : vec OhlcCandle;
+  bucket_secs : nat64;
+  symbol : text;
+};
+type PegStatus = record {
+  virtual_price : nat;
+  timestamp_ns : nat64;
+  pool_balances : vec nat;
+  balance_ratios : vec float64;
+  max_imbalance_pct : float64;
+};
 type PriceSeriesResponse = record {
   rows : vec FastPriceSnapshot;
   next_from_ts : opt nat64;
+};
+type ProtocolSummary = record {
+  peg : opt PegStatus;
+  lp_apy_pct : opt float64;
+  timestamp_ns : nat64;
+  sp_apy_pct : opt float64;
+  total_debt_e8s : nat64;
+  circulating_supply_icusd_e8s : opt nat;
+  prices : vec TwapEntry;
+  total_vault_count : nat32;
+  total_collateral_usd_e8s : nat64;
+  system_cr_bps : nat32;
+  swap_count_24h : nat32;
+  volume_24h_e8s : nat64;
 };
 type RangeQuery = record {
   to_ts : opt nat64;
@@ -179,28 +226,66 @@ type ThreePoolSeriesResponse = record {
   rows : vec Fast3PoolSnapshot;
   next_from_ts : opt nat64;
 };
+type TradeActivityQuery = record { window_secs : opt nat64 };
+type TradeActivityResponse = record {
+  total_swaps : nat32;
+  three_pool_swaps : nat32;
+  total_volume_e8s : nat64;
+  avg_trade_size_e8s : nat64;
+  window_secs : nat64;
+  amm_swaps : nat32;
+  total_fees_e8s : nat64;
+  unique_traders : nat32;
+};
 type TvlSeriesResponse = record {
   rows : vec DailyTvlRow;
   next_from_ts : opt nat64;
 };
+type TwapEntry = record {
+  latest_price : float64;
+  collateral : principal;
+  sample_count : nat32;
+  twap_price : float64;
+  symbol : text;
+};
+type TwapQuery = record { window_secs : opt nat64 };
+type TwapResponse = record { window_secs : nat64; entries : vec TwapEntry };
 type VaultSeriesResponse = record {
   rows : vec DailyVaultSnapshotRow;
   next_from_ts : opt nat64;
 };
+type VolatilityQuery = record {
+  collateral : principal;
+  window_secs : opt nat64;
+};
+type VolatilityResponse = record {
+  collateral : principal;
+  sample_count : nat32;
+  window_secs : nat64;
+  symbol : text;
+  annualized_vol_pct : float64;
+};
 service : (InitArgs) -> {
   get_admin : () -> (principal) query;
+  get_apys : (ApyQuery) -> (ApyResponse) query;
   get_collector_health : () -> (CollectorHealth) query;
   get_cycle_series : (RangeQuery) -> (CycleSeriesResponse) query;
   get_fee_curve_series : (RangeQuery) -> (FeeCurveSeriesResponse) query;
   get_fee_series : (RangeQuery) -> (FeeSeriesResponse) query;
   get_holder_series : (RangeQuery, principal) -> (HolderSeriesResponse) query;
   get_liquidation_series : (RangeQuery) -> (LiquidationSeriesResponse) query;
+  get_ohlc : (OhlcQuery) -> (OhlcResponse) query;
+  get_peg_status : () -> (opt PegStatus) query;
   get_price_series : (RangeQuery) -> (PriceSeriesResponse) query;
+  get_protocol_summary : () -> (ProtocolSummary) query;
   get_stability_series : (RangeQuery) -> (StabilitySeriesResponse) query;
   get_swap_series : (RangeQuery) -> (SwapSeriesResponse) query;
   get_three_pool_series : (RangeQuery) -> (ThreePoolSeriesResponse) query;
+  get_trade_activity : (TradeActivityQuery) -> (TradeActivityResponse) query;
   get_tvl_series : (RangeQuery) -> (TvlSeriesResponse) query;
+  get_twap : (TwapQuery) -> (TwapResponse) query;
   get_vault_series : (RangeQuery) -> (VaultSeriesResponse) query;
+  get_volatility : (VolatilityQuery) -> (VolatilityResponse) query;
   http_request : (HttpRequest) -> (HttpResponse) query;
   ping : () -> (text) query;
   start_backfill : (principal) -> (text);

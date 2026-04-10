@@ -2,6 +2,12 @@ import type { Principal } from '@dfinity/principal';
 import type { ActorMethod } from '@dfinity/agent';
 import type { IDL } from '@dfinity/candid';
 
+export interface ApyQuery { 'window_days' : [] | [number] }
+export interface ApyResponse {
+  'lp_apy_pct' : [] | [number],
+  'window_days' : number,
+  'sp_apy_pct' : [] | [number],
+}
 export interface BalanceTrackerStats {
   'token' : Principal,
   'total_tracked_e8s' : bigint,
@@ -164,9 +170,50 @@ export interface LiquidationSeriesResponse {
   'rows' : Array<DailyLiquidationRollup>,
   'next_from_ts' : [] | [bigint],
 }
+export interface OhlcCandle {
+  'low' : number,
+  'timestamp_ns' : bigint,
+  'high' : number,
+  'close' : number,
+  'open' : number,
+}
+export interface OhlcQuery {
+  'to_ts' : [] | [bigint],
+  'collateral' : Principal,
+  'from_ts' : [] | [bigint],
+  'limit' : [] | [number],
+  'bucket_secs' : [] | [bigint],
+}
+export interface OhlcResponse {
+  'collateral' : Principal,
+  'candles' : Array<OhlcCandle>,
+  'bucket_secs' : bigint,
+  'symbol' : string,
+}
+export interface PegStatus {
+  'virtual_price' : bigint,
+  'timestamp_ns' : bigint,
+  'pool_balances' : Array<bigint>,
+  'balance_ratios' : Array<number>,
+  'max_imbalance_pct' : number,
+}
 export interface PriceSeriesResponse {
   'rows' : Array<FastPriceSnapshot>,
   'next_from_ts' : [] | [bigint],
+}
+export interface ProtocolSummary {
+  'peg' : [] | [PegStatus],
+  'lp_apy_pct' : [] | [number],
+  'timestamp_ns' : bigint,
+  'sp_apy_pct' : [] | [number],
+  'total_debt_e8s' : bigint,
+  'circulating_supply_icusd_e8s' : [] | [bigint],
+  'prices' : Array<TwapEntry>,
+  'total_vault_count' : number,
+  'total_collateral_usd_e8s' : bigint,
+  'system_cr_bps' : number,
+  'swap_count_24h' : number,
+  'volume_24h_e8s' : bigint,
 }
 export interface RangeQuery {
   'to_ts' : [] | [bigint],
@@ -186,16 +233,51 @@ export interface ThreePoolSeriesResponse {
   'rows' : Array<Fast3PoolSnapshot>,
   'next_from_ts' : [] | [bigint],
 }
+export interface TradeActivityQuery { 'window_secs' : [] | [bigint] }
+export interface TradeActivityResponse {
+  'total_swaps' : number,
+  'three_pool_swaps' : number,
+  'total_volume_e8s' : bigint,
+  'avg_trade_size_e8s' : bigint,
+  'window_secs' : bigint,
+  'amm_swaps' : number,
+  'total_fees_e8s' : bigint,
+  'unique_traders' : number,
+}
 export interface TvlSeriesResponse {
   'rows' : Array<DailyTvlRow>,
   'next_from_ts' : [] | [bigint],
+}
+export interface TwapEntry {
+  'latest_price' : number,
+  'collateral' : Principal,
+  'sample_count' : number,
+  'twap_price' : number,
+  'symbol' : string,
+}
+export interface TwapQuery { 'window_secs' : [] | [bigint] }
+export interface TwapResponse {
+  'window_secs' : bigint,
+  'entries' : Array<TwapEntry>,
 }
 export interface VaultSeriesResponse {
   'rows' : Array<DailyVaultSnapshotRow>,
   'next_from_ts' : [] | [bigint],
 }
+export interface VolatilityQuery {
+  'collateral' : Principal,
+  'window_secs' : [] | [bigint],
+}
+export interface VolatilityResponse {
+  'collateral' : Principal,
+  'sample_count' : number,
+  'window_secs' : bigint,
+  'symbol' : string,
+  'annualized_vol_pct' : number,
+}
 export interface _SERVICE {
   'get_admin' : ActorMethod<[], Principal>,
+  'get_apys' : ActorMethod<[ApyQuery], ApyResponse>,
   'get_collector_health' : ActorMethod<[], CollectorHealth>,
   'get_cycle_series' : ActorMethod<[RangeQuery], CycleSeriesResponse>,
   'get_fee_curve_series' : ActorMethod<[RangeQuery], FeeCurveSeriesResponse>,
@@ -208,12 +290,21 @@ export interface _SERVICE {
     [RangeQuery],
     LiquidationSeriesResponse
   >,
+  'get_ohlc' : ActorMethod<[OhlcQuery], OhlcResponse>,
+  'get_peg_status' : ActorMethod<[], [] | [PegStatus]>,
   'get_price_series' : ActorMethod<[RangeQuery], PriceSeriesResponse>,
+  'get_protocol_summary' : ActorMethod<[], ProtocolSummary>,
   'get_stability_series' : ActorMethod<[RangeQuery], StabilitySeriesResponse>,
   'get_swap_series' : ActorMethod<[RangeQuery], SwapSeriesResponse>,
   'get_three_pool_series' : ActorMethod<[RangeQuery], ThreePoolSeriesResponse>,
+  'get_trade_activity' : ActorMethod<
+    [TradeActivityQuery],
+    TradeActivityResponse
+  >,
   'get_tvl_series' : ActorMethod<[RangeQuery], TvlSeriesResponse>,
+  'get_twap' : ActorMethod<[TwapQuery], TwapResponse>,
   'get_vault_series' : ActorMethod<[RangeQuery], VaultSeriesResponse>,
+  'get_volatility' : ActorMethod<[VolatilityQuery], VolatilityResponse>,
   'http_request' : ActorMethod<[HttpRequest], HttpResponse>,
   'ping' : ActorMethod<[], string>,
   'start_backfill' : ActorMethod<[Principal], string>,

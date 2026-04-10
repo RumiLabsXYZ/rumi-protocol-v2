@@ -7,6 +7,12 @@ export const idlFactory = ({ IDL }) => {
     'stability_pool' : IDL.Principal,
     'backend' : IDL.Principal,
   });
+  const ApyQuery = IDL.Record({ 'window_days' : IDL.Opt(IDL.Nat32) });
+  const ApyResponse = IDL.Record({
+    'lp_apy_pct' : IDL.Opt(IDL.Float64),
+    'window_days' : IDL.Nat32,
+    'sp_apy_pct' : IDL.Opt(IDL.Float64),
+  });
   const BalanceTrackerStats = IDL.Record({
     'token' : IDL.Principal,
     'total_tracked_e8s' : IDL.Nat64,
@@ -99,6 +105,33 @@ export const idlFactory = ({ IDL }) => {
     'rows' : IDL.Vec(DailyLiquidationRollup),
     'next_from_ts' : IDL.Opt(IDL.Nat64),
   });
+  const OhlcQuery = IDL.Record({
+    'to_ts' : IDL.Opt(IDL.Nat64),
+    'collateral' : IDL.Principal,
+    'from_ts' : IDL.Opt(IDL.Nat64),
+    'limit' : IDL.Opt(IDL.Nat32),
+    'bucket_secs' : IDL.Opt(IDL.Nat64),
+  });
+  const OhlcCandle = IDL.Record({
+    'low' : IDL.Float64,
+    'timestamp_ns' : IDL.Nat64,
+    'high' : IDL.Float64,
+    'close' : IDL.Float64,
+    'open' : IDL.Float64,
+  });
+  const OhlcResponse = IDL.Record({
+    'collateral' : IDL.Principal,
+    'candles' : IDL.Vec(OhlcCandle),
+    'bucket_secs' : IDL.Nat64,
+    'symbol' : IDL.Text,
+  });
+  const PegStatus = IDL.Record({
+    'virtual_price' : IDL.Nat,
+    'timestamp_ns' : IDL.Nat64,
+    'pool_balances' : IDL.Vec(IDL.Nat),
+    'balance_ratios' : IDL.Vec(IDL.Float64),
+    'max_imbalance_pct' : IDL.Float64,
+  });
   const FastPriceSnapshot = IDL.Record({
     'timestamp_ns' : IDL.Nat64,
     'prices' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Float64, IDL.Text)),
@@ -106,6 +139,27 @@ export const idlFactory = ({ IDL }) => {
   const PriceSeriesResponse = IDL.Record({
     'rows' : IDL.Vec(FastPriceSnapshot),
     'next_from_ts' : IDL.Opt(IDL.Nat64),
+  });
+  const TwapEntry = IDL.Record({
+    'latest_price' : IDL.Float64,
+    'collateral' : IDL.Principal,
+    'sample_count' : IDL.Nat32,
+    'twap_price' : IDL.Float64,
+    'symbol' : IDL.Text,
+  });
+  const ProtocolSummary = IDL.Record({
+    'peg' : IDL.Opt(PegStatus),
+    'lp_apy_pct' : IDL.Opt(IDL.Float64),
+    'timestamp_ns' : IDL.Nat64,
+    'sp_apy_pct' : IDL.Opt(IDL.Float64),
+    'total_debt_e8s' : IDL.Nat64,
+    'circulating_supply_icusd_e8s' : IDL.Opt(IDL.Nat),
+    'prices' : IDL.Vec(TwapEntry),
+    'total_vault_count' : IDL.Nat32,
+    'total_collateral_usd_e8s' : IDL.Nat64,
+    'system_cr_bps' : IDL.Nat32,
+    'swap_count_24h' : IDL.Nat32,
+    'volume_24h_e8s' : IDL.Nat64,
   });
   const DailyStabilityRow = IDL.Record({
     'collateral_gains' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
@@ -144,6 +198,17 @@ export const idlFactory = ({ IDL }) => {
     'rows' : IDL.Vec(Fast3PoolSnapshot),
     'next_from_ts' : IDL.Opt(IDL.Nat64),
   });
+  const TradeActivityQuery = IDL.Record({ 'window_secs' : IDL.Opt(IDL.Nat64) });
+  const TradeActivityResponse = IDL.Record({
+    'total_swaps' : IDL.Nat32,
+    'three_pool_swaps' : IDL.Nat32,
+    'total_volume_e8s' : IDL.Nat64,
+    'avg_trade_size_e8s' : IDL.Nat64,
+    'window_secs' : IDL.Nat64,
+    'amm_swaps' : IDL.Nat32,
+    'total_fees_e8s' : IDL.Nat64,
+    'unique_traders' : IDL.Nat32,
+  });
   const DailyTvlRow = IDL.Record({
     'three_pool_reserve_0_e8s' : IDL.Opt(IDL.Nat),
     'timestamp_ns' : IDL.Nat64,
@@ -159,6 +224,11 @@ export const idlFactory = ({ IDL }) => {
   const TvlSeriesResponse = IDL.Record({
     'rows' : IDL.Vec(DailyTvlRow),
     'next_from_ts' : IDL.Opt(IDL.Nat64),
+  });
+  const TwapQuery = IDL.Record({ 'window_secs' : IDL.Opt(IDL.Nat64) });
+  const TwapResponse = IDL.Record({
+    'window_secs' : IDL.Nat64,
+    'entries' : IDL.Vec(TwapEntry),
   });
   const CollateralStats = IDL.Record({
     'total_collateral_e8s' : IDL.Nat64,
@@ -182,6 +252,17 @@ export const idlFactory = ({ IDL }) => {
     'rows' : IDL.Vec(DailyVaultSnapshotRow),
     'next_from_ts' : IDL.Opt(IDL.Nat64),
   });
+  const VolatilityQuery = IDL.Record({
+    'collateral' : IDL.Principal,
+    'window_secs' : IDL.Opt(IDL.Nat64),
+  });
+  const VolatilityResponse = IDL.Record({
+    'collateral' : IDL.Principal,
+    'sample_count' : IDL.Nat32,
+    'window_secs' : IDL.Nat64,
+    'symbol' : IDL.Text,
+    'annualized_vol_pct' : IDL.Float64,
+  });
   const HttpRequest = IDL.Record({
     'url' : IDL.Text,
     'method' : IDL.Text,
@@ -195,6 +276,7 @@ export const idlFactory = ({ IDL }) => {
   });
   return IDL.Service({
     'get_admin' : IDL.Func([], [IDL.Principal], ['query']),
+    'get_apys' : IDL.Func([ApyQuery], [ApyResponse], ['query']),
     'get_collector_health' : IDL.Func([], [CollectorHealth], ['query']),
     'get_cycle_series' : IDL.Func(
         [RangeQuery],
@@ -217,11 +299,14 @@ export const idlFactory = ({ IDL }) => {
         [LiquidationSeriesResponse],
         ['query'],
       ),
+    'get_ohlc' : IDL.Func([OhlcQuery], [OhlcResponse], ['query']),
+    'get_peg_status' : IDL.Func([], [IDL.Opt(PegStatus)], ['query']),
     'get_price_series' : IDL.Func(
         [RangeQuery],
         [PriceSeriesResponse],
         ['query'],
       ),
+    'get_protocol_summary' : IDL.Func([], [ProtocolSummary], ['query']),
     'get_stability_series' : IDL.Func(
         [RangeQuery],
         [StabilitySeriesResponse],
@@ -233,10 +318,21 @@ export const idlFactory = ({ IDL }) => {
         [ThreePoolSeriesResponse],
         ['query'],
       ),
+    'get_trade_activity' : IDL.Func(
+        [TradeActivityQuery],
+        [TradeActivityResponse],
+        ['query'],
+      ),
     'get_tvl_series' : IDL.Func([RangeQuery], [TvlSeriesResponse], ['query']),
+    'get_twap' : IDL.Func([TwapQuery], [TwapResponse], ['query']),
     'get_vault_series' : IDL.Func(
         [RangeQuery],
         [VaultSeriesResponse],
+        ['query'],
+      ),
+    'get_volatility' : IDL.Func(
+        [VolatilityQuery],
+        [VolatilityResponse],
         ['query'],
       ),
     'http_request' : IDL.Func([HttpRequest], [HttpResponse], ['query']),
