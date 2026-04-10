@@ -39,7 +39,8 @@ fn rollup_liquidations(now: u64, day_start: u64) {
         total_collateral = total_collateral.saturating_add(e.collateral_amount);
         total_debt = total_debt.saturating_add(e.debt_amount);
         if e.collateral_type != Principal::anonymous() {
-            *by_collateral.entry(e.collateral_type).or_default() += e.collateral_amount;
+            let entry = by_collateral.entry(e.collateral_type).or_default();
+            *entry = entry.saturating_add(e.collateral_amount);
         }
     }
 

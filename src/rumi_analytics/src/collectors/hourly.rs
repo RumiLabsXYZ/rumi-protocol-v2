@@ -15,14 +15,17 @@ pub async fn run() -> Result<(), String> {
     match sources::backend::get_collateral_totals(backend_id).await {
         Ok(totals) => {
             let system_cr_bps = {
-                let total_coll_usd: f64 = totals.iter()
-                    .map(|t| t.total_collateral as f64 * t.price / 1e8)
+                // total_collateral is in raw e8s, price is USD per whole token.
+                // collateral_value_e8s = total_collateral * price (same as vaults.rs).
+                // total_debt is in icUSD e8s. CR = collateral_value / debt.
+                let total_coll_value: f64 = totals.iter()
+                    .map(|t| t.total_collateral as f64 * t.price)
                     .sum();
                 let total_debt: f64 = totals.iter()
                     .map(|t| t.total_debt as f64)
                     .sum();
                 if total_debt > 0.0 {
-                    ((total_coll_usd / total_debt) * 10_000.0).clamp(0.0, u32::MAX as f64) as u32
+                    ((total_coll_value / total_debt) * 10_000.0).clamp(0.0, u32::MAX as f64) as u32
                 } else {
                     0
                 }
