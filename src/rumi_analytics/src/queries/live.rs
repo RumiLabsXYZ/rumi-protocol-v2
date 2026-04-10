@@ -103,6 +103,114 @@ pub fn compute_ohlc(
     (candles, symbol)
 }
 
+// ─── TWAP ───
+
+pub fn get_twap(query: types::TwapQuery) -> types::TwapResponse {
+    let window_secs = query.window_secs.unwrap_or(DEFAULT_TWAP_WINDOW_SECS);
+    let now = ic_cdk::api::time();
+    let from = now.saturating_sub(window_secs.saturating_mul(NANOS_PER_SEC));
+
+    let snapshots = storage::fast::fast_prices::range(from, now, usize::MAX);
+    let entries = compute_twap(&snapshots);
+
+    types::TwapResponse { entries, window_secs }
+}
+
+pub fn compute_twap(
+    snapshots: &[storage::fast::FastPriceSnapshot],
+) -> Vec<types::TwapEntry> {
+    if snapshots.is_empty() {
+        return vec![];
+    }
+
+    let mut acc: HashMap<Principal, (f64, u32, f64, String)> = HashMap::new();
+
+    for snap in snapshots {
+        for (p, price, sym) in &snap.prices {
+            let entry = acc.entry(*p).or_insert((0.0, 0, 0.0, sym.clone()));
+            entry.0 += price;
+            entry.1 += 1;
+            entry.2 = *price;
+        }
+    }
+
+    let mut entries: Vec<types::TwapEntry> = acc
+        .into_iter()
+        .map(|(collateral, (sum, count, latest, symbol))| {
+            types::TwapEntry {
+                collateral,
+                symbol,
+                twap_price: if count > 0 { sum / count as f64 } else { 0.0 },
+                latest_price: latest,
+                sample_count: count,
+            }
+        })
+        .collect();
+
+    entries.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+    entries
+}
+
+// ─── Realized Volatility ───
+
+pub fn get_volatility(query: types::VolatilityQuery) -> types::VolatilityResponse {
+    let window_secs = query.window_secs.unwrap_or(DEFAULT_VOL_WINDOW_SECS);
+    let now = ic_cdk::api::time();
+    let from = now.saturating_sub(window_secs.saturating_mul(NANOS_PER_SEC));
+
+    let snapshots = storage::fast::fast_prices::range(from, now, usize::MAX);
+    let (vol, count, symbol) = compute_volatility(&snapshots, query.collateral);
+
+    types::VolatilityResponse {
+        collateral: query.collateral,
+        symbol,
+        annualized_vol_pct: vol,
+        sample_count: count,
+        window_secs,
+    }
+}
+
+/// Returns (annualized_vol_pct, sample_count, symbol).
+pub fn compute_volatility(
+    snapshots: &[storage::fast::FastPriceSnapshot],
+    collateral: Principal,
+) -> (f64, u32, String) {
+    let mut symbol = String::new();
+    let mut prices: Vec<f64> = Vec::new();
+
+    for snap in snapshots {
+        for (p, price, sym) in &snap.prices {
+            if *p == collateral && *price > 0.0 {
+                prices.push(*price);
+                if symbol.is_empty() {
+                    symbol = sym.clone();
+                }
+                break;
+            }
+        }
+    }
+
+    if prices.len() < 2 {
+        return (0.0, prices.len() as u32, symbol);
+    }
+
+    let log_returns: Vec<f64> = prices
+        .windows(2)
+        .map(|w| (w[1] / w[0]).ln())
+        .collect();
+
+    let n = log_returns.len() as f64;
+    let mean = log_returns.iter().sum::<f64>() / n;
+    let variance = log_returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / n;
+    let std_dev = variance.sqrt();
+
+    // Annualize: 5-minute intervals -> 105,120 intervals per year (365 * 24 * 12).
+    let intervals_per_year: f64 = 365.0 * 24.0 * 12.0;
+    let annualized = std_dev * intervals_per_year.sqrt() * 100.0;
+
+    (annualized, prices.len() as u32, symbol)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +271,87 @@ mod tests {
         let snaps = vec![make_price_snap(1_000_000_000, col, 10.0)];
         let (candles, _) = compute_ohlc(&snaps, other, 3600, 100);
         assert!(candles.is_empty());
+    }
+
+    #[test]
+    fn twap_basic() {
+        let col = Principal::anonymous();
+        let snaps = vec![
+            make_price_snap(1_000_000_000, col, 10.0),
+            make_price_snap(2_000_000_000, col, 12.0),
+            make_price_snap(3_000_000_000, col, 14.0),
+        ];
+        let entries = compute_twap(&snaps);
+        assert_eq!(entries.len(), 1);
+        assert!((entries[0].twap_price - 12.0).abs() < 0.001);
+        assert_eq!(entries[0].latest_price, 14.0);
+        assert_eq!(entries[0].sample_count, 3);
+    }
+
+    #[test]
+    fn twap_multiple_collaterals() {
+        let col_a = Principal::anonymous();
+        let col_b = Principal::management_canister();
+        let snaps = vec![
+            FastPriceSnapshot {
+                timestamp_ns: 1_000_000_000,
+                prices: vec![
+                    (col_a, 10.0, "ICP".to_string()),
+                    (col_b, 50000.0, "ckBTC".to_string()),
+                ],
+            },
+            FastPriceSnapshot {
+                timestamp_ns: 2_000_000_000,
+                prices: vec![
+                    (col_a, 12.0, "ICP".to_string()),
+                    (col_b, 51000.0, "ckBTC".to_string()),
+                ],
+            },
+        ];
+        let entries = compute_twap(&snaps);
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn twap_empty() {
+        let entries = compute_twap(&[]);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn volatility_basic() {
+        let col = Principal::anonymous();
+        let snaps = vec![
+            make_price_snap(1_000_000_000, col, 100.0),
+            make_price_snap(2_000_000_000, col, 102.0),
+            make_price_snap(3_000_000_000, col, 98.0),
+            make_price_snap(4_000_000_000, col, 101.0),
+            make_price_snap(5_000_000_000, col, 103.0),
+        ];
+        let (vol, count, sym) = compute_volatility(&snaps, col);
+        assert_eq!(count, 5);
+        assert_eq!(sym, "ICP");
+        assert!(vol > 0.0, "volatility should be positive");
+    }
+
+    #[test]
+    fn volatility_constant_price() {
+        let col = Principal::anonymous();
+        let snaps = vec![
+            make_price_snap(1_000_000_000, col, 10.0),
+            make_price_snap(2_000_000_000, col, 10.0),
+            make_price_snap(3_000_000_000, col, 10.0),
+        ];
+        let (vol, _, _) = compute_volatility(&snaps, col);
+        assert_eq!(vol, 0.0, "constant price should have zero vol");
+    }
+
+    #[test]
+    fn volatility_too_few_samples() {
+        let col = Principal::anonymous();
+        let snaps = vec![make_price_snap(1_000_000_000, col, 10.0)];
+        let (vol, count, _) = compute_volatility(&snaps, col);
+        assert_eq!(vol, 0.0);
+        assert_eq!(count, 1);
     }
 }
