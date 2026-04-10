@@ -14,6 +14,10 @@ const DEFAULT_APY_WINDOW_DAYS: u32 = 7;
 const DEFAULT_TRADE_WINDOW_SECS: u64 = 86_400;
 const NANOS_PER_SEC: u64 = 1_000_000_000;
 
+/// Safety cap on snapshot loads to avoid blowing instruction limits.
+/// 20,000 fast snapshots = ~69 days at 5-min intervals (plenty for any query window).
+const MAX_SNAPSHOT_LOAD: usize = 20_000;
+
 // ─── OHLC ───
 
 pub fn get_ohlc(query: types::OhlcQuery) -> types::OhlcResponse {
@@ -22,7 +26,7 @@ pub fn get_ohlc(query: types::OhlcQuery) -> types::OhlcResponse {
     let to = query.to_ts.unwrap_or(u64::MAX);
     let limit = query.limit.unwrap_or(500).min(2000) as usize;
 
-    let snapshots = storage::fast::fast_prices::range(from, to, usize::MAX);
+    let snapshots = storage::fast::fast_prices::range(from, to, MAX_SNAPSHOT_LOAD);
 
     let (candles, symbol) = compute_ohlc(&snapshots, query.collateral, bucket_secs, limit);
 
@@ -110,7 +114,7 @@ pub fn get_twap(query: types::TwapQuery) -> types::TwapResponse {
     let now = ic_cdk::api::time();
     let from = now.saturating_sub(window_secs.saturating_mul(NANOS_PER_SEC));
 
-    let snapshots = storage::fast::fast_prices::range(from, now, usize::MAX);
+    let snapshots = storage::fast::fast_prices::range(from, now, MAX_SNAPSHOT_LOAD);
     let entries = compute_twap(&snapshots);
 
     types::TwapResponse { entries, window_secs }
@@ -158,7 +162,7 @@ pub fn get_volatility(query: types::VolatilityQuery) -> types::VolatilityRespons
     let now = ic_cdk::api::time();
     let from = now.saturating_sub(window_secs.saturating_mul(NANOS_PER_SEC));
 
-    let snapshots = storage::fast::fast_prices::range(from, now, usize::MAX);
+    let snapshots = storage::fast::fast_prices::range(from, now, MAX_SNAPSHOT_LOAD);
     let (vol, count, symbol) = compute_volatility(&snapshots, query.collateral);
 
     types::VolatilityResponse {
@@ -256,9 +260,9 @@ pub fn get_apys(query: types::ApyQuery) -> types::ApyResponse {
     let window_ns = (window_days as u64).saturating_mul(86_400).saturating_mul(NANOS_PER_SEC);
     let from = now.saturating_sub(window_ns);
 
-    let swap_rollups = storage::rollups::daily_swaps::range(from, now, usize::MAX);
-    let tvl_rows = storage::daily_tvl::range(from, now, usize::MAX);
-    let stability_rows = storage::daily_stability::range(from, now, usize::MAX);
+    let swap_rollups = storage::rollups::daily_swaps::range(from, now, MAX_SNAPSHOT_LOAD);
+    let tvl_rows = storage::daily_tvl::range(from, now, MAX_SNAPSHOT_LOAD);
+    let stability_rows = storage::daily_stability::range(from, now, MAX_SNAPSHOT_LOAD);
 
     let lp_apy = compute_lp_apy(&swap_rollups, &tvl_rows, window_days);
     let sp_apy = compute_sp_apy(&stability_rows, window_days);
@@ -350,7 +354,7 @@ pub fn get_trade_activity(query: types::TradeActivityQuery) -> types::TradeActiv
     let now = ic_cdk::api::time();
     let from = now.saturating_sub(window_secs.saturating_mul(NANOS_PER_SEC));
 
-    let events = storage::events::evt_swaps::range(from, now, usize::MAX);
+    let events = storage::events::evt_swaps::range(from, now, MAX_SNAPSHOT_LOAD);
     compute_trade_activity(&events, window_secs)
 }
 
@@ -412,22 +416,22 @@ pub fn get_protocol_summary() -> types::ProtocolSummary {
     let supply = state::read_state(|s| s.circulating_supply_icusd_e8s);
 
     // 24h trade activity from EVT_SWAPS.
-    let swap_events = storage::events::evt_swaps::range(day_ago, now, usize::MAX);
+    let swap_events = storage::events::evt_swaps::range(day_ago, now, MAX_SNAPSHOT_LOAD);
     let activity = compute_trade_activity(&swap_events, 86_400);
 
     // Peg status from latest 3pool snapshot.
     let peg = get_peg_status();
 
     // APYs over 7 days.
-    let swap_rollups = storage::rollups::daily_swaps::range(week_ago, now, usize::MAX);
-    let tvl_rows = storage::daily_tvl::range(week_ago, now, usize::MAX);
-    let stability_rows = storage::daily_stability::range(week_ago, now, usize::MAX);
+    let swap_rollups = storage::rollups::daily_swaps::range(week_ago, now, MAX_SNAPSHOT_LOAD);
+    let tvl_rows = storage::daily_tvl::range(week_ago, now, MAX_SNAPSHOT_LOAD);
+    let stability_rows = storage::daily_stability::range(week_ago, now, MAX_SNAPSHOT_LOAD);
     let lp_apy = compute_lp_apy(&swap_rollups, &tvl_rows, 7);
     let sp_apy = compute_sp_apy(&stability_rows, 7);
 
     // Price TWAPs over 1 hour.
     let hour_ago = now.saturating_sub(3_600u64.saturating_mul(NANOS_PER_SEC));
-    let price_snaps = storage::fast::fast_prices::range(hour_ago, now, usize::MAX);
+    let price_snaps = storage::fast::fast_prices::range(hour_ago, now, MAX_SNAPSHOT_LOAD);
     let prices = compute_twap(&price_snaps);
 
     types::ProtocolSummary {
