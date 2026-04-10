@@ -26,7 +26,10 @@ pub async fn transfer_from_user(
         amount: candid::Nat::from(amount),
         fee: None,
         memo: None,
-        created_at_time: None,
+        // Set created_at_time for ledger-side deduplication. If a transfer
+        // is accidentally submitted twice within the ledger's dedup window
+        // (typically 24h), the second will be rejected as a duplicate.
+        created_at_time: Some(ic_cdk::api::time()),
     };
 
     let result: Result<(Result<candid::Nat, TransferFromError>,), _> =
@@ -69,7 +72,8 @@ pub async fn transfer_to_user(
         amount: candid::Nat::from(amount),
         fee: None,
         memo: None,
-        created_at_time: None,
+        // Set created_at_time for ledger-side deduplication.
+        created_at_time: Some(ic_cdk::api::time()),
     };
 
     let result: Result<(Result<candid::Nat, TransferError>,), _> =

@@ -167,6 +167,7 @@ type AmmError = variant {
   FeeBpsOutOfRange;
   MaintenanceMode;
   ClaimNotFound;
+  PoolBusy;
 };
 
 // ── Holder Snapshots ──
@@ -218,6 +219,7 @@ service : (AmmInitArgs) -> {
 
   is_pool_creation_open : () -> (bool) query;
   is_maintenance_mode : () -> (bool) query;
+  set_admin : (principal) -> (variant { Ok; Err : AmmError });
   set_maintenance_mode : (bool) -> (variant { Ok; Err : AmmError });
 
   // ── Pool Creation (permissionless when open, otherwise admin-only) ──

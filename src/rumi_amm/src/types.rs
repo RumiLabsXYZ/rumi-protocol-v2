@@ -201,4 +201,5 @@ pub enum AmmError {
     FeeBpsOutOfRange,
     MaintenanceMode,
     ClaimNotFound,
+    PoolBusy,
 }
