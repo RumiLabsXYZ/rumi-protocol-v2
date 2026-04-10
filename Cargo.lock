@@ -7177,6 +7177,7 @@ version = "0.1.0"
 dependencies = [
  "candid",
  "ciborium",
+ "futures",
  "ic-canister-log 0.2.0 (git+https://github.com/Rumi-Protocol/ic?rev=fc278709)",
  "ic-canisters-http-types",
  "ic-cdk 0.12.2",

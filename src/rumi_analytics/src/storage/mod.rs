@@ -118,6 +118,15 @@ pub struct SlimState {
     pub last_daily_snapshot_ns: u64,
     /// Per-source error counters incremented on inter-canister call failures.
     pub error_counters: ErrorCounters,
+    // Phase 4: Cursor metadata (persisted across upgrades)
+    pub cursor_last_success: Option<std::collections::HashMap<u8, u64>>,
+    pub cursor_last_error: Option<std::collections::HashMap<u8, String>>,
+    pub cursor_source_counts: Option<std::collections::HashMap<u8, u64>>,
+    // Phase 4: Backfill flags
+    pub backfill_active_icusd: Option<bool>,
+    pub backfill_active_3usd: Option<bool>,
+    // Phase 4: Pull cycle tracking
+    pub last_pull_cycle_ns: Option<u64>,
 }
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
@@ -153,6 +162,12 @@ impl Default for SlimState {
             circulating_supply_3usd_e8s: None,
             last_daily_snapshot_ns: 0,
             error_counters: ErrorCounters::default(),
+            cursor_last_success: None,
+            cursor_last_error: None,
+            cursor_source_counts: None,
+            backfill_active_icusd: None,
+            backfill_active_3usd: None,
+            last_pull_cycle_ns: None,
         }
     }
 }
@@ -177,6 +192,13 @@ pub struct DailyTvlRow {
     pub total_icp_collateral_e8s: u128,
     pub total_icusd_supply_e8s: u128,
     pub system_collateral_ratio_bps: u32,
+    // Phase 3 additions (Option for backward compat with existing rows)
+    pub stability_pool_deposits_e8s: Option<u64>,
+    pub three_pool_reserve_0_e8s: Option<u128>,
+    pub three_pool_reserve_1_e8s: Option<u128>,
+    pub three_pool_reserve_2_e8s: Option<u128>,
+    pub three_pool_virtual_price_e18: Option<u128>,
+    pub three_pool_lp_supply_e8s: Option<u128>,
 }
 
 impl Storable for DailyTvlRow {
@@ -185,6 +207,61 @@ impl Storable for DailyTvlRow {
     }
     fn from_bytes(bytes: Cow<[u8]>) -> Self {
         Decode!(bytes.as_ref(), Self).expect("DailyTvlRow decode")
+    }
+    const BOUND: Bound = Bound::Unbounded;
+}
+
+// --- CollateralStats, DailyVaultSnapshotRow, DailyStabilityRow ---
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct CollateralStats {
+    pub collateral_type: Principal,
+    pub vault_count: u32,
+    pub total_collateral_e8s: u64,
+    pub total_debt_e8s: u64,
+    pub min_cr_bps: u32,
+    pub max_cr_bps: u32,
+    pub median_cr_bps: u32,
+    pub price_usd_e8s: u64,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct DailyVaultSnapshotRow {
+    pub timestamp_ns: u64,
+    pub total_vault_count: u32,
+    pub total_collateral_usd_e8s: u64,
+    pub total_debt_e8s: u64,
+    pub median_cr_bps: u32,
+    pub collaterals: Vec<CollateralStats>,
+}
+
+impl Storable for DailyVaultSnapshotRow {
+    fn to_bytes(&self) -> Cow<[u8]> {
+        Cow::Owned(Encode!(self).expect("DailyVaultSnapshotRow encode"))
+    }
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Decode!(bytes.as_ref(), Self).expect("DailyVaultSnapshotRow decode")
+    }
+    const BOUND: Bound = Bound::Unbounded;
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct DailyStabilityRow {
+    pub timestamp_ns: u64,
+    pub total_deposits_e8s: u64,
+    pub total_depositors: u64,
+    pub total_liquidations_executed: u64,
+    pub total_interest_received_e8s: u64,
+    pub stablecoin_balances: Vec<(Principal, u64)>,
+    pub collateral_gains: Vec<(Principal, u64)>,
+}
+
+impl Storable for DailyStabilityRow {
+    fn to_bytes(&self) -> Cow<[u8]> {
+        Cow::Owned(Encode!(self).expect("DailyStabilityRow encode"))
+    }
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Decode!(bytes.as_ref(), Self).expect("DailyStabilityRow decode")
     }
     const BOUND: Bound = Bound::Unbounded;
 }
@@ -207,6 +284,22 @@ thread_local! {
             let data = MEMORY_MANAGER.with(|m| m.borrow().get(MEM_DAILY_TVL_DATA));
             ic_stable_structures::StableLog::init(idx, data)
                 .expect("init DAILY_TVL log")
+        });
+
+    static DAILY_VAULTS_LOG: RefCell<ic_stable_structures::StableLog<DailyVaultSnapshotRow, Memory, Memory>> =
+        RefCell::new({
+            let idx = MEMORY_MANAGER.with(|m| m.borrow().get(MEM_DAILY_VAULTS_IDX));
+            let data = MEMORY_MANAGER.with(|m| m.borrow().get(MEM_DAILY_VAULTS_DATA));
+            ic_stable_structures::StableLog::init(idx, data)
+                .expect("init DAILY_VAULTS log")
+        });
+
+    static DAILY_STABILITY_LOG: RefCell<ic_stable_structures::StableLog<DailyStabilityRow, Memory, Memory>> =
+        RefCell::new({
+            let idx = MEMORY_MANAGER.with(|m| m.borrow().get(MEM_DAILY_STABILITY_IDX));
+            let data = MEMORY_MANAGER.with(|m| m.borrow().get(MEM_DAILY_STABILITY_DATA));
+            ic_stable_structures::StableLog::init(idx, data)
+                .expect("init DAILY_STABILITY log")
         });
 }
 
@@ -275,4 +368,94 @@ pub mod daily_tvl {
         });
         out
     }
+}
+
+pub mod daily_vaults {
+    use super::*;
+
+    pub fn push(row: DailyVaultSnapshotRow) {
+        DAILY_VAULTS_LOG.with(|log| {
+            log.borrow_mut().append(&row).expect("append DAILY_VAULTS");
+        });
+    }
+
+    pub fn len() -> u64 {
+        DAILY_VAULTS_LOG.with(|log| log.borrow().len())
+    }
+
+    pub fn get(index: u64) -> Option<DailyVaultSnapshotRow> {
+        DAILY_VAULTS_LOG.with(|log| log.borrow().get(index))
+    }
+
+    pub fn range(from_ts: u64, to_ts: u64, limit: usize) -> Vec<DailyVaultSnapshotRow> {
+        let mut out = Vec::new();
+        DAILY_VAULTS_LOG.with(|log| {
+            let log = log.borrow();
+            let n = log.len();
+            for i in 0..n {
+                if let Some(row) = log.get(i) {
+                    if row.timestamp_ns >= to_ts {
+                        break;
+                    }
+                    if row.timestamp_ns >= from_ts {
+                        out.push(row);
+                        if out.len() >= limit {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        out
+    }
+}
+
+pub mod daily_stability {
+    use super::*;
+
+    pub fn push(row: DailyStabilityRow) {
+        DAILY_STABILITY_LOG.with(|log| {
+            log.borrow_mut().append(&row).expect("append DAILY_STABILITY");
+        });
+    }
+
+    pub fn len() -> u64 {
+        DAILY_STABILITY_LOG.with(|log| log.borrow().len())
+    }
+
+    pub fn get(index: u64) -> Option<DailyStabilityRow> {
+        DAILY_STABILITY_LOG.with(|log| log.borrow().get(index))
+    }
+
+    pub fn range(from_ts: u64, to_ts: u64, limit: usize) -> Vec<DailyStabilityRow> {
+        let mut out = Vec::new();
+        DAILY_STABILITY_LOG.with(|log| {
+            let log = log.borrow();
+            let n = log.len();
+            for i in 0..n {
+                if let Some(row) = log.get(i) {
+                    if row.timestamp_ns >= to_ts {
+                        break;
+                    }
+                    if row.timestamp_ns >= from_ts {
+                        out.push(row);
+                        if out.len() >= limit {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        out
+    }
+}
+
+pub mod cursors;
+pub mod events;
+pub mod balance_tracker;
+pub mod holders;
+
+/// Get a virtual memory from the shared MemoryManager. Used by submodules.
+pub(crate) fn get_memory(id: MemoryId) -> Memory {
+    MEMORY_MANAGER.with(|m| m.borrow().get(id))
 }

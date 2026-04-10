@@ -3,7 +3,7 @@
 use candid::CandidType;
 use serde::Deserialize;
 
-use crate::storage::DailyTvlRow;
+use crate::storage::{DailyTvlRow, DailyVaultSnapshotRow, DailyStabilityRow};
 
 #[derive(CandidType, Deserialize, Clone, Debug, Default)]
 pub struct RangeQuery {
@@ -35,4 +35,50 @@ impl RangeQuery {
 pub struct TvlSeriesResponse {
     pub rows: Vec<DailyTvlRow>,
     pub next_from_ts: Option<u64>,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct VaultSeriesResponse {
+    pub rows: Vec<DailyVaultSnapshotRow>,
+    pub next_from_ts: Option<u64>,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct StabilitySeriesResponse {
+    pub rows: Vec<DailyStabilityRow>,
+    pub next_from_ts: Option<u64>,
+}
+
+use candid::Principal;
+use crate::storage::holders::DailyHolderRow;
+
+#[derive(CandidType, Clone, Debug)]
+pub struct HolderSeriesResponse {
+    pub rows: Vec<DailyHolderRow>,
+    pub next_from_ts: Option<u64>,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct CollectorHealth {
+    pub cursors: Vec<CursorStatus>,
+    pub error_counters: crate::storage::ErrorCounters,
+    pub backfill_active: Vec<Principal>,
+    pub last_pull_cycle_ns: u64,
+    pub balance_tracker_stats: Vec<BalanceTrackerStats>,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct CursorStatus {
+    pub name: String,
+    pub cursor_position: u64,
+    pub source_count: u64,
+    pub last_success_ns: u64,
+    pub last_error: Option<String>,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct BalanceTrackerStats {
+    pub token: Principal,
+    pub holder_count: u64,
+    pub total_tracked_e8s: u64,
 }

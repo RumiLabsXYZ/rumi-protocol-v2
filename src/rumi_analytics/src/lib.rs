@@ -10,6 +10,7 @@ mod collectors;
 mod sources;
 mod queries;
 mod timers;
+mod tailing;
 mod types;
 
 use crate::storage::{SlimState, SourceCanisterIds};
@@ -69,8 +70,106 @@ fn get_tvl_series(query: types::RangeQuery) -> types::TvlSeriesResponse {
 }
 
 #[ic_cdk_macros::query]
+fn get_vault_series(query: types::RangeQuery) -> types::VaultSeriesResponse {
+    queries::historical::get_vault_series(query)
+}
+
+#[ic_cdk_macros::query]
+fn get_stability_series(query: types::RangeQuery) -> types::StabilitySeriesResponse {
+    queries::historical::get_stability_series(query)
+}
+
+#[ic_cdk_macros::query]
 fn http_request(req: ic_canisters_http_types::HttpRequest) -> ic_canisters_http_types::HttpResponse {
     http::http_request(req)
+}
+
+#[ic_cdk_macros::query]
+fn get_holder_series(query: types::RangeQuery, token: Principal) -> types::HolderSeriesResponse {
+    queries::historical::get_holder_series(query, token)
+}
+
+#[ic_cdk_macros::query]
+fn get_collector_health() -> types::CollectorHealth {
+    use storage::cursors;
+
+    let cursor_names: &[(u8, &str, fn() -> u64)] = &[
+        (cursors::CURSOR_ID_BACKEND_EVENTS, "backend_events", cursors::backend_events::get),
+        (cursors::CURSOR_ID_3POOL_SWAPS, "3pool_swaps", cursors::three_pool_swaps::get),
+        (cursors::CURSOR_ID_3POOL_LIQUIDITY, "3pool_liquidity", cursors::three_pool_liquidity::get),
+        (cursors::CURSOR_ID_3POOL_BLOCKS, "3pool_blocks", cursors::three_pool_blocks::get),
+        (cursors::CURSOR_ID_AMM_SWAPS, "amm_swaps", cursors::amm_swaps::get),
+        (cursors::CURSOR_ID_ICUSD_BLOCKS, "icusd_blocks", cursors::icusd_blocks::get),
+    ];
+
+    let (last_success_map, last_error_map, source_count_map, backfill_icusd, backfill_3usd, last_pull_ns, error_counters, icusd_ledger, three_pool) =
+        state::read_state(|s| (
+            s.cursor_last_success.clone().unwrap_or_default(),
+            s.cursor_last_error.clone().unwrap_or_default(),
+            s.cursor_source_counts.clone().unwrap_or_default(),
+            s.backfill_active_icusd.unwrap_or(false),
+            s.backfill_active_3usd.unwrap_or(false),
+            s.last_pull_cycle_ns.unwrap_or(0),
+            s.error_counters.clone(),
+            s.sources.icusd_ledger,
+            s.sources.three_pool,
+        ));
+
+    let cursors: Vec<types::CursorStatus> = cursor_names.iter().map(|(id, name, get_fn)| {
+        types::CursorStatus {
+            name: name.to_string(),
+            cursor_position: get_fn(),
+            source_count: source_count_map.get(id).copied().unwrap_or(0),
+            last_success_ns: last_success_map.get(id).copied().unwrap_or(0),
+            last_error: last_error_map.get(id).cloned(),
+        }
+    }).collect();
+
+    let mut backfill_active = Vec::new();
+    if backfill_icusd { backfill_active.push(icusd_ledger); }
+    if backfill_3usd { backfill_active.push(three_pool); }
+
+    let balance_tracker_stats = vec![
+        types::BalanceTrackerStats {
+            token: icusd_ledger,
+            holder_count: storage::balance_tracker::holder_count(storage::balance_tracker::Token::IcUsd),
+            total_tracked_e8s: storage::balance_tracker::total_supply_tracked(storage::balance_tracker::Token::IcUsd),
+        },
+        types::BalanceTrackerStats {
+            token: three_pool,
+            holder_count: storage::balance_tracker::holder_count(storage::balance_tracker::Token::ThreeUsd),
+            total_tracked_e8s: storage::balance_tracker::total_supply_tracked(storage::balance_tracker::Token::ThreeUsd),
+        },
+    ];
+
+    types::CollectorHealth {
+        cursors,
+        error_counters,
+        backfill_active,
+        last_pull_cycle_ns: last_pull_ns,
+        balance_tracker_stats,
+    }
+}
+
+#[ic_cdk_macros::update]
+fn start_backfill(token: Principal) -> String {
+    let admin = state::read_state(|s| s.admin);
+    let caller = ic_cdk::caller();
+    if caller != admin {
+        return format!("unauthorized: caller {} is not admin", caller);
+    }
+
+    let (icusd_ledger, three_pool) = state::read_state(|s| (s.sources.icusd_ledger, s.sources.three_pool));
+
+    if token == icusd_ledger {
+        state::mutate_state(|s| s.backfill_active_icusd = Some(true));
+        "backfill started for icUSD".to_string()
+    } else if token == three_pool {
+        state::mutate_state(|s| s.backfill_active_3usd = Some(true));
+        "backfill started for 3USD".to_string()
+    } else {
+        format!("unknown token: {}", token)
+    }
 }
 
 ic_cdk::export_candid!();

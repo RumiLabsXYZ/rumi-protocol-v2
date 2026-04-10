@@ -239,6 +239,45 @@ type Event = variant {
     collateral_type : principal;
     borrowing_fee : opt text;
   };
+  set_collateral_liquidation_ratio : record {
+    collateral_type : principal;
+    liquidation_ratio : text;
+  };
+  set_collateral_borrow_threshold : record {
+    collateral_type : principal;
+    borrow_threshold_ratio : text;
+  };
+  set_collateral_liquidation_bonus : record {
+    collateral_type : principal;
+    liquidation_bonus : text;
+  };
+  set_collateral_min_vault_debt : record {
+    collateral_type : principal;
+    min_vault_debt : nat64;
+  };
+  set_collateral_ledger_fee : record {
+    collateral_type : principal;
+    ledger_fee : nat64;
+  };
+  set_collateral_redemption_fee_floor : record {
+    collateral_type : principal;
+    redemption_fee_floor : text;
+  };
+  set_collateral_redemption_fee_ceiling : record {
+    collateral_type : principal;
+    redemption_fee_ceiling : text;
+  };
+  set_collateral_min_deposit : record {
+    collateral_type : principal;
+    min_collateral_deposit : nat64;
+  };
+  set_collateral_display_color : record {
+    collateral_type : principal;
+    display_color : opt text;
+  };
+  set_bot_allowed_collateral_types : record {
+    collateral_types : vec principal;
+  };
   margin_transfer : record { block_index : nat64; vault_id : nat64; timestamp : opt nat64 };
   admin_sweep_to_treasury : record {
     block_index : nat64;

@@ -288,7 +288,15 @@ export const idlFactory = ({ IDL }) => {
       'old_amount' : IDL.Nat64,
       'reason' : IDL.Text,
     }),
+    'set_collateral_min_vault_debt' : IDL.Record({
+      'min_vault_debt' : IDL.Nat64,
+      'collateral_type' : IDL.Principal,
+    }),
     'set_recovery_target_cr' : IDL.Record({ 'rate' : IDL.Text }),
+    'set_collateral_redemption_fee_floor' : IDL.Record({
+      'redemption_fee_floor' : IDL.Text,
+      'collateral_type' : IDL.Principal,
+    }),
     'init' : InitArg,
     'set_stable_ledger_principal' : IDL.Record({
       'principal' : IDL.Principal,
@@ -298,6 +306,10 @@ export const idlFactory = ({ IDL }) => {
       'block_index' : IDL.Nat64,
       'vault' : Vault,
       'timestamp' : IDL.Opt(IDL.Nat64),
+    }),
+    'set_collateral_display_color' : IDL.Record({
+      'collateral_type' : IDL.Principal,
+      'display_color' : IDL.Opt(IDL.Text),
     }),
     'redemption_on_vaults' : IDL.Record({
       'icusd_amount' : IDL.Nat64,
@@ -321,6 +333,10 @@ export const idlFactory = ({ IDL }) => {
       'collateral_type' : IDL.Principal,
       'borrowing_fee' : IDL.Opt(IDL.Text),
     }),
+    'set_collateral_redemption_fee_ceiling' : IDL.Record({
+      'redemption_fee_ceiling' : IDL.Text,
+      'collateral_type' : IDL.Principal,
+    }),
     'margin_transfer' : IDL.Record({
       'block_index' : IDL.Nat64,
       'vault_id' : IDL.Nat64,
@@ -334,6 +350,10 @@ export const idlFactory = ({ IDL }) => {
     }),
     'set_rmr_floor_cr' : IDL.Record({ 'value' : IDL.Text }),
     'set_rmr_ceiling' : IDL.Record({ 'value' : IDL.Text }),
+    'set_collateral_liquidation_bonus' : IDL.Record({
+      'collateral_type' : IDL.Principal,
+      'liquidation_bonus' : IDL.Text,
+    }),
     'set_global_icusd_mint_cap' : IDL.Record({
       'cap' : IDL.Opt(IDL.Text),
       'amount' : IDL.Opt(IDL.Text),
@@ -346,6 +366,9 @@ export const idlFactory = ({ IDL }) => {
       'fee_amount' : IDL.Nat64,
       'caller' : IDL.Opt(IDL.Principal),
       'borrowed_amount' : IDL.Nat64,
+    }),
+    'set_bot_allowed_collateral_types' : IDL.Record({
+      'collateral_types' : IDL.Vec(IDL.Principal),
     }),
     'set_reserve_redemptions_enabled' : IDL.Record({ 'enabled' : IDL.Bool }),
     'set_min_icusd_amount' : IDL.Record({ 'amount' : IDL.Text }),
@@ -378,6 +401,10 @@ export const idlFactory = ({ IDL }) => {
     'set_rate_curve_markers' : IDL.Record({
       'markers' : IDL.Text,
       'collateral_type' : IDL.Opt(IDL.Text),
+    }),
+    'set_collateral_liquidation_ratio' : IDL.Record({
+      'collateral_type' : IDL.Principal,
+      'liquidation_ratio' : IDL.Text,
     }),
     'dust_forgiven' : IDL.Record({
       'vault_id' : IDL.Nat64,
@@ -422,6 +449,10 @@ export const idlFactory = ({ IDL }) => {
       'block_index' : IDL.Opt(IDL.Nat64),
       'vault_id' : IDL.Nat64,
       'timestamp' : IDL.Opt(IDL.Nat64),
+    }),
+    'set_collateral_min_deposit' : IDL.Record({
+      'min_collateral_deposit' : IDL.Nat64,
+      'collateral_type' : IDL.Principal,
     }),
     'update_collateral_status' : IDL.Record({
       'status' : CollateralStatus,
@@ -469,8 +500,16 @@ export const idlFactory = ({ IDL }) => {
       'timestamp' : IDL.Opt(IDL.Nat64),
       'liquidator' : IDL.Opt(IDL.Principal),
     }),
+    'set_collateral_borrow_threshold' : IDL.Record({
+      'borrow_threshold_ratio' : IDL.Text,
+      'collateral_type' : IDL.Principal,
+    }),
     'add_collateral_type' : IDL.Record({
       'config' : CollateralConfig,
+      'collateral_type' : IDL.Principal,
+    }),
+    'set_collateral_ledger_fee' : IDL.Record({
+      'ledger_fee' : IDL.Nat64,
       'collateral_type' : IDL.Principal,
     }),
     'set_stable_token_enabled' : IDL.Record({

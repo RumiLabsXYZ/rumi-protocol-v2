@@ -1,49 +1,129 @@
-type InitArgs = record {
-  admin : principal;
-  backend : principal;
-  icusd_ledger : principal;
-  three_pool : principal;
-  stability_pool : principal;
-  amm : principal;
+type BalanceTrackerStats = record {
+  token : principal;
+  total_tracked_e8s : nat64;
+  holder_count : nat64;
 };
-
-type RangeQuery = record {
-  from_ts : opt nat64;
-  to_ts : opt nat64;
-  limit : opt nat32;
-  offset : opt nat64;
+type CollateralStats = record {
+  total_collateral_e8s : nat64;
+  median_cr_bps : nat32;
+  price_usd_e8s : nat64;
+  total_debt_e8s : nat64;
+  max_cr_bps : nat32;
+  collateral_type : principal;
+  min_cr_bps : nat32;
+  vault_count : nat32;
 };
-
-type DailyTvlRow = record {
+type CollectorHealth = record {
+  balance_tracker_stats : vec BalanceTrackerStats;
+  backfill_active : vec principal;
+  error_counters : ErrorCounters;
+  last_pull_cycle_ns : nat64;
+  cursors : vec CursorStatus;
+};
+type CursorStatus = record {
+  last_error : opt text;
+  source_count : nat64;
+  name : text;
+  last_success_ns : nat64;
+  cursor_position : nat64;
+};
+type DailyHolderRow = record {
+  total_supply_tracked_e8s : nat64;
+  token : principal;
+  new_holders_today : nat32;
   timestamp_ns : nat64;
-  total_icp_collateral_e8s : nat;
+  median_balance_e8s : nat64;
+  total_holders : nat32;
+  top_10_pct_bps : nat32;
+  top_50 : vec record { principal; nat64 };
+  distribution_buckets : vec nat32;
+  gini_bps : nat32;
+};
+type DailyStabilityRow = record {
+  collateral_gains : vec record { principal; nat64 };
+  timestamp_ns : nat64;
+  total_depositors : nat64;
+  stablecoin_balances : vec record { principal; nat64 };
+  total_deposits_e8s : nat64;
+  total_interest_received_e8s : nat64;
+  total_liquidations_executed : nat64;
+};
+type DailyTvlRow = record {
+  three_pool_reserve_0_e8s : opt nat;
+  timestamp_ns : nat64;
+  three_pool_reserve_2_e8s : opt nat;
+  three_pool_virtual_price_e18 : opt nat;
   total_icusd_supply_e8s : nat;
   system_collateral_ratio_bps : nat32;
+  total_icp_collateral_e8s : nat;
+  three_pool_reserve_1_e8s : opt nat;
+  stability_pool_deposits_e8s : opt nat64;
+  three_pool_lp_supply_e8s : opt nat;
 };
-
+type DailyVaultSnapshotRow = record {
+  timestamp_ns : nat64;
+  median_cr_bps : nat32;
+  total_debt_e8s : nat64;
+  total_vault_count : nat32;
+  total_collateral_usd_e8s : nat64;
+  collaterals : vec CollateralStats;
+};
+type ErrorCounters = record {
+  amm : nat64;
+  three_pool : nat64;
+  icusd_ledger : nat64;
+  stability_pool : nat64;
+  backend : nat64;
+};
+type HolderSeriesResponse = record {
+  rows : vec DailyHolderRow;
+  next_from_ts : opt nat64;
+};
+type HttpRequest = record {
+  url : text;
+  method : text;
+  body : blob;
+  headers : vec record { text; text };
+};
+type HttpResponse = record {
+  body : blob;
+  headers : vec record { text; text };
+  status_code : nat16;
+};
+type InitArgs = record {
+  amm : principal;
+  three_pool : principal;
+  admin : principal;
+  icusd_ledger : principal;
+  stability_pool : principal;
+  backend : principal;
+};
+type RangeQuery = record {
+  to_ts : opt nat64;
+  from_ts : opt nat64;
+  offset : opt nat64;
+  limit : opt nat32;
+};
+type StabilitySeriesResponse = record {
+  rows : vec DailyStabilityRow;
+  next_from_ts : opt nat64;
+};
 type TvlSeriesResponse = record {
   rows : vec DailyTvlRow;
   next_from_ts : opt nat64;
 };
-
-type HeaderField = record { text; text };
-
-type HttpRequest = record {
-  method : text;
-  url : text;
-  headers : vec HeaderField;
-  body : blob;
+type VaultSeriesResponse = record {
+  rows : vec DailyVaultSnapshotRow;
+  next_from_ts : opt nat64;
 };
-
-type HttpResponse = record {
-  status_code : nat16;
-  headers : vec HeaderField;
-  body : blob;
-};
-
 service : (InitArgs) -> {
-  ping : () -> (text) query;
   get_admin : () -> (principal) query;
+  get_collector_health : () -> (CollectorHealth) query;
+  get_holder_series : (RangeQuery, principal) -> (HolderSeriesResponse) query;
+  get_stability_series : (RangeQuery) -> (StabilitySeriesResponse) query;
   get_tvl_series : (RangeQuery) -> (TvlSeriesResponse) query;
+  get_vault_series : (RangeQuery) -> (VaultSeriesResponse) query;
   http_request : (HttpRequest) -> (HttpResponse) query;
+  ping : () -> (text) query;
+  start_backfill : (principal) -> (text);
 }
