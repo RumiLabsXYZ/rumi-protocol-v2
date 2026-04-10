@@ -3,6 +3,7 @@
 //! pull cycle keeps fresh.
 
 pub mod csv;
+pub mod metrics;
 
 use ic_canisters_http_types::{HttpRequest, HttpResponse, HttpResponseBuilder};
 
@@ -13,6 +14,13 @@ pub fn http_request(req: HttpRequest) -> HttpResponse {
     match path {
         "/api/supply" => supply_icusd_f64(),
         "/api/supply/raw" => supply_icusd_raw(),
+        "/metrics" => {
+            let body = metrics::render();
+            HttpResponseBuilder::ok()
+                .header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+                .with_body_and_content_length(body)
+                .build()
+        }
         _ => HttpResponseBuilder::not_found().build(),
     }
 }
