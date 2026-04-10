@@ -55,6 +55,7 @@ impl AccountKey {
         Account { owner, subaccount }
     }
 
+    #[allow(dead_code)]
     pub fn owner(&self) -> Principal {
         let plen = self.0[0] as usize;
         Principal::from_slice(&self.0[1..1 + plen])
@@ -62,10 +63,10 @@ impl AccountKey {
 }
 
 impl Storable for AccountKey {
-    fn to_bytes(&self) -> Cow<[u8]> {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
         Cow::Borrowed(&self.0)
     }
-    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         let mut buf = [0u8; ACCOUNT_KEY_LEN];
         buf.copy_from_slice(&bytes[..ACCOUNT_KEY_LEN]);
         Self(buf)
@@ -80,10 +81,10 @@ impl Storable for AccountKey {
 pub struct BalVal(pub u64);
 
 impl Storable for BalVal {
-    fn to_bytes(&self) -> Cow<[u8]> {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
         Cow::Owned(self.0.to_le_bytes().to_vec())
     }
-    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         let mut arr = [0u8; 8];
         arr.copy_from_slice(&bytes[..8]);
         Self(u64::from_le_bytes(arr))
@@ -171,6 +172,7 @@ pub fn apply_burn(token: Token, from: &Account, amount: u64) {
     debit(token, from, amount);
 }
 
+#[allow(dead_code)]
 pub fn get_balance(token: Token, acct: &Account) -> u64 {
     let key = AccountKey::from_account(acct);
     with_bal(token, |map| map.get(&key).map(|v| v.0).unwrap_or(0))
@@ -186,6 +188,7 @@ pub fn all_balances(token: Token) -> Vec<(Account, u64)> {
     })
 }
 
+#[allow(dead_code)]
 pub fn get_firstseen(token: Token, acct: &Account) -> Option<u64> {
     let key = AccountKey::from_account(acct);
     with_firstseen(token, |map| map.get(&key).map(|v| v.0))

@@ -26,10 +26,10 @@ pub struct DailyHolderRow {
 }
 
 impl Storable for DailyHolderRow {
-    fn to_bytes(&self) -> Cow<[u8]> {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
         Cow::Owned(Encode!(self).expect("DailyHolderRow encode"))
     }
-    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         Decode!(bytes.as_ref(), Self).expect("DailyHolderRow decode")
     }
     const BOUND: Bound = Bound::Unbounded;
@@ -55,6 +55,7 @@ thread_local! {
 
 macro_rules! holder_accessors {
     ($mod_name:ident, $log:ident) => {
+        #[allow(dead_code)]
         pub mod $mod_name {
             use super::*;
 

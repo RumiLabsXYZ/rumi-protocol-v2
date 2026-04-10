@@ -2,8 +2,8 @@
 //! calls. All values are served from cached state in SlimState which the 60s
 //! pull cycle keeps fresh.
 
-pub mod csv;
-pub mod metrics;
+mod csv;
+mod metrics;
 
 use ic_canisters_http_types::{HttpRequest, HttpResponse, HttpResponseBuilder};
 

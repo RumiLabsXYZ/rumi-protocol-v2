@@ -1225,3 +1225,45 @@ fn http_not_found() {
     let resp = http_get(&env, "/nonexistent");
     assert_eq!(resp.status_code, 404);
 }
+
+// ─── Phase 8 hardening tests ───
+
+#[derive(CandidType)]
+struct TestOhlcQuery {
+    collateral: Principal,
+    from_ts: Option<u64>,
+    to_ts: Option<u64>,
+    bucket_secs: Option<u64>,
+    limit: Option<u32>,
+}
+
+#[test]
+fn ohlc_query_with_wide_range_returns_capped_result() {
+    let env = setup();
+    // Trigger pull cycle + fast snapshot
+    advance_pull_cycle(&env);
+    // Advance 5 min to trigger fast snapshot
+    env.pic.advance_time(std::time::Duration::from_secs(305));
+    for _ in 0..10 { env.pic.tick(); }
+
+    // Query OHLC with max possible range (should not trap)
+    let result = env.pic.query_call(
+        env.analytics,
+        env.admin,
+        "get_ohlc",
+        encode_one(TestOhlcQuery {
+            collateral: env.backend, // any principal, just testing it doesn't trap
+            from_ts: Some(0u64),
+            to_ts: Some(u64::MAX),
+            bucket_secs: Some(3600u64),
+            limit: Some(10u32),
+        }).unwrap(),
+    ).expect("get_ohlc query");
+    match result {
+        WasmResult::Reply(bytes) => {
+            let resp: TestOhlcResponse = decode_one(&bytes).unwrap();
+            assert!(resp.candles.len() <= 10, "candles should be capped at limit");
+        }
+        WasmResult::Reject(msg) => panic!("get_ohlc rejected: {}", msg),
+    }
+}
