@@ -248,11 +248,105 @@ pub fn compute_peg_status(snap: &storage::fast::Fast3PoolSnapshot) -> types::Peg
     }
 }
 
+// ─── APY ───
+
+pub fn get_apys(query: types::ApyQuery) -> types::ApyResponse {
+    let window_days = query.window_days.unwrap_or(DEFAULT_APY_WINDOW_DAYS).max(1);
+    let now = ic_cdk::api::time();
+    let window_ns = (window_days as u64).saturating_mul(86_400).saturating_mul(NANOS_PER_SEC);
+    let from = now.saturating_sub(window_ns);
+
+    let swap_rollups = storage::rollups::daily_swaps::range(from, now, usize::MAX);
+    let tvl_rows = storage::daily_tvl::range(from, now, usize::MAX);
+    let stability_rows = storage::daily_stability::range(from, now, usize::MAX);
+
+    let lp_apy = compute_lp_apy(&swap_rollups, &tvl_rows, window_days);
+    let sp_apy = compute_sp_apy(&stability_rows, window_days);
+
+    types::ApyResponse {
+        lp_apy_pct: lp_apy,
+        sp_apy_pct: sp_apy,
+        window_days,
+    }
+}
+
+/// 3pool LP APY: annualized swap fee yield.
+/// APY = (total_swap_fees / days) / avg_pool_tvl * 365 * 100
+pub fn compute_lp_apy(
+    swap_rollups: &[storage::rollups::DailySwapRollup],
+    tvl_rows: &[storage::DailyTvlRow],
+    window_days: u32,
+) -> Option<f64> {
+    if swap_rollups.is_empty() || tvl_rows.is_empty() {
+        return None;
+    }
+
+    let total_fees: u64 = swap_rollups.iter()
+        .map(|r| r.three_pool_fees_e8s)
+        .sum();
+
+    // Average 3pool TVL from daily TVL rows (sum of all 3 reserves).
+    let tvl_sum: f64 = tvl_rows.iter()
+        .filter_map(|r| {
+            let r0 = r.three_pool_reserve_0_e8s? as f64;
+            let r1 = r.three_pool_reserve_1_e8s? as f64;
+            let r2 = r.three_pool_reserve_2_e8s? as f64;
+            Some(r0 + r1 + r2)
+        })
+        .sum();
+
+    let tvl_count = tvl_rows.iter()
+        .filter(|r| r.three_pool_reserve_0_e8s.is_some())
+        .count();
+
+    if tvl_count == 0 {
+        return None;
+    }
+
+    let avg_tvl = tvl_sum / tvl_count as f64;
+    if avg_tvl <= 0.0 {
+        return None;
+    }
+
+    let daily_fees = total_fees as f64 / window_days as f64;
+    let apy = (daily_fees / avg_tvl) * 365.0 * 100.0;
+    Some(apy)
+}
+
+/// Stability pool APY: annualized interest yield.
+/// APY = (total_interest / days) / avg_deposits * 365 * 100
+pub fn compute_sp_apy(
+    stability_rows: &[storage::DailyStabilityRow],
+    window_days: u32,
+) -> Option<f64> {
+    if stability_rows.is_empty() {
+        return None;
+    }
+
+    let total_interest: u64 = stability_rows.iter()
+        .map(|r| r.total_interest_received_e8s)
+        .sum();
+
+    let avg_deposits: f64 = stability_rows.iter()
+        .map(|r| r.total_deposits_e8s as f64)
+        .sum::<f64>() / stability_rows.len() as f64;
+
+    if avg_deposits <= 0.0 {
+        return None;
+    }
+
+    let daily_interest = total_interest as f64 / window_days as f64;
+    let apy = (daily_interest / avg_deposits) * 365.0 * 100.0;
+    Some(apy)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::fast::FastPriceSnapshot;
     use crate::storage::fast::Fast3PoolSnapshot;
+    use crate::storage::rollups::DailySwapRollup;
+    use crate::storage::{DailyTvlRow, DailyStabilityRow};
 
     fn make_price_snap(ts: u64, collateral: Principal, price: f64) -> FastPriceSnapshot {
         FastPriceSnapshot {
@@ -432,5 +526,77 @@ mod tests {
         let status = compute_peg_status(&snap);
         assert!(status.balance_ratios.is_empty());
         assert_eq!(status.max_imbalance_pct, 0.0);
+    }
+
+    fn make_swap_rollup(fees: u64) -> DailySwapRollup {
+        DailySwapRollup {
+            timestamp_ns: 1_000_000_000,
+            three_pool_swap_count: 10,
+            amm_swap_count: 0,
+            three_pool_volume_e8s: 1_000_000,
+            amm_volume_e8s: 0,
+            three_pool_fees_e8s: fees,
+            amm_fees_e8s: 0,
+            unique_swappers: 5,
+        }
+    }
+
+    fn make_tvl_row(reserve: u128) -> DailyTvlRow {
+        DailyTvlRow {
+            timestamp_ns: 1_000_000_000,
+            total_icp_collateral_e8s: 0,
+            total_icusd_supply_e8s: 0,
+            system_collateral_ratio_bps: 0,
+            stability_pool_deposits_e8s: None,
+            three_pool_reserve_0_e8s: Some(reserve),
+            three_pool_reserve_1_e8s: Some(reserve),
+            three_pool_reserve_2_e8s: Some(reserve),
+            three_pool_virtual_price_e18: None,
+            three_pool_lp_supply_e8s: None,
+        }
+    }
+
+    fn make_stability_row(deposits: u64, interest: u64) -> DailyStabilityRow {
+        DailyStabilityRow {
+            timestamp_ns: 1_000_000_000,
+            total_deposits_e8s: deposits,
+            total_depositors: 10,
+            total_liquidations_executed: 0,
+            total_interest_received_e8s: interest,
+            stablecoin_balances: vec![],
+            collateral_gains: vec![],
+        }
+    }
+
+    #[test]
+    fn lp_apy_basic() {
+        let swaps = vec![make_swap_rollup(100)];
+        let tvls = vec![make_tvl_row(10_000)];
+        let apy = compute_lp_apy(&swaps, &tvls, 1);
+        assert!(apy.is_some());
+        // daily_fees = 100, avg_tvl = 30_000, APY = (100/30000) * 365 * 100 = 121.67%
+        let v = apy.unwrap();
+        assert!((v - 121.67).abs() < 1.0, "expected ~121.67%, got {}", v);
+    }
+
+    #[test]
+    fn lp_apy_empty() {
+        assert!(compute_lp_apy(&[], &[], 7).is_none());
+    }
+
+    #[test]
+    fn sp_apy_basic() {
+        let rows = vec![make_stability_row(100_000, 50)];
+        let apy = compute_sp_apy(&rows, 1);
+        assert!(apy.is_some());
+        // APY = (50/100000) * 365 * 100 = 18.25%
+        let v = apy.unwrap();
+        assert!((v - 18.25).abs() < 0.1, "expected ~18.25%, got {}", v);
+    }
+
+    #[test]
+    fn sp_apy_zero_deposits() {
+        let rows = vec![make_stability_row(0, 50)];
+        assert!(compute_sp_apy(&rows, 1).is_none());
     }
 }
