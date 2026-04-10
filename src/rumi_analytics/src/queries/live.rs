@@ -211,10 +211,48 @@ pub fn compute_volatility(
     (annualized, prices.len() as u32, symbol)
 }
 
+// ─── Peg Deviation ───
+
+pub fn get_peg_status() -> Option<types::PegStatus> {
+    let n = storage::fast::fast_3pool::len();
+    if n == 0 {
+        return None;
+    }
+    let snap = storage::fast::fast_3pool::get(n - 1)?;
+    Some(compute_peg_status(&snap))
+}
+
+pub fn compute_peg_status(snap: &storage::fast::Fast3PoolSnapshot) -> types::PegStatus {
+    let total: u128 = snap.balances.iter().sum();
+    let count = snap.balances.len();
+
+    let (balance_ratios, max_imbalance_pct) = if count > 0 && total > 0 {
+        let target = total as f64 / count as f64;
+        let ratios: Vec<f64> = snap.balances.iter()
+            .map(|b| *b as f64 / target)
+            .collect();
+        let max_dev = ratios.iter()
+            .map(|r| (r - 1.0).abs())
+            .fold(0.0f64, f64::max);
+        (ratios, max_dev * 100.0)
+    } else {
+        (vec![], 0.0)
+    };
+
+    types::PegStatus {
+        timestamp_ns: snap.timestamp_ns,
+        pool_balances: snap.balances.clone(),
+        virtual_price: snap.virtual_price,
+        balance_ratios,
+        max_imbalance_pct,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::fast::FastPriceSnapshot;
+    use crate::storage::fast::Fast3PoolSnapshot;
 
     fn make_price_snap(ts: u64, collateral: Principal, price: f64) -> FastPriceSnapshot {
         FastPriceSnapshot {
@@ -353,5 +391,46 @@ mod tests {
         let (vol, count, _) = compute_volatility(&snaps, col);
         assert_eq!(vol, 0.0);
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn peg_perfectly_balanced() {
+        let snap = Fast3PoolSnapshot {
+            timestamp_ns: 1_000_000_000,
+            balances: vec![1_000_000, 1_000_000, 1_000_000],
+            virtual_price: 100_000_000,
+            lp_total_supply: 3_000_000,
+        };
+        let status = compute_peg_status(&snap);
+        assert_eq!(status.balance_ratios.len(), 3);
+        for r in &status.balance_ratios {
+            assert!((r - 1.0).abs() < 0.001);
+        }
+        assert!(status.max_imbalance_pct < 0.01);
+    }
+
+    #[test]
+    fn peg_imbalanced() {
+        let snap = Fast3PoolSnapshot {
+            timestamp_ns: 1_000_000_000,
+            balances: vec![1_500_000, 1_000_000, 500_000],
+            virtual_price: 100_000_000,
+            lp_total_supply: 3_000_000,
+        };
+        let status = compute_peg_status(&snap);
+        assert!((status.max_imbalance_pct - 50.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn peg_empty_balances() {
+        let snap = Fast3PoolSnapshot {
+            timestamp_ns: 1_000_000_000,
+            balances: vec![],
+            virtual_price: 0,
+            lp_total_supply: 0,
+        };
+        let status = compute_peg_status(&snap);
+        assert!(status.balance_ratios.is_empty());
+        assert_eq!(status.max_imbalance_pct, 0.0);
     }
 }
