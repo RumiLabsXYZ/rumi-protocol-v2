@@ -26,9 +26,12 @@ pub struct PoolStatusRaw {
 pub struct ThreePoolStatusSubset {
     pub balances: Vec<u128>,
     pub lp_total_supply: u128,
+    #[allow(dead_code)]
     pub current_a: u64,
     pub virtual_price: u128,
+    #[allow(dead_code)]
     pub swap_fee_bps: u64,
+    #[allow(dead_code)]
     pub admin_fee_bps: u64,
 }
 

@@ -32,10 +32,10 @@ pub struct HourlyFeeCurveSnapshot {
 macro_rules! storable_candid {
     ($t:ty) => {
         impl Storable for $t {
-            fn to_bytes(&self) -> Cow<[u8]> {
+            fn to_bytes(&self) -> Cow<'_, [u8]> {
                 Cow::Owned(Encode!(self).expect(concat!(stringify!($t), " encode")))
             }
-            fn from_bytes(bytes: Cow<[u8]>) -> Self {
+            fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
                 Decode!(bytes.as_ref(), Self).expect(concat!(stringify!($t), " decode"))
             }
             const BOUND: Bound = Bound::Unbounded;
@@ -70,6 +70,7 @@ thread_local! {
 
 macro_rules! hourly_accessors {
     ($mod_name:ident, $log:ident, $row_type:ty) => {
+        #[allow(dead_code)]
         pub mod $mod_name {
             use super::*;
 

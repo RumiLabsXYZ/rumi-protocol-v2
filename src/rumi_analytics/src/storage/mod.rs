@@ -47,6 +47,7 @@ pub const MEM_CURSOR_3POOL_SWAPS: MemoryId = MemoryId::new(2);
 pub const MEM_CURSOR_3POOL_LIQUIDITY: MemoryId = MemoryId::new(3);
 pub const MEM_CURSOR_3POOL_BLOCKS: MemoryId = MemoryId::new(4);
 pub const MEM_CURSOR_AMM_SWAPS: MemoryId = MemoryId::new(5);
+#[allow(dead_code)]
 pub const MEM_CURSOR_STABILITY_EVENTS: MemoryId = MemoryId::new(6);
 pub const MEM_CURSOR_ICUSD_BLOCKS: MemoryId = MemoryId::new(7);
 
@@ -173,10 +174,10 @@ impl Default for SlimState {
 }
 
 impl Storable for SlimState {
-    fn to_bytes(&self) -> Cow<[u8]> {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
         Cow::Owned(Encode!(self).expect("SlimState encode"))
     }
-    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         Decode!(bytes.as_ref(), Self).expect("SlimState decode")
     }
     const BOUND: Bound = Bound::Unbounded;
@@ -202,10 +203,10 @@ pub struct DailyTvlRow {
 }
 
 impl Storable for DailyTvlRow {
-    fn to_bytes(&self) -> Cow<[u8]> {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
         Cow::Owned(Encode!(self).expect("DailyTvlRow encode"))
     }
-    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         Decode!(bytes.as_ref(), Self).expect("DailyTvlRow decode")
     }
     const BOUND: Bound = Bound::Unbounded;
@@ -236,10 +237,10 @@ pub struct DailyVaultSnapshotRow {
 }
 
 impl Storable for DailyVaultSnapshotRow {
-    fn to_bytes(&self) -> Cow<[u8]> {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
         Cow::Owned(Encode!(self).expect("DailyVaultSnapshotRow encode"))
     }
-    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         Decode!(bytes.as_ref(), Self).expect("DailyVaultSnapshotRow decode")
     }
     const BOUND: Bound = Bound::Unbounded;
@@ -257,10 +258,10 @@ pub struct DailyStabilityRow {
 }
 
 impl Storable for DailyStabilityRow {
-    fn to_bytes(&self) -> Cow<[u8]> {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
         Cow::Owned(Encode!(self).expect("DailyStabilityRow encode"))
     }
-    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
         Decode!(bytes.as_ref(), Self).expect("DailyStabilityRow decode")
     }
     const BOUND: Bound = Bound::Unbounded;
@@ -315,6 +316,7 @@ pub fn set_slim(s: SlimState) {
     });
 }
 
+#[allow(dead_code)]
 pub fn mutate_slim<F: FnOnce(&mut SlimState)>(f: F) {
     let mut s = get_slim();
     f(&mut s);
@@ -410,6 +412,7 @@ pub mod daily_vaults {
     }
 }
 
+#[allow(dead_code)]
 pub mod daily_stability {
     use super::*;
 
