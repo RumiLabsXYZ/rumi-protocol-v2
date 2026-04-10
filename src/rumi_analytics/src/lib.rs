@@ -90,6 +90,41 @@ fn get_holder_series(query: types::RangeQuery, token: Principal) -> types::Holde
 }
 
 #[ic_cdk_macros::query]
+fn get_liquidation_series(query: types::RangeQuery) -> types::LiquidationSeriesResponse {
+    queries::historical::get_liquidation_series(query)
+}
+
+#[ic_cdk_macros::query]
+fn get_swap_series(query: types::RangeQuery) -> types::SwapSeriesResponse {
+    queries::historical::get_swap_series(query)
+}
+
+#[ic_cdk_macros::query]
+fn get_fee_series(query: types::RangeQuery) -> types::FeeSeriesResponse {
+    queries::historical::get_fee_series(query)
+}
+
+#[ic_cdk_macros::query]
+fn get_price_series(query: types::RangeQuery) -> types::PriceSeriesResponse {
+    queries::historical::get_price_series(query)
+}
+
+#[ic_cdk_macros::query]
+fn get_three_pool_series(query: types::RangeQuery) -> types::ThreePoolSeriesResponse {
+    queries::historical::get_three_pool_series(query)
+}
+
+#[ic_cdk_macros::query]
+fn get_cycle_series(query: types::RangeQuery) -> types::CycleSeriesResponse {
+    queries::historical::get_cycle_series(query)
+}
+
+#[ic_cdk_macros::query]
+fn get_fee_curve_series(query: types::RangeQuery) -> types::FeeCurveSeriesResponse {
+    queries::historical::get_fee_curve_series(query)
+}
+
+#[ic_cdk_macros::query]
 fn get_collector_health() -> types::CollectorHealth {
     use storage::cursors;
 

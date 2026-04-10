@@ -454,6 +454,9 @@ pub mod cursors;
 pub mod events;
 pub mod balance_tracker;
 pub mod holders;
+pub mod rollups;
+pub mod fast;
+pub mod hourly;
 
 /// Get a virtual memory from the shared MemoryManager. Used by submodules.
 pub(crate) fn get_memory(id: MemoryId) -> Memory {

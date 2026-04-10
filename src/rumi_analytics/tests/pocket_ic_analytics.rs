@@ -453,6 +453,48 @@ fn get_stability_series(env: &Env, q: RangeQueryArg) -> StabilitySeriesResponse 
     }
 }
 
+// ─── Phase 5 test-side types ───
+
+#[derive(CandidType, Deserialize, Debug)]
+struct TestDailyLiquidationRollup {
+    timestamp_ns: u64,
+    full_count: u32,
+    partial_count: u32,
+    redistribution_count: u32,
+    total_collateral_seized_e8s: u64,
+    total_debt_covered_e8s: u64,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct TestLiquidationSeriesResponse {
+    rows: Vec<TestDailyLiquidationRollup>,
+    next_from_ts: Option<u64>,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct TestFastPriceSnapshot {
+    timestamp_ns: u64,
+    prices: Vec<(Principal, f64, String)>,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct TestPriceSeriesResponse {
+    rows: Vec<TestFastPriceSnapshot>,
+    next_from_ts: Option<u64>,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct TestHourlyCycleSnapshot {
+    timestamp_ns: u64,
+    cycle_balance: candid::Nat,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct TestCycleSeriesResponse {
+    rows: Vec<TestHourlyCycleSnapshot>,
+    next_from_ts: Option<u64>,
+}
+
 // ─── Phase 4 helpers ───
 
 fn get_collector_health(env: &Env) -> CollectorHealth {
@@ -841,4 +883,125 @@ fn upgrade_preserves_phase4_state() {
         assert_eq!(before.total_tracked_e8s, after.total_tracked_e8s,
             "tracked supply changed on upgrade for token {:?}", before.token);
     }
+}
+
+// ─── Phase 5 helpers ───
+
+fn get_liquidation_series(env: &Env, q: RangeQueryArg) -> TestLiquidationSeriesResponse {
+    let result = env.pic.query_call(
+        env.analytics, env.admin, "get_liquidation_series", encode_one(q).unwrap(),
+    ).expect("get_liquidation_series query");
+    match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).unwrap(),
+        WasmResult::Reject(msg) => panic!("get_liquidation_series rejected: {}", msg),
+    }
+}
+
+fn get_price_series(env: &Env, q: RangeQueryArg) -> TestPriceSeriesResponse {
+    let result = env.pic.query_call(
+        env.analytics, env.admin, "get_price_series", encode_one(q).unwrap(),
+    ).expect("get_price_series query");
+    match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).unwrap(),
+        WasmResult::Reject(msg) => panic!("get_price_series rejected: {}", msg),
+    }
+}
+
+fn get_cycle_series(env: &Env, q: RangeQueryArg) -> TestCycleSeriesResponse {
+    let result = env.pic.query_call(
+        env.analytics, env.admin, "get_cycle_series", encode_one(q).unwrap(),
+    ).expect("get_cycle_series query");
+    match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).unwrap(),
+        WasmResult::Reject(msg) => panic!("get_cycle_series rejected: {}", msg),
+    }
+}
+
+// ─── Phase 5 Tests ───
+
+#[test]
+fn fast_snapshot_captures_prices() {
+    let env = setup();
+    // Advance past the 300s fast timer
+    env.pic.advance_time(std::time::Duration::from_secs(305));
+    for _ in 0..10 {
+        env.pic.tick();
+    }
+    let q = RangeQueryArg { from_ts: None, to_ts: None, limit: Some(10), offset: None };
+    let res = get_price_series(&env, q);
+    // Fast snapshot should have captured collateral prices from the backend
+    assert!(!res.rows.is_empty(), "expected at least one fast price snapshot");
+    assert!(res.rows[0].timestamp_ns > 0);
+}
+
+#[test]
+fn hourly_snapshot_captures_cycles() {
+    let env = setup();
+    // Advance past the 3600s hourly timer
+    env.pic.advance_time(std::time::Duration::from_secs(3605));
+    for _ in 0..10 {
+        env.pic.tick();
+    }
+    let q = RangeQueryArg { from_ts: None, to_ts: None, limit: Some(10), offset: None };
+    let res = get_cycle_series(&env, q);
+    assert!(!res.rows.is_empty(), "expected at least one hourly cycle snapshot");
+}
+
+#[test]
+fn daily_rollup_aggregates_events() {
+    let env = setup();
+    // First trigger a pull cycle to tail events
+    advance_pull_cycle(&env);
+    // Then trigger the daily snapshot (which includes rollups)
+    env.pic.advance_time(std::time::Duration::from_secs(86_400));
+    for _ in 0..10 {
+        env.pic.tick();
+    }
+    let q = RangeQueryArg { from_ts: None, to_ts: None, limit: Some(10), offset: None };
+    let res = get_liquidation_series(&env, q);
+    // Even with zero liquidation events, the rollup should produce a row
+    assert!(!res.rows.is_empty(), "expected daily liquidation rollup row");
+    assert_eq!(res.rows[0].full_count, 0);
+}
+
+#[test]
+fn upgrade_preserves_phase5_state() {
+    let env = setup();
+    // Trigger fast snapshot
+    env.pic.advance_time(std::time::Duration::from_secs(305));
+    for _ in 0..10 {
+        env.pic.tick();
+    }
+    // Trigger hourly snapshot
+    env.pic.advance_time(std::time::Duration::from_secs(3600));
+    for _ in 0..10 {
+        env.pic.tick();
+    }
+
+    let prices_before = get_price_series(&env,
+        RangeQueryArg { from_ts: None, to_ts: None, limit: Some(10), offset: None });
+    let cycles_before = get_cycle_series(&env,
+        RangeQueryArg { from_ts: None, to_ts: None, limit: Some(10), offset: None });
+
+    // Upgrade the canister
+    env.pic.upgrade_canister(
+        env.analytics,
+        analytics_wasm(),
+        encode_one(AnalyticsInitArgs {
+            admin: env.admin,
+            backend: env.backend,
+            icusd_ledger: env.icusd_ledger,
+            three_pool: Principal::anonymous(),
+            stability_pool: Principal::anonymous(),
+            amm: Principal::anonymous(),
+        }).unwrap(),
+        Some(env.admin),
+    ).expect("upgrade analytics");
+
+    let prices_after = get_price_series(&env,
+        RangeQueryArg { from_ts: None, to_ts: None, limit: Some(10), offset: None });
+    let cycles_after = get_cycle_series(&env,
+        RangeQueryArg { from_ts: None, to_ts: None, limit: Some(10), offset: None });
+    assert_eq!(prices_before.rows.len(), prices_after.rows.len(), "price snapshots lost on upgrade");
+    assert_eq!(cycles_before.rows.len(), cycles_after.rows.len(), "cycle snapshots lost on upgrade");
 }

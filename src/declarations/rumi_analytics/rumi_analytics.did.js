@@ -39,6 +39,37 @@ export const idlFactory = ({ IDL }) => {
     'offset' : IDL.Opt(IDL.Nat64),
     'limit' : IDL.Opt(IDL.Nat32),
   });
+  const HourlyCycleSnapshot = IDL.Record({
+    'timestamp_ns' : IDL.Nat64,
+    'cycle_balance' : IDL.Nat,
+  });
+  const CycleSeriesResponse = IDL.Record({
+    'rows' : IDL.Vec(HourlyCycleSnapshot),
+    'next_from_ts' : IDL.Opt(IDL.Nat64),
+  });
+  const HourlyFeeCurveSnapshot = IDL.Record({
+    'collateral_stats' : IDL.Vec(
+      IDL.Tuple(IDL.Principal, IDL.Nat64, IDL.Nat64, IDL.Float64)
+    ),
+    'timestamp_ns' : IDL.Nat64,
+    'system_cr_bps' : IDL.Nat32,
+  });
+  const FeeCurveSeriesResponse = IDL.Record({
+    'rows' : IDL.Vec(HourlyFeeCurveSnapshot),
+    'next_from_ts' : IDL.Opt(IDL.Nat64),
+  });
+  const DailyFeeRollup = IDL.Record({
+    'redemption_count' : IDL.Nat32,
+    'borrow_count' : IDL.Nat32,
+    'timestamp_ns' : IDL.Nat64,
+    'swap_fees_e8s' : IDL.Nat64,
+    'redemption_fees_e8s' : IDL.Opt(IDL.Nat64),
+    'borrowing_fees_e8s' : IDL.Opt(IDL.Nat64),
+  });
+  const FeeSeriesResponse = IDL.Record({
+    'rows' : IDL.Vec(DailyFeeRollup),
+    'next_from_ts' : IDL.Opt(IDL.Nat64),
+  });
   const DailyHolderRow = IDL.Record({
     'total_supply_tracked_e8s' : IDL.Nat64,
     'token' : IDL.Principal,
@@ -55,6 +86,27 @@ export const idlFactory = ({ IDL }) => {
     'rows' : IDL.Vec(DailyHolderRow),
     'next_from_ts' : IDL.Opt(IDL.Nat64),
   });
+  const DailyLiquidationRollup = IDL.Record({
+    'total_debt_covered_e8s' : IDL.Nat64,
+    'timestamp_ns' : IDL.Nat64,
+    'total_collateral_seized_e8s' : IDL.Nat64,
+    'redistribution_count' : IDL.Nat32,
+    'by_collateral' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
+    'partial_count' : IDL.Nat32,
+    'full_count' : IDL.Nat32,
+  });
+  const LiquidationSeriesResponse = IDL.Record({
+    'rows' : IDL.Vec(DailyLiquidationRollup),
+    'next_from_ts' : IDL.Opt(IDL.Nat64),
+  });
+  const FastPriceSnapshot = IDL.Record({
+    'timestamp_ns' : IDL.Nat64,
+    'prices' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Float64, IDL.Text)),
+  });
+  const PriceSeriesResponse = IDL.Record({
+    'rows' : IDL.Vec(FastPriceSnapshot),
+    'next_from_ts' : IDL.Opt(IDL.Nat64),
+  });
   const DailyStabilityRow = IDL.Record({
     'collateral_gains' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
     'timestamp_ns' : IDL.Nat64,
@@ -66,6 +118,30 @@ export const idlFactory = ({ IDL }) => {
   });
   const StabilitySeriesResponse = IDL.Record({
     'rows' : IDL.Vec(DailyStabilityRow),
+    'next_from_ts' : IDL.Opt(IDL.Nat64),
+  });
+  const DailySwapRollup = IDL.Record({
+    'three_pool_fees_e8s' : IDL.Nat64,
+    'timestamp_ns' : IDL.Nat64,
+    'three_pool_swap_count' : IDL.Nat32,
+    'amm_volume_e8s' : IDL.Nat64,
+    'three_pool_volume_e8s' : IDL.Nat64,
+    'amm_swap_count' : IDL.Nat32,
+    'amm_fees_e8s' : IDL.Nat64,
+    'unique_swappers' : IDL.Nat32,
+  });
+  const SwapSeriesResponse = IDL.Record({
+    'rows' : IDL.Vec(DailySwapRollup),
+    'next_from_ts' : IDL.Opt(IDL.Nat64),
+  });
+  const Fast3PoolSnapshot = IDL.Record({
+    'virtual_price' : IDL.Nat,
+    'timestamp_ns' : IDL.Nat64,
+    'lp_total_supply' : IDL.Nat,
+    'balances' : IDL.Vec(IDL.Nat),
+  });
+  const ThreePoolSeriesResponse = IDL.Record({
+    'rows' : IDL.Vec(Fast3PoolSnapshot),
     'next_from_ts' : IDL.Opt(IDL.Nat64),
   });
   const DailyTvlRow = IDL.Record({
@@ -120,14 +196,41 @@ export const idlFactory = ({ IDL }) => {
   return IDL.Service({
     'get_admin' : IDL.Func([], [IDL.Principal], ['query']),
     'get_collector_health' : IDL.Func([], [CollectorHealth], ['query']),
+    'get_cycle_series' : IDL.Func(
+        [RangeQuery],
+        [CycleSeriesResponse],
+        ['query'],
+      ),
+    'get_fee_curve_series' : IDL.Func(
+        [RangeQuery],
+        [FeeCurveSeriesResponse],
+        ['query'],
+      ),
+    'get_fee_series' : IDL.Func([RangeQuery], [FeeSeriesResponse], ['query']),
     'get_holder_series' : IDL.Func(
         [RangeQuery, IDL.Principal],
         [HolderSeriesResponse],
         ['query'],
       ),
+    'get_liquidation_series' : IDL.Func(
+        [RangeQuery],
+        [LiquidationSeriesResponse],
+        ['query'],
+      ),
+    'get_price_series' : IDL.Func(
+        [RangeQuery],
+        [PriceSeriesResponse],
+        ['query'],
+      ),
     'get_stability_series' : IDL.Func(
         [RangeQuery],
         [StabilitySeriesResponse],
+        ['query'],
+      ),
+    'get_swap_series' : IDL.Func([RangeQuery], [SwapSeriesResponse], ['query']),
+    'get_three_pool_series' : IDL.Func(
+        [RangeQuery],
+        [ThreePoolSeriesResponse],
         ['query'],
       ),
     'get_tvl_series' : IDL.Func([RangeQuery], [TvlSeriesResponse], ['query']),
