@@ -340,6 +340,109 @@ pub fn compute_sp_apy(
     Some(apy)
 }
 
+// ─── Trade Activity ───
+
+pub fn get_trade_activity(query: types::TradeActivityQuery) -> types::TradeActivityResponse {
+    let window_secs = query.window_secs.unwrap_or(DEFAULT_TRADE_WINDOW_SECS);
+    let now = ic_cdk::api::time();
+    let from = now.saturating_sub(window_secs.saturating_mul(NANOS_PER_SEC));
+
+    let events = storage::events::evt_swaps::range(from, now, usize::MAX);
+    compute_trade_activity(&events, window_secs)
+}
+
+pub fn compute_trade_activity(
+    events: &[storage::events::AnalyticsSwapEvent],
+    window_secs: u64,
+) -> types::TradeActivityResponse {
+    let mut tp_count: u32 = 0;
+    let mut amm_count: u32 = 0;
+    let mut total_volume: u64 = 0;
+    let mut total_fees: u64 = 0;
+    let mut traders: HashSet<Principal> = HashSet::new();
+
+    for e in events {
+        traders.insert(e.caller);
+        total_volume = total_volume.saturating_add(e.amount_in);
+        total_fees = total_fees.saturating_add(e.fee);
+        match e.source {
+            storage::events::SwapSource::ThreePool => tp_count += 1,
+            storage::events::SwapSource::Amm => amm_count += 1,
+        }
+    }
+
+    let total = tp_count + amm_count;
+    let avg_size = if total > 0 { total_volume / total as u64 } else { 0 };
+
+    types::TradeActivityResponse {
+        window_secs,
+        total_swaps: total,
+        three_pool_swaps: tp_count,
+        amm_swaps: amm_count,
+        total_volume_e8s: total_volume,
+        total_fees_e8s: total_fees,
+        unique_traders: traders.len() as u32,
+        avg_trade_size_e8s: avg_size,
+    }
+}
+
+// ─── Protocol Summary ───
+
+pub fn get_protocol_summary() -> types::ProtocolSummary {
+    let now = ic_cdk::api::time();
+    let day_ns = 86_400u64.saturating_mul(NANOS_PER_SEC);
+    let day_ago = now.saturating_sub(day_ns);
+    let week_ns = 7u64.saturating_mul(day_ns);
+    let week_ago = now.saturating_sub(week_ns);
+
+    // Latest vault snapshot for TVL/CR/vault count.
+    let vault_n = storage::daily_vaults::len();
+    let (tvl, debt, cr, vaults) = if vault_n > 0 {
+        storage::daily_vaults::get(vault_n - 1)
+            .map(|v| (v.total_collateral_usd_e8s, v.total_debt_e8s, v.median_cr_bps, v.total_vault_count))
+            .unwrap_or((0, 0, 0, 0))
+    } else {
+        (0, 0, 0, 0)
+    };
+
+    // Circulating supply from cache.
+    let supply = state::read_state(|s| s.circulating_supply_icusd_e8s);
+
+    // 24h trade activity from EVT_SWAPS.
+    let swap_events = storage::events::evt_swaps::range(day_ago, now, usize::MAX);
+    let activity = compute_trade_activity(&swap_events, 86_400);
+
+    // Peg status from latest 3pool snapshot.
+    let peg = get_peg_status();
+
+    // APYs over 7 days.
+    let swap_rollups = storage::rollups::daily_swaps::range(week_ago, now, usize::MAX);
+    let tvl_rows = storage::daily_tvl::range(week_ago, now, usize::MAX);
+    let stability_rows = storage::daily_stability::range(week_ago, now, usize::MAX);
+    let lp_apy = compute_lp_apy(&swap_rollups, &tvl_rows, 7);
+    let sp_apy = compute_sp_apy(&stability_rows, 7);
+
+    // Price TWAPs over 1 hour.
+    let hour_ago = now.saturating_sub(3_600u64.saturating_mul(NANOS_PER_SEC));
+    let price_snaps = storage::fast::fast_prices::range(hour_ago, now, usize::MAX);
+    let prices = compute_twap(&price_snaps);
+
+    types::ProtocolSummary {
+        timestamp_ns: now,
+        total_collateral_usd_e8s: tvl,
+        total_debt_e8s: debt,
+        system_cr_bps: cr,
+        total_vault_count: vaults,
+        circulating_supply_icusd_e8s: supply,
+        volume_24h_e8s: activity.total_volume_e8s,
+        swap_count_24h: activity.total_swaps,
+        peg,
+        lp_apy_pct: lp_apy,
+        sp_apy_pct: sp_apy,
+        prices,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -598,5 +701,47 @@ mod tests {
     fn sp_apy_zero_deposits() {
         let rows = vec![make_stability_row(0, 50)];
         assert!(compute_sp_apy(&rows, 1).is_none());
+    }
+
+    use crate::storage::events::{AnalyticsSwapEvent, SwapSource};
+
+    fn make_swap_event(caller: Principal, source: SwapSource, amount: u64, fee: u64) -> AnalyticsSwapEvent {
+        AnalyticsSwapEvent {
+            timestamp_ns: 1_000_000_000,
+            source,
+            source_event_id: 0,
+            caller,
+            token_in: Principal::anonymous(),
+            token_out: Principal::anonymous(),
+            amount_in: amount,
+            amount_out: amount.saturating_sub(fee),
+            fee,
+        }
+    }
+
+    #[test]
+    fn trade_activity_basic() {
+        let user_a = Principal::anonymous();
+        let user_b = Principal::management_canister();
+        let events = vec![
+            make_swap_event(user_a, SwapSource::ThreePool, 1_000, 10),
+            make_swap_event(user_a, SwapSource::ThreePool, 2_000, 20),
+            make_swap_event(user_b, SwapSource::Amm, 3_000, 30),
+        ];
+        let res = compute_trade_activity(&events, 86_400);
+        assert_eq!(res.total_swaps, 3);
+        assert_eq!(res.three_pool_swaps, 2);
+        assert_eq!(res.amm_swaps, 1);
+        assert_eq!(res.total_volume_e8s, 6_000);
+        assert_eq!(res.total_fees_e8s, 60);
+        assert_eq!(res.unique_traders, 2);
+        assert_eq!(res.avg_trade_size_e8s, 2_000);
+    }
+
+    #[test]
+    fn trade_activity_empty() {
+        let res = compute_trade_activity(&[], 86_400);
+        assert_eq!(res.total_swaps, 0);
+        assert_eq!(res.avg_trade_size_e8s, 0);
     }
 }
