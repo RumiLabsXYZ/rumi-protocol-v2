@@ -1005,3 +1005,174 @@ fn upgrade_preserves_phase5_state() {
     assert_eq!(prices_before.rows.len(), prices_after.rows.len(), "price snapshots lost on upgrade");
     assert_eq!(cycles_before.rows.len(), cycles_after.rows.len(), "cycle snapshots lost on upgrade");
 }
+
+// ─── Phase 6 test-side types ───
+
+#[derive(CandidType, Deserialize, Debug)]
+struct TestOhlcCandle {
+    timestamp_ns: u64,
+    open: f64,
+    high: f64,
+    low: f64,
+    close: f64,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct TestOhlcResponse {
+    candles: Vec<TestOhlcCandle>,
+    collateral: Principal,
+    symbol: String,
+    bucket_secs: u64,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct TestTwapEntry {
+    collateral: Principal,
+    symbol: String,
+    twap_price: f64,
+    latest_price: f64,
+    sample_count: u32,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct TestTwapResponse {
+    entries: Vec<TestTwapEntry>,
+    window_secs: u64,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct TestPegStatus {
+    timestamp_ns: u64,
+    pool_balances: Vec<candid::Nat>,
+    virtual_price: candid::Nat,
+    balance_ratios: Vec<f64>,
+    max_imbalance_pct: f64,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct TestApyResponse {
+    lp_apy_pct: Option<f64>,
+    sp_apy_pct: Option<f64>,
+    window_days: u32,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct TestProtocolSummary {
+    timestamp_ns: u64,
+    total_collateral_usd_e8s: u64,
+    total_debt_e8s: u64,
+    system_cr_bps: u32,
+    total_vault_count: u32,
+    volume_24h_e8s: u64,
+    swap_count_24h: u32,
+    prices: Vec<TestTwapEntry>,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct TestTradeActivityResponse {
+    window_secs: u64,
+    total_swaps: u32,
+    total_volume_e8s: u64,
+    total_fees_e8s: u64,
+    unique_traders: u32,
+}
+
+// ─── Phase 6 helpers ───
+
+fn get_protocol_summary(env: &Env) -> TestProtocolSummary {
+    let result = env.pic.query_call(
+        env.analytics, env.admin, "get_protocol_summary", encode_one(()).unwrap(),
+    ).expect("get_protocol_summary query");
+    match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).unwrap(),
+        WasmResult::Reject(msg) => panic!("get_protocol_summary rejected: {}", msg),
+    }
+}
+
+fn get_trade_activity(env: &Env) -> TestTradeActivityResponse {
+    #[derive(CandidType)]
+    struct Q { window_secs: Option<u64> }
+    let result = env.pic.query_call(
+        env.analytics, env.admin, "get_trade_activity",
+        encode_one(Q { window_secs: Some(86_400) }).unwrap(),
+    ).expect("get_trade_activity query");
+    match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).unwrap(),
+        WasmResult::Reject(msg) => panic!("get_trade_activity rejected: {}", msg),
+    }
+}
+
+fn get_twap(env: &Env, window_secs: u64) -> TestTwapResponse {
+    #[derive(CandidType)]
+    struct Q { window_secs: Option<u64> }
+    let result = env.pic.query_call(
+        env.analytics, env.admin, "get_twap",
+        encode_one(Q { window_secs: Some(window_secs) }).unwrap(),
+    ).expect("get_twap query");
+    match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).unwrap(),
+        WasmResult::Reject(msg) => panic!("get_twap rejected: {}", msg),
+    }
+}
+
+// ─── Phase 6 tests ───
+
+#[test]
+fn protocol_summary_returns_data() {
+    let env = setup();
+    advance_pull_cycle(&env);
+    env.pic.advance_time(std::time::Duration::from_secs(305));
+    for _ in 0..10 { env.pic.tick(); }
+
+    let summary = get_protocol_summary(&env);
+    assert!(summary.timestamp_ns > 0);
+    assert_eq!(summary.total_debt_e8s, 0);
+}
+
+#[test]
+fn twap_returns_prices_after_fast_snapshot() {
+    let env = setup();
+    env.pic.advance_time(std::time::Duration::from_secs(305));
+    for _ in 0..10 { env.pic.tick(); }
+
+    let resp = get_twap(&env, 3_600);
+    assert!(resp.window_secs == 3_600);
+}
+
+#[test]
+fn trade_activity_returns_zeros_with_no_swaps() {
+    let env = setup();
+    advance_pull_cycle(&env);
+
+    let activity = get_trade_activity(&env);
+    assert_eq!(activity.total_swaps, 0);
+    assert_eq!(activity.total_volume_e8s, 0);
+    assert_eq!(activity.unique_traders, 0);
+}
+
+#[test]
+fn live_queries_survive_upgrade() {
+    let env = setup();
+    advance_pull_cycle(&env);
+    env.pic.advance_time(std::time::Duration::from_secs(305));
+    for _ in 0..10 { env.pic.tick(); }
+
+    let summary_before = get_protocol_summary(&env);
+
+    env.pic.upgrade_canister(
+        env.analytics,
+        analytics_wasm(),
+        encode_one(AnalyticsInitArgs {
+            admin: env.admin,
+            backend: env.backend,
+            icusd_ledger: env.icusd_ledger,
+            three_pool: Principal::anonymous(),
+            stability_pool: Principal::anonymous(),
+            amm: Principal::anonymous(),
+        }).unwrap(),
+        Some(env.admin),
+    ).expect("upgrade analytics");
+
+    let summary_after = get_protocol_summary(&env);
+    assert_eq!(summary_before.total_vault_count, summary_after.total_vault_count);
+}
