@@ -27,6 +27,18 @@ type CursorStatus = record {
   last_success_ns : nat64;
   cursor_position : nat64;
 };
+type CycleSeriesResponse = record {
+  rows : vec HourlyCycleSnapshot;
+  next_from_ts : opt nat64;
+};
+type DailyFeeRollup = record {
+  redemption_count : nat32;
+  borrow_count : nat32;
+  timestamp_ns : nat64;
+  swap_fees_e8s : nat64;
+  redemption_fees_e8s : opt nat64;
+  borrowing_fees_e8s : opt nat64;
+};
 type DailyHolderRow = record {
   total_supply_tracked_e8s : nat64;
   token : principal;
@@ -39,6 +51,15 @@ type DailyHolderRow = record {
   distribution_buckets : vec nat32;
   gini_bps : nat32;
 };
+type DailyLiquidationRollup = record {
+  total_debt_covered_e8s : nat64;
+  timestamp_ns : nat64;
+  total_collateral_seized_e8s : nat64;
+  redistribution_count : nat32;
+  by_collateral : vec record { principal; nat64 };
+  partial_count : nat32;
+  full_count : nat32;
+};
 type DailyStabilityRow = record {
   collateral_gains : vec record { principal; nat64 };
   timestamp_ns : nat64;
@@ -47,6 +68,16 @@ type DailyStabilityRow = record {
   total_deposits_e8s : nat64;
   total_interest_received_e8s : nat64;
   total_liquidations_executed : nat64;
+};
+type DailySwapRollup = record {
+  three_pool_fees_e8s : nat64;
+  timestamp_ns : nat64;
+  three_pool_swap_count : nat32;
+  amm_volume_e8s : nat64;
+  three_pool_volume_e8s : nat64;
+  amm_swap_count : nat32;
+  amm_fees_e8s : nat64;
+  unique_swappers : nat32;
 };
 type DailyTvlRow = record {
   three_pool_reserve_0_e8s : opt nat;
@@ -75,9 +106,33 @@ type ErrorCounters = record {
   stability_pool : nat64;
   backend : nat64;
 };
+type Fast3PoolSnapshot = record {
+  virtual_price : nat;
+  timestamp_ns : nat64;
+  lp_total_supply : nat;
+  balances : vec nat;
+};
+type FastPriceSnapshot = record {
+  timestamp_ns : nat64;
+  prices : vec record { principal; float64; text };
+};
+type FeeCurveSeriesResponse = record {
+  rows : vec HourlyFeeCurveSnapshot;
+  next_from_ts : opt nat64;
+};
+type FeeSeriesResponse = record {
+  rows : vec DailyFeeRollup;
+  next_from_ts : opt nat64;
+};
 type HolderSeriesResponse = record {
   rows : vec DailyHolderRow;
   next_from_ts : opt nat64;
+};
+type HourlyCycleSnapshot = record { timestamp_ns : nat64; cycle_balance : nat };
+type HourlyFeeCurveSnapshot = record {
+  collateral_stats : vec record { principal; nat64; nat64; float64 };
+  timestamp_ns : nat64;
+  system_cr_bps : nat32;
 };
 type HttpRequest = record {
   url : text;
@@ -98,6 +153,14 @@ type InitArgs = record {
   stability_pool : principal;
   backend : principal;
 };
+type LiquidationSeriesResponse = record {
+  rows : vec DailyLiquidationRollup;
+  next_from_ts : opt nat64;
+};
+type PriceSeriesResponse = record {
+  rows : vec FastPriceSnapshot;
+  next_from_ts : opt nat64;
+};
 type RangeQuery = record {
   to_ts : opt nat64;
   from_ts : opt nat64;
@@ -106,6 +169,14 @@ type RangeQuery = record {
 };
 type StabilitySeriesResponse = record {
   rows : vec DailyStabilityRow;
+  next_from_ts : opt nat64;
+};
+type SwapSeriesResponse = record {
+  rows : vec DailySwapRollup;
+  next_from_ts : opt nat64;
+};
+type ThreePoolSeriesResponse = record {
+  rows : vec Fast3PoolSnapshot;
   next_from_ts : opt nat64;
 };
 type TvlSeriesResponse = record {
@@ -119,8 +190,15 @@ type VaultSeriesResponse = record {
 service : (InitArgs) -> {
   get_admin : () -> (principal) query;
   get_collector_health : () -> (CollectorHealth) query;
+  get_cycle_series : (RangeQuery) -> (CycleSeriesResponse) query;
+  get_fee_curve_series : (RangeQuery) -> (FeeCurveSeriesResponse) query;
+  get_fee_series : (RangeQuery) -> (FeeSeriesResponse) query;
   get_holder_series : (RangeQuery, principal) -> (HolderSeriesResponse) query;
+  get_liquidation_series : (RangeQuery) -> (LiquidationSeriesResponse) query;
+  get_price_series : (RangeQuery) -> (PriceSeriesResponse) query;
   get_stability_series : (RangeQuery) -> (StabilitySeriesResponse) query;
+  get_swap_series : (RangeQuery) -> (SwapSeriesResponse) query;
+  get_three_pool_series : (RangeQuery) -> (ThreePoolSeriesResponse) query;
   get_tvl_series : (RangeQuery) -> (TvlSeriesResponse) query;
   get_vault_series : (RangeQuery) -> (VaultSeriesResponse) query;
   http_request : (HttpRequest) -> (HttpResponse) query;

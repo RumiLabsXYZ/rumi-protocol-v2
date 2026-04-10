@@ -31,6 +31,18 @@ export interface CursorStatus {
   'last_success_ns' : bigint,
   'cursor_position' : bigint,
 }
+export interface CycleSeriesResponse {
+  'rows' : Array<HourlyCycleSnapshot>,
+  'next_from_ts' : [] | [bigint],
+}
+export interface DailyFeeRollup {
+  'redemption_count' : number,
+  'borrow_count' : number,
+  'timestamp_ns' : bigint,
+  'swap_fees_e8s' : bigint,
+  'redemption_fees_e8s' : [] | [bigint],
+  'borrowing_fees_e8s' : [] | [bigint],
+}
 export interface DailyHolderRow {
   'total_supply_tracked_e8s' : bigint,
   'token' : Principal,
@@ -43,6 +55,15 @@ export interface DailyHolderRow {
   'distribution_buckets' : Uint32Array | number[],
   'gini_bps' : number,
 }
+export interface DailyLiquidationRollup {
+  'total_debt_covered_e8s' : bigint,
+  'timestamp_ns' : bigint,
+  'total_collateral_seized_e8s' : bigint,
+  'redistribution_count' : number,
+  'by_collateral' : Array<[Principal, bigint]>,
+  'partial_count' : number,
+  'full_count' : number,
+}
 export interface DailyStabilityRow {
   'collateral_gains' : Array<[Principal, bigint]>,
   'timestamp_ns' : bigint,
@@ -51,6 +72,16 @@ export interface DailyStabilityRow {
   'total_deposits_e8s' : bigint,
   'total_interest_received_e8s' : bigint,
   'total_liquidations_executed' : bigint,
+}
+export interface DailySwapRollup {
+  'three_pool_fees_e8s' : bigint,
+  'timestamp_ns' : bigint,
+  'three_pool_swap_count' : number,
+  'amm_volume_e8s' : bigint,
+  'three_pool_volume_e8s' : bigint,
+  'amm_swap_count' : number,
+  'amm_fees_e8s' : bigint,
+  'unique_swappers' : number,
 }
 export interface DailyTvlRow {
   'three_pool_reserve_0_e8s' : [] | [bigint],
@@ -79,9 +110,36 @@ export interface ErrorCounters {
   'stability_pool' : bigint,
   'backend' : bigint,
 }
+export interface Fast3PoolSnapshot {
+  'virtual_price' : bigint,
+  'timestamp_ns' : bigint,
+  'lp_total_supply' : bigint,
+  'balances' : Array<bigint>,
+}
+export interface FastPriceSnapshot {
+  'timestamp_ns' : bigint,
+  'prices' : Array<[Principal, number, string]>,
+}
+export interface FeeCurveSeriesResponse {
+  'rows' : Array<HourlyFeeCurveSnapshot>,
+  'next_from_ts' : [] | [bigint],
+}
+export interface FeeSeriesResponse {
+  'rows' : Array<DailyFeeRollup>,
+  'next_from_ts' : [] | [bigint],
+}
 export interface HolderSeriesResponse {
   'rows' : Array<DailyHolderRow>,
   'next_from_ts' : [] | [bigint],
+}
+export interface HourlyCycleSnapshot {
+  'timestamp_ns' : bigint,
+  'cycle_balance' : bigint,
+}
+export interface HourlyFeeCurveSnapshot {
+  'collateral_stats' : Array<[Principal, bigint, bigint, number]>,
+  'timestamp_ns' : bigint,
+  'system_cr_bps' : number,
 }
 export interface HttpRequest {
   'url' : string,
@@ -102,6 +160,14 @@ export interface InitArgs {
   'stability_pool' : Principal,
   'backend' : Principal,
 }
+export interface LiquidationSeriesResponse {
+  'rows' : Array<DailyLiquidationRollup>,
+  'next_from_ts' : [] | [bigint],
+}
+export interface PriceSeriesResponse {
+  'rows' : Array<FastPriceSnapshot>,
+  'next_from_ts' : [] | [bigint],
+}
 export interface RangeQuery {
   'to_ts' : [] | [bigint],
   'from_ts' : [] | [bigint],
@@ -110,6 +176,14 @@ export interface RangeQuery {
 }
 export interface StabilitySeriesResponse {
   'rows' : Array<DailyStabilityRow>,
+  'next_from_ts' : [] | [bigint],
+}
+export interface SwapSeriesResponse {
+  'rows' : Array<DailySwapRollup>,
+  'next_from_ts' : [] | [bigint],
+}
+export interface ThreePoolSeriesResponse {
+  'rows' : Array<Fast3PoolSnapshot>,
   'next_from_ts' : [] | [bigint],
 }
 export interface TvlSeriesResponse {
@@ -123,11 +197,21 @@ export interface VaultSeriesResponse {
 export interface _SERVICE {
   'get_admin' : ActorMethod<[], Principal>,
   'get_collector_health' : ActorMethod<[], CollectorHealth>,
+  'get_cycle_series' : ActorMethod<[RangeQuery], CycleSeriesResponse>,
+  'get_fee_curve_series' : ActorMethod<[RangeQuery], FeeCurveSeriesResponse>,
+  'get_fee_series' : ActorMethod<[RangeQuery], FeeSeriesResponse>,
   'get_holder_series' : ActorMethod<
     [RangeQuery, Principal],
     HolderSeriesResponse
   >,
+  'get_liquidation_series' : ActorMethod<
+    [RangeQuery],
+    LiquidationSeriesResponse
+  >,
+  'get_price_series' : ActorMethod<[RangeQuery], PriceSeriesResponse>,
   'get_stability_series' : ActorMethod<[RangeQuery], StabilitySeriesResponse>,
+  'get_swap_series' : ActorMethod<[RangeQuery], SwapSeriesResponse>,
+  'get_three_pool_series' : ActorMethod<[RangeQuery], ThreePoolSeriesResponse>,
   'get_tvl_series' : ActorMethod<[RangeQuery], TvlSeriesResponse>,
   'get_vault_series' : ActorMethod<[RangeQuery], VaultSeriesResponse>,
   'http_request' : ActorMethod<[HttpRequest], HttpResponse>,
