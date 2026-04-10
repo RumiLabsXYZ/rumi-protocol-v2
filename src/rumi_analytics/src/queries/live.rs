@@ -314,18 +314,21 @@ pub fn compute_lp_apy(
 }
 
 /// Stability pool APY: annualized interest yield.
-/// APY = (total_interest / days) / avg_deposits * 365 * 100
+/// `total_interest_received_e8s` is cumulative, so we take the delta between
+/// the last and first snapshots in the window.
+/// APY = (interest_delta / days) / avg_deposits * 365 * 100
 pub fn compute_sp_apy(
     stability_rows: &[storage::DailyStabilityRow],
     window_days: u32,
 ) -> Option<f64> {
-    if stability_rows.is_empty() {
+    if stability_rows.len() < 2 {
         return None;
     }
 
-    let total_interest: u64 = stability_rows.iter()
-        .map(|r| r.total_interest_received_e8s)
-        .sum();
+    let first = stability_rows.first().unwrap();
+    let last = stability_rows.last().unwrap();
+    let interest_delta = last.total_interest_received_e8s
+        .saturating_sub(first.total_interest_received_e8s);
 
     let avg_deposits: f64 = stability_rows.iter()
         .map(|r| r.total_deposits_e8s as f64)
@@ -335,7 +338,7 @@ pub fn compute_sp_apy(
         return None;
     }
 
-    let daily_interest = total_interest as f64 / window_days as f64;
+    let daily_interest = interest_delta as f64 / window_days as f64;
     let apy = (daily_interest / avg_deposits) * 365.0 * 100.0;
     Some(apy)
 }
@@ -689,17 +692,26 @@ mod tests {
 
     #[test]
     fn sp_apy_basic() {
-        let rows = vec![make_stability_row(100_000, 50)];
+        // total_interest_received_e8s is cumulative: 100 on day 1, 150 on day 2 = 50 delta
+        let rows = vec![make_stability_row(100_000, 100), make_stability_row(100_000, 150)];
         let apy = compute_sp_apy(&rows, 1);
         assert!(apy.is_some());
+        // delta = 150 - 100 = 50, daily_interest = 50, avg_deposits = 100_000
         // APY = (50/100000) * 365 * 100 = 18.25%
         let v = apy.unwrap();
         assert!((v - 18.25).abs() < 0.1, "expected ~18.25%, got {}", v);
     }
 
     #[test]
+    fn sp_apy_single_row() {
+        // Need at least 2 rows to compute a delta
+        let rows = vec![make_stability_row(100_000, 50)];
+        assert!(compute_sp_apy(&rows, 1).is_none());
+    }
+
+    #[test]
     fn sp_apy_zero_deposits() {
-        let rows = vec![make_stability_row(0, 50)];
+        let rows = vec![make_stability_row(0, 50), make_stability_row(0, 100)];
         assert!(compute_sp_apy(&rows, 1).is_none());
     }
 
