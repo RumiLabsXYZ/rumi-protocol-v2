@@ -5,6 +5,17 @@ use serde::{Serialize, Deserialize};
 
 use crate::types::*;
 
+// ─── Event log caps ───
+// Prevents unbounded heap growth that could brick the canister by causing
+// pre_upgrade to trap when serializing too much data. Oldest events are
+// dropped when the cap is reached (ring buffer behavior).
+
+pub const MAX_SWAP_EVENTS: usize = 50_000;
+pub const MAX_LIQUIDITY_EVENTS: usize = 50_000;
+pub const MAX_ADMIN_EVENTS: usize = 10_000;
+pub const MAX_HOLDER_SNAPSHOTS: usize = 1_000; // ~500 days at 2/day
+pub const MAX_PENDING_CLAIMS: usize = 1_000;
+
 // ─── State ───
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
@@ -61,6 +72,9 @@ impl AmmState {
     }
 
     pub fn record_swap_event(&mut self, caller: Principal, pool_id: PoolId, token_in: Principal, amount_in: u128, token_out: Principal, amount_out: u128, fee: u128) {
+        if self.swap_events.len() >= MAX_SWAP_EVENTS {
+            self.swap_events.remove(0);
+        }
         let event = AmmSwapEvent {
             id: self.next_swap_event_id,
             caller,
@@ -87,6 +101,9 @@ impl AmmState {
         amount_b: u128,
         lp_shares: u128,
     ) {
+        if self.liquidity_events.len() >= MAX_LIQUIDITY_EVENTS {
+            self.liquidity_events.remove(0);
+        }
         let event = AmmLiquidityEvent {
             id: self.next_liquidity_event_id,
             caller,
@@ -104,6 +121,9 @@ impl AmmState {
     }
 
     pub fn record_admin_event(&mut self, caller: Principal, action: AmmAdminAction) {
+        if self.admin_events.len() >= MAX_ADMIN_EVENTS {
+            self.admin_events.remove(0);
+        }
         let event = AmmAdminEvent {
             id: self.next_admin_event_id,
             caller,

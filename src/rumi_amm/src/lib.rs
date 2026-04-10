@@ -5,7 +5,7 @@ use ic_canisters_http_types::{HttpRequest, HttpResponse, HttpResponseBuilder};
 use serde::Deserialize;
 use sha2::{Sha256, Digest};
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub mod types;
 pub mod state;
@@ -21,6 +21,39 @@ use crate::math::{compute_swap, compute_initial_lp_shares, compute_proportional_
 use crate::transfers::{transfer_from_user, transfer_to_user};
 use crate::logs::INFO;
 
+// ─── Per-pool reentrancy guard ───
+// Prevents concurrent async operations on the same pool. On IC, messages
+// interleave at every `await` point, so without locking two swaps can read
+// the same reserves and drain the pool. The guard is released via Drop,
+// which runs even if the callback traps (since ic-cdk 0.5.1).
+
+thread_local! {
+    static POOL_LOCKS: RefCell<BTreeSet<PoolId>> = RefCell::new(BTreeSet::new());
+}
+
+struct PoolGuard {
+    pool_id: PoolId,
+}
+
+impl PoolGuard {
+    fn new(pool_id: PoolId) -> Result<Self, AmmError> {
+        POOL_LOCKS.with(|locks| {
+            if !locks.borrow_mut().insert(pool_id.clone()) {
+                return Err(AmmError::PoolBusy);
+            }
+            Ok(Self { pool_id })
+        })
+    }
+}
+
+impl Drop for PoolGuard {
+    fn drop(&mut self) {
+        POOL_LOCKS.with(|locks| {
+            locks.borrow_mut().remove(&self.pool_id);
+        });
+    }
+}
+
 // ─── Supply Cache (not persisted to stable memory) ───
 
 /// icUSD ledger canister ID on mainnet.
@@ -34,8 +67,20 @@ struct SupplyCache {
     last_updated_ns: u64,
 }
 
+/// Cached icUSD holder balances for incremental snapshot computation.
+/// Instead of replaying the entire ledger history on every snapshot,
+/// we cache the balance map and last-processed tx index, then only
+/// replay new transactions since the last run.
+#[derive(Clone, Default)]
+struct HolderBalanceCache {
+    balances: BTreeMap<Principal, u128>,
+    total_supply: u128,
+    last_processed_index: u64,
+}
+
 thread_local! {
     static SUPPLY_CACHE: RefCell<SupplyCache> = RefCell::new(SupplyCache::default());
+    static ICUSD_HOLDER_CACHE: RefCell<HolderBalanceCache> = RefCell::new(HolderBalanceCache::default());
 }
 
 fn setup_supply_timer() {
@@ -140,6 +185,9 @@ async fn take_holder_snapshots() {
             log!(INFO, "icUSD snapshot: {} holders, supply {}",
                 snapshot.holder_count, snapshot.total_supply);
             mutate_state(|s| {
+                if s.holder_snapshots.len() >= state::MAX_HOLDER_SNAPSHOTS {
+                    s.holder_snapshots.remove(0);
+                }
                 s.holder_snapshots.push(snapshot);
             });
         }
@@ -152,6 +200,9 @@ async fn take_holder_snapshots() {
             log!(INFO, "3USD snapshot: {} holders, supply {}",
                 snapshot.holder_count, snapshot.total_supply);
             mutate_state(|s| {
+                if s.holder_snapshots.len() >= state::MAX_HOLDER_SNAPSHOTS {
+                    s.holder_snapshots.remove(0);
+                }
                 s.holder_snapshots.push(snapshot);
             });
         }
@@ -161,13 +212,20 @@ async fn take_holder_snapshots() {
     log!(INFO, "Holder snapshot collection complete.");
 }
 
-/// Replay all icUSD ledger transactions to build a holder balance map.
+/// Incrementally replay new icUSD ledger transactions since the last snapshot.
+/// On the first call (cold cache), replays from tx 0. On subsequent calls,
+/// only fetches transactions added since `last_processed_index`, saving
+/// significant cycles and inter-canister calls as the ledger grows.
 async fn collect_icusd_holders() -> Result<HolderSnapshot, String> {
     let ledger = Principal::from_text(ICUSD_LEDGER).map_err(|e| format!("{}", e))?;
-    let mut balances: BTreeMap<Principal, u128> = BTreeMap::new();
-    let mut start: u64 = 0;
+
+    // Load cached state
+    let (mut balances, mut total_supply, mut start) = ICUSD_HOLDER_CACHE.with(|c| {
+        let cache = c.borrow();
+        (cache.balances.clone(), cache.total_supply, cache.last_processed_index)
+    });
+
     let batch_size: u64 = 2000;
-    let mut total_supply: u128 = 0;
 
     loop {
         let request = GetTransactionsRequest {
@@ -222,8 +280,17 @@ async fn collect_icusd_holders() -> Result<HolderSnapshot, String> {
         }
     }
 
-    // Remove zero-balance accounts
+    // Remove zero-balance accounts to prevent unbounded cache growth
+    // from addresses that once held tokens but no longer do.
     balances.retain(|_, balance| *balance > 0);
+
+    // Persist cache for next incremental run
+    ICUSD_HOLDER_CACHE.with(|c| {
+        let mut cache = c.borrow_mut();
+        cache.balances = balances.clone();
+        cache.total_supply = total_supply;
+        cache.last_processed_index = start;
+    });
 
     // Sort by balance descending and take top holders
     let mut sorted: Vec<(Principal, u128)> = balances.into_iter().collect();
@@ -293,6 +360,9 @@ fn pre_upgrade() {
     state::save_to_stable_memory();
 }
 
+/// On upgrade, state is restored from stable memory. The `_args` parameter is
+/// accepted for Candid interface compatibility with `init` but intentionally
+/// ignored; the admin and all other config come from persisted state.
 #[post_upgrade]
 fn post_upgrade(_args: AmmInitArgs) {
     state::load_from_stable_memory();
@@ -354,6 +424,10 @@ fn record_pending_claim(
     reason: &str,
 ) -> u64 {
     mutate_state(|s| {
+        if s.pending_claims.len() >= state::MAX_PENDING_CLAIMS {
+            log!(INFO, "WARN: pending_claims at capacity ({}). Dropping oldest claim.", state::MAX_PENDING_CLAIMS);
+            s.pending_claims.remove(0);
+        }
         let id = s.next_claim_id;
         s.next_claim_id += 1;
         s.pending_claims.push(PendingClaim {
@@ -394,6 +468,12 @@ fn create_pool(args: CreatePoolArgs) -> Result<PoolId, AmmError> {
         if args.fee_bps < 1 || args.fee_bps > 1000 {
             return Err(AmmError::FeeBpsOutOfRange);
         }
+    }
+
+    // Validate fee_bps for all callers (admin included) to prevent creating
+    // permanently broken pools where compute_swap would always error
+    if args.fee_bps > 10_000 {
+        return Err(AmmError::FeeBpsOutOfRange);
     }
 
     if args.token_a == args.token_b {
@@ -481,6 +561,9 @@ fn set_protocol_fee(pool_id: PoolId, protocol_fee_bps: u16) -> Result<(), AmmErr
 #[update]
 async fn withdraw_protocol_fees(pool_id: PoolId) -> Result<(u128, u128), AmmError> {
     caller_is_admin()?;
+
+    // Acquire per-pool lock to prevent concurrent fee withdrawals
+    let _pool_guard = PoolGuard::new(pool_id.clone())?;
 
     let (token_a, token_b, sub_a, sub_b, fees_a, fees_b, admin) = read_state(|s| {
         let pool = s.pools.get(&pool_id).ok_or(AmmError::PoolNotFound)?;
@@ -594,6 +677,18 @@ fn set_pool_creation_open(open: bool) -> Result<(), AmmError> {
 }
 
 #[update]
+fn set_admin(new_admin: Principal) -> Result<(), AmmError> {
+    caller_is_admin()?;
+    if new_admin == Principal::anonymous() {
+        return Err(AmmError::Unauthorized);
+    }
+    let old_admin = read_state(|s| s.admin);
+    mutate_state(|s| s.admin = new_admin);
+    log!(INFO, "Admin transferred: {} -> {}", old_admin, new_admin);
+    Ok(())
+}
+
+#[update]
 fn set_maintenance_mode(enabled: bool) -> Result<(), AmmError> {
     caller_is_admin()?;
     mutate_state(|s| s.maintenance_mode = enabled);
@@ -697,6 +792,8 @@ async fn swap(
     }
     reject_anonymous()?;
 
+    // Acquire per-pool lock to prevent interleaving attacks across await points
+    let _pool_guard = PoolGuard::new(pool_id.clone())?;
     let caller = ic_cdk::caller();
 
     // Read pool state
@@ -826,6 +923,8 @@ async fn add_liquidity(
     }
     reject_anonymous()?;
 
+    // Acquire per-pool lock to prevent interleaving attacks across await points
+    let _pool_guard = PoolGuard::new(pool_id.clone())?;
     let caller = ic_cdk::caller();
 
     let (token_a, token_b, reserve_a, reserve_b, total_shares, sub_a, sub_b, paused) =
@@ -918,6 +1017,11 @@ async fn add_liquidity(
     Ok(shares)
 }
 
+/// Remove liquidity from a pool.
+///
+/// Intentionally NOT gated by maintenance_mode: users must always be able to
+/// withdraw their funds. Per-pool `paused` is the correct lever if a specific
+/// pool needs to be frozen during an exploit.
 #[update]
 async fn remove_liquidity(
     pool_id: PoolId,
@@ -926,6 +1030,9 @@ async fn remove_liquidity(
     min_amount_b: u128,
 ) -> Result<(u128, u128), AmmError> {
     reject_anonymous()?;
+
+    // Acquire per-pool lock to prevent interleaving attacks across await points
+    let _pool_guard = PoolGuard::new(pool_id.clone())?;
     let caller = ic_cdk::caller();
 
     let (token_a, token_b, reserve_a, reserve_b, total_shares, sub_a, sub_b, user_shares, paused) =
@@ -1196,6 +1303,28 @@ fn icrc28_trusted_origins() -> icrc21::Icrc28TrustedOriginsResponse {
 #[query]
 fn icrc10_supported_standards() -> Vec<icrc21::StandardRecord> {
     icrc21::icrc10_supported_standards()
+}
+
+// ─── Inspect Message (cycle-drain protection) ───
+// Runs on a single replica before consensus. NOT a security boundary (can be
+// bypassed by a malicious boundary node), but saves cycles by rejecting
+// anonymous callers before Candid decoding. Real access control is duplicated
+// inside each method.
+
+#[ic_cdk::inspect_message]
+fn inspect_message() {
+    let method = ic_cdk::api::call::method_name();
+    match method.as_str() {
+        // ICRC-21 consent messages must accept all callers (wallet integration)
+        "icrc21_canister_call_consent_message" => ic_cdk::api::call::accept_message(),
+        // All other update methods: reject anonymous to save cycles
+        _ => {
+            if ic_cdk::api::caller() != Principal::anonymous() {
+                ic_cdk::api::call::accept_message();
+            }
+            // Silently drop anonymous calls
+        }
+    }
 }
 
 // ─── HTTP Request (CoinGecko API) ───
