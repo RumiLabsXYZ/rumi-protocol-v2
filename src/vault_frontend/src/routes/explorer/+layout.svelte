@@ -18,6 +18,7 @@
     { href: '/explorer', label: 'Overview', exact: true },
     { href: '/explorer/activity', label: 'Activity', exact: false },
     { href: '/explorer/holders', label: 'Holders', exact: false },
+    { href: '/explorer/stats', label: 'Stats', exact: false },
   ];
 
   function isActive(link: { href: string; exact: boolean }): boolean {
