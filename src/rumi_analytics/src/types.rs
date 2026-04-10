@@ -59,6 +59,48 @@ pub struct HolderSeriesResponse {
 }
 
 #[derive(CandidType, Clone, Debug)]
+pub struct LiquidationSeriesResponse {
+    pub rows: Vec<crate::storage::rollups::DailyLiquidationRollup>,
+    pub next_from_ts: Option<u64>,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct SwapSeriesResponse {
+    pub rows: Vec<crate::storage::rollups::DailySwapRollup>,
+    pub next_from_ts: Option<u64>,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct FeeSeriesResponse {
+    pub rows: Vec<crate::storage::rollups::DailyFeeRollup>,
+    pub next_from_ts: Option<u64>,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct PriceSeriesResponse {
+    pub rows: Vec<crate::storage::fast::FastPriceSnapshot>,
+    pub next_from_ts: Option<u64>,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct ThreePoolSeriesResponse {
+    pub rows: Vec<crate::storage::fast::Fast3PoolSnapshot>,
+    pub next_from_ts: Option<u64>,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct CycleSeriesResponse {
+    pub rows: Vec<crate::storage::hourly::HourlyCycleSnapshot>,
+    pub next_from_ts: Option<u64>,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct FeeCurveSeriesResponse {
+    pub rows: Vec<crate::storage::hourly::HourlyFeeCurveSnapshot>,
+    pub next_from_ts: Option<u64>,
+}
+
+#[derive(CandidType, Clone, Debug)]
 pub struct CollectorHealth {
     pub cursors: Vec<CursorStatus>,
     pub error_counters: crate::storage::ErrorCounters,
