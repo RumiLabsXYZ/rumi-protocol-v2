@@ -23,6 +23,10 @@ import type {
 	PegStatus,
 	TradeActivityResponse,
 	CollectorHealth,
+	OhlcResponse,
+	VolatilityResponse,
+	PriceSeriesResponse,
+	ThreePoolSeriesResponse,
 } from '$declarations/rumi_analytics/rumi_analytics.did';
 
 // ── TTL constants (ms) ───────────────────────────────────────────────────────
@@ -295,5 +299,87 @@ export async function fetchCollectorHealth(): Promise<CollectorHealth | null> {
 	} catch (err) {
 		console.error('[analyticsService] fetchCollectorHealth failed:', err);
 		return null;
+	}
+}
+
+// ── OHLC candlestick data ───────────────────────────────────────────────────
+
+export async function fetchOhlc(
+	collateral: Principal,
+	bucketSecs?: bigint,
+	fromTs?: bigint,
+	toTs?: bigint,
+	limit?: number
+): Promise<OhlcResponse | null> {
+	const key = `analytics:ohlc:${collateral.toText()}:${bucketSecs ?? 3600n}:${fromTs ?? 0n}:${toTs ?? 0n}:${limit ?? 500}`;
+	const cached = getCached<OhlcResponse>(key, TTL.SERIES);
+	if (cached) return cached;
+
+	try {
+		const result = await getActor().get_ohlc({
+			collateral,
+			bucket_secs: bucketSecs !== undefined ? [bucketSecs] : [],
+			from_ts: fromTs !== undefined ? [fromTs] : [],
+			to_ts: toTs !== undefined ? [toTs] : [],
+			limit: limit !== undefined ? [limit] : [],
+		});
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[analyticsService] fetchOhlc failed:', err);
+		return null;
+	}
+}
+
+// ── Volatility ──────────────────────────────────────────────────────────────
+
+export async function fetchVolatility(
+	collateral: Principal,
+	windowSecs?: bigint
+): Promise<VolatilityResponse | null> {
+	const key = `analytics:volatility:${collateral.toText()}:${windowSecs ?? 86400n}`;
+	const cached = getCached<VolatilityResponse>(key, TTL.AGGREGATE);
+	if (cached) return cached;
+
+	try {
+		const result = await getActor().get_volatility({
+			collateral,
+			window_secs: windowSecs !== undefined ? [windowSecs] : [],
+		});
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[analyticsService] fetchVolatility failed:', err);
+		return null;
+	}
+}
+
+// ── Fast price snapshots (5-min) ────────────────────────────────────────────
+
+export async function fetchPriceSeries(limit = 500): Promise<PriceSeriesResponse['rows']> {
+	const key = `analytics:price_series:${limit}`;
+	const cached = getCached<PriceSeriesResponse['rows']>(key, TTL.SERIES);
+	if (cached) return cached;
+
+	try {
+		const result = await getActor().get_price_series(rangeQuery(undefined, undefined, limit));
+		return setCache(key, result.rows);
+	} catch (err) {
+		console.error('[analyticsService] fetchPriceSeries failed:', err);
+		return [];
+	}
+}
+
+// ── Fast 3pool snapshots (5-min) ────────────────────────────────────────────
+
+export async function fetchThreePoolSeries(limit = 500): Promise<ThreePoolSeriesResponse['rows']> {
+	const key = `analytics:three_pool_series:${limit}`;
+	const cached = getCached<ThreePoolSeriesResponse['rows']>(key, TTL.SERIES);
+	if (cached) return cached;
+
+	try {
+		const result = await getActor().get_three_pool_series(rangeQuery(undefined, undefined, limit));
+		return setCache(key, result.rows);
+	} catch (err) {
+		console.error('[analyticsService] fetchThreePoolSeries failed:', err);
+		return [];
 	}
 }
