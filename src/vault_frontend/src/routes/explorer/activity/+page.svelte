@@ -576,7 +576,7 @@
 
 	<!-- Events table -->
 	{:else}
-		<div class="bg-gray-800/30 border border-gray-700/50 rounded-xl overflow-hidden">
+		<div class="explorer-card overflow-hidden p-0">
 			<table class="w-full">
 				<thead>
 					<tr class="border-b border-gray-700/50 text-left">

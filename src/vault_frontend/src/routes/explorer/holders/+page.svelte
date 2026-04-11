@@ -215,7 +215,7 @@
 {#if holderTrends.length > 1}
 <section class="mt-8">
   <h3 class="mb-3 text-base font-semibold text-white">Holder Count Over Time</h3>
-  <div class="rounded-lg border border-white/10 bg-gray-900/50 p-4">
+  <div class="explorer-card">
     <svg viewBox="0 0 {chartW} {chartH}" class="w-full h-auto" preserveAspectRatio="none">
       <polyline
         fill="none"
