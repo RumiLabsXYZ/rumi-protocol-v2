@@ -90,10 +90,10 @@
       const price = twap?.price ?? summaryPriceMap.get(principal) ?? 0;
       const twapPrice = twap?.twap ?? price;
 
-      const totalCollateral = tot?.total_collateral_e8s != null
-        ? e8sToNumber(tot.total_collateral_e8s) : 0;
-      const totalDebt = tot?.total_debt_e8s != null
-        ? e8sToNumber(tot.total_debt_e8s) : 0;
+      const totalCollateral = tot?.total_collateral != null
+        ? e8sToNumber(tot.total_collateral) : 0;
+      const totalDebt = tot?.total_debt != null
+        ? e8sToNumber(tot.total_debt) : 0;
       const vaultCount = tot?.vault_count != null ? Number(tot.vault_count) : 0;
 
       const debtCeilingRaw = cfg?.debt_ceiling ?? 0n;

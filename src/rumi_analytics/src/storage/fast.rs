@@ -26,6 +26,7 @@ pub struct Fast3PoolSnapshot {
     pub balances: Vec<u128>,
     pub virtual_price: u128,
     pub lp_total_supply: u128,
+    pub decimals: Vec<u8>,
 }
 
 // --- Storable impls ---

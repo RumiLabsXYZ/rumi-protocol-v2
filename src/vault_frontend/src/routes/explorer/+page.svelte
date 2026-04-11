@@ -350,10 +350,10 @@
           : (backendStats?.vault_count != null ? Number(backendStats.vault_count) : 0);
         const totalCollateralE8s = stats
           ? e8sToNumber(stats.total_collateral_e8s)
-          : (backendStats?.total_collateral_e8s != null ? e8sToNumber(backendStats.total_collateral_e8s) : 0);
+          : (backendStats?.total_collateral != null ? e8sToNumber(backendStats.total_collateral) : 0);
         const totalDebtE8s = stats
           ? e8sToNumber(stats.total_debt_e8s)
-          : (backendStats?.total_debt_e8s != null ? e8sToNumber(backendStats.total_debt_e8s) : 0);
+          : (backendStats?.total_debt != null ? e8sToNumber(backendStats.total_debt) : 0);
         const medianCrBps = stats ? Number(stats.median_cr_bps) : 0;
 
         rows.push({

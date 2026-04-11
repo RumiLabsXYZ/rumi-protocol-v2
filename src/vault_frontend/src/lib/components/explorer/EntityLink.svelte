@@ -15,7 +15,7 @@
     address: '👤',
     canister: '📦',
     token: '🪙',
-    event: '📋',
+    event: '',
     block_index: '🔗',
   };
 

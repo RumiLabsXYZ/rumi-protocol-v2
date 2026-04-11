@@ -9,6 +9,14 @@
 
 use candid::{CandidType, Deserialize, Nat, Principal};
 
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct TokenConfigRaw {
+    pub ledger_id: Principal,
+    pub symbol: String,
+    pub decimals: u8,
+    pub precision_mul: u64,
+}
+
 /// Raw decoded form of `PoolStatus` using `candid::Nat` for arbitrary-precision
 /// fields. Never stored directly; converted to `ThreePoolStatusSubset` immediately.
 #[derive(CandidType, Deserialize, Clone, Debug)]
@@ -19,6 +27,7 @@ pub struct PoolStatusRaw {
     pub virtual_price: Nat,
     pub swap_fee_bps: u64,
     pub admin_fee_bps: u64,
+    pub tokens: Vec<TokenConfigRaw>,
 }
 
 /// Converted form with all `nat` fields represented as `u128`.
@@ -33,6 +42,7 @@ pub struct ThreePoolStatusSubset {
     pub swap_fee_bps: u64,
     #[allow(dead_code)]
     pub admin_fee_bps: u64,
+    pub decimals: Vec<u8>,
 }
 
 fn nat_to_u128(nat: Nat, field: &str) -> Result<u128, String> {
@@ -52,6 +62,7 @@ pub async fn get_pool_status(three_pool: Principal) -> Result<ThreePoolStatusSub
                 .enumerate()
                 .map(|(i, n)| nat_to_u128(n, &format!("balances[{}]", i)))
                 .collect::<Result<Vec<_>, _>>()?;
+            let decimals = raw.tokens.iter().map(|t| t.decimals).collect();
             Ok(ThreePoolStatusSubset {
                 balances,
                 lp_total_supply: nat_to_u128(raw.lp_total_supply, "lp_total_supply")?,
@@ -59,6 +70,7 @@ pub async fn get_pool_status(three_pool: Principal) -> Result<ThreePoolStatusSub
                 virtual_price: nat_to_u128(raw.virtual_price, "virtual_price")?,
                 swap_fee_bps: raw.swap_fee_bps,
                 admin_fee_bps: raw.admin_fee_bps,
+                decimals,
             })
         }
         Err((code, msg)) => Err(format!("get_pool_status: {:?} {}", code, msg)),

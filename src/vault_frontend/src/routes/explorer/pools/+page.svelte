@@ -33,9 +33,9 @@
 
   // 3Pool token colors
   const POOL_TOKENS = [
-    { symbol: 'icUSD', color: '#2DD4BF' },
-    { symbol: 'ckUSDT', color: '#26A17B' },
-    { symbol: 'ckUSDC', color: '#2775CA' },
+    { symbol: 'icUSD', color: '#2DD4BF', decimals: 8 },
+    { symbol: 'ckUSDT', color: '#26A17B', decimals: 6 },
+    { symbol: 'ckUSDC', color: '#2775CA', decimals: 6 },
   ];
 
   onMount(async () => {
@@ -103,7 +103,7 @@
     }
     return POOL_TOKENS.map((t, i) => ({
       ...t,
-      balance: e8sToNumber(pegStatus!.pool_balances[i]),
+      balance: Number(pegStatus!.pool_balances[i]) / Math.pow(10, t.decimals),
     }));
   });
 
@@ -257,7 +257,7 @@
         <div class="explorer-card">
           <div class="text-xs text-gray-500 mb-1">Total Deposits</div>
           <div class="text-lg font-semibold tabular-nums text-gray-200">
-            {formatCompact(spTotalDeposits)} icUSD
+            {formatCompact(spTotalDeposits)} stablecoins
           </div>
         </div>
         <div class="explorer-card">

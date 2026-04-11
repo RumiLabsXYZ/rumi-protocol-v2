@@ -112,8 +112,8 @@
       const price = priceMap.get(principal) ?? 0;
 
       const liqRatio = cfg ? decodeRustDecimal(cfg.liquidation_ratio) : 0;
-      const totalColl = tot?.total_collateral_e8s != null ? e8sToNumber(tot.total_collateral_e8s) : 0;
-      const debt = tot?.total_debt_e8s != null ? e8sToNumber(tot.total_debt_e8s) : 0;
+      const totalColl = tot?.total_collateral != null ? e8sToNumber(tot.total_collateral) : 0;
+      const debt = tot?.total_debt != null ? e8sToNumber(tot.total_debt) : 0;
       const vaults = tot?.vault_count != null ? Number(tot.vault_count) : 0;
       const debtCeilingRaw = cfg?.debt_ceiling ?? 0n;
       const isUnlimited = typeof debtCeilingRaw === 'bigint'
