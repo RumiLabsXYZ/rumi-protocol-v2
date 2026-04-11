@@ -57,6 +57,7 @@
   let totalDebt = $state(0);
   let infoLoading = $state(true);
   let initialLoadDone = $state(false);
+  let error: string | null = $state(null);
 
   async function loadCandles() {
     if (!initialLoadDone) return; // Avoid double-fetch on mount
@@ -74,7 +75,16 @@
   }
 
   onMount(async () => {
-    const principal = Principal.fromText(tokenId);
+    let principal: Principal;
+    try {
+      principal = Principal.fromText(tokenId);
+    } catch {
+      error = `Invalid principal: "${tokenId}"`;
+      infoLoading = false;
+      candleLoading = false;
+      priceLoading = false;
+      return;
+    }
 
     // Parallel fetch of all data
     const [ohlcResult, twapResult, volResult, priceResult, configsResult, totalsResult, vaultsResult] =
@@ -210,6 +220,12 @@
     All Markets
   </a>
 
+  {#if error}
+    <div class="explorer-card text-center py-12">
+      <p class="text-pink-400 text-sm mb-2">{error}</p>
+      <a href="/explorer/markets" class="text-xs text-teal-400 hover:text-teal-300">Back to Markets</a>
+    </div>
+  {:else}
   <!-- Header -->
   <div class="explorer-card">
     <div class="flex flex-wrap items-center gap-4">
@@ -361,4 +377,5 @@
       View full token detail page (vaults, events) &rarr;
     </a>
   </div>
+  {/if}
 </div>
