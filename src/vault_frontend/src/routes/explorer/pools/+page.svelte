@@ -78,7 +78,7 @@
     poolLoading = false;
 
     // Stability Pool
-    if (spStatusResult.status === 'fulfilled') {
+    if (spStatusResult.status === 'fulfilled' && spStatusResult.value != null) {
       spStatus = spStatusResult.value;
     }
     spLoading = false;

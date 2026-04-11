@@ -111,7 +111,7 @@
         vaultCount,
         tvlUsd: totalCollateral * price,
         totalDebt,
-        debtCeiling: e8sToNumber(Number(debtCeilingRaw)),
+        debtCeiling: e8sToNumber(debtCeilingRaw),
         unlimited: isUnlimited,
       });
     }

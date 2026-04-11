@@ -206,7 +206,7 @@
           vaultCount,
           totalCollateralUsd: totalCollateralE8s * price,
           totalDebt: totalDebtE8s,
-          debtCeiling: e8sToNumber(Number(debtCeilingRaw)),
+          debtCeiling: e8sToNumber(debtCeilingRaw),
           unlimited: isUnlimited,
           medianCrBps,
           volatility: volMap.get(principal) ?? null,

@@ -193,7 +193,7 @@
       ? debtCeilingRaw >= 18446744073709551615n
       : Number(debtCeilingRaw) >= Number.MAX_SAFE_INTEGER
   );
-  const debtCeiling = $derived(e8sToNumber(Number(debtCeilingRaw)));
+  const debtCeiling = $derived(e8sToNumber(debtCeilingRaw));
   const collateralValueUsd = $derived(totalCollateral * currentPrice);
 
   function formatPct(val: number, decimals = 1): string {
@@ -364,7 +364,7 @@
         <div class="flex justify-between py-2 border-b" style="border-color: var(--rumi-border);">
           <span class="text-xs text-gray-500">Min Vault Debt</span>
           <span class="text-sm tabular-nums text-gray-300">
-            {config.min_vault_debt ? `${e8sToNumber(Number(config.min_vault_debt))} icUSD` : '--'}
+            {config.min_vault_debt ? `${e8sToNumber(config.min_vault_debt)} icUSD` : '--'}
           </span>
         </div>
       </div>
