@@ -109,7 +109,7 @@
           stroke={CHART_COLORS.grid} stroke-width="1" />
         <text x={PADDING.left - 8} y={yPos(tick) + 4} text-anchor="end"
           fill={CHART_COLORS.textMuted} font-size="10" font-family="Inter">
-          ${formatCompact(tick)}
+          {formatCompact(tick)}
         </text>
       {/each}
 

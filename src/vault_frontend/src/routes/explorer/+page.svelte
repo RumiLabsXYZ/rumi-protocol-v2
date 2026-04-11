@@ -10,7 +10,7 @@
     fetchProtocolSummary, fetchTvlSeries, fetchVaultSeries,
     fetchTwap, fetchPegStatus, fetchApys, fetchVolatility
   } from '$services/explorer/analyticsService';
-  import { fetchEvents, fetchCollateralConfigs, fetchAllVaults } from '$services/explorer/explorerService';
+  import { fetchEvents, fetchCollateralConfigs, fetchCollateralTotals, fetchAllVaults } from '$services/explorer/explorerService';
   import { e8sToNumber, COLLATERAL_SYMBOLS } from '$utils/explorerChartHelpers';
   import type { ProtocolSummary, DailyTvlRow, PegStatus } from '$declarations/rumi_analytics/rumi_analytics.did';
   import type { CollateralRow } from '$components/explorer/CollateralTable.svelte';
@@ -41,7 +41,8 @@
     // Fetch all sections in parallel
     const [
       summaryResult, tvlResult, vaultSeriesResult, twapResult,
-      configsResult, pegResult, apyResult, eventsResult, vaultsResult
+      configsResult, pegResult, apyResult, eventsResult, vaultsResult,
+      collateralTotalsResult
     ] = await Promise.allSettled([
       fetchProtocolSummary(),
       fetchTvlSeries(365),
@@ -52,6 +53,7 @@
       fetchApys(),
       fetchEvents(0n, 10n),
       fetchAllVaults(),
+      fetchCollateralTotals(),
     ]);
 
     // Protocol summary
@@ -96,13 +98,14 @@
     }
 
     // Build collateral table rows
-    await buildCollateralRows(vaultSeriesResult, twapResult, configsResult);
+    await buildCollateralRows(vaultSeriesResult, twapResult, configsResult, collateralTotalsResult);
   });
 
   async function buildCollateralRows(
     vaultSeriesResult: PromiseSettledResult<any>,
     twapResult: PromiseSettledResult<any>,
-    configsResult: PromiseSettledResult<any>
+    configsResult: PromiseSettledResult<any>,
+    collateralTotalsResult: PromiseSettledResult<any>
   ) {
     try {
       // Get latest vault snapshot (the series returns rows, we want the last one)
@@ -128,8 +131,18 @@
         configMap.set(principal, cfg);
       }
 
-      // Get collateral stats from vault snapshot
+      // Get collateral stats from vault snapshot (analytics daily aggregation)
       const collaterals = latestVaultSnapshot?.collaterals ?? [];
+
+      // Backend collateral totals as fallback (live data from backend canister)
+      const backendTotals = collateralTotalsResult.status === 'fulfilled'
+        ? collateralTotalsResult.value ?? []
+        : [];
+      const backendTotalsMap = new Map<string, any>();
+      for (const t of backendTotals) {
+        const pid = t.collateral_type?.toText?.() ?? String(t.collateral_type ?? '');
+        if (pid) backendTotalsMap.set(pid, t);
+      }
 
       // Fetch volatility for each collateral in parallel
       const volResults = await Promise.allSettled(
@@ -156,27 +169,46 @@
 
       const rows: CollateralRow[] = [];
       for (const [principal, symbol] of Object.entries(COLLATERAL_SYMBOLS)) {
+        // Prefer analytics vault snapshot stats, fall back to backend totals
         const stats = collaterals.find((c: any) => {
           const p = c.collateral_type?.toText?.() ?? String(c.collateral_type);
           return p === principal;
         });
+        const backendStats = backendTotalsMap.get(principal);
+
         const cfg = configMap.get(principal);
         const price = priceMap.get(principal)
           ?? summaryPriceMap.get(principal)
           ?? (stats?.price_usd_e8s ? e8sToNumber(stats.price_usd_e8s) : 0);
-        const debtCeiling = cfg ? Number(cfg.debt_ceiling) : 0;
-        const isUnlimited = debtCeiling >= Number(18446744073709551615n);
+
+        // Use bigint comparison for debt ceiling to avoid Number precision loss
+        const debtCeilingRaw = cfg?.debt_ceiling ?? 0n;
+        const isUnlimited = typeof debtCeilingRaw === 'bigint'
+          ? debtCeilingRaw >= 18446744073709551615n
+          : Number(debtCeilingRaw) >= Number.MAX_SAFE_INTEGER;
+
+        // Vault count and debt: prefer analytics, fall back to backend
+        const vaultCount = stats
+          ? Number(stats.vault_count)
+          : (backendStats?.vault_count != null ? Number(backendStats.vault_count) : 0);
+        const totalCollateralE8s = stats
+          ? e8sToNumber(stats.total_collateral_e8s)
+          : (backendStats?.total_collateral_e8s != null ? e8sToNumber(backendStats.total_collateral_e8s) : 0);
+        const totalDebtE8s = stats
+          ? e8sToNumber(stats.total_debt_e8s)
+          : (backendStats?.total_debt_e8s != null ? e8sToNumber(backendStats.total_debt_e8s) : 0);
+        const medianCrBps = stats ? Number(stats.median_cr_bps) : 0;
 
         rows.push({
           principal,
           symbol,
           price,
-          vaultCount: stats ? Number(stats.vault_count) : 0,
-          totalCollateralUsd: stats ? e8sToNumber(stats.total_collateral_e8s) * price : 0,
-          totalDebt: stats ? e8sToNumber(stats.total_debt_e8s) : 0,
-          debtCeiling: e8sToNumber(debtCeiling),
+          vaultCount,
+          totalCollateralUsd: totalCollateralE8s * price,
+          totalDebt: totalDebtE8s,
+          debtCeiling: e8sToNumber(Number(debtCeilingRaw)),
           unlimited: isUnlimited,
-          medianCrBps: stats ? Number(stats.median_cr_bps) : 0,
+          medianCrBps,
           volatility: volMap.get(principal) ?? null,
         });
       }
