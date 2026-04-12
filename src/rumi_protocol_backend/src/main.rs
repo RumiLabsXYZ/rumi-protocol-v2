@@ -107,6 +107,29 @@ fn validate_price_for_liquidation() -> Result<(), ProtocolError> {
     read_state(|s| s.check_price_not_too_old())
 }
 
+/// Pre-filter to reduce cycle waste from anonymous spam.
+/// Runs on ONE replica without consensus. Can be bypassed by malicious nodes.
+/// NOT a security boundary — all real access control is inside each #[update] method.
+#[ic_cdk_macros::inspect_message]
+fn inspect_message() {
+    let method = ic_cdk::api::call::method_name();
+    let caller = ic_cdk::caller();
+
+    match method.as_str() {
+        // Query-like reads exposed as update for certification: accept all callers
+        "icrc21_canister_call_consent_message" | "icrc10_supported_standards" => {
+            ic_cdk::api::call::accept_message();
+        }
+        // Everything else requires a non-anonymous caller
+        _ => {
+            if caller != Principal::anonymous() {
+                ic_cdk::api::call::accept_message();
+            }
+            // Anonymous callers silently rejected — saves cycles on Candid decoding
+        }
+    }
+}
+
 fn setup_timers() {
     // ── Immediate price fetch (fire on the very next execution round) ───────
     // Prices are ephemeral and not stored as events, so after an upgrade
