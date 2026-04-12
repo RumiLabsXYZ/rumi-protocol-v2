@@ -291,8 +291,12 @@ pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Prin
     // Transfer fee to treasury (if configured), otherwise fee stays in reserves
     if fee_e6s > 0 {
         if let Some(treasury_principal) = treasury {
-            let _ = management::transfer_collateral(fee_e6s, treasury_principal, stable_ledger).await;
-            // If treasury transfer fails, fee stays in reserves — not critical
+            if let Err(e) = management::transfer_collateral(fee_e6s, treasury_principal, stable_ledger).await {
+                log!(crate::INFO,
+                    "[redeem_reserves] WARNING: treasury fee transfer failed ({} e6s to {}): {:?}. Fee stays in reserves.",
+                    fee_e6s, treasury_principal, e
+                );
+            }
         }
     }
 
