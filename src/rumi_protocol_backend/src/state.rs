@@ -523,6 +523,9 @@ pub struct PendingMarginTransfer {
     /// with in-flight pending transfers from before the multi-collateral refactor.
     #[serde(default = "crate::vault::default_collateral_type")]
     pub collateral_type: Principal,
+    /// Number of times this transfer has been retried. Capped at MAX_PENDING_RETRIES.
+    #[serde(default)]
+    pub retry_count: u8,
 }
 
 

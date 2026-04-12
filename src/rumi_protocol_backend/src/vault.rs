@@ -2100,6 +2100,7 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
                 owner: caller,
                 margin: collateral_to_liquidator,
                 collateral_type: vault.collateral_type,
+                retry_count: 0,
             },
         );
 
@@ -2337,6 +2338,7 @@ pub async fn liquidate_vault_partial_with_stable(
                 owner: caller,
                 margin: collateral_to_liquidator,
                 collateral_type: vault.collateral_type,
+                retry_count: 0,
             },
         );
 
@@ -2550,6 +2552,7 @@ pub async fn liquidate_vault_debt_already_burned(
                 owner: caller,
                 margin: collateral_to_liquidator,
                 collateral_type: vault.collateral_type,
+                retry_count: 0,
             },
         );
 
@@ -2744,6 +2747,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
                 owner: caller,
                 margin: collateral_to_liquidator,
                 collateral_type: vault.collateral_type,
+                retry_count: 0,
             },
         );
 
@@ -2757,6 +2761,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
                     owner: vault.owner,
                     margin: excess_collateral,
                     collateral_type: vault.collateral_type,
+                    retry_count: 0,
                 },
             );
         }
@@ -3150,6 +3155,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
                 owner: caller,
                 margin: collateral_to_liquidator,
                 collateral_type: vault.collateral_type,
+                retry_count: 0,
             },
         );
 
