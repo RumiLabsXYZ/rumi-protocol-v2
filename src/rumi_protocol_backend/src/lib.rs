@@ -706,7 +706,7 @@ pub(crate) async fn process_pending_transfer() {
             Err(error) => {
                 // Improved error logging with more details
                 log!(
-                    DEBUG,
+                    INFO,
                     "[transfering_margins] failed to transfer margin: {}, to principal: {}, via ledger: {}, with error: {}",
                     transfer.margin,
                     transfer.owner,
@@ -786,7 +786,7 @@ pub(crate) async fn process_pending_transfer() {
             }
             Err(error) => {
                 log!(
-                    DEBUG,
+                    INFO,
                     "[transfering_excess] failed to transfer excess collateral: {}, to principal: {}, via ledger: {}, with error: {}",
                     transfer.margin,
                     transfer.owner,
@@ -838,7 +838,7 @@ pub(crate) async fn process_pending_transfer() {
                 });
             }
             Err(error) => log!(
-                DEBUG,
+                INFO,
                 "[transfering_redemptions] failed to transfer margin: {}, via ledger: {}, with error: {}",
                 pending_transfer.margin,
                 ledger,
