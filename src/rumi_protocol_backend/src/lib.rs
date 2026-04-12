@@ -15,6 +15,10 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
 
+/// Maximum number of retries for a pending transfer before it is abandoned.
+/// At 5-second intervals, 60 retries = 5 minutes of attempts.
+const MAX_PENDING_RETRIES: u8 = 60;
+
 pub mod dashboard;
 pub mod event;
 pub mod guard;
@@ -706,7 +710,7 @@ pub(crate) async fn process_pending_transfer() {
             Err(error) => {
                 // Improved error logging with more details
                 log!(
-                    DEBUG,
+                    INFO,
                     "[transfering_margins] failed to transfer margin: {}, to principal: {}, via ledger: {}, with error: {}",
                     transfer.margin,
                     transfer.owner,
@@ -739,8 +743,26 @@ pub(crate) async fn process_pending_transfer() {
 
                     // After updating the fee, we should retry this transfer next time
                 } else {
-                    // For other errors, we still keep the transfer pending for retry
-                    log!(INFO, "[transfering_margins] Will retry this transfer later");
+                    // Increment retry count; abandon after MAX_PENDING_RETRIES
+                    let retries = mutate_state(|s| {
+                        if let Some(t) = s.pending_margin_transfers.get_mut(&vault_id) {
+                            t.retry_count = t.retry_count.saturating_add(1);
+                            t.retry_count
+                        } else {
+                            0
+                        }
+                    });
+                    if retries >= MAX_PENDING_RETRIES {
+                        log!(INFO,
+                            "[transfering_margins] CRITICAL: abandoning margin transfer for vault {} \
+                             after {} retries. Owner: {}, amount: {}. Use recover_pending_transfer to retry manually.",
+                            vault_id, retries, transfer.owner, transfer.margin
+                        );
+                        mutate_state(|s| { s.pending_margin_transfers.remove(&vault_id); });
+                    } else {
+                        log!(INFO, "[transfering_margins] Will retry transfer for vault {} (attempt {}/{})",
+                            vault_id, retries, MAX_PENDING_RETRIES);
+                    }
                 }
             }
         }
@@ -786,13 +808,29 @@ pub(crate) async fn process_pending_transfer() {
             }
             Err(error) => {
                 log!(
-                    DEBUG,
+                    INFO,
                     "[transfering_excess] failed to transfer excess collateral: {}, to principal: {}, via ledger: {}, with error: {}",
                     transfer.margin,
                     transfer.owner,
                     ledger,
                     error
                 );
+                let retries = mutate_state(|s| {
+                    if let Some(t) = s.pending_excess_transfers.get_mut(&vault_id) {
+                        t.retry_count = t.retry_count.saturating_add(1);
+                        t.retry_count
+                    } else {
+                        0
+                    }
+                });
+                if retries >= MAX_PENDING_RETRIES {
+                    log!(INFO,
+                        "[transfering_excess] CRITICAL: abandoning excess transfer for vault {} \
+                         after {} retries. Owner: {}, amount: {}. Use recover_pending_transfer to retry manually.",
+                        vault_id, retries, transfer.owner, transfer.margin
+                    );
+                    mutate_state(|s| { s.pending_excess_transfers.remove(&vault_id); });
+                }
             }
         }
     }
@@ -837,13 +875,32 @@ pub(crate) async fn process_pending_transfer() {
                     crate::event::record_redemption_transfered(s, icusd_block_index, block_index)
                 });
             }
-            Err(error) => log!(
-                DEBUG,
-                "[transfering_redemptions] failed to transfer margin: {}, via ledger: {}, with error: {}",
-                pending_transfer.margin,
-                ledger,
-                error
-            ),
+            Err(error) => {
+                log!(
+                    INFO,
+                    "[transfering_redemptions] failed to transfer margin: {}, to principal: {}, via ledger: {}, with error: {}",
+                    pending_transfer.margin,
+                    pending_transfer.owner,
+                    ledger,
+                    error
+                );
+                let retries = mutate_state(|s| {
+                    if let Some(t) = s.pending_redemption_transfer.get_mut(&icusd_block_index) {
+                        t.retry_count = t.retry_count.saturating_add(1);
+                        t.retry_count
+                    } else {
+                        0
+                    }
+                });
+                if retries >= MAX_PENDING_RETRIES {
+                    log!(INFO,
+                        "[transfering_redemptions] CRITICAL: abandoning redemption transfer {} \
+                         after {} retries. Owner: {}, amount: {}. Use recover_pending_transfer to retry manually.",
+                        icusd_block_index, retries, pending_transfer.owner, pending_transfer.margin
+                    );
+                    mutate_state(|s| { s.pending_redemption_transfer.remove(&icusd_block_index); });
+                }
+            }
         }
     }
 

@@ -786,7 +786,7 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                 let margin: ICP = icusd_amount / current_icp_rate;
                 state
                     .pending_redemption_transfer
-                    .insert(icusd_block_index, PendingMarginTransfer { owner, margin, collateral_type: crate::vault::default_collateral_type() });
+                    .insert(icusd_block_index, PendingMarginTransfer { owner, margin, collateral_type: crate::vault::default_collateral_type(), retry_count: 0 });
             }
             Event::RedemptionTransfered {
                 icusd_block_index, ..
@@ -1400,7 +1400,7 @@ pub fn record_redemption_on_vaults(
     let margin: ICP = icusd_amount / ct_price;
     state
         .pending_redemption_transfer
-        .insert(icusd_block_index, PendingMarginTransfer { owner, margin, collateral_type: redeem_ct });
+        .insert(icusd_block_index, PendingMarginTransfer { owner, margin, collateral_type: redeem_ct, retry_count: 0 });
 }
 
 pub fn record_redemption_transfered(
