@@ -5,7 +5,7 @@ use crate::event::{
 use crate::guard::GuardPrincipal;
 use crate::GuardError;
 use crate::logs::INFO;
-use crate::management::{mint_icusd, transfer_collateral_from, transfer_icusd_from, transfer_stable_from};
+use crate::management::{mint_icusd, transfer_collateral, transfer_collateral_from, transfer_icusd_from, transfer_stable_from};
 use crate::numeric::{ICUSD, ICP, Ratio, UsdIcp};
 use crate::{
     mutate_state, read_state, ProtocolError, SuccessWithFee,
@@ -18,6 +18,7 @@ use candid::{CandidType, Deserialize, Principal};
 use ic_canister_log::log;
 use icrc_ledger_types::icrc2::transfer_from::TransferFromError;
 use serde::Serialize;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use crate::DEBUG;
 use crate::management;
 use crate::PendingMarginTransfer;
@@ -486,33 +487,80 @@ pub async fn open_vault(collateral_amount_raw: u64, collateral_type_opt: Option<
 
     match transfer_collateral_from(collateral_amount_raw, caller, config_ledger).await {
         Ok(block_index) => {
-            let vault_id = mutate_state(|s| {
-                let vault_id = s.increment_vault_id();
-                record_open_vault(
-                    s,
-                    Vault {
-                        owner: caller,
-                        borrowed_icusd_amount: 0.into(),
-                        collateral_amount: collateral_amount_raw,
+            // Wrap state mutation in catch_unwind so that if vault record
+            // creation panics (e.g. OOM), we can refund the collateral
+            // instead of silently losing it.
+            let vault_result = catch_unwind(AssertUnwindSafe(|| {
+                mutate_state(|s| {
+                    let vault_id = s.increment_vault_id();
+                    record_open_vault(
+                        s,
+                        Vault {
+                            owner: caller,
+                            borrowed_icusd_amount: 0.into(),
+                            collateral_amount: collateral_amount_raw,
+                            vault_id,
+                            collateral_type,
+                            last_accrual_time: ic_cdk::api::time(),
+                            accrued_interest: ICUSD::new(0),
+                            bot_processing: false,
+                        },
+                        block_index,
+                    );
+                    vault_id
+                })
+            }));
+
+            match vault_result {
+                Ok(vault_id) => {
+                    log!(INFO, "[open_vault] opened vault with id: {vault_id}");
+                    guard_principal.complete();
+                    Ok(OpenVaultSuccess {
                         vault_id,
-                        collateral_type,
-                        last_accrual_time: ic_cdk::api::time(),
-                        accrued_interest: ICUSD::new(0),
-                        bot_processing: false,
-                    },
-                    block_index,
-                );
-                vault_id
-            });
-            log!(INFO, "[open_vault] opened vault with id: {vault_id}");
+                        block_index,
+                    })
+                }
+                Err(panic_info) => {
+                    // State mutation failed -- refund collateral to caller
+                    log!(INFO,
+                        "[open_vault] CRITICAL: vault record creation panicked after collateral transfer \
+                         (block {}). Attempting refund of {} to {}. Panic: {:?}",
+                        block_index, collateral_amount_raw, caller, panic_info
+                    );
 
-            // Mark operation as successfully completed
-            guard_principal.complete();
-
-            Ok(OpenVaultSuccess {
-                vault_id,
-                block_index,
-            })
+                    // Best-effort refund: transfer collateral back minus ledger fee
+                    let ledger_fee = read_state(|s| {
+                        s.get_collateral_config(&collateral_type)
+                            .map(|c| c.ledger_fee)
+                            .unwrap_or(10_000)
+                    });
+                    if collateral_amount_raw > ledger_fee {
+                        match transfer_collateral(
+                            collateral_amount_raw - ledger_fee,
+                            caller,
+                            config_ledger,
+                        ).await {
+                            Ok(refund_block) => {
+                                log!(INFO,
+                                    "[open_vault] Refunded {} collateral to {} (block {})",
+                                    collateral_amount_raw - ledger_fee, caller, refund_block
+                                );
+                            }
+                            Err(refund_err) => {
+                                log!(INFO,
+                                    "[open_vault] CRITICAL: collateral refund ALSO failed for {}! \
+                                     Amount: {}, ledger: {}. Error: {:?}. Manual intervention required.",
+                                    caller, collateral_amount_raw, config_ledger, refund_err
+                                );
+                            }
+                        }
+                    }
+                    guard_principal.fail();
+                    Err(ProtocolError::GenericError(
+                        "Vault creation failed after collateral transfer. Your collateral has been refunded.".to_string()
+                    ))
+                }
+            }
         }
         Err(transfer_from_error) => {
             // Explicitly mark as failed when an error occurs
