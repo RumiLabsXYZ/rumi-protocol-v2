@@ -8,6 +8,9 @@
   import {
     fetchThreePoolStatus, fetchStabilityPoolStatus
   } from '$services/explorer/explorerService';
+  import { ProtocolService } from '$services/protocol';
+  import { calculateTheoreticalApy, POOL_TOKENS as SERVICE_POOL_TOKENS } from '$services/threePoolService';
+  import { stabilityPoolService } from '$services/stabilityPoolService';
   import { e8sToNumber, formatCompact, nsToDate, formatDateShort } from '$utils/explorerChartHelpers';
   import type { PegStatus } from '$declarations/rumi_analytics/rumi_analytics.did';
 
@@ -58,10 +61,63 @@
       pegStatus = pegResult.value ?? null;
     }
 
-    // APYs
+    // APYs: try analytics first, fall back to live computation
     if (apyResult.status === 'fulfilled' && apyResult.value) {
-      lpApy = apyResult.value.lp_apy_pct?.[0] ?? null;
-      spApy = apyResult.value.sp_apy_pct?.[0] ?? null;
+      const analyticsLp = apyResult.value.lp_apy_pct?.[0];
+      const analyticsSp = apyResult.value.sp_apy_pct?.[0];
+      if (typeof analyticsLp === 'number' && analyticsLp > 0) lpApy = analyticsLp;
+      if (typeof analyticsSp === 'number' && analyticsSp > 0) spApy = analyticsSp;
+    }
+    if (!lpApy || !spApy) {
+      try {
+        const [psResult, spPoolResult] = await Promise.allSettled([
+          ProtocolService.getProtocolStatus(),
+          stabilityPoolService.getPoolStatus(),
+        ]);
+        const ps = psResult.status === 'fulfilled' ? psResult.value : null;
+        const sp = spPoolResult.status === 'fulfilled' ? spPoolResult.value : null;
+        const poolResult = poolStatusResult.status === 'fulfilled' ? poolStatusResult.value : null;
+
+        if (!lpApy && ps && poolResult) {
+          let poolTvlE8s = 0;
+          for (let i = 0; i < poolResult.balances.length; i++) {
+            const token = SERVICE_POOL_TOKENS[i];
+            if (token) {
+              poolTvlE8s += token.decimals === 8
+                ? Number(poolResult.balances[i])
+                : Number(poolResult.balances[i]) * 100;
+            }
+          }
+          const threePoolBps = ps.interestSplit?.find((e: any) => e.destination === 'three_pool')?.bps ?? 5000;
+          const computed = calculateTheoreticalApy(threePoolBps, ps.perCollateralInterest, poolTvlE8s / 1e8);
+          if (computed != null) lpApy = computed * 100;
+        }
+
+        if (!spApy && ps && sp) {
+          const poolShare = (ps.interestSplit?.find((e: any) => e.destination === 'stability_pool')?.bps ?? 0) / 10000;
+          const perC = ps.perCollateralInterest;
+          if (poolShare > 0 && perC && perC.length > 0) {
+            const eligibleMap = new Map<string, number>(
+              (sp.eligible_icusd_per_collateral ?? []).map(([p, v]: [any, bigint]) => [
+                typeof p === 'object' && typeof p.toText === 'function' ? p.toText() : String(p),
+                Number(v) / 1e8
+              ])
+            );
+            let totalApr = 0;
+            for (const info of perC) {
+              const eligible = eligibleMap.get(info.collateralType) ?? 0;
+              if (eligible === 0 || info.totalDebtE8s === 0 || info.weightedInterestRate === 0) continue;
+              totalApr += (info.weightedInterestRate * poolShare * info.totalDebtE8s) / eligible;
+            }
+            if (totalApr > 0) {
+              const apy = Math.pow(1 + totalApr / 365, 365) - 1;
+              spApy = apy * 100;
+            }
+          }
+        }
+      } catch (e) {
+        console.error('[pools] APY fallback error:', e);
+      }
     }
 
     // 3Pool status

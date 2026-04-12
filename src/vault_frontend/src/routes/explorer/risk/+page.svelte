@@ -13,6 +13,7 @@
     COLLATERAL_SYMBOLS, COLLATERAL_COLORS
   } from '$utils/explorerChartHelpers';
   import { decodeRustDecimal } from '$utils/decimalUtils';
+  import { COLLATERAL_DISPLAY_ORDER } from '$stores/collateralStore';
 
   let loading = $state(true);
   let systemCrBps = $state(0);
@@ -38,105 +39,119 @@
   let collateralRisks: CollateralRisk[] = $state([]);
 
   onMount(async () => {
-    const principals = Object.keys(COLLATERAL_SYMBOLS);
+    try {
+      const principals = Object.keys(COLLATERAL_SYMBOLS);
 
-    const [summaryResult, configsResult, totalsResult, liqVaultsResult, botResult, liqSeriesResult, ...volResults] =
-      await Promise.allSettled([
-        fetchProtocolSummary(),
-        fetchCollateralConfigs(),
-        fetchCollateralTotals(),
-        fetchLiquidatableVaults(),
-        fetchBotStats(),
-        fetchLiquidationSeries(90),
-        ...principals.map(p => fetchVolatility(Principal.fromText(p))),
-      ]);
+      const [summaryResult, configsResult, totalsResult, liqVaultsResult, botResult, liqSeriesResult, ...volResults] =
+        await Promise.allSettled([
+          fetchProtocolSummary(),
+          fetchCollateralConfigs(),
+          fetchCollateralTotals(),
+          fetchLiquidatableVaults(),
+          fetchBotStats(),
+          fetchLiquidationSeries(90),
+          ...principals.map(p => fetchVolatility(Principal.fromText(p))),
+        ]);
 
-    // System CR
-    if (summaryResult.status === 'fulfilled' && summaryResult.value) {
-      systemCrBps = summaryResult.value.system_cr_bps;
-      totalDebt = e8sToNumber(summaryResult.value.total_debt_e8s);
-      totalCollateralUsd = e8sToNumber(summaryResult.value.total_collateral_usd_e8s);
-    }
-
-    // Liquidatable vaults
-    if (liqVaultsResult.status === 'fulfilled') {
-      liquidatableVaults = liqVaultsResult.value ?? [];
-    }
-
-    // Bot stats
-    if (botResult.status === 'fulfilled') {
-      botStats = botResult.value;
-    }
-
-    // Liquidation series
-    if (liqSeriesResult.status === 'fulfilled') {
-      liquidationSeries = liqSeriesResult.value ?? [];
-    }
-
-    // Build collateral risk breakdown
-    const configs = configsResult.status === 'fulfilled' ? configsResult.value ?? [] : [];
-    const totals = totalsResult.status === 'fulfilled' ? totalsResult.value ?? [] : [];
-    const summaryPrices = summaryResult.status === 'fulfilled' && summaryResult.value
-      ? summaryResult.value.prices : [];
-
-    const configMap = new Map<string, any>();
-    for (const c of configs) {
-      const pid = c.ledger_canister_id?.toText?.() ?? String(c.ledger_canister_id);
-      configMap.set(pid, c);
-    }
-
-    const totalsMap = new Map<string, any>();
-    for (const t of totals) {
-      const pid = t.collateral_type?.toText?.() ?? String(t.collateral_type ?? '');
-      if (pid) totalsMap.set(pid, t);
-    }
-
-    const priceMap = new Map<string, number>();
-    for (const p of summaryPrices) {
-      const pid = p.collateral?.toText?.() ?? String(p.collateral);
-      priceMap.set(pid, p.twap_price);
-    }
-
-    const volMap = new Map<string, number>();
-    for (let i = 0; i < principals.length; i++) {
-      const r = volResults[i];
-      if (r.status === 'fulfilled' && r.value) {
-        volMap.set(principals[i], r.value.annualized_vol_pct);
+      // System CR
+      if (summaryResult.status === 'fulfilled' && summaryResult.value) {
+        systemCrBps = summaryResult.value.system_cr_bps;
+        totalDebt = e8sToNumber(summaryResult.value.total_debt_e8s);
+        totalCollateralUsd = e8sToNumber(summaryResult.value.total_collateral_usd_e8s);
       }
-    }
 
-    const risks: CollateralRisk[] = [];
-    for (const [principal, symbol] of Object.entries(COLLATERAL_SYMBOLS)) {
-      const cfg = configMap.get(principal);
-      const tot = totalsMap.get(principal);
-      const price = priceMap.get(principal) ?? 0;
+      // Liquidatable vaults
+      if (liqVaultsResult.status === 'fulfilled') {
+        liquidatableVaults = liqVaultsResult.value ?? [];
+      }
 
-      const liqRatio = cfg ? decodeRustDecimal(cfg.liquidation_ratio) : 0;
-      const totalColl = tot?.total_collateral != null ? e8sToNumber(tot.total_collateral) : 0;
-      const debt = tot?.total_debt != null ? e8sToNumber(tot.total_debt) : 0;
-      const vaults = tot?.vault_count != null ? Number(tot.vault_count) : 0;
-      const debtCeilingRaw = cfg?.debt_ceiling ?? 0n;
-      const isUnlimited = typeof debtCeilingRaw === 'bigint'
-        ? debtCeilingRaw >= 18446744073709551615n
-        : Number(debtCeilingRaw) >= Number.MAX_SAFE_INTEGER;
+      // Bot stats
+      if (botResult.status === 'fulfilled') {
+        botStats = botResult.value;
+      }
 
-      risks.push({
-        principal,
-        symbol,
-        color: COLLATERAL_COLORS[symbol as keyof typeof COLLATERAL_COLORS] ?? '#888',
-        volatility: volMap.get(principal) ?? null,
-        liquidationRatio: liqRatio,
-        vaultCount: vaults,
-        totalDebt: debt,
-        totalCollateralUsd: totalColl * price,
-        debtCeiling: e8sToNumber(debtCeilingRaw),
-        unlimited: isUnlimited,
+      // Liquidation series
+      if (liqSeriesResult.status === 'fulfilled') {
+        liquidationSeries = liqSeriesResult.value ?? [];
+      }
+
+      // Build collateral risk breakdown
+      const configs = configsResult.status === 'fulfilled' ? configsResult.value ?? [] : [];
+      const totals = totalsResult.status === 'fulfilled' ? totalsResult.value ?? [] : [];
+      const summaryPrices = summaryResult.status === 'fulfilled' && summaryResult.value
+        ? summaryResult.value.prices : [];
+
+      const configMap = new Map<string, any>();
+      for (const c of configs) {
+        const pid = c.ledger_canister_id?.toText?.() ?? String(c.ledger_canister_id);
+        configMap.set(pid, c);
+      }
+
+      const totalsMap = new Map<string, any>();
+      for (const t of totals) {
+        const pid = t.collateral_type?.toText?.() ?? String(t.collateral_type ?? '');
+        if (pid) totalsMap.set(pid, t);
+      }
+
+      const priceMap = new Map<string, number>();
+      for (const p of summaryPrices) {
+        const pid = p.collateral?.toText?.() ?? String(p.collateral);
+        priceMap.set(pid, p.twap_price);
+      }
+
+      const volMap = new Map<string, number>();
+      for (let i = 0; i < principals.length; i++) {
+        const r = volResults[i];
+        if (r.status === 'fulfilled' && r.value) {
+          volMap.set(principals[i], r.value.annualized_vol_pct);
+        }
+      }
+
+      const risks: CollateralRisk[] = [];
+      for (const [principal, symbol] of Object.entries(COLLATERAL_SYMBOLS)) {
+        const cfg = configMap.get(principal);
+        const tot = totalsMap.get(principal);
+        const price = priceMap.get(principal)
+          ?? (tot?.price ? Number(tot.price) : 0);
+
+        const liqRatio = cfg ? decodeRustDecimal(cfg.liquidation_ratio) : 0;
+        // Use actual token decimals for proper normalization
+        const decimals = tot?.decimals != null ? Number(tot.decimals) : 8;
+        const totalColl = tot?.total_collateral != null
+          ? Number(tot.total_collateral) / Math.pow(10, decimals) : 0;
+        const debt = tot?.total_debt != null ? e8sToNumber(tot.total_debt) : 0;
+        const vaults = tot?.vault_count != null ? Number(tot.vault_count) : 0;
+        const debtCeilingRaw = cfg?.debt_ceiling ?? 0n;
+        const isUnlimited = typeof debtCeilingRaw === 'bigint'
+          ? debtCeilingRaw >= 18446744073709551615n
+          : Number(debtCeilingRaw) >= Number.MAX_SAFE_INTEGER;
+
+        risks.push({
+          principal,
+          symbol,
+          color: COLLATERAL_COLORS[symbol as keyof typeof COLLATERAL_COLORS] ?? '#888',
+          volatility: volMap.get(principal) ?? null,
+          liquidationRatio: liqRatio,
+          vaultCount: vaults,
+          totalDebt: debt,
+          totalCollateralUsd: totalColl * price,
+          debtCeiling: e8sToNumber(debtCeilingRaw),
+          unlimited: isUnlimited,
+        });
+      }
+
+      // Sort by canonical display order
+      risks.sort((a, b) => {
+        const ai = COLLATERAL_DISPLAY_ORDER.indexOf(a.symbol);
+        const bi = COLLATERAL_DISPLAY_ORDER.indexOf(b.symbol);
+        return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
       });
+      collateralRisks = risks;
+    } catch (err) {
+      console.error('[risk] onMount error:', err);
+    } finally {
+      loading = false;
     }
-
-    risks.sort((a, b) => b.totalCollateralUsd - a.totalCollateralUsd);
-    collateralRisks = risks;
-    loading = false;
   });
 
   const systemCrPct = $derived(systemCrBps > 0 ? (systemCrBps / 100).toFixed(0) : '0');
