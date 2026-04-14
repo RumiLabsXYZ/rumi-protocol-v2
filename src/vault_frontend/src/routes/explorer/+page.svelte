@@ -10,7 +10,23 @@
     fetchProtocolSummary, fetchTvlSeries, fetchVaultSeries,
     fetchTwap, fetchPegStatus, fetchApys, fetchVolatility
   } from '$services/explorer/analyticsService';
-  import { fetchEvents, fetchCollateralConfigs, fetchCollateralTotals, fetchAllVaults } from '$services/explorer/explorerService';
+  import {
+    fetchEvents, fetchCollateralConfigs, fetchCollateralTotals, fetchAllVaults,
+    fetchSwapEvents, fetchSwapEventCount,
+    fetchAmmSwapEvents, fetchAmmSwapEventCount,
+    fetchAmmLiquidityEvents, fetchAmmLiquidityEventCount,
+    fetchAmmAdminEvents, fetchAmmAdminEventCount,
+    fetch3PoolLiquidityEvents, fetch3PoolLiquidityEventCount,
+    fetch3PoolAdminEvents, fetch3PoolAdminEventCount,
+    fetchStabilityPoolEvents, fetchStabilityPoolEventCount,
+  } from '$services/explorer/explorerService';
+  import {
+    formatSwapEvent, formatAmmSwapEvent,
+    formatAmmLiquidityEvent, formatAmmAdminEvent,
+    format3PoolLiquidityEvent, format3PoolAdminEvent,
+    formatStabilityPoolEvent
+  } from '$utils/explorerFormatters';
+  import { shortenPrincipal } from '$utils/explorerHelpers';
   import { e8sToNumber, COLLATERAL_SYMBOLS } from '$utils/explorerChartHelpers';
   import type { ProtocolSummary, DailyTvlRow, PegStatus } from '$declarations/rumi_analytics/rumi_analytics.did';
   import type { CollateralRow } from '$components/explorer/CollateralTable.svelte';
@@ -30,8 +46,80 @@
   let spApy: number | null = $state(null);
   let poolsLoading = $state(true);
 
-  let recentEvents: [bigint, any][] = $state([]);
+  // Unified event wrapper for multi-source display
+  interface DisplayEvent {
+    globalIndex: bigint;
+    event: any;
+    source: 'backend' | '3pool_swap' | 'amm_swap' | 'amm_liquidity' | 'amm_admin' | '3pool_liquidity' | '3pool_admin' | 'stability_pool';
+    timestamp: number;
+  }
+
+  let recentEvents: DisplayEvent[] = $state([]);
   let eventsLoading = $state(true);
+
+  const SOURCE_LABELS: Record<string, string> = {
+    '3pool_swap': '3Pool',
+    'amm_swap': 'AMM',
+    'amm_liquidity': 'AMM',
+    'amm_admin': 'AMM',
+    '3pool_liquidity': '3Pool',
+    '3pool_admin': '3Pool',
+    'stability_pool': 'SP',
+  };
+
+  function extractTimestamp(event: any): number {
+    if (event.timestamp != null) return Number(event.timestamp);
+    const eventType = event.event_type ?? event;
+    const key = Object.keys(eventType)[0];
+    if (key) {
+      const data = eventType[key];
+      if (data?.timestamp != null) return Number(data.timestamp);
+    }
+    return 0;
+  }
+
+  function extractPrincipalFromEvent(event: any): string | null {
+    const caller = event.caller;
+    if (caller) {
+      if (typeof caller === 'object' && typeof caller.toText === 'function') return caller.toText();
+      if (typeof caller === 'string' && caller.length > 10) return caller;
+    }
+    const eventType = event.event_type ?? event;
+    const key = Object.keys(eventType)[0];
+    if (key) {
+      const data = eventType[key];
+      if (!data) return null;
+      for (const field of ['owner', 'caller', 'from', 'liquidator', 'redeemer']) {
+        const val = data[field];
+        if (val && typeof val === 'object' && typeof val.toText === 'function') return val.toText();
+        if (typeof val === 'string' && val.length > 20) return val;
+      }
+    }
+    return null;
+  }
+
+  function formatNonBackendEvent(de: DisplayEvent): { summary: string; typeName: string; badgeColor: string } {
+    switch (de.source) {
+      case '3pool_swap': return formatSwapEvent(de.event);
+      case 'amm_swap': return formatAmmSwapEvent(de.event);
+      case 'amm_liquidity': return formatAmmLiquidityEvent(de.event);
+      case 'amm_admin': return formatAmmAdminEvent(de.event);
+      case '3pool_liquidity': return format3PoolLiquidityEvent(de.event);
+      case '3pool_admin': return format3PoolAdminEvent(de.event);
+      case 'stability_pool': return formatStabilityPoolEvent(de.event);
+      default: return { summary: '', typeName: '', badgeColor: '' };
+    }
+  }
+
+  function formatTimeAgo(ts: number): string {
+    const nsTs = ts > 1e15 ? ts : ts * 1e9;
+    const s = Math.floor((Date.now() - nsTs / 1e6) / 1000);
+    if (s < 0) return 'just now';
+    if (s < 60) return `${s}s ago`;
+    if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+    return `${Math.floor(s / 86400)}d ago`;
+  }
 
   // Vault maps for EventRow
   let vaultCollateralMap: Map<number, string> = $state(new Map());
@@ -78,9 +166,78 @@
     }
     poolsLoading = false;
 
-    // Recent events
-    if (eventsResult.status === 'fulfilled' && eventsResult.value) {
-      recentEvents = eventsResult.value.events ?? [];
+    // Recent events: merge from all sources, sort by timestamp, take top 10
+    const SAMPLE_SIZE = 10n;
+    try {
+      const backendEvents: DisplayEvent[] = [];
+      if (eventsResult.status === 'fulfilled' && eventsResult.value) {
+        for (const [idx, evt] of eventsResult.value.events ?? []) {
+          backendEvents.push({ globalIndex: idx, event: evt, source: 'backend', timestamp: extractTimestamp(evt) });
+        }
+      }
+
+      // Fetch a small sample from each non-backend source in parallel
+      const [
+        swapCount, ammSwapCount, ammLiqCount, threePoolLiqCount,
+        ammAdminCount, threePoolAdminCount, spCount
+      ] = await Promise.all([
+        fetchSwapEventCount().catch(() => 0n),
+        fetchAmmSwapEventCount().catch(() => 0n),
+        fetchAmmLiquidityEventCount().catch(() => 0n),
+        fetch3PoolLiquidityEventCount().catch(() => 0n),
+        fetchAmmAdminEventCount().catch(() => 0n),
+        fetch3PoolAdminEventCount().catch(() => 0n),
+        fetchStabilityPoolEventCount().catch(() => 0n),
+      ]);
+
+      // Fetch recent events from each source (start from end for newest)
+      const fetchRecent = (count: bigint, fetcher: (s: bigint, l: bigint) => Promise<any[]>) => {
+        if (Number(count) === 0) return Promise.resolve([]);
+        const start = count > SAMPLE_SIZE ? count - SAMPLE_SIZE : 0n;
+        const length = count > SAMPLE_SIZE ? SAMPLE_SIZE : count;
+        return fetcher(start, length).catch(() => []);
+      };
+
+      const [swaps, ammSwaps, ammLiq, threePoolLiq, ammAdmin, threePoolAdmin, spEvts] = await Promise.all([
+        fetchRecent(swapCount, fetchSwapEvents),
+        fetchRecent(ammSwapCount, fetchAmmSwapEvents),
+        fetchRecent(ammLiqCount, fetchAmmLiquidityEvents),
+        fetchRecent(threePoolLiqCount, fetch3PoolLiquidityEvents),
+        fetchRecent(ammAdminCount, fetchAmmAdminEvents),
+        fetchRecent(threePoolAdminCount, fetch3PoolAdminEvents),
+        fetchRecent(spCount, fetchStabilityPoolEvents),
+      ]);
+
+      const filteredSp = spEvts.filter((e: any) => {
+        const et = e.event_type ?? {};
+        return !('InterestReceived' in et);
+      });
+
+      const all: DisplayEvent[] = [...backendEvents];
+      const addSource = (events: any[], source: DisplayEvent['source']) => {
+        for (const e of events) {
+          all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source, timestamp: extractTimestamp(e) });
+        }
+      };
+
+      addSource(swaps, '3pool_swap');
+      addSource(ammSwaps, 'amm_swap');
+      addSource(ammLiq, 'amm_liquidity');
+      addSource(threePoolLiq, '3pool_liquidity');
+      addSource(ammAdmin, 'amm_admin');
+      addSource(threePoolAdmin, '3pool_admin');
+      addSource(filteredSp, 'stability_pool');
+
+      all.sort((a, b) => b.timestamp - a.timestamp);
+      recentEvents = all.slice(0, 10);
+    } catch (err) {
+      console.error('[dashboard] recent events merge error:', err);
+      // Fall back to backend-only events
+      if (eventsResult.status === 'fulfilled' && eventsResult.value) {
+        recentEvents = (eventsResult.value.events ?? []).map(([idx, evt]: [bigint, any]) => ({
+          globalIndex: idx, event: evt, source: 'backend' as const, timestamp: extractTimestamp(evt)
+        }));
+      }
     }
     eventsLoading = false;
 
@@ -256,9 +413,62 @@
     {:else}
       <div class="overflow-x-auto">
         <table class="w-full">
+          <thead>
+            <tr class="border-b border-gray-700/50 text-left">
+              <th class="px-4 py-2 text-xs font-medium text-gray-500 uppercase tracking-wider w-[5rem]">#</th>
+              <th class="px-4 py-2 text-xs font-medium text-gray-500 uppercase tracking-wider w-[7rem]">Time</th>
+              <th class="px-4 py-2 text-xs font-medium text-gray-500 uppercase tracking-wider w-[8rem]">Principal</th>
+              <th class="px-4 py-2 text-xs font-medium text-gray-500 uppercase tracking-wider w-[10rem]">Type</th>
+              <th class="px-4 py-2 text-xs font-medium text-gray-500 uppercase tracking-wider">Summary</th>
+              <th class="px-4 py-2 text-xs font-medium text-gray-500 uppercase tracking-wider w-[5rem] text-right">Details</th>
+            </tr>
+          </thead>
           <tbody>
-            {#each recentEvents as [index, event]}
-              <EventRow {event} index={Number(index)} {vaultCollateralMap} {vaultOwnerMap} />
+            {#each recentEvents as de (String(de.globalIndex) + de.source)}
+              {#if de.source === 'backend'}
+                <EventRow event={de.event} index={Number(de.globalIndex)} {vaultCollateralMap} {vaultOwnerMap} />
+              {:else}
+                {@const formatted = formatNonBackendEvent(de)}
+                {@const principal = extractPrincipalFromEvent(de.event)}
+                {@const sourceLabel = SOURCE_LABELS[de.source] ?? de.source}
+                <tr class="border-b border-gray-700/50 hover:bg-gray-800/30 transition-colors group">
+                  <td class="px-4 py-3">
+                    <a href="/explorer/dex/{de.source}/{Number(de.globalIndex)}" class="text-xs text-blue-400 hover:text-blue-300 font-mono" title="{sourceLabel} Event #{Number(de.globalIndex)}">{sourceLabel} #{Number(de.globalIndex)}</a>
+                  </td>
+                  <td class="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">
+                    {#if de.timestamp}
+                      <span>{formatTimeAgo(de.timestamp)}</span>
+                    {:else}
+                      <span class="text-gray-600">--</span>
+                    {/if}
+                  </td>
+                  <td class="px-4 py-3 text-xs text-gray-400 whitespace-nowrap">
+                    {#if principal}
+                      <a href="/explorer/address/{principal}" class="hover:text-blue-400 transition-colors font-mono">
+                        {shortenPrincipal(principal)}
+                      </a>
+                    {:else}
+                      <span class="text-gray-600">--</span>
+                    {/if}
+                  </td>
+                  <td class="px-4 py-3">
+                    <span class="inline-block text-xs font-medium px-2.5 py-0.5 rounded-full whitespace-nowrap {formatted.badgeColor}">
+                      {formatted.typeName}
+                    </span>
+                  </td>
+                  <td class="px-4 py-3 text-sm text-gray-300 truncate max-w-[300px]">
+                    {formatted.summary}
+                  </td>
+                  <td class="px-4 py-3 text-right">
+                    <a
+                      href="/explorer/dex/{de.source}/{Number(de.globalIndex)}"
+                      class="text-xs text-blue-400 hover:text-blue-300 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap"
+                    >
+                      Details &rarr;
+                    </a>
+                  </td>
+                </tr>
+              {/if}
             {/each}
           </tbody>
         </table>

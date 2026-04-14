@@ -144,8 +144,10 @@
 		error = null;
 		try {
 			// Fetch ALL backend events (batched) and all other event source counts in parallel
+			// Backend caps page size at 200 in get_events_filtered.
+			const BACKEND_PAGE_SIZE = 200;
 			const [firstBatch, threePoolSwapCount, ammSwapCount, ammLiqCount, threePoolLiqCount, ammAdminCount, threePoolAdminCount, spCount] = await Promise.all([
-				fetchEvents(0n, BigInt(500)),
+				fetchEvents(0n, BigInt(BACKEND_PAGE_SIZE)),
 				fetchSwapEventCount(),
 				fetchAmmSwapEventCount(),
 				fetchAmmLiquidityEventCount(),
@@ -160,8 +162,8 @@
 			const backendTotal = Number(firstBatch.total);
 			if (allBackendEvents.length < backendTotal) {
 				const remaining: Promise<{ total: bigint; events: [bigint, any][] }>[] = [];
-				for (let page = 1; page * 500 < backendTotal; page++) {
-					remaining.push(fetchEvents(BigInt(page), BigInt(500)));
+				for (let page = 1; page * BACKEND_PAGE_SIZE < backendTotal; page++) {
+					remaining.push(fetchEvents(BigInt(page), BigInt(BACKEND_PAGE_SIZE)));
 				}
 				const batches = await Promise.all(remaining);
 				for (const batch of batches) {
@@ -235,7 +237,8 @@
 		try {
 			// Fetch ALL backend events so we can filter by category client-side
 			// without the old bug of empty pages from filtering paginated data.
-			const batchSize = 500;
+			// Backend caps page size at 200 in get_events_filtered.
+			const batchSize = 200;
 			const allEvents: [bigint, any][] = [];
 			let pageNum = 0;
 			let filteredTotal = Infinity;
@@ -244,7 +247,7 @@
 				filteredTotal = Number(batch.total);
 				allEvents.push(...batch.events);
 				pageNum++;
-				if (batch.events.length < batchSize) break; // no more pages
+				if (batch.events.length === 0) break; // safety: backend returned nothing
 			}
 
 			// Apply category filter
