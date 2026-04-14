@@ -2,7 +2,11 @@
   import { page } from '$app/stores';
   import '../app.css';
 
-  let appUrl = 'https://app.rumiprotocol.xyz';
+  // Match the app subdomain to the TLD of the current host so visitors stay
+  // on the domain they arrived from (.com → app.rumiprotocol.com, otherwise .xyz).
+  $: appUrl = $page.url.hostname.endsWith('rumiprotocol.com')
+    ? 'https://app.rumiprotocol.com'
+    : 'https://app.rumiprotocol.xyz';
 </script>
 
 <div class="min-h-screen flex flex-col relative z-10">
