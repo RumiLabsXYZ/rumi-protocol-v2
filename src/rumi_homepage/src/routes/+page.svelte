@@ -1,5 +1,11 @@
 <script>
-  let appUrl = 'https://app.rumiprotocol.xyz';
+  import { page } from '$app/stores';
+
+  // Match the app subdomain to the TLD of the current host so visitors stay
+  // on the domain they arrived from (.com → app.rumiprotocol.com, otherwise .xyz).
+  $: appUrl = $page.url.hostname.endsWith('rumiprotocol.com')
+    ? 'https://app.rumiprotocol.com'
+    : 'https://app.rumiprotocol.xyz';
 
   // ── Single source of truth for supported collateral ──
   // Update this list when adding new assets. Everything else derives from it.
