@@ -1,8 +1,8 @@
 <!-- src/vault_frontend/src/lib/components/layout/PositionStrip.svelte -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { userVaults, isLoadingVaults } from '$lib/stores/appDataStore';
-  import { isConnected } from '$lib/stores/wallet';
+  import { appDataStore, userVaults, isLoadingVaults } from '$lib/stores/appDataStore';
+  import { isConnected, principal } from '$lib/stores/wallet';
   import { permissionStore } from '$lib/stores/permissionStore';
   import { collateralStore } from '$lib/stores/collateralStore';
   import { isDevelopment } from '$lib/config';
@@ -41,9 +41,26 @@
   $: canView = isDevelopment || $developerAccess || $isConnected
     || ($permissionStore.initialized && $permissionStore.canViewVaults);
 
+  // Auto-load user vaults on connect so the strip reflects the user's real
+  // position everywhere, not just after visiting /vaults. fetchUserVaults has
+  // built-in caching and request-deduplication, so reactive refires are cheap.
+  // Tracks whether we've ever attempted a fetch for this connection so the
+  // skeleton (not the CTA) shows during the initial load.
+  let hasAttemptedLoad = false;
+  $: if ($isConnected && $principal && !$isLoadingVaults) {
+    hasAttemptedLoad = true;
+    appDataStore.fetchUserVaults($principal).catch(err => {
+      console.error('PositionStrip: failed to load user vaults', err);
+    });
+  }
+  $: if (!$isConnected) hasAttemptedLoad = false;
+
   $: summary = aggregatePosition($userVaults, $collateralStore.collaterals);
   $: hasPosition = $userVaults.length > 0;
-  $: showSkeleton = $isConnected && $isLoadingVaults && $userVaults.length === 0;
+  // Show skeleton while loading OR while we haven't finished the first fetch
+  // for this connection yet. Prevents the CTA from flashing before data arrives.
+  $: showSkeleton = $isConnected && $userVaults.length === 0
+    && ($isLoadingVaults || !hasAttemptedLoad);
 
   // Expose the rendered height as a CSS variable on <html> so main-content
   // padding can compensate. Bound to the outer wrapper so it stays 0 when
