@@ -172,10 +172,9 @@
   .strip {
     display: flex;
     align-items: center;
+    justify-content: center;
     gap: 1.25rem;
     padding: 0.5rem 1.5rem;
-    max-width: 1200px;
-    margin: 0 auto;
     font-size: 0.8125rem;
     min-height: 2.25rem;
     box-sizing: border-box;
@@ -227,16 +226,14 @@
   }
 
   .caret {
-    margin-left: auto;
     color: var(--rumi-text-muted);
     font-size: 0.75rem;
   }
 
   /* Breakdown row */
   .breakdown {
-    max-width: 1200px;
-    margin: 0 auto;
     padding: 0 1.5rem 0.625rem;
+    justify-content: center;
     display: flex;
     flex-wrap: wrap;
     gap: 0.5rem;
@@ -263,7 +260,7 @@
   }
   .cta-headline { color: var(--rumi-text-primary); font-weight: 600; }
   .cta-sub { color: var(--rumi-text-muted); font-size: 0.75rem; }
-  .cta-link { margin-left: auto; color: var(--rumi-action); text-decoration: none; font-weight: 500; }
+  .cta-link { color: var(--rumi-action); text-decoration: none; font-weight: 500; }
   .cta-link:hover { text-decoration: underline; }
 
   /* Skeleton */
