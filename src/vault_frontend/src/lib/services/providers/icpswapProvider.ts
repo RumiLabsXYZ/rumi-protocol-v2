@@ -66,6 +66,9 @@ export class IcpswapProvider implements SwapProvider {
   private async getActor(): Promise<IcpswapPool> {
     if (this._actor) return this._actor;
     const agent = await HttpAgent.create({ host: CONFIG.host });
+    if (CONFIG.isLocal) {
+      await agent.fetchRootKey();
+    }
     this._actor = Actor.createActor<IcpswapPool>(icpswapPoolIDL, {
       agent,
       canisterId: this.config.poolCanisterId,

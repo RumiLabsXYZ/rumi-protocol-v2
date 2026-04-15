@@ -2,7 +2,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('@dfinity/agent', () => ({
   Actor: { createActor: vi.fn() },
-  HttpAgent: { create: vi.fn().mockResolvedValue({}) },
+  HttpAgent: {
+    create: vi.fn().mockResolvedValue({
+      fetchRootKey: vi.fn().mockResolvedValue(undefined),
+    }),
+  },
 }));
 
 import { Actor } from '@dfinity/agent';
