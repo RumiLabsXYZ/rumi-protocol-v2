@@ -81,8 +81,11 @@ export class IcpswapProvider implements SwapProvider {
     this.unwrapResult(depositResult, 'depositFrom');
 
     // After a successful deposit the input token sits on the pool's internal
-    // subaccount. Any failure in swap or withdraw leaves a recoverable balance,
-    // so we enrich the error with explicit instructions.
+    // subaccount. If swap or withdraw fails the balance stays there, so we
+    // enrich those errors with recovery instructions. Only wrap steps that
+    // could leave funds stranded -- the post-withdraw slippage check below
+    // runs on funds already back in the user's wallet.
+    let withdrawn: bigint;
     try {
       // Step 2: swap within the pool (amountOutMinimum is the primary slippage
       // guard, enforced by the pool itself).
@@ -100,22 +103,25 @@ export class IcpswapProvider implements SwapProvider {
         amount: swapOut,
         fee: 0n,
       });
-      const withdrawn = this.unwrapResult(withdrawResult, 'withdraw');
-
-      // Defense-in-depth slippage check. The pool's amountOutMinimum above is
-      // the authoritative guard; this catches the edge case where the swap
-      // succeeds but the withdraw returns less than expected.
-      if (withdrawn < minOut) {
-        throw new Error(`ICPswap swap failed slippage check: got ${withdrawn}, minimum ${minOut}`);
-      }
-
-      return { amountOut: withdrawn };
+      withdrawn = this.unwrapResult(withdrawResult, 'withdraw');
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       throw new Error(
         `${msg} (your ${tokenIn.symbol} deposit is stranded on ICPswap pool ${this.config.poolCanisterId}; recover it by calling withdraw on that canister)`,
+        { cause: err },
       );
     }
+
+    // Defense-in-depth slippage check. The pool's amountOutMinimum above is
+    // the authoritative guard; this catches the edge case where the swap
+    // succeeds but the withdraw returns less than expected (e.g., ledger fee
+    // larger than anticipated). At this point the funds are in the user's
+    // wallet, so no recovery hint is needed.
+    if (withdrawn < minOut) {
+      throw new Error(`ICPswap swap failed slippage check: got ${withdrawn}, minimum ${minOut}`);
+    }
+
+    return { amountOut: withdrawn };
   }
 
   private async getActor(): Promise<IcpswapPool> {
