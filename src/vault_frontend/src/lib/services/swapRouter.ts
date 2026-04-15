@@ -331,6 +331,18 @@ export async function executeRoute(
       const quote = route.providerQuote;
       if (!quote) throw new Error('amm_swap route missing providerQuote');
       const provider = _threeUsdIcpRegistry.get(quote.provider);
+
+      // RumiAmmProvider handles approval internally via ammService.swap.
+      // ICPswap needs an explicit ICRC-2 approval to the pool canister before
+      // the provider's depositFrom can pull funds.
+      if (isIcpswapProvider(quote.provider)) {
+        const poolCanisterId = quote.meta.poolCanisterId as string | undefined;
+        if (typeof poolCanisterId !== 'string') {
+          throw new Error('amm_swap: ICPswap quote missing meta.poolCanisterId');
+        }
+        await approveIcpswapPool(from, amountIn, poolCanisterId);
+      }
+
       const result = await provider.swap(from, to, amountIn, minOutput, quote);
       return result.amountOut;
     }
@@ -354,6 +366,17 @@ export async function executeRoute(
       const threeUsdToken = AMM_TOKENS.find(t => t.is3USD)!;
       const provider = _threeUsdIcpRegistry.get(hopQuote.provider);
       const freshQuote = await provider.quote(threeUsdToken, to, threeUsdReceived);
+
+      // ICPswap needs an explicit ICRC-2 approval to the pool canister; Rumi
+      // AMM handles its own approval via ammService.swap.
+      if (isIcpswapProvider(freshQuote.provider)) {
+        const poolCanisterId = freshQuote.meta.poolCanisterId as string | undefined;
+        if (typeof poolCanisterId !== 'string') {
+          throw new Error('stable_to_icp: ICPswap quote missing meta.poolCanisterId');
+        }
+        await approveIcpswapPool(threeUsdToken, threeUsdReceived, poolCanisterId);
+      }
+
       const icpMinOutput = freshQuote.amountOut * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
       const result = await provider.swap(threeUsdToken, to, threeUsdReceived, icpMinOutput, freshQuote);
       return result.amountOut;
@@ -369,6 +392,17 @@ export async function executeRoute(
       // Hop 1: ICP -> 3USD via winning provider
       const threeUsdToken = AMM_TOKENS.find(t => t.is3USD)!;
       const provider = _threeUsdIcpRegistry.get(hopQuote.provider);
+
+      // ICPswap needs an explicit ICRC-2 approval to the pool canister; Rumi
+      // AMM handles its own approval via ammService.swap.
+      if (isIcpswapProvider(hopQuote.provider)) {
+        const poolCanisterId = hopQuote.meta.poolCanisterId as string | undefined;
+        if (typeof poolCanisterId !== 'string') {
+          throw new Error('icp_to_stable: ICPswap quote missing meta.poolCanisterId');
+        }
+        await approveIcpswapPool(from, amountIn, poolCanisterId);
+      }
+
       const threeUsdMinOutput = hopQuote.amountOut * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
       const hop1 = await provider.swap(from, threeUsdToken, amountIn, threeUsdMinOutput, hopQuote);
 
@@ -403,6 +437,13 @@ export async function executeRoute(
     default:
       throw new Error(`Unknown route type: ${route.type}`);
   }
+}
+
+/** True when the provider id points at any ICPswap pool. Used by non-Oisy
+ *  branches to decide whether an explicit ICRC-2 approval is required before
+ *  dispatching to provider.swap(). */
+function isIcpswapProvider(providerId: string): boolean {
+  return providerId === 'icpswap_3usd_icp' || providerId === 'icpswap_icusd_icp';
 }
 
 /**

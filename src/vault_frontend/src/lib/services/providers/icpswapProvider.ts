@@ -2,6 +2,8 @@ import { Actor, HttpAgent } from '@dfinity/agent';
 import type { _SERVICE as IcpswapPool } from '$declarations/icpswap_pool/icpswap_pool.did';
 import { idlFactory as icpswapPoolIDL } from '$declarations/icpswap_pool/icpswap_pool.did.js';
 import { CONFIG } from '../../config';
+import { walletStore } from '../../stores/wallet';
+import { canisterIDLs } from '../pnp';
 import type { AmmToken } from '../ammService';
 import type { SwapProvider, ProviderQuote, ProviderSwapResult, ProviderId } from './types';
 
@@ -35,7 +37,7 @@ export class IcpswapProvider implements SwapProvider {
   }
 
   async quote(tokenIn: AmmToken, tokenOut: AmmToken, amountIn: bigint): Promise<ProviderQuote> {
-    const pool = await this.getActor();
+    const pool = await this.getAnonActor();
     const zeroForOne = tokenIn.ledgerId === this.config.token0LedgerId;
     const result = await pool.quote({
       amountIn: amountIn.toString(),
@@ -60,7 +62,10 @@ export class IcpswapProvider implements SwapProvider {
   async swap(
     tokenIn: AmmToken, tokenOut: AmmToken, amountIn: bigint, minOut: bigint, quote: ProviderQuote,
   ): Promise<ProviderSwapResult> {
-    const pool = await this.getActor();
+    // depositFrom pulls from msg.caller's account, so the actor MUST be built
+    // with the user's identity. The anonymous agent used by quote() would
+    // resolve to the anonymous principal (2vxsx-fae) and fail with no balance.
+    const pool = await this.getAuthActor();
 
     // Validate the provider-specific hint rather than silently coercing. A
     // missing or non-boolean zeroForOne would route the swap the wrong way.
@@ -124,7 +129,10 @@ export class IcpswapProvider implements SwapProvider {
     return { amountOut: withdrawn };
   }
 
-  private async getActor(): Promise<IcpswapPool> {
+  /**
+   * Anonymous actor for query calls (quote). No identity needed; safe to cache.
+   */
+  private async getAnonActor(): Promise<IcpswapPool> {
     if (this._actor) return this._actor;
     const agent = await HttpAgent.create({ host: CONFIG.host });
     if (CONFIG.isLocal) {
@@ -135,6 +143,18 @@ export class IcpswapProvider implements SwapProvider {
       canisterId: this.config.poolCanisterId,
     });
     return this._actor;
+  }
+
+  /**
+   * Authenticated actor for update calls (depositFrom/swap/withdraw). Built
+   * per-call via walletStore so the current wallet's identity is used;
+   * not cached because the active wallet can change between swaps.
+   */
+  private async getAuthActor(): Promise<IcpswapPool> {
+    const actor = await walletStore.getActor(
+      this.config.poolCanisterId, canisterIDLs.icpswap_pool,
+    );
+    return actor as unknown as IcpswapPool;
   }
 
   private unwrapResult(result: { ok: bigint } | { err: unknown }, operation: string): bigint {

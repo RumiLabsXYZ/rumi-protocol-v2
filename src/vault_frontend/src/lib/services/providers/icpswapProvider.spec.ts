@@ -9,9 +9,32 @@ vi.mock('@dfinity/agent', () => ({
   },
 }));
 
+// IcpswapProvider now pulls in walletStore + canisterIDLs so .swap() can
+// build an authenticated actor (the anonymous agent was caller=anonymous,
+// which made depositFrom fail for every II/Plug swap). Mock both so the
+// spec doesn't drag in the real wallet/pnp stack.
+vi.mock('../pnp', () => ({
+  canisterIDLs: { icpswap_pool: {} },
+}));
+vi.mock('../../stores/wallet', () => ({
+  walletStore: {
+    subscribe: () => () => {},
+    getActor: vi.fn(),
+  },
+}));
+
 import { Actor } from '@dfinity/agent';
 import { IcpswapProvider } from './icpswapProvider';
 import type { AmmToken } from '../ammService';
+import { walletStore } from '../../stores/wallet';
+
+/** Route both the anonymous quote actor (Actor.createActor) and the
+ *  authenticated swap actor (walletStore.getActor) to the same pool
+ *  mock, so a test can drive the full quote->swap flow. */
+function routeMockPoolToBothActors(mockPool: unknown) {
+  vi.mocked(Actor.createActor).mockReturnValue(mockPool as any);
+  vi.mocked(walletStore.getActor).mockResolvedValue(mockPool as any);
+}
 
 const icUsd: AmmToken = {
   symbol: 'icUSD', ledgerId: 't6bor-paaaa-aaaap-qrd5q-cai',
@@ -54,7 +77,7 @@ describe('IcpswapProvider (quote)', () => {
     const mockPool = {
       quote: vi.fn().mockResolvedValue({ ok: 1_000_000_000n }),
     };
-    vi.mocked(Actor.createActor).mockReturnValue(mockPool as any);
+    routeMockPoolToBothActors(mockPool);
 
     const provider = new IcpswapProvider({
       id: 'icpswap_icusd_icp',
@@ -88,7 +111,7 @@ describe('IcpswapProvider.swap', () => {
       swap: vi.fn().mockResolvedValue({ ok: 495_000_000n }),
       withdraw: vi.fn().mockResolvedValue({ ok: 495_000_000n }),
     };
-    vi.mocked(Actor.createActor).mockReturnValue(mockPool as any);
+    routeMockPoolToBothActors(mockPool);
 
     const provider = new IcpswapProvider({
       id: 'icpswap_icusd_icp',
@@ -128,7 +151,7 @@ describe('IcpswapProvider.swap', () => {
       swap: vi.fn().mockResolvedValue({ ok: 100_000_000n }),
       withdraw: vi.fn().mockResolvedValue({ ok: 100_000_000n }),
     };
-    vi.mocked(Actor.createActor).mockReturnValue(mockPool as any);
+    routeMockPoolToBothActors(mockPool);
 
     const provider = new IcpswapProvider({
       id: 'icpswap_icusd_icp',
@@ -154,7 +177,7 @@ describe('IcpswapProvider.swap', () => {
       swap: vi.fn().mockResolvedValue({ err: { InternalError: 'pool frozen' } }),
       withdraw: vi.fn(),
     };
-    vi.mocked(Actor.createActor).mockReturnValue(mockPool as any);
+    routeMockPoolToBothActors(mockPool);
 
     const provider = new IcpswapProvider({
       id: 'icpswap_icusd_icp',
@@ -177,7 +200,7 @@ describe('IcpswapProvider.swap', () => {
       swap: vi.fn(),
       withdraw: vi.fn(),
     };
-    vi.mocked(Actor.createActor).mockReturnValue(mockPool as any);
+    routeMockPoolToBothActors(mockPool);
 
     const provider = new IcpswapProvider({
       id: 'icpswap_icusd_icp',

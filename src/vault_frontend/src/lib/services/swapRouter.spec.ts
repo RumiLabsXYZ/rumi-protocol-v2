@@ -81,7 +81,22 @@ vi.mock('./oisySigner', () => ({
 }));
 vi.mock('./pnp', () => ({ canisterIDLs: {} }));
 vi.mock('../stores/wallet', () => ({
-  walletStore: { subscribe: () => () => {} },
+  walletStore: {
+    subscribe: () => () => {},
+    // Non-Oisy ICPswap branches call walletStore.getActor to build an
+    // authenticated actor and (separately) to run icrc2_approve. Return
+    // a stub that satisfies both call sites; tests that care about the
+    // approval payload should override this per-case.
+    getActor: vi.fn().mockResolvedValue({
+      icrc2_approve: vi.fn().mockResolvedValue({ Ok: 1n }),
+      // Authenticated pool actor stub; tests drive provider.swap via the
+      // ICPswap mock in `rumiAmmProvider`/`icpswapProvider` module mocks
+      // above, so this only needs to be non-throwing.
+      depositFrom: vi.fn().mockResolvedValue({ ok: 0n }),
+      swap: vi.fn().mockResolvedValue({ ok: 0n }),
+      withdraw: vi.fn().mockResolvedValue({ ok: 0n }),
+    }),
+  },
 }));
 
 import { resolveRoute, executeRoute, type SwapRoute } from './swapRouter';
@@ -139,7 +154,10 @@ function icpswapQuote(amountOut: bigint, overrides: Partial<ProviderQuote> = {})
     amountOut,
     feeDisplay: '0.30%',
     priceImpactBps: 0,
-    meta: { poolCanisterId: 'icpswap-pool', zeroForOne: true },
+    // Real ICPswap 3USD/ICP pool canister ID — needs to be a valid Principal
+    // string because executeRoute now calls Principal.fromText on it for the
+    // pre-swap ICRC-2 approval (added in the B2 blocker fix).
+    meta: { poolCanisterId: 'mu2zw-6iaaa-aaaar-qb56q-cai', zeroForOne: true },
     ...overrides,
   };
 }

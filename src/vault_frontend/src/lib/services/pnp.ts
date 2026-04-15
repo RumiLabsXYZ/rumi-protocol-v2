@@ -42,12 +42,14 @@ export const REQUIRED_CANISTERS = {
 // All delegation targets for comprehensive permissions
 const getAllDelegationTargets = (): string[] => {
   return [
-    CONFIG.currentCanisterId,      // Protocol canister
-    CONFIG.currentIcpLedgerId,     // ICP Ledger  
-    CONFIG.currentIcusdLedgerId,   // icUSD Ledger
-    CANISTER_IDS.STABILITY_POOL,   // Stability Pool canister
-    CANISTER_IDS.THREEPOOL,        // 3pool (StableSwap)
-    CANISTER_IDS.RUMI_AMM,         // AMM pool
+    CONFIG.currentCanisterId,              // Protocol canister
+    CONFIG.currentIcpLedgerId,             // ICP Ledger
+    CONFIG.currentIcusdLedgerId,           // icUSD Ledger
+    CANISTER_IDS.STABILITY_POOL,           // Stability Pool canister
+    CANISTER_IDS.THREEPOOL,                // 3pool (StableSwap)
+    CANISTER_IDS.RUMI_AMM,                 // AMM pool
+    CANISTER_IDS.ICPSWAP_3USD_ICP_POOL,    // ICPswap 3USD/ICP pool
+    CANISTER_IDS.ICPSWAP_ICUSD_ICP_POOL,   // ICPswap icUSD/ICP pool
   ].filter(Boolean); // Filter out any undefined values
 };
 
