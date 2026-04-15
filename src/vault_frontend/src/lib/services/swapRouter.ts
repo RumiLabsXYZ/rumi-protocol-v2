@@ -7,6 +7,26 @@ import { getOisySignerAgent, createOisyActor } from './oisySigner';
 import { canisterIDLs } from './pnp';
 import { walletStore } from '../stores/wallet';
 import { get } from 'svelte/store';
+import { RumiAmmProvider } from './providers/rumiAmmProvider';
+import { IcpswapProvider } from './providers/icpswapProvider';
+import { ProviderRegistry } from './providers/providerRegistry';
+import type { ProviderQuote } from './providers/types';
+
+// ──────────────────────────────────────────────────────────────
+// Provider registry for the 3USD <-> ICP hop.
+// Quotes Rumi AMM and ICPswap 3USD/ICP in parallel and picks the winner.
+// ──────────────────────────────────────────────────────────────
+
+const _threeUsdIcpRegistry = new ProviderRegistry([
+  new RumiAmmProvider(),
+  new IcpswapProvider({
+    id: 'icpswap_3usd_icp',
+    poolCanisterId: CANISTER_IDS.ICPSWAP_3USD_ICP_POOL,
+    token0LedgerId: CANISTER_IDS.THREEPOOL,
+    token1LedgerId: CANISTER_IDS.ICP_LEDGER,
+    feeBps: 30,
+  }),
+]);
 
 // ──────────────────────────────────────────────────────────────
 // Route types
@@ -32,8 +52,24 @@ export interface SwapRoute {
   feeDisplay: string;
   /** For multi-hop routes: intermediate output (e.g. 3USD amount between hops) */
   intermediateOutput?: bigint;
-  /** Cached AMM pool ID (avoids re-fetching during execution) */
+  /**
+   * Cached Rumi AMM pool ID. Populated when the 3USD/ICP hop resolves to
+   * Rumi AMM so the Oisy batched executor can reuse it without an extra
+   * canister query. Removed in Task 10 once Oisy dispatches through the
+   * provider registry.
+   */
   poolId?: string;
+  /**
+   * Winning provider quote for single-hop `amm_swap` routes. Populated for
+   * Case 4 (3USD <-> ICP). Passed back to the provider during execution.
+   */
+  providerQuote?: ProviderQuote;
+  /**
+   * Winning provider quote for the 3USD/ICP leg of a two-hop route
+   * (Cases 5/6: stable <-> ICP). Task 10 uses this to dispatch via the
+   * provider registry; Task 9 only populates it.
+   */
+  hopProviderQuote?: ProviderQuote;
 }
 
 // The 3USD/ICP pool ID — cached after first lookup
@@ -124,58 +160,59 @@ export async function resolveRoute(
     };
   }
 
-  // Case 4: 3USD <-> ICP (direct AMM swap)
+  // Case 4: 3USD <-> ICP (best of Rumi AMM and ICPswap 3USD/ICP)
   if ((is3USD(from) && isICP(to)) || (isICP(from) && is3USD(to))) {
-    const poolId = await getAmmPoolId();
-    const tokenIn = Principal.fromText(from.ledgerId);
-    const output = await ammService.getQuote(poolId, tokenIn, amountIn);
+    const quote = await _threeUsdIcpRegistry.bestQuote(from, to, amountIn);
     return {
       type: 'amm_swap',
-      pathDisplay: `${from.symbol} → ${to.symbol}`,
+      pathDisplay: quote.label,
       hops: 1,
-      estimatedOutput: output,
-      feeDisplay: '0.30%',
-      poolId,
+      estimatedOutput: quote.amountOut,
+      feeDisplay: quote.feeDisplay,
+      providerQuote: quote,
+      // Keep poolId populated when Rumi AMM wins so the Oisy helper can
+      // reuse it without an extra canister query. Task 10 removes this.
+      poolId: quote.provider === 'rumi_amm' ? (quote.meta.poolId as string) : undefined,
     };
   }
 
-  // Case 5: Stablecoin -> ICP (two-hop: deposit + AMM swap)
+  // Case 5: Stablecoin -> ICP (two-hop: 3pool deposit + best 3USD->ICP swap)
   if (isStablecoin(from) && isICP(to)) {
     const amounts = [0n, 0n, 0n];
     amounts[from.threePoolIndex] = amountIn;
     const threeUsdOut = await threePoolService.calcAddLiquidity(amounts);
 
-    const poolId = await getAmmPoolId();
-    const threeUsdPrincipal = Principal.fromText(CANISTER_IDS.THREEPOOL);
-    const icpOut = await ammService.getQuote(poolId, threeUsdPrincipal, threeUsdOut);
+    const threeUsdToken = AMM_TOKENS.find(t => t.is3USD)!;
+    const hopQuote = await _threeUsdIcpRegistry.bestQuote(threeUsdToken, to, threeUsdOut);
 
     return {
       type: 'stable_to_icp',
       pathDisplay: `${from.symbol} → 3USD → ICP`,
       hops: 2,
-      estimatedOutput: icpOut,
-      feeDisplay: '~0.30%',
+      estimatedOutput: hopQuote.amountOut,
+      feeDisplay: hopQuote.feeDisplay,
       intermediateOutput: threeUsdOut,
-      poolId,
+      hopProviderQuote: hopQuote,
+      poolId: hopQuote.provider === 'rumi_amm' ? (hopQuote.meta.poolId as string) : undefined,
     };
   }
 
-  // Case 6: ICP -> Stablecoin (two-hop: AMM swap + redeem)
+  // Case 6: ICP -> Stablecoin (two-hop: best ICP->3USD swap + 3pool redeem)
   if (isICP(from) && isStablecoin(to)) {
-    const poolId = await getAmmPoolId();
-    const icpPrincipal = Principal.fromText(CANISTER_IDS.ICP_LEDGER);
-    const threeUsdOut = await ammService.getQuote(poolId, icpPrincipal, amountIn);
+    const threeUsdToken = AMM_TOKENS.find(t => t.is3USD)!;
+    const hopQuote = await _threeUsdIcpRegistry.bestQuote(from, threeUsdToken, amountIn);
 
-    const stableOut = await threePoolService.calcRemoveOneCoin(threeUsdOut, to.threePoolIndex);
+    const stableOut = await threePoolService.calcRemoveOneCoin(hopQuote.amountOut, to.threePoolIndex);
 
     return {
       type: 'icp_to_stable',
       pathDisplay: `ICP → 3USD → ${to.symbol}`,
       hops: 2,
       estimatedOutput: stableOut,
-      feeDisplay: '~0.30%',
-      intermediateOutput: threeUsdOut,
-      poolId,
+      feeDisplay: hopQuote.feeDisplay,
+      intermediateOutput: hopQuote.amountOut,
+      hopProviderQuote: hopQuote,
+      poolId: hopQuote.provider === 'rumi_amm' ? (hopQuote.meta.poolId as string) : undefined,
     };
   }
 
@@ -218,51 +255,77 @@ export async function executeRoute(
     }
 
     case 'amm_swap': {
-      const poolId = await getAmmPoolId();
-      const tokenIn = Principal.fromText(from.ledgerId);
-      const result = await ammService.swap(poolId, tokenIn, amountIn, minOutput, from);
-      return result.amount_out;
+      assertOisyProviderSupported(route);
+      const quote = route.providerQuote;
+      if (!quote) throw new Error('amm_swap route missing providerQuote');
+      const provider = _threeUsdIcpRegistry.get(quote.provider);
+      const result = await provider.swap(from, to, amountIn, minOutput, quote);
+      return result.amountOut;
     }
 
     case 'stable_to_icp': {
+      assertOisyProviderSupported(route);
       if (isOisyWallet()) {
         return await executeStableToIcpOisy(route, from, amountIn, slippageBps);
       }
-      // Non-Oisy: sequential two-hop
+      const hopQuote = route.hopProviderQuote;
+      if (!hopQuote) throw new Error('stable_to_icp route missing hopProviderQuote');
+
+      // Hop 1: stablecoin -> 3USD (3pool deposit)
       const amounts = [0n, 0n, 0n];
       amounts[from.threePoolIndex] = amountIn;
       const threeUsdEstimate = await threePoolService.calcAddLiquidity(amounts);
       const threeUsdMinOutput = threeUsdEstimate * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
       const threeUsdReceived = await threePoolService.addLiquidity(amounts, threeUsdMinOutput);
 
-      const poolId = await getAmmPoolId();
-      const threeUsdPrincipal = Principal.fromText(CANISTER_IDS.THREEPOOL);
-      const icpEstimate = await ammService.getQuote(poolId, threeUsdPrincipal, threeUsdReceived);
-      const icpMinOutput = icpEstimate * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
+      // Hop 2: 3USD -> ICP via winning provider. Re-quote with actual received
+      // amount so the slippage budget reflects what we really have.
       const threeUsdToken = AMM_TOKENS.find(t => t.is3USD)!;
-      const result = await ammService.swap(poolId, threeUsdPrincipal, threeUsdReceived, icpMinOutput, threeUsdToken);
-      return result.amount_out;
+      const provider = _threeUsdIcpRegistry.get(hopQuote.provider);
+      const freshQuote = await provider.quote(threeUsdToken, to, threeUsdReceived);
+      const icpMinOutput = freshQuote.amountOut * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
+      const result = await provider.swap(threeUsdToken, to, threeUsdReceived, icpMinOutput, freshQuote);
+      return result.amountOut;
     }
 
     case 'icp_to_stable': {
+      assertOisyProviderSupported(route);
       if (isOisyWallet()) {
         return await executeIcpToStableOisy(route, to, amountIn, slippageBps);
       }
-      // Non-Oisy: sequential two-hop
-      const poolId = await getAmmPoolId();
-      const icpPrincipal = Principal.fromText(CANISTER_IDS.ICP_LEDGER);
-      const threeUsdEstimate = await ammService.getQuote(poolId, icpPrincipal, amountIn);
-      const threeUsdMinOutput = threeUsdEstimate * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
-      const icpToken = AMM_TOKENS.find(t => t.symbol === 'ICP')!;
-      const hop1 = await ammService.swap(poolId, icpPrincipal, amountIn, threeUsdMinOutput, icpToken);
+      const hopQuote = route.hopProviderQuote;
+      if (!hopQuote) throw new Error('icp_to_stable route missing hopProviderQuote');
 
-      const stableEstimate = await threePoolService.calcRemoveOneCoin(hop1.amount_out, to.threePoolIndex);
+      // Hop 1: ICP -> 3USD via winning provider
+      const threeUsdToken = AMM_TOKENS.find(t => t.is3USD)!;
+      const provider = _threeUsdIcpRegistry.get(hopQuote.provider);
+      const threeUsdMinOutput = hopQuote.amountOut * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
+      const hop1 = await provider.swap(from, threeUsdToken, amountIn, threeUsdMinOutput, hopQuote);
+
+      // Hop 2: 3USD -> stablecoin (3pool redeem)
+      const stableEstimate = await threePoolService.calcRemoveOneCoin(hop1.amountOut, to.threePoolIndex);
       const stableMinOutput = stableEstimate * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
-      return await threePoolService.removeOneCoin(hop1.amount_out, to.threePoolIndex, stableMinOutput);
+      return await threePoolService.removeOneCoin(hop1.amountOut, to.threePoolIndex, stableMinOutput);
     }
 
     default:
       throw new Error(`Unknown route type: ${route.type}`);
+  }
+}
+
+/**
+ * Transitional guard for Task 9: the Oisy batched helpers only know how to
+ * execute Rumi AMM swaps. Until Task 10 teaches them to dispatch via the
+ * provider registry, reject Oisy executions where ICPswap won the quote.
+ */
+function assertOisyProviderSupported(route: SwapRoute): void {
+  if (!isOisyWallet()) return;
+  const winner = route.providerQuote?.provider ?? route.hopProviderQuote?.provider;
+  if (winner && winner !== 'rumi_amm') {
+    throw new Error(
+      `Oisy batched execution for ${winner} is not yet supported (Task 10). ` +
+      `Please use Internet Identity for this swap, or switch to a smaller amount that routes through Rumi AMM.`,
+    );
   }
 }
 
