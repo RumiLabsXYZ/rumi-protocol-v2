@@ -27,7 +27,12 @@
     formatStabilityPoolEvent
   } from '$utils/explorerFormatters';
   import { shortenPrincipal } from '$utils/explorerHelpers';
+  import { calculateTheoreticalApy } from '$services/threePoolService';
+  import { threePoolService, POOL_TOKENS } from '$services/threePoolService';
+  import { ProtocolService } from '$services/protocol';
+  import { stabilityPoolService } from '$services/stabilityPoolService';
   import { e8sToNumber, COLLATERAL_SYMBOLS } from '$utils/explorerChartHelpers';
+  import { COLLATERAL_DISPLAY_ORDER } from '$stores/collateralStore';
   import type { ProtocolSummary, DailyTvlRow, PegStatus } from '$declarations/rumi_analytics/rumi_analytics.did';
   import type { CollateralRow } from '$components/explorer/CollateralTable.svelte';
 
@@ -134,7 +139,7 @@
     ] = await Promise.allSettled([
       fetchProtocolSummary(),
       fetchTvlSeries(365),
-      fetchVaultSeries(1),
+      fetchVaultSeries(365),
       fetchTwap(),
       fetchCollateralConfigs(),
       fetchPegStatus(),
@@ -160,9 +165,71 @@
     if (pegResult.status === 'fulfilled') {
       pegStatus = pegResult.value ?? null;
     }
+    // Try analytics APYs first, then compute directly as fallback
     if (apyResult.status === 'fulfilled' && apyResult.value) {
-      lpApy = apyResult.value.lp_apy_pct?.[0] ?? null;
-      spApy = apyResult.value.sp_apy_pct?.[0] ?? null;
+      const analyticsLp = apyResult.value.lp_apy_pct?.[0];
+      const analyticsSp = apyResult.value.sp_apy_pct?.[0];
+      // Only use analytics values if they're actual non-zero numbers
+      if (typeof analyticsLp === 'number' && analyticsLp > 0) lpApy = analyticsLp;
+      if (typeof analyticsSp === 'number' && analyticsSp > 0) spApy = analyticsSp;
+    }
+    // If analytics didn't have meaningful APYs, compute from live data
+    // LP APY: same approach as 3USD page
+    // SP APY: same approach as StabilityPoolTab (per-collateral eligible deposits)
+    if (!lpApy || !spApy) {
+      try {
+        const [protocolStatus, poolStatus, spStatus] = await Promise.allSettled([
+          ProtocolService.getProtocolStatus(),
+          threePoolService.getPoolStatus(),
+          stabilityPoolService.getPoolStatus(),
+        ]);
+
+        const ps = protocolStatus.status === 'fulfilled' ? protocolStatus.value : null;
+        const pool = poolStatus.status === 'fulfilled' ? poolStatus.value : null;
+        const sp = spStatus.status === 'fulfilled' ? spStatus.value : null;
+
+        if (!lpApy && ps && pool) {
+          let poolTvlE8s = 0;
+          for (let i = 0; i < pool.balances.length; i++) {
+            const token = POOL_TOKENS[i];
+            if (token) {
+              poolTvlE8s += token.decimals === 8
+                ? Number(pool.balances[i])
+                : Number(pool.balances[i]) * 100;
+            }
+          }
+          const threePoolBps = ps.interestSplit?.find((e: any) => e.destination === 'three_pool')?.bps ?? 5000;
+          const computed = calculateTheoreticalApy(threePoolBps, ps.perCollateralInterest, poolTvlE8s / 1e8);
+          if (computed != null) lpApy = computed * 100;
+        }
+
+        // SP APY: replicate StabilityPoolTab logic exactly
+        // Uses per-collateral eligible deposits as denominator, not total deposits
+        if (!spApy && ps && sp) {
+          const poolShare = (ps.interestSplit?.find((e: any) => e.destination === 'stability_pool')?.bps ?? 0) / 10000;
+          const perC = ps.perCollateralInterest;
+          if (poolShare > 0 && perC && perC.length > 0) {
+            const eligibleMap = new Map<string, number>(
+              (sp.eligible_icusd_per_collateral ?? []).map(([p, v]: [any, bigint]) => [
+                typeof p === 'object' && typeof p.toText === 'function' ? p.toText() : String(p),
+                Number(v) / 1e8
+              ])
+            );
+            let totalApr = 0;
+            for (const info of perC) {
+              const eligible = eligibleMap.get(info.collateralType) ?? 0;
+              if (eligible === 0 || info.totalDebtE8s === 0 || info.weightedInterestRate === 0) continue;
+              totalApr += (info.weightedInterestRate * poolShare * info.totalDebtE8s) / eligible;
+            }
+            if (totalApr > 0) {
+              const apy = Math.pow(1 + totalApr / 365, 365) - 1;
+              spApy = apy * 100;
+            }
+          }
+        }
+      } catch (e) {
+        console.error('[dashboard] APY fallback error:', e);
+      }
     }
     poolsLoading = false;
 
@@ -336,7 +403,8 @@
         const cfg = configMap.get(principal);
         const price = priceMap.get(principal)
           ?? summaryPriceMap.get(principal)
-          ?? (stats?.price_usd_e8s ? e8sToNumber(stats.price_usd_e8s) : 0);
+          ?? (stats?.price_usd_e8s ? e8sToNumber(stats.price_usd_e8s) : null)
+          ?? (backendStats?.price ? Number(backendStats.price) : 0);
 
         // Use bigint comparison for debt ceiling to avoid Number precision loss
         const debtCeilingRaw = cfg?.debt_ceiling ?? 0n;
@@ -348,12 +416,15 @@
         const vaultCount = stats
           ? Number(stats.vault_count)
           : (backendStats?.vault_count != null ? Number(backendStats.vault_count) : 0);
-        const totalCollateralE8s = stats
-          ? e8sToNumber(stats.total_collateral_e8s)
-          : (backendStats?.total_collateral_e8s != null ? e8sToNumber(backendStats.total_collateral_e8s) : 0);
+        // Use backend decimals for proper normalization (ckETH=18, ckXAUT=6, others=8)
+        const decimals = backendStats?.decimals != null ? Number(backendStats.decimals) : 8;
+        const totalCollateralRaw = stats
+          ? Number(stats.total_collateral_e8s)
+          : (backendStats?.total_collateral != null ? Number(backendStats.total_collateral) : 0);
+        const totalCollateralUnits = totalCollateralRaw / Math.pow(10, decimals);
         const totalDebtE8s = stats
           ? e8sToNumber(stats.total_debt_e8s)
-          : (backendStats?.total_debt_e8s != null ? e8sToNumber(backendStats.total_debt_e8s) : 0);
+          : (backendStats?.total_debt != null ? e8sToNumber(backendStats.total_debt) : 0);
         const medianCrBps = stats ? Number(stats.median_cr_bps) : 0;
 
         rows.push({
@@ -361,7 +432,7 @@
           symbol,
           price,
           vaultCount,
-          totalCollateralUsd: totalCollateralE8s * price,
+          totalCollateralUsd: totalCollateralUnits * price,
           totalDebt: totalDebtE8s,
           debtCeiling: e8sToNumber(debtCeilingRaw),
           unlimited: isUnlimited,
@@ -370,8 +441,12 @@
         });
       }
 
-      // Sort by TVL descending
-      rows.sort((a, b) => b.totalCollateralUsd - a.totalCollateralUsd);
+      // Sort by canonical display order (same as borrow page / protocol stats)
+      rows.sort((a, b) => {
+        const ai = COLLATERAL_DISPLAY_ORDER.indexOf(a.symbol);
+        const bi = COLLATERAL_DISPLAY_ORDER.indexOf(b.symbol);
+        return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+      });
       collateralRows = rows;
     } catch (err) {
       console.error('[dashboard] buildCollateralRows error:', err);

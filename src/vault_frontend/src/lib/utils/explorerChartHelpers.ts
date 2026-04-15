@@ -58,7 +58,7 @@ export const COLLATERAL_SYMBOLS: Record<string, string> = {
   'ryjl3-tyaaa-aaaaa-aaaba-cai': 'ICP',
   'mxzaz-hqaaa-aaaar-qaada-cai': 'ckBTC',
   'ss2fx-dyaaa-aaaar-qacoq-cai': 'ckETH',
-  'lkwrt-vyaaa-aaaar-qadkq-cai': 'ckXAUT',
+  'nza5v-qaaaa-aaaar-qahzq-cai': 'ckXAUT',
   'buwm7-7yaaa-aaaar-qagva-cai': 'nICP',
   '7pail-xaaaa-aaaas-aabmq-cai': 'BOB',
   'rh2pm-ryaaa-aaaan-qeniq-cai': 'EXE',

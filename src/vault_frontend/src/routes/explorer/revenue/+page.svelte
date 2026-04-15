@@ -4,6 +4,7 @@
     fetchFeeSeries, fetchSwapSeries, fetchTradeActivity
   } from '$services/explorer/analyticsService';
   import { fetchTreasuryStats, fetchInterestSplit } from '$services/explorer/explorerService';
+  import { ProtocolService } from '$services/protocol';
   import { e8sToNumber, formatCompact, nsToDate, formatDateShort } from '$utils/explorerChartHelpers';
 
   let feeData: any[] = $state([]);
@@ -11,15 +12,17 @@
   let tradeActivity: any = $state(null);
   let treasury: any = $state(null);
   let interestSplit: any = $state(null);
+  let protocolStatus: any = $state(null);
   let loading = $state(true);
 
   onMount(async () => {
-    const [feeResult, swapResult, tradeResult, treasuryResult, splitResult] = await Promise.allSettled([
+    const [feeResult, swapResult, tradeResult, treasuryResult, splitResult, psResult] = await Promise.allSettled([
       fetchFeeSeries(90),
       fetchSwapSeries(90),
       fetchTradeActivity(),
       fetchTreasuryStats(),
       fetchInterestSplit(),
+      ProtocolService.getProtocolStatus(),
     ]);
 
     if (feeResult.status === 'fulfilled') feeData = feeResult.value ?? [];
@@ -27,11 +30,12 @@
     if (tradeResult.status === 'fulfilled') tradeActivity = tradeResult.value;
     if (treasuryResult.status === 'fulfilled') treasury = treasuryResult.value;
     if (splitResult.status === 'fulfilled') interestSplit = splitResult.value;
+    if (psResult.status === 'fulfilled') protocolStatus = psResult.value;
     loading = false;
   });
 
   // Aggregate totals from fee series
-  const totalBorrowFees = $derived(
+  const totalBorrowFeesFromAnalytics = $derived(
     feeData.reduce((s, d) => s + e8sToNumber(d.borrowing_fees_e8s?.[0] ?? d.borrowing_fees_e8s ?? 0n), 0)
   );
   const totalRedemptionFees = $derived(
@@ -40,16 +44,47 @@
   const totalSwapFees = $derived(
     feeData.reduce((s, d) => s + e8sToNumber(d.swap_fees_e8s ?? 0n), 0)
   );
+
+  // Compute theoretical daily borrow interest from protocol status as fallback
+  // This estimates the daily protocol revenue from borrowing interest
+  const estimatedDailyBorrowRevenue = $derived.by(() => {
+    if (!protocolStatus?.perCollateralInterest) return 0;
+    // Treasury share of interest (from interest split)
+    const treasuryBps = protocolStatus.interestSplit?.find((e: any) => e.destination === 'treasury')?.bps ?? 0;
+    const treasuryShare = treasuryBps / 10000;
+    let dailyInterest = 0;
+    for (const info of protocolStatus.perCollateralInterest) {
+      // weightedInterestRate is the daily rate, totalDebtE8s is already in units
+      dailyInterest += info.weightedInterestRate * info.totalDebtE8s;
+    }
+    return dailyInterest * treasuryShare;
+  });
+
+  // Use analytics borrow fees if available, otherwise estimate from interest rates
+  const totalBorrowFees = $derived(
+    totalBorrowFeesFromAnalytics > 0
+      ? totalBorrowFeesFromAnalytics
+      : estimatedDailyBorrowRevenue * 90  // Rough 90-day estimate
+  );
+
   const totalFees = $derived(totalBorrowFees + totalRedemptionFees + totalSwapFees);
 
-  // 24h fees from trade activity
-  const fees24h = $derived(tradeActivity ? e8sToNumber(tradeActivity.total_fees_e8s) : 0);
+  // 24h fees: trade activity swap fees + estimated daily borrow interest
+  const fees24h = $derived.by(() => {
+    const swapFees24h = tradeActivity ? e8sToNumber(tradeActivity.total_fees_e8s) : 0;
+    return swapFees24h + estimatedDailyBorrowRevenue;
+  });
 
-  // Treasury balance
-  const treasuryBalance = $derived.by(() => {
-    if (!treasury) return 0;
-    const raw = treasury.total_balance ?? treasury.total_balance_e8s ?? 0n;
-    return e8sToNumber(raw);
+  // Treasury: show pending interest + pending collateral entries from get_treasury_stats
+  const treasuryInfo = $derived.by(() => {
+    if (!treasury) return null;
+    return {
+      pendingInterest: Number(treasury.pending_treasury_interest ?? 0n),
+      pendingCollateralEntries: Number(treasury.pending_treasury_collateral_entries ?? 0n),
+      liquidationShare: Number(treasury.liquidation_protocol_share ?? 0),
+      flushThreshold: e8sToNumber(treasury.interest_flush_threshold_e8s ?? 0n),
+      principal: treasury.treasury_principal?.[0]?.toText?.() ?? treasury.treasury_principal?.[0] ?? null,
+    };
   });
 </script>
 
@@ -77,9 +112,16 @@
       </div>
       <div class="explorer-card">
         <div class="text-xs text-gray-500 mb-1">Treasury</div>
-        <div class="text-lg font-semibold tabular-nums text-gray-200">
-          {treasuryBalance > 0 ? `$${formatCompact(treasuryBalance)}` : '--'}
-        </div>
+        {#if treasuryInfo}
+          <div class="text-lg font-semibold tabular-nums text-gray-200">
+            {treasuryInfo.liquidationShare > 0 ? `${(treasuryInfo.liquidationShare * 100).toFixed(0)}% liq. share` : '--'}
+          </div>
+          <div class="text-xs text-gray-500 mt-0.5">
+            {treasuryInfo.pendingInterest > 0 ? `${formatCompact(treasuryInfo.pendingInterest / 1e8)} pending interest` : 'No pending interest'}
+          </div>
+        {:else}
+          <div class="text-lg font-semibold tabular-nums text-gray-200">--</div>
+        {/if}
       </div>
       <div class="explorer-card">
         <div class="text-xs text-gray-500 mb-1">Fee Breakdown (90d)</div>

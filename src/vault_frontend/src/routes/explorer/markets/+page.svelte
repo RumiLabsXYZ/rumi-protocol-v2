@@ -11,6 +11,7 @@
   import {
     e8sToNumber, formatCompact, COLLATERAL_SYMBOLS, COLLATERAL_COLORS
   } from '$utils/explorerChartHelpers';
+  import { COLLATERAL_DISPLAY_ORDER } from '$stores/collateralStore';
 
   interface MarketRow {
     principal: string;
@@ -30,95 +31,109 @@
   let loading = $state(true);
 
   onMount(async () => {
-    const principals = Object.keys(COLLATERAL_SYMBOLS);
+    try {
+      const principals = Object.keys(COLLATERAL_SYMBOLS);
 
-    const [twapResult, configsResult, totalsResult, summaryResult, ...volResults] = await Promise.allSettled([
-      fetchTwap(),
-      fetchCollateralConfigs(),
-      fetchCollateralTotals(),
-      fetchProtocolSummary(),
-      ...principals.map(p => fetchVolatility(Principal.fromText(p))),
-    ]);
+      const [twapResult, configsResult, totalsResult, summaryResult, ...volResults] = await Promise.allSettled([
+        fetchTwap(),
+        fetchCollateralConfigs(),
+        fetchCollateralTotals(),
+        fetchProtocolSummary(),
+        ...principals.map(p => fetchVolatility(Principal.fromText(p))),
+      ]);
 
-    const twapData = twapResult.status === 'fulfilled' ? twapResult.value : null;
-    const twapEntries = twapData?.entries ?? [];
-    const configs = configsResult.status === 'fulfilled' ? configsResult.value ?? [] : [];
-    const totals = totalsResult.status === 'fulfilled' ? totalsResult.value ?? [] : [];
-    const summary = summaryResult.status === 'fulfilled' ? summaryResult.value : null;
+      const twapData = twapResult.status === 'fulfilled' ? twapResult.value : null;
+      const twapEntries = twapData?.entries ?? [];
+      const configs = configsResult.status === 'fulfilled' ? configsResult.value ?? [] : [];
+      const totals = totalsResult.status === 'fulfilled' ? totalsResult.value ?? [] : [];
+      const summary = summaryResult.status === 'fulfilled' ? summaryResult.value : null;
 
-    // Build lookup maps
-    const twapMap = new Map<string, { price: number; twap: number }>();
-    for (const e of twapEntries) {
-      const pid = e.collateral?.toText?.() ?? String(e.collateral);
-      twapMap.set(pid, { price: e.latest_price, twap: e.twap_price });
-    }
-
-    const summaryPriceMap = new Map<string, number>();
-    if (summary?.prices) {
-      for (const p of summary.prices) {
-        const pid = p.collateral?.toText?.() ?? String(p.collateral);
-        summaryPriceMap.set(pid, p.twap_price);
+      // Build lookup maps
+      const twapMap = new Map<string, { price: number; twap: number }>();
+      for (const e of twapEntries) {
+        const pid = e.collateral?.toText?.() ?? String(e.collateral);
+        twapMap.set(pid, { price: e.latest_price, twap: e.twap_price });
       }
-    }
 
-    const configMap = new Map<string, any>();
-    for (const c of configs) {
-      const pid = c.ledger_canister_id?.toText?.() ?? String(c.ledger_canister_id);
-      configMap.set(pid, c);
-    }
-
-    const totalsMap = new Map<string, any>();
-    for (const t of totals) {
-      const pid = t.collateral_type?.toText?.() ?? String(t.collateral_type ?? '');
-      if (pid) totalsMap.set(pid, t);
-    }
-
-    const volMap = new Map<string, number>();
-    for (let i = 0; i < principals.length; i++) {
-      const r = volResults[i];
-      if (r.status === 'fulfilled' && r.value) {
-        volMap.set(principals[i], r.value.annualized_vol_pct);
+      const summaryPriceMap = new Map<string, number>();
+      if (summary?.prices) {
+        for (const p of summary.prices) {
+          const pid = p.collateral?.toText?.() ?? String(p.collateral);
+          summaryPriceMap.set(pid, p.twap_price);
+        }
       }
-    }
 
-    const built: MarketRow[] = [];
-    for (const [principal, symbol] of Object.entries(COLLATERAL_SYMBOLS)) {
-      const twap = twapMap.get(principal);
-      const cfg = configMap.get(principal);
-      const tot = totalsMap.get(principal);
+      const configMap = new Map<string, any>();
+      for (const c of configs) {
+        const pid = c.ledger_canister_id?.toText?.() ?? String(c.ledger_canister_id);
+        configMap.set(pid, c);
+      }
 
-      const price = twap?.price ?? summaryPriceMap.get(principal) ?? 0;
-      const twapPrice = twap?.twap ?? price;
+      const totalsMap = new Map<string, any>();
+      for (const t of totals) {
+        const pid = t.collateral_type?.toText?.() ?? String(t.collateral_type ?? '');
+        if (pid) totalsMap.set(pid, t);
+      }
 
-      const totalCollateral = tot?.total_collateral_e8s != null
-        ? e8sToNumber(tot.total_collateral_e8s) : 0;
-      const totalDebt = tot?.total_debt_e8s != null
-        ? e8sToNumber(tot.total_debt_e8s) : 0;
-      const vaultCount = tot?.vault_count != null ? Number(tot.vault_count) : 0;
+      const volMap = new Map<string, number>();
+      for (let i = 0; i < principals.length; i++) {
+        const r = volResults[i];
+        if (r.status === 'fulfilled' && r.value) {
+          volMap.set(principals[i], r.value.annualized_vol_pct);
+        }
+      }
 
-      const debtCeilingRaw = cfg?.debt_ceiling ?? 0n;
-      const isUnlimited = typeof debtCeilingRaw === 'bigint'
-        ? debtCeilingRaw >= 18446744073709551615n
-        : Number(debtCeilingRaw) >= Number.MAX_SAFE_INTEGER;
+      const built: MarketRow[] = [];
+      for (const [principal, symbol] of Object.entries(COLLATERAL_SYMBOLS)) {
+        const twap = twapMap.get(principal);
+        const cfg = configMap.get(principal);
+        const tot = totalsMap.get(principal);
 
-      built.push({
-        principal,
-        symbol,
-        color: COLLATERAL_COLORS[symbol as keyof typeof COLLATERAL_COLORS] ?? '#888',
-        price,
-        twapPrice,
-        volatility: volMap.get(principal) ?? null,
-        vaultCount,
-        tvlUsd: totalCollateral * price,
-        totalDebt,
-        debtCeiling: e8sToNumber(debtCeilingRaw),
-        unlimited: isUnlimited,
+        const price = twap?.price
+          ?? summaryPriceMap.get(principal)
+          ?? (tot?.price ? Number(tot.price) : 0);
+        const twapPrice = twap?.twap ?? price;
+
+        // Use actual token decimals for proper normalization
+        const decimals = tot?.decimals != null ? Number(tot.decimals) : 8;
+        const totalCollateral = tot?.total_collateral != null
+          ? Number(tot.total_collateral) / Math.pow(10, decimals) : 0;
+        const totalDebt = tot?.total_debt != null
+          ? e8sToNumber(tot.total_debt) : 0;
+        const vaultCount = tot?.vault_count != null ? Number(tot.vault_count) : 0;
+
+        const debtCeilingRaw = cfg?.debt_ceiling ?? 0n;
+        const isUnlimited = typeof debtCeilingRaw === 'bigint'
+          ? debtCeilingRaw >= 18446744073709551615n
+          : Number(debtCeilingRaw) >= Number.MAX_SAFE_INTEGER;
+
+        built.push({
+          principal,
+          symbol,
+          color: COLLATERAL_COLORS[symbol as keyof typeof COLLATERAL_COLORS] ?? '#888',
+          price,
+          twapPrice,
+          volatility: volMap.get(principal) ?? null,
+          vaultCount,
+          tvlUsd: totalCollateral * price,
+          totalDebt,
+          debtCeiling: e8sToNumber(debtCeilingRaw),
+          unlimited: isUnlimited,
+        });
+      }
+
+      // Sort by canonical display order
+      built.sort((a, b) => {
+        const ai = COLLATERAL_DISPLAY_ORDER.indexOf(a.symbol);
+        const bi = COLLATERAL_DISPLAY_ORDER.indexOf(b.symbol);
+        return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
       });
+      rows = built;
+    } catch (err) {
+      console.error('[markets] onMount error:', err);
+    } finally {
+      loading = false;
     }
-
-    built.sort((a, b) => b.tvlUsd - a.tvlUsd);
-    rows = built;
-    loading = false;
   });
 
   function formatPrice(price: number): string {

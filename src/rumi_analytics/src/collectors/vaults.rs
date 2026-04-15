@@ -49,10 +49,14 @@ pub async fn run() -> Result<(), String> {
         }
     };
 
-    // Build a price lookup from collateral_type -> price (f64).
+    // Build price and decimals lookups from collateral_type.
     let price_map: HashMap<candid::Principal, f64> = collateral_totals
         .iter()
         .map(|ct| (ct.collateral_type, ct.price))
+        .collect();
+    let decimals_map: HashMap<candid::Principal, u8> = collateral_totals
+        .iter()
+        .map(|ct| (ct.collateral_type, ct.decimals))
         .collect();
 
     // For each vault with debt > 0, compute its CR in bps and group by
@@ -69,9 +73,13 @@ pub async fn run() -> Result<(), String> {
             Some(&p) => p,
             None => continue,
         };
-        let cr_bps = (vault.collateral_amount as f64 * price
-            / debt as f64
-            * 10_000.0)
+        // Normalize collateral to whole units using actual token decimals
+        // (ckETH=18, ckXAUT=6, ICP/ckBTC/others=8)
+        let decimals = decimals_map.get(&vault.collateral_type).copied().unwrap_or(8);
+        let collateral_usd = vault.collateral_amount as f64 * price
+            / 10f64.powi(decimals as i32);
+        let debt_usd = debt as f64 / 1e8;
+        let cr_bps = (collateral_usd / debt_usd * 10_000.0)
             .clamp(0.0, u32::MAX as f64) as u32;
 
         crs_by_collateral
@@ -119,11 +127,14 @@ pub async fn run() -> Result<(), String> {
     all_crs.sort_unstable();
     let protocol_median_cr_bps = median_of_sorted(&all_crs);
 
-    // Total collateral USD value: sum of (total_collateral * price) for each
-    // collateral type, converted to e8s.
+    // Total collateral USD value: sum of (total_collateral / 10^decimals * price)
+    // for each collateral type, converted to e8s.
     let total_collateral_usd_e8s: u64 = collateral_totals
         .iter()
-        .map(|ct| (ct.total_collateral as f64 * ct.price) as u64)
+        .map(|ct| {
+            let units = ct.total_collateral as f64 / 10f64.powi(ct.decimals as i32);
+            (units * ct.price * 1e8) as u64
+        })
         .fold(0u64, |acc, x| acc.saturating_add(x));
 
     let total_debt_e8s: u64 = collateral_totals

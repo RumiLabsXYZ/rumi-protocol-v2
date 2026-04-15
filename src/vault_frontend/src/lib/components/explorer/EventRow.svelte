@@ -33,10 +33,16 @@
     if (!data) return null;
 
     // Check common principal fields
-    for (const key of ['owner', 'caller', 'from', 'liquidator', 'redeemer']) {
+    for (const key of ['owner', 'caller', 'from', 'liquidator', 'redeemer', 'developer_principal']) {
       const val = data[key];
       if (val && typeof val === 'object' && typeof val.toText === 'function') {
         return val.toText();
+      }
+      // Handle Candid opt principal: arrives as [Principal] or []
+      if (Array.isArray(val) && val.length > 0) {
+        const inner = val[0];
+        if (inner && typeof inner === 'object' && typeof inner.toText === 'function') return inner.toText();
+        if (typeof inner === 'string' && inner.length > 10) return inner;
       }
       if (typeof val === 'string' && val.length > 20) {
         return val;

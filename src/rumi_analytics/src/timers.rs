@@ -5,6 +5,15 @@ use std::time::Duration;
 use crate::{collectors, sources, state, tailing};
 
 pub fn setup_timers() {
+    // Fire daily + fast snapshots immediately on init/upgrade (set_timer_interval
+    // waits for the full interval before the first tick).
+    ic_cdk_timers::set_timer(Duration::from_secs(0), || {
+        ic_cdk::spawn(daily_snapshot());
+    });
+    ic_cdk_timers::set_timer(Duration::from_secs(0), || {
+        ic_cdk::spawn(fast_snapshot());
+    });
+
     ic_cdk_timers::set_timer_interval(Duration::from_secs(60), || {
         ic_cdk::spawn(pull_cycle());
     });

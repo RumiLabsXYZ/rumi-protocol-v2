@@ -8,10 +8,13 @@ use super::{BATCH_SIZE, update_cursor_success, update_cursor_error, update_curso
 
 // Mainnet token principals for 3pool indices 0/1/2.
 const THREE_POOL_TOKENS: [&str; 3] = [
-    "t6bor-paaaa-aaaap-qrd5q-cai",  // icUSD
-    "cngnf-vqaaa-aaaar-qag4q-cai",  // ckUSDT
-    "xevnm-gaaaa-aaaar-qafnq-cai",  // ckUSDC
+    "t6bor-paaaa-aaaap-qrd5q-cai",  // icUSD  (8 decimals)
+    "cngnf-vqaaa-aaaar-qag4q-cai",  // ckUSDT (6 decimals)
+    "xevnm-gaaaa-aaaar-qafnq-cai",  // ckUSDC (6 decimals)
 ];
+
+// Token decimals for 3pool indices 0/1/2.
+const THREE_POOL_DECIMALS: [u8; 3] = [8, 6, 6];
 
 fn token_principal(idx: u8) -> Option<Principal> {
     THREE_POOL_TOKENS.get(idx as usize)
@@ -21,6 +24,18 @@ fn token_principal(idx: u8) -> Option<Principal> {
 fn nat_to_u64(n: &candid::Nat) -> u64 {
     use num_traits::ToPrimitive;
     n.0.to_u64().unwrap_or(u64::MAX)
+}
+
+/// Normalize a raw token amount to e8s (8-decimal) representation.
+/// For 6-decimal tokens (ckUSDT, ckUSDC), multiply by 100.
+/// For 8-decimal tokens (icUSD), no change needed.
+fn normalize_to_e8s(raw: u64, token_idx: u8) -> u64 {
+    let decimals = THREE_POOL_DECIMALS.get(token_idx as usize).copied().unwrap_or(8);
+    if decimals >= 8 {
+        raw / 10u64.pow((decimals - 8) as u32)
+    } else {
+        raw.saturating_mul(10u64.pow((8 - decimals) as u32))
+    }
 }
 
 pub async fn run() {
@@ -74,9 +89,9 @@ pub async fn run() {
             caller: evt.caller,
             token_in,
             token_out,
-            amount_in: nat_to_u64(&evt.amount_in),
-            amount_out: nat_to_u64(&evt.amount_out),
-            fee: nat_to_u64(&evt.fee),
+            amount_in: normalize_to_e8s(nat_to_u64(&evt.amount_in), evt.token_in),
+            amount_out: normalize_to_e8s(nat_to_u64(&evt.amount_out), evt.token_out),
+            fee: normalize_to_e8s(nat_to_u64(&evt.fee), evt.token_in),
         });
         processed += 1;
     }
