@@ -73,6 +73,20 @@
     return 'none';
   })();
 
+  // Selected AMM provider (single-hop direct routes or the AMM leg of two-hop routes)
+  $: selectedProvider = currentRoute?.providerQuote?.provider
+    ?? currentRoute?.hopProviderQuote?.provider
+    ?? null;
+
+  function providerLabel(id: string): string {
+    switch (id) {
+      case 'rumi_amm': return 'Rumi AMM';
+      case 'icpswap_3usd_icp': return 'ICPswap 3USD/ICP';
+      case 'icpswap_icusd_icp': return 'ICPswap icUSD/ICP';
+      default: return id;
+    }
+  }
+
   // Debounced quote
   $: if (amount && parseFloat(amount) > 0) {
     currentRoute = null;
@@ -330,10 +344,21 @@
               class:impact-favorable={parseFloat(priceImpact) < 0}>{priceImpact}%</span>
           </div>
         {/if}
-        {#if currentRoute && currentRoute.hops > 1}
+        {#if currentRoute && (currentRoute.hops > 1 || selectedProvider !== null)}
           <div class="info-row">
             <span class="info-label">Route</span>
-            <span class="info-value route-path">{currentRoute.pathDisplay}</span>
+            <span class="route-cell">
+              <span class="info-value route-path">{currentRoute.pathDisplay}</span>
+              {#if selectedProvider !== null}
+                <span class="provider-pill">
+                  {#if currentRoute.hopProviderQuote}
+                    via {providerLabel(selectedProvider)}
+                  {:else}
+                    {providerLabel(selectedProvider)}
+                  {/if}
+                </span>
+              {/if}
+            </span>
           </div>
         {/if}
         <div class="info-row">
@@ -680,6 +705,27 @@
   .route-path {
     font-family: 'SF Mono', 'Fira Code', monospace;
     letter-spacing: -0.01em;
+  }
+
+  .route-cell {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .provider-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.125rem 0.4375rem;
+    background: var(--rumi-bg-surface3);
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.25rem;
+    font-size: 0.6875rem;
+    font-weight: 500;
+    color: var(--rumi-text-secondary);
+    white-space: nowrap;
   }
 
   /* ── Slippage ── */
