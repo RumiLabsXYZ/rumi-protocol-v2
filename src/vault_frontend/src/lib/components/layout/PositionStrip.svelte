@@ -126,23 +126,29 @@
         on:click={toggle}
       >
         <span class="cell">
-          <span class="cell-label">Collateral</span>
+          <span class="cell-label label-full">Collateral</span>
+          <span class="cell-label label-short">Coll</span>
           <span class="cell-val">{summary.hasAnyMissingPrice ? '≈' : ''}{fmtUsd(summary.totalCollateralUsd)}</span>
         </span>
         <span class="divider" aria-hidden="true"></span>
         <span class="cell">
-          <span class="cell-label">Borrowed</span>
+          <span class="cell-label label-full">Borrowed</span>
+          <span class="cell-label label-short">Borr</span>
           <span class="cell-val">{fmtIcusd(summary.totalBorrowed)}<span class="cell-unit"> icUSD</span></span>
         </span>
         <span class="divider" aria-hidden="true"></span>
         <span class="cell">
-          <span class="cell-label">Overall CR</span>
+          <span class="cell-label label-full">Overall CR</span>
+          <span class="cell-label label-short">CR</span>
           <span class="cell-val health-{summary.healthTier}">{fmtCr(summary.overallCr)}</span>
         </span>
         {#if summary.healthTier !== 'unknown'}
           <span class="health-label health-{summary.healthTier}">{healthLabel(summary.healthTier)}</span>
         {/if}
-        <span class="caret" aria-hidden="true">{expanded ? 'Hide ▴' : 'Show breakdown ▾'}</span>
+        <span class="caret" aria-hidden="true">
+          <span class="caret-full">{expanded ? 'Hide ▴' : 'Show breakdown ▾'}</span>
+          <span class="caret-short">{expanded ? '▴' : '▾'}</span>
+        </span>
       </button>
 
       {#if expanded}
@@ -175,6 +181,7 @@
     left: 0;
     right: 0;
     z-index: 99;  /* below top-bar's 100, above page content */
+    overflow-x: hidden;  /* belt-and-suspenders against mobile overflow */
   }
   /* Only draw border/background when something is actually rendered.
      :not(:empty) keeps the outer invisible when the disconnected branch
@@ -211,13 +218,17 @@
     outline-offset: -2px;
   }
 
-  .cell { display: inline-flex; align-items: baseline; gap: 0.5rem; }
+  .cell { display: inline-flex; align-items: baseline; gap: 0.5rem; white-space: nowrap; }
   .cell-label {
     color: var(--rumi-text-muted);
     font-size: 0.6875rem;
     text-transform: uppercase;
     letter-spacing: 0.06em;
+    white-space: nowrap;
   }
+  /* Desktop shows full labels, hides short; mobile flips (see @media below). */
+  .label-short { display: none; }
+  .caret-short { display: none; }
   .cell-val {
     color: var(--rumi-text-primary);
     font-weight: 600;
@@ -293,12 +304,17 @@
 
   /* Mobile */
   @media (max-width: 768px) {
-    .strip { padding: 0.375rem 0.75rem; gap: 0.75rem; font-size: 0.75rem; }
+    .strip { padding: 0.375rem 0.5rem; gap: 0.5rem; font-size: 0.75rem; }
     .divider { display: none; }
+    .cell { gap: 0.25rem; }
     .cell-label { font-size: 0.625rem; }
+    .label-full { display: none; }
+    .label-short { display: inline; }
     .cell-val { font-size: 0.8125rem; }
     .cell-unit { display: none; } /* "Borrowed 1,500" without " icUSD" suffix on mobile */
-    .caret { font-size: 0.6875rem; }
+    .caret { font-size: 0.8125rem; }
+    .caret-full { display: none; }
+    .caret-short { display: inline; }
     .health-label { display: none; } /* color alone carries meaning on mobile */
     .breakdown { padding: 0 0.75rem 0.5rem; gap: 0.375rem; }
     .pill { padding: 0.1875rem 0.5rem; font-size: 0.6875rem; }
