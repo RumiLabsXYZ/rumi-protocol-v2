@@ -35,8 +35,8 @@ const _icUsdIcpRegistry = new ProviderRegistry([
   new IcpswapProvider({
     id: 'icpswap_icusd_icp',
     poolCanisterId: CANISTER_IDS.ICPSWAP_ICUSD_ICP_POOL,
-    token0LedgerId: CANISTER_IDS.ICUSD_LEDGER,
-    token1LedgerId: CANISTER_IDS.ICP_LEDGER,
+    token0LedgerId: CANISTER_IDS.ICP_LEDGER,
+    token1LedgerId: CANISTER_IDS.ICUSD_LEDGER,
     feeBps: 30,
   }),
 ]);
