@@ -53,4 +53,38 @@ describe('ProviderRegistry', () => {
     ]);
     await expect(reg.bestQuote(tokenA, tokenB, 500n)).rejects.toThrow(/no provider/i);
   });
+
+  it('throws when every supporting provider errors', async () => {
+    const a = makeProvider('rumi_amm', 0n);
+    const b = makeProvider('icpswap_3usd_icp', 0n);
+    (a.quote as any).mockRejectedValue(new Error('a down'));
+    (b.quote as any).mockRejectedValue(new Error('b down'));
+    const reg = new ProviderRegistry([a, b]);
+    await expect(reg.bestQuote(tokenA, tokenB, 500n)).rejects.toThrow(/no provider/i);
+  });
+
+  it('keeps the earlier provider on a tied amountOut', async () => {
+    // Lock in first-wins tie semantics so a future refactor to `>=` cannot
+    // silently flip winners.
+    const reg = new ProviderRegistry([
+      makeProvider('rumi_amm', 100n),
+      makeProvider('icpswap_3usd_icp', 100n),
+    ]);
+    const best = await reg.bestQuote(tokenA, tokenB, 500n);
+    expect(best.provider).toBe('rumi_amm');
+  });
+
+  it('returns the only quote when a single provider supports the pair', async () => {
+    const reg = new ProviderRegistry([makeProvider('rumi_amm', 100n)]);
+    const best = await reg.bestQuote(tokenA, tokenB, 500n);
+    expect(best.provider).toBe('rumi_amm');
+    expect(best.amountOut).toBe(100n);
+  });
+
+  it('get returns the provider by id and throws on unknown', () => {
+    const p = makeProvider('rumi_amm', 100n);
+    const reg = new ProviderRegistry([p]);
+    expect(reg.get('rumi_amm')).toBe(p);
+    expect(() => reg.get('icpswap_3usd_icp')).toThrow(/unknown provider/i);
+  });
 });
