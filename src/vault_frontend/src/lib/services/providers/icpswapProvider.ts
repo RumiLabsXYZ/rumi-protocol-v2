@@ -58,9 +58,44 @@ export class IcpswapProvider implements SwapProvider {
   }
 
   async swap(
-    _tokenIn: AmmToken, _tokenOut: AmmToken, _amountIn: bigint, _minOut: bigint, _quote: ProviderQuote,
+    tokenIn: AmmToken, tokenOut: AmmToken, amountIn: bigint, minOut: bigint, quote: ProviderQuote,
   ): Promise<ProviderSwapResult> {
-    throw new Error('IcpswapProvider.swap not implemented (see Task 7)');
+    const pool = await this.getActor();
+    const zeroForOne = quote.meta.zeroForOne as boolean;
+
+    // Step 1: depositFrom pulls tokens via ICRC-2 (caller must have pre-approved
+    // the pool canister). Approval is the caller's responsibility -- wired in
+    // by the swapRouter in Task 9.
+    // TODO: query icrc1_fee() from the input ledger; 0n is a placeholder.
+    const depositResult = await pool.depositFrom({
+      token: tokenIn.ledgerId,
+      amount: amountIn,
+      fee: 0n,
+    });
+    this.unwrapResult(depositResult);
+
+    // Step 2: swap within the pool
+    const swapResult = await pool.swap({
+      amountIn: amountIn.toString(),
+      zeroForOne,
+      amountOutMinimum: minOut.toString(),
+    });
+    const swapOut = this.unwrapResult(swapResult);
+
+    // Step 3: withdraw output back to caller's ledger account
+    // TODO: query icrc1_fee() from the output ledger; 0n is a placeholder.
+    const withdrawResult = await pool.withdraw({
+      token: tokenOut.ledgerId,
+      amount: swapOut,
+      fee: 0n,
+    });
+    const withdrawn = this.unwrapResult(withdrawResult);
+
+    if (withdrawn < minOut) {
+      throw new Error(`ICPswap swap failed slippage check: got ${withdrawn}, minimum ${minOut}`);
+    }
+
+    return { amountOut: withdrawn };
   }
 
   private async getActor(): Promise<IcpswapPool> {

@@ -75,3 +75,58 @@ describe('IcpswapProvider (quote)', () => {
     });
   });
 });
+
+describe('IcpswapProvider.swap', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('executes depositFrom -> swap -> withdraw and returns the withdrawn amount', async () => {
+    const mockPool = {
+      quote: vi.fn().mockResolvedValue({ ok: 500_000_000n }),
+      depositFrom: vi.fn().mockResolvedValue({ ok: 500_000_000n }),
+      swap: vi.fn().mockResolvedValue({ ok: 495_000_000n }),
+      withdraw: vi.fn().mockResolvedValue({ ok: 495_000_000n }),
+    };
+    vi.mocked(Actor.createActor).mockReturnValue(mockPool as any);
+
+    const provider = new IcpswapProvider({
+      id: 'icpswap_icusd_icp',
+      poolCanisterId: 'abc-icusd',
+      token0LedgerId: 't6bor-paaaa-aaaap-qrd5q-cai',
+      token1LedgerId: 'ryjl3-tyaaa-aaaaa-aaaba-cai',
+      feeBps: 30,
+    });
+
+    const quote = await provider.quote(icUsd, icp, 500_000_000n);
+    const result = await provider.swap(icUsd, icp, 500_000_000n, 490_000_000n, quote);
+
+    expect(result.amountOut).toBe(495_000_000n);
+    expect(mockPool.depositFrom).toHaveBeenCalled();
+    expect(mockPool.swap).toHaveBeenCalled();
+    expect(mockPool.withdraw).toHaveBeenCalled();
+  });
+
+  it('throws if the withdrawn amount is below minOut', async () => {
+    const mockPool = {
+      quote: vi.fn().mockResolvedValue({ ok: 500_000_000n }),
+      depositFrom: vi.fn().mockResolvedValue({ ok: 500_000_000n }),
+      swap: vi.fn().mockResolvedValue({ ok: 100_000_000n }),
+      withdraw: vi.fn().mockResolvedValue({ ok: 100_000_000n }),
+    };
+    vi.mocked(Actor.createActor).mockReturnValue(mockPool as any);
+
+    const provider = new IcpswapProvider({
+      id: 'icpswap_icusd_icp',
+      poolCanisterId: 'abc-icusd',
+      token0LedgerId: 't6bor-paaaa-aaaap-qrd5q-cai',
+      token1LedgerId: 'ryjl3-tyaaa-aaaaa-aaaba-cai',
+      feeBps: 30,
+    });
+
+    const quote = await provider.quote(icUsd, icp, 500_000_000n);
+    await expect(
+      provider.swap(icUsd, icp, 500_000_000n, 490_000_000n, quote)
+    ).rejects.toThrow(/slippage/i);
+  });
+});
