@@ -102,9 +102,23 @@ describe('IcpswapProvider.swap', () => {
     const result = await provider.swap(icUsd, icp, 500_000_000n, 490_000_000n, quote);
 
     expect(result.amountOut).toBe(495_000_000n);
-    expect(mockPool.depositFrom).toHaveBeenCalled();
-    expect(mockPool.swap).toHaveBeenCalled();
-    expect(mockPool.withdraw).toHaveBeenCalled();
+    // Lock in the bigint contract on deposit/withdraw args (different from swap,
+    // which takes strings).
+    expect(mockPool.depositFrom).toHaveBeenCalledWith({
+      token: 't6bor-paaaa-aaaap-qrd5q-cai',
+      amount: 500_000_000n,
+      fee: 0n,
+    });
+    expect(mockPool.swap).toHaveBeenCalledWith({
+      amountIn: '500000000',
+      zeroForOne: true,
+      amountOutMinimum: '490000000',
+    });
+    expect(mockPool.withdraw).toHaveBeenCalledWith({
+      token: 'ryjl3-tyaaa-aaaaa-aaaba-cai',
+      amount: 495_000_000n,
+      fee: 0n,
+    });
   });
 
   it('throws if the withdrawn amount is below minOut', async () => {
@@ -128,5 +142,63 @@ describe('IcpswapProvider.swap', () => {
     await expect(
       provider.swap(icUsd, icp, 500_000_000n, 490_000_000n, quote)
     ).rejects.toThrow(/slippage/i);
+  });
+
+  it('throws with swap context and recovery hint when pool.swap returns err', async () => {
+    // The pool's amountOutMinimum is the primary slippage guard. When it
+    // fires, pool.swap returns err (not a small ok). Verify that path raises
+    // a clear error and skips withdraw (there's nothing to withdraw).
+    const mockPool = {
+      quote: vi.fn().mockResolvedValue({ ok: 500_000_000n }),
+      depositFrom: vi.fn().mockResolvedValue({ ok: 500_000_000n }),
+      swap: vi.fn().mockResolvedValue({ err: { InternalError: 'pool frozen' } }),
+      withdraw: vi.fn(),
+    };
+    vi.mocked(Actor.createActor).mockReturnValue(mockPool as any);
+
+    const provider = new IcpswapProvider({
+      id: 'icpswap_icusd_icp',
+      poolCanisterId: 'abc-icusd',
+      token0LedgerId: 't6bor-paaaa-aaaap-qrd5q-cai',
+      token1LedgerId: 'ryjl3-tyaaa-aaaaa-aaaba-cai',
+      feeBps: 30,
+    });
+
+    const quote = await provider.quote(icUsd, icp, 500_000_000n);
+    await expect(
+      provider.swap(icUsd, icp, 500_000_000n, 490_000_000n, quote),
+    ).rejects.toThrow(/swap failed.*recover/is);
+    expect(mockPool.withdraw).not.toHaveBeenCalled();
+  });
+
+  it('rejects a quote whose meta.zeroForOne is not a boolean', async () => {
+    const mockPool = {
+      depositFrom: vi.fn(),
+      swap: vi.fn(),
+      withdraw: vi.fn(),
+    };
+    vi.mocked(Actor.createActor).mockReturnValue(mockPool as any);
+
+    const provider = new IcpswapProvider({
+      id: 'icpswap_icusd_icp',
+      poolCanisterId: 'abc-icusd',
+      token0LedgerId: 't6bor-paaaa-aaaap-qrd5q-cai',
+      token1LedgerId: 'ryjl3-tyaaa-aaaaa-aaaba-cai',
+      feeBps: 30,
+    });
+
+    const badQuote = {
+      provider: 'icpswap_icusd_icp',
+      label: 'icUSD -> ICP via ICPswap',
+      amountOut: 100n,
+      feeDisplay: '0.30%',
+      priceImpactBps: 0,
+      meta: { poolCanisterId: 'abc-icusd' }, // zeroForOne missing
+    } as any;
+
+    await expect(
+      provider.swap(icUsd, icp, 500_000_000n, 0n, badQuote),
+    ).rejects.toThrow(/zeroForOne/i);
+    expect(mockPool.depositFrom).not.toHaveBeenCalled();
   });
 });

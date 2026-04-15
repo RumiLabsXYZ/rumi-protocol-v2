@@ -42,7 +42,7 @@ export class IcpswapProvider implements SwapProvider {
       zeroForOne,
       amountOutMinimum: '0',
     });
-    const amountOut = this.unwrapResult(result);
+    const amountOut = this.unwrapResult(result, 'quote');
     const feePct = (this.config.feeBps / 100).toFixed(2);
     return {
       provider: this.id,
@@ -61,41 +61,61 @@ export class IcpswapProvider implements SwapProvider {
     tokenIn: AmmToken, tokenOut: AmmToken, amountIn: bigint, minOut: bigint, quote: ProviderQuote,
   ): Promise<ProviderSwapResult> {
     const pool = await this.getActor();
-    const zeroForOne = quote.meta.zeroForOne as boolean;
+
+    // Validate the provider-specific hint rather than silently coercing. A
+    // missing or non-boolean zeroForOne would route the swap the wrong way.
+    const zeroForOne = quote.meta.zeroForOne;
+    if (typeof zeroForOne !== 'boolean') {
+      throw new Error('ICPswap swap: quote.meta.zeroForOne must be a boolean');
+    }
 
     // Step 1: depositFrom pulls tokens via ICRC-2 (caller must have pre-approved
-    // the pool canister). Approval is the caller's responsibility -- wired in
-    // by the swapRouter in Task 9.
+    // the pool canister). Approval is the caller's responsibility, wired in by
+    // the swapRouter in Task 9.
     // TODO: query icrc1_fee() from the input ledger; 0n is a placeholder.
     const depositResult = await pool.depositFrom({
       token: tokenIn.ledgerId,
       amount: amountIn,
       fee: 0n,
     });
-    this.unwrapResult(depositResult);
+    this.unwrapResult(depositResult, 'depositFrom');
 
-    // Step 2: swap within the pool
-    const swapResult = await pool.swap({
-      amountIn: amountIn.toString(),
-      zeroForOne,
-      amountOutMinimum: minOut.toString(),
-    });
-    const swapOut = this.unwrapResult(swapResult);
+    // After a successful deposit the input token sits on the pool's internal
+    // subaccount. Any failure in swap or withdraw leaves a recoverable balance,
+    // so we enrich the error with explicit instructions.
+    try {
+      // Step 2: swap within the pool (amountOutMinimum is the primary slippage
+      // guard, enforced by the pool itself).
+      const swapResult = await pool.swap({
+        amountIn: amountIn.toString(),
+        zeroForOne,
+        amountOutMinimum: minOut.toString(),
+      });
+      const swapOut = this.unwrapResult(swapResult, 'swap');
 
-    // Step 3: withdraw output back to caller's ledger account
-    // TODO: query icrc1_fee() from the output ledger; 0n is a placeholder.
-    const withdrawResult = await pool.withdraw({
-      token: tokenOut.ledgerId,
-      amount: swapOut,
-      fee: 0n,
-    });
-    const withdrawn = this.unwrapResult(withdrawResult);
+      // Step 3: withdraw output back to caller's ledger account.
+      // TODO: query icrc1_fee() from the output ledger; 0n is a placeholder.
+      const withdrawResult = await pool.withdraw({
+        token: tokenOut.ledgerId,
+        amount: swapOut,
+        fee: 0n,
+      });
+      const withdrawn = this.unwrapResult(withdrawResult, 'withdraw');
 
-    if (withdrawn < minOut) {
-      throw new Error(`ICPswap swap failed slippage check: got ${withdrawn}, minimum ${minOut}`);
+      // Defense-in-depth slippage check. The pool's amountOutMinimum above is
+      // the authoritative guard; this catches the edge case where the swap
+      // succeeds but the withdraw returns less than expected.
+      if (withdrawn < minOut) {
+        throw new Error(`ICPswap swap failed slippage check: got ${withdrawn}, minimum ${minOut}`);
+      }
+
+      return { amountOut: withdrawn };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `${msg} (your ${tokenIn.symbol} deposit is stranded on ICPswap pool ${this.config.poolCanisterId}; recover it by calling withdraw on that canister)`,
+      );
     }
-
-    return { amountOut: withdrawn };
   }
 
   private async getActor(): Promise<IcpswapPool> {
@@ -111,8 +131,8 @@ export class IcpswapProvider implements SwapProvider {
     return this._actor;
   }
 
-  private unwrapResult(result: { ok: bigint } | { err: unknown }): bigint {
+  private unwrapResult(result: { ok: bigint } | { err: unknown }, operation: string): bigint {
     if ('ok' in result) return result.ok;
-    throw new Error(`ICPswap quote failed: ${JSON.stringify(result.err)}`);
+    throw new Error(`ICPswap ${operation} failed: ${JSON.stringify(result.err)}`);
   }
 }
