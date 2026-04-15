@@ -99,7 +99,7 @@ vi.mock('../stores/wallet', () => ({
   },
 }));
 
-import { resolveRoute, executeRoute, type SwapRoute } from './swapRouter';
+import { resolveRoute, executeRoute, setIcpswapRoutingEnabled, type SwapRoute } from './swapRouter';
 
 // ──────────────────────────────────────────────────────────────
 // Test fixtures
@@ -168,6 +168,9 @@ describe('swapRouter — provider registry integration', () => {
     // restore the default supports() after clearAllMocks
     rumiAmmMock.supports.mockReturnValue(true);
     icpswapMock.supports.mockReturnValue(true);
+    // Most tests exercise routes where ICPswap is a valid option; the
+    // kill-switch-off behaviour is covered in its own describe block.
+    setIcpswapRoutingEnabled(true);
   });
 
   // ──────────────────────────────────────────────────────────────
@@ -301,6 +304,87 @@ describe('swapRouter — provider registry integration', () => {
       };
       await expect(executeRoute(route, threeUsd, icp, 100n, 50))
         .rejects.toThrow(/not yet supported \(Task 10\)/);
+    });
+  });
+
+  // ──────────────────────────────────────────────────────────────
+  // Kill switch: when `icpswap_routing_enabled` is off, the router must
+  // behave as if only Rumi AMM + the 3pool existed.
+  // ──────────────────────────────────────────────────────────────
+
+  describe('ICPswap kill switch', () => {
+    it('ignores ICPswap quotes on 3USD->ICP and picks Rumi AMM even when ICPswap quotes higher', async () => {
+      setIcpswapRoutingEnabled(false);
+      rumiAmmMock.quote.mockResolvedValue(rumiQuote(1_000n));
+      // ICPswap would win if it were queried — but the router must not call it.
+      icpswapMock.quote.mockResolvedValue(icpswapQuote(9_999n));
+
+      const route = await resolveRoute(threeUsd, icp, 100n);
+
+      expect(route.providerQuote?.provider).toBe('rumi_amm');
+      expect(route.estimatedOutput).toBe(1_000n);
+      expect(icpswapMock.quote).not.toHaveBeenCalled();
+    });
+
+    it('refuses to execute a stale ICPswap route if the flag flipped off after quoting', async () => {
+      // Simulate the sequence: quote while enabled, then admin disables,
+      // then user clicks execute.
+      const route: SwapRoute = {
+        type: 'amm_swap',
+        pathDisplay: 'x',
+        hops: 1,
+        estimatedOutput: 1_500n,
+        feeDisplay: '0.30%',
+        providerQuote: icpswapQuote(1_500n),
+      };
+      setIcpswapRoutingEnabled(false);
+
+      await expect(executeRoute(route, threeUsd, icp, 100n, 50))
+        .rejects.toThrow(/ICPswap routing is currently disabled/i);
+    });
+
+    it('still allows pure-Rumi routes to execute when ICPswap is disabled', async () => {
+      setIcpswapRoutingEnabled(false);
+      rumiAmmMock.swap.mockResolvedValue({ amountOut: 990n });
+
+      const route: SwapRoute = {
+        type: 'amm_swap',
+        pathDisplay: 'x',
+        hops: 1,
+        estimatedOutput: 1_000n,
+        feeDisplay: '0.30%',
+        providerQuote: rumiQuote(1_000n),
+      };
+
+      const out = await executeRoute(route, threeUsd, icp, 100n, 50);
+      expect(out).toBe(990n);
+      expect(rumiAmmMock.swap).toHaveBeenCalled();
+    });
+
+    it('falls back to 2-hop for icUSD<->ICP when ICPswap is disabled (no direct attempt)', async () => {
+      setIcpswapRoutingEnabled(false);
+      const icUsd: AmmToken = {
+        symbol: 'icUSD',
+        ledgerId: 't6bor-paaaa-aaaap-qrd5q-cai',
+        decimals: 8,
+        color: '#000',
+        balanceKey: 'ICUSD',
+        is3USD: false,
+        threePoolIndex: 0,
+      };
+
+      // Two-hop: 3pool add_liquidity then Rumi AMM on 3USD->ICP
+      threePoolMock.calcAddLiquidity.mockResolvedValue(950n);
+      rumiAmmMock.quote.mockResolvedValue(rumiQuote(500n));
+      // If the direct icUSD/ICP ICPswap path were attempted the mock would
+      // need to be called — assert it wasn't.
+      icpswapMock.quote.mockResolvedValue(icpswapQuote(9_999n));
+
+      const route = await resolveRoute(icUsd, icp, 100n);
+      expect(route.type).toBe('stable_to_icp');
+      // icpswapMock.quote should only have been consulted for the 3USD/ICP
+      // hop — which it shouldn't have been either, since the flag is off.
+      expect(icpswapMock.quote).not.toHaveBeenCalled();
     });
   });
 });

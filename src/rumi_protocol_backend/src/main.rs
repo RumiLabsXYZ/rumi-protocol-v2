@@ -531,6 +531,8 @@ fn get_protocol_config() -> rumi_protocol_backend::ProtocolConfig {
         ckusdt_enabled: s.ckusdt_enabled,
         ckusdc_enabled: s.ckusdc_enabled,
 
+        icpswap_routing_enabled: s.icpswap_routing_enabled,
+
         treasury_principal: s.treasury_principal,
         stability_pool_canister: s.stability_pool_canister,
         three_pool_canister: s.three_pool_canister,
@@ -2423,6 +2425,34 @@ async fn set_reserve_redemptions_enabled(enabled: bool) -> Result<(), ProtocolEr
 #[query]
 fn get_reserve_redemptions_enabled() -> bool {
     read_state(|s| s.reserve_redemptions_enabled)
+}
+
+// ── ICPswap routing kill switch (developer only) ────────────────────
+
+/// Enable or disable ICPswap-backed swap routing. When disabled, the frontend
+/// skips all ICPswap providers and falls back to Rumi AMM + 3pool only.
+#[candid_method(update)]
+#[update]
+async fn set_icpswap_routing_enabled(enabled: bool) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only developer can toggle ICPswap routing".to_string(),
+        ));
+    }
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_icpswap_routing_enabled(s, enabled);
+    });
+    log!(INFO, "[set_icpswap_routing_enabled] ICPswap routing enabled: {}", enabled);
+    Ok(())
+}
+
+/// Get whether ICPswap-backed swap routing is enabled.
+#[candid_method(query)]
+#[query]
+fn get_icpswap_routing_enabled() -> bool {
+    read_state(|s| s.icpswap_routing_enabled)
 }
 
 /// Set the flat fee for reserve redemptions (developer only)

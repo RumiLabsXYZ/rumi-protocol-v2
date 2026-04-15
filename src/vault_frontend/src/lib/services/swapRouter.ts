@@ -17,7 +17,7 @@ import type { ProviderQuote } from './providers/types';
 // Quotes Rumi AMM and ICPswap 3USD/ICP in parallel and picks the winner.
 // ──────────────────────────────────────────────────────────────
 
-const _threeUsdIcpRegistry = new ProviderRegistry([
+const _threeUsdIcpRegistryFull = new ProviderRegistry([
   new RumiAmmProvider(),
   new IcpswapProvider({
     id: 'icpswap_3usd_icp',
@@ -27,6 +27,9 @@ const _threeUsdIcpRegistry = new ProviderRegistry([
     feeBps: 30,
   }),
 ]);
+
+// Rumi-only fallback used when the ICPswap kill switch is off.
+const _threeUsdIcpRegistryRumiOnly = new ProviderRegistry([new RumiAmmProvider()]);
 
 // Dedicated registry for the direct icUSD/ICP pool on ICPswap (Task 11).
 // Only ICPswap currently hosts this pair; if a Rumi AMM icUSD/ICP pool is
@@ -40,6 +43,48 @@ const _icUsdIcpRegistry = new ProviderRegistry([
     feeBps: 30,
   }),
 ]);
+
+// ──────────────────────────────────────────────────────────────
+// ICPswap routing kill switch
+//
+// Mirrors the backend `icpswap_routing_enabled` admin flag. When false (the
+// default), the router skips every ICPswap provider and behaves as if only
+// Rumi AMM + the 3pool existed. Fetched on app boot via
+// `initIcpswapRoutingFlag()`; a page reload picks up admin flips. The default
+// is intentionally off so a stale frontend never routes through ICPswap
+// unless the backend has explicitly opted in.
+// ──────────────────────────────────────────────────────────────
+
+let _icpswapEnabled = false;
+
+export function setIcpswapRoutingEnabled(enabled: boolean): void {
+  _icpswapEnabled = enabled;
+}
+
+export function isIcpswapRoutingEnabled(): boolean {
+  return _icpswapEnabled;
+}
+
+/**
+ * Fetch the ICPswap routing kill switch from the backend and apply it.
+ * Called once on app boot from the root layout. Errors are swallowed — a
+ * failed fetch leaves the flag at its default (off), which is the safe
+ * fallback.
+ */
+export async function initIcpswapRoutingFlag(): Promise<void> {
+  try {
+    const { publicActor } = await import('./protocol/apiClient');
+    const enabled = await (publicActor as any).get_icpswap_routing_enabled();
+    _icpswapEnabled = Boolean(enabled);
+  } catch (err) {
+    console.warn('[swapRouter] Failed to fetch icpswap_routing_enabled, defaulting to off:', err);
+    _icpswapEnabled = false;
+  }
+}
+
+function threeUsdIcpRegistry(): ProviderRegistry {
+  return _icpswapEnabled ? _threeUsdIcpRegistryFull : _threeUsdIcpRegistryRumiOnly;
+}
 
 // ──────────────────────────────────────────────────────────────
 // Route types
@@ -176,7 +221,7 @@ export async function resolveRoute(
 
   // Case 4: 3USD <-> ICP (best of Rumi AMM and ICPswap 3USD/ICP)
   if ((is3USD(from) && isICP(to)) || (isICP(from) && is3USD(to))) {
-    const quote = await _threeUsdIcpRegistry.bestQuote(from, to, amountIn);
+    const quote = await threeUsdIcpRegistry().bestQuote(from, to, amountIn);
     return {
       type: 'amm_swap',
       pathDisplay: quote.label,
@@ -195,12 +240,16 @@ export async function resolveRoute(
   // Direct wins on ties (one fewer fee, simpler execution).
   const isIcUsd = (t: AmmToken) => t.symbol === 'icUSD';
   if ((isIcUsd(from) && isICP(to)) || (isICP(from) && isIcUsd(to))) {
-    // Option A: direct via ICPswap icUSD/ICP
+    // Option A: direct via ICPswap icUSD/ICP. Skipped entirely when the
+    // kill switch is off — there is no Rumi-hosted icUSD/ICP pool, so with
+    // ICPswap disabled the router always falls through to the 2-hop path.
     let directQuote: ProviderQuote | null = null;
-    try {
-      directQuote = await _icUsdIcpRegistry.bestQuote(from, to, amountIn);
-    } catch {
-      // Pool too thin / offline; continue with 2-hop only
+    if (_icpswapEnabled) {
+      try {
+        directQuote = await _icUsdIcpRegistry.bestQuote(from, to, amountIn);
+      } catch {
+        // Pool too thin / offline; continue with 2-hop only
+      }
     }
 
     // Option B: 2-hop via 3pool + best-of(3USD/ICP)
@@ -213,10 +262,10 @@ export async function resolveRoute(
       const amounts = [0n, 0n, 0n];
       amounts[from.threePoolIndex] = amountIn;
       twoHopIntermediate = await threePoolService.calcAddLiquidity(amounts);
-      twoHopQuote = await _threeUsdIcpRegistry.bestQuote(threeUsdToken, to, twoHopIntermediate);
+      twoHopQuote = await threeUsdIcpRegistry().bestQuote(threeUsdToken, to, twoHopIntermediate);
       twoHopOutput = twoHopQuote.amountOut;
     } else {
-      twoHopQuote = await _threeUsdIcpRegistry.bestQuote(from, threeUsdToken, amountIn);
+      twoHopQuote = await threeUsdIcpRegistry().bestQuote(from, threeUsdToken, amountIn);
       twoHopIntermediate = twoHopQuote.amountOut;
       twoHopOutput = await threePoolService.calcRemoveOneCoin(twoHopIntermediate, to.threePoolIndex);
     }
@@ -255,7 +304,7 @@ export async function resolveRoute(
     const threeUsdOut = await threePoolService.calcAddLiquidity(amounts);
 
     const threeUsdToken = AMM_TOKENS.find(t => t.is3USD)!;
-    const hopQuote = await _threeUsdIcpRegistry.bestQuote(threeUsdToken, to, threeUsdOut);
+    const hopQuote = await threeUsdIcpRegistry().bestQuote(threeUsdToken, to, threeUsdOut);
 
     return {
       type: 'stable_to_icp',
@@ -272,7 +321,7 @@ export async function resolveRoute(
   // Case 6: ICP -> Stablecoin (two-hop: best ICP->3USD swap + 3pool redeem)
   if (isICP(from) && isStablecoin(to)) {
     const threeUsdToken = AMM_TOKENS.find(t => t.is3USD)!;
-    const hopQuote = await _threeUsdIcpRegistry.bestQuote(from, threeUsdToken, amountIn);
+    const hopQuote = await threeUsdIcpRegistry().bestQuote(from, threeUsdToken, amountIn);
 
     const stableOut = await threePoolService.calcRemoveOneCoin(hopQuote.amountOut, to.threePoolIndex);
 
@@ -309,6 +358,18 @@ export async function executeRoute(
 ): Promise<bigint> {
   const minOutput = route.estimatedOutput * BigInt(10000 - slippageBps) / 10000n;
 
+  // Kill-switch guard: a route quoted while ICPswap routing was enabled must
+  // not execute if the admin flag has since been flipped off. Re-quote instead
+  // of silently sending the user down a disabled path.
+  if (!_icpswapEnabled) {
+    const winner = route.providerQuote?.provider ?? route.hopProviderQuote?.provider;
+    if ((winner && isIcpswapProvider(winner)) || route.type === 'icusd_icp_direct') {
+      throw new Error(
+        'ICPswap routing is currently disabled. Please refresh the quote and try again.',
+      );
+    }
+  }
+
   switch (route.type) {
     case 'three_pool_swap': {
       return await threePoolService.swap(
@@ -330,7 +391,7 @@ export async function executeRoute(
       assertOisyProviderSupported(route);
       const quote = route.providerQuote;
       if (!quote) throw new Error('amm_swap route missing providerQuote');
-      const provider = _threeUsdIcpRegistry.get(quote.provider);
+      const provider = threeUsdIcpRegistry().get(quote.provider);
 
       // RumiAmmProvider handles approval internally via ammService.swap.
       // ICPswap needs an explicit ICRC-2 approval to the pool canister before
@@ -364,7 +425,7 @@ export async function executeRoute(
       // Hop 2: 3USD -> ICP via winning provider. Re-quote with actual received
       // amount so the slippage budget reflects what we really have.
       const threeUsdToken = AMM_TOKENS.find(t => t.is3USD)!;
-      const provider = _threeUsdIcpRegistry.get(hopQuote.provider);
+      const provider = threeUsdIcpRegistry().get(hopQuote.provider);
       const freshQuote = await provider.quote(threeUsdToken, to, threeUsdReceived);
 
       // ICPswap needs an explicit ICRC-2 approval to the pool canister; Rumi
@@ -391,7 +452,7 @@ export async function executeRoute(
 
       // Hop 1: ICP -> 3USD via winning provider
       const threeUsdToken = AMM_TOKENS.find(t => t.is3USD)!;
-      const provider = _threeUsdIcpRegistry.get(hopQuote.provider);
+      const provider = threeUsdIcpRegistry().get(hopQuote.provider);
 
       // ICPswap needs an explicit ICRC-2 approval to the pool canister; Rumi
       // AMM handles its own approval via ammService.swap.

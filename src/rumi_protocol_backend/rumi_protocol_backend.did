@@ -27,6 +27,7 @@ type ProtocolConfig = record {
   reserve_redemptions_enabled : bool;
   ckusdt_enabled : bool;
   ckusdc_enabled : bool;
+  icpswap_routing_enabled : bool;
   treasury_principal : opt principal;
   stability_pool_canister : opt principal;
   three_pool_canister : opt principal;
@@ -298,6 +299,7 @@ type Event = variant {
     timestamp : opt nat64;
   };
   set_reserve_redemptions_enabled : record { enabled : bool };
+  set_icpswap_routing_enabled : record { enabled : bool };
   set_min_icusd_amount : record { amount : text };
   set_borrowing_fee_curve : record { markers : text };
   set_interest_pool_share : record { share : text };
@@ -693,6 +695,7 @@ service : (ProtocolArg) -> {
   get_reserve_balances : () -> (vec ReserveBalance) query;
   get_reserve_redemption_fee : () -> (float64) query;
   get_reserve_redemptions_enabled : () -> (bool) query;
+  get_icpswap_routing_enabled : () -> (bool) query;
   get_rmr_ceiling : () -> (float64) query;
   get_rmr_ceiling_cr : () -> (float64) query;
   get_rmr_floor : () -> (float64) query;
@@ -771,6 +774,7 @@ service : (ProtocolArg) -> {
   get_redemption_tier : (principal) -> (Result_12) query;
   set_reserve_redemption_fee : (float64) -> (Result);
   set_reserve_redemptions_enabled : (bool) -> (Result);
+  set_icpswap_routing_enabled : (bool) -> (Result);
   set_rmr_ceiling : (float64) -> (Result);
   set_rmr_ceiling_cr : (float64) -> (Result);
   set_rmr_floor : (float64) -> (Result);

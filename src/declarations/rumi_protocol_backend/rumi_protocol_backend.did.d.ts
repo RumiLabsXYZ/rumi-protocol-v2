@@ -443,6 +443,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
   } |
   { 'set_stability_pool_principal' : { 'principal' : Principal } } |
   { 'set_interest_split' : { 'split' : string } } |
+  { 'set_icpswap_routing_enabled' : { 'enabled' : boolean } } |
   { 'set_bot_budget' : { 'start_timestamp' : bigint, 'total_e8s' : bigint } } |
   { 'set_rmr_floor' : { 'value' : string } } |
   { 'set_redemption_fee_floor' : { 'rate' : string } } |
@@ -601,6 +602,7 @@ export interface ProtocolConfig {
   'treasury_principal' : [] | [Principal],
   'rmr_ceiling_cr' : number,
   'frozen' : boolean,
+  'icpswap_routing_enabled' : boolean,
   'ckusdc_enabled' : boolean,
   'ckusdt_enabled' : boolean,
   'rmr_floor' : number,
@@ -853,6 +855,7 @@ export interface _SERVICE {
   >,
   'get_fees' : ActorMethod<[bigint], Fees>,
   'get_global_icusd_mint_cap' : ActorMethod<[], bigint>,
+  'get_icpswap_routing_enabled' : ActorMethod<[], boolean>,
   'get_interest_pool_share' : ActorMethod<[], number>,
   'get_interest_split' : ActorMethod<[], Array<InterestSplitArg>>,
   'get_liquidatable_vaults' : ActorMethod<[], Array<CandidVault>>,
@@ -949,6 +952,7 @@ export interface _SERVICE {
   'set_collateral_status' : ActorMethod<[Principal, CollateralStatus], Result>,
   'set_global_icusd_mint_cap' : ActorMethod<[bigint], Result>,
   'set_healthy_cr' : ActorMethod<[Principal, [] | [number]], Result>,
+  'set_icpswap_routing_enabled' : ActorMethod<[boolean], Result>,
   'set_interest_flush_threshold' : ActorMethod<[bigint], Result>,
   'set_interest_pool_share' : ActorMethod<[number], Result>,
   'set_interest_rate' : ActorMethod<[Principal, number], Result>,

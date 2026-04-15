@@ -348,6 +348,11 @@ pub enum Event {
         enabled: bool,
     },
 
+    #[serde(rename = "set_icpswap_routing_enabled")]
+    SetIcpswapRoutingEnabled {
+        enabled: bool,
+    },
+
     #[serde(rename = "set_reserve_redemption_fee")]
     SetReserveRedemptionFee {
         fee: String,
@@ -621,6 +626,7 @@ impl Event {
             Event::UpdateCollateralStatus { .. } => false,
             Event::UpdateCollateralConfig { .. } => false,
             Event::SetReserveRedemptionsEnabled { .. } => false,
+            Event::SetIcpswapRoutingEnabled { .. } => false,
             Event::SetReserveRedemptionFee { .. } => false,
             Event::ReserveRedemption { .. } => false,
             Event::AdminMint { .. } => false,
@@ -981,6 +987,9 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             },
             Event::SetReserveRedemptionsEnabled { enabled } => {
                 state.reserve_redemptions_enabled = enabled;
+            },
+            Event::SetIcpswapRoutingEnabled { enabled } => {
+                state.icpswap_routing_enabled = enabled;
             },
             Event::SetReserveRedemptionFee { fee } => {
                 if let Ok(dec) = fee.parse::<Decimal>() {
@@ -1666,6 +1675,11 @@ pub fn record_update_collateral_config(
 pub fn record_set_reserve_redemptions_enabled(state: &mut State, enabled: bool) {
     record_event(&Event::SetReserveRedemptionsEnabled { enabled });
     state.reserve_redemptions_enabled = enabled;
+}
+
+pub fn record_set_icpswap_routing_enabled(state: &mut State, enabled: bool) {
+    record_event(&Event::SetIcpswapRoutingEnabled { enabled });
+    state.icpswap_routing_enabled = enabled;
 }
 
 pub fn record_set_reserve_redemption_fee(state: &mut State, fee: Ratio) {
