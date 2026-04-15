@@ -4,6 +4,7 @@
   import { walletStore as wallet } from "../lib/stores/wallet";
   import { permissionStore } from "../lib/stores/permissionStore";
   import WalletConnector from "../lib/components/wallet/WalletConnector.svelte";
+  import PositionStrip from "../lib/components/layout/PositionStrip.svelte";
   import PriceDebug from "../lib/components/debug/PriceDebug.svelte";
   import WalletDebug from "../lib/components/debug/WalletDebug.svelte";
   import "../app.css";
@@ -76,6 +77,7 @@
     <WalletConnector />
   </div>
 </header>
+<PositionStrip />
 <ToastContainer />
 <main class="main-content"><slot /></main>
 <footer class="app-footer">
@@ -155,7 +157,7 @@
   .header-icon-link svg { width:0.875rem;height:0.875rem; }
 
   /* ── Main content ── */
-  .main-content { padding:4.75rem 2rem 2rem;min-height:100vh;position:relative;z-index:1;max-width:1200px;margin:0 auto; }
+  .main-content { padding:calc(4.75rem + var(--rumi-strip-height, 0px)) 2rem 2rem;min-height:100vh;position:relative;z-index:1;max-width:1200px;margin:0 auto; }
   .app-footer { padding:1.5rem 2rem;border-top:1px solid var(--rumi-border); }
   .footer-inner { max-width:1200px;margin:0 auto;display:flex;flex-direction:column;align-items:center;gap:0.75rem; }
   .footer-links { display:flex;flex-wrap:wrap;justify-content:center;gap:0.375rem 1.25rem; }
@@ -174,7 +176,7 @@
   .mob-item.active { color:var(--rumi-action); }
   @media (max-width:768px) {
     .top-nav{display:none}
-    .main-content{padding:4.25rem 1rem 5rem}
+    .main-content{padding:calc(4.25rem + var(--rumi-strip-height, 0px)) 1rem 5rem}
     .mobile-nav{display:flex}
     /* Social icons and beta chip duplicate footer content and crowd out the
        wallet button on narrow screens — hide them here. */
