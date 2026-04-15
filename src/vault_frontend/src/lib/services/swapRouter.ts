@@ -622,7 +622,7 @@ async function executeStableToIcpOisyIcpswap(
  * 2. ICPswap.depositFrom ICP
  * 3. ICPswap.swap ICP → 3USD
  * 4. ICPswap.withdraw 3USD to caller
- * 5. 3pool.remove_one_coin (burns caller's LP — no allowance needed)
+ * 5. 3pool.remove_one_coin (burns caller's LP, no allowance needed)
  *
  * Same withdraw-amount limitation as the stable→ICP case: we pass
  * threeUsdMinFromSwap as the withdraw amount. Positive slippage stays on
@@ -692,7 +692,7 @@ async function executeIcpToStableOisyIcpswap(
   });
 
   // Step 5: 3pool remove_one_coin (3USD → target stablecoin)
-  // remove_one_coin burns the caller's LP directly — no ICRC-2 allowance required.
+  // remove_one_coin burns the caller's LP directly (no ICRC-2 allowance required).
   // We pass threeUsdMinFromSwap (conservative) to match the withdraw amount.
   signerAgent.batch();
   const p5 = poolActor.remove_one_coin(threeUsdMinFromSwap, to.threePoolIndex, stableMinOutput);
