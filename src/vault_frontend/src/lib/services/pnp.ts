@@ -6,6 +6,7 @@ import { idlFactory as icusd_ledgerIDL } from '$declarations/icusd_ledger/icusd_
 import { idlFactory as stabilityPoolIDL } from '$declarations/rumi_stability_pool/rumi_stability_pool.did.js';
 import { idlFactory as threePoolIDL } from '$declarations/rumi_3pool/rumi_3pool.did.js';
 import { idlFactory as rumiAmmIDL } from '$declarations/rumi_amm/rumi_amm.did.js';
+import { idlFactory as icpswapPoolIDL } from '$declarations/icpswap_pool/icpswap_pool.did.js';
 import { createPNP, type PNP, ConfigBuilder, BaseSignerAdapter } from '@windoge98/plug-n-play';
 
 // Define types for supported canisters
@@ -15,7 +16,8 @@ export type CanisterType =
   | "icusd_ledger"
   | "stability_pool"
   | "three_pool"
-  | "rumi_amm";
+  | "rumi_amm"
+  | "icpswap_pool";
 
 // Collect all canister IDLs in one place
 export const canisterIDLs = {
@@ -25,6 +27,7 @@ export const canisterIDLs = {
   stability_pool: stabilityPoolIDL,
   three_pool: threePoolIDL,
   rumi_amm: rumiAmmIDL,
+  icpswap_pool: icpswapPoolIDL,
 };
 
 let globalPnp: PNP | null = null;

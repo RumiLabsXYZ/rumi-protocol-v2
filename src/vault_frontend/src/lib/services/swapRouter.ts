@@ -264,7 +264,6 @@ export async function executeRoute(
     }
 
     case 'stable_to_icp': {
-      assertOisyProviderSupported(route);
       if (isOisyWallet()) {
         return await executeStableToIcpOisy(route, from, amountIn, slippageBps);
       }
@@ -289,7 +288,6 @@ export async function executeRoute(
     }
 
     case 'icp_to_stable': {
-      assertOisyProviderSupported(route);
       if (isOisyWallet()) {
         return await executeIcpToStableOisy(route, to, amountIn, slippageBps);
       }
@@ -314,9 +312,10 @@ export async function executeRoute(
 }
 
 /**
- * Transitional guard for Task 9: the Oisy batched helpers only know how to
- * execute Rumi AMM swaps. Until Task 10 teaches them to dispatch via the
- * provider registry, reject Oisy executions where ICPswap won the quote.
+ * Transitional guard: direct Case 4 (3USD <-> ICP) Oisy executions only know
+ * how to route through Rumi AMM. Two-hop cases (stable_to_icp / icp_to_stable)
+ * now dispatch ICPswap and Rumi AMM natively via the Oisy helpers below.
+ * Rejects Oisy + ICPswap combos for `amm_swap` until that path is added.
  */
 function assertOisyProviderSupported(route: SwapRoute): void {
   if (!isOisyWallet()) return;
@@ -377,6 +376,13 @@ async function executeStableToIcpOisy(
 ): Promise<bigint> {
   const wallet = get(walletStore);
   if (!wallet.principal) throw new Error('Wallet not connected');
+
+  const hopQuote = route.hopProviderQuote;
+  if (!hopQuote) throw new Error('stable_to_icp Oisy route missing hopProviderQuote');
+
+  if (hopQuote.provider === 'icpswap_3usd_icp') {
+    return await executeStableToIcpOisyIcpswap(route, from, amountIn, slippageBps, hopQuote);
+  }
 
   // All values pre-computed during resolveRoute — no canister calls
   const poolId = route.poolId!;
@@ -451,6 +457,13 @@ async function executeIcpToStableOisy(
   const wallet = get(walletStore);
   if (!wallet.principal) throw new Error('Wallet not connected');
 
+  const hopQuote = route.hopProviderQuote;
+  if (!hopQuote) throw new Error('icp_to_stable Oisy route missing hopProviderQuote');
+
+  if (hopQuote.provider === 'icpswap_3usd_icp') {
+    return await executeIcpToStableOisyIcpswap(route, to, amountIn, slippageBps, hopQuote);
+  }
+
   // All values pre-computed during resolveRoute — no canister calls
   const poolId = route.poolId!;
   const threeUsdEstimate = route.intermediateOutput!;
@@ -490,4 +503,215 @@ async function executeIcpToStableOisy(
   if ('Err' in r2) throw new Error(`AMM swap failed: ${JSON.stringify(r2.Err)}`);
   if ('Err' in r3) throw new Error(`3pool redeem failed: ${JSON.stringify(r3.Err)}`);
   return r3.Ok;
+}
+
+/**
+ * Stablecoin → ICP via ICPswap (Oisy batched):
+ * 1. Approve stablecoin → 3pool (for add_liquidity)
+ * 2. 3pool.add_liquidity (burns stablecoin, mints 3USD)
+ * 3. Approve 3USD → ICPswap pool (for depositFrom)
+ * 4. ICPswap.depositFrom 3USD
+ * 5. ICPswap.swap 3USD → ICP
+ * 6. ICPswap.withdraw ICP to caller
+ *
+ * Known limitation: ICPswap withdraw amount must be pre-committed (no async
+ * query between swap and withdraw in a batch). We use icpMinOutput as the
+ * withdraw amount. Any positive slippage (pool pays more than minimum) stays
+ * on the pool's internal subaccount and can be recovered manually later.
+ */
+async function executeStableToIcpOisyIcpswap(
+  route: SwapRoute,
+  from: AmmToken,
+  amountIn: bigint,
+  slippageBps: number,
+  hopQuote: ProviderQuote,
+): Promise<bigint> {
+  const wallet = get(walletStore);
+  if (!wallet.principal) throw new Error('Wallet not connected');
+
+  const icpswapPoolId = hopQuote.meta.poolCanisterId as string | undefined;
+  const zeroForOne = hopQuote.meta.zeroForOne;
+  if (typeof icpswapPoolId !== 'string') {
+    throw new Error('ICPswap hopQuote missing meta.poolCanisterId');
+  }
+  if (typeof zeroForOne !== 'boolean') {
+    throw new Error('ICPswap hopQuote missing meta.zeroForOne');
+  }
+
+  const threeUsdEstimate = route.intermediateOutput!;
+  const threeUsdMinOutput = threeUsdEstimate * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
+  const icpMinOutput = route.estimatedOutput * BigInt(10000 - slippageBps) / 10000n;
+  const fromPoolToken = POOL_TOKENS[from.threePoolIndex];
+
+  const amounts: [bigint, bigint, bigint] = [0n, 0n, 0n];
+  amounts[from.threePoolIndex] = amountIn;
+
+  const signerAgent = await getOisySignerAgent(wallet.principal);
+
+  const stableLedger = createOisyActor(fromPoolToken.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent);
+  const threeUsdLedger = createOisyActor(THREEPOOL_ID, canisterIDLs.three_pool, signerAgent);
+  const icpswapPool = createOisyActor(icpswapPoolId, canisterIDLs.icpswap_pool, signerAgent);
+
+  // Step 1: approve stablecoin → 3pool
+  signerAgent.batch();
+  const p1 = stableLedger.icrc2_approve({
+    amount: amountIn + getLedgerFee(from) * 2n,
+    spender: { owner: Principal.fromText(THREEPOOL_ID), subaccount: [] },
+    expires_at: [], expected_allowance: [], memo: [], fee: [],
+    from_subaccount: [], created_at_time: [],
+  });
+
+  // Step 2: 3pool deposit (burns stablecoin, mints 3USD)
+  signerAgent.batch();
+  const p2 = threeUsdLedger.add_liquidity(amounts, threeUsdMinOutput);
+
+  // Step 3: approve 3USD → ICPswap pool (depositFrom is ICRC-2 pull)
+  const threeUsdApprovalAmt = threeUsdEstimate * 101n / 100n;
+  signerAgent.batch();
+  const p3 = threeUsdLedger.icrc2_approve({
+    amount: threeUsdApprovalAmt,
+    spender: { owner: Principal.fromText(icpswapPoolId), subaccount: [] },
+    expires_at: [], expected_allowance: [], memo: [], fee: [],
+    from_subaccount: [], created_at_time: [],
+  });
+
+  // Step 4: ICPswap depositFrom (pulls 3USD via ICRC-2)
+  // NOTE: fee: 0n matches IcpswapProvider's current TODO; wire icrc1_fee() later.
+  signerAgent.batch();
+  const p4 = icpswapPool.depositFrom({
+    token: CANISTER_IDS.THREEPOOL,
+    amount: threeUsdEstimate,
+    fee: 0n,
+  });
+
+  // Step 5: ICPswap swap (uses pre-committed 3USD amount; slippage via amountOutMinimum)
+  signerAgent.batch();
+  const p5 = icpswapPool.swap({
+    amountIn: threeUsdEstimate.toString(),
+    zeroForOne,
+    amountOutMinimum: icpMinOutput.toString(),
+  });
+
+  // Step 6: ICPswap withdraw to caller's ICP ledger account.
+  // Pre-committed amount; we can't await p5 before building p6 in a batch.
+  signerAgent.batch();
+  const p6 = icpswapPool.withdraw({
+    token: CANISTER_IDS.ICP_LEDGER,
+    amount: icpMinOutput,
+    fee: 0n,
+  });
+
+  await signerAgent.execute();
+  const [r1, r2, r3, r4, r5, r6] = await Promise.all([p1, p2, p3, p4, p5, p6]);
+
+  if (r1 && 'Err' in r1) throw new Error(`Stablecoin approval failed: ${JSON.stringify(r1.Err)}`);
+  if ('Err' in r2) throw new Error(`3pool deposit failed: ${JSON.stringify(r2.Err)}`);
+  if (r3 && 'Err' in r3) throw new Error(`3USD approval failed: ${JSON.stringify(r3.Err)}`);
+  if ('err' in r4) throw new Error(`ICPswap depositFrom failed: ${JSON.stringify(r4.err)}`);
+  if ('err' in r5) throw new Error(`ICPswap swap failed: ${JSON.stringify(r5.err)}`);
+  if ('err' in r6) throw new Error(`ICPswap withdraw failed: ${JSON.stringify(r6.err)}`);
+  return (r6 as { ok: bigint }).ok;
+}
+
+/**
+ * ICP → Stablecoin via ICPswap (Oisy batched):
+ * 1. Approve ICP → ICPswap pool (for depositFrom)
+ * 2. ICPswap.depositFrom ICP
+ * 3. ICPswap.swap ICP → 3USD
+ * 4. ICPswap.withdraw 3USD to caller
+ * 5. Approve 3USD → 3pool (for remove_one_coin)
+ * 6. 3pool.remove_one_coin 3USD → stablecoin
+ *
+ * Same withdraw-amount limitation as the stable→ICP case: we pass
+ * threeUsdMinFromSwap as the withdraw amount. Positive slippage stays on
+ * the pool's internal subaccount for manual recovery.
+ */
+async function executeIcpToStableOisyIcpswap(
+  route: SwapRoute,
+  to: AmmToken,
+  amountIn: bigint,
+  slippageBps: number,
+  hopQuote: ProviderQuote,
+): Promise<bigint> {
+  const wallet = get(walletStore);
+  if (!wallet.principal) throw new Error('Wallet not connected');
+
+  const icpswapPoolId = hopQuote.meta.poolCanisterId as string | undefined;
+  const zeroForOne = hopQuote.meta.zeroForOne;
+  if (typeof icpswapPoolId !== 'string') {
+    throw new Error('ICPswap hopQuote missing meta.poolCanisterId');
+  }
+  if (typeof zeroForOne !== 'boolean') {
+    throw new Error('ICPswap hopQuote missing meta.zeroForOne');
+  }
+
+  const icpToken = AMM_TOKENS.find(t => t.symbol === 'ICP')!;
+  const threeUsdEstimate = route.intermediateOutput!;
+  const threeUsdMinFromSwap = threeUsdEstimate * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
+  const stableMinOutput = route.estimatedOutput * BigInt(10000 - slippageBps) / 10000n;
+
+  const signerAgent = await getOisySignerAgent(wallet.principal);
+
+  const icpLedger = createOisyActor(ICP_LEDGER_ID, CONFIG.icusd_ledgerIDL, signerAgent);
+  const icpswapPool = createOisyActor(icpswapPoolId, canisterIDLs.icpswap_pool, signerAgent);
+  const threeUsdLedger = createOisyActor(THREEPOOL_ID, canisterIDLs.three_pool, signerAgent);
+  const poolActor = createOisyActor(THREEPOOL_ID, canisterIDLs.three_pool, signerAgent);
+
+  // Step 1: approve ICP → ICPswap pool
+  signerAgent.batch();
+  const p1 = icpLedger.icrc2_approve({
+    amount: amountIn + getLedgerFee(icpToken) * 2n,
+    spender: { owner: Principal.fromText(icpswapPoolId), subaccount: [] },
+    expires_at: [], expected_allowance: [], memo: [], fee: [],
+    from_subaccount: [], created_at_time: [],
+  });
+
+  // Step 2: ICPswap depositFrom (pulls ICP)
+  signerAgent.batch();
+  const p2 = icpswapPool.depositFrom({
+    token: ICP_LEDGER_ID,
+    amount: amountIn,
+    fee: 0n,
+  });
+
+  // Step 3: ICPswap swap ICP → 3USD
+  signerAgent.batch();
+  const p3 = icpswapPool.swap({
+    amountIn: amountIn.toString(),
+    zeroForOne,
+    amountOutMinimum: threeUsdMinFromSwap.toString(),
+  });
+
+  // Step 4: ICPswap withdraw 3USD to caller
+  signerAgent.batch();
+  const p4 = icpswapPool.withdraw({
+    token: CANISTER_IDS.THREEPOOL,
+    amount: threeUsdMinFromSwap,
+    fee: 0n,
+  });
+
+  // Step 5: approve 3USD → 3pool for remove_one_coin
+  signerAgent.batch();
+  const p5 = threeUsdLedger.icrc2_approve({
+    amount: threeUsdMinFromSwap * 101n / 100n,
+    spender: { owner: Principal.fromText(THREEPOOL_ID), subaccount: [] },
+    expires_at: [], expected_allowance: [], memo: [], fee: [],
+    from_subaccount: [], created_at_time: [],
+  });
+
+  // Step 6: 3pool remove_one_coin (3USD → target stablecoin)
+  // We pass threeUsdMinFromSwap (conservative) to match the withdraw amount.
+  signerAgent.batch();
+  const p6 = poolActor.remove_one_coin(threeUsdMinFromSwap, to.threePoolIndex, stableMinOutput);
+
+  await signerAgent.execute();
+  const [r1, r2, r3, r4, r5, r6] = await Promise.all([p1, p2, p3, p4, p5, p6]);
+
+  if (r1 && 'Err' in r1) throw new Error(`ICP approval failed: ${JSON.stringify(r1.Err)}`);
+  if ('err' in r2) throw new Error(`ICPswap depositFrom failed: ${JSON.stringify(r2.err)}`);
+  if ('err' in r3) throw new Error(`ICPswap swap failed: ${JSON.stringify(r3.err)}`);
+  if ('err' in r4) throw new Error(`ICPswap withdraw failed: ${JSON.stringify(r4.err)}`);
+  if (r5 && 'Err' in r5) throw new Error(`3USD approval failed: ${JSON.stringify(r5.Err)}`);
+  if ('Err' in r6) throw new Error(`3pool redeem failed: ${JSON.stringify(r6.Err)}`);
+  return r6.Ok;
 }
