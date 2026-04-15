@@ -28,6 +28,19 @@ const _threeUsdIcpRegistry = new ProviderRegistry([
   }),
 ]);
 
+// Dedicated registry for the direct icUSD/ICP pool on ICPswap (Task 11).
+// Only ICPswap currently hosts this pair; if a Rumi AMM icUSD/ICP pool is
+// added later, wire in RumiAmmProvider here too.
+const _icUsdIcpRegistry = new ProviderRegistry([
+  new IcpswapProvider({
+    id: 'icpswap_icusd_icp',
+    poolCanisterId: CANISTER_IDS.ICPSWAP_ICUSD_ICP_POOL,
+    token0LedgerId: CANISTER_IDS.ICUSD_LEDGER,
+    token1LedgerId: CANISTER_IDS.ICP_LEDGER,
+    feeBps: 30,
+  }),
+]);
+
 // ──────────────────────────────────────────────────────────────
 // Route types
 // ──────────────────────────────────────────────────────────────
@@ -38,7 +51,8 @@ export type RouteType =
   | 'three_pool_redeem'     // 3USD -> Stablecoin (redeem via 3pool)
   | 'amm_swap'              // 3USD <-> ICP (direct AMM)
   | 'stable_to_icp'         // Stablecoin -> ICP (3pool deposit + AMM swap)
-  | 'icp_to_stable';        // ICP -> Stablecoin (AMM swap + 3pool redeem)
+  | 'icp_to_stable'         // ICP -> Stablecoin (AMM swap + 3pool redeem)
+  | 'icusd_icp_direct';     // icUSD <-> ICP (direct ICPswap icUSD/ICP pool)
 
 export interface SwapRoute {
   type: RouteType;
@@ -176,6 +190,64 @@ export async function resolveRoute(
     };
   }
 
+  // Case 5a: icUSD <-> ICP (direct ICPswap icUSD/ICP pool vs 2-hop via 3pool).
+  // icUSD is a stablecoin, so this MUST sit before Case 5 to take precedence.
+  // Direct wins on ties (one fewer fee, simpler execution).
+  const isIcUsd = (t: AmmToken) => t.symbol === 'icUSD';
+  if ((isIcUsd(from) && isICP(to)) || (isICP(from) && isIcUsd(to))) {
+    // Option A: direct via ICPswap icUSD/ICP
+    let directQuote: ProviderQuote | null = null;
+    try {
+      directQuote = await _icUsdIcpRegistry.bestQuote(from, to, amountIn);
+    } catch {
+      // Pool too thin / offline; continue with 2-hop only
+    }
+
+    // Option B: 2-hop via 3pool + best-of(3USD/ICP)
+    const threeUsdToken = AMM_TOKENS.find(t => t.is3USD)!;
+    let twoHopOutput: bigint;
+    let twoHopIntermediate: bigint;
+    let twoHopQuote: ProviderQuote;
+
+    if (isIcUsd(from)) {
+      const amounts = [0n, 0n, 0n];
+      amounts[from.threePoolIndex] = amountIn;
+      twoHopIntermediate = await threePoolService.calcAddLiquidity(amounts);
+      twoHopQuote = await _threeUsdIcpRegistry.bestQuote(threeUsdToken, to, twoHopIntermediate);
+      twoHopOutput = twoHopQuote.amountOut;
+    } else {
+      twoHopQuote = await _threeUsdIcpRegistry.bestQuote(from, threeUsdToken, amountIn);
+      twoHopIntermediate = twoHopQuote.amountOut;
+      twoHopOutput = await threePoolService.calcRemoveOneCoin(twoHopIntermediate, to.threePoolIndex);
+    }
+
+    // Direct wins on ties (one fewer fee)
+    if (directQuote && directQuote.amountOut >= twoHopOutput) {
+      return {
+        type: 'icusd_icp_direct',
+        pathDisplay: directQuote.label,
+        hops: 1,
+        estimatedOutput: directQuote.amountOut,
+        feeDisplay: directQuote.feeDisplay,
+        providerQuote: directQuote,
+      };
+    }
+
+    // Fall back to 2-hop (reuses existing stable_to_icp / icp_to_stable execution)
+    return {
+      type: isIcUsd(from) ? 'stable_to_icp' : 'icp_to_stable',
+      pathDisplay: isIcUsd(from)
+        ? `icUSD → 3USD → ICP`
+        : `ICP → 3USD → icUSD`,
+      hops: 2,
+      estimatedOutput: twoHopOutput,
+      feeDisplay: twoHopQuote.feeDisplay,
+      intermediateOutput: twoHopIntermediate,
+      hopProviderQuote: twoHopQuote,
+      poolId: twoHopQuote.provider === 'rumi_amm' ? (twoHopQuote.meta.poolId as string) : undefined,
+    };
+  }
+
   // Case 5: Stablecoin -> ICP (two-hop: 3pool deposit + best 3USD->ICP swap)
   if (isStablecoin(from) && isICP(to)) {
     const amounts = [0n, 0n, 0n];
@@ -306,9 +378,62 @@ export async function executeRoute(
       return await threePoolService.removeOneCoin(hop1.amountOut, to.threePoolIndex, stableMinOutput);
     }
 
+    case 'icusd_icp_direct': {
+      const q = route.providerQuote;
+      if (!q) throw new Error('icusd_icp_direct route missing providerQuote');
+
+      if (isOisyWallet()) {
+        return await executeIcpswapDirectOisy(route, from, to, amountIn, slippageBps);
+      }
+
+      // Non-Oisy: pre-approve input token to the ICPswap pool, then call provider.swap
+      // (the provider does depositFrom -> swap -> withdraw internally).
+      const poolCanisterId = q.meta.poolCanisterId as string | undefined;
+      if (typeof poolCanisterId !== 'string') {
+        throw new Error('icusd_icp_direct route has invalid meta.poolCanisterId');
+      }
+
+      await approveIcpswapPool(from, amountIn, poolCanisterId);
+
+      const provider = _icUsdIcpRegistry.get(q.provider);
+      const result = await provider.swap(from, to, amountIn, minOutput, q);
+      return result.amountOut;
+    }
+
     default:
       throw new Error(`Unknown route type: ${route.type}`);
   }
+}
+
+/**
+ * Approve an arbitrary ICPswap pool canister to pull `amountIn` of `from`
+ * via ICRC-2 depositFrom. Mirrors the non-Oisy approval pattern in
+ * threePoolService.swap (walletStore.getActor + icrc2_approve + ledger sync
+ * delay) and reuses the `approvalAmount(amountIn, fromToken)` helper so the
+ * fee buffer stays consistent with the rest of the codebase.
+ */
+async function approveIcpswapPool(
+  fromToken: AmmToken,
+  amountIn: bigint,
+  poolCanisterId: string,
+): Promise<void> {
+  const ledgerActor = await walletStore.getActor(
+    fromToken.ledgerId, CONFIG.icusd_ledgerIDL
+  ) as any;
+
+  const approveResult = await ledgerActor.icrc2_approve({
+    amount: approvalAmount(amountIn, fromToken),
+    spender: { owner: Principal.fromText(poolCanisterId), subaccount: [] },
+    expires_at: [], expected_allowance: [], memo: [], fee: [],
+    from_subaccount: [], created_at_time: [],
+  });
+
+  if (approveResult && 'Err' in approveResult) {
+    throw new Error(`${fromToken.symbol} approval failed: ${JSON.stringify(approveResult.Err)}`);
+  }
+
+  // Small delay for ledger sync (matches threePoolService.swap non-Oisy path).
+  await new Promise(r => setTimeout(r, 2000));
 }
 
 /**
@@ -706,4 +831,87 @@ async function executeIcpToStableOisyIcpswap(
   if ('err' in r4) throw new Error(`ICPswap withdraw failed: ${JSON.stringify(r4.err)}`);
   if ('Err' in r5) throw new Error(`3pool redeem failed: ${JSON.stringify(r5.Err)}`);
   return r5.Ok;
+}
+
+/**
+ * icUSD <-> ICP direct via ICPswap (Oisy batched):
+ * 1. Approve input token -> ICPswap pool
+ * 2. ICPswap.depositFrom (pulls input via ICRC-2)
+ * 3. ICPswap.swap
+ * 4. ICPswap.withdraw (output to caller)
+ *
+ * Same withdraw-amount limitation as the other ICPswap Oisy helpers:
+ * withdraw amount is pre-committed to minOut; positive slippage stays on
+ * the pool's internal subaccount until recovered.
+ */
+async function executeIcpswapDirectOisy(
+  route: SwapRoute,
+  from: AmmToken,
+  to: AmmToken,
+  amountIn: bigint,
+  slippageBps: number,
+): Promise<bigint> {
+  const wallet = get(walletStore);
+  if (!wallet.principal) throw new Error('Wallet not connected');
+
+  const q = route.providerQuote;
+  if (!q) throw new Error('icusd_icp_direct Oisy route missing providerQuote');
+
+  const icpswapPoolId = q.meta.poolCanisterId as string | undefined;
+  const zeroForOne = q.meta.zeroForOne;
+  if (typeof icpswapPoolId !== 'string') {
+    throw new Error('ICPswap direct route missing meta.poolCanisterId');
+  }
+  if (typeof zeroForOne !== 'boolean') {
+    throw new Error('ICPswap direct route has invalid meta.zeroForOne (expected boolean)');
+  }
+
+  const minOut = route.estimatedOutput * BigInt(10000 - slippageBps) / 10000n;
+
+  const signerAgent = await getOisySignerAgent(wallet.principal);
+
+  const fromLedger = createOisyActor(from.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent);
+  const icpswapPool = createOisyActor(icpswapPoolId, canisterIDLs.icpswap_pool, signerAgent);
+
+  // Step 1: approve input -> ICPswap pool
+  signerAgent.batch();
+  const p1 = fromLedger.icrc2_approve({
+    amount: amountIn + getLedgerFee(from) * 2n,
+    spender: { owner: Principal.fromText(icpswapPoolId), subaccount: [] },
+    expires_at: [], expected_allowance: [], memo: [], fee: [],
+    from_subaccount: [], created_at_time: [],
+  });
+
+  // Step 2: ICPswap depositFrom
+  signerAgent.batch();
+  const p2 = icpswapPool.depositFrom({
+    token: from.ledgerId,
+    amount: amountIn,
+    fee: 0n,
+  });
+
+  // Step 3: ICPswap swap
+  signerAgent.batch();
+  const p3 = icpswapPool.swap({
+    amountIn: amountIn.toString(),
+    zeroForOne,
+    amountOutMinimum: minOut.toString(),
+  });
+
+  // Step 4: ICPswap withdraw
+  signerAgent.batch();
+  const p4 = icpswapPool.withdraw({
+    token: to.ledgerId,
+    amount: minOut,
+    fee: 0n,
+  });
+
+  await signerAgent.execute();
+  const [r1, r2, r3, r4] = await Promise.all([p1, p2, p3, p4]);
+
+  if (r1 && 'Err' in r1) throw new Error(`${from.symbol} approval failed: ${JSON.stringify(r1.Err)}`);
+  if ('err' in r2) throw new Error(`ICPswap depositFrom failed: ${JSON.stringify(r2.err)}`);
+  if ('err' in r3) throw new Error(`ICPswap swap failed: ${JSON.stringify(r3.err)}`);
+  if ('err' in r4) throw new Error(`ICPswap withdraw failed: ${JSON.stringify(r4.err)}`);
+  return (r4 as { ok: bigint }).ok;
 }
