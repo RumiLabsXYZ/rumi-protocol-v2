@@ -316,6 +316,9 @@ export async function executeRoute(
  * how to route through Rumi AMM. Two-hop cases (stable_to_icp / icp_to_stable)
  * now dispatch ICPswap and Rumi AMM natively via the Oisy helpers below.
  * Rejects Oisy + ICPswap combos for `amm_swap` until that path is added.
+ * Case 4 was deferred because users with only icUSD/ICP can fall back to
+ * Internet Identity or route through the 2-hop path; the 3USD-direct case
+ * is rarer and lower-impact.
  */
 function assertOisyProviderSupported(route: SwapRoute): void {
   if (!isOisyWallet()) return;
@@ -535,7 +538,7 @@ async function executeStableToIcpOisyIcpswap(
     throw new Error('ICPswap hopQuote missing meta.poolCanisterId');
   }
   if (typeof zeroForOne !== 'boolean') {
-    throw new Error('ICPswap hopQuote missing meta.zeroForOne');
+    throw new Error('ICPswap hopQuote has invalid meta.zeroForOne (expected boolean)');
   }
 
   const threeUsdEstimate = route.intermediateOutput!;
@@ -619,8 +622,7 @@ async function executeStableToIcpOisyIcpswap(
  * 2. ICPswap.depositFrom ICP
  * 3. ICPswap.swap ICP → 3USD
  * 4. ICPswap.withdraw 3USD to caller
- * 5. Approve 3USD → 3pool (for remove_one_coin)
- * 6. 3pool.remove_one_coin 3USD → stablecoin
+ * 5. 3pool.remove_one_coin (burns caller's LP — no allowance needed)
  *
  * Same withdraw-amount limitation as the stable→ICP case: we pass
  * threeUsdMinFromSwap as the withdraw amount. Positive slippage stays on
@@ -642,7 +644,7 @@ async function executeIcpToStableOisyIcpswap(
     throw new Error('ICPswap hopQuote missing meta.poolCanisterId');
   }
   if (typeof zeroForOne !== 'boolean') {
-    throw new Error('ICPswap hopQuote missing meta.zeroForOne');
+    throw new Error('ICPswap hopQuote has invalid meta.zeroForOne (expected boolean)');
   }
 
   const icpToken = AMM_TOKENS.find(t => t.symbol === 'ICP')!;
@@ -654,7 +656,6 @@ async function executeIcpToStableOisyIcpswap(
 
   const icpLedger = createOisyActor(ICP_LEDGER_ID, CONFIG.icusd_ledgerIDL, signerAgent);
   const icpswapPool = createOisyActor(icpswapPoolId, canisterIDLs.icpswap_pool, signerAgent);
-  const threeUsdLedger = createOisyActor(THREEPOOL_ID, canisterIDLs.three_pool, signerAgent);
   const poolActor = createOisyActor(THREEPOOL_ID, canisterIDLs.three_pool, signerAgent);
 
   // Step 1: approve ICP → ICPswap pool
@@ -690,28 +691,19 @@ async function executeIcpToStableOisyIcpswap(
     fee: 0n,
   });
 
-  // Step 5: approve 3USD → 3pool for remove_one_coin
-  signerAgent.batch();
-  const p5 = threeUsdLedger.icrc2_approve({
-    amount: threeUsdMinFromSwap * 101n / 100n,
-    spender: { owner: Principal.fromText(THREEPOOL_ID), subaccount: [] },
-    expires_at: [], expected_allowance: [], memo: [], fee: [],
-    from_subaccount: [], created_at_time: [],
-  });
-
-  // Step 6: 3pool remove_one_coin (3USD → target stablecoin)
+  // Step 5: 3pool remove_one_coin (3USD → target stablecoin)
+  // remove_one_coin burns the caller's LP directly — no ICRC-2 allowance required.
   // We pass threeUsdMinFromSwap (conservative) to match the withdraw amount.
   signerAgent.batch();
-  const p6 = poolActor.remove_one_coin(threeUsdMinFromSwap, to.threePoolIndex, stableMinOutput);
+  const p5 = poolActor.remove_one_coin(threeUsdMinFromSwap, to.threePoolIndex, stableMinOutput);
 
   await signerAgent.execute();
-  const [r1, r2, r3, r4, r5, r6] = await Promise.all([p1, p2, p3, p4, p5, p6]);
+  const [r1, r2, r3, r4, r5] = await Promise.all([p1, p2, p3, p4, p5]);
 
   if (r1 && 'Err' in r1) throw new Error(`ICP approval failed: ${JSON.stringify(r1.Err)}`);
   if ('err' in r2) throw new Error(`ICPswap depositFrom failed: ${JSON.stringify(r2.err)}`);
   if ('err' in r3) throw new Error(`ICPswap swap failed: ${JSON.stringify(r3.err)}`);
   if ('err' in r4) throw new Error(`ICPswap withdraw failed: ${JSON.stringify(r4.err)}`);
-  if (r5 && 'Err' in r5) throw new Error(`3USD approval failed: ${JSON.stringify(r5.Err)}`);
-  if ('Err' in r6) throw new Error(`3pool redeem failed: ${JSON.stringify(r6.Err)}`);
-  return r6.Ok;
+  if ('Err' in r5) throw new Error(`3pool redeem failed: ${JSON.stringify(r5.Err)}`);
+  return r5.Ok;
 }
