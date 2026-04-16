@@ -13,6 +13,7 @@
   import { developerAccess } from "../lib/stores/developer";
   import ToastContainer from "../lib/components/common/ToastContainer.svelte";
   import { ApiClient } from "../lib/services/protocol/apiClient";
+  import { initIcpswapRoutingFlag } from "../lib/services/swapRouter";
   let permissionInitialized = false;
   let showDebug = false;
   let hasLiquidatableVaults = false;
@@ -30,6 +31,7 @@
       try { await wallet.initialize(); } catch (e) { console.error('Wallet init failed:', e); }
       if (isConnected && !permissionInitialized) { try { if (await permissionStore.init()) permissionInitialized = true; } catch (e) { permissionInitialized = true; } }
       protocolService.getICPPrice().catch(() => {});
+      initIcpswapRoutingFlag().catch(() => {});
       // Check for liquidatable vaults (poll every 60s)
       const checkLiquidatable = async () => {
         try {

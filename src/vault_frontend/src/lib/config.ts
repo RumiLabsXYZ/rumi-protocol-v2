@@ -5,6 +5,7 @@ import { idlFactory as threePoolIDL } from '$declarations/rumi_3pool/rumi_3pool.
 import { idlFactory as rumiAmmIDL } from '$declarations/rumi_amm/rumi_amm.did.js';
 import { idlFactory as icusdIndexIDL } from '$declarations/icusd_index/icusd_index.did.js';
 import { idlFactory as analyticsIDL } from '$declarations/rumi_analytics/rumi_analytics.did.js';
+import { idlFactory as icpswapPoolIDL } from '$declarations/icpswap_pool/icpswap_pool.did.js';
 
 // Canister IDs for production (Rumi Protocol v2 - mainnet)
 export const CANISTER_IDS = {
@@ -24,6 +25,9 @@ export const CANISTER_IDS = {
   RUMI_AMM: "ijlzs-2yaaa-aaaap-quaaq-cai",
   // Rumi Analytics (time-series data, protocol metrics)
   ANALYTICS: "dtlu2-uqaaa-aaaap-qugcq-cai",
+  // ICPswap pools (external DEX for routing)
+  ICPSWAP_3USD_ICP_POOL: "mu2zw-6iaaa-aaaar-qb56q-cai",
+  ICPSWAP_ICUSD_ICP_POOL: "nqxwe-hiaaa-aaaar-qb5yq-cai",
 } as const;
 
 // Canister IDs for local development
@@ -95,6 +99,14 @@ export const CONFIG = {
     return CANISTER_IDS.RUMI_AMM;
   },
 
+  get icpswap3UsdIcpPoolId() {
+    return CANISTER_IDS.ICPSWAP_3USD_ICP_POOL;
+  },
+
+  get icpswapIcUsdIcpPoolId() {
+    return CANISTER_IDS.ICPSWAP_ICUSD_ICP_POOL;
+  },
+
   getStableLedgerId(tokenType: 'CKUSDT' | 'CKUSDC'): string {
     return tokenType === 'CKUSDT' ? CANISTER_IDS.CKUSDT_LEDGER : CANISTER_IDS.CKUSDC_LEDGER;
   },
@@ -135,4 +147,5 @@ export const CONFIG = {
   rumiAmmIDL,
   icusdIndexIDL,
   analyticsIDL,
+  icpswapPoolIDL,
 };

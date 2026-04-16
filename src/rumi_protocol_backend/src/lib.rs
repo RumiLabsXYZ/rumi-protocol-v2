@@ -262,6 +262,11 @@ pub struct ProtocolConfig {
     pub ckusdt_enabled: bool,
     pub ckusdc_enabled: bool,
 
+    // -- Swap routing --
+    /// Kill switch for ICPswap-backed swap routing. When false, frontend skips
+    /// all ICPswap providers. Flipped via set_icpswap_routing_enabled.
+    pub icpswap_routing_enabled: bool,
+
     // -- External principals --
     pub treasury_principal: Option<Principal>,
     pub stability_pool_canister: Option<Principal>,

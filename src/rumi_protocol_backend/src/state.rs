@@ -618,6 +618,12 @@ pub struct State {
     pub reserve_redemptions_enabled: bool,
     pub reserve_redemption_fee: Ratio,
 
+    /// Admin kill switch for ICPswap-backed swap routing. When false (default),
+    /// the frontend's swap router skips all ICPswap providers and behaves as if
+    /// only Rumi AMM + the 3pool existed. Flipped via `set_icpswap_routing_enabled`
+    /// by the developer principal. Read by the frontend via `get_protocol_config`.
+    pub icpswap_routing_enabled: bool,
+
     /// Cumulative 3USD (LP tokens) received from stability pool liquidations (e8s).
     /// These sit in subaccount hash("protocol_3usd_reserves") on the 3USD ledger.
     pub protocol_3usd_reserves: u64,
@@ -771,6 +777,7 @@ impl Default for State {
             recovery_mode_threshold: RECOVERY_COLLATERAL_RATIO,
             reserve_redemptions_enabled: false,
             reserve_redemption_fee: DEFAULT_RESERVE_REDEMPTION_FEE,
+            icpswap_routing_enabled: false,
             protocol_3usd_reserves: 0,
             last_admin_mint_time: 0,
             collateral_configs: BTreeMap::new(),
@@ -870,6 +877,8 @@ impl From<InitArg> for State {
             // Reserve redemptions
             reserve_redemptions_enabled: false,
             reserve_redemption_fee: DEFAULT_RESERVE_REDEMPTION_FEE,
+            // ICPswap routing kill switch — default off, admin flips via set_icpswap_routing_enabled
+            icpswap_routing_enabled: false,
             protocol_3usd_reserves: 0,
 
             // Admin mint cooldown
@@ -2668,6 +2677,11 @@ impl State {
             self.reserve_redemptions_enabled,
             other.reserve_redemptions_enabled,
             "reserve_redemptions_enabled does not match"
+        );
+        ensure_eq!(
+            self.icpswap_routing_enabled,
+            other.icpswap_routing_enabled,
+            "icpswap_routing_enabled does not match"
         );
 
         Ok(())
