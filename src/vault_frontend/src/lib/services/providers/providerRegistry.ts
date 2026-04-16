@@ -12,9 +12,18 @@ export class ProviderRegistry {
    */
   async quoteAll(tokenIn: AmmToken, tokenOut: AmmToken, amountIn: bigint): Promise<ProviderQuote[]> {
     const supporting = this.providers.filter(p => p.supports(tokenIn, tokenOut));
+    console.log(`[ProviderRegistry] quoteAll ${tokenIn.symbol}->${tokenOut.symbol} amt=${amountIn}, ${supporting.length} providers: [${supporting.map(p => p.id).join(', ')}]`);
     const results = await Promise.allSettled(
       supporting.map(p => p.quote(tokenIn, tokenOut, amountIn)),
     );
+    // Log rejected quotes so silent failures become visible in the console.
+    results.forEach((r, i) => {
+      if (r.status === 'rejected') {
+        console.warn(`[ProviderRegistry] ${supporting[i].id} quote FAILED:`, r.reason);
+      } else {
+        console.log(`[ProviderRegistry] ${supporting[i].id} quote OK: amountOut=${r.value.amountOut}`);
+      }
+    });
     return results
       .filter((r): r is PromiseFulfilledResult<ProviderQuote> => r.status === 'fulfilled')
       .map(r => r.value);
