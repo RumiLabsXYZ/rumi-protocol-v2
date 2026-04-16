@@ -130,7 +130,7 @@ describe('IcpswapProvider.swap', () => {
     expect(mockPool.depositFrom).toHaveBeenCalledWith({
       token: 't6bor-paaaa-aaaap-qrd5q-cai',
       amount: 500_000_000n,
-      fee: 0n,
+      fee: 100_000n,  // icUSD ICRC-1 fee
     });
     expect(mockPool.swap).toHaveBeenCalledWith({
       amountIn: '500000000',
@@ -140,7 +140,7 @@ describe('IcpswapProvider.swap', () => {
     expect(mockPool.withdraw).toHaveBeenCalledWith({
       token: 'ryjl3-tyaaa-aaaaa-aaaba-cai',
       amount: 495_000_000n,
-      fee: 0n,
+      fee: 10_000n,  // ICP ICRC-1 fee
     });
   });
 

@@ -1,11 +1,28 @@
 import { Actor, HttpAgent } from '@dfinity/agent';
 import type { _SERVICE as IcpswapPool } from '$declarations/icpswap_pool/icpswap_pool.did';
 import { idlFactory as icpswapPoolIDL } from '$declarations/icpswap_pool/icpswap_pool.did.js';
-import { CONFIG } from '../../config';
+import { CONFIG, CANISTER_IDS } from '../../config';
 import { walletStore } from '../../stores/wallet';
 import { canisterIDLs } from '../pnp';
 import type { AmmToken } from '../ammService';
 import type { SwapProvider, ProviderQuote, ProviderSwapResult, ProviderId } from './types';
+
+/**
+ * Returns the exact ICRC-1 transfer fee for a known ledger.
+ * ICPswap pool's depositFrom/withdraw expect this value in the `fee` field
+ * to match the pool's internal fee cache.
+ */
+export function icrc1Fee(ledgerId: string): bigint {
+  switch (ledgerId) {
+    case CANISTER_IDS.ICP_LEDGER:   return 10_000n;     // 0.0001 ICP
+    case CANISTER_IDS.ICUSD_LEDGER: return 100_000n;    // 0.001 icUSD
+    case CANISTER_IDS.THREEPOOL:    return 0n;           // 3USD has zero fee
+    case CANISTER_IDS.CKUSDT_LEDGER: return 10_000n;    // ckUSDT
+    case CANISTER_IDS.CKUSDC_LEDGER: return 10_000n;    // ckUSDC
+    default:
+      throw new Error(`Unknown ledger fee for ${ledgerId}; add it to icrc1Fee()`);
+  }
+}
 
 export interface IcpswapProviderConfig {
   id: Extract<ProviderId, 'icpswap_3usd_icp' | 'icpswap_icusd_icp'>;
@@ -77,11 +94,10 @@ export class IcpswapProvider implements SwapProvider {
     // Step 1: depositFrom pulls tokens via ICRC-2 (caller must have pre-approved
     // the pool canister). Approval is the caller's responsibility, wired in by
     // the swapRouter in Task 9.
-    // TODO: query icrc1_fee() from the input ledger; 0n is a placeholder.
     const depositResult = await pool.depositFrom({
       token: tokenIn.ledgerId,
       amount: amountIn,
-      fee: 0n,
+      fee: icrc1Fee(tokenIn.ledgerId),
     });
     this.unwrapResult(depositResult, 'depositFrom');
 
@@ -102,11 +118,10 @@ export class IcpswapProvider implements SwapProvider {
       const swapOut = this.unwrapResult(swapResult, 'swap');
 
       // Step 3: withdraw output back to caller's ledger account.
-      // TODO: query icrc1_fee() from the output ledger; 0n is a placeholder.
       const withdrawResult = await pool.withdraw({
         token: tokenOut.ledgerId,
         amount: swapOut,
-        fee: 0n,
+        fee: icrc1Fee(tokenOut.ledgerId),
       });
       withdrawn = this.unwrapResult(withdrawResult, 'withdraw');
     } catch (err) {

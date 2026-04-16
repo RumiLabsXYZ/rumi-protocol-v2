@@ -8,7 +8,7 @@ import { canisterIDLs } from './pnp';
 import { walletStore } from '../stores/wallet';
 import { get } from 'svelte/store';
 import { RumiAmmProvider } from './providers/rumiAmmProvider';
-import { IcpswapProvider } from './providers/icpswapProvider';
+import { IcpswapProvider, icrc1Fee } from './providers/icpswapProvider';
 import { ProviderRegistry } from './providers/providerRegistry';
 import type { ProviderQuote } from './providers/types';
 
@@ -76,6 +76,7 @@ export async function initIcpswapRoutingFlag(): Promise<void> {
     const { publicActor } = await import('./protocol/apiClient');
     const enabled = await (publicActor as any).get_icpswap_routing_enabled();
     _icpswapEnabled = Boolean(enabled);
+    console.log(`[swapRouter] initIcpswapRoutingFlag: ${_icpswapEnabled}`);
   } catch (err) {
     console.warn('[swapRouter] Failed to fetch icpswap_routing_enabled, defaulting to off:', err);
     _icpswapEnabled = false;
@@ -240,6 +241,7 @@ export async function resolveRoute(
   // Direct wins on ties (one fewer fee, simpler execution).
   const isIcUsd = (t: AmmToken) => t.symbol === 'icUSD';
   if ((isIcUsd(from) && isICP(to)) || (isICP(from) && isIcUsd(to))) {
+    console.log(`[swapRouter] Case 5a: icUSD<->ICP, _icpswapEnabled=${_icpswapEnabled}`);
     // Option A: direct via ICPswap icUSD/ICP. Skipped entirely when the
     // kill switch is off — there is no Rumi-hosted icUSD/ICP pool, so with
     // ICPswap disabled the router always falls through to the 2-hop path.
@@ -806,12 +808,11 @@ async function executeStableToIcpOisyIcpswap(
   });
 
   // Step 4: ICPswap depositFrom (pulls 3USD via ICRC-2)
-  // NOTE: fee: 0n matches IcpswapProvider's current TODO; wire icrc1_fee() later.
   signerAgent.batch();
   const p4 = icpswapPool.depositFrom({
     token: CANISTER_IDS.THREEPOOL,
     amount: threeUsdEstimate,
-    fee: 0n,
+    fee: icrc1Fee(CANISTER_IDS.THREEPOOL),
   });
 
   // Step 5: ICPswap swap (uses pre-committed 3USD amount; slippage via amountOutMinimum)
@@ -828,7 +829,7 @@ async function executeStableToIcpOisyIcpswap(
   const p6 = icpswapPool.withdraw({
     token: CANISTER_IDS.ICP_LEDGER,
     amount: icpMinOutput,
-    fee: 0n,
+    fee: icrc1Fee(CANISTER_IDS.ICP_LEDGER),
   });
 
   await signerAgent.execute();
@@ -899,7 +900,7 @@ async function executeIcpToStableOisyIcpswap(
   const p2 = icpswapPool.depositFrom({
     token: ICP_LEDGER_ID,
     amount: amountIn,
-    fee: 0n,
+    fee: icrc1Fee(ICP_LEDGER_ID),
   });
 
   // Step 3: ICPswap swap ICP → 3USD
@@ -915,7 +916,7 @@ async function executeIcpToStableOisyIcpswap(
   const p4 = icpswapPool.withdraw({
     token: CANISTER_IDS.THREEPOOL,
     amount: threeUsdMinFromSwap,
-    fee: 0n,
+    fee: icrc1Fee(CANISTER_IDS.THREEPOOL),
   });
 
   // Step 5: 3pool remove_one_coin (3USD → target stablecoin)
@@ -989,7 +990,7 @@ async function executeIcpswapDirectOisy(
   const p2 = icpswapPool.depositFrom({
     token: from.ledgerId,
     amount: amountIn,
-    fee: 0n,
+    fee: icrc1Fee(from.ledgerId),
   });
 
   // Step 3: ICPswap swap
@@ -1005,7 +1006,7 @@ async function executeIcpswapDirectOisy(
   const p4 = icpswapPool.withdraw({
     token: to.ledgerId,
     amount: minOut,
-    fee: 0n,
+    fee: icrc1Fee(to.ledgerId),
   });
 
   await signerAgent.execute();
