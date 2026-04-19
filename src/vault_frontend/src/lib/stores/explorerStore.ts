@@ -4,7 +4,7 @@ import { Principal } from '@dfinity/principal';
 import { stabilityPoolService } from '$lib/services/stabilityPoolService';
 import { threePoolService } from '$lib/services/threePoolService';
 
-export type EventSource = 'backend' | 'stability_pool' | '3pool_swap' | '3pool_lp';
+export type EventSource = 'backend' | 'stability_pool' | '3pool_swap' | '3pool_lp' | 'multi_hop_swap';
 
 export interface UnifiedEvent {
 	source: EventSource;

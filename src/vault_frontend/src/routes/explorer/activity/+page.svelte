@@ -19,9 +19,10 @@
 		getEventCategory, formatSwapEvent, formatAmmSwapEvent,
 		formatAmmLiquidityEvent, formatAmmAdminEvent,
 		format3PoolLiquidityEvent, format3PoolAdminEvent,
-		formatStabilityPoolEvent
+		formatStabilityPoolEvent, formatMultiHopSwapEvent
 	} from '$utils/explorerFormatters';
-	import { formatE8s, timeAgo, shortenPrincipal } from '$utils/explorerHelpers';
+	import { formatE8s, formatTokenAmount, timeAgo, shortenPrincipal, getTokenSymbol, getTokenDecimals } from '$utils/explorerHelpers';
+	import { CANISTER_IDS } from '$lib/config';
 
 	const PAGE_SIZE = 100;
 
@@ -40,7 +41,7 @@
 	interface DisplayEvent {
 		globalIndex: bigint;
 		event: any;
-		source: 'backend' | '3pool_swap' | 'amm_swap' | 'amm_liquidity' | 'amm_admin' | '3pool_liquidity' | '3pool_admin' | 'stability_pool';
+		source: 'backend' | '3pool_swap' | 'amm_swap' | 'amm_liquidity' | 'amm_admin' | '3pool_liquidity' | '3pool_admin' | 'stability_pool' | 'multi_hop_swap';
 		timestamp: number; // nanoseconds
 	}
 
@@ -79,6 +80,13 @@
 	// ── Principal extraction from any event type ──
 
 	function extractPrincipal(event: any, source: string): string | null {
+		// Multi-hop swap: extract caller from nested AMM event
+		if (source === 'multi_hop_swap') {
+			const caller = event.ammEvent?.caller ?? event.liqEvent?.caller;
+			if (caller?.toText) return caller.toText();
+			if (typeof caller === 'string' && caller.length > 10) return caller;
+			return null;
+		}
 		// Direct caller field (swap events, SP events, AMM liquidity/admin, 3Pool liquidity/admin)
 		const caller = event.caller;
 		if (caller) {
@@ -126,7 +134,143 @@
 		'3pool_liquidity': '3Pool',
 		'3pool_admin': '3Pool',
 		'stability_pool': 'SP',
+		'multi_hop_swap': 'Swap',
 	};
+
+	// 3Pool token index → symbol/decimals for multi-hop merging
+	const THREEPOOL_TOKENS: { symbol: string; decimals: number }[] = [
+		{ symbol: 'icUSD', decimals: 8 },
+		{ symbol: 'ckUSDT', decimals: 6 },
+		{ symbol: 'ckUSDC', decimals: 6 },
+	];
+
+	// 3USD LP token principal (the 3pool canister itself)
+	const THREEPOOL_PRINCIPAL = CANISTER_IDS.THREEPOOL;
+
+	/**
+	 * Merge correlated multi-hop swap events into single display events.
+	 *
+	 * Detects pairs where a 3pool_liquidity event and an amm_swap event share
+	 * the same caller and occur within 10 seconds, indicating a two-leg swap
+	 * routed through the swap router.
+	 *
+	 * stable_to_icp: AddLiquidity (stablecoin → 3USD) + AMM swap (3USD → ICP)
+	 * icp_to_stable: AMM swap (ICP → 3USD) + RemoveOneCoin (3USD → stablecoin)
+	 */
+	function mergeMultiHopEvents(events: DisplayEvent[]): DisplayEvent[] {
+		const MAX_GAP_NS = 10_000_000_000; // 10 seconds in nanoseconds
+
+		// Index liquidity and AMM swap events by caller for fast lookup
+		const liqEvents: DisplayEvent[] = [];
+		const ammEvents: DisplayEvent[] = [];
+		for (const de of events) {
+			if (de.source === '3pool_liquidity') liqEvents.push(de);
+			else if (de.source === 'amm_swap') ammEvents.push(de);
+		}
+
+		if (liqEvents.length === 0 || ammEvents.length === 0) return events;
+
+		const mergedSet = new Set<DisplayEvent>();
+		const mergedResults: DisplayEvent[] = [];
+
+		for (const liq of liqEvents) {
+			const liqCaller = liq.event.caller?.toText?.() ?? '';
+			if (!liqCaller) continue;
+
+			const action = liq.event.action ? Object.keys(liq.event.action)[0] : '';
+			const isAdd = action === 'AddLiquidity';
+			const isRemove = action === 'RemoveOneCoin';
+			if (!isAdd && !isRemove) continue;
+
+			// Find matching AMM swap: same caller, close timestamp
+			for (const amm of ammEvents) {
+				if (mergedSet.has(amm)) continue;
+				const ammCaller = amm.event.caller?.toText?.() ?? '';
+				if (ammCaller !== liqCaller) continue;
+
+				const gap = Math.abs(liq.timestamp - amm.timestamp);
+				if (gap > MAX_GAP_NS) continue;
+
+				// Verify the AMM swap involves 3USD LP token
+				const ammTokenIn = amm.event.token_in?.toText?.() ?? '';
+				const ammTokenOut = amm.event.token_out?.toText?.() ?? '';
+				const ammInvolves3USD = ammTokenIn === THREEPOOL_PRINCIPAL || ammTokenOut === THREEPOOL_PRINCIPAL;
+				if (!ammInvolves3USD) continue;
+
+				if (isAdd && ammTokenIn === THREEPOOL_PRINCIPAL) {
+					// stable_to_icp: AddLiquidity then AMM swap (3USD → other)
+					const amounts = liq.event.amounts ?? [];
+					let stableIdx = -1;
+					for (let i = 0; i < amounts.length; i++) {
+						if (Number(amounts[i]) > 0) { stableIdx = i; break; }
+					}
+					if (stableIdx < 0) continue;
+
+					const stableToken = THREEPOOL_TOKENS[stableIdx];
+					const stableAmount = formatE8s(amounts[stableIdx], stableToken.decimals);
+					const threeUsdAmount = formatE8s(liq.event.lp_amount, 8);
+					const finalSym = getTokenSymbol(ammTokenOut);
+					const finalAmount = amm.event.amount_out != null ? formatTokenAmount(BigInt(amm.event.amount_out), ammTokenOut) : '?';
+
+					mergedSet.add(liq);
+					mergedSet.add(amm);
+					mergedResults.push({
+						globalIndex: amm.globalIndex,
+						source: 'multi_hop_swap',
+						timestamp: Math.max(liq.timestamp, amm.timestamp),
+						event: {
+							direction: 'stable_to_icp',
+							liqEvent: liq.event,
+							ammEvent: amm.event,
+							stablecoinSymbol: stableToken.symbol,
+							stablecoinAmount: stableAmount,
+							threeUsdAmount,
+							finalSymbol: finalSym,
+							finalAmount,
+						},
+					});
+					break;
+				} else if (isRemove && ammTokenOut === THREEPOOL_PRINCIPAL) {
+					// icp_to_stable: AMM swap (other → 3USD) then RemoveOneCoin
+					const coinIndex = liq.event.coin_index?.[0] ?? 0;
+					const stableToken = THREEPOOL_TOKENS[coinIndex] ?? THREEPOOL_TOKENS[0];
+					const amounts = liq.event.amounts ?? [];
+					const stableAmount = amounts[coinIndex] != null ? formatE8s(amounts[coinIndex], stableToken.decimals) : '?';
+					const threeUsdAmount = formatE8s(liq.event.lp_amount, 8);
+					const otherToken = amm.event.token_in?.toText?.() ?? '';
+					const otherSym = getTokenSymbol(otherToken);
+					const otherAmount = amm.event.amount_in != null ? formatTokenAmount(BigInt(amm.event.amount_in), otherToken) : '?';
+
+					mergedSet.add(liq);
+					mergedSet.add(amm);
+					mergedResults.push({
+						globalIndex: amm.globalIndex,
+						source: 'multi_hop_swap',
+						timestamp: Math.max(liq.timestamp, amm.timestamp),
+						event: {
+							direction: 'icp_to_stable',
+							liqEvent: liq.event,
+							ammEvent: amm.event,
+							stablecoinSymbol: stableToken.symbol,
+							stablecoinAmount: stableAmount,
+							threeUsdAmount,
+							finalSymbol: otherSym,
+							finalAmount: otherAmount,
+						},
+					});
+					break;
+				}
+			}
+		}
+
+		if (mergedResults.length === 0) return events;
+
+		// Rebuild: keep unmerged events, add merged ones
+		const result = events.filter(e => !mergedSet.has(e));
+		result.push(...mergedResults);
+		result.sort((a, b) => b.timestamp - a.timestamp);
+		return result;
+	}
 
 	// ── Format event for display ──
 
@@ -139,6 +283,7 @@
 			case '3pool_liquidity': return format3PoolLiquidityEvent(de.event);
 			case '3pool_admin': return format3PoolAdminEvent(de.event);
 			case 'stability_pool': return formatStabilityPoolEvent(de.event);
+			case 'multi_hop_swap': return formatMultiHopSwapEvent(de.event);
 			default: return { summary: '', typeName: '', badgeColor: '' }; // handled by EventRow
 		}
 	}
@@ -222,12 +367,13 @@
 				all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: 'stability_pool', timestamp: extractTimestamp(e) });
 			}
 
-			// Sort by timestamp descending
-			all.sort((a, b) => b.timestamp - a.timestamp);
+			// Merge multi-hop swaps, then sort by timestamp descending
+			const merged = mergeMultiHopEvents(all);
+			merged.sort((a, b) => b.timestamp - a.timestamp);
 
-			totalCount = all.length;
+			totalCount = merged.length;
 			const start = p * PAGE_SIZE;
-			displayEvents = all.slice(start, start + PAGE_SIZE);
+			displayEvents = merged.slice(start, start + PAGE_SIZE);
 			currentPage = p;
 		} catch (e) {
 			error = 'Failed to load events.';
@@ -361,8 +507,8 @@
 				Number(threePoolLiqCount) > 0 ? fetch3PoolLiquidityEvents(0n, threePoolLiqCount) : Promise.resolve([]),
 			]);
 
-			// Merge and tag
-			const merged: DisplayEvent[] = [
+			// Tag all events
+			const tagged: DisplayEvent[] = [
 				...threePoolSwaps.map((e: any) => ({
 					globalIndex: BigInt(e.id ?? 0), event: e, source: '3pool_swap' as const, timestamp: extractTimestamp(e)
 				})),
@@ -377,7 +523,8 @@
 				})),
 			];
 
-			// Sort by timestamp descending
+			// Merge multi-hop swaps, then sort by timestamp descending
+			const merged = mergeMultiHopEvents(tagged);
 			merged.sort((a, b) => b.timestamp - a.timestamp);
 
 			totalCount = merged.length;
@@ -607,9 +754,12 @@
 							{@const formatted = formatDisplayEvent(de)}
 							{@const principal = extractPrincipal(de.event, de.source)}
 							{@const sourceLabel = SOURCE_LABELS[de.source] ?? de.source}
+							{@const detailHref = de.source === 'multi_hop_swap'
+								? `/explorer/dex/amm_swap/${de.event.ammEvent?.id ?? Number(de.globalIndex)}`
+								: `/explorer/dex/${de.source}/${Number(de.globalIndex)}`}
 							<tr class="border-b border-gray-700/50 hover:bg-gray-800/30 transition-colors group">
 								<td class="px-4 py-3">
-									<a href="/explorer/dex/{de.source}/{Number(de.globalIndex)}" class="text-xs text-blue-400 hover:text-blue-300 font-mono" title="{sourceLabel} Event #{Number(de.globalIndex)}">{sourceLabel} #{Number(de.globalIndex)}</a>
+									<a href={detailHref} class="text-xs text-blue-400 hover:text-blue-300 font-mono" title="{sourceLabel} Event #{Number(de.globalIndex)}">{sourceLabel} #{Number(de.globalIndex)}</a>
 								</td>
 								<td class="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">
 									{#if de.timestamp}
@@ -637,7 +787,7 @@
 								</td>
 								<td class="px-4 py-3 text-right">
 									<a
-										href="/explorer/dex/{de.source}/{Number(de.globalIndex)}"
+										href={detailHref}
 										class="text-xs text-blue-400 hover:text-blue-300 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap"
 									>
 										Details &rarr;

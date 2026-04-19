@@ -483,6 +483,8 @@ export interface _SERVICE {
     Array<SwapEventV2>
   >,
   'get_swap_events_v2' : ActorMethod<[bigint, bigint], Array<SwapEventV2>>,
+  'get_liquidity_events_v2' : ActorMethod<[bigint, bigint], Array<LiquidityEventV2>>,
+  'get_liquidity_event_count_v2' : ActorMethod<[], bigint>,
   'get_top_lps' : ActorMethod<[bigint], Array<[Principal, bigint, number]>>,
   'get_top_swappers' : ActorMethod<
     [StatsWindow, bigint],

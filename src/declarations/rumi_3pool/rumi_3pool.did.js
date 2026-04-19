@@ -547,6 +547,12 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Vec(SwapEventV2)],
         ['query'],
       ),
+    'get_liquidity_events_v2' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [IDL.Vec(LiquidityEventV2)],
+        ['query'],
+      ),
+    'get_liquidity_event_count_v2' : IDL.Func([], [IDL.Nat64], ['query']),
     'get_top_lps' : IDL.Func(
         [IDL.Nat64],
         [IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat, IDL.Nat32))],

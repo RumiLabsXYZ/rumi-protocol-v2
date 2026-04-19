@@ -537,6 +537,73 @@ export function formatStabilityPoolEvent(evt: any): FormattedEvent {
   };
 }
 
+// ─── Multi-Hop Swap Formatter ────────────────────────────────────────
+
+/**
+ * Format a merged multi-hop swap event.
+ * `merged` contains: direction ('stable_to_icp' | 'icp_to_stable'),
+ * the 3pool liquidity event, the AMM swap event, and derived amounts.
+ */
+export function formatMultiHopSwapEvent(merged: {
+  direction: 'stable_to_icp' | 'icp_to_stable';
+  liqEvent: any;
+  ammEvent: any;
+  stablecoinSymbol: string;
+  stablecoinAmount: string;
+  threeUsdAmount: string;
+  finalSymbol: string;
+  finalAmount: string;
+}): FormattedEvent {
+  const { direction, liqEvent, ammEvent, stablecoinSymbol, stablecoinAmount, threeUsdAmount, finalSymbol, finalAmount } = merged;
+  const fields: EventField[] = [];
+
+  if (direction === 'stable_to_icp') {
+    fields.push({ label: 'Deposited', value: `${stablecoinAmount} ${stablecoinSymbol}`, type: 'amount' });
+    fields.push({ label: '3Pool Output', value: `${threeUsdAmount} 3USD LP`, type: 'amount' });
+    fields.push({ label: 'AMM Output', value: `${finalAmount} ${finalSymbol}`, type: 'amount' });
+    fields.push({ label: 'Route', value: `${stablecoinSymbol} → 3Pool → AMM → ${finalSymbol}`, type: 'text' });
+  } else {
+    fields.push({ label: 'Swapped In', value: `${finalAmount} ${finalSymbol}`, type: 'amount' });
+    fields.push({ label: 'AMM Output', value: `${threeUsdAmount} 3USD LP`, type: 'amount' });
+    fields.push({ label: 'Redeemed', value: `${stablecoinAmount} ${stablecoinSymbol}`, type: 'amount' });
+    fields.push({ label: 'Route', value: `${finalSymbol} → AMM → 3Pool → ${stablecoinSymbol}`, type: 'text' });
+  }
+
+  // Pool IDs
+  const ammPoolId = ammEvent.pool_id ?? '';
+  if (ammPoolId) fields.push({ label: 'AMM Pool', value: String(ammPoolId), type: 'text' });
+
+  // Token ledgers
+  const ammTokenIn = ammEvent.token_in?.toText?.() ?? String(ammEvent.token_in ?? '');
+  const ammTokenOut = ammEvent.token_out?.toText?.() ?? String(ammEvent.token_out ?? '');
+  if (ammTokenIn) fields.push({ label: 'AMM Token In', value: shortenPrincipal(ammTokenIn), type: 'token', linkTarget: ammTokenIn });
+  if (ammTokenOut) fields.push({ label: 'AMM Token Out', value: shortenPrincipal(ammTokenOut), type: 'token', linkTarget: ammTokenOut });
+
+  // Caller
+  const callerText = ammEvent.caller?.toText?.() ?? liqEvent.caller?.toText?.() ?? null;
+  if (callerText) fields.push({ label: 'Caller', value: shortenPrincipal(callerText), type: 'address', linkTarget: callerText });
+
+  // Timestamp (use AMM event as canonical)
+  const ts = ammEvent.timestamp ?? liqEvent.timestamp;
+  if (ts) fields.push({ label: 'Timestamp', value: formatTimestamp(ts), type: 'timestamp', linkTarget: String(ts) });
+
+  // Sub-event references
+  fields.push({ label: '3Pool Event', value: `#${liqEvent.id ?? '?'}`, type: 'text' });
+  fields.push({ label: 'AMM Event', value: `#${ammEvent.id ?? '?'}`, type: 'text' });
+
+  const summary = direction === 'stable_to_icp'
+    ? `Swapped ${stablecoinAmount} ${stablecoinSymbol} → ${threeUsdAmount} 3USD → ${finalAmount} ${finalSymbol}`
+    : `Swapped ${finalAmount} ${finalSymbol} → ${threeUsdAmount} 3USD → ${stablecoinAmount} ${stablecoinSymbol}`;
+
+  return {
+    summary,
+    typeName: 'Multi-Hop Swap',
+    category: 'amm',
+    badgeColor: BADGE_COLORS.amm,
+    fields,
+  };
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────
 
 function getVariantKey(event: any): string {
@@ -956,16 +1023,16 @@ export function formatEvent(event: any, vaultCollateralMap?: Map<number, string>
     // ── Liquidations ────────────────────────────────────────────────
 
     case 'liquidate_vault': {
-      const ctPrincipal = vaultCollateral(d.vault_id);
-      const sym = getTokenSymbol(ctPrincipal);
+      const collPrincipal = vaultCollateral(d.vault_id);
+      const sym = getTokenSymbol(collPrincipal) || 'collateral';
       fields.push(vaultField(d.vault_id));
       if (d.mode) {
         const modeKey = typeof d.mode === 'object' ? Object.keys(d.mode)[0] : String(d.mode);
         fields.push(textField('Mode', modeKey));
       }
       if (d.icp_rate !== undefined) {
-        const rate = Number(d.icp_rate);
-        if (Number.isFinite(rate)) fields.push(textField(`${sym} Price`, `$${rate.toFixed(4)}`));
+        const num = Number(d.icp_rate);
+        if (Number.isFinite(num)) fields.push(textField(`${sym} Price`, `$${num.toFixed(4)}`));
       }
       pushIfPresent(fields, addressField('Liquidator', d.liquidator));
       if (ts) fields.push(timestampField(ts));
@@ -976,11 +1043,11 @@ export function formatEvent(event: any, vaultCollateralMap?: Map<number, string>
     }
 
     case 'partial_liquidate_vault': {
-      const ctPrincipal = vaultCollateral(d.vault_id);
-      const sym = getTokenSymbol(ctPrincipal);
-      const dec = getTokenDecimals(ctPrincipal);
+      const collPrincipal = vaultCollateral(d.vault_id);
+      const sym = getTokenSymbol(collPrincipal) || 'collateral';
+      const dec = getTokenDecimals(collPrincipal);
       const payment = fmtE8s(d.liquidator_payment);
-      const collateral = d.icp_to_liquidator != null ? formatTokenAmount(BigInt(d.icp_to_liquidator), dec) : '?';
+      const collateral = fmtE8s(d.icp_to_liquidator, dec);
       fields.push(vaultField(d.vault_id));
       fields.push(amountField('Debt Repaid', d.liquidator_payment));
       fields.push(amountField('Collateral to Liquidator', d.icp_to_liquidator, dec, sym));
@@ -991,8 +1058,10 @@ export function formatEvent(event: any, vaultCollateralMap?: Map<number, string>
       pushIfPresent(fields, addressField('Liquidator', d.liquidator));
       if (d.icp_rate !== undefined) {
         const rate = optValue(d.icp_rate);
-        const rateNum = rate !== undefined ? Number(rate) : NaN;
-        if (Number.isFinite(rateNum)) fields.push(textField(`${sym} Price`, `$${rateNum.toFixed(4)}`));
+        if (rate !== undefined) {
+          const num = Number(rate);
+          if (Number.isFinite(num)) fields.push(textField(`${sym} Price`, `$${num.toFixed(4)}`));
+        }
       }
       if (ts) fields.push(timestampField(ts));
       return {
