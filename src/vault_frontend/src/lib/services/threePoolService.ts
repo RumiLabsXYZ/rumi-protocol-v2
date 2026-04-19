@@ -283,12 +283,12 @@ class ThreePoolService {
 
   async getLiquidityEvents(start: bigint, length: bigint): Promise<any[]> {
     const actor = await this.getQueryActor();
-    return await actor.get_liquidity_events(start, length) as any[];
+    return await actor.get_liquidity_events_v2(length, start) as any[];
   }
 
   async getLiquidityEventCount(): Promise<bigint> {
     const actor = await this.getQueryActor();
-    return await actor.get_liquidity_event_count() as bigint;
+    return await actor.get_liquidity_event_count_v2() as bigint;
   }
 
   async getAdminEvents(start: bigint, length: bigint): Promise<any[]> {

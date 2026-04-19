@@ -1189,6 +1189,30 @@ pub fn get_imbalance_history(limit: u64, offset: u64) -> Vec<ImbalanceSnapshot> 
     })
 }
 
+/// Total number of v2 liquidity events.
+#[query]
+pub fn get_liquidity_event_count_v2() -> u64 {
+    storage::liq_v2::len()
+}
+
+/// Paginated newest-first read of the v2 liquidity event log.
+#[query]
+pub fn get_liquidity_events_v2(limit: u64, offset: u64) -> Vec<LiquidityEventV2> {
+    read_state(|s| {
+        let events = s.liquidity_events_v2();
+        let total = events.len() as u64;
+        if offset >= total {
+            return Vec::new();
+        }
+        let take = ((total - offset).min(limit)) as usize;
+        let end = (total - offset) as usize;
+        let start = end - take;
+        let mut out: Vec<LiquidityEventV2> = events[start..end].to_vec();
+        out.reverse();
+        out
+    })
+}
+
 /// Paginated newest-first read of the v2 swap event log.
 #[query]
 pub fn get_swap_events_v2(limit: u64, offset: u64) -> Vec<SwapEventV2> {
