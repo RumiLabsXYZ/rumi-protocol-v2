@@ -956,12 +956,17 @@ export function formatEvent(event: any, vaultCollateralMap?: Map<number, string>
     // ── Liquidations ────────────────────────────────────────────────
 
     case 'liquidate_vault': {
+      const ctPrincipal = vaultCollateral(d.vault_id);
+      const sym = getTokenSymbol(ctPrincipal);
       fields.push(vaultField(d.vault_id));
       if (d.mode) {
         const modeKey = typeof d.mode === 'object' ? Object.keys(d.mode)[0] : String(d.mode);
         fields.push(textField('Mode', modeKey));
       }
-      if (d.icp_rate !== undefined) fields.push(textField('ICP Rate', `$${Number(d.icp_rate).toFixed(4)}`));
+      if (d.icp_rate !== undefined) {
+        const rate = Number(d.icp_rate);
+        if (Number.isFinite(rate)) fields.push(textField(`${sym} Price`, `$${rate.toFixed(4)}`));
+      }
       pushIfPresent(fields, addressField('Liquidator', d.liquidator));
       if (ts) fields.push(timestampField(ts));
       return {
@@ -971,23 +976,27 @@ export function formatEvent(event: any, vaultCollateralMap?: Map<number, string>
     }
 
     case 'partial_liquidate_vault': {
+      const ctPrincipal = vaultCollateral(d.vault_id);
+      const sym = getTokenSymbol(ctPrincipal);
+      const dec = getTokenDecimals(ctPrincipal);
       const payment = fmtE8s(d.liquidator_payment);
-      const collateral = fmtE8s(d.icp_to_liquidator);
+      const collateral = d.icp_to_liquidator != null ? formatTokenAmount(BigInt(d.icp_to_liquidator), dec) : '?';
       fields.push(vaultField(d.vault_id));
       fields.push(amountField('Debt Repaid', d.liquidator_payment));
-      fields.push(amountField('Collateral to Liquidator', d.icp_to_liquidator, 8, 'ICP'));
+      fields.push(amountField('Collateral to Liquidator', d.icp_to_liquidator, dec, sym));
       if (d.protocol_fee_collateral !== undefined) {
         const fee = optValue(d.protocol_fee_collateral);
-        if (fee !== undefined) fields.push(amountField('Protocol Fee', fee, 8, 'ICP'));
+        if (fee !== undefined) fields.push(amountField('Protocol Fee', fee, dec, sym));
       }
       pushIfPresent(fields, addressField('Liquidator', d.liquidator));
       if (d.icp_rate !== undefined) {
         const rate = optValue(d.icp_rate);
-        if (rate !== undefined) fields.push(textField('ICP Rate', `$${Number(rate).toFixed(4)}`));
+        const rateNum = rate !== undefined ? Number(rate) : NaN;
+        if (Number.isFinite(rateNum)) fields.push(textField(`${sym} Price`, `$${rateNum.toFixed(4)}`));
       }
       if (ts) fields.push(timestampField(ts));
       return {
-        summary: `Vault #${d.vault_id} partially liquidated — ${payment} icUSD debt repaid, ${collateral} ICP seized`,
+        summary: `Vault #${d.vault_id} partially liquidated — ${payment} icUSD debt repaid, ${collateral} ${sym} seized`,
         typeName, category, badgeColor, fields,
       };
     }
