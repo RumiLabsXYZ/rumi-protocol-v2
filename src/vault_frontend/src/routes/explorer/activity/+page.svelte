@@ -327,7 +327,7 @@
 				Number(threePoolSwapCount) > 0 ? fetchSwapEvents(0n, threePoolSwapCount) : Promise.resolve([]),
 				Number(ammSwapCount) > 0 ? fetchAmmSwapEvents(0n, ammSwapCount) : Promise.resolve([]),
 				Number(ammLiqCount) > 0 ? fetchAmmLiquidityEvents(0n, ammLiqCount) : Promise.resolve([]),
-				Number(threePoolLiqCount) > 0 ? fetch3PoolLiquidityEvents(0n, threePoolLiqCount) : Promise.resolve([]),
+				Number(threePoolLiqCount) > 0 ? fetch3PoolLiquidityEvents(threePoolLiqCount, 0n) : Promise.resolve([]),
 				Number(ammAdminCount) > 0 ? fetchAmmAdminEvents(0n, ammAdminCount) : Promise.resolve([]),
 				Number(threePoolAdminCount) > 0 ? fetch3PoolAdminEvents(0n, threePoolAdminCount) : Promise.resolve([]),
 				Number(spCount) > 0 ? fetchStabilityPoolEvents(0n, spCount) : Promise.resolve([]),
@@ -504,7 +504,7 @@
 				Number(threePoolSwapCount) > 0 ? fetchSwapEvents(0n, threePoolSwapCount) : Promise.resolve([]),
 				Number(ammSwapCount) > 0 ? fetchAmmSwapEvents(0n, ammSwapCount) : Promise.resolve([]),
 				Number(ammLiqCount) > 0 ? fetchAmmLiquidityEvents(0n, ammLiqCount) : Promise.resolve([]),
-				Number(threePoolLiqCount) > 0 ? fetch3PoolLiquidityEvents(0n, threePoolLiqCount) : Promise.resolve([]),
+				Number(threePoolLiqCount) > 0 ? fetch3PoolLiquidityEvents(threePoolLiqCount, 0n) : Promise.resolve([]),
 			]);
 
 			// Tag all events

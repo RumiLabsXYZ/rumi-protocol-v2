@@ -4,7 +4,7 @@
   import EntityLink from '$components/explorer/EntityLink.svelte';
   import CopyButton from '$components/explorer/CopyButton.svelte';
   import TimeAgo from '$components/explorer/TimeAgo.svelte';
-  import { fetchDexEvent } from '$services/explorer/explorerService';
+  import { fetchDexEvent, fetchDexEventCount } from '$services/explorer/explorerService';
   import type { DexEventSource } from '$services/explorer/explorerService';
   import {
     formatSwapEvent, formatAmmSwapEvent, formatAmmLiquidityEvent,
@@ -27,6 +27,7 @@
   let event: any = $state(null);
   let loading = $state(true);
   let error: string | null = $state(null);
+  let totalCount: number = $state(0);
 
   const source = $derived($page.params.source as DexEventSource);
   const eventId = $derived(Number($page.params.id));
@@ -70,7 +71,11 @@
     loading = true;
     error = null;
     try {
-      const result = await fetchDexEvent(source, eventId);
+      const [result, count] = await Promise.all([
+        fetchDexEvent(source, eventId),
+        fetchDexEventCount(source),
+      ]);
+      totalCount = Number(count);
       if (result) {
         event = result;
       } else {
@@ -204,12 +209,16 @@
       {:else}
         <span></span>
       {/if}
-      <a
-        href="/explorer/dex/{source}/{eventId + 1}"
-        class="text-sm text-blue-400 hover:text-blue-300 hover:underline inline-flex items-center gap-1"
-      >
-        Next &rarr;
-      </a>
+      {#if eventId < totalCount - 1}
+        <a
+          href="/explorer/dex/{source}/{eventId + 1}"
+          class="text-sm text-blue-400 hover:text-blue-300 hover:underline inline-flex items-center gap-1"
+        >
+          Next &rarr;
+        </a>
+      {:else}
+        <span></span>
+      {/if}
     </div>
   {/if}
 </div>
