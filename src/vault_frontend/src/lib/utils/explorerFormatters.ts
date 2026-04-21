@@ -127,19 +127,7 @@ export function formatSwapEvent(swap: any): FormattedEvent {
     { label: 'Fee', value: `${feeAmt} ${tokenOut}`, type: 'amount' },
   ];
 
-  const callerText = swap.caller?.toText?.() ?? swap.caller?.toString?.() ?? null;
-  if (callerText) {
-    fields.push({
-      label: 'Caller',
-      value: shortenPrincipal(callerText),
-      type: 'address',
-      linkTarget: callerText,
-    });
-  }
-
-  if (swap.timestamp) {
-    fields.push({ label: 'Timestamp', value: formatTimestamp(swap.timestamp), type: 'timestamp' });
-  }
+  appendCallerAndTimestamp(fields, swap);
 
   return {
     summary: `Swapped ${amtIn} ${tokenIn} → ${amtOut} ${tokenOut}`,
@@ -159,10 +147,8 @@ export function formatAmmSwapEvent(event: any): FormattedEvent {
   const tokenOutPrincipal = event.token_out?.toText?.() ?? String(event.token_out ?? '');
   const tokenInSym = getTokenSymbol(tokenInPrincipal);
   const tokenOutSym = getTokenSymbol(tokenOutPrincipal);
-  const tokenInDec = getTokenDecimals(tokenInPrincipal);
-  const tokenOutDec = getTokenDecimals(tokenOutPrincipal);
-  const amountIn = event.amount_in != null ? formatTokenAmount(BigInt(event.amount_in), tokenInDec) : '?';
-  const amountOut = event.amount_out != null ? formatTokenAmount(BigInt(event.amount_out), tokenOutDec) : '?';
+  const amountIn = event.amount_in != null ? formatTokenAmount(BigInt(event.amount_in), tokenInPrincipal) : '?';
+  const amountOut = event.amount_out != null ? formatTokenAmount(BigInt(event.amount_out), tokenOutPrincipal) : '?';
 
   const fields: EventField[] = [
     { label: 'Token In', value: `${amountIn} ${tokenInSym}`, type: 'amount' },
@@ -173,10 +159,7 @@ export function formatAmmSwapEvent(event: any): FormattedEvent {
   if (tokenInPrincipal) fields.push({ label: 'Token In Ledger', value: shortenPrincipal(tokenInPrincipal), type: 'token', linkTarget: tokenInPrincipal });
   if (tokenOutPrincipal) fields.push({ label: 'Token Out Ledger', value: shortenPrincipal(tokenOutPrincipal), type: 'token', linkTarget: tokenOutPrincipal });
 
-  const callerText = event.caller?.toText?.() ?? (typeof event.caller === 'string' ? event.caller : null);
-  if (callerText) fields.push({ label: 'Caller', value: shortenPrincipal(callerText), type: 'address', linkTarget: callerText });
-
-  if (event.timestamp) fields.push({ label: 'Timestamp', value: formatTimestamp(event.timestamp), type: 'timestamp', linkTarget: String(event.timestamp) });
+  appendCallerAndTimestamp(fields, event);
 
   return {
     summary: `Swapped ${amountIn} ${tokenInSym} → ${amountOut} ${tokenOutSym}`,
@@ -197,11 +180,9 @@ export function formatAmmLiquidityEvent(event: any): FormattedEvent {
   const tokenBPrincipal = event.token_b?.toText?.() ?? String(event.token_b ?? '');
   const tokenA = getTokenSymbol(tokenAPrincipal);
   const tokenB = getTokenSymbol(tokenBPrincipal);
-  const tokenADec = getTokenDecimals(tokenAPrincipal);
-  const tokenBDec = getTokenDecimals(tokenBPrincipal);
-  const amtA = event.amount_a != null ? formatTokenAmount(BigInt(event.amount_a), tokenADec) : '?';
-  const amtB = event.amount_b != null ? formatTokenAmount(BigInt(event.amount_b), tokenBDec) : '?';
-  const lpShares = event.lp_shares != null ? formatTokenAmount(BigInt(event.lp_shares), 8) : '?';
+  const amtA = event.amount_a != null ? formatTokenAmount(BigInt(event.amount_a), tokenAPrincipal) : '?';
+  const amtB = event.amount_b != null ? formatTokenAmount(BigInt(event.amount_b), tokenBPrincipal) : '?';
+  const lpShares = event.lp_shares != null ? formatE8s(BigInt(event.lp_shares), 8) : '?';
 
   const isAdd = action === 'AddLiquidity';
   const typeName = isAdd ? 'AMM Add Liquidity' : 'AMM Remove Liquidity';
@@ -220,10 +201,7 @@ export function formatAmmLiquidityEvent(event: any): FormattedEvent {
   if (tokenAPrincipal) fields.push({ label: 'Token A Ledger', value: shortenPrincipal(tokenAPrincipal), type: 'token', linkTarget: tokenAPrincipal });
   if (tokenBPrincipal) fields.push({ label: 'Token B Ledger', value: shortenPrincipal(tokenBPrincipal), type: 'token', linkTarget: tokenBPrincipal });
 
-  const callerText = event.caller?.toText?.() ?? (typeof event.caller === 'string' ? event.caller : null);
-  if (callerText) fields.push({ label: 'Caller', value: shortenPrincipal(callerText), type: 'address', linkTarget: callerText });
-
-  if (event.timestamp) fields.push({ label: 'Timestamp', value: formatTimestamp(event.timestamp), type: 'timestamp', linkTarget: String(event.timestamp) });
+  appendCallerAndTimestamp(fields, event);
 
   return {
     summary,
@@ -262,10 +240,7 @@ export function formatAmmAdminEvent(event: any): FormattedEvent {
   if (data.fee_bps != null) fields.push({ label: 'Fee', value: `${data.fee_bps} bps`, type: 'text' });
   if (data.protocol_fee_bps != null) fields.push({ label: 'Protocol Fee', value: `${data.protocol_fee_bps} bps`, type: 'text' });
 
-  const callerText = event.caller?.toText?.() ?? (typeof event.caller === 'string' ? event.caller : null);
-  if (callerText) fields.push({ label: 'Caller', value: shortenPrincipal(callerText), type: 'address', linkTarget: callerText });
-
-  if (event.timestamp) fields.push({ label: 'Timestamp', value: formatTimestamp(event.timestamp), type: 'timestamp', linkTarget: String(event.timestamp) });
+  appendCallerAndTimestamp(fields, event);
 
   return {
     summary,
@@ -282,7 +257,7 @@ export function formatAmmAdminEvent(event: any): FormattedEvent {
 export function format3PoolLiquidityEvent(event: any): FormattedEvent {
   const action = event.action ? Object.keys(event.action)[0] : '?';
   const amounts = event.amounts ?? [];
-  const lpAmount = event.lp_amount != null ? formatTokenAmount(BigInt(event.lp_amount), 8) : '?';
+  const lpAmount = event.lp_amount != null ? formatE8s(BigInt(event.lp_amount), 8) : '?';
   const coinIndex = event.coin_index?.[0] ?? null;
 
   let summary = '';
@@ -351,10 +326,7 @@ export function format3PoolLiquidityEvent(event: any): FormattedEvent {
       fields.push({ label: 'Action', value: action, type: 'text' });
   }
 
-  const callerText = event.caller?.toText?.() ?? (typeof event.caller === 'string' ? event.caller : null);
-  if (callerText) fields.push({ label: 'Caller', value: shortenPrincipal(callerText), type: 'address', linkTarget: callerText });
-
-  if (event.timestamp) fields.push({ label: 'Timestamp', value: formatTimestamp(event.timestamp), type: 'timestamp', linkTarget: String(event.timestamp) });
+  appendCallerAndTimestamp(fields, event);
 
   return {
     summary,
@@ -394,10 +366,7 @@ export function format3PoolAdminEvent(event: any): FormattedEvent {
     fields.push({ label: 'Canister', value: shortenPrincipal(p), type: 'canister', linkTarget: p });
   }
 
-  const callerText = event.caller?.toText?.() ?? (typeof event.caller === 'string' ? event.caller : null);
-  if (callerText) fields.push({ label: 'Caller', value: shortenPrincipal(callerText), type: 'address', linkTarget: callerText });
-
-  if (event.timestamp) fields.push({ label: 'Timestamp', value: formatTimestamp(event.timestamp), type: 'timestamp', linkTarget: String(event.timestamp) });
+  appendCallerAndTimestamp(fields, event);
 
   return {
     summary,
@@ -514,19 +483,7 @@ export function formatStabilityPoolEvent(evt: any): FormattedEvent {
     summary = key;
   }
 
-  const callerText = evt.caller?.toText?.() ?? evt.caller?.toString?.() ?? null;
-  if (callerText) {
-    fields.push({
-      label: 'Caller',
-      value: shortenPrincipal(callerText),
-      type: 'address',
-      linkTarget: callerText,
-    });
-  }
-
-  if (evt.timestamp) {
-    fields.push({ label: 'Timestamp', value: formatTimestamp(evt.timestamp), type: 'timestamp' });
-  }
+  appendCallerAndTimestamp(fields, evt);
 
   return {
     summary,
@@ -579,13 +536,10 @@ export function formatMultiHopSwapEvent(merged: {
   if (ammTokenIn) fields.push({ label: 'AMM Token In', value: shortenPrincipal(ammTokenIn), type: 'token', linkTarget: ammTokenIn });
   if (ammTokenOut) fields.push({ label: 'AMM Token Out', value: shortenPrincipal(ammTokenOut), type: 'token', linkTarget: ammTokenOut });
 
-  // Caller
-  const callerText = ammEvent.caller?.toText?.() ?? liqEvent.caller?.toText?.() ?? null;
-  if (callerText) fields.push({ label: 'Caller', value: shortenPrincipal(callerText), type: 'address', linkTarget: callerText });
-
-  // Timestamp (use AMM event as canonical)
-  const ts = ammEvent.timestamp ?? liqEvent.timestamp;
-  if (ts) fields.push({ label: 'Timestamp', value: formatTimestamp(ts), type: 'timestamp', linkTarget: String(ts) });
+  appendCallerAndTimestamp(fields, {
+    caller: ammEvent.caller ?? liqEvent.caller,
+    timestamp: ammEvent.timestamp ?? liqEvent.timestamp,
+  });
 
   // Sub-event references
   fields.push({ label: '3Pool Event', value: `#${liqEvent.id ?? '?'}`, type: 'text' });
@@ -746,6 +700,23 @@ function canisterField(label: string, principal: any): EventField {
 
 function pushIfPresent(fields: EventField[], field: EventField | null) {
   if (field) fields.push(field);
+}
+
+// Append the canonical "Caller" + "Timestamp" fields used by most non-backend events.
+// The `linkTarget` on the timestamp drives the live `<TimeAgo>` on detail pages.
+function appendCallerAndTimestamp(
+  fields: EventField[],
+  event: { caller?: any; timestamp?: any },
+): void {
+  pushIfPresent(fields, addressField('Caller', event.caller));
+  if (event.timestamp) {
+    fields.push({
+      label: 'Timestamp',
+      value: formatTimestamp(event.timestamp),
+      type: 'timestamp',
+      linkTarget: String(event.timestamp),
+    });
+  }
 }
 
 // ─── Category Resolution ──────────────────────────────────────────────

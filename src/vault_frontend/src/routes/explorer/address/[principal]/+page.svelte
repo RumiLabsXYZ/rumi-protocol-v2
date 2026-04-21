@@ -19,13 +19,14 @@
   } from '$services/explorer/explorerService';
   import {
     formatE8s, formatUsdRaw, formatCR, getTokenSymbol, getCanisterName,
-    isKnownCanister, classifyVaultHealth, healthColor, shortenPrincipal
+    isKnownCanister, shortenPrincipal, timeAgo, formatTimestamp
   } from '$utils/explorerHelpers';
   import {
     getEventCategory, formatSwapEvent, formatAmmSwapEvent,
     formatAmmLiquidityEvent, format3PoolLiquidityEvent,
   } from '$utils/explorerFormatters';
   import type { EventCategory } from '$utils/explorerFormatters';
+  import { extractEventTimestamp } from '$utils/displayEvent';
 
   // ── State ────────────────────────────────────────────────────────────
   let loading = $state(true);
@@ -195,19 +196,12 @@
     | { kind: 'backend'; globalIndex: bigint; event: any; timestamp: number }
     | { kind: 'dex'; id: bigint; source: DexSource; event: any; timestamp: number };
 
-  function backendTimestamp(event: any): number {
-    const eventType = event.event_type ?? event;
-    const key = Object.keys(eventType)[0];
-    const data = key ? eventType[key] : null;
-    return Number(data?.timestamp ?? event.timestamp ?? 0);
-  }
-
   const allRows = $derived.by((): MixedRow[] => {
     const backendRows: MixedRow[] = sortedEvents.map(([idx, ev]) => ({
       kind: 'backend',
       globalIndex: idx,
       event: ev,
-      timestamp: backendTimestamp(ev),
+      timestamp: extractEventTimestamp(ev),
     }));
     const dexRows: MixedRow[] = dexEvents.map((d) => ({
       kind: 'dex',
@@ -465,14 +459,12 @@
                 <EventRow event={row.event} index={Number(row.globalIndex)} {vaultCollateralMap} {vaultOwnerMap} />
               {:else}
                 {@const formatted = getDexFormatter(row.source, row.event)}
-                {@const ts = Number(row.timestamp) > 1e15 ? Number(row.timestamp) : Number(row.timestamp) * 1e9}
-                {@const ago = (() => { const s = Math.floor((Date.now() - ts / 1e6) / 1000); if (s <= 0) return 'just now'; if (s < 60) return `${s}s ago`; if (s < 3600) return `${Math.floor(s/60)}m ago`; if (s < 86400) return `${Math.floor(s/3600)}h ago`; return `${Math.floor(s/86400)}d ago`; })()}
                 <a
                   href="/explorer/dex/{row.source}/{Number(row.id)}"
                   class="flex items-center gap-4 px-4 py-3 border-b border-gray-700/30 last:border-b-0 hover:bg-gray-700/20 transition-colors"
                 >
                   <span class="text-xs text-gray-500 font-mono w-24 shrink-0">{DEX_SOURCE_LABEL[row.source]} #{Number(row.id)}</span>
-                  <span class="text-xs text-gray-500 w-20 shrink-0">{row.timestamp ? ago : '—'}</span>
+                  <span class="text-xs text-gray-500 w-20 shrink-0" title={row.timestamp ? formatTimestamp(row.timestamp) : ''}>{row.timestamp ? timeAgo(row.timestamp) : '—'}</span>
                   <span class="inline-block text-xs font-medium px-2.5 py-0.5 rounded-full shrink-0 {formatted.badgeColor}">
                     {formatted.typeName}
                   </span>
@@ -504,11 +496,9 @@
               <tbody>
                 {#each dexEvents as d (d.source + ':' + d.id)}
                   {@const formatted = getDexFormatter(d.source, d.event)}
-                  {@const ts = Number(d.timestamp) > 1e15 ? Number(d.timestamp) : Number(d.timestamp) * 1e9}
-                  {@const ago = (() => { const s = Math.floor((Date.now() - ts / 1e6) / 1000); if (s <= 0) return 'just now'; if (s < 60) return `${s}s ago`; if (s < 3600) return `${Math.floor(s/60)}m ago`; if (s < 86400) return `${Math.floor(s/3600)}h ago`; return `${Math.floor(s/86400)}d ago`; })()}
                   <tr class="border-b border-gray-700/50 hover:bg-gray-800/30 transition-colors">
                     <td class="px-4 py-3 text-xs text-gray-500 font-mono">{DEX_SOURCE_LABEL[d.source]} #{Number(d.id)}</td>
-                    <td class="px-4 py-3 text-xs text-gray-500">{d.timestamp ? ago : '—'}</td>
+                    <td class="px-4 py-3 text-xs text-gray-500" title={d.timestamp ? formatTimestamp(d.timestamp) : ''}>{d.timestamp ? timeAgo(d.timestamp) : '—'}</td>
                     <td class="px-4 py-3">
                       <span class="inline-block text-xs font-medium px-2.5 py-0.5 rounded-full {formatted.badgeColor}">
                         {formatted.typeName}

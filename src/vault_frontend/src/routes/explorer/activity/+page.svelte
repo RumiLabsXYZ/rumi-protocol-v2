@@ -1,11 +1,11 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
-	import EventRow from '$components/explorer/EventRow.svelte';
+	import MixedEventsTable from '$components/explorer/MixedEventsTable.svelte';
 	import Pagination from '$components/explorer/Pagination.svelte';
 	import StatCard from '$components/explorer/StatCard.svelte';
 	import {
-		fetchEvents, fetchEventCount,
+		fetchEvents,
 		fetchSwapEvents, fetchSwapEventCount,
 		fetchAmmSwapEvents, fetchAmmSwapEventCount,
 		fetchAmmLiquidityEvents, fetchAmmLiquidityEventCount,
@@ -15,13 +15,10 @@
 		fetchStabilityPoolEvents, fetchStabilityPoolEventCount,
 		fetchLiquidatableVaults, fetchBotStats, fetchAllVaults
 	} from '$services/explorer/explorerService';
-	import {
-		getEventCategory, formatSwapEvent, formatAmmSwapEvent,
-		formatAmmLiquidityEvent, formatAmmAdminEvent,
-		format3PoolLiquidityEvent, format3PoolAdminEvent,
-		formatStabilityPoolEvent, formatMultiHopSwapEvent
-	} from '$utils/explorerFormatters';
-	import { formatE8s, formatTokenAmount, timeAgo, shortenPrincipal, getTokenSymbol, getTokenDecimals } from '$utils/explorerHelpers';
+	import { getEventCategory } from '$utils/explorerFormatters';
+	import { extractEventTimestamp } from '$utils/displayEvent';
+	import type { DisplayEvent } from '$utils/displayEvent';
+	import { formatE8s, formatTokenAmount, getTokenSymbol } from '$utils/explorerHelpers';
 	import { CANISTER_IDS } from '$lib/config';
 
 	const PAGE_SIZE = 100;
@@ -36,14 +33,6 @@
 		{ key: 'stability_pool', label: 'Stability Pool' },
 		{ key: 'system', label: 'System' },
 	];
-
-	// Unified event wrapper for display
-	interface DisplayEvent {
-		globalIndex: bigint;
-		event: any;
-		source: 'backend' | '3pool_swap' | 'amm_swap' | 'amm_liquidity' | 'amm_admin' | '3pool_liquidity' | '3pool_admin' | 'stability_pool' | 'multi_hop_swap';
-		timestamp: number; // nanoseconds
-	}
 
 	let displayEvents: DisplayEvent[] = $state([]);
 	let totalCount: number = $state(0);
@@ -62,80 +51,6 @@
 	let vaultOwnerMap: Map<number, string> = $state(new Map());
 
 	const totalPages = $derived(Math.ceil(totalCount / PAGE_SIZE));
-
-	// ── Timestamp extraction ──
-
-	function extractTimestamp(event: any): number {
-		if (event.timestamp != null) return Number(event.timestamp);
-		// Backend events may have timestamp inside the variant data
-		const eventType = event.event_type ?? event;
-		const key = Object.keys(eventType)[0];
-		if (key) {
-			const data = eventType[key];
-			if (data?.timestamp != null) return Number(data.timestamp);
-		}
-		return 0;
-	}
-
-	// ── Principal extraction from any event type ──
-
-	function extractPrincipal(event: any, source: string): string | null {
-		// Multi-hop swap: extract caller from nested AMM event
-		if (source === 'multi_hop_swap') {
-			const caller = event.ammEvent?.caller ?? event.liqEvent?.caller;
-			if (caller?.toText) return caller.toText();
-			if (typeof caller === 'string' && caller.length > 10) return caller;
-			return null;
-		}
-		// Direct caller field (swap events, SP events, AMM liquidity/admin, 3Pool liquidity/admin)
-		const caller = event.caller;
-		if (caller) {
-			if (typeof caller === 'object' && typeof caller.toText === 'function') return caller.toText();
-			if (typeof caller === 'string' && caller.length > 10) return caller;
-		}
-
-		// Backend protocol events: look inside the variant
-		const eventType = event.event_type ?? event;
-		const key = Object.keys(eventType)[0];
-		if (key) {
-			const data = eventType[key];
-			if (!data) return null;
-			for (const field of ['owner', 'caller', 'from', 'liquidator', 'redeemer', 'developer_principal']) {
-				const val = data[field];
-				if (val && typeof val === 'object' && typeof val.toText === 'function') return val.toText();
-				// Handle Candid opt principal: arrives as [Principal] or []
-				if (Array.isArray(val) && val.length > 0) {
-					const inner = val[0];
-					if (inner && typeof inner === 'object' && typeof inner.toText === 'function') return inner.toText();
-					if (typeof inner === 'string' && inner.length > 10) return inner;
-				}
-				if (typeof val === 'string' && val.length > 20) return val;
-			}
-			// Check nested vault
-			if (data.vault?.owner) {
-				const owner = data.vault.owner;
-				if (typeof owner === 'object' && typeof owner.toText === 'function') return owner.toText();
-			}
-			// Fall back to vault owner map
-			if (data.vault_id != null) {
-				const owner = vaultOwnerMap.get(Number(data.vault_id));
-				if (owner) return owner;
-			}
-		}
-		return null;
-	}
-
-	// ── Source label for non-backend event IDs ──
-	const SOURCE_LABELS: Record<string, string> = {
-		'3pool_swap': '3Pool',
-		'amm_swap': 'AMM',
-		'amm_liquidity': 'AMM',
-		'amm_admin': 'AMM',
-		'3pool_liquidity': '3Pool',
-		'3pool_admin': '3Pool',
-		'stability_pool': 'SP',
-		'multi_hop_swap': 'Swap',
-	};
 
 	// 3Pool token index → symbol/decimals for multi-hop merging
 	const THREEPOOL_TOKENS: { symbol: string; decimals: number }[] = [
@@ -272,22 +187,6 @@
 		return result;
 	}
 
-	// ── Format event for display ──
-
-	function formatDisplayEvent(de: DisplayEvent): { summary: string; typeName: string; badgeColor: string } {
-		switch (de.source) {
-			case '3pool_swap': return formatSwapEvent(de.event);
-			case 'amm_swap': return formatAmmSwapEvent(de.event);
-			case 'amm_liquidity': return formatAmmLiquidityEvent(de.event);
-			case 'amm_admin': return formatAmmAdminEvent(de.event);
-			case '3pool_liquidity': return format3PoolLiquidityEvent(de.event);
-			case '3pool_admin': return format3PoolAdminEvent(de.event);
-			case 'stability_pool': return formatStabilityPoolEvent(de.event);
-			case 'multi_hop_swap': return formatMultiHopSwapEvent(de.event);
-			default: return { summary: '', typeName: '', badgeColor: '' }; // handled by EventRow
-		}
-	}
-
 	// ── Load functions ──
 
 	async function loadAllPage(p: number) {
@@ -343,28 +242,28 @@
 			const all: DisplayEvent[] = [];
 
 			for (const [idx, evt] of allBackendEvents) {
-				all.push({ globalIndex: idx, event: evt, source: 'backend', timestamp: extractTimestamp(evt) });
+				all.push({ globalIndex: idx, event: evt, source: 'backend', timestamp: extractEventTimestamp(evt) });
 			}
 			for (const e of threePoolSwaps) {
-				all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: '3pool_swap', timestamp: extractTimestamp(e) });
+				all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: '3pool_swap', timestamp: extractEventTimestamp(e) });
 			}
 			for (const e of ammSwaps) {
-				all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: 'amm_swap', timestamp: extractTimestamp(e) });
+				all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: 'amm_swap', timestamp: extractEventTimestamp(e) });
 			}
 			for (const e of ammLiqEvents) {
-				all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: 'amm_liquidity', timestamp: extractTimestamp(e) });
+				all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: 'amm_liquidity', timestamp: extractEventTimestamp(e) });
 			}
 			for (const e of threePoolLiqEvents) {
-				all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: '3pool_liquidity', timestamp: extractTimestamp(e) });
+				all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: '3pool_liquidity', timestamp: extractEventTimestamp(e) });
 			}
 			for (const e of ammAdminEvts) {
-				all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: 'amm_admin', timestamp: extractTimestamp(e) });
+				all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: 'amm_admin', timestamp: extractEventTimestamp(e) });
 			}
 			for (const e of threePoolAdminEvts) {
-				all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: '3pool_admin', timestamp: extractTimestamp(e) });
+				all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: '3pool_admin', timestamp: extractEventTimestamp(e) });
 			}
 			for (const e of filteredSp) {
-				all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: 'stability_pool', timestamp: extractTimestamp(e) });
+				all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: 'stability_pool', timestamp: extractEventTimestamp(e) });
 			}
 
 			// Merge multi-hop swaps, then sort by timestamp descending
@@ -414,7 +313,7 @@
 						globalIndex: idx,
 						event,
 						source: 'backend' as const,
-						timestamp: extractTimestamp(event),
+						timestamp: extractEventTimestamp(event),
 					}));
 			} else if (filterCategory === 'vault_ops') {
 				filtered = allEvents
@@ -423,7 +322,7 @@
 						globalIndex: idx,
 						event,
 						source: 'backend' as const,
-						timestamp: extractTimestamp(event),
+						timestamp: extractEventTimestamp(event),
 					}));
 			} else if (filterCategory === 'system') {
 				// Show backend admin+system events AND AMM/3Pool admin events
@@ -436,7 +335,7 @@
 						globalIndex: idx,
 						event,
 						source: 'backend' as const,
-						timestamp: extractTimestamp(event),
+						timestamp: extractEventTimestamp(event),
 					}));
 
 				// Also fetch AMM and 3Pool admin events
@@ -452,10 +351,10 @@
 				const adminEvents: DisplayEvent[] = [
 					...backendAdminSystem,
 					...ammAdminEvts.map((e: any) => ({
-						globalIndex: BigInt(e.id ?? 0), event: e, source: 'amm_admin' as const, timestamp: extractTimestamp(e)
+						globalIndex: BigInt(e.id ?? 0), event: e, source: 'amm_admin' as const, timestamp: extractEventTimestamp(e)
 					})),
 					...threePoolAdminEvts.map((e: any) => ({
-						globalIndex: BigInt(e.id ?? 0), event: e, source: '3pool_admin' as const, timestamp: extractTimestamp(e)
+						globalIndex: BigInt(e.id ?? 0), event: e, source: '3pool_admin' as const, timestamp: extractEventTimestamp(e)
 					})),
 				];
 				adminEvents.sort((a, b) => b.timestamp - a.timestamp);
@@ -465,7 +364,7 @@
 					globalIndex: idx,
 					event,
 					source: 'backend' as const,
-					timestamp: extractTimestamp(event),
+					timestamp: extractEventTimestamp(event),
 				}));
 			}
 
@@ -510,16 +409,16 @@
 			// Tag all events
 			const tagged: DisplayEvent[] = [
 				...threePoolSwaps.map((e: any) => ({
-					globalIndex: BigInt(e.id ?? 0), event: e, source: '3pool_swap' as const, timestamp: extractTimestamp(e)
+					globalIndex: BigInt(e.id ?? 0), event: e, source: '3pool_swap' as const, timestamp: extractEventTimestamp(e)
 				})),
 				...ammSwaps.map((e: any) => ({
-					globalIndex: BigInt(e.id ?? 0), event: e, source: 'amm_swap' as const, timestamp: extractTimestamp(e)
+					globalIndex: BigInt(e.id ?? 0), event: e, source: 'amm_swap' as const, timestamp: extractEventTimestamp(e)
 				})),
 				...ammLiqEvents.map((e: any) => ({
-					globalIndex: BigInt(e.id ?? 0), event: e, source: 'amm_liquidity' as const, timestamp: extractTimestamp(e)
+					globalIndex: BigInt(e.id ?? 0), event: e, source: 'amm_liquidity' as const, timestamp: extractEventTimestamp(e)
 				})),
 				...threePoolLiqEvents.map((e: any) => ({
-					globalIndex: BigInt(e.id ?? 0), event: e, source: '3pool_liquidity' as const, timestamp: extractTimestamp(e)
+					globalIndex: BigInt(e.id ?? 0), event: e, source: '3pool_liquidity' as const, timestamp: extractEventTimestamp(e)
 				})),
 			];
 
@@ -570,7 +469,7 @@
 				globalIndex: BigInt(evt.id ?? 0),
 				event: evt,
 				source: 'stability_pool' as const,
-				timestamp: extractTimestamp(evt),
+				timestamp: extractEventTimestamp(evt),
 			}));
 			currentPage = p;
 		} catch (e) {
@@ -605,22 +504,6 @@
 		selectedFilter = key;
 		if (key === 'liquidations') loadLiquidationStats();
 		loadPage(0);
-	}
-
-	// Format timestamp for display
-	function formatTimeAgo(ts: number): string {
-		const nsTs = ts > 1e15 ? ts : ts * 1e9;
-		const s = Math.floor((Date.now() - nsTs / 1e6) / 1000);
-		if (s < 0) return 'just now';
-		if (s < 60) return `${s}s ago`;
-		if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-		if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-		return `${Math.floor(s / 86400)}d ago`;
-	}
-
-	function formatTimestampISO(ts: number): string {
-		const nsTs = ts > 1e15 ? ts : ts * 1e9;
-		return new Date(nsTs / 1e6).toISOString();
 	}
 
 	// Check URL params for initial filter
@@ -733,71 +616,7 @@
 	<!-- Events table -->
 	{:else}
 		<div class="explorer-card overflow-hidden p-0">
-			<table class="w-full">
-				<thead>
-					<tr class="border-b border-gray-700/50 text-left">
-						<th class="px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider w-[5rem]">#</th>
-						<th class="px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider w-[7rem]">Time</th>
-						<th class="px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider w-[8rem]">Principal</th>
-						<th class="px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider w-[10rem]">Type</th>
-						<th class="px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Summary</th>
-						<th class="px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider w-[5rem] text-right">Details</th>
-					</tr>
-				</thead>
-				<tbody>
-					{#each displayEvents as de (String(de.globalIndex) + de.source)}
-						{#if de.source === 'backend'}
-							<!-- Backend events use EventRow which has its own formatting -->
-							<EventRow event={de.event} index={Number(de.globalIndex)} {vaultCollateralMap} {vaultOwnerMap} />
-						{:else}
-							<!-- Non-backend events use the unified rendering -->
-							{@const formatted = formatDisplayEvent(de)}
-							{@const principal = extractPrincipal(de.event, de.source)}
-							{@const sourceLabel = SOURCE_LABELS[de.source] ?? de.source}
-							{@const detailHref = de.source === 'multi_hop_swap'
-								? `/explorer/dex/amm_swap/${de.event.ammEvent?.id ?? Number(de.globalIndex)}`
-								: `/explorer/dex/${de.source}/${Number(de.globalIndex)}`}
-							<tr class="border-b border-gray-700/50 hover:bg-gray-800/30 transition-colors group">
-								<td class="px-4 py-3">
-									<a href={detailHref} class="text-xs text-blue-400 hover:text-blue-300 font-mono" title="{sourceLabel} Event #{Number(de.globalIndex)}">{sourceLabel} #{Number(de.globalIndex)}</a>
-								</td>
-								<td class="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">
-									{#if de.timestamp}
-										<span title={formatTimestampISO(de.timestamp)}>{formatTimeAgo(de.timestamp)}</span>
-									{:else}
-										<span class="text-gray-600">&mdash;</span>
-									{/if}
-								</td>
-								<td class="px-4 py-3 text-xs text-gray-400 whitespace-nowrap">
-									{#if principal}
-										<a href="/explorer/address/{principal}" class="hover:text-blue-400 transition-colors font-mono">
-											{shortenPrincipal(principal)}
-										</a>
-									{:else}
-										<span class="text-gray-600">&mdash;</span>
-									{/if}
-								</td>
-								<td class="px-4 py-3">
-									<span class="inline-block text-xs font-medium px-2.5 py-0.5 rounded-full whitespace-nowrap {formatted.badgeColor}">
-										{formatted.typeName}
-									</span>
-								</td>
-								<td class="px-4 py-3 text-sm text-gray-300 truncate max-w-[300px]">
-									{formatted.summary}
-								</td>
-								<td class="px-4 py-3 text-right">
-									<a
-										href={detailHref}
-										class="text-xs text-blue-400 hover:text-blue-300 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap"
-									>
-										Details &rarr;
-									</a>
-								</td>
-							</tr>
-						{/if}
-					{/each}
-				</tbody>
-			</table>
+			<MixedEventsTable events={displayEvents} {vaultCollateralMap} {vaultOwnerMap} />
 		</div>
 	{/if}
 
