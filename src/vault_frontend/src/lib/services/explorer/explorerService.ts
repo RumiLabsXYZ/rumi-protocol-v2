@@ -640,13 +640,18 @@ export async function fetchAmmAdminEventCount(): Promise<bigint> {
 
 // ── 3Pool Liquidity & Admin Events ──────────────────────────────────────────
 
-export async function fetch3PoolLiquidityEvents(start: bigint, length: bigint): Promise<any[]> {
-	const key = `pool:3pool:liquidity:${start}:${length}`;
+/**
+ * Fetch 3Pool v2 liquidity events newest-first.
+ * `limit` = max events, `offset` = skip this many most-recent. Matches the canister's v2 contract.
+ * Callers that want "all events newest-first" should pass (totalCount, 0n).
+ */
+export async function fetch3PoolLiquidityEvents(limit: bigint, offset: bigint): Promise<any[]> {
+	const key = `pool:3pool:liquidity:${limit}:${offset}`;
 	const cached = getCached<any[]>(key, TTL.POOL);
 	if (cached) return cached;
 
 	try {
-		const result = await threePoolService.getLiquidityEvents(start, length);
+		const result = await threePoolService.getLiquidityEvents(limit, offset);
 		return setCache(key, result);
 	} catch (err) {
 		console.error('[explorerService] fetch3PoolLiquidityEvents failed:', err);
@@ -701,8 +706,15 @@ export async function fetch3PoolAdminEventCount(): Promise<bigint> {
 export type DexEventSource = '3pool_swap' | 'amm_swap' | 'amm_liquidity' | 'amm_admin' | '3pool_liquidity' | '3pool_admin' | 'stability_pool';
 
 /**
- * Fetch a single event from a non-backend source by its local ID.
- * Fetches a small window around the ID and finds the matching event.
+ * Fetch a single event from a non-backend source by its id.
+ *
+ * Canister pagination semantics differ across sources: 3pool's v2 liquidity
+ * endpoint is newest-first (offset = skip-from-newest), while AMM / SP / 3pool
+ * v1 endpoints are oldest-first where `start` happens to equal the id because
+ * ids are assigned sequentially. Rather than hand-craft each code path, we
+ * fetch the full event log (reusing the cache populated by list views) and
+ * find the matching id client-side. Current event counts are small (~tens),
+ * and fetches are cached, so this is cheap.
  */
 export async function fetchDexEvent(source: DexEventSource, id: number): Promise<any | null> {
 	const key = `dex:event:${source}:${id}`;
@@ -710,29 +722,63 @@ export async function fetchDexEvent(source: DexEventSource, id: number): Promise
 	if (cached) return cached;
 
 	try {
-		// Fetch events that include the target ID
-		// Most canister event APIs take (start, length) where start is the first ID
-		const start = BigInt(Math.max(0, id));
-		const length = 1n;
-		let events: any[];
-
-		switch (source) {
-			case '3pool_swap': events = await threePoolService.getSwapEvents(start, length); break;
-			case 'amm_swap': events = await ammService.getSwapEvents(start, length); break;
-			case 'amm_liquidity': events = await ammService.getLiquidityEvents(start, length); break;
-			case 'amm_admin': events = await ammService.getAdminEvents(start, length); break;
-			case '3pool_liquidity': events = await threePoolService.getLiquidityEvents(start, length); break;
-			case '3pool_admin': events = await threePoolService.getAdminEvents(start, length); break;
-			case 'stability_pool': events = await stabilityPoolService.getPoolEvents(start, length); break;
-			default: return null;
-		}
-
-		const match = events.find((e: any) => Number(e.id ?? 0) === id) ?? events[0] ?? null;
+		const all = await fetchAllDexEvents(source);
+		const match = all.find((e: any) => Number(e.id ?? 0) === id) ?? null;
 		if (match) return setCache(key, match);
 		return null;
 	} catch (err) {
 		console.error(`[explorerService] fetchDexEvent(${source}, ${id}) failed:`, err);
 		return null;
+	}
+}
+
+/** Return the total count of events for a non-backend source. Used to gate "Next" navigation. */
+export async function fetchDexEventCount(source: DexEventSource): Promise<bigint> {
+	switch (source) {
+		case '3pool_swap':       return fetchSwapEventCount();
+		case 'amm_swap':         return fetchAmmSwapEventCount();
+		case 'amm_liquidity':    return fetchAmmLiquidityEventCount();
+		case 'amm_admin':        return fetchAmmAdminEventCount();
+		case '3pool_liquidity':  return fetch3PoolLiquidityEventCount();
+		case '3pool_admin':      return fetch3PoolAdminEventCount();
+		case 'stability_pool':   return fetchStabilityPoolEventCount();
+		default:                 return 0n;
+	}
+}
+
+/** Fetch every event from a non-backend source (count → full fetch). Cached via the per-range helpers. */
+export async function fetchAllDexEvents(source: DexEventSource): Promise<any[]> {
+	switch (source) {
+		case '3pool_swap': {
+			const count = await fetchSwapEventCount();
+			return Number(count) > 0 ? fetchSwapEvents(0n, count) : [];
+		}
+		case 'amm_swap': {
+			const count = await fetchAmmSwapEventCount();
+			return Number(count) > 0 ? fetchAmmSwapEvents(0n, count) : [];
+		}
+		case 'amm_liquidity': {
+			const count = await fetchAmmLiquidityEventCount();
+			return Number(count) > 0 ? fetchAmmLiquidityEvents(0n, count) : [];
+		}
+		case 'amm_admin': {
+			const count = await fetchAmmAdminEventCount();
+			return Number(count) > 0 ? fetchAmmAdminEvents(0n, count) : [];
+		}
+		case '3pool_liquidity': {
+			const count = await fetch3PoolLiquidityEventCount();
+			return Number(count) > 0 ? fetch3PoolLiquidityEvents(count, 0n) : [];
+		}
+		case '3pool_admin': {
+			const count = await fetch3PoolAdminEventCount();
+			return Number(count) > 0 ? fetch3PoolAdminEvents(0n, count) : [];
+		}
+		case 'stability_pool': {
+			const count = await fetchStabilityPoolEventCount();
+			return Number(count) > 0 ? fetchStabilityPoolEvents(0n, count) : [];
+		}
+		default:
+			return [];
 	}
 }
 

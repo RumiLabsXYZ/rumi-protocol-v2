@@ -19,13 +19,14 @@
   } from '$services/explorer/explorerService';
   import {
     formatE8s, formatUsdRaw, formatCR, getTokenSymbol, getCanisterName,
-    isKnownCanister, classifyVaultHealth, healthColor, shortenPrincipal
+    isKnownCanister, shortenPrincipal, timeAgo, formatTimestamp
   } from '$utils/explorerHelpers';
   import {
     getEventCategory, formatSwapEvent, formatAmmSwapEvent,
     formatAmmLiquidityEvent, format3PoolLiquidityEvent,
   } from '$utils/explorerFormatters';
   import type { EventCategory } from '$utils/explorerFormatters';
+  import { extractEventTimestamp } from '$utils/displayEvent';
 
   // ── State ────────────────────────────────────────────────────────────
   let loading = $state(true);
@@ -35,7 +36,9 @@
   let configMap = $state(new Map<string, any>());
   let priceMap = $state(new Map<string, number>());
   let selectedCategory: EventCategory | 'all' | 'dex' = $state('all');
-  let dexEvents: [bigint, any][] = $state([]);
+  // Source tags match DexEventSource route segments so we can link to /explorer/dex/{source}/{id}
+  type DexSource = '3pool_swap' | 'amm_swap' | 'amm_liquidity' | '3pool_liquidity';
+  let dexEvents: { id: bigint; source: DexSource; event: any; timestamp: number }[] = $state([]);
   let dexLoading: boolean = $state(false);
   let vaultCollateralMap: Map<number, string> = $state(new Map());
   let vaultOwnerMap: Map<number, string> = $state(new Map());
@@ -126,7 +129,7 @@
         Number(threePoolSwapCount) > 0 ? fetchSwapEvents(0n, threePoolSwapCount) : Promise.resolve([]),
         Number(ammSwapCount) > 0 ? fetchAmmSwapEvents(0n, ammSwapCount) : Promise.resolve([]),
         Number(ammLiqCount) > 0 ? fetchAmmLiquidityEvents(0n, ammLiqCount) : Promise.resolve([]),
-        Number(threePoolLiqCount) > 0 ? fetch3PoolLiquidityEvents(0n, threePoolLiqCount) : Promise.resolve([]),
+        Number(threePoolLiqCount) > 0 ? fetch3PoolLiquidityEvents(threePoolLiqCount, 0n) : Promise.resolve([]),
       ]);
 
       // Helper to check if an event's caller matches this principal
@@ -135,19 +138,21 @@
         return caller === principalId;
       };
 
-      // Filter by caller and tag with source
-      const matching3PoolSwaps = threePoolSwaps.filter(matchesCaller)
-        .map((e: any) => [BigInt(e.id ?? 0), { ...e, _source: '3pool' }] as [bigint, any]);
-      const matchingAmmSwaps = ammSwaps.filter(matchesCaller)
-        .map((e: any) => [BigInt(e.id ?? 0), { ...e, _source: 'amm' }] as [bigint, any]);
-      const matchingAmmLiq = ammLiqEvents.filter(matchesCaller)
-        .map((e: any) => [BigInt(e.id ?? 0), { ...e, _source: 'amm_liquidity' }] as [bigint, any]);
-      const matching3PoolLiq = threePoolLiqEvents.filter(matchesCaller)
-        .map((e: any) => [BigInt(e.id ?? 0), { ...e, _source: '3pool_liquidity' }] as [bigint, any]);
+      const tag = (arr: any[], source: DexSource) =>
+        arr.filter(matchesCaller).map((e: any) => ({
+          id: BigInt(e.id ?? 0),
+          source,
+          event: e,
+          timestamp: Number(e.timestamp ?? 0),
+        }));
 
-      // Merge and sort by timestamp descending
-      const merged = [...matching3PoolSwaps, ...matchingAmmSwaps, ...matchingAmmLiq, ...matching3PoolLiq];
-      merged.sort((a, b) => Number(b[1].timestamp ?? 0) - Number(a[1].timestamp ?? 0));
+      const merged = [
+        ...tag(threePoolSwaps, '3pool_swap'),
+        ...tag(ammSwaps, 'amm_swap'),
+        ...tag(ammLiqEvents, 'amm_liquidity'),
+        ...tag(threePoolLiqEvents, '3pool_liquidity'),
+      ];
+      merged.sort((a, b) => b.timestamp - a.timestamp);
       dexEvents = merged;
     } catch (e) {
       console.error('[address] loadDexEvents error:', e);
@@ -157,15 +162,61 @@
     }
   }
 
+  // Backend events (already ordered by globalIndex; newest first)
   const sortedEvents = $derived(
     [...events].sort(([a], [b]) => Number(b) - Number(a))
   );
 
-  const filteredEvents = $derived(
+  // Backend events filtered by tab (used for non-'all' and non-'dex' tabs)
+  const filteredBackendEvents = $derived(
     selectedCategory === 'all'
       ? sortedEvents
       : sortedEvents.filter(([_, event]) => getEventCategory(event) === selectedCategory)
   );
+
+  function getDexFormatter(source: DexSource, event: any) {
+    switch (source) {
+      case 'amm_liquidity': return formatAmmLiquidityEvent(event);
+      case '3pool_liquidity': return format3PoolLiquidityEvent(event);
+      case 'amm_swap': return formatAmmSwapEvent(event);
+      case '3pool_swap': return formatSwapEvent(event);
+    }
+  }
+
+  const DEX_SOURCE_LABEL: Record<DexSource, string> = {
+    '3pool_swap': '3Pool',
+    'amm_swap': 'AMM',
+    'amm_liquidity': 'AMM',
+    '3pool_liquidity': '3Pool',
+  };
+
+  // Unified event stream for the "all" tab: backend events + DEX events sorted by timestamp desc.
+  // Each entry carries just enough context for the mixed table renderer below.
+  type MixedRow =
+    | { kind: 'backend'; globalIndex: bigint; event: any; timestamp: number }
+    | { kind: 'dex'; id: bigint; source: DexSource; event: any; timestamp: number };
+
+  const allRows = $derived.by((): MixedRow[] => {
+    const backendRows: MixedRow[] = sortedEvents.map(([idx, ev]) => ({
+      kind: 'backend',
+      globalIndex: idx,
+      event: ev,
+      timestamp: extractEventTimestamp(ev),
+    }));
+    const dexRows: MixedRow[] = dexEvents.map((d) => ({
+      kind: 'dex',
+      id: d.id,
+      source: d.source,
+      event: d.event,
+      timestamp: d.timestamp,
+    }));
+    const all = [...backendRows, ...dexRows];
+    // Sort newest first. Fall back to globalIndex for ties (backend) so order stays stable.
+    all.sort((a, b) => b.timestamp - a.timestamp);
+    return all;
+  });
+
+  const totalEventCount = $derived(events.length + dexEvents.length);
 
   // ── Load ─────────────────────────────────────────────────────────────
   onMount(async () => {
@@ -217,6 +268,11 @@
 
       // prices is already Map<string, number>
       priceMap = prices;
+
+      // Kick off DEX event load in the background so the "All" tab has them on first paint.
+      // We don't await — the main view renders immediately with backend events, and DEX rows
+      // fold in as soon as this resolves.
+      loadDexEvents($page.params.principal);
     } catch (e) {
       console.error('[address page] Failed to load data:', e);
       error = 'Failed to load address data. Please try again.';
@@ -370,7 +426,9 @@
 
     <!-- ── Activity Feed ───────────────────────────────────────────────── -->
     <section>
-      <h2 class="text-lg font-semibold text-white mb-4">Activity ({events.length} events)</h2>
+      <h2 class="text-lg font-semibold text-white mb-4">
+        Activity ({totalEventCount} event{totalEventCount === 1 ? '' : 's'}{dexLoading ? ', loading DEX…' : ''})
+      </h2>
 
       <!-- Category filter tabs -->
       <div class="flex gap-0 border-b border-gray-700/50 mb-4 overflow-x-auto">
@@ -382,7 +440,6 @@
               : 'text-gray-400 border-b-2 border-transparent hover:text-gray-300 hover:border-gray-600'}"
             onclick={() => {
               selectedCategory = tab.key as EventCategory | 'all' | 'dex';
-              if (tab.key === 'dex') loadDexEvents(principalStr);
             }}
           >
             {tab.label}
@@ -390,8 +447,35 @@
         {/each}
       </div>
 
-      {#if selectedCategory === 'dex'}
-        {#if dexLoading}
+      {#if selectedCategory === 'all'}
+        {#if allRows.length === 0}
+          <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-12 text-center">
+            <p class="text-gray-500 text-sm">No activity found</p>
+          </div>
+        {:else}
+          <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl overflow-hidden">
+            {#each allRows as row (row.kind === 'backend' ? `b:${row.globalIndex}` : `d:${row.source}:${row.id}`)}
+              {#if row.kind === 'backend'}
+                <EventRow event={row.event} index={Number(row.globalIndex)} {vaultCollateralMap} {vaultOwnerMap} />
+              {:else}
+                {@const formatted = getDexFormatter(row.source, row.event)}
+                <a
+                  href="/explorer/dex/{row.source}/{Number(row.id)}"
+                  class="flex items-center gap-4 px-4 py-3 border-b border-gray-700/30 last:border-b-0 hover:bg-gray-700/20 transition-colors"
+                >
+                  <span class="text-xs text-gray-500 font-mono w-24 shrink-0">{DEX_SOURCE_LABEL[row.source]} #{Number(row.id)}</span>
+                  <span class="text-xs text-gray-500 w-20 shrink-0" title={row.timestamp ? formatTimestamp(row.timestamp) : ''}>{row.timestamp ? timeAgo(row.timestamp) : '—'}</span>
+                  <span class="inline-block text-xs font-medium px-2.5 py-0.5 rounded-full shrink-0 {formatted.badgeColor}">
+                    {formatted.typeName}
+                  </span>
+                  <span class="text-sm text-gray-300 truncate flex-1 min-w-0">{formatted.summary}</span>
+                </a>
+              {/if}
+            {/each}
+          </div>
+        {/if}
+      {:else if selectedCategory === 'dex'}
+        {#if dexLoading && dexEvents.length === 0}
           <div class="flex items-center justify-center py-10">
             <div class="w-6 h-6 border-2 border-gray-600 border-t-blue-400 rounded-full animate-spin"></div>
           </div>
@@ -406,51 +490,42 @@
                   <th class="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Time</th>
                   <th class="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Type</th>
                   <th class="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Summary</th>
+                  <th class="px-4 py-3 text-xs font-medium text-gray-500 uppercase w-16 text-right">Details</th>
                 </tr>
               </thead>
               <tbody>
-                {#each dexEvents as [id, event]}
-                  {@const formatted = event._source === 'amm_liquidity'
-                    ? formatAmmLiquidityEvent(event)
-                    : event._source === '3pool_liquidity'
-                    ? format3PoolLiquidityEvent(event)
-                    : event._source === 'amm'
-                    ? formatAmmSwapEvent(event)
-                    : formatSwapEvent(event)}
+                {#each dexEvents as d (d.source + ':' + d.id)}
+                  {@const formatted = getDexFormatter(d.source, d.event)}
                   <tr class="border-b border-gray-700/50 hover:bg-gray-800/30 transition-colors">
-                    <td class="px-4 py-3 text-xs text-gray-500 font-mono">{Number(id)}</td>
-                    <td class="px-4 py-3 text-xs text-gray-500">
-                      {#if event.timestamp}
-                        {@const ts = Number(event.timestamp) > 1e15 ? Number(event.timestamp) : Number(event.timestamp) * 1e9}
-                        {@const ago = (() => { const s = Math.floor((Date.now() - ts / 1e6) / 1000); if (s < 60) return `${s}s ago`; if (s < 3600) return `${Math.floor(s/60)}m ago`; if (s < 86400) return `${Math.floor(s/3600)}h ago`; return `${Math.floor(s/86400)}d ago`; })()}
-                        {ago}
-                      {:else}
-                        &mdash;
-                      {/if}
-                    </td>
+                    <td class="px-4 py-3 text-xs text-gray-500 font-mono">{DEX_SOURCE_LABEL[d.source]} #{Number(d.id)}</td>
+                    <td class="px-4 py-3 text-xs text-gray-500" title={d.timestamp ? formatTimestamp(d.timestamp) : ''}>{d.timestamp ? timeAgo(d.timestamp) : '—'}</td>
                     <td class="px-4 py-3">
                       <span class="inline-block text-xs font-medium px-2.5 py-0.5 rounded-full {formatted.badgeColor}">
                         {formatted.typeName}
                       </span>
                     </td>
                     <td class="px-4 py-3 text-sm text-gray-300 truncate max-w-[300px]">{formatted.summary}</td>
+                    <td class="px-4 py-3 text-right">
+                      <a
+                        href="/explorer/dex/{d.source}/{Number(d.id)}"
+                        class="text-xs text-blue-400 hover:text-blue-300 hover:underline"
+                      >Details</a>
+                    </td>
                   </tr>
                 {/each}
               </tbody>
             </table>
           </div>
         {/if}
-      {:else if filteredEvents.length === 0}
+      {:else if filteredBackendEvents.length === 0}
         <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-12 text-center">
           <p class="text-gray-500 text-sm">
-            {selectedCategory === 'all'
-              ? 'No activity found'
-              : `No ${addressTabs.find((t) => t.key === selectedCategory)?.label ?? ''} events found`}
+            No {addressTabs.find((t) => t.key === selectedCategory)?.label ?? ''} events found
           </p>
         </div>
       {:else}
         <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl overflow-hidden">
-          {#each filteredEvents as [globalIndex, event] (globalIndex)}
+          {#each filteredBackendEvents as [globalIndex, event] (globalIndex)}
             <EventRow {event} index={Number(globalIndex)} {vaultCollateralMap} {vaultOwnerMap} />
           {/each}
         </div>

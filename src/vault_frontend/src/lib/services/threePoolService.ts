@@ -281,9 +281,11 @@ class ThreePoolService {
     return await actor.get_swap_event_count() as bigint;
   }
 
-  async getLiquidityEvents(start: bigint, length: bigint): Promise<any[]> {
+  // v2 liquidity endpoint is newest-first: offset skips the N most-recent events, limit takes the next batch.
+  // The returned array is reversed by the canister so events[0] is the newest event in the returned window.
+  async getLiquidityEvents(limit: bigint, offset: bigint): Promise<any[]> {
     const actor = await this.getQueryActor();
-    return await actor.get_liquidity_events_v2(length, start) as any[];
+    return await actor.get_liquidity_events_v2(limit, offset) as any[];
   }
 
   async getLiquidityEventCount(): Promise<bigint> {

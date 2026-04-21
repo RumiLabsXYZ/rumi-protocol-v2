@@ -8,13 +8,14 @@
   import { formatEvent } from '$utils/explorerFormatters';
   import type { EventField } from '$utils/explorerFormatters';
   import { formatTimestamp } from '$utils/explorerHelpers';
-  import { fetchAllVaults } from '$services/explorer/explorerService';
+  import { fetchAllVaults, fetchEventCount } from '$services/explorer/explorerService';
 
   let event: any = $state(null);
   let globalIndex: bigint | null = $state(null);
   let loading = $state(true);
   let error: string | null = $state(null);
   let vaultCollateralMap: Map<number, string> = $state(new Map());
+  let totalEventCount: number = $state(0);
 
   const eventIndex = $derived(Number($page.params.index));
 
@@ -52,10 +53,12 @@
     loading = true;
     error = null;
     try {
-      const [results, vaults] = await Promise.all([
+      const [results, vaults, count] = await Promise.all([
         publicActor.get_events({ start: BigInt(eventIndex), length: 1n }),
         fetchAllVaults(),
+        fetchEventCount(),
       ]);
+      totalEventCount = Number(count);
       // Build vault collateral map
       const map = new Map<number, string>();
       for (const v of vaults) {
@@ -221,12 +224,16 @@
       {:else}
         <span></span>
       {/if}
-      <a
-        href="/explorer/event/{eventIndex + 1}"
-        class="text-sm text-blue-400 hover:text-blue-300 hover:underline inline-flex items-center gap-1"
-      >
-        Next Event &rarr;
-      </a>
+      {#if eventIndex < totalEventCount - 1}
+        <a
+          href="/explorer/event/{eventIndex + 1}"
+          class="text-sm text-blue-400 hover:text-blue-300 hover:underline inline-flex items-center gap-1"
+        >
+          Next Event &rarr;
+        </a>
+      {:else}
+        <span></span>
+      {/if}
     </div>
   {/if}
 </div>
