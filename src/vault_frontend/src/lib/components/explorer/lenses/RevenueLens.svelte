@@ -234,4 +234,9 @@
   </div>
 {/if}
 
-<LensActivityPanel scope="revenue" title="Revenue-bearing activity" />
+<!-- Revenue-bearing = redemptions + liquidations + swaps (everything the protocol charges a fee on). -->
+<LensActivityPanel
+  scope="revenue"
+  title="Revenue-bearing activity"
+  viewAllHref="/explorer/activity?type=redemption,liquidation,swap"
+/>

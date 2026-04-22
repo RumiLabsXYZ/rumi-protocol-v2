@@ -173,4 +173,4 @@
   {/if}
 </div>
 
-<LensActivityPanel scope="redemptions" title="Redemption activity" />
+<LensActivityPanel scope="redemptions" title="Redemption activity" viewAllHref="/explorer/activity?type=redemption" />

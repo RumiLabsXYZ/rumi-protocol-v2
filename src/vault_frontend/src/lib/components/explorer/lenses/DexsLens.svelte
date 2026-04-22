@@ -271,4 +271,4 @@
 
 <PoolHealthStrip {pegStatus} {lpApy} {spApy} loading={loading} />
 
-<LensActivityPanel scope="dexs" title="DEX activity" />
+<LensActivityPanel scope="dexs" title="DEX activity" viewAllHref="/explorer/activity?type=dex" />

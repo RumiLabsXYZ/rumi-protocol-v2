@@ -2,6 +2,7 @@
   import EventRow from './EventRow.svelte';
   import MixedEventRow from './MixedEventRow.svelte';
   import type { DisplayEvent } from '$utils/displayEvent';
+  import type { Facets } from '$utils/eventFacets';
 
   interface Props {
     events: DisplayEvent[];
@@ -9,9 +10,23 @@
     vaultOwnerMap?: Map<number, string>;
     /** Header cell classes — defaults to `px-4 py-3`. Landing page uses `px-4 py-2` for a tighter look. */
     headerCellClass?: string;
+    /**
+     * Optional facet-click handler. When provided, facet chips in rows become
+     * "add-to-filter" buttons that call this with the updated `Facets`.
+     * When omitted, chips behave as plain entity links (navigate to /e/...).
+     */
+    onFacetClick?: (next: Facets) => void;
+    currentFacets?: Facets;
   }
 
-  let { events, vaultCollateralMap, vaultOwnerMap, headerCellClass = 'px-4 py-3' }: Props = $props();
+  let {
+    events,
+    vaultCollateralMap,
+    vaultOwnerMap,
+    headerCellClass = 'px-4 py-3',
+    onFacetClick,
+    currentFacets,
+  }: Props = $props();
 </script>
 
 <div class="overflow-x-auto">
@@ -29,9 +44,21 @@
     <tbody>
       {#each events as de (String(de.globalIndex) + de.source)}
         {#if de.source === 'backend'}
-          <EventRow event={de.event} index={Number(de.globalIndex)} {vaultCollateralMap} {vaultOwnerMap} />
+          <EventRow
+            event={de.event}
+            index={Number(de.globalIndex)}
+            {vaultCollateralMap}
+            {vaultOwnerMap}
+            {onFacetClick}
+            {currentFacets}
+          />
         {:else}
-          <MixedEventRow event={de} {vaultOwnerMap} />
+          <MixedEventRow
+            event={de}
+            {vaultOwnerMap}
+            {onFacetClick}
+            {currentFacets}
+          />
         {/if}
       {/each}
     </tbody>

@@ -167,4 +167,4 @@
   {/if}
 </div>
 
-<LensActivityPanel scope="stability_pool" title="Stability pool activity" />
+<LensActivityPanel scope="stability_pool" title="Stability pool activity" viewAllHref="/explorer/activity?type=stability_pool" />

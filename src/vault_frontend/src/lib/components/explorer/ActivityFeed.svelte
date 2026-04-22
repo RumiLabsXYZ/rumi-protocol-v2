@@ -15,7 +15,7 @@
   <div class="px-5 py-4 border-b border-gray-700/50">
     <div class="flex items-center justify-between">
       <h3 class="text-sm font-semibold text-gray-200">Recent Activity</h3>
-      <a href="/explorer/events" class="text-xs text-blue-400 hover:text-blue-300 transition-colors">View all</a>
+      <a href="/explorer/activity" class="text-xs text-blue-400 hover:text-blue-300 transition-colors">View all</a>
     </div>
   </div>
 

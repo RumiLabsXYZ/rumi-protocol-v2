@@ -208,4 +208,4 @@
 
 <PoolHealthStrip {pegStatus} {lpApy} {spApy} loading={poolsLoading} />
 
-<LensActivityPanel scope="all" title="Recent activity" />
+<LensActivityPanel scope="all" title="Recent activity" viewAllHref="/explorer/activity" />

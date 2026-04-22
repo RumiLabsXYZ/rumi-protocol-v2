@@ -177,4 +177,4 @@
   </div>
 {/if}
 
-<LensActivityPanel scope="admin" title="Admin events (protocol + 3Pool + AMM)" />
+<LensActivityPanel scope="admin" title="Admin events (protocol + 3Pool + AMM)" viewAllHref="/explorer/activity?type=admin,system" />
