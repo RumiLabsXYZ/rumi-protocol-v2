@@ -157,6 +157,32 @@
     ownerVaults.filter((v: any) => Number(v.vault_id) !== vaultId),
   );
 
+  /**
+   * Decorate each of the owner's other vaults with its CR + liquidation ratio
+   * so we can render a small CRDial per chip. Falls back to Infinity when debt
+   * is zero or price is missing.
+   */
+  const otherOwnerVaultsAnnotated = $derived.by(() => {
+    return otherOwnerVaults.map((v: any) => {
+      const ct = v.collateral_type?.toText?.() ?? String(v.collateral_type ?? '');
+      const dec = getTokenDecimals(ct);
+      const coll = Number(BigInt(v.collateral_amount ?? 0)) / 10 ** dec;
+      const debt = Number(BigInt(v.borrowed_icusd_amount ?? 0) + BigInt(v.accrued_interest ?? 0)) / 1e8;
+      const p = collateralPrices.get(ct) ?? 0;
+      const cfg = collateralConfigs.find((c: any) => {
+        const cPrincipal = c.ledger_canister_id?.toText?.() ?? String(c.ledger_canister_id ?? '');
+        return cPrincipal === ct;
+      });
+      const liq = decodeField(cfg?.liquidation_ratio, 1.1);
+      const crVal = debt > 0 && p > 0 ? (coll * p) / debt : Infinity;
+      return {
+        id: Number(v.vault_id),
+        cr: crVal,
+        liq,
+      };
+    });
+  });
+
   // ── Timeline reconstruction ──────────────────────────────────────────────
   interface TimelinePoint {
     t: number;
@@ -284,6 +310,83 @@
   const debtPoints = $derived(timeline.map((pt) => ({ t: pt.t, v: pt.debt })));
   const collateralPoints = $derived(timeline.map((pt) => ({ t: pt.t, v: pt.collateral })));
 
+  /**
+   * Rebuild a vault-shaped object from event history so closed vaults can
+   * render their full historical state. Uses the first open_vault event for
+   * identity (owner, collateral_type) and replays events to derive final
+   * collateral + debt (which for a closed vault end at zero).
+   */
+  function synthesizeVaultFromHistory(id: number, h: any[]): any | null {
+    if (!h.length) return null;
+    const first = h[0];
+    const firstType = first?.event_type ?? first;
+    const firstKey = Object.keys(firstType)[0];
+    if (firstKey !== 'open_vault') return null;
+    const firstData = firstType[firstKey];
+    const openVault = firstData?.vault;
+    if (!openVault) return null;
+
+    let coll = BigInt(openVault.collateral_amount ?? 0);
+    let debt = BigInt(openVault.borrowed_icusd_amount ?? 0);
+    for (let i = 1; i < h.length; i++) {
+      const et = h[i]?.event_type ?? h[i];
+      const key = Object.keys(et)[0];
+      const d = et[key];
+      switch (key) {
+        case 'borrow_from_vault':
+          debt += BigInt(d.borrowed_amount ?? 0) + BigInt(d.fee_amount ?? 0); break;
+        case 'repay_to_vault':
+          debt -= BigInt(d.repayed_amount ?? 0); if (debt < 0n) debt = 0n; break;
+        case 'add_margin_to_vault':
+          coll += BigInt(d.margin_added ?? 0); break;
+        case 'partial_collateral_withdrawn':
+          coll -= BigInt(d.amount ?? 0); if (coll < 0n) coll = 0n; break;
+        case 'collateral_withdrawn':
+        case 'withdraw_and_close_vault':
+        case 'vault_withdrawn_and_closed':
+          coll = 0n; break;
+        case 'close_vault':
+          coll = 0n; debt = 0n; break;
+        case 'liquidate_vault':
+          coll = 0n; debt = 0n; break;
+        case 'partial_liquidate_vault': {
+          coll -= BigInt(d.icp_to_liquidator ?? 0);
+          const pf = Array.isArray(d.protocol_fee_collateral) ? d.protocol_fee_collateral[0] : d.protocol_fee_collateral;
+          if (pf != null) coll -= BigInt(pf);
+          debt -= BigInt(d.liquidator_payment ?? 0);
+          if (coll < 0n) coll = 0n;
+          if (debt < 0n) debt = 0n;
+          break;
+        }
+        case 'redemption_on_vaults': {
+          const rawRedemptions = d.vault_redemptions;
+          const redemptions: any[] = Array.isArray(rawRedemptions) && rawRedemptions.length > 0
+            ? rawRedemptions[0]
+            : Array.isArray(rawRedemptions) ? rawRedemptions : [];
+          const mine = redemptions.find((vr: any) => Number(vr.vault_id) === id);
+          if (mine) {
+            coll -= BigInt(mine.collateral_amount ?? 0);
+            debt -= BigInt(mine.icusd_amount ?? 0);
+            if (coll < 0n) coll = 0n;
+            if (debt < 0n) debt = 0n;
+          }
+          break;
+        }
+      }
+    }
+    return {
+      vault_id: id,
+      owner: openVault.owner,
+      collateral_type: openVault.collateral_type,
+      collateral_amount: coll,
+      borrowed_icusd_amount: debt,
+      accrued_interest: 0n,
+      icp_margin_amount: coll,
+      last_accrual_time: openVault.last_accrual_time ?? 0n,
+      _synthetic: true,
+    };
+  }
+
   onMount(async () => {
     const id = BigInt(vaultId);
     try {
@@ -295,18 +398,22 @@
         fetchVaultHistory(id).catch(() => []),
         fetchPriceSeries(500).catch(() => []),
       ]);
-      if (!v) {
+      const histArr = Array.isArray(h) ? h : [];
+      const resolved = v ?? synthesizeVaultFromHistory(vaultId, histArr);
+      if (!resolved) {
         vaultError = true;
       } else {
-        vault = v;
+        vault = resolved;
         interestRate = r;
         collateralConfigs = configs;
         collateralPrices = prices;
-        history = Array.isArray(h) ? h : [];
+        history = histArr;
         priceSeries = pseries as any[];
-        // Load owner's other vaults in the background
-        if (v.owner) {
-          fetchVaultsByOwner(v.owner as Principal)
+        if (resolved.owner) {
+          const ownerPrincipal = typeof resolved.owner === 'object'
+            ? resolved.owner as Principal
+            : Principal.fromText(String(resolved.owner));
+          fetchVaultsByOwner(ownerPrincipal)
             .then((list) => { ownerVaults = list; })
             .catch(() => {});
         }
@@ -398,12 +505,13 @@
           <EntityLink type="address" value={ownerStr} />
           <CopyButton text={ownerStr} />
         </div>
-        {#if otherOwnerVaults.length > 0}
-          <div class="text-[10px] uppercase tracking-wider text-gray-500 mt-3">Other Vaults ({otherOwnerVaults.length})</div>
-          <div class="flex flex-wrap gap-1.5">
-            {#each otherOwnerVaults.slice(0, 10) as ov (ov.vault_id)}
-              <a href="/explorer/e/vault/{ov.vault_id}" class="text-xs text-blue-400 hover:text-blue-300 font-mono px-2 py-0.5 rounded border border-gray-700/50 hover:border-gray-600">
-                #{ov.vault_id}
+        {#if otherOwnerVaultsAnnotated.length > 0}
+          <div class="text-[10px] uppercase tracking-wider text-gray-500 mt-3">Other Vaults ({otherOwnerVaultsAnnotated.length})</div>
+          <div class="flex flex-wrap gap-2">
+            {#each otherOwnerVaultsAnnotated.slice(0, 10) as ov (ov.id)}
+              <a href="/explorer/e/vault/{ov.id}" class="inline-flex items-center gap-1.5 text-xs text-blue-400 hover:text-blue-300 font-mono pl-1 pr-2 py-0.5 rounded border border-gray-700/50 hover:border-gray-600">
+                <CRDial cr={ov.cr} liquidationCR={ov.liq} size="sm" />
+                <span>#{ov.id}</span>
               </a>
             {/each}
           </div>
