@@ -27,6 +27,7 @@ import type {
 	VolatilityResponse,
 	PriceSeriesResponse,
 	ThreePoolSeriesResponse,
+	CycleSeriesResponse,
 } from '$declarations/rumi_analytics/rumi_analytics.did';
 
 // ── TTL constants (ms) ───────────────────────────────────────────────────────
@@ -364,6 +365,22 @@ export async function fetchPriceSeries(limit = 500): Promise<PriceSeriesResponse
 		return setCache(key, result.rows);
 	} catch (err) {
 		console.error('[analyticsService] fetchPriceSeries failed:', err);
+		return [];
+	}
+}
+
+// ── Cycle balance series (hourly per-canister snapshots) ────────────────────
+
+export async function fetchCycleSeries(limit = 500): Promise<CycleSeriesResponse['rows']> {
+	const key = `analytics:cycle_series:${limit}`;
+	const cached = getCached<CycleSeriesResponse['rows']>(key, TTL.SERIES);
+	if (cached) return cached;
+
+	try {
+		const result = await getActor().get_cycle_series(rangeQuery(undefined, undefined, limit));
+		return setCache(key, result.rows);
+	} catch (err) {
+		console.error('[analyticsService] fetchCycleSeries failed:', err);
 		return [];
 	}
 }

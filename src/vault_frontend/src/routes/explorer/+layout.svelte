@@ -14,14 +14,33 @@
 
   let currentPath = $derived($page.url.pathname);
 
+  // Three-section IA: Protocol (lens-scoped dashboard), Activity (query layer),
+  // Entities (vault / token / address / pool / canister / event — reached via
+  // search + links, no dedicated nav tab).
   const NAV_ITEMS = [
-    { href: '/explorer', label: 'Dashboard', match: (p: string) => p === '/explorer' },
-    { href: '/explorer/markets', label: 'Markets', match: (p: string) => p.startsWith('/explorer/markets') || p.startsWith('/explorer/token/') },
-    { href: '/explorer/pools', label: 'Pools', match: (p: string) => p.startsWith('/explorer/pools') },
-    { href: '/explorer/revenue', label: 'Revenue', match: (p: string) => p.startsWith('/explorer/revenue') },
-    { href: '/explorer/activity', label: 'Activity', match: (p: string) => p.startsWith('/explorer/activity') || p.startsWith('/explorer/event/') || p.startsWith('/explorer/dex/') },
-    { href: '/explorer/holders', label: 'Holders', match: (p: string) => p.startsWith('/explorer/holders') },
-    { href: '/explorer/risk', label: 'Risk', match: (p: string) => p.startsWith('/explorer/risk') || p.startsWith('/explorer/liquidations') },
+    {
+      href: '/explorer',
+      label: 'Protocol',
+      match: (p: string) =>
+        p === '/explorer'
+        || p.startsWith('/explorer/markets')
+        || p.startsWith('/explorer/pools')
+        || p.startsWith('/explorer/revenue')
+        || p.startsWith('/explorer/risk')
+        || p.startsWith('/explorer/stats')
+        || p.startsWith('/explorer/holders')
+        || p.startsWith('/explorer/token/')
+    },
+    {
+      href: '/explorer/activity',
+      label: 'Activity',
+      match: (p: string) =>
+        p.startsWith('/explorer/activity')
+        || p.startsWith('/explorer/events')
+        || p.startsWith('/explorer/event/')
+        || p.startsWith('/explorer/dex/')
+        || p.startsWith('/explorer/liquidations')
+    },
   ];
 
   function handleSearch(query: string) {
