@@ -107,6 +107,162 @@ export async function fetchProtocolMode(): Promise<string> {
 	return Object.keys(status.mode)[0] ?? 'Unknown';
 }
 
+// ── Redemption parameters (live) ────────────────────────────────────────────
+
+export async function fetchRedemptionRate(): Promise<number | null> {
+	const key = 'redemption:rate';
+	const cached = getCached<number>(key, TTL.STATUS);
+	if (cached !== null) return cached;
+
+	try {
+		const result = await (publicActor as any).get_redemption_rate();
+		return setCache(key, Number(result));
+	} catch (err) {
+		console.error('[explorerService] fetchRedemptionRate failed:', err);
+		return null;
+	}
+}
+
+export async function fetchRedemptionFeeFloor(): Promise<number | null> {
+	const key = 'redemption:floor';
+	const cached = getCached<number>(key, TTL.STATUS);
+	if (cached !== null) return cached;
+
+	try {
+		const result = await (publicActor as any).get_redemption_fee_floor();
+		return setCache(key, Number(result));
+	} catch (err) {
+		console.error('[explorerService] fetchRedemptionFeeFloor failed:', err);
+		return null;
+	}
+}
+
+export async function fetchRedemptionFeeCeiling(): Promise<number | null> {
+	const key = 'redemption:ceiling';
+	const cached = getCached<number>(key, TTL.STATUS);
+	if (cached !== null) return cached;
+
+	try {
+		const result = await (publicActor as any).get_redemption_fee_ceiling();
+		return setCache(key, Number(result));
+	} catch (err) {
+		console.error('[explorerService] fetchRedemptionFeeCeiling failed:', err);
+		return null;
+	}
+}
+
+export async function fetchRedemptionTier(collateral: Principal): Promise<number | null> {
+	const key = `redemption:tier:${collateral.toText()}`;
+	const cached = getCached<number>(key, TTL.COLLATERAL);
+	if (cached !== null) return cached;
+
+	try {
+		const result = await (publicActor as any).get_redemption_tier(collateral);
+		if ('Ok' in result) return setCache(key, Number(result.Ok));
+		return null;
+	} catch (err) {
+		console.error('[explorerService] fetchRedemptionTier failed:', err);
+		return null;
+	}
+}
+
+// ── 3pool rich analytics (state / stats / health / series) ──────────────────
+
+export async function fetchThreePoolState(): Promise<any | null> {
+	const key = 'pool:3pool:state';
+	const cached = getCached<any>(key, TTL.POOL);
+	if (cached) return cached;
+
+	try {
+		const result = await threePoolService.getPoolState();
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchThreePoolState failed:', err);
+		return null;
+	}
+}
+
+export async function fetchThreePoolStats(
+	window: 'Last24h' | 'Last7d' | 'Last30d' | 'AllTime' = 'Last24h',
+): Promise<any | null> {
+	const key = `pool:3pool:stats:${window}`;
+	const cached = getCached<any>(key, TTL.POOL);
+	if (cached) return cached;
+
+	try {
+		const result = await threePoolService.getPoolStats(window);
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchThreePoolStats failed:', err);
+		return null;
+	}
+}
+
+export async function fetchThreePoolHealth(): Promise<any | null> {
+	const key = 'pool:3pool:health';
+	const cached = getCached<any>(key, TTL.POOL);
+	if (cached) return cached;
+
+	try {
+		const result = await threePoolService.getPoolHealth();
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchThreePoolHealth failed:', err);
+		return null;
+	}
+}
+
+export async function fetchThreePoolVolumeSeries(
+	window: 'Last24h' | 'Last7d' | 'Last30d' | 'AllTime' = 'Last7d',
+	bucketSecs: bigint = 3600n,
+): Promise<any[]> {
+	const key = `pool:3pool:vol:${window}:${bucketSecs}`;
+	const cached = getCached<any[]>(key, TTL.POOL);
+	if (cached) return cached;
+
+	try {
+		const result = await threePoolService.getVolumeSeries(window, bucketSecs);
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchThreePoolVolumeSeries failed:', err);
+		return [];
+	}
+}
+
+export async function fetchThreePoolBalanceSeries(
+	window: 'Last24h' | 'Last7d' | 'Last30d' | 'AllTime' = 'Last7d',
+	bucketSecs: bigint = 3600n,
+): Promise<any[]> {
+	const key = `pool:3pool:bal:${window}:${bucketSecs}`;
+	const cached = getCached<any[]>(key, TTL.POOL);
+	if (cached) return cached;
+
+	try {
+		const result = await threePoolService.getBalanceSeries(window, bucketSecs);
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchThreePoolBalanceSeries failed:', err);
+		return [];
+	}
+}
+
+export async function fetchThreePoolVirtualPriceSeries(
+	window: 'Last24h' | 'Last7d' | 'Last30d' | 'AllTime' = 'Last7d',
+	bucketSecs: bigint = 3600n,
+): Promise<any[]> {
+	const key = `pool:3pool:vp:${window}:${bucketSecs}`;
+	const cached = getCached<any[]>(key, TTL.POOL);
+	if (cached) return cached;
+
+	try {
+		const result = await threePoolService.getVirtualPriceSeries(window, bucketSecs);
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchThreePoolVirtualPriceSeries failed:', err);
+		return [];
+	}
+}
+
 // ── Collateral ───────────────────────────────────────────────────────────────
 
 export async function fetchCollateralConfigs(): Promise<any[]> {

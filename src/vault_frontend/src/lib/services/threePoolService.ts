@@ -303,6 +303,47 @@ class ThreePoolService {
     return await actor.get_admin_event_count() as bigint;
   }
 
+  // ── Rich analytics queries (PoolStateView / PoolStats / PoolHealth + series) ──
+
+  async getPoolState(): Promise<any> {
+    const actor = await this.getQueryActor();
+    return await actor.get_pool_state();
+  }
+
+  async getPoolStats(window: 'Last24h' | 'Last7d' | 'Last30d' | 'AllTime' = 'Last24h'): Promise<any> {
+    const actor = await this.getQueryActor();
+    return await actor.get_pool_stats({ [window]: null } as any);
+  }
+
+  async getPoolHealth(): Promise<any> {
+    const actor = await this.getQueryActor();
+    return await actor.get_pool_health();
+  }
+
+  async getVolumeSeries(
+    window: 'Last24h' | 'Last7d' | 'Last30d' | 'AllTime' = 'Last7d',
+    bucketSecs: bigint = 3600n,
+  ): Promise<any[]> {
+    const actor = await this.getQueryActor();
+    return await actor.get_volume_series({ [window]: null } as any, bucketSecs) as any[];
+  }
+
+  async getBalanceSeries(
+    window: 'Last24h' | 'Last7d' | 'Last30d' | 'AllTime' = 'Last7d',
+    bucketSecs: bigint = 3600n,
+  ): Promise<any[]> {
+    const actor = await this.getQueryActor();
+    return await actor.get_balance_series({ [window]: null } as any, bucketSecs) as any[];
+  }
+
+  async getVirtualPriceSeries(
+    window: 'Last24h' | 'Last7d' | 'Last30d' | 'AllTime' = 'Last7d',
+    bucketSecs: bigint = 3600n,
+  ): Promise<any[]> {
+    const actor = await this.getQueryActor();
+    return await actor.get_virtual_price_series({ [window]: null } as any, bucketSecs) as any[];
+  }
+
   // ── Mutations ──
 
   async swap(fromIndex: number, toIndex: number, dxRaw: bigint, minDyRaw: bigint): Promise<bigint> {
