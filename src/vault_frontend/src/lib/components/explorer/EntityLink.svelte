@@ -23,10 +23,10 @@
 
   const href = $derived.by(() => {
     switch (type) {
-      case 'vault': return `/explorer/vault/${value}`;
+      case 'vault': return `/explorer/e/vault/${value}`;
       case 'address': return `/explorer/address/${value}`;
       case 'token': return `/explorer/token/${value}`;
-      case 'event': return `/explorer/event/${value}`;
+      case 'event': return `/explorer/e/event/${value}`;
       case 'canister': return `/explorer/address/${value}`;
       case 'block_index': return null;
     }

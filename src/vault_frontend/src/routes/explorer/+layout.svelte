@@ -38,6 +38,7 @@
         p.startsWith('/explorer/activity')
         || p.startsWith('/explorer/events')
         || p.startsWith('/explorer/event/')
+        || p.startsWith('/explorer/e/event/')
         || p.startsWith('/explorer/dex/')
         || p.startsWith('/explorer/liquidations')
     },
@@ -46,8 +47,8 @@
   function handleSearch(query: string) {
     const q = query.trim();
     if (!q) return;
-    if (isVaultId(q)) goto(`/explorer/vault/${q}`);
-    else if (isEventIndex(q)) goto(`/explorer/event/${parseEventIndex(q)}`);
+    if (isVaultId(q)) goto(`/explorer/e/vault/${q}`);
+    else if (isEventIndex(q)) goto(`/explorer/e/event/${parseEventIndex(q)}`);
     else if (resolveTokenAlias(q)) goto(`/explorer/token/${resolveTokenAlias(q)}`);
     else if (isPrincipal(q)) goto(`/explorer/address/${q}`);
     mobileSearchOpen = false;

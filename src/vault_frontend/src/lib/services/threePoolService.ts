@@ -344,6 +344,32 @@ class ThreePoolService {
     return await actor.get_virtual_price_series({ [window]: null } as any, bucketSecs) as any[];
   }
 
+  async getFeeSeries(
+    window: 'Last24h' | 'Last7d' | 'Last30d' | 'AllTime' = 'Last7d',
+    bucketSecs: bigint = 3600n,
+  ): Promise<any[]> {
+    const actor = await this.getQueryActor();
+    return await actor.get_fee_series({ [window]: null } as any, bucketSecs) as any[];
+  }
+
+  async getTopLps(n: bigint): Promise<Array<[Principal, bigint, number]>> {
+    const actor = await this.getQueryActor();
+    return await actor.get_top_lps(n) as Array<[Principal, bigint, number]>;
+  }
+
+  async getTopSwappers(
+    window: 'Last24h' | 'Last7d' | 'Last30d' | 'AllTime' = 'Last7d',
+    n: bigint = 10n,
+  ): Promise<Array<[Principal, bigint, bigint]>> {
+    const actor = await this.getQueryActor();
+    return await actor.get_top_swappers({ [window]: null } as any, n) as Array<[Principal, bigint, bigint]>;
+  }
+
+  async getSwapEventsV2(start: bigint, length: bigint): Promise<any[]> {
+    const actor = await this.getQueryActor();
+    return await actor.get_swap_events_v2(start, length) as any[];
+  }
+
   // ── Mutations ──
 
   async swap(fromIndex: number, toIndex: number, dxRaw: bigint, minDyRaw: bigint): Promise<bigint> {

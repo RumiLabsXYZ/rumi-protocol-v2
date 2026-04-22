@@ -147,7 +147,7 @@
             <tr class="border-b border-white/[0.03] hover:bg-white/[0.02]">
               <td class="py-2 px-2">
                 {#if l.vault_id != null}
-                  <a href="/explorer/vault/{Number(l.vault_id)}" class="text-teal-400 hover:text-teal-300">#{Number(l.vault_id)}</a>
+                  <a href="/explorer/e/vault/{Number(l.vault_id)}" class="text-teal-400 hover:text-teal-300">#{Number(l.vault_id)}</a>
                 {:else}
                   <span class="text-gray-500">--</span>
                 {/if}

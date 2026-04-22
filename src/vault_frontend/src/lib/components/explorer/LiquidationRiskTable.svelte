@@ -1,6 +1,7 @@
 <script lang="ts">
   import EntityLink from './EntityLink.svelte';
   import VaultHealthBar from './VaultHealthBar.svelte';
+  import CRDial from './entity/CRDial.svelte';
   import { getTokenSymbol } from '$lib/utils/explorerHelpers';
 
   function collateralSymbol(principal: any): string {
@@ -56,6 +57,7 @@
         <thead>
           <tr class="border-b border-gray-700/50">
             <th class="px-4 py-2.5 text-xs font-medium text-gray-400 uppercase tracking-wider text-left">Vault</th>
+            <th class="px-2 py-2.5 text-xs font-medium text-gray-400 uppercase tracking-wider text-center w-14">CR</th>
             <th class="px-4 py-2.5 text-xs font-medium text-gray-400 uppercase tracking-wider text-left">Owner</th>
             <th class="px-4 py-2.5 text-xs font-medium text-gray-400 uppercase tracking-wider text-left">Collateral</th>
             <th class="px-4 py-2.5 text-xs font-medium text-gray-400 uppercase tracking-wider text-right">Debt</th>
@@ -67,6 +69,9 @@
             <tr class="border-b border-gray-700/30 hover:bg-gray-700/20 transition-colors">
               <td class="px-4 py-2.5">
                 <EntityLink type="vault" id={vault.vault_id} />
+              </td>
+              <td class="px-2 py-2.5 text-center">
+                <CRDial cr={vault.collateral_ratio / 100} liquidationCR={vault.liquidation_ratio / 100} size="sm" />
               </td>
               <td class="px-4 py-2.5">
                 <EntityLink type="address" id={vault.owner} />
