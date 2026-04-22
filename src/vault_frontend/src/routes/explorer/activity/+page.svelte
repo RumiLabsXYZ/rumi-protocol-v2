@@ -1,9 +1,11 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import MixedEventsTable from '$components/explorer/MixedEventsTable.svelte';
-	import Pagination from '$components/explorer/Pagination.svelte';
-	import StatCard from '$components/explorer/StatCard.svelte';
+	import FacetBar from '$components/explorer/FacetBar.svelte';
+	import ActiveFilterChips from '$components/explorer/ActiveFilterChips.svelte';
+	import SavedViewsStrip, { type SavedView } from '$components/explorer/SavedViewsStrip.svelte';
 	import {
 		fetchEvents,
 		fetchSwapEvents, fetchSwapEventCount,
@@ -13,76 +15,230 @@
 		fetch3PoolLiquidityEvents, fetch3PoolLiquidityEventCount,
 		fetch3PoolAdminEvents, fetch3PoolAdminEventCount,
 		fetchStabilityPoolEvents, fetchStabilityPoolEventCount,
-		fetchLiquidatableVaults, fetchBotStats, fetchAllVaults
+		fetchAllVaults,
+		fetchAmmPools,
+		fetchCollateralPrices,
 	} from '$services/explorer/explorerService';
-	import { getEventCategory } from '$utils/explorerFormatters';
-	import { extractEventTimestamp } from '$utils/displayEvent';
+	import { extractEventTimestamp, displayEvent } from '$utils/displayEvent';
 	import type { DisplayEvent } from '$utils/displayEvent';
-	import { formatE8s, formatTokenAmount, getTokenSymbol } from '$utils/explorerHelpers';
+	import { formatE8s, formatTokenAmount, getTokenSymbol, KNOWN_TOKENS } from '$utils/explorerHelpers';
 	import { CANISTER_IDS } from '$lib/config';
+	import {
+		extractFacets,
+		matchesFacets,
+		parseFacetsFromUrl,
+		buildFacetsQueryString,
+		emptyFacets,
+		hasAnyFacet,
+		type Facets,
+	} from '$utils/eventFacets';
 
-	const PAGE_SIZE = 100;
+	const INITIAL_ROWS = 100;
+	const PAGE_STEP = 100;
 
-	type ActivityFilter = 'all' | 'vault_ops' | 'liquidations' | 'dex' | 'stability_pool' | 'system';
+	// ── State ───────────────────────────────────────────────────────────
 
-	const FILTERS: { key: ActivityFilter; label: string }[] = [
-		{ key: 'all', label: 'All' },
-		{ key: 'vault_ops', label: 'Vault Operations' },
-		{ key: 'liquidations', label: 'Liquidations' },
-		{ key: 'dex', label: 'DEX' },
-		{ key: 'stability_pool', label: 'Stability Pool' },
-		{ key: 'system', label: 'System' },
-	];
-
-	let displayEvents: DisplayEvent[] = $state([]);
-	let totalCount: number = $state(0);
-	let currentPage: number = $state(0);
-	let selectedFilter: ActivityFilter = $state('all');
-	let loading: boolean = $state(true);
-	let error: string | null = $state(null);
-
-	// Liquidation summary (shown when filter === 'liquidations')
-	let liquidatableVaults: any[] = $state([]);
-	let botStats: any = $state(null);
-
-	// Vault collateral type lookup map (vault_id → collateral_type principal string)
+	let allEvents: DisplayEvent[] = $state([]);
+	let eventFacetsByIndex: Map<string, ReturnType<typeof extractFacets>> = $state(new Map());
 	let vaultCollateralMap: Map<number, string> = $state(new Map());
-	// Vault owner lookup map (vault_id → owner principal string)
 	let vaultOwnerMap: Map<number, string> = $state(new Map());
+	let priceMap: Map<string, number> = $state(new Map());
+	let tokenOptions: { principal: string; label: string }[] = $state([]);
+	let poolOptions: { id: string; label: string }[] = $state([]);
 
-	const totalPages = $derived(Math.ceil(totalCount / PAGE_SIZE));
+	let loading = $state(true);
+	let error: string | null = $state(null);
+	let visibleRows = $state(INITIAL_ROWS);
 
-	// 3Pool token index → symbol/decimals for multi-hop merging
+	let savedViews: SavedView[] = $state([]);
+
+	// ── URL-derived facets (reactive via $page) ─────────────────────────
+
+	let facets: Facets = $derived(parseFacetsFromUrl($page.url));
+	let currentParams = $derived($page.url.search);
+	let sortOrder: 'newest' | 'oldest' = $state<'newest' | 'oldest'>('newest');
+
+	// ── Derived: filtered + sorted + sliced for render ──────────────────
+
+	const filteredEvents = $derived.by(() => {
+		if (allEvents.length === 0) return [] as DisplayEvent[];
+		const noFacets = !hasAnyFacet(facets);
+		if (noFacets) return allEvents;
+		return allEvents.filter((de) => {
+			const key = `${de.source}:${String(de.globalIndex)}`;
+			const ef = eventFacetsByIndex.get(key);
+			if (!ef) return false;
+			return matchesFacets(ef, facets);
+		});
+	});
+
+	const sortedEvents = $derived(
+		sortOrder === 'oldest'
+			? [...filteredEvents].sort((a, b) => a.timestamp - b.timestamp)
+			: filteredEvents,
+	);
+
+	const visibleEvents = $derived(sortedEvents.slice(0, visibleRows));
+
+	// Reset the visible window whenever the underlying filter changes.
+	$effect(() => {
+		// Track `currentParams` so edits to facets collapse the window back to INITIAL_ROWS
+		void currentParams;
+		void sortOrder;
+		visibleRows = INITIAL_ROWS;
+	});
+
+	// ── URL writer ───────────────────────────────────────────────────────
+
+	function applyFacets(next: Facets) {
+		const q = buildFacetsQueryString(next);
+		const path = `/explorer/activity${q}`;
+		goto(path, { keepFocus: true, noScroll: true, replaceState: false });
+	}
+
+	function clearAll() {
+		applyFacets(emptyFacets());
+	}
+
+	// ── Saved views (localStorage) ──────────────────────────────────────
+
+	const SAVED_VIEWS_KEY = 'rumi.explorer.activity.savedViews';
+
+	function loadSavedViews() {
+		if (typeof localStorage === 'undefined') return;
+		try {
+			const raw = localStorage.getItem(SAVED_VIEWS_KEY);
+			if (!raw) return;
+			const parsed = JSON.parse(raw);
+			if (Array.isArray(parsed)) {
+				savedViews = parsed.filter((v) => v && typeof v.id === 'string' && typeof v.name === 'string' && typeof v.params === 'string');
+			}
+		} catch (e) {
+			console.warn('[activity] Failed to parse saved views:', e);
+		}
+	}
+
+	function persistSavedViews() {
+		if (typeof localStorage === 'undefined') return;
+		try {
+			localStorage.setItem(SAVED_VIEWS_KEY, JSON.stringify(savedViews));
+		} catch (e) {
+			console.warn('[activity] Failed to persist saved views:', e);
+		}
+	}
+
+	function saveCurrentView() {
+		if (typeof window === 'undefined') return;
+		if (!hasAnyFacet(facets)) {
+			window.alert('Add at least one filter before saving a view.');
+			return;
+		}
+		const name = window.prompt('Name this saved view');
+		if (!name || !name.trim()) return;
+		const view: SavedView = {
+			id: `v_${Date.now().toString(36)}`,
+			name: name.trim(),
+			params: currentParams || '',
+		};
+		savedViews = [...savedViews, view];
+		persistSavedViews();
+	}
+
+	function applySavedView(v: SavedView) {
+		goto(`/explorer/activity${v.params}`, { keepFocus: true, noScroll: true, replaceState: false });
+	}
+
+	function renameSavedView(id: string, name: string) {
+		savedViews = savedViews.map((v) => (v.id === id ? { ...v, name } : v));
+		persistSavedViews();
+	}
+
+	function deleteSavedView(id: string) {
+		savedViews = savedViews.filter((v) => v.id !== id);
+		persistSavedViews();
+	}
+
+	// ── CSV export ──────────────────────────────────────────────────────
+
+	function csvEscape(val: unknown): string {
+		if (val == null) return '';
+		const s = typeof val === 'string' ? val : String(val);
+		if (s.includes(',') || s.includes('"') || s.includes('\n')) {
+			return `"${s.replace(/"/g, '""')}"`;
+		}
+		return s;
+	}
+
+	function bigintReplacer(_key: string, value: unknown): unknown {
+		if (typeof value === 'bigint') return value.toString();
+		if (value && typeof value === 'object' && typeof (value as any).toText === 'function') {
+			return (value as any).toText();
+		}
+		return value;
+	}
+
+	function exportCsv() {
+		if (filteredEvents.length === 0) return;
+		const rows: string[] = [];
+		rows.push(['timestamp', 'source', 'type', 'size_usd', 'principal', 'vault', 'token', 'pool', 'summary', 'raw'].map(csvEscape).join(','));
+		for (const de of filteredEvents) {
+			const key = `${de.source}:${String(de.globalIndex)}`;
+			const ef = eventFacetsByIndex.get(key);
+			const display = displayEvent(de, { vaultCollateralMap, vaultOwnerMap });
+			const timestamp = de.timestamp > 0 ? new Date(de.timestamp / 1_000_000).toISOString() : '';
+			const principal = ef?.principals.join('|') ?? '';
+			const vault = ef?.vaultIds.join('|') ?? '';
+			const token = (ef?.tokens ?? []).map((p) => getTokenSymbol(p)).join('|');
+			const pool = ef?.pools.join('|') ?? '';
+			const sizeUsd = ef?.sizeUsd != null ? ef.sizeUsd.toFixed(2) : '';
+			let raw = '';
+			try {
+				raw = JSON.stringify(de.event, bigintReplacer);
+			} catch {
+				raw = '';
+			}
+			rows.push([
+				csvEscape(timestamp),
+				csvEscape(de.source),
+				csvEscape(ef?.typeKey ?? ''),
+				csvEscape(sizeUsd),
+				csvEscape(principal),
+				csvEscape(vault),
+				csvEscape(token),
+				csvEscape(pool),
+				csvEscape(display.formatted.summary),
+				csvEscape(raw),
+			].join(','));
+		}
+		const blob = new Blob([rows.join('\n')], { type: 'text/csv;charset=utf-8' });
+		const url = URL.createObjectURL(blob);
+		const a = document.createElement('a');
+		const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+		a.href = url;
+		a.download = `rumi-activity-${stamp}.csv`;
+		document.body.appendChild(a);
+		a.click();
+		document.body.removeChild(a);
+		URL.revokeObjectURL(url);
+	}
+
+	// ── Multi-hop swap merge (same logic as before) ────────────────────
+
 	const THREEPOOL_TOKENS: { symbol: string; decimals: number }[] = [
 		{ symbol: 'icUSD', decimals: 8 },
 		{ symbol: 'ckUSDT', decimals: 6 },
 		{ symbol: 'ckUSDC', decimals: 6 },
 	];
-
-	// 3USD LP token principal (the 3pool canister itself)
 	const THREEPOOL_PRINCIPAL = CANISTER_IDS.THREEPOOL;
 
-	/**
-	 * Merge correlated multi-hop swap events into single display events.
-	 *
-	 * Detects pairs where a 3pool_liquidity event and an amm_swap event share
-	 * the same caller and occur within 10 seconds, indicating a two-leg swap
-	 * routed through the swap router.
-	 *
-	 * stable_to_icp: AddLiquidity (stablecoin → 3USD) + AMM swap (3USD → ICP)
-	 * icp_to_stable: AMM swap (ICP → 3USD) + RemoveOneCoin (3USD → stablecoin)
-	 */
 	function mergeMultiHopEvents(events: DisplayEvent[]): DisplayEvent[] {
-		const MAX_GAP_NS = 10_000_000_000; // 10 seconds in nanoseconds
-
-		// Index liquidity and AMM swap events by caller for fast lookup
+		const MAX_GAP_NS = 10_000_000_000;
 		const liqEvents: DisplayEvent[] = [];
 		const ammEvents: DisplayEvent[] = [];
 		for (const de of events) {
 			if (de.source === '3pool_liquidity') liqEvents.push(de);
 			else if (de.source === 'amm_swap') ammEvents.push(de);
 		}
-
 		if (liqEvents.length === 0 || ammEvents.length === 0) return events;
 
 		const mergedSet = new Set<DisplayEvent>();
@@ -91,42 +247,35 @@
 		for (const liq of liqEvents) {
 			const liqCaller = liq.event.caller?.toText?.() ?? '';
 			if (!liqCaller) continue;
-
 			const action = liq.event.action ? Object.keys(liq.event.action)[0] : '';
 			const isAdd = action === 'AddLiquidity';
 			const isRemove = action === 'RemoveOneCoin';
 			if (!isAdd && !isRemove) continue;
 
-			// Find matching AMM swap: same caller, close timestamp
 			for (const amm of ammEvents) {
 				if (mergedSet.has(amm)) continue;
 				const ammCaller = amm.event.caller?.toText?.() ?? '';
 				if (ammCaller !== liqCaller) continue;
-
 				const gap = Math.abs(liq.timestamp - amm.timestamp);
 				if (gap > MAX_GAP_NS) continue;
 
-				// Verify the AMM swap involves 3USD LP token
 				const ammTokenIn = amm.event.token_in?.toText?.() ?? '';
 				const ammTokenOut = amm.event.token_out?.toText?.() ?? '';
 				const ammInvolves3USD = ammTokenIn === THREEPOOL_PRINCIPAL || ammTokenOut === THREEPOOL_PRINCIPAL;
 				if (!ammInvolves3USD) continue;
 
 				if (isAdd && ammTokenIn === THREEPOOL_PRINCIPAL) {
-					// stable_to_icp: AddLiquidity then AMM swap (3USD → other)
 					const amounts = liq.event.amounts ?? [];
 					let stableIdx = -1;
 					for (let i = 0; i < amounts.length; i++) {
 						if (Number(amounts[i]) > 0) { stableIdx = i; break; }
 					}
 					if (stableIdx < 0) continue;
-
 					const stableToken = THREEPOOL_TOKENS[stableIdx];
 					const stableAmount = formatE8s(amounts[stableIdx], stableToken.decimals);
 					const threeUsdAmount = formatE8s(liq.event.lp_amount, 8);
 					const finalSym = getTokenSymbol(ammTokenOut);
 					const finalAmount = amm.event.amount_out != null ? formatTokenAmount(BigInt(amm.event.amount_out), ammTokenOut) : '?';
-
 					mergedSet.add(liq);
 					mergedSet.add(amm);
 					mergedResults.push({
@@ -146,7 +295,6 @@
 					});
 					break;
 				} else if (isRemove && ammTokenOut === THREEPOOL_PRINCIPAL) {
-					// icp_to_stable: AMM swap (other → 3USD) then RemoveOneCoin
 					const coinIndex = liq.event.coin_index?.[0] ?? 0;
 					const stableToken = THREEPOOL_TOKENS[coinIndex] ?? THREEPOOL_TOKENS[0];
 					const amounts = liq.event.amounts ?? [];
@@ -155,7 +303,6 @@
 					const otherToken = amm.event.token_in?.toText?.() ?? '';
 					const otherSym = getTokenSymbol(otherToken);
 					const otherAmount = amm.event.amount_in != null ? formatTokenAmount(BigInt(amm.event.amount_in), otherToken) : '?';
-
 					mergedSet.add(liq);
 					mergedSet.add(amm);
 					mergedResults.push({
@@ -177,26 +324,21 @@
 				}
 			}
 		}
-
 		if (mergedResults.length === 0) return events;
-
-		// Rebuild: keep unmerged events, add merged ones
-		const result = events.filter(e => !mergedSet.has(e));
+		const result = events.filter((e) => !mergedSet.has(e));
 		result.push(...mergedResults);
 		result.sort((a, b) => b.timestamp - a.timestamp);
 		return result;
 	}
 
-	// ── Load functions ──
+	// ── Load everything once on mount ────────────────────────────────────
 
-	async function loadAllPage(p: number) {
+	async function loadEverything() {
 		loading = true;
 		error = null;
 		try {
-			// Fetch ALL backend events (batched) and all other event source counts in parallel
-			// Backend caps page size at 200 in get_events_filtered.
 			const BACKEND_PAGE_SIZE = 200;
-			const [firstBatch, threePoolSwapCount, ammSwapCount, ammLiqCount, threePoolLiqCount, ammAdminCount, threePoolAdminCount, spCount] = await Promise.all([
+			const [firstBatch, threePoolSwapCount, ammSwapCount, ammLiqCount, threePoolLiqCount, ammAdminCount, threePoolAdminCount, spCount, ammPools, prices] = await Promise.all([
 				fetchEvents(0n, BigInt(BACKEND_PAGE_SIZE)),
 				fetchSwapEventCount(),
 				fetchAmmSwapEventCount(),
@@ -205,23 +347,24 @@
 				fetchAmmAdminEventCount(),
 				fetch3PoolAdminEventCount(),
 				fetchStabilityPoolEventCount(),
+				fetchAmmPools(),
+				fetchCollateralPrices(),
 			]);
 
-			// Batch-fetch remaining backend events if any
+			priceMap = prices;
+
+			// Remaining backend pages
 			const allBackendEvents: [bigint, any][] = [...firstBatch.events];
 			const backendTotal = Number(firstBatch.total);
 			if (allBackendEvents.length < backendTotal) {
 				const remaining: Promise<{ total: bigint; events: [bigint, any][] }>[] = [];
-				for (let page = 1; page * BACKEND_PAGE_SIZE < backendTotal; page++) {
-					remaining.push(fetchEvents(BigInt(page), BigInt(BACKEND_PAGE_SIZE)));
+				for (let p = 1; p * BACKEND_PAGE_SIZE < backendTotal; p++) {
+					remaining.push(fetchEvents(BigInt(p), BigInt(BACKEND_PAGE_SIZE)));
 				}
 				const batches = await Promise.all(remaining);
-				for (const batch of batches) {
-					allBackendEvents.push(...batch.events);
-				}
+				for (const batch of batches) allBackendEvents.push(...batch.events);
 			}
 
-			// Fetch all non-backend events (typically small datasets)
 			const [threePoolSwaps, ammSwaps, ammLiqEvents, threePoolLiqEvents, ammAdminEvts, threePoolAdminEvts, spEvents] = await Promise.all([
 				Number(threePoolSwapCount) > 0 ? fetchSwapEvents(0n, threePoolSwapCount) : Promise.resolve([]),
 				Number(ammSwapCount) > 0 ? fetchAmmSwapEvents(0n, ammSwapCount) : Promise.resolve([]),
@@ -232,283 +375,74 @@
 				Number(spCount) > 0 ? fetchStabilityPoolEvents(0n, spCount) : Promise.resolve([]),
 			]);
 
-			// Filter out InterestReceived from SP events
 			const filteredSp = spEvents.filter((e: any) => {
 				const et = e.event_type ?? {};
 				return !('InterestReceived' in et);
 			});
 
-			// Merge all into DisplayEvent[]
 			const all: DisplayEvent[] = [];
-
 			for (const [idx, evt] of allBackendEvents) {
 				all.push({ globalIndex: idx, event: evt, source: 'backend', timestamp: extractEventTimestamp(evt) });
 			}
-			for (const e of threePoolSwaps) {
-				all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: '3pool_swap', timestamp: extractEventTimestamp(e) });
-			}
-			for (const e of ammSwaps) {
-				all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: 'amm_swap', timestamp: extractEventTimestamp(e) });
-			}
-			for (const e of ammLiqEvents) {
-				all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: 'amm_liquidity', timestamp: extractEventTimestamp(e) });
-			}
-			for (const e of threePoolLiqEvents) {
-				all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: '3pool_liquidity', timestamp: extractEventTimestamp(e) });
-			}
-			for (const e of ammAdminEvts) {
-				all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: 'amm_admin', timestamp: extractEventTimestamp(e) });
-			}
-			for (const e of threePoolAdminEvts) {
-				all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: '3pool_admin', timestamp: extractEventTimestamp(e) });
-			}
-			for (const e of filteredSp) {
-				all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: 'stability_pool', timestamp: extractEventTimestamp(e) });
-			}
+			for (const e of threePoolSwaps) all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: '3pool_swap', timestamp: extractEventTimestamp(e) });
+			for (const e of ammSwaps) all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: 'amm_swap', timestamp: extractEventTimestamp(e) });
+			for (const e of ammLiqEvents) all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: 'amm_liquidity', timestamp: extractEventTimestamp(e) });
+			for (const e of threePoolLiqEvents) all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: '3pool_liquidity', timestamp: extractEventTimestamp(e) });
+			for (const e of ammAdminEvts) all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: 'amm_admin', timestamp: extractEventTimestamp(e) });
+			for (const e of threePoolAdminEvts) all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: '3pool_admin', timestamp: extractEventTimestamp(e) });
+			for (const e of filteredSp) all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: 'stability_pool', timestamp: extractEventTimestamp(e) });
 
-			// Merge multi-hop swaps, then sort by timestamp descending
 			const merged = mergeMultiHopEvents(all);
 			merged.sort((a, b) => b.timestamp - a.timestamp);
+			allEvents = merged;
 
-			totalCount = merged.length;
-			const start = p * PAGE_SIZE;
-			displayEvents = merged.slice(start, start + PAGE_SIZE);
-			currentPage = p;
+			// Extract facets once per event
+			const fmap = new Map<string, ReturnType<typeof extractFacets>>();
+			for (const de of merged) {
+				const key = `${de.source}:${String(de.globalIndex)}`;
+				fmap.set(key, extractFacets(de, priceMap, vaultCollateralMap, vaultOwnerMap));
+			}
+			eventFacetsByIndex = fmap;
+
+			// Build token + pool option lists from the observed data + known tokens
+			const tokenSet = new Set<string>();
+			const poolSet = new Set<string>();
+			for (const ef of fmap.values()) {
+				for (const t of ef.tokens) tokenSet.add(t);
+				for (const p of ef.pools) poolSet.add(p);
+			}
+			// Always include the canonical Rumi tokens so the dropdown is complete
+			for (const known of Object.keys(KNOWN_TOKENS)) tokenSet.add(known);
+
+			tokenOptions = [...tokenSet]
+				.map((principal) => ({ principal, label: getTokenSymbol(principal) }))
+				.sort((a, b) => a.label.localeCompare(b.label));
+
+			// Pool options: 3pool always first, then AMM pools
+			const ammPoolIds: string[] = ammPools.map((p: any) => p.pool_id);
+			for (const id of ammPoolIds) poolSet.add(id);
+			poolSet.add('3pool');
+			poolOptions = [...poolSet]
+				.map((id) => {
+					if (id === '3pool') return { id, label: 'Rumi 3Pool' };
+					const pool = ammPools.find((p: any) => p.pool_id === id);
+					if (pool) {
+						const a = getTokenSymbol(pool.token_a?.toText?.() ?? '');
+						const b = getTokenSymbol(pool.token_b?.toText?.() ?? '');
+						return { id, label: `AMM · ${a}/${b} (${id})` };
+					}
+					return { id, label: id };
+				})
+				.sort((a, b) => a.label.localeCompare(b.label));
 		} catch (e) {
+			console.error('[activity] loadEverything error:', e);
 			error = 'Failed to load events.';
-			console.error('[activity] loadAllPage error:', e);
 		} finally {
 			loading = false;
 		}
 	}
 
-	async function loadProtocolPage(p: number, filterCategory: string) {
-		loading = true;
-		error = null;
-		try {
-			// Fetch ALL backend events so we can filter by category client-side
-			// without the old bug of empty pages from filtering paginated data.
-			// Backend caps page size at 200 in get_events_filtered.
-			const batchSize = 200;
-			const allEvents: [bigint, any][] = [];
-			let pageNum = 0;
-			let filteredTotal = Infinity;
-			while (allEvents.length < filteredTotal) {
-				const batch = await fetchEvents(BigInt(pageNum), BigInt(batchSize));
-				filteredTotal = Number(batch.total);
-				allEvents.push(...batch.events);
-				pageNum++;
-				if (batch.events.length === 0) break; // safety: backend returned nothing
-			}
-
-			// Apply category filter
-			let filtered: DisplayEvent[];
-			if (filterCategory === 'liquidations') {
-				filtered = allEvents
-					.filter(([_, event]) => {
-						const category = getEventCategory(event);
-						return category === 'liquidation' || category === 'redemption';
-					})
-					.map(([idx, event]) => ({
-						globalIndex: idx,
-						event,
-						source: 'backend' as const,
-						timestamp: extractEventTimestamp(event),
-					}));
-			} else if (filterCategory === 'vault_ops') {
-				filtered = allEvents
-					.filter(([_, event]) => getEventCategory(event) === 'vault_ops')
-					.map(([idx, event]) => ({
-						globalIndex: idx,
-						event,
-						source: 'backend' as const,
-						timestamp: extractEventTimestamp(event),
-					}));
-			} else if (filterCategory === 'system') {
-				// Show backend admin+system events AND AMM/3Pool admin events
-				const backendAdminSystem = allEvents
-					.filter(([_, event]) => {
-						const category = getEventCategory(event);
-						return category === 'admin' || category === 'system';
-					})
-					.map(([idx, event]) => ({
-						globalIndex: idx,
-						event,
-						source: 'backend' as const,
-						timestamp: extractEventTimestamp(event),
-					}));
-
-				// Also fetch AMM and 3Pool admin events
-				const [ammAdminCount, threePoolAdminCount] = await Promise.all([
-					fetchAmmAdminEventCount(),
-					fetch3PoolAdminEventCount(),
-				]);
-				const [ammAdminEvts, threePoolAdminEvts] = await Promise.all([
-					Number(ammAdminCount) > 0 ? fetchAmmAdminEvents(0n, ammAdminCount) : Promise.resolve([]),
-					Number(threePoolAdminCount) > 0 ? fetch3PoolAdminEvents(0n, threePoolAdminCount) : Promise.resolve([]),
-				]);
-
-				const adminEvents: DisplayEvent[] = [
-					...backendAdminSystem,
-					...ammAdminEvts.map((e: any) => ({
-						globalIndex: BigInt(e.id ?? 0), event: e, source: 'amm_admin' as const, timestamp: extractEventTimestamp(e)
-					})),
-					...threePoolAdminEvts.map((e: any) => ({
-						globalIndex: BigInt(e.id ?? 0), event: e, source: '3pool_admin' as const, timestamp: extractEventTimestamp(e)
-					})),
-				];
-				adminEvents.sort((a, b) => b.timestamp - a.timestamp);
-				filtered = adminEvents;
-			} else {
-				filtered = allEvents.map(([idx, event]) => ({
-					globalIndex: idx,
-					event,
-					source: 'backend' as const,
-					timestamp: extractEventTimestamp(event),
-				}));
-			}
-
-			// Sort descending by timestamp
-			filtered.sort((a, b) => b.timestamp - a.timestamp);
-
-			totalCount = filtered.length;
-			const start = p * PAGE_SIZE;
-			displayEvents = filtered.slice(start, start + PAGE_SIZE);
-			currentPage = p;
-		} catch (e) {
-			error = 'Failed to load events.';
-			console.error('[activity] loadProtocolPage error:', e);
-		} finally {
-			loading = false;
-		}
-	}
-
-	async function loadDexPage(p: number) {
-		loading = true;
-		error = null;
-		try {
-			// Fetch ALL dex event counts (swaps + liquidity from both pools)
-			const [
-				threePoolSwapCount, ammSwapCount,
-				ammLiqCount, threePoolLiqCount
-			] = await Promise.all([
-				fetchSwapEventCount(),
-				fetchAmmSwapEventCount(),
-				fetchAmmLiquidityEventCount(),
-				fetch3PoolLiquidityEventCount(),
-			]);
-
-			// Fetch all events
-			const [threePoolSwaps, ammSwaps, ammLiqEvents, threePoolLiqEvents] = await Promise.all([
-				Number(threePoolSwapCount) > 0 ? fetchSwapEvents(0n, threePoolSwapCount) : Promise.resolve([]),
-				Number(ammSwapCount) > 0 ? fetchAmmSwapEvents(0n, ammSwapCount) : Promise.resolve([]),
-				Number(ammLiqCount) > 0 ? fetchAmmLiquidityEvents(0n, ammLiqCount) : Promise.resolve([]),
-				Number(threePoolLiqCount) > 0 ? fetch3PoolLiquidityEvents(threePoolLiqCount, 0n) : Promise.resolve([]),
-			]);
-
-			// Tag all events
-			const tagged: DisplayEvent[] = [
-				...threePoolSwaps.map((e: any) => ({
-					globalIndex: BigInt(e.id ?? 0), event: e, source: '3pool_swap' as const, timestamp: extractEventTimestamp(e)
-				})),
-				...ammSwaps.map((e: any) => ({
-					globalIndex: BigInt(e.id ?? 0), event: e, source: 'amm_swap' as const, timestamp: extractEventTimestamp(e)
-				})),
-				...ammLiqEvents.map((e: any) => ({
-					globalIndex: BigInt(e.id ?? 0), event: e, source: 'amm_liquidity' as const, timestamp: extractEventTimestamp(e)
-				})),
-				...threePoolLiqEvents.map((e: any) => ({
-					globalIndex: BigInt(e.id ?? 0), event: e, source: '3pool_liquidity' as const, timestamp: extractEventTimestamp(e)
-				})),
-			];
-
-			// Merge multi-hop swaps, then sort by timestamp descending
-			const merged = mergeMultiHopEvents(tagged);
-			merged.sort((a, b) => b.timestamp - a.timestamp);
-
-			totalCount = merged.length;
-			const start = p * PAGE_SIZE;
-			displayEvents = merged.slice(start, start + PAGE_SIZE);
-			currentPage = p;
-		} catch (e) {
-			error = 'Failed to load DEX events.';
-			console.error('[activity] loadDexPage error:', e);
-		} finally {
-			loading = false;
-		}
-	}
-
-	async function loadStabilityPoolPage(p: number) {
-		loading = true;
-		error = null;
-		try {
-			const count = await fetchStabilityPoolEventCount();
-			const total = Number(count);
-
-			if (total === 0) {
-				displayEvents = [];
-				totalCount = 0;
-				currentPage = p;
-				return;
-			}
-
-			// Fetch ALL stability pool events, then filter out InterestReceived
-			const allEvents = await fetchStabilityPoolEvents(0n, BigInt(total));
-			const filtered = allEvents.filter((evt: any) => {
-				const et = evt.event_type ?? {};
-				return !('InterestReceived' in et);
-			});
-
-			// Sort descending by id (newest first)
-			filtered.sort((a: any, b: any) => Number(b.id ?? 0) - Number(a.id ?? 0));
-
-			totalCount = filtered.length;
-			const start = p * PAGE_SIZE;
-			const pageEvents = filtered.slice(start, start + PAGE_SIZE);
-			displayEvents = pageEvents.map((evt: any) => ({
-				globalIndex: BigInt(evt.id ?? 0),
-				event: evt,
-				source: 'stability_pool' as const,
-				timestamp: extractEventTimestamp(evt),
-			}));
-			currentPage = p;
-		} catch (e) {
-			error = 'Failed to load Stability Pool events.';
-			console.error('[activity] loadStabilityPoolPage error:', e);
-		} finally {
-			loading = false;
-		}
-	}
-
-	async function loadLiquidationStats() {
-		try {
-			const [liqVaults, stats] = await Promise.all([
-				fetchLiquidatableVaults(),
-				fetchBotStats(),
-			]);
-			liquidatableVaults = liqVaults;
-			botStats = stats;
-		} catch (e) {
-			console.error('[activity] loadLiquidationStats error:', e);
-		}
-	}
-
-	function loadPage(p: number) {
-		if (selectedFilter === 'all') loadAllPage(p);
-		else if (selectedFilter === 'dex') loadDexPage(p);
-		else if (selectedFilter === 'stability_pool') loadStabilityPoolPage(p);
-		else loadProtocolPage(p, selectedFilter);
-	}
-
-	function handleFilterChange(key: ActivityFilter) {
-		selectedFilter = key;
-		if (key === 'liquidations') loadLiquidationStats();
-		loadPage(0);
-	}
-
-	// Check URL params for initial filter
-	onMount(async () => {
-		// Load vault collateral type map for proper event formatting
+	async function loadVaultMaps() {
 		try {
 			const vaults = await fetchAllVaults();
 			const collMap = new Map<number, string>();
@@ -525,13 +459,13 @@
 		} catch (e) {
 			console.error('[activity] Failed to load vault maps:', e);
 		}
+	}
 
-		const urlFilter = $page.url.searchParams.get('filter');
-		if (urlFilter && FILTERS.some(f => f.key === urlFilter)) {
-			selectedFilter = urlFilter as ActivityFilter;
-			if (urlFilter === 'liquidations') loadLiquidationStats();
-		}
-		loadPage(0);
+	onMount(async () => {
+		loadSavedViews();
+		// Load vault maps first so the facet extractor can use them
+		await loadVaultMaps();
+		await loadEverything();
 	});
 </script>
 
@@ -539,58 +473,57 @@
 	<title>Activity | Rumi Explorer</title>
 </svelte:head>
 
-<div class="max-w-[1100px] mx-auto px-4 py-8">
-	<div class="flex items-baseline justify-between mb-6">
-		<h1 class="text-2xl font-bold text-white">Protocol Activity</h1>
-		{#if totalCount > 0}
-			<span class="text-lg font-semibold text-gray-400">
-				{totalCount.toLocaleString()} events
+<div class="max-w-[1100px] mx-auto px-4 py-8 space-y-4">
+	<div class="flex items-baseline justify-between">
+		<h1 class="text-2xl font-bold text-white">Activity</h1>
+		{#if allEvents.length > 0}
+			<span class="text-sm text-gray-500">
+				{filteredEvents.length.toLocaleString()} of {allEvents.length.toLocaleString()} events
 			</span>
 		{/if}
 	</div>
 
-	<!-- Filter pills -->
-	<div class="flex flex-wrap gap-2 mb-6">
-		{#each FILTERS as filter}
+	<FacetBar {facets} {tokenOptions} {poolOptions} onChange={applyFacets} />
+
+	<ActiveFilterChips {facets} onChange={applyFacets} onClear={clearAll} onSaveView={saveCurrentView} />
+
+	<SavedViewsStrip
+		views={savedViews}
+		{currentParams}
+		onApply={applySavedView}
+		onRename={renameSavedView}
+		onDelete={deleteSavedView}
+	/>
+
+	<div class="flex items-center justify-between pt-2">
+		<div class="text-sm text-gray-400">
+			{filteredEvents.length.toLocaleString()} {filteredEvents.length === 1 ? 'event' : 'events'}
+			{#if filteredEvents.length > visibleRows}
+				<span class="text-gray-500">· showing {visibleRows.toLocaleString()}</span>
+			{/if}
+		</div>
+		<div class="flex items-center gap-2">
 			<button
-				class="px-4 py-1.5 text-sm font-medium rounded-full border transition-all
-					{selectedFilter === filter.key
-					? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40'
-					: 'bg-transparent text-gray-400 border-gray-700 hover:border-gray-500 hover:text-gray-300'}"
-				onclick={() => handleFilterChange(filter.key)}
+				type="button"
+				class="px-3 py-1.5 text-xs rounded-md bg-gray-800/60 text-gray-200 border border-gray-700 hover:border-gray-500 disabled:opacity-50"
+				disabled={filteredEvents.length === 0}
+				onclick={exportCsv}
 			>
-				{filter.label}
+				Export CSV
 			</button>
-		{/each}
+			<label class="text-xs text-gray-400 flex items-center gap-1">
+				Sort
+				<select
+					bind:value={sortOrder}
+					class="px-2 py-1 bg-gray-800 border border-gray-700 rounded text-gray-200 text-xs"
+				>
+					<option value="newest">Newest</option>
+					<option value="oldest">Oldest</option>
+				</select>
+			</label>
+		</div>
 	</div>
 
-	<!-- Liquidation summary cards (shown only when filtering to liquidations) -->
-	{#if selectedFilter === 'liquidations'}
-		<div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
-			<StatCard
-				label="Liquidation Events"
-				value={displayEvents.length > 0 ? String(totalCount) : '—'}
-				subtitle={totalCount > 0 ? 'Total' : ''}
-			/>
-			<StatCard
-				label="Liquidatable Vaults"
-				value={String(liquidatableVaults.length)}
-				subtitle={liquidatableVaults.length === 0 ? 'None at risk' : ''}
-			/>
-			<StatCard
-				label="Bot Budget Remaining"
-				value={botStats ? `${formatE8s(botStats.budget_remaining_e8s)} ICP` : '—'}
-				subtitle="Available for bot"
-			/>
-			<StatCard
-				label="Bot Debt Covered"
-				value={botStats ? `${formatE8s(botStats.total_debt_covered_e8s)} icUSD` : '—'}
-				subtitle="Total debt covered by bot"
-			/>
-		</div>
-	{/if}
-
-	<!-- Loading state -->
 	{#if loading}
 		<div class="flex items-center justify-center py-20">
 			<div class="flex flex-col items-center gap-3">
@@ -598,30 +531,37 @@
 				<span class="text-sm text-gray-500">Loading activity...</span>
 			</div>
 		</div>
-
-	<!-- Error state -->
 	{:else if error}
 		<div class="text-center py-16">
 			<p class="text-red-400 text-sm">{error}</p>
 		</div>
-
-	<!-- Empty state -->
-	{:else if displayEvents.length === 0}
+	{:else if visibleEvents.length === 0}
 		<div class="text-center py-16">
 			<p class="text-gray-500 text-sm">
-				{selectedFilter === 'all' ? 'No events found.' : `No ${FILTERS.find(f => f.key === selectedFilter)?.label ?? ''} events found.`}
+				{hasAnyFacet(facets) ? 'No events match the current filters.' : 'No events found.'}
 			</p>
 		</div>
-
-	<!-- Events table -->
 	{:else}
 		<div class="explorer-card overflow-hidden p-0">
-			<MixedEventsTable events={displayEvents} {vaultCollateralMap} {vaultOwnerMap} />
+			<MixedEventsTable
+				events={visibleEvents}
+				{vaultCollateralMap}
+				{vaultOwnerMap}
+				onFacetClick={applyFacets}
+				currentFacets={facets}
+			/>
 		</div>
-	{/if}
 
-	<!-- Pagination -->
-	{#if totalPages > 1}
-		<Pagination {currentPage} {totalPages} onPageChange={(p) => loadPage(p)} />
+		{#if filteredEvents.length > visibleRows}
+			<div class="flex justify-center pt-2">
+				<button
+					type="button"
+					class="px-4 py-2 text-sm rounded-md bg-gray-800/60 text-gray-200 border border-gray-700 hover:border-gray-500"
+					onclick={() => { visibleRows = Math.min(visibleRows + PAGE_STEP, filteredEvents.length); }}
+				>
+					Load more
+				</button>
+			</div>
+		{/if}
 	{/if}
 </div>

@@ -244,4 +244,4 @@
   loading={loading}
 />
 
-<LensActivityPanel scope="vault_ops" title="Vault activity" />
+<LensActivityPanel scope="vault_ops" title="Vault activity" viewAllHref="/explorer/activity?type=vault_ops" />

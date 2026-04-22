@@ -1,8 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
-	// TODO(Step 4): point at /explorer/activity?type=liquidation once the facet
-	// bar lands. For now the activity page honours `?filter=liquidations`, so
-	// this keeps old URLs working without breaking.
-	onMount(() => goto('/explorer/activity?filter=liquidations', { replaceState: true }));
+	// Absorbed by the Activity facet bar. `?type=liquidation` expands via
+	// TYPE_CATEGORY_ALIASES to the full set of liquidation event variants.
+	onMount(() => goto('/explorer/activity?type=liquidation', { replaceState: true }));
 </script>
