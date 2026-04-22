@@ -1,6 +1,6 @@
 <script lang="ts">
   import EntityLink from './EntityLink.svelte';
-  import { timeAgo, shortenPrincipal } from '$utils/explorerHelpers';
+  import { timeAgo, shortenPrincipal, formatTimestamp } from '$utils/explorerHelpers';
   import { displayEvent, wrapBackendEvent } from '$utils/displayEvent';
 
   interface Props {
@@ -20,7 +20,8 @@
     displayEvent(wrapBackendEvent(event, index ?? 0), { vaultCollateralMap, vaultOwnerMap }),
   );
 
-  const timestamp = $derived(display.timestamp ? timeAgo(display.timestamp) : null);
+  const relativeTime = $derived(display.timestamp ? timeAgo(display.timestamp) : null);
+  const absoluteTime = $derived(display.timestamp ? formatTimestamp(display.timestamp) : null);
 </script>
 
 <tr class="border-b border-gray-700/50 hover:bg-gray-800/30 transition-colors group">
@@ -36,8 +37,8 @@
   <!-- Timestamp -->
   {#if showTimestamp}
     <td class="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">
-      {#if timestamp}
-        <span title={timestamp}>{timestamp}</span>
+      {#if relativeTime}
+        <span title={absoluteTime ?? ''}>{relativeTime}</span>
       {:else}
         <span class="text-gray-600">&mdash;</span>
       {/if}
