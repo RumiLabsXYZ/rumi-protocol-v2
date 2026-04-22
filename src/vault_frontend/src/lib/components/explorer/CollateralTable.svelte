@@ -56,7 +56,7 @@
         {#each rows as row}
           <tr class="border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors">
             <td class="py-2.5 px-2">
-              <a href="/explorer/markets/{row.principal}" class="flex items-center gap-2 hover:text-teal-300 transition-colors">
+              <a href="/explorer/token/{row.principal}" class="flex items-center gap-2 hover:text-teal-300 transition-colors">
                 <span class="w-2 h-2 rounded-full flex-shrink-0" style="background: {COLLATERAL_COLORS[row.symbol] ?? '#666'}"></span>
                 <span class="font-medium text-gray-200">{row.symbol}</span>
               </a>

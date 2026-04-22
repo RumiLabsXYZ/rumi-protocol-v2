@@ -136,9 +136,9 @@ export function formatNonBackendEvent(de: DisplayEvent): FormattedEvent {
 export function dexDetailHref(de: DisplayEvent): string {
 	if (de.source === 'multi_hop_swap') {
 		const innerId = de.event?.ammEvent?.id ?? Number(de.globalIndex);
-		return `/explorer/dex/amm_swap/${innerId}`;
+		return `/explorer/e/event/dex:amm_swap:${innerId}`;
 	}
-	return `/explorer/dex/${de.source}/${Number(de.globalIndex)}`;
+	return `/explorer/e/event/dex:${de.source}:${Number(de.globalIndex)}`;
 }
 
 /**
@@ -178,7 +178,7 @@ export function displayEvent(de: DisplayEvent, maps?: DisplayEventMaps): Display
 		: formatNonBackendEvent(de);
 	const principal = extractEventPrincipal(de.event, de.source, maps?.vaultOwnerMap);
 	const timestamp = de.timestamp || extractEventTimestamp(de.event);
-	const detailHref = isBackend ? `/explorer/event/${globalIndex}` : dexDetailHref(de);
+	const detailHref = isBackend ? `/explorer/e/event/${globalIndex}` : dexDetailHref(de);
 	const sourceLabel = isBackend
 		? null
 		: (DEX_SOURCE_LABEL[de.source as NonBackendSource] ?? null);

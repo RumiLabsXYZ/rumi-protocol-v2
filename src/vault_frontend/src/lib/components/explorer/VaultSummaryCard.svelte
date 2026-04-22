@@ -14,7 +14,7 @@
   $: ownerStr = vault.owner?.toString?.() || vault.owner || '';
 </script>
 
-<a class="vault-card glass-card" href="/explorer/vault/{vault.vault_id}">
+<a class="vault-card glass-card" href="/explorer/e/vault/{vault.vault_id}">
   <div class="vault-header">
     <span class="vault-id">Vault #{Number(vault.vault_id)}</span>
     <span class="vault-cr" style="color:{crColor}">

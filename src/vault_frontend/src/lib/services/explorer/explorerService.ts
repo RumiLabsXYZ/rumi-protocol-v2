@@ -263,6 +263,84 @@ export async function fetchThreePoolVirtualPriceSeries(
 	}
 }
 
+export async function fetchThreePoolFeeSeries(
+	window: 'Last24h' | 'Last7d' | 'Last30d' | 'AllTime' = 'Last7d',
+	bucketSecs: bigint = 3600n,
+): Promise<any[]> {
+	const key = `pool:3pool:fees:${window}:${bucketSecs}`;
+	const cached = getCached<any[]>(key, TTL.POOL);
+	if (cached) return cached;
+
+	try {
+		const result = await threePoolService.getFeeSeries(window, bucketSecs);
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchThreePoolFeeSeries failed:', err);
+		return [];
+	}
+}
+
+export async function fetchThreePoolStatsWindow(
+	window: 'Last24h' | 'Last7d' | 'Last30d' | 'AllTime' = 'Last7d',
+): Promise<any | null> {
+	const key = `pool:3pool:stats:${window}`;
+	const cached = getCached<any>(key, TTL.POOL);
+	if (cached) return cached;
+
+	try {
+		const result = await threePoolService.getPoolStats(window);
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchThreePoolStatsWindow failed:', err);
+		return null;
+	}
+}
+
+export async function fetchThreePoolTopLps(n: bigint = 10n): Promise<Array<[Principal, bigint, number]>> {
+	const key = `pool:3pool:topLps:${n}`;
+	const cached = getCached<Array<[Principal, bigint, number]>>(key, TTL.POOL);
+	if (cached) return cached;
+
+	try {
+		const result = await threePoolService.getTopLps(n);
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchThreePoolTopLps failed:', err);
+		return [];
+	}
+}
+
+export async function fetchThreePoolTopSwappers(
+	window: 'Last24h' | 'Last7d' | 'Last30d' | 'AllTime' = 'Last7d',
+	n: bigint = 10n,
+): Promise<Array<[Principal, bigint, bigint]>> {
+	const key = `pool:3pool:topSwappers:${window}:${n}`;
+	const cached = getCached<Array<[Principal, bigint, bigint]>>(key, TTL.POOL);
+	if (cached) return cached;
+
+	try {
+		const result = await threePoolService.getTopSwappers(window, n);
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchThreePoolTopSwappers failed:', err);
+		return [];
+	}
+}
+
+export async function fetchThreePoolSwapEventsV2(start: bigint, length: bigint): Promise<any[]> {
+	const key = `pool:3pool:swapEventsV2:${start}:${length}`;
+	const cached = getCached<any[]>(key, TTL.EVENTS);
+	if (cached) return cached;
+
+	try {
+		const result = await threePoolService.getSwapEventsV2(start, length);
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchThreePoolSwapEventsV2 failed:', err);
+		return [];
+	}
+}
+
 // ── Collateral ───────────────────────────────────────────────────────────────
 
 export async function fetchCollateralConfigs(): Promise<any[]> {

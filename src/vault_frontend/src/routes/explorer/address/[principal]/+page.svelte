@@ -382,7 +382,7 @@
                   {@const status = vaultStatus(vault)}
                   <tr
                     class="border-b border-gray-700/30 last:border-b-0 hover:bg-gray-700/20 transition-colors cursor-pointer"
-                    onclick={() => { window.location.href = `/explorer/vault/${vault.vault_id}`; }}
+                    onclick={() => { window.location.href = `/explorer/e/vault/${vault.vault_id}`; }}
                   >
                     <td class="px-4 py-3">
                       <EntityLink type="vault" value={String(vault.vault_id)} />
@@ -460,7 +460,7 @@
               {:else}
                 {@const formatted = getDexFormatter(row.source, row.event)}
                 <a
-                  href="/explorer/dex/{row.source}/{Number(row.id)}"
+                  href="/explorer/e/event/dex:{row.source}:{Number(row.id)}"
                   class="flex items-center gap-4 px-4 py-3 border-b border-gray-700/30 last:border-b-0 hover:bg-gray-700/20 transition-colors"
                 >
                   <span class="text-xs text-gray-500 font-mono w-24 shrink-0">{DEX_SOURCE_LABEL[row.source]} #{Number(row.id)}</span>
@@ -507,7 +507,7 @@
                     <td class="px-4 py-3 text-sm text-gray-300 truncate max-w-[300px]">{formatted.summary}</td>
                     <td class="px-4 py-3 text-right">
                       <a
-                        href="/explorer/dex/{d.source}/{Number(d.id)}"
+                        href="/explorer/e/event/dex:{d.source}:{Number(d.id)}"
                         class="text-xs text-blue-400 hover:text-blue-300 hover:underline"
                       >Details</a>
                     </td>
