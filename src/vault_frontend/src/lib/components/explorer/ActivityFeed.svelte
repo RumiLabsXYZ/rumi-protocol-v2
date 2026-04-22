@@ -1,10 +1,11 @@
 <script lang="ts">
-  import { getEventType, getEventBadgeColor, getEventSummary, formatTimestamp, getEventTimestamp } from '$lib/utils/eventFormatters';
+  import { displayEvent, wrapBackendEvent } from '$lib/utils/displayEvent';
+  import { timeAgo, formatTimestamp } from '$lib/utils/explorerHelpers';
 
   interface Props {
     events: Array<{ event: any; globalIndex: number }>;
     loading?: boolean;
-    vaultCollateralMap?: Map<number, any>;
+    vaultCollateralMap?: Map<number, string>;
   }
 
   let { events, loading = false, vaultCollateralMap }: Props = $props();
@@ -25,25 +26,19 @@
   {:else}
     <div class="divide-y divide-gray-700/30">
       {#each events as { event, globalIndex }}
-        {@const eventType = getEventType(event)}
-        {@const badgeColor = getEventBadgeColor(event)}
-        {@const summary = getEventSummary(event, vaultCollateralMap)}
-        {@const ts = getEventTimestamp(event)}
+        {@const display = displayEvent(wrapBackendEvent(event, globalIndex), { vaultCollateralMap })}
         <a
-          href="/explorer/event/{globalIndex}"
+          href={display.detailHref}
           class="flex items-center gap-3 px-5 py-3 hover:bg-gray-700/30 transition-colors"
         >
-          <span
-            class="shrink-0 text-xs font-medium px-2 py-0.5 rounded-full whitespace-nowrap"
-            style="background:{badgeColor}20; color:{badgeColor}; border:1px solid {badgeColor}40;"
-          >
-            {eventType}
+          <span class="shrink-0 text-xs font-medium px-2 py-0.5 rounded-full whitespace-nowrap {display.formatted.badgeColor}">
+            {display.formatted.typeName}
           </span>
-          <span class="flex-1 text-sm text-gray-300 truncate">{summary}</span>
+          <span class="flex-1 text-sm text-gray-300 truncate">{display.formatted.summary}</span>
           <span class="shrink-0 text-xs text-gray-500 tabular-nums">
-            {#if ts}{formatTimestamp(ts)}{/if}
+            {#if display.timestamp}<span title={formatTimestamp(display.timestamp)}>{timeAgo(display.timestamp)}</span>{/if}
           </span>
-          <span class="shrink-0 text-xs text-gray-600 tabular-nums">#{globalIndex}</span>
+          <span class="shrink-0 text-xs text-gray-600 tabular-nums">#{display.globalIndex}</span>
         </a>
       {/each}
     </div>

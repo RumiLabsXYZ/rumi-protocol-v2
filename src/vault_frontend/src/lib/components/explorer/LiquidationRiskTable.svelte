@@ -1,7 +1,12 @@
 <script lang="ts">
   import EntityLink from './EntityLink.svelte';
   import VaultHealthBar from './VaultHealthBar.svelte';
-  import { resolveCollateralSymbol } from '$lib/utils/eventFormatters';
+  import { getTokenSymbol } from '$lib/utils/explorerHelpers';
+
+  function collateralSymbol(principal: any): string {
+    const text = principal?.toText?.() ?? principal?.toString?.() ?? String(principal);
+    return getTokenSymbol(text);
+  }
 
   interface AtRiskVault {
     vault_id: number;
@@ -67,7 +72,7 @@
                 <EntityLink type="address" id={vault.owner} />
               </td>
               <td class="px-4 py-2.5 text-gray-300 text-xs">
-                {resolveCollateralSymbol(vault.collateral_type)}
+                {collateralSymbol(vault.collateral_type)}
               </td>
               <td class="px-4 py-2.5 text-right text-gray-200 tabular-nums text-xs">
                 {(vault.borrowed_icusd_amount / E8S).toLocaleString(undefined, { maximumFractionDigits: 2 })} icUSD
