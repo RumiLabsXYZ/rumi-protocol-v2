@@ -1,4 +1,5 @@
 import {
+	formatEvent,
 	formatSwapEvent, formatAmmSwapEvent,
 	formatAmmLiquidityEvent, formatAmmAdminEvent,
 	format3PoolLiquidityEvent, format3PoolAdminEvent,
@@ -138,4 +139,64 @@ export function dexDetailHref(de: DisplayEvent): string {
 		return `/explorer/dex/amm_swap/${innerId}`;
 	}
 	return `/explorer/dex/${de.source}/${Number(de.globalIndex)}`;
+}
+
+/**
+ * Unified render-ready shape for any event across every Explorer surface
+ * (Activity, entity streams, event detail, Protocol lenses).
+ *
+ * Pull this from `displayEvent()` rather than calling the individual
+ * formatters so every surface renders the same event the same way.
+ */
+export interface DisplayedEvent {
+	globalIndex: number;
+	source: DisplayEventSource;
+	formatted: FormattedEvent;
+	principal: string | null;
+	/** Nanoseconds. 0 when the event has no timestamp. */
+	timestamp: number;
+	detailHref: string;
+	/** 'AMM' / '3Pool' / 'SP' / 'Swap' for non-backend events; null for backend. */
+	sourceLabel: string | null;
+}
+
+export interface DisplayEventMaps {
+	vaultCollateralMap?: Map<number, string>;
+	vaultOwnerMap?: Map<number, string>;
+}
+
+/**
+ * Normalize any DisplayEvent (backend or non-backend) into a render-ready
+ * shape. This is the single entry point every row/list/tile component
+ * should use to format an event.
+ */
+export function displayEvent(de: DisplayEvent, maps?: DisplayEventMaps): DisplayedEvent {
+	const isBackend = de.source === 'backend';
+	const globalIndex = Number(de.globalIndex);
+	const formatted = isBackend
+		? formatEvent(de.event, maps?.vaultCollateralMap)
+		: formatNonBackendEvent(de);
+	const principal = extractEventPrincipal(de.event, de.source, maps?.vaultOwnerMap);
+	const timestamp = de.timestamp || extractEventTimestamp(de.event);
+	const detailHref = isBackend ? `/explorer/event/${globalIndex}` : dexDetailHref(de);
+	const sourceLabel = isBackend
+		? null
+		: (DEX_SOURCE_LABEL[de.source as NonBackendSource] ?? null);
+
+	return { globalIndex, source: de.source, formatted, principal, timestamp, detailHref, sourceLabel };
+}
+
+/**
+ * Wrap a raw backend event (as returned by the protocol backend) into a
+ * DisplayEvent so it can be passed through `displayEvent()`. Useful for
+ * legacy call sites that have `{ event, globalIndex }` rather than the full
+ * DisplayEvent shape.
+ */
+export function wrapBackendEvent(event: any, globalIndex: number | bigint): DisplayEvent {
+	return {
+		event,
+		globalIndex: BigInt(globalIndex),
+		source: 'backend',
+		timestamp: extractEventTimestamp(event),
+	};
 }

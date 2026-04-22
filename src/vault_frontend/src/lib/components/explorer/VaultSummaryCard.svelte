@@ -1,6 +1,6 @@
 <script lang="ts">
   import { truncatePrincipal } from '$lib/utils/principalHelpers';
-  import { formatAmount } from '$lib/utils/eventFormatters';
+  import { formatE8s } from '$lib/utils/explorerHelpers';
 
   export let vault: any;
   export let collateralSymbol: string = 'tokens';
@@ -28,11 +28,11 @@
     </div>
     <div class="vault-detail">
       <span class="label">Collateral</span>
-      <span class="value key-number">{formatAmount(vault.collateral_amount, collateralDecimals)} {collateralSymbol}</span>
+      <span class="value key-number">{formatE8s(vault.collateral_amount, collateralDecimals)} {collateralSymbol}</span>
     </div>
     <div class="vault-detail">
       <span class="label">Debt</span>
-      <span class="value key-number">{formatAmount(vault.borrowed_icusd_amount)} icUSD</span>
+      <span class="value key-number">{formatE8s(vault.borrowed_icusd_amount)} icUSD</span>
     </div>
   </div>
 </a>

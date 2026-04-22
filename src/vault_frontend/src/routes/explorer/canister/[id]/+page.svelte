@@ -8,7 +8,8 @@
   import { fetchEventsByPrincipal } from '$lib/stores/explorerStore';
   import { CANISTER_IDS } from '$lib/config';
   import { copyToClipboard } from '$lib/utils/principalHelpers';
-  import { getEventType, getEventBadgeColor, getEventSummary, getEventTimestamp, formatTimestamp } from '$lib/utils/eventFormatters';
+  import { displayEvent, wrapBackendEvent } from '$lib/utils/displayEvent';
+  import { timeAgo, formatTimestamp } from '$lib/utils/explorerHelpers';
   import { toastStore } from '$lib/stores/toast';
 
   // ── Canister role map ─────────────────────────────────────────────────────
@@ -214,31 +215,30 @@
       >
         {#snippet row(item: any, i: number)}
           {@const evt = item.event ?? item}
-          {@const ts = getEventTimestamp(evt)}
-          {@const badgeColor = getEventBadgeColor(evt)}
-          {@const summary = getEventSummary(evt)}
           {@const globalIdx = item.globalIndex ?? null}
+          {@const display = displayEvent(wrapBackendEvent(evt, globalIdx ?? 0))}
           <tr class="history-row">
             <td class="px-4 py-3 text-right text-gray-500 text-xs font-mono">
               {#if globalIdx !== null}
-                <a href="/explorer/event/{globalIdx}" class="hover:text-blue-400 transition-colors">#{globalIdx}</a>
+                <a href={display.detailHref} class="hover:text-blue-400 transition-colors">#{globalIdx}</a>
               {:else}
                 {i + 1}
               {/if}
             </td>
             <td class="px-4 py-3 text-gray-400 text-xs whitespace-nowrap">
-              {ts ? formatTimestamp(ts) : '—'}
+              {#if display.timestamp}
+                <span title={formatTimestamp(display.timestamp)}>{timeAgo(display.timestamp)}</span>
+              {:else}
+                —
+              {/if}
             </td>
             <td class="px-4 py-3">
-              <span
-                class="event-badge"
-                style="background:{badgeColor}20; color:{badgeColor}; border:1px solid {badgeColor}40;"
-              >
-                {getEventType(evt)}
+              <span class="event-badge {display.formatted.badgeColor}">
+                {display.formatted.typeName}
               </span>
             </td>
             <td class="px-4 py-3 text-gray-300 text-sm">
-              {summary}
+              {display.formatted.summary}
             </td>
           </tr>
         {/snippet}
