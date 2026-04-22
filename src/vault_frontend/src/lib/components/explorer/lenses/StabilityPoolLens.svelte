@@ -39,9 +39,9 @@
     }
   });
 
-  const totalDeposits = $derived(poolStatus ? e8sToNumber(poolStatus.total_icusd_in_pool ?? poolStatus.total_deposits_e8s ?? 0n) : 0);
-  const depositors = $derived(poolStatus ? Number(poolStatus.depositor_count ?? 0) : 0);
-  const totalLiquidations = $derived(poolStatus ? Number(poolStatus.liquidation_count ?? 0) : 0);
+  const totalDeposits = $derived(poolStatus ? e8sToNumber(poolStatus.total_deposits_e8s ?? 0n) : 0);
+  const depositors = $derived(poolStatus ? Number(poolStatus.total_depositors ?? 0n) : 0);
+  const totalLiquidations = $derived(poolStatus ? Number(poolStatus.total_liquidations_executed ?? 0n) : 0);
   const eligibleCoverage = $derived.by(() => {
     if (!poolStatus?.eligible_icusd_per_collateral) return 0;
     let sum = 0;
@@ -57,19 +57,17 @@
   );
 
   const collateralGains = $derived.by(() => {
-    if (!poolStatus?.gained_collateral_per_user) return [];
-    // poolStatus has per-user; we want aggregate gained collateral across the pool
-    const map = new Map<string, number>();
-    const perCol = poolStatus.collateral_balances ?? poolStatus.total_collateral_gained ?? [];
-    for (const [p, v] of perCol) {
+    // PoolStatus.collateral_gains is the aggregate collateral in the pool,
+    // each entry a (collateral principal, raw amount) pair.
+    const perCol = poolStatus?.collateral_gains ?? [];
+    return perCol.map(([p, v]: [any, any]) => {
       const pid = typeof p === 'object' && p.toText ? p.toText() : String(p);
-      map.set(pid, Number(v));
-    }
-    return Array.from(map.entries()).map(([pid, v]) => ({
-      principal: pid,
-      symbol: getCollateralSymbol(pid),
-      amount: v,
-    }));
+      return {
+        principal: pid,
+        symbol: getCollateralSymbol(pid),
+        amount: Number(v),
+      };
+    });
   });
 
   const healthMetrics = $derived.by(() => [

@@ -138,7 +138,10 @@
   });
 
   const vaultCountPoints = $derived(
-    vaultRows.map((r: any) => ({ t: Number(r.timestamp_ns) / 1_000_000, v: Number(r.total_vaults ?? r.vault_count ?? 0) }))
+    vaultRows.map((r: any) => ({
+      t: Number(r.timestamp_ns) / 1_000_000,
+      v: Number(r.total_vault_count ?? r.total_vaults ?? r.vault_count ?? 0),
+    }))
   );
   const debtPoints = $derived(
     vaultRows.map((r: any) => ({ t: Number(r.timestamp_ns) / 1_000_000, v: e8sToNumber(r.total_debt_e8s ?? 0n) }))

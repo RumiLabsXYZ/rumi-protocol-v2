@@ -70,8 +70,16 @@
     return swapFees24h + estimatedDailyBorrow;
   });
 
-  const lpApy = $derived(apys?.lp_apy_pct?.[0] ?? null);
-  const spApy = $derived(apys?.sp_apy_pct?.[0] ?? null);
+  // Analytics returns 0 when the window has no data; treat that as "--"
+  // rather than confidently displaying 0.00%.
+  const lpApy = $derived.by(() => {
+    const v = apys?.lp_apy_pct?.[0];
+    return typeof v === 'number' && v > 0 ? v : null;
+  });
+  const spApy = $derived.by(() => {
+    const v = apys?.sp_apy_pct?.[0];
+    return typeof v === 'number' && v > 0 ? v : null;
+  });
 
   const feePoints = $derived(
     feeRows.map((r: any) => {
