@@ -28,6 +28,7 @@
     fetchVaultSeries,
     fetchThreePoolSeries,
     fetchHolderSeries,
+    fetchTokenFlow,
   } from '$services/explorer/analyticsService';
   import {
     formatE8s,
@@ -42,7 +43,7 @@
   import type { DisplayEvent } from '$utils/displayEvent';
   import { extractFacets } from '$utils/eventFacets';
   import { CANISTER_IDS } from '$lib/config';
-  import type { TopHoldersResponse } from '$declarations/rumi_analytics/rumi_analytics.did';
+  import type { TopHoldersResponse, TokenFlowEdge } from '$declarations/rumi_analytics/rumi_analytics.did';
 
   interface PageData {
     tokenPrincipal: string;
@@ -77,6 +78,7 @@
   let vaultSeries: any[] = $state([]);
   let threePoolHistory: any[] = $state([]);
   let holderSeries: any[] = $state([]);
+  let flowEdges = $state<TokenFlowEdge[]>([]);
 
   // ── Derived: identity ──────────────────────────────────────────────────────
 
@@ -179,6 +181,59 @@
     }
     return rows;
   });
+
+  // ── Derived: token flow in/out strip ───────────────────────────────────────
+
+  interface FlowRow {
+    otherToken: string;
+    symbol: string;
+    href: string;
+    volumeUsdE8s: bigint;
+    swapCount: bigint;
+  }
+
+  /** Edges where this token is the `to_token` — who sent it in. */
+  const inboundFlows = $derived.by<FlowRow[]>(() => {
+    const rows = flowEdges
+      .filter((e) => e.to_token.toText() === tokenPrincipal)
+      .map<FlowRow>((e) => {
+        const other = e.from_token.toText();
+        return {
+          otherToken: other,
+          symbol: getTokenSymbol(other),
+          href: `/explorer/e/token/${other}`,
+          volumeUsdE8s: e.volume_usd_e8s,
+          swapCount: e.swap_count,
+        };
+      });
+    rows.sort((a, b) => (b.volumeUsdE8s > a.volumeUsdE8s ? 1 : b.volumeUsdE8s < a.volumeUsdE8s ? -1 : 0));
+    return rows.slice(0, 10);
+  });
+
+  /** Edges where this token is the `from_token` — where it went. */
+  const outboundFlows = $derived.by<FlowRow[]>(() => {
+    const rows = flowEdges
+      .filter((e) => e.from_token.toText() === tokenPrincipal)
+      .map<FlowRow>((e) => {
+        const other = e.to_token.toText();
+        return {
+          otherToken: other,
+          symbol: getTokenSymbol(other),
+          href: `/explorer/e/token/${other}`,
+          volumeUsdE8s: e.volume_usd_e8s,
+          swapCount: e.swap_count,
+        };
+      });
+    rows.sort((a, b) => (b.volumeUsdE8s > a.volumeUsdE8s ? 1 : b.volumeUsdE8s < a.volumeUsdE8s ? -1 : 0));
+    return rows.slice(0, 10);
+  });
+
+  function formatFlowUsd(e8s: bigint): string {
+    const n = Number(e8s) / 1e8;
+    if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(2)}M`;
+    if (n >= 1_000) return `$${(n / 1_000).toFixed(2)}k`;
+    return `$${n.toFixed(2)}`;
+  }
 
   // ── Derived: vaults using this token ───────────────────────────────────────
 
@@ -484,6 +539,7 @@
         threePoolStateRes,
         topHoldersRes,
         pegRes,
+        flowRes,
       ] = await Promise.all([
         fetchCollateralConfigs().catch(() => []),
         fetchCollateralPrices().catch(() => new Map<string, number>()),
@@ -492,6 +548,10 @@
         fetchThreePoolState().catch(() => null),
         fetchTopHolders(tokenPrincipalObj, 50),
         fetchPegStatus().catch(() => null),
+        // 7-day window, big enough limit to catch most edges the token participates in.
+        fetchTokenFlow(7n * 86_400n * 1_000_000_000n, undefined, 200)
+          .then((r) => r.edges)
+          .catch(() => [] as TokenFlowEdge[]),
       ]);
 
       configs = configsRes;
@@ -499,6 +559,7 @@
       allVaults = allVaultsRes;
       ammPools = ammPoolsRes;
       threePoolState = threePoolStateRes;
+      flowEdges = flowRes;
       topHolders = topHoldersRes;
       pegStatus = pegRes;
 
@@ -727,6 +788,46 @@
         <div class="text-sm text-gray-500">
           Coming with movers backend endpoint.
         </div>
+      </div>
+
+      <!-- Flows in (7d) -->
+      <div class="rounded-lg border border-gray-700/60 bg-gray-900/40 p-4">
+        <h3 class="text-sm font-semibold text-white mb-3">Flows in (7d)</h3>
+        {#if inboundFlows.length === 0}
+          <div class="text-sm text-gray-500">No inbound swap flows in the last 7 days.</div>
+        {:else}
+          <ul class="space-y-1.5">
+            {#each inboundFlows as row (row.otherToken)}
+              <li class="flex items-center justify-between text-sm">
+                <a href={row.href} class="text-blue-400 hover:text-blue-300 font-medium">{row.symbol}</a>
+                <span class="text-xs text-gray-500 tabular-nums">
+                  {formatFlowUsd(row.volumeUsdE8s)}
+                  <span class="text-gray-600"> · {row.swapCount.toString()}</span>
+                </span>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
+
+      <!-- Flows out (7d) -->
+      <div class="rounded-lg border border-gray-700/60 bg-gray-900/40 p-4">
+        <h3 class="text-sm font-semibold text-white mb-3">Flows out (7d)</h3>
+        {#if outboundFlows.length === 0}
+          <div class="text-sm text-gray-500">No outbound swap flows in the last 7 days.</div>
+        {:else}
+          <ul class="space-y-1.5">
+            {#each outboundFlows as row (row.otherToken)}
+              <li class="flex items-center justify-between text-sm">
+                <a href={row.href} class="text-blue-400 hover:text-blue-300 font-medium">{row.symbol}</a>
+                <span class="text-xs text-gray-500 tabular-nums">
+                  {formatFlowUsd(row.volumeUsdE8s)}
+                  <span class="text-gray-600"> · {row.swapCount.toString()}</span>
+                </span>
+              </li>
+            {/each}
+          </ul>
+        {/if}
       </div>
     </div>
   {/snippet}
