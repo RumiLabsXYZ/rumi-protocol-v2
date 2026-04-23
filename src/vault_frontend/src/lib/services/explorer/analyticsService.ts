@@ -29,6 +29,9 @@ import type {
 	ThreePoolSeriesResponse,
 	CycleSeriesResponse,
 	TopHoldersResponse,
+	TopCounterpartiesResponse,
+	TopSpDepositorsResponse,
+	AdminEventBreakdownResponse,
 } from '$declarations/rumi_analytics/rumi_analytics.did';
 
 // ── TTL constants (ms) ───────────────────────────────────────────────────────
@@ -439,5 +442,108 @@ export async function fetchTopHolders(
 	} catch (err) {
 		console.error('[analyticsService] fetchTopHolders failed:', err);
 		return EMPTY_TOP_HOLDERS(token);
+	}
+}
+
+// ── Top counterparties ──────────────────────────────────────────────────────
+
+const EMPTY_TOP_COUNTERPARTIES = (principal: Principal): TopCounterpartiesResponse => ({
+	principal,
+	window_ns: 0n,
+	generated_at_ns: 0n,
+	rows: [],
+});
+
+/**
+ * Ranks the principals a target address most interacts with across vault
+ * events (redeemers, liquidators), swaps (pool principals as counterparties),
+ * 3pool liquidity provides, and stability-pool participation.
+ *
+ * Window defaults to 30 days on the canister side when `windowNs` is omitted.
+ * Limit is clamped canister-side to [1, 200] (default 50).
+ */
+export async function fetchTopCounterparties(
+	principal: Principal,
+	windowNs?: bigint,
+	limit = 10
+): Promise<TopCounterpartiesResponse> {
+	const key = `analytics:top_counterparties:${principal.toText()}:${windowNs ?? 'default'}:${limit}`;
+	const cached = getCached<TopCounterpartiesResponse>(key, TTL.AGGREGATE);
+	if (cached) return cached;
+
+	try {
+		const result = await getActor().get_top_counterparties({
+			principal,
+			window_ns: windowNs !== undefined ? [windowNs] : [],
+			limit: [limit],
+		});
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[analyticsService] fetchTopCounterparties failed:', err);
+		return EMPTY_TOP_COUNTERPARTIES(principal);
+	}
+}
+
+// ── Top stability-pool depositors ──────────────────────────────────────────
+
+const EMPTY_TOP_SP_DEPOSITORS: TopSpDepositorsResponse = {
+	window_ns: 0n,
+	generated_at_ns: 0n,
+	rows: [],
+};
+
+/**
+ * Ranks stability-pool participants by total deposits inside the window,
+ * with all-time net balance surfaced separately so the leaderboard can show
+ * both flow and standing position.
+ */
+export async function fetchTopSpDepositors(
+	windowNs?: bigint,
+	limit = 20
+): Promise<TopSpDepositorsResponse> {
+	const key = `analytics:top_sp_depositors:${windowNs ?? 'default'}:${limit}`;
+	const cached = getCached<TopSpDepositorsResponse>(key, TTL.AGGREGATE);
+	if (cached) return cached;
+
+	try {
+		const result = await getActor().get_top_sp_depositors({
+			window_ns: windowNs !== undefined ? [windowNs] : [],
+			limit: [limit],
+		});
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[analyticsService] fetchTopSpDepositors failed:', err);
+		return EMPTY_TOP_SP_DEPOSITORS;
+	}
+}
+
+// ── Admin event breakdown ──────────────────────────────────────────────────
+
+const EMPTY_ADMIN_BREAKDOWN: AdminEventBreakdownResponse = {
+	window_ns: 0n,
+	generated_at_ns: 0n,
+	labels: [],
+};
+
+/**
+ * Returns per-label counts of admin/setter events within the window so the
+ * Explorer activity page can expand its Admin chip into labeled sub-facets.
+ * The canister caches these for 5 minutes (admin events are rare).
+ */
+export async function fetchAdminEventBreakdown(
+	windowNs?: bigint
+): Promise<AdminEventBreakdownResponse> {
+	const key = `analytics:admin_breakdown:${windowNs ?? 'default'}`;
+	const cached = getCached<AdminEventBreakdownResponse>(key, TTL.AGGREGATE);
+	if (cached) return cached;
+
+	try {
+		const result = await getActor().get_admin_event_breakdown({
+			window_ns: windowNs !== undefined ? [windowNs] : [],
+		});
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[analyticsService] fetchAdminEventBreakdown failed:', err);
+		return EMPTY_ADMIN_BREAKDOWN;
 	}
 }

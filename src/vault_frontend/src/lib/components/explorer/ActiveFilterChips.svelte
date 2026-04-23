@@ -33,6 +33,10 @@
     onChange({ ...facets, principals: facets.principals.filter((x) => x !== p) });
   }
 
+  function removeAdminLabel(label: string) {
+    onChange({ ...facets, adminLabels: facets.adminLabels.filter((x) => x !== label) });
+  }
+
   function removeSize() {
     onChange({ ...facets, minSizeUsd: null });
   }
@@ -86,6 +90,13 @@
       <span class="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs rounded-full bg-violet-500/15 text-violet-300 border border-violet-500/30 font-mono">
         <span>addr:{shortenPrincipal(p)}</span>
         <button type="button" aria-label="Remove principal" class="text-violet-200 hover:text-white" onclick={() => removePrincipal(p)}>×</button>
+      </span>
+    {/each}
+
+    {#each facets.adminLabels as label (label)}
+      <span class="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs rounded-full bg-blue-500/15 text-blue-300 border border-blue-500/30 font-mono">
+        <span>admin:{label}</span>
+        <button type="button" aria-label="Remove admin label" class="text-blue-200 hover:text-white" onclick={() => removeAdminLabel(label)}>×</button>
       </span>
     {/each}
 

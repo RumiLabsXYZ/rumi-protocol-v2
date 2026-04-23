@@ -38,8 +38,11 @@
 		facetsToBackendFilters,
 		pickPoolFetchStrategy,
 		sourceExcludedByTypeFacet,
+		toggleAdminLabel,
 		type Facets,
 	} from '$utils/eventFacets';
+	import { fetchAdminEventBreakdown } from '$services/explorer/analyticsService';
+	import type { AdminEventLabelCount } from '$declarations/rumi_analytics/rumi_analytics.did';
 
 	const INITIAL_ROWS = 100;
 	const PAGE_STEP = 100;
@@ -59,6 +62,38 @@
 	let visibleRows = $state(INITIAL_ROWS);
 
 	let savedViews: SavedView[] = $state([]);
+
+	// Admin sub-facet breakdown (analytics-backed). Populated lazily the first
+	// time the user opens the Admin type chip.
+	let adminLabelCounts: AdminEventLabelCount[] = $state([]);
+	let adminBreakdownLoaded = $state(false);
+	let adminBreakdownLoading = $state(false);
+
+	async function loadAdminBreakdown() {
+		if (adminBreakdownLoaded || adminBreakdownLoading) return;
+		adminBreakdownLoading = true;
+		try {
+			const resp = await fetchAdminEventBreakdown();
+			adminLabelCounts = resp.labels;
+			adminBreakdownLoaded = true;
+		} catch (err) {
+			console.error('[activity] loadAdminBreakdown failed:', err);
+		} finally {
+			adminBreakdownLoading = false;
+		}
+	}
+
+	// Auto-load the breakdown whenever the Admin type chip is active so the
+	// sub-bar below renders the count-decorated label chips.
+	$effect(() => {
+		if (facets.types.includes('admin')) {
+			loadAdminBreakdown();
+		}
+	});
+
+	function onAdminLabelClick(label: string) {
+		applyFacets(toggleAdminLabel(facets, label));
+	}
 
 	// ── URL-derived facets (reactive via $page) ─────────────────────────
 
@@ -619,6 +654,67 @@
 	</div>
 
 	<FacetBar {facets} {tokenOptions} {poolOptions} onChange={applyFacets} />
+
+	{#if facets.types.includes('admin')}
+		<!-- Expanded admin sub-facet bar: list each labeled setter from the
+			analytics breakdown with its recent count. Clicking toggles the
+			label into/out of the active facet set (pushed server-side via
+			`admin_labels`, also applied client-side as a fallback). -->
+		<div class="rounded-xl border border-gray-800 bg-gray-900/40 p-3 space-y-2">
+			<div class="flex items-center justify-between gap-3">
+				<div class="text-[11px] uppercase tracking-wider text-gray-400">
+					Admin events by label
+					{#if adminLabelCounts.length > 0}
+						<span class="text-gray-500 normal-case tracking-normal">
+							· {adminLabelCounts.length} distinct labels
+						</span>
+					{/if}
+				</div>
+				{#if facets.adminLabels.length > 0}
+					<button
+						type="button"
+						class="text-[11px] text-gray-400 hover:text-gray-200"
+						onclick={() => applyFacets({ ...facets, adminLabels: [] })}
+					>
+						Clear labels
+					</button>
+				{/if}
+			</div>
+
+			{#if adminBreakdownLoading && adminLabelCounts.length === 0}
+				<div class="text-xs text-gray-500">Loading admin labels…</div>
+			{:else if adminLabelCounts.length === 0 && adminBreakdownLoaded}
+				<div class="text-xs text-gray-500">No admin events recorded yet.</div>
+			{:else}
+				<div class="flex flex-wrap gap-1.5">
+					{#each adminLabelCounts as lbl (lbl.label)}
+						{@const active = facets.adminLabels.includes(lbl.label)}
+						<button
+							type="button"
+							onclick={() => onAdminLabelClick(lbl.label)}
+							class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[11px] transition-colors"
+							class:bg-blue-500={active}
+							class:border-blue-400={active}
+							class:text-white={active}
+							class:bg-gray-800={!active}
+							class:border-gray-700={!active}
+							class:text-gray-300={!active}
+							class:hover:border-gray-500={!active}
+						>
+							<span class="font-mono">{lbl.label}</span>
+							<span
+								class="text-[10px] tabular-nums"
+								class:text-blue-100={active}
+								class:text-gray-500={!active}
+							>
+								{lbl.count.toString()}
+							</span>
+						</button>
+					{/each}
+				</div>
+			{/if}
+		</div>
+	{/if}
 
 	<ActiveFilterChips {facets} onChange={applyFacets} onClear={clearAll} onSaveView={saveCurrentView} />
 

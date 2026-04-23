@@ -250,6 +250,8 @@ pub enum BackendEvent {
     SetGlobalIcusdMintCap {},
     #[serde(rename = "set_reserve_redemptions_enabled")]
     SetReserveRedemptionsEnabled {},
+    #[serde(rename = "set_icpswap_routing_enabled")]
+    SetIcpswapRoutingEnabled {},
     #[serde(rename = "set_min_icusd_amount")]
     SetMinIcusdAmount {},
     #[serde(rename = "set_borrowing_fee_curve")]
@@ -398,6 +400,7 @@ impl BackendEvent {
             SetRmrCeiling {} => Some("SetRmrCeiling"),
             SetGlobalIcusdMintCap {} => Some("SetGlobalIcusdMintCap"),
             SetReserveRedemptionsEnabled {} => Some("SetReserveRedemptionsEnabled"),
+            SetIcpswapRoutingEnabled {} => Some("SetIcpswapRoutingEnabled"),
             SetMinIcusdAmount {} => Some("SetMinIcusdAmount"),
             SetBorrowingFeeCurve {} => Some("SetBorrowingFeeCurve"),
             SetInterestPoolShare {} => Some("SetInterestPoolShare"),

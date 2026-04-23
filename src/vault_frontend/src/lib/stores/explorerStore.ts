@@ -42,6 +42,7 @@ export async function fetchEvents(page: number = 0) {
 			collateral_token: [],
 			time_range: [],
 			min_size_e8s: [],
+			admin_labels: [],
 		});
 		explorerEventsTotalCount.set(Number(result.total));
 		// result.events is Vec<(u64, Event)> — tuples of (globalIndex, event)
@@ -70,6 +71,7 @@ export async function fetchEvents(page: number = 0) {
 				collateral_token: [],
 				time_range: [],
 				min_size_e8s: [],
+				admin_labels: [],
 			});
 			const filtered = [...events].reverse().filter((e: any) => {
 				const key = Object.keys(e)[0];

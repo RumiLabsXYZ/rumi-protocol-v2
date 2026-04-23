@@ -44,6 +44,8 @@
   import type { DisplayEvent } from '$utils/displayEvent';
   import { extractFacets } from '$utils/eventFacets';
   import { CANISTER_IDS } from '$lib/config';
+  import { fetchTopCounterparties } from '$services/explorer/analyticsService';
+  import type { TopCounterpartyRow } from '$declarations/rumi_analytics/rumi_analytics.did';
 
   const principalStr = $derived($page.params.principal);
 
@@ -67,6 +69,44 @@
   let ammLiqEventsMatching: any[] = $state([]);
   let icusdSubaccounts: Array<Uint8Array | number[]> = $state([]);
   let threeUsdSubaccounts: Array<Uint8Array | number[]> = $state([]);
+
+  // ── Server-ranked counterparties (analytics) ───────────────────────────────
+
+  /** Window selector for the analytics counterparties strip. `null` = all-time. */
+  type CpWindow = '7d' | '30d' | '90d' | 'all';
+  let cpWindow: CpWindow = $state('30d');
+  let cpRows: TopCounterpartyRow[] = $state([]);
+  let cpLoading = $state(false);
+
+  const CP_WINDOW_NS: Record<CpWindow, bigint | undefined> = {
+    '7d': 7n * 86_400n * 1_000_000_000n,
+    '30d': 30n * 86_400n * 1_000_000_000n,
+    '90d': 90n * 86_400n * 1_000_000_000n,
+    // u64::MAX selects "everything" without special-casing on the backend.
+    all: (1n << 63n) - 1n,
+  };
+
+  async function loadCounterparties(target: string, win: CpWindow) {
+    if (!target) return;
+    cpLoading = true;
+    try {
+      const resp = await fetchTopCounterparties(
+        Principal.fromText(target),
+        CP_WINDOW_NS[win],
+        10,
+      );
+      cpRows = resp.rows;
+    } catch (err) {
+      console.error('[address page] loadCounterparties failed:', err);
+      cpRows = [];
+    } finally {
+      cpLoading = false;
+    }
+  }
+
+  $effect(() => {
+    loadCounterparties(principalStr, cpWindow);
+  });
 
   // ── Canister identity ──────────────────────────────────────────────────────
 
@@ -1013,6 +1053,66 @@
             </div>
           {/if}
         </div>
+      {/if}
+    </div>
+
+    <!-- Server-ranked counterparties (analytics.get_top_counterparties). -->
+    <!-- Shown separately from the client-computed list above because it ranks -->
+    <!-- by volume (not just event count), spans a chosen window, and has a -->
+    <!-- wider 10-row view with an interaction-count + volume column pair. -->
+    <div class="mt-3 bg-gray-800/40 border border-gray-700/50 rounded-xl p-4 space-y-3">
+      <div class="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <div class="text-[10px] uppercase tracking-wider text-gray-500">Top counterparties (by volume)</div>
+          <div class="text-[10px] text-gray-600">Ranked across vault, swap, LP, and SP events</div>
+        </div>
+        <div class="inline-flex rounded-lg border border-gray-700/70 overflow-hidden text-[11px]">
+          {#each ['7d', '30d', '90d', 'all'] as const as w (w)}
+            <button
+              type="button"
+              class="px-2.5 py-1 border-r border-gray-700/70 last:border-r-0 transition-colors"
+              class:bg-blue-500={cpWindow === w}
+              class:text-white={cpWindow === w}
+              class:text-gray-400={cpWindow !== w}
+              class:hover:text-gray-200={cpWindow !== w}
+              onclick={() => (cpWindow = w)}
+            >
+              {w.toUpperCase()}
+            </button>
+          {/each}
+        </div>
+      </div>
+
+      {#if cpLoading && cpRows.length === 0}
+        <div class="text-xs text-gray-500">Loading…</div>
+      {:else if cpRows.length === 0}
+        <div class="text-xs text-gray-500">No counterparty activity in this window.</div>
+      {:else}
+        <ul class="divide-y divide-gray-700/40">
+          {#each cpRows as row (row.counterparty.toText())}
+            {@const cp = row.counterparty.toText()}
+            {@const label = getCanisterName(cp) ?? shortenPrincipal(cp)}
+            <li class="py-1.5 flex items-center justify-between gap-3 text-xs">
+              <a
+                href="/explorer/e/address/{cp}"
+                class="text-blue-400 hover:text-blue-300 truncate font-mono"
+                title={cp}
+              >
+                {label}
+              </a>
+              <div class="flex items-center gap-3 shrink-0 text-gray-400">
+                <span class="tabular-nums">
+                  {row.interaction_count.toString()}
+                  {Number(row.interaction_count) === 1 ? 'event' : 'events'}
+                </span>
+                <span class="text-gray-600">·</span>
+                <span class="tabular-nums text-gray-300">
+                  {formatE8s(row.volume_e8s)}
+                </span>
+              </div>
+            </li>
+          {/each}
+        </ul>
       {/if}
     </div>
   {/snippet}
