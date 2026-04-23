@@ -605,6 +605,10 @@ export const idlFactory = ({ IDL }) => {
     'stability_pool_canister' : IDL.Opt(IDL.Principal),
     'rmr_floor_cr' : IDL.Float64,
   });
+  const GetSnapshotsArg = IDL.Record({
+    'start' : IDL.Nat64,
+    'length' : IDL.Nat64,
+  });
   const CollateralSnapshot = IDL.Record({
     'total_collateral' : IDL.Nat64,
     'total_debt' : IDL.Nat64,
@@ -890,7 +894,7 @@ export const idlFactory = ({ IDL }) => {
     'get_min_icusd_amount' : IDL.Func([], [IDL.Nat64], ['query']),
     'get_protocol_config' : IDL.Func([], [ProtocolConfig], ['query']),
     'get_protocol_snapshots' : IDL.Func(
-        [GetEventsArg],
+        [GetSnapshotsArg],
         [IDL.Vec(ProtocolSnapshot)],
         ['query'],
       ),

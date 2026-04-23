@@ -15,6 +15,11 @@
 		fetch3PoolLiquidityEvents, fetch3PoolLiquidityEventCount,
 		fetch3PoolAdminEvents, fetch3PoolAdminEventCount,
 		fetchStabilityPoolEvents, fetchStabilityPoolEventCount,
+		fetch3PoolSwapEventsByPrincipal,
+		fetch3PoolLiquidityEventsByPrincipal,
+		fetchAmmSwapEventsByPrincipal,
+		fetchAmmLiquidityEventsByPrincipal,
+		fetchAmmSwapEventsByTimeRange,
 		fetchAllVaults,
 		fetchAmmPools,
 		fetchCollateralPrices,
@@ -30,6 +35,9 @@
 		buildFacetsQueryString,
 		emptyFacets,
 		hasAnyFacet,
+		facetsToBackendFilters,
+		pickPoolFetchStrategy,
+		sourceExcludedByTypeFacet,
 		type Facets,
 	} from '$utils/eventFacets';
 
@@ -331,116 +339,10 @@
 		return result;
 	}
 
-	// ── Load everything once on mount ────────────────────────────────────
+	// ── Loaders ─────────────────────────────────────────────────────────
 
-	async function loadEverything() {
-		loading = true;
-		error = null;
-		try {
-			const BACKEND_PAGE_SIZE = 200;
-			const [firstBatch, threePoolSwapCount, ammSwapCount, ammLiqCount, threePoolLiqCount, ammAdminCount, threePoolAdminCount, spCount, ammPools, prices] = await Promise.all([
-				fetchEvents(0n, BigInt(BACKEND_PAGE_SIZE)),
-				fetchSwapEventCount(),
-				fetchAmmSwapEventCount(),
-				fetchAmmLiquidityEventCount(),
-				fetch3PoolLiquidityEventCount(),
-				fetchAmmAdminEventCount(),
-				fetch3PoolAdminEventCount(),
-				fetchStabilityPoolEventCount(),
-				fetchAmmPools(),
-				fetchCollateralPrices(),
-			]);
-
-			priceMap = prices;
-
-			// Remaining backend pages
-			const allBackendEvents: [bigint, any][] = [...firstBatch.events];
-			const backendTotal = Number(firstBatch.total);
-			if (allBackendEvents.length < backendTotal) {
-				const remaining: Promise<{ total: bigint; events: [bigint, any][] }>[] = [];
-				for (let p = 1; p * BACKEND_PAGE_SIZE < backendTotal; p++) {
-					remaining.push(fetchEvents(BigInt(p), BigInt(BACKEND_PAGE_SIZE)));
-				}
-				const batches = await Promise.all(remaining);
-				for (const batch of batches) allBackendEvents.push(...batch.events);
-			}
-
-			const [threePoolSwaps, ammSwaps, ammLiqEvents, threePoolLiqEvents, ammAdminEvts, threePoolAdminEvts, spEvents] = await Promise.all([
-				Number(threePoolSwapCount) > 0 ? fetchSwapEvents(0n, threePoolSwapCount) : Promise.resolve([]),
-				Number(ammSwapCount) > 0 ? fetchAmmSwapEvents(0n, ammSwapCount) : Promise.resolve([]),
-				Number(ammLiqCount) > 0 ? fetchAmmLiquidityEvents(0n, ammLiqCount) : Promise.resolve([]),
-				Number(threePoolLiqCount) > 0 ? fetch3PoolLiquidityEvents(threePoolLiqCount, 0n) : Promise.resolve([]),
-				Number(ammAdminCount) > 0 ? fetchAmmAdminEvents(0n, ammAdminCount) : Promise.resolve([]),
-				Number(threePoolAdminCount) > 0 ? fetch3PoolAdminEvents(0n, threePoolAdminCount) : Promise.resolve([]),
-				Number(spCount) > 0 ? fetchStabilityPoolEvents(0n, spCount) : Promise.resolve([]),
-			]);
-
-			const filteredSp = spEvents.filter((e: any) => {
-				const et = e.event_type ?? {};
-				return !('InterestReceived' in et);
-			});
-
-			const all: DisplayEvent[] = [];
-			for (const [idx, evt] of allBackendEvents) {
-				all.push({ globalIndex: idx, event: evt, source: 'backend', timestamp: extractEventTimestamp(evt) });
-			}
-			for (const e of threePoolSwaps) all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: '3pool_swap', timestamp: extractEventTimestamp(e) });
-			for (const e of ammSwaps) all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: 'amm_swap', timestamp: extractEventTimestamp(e) });
-			for (const e of ammLiqEvents) all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: 'amm_liquidity', timestamp: extractEventTimestamp(e) });
-			for (const e of threePoolLiqEvents) all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: '3pool_liquidity', timestamp: extractEventTimestamp(e) });
-			for (const e of ammAdminEvts) all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: 'amm_admin', timestamp: extractEventTimestamp(e) });
-			for (const e of threePoolAdminEvts) all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: '3pool_admin', timestamp: extractEventTimestamp(e) });
-			for (const e of filteredSp) all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: 'stability_pool', timestamp: extractEventTimestamp(e) });
-
-			const merged = mergeMultiHopEvents(all);
-			merged.sort((a, b) => b.timestamp - a.timestamp);
-			allEvents = merged;
-
-			// Extract facets once per event
-			const fmap = new Map<string, ReturnType<typeof extractFacets>>();
-			for (const de of merged) {
-				const key = `${de.source}:${String(de.globalIndex)}`;
-				fmap.set(key, extractFacets(de, priceMap, vaultCollateralMap, vaultOwnerMap));
-			}
-			eventFacetsByIndex = fmap;
-
-			// Build token + pool option lists from the observed data + known tokens
-			const tokenSet = new Set<string>();
-			const poolSet = new Set<string>();
-			for (const ef of fmap.values()) {
-				for (const t of ef.tokens) tokenSet.add(t);
-				for (const p of ef.pools) poolSet.add(p);
-			}
-			// Always include the canonical Rumi tokens so the dropdown is complete
-			for (const known of Object.keys(KNOWN_TOKENS)) tokenSet.add(known);
-
-			tokenOptions = [...tokenSet]
-				.map((principal) => ({ principal, label: getTokenSymbol(principal) }))
-				.sort((a, b) => a.label.localeCompare(b.label));
-
-			// Pool options: 3pool always first, then AMM pools
-			const ammPoolIds: string[] = ammPools.map((p: any) => p.pool_id);
-			for (const id of ammPoolIds) poolSet.add(id);
-			poolSet.add('3pool');
-			poolOptions = [...poolSet]
-				.map((id) => {
-					if (id === '3pool') return { id, label: 'Rumi 3Pool' };
-					const pool = ammPools.find((p: any) => p.pool_id === id);
-					if (pool) {
-						const a = getTokenSymbol(pool.token_a?.toText?.() ?? '');
-						const b = getTokenSymbol(pool.token_b?.toText?.() ?? '');
-						return { id, label: `AMM · ${a}/${b} (${id})` };
-					}
-					return { id, label: id };
-				})
-				.sort((a, b) => a.label.localeCompare(b.label));
-		} catch (e) {
-			console.error('[activity] loadEverything error:', e);
-			error = 'Failed to load events.';
-		} finally {
-			loading = false;
-		}
-	}
+	let knownAmmPools: any[] = [];
+	let activeRequestId = 0;
 
 	async function loadVaultMaps() {
 		try {
@@ -461,11 +363,244 @@
 		}
 	}
 
+	async function loadMetadata() {
+		try {
+			const [ammPools, prices] = await Promise.all([
+				fetchAmmPools(),
+				fetchCollateralPrices(),
+			]);
+			knownAmmPools = ammPools ?? [];
+			priceMap = prices;
+
+			// Pool options: 3pool always first, then AMM pools
+			const poolSet = new Set<string>();
+			for (const p of knownAmmPools) poolSet.add(p.pool_id);
+			poolSet.add('3pool');
+			poolOptions = [...poolSet]
+				.map((id) => {
+					if (id === '3pool') return { id, label: 'Rumi 3Pool' };
+					const pool = knownAmmPools.find((p: any) => p.pool_id === id);
+					if (pool) {
+						const a = getTokenSymbol(pool.token_a?.toText?.() ?? '');
+						const b = getTokenSymbol(pool.token_b?.toText?.() ?? '');
+						return { id, label: `AMM · ${a}/${b} (${id})` };
+					}
+					return { id, label: id };
+				})
+				.sort((a, b) => a.label.localeCompare(b.label));
+
+			// Token options: union of canonical Rumi tokens + observed event tokens.
+			// Reloads append observed tokens to this set.
+			rebuildTokenOptionsFrom(eventFacetsByIndex);
+		} catch (e) {
+			console.error('[activity] loadMetadata error:', e);
+		}
+	}
+
+	function rebuildTokenOptionsFrom(fmap: Map<string, ReturnType<typeof extractFacets>>) {
+		const tokenSet = new Set<string>();
+		for (const ef of fmap.values()) {
+			for (const t of ef.tokens) tokenSet.add(t);
+		}
+		for (const known of Object.keys(KNOWN_TOKENS)) tokenSet.add(known);
+		tokenOptions = [...tokenSet]
+			.map((principal) => ({ principal, label: getTokenSymbol(principal) }))
+			.sort((a, b) => a.label.localeCompare(b.label));
+	}
+
+	// ── Per-source dispatch ─────────────────────────────────────────────
+
+	async function fetchBackendEvents(activeFacets: Facets): Promise<[bigint, any][]> {
+		if (sourceExcludedByTypeFacet('backend', activeFacets)) return [];
+		const plan = facetsToBackendFilters(activeFacets);
+		if (plan.skip) return [];
+
+		// Server-side filter (or unfiltered tail if no facets). Page through
+		// matched results — backend caps `length` at 200 per call.
+		const PAGE_SIZE = 200n;
+		const MAX_PAGES = 25; // 5000 events upper bound — safety against runaway loops
+		const out: [bigint, any][] = [];
+		const first = await fetchEvents(0n, PAGE_SIZE, plan.filters);
+		out.push(...first.events);
+		const total = Number(first.total);
+		const pagesNeeded = Math.min(MAX_PAGES, Math.ceil(total / Number(PAGE_SIZE)));
+		if (pagesNeeded > 1) {
+			const promises: Promise<{ total: bigint; events: [bigint, any][] }>[] = [];
+			for (let p = 1; p < pagesNeeded; p++) {
+				promises.push(fetchEvents(BigInt(p), PAGE_SIZE, plan.filters));
+			}
+			const batches = await Promise.all(promises);
+			for (const b of batches) out.push(...b.events);
+		}
+		return out;
+	}
+
+	async function fetchThreePoolForFacets(activeFacets: Facets): Promise<{ swaps: any[]; liquidity: any[]; admin: any[] }> {
+		if (sourceExcludedByTypeFacet('3pool', activeFacets)) {
+			return { swaps: [], liquidity: [], admin: [] };
+		}
+		const strategy = pickPoolFetchStrategy(activeFacets);
+		const PRINCIPAL_LIMIT = 500n;
+
+		if (strategy.kind === 'principal') {
+			// Per-principal endpoints exist for swaps + liquidity. Admin events
+			// have no principal index — drop them since they wouldn't match.
+			const [swaps, liquidity] = await Promise.all([
+				fetch3PoolSwapEventsByPrincipal(strategy.principal, 0n, PRINCIPAL_LIMIT),
+				fetch3PoolLiquidityEventsByPrincipal(strategy.principal, 0n, PRINCIPAL_LIMIT),
+			]);
+			return { swaps, liquidity, admin: [] };
+		}
+
+		// time-only or tail: full fetch + client-side post-filter handles
+		// time narrowing. (3pool has a swap_by_time_range endpoint but no
+		// liquidity equivalent — keeping the dispatch symmetric.)
+		const [swapCount, liqCount, adminCount] = await Promise.all([
+			fetchSwapEventCount(),
+			fetch3PoolLiquidityEventCount(),
+			fetch3PoolAdminEventCount(),
+		]);
+		const [swaps, liquidity, admin] = await Promise.all([
+			Number(swapCount) > 0 ? fetchSwapEvents(0n, swapCount) : Promise.resolve([]),
+			Number(liqCount) > 0 ? fetch3PoolLiquidityEvents(liqCount, 0n) : Promise.resolve([]),
+			Number(adminCount) > 0 ? fetch3PoolAdminEvents(0n, adminCount) : Promise.resolve([]),
+		]);
+		return { swaps, liquidity, admin };
+	}
+
+	async function fetchAmmForFacets(activeFacets: Facets): Promise<{ swaps: any[]; liquidity: any[]; admin: any[] }> {
+		if (sourceExcludedByTypeFacet('amm', activeFacets)) {
+			return { swaps: [], liquidity: [], admin: [] };
+		}
+		const strategy = pickPoolFetchStrategy(activeFacets);
+		const PRINCIPAL_LIMIT = 500n;
+		const TIME_LIMIT = 500n;
+
+		if (strategy.kind === 'principal' && knownAmmPools.length > 0) {
+			// Fan out across pools — AMM endpoints are pool-keyed.
+			const swapPromises = knownAmmPools.map((p) =>
+				fetchAmmSwapEventsByPrincipal(p.pool_id, strategy.principal, 0n, PRINCIPAL_LIMIT));
+			const liqPromises = knownAmmPools.map((p) =>
+				fetchAmmLiquidityEventsByPrincipal(p.pool_id, strategy.principal, 0n, PRINCIPAL_LIMIT));
+			const [swapBatches, liqBatches] = await Promise.all([
+				Promise.all(swapPromises),
+				Promise.all(liqPromises),
+			]);
+			return {
+				swaps: swapBatches.flat(),
+				liquidity: liqBatches.flat(),
+				admin: [], // admin events skipped under principal filter
+			};
+		}
+
+		if (strategy.kind === 'time' && knownAmmPools.length > 0) {
+			// Swap-by-time endpoint exists per pool; no liquidity-by-time, so
+			// liquidity falls back to tail-fetch and gets caught by the
+			// client-side post-filter pass.
+			const swapPromises = knownAmmPools.map((p) =>
+				fetchAmmSwapEventsByTimeRange(p.pool_id, strategy.startNs, strategy.endNs, TIME_LIMIT));
+			const [liqCount, swapBatches] = await Promise.all([
+				fetchAmmLiquidityEventCount(),
+				Promise.all(swapPromises),
+			]);
+			const liquidity = Number(liqCount) > 0 ? await fetchAmmLiquidityEvents(0n, liqCount) : [];
+			return { swaps: swapBatches.flat(), liquidity, admin: [] };
+		}
+
+		// Tail fetch
+		const [swapCount, liqCount, adminCount] = await Promise.all([
+			fetchAmmSwapEventCount(),
+			fetchAmmLiquidityEventCount(),
+			fetchAmmAdminEventCount(),
+		]);
+		const [swaps, liquidity, admin] = await Promise.all([
+			Number(swapCount) > 0 ? fetchAmmSwapEvents(0n, swapCount) : Promise.resolve([]),
+			Number(liqCount) > 0 ? fetchAmmLiquidityEvents(0n, liqCount) : Promise.resolve([]),
+			Number(adminCount) > 0 ? fetchAmmAdminEvents(0n, adminCount) : Promise.resolve([]),
+		]);
+		return { swaps, liquidity, admin };
+	}
+
+	async function fetchSpForFacets(activeFacets: Facets): Promise<any[]> {
+		if (sourceExcludedByTypeFacet('stability_pool', activeFacets)) return [];
+		// SP has no per-principal/time index — always tail-fetch, client-side
+		// post-filter narrows. Flagged as a Tier 2 follow-up if it bottlenecks.
+		const spCount = await fetchStabilityPoolEventCount();
+		if (Number(spCount) === 0) return [];
+		const events = await fetchStabilityPoolEvents(0n, spCount);
+		return events.filter((e: any) => {
+			const et = e.event_type ?? {};
+			return !('InterestReceived' in et);
+		});
+	}
+
+	// ── Core load: dispatch per-source, merge, extract facets ───────────
+
+	async function loadEvents(activeFacets: Facets) {
+		const reqId = ++activeRequestId;
+		loading = true;
+		error = null;
+		try {
+			const [backendEvents, threePool, amm, spEvents] = await Promise.all([
+				fetchBackendEvents(activeFacets),
+				fetchThreePoolForFacets(activeFacets),
+				fetchAmmForFacets(activeFacets),
+				fetchSpForFacets(activeFacets),
+			]);
+
+			// Bail if a newer request started while we awaited.
+			if (reqId !== activeRequestId) return;
+
+			const all: DisplayEvent[] = [];
+			for (const [idx, evt] of backendEvents) {
+				all.push({ globalIndex: idx, event: evt, source: 'backend', timestamp: extractEventTimestamp(evt) });
+			}
+			for (const e of threePool.swaps) all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: '3pool_swap', timestamp: extractEventTimestamp(e) });
+			for (const e of threePool.liquidity) all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: '3pool_liquidity', timestamp: extractEventTimestamp(e) });
+			for (const e of threePool.admin) all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: '3pool_admin', timestamp: extractEventTimestamp(e) });
+			for (const e of amm.swaps) all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: 'amm_swap', timestamp: extractEventTimestamp(e) });
+			for (const e of amm.liquidity) all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: 'amm_liquidity', timestamp: extractEventTimestamp(e) });
+			for (const e of amm.admin) all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: 'amm_admin', timestamp: extractEventTimestamp(e) });
+			for (const e of spEvents) all.push({ globalIndex: BigInt(e.id ?? 0), event: e, source: 'stability_pool', timestamp: extractEventTimestamp(e) });
+
+			const merged = mergeMultiHopEvents(all);
+			merged.sort((a, b) => b.timestamp - a.timestamp);
+
+			const fmap = new Map<string, ReturnType<typeof extractFacets>>();
+			for (const de of merged) {
+				const key = `${de.source}:${String(de.globalIndex)}`;
+				fmap.set(key, extractFacets(de, priceMap, vaultCollateralMap, vaultOwnerMap));
+			}
+
+			if (reqId !== activeRequestId) return;
+			allEvents = merged;
+			eventFacetsByIndex = fmap;
+			rebuildTokenOptionsFrom(fmap);
+		} catch (e) {
+			if (reqId !== activeRequestId) return;
+			console.error('[activity] loadEvents error:', e);
+			error = 'Failed to load events.';
+		} finally {
+			if (reqId === activeRequestId) loading = false;
+		}
+	}
+
+	let metadataReady = $state(false);
+
 	onMount(async () => {
 		loadSavedViews();
-		// Load vault maps first so the facet extractor can use them
 		await loadVaultMaps();
-		await loadEverything();
+		await loadMetadata();
+		metadataReady = true;
+	});
+
+	// React to facet changes — re-dispatch per-source fetches so the bulk of
+	// filtering happens server-side. The `matchesFacets` post-pass below still
+	// runs to catch dimensions a given source can't filter on.
+	$effect(() => {
+		void currentParams; // depend on URL state
+		if (!metadataReady) return;
+		void loadEvents(facets);
 	});
 </script>
 

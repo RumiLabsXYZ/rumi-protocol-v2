@@ -450,6 +450,7 @@ type GetEventsArg = record {
   min_size_e8s : opt nat64;
 };
 type GetEventsFilteredResponse = record { total : nat64; events : vec record { nat64; Event } };
+type GetSnapshotsArg = record { start : nat64; length : nat64 };
 type HttpRequest = record {
   url : text;
   method : text;
@@ -711,7 +712,7 @@ service : (ProtocolArg) -> {
   get_liquidation_protocol_share : () -> (float64) query;
   get_liquidity_status : (principal) -> (LiquidityStatus) query;
   get_min_icusd_amount : () -> (nat64) query;
-  get_protocol_snapshots : (GetEventsArg) -> (vec ProtocolSnapshot) query;
+  get_protocol_snapshots : (GetSnapshotsArg) -> (vec ProtocolSnapshot) query;
   get_protocol_config : () -> (ProtocolConfig) query;
   get_protocol_status : () -> (ProtocolStatus) query;
   get_recovery_cr_multiplier : () -> (float64) query;
