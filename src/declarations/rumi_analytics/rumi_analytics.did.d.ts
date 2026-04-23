@@ -2,6 +2,28 @@ import type { Principal } from '@dfinity/principal';
 import type { ActorMethod } from '@dfinity/agent';
 import type { IDL } from '@dfinity/candid';
 
+export interface AddressValuePoint {
+  'ts_ns' : bigint,
+  'breakdown' : Array<AddressValueSourceBreakdown>,
+  'value_usd_e8s' : bigint,
+}
+export interface AddressValueSeriesQuery {
+  'principal' : Principal,
+  'resolution_ns' : [] | [bigint],
+  'window_ns' : [] | [bigint],
+}
+export interface AddressValueSeriesResponse {
+  'principal' : Principal,
+  'resolution_ns' : bigint,
+  'generated_at_ns' : bigint,
+  'approximate_sources' : Array<string>,
+  'window_ns' : bigint,
+  'points' : Array<AddressValuePoint>,
+}
+export interface AddressValueSourceBreakdown {
+  'source' : string,
+  'value_usd_e8s' : bigint,
+}
 export interface AdminEventBreakdownQuery { 'window_ns' : [] | [bigint] }
 export interface AdminEventBreakdownResponse {
   'labels' : Array<AdminEventLabelCount>,
@@ -369,6 +391,10 @@ export interface VolatilityResponse {
   'annualized_vol_pct' : number,
 }
 export interface _SERVICE {
+  'get_address_value_series' : ActorMethod<
+    [AddressValueSeriesQuery],
+    AddressValueSeriesResponse
+  >,
   'get_admin' : ActorMethod<[], Principal>,
   'get_admin_event_breakdown' : ActorMethod<
     [AdminEventBreakdownQuery],
