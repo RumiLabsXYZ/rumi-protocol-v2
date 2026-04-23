@@ -180,6 +180,16 @@ fn get_trade_activity(query: types::TradeActivityQuery) -> types::TradeActivityR
 }
 
 #[ic_cdk_macros::query]
+fn get_token_flow(query: types::TokenFlowQuery) -> types::TokenFlowResponse {
+    queries::flow::get_token_flow(query)
+}
+
+#[ic_cdk_macros::query]
+fn get_pool_routes(query: types::PoolRoutesQuery) -> types::PoolRoutesResponse {
+    queries::flow::get_pool_routes(query)
+}
+
+#[ic_cdk_macros::query]
 fn get_collector_health() -> types::CollectorHealth {
     use storage::cursors;
 

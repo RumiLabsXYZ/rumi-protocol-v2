@@ -202,6 +202,23 @@ type PegStatus = record {
   balance_ratios : vec float64;
   max_imbalance_pct : float64;
 };
+type PoolRoute = record {
+  swap_count : nat64;
+  volume_usd_e8s : nat64;
+  avg_hop_count : nat32;
+  route : vec principal;
+};
+type PoolRoutesQuery = record {
+  limit : opt nat32;
+  window_ns : opt nat64;
+  pool_id : text;
+};
+type PoolRoutesResponse = record {
+  generated_at_ns : nat64;
+  window_ns : nat64;
+  pool_id : text;
+  routes : vec PoolRoute;
+};
 type PriceSeriesResponse = record {
   rows : vec FastPriceSnapshot;
   next_from_ts : opt nat64;
@@ -237,6 +254,22 @@ type SwapSeriesResponse = record {
 type ThreePoolSeriesResponse = record {
   rows : vec Fast3PoolSnapshot;
   next_from_ts : opt nat64;
+};
+type TokenFlowEdge = record {
+  to_token : principal;
+  from_token : principal;
+  swap_count : nat64;
+  volume_usd_e8s : nat64;
+};
+type TokenFlowQuery = record {
+  min_volume_usd_e8s : opt nat64;
+  limit : opt nat32;
+  window_ns : opt nat64;
+};
+type TokenFlowResponse = record {
+  edges : vec TokenFlowEdge;
+  generated_at_ns : nat64;
+  window_ns : nat64;
 };
 type TopCounterpartiesQuery = record {
   "principal" : principal;
@@ -333,11 +366,13 @@ service : (InitArgs) -> {
   get_liquidation_series : (RangeQuery) -> (LiquidationSeriesResponse) query;
   get_ohlc : (OhlcQuery) -> (OhlcResponse) query;
   get_peg_status : () -> (opt PegStatus) query;
+  get_pool_routes : (PoolRoutesQuery) -> (PoolRoutesResponse) query;
   get_price_series : (RangeQuery) -> (PriceSeriesResponse) query;
   get_protocol_summary : () -> (ProtocolSummary) query;
   get_stability_series : (RangeQuery) -> (StabilitySeriesResponse) query;
   get_swap_series : (RangeQuery) -> (SwapSeriesResponse) query;
   get_three_pool_series : (RangeQuery) -> (ThreePoolSeriesResponse) query;
+  get_token_flow : (TokenFlowQuery) -> (TokenFlowResponse) query;
   get_top_counterparties : (TopCounterpartiesQuery) -> (
       TopCounterpartiesResponse,
     ) query;

@@ -334,3 +334,61 @@ pub struct AdminEventBreakdownResponse {
     pub generated_at_ns: u64,
     pub labels: Vec<AdminEventLabelCount>,
 }
+
+// --- Flow aggregation types (token-to-token Sankey, routes through a pool) ---
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct TokenFlowQuery {
+    /// Lookback window in nanoseconds. `None` defaults to ~30 days.
+    pub window_ns: Option<u64>,
+    /// Drop edges below this USD volume threshold (in e8s). `None`/0 keeps all.
+    pub min_volume_usd_e8s: Option<u64>,
+    /// Max edges returned. Clamped to [1, 200]; `None` defaults to 50.
+    pub limit: Option<u32>,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq)]
+pub struct TokenFlowEdge {
+    pub from_token: Principal,
+    pub to_token: Principal,
+    pub volume_usd_e8s: u64,
+    pub swap_count: u64,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct TokenFlowResponse {
+    pub window_ns: u64,
+    pub generated_at_ns: u64,
+    pub edges: Vec<TokenFlowEdge>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct PoolRoutesQuery {
+    /// "3pool" or the 3pool canister principal text identifies the 3pool.
+    /// Any other string is treated as an AMM pool_id
+    /// (format: "principal_lo_principal_hi").
+    pub pool_id: String,
+    pub window_ns: Option<u64>,
+    pub limit: Option<u32>,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq)]
+pub struct PoolRoute {
+    /// Ordered sequence of token principals. Length 2 = single-hop, length 3
+    /// = two-hop (via 3USD today).
+    pub route: Vec<Principal>,
+    pub volume_usd_e8s: u64,
+    pub swap_count: u64,
+    /// Hop count for this route. Single-hop = 1, two-hop = 2. Populated as
+    /// `avg_hop_count` so future variants that group sequences of varying
+    /// depth can report a weighted mean without a breaking schema change.
+    pub avg_hop_count: u32,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct PoolRoutesResponse {
+    pub pool_id: String,
+    pub window_ns: u64,
+    pub generated_at_ns: u64,
+    pub routes: Vec<PoolRoute>,
+}
