@@ -1,8 +1,10 @@
 # Explorer IA Redesign — Plan
 
 **Date:** 2026-04-21
-**Status:** IA locked, ready for implementation in a fresh branch
+**Status:** Implemented. All 7 steps + 4 backlog sessions landed to mainnet by 2026-04-23.
 **Scope:** `src/vault_frontend/src/routes/explorer/**` + supporting services. No backend code changes required for Phase 1; backend gaps listed separately.
+
+> **Archive note (2026-04-23):** every Tier 1/2/3 gap listed below either shipped or was explicitly deferred as a v1-acceptable approximation. See the "Implementation order" section at the bottom for the shipped-vs-deferred breakdown. Future work should branch off a fresh plan rather than extending this one.
 
 ---
 
@@ -252,20 +254,31 @@ Frontend already exposes 45 wrappers in `src/vault_frontend/src/lib/services/exp
 
 ## Implementation order
 
-1. **Unify event renderers** — collapse `eventFormatters.ts` + `explorerFormatters.ts` into one. Prerequisite for everything below because the same event now renders in 4 surfaces (Activity, entity streams, event detail, every Protocol lens).
-2. **Protocol page + 7 lenses** — all zero-gap, biggest visible upgrade.
-3. **Entity shell template + migrate `/vault`, `/pool` (3pool), `/event`** — establishes the shell pattern.
-4. **/activity facet bar (client-side filtering)** — establishes the query layer, enables deep-links from everywhere.
-5. **Migrate `/address`** using N+1 calls — add aggregator endpoint later.
-6. **`/token`** — requires Tier 1 gap #2 (top holders endpoint) before shipping meaningfully.
-7. **AMM pool parity** — Tier 2 gap #6; AMM pool pages degraded until then.
+Original plan:
 
-**Branching:** one branch per step. Don't open multiple branches touching `src/vault_frontend/src/routes/explorer/` concurrently.
+1. **Unify event renderers** — collapse `eventFormatters.ts` + `explorerFormatters.ts` into one. Prerequisite for everything below because the same event now renders in 4 surfaces (Activity, entity streams, event detail, every Protocol lens). **Shipped:** PR #82.
+2. **Protocol page + 7 lenses** — all zero-gap, biggest visible upgrade. **Shipped:** PR #83.
+3. **Entity shell template + migrate `/vault`, `/pool` (3pool), `/event`** — establishes the shell pattern. **Shipped:** PR #84.
+4. **/activity facet bar (client-side filtering)** — establishes the query layer, enables deep-links from everywhere. **Shipped:** PR #85.
+5. **Migrate `/address`** using N+1 calls — add aggregator endpoint later. **Shipped:** PR #86.
+6. **`/token`** — requires Tier 1 gap #2 (top holders endpoint) before shipping meaningfully. **Shipped:** PR #87 (backend) + PR #88 (UI).
+7. **AMM pool parity** — Tier 2 gap #6; AMM pool pages degraded until then. **Shipped:** PR #89 (backend) + PR #90 (UI).
+
+Post-redesign backlog (closes Tier 1-3 gaps from the list above):
+
+- **Session A — server-side event filter dispatch** (Tier 1 #1). Backend PR #91 adds real filter args to `get_events_filtered`; frontend PR #92 wires the Activity page's facet bar into the typed endpoint call.
+- **Session B — top-N principals + admin breakdown** (Tier 2 #4, Tier 2 #7, Tier 3 #10). Backend PR #93 and PR #94 ship the three aggregated endpoints (`get_top_counterparties`, `get_top_sp_depositors`, `admin_labels` filter + `get_admin_event_breakdown`); frontend PR #95 surfaces them on `/e/address/{principal}`, `/protocol?lens=stability`, and the Admin chip's sub-facet list.
+- **Session C — flow aggregator** (Tier 2 #5, Tier 2 #8). Backend PR #96 ships the shared swap+liquidity walker with two endpoints (`get_token_flow`, `get_pool_routes`); frontend PR #97 wires them into the Protocol Sankey, `/e/token/{id}` Relationships, and `/e/pool/{id}` Relationships with multi-hop badges.
+- **Session D — address value-over-time** (Tier 3 #9). Backend PR #98 adds `get_address_value_series` (with a followup PR #99 hotfix for legacy `Fast3PoolSnapshot` rows); frontend PR #100 wires the stacked-area **Portfolio value** chart into `/e/address/{principal}` with a 7D / 30D / 90D / 1Y / All window selector.
 
 **Deferred (Phase 2, not in this plan):**
 - Watching / bookmarking (cool idea, revisit later)
 - Personalized landing ("My positions" for logged-in users)
 - CSV export on Activity (small, add when someone needs it)
+- ICRC-3 per-delta ledger log → would promote icUSD / 3USD bands in the portfolio chart from "current-balance projection" to full historical reconstruction.
+- AMM liquidity event tailer → would add an "AMM LP" band to the portfolio chart and let `/e/pool/{id}` (AMM) ship a holder snapshot + routes feed without the current 3pool-only shortcuts.
+- Standalone non-stable ledger balances (ICP, ckBTC, ckETH, nICP, BOB, EXE, ckXAUT) in the portfolio chart. Currently the chart covers 5 of 6 position types named in the Tier 3 #9 scope; these are the 6th and require either a per-ledger tailer or a client-side projection layer.
+- Backfill legacy `Fast3PoolSnapshot` rows so `range()` can iterate them (or make `decimals` optional); PR #99 sidesteps this with a latest-snapshot-only lookup for virtual_price.
 
 ---
 
