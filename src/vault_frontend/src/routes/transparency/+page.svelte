@@ -25,7 +25,7 @@
       let eventIndex = 0;
 
       while (!done) {
-        const events: any[] = await publicActor.get_events({ start, length: pageSize, types: [], principal: [], collateral_token: [], time_range: [], min_size_e8s: [] });
+        const events: any[] = await publicActor.get_events({ start, length: pageSize, types: [], principal: [], collateral_token: [], time_range: [], min_size_e8s: [], admin_labels: [] });
         for (const event of events) {
           if ('admin_mint' in event) {
             const e = event.admin_mint;

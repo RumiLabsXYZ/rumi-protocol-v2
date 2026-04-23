@@ -516,6 +516,12 @@ export interface BackendEventFilters {
 	collateral_token?: Principal;
 	time_range?: { start_ns: bigint; end_ns: bigint };
 	min_size_e8s?: bigint;
+	/**
+	 * Narrow `Admin`-type matches to these canonical labels (e.g.
+	 * "SetBorrowingFee"). No-op when `Admin` isn't in `types` or when the
+	 * list is empty. See backend `Event::admin_label()` for the full set.
+	 */
+	admin_labels?: string[];
 }
 
 /** Mirrors the backend `EventTypeFilter` Candid variant. */
@@ -536,6 +542,7 @@ function backendFiltersCacheKey(f: BackendEventFilters | undefined): string {
 	if (f.collateral_token) parts.push(`c=${f.collateral_token.toText()}`);
 	if (f.time_range) parts.push(`r=${f.time_range.start_ns}-${f.time_range.end_ns}`);
 	if (f.min_size_e8s != null) parts.push(`s=${f.min_size_e8s}`);
+	if (f.admin_labels?.length) parts.push(`al=${[...f.admin_labels].sort().join(',')}`);
 	return parts.length ? parts.join('|') : 'none';
 }
 
@@ -569,6 +576,7 @@ export async function fetchEvents(
 		arg.collateral_token = filters?.collateral_token ? [filters.collateral_token] : [];
 		arg.time_range = filters?.time_range ? [filters.time_range] : [];
 		arg.min_size_e8s = filters?.min_size_e8s != null ? [filters.min_size_e8s] : [];
+		arg.admin_labels = filters?.admin_labels?.length ? [filters.admin_labels] : [];
 
 		const result = await publicActor.get_events_filtered(arg);
 		const data = { total: result.total, events: result.events ?? [] };

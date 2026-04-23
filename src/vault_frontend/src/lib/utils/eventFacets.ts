@@ -276,6 +276,11 @@ export interface EventFacets {
   sizeUsd: number | null;
   /** Nanoseconds. 0 means "no timestamp". */
   timestampNs: number;
+  /**
+   * Canonical admin label (CamelCase) when the event is a backend admin/
+   * setter variant. Parallels `Event::admin_label()` on the backend.
+   */
+  adminLabel: string | null;
 }
 
 function principalText(p: any): string | null {
@@ -612,7 +617,28 @@ export function extractFacets(
     canisters,
     sizeUsd: computeSizeUsd(de, priceMap, vaultCollateralMap),
     timestampNs,
+    adminLabel: extractAdminLabel(de, typeKey),
   };
+}
+
+/**
+ * If this is a backend admin/setter event, return the canonical CamelCase
+ * label that matches `Event::admin_label()` on the backend. Otherwise null.
+ * Only applied to `source === 'backend'` events; DEX-side admin events
+ * (`amm_admin`, `3pool_admin`) share the `'admin'` type key but don't have a
+ * matching backend label and are filtered out when admin labels are active.
+ */
+function extractAdminLabel(de: DisplayEvent, typeKey: TypeFacetKey): string | null {
+  if (typeKey !== 'admin') return null;
+  if (de.source !== 'backend') return null;
+  const event = de.event ?? {};
+  const variantKey = Object.keys(event)[0];
+  if (!variantKey) return null;
+  return snakeToCamel(variantKey);
+}
+
+function snakeToCamel(s: string): string {
+  return s.replace(/(^|_)([a-z])/g, (_, _p, c) => c.toUpperCase());
 }
 
 // ─── Facet state + URL (de)serialization ─────────────────────────────
@@ -625,6 +651,10 @@ export interface Facets {
   principals: string[];
   time: { preset: TimePresetKey; fromMs?: number; toMs?: number };
   minSizeUsd: number | null;
+  /** Canonical CamelCase admin labels (e.g. "SetBorrowingFee"). OR within the
+   * list; AND with other facets. Only meaningful when `types` contains
+   * `'admin'` — acts as a no-op otherwise. */
+  adminLabels: string[];
 }
 
 export function emptyFacets(): Facets {
@@ -636,6 +666,7 @@ export function emptyFacets(): Facets {
     principals: [],
     time: { preset: 'all' },
     minSizeUsd: null,
+    adminLabels: [],
   };
 }
 
@@ -649,7 +680,8 @@ export function hasAnyFacet(f: Facets): boolean {
     f.minSizeUsd != null ||
     f.time.preset !== 'all' ||
     f.time.fromMs != null ||
-    f.time.toMs != null
+    f.time.toMs != null ||
+    f.adminLabels.length > 0
   );
 }
 
@@ -757,6 +789,10 @@ export function parseFacetsFromUrl(url: URL): Facets {
     f.time.preset = 'custom';
   }
 
+  for (const a of parseCsv(params.get('admin'))) {
+    if (a) f.adminLabels.push(a);
+  }
+
   // Backward-compat with the pre-Step-4 `?filter=...` param.
   const legacy = params.get('filter');
   if (legacy && !params.get('type')) {
@@ -779,6 +815,7 @@ export function buildFacetsQueryString(f: Facets): string {
   if (f.vaultIds.length) params.set('vault', f.vaultIds.join(','));
   if (f.principals.length) params.set('principal', f.principals.join(','));
   if (f.minSizeUsd != null) params.set('size', String(f.minSizeUsd));
+  if (f.adminLabels.length) params.set('admin', f.adminLabels.join(','));
   if (f.time.preset !== 'all' && f.time.preset !== 'custom') params.set('time', f.time.preset);
   if (f.time.fromMs != null) params.set('from', new Date(f.time.fromMs).toISOString());
   if (f.time.toMs != null) params.set('to', new Date(f.time.toMs).toISOString());
@@ -820,6 +857,16 @@ export function matchesFacets(event_facets: EventFacets, active: Facets): boolea
   if (active.minSizeUsd != null) {
     if (event_facets.sizeUsd == null) return false;
     if (event_facets.sizeUsd < active.minSizeUsd) return false;
+  }
+
+  // Admin labels narrow only Admin-typed events. No-op when the `Admin` type
+  // isn't active (consistent with the backend `passes_filters` semantics).
+  if (active.adminLabels.length > 0 && active.types.includes('admin')) {
+    if (event_facets.typeKey === 'admin') {
+      if (!event_facets.adminLabel || !active.adminLabels.includes(event_facets.adminLabel)) {
+        return false;
+      }
+    }
   }
 
   // Time
@@ -919,7 +966,25 @@ function structuredCloneFacets(f: Facets): Facets {
     principals: [...f.principals],
     time: { ...f.time },
     minSizeUsd: f.minSizeUsd,
+    adminLabels: [...f.adminLabels],
   };
+}
+
+/**
+ * Toggle an admin label on the active facets. Also makes sure `admin` is in
+ * the active types so the label narrowing has an effect — otherwise the
+ * filter would be a no-op.
+ */
+export function toggleAdminLabel(f: Facets, label: string): Facets {
+  const next = structuredCloneFacets(f);
+  const i = next.adminLabels.indexOf(label);
+  if (i >= 0) {
+    next.adminLabels.splice(i, 1);
+  } else {
+    next.adminLabels.push(label);
+    if (!next.types.includes('admin')) next.types.push('admin');
+  }
+  return next;
 }
 
 // ─── Server-side dispatch translation ─────────────────────────────────
@@ -1048,9 +1113,17 @@ export function facetsToBackendFilters(facets: Facets): BackendFilterPlan {
     filters.min_size_e8s = BigInt(Math.floor(facets.minSizeUsd * 1e8));
   }
 
+  // Admin-label narrowing. The backend treats non-empty `admin_labels` as a
+  // no-op when `Admin` isn't in `types`, so we can safely always push this
+  // through.
+  if (facets.adminLabels.length > 0) {
+    filters.admin_labels = [...facets.adminLabels];
+  }
+
   const hasAny =
     filters.types?.length || filters.principal || filters.collateral_token ||
-    filters.time_range || filters.min_size_e8s != null;
+    filters.time_range || filters.min_size_e8s != null ||
+    (filters.admin_labels?.length ?? 0) > 0;
   return { filters: hasAny ? filters : undefined, skip: false };
 }
 
