@@ -12,6 +12,7 @@ pub mod state;
 pub mod math;
 pub mod transfers;
 pub mod icrc21;
+pub mod analytics;
 mod logs;
 
 use crate::types::*;
@@ -901,6 +902,7 @@ async fn swap(
     mutate_state(|s| {
         s.record_swap_event(caller, pool_id.clone(), token_in, amount_in, ledger_out, amount_out, total_fee);
     });
+    analytics::invalidate_cache_for_pool(&pool_id);
 
     log!(INFO, "Swap on {}: {} in -> {} out (fee: {}, proto: {})",
         pool_id, amount_in, amount_out, total_fee, protocol_fee);
@@ -1010,6 +1012,7 @@ async fn add_liquidity(
             token_a, amount_a, token_b, amount_b, shares,
         );
     });
+    analytics::invalidate_cache_for_pool(&pool_id);
 
     log!(INFO, "Add liquidity to {}: ({}, {}) -> {} shares for {}",
         pool_id, amount_a, amount_b, shares, caller);
@@ -1121,6 +1124,7 @@ async fn remove_liquidity(
             token_a, amount_a, token_b, amount_b, lp_shares,
         );
     });
+    analytics::invalidate_cache_for_pool(&pool_id);
 
     log!(INFO, "Remove liquidity from {}: {} shares -> ({}, {}) for {}",
         pool_id, lp_shares, amount_a, amount_b, caller);
@@ -1284,6 +1288,60 @@ fn get_latest_holder_snapshot(token: String) -> Option<HolderSnapshot> {
             .last()
             .cloned()
     })
+}
+
+// ─── Analytics: pool time series + rankings ───
+//
+// These mirror the shape of rumi_3pool's analytics endpoints so the
+// Explorer `/e/pool/{id}` page can render either pool source with
+// minimal branching. Responses are cached with a 60s TTL and
+// invalidated on new swap/liquidity events (see record_* call sites).
+
+#[query]
+fn get_amm_volume_series(query: AmmSeriesQuery) -> Vec<AmmVolumePoint> {
+    analytics::get_volume_series(query)
+}
+
+#[query]
+fn get_amm_balance_series(query: AmmSeriesQuery) -> Vec<AmmBalancePoint> {
+    analytics::get_balance_series(query)
+}
+
+#[query]
+fn get_amm_fee_series(query: AmmSeriesQuery) -> Vec<AmmFeePoint> {
+    analytics::get_fee_series(query)
+}
+
+#[query]
+fn get_amm_pool_stats(query: AmmStatsQuery) -> AmmPoolStats {
+    analytics::get_pool_stats(query)
+}
+
+#[query]
+fn get_amm_top_swappers(query: AmmTopSwappersQuery) -> Vec<(Principal, u64, u128)> {
+    analytics::get_top_swappers(query)
+}
+
+#[query]
+fn get_amm_top_lps(query: AmmTopLpsQuery) -> Vec<(Principal, u128, u32)> {
+    analytics::get_top_lps(query)
+}
+
+#[query]
+fn get_amm_swap_events_by_principal(query: AmmEventsByPrincipalQuery) -> Vec<AmmSwapEvent> {
+    analytics::get_swap_events_by_principal(query)
+}
+
+#[query]
+fn get_amm_liquidity_events_by_principal(
+    query: AmmEventsByPrincipalQuery,
+) -> Vec<AmmLiquidityEvent> {
+    analytics::get_liquidity_events_by_principal(query)
+}
+
+#[query]
+fn get_amm_swap_events_by_time_range(query: AmmEventsByTimeRangeQuery) -> Vec<AmmSwapEvent> {
+    analytics::get_swap_events_by_time_range(query)
 }
 
 // ─── ICRC-21 / ICRC-28 / ICRC-10 ───

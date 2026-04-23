@@ -181,6 +181,95 @@ pub struct HolderSnapshot {
     pub top_holders: Vec<HolderEntry>, // top 50
 }
 
+// ─── Analytics: windowed stats, time series, rankings ───
+
+#[derive(CandidType, Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum AmmStatsWindow {
+    Hour,
+    Day,
+    Week,
+    Month,
+    All,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct AmmSeriesQuery {
+    pub pool: PoolId,
+    pub window: AmmStatsWindow,
+    pub points: u32,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct AmmStatsQuery {
+    pub pool: PoolId,
+    pub window: AmmStatsWindow,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct AmmTopSwappersQuery {
+    pub pool: PoolId,
+    pub window: AmmStatsWindow,
+    pub limit: u32,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct AmmTopLpsQuery {
+    pub pool: PoolId,
+    pub limit: u32,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct AmmEventsByPrincipalQuery {
+    pub pool: PoolId,
+    pub who: Principal,
+    pub start: u64,
+    pub length: u64,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct AmmEventsByTimeRangeQuery {
+    pub pool: PoolId,
+    pub start_ns: u64,
+    pub end_ns: u64,
+    pub limit: u64,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct AmmVolumePoint {
+    pub ts_ns: u64,
+    pub volume_a_e8s: u128,
+    pub volume_b_e8s: u128,
+    pub swap_count: u32,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct AmmBalancePoint {
+    pub ts_ns: u64,
+    pub reserve_a_e8s: u128,
+    pub reserve_b_e8s: u128,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct AmmFeePoint {
+    pub ts_ns: u64,
+    pub fees_a_e8s: u128,
+    pub fees_b_e8s: u128,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct AmmPoolStats {
+    pub pool: PoolId,
+    pub window: AmmStatsWindow,
+    pub volume_a_e8s: u128,
+    pub volume_b_e8s: u128,
+    pub fees_a_e8s: u128,
+    pub fees_b_e8s: u128,
+    pub swap_count: u32,
+    pub unique_swappers: u32,
+    pub unique_lps: u32,
+    pub generated_at_ns: u64,
+}
+
 // ─── Errors ───
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]

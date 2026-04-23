@@ -185,6 +185,84 @@ type HolderSnapshot = record {
   top_holders : vec HolderEntry;
 };
 
+// ── Analytics ──
+
+type AmmStatsWindow = variant {
+  Hour;
+  Day;
+  Week;
+  Month;
+  All;
+};
+
+type AmmSeriesQuery = record {
+  pool : text;
+  window : AmmStatsWindow;
+  points : nat32;
+};
+
+type AmmStatsQuery = record {
+  pool : text;
+  window : AmmStatsWindow;
+};
+
+type AmmTopSwappersQuery = record {
+  pool : text;
+  window : AmmStatsWindow;
+  limit : nat32;
+};
+
+type AmmTopLpsQuery = record {
+  pool : text;
+  limit : nat32;
+};
+
+type AmmEventsByPrincipalQuery = record {
+  pool : text;
+  who : principal;
+  start : nat64;
+  length : nat64;
+};
+
+type AmmEventsByTimeRangeQuery = record {
+  pool : text;
+  start_ns : nat64;
+  end_ns : nat64;
+  limit : nat64;
+};
+
+type AmmVolumePoint = record {
+  ts_ns : nat64;
+  volume_a_e8s : nat;
+  volume_b_e8s : nat;
+  swap_count : nat32;
+};
+
+type AmmBalancePoint = record {
+  ts_ns : nat64;
+  reserve_a_e8s : nat;
+  reserve_b_e8s : nat;
+};
+
+type AmmFeePoint = record {
+  ts_ns : nat64;
+  fees_a_e8s : nat;
+  fees_b_e8s : nat;
+};
+
+type AmmPoolStats = record {
+  pool : text;
+  window : AmmStatsWindow;
+  volume_a_e8s : nat;
+  volume_b_e8s : nat;
+  fees_a_e8s : nat;
+  fees_b_e8s : nat;
+  swap_count : nat32;
+  unique_swappers : nat32;
+  unique_lps : nat32;
+  generated_at_ns : nat64;
+};
+
 // ── HTTP Request ──
 
 type HeaderField = record { text; text };
@@ -254,6 +332,17 @@ service : (AmmInitArgs) -> {
   get_holder_snapshots : (text, nat64, nat64) -> (vec HolderSnapshot) query;
   get_holder_snapshot_count : (text) -> (nat64) query;
   get_latest_holder_snapshot : (text) -> (opt HolderSnapshot) query;
+
+  // ── Analytics (parity with rumi_3pool) ──
+  get_amm_volume_series : (AmmSeriesQuery) -> (vec AmmVolumePoint) query;
+  get_amm_balance_series : (AmmSeriesQuery) -> (vec AmmBalancePoint) query;
+  get_amm_fee_series : (AmmSeriesQuery) -> (vec AmmFeePoint) query;
+  get_amm_pool_stats : (AmmStatsQuery) -> (AmmPoolStats) query;
+  get_amm_top_swappers : (AmmTopSwappersQuery) -> (vec record { principal; nat64; nat }) query;
+  get_amm_top_lps : (AmmTopLpsQuery) -> (vec record { principal; nat; nat32 }) query;
+  get_amm_swap_events_by_principal : (AmmEventsByPrincipalQuery) -> (vec AmmSwapEvent) query;
+  get_amm_liquidity_events_by_principal : (AmmEventsByPrincipalQuery) -> (vec AmmLiquidityEvent) query;
+  get_amm_swap_events_by_time_range : (AmmEventsByTimeRangeQuery) -> (vec AmmSwapEvent) query;
 
   // ── HTTP ──
   http_request : (HttpRequest) -> (HttpResponse) query;

@@ -42,6 +42,18 @@ type PendingClaim = record {
   created_at : nat64;
 };
 
+type AmmSwapEvent = record {
+  id : nat64;
+  caller : principal;
+  pool_id : text;
+  token_in : principal;
+  amount_in : nat;
+  token_out : principal;
+  amount_out : nat;
+  fee : nat;
+  timestamp : nat64;
+};
+
 // ── ICRC-21 Consent Messages ──
 
 type ConsentMessageMetadata = record {
@@ -94,6 +106,48 @@ type StandardRecord = record {
   url : text;
 };
 
+// ── Liquidity Events ──
+
+type AmmLiquidityAction = variant {
+  AddLiquidity;
+  RemoveLiquidity;
+};
+
+type AmmLiquidityEvent = record {
+  id : nat64;
+  caller : principal;
+  pool_id : text;
+  action : AmmLiquidityAction;
+  token_a : principal;
+  amount_a : nat;
+  token_b : principal;
+  amount_b : nat;
+  lp_shares : nat;
+  timestamp : nat64;
+};
+
+// ── Admin Events ──
+
+type AmmAdminAction = variant {
+  CreatePool : record { pool_id : text; token_a : principal; token_b : principal; fee_bps : nat16 };
+  SetFee : record { pool_id : text; fee_bps : nat16 };
+  SetProtocolFee : record { pool_id : text; protocol_fee_bps : nat16 };
+  WithdrawProtocolFees : record { pool_id : text; amount_a : nat; amount_b : nat };
+  PausePool : record { pool_id : text };
+  UnpausePool : record { pool_id : text };
+  SetPoolCreationOpen : record { open : bool };
+  SetMaintenanceMode : record { enabled : bool };
+  ClaimPending : record { claim_id : nat64; claimant : principal; amount : nat };
+  ResolvePendingClaim : record { claim_id : nat64 };
+};
+
+type AmmAdminEvent = record {
+  id : nat64;
+  caller : principal;
+  action : AmmAdminAction;
+  timestamp : nat64;
+};
+
 // ── AMM Errors ──
 
 type AmmError = variant {
@@ -113,6 +167,117 @@ type AmmError = variant {
   FeeBpsOutOfRange;
   MaintenanceMode;
   ClaimNotFound;
+  PoolBusy;
+};
+
+// ── Holder Snapshots ──
+
+type HolderEntry = record {
+  holder : principal;
+  balance : nat;
+};
+
+type HolderSnapshot = record {
+  token : text;
+  timestamp : nat64;
+  holder_count : nat64;
+  total_supply : nat;
+  top_holders : vec HolderEntry;
+};
+
+// ── Analytics ──
+
+type AmmStatsWindow = variant {
+  Hour;
+  Day;
+  Week;
+  Month;
+  All;
+};
+
+type AmmSeriesQuery = record {
+  pool : text;
+  window : AmmStatsWindow;
+  points : nat32;
+};
+
+type AmmStatsQuery = record {
+  pool : text;
+  window : AmmStatsWindow;
+};
+
+type AmmTopSwappersQuery = record {
+  pool : text;
+  window : AmmStatsWindow;
+  limit : nat32;
+};
+
+type AmmTopLpsQuery = record {
+  pool : text;
+  limit : nat32;
+};
+
+type AmmEventsByPrincipalQuery = record {
+  pool : text;
+  who : principal;
+  start : nat64;
+  length : nat64;
+};
+
+type AmmEventsByTimeRangeQuery = record {
+  pool : text;
+  start_ns : nat64;
+  end_ns : nat64;
+  limit : nat64;
+};
+
+type AmmVolumePoint = record {
+  ts_ns : nat64;
+  volume_a_e8s : nat;
+  volume_b_e8s : nat;
+  swap_count : nat32;
+};
+
+type AmmBalancePoint = record {
+  ts_ns : nat64;
+  reserve_a_e8s : nat;
+  reserve_b_e8s : nat;
+};
+
+type AmmFeePoint = record {
+  ts_ns : nat64;
+  fees_a_e8s : nat;
+  fees_b_e8s : nat;
+};
+
+type AmmPoolStats = record {
+  pool : text;
+  window : AmmStatsWindow;
+  volume_a_e8s : nat;
+  volume_b_e8s : nat;
+  fees_a_e8s : nat;
+  fees_b_e8s : nat;
+  swap_count : nat32;
+  unique_swappers : nat32;
+  unique_lps : nat32;
+  generated_at_ns : nat64;
+};
+
+// ── HTTP Request ──
+
+type HeaderField = record { text; text };
+
+type HttpRequest = record {
+  method : text;
+  url : text;
+  headers : vec HeaderField;
+  body : blob;
+};
+
+type HttpResponse = record {
+  status_code : nat16;
+  headers : vec HeaderField;
+  body : blob;
 };
 
 service : (AmmInitArgs) -> {
@@ -132,6 +297,7 @@ service : (AmmInitArgs) -> {
 
   is_pool_creation_open : () -> (bool) query;
   is_maintenance_mode : () -> (bool) query;
+  set_admin : (principal) -> (variant { Ok; Err : AmmError });
   set_maintenance_mode : (bool) -> (variant { Ok; Err : AmmError });
 
   // ── Pool Creation (permissionless when open, otherwise admin-only) ──
@@ -149,6 +315,37 @@ service : (AmmInitArgs) -> {
   withdraw_protocol_fees : (text) -> (variant { Ok : record { nat; nat }; Err : AmmError });
   pause_pool : (text) -> (variant { Ok; Err : AmmError });
   unpause_pool : (text) -> (variant { Ok; Err : AmmError });
+
+  // ── Swap Event History ──
+  get_amm_swap_events : (nat64, nat64) -> (vec AmmSwapEvent) query;
+  get_amm_swap_event_count : () -> (nat64) query;
+
+  // ── Liquidity Event History ──
+  get_amm_liquidity_events : (nat64, nat64) -> (vec AmmLiquidityEvent) query;
+  get_amm_liquidity_event_count : () -> (nat64) query;
+
+  // ── Admin Event History ──
+  get_amm_admin_events : (nat64, nat64) -> (vec AmmAdminEvent) query;
+  get_amm_admin_event_count : () -> (nat64) query;
+
+  // ── Holder Snapshots ──
+  get_holder_snapshots : (text, nat64, nat64) -> (vec HolderSnapshot) query;
+  get_holder_snapshot_count : (text) -> (nat64) query;
+  get_latest_holder_snapshot : (text) -> (opt HolderSnapshot) query;
+
+  // ── Analytics (parity with rumi_3pool) ──
+  get_amm_volume_series : (AmmSeriesQuery) -> (vec AmmVolumePoint) query;
+  get_amm_balance_series : (AmmSeriesQuery) -> (vec AmmBalancePoint) query;
+  get_amm_fee_series : (AmmSeriesQuery) -> (vec AmmFeePoint) query;
+  get_amm_pool_stats : (AmmStatsQuery) -> (AmmPoolStats) query;
+  get_amm_top_swappers : (AmmTopSwappersQuery) -> (vec record { principal; nat64; nat }) query;
+  get_amm_top_lps : (AmmTopLpsQuery) -> (vec record { principal; nat; nat32 }) query;
+  get_amm_swap_events_by_principal : (AmmEventsByPrincipalQuery) -> (vec AmmSwapEvent) query;
+  get_amm_liquidity_events_by_principal : (AmmEventsByPrincipalQuery) -> (vec AmmLiquidityEvent) query;
+  get_amm_swap_events_by_time_range : (AmmEventsByTimeRangeQuery) -> (vec AmmSwapEvent) query;
+
+  // ── HTTP ──
+  http_request : (HttpRequest) -> (HttpResponse) query;
 
   // ── ICRC-21 / ICRC-28 / ICRC-10 ──
   icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (variant { Ok : ConsentInfo; Err : Icrc21Error });
