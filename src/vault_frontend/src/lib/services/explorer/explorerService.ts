@@ -1140,6 +1140,26 @@ export async function fetchIcrc1BalanceOf(
 }
 
 /**
+ * Query `icrc1_total_supply()` on any ICRC-1 ledger. Used by entity pages
+ * that need the live circulating supply for a token whose ledger is not
+ * tracked by analytics. Returns null on error so callers can hide the field.
+ */
+export async function fetchIcrc1TotalSupply(ledgerPrincipal: string): Promise<bigint | null> {
+	const key = `token:total_supply:${ledgerPrincipal}`;
+	const cached = getCached<bigint>(key, TTL.VAULTS);
+	if (cached !== null) return cached;
+
+	try {
+		const actor = getIcrc1Actor(ledgerPrincipal);
+		const result = await (actor as any).icrc1_total_supply();
+		return setCache(key, result as bigint);
+	} catch (err) {
+		console.error(`[explorerService] fetchIcrc1TotalSupply(${ledgerPrincipal}) failed:`, err);
+		return null;
+	}
+}
+
+/**
  * List every subaccount that has held a balance under `owner` in the icUSD index.
  * `start` is optional pagination — omit for the first page.
  */

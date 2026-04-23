@@ -90,7 +90,7 @@
             {@const ceilPct = debtCeilingPct(row)}
             <tr class="border-b border-gray-700/30 hover:bg-gray-700/20 transition-colors">
               <td class="px-4 py-3">
-                <a href="/explorer/token/{row.config.principal}" class="inline-block hover:opacity-80 transition-opacity">
+                <a href="/explorer/e/token/{row.config.principal}" class="inline-block hover:opacity-80 transition-opacity">
                   <TokenBadge symbol={row.config.symbol} principalId={row.config.principal} size="md" linked={false} />
                 </a>
               </td>

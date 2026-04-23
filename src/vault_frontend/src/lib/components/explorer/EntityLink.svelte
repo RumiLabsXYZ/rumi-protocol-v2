@@ -25,7 +25,7 @@
     switch (type) {
       case 'vault': return `/explorer/e/vault/${value}`;
       case 'address': return `/explorer/e/address/${value}`;
-      case 'token': return `/explorer/token/${value}`;
+      case 'token': return `/explorer/e/token/${value}`;
       case 'event': return `/explorer/e/event/${value}`;
       case 'canister': return `/explorer/e/address/${value}`;
       case 'block_index': return null;

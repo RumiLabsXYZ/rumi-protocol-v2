@@ -28,6 +28,7 @@ import type {
 	PriceSeriesResponse,
 	ThreePoolSeriesResponse,
 	CycleSeriesResponse,
+	TopHoldersResponse,
 } from '$declarations/rumi_analytics/rumi_analytics.did';
 
 // ── TTL constants (ms) ───────────────────────────────────────────────────────
@@ -398,5 +399,45 @@ export async function fetchThreePoolSeries(limit = 500): Promise<ThreePoolSeries
 	} catch (err) {
 		console.error('[analyticsService] fetchThreePoolSeries failed:', err);
 		return [];
+	}
+}
+
+// ── Top holders ─────────────────────────────────────────────────────────────
+
+const EMPTY_TOP_HOLDERS = (token: Principal): TopHoldersResponse => ({
+	token,
+	total_holders: 0,
+	total_supply_e8s: 0n,
+	generated_at_ns: 0n,
+	rows: [],
+	source: 'unsupported',
+});
+
+/**
+ * Returns the top holders of a token, ranked by descending balance, with each
+ * holder's share of supply in basis points.
+ *
+ * For tokens not tracked by analytics (collateral assets, etc.) the response
+ * has `total_holders: 0` and `source: "unsupported"` — callers should render
+ * an empty state instead of breaking. The 60s TTL matches the canister-side
+ * cache window so cascading reloads stay cheap.
+ */
+export async function fetchTopHolders(
+	token: Principal,
+	limit = 50
+): Promise<TopHoldersResponse> {
+	const key = `analytics:top_holders:${token.toText()}:${limit}`;
+	const cached = getCached<TopHoldersResponse>(key, TTL.SERIES);
+	if (cached) return cached;
+
+	try {
+		const result = await getActor().get_top_holders({
+			token,
+			limit: [limit],
+		});
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[analyticsService] fetchTopHolders failed:', err);
+		return EMPTY_TOP_HOLDERS(token);
 	}
 }
