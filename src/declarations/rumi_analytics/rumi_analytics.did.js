@@ -145,6 +145,23 @@ export const idlFactory = ({ IDL }) => {
     'balance_ratios' : IDL.Vec(IDL.Float64),
     'max_imbalance_pct' : IDL.Float64,
   });
+  const PoolRoutesQuery = IDL.Record({
+    'limit' : IDL.Opt(IDL.Nat32),
+    'window_ns' : IDL.Opt(IDL.Nat64),
+    'pool_id' : IDL.Text,
+  });
+  const PoolRoute = IDL.Record({
+    'swap_count' : IDL.Nat64,
+    'volume_usd_e8s' : IDL.Nat64,
+    'avg_hop_count' : IDL.Nat32,
+    'route' : IDL.Vec(IDL.Principal),
+  });
+  const PoolRoutesResponse = IDL.Record({
+    'generated_at_ns' : IDL.Nat64,
+    'window_ns' : IDL.Nat64,
+    'pool_id' : IDL.Text,
+    'routes' : IDL.Vec(PoolRoute),
+  });
   const FastPriceSnapshot = IDL.Record({
     'timestamp_ns' : IDL.Nat64,
     'prices' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Float64, IDL.Text)),
@@ -211,6 +228,22 @@ export const idlFactory = ({ IDL }) => {
   const ThreePoolSeriesResponse = IDL.Record({
     'rows' : IDL.Vec(Fast3PoolSnapshot),
     'next_from_ts' : IDL.Opt(IDL.Nat64),
+  });
+  const TokenFlowQuery = IDL.Record({
+    'min_volume_usd_e8s' : IDL.Opt(IDL.Nat64),
+    'limit' : IDL.Opt(IDL.Nat32),
+    'window_ns' : IDL.Opt(IDL.Nat64),
+  });
+  const TokenFlowEdge = IDL.Record({
+    'to_token' : IDL.Principal,
+    'from_token' : IDL.Principal,
+    'swap_count' : IDL.Nat64,
+    'volume_usd_e8s' : IDL.Nat64,
+  });
+  const TokenFlowResponse = IDL.Record({
+    'edges' : IDL.Vec(TokenFlowEdge),
+    'generated_at_ns' : IDL.Nat64,
+    'window_ns' : IDL.Nat64,
   });
   const TopCounterpartiesQuery = IDL.Record({
     'principal' : IDL.Principal,
@@ -368,6 +401,11 @@ export const idlFactory = ({ IDL }) => {
       ),
     'get_ohlc' : IDL.Func([OhlcQuery], [OhlcResponse], ['query']),
     'get_peg_status' : IDL.Func([], [IDL.Opt(PegStatus)], ['query']),
+    'get_pool_routes' : IDL.Func(
+        [PoolRoutesQuery],
+        [PoolRoutesResponse],
+        ['query'],
+      ),
     'get_price_series' : IDL.Func(
         [RangeQuery],
         [PriceSeriesResponse],
@@ -383,6 +421,11 @@ export const idlFactory = ({ IDL }) => {
     'get_three_pool_series' : IDL.Func(
         [RangeQuery],
         [ThreePoolSeriesResponse],
+        ['query'],
+      ),
+    'get_token_flow' : IDL.Func(
+        [TokenFlowQuery],
+        [TokenFlowResponse],
         ['query'],
       ),
     'get_top_counterparties' : IDL.Func(

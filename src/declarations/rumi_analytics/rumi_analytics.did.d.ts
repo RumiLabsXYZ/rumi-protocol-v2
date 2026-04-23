@@ -209,6 +209,23 @@ export interface PegStatus {
   'balance_ratios' : Array<number>,
   'max_imbalance_pct' : number,
 }
+export interface PoolRoute {
+  'swap_count' : bigint,
+  'volume_usd_e8s' : bigint,
+  'avg_hop_count' : number,
+  'route' : Array<Principal>,
+}
+export interface PoolRoutesQuery {
+  'limit' : [] | [number],
+  'window_ns' : [] | [bigint],
+  'pool_id' : string,
+}
+export interface PoolRoutesResponse {
+  'generated_at_ns' : bigint,
+  'window_ns' : bigint,
+  'pool_id' : string,
+  'routes' : Array<PoolRoute>,
+}
 export interface PriceSeriesResponse {
   'rows' : Array<FastPriceSnapshot>,
   'next_from_ts' : [] | [bigint],
@@ -244,6 +261,22 @@ export interface SwapSeriesResponse {
 export interface ThreePoolSeriesResponse {
   'rows' : Array<Fast3PoolSnapshot>,
   'next_from_ts' : [] | [bigint],
+}
+export interface TokenFlowEdge {
+  'to_token' : Principal,
+  'from_token' : Principal,
+  'swap_count' : bigint,
+  'volume_usd_e8s' : bigint,
+}
+export interface TokenFlowQuery {
+  'min_volume_usd_e8s' : [] | [bigint],
+  'limit' : [] | [number],
+  'window_ns' : [] | [bigint],
+}
+export interface TokenFlowResponse {
+  'edges' : Array<TokenFlowEdge>,
+  'generated_at_ns' : bigint,
+  'window_ns' : bigint,
 }
 export interface TopCounterpartiesQuery {
   'principal' : Principal,
@@ -356,11 +389,13 @@ export interface _SERVICE {
   >,
   'get_ohlc' : ActorMethod<[OhlcQuery], OhlcResponse>,
   'get_peg_status' : ActorMethod<[], [] | [PegStatus]>,
+  'get_pool_routes' : ActorMethod<[PoolRoutesQuery], PoolRoutesResponse>,
   'get_price_series' : ActorMethod<[RangeQuery], PriceSeriesResponse>,
   'get_protocol_summary' : ActorMethod<[], ProtocolSummary>,
   'get_stability_series' : ActorMethod<[RangeQuery], StabilitySeriesResponse>,
   'get_swap_series' : ActorMethod<[RangeQuery], SwapSeriesResponse>,
   'get_three_pool_series' : ActorMethod<[RangeQuery], ThreePoolSeriesResponse>,
+  'get_token_flow' : ActorMethod<[TokenFlowQuery], TokenFlowResponse>,
   'get_top_counterparties' : ActorMethod<
     [TopCounterpartiesQuery],
     TopCounterpartiesResponse
