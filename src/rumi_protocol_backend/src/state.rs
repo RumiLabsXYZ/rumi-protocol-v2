@@ -700,7 +700,8 @@ pub struct State {
     pub bot_budget_remaining_e8s: u64,
     pub bot_budget_start_timestamp: u64,
     pub bot_total_debt_covered_e8s: u64,
-    pub bot_total_icusd_deposited_e8s: u64,
+    #[serde(default)]
+    pub bot_total_icusd_deposited_e8s: u64, // Dead field, kept for deserialization compat
     /// Which collateral types the bot is allowed to liquidate.
     /// Vaults with collateral not in this set are rejected by bot_liquidate,
     /// leaving the stability pool to handle them.

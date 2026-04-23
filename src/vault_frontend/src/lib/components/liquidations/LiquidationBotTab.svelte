@@ -9,7 +9,6 @@
     budget_remaining_e8s: bigint;
     budget_start_timestamp: bigint;
     total_debt_covered_e8s: bigint;
-    total_icusd_deposited_e8s: bigint;
   }
 
   interface BotEvent {
@@ -66,7 +65,6 @@
         budget_remaining_e8s: raw.budget_remaining_e8s,
         budget_start_timestamp: raw.budget_start_timestamp,
         total_debt_covered_e8s: raw.total_debt_covered_e8s,
-        total_icusd_deposited_e8s: raw.total_icusd_deposited_e8s,
       };
     } catch (err: any) {
       console.error('Failed to load bot stats:', err);
@@ -125,16 +123,8 @@
       <h3 class="card-title">All-Time Stats</h3>
       <div class="stats-grid">
         <div class="stat">
-          <span class="stat-label">Debt Covered</span>
+          <span class="stat-label">Total Debt Covered</span>
           <span class="stat-value">{formatE8s(stats.total_debt_covered_e8s)} icUSD</span>
-        </div>
-        <div class="stat">
-          <span class="stat-label">icUSD Deposited</span>
-          <span class="stat-value">{formatE8s(stats.total_icusd_deposited_e8s)} icUSD</span>
-        </div>
-        <div class="stat">
-          <span class="stat-label">Deficit</span>
-          <span class="stat-value deficit">{formatE8s(BigInt(Number(stats.total_debt_covered_e8s) - Number(stats.total_icusd_deposited_e8s)))} icUSD</span>
         </div>
         <div class="stat">
           <span class="stat-label">Bot Canister</span>

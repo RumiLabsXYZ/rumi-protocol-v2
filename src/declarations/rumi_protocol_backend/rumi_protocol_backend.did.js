@@ -145,7 +145,6 @@ export const idlFactory = ({ IDL }) => {
     'liquidation_bot_principal' : IDL.Opt(IDL.Principal),
     'budget_total_e8s' : IDL.Nat64,
     'budget_start_timestamp' : IDL.Nat64,
-    'total_icusd_deposited_e8s' : IDL.Nat64,
   });
   const CollateralStatus = IDL.Variant({
     'Paused' : IDL.Null,
@@ -794,12 +793,12 @@ export const idlFactory = ({ IDL }) => {
         [Result_1],
         [],
       ),
+    'admin_resolve_stuck_claim' : IDL.Func([IDL.Nat64, IDL.Bool], [Result], []),
     'admin_sweep_to_treasury' : IDL.Func([IDL.Text], [Result_1], []),
     'borrow_from_vault' : IDL.Func([VaultArg], [Result_2], []),
     'bot_cancel_liquidation' : IDL.Func([IDL.Nat64], [Result], []),
     'bot_claim_liquidation' : IDL.Func([IDL.Nat64], [Result_3], []),
     'bot_confirm_liquidation' : IDL.Func([IDL.Nat64], [Result], []),
-    'bot_deposit_to_reserves' : IDL.Func([IDL.Nat64], [Result], []),
     'claim_liquidity_returns' : IDL.Func([], [Result_1], []),
     'clear_stuck_operations' : IDL.Func(
         [IDL.Opt(IDL.Principal)],

@@ -1623,7 +1623,6 @@ pub struct BotStatsResponse {
     pub budget_remaining_e8s: u64,
     pub budget_start_timestamp: u64,
     pub total_debt_covered_e8s: u64,
-    pub total_icusd_deposited_e8s: u64,
 }
 
 #[candid_method(update)]
@@ -2206,26 +2205,6 @@ async fn dev_set_collateral_price(collateral_type: Principal, price_usd: f64) ->
     Ok(format!("Price for {} set to ${:.6} (was {:?})", collateral_type, price_usd, old_price))
 }
 
-/// Bot calls this after swapping collateral → icUSD to repay its obligation.
-#[candid_method(update)]
-#[update]
-async fn bot_deposit_to_reserves(amount_e8s: u64) -> Result<(), ProtocolError> {
-    let caller = ic_cdk::api::caller();
-    let is_bot = read_state(|s| {
-        s.liquidation_bot_principal.map_or(false, |bp| bp == caller)
-    });
-    if !is_bot {
-        return Err(ProtocolError::GenericError(
-            "Caller is not the registered liquidation bot canister".to_string(),
-        ));
-    }
-    mutate_state(|s| {
-        s.bot_total_icusd_deposited_e8s += amount_e8s;
-    });
-    log!(INFO, "[bot_deposit_to_reserves] Bot deposited {} e8s icUSD to reserves", amount_e8s);
-    Ok(())
-}
-
 #[candid_method(query)]
 #[query]
 fn get_bot_stats() -> BotStatsResponse {
@@ -2235,8 +2214,49 @@ fn get_bot_stats() -> BotStatsResponse {
         budget_remaining_e8s: s.bot_budget_remaining_e8s,
         budget_start_timestamp: s.bot_budget_start_timestamp,
         total_debt_covered_e8s: s.bot_total_debt_covered_e8s,
-        total_icusd_deposited_e8s: s.bot_total_icusd_deposited_e8s,
     })
+}
+
+/// Admin-only: force-resolve a stuck bot claim. Used when the bot's ckUSDC transfer
+/// or confirm failed and the vault is stuck with bot_processing=true.
+///
+/// - `apply_debt_reduction = false`: TransferFailed case. ckUSDC never reached the backend,
+///   so vault debt stays as-is. Just unlocks vault and restores budget.
+/// - `apply_debt_reduction = true`: ConfirmFailed case. ckUSDC DID reach the backend,
+///   so also write down the vault's debt and collateral (same as what confirm would do).
+#[candid_method(update)]
+#[update]
+fn admin_resolve_stuck_claim(vault_id: u64, apply_debt_reduction: bool) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_dev = read_state(|s| s.developer_principal == caller);
+    if !is_dev {
+        return Err(ProtocolError::GenericError("Unauthorized: developer only".to_string()));
+    }
+
+    let claim = read_state(|s| s.bot_claims.get(&vault_id).cloned())
+        .ok_or_else(|| ProtocolError::GenericError(format!(
+            "No active claim for vault #{}", vault_id
+        )))?;
+
+    mutate_state(|s| {
+        if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
+            if apply_debt_reduction {
+                vault.borrowed_icusd_amount -= ICUSD::new(claim.debt_amount);
+                vault.collateral_amount = vault.collateral_amount.saturating_sub(claim.collateral_amount);
+                s.bot_total_debt_covered_e8s += claim.debt_amount;
+            }
+            vault.bot_processing = false;
+        }
+        if !apply_debt_reduction {
+            s.bot_budget_remaining_e8s += claim.debt_amount;
+        }
+        s.bot_claims.remove(&vault_id);
+    });
+
+    log!(INFO, "[admin_resolve_stuck_claim] Resolved stuck claim for vault #{}: debt={}, collateral={}, debt_reduced={}",
+        vault_id, claim.debt_amount, claim.collateral_amount, apply_debt_reduction);
+
+    Ok(())
 }
 
 // ---- Stable token repayment admin functions ----

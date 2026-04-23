@@ -72,7 +72,6 @@ type BotStatsResponse = record {
   liquidation_bot_principal : opt principal;
   budget_total_e8s : nat64;
   budget_start_timestamp : nat64;
-  total_icusd_deposited_e8s : nat64;
 };
 type CandidVault = record {
   collateral_amount : nat64;
@@ -680,7 +679,7 @@ service : (ProtocolArg) -> {
   bot_cancel_liquidation : (nat64) -> (Result);
   bot_claim_liquidation : (nat64) -> (Result_3);
   bot_confirm_liquidation : (nat64) -> (Result);
-  bot_deposit_to_reserves : (nat64) -> (Result);
+  admin_resolve_stuck_claim : (nat64, bool) -> (Result);
   claim_liquidity_returns : () -> (Result_1);
   clear_stuck_operations : (opt principal) -> (Result_1);
   close_vault : (nat64) -> (Result_4);

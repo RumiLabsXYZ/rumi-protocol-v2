@@ -1,15 +1,45 @@
-use candid::{CandidType, Deserialize, Nat};
+use candid::{CandidType, Deserialize, Nat, Principal};
 use ic_cdk_macros::{init, post_upgrade, pre_upgrade, query, update};
 use ic_canister_log::{declare_log_buffer, log};
 use icrc_ledger_types::icrc1::account::Account;
+use std::cell::RefCell;
 
-mod state;
+mod history;
+mod icpswap;
+mod memory;
 mod process;
+mod state;
 mod swap;
 
-use state::{BotAdminAction, BotAdminEvent, BotConfig, BotLiquidationEvent, BotState, LiquidatableVaultInfo};
+use state::{BotAdminAction, BotAdminEvent, BotConfig, BotState, LiquidatableVaultInfo};
 
 declare_log_buffer!(name = INFO, capacity = 1000);
+
+thread_local! {
+    /// Reentrancy guard: true while process_pending or an admin async endpoint is running.
+    static PROCESSING: RefCell<bool> = RefCell::new(false);
+}
+
+struct ProcessingGuard;
+
+impl ProcessingGuard {
+    fn acquire() -> Result<Self, &'static str> {
+        PROCESSING.with(|p| {
+            let mut flag = p.borrow_mut();
+            if *flag {
+                return Err("Already processing");
+            }
+            *flag = true;
+            Ok(Self)
+        })
+    }
+}
+
+impl Drop for ProcessingGuard {
+    fn drop(&mut self) {
+        PROCESSING.with(|p| *p.borrow_mut() = false);
+    }
+}
 
 #[derive(CandidType, Deserialize)]
 pub struct BotInitArgs {
@@ -18,8 +48,11 @@ pub struct BotInitArgs {
 
 #[init]
 fn init(args: BotInitArgs) {
+    memory::init_memory_manager();
+    history::init_history();
     state::init_state(BotState {
         config: Some(args.config),
+        migrated_to_stable_structures: true,
         ..Default::default()
     });
     setup_timer();
@@ -27,12 +60,68 @@ fn init(args: BotInitArgs) {
 
 #[pre_upgrade]
 fn pre_upgrade() {
-    state::save_to_stable_memory();
+    let migrated = state::read_state(|s| s.migrated_to_stable_structures);
+    if migrated {
+        state::save_config_to_stable();
+    } else {
+        state::save_to_stable_memory();
+    }
 }
 
 #[post_upgrade]
 fn post_upgrade() {
-    state::load_from_stable_memory();
+    // STEP 1: Rescue legacy JSON blob BEFORE MemoryManager::init.
+    // Raw stable64_read is safe here because MemoryManager hasn't been initialized yet.
+    // On second+ upgrades, offset 0 contains the MemoryManager header (magic 0x4D474943 + version).
+    // Interpreted as a little-endian u64, this exceeds 10_000_000, so the len check below
+    // correctly returns None and we fall through to load_config_from_stable().
+    let size = ic_cdk::api::stable::stable64_size();
+    let legacy_state: Option<BotState> = if size > 0 {
+        let mut len_bytes = [0u8; 8];
+        ic_cdk::api::stable::stable64_read(0, &mut len_bytes);
+        let len = u64::from_le_bytes(len_bytes) as usize;
+        if len > 0 && len < 10_000_000 {
+            let mut bytes = vec![0u8; len];
+            ic_cdk::api::stable::stable64_read(8, &mut bytes);
+            serde_json::from_slice(&bytes).ok()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // STEP 2: Initialize MemoryManager. On first migration this writes a new header
+    // at offset 0 (fine, we already rescued above). On subsequent upgrades it reads
+    // the existing header (non-destructive, idempotent).
+    memory::init_memory_manager();
+    history::init_history();
+
+    // STEP 3: Decide migration path.
+    if let Some(ref state) = legacy_state {
+        if !state.migrated_to_stable_structures {
+            // First upgrade after migration: move legacy events into stable map
+            log!(INFO, "Migrating {} legacy events to stable map", state.liquidation_events.len());
+            history::migrate_legacy_events(&state.liquidation_events);
+        }
+    }
+
+    // STEP 4: Load state.
+    if let Some(legacy) = legacy_state {
+        if legacy.migrated_to_stable_structures {
+            // Already migrated, but the pre_upgrade wrote config to MEM_ID_CONFIG.
+            // The legacy_state we read from offset 0 is stale. Load from StableCell instead.
+            state::load_config_from_stable();
+        } else {
+            // First migration: use the rescued state, mark as migrated.
+            state::init_state(legacy);
+            state::mutate_state(|s| s.migrated_to_stable_structures = true);
+        }
+    } else {
+        // No legacy state found at all. Try new-format config.
+        state::load_config_from_stable();
+    }
+
     setup_timer();
 }
 
@@ -43,24 +132,44 @@ fn setup_timer() {
     );
 }
 
+// ---- Inspect message (cycle optimization, NOT a security boundary) ----
+
+#[ic_cdk_macros::inspect_message]
+fn inspect_message() {
+    let method = ic_cdk::api::call::method_name();
+    match method.as_str() {
+        // Admin/auth methods: reject anonymous to save cycles on Candid decoding
+        "set_config" | "admin_resolve_pool_ordering" | "admin_approve_pool"
+        | "admin_sweep_ckusdc" | "admin_retry_stuck_claim" => {
+            if ic_cdk::api::caller() != Principal::anonymous() {
+                ic_cdk::api::call::accept_message();
+            }
+        }
+        // All other methods (queries, notify from backend): accept
+        _ => ic_cdk::api::call::accept_message(),
+    }
+}
+
+// ---- Core endpoints ----
+
 #[update]
 fn notify_liquidatable_vaults(vaults: Vec<LiquidatableVaultInfo>) {
     let caller = ic_cdk::api::caller();
-    let backend = state::read_state(|s| {
-        s.config.as_ref().map(|c| c.backend_principal)
-    });
+    let backend = state::read_state(|s| s.config.as_ref().map(|c| c.backend_principal));
     if Some(caller) != backend {
         log!(INFO, "Rejected notification from unauthorized caller: {}", caller);
         return;
     }
     let count = vaults.len();
     state::mutate_state(|s| {
+        // Replace (not append): backend sends the full current set each cycle.
         s.pending_vaults = vaults;
         s.admin_events.push(BotAdminEvent {
             timestamp: ic_cdk::api::time(),
             caller: caller.to_text(),
             action: BotAdminAction::VaultsNotified { count: count as u64 },
         });
+        trim_admin_events(&mut s.admin_events);
     });
     log!(INFO, "Received {} liquidatable vaults from backend", count);
 }
@@ -71,22 +180,15 @@ fn get_bot_stats() -> state::BotStats {
 }
 
 #[query]
-fn get_liquidation_events(offset: u64, limit: u64) -> Vec<BotLiquidationEvent> {
-    state::read_state(|s| {
-        let len = s.liquidation_events.len();
-        let start = (len as u64).saturating_sub(offset + limit) as usize;
-        let end = (len as u64).saturating_sub(offset) as usize;
-        s.liquidation_events[start..end].to_vec()
-    })
-}
-
-#[query]
 fn get_admin_events(offset: u64, limit: u64) -> Vec<state::BotAdminEvent> {
+    let limit = limit.min(1000);
     state::read_state(|s| {
         let len = s.admin_events.len();
-        let start = (len as u64).saturating_sub(offset + limit) as usize;
+        let start = (len as u64).saturating_sub(offset.saturating_add(limit)) as usize;
         let end = (len as u64).saturating_sub(offset) as usize;
-        if start >= end { return vec![]; }
+        if start >= end {
+            return vec![];
+        }
         s.admin_events[start..end].to_vec()
     })
 }
@@ -96,330 +198,222 @@ fn get_admin_event_count() -> u64 {
     state::read_state(|s| s.admin_events.len() as u64)
 }
 
+/// Cap admin_events to prevent unbounded heap growth.
+/// Keeps the most recent MAX entries, discards oldest.
+const MAX_ADMIN_EVENTS: usize = 10_000;
+
+fn trim_admin_events(events: &mut Vec<BotAdminEvent>) {
+    if events.len() > MAX_ADMIN_EVENTS {
+        let drain_count = events.len() - MAX_ADMIN_EVENTS;
+        events.drain(..drain_count);
+    }
+}
+
 #[update]
 fn set_config(config: BotConfig) {
-    let caller = ic_cdk::api::caller();
-    let is_admin = state::read_state(|s| {
-        s.config.as_ref().map(|c| c.admin == caller).unwrap_or(false)
-    });
-    if !is_admin {
-        ic_cdk::trap("Unauthorized: only admin can set config");
-    }
+    require_admin();
     state::mutate_state(|s| {
         s.config = Some(config);
         s.admin_events.push(BotAdminEvent {
             timestamp: ic_cdk::api::time(),
-            caller: caller.to_text(),
+            caller: ic_cdk::api::caller().to_text(),
             action: BotAdminAction::ConfigUpdated,
         });
+        trim_admin_events(&mut s.admin_events);
     });
 }
 
-// ─── Test Functions ───
+// ---- History query endpoints ----
 
-#[derive(CandidType, Deserialize)]
-pub struct TestSwapResult {
-    pub icp_input_e8s: u64,
-    pub stable_output_native: u64,
-    pub stable_route: String,
-    pub icusd_output_e8s: u64,
-    pub icusd_sent_to: String,
+#[query]
+fn get_liquidation(id: u64) -> Option<history::LiquidationRecordVersioned> {
+    history::get_record(id)
 }
 
-#[derive(CandidType, Deserialize)]
-pub struct TestForceResult {
-    pub vault_id: u64,
-    pub collateral_received_e8s: u64,
-    pub debt_covered_e8s: u64,
-    pub stable_output_native: u64,
-    pub stable_route: String,
-    pub icusd_output_e8s: u64,
-    pub icusd_deposited_to_reserves: bool,
-    pub icp_to_treasury_e8s: u64,
+#[query]
+fn get_liquidations(offset: u64, limit: u64) -> Vec<history::LiquidationRecordVersioned> {
+    history::get_records(offset, limit)
 }
+
+#[query]
+fn get_liquidation_count() -> u64 {
+    history::record_count()
+}
+
+#[query]
+fn get_stuck_liquidations() -> Vec<history::LiquidationRecordVersioned> {
+    history::get_stuck_records()
+}
+
+// ---- Legacy query (backward compat, delegates to new history) ----
+
+#[query]
+fn get_liquidation_events(offset: u64, limit: u64) -> Vec<history::LiquidationRecordVersioned> {
+    history::get_records(offset, limit)
+}
+
+// ---- Admin endpoints ----
 
 fn require_admin() {
     let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() {
+        ic_cdk::trap("Anonymous caller not allowed");
+    }
     let is_admin = state::read_state(|s| {
         s.config.as_ref().map(|c| c.admin == caller).unwrap_or(false)
     });
     if !is_admin {
-        ic_cdk::trap("Unauthorized: only admin can call test functions");
+        ic_cdk::trap("Unauthorized: only admin can call this function");
     }
 }
 
-/// Test the swap pipeline: ICP → ckStable → icUSD.
-/// Send ICP to the bot first, then call this. The icUSD output is sent back to the caller.
+/// One-time: fetch pool metadata to determine if ICP is token0 or token1.
 #[update]
-async fn test_swap_pipeline(amount_e8s: u64) -> TestSwapResult {
+async fn admin_resolve_pool_ordering() {
     require_admin();
+    let _guard = ProcessingGuard::acquire()
+        .unwrap_or_else(|_| ic_cdk::trap("Another operation is in progress"));
+    let (pool, icp_ledger) = state::read_state(|s| {
+        let c = s.config.as_ref().expect("Config not set");
+        (c.icpswap_pool, c.icp_ledger)
+    });
 
-    let config = state::read_state(|s| s.config.clone())
-        .expect("Bot not configured");
+    let metadata = icpswap::fetch_metadata(pool)
+        .await
+        .unwrap_or_else(|e| ic_cdk::trap(&format!("Failed to fetch metadata: {}", e)));
 
-    log!(INFO, "[test_swap_pipeline] Starting with {} e8s ICP", amount_e8s);
+    let icp_text = icp_ledger.to_text();
+    let zero_for_one = metadata.token0.address == icp_text;
 
-    // Step 1: ICP → ckStable (KongSwap)
-    let stable_result = swap::swap_icp_for_stable(&config, amount_e8s).await;
-    let (stable_amount, _stable_token, route) = match stable_result {
-        Ok(r) => {
-            log!(INFO, "[test_swap_pipeline] KongSwap OK: {} native via {}", r.output_amount, r.route);
-            (r.output_amount, r.target_token, r.route)
+    state::mutate_state(|s| {
+        if let Some(ref mut config) = s.config {
+            config.icpswap_zero_for_one = Some(zero_for_one);
         }
-        Err(e) => ic_cdk::trap(&format!("KongSwap failed: {}", e)),
+    });
+
+    log!(
+        INFO,
+        "Pool ordering resolved: ICP is token{}, zeroForOne={}",
+        if zero_for_one { "0" } else { "1" },
+        zero_for_one
+    );
+}
+
+/// One-time: set up infinite ICRC-2 approve for ICP to the ICPSwap pool.
+#[update]
+async fn admin_approve_pool() {
+    require_admin();
+    let _guard = ProcessingGuard::acquire()
+        .unwrap_or_else(|_| ic_cdk::trap("Another operation is in progress"));
+    let (icp_ledger, pool) = state::read_state(|s| {
+        let c = s.config.as_ref().expect("Config not set");
+        (c.icp_ledger, c.icpswap_pool)
+    });
+
+    swap::approve_infinite(icp_ledger, pool)
+        .await
+        .unwrap_or_else(|e| ic_cdk::trap(&format!("Approve failed: {}", e)));
+
+    log!(INFO, "Infinite approve set: ICP ledger {} -> pool {}", icp_ledger, pool);
+}
+
+/// Emergency: transfer all bot ckUSDC to a target principal.
+/// Optionally mark an associated history record as AdminResolved.
+#[update]
+async fn admin_sweep_ckusdc(target: Principal, record_id: Option<u64>) {
+    require_admin();
+    let _guard = ProcessingGuard::acquire()
+        .unwrap_or_else(|_| ic_cdk::trap("Another operation is in progress"));
+    let ckusdc_ledger = state::read_state(|s| {
+        s.config.as_ref().expect("Config not set").ckusdc_ledger
+    });
+
+    let balance_result: Result<(Nat,), _> = ic_cdk::call(
+        ckusdc_ledger,
+        "icrc1_balance_of",
+        (Account {
+            owner: ic_cdk::id(),
+            subaccount: None,
+        },),
+    )
+    .await;
+
+    let balance = match balance_result {
+        Ok((b,)) => {
+            let val: u64 = b.0.to_string().parse().unwrap_or(u64::MAX);
+            if val == 0 {
+                ic_cdk::trap("Bot has zero ckUSDC balance");
+            }
+            val
+        }
+        Err((code, msg)) => ic_cdk::trap(&format!("Balance query failed: {:?} {}", code, msg)),
     };
 
-    // Step 2: ckStable → icUSD (3pool)
-    let icusd_amount = match swap::swap_stable_for_icusd(&config, stable_amount, _stable_token).await {
-        Ok(amount) => {
-            log!(INFO, "[test_swap_pipeline] 3pool OK: {} e8s icUSD", amount);
-            amount
-        }
-        Err(e) => ic_cdk::trap(&format!("3pool swap failed: {}", e)),
-    };
+    let fee = state::read_state(|s| s.config.as_ref().expect("Config not set").ckusdc_fee_e6.unwrap_or(10));
+    let send_amount = balance.saturating_sub(fee);
 
-    // Step 3: Send icUSD back to caller
-    let caller = ic_cdk::api::caller();
     let transfer_args = icrc_ledger_types::icrc1::transfer::TransferArg {
         from_subaccount: None,
-        to: Account { owner: caller, subaccount: None },
-        amount: Nat::from(icusd_amount),
+        to: Account {
+            owner: target,
+            subaccount: None,
+        },
+        amount: Nat::from(send_amount),
         fee: None,
         memo: None,
-        created_at_time: None,
+        created_at_time: Some(ic_cdk::api::time()),
     };
 
-    let sent_to = match ic_cdk::call::<_, (Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,)>(
-        config.icusd_ledger, "icrc1_transfer", (transfer_args,)
-    ).await {
-        Ok((Ok(_),)) => {
-            log!(INFO, "[test_swap_pipeline] Sent {} e8s icUSD to {}", icusd_amount, caller);
-            format!("{}", caller)
-        }
-        Ok((Err(e),)) => {
-            log!(INFO, "[test_swap_pipeline] icUSD transfer failed: {:?}, keeping in bot", e);
-            "bot (transfer failed)".to_string()
-        }
-        Err((code, msg)) => {
-            log!(INFO, "[test_swap_pipeline] icUSD transfer call failed: {:?} {}", code, msg);
-            "bot (call failed)".to_string()
-        }
-    };
+    let result: Result<
+        (Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,),
+        _,
+    > = ic_cdk::call(ckusdc_ledger, "icrc1_transfer", (transfer_args,)).await;
 
-    TestSwapResult {
-        icp_input_e8s: amount_e8s,
-        stable_output_native: stable_amount,
-        stable_route: route,
-        icusd_output_e8s: icusd_amount,
-        icusd_sent_to: sent_to,
+    match result {
+        Ok((Ok(block),)) => {
+            log!(INFO, "Swept {} ckUSDC e6 to {}, block {}", send_amount, target, block);
+            if let Some(id) = record_id {
+                history::update_record_status(id, history::LiquidationStatus::AdminResolved);
+                log!(INFO, "Marked record #{} as AdminResolved", id);
+            }
+        }
+        Ok((Err(e),)) => ic_cdk::trap(&format!("Sweep transfer failed: {:?}", e)),
+        Err((code, msg)) => ic_cdk::trap(&format!("Sweep call failed: {:?} {}", code, msg)),
     }
 }
 
-/// Force-liquidate a vault (bypasses health ratio check on backend).
-/// Uses the two-phase claim/confirm/cancel pattern.
+/// Retry confirm for a stuck claim.
 #[update]
-async fn test_force_liquidate(vault_id: u64) -> TestForceResult {
+async fn admin_retry_stuck_claim(vault_id: u64) {
     require_admin();
+    let _guard = ProcessingGuard::acquire()
+        .unwrap_or_else(|_| ic_cdk::trap("Another operation is in progress"));
+    let config = state::read_state(|s| s.config.clone()).expect("Not configured");
 
-    let config = state::read_state(|s| s.config.clone())
-        .expect("Bot not configured");
-
-    log!(INFO, "[test_force_liquidate] Force-liquidating vault #{}", vault_id);
-
-    // Step 1: Call dev_force_bot_liquidate (now uses claim pattern — locks vault, gets collateral)
-    let liq_result: Result<(process::BackendResult<process::BotLiquidationResult>,), _> =
-        ic_cdk::call(config.backend_principal, "dev_force_bot_liquidate", (vault_id,)).await;
-
-    let (collateral_amount, debt_covered, collateral_price) = match liq_result {
-        Ok((process::BackendResult::Ok(r),)) => {
-            log!(INFO, "[test_force_liquidate] Claimed {} e8s collateral, {} e8s debt", r.collateral_amount, r.debt_covered);
-            (r.collateral_amount, r.debt_covered, r.collateral_price_e8s)
-        }
-        Ok((process::BackendResult::Err(e),)) => ic_cdk::trap(&format!("dev_force_bot_liquidate error: {}", e)),
-        Err((code, msg)) => ic_cdk::trap(&format!("dev_force_bot_liquidate call failed: {:?} {}", code, msg)),
-    };
-
-    // Step 2: Swap ICP → ckStable
-    let swap_amount = process::calculate_swap_amount(collateral_amount, debt_covered, collateral_price);
-    let stable_result = swap::swap_icp_for_stable(&config, swap_amount).await;
-    let (stable_amount, stable_token, route) = match stable_result {
-        Ok(r) => {
-            log!(INFO, "[test_force_liquidate] KongSwap OK: {} native via {}", r.output_amount, r.route);
-            (r.output_amount, r.target_token, r.route)
-        }
-        Err(e) => {
-            // Cancel and trap
-            let _ = process::call_bot_cancel_liquidation_pub(&config, vault_id).await;
-            ic_cdk::trap(&format!("KongSwap failed (claim cancelled): {}", e));
-        }
-    };
-
-    // Step 3: ckStable → icUSD
-    let icusd_amount = match swap::swap_stable_for_icusd(&config, stable_amount, stable_token).await {
-        Ok(amount) => amount,
-        Err(e) => {
-            let _ = process::call_bot_cancel_liquidation_pub(&config, vault_id).await;
-            ic_cdk::trap(&format!("3pool swap failed (claim cancelled): {}", e));
-        }
-    };
-
-    // Step 4: Deposit icUSD to backend reserves
-    let deposited = match process::call_bot_deposit_to_reserves_pub(&config, icusd_amount).await {
-        Ok(()) => true,
-        Err(e) => {
-            log!(INFO, "[test_force_liquidate] Deposit failed: {}", e);
-            false
-        }
-    };
-
-    // Step 5: CONFIRM the liquidation (finalize vault state)
-    let confirmed = match process::call_bot_confirm_liquidation_pub(&config, vault_id).await {
+    match process::call_bot_confirm_liquidation(&config, vault_id).await {
         Ok(()) => {
-            log!(INFO, "[test_force_liquidate] Confirmed liquidation for vault #{}", vault_id);
-            true
+            // Find and update the stuck record for this vault
+            let count = history::record_count();
+            for id in (0..count).rev() {
+                if let Some(record) = history::get_record(id) {
+                    match &record {
+                        history::LiquidationRecordVersioned::V1(r) => {
+                            if r.vault_id == vault_id && r.status == history::LiquidationStatus::ConfirmFailed {
+                                history::update_record_status(id, history::LiquidationStatus::Completed);
+                                log!(INFO, "admin_retry_stuck_claim: marked record #{} as Completed", id);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            log!(INFO, "admin_retry_stuck_claim: confirmed vault #{}", vault_id);
         }
         Err(e) => {
-            log!(INFO, "[test_force_liquidate] Confirm failed: {}", e);
-            false
+            ic_cdk::trap(&format!(
+                "Confirm still failing for vault #{}: {}",
+                vault_id, e
+            ));
         }
-    };
-
-    // Step 6: Send remaining ICP to treasury
-    let icp_to_treasury = collateral_amount.saturating_sub(swap_amount);
-    if icp_to_treasury > 0 {
-        let _ = process::transfer_icp_to_treasury_pub(&config, icp_to_treasury).await;
-    }
-
-    // Log event
-    state::mutate_state(|s| {
-        s.stats.events_count += 1;
-        s.liquidation_events.push(BotLiquidationEvent {
-            timestamp: ic_cdk::api::time(),
-            vault_id,
-            debt_covered_e8s: debt_covered,
-            collateral_received_e8s: collateral_amount,
-            icusd_burned_e8s: icusd_amount,
-            collateral_to_treasury_e8s: icp_to_treasury,
-            swap_route: route.clone(),
-            effective_price_e8s: 0,
-            slippage_bps: 0,
-            success: confirmed && deposited,
-            error_message: if confirmed { Some("test_force_liquidate".to_string()) } else { Some("confirm failed".to_string()) },
-        });
-    });
-
-    TestForceResult {
-        vault_id,
-        collateral_received_e8s: collateral_amount,
-        debt_covered_e8s: debt_covered,
-        stable_output_native: stable_amount,
-        stable_route: route,
-        icusd_output_e8s: icusd_amount,
-        icusd_deposited_to_reserves: deposited,
-        icp_to_treasury_e8s: icp_to_treasury,
-    }
-}
-
-/// Force a PARTIAL liquidation of a vault (bypasses health ratio check, uses partial cap).
-/// Same as test_force_liquidate but calls dev_force_partial_bot_liquidate on backend.
-#[update]
-async fn test_force_partial_liquidate(vault_id: u64) -> TestForceResult {
-    require_admin();
-
-    let config = state::read_state(|s| s.config.clone())
-        .expect("Bot not configured");
-
-    log!(INFO, "[test_force_partial_liquidate] Partial-liquidating vault #{}", vault_id);
-
-    // Step 1: Call dev_force_partial_bot_liquidate (uses partial cap, skips CR check)
-    let liq_result: Result<(process::BackendResult<process::BotLiquidationResult>,), _> =
-        ic_cdk::call(config.backend_principal, "dev_force_partial_bot_liquidate", (vault_id,)).await;
-
-    let (collateral_amount, debt_covered, collateral_price) = match liq_result {
-        Ok((process::BackendResult::Ok(r),)) => {
-            log!(INFO, "[test_force_partial_liquidate] Claimed {} e8s collateral, {} e8s debt", r.collateral_amount, r.debt_covered);
-            (r.collateral_amount, r.debt_covered, r.collateral_price_e8s)
-        }
-        Ok((process::BackendResult::Err(e),)) => ic_cdk::trap(&format!("dev_force_partial_bot_liquidate error: {}", e)),
-        Err((code, msg)) => ic_cdk::trap(&format!("dev_force_partial_bot_liquidate call failed: {:?} {}", code, msg)),
-    };
-
-    // Step 2: Swap ICP → ckStable
-    let swap_amount = process::calculate_swap_amount(collateral_amount, debt_covered, collateral_price);
-    let stable_result = swap::swap_icp_for_stable(&config, swap_amount).await;
-    let (stable_amount, stable_token, route) = match stable_result {
-        Ok(r) => {
-            log!(INFO, "[test_force_partial_liquidate] KongSwap OK: {} native via {}", r.output_amount, r.route);
-            (r.output_amount, r.target_token, r.route)
-        }
-        Err(e) => {
-            let _ = process::call_bot_cancel_liquidation_pub(&config, vault_id).await;
-            ic_cdk::trap(&format!("KongSwap failed (claim cancelled): {}", e));
-        }
-    };
-
-    // Step 3: ckStable → icUSD
-    let icusd_amount = match swap::swap_stable_for_icusd(&config, stable_amount, stable_token).await {
-        Ok(amount) => amount,
-        Err(e) => {
-            let _ = process::call_bot_cancel_liquidation_pub(&config, vault_id).await;
-            ic_cdk::trap(&format!("3pool swap failed (claim cancelled): {}", e));
-        }
-    };
-
-    // Step 4: Deposit icUSD to backend reserves
-    let deposited = match process::call_bot_deposit_to_reserves_pub(&config, icusd_amount).await {
-        Ok(()) => true,
-        Err(e) => {
-            log!(INFO, "[test_force_partial_liquidate] Deposit failed: {}", e);
-            false
-        }
-    };
-
-    // Step 5: CONFIRM the liquidation
-    let confirmed = match process::call_bot_confirm_liquidation_pub(&config, vault_id).await {
-        Ok(()) => {
-            log!(INFO, "[test_force_partial_liquidate] Confirmed liquidation for vault #{}", vault_id);
-            true
-        }
-        Err(e) => {
-            log!(INFO, "[test_force_partial_liquidate] Confirm failed: {}", e);
-            false
-        }
-    };
-
-    // Step 6: Send remaining ICP to treasury
-    let icp_to_treasury = collateral_amount.saturating_sub(swap_amount);
-    if icp_to_treasury > 0 {
-        let _ = process::transfer_icp_to_treasury_pub(&config, icp_to_treasury).await;
-    }
-
-    // Log event
-    state::mutate_state(|s| {
-        s.stats.events_count += 1;
-        s.liquidation_events.push(BotLiquidationEvent {
-            timestamp: ic_cdk::api::time(),
-            vault_id,
-            debt_covered_e8s: debt_covered,
-            collateral_received_e8s: collateral_amount,
-            icusd_burned_e8s: icusd_amount,
-            collateral_to_treasury_e8s: icp_to_treasury,
-            swap_route: route.clone(),
-            effective_price_e8s: 0,
-            slippage_bps: 0,
-            success: confirmed && deposited,
-            error_message: if confirmed { Some("test_force_partial_liquidate".to_string()) } else { Some("confirm failed".to_string()) },
-        });
-    });
-
-    TestForceResult {
-        vault_id,
-        collateral_received_e8s: collateral_amount,
-        debt_covered_e8s: debt_covered,
-        stable_output_native: stable_amount,
-        stable_route: route,
-        icusd_output_e8s: icusd_amount,
-        icusd_deposited_to_reserves: deposited,
-        icp_to_treasury_e8s: icp_to_treasury,
     }
 }
