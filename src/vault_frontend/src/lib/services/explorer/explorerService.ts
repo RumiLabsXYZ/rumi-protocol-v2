@@ -505,27 +505,72 @@ export async function fetchEventCount(): Promise<bigint> {
 }
 
 /**
- * Fetch events with their global indices using the filtered endpoint.
- * Returns { total, events: Array<[bigint, Event]> }.
+ * Server-side filter spec for `fetchEvents`. Each field is optional; when
+ * omitted the backend treats it as "no filter on this dimension". Maps 1:1
+ * to the backend's `GetEventsArg` opt fields. Built from the activity-page
+ * facet bar via `facetsToBackendFilters` in `$utils/eventFacets`.
+ */
+export interface BackendEventFilters {
+	types?: BackendEventTypeFilter[];
+	principal?: Principal;
+	collateral_token?: Principal;
+	time_range?: { start_ns: bigint; end_ns: bigint };
+	min_size_e8s?: bigint;
+}
+
+/** Mirrors the backend `EventTypeFilter` Candid variant. */
+export type BackendEventTypeFilter =
+	| 'OpenVault' | 'CloseVault' | 'AdjustVault'
+	| 'Borrow' | 'Repay'
+	| 'Liquidation' | 'PartialLiquidation'
+	| 'Redemption' | 'ReserveRedemption'
+	| 'StabilityPoolDeposit' | 'StabilityPoolWithdraw'
+	| 'AdminMint' | 'AdminSweepToTreasury'
+	| 'Admin' | 'PriceUpdate' | 'AccrueInterest';
+
+function backendFiltersCacheKey(f: BackendEventFilters | undefined): string {
+	if (!f) return 'none';
+	const parts: string[] = [];
+	if (f.types?.length) parts.push(`t=${[...f.types].sort().join(',')}`);
+	if (f.principal) parts.push(`p=${f.principal.toText()}`);
+	if (f.collateral_token) parts.push(`c=${f.collateral_token.toText()}`);
+	if (f.time_range) parts.push(`r=${f.time_range.start_ns}-${f.time_range.end_ns}`);
+	if (f.min_size_e8s != null) parts.push(`s=${f.min_size_e8s}`);
+	return parts.length ? parts.join('|') : 'none';
+}
+
+function toCandidVariant(v: BackendEventTypeFilter): Record<string, null> {
+	return { [v]: null };
+}
+
+/**
+ * Fetch events with their global indices using `get_events_filtered`.
+ * `page` cursors over the *filtered* result set; `pageSize` capped at 200
+ * by the backend. `total` reports the matched count across the entire log.
  *
- * get_events_filtered takes {start, length} where:
- *   - start = page number (0-indexed)
- *   - length = page size
- * It excludes AccrueInterest events automatically.
+ * Without `filters`, behavior matches the legacy tail-fetch (hides
+ * AccrueInterest/PriceUpdate). With `filters`, all fields AND-combined.
  */
 export async function fetchEvents(
 	page: bigint,
-	pageSize: bigint
+	pageSize: bigint,
+	filters?: BackendEventFilters,
 ): Promise<{ total: bigint; events: [bigint, any][] }> {
-	const key = `events:filtered:${page}:${pageSize}`;
+	const filterKey = backendFiltersCacheKey(filters);
+	const key = `events:filtered:${page}:${pageSize}:${filterKey}`;
 	const cached = getCached<{ total: bigint; events: [bigint, any][] }>(key, TTL.EVENTS);
 	if (cached) return cached;
 
 	try {
-		const result = await publicActor.get_events_filtered({
-			start: page,
-			length: pageSize
-		});
+		const arg: any = { start: page, length: pageSize };
+		// Candid `opt T` is `[]` (none) or `[T]` (some) on the JS side.
+		arg.types = filters?.types?.length ? [filters.types.map(toCandidVariant)] : [];
+		arg.principal = filters?.principal ? [filters.principal] : [];
+		arg.collateral_token = filters?.collateral_token ? [filters.collateral_token] : [];
+		arg.time_range = filters?.time_range ? [filters.time_range] : [];
+		arg.min_size_e8s = filters?.min_size_e8s != null ? [filters.min_size_e8s] : [];
+
+		const result = await publicActor.get_events_filtered(arg);
 		const data = { total: result.total, events: result.events ?? [] };
 		return setCache(key, data);
 	} catch (err) {

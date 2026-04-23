@@ -527,6 +527,7 @@ export interface GetEventsFilteredResponse {
   'total' : bigint,
   'events' : Array<[bigint, Event]>,
 }
+export interface GetSnapshotsArg { 'start' : bigint, 'length' : bigint }
 export interface HttpRequest {
   'url' : string,
   'method' : string,
@@ -890,7 +891,7 @@ export interface _SERVICE {
   'get_min_icusd_amount' : ActorMethod<[], bigint>,
   'get_protocol_config' : ActorMethod<[], ProtocolConfig>,
   'get_protocol_snapshots' : ActorMethod<
-    [GetEventsArg],
+    [GetSnapshotsArg],
     Array<ProtocolSnapshot>
   >,
   'get_protocol_status' : ActorMethod<[], ProtocolStatus>,

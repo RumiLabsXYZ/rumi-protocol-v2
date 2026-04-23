@@ -6,12 +6,15 @@
  *   $-equivalent size; its canonical type key).
  * - `Facets` is the URL-as-state shape for active filters.
  * - `parseFacetsFromUrl` / `buildFacetsQueryString` handle the round-trip.
- * - `matchesFacets(event_facets, active)` is the AND-combined predicate.
- *
- * TODO: swap to server-side once get_events_filtered accepts filter params
- * (Tier 1 gap #1 in docs/superpowers/plans/2026-04-21-explorer-ia-redesign.md).
+ * - `matchesFacets(event_facets, active)` is the AND-combined predicate run
+ *   over already-fetched events as a safety net for dimensions not yet
+ *   pushable per source.
+ * - `facetsToBackendFilters(facets)` and `pickPoolFetchStrategy(facets)`
+ *   translate the URL facet state into per-canister query args so the
+ *   activity page can dispatch server-side filters where supported.
  */
 
+import { Principal } from '@dfinity/principal';
 import { CANISTER_IDS } from '$lib/config';
 import {
   KNOWN_TOKENS,
@@ -19,6 +22,10 @@ import {
   getTokenDecimals,
 } from '$utils/explorerHelpers';
 import type { DisplayEvent } from '$utils/displayEvent';
+import type {
+  BackendEventFilters,
+  BackendEventTypeFilter,
+} from '$services/explorer/explorerService';
 
 // ─── Type facet options ───────────────────────────────────────────────
 
@@ -913,4 +920,182 @@ function structuredCloneFacets(f: Facets): Facets {
     time: { ...f.time },
     minSizeUsd: f.minSizeUsd,
   };
+}
+
+// ─── Server-side dispatch translation ─────────────────────────────────
+
+/**
+ * Map a frontend `TypeFacetKey` to the matching backend `EventTypeFilter`.
+ * Returns `null` for keys that don't correspond to a backend event variant
+ * (DEX swaps, stability-pool ops — those come from other canisters).
+ */
+function frontendTypeToBackend(t: TypeFacetKey): BackendEventTypeFilter | null {
+  switch (t) {
+    case 'open_vault': return 'OpenVault';
+    case 'close_vault':
+    case 'withdraw_and_close':
+      return 'CloseVault';
+    case 'add_margin':
+    case 'withdraw_collateral':
+    case 'partial_withdraw_collateral':
+    case 'margin_transfer':
+    case 'dust_forgiven':
+      return 'AdjustVault';
+    case 'borrow': return 'Borrow';
+    case 'repay': return 'Repay';
+    case 'full_liquidation': return 'Liquidation';
+    case 'partial_liquidation': return 'PartialLiquidation';
+    case 'redistribute': return 'AdjustVault';
+    case 'redemption':
+    case 'redemption_transfer':
+      return 'Redemption';
+    case 'reserve_redemption': return 'ReserveRedemption';
+    case 'admin': return 'Admin';
+    case 'system': return 'AccrueInterest';
+    default: return null;
+  }
+}
+
+/** Token principals the backend's `collateral_token` filter understands as
+ * collateral types (i.e. has price + appears as `collateral_type` on vaults).
+ * icUSD/3USD/ckUSDT/ckUSDC don't make sense as collateral filters and are
+ * left to the client-side post-pass. */
+function isCollateralLikeToken(principal: string): boolean {
+  if (principal === CANISTER_IDS.ICUSD_LEDGER) return false;
+  if (principal === CANISTER_IDS.THREEPOOL) return false;
+  if (principal === CANISTER_IDS.CKUSDT_LEDGER) return false;
+  if (principal === CANISTER_IDS.CKUSDC_LEDGER) return false;
+  return true;
+}
+
+/** Resolve absolute ns time-window from a `Facets.time` spec, or null. */
+export function resolveTimeWindowMs(time: Facets['time']): { fromMs: number; toMs: number } | null {
+  const nowMs = Date.now();
+  if (time.preset === 'all') {
+    if (time.fromMs == null && time.toMs == null) return null;
+    return { fromMs: time.fromMs ?? 0, toMs: time.toMs ?? nowMs };
+  }
+  if (time.preset === 'custom') {
+    if (time.fromMs == null && time.toMs == null) return null;
+    return { fromMs: time.fromMs ?? 0, toMs: time.toMs ?? nowMs };
+  }
+  const preset = TIME_PRESETS.find((p) => p.key === time.preset);
+  if (!preset?.durationMs) return null;
+  return { fromMs: nowMs - preset.durationMs, toMs: nowMs };
+}
+
+function timeWindowToNsRange(time: Facets['time']): { start_ns: bigint; end_ns: bigint } | null {
+  const window = resolveTimeWindowMs(time);
+  if (!window) return null;
+  return {
+    start_ns: BigInt(Math.max(0, window.fromMs)) * 1_000_000n,
+    end_ns: BigInt(Math.max(0, window.toMs)) * 1_000_000n,
+  };
+}
+
+function safePrincipalFromText(text: string): Principal | null {
+  try { return Principal.fromText(text); } catch { return null; }
+}
+
+/**
+ * Result of `facetsToBackendFilters` — `filters` are the args to pass to
+ * `fetchEvents`; `skip = true` means the active facets explicitly exclude
+ * every backend event variant (e.g. user only chose DEX types) so the
+ * caller should skip the backend fetch entirely.
+ */
+export interface BackendFilterPlan {
+  filters: BackendEventFilters | undefined;
+  skip: boolean;
+}
+
+/**
+ * Translate the URL facet state into a server-side filter spec for
+ * `get_events_filtered`. Dimensions the backend can't represent (e.g.
+ * multiple principals, icUSD-as-token) are dropped — the client-side
+ * `matchesFacets` post-pass enforces them.
+ */
+export function facetsToBackendFilters(facets: Facets): BackendFilterPlan {
+  const filters: BackendEventFilters = {};
+
+  // Types — collapse frontend keys to the coarser backend variants. If the
+  // user picked types but none map to backend events, signal `skip`.
+  if (facets.types.length > 0) {
+    const backendTypes = new Set<BackendEventTypeFilter>();
+    for (const t of facets.types) {
+      const b = frontendTypeToBackend(t);
+      if (b) backendTypes.add(b);
+    }
+    if (backendTypes.size === 0) return { filters: undefined, skip: true };
+    filters.types = [...backendTypes];
+  }
+
+  // Principal — backend filter accepts a single principal.
+  if (facets.principals.length === 1) {
+    const p = safePrincipalFromText(facets.principals[0]);
+    if (p) filters.principal = p;
+  }
+
+  // Collateral token — only push down for actual collateral tokens.
+  if (facets.tokens.length === 1 && isCollateralLikeToken(facets.tokens[0])) {
+    const p = safePrincipalFromText(facets.tokens[0]);
+    if (p) filters.collateral_token = p;
+  }
+
+  const range = timeWindowToNsRange(facets.time);
+  if (range) filters.time_range = range;
+
+  if (facets.minSizeUsd != null && facets.minSizeUsd > 0) {
+    filters.min_size_e8s = BigInt(Math.floor(facets.minSizeUsd * 1e8));
+  }
+
+  const hasAny =
+    filters.types?.length || filters.principal || filters.collateral_token ||
+    filters.time_range || filters.min_size_e8s != null;
+  return { filters: hasAny ? filters : undefined, skip: false };
+}
+
+/**
+ * Dispatch strategy for per-pool event sources (3pool + AMM). The activity
+ * page picks the most selective endpoint based on which facets are active:
+ * a single principal is the strongest narrowing signal, a time window is
+ * second, otherwise we tail-fetch.
+ */
+export type PoolFetchStrategy =
+  | { kind: 'principal'; principal: Principal }
+  | { kind: 'time'; startNs: bigint; endNs: bigint }
+  | { kind: 'tail' };
+
+export function pickPoolFetchStrategy(facets: Facets): PoolFetchStrategy {
+  if (facets.principals.length === 1) {
+    const p = safePrincipalFromText(facets.principals[0]);
+    if (p) return { kind: 'principal', principal: p };
+  }
+  const range = timeWindowToNsRange(facets.time);
+  if (range) return { kind: 'time', startNs: range.start_ns, endNs: range.end_ns };
+  return { kind: 'tail' };
+}
+
+/**
+ * True iff the user's type facets exclude every event from a given source.
+ * Lets the activity page skip per-source fetches that can't possibly match.
+ */
+export function sourceExcludedByTypeFacet(
+  source: 'backend' | '3pool' | 'amm' | 'stability_pool',
+  facets: Facets,
+): boolean {
+  if (facets.types.length === 0) return false;
+  const has = (key: TypeFacetKey) => facets.types.includes(key);
+  switch (source) {
+    case 'backend':
+      return facets.types.every((t) => frontendTypeToBackend(t) == null);
+    case '3pool':
+      return !has('3pool_swap') && !has('3pool_add_liquidity') && !has('3pool_remove_liquidity')
+        && !has('3pool_remove_one_coin') && !has('3pool_donate') && !has('multi_hop_swap');
+    case 'amm':
+      return !has('amm_swap') && !has('amm_add_liquidity') && !has('amm_remove_liquidity')
+        && !has('multi_hop_swap');
+    case 'stability_pool':
+      return !has('sp_deposit') && !has('sp_withdraw') && !has('sp_claim_collateral')
+        && !has('sp_deposit_as_3usd') && !has('sp_liquidation_executed') && !has('sp_other');
+  }
 }

@@ -108,7 +108,7 @@
     try {
       if (parsed.source === 'backend') {
         const [results, vaults, count] = await Promise.all([
-          publicActor.get_events({ start: BigInt(parsed.id), length: 1n }),
+          publicActor.get_events({ start: BigInt(parsed.id), length: 1n, types: [], principal: [], collateral_token: [], time_range: [], min_size_e8s: [] }),
           fetchAllVaults().catch(() => []),
           fetchEventCount().catch(() => 0n),
         ]);
@@ -154,7 +154,7 @@
         const neighborhood = 25;
         const start = BigInt(Math.max(0, parsed.id - neighborhood));
         const len = BigInt(neighborhood * 2 + 1);
-        const results = await publicActor.get_events({ start, length: len });
+        const results = await publicActor.get_events({ start, length: len, types: [], principal: [], collateral_token: [], time_range: [], min_size_e8s: [] });
         for (let i = 0; i < results.length; i++) {
           const idx = Number(start) + i;
           if (idx === parsed.id) continue;

@@ -36,7 +36,12 @@ export async function fetchEvents(page: number = 0) {
 		// {total, events: [(index, event)]} with newest-first pagination
 		const result = await publicActor.get_events_filtered({
 			start: BigInt(page),   // page number
-			length: BigInt(PAGE_SIZE)
+			length: BigInt(PAGE_SIZE),
+			types: [],
+			principal: [],
+			collateral_token: [],
+			time_range: [],
+			min_size_e8s: [],
 		});
 		explorerEventsTotalCount.set(Number(result.total));
 		// result.events is Vec<(u64, Event)> — tuples of (globalIndex, event)
@@ -59,7 +64,12 @@ export async function fetchEvents(page: number = 0) {
 			const length = Math.min(PAGE_SIZE, totalCount - (page * PAGE_SIZE));
 			const events = await publicActor.get_events({
 				start: BigInt(start),
-				length: BigInt(length)
+				length: BigInt(length),
+				types: [],
+				principal: [],
+				collateral_token: [],
+				time_range: [],
+				min_size_e8s: [],
 			});
 			const filtered = [...events].reverse().filter((e: any) => {
 				const key = Object.keys(e)[0];
