@@ -199,6 +199,10 @@ export const KNOWN_CANISTERS: Record<string, string> = {
   [CANISTER_IDS.CKUSDC_LEDGER]: 'ckUSDC Ledger',
   [CANISTER_IDS.ICUSD_INDEX]: 'icUSD Index',
   [CANISTER_IDS.THREEPOOL]: 'Rumi 3Pool',
+  [CANISTER_IDS.RUMI_AMM]: 'Rumi AMM',
+  [CANISTER_IDS.ANALYTICS]: 'Rumi Analytics',
+  'nygob-3qaaa-aaaap-qttcq-cai': 'Liquidation Bot',
+  'jagpu-pyaaa-aaaap-qtm6q-cai': '3USD Index',
 };
 
 /** Get human-readable name for a canister, or null if unknown. */

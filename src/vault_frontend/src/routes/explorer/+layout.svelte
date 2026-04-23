@@ -50,7 +50,7 @@
     if (isVaultId(q)) goto(`/explorer/e/vault/${q}`);
     else if (isEventIndex(q)) goto(`/explorer/e/event/${parseEventIndex(q)}`);
     else if (resolveTokenAlias(q)) goto(`/explorer/token/${resolveTokenAlias(q)}`);
-    else if (isPrincipal(q)) goto(`/explorer/address/${q}`);
+    else if (isPrincipal(q)) goto(`/explorer/e/address/${q}`);
     mobileSearchOpen = false;
     mobileNavOpen = false;
   }

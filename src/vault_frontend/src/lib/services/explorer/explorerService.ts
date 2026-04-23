@@ -1016,6 +1016,176 @@ export async function fetchAllDexEvents(source: DexEventSource): Promise<any[]> 
 	}
 }
 
+// ── Address page wrappers (LP balances, by-principal events, ICRC-1, subaccounts) ─
+
+// TODO: replace these N+1 call sites with rumi_analytics.get_address_summary(p) once it ships.
+
+/** 3pool LP balance for a principal. Result is LP token units (8 decimals). */
+export async function fetch3PoolLpBalance(principal: Principal): Promise<bigint> {
+	const key = `address:3pool:lp:${principal.toText()}`;
+	const cached = getCached<bigint>(key, TTL.POOL);
+	if (cached !== null) return cached;
+
+	try {
+		const result = await threePoolService.getLpBalance(principal);
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetch3PoolLpBalance failed:', err);
+		return 0n;
+	}
+}
+
+/** AMM LP balance for a given pool + principal. */
+export async function fetchAmmLpBalance(poolId: string, principal: Principal): Promise<bigint> {
+	const key = `address:amm:lp:${poolId}:${principal.toText()}`;
+	const cached = getCached<bigint>(key, TTL.POOL);
+	if (cached !== null) return cached;
+
+	try {
+		const result = await ammService.getLpBalance(poolId, principal);
+		return setCache(key, result);
+	} catch (err) {
+		console.error(`[explorerService] fetchAmmLpBalance(${poolId}) failed:`, err);
+		return 0n;
+	}
+}
+
+/**
+ * 3pool swap events touching a principal (as caller or counterparty).
+ * Newest-first. offset skips the N most-recent matches, limit takes the next batch.
+ */
+export async function fetch3PoolSwapEventsByPrincipal(
+	principal: Principal,
+	offset: bigint = 0n,
+	limit: bigint = 500n,
+): Promise<any[]> {
+	const key = `address:3pool:swaps:${principal.toText()}:${offset}:${limit}`;
+	const cached = getCached<any[]>(key, TTL.EVENTS);
+	if (cached) return cached;
+
+	try {
+		const actor = await (threePoolService as any).getQueryActor();
+		const result = await actor.get_swap_events_by_principal(principal, offset, limit) as any[];
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetch3PoolSwapEventsByPrincipal failed:', err);
+		return [];
+	}
+}
+
+/** 3pool liquidity events (add / remove) touching a principal. Newest-first. */
+export async function fetch3PoolLiquidityEventsByPrincipal(
+	principal: Principal,
+	offset: bigint = 0n,
+	limit: bigint = 500n,
+): Promise<any[]> {
+	const key = `address:3pool:liq:${principal.toText()}:${offset}:${limit}`;
+	const cached = getCached<any[]>(key, TTL.EVENTS);
+	if (cached) return cached;
+
+	try {
+		const actor = await (threePoolService as any).getQueryActor();
+		const result = await actor.get_liquidity_events_by_principal(principal, offset, limit) as any[];
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetch3PoolLiquidityEventsByPrincipal failed:', err);
+		return [];
+	}
+}
+
+/**
+ * Lazy actor cache for ICRC-1 balance lookups. Any ICRC-1-compliant ledger
+ * works because the IDL we reuse (icusd_ledger) declares the standard
+ * `icrc1_balance_of : (Account) -> (nat) query` method that all ICRC-1 ledgers expose.
+ */
+const _icrc1Actors = new Map<string, IcusdLedgerService>();
+
+function getIcrc1Actor(ledgerPrincipal: string): IcusdLedgerService {
+	const cached = _icrc1Actors.get(ledgerPrincipal);
+	if (cached) return cached;
+	const agent = new HttpAgent({ host: CONFIG.host });
+	if (CONFIG.isLocal) agent.fetchRootKey().catch(() => {});
+	const actor = Actor.createActor<IcusdLedgerService>(CONFIG.icusd_ledgerIDL as any, {
+		agent,
+		canisterId: ledgerPrincipal,
+	});
+	_icrc1Actors.set(ledgerPrincipal, actor);
+	return actor;
+}
+
+/**
+ * Query `icrc1_balance_of(owner)` on any ICRC-1 ledger. Subaccount defaults
+ * to the caller's default subaccount (empty opt). Returns 0n on error so
+ * callers can safely promise-all across multiple ledgers.
+ */
+export async function fetchIcrc1BalanceOf(
+	ledgerPrincipal: string,
+	owner: Principal,
+): Promise<bigint> {
+	const key = `address:balance:${ledgerPrincipal}:${owner.toText()}`;
+	const cached = getCached<bigint>(key, TTL.VAULTS);
+	if (cached !== null) return cached;
+
+	try {
+		const actor = getIcrc1Actor(ledgerPrincipal);
+		const result = await actor.icrc1_balance_of({
+			owner,
+			subaccount: [],
+		} as any);
+		return setCache(key, result as bigint);
+	} catch (err) {
+		console.error(`[explorerService] fetchIcrc1BalanceOf(${ledgerPrincipal}) failed:`, err);
+		return 0n;
+	}
+}
+
+/**
+ * List every subaccount that has held a balance under `owner` in the icUSD index.
+ * `start` is optional pagination — omit for the first page.
+ */
+export async function fetchIcusdSubaccounts(
+	owner: Principal,
+	start?: Uint8Array | number[],
+): Promise<Array<Uint8Array | number[]>> {
+	const key = `address:icusd:subs:${owner.toText()}`;
+	const cached = getCached<Array<Uint8Array | number[]>>(key, TTL.VAULTS);
+	if (cached) return cached;
+
+	try {
+		const index = getIcusdIndexActor();
+		const result = await index.list_subaccounts({
+			owner,
+			start: start ? [start] : [],
+		} as any);
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchIcusdSubaccounts failed:', err);
+		return [];
+	}
+}
+
+/** Same as `fetchIcusdSubaccounts` but for the 3USD (3pool LP) index canister. */
+export async function fetchThreeUsdSubaccounts(
+	owner: Principal,
+	start?: Uint8Array | number[],
+): Promise<Array<Uint8Array | number[]>> {
+	const key = `address:3usd:subs:${owner.toText()}`;
+	const cached = getCached<Array<Uint8Array | number[]>>(key, TTL.VAULTS);
+	if (cached) return cached;
+
+	try {
+		const index = getThreeusdIndexActor();
+		const result = await index.list_subaccounts({
+			owner,
+			start: start ? [start] : [],
+		} as any);
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchThreeUsdSubaccounts failed:', err);
+		return [];
+	}
+}
+
 // ── icUSD Holders ──────────────────────────────────────────────────────
 
 export interface TokenHolder {
