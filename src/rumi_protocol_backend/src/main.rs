@@ -8,7 +8,7 @@ use rumi_protocol_backend::{
     numeric::{ICUSD, ICP, Ratio, UsdIcp},
     state::{read_state, replace_state, Mode, State, RateCurveV2, DEFAULT_INTEREST_RATE_APR},
     vault::{CandidVault, OpenVaultSuccess, VaultArg},
-    Fees, GetEventsArg, ProtocolArg, ProtocolError, ProtocolStatus, SuccessWithFee,
+    EventTypeFilter, Fees, GetEventsArg, ProtocolArg, ProtocolError, ProtocolStatus, SuccessWithFee,
     ReserveRedemptionResult, ReserveBalance, CollateralTotals, CollateralInterestInfo, PerCollateralRateCurve,
     VaultArgWithToken, StableTokenType, InterestSplitArg,
     GetSnapshotsArg, ProtocolSnapshot, CollateralSnapshot,
@@ -596,8 +596,26 @@ fn get_event_count() -> u64 {
     rumi_protocol_backend::storage::count_events()
 }
 
-/// Return events excluding AccrueInterest, paginated newest-first.
-/// `start` is the page number (0-indexed), `length` is page size.
+/// Server-side filtered event query, paginated newest-first.
+/// `start` is the page number (0-indexed) into the *filtered* result set;
+/// `length` is page size (capped at `MAX_PAGE_SIZE`).
+///
+/// Filter semantics (all AND-combined):
+/// - `types`: empty/null preserves the legacy behavior of hiding
+///   `AccrueInterest`/`PriceUpdate`. When non-empty, only matching variants
+///   are included (those two are returnable if explicitly requested).
+/// - `principal`: matches via `Event::involves_principal`.
+/// - `collateral_token`: matches via `Event::collateral_token` using a
+///   per-query `vault_id → collateral_type` lookup built from `OpenVault`.
+/// - `time_range`: events with no `timestamp_ns` are excluded.
+/// - `min_size_e8s`: events with no `size_e8s_usd` pass through.
+///
+/// `total` is the matched count across the entire log (not the scanned slice),
+/// so the frontend can render accurate result counters.
+///
+/// Results are cached for `FILTERED_EVENTS_TTL_NS` (10s) keyed on the full
+/// filter spec + page, since events append continuously and stale results
+/// would hide just-recorded activity.
 #[candid_method(query)]
 #[query]
 fn get_events_filtered(args: GetEventsArg) -> GetEventsFilteredResponse {
@@ -606,17 +624,48 @@ fn get_events_filtered(args: GetEventsArg) -> GetEventsFilteredResponse {
     }
     const MAX_PAGE_SIZE: usize = 200;
     let page_size = MAX_PAGE_SIZE.min(args.length as usize);
-    let page = args.start as usize; // reinterpret `start` as page number
+    let page = args.start as usize;
 
-    // Collect all non-AccrueInterest events with their original indices
+    let now = ic_cdk::api::time();
+    let cache_key = filtered_events_cache_key(&args, page, page_size);
+    if let Some(cached) = read_filtered_events_cache(cache_key, now) {
+        return cached;
+    }
+
+    let vault_lookup = if args.collateral_token.is_some() {
+        build_vault_collateral_lookup()
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    let icp_price_e8s = read_state(|s| {
+        s.collateral_configs
+            .get(&s.icp_ledger_principal)
+            .and_then(|c| c.last_price)
+            .map(|p| (p * 100_000_000.0) as u64)
+            .unwrap_or(0)
+    });
+
+    let types_set: Option<std::collections::HashSet<EventTypeFilter>> = args.types
+        .as_ref()
+        .filter(|v| !v.is_empty())
+        .map(|v| v.iter().cloned().collect());
+
     let filtered: Vec<(u64, Event)> = events()
         .enumerate()
-        .filter(|(_, e)| !e.is_accrue_interest())
+        .filter(|(_, e)| e.passes_filters(
+            types_set.as_ref(),
+            args.principal.as_ref(),
+            args.collateral_token.as_ref(),
+            args.time_range.as_ref(),
+            args.min_size_e8s,
+            &vault_lookup,
+            icp_price_e8s,
+        ))
         .map(|(i, e)| (i as u64, e))
         .collect();
 
     let total = filtered.len() as u64;
-    // Reverse for newest-first, then paginate
     let start_idx = page * page_size;
     let page_events: Vec<(u64, Event)> = filtered.into_iter()
         .rev()
@@ -624,10 +673,73 @@ fn get_events_filtered(args: GetEventsArg) -> GetEventsFilteredResponse {
         .take(page_size)
         .collect();
 
-    GetEventsFilteredResponse {
+    let resp = GetEventsFilteredResponse {
         total,
         events: page_events,
+    };
+    write_filtered_events_cache(cache_key, now, &resp);
+    resp
+}
+
+/// Build `vault_id → collateral_type` by walking `OpenVault` events.
+/// Called only when the `collateral_token` filter is active. Cheap relative
+/// to the surrounding event scan since `OpenVault` is a small fraction of
+/// total events.
+fn build_vault_collateral_lookup() -> std::collections::HashMap<u64, Principal> {
+    let mut map = std::collections::HashMap::new();
+    for event in events() {
+        if let Event::OpenVault { vault, .. } = event {
+            map.insert(vault.vault_id, vault.collateral_type);
+        }
     }
+    map
+}
+
+const FILTERED_EVENTS_TTL_NS: u64 = 10 * 1_000_000_000;
+
+thread_local! {
+    static FILTERED_EVENTS_CACHE: std::cell::RefCell<
+        std::collections::HashMap<u64, (u64, GetEventsFilteredResponse)>
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn filtered_events_cache_key(args: &GetEventsArg, page: usize, page_size: usize) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    page.hash(&mut hasher);
+    page_size.hash(&mut hasher);
+    args.types.hash(&mut hasher);
+    args.principal.hash(&mut hasher);
+    args.collateral_token.hash(&mut hasher);
+    args.time_range.hash(&mut hasher);
+    args.min_size_e8s.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn read_filtered_events_cache(key: u64, now: u64) -> Option<GetEventsFilteredResponse> {
+    FILTERED_EVENTS_CACHE.with(|c| {
+        c.borrow().get(&key).and_then(|(at, resp)| {
+            if now.saturating_sub(*at) < FILTERED_EVENTS_TTL_NS {
+                Some(GetEventsFilteredResponse {
+                    total: resp.total,
+                    events: resp.events.clone(),
+                })
+            } else {
+                None
+            }
+        })
+    })
+}
+
+fn write_filtered_events_cache(key: u64, now: u64, resp: &GetEventsFilteredResponse) {
+    FILTERED_EVENTS_CACHE.with(|c| {
+        let snapshot = GetEventsFilteredResponse {
+            total: resp.total,
+            events: resp.events.clone(),
+        };
+        c.borrow_mut().insert(key, (now, snapshot));
+    });
 }
 
 /// Return all events involving a given principal (as owner, caller, or liquidator).

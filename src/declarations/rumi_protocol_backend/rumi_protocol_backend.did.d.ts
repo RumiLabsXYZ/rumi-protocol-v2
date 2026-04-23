@@ -496,8 +496,33 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     }
   } |
   { 'set_recovery_cr_multiplier' : { 'multiplier' : string } };
+export interface EventTimeRange { 'start_ns' : bigint, 'end_ns' : bigint }
+export type EventTypeFilter = { 'StabilityPoolDeposit' : null } |
+  { 'AdminSweepToTreasury' : null } |
+  { 'AdminMint' : null } |
+  { 'AdjustVault' : null } |
+  { 'PartialLiquidation' : null } |
+  { 'OpenVault' : null } |
+  { 'StabilityPoolWithdraw' : null } |
+  { 'AccrueInterest' : null } |
+  { 'ReserveRedemption' : null } |
+  { 'Repay' : null } |
+  { 'Liquidation' : null } |
+  { 'Borrow' : null } |
+  { 'PriceUpdate' : null } |
+  { 'Admin' : null } |
+  { 'Redemption' : null } |
+  { 'CloseVault' : null };
 export interface Fees { 'redemption_fee' : number, 'borrowing_fee' : number }
-export interface GetEventsArg { 'start' : bigint, 'length' : bigint }
+export interface GetEventsArg {
+  'principal' : [] | [Principal],
+  'types' : [] | [Array<EventTypeFilter>],
+  'time_range' : [] | [EventTimeRange],
+  'start' : bigint,
+  'collateral_token' : [] | [Principal],
+  'length' : bigint,
+  'min_size_e8s' : [] | [bigint],
+}
 export interface GetEventsFilteredResponse {
   'total' : bigint,
   'events' : Array<[bigint, Event]>,

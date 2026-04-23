@@ -203,9 +203,36 @@ export const idlFactory = ({ IDL }) => {
     'owner' : IDL.Principal,
     'subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
   });
+  const EventTypeFilter = IDL.Variant({
+    'StabilityPoolDeposit' : IDL.Null,
+    'AdminSweepToTreasury' : IDL.Null,
+    'AdminMint' : IDL.Null,
+    'AdjustVault' : IDL.Null,
+    'PartialLiquidation' : IDL.Null,
+    'OpenVault' : IDL.Null,
+    'StabilityPoolWithdraw' : IDL.Null,
+    'AccrueInterest' : IDL.Null,
+    'ReserveRedemption' : IDL.Null,
+    'Repay' : IDL.Null,
+    'Liquidation' : IDL.Null,
+    'Borrow' : IDL.Null,
+    'PriceUpdate' : IDL.Null,
+    'Admin' : IDL.Null,
+    'Redemption' : IDL.Null,
+    'CloseVault' : IDL.Null,
+  });
+  const EventTimeRange = IDL.Record({
+    'start_ns' : IDL.Nat64,
+    'end_ns' : IDL.Nat64,
+  });
   const GetEventsArg = IDL.Record({
+    'principal' : IDL.Opt(IDL.Principal),
+    'types' : IDL.Opt(IDL.Vec(EventTypeFilter)),
+    'time_range' : IDL.Opt(EventTimeRange),
     'start' : IDL.Nat64,
+    'collateral_token' : IDL.Opt(IDL.Principal),
     'length' : IDL.Nat64,
+    'min_size_e8s' : IDL.Opt(IDL.Nat64),
   });
   const StableTokenType = IDL.Variant({
     'CKUSDC' : IDL.Null,
