@@ -2,11 +2,12 @@ use crate::numeric::{Ratio, UsdIcp, ICUSD, ICP};
 use crate::state::{CollateralConfig, CollateralStatus, CollateralType, PendingMarginTransfer, RateCurveV2, State};
 use crate::storage::record_event;
 use crate::vault::Vault;
-use crate::{InitArg, Mode, StableTokenType, UpgradeArg};
+use crate::{EventTimeRange, EventTypeFilter, InitArg, Mode, StableTokenType, UpgradeArg};
 use candid::{CandidType, Principal};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 /// Per-vault breakdown of a redemption: how much icUSD was redeemed and how much
 /// collateral was seized from each individual vault.
@@ -664,6 +665,211 @@ impl Event {
     /// Returns true if this is a noisy periodic event (hidden from explorer).
     pub fn is_accrue_interest(&self) -> bool {
         matches!(self, Event::AccrueInterest { .. } | Event::PriceUpdate { .. })
+    }
+
+    /// Coarse type classification for the explorer's `types` facet.
+    /// All admin/setter variants collapse into `EventTypeFilter::Admin`.
+    pub fn type_filter(&self) -> EventTypeFilter {
+        match self {
+            Event::OpenVault { .. } => EventTypeFilter::OpenVault,
+            Event::CloseVault { .. }
+            | Event::WithdrawAndCloseVault { .. }
+            | Event::VaultWithdrawnAndClosed { .. } => EventTypeFilter::CloseVault,
+            Event::AddMarginToVault { .. }
+            | Event::CollateralWithdrawn { .. }
+            | Event::PartialCollateralWithdrawn { .. }
+            | Event::MarginTransfer { .. }
+            | Event::RedistributeVault { .. }
+            | Event::DustForgiven { .. }
+            | Event::AdminVaultCorrection { .. }
+            | Event::AdminDebtCorrection { .. } => EventTypeFilter::AdjustVault,
+            Event::BorrowFromVault { .. } => EventTypeFilter::Borrow,
+            Event::RepayToVault { .. } => EventTypeFilter::Repay,
+            Event::LiquidateVault { .. } => EventTypeFilter::Liquidation,
+            Event::PartialLiquidateVault { .. } => EventTypeFilter::PartialLiquidation,
+            Event::RedemptionOnVaults { .. } | Event::RedemptionTransfered { .. } => {
+                EventTypeFilter::Redemption
+            }
+            Event::ReserveRedemption { .. } => EventTypeFilter::ReserveRedemption,
+            Event::ProvideLiquidity { .. } => EventTypeFilter::StabilityPoolDeposit,
+            Event::WithdrawLiquidity { .. } | Event::ClaimLiquidityReturns { .. } => {
+                EventTypeFilter::StabilityPoolWithdraw
+            }
+            Event::AdminMint { .. } => EventTypeFilter::AdminMint,
+            Event::AdminSweepToTreasury { .. } => EventTypeFilter::AdminSweepToTreasury,
+            Event::PriceUpdate { .. } => EventTypeFilter::PriceUpdate,
+            Event::AccrueInterest { .. } => EventTypeFilter::AccrueInterest,
+            _ => EventTypeFilter::Admin,
+        }
+    }
+
+    /// Recorded timestamp in nanoseconds, when the event variant carries one.
+    /// Used by the time-range facet; events returning `None` are excluded
+    /// from time-filtered queries.
+    pub fn timestamp_ns(&self) -> Option<u64> {
+        match self {
+            Event::OpenVault { timestamp, .. }
+            | Event::CloseVault { timestamp, .. }
+            | Event::MarginTransfer { timestamp, .. }
+            | Event::LiquidateVault { timestamp, .. }
+            | Event::PartialLiquidateVault { timestamp, .. }
+            | Event::RedemptionOnVaults { timestamp, .. }
+            | Event::RedemptionTransfered { timestamp, .. }
+            | Event::RedistributeVault { timestamp, .. }
+            | Event::BorrowFromVault { timestamp, .. }
+            | Event::RepayToVault { timestamp, .. }
+            | Event::AddMarginToVault { timestamp, .. }
+            | Event::ProvideLiquidity { timestamp, .. }
+            | Event::WithdrawLiquidity { timestamp, .. }
+            | Event::ClaimLiquidityReturns { timestamp, .. }
+            | Event::CollateralWithdrawn { timestamp, .. }
+            | Event::PartialCollateralWithdrawn { timestamp, .. }
+            | Event::WithdrawAndCloseVault { timestamp, .. }
+            | Event::DustForgiven { timestamp, .. }
+            | Event::ReserveRedemption { timestamp, .. }
+            | Event::AdminMint { timestamp, .. }
+            | Event::AdminDebtCorrection { timestamp, .. } => *timestamp,
+            Event::VaultWithdrawnAndClosed { timestamp, .. } => Some(*timestamp),
+            Event::PriceUpdate { timestamp, .. } => Some(*timestamp),
+            Event::AccrueInterest { timestamp } => Some(*timestamp),
+            Event::SetBotBudget { start_timestamp, .. } => Some(*start_timestamp),
+            _ => None,
+        }
+    }
+
+    /// Collateral token referenced by this event, if any. For vault-id events
+    /// the collateral type isn't carried in the event itself, so the caller
+    /// passes `vault_lookup` (built once per query by walking `OpenVault`
+    /// events). Returns `None` for events with no collateral context.
+    pub fn collateral_token(&self, vault_lookup: &HashMap<u64, Principal>) -> Option<Principal> {
+        match self {
+            Event::OpenVault { vault, .. } => Some(vault.collateral_type),
+            Event::AddCollateralType { collateral_type, .. }
+            | Event::UpdateCollateralStatus { collateral_type, .. }
+            | Event::UpdateCollateralConfig { collateral_type, .. }
+            | Event::SetCollateralBorrowingFee { collateral_type, .. }
+            | Event::SetInterestRate { collateral_type, .. }
+            | Event::SetRecoveryParameters { collateral_type, .. }
+            | Event::SetCollateralLiquidationRatio { collateral_type, .. }
+            | Event::SetCollateralBorrowThreshold { collateral_type, .. }
+            | Event::SetCollateralLiquidationBonus { collateral_type, .. }
+            | Event::SetCollateralMinVaultDebt { collateral_type, .. }
+            | Event::SetCollateralLedgerFee { collateral_type, .. }
+            | Event::SetCollateralRedemptionFeeFloor { collateral_type, .. }
+            | Event::SetCollateralRedemptionFeeCeiling { collateral_type, .. }
+            | Event::SetCollateralMinDeposit { collateral_type, .. }
+            | Event::SetCollateralDisplayColor { collateral_type, .. }
+            | Event::PriceUpdate { collateral_type, .. } => Some(*collateral_type),
+            Event::RedemptionOnVaults { collateral_type, .. } => *collateral_type,
+            Event::ReserveRedemption { stable_token_ledger, .. } => Some(*stable_token_ledger),
+            Event::CloseVault { vault_id, .. }
+            | Event::MarginTransfer { vault_id, .. }
+            | Event::LiquidateVault { vault_id, .. }
+            | Event::PartialLiquidateVault { vault_id, .. }
+            | Event::RedistributeVault { vault_id, .. }
+            | Event::BorrowFromVault { vault_id, .. }
+            | Event::RepayToVault { vault_id, .. }
+            | Event::AddMarginToVault { vault_id, .. }
+            | Event::CollateralWithdrawn { vault_id, .. }
+            | Event::PartialCollateralWithdrawn { vault_id, .. }
+            | Event::VaultWithdrawnAndClosed { vault_id, .. }
+            | Event::WithdrawAndCloseVault { vault_id, .. }
+            | Event::DustForgiven { vault_id, .. }
+            | Event::AdminVaultCorrection { vault_id, .. }
+            | Event::AdminDebtCorrection { vault_id, .. } => vault_lookup.get(vault_id).copied(),
+            _ => None,
+        }
+    }
+
+    /// Primary "size" of this event in icUSD e8s (= USD e8s) for the size facet.
+    /// icUSD-denominated amounts pass through; ICP/collateral amounts are
+    /// converted using `icp_price_e8s` (current spot, in 1e8 USD per ICP).
+    /// Returns `None` for events with no meaningful magnitude (admin setters,
+    /// init/upgrade, accrue/price ticks); the size filter treats `None` as
+    /// "passes" so these events surface independent of the threshold.
+    /// Multi-collateral conversions use the ICP price as a v1 approximation.
+    pub fn size_e8s_usd(&self, icp_price_e8s: u64) -> Option<u64> {
+        let convert = |native_amount: u64| -> u64 {
+            ((native_amount as u128) * (icp_price_e8s as u128) / 100_000_000u128) as u64
+        };
+        match self {
+            Event::BorrowFromVault { borrowed_amount, .. } => Some(borrowed_amount.0),
+            Event::RepayToVault { repayed_amount, .. } => Some(repayed_amount.0),
+            Event::RedemptionOnVaults { icusd_amount, .. } => Some(icusd_amount.0),
+            Event::ReserveRedemption { icusd_amount, .. } => Some(icusd_amount.0),
+            Event::AdminMint { amount, .. } => Some(amount.0),
+            Event::DustForgiven { amount, .. } => Some(amount.0),
+            Event::ProvideLiquidity { amount, .. } => Some(amount.0),
+            Event::WithdrawLiquidity { amount, .. } => Some(amount.0),
+            Event::PartialLiquidateVault { liquidator_payment, .. } => Some(liquidator_payment.0),
+            Event::OpenVault { vault, .. } => Some(convert(vault.collateral_amount)),
+            Event::AddMarginToVault { margin_added, .. } => Some(convert(margin_added.0)),
+            Event::CollateralWithdrawn { amount, .. } => Some(convert(amount.0)),
+            Event::PartialCollateralWithdrawn { amount, .. } => Some(convert(amount.0)),
+            Event::WithdrawAndCloseVault { amount, .. } => Some(convert(amount.0)),
+            Event::VaultWithdrawnAndClosed { amount, .. } => Some(convert(amount.0)),
+            Event::ClaimLiquidityReturns { amount, .. } => Some(convert(amount.0)),
+            Event::AdminSweepToTreasury { amount, .. } => Some(*amount),
+            _ => None,
+        }
+    }
+
+    /// AND-combine all `get_events_filtered` facets and return whether this
+    /// event passes. Pure function — caller supplies the per-query lookup map
+    /// and a price snapshot.
+    #[allow(clippy::too_many_arguments)]
+    pub fn passes_filters(
+        &self,
+        types_set: Option<&HashSet<EventTypeFilter>>,
+        principal: Option<&Principal>,
+        collateral_token: Option<&Principal>,
+        time_range: Option<&EventTimeRange>,
+        min_size_e8s: Option<u64>,
+        vault_lookup: &HashMap<u64, Principal>,
+        icp_price_e8s: u64,
+    ) -> bool {
+        match types_set {
+            Some(set) => {
+                if !set.contains(&self.type_filter()) {
+                    return false;
+                }
+            }
+            None => {
+                if self.is_accrue_interest() {
+                    return false;
+                }
+            }
+        }
+
+        if let Some(p) = principal {
+            if !self.involves_principal(p) {
+                return false;
+            }
+        }
+
+        if let Some(token) = collateral_token {
+            match self.collateral_token(vault_lookup) {
+                Some(t) if t == *token => {}
+                _ => return false,
+            }
+        }
+
+        if let Some(range) = time_range {
+            match self.timestamp_ns() {
+                Some(ts) if ts >= range.start_ns && ts <= range.end_ns => {}
+                _ => return false,
+            }
+        }
+
+        if let Some(min_size) = min_size_e8s {
+            if let Some(size) = self.size_e8s_usd(icp_price_e8s) {
+                if size < min_size {
+                    return false;
+                }
+            }
+        }
+
+        true
     }
 
     /// Check if a given principal is involved in this event (as owner, caller, or liquidator).
@@ -2043,4 +2249,291 @@ pub fn record_price_update(collateral_type: CollateralType, price: Decimal, time
         price: price.to_string(),
         timestamp,
     });
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+    use crate::vault::Vault;
+
+    fn p(seed: u8) -> Principal {
+        Principal::self_authenticating([seed; 32])
+    }
+
+    fn caller_a() -> Principal { p(1) }
+    fn caller_b() -> Principal { p(2) }
+    fn icp_token() -> Principal { p(10) }
+    fn ckbtc_token() -> Principal { p(11) }
+
+    fn vault_with(id: u64, owner: Principal, ct: Principal, collateral_e8s: u64) -> Vault {
+        Vault {
+            owner,
+            vault_id: id,
+            collateral_type: ct,
+            collateral_amount: collateral_e8s,
+            borrowed_icusd_amount: ICUSD::new(0),
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        }
+    }
+
+    fn open_vault_event(id: u64, owner: Principal, ct: Principal) -> Event {
+        Event::OpenVault {
+            vault: vault_with(id, owner, ct, 1_000_000_000),
+            block_index: 0,
+            timestamp: Some(1_000),
+        }
+    }
+
+    fn borrow_event(vault_id: u64, caller: Principal, amount_e8s: u64, ts: u64) -> Event {
+        Event::BorrowFromVault {
+            vault_id,
+            borrowed_amount: ICUSD::new(amount_e8s),
+            fee_amount: ICUSD::new(0),
+            block_index: 0,
+            caller: Some(caller),
+            timestamp: Some(ts),
+        }
+    }
+
+    fn repay_event(vault_id: u64, caller: Principal, amount_e8s: u64, ts: u64) -> Event {
+        Event::RepayToVault {
+            vault_id,
+            repayed_amount: ICUSD::new(amount_e8s),
+            block_index: 0,
+            caller: Some(caller),
+            timestamp: Some(ts),
+        }
+    }
+
+    fn liquidate_event(vault_id: u64, liquidator: Principal, ts: u64) -> Event {
+        Event::LiquidateVault {
+            vault_id,
+            mode: Mode::GeneralAvailability,
+            icp_rate: UsdIcp::new(Decimal::from(5u32)),
+            liquidator: Some(liquidator),
+            timestamp: Some(ts),
+        }
+    }
+
+    fn accrue_event(ts: u64) -> Event {
+        Event::AccrueInterest { timestamp: ts }
+    }
+
+    fn price_event(ct: Principal, ts: u64) -> Event {
+        Event::PriceUpdate { collateral_type: ct, price: "5.0".into(), timestamp: ts }
+    }
+
+    /// Build a vault_id → collateral_type lookup for tests.
+    fn lookup(entries: &[(u64, Principal)]) -> HashMap<u64, Principal> {
+        entries.iter().copied().collect()
+    }
+
+    // ── type_filter classification ────────────────────────────────────────
+
+    #[test]
+    fn type_filter_classifies_each_user_facing_variant() {
+        assert_eq!(open_vault_event(1, caller_a(), icp_token()).type_filter(), EventTypeFilter::OpenVault);
+        assert_eq!(borrow_event(1, caller_a(), 100, 0).type_filter(), EventTypeFilter::Borrow);
+        assert_eq!(repay_event(1, caller_a(), 100, 0).type_filter(), EventTypeFilter::Repay);
+        assert_eq!(liquidate_event(1, caller_a(), 0).type_filter(), EventTypeFilter::Liquidation);
+        assert_eq!(accrue_event(0).type_filter(), EventTypeFilter::AccrueInterest);
+        assert_eq!(price_event(icp_token(), 0).type_filter(), EventTypeFilter::PriceUpdate);
+
+        // Setter falls into Admin
+        let setter = Event::SetBorrowingFee { rate: "0.005".into() };
+        assert_eq!(setter.type_filter(), EventTypeFilter::Admin);
+    }
+
+    // ── timestamp_ns ──────────────────────────────────────────────────────
+
+    #[test]
+    fn timestamp_ns_extracts_when_present_and_returns_none_otherwise() {
+        assert_eq!(borrow_event(1, caller_a(), 100, 12_345).timestamp_ns(), Some(12_345));
+        assert_eq!(accrue_event(7).timestamp_ns(), Some(7));
+
+        // Init has no timestamp.
+        let init = Event::Init(InitArg {
+            xrc_principal: p(0),
+            icusd_ledger_principal: p(0),
+            icp_ledger_principal: p(0),
+            fee_e8s: 0,
+            developer_principal: p(0),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        });
+        assert_eq!(init.timestamp_ns(), None);
+    }
+
+    // ── collateral_token + vault lookup ───────────────────────────────────
+
+    #[test]
+    fn collateral_token_falls_back_to_vault_lookup_for_id_only_events() {
+        let lookup = lookup(&[(42, ckbtc_token())]);
+        let ev = borrow_event(42, caller_a(), 100, 0);
+        assert_eq!(ev.collateral_token(&lookup), Some(ckbtc_token()));
+
+        // Unknown vault id → None
+        let ev2 = borrow_event(99, caller_a(), 100, 0);
+        assert_eq!(ev2.collateral_token(&HashMap::new()), None);
+    }
+
+    #[test]
+    fn collateral_token_uses_event_field_for_open_vault() {
+        let ev = open_vault_event(1, caller_a(), ckbtc_token());
+        assert_eq!(ev.collateral_token(&HashMap::new()), Some(ckbtc_token()));
+    }
+
+    // ── size_e8s_usd conversions ──────────────────────────────────────────
+
+    #[test]
+    fn size_in_usd_passes_through_icusd_amounts() {
+        let ev = borrow_event(1, caller_a(), 250_000_000, 0); // 2.50 icUSD
+        assert_eq!(ev.size_e8s_usd(0), Some(250_000_000));
+    }
+
+    #[test]
+    fn size_in_usd_converts_icp_amounts_at_spot_price() {
+        // 1 ICP @ $5 = $5 = 500_000_000 e8s
+        let icp_e8s = 100_000_000u64;
+        let price_e8s = 500_000_000u64;
+        let ev = open_vault_event(1, caller_a(), icp_token());
+        let ev = if let Event::OpenVault { mut vault, block_index, timestamp } = ev {
+            vault.collateral_amount = icp_e8s;
+            Event::OpenVault { vault, block_index, timestamp }
+        } else { unreachable!() };
+        assert_eq!(ev.size_e8s_usd(price_e8s), Some(500_000_000));
+    }
+
+    #[test]
+    fn size_returns_none_for_admin_setters() {
+        let ev = Event::SetBorrowingFee { rate: "0.005".into() };
+        assert_eq!(ev.size_e8s_usd(500_000_000), None);
+    }
+
+    // ── passes_filters: each dimension in isolation ───────────────────────
+
+    #[test]
+    fn empty_filter_excludes_accrue_interest_and_price_update() {
+        let lookup = HashMap::new();
+        assert!(!accrue_event(0).passes_filters(None, None, None, None, None, &lookup, 0));
+        assert!(!price_event(icp_token(), 0).passes_filters(None, None, None, None, None, &lookup, 0));
+        assert!(borrow_event(1, caller_a(), 100, 0).passes_filters(None, None, None, None, None, &lookup, 0));
+    }
+
+    #[test]
+    fn explicit_type_set_includes_accrue_interest_when_requested() {
+        let lookup = HashMap::new();
+        let set: HashSet<_> = [EventTypeFilter::AccrueInterest].into_iter().collect();
+        assert!(accrue_event(0).passes_filters(Some(&set), None, None, None, None, &lookup, 0));
+        assert!(!borrow_event(1, caller_a(), 100, 0).passes_filters(Some(&set), None, None, None, None, &lookup, 0));
+    }
+
+    #[test]
+    fn type_filter_or_combines_within_the_set() {
+        let lookup = HashMap::new();
+        let set: HashSet<_> = [EventTypeFilter::Borrow, EventTypeFilter::Repay].into_iter().collect();
+        assert!(borrow_event(1, caller_a(), 100, 0).passes_filters(Some(&set), None, None, None, None, &lookup, 0));
+        assert!(repay_event(1, caller_a(), 100, 0).passes_filters(Some(&set), None, None, None, None, &lookup, 0));
+        assert!(!liquidate_event(1, caller_a(), 0).passes_filters(Some(&set), None, None, None, None, &lookup, 0));
+    }
+
+    #[test]
+    fn principal_filter_matches_caller_or_owner() {
+        let lookup = HashMap::new();
+        assert!(borrow_event(1, caller_a(), 100, 0).passes_filters(None, Some(&caller_a()), None, None, None, &lookup, 0));
+        assert!(!borrow_event(1, caller_a(), 100, 0).passes_filters(None, Some(&caller_b()), None, None, None, &lookup, 0));
+    }
+
+    #[test]
+    fn collateral_token_filter_matches_via_vault_lookup() {
+        let lookup = lookup(&[(1, ckbtc_token())]);
+        let ev = borrow_event(1, caller_a(), 100, 0);
+        assert!(ev.passes_filters(None, None, Some(&ckbtc_token()), None, None, &lookup, 0));
+        assert!(!ev.passes_filters(None, None, Some(&icp_token()), None, None, &lookup, 0));
+    }
+
+    #[test]
+    fn time_range_excludes_outside_window_and_no_timestamp_events() {
+        let lookup = HashMap::new();
+        let range = EventTimeRange { start_ns: 1_000, end_ns: 2_000 };
+
+        let inside = borrow_event(1, caller_a(), 100, 1_500);
+        let outside = borrow_event(1, caller_a(), 100, 5_000);
+        assert!(inside.passes_filters(None, None, None, Some(&range), None, &lookup, 0));
+        assert!(!outside.passes_filters(None, None, None, Some(&range), None, &lookup, 0));
+
+        let init = Event::Init(InitArg {
+            xrc_principal: p(0),
+            icusd_ledger_principal: p(0),
+            icp_ledger_principal: p(0),
+            fee_e8s: 0,
+            developer_principal: p(0),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        });
+        // Init has no timestamp_ns → excluded by an active time_range.
+        assert!(!init.passes_filters(None, None, None, Some(&range), None, &lookup, 0));
+    }
+
+    #[test]
+    fn min_size_excludes_below_threshold_and_passes_unsized_events() {
+        let lookup = HashMap::new();
+        // Borrow $0.50 — under $1.00 threshold.
+        let small = borrow_event(1, caller_a(), 50_000_000, 0);
+        let big = borrow_event(1, caller_a(), 500_000_000, 0);
+        let threshold = 100_000_000u64; // $1.00 in e8s
+
+        assert!(!small.passes_filters(None, None, None, None, Some(threshold), &lookup, 0));
+        assert!(big.passes_filters(None, None, None, None, Some(threshold), &lookup, 0));
+
+        // Admin setter has no size — passes through any threshold.
+        let setter = Event::SetBorrowingFee { rate: "0.005".into() };
+        assert!(setter.passes_filters(None, None, None, None, Some(u64::MAX), &lookup, 0));
+    }
+
+    // ── two-filter AND combinations ───────────────────────────────────────
+
+    #[test]
+    fn type_and_principal_combine_with_and_semantics() {
+        let lookup = HashMap::new();
+        let types: HashSet<_> = [EventTypeFilter::Borrow].into_iter().collect();
+
+        // Right type AND right principal → match
+        assert!(borrow_event(1, caller_a(), 100, 0).passes_filters(
+            Some(&types), Some(&caller_a()), None, None, None, &lookup, 0,
+        ));
+        // Right type, wrong principal → reject
+        assert!(!borrow_event(1, caller_a(), 100, 0).passes_filters(
+            Some(&types), Some(&caller_b()), None, None, None, &lookup, 0,
+        ));
+        // Wrong type, right principal → reject
+        assert!(!repay_event(1, caller_a(), 100, 0).passes_filters(
+            Some(&types), Some(&caller_a()), None, None, None, &lookup, 0,
+        ));
+    }
+
+    #[test]
+    fn time_and_token_combine_with_and_semantics() {
+        let lookup = lookup(&[(1, ckbtc_token())]);
+        let range = EventTimeRange { start_ns: 1_000, end_ns: 2_000 };
+
+        // In-window, right token → match
+        assert!(borrow_event(1, caller_a(), 100, 1_500).passes_filters(
+            None, None, Some(&ckbtc_token()), Some(&range), None, &lookup, 0,
+        ));
+        // Out-of-window, right token → reject
+        assert!(!borrow_event(1, caller_a(), 100, 9_999).passes_filters(
+            None, None, Some(&ckbtc_token()), Some(&range), None, &lookup, 0,
+        ));
+        // In-window, wrong token → reject
+        assert!(!borrow_event(1, caller_a(), 100, 1_500).passes_filters(
+            None, None, Some(&icp_token()), Some(&range), None, &lookup, 0,
+        ));
+    }
 }

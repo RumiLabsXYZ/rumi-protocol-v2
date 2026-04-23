@@ -421,7 +421,34 @@ type VaultRedemption = record {
   collateral_seized : nat64;
 };
 type Fees = record { redemption_fee : float64; borrowing_fee : float64 };
-type GetEventsArg = record { start : nat64; length : nat64 };
+type EventTypeFilter = variant {
+  OpenVault;
+  CloseVault;
+  AdjustVault;
+  Borrow;
+  Repay;
+  Liquidation;
+  PartialLiquidation;
+  Redemption;
+  ReserveRedemption;
+  StabilityPoolDeposit;
+  StabilityPoolWithdraw;
+  AdminMint;
+  AdminSweepToTreasury;
+  Admin;
+  PriceUpdate;
+  AccrueInterest;
+};
+type EventTimeRange = record { start_ns : nat64; end_ns : nat64 };
+type GetEventsArg = record {
+  start : nat64;
+  length : nat64;
+  types : opt vec EventTypeFilter;
+  "principal" : opt principal;
+  collateral_token : opt principal;
+  time_range : opt EventTimeRange;
+  min_size_e8s : opt nat64;
+};
 type GetEventsFilteredResponse = record { total : nat64; events : vec record { nat64; Event } };
 type HttpRequest = record {
   url : text;

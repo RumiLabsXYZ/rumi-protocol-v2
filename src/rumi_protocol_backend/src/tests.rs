@@ -70,9 +70,40 @@ proptest! {
             let result = crate::state::distribute_across_vaults(&vaults, target_vault);
             let icusd_distributed: ICUSD = result.iter().map(|e| e.icusd_share_amount).sum();
             let icp_distributed: ICP = result.iter().map(|e| e.icp_share_amount).sum();
-            
+
             assert_eq!(icusd_distributed, ICUSD::from(target_borrowed_icusd));
             assert_eq!(icp_distributed, ICP::from(target_icp_margin));
         }
+    }
+}
+
+#[cfg(test)]
+mod candid_compat {
+    use crate::GetEventsArg;
+    use candid::{decode_one, encode_one, CandidType, Deserialize};
+
+    /// Pre-extension wire shape: any client compiled before the new optional
+    /// filter fields were added still encodes a record with just `start` and
+    /// `length`. Decoding it as the extended `GetEventsArg` must succeed and
+    /// leave every new field as `None`.
+    #[derive(CandidType, Deserialize)]
+    struct LegacyGetEventsArg {
+        start: u64,
+        length: u64,
+    }
+
+    #[test]
+    fn legacy_two_field_arg_decodes_into_extended_struct() {
+        let legacy = LegacyGetEventsArg { start: 0, length: 100 };
+        let bytes = encode_one(&legacy).expect("encode legacy");
+        let decoded: GetEventsArg = decode_one(&bytes).expect("decode into extended");
+
+        assert_eq!(decoded.start, 0);
+        assert_eq!(decoded.length, 100);
+        assert!(decoded.types.is_none());
+        assert!(decoded.principal.is_none());
+        assert!(decoded.collateral_token.is_none());
+        assert!(decoded.time_range.is_none());
+        assert!(decoded.min_size_e8s.is_none());
     }
 }

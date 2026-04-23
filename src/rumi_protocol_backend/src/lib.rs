@@ -193,13 +193,66 @@ pub struct StabilityPoolLiquidationResult {
     pub collateral_price_e8s: u64,
 }
 
-#[derive(candid::CandidType, Deserialize)]
+/// Coarse classification of an `Event` for the explorer's type facet.
+/// Each variant maps to one or more concrete `Event` cases via
+/// `Event::type_filter()`. Adding a new `Event` variant requires extending
+/// both the mapping there and (if needed) this enum.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum EventTypeFilter {
+    OpenVault,
+    CloseVault,
+    AdjustVault,
+    Borrow,
+    Repay,
+    Liquidation,
+    PartialLiquidation,
+    Redemption,
+    ReserveRedemption,
+    StabilityPoolDeposit,
+    StabilityPoolWithdraw,
+    AdminMint,
+    AdminSweepToTreasury,
+    Admin,
+    PriceUpdate,
+    AccrueInterest,
+}
+
+/// Inclusive nanosecond timestamp window for the time facet.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EventTimeRange {
+    pub start_ns: u64,
+    pub end_ns: u64,
+}
+
+#[derive(candid::CandidType, Deserialize, Default, Clone, Debug)]
 pub struct GetEventsArg {
     pub start: u64,
     pub length: u64,
+    /// OR-combined within the vec; AND with other filters. Empty vec or null
+    /// means "no filter on type" — preserves the legacy behavior of hiding
+    /// `AccrueInterest` and `PriceUpdate`. When non-empty, only events whose
+    /// `type_filter` matches one of the variants are returned (including
+    /// `AccrueInterest`/`PriceUpdate` if explicitly requested).
+    #[serde(default)]
+    pub types: Option<Vec<EventTypeFilter>>,
+    /// Match against the event's owner / caller / liquidator / target principal
+    /// using `Event::involves_principal`.
+    #[serde(default)]
+    pub principal: Option<Principal>,
+    /// Collateral token ledger principal. For vault-id events, resolved by
+    /// looking up the vault's collateral type at open time.
+    #[serde(default)]
+    pub collateral_token: Option<Principal>,
+    #[serde(default)]
+    pub time_range: Option<EventTimeRange>,
+    /// Minimum event size in icUSD e8s (= USD e8s). ICP/collateral amounts are
+    /// converted at the current spot price. Events with no meaningful size
+    /// pass through.
+    #[serde(default)]
+    pub min_size_e8s: Option<u64>,
 }
 
-#[derive(candid::CandidType)]
+#[derive(candid::CandidType, Clone)]
 pub struct GetEventsFilteredResponse {
     pub total: u64,
     pub events: Vec<(u64, crate::event::Event)>,

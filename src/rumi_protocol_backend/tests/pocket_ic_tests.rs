@@ -3230,7 +3230,7 @@ fn call_admin_mint(
 
 /// Helper: fetch all events from the protocol.
 fn fetch_events(pic: &PocketIc, protocol_id: Principal, start: u64, length: u64) -> Vec<Event> {
-    let arg = GetEventsArg { start, length };
+    let arg = GetEventsArg { start, length, ..Default::default() };
     let encoded = encode_args((arg,)).expect("Failed to encode get_events args");
 
     let result = pic
