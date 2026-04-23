@@ -1,3 +1,25 @@
+type AddressValuePoint = record {
+  ts_ns : nat64;
+  value_usd_e8s : nat64;
+  breakdown : vec AddressValueSourceBreakdown;
+};
+type AddressValueSeriesQuery = record {
+  "principal" : principal;
+  window_ns : opt nat64;
+  resolution_ns : opt nat64;
+};
+type AddressValueSeriesResponse = record {
+  "principal" : principal;
+  window_ns : nat64;
+  resolution_ns : nat64;
+  generated_at_ns : nat64;
+  points : vec AddressValuePoint;
+  approximate_sources : vec text;
+};
+type AddressValueSourceBreakdown = record {
+  source : text;
+  value_usd_e8s : nat64;
+};
 type AdminEventBreakdownQuery = record { window_ns : opt nat64 };
 type AdminEventBreakdownResponse = record {
   labels : vec AdminEventLabelCount;
@@ -353,6 +375,9 @@ type VolatilityResponse = record {
   annualized_vol_pct : float64;
 };
 service : (InitArgs) -> {
+  get_address_value_series : (AddressValueSeriesQuery) -> (
+      AddressValueSeriesResponse,
+    ) query;
   get_admin : () -> (principal) query;
   get_admin_event_breakdown : (AdminEventBreakdownQuery) -> (
       AdminEventBreakdownResponse,

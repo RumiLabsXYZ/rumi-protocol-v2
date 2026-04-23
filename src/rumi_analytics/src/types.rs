@@ -392,3 +392,42 @@ pub struct PoolRoutesResponse {
     pub generated_at_ns: u64,
     pub routes: Vec<PoolRoute>,
 }
+
+// --- Address value series (portfolio value over time, stacked by source) ---
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct AddressValueSeriesQuery {
+    pub principal: Principal,
+    /// Lookback window in nanoseconds. `None` defaults to ~90 days.
+    pub window_ns: Option<u64>,
+    /// Sample resolution in nanoseconds. `None` defaults to 1 day. Clamped to
+    /// the price-oracle's native 5-minute granularity.
+    pub resolution_ns: Option<u64>,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq)]
+pub struct AddressValueSourceBreakdown {
+    /// Short identifier for the source, e.g. "icusd", "threeusd",
+    /// "vault_collateral", "sp_deposit", "three_pool_lp".
+    pub source: String,
+    pub value_usd_e8s: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq)]
+pub struct AddressValuePoint {
+    pub ts_ns: u64,
+    pub value_usd_e8s: u64,
+    pub breakdown: Vec<AddressValueSourceBreakdown>,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct AddressValueSeriesResponse {
+    pub principal: Principal,
+    pub window_ns: u64,
+    pub resolution_ns: u64,
+    pub generated_at_ns: u64,
+    pub points: Vec<AddressValuePoint>,
+    /// Sources that v1 approximates rather than fully reconstructs (e.g.
+    /// "icusd", "threeusd", "amm_lp"). Exposed so the UI can note the caveat.
+    pub approximate_sources: Vec<String>,
+}

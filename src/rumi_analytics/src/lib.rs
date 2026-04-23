@@ -190,6 +190,11 @@ fn get_pool_routes(query: types::PoolRoutesQuery) -> types::PoolRoutesResponse {
 }
 
 #[ic_cdk_macros::query]
+fn get_address_value_series(query: types::AddressValueSeriesQuery) -> types::AddressValueSeriesResponse {
+    queries::address_value::get_address_value_series(query)
+}
+
+#[ic_cdk_macros::query]
 fn get_collector_health() -> types::CollectorHealth {
     use storage::cursors;
 

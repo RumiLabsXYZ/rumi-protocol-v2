@@ -7,6 +7,28 @@ export const idlFactory = ({ IDL }) => {
     'stability_pool' : IDL.Principal,
     'backend' : IDL.Principal,
   });
+  const AddressValueSeriesQuery = IDL.Record({
+    'principal' : IDL.Principal,
+    'resolution_ns' : IDL.Opt(IDL.Nat64),
+    'window_ns' : IDL.Opt(IDL.Nat64),
+  });
+  const AddressValueSourceBreakdown = IDL.Record({
+    'source' : IDL.Text,
+    'value_usd_e8s' : IDL.Nat64,
+  });
+  const AddressValuePoint = IDL.Record({
+    'ts_ns' : IDL.Nat64,
+    'breakdown' : IDL.Vec(AddressValueSourceBreakdown),
+    'value_usd_e8s' : IDL.Nat64,
+  });
+  const AddressValueSeriesResponse = IDL.Record({
+    'principal' : IDL.Principal,
+    'resolution_ns' : IDL.Nat64,
+    'generated_at_ns' : IDL.Nat64,
+    'approximate_sources' : IDL.Vec(IDL.Text),
+    'window_ns' : IDL.Nat64,
+    'points' : IDL.Vec(AddressValuePoint),
+  });
   const AdminEventBreakdownQuery = IDL.Record({
     'window_ns' : IDL.Opt(IDL.Nat64),
   });
@@ -370,6 +392,11 @@ export const idlFactory = ({ IDL }) => {
     'status_code' : IDL.Nat16,
   });
   return IDL.Service({
+    'get_address_value_series' : IDL.Func(
+        [AddressValueSeriesQuery],
+        [AddressValueSeriesResponse],
+        ['query'],
+      ),
     'get_admin' : IDL.Func([], [IDL.Principal], ['query']),
     'get_admin_event_breakdown' : IDL.Func(
         [AdminEventBreakdownQuery],
