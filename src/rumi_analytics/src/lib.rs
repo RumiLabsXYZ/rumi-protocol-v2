@@ -160,6 +160,21 @@ fn get_top_holders(query: types::TopHoldersQuery) -> types::TopHoldersResponse {
 }
 
 #[ic_cdk_macros::query]
+fn get_top_counterparties(query: types::TopCounterpartiesQuery) -> types::TopCounterpartiesResponse {
+    queries::live::get_top_counterparties(query)
+}
+
+#[ic_cdk_macros::query]
+fn get_top_sp_depositors(query: types::TopSpDepositorsQuery) -> types::TopSpDepositorsResponse {
+    queries::live::get_top_sp_depositors(query)
+}
+
+#[ic_cdk_macros::query]
+fn get_admin_event_breakdown(query: types::AdminEventBreakdownQuery) -> types::AdminEventBreakdownResponse {
+    queries::live::get_admin_event_breakdown(query)
+}
+
+#[ic_cdk_macros::query]
 fn get_trade_activity(query: types::TradeActivityQuery) -> types::TradeActivityResponse {
     queries::live::get_trade_activity(query)
 }

@@ -533,6 +533,318 @@ pub fn compute_top_holders(
     }
 }
 
+// ─── Top Counterparties ───
+
+/// Default lookback when callers don't pass a window: 30 days.
+const DEFAULT_WINDOW_NS: u64 = 30 * 86_400 * NANOS_PER_SEC;
+
+/// Principal-ranking cache TTL: 30s.
+const TOP_PRINCIPALS_TTL_NS: u64 = 30 * NANOS_PER_SEC;
+
+/// Admin-breakdown cache TTL: 5 minutes (admin events are rare).
+const ADMIN_BREAKDOWN_TTL_NS: u64 = 5 * 60 * NANOS_PER_SEC;
+
+const TOP_PRINCIPALS_DEFAULT_LIMIT: u32 = 50;
+const TOP_PRINCIPALS_MAX_LIMIT: u32 = 200;
+const MAX_EVENT_LOAD: usize = 50_000;
+
+thread_local! {
+    static TOP_COUNTERPARTIES_CACHE: std::cell::RefCell<HashMap<(Principal, u64, u32), (u64, types::TopCounterpartiesResponse)>> =
+        std::cell::RefCell::new(HashMap::new());
+    static TOP_SP_DEPOSITORS_CACHE: std::cell::RefCell<HashMap<(u64, u32), (u64, types::TopSpDepositorsResponse)>> =
+        std::cell::RefCell::new(HashMap::new());
+    static ADMIN_BREAKDOWN_CACHE: std::cell::RefCell<HashMap<u64, (u64, types::AdminEventBreakdownResponse)>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+fn resolve_window_ns(window_ns: Option<u64>) -> u64 {
+    match window_ns {
+        Some(0) => DEFAULT_WINDOW_NS,
+        Some(w) => w,
+        None => DEFAULT_WINDOW_NS,
+    }
+}
+
+/// Whether a cached entry stamped at `cached_at_ns` is still fresh relative to
+/// `now_ns` and a `ttl_ns` lifetime. Extracted so cache behavior is unit-
+/// testable without needing a canister runtime.
+pub fn cache_is_fresh(cached_at_ns: u64, now_ns: u64, ttl_ns: u64) -> bool {
+    now_ns.saturating_sub(cached_at_ns) < ttl_ns
+}
+
+fn resolve_principal_limit(limit: Option<u32>) -> u32 {
+    let raw = limit.unwrap_or(TOP_PRINCIPALS_DEFAULT_LIMIT);
+    if raw == 0 { TOP_PRINCIPALS_DEFAULT_LIMIT } else { raw }
+        .clamp(1, TOP_PRINCIPALS_MAX_LIMIT)
+}
+
+pub fn get_top_counterparties(query: types::TopCounterpartiesQuery) -> types::TopCounterpartiesResponse {
+    let window_ns = resolve_window_ns(query.window_ns);
+    let limit = resolve_principal_limit(query.limit);
+    let now = ic_cdk::api::time();
+    let cache_key = (query.principal, window_ns, limit);
+
+    if let Some((ts, resp)) = TOP_COUNTERPARTIES_CACHE.with(|c| c.borrow().get(&cache_key).cloned()) {
+        if cache_is_fresh(ts, now, TOP_PRINCIPALS_TTL_NS) {
+            return resp;
+        }
+    }
+
+    let from = now.saturating_sub(window_ns);
+    let vault_evs = storage::events::evt_vaults::range(from, now, MAX_EVENT_LOAD);
+    let swap_evs = storage::events::evt_swaps::range(from, now, MAX_EVENT_LOAD);
+    let liq_evs = storage::events::evt_liquidity::range(from, now, MAX_EVENT_LOAD);
+    let stab_evs = storage::events::evt_stability::range(from, now, MAX_EVENT_LOAD);
+
+    let (three_pool, amm) = state::read_state(|s| (s.sources.three_pool, s.sources.amm));
+    let sp = state::read_state(|s| s.sources.stability_pool);
+
+    // Build vault_id -> vault_owner from Opened events in this window. For
+    // historical redemption-vs-owner relationships we rely on open events also
+    // being in range; acceptable for the default window.
+    let mut vault_owners: HashMap<u64, Principal> = HashMap::new();
+    for e in &vault_evs {
+        if matches!(e.event_kind, storage::events::VaultEventKind::Opened) {
+            vault_owners.insert(e.vault_id, e.owner);
+        }
+    }
+
+    let rows = compute_top_counterparties(
+        query.principal,
+        &vault_evs,
+        &swap_evs,
+        &liq_evs,
+        &stab_evs,
+        &vault_owners,
+        three_pool,
+        amm,
+        sp,
+        limit as usize,
+    );
+
+    let resp = types::TopCounterpartiesResponse {
+        principal: query.principal,
+        window_ns,
+        generated_at_ns: now,
+        rows,
+    };
+    TOP_COUNTERPARTIES_CACHE.with(|c| {
+        c.borrow_mut().insert(cache_key, (now, resp.clone()));
+    });
+    resp
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn compute_top_counterparties(
+    target: Principal,
+    vault_events: &[storage::events::AnalyticsVaultEvent],
+    swap_events: &[storage::events::AnalyticsSwapEvent],
+    liquidity_events: &[storage::events::AnalyticsLiquidityEvent],
+    stability_events: &[storage::events::AnalyticsStabilityEvent],
+    vault_owners: &HashMap<u64, Principal>,
+    three_pool: Principal,
+    amm: Principal,
+    stability_pool: Principal,
+    limit: usize,
+) -> Vec<types::TopCounterpartyRow> {
+    let mut cp: HashMap<Principal, (u64, u64)> = HashMap::new();
+    let mut bump = |p: Principal, vol: u64| {
+        let entry = cp.entry(p).or_insert((0, 0));
+        entry.0 = entry.0.saturating_add(1);
+        entry.1 = entry.1.saturating_add(vol);
+    };
+
+    for e in vault_events {
+        let owner_of_vault = vault_owners.get(&e.vault_id).copied();
+        let ev_actor = e.owner;
+        if ev_actor == target {
+            // Target acted on someone else's vault (e.g. a redemption) → the
+            // vault owner is the counterparty.
+            if let Some(actual_owner) = owner_of_vault {
+                if actual_owner != target {
+                    bump(actual_owner, e.amount);
+                }
+            }
+        } else if owner_of_vault == Some(target) {
+            // Someone else touched target's vault (liquidator, redeemer).
+            bump(ev_actor, e.amount);
+        }
+    }
+
+    for e in swap_events {
+        if e.caller == target {
+            let pool = match e.source {
+                storage::events::SwapSource::ThreePool => three_pool,
+                storage::events::SwapSource::Amm => amm,
+            };
+            bump(pool, e.amount_in);
+        }
+    }
+
+    for e in liquidity_events {
+        if e.caller == target {
+            let vol: u64 = e.amounts.iter().copied().fold(0u64, |acc, a| acc.saturating_add(a));
+            bump(three_pool, vol);
+        }
+    }
+
+    for e in stability_events {
+        if e.caller == target {
+            bump(stability_pool, e.amount);
+        }
+    }
+
+    let mut rows: Vec<(Principal, u64, u64)> = cp.into_iter()
+        .map(|(p, (c, v))| (p, c, v))
+        .collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
+    rows.truncate(limit);
+    rows.into_iter().map(|(counterparty, interaction_count, volume_e8s)| {
+        types::TopCounterpartyRow { counterparty, interaction_count, volume_e8s }
+    }).collect()
+}
+
+/// Invalidate the cached counterparties for a principal. Kept for parity with
+/// PR #87's `invalidate_top_holders_cache`.
+#[allow(dead_code)]
+pub fn invalidate_top_counterparties_cache(principal: Principal) {
+    TOP_COUNTERPARTIES_CACHE.with(|c| {
+        c.borrow_mut().retain(|(p, _, _), _| *p != principal);
+    });
+}
+
+// ─── Top Stability Pool Depositors ───
+
+pub fn get_top_sp_depositors(query: types::TopSpDepositorsQuery) -> types::TopSpDepositorsResponse {
+    let window_ns = resolve_window_ns(query.window_ns);
+    let limit = resolve_principal_limit(query.limit);
+    let now = ic_cdk::api::time();
+    let cache_key = (window_ns, limit);
+
+    if let Some((ts, resp)) = TOP_SP_DEPOSITORS_CACHE.with(|c| c.borrow().get(&cache_key).cloned()) {
+        if cache_is_fresh(ts, now, TOP_PRINCIPALS_TTL_NS) {
+            return resp;
+        }
+    }
+
+    let from = now.saturating_sub(window_ns);
+    let window_evs = storage::events::evt_stability::range(from, now, MAX_EVENT_LOAD);
+    let all_evs = storage::events::evt_stability::range(0, now, MAX_EVENT_LOAD);
+
+    let rows = compute_top_sp_depositors(&window_evs, &all_evs, limit as usize);
+
+    let resp = types::TopSpDepositorsResponse {
+        window_ns,
+        generated_at_ns: now,
+        rows,
+    };
+    TOP_SP_DEPOSITORS_CACHE.with(|c| {
+        c.borrow_mut().insert(cache_key, (now, resp.clone()));
+    });
+    resp
+}
+
+pub fn compute_top_sp_depositors(
+    window_events: &[storage::events::AnalyticsStabilityEvent],
+    all_events: &[storage::events::AnalyticsStabilityEvent],
+    limit: usize,
+) -> Vec<types::TopSpDepositorRow> {
+    use storage::events::StabilityAction;
+
+    // Windowed totals per principal.
+    let mut window_stats: HashMap<Principal, (u64, i64)> = HashMap::new();
+    for e in window_events {
+        let entry = window_stats.entry(e.caller).or_insert((0, 0));
+        match e.action {
+            StabilityAction::Deposit => {
+                entry.0 = entry.0.saturating_add(e.amount);
+                entry.1 = entry.1.saturating_add(e.amount as i64);
+            }
+            StabilityAction::Withdraw => {
+                entry.1 = entry.1.saturating_sub(e.amount as i64);
+            }
+            StabilityAction::ClaimReturns => {}
+        }
+    }
+
+    // All-time net balance per principal.
+    let mut lifetime_net: HashMap<Principal, i64> = HashMap::new();
+    for e in all_events {
+        let entry = lifetime_net.entry(e.caller).or_insert(0);
+        match e.action {
+            StabilityAction::Deposit => *entry = entry.saturating_add(e.amount as i64),
+            StabilityAction::Withdraw => *entry = entry.saturating_sub(e.amount as i64),
+            StabilityAction::ClaimReturns => {}
+        }
+    }
+
+    let mut rows: Vec<types::TopSpDepositorRow> = window_stats.into_iter()
+        .filter(|(_, (dep, _))| *dep > 0)
+        .map(|(principal, (total_deposited_e8s, net_position_e8s))| {
+            let current = lifetime_net.get(&principal).copied().unwrap_or(0);
+            let current_balance_e8s = if current < 0 { 0 } else { current as u64 };
+            types::TopSpDepositorRow {
+                principal,
+                total_deposited_e8s,
+                current_balance_e8s,
+                net_position_e8s,
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| b.total_deposited_e8s.cmp(&a.total_deposited_e8s));
+    rows.truncate(limit);
+    rows
+}
+
+// ─── Admin Event Breakdown ───
+
+pub fn get_admin_event_breakdown(query: types::AdminEventBreakdownQuery) -> types::AdminEventBreakdownResponse {
+    let window_ns = resolve_window_ns(query.window_ns);
+    let now = ic_cdk::api::time();
+
+    if let Some((ts, resp)) = ADMIN_BREAKDOWN_CACHE.with(|c| c.borrow().get(&window_ns).cloned()) {
+        if now.saturating_sub(ts) < ADMIN_BREAKDOWN_TTL_NS {
+            return resp;
+        }
+    }
+
+    let from = now.saturating_sub(window_ns);
+    let events = storage::events::evt_admin::range(from, now, MAX_EVENT_LOAD);
+    let labels = compute_admin_event_breakdown(&events);
+
+    let resp = types::AdminEventBreakdownResponse {
+        window_ns,
+        generated_at_ns: now,
+        labels,
+    };
+    ADMIN_BREAKDOWN_CACHE.with(|c| {
+        c.borrow_mut().insert(window_ns, (now, resp.clone()));
+    });
+    resp
+}
+
+pub fn compute_admin_event_breakdown(
+    events: &[storage::events::AnalyticsAdminEvent],
+) -> Vec<types::AdminEventLabelCount> {
+    let mut agg: HashMap<String, (u64, u64)> = HashMap::new();
+    for e in events {
+        let entry = agg.entry(e.label.clone()).or_insert((0, 0));
+        entry.0 = entry.0.saturating_add(1);
+        if e.timestamp_ns > entry.1 {
+            entry.1 = e.timestamp_ns;
+        }
+    }
+    let mut rows: Vec<types::AdminEventLabelCount> = agg.into_iter()
+        .map(|(label, (count, last))| types::AdminEventLabelCount {
+            label,
+            count,
+            last_at_ns: if last > 0 { Some(last) } else { None },
+        })
+        .collect();
+    rows.sort_by(|a, b| b.count.cmp(&a.count).then(a.label.cmp(&b.label)));
+    rows
+}
+
 // ─── Protocol Summary ───
 
 pub fn get_protocol_summary() -> types::ProtocolSummary {
@@ -974,6 +1286,301 @@ mod tests {
         assert_eq!(res.total_holders, 0);
         assert!(res.rows.is_empty());
         assert_eq!(res.generated_at_ns, 7);
+    }
+
+    // ── Top counterparties ─────────────────────────────────────────────────
+
+    fn make_vault_event(vault_id: u64, owner: Principal, kind: crate::storage::events::VaultEventKind, amount: u64) -> crate::storage::events::AnalyticsVaultEvent {
+        crate::storage::events::AnalyticsVaultEvent {
+            timestamp_ns: 1_000,
+            source_event_id: 0,
+            vault_id,
+            owner,
+            event_kind: kind,
+            collateral_type: Principal::anonymous(),
+            amount,
+        }
+    }
+
+    fn make_liquidity_event(caller: Principal, amounts: Vec<u64>) -> crate::storage::events::AnalyticsLiquidityEvent {
+        crate::storage::events::AnalyticsLiquidityEvent {
+            timestamp_ns: 1_000,
+            source_event_id: 0,
+            caller,
+            action: crate::storage::events::LiquidityAction::Add,
+            amounts,
+            lp_amount: 0,
+            coin_index: None,
+            fee: None,
+        }
+    }
+
+    fn make_stability_event(caller: Principal, action: crate::storage::events::StabilityAction, amount: u64) -> crate::storage::events::AnalyticsStabilityEvent {
+        crate::storage::events::AnalyticsStabilityEvent {
+            timestamp_ns: 1_000,
+            source_event_id: 0,
+            caller,
+            action,
+            amount,
+        }
+    }
+
+    fn make_admin_event(label: &str, ts: u64) -> crate::storage::events::AnalyticsAdminEvent {
+        crate::storage::events::AnalyticsAdminEvent {
+            timestamp_ns: ts,
+            source_event_id: 0,
+            label: label.to_string(),
+        }
+    }
+
+    #[test]
+    fn top_counterparties_ranks_by_interactions_and_volume() {
+        use crate::storage::events::SwapSource;
+
+        let target = p(1);
+        let three_pool = p(100);
+        let amm = p(101);
+        let sp = p(102);
+
+        let swaps = vec![
+            AnalyticsSwapEvent {
+                timestamp_ns: 1_000, source: SwapSource::ThreePool, source_event_id: 0,
+                caller: target, token_in: p(50), token_out: p(51),
+                amount_in: 1_000, amount_out: 995, fee: 5,
+            },
+            AnalyticsSwapEvent {
+                timestamp_ns: 2_000, source: SwapSource::Amm, source_event_id: 1,
+                caller: target, token_in: p(60), token_out: p(61),
+                amount_in: 500, amount_out: 495, fee: 5,
+            },
+            AnalyticsSwapEvent {
+                timestamp_ns: 3_000, source: SwapSource::ThreePool, source_event_id: 2,
+                caller: target, token_in: p(50), token_out: p(51),
+                amount_in: 2_000, amount_out: 1_990, fee: 10,
+            },
+        ];
+
+        let rows = compute_top_counterparties(
+            target,
+            &[],
+            &swaps,
+            &[],
+            &[],
+            &HashMap::new(),
+            three_pool, amm, sp,
+            10,
+        );
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].counterparty, three_pool);
+        assert_eq!(rows[0].interaction_count, 2);
+        assert_eq!(rows[0].volume_e8s, 3_000);
+        assert_eq!(rows[1].counterparty, amm);
+        assert_eq!(rows[1].interaction_count, 1);
+    }
+
+    #[test]
+    fn top_counterparties_surfaces_other_principals_via_vault_ownership() {
+        use crate::storage::events::VaultEventKind;
+
+        let owner = p(1);
+        let redeemer = p(2);
+        let mut vault_owners = HashMap::new();
+        vault_owners.insert(42u64, owner);
+
+        let vault_events = vec![
+            make_vault_event(42, owner, VaultEventKind::Opened, 0),
+            // Redeemer acted on owner's vault.
+            make_vault_event(42, redeemer, VaultEventKind::Redeemed, 500),
+            // Owner acts on own vault — not a counterparty.
+            make_vault_event(42, owner, VaultEventKind::Borrowed, 100),
+        ];
+
+        let rows = compute_top_counterparties(
+            owner,
+            &vault_events,
+            &[],
+            &[],
+            &[],
+            &vault_owners,
+            p(100), p(101), p(102),
+            10,
+        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].counterparty, redeemer);
+        assert_eq!(rows[0].interaction_count, 1);
+        assert_eq!(rows[0].volume_e8s, 500);
+    }
+
+    #[test]
+    fn top_counterparties_respects_limit() {
+        let target = p(1);
+        let three_pool = p(100);
+        // Three separate liquidity events (all counted against the pool).
+        let events = vec![
+            make_liquidity_event(target, vec![100, 200]),
+            make_liquidity_event(target, vec![50]),
+            make_liquidity_event(target, vec![10]),
+        ];
+        // Pool is the only counterparty, so limit=1 is already the full result.
+        let rows = compute_top_counterparties(
+            target,
+            &[],
+            &[],
+            &events,
+            &[],
+            &HashMap::new(),
+            three_pool, p(101), p(102),
+            1,
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].interaction_count, 3);
+        assert_eq!(rows[0].volume_e8s, 360);
+    }
+
+    #[test]
+    fn top_counterparties_skips_events_unrelated_to_target() {
+        use crate::storage::events::SwapSource;
+        let target = p(1);
+        let other = p(2);
+        let swaps = vec![
+            AnalyticsSwapEvent {
+                timestamp_ns: 1_000, source: SwapSource::ThreePool, source_event_id: 0,
+                caller: other, token_in: p(50), token_out: p(51),
+                amount_in: 1_000, amount_out: 995, fee: 5,
+            },
+        ];
+        let rows = compute_top_counterparties(
+            target,
+            &[],
+            &swaps,
+            &[],
+            &[],
+            &HashMap::new(),
+            p(100), p(101), p(102),
+            10,
+        );
+        assert!(rows.is_empty());
+    }
+
+    // ── Top SP depositors ─────────────────────────────────────────────────
+
+    #[test]
+    fn top_sp_depositors_ranks_by_total_deposited_in_window() {
+        use crate::storage::events::StabilityAction;
+        let whale = p(1);
+        let shrimp = p(2);
+        let window_events = vec![
+            make_stability_event(whale, StabilityAction::Deposit, 1_000),
+            make_stability_event(whale, StabilityAction::Deposit, 500),
+            make_stability_event(whale, StabilityAction::Withdraw, 200),
+            make_stability_event(shrimp, StabilityAction::Deposit, 100),
+        ];
+        let rows = compute_top_sp_depositors(&window_events, &window_events, 10);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].principal, whale);
+        assert_eq!(rows[0].total_deposited_e8s, 1_500);
+        assert_eq!(rows[0].net_position_e8s, 1_300);
+        assert_eq!(rows[0].current_balance_e8s, 1_300);
+        assert_eq!(rows[1].principal, shrimp);
+        assert_eq!(rows[1].total_deposited_e8s, 100);
+    }
+
+    #[test]
+    fn top_sp_depositors_uses_all_events_for_current_balance() {
+        use crate::storage::events::StabilityAction;
+        let user = p(1);
+        let window = vec![
+            make_stability_event(user, StabilityAction::Deposit, 500),
+        ];
+        let all_time = vec![
+            make_stability_event(user, StabilityAction::Deposit, 1_000),
+            make_stability_event(user, StabilityAction::Withdraw, 400),
+            make_stability_event(user, StabilityAction::Deposit, 500),
+        ];
+        let rows = compute_top_sp_depositors(&window, &all_time, 10);
+        assert_eq!(rows[0].total_deposited_e8s, 500);
+        assert_eq!(rows[0].current_balance_e8s, 1_100);
+    }
+
+    #[test]
+    fn top_sp_depositors_respects_limit_and_drops_claim_only_principals() {
+        use crate::storage::events::StabilityAction;
+        let events: Vec<_> = (1u8..=10)
+            .map(|i| make_stability_event(p(i), StabilityAction::Deposit, (i as u64) * 100))
+            .chain(std::iter::once(make_stability_event(p(99), StabilityAction::ClaimReturns, 50)))
+            .collect();
+        let rows = compute_top_sp_depositors(&events, &events, 3);
+        assert_eq!(rows.len(), 3);
+        // Top three by amount: p(10)=1000, p(9)=900, p(8)=800
+        assert_eq!(rows[0].principal, p(10));
+        assert_eq!(rows[2].total_deposited_e8s, 800);
+        // The claim-only principal never appears in the deposits ranking.
+        assert!(rows.iter().all(|r| r.principal != p(99)));
+    }
+
+    #[test]
+    fn top_sp_depositors_empty_events_returns_empty() {
+        let rows = compute_top_sp_depositors(&[], &[], 10);
+        assert!(rows.is_empty());
+    }
+
+    // ── Admin event breakdown ─────────────────────────────────────────────
+
+    #[test]
+    fn admin_breakdown_counts_by_label_and_tracks_last_at() {
+        let events = vec![
+            make_admin_event("SetBorrowingFee", 1_000),
+            make_admin_event("SetBorrowingFee", 3_000),
+            make_admin_event("SetHealthyCr", 2_000),
+        ];
+        let rows = compute_admin_event_breakdown(&events);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].label, "SetBorrowingFee");
+        assert_eq!(rows[0].count, 2);
+        assert_eq!(rows[0].last_at_ns, Some(3_000));
+        assert_eq!(rows[1].label, "SetHealthyCr");
+        assert_eq!(rows[1].count, 1);
+    }
+
+    #[test]
+    fn admin_breakdown_sorts_count_desc_then_label() {
+        let events = vec![
+            make_admin_event("SetBorrowingFee", 1_000),
+            make_admin_event("SetHealthyCr", 2_000),
+            make_admin_event("AddCollateralType", 3_000),
+        ];
+        let rows = compute_admin_event_breakdown(&events);
+        // All count==1, sort by label asc as tiebreaker.
+        assert_eq!(rows[0].label, "AddCollateralType");
+        assert_eq!(rows[1].label, "SetBorrowingFee");
+        assert_eq!(rows[2].label, "SetHealthyCr");
+    }
+
+    #[test]
+    fn admin_breakdown_empty_returns_empty() {
+        assert!(compute_admin_event_breakdown(&[]).is_empty());
+    }
+
+    // ── Cache freshness ──────────────────────────────────────────────────
+
+    #[test]
+    fn cache_is_fresh_within_ttl_and_stale_after() {
+        // 30s TTL, stamp at t=1_000 (in the same ns units).
+        let ttl = 30 * NANOS_PER_SEC;
+        let cached_at = 1_000_000_000u64;
+        // Same instant → fresh.
+        assert!(cache_is_fresh(cached_at, cached_at, ttl));
+        // 29s later → still fresh.
+        assert!(cache_is_fresh(cached_at, cached_at + 29 * NANOS_PER_SEC, ttl));
+        // Exactly TTL later → stale (strict <).
+        assert!(!cache_is_fresh(cached_at, cached_at + ttl, ttl));
+        // 1 minute later → stale.
+        assert!(!cache_is_fresh(cached_at, cached_at + 60 * NANOS_PER_SEC, ttl));
+        // Now earlier than cached_at (clock skew/defensive) → saturating
+        // subtraction yields 0 which is < ttl → still fresh.
+        assert!(cache_is_fresh(cached_at + 5, cached_at, ttl));
     }
 
     #[test]

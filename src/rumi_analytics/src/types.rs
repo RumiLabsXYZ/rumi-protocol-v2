@@ -267,3 +267,70 @@ pub struct TopHoldersResponse {
     /// decide between rendering the table and an empty state.
     pub source: String,
 }
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct TopCounterpartiesQuery {
+    pub principal: Principal,
+    /// Lookback window in nanoseconds. `None` defaults to ~30 days.
+    pub window_ns: Option<u64>,
+    /// Max rows returned. Clamped to [1, 200]; `None` defaults to 50.
+    pub limit: Option<u32>,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq)]
+pub struct TopCounterpartyRow {
+    pub counterparty: Principal,
+    pub interaction_count: u64,
+    pub volume_e8s: u64,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct TopCounterpartiesResponse {
+    pub principal: Principal,
+    pub window_ns: u64,
+    pub generated_at_ns: u64,
+    pub rows: Vec<TopCounterpartyRow>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct TopSpDepositorsQuery {
+    pub window_ns: Option<u64>,
+    pub limit: Option<u32>,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq)]
+pub struct TopSpDepositorRow {
+    pub principal: Principal,
+    /// Sum of deposit amounts inside the window.
+    pub total_deposited_e8s: u64,
+    /// All-time net position (deposits minus withdrawals across the full log).
+    pub current_balance_e8s: u64,
+    /// Window net position (deposits minus withdrawals inside the window).
+    pub net_position_e8s: i64,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct TopSpDepositorsResponse {
+    pub window_ns: u64,
+    pub generated_at_ns: u64,
+    pub rows: Vec<TopSpDepositorRow>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct AdminEventBreakdownQuery {
+    pub window_ns: Option<u64>,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq)]
+pub struct AdminEventLabelCount {
+    pub label: String,
+    pub count: u64,
+    pub last_at_ns: Option<u64>,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct AdminEventBreakdownResponse {
+    pub window_ns: u64,
+    pub generated_at_ns: u64,
+    pub labels: Vec<AdminEventLabelCount>,
+}

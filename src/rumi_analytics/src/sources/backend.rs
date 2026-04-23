@@ -185,9 +185,17 @@ pub enum BackendEvent {
     #[serde(rename = "set_borrowing_fee")]
     SetBorrowingFee {},
     #[serde(rename = "claim_liquidity_returns")]
-    ClaimLiquidityReturns {},
+    ClaimLiquidityReturns {
+        amount: u64,
+        caller: Principal,
+        timestamp: Option<u64>,
+    },
     #[serde(rename = "provide_liquidity")]
-    ProvideLiquidity {},
+    ProvideLiquidity {
+        amount: u64,
+        caller: Principal,
+        timestamp: Option<u64>,
+    },
     #[serde(rename = "set_rmr_ceiling_cr")]
     SetRmrCeilingCr {},
     #[serde(rename = "set_recovery_rate_curve")]
@@ -255,7 +263,11 @@ pub enum BackendEvent {
     #[serde(rename = "set_rate_curve_markers")]
     SetRateCurveMarkers {},
     #[serde(rename = "withdraw_liquidity")]
-    WithdrawLiquidity {},
+    WithdrawLiquidity {
+        amount: u64,
+        caller: Principal,
+        timestamp: Option<u64>,
+    },
     #[serde(rename = "admin_mint")]
     AdminMint {},
     #[serde(rename = "set_three_pool_canister")]
@@ -317,6 +329,102 @@ pub struct BackendVaultRecord {
     pub collateral_type: Principal,
     pub collateral_amount: u64,
     pub borrowed_icusd_amount: u64,
+}
+
+impl BackendEvent {
+    /// Canonical admin label (variant name) for admin/setter/init/upgrade
+    /// variants. Returns None for user-facing variants (vault, swap, stability,
+    /// redemption, etc.). Stable across Rust renames as long as this match
+    /// stays in sync with the backend enum.
+    pub fn admin_label(&self) -> Option<&'static str> {
+        use BackendEvent::*;
+        match self {
+            // User-facing / non-admin variants (they map to their own
+            // EventTypeFilter categories in the backend, not Admin):
+            OpenVault { .. }
+            | BorrowFromVault { .. }
+            | RepayToVault { .. }
+            | CollateralWithdrawn { .. }
+            | PartialCollateralWithdrawn { .. }
+            | WithdrawAndCloseVault { .. }
+            | VaultWithdrawnAndClosed { .. }
+            | DustForgiven { .. }
+            | RedemptionOnVaults { .. }
+            | RedemptionTransfered {}
+            | LiquidateVault { .. }
+            | PartialLiquidateVault { .. }
+            | RedistributeVault { .. }
+            | ProvideLiquidity { .. }
+            | WithdrawLiquidity { .. }
+            | ClaimLiquidityReturns { .. }
+            | AccrueInterest {}
+            | PriceUpdate {}
+            | AdminMint {}
+            | AdminSweepToTreasury {}
+            | CloseVault {}
+            | MarginTransfer {}
+            | AddMarginToVault {}
+            | AdminVaultCorrection {}
+            | AdminDebtCorrection {}
+            | ReserveRedemption {} => None,
+
+            // Lifecycle variants.
+            Init {} => Some("Init"),
+            Upgrade {} => Some("Upgrade"),
+
+            // Admin setters and config events (hit `_ => Admin` in backend
+            // type_filter).
+            SetBorrowingFee {} => Some("SetBorrowingFee"),
+            SetRmrCeilingCr {} => Some("SetRmrCeilingCr"),
+            SetRecoveryRateCurve {} => Some("SetRecoveryRateCurve"),
+            SetCkstableRepayFee {} => Some("SetCkstableRepayFee"),
+            SetTreasuryPrincipal {} => Some("SetTreasuryPrincipal"),
+            SetMaxPartialLiquidationRatio {} => Some("SetMaxPartialLiquidationRatio"),
+            SetRecoveryTargetCr {} => Some("SetRecoveryTargetCr"),
+            SetStableLedgerPrincipal {} => Some("SetStableLedgerPrincipal"),
+            SetRecoveryParameters {} => Some("SetRecoveryParameters"),
+            SetCollateralBorrowingFee {} => Some("SetCollateralBorrowingFee"),
+            SetCollateralLiquidationRatio {} => Some("SetCollateralLiquidationRatio"),
+            SetCollateralBorrowThreshold {} => Some("SetCollateralBorrowThreshold"),
+            SetCollateralLiquidationBonus {} => Some("SetCollateralLiquidationBonus"),
+            SetCollateralMinVaultDebt {} => Some("SetCollateralMinVaultDebt"),
+            SetCollateralLedgerFee {} => Some("SetCollateralLedgerFee"),
+            SetCollateralRedemptionFeeFloor {} => Some("SetCollateralRedemptionFeeFloor"),
+            SetCollateralRedemptionFeeCeiling {} => Some("SetCollateralRedemptionFeeCeiling"),
+            SetCollateralMinDeposit {} => Some("SetCollateralMinDeposit"),
+            SetCollateralDisplayColor {} => Some("SetCollateralDisplayColor"),
+            SetBotAllowedCollateralTypes {} => Some("SetBotAllowedCollateralTypes"),
+            SetRmrFloorCr {} => Some("SetRmrFloorCr"),
+            SetRmrCeiling {} => Some("SetRmrCeiling"),
+            SetGlobalIcusdMintCap {} => Some("SetGlobalIcusdMintCap"),
+            SetReserveRedemptionsEnabled {} => Some("SetReserveRedemptionsEnabled"),
+            SetMinIcusdAmount {} => Some("SetMinIcusdAmount"),
+            SetBorrowingFeeCurve {} => Some("SetBorrowingFeeCurve"),
+            SetInterestPoolShare {} => Some("SetInterestPoolShare"),
+            SetLiquidationProtocolShare {} => Some("SetLiquidationProtocolShare"),
+            UpdateCollateralConfig {} => Some("UpdateCollateralConfig"),
+            SetRateCurveMarkers {} => Some("SetRateCurveMarkers"),
+            SetThreePoolCanister {} => Some("SetThreePoolCanister"),
+            SetLiquidationBonus {} => Some("SetLiquidationBonus"),
+            UpdateCollateralStatus {} => Some("UpdateCollateralStatus"),
+            SetHealthyCr {} => Some("SetHealthyCr"),
+            SetRedemptionFeeCeiling {} => Some("SetRedemptionFeeCeiling"),
+            SetStabilityPoolPrincipal {} => Some("SetStabilityPoolPrincipal"),
+            SetInterestSplit {} => Some("SetInterestSplit"),
+            SetBotBudget {} => Some("SetBotBudget"),
+            SetRmrFloor {} => Some("SetRmrFloor"),
+            SetRedemptionFeeFloor {} => Some("SetRedemptionFeeFloor"),
+            SetInterestRate {} => Some("SetInterestRate"),
+            SetReserveRedemptionFee {} => Some("SetReserveRedemptionFee"),
+            SetLiquidationBotPrincipal {} => Some("SetLiquidationBotPrincipal"),
+            AddCollateralType {} => Some("AddCollateralType"),
+            SetStableTokenEnabled {} => Some("SetStableTokenEnabled"),
+            SetRecoveryCrMultiplier {} => Some("SetRecoveryCrMultiplier"),
+            SetCollateralDebtCeiling {} => Some("SetCollateralDebtCeiling"),
+            SetCollateralInterestRate {} => Some("SetCollateralInterestRate"),
+            SetCollateralRedemptionTier {} => Some("SetCollateralRedemptionTier"),
+        }
+    }
 }
 
 pub async fn get_events(
