@@ -6,15 +6,16 @@
   import ProtocolVitals from '../ProtocolVitals.svelte';
   import PoolHealthStrip from '../PoolHealthStrip.svelte';
   import TvlChart from '../TvlChart.svelte';
+  import TokenFlowSankey from '../TokenFlowSankey.svelte';
   import {
     fetchProtocolSummary, fetchTvlSeries, fetchVaultSeries,
-    fetchFeeSeries, fetchPegStatus, fetchApys,
+    fetchFeeSeries, fetchPegStatus, fetchApys, fetchTokenFlow,
   } from '$services/explorer/analyticsService';
   import { ProtocolService } from '$services/protocol';
   import { threePoolService, POOL_TOKENS, calculateTheoreticalApy } from '$services/threePoolService';
   import { stabilityPoolService } from '$services/stabilityPoolService';
   import { e8sToNumber, formatCompact, CHART_COLORS } from '$utils/explorerChartHelpers';
-  import type { ProtocolSummary, DailyTvlRow, PegStatus } from '$declarations/rumi_analytics/rumi_analytics.did';
+  import type { ProtocolSummary, DailyTvlRow, PegStatus, TokenFlowEdge } from '$declarations/rumi_analytics/rumi_analytics.did';
 
   let summary: ProtocolSummary | null = $state(null);
   let summaryLoading = $state(true);
@@ -27,6 +28,35 @@
   let lpApy: number | null = $state(null);
   let spApy: number | null = $state(null);
   let poolsLoading = $state(true);
+
+  type FlowWindowKey = '24h' | '7d' | '30d';
+  const FLOW_WINDOW_NS: Record<FlowWindowKey, bigint> = {
+    '24h': 86_400n * 1_000_000_000n,
+    '7d': 7n * 86_400n * 1_000_000_000n,
+    '30d': 30n * 86_400n * 1_000_000_000n,
+  };
+  let flowWindow = $state<FlowWindowKey>('7d');
+  let flowEdges = $state<TokenFlowEdge[]>([]);
+  let flowLoading = $state(true);
+
+  async function reloadFlow() {
+    flowLoading = true;
+    try {
+      const resp = await fetchTokenFlow(FLOW_WINDOW_NS[flowWindow], undefined, 12);
+      flowEdges = resp.edges;
+    } catch (err) {
+      console.error('[OverviewLens] fetchTokenFlow failed:', err);
+      flowEdges = [];
+    } finally {
+      flowLoading = false;
+    }
+  }
+
+  $effect(() => {
+    // React to window flips; the first run also bootstraps the initial fetch.
+    void flowWindow;
+    reloadFlow();
+  });
 
   onMount(async () => {
     const [sumR, tvlR, vaultR, feeR, pegR, apyR] = await Promise.allSettled([
@@ -207,5 +237,24 @@
 </div>
 
 <PoolHealthStrip {pegStatus} {lpApy} {spApy} loading={poolsLoading} />
+
+<div class="explorer-card">
+  <div class="flex items-center justify-between mb-3">
+    <h3 class="text-sm font-medium text-gray-300">Token flow</h3>
+    <div class="flex items-center gap-1 text-xs">
+      {#each ['24h', '7d', '30d'] as preset (preset)}
+        <button
+          type="button"
+          class="px-2 py-0.5 rounded transition-colors
+                 {flowWindow === preset
+                   ? 'bg-white/10 text-gray-100'
+                   : 'text-gray-400 hover:text-gray-200'}"
+          onclick={() => (flowWindow = preset as FlowWindowKey)}
+        >{preset}</button>
+      {/each}
+    </div>
+  </div>
+  <TokenFlowSankey edges={flowEdges} loading={flowLoading} timePreset={flowWindow} />
+</div>
 
 <LensActivityPanel scope="all" title="Recent activity" viewAllHref="/explorer/activity" />

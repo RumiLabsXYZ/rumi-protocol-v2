@@ -32,6 +32,8 @@ import type {
 	TopCounterpartiesResponse,
 	TopSpDepositorsResponse,
 	AdminEventBreakdownResponse,
+	TokenFlowResponse,
+	PoolRoutesResponse,
 } from '$declarations/rumi_analytics/rumi_analytics.did';
 
 // ── TTL constants (ms) ───────────────────────────────────────────────────────
@@ -545,5 +547,78 @@ export async function fetchAdminEventBreakdown(
 	} catch (err) {
 		console.error('[analyticsService] fetchAdminEventBreakdown failed:', err);
 		return EMPTY_ADMIN_BREAKDOWN;
+	}
+}
+
+// ── Token flow (Sankey edges) ──────────────────────────────────────────────
+
+const EMPTY_TOKEN_FLOW: TokenFlowResponse = {
+	window_ns: 0n,
+	generated_at_ns: 0n,
+	edges: [],
+};
+
+/**
+ * Ranks token→token edges by USD volume across 3pool + AMM swaps. Drives the
+ * Protocol → Overview Sankey and per-token flow strips. Canister caches for
+ * 60s per (window, min_volume, limit) tuple.
+ */
+export async function fetchTokenFlow(
+	windowNs?: bigint,
+	minVolumeUsdE8s?: bigint,
+	limit = 50
+): Promise<TokenFlowResponse> {
+	const key = `analytics:token_flow:${windowNs ?? 'default'}:${minVolumeUsdE8s ?? '0'}:${limit}`;
+	const cached = getCached<TokenFlowResponse>(key, TTL.AGGREGATE);
+	if (cached) return cached;
+
+	try {
+		const result = await getActor().get_token_flow({
+			window_ns: windowNs !== undefined ? [windowNs] : [],
+			min_volume_usd_e8s: minVolumeUsdE8s !== undefined ? [minVolumeUsdE8s] : [],
+			limit: [limit],
+		});
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[analyticsService] fetchTokenFlow failed:', err);
+		return EMPTY_TOKEN_FLOW;
+	}
+}
+
+// ── Pool routes (single-hop + multi-hop sequences through a pool) ──────────
+
+const EMPTY_POOL_ROUTES = (poolId: string): PoolRoutesResponse => ({
+	pool_id: poolId,
+	window_ns: 0n,
+	generated_at_ns: 0n,
+	routes: [],
+});
+
+/**
+ * Enumerates routes passing through a given pool, ranked by USD volume.
+ * `poolId` accepts "3pool", the 3pool canister principal text, or an AMM
+ * `principal_lo_principal_hi` pool_id. Routes are ordered token sequences —
+ * length-2 for single-hop, length-3 for two-hop reconstructed via the
+ * 3pool-liquidity + AMM pairing.
+ */
+export async function fetchPoolRoutes(
+	poolId: string,
+	windowNs?: bigint,
+	limit = 10
+): Promise<PoolRoutesResponse> {
+	const key = `analytics:pool_routes:${poolId}:${windowNs ?? 'default'}:${limit}`;
+	const cached = getCached<PoolRoutesResponse>(key, TTL.AGGREGATE);
+	if (cached) return cached;
+
+	try {
+		const result = await getActor().get_pool_routes({
+			pool_id: poolId,
+			window_ns: windowNs !== undefined ? [windowNs] : [],
+			limit: [limit],
+		});
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[analyticsService] fetchPoolRoutes failed:', err);
+		return EMPTY_POOL_ROUTES(poolId);
 	}
 }

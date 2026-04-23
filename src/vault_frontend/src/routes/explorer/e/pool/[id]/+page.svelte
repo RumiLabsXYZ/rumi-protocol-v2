@@ -7,7 +7,7 @@
   import MiniAreaChart from '$components/explorer/MiniAreaChart.svelte';
   import MixedEventRow from '$components/explorer/MixedEventRow.svelte';
   import StatusBadge from '$components/explorer/StatusBadge.svelte';
-  import { shortenPrincipal } from '$utils/explorerHelpers';
+  import { shortenPrincipal, getTokenSymbol } from '$utils/explorerHelpers';
   import {
     fetchThreePoolStatus,
     fetchThreePoolStatsWindow,
@@ -33,6 +33,8 @@
     fetchAmmLiquidityEvents,
     fetchAmmLiquidityEventCount,
   } from '$services/explorer/explorerService';
+  import { fetchPoolRoutes } from '$services/explorer/analyticsService';
+  import type { PoolRoute } from '$declarations/rumi_analytics/rumi_analytics.did';
   import { AMM_TOKENS } from '$services/ammService';
   import type { DisplayEvent } from '$utils/displayEvent';
   import { CANISTER_IDS } from '$lib/config';
@@ -48,6 +50,7 @@
   // ── Shared state ─────────────────────────────────────────────────────────
   let loading = $state(true);
   let notFound = $state(false);
+  let poolRoutes = $state<PoolRoute[]>([]);
 
   // ── 3pool state ──────────────────────────────────────────────────────────
   let status = $state<any>(null);
@@ -246,14 +249,30 @@
     return out.slice(0, 40);
   });
 
+  /** Activity page deep-link for a route: filter by all tokens in the route
+   * with a 7d time window matching the routes fetch. */
+  function routeActivityHref(tokens: string[]): string {
+    const params = new URLSearchParams();
+    params.set('type', 'swap');
+    if (tokens.length > 0) params.set('token', tokens.join(','));
+    params.set('time', '7d');
+    return `/explorer/activity?${params.toString()}`;
+  }
+
   // ── Data load ────────────────────────────────────────────────────────────
   onMount(async () => {
+    // Pool-routes fetch runs on both branches; 7d window matches top swappers.
+    const ROUTES_WINDOW_NS = 7n * 86_400n * 1_000_000_000n;
+    const routesPromise = fetchPoolRoutes(poolIdParam, ROUTES_WINDOW_NS, 10)
+      .then((r) => r.routes)
+      .catch(() => [] as PoolRoute[]);
+
     if (isThreePool) {
       try {
         const swapCount = await fetchSwapEventCount().catch(() => 0n);
         const liqCount = await fetch3PoolLiquidityEventCount().catch(() => 0n);
 
-        const [s, st, h, lps, swappers, sev, lev, vol, bal, fees, vp] = await Promise.all([
+        const [s, st, h, lps, swappers, sev, lev, vol, bal, fees, vp, routes] = await Promise.all([
           fetchThreePoolStatus(),
           fetchThreePoolStatsWindow('Last7d'),
           fetchThreePoolHealth(),
@@ -267,6 +286,7 @@
           fetchThreePoolBalanceSeries('Last7d', 3600n),
           fetchThreePoolFeeSeries('Last7d', 3600n),
           fetchThreePoolVirtualPriceSeries('Last7d', 3600n),
+          routesPromise,
         ]);
         status = s;
         stats = st;
@@ -279,6 +299,7 @@
         balSeries = bal;
         feeSeries = fees;
         vpSeries = vp;
+        poolRoutes = routes;
       } finally {
         loading = false;
       }
@@ -300,7 +321,7 @@
       const sevenDaysNs = 7n * 24n * 3_600n * 1_000_000_000n;
       const liqCount = await fetchAmmLiquidityEventCount().catch(() => 0n);
 
-      const [statsResp, topLpsResp, topSwappersResp, swapsResp, liqsAll, volResp, balResp, feeResp] =
+      const [statsResp, topLpsResp, topSwappersResp, swapsResp, liqsAll, volResp, balResp, feeResp, routesResp] =
         await Promise.all([
           fetchAmmPoolStats(poolIdParam, 'Week'),
           fetchAmmTopLps(poolIdParam, 10),
@@ -313,6 +334,7 @@
           fetchAmmVolumeSeries(poolIdParam, 'Week', 60),
           fetchAmmBalanceSeries(poolIdParam, 'Week', 60),
           fetchAmmFeeSeries(poolIdParam, 'Week', 60),
+          routesPromise,
         ]);
 
       ammStats = statsResp;
@@ -322,6 +344,7 @@
       ammLiqEvents = (liqsAll as any[]).filter((e: any) => e.pool_id === poolIdParam);
       ammVolSeries = volResp;
       ammBalSeries = balResp;
+      poolRoutes = routesResp;
       ammFeeSeries = feeResp;
     } catch (err) {
       console.error('[pool page] AMM load failed:', err);
@@ -587,6 +610,48 @@
         </div>
       </div>
     {/if}
+
+    <!-- Routes through this pool (single-hop + reconstructed two-hop) -->
+    <div class="mt-3 bg-gray-800/40 border border-gray-700/50 rounded-xl p-4 space-y-3">
+      <div class="flex items-center justify-between">
+        <div class="text-[10px] uppercase tracking-wider text-gray-500">Routes through this pool (7d)</div>
+        <span class="text-[10px] text-gray-600">Ordered token sequence · single and multi-hop</span>
+      </div>
+      {#if poolRoutes.length === 0}
+        <div class="text-xs text-gray-500">No routes in this window.</div>
+      {:else}
+        <ul class="space-y-2">
+          {#each poolRoutes as route, i (i)}
+            {@const principals = route.route.map((p) => p.toText())}
+            {@const usd = Number(route.volume_usd_e8s) / 1e8}
+            <li>
+              <a
+                href={routeActivityHref(principals)}
+                class="flex items-center justify-between gap-3 rounded-md px-2 py-2 hover:bg-gray-700/30"
+              >
+                <div class="flex items-center gap-1 flex-wrap text-xs">
+                  {#each principals as pr, j (pr + j)}
+                    <span class="font-mono text-gray-200 bg-gray-900/60 border border-gray-700/50 rounded px-1.5 py-0.5">
+                      {getTokenSymbol(pr)}
+                    </span>
+                    {#if j < principals.length - 1}
+                      <span class="text-gray-500">→</span>
+                    {/if}
+                  {/each}
+                  <span class="ml-2 text-[10px] text-gray-500 uppercase">
+                    {route.avg_hop_count === 1 ? 'single-hop' : `${route.avg_hop_count}-hop`}
+                  </span>
+                </div>
+                <div class="text-right text-xs text-gray-400 whitespace-nowrap tabular-nums">
+                  ${usd.toLocaleString(undefined, { maximumFractionDigits: usd >= 1_000 ? 0 : 2 })}
+                  <span class="text-gray-600"> · {route.swap_count.toString()} swap{route.swap_count === 1n ? '' : 's'}</span>
+                </div>
+              </a>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </div>
   {/snippet}
 
   {#snippet activity()}
