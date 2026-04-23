@@ -233,6 +233,7 @@ export const idlFactory = ({ IDL }) => {
     'collateral_token' : IDL.Opt(IDL.Principal),
     'length' : IDL.Nat64,
     'min_size_e8s' : IDL.Opt(IDL.Nat64),
+    'admin_labels' : IDL.Opt(IDL.Vec(IDL.Text)),
   });
   const StableTokenType = IDL.Variant({
     'CKUSDC' : IDL.Null,

@@ -250,6 +250,12 @@ pub struct GetEventsArg {
     /// pass through.
     #[serde(default)]
     pub min_size_e8s: Option<u64>,
+    /// Narrow `EventTypeFilter::Admin` matches to these specific admin labels
+    /// (variant names, e.g. `"SetBorrowingFee"`). No-op when `Admin` isn't in
+    /// `types` or when the list is empty/null. Non-admin events are never
+    /// affected by this field.
+    #[serde(default)]
+    pub admin_labels: Option<Vec<String>>,
 }
 
 #[derive(candid::CandidType, Clone)]

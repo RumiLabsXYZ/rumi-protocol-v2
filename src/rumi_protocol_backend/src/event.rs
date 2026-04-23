@@ -703,6 +703,73 @@ impl Event {
         }
     }
 
+    /// Canonical label for admin/setter variants (i.e. events whose
+    /// `type_filter()` returns `Admin`). Returns `None` for user-facing
+    /// variants classified into any other `EventTypeFilter`. Labels are the
+    /// Rust variant name in CamelCase, paralleling the `EventTypeFilter`
+    /// casing so the frontend can surface per-setter facets without having to
+    /// deal with both CamelCase and snake_case on the wire.
+    pub fn admin_label(&self) -> Option<&'static str> {
+        if self.type_filter() != EventTypeFilter::Admin {
+            return None;
+        }
+        match self {
+            Event::Init(_) => Some("Init"),
+            Event::Upgrade(_) => Some("Upgrade"),
+            Event::SetCkstableRepayFee { .. } => Some("SetCkstableRepayFee"),
+            Event::SetMinIcusdAmount { .. } => Some("SetMinIcusdAmount"),
+            Event::SetGlobalIcusdMintCap { .. } => Some("SetGlobalIcusdMintCap"),
+            Event::SetStableTokenEnabled { .. } => Some("SetStableTokenEnabled"),
+            Event::SetStableLedgerPrincipal { .. } => Some("SetStableLedgerPrincipal"),
+            Event::SetTreasuryPrincipal { .. } => Some("SetTreasuryPrincipal"),
+            Event::SetStabilityPoolPrincipal { .. } => Some("SetStabilityPoolPrincipal"),
+            Event::SetLiquidationBotPrincipal { .. } => Some("SetLiquidationBotPrincipal"),
+            Event::SetBotBudget { .. } => Some("SetBotBudget"),
+            Event::SetBotAllowedCollateralTypes { .. } => Some("SetBotAllowedCollateralTypes"),
+            Event::SetLiquidationBonus { .. } => Some("SetLiquidationBonus"),
+            Event::SetBorrowingFee { .. } => Some("SetBorrowingFee"),
+            Event::SetRedemptionFeeFloor { .. } => Some("SetRedemptionFeeFloor"),
+            Event::SetRedemptionFeeCeiling { .. } => Some("SetRedemptionFeeCeiling"),
+            Event::SetMaxPartialLiquidationRatio { .. } => Some("SetMaxPartialLiquidationRatio"),
+            Event::SetRecoveryTargetCr { .. } => Some("SetRecoveryTargetCr"),
+            Event::SetRecoveryCrMultiplier { .. } => Some("SetRecoveryCrMultiplier"),
+            Event::SetLiquidationProtocolShare { .. } => Some("SetLiquidationProtocolShare"),
+            Event::AddCollateralType { .. } => Some("AddCollateralType"),
+            Event::UpdateCollateralStatus { .. } => Some("UpdateCollateralStatus"),
+            Event::UpdateCollateralConfig { .. } => Some("UpdateCollateralConfig"),
+            Event::SetReserveRedemptionsEnabled { .. } => Some("SetReserveRedemptionsEnabled"),
+            Event::SetIcpswapRoutingEnabled { .. } => Some("SetIcpswapRoutingEnabled"),
+            Event::SetReserveRedemptionFee { .. } => Some("SetReserveRedemptionFee"),
+            Event::SetRecoveryParameters { .. } => Some("SetRecoveryParameters"),
+            Event::SetRateCurveMarkers { .. } => Some("SetRateCurveMarkers"),
+            Event::SetRecoveryRateCurve { .. } => Some("SetRecoveryRateCurve"),
+            Event::SetHealthyCr { .. } => Some("SetHealthyCr"),
+            Event::SetCollateralBorrowingFee { .. } => Some("SetCollateralBorrowingFee"),
+            Event::SetInterestRate { .. } => Some("SetInterestRate"),
+            Event::SetInterestPoolShare { .. } => Some("SetInterestPoolShare"),
+            Event::SetRmrFloor { .. } => Some("SetRmrFloor"),
+            Event::SetRmrCeiling { .. } => Some("SetRmrCeiling"),
+            Event::SetRmrFloorCr { .. } => Some("SetRmrFloorCr"),
+            Event::SetRmrCeilingCr { .. } => Some("SetRmrCeilingCr"),
+            Event::SetBorrowingFeeCurve { .. } => Some("SetBorrowingFeeCurve"),
+            Event::SetInterestSplit { .. } => Some("SetInterestSplit"),
+            Event::SetThreePoolCanister { .. } => Some("SetThreePoolCanister"),
+            Event::SetCollateralLiquidationRatio { .. } => Some("SetCollateralLiquidationRatio"),
+            Event::SetCollateralBorrowThreshold { .. } => Some("SetCollateralBorrowThreshold"),
+            Event::SetCollateralLiquidationBonus { .. } => Some("SetCollateralLiquidationBonus"),
+            Event::SetCollateralMinVaultDebt { .. } => Some("SetCollateralMinVaultDebt"),
+            Event::SetCollateralLedgerFee { .. } => Some("SetCollateralLedgerFee"),
+            Event::SetCollateralRedemptionFeeFloor { .. } => Some("SetCollateralRedemptionFeeFloor"),
+            Event::SetCollateralRedemptionFeeCeiling { .. } => Some("SetCollateralRedemptionFeeCeiling"),
+            Event::SetCollateralMinDeposit { .. } => Some("SetCollateralMinDeposit"),
+            Event::SetCollateralDisplayColor { .. } => Some("SetCollateralDisplayColor"),
+            // Any variant that surfaces `Admin` via `type_filter` but isn't
+            // enumerated here still matches `Admin` type filters; it just
+            // carries no fine-grained label.
+            _ => None,
+        }
+    }
+
     /// Recorded timestamp in nanoseconds, when the event variant carries one.
     /// Used by the time-range facet; events returning `None` are excluded
     /// from time-filtered queries.
@@ -825,6 +892,7 @@ impl Event {
         collateral_token: Option<&Principal>,
         time_range: Option<&EventTimeRange>,
         min_size_e8s: Option<u64>,
+        admin_labels: Option<&HashSet<String>>,
         vault_lookup: &HashMap<u64, Principal>,
         icp_price_e8s: u64,
     ) -> bool {
@@ -837,6 +905,20 @@ impl Event {
             None => {
                 if self.is_accrue_interest() {
                     return false;
+                }
+            }
+        }
+
+        // `admin_labels` is an AND filter that narrows only Admin-typed events.
+        // No-op when the caller didn't request a specific label set or when
+        // this event isn't in the Admin bucket. Admin events with no canonical
+        // label (i.e. `admin_label()` returns None) are excluded whenever the
+        // caller requested specific labels.
+        if let Some(labels) = admin_labels {
+            if !labels.is_empty() && self.type_filter() == EventTypeFilter::Admin {
+                match self.admin_label() {
+                    Some(label) if labels.contains(label) => {}
+                    _ => return false,
                 }
             }
         }
@@ -2419,41 +2501,41 @@ mod filter_tests {
     #[test]
     fn empty_filter_excludes_accrue_interest_and_price_update() {
         let lookup = HashMap::new();
-        assert!(!accrue_event(0).passes_filters(None, None, None, None, None, &lookup, 0));
-        assert!(!price_event(icp_token(), 0).passes_filters(None, None, None, None, None, &lookup, 0));
-        assert!(borrow_event(1, caller_a(), 100, 0).passes_filters(None, None, None, None, None, &lookup, 0));
+        assert!(!accrue_event(0).passes_filters(None, None, None, None, None, None, &lookup, 0));
+        assert!(!price_event(icp_token(), 0).passes_filters(None, None, None, None, None, None, &lookup, 0));
+        assert!(borrow_event(1, caller_a(), 100, 0).passes_filters(None, None, None, None, None, None, &lookup, 0));
     }
 
     #[test]
     fn explicit_type_set_includes_accrue_interest_when_requested() {
         let lookup = HashMap::new();
         let set: HashSet<_> = [EventTypeFilter::AccrueInterest].into_iter().collect();
-        assert!(accrue_event(0).passes_filters(Some(&set), None, None, None, None, &lookup, 0));
-        assert!(!borrow_event(1, caller_a(), 100, 0).passes_filters(Some(&set), None, None, None, None, &lookup, 0));
+        assert!(accrue_event(0).passes_filters(Some(&set), None, None, None, None, None, &lookup, 0));
+        assert!(!borrow_event(1, caller_a(), 100, 0).passes_filters(Some(&set), None, None, None, None, None, &lookup, 0));
     }
 
     #[test]
     fn type_filter_or_combines_within_the_set() {
         let lookup = HashMap::new();
         let set: HashSet<_> = [EventTypeFilter::Borrow, EventTypeFilter::Repay].into_iter().collect();
-        assert!(borrow_event(1, caller_a(), 100, 0).passes_filters(Some(&set), None, None, None, None, &lookup, 0));
-        assert!(repay_event(1, caller_a(), 100, 0).passes_filters(Some(&set), None, None, None, None, &lookup, 0));
-        assert!(!liquidate_event(1, caller_a(), 0).passes_filters(Some(&set), None, None, None, None, &lookup, 0));
+        assert!(borrow_event(1, caller_a(), 100, 0).passes_filters(Some(&set), None, None, None, None, None, &lookup, 0));
+        assert!(repay_event(1, caller_a(), 100, 0).passes_filters(Some(&set), None, None, None, None, None, &lookup, 0));
+        assert!(!liquidate_event(1, caller_a(), 0).passes_filters(Some(&set), None, None, None, None, None, &lookup, 0));
     }
 
     #[test]
     fn principal_filter_matches_caller_or_owner() {
         let lookup = HashMap::new();
-        assert!(borrow_event(1, caller_a(), 100, 0).passes_filters(None, Some(&caller_a()), None, None, None, &lookup, 0));
-        assert!(!borrow_event(1, caller_a(), 100, 0).passes_filters(None, Some(&caller_b()), None, None, None, &lookup, 0));
+        assert!(borrow_event(1, caller_a(), 100, 0).passes_filters(None, Some(&caller_a()), None, None, None, None, &lookup, 0));
+        assert!(!borrow_event(1, caller_a(), 100, 0).passes_filters(None, Some(&caller_b()), None, None, None, None, &lookup, 0));
     }
 
     #[test]
     fn collateral_token_filter_matches_via_vault_lookup() {
         let lookup = lookup(&[(1, ckbtc_token())]);
         let ev = borrow_event(1, caller_a(), 100, 0);
-        assert!(ev.passes_filters(None, None, Some(&ckbtc_token()), None, None, &lookup, 0));
-        assert!(!ev.passes_filters(None, None, Some(&icp_token()), None, None, &lookup, 0));
+        assert!(ev.passes_filters(None, None, Some(&ckbtc_token()), None, None, None, &lookup, 0));
+        assert!(!ev.passes_filters(None, None, Some(&icp_token()), None, None, None, &lookup, 0));
     }
 
     #[test]
@@ -2463,8 +2545,8 @@ mod filter_tests {
 
         let inside = borrow_event(1, caller_a(), 100, 1_500);
         let outside = borrow_event(1, caller_a(), 100, 5_000);
-        assert!(inside.passes_filters(None, None, None, Some(&range), None, &lookup, 0));
-        assert!(!outside.passes_filters(None, None, None, Some(&range), None, &lookup, 0));
+        assert!(inside.passes_filters(None, None, None, Some(&range), None, None, &lookup, 0));
+        assert!(!outside.passes_filters(None, None, None, Some(&range), None, None, &lookup, 0));
 
         let init = Event::Init(InitArg {
             xrc_principal: p(0),
@@ -2478,7 +2560,7 @@ mod filter_tests {
             ckusdc_ledger_principal: None,
         });
         // Init has no timestamp_ns → excluded by an active time_range.
-        assert!(!init.passes_filters(None, None, None, Some(&range), None, &lookup, 0));
+        assert!(!init.passes_filters(None, None, None, Some(&range), None, None, &lookup, 0));
     }
 
     #[test]
@@ -2489,12 +2571,12 @@ mod filter_tests {
         let big = borrow_event(1, caller_a(), 500_000_000, 0);
         let threshold = 100_000_000u64; // $1.00 in e8s
 
-        assert!(!small.passes_filters(None, None, None, None, Some(threshold), &lookup, 0));
-        assert!(big.passes_filters(None, None, None, None, Some(threshold), &lookup, 0));
+        assert!(!small.passes_filters(None, None, None, None, Some(threshold), None, &lookup, 0));
+        assert!(big.passes_filters(None, None, None, None, Some(threshold), None, &lookup, 0));
 
         // Admin setter has no size — passes through any threshold.
         let setter = Event::SetBorrowingFee { rate: "0.005".into() };
-        assert!(setter.passes_filters(None, None, None, None, Some(u64::MAX), &lookup, 0));
+        assert!(setter.passes_filters(None, None, None, None, Some(u64::MAX), None, &lookup, 0));
     }
 
     // ── two-filter AND combinations ───────────────────────────────────────
@@ -2506,15 +2588,15 @@ mod filter_tests {
 
         // Right type AND right principal → match
         assert!(borrow_event(1, caller_a(), 100, 0).passes_filters(
-            Some(&types), Some(&caller_a()), None, None, None, &lookup, 0,
+            Some(&types), Some(&caller_a()), None, None, None, None, &lookup, 0,
         ));
         // Right type, wrong principal → reject
         assert!(!borrow_event(1, caller_a(), 100, 0).passes_filters(
-            Some(&types), Some(&caller_b()), None, None, None, &lookup, 0,
+            Some(&types), Some(&caller_b()), None, None, None, None, &lookup, 0,
         ));
         // Wrong type, right principal → reject
         assert!(!repay_event(1, caller_a(), 100, 0).passes_filters(
-            Some(&types), Some(&caller_a()), None, None, None, &lookup, 0,
+            Some(&types), Some(&caller_a()), None, None, None, None, &lookup, 0,
         ));
     }
 
@@ -2525,15 +2607,115 @@ mod filter_tests {
 
         // In-window, right token → match
         assert!(borrow_event(1, caller_a(), 100, 1_500).passes_filters(
-            None, None, Some(&ckbtc_token()), Some(&range), None, &lookup, 0,
+            None, None, Some(&ckbtc_token()), Some(&range), None, None, &lookup, 0,
         ));
         // Out-of-window, right token → reject
         assert!(!borrow_event(1, caller_a(), 100, 9_999).passes_filters(
-            None, None, Some(&ckbtc_token()), Some(&range), None, &lookup, 0,
+            None, None, Some(&ckbtc_token()), Some(&range), None, None, &lookup, 0,
         ));
         // In-window, wrong token → reject
         assert!(!borrow_event(1, caller_a(), 100, 1_500).passes_filters(
-            None, None, Some(&icp_token()), Some(&range), None, &lookup, 0,
+            None, None, Some(&icp_token()), Some(&range), None, None, &lookup, 0,
+        ));
+    }
+
+    // ── admin_label + admin_labels filter ─────────────────────────────────
+
+    #[test]
+    fn admin_label_returns_variant_name_for_admin_variants() {
+        let borrow_fee = Event::SetBorrowingFee { rate: "0.005".into() };
+        assert_eq!(borrow_fee.admin_label(), Some("SetBorrowingFee"));
+        let healthy = Event::SetHealthyCr {
+            collateral_type: "ICP".to_string(),
+            healthy_cr: Some("1.2".to_string()),
+        };
+        assert_eq!(healthy.admin_label(), Some("SetHealthyCr"));
+    }
+
+    #[test]
+    fn admin_label_returns_none_for_non_admin_variants() {
+        assert_eq!(borrow_event(1, caller_a(), 100, 0).admin_label(), None);
+        assert_eq!(liquidate_event(1, caller_a(), 0).admin_label(), None);
+        assert_eq!(accrue_event(0).admin_label(), None);
+        assert_eq!(price_event(icp_token(), 0).admin_label(), None);
+    }
+
+    #[test]
+    fn admin_labels_narrows_admin_type_matches() {
+        let lookup = HashMap::new();
+        let types: HashSet<_> = [EventTypeFilter::Admin].into_iter().collect();
+        let labels: HashSet<String> = ["SetBorrowingFee".to_string()].into_iter().collect();
+
+        let borrow_fee = Event::SetBorrowingFee { rate: "0.005".into() };
+        let healthy = Event::SetHealthyCr {
+            collateral_type: "ICP".to_string(),
+            healthy_cr: Some("1.2".to_string()),
+        };
+
+        assert!(borrow_fee.passes_filters(
+            Some(&types), None, None, None, None, Some(&labels), &lookup, 0,
+        ));
+        assert!(!healthy.passes_filters(
+            Some(&types), None, None, None, None, Some(&labels), &lookup, 0,
+        ));
+    }
+
+    #[test]
+    fn admin_labels_is_noop_without_admin_in_types() {
+        let lookup = HashMap::new();
+        // types filter requests Borrow, not Admin — so admin_labels should
+        // have no effect and the borrow event should still pass.
+        let types: HashSet<_> = [EventTypeFilter::Borrow].into_iter().collect();
+        let labels: HashSet<String> = ["SetBorrowingFee".to_string()].into_iter().collect();
+
+        assert!(borrow_event(1, caller_a(), 100, 0).passes_filters(
+            Some(&types), None, None, None, None, Some(&labels), &lookup, 0,
+        ));
+
+        // An admin event is excluded because the types filter doesn't include
+        // Admin. admin_labels doesn't re-enable it.
+        let setter = Event::SetBorrowingFee { rate: "0.005".into() };
+        assert!(!setter.passes_filters(
+            Some(&types), None, None, None, None, Some(&labels), &lookup, 0,
+        ));
+    }
+
+    #[test]
+    fn admin_labels_with_no_types_narrows_admin_events_only() {
+        // When types is None, non-admin events pass via the default filter
+        // (which hides only accrue/price). admin_labels narrows admin events
+        // to those whose label is in the set; non-admin events are unaffected.
+        let lookup = HashMap::new();
+        let labels: HashSet<String> = ["SetBorrowingFee".to_string()].into_iter().collect();
+
+        let matching_admin = Event::SetBorrowingFee { rate: "0.005".into() };
+        let non_matching_admin = Event::SetHealthyCr {
+            collateral_type: "ICP".to_string(),
+            healthy_cr: Some("1.2".to_string()),
+        };
+        let non_admin = borrow_event(1, caller_a(), 100, 0);
+
+        assert!(matching_admin.passes_filters(
+            None, None, None, None, None, Some(&labels), &lookup, 0,
+        ));
+        assert!(!non_matching_admin.passes_filters(
+            None, None, None, None, None, Some(&labels), &lookup, 0,
+        ));
+        assert!(non_admin.passes_filters(
+            None, None, None, None, None, Some(&labels), &lookup, 0,
+        ));
+    }
+
+    #[test]
+    fn admin_labels_empty_set_behaves_like_none() {
+        // An empty admin_labels set should be ignored (same semantics as None).
+        let lookup = HashMap::new();
+        let types: HashSet<_> = [EventTypeFilter::Admin].into_iter().collect();
+        let empty: HashSet<String> = HashSet::new();
+
+        let setter = Event::SetBorrowingFee { rate: "0.005".into() };
+        assert!(setter.passes_filters(
+            Some(&types), None, None, None, None, Some(&empty), &lookup, 0,
         ));
     }
 }

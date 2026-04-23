@@ -522,6 +522,7 @@ export interface GetEventsArg {
   'collateral_token' : [] | [Principal],
   'length' : bigint,
   'min_size_e8s' : [] | [bigint],
+  'admin_labels' : [] | [Array<string>],
 }
 export interface GetEventsFilteredResponse {
   'total' : bigint,

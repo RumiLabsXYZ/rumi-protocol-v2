@@ -448,6 +448,7 @@ type GetEventsArg = record {
   collateral_token : opt principal;
   time_range : opt EventTimeRange;
   min_size_e8s : opt nat64;
+  admin_labels : opt vec text;
 };
 type GetEventsFilteredResponse = record { total : nat64; events : vec record { nat64; Event } };
 type GetSnapshotsArg = record { start : nat64; length : nat64 };

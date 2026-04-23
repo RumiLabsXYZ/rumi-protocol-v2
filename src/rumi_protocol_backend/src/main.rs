@@ -651,6 +651,11 @@ fn get_events_filtered(args: GetEventsArg) -> GetEventsFilteredResponse {
         .filter(|v| !v.is_empty())
         .map(|v| v.iter().cloned().collect());
 
+    let admin_labels_set: Option<std::collections::HashSet<String>> = args.admin_labels
+        .as_ref()
+        .filter(|v| !v.is_empty())
+        .map(|v| v.iter().cloned().collect());
+
     let filtered: Vec<(u64, Event)> = events()
         .enumerate()
         .filter(|(_, e)| e.passes_filters(
@@ -659,6 +664,7 @@ fn get_events_filtered(args: GetEventsArg) -> GetEventsFilteredResponse {
             args.collateral_token.as_ref(),
             args.time_range.as_ref(),
             args.min_size_e8s,
+            admin_labels_set.as_ref(),
             &vault_lookup,
             icp_price_e8s,
         ))
