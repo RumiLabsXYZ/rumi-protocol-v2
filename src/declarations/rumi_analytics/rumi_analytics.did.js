@@ -190,6 +190,7 @@ export const idlFactory = ({ IDL }) => {
   });
   const Fast3PoolSnapshot = IDL.Record({
     'virtual_price' : IDL.Nat,
+    'decimals' : IDL.Vec(IDL.Nat8),
     'timestamp_ns' : IDL.Nat64,
     'lp_total_supply' : IDL.Nat,
     'balances' : IDL.Vec(IDL.Nat),
@@ -197,6 +198,23 @@ export const idlFactory = ({ IDL }) => {
   const ThreePoolSeriesResponse = IDL.Record({
     'rows' : IDL.Vec(Fast3PoolSnapshot),
     'next_from_ts' : IDL.Opt(IDL.Nat64),
+  });
+  const TopHoldersQuery = IDL.Record({
+    'token' : IDL.Principal,
+    'limit' : IDL.Opt(IDL.Nat32),
+  });
+  const TopHolderRow = IDL.Record({
+    'principal' : IDL.Principal,
+    'balance_e8s' : IDL.Nat64,
+    'share_bps' : IDL.Nat32,
+  });
+  const TopHoldersResponse = IDL.Record({
+    'token' : IDL.Principal,
+    'total_supply_e8s' : IDL.Nat64,
+    'source' : IDL.Text,
+    'rows' : IDL.Vec(TopHolderRow),
+    'total_holders' : IDL.Nat32,
+    'generated_at_ns' : IDL.Nat64,
   });
   const TradeActivityQuery = IDL.Record({ 'window_secs' : IDL.Opt(IDL.Nat64) });
   const TradeActivityResponse = IDL.Record({
@@ -316,6 +334,11 @@ export const idlFactory = ({ IDL }) => {
     'get_three_pool_series' : IDL.Func(
         [RangeQuery],
         [ThreePoolSeriesResponse],
+        ['query'],
+      ),
+    'get_top_holders' : IDL.Func(
+        [TopHoldersQuery],
+        [TopHoldersResponse],
         ['query'],
       ),
     'get_trade_activity' : IDL.Func(

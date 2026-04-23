@@ -118,6 +118,7 @@ export interface ErrorCounters {
 }
 export interface Fast3PoolSnapshot {
   'virtual_price' : bigint,
+  'decimals' : Uint8Array | number[],
   'timestamp_ns' : bigint,
   'lp_total_supply' : bigint,
   'balances' : Array<bigint>,
@@ -233,6 +234,23 @@ export interface ThreePoolSeriesResponse {
   'rows' : Array<Fast3PoolSnapshot>,
   'next_from_ts' : [] | [bigint],
 }
+export interface TopHolderRow {
+  'principal' : Principal,
+  'balance_e8s' : bigint,
+  'share_bps' : number,
+}
+export interface TopHoldersQuery {
+  'token' : Principal,
+  'limit' : [] | [number],
+}
+export interface TopHoldersResponse {
+  'token' : Principal,
+  'total_supply_e8s' : bigint,
+  'source' : string,
+  'rows' : Array<TopHolderRow>,
+  'total_holders' : number,
+  'generated_at_ns' : bigint,
+}
 export interface TradeActivityQuery { 'window_secs' : [] | [bigint] }
 export interface TradeActivityResponse {
   'total_swaps' : number,
@@ -297,6 +315,7 @@ export interface _SERVICE {
   'get_stability_series' : ActorMethod<[RangeQuery], StabilitySeriesResponse>,
   'get_swap_series' : ActorMethod<[RangeQuery], SwapSeriesResponse>,
   'get_three_pool_series' : ActorMethod<[RangeQuery], ThreePoolSeriesResponse>,
+  'get_top_holders' : ActorMethod<[TopHoldersQuery], TopHoldersResponse>,
   'get_trade_activity' : ActorMethod<
     [TradeActivityQuery],
     TradeActivityResponse

@@ -155,6 +155,11 @@ fn get_protocol_summary() -> types::ProtocolSummary {
 }
 
 #[ic_cdk_macros::query]
+fn get_top_holders(query: types::TopHoldersQuery) -> types::TopHoldersResponse {
+    queries::live::get_top_holders(query)
+}
+
+#[ic_cdk_macros::query]
 fn get_trade_activity(query: types::TradeActivityQuery) -> types::TradeActivityResponse {
     queries::live::get_trade_activity(query)
 }

@@ -114,6 +114,7 @@ type ErrorCounters = record {
 };
 type Fast3PoolSnapshot = record {
   virtual_price : nat;
+  decimals : blob;
   timestamp_ns : nat64;
   lp_total_supply : nat;
   balances : vec nat;
@@ -226,6 +227,20 @@ type ThreePoolSeriesResponse = record {
   rows : vec Fast3PoolSnapshot;
   next_from_ts : opt nat64;
 };
+type TopHolderRow = record {
+  "principal" : principal;
+  balance_e8s : nat64;
+  share_bps : nat32;
+};
+type TopHoldersQuery = record { token : principal; limit : opt nat32 };
+type TopHoldersResponse = record {
+  token : principal;
+  total_supply_e8s : nat64;
+  source : text;
+  rows : vec TopHolderRow;
+  total_holders : nat32;
+  generated_at_ns : nat64;
+};
 type TradeActivityQuery = record { window_secs : opt nat64 };
 type TradeActivityResponse = record {
   total_swaps : nat32;
@@ -281,6 +296,7 @@ service : (InitArgs) -> {
   get_stability_series : (RangeQuery) -> (StabilitySeriesResponse) query;
   get_swap_series : (RangeQuery) -> (SwapSeriesResponse) query;
   get_three_pool_series : (RangeQuery) -> (ThreePoolSeriesResponse) query;
+  get_top_holders : (TopHoldersQuery) -> (TopHoldersResponse) query;
   get_trade_activity : (TradeActivityQuery) -> (TradeActivityResponse) query;
   get_tvl_series : (RangeQuery) -> (TvlSeriesResponse) query;
   get_twap : (TwapQuery) -> (TwapResponse) query;
