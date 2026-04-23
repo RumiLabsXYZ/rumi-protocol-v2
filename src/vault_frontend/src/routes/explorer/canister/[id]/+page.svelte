@@ -135,7 +135,7 @@
       </a>
 
       {#if role.isLedger && role.symbol}
-        <a href="/explorer/token/{canisterId}" class="token-link">
+        <a href="/explorer/e/token/{canisterId}" class="token-link">
           View token details →
         </a>
       {/if}

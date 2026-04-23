@@ -29,7 +29,7 @@
 </script>
 
 {#if linked && principalId}
-  <a href="/explorer/token/{principalId}" class="inline-flex items-center {sizeClasses} bg-gray-700/50 rounded-full hover:bg-gray-600/50 transition-colors">
+  <a href="/explorer/e/token/{principalId}" class="inline-flex items-center {sizeClasses} bg-gray-700/50 rounded-full hover:bg-gray-600/50 transition-colors">
     {#if logos[symbol]}
       <img src={logos[symbol]} alt={symbol} class="{imgSize} rounded-full" />
     {/if}

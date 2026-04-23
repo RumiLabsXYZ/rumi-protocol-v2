@@ -30,6 +30,7 @@
         || p.startsWith('/explorer/stats')
         || p.startsWith('/explorer/holders')
         || p.startsWith('/explorer/token/')
+        || p.startsWith('/explorer/e/token/')
     },
     {
       href: '/explorer/activity',
@@ -49,7 +50,7 @@
     if (!q) return;
     if (isVaultId(q)) goto(`/explorer/e/vault/${q}`);
     else if (isEventIndex(q)) goto(`/explorer/e/event/${parseEventIndex(q)}`);
-    else if (resolveTokenAlias(q)) goto(`/explorer/token/${resolveTokenAlias(q)}`);
+    else if (resolveTokenAlias(q)) goto(`/explorer/e/token/${resolveTokenAlias(q)}`);
     else if (isPrincipal(q)) goto(`/explorer/e/address/${q}`);
     mobileSearchOpen = false;
     mobileNavOpen = false;
