@@ -34,6 +34,7 @@ import type {
 	AdminEventBreakdownResponse,
 	TokenFlowResponse,
 	PoolRoutesResponse,
+	AddressValueSeriesResponse,
 } from '$declarations/rumi_analytics/rumi_analytics.did';
 
 // ── TTL constants (ms) ───────────────────────────────────────────────────────
@@ -620,5 +621,47 @@ export async function fetchPoolRoutes(
 	} catch (err) {
 		console.error('[analyticsService] fetchPoolRoutes failed:', err);
 		return EMPTY_POOL_ROUTES(poolId);
+	}
+}
+
+// ── Address value series (portfolio value over time) ───────────────────────
+
+const EMPTY_ADDRESS_VALUE_SERIES = (principal: Principal): AddressValueSeriesResponse => ({
+	principal,
+	window_ns: 0n,
+	resolution_ns: 0n,
+	generated_at_ns: 0n,
+	points: [],
+	approximate_sources: [],
+});
+
+/**
+ * Portfolio value over time for a given principal, stacked by source.
+ *
+ * Defaults (canister-side): 90-day window, 1-day resolution. v1 approximates
+ * the icUSD/3USD bands with the current ledger balance projected from the
+ * `firstseen_ns` timestamp — the UI should surface that via the
+ * `approximate_sources` field. Backend caches responses for 5 minutes per
+ * (principal, window, resolution) tuple.
+ */
+export async function fetchAddressValueSeries(
+	principal: Principal,
+	windowNs?: bigint,
+	resolutionNs?: bigint
+): Promise<AddressValueSeriesResponse> {
+	const key = `analytics:address_value:${principal.toText()}:${windowNs ?? 'default'}:${resolutionNs ?? 'default'}`;
+	const cached = getCached<AddressValueSeriesResponse>(key, TTL.SERIES);
+	if (cached) return cached;
+
+	try {
+		const result = await getActor().get_address_value_series({
+			principal,
+			window_ns: windowNs !== undefined ? [windowNs] : [],
+			resolution_ns: resolutionNs !== undefined ? [resolutionNs] : [],
+		});
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[analyticsService] fetchAddressValueSeries failed:', err);
+		return EMPTY_ADDRESS_VALUE_SERIES(principal);
 	}
 }

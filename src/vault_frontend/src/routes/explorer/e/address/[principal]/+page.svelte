@@ -9,6 +9,7 @@
   import CopyButton from '$components/explorer/CopyButton.svelte';
   import StatusBadge from '$components/explorer/StatusBadge.svelte';
   import TimeAgo from '$components/explorer/TimeAgo.svelte';
+  import PortfolioValueChart from '$components/explorer/PortfolioValueChart.svelte';
   import {
     fetchVaultsByOwner,
     fetchEventsByPrincipal,
@@ -804,14 +805,7 @@
         {/if}
       </div>
 
-      <div class="bg-gray-800/40 border border-gray-700/50 rounded-xl p-5">
-        <div class="text-[10px] uppercase tracking-wider text-gray-500 mb-2">Balance timeline</div>
-        <div class="h-[140px] flex items-center justify-center text-center">
-          <p class="text-xs text-gray-500 max-w-[260px] leading-relaxed">
-            Portfolio history coming with the address-summary backend endpoint.
-          </p>
-        </div>
-      </div>
+      <PortfolioValueChart principal={principalStr} />
     </div>
 
     <!-- Vaults table -->
