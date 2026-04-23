@@ -241,3 +241,29 @@ pub struct TradeActivityResponse {
     pub unique_traders: u32,
     pub avg_trade_size_e8s: u64,
 }
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct TopHoldersQuery {
+    pub token: Principal,
+    pub limit: Option<u32>,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq)]
+pub struct TopHolderRow {
+    pub principal: Principal,
+    pub balance_e8s: u64,
+    pub share_bps: u32,
+}
+
+#[derive(CandidType, Clone, Debug)]
+pub struct TopHoldersResponse {
+    pub token: Principal,
+    pub total_holders: u32,
+    pub total_supply_e8s: u64,
+    pub generated_at_ns: u64,
+    pub rows: Vec<TopHolderRow>,
+    /// "balance_tracker" when the token is tracked by analytics, "unsupported"
+    /// when the token has no holder data here. The frontend uses this to
+    /// decide between rendering the table and an empty state.
+    pub source: String,
+}

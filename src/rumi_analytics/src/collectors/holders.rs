@@ -108,10 +108,12 @@ pub async fn run() -> Result<(), String> {
     if balance_tracker::holder_count(Token::IcUsd) > 0 {
         let row = snapshot_token(Token::IcUsd, icusd_ledger, now);
         storage::holders::daily_holders_icusd::push(row);
+        crate::queries::live::invalidate_top_holders_cache(icusd_ledger);
     }
     if balance_tracker::holder_count(Token::ThreeUsd) > 0 {
         let row = snapshot_token(Token::ThreeUsd, three_pool, now);
         storage::holders::daily_holders_3usd::push(row);
+        crate::queries::live::invalidate_top_holders_cache(three_pool);
     }
     Ok(())
 }

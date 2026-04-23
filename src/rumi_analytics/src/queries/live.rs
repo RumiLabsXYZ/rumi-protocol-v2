@@ -404,6 +404,135 @@ pub fn compute_trade_activity(
     }
 }
 
+// ─── Top Holders ───
+
+/// TTL for the top-holders cache. Sorting can touch tens of thousands of
+/// accounts, so we serve repeat callers from cache for one minute.
+const TOP_HOLDERS_TTL_NS: u64 = 60 * NANOS_PER_SEC;
+
+const TOP_HOLDERS_DEFAULT_LIMIT: u32 = 50;
+const TOP_HOLDERS_MAX_LIMIT: u32 = 200;
+
+thread_local! {
+    static TOP_HOLDERS_CACHE: std::cell::RefCell<HashMap<(Principal, u32), (u64, types::TopHoldersResponse)>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+fn resolve_token(token: Principal) -> Option<storage::balance_tracker::Token> {
+    let (icusd_ledger, three_pool) = state::read_state(|s| (s.sources.icusd_ledger, s.sources.three_pool));
+    if token == icusd_ledger {
+        Some(storage::balance_tracker::Token::IcUsd)
+    } else if token == three_pool {
+        Some(storage::balance_tracker::Token::ThreeUsd)
+    } else {
+        None
+    }
+}
+
+/// Invalidate the cached entries for a token. Call after the holder snapshot
+/// collector writes a new sample so the next caller sees fresh data.
+#[allow(dead_code)]
+pub fn invalidate_top_holders_cache(token: Principal) {
+    TOP_HOLDERS_CACHE.with(|cache| {
+        cache.borrow_mut().retain(|(t, _), _| *t != token);
+    });
+}
+
+pub fn get_top_holders(query: types::TopHoldersQuery) -> types::TopHoldersResponse {
+    let limit_raw = query.limit.unwrap_or(TOP_HOLDERS_DEFAULT_LIMIT);
+    let limit = if limit_raw == 0 { TOP_HOLDERS_DEFAULT_LIMIT } else { limit_raw }
+        .clamp(1, TOP_HOLDERS_MAX_LIMIT);
+
+    let now = ic_cdk::api::time();
+    let cache_key = (query.token, limit);
+
+    let cached = TOP_HOLDERS_CACHE.with(|cache| {
+        cache.borrow().get(&cache_key).cloned()
+    });
+    if let Some((cached_at, response)) = cached {
+        if now.saturating_sub(cached_at) < TOP_HOLDERS_TTL_NS {
+            return response;
+        }
+    }
+
+    let response = match resolve_token(query.token) {
+        Some(token) => {
+            let all = storage::balance_tracker::all_balances(token);
+            let total_supply = storage::balance_tracker::total_supply_tracked(token);
+            let by_principal = aggregate_by_principal(&all);
+            compute_top_holders(&by_principal, total_supply, limit as usize, query.token, now, "balance_tracker")
+        }
+        None => types::TopHoldersResponse {
+            token: query.token,
+            total_holders: 0,
+            total_supply_e8s: 0,
+            generated_at_ns: now,
+            rows: Vec::new(),
+            source: "unsupported".to_string(),
+        },
+    };
+
+    TOP_HOLDERS_CACHE.with(|cache| {
+        cache.borrow_mut().insert(cache_key, (now, response.clone()));
+    });
+
+    response
+}
+
+/// Sum balances per owner, dropping subaccount distinctions. Returned as an
+/// unsorted vector for the caller to rank.
+fn aggregate_by_principal(
+    accounts: &[(storage::balance_tracker::Account, u64)],
+) -> Vec<(Principal, u64)> {
+    let mut by_principal: HashMap<Principal, u64> = HashMap::new();
+    for (acct, balance) in accounts {
+        let entry = by_principal.entry(acct.owner).or_insert(0);
+        *entry = entry.saturating_add(*balance);
+    }
+    by_principal.into_iter().collect()
+}
+
+/// Pure helper: rank `holders` desc, take `limit`, compute share basis points
+/// against `total_supply`. Falls back to the sum of ranked balances when
+/// `total_supply` is zero, so share_bps stays meaningful for small datasets.
+pub fn compute_top_holders(
+    holders: &[(Principal, u64)],
+    total_supply: u64,
+    limit: usize,
+    token: Principal,
+    now_ns: u64,
+    source: &str,
+) -> types::TopHoldersResponse {
+    let mut sorted = holders.to_vec();
+    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    let total_holders = sorted.len() as u32;
+    sorted.truncate(limit);
+
+    let denom: u128 = if total_supply > 0 {
+        total_supply as u128
+    } else {
+        sorted.iter().map(|(_, b)| *b as u128).sum::<u128>().max(1)
+    };
+
+    let rows: Vec<types::TopHolderRow> = sorted.into_iter().map(|(principal, balance)| {
+        let share = ((balance as u128).saturating_mul(10_000) / denom).min(10_000) as u32;
+        types::TopHolderRow {
+            principal,
+            balance_e8s: balance,
+            share_bps: share,
+        }
+    }).collect();
+
+    types::TopHoldersResponse {
+        token,
+        total_holders,
+        total_supply_e8s: total_supply,
+        generated_at_ns: now_ns,
+        rows,
+        source: source.to_string(),
+    }
+}
+
 // ─── Protocol Summary ───
 
 pub fn get_protocol_summary() -> types::ProtocolSummary {
@@ -786,5 +915,87 @@ mod tests {
         let res = compute_trade_activity(&[], 86_400);
         assert_eq!(res.total_swaps, 0);
         assert_eq!(res.avg_trade_size_e8s, 0);
+    }
+
+    fn p(byte: u8) -> Principal {
+        Principal::from_slice(&[byte; 29])
+    }
+
+    #[test]
+    fn top_holders_ranks_descending_and_computes_share() {
+        let token = p(99);
+        let holders = vec![
+            (p(1), 100),
+            (p(2), 400),
+            (p(3), 250),
+            (p(4), 250),
+        ];
+        let total_supply = 1_000;
+        let res = compute_top_holders(&holders, total_supply, 10, token, 12_345, "balance_tracker");
+
+        assert_eq!(res.token, token);
+        assert_eq!(res.total_holders, 4);
+        assert_eq!(res.total_supply_e8s, 1_000);
+        assert_eq!(res.generated_at_ns, 12_345);
+        assert_eq!(res.source, "balance_tracker");
+        assert_eq!(res.rows.len(), 4);
+        assert_eq!(res.rows[0].principal, p(2));
+        assert_eq!(res.rows[0].balance_e8s, 400);
+        assert_eq!(res.rows[0].share_bps, 4_000);
+        let lower_bps_sum: u32 = res.rows[1..].iter().map(|r| r.share_bps).sum();
+        assert_eq!(lower_bps_sum, 6_000);
+    }
+
+    #[test]
+    fn top_holders_truncates_to_limit_and_keeps_total_count() {
+        let token = p(99);
+        let holders: Vec<(Principal, u64)> = (0..30u8).map(|i| (p(i), 100 - i as u64)).collect();
+        let res = compute_top_holders(&holders, 0, 5, token, 0, "balance_tracker");
+        assert_eq!(res.total_holders, 30);
+        assert_eq!(res.rows.len(), 5);
+        assert_eq!(res.rows[0].balance_e8s, 100);
+        assert_eq!(res.rows[4].balance_e8s, 96);
+    }
+
+    #[test]
+    fn top_holders_falls_back_to_ranked_sum_when_supply_is_zero() {
+        let token = p(99);
+        let holders = vec![(p(1), 25), (p(2), 75)];
+        let res = compute_top_holders(&holders, 0, 10, token, 0, "balance_tracker");
+        assert_eq!(res.rows[0].principal, p(2));
+        assert_eq!(res.rows[0].share_bps, 7_500);
+        assert_eq!(res.rows[1].share_bps, 2_500);
+    }
+
+    #[test]
+    fn top_holders_empty_input_returns_empty_rows() {
+        let token = p(99);
+        let res = compute_top_holders(&[], 0, 10, token, 7, "balance_tracker");
+        assert_eq!(res.total_holders, 0);
+        assert!(res.rows.is_empty());
+        assert_eq!(res.generated_at_ns, 7);
+    }
+
+    #[test]
+    fn aggregate_by_principal_sums_subaccounts() {
+        use crate::storage::balance_tracker::Account;
+        let owner = p(7);
+        let other = p(8);
+        let mut sub_a = [0u8; 32];
+        sub_a[0] = 1;
+        let mut sub_b = [0u8; 32];
+        sub_b[0] = 2;
+        let accounts = vec![
+            (Account { owner, subaccount: None }, 100u64),
+            (Account { owner, subaccount: Some(sub_a) }, 50u64),
+            (Account { owner, subaccount: Some(sub_b) }, 25u64),
+            (Account { owner: other, subaccount: None }, 10u64),
+        ];
+        let mut by_p = aggregate_by_principal(&accounts);
+        by_p.sort_by_key(|(p, _)| *p);
+        let owner_total = by_p.iter().find(|(p, _)| *p == owner).map(|(_, b)| *b).unwrap();
+        let other_total = by_p.iter().find(|(p, _)| *p == other).map(|(_, b)| *b).unwrap();
+        assert_eq!(owner_total, 175);
+        assert_eq!(other_total, 10);
     }
 }
