@@ -29,6 +29,14 @@ export interface SwapResult {
   fee: bigint;
 }
 
+// ── Analytics window variants (mirrors Candid AmmStatsWindow) ──
+
+export type AmmStatsWindow = 'Hour' | 'Day' | 'Week' | 'Month' | 'All';
+
+function windowToVariant(window: AmmStatsWindow): Record<string, null> {
+  return { [window]: null };
+}
+
 // ──────────────────────────────────────────────────────────────
 // Token metadata for AMM-tradeable tokens
 // ──────────────────────────────────────────────────────────────
@@ -234,6 +242,62 @@ class AmmService {
     return await actor.get_amm_admin_event_count();
   }
 
+  // ── Analytics (per-pool) ──
+  //
+  // Mirrors rumi_3pool's analytics surface so /e/pool/{id} can render
+  // AMM pools at parity. Queries key by the AMM pool_id (e.g.,
+  // "fohh4-…_ryjl3-…") and are served from a 60s TTL cache canister-side.
+
+  async getVolumeSeries(poolId: string, window: AmmStatsWindow, points: number): Promise<any[]> {
+    const actor = await this.getQueryActor();
+    return await actor.get_amm_volume_series({ pool: poolId, window: windowToVariant(window), points });
+  }
+
+  async getBalanceSeries(poolId: string, window: AmmStatsWindow, points: number): Promise<any[]> {
+    const actor = await this.getQueryActor();
+    return await actor.get_amm_balance_series({ pool: poolId, window: windowToVariant(window), points });
+  }
+
+  async getFeeSeries(poolId: string, window: AmmStatsWindow, points: number): Promise<any[]> {
+    const actor = await this.getQueryActor();
+    return await actor.get_amm_fee_series({ pool: poolId, window: windowToVariant(window), points });
+  }
+
+  async getPoolStats(poolId: string, window: AmmStatsWindow): Promise<any> {
+    const actor = await this.getQueryActor();
+    return await actor.get_amm_pool_stats({ pool: poolId, window: windowToVariant(window) });
+  }
+
+  async getTopSwappers(poolId: string, window: AmmStatsWindow, limit: number): Promise<Array<[Principal, bigint, bigint]>> {
+    const actor = await this.getQueryActor();
+    return await actor.get_amm_top_swappers({ pool: poolId, window: windowToVariant(window), limit });
+  }
+
+  async getTopLps(poolId: string, limit: number): Promise<Array<[Principal, bigint, number]>> {
+    const actor = await this.getQueryActor();
+    return await actor.get_amm_top_lps({ pool: poolId, limit });
+  }
+
+  async getSwapEventsByPrincipal(poolId: string, who: Principal, start: bigint, length: bigint): Promise<any[]> {
+    const actor = await this.getQueryActor();
+    return await actor.get_amm_swap_events_by_principal({ pool: poolId, who, start, length });
+  }
+
+  async getLiquidityEventsByPrincipal(poolId: string, who: Principal, start: bigint, length: bigint): Promise<any[]> {
+    const actor = await this.getQueryActor();
+    return await actor.get_amm_liquidity_events_by_principal({ pool: poolId, who, start, length });
+  }
+
+  async getSwapEventsByTimeRange(poolId: string, startNs: bigint, endNs: bigint, limit: bigint): Promise<any[]> {
+    const actor = await this.getQueryActor();
+    return await actor.get_amm_swap_events_by_time_range({
+      pool: poolId,
+      start_ns: startNs,
+      end_ns: endNs,
+      limit,
+    });
+  }
+
   // ── Mutations ──
 
   async swap(
@@ -416,7 +480,8 @@ class AmmService {
     if ('PoolCreationClosed' in err) return 'Pool creation is currently closed';
     if ('FeeBpsOutOfRange' in err) return 'Fee must be between 0.01% and 10%';
     if ('MaintenanceMode' in err) return 'AMM is in maintenance mode — swaps and deposits are temporarily disabled';
-    if ('ClaimNotFound' in err) return 'Claim not found — it may have already been resolved';
+    if ('ClaimNotFound' in err) return 'Claim not found (it may have already been resolved)';
+    if ('PoolBusy' in err) return 'Pool is busy with another transaction. Please try again in a moment.';
     return 'Unknown AMM error';
   }
 }
