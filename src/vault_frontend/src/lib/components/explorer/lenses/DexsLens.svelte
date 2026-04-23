@@ -257,10 +257,14 @@
         </thead>
         <tbody>
           {#each ammSummary as p}
-            <tr class="border-b border-white/[0.03]">
-              <td class="py-2 px-2 font-medium text-gray-200">{p.name}</td>
+            <tr class="border-b border-white/[0.03] hover:bg-white/[0.02]">
+              <td class="py-2 px-2 font-medium">
+                <a href={`/explorer/e/pool/${encodeURIComponent(p.id)}`} class="text-indigo-300 hover:text-indigo-200">{p.name}</a>
+              </td>
               <td class="py-2 px-2 text-right tabular-nums text-gray-400">{(p.feeBps / 100).toFixed(2)}%</td>
-              <td class="py-2 px-2 text-gray-500 font-mono text-xs">{p.id}</td>
+              <td class="py-2 px-2 text-gray-500 font-mono text-xs">
+                <a href={`/explorer/e/pool/${encodeURIComponent(p.id)}`} class="hover:text-gray-300">{p.id}</a>
+              </td>
             </tr>
           {/each}
         </tbody>

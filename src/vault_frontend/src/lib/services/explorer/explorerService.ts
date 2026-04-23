@@ -12,6 +12,7 @@ import { publicActor } from '$services/protocol/apiClient';
 import { stabilityPoolService } from '$services/stabilityPoolService';
 import { threePoolService } from '$services/threePoolService';
 import { ammService } from '$services/ammService';
+import type { AmmStatsWindow } from '$services/ammService';
 import { CANISTER_IDS, CONFIG } from '$lib/config';
 import type { _SERVICE as IcusdLedgerService } from '$declarations/icusd_ledger/icusd_ledger.did';
 import type { _SERVICE as IcusdIndexService } from '$declarations/icusd_index/icusd_index.did';
@@ -869,6 +870,154 @@ export async function fetchAmmAdminEventCount(): Promise<bigint> {
 	} catch (err) {
 		console.error('[explorerService] fetchAmmAdminEventCount failed:', err);
 		return 0n;
+	}
+}
+
+// ── AMM analytics (per-pool time series + rankings) ────────────────────────
+//
+// Mirrors the rumi_3pool analytics wrappers so /e/pool/{id} can branch on
+// pool source with minimal frontend code. All responses are cached 30s
+// client-side; the canister also caches 60s.
+
+export async function fetchAmmVolumeSeries(
+	poolId: string,
+	window: AmmStatsWindow = 'Week',
+	points: number = 100,
+): Promise<any[]> {
+	const key = `pool:amm:vol:${poolId}:${window}:${points}`;
+	const cached = getCached<any[]>(key, TTL.POOL);
+	if (cached) return cached;
+	try {
+		const result = await ammService.getVolumeSeries(poolId, window, points);
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchAmmVolumeSeries failed:', err);
+		return [];
+	}
+}
+
+export async function fetchAmmBalanceSeries(
+	poolId: string,
+	window: AmmStatsWindow = 'Week',
+	points: number = 100,
+): Promise<any[]> {
+	const key = `pool:amm:bal:${poolId}:${window}:${points}`;
+	const cached = getCached<any[]>(key, TTL.POOL);
+	if (cached) return cached;
+	try {
+		const result = await ammService.getBalanceSeries(poolId, window, points);
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchAmmBalanceSeries failed:', err);
+		return [];
+	}
+}
+
+export async function fetchAmmFeeSeries(
+	poolId: string,
+	window: AmmStatsWindow = 'Week',
+	points: number = 100,
+): Promise<any[]> {
+	const key = `pool:amm:fee:${poolId}:${window}:${points}`;
+	const cached = getCached<any[]>(key, TTL.POOL);
+	if (cached) return cached;
+	try {
+		const result = await ammService.getFeeSeries(poolId, window, points);
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchAmmFeeSeries failed:', err);
+		return [];
+	}
+}
+
+export async function fetchAmmPoolStats(
+	poolId: string,
+	window: AmmStatsWindow = 'Week',
+): Promise<any | null> {
+	const key = `pool:amm:stats:${poolId}:${window}`;
+	const cached = getCached<any>(key, TTL.POOL);
+	if (cached) return cached;
+	try {
+		const result = await ammService.getPoolStats(poolId, window);
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchAmmPoolStats failed:', err);
+		return null;
+	}
+}
+
+export async function fetchAmmTopSwappers(
+	poolId: string,
+	window: AmmStatsWindow = 'Week',
+	limit: number = 10,
+): Promise<Array<[Principal, bigint, bigint]>> {
+	const key = `pool:amm:swappers:${poolId}:${window}:${limit}`;
+	const cached = getCached<Array<[Principal, bigint, bigint]>>(key, TTL.POOL);
+	if (cached) return cached;
+	try {
+		const result = await ammService.getTopSwappers(poolId, window, limit);
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchAmmTopSwappers failed:', err);
+		return [];
+	}
+}
+
+export async function fetchAmmTopLps(
+	poolId: string,
+	limit: number = 10,
+): Promise<Array<[Principal, bigint, number]>> {
+	const key = `pool:amm:lps:${poolId}:${limit}`;
+	const cached = getCached<Array<[Principal, bigint, number]>>(key, TTL.POOL);
+	if (cached) return cached;
+	try {
+		const result = await ammService.getTopLps(poolId, limit);
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchAmmTopLps failed:', err);
+		return [];
+	}
+}
+
+export async function fetchAmmSwapEventsByPrincipal(
+	poolId: string,
+	who: Principal,
+	start: bigint,
+	length: bigint,
+): Promise<any[]> {
+	try {
+		return await ammService.getSwapEventsByPrincipal(poolId, who, start, length);
+	} catch (err) {
+		console.error('[explorerService] fetchAmmSwapEventsByPrincipal failed:', err);
+		return [];
+	}
+}
+
+export async function fetchAmmLiquidityEventsByPrincipal(
+	poolId: string,
+	who: Principal,
+	start: bigint,
+	length: bigint,
+): Promise<any[]> {
+	try {
+		return await ammService.getLiquidityEventsByPrincipal(poolId, who, start, length);
+	} catch (err) {
+		console.error('[explorerService] fetchAmmLiquidityEventsByPrincipal failed:', err);
+		return [];
+	}
+}
+
+export async function fetchAmmSwapEventsByTimeRange(
+	poolId: string,
+	startNs: bigint,
+	endNs: bigint,
+	limit: bigint,
+): Promise<any[]> {
+	try {
+		return await ammService.getSwapEventsByTimeRange(poolId, startNs, endNs, limit);
+	} catch (err) {
+		console.error('[explorerService] fetchAmmSwapEventsByTimeRange failed:', err);
+		return [];
 	}
 }
 
