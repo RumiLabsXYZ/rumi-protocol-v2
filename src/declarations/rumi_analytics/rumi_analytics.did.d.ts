@@ -2,6 +2,17 @@ import type { Principal } from '@dfinity/principal';
 import type { ActorMethod } from '@dfinity/agent';
 import type { IDL } from '@dfinity/candid';
 
+export interface AdminEventBreakdownQuery { 'window_ns' : [] | [bigint] }
+export interface AdminEventBreakdownResponse {
+  'labels' : Array<AdminEventLabelCount>,
+  'generated_at_ns' : bigint,
+  'window_ns' : bigint,
+}
+export interface AdminEventLabelCount {
+  'count' : bigint,
+  'label' : string,
+  'last_at_ns' : [] | [bigint],
+}
 export interface ApyQuery { 'window_days' : [] | [number] }
 export interface ApyResponse {
   'lp_apy_pct' : [] | [number],
@@ -234,6 +245,22 @@ export interface ThreePoolSeriesResponse {
   'rows' : Array<Fast3PoolSnapshot>,
   'next_from_ts' : [] | [bigint],
 }
+export interface TopCounterpartiesQuery {
+  'principal' : Principal,
+  'limit' : [] | [number],
+  'window_ns' : [] | [bigint],
+}
+export interface TopCounterpartiesResponse {
+  'principal' : Principal,
+  'rows' : Array<TopCounterpartyRow>,
+  'generated_at_ns' : bigint,
+  'window_ns' : bigint,
+}
+export interface TopCounterpartyRow {
+  'interaction_count' : bigint,
+  'volume_e8s' : bigint,
+  'counterparty' : Principal,
+}
 export interface TopHolderRow {
   'principal' : Principal,
   'balance_e8s' : bigint,
@@ -250,6 +277,21 @@ export interface TopHoldersResponse {
   'rows' : Array<TopHolderRow>,
   'total_holders' : number,
   'generated_at_ns' : bigint,
+}
+export interface TopSpDepositorRow {
+  'principal' : Principal,
+  'total_deposited_e8s' : bigint,
+  'current_balance_e8s' : bigint,
+  'net_position_e8s' : bigint,
+}
+export interface TopSpDepositorsQuery {
+  'limit' : [] | [number],
+  'window_ns' : [] | [bigint],
+}
+export interface TopSpDepositorsResponse {
+  'rows' : Array<TopSpDepositorRow>,
+  'generated_at_ns' : bigint,
+  'window_ns' : bigint,
 }
 export interface TradeActivityQuery { 'window_secs' : [] | [bigint] }
 export interface TradeActivityResponse {
@@ -295,6 +337,10 @@ export interface VolatilityResponse {
 }
 export interface _SERVICE {
   'get_admin' : ActorMethod<[], Principal>,
+  'get_admin_event_breakdown' : ActorMethod<
+    [AdminEventBreakdownQuery],
+    AdminEventBreakdownResponse
+  >,
   'get_apys' : ActorMethod<[ApyQuery], ApyResponse>,
   'get_collector_health' : ActorMethod<[], CollectorHealth>,
   'get_cycle_series' : ActorMethod<[RangeQuery], CycleSeriesResponse>,
@@ -315,7 +361,15 @@ export interface _SERVICE {
   'get_stability_series' : ActorMethod<[RangeQuery], StabilitySeriesResponse>,
   'get_swap_series' : ActorMethod<[RangeQuery], SwapSeriesResponse>,
   'get_three_pool_series' : ActorMethod<[RangeQuery], ThreePoolSeriesResponse>,
+  'get_top_counterparties' : ActorMethod<
+    [TopCounterpartiesQuery],
+    TopCounterpartiesResponse
+  >,
   'get_top_holders' : ActorMethod<[TopHoldersQuery], TopHoldersResponse>,
+  'get_top_sp_depositors' : ActorMethod<
+    [TopSpDepositorsQuery],
+    TopSpDepositorsResponse
+  >,
   'get_trade_activity' : ActorMethod<
     [TradeActivityQuery],
     TradeActivityResponse

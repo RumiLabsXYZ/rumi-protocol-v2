@@ -11,6 +11,8 @@ use super::{
     MEM_EVT_SWAPS_IDX, MEM_EVT_SWAPS_DATA,
     MEM_EVT_LIQUIDITY_IDX, MEM_EVT_LIQUIDITY_DATA,
     MEM_EVT_VAULTS_IDX, MEM_EVT_VAULTS_DATA,
+    MEM_EVT_STABILITY_IDX, MEM_EVT_STABILITY_DATA,
+    MEM_EVT_ADMIN_IDX, MEM_EVT_ADMIN_DATA,
 };
 
 // --- Enum types ---
@@ -47,6 +49,15 @@ pub enum LiquidityAction {
     Remove,
     RemoveOneCoin,
     Donate,
+}
+
+/// Stability pool activity kind. Deposit/Withdraw affect principal balance;
+/// ClaimReturns is a yield claim (ICP) that doesn't change icUSD position.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum StabilityAction {
+    Deposit,
+    Withdraw,
+    ClaimReturns,
 }
 
 // --- Event row types ---
@@ -98,6 +109,26 @@ pub struct AnalyticsLiquidityEvent {
     pub fee: Option<u64>,
 }
 
+/// Mirror of backend stability-pool participation events (provide/withdraw/
+/// claim). Sourced from rumi_protocol_backend via the backend-event tailer.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct AnalyticsStabilityEvent {
+    pub timestamp_ns: u64,
+    pub source_event_id: u64,
+    pub caller: Principal,
+    pub action: StabilityAction,
+    pub amount: u64,
+}
+
+/// Mirror of backend admin/setter events. Only label + timestamp are kept so
+/// the log stays small; admin events are rare (a handful per week).
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct AnalyticsAdminEvent {
+    pub timestamp_ns: u64,
+    pub source_event_id: u64,
+    pub label: String,
+}
+
 // --- Storable impls ---
 
 macro_rules! storable_candid {
@@ -118,6 +149,8 @@ storable_candid!(AnalyticsLiquidationEvent);
 storable_candid!(AnalyticsVaultEvent);
 storable_candid!(AnalyticsSwapEvent);
 storable_candid!(AnalyticsLiquidityEvent);
+storable_candid!(AnalyticsStabilityEvent);
+storable_candid!(AnalyticsAdminEvent);
 
 // --- StableLog instances ---
 
@@ -152,6 +185,22 @@ thread_local! {
                 get_memory(MEM_EVT_VAULTS_IDX),
                 get_memory(MEM_EVT_VAULTS_DATA),
             ).expect("init EVT_VAULTS log")
+        });
+
+    static EVT_STABILITY_LOG: RefCell<ic_stable_structures::StableLog<AnalyticsStabilityEvent, Memory, Memory>> =
+        RefCell::new({
+            ic_stable_structures::StableLog::init(
+                get_memory(MEM_EVT_STABILITY_IDX),
+                get_memory(MEM_EVT_STABILITY_DATA),
+            ).expect("init EVT_STABILITY log")
+        });
+
+    static EVT_ADMIN_LOG: RefCell<ic_stable_structures::StableLog<AnalyticsAdminEvent, Memory, Memory>> =
+        RefCell::new({
+            ic_stable_structures::StableLog::init(
+                get_memory(MEM_EVT_ADMIN_IDX),
+                get_memory(MEM_EVT_ADMIN_DATA),
+            ).expect("init EVT_ADMIN log")
         });
 }
 
@@ -206,6 +255,8 @@ evt_accessors!(evt_liquidations, EVT_LIQUIDATIONS_LOG, AnalyticsLiquidationEvent
 evt_accessors!(evt_swaps, EVT_SWAPS_LOG, AnalyticsSwapEvent);
 evt_accessors!(evt_liquidity, EVT_LIQUIDITY_LOG, AnalyticsLiquidityEvent);
 evt_accessors!(evt_vaults, EVT_VAULTS_LOG, AnalyticsVaultEvent);
+evt_accessors!(evt_stability, EVT_STABILITY_LOG, AnalyticsStabilityEvent);
+evt_accessors!(evt_admin, EVT_ADMIN_LOG, AnalyticsAdminEvent);
 
 // --- Tests ---
 
@@ -283,5 +334,33 @@ mod tests {
         let decoded = AnalyticsLiquidityEvent::from_bytes(bytes);
         assert_eq!(decoded.amounts, vec![100, 200, 300]);
         assert_eq!(decoded.fee, Some(5));
+    }
+
+    #[test]
+    fn stability_event_roundtrip() {
+        let evt = AnalyticsStabilityEvent {
+            timestamp_ns: 5_000_000,
+            source_event_id: 31,
+            caller: Principal::anonymous(),
+            action: StabilityAction::Deposit,
+            amount: 123_456_789,
+        };
+        let bytes = evt.to_bytes();
+        let decoded = AnalyticsStabilityEvent::from_bytes(bytes);
+        assert_eq!(decoded.amount, 123_456_789);
+        assert!(matches!(decoded.action, StabilityAction::Deposit));
+    }
+
+    #[test]
+    fn admin_event_roundtrip() {
+        let evt = AnalyticsAdminEvent {
+            timestamp_ns: 6_000_000,
+            source_event_id: 77,
+            label: "SetBorrowingFee".to_string(),
+        };
+        let bytes = evt.to_bytes();
+        let decoded = AnalyticsAdminEvent::from_bytes(bytes);
+        assert_eq!(decoded.label, "SetBorrowingFee");
+        assert_eq!(decoded.source_event_id, 77);
     }
 }

@@ -7,6 +7,19 @@ export const idlFactory = ({ IDL }) => {
     'stability_pool' : IDL.Principal,
     'backend' : IDL.Principal,
   });
+  const AdminEventBreakdownQuery = IDL.Record({
+    'window_ns' : IDL.Opt(IDL.Nat64),
+  });
+  const AdminEventLabelCount = IDL.Record({
+    'count' : IDL.Nat64,
+    'label' : IDL.Text,
+    'last_at_ns' : IDL.Opt(IDL.Nat64),
+  });
+  const AdminEventBreakdownResponse = IDL.Record({
+    'labels' : IDL.Vec(AdminEventLabelCount),
+    'generated_at_ns' : IDL.Nat64,
+    'window_ns' : IDL.Nat64,
+  });
   const ApyQuery = IDL.Record({ 'window_days' : IDL.Opt(IDL.Nat32) });
   const ApyResponse = IDL.Record({
     'lp_apy_pct' : IDL.Opt(IDL.Float64),
@@ -199,6 +212,22 @@ export const idlFactory = ({ IDL }) => {
     'rows' : IDL.Vec(Fast3PoolSnapshot),
     'next_from_ts' : IDL.Opt(IDL.Nat64),
   });
+  const TopCounterpartiesQuery = IDL.Record({
+    'principal' : IDL.Principal,
+    'limit' : IDL.Opt(IDL.Nat32),
+    'window_ns' : IDL.Opt(IDL.Nat64),
+  });
+  const TopCounterpartyRow = IDL.Record({
+    'interaction_count' : IDL.Nat64,
+    'volume_e8s' : IDL.Nat64,
+    'counterparty' : IDL.Principal,
+  });
+  const TopCounterpartiesResponse = IDL.Record({
+    'principal' : IDL.Principal,
+    'rows' : IDL.Vec(TopCounterpartyRow),
+    'generated_at_ns' : IDL.Nat64,
+    'window_ns' : IDL.Nat64,
+  });
   const TopHoldersQuery = IDL.Record({
     'token' : IDL.Principal,
     'limit' : IDL.Opt(IDL.Nat32),
@@ -215,6 +244,21 @@ export const idlFactory = ({ IDL }) => {
     'rows' : IDL.Vec(TopHolderRow),
     'total_holders' : IDL.Nat32,
     'generated_at_ns' : IDL.Nat64,
+  });
+  const TopSpDepositorsQuery = IDL.Record({
+    'limit' : IDL.Opt(IDL.Nat32),
+    'window_ns' : IDL.Opt(IDL.Nat64),
+  });
+  const TopSpDepositorRow = IDL.Record({
+    'principal' : IDL.Principal,
+    'total_deposited_e8s' : IDL.Nat64,
+    'current_balance_e8s' : IDL.Nat64,
+    'net_position_e8s' : IDL.Int64,
+  });
+  const TopSpDepositorsResponse = IDL.Record({
+    'rows' : IDL.Vec(TopSpDepositorRow),
+    'generated_at_ns' : IDL.Nat64,
+    'window_ns' : IDL.Nat64,
   });
   const TradeActivityQuery = IDL.Record({ 'window_secs' : IDL.Opt(IDL.Nat64) });
   const TradeActivityResponse = IDL.Record({
@@ -294,6 +338,11 @@ export const idlFactory = ({ IDL }) => {
   });
   return IDL.Service({
     'get_admin' : IDL.Func([], [IDL.Principal], ['query']),
+    'get_admin_event_breakdown' : IDL.Func(
+        [AdminEventBreakdownQuery],
+        [AdminEventBreakdownResponse],
+        ['query'],
+      ),
     'get_apys' : IDL.Func([ApyQuery], [ApyResponse], ['query']),
     'get_collector_health' : IDL.Func([], [CollectorHealth], ['query']),
     'get_cycle_series' : IDL.Func(
@@ -336,9 +385,19 @@ export const idlFactory = ({ IDL }) => {
         [ThreePoolSeriesResponse],
         ['query'],
       ),
+    'get_top_counterparties' : IDL.Func(
+        [TopCounterpartiesQuery],
+        [TopCounterpartiesResponse],
+        ['query'],
+      ),
     'get_top_holders' : IDL.Func(
         [TopHoldersQuery],
         [TopHoldersResponse],
+        ['query'],
+      ),
+    'get_top_sp_depositors' : IDL.Func(
+        [TopSpDepositorsQuery],
+        [TopSpDepositorsResponse],
         ['query'],
       ),
     'get_trade_activity' : IDL.Func(

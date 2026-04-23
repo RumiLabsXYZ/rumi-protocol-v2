@@ -90,6 +90,10 @@ pub const MEM_EVT_LIQUIDITY_IDX: MemoryId = MemoryId::new(48);
 pub const MEM_EVT_LIQUIDITY_DATA: MemoryId = MemoryId::new(49);
 pub const MEM_EVT_VAULTS_IDX: MemoryId = MemoryId::new(50);
 pub const MEM_EVT_VAULTS_DATA: MemoryId = MemoryId::new(51);
+pub const MEM_EVT_STABILITY_IDX: MemoryId = MemoryId::new(52);
+pub const MEM_EVT_STABILITY_DATA: MemoryId = MemoryId::new(53);
+pub const MEM_EVT_ADMIN_IDX: MemoryId = MemoryId::new(54);
+pub const MEM_EVT_ADMIN_DATA: MemoryId = MemoryId::new(55);
 
 // BalanceTracker maps (Phase 4)
 pub const MEM_BAL_ICUSD: MemoryId = MemoryId::new(56);

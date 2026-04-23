@@ -1,3 +1,14 @@
+type AdminEventBreakdownQuery = record { window_ns : opt nat64 };
+type AdminEventBreakdownResponse = record {
+  labels : vec AdminEventLabelCount;
+  generated_at_ns : nat64;
+  window_ns : nat64;
+};
+type AdminEventLabelCount = record {
+  count : nat64;
+  label : text;
+  last_at_ns : opt nat64;
+};
 type ApyQuery = record { window_days : opt nat32 };
 type ApyResponse = record {
   lp_apy_pct : opt float64;
@@ -227,6 +238,22 @@ type ThreePoolSeriesResponse = record {
   rows : vec Fast3PoolSnapshot;
   next_from_ts : opt nat64;
 };
+type TopCounterpartiesQuery = record {
+  "principal" : principal;
+  limit : opt nat32;
+  window_ns : opt nat64;
+};
+type TopCounterpartiesResponse = record {
+  "principal" : principal;
+  rows : vec TopCounterpartyRow;
+  generated_at_ns : nat64;
+  window_ns : nat64;
+};
+type TopCounterpartyRow = record {
+  interaction_count : nat64;
+  volume_e8s : nat64;
+  counterparty : principal;
+};
 type TopHolderRow = record {
   "principal" : principal;
   balance_e8s : nat64;
@@ -240,6 +267,18 @@ type TopHoldersResponse = record {
   rows : vec TopHolderRow;
   total_holders : nat32;
   generated_at_ns : nat64;
+};
+type TopSpDepositorRow = record {
+  "principal" : principal;
+  total_deposited_e8s : nat64;
+  current_balance_e8s : nat64;
+  net_position_e8s : int64;
+};
+type TopSpDepositorsQuery = record { limit : opt nat32; window_ns : opt nat64 };
+type TopSpDepositorsResponse = record {
+  rows : vec TopSpDepositorRow;
+  generated_at_ns : nat64;
+  window_ns : nat64;
 };
 type TradeActivityQuery = record { window_secs : opt nat64 };
 type TradeActivityResponse = record {
@@ -282,6 +321,9 @@ type VolatilityResponse = record {
 };
 service : (InitArgs) -> {
   get_admin : () -> (principal) query;
+  get_admin_event_breakdown : (AdminEventBreakdownQuery) -> (
+      AdminEventBreakdownResponse,
+    ) query;
   get_apys : (ApyQuery) -> (ApyResponse) query;
   get_collector_health : () -> (CollectorHealth) query;
   get_cycle_series : (RangeQuery) -> (CycleSeriesResponse) query;
@@ -296,7 +338,13 @@ service : (InitArgs) -> {
   get_stability_series : (RangeQuery) -> (StabilitySeriesResponse) query;
   get_swap_series : (RangeQuery) -> (SwapSeriesResponse) query;
   get_three_pool_series : (RangeQuery) -> (ThreePoolSeriesResponse) query;
+  get_top_counterparties : (TopCounterpartiesQuery) -> (
+      TopCounterpartiesResponse,
+    ) query;
   get_top_holders : (TopHoldersQuery) -> (TopHoldersResponse) query;
+  get_top_sp_depositors : (TopSpDepositorsQuery) -> (
+      TopSpDepositorsResponse,
+    ) query;
   get_trade_activity : (TradeActivityQuery) -> (TradeActivityResponse) query;
   get_tvl_series : (RangeQuery) -> (TvlSeriesResponse) query;
   get_twap : (TwapQuery) -> (TwapResponse) query;

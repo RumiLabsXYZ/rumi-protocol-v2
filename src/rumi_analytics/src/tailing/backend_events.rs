@@ -1,4 +1,5 @@
-//! Backend event tailing. Routes events to EVT_LIQUIDATIONS and EVT_VAULTS.
+//! Backend event tailing. Routes events to EVT_LIQUIDATIONS, EVT_VAULTS,
+//! EVT_STABILITY (SP participation), and EVT_ADMIN (labeled setter events).
 
 use candid::Principal;
 use crate::{sources, state, storage};
@@ -192,7 +193,48 @@ fn route_backend_event(event_id: u64, event: &sources::backend::BackendEvent) {
                 amount: *icusd_amount,
             });
         }
-        // All other variants (admin/config events) are not routed
-        _ => {}
+        ProvideLiquidity { amount, caller, timestamp } => {
+            evt_stability::push(AnalyticsStabilityEvent {
+                timestamp_ns: timestamp.unwrap_or(0),
+                source_event_id: event_id,
+                caller: *caller,
+                action: StabilityAction::Deposit,
+                amount: *amount,
+            });
+        }
+        WithdrawLiquidity { amount, caller, timestamp } => {
+            evt_stability::push(AnalyticsStabilityEvent {
+                timestamp_ns: timestamp.unwrap_or(0),
+                source_event_id: event_id,
+                caller: *caller,
+                action: StabilityAction::Withdraw,
+                amount: *amount,
+            });
+        }
+        ClaimLiquidityReturns { amount, caller, timestamp } => {
+            evt_stability::push(AnalyticsStabilityEvent {
+                timestamp_ns: timestamp.unwrap_or(0),
+                source_event_id: event_id,
+                caller: *caller,
+                action: StabilityAction::ClaimReturns,
+                amount: *amount,
+            });
+        }
+        // All other variants are either not surfaced (e.g. accrue, price) or
+        // admin setters. Admin-labeled variants get mirrored into evt_admin so
+        // the admin-breakdown endpoint can count them by label.
+        other => {
+            if let Some(label) = other.admin_label() {
+                // Admin variants decode as empty structs in our BackendEvent
+                // shadow type, so the event's own timestamp isn't available.
+                // Tailing runs every few minutes, so using now as an upper
+                // bound on "last seen at" is accurate within that window.
+                evt_admin::push(AnalyticsAdminEvent {
+                    timestamp_ns: ic_cdk::api::time(),
+                    source_event_id: event_id,
+                    label: label.to_string(),
+                });
+            }
+        }
     }
 }
