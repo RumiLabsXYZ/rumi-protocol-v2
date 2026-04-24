@@ -147,7 +147,7 @@ type ErrorCounters = record {
 };
 type Fast3PoolSnapshot = record {
   virtual_price : nat;
-  decimals : blob;
+  decimals : opt blob;
   timestamp_ns : nat64;
   lp_total_supply : nat;
   balances : vec nat;

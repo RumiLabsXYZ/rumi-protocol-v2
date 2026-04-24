@@ -127,23 +127,7 @@ pub fn get_address_value_series(query: types::AddressValueSeriesQuery) -> types:
     let sp_evs = storage::events::evt_stability::range(0, now, MAX_EVENT_LOAD);
     let liquidity_evs = storage::events::evt_liquidity::range(0, now, MAX_EVENT_LOAD);
     let price_snaps = storage::fast::fast_prices::range(0, now, MAX_EVENT_LOAD);
-    // Fast3PoolSnapshot has older rows on mainnet whose decoder trips on a
-    // `decimals` field schema change. Reading only the latest snapshot sidesteps
-    // the migration cleanup; LP pricing then uses spot virtual_price, which
-    // drifts <1% across a 90-day window for a $1-pegged stable 3pool.
-    // TODO: make Fast3PoolSnapshot.decimals optional (or backfill old rows)
-    // and restore full historical range() once the data is clean.
-    let three_pool_snaps: Vec<storage::fast::Fast3PoolSnapshot> = {
-        let n = storage::fast::fast_3pool::len();
-        if n == 0 {
-            Vec::new()
-        } else {
-            match storage::fast::fast_3pool::get(n - 1) {
-                Some(snap) => vec![snap],
-                None => Vec::new(),
-            }
-        }
-    };
+    let three_pool_snaps = storage::fast::fast_3pool::range(0, now, MAX_EVENT_LOAD);
 
     let (icusd_ledger, three_pool) = state::read_state(|s| (s.sources.icusd_ledger, s.sources.three_pool));
     let icusd_balance = storage::balance_tracker::all_balances(storage::balance_tracker::Token::IcUsd)
@@ -751,7 +735,7 @@ mod tests {
             balances: vec![],
             virtual_price,
             lp_total_supply: 0,
-            decimals: vec![],
+            decimals: Some(vec![]),
         }
     }
 

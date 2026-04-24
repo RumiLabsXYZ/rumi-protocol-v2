@@ -242,7 +242,7 @@ export const idlFactory = ({ IDL }) => {
   });
   const Fast3PoolSnapshot = IDL.Record({
     'virtual_price' : IDL.Nat,
-    'decimals' : IDL.Vec(IDL.Nat8),
+    'decimals' : IDL.Opt(IDL.Vec(IDL.Nat8)),
     'timestamp_ns' : IDL.Nat64,
     'lp_total_supply' : IDL.Nat,
     'balances' : IDL.Vec(IDL.Nat),

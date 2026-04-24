@@ -227,12 +227,14 @@ pub fn get_peg_status() -> Option<types::PegStatus> {
 }
 
 pub fn compute_peg_status(snap: &storage::fast::Fast3PoolSnapshot) -> types::PegStatus {
-    // Normalize all balances to a common scale (highest decimal).
-    let max_dec = snap.decimals.iter().copied().max().unwrap_or(8);
+    // Normalize all balances to a common scale (highest decimal). Legacy rows
+    // that pre-date the decimals field fall back to 8 per token (3pool standard).
+    let decimals = snap.decimals.as_deref().unwrap_or(&[]);
+    let max_dec = decimals.iter().copied().max().unwrap_or(8);
     let normalized: Vec<u128> = snap.balances.iter()
         .enumerate()
         .map(|(i, b)| {
-            let dec = snap.decimals.get(i).copied().unwrap_or(max_dec);
+            let dec = decimals.get(i).copied().unwrap_or(max_dec);
             let scale = 10u128.pow((max_dec - dec) as u32);
             b * scale
         })
@@ -1056,7 +1058,7 @@ mod tests {
             balances: vec![1_000_000, 1_000_000, 1_000_000],
             virtual_price: 100_000_000,
             lp_total_supply: 3_000_000,
-            decimals: vec![8, 8, 8],
+            decimals: Some(vec![8, 8, 8]),
         };
         let status = compute_peg_status(&snap);
         assert_eq!(status.balance_ratios.len(), 3);
@@ -1073,7 +1075,7 @@ mod tests {
             balances: vec![1_500_000, 1_000_000, 500_000],
             virtual_price: 100_000_000,
             lp_total_supply: 3_000_000,
-            decimals: vec![8, 8, 8],
+            decimals: Some(vec![8, 8, 8]),
         };
         let status = compute_peg_status(&snap);
         assert!((status.max_imbalance_pct - 50.0).abs() < 0.01);
@@ -1086,7 +1088,7 @@ mod tests {
             balances: vec![],
             virtual_price: 0,
             lp_total_supply: 0,
-            decimals: vec![],
+            decimals: Some(vec![]),
         };
         let status = compute_peg_status(&snap);
         assert!(status.balance_ratios.is_empty());
@@ -1100,10 +1102,30 @@ mod tests {
             balances: vec![10_000_000_000, 100_000_000, 100_000_000],
             virtual_price: 1_000_000_000_000_000_000,
             lp_total_supply: 300_000_000,
-            decimals: vec![8, 6, 6],
+            decimals: Some(vec![8, 6, 6]),
         };
         let status = compute_peg_status(&snap);
         assert!(status.max_imbalance_pct < 0.01, "expected near-zero imbalance, got {}", status.max_imbalance_pct);
+    }
+
+    #[test]
+    fn peg_status_handles_legacy_row_without_decimals() {
+        // Legacy rows decoded from pre-decimals bytes have `decimals = None`.
+        // compute_peg_status must treat the vec as empty and fall back to the
+        // 3pool default of 8 per token without panicking.
+        let snap = Fast3PoolSnapshot {
+            timestamp_ns: 1_000_000_000,
+            balances: vec![1_000_000, 1_000_000, 1_000_000],
+            virtual_price: 100_000_000,
+            lp_total_supply: 3_000_000,
+            decimals: None,
+        };
+        let status = compute_peg_status(&snap);
+        assert_eq!(status.balance_ratios.len(), 3);
+        for r in &status.balance_ratios {
+            assert!((r - 1.0).abs() < 0.001);
+        }
+        assert!(status.max_imbalance_pct < 0.01);
     }
 
     fn make_swap_rollup(fees: u64) -> DailySwapRollup {
