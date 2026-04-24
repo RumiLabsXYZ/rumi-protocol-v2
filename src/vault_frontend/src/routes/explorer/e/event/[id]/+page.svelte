@@ -96,7 +96,7 @@
     };
   });
 
-  onMount(async () => {
+  async function loadEvent() {
     loading = true;
     error = null;
     if (!parsed) {
@@ -189,7 +189,9 @@
     } catch (err) {
       console.error('[event] context load failed:', err);
     }
-  });
+  }
+
+  onMount(loadEvent);
 
   const timestampNs = $derived(display?.timestamp ?? 0);
   const blockIndex = $derived.by(() => {
@@ -207,6 +209,7 @@
   title={display ? `${display.formatted.typeName}${isBackend ? ` #${parsed?.id}` : ` ${display.sourceLabel ?? ''} #${parsed?.id}`}` : `Event ${rawId}`}
   loading={loading}
   error={error}
+  onRetry={loadEvent}
 >
   {#snippet identity()}
     {#if display}

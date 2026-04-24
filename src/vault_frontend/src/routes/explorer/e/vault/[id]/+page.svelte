@@ -34,7 +34,7 @@
   let loadingVault = $state(true);
   let loadingCore = $state(true);
   let loadingHistory = $state(true);
-  let vaultError = $state(false);
+  let loadError = $state<string | null>(null);
 
   const collateralPrincipalStr = $derived(
     vault?.collateral_type ? (vault.collateral_type.toString?.() ?? vault.collateral_type.toText?.() ?? String(vault.collateral_type)) : ''
@@ -387,7 +387,11 @@
     };
   }
 
-  onMount(async () => {
+  async function loadVault() {
+    loadingVault = true;
+    loadingCore = true;
+    loadingHistory = true;
+    loadError = null;
     const id = BigInt(vaultId);
     try {
       const [v, r, configs, prices, h, pseries] = await Promise.all([
@@ -401,7 +405,7 @@
       const histArr = Array.isArray(h) ? h : [];
       const resolved = v ?? synthesizeVaultFromHistory(vaultId, histArr);
       if (!resolved) {
-        vaultError = true;
+        loadError = `Vault #${vaultId} does not exist or has never recorded any events.`;
       } else {
         vault = resolved;
         interestRate = r;
@@ -418,12 +422,17 @@
             .catch(() => {});
         }
       }
+    } catch (err) {
+      console.error('[vault page] load error:', err);
+      loadError = 'Failed to load vault data. The backend may be briefly unavailable.';
     } finally {
       loadingVault = false;
       loadingCore = false;
       loadingHistory = false;
     }
-  });
+  }
+
+  onMount(loadVault);
 
   const statusLabel = $derived(isClosed ? 'Closed' : 'Active');
 </script>
@@ -435,7 +444,8 @@
 <EntityShell
   title={`Vault #${vaultId}`}
   loading={loadingVault}
-  error={vaultError ? `Vault #${vaultId} does not exist or could not be loaded.` : null}
+  error={loadError}
+  onRetry={loadVault}
 >
   {#snippet identity()}
     <div class="flex flex-wrap items-center gap-3">

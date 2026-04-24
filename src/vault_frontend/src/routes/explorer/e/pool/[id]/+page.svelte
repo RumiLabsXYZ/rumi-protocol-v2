@@ -49,7 +49,7 @@
 
   // ── Shared state ─────────────────────────────────────────────────────────
   let loading = $state(true);
-  let notFound = $state(false);
+  let error = $state<string | null>(null);
   let poolRoutes = $state<PoolRoute[]>([]);
 
   // ── 3pool state ──────────────────────────────────────────────────────────
@@ -260,7 +260,9 @@
   }
 
   // ── Data load ────────────────────────────────────────────────────────────
-  onMount(async () => {
+  async function loadPool() {
+    loading = true;
+    error = null;
     // Pool-routes fetch runs on both branches; 7d window matches top swappers.
     const ROUTES_WINDOW_NS = 7n * 86_400n * 1_000_000_000n;
     const routesPromise = fetchPoolRoutes(poolIdParam, ROUTES_WINDOW_NS, 10)
@@ -300,6 +302,9 @@
         feeSeries = fees;
         vpSeries = vp;
         poolRoutes = routes;
+      } catch (err) {
+        console.error('[pool page] 3pool load failed:', err);
+        error = 'Failed to load 3pool data. The canister may be briefly unavailable.';
       } finally {
         loading = false;
       }
@@ -311,7 +316,7 @@
       const pools = await fetchAmmPools();
       const pool = pools.find((p: any) => p.pool_id === poolIdParam);
       if (!pool) {
-        notFound = true;
+        error = `Pool ${poolIdParam} does not exist.`;
         return;
       }
       ammPool = pool;
@@ -348,11 +353,13 @@
       ammFeeSeries = feeResp;
     } catch (err) {
       console.error('[pool page] AMM load failed:', err);
-      notFound = true;
+      error = 'Failed to load pool data. The canister may be briefly unavailable.';
     } finally {
       loading = false;
     }
-  });
+  }
+
+  onMount(loadPool);
 </script>
 
 <svelte:head>
@@ -367,7 +374,8 @@
       ? `Constant-product AMM · ${formatBps(ammFeeBps)} fee`
       : undefined}
   loading={loading}
-  error={notFound ? `Pool not found: ${poolIdParam}` : null}
+  {error}
+  onRetry={loadPool}
 >
   {#snippet identity()}
     {#if isThreePool}

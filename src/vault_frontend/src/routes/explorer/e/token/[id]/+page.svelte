@@ -520,7 +520,9 @@
   const SP_EVENT_PULL = 500n;
   const THREE_POOL_SWAP_PULL = 500n;
 
-  onMount(async () => {
+  async function loadToken() {
+    loading = true;
+    error = null;
     let tokenPrincipalObj: Principal;
     try {
       tokenPrincipalObj = Principal.fromText(tokenPrincipal);
@@ -623,7 +625,9 @@
     } finally {
       loading = false;
     }
-  });
+  }
+
+  onMount(loadToken);
 </script>
 
 <EntityShell
@@ -631,6 +635,7 @@
   subtitle="{tokenName} · ledger {shortenPrincipal(tokenPrincipal)}"
   {loading}
   {error}
+  onRetry={loadToken}
 >
   {#snippet identity()}
     <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">

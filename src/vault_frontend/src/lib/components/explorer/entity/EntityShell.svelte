@@ -5,6 +5,7 @@
    * content is simply omitted.
    */
   import type { Snippet } from 'svelte';
+  import ErrorState from '$components/explorer/ErrorState.svelte';
 
   interface Props {
     title: string;
@@ -17,11 +18,12 @@
     analytics?: Snippet;
     loading?: boolean;
     error?: string | null;
+    onRetry?: () => void | Promise<void>;
   }
 
   let {
     title, subtitle, backHref = '/explorer', backLabel = 'Back to Explorer',
-    identity, relationships, activity, analytics, loading = false, error = null,
+    identity, relationships, activity, analytics, loading = false, error = null, onRetry,
   }: Props = $props();
 </script>
 
@@ -39,10 +41,12 @@
       <p>Loading {title}...</p>
     </div>
   {:else if error}
-    <div class="text-center py-16">
-      <p class="text-2xl font-bold text-gray-300 mb-2">{title}</p>
-      <p class="text-gray-500">{error}</p>
-      <a href={backHref} class="inline-block mt-4 text-blue-400 hover:underline text-sm">{backLabel}</a>
+    <div class="space-y-3">
+      <p class="text-2xl font-bold text-gray-300 text-center">{title}</p>
+      <ErrorState message={error} {onRetry} />
+      <p class="text-center">
+        <a href={backHref} class="text-sm text-blue-400 hover:underline">{backLabel}</a>
+      </p>
     </div>
   {:else}
     <header class="space-y-1">
