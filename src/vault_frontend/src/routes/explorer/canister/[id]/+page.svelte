@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { page } from '$app/stores';
-  import SearchBar from '$lib/components/explorer/SearchBar.svelte';
   import EntityLink from '$lib/components/explorer/EntityLink.svelte';
   import TokenBadge from '$lib/components/explorer/TokenBadge.svelte';
   import DataTable from '$lib/components/explorer/DataTable.svelte';
+  import ErrorState from '$lib/components/explorer/ErrorState.svelte';
   import { fetchEventsByPrincipal } from '$lib/stores/explorerStore';
   import { CANISTER_IDS } from '$lib/config';
   import { copyToClipboard } from '$lib/utils/principalHelpers';
@@ -42,6 +42,7 @@
   // ── State ──────────────────────────────────────────────────────────────────
   let events = $state<Array<{ event: any; globalIndex: number }>>([]);
   let eventsLoading = $state(true);
+  let eventsError = $state<string | null>(null);
   let copied = $state(false);
 
   // ── Derived ────────────────────────────────────────────────────────────────
@@ -87,8 +88,9 @@
   }
 
   // ── Load ───────────────────────────────────────────────────────────────────
-  onMount(async () => {
+  async function loadEvents() {
     eventsLoading = true;
+    eventsError = null;
     try {
       const id = $page.params.id;
       const result = await fetchEventsByPrincipal(id);
@@ -96,16 +98,17 @@
     } catch (e) {
       console.error('Failed to fetch canister events:', e);
       events = [];
+      eventsError = 'Could not fetch events for this canister. The backend may be briefly unavailable.';
     } finally {
       eventsLoading = false;
     }
-  });
+  }
+
+  onMount(loadEvents);
 </script>
 
 <div class="canister-page">
   <a href="/explorer" class="back-link">← Back to Explorer</a>
-
-  <div class="search-row"><SearchBar /></div>
 
   <!-- ── Header ───────────────────────────────────────────────────────────── -->
   <div class="canister-header">
@@ -206,11 +209,16 @@
         <span class="count-badge">{eventsSorted.length} events</span>
       {/if}
     </h2>
+    {#if eventsError}
+      <div class="glass-card overflow-hidden">
+        <ErrorState message={eventsError} onRetry={loadEvents} />
+      </div>
+    {:else}
     <div class="glass-card overflow-hidden">
       <DataTable
         columns={activityColumns}
-        rows={eventsSorted}
-        emptyMessage={eventsLoading ? 'Loading events…' : 'No protocol events found involving this canister.'}
+        data={eventsSorted}
+        emptyMessage="No protocol events found involving this canister."
         loading={eventsLoading}
       >
         {#snippet row(item: any, i: number)}
@@ -244,6 +252,7 @@
         {/snippet}
       </DataTable>
     </div>
+    {/if}
     <p class="note">Events are matched by principal — only events where this canister appears as caller or owner are shown.</p>
   </section>
 </div>

@@ -584,7 +584,9 @@
 
   // ── Data load ──────────────────────────────────────────────────────────────
 
-  onMount(async () => {
+  async function loadAddress() {
+    loading = true;
+    error = null;
     let principal: Principal;
     try {
       principal = Principal.fromText(principalStr);
@@ -687,11 +689,13 @@
       ammLiqEventsMatching = ammLiqFull.filter(matchesCaller);
     } catch (e) {
       console.error('[address page] Failed to load data:', e);
-      error = 'Failed to load address data. Please try again.';
+      error = 'Failed to load address data. The backend may be briefly unavailable.';
     } finally {
       loading = false;
     }
-  });
+  }
+
+  onMount(loadAddress);
 
   const pageTitle = $derived(
     knownCanister && canisterName ? canisterName : shortenPrincipal(principalStr),
@@ -706,6 +710,7 @@
   title="Address"
   loading={loading}
   error={error}
+  onRetry={loadAddress}
 >
   {#snippet identity()}
     <!-- Identity strip -->

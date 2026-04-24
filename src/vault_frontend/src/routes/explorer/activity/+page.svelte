@@ -6,6 +6,8 @@
 	import FacetBar from '$components/explorer/FacetBar.svelte';
 	import ActiveFilterChips from '$components/explorer/ActiveFilterChips.svelte';
 	import SavedViewsStrip, { type SavedView } from '$components/explorer/SavedViewsStrip.svelte';
+	import EmptyState from '$components/explorer/EmptyState.svelte';
+	import ErrorState from '$components/explorer/ErrorState.svelte';
 	import {
 		fetchEvents,
 		fetchSwapEvents, fetchSwapEventCount,
@@ -763,15 +765,29 @@
 			</div>
 		</div>
 	{:else if error}
-		<div class="text-center py-16">
-			<p class="text-red-400 text-sm">{error}</p>
-		</div>
+		<ErrorState
+			title="Could not load events"
+			message={error}
+			onRetry={() => loadEvents(facets)}
+		/>
 	{:else if visibleEvents.length === 0}
-		<div class="text-center py-16">
-			<p class="text-gray-500 text-sm">
-				{hasAnyFacet(facets) ? 'No events match the current filters.' : 'No events found.'}
-			</p>
-		</div>
+		<EmptyState
+			icon={hasAnyFacet(facets) ? 'search' : 'inbox'}
+			title={hasAnyFacet(facets) ? 'No matching events' : 'No activity yet'}
+			message={hasAnyFacet(facets)
+				? 'Try widening the time window or clearing a facet.'
+				: 'Once the protocol sees its first events they will stream in here.'}
+		>
+			{#if hasAnyFacet(facets)}
+				<button
+					type="button"
+					onclick={clearAll}
+					class="text-sm text-blue-400 hover:text-blue-300 underline-offset-2 hover:underline"
+				>
+					Clear all filters
+				</button>
+			{/if}
+		</EmptyState>
 	{:else}
 		<div class="explorer-card overflow-hidden p-0">
 			<MixedEventsTable
