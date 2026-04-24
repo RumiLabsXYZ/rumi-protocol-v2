@@ -597,13 +597,42 @@
     }
 
     try {
+      // Wave 1 — identity + portfolio donut. 5 parallel calls. These populate
+      // the above-the-fold content; once they land, we set `loading = false`
+      // and the rest of the page fills in progressively as Wave 2 completes.
+      const [vaultsRes, configsRes, pricesRes, threePoolStateRes, threePoolLpRes] =
+        await Promise.all([
+          fetchVaultsByOwner(principal).catch(() => []),
+          fetchCollateralConfigs().catch(() => []),
+          fetchCollateralPrices().catch(() => new Map<string, number>()),
+          fetchThreePoolState().catch(() => null),
+          fetch3PoolLpBalance(principal).catch(() => 0n),
+        ]);
+
+      vaults = vaultsRes;
+      configs = configsRes;
+      priceMap = pricesRes;
+      threePoolState = threePoolStateRes;
+      threePoolLp = threePoolLpRes;
+      loading = false;
+
+      // Wave 2 — below-the-fold activity + relationships data. Runs in the
+      // background without blocking the render. Sections hydrate as their
+      // state variables update.
+      void loadBelowFoldData(principal, configsRes);
+    } catch (e) {
+      console.error('[address page] Failed to load data:', e);
+      error = 'Failed to load address data. The backend may be briefly unavailable.';
+      loading = false;
+    }
+  }
+
+  async function loadBelowFoldData(principal: Principal, configsRes: any[]) {
+    try {
+      // Wave 2a — 7 parallel calls. Everything the activity feed, LP
+      // positions, and subaccount relationships need.
       const [
-        vaultsRes,
         allVaultsRes,
-        configsRes,
-        pricesRes,
-        threePoolStateRes,
-        threePoolLpRes,
         ammPoolsRes,
         backendEventsRes,
         threePoolSwapsRes,
@@ -611,12 +640,7 @@
         icusdSubsRes,
         threeUsdSubsRes,
       ] = await Promise.all([
-        fetchVaultsByOwner(principal).catch(() => []),
         fetchAllVaults().catch(() => []),
-        fetchCollateralConfigs().catch(() => []),
-        fetchCollateralPrices().catch(() => new Map<string, number>()),
-        fetchThreePoolState().catch(() => null),
-        fetch3PoolLpBalance(principal).catch(() => 0n),
         fetchAmmPools().catch(() => []),
         fetchEventsByPrincipal(principal).catch(() => [] as [bigint, any][]),
         fetch3PoolSwapEventsByPrincipal(principal).catch(() => []),
@@ -625,12 +649,7 @@
         fetchThreeUsdSubaccounts(principal).catch(() => []),
       ]);
 
-      vaults = vaultsRes;
       allVaults = allVaultsRes;
-      configs = configsRes;
-      priceMap = pricesRes;
-      threePoolState = threePoolStateRes;
-      threePoolLp = threePoolLpRes;
       ammPools = ammPoolsRes;
       backendEvents = backendEventsRes;
       threePoolSwapEvents = threePoolSwapsRes;
@@ -638,7 +657,7 @@
       icusdSubaccounts = icusdSubsRes;
       threeUsdSubaccounts = threeUsdSubsRes;
 
-      // Second wave — depends on the pool + config lists above.
+      // Wave 2b — depends on the pool + config lists above.
       const ledgerSet = new Set<string>([CANISTER_IDS.ICUSD_LEDGER, CANISTER_IDS.THREEPOOL]);
       for (const cfg of configsRes) {
         const pid = cfg.ledger_canister_id?.toText?.() ?? String(cfg.ledger_canister_id ?? '');
@@ -688,10 +707,10 @@
       ammSwapEventsMatching = ammSwapFull.filter(matchesCaller);
       ammLiqEventsMatching = ammLiqFull.filter(matchesCaller);
     } catch (e) {
-      console.error('[address page] Failed to load data:', e);
-      error = 'Failed to load address data. The backend may be briefly unavailable.';
-    } finally {
-      loading = false;
+      // Below-fold errors don't surface as page-level failures — the affected
+      // sections will simply show empty states. The error still goes to the
+      // console for debugging.
+      console.error('[address page] Wave 2 load failed:', e);
     }
   }
 
