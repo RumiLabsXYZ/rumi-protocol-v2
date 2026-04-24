@@ -37,7 +37,7 @@ pub async fn run() -> Result<(), String> {
                 balances: tp.balances,
                 virtual_price: tp.virtual_price,
                 lp_total_supply: tp.lp_total_supply,
-                decimals: tp.decimals,
+                decimals: Some(tp.decimals),
             });
         }
         Err(e) => {

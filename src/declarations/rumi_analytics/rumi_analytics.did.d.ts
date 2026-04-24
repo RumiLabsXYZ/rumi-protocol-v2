@@ -151,7 +151,7 @@ export interface ErrorCounters {
 }
 export interface Fast3PoolSnapshot {
   'virtual_price' : bigint,
-  'decimals' : Uint8Array | number[],
+  'decimals' : [] | [Uint8Array | number[]],
   'timestamp_ns' : bigint,
   'lp_total_supply' : bigint,
   'balances' : Array<bigint>,

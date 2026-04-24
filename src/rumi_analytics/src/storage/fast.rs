@@ -26,7 +26,9 @@ pub struct Fast3PoolSnapshot {
     pub balances: Vec<u128>,
     pub virtual_price: u128,
     pub lp_total_supply: u128,
-    pub decimals: Vec<u8>,
+    /// Per-token decimal scale. `None` on legacy rows that pre-date this field.
+    /// Readers fall back to `[8; N]` (3pool's standard precision).
+    pub decimals: Option<Vec<u8>>,
 }
 
 // --- Storable impls ---
@@ -117,3 +119,89 @@ macro_rules! fast_accessors {
 
 fast_accessors!(fast_prices, FAST_PRICES_LOG, FastPriceSnapshot);
 fast_accessors!(fast_3pool, FAST_3POOL_LOG, Fast3PoolSnapshot);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Schema used before the `decimals` field was introduced. Rows written on
+    /// mainnet under this shape must still decode under the current type.
+    #[derive(CandidType, Serialize, Deserialize)]
+    struct Fast3PoolSnapshotV0 {
+        timestamp_ns: u64,
+        balances: Vec<u128>,
+        virtual_price: u128,
+        lp_total_supply: u128,
+    }
+
+    #[test]
+    fn decodes_legacy_row_missing_decimals_field() {
+        let v0 = Fast3PoolSnapshotV0 {
+            timestamp_ns: 1_700_000_000_000_000_000,
+            balances: vec![1_234, 2_345, 3_456],
+            virtual_price: 1_000_000_000_000_000_000,
+            lp_total_supply: 7_035,
+        };
+        let bytes = Encode!(&v0).expect("encode legacy row");
+        let decoded: Fast3PoolSnapshot =
+            Decode!(&bytes, Fast3PoolSnapshot).expect("decode legacy row as current schema");
+        assert_eq!(decoded.timestamp_ns, 1_700_000_000_000_000_000);
+        assert_eq!(decoded.balances, vec![1_234, 2_345, 3_456]);
+        assert_eq!(decoded.virtual_price, 1_000_000_000_000_000_000);
+        assert_eq!(decoded.lp_total_supply, 7_035);
+        assert_eq!(decoded.decimals, None);
+    }
+
+    #[test]
+    fn current_row_round_trips_via_storable() {
+        let current = Fast3PoolSnapshot {
+            timestamp_ns: 1_800_000_000_000_000_000,
+            balances: vec![5, 10, 15],
+            virtual_price: 1_020_000_000_000_000_000,
+            lp_total_supply: 30,
+            decimals: Some(vec![8, 8, 8]),
+        };
+        let bytes = <Fast3PoolSnapshot as Storable>::to_bytes(&current);
+        let decoded = <Fast3PoolSnapshot as Storable>::from_bytes(bytes);
+        assert_eq!(decoded.timestamp_ns, current.timestamp_ns);
+        assert_eq!(decoded.balances, current.balances);
+        assert_eq!(decoded.virtual_price, current.virtual_price);
+        assert_eq!(decoded.lp_total_supply, current.lp_total_supply);
+        assert_eq!(decoded.decimals, Some(vec![8, 8, 8]));
+    }
+
+    #[test]
+    fn mixed_log_decodes_legacy_and_current_rows() {
+        // A "mixed" log on mainnet has older rows without `decimals` and newer
+        // rows with `Some(vec![...])`. The Storable::from_bytes path has to
+        // tolerate both shapes so that range() can iterate the full log.
+        let legacy = Fast3PoolSnapshotV0 {
+            timestamp_ns: 100,
+            balances: vec![1, 2, 3],
+            virtual_price: 1_000_000_000_000_000_000,
+            lp_total_supply: 6,
+        };
+        let current = Fast3PoolSnapshot {
+            timestamp_ns: 200,
+            balances: vec![4, 5, 6],
+            virtual_price: 1_010_000_000_000_000_000,
+            lp_total_supply: 15,
+            decimals: Some(vec![8, 8, 8]),
+        };
+
+        let legacy_bytes = Encode!(&legacy).expect("encode legacy");
+        let current_bytes = <Fast3PoolSnapshot as Storable>::to_bytes(&current);
+
+        let decoded_legacy: Fast3PoolSnapshot =
+            Decode!(&legacy_bytes, Fast3PoolSnapshot).expect("decode legacy");
+        let decoded_current =
+            <Fast3PoolSnapshot as Storable>::from_bytes(current_bytes);
+
+        let rows = vec![decoded_legacy, decoded_current];
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|r| r.timestamp_ns == 100 && r.decimals.is_none()));
+        assert!(rows
+            .iter()
+            .any(|r| r.timestamp_ns == 200 && r.decimals.as_deref() == Some(&[8, 8, 8][..])));
+    }
+}
