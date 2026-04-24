@@ -277,9 +277,16 @@ impl StabilityPoolState {
         Ok(())
     }
 
-    /// Emergency accounting fix: deduct LP tokens that were burned on the 3pool
-    /// but whose debt write-down was rejected by the backend. Distributes the loss
-    /// proportionally across all depositors who hold this token.
+    /// Proportionally debit a token balance across all depositors who hold it.
+    ///
+    /// **Not used by the liquidation flow.** The SP-001 fix (audit 2026-04-22-28e9896)
+    /// removed this helper from `execute_single_liquidation`'s orchestration because
+    /// it caused a double-deduction against `process_liquidation_gains_at`.
+    ///
+    /// Retained as an emergency operator tool for scenarios where token balances
+    /// have been destroyed outside of a normal liquidation flow (e.g., a ledger
+    /// migration quirk or an external reconciliation). `correct_balance` is the
+    /// per-depositor-targeted analogue for surgical corrections.
     pub fn deduct_burned_lp_from_balances(&mut self, token_ledger: Principal, burned_amount: u64) {
         let total = self.total_stablecoin_balances.get(&token_ledger).copied().unwrap_or(0);
         if total == 0 || burned_amount == 0 {
@@ -328,8 +335,12 @@ impl StabilityPoolState {
         }
     }
 
-    /// Re-credit tokens to depositor balances (rollback after failed backend call).
-    /// Inverse of deduct_burned_lp_from_balances.
+    /// Inverse of `deduct_burned_lp_from_balances`: proportionally credit a token
+    /// balance back to depositors.
+    ///
+    /// **Not used by the liquidation flow.** After the SP-001 fix removed the
+    /// pre-deduct pattern, there are no rollback sites that need this function.
+    /// Retained as the symmetric operator tool alongside `deduct_burned_lp_from_balances`.
     pub fn credit_tokens_to_pool(&mut self, token_ledger: Principal, amount: u64) {
         if amount == 0 {
             return;
@@ -715,6 +726,16 @@ impl StabilityPoolState {
 
         // Phase 6: Clean up empty positions
         self.deposits.retain(|_, pos| !pos.is_empty());
+
+        // SP-001 regression fence: per-depositor balances must sum to the
+        // aggregate total after the full gains pass. Violations indicate a
+        // double-deduction or divergent-update bug (debug builds only — the
+        // field-level assertions above are already proportional-sound).
+        debug_assert!(
+            self.validate_state().is_ok(),
+            "stability pool aggregate/per-depositor invariant violated after \
+             process_liquidation_gains_at (likely regression of SP-001)"
+        );
     }
 
     // ─── Query Helpers ───

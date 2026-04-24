@@ -206,9 +206,13 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
             }
         }
 
-        // Deduct-before-call: conservatively assume tokens will be consumed.
-        // Rollback if backend explicitly rejects; leave deducted if call fails (conservative).
-        mutate_state(|s| s.deduct_burned_lp_from_balances(*token_ledger, *amount));
+        // No pre-deduct of depositor balances: `process_liquidation_gains` is the
+        // single point of truth for stablecoin bookkeeping on a successful
+        // liquidation (SP-001 regression fix, audit 2026-04-22-28e9896). Calling
+        // `deduct_burned_lp_from_balances` here previously caused depositor balances
+        // and the aggregate total to be decremented twice per liquidation — once
+        // pre-call, once inside `process_liquidation_gains_at` — leaving phantom
+        // tokens in the pool account per liquidation.
 
         // Call the appropriate backend endpoint
         let liq_result = if is_icusd {
@@ -238,9 +242,8 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
                     call_result.map(|(r,)| r)
                 },
                 None => {
-                    // Never called the backend — rollback the deduction
-                    log!(INFO, "Unknown stable token type for {}, rolling back deduction", token_ledger);
-                    mutate_state(|s| s.credit_tokens_to_pool(*token_ledger, *amount));
+                    // Backend was never called; no bookkeeping to roll back.
+                    log!(INFO, "Unknown stable token type for {}, skipping", token_ledger);
                     continue;
                 }
             }
@@ -251,21 +254,29 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
                 let collateral = success.collateral_amount_received.unwrap_or(success.fee_amount_paid);
                 log!(INFO, "Liquidation succeeded for vault {} with token {}: collateral={}, fee={}",
                     vault_info.vault_id, token_ledger, collateral, success.fee_amount_paid);
-                // Deduction stands — record in actual_consumed
+                // Record the consumption; `process_liquidation_gains` will debit
+                // depositor balances exactly once, after this loop.
                 actual_consumed.insert(*token_ledger, *amount);
                 total_collateral_gained += collateral;
                 // Bug 7: one token per vault per round — vault state changed, remaining draws are stale
                 break;
             },
             Ok(Err(protocol_error)) => {
-                // Backend explicitly rejected — rollback the deduction
-                log!(INFO, "Protocol rejected liquidation for vault {} with token {}: {:?}. Rolling back deduction.",
+                // Backend explicitly rejected; nothing was pre-deducted, so no rollback needed.
+                log!(INFO, "Protocol rejected liquidation for vault {} with token {}: {:?}",
                     vault_info.vault_id, token_ledger, protocol_error);
-                mutate_state(|s| s.credit_tokens_to_pool(*token_ledger, *amount));
             },
             Err(call_error) => {
-                // Inter-canister call failed — leave deduction in place (conservative: assume tokens consumed)
-                log!(INFO, "Liquidation call failed for vault {} with token {}: {:?}. Deduction kept (conservative).",
+                // Inter-canister call failed; outcome is unknown. We do NOT mutate
+                // depositor bookkeeping here — the previous "conservative deduct" path
+                // (SP-005) caused permanent depositor loss when the backend was in
+                // fact a no-op. If the backend rolled forward (took the tokens via
+                // transfer_from but failed to reply), the next liquidation or a manual
+                // `correct_balance` reconciliation against `icrc1_balance_of(pool)`
+                // will reconcile the divergence. Log loudly so operators notice.
+                log!(INFO, "Liquidation call failed for vault {} with token {}: {:?}. \
+                      No bookkeeping change; ledger balance should be reconciled if \
+                      tokens moved silently.",
                     vault_info.vault_id, token_ledger, call_error);
             }
         }
@@ -324,8 +335,10 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
             }
         }
 
-        // Step B: Deduct-before-call, then ask backend to pull 3USD + write down debt atomically
-        mutate_state(|s| s.deduct_burned_lp_from_balances(*token_ledger, *amount));
+        // Step B: Ask backend to pull 3USD + write down debt atomically.
+        // `process_liquidation_gains` runs once after this loop and is the single
+        // point of truth for bookkeeping — no pre-deduct (SP-001 regression fix,
+        // audit 2026-04-22-28e9896).
 
         let liq_result: Result<(Result<StabilityPoolLiquidationResult, rumi_protocol_backend::ProtocolError>,), _> = call(
             protocol_id,
@@ -342,14 +355,19 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
                 break; // one token per vault per round
             }
             Ok((Err(e),)) => {
-                // Backend explicitly rejected — rollback the deduction, approval expires harmlessly
-                log!(INFO, "Backend rejected 3USD reserves liquidation for vault {}: {:?}. Rolling back.",
+                // Backend explicitly rejected; approval expires harmlessly and nothing
+                // was pre-deducted, so there is no bookkeeping to roll back.
+                log!(INFO, "Backend rejected 3USD reserves liquidation for vault {}: {:?}",
                     vault_info.vault_id, e);
-                mutate_state(|s| s.credit_tokens_to_pool(*token_ledger, *amount));
             }
             Err(e) => {
-                // Inter-canister call failed — leave deduction in place (conservative)
-                log!(INFO, "3USD reserves liquidation call failed for vault {}: {:?}. Deduction kept (conservative).",
+                // Inter-canister call failed; outcome unknown. We do NOT mutate
+                // depositor bookkeeping (SP-005 regression fix). If the backend
+                // pulled the 3USD silently, operator reconciliation against
+                // `icrc1_balance_of(pool)` will reconcile.
+                log!(INFO, "3USD reserves liquidation call failed for vault {}: {:?}. \
+                      No bookkeeping change; ledger balance should be reconciled if \
+                      tokens moved silently.",
                     vault_info.vault_id, e);
             }
         }
