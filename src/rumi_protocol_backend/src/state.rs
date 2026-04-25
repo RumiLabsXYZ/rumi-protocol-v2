@@ -526,6 +526,13 @@ pub struct PendingMarginTransfer {
     /// Number of times this transfer has been retried. Capped at MAX_PENDING_RETRIES.
     #[serde(default)]
     pub retry_count: u8,
+    /// Wave-3 ICRC dedup nonce. Constructed once at first attempt via
+    /// `State::next_op_nonce`; reused on every retry so the ledger sees the
+    /// same `created_at_time` and deduplicates instead of double-spending.
+    /// Zero for entries from snapshots written before Wave-3 — those retry
+    /// without dedup (the prior behaviour, no regression).
+    #[serde(default)]
+    pub op_nonce: u128,
 }
 
 
@@ -717,6 +724,15 @@ pub struct State {
     /// Active bot claims — tracks collateral transferred to bot but not yet confirmed.
     /// Key = vault_id. Auto-cancelled after `BOT_CLAIM_TIMEOUT_NS`.
     pub bot_claims: BTreeMap<u64, BotClaim>,
+
+    /// Monotonic counter for ICRC transfer idempotency nonces (audit Wave-3).
+    /// Combined with `ic_cdk::api::time()` in `next_op_nonce` to mint a u128
+    /// that the helper packs into the ledger's `created_at_time` for retry-safe
+    /// deduplication. `serde(default)` so deserializing pre-Wave-3 snapshots
+    /// starts the counter at zero (collisions vs. older transfers are
+    /// impossible because their tuples have `created_at_time: None`).
+    #[serde(default)]
+    pub op_nonce_counter: u64,
 }
 
 /// Serde-only fallback: provides zero/empty/None defaults for fields missing from
@@ -811,6 +827,7 @@ impl Default for State {
             bot_pending_vaults: BTreeMap::new(),
             sp_attempted_vaults: BTreeSet::new(),
             bot_claims: BTreeMap::new(),
+            op_nonce_counter: 0,
         }
     }
 }
@@ -997,6 +1014,7 @@ impl From<InitArg> for State {
             bot_pending_vaults: BTreeMap::new(),
             sp_attempted_vaults: BTreeSet::new(),
             bot_claims: BTreeMap::new(),
+            op_nonce_counter: 0,
         }
     }
 }
@@ -1113,6 +1131,23 @@ impl State {
             ));
         }
         Ok(())
+    }
+
+    /// Mint a fresh idempotency nonce for an ICRC transfer (audit Wave-3).
+    ///
+    /// Layout: upper 64 bits = current IC time (nanoseconds), lower 64 bits =
+    /// monotonic counter. The transfer helper extracts the upper bits as
+    /// `created_at_time`; the lower bits keep nonces from colliding when two
+    /// transfers are issued within the same nanosecond.
+    ///
+    /// Persist the returned nonce alongside the operation (e.g. in a
+    /// `PendingMarginTransfer`) and pass it back into the helper on retries —
+    /// that is what makes the transfer idempotent at the ledger.
+    pub fn next_op_nonce(&mut self) -> u128 {
+        let counter = self.op_nonce_counter;
+        self.op_nonce_counter = self.op_nonce_counter.wrapping_add(1);
+        let now = ic_cdk::api::time();
+        ((now as u128) << 64) | (counter as u128)
     }
 
     pub fn increment_vault_id(&mut self) -> u64 {

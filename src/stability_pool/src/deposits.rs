@@ -60,6 +60,17 @@ pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), Stabili
             log!(INFO, "Deposit recorded for {}", caller);
             Ok(())
         },
+        // Audit Wave-3 (ICRC-003): Duplicate from the ledger means the
+        // previous transfer landed; the tokens are already in the pool.
+        // Credit the deposit and treat as success.
+        Ok((Err(TransferFromError::Duplicate { duplicate_of }),)) => {
+            log!(INFO, "Deposit transfer Duplicate (block {}); previous attempt landed, crediting deposit", duplicate_of);
+            mutate_state(|s| {
+                s.add_deposit(caller, token_ledger, amount);
+                s.push_event(caller, PoolEventType::Deposit { token_ledger, amount });
+            });
+            Ok(())
+        },
         Ok((Err(transfer_error),)) => {
             log!(INFO, "Transfer failed: {:?}", transfer_error);
             Err(StabilityPoolError::LedgerTransferFailed {
@@ -131,9 +142,17 @@ pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), Stabil
             mutate_state(|s| s.push_event(caller, PoolEventType::Withdraw { token_ledger, amount }));
             Ok(())
         },
+        // Audit Wave-3 (ICRC-003): Duplicate means the previous withdrawal
+        // attempt already paid the user. Don't restore — that would double-spend.
+        Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
+            log!(INFO, "Withdrawal Duplicate (block {}); previous attempt landed, NOT restoring balance", duplicate_of);
+            mutate_state(|s| s.push_event(caller, PoolEventType::Withdraw { token_ledger, amount }));
+            Ok(())
+        },
         Ok((Err(transfer_error),)) => {
             log!(INFO, "Withdrawal transfer failed, rolling back deduction: {:?}", transfer_error);
-            // Rollback: re-credit the user's balance
+            // Rollback: re-credit the user's balance (clear ledger rejection,
+            // tokens did NOT leave the pool).
             mutate_state(|s| s.add_deposit(caller, token_ledger, amount));
             Err(StabilityPoolError::LedgerTransferFailed {
                 reason: format!("{:?}", transfer_error),
@@ -141,7 +160,14 @@ pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), Stabil
         },
         Err(call_error) => {
             log!(INFO, "Inter-canister call failed, rolling back deduction: {:?}", call_error);
-            // Rollback: re-credit the user's balance
+            // Rollback: re-credit the user's balance.
+            // NOTE: this is the audit ICRC-002 risk pattern — if the ledger
+            // committed but the reply was lost, restoring creates a phantom
+            // credit. The dedup hash (created_at_time) makes the user's
+            // immediate retry land as Duplicate (handled above), so no
+            // double-spend in practice; lose-then-don't-retry leaves the
+            // deduction restored AND the tokens transferred — a known
+            // operational risk that requires manual reconciliation.
             mutate_state(|s| s.add_deposit(caller, token_ledger, amount));
             Err(StabilityPoolError::InterCanisterCallFailed {
                 target: format!("{}", token_ledger),
@@ -228,13 +254,23 @@ pub async fn claim_collateral(collateral_ledger: Principal) -> Result<u64, Stabi
             }));
             Ok(transfer_amount)
         },
+        // Audit Wave-3 (ICRC-003): Duplicate means the previous claim already
+        // paid the user. Don't restore — that would let them claim again.
+        Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
+            log!(INFO, "Collateral claim Duplicate (block {}); previous attempt landed, NOT restoring", duplicate_of);
+            mutate_state(|s| s.push_event(caller, PoolEventType::ClaimCollateral {
+                collateral_ledger,
+                amount: transfer_amount,
+            }));
+            Ok(transfer_amount)
+        },
         Ok((Err(transfer_error),)) => {
             log!(INFO, "Collateral claim failed, rolling back: {:?}", transfer_error);
-            // Rollback: restore the gains
+            // Rollback: restore the gains (clear ledger rejection — tokens
+            // did NOT leave the pool).
             mutate_state(|s| {
                 if let Some(pos) = s.deposits.get_mut(&caller) {
                     *pos.collateral_gains.entry(collateral_ledger).or_insert(0) += gains;
-                    // Undo the total_claimed_gains increment from mark_gains_claimed
                     if let Some(claimed) = pos.total_claimed_gains.get_mut(&collateral_ledger) {
                         *claimed = claimed.saturating_sub(gains);
                     }
@@ -246,11 +282,11 @@ pub async fn claim_collateral(collateral_ledger: Principal) -> Result<u64, Stabi
         },
         Err(call_error) => {
             log!(INFO, "Inter-canister call failed, rolling back: {:?}", call_error);
-            // Rollback: restore the gains
+            // Rollback: restore the gains. See withdraw() for the same
+            // ICRC-002 caveat about transport-error-then-no-retry.
             mutate_state(|s| {
                 if let Some(pos) = s.deposits.get_mut(&caller) {
                     *pos.collateral_gains.entry(collateral_ledger).or_insert(0) += gains;
-                    // Undo the total_claimed_gains increment from mark_gains_claimed
                     if let Some(claimed) = pos.total_claimed_gains.get_mut(&collateral_ledger) {
                         *claimed = claimed.saturating_sub(gains);
                     }

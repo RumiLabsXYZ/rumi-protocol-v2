@@ -80,7 +80,15 @@
     showDropdown = false;
   }
 
-  // Ledger transfer fee per token (approve + transfer_from both charge a fee)
+  // Ledger transfer fee per token (approve + transfer_from both charge a fee).
+  //
+  // TODO(audit ICRC-005): Replace this hardcoded table with a live
+  // `icrc1_fee()` query against `token.ledger`, cached per-ledger with a
+  // ~10-minute TTL. The backend now refreshes its own cache when transfers
+  // come back BadFee (`management::transfer_idempotent`). The frontend
+  // should mirror that — query the ledger directly so a fee bump on chain
+  // doesn't make `getLedgerFee` silently undercharge or overcharge until
+  // we ship a frontend update.
   function getLedgerFee(token: StablecoinConfig): bigint {
     // 3USD LP token (8 decimals) = 0.001 = 100_000 e8s (same as icUSD)
     // icUSD (8 decimals) = 0.001 = 100_000 e8s

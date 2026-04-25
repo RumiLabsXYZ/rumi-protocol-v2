@@ -37,11 +37,16 @@ pub async fn transfer_from_user(
 
     match result {
         Ok((Ok(block_index),)) => {
-            // Convert Nat to u64
             let idx: u64 = block_index.0.try_into().unwrap_or_else(|_| {
                 ic_cdk::println!("WARN: block index exceeds u64::MAX, returning 0");
                 0
             });
+            Ok(idx)
+        }
+        // Audit Wave-3 (ICRC-003): Duplicate means the previous attempt's
+        // transfer landed at `duplicate_of`. Treat as success.
+        Ok((Err(TransferFromError::Duplicate { duplicate_of }),)) => {
+            let idx: u64 = duplicate_of.0.try_into().unwrap_or(0);
             Ok(idx)
         }
         Ok((Err(e),)) => Err(format!("icrc2_transfer_from error: {:?}", e)),
@@ -85,6 +90,10 @@ pub async fn transfer_to_user(
                 ic_cdk::println!("WARN: block index exceeds u64::MAX, returning 0");
                 0
             });
+            Ok(idx)
+        }
+        Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
+            let idx: u64 = duplicate_of.0.try_into().unwrap_or(0);
             Ok(idx)
         }
         Ok((Err(e),)) => Err(format!("icrc1_transfer error: {:?}", e)),

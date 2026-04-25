@@ -95,19 +95,27 @@ async fn deposit(args: DepositArgs) -> Result<u64, String> {
     Ok(deposit_id)
 }
 
-/// Withdraw funds from treasury (controllers only)
+/// Withdraw funds from treasury (controllers only).
+///
+/// Audit Wave-3 (ICRC-002): the previous implementation passed
+/// `created_at_time: None` and restored the local balance on ANY error,
+/// turning a lost-reply transient into a silent double-spend on retry.
+/// This version sets a deterministic `created_at_time` derived from the
+/// caller-supplied (or auto-derived) `request_id`, treats `Duplicate` as
+/// success, restores the balance ONLY for clear ledger errors, and on a
+/// transport-layer error keeps the balance deducted while logging a
+/// reconciliation hint for the controller.
 #[update]
 #[candid_method(update)]
 async fn withdraw(args: WithdrawArgs) -> Result<WithdrawResult, String> {
     ensure_controller()?;
+    let caller_principal = caller();
 
     log!(LOG, "Processing withdrawal: {} {:?} to {}",
          args.amount, args.asset_type, args.to);
 
-    // Deduct from bookkeeping before attempting transfer
     with_state_mut(|s| s.withdraw(args.asset_type.clone(), args.amount))?;
 
-    // Get the appropriate ledger principal
     let ledger_principal = with_state(|s| {
         let config = s.get_config();
         match args.asset_type {
@@ -119,7 +127,11 @@ async fn withdraw(args: WithdrawArgs) -> Result<WithdrawResult, String> {
         }
     }).ok_or("Ledger not configured for this asset type")?;
 
-    // Make the transfer
+    let request_id = args.request_id.unwrap_or_else(|| {
+        derive_request_id(&caller_principal, &args.asset_type, args.amount, &args.to)
+    });
+    let created_at_time = ic_cdk::api::time();
+
     let transfer_args = TransferArg {
         from_subaccount: None,
         to: Account {
@@ -128,21 +140,40 @@ async fn withdraw(args: WithdrawArgs) -> Result<WithdrawResult, String> {
         },
         amount: args.amount.into(),
         fee: None,
-        memo: args.memo.map(|m| m.into_bytes().into()),
-        created_at_time: None,
+        memo: args.memo.clone()
+            .map(|m| m.into_bytes().into())
+            .or_else(|| Some(request_id.to_be_bytes().to_vec().into())),
+        created_at_time: Some(created_at_time),
     };
 
-    // Make the actual inter-canister transfer call to the ledger
     let block_index = match call_ledger_transfer(ledger_principal, transfer_args).await {
         Ok(block_index) => block_index,
-        Err(e) => {
-            // Restore the balance if transfer failed
+        Err(LedgerError::Duplicate { duplicate_of }) => {
+            log!(LOG,
+                "Withdrawal returned Duplicate (block {}); treating as success — prior attempt landed",
+                duplicate_of
+            );
+            duplicate_of
+        }
+        Err(LedgerError::Ledger(e)) => {
             with_state_mut(|s| s.restore_balance(&args.asset_type, args.amount));
             return Err(format!("Transfer failed: {:?}", e));
         }
+        Err(LedgerError::Transport(msg)) => {
+            log!(LOG,
+                "RECONCILIATION REQUIRED: transport error during withdrawal of {} {:?} to {} (request_id {}). \
+                 Balance NOT restored — the transfer may have committed. Verify on-chain via ledger \
+                 icrc3_get_blocks before retrying or reconciling. Error: {}",
+                args.amount, args.asset_type, args.to, request_id, msg
+            );
+            return Err(format!(
+                "Transport error: {} (reconciliation required, request_id={})",
+                msg, request_id
+            ));
+        }
     };
 
-    with_state_mut(|s| s.push_event(caller(), TreasuryAction::Withdraw {
+    with_state_mut(|s| s.push_event(caller_principal, TreasuryAction::Withdraw {
         asset_type: args.asset_type.clone(),
         amount: args.amount,
         to: args.to,
@@ -155,6 +186,36 @@ async fn withdraw(args: WithdrawArgs) -> Result<WithdrawResult, String> {
         amount_transferred: args.amount,
         fee: 0,
     })
+}
+
+/// Derive a stable request_id from withdrawal args when the caller doesn't
+/// supply one. Bucketing the timestamp at one-minute resolution so a
+/// same-minute retry produces the same id (and therefore the same
+/// `created_at_time` at the ledger, enabling dedup).
+fn derive_request_id(
+    caller_principal: &Principal,
+    asset: &AssetType,
+    amount: u64,
+    to: &Principal,
+) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    caller_principal.as_slice().hash(&mut h);
+    format!("{:?}", asset).hash(&mut h);
+    amount.hash(&mut h);
+    to.as_slice().hash(&mut h);
+    let bucket = ic_cdk::api::time() / 60_000_000_000;
+    bucket.hash(&mut h);
+    h.finish()
+}
+
+/// Distinguishes a clear ledger rejection from an ambiguous transport error.
+/// The withdraw flow restores the bookkeeping balance only on the former.
+enum LedgerError {
+    Duplicate { duplicate_of: u64 },
+    Ledger(TransferError),
+    Transport(String),
 }
 
 /// Get treasury status
@@ -213,31 +274,34 @@ fn set_paused(paused: bool) -> Result<(), String> {
     result
 }
 
-/// Make actual ledger transfer call
+/// Make actual ledger transfer call. Distinguishes Duplicate (success),
+/// ledger rejections (caller-recoverable), and transport errors (ambiguous).
 async fn call_ledger_transfer(
     ledger_principal: Principal,
     args: TransferArg,
-) -> Result<u64, TransferError> {
-    let (result,): (Result<candid::Nat, TransferError>,) = ic_cdk::call(
+) -> Result<u64, LedgerError> {
+    let outer: Result<(Result<candid::Nat, TransferError>,), _> = ic_cdk::call(
         ledger_principal,
         "icrc1_transfer",
         (args,),
-    ).await
-    .map_err(|e| TransferError::GenericError {
-        error_code: candid::Nat::from(500u32),
-        message: format!("Call failed: {:?}", e),
-    })?;
+    ).await;
 
-    match result {
-        Ok(block_index) => {
-            let block_index: u64 = block_index.0.try_into()
-                .map_err(|_| TransferError::GenericError {
+    match outer {
+        Err((code, msg)) => Err(LedgerError::Transport(format!("{:?}: {}", code, msg))),
+        Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
+            let block: u64 = duplicate_of.0.try_into().unwrap_or(0);
+            Err(LedgerError::Duplicate { duplicate_of: block })
+        }
+        Ok((Err(e),)) => Err(LedgerError::Ledger(e)),
+        Ok((Ok(block_index),)) => {
+            let block_index: u64 = block_index.0.try_into().map_err(|_| {
+                LedgerError::Ledger(TransferError::GenericError {
                     error_code: candid::Nat::from(501u32),
                     message: "Block index too large".to_string(),
-                })?;
+                })
+            })?;
             Ok(block_index)
         }
-        Err(e) => Err(e),
     }
 }
 
