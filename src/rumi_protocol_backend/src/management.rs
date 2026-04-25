@@ -4,15 +4,230 @@ use crate::StableTokenType;
 use candid::{Nat, Principal};
 use ic_xrc_types::{Asset, AssetClass, GetExchangeRateRequest, GetExchangeRateResult};
 use icrc_ledger_types::icrc1::account::Account;
-use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
+use icrc_ledger_types::icrc1::transfer::{Memo, TransferArg, TransferError};
 use icrc_ledger_types::icrc2::approve::{ApproveArgs, ApproveError};
 use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromError};
 use icrc_ledger_client_cdk::{CdkRuntime, ICRC1Client};
 use num_traits::ToPrimitive;
 use sha2::{Sha256, Digest};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::fmt;
 use crate::log;
 use crate::DEBUG;
+
+// ─── Wave-3 ICRC transfer hygiene helpers ───
+//
+// Audit-driven (`audit-reports/2026-04-22-28e9896` ICRC-001..005). Two pieces:
+//
+//   1. `transfer_idempotent` / `transfer_from_idempotent` set a deterministic
+//      `created_at_time` (derived from `op_nonce`) so the ledger can
+//      deduplicate retries, treat `Duplicate { duplicate_of }` as success
+//      (the previous attempt landed at that block index — not a failure),
+//      and refresh the fee cache on `BadFee`.
+//
+//   2. `cached_fee_for` / `refresh_fee_cache` give callers a fast read of
+//      the most recent ledger fee with a 10-minute TTL. The cache updates
+//      automatically when an idempotent transfer comes back BadFee.
+
+const FEE_CACHE_TTL_NS: u64 = 600_000_000_000; // 10 minutes
+
+thread_local! {
+    /// `ledger -> (fee, last_refresh_ns)`. Populated by `refresh_fee_cache`,
+    /// invalidated on `BadFee`, and queried by callers that need to size a
+    /// transfer (e.g., subtract the fee from the gross amount before sending).
+    static LEDGER_FEE_CACHE: RefCell<BTreeMap<Principal, (u64, u64)>> =
+        RefCell::new(BTreeMap::new());
+}
+
+/// Extract the `created_at_time` (nanoseconds since UNIX epoch) embedded in a
+/// nonce produced by `crate::state::next_op_nonce`. The upper 64 bits hold
+/// the timestamp captured at first issuance; the lower 64 bits hold a
+/// monotonic counter for collision resistance.
+pub fn nonce_to_created_at_time(op_nonce: u128) -> u64 {
+    (op_nonce >> 64) as u64
+}
+
+/// Encode an `op_nonce` as a 16-byte big-endian memo. Useful for explorer
+/// correlation and as a tie-breaker in the dedup tuple.
+pub fn nonce_to_memo(op_nonce: u128) -> Memo {
+    Memo::from(op_nonce.to_be_bytes().to_vec())
+}
+
+/// Read the cached fee for a ledger if it is fresh; otherwise return None.
+pub fn cached_fee_for(ledger: Principal) -> Option<u64> {
+    let now = ic_cdk::api::time();
+    LEDGER_FEE_CACHE.with(|c| {
+        let cache = c.borrow();
+        cache.get(&ledger).and_then(|(fee, ts)| {
+            if now.saturating_sub(*ts) < FEE_CACHE_TTL_NS {
+                Some(*fee)
+            } else {
+                None
+            }
+        })
+    })
+}
+
+/// Force-set the cache for a ledger (used internally on BadFee and by tests).
+pub fn set_cached_fee(ledger: Principal, fee: u64) {
+    LEDGER_FEE_CACHE.with(|c| {
+        c.borrow_mut().insert(ledger, (fee, ic_cdk::api::time()));
+    });
+}
+
+/// Query `icrc1_fee()` and update the cache. Returns the freshly-fetched fee.
+pub async fn refresh_fee_cache(ledger: Principal) -> Result<u64, String> {
+    let fee = get_ledger_fee(ledger).await?;
+    set_cached_fee(ledger, fee);
+    Ok(fee)
+}
+
+/// Convenience: return the cached fee if fresh, else fetch and cache it.
+pub async fn get_or_refresh_fee(ledger: Principal) -> Result<u64, String> {
+    if let Some(fee) = cached_fee_for(ledger) {
+        return Ok(fee);
+    }
+    refresh_fee_cache(ledger).await
+}
+
+/// Idempotent ICRC-1 transfer.
+///
+/// `op_nonce` MUST be stable across retries of the same logical operation
+/// (mint via `crate::state::next_op_nonce` once, persist alongside the
+/// pending record, reuse on every retry). The `created_at_time` is derived
+/// from `op_nonce` so the ledger's dedup tuple matches across retries.
+///
+/// Behaviour:
+///   * `Ok(block)` — transfer landed at `block`.
+///   * `Err(TransferError::Duplicate { duplicate_of })` is converted to
+///     `Ok(duplicate_of)` — the previous attempt already landed at that
+///     block, the operation succeeded (audit ICRC-003).
+///   * `Err(TransferError::BadFee { expected_fee })` updates the fee cache
+///     for `ledger` and propagates the error so the caller can retry with
+///     the fresh fee (audit ICRC-005).
+pub async fn transfer_idempotent(
+    ledger: Principal,
+    from_subaccount: Option<[u8; 32]>,
+    to: Account,
+    amount: u128,
+    op_nonce: u128,
+    memo: Option<Memo>,
+) -> Result<u64, TransferError> {
+    let created_at_time = nonce_to_created_at_time(op_nonce);
+    let memo = memo.unwrap_or_else(|| nonce_to_memo(op_nonce));
+
+    let client = ICRC1Client {
+        runtime: CdkRuntime,
+        ledger_canister_id: ledger,
+    };
+    let outer = client
+        .transfer(TransferArg {
+            from_subaccount,
+            to,
+            fee: None,
+            created_at_time: Some(created_at_time),
+            memo: Some(memo),
+            amount: Nat::from(amount),
+        })
+        .await;
+
+    handle_transfer_outcome(ledger, outer)
+}
+
+/// Idempotent ICRC-2 transfer_from. Same semantics as `transfer_idempotent`
+/// but for pull-based transfers (pre-approved spend).
+pub async fn transfer_from_idempotent(
+    ledger: Principal,
+    from: Account,
+    to: Account,
+    amount: u128,
+    op_nonce: u128,
+    memo: Option<Memo>,
+) -> Result<u64, TransferFromError> {
+    let created_at_time = nonce_to_created_at_time(op_nonce);
+    let memo = memo.unwrap_or_else(|| nonce_to_memo(op_nonce));
+
+    let client = ICRC1Client {
+        runtime: CdkRuntime,
+        ledger_canister_id: ledger,
+    };
+    let outer = client
+        .transfer_from(TransferFromArgs {
+            spender_subaccount: None,
+            from,
+            to,
+            amount: Nat::from(amount),
+            fee: None,
+            created_at_time: Some(created_at_time),
+            memo: Some(memo),
+        })
+        .await;
+
+    handle_transfer_from_outcome(ledger, outer)
+}
+
+fn handle_transfer_outcome(
+    ledger: Principal,
+    outer: Result<Result<Nat, TransferError>, (i32, String)>,
+) -> Result<u64, TransferError> {
+    match outer {
+        Ok(Ok(block)) => Ok(block.0.to_u64().unwrap_or(0)),
+        Ok(Err(TransferError::Duplicate { duplicate_of })) => {
+            let block = duplicate_of.0.to_u64().unwrap_or(0);
+            log!(DEBUG,
+                "[transfer_idempotent] ledger {} reported Duplicate; treating as success (block {})",
+                ledger, block
+            );
+            Ok(block)
+        }
+        Ok(Err(TransferError::BadFee { expected_fee })) => {
+            let fee = expected_fee.0.to_u64().unwrap_or(0);
+            log!(DEBUG,
+                "[transfer_idempotent] ledger {} returned BadFee (expected {}), refreshing cache",
+                ledger, fee
+            );
+            set_cached_fee(ledger, fee);
+            Err(TransferError::BadFee { expected_fee })
+        }
+        Ok(Err(other)) => Err(other),
+        Err((code, msg)) => Err(TransferError::GenericError {
+            error_code: Nat::from(code.max(0) as u64),
+            message: msg,
+        }),
+    }
+}
+
+fn handle_transfer_from_outcome(
+    ledger: Principal,
+    outer: Result<Result<Nat, TransferFromError>, (i32, String)>,
+) -> Result<u64, TransferFromError> {
+    match outer {
+        Ok(Ok(block)) => Ok(block.0.to_u64().unwrap_or(0)),
+        Ok(Err(TransferFromError::Duplicate { duplicate_of })) => {
+            let block = duplicate_of.0.to_u64().unwrap_or(0);
+            log!(DEBUG,
+                "[transfer_from_idempotent] ledger {} reported Duplicate; treating as success (block {})",
+                ledger, block
+            );
+            Ok(block)
+        }
+        Ok(Err(TransferFromError::BadFee { expected_fee })) => {
+            let fee = expected_fee.0.to_u64().unwrap_or(0);
+            log!(DEBUG,
+                "[transfer_from_idempotent] ledger {} returned BadFee (expected {}), refreshing cache",
+                ledger, fee
+            );
+            set_cached_fee(ledger, fee);
+            Err(TransferFromError::BadFee { expected_fee })
+        }
+        Ok(Err(other)) => Err(other),
+        Err((code, msg)) => Err(TransferFromError::GenericError {
+            error_code: Nat::from(code.max(0) as u64),
+            message: msg,
+        }),
+    }
+}
 
 /// Represents an error from a management canister call
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -425,100 +640,58 @@ async fn fetch_coingecko_price(coin_id: &str, vs_currency: &str) -> Option<f64> 
 }
 
 pub async fn mint_icusd(amount: ICUSD, to: Principal) -> Result<u64, TransferError> {
-    let client = ICRC1Client {
-        runtime: CdkRuntime,
-        ledger_canister_id: read_state(|s| s.icusd_ledger_principal),
-    };
-    let block_index = client
-        .transfer(TransferArg {
-            from_subaccount: None,
-            to: Account {
-                owner: to,
-                subaccount: None,
-            },
-            fee: None,
-            created_at_time: None,
-            memo: None,
-            amount: amount.to_nat(),
-        })
-        .await
-        .map_err(|e| TransferError::GenericError {
-            error_code: Nat::from(e.0.max(0) as u64), 
-            message: e.1,
-        })??;
-    
-    Ok(block_index.0.to_u64().unwrap())
+    let (ledger, op_nonce) = crate::state::mutate_state(|s| (s.icusd_ledger_principal, s.next_op_nonce()));
+    transfer_idempotent(
+        ledger,
+        None,
+        Account { owner: to, subaccount: None },
+        amount.to_u64() as u128,
+        op_nonce,
+        None,
+    )
+    .await
 }
 
 pub async fn transfer_icusd_from(amount: ICUSD, caller: Principal) -> Result<u64, TransferFromError> {
-    let client = ICRC1Client {
-        runtime: CdkRuntime,
-        ledger_canister_id: read_state(|s| s.icusd_ledger_principal),
-    };
+    let (ledger, op_nonce) = crate::state::mutate_state(|s| (s.icusd_ledger_principal, s.next_op_nonce()));
     let protocol_id = ic_cdk::id();
-    let block_index = client
-        .transfer_from(TransferFromArgs {
-            spender_subaccount: None,
-            from: Account {
-                owner: caller,
-                subaccount: None,
-            },
-            to: Account {
-                owner: protocol_id,
-                subaccount: None,
-            },
-            amount: amount.to_nat(),
-            fee: None,
-            created_at_time: None,
-            memo: None,
-        })
-        .await
-        .map_err(|e| TransferFromError::GenericError {
-            error_code: Nat::from(e.0.max(0) as u64), 
-            message: e.1,                            
-        })?;
-        
-    let nat = block_index.map_err(|e| e)?;
-    Ok(nat.0.to_u64().unwrap())
+    transfer_from_idempotent(
+        ledger,
+        Account { owner: caller, subaccount: None },
+        Account { owner: protocol_id, subaccount: None },
+        amount.to_u64() as u128,
+        op_nonce,
+        None,
+    )
+    .await
 }
 
 
-/// Thin wrapper around generic transfer_collateral_from for ICP.
+/// Thin wrapper around generic transfer_collateral_from for ICP. One-shot
+/// callers; retry-loop callers must use `transfer_collateral_from_with_nonce`.
 pub async fn transfer_icp_from(amount: ICP, caller: Principal) -> Result<u64, TransferFromError> {
     let ledger = read_state(|s| s.icp_ledger_principal);
     transfer_collateral_from(amount.to_u64(), caller, ledger).await
 }
 
-/// Thin wrapper around generic transfer_collateral for ICP.
+/// Thin wrapper around generic transfer_collateral for ICP. One-shot callers;
+/// retry-loop callers must use `transfer_collateral_with_nonce`.
 pub async fn transfer_icp(amount: ICP, to: Principal) -> Result<u64, TransferError> {
     let ledger = read_state(|s| s.icp_ledger_principal);
     transfer_collateral(amount.to_u64(), to, ledger).await
 }
 
 pub async fn transfer_icusd(amount: ICUSD, to: Principal) -> Result<u64, TransferError> {
-    let client = ICRC1Client {
-        runtime: CdkRuntime,
-        ledger_canister_id: read_state(|s| s.icusd_ledger_principal),
-    };
-    let block_index = client
-        .transfer(TransferArg {
-            from_subaccount: None,
-            to: Account {
-                owner: to,
-                subaccount: None,
-            },
-            fee: None,
-            created_at_time: None,
-            memo: None,
-            amount: amount.to_nat(),
-        })
-        .await
-        .map_err(|e| TransferError::GenericError {
-            error_code: Nat::from(e.0.max(0) as u64),
-            message: e.1,
-        })??;
-
-    Ok(block_index.0.to_u64().unwrap())
+    let (ledger, op_nonce) = crate::state::mutate_state(|s| (s.icusd_ledger_principal, s.next_op_nonce()));
+    transfer_idempotent(
+        ledger,
+        None,
+        Account { owner: to, subaccount: None },
+        amount.to_u64() as u128,
+        op_nonce,
+        None,
+    )
+    .await
 }
 
 /// Query the ICRC-1 transfer fee for a given ledger canister.
@@ -533,64 +706,51 @@ pub async fn get_ledger_fee(ledger: Principal) -> Result<u64, String> {
 
 /// Generic collateral transfer: move tokens from the protocol canister to a recipient.
 /// The `ledger` parameter is the ICRC-1 ledger canister ID of the collateral token.
+///
+/// One-shot variant: mints a fresh `op_nonce` per call. Use this for
+/// caller-initiated transfers that don't have a persistent retry record.
+/// For pending-transfer retry loops, use `transfer_collateral_with_nonce` and
+/// pass the nonce stored on the pending entry.
 pub async fn transfer_collateral(amount: u64, to: Principal, ledger: Principal) -> Result<u64, TransferError> {
-    let client = ICRC1Client {
-        runtime: CdkRuntime,
-        ledger_canister_id: ledger,
-    };
-    let block_index = client
-        .transfer(TransferArg {
-            from_subaccount: None,
-            to: Account {
-                owner: to,
-                subaccount: None,
-            },
-            fee: None,
-            created_at_time: None,
-            memo: None,
-            amount: Nat::from(amount),
-        })
-        .await
-        .map_err(|e| TransferError::GenericError {
-            error_code: Nat::from(e.0.max(0) as u64),
-            message: e.1,
-        })??;
+    let op_nonce = crate::state::mutate_state(|s| s.next_op_nonce());
+    transfer_collateral_with_nonce(amount, to, ledger, op_nonce).await
+}
 
-    Ok(block_index.0.to_u64().unwrap())
+/// Idempotent collateral transfer with a caller-supplied nonce. Retry-loop
+/// callers (process_pending_transfer, try_process_pending_transfers_immediate,
+/// schedule_transfer_retry) must persist the nonce alongside the pending entry
+/// and pass the same value on every retry so the ledger deduplicates.
+pub async fn transfer_collateral_with_nonce(
+    amount: u64,
+    to: Principal,
+    ledger: Principal,
+    op_nonce: u128,
+) -> Result<u64, TransferError> {
+    transfer_idempotent(
+        ledger,
+        None,
+        Account { owner: to, subaccount: None },
+        amount as u128,
+        op_nonce,
+        None,
+    )
+    .await
 }
 
 /// Generic collateral transfer_from: pull tokens from a user into the protocol canister.
 /// The `ledger` parameter is the ICRC-1 ledger canister ID of the collateral token.
 pub async fn transfer_collateral_from(amount: u64, from: Principal, ledger: Principal) -> Result<u64, TransferFromError> {
-    let client = ICRC1Client {
-        runtime: CdkRuntime,
-        ledger_canister_id: ledger,
-    };
+    let op_nonce = crate::state::mutate_state(|s| s.next_op_nonce());
     let protocol_id = ic_cdk::id();
-    let block_index = client
-        .transfer_from(TransferFromArgs {
-            spender_subaccount: None,
-            from: Account {
-                owner: from,
-                subaccount: None,
-            },
-            to: Account {
-                owner: protocol_id,
-                subaccount: None,
-            },
-            amount: Nat::from(amount),
-            fee: None,
-            created_at_time: None,
-            memo: None,
-        })
-        .await
-        .map_err(|e| TransferFromError::GenericError {
-            error_code: Nat::from(e.0.max(0) as u64),
-            message: e.1,
-        })?;
-
-    let nat = block_index.map_err(|e| e)?;
-    Ok(nat.0.to_u64().unwrap())
+    transfer_from_idempotent(
+        ledger,
+        Account { owner: from, subaccount: None },
+        Account { owner: protocol_id, subaccount: None },
+        amount as u128,
+        op_nonce,
+        None,
+    )
+    .await
 }
 
 /// Transfer ckUSDT or ckUSDC from a user to the protocol (for vault repayment/liquidation)
@@ -604,35 +764,17 @@ pub async fn transfer_stable_from(token_type: StableTokenType, amount_e6s: u64, 
         message: format!("{:?} ledger not configured", token_type),
     })?;
 
-    let client = ICRC1Client {
-        runtime: CdkRuntime,
-        ledger_canister_id: ledger_principal,
-    };
+    let op_nonce = crate::state::mutate_state(|s| s.next_op_nonce());
     let protocol_id = ic_cdk::id();
-    let block_index = client
-        .transfer_from(TransferFromArgs {
-            spender_subaccount: None,
-            from: Account {
-                owner: caller,
-                subaccount: None,
-            },
-            to: Account {
-                owner: protocol_id,
-                subaccount: None,
-            },
-            amount: Nat::from(amount_e6s),
-            fee: None,
-            created_at_time: None,
-            memo: None,
-        })
-        .await
-        .map_err(|e| TransferFromError::GenericError {
-            error_code: Nat::from(e.0.max(0) as u64),
-            message: e.1,
-        })?;
-
-    let nat = block_index.map_err(|e| e)?;
-    Ok(nat.0.to_u64().unwrap())
+    transfer_from_idempotent(
+        ledger_principal,
+        Account { owner: caller, subaccount: None },
+        Account { owner: protocol_id, subaccount: None },
+        amount_e6s as u128,
+        op_nonce,
+        None,
+    )
+    .await
 }
 
 /// Query the ICRC-1 balance of the protocol canister on any token ledger.
@@ -669,35 +811,20 @@ pub async fn transfer_3usd_to_reserves(
     from: Principal,
     amount: u64,
 ) -> Result<u64, TransferFromError> {
-    let client = ICRC1Client {
-        runtime: CdkRuntime,
-        ledger_canister_id: ledger,
-    };
+    let op_nonce = crate::state::mutate_state(|s| s.next_op_nonce());
     let protocol_id = ic_cdk::id();
-    let block_index = client
-        .transfer_from(TransferFromArgs {
-            spender_subaccount: None,
-            from: Account {
-                owner: from,
-                subaccount: None,
-            },
-            to: Account {
-                owner: protocol_id,
-                subaccount: Some(protocol_3usd_reserves_subaccount()),
-            },
-            amount: Nat::from(amount),
-            fee: None,
-            created_at_time: None,
-            memo: None,
-        })
-        .await
-        .map_err(|e| TransferFromError::GenericError {
-            error_code: Nat::from(e.0.max(0) as u64),
-            message: e.1,
-        })?;
-
-    let nat = block_index.map_err(|e| e)?;
-    Ok(nat.0.to_u64().unwrap())
+    transfer_from_idempotent(
+        ledger,
+        Account { owner: from, subaccount: None },
+        Account {
+            owner: protocol_id,
+            subaccount: Some(protocol_3usd_reserves_subaccount()),
+        },
+        amount as u128,
+        op_nonce,
+        None,
+    )
+    .await
 }
 
 // ─── Push-deposit helpers (Oisy wallet integration) ───
@@ -762,29 +889,21 @@ pub async fn sweep_deposit(
     }
 
     let transfer_amount = balance - ledger_fee;
+    let op_nonce = crate::state::mutate_state(|s| s.next_op_nonce());
 
-    let client = ICRC1Client {
-        runtime: CdkRuntime,
-        ledger_canister_id: ledger,
-    };
-
-    let block_index = client
-        .transfer(TransferArg {
-            from_subaccount: Some(subaccount),
-            to: Account {
-                owner: ic_cdk::id(),
-                subaccount: None,
-            },
-            fee: None,
-            created_at_time: None,
-            memo: None,
-            amount: Nat::from(transfer_amount),
-        })
-        .await
-        .map_err(|e| format!("sweep transfer call failed: {:?}", e))?
-        .map_err(|e| format!("sweep transfer error: {:?}", e))?;
-
-    let block_index_u64 = block_index.0.to_u64().unwrap_or(0);
+    let block_index_u64 = transfer_idempotent(
+        ledger,
+        Some(subaccount),
+        Account {
+            owner: ic_cdk::id(),
+            subaccount: None,
+        },
+        transfer_amount as u128,
+        op_nonce,
+        None,
+    )
+    .await
+    .map_err(|e| format!("sweep transfer error: {:?}", e))?;
 
     log!(DEBUG,
         "[sweep_deposit] Swept {} from subaccount for {} on ledger {} (block {})",
@@ -796,8 +915,15 @@ pub async fn sweep_deposit(
 
 /// Approve a spender to transfer icUSD from the protocol canister.
 /// Used by interest distribution to approve the 3pool for `donate`.
+///
+/// Sets `created_at_time` from a fresh nonce so the ledger can dedup, and
+/// treats `ApproveError::Duplicate { duplicate_of }` as success (the approve
+/// already landed at that block — same effective allowance).
 pub async fn approve_icusd(spender: Principal, amount: u64) -> Result<u64, ApproveError> {
-    let ledger = read_state(|s| s.icusd_ledger_principal);
+    let (ledger, op_nonce) = crate::state::mutate_state(|s| (s.icusd_ledger_principal, s.next_op_nonce()));
+    let created_at_time = nonce_to_created_at_time(op_nonce);
+    let memo = nonce_to_memo(op_nonce);
+
     let result: Result<(Result<Nat, ApproveError>,), _> = ic_cdk::call(
         ledger,
         "icrc2_approve",
@@ -808,12 +934,24 @@ pub async fn approve_icusd(spender: Principal, amount: u64) -> Result<u64, Appro
             expected_allowance: None,
             expires_at: None,
             fee: None,
-            created_at_time: None,
-            memo: None,
+            created_at_time: Some(created_at_time),
+            memo: Some(memo),
         },),
     ).await;
     match result {
         Ok((Ok(block_index),)) => Ok(block_index.0.to_u64().unwrap_or(0)),
+        Ok((Err(ApproveError::Duplicate { duplicate_of }),)) => {
+            log!(DEBUG,
+                "[approve_icusd] ledger {} reported Duplicate; treating as success (block {})",
+                ledger, duplicate_of
+            );
+            Ok(duplicate_of.0.to_u64().unwrap_or(0))
+        }
+        Ok((Err(ApproveError::BadFee { expected_fee }),)) => {
+            let fee = expected_fee.0.to_u64().unwrap_or(0);
+            set_cached_fee(ledger, fee);
+            Err(ApproveError::BadFee { expected_fee })
+        }
         Ok((Err(e),)) => Err(e),
         Err((code, msg)) => Err(ApproveError::GenericError {
             error_code: Nat::from(code as u64),

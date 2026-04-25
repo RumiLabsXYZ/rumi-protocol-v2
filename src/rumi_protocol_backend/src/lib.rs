@@ -754,10 +754,11 @@ pub(crate) async fn process_pending_transfer() {
             mutate_state(|s| { s.pending_margin_transfers.remove(&vault_id); });
             continue;
         }
-        match crate::management::transfer_collateral(
+        match crate::management::transfer_collateral_with_nonce(
             (transfer.margin - transfer_fee).to_u64(),
             transfer.owner,
             ledger,
+            transfer.op_nonce,
         )
         .await
         {
@@ -853,10 +854,11 @@ pub(crate) async fn process_pending_transfer() {
             mutate_state(|s| { s.pending_excess_transfers.remove(&vault_id); });
             continue;
         }
-        match crate::management::transfer_collateral(
+        match crate::management::transfer_collateral_with_nonce(
             (transfer.margin - transfer_fee).to_u64(),
             transfer.owner,
             ledger,
+            transfer.op_nonce,
         )
         .await
         {
@@ -879,21 +881,44 @@ pub(crate) async fn process_pending_transfer() {
                     ledger,
                     error
                 );
-                let retries = mutate_state(|s| {
-                    if let Some(t) = s.pending_excess_transfers.get_mut(&vault_id) {
-                        t.retry_count = t.retry_count.saturating_add(1);
-                        t.retry_count
-                    } else {
-                        0
+                if let TransferError::BadFee { expected_fee } = error {
+                    log!(INFO, "[transfering_excess] Updating transfer fee to: {:?}", expected_fee);
+                    mutate_state(|s| {
+                        let expected_fee_u64: u64 = expected_fee
+                            .0
+                            .try_into()
+                            .expect("failed to convert Nat to u64");
+                        if let Some(config) = s.get_collateral_config_mut(&transfer.collateral_type) {
+                            config.ledger_fee = expected_fee_u64;
+                        }
+                        let icp_ct = s.icp_collateral_type();
+                        let resolved_ct = if transfer.collateral_type == candid::Principal::anonymous() {
+                            icp_ct
+                        } else {
+                            transfer.collateral_type
+                        };
+                        if resolved_ct == icp_ct {
+                            s.icp_ledger_fee = ICP::from(expected_fee_u64);
+                        }
+                    });
+                    // Don't increment retry counter on BadFee — refresh fee, retry next tick.
+                } else {
+                    let retries = mutate_state(|s| {
+                        if let Some(t) = s.pending_excess_transfers.get_mut(&vault_id) {
+                            t.retry_count = t.retry_count.saturating_add(1);
+                            t.retry_count
+                        } else {
+                            0
+                        }
+                    });
+                    if retries >= MAX_PENDING_RETRIES {
+                        log!(INFO,
+                            "[transfering_excess] CRITICAL: abandoning excess transfer for vault {} \
+                             after {} retries. Owner: {}, amount: {}. Use recover_pending_transfer to retry manually.",
+                            vault_id, retries, transfer.owner, transfer.margin
+                        );
+                        mutate_state(|s| { s.pending_excess_transfers.remove(&vault_id); });
                     }
-                });
-                if retries >= MAX_PENDING_RETRIES {
-                    log!(INFO,
-                        "[transfering_excess] CRITICAL: abandoning excess transfer for vault {} \
-                         after {} retries. Owner: {}, amount: {}. Use recover_pending_transfer to retry manually.",
-                        vault_id, retries, transfer.owner, transfer.margin
-                    );
-                    mutate_state(|s| { s.pending_excess_transfers.remove(&vault_id); });
                 }
             }
         }
@@ -920,10 +945,11 @@ pub(crate) async fn process_pending_transfer() {
             mutate_state(|s| { s.pending_redemption_transfer.remove(&icusd_block_index); });
             continue;
         }
-        match crate::management::transfer_collateral(
+        match crate::management::transfer_collateral_with_nonce(
             (pending_transfer.margin - transfer_fee).to_u64(),
             pending_transfer.owner,
             ledger,
+            pending_transfer.op_nonce,
         )
         .await
         {
@@ -948,21 +974,44 @@ pub(crate) async fn process_pending_transfer() {
                     ledger,
                     error
                 );
-                let retries = mutate_state(|s| {
-                    if let Some(t) = s.pending_redemption_transfer.get_mut(&icusd_block_index) {
-                        t.retry_count = t.retry_count.saturating_add(1);
-                        t.retry_count
-                    } else {
-                        0
+                if let TransferError::BadFee { expected_fee } = error {
+                    log!(INFO, "[transfering_redemptions] Updating transfer fee to: {:?}", expected_fee);
+                    mutate_state(|s| {
+                        let expected_fee_u64: u64 = expected_fee
+                            .0
+                            .try_into()
+                            .expect("failed to convert Nat to u64");
+                        if let Some(config) = s.get_collateral_config_mut(&pending_transfer.collateral_type) {
+                            config.ledger_fee = expected_fee_u64;
+                        }
+                        let icp_ct = s.icp_collateral_type();
+                        let resolved_ct = if pending_transfer.collateral_type == candid::Principal::anonymous() {
+                            icp_ct
+                        } else {
+                            pending_transfer.collateral_type
+                        };
+                        if resolved_ct == icp_ct {
+                            s.icp_ledger_fee = ICP::from(expected_fee_u64);
+                        }
+                    });
+                    // Don't increment retry counter on BadFee — refresh fee, retry next tick.
+                } else {
+                    let retries = mutate_state(|s| {
+                        if let Some(t) = s.pending_redemption_transfer.get_mut(&icusd_block_index) {
+                            t.retry_count = t.retry_count.saturating_add(1);
+                            t.retry_count
+                        } else {
+                            0
+                        }
+                    });
+                    if retries >= MAX_PENDING_RETRIES {
+                        log!(INFO,
+                            "[transfering_redemptions] CRITICAL: abandoning redemption transfer {} \
+                             after {} retries. Owner: {}, amount: {}. Use recover_pending_transfer to retry manually.",
+                            icusd_block_index, retries, pending_transfer.owner, pending_transfer.margin
+                        );
+                        mutate_state(|s| { s.pending_redemption_transfer.remove(&icusd_block_index); });
                     }
-                });
-                if retries >= MAX_PENDING_RETRIES {
-                    log!(INFO,
-                        "[transfering_redemptions] CRITICAL: abandoning redemption transfer {} \
-                         after {} retries. Owner: {}, amount: {}. Use recover_pending_transfer to retry manually.",
-                        icusd_block_index, retries, pending_transfer.owner, pending_transfer.margin
-                    );
-                    mutate_state(|s| { s.pending_redemption_transfer.remove(&icusd_block_index); });
                 }
             }
         }

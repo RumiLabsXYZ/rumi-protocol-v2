@@ -1,4 +1,9 @@
 // ICRC-1 / ICRC-2 token transfer helpers for the Rumi 3pool.
+//
+// Audit Wave-3 (ICRC-003/004): every transfer now sets `created_at_time`
+// (so the ledger can dedup retries) and treats `Duplicate { duplicate_of }`
+// as success — the previous attempt landed at that block, so the operation
+// already succeeded.
 
 use candid::Principal;
 use icrc_ledger_types::icrc1::account::Account;
@@ -24,7 +29,7 @@ pub async fn transfer_from_user(
         amount: candid::Nat::from(amount),
         fee: None,
         memo: None,
-        created_at_time: None,
+        created_at_time: Some(ic_cdk::api::time()),
     };
 
     let result: Result<(Result<candid::Nat, TransferFromError>,), _> =
@@ -32,6 +37,13 @@ pub async fn transfer_from_user(
 
     match result {
         Ok((Ok(_block_index),)) => Ok(()),
+        Ok((Err(TransferFromError::Duplicate { duplicate_of }),)) => {
+            ic_cdk::println!(
+                "[transfer_from_user] ledger {} reported Duplicate (block {}); treating as success",
+                ledger, duplicate_of
+            );
+            Ok(())
+        }
         Ok((Err(e),)) => Err(format!("icrc2_transfer_from error: {:?}", e)),
         Err((code, msg)) => Err(format!(
             "inter-canister call failed: {:?} - {}",
@@ -55,7 +67,7 @@ pub async fn transfer_to_user(
         amount: candid::Nat::from(amount),
         fee: None,
         memo: None,
-        created_at_time: None,
+        created_at_time: Some(ic_cdk::api::time()),
     };
 
     let result: Result<(Result<candid::Nat, TransferError>,), _> =
@@ -63,6 +75,13 @@ pub async fn transfer_to_user(
 
     match result {
         Ok((Ok(_block_index),)) => Ok(()),
+        Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
+            ic_cdk::println!(
+                "[transfer_to_user] ledger {} reported Duplicate (block {}); treating as success",
+                ledger, duplicate_of
+            );
+            Ok(())
+        }
         Ok((Err(e),)) => Err(format!("icrc1_transfer error: {:?}", e)),
         Err((code, msg)) => Err(format!(
             "inter-canister call failed: {:?} - {}",

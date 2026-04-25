@@ -147,8 +147,18 @@ pub async fn return_collateral_to_backend(
         _,
     > = ic_cdk::call(collateral_ledger, "icrc1_transfer", (transfer_args,)).await;
 
+    use icrc_ledger_types::icrc1::transfer::TransferError;
     match result {
         Ok((Ok(_),)) => Ok(()),
+        // Audit Wave-3: a Duplicate response means the previous attempt landed.
+        Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
+            log!(
+                crate::INFO,
+                "[return_collateral_to_backend] ledger reported Duplicate (block {}); treating as success",
+                duplicate_of
+            );
+            Ok(())
+        }
         Ok((Err(e),)) => Err(format!("Transfer error: {:?}", e)),
         Err((code, msg)) => Err(format!("Transfer call failed: {:?} {}", code, msg)),
     }
@@ -183,8 +193,17 @@ pub async fn transfer_ckusdc_to_backend(
         _,
     > = ic_cdk::call(config.ckusdc_ledger, "icrc1_transfer", (transfer_args,)).await;
 
+    use icrc_ledger_types::icrc1::transfer::TransferError;
     match result {
         Ok((Ok(_),)) => Ok(send_amount),
+        Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
+            log!(
+                crate::INFO,
+                "[transfer_ckusdc_to_backend] ledger reported Duplicate (block {}); treating as success",
+                duplicate_of
+            );
+            Ok(send_amount)
+        }
         Ok((Err(e),)) => Err(format!("ckUSDC transfer error: {:?}", e)),
         Err((code, msg)) => Err(format!("ckUSDC transfer call failed: {:?} {}", code, msg)),
     }
@@ -218,9 +237,18 @@ pub async fn transfer_icp_to_treasury(
         _,
     > = ic_cdk::call(config.icp_ledger, "icrc1_transfer", (transfer_args,)).await;
 
+    use icrc_ledger_types::icrc1::transfer::TransferError;
     match result {
         Ok((Ok(_),)) => {
             log!(crate::INFO, "Transferred {} e8s ICP to treasury", send_amount);
+            Ok(())
+        }
+        Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
+            log!(
+                crate::INFO,
+                "[transfer_icp_to_treasury] ledger reported Duplicate (block {}); treating as success",
+                duplicate_of
+            );
             Ok(())
         }
         Ok((Err(e),)) => Err(format!("ICP transfer to treasury failed: {:?}", e)),

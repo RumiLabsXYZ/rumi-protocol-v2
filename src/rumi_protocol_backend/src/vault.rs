@@ -2094,6 +2094,7 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
         crate::storage::record_event(&event);
 
         // Create pending transfer for liquidator reward
+        let nonce = s.next_op_nonce();
         s.pending_margin_transfers.insert(
             vault_id,
             PendingMarginTransfer {
@@ -2101,6 +2102,7 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
                 margin: collateral_to_liquidator,
                 collateral_type: vault.collateral_type,
                 retry_count: 0,
+                op_nonce: nonce,
             },
         );
 
@@ -2332,6 +2334,7 @@ pub async fn liquidate_vault_partial_with_stable(
         crate::storage::record_event(&event);
 
         // Create pending transfer for liquidator reward
+        let nonce = s.next_op_nonce();
         s.pending_margin_transfers.insert(
             vault_id,
             PendingMarginTransfer {
@@ -2339,6 +2342,7 @@ pub async fn liquidate_vault_partial_with_stable(
                 margin: collateral_to_liquidator,
                 collateral_type: vault.collateral_type,
                 retry_count: 0,
+                op_nonce: nonce,
             },
         );
 
@@ -2546,6 +2550,7 @@ pub async fn liquidate_vault_debt_already_burned(
             s.protocol_3usd_reserves += three_usd_e8s;
         }
 
+        let nonce = s.next_op_nonce();
         s.pending_margin_transfers.insert(
             vault_id,
             PendingMarginTransfer {
@@ -2553,6 +2558,7 @@ pub async fn liquidate_vault_debt_already_burned(
                 margin: collateral_to_liquidator,
                 collateral_type: vault.collateral_type,
                 retry_count: 0,
+                op_nonce: nonce,
             },
         );
 
@@ -2741,6 +2747,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         crate::storage::record_event(&event);
 
         // Create pending transfer for liquidator reward (minus protocol cut)
+        let liquidator_nonce = s.next_op_nonce();
         s.pending_margin_transfers.insert(
             vault_id,
             PendingMarginTransfer {
@@ -2748,6 +2755,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
                 margin: collateral_to_liquidator,
                 collateral_type: vault.collateral_type,
                 retry_count: 0,
+                op_nonce: liquidator_nonce,
             },
         );
 
@@ -2755,6 +2763,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         // (only for full liquidations, not recovery partial)
         if !is_recovery_partial && excess_collateral > ICP::new(0) {
             log!(INFO, "[liquidate_vault] Scheduling excess collateral return to vault owner");
+            let excess_nonce = s.next_op_nonce();
             s.pending_excess_transfers.insert(
                 vault_id,
                 PendingMarginTransfer {
@@ -2762,6 +2771,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
                     margin: excess_collateral,
                     collateral_type: vault.collateral_type,
                     retry_count: 0,
+                    op_nonce: excess_nonce,
                 },
             );
         }
@@ -2873,7 +2883,7 @@ async fn try_process_pending_transfers_immediate(vault_id: u64) -> Result<u32, S
         log!(INFO, "[immediate_transfer] Processing {} transfer {} of {} collateral to {}",
              transfer_type, transfer_id, transfer_amount.to_u64(), transfer.owner);
 
-        match management::transfer_collateral(transfer_amount.to_u64(), transfer.owner, ledger_canister_id).await {
+        match management::transfer_collateral_with_nonce(transfer_amount.to_u64(), transfer.owner, ledger_canister_id, transfer.op_nonce).await {
             Ok(block_index) => {
                 log!(INFO, "[immediate_transfer] Transfer {} successful, block: {}", transfer_id, block_index);
 
@@ -3149,6 +3159,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         crate::storage::record_event(&event);
 
         // Create pending transfer for liquidator reward (minus protocol cut)
+        let nonce = s.next_op_nonce();
         s.pending_margin_transfers.insert(
             arg.vault_id,
             PendingMarginTransfer {
@@ -3156,6 +3167,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
                 margin: collateral_to_liquidator,
                 collateral_type: vault.collateral_type,
                 retry_count: 0,
+                op_nonce: nonce,
             },
         );
 

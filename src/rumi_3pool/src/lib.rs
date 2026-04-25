@@ -1899,6 +1899,13 @@ async fn burn_token_on_ledger(ledger: Principal, amount: u128) -> Result<u64, St
             let idx: u64 = block_index.0.try_into().unwrap_or(0);
             Ok(idx)
         }
+        Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
+            // Audit Wave-3: a Duplicate from the ledger means the burn already
+            // landed at `duplicate_of`. The corresponding tokens are already
+            // out of supply, so return success.
+            let idx: u64 = duplicate_of.0.try_into().unwrap_or(0);
+            Ok(idx)
+        }
         Ok((Err(e),)) => Err(format!("Transfer error: {:?}", e)),
         Err(e) => Err(format!("Call error: {:?}", e)),
     }

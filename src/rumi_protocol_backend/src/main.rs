@@ -340,6 +340,49 @@ fn post_upgrade(arg: ProtocolArg) {
         }
     });
 
+    // Wave-3 migration: backfill op_nonce on pending transfers carried over from
+    // pre-Wave-3 snapshots so their retries get ledger-side dedup. Without this,
+    // legacy entries stay at op_nonce: 0 (TooOld at the ledger) and never finish.
+    mutate_state(|s| {
+        let mut backfilled = 0u64;
+        let vault_ids: Vec<u64> = s.pending_margin_transfers.iter()
+            .filter(|(_, t)| t.op_nonce == 0)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in vault_ids {
+            let nonce = s.next_op_nonce();
+            if let Some(t) = s.pending_margin_transfers.get_mut(&id) {
+                t.op_nonce = nonce;
+                backfilled += 1;
+            }
+        }
+        let excess_ids: Vec<u64> = s.pending_excess_transfers.iter()
+            .filter(|(_, t)| t.op_nonce == 0)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in excess_ids {
+            let nonce = s.next_op_nonce();
+            if let Some(t) = s.pending_excess_transfers.get_mut(&id) {
+                t.op_nonce = nonce;
+                backfilled += 1;
+            }
+        }
+        let redemption_ids: Vec<u64> = s.pending_redemption_transfer.iter()
+            .filter(|(_, t)| t.op_nonce == 0)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in redemption_ids {
+            let nonce = s.next_op_nonce();
+            if let Some(t) = s.pending_redemption_transfer.get_mut(&id) {
+                t.op_nonce = nonce;
+                backfilled += 1;
+            }
+        }
+        if backfilled > 0 {
+            log!(INFO, "[upgrade]: backfilled op_nonce on {} legacy pending transfers (Wave-3 migration)", backfilled);
+        }
+    });
+
     // One-time: remove PHASMA test collateral and clean up empty vaults
     mutate_state(|s| {
         let phasma = candid::Principal::from_text("np5km-uyaaa-aaaaq-aadrq-cai").unwrap();
