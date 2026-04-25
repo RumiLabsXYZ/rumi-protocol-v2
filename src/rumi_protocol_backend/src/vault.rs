@@ -2096,7 +2096,7 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
         // Create pending transfer for liquidator reward
         let nonce = s.next_op_nonce();
         s.pending_margin_transfers.insert(
-            vault_id,
+            (vault_id, caller),
             PendingMarginTransfer {
                 owner: caller,
                 margin: collateral_to_liquidator,
@@ -2336,7 +2336,7 @@ pub async fn liquidate_vault_partial_with_stable(
         // Create pending transfer for liquidator reward
         let nonce = s.next_op_nonce();
         s.pending_margin_transfers.insert(
-            vault_id,
+            (vault_id, caller),
             PendingMarginTransfer {
                 owner: caller,
                 margin: collateral_to_liquidator,
@@ -2552,7 +2552,7 @@ pub async fn liquidate_vault_debt_already_burned(
 
         let nonce = s.next_op_nonce();
         s.pending_margin_transfers.insert(
-            vault_id,
+            (vault_id, caller),
             PendingMarginTransfer {
                 owner: caller,
                 margin: collateral_to_liquidator,
@@ -2749,7 +2749,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         // Create pending transfer for liquidator reward (minus protocol cut)
         let liquidator_nonce = s.next_op_nonce();
         s.pending_margin_transfers.insert(
-            vault_id,
+            (vault_id, caller),
             PendingMarginTransfer {
                 owner: caller,
                 margin: collateral_to_liquidator,
@@ -2765,7 +2765,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
             log!(INFO, "[liquidate_vault] Scheduling excess collateral return to vault owner");
             let excess_nonce = s.next_op_nonce();
             s.pending_excess_transfers.insert(
-                vault_id,
+                (vault_id, vault.owner),
                 PendingMarginTransfer {
                     owner: vault.owner,
                     margin: excess_collateral,
@@ -2839,25 +2839,29 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
 async fn try_process_pending_transfers_immediate(vault_id: u64) -> Result<u32, String> {
     let mut processed_count = 0;
 
-    // Get pending transfers for this liquidation
+    // Wave-4 LIQ-001: collect every pending margin/excess entry whose key matches
+    // this vault_id. Concurrent liquidators on the same vault each have their own
+    // (vault_id, owner) key, so we iterate rather than do a single point lookup.
     let transfers_to_process = read_state(|s| {
         let mut transfers = Vec::new();
 
-        // Primary transfer (liquidator reward)
-        if let Some(transfer) = s.pending_margin_transfers.get(&vault_id) {
-            transfers.push(("margin", vault_id, transfer.clone()));
+        for ((vid, owner), transfer) in s.pending_margin_transfers.iter() {
+            if *vid == vault_id {
+                transfers.push(("margin", *vid, *owner, transfer.clone()));
+            }
         }
 
-        // Excess collateral transfer (if exists)
-        if let Some(transfer) = s.pending_excess_transfers.get(&vault_id) {
-            transfers.push(("excess", vault_id, transfer.clone()));
+        for ((vid, owner), transfer) in s.pending_excess_transfers.iter() {
+            if *vid == vault_id {
+                transfers.push(("excess", *vid, *owner, transfer.clone()));
+            }
         }
 
         transfers
     });
 
     // Process each transfer
-    for (transfer_type, transfer_id, transfer) in transfers_to_process {
+    for (transfer_type, transfer_vault_id, transfer_owner, transfer) in transfers_to_process {
         // Look up per-collateral ledger fee and canister ID
         let (ledger_fee, ledger_canister_id) = read_state(|s| {
             match s.get_collateral_config(&transfer.collateral_type) {
@@ -2867,11 +2871,13 @@ async fn try_process_pending_transfers_immediate(vault_id: u64) -> Result<u32, S
         });
 
         if transfer.margin <= ledger_fee {
-            log!(INFO, "[immediate_transfer] Skipping {} transfer {} - margin {} <= fee {}, removing", transfer_type, transfer_id, transfer.margin.to_u64(), ledger_fee.to_u64());
+            log!(INFO, "[immediate_transfer] Skipping {} transfer {} owner {} - margin {} <= fee {}, removing",
+                transfer_type, transfer_vault_id, transfer_owner, transfer.margin.to_u64(), ledger_fee.to_u64());
             mutate_state(|s| {
+                let key = (transfer_vault_id, transfer_owner);
                 match transfer_type {
-                    "margin" => { s.pending_margin_transfers.remove(&transfer_id); },
-                    "excess" => { s.pending_excess_transfers.remove(&transfer_id); },
+                    "margin" => { s.pending_margin_transfers.remove(&key); },
+                    "excess" => { s.pending_excess_transfers.remove(&key); },
                     _ => {}
                 }
             });
@@ -2881,17 +2887,19 @@ async fn try_process_pending_transfers_immediate(vault_id: u64) -> Result<u32, S
         let transfer_amount = transfer.margin - ledger_fee;
 
         log!(INFO, "[immediate_transfer] Processing {} transfer {} of {} collateral to {}",
-             transfer_type, transfer_id, transfer_amount.to_u64(), transfer.owner);
+             transfer_type, transfer_vault_id, transfer_amount.to_u64(), transfer.owner);
 
         match management::transfer_collateral_with_nonce(transfer_amount.to_u64(), transfer.owner, ledger_canister_id, transfer.op_nonce).await {
             Ok(block_index) => {
-                log!(INFO, "[immediate_transfer] Transfer {} successful, block: {}", transfer_id, block_index);
+                log!(INFO, "[immediate_transfer] Transfer {} owner {} successful, block: {}",
+                    transfer_vault_id, transfer_owner, block_index);
 
                 // Remove from the appropriate pending map
                 mutate_state(|s| {
+                    let key = (transfer_vault_id, transfer_owner);
                     match transfer_type {
-                        "margin" => { s.pending_margin_transfers.remove(&transfer_id); },
-                        "excess" => { s.pending_excess_transfers.remove(&transfer_id); },
+                        "margin" => { s.pending_margin_transfers.remove(&key); },
+                        "excess" => { s.pending_excess_transfers.remove(&key); },
                         _ => {}
                     }
                 });
@@ -2899,13 +2907,14 @@ async fn try_process_pending_transfers_immediate(vault_id: u64) -> Result<u32, S
                 processed_count += 1;
             },
             Err(error) => {
-                log!(INFO, "[immediate_transfer] Transfer {} failed: {}. Will retry later", transfer_id, error);
+                log!(INFO, "[immediate_transfer] Transfer {} owner {} failed: {}. Will retry later",
+                    transfer_vault_id, transfer_owner, error);
                 // Leave in pending transfers for retry
-                return Err(format!("Transfer {} failed: {}", transfer_id, error));
+                return Err(format!("Transfer {} failed: {}", transfer_vault_id, error));
             }
         }
     }
-    
+
     Ok(processed_count)
 }
 
@@ -3161,7 +3170,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         // Create pending transfer for liquidator reward (minus protocol cut)
         let nonce = s.next_op_nonce();
         s.pending_margin_transfers.insert(
-            arg.vault_id,
+            (arg.vault_id, caller),
             PendingMarginTransfer {
                 owner: caller,
                 margin: collateral_to_liquidator,
