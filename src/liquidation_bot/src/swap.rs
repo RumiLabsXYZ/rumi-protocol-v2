@@ -42,8 +42,24 @@ pub async fn approve_infinite(
     }
 }
 
+/// Reject swaps when `icpswap_pool` is the anonymous-principal sentinel that
+/// `BotConfig` falls back to after a legacy-state migration where the field
+/// did not exist. Forces admin to call `set_config` with a real pool before
+/// any liquidation routes through ICPSwap.
+fn require_icpswap_pool_set(config: &BotConfig) -> Result<(), String> {
+    if config.icpswap_pool == Principal::anonymous() {
+        return Err(
+            "icpswap_pool not configured (defaulted from legacy migration). \
+             Admin must call set_config with a real ICPSwap pool principal."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Quote how much ckUSDC we'd get for `icp_amount_e8s` ICP.
 pub async fn quote_icp_for_ckusdc(config: &BotConfig, icp_amount_e8s: u64) -> Result<u64, String> {
+    require_icpswap_pool_set(config)?;
     let zero_for_one = config
         .icpswap_zero_for_one
         .ok_or("Pool ordering not configured. Call admin_resolve_pool_ordering first.")?;
@@ -58,6 +74,7 @@ pub async fn swap_icp_for_ckusdc(
     config: &BotConfig,
     icp_amount_e8s: u64,
 ) -> Result<SwapResult, String> {
+    require_icpswap_pool_set(config)?;
     let zero_for_one = config
         .icpswap_zero_for_one
         .ok_or("Pool ordering not configured. Call admin_resolve_pool_ordering first.")?;
