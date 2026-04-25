@@ -1923,6 +1923,11 @@ async fn bot_cancel_liquidation(vault_id: u64) -> Result<(), ProtocolError> {
 
 /// Developer-only: force the bot to claim a vault for liquidation regardless of health ratio.
 /// Bypasses CR checks but still uses the two-phase claim pattern.
+///
+/// Compiled out of the mainnet wasm via `cfg(feature = "test_endpoints")` (audit
+/// 2026-04-22-28e9896 Wave 2, AUTH-002). The runtime caller gate below remains
+/// for the test build that does enable the feature.
+#[cfg(feature = "test_endpoints")]
 #[candid_method(update)]
 #[update]
 async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, ProtocolError> {
@@ -2018,6 +2023,9 @@ async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, 
 /// Developer test: force a PARTIAL bot liquidation, bypassing the CR health check.
 /// Uses compute_partial_liquidation_cap to determine debt amount (same as bot_claim_liquidation)
 /// but skips the requirement that the vault be below the liquidation threshold.
+///
+/// Compiled out of the mainnet wasm via `cfg(feature = "test_endpoints")` (AUTH-002).
+#[cfg(feature = "test_endpoints")]
 #[candid_method(update)]
 #[update]
 async fn dev_force_partial_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, ProtocolError> {
@@ -2114,6 +2122,9 @@ async fn dev_force_partial_bot_liquidate(vault_id: u64) -> Result<BotLiquidation
 
 /// Developer test: force a vault to be liquidated by the stability pool, bypassing the bot.
 /// Calls the stability pool's notify_liquidatable_vaults with just this vault.
+///
+/// Compiled out of the mainnet wasm via `cfg(feature = "test_endpoints")` (AUTH-002).
+#[cfg(feature = "test_endpoints")]
 #[candid_method(update)]
 #[update]
 async fn dev_test_pool_only_liquidation(vault_id: u64) -> Result<String, ProtocolError> {
@@ -2176,6 +2187,9 @@ async fn dev_test_pool_only_liquidation(vault_id: u64) -> Result<String, Protoco
 
 /// Developer test: manually set the cached price for any collateral type.
 /// Bypasses XRC — useful for testing liquidation flows with synthetic assets.
+///
+/// Compiled out of the mainnet wasm via `cfg(feature = "test_endpoints")` (AUTH-002).
+#[cfg(feature = "test_endpoints")]
 #[candid_method(update)]
 #[update]
 async fn dev_set_collateral_price(collateral_type: Principal, price_usd: f64) -> Result<String, ProtocolError> {

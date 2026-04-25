@@ -150,15 +150,21 @@ pub fn opt_in_collateral(collateral_type: Principal) -> Result<(), StabilityPool
 // ─── Liquidation (Push + Fallback) ───
 
 /// Called by the backend to push liquidatable vault notifications.
+///
+/// Restricted to the registered protocol canister (audit 2026-04-22-28e9896
+/// Wave 2, AUTH-001 / SP-004 / DOS-009). Any other caller would otherwise
+/// be able to feed fabricated `LiquidatableVaultInfo` entries through the
+/// SP's liquidation pipeline (cycle DoS + event-log pollution + interaction
+/// with the per-token bookkeeping path), so the gate matches the pattern
+/// used by `receive_interest_revenue` below.
 #[update]
 pub async fn notify_liquidatable_vaults(vaults: Vec<LiquidatableVaultInfo>) -> Vec<LiquidationResult> {
-    // Optionally: validate caller is the protocol canister
     let caller = ic_cdk::api::caller();
     let expected = read_state(|s| s.protocol_canister_id);
     if caller != expected {
-        log!(INFO, "notify_liquidatable_vaults called by {} (expected {}). Allowing for now.",
+        log!(INFO, "notify_liquidatable_vaults: rejected caller {} (expected protocol {})",
             caller, expected);
-        // TODO: decide whether to enforce caller == protocol_canister_id
+        return Vec::new();
     }
     let vault_count = vaults.len() as u64;
     mutate_state(|s| s.push_event(caller, PoolEventType::LiquidationNotification { vault_count }));
