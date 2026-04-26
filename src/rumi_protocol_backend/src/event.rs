@@ -1118,7 +1118,12 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                 state.upgrade(upgrade_args);
             }
             Event::MarginTransfer { vault_id, .. } => {
-                state.pending_margin_transfers.remove(&vault_id);
+                // Wave-4 LIQ-001: pending_margin_transfers is keyed by (vault_id, owner).
+                // The MarginTransfer event predates that change and doesn't carry owner,
+                // so on replay we drop every entry matching the vault_id. This is
+                // semantically equivalent to the legacy single-slot remove because the
+                // pending map is rebuilt by live ops, not by replay.
+                state.pending_margin_transfers.retain(|(vid, _), _| *vid != vault_id);
             }
             Event::CollateralWithdrawn { vault_id, amount, .. } => {
                 // Zero the vault's collateral during replay so that if a
@@ -1592,13 +1597,13 @@ pub fn record_close_vault(state: &mut State, vault_id: u64, block_index: Option<
     state.close_vault(vault_id);
 }
 
-pub fn record_margin_transfer(state: &mut State, vault_id: u64, block_index: u64) {
+pub fn record_margin_transfer(state: &mut State, vault_id: u64, owner: Principal, block_index: u64) {
     record_event(&Event::MarginTransfer {
         vault_id,
         block_index,
         timestamp: Some(now()),
     });
-    state.pending_margin_transfers.remove(&vault_id);
+    state.pending_margin_transfers.remove(&(vault_id, owner));
 }
 
 pub fn record_borrow_from_vault(

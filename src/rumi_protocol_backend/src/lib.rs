@@ -718,6 +718,19 @@ pub fn compute_collateral_ratio(vault: &Vault, _rate: UsdIcp, state: &state::Sta
     margin_value / vault.borrowed_icusd_amount
 }
 
+/// Drop a single pending-transfer entry from its owning map. Wave-4 ICC-005:
+/// after LIQ-001's `(vault_id, owner)` re-keying, every pending entry has a
+/// unique key, so abandon-paths are uniform across margin / excess / redemption.
+/// This helper exists to make that uniformity legible (and to stop callers
+/// from ever drifting back to `retain` over a vault_id range, which would
+/// over-remove sibling liquidators' entries).
+fn drop_pending<K: std::cmp::Ord>(
+    map: &mut std::collections::BTreeMap<K, crate::state::PendingMarginTransfer>,
+    key: &K,
+) {
+    map.remove(key);
+}
+
 pub(crate) async fn process_pending_transfer() {
     let _guard = match crate::guard::TimerLogicGuard::new() {
         Some(guard) => guard,
@@ -728,19 +741,29 @@ pub(crate) async fn process_pending_transfer() {
     };
 
     // Process pending margin transfers
+    //
+    // Wave-3 + Wave-4 cleanup contract:
+    //   * Success: `record_margin_transfer` writes a MarginTransfer event AND
+    //     removes the entry by `(vault_id, owner)` (event.rs).
+    //   * Skipped (margin <= fee): `drop_pending` drops the entry inline.
+    //   * Abandon (>= MAX_PENDING_RETRIES): `drop_pending` drops the entry inline.
+    //   * BadFee: refresh fee cache, do NOT drop. The next tick retries.
+    // Excess and redemption loops follow the same contract; redemption uses
+    // its own event recorder with the same removal semantics.
     let pending_transfers = read_state(|s| {
         // Log for visibility
         if !s.pending_margin_transfers.is_empty() {
-            log!(INFO, "[process_pending_transfer] Found {} pending margin transfers", 
+            log!(INFO, "[process_pending_transfer] Found {} pending margin transfers",
                  s.pending_margin_transfers.len());
         }
-        
+
         s.pending_margin_transfers
             .iter()
-            .map(|(vault_id, margin_transfer)| (*vault_id, *margin_transfer))
-            .collect::<Vec<(u64, PendingMarginTransfer)>>()
+            .map(|(key, margin_transfer)| (*key, *margin_transfer))
+            .collect::<Vec<((u64, candid::Principal), PendingMarginTransfer)>>()
     });
-    for (vault_id, transfer) in pending_transfers {
+    for (key, transfer) in pending_transfers {
+        let (vault_id, _key_owner) = key;
         // Look up per-collateral config for ledger and fee; fall back to global ICP defaults
         let (ledger, transfer_fee) = read_state(|s| {
             match s.get_collateral_config(&transfer.collateral_type) {
@@ -750,8 +773,8 @@ pub(crate) async fn process_pending_transfer() {
         });
 
         if transfer.margin <= transfer_fee {
-            log!(INFO, "[transfering_margins] Skipping vault {} - margin {} <= fee {}, removing", vault_id, transfer.margin, transfer_fee);
-            mutate_state(|s| { s.pending_margin_transfers.remove(&vault_id); });
+            log!(INFO, "[transfering_margins] Skipping vault {} owner {} - margin {} <= fee {}, removing", vault_id, transfer.owner, transfer.margin, transfer_fee);
+            mutate_state(|s| drop_pending(&mut s.pending_margin_transfers, &key));
             continue;
         }
         match crate::management::transfer_collateral_with_nonce(
@@ -770,7 +793,7 @@ pub(crate) async fn process_pending_transfer() {
                     transfer.owner,
                     ledger
                 );
-                mutate_state(|s| crate::event::record_margin_transfer(s, vault_id, block_index));
+                mutate_state(|s| crate::event::record_margin_transfer(s, vault_id, transfer.owner, block_index));
             }
             Err(error) => {
                 // Improved error logging with more details
@@ -810,7 +833,7 @@ pub(crate) async fn process_pending_transfer() {
                 } else {
                     // Increment retry count; abandon after MAX_PENDING_RETRIES
                     let retries = mutate_state(|s| {
-                        if let Some(t) = s.pending_margin_transfers.get_mut(&vault_id) {
+                        if let Some(t) = s.pending_margin_transfers.get_mut(&key) {
                             t.retry_count = t.retry_count.saturating_add(1);
                             t.retry_count
                         } else {
@@ -823,10 +846,10 @@ pub(crate) async fn process_pending_transfer() {
                              after {} retries. Owner: {}, amount: {}. Use recover_pending_transfer to retry manually.",
                             vault_id, retries, transfer.owner, transfer.margin
                         );
-                        mutate_state(|s| { s.pending_margin_transfers.remove(&vault_id); });
+                        mutate_state(|s| drop_pending(&mut s.pending_margin_transfers, &key));
                     } else {
-                        log!(INFO, "[transfering_margins] Will retry transfer for vault {} (attempt {}/{})",
-                            vault_id, retries, MAX_PENDING_RETRIES);
+                        log!(INFO, "[transfering_margins] Will retry transfer for vault {} owner {} (attempt {}/{})",
+                            vault_id, transfer.owner, retries, MAX_PENDING_RETRIES);
                     }
                 }
             }
@@ -837,11 +860,12 @@ pub(crate) async fn process_pending_transfer() {
     let pending_excess = read_state(|s| {
         s.pending_excess_transfers
             .iter()
-            .map(|(vault_id, transfer)| (*vault_id, *transfer))
-            .collect::<Vec<(u64, PendingMarginTransfer)>>()
+            .map(|(key, transfer)| (*key, *transfer))
+            .collect::<Vec<((u64, candid::Principal), PendingMarginTransfer)>>()
     });
 
-    for (vault_id, transfer) in pending_excess {
+    for (key, transfer) in pending_excess {
+        let (vault_id, _key_owner) = key;
         let (ledger, transfer_fee) = read_state(|s| {
             match s.get_collateral_config(&transfer.collateral_type) {
                 Some(config) => (config.ledger_canister_id, ICP::from(config.ledger_fee)),
@@ -850,8 +874,8 @@ pub(crate) async fn process_pending_transfer() {
         });
 
         if transfer.margin <= transfer_fee {
-            log!(INFO, "[transfering_excess] Skipping vault {} - margin {} <= fee {}, removing", vault_id, transfer.margin, transfer_fee);
-            mutate_state(|s| { s.pending_excess_transfers.remove(&vault_id); });
+            log!(INFO, "[transfering_excess] Skipping vault {} owner {} - margin {} <= fee {}, removing", vault_id, transfer.owner, transfer.margin, transfer_fee);
+            mutate_state(|s| drop_pending(&mut s.pending_excess_transfers, &key));
             continue;
         }
         match crate::management::transfer_collateral_with_nonce(
@@ -870,7 +894,7 @@ pub(crate) async fn process_pending_transfer() {
                     transfer.owner,
                     ledger
                 );
-                mutate_state(|s| { s.pending_excess_transfers.remove(&vault_id); });
+                mutate_state(|s| drop_pending(&mut s.pending_excess_transfers, &key));
             }
             Err(error) => {
                 log!(
@@ -904,7 +928,7 @@ pub(crate) async fn process_pending_transfer() {
                     // Don't increment retry counter on BadFee — refresh fee, retry next tick.
                 } else {
                     let retries = mutate_state(|s| {
-                        if let Some(t) = s.pending_excess_transfers.get_mut(&vault_id) {
+                        if let Some(t) = s.pending_excess_transfers.get_mut(&key) {
                             t.retry_count = t.retry_count.saturating_add(1);
                             t.retry_count
                         } else {
@@ -917,7 +941,7 @@ pub(crate) async fn process_pending_transfer() {
                              after {} retries. Owner: {}, amount: {}. Use recover_pending_transfer to retry manually.",
                             vault_id, retries, transfer.owner, transfer.margin
                         );
-                        mutate_state(|s| { s.pending_excess_transfers.remove(&vault_id); });
+                        mutate_state(|s| drop_pending(&mut s.pending_excess_transfers, &key));
                     }
                 }
             }
@@ -942,7 +966,7 @@ pub(crate) async fn process_pending_transfer() {
 
         if pending_transfer.margin <= transfer_fee {
             log!(INFO, "[transfering_redemptions] Skipping redemption {} - margin {} <= fee {}, removing", icusd_block_index, pending_transfer.margin, transfer_fee);
-            mutate_state(|s| { s.pending_redemption_transfer.remove(&icusd_block_index); });
+            mutate_state(|s| drop_pending(&mut s.pending_redemption_transfer, &icusd_block_index));
             continue;
         }
         match crate::management::transfer_collateral_with_nonce(
@@ -1010,7 +1034,62 @@ pub(crate) async fn process_pending_transfer() {
                              after {} retries. Owner: {}, amount: {}. Use recover_pending_transfer to retry manually.",
                             icusd_block_index, retries, pending_transfer.owner, pending_transfer.margin
                         );
-                        mutate_state(|s| { s.pending_redemption_transfer.remove(&icusd_block_index); });
+                        mutate_state(|s| drop_pending(&mut s.pending_redemption_transfer, &icusd_block_index));
+                    }
+                }
+            }
+        }
+    }
+
+    // Wave-4 ICC-007: durable refund queue from `redeem_reserves` double-failures.
+    // Each entry is keyed by the original burn block index (unique). We drive the
+    // retry through `transfer_icusd_with_nonce` so the icUSD ledger deduplicates
+    // if a previous attempt's reply was lost.
+    let pending_refunds = read_state(|s| {
+        s.pending_refunds
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect::<Vec<(u64, crate::state::PendingRefund)>>()
+    });
+
+    for (icusd_block_index, refund) in pending_refunds {
+        match crate::management::transfer_icusd_with_nonce(
+            crate::numeric::ICUSD::new(refund.amount_e8s),
+            refund.user,
+            refund.op_nonce,
+        ).await {
+            Ok(block_index) => {
+                log!(INFO,
+                    "[refunding] icUSD refund settled for {} (burn block {}, refund block {}, amount {})",
+                    refund.user, icusd_block_index, block_index, refund.amount_e8s
+                );
+                mutate_state(|s| { s.pending_refunds.remove(&icusd_block_index); });
+            }
+            Err(error) => {
+                log!(INFO,
+                    "[refunding] icUSD refund failed for {} (burn block {}): {}. Will retry.",
+                    refund.user, icusd_block_index, error
+                );
+                if let TransferError::BadFee { expected_fee } = error {
+                    // Refresh fee cache; do NOT increment retry count on BadFee.
+                    if let Ok(expected_fee_u64) = expected_fee.0.clone().try_into() {
+                        let icusd_ledger = read_state(|s| s.icusd_ledger_principal);
+                        crate::management::set_cached_fee(icusd_ledger, expected_fee_u64);
+                    }
+                } else {
+                    let retries = mutate_state(|s| {
+                        if let Some(r) = s.pending_refunds.get_mut(&icusd_block_index) {
+                            r.retry_count = r.retry_count.saturating_add(1);
+                            r.retry_count
+                        } else { 0 }
+                    });
+                    if retries >= MAX_PENDING_RETRIES {
+                        log!(INFO,
+                            "[refunding] CRITICAL: abandoning icUSD refund for {} (burn block {}) \
+                             after {} retries. Amount: {}. Manual reconciliation required.",
+                            refund.user, icusd_block_index, retries, refund.amount_e8s
+                        );
+                        mutate_state(|s| { s.pending_refunds.remove(&icusd_block_index); });
                     }
                 }
             }
@@ -1019,7 +1098,10 @@ pub(crate) async fn process_pending_transfer() {
 
     // Schedule another run if needed, but with better timing
     if read_state(|s| {
-        !s.pending_margin_transfers.is_empty() || !s.pending_excess_transfers.is_empty() || !s.pending_redemption_transfer.is_empty()
+        !s.pending_margin_transfers.is_empty()
+            || !s.pending_excess_transfers.is_empty()
+            || !s.pending_redemption_transfer.is_empty()
+            || !s.pending_refunds.is_empty()
     }) {
         // Schedule another check in 5 seconds
         log!(INFO, "[process_pending_transfer] Scheduling another transfer attempt in 5 seconds");

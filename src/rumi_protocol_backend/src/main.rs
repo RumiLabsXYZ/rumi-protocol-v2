@@ -343,26 +343,31 @@ fn post_upgrade(arg: ProtocolArg) {
     // Wave-3 migration: backfill op_nonce on pending transfers carried over from
     // pre-Wave-3 snapshots so their retries get ledger-side dedup. Without this,
     // legacy entries stay at op_nonce: 0 (TooOld at the ledger) and never finish.
+    //
+    // Wave-4 LIQ-001: pending_margin_transfers and pending_excess_transfers are now
+    // keyed by (vault_id, owner). Legacy entries from pre-Wave-4 snapshots are
+    // re-keyed transparently by `state::deserialize_pending_keyed`, so by the time
+    // this block runs they already have tuple keys.
     mutate_state(|s| {
         let mut backfilled = 0u64;
-        let vault_ids: Vec<u64> = s.pending_margin_transfers.iter()
+        let margin_keys: Vec<(u64, candid::Principal)> = s.pending_margin_transfers.iter()
             .filter(|(_, t)| t.op_nonce == 0)
-            .map(|(id, _)| *id)
+            .map(|(k, _)| *k)
             .collect();
-        for id in vault_ids {
+        for k in margin_keys {
             let nonce = s.next_op_nonce();
-            if let Some(t) = s.pending_margin_transfers.get_mut(&id) {
+            if let Some(t) = s.pending_margin_transfers.get_mut(&k) {
                 t.op_nonce = nonce;
                 backfilled += 1;
             }
         }
-        let excess_ids: Vec<u64> = s.pending_excess_transfers.iter()
+        let excess_keys: Vec<(u64, candid::Principal)> = s.pending_excess_transfers.iter()
             .filter(|(_, t)| t.op_nonce == 0)
-            .map(|(id, _)| *id)
+            .map(|(k, _)| *k)
             .collect();
-        for id in excess_ids {
+        for k in excess_keys {
             let nonce = s.next_op_nonce();
-            if let Some(t) = s.pending_excess_transfers.get_mut(&id) {
+            if let Some(t) = s.pending_excess_transfers.get_mut(&k) {
                 t.op_nonce = nonce;
                 backfilled += 1;
             }
@@ -1218,10 +1223,91 @@ async fn stability_pool_liquidate_with_reserves(
         format!("Failed to pull 3USD from stability pool: {:?}", e)
     ))?;
 
-    // 3USD is now in our reserves subaccount — write down debt and release collateral
-    rumi_protocol_backend::vault::liquidate_vault_debt_already_burned(
+    // 3USD is now in our reserves subaccount, so write down debt and release collateral.
+    // Wave-4 ICC-002: if `liquidate_vault_debt_already_burned` returns Err after the
+    // pull above succeeded (vault closed mid-flight, paused, debt hit zero, etc.),
+    // the 3USD is stranded in our reserves subaccount and the SP's bookkeeping never
+    // got a chance to mark it consumed. Refund it so the SP's ledger balance and
+    // bookkeeping stay in sync.
+    match rumi_protocol_backend::vault::liquidate_vault_debt_already_burned(
         vault_id, icusd_debt_covered_e8s, caller, Some(three_usd_amount_e8s)
-    ).await
+    ).await {
+        Ok(success) => Ok(success),
+        Err(liq_error) => {
+            refund_3usd_to_stability_pool(
+                three_usd_ledger, caller, three_usd_amount_e8s, vault_id,
+            ).await;
+            Err(liq_error)
+        }
+    }
+}
+
+/// Refund a previously pulled 3USD amount from the protocol's reserves
+/// subaccount back to the stability pool. Used by `stability_pool_liquidate_with_reserves`
+/// when the second-stage backend call fails after `transfer_3usd_to_reserves`
+/// already moved tokens. Wave-4 ICC-002.
+///
+/// On success, logs the refund block index. On any failure (including BadFee or
+/// fee-too-large), logs CRITICAL so an operator can manually reconcile via
+/// `recover_pending_transfer` or a direct ICRC-1 transfer from the reserves
+/// subaccount. The refund itself uses Wave-3's idempotent transfer helper, so
+/// retries from the SP side won't double-credit even if the reply is dropped.
+async fn refund_3usd_to_stability_pool(
+    three_usd_ledger: Principal,
+    sp_caller: Principal,
+    amount_e8s: u64,
+    vault_id: u64,
+) {
+    use ic_canister_log::log;
+    use rumi_protocol_backend::logs::INFO;
+
+    let fee = match rumi_protocol_backend::management::get_or_refresh_fee(three_usd_ledger).await {
+        Ok(f) => f,
+        Err(e) => {
+            log!(INFO,
+                "[stability_pool_liquidate_with_reserves] CRITICAL: refund of {} 3USD for vault {} \
+                 to SP {} aborted (could not fetch ledger fee: {}). Tokens stranded in reserves; \
+                 use admin tools to reconcile.",
+                amount_e8s, vault_id, sp_caller, e
+            );
+            return;
+        }
+    };
+    if amount_e8s <= fee {
+        log!(INFO,
+            "[stability_pool_liquidate_with_reserves] CRITICAL: refund of {} 3USD for vault {} \
+             to SP {} aborted (amount does not cover ledger fee {}). Tokens stranded in reserves.",
+            amount_e8s, vault_id, sp_caller, fee
+        );
+        return;
+    }
+    let refund_amount = amount_e8s - fee;
+    let refund_nonce = mutate_state(|s| s.next_op_nonce());
+    let result = rumi_protocol_backend::management::transfer_idempotent(
+        three_usd_ledger,
+        Some(rumi_protocol_backend::management::protocol_3usd_reserves_subaccount()),
+        icrc_ledger_types::icrc1::account::Account { owner: sp_caller, subaccount: None },
+        refund_amount as u128,
+        refund_nonce,
+        None,
+    )
+    .await;
+    match result {
+        Ok(block) => {
+            log!(INFO,
+                "[stability_pool_liquidate_with_reserves] refunded {} 3USD (net of {} fee) to SP {} \
+                 for vault {} after liquidation rollback (block {})",
+                refund_amount, fee, sp_caller, vault_id, block
+            );
+        }
+        Err(e) => {
+            log!(INFO,
+                "[stability_pool_liquidate_with_reserves] CRITICAL: refund of {} 3USD for vault {} \
+                 to SP {} FAILED: {:?}. Tokens stranded in reserves; reconcile manually.",
+                refund_amount, vault_id, sp_caller, e
+            );
+        }
+    }
 }
 
 /// Cumulative 3USD held in protocol reserves from stability pool liquidations (e8s).
@@ -1514,29 +1600,15 @@ fn http_request(req: HttpRequest) -> HttpResponse {
 #[update]
 async fn recover_pending_transfer(vault_id: u64) -> Result<bool, ProtocolError> {
     let caller = ic_cdk::caller();
-    
-    // Validate the caller is the owner of this pending transfer (check both maps)
-    let is_owner = read_state(|s| {
-        s.pending_margin_transfers
-            .get(&vault_id)
-            .map(|transfer| transfer.owner == caller)
-            .unwrap_or(false)
-        || s.pending_excess_transfers
-            .get(&vault_id)
-            .map(|transfer| transfer.owner == caller)
-            .unwrap_or(false)
-    });
 
-    if !is_owner {
-        return Err(ProtocolError::CallerNotOwner);
-    }
-
-    // Process the pending transfer immediately (check margin map first, then excess)
+    // Wave-4 LIQ-001: pending_margin_transfers and pending_excess_transfers are
+    // keyed by (vault_id, owner). Look up the entry that belongs to the caller.
+    let key = (vault_id, caller);
     let transfer_info = read_state(|s| {
-        if let Some(t) = s.pending_margin_transfers.get(&vault_id).cloned() {
+        if let Some(t) = s.pending_margin_transfers.get(&key).cloned() {
             Some(("margin", t))
         } else {
-            s.pending_excess_transfers.get(&vault_id).cloned().map(|t| ("excess", t))
+            s.pending_excess_transfers.get(&key).cloned().map(|t| ("excess", t))
         }
     });
 
@@ -1553,8 +1625,8 @@ async fn recover_pending_transfer(vault_id: u64) -> Result<bool, ProtocolError> 
             // Margin too small to cover fee — clean it up
             mutate_state(|s| {
                 match source {
-                    "margin" => { s.pending_margin_transfers.remove(&vault_id); },
-                    _ => { s.pending_excess_transfers.remove(&vault_id); },
+                    "margin" => { s.pending_margin_transfers.remove(&key); },
+                    _ => { s.pending_excess_transfers.remove(&key); },
                 }
             });
             return Err(ProtocolError::GenericError(
@@ -1572,8 +1644,8 @@ async fn recover_pending_transfer(vault_id: u64) -> Result<bool, ProtocolError> 
             Ok(block_index) => {
                 mutate_state(|s| {
                     match source {
-                        "margin" => { event::record_margin_transfer(s, vault_id, block_index); },
-                        _ => { s.pending_excess_transfers.remove(&vault_id); },
+                        "margin" => { event::record_margin_transfer(s, vault_id, caller, block_index); },
+                        _ => { s.pending_excess_transfers.remove(&key); },
                     }
                 });
                 Ok(true)
@@ -1590,7 +1662,7 @@ async fn recover_pending_transfer(vault_id: u64) -> Result<bool, ProtocolError> 
             }
         }
     } else {
-        // No pending transfer found for this vault
+        // No pending transfer found for this caller + vault
         Err(ProtocolError::GenericError("No pending transfer found for this vault".to_string()))
     }
 }
