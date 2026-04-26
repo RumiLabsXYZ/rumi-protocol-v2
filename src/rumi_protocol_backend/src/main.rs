@@ -107,6 +107,37 @@ fn validate_price_for_liquidation() -> Result<(), ProtocolError> {
     read_state(|s| s.check_price_not_too_old())
 }
 
+/// Wave-5 LIQ-007: emergency brake for liquidations. Decoupled from `validate_mode`
+/// because ReadOnly auto-latches on TCR < 100% and liquidations should remain open
+/// in that state (they reduce bad debt). `liquidation_frozen` is the explicit
+/// admin switch to halt liquidations during a confirmed oracle/dependency outage
+/// where liquidating against the cached price would be unsafe.
+fn validate_liquidation_not_frozen() -> Result<(), ProtocolError> {
+    if read_state(|s| s.liquidation_frozen) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "Liquidations are currently frozen by admin.".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Wave-5 LIQ-006: refresh the cached price for a vault's collateral type before
+/// a liquidation runs. `validate_price_for_liquidation` only checks the ICP
+/// timestamp; for non-ICP vaults the cached `last_price` could be arbitrarily
+/// stale if that collateral's background fetch has been failing. Looks up
+/// `vault.collateral_type` via a small read_state, then awaits the on-demand
+/// fetch. If the vault doesn't exist, we let the downstream call surface its
+/// own `Vault not found` error rather than masking it here.
+async fn validate_freshness_for_vault(vault_id: u64) -> Result<(), ProtocolError> {
+    let collateral_type = read_state(|s| {
+        s.vault_id_to_vaults.get(&vault_id).map(|v| v.collateral_type)
+    });
+    match collateral_type {
+        Some(ct) => rumi_protocol_backend::xrc::ensure_fresh_price_for(&ct).await,
+        None => Ok(()),
+    }
+}
+
 /// Pre-filter to reduce cycle waste from anonymous spam.
 /// Runs on ONE replica without consensus. Can be bypassed by malicious nodes.
 /// NOT a security boundary — all real access control is inside each #[update] method.
@@ -894,6 +925,13 @@ async fn redeem_icp(icusd_amount: u64) -> Result<SuccessWithFee, ProtocolError> 
 #[update]
 async fn redeem_collateral(collateral_type: Principal, icusd_amount: u64) -> Result<SuccessWithFee, ProtocolError> {
     validate_call().await?;
+    // Wave-5 RED-001: validate_call only refreshes ICP. For non-ICP collaterals
+    // (BOB, EXE, ckBTC, ckETH, ckXAUT, nICP) the redeemer would otherwise pay
+    // out at whatever last_price is cached, which could be hours stale if the
+    // background timer for that asset has been failing. ensure_fresh_price_for
+    // delegates to ensure_fresh_price for ICP (already handled), so this is
+    // safe to call unconditionally.
+    rumi_protocol_backend::xrc::ensure_fresh_price_for(&collateral_type).await?;
     check_postcondition(rumi_protocol_backend::vault::redeem_collateral(collateral_type, icusd_amount).await)
 }
 
@@ -1024,7 +1062,9 @@ async fn withdraw_and_close_vault(vault_id: u64) -> Result<Option<u64>, Protocol
 #[update]
 async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolError> {
     validate_call().await?;
+    validate_liquidation_not_frozen()?;
     validate_price_for_liquidation()?;
+    validate_freshness_for_vault(vault_id).await?;
     check_postcondition(rumi_protocol_backend::vault::liquidate_vault(vault_id).await)
 }
 
@@ -1041,7 +1081,9 @@ async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
 #[update]
 async fn liquidate_vault_partial(arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {
     validate_call().await?;
+    validate_liquidation_not_frozen()?;
     validate_price_for_liquidation()?;
+    validate_freshness_for_vault(arg.vault_id).await?;
     check_postcondition(rumi_protocol_backend::vault::liquidate_vault_partial(arg.vault_id, arg.amount).await)
 }
 
@@ -1050,7 +1092,9 @@ async fn liquidate_vault_partial(arg: VaultArg) -> Result<SuccessWithFee, Protoc
 #[candid_method(update)]
 async fn liquidate_vault_partial_with_stable(arg: VaultArgWithToken) -> Result<SuccessWithFee, ProtocolError> {
     validate_call().await?;
+    validate_liquidation_not_frozen()?;
     validate_price_for_liquidation()?;
+    validate_freshness_for_vault(arg.vault_id).await?;
     check_postcondition(rumi_protocol_backend::vault::liquidate_vault_partial_with_stable(arg.vault_id, arg.amount, arg.token_type).await)
 }
 
@@ -1059,7 +1103,9 @@ async fn liquidate_vault_partial_with_stable(arg: VaultArgWithToken) -> Result<S
 #[candid_method(update)]
 async fn stability_pool_liquidate(vault_id: u64, max_debt_to_liquidate: u64) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
     validate_call().await?;
+    validate_liquidation_not_frozen()?;
     validate_price_for_liquidation()?;
+    validate_freshness_for_vault(vault_id).await?;
     let caller = ic_cdk::api::caller();
 
     // Authorization: only the registered stability pool canister can call this
@@ -1138,7 +1184,9 @@ async fn stability_pool_liquidate_debt_burned(
     icusd_burned_e8s: u64,
 ) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
     validate_call().await?;
+    validate_liquidation_not_frozen()?;
     validate_price_for_liquidation()?;
+    validate_freshness_for_vault(vault_id).await?;
     let caller = ic_cdk::api::caller();
 
     let is_stability_pool = read_state(|s| {
@@ -1166,7 +1214,9 @@ async fn stability_pool_liquidate_with_reserves(
     three_usd_ledger: Principal,
 ) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
     validate_call().await?;
+    validate_liquidation_not_frozen()?;
     validate_price_for_liquidation()?;
+    validate_freshness_for_vault(vault_id).await?;
     let caller = ic_cdk::api::caller();
 
     let is_stability_pool = read_state(|s| {
@@ -1335,7 +1385,9 @@ fn get_stability_pool_config() -> StabilityPoolConfig {
 #[update]
 async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {
     validate_call().await?;
+    validate_liquidation_not_frozen()?;
     validate_price_for_liquidation()?;
+    validate_freshness_for_vault(arg.vault_id).await?;
     check_postcondition(rumi_protocol_backend::vault::partial_liquidate_vault(arg).await)
 }
 
@@ -2812,6 +2864,33 @@ fn unfreeze_protocol() -> Result<(), ProtocolError> {
         log!(INFO, "[admin] protocol UNFROZEN — operations resumed");
     });
     Ok(())
+}
+
+/// Wave-5 LIQ-007: toggle the liquidation kill switch. When true, all
+/// liquidation endpoints reject with TemporarilyUnavailable. Independent of
+/// `frozen` (which halts everything) and `Mode::ReadOnly` (which auto-latches
+/// on TCR < 100% but lets liquidations through). Use during a confirmed oracle
+/// outage where liquidating against the cached price would be unsafe.
+#[candid_method(update)]
+#[update]
+fn set_liquidation_frozen(frozen: bool) -> Result<(), ProtocolError> {
+    require_controller()?;
+    mutate_state(|s| {
+        s.liquidation_frozen = frozen;
+        log!(
+            INFO,
+            "[admin] liquidation_frozen set to {}",
+            frozen
+        );
+    });
+    Ok(())
+}
+
+/// Wave-5 LIQ-007: read the liquidation kill switch state.
+#[candid_method(query)]
+#[query]
+fn get_liquidation_frozen() -> bool {
+    read_state(|s| s.liquidation_frozen)
 }
 
 // ── End admin safety functions ────────────────────────────────────────────────

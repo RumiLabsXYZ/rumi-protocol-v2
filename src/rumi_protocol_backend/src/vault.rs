@@ -338,6 +338,11 @@ pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Prin
                 .copied()
                 .unwrap_or_else(|| s.icp_collateral_type())
         });
+        // Wave-5 RED-001: spillover redeems against the best-priority collateral,
+        // which may be non-ICP. validate_call only refreshes ICP. Refresh the
+        // spillover collateral's price on-demand so the redeemer can't capture a
+        // stale price during the 300s background-timer window.
+        crate::xrc::ensure_fresh_price_for(&best_ct).await?;
         let collateral_price = read_state(|s| s.get_collateral_price_decimal(&best_ct))
             .ok_or(ProtocolError::TemporarilyUnavailable("No price for vault spillover collateral".to_string()))?;
         let current_price = UsdIcp::from(collateral_price);
