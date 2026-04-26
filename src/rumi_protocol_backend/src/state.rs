@@ -529,9 +529,28 @@ pub struct PendingMarginTransfer {
     /// Wave-3 ICRC dedup nonce. Constructed once at first attempt via
     /// `State::next_op_nonce`; reused on every retry so the ledger sees the
     /// same `created_at_time` and deduplicates instead of double-spending.
-    /// Zero for entries from snapshots written before Wave-3 — those retry
-    /// without dedup (the prior behaviour, no regression).
+    /// Zero for entries from snapshots written before Wave-3 (those retry
+    /// without dedup, matching prior behaviour, no regression).
     #[serde(default)]
+    pub op_nonce: u128,
+}
+
+/// Wave-4 ICC-007: durable refund record for `redeem_reserves` failures.
+///
+/// When a reserve redemption pulls icUSD from the user (effectively burning it)
+/// but the ckStable transfer back fails AND the inline icUSD refund also fails,
+/// the user is left with nothing. Pre-Wave-4 the only recovery path was a
+/// CRITICAL log. Now the failure persists a `PendingRefund` keyed by the burn
+/// block index, and `process_pending_transfer` retries it until success or
+/// MAX_PENDING_RETRIES. The `op_nonce` is minted once and reused across retries
+/// so the icUSD ledger deduplicates if a previous retry's reply was lost.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize, Copy)]
+pub struct PendingRefund {
+    pub user: Principal,
+    /// icUSD amount to refund (in e8s).
+    pub amount_e8s: u64,
+    #[serde(default)]
+    pub retry_count: u8,
     pub op_nonce: u128,
 }
 
@@ -609,6 +628,10 @@ pub struct State {
     #[serde(deserialize_with = "deserialize_pending_keyed")]
     pub pending_excess_transfers: BTreeMap<(VaultId, Principal), PendingMarginTransfer>,
     pub pending_redemption_transfer: BTreeMap<u64, PendingMarginTransfer>,
+    /// Wave-4 ICC-007: durable refund queue for `redeem_reserves` failures,
+    /// keyed by the burn icUSD block index. Empty for pre-Wave-4 snapshots.
+    #[serde(default)]
+    pub pending_refunds: BTreeMap<u64, PendingRefund>,
     pub mode: Mode,
     pub fee: Ratio,
     pub developer_principal: Principal,
@@ -801,6 +824,7 @@ impl Default for State {
             pending_margin_transfers: BTreeMap::new(),
             pending_excess_transfers: BTreeMap::new(),
             pending_redemption_transfer: BTreeMap::new(),
+            pending_refunds: BTreeMap::new(),
             mode: Mode::default(),
             fee: Ratio::from(Decimal::ZERO),
             developer_principal: Principal::anonymous(),
@@ -898,6 +922,7 @@ impl From<InitArg> for State {
             developer_principal: args.developer_principal,
             principal_to_vault_ids: BTreeMap::new(),
             pending_redemption_transfer: BTreeMap::new(),
+            pending_refunds: BTreeMap::new(),
             vault_id_to_vaults: BTreeMap::new(),
             xrc_principal: args.xrc_principal,
             icusd_ledger_principal: args.icusd_ledger_principal,

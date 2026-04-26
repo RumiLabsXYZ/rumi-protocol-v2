@@ -255,17 +255,22 @@ pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Prin
         .map_err(|e| ProtocolError::TransferFromError(e, icusd_amount.to_u64()))?;
 
     // Transfer ckStable to user from reserves.
-    // CRITICAL: If this fails we MUST refund the icUSD — otherwise the user
+    // CRITICAL: If this fails we MUST refund the icUSD, otherwise the user
     // loses funds with nothing received. ICP inter-canister calls are NOT
     // atomic, so we implement the saga/compensation pattern manually.
+    //
+    // Wave-4 ICC-007: if the inline refund itself fails, persist a
+    // `PendingRefund` keyed by `icusd_block_index`; `process_pending_transfer`
+    // retries it until success or MAX_PENDING_RETRIES. The op_nonce is minted
+    // once and reused across retries (idempotent at the icUSD ledger).
     if available_for_user > 0 {
         if let Err(transfer_err) = management::transfer_collateral(available_for_user, caller, stable_ledger).await {
             log!(crate::INFO,
                 "[redeem_reserves] ckStable transfer failed for {}: {:?}. Refunding {} icUSD.",
                 caller, transfer_err, icusd_amount.to_u64()
             );
-            // Attempt to refund icUSD (minus ledger fee which is deducted by the ledger)
-            match management::transfer_icusd(icusd_amount, caller).await {
+            let refund_nonce = mutate_state(|s| s.next_op_nonce());
+            match management::transfer_icusd_with_nonce(icusd_amount, caller, refund_nonce).await {
                 Ok(refund_block) => {
                     log!(crate::INFO,
                         "[redeem_reserves] Refunded {} icUSD to {} (block {})",
@@ -273,18 +278,30 @@ pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Prin
                     );
                 }
                 Err(refund_err) => {
-                    // Both the ckStable send AND the refund failed.
-                    // Log a critical error — admin must manually resolve.
                     log!(crate::INFO,
-                        "[redeem_reserves] CRITICAL: ckStable transfer failed AND icUSD refund failed for {}! \
-                         Amount: {} icUSD. ckStable error: {:?}. Refund error: {:?}. \
-                         Manual intervention required.",
-                        caller, icusd_amount.to_u64(), transfer_err, refund_err
+                        "[redeem_reserves] ckStable transfer failed AND inline icUSD refund failed for {}! \
+                         Amount: {} icUSD, ckStable error: {:?}, refund error: {:?}. \
+                         Enqueueing durable refund (block {}).",
+                        caller, icusd_amount.to_u64(), transfer_err, refund_err, icusd_block_index
                     );
+                    mutate_state(|s| {
+                        s.pending_refunds.insert(
+                            icusd_block_index,
+                            crate::state::PendingRefund {
+                                user: caller,
+                                amount_e8s: icusd_amount.to_u64(),
+                                retry_count: 0,
+                                op_nonce: refund_nonce,
+                            },
+                        );
+                    });
+                    ic_cdk_timers::set_timer(std::time::Duration::from_secs(2), || {
+                        ic_cdk::spawn(crate::process_pending_transfer())
+                    });
                 }
             }
             return Err(ProtocolError::GenericError(
-                format!("Reserve transfer failed — your icUSD has been refunded. Error: {:?}", transfer_err),
+                format!("Reserve transfer failed; your icUSD refund is in flight. Error: {:?}", transfer_err),
             ));
         }
     }

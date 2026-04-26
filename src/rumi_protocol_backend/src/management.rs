@@ -694,6 +694,22 @@ pub async fn transfer_icusd(amount: ICUSD, to: Principal) -> Result<u64, Transfe
     .await
 }
 
+/// Idempotent icUSD transfer with a caller-supplied op_nonce. Wave-4 ICC-007:
+/// used by the durable refund queue so retries reuse the same dedup tuple at
+/// the icUSD ledger across canister upgrades.
+pub async fn transfer_icusd_with_nonce(amount: ICUSD, to: Principal, op_nonce: u128) -> Result<u64, TransferError> {
+    let ledger = crate::state::read_state(|s| s.icusd_ledger_principal);
+    transfer_idempotent(
+        ledger,
+        None,
+        Account { owner: to, subaccount: None },
+        amount.to_u64() as u128,
+        op_nonce,
+        None,
+    )
+    .await
+}
+
 /// Query the ICRC-1 transfer fee for a given ledger canister.
 pub async fn get_ledger_fee(ledger: Principal) -> Result<u64, String> {
     let client = ICRC1Client {

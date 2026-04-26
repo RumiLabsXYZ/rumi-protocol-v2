@@ -1041,9 +1041,67 @@ pub(crate) async fn process_pending_transfer() {
         }
     }
 
+    // Wave-4 ICC-007: durable refund queue from `redeem_reserves` double-failures.
+    // Each entry is keyed by the original burn block index (unique). We drive the
+    // retry through `transfer_icusd_with_nonce` so the icUSD ledger deduplicates
+    // if a previous attempt's reply was lost.
+    let pending_refunds = read_state(|s| {
+        s.pending_refunds
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect::<Vec<(u64, crate::state::PendingRefund)>>()
+    });
+
+    for (icusd_block_index, refund) in pending_refunds {
+        match crate::management::transfer_icusd_with_nonce(
+            crate::numeric::ICUSD::new(refund.amount_e8s),
+            refund.user,
+            refund.op_nonce,
+        ).await {
+            Ok(block_index) => {
+                log!(INFO,
+                    "[refunding] icUSD refund settled for {} (burn block {}, refund block {}, amount {})",
+                    refund.user, icusd_block_index, block_index, refund.amount_e8s
+                );
+                mutate_state(|s| { s.pending_refunds.remove(&icusd_block_index); });
+            }
+            Err(error) => {
+                log!(INFO,
+                    "[refunding] icUSD refund failed for {} (burn block {}): {}. Will retry.",
+                    refund.user, icusd_block_index, error
+                );
+                if let TransferError::BadFee { expected_fee } = error {
+                    // Refresh fee cache; do NOT increment retry count on BadFee.
+                    if let Ok(expected_fee_u64) = expected_fee.0.clone().try_into() {
+                        let icusd_ledger = read_state(|s| s.icusd_ledger_principal);
+                        crate::management::set_cached_fee(icusd_ledger, expected_fee_u64);
+                    }
+                } else {
+                    let retries = mutate_state(|s| {
+                        if let Some(r) = s.pending_refunds.get_mut(&icusd_block_index) {
+                            r.retry_count = r.retry_count.saturating_add(1);
+                            r.retry_count
+                        } else { 0 }
+                    });
+                    if retries >= MAX_PENDING_RETRIES {
+                        log!(INFO,
+                            "[refunding] CRITICAL: abandoning icUSD refund for {} (burn block {}) \
+                             after {} retries. Amount: {}. Manual reconciliation required.",
+                            refund.user, icusd_block_index, retries, refund.amount_e8s
+                        );
+                        mutate_state(|s| { s.pending_refunds.remove(&icusd_block_index); });
+                    }
+                }
+            }
+        }
+    }
+
     // Schedule another run if needed, but with better timing
     if read_state(|s| {
-        !s.pending_margin_transfers.is_empty() || !s.pending_excess_transfers.is_empty() || !s.pending_redemption_transfer.is_empty()
+        !s.pending_margin_transfers.is_empty()
+            || !s.pending_excess_transfers.is_empty()
+            || !s.pending_redemption_transfer.is_empty()
+            || !s.pending_refunds.is_empty()
     }) {
         // Schedule another check in 5 seconds
         log!(INFO, "[process_pending_transfer] Scheduling another transfer attempt in 5 seconds");
