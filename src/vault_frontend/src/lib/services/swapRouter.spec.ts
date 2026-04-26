@@ -44,6 +44,8 @@ vi.mock('./providers/rumiAmmProvider', () => ({
 
 vi.mock('./providers/icpswapProvider', () => ({
   IcpswapProvider: vi.fn(() => mocks.icpswapMock),
+  // Used by the Oisy batched executor for the deposit/withdraw fee field.
+  icrc1Fee: vi.fn(() => 10n),
 }));
 
 // Neutralise ammService — the provider mocks bypass it, but getAmmPoolId
@@ -74,7 +76,9 @@ vi.mock('./protocol/walletOperations', () => ({
   isOisyWallet: mocks.isOisyWalletMock,
 }));
 
-// Keep oisySigner and pnp importable without side effects.
+// Keep oisySigner and pnp importable without side effects. The Oisy ICPswap
+// direct dispatch test below overrides these with concrete fakes via
+// vi.mocked(...).mockResolvedValueOnce(...).
 vi.mock('./oisySigner', () => ({
   getOisySignerAgent: vi.fn(),
   createOisyActor: vi.fn(),
@@ -82,7 +86,13 @@ vi.mock('./oisySigner', () => ({
 vi.mock('./pnp', () => ({ canisterIDLs: {} }));
 vi.mock('../stores/wallet', () => ({
   walletStore: {
-    subscribe: () => () => {},
+    // svelte/store's `get()` calls subscribe(set) and reads back synchronously,
+    // so we must invoke `set` with a value. Oisy branches need a truthy
+    // principal to clear the "Wallet not connected" guard.
+    subscribe: (set: (v: any) => void) => {
+      set({ principal: { toText: () => 'aaaaa-aa' } });
+      return () => {};
+    },
     // Non-Oisy ICPswap branches call walletStore.getActor to build an
     // authenticated actor and (separately) to run icrc2_approve. Return
     // a stub that satisfies both call sites; tests that care about the
@@ -291,9 +301,39 @@ describe('swapRouter — provider registry integration', () => {
     });
   });
 
-  describe('Oisy transitional guard', () => {
-    it('rejects Oisy executions when ICPswap wins', async () => {
+  // ──────────────────────────────────────────────────────────────
+  // Oisy ICPswap direct dispatch (3USD <-> ICP, single-hop ICPswap winner).
+  // Verifies the `amm_swap` case routes through the batched executor when
+  // Oisy is the wallet, and through provider.swap otherwise.
+  // ──────────────────────────────────────────────────────────────
+
+  describe('Oisy ICPswap direct dispatch (amm_swap)', () => {
+    it('dispatches through the batched executor instead of provider.swap when ICPswap wins', async () => {
       isOisyWalletMock.mockReturnValue(true);
+
+      // Wire up Oisy fakes: signer agent collects batched promises and
+      // returns control once execute() resolves. Actors must respond with
+      // shapes the executor unpacks (Ok/ok per call site).
+      const fakeSigner = {
+        batch: vi.fn(),
+        execute: vi.fn().mockResolvedValue(undefined),
+      };
+      const fakeFromLedger = {
+        icrc2_approve: vi.fn().mockResolvedValue({ Ok: 1n }),
+      };
+      const fakePool = {
+        depositFrom: vi.fn().mockResolvedValue({ ok: 0n }),
+        swap: vi.fn().mockResolvedValue({ ok: 0n }),
+        withdraw: vi.fn().mockResolvedValue({ ok: 1_499n }),
+      };
+      const oisySigner = await import('./oisySigner');
+      vi.mocked(oisySigner.getOisySignerAgent).mockResolvedValue(fakeSigner as any);
+      vi.mocked(oisySigner.createOisyActor).mockImplementation(((canisterId: string) => {
+        // Pool ID from icpswapQuote() fixture above
+        if (canisterId === 'mu2zw-6iaaa-aaaar-qb56q-cai') return fakePool;
+        return fakeFromLedger;
+      }) as any);
+
       const route: SwapRoute = {
         type: 'amm_swap',
         pathDisplay: 'x',
@@ -302,8 +342,37 @@ describe('swapRouter — provider registry integration', () => {
         feeDisplay: '0.30%',
         providerQuote: icpswapQuote(1_500n),
       };
-      await expect(executeRoute(route, threeUsd, icp, 100n, 50))
-        .rejects.toThrow(/not yet supported \(Task 10\)/);
+
+      const out = await executeRoute(route, threeUsd, icp, 100n, 50);
+
+      // Provider.swap path was bypassed
+      expect(icpswapMock.swap).not.toHaveBeenCalled();
+      // Oisy batched flow ran end to end
+      expect(fakeSigner.execute).toHaveBeenCalledTimes(1);
+      expect(fakeFromLedger.icrc2_approve).toHaveBeenCalledTimes(1);
+      expect(fakePool.depositFrom).toHaveBeenCalledTimes(1);
+      expect(fakePool.swap).toHaveBeenCalledTimes(1);
+      expect(fakePool.withdraw).toHaveBeenCalledTimes(1);
+      // Returns the `ok` value from the final withdraw call
+      expect(out).toBe(1_499n);
+    });
+
+    it('still uses provider.swap when Oisy wins with Rumi AMM (Rumi handles signer internally)', async () => {
+      isOisyWalletMock.mockReturnValue(true);
+      rumiAmmMock.swap.mockResolvedValue({ amountOut: 990n });
+
+      const route: SwapRoute = {
+        type: 'amm_swap',
+        pathDisplay: 'x',
+        hops: 1,
+        estimatedOutput: 1_000n,
+        feeDisplay: '0.30%',
+        providerQuote: rumiQuote(1_000n),
+      };
+
+      const out = await executeRoute(route, threeUsd, icp, 100n, 50);
+      expect(rumiAmmMock.swap).toHaveBeenCalledTimes(1);
+      expect(out).toBe(990n);
     });
   });
 

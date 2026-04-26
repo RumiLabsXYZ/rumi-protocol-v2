@@ -115,8 +115,7 @@ export interface SwapRoute {
   /**
    * Cached Rumi AMM pool ID. Populated when the 3USD/ICP hop resolves to
    * Rumi AMM so the Oisy batched executor can reuse it without an extra
-   * canister query. Removed in Task 10 once Oisy dispatches through the
-   * provider registry.
+   * canister query.
    */
   poolId?: string;
   /**
@@ -126,8 +125,7 @@ export interface SwapRoute {
   providerQuote?: ProviderQuote;
   /**
    * Winning provider quote for the 3USD/ICP leg of a two-hop route
-   * (Cases 5/6: stable <-> ICP). Task 10 uses this to dispatch via the
-   * provider registry; Task 9 only populates it.
+   * (Cases 5/6: stable <-> ICP).
    */
   hopProviderQuote?: ProviderQuote;
 }
@@ -231,7 +229,7 @@ export async function resolveRoute(
       feeDisplay: quote.feeDisplay,
       providerQuote: quote,
       // Keep poolId populated when Rumi AMM wins so the Oisy helper can
-      // reuse it without an extra canister query. Task 10 removes this.
+      // reuse it without an extra canister query.
       poolId: quote.provider === 'rumi_amm' ? (quote.meta.poolId as string) : undefined,
     };
   }
@@ -390,9 +388,18 @@ export async function executeRoute(
     }
 
     case 'amm_swap': {
-      assertOisyProviderSupported(route);
       const quote = route.providerQuote;
       if (!quote) throw new Error('amm_swap route missing providerQuote');
+
+      // Oisy + ICPswap needs the batched executor: ICPswap's deposit -> swap
+      // -> withdraw flow has to land in one signer popup. Rumi AMM works with
+      // Oisy through the standard provider.swap path because ammService.swap
+      // already routes through the signer agent. Plain II also uses
+      // provider.swap for both providers.
+      if (isOisyWallet() && isIcpswapProvider(quote.provider)) {
+        return await executeIcpswapDirectOisy(route, from, to, amountIn, slippageBps);
+      }
+
       const provider = threeUsdIcpRegistry().get(quote.provider);
 
       // RumiAmmProvider handles approval internally via ammService.swap.
@@ -538,26 +545,6 @@ async function approveIcpswapPool(
 
   // Small delay for ledger sync (matches threePoolService.swap non-Oisy path).
   await new Promise(r => setTimeout(r, 2000));
-}
-
-/**
- * Transitional guard: direct Case 4 (3USD <-> ICP) Oisy executions only know
- * how to route through Rumi AMM. Two-hop cases (stable_to_icp / icp_to_stable)
- * now dispatch ICPswap and Rumi AMM natively via the Oisy helpers below.
- * Rejects Oisy + ICPswap combos for `amm_swap` until that path is added.
- * Case 4 was deferred because users with only icUSD/ICP can fall back to
- * Internet Identity or route through the 2-hop path; the 3USD-direct case
- * is rarer and lower-impact.
- */
-function assertOisyProviderSupported(route: SwapRoute): void {
-  if (!isOisyWallet()) return;
-  const winner = route.providerQuote?.provider ?? route.hopProviderQuote?.provider;
-  if (winner && winner !== 'rumi_amm') {
-    throw new Error(
-      `Oisy batched execution for ${winner} is not yet supported (Task 10). ` +
-      `Please use Internet Identity for this swap, or switch to a smaller amount that routes through Rumi AMM.`,
-    );
-  }
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -937,7 +924,9 @@ async function executeIcpToStableOisyIcpswap(
 }
 
 /**
- * icUSD <-> ICP direct via ICPswap (Oisy batched):
+ * Direct ICPswap pool swap (Oisy batched). Used by both `icusd_icp_direct`
+ * (icUSD <-> ICP) and `amm_swap` (3USD <-> ICP) when ICPswap wins the quote.
+ *
  * 1. Approve input token -> ICPswap pool
  * 2. ICPswap.depositFrom (pulls input via ICRC-2)
  * 3. ICPswap.swap
@@ -958,7 +947,7 @@ async function executeIcpswapDirectOisy(
   if (!wallet.principal) throw new Error('Wallet not connected');
 
   const q = route.providerQuote;
-  if (!q) throw new Error('icusd_icp_direct Oisy route missing providerQuote');
+  if (!q) throw new Error('ICPswap direct Oisy route missing providerQuote');
 
   const icpswapPoolId = q.meta.poolCanisterId as string | undefined;
   const zeroForOne = q.meta.zeroForOne;
