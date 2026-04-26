@@ -11,8 +11,9 @@ use std::time::Duration;
 
 /// How often to passively fetch ICP price from XRC (background polling).
 /// Each XRC call costs ~1B cycles. At 60s = ~$58/month, at 300s = ~$12/month.
-/// Price-sensitive operations will fetch on-demand if the cached price is >30s old,
-/// so this is just a lazy background refresh for display/query purposes.
+/// Price-sensitive operations will fetch on-demand if the cached price is older
+/// than `PRICE_FRESHNESS_THRESHOLD_NANOS` (60s as of Wave-5 F-004), so this
+/// timer is just a lazy background refresh for display/query purposes.
 pub const FETCHING_ICP_RATE_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Maximum age (in nanoseconds) of a cached price before a price-sensitive
