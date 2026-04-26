@@ -1,9 +1,11 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use candid::{CandidType, Principal, Decode, Encode};
+use ic_canister_log::log;
 use serde::{Serialize, Deserialize};
 
 use crate::types::*;
+use crate::logs::INFO;
 
 // ─── Event log caps ───
 // Prevents unbounded heap growth that could brick the canister by causing
@@ -163,6 +165,15 @@ pub fn replace_state(new_state: AmmState) {
 
 // ─── Stable memory persistence ───
 
+// SAFETY (UPG-004): this writes the encoded state at raw stable-memory offset 0
+// using `stable64_write`, with a leading 8-byte length prefix. It does NOT use
+// `ic_stable_structures::MemoryManager`. A future migration that introduces
+// MemoryManager MUST first read the legacy blob into RAM via the same raw
+// `stable64_read(0, ...)` path before calling `MemoryManager::init`, because
+// `MemoryManager::init` unconditionally writes its 'MGR' magic header at
+// physical offset 0 and would destructively overwrite the legacy state. See
+// `liquidation_bot::post_upgrade` for the canonical "rescue legacy blob first,
+// then init MemoryManager" pattern.
 pub fn save_to_stable_memory() {
     STATE.with(|s| {
         let state = s.borrow();
@@ -216,23 +227,14 @@ struct AmmStateV1 {
     pub pools: BTreeMap<PoolId, Pool>,
 }
 
-pub fn load_from_stable_memory() {
-    let mut len_bytes = [0u8; 8];
-    ic_cdk::api::stable::stable64_read(0, &mut len_bytes);
-    let len = u64::from_le_bytes(len_bytes) as usize;
-
-    if len == 0 {
-        return;
+/// Try to deserialize an AMM state snapshot, walking known schema versions
+/// in order (current, V4, V3, V2, V1). Returns `None` if no version decodes.
+pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
+    if let Ok(state) = Decode!(bytes, AmmState) {
+        return Some(state);
     }
-
-    let mut bytes = vec![0u8; len];
-    ic_cdk::api::stable::stable64_read(8, &mut bytes);
-
-    // Try current shape first, then V4, V3, V2, V1
-    if let Ok(state) = Decode!(&bytes, AmmState) {
-        replace_state(state);
-    } else if let Ok(v4) = Decode!(&bytes, AmmStateV4) {
-        replace_state(AmmState {
+    if let Ok(v4) = Decode!(bytes, AmmStateV4) {
+        return Some(AmmState {
             admin: v4.admin,
             pools: v4.pools,
             pool_creation_open: v4.pool_creation_open,
@@ -247,8 +249,9 @@ pub fn load_from_stable_memory() {
             next_admin_event_id: 0,
             holder_snapshots: Vec::new(),
         });
-    } else if let Ok(v3) = Decode!(&bytes, AmmStateV3) {
-        replace_state(AmmState {
+    }
+    if let Ok(v3) = Decode!(bytes, AmmStateV3) {
+        return Some(AmmState {
             admin: v3.admin,
             pools: v3.pools,
             pool_creation_open: v3.pool_creation_open,
@@ -263,8 +266,9 @@ pub fn load_from_stable_memory() {
             next_admin_event_id: 0,
             holder_snapshots: Vec::new(),
         });
-    } else if let Ok(v2) = Decode!(&bytes, AmmStateV2) {
-        replace_state(AmmState {
+    }
+    if let Ok(v2) = Decode!(bytes, AmmStateV2) {
+        return Some(AmmState {
             admin: v2.admin,
             pools: v2.pools,
             pool_creation_open: v2.pool_creation_open,
@@ -279,10 +283,9 @@ pub fn load_from_stable_memory() {
             next_admin_event_id: 0,
             holder_snapshots: Vec::new(),
         });
-    } else {
-        let v1: AmmStateV1 = Decode!(&bytes, AmmStateV1)
-            .expect("Failed to decode AMM state from stable memory (tried V5, V4, V3, V2, V1)");
-        replace_state(AmmState {
+    }
+    if let Ok(v1) = Decode!(bytes, AmmStateV1) {
+        return Some(AmmState {
             admin: v1.admin,
             pools: v1.pools,
             pool_creation_open: false,
@@ -298,4 +301,48 @@ pub fn load_from_stable_memory() {
             holder_snapshots: Vec::new(),
         });
     }
+    None
+}
+
+/// Restore state from stable memory (called from post_upgrade).
+///
+/// UPG-002 fix: rather than trapping on decode failure (which bricks the
+/// canister until a hotfix wasm ships), walk the V-current..V1 fallback chain
+/// via `try_decode_state`. If every known version fails, log a CRITICAL
+/// diagnostic with the snapshot length and a short hex preview, then fall
+/// back to empty state. AMM positions are reconstructable from underlying
+/// ledger balances, so empty fallback is a defensible last resort here.
+pub fn load_from_stable_memory() {
+    let mut len_bytes = [0u8; 8];
+    ic_cdk::api::stable::stable64_read(0, &mut len_bytes);
+    let len = u64::from_le_bytes(len_bytes) as usize;
+
+    if len == 0 {
+        return;
+    }
+
+    let mut bytes = vec![0u8; len];
+    ic_cdk::api::stable::stable64_read(8, &mut bytes);
+
+    if let Some(state) = try_decode_state(&bytes) {
+        replace_state(state);
+        return;
+    }
+
+    let preview_len = bytes.len().min(64);
+    let preview_hex: String = bytes[..preview_len]
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+    log!(
+        INFO,
+        "CRITICAL UPG-002: AMM snapshot decode failed for all known schema versions \
+         (current, V4, V3, V2, V1). snapshot_len={} bytes, first_{}_bytes_hex={}. \
+         Falling back to empty state. AMM positions can be reconstructed from \
+         underlying ledger balances; admin must re-set via admin endpoints.",
+        bytes.len(),
+        preview_len,
+        preview_hex
+    );
+    replace_state(AmmState::default());
 }
