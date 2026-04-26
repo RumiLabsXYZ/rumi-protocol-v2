@@ -5,7 +5,7 @@ use crate::Decimal;
 use crate::Mode;
 use ic_canister_log::log;
 use ic_xrc_types::GetExchangeRateResult;
-use rust_decimal::prelude::FromPrimitive;
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use rust_decimal_macros::dec;
 use std::time::Duration;
 
@@ -16,8 +16,15 @@ use std::time::Duration;
 pub const FETCHING_ICP_RATE_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Maximum age (in nanoseconds) of a cached price before a price-sensitive
-/// operation triggers an on-demand XRC fetch. Set to 30 seconds.
-pub const PRICE_FRESHNESS_THRESHOLD_NANOS: u64 = 30 * 1_000_000_000;
+/// operation triggers an on-demand XRC fetch.
+///
+/// Audit Wave-5 F-004: bumped from 30s to 60s. The XRC `timestamp` field is
+/// the CEX bar time, populated as `(now - XRC_MARGIN_SEC=60)`, so a freshly
+/// fetched price already starts 60s "old" from this canister's clock. A 30s
+/// threshold therefore meant every call refetched, defeating the cache and
+/// burning roughly 300M cycles/day. 60s matches the stables-side threshold
+/// and lets bursts of activity within the same fetch window hit the cache.
+pub const PRICE_FRESHNESS_THRESHOLD_NANOS: u64 = 60 * 1_000_000_000;
 
 pub async fn fetch_icp_rate() {
     let _guard = match crate::guard::FetchXrcGuard::new() {
@@ -31,31 +38,56 @@ pub async fn fetch_icp_rate() {
                 let rate = Decimal::from_u64(exchange_rate_result.rate).unwrap()
                     / Decimal::from_u64(10_u64.pow(exchange_rate_result.metadata.decimals))
                         .unwrap();
-                if rate < dec!(0.01) {  // Changed threshold for ICP
+                let ts_nanos = exchange_rate_result.timestamp * 1_000_000_000;
+
+                // Wave-5 LIQ-007 / ORACLE-009: gate every accepted price through the
+                // sanity band. Pre-Wave-5 the ReadOnly latch fired on `rate < $0.01`
+                // before any sanity check, so a single sub-$0.01 XRC blip could
+                // freeze the protocol. Now we (1) reject samples older than the
+                // stored timestamp, (2) apply the sanity band, then (3) only latch
+                // ReadOnly when a sub-$0.01 sample was actually accepted.
+                let should_update = read_state(|s| match s.last_icp_timestamp {
+                    Some(last_ts) => last_ts < ts_nanos,
+                    None => true,
+                });
+                if !should_update {
                     log!(
                         TRACE_XRC,
-                        "[FetchPrice] Warning: ICP rate is below $0.01 switching to read-only at timestamp: {}",
+                        "[FetchPrice] ICP rate {rate} skipped: timestamp {} not newer than stored",
                         exchange_rate_result.timestamp
                     );
-                    mutate_state(|s| s.mode = Mode::ReadOnly);
-                };
-                log!(
-                    TRACE_XRC,
-                    "[FetchPrice] fetched new ICP rate: {rate} with timestamp: {}",
-                    exchange_rate_result.timestamp
-                );
-                mutate_state(|s| {
-                    let ts_nanos = exchange_rate_result.timestamp * 1_000_000_000;
-                    let should_update = match s.last_icp_timestamp {
-                        Some(last_ts) => last_ts < ts_nanos,
-                        None => true,
-                    };
-                    if should_update {
-                        s.set_icp_rate(UsdIcp::from(rate), Some(ts_nanos));
-                        let icp_ct = s.icp_collateral_type();
-                        crate::event::record_price_update(icp_ct, rate, ts_nanos);
+                } else {
+                    let icp_ct = read_state(|s| s.icp_collateral_type());
+                    let rate_f64 = rate.to_f64().unwrap_or(0.0);
+                    let accepted = mutate_state(|s| {
+                        s.check_price_sanity_band(&icp_ct, rate_f64)
+                    });
+                    if !accepted {
+                        log!(
+                            TRACE_XRC,
+                            "[FetchPrice] rejecting outlier ICP rate {rate} (sanity band); awaiting confirmation"
+                        );
+                    } else {
+                        if rate < dec!(0.01) {
+                            log!(
+                                TRACE_XRC,
+                                "[FetchPrice] CONFIRMED sub-$0.01 ICP rate {rate}, switching to ReadOnly at timestamp: {}",
+                                exchange_rate_result.timestamp
+                            );
+                            mutate_state(|s| s.mode = Mode::ReadOnly);
+                        }
+                        log!(
+                            TRACE_XRC,
+                            "[FetchPrice] fetched new ICP rate: {rate} with timestamp: {}",
+                            exchange_rate_result.timestamp
+                        );
+                        mutate_state(|s| {
+                            s.set_icp_rate(UsdIcp::from(rate), Some(ts_nanos));
+                            let icp_ct = s.icp_collateral_type();
+                            crate::event::record_price_update(icp_ct, rate, ts_nanos);
+                        });
                     }
-                });
+                }
             }
             GetExchangeRateResult::Err(error) => ic_canister_log::log!(
                 TRACE_XRC,

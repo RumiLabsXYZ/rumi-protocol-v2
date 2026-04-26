@@ -105,6 +105,21 @@ pub const DEFAULT_RMR_CEILING: Ratio = Ratio::new(dec!(1.0));     // 100% at/bel
 pub const DEFAULT_RMR_FLOOR_CR: Ratio = Ratio::new(dec!(2.25));   // CR above which floor applies (recovery × 1.5)
 pub const DEFAULT_RMR_CEILING_CR: Ratio = Ratio::new(dec!(1.5));  // CR below which ceiling applies (= recovery)
 
+/// Wave-5 LIQ-007: minimum tolerated ratio between a new XRC sample and the
+/// stored price. A new rate is considered "in band" when
+/// `band <= new/stored <= 1/band`. 0.7 allows up to a 30% drop or a ~43% rise
+/// per sample. Out-of-band samples are queued (see `check_price_sanity_band`).
+/// Conservative single value across all collateral; can be made per-asset later
+/// by moving onto `CollateralConfig`.
+pub const PRICE_SANITY_BAND_RATIO: f64 = 0.7;
+
+/// Wave-5 LIQ-007 / ORACLE-009: number of consecutive in-band confirmations a
+/// queued outlier candidate needs before it is accepted as the new stored
+/// price. With background fetches every 300 s, N=3 means a sustained move
+/// outside the sanity band takes ~10 minutes to land. A single bad sample is
+/// always rejected. Stops a sub-$0.01 ICP blip from latching ReadOnly forever.
+pub const PRICE_OUTLIER_CONFIRM_COUNT: u8 = 3;
+
 /// Collateral type identified by its ICRC-1 ledger canister principal.
 pub type CollateralType = Principal;
 
@@ -812,6 +827,24 @@ pub struct State {
     /// impossible because their tuples have `created_at_time: None`).
     #[serde(default)]
     pub op_nonce_counter: u64,
+
+    /// Wave-5 LIQ-007 / ORACLE-009: queued outlier price candidates per collateral.
+    /// When a fetched price falls outside the sanity band (PRICE_SANITY_BAND_RATIO)
+    /// of the stored price, queue it as a candidate instead of accepting it.
+    /// After PRICE_OUTLIER_CONFIRM_COUNT consecutive samples agree (within the band
+    /// of the candidate itself), accept the new price. A single bad sample is
+    /// rejected; this stops a sub-$0.01 XRC blip from latching ReadOnly.
+    /// Value is `(candidate_price, consecutive_count)`.
+    #[serde(default)]
+    pub pending_outlier_prices: BTreeMap<Principal, (f64, u8)>,
+
+    /// Wave-5 LIQ-007: emergency brake for liquidation endpoints. Independent of
+    /// `mode` (which auto-latches ReadOnly on TCR < 100% but should not block
+    /// liquidations because liquidations reduce bad debt). Admin flips this via
+    /// `set_liquidation_frozen` during a confirmed oracle outage or other event
+    /// where liquidating against the cached price would be dangerous.
+    #[serde(default)]
+    pub liquidation_frozen: bool,
 }
 
 /// Serde-only fallback: provides zero/empty/None defaults for fields missing from
@@ -908,6 +941,8 @@ impl Default for State {
             sp_attempted_vaults: BTreeSet::new(),
             bot_claims: BTreeMap::new(),
             op_nonce_counter: 0,
+            pending_outlier_prices: BTreeMap::new(),
+            liquidation_frozen: false,
         }
     }
 }
@@ -1096,6 +1131,8 @@ impl From<InitArg> for State {
             sp_attempted_vaults: BTreeSet::new(),
             bot_claims: BTreeMap::new(),
             op_nonce_counter: 0,
+            pending_outlier_prices: BTreeMap::new(),
+            liquidation_frozen: false,
         }
     }
 }
@@ -1212,6 +1249,81 @@ impl State {
             ));
         }
         Ok(())
+    }
+
+    /// Wave-5 LIQ-007 / ORACLE-009: apply the price-outlier sanity gate.
+    ///
+    /// Returns `true` when the new sample should be written to `last_price`,
+    /// `false` when it should be queued/rejected. Mutates `pending_outlier_prices`
+    /// to track the running outlier candidate and its consecutive-confirmation
+    /// count.
+    ///
+    /// Algorithm:
+    ///   1. No stored price (or stored <= 0): accept and clear any candidate.
+    ///   2. New sample within `[band, 1/band]` of stored: accept and clear candidate.
+    ///   3. New sample outside band:
+    ///      - First outlier seen, or diverges from queued candidate: queue it
+    ///        with count=1 and reject.
+    ///      - Matches queued candidate (within band of candidate): increment
+    ///        count; accept once count >= `PRICE_OUTLIER_CONFIRM_COUNT`.
+    ///
+    /// Without this gate a single garbage XRC sample could shift `last_price`
+    /// arbitrarily, including triggering the `rate < $0.01` ReadOnly latch
+    /// (ORACLE-009). With the gate, an outlier needs N consecutive consistent
+    /// confirmations before it's accepted.
+    pub fn check_price_sanity_band(
+        &mut self,
+        collateral_type: &Principal,
+        new_rate: f64,
+    ) -> bool {
+        if !new_rate.is_finite() || new_rate <= 0.0 {
+            return false;
+        }
+
+        let stored = self
+            .collateral_configs
+            .get(collateral_type)
+            .and_then(|c| c.last_price);
+
+        let stored_v = match stored {
+            Some(v) if v > 0.0 && v.is_finite() => v,
+            _ => {
+                self.pending_outlier_prices.remove(collateral_type);
+                return true;
+            }
+        };
+
+        let ratio = new_rate / stored_v;
+        if ratio >= PRICE_SANITY_BAND_RATIO && ratio <= 1.0 / PRICE_SANITY_BAND_RATIO {
+            self.pending_outlier_prices.remove(collateral_type);
+            return true;
+        }
+
+        let entry = self
+            .pending_outlier_prices
+            .entry(*collateral_type)
+            .or_insert((new_rate, 0));
+        let candidate = entry.0;
+
+        if !candidate.is_finite() || candidate <= 0.0 {
+            *entry = (new_rate, 1);
+            return false;
+        }
+
+        let cand_ratio = new_rate / candidate;
+        if cand_ratio >= PRICE_SANITY_BAND_RATIO
+            && cand_ratio <= 1.0 / PRICE_SANITY_BAND_RATIO
+        {
+            entry.1 = entry.1.saturating_add(1);
+            if entry.1 >= PRICE_OUTLIER_CONFIRM_COUNT {
+                self.pending_outlier_prices.remove(collateral_type);
+                return true;
+            }
+            false
+        } else {
+            *entry = (new_rate, 1);
+            false
+        }
     }
 
     /// Mint a fresh idempotency nonce for an ICRC transfer (audit Wave-3).

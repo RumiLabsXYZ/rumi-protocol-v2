@@ -424,18 +424,34 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
                     "[fetch_collateral_price] CoinGecko {} price: {} at {}",
                     coin_id, price, ts_nanos
                 );
-                mutate_state(|s| {
-                    if let Some(config) = s.collateral_configs.get_mut(&collateral_type) {
-                        let should_update = match config.last_price_timestamp {
+                let should_update = read_state(|s| {
+                    s.get_collateral_config(&collateral_type)
+                        .map(|c| match c.last_price_timestamp {
                             Some(last_ts) => last_ts < ts_nanos,
                             None => true,
-                        };
-                        if should_update {
-                            config.last_price = Some(price);
-                            config.last_price_timestamp = Some(ts_nanos);
-                            if let Some(price_dec) = rust_decimal::Decimal::from_f64(price) {
-                                crate::event::record_price_update(collateral_type, price_dec, ts_nanos);
-                            }
+                        })
+                        .unwrap_or(false)
+                });
+                if !should_update {
+                    return;
+                }
+                // Wave-5 LIQ-007: gate every accepted price through the sanity band
+                // (rejects single outliers, accepts after N consecutive confirmations).
+                let accepted = mutate_state(|s| s.check_price_sanity_band(&collateral_type, price));
+                if !accepted {
+                    log!(
+                        TRACE_XRC,
+                        "[fetch_collateral_price] rejecting outlier CoinGecko price {} for {}; awaiting confirmation",
+                        price, coin_id
+                    );
+                    return;
+                }
+                mutate_state(|s| {
+                    if let Some(config) = s.collateral_configs.get_mut(&collateral_type) {
+                        config.last_price = Some(price);
+                        config.last_price_timestamp = Some(ts_nanos);
+                        if let Some(price_dec) = rust_decimal::Decimal::from_f64(price) {
+                            crate::event::record_price_update(collateral_type, price_dec, ts_nanos);
                         }
                     }
                 });
@@ -556,17 +572,45 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
         PriceSource::CoinGecko { .. } => unreachable!(),
     };
 
-    mutate_state(|s| {
-        if let Some(config) = s.collateral_configs.get_mut(&collateral_type) {
-            let should_update = match config.last_price_timestamp {
+    let should_update = read_state(|s| {
+        s.get_collateral_config(&collateral_type)
+            .map(|c| match c.last_price_timestamp {
                 Some(last_ts) => last_ts < ts_nanos,
                 None => true,
-            };
-            if should_update {
-                config.last_price = final_rate.to_f64();
-                config.last_price_timestamp = Some(ts_nanos);
-                crate::event::record_price_update(collateral_type, final_rate, ts_nanos);
-            }
+            })
+            .unwrap_or(false)
+    });
+    if !should_update {
+        return;
+    }
+
+    // Wave-5 LIQ-007: gate every accepted price through the sanity band.
+    let final_rate_f64 = match final_rate.to_f64() {
+        Some(v) if v.is_finite() && v > 0.0 => v,
+        _ => {
+            log!(
+                TRACE_XRC,
+                "[fetch_collateral_price] {}: dropping non-positive/non-finite final rate {}",
+                base_asset, final_rate
+            );
+            return;
+        }
+    };
+    let accepted = mutate_state(|s| s.check_price_sanity_band(&collateral_type, final_rate_f64));
+    if !accepted {
+        log!(
+            TRACE_XRC,
+            "[fetch_collateral_price] rejecting outlier {} rate {} for {}; awaiting confirmation",
+            base_asset, final_rate_f64, collateral_type
+        );
+        return;
+    }
+
+    mutate_state(|s| {
+        if let Some(config) = s.collateral_configs.get_mut(&collateral_type) {
+            config.last_price = Some(final_rate_f64);
+            config.last_price_timestamp = Some(ts_nanos);
+            crate::event::record_price_update(collateral_type, final_rate, ts_nanos);
         }
     });
 }
