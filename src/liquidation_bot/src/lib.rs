@@ -48,6 +48,14 @@ pub struct BotInitArgs {
 
 #[init]
 fn init(args: BotInitArgs) {
+    // UPG-006: refuse to init with non-empty stable memory. Catches accidental
+    // reinstalls of a canister that already has persisted state. Must run BEFORE
+    // memory::init_memory_manager() because that call writes the MGR magic header
+    // at offset 0, which would defeat the check on subsequent inits.
+    assert!(
+        ic_cdk::api::stable::stable64_size() == 0,
+        "refusing to init: stable memory non-empty; use upgrade mode not reinstall"
+    );
     memory::init_memory_manager();
     history::init_history();
     state::init_state(BotState {

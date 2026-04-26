@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::cell::RefCell;
 use candid::{CandidType, Principal, Decode, Encode};
+use ic_canister_log::log;
 use serde::{Serialize, Deserialize};
 
 use crate::types::*;
+use crate::logs::INFO;
 
 /// Maximum number of liquidation records retained in memory.
 /// Older entries are dropped when this limit is exceeded.
@@ -939,6 +941,16 @@ pub fn replace_state(state: StabilityPoolState) {
 }
 
 /// Serialize state to stable memory (called from pre_upgrade).
+//
+// SAFETY (UPG-004): this writes the encoded state at raw stable-memory offset 0
+// using `stable64_write`, with a leading 8-byte length prefix. It does NOT use
+// `ic_stable_structures::MemoryManager`. A future migration that introduces
+// MemoryManager MUST first read the legacy blob into RAM via the same raw
+// `stable64_read(0, ...)` path before calling `MemoryManager::init`, because
+// `MemoryManager::init` unconditionally writes its 'MGR' magic header at
+// physical offset 0 and would destructively overwrite the legacy state. See
+// `liquidation_bot::post_upgrade` for the canonical "rescue legacy blob first,
+// then init MemoryManager" pattern.
 pub fn save_to_stable_memory() {
     STATE.with(|s| {
         let state = s.borrow();
@@ -960,22 +972,69 @@ pub fn save_to_stable_memory() {
     });
 }
 
+/// Try to deserialize a stability pool state snapshot, walking known schema
+/// versions in order. Returns `None` if no version successfully decodes.
+///
+/// Adding a new schema (UPG-001 multi-version fallback): when a non-additive
+/// change ships, copy the current `StabilityPoolState` definition as
+/// `StabilityPoolStateVN` (with the appropriate `From<StabilityPoolStateVN>
+/// for StabilityPoolState` conversion) and add a fallback branch below before
+/// the existing ones. Keep at least the previous 2 to 3 versions.
+pub fn try_decode_state(bytes: &[u8]) -> Option<StabilityPoolState> {
+    // v-current.
+    if let Ok(state) = Decode!(bytes, StabilityPoolState) {
+        return Some(state);
+    }
+    // Future: insert prior schema versions here, e.g.
+    //     if let Ok(prev) = Decode!(bytes, StabilityPoolStateVN) {
+    //         return Some(prev.into());
+    //     }
+    None
+}
+
 /// Restore state from stable memory (called from post_upgrade).
+///
+/// UPG-001 fix: rather than trapping on decode failure (which bricks the
+/// canister until a hotfix wasm with a compatible decoder is shipped), walk
+/// the known-version fallback chain via `try_decode_state`. If every known
+/// version fails, log a CRITICAL diagnostic with the snapshot length and a
+/// short hex preview, then fall back to empty state. The empty fallback is a
+/// last resort: it zeroes depositor positions. Operators should treat it as a
+/// recoverable incident (rebuild from event history if possible) rather than
+/// a routine outcome.
 pub fn load_from_stable_memory() {
     let mut len_bytes = [0u8; 8];
     ic_cdk::api::stable::stable64_read(0, &mut len_bytes);
     let len = u64::from_le_bytes(len_bytes) as usize;
 
     if len == 0 {
-        return; // No saved state — fresh start
+        return; // No saved state, fresh start.
     }
 
     let mut bytes = vec![0u8; len];
     ic_cdk::api::stable::stable64_read(8, &mut bytes);
 
-    let state: StabilityPoolState = Decode!(&bytes, StabilityPoolState)
-        .expect("Failed to decode stability pool state from stable memory");
-    replace_state(state);
+    if let Some(state) = try_decode_state(&bytes) {
+        replace_state(state);
+        return;
+    }
+
+    let preview_len = bytes.len().min(64);
+    let preview_hex: String = bytes[..preview_len]
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+    log!(
+        INFO,
+        "CRITICAL UPG-001: stability pool snapshot decode failed for all known schema versions. \
+         snapshot_len={} bytes, first_{}_bytes_hex={}. \
+         Falling back to empty state. Depositor positions are reset; operator must \
+         restore from event history or admin endpoints.",
+        bytes.len(),
+        preview_len,
+        preview_hex
+    );
+    replace_state(StabilityPoolState::default());
 }
 
 // ──────────────────────────────────────────────────────────────

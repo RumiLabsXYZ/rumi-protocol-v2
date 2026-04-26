@@ -273,6 +273,15 @@ fn main() {}
 #[candid_method(init)]
 #[init]
 fn init(arg: ProtocolArg) {
+    // UPG-006: refuse to init with non-empty stable memory. Catches accidental
+    // reinstalls of a canister that already has persisted state. Reinstall mode
+    // wipes stable memory before init runs (per IC spec), so this primarily
+    // documents intent and guards against future IC behavior changes or hand-
+    // crafted install_code calls that do not zero stable memory first.
+    assert!(
+        ic_cdk::api::stable::stable64_size() == 0,
+        "refusing to init: stable memory non-empty; use upgrade mode not reinstall"
+    );
     match arg {
         ProtocolArg::Init(init_arg) => {
             log!(
