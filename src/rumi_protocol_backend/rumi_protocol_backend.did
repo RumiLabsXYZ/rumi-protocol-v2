@@ -527,6 +527,7 @@ type ProtocolError = variant {
   AmountTooLow : record { minimum_amount : nat64 };
   TransferFromError : record { TransferFromError; nat64 };
   CallerNotOwner;
+  NotLowestCR;
 };
 type ProtocolSnapshot = record {
   total_debt : nat64;
@@ -707,6 +708,7 @@ service : (ProtocolArg) -> {
   get_liquidatable_vaults : () -> (vec CandidVault) query;
   get_liquidation_bonus : () -> (float64) query;
   get_liquidation_frozen : () -> (bool) query;
+  get_liquidation_ordering_tolerance_bps : () -> (nat64) query;
   get_liquidation_protocol_share : () -> (float64) query;
   get_liquidity_status : (principal) -> (LiquidityStatus) query;
   get_min_icusd_amount : () -> (nat64) query;
@@ -785,6 +787,7 @@ service : (ProtocolArg) -> {
   set_bot_allowed_collateral_types : (vec principal) -> (Result);
   set_liquidation_bot_config : (principal, nat64) -> (Result);
   set_liquidation_frozen : (bool) -> (Result);
+  set_liquidation_ordering_tolerance : (nat64) -> (Result);
   set_liquidation_protocol_share : (float64) -> (Result);
   set_lst_haircut : (principal, float64) -> (Result);
   set_min_icusd_amount : (nat64) -> (Result);

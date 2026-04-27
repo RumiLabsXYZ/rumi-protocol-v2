@@ -527,6 +527,7 @@ type ProtocolError = variant {
   AmountTooLow : record { minimum_amount : nat64 };
   TransferFromError : record { TransferFromError; nat64 };
   CallerNotOwner;
+  NotLowestCR;
 };
 type ProtocolSnapshot = record {
   total_debt : nat64;

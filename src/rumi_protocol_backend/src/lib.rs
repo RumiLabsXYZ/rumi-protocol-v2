@@ -424,6 +424,13 @@ pub enum ProtocolError {
     CallerNotOwner,
     AmountTooLow { minimum_amount: u64 },
     GenericError(String),
+    /// Wave-8b LIQ-002: rejected because the requested vault is not within
+    /// `liquidation_ordering_tolerance` of the lowest-CR vault. Liquidators
+    /// must process the worst vault first so the protocol cannot be left
+    /// with deeply-underwater bad debt while easy targets are picked off.
+    /// The caller can either pick a worst-or-near-worst vault, or wait until
+    /// admin widens the tolerance band.
+    NotLowestCR,
 }
 
 impl From<GuardError> for ProtocolError {
@@ -486,20 +493,32 @@ pub fn check_vaults() {
     });
 
     // Only identify unhealthy vaults but don't liquidate them
+    //
+    // Wave-8b LIQ-002: walk `vault_cr_index` ascending so the bot / stability
+    // pool receive worst-CR vaults first. The list of underwater vaults is
+    // unchanged; the order is now sorted by CR ascending. This matches the
+    // server-side band-gate behavior — the bot/pool see the same vault the
+    // band gate would accept first.
     let (unhealthy_vaults, _healthy_vaults) = read_state(|s| {
         let mut unhealthy_vaults: Vec<Vault> = vec![];
         let mut healthy_vaults: Vec<Vault> = vec![];
-        for vault in s.vault_id_to_vaults.values() {
-            if vault.bot_processing {
-                // Skip — bot is actively processing this vault
-                continue;
-            }
-            if compute_collateral_ratio(vault, dummy_rate, s)
-                < s.get_min_liquidation_ratio_for(&vault.collateral_type)
-            {
-                unhealthy_vaults.push(vault.clone());
-            } else {
-                healthy_vaults.push(vault.clone())
+        for (_cr_key, bucket) in s.vault_cr_index.iter() {
+            for vid in bucket {
+                let vault = match s.vault_id_to_vaults.get(vid) {
+                    Some(v) => v,
+                    None => continue, // index drift — ignore
+                };
+                if vault.bot_processing {
+                    // Skip — bot is actively processing this vault
+                    continue;
+                }
+                if compute_collateral_ratio(vault, dummy_rate, s)
+                    < s.get_min_liquidation_ratio_for(&vault.collateral_type)
+                {
+                    unhealthy_vaults.push(vault.clone());
+                } else {
+                    healthy_vaults.push(vault.clone())
+                }
             }
         }
         (unhealthy_vaults, healthy_vaults)

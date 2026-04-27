@@ -1513,7 +1513,13 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
         if s.vault_id_to_vaults.contains_key(&vault_id) {
             // Remove from vault_id_to_vaults map
             s.vault_id_to_vaults.remove(&vault_id);
-            
+
+            // Wave-8b LIQ-002: drop from the sorted-troves CR index. The
+            // dedicated `state::close_vault` already does this; this path
+            // does the removal inline (without going through `close_vault`)
+            // to skip the trap branches, so we mirror the unindex here.
+            s.unindex_vault_cr(vault_id);
+
             // Remove from principal_to_vault_ids map
             if let Some(vault_ids) = s.principal_to_vault_ids.get_mut(&vault.owner) {
                 vault_ids.remove(&vault_id);
@@ -1522,7 +1528,7 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
                     s.principal_to_vault_ids.remove(&vault.owner);
                 }
             }
-            
+
             // Record the close vault event
             crate::event::record_close_vault(s, vault_id, None);
             
@@ -1636,6 +1642,8 @@ pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
         if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
             vault.collateral_amount = 0;
         }
+        // Wave-8b LIQ-002: collateral changed → re-key the index entry.
+        state.reindex_vault_cr(vault_id);
     });
 
     // Make the collateral transfer with appropriate fee deduction
@@ -1671,6 +1679,8 @@ pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
                 if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
                     vault.collateral_amount = amount_to_transfer.to_u64();
                 }
+                // Wave-8b LIQ-002: rollback restores collateral → re-key.
+                state.reindex_vault_cr(vault_id);
             });
 
             log!(
@@ -1767,6 +1777,8 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
                 v.borrowed_icusd_amount = ICUSD::new(0);
                 v.accrued_interest = ICUSD::new(0);
             }
+            // Wave-8b LIQ-002: dust forgiveness changes debt → re-key.
+            s.reindex_vault_cr(vault_id);
         });
     }
 
@@ -1917,6 +1929,8 @@ pub async fn withdraw_and_close_vault(vault_id: u64) -> Result<Option<u64>, Prot
                 v.borrowed_icusd_amount = ICUSD::new(0);
                 v.accrued_interest = ICUSD::new(0);
             }
+            // Wave-8b LIQ-002: dust forgiveness changes debt → re-key.
+            s.reindex_vault_cr(vault_id);
         });
     } else if vault.borrowed_icusd_amount > ICUSD::new(0) {
         log!(
@@ -1955,6 +1969,8 @@ pub async fn withdraw_and_close_vault(vault_id: u64) -> Result<Option<u64>, Prot
             if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
                 vault.collateral_amount = 0;
             }
+            // Wave-8b LIQ-002: collateral changed → re-key.
+            state.reindex_vault_cr(vault_id);
         });
 
         // Make the collateral transfer with appropriate fee deduction
@@ -1989,6 +2005,8 @@ pub async fn withdraw_and_close_vault(vault_id: u64) -> Result<Option<u64>, Prot
                     if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
                         vault.collateral_amount = amount_to_transfer.to_u64();
                     }
+                    // Wave-8b LIQ-002: rollback restores collateral → re-key.
+                    state.reindex_vault_cr(vault_id);
                 });
 
                 log!(
@@ -2037,9 +2055,17 @@ pub async fn withdraw_and_close_vault(vault_id: u64) -> Result<Option<u64>, Prot
 pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result<SuccessWithFee, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_partial_{}", vault_id))?;
-    
+
+    // Wave-8b LIQ-002: reject vaults that are not within the lowest-CR band.
+    // Forces liquidators to process the worst vault first; blocks MEV cherry-
+    // picking that would leave deeply-underwater vaults on the books.
+    if !read_state(|s| s.is_within_liquidation_band(vault_id)) {
+        guard_principal.fail();
+        return Err(ProtocolError::NotLowestCR);
+    }
+
     let liquidation_amount: ICUSD = icusd_amount.into();
-    
+
     if liquidation_amount < read_state(|s| s.min_icusd_amount) {
         guard_principal.fail();
         return Err(ProtocolError::AmountTooLow {
@@ -2187,6 +2213,7 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
         );
 
         // Clean up fully liquidated vaults (zero debt and zero collateral)
+        let mut removed = false;
         if let Some(vault) = s.vault_id_to_vaults.get(&vault_id) {
             if vault.borrowed_icusd_amount.0 == 0 && vault.collateral_amount == 0 {
                 let owner = vault.owner;
@@ -2198,7 +2225,16 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
                     }
                 }
                 log!(INFO, "[liquidate_vault_partial] Vault #{} fully liquidated — removed", vault_id);
+                removed = true;
             }
+        }
+
+        // Wave-8b LIQ-002: re-key after the partial deduction, or unindex if
+        // the vault was drained to zero and removed above.
+        if removed {
+            s.unindex_vault_cr(vault_id);
+        } else {
+            s.reindex_vault_cr(vault_id);
         }
 
         log!(INFO, "[liquidate_vault_partial] Partial liquidation completed, {} pending transfers created", 1);
@@ -2260,6 +2296,12 @@ pub async fn liquidate_vault_partial_with_stable(
 ) -> Result<SuccessWithFee, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_stable_{}", vault_id))?;
+
+    // Wave-8b LIQ-002: reject vaults that are not within the lowest-CR band.
+    if !read_state(|s| s.is_within_liquidation_band(vault_id)) {
+        guard_principal.fail();
+        return Err(ProtocolError::NotLowestCR);
+    }
 
     // Check if the selected stable token is enabled
     let is_enabled = read_state(|s| match token_type {
@@ -2433,6 +2475,13 @@ pub async fn liquidate_vault_partial_with_stable(
             },
         );
 
+        // Wave-8b LIQ-002: re-key the index entry after the partial deduction.
+        // (`liquidate_vault_partial_with_stable` does not currently include
+        // the zero-debt-zero-collateral cleanup branch its sibling has, so a
+        // simple reindex is sufficient. If a future cleanup branch is added
+        // here, mirror the unindex path from `liquidate_vault_partial`.)
+        s.reindex_vault_cr(vault_id);
+
         log!(INFO, "[liquidate_vault_stable] Partial liquidation completed, pending transfer created");
         interest_share
     });
@@ -2532,6 +2581,16 @@ pub async fn liquidate_vault_debt_already_burned(
     caller: Principal,
     three_usd_received_e8s: Option<u64>,
 ) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
+    // Wave-8b LIQ-002 SAFETY: this path is intentionally NOT gated on
+    // `is_within_liquidation_band`. It is the stability-pool-triggered
+    // writedown — the caller is gated on `caller == stability_pool_canister`
+    // by the entry point in `main.rs` (`stability_pool_liquidate_*`), and the
+    // SP has already committed icUSD via the 3pool burn. Adding the band gate
+    // here would mean a worst-CR-vault race could block legitimate SP
+    // writedowns and orphan the burned icUSD with no on-chain accounting.
+    // The CR index is still kept fresh by the post-mutation `reindex_vault_cr`
+    // call at the end of this function so subsequent user-initiated
+    // liquidations see the post-writedown CR.
     let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_debt_burned_{}", vault_id))?;
 
     let liquidation_amount: ICUSD = icusd_burned_e8s.into();
@@ -2650,6 +2709,7 @@ pub async fn liquidate_vault_debt_already_burned(
         );
 
         // Clean up fully liquidated vaults (zero debt and zero collateral)
+        let mut removed = false;
         if let Some(vault) = s.vault_id_to_vaults.get(&vault_id) {
             if vault.borrowed_icusd_amount.0 == 0 && vault.collateral_amount == 0 {
                 let owner = vault.owner;
@@ -2661,7 +2721,21 @@ pub async fn liquidate_vault_debt_already_burned(
                     }
                 }
                 log!(INFO, "[liquidate_vault_debt_burned] Vault #{} fully liquidated — removed", vault_id);
+                removed = true;
             }
+        }
+
+        // Wave-8b LIQ-002: re-key after partial deduction, or unindex if drained.
+        // SAFETY: this path is the SP-triggered writedown, gated on
+        // caller==stability_pool. It intentionally bypasses the
+        // `is_within_liquidation_band` check (the band gate is a
+        // user-input safety net, not an SP one — the SP has already
+        // committed icUSD via the 3pool burn). The index update still
+        // happens so subsequent user-initiated liquidations see fresh CR.
+        if removed {
+            s.unindex_vault_cr(vault_id);
+        } else {
+            s.reindex_vault_cr(vault_id);
         }
 
         interest_share
@@ -2721,7 +2795,13 @@ pub async fn liquidate_vault_debt_already_burned(
 pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_{}", vault_id))?;
-    
+
+    // Wave-8b LIQ-002: reject vaults that are not within the lowest-CR band.
+    if !read_state(|s| s.is_within_liquidation_band(vault_id)) {
+        guard_principal.fail();
+        return Err(ProtocolError::NotLowestCR);
+    }
+
     // Step 1: Validate vault is liquidatable
     let (vault, collateral_price, config_decimals, collateral_price_usd, mode) = match read_state(|s| {
         match s.vault_id_to_vaults.get(&vault_id) {
@@ -3116,6 +3196,13 @@ pub async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError>
 pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("partial_liquidate_vault_{}", arg.vault_id))?;
+
+    // Wave-8b LIQ-002: reject vaults that are not within the lowest-CR band.
+    if !read_state(|s| s.is_within_liquidation_band(arg.vault_id)) {
+        guard_principal.fail();
+        return Err(ProtocolError::NotLowestCR);
+    }
+
     let liquidator_payment: ICUSD = arg.amount.into();
 
     // Accrue interest before liquidation so CR check uses up-to-date debt.
@@ -3272,6 +3359,11 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
                 op_nonce: nonce,
             },
         );
+
+        // Wave-8b LIQ-002: re-key after the partial deduction. This endpoint
+        // doesn't include a zero-debt-zero-collateral cleanup branch (unlike
+        // `liquidate_vault_partial`), so a simple reindex is correct.
+        s.reindex_vault_cr(arg.vault_id);
 
         log!(INFO, "[partial_liquidate_vault] Protocol state updated, pending transfer created");
         interest_share

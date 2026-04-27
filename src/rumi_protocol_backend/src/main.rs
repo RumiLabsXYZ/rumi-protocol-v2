@@ -454,6 +454,26 @@ fn post_upgrade(arg: ProtocolArg) {
         }
     });
 
+    // Wave-8b LIQ-002 migration: rebuild `vault_cr_index` from
+    // `vault_id_to_vaults`. The index is `serde(skip_serializing)` (kept out
+    // of the on-disk snapshot to avoid a state-format migration), so it is
+    // empty after `replace_state(state)`. Walking the surviving vaults and
+    // re-keying each one converges the index to the post-upgrade CR
+    // distribution. O(N log N) one-shot. Empty for fresh installs.
+    let reindexed = mutate_state(|s| {
+        let vault_ids: Vec<u64> = s.vault_id_to_vaults.keys().copied().collect();
+        let count = vault_ids.len();
+        for vid in vault_ids {
+            s.reindex_vault_cr(vid);
+        }
+        count
+    });
+    log!(
+        INFO,
+        "[upgrade]: Wave-8b LIQ-002 migration rebuilt vault_cr_index for {} vault(s)",
+        reindexed,
+    );
+
     let end = ic_cdk::api::instruction_counter();
 
     log!(
@@ -2028,6 +2048,10 @@ async fn bot_confirm_liquidation(vault_id: u64) -> Result<(), ProtocolError> {
 
         s.bot_total_debt_covered_e8s += claim.debt_amount;
         s.bot_claims.remove(&vault_id);
+        // Wave-8b LIQ-002: bot-confirmed liquidation reduced debt+collateral
+        // → re-key the CR index entry. (No removal: bot path never drains to
+        // zero in a single confirm.)
+        s.reindex_vault_cr(vault_id);
     });
 
     log!(INFO, "[bot_confirm_liquidation] Confirmed liquidation for vault #{}: debt={}, collateral={}",
@@ -2441,6 +2465,12 @@ fn admin_resolve_stuck_claim(vault_id: u64, apply_debt_reduction: bool) -> Resul
             s.bot_budget_remaining_e8s += claim.debt_amount;
         }
         s.bot_claims.remove(&vault_id);
+        // Wave-8b LIQ-002: re-key only when debt/collateral was actually
+        // reduced. The pure-cancel branch only flips `bot_processing`, which
+        // does not affect CR.
+        if apply_debt_reduction {
+            s.reindex_vault_cr(vault_id);
+        }
     });
 
     log!(INFO, "[admin_resolve_stuck_claim] Resolved stuck claim for vault #{}: debt={}, collateral={}, debt_reduced={}",
@@ -2900,6 +2930,46 @@ fn set_liquidation_frozen(frozen: bool) -> Result<(), ProtocolError> {
 #[query]
 fn get_liquidation_frozen() -> bool {
     read_state(|s| s.liquidation_frozen)
+}
+
+/// Wave-8b LIQ-002: tune the liquidation-ordering tolerance band. The band is
+/// expressed in absolute CR units (e.g., 0.01 = 1% CR = 100 bps). Liquidator
+/// endpoints accept a vault only if its CR is within `tolerance` of the
+/// lowest-CR vault. Widening to 1.0 effectively disables the gate (all
+/// indexed vaults are in band); shrinking to 0 forces strict worst-first
+/// ordering. Default is `DEFAULT_LIQUIDATION_ORDERING_TOLERANCE` (1%).
+#[candid_method(update)]
+#[update]
+fn set_liquidation_ordering_tolerance(tolerance_e4: u64) -> Result<(), ProtocolError> {
+    require_controller()?;
+    // Argument is in basis points (10_000 = 1.0 = 100%). Convert to Decimal
+    // by dividing by 10_000. This keeps the wire format integer-only and
+    // matches `cr_index_key`'s scaling.
+    let tolerance = Ratio::from(
+        Decimal::from(tolerance_e4) / Decimal::from(10_000u64),
+    );
+    mutate_state(|s| {
+        s.set_liquidation_ordering_tolerance(tolerance);
+        log!(
+            INFO,
+            "[admin] liquidation_ordering_tolerance set to {} bps ({})",
+            tolerance_e4,
+            tolerance.to_f64()
+        );
+    });
+    Ok(())
+}
+
+/// Wave-8b LIQ-002: read the current liquidation-ordering tolerance band, in
+/// basis points (e.g., 100 = 1% CR = the default).
+#[candid_method(query)]
+#[query]
+fn get_liquidation_ordering_tolerance_bps() -> u64 {
+    read_state(|s| {
+        (s.liquidation_ordering_tolerance.0 * Decimal::from(10_000u64))
+            .to_u64()
+            .unwrap_or(0)
+    })
 }
 
 // ── End admin safety functions ────────────────────────────────────────────────
@@ -4712,6 +4782,9 @@ fn admin_correct_vault_debts(corrections: Vec<VaultDebtCorrection>) -> Result<St
                     c.vault_id, old_borrowed, c.correct_borrowed_e8s,
                     old_accrued, c.correct_accrued_interest_e8s
                 ));
+
+                // Wave-8b LIQ-002: admin correction changes debt → re-key.
+                s.reindex_vault_cr(c.vault_id);
             } else {
                 results.push(format!("vault#{}: NOT FOUND", c.vault_id));
             }
