@@ -28,6 +28,18 @@ use rust_decimal_macros::dec;
 
 use crate::compute_collateral_ratio;
 
+/// INT-003 defense in depth: clamp a raw borrow fee so `amount - fee >= 1 e8s`.
+/// The validation cap on borrowing-fee curve multipliers (see
+/// `state::MAX_BORROWING_FEE_MULTIPLIER`) is the primary fence; this clamp
+/// protects against any path that bypasses validation (legacy state, future
+/// drift) by ensuring `borrow_from_vault_internal::mint_icusd(amount - fee)`
+/// never underflows. `min_icusd_amount` (the protocol's borrow minimum) is
+/// orders of magnitude above 1 e8s, so the clamp never reduces a legitimate
+/// fee.
+pub fn clamp_borrow_fee(amount: ICUSD, raw_fee: ICUSD) -> ICUSD {
+    raw_fee.min(amount.saturating_sub(ICUSD::new(1)))
+}
+
 /// Checks that a partial repayment won't leave the vault with dust debt below `min_vault_debt`.
 /// Returns Ok(()) if remaining debt is zero or >= min_vault_debt, Err otherwise.
 fn check_min_vault_debt_after_repay(
@@ -829,7 +841,12 @@ async fn borrow_from_vault_internal(caller: Principal, arg: VaultArg) -> Result<
     let fee: ICUSD = read_state(|s| {
         let base_fee = s.get_borrowing_fee_for(&vault.collateral_type);
         let multiplier = s.get_borrowing_fee_multiplier(projected_cr);
-        amount * base_fee * multiplier
+        let raw_fee: ICUSD = amount * base_fee * multiplier;
+        // INT-003: clamp so `amount - fee >= 1 e8s`. Defense in depth: the
+        // curve validator caps the multiplier, but a legacy or migrated curve
+        // (or any future code path that writes the fee state outside
+        // `set_borrowing_fee_curve`) cannot panic the borrow path.
+        clamp_borrow_fee(amount, raw_fee)
     });
 
     match mint_icusd(amount - fee, caller).await {
@@ -1647,6 +1664,14 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
     let _guard_principal = GuardPrincipal::new(caller, &format!("withdraw_partial_{}", vault_id))?;
 
     let withdraw_amount: ICP = ICP::new(amount);
+
+    // INT-004: accrue interest on this vault before any CR-relevant read so
+    // the withdrawal headroom is computed against fresh debt. Mirrors the
+    // pattern already used in `borrow_from_vault_internal` and both
+    // `repay_to_vault` entry points. `accrue_single_vault` is a no-op when
+    // the vault has no debt or when the elapsed window is zero.
+    let now = ic_cdk::api::time();
+    mutate_state(|s| s.accrue_single_vault(vault_id, now));
 
     // Read vault, per-collateral price + config from state
     let (vault, collateral_price, config_decimals, ledger_canister_id, ledger_fee, min_deposit) = match read_state(|s| {

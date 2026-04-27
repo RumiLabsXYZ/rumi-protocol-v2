@@ -3681,18 +3681,12 @@ async fn set_borrowing_fee_curve(
         Some(json) => {
             let parsed: RateCurveV2 = serde_json::from_str(&json)
                 .map_err(|e| ProtocolError::GenericError(format!("Invalid curve JSON: {}", e)))?;
-            if parsed.markers.is_empty() {
-                return Err(ProtocolError::GenericError(
-                    "Curve must have at least 1 marker".to_string(),
-                ));
-            }
-            for m in &parsed.markers {
-                if m.multiplier.to_f64() <= 0.0 {
-                    return Err(ProtocolError::GenericError(
-                        "All multipliers must be positive".to_string(),
-                    ));
-                }
-            }
+            // INT-003: validate structure and multiplier upper bound. The
+            // upper bound prevents a runaway fee from underflowing
+            // `amount - fee` in `borrow_from_vault_internal`.
+            parsed
+                .validate()
+                .map_err(ProtocolError::GenericError)?;
             Some(parsed)
         }
     };

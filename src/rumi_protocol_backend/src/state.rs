@@ -52,6 +52,11 @@ pub const DEFAULT_RECOVERY_TARGET_CR: Ratio = Ratio::new(dec!(1.55)); // 155% �
 pub const DEFAULT_RECOVERY_CR_MULTIPLIER: Ratio = Ratio::new(dec!(1.033333333333333333)); // proportional buffer: recovery_cr = borrow_threshold × 1.0333...
 pub const DEFAULT_INTEREST_RATE_APR: Ratio = Ratio::new(dec!(0.0)); // 0% — placeholder for future accrual
 pub const DEFAULT_INTEREST_POOL_SHARE: Ratio = Ratio::new(dec!(0.75)); // 75% to stability pool — legacy, kept for old event replay
+/// INT-003: hard cap on a borrowing-fee curve marker's multiplier.
+/// The default curve ships with multipliers up to 3.0; 20.0 leaves ~6.6x of
+/// headroom for future high-risk-tier configurations while preventing the
+/// `amount - fee` underflow that would trap every borrow.
+pub const MAX_BORROWING_FEE_MULTIPLIER: Ratio = Ratio::new(dec!(20));
 
 /// Where a share of interest revenue is routed.
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
@@ -368,6 +373,31 @@ pub struct RateMarkerV2 {
 pub struct RateCurveV2 {
     pub markers: Vec<RateMarkerV2>,
     pub method: InterpolationMethod,
+}
+
+impl RateCurveV2 {
+    /// Validate the curve's structure and bounds. INT-003: the multiplier
+    /// upper bound prevents a runaway borrowing fee that would underflow
+    /// `amount - fee` in `borrow_from_vault_internal`. Returns an
+    /// `Err(message)` suitable for `ProtocolError::GenericError`.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.markers.is_empty() {
+            return Err("Curve must have at least 1 marker".to_string());
+        }
+        for m in &self.markers {
+            if m.multiplier.to_f64() <= 0.0 {
+                return Err("All multipliers must be positive".to_string());
+            }
+            if m.multiplier > MAX_BORROWING_FEE_MULTIPLIER {
+                return Err(format!(
+                    "Multiplier {} exceeds maximum allowed {}",
+                    m.multiplier.to_f64(),
+                    MAX_BORROWING_FEE_MULTIPLIER.to_f64(),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A recovery rate marker: at this named threshold, apply this multiplier.
@@ -2412,11 +2442,19 @@ impl State {
                         * rust_decimal::Decimal::from(vault.accrued_interest.0)
                         / rust_decimal::Decimal::from(vault.borrowed_icusd_amount.0))
                         .to_u64().unwrap_or(0);
-                    ICUSD::new(share.min(vault.accrued_interest.0))
+                    // INT-001: also cap by `repayed_amount` so the saturating
+                    // subtraction below cannot lose principal silently. The
+                    // deduct-side clamp keeps `accrued <= borrowed`, but defense
+                    // in depth here pins the property even on legacy state.
+                    ICUSD::new(share.min(vault.accrued_interest.0).min(repayed_amount.0))
                 } else {
                     ICUSD::new(0)
                 };
-                let principal_share = repayed_amount - interest_share;
+                // INT-001: saturating subtraction so a stale `accrued > borrowed`
+                // state cannot panic the canister via `Token::Sub`. With the
+                // `.min(repayed_amount)` cap above this can never under-flow
+                // in practice, but the saturating form documents the contract.
+                let principal_share = repayed_amount.saturating_sub(interest_share);
                 vault.borrowed_icusd_amount -= repayed_amount;
                 vault.accrued_interest -= interest_share;
                 (interest_share, principal_share)
@@ -2861,6 +2899,15 @@ impl State {
                 // deduction to exceed the vault's balance.
                 vault.borrowed_icusd_amount = vault.borrowed_icusd_amount.saturating_sub(icusd_amount_to_deduct);
                 vault.collateral_amount = vault.collateral_amount.saturating_sub(collateral_to_deduct);
+                // INT-001: redemption can shrink `borrowed_icusd_amount` below
+                // `accrued_interest`, breaking the invariant that drives the
+                // proportional interest-share math in `repay_to_vault`.
+                // Clamp here so any subsequent repay sees a consistent state.
+                // Excess interest is forgiven (matches the dust-debt forgiveness
+                // pattern in `withdraw_partial_collateral`).
+                if vault.accrued_interest > vault.borrowed_icusd_amount {
+                    vault.accrued_interest = vault.borrowed_icusd_amount;
+                }
             }
             None => ic_cdk::trap("cannot deduct from unknown vault"),
         }
@@ -3163,6 +3210,75 @@ mod tests {
         let v2 = state.vault_id_to_vaults.get(&2).unwrap();
         assert_eq!(v2.borrowed_icusd_amount, ICUSD::new(350_000_000));
         assert_eq!(v2.collateral_amount, 725_000_000);
+    }
+
+    // INT-001 regression fence — see
+    // `tests/audit_pocs_int_001_redemption_clamps_interest.rs` for the
+    // external-callers' invariant fence; this test exercises the private
+    // `deduct_amount_from_vault` directly.
+    #[test]
+    fn int_001_deduct_clamps_accrued_interest_to_residual_debt() {
+        let mut state = test_state();
+        let icp_ct = state.icp_collateral_type();
+
+        state.open_vault(crate::vault::Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            collateral_amount: 1_000_000_000,
+            borrowed_icusd_amount: ICUSD::new(500_000_000),
+            collateral_type: icp_ct,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(100_000_000), // 1 icUSD of accrued interest
+            bot_processing: false,
+        });
+
+        // Redemption deducts 4.95 icUSD, leaving residual borrowed=0.05 icUSD.
+        // Pre-fix: accrued_interest stays at 1 icUSD, breaking the invariant.
+        state.deduct_amount_from_vault(0, ICUSD::from(495_000_000u64), 1);
+
+        let v = state.vault_id_to_vaults.get(&1).unwrap();
+        assert_eq!(v.borrowed_icusd_amount, ICUSD::new(5_000_000));
+        assert!(
+            v.accrued_interest <= v.borrowed_icusd_amount,
+            "INT-001 invariant: accrued_interest ({}) must not exceed borrowed_icusd_amount ({}) post-deduct",
+            v.accrued_interest.to_u64(),
+            v.borrowed_icusd_amount.to_u64(),
+        );
+        // Post-fix: accrued is clamped down to the new borrowed (5M).
+        assert_eq!(v.accrued_interest, ICUSD::new(5_000_000));
+    }
+
+    // INT-001 regression fence — full repay must not panic when called on a
+    // vault that already had its invariant broken (legacy state arriving from
+    // a pre-fix canister snapshot, or any future code path that touches debt
+    // without going through `deduct_amount_from_vault`).
+    #[test]
+    fn int_001_repay_saturates_principal_when_accrued_exceeds_borrowed() {
+        let mut state = test_state();
+        let icp_ct = state.icp_collateral_type();
+
+        state.open_vault(crate::vault::Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            collateral_amount: 1_000_000_000,
+            borrowed_icusd_amount: ICUSD::new(5_000_000),
+            collateral_type: icp_ct,
+            last_accrual_time: 0,
+            // Intentionally broken invariant — accrued > borrowed.
+            accrued_interest: ICUSD::new(100_000_000),
+            bot_processing: false,
+        });
+
+        // Repay all 5M residual; pre-fix this panics with `underflow` in
+        // `Token::Sub`. Post-fix the saturating subtraction zeroes the
+        // principal share without panicking.
+        let (interest_share, principal_share) =
+            state.repay_to_vault(1, ICUSD::new(5_000_000));
+
+        assert_eq!(interest_share, ICUSD::new(5_000_000));
+        assert_eq!(principal_share, ICUSD::new(0));
+        let v = state.vault_id_to_vaults.get(&1).unwrap();
+        assert_eq!(v.borrowed_icusd_amount, ICUSD::new(0));
     }
 
     #[test]
