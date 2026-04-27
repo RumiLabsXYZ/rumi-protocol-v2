@@ -4,15 +4,25 @@
 use std::time::Duration;
 use crate::{collectors, sources, state, tailing};
 
-pub fn setup_timers() {
-    // Fire daily + fast snapshots immediately on init/upgrade (set_timer_interval
-    // waits for the full interval before the first tick).
-    ic_cdk_timers::set_timer(Duration::from_secs(0), || {
-        ic_cdk::spawn(daily_snapshot());
-    });
-    ic_cdk_timers::set_timer(Duration::from_secs(0), || {
-        ic_cdk::spawn(fast_snapshot());
-    });
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SetupContext {
+    Init,
+    PostUpgrade,
+}
+
+pub fn setup_timers(ctx: SetupContext) {
+    // Fire daily + fast snapshots immediately on init only. On post_upgrade
+    // the pre-existing rows already cover the recent period, so re-firing
+    // would create duplicate snapshots for the same day. Intervals reset on
+    // upgrade and resume normally without an immediate fire.
+    if ctx == SetupContext::Init {
+        ic_cdk_timers::set_timer(Duration::from_secs(0), || {
+            ic_cdk::spawn(daily_snapshot());
+        });
+        ic_cdk_timers::set_timer(Duration::from_secs(0), || {
+            ic_cdk::spawn(fast_snapshot());
+        });
+    }
 
     ic_cdk_timers::set_timer_interval(Duration::from_secs(60), || {
         ic_cdk::spawn(pull_cycle());
