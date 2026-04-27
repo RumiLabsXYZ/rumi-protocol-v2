@@ -88,6 +88,20 @@ pub fn default_interest_split() -> Vec<InterestRecipient> {
 }
 pub const DUST_DEBT_THRESHOLD: u64 = 50_000; // 0.0005 icUSD — debt below this is forgiven on withdrawal
 
+/// Wave-8b LIQ-002: default tolerance band (in absolute CR units) above the
+/// worst-CR vault inside which liquidations are accepted. 0.01 = 1% CR. With
+/// the band in basis points, this is 100 bps. Admin-tunable via
+/// `set_liquidation_ordering_tolerance`. Widening to 1.0 effectively
+/// disables the gate (every indexed vault is in band).
+pub const DEFAULT_LIQUIDATION_ORDERING_TOLERANCE: Ratio = Ratio::new(dec!(0.01));
+
+/// Wave-8b LIQ-002: serde-default factory for `liquidation_ordering_tolerance`.
+/// Old snapshots without the field decode as if the protocol had always been
+/// running with the 1% default.
+fn default_liquidation_ordering_tolerance() -> Ratio {
+    DEFAULT_LIQUIDATION_ORDERING_TOLERANCE
+}
+
 /// Default Layer 1 multipliers at each CR marker
 pub const DEFAULT_RATE_MULTIPLIER_HEALTHY: Ratio = Ratio::new(dec!(1.0));
 pub const DEFAULT_RATE_MULTIPLIER_WARNING: Ratio = Ratio::new(dec!(1.75));
@@ -875,6 +889,37 @@ pub struct State {
     /// where liquidating against the cached price would be dangerous.
     #[serde(default)]
     pub liquidation_frozen: bool,
+
+    /// Wave-8b LIQ-002: secondary index of vaults keyed by CR (in basis points,
+    /// ascending). Lets liquidator endpoints check that a caller-provided
+    /// `vault_id` is among the worst-CR vaults, blocking MEV cherry-picking.
+    ///
+    /// The key is `(cr * 10_000) as u64`. CR is computed via
+    /// `compute_collateral_ratio` and reflects the cached collateral price at
+    /// the time of the mutation that triggered the re-key. The index is NOT
+    /// re-keyed on price update — within a single collateral type, all vaults
+    /// move proportionally with price, preserving relative ordering.
+    /// Cross-collateral ordering can drift between price ticks but liquidators
+    /// specialize per asset, so the band gate stays correct in practice.
+    /// (See `liq_002_price_update_does_not_rekey` for the contract.)
+    ///
+    /// Multiple vaults may share a CR bucket (e.g., all zero-debt vaults sit
+    /// at u64::MAX), hence the inner `BTreeSet`.
+    ///
+    /// `serde(default, skip_serializing)`: NOT persisted in the on-disk
+    /// snapshot. `post_upgrade` rebuilds the index in-memory from
+    /// `vault_id_to_vaults`. This keeps existing on-chain state forward-
+    /// compatible without a snapshot-format migration.
+    #[serde(default, skip_serializing)]
+    pub vault_cr_index: BTreeMap<u64, BTreeSet<u64>>,
+
+    /// Wave-8b LIQ-002: tolerance band (in absolute CR units) above the
+    /// worst-CR vault inside which liquidations are accepted. e.g., 0.01 means
+    /// any vault within 0.01 CR (= 100 bps) of the lowest CR may be
+    /// liquidated. Widening to 1.0 effectively disables the gate. Admin-
+    /// tunable via `set_liquidation_ordering_tolerance`.
+    #[serde(default = "default_liquidation_ordering_tolerance")]
+    pub liquidation_ordering_tolerance: Ratio,
 }
 
 /// Serde-only fallback: provides zero/empty/None defaults for fields missing from
@@ -973,6 +1018,8 @@ impl Default for State {
             op_nonce_counter: 0,
             pending_outlier_prices: BTreeMap::new(),
             liquidation_frozen: false,
+            vault_cr_index: BTreeMap::new(),
+            liquidation_ordering_tolerance: DEFAULT_LIQUIDATION_ORDERING_TOLERANCE,
         }
     }
 }
@@ -1163,6 +1210,8 @@ impl From<InitArg> for State {
             op_nonce_counter: 0,
             pending_outlier_prices: BTreeMap::new(),
             liquidation_frozen: false,
+            vault_cr_index: BTreeMap::new(),
+            liquidation_ordering_tolerance: DEFAULT_LIQUIDATION_ORDERING_TOLERANCE,
         }
     }
 }
@@ -1650,6 +1699,15 @@ impl State {
 
     /// Set the ICP rate on both the global field AND the ICP CollateralConfig's `last_price`.
     /// This is the ONLY correct way to update the ICP price.
+    ///
+    /// SAFETY (Wave-8b LIQ-002): this function MUST NOT call `reindex_vault_cr`.
+    /// The CR index keys reflect the cached price at the time of each vault's
+    /// last debt/collateral mutation. Within a single collateral type, all
+    /// vaults move proportionally with price, preserving relative ordering —
+    /// re-keying every vault on every price tick would burn O(N) cycles for
+    /// zero ordering benefit. Cross-collateral ordering can drift between
+    /// price ticks, but liquidators specialize per asset and the band
+    /// tolerance handles intra-asset drift between user actions.
     pub fn set_icp_rate(&mut self, rate: crate::numeric::UsdIcp, timestamp_nanos: Option<u64>) {
         self.last_icp_rate = Some(rate);
         if let Some(ts) = timestamp_nanos {
@@ -1971,6 +2029,13 @@ impl State {
 
     /// Accrue interest on a single vault up to `now_nanos`.
     /// Two-phase for borrow checker: compute rate (immutable), then apply (mutable).
+    /// SAFETY (Wave-8b LIQ-002): interest accrual changes a vault's debt and
+    /// therefore its CR. We deliberately DO NOT re-key the index here. Each
+    /// user-facing operation (borrow / repay / margin / withdraw / partial-liq)
+    /// already calls `reindex_vault_cr` at the end of its `mutate_state` block,
+    /// so the index converges to the post-accrual CR on the next user action.
+    /// Re-keying inside passive accrual would be O(N log N) per timer tick for
+    /// zero ordering benefit at the band tolerance scale (default 1% CR).
     pub fn accrue_single_vault(&mut self, vault_id: u64, now_nanos: u64) {
         // Phase 1: compute rate (immutable borrow of self)
         let rate_and_elapsed = {
@@ -2012,6 +2077,10 @@ impl State {
 
     /// Accrue interest on ALL vaults with outstanding debt.
     /// Two-phase: collect (vault_id, rate, elapsed) immutably, then apply mutably.
+    ///
+    /// SAFETY (Wave-8b LIQ-002): same contract as `accrue_single_vault` —
+    /// passive accrual does not re-key the CR index. See that function's
+    /// SAFETY block for the rationale.
     pub fn accrue_all_vault_interest(&mut self, now_nanos: u64) {
         // Phase 1: compute rates for all vaults (immutable)
         let accruals: Vec<(u64, Ratio, u64)> = {
@@ -2286,6 +2355,139 @@ impl State {
         }
     }
 
+    // ---- Wave-8b LIQ-002: sorted-troves CR index ---------------------------
+
+    /// Convert a CR ratio into the integer key used by `vault_cr_index`.
+    /// Saturates at `u64::MAX` so a healthy zero-debt vault (CR = Decimal::MAX)
+    /// sorts after every underwater one. Negative or non-finite CRs are
+    /// coerced to zero — they sort to the bottom of the index, which is the
+    /// conservative direction (treat as worst-CR, gate by per-vault CR
+    /// check before any state change).
+    ///
+    /// Uses `checked_mul`/`checked_to_u64` because zero-debt vaults return
+    /// `Ratio::from(Decimal::MAX)` from `compute_collateral_ratio`, and a bare
+    /// `Decimal::MAX * 10_000` panics with "Multiplication overflowed".
+    pub fn cr_index_key(cr: Ratio) -> u64 {
+        match cr.0.checked_mul(Decimal::from(10_000u64)) {
+            Some(scaled) => scaled.to_u64().unwrap_or(u64::MAX),
+            None => u64::MAX,
+        }
+    }
+
+    /// Insert or move a vault's entry in `vault_cr_index`. Idempotent: any
+    /// prior entry for `vault_id` is removed first. Reads the vault's current
+    /// CR via `compute_collateral_ratio` and the cached collateral price.
+    ///
+    /// **Call after every mutation that changes the vault's debt or
+    /// collateral.** Single mutator pattern: every call site must mutate
+    /// `vault_id_to_vaults` THEN call `reindex_vault_cr(vault_id)` inside the
+    /// same `mutate_state` closure. Never split.
+    ///
+    /// Sites currently wired:
+    ///   * `state::open_vault` — insert.
+    ///   * `state::borrow_from_vault` / `state::repay_to_vault` — re-key.
+    ///   * `state::add_margin_to_vault` / `state::remove_margin_from_vault` — re-key.
+    ///   * `state::deduct_amount_from_vault` (redemption water-fill) — re-key.
+    ///   * `state::liquidate_vault` (recovery-mode partial branch) — re-key.
+    ///   * `vault::*` partial-liquidation endpoints — re-key after the manual
+    ///     `vault_id_to_vaults.get_mut` mutation.
+    ///   * `vault::withdraw_partial_collateral` — re-key.
+    ///
+    /// SAFETY: `on_price_update` MUST NOT call this. The CR key is computed
+    /// from the cached collateral price; within a single collateral type all
+    /// vaults move proportionally with price, preserving relative ordering.
+    /// Re-keying every vault on every 5-minute price tick would burn O(N)
+    /// cycles for zero ordering benefit.
+    pub fn reindex_vault_cr(&mut self, vault_id: u64) {
+        // Drop any prior entry first so a re-key from one bucket to another
+        // never leaves a stale duplicate.
+        self.unindex_vault_cr(vault_id);
+
+        let vault = match self.vault_id_to_vaults.get(&vault_id) {
+            Some(v) => v.clone(),
+            None => return,
+        };
+
+        // Look up the cached price; unavailable price → CR sorts via the
+        // ZERO branch in `compute_collateral_ratio`, which keys at 0 (bottom
+        // of the index). The liquidation endpoints independently require a
+        // fresh price before proceeding, so a vault keyed without a price
+        // cannot be liquidated until a price is available.
+        let collateral_price = self
+            .get_collateral_price_decimal(&vault.collateral_type)
+            .map(UsdIcp::from)
+            .unwrap_or(UsdIcp::from(Decimal::ZERO));
+
+        let cr = compute_collateral_ratio(&vault, collateral_price, self);
+        let key = Self::cr_index_key(cr);
+        self.vault_cr_index
+            .entry(key)
+            .or_insert_with(BTreeSet::new)
+            .insert(vault_id);
+    }
+
+    /// Drop a vault from `vault_cr_index`. Idempotent — safe to call on a
+    /// vault that was never indexed.
+    ///
+    /// Call from `close_vault` and from any cleanup that removes the vault
+    /// entirely from `vault_id_to_vaults` (e.g., the full-liquidation branch
+    /// of `state::liquidate_vault`).
+    pub fn unindex_vault_cr(&mut self, vault_id: u64) {
+        // The reverse lookup (vault_id → key) would speed this up but doubles
+        // bookkeeping. Linear over the buckets in CR order is acceptable: at
+        // current TVL the index is small, and the BTreeMap iteration short-
+        // circuits the moment we find the vault's bucket.
+        let mut empty_key: Option<u64> = None;
+        for (key, bucket) in self.vault_cr_index.iter_mut() {
+            if bucket.remove(&vault_id) {
+                if bucket.is_empty() {
+                    empty_key = Some(*key);
+                }
+                break;
+            }
+        }
+        if let Some(k) = empty_key {
+            self.vault_cr_index.remove(&k);
+        }
+    }
+
+    /// Returns true if `vault_id` is within `liquidation_ordering_tolerance`
+    /// (in CR units) of the bottom of the index — i.e., one of the worst-CR
+    /// vaults. Liquidator endpoints gate on this BEFORE the per-vault CR
+    /// check.
+    ///
+    /// Returns false for an unindexed `vault_id` (defensive: the caller must
+    /// have just attempted to liquidate a vault that does not exist or that
+    /// was opened during the call but not re-keyed).
+    pub fn is_within_liquidation_band(&self, vault_id: u64) -> bool {
+        let mut my_key: Option<u64> = None;
+        for (key, bucket) in self.vault_cr_index.iter() {
+            if bucket.contains(&vault_id) {
+                my_key = Some(*key);
+                break;
+            }
+        }
+        let my_key = match my_key {
+            Some(k) => k,
+            None => return false,
+        };
+        let bottom_key = match self.vault_cr_index.keys().next() {
+            Some(k) => *k,
+            None => return false,
+        };
+        let tolerance_bps = (self.liquidation_ordering_tolerance.0
+            * Decimal::from(10_000u64))
+            .to_u64()
+            .unwrap_or(0);
+        my_key.saturating_sub(bottom_key) <= tolerance_bps
+    }
+
+    /// Admin setter for the LIQ-002 tolerance band. No upper bound — admin
+    /// can widen to effectively-disable the gate during emergencies.
+    pub fn set_liquidation_ordering_tolerance(&mut self, tolerance: Ratio) {
+        self.liquidation_ordering_tolerance = tolerance;
+    }
+
     /// Sync a global fee-setting event to the ICP CollateralConfig (for backward compat during replay)
     pub fn sync_icp_collateral_config(&mut self) {
         let icp = self.icp_ledger_principal;
@@ -2382,6 +2584,8 @@ impl State {
         }
         // Index by collateral type
         self.index_vault_by_collateral(collateral_type, vault_id);
+        // Wave-8b LIQ-002: insert into the sorted-troves CR index.
+        self.reindex_vault_cr(vault_id);
     }
 
     pub fn close_vault(&mut self, vault_id: u64) {
@@ -2398,6 +2602,8 @@ impl State {
             } else {
                 ic_cdk::trap("BUG: tried to close vault with no owner");
             }
+            // Wave-8b LIQ-002: drop from the sorted-troves CR index.
+            self.unindex_vault_cr(vault_id);
         } else {
             ic_cdk::trap("BUG: tried to close unknown vault");
         }
@@ -2410,6 +2616,8 @@ impl State {
             }
             None => ic_cdk::trap("borrowing from unknown vault"),
         }
+        // Wave-8b LIQ-002: re-key after debt change.
+        self.reindex_vault_cr(vault_id);
     }
 
     pub fn add_margin_to_vault(&mut self, vault_id: u64, add_margin: ICP) {
@@ -2419,6 +2627,8 @@ impl State {
             }
             None => ic_cdk::trap("adding margin to unknown vault"),
         }
+        // Wave-8b LIQ-002: re-key after collateral change.
+        self.reindex_vault_cr(vault_id);
     }
 
     pub fn remove_margin_from_vault(&mut self, vault_id: u64, amount: ICP) {
@@ -2429,12 +2639,14 @@ impl State {
             }
             None => ic_cdk::trap("removing margin from unknown vault"),
         }
+        // Wave-8b LIQ-002: re-key after collateral change.
+        self.reindex_vault_cr(vault_id);
     }
 
     /// Repay debt to a vault. Returns `(interest_share, principal_share)` of the repayment.
     /// The interest share is proportional to how much of the vault's current debt is accrued interest.
     pub fn repay_to_vault(&mut self, vault_id: u64, repayed_amount: ICUSD) -> (ICUSD, ICUSD) {
-        match self.vault_id_to_vaults.get_mut(&vault_id) {
+        let result = match self.vault_id_to_vaults.get_mut(&vault_id) {
             Some(vault) => {
                 assert!(repayed_amount <= vault.borrowed_icusd_amount);
                 let interest_share = if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
@@ -2460,7 +2672,12 @@ impl State {
                 (interest_share, principal_share)
             }
             None => ic_cdk::trap("repaying to unknown vault"),
-        }
+        };
+        // Wave-8b LIQ-002: re-key after debt change. Vault stays in the map
+        // (full repays are followed by close_vault elsewhere), so reindex —
+        // not unindex — here.
+        self.reindex_vault_cr(vault_id);
+        result
     }
 
     pub fn provide_liquidity(&mut self, amount: ICUSD, caller: Principal) {
@@ -2631,7 +2848,7 @@ impl State {
                 decimals,
             ).min(vault.collateral_amount);
 
-            match self.vault_id_to_vaults.get_mut(&vault_id) {
+            let interest_share = match self.vault_id_to_vaults.get_mut(&vault_id) {
                 Some(vault) => {
                     // Compute interest share proportionally before reducing debt
                     let interest_share = if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
@@ -2648,7 +2865,11 @@ impl State {
                     interest_share
                 }
                 None => ic_cdk::trap("liquidating unknown vault"),
-            }
+            };
+            // Wave-8b LIQ-002: recovery-mode partial liquidation mutates the
+            // vault in place; re-key its index entry to reflect the new CR.
+            self.reindex_vault_cr(vault_id);
+            interest_share
         } else {
             // Full liquidation — removes vault entirely
             // All remaining accrued_interest is interest revenue
@@ -2658,6 +2879,9 @@ impl State {
                     vault_ids.remove(&vault_id);
                 }
             }
+            // Wave-8b LIQ-002: full liquidation removes the vault entirely;
+            // drop its index entry too.
+            self.unindex_vault_cr(vault_id);
             interest_share
         }
     }
@@ -2669,6 +2893,7 @@ impl State {
             .get(&vault_id)
             .expect("bug: vault not found");
         let entries = distribute_across_vaults(&self.vault_id_to_vaults, vault.clone());
+        let touched_ids: Vec<u64> = entries.iter().map(|e| e.vault_id).collect();
         for entry in entries {
             match self.vault_id_to_vaults.entry(entry.vault_id) {
                 Occupied(mut vault_entry) => {
@@ -2684,6 +2909,14 @@ impl State {
                 vault_ids.remove(&vault_id);
             }
         }
+        // Wave-8b LIQ-002: re-key every vault that received a share, then drop
+        // the source vault from the index. `redistribute_vault` is currently
+        // only reachable from event replay (no #[update] wires it), but the
+        // index contract holds for any caller.
+        for tid in touched_ids {
+            self.reindex_vault_cr(tid);
+        }
+        self.unindex_vault_cr(vault_id);
     }
     
     /// Water-filling redemption: spread redemptions across vaults to equalize CR.
@@ -2911,6 +3144,10 @@ impl State {
             }
             None => ic_cdk::trap("cannot deduct from unknown vault"),
         }
+        // Wave-8b LIQ-002: redemption water-fill mutates each touched vault's
+        // debt/collateral; re-key its index entry so the next redemption /
+        // liquidation sees the updated CR.
+        self.reindex_vault_cr(vault_id);
     }
 
     pub fn check_semantically_eq(&self, other: &Self) -> Result<(), String> {

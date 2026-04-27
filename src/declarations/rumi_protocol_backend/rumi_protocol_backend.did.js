@@ -97,6 +97,7 @@ export const idlFactory = ({ IDL }) => {
     'AmountTooLow' : IDL.Record({ 'minimum_amount' : IDL.Nat64 }),
     'TransferFromError' : IDL.Tuple(TransferFromError, IDL.Nat64),
     'CallerNotOwner' : IDL.Null,
+    'NotLowestCR' : IDL.Null,
   });
   const Result = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : ProtocolError });
   const VaultArg = IDL.Record({ 'vault_id' : IDL.Nat64, 'amount' : IDL.Nat64 });

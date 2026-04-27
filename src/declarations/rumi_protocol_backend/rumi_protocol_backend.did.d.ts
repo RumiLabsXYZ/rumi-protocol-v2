@@ -649,7 +649,8 @@ export type ProtocolError = { 'GenericError' : string } |
   { 'AnonymousCallerNotAllowed' : null } |
   { 'AmountTooLow' : { 'minimum_amount' : bigint } } |
   { 'TransferFromError' : [TransferFromError, bigint] } |
-  { 'CallerNotOwner' : null };
+  { 'CallerNotOwner' : null } |
+  { 'NotLowestCR' : null };
 export interface ProtocolSnapshot {
   'total_debt' : bigint,
   'collateral_snapshots' : Array<CollateralSnapshot>,
