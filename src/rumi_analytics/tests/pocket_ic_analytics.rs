@@ -651,15 +651,7 @@ fn stability_snapshot_skipped_when_source_unavailable() {
     assert!(resp.rows.is_empty(), "no stability row when source canister unavailable");
 }
 
-// Pre-existing failure on main: assertion `vault log lost rows on upgrade`
-// (left: 2, right: 3) -- a row goes missing across the analytics canister
-// upgrade. Verified pre-existing at commit b1c2a7a; not introduced by
-// Wave-6 (upgrade-safety changes are limited to stability_pool and rumi_amm,
-// neither of which feeds rumi_analytics directly). Marked #[ignore] so the
-// pre-deploy hook can proceed; tracked as a real bug for separate
-// investigation (likely a missing pre_upgrade snapshot for the vault log).
 #[test]
-#[ignore = "pre-existing bug on main: vault log row lost across analytics upgrade"]
 fn upgrade_preserves_supply_cache_and_tvl_log() {
     let env = setup();
     env.pic.advance_time(std::time::Duration::from_secs(86_400 + 65));
