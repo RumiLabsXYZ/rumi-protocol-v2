@@ -64,6 +64,32 @@ fn check_min_vault_debt_after_repay(
     Ok(())
 }
 
+/// LIQ-003: round a partial-liquidation amount up to the vault's full debt if
+/// the residual would land in the open interval `(0, min_vault_debt)`. Mirrors
+/// the dust-forgiveness pattern in `repay_to_vault`. The repay path enforces
+/// `residual == 0 || residual >= min_vault_debt` via
+/// `check_min_vault_debt_after_repay`; partial-liquidation endpoints must
+/// enforce the same invariant on the residual after their cap math, otherwise
+/// a liquidator could leave a vault with debt below `min_vault_debt` and bypass
+/// the repay-side guarantee.
+///
+/// Returns the (possibly-rounded-up) amount the liquidator will actually
+/// consume. The caller is responsible for pulling the corresponding icUSD
+/// (or stable) from the liquidator and reducing vault debt by the returned
+/// amount.
+pub fn round_up_partial_liq_dust(
+    vault: &Vault,
+    proposed_amount: ICUSD,
+    min_vault_debt: ICUSD,
+) -> ICUSD {
+    let residual = vault.borrowed_icusd_amount.saturating_sub(proposed_amount);
+    if residual > ICUSD::new(0) && residual < min_vault_debt {
+        vault.borrowed_icusd_amount
+    } else {
+        proposed_amount
+    }
+}
+
 #[derive(CandidType, Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct OpenVaultSuccess {
     pub vault_id: u64,
@@ -2053,7 +2079,14 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
                     let max_liquidatable = s.compute_partial_liquidation_cap(vault, collateral_price_usd);
 
                     // Ensure requested amount doesn't exceed maximum
-                    let actual_liquidation_amount = liquidation_amount.min(max_liquidatable).min(vault.borrowed_icusd_amount);
+                    let capped_amount = liquidation_amount.min(max_liquidatable).min(vault.borrowed_icusd_amount);
+
+                    // LIQ-003: round residual up to full debt if it would land
+                    // in (0, min_vault_debt). Mirrors the repay-side invariant.
+                    let min_vault_debt = s.get_collateral_config(&vault.collateral_type)
+                        .map(|c| c.min_vault_debt)
+                        .unwrap_or(ICUSD::new(0));
+                    let actual_liquidation_amount = round_up_partial_liq_dust(vault, capped_amount, min_vault_debt);
 
                     if actual_liquidation_amount == ICUSD::new(0) {
                         return Err("Cannot liquidate zero amount".to_string());
@@ -2286,7 +2319,14 @@ pub async fn liquidate_vault_partial_with_stable(
                     // Cap at the amount needed to restore vault CR to recovery_target_cr
                     let max_liquidatable = s.compute_partial_liquidation_cap(vault, collateral_price_usd);
 
-                    let actual_liquidation_amount = liquidation_amount.min(max_liquidatable).min(vault.borrowed_icusd_amount);
+                    let capped_amount = liquidation_amount.min(max_liquidatable).min(vault.borrowed_icusd_amount);
+
+                    // LIQ-003: round residual up to full debt if it would land
+                    // in (0, min_vault_debt). Mirrors the repay-side invariant.
+                    let min_vault_debt = s.get_collateral_config(&vault.collateral_type)
+                        .map(|c| c.min_vault_debt)
+                        .unwrap_or(ICUSD::new(0));
+                    let actual_liquidation_amount = round_up_partial_liq_dust(vault, capped_amount, min_vault_debt);
 
                     if actual_liquidation_amount == ICUSD::new(0) {
                         return Err("Cannot liquidate zero amount".to_string());
@@ -3131,10 +3171,16 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         });
     }
 
-    // In recovery mode, cap the payment at the amount needed to restore CR to target
+    // Cap payment to recovery_target_cr, then round residual up to full debt
+    // if it would land in (0, min_vault_debt) (LIQ-003: mirrors the repay-side
+    // invariant in `check_min_vault_debt_after_repay`).
     let liquidator_payment = read_state(|s| {
         let cap = s.compute_partial_liquidation_cap(&vault, collateral_price_usd);
-        liquidator_payment.min(cap)
+        let capped = liquidator_payment.min(cap);
+        let min_vault_debt = s.get_collateral_config(&vault.collateral_type)
+            .map(|c| c.min_vault_debt)
+            .unwrap_or(ICUSD::new(0));
+        round_up_partial_liq_dust(&vault, capped, min_vault_debt)
     });
 
     if liquidator_payment > vault.borrowed_icusd_amount {
