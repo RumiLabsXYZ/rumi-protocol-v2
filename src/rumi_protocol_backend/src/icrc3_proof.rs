@@ -1,26 +1,44 @@
-//! Wave-8c LIQ-004: ICRC-3 burn / transfer proof verification for SP-triggered writedowns.
+//! Wave-8c/8d LIQ-004: ICRC-3 burn / transfer proof verification for SP-triggered writedowns.
 //!
 //! The stability pool entry points (`stability_pool_liquidate_debt_burned`,
 //! `stability_pool_liquidate_with_reserves`) call into
 //! `vault::liquidate_vault_debt_already_burned`, which intentionally bypasses
-//! the `ratio < min_liq_ratio` check. Today the only access control is
-//! `caller == stability_pool_canister`. If the SP is buggy, upgraded to buggy
-//! code, or its principal is rotated to a malicious one, the backend would
-//! write down debt on healthy vaults with no sanity check.
+//! the `ratio < min_liq_ratio` check. Without this module the only access
+//! control would be `caller == stability_pool_canister`. If the SP were
+//! buggy, upgraded to buggy code, or its principal rotated to a malicious
+//! one, the backend would write down debt on healthy vaults with no sanity
+//! check.
 //!
-//! This module adds defense-in-depth: the SP must pass a `SpWritedownProof`
-//! pointing at a real ICRC-3 block on the relevant ledger, and the backend
-//! verifies the block matches expected memo, amount, and accounts before
-//! accepting the writedown.
+//! This module adds defense-in-depth: every writedown carries a
+//! `SpWritedownProof` pointing at a real ICRC-3 block on the relevant
+//! ledger, and the backend verifies the block matches expected accounts,
+//! amount, and (for the legacy burn path) memo before accepting the
+//! writedown.
 //!
-//! Memo binding: every proof carries a memo derived from the vault id, so a
-//! valid burn proof for vault A cannot be replayed against vault B. Replay
-//! within a single vault is also blocked by the consumed-proof set on State
-//! (see `State::consumed_writedown_proofs`).
+//! Vault binding has two flavours, one per ledger kind:
 //!
-//! Phase-1 rollout: `proof: Option<SpWritedownProof>` keeps the legacy
-//! caller-trust path open for one deploy window so the existing SP can keep
-//! calling. Phase-2 (a separate wave) flips Optional to required.
+//!   * `IcusdBurn` (legacy `_debt_burned` path) — the SP autonomously chose
+//!     which vault to burn for and encoded the vault id in the burn block's
+//!     memo. The verifier decodes that memo and asserts it matches the call
+//!     site's vault id, so a burn proof for vault A cannot be replayed
+//!     against vault B.
+//!   * `ThreePoolTransfer` (reserves `_with_reserves` path) — the proof is
+//!     produced by the backend itself after `transfer_3usd_to_reserves`
+//!     succeeds, so vault binding is enforced by code construction at
+//!     proof-build time. The on-chain block has no memo to check (the
+//!     `rumi_3pool` ledger's `Icrc3Transaction::Transfer` variant does not
+//!     persist memos into ICRC-3 blocks; it only consumes them for ICRC-1
+//!     dedup). Verification on this kind asserts op / amount / from / to,
+//!     and the consumed-proof set still blocks block-index replay.
+//!
+//! Replay within a single vault is blocked by the consumed-proof set on
+//! `State` (see `State::consumed_writedown_proofs`).
+//!
+//! Wave-8d Phase-2 rollout: `proof: SpWritedownProof` is required on the
+//! legacy `_debt_burned` entry point. The reserves entry point
+//! (`_with_reserves`) builds its proof internally so it has no proof
+//! parameter on its public surface. The Wave-8c migration WARN-log path
+//! (`proof: None` with a per-call WARN) has been retired.
 
 use candid::{CandidType, Nat, Principal};
 use icrc_ledger_types::icrc::generic_value::{ICRC3Value, ICRC3Map};
@@ -178,17 +196,28 @@ pub fn decode_block(value: &ICRC3Value) -> Result<DecodedBlock, String> {
 }
 
 /// Pure-logic validator. Asserts `block` matches `expected` for the given
-/// `ledger_kind`. Returns the validated vault id (decoded from the memo)
-/// on success.
+/// `ledger_kind`. Returns the validated vault id on success.
 ///
-/// Rules:
-///   * `ledger_kind == IcusdBurn`: `op == "burn"`.
-///   * `ledger_kind == ThreePoolTransfer`: `op == "xfer"` (or `"transfer"`).
+/// Rules common to both kinds:
 ///   * `amount` must equal `expected.expected_amount_e8s`.
 ///   * `from.owner` must equal `expected.sp_principal`.
-///   * For transfers: `to` must equal `expected.reserves_account`.
-///   * Memo must decode to `expected.vault_id_memo` via
-///     `decode_writedown_memo`.
+///
+/// `IcusdBurn`-specific rules:
+///   * `op == "burn"`.
+///   * Memo must be present and must decode to `expected.vault_id_memo` via
+///     `decode_writedown_memo`. The SP autonomously chose the vault for a
+///     burn, so memo binding is the cross-vault replay guard.
+///
+/// `ThreePoolTransfer`-specific rules:
+///   * `op == "xfer"` (or `"transfer"`).
+///   * `to` must equal `expected.reserves_account`.
+///   * Memo is NOT checked. The `rumi_3pool` ledger does not persist memos
+///     into its ICRC-3 block log (only consumes them for ICRC-1 dedup), and
+///     the proof on this path is constructed by the backend itself rather
+///     than supplied by the SP, so cross-vault replay is prevented by the
+///     backend's code-time construction (`vault_id_memo` is set to the
+///     call's `vault_id`) plus the consumed-proof set's per-block-index
+///     replay defense.
 pub fn validate_block(
     block: &DecodedBlock,
     expected: &ProofExpectations,
@@ -232,34 +261,41 @@ pub fn validate_block(
         ));
     }
 
-    if matches!(expected.ledger_kind, SpProofLedger::ThreePoolTransfer) {
-        let to = block
-            .to
-            .as_ref()
-            .ok_or_else(|| "transfer block missing 'to' field".to_string())?;
-        if to.owner != expected.reserves_account.owner
-            || to.subaccount != expected.reserves_account.subaccount
-        {
-            return Err(format!(
-                "block 'to' does not equal expected reserves account (owner {} sub {:?})",
-                expected.reserves_account.owner, expected.reserves_account.subaccount
-            ));
+    match expected.ledger_kind {
+        SpProofLedger::ThreePoolTransfer => {
+            let to = block
+                .to
+                .as_ref()
+                .ok_or_else(|| "transfer block missing 'to' field".to_string())?;
+            if to.owner != expected.reserves_account.owner
+                || to.subaccount != expected.reserves_account.subaccount
+            {
+                return Err(format!(
+                    "block 'to' does not equal expected reserves account (owner {} sub {:?})",
+                    expected.reserves_account.owner, expected.reserves_account.subaccount
+                ));
+            }
+            // Memo is NOT checked on the 3pool transfer path — see fn doc.
+            // Vault binding comes from the backend's code-time construction
+            // of `vault_id_memo`, which is asserted against the call's
+            // `vault_id` at the call site in `vault.rs`.
+            Ok(expected.vault_id_memo)
+        }
+        SpProofLedger::IcusdBurn => {
+            let memo = block
+                .memo
+                .as_ref()
+                .ok_or_else(|| "block missing 'memo' field".to_string())?;
+            let decoded_vault = decode_writedown_memo(memo)?;
+            if decoded_vault != expected.vault_id_memo {
+                return Err(format!(
+                    "memo vault id {} does not equal expected {}",
+                    decoded_vault, expected.vault_id_memo
+                ));
+            }
+            Ok(decoded_vault)
         }
     }
-
-    let memo = block
-        .memo
-        .as_ref()
-        .ok_or_else(|| "block missing 'memo' field".to_string())?;
-    let decoded_vault = decode_writedown_memo(memo)?;
-    if decoded_vault != expected.vault_id_memo {
-        return Err(format!(
-            "memo vault id {} does not equal expected {}",
-            decoded_vault, expected.vault_id_memo
-        ));
-    }
-
-    Ok(decoded_vault)
 }
 
 /// I/O wrapper: query `icrc3_get_blocks` on `ledger_principal`, decode the

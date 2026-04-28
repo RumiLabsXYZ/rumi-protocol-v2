@@ -2576,17 +2576,17 @@ pub async fn liquidate_vault_partial_with_stable(
 ///
 /// Called by the stability pool canister.
 ///
-/// Wave-8c LIQ-004: `proof` is the optional ICRC-3 burn / transfer proof
-/// the SP passes alongside the call. During the Phase-1 migration window
-/// the parameter is Optional — `None` is accepted but logged at WARN. After
-/// the SP rolls out its proof-emitting code (Wave 8d) Phase 2 will flip
-/// this to required.
+/// Wave-8d LIQ-004 Phase 2: `proof` is required. Every writedown must
+/// reference an on-chain ICRC-3 block (a real icUSD burn for the legacy
+/// path, or a real 3USD transfer to the protocol's reserves subaccount for
+/// the reserves path). The Wave-8c migration window where `None` was
+/// accepted with a per-call WARN log has been retired.
 pub async fn liquidate_vault_debt_already_burned(
     vault_id: u64,
     icusd_burned_e8s: u64,
     caller: Principal,
     three_usd_received_e8s: Option<u64>,
-    proof: Option<crate::icrc3_proof::SpWritedownProof>,
+    proof: crate::icrc3_proof::SpWritedownProof,
 ) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
     // Wave-8b LIQ-002 SAFETY: this path is intentionally NOT gated on
     // `is_within_liquidation_band`. It is the stability-pool-triggered
@@ -2619,99 +2619,91 @@ pub async fn liquidate_vault_debt_already_burned(
         });
     }
 
-    // Wave-8c LIQ-004 (replay defense + ICRC-3 verification). Verify the
-    // SP-supplied proof BEFORE we touch any state. If a proof is provided:
-    //   * its (ledger_kind, block_index) must not have been consumed before;
-    //   * the ICRC-3 block at that index must match expected memo, amount,
-    //     and accounts.
-    // If the proof's block-index is already consumed, refuse — even pre-
-    // mutation — so the SP gets a clean error instead of a stale partial
-    // success.
-    if let Some(p) = &proof {
-        if read_state(|s| s.consumed_writedown_proofs.contains(&(p.ledger_kind, p.block_index))) {
-            guard_principal.fail();
-            return Err(ProtocolError::GenericError(format!(
-                "SP writedown proof replay rejected: ({:?}, block {}) already consumed",
-                p.ledger_kind, p.block_index
-            )));
-        }
+    // Wave-8d LIQ-004 Phase 2 (replay defense + ICRC-3 verification). Verify
+    // the proof BEFORE touching any state. If the proof's
+    // (ledger_kind, block_index) was already consumed, refuse — pre-
+    // mutation — so the caller gets a clean error instead of a stale partial
+    // success. Then validate the on-chain block matches expected accounts,
+    // amount, and (for IcusdBurn) memo.
+    //
+    // The Wave-8c migration WARN-on-None branch has been retired in Phase 2.
+    if read_state(|s| {
+        s.consumed_writedown_proofs
+            .contains(&(proof.ledger_kind, proof.block_index))
+    }) {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(format!(
+            "SP writedown proof replay rejected: ({:?}, block {}) already consumed",
+            proof.ledger_kind, proof.block_index
+        )));
+    }
 
-        let (ledger_principal, reserves_account) = read_state(|s| {
-            let ledger = match p.ledger_kind {
-                crate::icrc3_proof::SpProofLedger::IcusdBurn => s.icusd_ledger_principal,
-                crate::icrc3_proof::SpProofLedger::ThreePoolTransfer => {
-                    s.three_pool_canister.unwrap_or(Principal::anonymous())
-                }
-            };
-            let reserves = icrc_ledger_types::icrc1::account::Account {
-                owner: ic_cdk::id(),
-                subaccount: Some(crate::management::protocol_3usd_reserves_subaccount()),
-            };
-            (ledger, reserves)
-        });
-
-        if ledger_principal == Principal::anonymous() {
-            guard_principal.fail();
-            return Err(ProtocolError::GenericError(
-                "SP writedown proof references a ledger that is not configured".to_string(),
-            ));
-        }
-
-        let expected_amount_e8s = match p.ledger_kind {
-            crate::icrc3_proof::SpProofLedger::IcusdBurn => icusd_burned_e8s,
+    let (ledger_principal, reserves_account) = read_state(|s| {
+        let ledger = match proof.ledger_kind {
+            crate::icrc3_proof::SpProofLedger::IcusdBurn => s.icusd_ledger_principal,
             crate::icrc3_proof::SpProofLedger::ThreePoolTransfer => {
-                three_usd_received_e8s.unwrap_or(0)
+                s.three_pool_canister.unwrap_or(Principal::anonymous())
             }
         };
-
-        let expectations = crate::icrc3_proof::ProofExpectations {
-            ledger_kind: p.ledger_kind,
-            expected_amount_e8s,
-            sp_principal: caller,
-            reserves_account,
-            vault_id_memo: vault_id,
+        let reserves = icrc_ledger_types::icrc1::account::Account {
+            owner: ic_cdk::id(),
+            subaccount: Some(crate::management::protocol_3usd_reserves_subaccount()),
         };
+        (ledger, reserves)
+    });
 
-        if let Err(err) = crate::icrc3_proof::fetch_and_validate_block(
-            ledger_principal,
-            p.block_index,
-            &expectations,
-        )
-        .await
-        {
-            guard_principal.fail();
-            log!(INFO,
-                "[liquidate_vault_debt_burned] [LIQ-004] proof verification FAILED for vault #{} \
-                 ({:?} block {}): {}",
-                vault_id, p.ledger_kind, p.block_index, err
-            );
-            return Err(ProtocolError::GenericError(format!(
-                "SP writedown proof verification failed: {}",
-                err
-            )));
-        }
+    if ledger_principal == Principal::anonymous() {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "SP writedown proof references a ledger that is not configured".to_string(),
+        ));
+    }
 
-        if vault_id != p.vault_id_memo {
-            // `validate_block` already enforces this against the memo, but
-            // double-check the proof's claimed vault_id matches the call
-            // site so a misuse of the API surfaces with a tight error.
-            guard_principal.fail();
-            return Err(ProtocolError::GenericError(format!(
-                "SP writedown proof vault_id_memo {} does not match call vault_id {}",
-                p.vault_id_memo, vault_id
-            )));
+    let expected_amount_e8s = match proof.ledger_kind {
+        crate::icrc3_proof::SpProofLedger::IcusdBurn => icusd_burned_e8s,
+        crate::icrc3_proof::SpProofLedger::ThreePoolTransfer => {
+            three_usd_received_e8s.unwrap_or(0)
         }
-    } else {
-        // Phase-1 migration window: log per-call WARN so any drift between
-        // the SP version and the proof requirement is visible. After the SP
-        // ships its proof-emitting code (Wave 8d) Phase-2 will flip this to
-        // a hard rejection.
+    };
+
+    let expectations = crate::icrc3_proof::ProofExpectations {
+        ledger_kind: proof.ledger_kind,
+        expected_amount_e8s,
+        sp_principal: caller,
+        reserves_account,
+        vault_id_memo: vault_id,
+    };
+
+    if let Err(err) = crate::icrc3_proof::fetch_and_validate_block(
+        ledger_principal,
+        proof.block_index,
+        &expectations,
+    )
+    .await
+    {
+        guard_principal.fail();
         log!(INFO,
-            "[liquidate_vault_debt_burned] [LIQ-004] WARN: SP writedown for vault #{} accepted \
-             without ICRC-3 proof (Phase-1 migration window). Caller={}, amount={} icUSD, \
-             three_usd={:?}",
-            vault_id, caller, icusd_burned_e8s, three_usd_received_e8s
+            "[liquidate_vault_debt_burned] [LIQ-004] proof verification FAILED for vault #{} \
+             ({:?} block {}): {}",
+            vault_id, proof.ledger_kind, proof.block_index, err
         );
+        return Err(ProtocolError::GenericError(format!(
+            "SP writedown proof verification failed: {}",
+            err
+        )));
+    }
+
+    if vault_id != proof.vault_id_memo {
+        // For IcusdBurn `validate_block` already enforces this against the
+        // memo. For ThreePoolTransfer there is no memo on the block (3pool
+        // ledger doesn't persist memos into ICRC-3); this assertion is the
+        // single binding point against the call's vault_id, so any internal
+        // misconstruction surfaces with a tight error before mutation.
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(format!(
+            "SP writedown proof vault_id_memo {} does not match call vault_id {}",
+            proof.vault_id_memo, vault_id
+        )));
     }
 
     // Step 1: Validate vault is liquidatable and compute collateral to release
@@ -2795,9 +2787,8 @@ pub async fn liquidate_vault_debt_already_burned(
         // Wave-8c LIQ-004: record the proof as consumed atomically with the
         // writedown so a partial failure cannot leave the proof unconsumed
         // (replay risk) or consumed without an effect (orphan risk).
-        if let Some(p) = &proof {
-            s.consumed_writedown_proofs.insert((p.ledger_kind, p.block_index));
-        }
+        s.consumed_writedown_proofs
+            .insert((proof.ledger_kind, proof.block_index));
 
         let interest_share = if let Some(vault) = s.vault_id_to_vaults.get(&vault_id) {
             if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {

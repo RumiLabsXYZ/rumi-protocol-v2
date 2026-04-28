@@ -1,5 +1,5 @@
-//! LIQ-004 regression fence: ICRC-3 burn / transfer proof verification for
-//! SP-triggered writedowns.
+//! LIQ-004 regression fence (Layers 1 + 2): ICRC-3 burn / transfer proof
+//! verification for SP-triggered writedowns.
 //!
 //! Audit report:
 //!   `audit-reports/2026-04-22-28e9896/raw-pass-results/liquidation-mechanics.json`
@@ -25,22 +25,29 @@
 //!
 //! # How this file tests the fix
 //!
-//! Wave-8c adds defense-in-depth via:
-//!   * `icrc3_proof::SpWritedownProof` — typed argument the SP passes that
-//!     points at a real ICRC-3 block on the relevant ledger.
+//! Defense-in-depth shipped across Wave-8c (Phase 1) and Wave-8d (Phase 2):
+//!   * `icrc3_proof::SpWritedownProof` — typed argument that points at a
+//!     real ICRC-3 block on the relevant ledger.
 //!   * `icrc3_proof::decode_block` + `validate_block` — pure-logic verifier
-//!     that asserts the block matches expected memo, amount, and accounts.
+//!     that asserts the block matches expected accounts, amount, and (on
+//!     the burn path) memo.
 //!   * `State::sp_writedown_disabled` — admin kill switch (independent of
 //!     `liquidation_frozen` and `frozen`).
 //!   * `State::consumed_writedown_proofs` — replay defense set keyed by
 //!     `(SpProofLedger, block_index)`.
 //!
 //! Layer 1 (this file): pure verification logic on the public helpers.
-//!   * Memo round-trip / negative cases.
+//!   * Memo round-trip / negative cases (burn path).
 //!   * Burn / transfer block decode against both block formats (standard
 //!     ic-icrc1-ledger top-level `btype` and 3pool `tx.op`).
 //!   * `validate_block` accepts correct shapes and rejects every variant of
-//!     wrong-amount, wrong-kind, wrong-from, wrong-to, wrong-memo.
+//!     wrong-amount, wrong-kind, wrong-from, wrong-to, and (burn-only)
+//!     wrong / missing memo.
+//!   * `validate_block` skips memo on `ThreePoolTransfer` because the 3pool
+//!     ledger does not persist memos into ICRC-3 blocks. Vault binding on
+//!     the reserves path comes from the backend's code-time construction
+//!     of `vault_id_memo` plus the consumed-proof set's per-block-index
+//!     replay defense.
 //!
 //! Layer 2 (this file): state-level fence on the kill switch and the
 //! consumed-proof set.
@@ -49,34 +56,20 @@
 //!   * `consumed_writedown_proofs` round-trips through CBOR (so replay
 //!     defense survives canister upgrades).
 //!
-//! # Why no dedicated PocketIC file in Phase 1
+//! Layer 3 (a sibling file, `audit_pocs_liq_004_icrc3_burn_proof_pic.rs`)
+//! is the PocketIC fence shipped in Wave 8d. It exercises the full
+//! canister boundary: legacy burn-path success, forged-proof rejection,
+//! replay rejection, kill-switch rejection, and reserves-path internal
+//! proof round-trip.
 //!
-//! Phase-1 of LIQ-004 keeps the proof argument Optional and `None` is
-//! accepted with a WARN log so the existing SP can keep calling. The fix
-//! is the *infrastructure* (types, decoder, validator, kill switch, replay
-//! defense), not yet the enforcement. Three orthogonal checks cover the
-//! Phase-1 surface:
+//! # Wave 8d Phase 2 status
 //!
-//!   1. The Rust compiler enforces the wiring at every call site —
-//!      `vault::liquidate_vault_debt_already_burned` takes
-//!      `proof: Option<SpWritedownProof>` and the entry points in
-//!      `main.rs` thread it through.
-//!   2. Layer 1 here covers `decode_block` + `validate_block` against
-//!      both the standard ic-icrc1-ledger format (top-level `btype`) and
-//!      the in-tree rumi_3pool format (`tx.op`).
-//!   3. Layer 2 here covers the state machinery (kill switch +
-//!      consumed-proof set serde/round-trip).
-//!
-//! The remaining surface is the IC inter-canister call boilerplate
-//! (`ic_cdk::call(ledger, "icrc3_get_blocks", ...)`), which is well-trodden
-//! and exercised by every other ledger-touching path in this canister
-//! (e.g., Wave-3 idempotent transfers, ICRC-2 transfer_from, sweep_deposit).
-//!
-//! Wave 8d (Phase 2 — flips Optional to required) is the right time for a
-//! PocketIC fence: when the proof becomes mandatory, the integration is
-//! load-bearing and worth the per-test setup cost. This file documents
-//! that boundary explicitly so the regression suite stays honest about
-//! what Phase 1 does and does not cover.
+//! Wave-8d retired the Wave-8c migration window: `proof: Option<...>` is
+//! now `proof: SpWritedownProof` (required) on the legacy entry point,
+//! and the reserves entry point dropped its proof argument entirely (the
+//! backend builds the proof internally from the block index returned by
+//! `transfer_3usd_to_reserves`). The "WARN-on-None" Phase-1 log path has
+//! been removed.
 
 use candid::Principal;
 use icrc_ledger_types::icrc1::account::Account;
@@ -357,7 +350,7 @@ fn liq_004_proof_with_wrong_memo_vault_id_rejected() {
 }
 
 #[test]
-fn liq_004_proof_with_missing_memo_rejected() {
+fn liq_004_proof_with_missing_memo_rejected_on_burn_path() {
     let block = decode_block(&make_test_block_without_memo(
         "burn",
         sp_account(),
@@ -368,7 +361,54 @@ fn liq_004_proof_with_missing_memo_rejected() {
     let exp = burn_expectations(1, 500);
     assert!(
         validate_block(&block, &exp).is_err(),
-        "burns without a Wave-8c memo must be rejected"
+        "burns without a Wave-8c memo must be rejected (memo binding is the burn path's cross-vault replay guard)"
+    );
+}
+
+#[test]
+fn liq_004_proof_with_missing_memo_accepted_on_3pool_transfer_path() {
+    // Wave-8d Phase 2: rumi_3pool's ICRC-3 Transfer variant does not persist
+    // memos into the block log (it only consumes them for ICRC-1 dedup), so
+    // the verifier must NOT require memo on the ThreePoolTransfer kind.
+    // Vault binding on this path is set by the backend at proof-construction
+    // time and re-asserted at the call site against the call's vault id.
+    let block = decode_block(&make_test_block_without_memo(
+        "xfer",
+        sp_account(),
+        Some(reserves_account()),
+        2_500,
+    ))
+    .unwrap();
+    let exp = transfer_expectations(7, 2_500);
+    assert_eq!(
+        validate_block(&block, &exp).expect("3pool transfer without memo must validate"),
+        7,
+        "validator must return the expected vault_id_memo on the transfer path"
+    );
+}
+
+#[test]
+fn liq_004_proof_with_wrong_memo_ignored_on_3pool_transfer_path() {
+    // Sister test to the burn-path `liq_004_proof_with_wrong_memo_vault_id_rejected`.
+    // On the transfer path the block's memo is irrelevant: even if the on-chain
+    // block somehow carried a memo encoding vault 99, the verifier must trust
+    // `expected.vault_id_memo` (which the backend set to the call's vault_id at
+    // proof-build time). The vault_id binding is enforced separately at the call
+    // site by `vault.rs` (the `proof.vault_id_memo == vault_id` assertion).
+    let bogus_memo = encode_writedown_memo(99);
+    let block = decode_block(&make_test_transfer_block(
+        sp_account(),
+        reserves_account(),
+        2_500,
+        &bogus_memo,
+        false,
+    ))
+    .unwrap();
+    let exp = transfer_expectations(7, 2_500);
+    assert_eq!(
+        validate_block(&block, &exp).expect("3pool transfer ignores block-side memo"),
+        7,
+        "ThreePoolTransfer must return expected vault_id_memo regardless of any memo blob on the block"
     );
 }
 
