@@ -2,13 +2,15 @@ type AssetType = variant {
   ICUSD;
   ICP;
   CKBTC;
+  CKUSDT;
+  CKUSDC;
 };
 
 type DepositType = variant {
-  MintingFee;
+  BorrowingFee;
   RedemptionFee;
-  LiquidationSurplus;
-  StabilityFee;
+  LiquidationFee;
+  InterestRevenue;
 };
 
 type AssetBalance = record {
@@ -39,6 +41,8 @@ type TreasuryInitArgs = record {
   icusd_ledger: principal;
   icp_ledger: principal;
   ckbtc_ledger: opt principal;
+  ckusdt_ledger: opt principal;
+  ckusdc_ledger: opt principal;
 };
 
 type DepositArgs = record {
@@ -62,11 +66,25 @@ type WithdrawResult = record {
   fee: nat64;
 };
 
+type TreasuryAction = variant {
+  Deposit : record { deposit_type : DepositType; asset_type : AssetType; amount : nat64 };
+  Withdraw : record { asset_type : AssetType; amount : nat64; to : principal };
+  SetPaused : record { paused : bool };
+};
+
+type TreasuryEvent = record {
+  id : nat64;
+  timestamp : nat64;
+  caller : principal;
+  action : TreasuryAction;
+};
+
 service : (TreasuryInitArgs) -> {
   deposit: (DepositArgs) -> (variant { Ok : nat64; Err : text });
   withdraw: (WithdrawArgs) -> (variant { Ok : WithdrawResult; Err : text });
   get_status: () -> (TreasuryStatus) query;
   get_deposits: (opt nat64, opt nat64) -> (vec DepositRecord) query;
-  set_controller: (principal) -> (variant { Ok; Err : text });
+  get_events: (opt nat64, opt nat64) -> (vec TreasuryEvent) query;
+  get_event_count: () -> (nat64) query;
   set_paused: (bool) -> (variant { Ok; Err : text });
 }

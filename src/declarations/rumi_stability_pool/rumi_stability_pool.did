@@ -185,6 +185,23 @@ type PoolEventType = variant {
   ClaimCollateral : record { collateral_ledger : principal; amount : nat64 };
   DepositAs3USD : record { token_ledger : principal; amount_in : nat64; lp_minted : nat64 };
   InterestReceived : record { token_ledger : principal; amount : nat64 };
+  OptOutCollateral : record { collateral_type : principal };
+  OptInCollateral : record { collateral_type : principal };
+  LiquidationNotification : record { vault_count : nat64 };
+  LiquidationExecuted : record {
+    vault_id : nat64;
+    stables_consumed_e8s : nat64;
+    collateral_gained : nat64;
+    collateral_type : principal;
+    success : bool;
+  };
+  StablecoinRegistered : record { ledger : principal; symbol : text };
+  CollateralRegistered : record { ledger : principal; symbol : text };
+  ConfigurationUpdated;
+  EmergencyPauseActivated;
+  OperationsResumed;
+  BalanceCorrected : record { user : principal; token_ledger : principal; new_amount : nat64 };
+  CollateralGainCorrected : record { user : principal; collateral_ledger : principal; new_amount : nat64 };
 };
 
 type PoolEvent = record {

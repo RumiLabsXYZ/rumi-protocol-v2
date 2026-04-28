@@ -8,6 +8,8 @@ export interface AssetBalance {
   'available' : bigint,
 }
 export type AssetType = { 'ICP' : null } |
+  { 'CKUSDC' : null } |
+  { 'CKUSDT' : null } |
   { 'ICUSD' : null } |
   { 'CKBTC' : null };
 export interface DepositArgs {
@@ -26,12 +28,35 @@ export interface DepositRecord {
   'timestamp' : bigint,
   'amount' : bigint,
 }
-export type DepositType = { 'RedemptionFee' : null } |
-  { 'MintingFee' : null } |
-  { 'StabilityFee' : null } |
-  { 'LiquidationSurplus' : null };
+export type DepositType = { 'BorrowingFee' : null } |
+  { 'LiquidationFee' : null } |
+  { 'RedemptionFee' : null } |
+  { 'InterestRevenue' : null };
+export type TreasuryAction = {
+    'Withdraw' : {
+      'to' : Principal,
+      'asset_type' : AssetType,
+      'amount' : bigint,
+    }
+  } |
+  {
+    'Deposit' : {
+      'asset_type' : AssetType,
+      'deposit_type' : DepositType,
+      'amount' : bigint,
+    }
+  } |
+  { 'SetPaused' : { 'paused' : boolean } };
+export interface TreasuryEvent {
+  'id' : bigint,
+  'action' : TreasuryAction,
+  'timestamp' : bigint,
+  'caller' : Principal,
+}
 export interface TreasuryInitArgs {
   'controller' : Principal,
+  'ckusdt_ledger' : [] | [Principal],
+  'ckusdc_ledger' : [] | [Principal],
   'icp_ledger' : Principal,
   'ckbtc_ledger' : [] | [Principal],
   'icusd_ledger' : Principal,
@@ -63,12 +88,12 @@ export interface _SERVICE {
     [[] | [bigint], [] | [bigint]],
     Array<DepositRecord>
   >,
-  'get_status' : ActorMethod<[], TreasuryStatus>,
-  'set_controller' : ActorMethod<
-    [Principal],
-    { 'Ok' : null } |
-      { 'Err' : string }
+  'get_event_count' : ActorMethod<[], bigint>,
+  'get_events' : ActorMethod<
+    [[] | [bigint], [] | [bigint]],
+    Array<TreasuryEvent>
   >,
+  'get_status' : ActorMethod<[], TreasuryStatus>,
   'set_paused' : ActorMethod<[boolean], { 'Ok' : null } | { 'Err' : string }>,
   'withdraw' : ActorMethod<
     [WithdrawArgs],

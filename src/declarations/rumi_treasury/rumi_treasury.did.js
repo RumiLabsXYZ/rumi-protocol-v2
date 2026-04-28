@@ -1,20 +1,24 @@
 export const idlFactory = ({ IDL }) => {
   const TreasuryInitArgs = IDL.Record({
     'controller' : IDL.Principal,
+    'ckusdt_ledger' : IDL.Opt(IDL.Principal),
+    'ckusdc_ledger' : IDL.Opt(IDL.Principal),
     'icp_ledger' : IDL.Principal,
     'ckbtc_ledger' : IDL.Opt(IDL.Principal),
     'icusd_ledger' : IDL.Principal,
   });
   const AssetType = IDL.Variant({
     'ICP' : IDL.Null,
+    'CKUSDC' : IDL.Null,
+    'CKUSDT' : IDL.Null,
     'ICUSD' : IDL.Null,
     'CKBTC' : IDL.Null,
   });
   const DepositType = IDL.Variant({
+    'BorrowingFee' : IDL.Null,
+    'LiquidationFee' : IDL.Null,
     'RedemptionFee' : IDL.Null,
-    'MintingFee' : IDL.Null,
-    'StabilityFee' : IDL.Null,
-    'LiquidationSurplus' : IDL.Null,
+    'InterestRevenue' : IDL.Null,
   });
   const DepositArgs = IDL.Record({
     'asset_type' : AssetType,
@@ -31,6 +35,25 @@ export const idlFactory = ({ IDL }) => {
     'memo' : IDL.Opt(IDL.Text),
     'timestamp' : IDL.Nat64,
     'amount' : IDL.Nat64,
+  });
+  const TreasuryAction = IDL.Variant({
+    'Withdraw' : IDL.Record({
+      'to' : IDL.Principal,
+      'asset_type' : AssetType,
+      'amount' : IDL.Nat64,
+    }),
+    'Deposit' : IDL.Record({
+      'asset_type' : AssetType,
+      'deposit_type' : DepositType,
+      'amount' : IDL.Nat64,
+    }),
+    'SetPaused' : IDL.Record({ 'paused' : IDL.Bool }),
+  });
+  const TreasuryEvent = IDL.Record({
+    'id' : IDL.Nat64,
+    'action' : TreasuryAction,
+    'timestamp' : IDL.Nat64,
+    'caller' : IDL.Principal,
   });
   const AssetBalance = IDL.Record({
     'total' : IDL.Nat64,
@@ -65,12 +88,13 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Vec(DepositRecord)],
         ['query'],
       ),
-    'get_status' : IDL.Func([], [TreasuryStatus], ['query']),
-    'set_controller' : IDL.Func(
-        [IDL.Principal],
-        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],
-        [],
+    'get_event_count' : IDL.Func([], [IDL.Nat64], ['query']),
+    'get_events' : IDL.Func(
+        [IDL.Opt(IDL.Nat64), IDL.Opt(IDL.Nat64)],
+        [IDL.Vec(TreasuryEvent)],
+        ['query'],
       ),
+    'get_status' : IDL.Func([], [TreasuryStatus], ['query']),
     'set_paused' : IDL.Func(
         [IDL.Bool],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],
@@ -86,6 +110,8 @@ export const idlFactory = ({ IDL }) => {
 export const init = ({ IDL }) => {
   const TreasuryInitArgs = IDL.Record({
     'controller' : IDL.Principal,
+    'ckusdt_ledger' : IDL.Opt(IDL.Principal),
+    'ckusdc_ledger' : IDL.Opt(IDL.Principal),
     'icp_ledger' : IDL.Principal,
     'ckbtc_ledger' : IDL.Opt(IDL.Principal),
     'icusd_ledger' : IDL.Principal,
