@@ -1,7 +1,7 @@
 <script lang="ts">
   import EntityLink from './EntityLink.svelte';
   import FacetChip from './FacetChip.svelte';
-  import { timeAgo, shortenPrincipal, formatTimestamp, getTokenSymbol } from '$utils/explorerHelpers';
+  import { timeAgo, formatTimestamp } from '$utils/explorerHelpers';
   import { displayEvent, wrapBackendEvent } from '$utils/displayEvent';
   import { extractFacets, typeFacetLabel, type Facets } from '$utils/eventFacets';
 
@@ -63,14 +63,10 @@
   <!-- Principal -->
   <td class="px-4 py-3 text-xs text-gray-400 whitespace-nowrap">
     {#if display.principal}
-      <FacetChip
-        kind="principal"
+      <EntityLink
+        type="address"
         value={display.principal}
-        label={shortenPrincipal(display.principal)}
-        title={display.principal}
-        class="text-xs text-gray-300 hover:text-blue-300 font-mono px-1 py-0.5"
-        {onFacetClick}
-        {currentFacets}
+        class="inline-flex items-center gap-1 text-xs text-gray-300 hover:text-blue-300 font-mono px-1 py-0.5"
       />
     {:else}
       <span class="text-gray-600">&mdash;</span>
@@ -95,26 +91,21 @@
     <div class="truncate max-w-[360px]" title={display.formatted.summary}>
       {display.formatted.summary}
     </div>
-    {#if onFacetClick && (extraTokens.length || extraVaults.length)}
+    {#if extraTokens.length || extraVaults.length}
       <div class="mt-1 flex flex-wrap gap-1 text-[10px] text-gray-500">
         {#each extraTokens as p (p)}
-          <FacetChip
-            kind="token"
+          <EntityLink
+            type="token"
             value={p}
-            label="+token:{getTokenSymbol(p)}"
-            class="px-1.5 py-0.5 rounded-full border border-gray-700 bg-gray-900/60 hover:text-teal-300"
-            {onFacetClick}
-            {currentFacets}
+            class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border border-gray-700 bg-gray-900/60 text-[10px] text-gray-400 hover:text-teal-300 font-mono"
           />
         {/each}
         {#each extraVaults as v (v)}
-          <FacetChip
-            kind="vault"
-            value={v}
-            label="+vault:#{v}"
-            class="px-1.5 py-0.5 rounded-full border border-gray-700 bg-gray-900/60 hover:text-teal-300"
-            {onFacetClick}
-            {currentFacets}
+          <EntityLink
+            type="vault"
+            value={String(v)}
+            label={`#${v}`}
+            class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border border-gray-700 bg-gray-900/60 text-[10px] text-gray-400 hover:text-teal-300 font-mono"
           />
         {/each}
       </div>

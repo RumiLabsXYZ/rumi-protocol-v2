@@ -43,6 +43,7 @@
 		toggleAdminLabel,
 		type Facets,
 	} from '$utils/eventFacets';
+	import { setAmmPoolRegistry } from '$utils/ammNaming';
 	import { fetchAdminEventBreakdown } from '$services/explorer/analyticsService';
 	import type { AdminEventLabelCount } from '$declarations/rumi_analytics/rumi_analytics.did';
 
@@ -407,6 +408,8 @@
 				fetchCollateralPrices(),
 			]);
 			knownAmmPools = ammPools ?? [];
+			// Seed registry so AMM event rows render "AMM1" labels instead of generic "AMM".
+			setAmmPoolRegistry(knownAmmPools);
 			priceMap = prices;
 
 			// Pool options: 3pool always first, then AMM pools

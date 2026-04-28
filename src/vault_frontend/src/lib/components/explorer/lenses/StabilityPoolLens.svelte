@@ -11,9 +11,11 @@
   import {
     fetchStabilityPoolStatus, fetchStabilityPoolLiquidations,
   } from '$services/explorer/explorerService';
+  import { QueryOperations } from '$services/protocol/queryOperations';
   import { e8sToNumber, formatCompact, CHART_COLORS, getCollateralSymbol } from '$utils/explorerChartHelpers';
 
   let poolStatus: any = $state(null);
+  let protocolStatus: any = $state(null);
   let series: any[] = $state([]);
   let liquidations: any[] = $state([]);
   let spApy: number | null = $state(null);
@@ -51,15 +53,17 @@
 
   onMount(async () => {
     try {
-      const [stR, seR, lqR, apR] = await Promise.allSettled([
+      const [stR, seR, lqR, apR, prR] = await Promise.allSettled([
         fetchStabilityPoolStatus(),
         fetchStabilitySeries(90),
         fetchStabilityPoolLiquidations(50),
         fetchApys(),
+        QueryOperations.getProtocolStatus(),
       ]);
       if (stR.status === 'fulfilled') poolStatus = stR.value;
       if (seR.status === 'fulfilled') series = seR.value ?? [];
       if (lqR.status === 'fulfilled') liquidations = lqR.value ?? [];
+      if (prR.status === 'fulfilled') protocolStatus = prR.value;
       if (apR.status === 'fulfilled' && apR.value) {
         const v = apR.value.sp_apy_pct?.[0];
         if (typeof v === 'number' && v > 0) spApy = v;
@@ -70,6 +74,37 @@
       loading = false;
     }
   });
+
+  // Live SP APY: same formula the Stability Pool tab uses, computed from
+  // current protocol/pool status. Fixes the discrepancy between the analytics
+  // 7-day rolling number (slow to react) and the live rate users see in /liquidity.
+  const liveSpApy = $derived.by(() => {
+    if (!protocolStatus || !poolStatus) return null;
+    const split = protocolStatus.interestSplit ?? [];
+    const poolShare = (split.find((e: any) => e.destination === 'stability_pool')?.bps ?? 0) / 10000;
+    const perC = protocolStatus.perCollateralInterest;
+    if (!perC || perC.length === 0 || poolShare === 0) return null;
+
+    const eligibleMap = new Map<string, number>(
+      (poolStatus.eligible_icusd_per_collateral ?? []).map(([p, v]: [any, bigint]) => [
+        typeof p?.toText === 'function' ? p.toText() : String(p),
+        Number(v) / 1e8,
+      ]),
+    );
+
+    let totalApr = 0;
+    for (const info of perC) {
+      const eligible = eligibleMap.get(info.collateralType) ?? 0;
+      if (eligible === 0 || info.totalDebtE8s === 0 || info.weightedInterestRate === 0) continue;
+      totalApr += (info.weightedInterestRate * poolShare * info.totalDebtE8s) / eligible;
+    }
+    if (totalApr === 0) return null;
+    const apy = Math.pow(1 + totalApr / 365, 365) - 1;
+    return apy * 100;
+  });
+
+  // Prefer the live computation; fall back to the 7d rolling analytics number.
+  const displayedSpApy = $derived(liveSpApy ?? spApy);
 
   const totalDeposits = $derived(poolStatus ? e8sToNumber(poolStatus.total_deposits_e8s ?? 0n) : 0);
   const depositors = $derived(poolStatus ? Number(poolStatus.total_depositors ?? 0n) : 0);
@@ -105,8 +140,8 @@
   const healthMetrics = $derived.by(() => [
     { label: 'Deposits', value: `$${formatCompact(totalDeposits)}`, sub: 'icUSD' },
     { label: 'Depositors', value: depositors.toLocaleString() },
-    { label: 'Eligible coverage', value: `$${formatCompact(eligibleCoverage)}`, sub: 'backs debt' },
-    { label: 'SP APY', value: spApy != null ? `${spApy.toFixed(2)}%` : '--', sub: '7d' },
+    { label: 'Eligible coverage', value: `$${formatCompact(eligibleCoverage)}`, sub: 'icUSD-equivalent that can absorb liquidations' },
+    { label: 'SP APY', value: displayedSpApy != null ? `${displayedSpApy.toFixed(2)}%` : '--', sub: liveSpApy != null ? 'live' : '7d' },
     { label: 'Liquidations absorbed', value: totalLiquidations.toLocaleString() },
   ]);
 </script>

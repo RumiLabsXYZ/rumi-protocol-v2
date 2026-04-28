@@ -44,7 +44,7 @@
         <tr class="border-b border-white/5">
           <th class="text-left py-2 px-2 text-xs font-medium text-gray-500 uppercase tracking-wider">Asset</th>
           <th class="text-right py-2 px-2 text-xs font-medium text-gray-500 uppercase tracking-wider">Price</th>
-          <th class="text-right py-2 px-2 text-xs font-medium text-gray-500 uppercase tracking-wider hidden md:table-cell">Vol</th>
+          <th class="text-right py-2 px-2 text-xs font-medium text-gray-500 uppercase tracking-wider hidden md:table-cell" title="Annualized price volatility (returns sigma) over the last 30 days">Vol</th>
           <th class="text-right py-2 px-2 text-xs font-medium text-gray-500 uppercase tracking-wider">Vaults</th>
           <th class="text-right py-2 px-2 text-xs font-medium text-gray-500 uppercase tracking-wider hidden sm:table-cell">Collateral</th>
           <th class="text-right py-2 px-2 text-xs font-medium text-gray-500 uppercase tracking-wider">Debt</th>

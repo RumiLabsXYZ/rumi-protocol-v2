@@ -253,8 +253,14 @@ export function classifyEventType(de: DisplayEvent): TypeFacetKey {
     case 'redemption_transfered': return 'redemption_transfer';
     case 'reserve_redemption': return 'reserve_redemption';
 
+    // Canister upgrades and init are admin actions — surface them under 'admin'
+    // alongside setter calls. Only accrue_interest stays in 'system' (it's
+    // automatic interest-tick bookkeeping that fires every block, not a user
+    // or admin action).
     case 'init':
     case 'upgrade':
+      return 'admin';
+
     case 'accrue_interest':
       return 'system';
 

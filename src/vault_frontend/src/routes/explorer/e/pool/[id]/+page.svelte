@@ -32,12 +32,14 @@
     fetchAmmSwapEventsByTimeRange,
     fetchAmmLiquidityEvents,
     fetchAmmLiquidityEventCount,
+    fetchCollateralPrices,
   } from '$services/explorer/explorerService';
   import { fetchPoolRoutes } from '$services/explorer/analyticsService';
   import type { PoolRoute } from '$declarations/rumi_analytics/rumi_analytics.did';
   import { AMM_TOKENS } from '$services/ammService';
   import type { DisplayEvent } from '$utils/displayEvent';
   import { CANISTER_IDS } from '$lib/config';
+  import { formatCompact } from '$utils/explorerChartHelpers';
 
   const poolIdParam = $derived($page.params.id);
 
@@ -51,6 +53,7 @@
   let loading = $state(true);
   let error = $state<string | null>(null);
   let poolRoutes = $state<PoolRoute[]>([]);
+  let priceMap = $state<Map<string, number>>(new Map());
 
   // ── 3pool state ──────────────────────────────────────────────────────────
   let status = $state<any>(null);
@@ -112,6 +115,46 @@
     const aNorm = Number(ammReserveA) / 10 ** ammTokenA.decimals;
     const bNorm = Number(ammReserveB) / 10 ** ammTokenB.decimals;
     return bNorm === 0 ? 0 : aNorm / bNorm;
+  });
+
+  // ── TVL ──────────────────────────────────────────────────────────────────
+  // 3pool TVL: sum of stable balances normalized to USD ($1 each).
+  const threePoolTvlUsd = $derived.by(() => {
+    if (!status?.tokens?.length || !status?.balances) return 0;
+    let total = 0;
+    for (let i = 0; i < status.tokens.length; i++) {
+      const tok = status.tokens[i];
+      const bal = status.balances[i] ?? 0n;
+      const dec = Number(tok.decimals ?? 8);
+      total += Number(bal) / 10 ** dec; // stables ≈ $1
+    }
+    return total;
+  });
+
+  // AMM TVL: needs oracle prices for both legs. If one leg is 3USD we price it
+  // by the 3pool virtual_price; ICP via the protocol's last_price; everything
+  // else $1 if a stablecoin, else null (unknown — display "--").
+  function priceForToken(ledgerId: string): number | null {
+    if (ledgerId === CANISTER_IDS.THREEPOOL) {
+      // 3USD LP token priced via virtual price (each unit = vp dollars)
+      return Number(virtualPrice) / 1e18 || null;
+    }
+    if (ledgerId === CANISTER_IDS.ICUSD_LEDGER) return 1;
+    if (ledgerId === CANISTER_IDS.CKUSDT_LEDGER) return 1;
+    if (ledgerId === CANISTER_IDS.CKUSDC_LEDGER) return 1;
+    const p = priceMap.get(ledgerId);
+    if (typeof p === 'number' && p > 0) return p;
+    return null;
+  }
+
+  const ammTvlUsd = $derived.by(() => {
+    if (!ammPool || !ammTokenA || !ammTokenB) return null;
+    const priceA = priceForToken(ammTokenA.ledgerId);
+    const priceB = priceForToken(ammTokenB.ledgerId);
+    if (priceA == null || priceB == null) return null;
+    const aNorm = Number(ammReserveA) / 10 ** ammTokenA.decimals;
+    const bNorm = Number(ammReserveB) / 10 ** ammTokenB.decimals;
+    return aNorm * priceA + bNorm * priceB;
   });
 
   // ── Shared formatters ────────────────────────────────────────────────────
@@ -268,6 +311,8 @@
     const routesPromise = fetchPoolRoutes(poolIdParam, ROUTES_WINDOW_NS, 10)
       .then((r) => r.routes)
       .catch(() => [] as PoolRoute[]);
+    // Pull oracle prices once so the AMM branch can value the volatile leg.
+    fetchCollateralPrices().then((m) => { priceMap = m; }).catch(() => {});
 
     if (isThreePool) {
       try {
@@ -320,6 +365,10 @@
         return;
       }
       ammPool = pool;
+
+      // Pull 3pool status so we can value any 3USD leg via virtual_price.
+      // Cheap query, runs in parallel with the rest.
+      fetchThreePoolStatus().then((s) => { status = s; }).catch(() => {});
 
       // Seven-day window of swap events for the activity feed.
       const now = BigInt(Date.now()) * 1_000_000n;
@@ -386,7 +435,11 @@
         <CopyButton text={CANISTER_IDS.THREEPOOL} />
       </div>
 
-      <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+      <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-3">
+        <div class="bg-gray-800/40 border border-gray-700/50 rounded-xl p-4">
+          <div class="text-[10px] uppercase tracking-wider text-gray-500">TVL</div>
+          <div class="text-lg font-mono text-white">${formatCompact(threePoolTvlUsd)}</div>
+        </div>
         <div class="bg-gray-800/40 border border-gray-700/50 rounded-xl p-4">
           <div class="text-[10px] uppercase tracking-wider text-gray-500">Amplification (A)</div>
           <div class="text-lg font-mono text-white">{currentA || '--'}</div>
@@ -453,7 +506,11 @@
         <CopyButton text={poolIdParam} />
       </div>
 
-      <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+      <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+        <div class="bg-gray-800/40 border border-gray-700/50 rounded-xl p-4">
+          <div class="text-[10px] uppercase tracking-wider text-gray-500">TVL</div>
+          <div class="text-lg font-mono text-white">{ammTvlUsd != null ? `$${formatCompact(ammTvlUsd)}` : '--'}</div>
+        </div>
         <div class="bg-gray-800/40 border border-gray-700/50 rounded-xl p-4">
           <div class="text-[10px] uppercase tracking-wider text-gray-500">Curve</div>
           <div class="text-lg font-mono text-white">Constant product</div>

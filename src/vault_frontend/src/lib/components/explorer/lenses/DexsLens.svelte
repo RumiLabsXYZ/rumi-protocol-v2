@@ -10,10 +10,13 @@
   import {
     fetchThreePoolState, fetchThreePoolStats, fetchThreePoolHealth,
     fetchThreePoolVolumeSeries, fetchThreePoolVirtualPriceSeries,
-    fetchAmmPools,
+    fetchAmmPools, fetchAmmPoolStats, fetchCollateralPrices,
   } from '$services/explorer/explorerService';
+  import { CANISTER_IDS } from '$lib/config';
   import { POOL_TOKENS } from '$services/threePoolService';
   import { e8sToNumber, formatCompact, CHART_COLORS } from '$utils/explorerChartHelpers';
+  import { ammPoolLabel, ammPoolPair, ammPoolShortLabel, setAmmPoolRegistry } from '$utils/ammNaming';
+  import { getTokenSymbol } from '$utils/explorerHelpers';
   import type { PegStatus } from '$declarations/rumi_analytics/rumi_analytics.did';
 
   let pegStatus: PegStatus | null = $state(null);
@@ -24,13 +27,15 @@
   let volumeSeries: any[] = $state([]);
   let vpSeries: any[] = $state([]);
   let ammPools: any[] = $state([]);
+  let ammPoolStats: Record<string, any> = $state({});
   let lpApy: number | null = $state(null);
   let spApy: number | null = $state(null);
+  let icpUsdPrice: number | null = $state(null);
   let loading = $state(true);
 
   onMount(async () => {
     try {
-      const [pegR, stR, statR, hlR, ssR, vsR, vpR, ammR, apyR] = await Promise.allSettled([
+      const [pegR, stR, statR, hlR, ssR, vsR, vpR, ammR, apyR, pricesR] = await Promise.allSettled([
         fetchPegStatus(),
         fetchThreePoolState(),
         fetchThreePoolStats('Last24h'),
@@ -40,6 +45,7 @@
         fetchThreePoolVirtualPriceSeries('Last30d', 86400n),
         fetchAmmPools(),
         fetchApys(),
+        fetchCollateralPrices(),
       ]);
       if (pegR.status === 'fulfilled') pegStatus = pegR.value ?? null;
       if (stR.status === 'fulfilled') poolState = stR.value;
@@ -48,12 +54,33 @@
       if (ssR.status === 'fulfilled') swapSeries = ssR.value ?? [];
       if (vsR.status === 'fulfilled') volumeSeries = vsR.value ?? [];
       if (vpR.status === 'fulfilled') vpSeries = vpR.value ?? [];
-      if (ammR.status === 'fulfilled') ammPools = ammR.value ?? [];
+      if (ammR.status === 'fulfilled') {
+        ammPools = ammR.value ?? [];
+        // Seed the registry so AMM event labels everywhere can resolve "AMM1 · 3USD/ICP"
+        setAmmPoolRegistry(ammPools);
+      }
       if (apyR.status === 'fulfilled' && apyR.value) {
         const aLp = apyR.value.lp_apy_pct?.[0];
         const aSp = apyR.value.sp_apy_pct?.[0];
         if (typeof aLp === 'number' && aLp > 0) lpApy = aLp;
         if (typeof aSp === 'number' && aSp > 0) spApy = aSp;
+      }
+      if (pricesR.status === 'fulfilled') {
+        const map = pricesR.value;
+        icpUsdPrice = map.get(CANISTER_IDS.ICP_LEDGER) ?? null;
+      }
+
+      // Per-pool stats for the AMM Pools card (TVL, 7d volume).
+      if (ammPools.length > 0) {
+        const statResults = await Promise.allSettled(
+          ammPools.map((p: any) => fetchAmmPoolStats(p.pool_id, 'Week')),
+        );
+        const out: Record<string, any> = {};
+        ammPools.forEach((p: any, i: number) => {
+          const r = statResults[i];
+          if (r.status === 'fulfilled' && r.value) out[p.pool_id] = r.value;
+        });
+        ammPoolStats = out;
       }
     } catch (err) {
       console.error('[DexsLens] onMount error:', err);
@@ -127,32 +154,85 @@
       { label: '24h volume', value: `$${formatCompact(volume24h)}` },
       { label: 'Virtual price', value: virtualPrice.toFixed(6), sub: 'compounds with fees' },
       {
-        label: 'Peg imbalance',
-        value: pegStatus ? `${imbalancePct.toFixed(2)}%` : '--',
+        label: '3pool balance',
+        value: pegStatus ? `${imbalancePct.toFixed(2)}% skew` : '--',
         tone: imbalancePct < 2 ? 'good' as const : imbalancePct < 5 ? 'caution' as const : 'danger' as const,
+        sub: 'weight vs 33/33/33',
       },
     ];
     if (health) {
       const arb = Number(health.arb_opportunity_score);
-      metrics.push({ label: 'Arb score', value: `${arb}/100`, tone: arb > 50 ? 'caution' as const : 'good' as const });
+      metrics.push({
+        label: 'Arb score',
+        value: `${arb}/100`,
+        tone: arb > 50 ? 'caution' as const : 'good' as const,
+        sub: '0–100',
+      });
     }
-    metrics.push({ label: 'LP APY', value: lpApy != null ? `${lpApy.toFixed(2)}%` : '--', sub: '7d' });
+    metrics.push({ label: '3Pool LP APY', value: lpApy != null ? `${lpApy.toFixed(2)}%` : '--', sub: '7d' });
     return metrics;
   });
 
-  // AMM pools: collapse list to simple summary
+  // AMM pools: friendly summary with sequential index, token pair, fee, TVL, 7d volume.
+  // TVL = (3USD reserve × 3pool virtual_price) + (other token reserve × oracle price).
+  // For the 3USD/ICP pool that means: 3USD value @ vp_USD + ICP balance × icpUsdPrice.
+  function principalToText(p: any): string {
+    if (!p) return '';
+    if (typeof p === 'string') return p;
+    if (typeof p?.toText === 'function') return p.toText();
+    return String(p);
+  }
+
+  function tokenUsdPrice(principalText: string): number | null {
+    if (principalText === CANISTER_IDS.THREEPOOL) return virtualPrice; // 3USD LP token priced via vp
+    if (principalText === CANISTER_IDS.ICUSD_LEDGER) return 1;
+    if (principalText === CANISTER_IDS.CKUSDT_LEDGER) return 1;
+    if (principalText === CANISTER_IDS.CKUSDC_LEDGER) return 1;
+    if (principalText === CANISTER_IDS.ICP_LEDGER) return icpUsdPrice;
+    return null;
+  }
+
+  function tokenDecimals(principalText: string): number {
+    // ckUSDT/ckUSDC are 6; everything else in our universe is 8. Add to this map
+    // as we onboard tokens with different decimals.
+    if (principalText === CANISTER_IDS.CKUSDT_LEDGER) return 6;
+    if (principalText === CANISTER_IDS.CKUSDC_LEDGER) return 6;
+    return 8;
+  }
+
   const ammSummary = $derived.by(() => {
-    return ammPools.map((p: any) => {
-      const tokens: string[] = Array.isArray(p.tokens)
-        ? p.tokens.map((t: any) => {
-            const sym = t?.symbol ?? t?.name ?? '';
-            return typeof sym === 'string' ? sym : String(sym);
-          })
-        : [];
+    const sorted = [...ammPools].sort((a: any, b: any) => a.pool_id.localeCompare(b.pool_id));
+    return sorted.map((p: any, i: number) => {
+      const tokenA = principalToText(p.token_a);
+      const tokenB = principalToText(p.token_b);
+      const symA = getTokenSymbol(tokenA) || '?';
+      const symB = getTokenSymbol(tokenB) || '?';
+
+      const reserveA = Number(p.reserve_a ?? 0n) / Math.pow(10, tokenDecimals(tokenA));
+      const reserveB = Number(p.reserve_b ?? 0n) / Math.pow(10, tokenDecimals(tokenB));
+      const priceA = tokenUsdPrice(tokenA);
+      const priceB = tokenUsdPrice(tokenB);
+      const tvlUsd = (priceA != null && priceB != null) ? reserveA * priceA + reserveB * priceB : null;
+
+      // 7d volume: sum of both sides' input volume in USD (each swap touches one side
+      // as input, so a + b avoids double-counting).
+      const stat = ammPoolStats[p.pool_id] ?? null;
+      let vol7d: number | null = null;
+      if (stat && priceA != null && priceB != null) {
+        const vA = Number(stat.volume_a_e8s ?? 0n) / Math.pow(10, tokenDecimals(tokenA));
+        const vB = Number(stat.volume_b_e8s ?? 0n) / Math.pow(10, tokenDecimals(tokenB));
+        vol7d = vA * priceA + vB * priceB;
+      }
+
       return {
-        id: p.id ?? p.pool_id ?? p.canister_id ?? 'amm',
-        name: tokens.length > 1 ? tokens.join(' / ') : 'AMM pool',
-        feeBps: Number(p.fee_bps ?? p.fee ?? 0),
+        index: i + 1,
+        id: p.pool_id,
+        name: ammPoolLabel(p.pool_id, p.token_a, p.token_b),
+        shortName: ammPoolShortLabel(p.pool_id),
+        pair: `${symA}/${symB}`,
+        feeBps: Number(p.fee_bps ?? 0),
+        tvlUsd,
+        vol7d,
       };
     });
   });
@@ -251,19 +331,27 @@
         <thead>
           <tr class="border-b border-white/5">
             <th class="text-left py-2 px-2 text-xs font-medium text-gray-500 uppercase tracking-wider">Pool</th>
+            <th class="text-left py-2 px-2 text-xs font-medium text-gray-500 uppercase tracking-wider">Pair</th>
             <th class="text-right py-2 px-2 text-xs font-medium text-gray-500 uppercase tracking-wider">Fee</th>
-            <th class="text-left py-2 px-2 text-xs font-medium text-gray-500 uppercase tracking-wider">ID</th>
+            <th class="text-right py-2 px-2 text-xs font-medium text-gray-500 uppercase tracking-wider">TVL</th>
+            <th class="text-right py-2 px-2 text-xs font-medium text-gray-500 uppercase tracking-wider">7d volume</th>
           </tr>
         </thead>
         <tbody>
-          {#each ammSummary as p}
+          {#each ammSummary as p (p.id)}
             <tr class="border-b border-white/[0.03] hover:bg-white/[0.02]">
               <td class="py-2 px-2 font-medium">
-                <a href={`/explorer/e/pool/${encodeURIComponent(p.id)}`} class="text-indigo-300 hover:text-indigo-200">{p.name}</a>
+                <a href={`/explorer/e/pool/${encodeURIComponent(p.id)}`} class="text-indigo-300 hover:text-indigo-200">{p.shortName}</a>
+              </td>
+              <td class="py-2 px-2 text-gray-300">
+                <a href={`/explorer/e/pool/${encodeURIComponent(p.id)}`} class="hover:text-indigo-200">{p.pair}</a>
               </td>
               <td class="py-2 px-2 text-right tabular-nums text-gray-400">{(p.feeBps / 100).toFixed(2)}%</td>
-              <td class="py-2 px-2 text-gray-500 font-mono text-xs">
-                <a href={`/explorer/e/pool/${encodeURIComponent(p.id)}`} class="hover:text-gray-300">{p.id}</a>
+              <td class="py-2 px-2 text-right tabular-nums text-gray-300">
+                {p.tvlUsd != null ? `$${formatCompact(p.tvlUsd)}` : '--'}
+              </td>
+              <td class="py-2 px-2 text-right tabular-nums text-gray-400">
+                {p.vol7d != null ? `$${formatCompact(p.vol7d)}` : '--'}
               </td>
             </tr>
           {/each}

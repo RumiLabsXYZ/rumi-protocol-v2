@@ -30,7 +30,26 @@
     const minT = points[0].t;
     const maxT = points[points.length - 1].t;
     const { min, max } = computeYScale(points.map(p => p.v));
-    return { minT, maxT, yMin: min, yMax: max };
+    // Anchor the y-axis at 0 when all values are non-negative — otherwise a
+    // small spike on top of zeros (typical for low-volume swap charts) renders
+    // as a flat line near the baseline because computeYScale tightens around
+    // the data. Anchoring keeps the spike visually distinct from baseline.
+    const allNonNeg = points.every((p) => p.v >= 0);
+    const yMin = allNonNeg ? 0 : min;
+    return { minT, maxT, yMin, yMax: max };
+  });
+
+  // Highlight dots for non-zero points when the series is sparse — without
+  // them, an hourly chart with mostly-zero buckets looks empty even when
+  // there's real activity in a couple of buckets.
+  const dotPoints = $derived.by(() => {
+    if (!points.length) return [];
+    const nonZero = points.filter((p) => p.v > 0);
+    if (nonZero.length === 0) return [];
+    // Only annotate when the series is sparse enough that the line alone
+    // wouldn't be obvious. Above this threshold a normal line is plenty.
+    if (nonZero.length > 20) return [];
+    return nonZero;
   });
 
   function x(t: number) {
@@ -84,6 +103,9 @@
       <svg viewBox="0 0 {width} {height}" class="w-full h-full" preserveAspectRatio="none">
         <path d={fillD} fill={fillColor} stroke="none" />
         <path d={pathD} fill="none" stroke={color} stroke-width="1.5" stroke-linejoin="round" />
+        {#each dotPoints as p (p.t)}
+          <circle cx={x(p.t).toFixed(2)} cy={y(p.v).toFixed(2)} r="3" fill={color} />
+        {/each}
       </svg>
     {/if}
   </div>

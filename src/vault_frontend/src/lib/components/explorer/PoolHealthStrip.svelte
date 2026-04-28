@@ -20,16 +20,16 @@
   const pegLabel = $derived.by(() => {
     if (!pegStatus) return '--';
     const imb = pegStatus.max_imbalance_pct;
-    if (imb < 2) return 'Stable';
-    if (imb < 5) return 'Minor drift';
-    return `${imb.toFixed(1)}% imbalance`;
+    if (imb < 2) return 'Balanced';
+    if (imb < 5) return 'Minor skew';
+    return `${imb.toFixed(1)}% skew`;
   });
 </script>
 
 <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
-  <!-- 3pool Peg -->
+  <!-- 3pool balance skew (NOT peg deviation — measures how far weights drift from 33/33/33) -->
   <div class="explorer-card flex flex-col gap-1">
-    <span class="vital-label">3pool Peg</span>
+    <span class="vital-label" title="Pool weight skew vs ideal 33/33/33 split. Not a measure of icUSD peg.">3pool balance</span>
     {#if loading}
       <span class="text-sm text-gray-500">Loading...</span>
     {:else}
@@ -37,9 +37,9 @@
     {/if}
   </div>
 
-  <!-- LP APY -->
+  <!-- 3Pool LP APY -->
   <div class="explorer-card flex flex-col gap-1">
-    <span class="vital-label">LP APY (7d)</span>
+    <span class="vital-label">3Pool LP APY (7d)</span>
     {#if loading}
       <span class="text-sm text-gray-500">Loading...</span>
     {:else}
