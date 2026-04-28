@@ -32,3 +32,46 @@ pub async fn get_pool_status(
         Err((code, msg)) => Err(format!("get_pool_status: {:?} {}", code, msg)),
     }
 }
+
+// --- Event tailing (Phase 4) ---
+
+/// Shadow type for `PoolEventType` from rumi_stability_pool.did.
+/// We enumerate every variant so Candid deserialization succeeds for all
+/// event types. Variants we process have their fields decoded; others use
+/// empty structs (Candid skips extra record fields on the source side).
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub enum PoolEventType {
+    #[serde(rename = "Deposit")]
+    Deposit { token_ledger: Principal, amount: u64 },
+    #[serde(rename = "Withdraw")]
+    Withdraw { token_ledger: Principal, amount: u64 },
+    #[serde(rename = "ClaimCollateral")]
+    ClaimCollateral { collateral_ledger: Principal, amount: u64 },
+    #[serde(rename = "DepositAs3USD")]
+    DepositAs3USD { token_ledger: Principal, amount_in: u64, lp_minted: u64 },
+    #[serde(rename = "InterestReceived")]
+    InterestReceived { token_ledger: Principal, amount: u64 },
+}
+
+/// Shadow type for `PoolEvent` from rumi_stability_pool.did.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct PoolEvent {
+    pub id: u64,
+    pub timestamp: u64,
+    pub caller: Principal,
+    pub event_type: PoolEventType,
+}
+
+pub async fn get_pool_event_count(sp: Principal) -> Result<u64, String> {
+    let (count,): (u64,) = ic_cdk::call(sp, "get_pool_event_count", ())
+        .await
+        .map_err(|(code, msg)| format!("get_pool_event_count: {:?} {}", code, msg))?;
+    Ok(count)
+}
+
+pub async fn get_pool_events(sp: Principal, start: u64, length: u64) -> Result<Vec<PoolEvent>, String> {
+    let (events,): (Vec<PoolEvent>,) = ic_cdk::call(sp, "get_pool_events", (start, length))
+        .await
+        .map_err(|(code, msg)| format!("get_pool_events: {:?} {}", code, msg))?;
+    Ok(events)
+}

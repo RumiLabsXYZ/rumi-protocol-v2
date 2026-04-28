@@ -204,6 +204,7 @@ fn get_collector_health() -> types::CollectorHealth {
         (cursors::CURSOR_ID_3POOL_LIQUIDITY, "3pool_liquidity", cursors::three_pool_liquidity::get),
         (cursors::CURSOR_ID_3POOL_BLOCKS, "3pool_blocks", cursors::three_pool_blocks::get),
         (cursors::CURSOR_ID_AMM_SWAPS, "amm_swaps", cursors::amm_swaps::get),
+        (cursors::CURSOR_ID_STABILITY_EVENTS, "stability_events", cursors::stability_events::get),
         (cursors::CURSOR_ID_ICUSD_BLOCKS, "icusd_blocks", cursors::icusd_blocks::get),
     ];
 

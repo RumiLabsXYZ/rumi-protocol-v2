@@ -49,6 +49,7 @@ async fn pull_cycle() {
         tailing::amm_swaps::run(),
         tailing::icrc3::tail_icusd_blocks(),
         tailing::icrc3::tail_3pool_blocks(),
+        tailing::stability_pool::run(),
     );
 
     // Update pull cycle timestamp
