@@ -23,6 +23,7 @@ pub mod dashboard;
 pub mod event;
 pub mod guard;
 pub mod icrc21;
+pub mod icrc3_proof;
 pub mod liquidity_pool;
 pub mod logs;
 pub mod management;
