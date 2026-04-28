@@ -104,21 +104,29 @@ fn rollup_fees(now: u64, day_start: u64) {
     let swap_fees: u64 = swap_events.iter().map(|e| e.fee).sum();
     let mut borrow_count: u32 = 0;
     let mut redemption_count: u32 = 0;
+    let mut borrow_fees: u64 = 0;
+    let mut redemption_fees: u64 = 0;
 
     for e in &vault_events {
         match e.event_kind {
-            VaultEventKind::Borrowed => borrow_count += 1,
-            VaultEventKind::Redeemed => redemption_count += 1,
+            VaultEventKind::Borrowed => {
+                borrow_count += 1;
+                borrow_fees = borrow_fees.saturating_add(e.fee_amount);
+            }
+            VaultEventKind::Redeemed => {
+                redemption_count += 1;
+                redemption_fees = redemption_fees.saturating_add(e.fee_amount);
+            }
             _ => {}
         }
     }
 
     rollups::daily_fees::push(rollups::DailyFeeRollup {
         timestamp_ns: now,
-        borrowing_fees_e8s: None,
+        borrowing_fees_e8s: Some(borrow_fees),
         borrow_count,
         swap_fees_e8s: swap_fees,
-        redemption_fees_e8s: None,
+        redemption_fees_e8s: Some(redemption_fees),
         redemption_count,
     });
 }
