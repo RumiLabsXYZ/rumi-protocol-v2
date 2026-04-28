@@ -82,6 +82,11 @@ pub struct AnalyticsVaultEvent {
     pub event_kind: VaultEventKind,
     pub collateral_type: Principal,
     pub amount: u64,
+    /// Fee paid on this event in icUSD e8s. Populated for Borrowed and
+    /// Redeemed; zero for other event kinds. Older stored events default
+    /// to 0 via serde — we just won't have fee data for those.
+    #[serde(default)]
+    pub fee_amount: u64,
 }
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
@@ -311,6 +316,7 @@ mod tests {
             event_kind: VaultEventKind::Opened,
             collateral_type: Principal::anonymous(),
             amount: 10_000_000_000,
+            fee_amount: 0,
         };
         let bytes = evt.to_bytes();
         let decoded = AnalyticsVaultEvent::from_bytes(bytes);
