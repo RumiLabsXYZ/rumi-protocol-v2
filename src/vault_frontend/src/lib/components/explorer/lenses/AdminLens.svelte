@@ -3,6 +3,7 @@
   import LensHealthStrip from '../LensHealthStrip.svelte';
   import LensActivityPanel from '../LensActivityPanel.svelte';
   import AdminBreakdownCard from '../AdminBreakdownCard.svelte';
+  import CanisterInventoryCard from '../CanisterInventoryCard.svelte';
   import { fetchCollectorHealth } from '$services/explorer/analyticsService';
   import { fetchProtocolStatus } from '$services/explorer/explorerService';
 
@@ -50,6 +51,8 @@
 <LensHealthStrip title="Admin" metrics={healthMetrics} loading={loading} />
 
 <AdminBreakdownCard />
+
+<CanisterInventoryCard />
 
 {#if collectorHealth}
   <div class="explorer-card">
