@@ -138,8 +138,22 @@ fn route_sp_event(event: &sources::stability_pool::PoolEvent) {
                 amount: *amount,
             });
         }
-        // InterestReceived is a protocol-internal credit, not a user action.
-        // Skip it silently — it doesn't affect the depositor leaderboard.
+        // Everything below is decoded so Vec<PoolEvent> deserialization
+        // succeeds, but skipped — none of these affect the depositor
+        // leaderboard. Listed exhaustively (rather than `_ => {}`) so adding
+        // a new variant on the SP side without updating analytics produces a
+        // compile error here, not a silent drop.
         InterestReceived { .. } => {}
+        OptOutCollateral { .. } => {}
+        OptInCollateral { .. } => {}
+        LiquidationNotification { .. } => {}
+        LiquidationExecuted { .. } => {}
+        StablecoinRegistered { .. } => {}
+        CollateralRegistered { .. } => {}
+        ConfigurationUpdated => {}
+        EmergencyPauseActivated => {}
+        OperationsResumed => {}
+        BalanceCorrected { .. } => {}
+        CollateralGainCorrected { .. } => {}
     }
 }

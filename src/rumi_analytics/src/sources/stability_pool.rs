@@ -35,22 +35,41 @@ pub async fn get_pool_status(
 
 // --- Event tailing (Phase 4) ---
 
-/// Shadow type for `PoolEventType` from rumi_stability_pool.did.
-/// We enumerate every variant so Candid deserialization succeeds for all
-/// event types. Variants we process have their fields decoded; others use
-/// empty structs (Candid skips extra record fields on the source side).
+/// Shadow type for `PoolEventType` from rumi_stability_pool. The Candid
+/// service .did file lists only 5 variants but the actual Rust enum (in
+/// `src/stability_pool/src/types.rs`) has 16. The wire format includes all
+/// 16, so this shadow MUST enumerate every one or `Vec<PoolEvent>` decoding
+/// fails the moment any non-listed variant appears. We tail Deposit /
+/// Withdraw / DepositAs3USD / ClaimCollateral; everything else gets matched
+/// exhaustively but routed through a no-op skip (see route_sp_event).
 #[derive(CandidType, Deserialize, Clone, Debug)]
 pub enum PoolEventType {
-    #[serde(rename = "Deposit")]
     Deposit { token_ledger: Principal, amount: u64 },
-    #[serde(rename = "Withdraw")]
     Withdraw { token_ledger: Principal, amount: u64 },
-    #[serde(rename = "ClaimCollateral")]
     ClaimCollateral { collateral_ledger: Principal, amount: u64 },
-    #[serde(rename = "DepositAs3USD")]
     DepositAs3USD { token_ledger: Principal, amount_in: u64, lp_minted: u64 },
-    #[serde(rename = "InterestReceived")]
     InterestReceived { token_ledger: Principal, amount: u64 },
+    OptOutCollateral { collateral_type: Principal },
+    OptInCollateral { collateral_type: Principal },
+    LiquidationNotification { vault_count: u64 },
+    LiquidationExecuted {
+        vault_id: u64,
+        stables_consumed_e8s: u64,
+        collateral_gained: u64,
+        collateral_type: Principal,
+        success: bool,
+    },
+    StablecoinRegistered { ledger: Principal, symbol: String },
+    CollateralRegistered { ledger: Principal, symbol: String },
+    ConfigurationUpdated,
+    EmergencyPauseActivated,
+    OperationsResumed,
+    BalanceCorrected { user: Principal, token_ledger: Principal, new_amount: u64 },
+    CollateralGainCorrected {
+        user: Principal,
+        collateral_ledger: Principal,
+        new_amount: u64,
+    },
 }
 
 /// Shadow type for `PoolEvent` from rumi_stability_pool.did.
