@@ -482,6 +482,17 @@ fn post_upgrade(arg: ProtocolArg) {
         end - start
     );
 
+    // Defense-in-depth: clear transient runtime locks unconditionally on every
+    // upgrade. The matching State fields now use `serde(skip_serializing)` so
+    // future upgrades won't re-introduce a stuck lock, but snapshots written by
+    // the OLD code (before that change shipped) can still carry `true`. Locks
+    // guard in-flight async futures that the upgrade has already killed, so
+    // resetting them here is always correct.
+    mutate_state(|s| {
+        s.is_fetching_rate = false;
+        s.is_timer_running = false;
+    });
+
     setup_timers();
 }
 
