@@ -6,6 +6,7 @@ pub mod three_pool_swaps;
 pub mod three_pool_liquidity;
 pub mod amm_swaps;
 pub mod icrc3;
+pub mod stability_pool;
 
 pub const BATCH_SIZE: u64 = 500;
 pub const BACKFILL_BATCH_SIZE: u64 = 1000;

@@ -100,8 +100,16 @@ export interface PoolEvent {
 export type PoolEventType = {
     'Withdraw' : { 'amount' : bigint, 'token_ledger' : Principal }
   } |
+  { 'OperationsResumed' : null } |
+  { 'CollateralRegistered' : { 'ledger' : Principal, 'symbol' : string } } |
+  { 'OptOutCollateral' : { 'collateral_type' : Principal } } |
+  { 'OptInCollateral' : { 'collateral_type' : Principal } } |
+  { 'StablecoinRegistered' : { 'ledger' : Principal, 'symbol' : string } } |
   { 'Deposit' : { 'amount' : bigint, 'token_ledger' : Principal } } |
   { 'InterestReceived' : { 'amount' : bigint, 'token_ledger' : Principal } } |
+  { 'ConfigurationUpdated' : null } |
+  { 'LiquidationNotification' : { 'vault_count' : bigint } } |
+  { 'EmergencyPauseActivated' : null } |
   {
     'DepositAs3USD' : {
       'amount_in' : bigint,
@@ -111,6 +119,29 @@ export type PoolEventType = {
   } |
   {
     'ClaimCollateral' : { 'collateral_ledger' : Principal, 'amount' : bigint }
+  } |
+  {
+    'LiquidationExecuted' : {
+      'stables_consumed_e8s' : bigint,
+      'vault_id' : bigint,
+      'collateral_gained' : bigint,
+      'success' : boolean,
+      'collateral_type' : Principal,
+    }
+  } |
+  {
+    'CollateralGainCorrected' : {
+      'user' : Principal,
+      'new_amount' : bigint,
+      'collateral_ledger' : Principal,
+    }
+  } |
+  {
+    'BalanceCorrected' : {
+      'user' : Principal,
+      'new_amount' : bigint,
+      'token_ledger' : Principal,
+    }
   };
 export interface PoolLiquidationRecord {
   'collateral_price_e8s' : [] | [bigint],

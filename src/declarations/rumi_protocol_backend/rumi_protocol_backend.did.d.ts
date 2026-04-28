@@ -58,6 +58,7 @@ export interface CollateralConfig {
   'min_collateral_deposit' : bigint,
   'last_price' : [] | [number],
   'last_price_timestamp' : [] | [bigint],
+  'redemption_tier' : number,
   'redemption_fee_floor' : Uint8Array | number[],
   'borrow_threshold_ratio' : Uint8Array | number[],
   'ledger_fee' : bigint,
@@ -237,7 +238,6 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'icusd_amount' : bigint,
       'icusd_block_index' : bigint,
       'owner' : Principal,
-      'vault_impacts' : [] | [Array<VaultRedemptionImpact>],
       'timestamp' : [] | [bigint],
       'fee_amount' : bigint,
       'collateral_type' : [] | [Principal],
@@ -370,6 +370,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'liquidator_payment' : bigint,
       'vault_id' : bigint,
       'timestamp' : [] | [bigint],
+      'three_usd_reserves_e8s' : [] | [bigint],
       'liquidator' : [] | [Principal],
       'icp_to_liquidator' : bigint,
     }
@@ -528,6 +529,7 @@ export interface GetEventsFilteredResponse {
   'events' : Array<[bigint, Event]>,
 }
 export interface GetSnapshotsArg { 'start' : bigint, 'length' : bigint }
+export interface HttpHeader { 'value' : string, 'name' : string }
 export interface HttpRequest {
   'url' : string,
   'method' : string,
@@ -535,6 +537,11 @@ export interface HttpRequest {
   'headers' : Array<[string, string]>,
 }
 export interface HttpResponse {
+  'status' : bigint,
+  'body' : Uint8Array | number[],
+  'headers' : Array<HttpHeader>,
+}
+export interface HttpResponse_1 {
   'body' : Uint8Array | number[],
   'headers' : Array<[string, string]>,
   'status_code' : number,
@@ -646,11 +653,11 @@ export type ProtocolError = { 'GenericError' : string } |
   { 'TemporarilyUnavailable' : string } |
   { 'TransferError' : TransferError } |
   { 'AlreadyProcessing' : null } |
+  { 'NotLowestCR' : null } |
   { 'AnonymousCallerNotAllowed' : null } |
   { 'AmountTooLow' : { 'minimum_amount' : bigint } } |
   { 'TransferFromError' : [TransferFromError, bigint] } |
-  { 'CallerNotOwner' : null } |
-  { 'NotLowestCR' : null };
+  { 'CallerNotOwner' : null };
 export interface ProtocolSnapshot {
   'total_debt' : bigint,
   'collateral_snapshots' : Array<CollateralSnapshot>,
@@ -707,28 +714,35 @@ export type Result = { 'Ok' : null } |
   { 'Err' : ProtocolError };
 export type Result_1 = { 'Ok' : bigint } |
   { 'Err' : ProtocolError };
-export type Result_10 = { 'Ok' : StabilityPoolLiquidationResult } |
+export type Result_10 = { 'Ok' : boolean } |
   { 'Err' : ProtocolError };
-export type Result_11 = { 'Ok' : string } |
+export type Result_11 = { 'Ok' : ReserveRedemptionResult } |
   { 'Err' : ProtocolError };
-export type Result_12 = { 'Ok' : number } |
+export type Result_12 = { 'Ok' : StabilityPoolLiquidationResult } |
   { 'Err' : ProtocolError };
-export type Result_2 = { 'Ok' : SuccessWithFee } |
+export type Result_2 = { 'Ok' : string } |
   { 'Err' : ProtocolError };
-export type Result_3 = { 'Ok' : BotLiquidationResult } |
+export type Result_3 = { 'Ok' : SuccessWithFee } |
   { 'Err' : ProtocolError };
-export type Result_4 = { 'Ok' : [] | [bigint] } |
+export type Result_4 = { 'Ok' : BotLiquidationResult } |
   { 'Err' : ProtocolError };
-export type Result_5 = { 'Ok' : number } |
+export type Result_5 = { 'Ok' : [] | [bigint] } |
   { 'Err' : ProtocolError };
-export type Result_6 = { 'Ok' : ConsentInfo } |
+export type Result_6 = { 'Ok' : number } |
+  { 'Err' : ProtocolError };
+export type Result_7 = { 'Ok' : number } |
+  { 'Err' : ProtocolError };
+export type Result_8 = { 'Ok' : ConsentInfo } |
   { 'Err' : Icrc21Error };
-export type Result_7 = { 'Ok' : OpenVaultSuccess } |
+export type Result_9 = { 'Ok' : OpenVaultSuccess } |
   { 'Err' : ProtocolError };
-export type Result_8 = { 'Ok' : boolean } |
-  { 'Err' : ProtocolError };
-export type Result_9 = { 'Ok' : ReserveRedemptionResult } |
-  { 'Err' : ProtocolError };
+export type SpProofLedger = { 'IcusdBurn' : null } |
+  { 'ThreePoolTransfer' : null };
+export interface SpWritedownProof {
+  'block_index' : bigint,
+  'ledger_kind' : SpProofLedger,
+  'vault_id_memo' : bigint,
+}
 export interface StabilityPoolConfig {
   'enabled' : boolean,
   'liquidation_discount' : bigint,
@@ -773,6 +787,10 @@ export type TransferFromError = {
   { 'CreatedInFuture' : { 'ledger_time' : bigint } } |
   { 'TooOld' : null } |
   { 'InsufficientFunds' : { 'balance' : bigint } };
+export interface TransformArgs {
+  'context' : Uint8Array | number[],
+  'response' : HttpResponse,
+}
 export interface TreasuryStats {
   'pending_treasury_collateral_entries' : bigint,
   'liquidation_protocol_share' : number,
@@ -789,6 +807,7 @@ export interface UpgradeArg {
 export interface Vault {
   'collateral_amount' : bigint,
   'owner' : Principal,
+  'bot_processing' : boolean,
   'vault_id' : bigint,
   'collateral_type' : Principal,
   'last_accrual_time' : bigint,
@@ -811,11 +830,6 @@ export interface VaultRedemption {
   'vault_id' : bigint,
   'collateral_seized' : bigint,
 }
-export interface VaultRedemptionImpact {
-  'vault_id' : bigint,
-  'collateral_seized' : bigint,
-  'debt_reduced' : bigint,
-}
 export type XrcAssetClass = { 'Cryptocurrency' : null } |
   { 'FiatCurrency' : null };
 export interface _SERVICE {
@@ -828,40 +842,19 @@ export interface _SERVICE {
   >,
   'admin_correct_vault_debts' : ActorMethod<
     [Array<VaultDebtCorrection>],
-    Result_11
+    Result_2
   >,
   'admin_mint_icusd' : ActorMethod<[bigint, Principal, string], Result_1>,
   'admin_resolve_stuck_claim' : ActorMethod<[bigint, boolean], Result>,
   'admin_sweep_to_treasury' : ActorMethod<[string], Result_1>,
-  'borrow_from_vault' : ActorMethod<[VaultArg], Result_2>,
+  'borrow_from_vault' : ActorMethod<[VaultArg], Result_3>,
   'bot_cancel_liquidation' : ActorMethod<[bigint], Result>,
-  'bot_claim_liquidation' : ActorMethod<[bigint], Result_3>,
+  'bot_claim_liquidation' : ActorMethod<[bigint], Result_4>,
   'bot_confirm_liquidation' : ActorMethod<[bigint], Result>,
   'claim_liquidity_returns' : ActorMethod<[], Result_1>,
   'clear_stuck_operations' : ActorMethod<[[] | [Principal]], Result_1>,
-  'close_vault' : ActorMethod<[bigint], Result_4>,
-  'coingecko_transform' : ActorMethod<
-    [
-      {
-        'context' : Uint8Array | number[],
-        'response' : {
-          'status' : bigint,
-          'body' : Uint8Array | number[],
-          'headers' : Array<{ 'value' : string, 'name' : string }>,
-        },
-      },
-    ],
-    {
-      'status' : bigint,
-      'body' : Uint8Array | number[],
-      'headers' : Array<{ 'value' : string, 'name' : string }>,
-    }
-  >,
-  'dev_force_bot_liquidate' : ActorMethod<[bigint], Result_3>,
-  'dev_force_partial_bot_liquidate' : ActorMethod<[bigint], Result_3>,
-  'dev_set_collateral_price' : ActorMethod<[Principal, number], Result_11>,
-  'dev_test_cascade_liquidation' : ActorMethod<[bigint], Result_11>,
-  'dev_test_pool_only_liquidation' : ActorMethod<[bigint], Result_11>,
+  'close_vault' : ActorMethod<[bigint], Result_5>,
+  'coingecko_transform' : ActorMethod<[TransformArgs], HttpResponse>,
   'enter_recovery_mode' : ActorMethod<[], Result>,
   'exit_recovery_mode' : ActorMethod<[], Result>,
   'freeze_protocol' : ActorMethod<[], Result>,
@@ -872,6 +865,10 @@ export interface _SERVICE {
   'get_ckstable_repay_fee' : ActorMethod<[], number>,
   'get_collateral_config' : ActorMethod<[Principal], [] | [CollateralConfig]>,
   'get_collateral_totals' : ActorMethod<[], Array<CollateralTotals>>,
+  'get_consumed_writedown_proofs' : ActorMethod<
+    [],
+    Array<[SpProofLedger, bigint]>
+  >,
   'get_deposit_account' : ActorMethod<[[] | [Principal]], Account>,
   'get_event_count' : ActorMethod<[], bigint>,
   'get_events' : ActorMethod<[GetEventsArg], Array<Event>>,
@@ -887,9 +884,12 @@ export interface _SERVICE {
   'get_interest_split' : ActorMethod<[], Array<InterestSplitArg>>,
   'get_liquidatable_vaults' : ActorMethod<[], Array<CandidVault>>,
   'get_liquidation_bonus' : ActorMethod<[], number>,
+  'get_liquidation_frozen' : ActorMethod<[], boolean>,
+  'get_liquidation_ordering_tolerance_bps' : ActorMethod<[], bigint>,
   'get_liquidation_protocol_share' : ActorMethod<[], number>,
   'get_liquidity_status' : ActorMethod<[Principal], LiquidityStatus>,
   'get_min_icusd_amount' : ActorMethod<[], bigint>,
+  'get_protocol_3usd_reserves' : ActorMethod<[], bigint>,
   'get_protocol_config' : ActorMethod<[], ProtocolConfig>,
   'get_protocol_snapshots' : ActorMethod<
     [GetSnapshotsArg],
@@ -901,7 +901,7 @@ export interface _SERVICE {
   'get_redemption_fee_ceiling' : ActorMethod<[], number>,
   'get_redemption_fee_floor' : ActorMethod<[], number>,
   'get_redemption_rate' : ActorMethod<[], number>,
-  'get_redemption_tier' : ActorMethod<[Principal], Result_12>,
+  'get_redemption_tier' : ActorMethod<[Principal], Result_6>,
   'get_reserve_balances' : ActorMethod<[], Array<ReserveBalance>>,
   'get_reserve_redemption_fee' : ActorMethod<[], number>,
   'get_reserve_redemptions_enabled' : ActorMethod<[], boolean>,
@@ -910,6 +910,7 @@ export interface _SERVICE {
   'get_rmr_floor' : ActorMethod<[], number>,
   'get_rmr_floor_cr' : ActorMethod<[], number>,
   'get_snapshot_count' : ActorMethod<[], bigint>,
+  'get_sp_writedown_disabled' : ActorMethod<[], boolean>,
   'get_stability_pool_config' : ActorMethod<[], StabilityPoolConfig>,
   'get_stability_pool_principal' : ActorMethod<[], [] | [Principal]>,
   'get_stable_token_enabled' : ActorMethod<[StableTokenType], boolean>,
@@ -921,34 +922,34 @@ export interface _SERVICE {
   'get_treasury_principal' : ActorMethod<[], [] | [Principal]>,
   'get_treasury_stats' : ActorMethod<[], TreasuryStats>,
   'get_vault_history' : ActorMethod<[bigint], Array<Event>>,
-  'get_vault_interest_rate' : ActorMethod<[bigint], Result_5>,
+  'get_vault_interest_rate' : ActorMethod<[bigint], Result_7>,
   'get_vaults' : ActorMethod<[[] | [Principal]], Array<CandidVault>>,
-  'http_request' : ActorMethod<[HttpRequest], HttpResponse>,
+  'http_request' : ActorMethod<[HttpRequest], HttpResponse_1>,
   'icrc10_supported_standards' : ActorMethod<[], Array<StandardRecord>>,
   'icrc21_canister_call_consent_message' : ActorMethod<
     [ConsentMessageRequest],
-    Result_6
+    Result_8
   >,
   'icrc28_trusted_origins' : ActorMethod<[], Icrc28TrustedOriginsResponse>,
-  'liquidate_vault' : ActorMethod<[bigint], Result_2>,
-  'liquidate_vault_partial' : ActorMethod<[VaultArg], Result_2>,
+  'liquidate_vault' : ActorMethod<[bigint], Result_3>,
+  'liquidate_vault_partial' : ActorMethod<[VaultArg], Result_3>,
   'liquidate_vault_partial_with_stable' : ActorMethod<
     [VaultArgWithToken],
-    Result_2
+    Result_3
   >,
-  'open_vault' : ActorMethod<[bigint, [] | [Principal]], Result_7>,
+  'open_vault' : ActorMethod<[bigint, [] | [Principal]], Result_9>,
   'open_vault_and_borrow' : ActorMethod<
     [bigint, bigint, [] | [Principal]],
-    Result_7
+    Result_9
   >,
-  'open_vault_with_deposit' : ActorMethod<[bigint, [] | [Principal]], Result_7>,
-  'partial_liquidate_vault' : ActorMethod<[VaultArg], Result_2>,
+  'open_vault_with_deposit' : ActorMethod<[bigint, [] | [Principal]], Result_9>,
+  'partial_liquidate_vault' : ActorMethod<[VaultArg], Result_3>,
   'partial_repay_to_vault' : ActorMethod<[VaultArg], Result_1>,
   'provide_liquidity' : ActorMethod<[bigint], Result_1>,
-  'recover_pending_transfer' : ActorMethod<[bigint], Result_8>,
-  'redeem_collateral' : ActorMethod<[Principal, bigint], Result_2>,
-  'redeem_icp' : ActorMethod<[bigint], Result_2>,
-  'redeem_reserves' : ActorMethod<[bigint, [] | [Principal]], Result_9>,
+  'recover_pending_transfer' : ActorMethod<[bigint], Result_10>,
+  'redeem_collateral' : ActorMethod<[Principal, bigint], Result_3>,
+  'redeem_icp' : ActorMethod<[bigint], Result_3>,
+  'redeem_reserves' : ActorMethod<[bigint, [] | [Principal]], Result_11>,
   'repay_to_vault' : ActorMethod<[VaultArg], Result_1>,
   'repay_to_vault_with_stable' : ActorMethod<[VaultArgWithToken], Result_1>,
   'reset_bot_budget' : ActorMethod<[bigint], Result>,
@@ -986,6 +987,8 @@ export interface _SERVICE {
   'set_interest_split' : ActorMethod<[Array<InterestSplitArg>], Result>,
   'set_liquidation_bonus' : ActorMethod<[number], Result>,
   'set_liquidation_bot_config' : ActorMethod<[Principal, bigint], Result>,
+  'set_liquidation_frozen' : ActorMethod<[boolean], Result>,
+  'set_liquidation_ordering_tolerance' : ActorMethod<[bigint], Result>,
   'set_liquidation_protocol_share' : ActorMethod<[number], Result>,
   'set_lst_haircut' : ActorMethod<[Principal, number], Result>,
   'set_min_icusd_amount' : ActorMethod<[bigint], Result>,
@@ -1009,6 +1012,7 @@ export interface _SERVICE {
   'set_rmr_ceiling_cr' : ActorMethod<[number], Result>,
   'set_rmr_floor' : ActorMethod<[number], Result>,
   'set_rmr_floor_cr' : ActorMethod<[number], Result>,
+  'set_sp_writedown_disabled' : ActorMethod<[boolean], Result>,
   'set_stability_pool_principal' : ActorMethod<[Principal], Result>,
   'set_stable_ledger_principal' : ActorMethod<
     [StableTokenType, Principal],
@@ -1017,17 +1021,21 @@ export interface _SERVICE {
   'set_stable_token_enabled' : ActorMethod<[StableTokenType, boolean], Result>,
   'set_three_pool_canister' : ActorMethod<[Principal], Result>,
   'set_treasury_principal' : ActorMethod<[Principal], Result>,
-  'stability_pool_liquidate' : ActorMethod<[bigint, bigint], Result_10>,
+  'stability_pool_liquidate' : ActorMethod<[bigint, bigint], Result_12>,
   'stability_pool_liquidate_debt_burned' : ActorMethod<
-    [bigint, bigint],
-    Result_10
+    [bigint, bigint, SpWritedownProof],
+    Result_12
+  >,
+  'stability_pool_liquidate_with_reserves' : ActorMethod<
+    [bigint, bigint, bigint, Principal],
+    Result_12
   >,
   'unfreeze_protocol' : ActorMethod<[], Result>,
   'update_collateral_config' : ActorMethod<
     [Principal, CollateralConfig],
     Result
   >,
-  'withdraw_and_close_vault' : ActorMethod<[bigint], Result_4>,
+  'withdraw_and_close_vault' : ActorMethod<[bigint], Result_5>,
   'withdraw_collateral' : ActorMethod<[bigint], Result_1>,
   'withdraw_liquidity' : ActorMethod<[bigint], Result_1>,
   'withdraw_partial_collateral' : ActorMethod<[VaultArg], Result_1>,

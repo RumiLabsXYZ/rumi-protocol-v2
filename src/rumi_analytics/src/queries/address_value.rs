@@ -689,6 +689,7 @@ mod tests {
             event_kind: kind,
             collateral_type: coll_type,
             amount,
+            fee_amount: 0,
         }
     }
     fn liq_event(vault_id: u64, ts: u64, kind: LiquidationKind, coll_amount: u64) -> AnalyticsLiquidationEvent {

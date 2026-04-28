@@ -109,14 +109,24 @@
     };
   });
 
+  // Treasury share of accrued interest (not the liquidation bonus split — that
+  // belongs in the protocol docs). Pulled from interest_split's "treasury"
+  // entry; this is the slice of borrower interest that gets routed to the
+  // treasury canister.
+  const treasuryInterestShare = $derived.by(() => {
+    const bps = splitRows.find((r: any) => r.destination === 'treasury')?.bps ?? 0;
+    return bps / 10000;
+  });
+
   const healthMetrics = $derived.by(() => [
     { label: 'Fees (90d)', value: `$${formatCompact(totalFees)}` },
     { label: '24h fees', value: `$${formatCompact(fees24h)}` },
-    { label: 'LP APY', value: lpApy != null ? `${Number(lpApy).toFixed(2)}%` : '--', sub: '7d' },
+    { label: '3Pool LP APY', value: lpApy != null ? `${Number(lpApy).toFixed(2)}%` : '--', sub: '7d' },
     { label: 'SP APY', value: spApy != null ? `${Number(spApy).toFixed(2)}%` : '--', sub: '7d' },
     {
-      label: 'Treasury liq share',
-      value: treasuryInfo ? `${(treasuryInfo.liquidationShare * 100).toFixed(0)}%` : '--',
+      label: 'Treasury interest share',
+      value: `${(treasuryInterestShare * 100).toFixed(0)}%`,
+      sub: 'of accrued interest',
     },
   ]);
 
@@ -206,23 +216,27 @@
 {#if treasuryInfo}
   <div class="explorer-card">
     <h3 class="text-sm font-medium text-gray-300 mb-3">Treasury</h3>
-    <div class="grid grid-cols-2 md:grid-cols-3 gap-4">
+    <div class="grid grid-cols-2 md:grid-cols-2 gap-4">
       <div>
-        <div class="text-xs text-gray-500">Pending interest</div>
+        <div class="text-xs text-gray-500" title="icUSD that has accrued to the treasury but hasn't yet been swept to the treasury canister. Drops to 0 immediately after each periodic flush.">
+          Pending interest
+        </div>
         <div class="text-base font-semibold tabular-nums text-gray-200 mt-0.5">
           {formatCompact(treasuryInfo.pendingInterest / 1e8)} icUSD
         </div>
-      </div>
-      <div>
-        <div class="text-xs text-gray-500">Liquidation share</div>
-        <div class="text-base font-semibold tabular-nums text-gray-200 mt-0.5">
-          {(treasuryInfo.liquidationShare * 100).toFixed(0)}%
+        <div class="text-[11px] text-gray-500 mt-0.5">
+          Resets to 0 after each automatic flush.
         </div>
       </div>
       <div>
-        <div class="text-xs text-gray-500">Flush threshold</div>
+        <div class="text-xs text-gray-500" title="When pending interest crosses this amount the protocol auto-distributes it to recipients per the interest split. Threshold of 0 means flush every tick.">
+          Flush threshold
+        </div>
         <div class="text-base font-semibold tabular-nums text-gray-200 mt-0.5">
-          {formatCompact(treasuryInfo.flushThreshold)} icUSD
+          {treasuryInfo.flushThreshold > 0 ? `${formatCompact(treasuryInfo.flushThreshold)} icUSD` : 'Flush every tick'}
+        </div>
+        <div class="text-[11px] text-gray-500 mt-0.5">
+          Auto-flushes pending interest when crossed.
         </div>
       </div>
     </div>

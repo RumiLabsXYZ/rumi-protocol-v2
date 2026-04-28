@@ -7,7 +7,7 @@
   import { fetchFeeSeries } from '$services/explorer/analyticsService';
   import {
     fetchRedemptionRate, fetchRedemptionFeeFloor, fetchRedemptionFeeCeiling,
-    fetchRedemptionTier, fetchCollateralTotals,
+    fetchRedemptionTier, fetchCollateralTotals, fetchProtocolConfig,
   } from '$services/explorer/explorerService';
   import {
     e8sToNumber, formatCompact, CHART_COLORS, COLLATERAL_SYMBOLS, getCollateralSymbol,
@@ -17,6 +17,8 @@
   let rate: number | null = $state(null);
   let feeFloor: number | null = $state(null);
   let feeCeiling: number | null = $state(null);
+  let rmrFloor: number | null = $state(null);
+  let rmrCeiling: number | null = $state(null);
   let collateralTotals: any[] = $state([]);
   let tierMap: Map<string, number | null> = $state(new Map());
   let loading = $state(true);
@@ -24,12 +26,13 @@
   onMount(async () => {
     try {
       const principals = Object.keys(COLLATERAL_SYMBOLS);
-      const [feeR, rateR, floorR, ceilR, totalsR, ...tierRs] = await Promise.allSettled([
+      const [feeR, rateR, floorR, ceilR, totalsR, cfgR, ...tierRs] = await Promise.allSettled([
         fetchFeeSeries(90),
         fetchRedemptionRate(),
         fetchRedemptionFeeFloor(),
         fetchRedemptionFeeCeiling(),
         fetchCollateralTotals(),
+        fetchProtocolConfig(),
         ...principals.map(p => fetchRedemptionTier(Principal.fromText(p))),
       ]);
       if (feeR.status === 'fulfilled') feeRows = feeR.value ?? [];
@@ -37,6 +40,14 @@
       if (floorR.status === 'fulfilled') feeFloor = floorR.value;
       if (ceilR.status === 'fulfilled') feeCeiling = ceilR.value;
       if (totalsR.status === 'fulfilled') collateralTotals = totalsR.value ?? [];
+      if (cfgR.status === 'fulfilled' && cfgR.value) {
+        // RMR = redemption margin ratio. Bounds: rmr_floor → rmr_ceiling. The
+        // active value depends on the global CR (between rmr_floor_cr and
+        // rmr_ceiling_cr). Showing the configured range gives a clear picture
+        // of the protocol's redemption margin policy.
+        rmrFloor = typeof cfgR.value.rmr_floor === 'number' ? cfgR.value.rmr_floor : null;
+        rmrCeiling = typeof cfgR.value.rmr_ceiling === 'number' ? cfgR.value.rmr_ceiling : null;
+      }
 
       const tm = new Map<string, number | null>();
       for (let i = 0; i < principals.length; i++) {
@@ -69,10 +80,18 @@
   const formatPct = (v: number | null) =>
     v == null ? '--' : `${(v * 100).toFixed(2)}%`;
 
+  const rmrRangeLabel = $derived.by(() => {
+    if (rmrFloor == null && rmrCeiling == null) return '--';
+    const lo = rmrFloor != null ? `${(rmrFloor * 100).toFixed(2)}%` : '?';
+    const hi = rmrCeiling != null ? `${(rmrCeiling * 100).toFixed(2)}%` : '?';
+    return `${lo} → ${hi}`;
+  });
+
   const healthMetrics = $derived.by(() => [
     { label: 'Live rate', value: formatPct(rate), sub: 'current redemption fee' },
     { label: 'Fee floor', value: formatPct(feeFloor), tone: 'muted' as const },
     { label: 'Fee ceiling', value: formatPct(feeCeiling), tone: 'muted' as const },
+    { label: 'RMR', value: rmrRangeLabel, sub: 'redemption margin (low→high)', tone: 'muted' as const },
     { label: 'Redemptions (90d)', value: redemptions90d.toLocaleString() },
     { label: 'Fees collected (90d)', value: `$${formatCompact(redemptionFees90d)}`, sub: 'icUSD' },
   ]);

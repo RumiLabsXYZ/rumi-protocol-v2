@@ -1321,6 +1321,7 @@ mod tests {
             event_kind: kind,
             collateral_type: Principal::anonymous(),
             amount,
+            fee_amount: 0,
         }
     }
 

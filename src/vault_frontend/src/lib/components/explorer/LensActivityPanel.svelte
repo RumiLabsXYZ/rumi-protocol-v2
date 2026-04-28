@@ -41,26 +41,43 @@
   let vaultOwnerMap: Map<number, string> = $state(new Map());
   let loading = $state(true);
 
-  // Backend admin-ish event variant keys. Kept as a reference filter;
-  // add/remove as the backend event schema evolves.
+  // Backend events serialize as snake_case JSON (via #[serde(rename = ...)]).
+  // The previous filters used CamelCase variant names that don't actually exist
+  // on the wire — that's why scope='admin' was empty even though setter events
+  // were being recorded. Sets below match the actual variant keys.
+
+  // User-visible vault operations (NOT setter / admin / system events).
+  const VAULT_OP_KEYS = new Set([
+    'open_vault', 'close_vault', 'withdraw_and_close_vault', 'vault_withdrawn_and_closed',
+    'borrow_from_vault', 'repay_to_vault', 'add_margin_to_vault',
+    'collateral_withdrawn', 'partial_collateral_withdrawn', 'margin_transfer',
+    'liquidate_vault', 'partial_liquidate_vault', 'redistribute_vault',
+    'redemption_on_vaults', 'redemption_transfered',
+    'dust_forgiven',
+  ]);
+
+  // Admin / setter / config-change events. Init + Upgrade live here too —
+  // upgrades are admin actions even though they don't carry an explicit caller.
+  // AccrueInterest is intentionally NOT in this set: it's auto-triggered system
+  // bookkeeping that fires very frequently and floods the activity feed.
   const ADMIN_EVENT_KEYS = new Set([
-    'Init',
-    'Upgrade',
-    'ModeChanged',
-    'ProtocolModeChanged',
-    'ParameterChanged',
-    'CollateralAdded',
-    'CollateralRemoved',
-    'CollateralConfigChanged',
-    'InterestRateChanged',
-    'DebtCeilingChanged',
-    'LiquidationThresholdChanged',
-    'TreasuryConfigChanged',
-    'StabilityPoolConfigured',
-    'FeeFloorChanged',
-    'FeeCeilingChanged',
-    'InterestSplitChanged',
-    'RedemptionConfigChanged',
+    'init', 'upgrade',
+    'set_ckstable_repay_fee', 'set_min_icusd_amount', 'set_global_icusd_mint_cap',
+    'set_stable_token_enabled', 'set_stable_ledger_principal',
+    'set_treasury_principal', 'set_stability_pool_principal', 'set_liquidation_bot_principal',
+    'set_bot_budget', 'set_bot_allowed_collateral_types',
+    'set_liquidation_bonus', 'set_borrowing_fee',
+    'set_redemption_fee_floor', 'set_redemption_fee_ceiling',
+    'set_max_partial_liquidation_ratio', 'set_recovery_target_cr', 'set_recovery_cr_multiplier',
+    'set_liquidation_protocol_share',
+    'add_collateral_type', 'update_collateral_status', 'update_collateral_config',
+    'set_reserve_redemptions_enabled', 'set_icpswap_routing_enabled',
+    'set_reserve_redemption_fee', 'reserve_redemption',
+    'admin_mint', 'admin_vault_correction', 'admin_sweep_to_treasury',
+    'set_recovery_parameters', 'set_rate_curve_markers', 'set_recovery_rate_curve',
+    'set_healthy_cr', 'set_collateral_borrowing_fee', 'set_interest_rate', 'set_interest_pool_share',
+    'set_rmr_floor', 'set_rmr_ceiling', 'set_rmr_floor_cr', 'set_rmr_ceiling_cr',
+    'set_borrowing_fee_curve', 'set_interest_split', 'set_three_pool_canister',
   ]);
 
   function backendEventKey(evt: any): string {
@@ -69,23 +86,26 @@
   }
 
   function isBackendVaultEvent(evt: any): boolean {
-    const key = backendEventKey(evt);
-    return key === 'VaultCreated' || key === 'VaultUpdated' || key === 'VaultClosed'
-      || key === 'VaultAdjusted' || key === 'CollateralDeposited' || key === 'CollateralWithdrawn'
-      || key === 'DebtIncreased' || key === 'DebtRepaid' || key === 'Liquidation' || key === 'Redemption';
+    return VAULT_OP_KEYS.has(backendEventKey(evt));
   }
 
   function isBackendRedemption(evt: any): boolean {
-    return backendEventKey(evt) === 'Redemption';
+    return backendEventKey(evt) === 'redemption_on_vaults';
   }
 
   function isBackendRevenue(evt: any): boolean {
     const key = backendEventKey(evt);
-    return key === 'Redemption' || key === 'Liquidation';
+    return key === 'redemption_on_vaults'
+      || key === 'liquidate_vault'
+      || key === 'partial_liquidate_vault';
   }
 
   function isBackendAdmin(evt: any): boolean {
     return ADMIN_EVENT_KEYS.has(backendEventKey(evt));
+  }
+
+  function isAccrueInterest(evt: any): boolean {
+    return backendEventKey(evt) === 'accrue_interest';
   }
 
   function wrapBackend(events: [bigint, any][]): DisplayEvent[] {
@@ -169,11 +189,12 @@
         fetchRecent(spCount, sampleSize, fetchStabilityPoolEvents),
       ]);
 
-      // Filter backend events by scope
+      // Filter backend events by scope. AccrueInterest is system bookkeeping
+      // that fires every interest tick — never useful in any user-facing scope.
       const backendRows = wrapBackend(backend.events ?? []).filter((de) => {
+        if (isAccrueInterest(de.event)) return false;
         switch (scope) {
           case 'all':
-            // exclude admin by default
             return !isBackendAdmin(de.event);
           case 'vault_ops':
             return isBackendVaultEvent(de.event) && !isBackendAdmin(de.event);

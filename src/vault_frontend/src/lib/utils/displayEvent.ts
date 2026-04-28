@@ -6,6 +6,7 @@ import {
 	formatStabilityPoolEvent, formatMultiHopSwapEvent,
 } from './explorerFormatters';
 import type { FormattedEvent } from './explorerFormatters';
+import { ammPoolShortLabel } from './ammNaming';
 
 export type NonBackendSource =
 	| '3pool_swap'
@@ -179,9 +180,18 @@ export function displayEvent(de: DisplayEvent, maps?: DisplayEventMaps): Display
 	const principal = extractEventPrincipal(de.event, de.source, maps?.vaultOwnerMap);
 	const timestamp = de.timestamp || extractEventTimestamp(de.event);
 	const detailHref = isBackend ? `/explorer/e/event/${globalIndex}` : dexDetailHref(de);
-	const sourceLabel = isBackend
-		? null
-		: (DEX_SOURCE_LABEL[de.source as NonBackendSource] ?? null);
+	// AMM-source events get an indexed label like "AMM1" once the registry is
+	// loaded. Falls back to the generic "AMM" label if the registry isn't
+	// populated yet (first paint, or activity page before pools fetched).
+	let sourceLabel: string | null;
+	if (isBackend) {
+		sourceLabel = null;
+	} else if (de.source === 'amm_swap' || de.source === 'amm_liquidity' || de.source === 'amm_admin') {
+		const poolId = de.event?.pool_id ?? de.event?.ammEvent?.pool_id;
+		sourceLabel = ammPoolShortLabel(poolId ? String(poolId) : null);
+	} else {
+		sourceLabel = DEX_SOURCE_LABEL[de.source as NonBackendSource] ?? null;
+	}
 
 	return { globalIndex, source: de.source, formatted, principal, timestamp, detailHref, sourceLabel };
 }

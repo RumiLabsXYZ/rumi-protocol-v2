@@ -14,6 +14,7 @@
   import {
     e8sToNumber, formatCompact, bpsToPercent, COLLATERAL_SYMBOLS, COLLATERAL_COLORS,
   } from '$utils/explorerChartHelpers';
+  import { computeVaultCrPct, median } from '$utils/vaultCr';
   import { COLLATERAL_DISPLAY_ORDER } from '$stores/collateralStore';
 
   let systemCrBps = $state(0);
@@ -79,6 +80,38 @@
         if (r.status === 'fulfilled' && r.value) volMap.set(principals[i], r.value.annualized_vol_pct);
       }
 
+      // CR distribution + per-collateral median CR. Backend returns vaults
+      // without a collateral_ratio field; compute from collateral × price /
+      // debt using helpers.
+      const decimalsMap = new Map<string, number>();
+      for (const t of totals) {
+        const pid = t.collateral_type?.toText?.() ?? String(t.collateral_type ?? '');
+        if (pid && t.decimals != null) decimalsMap.set(pid, Number(t.decimals));
+      }
+
+      const crByCollateral = new Map<string, number[]>();
+      const bucketDefs: [number, number, string][] = [
+        [0, 110, '<110%'],
+        [110, 150, '110-150%'],
+        [150, 200, '150-200%'],
+        [200, 300, '200-300%'],
+        [300, 500, '300-500%'],
+        [500, Infinity, '500%+'],
+      ];
+      const buckets: CrBucket[] = bucketDefs.map(([lo, hi, label]) => ({ lo, hi, label, count: 0 }));
+
+      for (const v of allVaults) {
+        const cr = computeVaultCrPct(v, priceMap, decimalsMap);
+        if (cr == null) continue;
+        for (const b of buckets) {
+          if (cr >= b.lo && cr < b.hi) { b.count += 1; break; }
+        }
+        const collType = v.collateral_type?.toText?.() ?? String(v.collateral_type ?? '');
+        if (!crByCollateral.has(collType)) crByCollateral.set(collType, []);
+        crByCollateral.get(collType)!.push(cr);
+      }
+      crBuckets = buckets;
+
       const rows: CollateralRow[] = [];
       for (const [principal, symbol] of Object.entries(COLLATERAL_SYMBOLS)) {
         const cfg = configMap.get(principal);
@@ -99,7 +132,10 @@
           totalDebt: debt,
           debtCeiling: e8sToNumber(ceilingRaw),
           unlimited,
-          medianCrBps: 0,
+          medianCrBps: (() => {
+            const m = median(crByCollateral.get(principal) ?? []);
+            return m != null ? Math.round(m * 100) : 0; // bps
+          })(),
           volatility: volMap.get(principal) ?? null,
         });
       }
@@ -111,26 +147,6 @@
       collateralRows = rows;
 
       mixTotal = rows.reduce((s, r) => s + r.totalCollateralUsd, 0);
-
-      // CR distribution histogram from all active vaults
-      const bucketDefs: [number, number, string][] = [
-        [0, 110, '<110%'],
-        [110, 150, '110-150%'],
-        [150, 200, '150-200%'],
-        [200, 300, '200-300%'],
-        [300, 500, '300-500%'],
-        [500, Infinity, '500%+'],
-      ];
-      const buckets: CrBucket[] = bucketDefs.map(([lo, hi, label]) => ({ lo, hi, label, count: 0 }));
-      for (const v of allVaults) {
-        const cr = Number(v.collateral_ratio ?? 0);
-        if (cr === 0) continue;
-        const pct = cr; // backend uses percent (e.g. 243 for 243%)
-        for (const b of buckets) {
-          if (pct >= b.lo && pct < b.hi) { b.count += 1; break; }
-        }
-      }
-      crBuckets = buckets;
     } catch (err) {
       console.error('[CollateralLens] onMount error:', err);
     } finally {
