@@ -144,6 +144,24 @@
     { label: 'SP APY', value: displayedSpApy != null ? `${displayedSpApy.toFixed(2)}%` : '--', sub: liveSpApy != null ? 'live' : '7d' },
     { label: 'Liquidations absorbed', value: totalLiquidations.toLocaleString() },
   ]);
+
+  // Sum stables_consumed: vec record { principal; nat64 } → total icUSD-equivalent.
+  // All SP stablecoins (icUSD, ckUSDC, ckUSDT) are pegged $1 so a raw sum (after
+  // decimals normalization) is fine. ckUSDC/ckUSDT are 6-decimal; icUSD is 8.
+  function debtClearedFromRecord(rec: any): number {
+    const stables: Array<[any, bigint]> = rec?.stables_consumed ?? [];
+    let total = 0;
+    for (const [tokenPrincipal, amountE8s] of stables) {
+      const principal = typeof tokenPrincipal?.toText === 'function'
+        ? tokenPrincipal.toText() : String(tokenPrincipal);
+      // 6 decimals for ckUSDC / ckUSDT, 8 for everything else (icUSD)
+      const decimals = principal.includes('xevnm-gaaaa') /* ckUSDC */
+        || principal.includes('cngnf-vqaaa') /* ckUSDT */
+        ? 6 : 8;
+      total += Number(amountE8s) / Math.pow(10, decimals);
+    }
+    return total;
+  }
 </script>
 
 <LensHealthStrip title="Stability pool" metrics={healthMetrics} loading={loading} />
@@ -298,7 +316,7 @@
               </td>
               <td class="py-2 px-2 text-gray-300">{symbol}</td>
               <td class="py-2 px-2 text-right tabular-nums text-gray-300">
-                {formatCompact(Number(l.debt_cleared_e8s ?? l.debt_amount ?? 0n) / 1e8)} icUSD
+                {formatCompact(debtClearedFromRecord(l))} icUSD
               </td>
               <td class="py-2 px-2 text-right tabular-nums text-gray-300">
                 {formatCompact(Number(l.collateral_gained ?? l.collateral_amount ?? 0n) / 1e8)}
