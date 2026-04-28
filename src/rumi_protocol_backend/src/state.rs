@@ -920,6 +920,27 @@ pub struct State {
     /// tunable via `set_liquidation_ordering_tolerance`.
     #[serde(default = "default_liquidation_ordering_tolerance")]
     pub liquidation_ordering_tolerance: Ratio,
+
+    /// Wave-8c LIQ-004: emergency kill switch for the SP-triggered writedown
+    /// path (`liquidate_vault_debt_already_burned`). Independent of
+    /// `frozen` (global emergency stop) and `liquidation_frozen` (Wave-5
+    /// blanket liquidation halt). When true, both
+    /// `stability_pool_liquidate_debt_burned` and
+    /// `stability_pool_liquidate_with_reserves` reject with
+    /// `TemporarilyUnavailable`. Use during a confirmed SP compromise or
+    /// drift event so user-initiated liquidations stay open.
+    #[serde(default)]
+    pub sp_writedown_disabled: bool,
+
+    /// Wave-8c LIQ-004: set of `(SpProofLedger, block_index)` tuples already
+    /// consumed as SP writedown proofs. Inserted on successful proof
+    /// verification; rejects re-use of the same block on a later writedown.
+    /// Bounded by the number of SP-triggered writedowns the protocol ever
+    /// processes (low-hundreds per year at current scale); a future wave can
+    /// switch to a strictly-monotonic-block-index check if growth becomes a
+    /// concern.
+    #[serde(default)]
+    pub consumed_writedown_proofs: BTreeSet<(crate::icrc3_proof::SpProofLedger, u64)>,
 }
 
 /// Serde-only fallback: provides zero/empty/None defaults for fields missing from
@@ -1020,6 +1041,8 @@ impl Default for State {
             liquidation_frozen: false,
             vault_cr_index: BTreeMap::new(),
             liquidation_ordering_tolerance: DEFAULT_LIQUIDATION_ORDERING_TOLERANCE,
+            sp_writedown_disabled: false,
+            consumed_writedown_proofs: BTreeSet::new(),
         }
     }
 }
@@ -1212,6 +1235,8 @@ impl From<InitArg> for State {
             liquidation_frozen: false,
             vault_cr_index: BTreeMap::new(),
             liquidation_ordering_tolerance: DEFAULT_LIQUIDATION_ORDERING_TOLERANCE,
+            sp_writedown_disabled: false,
+            consumed_writedown_proofs: BTreeSet::new(),
         }
     }
 }

@@ -1206,11 +1206,17 @@ async fn stability_pool_liquidate(vault_id: u64, max_debt_to_liquidate: u64) -> 
 /// Called by the stability pool after it has already burned icUSD (via 3pool atomic burn).
 /// Writes down the vault's debt and releases proportional collateral to the caller.
 /// Only callable by the registered stability pool canister.
+///
+/// Wave-8c LIQ-004: `proof` is the optional ICRC-3 burn block index the SP
+/// passes alongside the call. During the Phase-1 migration window the
+/// parameter is Optional and `None` is accepted with a WARN log; a future
+/// Phase-2 wave makes it required.
 #[update]
 #[candid_method(update)]
 async fn stability_pool_liquidate_debt_burned(
     vault_id: u64,
     icusd_burned_e8s: u64,
+    proof: Option<rumi_protocol_backend::icrc3_proof::SpWritedownProof>,
 ) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
     validate_call().await?;
     validate_liquidation_not_frozen()?;
@@ -1227,13 +1233,23 @@ async fn stability_pool_liquidate_debt_burned(
         ));
     }
 
-    rumi_protocol_backend::vault::liquidate_vault_debt_already_burned(vault_id, icusd_burned_e8s, caller, None).await
+    rumi_protocol_backend::vault::liquidate_vault_debt_already_burned(
+        vault_id, icusd_burned_e8s, caller, None, proof,
+    )
+    .await
 }
 
 /// Called by the stability pool to liquidate a vault using 3USD reserves.
 /// The SP must have approved this canister to spend `three_usd_amount_e8s` on `three_usd_ledger`.
 /// Validates vault first, then pulls 3USD, then writes down debt and releases collateral.
 /// Only callable by the registered stability pool canister.
+///
+/// Wave-8c LIQ-004: `proof` is the optional ICRC-3 transfer proof the SP
+/// can pass; on the reserves path the backend itself produces the transfer
+/// (via `transfer_3usd_to_reserves`), so for Phase-1 we accept either an
+/// SP-provided proof or `None` with a WARN log. Phase-2 will require a
+/// proof and verify it against the block index returned by the reserves
+/// transfer.
 #[update]
 #[candid_method(update)]
 async fn stability_pool_liquidate_with_reserves(
@@ -1241,6 +1257,7 @@ async fn stability_pool_liquidate_with_reserves(
     icusd_debt_covered_e8s: u64,
     three_usd_amount_e8s: u64,
     three_usd_ledger: Principal,
+    proof: Option<rumi_protocol_backend::icrc3_proof::SpWritedownProof>,
 ) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
     validate_call().await?;
     validate_liquidation_not_frozen()?;
@@ -1309,7 +1326,7 @@ async fn stability_pool_liquidate_with_reserves(
     // got a chance to mark it consumed. Refund it so the SP's ledger balance and
     // bookkeeping stay in sync.
     match rumi_protocol_backend::vault::liquidate_vault_debt_already_burned(
-        vault_id, icusd_debt_covered_e8s, caller, Some(three_usd_amount_e8s)
+        vault_id, icusd_debt_covered_e8s, caller, Some(three_usd_amount_e8s), proof,
     ).await {
         Ok(success) => Ok(success),
         Err(liq_error) => {
@@ -2930,6 +2947,35 @@ fn set_liquidation_frozen(frozen: bool) -> Result<(), ProtocolError> {
 #[query]
 fn get_liquidation_frozen() -> bool {
     read_state(|s| s.liquidation_frozen)
+}
+
+/// Wave-8c LIQ-004: toggle the SP-writedown kill switch. When true, both
+/// `stability_pool_liquidate_debt_burned` and
+/// `stability_pool_liquidate_with_reserves` reject with
+/// TemporarilyUnavailable. Independent of `frozen` (global emergency stop)
+/// and `liquidation_frozen` (Wave-5 blanket liquidation halt). Use during a
+/// confirmed SP compromise or drift event so user-initiated liquidations
+/// stay open.
+#[candid_method(update)]
+#[update]
+fn set_sp_writedown_disabled(disabled: bool) -> Result<(), ProtocolError> {
+    require_controller()?;
+    mutate_state(|s| {
+        s.sp_writedown_disabled = disabled;
+        log!(
+            INFO,
+            "[admin] sp_writedown_disabled set to {}",
+            disabled
+        );
+    });
+    Ok(())
+}
+
+/// Wave-8c LIQ-004: read the SP-writedown kill switch state.
+#[candid_method(query)]
+#[query]
+fn get_sp_writedown_disabled() -> bool {
+    read_state(|s| s.sp_writedown_disabled)
 }
 
 /// Wave-8b LIQ-002: tune the liquidation-ordering tolerance band. The band is

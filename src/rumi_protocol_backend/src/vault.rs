@@ -2575,11 +2575,18 @@ pub async fn liquidate_vault_partial_with_stable(
 ///   reserves serves as backing for the written-off debt.
 ///
 /// Called by the stability pool canister.
+///
+/// Wave-8c LIQ-004: `proof` is the optional ICRC-3 burn / transfer proof
+/// the SP passes alongside the call. During the Phase-1 migration window
+/// the parameter is Optional — `None` is accepted but logged at WARN. After
+/// the SP rolls out its proof-emitting code (Wave 8d) Phase 2 will flip
+/// this to required.
 pub async fn liquidate_vault_debt_already_burned(
     vault_id: u64,
     icusd_burned_e8s: u64,
     caller: Principal,
     three_usd_received_e8s: Option<u64>,
+    proof: Option<crate::icrc3_proof::SpWritedownProof>,
 ) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
     // Wave-8b LIQ-002 SAFETY: this path is intentionally NOT gated on
     // `is_within_liquidation_band`. It is the stability-pool-triggered
@@ -2591,6 +2598,16 @@ pub async fn liquidate_vault_debt_already_burned(
     // The CR index is still kept fresh by the post-mutation `reindex_vault_cr`
     // call at the end of this function so subsequent user-initiated
     // liquidations see the post-writedown CR.
+
+    // Wave-8c LIQ-004 (kill switch): admin-toggleable disable of this path.
+    // Independent of `frozen` and `liquidation_frozen`. Use during a
+    // confirmed SP compromise / drift event.
+    if read_state(|s| s.sp_writedown_disabled) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "SP writedown path is disabled by admin".to_string(),
+        ));
+    }
+
     let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_debt_burned_{}", vault_id))?;
 
     let liquidation_amount: ICUSD = icusd_burned_e8s.into();
@@ -2600,6 +2617,101 @@ pub async fn liquidate_vault_debt_already_burned(
         return Err(ProtocolError::AmountTooLow {
             minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
         });
+    }
+
+    // Wave-8c LIQ-004 (replay defense + ICRC-3 verification). Verify the
+    // SP-supplied proof BEFORE we touch any state. If a proof is provided:
+    //   * its (ledger_kind, block_index) must not have been consumed before;
+    //   * the ICRC-3 block at that index must match expected memo, amount,
+    //     and accounts.
+    // If the proof's block-index is already consumed, refuse — even pre-
+    // mutation — so the SP gets a clean error instead of a stale partial
+    // success.
+    if let Some(p) = &proof {
+        if read_state(|s| s.consumed_writedown_proofs.contains(&(p.ledger_kind, p.block_index))) {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "SP writedown proof replay rejected: ({:?}, block {}) already consumed",
+                p.ledger_kind, p.block_index
+            )));
+        }
+
+        let (ledger_principal, reserves_account) = read_state(|s| {
+            let ledger = match p.ledger_kind {
+                crate::icrc3_proof::SpProofLedger::IcusdBurn => s.icusd_ledger_principal,
+                crate::icrc3_proof::SpProofLedger::ThreePoolTransfer => {
+                    s.three_pool_canister.unwrap_or(Principal::anonymous())
+                }
+            };
+            let reserves = icrc_ledger_types::icrc1::account::Account {
+                owner: ic_cdk::id(),
+                subaccount: Some(crate::management::protocol_3usd_reserves_subaccount()),
+            };
+            (ledger, reserves)
+        });
+
+        if ledger_principal == Principal::anonymous() {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "SP writedown proof references a ledger that is not configured".to_string(),
+            ));
+        }
+
+        let expected_amount_e8s = match p.ledger_kind {
+            crate::icrc3_proof::SpProofLedger::IcusdBurn => icusd_burned_e8s,
+            crate::icrc3_proof::SpProofLedger::ThreePoolTransfer => {
+                three_usd_received_e8s.unwrap_or(0)
+            }
+        };
+
+        let expectations = crate::icrc3_proof::ProofExpectations {
+            ledger_kind: p.ledger_kind,
+            expected_amount_e8s,
+            sp_principal: caller,
+            reserves_account,
+            vault_id_memo: vault_id,
+        };
+
+        if let Err(err) = crate::icrc3_proof::fetch_and_validate_block(
+            ledger_principal,
+            p.block_index,
+            &expectations,
+        )
+        .await
+        {
+            guard_principal.fail();
+            log!(INFO,
+                "[liquidate_vault_debt_burned] [LIQ-004] proof verification FAILED for vault #{} \
+                 ({:?} block {}): {}",
+                vault_id, p.ledger_kind, p.block_index, err
+            );
+            return Err(ProtocolError::GenericError(format!(
+                "SP writedown proof verification failed: {}",
+                err
+            )));
+        }
+
+        if vault_id != p.vault_id_memo {
+            // `validate_block` already enforces this against the memo, but
+            // double-check the proof's claimed vault_id matches the call
+            // site so a misuse of the API surfaces with a tight error.
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "SP writedown proof vault_id_memo {} does not match call vault_id {}",
+                p.vault_id_memo, vault_id
+            )));
+        }
+    } else {
+        // Phase-1 migration window: log per-call WARN so any drift between
+        // the SP version and the proof requirement is visible. After the SP
+        // ships its proof-emitting code (Wave 8d) Phase-2 will flip this to
+        // a hard rejection.
+        log!(INFO,
+            "[liquidate_vault_debt_burned] [LIQ-004] WARN: SP writedown for vault #{} accepted \
+             without ICRC-3 proof (Phase-1 migration window). Caller={}, amount={} icUSD, \
+             three_usd={:?}",
+            vault_id, caller, icusd_burned_e8s, three_usd_received_e8s
+        );
     }
 
     // Step 1: Validate vault is liquidatable and compute collateral to release
@@ -2658,11 +2770,35 @@ pub async fn liquidate_vault_debt_already_burned(
         vault_id, max_liquidatable_debt.to_u64(), collateral_to_liquidator.to_u64(), protocol_cut
     );
 
+    // Wave-8c LIQ-004 (sanity log on healthy vaults): if the pre-call CR is
+    // above min_liq_ratio, a buggy or malicious SP is writing down a
+    // non-underwater vault. Log loudly so an operator can investigate. Do
+    // NOT reject — the SP has already burned icUSD (or moved 3USD into
+    // reserves), so refusing here would orphan that token movement. The
+    // proof verification + kill switch are the enforcement layers; this
+    // is purely an alarm.
+    let pre_call_cr = read_state(|s| compute_collateral_ratio(&vault, collateral_price_usd, s));
+    let min_liq = read_state(|s| s.get_min_liquidation_ratio_for(&vault.collateral_type));
+    if pre_call_cr >= min_liq {
+        log!(INFO,
+            "[liquidate_vault_debt_burned] [LIQ-004] WARN: SP writedown applied to vault #{} \
+             whose pre-call CR ({}) is above min_liq_ratio ({}). Caller={} proof={:?}. Investigate.",
+            vault_id, pre_call_cr.to_f64(), min_liq.to_f64(), caller, proof
+        );
+    }
+
     // Step 2: SKIPPED — icUSD was already burned atomically in the 3pool.
     // The icUSD supply has already been reduced by `icusd_burned_e8s`.
 
     // Step 3: Update protocol state (partial liquidation)
     let interest_share = mutate_state(|s| {
+        // Wave-8c LIQ-004: record the proof as consumed atomically with the
+        // writedown so a partial failure cannot leave the proof unconsumed
+        // (replay risk) or consumed without an effect (orphan risk).
+        if let Some(p) = &proof {
+            s.consumed_writedown_proofs.insert((p.ledger_kind, p.block_index));
+        }
+
         let interest_share = if let Some(vault) = s.vault_id_to_vaults.get(&vault_id) {
             if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
                 let share = (rust_decimal::Decimal::from(max_liquidatable_debt.0)
