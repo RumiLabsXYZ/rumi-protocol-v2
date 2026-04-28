@@ -710,7 +710,16 @@ pub struct State {
     pub principal_guard_timestamps: BTreeMap<Principal, u64>, // Add timestamps for guards
     pub operation_states: BTreeMap<Principal, OperationState>, // Track operation states
     pub operation_names: BTreeMap<Principal, String>, // Track operation names
+    /// Transient runtime lock for `TimerLogicGuard`. Cleared on guard `Drop`.
+    /// `serde(default, skip_serializing)`: NEVER persisted across upgrades —
+    /// otherwise an upgrade caught with the lock held would leave it stuck `true`
+    /// on the restored state, since the in-flight future is killed by the upgrade
+    /// before its `Drop` runs.
+    #[serde(default, skip_serializing)]
     pub is_timer_running: bool,
+    /// Transient runtime lock for `FetchXrcGuard`. Same upgrade-safety rationale
+    /// as `is_timer_running` — see that field's doc comment.
+    #[serde(default, skip_serializing)]
     pub is_fetching_rate: bool,
 
     /// When true, automatic mode transitions (from price updates) are suppressed.
