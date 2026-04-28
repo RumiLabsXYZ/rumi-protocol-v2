@@ -1207,16 +1207,16 @@ async fn stability_pool_liquidate(vault_id: u64, max_debt_to_liquidate: u64) -> 
 /// Writes down the vault's debt and releases proportional collateral to the caller.
 /// Only callable by the registered stability pool canister.
 ///
-/// Wave-8c LIQ-004: `proof` is the optional ICRC-3 burn block index the SP
-/// passes alongside the call. During the Phase-1 migration window the
-/// parameter is Optional and `None` is accepted with a WARN log; a future
-/// Phase-2 wave makes it required.
+/// Wave-8d LIQ-004 Phase 2: `proof` is required. The SP must pass an
+/// ICRC-3 burn block index pointing at a real burn on the icUSD ledger;
+/// the backend verifies the block matches the expected memo, amount, and
+/// `from` account before accepting the writedown.
 #[update]
 #[candid_method(update)]
 async fn stability_pool_liquidate_debt_burned(
     vault_id: u64,
     icusd_burned_e8s: u64,
-    proof: Option<rumi_protocol_backend::icrc3_proof::SpWritedownProof>,
+    proof: rumi_protocol_backend::icrc3_proof::SpWritedownProof,
 ) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
     validate_call().await?;
     validate_liquidation_not_frozen()?;
@@ -1244,12 +1244,16 @@ async fn stability_pool_liquidate_debt_burned(
 /// Validates vault first, then pulls 3USD, then writes down debt and releases collateral.
 /// Only callable by the registered stability pool canister.
 ///
-/// Wave-8c LIQ-004: `proof` is the optional ICRC-3 transfer proof the SP
-/// can pass; on the reserves path the backend itself produces the transfer
-/// (via `transfer_3usd_to_reserves`), so for Phase-1 we accept either an
-/// SP-provided proof or `None` with a WARN log. Phase-2 will require a
-/// proof and verify it against the block index returned by the reserves
-/// transfer.
+/// Wave-8d LIQ-004 Phase 2: the backend builds the writedown proof
+/// internally from the block index returned by `transfer_3usd_to_reserves`.
+/// The SP does not pass a proof on this path (the block does not exist
+/// until after the backend's own transfer), so the proof argument has been
+/// retired from the entry point's surface; vault binding is enforced by
+/// `liquidate_vault_debt_already_burned`'s `vault_id_memo == vault_id`
+/// assertion. The 3pool ledger does not persist memos into ICRC-3 blocks,
+/// so the verifier skips the memo check on this path; replay defense via
+/// `consumed_writedown_proofs` and on-chain account/amount validation
+/// remain in force.
 #[update]
 #[candid_method(update)]
 async fn stability_pool_liquidate_with_reserves(
@@ -1257,7 +1261,6 @@ async fn stability_pool_liquidate_with_reserves(
     icusd_debt_covered_e8s: u64,
     three_usd_amount_e8s: u64,
     three_usd_ledger: Principal,
-    proof: Option<rumi_protocol_backend::icrc3_proof::SpWritedownProof>,
 ) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
     validate_call().await?;
     validate_liquidation_not_frozen()?;
@@ -1313,11 +1316,23 @@ async fn stability_pool_liquidate_with_reserves(
 
     // Pull 3USD from the SP into protocol reserves subaccount (ICRC-2 transfer_from).
     // Only runs after validation passes — no tokens move if vault is stale.
-    rumi_protocol_backend::management::transfer_3usd_to_reserves(
+    // The block index returned drives the Phase-2 internal proof below.
+    let transfer_block_index = rumi_protocol_backend::management::transfer_3usd_to_reserves(
         three_usd_ledger, caller, three_usd_amount_e8s
     ).await.map_err(|e| ProtocolError::GenericError(
         format!("Failed to pull 3USD from stability pool: {:?}", e)
     ))?;
+
+    // Wave-8d LIQ-004 Phase 2: build the writedown proof from the just-
+    // produced transfer block. Vault binding is set here at construction
+    // time; `liquidate_vault_debt_already_burned` re-asserts
+    // `proof.vault_id_memo == vault_id` before any state mutation, and the
+    // verifier checks the on-chain block's accounts and amount match.
+    let proof = rumi_protocol_backend::icrc3_proof::SpWritedownProof {
+        block_index: transfer_block_index,
+        ledger_kind: rumi_protocol_backend::icrc3_proof::SpProofLedger::ThreePoolTransfer,
+        vault_id_memo: vault_id,
+    };
 
     // 3USD is now in our reserves subaccount, so write down debt and release collateral.
     // Wave-4 ICC-002: if `liquidate_vault_debt_already_burned` returns Err after the
@@ -2976,6 +2991,17 @@ fn set_sp_writedown_disabled(disabled: bool) -> Result<(), ProtocolError> {
 #[query]
 fn get_sp_writedown_disabled() -> bool {
     read_state(|s| s.sp_writedown_disabled)
+}
+
+/// Wave-8d LIQ-004: snapshot of the consumed-writedown-proof set, used by
+/// ops monitoring (cross-check on-chain reserves vs sum of writedowns) and
+/// by the PocketIC fence for the Phase-2 wave. Returned as a Vec rather
+/// than a Set so it round-trips cleanly through Candid.
+#[candid_method(query)]
+#[query]
+fn get_consumed_writedown_proofs(
+) -> Vec<(rumi_protocol_backend::icrc3_proof::SpProofLedger, u64)> {
+    read_state(|s| s.consumed_writedown_proofs.iter().copied().collect())
 }
 
 /// Wave-8b LIQ-002: tune the liquidation-ordering tolerance band. The band is

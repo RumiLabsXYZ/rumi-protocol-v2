@@ -721,6 +721,9 @@ service : (ProtocolArg) -> {
   get_ckstable_repay_fee : () -> (float64) query;
   get_collateral_config : (principal) -> (opt CollateralConfig) query;
   get_collateral_totals : () -> (vec CollateralTotals) query;
+  get_consumed_writedown_proofs : () -> (
+      vec record { SpProofLedger; nat64 },
+    ) query;
   get_deposit_account : (opt principal) -> (Account) query;
   get_event_count : () -> (nat64) query;
   get_events : (GetEventsArg) -> (vec Event) query;
@@ -845,14 +848,13 @@ service : (ProtocolArg) -> {
   stability_pool_liquidate_debt_burned : (
       nat64,
       nat64,
-      opt SpWritedownProof,
+      SpWritedownProof,
     ) -> (Result_12);
   stability_pool_liquidate_with_reserves : (
       nat64,
       nat64,
       nat64,
       principal,
-      opt SpWritedownProof,
     ) -> (Result_12);
   unfreeze_protocol : () -> (Result);
   update_collateral_config : (principal, CollateralConfig) -> (Result);

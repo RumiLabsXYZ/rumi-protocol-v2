@@ -3633,6 +3633,21 @@ fn test_3usd_reserves_liquidation_happy_path() {
     }
     log(&format!("✅ Registered SP principal: {}", sp_principal));
 
+    // Wave-8d LIQ-004 Phase 2: register the 3pool ledger as the protocol's
+    // three_pool_canister. The reserves path's internal-proof verifier
+    // resolves the ledger to query from this state field.
+    let result = pic.update_call(
+        protocol_id, developer, "set_three_pool_canister",
+        encode_args((three_usd_ledger,)).unwrap(),
+    ).expect("set_three_pool_canister call failed");
+    match result {
+        WasmResult::Reply(bytes) => {
+            let r: Result<(), ProtocolError> = decode_one(&bytes).expect("decode");
+            r.expect("set_three_pool_canister failed");
+        }
+        WasmResult::Reject(msg) => panic!("set_three_pool_canister rejected: {}", msg),
+    }
+
     // Open vault: approve ICP, open vault, borrow icUSD
     let collateral_amount = 5_000_000_000u64; // 50 ICP
     let borrow_amount = 2_000_000_000u64; // 20 icUSD
