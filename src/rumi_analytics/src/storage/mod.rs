@@ -47,7 +47,6 @@ pub const MEM_CURSOR_3POOL_SWAPS: MemoryId = MemoryId::new(2);
 pub const MEM_CURSOR_3POOL_LIQUIDITY: MemoryId = MemoryId::new(3);
 pub const MEM_CURSOR_3POOL_BLOCKS: MemoryId = MemoryId::new(4);
 pub const MEM_CURSOR_AMM_SWAPS: MemoryId = MemoryId::new(5);
-#[allow(dead_code)]
 pub const MEM_CURSOR_STABILITY_EVENTS: MemoryId = MemoryId::new(6);
 pub const MEM_CURSOR_ICUSD_BLOCKS: MemoryId = MemoryId::new(7);
 
