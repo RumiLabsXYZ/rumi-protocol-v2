@@ -84,7 +84,7 @@ pub struct AnalyticsVaultEvent {
     pub amount: u64,
     /// Fee paid on this event in icUSD e8s. Populated for Borrowed and
     /// Redeemed; zero for other event kinds. Older stored events default
-    /// to 0 via serde — we just won't have fee data for those.
+    /// to 0 via serde, so they simply lack fee data.
     #[serde(default)]
     pub fee_amount: u64,
 }
