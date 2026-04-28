@@ -17,9 +17,9 @@
     }
   });
 
-  // Group setter labels by domain so the card has more visual structure
-  // than a flat list — most setters cluster around fees, RMR, recovery
-  // mode, and collateral parameters.
+  // Categorize setter labels by domain. Surfaced in the row tooltip so
+  // hovering tells you which area of the protocol a setter belongs to,
+  // without crowding the visible label cells.
   function groupOf(label: string): string {
     if (label.startsWith('SetCollateral')) return 'Collateral';
     if (label.startsWith('SetRmr') || label.startsWith('SetRedemption') || label.startsWith('SetReserve')) return 'Redemption';

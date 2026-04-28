@@ -202,6 +202,12 @@ fn route_backend_event(event_id: u64, event: &sources::backend::BackendEvent) {
                 fee_amount: *fee_amount,
             });
         }
+        // Legacy: ProvideLiquidity / WithdrawLiquidity / ClaimLiquidityReturns
+        // were emitted by the protocol backend before the stability pool became
+        // its own canister. They preserve historical SP activity already in the
+        // backend event log. Future SP activity comes through the dedicated
+        // tailing::stability_pool tailer; backend never emits these variants
+        // anymore, so there's no double-source risk.
         ProvideLiquidity { amount, caller, timestamp } => {
             evt_stability::push(AnalyticsStabilityEvent {
                 timestamp_ns: timestamp.unwrap_or(0),
