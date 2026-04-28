@@ -722,8 +722,11 @@ fn collector_health_reports_cursor_positions() {
 
     let health = get_collector_health(&env);
 
-    // Should have 6 cursors
-    assert_eq!(health.cursors.len(), 6, "expected 6 cursors");
+    // Should have 7 cursors. The original 6 (icusd_blocks, threeusd_blocks,
+    // backend_events, 3pool_liquidity_events, amm_swap_events, ThreeUsd icrc3)
+    // plus the stability_pool_events tailer added by commit 2ce0771
+    // ("feat(analytics): tail rumi_stability_pool canister events").
+    assert_eq!(health.cursors.len(), 7, "expected 7 cursors");
 
     // last_pull_cycle_ns should be non-zero after a pull cycle
     assert!(health.last_pull_cycle_ns > 0, "last_pull_cycle_ns should be set");
