@@ -417,7 +417,7 @@ export function formatStabilityPoolEvent(evt: any): FormattedEvent {
     const amtIn = formatE8s(data.amount_in, dec);
     const lpMinted = formatE8s(data.lp_minted, 8);
     typeName = 'Deposit as 3USD';
-    summary = `Deposited ${amtIn} ${sym} → ${lpMinted} 3USD LP`;
+    summary = `Deposited ${amtIn} ${sym} → ${lpMinted} 3USD`;
     fields.push({ label: 'Amount In', value: `${amtIn} ${sym}`, type: 'amount' });
     fields.push({ label: 'LP Minted', value: `${lpMinted} 3USD`, type: 'amount' });
   } else if (key === 'InterestReceived') {
@@ -516,12 +516,12 @@ export function formatMultiHopSwapEvent(merged: {
 
   if (direction === 'stable_to_icp') {
     fields.push({ label: 'Deposited', value: `${stablecoinAmount} ${stablecoinSymbol}`, type: 'amount' });
-    fields.push({ label: '3Pool Output', value: `${threeUsdAmount} 3USD LP`, type: 'amount' });
+    fields.push({ label: '3Pool Output', value: `${threeUsdAmount} 3USD`, type: 'amount' });
     fields.push({ label: 'AMM Output', value: `${finalAmount} ${finalSymbol}`, type: 'amount' });
     fields.push({ label: 'Route', value: `${stablecoinSymbol} → 3Pool → AMM → ${finalSymbol}`, type: 'text' });
   } else {
     fields.push({ label: 'Swapped In', value: `${finalAmount} ${finalSymbol}`, type: 'amount' });
-    fields.push({ label: 'AMM Output', value: `${threeUsdAmount} 3USD LP`, type: 'amount' });
+    fields.push({ label: 'AMM Output', value: `${threeUsdAmount} 3USD`, type: 'amount' });
     fields.push({ label: 'Redeemed', value: `${stablecoinAmount} ${stablecoinSymbol}`, type: 'amount' });
     fields.push({ label: 'Route', value: `${finalSymbol} → AMM → 3Pool → ${stablecoinSymbol}`, type: 'text' });
   }
