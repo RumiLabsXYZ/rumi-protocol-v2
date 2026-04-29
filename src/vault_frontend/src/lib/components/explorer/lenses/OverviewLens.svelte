@@ -12,9 +12,10 @@
     fetchFeeSeries, fetchPegStatus, fetchApys, fetchTokenFlow,
   } from '$services/explorer/analyticsService';
   import { ProtocolService } from '$services/protocol';
-  import { threePoolService, POOL_TOKENS, calculateTheoreticalApy } from '$services/threePoolService';
+  import { threePoolService } from '$services/threePoolService';
   import { stabilityPoolService } from '$services/stabilityPoolService';
   import { e8sToNumber, formatCompact, CHART_COLORS } from '$utils/explorerChartHelpers';
+  import { liveSpApyPct, liveLpApyPct } from '$utils/liveApy';
   import type { ProtocolSummary, DailyTvlRow, PegStatus, TokenFlowEdge } from '$declarations/rumi_analytics/rumi_analytics.did';
 
   let summary: ProtocolSummary | null = $state(null);
@@ -25,8 +26,10 @@
   let feeRows: any[] = $state([]);
   let seriesLoading = $state(true);
   let pegStatus: PegStatus | null = $state(null);
-  let lpApy: number | null = $state(null);
-  let spApy: number | null = $state(null);
+  let analyticsLpApy: number | null = $state(null);
+  let analyticsSpApy: number | null = $state(null);
+  let liveLp: number | null = $state(null);
+  let liveSp: number | null = $state(null);
   let poolsLoading = $state(true);
 
   type FlowWindowKey = '24h' | '7d' | '30d';
@@ -82,59 +85,36 @@
     if (apyR.status === 'fulfilled' && apyR.value) {
       const aLp = apyR.value.lp_apy_pct?.[0];
       const aSp = apyR.value.sp_apy_pct?.[0];
-      if (typeof aLp === 'number') lpApy = aLp;
-      if (typeof aSp === 'number') spApy = aSp;
+      if (typeof aLp === 'number') analyticsLpApy = aLp;
+      if (typeof aSp === 'number') analyticsSpApy = aSp;
     }
 
-    // Fallback APY compute when analytics has no data (null means no rows).
-    if (lpApy === null || spApy === null) {
-      try {
-        const [psR, poolR, spR] = await Promise.allSettled([
-          ProtocolService.getProtocolStatus(),
-          threePoolService.getPoolStatus(),
-          stabilityPoolService.getPoolStatus(),
-        ]);
-        const ps = psR.status === 'fulfilled' ? psR.value : null;
-        const pool = poolR.status === 'fulfilled' ? poolR.value : null;
-        const sp = spR.status === 'fulfilled' ? spR.value : null;
-
-        if (lpApy === null && ps && pool) {
-          let poolTvlE8s = 0;
-          for (let i = 0; i < pool.balances.length; i++) {
-            const token = POOL_TOKENS[i];
-            if (token) {
-              poolTvlE8s += token.decimals === 8 ? Number(pool.balances[i]) : Number(pool.balances[i]) * 100;
-            }
-          }
-          const threePoolBps = ps.interestSplit?.find((e: any) => e.destination === 'three_pool')?.bps ?? 5000;
-          const computed = calculateTheoreticalApy(threePoolBps, ps.perCollateralInterest, poolTvlE8s / 1e8);
-          if (computed != null) lpApy = computed * 100;
-        }
-        if (spApy === null && ps && sp) {
-          const poolShare = (ps.interestSplit?.find((e: any) => e.destination === 'stability_pool')?.bps ?? 0) / 10000;
-          const perC = ps.perCollateralInterest;
-          if (poolShare > 0 && perC?.length > 0) {
-            const eligibleMap = new Map<string, number>(
-              (sp.eligible_icusd_per_collateral ?? []).map(([p, v]: [any, bigint]) => [
-                typeof p === 'object' && typeof p.toText === 'function' ? p.toText() : String(p),
-                Number(v) / 1e8,
-              ])
-            );
-            let totalApr = 0;
-            for (const info of perC) {
-              const eligible = eligibleMap.get(info.collateralType) ?? 0;
-              if (eligible === 0 || info.totalDebtE8s === 0 || info.weightedInterestRate === 0) continue;
-              totalApr += (info.weightedInterestRate * poolShare * info.totalDebtE8s) / eligible;
-            }
-            if (totalApr > 0) spApy = (Math.pow(1 + totalApr / 365, 365) - 1) * 100;
-          }
-        }
-      } catch (err) {
-        console.error('[OverviewLens] apy fallback error:', err);
-      }
+    // Always compute the live values too. The analytics 7d numbers can sit at
+    // zero when the rolling window has no realized fee activity, even though
+    // LPs/SP depositors are still earning from interest_split. Live derives
+    // from current protocol + pool state and reflects what a depositor would
+    // earn right now. Falls back to analytics if any input is missing.
+    try {
+      const [psR, poolR, spR] = await Promise.allSettled([
+        ProtocolService.getProtocolStatus(),
+        threePoolService.getPoolStatus(),
+        stabilityPoolService.getPoolStatus(),
+      ]);
+      const ps = psR.status === 'fulfilled' ? psR.value : null;
+      const pool = poolR.status === 'fulfilled' ? poolR.value : null;
+      const sp = spR.status === 'fulfilled' ? spR.value : null;
+      liveLp = liveLpApyPct(ps, pool?.balances);
+      liveSp = liveSpApyPct(ps, sp);
+    } catch (err) {
+      console.error('[OverviewLens] live APY compute error:', err);
     }
     poolsLoading = false;
   });
+
+  const lpApy = $derived(liveLp ?? analyticsLpApy);
+  const spApy = $derived(liveSp ?? analyticsSpApy);
+  const lpApySub = $derived(liveLp != null ? 'live' : '7d');
+  const spApySub = $derived(liveSp != null ? 'live' : '7d');
 
   const pegPct = $derived.by(() => {
     if (!pegStatus) return '--';
@@ -162,8 +142,8 @@
       { label: '24h Volume', value: `$${formatCompact(volume24h)}` },
       { label: '24h Swaps', value: Number(summary.swap_count_24h).toLocaleString() },
       { label: 'Peg', value: pegPct, tone: pegTone },
-      { label: 'LP APY', value: lpApy != null ? `${lpApy.toFixed(2)}%` : '--', sub: '7d' },
-      { label: 'SP APY', value: spApy != null ? `${spApy.toFixed(2)}%` : '--', sub: '7d' },
+      { label: 'LP APY', value: lpApy != null ? `${lpApy.toFixed(2)}%` : '--', sub: lpApySub },
+      { label: 'SP APY', value: spApy != null ? `${spApy.toFixed(2)}%` : '--', sub: spApySub },
     ];
   });
 

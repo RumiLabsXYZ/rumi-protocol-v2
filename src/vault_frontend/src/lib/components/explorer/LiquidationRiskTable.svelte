@@ -68,13 +68,13 @@
           {#each vaults as vault}
             <tr class="border-b border-gray-700/30 hover:bg-gray-700/20 transition-colors">
               <td class="px-4 py-2.5">
-                <EntityLink type="vault" id={vault.vault_id} />
+                <EntityLink type="vault" value={String(vault.vault_id)} />
               </td>
               <td class="px-2 py-2.5 text-center">
                 <CRDial cr={vault.collateral_ratio / 100} liquidationCR={vault.liquidation_ratio / 100} size="sm" />
               </td>
               <td class="px-4 py-2.5">
-                <EntityLink type="address" id={vault.owner} />
+                <EntityLink type="address" value={vault.owner} />
               </td>
               <td class="px-4 py-2.5 text-gray-300 text-xs">
                 {collateralSymbol(vault.collateral_type)}

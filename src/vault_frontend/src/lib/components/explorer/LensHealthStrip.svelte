@@ -39,7 +39,11 @@
             {m.value}
           </span>
           {#if m.sub}
-            <span class="text-[11px] text-gray-500 mt-0.5">{m.sub}</span>
+            <!-- Cap sub width so a long descriptor (e.g. the Admin lens
+                 "Collector errors" explanation) wraps within the metric
+                 column instead of expanding the column and squeezing
+                 siblings out of the row. -->
+            <span class="text-[11px] text-gray-500 mt-0.5 max-w-[14rem] leading-snug">{m.sub}</span>
           {/if}
         </div>
       {/each}

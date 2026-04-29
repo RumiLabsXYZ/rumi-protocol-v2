@@ -13,9 +13,11 @@
   } from '$services/explorer/explorerService';
   import { CANISTER_IDS } from '$lib/config';
   import { POOL_TOKENS } from '$services/threePoolService';
+  import { ProtocolService } from '$services/protocol';
   import { e8sToNumber, formatCompact, CHART_COLORS } from '$utils/explorerChartHelpers';
   import { ammPoolLabel, ammPoolPair, ammPoolShortLabel, setAmmPoolRegistry } from '$utils/ammNaming';
   import { getTokenSymbol } from '$utils/explorerHelpers';
+  import { liveLpApyPct } from '$utils/liveApy';
   import type { PegStatus } from '$declarations/rumi_analytics/rumi_analytics.did';
 
   let pegStatus: PegStatus | null = $state(null);
@@ -27,14 +29,14 @@
   let vpSeries: any[] = $state([]);
   let ammPools: any[] = $state([]);
   let ammPoolStats: Record<string, any> = $state({});
-  let lpApy: number | null = $state(null);
-  let spApy: number | null = $state(null);
+  let analyticsLpApy: number | null = $state(null);
+  let liveLp: number | null = $state(null);
   let icpUsdPrice: number | null = $state(null);
   let loading = $state(true);
 
   onMount(async () => {
     try {
-      const [pegR, stR, statR, hlR, ssR, vsR, vpR, ammR, apyR, pricesR] = await Promise.allSettled([
+      const [pegR, stR, statR, hlR, ssR, vsR, vpR, ammR, apyR, pricesR, psR] = await Promise.allSettled([
         fetchPegStatus(),
         fetchThreePoolState(),
         fetchThreePoolStats('Last24h'),
@@ -45,6 +47,7 @@
         fetchAmmPools(),
         fetchApys(),
         fetchCollateralPrices(),
+        ProtocolService.getProtocolStatus(),
       ]);
       if (pegR.status === 'fulfilled') pegStatus = pegR.value ?? null;
       if (stR.status === 'fulfilled') poolState = stR.value;
@@ -60,13 +63,15 @@
       }
       if (apyR.status === 'fulfilled' && apyR.value) {
         const aLp = apyR.value.lp_apy_pct?.[0];
-        const aSp = apyR.value.sp_apy_pct?.[0];
-        if (typeof aLp === 'number') lpApy = aLp;
-        if (typeof aSp === 'number') spApy = aSp;
+        if (typeof aLp === 'number') analyticsLpApy = aLp;
       }
       if (pricesR.status === 'fulfilled') {
         const map = pricesR.value;
         icpUsdPrice = map.get(CANISTER_IDS.ICP_LEDGER) ?? null;
+      }
+      // Live LP APY computed once protocol status + pool state are in.
+      if (psR.status === 'fulfilled' && stR.status === 'fulfilled') {
+        liveLp = liveLpApyPct(psR.value, stR.value?.balances);
       }
 
       // Per-pool stats for the AMM Pools card (TVL, 7d volume).
@@ -168,7 +173,12 @@
         sub: 'pool imbalance % of saturation; higher = more profit available to a rebalancing trader',
       });
     }
-    metrics.push({ label: '3Pool LP APY', value: lpApy != null ? `${lpApy.toFixed(2)}%` : '--', sub: '7d' });
+    const lpApy = liveLp ?? analyticsLpApy;
+    metrics.push({
+      label: '3Pool LP APY',
+      value: lpApy != null ? `${lpApy.toFixed(2)}%` : '--',
+      sub: liveLp != null ? 'live' : '7d',
+    });
     return metrics;
   });
 
