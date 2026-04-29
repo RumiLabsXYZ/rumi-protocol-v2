@@ -267,29 +267,12 @@ pub fn validate_block(
                 .to
                 .as_ref()
                 .ok_or_else(|| "transfer block missing 'to' field".to_string())?;
-            // The 3pool ledger's ICRC-3 block log records `to: Principal` only,
-            // dropping the subaccount (see `Icrc3Transaction::Transfer` in
-            // `rumi_3pool/src/types.rs` and `account_to_value` in
-            // `rumi_3pool/src/icrc3.rs`). The actual ICRC-2 transfer still
-            // credits the correct (owner, subaccount) pair on-ledger, but the
-            // block has no subaccount to compare against. Verify the owner
-            // matches and accept either `None` or the expected subaccount —
-            // the security invariant ("transfer ended up at the protocol
-            // canister's principal") still holds, since the destination is
-            // hardcoded in `transfer_3usd_to_reserves` and the SP cannot
-            // redirect it.
-            if to.owner != expected.reserves_account.owner {
+            if to.owner != expected.reserves_account.owner
+                || to.subaccount != expected.reserves_account.subaccount
+            {
                 return Err(format!(
                     "block 'to' does not equal expected reserves account (owner {} sub {:?})",
                     expected.reserves_account.owner, expected.reserves_account.subaccount
-                ));
-            }
-            if to.subaccount.is_some()
-                && to.subaccount != expected.reserves_account.subaccount
-            {
-                return Err(format!(
-                    "block 'to' subaccount {:?} does not equal expected {:?}",
-                    to.subaccount, expected.reserves_account.subaccount
                 ));
             }
             // Memo is NOT checked on the 3pool transfer path — see fn doc.

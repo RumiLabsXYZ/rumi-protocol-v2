@@ -845,7 +845,7 @@ mod tests {
             blocks: Some(vec![Icrc3Block {
                 id: 0,
                 timestamp: 1,
-                tx: Icrc3Transaction::Mint { to: p, amount: 1 },
+                tx: Icrc3Transaction::Mint { to: p, amount: 1, to_subaccount: None },
             }]),
             last_block_hash: Some([7u8; 32]),
             admin_fees: [4, 5, 6],
