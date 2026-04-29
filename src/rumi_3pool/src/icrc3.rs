@@ -89,10 +89,17 @@ pub struct SupportedBlockType {
 
 // ─── Helpers: encode blocks as ICRC3Value ───
 
-fn account_to_value(principal: Principal) -> Icrc3Value {
-    Icrc3Value::Array(vec![
-        Icrc3Value::Blob(principal.as_slice().to_vec()),
-    ])
+/// Encode a (principal, optional subaccount) pair as the ICRC-3 standard
+/// `Account` value: `[owner_blob]` if no subaccount, `[owner_blob, sub_blob]`
+/// if a subaccount is present. Blocks written before the subaccount fields
+/// were added to `Icrc3Transaction` always pass `None` here, which preserves
+/// their original `[owner_blob]` encoding (and therefore their hash chain).
+fn account_to_value(principal: Principal, subaccount: Option<&[u8]>) -> Icrc3Value {
+    let mut parts = vec![Icrc3Value::Blob(principal.as_slice().to_vec())];
+    if let Some(sub) = subaccount {
+        parts.push(Icrc3Value::Blob(sub.to_vec()));
+    }
+    Icrc3Value::Array(parts)
 }
 
 /// Encode a block as an ICRC-3 Value with optional parent hash.
@@ -101,43 +108,52 @@ fn account_to_value(principal: Principal) -> Icrc3Value {
 ///   - block hashing (representation-independent hash of this value)
 pub fn encode_block_with_phash(block: &Icrc3Block, phash: Option<&[u8; 32]>) -> Icrc3Value {
     let (btype, tx_map) = match &block.tx {
-        Icrc3Transaction::Mint { to, amount } => (
+        Icrc3Transaction::Mint { to, amount, to_subaccount } => (
             "1mint",
             vec![
                 ("op".to_string(), Icrc3Value::Text("mint".to_string())),
-                ("to".to_string(), account_to_value(*to)),
+                ("to".to_string(), account_to_value(*to, to_subaccount.as_deref())),
                 ("amt".to_string(), Icrc3Value::Nat(Nat::from(*amount))),
             ],
         ),
-        Icrc3Transaction::Burn { from, amount } => (
+        Icrc3Transaction::Burn { from, amount, from_subaccount } => (
             "1burn",
             vec![
                 ("op".to_string(), Icrc3Value::Text("burn".to_string())),
-                ("from".to_string(), account_to_value(*from)),
+                ("from".to_string(), account_to_value(*from, from_subaccount.as_deref())),
                 ("amt".to_string(), Icrc3Value::Nat(Nat::from(*amount))),
             ],
         ),
-        Icrc3Transaction::Transfer { from, to, amount, spender } => {
+        Icrc3Transaction::Transfer {
+            from, to, amount, spender,
+            from_subaccount, to_subaccount, spender_subaccount,
+        } => {
             let mut fields = vec![
                 ("op".to_string(), Icrc3Value::Text("xfer".to_string())),
-                ("from".to_string(), account_to_value(*from)),
-                ("to".to_string(), account_to_value(*to)),
+                ("from".to_string(), account_to_value(*from, from_subaccount.as_deref())),
+                ("to".to_string(), account_to_value(*to, to_subaccount.as_deref())),
                 ("amt".to_string(), Icrc3Value::Nat(Nat::from(*amount))),
             ];
             if let Some(s) = spender {
-                fields.push(("spender".to_string(), account_to_value(*s)));
+                fields.push((
+                    "spender".to_string(),
+                    account_to_value(*s, spender_subaccount.as_deref()),
+                ));
             }
             ("1xfer", fields)
         }
-        Icrc3Transaction::Approve { from, spender, amount, expires_at } => {
+        Icrc3Transaction::Approve {
+            from, spender, amount, expires_at,
+            from_subaccount, spender_subaccount,
+        } => {
             // Cap approve amounts to u64::MAX for index-ng compatibility.
             // The standard index-ng deserializes amounts as u64 and rejects
             // blocks with larger values. Approvals often use u128::MAX.
             let capped = std::cmp::min(*amount, u64::MAX as u128) as u64;
             let mut fields = vec![
                 ("op".to_string(), Icrc3Value::Text("approve".to_string())),
-                ("from".to_string(), account_to_value(*from)),
-                ("spender".to_string(), account_to_value(*spender)),
+                ("from".to_string(), account_to_value(*from, from_subaccount.as_deref())),
+                ("spender".to_string(), account_to_value(*spender, spender_subaccount.as_deref())),
                 ("amt".to_string(), Icrc3Value::Nat(Nat::from(capped))),
             ];
             // index-ng expects "expected_allowance" and "expires_at" (full names, not abbreviated)

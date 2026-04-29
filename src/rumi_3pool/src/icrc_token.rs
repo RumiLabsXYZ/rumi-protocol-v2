@@ -97,8 +97,13 @@ pub fn icrc1_transfer(caller: Principal, args: TransferArg) -> Result<Nat, Trans
     }
 
     // Both from_subaccount and to accept any subaccount — balances are keyed
-    // by owner principal only, so subaccounts are effectively ignored.
+    // by owner principal only, so subaccounts are effectively ignored for
+    // *balance* lookups. The subaccounts ARE preserved into the ICRC-3 block
+    // log so external consumers (e.g. the protocol_backend's SP writedown
+    // proof verifier) see the actual destination Account the caller chose.
     let to_principal = args.to.owner;
+    let from_subaccount = args.from_subaccount.map(|s| s.to_vec());
+    let to_subaccount = args.to.subaccount.map(|s| s.to_vec());
 
     let amount = nat_to_u128(&args.amount).map_err(|_| TransferError::GenericError {
         error_code: Nat::from(2u64),
@@ -139,6 +144,9 @@ pub fn icrc1_transfer(caller: Principal, args: TransferArg) -> Result<Nat, Trans
             to: to_principal,
             amount,
             spender: None,
+            from_subaccount,
+            to_subaccount,
+            spender_subaccount: None,
         });
         Ok(Nat::from(id))
     })
@@ -156,8 +164,12 @@ pub fn icrc2_approve(caller: Principal, args: ApproveArgs) -> Result<Nat, Approv
         }
     }
 
-    // Subaccounts accepted but ignored — balances keyed by principal only.
+    // Subaccounts accepted but ignored for balance/allowance keying — the
+    // 3pool tracks balances per principal only. Block log preserves the
+    // subaccounts the caller chose for ICRC-3 consumers.
     let spender_principal = args.spender.owner;
+    let from_subaccount = args.from_subaccount.map(|s| s.to_vec());
+    let spender_subaccount = args.spender.subaccount.map(|s| s.to_vec());
 
     let amount = nat_to_u128(&args.amount).map_err(|_| ApproveError::GenericError {
         error_code: Nat::from(2u64),
@@ -201,6 +213,8 @@ pub fn icrc2_approve(caller: Principal, args: ApproveArgs) -> Result<Nat, Approv
             spender: spender_principal,
             amount,
             expires_at: args.expires_at,
+            from_subaccount,
+            spender_subaccount,
         });
         Ok(Nat::from(id))
     })
@@ -242,9 +256,13 @@ pub fn icrc2_transfer_from(
         }
     }
 
-    // Subaccounts accepted but ignored — balances keyed by principal only.
+    // Subaccounts accepted but ignored for balance keying — block log
+    // preserves them for ICRC-3 consumers (see icrc1_transfer comment).
     let from_principal = args.from.owner;
     let to_principal = args.to.owner;
+    let from_subaccount = args.from.subaccount.map(|s| s.to_vec());
+    let to_subaccount = args.to.subaccount.map(|s| s.to_vec());
+    let spender_subaccount = args.spender_subaccount.map(|s| s.to_vec());
 
     let amount = nat_to_u128(&args.amount).map_err(|_| TransferFromError::GenericError {
         error_code: Nat::from(2u64),
@@ -302,6 +320,9 @@ pub fn icrc2_transfer_from(
             to: to_principal,
             amount,
             spender: Some(caller),
+            from_subaccount,
+            to_subaccount,
+            spender_subaccount,
         });
         Ok(Nat::from(id))
     })

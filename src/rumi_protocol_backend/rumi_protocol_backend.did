@@ -702,7 +702,6 @@ service : (ProtocolArg) -> {
   admin_correct_vault_debts : (vec VaultDebtCorrection) -> (Result_2);
   admin_mint_icusd : (nat64, principal, text) -> (Result_1);
   admin_resolve_stuck_claim : (nat64, bool) -> (Result);
-  admin_retry_sp_liquidation : (vec nat64) -> (variant { Ok : nat64; Err : ProtocolError });
   admin_sweep_to_treasury : (text) -> (Result_1);
   borrow_from_vault : (VaultArg) -> (Result_3);
   bot_cancel_liquidation : (nat64) -> (Result);

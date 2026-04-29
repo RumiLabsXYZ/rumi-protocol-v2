@@ -846,11 +846,6 @@ export interface _SERVICE {
   >,
   'admin_mint_icusd' : ActorMethod<[bigint, Principal, string], Result_1>,
   'admin_resolve_stuck_claim' : ActorMethod<[bigint, boolean], Result>,
-  'admin_retry_sp_liquidation' : ActorMethod<
-    [BigUint64Array | bigint[]],
-    { 'Ok' : bigint } |
-      { 'Err' : ProtocolError }
-  >,
   'admin_sweep_to_treasury' : ActorMethod<[string], Result_1>,
   'borrow_from_vault' : ActorMethod<[VaultArg], Result_3>,
   'bot_cancel_liquidation' : ActorMethod<[bigint], Result>,

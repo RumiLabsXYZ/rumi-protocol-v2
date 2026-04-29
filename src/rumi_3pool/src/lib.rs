@@ -418,7 +418,11 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
         s.lp_total_supply += lp_minted;
         s.is_initialized = true;
         // Log mint block for ICRC-3 index
-        s.log_block(Icrc3Transaction::Mint { to: caller, amount: lp_minted });
+        s.log_block(Icrc3Transaction::Mint {
+            to: caller,
+            amount: lp_minted,
+            to_subaccount: None,
+        });
     });
 
     // Record liquidity event v2 (dynamic-fee schema). v1 writes are stopped —
@@ -506,7 +510,11 @@ pub async fn remove_liquidity(
             s.balances[k] -= amounts[k];
         }
         // Log burn block for ICRC-3 index
-        s.log_block(Icrc3Transaction::Burn { from: caller, amount: lp_burn });
+        s.log_block(Icrc3Transaction::Burn {
+            from: caller,
+            amount: lp_burn,
+            from_subaccount: None,
+        });
     });
 
     // 6. Transfer each non-zero amount to user
@@ -619,7 +627,11 @@ pub async fn remove_one_coin(
         s.balances[idx] -= amount + admin_fee_share;
         s.admin_fees[idx] += admin_fee_share;
         // Log burn block for ICRC-3 index
-        s.log_block(Icrc3Transaction::Burn { from: caller, amount: lp_burn });
+        s.log_block(Icrc3Transaction::Burn {
+            from: caller,
+            amount: lp_burn,
+            from_subaccount: None,
+        });
     });
 
     // 6. Transfer to user
@@ -1838,6 +1850,7 @@ pub async fn authorized_redeem_and_burn(
                 s.log_block(Icrc3Transaction::Burn {
                     from: caller,
                     amount: args.lp_amount,
+                    from_subaccount: None,
                 });
             });
 

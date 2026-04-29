@@ -125,12 +125,57 @@ pub struct Icrc3Block {
 }
 
 /// A transaction recorded in the ICRC-3 block log.
+///
+/// Each role's subaccount is stored alongside the principal so the ICRC-3
+/// block encoding can emit the full `[owner, subaccount]` Account shape
+/// required by external verifiers (e.g. the protocol_backend's SP writedown
+/// proof verification path). Subaccount fields are `Option<Vec<u8>>` and use
+/// `#[serde(default)]` so blocks written before this change still decode
+/// (their subaccount fields are `None`, and the encoder falls back to the
+/// legacy `[owner]`-only encoding for those blocks — preserving the existing
+/// ICRC-3 hash chain).
+///
+/// Note: the 3pool's per-balance bookkeeping is still keyed by `Principal`
+/// only (subaccounts are accepted on the API surface but ignored for balance
+/// lookups — see icrc_token.rs). This change only fixes the *block log* so
+/// it correctly reflects the destination Account that ICRC-3 consumers need
+/// to see.
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
 pub enum Icrc3Transaction {
-    Mint { to: Principal, amount: u128 },
-    Burn { from: Principal, amount: u128 },
-    Transfer { from: Principal, to: Principal, amount: u128, spender: Option<Principal> },
-    Approve { from: Principal, spender: Principal, amount: u128, expires_at: Option<u64> },
+    Mint {
+        to: Principal,
+        amount: u128,
+        #[serde(default)]
+        to_subaccount: Option<Vec<u8>>,
+    },
+    Burn {
+        from: Principal,
+        amount: u128,
+        #[serde(default)]
+        from_subaccount: Option<Vec<u8>>,
+    },
+    Transfer {
+        from: Principal,
+        to: Principal,
+        amount: u128,
+        spender: Option<Principal>,
+        #[serde(default)]
+        from_subaccount: Option<Vec<u8>>,
+        #[serde(default)]
+        to_subaccount: Option<Vec<u8>>,
+        #[serde(default)]
+        spender_subaccount: Option<Vec<u8>>,
+    },
+    Approve {
+        from: Principal,
+        spender: Principal,
+        amount: u128,
+        expires_at: Option<u64>,
+        #[serde(default)]
+        from_subaccount: Option<Vec<u8>>,
+        #[serde(default)]
+        spender_subaccount: Option<Vec<u8>>,
+    },
 }
 
 // ─── Virtual Price Snapshots (for APY calculation) ───

@@ -459,12 +459,17 @@ export interface _SERVICE {
   >,
   'get_imbalance_stats' : ActorMethod<[StatsWindow], ImbalanceStats>,
   'get_liquidity_event_count' : ActorMethod<[], bigint>,
+  'get_liquidity_event_count_v2' : ActorMethod<[], bigint>,
   'get_liquidity_events' : ActorMethod<[bigint, bigint], Array<LiquidityEvent>>,
   /**
    * Explorer endpoints (E1-E14)
    */
   'get_liquidity_events_by_principal' : ActorMethod<
     [Principal, bigint, bigint],
+    Array<LiquidityEventV2>
+  >,
+  'get_liquidity_events_v2' : ActorMethod<
+    [bigint, bigint],
     Array<LiquidityEventV2>
   >,
   'get_lp_balance' : ActorMethod<[Principal], bigint>,
@@ -483,8 +488,6 @@ export interface _SERVICE {
     Array<SwapEventV2>
   >,
   'get_swap_events_v2' : ActorMethod<[bigint, bigint], Array<SwapEventV2>>,
-  'get_liquidity_events_v2' : ActorMethod<[bigint, bigint], Array<LiquidityEventV2>>,
-  'get_liquidity_event_count_v2' : ActorMethod<[], bigint>,
   'get_top_lps' : ActorMethod<[bigint], Array<[Principal, bigint, number]>>,
   'get_top_swappers' : ActorMethod<
     [StatsWindow, bigint],

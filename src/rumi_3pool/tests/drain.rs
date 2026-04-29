@@ -95,7 +95,7 @@ fn dummy_block(id: u64, p: Principal) -> Icrc3Block {
     Icrc3Block {
         id,
         timestamp: id,
-        tx: Icrc3Transaction::Mint { to: p, amount: 1 },
+        tx: Icrc3Transaction::Mint { to: p, amount: 1, to_subaccount: None },
     }
 }
 
