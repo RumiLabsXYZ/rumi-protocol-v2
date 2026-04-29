@@ -216,6 +216,10 @@ pub enum EventTypeFilter {
     Admin,
     PriceUpdate,
     AccrueInterest,
+    /// Wave-8e LIQ-005: bad-debt accrued from an underwater liquidation.
+    DeficitAccrued,
+    /// Wave-8e LIQ-005: deficit repaid via fee revenue routing.
+    DeficitRepaid,
 }
 
 /// Inclusive nanosecond timestamp window for the time facet.

@@ -18,6 +18,16 @@ pub struct VaultRedemption {
     pub collateral_seized: u64,
 }
 
+/// Wave-8e LIQ-005: identifies which fee revenue stream a deficit
+/// repayment was sourced from. Persisted in the `DeficitRepaid` event so
+/// the explorer can attribute repayment volume per source.
+#[derive(CandidType, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeeSource {
+    BorrowingFee,
+    RedemptionFee,
+}
+
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Event {
     #[serde(rename = "open_vault")]
@@ -109,6 +119,39 @@ pub enum Event {
         vault_id: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timestamp: Option<u64>,
+    },
+
+    /// Wave-8e LIQ-005: an underwater liquidation netted seized USD <
+    /// debt cleared, accruing the shortfall to `protocol_deficit_icusd`.
+    /// Emitted from every liquidation path (`liquidate_vault`,
+    /// `liquidate_vault_partial`, `liquidate_vault_partial_with_stable`,
+    /// `partial_liquidate_vault`, `liquidate_vault_debt_already_burned`)
+    /// when shortfall > 0.
+    #[serde(rename = "deficit_accrued")]
+    DeficitAccrued {
+        vault_id: u64,
+        amount: ICUSD,
+        new_deficit: ICUSD,
+        timestamp: u64,
+    },
+
+    /// Wave-8e LIQ-005: a fee collection routed `amount` icUSD toward
+    /// deficit repayment. For borrowing-fee source this means the protocol
+    /// minted `original_fee - amount` to treasury instead of `original_fee`
+    /// (foregone revenue). For redemption-fee source the redeemer's icUSD
+    /// was already burned via `transfer_icusd_from`, so the deficit
+    /// decremented purely as state mutation. `anchor_block_index` is the
+    /// icUSD ledger block that generated the fee when available, or `None`
+    /// when the deficit decrement happened before the ledger op (caller
+    /// can correlate via `op_nonce` in trace logs).
+    #[serde(rename = "deficit_repaid")]
+    DeficitRepaid {
+        amount: ICUSD,
+        source: FeeSource,
+        remaining_deficit: ICUSD,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        anchor_block_index: Option<u64>,
+        timestamp: u64,
     },
 
     #[serde(rename = "borrow_from_vault")]
@@ -573,6 +616,22 @@ pub enum Event {
         #[serde(default)]
         timestamp: Option<u64>,
     },
+
+    /// Wave-8e LIQ-005: admin tunes the per-fee fraction routed to deficit
+    /// repayment. Default 0.5; bounded [0, 1].
+    #[serde(rename = "set_deficit_repayment_fraction")]
+    SetDeficitRepaymentFraction {
+        fraction: Ratio,
+        timestamp: u64,
+    },
+
+    /// Wave-8e LIQ-005: admin sets the deficit-driven ReadOnly auto-latch
+    /// threshold. 0 disables the latch.
+    #[serde(rename = "set_deficit_readonly_threshold_e8s")]
+    SetDeficitReadonlyThresholdE8s {
+        threshold_e8s: u64,
+        timestamp: u64,
+    },
 }
 
 impl Event {
@@ -659,6 +718,11 @@ impl Event {
             Event::SetCollateralMinDeposit { .. } => false,
             Event::SetCollateralDisplayColor { .. } => false,
             Event::AdminDebtCorrection { vault_id: vid, .. } => vid == filter_vault_id,
+            // Wave-8e LIQ-005
+            Event::DeficitAccrued { vault_id, .. } => vault_id == filter_vault_id,
+            Event::DeficitRepaid { .. } => false,
+            Event::SetDeficitRepaymentFraction { .. } => false,
+            Event::SetDeficitReadonlyThresholdE8s { .. } => false,
         }
     }
 
@@ -699,6 +763,8 @@ impl Event {
             Event::AdminSweepToTreasury { .. } => EventTypeFilter::AdminSweepToTreasury,
             Event::PriceUpdate { .. } => EventTypeFilter::PriceUpdate,
             Event::AccrueInterest { .. } => EventTypeFilter::AccrueInterest,
+            Event::DeficitAccrued { .. } => EventTypeFilter::DeficitAccrued,
+            Event::DeficitRepaid { .. } => EventTypeFilter::DeficitRepaid,
             _ => EventTypeFilter::Admin,
         }
     }
@@ -763,6 +829,8 @@ impl Event {
             Event::SetCollateralRedemptionFeeCeiling { .. } => Some("SetCollateralRedemptionFeeCeiling"),
             Event::SetCollateralMinDeposit { .. } => Some("SetCollateralMinDeposit"),
             Event::SetCollateralDisplayColor { .. } => Some("SetCollateralDisplayColor"),
+            Event::SetDeficitRepaymentFraction { .. } => Some("SetDeficitRepaymentFraction"),
+            Event::SetDeficitReadonlyThresholdE8s { .. } => Some("SetDeficitReadonlyThresholdE8s"),
             // Any variant that surfaces `Admin` via `type_filter` but isn't
             // enumerated here still matches `Admin` type filters; it just
             // carries no fine-grained label.
@@ -1509,6 +1577,27 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                     vault.accrued_interest = ICUSD::new(new_accrued);
                 }
             },
+            // Wave-8e LIQ-005: replay the deficit accounting so a state
+            // rebuilt purely from the event log carries the right deficit.
+            Event::DeficitAccrued { amount, .. } => {
+                state.protocol_deficit_icusd = state.protocol_deficit_icusd + amount;
+                // Latch on replay if the threshold was crossed at the original
+                // event time. The threshold is whatever it is at this point
+                // in the replay, which is deterministic given the event order.
+                let _ = state.check_deficit_readonly_latch();
+            },
+            Event::DeficitRepaid { amount, .. } => {
+                state.protocol_deficit_icusd =
+                    state.protocol_deficit_icusd.saturating_sub(amount);
+                state.total_deficit_repaid_icusd =
+                    state.total_deficit_repaid_icusd + amount;
+            },
+            Event::SetDeficitRepaymentFraction { fraction, .. } => {
+                state.deficit_repayment_fraction = fraction;
+            },
+            Event::SetDeficitReadonlyThresholdE8s { threshold_e8s, .. } => {
+                state.deficit_readonly_threshold_e8s = threshold_e8s;
+            },
         }
     }
     state.next_available_vault_id = vault_id;
@@ -1604,6 +1693,62 @@ pub fn record_margin_transfer(state: &mut State, vault_id: u64, owner: Principal
         timestamp: Some(now()),
     });
     state.pending_margin_transfers.remove(&(vault_id, owner));
+}
+
+// ─── Wave-8e LIQ-005: deficit-account event recorders ───
+
+/// Record a `DeficitAccrued` event and increment `protocol_deficit_icusd`.
+/// Caller is responsible for invoking `state.check_deficit_readonly_latch()`
+/// afterwards if the latch threshold is configured.
+pub fn record_deficit_accrued(
+    state: &mut State,
+    vault_id: u64,
+    amount: ICUSD,
+    timestamp: u64,
+) {
+    state.accrue_deficit_shortfall(amount);
+    record_event(&Event::DeficitAccrued {
+        vault_id,
+        amount,
+        new_deficit: state.protocol_deficit_icusd,
+        timestamp,
+    });
+}
+
+/// Record a `DeficitRepaid` event and apply the repayment to state.
+pub fn record_deficit_repaid(
+    state: &mut State,
+    amount: ICUSD,
+    source: FeeSource,
+    anchor_block_index: Option<u64>,
+    timestamp: u64,
+) {
+    state.apply_deficit_repayment(amount);
+    record_event(&Event::DeficitRepaid {
+        amount,
+        source,
+        remaining_deficit: state.protocol_deficit_icusd,
+        anchor_block_index,
+        timestamp,
+    });
+}
+
+/// Admin: tune the per-fee fraction routed to deficit repayment.
+pub fn record_set_deficit_repayment_fraction(state: &mut State, fraction: Ratio) {
+    state.deficit_repayment_fraction = fraction;
+    record_event(&Event::SetDeficitRepaymentFraction {
+        fraction,
+        timestamp: now(),
+    });
+}
+
+/// Admin: set the deficit-driven ReadOnly auto-latch threshold (0 disables).
+pub fn record_set_deficit_readonly_threshold_e8s(state: &mut State, threshold_e8s: u64) {
+    state.deficit_readonly_threshold_e8s = threshold_e8s;
+    record_event(&Event::SetDeficitReadonlyThresholdE8s {
+        threshold_e8s,
+        timestamp: now(),
+    });
 }
 
 pub fn record_borrow_from_vault(

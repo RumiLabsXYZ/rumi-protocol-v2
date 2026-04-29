@@ -197,3 +197,81 @@ fn liq_005_check_readonly_latch_does_not_fire_below_threshold() {
     assert!(!latched, "deficit below threshold must not latch");
     assert_ne!(s.mode, Mode::ReadOnly);
 }
+
+// ─── Task 3: Event variants + recorder helpers + EventTypeFilter fences ───
+
+use rumi_protocol_backend::EventTypeFilter;
+use rumi_protocol_backend::event::{
+    Event, FeeSource, record_deficit_accrued, record_deficit_repaid,
+};
+
+#[test]
+fn liq_005_event_deficit_accrued_round_trip() {
+    let e = Event::DeficitAccrued {
+        vault_id: 42,
+        amount: ICUSD::new(1_500),
+        new_deficit: ICUSD::new(1_500),
+        timestamp: 1_700_000_000_000_000_000,
+    };
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&e, &mut bytes).expect("encode");
+    let decoded: Event =
+        ciborium::de::from_reader(bytes.as_slice()).expect("decode");
+    assert_eq!(decoded, e);
+    assert_eq!(decoded.type_filter(), EventTypeFilter::DeficitAccrued);
+}
+
+#[test]
+fn liq_005_event_deficit_repaid_round_trip_borrowing() {
+    let e = Event::DeficitRepaid {
+        amount: ICUSD::new(750),
+        source: FeeSource::BorrowingFee,
+        remaining_deficit: ICUSD::new(750),
+        anchor_block_index: Some(99_999),
+        timestamp: 1_700_000_000_000_000_001,
+    };
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&e, &mut bytes).expect("encode");
+    let decoded: Event =
+        ciborium::de::from_reader(bytes.as_slice()).expect("decode");
+    assert_eq!(decoded, e);
+    assert_eq!(decoded.type_filter(), EventTypeFilter::DeficitRepaid);
+}
+
+#[test]
+fn liq_005_event_deficit_repaid_round_trip_redemption_no_anchor() {
+    let e = Event::DeficitRepaid {
+        amount: ICUSD::new(123),
+        source: FeeSource::RedemptionFee,
+        remaining_deficit: ICUSD::new(0),
+        anchor_block_index: None,
+        timestamp: 1_700_000_000_000_000_002,
+    };
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&e, &mut bytes).expect("encode");
+    let decoded: Event =
+        ciborium::de::from_reader(bytes.as_slice()).expect("decode");
+    assert_eq!(decoded, e);
+}
+
+#[test]
+fn liq_005_record_deficit_accrued_emits_event_and_updates_state() {
+    let mut s = State::default();
+    record_deficit_accrued(&mut s, /*vault_id=*/ 7, ICUSD::new(900), /*timestamp=*/ 1_000);
+    assert_eq!(s.protocol_deficit_icusd, ICUSD::new(900));
+}
+
+#[test]
+fn liq_005_record_deficit_repaid_emits_event_and_updates_state() {
+    let mut s = State::default();
+    s.protocol_deficit_icusd = ICUSD::new(900);
+    record_deficit_repaid(
+        &mut s,
+        ICUSD::new(400),
+        FeeSource::BorrowingFee,
+        Some(12_345),
+        1_001,
+    );
+    assert_eq!(s.protocol_deficit_icusd, ICUSD::new(500));
+    assert_eq!(s.total_deficit_repaid_icusd, ICUSD::new(400));
+}
