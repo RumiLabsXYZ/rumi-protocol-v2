@@ -61,8 +61,8 @@
       if (apyR.status === 'fulfilled' && apyR.value) {
         const aLp = apyR.value.lp_apy_pct?.[0];
         const aSp = apyR.value.sp_apy_pct?.[0];
-        if (typeof aLp === 'number' && aLp > 0) lpApy = aLp;
-        if (typeof aSp === 'number' && aSp > 0) spApy = aSp;
+        if (typeof aLp === 'number') lpApy = aLp;
+        if (typeof aSp === 'number') spApy = aSp;
       }
       if (pricesR.status === 'fulfilled') {
         const map = pricesR.value;

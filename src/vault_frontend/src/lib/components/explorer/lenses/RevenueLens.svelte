@@ -70,15 +70,16 @@
     return swapFees24h + estimatedDailyBorrow;
   });
 
-  // Analytics returns 0 when the window has no data; treat that as "--"
-  // rather than confidently displaying 0.00%.
+  // Backend returns None (null in Candid) when there is genuinely no data.
+  // It returns Some(0.0) when the window has data but zero fees. Display
+  // 0.00% for a confirmed zero rather than hiding it as "--".
   const lpApy = $derived.by(() => {
     const v = apys?.lp_apy_pct?.[0];
-    return typeof v === 'number' && v > 0 ? v : null;
+    return typeof v === 'number' ? v : null;
   });
   const spApy = $derived.by(() => {
     const v = apys?.sp_apy_pct?.[0];
-    return typeof v === 'number' && v > 0 ? v : null;
+    return typeof v === 'number' ? v : null;
   });
 
   const feePoints = $derived(
