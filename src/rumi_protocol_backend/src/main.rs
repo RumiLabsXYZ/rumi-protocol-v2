@@ -2481,6 +2481,32 @@ fn get_bot_stats() -> BotStatsResponse {
 ///   so vault debt stays as-is. Just unlocks vault and restores budget.
 /// - `apply_debt_reduction = true`: ConfirmFailed case. ckUSDC DID reach the backend,
 ///   so also write down the vault's debt and collateral (same as what confirm would do).
+/// Admin escape hatch: remove a vault from `sp_attempted_vaults` so the next
+/// `check_vaults` cycle re-routes it to the stability pool for another shot.
+/// Used after fixing a bug that caused the SP's first attempt to fail
+/// without consuming any stables (e.g. the 3pool ICRC-3 subaccount drop fix
+/// that landed alongside this endpoint). The set is normally one-shot per
+/// vault to prevent endless retry loops, so clearing must be deliberate.
+#[candid_method(update)]
+#[update]
+fn admin_retry_sp_liquidation(vault_ids: Vec<u64>) -> Result<u64, ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_dev = read_state(|s| s.developer_principal == caller);
+    if !is_dev {
+        return Err(ProtocolError::GenericError("Unauthorized: developer only".to_string()));
+    }
+    let cleared = mutate_state(|s| {
+        let mut n = 0u64;
+        for vid in &vault_ids {
+            if s.sp_attempted_vaults.remove(vid) {
+                n += 1;
+            }
+        }
+        n
+    });
+    Ok(cleared)
+}
+
 #[candid_method(update)]
 #[update]
 fn admin_resolve_stuck_claim(vault_id: u64, apply_debt_reduction: bool) -> Result<(), ProtocolError> {

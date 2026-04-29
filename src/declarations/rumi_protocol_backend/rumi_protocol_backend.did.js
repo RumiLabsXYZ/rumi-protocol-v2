@@ -811,6 +811,11 @@ export const idlFactory = ({ IDL }) => {
         [],
       ),
     'admin_resolve_stuck_claim' : IDL.Func([IDL.Nat64, IDL.Bool], [Result], []),
+    'admin_retry_sp_liquidation' : IDL.Func(
+        [IDL.Vec(IDL.Nat64)],
+        [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : ProtocolError })],
+        [],
+      ),
     'admin_sweep_to_treasury' : IDL.Func([IDL.Text], [Result_1], []),
     'borrow_from_vault' : IDL.Func([VaultArg], [Result_3], []),
     'bot_cancel_liquidation' : IDL.Func([IDL.Nat64], [Result], []),
