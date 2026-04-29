@@ -88,6 +88,17 @@ export const idlFactory = ({ IDL }) => {
     'rows' : IDL.Vec(HourlyCycleSnapshot),
     'next_from_ts' : IDL.Opt(IDL.Nat64),
   });
+  const FeeBreakdownQuery = IDL.Record({ 'window_ns' : IDL.Opt(IDL.Nat64) });
+  const FeeBreakdownResponse = IDL.Record({
+    'redemption_count' : IDL.Nat32,
+    'borrow_count' : IDL.Nat32,
+    'redemption_fees_icusd_e8s' : IDL.Nat64,
+    'borrow_fees_icusd_e8s' : IDL.Nat64,
+    'start_ns' : IDL.Nat64,
+    'swap_count' : IDL.Nat32,
+    'swap_fees_icusd_e8s' : IDL.Nat64,
+    'end_ns' : IDL.Nat64,
+  });
   const HourlyFeeCurveSnapshot = IDL.Record({
     'collateral_stats' : IDL.Vec(
       IDL.Tuple(IDL.Principal, IDL.Nat64, IDL.Nat64, IDL.Float64)
@@ -391,6 +402,9 @@ export const idlFactory = ({ IDL }) => {
     'headers' : IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text)),
     'status_code' : IDL.Nat16,
   });
+  const ResetErrorCountersArgs = IDL.Record({
+    'sources' : IDL.Opt(IDL.Vec(IDL.Text)),
+  });
   return IDL.Service({
     'get_address_value_series' : IDL.Func(
         [AddressValueSeriesQuery],
@@ -408,6 +422,11 @@ export const idlFactory = ({ IDL }) => {
     'get_cycle_series' : IDL.Func(
         [RangeQuery],
         [CycleSeriesResponse],
+        ['query'],
+      ),
+    'get_fee_breakdown_window' : IDL.Func(
+        [FeeBreakdownQuery],
+        [FeeBreakdownResponse],
         ['query'],
       ),
     'get_fee_curve_series' : IDL.Func(
@@ -439,6 +458,11 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'get_protocol_summary' : IDL.Func([], [ProtocolSummary], ['query']),
+    'get_sp_depositor_principals' : IDL.Func(
+        [],
+        [IDL.Vec(IDL.Principal)],
+        ['query'],
+      ),
     'get_stability_series' : IDL.Func(
         [RangeQuery],
         [StabilitySeriesResponse],
@@ -489,6 +513,11 @@ export const idlFactory = ({ IDL }) => {
       ),
     'http_request' : IDL.Func([HttpRequest], [HttpResponse], ['query']),
     'ping' : IDL.Func([], [IDL.Text], ['query']),
+    'reset_error_counters' : IDL.Func(
+        [ResetErrorCountersArgs],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],
+        [],
+      ),
     'start_backfill' : IDL.Func([IDL.Principal], [IDL.Text], []),
   });
 };

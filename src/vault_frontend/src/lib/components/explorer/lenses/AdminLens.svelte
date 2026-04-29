@@ -4,11 +4,14 @@
   import LensActivityPanel from '../LensActivityPanel.svelte';
   import AdminBreakdownCard from '../AdminBreakdownCard.svelte';
   import CanisterInventoryCard from '../CanisterInventoryCard.svelte';
-  import { fetchCollectorHealth } from '$services/explorer/analyticsService';
-  import { fetchProtocolStatus } from '$services/explorer/explorerService';
+  import { fetchCollectorHealth, fetchAdminEventBreakdown } from '$services/explorer/analyticsService';
+  import { fetchProtocolStatus, fetchEvents } from '$services/explorer/explorerService';
+  import { extractEventTimestamp } from '$utils/displayEvent';
 
   let collectorHealth: any = $state(null);
   let status: any = $state(null);
+  let lastAdminEvent: any = $state(null);
+  let adminCount24h = $state(0);
   let loading = $state(true);
 
   onMount(async () => {
@@ -24,11 +27,40 @@
     } finally {
       loading = false;
     }
+
+    // Latest admin event (page=0 returns most recent first)
+    try {
+      const result = await fetchEvents(0n, 1n, { types: ['Admin'] });
+      lastAdminEvent = result.events?.[0]?.[1] ?? null;
+    } catch (err) {
+      console.warn('[AdminLens] latest admin fetch failed:', err);
+    }
+
+    // 24h admin count: ask analytics for a 24h windowed breakdown and sum labels
+    try {
+      const windowNs = BigInt(86_400) * 1_000_000_000n;
+      const breakdown = await fetchAdminEventBreakdown(windowNs);
+      adminCount24h = breakdown.labels.reduce((s, l) => s + Number(l.count), 0);
+    } catch (err) {
+      console.warn('[AdminLens] 24h admin count fetch failed:', err);
+    }
   });
 
   const mode = $derived.by(() => {
     if (!status?.mode) return 'Unknown';
     return Object.keys(status.mode)[0] ?? 'Unknown';
+  });
+
+  const lastAdminRel = $derived.by(() => {
+    if (!lastAdminEvent) return '--';
+    const tsNs = extractEventTimestamp(lastAdminEvent);
+    if (!tsNs) return '--';
+    const ms = tsNs / 1_000_000;
+    const ago = Date.now() - ms;
+    if (ago < 60_000) return 'just now';
+    if (ago < 3_600_000) return `${Math.floor(ago / 60_000)}m ago`;
+    if (ago < 86_400_000) return `${Math.floor(ago / 3_600_000)}h ago`;
+    return `${Math.floor(ago / 86_400_000)}d ago`;
   });
 
   const healthMetrics = $derived.by(() => {
@@ -40,10 +72,12 @@
       metrics.push({
         label: 'Collector errors',
         value: errs.toLocaleString(),
-        sub: 'analytics tailing',
+        sub: 'failed inter-canister calls from analytics tailers (unexpected response shape, decode failure). Per-source breakdown below.',
         tone: errs > 0 ? 'caution' as const : 'good' as const,
       });
     }
+    metrics.push({ label: 'Last admin action', value: lastAdminRel });
+    metrics.push({ label: 'Admin actions 24h', value: adminCount24h.toLocaleString() });
     return metrics;
   });
 </script>

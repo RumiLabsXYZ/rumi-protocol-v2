@@ -3,37 +3,38 @@
   import LensHealthStrip from '../LensHealthStrip.svelte';
   import LensActivityPanel from '../LensActivityPanel.svelte';
   import MiniAreaChart from '../MiniAreaChart.svelte';
+  import TreasuryHoldingsCard from '../TreasuryHoldingsCard.svelte';
   import {
-    fetchFeeSeries, fetchApys, fetchTradeActivity,
+    fetchFeeSeries, fetchApys, fetchFeeBreakdownWindow, type FeeBreakdown,
   } from '$services/explorer/analyticsService';
   import {
-    fetchTreasuryStats, fetchInterestSplit,
+    fetchInterestSplit,
   } from '$services/explorer/explorerService';
   import { ProtocolService } from '$services/protocol';
   import { e8sToNumber, formatCompact, CHART_COLORS } from '$utils/explorerChartHelpers';
 
   let feeRows: any[] = $state([]);
   let apys: any = $state(null);
-  let tradeActivity: any = $state(null);
-  let treasury: any = $state(null);
+  let fees24hData = $state<FeeBreakdown | null>(null);
+  let fees90dData = $state<FeeBreakdown | null>(null);
   let interestSplit: any[] = $state([]);
   let protocolStatus: any = $state(null);
   let loading = $state(true);
 
   onMount(async () => {
     try {
-      const [feeR, apR, trR, trsR, spR, psR] = await Promise.allSettled([
+      const [feeR, apR, f24R, f90R, spR, psR] = await Promise.allSettled([
         fetchFeeSeries(90),
         fetchApys(),
-        fetchTradeActivity(),
-        fetchTreasuryStats(),
+        fetchFeeBreakdownWindow(1),
+        fetchFeeBreakdownWindow(90),
         fetchInterestSplit(),
         ProtocolService.getProtocolStatus(),
       ]);
       if (feeR.status === 'fulfilled') feeRows = feeR.value ?? [];
       if (apR.status === 'fulfilled') apys = apR.value;
-      if (trR.status === 'fulfilled') tradeActivity = trR.value;
-      if (trsR.status === 'fulfilled') treasury = trsR.value;
+      if (f24R.status === 'fulfilled') fees24hData = f24R.value;
+      if (f90R.status === 'fulfilled') fees90dData = f90R.value;
       if (spR.status === 'fulfilled') interestSplit = spR.value ?? [];
       if (psR.status === 'fulfilled') protocolStatus = psR.value;
     } catch (err) {
@@ -43,42 +44,25 @@
     }
   });
 
-  const totalBorrow = $derived(
-    feeRows.reduce((s: number, d: any) => s + e8sToNumber(d.borrowing_fees_e8s?.[0] ?? d.borrowing_fees_e8s ?? 0n), 0)
-  );
-  const totalRedemption = $derived(
-    feeRows.reduce((s: number, d: any) => s + e8sToNumber(d.redemption_fees_e8s?.[0] ?? d.redemption_fees_e8s ?? 0n), 0)
-  );
-  const totalSwap = $derived(
-    feeRows.reduce((s: number, d: any) => s + e8sToNumber(d.swap_fees_e8s ?? 0n), 0)
-  );
+  const totalBorrow = $derived(fees90dData?.borrowIcusd ?? 0);
+  const totalRedemption = $derived(fees90dData?.redemptionIcusd ?? 0);
+  const totalSwap = $derived(fees90dData?.swapIcusd ?? 0);
   const totalFees = $derived(totalBorrow + totalRedemption + totalSwap);
 
-  const estimatedDailyBorrow = $derived.by(() => {
-    if (!protocolStatus?.perCollateralInterest) return 0;
-    const treasuryBps = protocolStatus.interestSplit?.find((e: any) => e.destination === 'treasury')?.bps ?? 0;
-    const treasuryShare = treasuryBps / 10000;
-    let dailyInterest = 0;
-    for (const info of protocolStatus.perCollateralInterest) {
-      dailyInterest += info.weightedInterestRate * info.totalDebtE8s;
-    }
-    return dailyInterest * treasuryShare;
-  });
+  const fees24h = $derived(
+    (fees24hData?.borrowIcusd ?? 0) + (fees24hData?.redemptionIcusd ?? 0) + (fees24hData?.swapIcusd ?? 0)
+  );
 
-  const fees24h = $derived.by(() => {
-    const swapFees24h = tradeActivity ? e8sToNumber(tradeActivity.total_fees_e8s) : 0;
-    return swapFees24h + estimatedDailyBorrow;
-  });
-
-  // Analytics returns 0 when the window has no data; treat that as "--"
-  // rather than confidently displaying 0.00%.
+  // Backend returns None (null in Candid) when there is genuinely no data.
+  // It returns Some(0.0) when the window has data but zero fees. Display
+  // 0.00% for a confirmed zero rather than hiding it as "--".
   const lpApy = $derived.by(() => {
     const v = apys?.lp_apy_pct?.[0];
-    return typeof v === 'number' && v > 0 ? v : null;
+    return typeof v === 'number' ? v : null;
   });
   const spApy = $derived.by(() => {
     const v = apys?.sp_apy_pct?.[0];
-    return typeof v === 'number' && v > 0 ? v : null;
+    return typeof v === 'number' ? v : null;
   });
 
   const feePoints = $derived(
@@ -97,16 +81,6 @@
       destination: e.destination ?? String(e.destination ?? ''),
       bps: Number(e.bps ?? 0),
     })).filter((r: any) => r.bps > 0);
-  });
-
-  const treasuryInfo = $derived.by(() => {
-    if (!treasury) return null;
-    return {
-      pendingInterest: Number(treasury.pending_treasury_interest ?? 0n),
-      liquidationShare: Number(treasury.liquidation_protocol_share ?? 0),
-      flushThreshold: e8sToNumber(treasury.interest_flush_threshold_e8s ?? 0n),
-      principal: treasury.treasury_principal?.[0]?.toText?.() ?? treasury.treasury_principal?.[0] ?? null,
-    };
   });
 
   // Treasury share of accrued interest (not the liquidation bonus split — that
@@ -213,40 +187,7 @@
   </div>
 </div>
 
-{#if treasuryInfo}
-  <div class="explorer-card">
-    <h3 class="text-sm font-medium text-gray-300 mb-3">Treasury</h3>
-    <div class="grid grid-cols-2 md:grid-cols-2 gap-4">
-      <div>
-        <div class="text-xs text-gray-500" title="icUSD that has accrued to the treasury but hasn't yet been swept to the treasury canister. Drops to 0 immediately after each periodic flush.">
-          Pending interest
-        </div>
-        <div class="text-base font-semibold tabular-nums text-gray-200 mt-0.5">
-          {formatCompact(treasuryInfo.pendingInterest / 1e8)} icUSD
-        </div>
-        <div class="text-[11px] text-gray-500 mt-0.5">
-          Resets to 0 after each automatic flush.
-        </div>
-      </div>
-      <div>
-        <div class="text-xs text-gray-500" title="When pending interest crosses this amount the protocol auto-distributes it to recipients per the interest split. Threshold of 0 means flush every tick.">
-          Flush threshold
-        </div>
-        <div class="text-base font-semibold tabular-nums text-gray-200 mt-0.5">
-          {treasuryInfo.flushThreshold > 0 ? `${formatCompact(treasuryInfo.flushThreshold)} icUSD` : 'Flush every tick'}
-        </div>
-        <div class="text-[11px] text-gray-500 mt-0.5">
-          Auto-flushes pending interest when crossed.
-        </div>
-      </div>
-    </div>
-    {#if treasuryInfo.principal}
-      <div class="mt-3 text-xs text-gray-500">
-        Treasury canister: <span class="font-mono text-gray-400">{treasuryInfo.principal}</span>
-      </div>
-    {/if}
-  </div>
-{/if}
+<TreasuryHoldingsCard />
 
 <!-- Revenue-bearing = redemptions + liquidations + swaps (everything the protocol charges a fee on). -->
 <LensActivityPanel

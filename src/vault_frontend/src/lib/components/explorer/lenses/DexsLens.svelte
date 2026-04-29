@@ -3,7 +3,6 @@
   import LensHealthStrip from '../LensHealthStrip.svelte';
   import LensActivityPanel from '../LensActivityPanel.svelte';
   import MiniAreaChart from '../MiniAreaChart.svelte';
-  import PoolHealthStrip from '../PoolHealthStrip.svelte';
   import {
     fetchSwapSeries, fetchThreePoolSeries, fetchPegStatus, fetchApys,
   } from '$services/explorer/analyticsService';
@@ -62,8 +61,8 @@
       if (apyR.status === 'fulfilled' && apyR.value) {
         const aLp = apyR.value.lp_apy_pct?.[0];
         const aSp = apyR.value.sp_apy_pct?.[0];
-        if (typeof aLp === 'number' && aLp > 0) lpApy = aLp;
-        if (typeof aSp === 'number' && aSp > 0) spApy = aSp;
+        if (typeof aLp === 'number') lpApy = aLp;
+        if (typeof aSp === 'number') spApy = aSp;
       }
       if (pricesR.status === 'fulfilled') {
         const map = pricesR.value;
@@ -166,7 +165,7 @@
         label: 'Arb score',
         value: `${arb}/100`,
         tone: arb > 50 ? 'caution' as const : 'good' as const,
-        sub: '0–100',
+        sub: 'pool imbalance % of saturation; higher = more profit available to a rebalancing trader',
       });
     }
     metrics.push({ label: '3Pool LP APY', value: lpApy != null ? `${lpApy.toFixed(2)}%` : '--', sub: '7d' });
@@ -319,6 +318,7 @@
       fillColor="rgba(52, 211, 153, 0.15)"
       valueFormat={(v) => v.toFixed(6)}
       loading={loading}
+      yAxisMode="data-fit"
     />
   </div>
 </div>
@@ -360,7 +360,5 @@
     </div>
   </div>
 {/if}
-
-<PoolHealthStrip {pegStatus} {lpApy} {spApy} loading={loading} />
 
 <LensActivityPanel scope="dexs" title="DEX activity" viewAllHref="/explorer/activity?type=dex" />

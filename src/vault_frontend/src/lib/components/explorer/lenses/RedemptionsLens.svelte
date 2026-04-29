@@ -7,7 +7,7 @@
   import { fetchFeeSeries } from '$services/explorer/analyticsService';
   import {
     fetchRedemptionRate, fetchRedemptionFeeFloor, fetchRedemptionFeeCeiling,
-    fetchRedemptionTier, fetchCollateralTotals, fetchProtocolConfig,
+    fetchRedemptionTier, fetchCollateralTotals, fetchProtocolConfig, fetchProtocolStatus,
   } from '$services/explorer/explorerService';
   import {
     e8sToNumber, formatCompact, CHART_COLORS, COLLATERAL_SYMBOLS, getCollateralSymbol,
@@ -19,6 +19,9 @@
   let feeCeiling: number | null = $state(null);
   let rmrFloor: number | null = $state(null);
   let rmrCeiling: number | null = $state(null);
+  let rmrFloorCr: number | null = $state(null);
+  let rmrCeilingCr: number | null = $state(null);
+  let totalCollateralRatio: number | null = $state(null);
   let collateralTotals: any[] = $state([]);
   let tierMap: Map<string, number | null> = $state(new Map());
   let loading = $state(true);
@@ -26,13 +29,14 @@
   onMount(async () => {
     try {
       const principals = Object.keys(COLLATERAL_SYMBOLS);
-      const [feeR, rateR, floorR, ceilR, totalsR, cfgR, ...tierRs] = await Promise.allSettled([
+      const [feeR, rateR, floorR, ceilR, totalsR, cfgR, statusR, ...tierRs] = await Promise.allSettled([
         fetchFeeSeries(90),
         fetchRedemptionRate(),
         fetchRedemptionFeeFloor(),
         fetchRedemptionFeeCeiling(),
         fetchCollateralTotals(),
         fetchProtocolConfig(),
+        fetchProtocolStatus(),
         ...principals.map(p => fetchRedemptionTier(Principal.fromText(p))),
       ]);
       if (feeR.status === 'fulfilled') feeRows = feeR.value ?? [];
@@ -41,12 +45,15 @@
       if (ceilR.status === 'fulfilled') feeCeiling = ceilR.value;
       if (totalsR.status === 'fulfilled') collateralTotals = totalsR.value ?? [];
       if (cfgR.status === 'fulfilled' && cfgR.value) {
-        // RMR = redemption margin ratio. Bounds: rmr_floor → rmr_ceiling. The
-        // active value depends on the global CR (between rmr_floor_cr and
-        // rmr_ceiling_cr). Showing the configured range gives a clear picture
-        // of the protocol's redemption margin policy.
         rmrFloor = typeof cfgR.value.rmr_floor === 'number' ? cfgR.value.rmr_floor : null;
         rmrCeiling = typeof cfgR.value.rmr_ceiling === 'number' ? cfgR.value.rmr_ceiling : null;
+        rmrFloorCr = typeof cfgR.value.rmr_floor_cr === 'number' ? cfgR.value.rmr_floor_cr : null;
+        rmrCeilingCr = typeof cfgR.value.rmr_ceiling_cr === 'number' ? cfgR.value.rmr_ceiling_cr : null;
+      }
+      if (statusR.status === 'fulfilled' && statusR.value) {
+        totalCollateralRatio = typeof statusR.value.total_collateral_ratio === 'number'
+          ? statusR.value.total_collateral_ratio
+          : null;
       }
 
       const tm = new Map<string, number | null>();
@@ -80,18 +87,44 @@
   const formatPct = (v: number | null) =>
     v == null ? '--' : `${(v * 100).toFixed(2)}%`;
 
-  const rmrRangeLabel = $derived.by(() => {
-    if (rmrFloor == null && rmrCeiling == null) return '--';
-    const lo = rmrFloor != null ? `${(rmrFloor * 100).toFixed(2)}%` : '?';
-    const hi = rmrCeiling != null ? `${(rmrCeiling * 100).toFixed(2)}%` : '?';
-    return `${lo} → ${hi}`;
+  // Active RMR: linear interpolation matching backend get_redemption_margin_ratio().
+  // tcr (total_collateral_ratio) is an absolute ratio (e.g. 2.5 = 250% CR).
+  // rmrFloorCr / rmrCeilingCr are also absolute ratios (e.g. 2.25 / 1.50).
+  // rmrFloor / rmrCeiling are decimal fractions (e.g. 0.96 / 1.0).
+  const activeRmr = $derived.by((): number | null => {
+    if (rmrFloor == null || rmrCeiling == null || rmrFloorCr == null || rmrCeilingCr == null) return null;
+    const tcr = totalCollateralRatio;
+    if (tcr == null) return null;
+    if (tcr <= rmrCeilingCr) return rmrCeiling;
+    if (tcr >= rmrFloorCr) return rmrFloor;
+    const range = rmrFloorCr - rmrCeilingCr;
+    const position = tcr - rmrCeilingCr;
+    const spread = rmrCeiling - rmrFloor;
+    return rmrCeiling - (position / range) * spread;
+  });
+
+  const activeRmrLabel = $derived.by(() => {
+    if (activeRmr == null) return '--';
+    return `${(activeRmr * 100).toFixed(2)}%`;
+  });
+
+  // Sub-text for the RMR tile: show what CR drove it and the configured range.
+  const activeRmrSub = $derived.by(() => {
+    const crPct = totalCollateralRatio != null ? `at ${(totalCollateralRatio * 100).toFixed(0)}% CR` : '';
+    if (rmrFloor == null || rmrCeiling == null || rmrFloorCr == null || rmrCeilingCr == null) return crPct || undefined;
+    const floorPct = `${(rmrFloor * 100).toFixed(0)}%`;
+    const ceilPct = `${(rmrCeiling * 100).toFixed(0)}%`;
+    const floorCrPct = `${(rmrFloorCr * 100).toFixed(0)}%`;
+    const ceilCrPct = `${(rmrCeilingCr * 100).toFixed(0)}%`;
+    const range = `${floorPct} (CR ${floorCrPct}) to ${ceilPct} (CR ${ceilCrPct})`;
+    return crPct ? `${crPct}; slides ${range}` : `slides ${range}`;
   });
 
   const healthMetrics = $derived.by(() => [
     { label: 'Live rate', value: formatPct(rate), sub: 'current redemption fee' },
     { label: 'Fee floor', value: formatPct(feeFloor), tone: 'muted' as const },
     { label: 'Fee ceiling', value: formatPct(feeCeiling), tone: 'muted' as const },
-    { label: 'RMR', value: rmrRangeLabel, sub: 'redemption margin (low→high)', tone: 'muted' as const },
+    { label: 'Current RMR', value: activeRmrLabel, sub: activeRmrSub },
     { label: 'Redemptions (90d)', value: redemptions90d.toLocaleString() },
     { label: 'Fees collected (90d)', value: `$${formatCompact(redemptionFees90d)}`, sub: 'icUSD' },
   ]);

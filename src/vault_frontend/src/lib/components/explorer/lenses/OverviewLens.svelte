@@ -82,12 +82,12 @@
     if (apyR.status === 'fulfilled' && apyR.value) {
       const aLp = apyR.value.lp_apy_pct?.[0];
       const aSp = apyR.value.sp_apy_pct?.[0];
-      if (typeof aLp === 'number' && aLp > 0) lpApy = aLp;
-      if (typeof aSp === 'number' && aSp > 0) spApy = aSp;
+      if (typeof aLp === 'number') lpApy = aLp;
+      if (typeof aSp === 'number') spApy = aSp;
     }
 
-    // Fallback APY compute when analytics is empty.
-    if (!lpApy || !spApy) {
+    // Fallback APY compute when analytics has no data (null means no rows).
+    if (lpApy === null || spApy === null) {
       try {
         const [psR, poolR, spR] = await Promise.allSettled([
           ProtocolService.getProtocolStatus(),
@@ -98,7 +98,7 @@
         const pool = poolR.status === 'fulfilled' ? poolR.value : null;
         const sp = spR.status === 'fulfilled' ? spR.value : null;
 
-        if (!lpApy && ps && pool) {
+        if (lpApy === null && ps && pool) {
           let poolTvlE8s = 0;
           for (let i = 0; i < pool.balances.length; i++) {
             const token = POOL_TOKENS[i];
@@ -110,7 +110,7 @@
           const computed = calculateTheoreticalApy(threePoolBps, ps.perCollateralInterest, poolTvlE8s / 1e8);
           if (computed != null) lpApy = computed * 100;
         }
-        if (!spApy && ps && sp) {
+        if (spApy === null && ps && sp) {
           const poolShare = (ps.interestSplit?.find((e: any) => e.destination === 'stability_pool')?.bps ?? 0) / 10000;
           const perC = ps.perCollateralInterest;
           if (poolShare > 0 && perC?.length > 0) {

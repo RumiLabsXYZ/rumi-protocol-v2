@@ -3,11 +3,12 @@
   import LensHealthStrip from '../LensHealthStrip.svelte';
   import LensActivityPanel from '../LensActivityPanel.svelte';
   import MiniAreaChart from '../MiniAreaChart.svelte';
+  import SpCurrentDepositorsCard from '../SpCurrentDepositorsCard.svelte';
+  import SpCoverageCard from '../SpCoverageCard.svelte';
   import {
-    fetchStabilitySeries, fetchApys, fetchTopSpDepositors,
+    fetchStabilitySeries, fetchApys,
   } from '$services/explorer/analyticsService';
-  import { shortenPrincipal, getCanisterName, getTokenDecimals } from '$utils/explorerHelpers';
-  import type { TopSpDepositorRow } from '$declarations/rumi_analytics/rumi_analytics.did';
+  import { getTokenDecimals } from '$utils/explorerHelpers';
   import {
     fetchStabilityPoolStatus, fetchStabilityPoolLiquidations,
   } from '$services/explorer/explorerService';
@@ -21,36 +22,6 @@
   let spApy: number | null = $state(null);
   let loading = $state(true);
 
-  // Top depositors leaderboard (analytics-backed).
-  type DepWindow = '7d' | '30d' | '90d' | 'all';
-  let depWindow: DepWindow = $state('30d');
-  let depositors_top: TopSpDepositorRow[] = $state([]);
-  let depLoading = $state(false);
-
-  const DEP_WINDOW_NS: Record<DepWindow, bigint> = {
-    '7d': 7n * 86_400n * 1_000_000_000n,
-    '30d': 30n * 86_400n * 1_000_000_000n,
-    '90d': 90n * 86_400n * 1_000_000_000n,
-    all: (1n << 63n) - 1n,
-  };
-
-  async function loadTopDepositors(win: DepWindow) {
-    depLoading = true;
-    try {
-      const resp = await fetchTopSpDepositors(DEP_WINDOW_NS[win], 20);
-      depositors_top = resp.rows;
-    } catch (err) {
-      console.error('[StabilityPoolLens] loadTopDepositors failed:', err);
-      depositors_top = [];
-    } finally {
-      depLoading = false;
-    }
-  }
-
-  $effect(() => {
-    loadTopDepositors(depWindow);
-  });
-
   onMount(async () => {
     try {
       const [stR, seR, lqR, apR, prR] = await Promise.allSettled([
@@ -60,13 +31,15 @@
         fetchApys(),
         QueryOperations.getProtocolStatus(),
       ]);
-      if (stR.status === 'fulfilled') poolStatus = stR.value;
+      if (stR.status === 'fulfilled' && stR.value) poolStatus = stR.value;
+      else console.warn('[StabilityPoolLens] poolStatus unavailable:', stR.status === 'rejected' ? stR.reason : 'null response');
       if (seR.status === 'fulfilled') series = seR.value ?? [];
       if (lqR.status === 'fulfilled') liquidations = lqR.value ?? [];
       if (prR.status === 'fulfilled') protocolStatus = prR.value;
+      else console.warn('[StabilityPoolLens] protocolStatus failed:', prR.reason);
       if (apR.status === 'fulfilled' && apR.value) {
         const v = apR.value.sp_apy_pct?.[0];
-        if (typeof v === 'number' && v > 0) spApy = v;
+        if (typeof v === 'number') spApy = v;
       }
     } catch (err) {
       console.error('[StabilityPoolLens] onMount error:', err);
@@ -83,6 +56,12 @@
     const split = protocolStatus.interestSplit ?? [];
     const poolShare = (split.find((e: any) => e.destination === 'stability_pool')?.bps ?? 0) / 10000;
     const perC = protocolStatus.perCollateralInterest;
+    // Diagnostic log: fires once after data loads to trace which guard causes null.
+    console.debug('[SPLens liveSpApy]', {
+      splitLen: split.length, poolShare,
+      perCLen: perC?.length,
+      eligibleLen: poolStatus?.eligible_icusd_per_collateral?.length,
+    });
     if (!perC || perC.length === 0 || poolShare === 0) return null;
 
     const eligibleMap = new Map<string, number>(
@@ -122,20 +101,6 @@
   const liquidationSeries = $derived(
     series.map((r: any) => ({ t: Number(r.timestamp_ns) / 1_000_000, v: Number(r.total_liquidations_executed ?? 0n) }))
   );
-
-  const collateralGains = $derived.by(() => {
-    // PoolStatus.collateral_gains is the aggregate collateral in the pool,
-    // each entry a (collateral principal, raw amount) pair.
-    const perCol = poolStatus?.collateral_gains ?? [];
-    return perCol.map(([p, v]: [any, any]) => {
-      const pid = typeof p === 'object' && p.toText ? p.toText() : String(p);
-      return {
-        principal: pid,
-        symbol: getCollateralSymbol(pid),
-        amount: Number(v),
-      };
-    });
-  });
 
   const healthMetrics = $derived.by(() => [
     { label: 'Deposits', value: `$${formatCompact(totalDeposits)}`, sub: 'icUSD' },
@@ -187,98 +152,9 @@
   </div>
 </div>
 
-{#if collateralGains.length > 0}
-  <div class="explorer-card">
-    <h3 class="text-sm font-medium text-gray-300 mb-3">Collateral in pool</h3>
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-      {#each collateralGains as g}
-        <div class="flex flex-col">
-          <span class="text-xs text-gray-500">{g.symbol}</span>
-          <span class="text-base font-semibold tabular-nums text-gray-200 mt-0.5">
-            {formatCompact(g.amount / 1e8)}
-          </span>
-        </div>
-      {/each}
-    </div>
-  </div>
-{/if}
+<SpCoverageCard />
 
-<div class="explorer-card">
-  <div class="flex items-center justify-between gap-3 flex-wrap mb-3">
-    <div>
-      <h3 class="text-sm font-medium text-gray-300">Top depositors</h3>
-      <p class="text-xs text-gray-500">Ranked by total deposit volume in the window</p>
-    </div>
-    <div class="inline-flex rounded-lg border border-gray-700/70 overflow-hidden text-[11px]">
-      {#each ['7d', '30d', '90d', 'all'] as const as w (w)}
-        <button
-          type="button"
-          class="px-2.5 py-1 border-r border-gray-700/70 last:border-r-0 transition-colors"
-          class:bg-teal-500={depWindow === w}
-          class:text-white={depWindow === w}
-          class:text-gray-400={depWindow !== w}
-          class:hover:text-gray-200={depWindow !== w}
-          onclick={() => (depWindow = w)}
-        >
-          {w.toUpperCase()}
-        </button>
-      {/each}
-    </div>
-  </div>
-  {#if depLoading && depositors_top.length === 0}
-    <div class="flex items-center justify-center py-6">
-      <div class="w-5 h-5 border-2 border-gray-600 border-t-teal-400 rounded-full animate-spin"></div>
-    </div>
-  {:else if depositors_top.length === 0}
-    <p class="text-sm text-gray-500 py-4">No deposit activity in this window.</p>
-  {:else}
-    <div class="overflow-x-auto">
-      <table class="w-full text-sm">
-        <thead>
-          <tr class="border-b border-white/5">
-            <th class="text-left py-2 px-2 text-xs font-medium text-gray-500 uppercase tracking-wider">#</th>
-            <th class="text-left py-2 px-2 text-xs font-medium text-gray-500 uppercase tracking-wider">Principal</th>
-            <th class="text-right py-2 px-2 text-xs font-medium text-gray-500 uppercase tracking-wider">Deposited (window)</th>
-            <th class="text-right py-2 px-2 text-xs font-medium text-gray-500 uppercase tracking-wider">Current balance</th>
-            <th class="text-right py-2 px-2 text-xs font-medium text-gray-500 uppercase tracking-wider">Net (window)</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each depositors_top as row, i (row.principal.toText())}
-            {@const pid = row.principal.toText()}
-            {@const label = getCanisterName(pid) ?? shortenPrincipal(pid)}
-            <tr class="border-b border-white/[0.03] hover:bg-white/[0.02]">
-              <td class="py-2 px-2 text-gray-500 tabular-nums">{i + 1}</td>
-              <td class="py-2 px-2">
-                <a
-                  href="/explorer/e/address/{pid}"
-                  class="text-teal-400 hover:text-teal-300 font-mono"
-                  title={pid}
-                >
-                  {label}
-                </a>
-              </td>
-              <td class="py-2 px-2 text-right tabular-nums text-gray-300">
-                {formatCompact(e8sToNumber(row.total_deposited_e8s))} icUSD
-              </td>
-              <td class="py-2 px-2 text-right tabular-nums text-gray-300">
-                {formatCompact(e8sToNumber(row.current_balance_e8s))}
-              </td>
-              <td
-                class="py-2 px-2 text-right tabular-nums"
-                class:text-emerald-400={row.net_position_e8s > 0n}
-                class:text-rose-400={row.net_position_e8s < 0n}
-                class:text-gray-400={row.net_position_e8s === 0n}
-              >
-                {row.net_position_e8s < 0n ? '-' : ''}{formatCompact(Math.abs(Number(row.net_position_e8s)) / 1e8)}
-              </td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-    </div>
-  {/if}
-</div>
+<SpCurrentDepositorsCard />
 
 <div class="explorer-card">
   <h3 class="text-sm font-medium text-gray-300 mb-3">Recent liquidations absorbed</h3>

@@ -160,6 +160,17 @@ export interface FastPriceSnapshot {
   'timestamp_ns' : bigint,
   'prices' : Array<[Principal, number, string]>,
 }
+export interface FeeBreakdownQuery { 'window_ns' : [] | [bigint] }
+export interface FeeBreakdownResponse {
+  'redemption_count' : number,
+  'borrow_count' : number,
+  'redemption_fees_icusd_e8s' : bigint,
+  'borrow_fees_icusd_e8s' : bigint,
+  'start_ns' : bigint,
+  'swap_count' : number,
+  'swap_fees_icusd_e8s' : bigint,
+  'end_ns' : bigint,
+}
 export interface FeeCurveSeriesResponse {
   'rows' : Array<HourlyFeeCurveSnapshot>,
   'next_from_ts' : [] | [bigint],
@@ -272,6 +283,7 @@ export interface RangeQuery {
   'offset' : [] | [bigint],
   'limit' : [] | [number],
 }
+export interface ResetErrorCountersArgs { 'sources' : [] | [Array<string>] }
 export interface StabilitySeriesResponse {
   'rows' : Array<DailyStabilityRow>,
   'next_from_ts' : [] | [bigint],
@@ -403,6 +415,10 @@ export interface _SERVICE {
   'get_apys' : ActorMethod<[ApyQuery], ApyResponse>,
   'get_collector_health' : ActorMethod<[], CollectorHealth>,
   'get_cycle_series' : ActorMethod<[RangeQuery], CycleSeriesResponse>,
+  'get_fee_breakdown_window' : ActorMethod<
+    [FeeBreakdownQuery],
+    FeeBreakdownResponse
+  >,
   'get_fee_curve_series' : ActorMethod<[RangeQuery], FeeCurveSeriesResponse>,
   'get_fee_series' : ActorMethod<[RangeQuery], FeeSeriesResponse>,
   'get_holder_series' : ActorMethod<
@@ -418,6 +434,7 @@ export interface _SERVICE {
   'get_pool_routes' : ActorMethod<[PoolRoutesQuery], PoolRoutesResponse>,
   'get_price_series' : ActorMethod<[RangeQuery], PriceSeriesResponse>,
   'get_protocol_summary' : ActorMethod<[], ProtocolSummary>,
+  'get_sp_depositor_principals' : ActorMethod<[], Array<Principal>>,
   'get_stability_series' : ActorMethod<[RangeQuery], StabilitySeriesResponse>,
   'get_swap_series' : ActorMethod<[RangeQuery], SwapSeriesResponse>,
   'get_three_pool_series' : ActorMethod<[RangeQuery], ThreePoolSeriesResponse>,
@@ -441,6 +458,11 @@ export interface _SERVICE {
   'get_volatility' : ActorMethod<[VolatilityQuery], VolatilityResponse>,
   'http_request' : ActorMethod<[HttpRequest], HttpResponse>,
   'ping' : ActorMethod<[], string>,
+  'reset_error_counters' : ActorMethod<
+    [ResetErrorCountersArgs],
+    { 'Ok' : null } |
+      { 'Err' : string }
+  >,
   'start_backfill' : ActorMethod<[Principal], string>,
 }
 export declare const idlFactory: IDL.InterfaceFactory;

@@ -160,6 +160,17 @@ type FeeCurveSeriesResponse = record {
   rows : vec HourlyFeeCurveSnapshot;
   next_from_ts : opt nat64;
 };
+type FeeBreakdownQuery = record { window_ns : opt nat64 };
+type FeeBreakdownResponse = record {
+  borrow_fees_icusd_e8s : nat64;
+  redemption_fees_icusd_e8s : nat64;
+  swap_fees_icusd_e8s : nat64;
+  borrow_count : nat32;
+  redemption_count : nat32;
+  swap_count : nat32;
+  start_ns : nat64;
+  end_ns : nat64;
+};
 type FeeSeriesResponse = record {
   rows : vec DailyFeeRollup;
   next_from_ts : opt nat64;
@@ -265,6 +276,7 @@ type RangeQuery = record {
   offset : opt nat64;
   limit : opt nat32;
 };
+type ResetErrorCountersArgs = record { sources : opt vec text };
 type StabilitySeriesResponse = record {
   rows : vec DailyStabilityRow;
   next_from_ts : opt nat64;
@@ -386,6 +398,7 @@ service : (InitArgs) -> {
   get_collector_health : () -> (CollectorHealth) query;
   get_cycle_series : (RangeQuery) -> (CycleSeriesResponse) query;
   get_fee_curve_series : (RangeQuery) -> (FeeCurveSeriesResponse) query;
+  get_fee_breakdown_window : (FeeBreakdownQuery) -> (FeeBreakdownResponse) query;
   get_fee_series : (RangeQuery) -> (FeeSeriesResponse) query;
   get_holder_series : (RangeQuery, principal) -> (HolderSeriesResponse) query;
   get_liquidation_series : (RangeQuery) -> (LiquidationSeriesResponse) query;
@@ -402,6 +415,7 @@ service : (InitArgs) -> {
       TopCounterpartiesResponse,
     ) query;
   get_top_holders : (TopHoldersQuery) -> (TopHoldersResponse) query;
+  get_sp_depositor_principals : () -> (vec principal) query;
   get_top_sp_depositors : (TopSpDepositorsQuery) -> (
       TopSpDepositorsResponse,
     ) query;
@@ -412,5 +426,6 @@ service : (InitArgs) -> {
   get_volatility : (VolatilityQuery) -> (VolatilityResponse) query;
   http_request : (HttpRequest) -> (HttpResponse) query;
   ping : () -> (text) query;
+  reset_error_counters : (ResetErrorCountersArgs) -> (variant { Ok; Err : text });
   start_backfill : (principal) -> (text);
 }

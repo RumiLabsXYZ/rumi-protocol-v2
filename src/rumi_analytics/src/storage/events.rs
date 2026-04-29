@@ -82,11 +82,13 @@ pub struct AnalyticsVaultEvent {
     pub event_kind: VaultEventKind,
     pub collateral_type: Principal,
     pub amount: u64,
-    /// Fee paid on this event in icUSD e8s. Populated for Borrowed and
-    /// Redeemed; zero for other event kinds. Older stored events default
-    /// to 0 via serde, so they simply lack fee data.
+    /// Fee paid on this event in icUSD e8s. Populated as `Some(fee)` for
+    /// Borrowed and Redeemed; `None` for other event kinds and for events
+    /// stored before round 1 introduced this field. Optional so candid
+    /// subtyping accepts decoding pre-round-1 stable storage entries that
+    /// lack the field entirely.
     #[serde(default)]
-    pub fee_amount: u64,
+    pub fee_amount: Option<u64>,
 }
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
@@ -316,12 +318,47 @@ mod tests {
             event_kind: VaultEventKind::Opened,
             collateral_type: Principal::anonymous(),
             amount: 10_000_000_000,
-            fee_amount: 0,
+            fee_amount: None,
         };
         let bytes = evt.to_bytes();
         let decoded = AnalyticsVaultEvent::from_bytes(bytes);
         assert_eq!(decoded.vault_id, 1);
         assert!(matches!(decoded.event_kind, VaultEventKind::Opened));
+        assert_eq!(decoded.fee_amount, None);
+    }
+
+    /// Pre-round-1 events were encoded by an `AnalyticsVaultEvent` whose
+    /// struct lacked `fee_amount` entirely. The first round-2 deploy traps
+    /// when `fee_amount` is required (`u64`) because candid subtyping
+    /// rejects "field missing" against a non-optional schema. This test
+    /// pins down the fix: a legacy-shaped struct round-trips into the
+    /// current one with `fee_amount = None`.
+    #[test]
+    fn vault_event_decodes_pre_round1_legacy_shape() {
+        #[derive(candid::CandidType, serde::Deserialize)]
+        struct LegacyVaultEvent {
+            timestamp_ns: u64,
+            source_event_id: u64,
+            vault_id: u64,
+            owner: Principal,
+            event_kind: VaultEventKind,
+            collateral_type: Principal,
+            amount: u64,
+        }
+        let legacy = LegacyVaultEvent {
+            timestamp_ns: 3_000_000,
+            source_event_id: 5,
+            vault_id: 42,
+            owner: Principal::anonymous(),
+            event_kind: VaultEventKind::Borrowed,
+            collateral_type: Principal::anonymous(),
+            amount: 1_000_000_000,
+        };
+        let bytes = candid::Encode!(&legacy).expect("encode legacy");
+        let decoded = AnalyticsVaultEvent::from_bytes(std::borrow::Cow::Owned(bytes));
+        assert_eq!(decoded.vault_id, 42);
+        assert!(matches!(decoded.event_kind, VaultEventKind::Borrowed));
+        assert_eq!(decoded.fee_amount, None);
     }
 
     #[test]

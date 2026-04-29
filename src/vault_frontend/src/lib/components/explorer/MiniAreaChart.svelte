@@ -10,6 +10,12 @@
     label?: string;
     valueFormat?: (v: number) => string;
     loading?: boolean;
+    // 'zero-anchored': y-axis always includes 0 (good for volumes, counts).
+    // 'data-fit': y-axis tightly wraps the data range (good for slowly-moving
+    // quantities like virtual price, where all values cluster near 1.06).
+    // Assumes positive values; data-fit padding multipliers behave unexpectedly
+    // for negative inputs.
+    yAxisMode?: 'zero-anchored' | 'data-fit';
   }
   let {
     points,
@@ -20,6 +26,7 @@
     label,
     valueFormat,
     loading = false,
+    yAxisMode = 'zero-anchored',
   }: Props = $props();
 
   const padX = 8;
@@ -30,14 +37,32 @@
     const minT = points[0].t;
     const maxT = points[points.length - 1].t;
     const { min, max } = computeYScale(points.map(p => p.v));
-    // Anchor the y-axis at 0 when all values are non-negative — otherwise a
-    // small spike on top of zeros (typical for low-volume swap charts) renders
-    // as a flat line near the baseline because computeYScale tightens around
-    // the data. Anchoring keeps the spike visually distinct from baseline.
-    const allNonNeg = points.every((p) => p.v >= 0);
-    const yMin = allNonNeg ? 0 : min;
-    return { minT, maxT, yMin, yMax: max };
+    let yMin: number;
+    let yMax: number;
+    if (yAxisMode === 'data-fit') {
+      // Tightly wrap the data range with a small margin so the slope is visible
+      // even when values cluster (e.g. virtual price 1.063–1.064).
+      yMin = min * 0.999;
+      yMax = max * 1.001;
+    } else {
+      // Anchor the y-axis at 0 when all values are non-negative — otherwise a
+      // small spike on top of zeros (typical for low-volume swap charts) renders
+      // as a flat line near the baseline because computeYScale tightens around
+      // the data. Anchoring keeps the spike visually distinct from baseline.
+      const allNonNeg = points.every((p) => p.v >= 0);
+      yMin = allNonNeg ? 0 : min;
+      yMax = max;
+    }
+    return { minT, maxT, yMin, yMax };
   });
+
+  // When the entire series has exactly one non-zero point the bare dot looks
+  // broken. Detect that case so the template can render a more obvious
+  // vertical-marker fallback instead.
+  const nonZeroCount = $derived(points.filter((p) => p.v > 0).length);
+  // Guard points.length > 1 to avoid NaN when there is only one element
+  // (i / (length - 1) would be 0/0).
+  const isSingleEvent = $derived(nonZeroCount === 1 && points.length > 1);
 
   // Highlight dots for non-zero points when the series is sparse — without
   // them, an hourly chart with mostly-zero buckets looks empty even when
@@ -101,11 +126,19 @@
       </div>
     {:else}
       <svg viewBox="0 0 {width} {height}" class="w-full h-full" preserveAspectRatio="none">
-        <path d={fillD} fill={fillColor} stroke="none" />
-        <path d={pathD} fill="none" stroke={color} stroke-width="1.5" stroke-linejoin="round" />
-        {#each dotPoints as p (p.t)}
-          <circle cx={x(p.t).toFixed(2)} cy={y(p.v).toFixed(2)} r="3" fill={color} />
-        {/each}
+        {#if isSingleEvent}
+          {@const si = points.findIndex((p) => p.v > 0)}
+          {@const sx = x(points[si].t)}
+          {@const sv = points[si].v}
+          <line x1={sx} y1={0} x2={sx} y2={height} stroke="rgb(45 212 191 / 0.4)" stroke-dasharray="2 2" />
+          <circle cx={sx} cy={y(sv)} r="3.5" fill="rgb(45 212 191)" />
+        {:else}
+          <path d={fillD} fill={fillColor} stroke="none" />
+          <path d={pathD} fill="none" stroke={color} stroke-width="1.5" stroke-linejoin="round" />
+          {#each dotPoints as p (p.t)}
+            <circle cx={x(p.t).toFixed(2)} cy={y(p.v).toFixed(2)} r="3" fill={color} />
+          {/each}
+        {/if}
       </svg>
     {/if}
   </div>

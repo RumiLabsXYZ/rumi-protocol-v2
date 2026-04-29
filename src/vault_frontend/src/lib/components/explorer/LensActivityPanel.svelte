@@ -10,6 +10,7 @@
     fetch3PoolLiquidityEvents, fetch3PoolLiquidityEventCount,
     fetch3PoolAdminEvents, fetch3PoolAdminEventCount,
     fetchStabilityPoolEvents, fetchStabilityPoolEventCount,
+    type BackendEventFilters,
   } from '$services/explorer/explorerService';
   import { extractEventTimestamp } from '$utils/displayEvent';
   import type { DisplayEvent } from '$utils/displayEvent';
@@ -144,8 +145,13 @@
     try {
       // Fetch backend events + vault maps. Always include unless scope is purely DEX/SP/admin.
       const needsBackend = scope === 'all' || scope === 'vault_ops' || scope === 'redemptions' || scope === 'revenue' || scope === 'admin';
+      // For the redemptions scope, use a server-side type filter so we find
+      // redemption events across the full log rather than hoping they appear
+      // in the most recent 72 entries. Other scopes keep the unfiltered tail
+      // (vault_ops, revenue, admin, all mix event kinds so filtering is harder).
+      const redemptionFilters: BackendEventFilters = { types: ['Redemption'] };
       const backendPromise = needsBackend
-        ? fetchEvents(0n, BigInt(limit * 6)).catch(() => ({ total: 0n, events: [] }))
+        ? fetchEvents(0n, scope === 'redemptions' ? 50n : BigInt(limit * 6), scope === 'redemptions' ? redemptionFilters : undefined).catch(() => ({ total: 0n, events: [] }))
         : Promise.resolve({ total: 0n, events: [] });
 
       const vaultsPromise = fetchAllVaults().catch(() => []);

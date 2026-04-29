@@ -180,6 +180,16 @@ fn get_trade_activity(query: types::TradeActivityQuery) -> types::TradeActivityR
 }
 
 #[ic_cdk_macros::query]
+fn get_fee_breakdown_window(query: types::FeeBreakdownQuery) -> types::FeeBreakdownResponse {
+    queries::live::get_fee_breakdown_window(query)
+}
+
+#[ic_cdk_macros::query]
+fn get_sp_depositor_principals() -> Vec<Principal> {
+    queries::live::get_sp_depositor_principals()
+}
+
+#[ic_cdk_macros::query]
 fn get_token_flow(query: types::TokenFlowQuery) -> types::TokenFlowResponse {
     queries::flow::get_token_flow(query)
 }
@@ -276,6 +286,26 @@ fn start_backfill(token: Principal) -> String {
     } else {
         format!("unknown token: {}", token)
     }
+}
+
+#[ic_cdk_macros::update]
+fn reset_error_counters(args: types::ResetErrorCountersArgs) -> Result<(), String> {
+    let admin = state::read_state(|s| s.admin);
+    let caller = ic_cdk::caller();
+    if caller != admin {
+        return Err(format!("unauthorized: caller {} is not admin", caller));
+    }
+    state::mutate_state(|s| {
+        let reset_all = args.sources.is_none();
+        let sources = args.sources.unwrap_or_default();
+        let touch = |name: &str| reset_all || sources.iter().any(|src| src == name);
+        if touch("backend") { s.error_counters.backend = 0; }
+        if touch("stability_pool") { s.error_counters.stability_pool = 0; }
+        if touch("three_pool") { s.error_counters.three_pool = 0; }
+        if touch("icusd_ledger") { s.error_counters.icusd_ledger = 0; }
+        if touch("amm") { s.error_counters.amm = 0; }
+    });
+    Ok(())
 }
 
 ic_cdk::export_candid!();

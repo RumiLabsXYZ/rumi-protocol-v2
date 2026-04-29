@@ -904,6 +904,69 @@ pub fn get_protocol_summary() -> types::ProtocolSummary {
     }
 }
 
+// ─── Fee Breakdown Window (Task 3.1) ───
+
+pub fn get_fee_breakdown_window(query: types::FeeBreakdownQuery) -> types::FeeBreakdownResponse {
+    let now = ic_cdk::api::time();
+    let start = match query.window_ns {
+        Some(window) => now.saturating_sub(window),
+        None => 0,
+    };
+
+    let vault_events = storage::events::evt_vaults::range(start, now, usize::MAX);
+    let swap_events = storage::events::evt_swaps::range(start, now, usize::MAX);
+
+    let (borrow_fees, redemption_fees, borrow_count, redemption_count) =
+        compute_vault_fee_totals(&vault_events);
+    let swap_fees: u64 = swap_events.iter().map(|e| e.fee).sum();
+    let swap_count = swap_events.len() as u32;
+
+    types::FeeBreakdownResponse {
+        borrow_fees_icusd_e8s: borrow_fees,
+        redemption_fees_icusd_e8s: redemption_fees,
+        swap_fees_icusd_e8s: swap_fees,
+        borrow_count,
+        redemption_count,
+        swap_count,
+        start_ns: start,
+        end_ns: now,
+    }
+}
+
+pub fn compute_vault_fee_totals(
+    vault_events: &[storage::events::AnalyticsVaultEvent],
+) -> (u64, u64, u32, u32) {
+    let mut borrow_fees: u64 = 0;
+    let mut redemption_fees: u64 = 0;
+    let mut borrow_count: u32 = 0;
+    let mut redemption_count: u32 = 0;
+    for e in vault_events {
+        match e.event_kind {
+            storage::events::VaultEventKind::Borrowed => {
+                borrow_fees = borrow_fees.saturating_add(e.fee_amount.unwrap_or(0));
+                borrow_count += 1;
+            }
+            storage::events::VaultEventKind::Redeemed => {
+                redemption_fees = redemption_fees.saturating_add(e.fee_amount.unwrap_or(0));
+                redemption_count += 1;
+            }
+            _ => {}
+        }
+    }
+    (borrow_fees, redemption_fees, borrow_count, redemption_count)
+}
+
+// ─── SP Depositor Principals (Task 3.2) ───
+
+pub fn get_sp_depositor_principals() -> Vec<Principal> {
+    let events = storage::events::evt_stability::range(0, u64::MAX, usize::MAX);
+    let mut set: HashSet<Principal> = HashSet::new();
+    for e in events {
+        set.insert(e.caller);
+    }
+    set.into_iter().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1321,7 +1384,7 @@ mod tests {
             event_kind: kind,
             collateral_type: Principal::anonymous(),
             amount,
-            fee_amount: 0,
+            fee_amount: None,
         }
     }
 
@@ -1627,5 +1690,60 @@ mod tests {
         let other_total = by_p.iter().find(|(p, _)| *p == other).map(|(_, b)| *b).unwrap();
         assert_eq!(owner_total, 175);
         assert_eq!(other_total, 10);
+    }
+
+    // ─── Task 3.1: fee breakdown compute helper ───
+
+    fn make_fee_vault_event(
+        kind: storage::events::VaultEventKind,
+        fee_amount: u64,
+    ) -> storage::events::AnalyticsVaultEvent {
+        storage::events::AnalyticsVaultEvent {
+            timestamp_ns: 1_000_000,
+            source_event_id: 0,
+            vault_id: 1,
+            owner: Principal::anonymous(),
+            event_kind: kind,
+            collateral_type: Principal::anonymous(),
+            amount: 1_000_000,
+            fee_amount: Some(fee_amount),
+        }
+    }
+
+    #[test]
+    fn fee_breakdown_empty_inputs_all_zeros() {
+        let (bf, rf, bc, rc) = compute_vault_fee_totals(&[]);
+        assert_eq!(bf, 0);
+        assert_eq!(rf, 0);
+        assert_eq!(bc, 0);
+        assert_eq!(rc, 0);
+    }
+
+    #[test]
+    fn fee_breakdown_borrow_and_redeem_counts_and_sums() {
+        use storage::events::VaultEventKind;
+        let events = vec![
+            make_fee_vault_event(VaultEventKind::Borrowed, 500_000),
+            make_fee_vault_event(VaultEventKind::Borrowed, 300_000),
+            make_fee_vault_event(VaultEventKind::Redeemed, 100_000),
+            make_fee_vault_event(VaultEventKind::Repaid, 0),  // should be ignored
+        ];
+        let (bf, rf, bc, rc) = compute_vault_fee_totals(&events);
+        assert_eq!(bf, 800_000);
+        assert_eq!(rf, 100_000);
+        assert_eq!(bc, 2);
+        assert_eq!(rc, 1);
+    }
+
+    #[test]
+    fn fee_breakdown_saturating_add_on_large_fees() {
+        use storage::events::VaultEventKind;
+        let events = vec![
+            make_fee_vault_event(VaultEventKind::Borrowed, u64::MAX),
+            make_fee_vault_event(VaultEventKind::Borrowed, 1),
+        ];
+        let (bf, _, bc, _) = compute_vault_fee_totals(&events);
+        assert_eq!(bf, u64::MAX); // saturating, not overflow
+        assert_eq!(bc, 2);
     }
 }
