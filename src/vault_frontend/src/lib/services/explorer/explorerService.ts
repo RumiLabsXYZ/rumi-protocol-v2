@@ -589,6 +589,66 @@ export async function fetchEvents(
 	}
 }
 
+/**
+ * Authoritative fee totals for a trailing window, sourced directly from the
+ * backend event log. The analytics canister's `get_fee_breakdown_window`
+ * derives borrow / redemption fees from `evt_vaults`, but historical entries
+ * there were ingested before the analytics tailer captured `fee_amount` (the
+ * column was added in round-1; rows ingested before that have `None`). This
+ * function paginates the backend's filtered event log, which has authoritative
+ * `fee_amount` on every Borrow / Redemption variant, and sums them.
+ *
+ * Returns icUSD values (e8s normalized). Capped at MAX_PAGES * 200 events,
+ * which covers any realistic 90d window for this protocol.
+ */
+export async function fetchProtocolFeeTotalsFromBackend(
+	windowMs: number,
+): Promise<{ borrowIcusd: number; redemptionIcusd: number; borrowCount: number; redemptionCount: number }> {
+	const key = `events:fee_totals:${windowMs}`;
+	const cached = getCached<{ borrowIcusd: number; redemptionIcusd: number; borrowCount: number; redemptionCount: number }>(key, TTL.EVENTS);
+	if (cached) return cached;
+
+	const nowNs = BigInt(Date.now()) * 1_000_000n;
+	const startNs = nowNs - BigInt(windowMs) * 1_000_000n;
+	const PAGE_SIZE = 200n;
+	const MAX_PAGES = 25; // 5,000-event ceiling; ~30x current 90d count
+
+	let borrowFeesE8s = 0n;
+	let redemptionFeesE8s = 0n;
+	let borrowCount = 0;
+	let redemptionCount = 0;
+	let offset = 0n;
+
+	for (let p = 0; p < MAX_PAGES; p++) {
+		const result = await fetchEvents(offset, PAGE_SIZE, {
+			types: ['Borrow', 'Redemption'],
+			time_range: { start_ns: startNs, end_ns: nowNs },
+		});
+		if (result.events.length === 0) break;
+		for (const [, evt] of result.events) {
+			const variantKey = Object.keys(evt ?? {})[0];
+			const data = evt?.[variantKey] ?? {};
+			if (variantKey === 'borrow_from_vault') {
+				borrowFeesE8s += BigInt(data.fee_amount ?? 0);
+				borrowCount += 1;
+			} else if (variantKey === 'redemption_on_vaults') {
+				redemptionFeesE8s += BigInt(data.fee_amount ?? 0);
+				redemptionCount += 1;
+			}
+		}
+		offset += BigInt(result.events.length);
+		if (offset >= result.total) break;
+	}
+
+	const out = {
+		borrowIcusd: Number(borrowFeesE8s) / 1e8,
+		redemptionIcusd: Number(redemptionFeesE8s) / 1e8,
+		borrowCount,
+		redemptionCount,
+	};
+	return setCache(key, out);
+}
+
 export async function fetchEventsByPrincipal(principal: Principal): Promise<[bigint, any][]> {
 	const key = `events:principal:${principal.toText()}`;
 	const cached = getCached<[bigint, any][]>(key, TTL.EVENTS);
