@@ -49,6 +49,66 @@ pub struct DepositArgs {
 }
 
 // ---------------------------------------------------------------------------
+// Wave-8e LIQ-005: fee → deficit routing planner
+// ---------------------------------------------------------------------------
+
+/// Outcome of routing a fee through the deficit-repayment path.
+///
+/// `to_repay` is the icUSD applied to deficit repayment (mint foregone for
+/// borrowing fees, supply already reduced for redemption fees).
+/// `to_remainder` is what flows to the existing destination — for borrowing
+/// fees that's the treasury mint amount; for redemption fees that's the
+/// portion of fee revenue that accrues as protocol equity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FeeRoutingOutcome {
+    pub to_repay: ICUSD,
+    pub to_remainder: ICUSD,
+}
+
+/// Plan how a fee splits between deficit repayment and its existing
+/// destination. Mutates state to apply the repayment + emit
+/// `DeficitRepaid` (so callers stay one-liners), then returns the split
+/// for the caller to act on.
+///
+/// `anchor_block_index` on the emitted event is `None`; the ledger op
+/// (treasury mint for borrowing fee, the redeemer's burn for redemption
+/// fee) hasn't happened yet at this point. Callers can correlate via the
+/// op_nonce on subsequent ledger entries.
+///
+/// In production the canister wrapper [`plan_fee_routing`] passes
+/// `ic_cdk::api::time()`; the inner `_at` form takes the timestamp
+/// explicitly so unit tests can drive it without a canister context.
+pub fn plan_fee_routing_at(
+    state: &mut crate::state::State,
+    fee: crate::numeric::ICUSD,
+    source: crate::event::FeeSource,
+    timestamp: u64,
+) -> FeeRoutingOutcome {
+    if fee.0 == 0 {
+        return FeeRoutingOutcome {
+            to_repay: crate::numeric::ICUSD::new(0),
+            to_remainder: crate::numeric::ICUSD::new(0),
+        };
+    }
+    let to_repay = state.compute_deficit_repay_amount(fee);
+    if to_repay.0 > 0 {
+        crate::event::record_deficit_repaid(state, to_repay, source, None, timestamp);
+    }
+    let to_remainder = crate::numeric::ICUSD::new(fee.0 - to_repay.0);
+    FeeRoutingOutcome { to_repay, to_remainder }
+}
+
+/// Production wrapper around [`plan_fee_routing_at`] that captures the
+/// canister time. Call sites stay one-liners.
+pub fn plan_fee_routing(
+    state: &mut crate::state::State,
+    fee: crate::numeric::ICUSD,
+    source: crate::event::FeeSource,
+) -> FeeRoutingOutcome {
+    plan_fee_routing_at(state, fee, source, ic_cdk::api::time())
+}
+
+// ---------------------------------------------------------------------------
 // Helper: map collateral ledger principal → AssetType
 // ---------------------------------------------------------------------------
 
@@ -395,25 +455,52 @@ enum ThreePoolDonateError {
 // ---------------------------------------------------------------------------
 
 /// Mint icUSD borrowing fee to treasury and record the deposit.
+///
+/// Wave-8e LIQ-005: routes a configurable fraction of the fee to deficit
+/// repayment first via `plan_fee_routing`. The "repayment" is supply-
+/// conserving — we mint `to_remainder` instead of the full `fee`, so the
+/// skipped `to_repay` mint is the foregone-revenue that pays down the
+/// deficit. No separate ledger op is required.
 pub async fn mint_borrowing_fee_to_treasury(fee: ICUSD) {
     if fee.0 == 0 {
         return;
     }
+    let outcome = crate::state::mutate_state(|s| {
+        plan_fee_routing(s, fee, crate::event::FeeSource::BorrowingFee)
+    });
+    if outcome.to_remainder.0 == 0 {
+        log!(
+            INFO,
+            "[treasury] Borrowing fee {} fully routed to deficit repayment (no treasury mint)",
+            fee.to_u64()
+        );
+        return;
+    }
     let treasury = read_state(|s| s.treasury_principal);
     if let Some(tp) = treasury {
-        match management::mint_icusd(fee, tp).await {
+        match management::mint_icusd(outcome.to_remainder, tp).await {
             Ok(block_index) => {
-                log!(
-                    INFO,
-                    "[treasury] Minted {} icUSD borrowing fee (block {})",
-                    fee.to_u64(),
-                    block_index
-                );
+                if outcome.to_repay.0 > 0 {
+                    log!(
+                        INFO,
+                        "[treasury] Minted {} icUSD borrowing fee (deficit repay {}, block {})",
+                        outcome.to_remainder.to_u64(),
+                        outcome.to_repay.to_u64(),
+                        block_index
+                    );
+                } else {
+                    log!(
+                        INFO,
+                        "[treasury] Minted {} icUSD borrowing fee (block {})",
+                        outcome.to_remainder.to_u64(),
+                        block_index
+                    );
+                }
                 let _ = notify_treasury_deposit(
                     tp,
                     DepositType::BorrowingFee,
                     AssetType::ICUSD,
-                    fee.to_u64(),
+                    outcome.to_remainder.to_u64(),
                     block_index,
                 )
                 .await;

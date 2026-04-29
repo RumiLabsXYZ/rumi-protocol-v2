@@ -323,3 +323,90 @@ fn liq_005_predicate_handles_low_price_collateral() {
     };
     assert_eq!(shortfall, ICUSD::new(25_000_000));
 }
+
+// ─── Task 9: plan_fee_routing fences ───
+//
+// Tests the synchronous decision helper that splits a fee between
+// deficit repayment and the existing destination. State mutations
+// (decrement deficit + increment lifetime counter + emit DeficitRepaid)
+// happen inside `plan_fee_routing` so callers can stay one-liners.
+
+#[test]
+fn liq_005_borrowing_fee_no_deficit_routes_full_fee() {
+    let mut s = State::default();
+    let outcome = rumi_protocol_backend::treasury::plan_fee_routing_at(
+        &mut s,
+        ICUSD::new(1_000_000),
+        FeeSource::BorrowingFee,
+        /*timestamp=*/ 1_000,
+    );
+    assert_eq!(outcome.to_repay, ICUSD::new(0));
+    assert_eq!(outcome.to_remainder, ICUSD::new(1_000_000));
+    // No state mutation when there's no deficit.
+    assert_eq!(s.protocol_deficit_icusd, ICUSD::new(0));
+    assert_eq!(s.total_deficit_repaid_icusd, ICUSD::new(0));
+}
+
+#[test]
+fn liq_005_borrowing_fee_with_deficit_splits_at_fraction() {
+    let mut s = State::default();
+    s.protocol_deficit_icusd = ICUSD::new(10_000_000); // 0.1 icUSD
+    let outcome = rumi_protocol_backend::treasury::plan_fee_routing_at(
+        &mut s,
+        ICUSD::new(1_000_000),
+        FeeSource::BorrowingFee,
+        /*timestamp=*/ 1_001,
+    );
+    // 50% of 1_000_000 = 500_000; deficit (10_000_000) doesn't cap.
+    assert_eq!(outcome.to_repay, ICUSD::new(500_000));
+    assert_eq!(outcome.to_remainder, ICUSD::new(500_000));
+    assert_eq!(s.protocol_deficit_icusd, ICUSD::new(9_500_000));
+    assert_eq!(s.total_deficit_repaid_icusd, ICUSD::new(500_000));
+}
+
+#[test]
+fn liq_005_borrowing_fee_caps_repay_at_remaining_deficit() {
+    let mut s = State::default();
+    s.protocol_deficit_icusd = ICUSD::new(50_000); // small deficit
+    let outcome = rumi_protocol_backend::treasury::plan_fee_routing_at(
+        &mut s,
+        ICUSD::new(1_000_000),
+        FeeSource::BorrowingFee,
+        /*timestamp=*/ 1_002,
+    );
+    // 50% of 1_000_000 = 500_000, but deficit is only 50_000 → cap binds.
+    assert_eq!(outcome.to_repay, ICUSD::new(50_000));
+    assert_eq!(outcome.to_remainder, ICUSD::new(950_000));
+    assert_eq!(s.protocol_deficit_icusd, ICUSD::new(0));
+}
+
+#[test]
+fn liq_005_redemption_fee_repayment_decrements_deficit() {
+    let mut s = State::default();
+    s.protocol_deficit_icusd = ICUSD::new(800_000);
+    let outcome = rumi_protocol_backend::treasury::plan_fee_routing_at(
+        &mut s,
+        ICUSD::new(400_000),
+        FeeSource::RedemptionFee,
+        /*timestamp=*/ 1_003,
+    );
+    assert_eq!(outcome.to_repay, ICUSD::new(200_000));
+    assert_eq!(outcome.to_remainder, ICUSD::new(200_000));
+    assert_eq!(s.protocol_deficit_icusd, ICUSD::new(600_000));
+    assert_eq!(s.total_deficit_repaid_icusd, ICUSD::new(200_000));
+}
+
+#[test]
+fn liq_005_zero_fee_is_noop() {
+    let mut s = State::default();
+    s.protocol_deficit_icusd = ICUSD::new(1_000);
+    let outcome = rumi_protocol_backend::treasury::plan_fee_routing_at(
+        &mut s,
+        ICUSD::new(0),
+        FeeSource::BorrowingFee,
+        /*timestamp=*/ 1_004,
+    );
+    assert_eq!(outcome.to_repay, ICUSD::new(0));
+    assert_eq!(outcome.to_remainder, ICUSD::new(0));
+    assert_eq!(s.protocol_deficit_icusd, ICUSD::new(1_000));
+}

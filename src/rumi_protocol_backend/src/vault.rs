@@ -367,6 +367,22 @@ pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Prin
         icusd_block_index,
     );
 
+    // Wave-8e LIQ-005: route the reserves-portion fee (in icUSD e8s)
+    // through deficit repayment. The redeemer's icUSD was burned via
+    // `transfer_icusd_from` above, so this is a pure state mutation.
+    // The stablecoin fee transfer to treasury (line ~349) is unaffected
+    // — that ckUSDT/ckUSDC payment is the actual revenue, the deficit
+    // bookkeeping is the foregone-equity offset.
+    if fee_icusd.0 > 0 {
+        mutate_state(|s| {
+            let _routing = crate::treasury::plan_fee_routing(
+                s,
+                fee_icusd,
+                crate::event::FeeSource::RedemptionFee,
+            );
+        });
+    }
+
     // Handle vault spillover if reserves didn't cover everything
     if spillover_e8s > 0 {
         // Pick the best collateral type for vault redemption based on tier priority
@@ -403,6 +419,14 @@ pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Prin
                 vault_fee,
                 current_price,
                 icusd_block_index,
+            );
+
+            // Wave-8e LIQ-005: route the spillover-portion fee through
+            // deficit repayment. icUSD already burned via `transfer_icusd_from`.
+            let _routing = crate::treasury::plan_fee_routing(
+                s,
+                vault_fee,
+                crate::event::FeeSource::RedemptionFee,
             );
         });
         ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), || {
@@ -482,6 +506,19 @@ pub async fn redeem_collateral(collateral_type: Principal, _icusd_amount: u64) -
                     current_collateral_price,
                     block_index,
                 );
+
+                // Wave-8e LIQ-005: route a configurable fraction of the
+                // redemption fee toward deficit repayment. The redeemer's
+                // icUSD has already been burned via `transfer_icusd_from`
+                // (the protocol's main account is the icUSD minting
+                // account), so the supply side is already correct — this
+                // is a pure state mutation that decrements the deficit.
+                let _routing = crate::treasury::plan_fee_routing(
+                    s,
+                    fee_amount,
+                    crate::event::FeeSource::RedemptionFee,
+                );
+
                 fee_amount
             });
             ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), || {
