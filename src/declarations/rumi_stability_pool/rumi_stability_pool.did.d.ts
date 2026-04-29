@@ -304,6 +304,7 @@ export interface _SERVICE {
     [Icrc21ConsentMessageRequest],
     Icrc21ConsentMessageResponse
   >,
+  'list_depositor_principals' : ActorMethod<[], Array<Principal>>,
   /**
    * ── Liquidation ──
    */

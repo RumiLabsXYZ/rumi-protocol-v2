@@ -18,7 +18,6 @@ import type { _SERVICE as IcusdLedgerService } from '$declarations/icusd_ledger/
 import type { _SERVICE as IcusdIndexService } from '$declarations/icusd_index/icusd_index.did';
 import type { UserStabilityPosition } from '$declarations/rumi_stability_pool/rumi_stability_pool.did';
 import { idlFactory as stabilityPoolIDL } from '$declarations/rumi_stability_pool/rumi_stability_pool.did.js';
-import { fetchSpDepositorPrincipals } from './analyticsService';
 
 // ── TTL constants (ms) ───────────────────────────────────────────────────────
 
@@ -807,9 +806,12 @@ function getStabilityPoolActor() {
 
 /**
  * Returns every principal currently holding a non-zero SP balance, sorted by
- * total USD value descending. The analytics canister supplies the set of
- * principals to fan out over; the SP canister is the source of truth for
- * current positions.
+ * total USD value descending. The SP canister is the source of truth for both
+ * the depositor set and each user's position — using `list_depositor_principals`
+ * (added in this PR) instead of the analytics shadow log fixes the case where
+ * old depositors are missing from `evt_stability` because their Deposit events
+ * predate the analytics tailer or were dropped while the shadow types were
+ * stale.
  */
 export async function fetchCurrentSpDepositors(): Promise<CurrentSpDepositor[]> {
 	const key = 'pool:stability:current_depositors';
@@ -817,8 +819,8 @@ export async function fetchCurrentSpDepositors(): Promise<CurrentSpDepositor[]> 
 	if (cached) return cached;
 
 	try {
-		const principals = await fetchSpDepositorPrincipals();
 		const sp = getStabilityPoolActor();
+		const principals: Principal[] = await sp.list_depositor_principals();
 		const positions = await Promise.all(
 			principals.map(async (p) => {
 				try {
