@@ -9,7 +9,8 @@
 //! `audit_pocs_liq_005_deficit_account_pic.rs`.
 
 use rumi_protocol_backend::numeric::{ICUSD, Ratio};
-use rumi_protocol_backend::state::State;
+use rumi_protocol_backend::state::{Mode, State};
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
 #[test]
@@ -82,4 +83,117 @@ fn liq_005_state_decodes_pre_8e_blob_with_defaults() {
     assert_eq!(decoded.total_deficit_repaid_icusd, ICUSD::new(0));
     assert_eq!(decoded.deficit_repayment_fraction.0, dec!(0.5));
     assert_eq!(decoded.deficit_readonly_threshold_e8s, 0);
+}
+
+// ─── Task 2: state-helper fences ───
+
+#[test]
+fn liq_005_accrue_shortfall_increments_deficit() {
+    let mut s = State::default();
+    let added = s.accrue_deficit_shortfall(ICUSD::new(500));
+    assert_eq!(added, ICUSD::new(500));
+    assert_eq!(s.protocol_deficit_icusd, ICUSD::new(500));
+    assert_eq!(s.total_deficit_repaid_icusd, ICUSD::new(0));
+}
+
+#[test]
+fn liq_005_accrue_zero_shortfall_is_noop() {
+    let mut s = State::default();
+    let added = s.accrue_deficit_shortfall(ICUSD::new(0));
+    assert_eq!(added, ICUSD::new(0));
+    assert_eq!(s.protocol_deficit_icusd, ICUSD::new(0));
+}
+
+#[test]
+fn liq_005_compute_repay_amount_zero_when_deficit_zero() {
+    let s = State::default();
+    let repay = s.compute_deficit_repay_amount(ICUSD::new(1_000_000));
+    assert_eq!(repay, ICUSD::new(0));
+}
+
+#[test]
+fn liq_005_compute_repay_amount_caps_at_remaining_deficit() {
+    let mut s = State::default();
+    s.protocol_deficit_icusd = ICUSD::new(500);
+    // 50% of 10_000 = 5_000, but deficit is only 500.
+    let repay = s.compute_deficit_repay_amount(ICUSD::new(10_000));
+    assert_eq!(repay, ICUSD::new(500));
+}
+
+#[test]
+fn liq_005_compute_repay_amount_uses_fraction() {
+    let mut s = State::default();
+    s.protocol_deficit_icusd = ICUSD::new(1_000_000_000_000);
+    s.deficit_repayment_fraction = Ratio::from(dec!(0.25));
+    let repay = s.compute_deficit_repay_amount(ICUSD::new(1_000_000));
+    assert_eq!(repay, ICUSD::new(250_000));
+}
+
+#[test]
+fn liq_005_compute_repay_amount_zero_when_fraction_zero() {
+    let mut s = State::default();
+    s.protocol_deficit_icusd = ICUSD::new(10_000_000);
+    s.deficit_repayment_fraction = Ratio::from(Decimal::ZERO);
+    let repay = s.compute_deficit_repay_amount(ICUSD::new(1_000_000));
+    assert_eq!(repay, ICUSD::new(0));
+}
+
+#[test]
+fn liq_005_compute_repay_amount_full_fee_when_fraction_one() {
+    let mut s = State::default();
+    s.protocol_deficit_icusd = ICUSD::new(1_000_000_000);
+    s.deficit_repayment_fraction = Ratio::from(dec!(1.0));
+    let repay = s.compute_deficit_repay_amount(ICUSD::new(1_000_000));
+    assert_eq!(repay, ICUSD::new(1_000_000));
+}
+
+#[test]
+fn liq_005_apply_repayment_decrements_and_increments_counters() {
+    let mut s = State::default();
+    s.protocol_deficit_icusd = ICUSD::new(800);
+    s.apply_deficit_repayment(ICUSD::new(300));
+    assert_eq!(s.protocol_deficit_icusd, ICUSD::new(500));
+    assert_eq!(s.total_deficit_repaid_icusd, ICUSD::new(300));
+}
+
+#[test]
+fn liq_005_apply_repayment_saturates_to_zero() {
+    let mut s = State::default();
+    s.protocol_deficit_icusd = ICUSD::new(100);
+    // Caller asks for 500 but only 100 outstanding — saturate to zero.
+    s.apply_deficit_repayment(ICUSD::new(500));
+    assert_eq!(s.protocol_deficit_icusd, ICUSD::new(0));
+    // total_deficit_repaid still records the requested amount so the
+    // event-log invariant remains:
+    //   sum(DeficitRepaid.amount) - sum(DeficitAccrued.amount) >= -deficit
+    assert_eq!(s.total_deficit_repaid_icusd, ICUSD::new(500));
+}
+
+#[test]
+fn liq_005_check_readonly_latch_disabled_when_threshold_zero() {
+    let mut s = State::default();
+    s.protocol_deficit_icusd = ICUSD::new(u64::MAX);
+    let latched = s.check_deficit_readonly_latch();
+    assert!(!latched, "threshold=0 must disable the latch");
+    assert_ne!(s.mode, Mode::ReadOnly);
+}
+
+#[test]
+fn liq_005_check_readonly_latch_fires_at_threshold() {
+    let mut s = State::default();
+    s.deficit_readonly_threshold_e8s = 1_000;
+    s.protocol_deficit_icusd = ICUSD::new(1_000);
+    let latched = s.check_deficit_readonly_latch();
+    assert!(latched, "deficit at threshold must latch");
+    assert_eq!(s.mode, Mode::ReadOnly);
+}
+
+#[test]
+fn liq_005_check_readonly_latch_does_not_fire_below_threshold() {
+    let mut s = State::default();
+    s.deficit_readonly_threshold_e8s = 1_000;
+    s.protocol_deficit_icusd = ICUSD::new(999);
+    let latched = s.check_deficit_readonly_latch();
+    assert!(!latched, "deficit below threshold must not latch");
+    assert_ne!(s.mode, Mode::ReadOnly);
 }

@@ -2894,6 +2894,64 @@ impl State {
         repay_amount.min(vault.borrowed_icusd_amount)
     }
 
+    // ─── Wave-8e LIQ-005: deficit-account helpers ───
+
+    /// Increment `protocol_deficit_icusd` by `shortfall` and return the
+    /// amount actually added (always equal to `shortfall` for non-zero
+    /// inputs). Caller is responsible for emitting `DeficitAccrued` and
+    /// invoking `check_deficit_readonly_latch` afterwards.
+    pub fn accrue_deficit_shortfall(&mut self, shortfall: ICUSD) -> ICUSD {
+        if shortfall.0 == 0 {
+            return ICUSD::new(0);
+        }
+        self.protocol_deficit_icusd = self.protocol_deficit_icusd + shortfall;
+        shortfall
+    }
+
+    /// Compute how much of `fee` to route to deficit repayment given the
+    /// current deficit and configured fraction. Caps at remaining deficit.
+    /// Returns `ICUSD::new(0)` when `protocol_deficit_icusd == 0` or
+    /// `deficit_repayment_fraction == 0`.
+    pub fn compute_deficit_repay_amount(&self, fee: ICUSD) -> ICUSD {
+        if self.protocol_deficit_icusd.0 == 0 || self.deficit_repayment_fraction.0.is_zero() {
+            return ICUSD::new(0);
+        }
+        let candidate_dec =
+            rust_decimal::Decimal::from(fee.0) * self.deficit_repayment_fraction.0;
+        let candidate_e8s = candidate_dec.to_u64().unwrap_or(0);
+        let capped = candidate_e8s.min(self.protocol_deficit_icusd.0);
+        ICUSD::new(capped)
+    }
+
+    /// Apply a successful deficit repayment: decrement the outstanding
+    /// deficit (saturating at zero) and accumulate `amount` into the lifetime
+    /// counter. Saturating behaviour preserves the invariant that
+    /// `total_deficit_repaid_icusd` equals the sum of `DeficitRepaid.amount`
+    /// events even if a caller asks for more than the outstanding deficit.
+    /// Caller is responsible for emitting `DeficitRepaid`.
+    pub fn apply_deficit_repayment(&mut self, amount: ICUSD) {
+        if amount.0 == 0 {
+            return;
+        }
+        self.protocol_deficit_icusd = self.protocol_deficit_icusd.saturating_sub(amount);
+        self.total_deficit_repaid_icusd = self.total_deficit_repaid_icusd + amount;
+    }
+
+    /// If `deficit_readonly_threshold_e8s > 0` and the current deficit has
+    /// reached the threshold, force `mode = Mode::ReadOnly` and return
+    /// `true`. Returns `false` otherwise. The latch is one-shot per
+    /// crossing — the admin must call `exit_recovery_mode` to clear it.
+    pub fn check_deficit_readonly_latch(&mut self) -> bool {
+        if self.deficit_readonly_threshold_e8s == 0 {
+            return false;
+        }
+        if self.protocol_deficit_icusd.0 < self.deficit_readonly_threshold_e8s {
+            return false;
+        }
+        self.mode = Mode::ReadOnly;
+        true
+    }
+
     /// Liquidate a vault. Returns the interest share of the debt reduction
     /// so callers can route it to treasury.
     pub fn liquidate_vault(&mut self, vault_id: u64, mode: Mode, collateral_price: UsdIcp) -> ICUSD {
