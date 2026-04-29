@@ -56,12 +56,6 @@
     const split = protocolStatus.interestSplit ?? [];
     const poolShare = (split.find((e: any) => e.destination === 'stability_pool')?.bps ?? 0) / 10000;
     const perC = protocolStatus.perCollateralInterest;
-    // Diagnostic log: fires once after data loads to trace which guard causes null.
-    console.debug('[SPLens liveSpApy]', {
-      splitLen: split.length, poolShare,
-      perCLen: perC?.length,
-      eligibleLen: poolStatus?.eligible_icusd_per_collateral?.length,
-    });
     if (!perC || perC.length === 0 || poolShare === 0) return null;
 
     const eligibleMap = new Map<string, number>(
