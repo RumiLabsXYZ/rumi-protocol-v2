@@ -9,12 +9,13 @@
     fetchProtocolSummary, fetchTwap, fetchVolatility, fetchLiquidationSeries,
   } from '$services/explorer/analyticsService';
   import {
-    fetchCollateralConfigs, fetchCollateralTotals, fetchAllVaults, fetchLiquidatableVaults,
+    fetchCollateralConfigs, fetchCollateralTotals, fetchAllVaults,
   } from '$services/explorer/explorerService';
   import {
     e8sToNumber, formatCompact, bpsToPercent, COLLATERAL_SYMBOLS, COLLATERAL_COLORS,
   } from '$utils/explorerChartHelpers';
   import { computeVaultCrPct, median } from '$utils/vaultCr';
+  import { decodeRustDecimal } from '$utils/decimalUtils';
   import { COLLATERAL_DISPLAY_ORDER } from '$stores/collateralStore';
 
   let systemCrBps = $state(0);
@@ -33,14 +34,13 @@
     try {
       const principals = Object.keys(COLLATERAL_SYMBOLS);
       const [
-        summaryR, twapR, configsR, totalsR, allVaultsR, liqVaultsR, liqSeriesR, ...volResults
+        summaryR, twapR, configsR, totalsR, allVaultsR, liqSeriesR, ...volResults
       ] = await Promise.allSettled([
         fetchProtocolSummary(),
         fetchTwap(),
         fetchCollateralConfigs(),
         fetchCollateralTotals(),
         fetchAllVaults(),
-        fetchLiquidatableVaults(),
         fetchLiquidationSeries(7),
         ...principals.map(p => fetchVolatility(Principal.fromText(p))),
       ]);
@@ -51,7 +51,6 @@
       const configs = configsR.status === 'fulfilled' ? configsR.value ?? [] : [];
       const totals = totalsR.status === 'fulfilled' ? totalsR.value ?? [] : [];
       allVaults = allVaultsR.status === 'fulfilled' ? allVaultsR.value ?? [] : [];
-      atRiskVaults = liqVaultsR.status === 'fulfilled' ? liqVaultsR.value ?? [] : [];
 
       const liqSeries = liqSeriesR.status === 'fulfilled' ? liqSeriesR.value ?? [] : [];
       liq7dCount = liqSeries.reduce((s: number, d: any) => s + Number(d.liquidation_count ?? 0), 0);
@@ -111,6 +110,42 @@
         crByCollateral.get(collType)!.push(cr);
       }
       crBuckets = buckets;
+
+      // Warning zone: vaults below min borrow CR but above liquidation threshold.
+      // These are the same vaults that trigger the warning icon on the vault page.
+      // borrow_threshold_ratio and liquidation_ratio are 16-byte Rust Decimal blobs;
+      // decodeRustDecimal returns an absolute ratio (e.g. 1.3 for 130%).
+      // computeVaultCrPct returns CR as a percentage (e.g. 130 for 130%).
+      const warningZone: any[] = [];
+      for (const v of allVaults) {
+        const cr = computeVaultCrPct(v, priceMap, decimalsMap);
+        if (cr == null) continue;
+        const collType = v.collateral_type?.toText?.() ?? String(v.collateral_type ?? '');
+        const cfg = configMap.get(collType);
+        if (!cfg) continue;
+        const borrowThresholdRatio = cfg.borrow_threshold_ratio
+          ? decodeRustDecimal(cfg.borrow_threshold_ratio) * 100
+          : null;
+        const liquidationRatio = cfg.liquidation_ratio
+          ? decodeRustDecimal(cfg.liquidation_ratio) * 100
+          : null;
+        if (borrowThresholdRatio == null || liquidationRatio == null) continue;
+        if (cr < borrowThresholdRatio && cr >= liquidationRatio) {
+          warningZone.push({
+            vault_id: Number(v.vault_id),
+            owner: v.owner?.toText?.() ?? String(v.owner ?? ''),
+            collateral_type: v.collateral_type,
+            collateral_ratio: cr,
+            liquidation_ratio: liquidationRatio,
+            borrowed_icusd_amount: Number(v.borrowed_icusd_amount ?? 0),
+            collateral_amount: Number(v.collateral_amount ?? 0),
+            collateral_decimals: decimalsMap.get(collType) ?? 8,
+          });
+        }
+      }
+      // Sort by CR ascending so the most-at-risk vaults appear first.
+      warningZone.sort((a, b) => a.collateral_ratio - b.collateral_ratio);
+      atRiskVaults = warningZone;
 
       const rows: CollateralRow[] = [];
       for (const [principal, symbol] of Object.entries(COLLATERAL_SYMBOLS)) {
