@@ -414,6 +414,7 @@ service : (InitArgs) -> {
       TopCounterpartiesResponse,
     ) query;
   get_top_holders : (TopHoldersQuery) -> (TopHoldersResponse) query;
+  get_sp_depositor_principals : () -> (vec principal) query;
   get_top_sp_depositors : (TopSpDepositorsQuery) -> (
       TopSpDepositorsResponse,
     ) query;

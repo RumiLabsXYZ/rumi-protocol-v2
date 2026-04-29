@@ -185,6 +185,11 @@ fn get_fee_breakdown_window(query: types::FeeBreakdownQuery) -> types::FeeBreakd
 }
 
 #[ic_cdk_macros::query]
+fn get_sp_depositor_principals() -> Vec<Principal> {
+    queries::live::get_sp_depositor_principals()
+}
+
+#[ic_cdk_macros::query]
 fn get_token_flow(query: types::TokenFlowQuery) -> types::TokenFlowResponse {
     queries::flow::get_token_flow(query)
 }
