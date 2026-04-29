@@ -138,6 +138,38 @@
     }
   }
 
+  // Sparse-scope server-side filtering: redemptions, revenue (liquidations +
+  // redemptions), and admin all match a small fraction of the backend log. A
+  // tail-fetch of the most recent 72 events rarely contains any of them, so
+  // those scopes pass an explicit `types` filter that lets the backend pick
+  // matching events from the entire log. The full-log search is paginated by
+  // length=50, which is enough for the lens panel (default limit=12) plus
+  // headroom after merging with other sources.
+  //
+  // The remaining scopes (`all`, `vault_ops`) cover the bulk of event kinds,
+  // so the unfiltered tail is the better fit there.
+  function backendQueryForScope(s: LensScope): { length: bigint; filters: BackendEventFilters | undefined } {
+    switch (s) {
+      case 'redemptions':
+        return { length: 50n, filters: { types: ['Redemption'] } };
+      case 'revenue':
+        // Mirrors `isBackendRevenue` (liquidate_vault, partial_liquidate_vault,
+        // redemption_on_vaults). `Redemption` also yields RedemptionTransfered,
+        // which the client-side filter then drops.
+        return { length: 50n, filters: { types: ['Redemption', 'Liquidation', 'PartialLiquidation'] } };
+      case 'admin':
+        // Mirrors `ADMIN_EVENT_KEYS`. Most setter / config variants collapse
+        // into the backend's catch-all `Admin` filter, but `admin_mint`,
+        // `admin_sweep_to_treasury`, and `reserve_redemption` have their own
+        // dedicated `EventTypeFilter` values (see `Event::type_filter()` in
+        // `rumi_protocol_backend/src/event.rs`) and would otherwise be
+        // excluded by a single `Admin` filter.
+        return { length: 50n, filters: { types: ['Admin', 'AdminMint', 'AdminSweepToTreasury', 'ReserveRedemption'] } };
+      default:
+        return { length: BigInt(limit * 6), filters: undefined };
+    }
+  }
+
   async function loadEvents() {
     loading = true;
     const sampleSize = BigInt(limit * 4);  // overfetch then trim after merging
@@ -145,13 +177,9 @@
     try {
       // Fetch backend events + vault maps. Always include unless scope is purely DEX/SP/admin.
       const needsBackend = scope === 'all' || scope === 'vault_ops' || scope === 'redemptions' || scope === 'revenue' || scope === 'admin';
-      // For the redemptions scope, use a server-side type filter so we find
-      // redemption events across the full log rather than hoping they appear
-      // in the most recent 72 entries. Other scopes keep the unfiltered tail
-      // (vault_ops, revenue, admin, all mix event kinds so filtering is harder).
-      const redemptionFilters: BackendEventFilters = { types: ['Redemption'] };
+      const { length: backendLength, filters: backendFilters } = backendQueryForScope(scope);
       const backendPromise = needsBackend
-        ? fetchEvents(0n, scope === 'redemptions' ? 50n : BigInt(limit * 6), scope === 'redemptions' ? redemptionFilters : undefined).catch(() => ({ total: 0n, events: [] }))
+        ? fetchEvents(0n, backendLength, backendFilters).catch(() => ({ total: 0n, events: [] }))
         : Promise.resolve({ total: 0n, events: [] });
 
       const vaultsPromise = fetchAllVaults().catch(() => []);
