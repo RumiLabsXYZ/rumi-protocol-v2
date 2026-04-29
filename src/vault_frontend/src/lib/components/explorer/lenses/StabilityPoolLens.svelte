@@ -60,13 +60,15 @@
         fetchApys(),
         QueryOperations.getProtocolStatus(),
       ]);
-      if (stR.status === 'fulfilled') poolStatus = stR.value;
+      if (stR.status === 'fulfilled' && stR.value) poolStatus = stR.value;
+      else console.warn('[StabilityPoolLens] poolStatus unavailable:', stR.status === 'rejected' ? stR.reason : 'null response');
       if (seR.status === 'fulfilled') series = seR.value ?? [];
       if (lqR.status === 'fulfilled') liquidations = lqR.value ?? [];
       if (prR.status === 'fulfilled') protocolStatus = prR.value;
+      else console.warn('[StabilityPoolLens] protocolStatus failed:', prR.reason);
       if (apR.status === 'fulfilled' && apR.value) {
         const v = apR.value.sp_apy_pct?.[0];
-        if (typeof v === 'number' && v > 0) spApy = v;
+        if (typeof v === 'number') spApy = v;
       }
     } catch (err) {
       console.error('[StabilityPoolLens] onMount error:', err);
@@ -83,6 +85,12 @@
     const split = protocolStatus.interestSplit ?? [];
     const poolShare = (split.find((e: any) => e.destination === 'stability_pool')?.bps ?? 0) / 10000;
     const perC = protocolStatus.perCollateralInterest;
+    // Diagnostic log: fires once after data loads to trace which guard causes null.
+    console.debug('[SPLens liveSpApy]', {
+      splitLen: split.length, poolShare,
+      perCLen: perC?.length,
+      eligibleLen: poolStatus?.eligible_icusd_per_collateral?.length,
+    });
     if (!perC || perC.length === 0 || poolShare === 0) return null;
 
     const eligibleMap = new Map<string, number>(
