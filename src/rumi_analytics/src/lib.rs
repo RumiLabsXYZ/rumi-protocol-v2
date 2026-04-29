@@ -180,6 +180,11 @@ fn get_trade_activity(query: types::TradeActivityQuery) -> types::TradeActivityR
 }
 
 #[ic_cdk_macros::query]
+fn get_fee_breakdown_window(query: types::FeeBreakdownQuery) -> types::FeeBreakdownResponse {
+    queries::live::get_fee_breakdown_window(query)
+}
+
+#[ic_cdk_macros::query]
 fn get_token_flow(query: types::TokenFlowQuery) -> types::TokenFlowResponse {
     queries::flow::get_token_flow(query)
 }
