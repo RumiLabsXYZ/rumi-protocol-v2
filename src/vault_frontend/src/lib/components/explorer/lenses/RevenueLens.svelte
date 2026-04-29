@@ -3,11 +3,12 @@
   import LensHealthStrip from '../LensHealthStrip.svelte';
   import LensActivityPanel from '../LensActivityPanel.svelte';
   import MiniAreaChart from '../MiniAreaChart.svelte';
+  import TreasuryHoldingsCard from '../TreasuryHoldingsCard.svelte';
   import {
     fetchFeeSeries, fetchApys, fetchFeeBreakdownWindow, type FeeBreakdown,
   } from '$services/explorer/analyticsService';
   import {
-    fetchTreasuryStats, fetchInterestSplit,
+    fetchInterestSplit,
   } from '$services/explorer/explorerService';
   import { ProtocolService } from '$services/protocol';
   import { e8sToNumber, formatCompact, CHART_COLORS } from '$utils/explorerChartHelpers';
@@ -16,19 +17,17 @@
   let apys: any = $state(null);
   let fees24hData = $state<FeeBreakdown | null>(null);
   let fees90dData = $state<FeeBreakdown | null>(null);
-  let treasury: any = $state(null);
   let interestSplit: any[] = $state([]);
   let protocolStatus: any = $state(null);
   let loading = $state(true);
 
   onMount(async () => {
     try {
-      const [feeR, apR, f24R, f90R, trsR, spR, psR] = await Promise.allSettled([
+      const [feeR, apR, f24R, f90R, spR, psR] = await Promise.allSettled([
         fetchFeeSeries(90),
         fetchApys(),
         fetchFeeBreakdownWindow(1),
         fetchFeeBreakdownWindow(90),
-        fetchTreasuryStats(),
         fetchInterestSplit(),
         ProtocolService.getProtocolStatus(),
       ]);
@@ -36,7 +35,6 @@
       if (apR.status === 'fulfilled') apys = apR.value;
       if (f24R.status === 'fulfilled') fees24hData = f24R.value;
       if (f90R.status === 'fulfilled') fees90dData = f90R.value;
-      if (trsR.status === 'fulfilled') treasury = trsR.value;
       if (spR.status === 'fulfilled') interestSplit = spR.value ?? [];
       if (psR.status === 'fulfilled') protocolStatus = psR.value;
     } catch (err) {
@@ -83,16 +81,6 @@
       destination: e.destination ?? String(e.destination ?? ''),
       bps: Number(e.bps ?? 0),
     })).filter((r: any) => r.bps > 0);
-  });
-
-  const treasuryInfo = $derived.by(() => {
-    if (!treasury) return null;
-    return {
-      pendingInterest: Number(treasury.pending_treasury_interest ?? 0n),
-      liquidationShare: Number(treasury.liquidation_protocol_share ?? 0),
-      flushThreshold: e8sToNumber(treasury.interest_flush_threshold_e8s ?? 0n),
-      principal: treasury.treasury_principal?.[0]?.toText?.() ?? treasury.treasury_principal?.[0] ?? null,
-    };
   });
 
   // Treasury share of accrued interest (not the liquidation bonus split — that
@@ -199,40 +187,7 @@
   </div>
 </div>
 
-{#if treasuryInfo}
-  <div class="explorer-card">
-    <h3 class="text-sm font-medium text-gray-300 mb-3">Treasury</h3>
-    <div class="grid grid-cols-2 md:grid-cols-2 gap-4">
-      <div>
-        <div class="text-xs text-gray-500" title="icUSD that has accrued to the treasury but hasn't yet been swept to the treasury canister. Drops to 0 immediately after each periodic flush.">
-          Pending interest
-        </div>
-        <div class="text-base font-semibold tabular-nums text-gray-200 mt-0.5">
-          {formatCompact(treasuryInfo.pendingInterest / 1e8)} icUSD
-        </div>
-        <div class="text-[11px] text-gray-500 mt-0.5">
-          Resets to 0 after each automatic flush.
-        </div>
-      </div>
-      <div>
-        <div class="text-xs text-gray-500" title="When pending interest crosses this amount the protocol auto-distributes it to recipients per the interest split. Threshold of 0 means flush every tick.">
-          Flush threshold
-        </div>
-        <div class="text-base font-semibold tabular-nums text-gray-200 mt-0.5">
-          {treasuryInfo.flushThreshold > 0 ? `${formatCompact(treasuryInfo.flushThreshold)} icUSD` : 'Flush every tick'}
-        </div>
-        <div class="text-[11px] text-gray-500 mt-0.5">
-          Auto-flushes pending interest when crossed.
-        </div>
-      </div>
-    </div>
-    {#if treasuryInfo.principal}
-      <div class="mt-3 text-xs text-gray-500">
-        Treasury canister: <span class="font-mono text-gray-400">{treasuryInfo.principal}</span>
-      </div>
-    {/if}
-  </div>
-{/if}
+<TreasuryHoldingsCard />
 
 <!-- Revenue-bearing = redemptions + liquidations + swaps (everything the protocol charges a fee on). -->
 <LensActivityPanel

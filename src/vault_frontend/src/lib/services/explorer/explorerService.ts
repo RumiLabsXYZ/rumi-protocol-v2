@@ -1759,3 +1759,57 @@ export async function fetchThreeUsdHolders(): Promise<{ holders: TokenHolder[]; 
 		return { holders: [], totalSupply: 0n, txCount: 0n };
 	}
 }
+
+// ── Treasury holdings ────────────────────────────────────────────────────────
+
+export type TreasuryHolding = {
+	symbol: string;
+	ledger: string;
+	balanceE8s: bigint;
+	decimals: number;
+	usd: number;
+};
+
+/** Ledgers we track for the treasury holdings card. */
+const TREASURY_TRACKED_LEDGERS: Array<{
+	symbol: string;
+	principal: string;
+	decimals: number;
+	/** usdEachE8s === -1 means use live ICP price */
+	usdEachE8s: number;
+}> = [
+	{ symbol: 'icUSD', principal: CANISTER_IDS.ICUSD_LEDGER, decimals: 8, usdEachE8s: 1 },
+	{ symbol: 'ckUSDT', principal: CANISTER_IDS.CKUSDT_LEDGER, decimals: 6, usdEachE8s: 1 },
+	{ symbol: 'ckUSDC', principal: CANISTER_IDS.CKUSDC_LEDGER, decimals: 6, usdEachE8s: 1 },
+	{ symbol: 'ICP', principal: CANISTER_IDS.ICP_LEDGER, decimals: 8, usdEachE8s: -1 },
+];
+
+const TREASURY_PRINCIPAL = Principal.fromText(CANISTER_IDS.TREASURY);
+
+/**
+ * Query `icrc1_balance_of` on each tracked ledger using the rumi_treasury
+ * principal as the account owner. Returns only tokens with a non-zero balance.
+ * icpPriceUsd should be the live USD price of ICP (e.g. from protocolStatus.lastIcpRate).
+ */
+export async function fetchTreasuryHoldings(icpPriceUsd: number): Promise<TreasuryHolding[]> {
+	const key = `treasury:holdings:${Math.floor(icpPriceUsd)}`;
+	const cached = getCached<TreasuryHolding[]>(key, TTL.TREASURY);
+	if (cached) return cached;
+
+	const balances = await Promise.all(
+		TREASURY_TRACKED_LEDGERS.map(async (l) => {
+			try {
+				const balanceE8s = await fetchIcrc1BalanceOf(l.principal, TREASURY_PRINCIPAL);
+				const amount = Number(balanceE8s) / Math.pow(10, l.decimals);
+				const usd = l.usdEachE8s === -1 ? amount * icpPriceUsd : amount * l.usdEachE8s;
+				return { symbol: l.symbol, ledger: l.principal, balanceE8s, decimals: l.decimals, usd };
+			} catch (err) {
+				console.error(`[explorerService] fetchTreasuryHoldings ${l.symbol} failed:`, err);
+				return { symbol: l.symbol, ledger: l.principal, balanceE8s: 0n, decimals: l.decimals, usd: 0 };
+			}
+		}),
+	);
+
+	const result = balances.filter((b) => b.balanceE8s > 0n);
+	return setCache(key, result);
+}
