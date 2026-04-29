@@ -56,6 +56,14 @@
     return { minT, maxT, yMin, yMax };
   });
 
+  // When the entire series has exactly one non-zero point the bare dot looks
+  // broken. Detect that case so the template can render a more obvious
+  // vertical-marker fallback instead.
+  const nonZeroCount = $derived(points.filter((p) => p.v > 0).length);
+  // Guard points.length > 1 to avoid NaN when there is only one element
+  // (i / (length - 1) would be 0/0).
+  const isSingleEvent = $derived(nonZeroCount === 1 && points.length > 1);
+
   // Highlight dots for non-zero points when the series is sparse — without
   // them, an hourly chart with mostly-zero buckets looks empty even when
   // there's real activity in a couple of buckets.
@@ -118,11 +126,19 @@
       </div>
     {:else}
       <svg viewBox="0 0 {width} {height}" class="w-full h-full" preserveAspectRatio="none">
-        <path d={fillD} fill={fillColor} stroke="none" />
-        <path d={pathD} fill="none" stroke={color} stroke-width="1.5" stroke-linejoin="round" />
-        {#each dotPoints as p (p.t)}
-          <circle cx={x(p.t).toFixed(2)} cy={y(p.v).toFixed(2)} r="3" fill={color} />
-        {/each}
+        {#if isSingleEvent}
+          {@const si = points.findIndex((p) => p.v > 0)}
+          {@const sx = x(points[si].t)}
+          {@const sv = points[si].v}
+          <line x1={sx} y1={0} x2={sx} y2={height} stroke="rgb(45 212 191 / 0.4)" stroke-dasharray="2 2" />
+          <circle cx={sx} cy={y(sv)} r="3.5" fill="rgb(45 212 191)" />
+        {:else}
+          <path d={fillD} fill={fillColor} stroke="none" />
+          <path d={pathD} fill="none" stroke={color} stroke-width="1.5" stroke-linejoin="round" />
+          {#each dotPoints as p (p.t)}
+            <circle cx={x(p.t).toFixed(2)} cy={y(p.v).toFixed(2)} r="3" fill={color} />
+          {/each}
+        {/if}
       </svg>
     {/if}
   </div>
