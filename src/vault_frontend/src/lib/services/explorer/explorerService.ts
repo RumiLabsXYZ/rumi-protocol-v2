@@ -16,6 +16,9 @@ import type { AmmStatsWindow } from '$services/ammService';
 import { CANISTER_IDS, CONFIG } from '$lib/config';
 import type { _SERVICE as IcusdLedgerService } from '$declarations/icusd_ledger/icusd_ledger.did';
 import type { _SERVICE as IcusdIndexService } from '$declarations/icusd_index/icusd_index.did';
+import type { UserStabilityPosition } from '$declarations/rumi_stability_pool/rumi_stability_pool.did';
+import { idlFactory as stabilityPoolIDL } from '$declarations/rumi_stability_pool/rumi_stability_pool.did.js';
+import { fetchSpDepositorPrincipals } from './analyticsService';
 
 // ── TTL constants (ms) ───────────────────────────────────────────────────────
 
@@ -779,6 +782,66 @@ export async function fetchStabilityPoolEventCount(): Promise<bigint> {
 	} catch (err) {
 		console.error('[explorerService] fetchStabilityPoolEventCount failed:', err);
 		return 0n;
+	}
+}
+
+// ── Current SP depositors (SP canister as source of truth) ─────────────────
+
+export type CurrentSpDepositor = {
+	principal: Principal;
+	position: UserStabilityPosition;
+};
+
+let _spActor: any = null;
+
+function getStabilityPoolActor() {
+	if (_spActor) return _spActor;
+	const agent = new HttpAgent({ host: CONFIG.host ?? 'https://icp-api.io' });
+	if (CONFIG.isLocal) agent.fetchRootKey().catch(() => {});
+	_spActor = Actor.createActor(stabilityPoolIDL as any, {
+		agent,
+		canisterId: CANISTER_IDS.STABILITY_POOL,
+	});
+	return _spActor;
+}
+
+/**
+ * Returns every principal currently holding a non-zero SP balance, sorted by
+ * total USD value descending. The analytics canister supplies the set of
+ * principals to fan out over; the SP canister is the source of truth for
+ * current positions.
+ */
+export async function fetchCurrentSpDepositors(): Promise<CurrentSpDepositor[]> {
+	const key = 'pool:stability:current_depositors';
+	const cached = getCached<CurrentSpDepositor[]>(key, TTL.POOL);
+	if (cached) return cached;
+
+	try {
+		const principals = await fetchSpDepositorPrincipals();
+		const sp = getStabilityPoolActor();
+		const positions = await Promise.all(
+			principals.map(async (p) => {
+				try {
+					return await sp.get_user_position([p]);
+				} catch (err) {
+					console.warn('[fetchCurrentSpDepositors] get_user_position failed for', p.toText(), err);
+					return [];
+				}
+			}),
+		);
+		const out: CurrentSpDepositor[] = [];
+		for (let i = 0; i < principals.length; i++) {
+			const maybe = positions[i];
+			const pos = Array.isArray(maybe) ? maybe[0] : maybe;
+			if (pos && Number(pos.total_usd_value_e8s) > 0) {
+				out.push({ principal: principals[i], position: pos as UserStabilityPosition });
+			}
+		}
+		out.sort((a, b) => Number(b.position.total_usd_value_e8s) - Number(a.position.total_usd_value_e8s));
+		return setCache(key, out);
+	} catch (err) {
+		console.error('[explorerService] fetchCurrentSpDepositors failed:', err);
+		return [];
 	}
 }
 

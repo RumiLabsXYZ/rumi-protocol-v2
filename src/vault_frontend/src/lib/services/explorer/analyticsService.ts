@@ -624,6 +624,28 @@ export async function fetchPoolRoutes(
 	}
 }
 
+// ── SP depositor principals ────────────────────────────────────────────────
+
+/**
+ * Returns the distinct set of principals that have ever deposited into the
+ * Stability Pool (sourced from evt_stability records). Use this as the fan-out
+ * set for per-principal SP position queries; the SP canister is the source of
+ * truth for current balances.
+ */
+export async function fetchSpDepositorPrincipals(): Promise<Principal[]> {
+	const key = 'analytics:sp_depositor_principals';
+	const cached = getCached<Principal[]>(key, TTL.AGGREGATE);
+	if (cached) return cached;
+
+	try {
+		const result = await getActor().get_sp_depositor_principals();
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[analyticsService] fetchSpDepositorPrincipals failed:', err);
+		return [];
+	}
+}
+
 // ── Address value series (portfolio value over time) ───────────────────────
 
 const EMPTY_ADDRESS_VALUE_SERIES = (principal: Principal): AddressValueSeriesResponse => ({
