@@ -4,7 +4,7 @@
   import LensActivityPanel from '../LensActivityPanel.svelte';
   import MiniAreaChart from '../MiniAreaChart.svelte';
   import {
-    fetchFeeSeries, fetchApys, fetchTradeActivity,
+    fetchFeeSeries, fetchApys, fetchFeeBreakdownWindow, type FeeBreakdown,
   } from '$services/explorer/analyticsService';
   import {
     fetchTreasuryStats, fetchInterestSplit,
@@ -14,7 +14,8 @@
 
   let feeRows: any[] = $state([]);
   let apys: any = $state(null);
-  let tradeActivity: any = $state(null);
+  let fees24hData = $state<FeeBreakdown | null>(null);
+  let fees90dData = $state<FeeBreakdown | null>(null);
   let treasury: any = $state(null);
   let interestSplit: any[] = $state([]);
   let protocolStatus: any = $state(null);
@@ -22,17 +23,19 @@
 
   onMount(async () => {
     try {
-      const [feeR, apR, trR, trsR, spR, psR] = await Promise.allSettled([
+      const [feeR, apR, f24R, f90R, trsR, spR, psR] = await Promise.allSettled([
         fetchFeeSeries(90),
         fetchApys(),
-        fetchTradeActivity(),
+        fetchFeeBreakdownWindow(1),
+        fetchFeeBreakdownWindow(90),
         fetchTreasuryStats(),
         fetchInterestSplit(),
         ProtocolService.getProtocolStatus(),
       ]);
       if (feeR.status === 'fulfilled') feeRows = feeR.value ?? [];
       if (apR.status === 'fulfilled') apys = apR.value;
-      if (trR.status === 'fulfilled') tradeActivity = trR.value;
+      if (f24R.status === 'fulfilled') fees24hData = f24R.value;
+      if (f90R.status === 'fulfilled') fees90dData = f90R.value;
       if (trsR.status === 'fulfilled') treasury = trsR.value;
       if (spR.status === 'fulfilled') interestSplit = spR.value ?? [];
       if (psR.status === 'fulfilled') protocolStatus = psR.value;
@@ -43,32 +46,14 @@
     }
   });
 
-  const totalBorrow = $derived(
-    feeRows.reduce((s: number, d: any) => s + e8sToNumber(d.borrowing_fees_e8s?.[0] ?? d.borrowing_fees_e8s ?? 0n), 0)
-  );
-  const totalRedemption = $derived(
-    feeRows.reduce((s: number, d: any) => s + e8sToNumber(d.redemption_fees_e8s?.[0] ?? d.redemption_fees_e8s ?? 0n), 0)
-  );
-  const totalSwap = $derived(
-    feeRows.reduce((s: number, d: any) => s + e8sToNumber(d.swap_fees_e8s ?? 0n), 0)
-  );
+  const totalBorrow = $derived(fees90dData?.borrowIcusd ?? 0);
+  const totalRedemption = $derived(fees90dData?.redemptionIcusd ?? 0);
+  const totalSwap = $derived(fees90dData?.swapIcusd ?? 0);
   const totalFees = $derived(totalBorrow + totalRedemption + totalSwap);
 
-  const estimatedDailyBorrow = $derived.by(() => {
-    if (!protocolStatus?.perCollateralInterest) return 0;
-    const treasuryBps = protocolStatus.interestSplit?.find((e: any) => e.destination === 'treasury')?.bps ?? 0;
-    const treasuryShare = treasuryBps / 10000;
-    let dailyInterest = 0;
-    for (const info of protocolStatus.perCollateralInterest) {
-      dailyInterest += info.weightedInterestRate * info.totalDebtE8s;
-    }
-    return dailyInterest * treasuryShare;
-  });
-
-  const fees24h = $derived.by(() => {
-    const swapFees24h = tradeActivity ? e8sToNumber(tradeActivity.total_fees_e8s) : 0;
-    return swapFees24h + estimatedDailyBorrow;
-  });
+  const fees24h = $derived(
+    (fees24hData?.borrowIcusd ?? 0) + (fees24hData?.redemptionIcusd ?? 0) + (fees24hData?.swapIcusd ?? 0)
+  );
 
   // Backend returns None (null in Candid) when there is genuinely no data.
   // It returns Some(0.0) when the window has data but zero fees. Display

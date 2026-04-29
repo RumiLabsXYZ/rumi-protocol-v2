@@ -35,6 +35,7 @@ import type {
 	TokenFlowResponse,
 	PoolRoutesResponse,
 	AddressValueSeriesResponse,
+	FeeBreakdownResponse,
 } from '$declarations/rumi_analytics/rumi_analytics.did';
 
 // ── TTL constants (ms) ───────────────────────────────────────────────────────
@@ -686,4 +687,44 @@ export async function fetchAddressValueSeries(
 		console.error('[analyticsService] fetchAddressValueSeries failed:', err);
 		return EMPTY_ADDRESS_VALUE_SERIES(principal);
 	}
+}
+
+// ── Fee breakdown window ─────────────────────────────────────────────────────
+
+const NS_PER_DAY = 86_400n * 1_000_000_000n;
+
+export type FeeBreakdown = {
+	borrowIcusd: number;
+	redemptionIcusd: number;
+	swapIcusd: number;
+	borrowCount: number;
+	redemptionCount: number;
+	swapCount: number;
+	startNs: bigint;
+	endNs: bigint;
+};
+
+/**
+ * Fetch fee totals for a given trailing window via get_fee_breakdown_window.
+ * windowDays=null means "all time" (no window constraint).
+ * Both 24h and 90d cards use this so they share methodology.
+ */
+export async function fetchFeeBreakdownWindow(windowDays: number | null): Promise<FeeBreakdown> {
+	const key = `analytics:fee_breakdown:${windowDays ?? 'all'}`;
+	const cached = getCached<FeeBreakdown>(key, TTL.AGGREGATE);
+	if (cached) return cached;
+
+	const window_ns: [] | [bigint] = windowDays == null ? [] : [BigInt(windowDays) * NS_PER_DAY];
+	const r: FeeBreakdownResponse = await getActor().get_fee_breakdown_window({ window_ns });
+	const result: FeeBreakdown = {
+		borrowIcusd: Number(r.borrow_fees_icusd_e8s) / 1e8,
+		redemptionIcusd: Number(r.redemption_fees_icusd_e8s) / 1e8,
+		swapIcusd: Number(r.swap_fees_icusd_e8s) / 1e8,
+		borrowCount: Number(r.borrow_count),
+		redemptionCount: Number(r.redemption_count),
+		swapCount: Number(r.swap_count),
+		startNs: r.start_ns,
+		endNs: r.end_ns,
+	};
+	return setCache(key, result);
 }
