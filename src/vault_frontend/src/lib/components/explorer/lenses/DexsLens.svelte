@@ -166,7 +166,7 @@
         label: 'Arb score',
         value: `${arb}/100`,
         tone: arb > 50 ? 'caution' as const : 'good' as const,
-        sub: '0–100',
+        sub: 'pool imbalance % of saturation; higher = more profit available to a rebalancing trader',
       });
     }
     metrics.push({ label: '3Pool LP APY', value: lpApy != null ? `${lpApy.toFixed(2)}%` : '--', sub: '7d' });
