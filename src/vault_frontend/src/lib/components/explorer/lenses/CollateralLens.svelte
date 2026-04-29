@@ -230,15 +230,17 @@
     {:else if allVaults.length === 0}
       <p class="text-sm text-gray-500 py-4">No active vaults.</p>
     {:else}
-      <div class="flex items-end gap-2 h-40 border-b border-white/5 mt-4">
+      <div class="flex items-end gap-2 h-40 min-h-[10rem] border-b border-white/5 mt-4">
         {#each crBuckets as b}
           {@const pct = (b.count / maxBucket) * 100}
+          {@const barPct = b.count > 0 ? Math.max(pct, 2) : 0}
           {@const tone = b.lo < 150 ? '#f472b6' : b.lo < 200 ? '#a78bfa' : '#2DD4BF'}
-          <div class="flex-1 flex flex-col items-center justify-end">
+          <div class="flex-1 flex flex-col items-center justify-end h-full">
             <span class="text-[11px] font-medium text-gray-400 mb-1">{b.count}</span>
             <div
               class="w-full rounded-t"
-              style="height: {pct}%; min-height: {b.count > 0 ? '2px' : '0'}; background: {tone}; opacity: 0.75;"
+              style="height: {barPct}%; background: {tone}; opacity: 0.75;"
+              title="{b.label}: {b.count} vault{b.count === 1 ? '' : 's'}"
             ></div>
           </div>
         {/each}
