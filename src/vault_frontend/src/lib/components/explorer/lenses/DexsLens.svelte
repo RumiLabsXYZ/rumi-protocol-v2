@@ -319,6 +319,7 @@
       fillColor="rgba(52, 211, 153, 0.15)"
       valueFormat={(v) => v.toFixed(6)}
       loading={loading}
+      yAxisMode="data-fit"
     />
   </div>
 </div>

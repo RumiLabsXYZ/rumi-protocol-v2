@@ -10,6 +10,12 @@
     label?: string;
     valueFormat?: (v: number) => string;
     loading?: boolean;
+    // 'zero-anchored': y-axis always includes 0 (good for volumes, counts).
+    // 'data-fit': y-axis tightly wraps the data range (good for slowly-moving
+    // quantities like virtual price, where all values cluster near 1.06).
+    // Assumes positive values; data-fit padding multipliers behave unexpectedly
+    // for negative inputs.
+    yAxisMode?: 'zero-anchored' | 'data-fit';
   }
   let {
     points,
@@ -20,6 +26,7 @@
     label,
     valueFormat,
     loading = false,
+    yAxisMode = 'zero-anchored',
   }: Props = $props();
 
   const padX = 8;
@@ -30,13 +37,23 @@
     const minT = points[0].t;
     const maxT = points[points.length - 1].t;
     const { min, max } = computeYScale(points.map(p => p.v));
-    // Anchor the y-axis at 0 when all values are non-negative — otherwise a
-    // small spike on top of zeros (typical for low-volume swap charts) renders
-    // as a flat line near the baseline because computeYScale tightens around
-    // the data. Anchoring keeps the spike visually distinct from baseline.
-    const allNonNeg = points.every((p) => p.v >= 0);
-    const yMin = allNonNeg ? 0 : min;
-    return { minT, maxT, yMin, yMax: max };
+    let yMin: number;
+    let yMax: number;
+    if (yAxisMode === 'data-fit') {
+      // Tightly wrap the data range with a small margin so the slope is visible
+      // even when values cluster (e.g. virtual price 1.063–1.064).
+      yMin = min * 0.999;
+      yMax = max * 1.001;
+    } else {
+      // Anchor the y-axis at 0 when all values are non-negative — otherwise a
+      // small spike on top of zeros (typical for low-volume swap charts) renders
+      // as a flat line near the baseline because computeYScale tightens around
+      // the data. Anchoring keeps the spike visually distinct from baseline.
+      const allNonNeg = points.every((p) => p.v >= 0);
+      yMin = allNonNeg ? 0 : min;
+      yMax = max;
+    }
+    return { minT, maxT, yMin, yMax };
   });
 
   // Highlight dots for non-zero points when the series is sparse — without
