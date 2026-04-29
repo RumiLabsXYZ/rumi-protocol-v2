@@ -6,7 +6,7 @@ import {
 	formatStabilityPoolEvent, formatMultiHopSwapEvent,
 } from './explorerFormatters';
 import type { FormattedEvent } from './explorerFormatters';
-import { ammPoolPair } from './ammNaming';
+import { ammPoolShortLabel } from './ammNaming';
 
 export type NonBackendSource =
 	| '3pool_swap'
@@ -187,9 +187,13 @@ export function displayEvent(de: DisplayEvent, maps?: DisplayEventMaps): Display
 	if (isBackend) {
 		sourceLabel = null;
 	} else if (de.source === 'amm_swap' || de.source === 'amm_liquidity' || de.source === 'amm_admin') {
+		// Leading-cell label is the source-prefix ("AMM1"), per the round-2 brief.
+		// `ammPoolPair` falls back to the raw underscore-joined principal pair
+		// when the registry hasn't loaded the pool, which spilled into the cell
+		// as `🌊 fohh4-...cai_ryjl3-...cai`. `ammPoolShortLabel` is the
+		// registry-indexed name ("AMM1") with a clean "AMM" fallback.
 		const poolId = de.event?.pool_id ?? de.event?.ammEvent?.pool_id;
-		const pair = ammPoolPair(poolId ? String(poolId) : null);
-		sourceLabel = pair ? `🌊 ${pair}` : 'AMM';
+		sourceLabel = ammPoolShortLabel(poolId ? String(poolId) : null);
 	} else {
 		sourceLabel = DEX_SOURCE_LABEL[de.source as NonBackendSource] ?? null;
 	}

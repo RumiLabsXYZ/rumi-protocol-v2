@@ -8,10 +8,11 @@
     fetchFeeSeries, fetchApys, fetchFeeBreakdownWindow, type FeeBreakdown,
   } from '$services/explorer/analyticsService';
   import {
-    fetchInterestSplit,
+    fetchInterestSplit, fetchStabilityPoolStatus, fetchThreePoolStatus,
   } from '$services/explorer/explorerService';
   import { ProtocolService } from '$services/protocol';
   import { e8sToNumber, formatCompact, CHART_COLORS } from '$utils/explorerChartHelpers';
+  import { liveSpApyPct, liveLpApyPct } from '$utils/liveApy';
 
   let feeRows: any[] = $state([]);
   let apys: any = $state(null);
@@ -19,17 +20,21 @@
   let fees90dData = $state<FeeBreakdown | null>(null);
   let interestSplit: any[] = $state([]);
   let protocolStatus: any = $state(null);
+  let poolStatus: any = $state(null);
+  let threePoolStatus: any = $state(null);
   let loading = $state(true);
 
   onMount(async () => {
     try {
-      const [feeR, apR, f24R, f90R, spR, psR] = await Promise.allSettled([
+      const [feeR, apR, f24R, f90R, spR, psR, poolR, tpR] = await Promise.allSettled([
         fetchFeeSeries(90),
         fetchApys(),
         fetchFeeBreakdownWindow(1),
         fetchFeeBreakdownWindow(90),
         fetchInterestSplit(),
         ProtocolService.getProtocolStatus(),
+        fetchStabilityPoolStatus(),
+        fetchThreePoolStatus(),
       ]);
       if (feeR.status === 'fulfilled') feeRows = feeR.value ?? [];
       if (apR.status === 'fulfilled') apys = apR.value;
@@ -37,6 +42,8 @@
       if (f90R.status === 'fulfilled') fees90dData = f90R.value;
       if (spR.status === 'fulfilled') interestSplit = spR.value ?? [];
       if (psR.status === 'fulfilled') protocolStatus = psR.value;
+      if (poolR.status === 'fulfilled') poolStatus = poolR.value;
+      if (tpR.status === 'fulfilled') threePoolStatus = tpR.value;
     } catch (err) {
       console.error('[RevenueLens] onMount error:', err);
     } finally {
@@ -53,17 +60,23 @@
     (fees24hData?.borrowIcusd ?? 0) + (fees24hData?.redemptionIcusd ?? 0) + (fees24hData?.swapIcusd ?? 0)
   );
 
-  // Backend returns None (null in Candid) when there is genuinely no data.
-  // It returns Some(0.0) when the window has data but zero fees. Display
-  // 0.00% for a confirmed zero rather than hiding it as "--".
-  const lpApy = $derived.by(() => {
+  // Live formulas first; analytics 7d rolling as the fallback (the rolling
+  // number can sit at zero when the window happens to have no realized fee
+  // activity, even though LPs/depositors are still earning from interest_split).
+  const analyticsLpApy = $derived.by(() => {
     const v = apys?.lp_apy_pct?.[0];
     return typeof v === 'number' ? v : null;
   });
-  const spApy = $derived.by(() => {
+  const analyticsSpApy = $derived.by(() => {
     const v = apys?.sp_apy_pct?.[0];
     return typeof v === 'number' ? v : null;
   });
+  const liveLp = $derived(liveLpApyPct(protocolStatus, threePoolStatus?.balances));
+  const liveSp = $derived(liveSpApyPct(protocolStatus, poolStatus));
+  const lpApy = $derived(liveLp ?? analyticsLpApy);
+  const spApy = $derived(liveSp ?? analyticsSpApy);
+  const lpApySub = $derived(liveLp != null ? 'live' : '7d');
+  const spApySub = $derived(liveSp != null ? 'live' : '7d');
 
   const feePoints = $derived(
     feeRows.map((r: any) => {
@@ -95,8 +108,8 @@
   const healthMetrics = $derived.by(() => [
     { label: 'Fees (90d)', value: `$${formatCompact(totalFees)}` },
     { label: '24h fees', value: `$${formatCompact(fees24h)}` },
-    { label: '3Pool LP APY', value: lpApy != null ? `${Number(lpApy).toFixed(2)}%` : '--', sub: '7d' },
-    { label: 'SP APY', value: spApy != null ? `${Number(spApy).toFixed(2)}%` : '--', sub: '7d' },
+    { label: '3Pool LP APY', value: lpApy != null ? `${Number(lpApy).toFixed(2)}%` : '--', sub: lpApySub },
+    { label: 'SP APY', value: spApy != null ? `${Number(spApy).toFixed(2)}%` : '--', sub: spApySub },
     {
       label: 'Treasury interest share',
       value: `${(treasuryInterestShare * 100).toFixed(0)}%`,

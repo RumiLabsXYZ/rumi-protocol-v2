@@ -14,6 +14,7 @@
   } from '$services/explorer/explorerService';
   import { QueryOperations } from '$services/protocol/queryOperations';
   import { e8sToNumber, formatCompact, CHART_COLORS, getCollateralSymbol } from '$utils/explorerChartHelpers';
+  import { liveSpApyPct } from '$utils/liveApy';
 
   let poolStatus: any = $state(null);
   let protocolStatus: any = $state(null);
@@ -48,33 +49,10 @@
     }
   });
 
-  // Live SP APY: same formula the Stability Pool tab uses, computed from
-  // current protocol/pool status. Fixes the discrepancy between the analytics
-  // 7-day rolling number (slow to react) and the live rate users see in /liquidity.
-  const liveSpApy = $derived.by(() => {
-    if (!protocolStatus || !poolStatus) return null;
-    const split = protocolStatus.interestSplit ?? [];
-    const poolShare = (split.find((e: any) => e.destination === 'stability_pool')?.bps ?? 0) / 10000;
-    const perC = protocolStatus.perCollateralInterest;
-    if (!perC || perC.length === 0 || poolShare === 0) return null;
-
-    const eligibleMap = new Map<string, number>(
-      (poolStatus.eligible_icusd_per_collateral ?? []).map(([p, v]: [any, bigint]) => [
-        typeof p?.toText === 'function' ? p.toText() : String(p),
-        Number(v) / 1e8,
-      ]),
-    );
-
-    let totalApr = 0;
-    for (const info of perC) {
-      const eligible = eligibleMap.get(info.collateralType) ?? 0;
-      if (eligible === 0 || info.totalDebtE8s === 0 || info.weightedInterestRate === 0) continue;
-      totalApr += (info.weightedInterestRate * poolShare * info.totalDebtE8s) / eligible;
-    }
-    if (totalApr === 0) return null;
-    const apy = Math.pow(1 + totalApr / 365, 365) - 1;
-    return apy * 100;
-  });
+  // Live SP APY: shared formula in $utils/liveApy. The analytics 7d rolling
+  // number lags reality and can sit at zero when the window has no realized
+  // fee activity, so prefer the live value with analytics as fallback.
+  const liveSpApy = $derived(liveSpApyPct(protocolStatus, poolStatus));
 
   // Prefer the live computation; fall back to the 7d rolling analytics number.
   const displayedSpApy = $derived(liveSpApy ?? spApy);

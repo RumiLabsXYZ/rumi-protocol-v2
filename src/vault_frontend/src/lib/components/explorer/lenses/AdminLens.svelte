@@ -5,12 +5,11 @@
   import AdminBreakdownCard from '../AdminBreakdownCard.svelte';
   import CanisterInventoryCard from '../CanisterInventoryCard.svelte';
   import { fetchCollectorHealth, fetchAdminEventBreakdown } from '$services/explorer/analyticsService';
-  import { fetchProtocolStatus, fetchEvents } from '$services/explorer/explorerService';
-  import { extractEventTimestamp } from '$utils/displayEvent';
+  import { fetchProtocolStatus } from '$services/explorer/explorerService';
 
   let collectorHealth: any = $state(null);
   let status: any = $state(null);
-  let lastAdminEvent: any = $state(null);
+  let lastAdminTsNs: number = $state(0);
   let adminCount24h = $state(0);
   let loading = $state(true);
 
@@ -28,21 +27,31 @@
       loading = false;
     }
 
-    // Latest admin event (page=0 returns most recent first)
-    try {
-      const result = await fetchEvents(0n, 1n, { types: ['Admin'] });
-      lastAdminEvent = result.events?.[0]?.[1] ?? null;
-    } catch (err) {
-      console.warn('[AdminLens] latest admin fetch failed:', err);
-    }
-
-    // 24h admin count: ask analytics for a 24h windowed breakdown and sum labels
+    // The backend's admin/setter Event variants do NOT carry a timestamp field
+    // (most are empty structs like `SetBorrowingFee {}`), so deriving the
+    // "Last admin action" relative time from a `fetchEvents` lookup yields no
+    // usable timestamp. The analytics shadow log (evt_admin) stamps each entry
+    // with the tail-time as an upper-bound timestamp, and the analytics
+    // breakdown response exposes that as `last_at_ns` per label. Use a 24h
+    // breakdown for the count, then a wider (default 30d) window to find the
+    // most recent admin timestamp across all labels.
     try {
       const windowNs = BigInt(86_400) * 1_000_000_000n;
       const breakdown = await fetchAdminEventBreakdown(windowNs);
       adminCount24h = breakdown.labels.reduce((s, l) => s + Number(l.count), 0);
     } catch (err) {
       console.warn('[AdminLens] 24h admin count fetch failed:', err);
+    }
+    try {
+      const breakdown30d = await fetchAdminEventBreakdown();
+      let maxTs = 0;
+      for (const l of breakdown30d.labels) {
+        const t = l.last_at_ns?.[0];
+        if (t != null && Number(t) > maxTs) maxTs = Number(t);
+      }
+      lastAdminTsNs = maxTs;
+    } catch (err) {
+      console.warn('[AdminLens] last admin timestamp fetch failed:', err);
     }
   });
 
@@ -52,10 +61,8 @@
   });
 
   const lastAdminRel = $derived.by(() => {
-    if (!lastAdminEvent) return '--';
-    const tsNs = extractEventTimestamp(lastAdminEvent);
-    if (!tsNs) return '--';
-    const ms = tsNs / 1_000_000;
+    if (!lastAdminTsNs) return '--';
+    const ms = lastAdminTsNs / 1_000_000;
     const ago = Date.now() - ms;
     if (ago < 60_000) return 'just now';
     if (ago < 3_600_000) return `${Math.floor(ago / 60_000)}m ago`;
@@ -72,7 +79,7 @@
       metrics.push({
         label: 'Collector errors',
         value: errs.toLocaleString(),
-        sub: 'failed inter-canister calls from analytics tailers (unexpected response shape, decode failure). Per-source breakdown below.',
+        sub: 'failed tailer calls (see breakdown below)',
         tone: errs > 0 ? 'caution' as const : 'good' as const,
       });
     }
