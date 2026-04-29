@@ -3,7 +3,6 @@
   import LensHealthStrip from '../LensHealthStrip.svelte';
   import LensActivityPanel from '../LensActivityPanel.svelte';
   import MiniAreaChart from '../MiniAreaChart.svelte';
-  import PoolHealthStrip from '../PoolHealthStrip.svelte';
   import {
     fetchSwapSeries, fetchThreePoolSeries, fetchPegStatus, fetchApys,
   } from '$services/explorer/analyticsService';
@@ -361,7 +360,5 @@
     </div>
   </div>
 {/if}
-
-<PoolHealthStrip {pegStatus} {lpApy} {spApy} loading={loading} />
 
 <LensActivityPanel scope="dexs" title="DEX activity" viewAllHref="/explorer/activity?type=dex" />
