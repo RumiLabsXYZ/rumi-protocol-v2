@@ -60,9 +60,11 @@
   // broken. Detect that case so the template can render a more obvious
   // vertical-marker fallback instead.
   const nonZeroCount = $derived(points.filter((p) => p.v > 0).length);
-  // Guard points.length > 1 to avoid NaN when there is only one element
-  // (i / (length - 1) would be 0/0).
-  const isSingleEvent = $derived(nonZeroCount === 1 && points.length > 1);
+  // Fires whenever the series has exactly one non-zero bucket — covers both
+  // a sparse 168-bucket hourly series (mostly zeros + 1 spike) and a series
+  // that only has a single row at all. `x()` already returns padX when
+  // maxT === minT, so a 1-point series is safe to render this way.
+  const isSingleEvent = $derived(nonZeroCount === 1 && points.length >= 1);
 
   // Highlight dots for non-zero points when the series is sparse — without
   // them, an hourly chart with mostly-zero buckets looks empty even when
