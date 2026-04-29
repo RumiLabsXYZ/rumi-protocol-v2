@@ -102,6 +102,15 @@ fn default_liquidation_ordering_tolerance() -> Ratio {
     DEFAULT_LIQUIDATION_ORDERING_TOLERANCE
 }
 
+/// Wave-8e LIQ-005: default fraction of every collected fee routed to deficit
+/// repayment before the remainder flows to its existing destination. 0.5 = 50%.
+/// Pre-Wave-8e CBOR snapshots get this value via `serde(default)`.
+pub const DEFAULT_DEFICIT_REPAYMENT_FRACTION: Ratio = Ratio::new(dec!(0.5));
+
+fn default_deficit_repayment_fraction() -> Ratio {
+    DEFAULT_DEFICIT_REPAYMENT_FRACTION
+}
+
 /// Default Layer 1 multipliers at each CR marker
 pub const DEFAULT_RATE_MULTIPLIER_HEALTHY: Ratio = Ratio::new(dec!(1.0));
 pub const DEFAULT_RATE_MULTIPLIER_WARNING: Ratio = Ratio::new(dec!(1.75));
@@ -950,6 +959,48 @@ pub struct State {
     /// concern.
     #[serde(default)]
     pub consumed_writedown_proofs: BTreeSet<(crate::icrc3_proof::SpProofLedger, u64)>,
+
+    // ─── Wave-8e LIQ-005: bad-debt deficit account ───
+    //
+    // Underwater liquidations (where seized collateral USD value < debt
+    // cleared) accrue the shortfall here as a protocol-level liability.
+    // Future fee revenue (borrowing fee, redemption fee) burns icUSD to
+    // amortize the deficit. No socialization to stability-pool depositors
+    // or pro-rata redistribution to other vaults.
+    //
+    // `serde(default)` on every field — pre-Wave-8e snapshots decode to
+    // zero deficit, half-fraction repayment, and a disabled ReadOnly latch.
+
+    /// Cumulative bad debt the protocol has absorbed from underwater
+    /// liquidations. Increments via `accrue_deficit_shortfall` at every
+    /// liquidation site that nets seized USD < debt cleared. Decreases only
+    /// via `apply_deficit_repayment` on fee collection.
+    #[serde(default)]
+    pub protocol_deficit_icusd: ICUSD,
+
+    /// Lifetime sum of icUSD applied as deficit repayment (mint foregone for
+    /// borrowing fee, supply already reduced for redemption fee). Reporting-
+    /// only; never decreases. Together with `protocol_deficit_icusd` and the
+    /// `DeficitAccrued` / `DeficitRepaid` event log this satisfies:
+    ///   sum(DeficitAccrued.amount) - sum(DeficitRepaid.amount)
+    ///       == protocol_deficit_icusd
+    #[serde(default)]
+    pub total_deficit_repaid_icusd: ICUSD,
+
+    /// Fraction of each collected fee routed to deficit repayment before the
+    /// remainder flows to its existing destination. Default 0.5 (50%);
+    /// 0.0 disables repayment, 1.0 routes the entire fee until cleared.
+    /// Bounded to [0, 1] in `set_deficit_repayment_fraction`.
+    #[serde(default = "default_deficit_repayment_fraction")]
+    pub deficit_repayment_fraction: Ratio,
+
+    /// ICUSD-e8s ceiling above which the protocol auto-transitions to
+    /// ReadOnly mode. 0 disables the latch. Tuned via
+    /// `set_deficit_readonly_threshold_e8s`. Operator should leave at 0
+    /// for the first 24-48h post-deploy and set after observing baseline
+    /// deficit accrual.
+    #[serde(default)]
+    pub deficit_readonly_threshold_e8s: u64,
 }
 
 /// Serde-only fallback: provides zero/empty/None defaults for fields missing from
@@ -1052,6 +1103,11 @@ impl Default for State {
             liquidation_ordering_tolerance: DEFAULT_LIQUIDATION_ORDERING_TOLERANCE,
             sp_writedown_disabled: false,
             consumed_writedown_proofs: BTreeSet::new(),
+            // Wave-8e LIQ-005
+            protocol_deficit_icusd: ICUSD::new(0),
+            total_deficit_repaid_icusd: ICUSD::new(0),
+            deficit_repayment_fraction: DEFAULT_DEFICIT_REPAYMENT_FRACTION,
+            deficit_readonly_threshold_e8s: 0,
         }
     }
 }
@@ -1246,6 +1302,11 @@ impl From<InitArg> for State {
             liquidation_ordering_tolerance: DEFAULT_LIQUIDATION_ORDERING_TOLERANCE,
             sp_writedown_disabled: false,
             consumed_writedown_proofs: BTreeSet::new(),
+            // Wave-8e LIQ-005
+            protocol_deficit_icusd: ICUSD::new(0),
+            total_deficit_repaid_icusd: ICUSD::new(0),
+            deficit_repayment_fraction: DEFAULT_DEFICIT_REPAYMENT_FRACTION,
+            deficit_readonly_threshold_e8s: 0,
         }
     }
 }
