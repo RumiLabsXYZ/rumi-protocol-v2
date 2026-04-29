@@ -266,4 +266,5 @@ service : (StabilityPoolInitArgs) -> {
   get_suspended_tokens : () -> (vec record { principal; nat32 }) query;
   get_pool_events : (nat64, nat64) -> (vec PoolEvent) query;
   get_pool_event_count : () -> (nat64) query;
+  list_depositor_principals : () -> (vec principal) query;
 };

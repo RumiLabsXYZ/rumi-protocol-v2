@@ -303,6 +303,11 @@ export const idlFactory = ({ IDL }) => {
         [Icrc21ConsentMessageResponse],
         [],
       ),
+    'list_depositor_principals' : IDL.Func(
+        [],
+        [IDL.Vec(IDL.Principal)],
+        ['query'],
+      ),
     'notify_liquidatable_vaults' : IDL.Func(
         [IDL.Vec(LiquidatableVaultInfo)],
         [IDL.Vec(LiquidationResult)],

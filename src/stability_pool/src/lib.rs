@@ -257,6 +257,17 @@ pub fn get_pool_event_count() -> u64 {
     read_state(|s| s.pool_event_count())
 }
 
+/// Enumerate every principal currently holding a deposit. The frontend's
+/// "Current depositors" card needs this because the analytics shadow log
+/// (`evt_stability`) misses depositors whose Deposit events predate the
+/// analytics tailer (or were dropped while the tailer was decoding broken
+/// shadow types). Pool's `deposits` map is the source of truth — its keys
+/// equal `total_depositors` from `get_pool_status`.
+#[query]
+pub fn list_depositor_principals() -> Vec<Principal> {
+    read_state(|s| s.deposits.keys().copied().collect())
+}
+
 #[query]
 pub fn check_pool_capacity(collateral_type: Principal, debt_amount_e8s: u64) -> bool {
     read_state(|s| s.effective_pool_for_collateral(&collateral_type) >= debt_amount_e8s)
