@@ -275,3 +275,51 @@ fn liq_005_record_deficit_repaid_emits_event_and_updates_state() {
     assert_eq!(s.protocol_deficit_icusd, ICUSD::new(500));
     assert_eq!(s.total_deficit_repaid_icusd, ICUSD::new(400));
 }
+
+// ─── Tasks 4-8: liquidation-site predicate fences ───
+//
+// These tests pin the `collateral_usd_value(seized) < debt_cleared`
+// predicate against the existing numeric helper. They serve as a
+// regression fence: if anyone ever changes `collateral_usd_value`,
+// these tests catch the deficit accrual drift before it lands.
+
+use rumi_protocol_backend::numeric::collateral_usd_value;
+
+#[test]
+fn liq_005_predicate_zero_when_seized_covers_debt() {
+    // 1 ICP at $10, 8 decimals = $10 seized, 8 icUSD debt → no shortfall.
+    let seized_usd = collateral_usd_value(100_000_000, dec!(10.0), 8);
+    let debt_cleared = ICUSD::new(800_000_000); // 8 icUSD
+    let shortfall = if seized_usd < debt_cleared {
+        debt_cleared - seized_usd
+    } else {
+        ICUSD::new(0)
+    };
+    assert_eq!(shortfall, ICUSD::new(0));
+}
+
+#[test]
+fn liq_005_predicate_positive_when_seized_under_debt() {
+    // 0.5 ICP at $10 = $5 seized, 8 icUSD debt → shortfall = 3 icUSD.
+    let seized_usd = collateral_usd_value(50_000_000, dec!(10.0), 8);
+    let debt_cleared = ICUSD::new(800_000_000); // 8 icUSD
+    let shortfall = if seized_usd < debt_cleared {
+        debt_cleared - seized_usd
+    } else {
+        ICUSD::new(0)
+    };
+    assert_eq!(shortfall, ICUSD::new(300_000_000));
+}
+
+#[test]
+fn liq_005_predicate_handles_low_price_collateral() {
+    // 1.5 collateral units at $0.50 = $0.75 seized, 1 icUSD debt → shortfall 0.25.
+    let seized_usd = collateral_usd_value(150_000_000, dec!(0.50), 8);
+    let debt_cleared = ICUSD::new(100_000_000);
+    let shortfall = if seized_usd < debt_cleared {
+        debt_cleared - seized_usd
+    } else {
+        ICUSD::new(0)
+    };
+    assert_eq!(shortfall, ICUSD::new(25_000_000));
+}
