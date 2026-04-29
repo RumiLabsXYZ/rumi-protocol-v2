@@ -4,6 +4,7 @@
   import LensActivityPanel from '../LensActivityPanel.svelte';
   import MiniAreaChart from '../MiniAreaChart.svelte';
   import SpCurrentDepositorsCard from '../SpCurrentDepositorsCard.svelte';
+  import SpCoverageCard from '../SpCoverageCard.svelte';
   import {
     fetchStabilitySeries, fetchApys,
   } from '$services/explorer/analyticsService';
@@ -101,20 +102,6 @@
     series.map((r: any) => ({ t: Number(r.timestamp_ns) / 1_000_000, v: Number(r.total_liquidations_executed ?? 0n) }))
   );
 
-  const collateralGains = $derived.by(() => {
-    // PoolStatus.collateral_gains is the aggregate collateral in the pool,
-    // each entry a (collateral principal, raw amount) pair.
-    const perCol = poolStatus?.collateral_gains ?? [];
-    return perCol.map(([p, v]: [any, any]) => {
-      const pid = typeof p === 'object' && p.toText ? p.toText() : String(p);
-      return {
-        principal: pid,
-        symbol: getCollateralSymbol(pid),
-        amount: Number(v),
-      };
-    });
-  });
-
   const healthMetrics = $derived.by(() => [
     { label: 'Deposits', value: `$${formatCompact(totalDeposits)}`, sub: 'icUSD' },
     { label: 'Depositors', value: depositors.toLocaleString() },
@@ -165,21 +152,7 @@
   </div>
 </div>
 
-{#if collateralGains.length > 0}
-  <div class="explorer-card">
-    <h3 class="text-sm font-medium text-gray-300 mb-3">Collateral in pool</h3>
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-      {#each collateralGains as g}
-        <div class="flex flex-col">
-          <span class="text-xs text-gray-500">{g.symbol}</span>
-          <span class="text-base font-semibold tabular-nums text-gray-200 mt-0.5">
-            {formatCompact(g.amount / 1e8)}
-          </span>
-        </div>
-      {/each}
-    </div>
-  </div>
-{/if}
+<SpCoverageCard />
 
 <SpCurrentDepositorsCard />
 
