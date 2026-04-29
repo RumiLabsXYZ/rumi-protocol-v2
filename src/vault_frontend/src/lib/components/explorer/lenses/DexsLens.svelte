@@ -155,7 +155,10 @@
   const healthMetrics = $derived.by(() => {
     const metrics = [
       { label: '3pool TVL', value: `$${formatCompact(threePoolTvl)}` },
-      { label: '24h volume', value: `$${formatCompact(volume24h)}` },
+      // Specifically 3pool's 24h swap volume — AMM swaps are tracked
+      // separately on the AMM Pools card. The unqualified "24h volume"
+      // label was confusing when AMM had volume but 3pool didn't.
+      { label: '3pool 24h volume', value: `$${formatCompact(volume24h)}` },
       { label: 'Virtual price', value: virtualPrice.toFixed(6), sub: 'compounds with fees' },
       {
         label: '3pool balance',

@@ -3,12 +3,30 @@
  * Formatters, scales, and color constants for SVG charts.
  */
 
-/** Format a large number with K/M/B suffixes. */
+/** Format a number with K/M/B suffixes for large magnitudes and appropriate
+ *  decimals for small magnitudes. The previous version always used 0
+ *  decimals below the K threshold, which rendered values like $0.02 as
+ *  "$0" — actively misleading on cards like Revenue's "24h fees" where
+ *  there ARE non-zero fees, just small ones.
+ *
+ *  Bands:
+ *  - 0 → "0"
+ *  - (0, 0.01) → 4 decimals ("0.0023")
+ *  - [0.01, 1) → 2 decimals ("0.02", "0.50")
+ *  - [1, 1000) → 0 decimals ("12", "999")
+ *  - [1K, 1M) → "1.2K"
+ *  - [1M, 1B) → "1.2M"
+ *  - [1B, ∞) → "1.2B"
+ */
 export function formatCompact(value: number): string {
-  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)}B`;
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
-  return value.toFixed(0);
+  if (value === 0) return '0';
+  const abs = Math.abs(value);
+  if (abs >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)}B`;
+  if (abs >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (abs >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+  if (abs >= 1) return value.toFixed(0);
+  if (abs >= 0.01) return value.toFixed(2);
+  return value.toFixed(4);
 }
 
 /** Format basis points as percentage string. */
