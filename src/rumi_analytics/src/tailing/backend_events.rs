@@ -103,7 +103,7 @@ fn route_backend_event(event_id: u64, event: &sources::backend::BackendEvent) {
                 event_kind: VaultEventKind::Opened,
                 collateral_type: vault.collateral_type,
                 amount: vault.collateral_amount,
-                fee_amount: 0,
+                fee_amount: None,
             });
         }
         BorrowFromVault { vault_id, borrowed_amount, fee_amount, caller, timestamp, .. } => {
@@ -115,7 +115,7 @@ fn route_backend_event(event_id: u64, event: &sources::backend::BackendEvent) {
                 event_kind: VaultEventKind::Borrowed,
                 collateral_type: Principal::anonymous(),
                 amount: *borrowed_amount,
-                fee_amount: *fee_amount,
+                fee_amount: Some(*fee_amount),
             });
         }
         RepayToVault { vault_id, repayed_amount, caller, timestamp, .. } => {
@@ -127,7 +127,7 @@ fn route_backend_event(event_id: u64, event: &sources::backend::BackendEvent) {
                 event_kind: VaultEventKind::Repaid,
                 collateral_type: Principal::anonymous(),
                 amount: *repayed_amount,
-                fee_amount: 0,
+                fee_amount: None,
             });
         }
         CollateralWithdrawn { vault_id, amount, caller, timestamp, .. } => {
@@ -139,7 +139,7 @@ fn route_backend_event(event_id: u64, event: &sources::backend::BackendEvent) {
                 event_kind: VaultEventKind::CollateralWithdrawn,
                 collateral_type: Principal::anonymous(),
                 amount: *amount,
-                fee_amount: 0,
+                fee_amount: None,
             });
         }
         PartialCollateralWithdrawn { vault_id, amount, caller, timestamp, .. } => {
@@ -151,7 +151,7 @@ fn route_backend_event(event_id: u64, event: &sources::backend::BackendEvent) {
                 event_kind: VaultEventKind::PartialCollateralWithdrawn,
                 collateral_type: Principal::anonymous(),
                 amount: *amount,
-                fee_amount: 0,
+                fee_amount: None,
             });
         }
         WithdrawAndCloseVault { vault_id, amount, caller, timestamp, .. } => {
@@ -163,7 +163,7 @@ fn route_backend_event(event_id: u64, event: &sources::backend::BackendEvent) {
                 event_kind: VaultEventKind::WithdrawAndClose,
                 collateral_type: Principal::anonymous(),
                 amount: *amount,
-                fee_amount: 0,
+                fee_amount: None,
             });
         }
         VaultWithdrawnAndClosed { vault_id, timestamp, caller, amount } => {
@@ -175,7 +175,7 @@ fn route_backend_event(event_id: u64, event: &sources::backend::BackendEvent) {
                 event_kind: VaultEventKind::Closed,
                 collateral_type: Principal::anonymous(),
                 amount: *amount,
-                fee_amount: 0,
+                fee_amount: None,
             });
         }
         DustForgiven { vault_id, amount, timestamp } => {
@@ -187,7 +187,7 @@ fn route_backend_event(event_id: u64, event: &sources::backend::BackendEvent) {
                 event_kind: VaultEventKind::DustForgiven,
                 collateral_type: Principal::anonymous(),
                 amount: *amount,
-                fee_amount: 0,
+                fee_amount: None,
             });
         }
         RedemptionOnVaults { icusd_amount, fee_amount, owner, collateral_type, timestamp, .. } => {
@@ -199,7 +199,7 @@ fn route_backend_event(event_id: u64, event: &sources::backend::BackendEvent) {
                 event_kind: VaultEventKind::Redeemed,
                 collateral_type: collateral_type.unwrap_or(Principal::anonymous()),
                 amount: *icusd_amount,
-                fee_amount: *fee_amount,
+                fee_amount: Some(*fee_amount),
             });
         }
         // Legacy: ProvideLiquidity / WithdrawLiquidity / ClaimLiquidityReturns

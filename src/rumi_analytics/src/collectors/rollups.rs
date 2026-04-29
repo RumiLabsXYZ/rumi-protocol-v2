@@ -111,11 +111,11 @@ fn rollup_fees(now: u64, day_start: u64) {
         match e.event_kind {
             VaultEventKind::Borrowed => {
                 borrow_count += 1;
-                borrow_fees = borrow_fees.saturating_add(e.fee_amount);
+                borrow_fees = borrow_fees.saturating_add(e.fee_amount.unwrap_or(0));
             }
             VaultEventKind::Redeemed => {
                 redemption_count += 1;
-                redemption_fees = redemption_fees.saturating_add(e.fee_amount);
+                redemption_fees = redemption_fees.saturating_add(e.fee_amount.unwrap_or(0));
             }
             _ => {}
         }

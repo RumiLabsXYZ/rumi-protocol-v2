@@ -943,11 +943,11 @@ pub fn compute_vault_fee_totals(
     for e in vault_events {
         match e.event_kind {
             storage::events::VaultEventKind::Borrowed => {
-                borrow_fees = borrow_fees.saturating_add(e.fee_amount);
+                borrow_fees = borrow_fees.saturating_add(e.fee_amount.unwrap_or(0));
                 borrow_count += 1;
             }
             storage::events::VaultEventKind::Redeemed => {
-                redemption_fees = redemption_fees.saturating_add(e.fee_amount);
+                redemption_fees = redemption_fees.saturating_add(e.fee_amount.unwrap_or(0));
                 redemption_count += 1;
             }
             _ => {}
@@ -1384,7 +1384,7 @@ mod tests {
             event_kind: kind,
             collateral_type: Principal::anonymous(),
             amount,
-            fee_amount: 0,
+            fee_amount: None,
         }
     }
 
@@ -1706,7 +1706,7 @@ mod tests {
             event_kind: kind,
             collateral_type: Principal::anonymous(),
             amount: 1_000_000,
-            fee_amount,
+            fee_amount: Some(fee_amount),
         }
     }
 
