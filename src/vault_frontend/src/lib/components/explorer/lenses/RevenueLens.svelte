@@ -9,6 +9,7 @@
   } from '$services/explorer/analyticsService';
   import {
     fetchInterestSplit, fetchStabilityPoolStatus, fetchThreePoolStatus,
+    fetchProtocolFeeTotalsFromBackend,
   } from '$services/explorer/explorerService';
   import { ProtocolService } from '$services/protocol';
   import { e8sToNumber, formatCompact, CHART_COLORS } from '$utils/explorerChartHelpers';
@@ -18,15 +19,25 @@
   let apys: any = $state(null);
   let fees24hData = $state<FeeBreakdown | null>(null);
   let fees90dData = $state<FeeBreakdown | null>(null);
+  let backendFees24h = $state<{ borrowIcusd: number; redemptionIcusd: number } | null>(null);
+  let backendFees90d = $state<{ borrowIcusd: number; redemptionIcusd: number } | null>(null);
   let interestSplit: any[] = $state([]);
   let protocolStatus: any = $state(null);
   let poolStatus: any = $state(null);
   let threePoolStatus: any = $state(null);
   let loading = $state(true);
 
+  const MS_PER_DAY = 86_400_000;
+
   onMount(async () => {
     try {
-      const [feeR, apR, f24R, f90R, spR, psR, poolR, tpR] = await Promise.allSettled([
+      // Borrow / redemption fees come from the backend event log directly.
+      // The analytics rollup (`fetchFeeBreakdownWindow`) reads `evt_vaults`
+      // whose historical rows have `fee_amount = None` (round-1 added the
+      // capture; pre-round-1 entries are stuck at null), which is why the
+      // 90d totals previously showed only swap fees. Swap fees stay on
+      // analytics (`evt_swaps` was always populated correctly).
+      const [feeR, apR, f24R, f90R, spR, psR, poolR, tpR, b24R, b90R] = await Promise.allSettled([
         fetchFeeSeries(90),
         fetchApys(),
         fetchFeeBreakdownWindow(1),
@@ -35,6 +46,8 @@
         ProtocolService.getProtocolStatus(),
         fetchStabilityPoolStatus(),
         fetchThreePoolStatus(),
+        fetchProtocolFeeTotalsFromBackend(MS_PER_DAY),
+        fetchProtocolFeeTotalsFromBackend(90 * MS_PER_DAY),
       ]);
       if (feeR.status === 'fulfilled') feeRows = feeR.value ?? [];
       if (apR.status === 'fulfilled') apys = apR.value;
@@ -44,6 +57,8 @@
       if (psR.status === 'fulfilled') protocolStatus = psR.value;
       if (poolR.status === 'fulfilled') poolStatus = poolR.value;
       if (tpR.status === 'fulfilled') threePoolStatus = tpR.value;
+      if (b24R.status === 'fulfilled') backendFees24h = b24R.value;
+      if (b90R.status === 'fulfilled') backendFees90d = b90R.value;
     } catch (err) {
       console.error('[RevenueLens] onMount error:', err);
     } finally {
@@ -51,13 +66,17 @@
     }
   });
 
-  const totalBorrow = $derived(fees90dData?.borrowIcusd ?? 0);
-  const totalRedemption = $derived(fees90dData?.redemptionIcusd ?? 0);
+  // Borrow / redemption: backend event log (authoritative). Swap: analytics
+  // (`evt_swaps` was always populated correctly by the 3pool / AMM tailers).
+  const totalBorrow = $derived(backendFees90d?.borrowIcusd ?? fees90dData?.borrowIcusd ?? 0);
+  const totalRedemption = $derived(backendFees90d?.redemptionIcusd ?? fees90dData?.redemptionIcusd ?? 0);
   const totalSwap = $derived(fees90dData?.swapIcusd ?? 0);
   const totalFees = $derived(totalBorrow + totalRedemption + totalSwap);
 
   const fees24h = $derived(
-    (fees24hData?.borrowIcusd ?? 0) + (fees24hData?.redemptionIcusd ?? 0) + (fees24hData?.swapIcusd ?? 0)
+    (backendFees24h?.borrowIcusd ?? fees24hData?.borrowIcusd ?? 0)
+      + (backendFees24h?.redemptionIcusd ?? fees24hData?.redemptionIcusd ?? 0)
+      + (fees24hData?.swapIcusd ?? 0)
   );
 
   // Live formulas first; analytics 7d rolling as the fallback (the rolling
