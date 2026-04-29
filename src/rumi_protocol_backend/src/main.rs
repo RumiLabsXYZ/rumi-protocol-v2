@@ -591,6 +591,11 @@ fn get_protocol_status() -> ProtocolStatus {
             };
             InterestSplitArg { destination: dest, bps: r.bps }
         }).collect(),
+        // Wave-8e LIQ-005
+        protocol_deficit_icusd: s.protocol_deficit_icusd.to_u64(),
+        total_deficit_repaid_icusd: s.total_deficit_repaid_icusd.to_u64(),
+        deficit_repayment_fraction: s.deficit_repayment_fraction.to_f64(),
+        deficit_readonly_threshold_e8s: s.deficit_readonly_threshold_e8s,
     })
 }
 
@@ -3207,6 +3212,66 @@ async fn set_liquidation_protocol_share(new_share: f64) -> Result<(), ProtocolEr
 #[query]
 fn get_liquidation_protocol_share() -> f64 {
     read_state(|s| s.liquidation_protocol_share.to_f64())
+}
+
+/// Wave-8e LIQ-005: tune the per-fee fraction routed to deficit repayment.
+/// Default 0.5; bounded [0.0, 1.0]. 0.0 disables repayment; 1.0 routes the
+/// entire fee until the deficit is cleared.
+#[candid_method(update)]
+#[update]
+async fn set_deficit_repayment_fraction(new_fraction: f64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set deficit repayment fraction".to_string(),
+        ));
+    }
+    if !new_fraction.is_finite() || !(0.0..=1.0).contains(&new_fraction) {
+        return Err(ProtocolError::GenericError(format!(
+            "deficit_repayment_fraction must be in [0.0, 1.0]; got {}",
+            new_fraction
+        )));
+    }
+    let fraction = Ratio::from(
+        rust_decimal::Decimal::try_from(new_fraction)
+            .map_err(|_| ProtocolError::GenericError("Invalid fraction value".to_string()))?,
+    );
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_deficit_repayment_fraction(s, fraction);
+    });
+    log!(
+        INFO,
+        "[set_deficit_repayment_fraction] Fraction set to: {} ({}%)",
+        new_fraction,
+        new_fraction * 100.0
+    );
+    Ok(())
+}
+
+/// Wave-8e LIQ-005: set the deficit-driven ReadOnly auto-latch threshold (e8s).
+/// 0 disables the latch. Operator should leave at 0 for the first 24-48h
+/// post-deploy and set after observing baseline deficit accrual.
+#[candid_method(update)]
+#[update]
+async fn set_deficit_readonly_threshold_e8s(new_threshold: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set deficit ReadOnly threshold".to_string(),
+        ));
+    }
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_deficit_readonly_threshold_e8s(s, new_threshold);
+    });
+    log!(
+        INFO,
+        "[set_deficit_readonly_threshold_e8s] Threshold set to: {} e8s ({})",
+        new_threshold,
+        if new_threshold == 0 { "latch disabled" } else { "latch armed" }
+    );
+    Ok(())
 }
 
 /// Set the share of interest revenue sent to the stability pool (0.0–1.0).

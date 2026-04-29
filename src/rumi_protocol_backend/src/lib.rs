@@ -123,6 +123,16 @@ pub struct ProtocolStatus {
     pub per_collateral_interest: Vec<CollateralInterestInfo>,
     pub per_collateral_rate_curves: Vec<PerCollateralRateCurve>,
     pub interest_split: Vec<InterestSplitArg>,
+    /// Wave-8e LIQ-005: cumulative bad debt absorbed from underwater
+    /// liquidations, awaiting fee-driven repayment.
+    pub protocol_deficit_icusd: u64,
+    /// Wave-8e LIQ-005: lifetime sum of icUSD applied as deficit repayment.
+    pub total_deficit_repaid_icusd: u64,
+    /// Wave-8e LIQ-005: fraction of each fee routed to deficit repayment.
+    pub deficit_repayment_fraction: f64,
+    /// Wave-8e LIQ-005: e8s threshold above which the protocol auto-latches
+    /// to ReadOnly. 0 disables the latch.
+    pub deficit_readonly_threshold_e8s: u64,
 }
 
 /// Per-collateral debt and weighted interest rate for APR calculations.
@@ -216,6 +226,10 @@ pub enum EventTypeFilter {
     Admin,
     PriceUpdate,
     AccrueInterest,
+    /// Wave-8e LIQ-005: bad-debt accrued from an underwater liquidation.
+    DeficitAccrued,
+    /// Wave-8e LIQ-005: deficit repaid via fee revenue routing.
+    DeficitRepaid,
 }
 
 /// Inclusive nanosecond timestamp window for the time facet.

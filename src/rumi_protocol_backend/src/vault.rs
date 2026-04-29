@@ -367,6 +367,22 @@ pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Prin
         icusd_block_index,
     );
 
+    // Wave-8e LIQ-005: route the reserves-portion fee (in icUSD e8s)
+    // through deficit repayment. The redeemer's icUSD was burned via
+    // `transfer_icusd_from` above, so this is a pure state mutation.
+    // The stablecoin fee transfer to treasury (line ~349) is unaffected
+    // — that ckUSDT/ckUSDC payment is the actual revenue, the deficit
+    // bookkeeping is the foregone-equity offset.
+    if fee_icusd.0 > 0 {
+        mutate_state(|s| {
+            let _routing = crate::treasury::plan_fee_routing(
+                s,
+                fee_icusd,
+                crate::event::FeeSource::RedemptionFee,
+            );
+        });
+    }
+
     // Handle vault spillover if reserves didn't cover everything
     if spillover_e8s > 0 {
         // Pick the best collateral type for vault redemption based on tier priority
@@ -403,6 +419,14 @@ pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Prin
                 vault_fee,
                 current_price,
                 icusd_block_index,
+            );
+
+            // Wave-8e LIQ-005: route the spillover-portion fee through
+            // deficit repayment. icUSD already burned via `transfer_icusd_from`.
+            let _routing = crate::treasury::plan_fee_routing(
+                s,
+                vault_fee,
+                crate::event::FeeSource::RedemptionFee,
             );
         });
         ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), || {
@@ -482,6 +506,19 @@ pub async fn redeem_collateral(collateral_type: Principal, _icusd_amount: u64) -
                     current_collateral_price,
                     block_index,
                 );
+
+                // Wave-8e LIQ-005: route a configurable fraction of the
+                // redemption fee toward deficit repayment. The redeemer's
+                // icUSD has already been burned via `transfer_icusd_from`
+                // (the protocol's main account is the icUSD minting
+                // account), so the supply side is already correct — this
+                // is a pure state mutation that decrements the deficit.
+                let _routing = crate::treasury::plan_fee_routing(
+                    s,
+                    fee_amount,
+                    crate::event::FeeSource::RedemptionFee,
+                );
+
                 fee_amount
             });
             ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), || {
@@ -2186,6 +2223,35 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
             vault.accrued_interest -= interest_share;
         }
 
+        // Wave-8e LIQ-005: per-call deficit accrual. `max_liquidatable_debt`
+        // is the icUSD amount the vault's debt was reduced by;
+        // `total_to_seize` is the collateral seized. Predicate: seized USD <
+        // debt cleared.
+        let seized_usd = crate::numeric::collateral_usd_value(
+            total_to_seize.to_u64(),
+            collateral_price,
+            config_decimals,
+        );
+        let shortfall = if seized_usd < max_liquidatable_debt {
+            max_liquidatable_debt - seized_usd
+        } else {
+            ICUSD::new(0)
+        };
+        if shortfall.0 > 0 {
+            crate::event::record_deficit_accrued(
+                s,
+                vault_id,
+                shortfall,
+                ic_cdk::api::time(),
+            );
+            if s.check_deficit_readonly_latch() {
+                log!(INFO,
+                    "[LIQ-005] deficit threshold {} crossed by partial vault #{} shortfall {}; auto-latched ReadOnly",
+                    s.deficit_readonly_threshold_e8s, vault_id, shortfall.to_u64()
+                );
+            }
+        }
+
         // Record the partial liquidation event
         let event = crate::event::Event::PartialLiquidateVault {
             vault_id,
@@ -2447,6 +2513,36 @@ pub async fn liquidate_vault_partial_with_stable(
             vault.borrowed_icusd_amount -= max_liquidatable_debt;
             vault.collateral_amount -= total_to_seize.to_u64();
             vault.accrued_interest -= interest_share;
+        }
+
+        // Wave-8e LIQ-005: per-call deficit accrual. The stablecoin path
+        // pulls ckUSDT/ckUSDC from the liquidator (1:1 with icUSD plus a
+        // surcharge). The icUSD-denominated debt cleared is
+        // `max_liquidatable_debt`; the collateral seized is `total_to_seize`.
+        // Predicate measured in icUSD-equivalent collateral USD value.
+        let seized_usd = crate::numeric::collateral_usd_value(
+            total_to_seize.to_u64(),
+            collateral_price,
+            config_decimals,
+        );
+        let shortfall = if seized_usd < max_liquidatable_debt {
+            max_liquidatable_debt - seized_usd
+        } else {
+            ICUSD::new(0)
+        };
+        if shortfall.0 > 0 {
+            crate::event::record_deficit_accrued(
+                s,
+                vault_id,
+                shortfall,
+                ic_cdk::api::time(),
+            );
+            if s.check_deficit_readonly_latch() {
+                log!(INFO,
+                    "[LIQ-005] deficit threshold {} crossed by stable-partial vault #{} shortfall {}; auto-latched ReadOnly",
+                    s.deficit_readonly_threshold_e8s, vault_id, shortfall.to_u64()
+                );
+            }
         }
 
         // Record the partial liquidation event
@@ -2806,6 +2902,39 @@ pub async fn liquidate_vault_debt_already_burned(
             vault.accrued_interest -= interest_share;
         }
 
+        // Wave-8e LIQ-005: per-call deficit accrual on the SP writedown
+        // path. Even though icUSD was burned externally (legacy 3pool burn)
+        // or 3USD reserves were credited (reserves path), the protocol's
+        // solvency invariant is still: seized collateral USD value vs. debt
+        // cleared. If the SP absorbed an underwater vault, the protocol
+        // records the shortfall here so future fee revenue burns it down —
+        // this is what the audit (LIQ-005) prescribes instead of socializing
+        // onto SP depositors.
+        let seized_usd = crate::numeric::collateral_usd_value(
+            total_to_seize.to_u64(),
+            collateral_price,
+            config_decimals,
+        );
+        let shortfall = if seized_usd < max_liquidatable_debt {
+            max_liquidatable_debt - seized_usd
+        } else {
+            ICUSD::new(0)
+        };
+        if shortfall.0 > 0 {
+            crate::event::record_deficit_accrued(
+                s,
+                vault_id,
+                shortfall,
+                ic_cdk::api::time(),
+            );
+            if s.check_deficit_readonly_latch() {
+                log!(INFO,
+                    "[LIQ-005] deficit threshold {} crossed by SP writedown vault #{} shortfall {}; auto-latched ReadOnly",
+                    s.deficit_readonly_threshold_e8s, vault_id, shortfall.to_u64()
+                );
+            }
+        }
+
         let event = crate::event::Event::PartialLiquidateVault {
             vault_id,
             liquidator_payment: max_liquidatable_debt,
@@ -2973,7 +3102,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
     // Step 2: Calculate liquidation amounts
     // Check if this is a recovery-mode targeted liquidation (vault CR between 133-150%)
     let vault_collateral = ICP::from(vault.collateral_amount);
-    let (debt_amount, collateral_to_liquidator, _total_to_seize, protocol_cut, excess_collateral, is_recovery_partial) = read_state(|s| {
+    let (debt_amount, collateral_to_liquidator, total_to_seize, protocol_cut, excess_collateral, is_recovery_partial) = read_state(|s| {
         let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
         let protocol_share = s.get_liquidation_protocol_share();
         if let Some(repay_cap) = s.compute_recovery_repay_cap(&vault, collateral_price_usd) {
@@ -3029,6 +3158,38 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         // Execute the liquidation in state first (this must happen)
         // liquidate_vault returns the interest share of the debt reduction
         let interest_share = s.liquidate_vault(vault_id, mode, collateral_price_usd);
+
+        // Wave-8e LIQ-005: if seized USD < debt cleared, the protocol
+        // absorbed bad debt. Track the shortfall in `protocol_deficit_icusd`
+        // and check the ReadOnly latch. The liquidator's icUSD payment was
+        // already burned via `transfer_icusd_from` (the protocol IS the
+        // icUSD minting account), so the supply side is consistent — the
+        // liquidator effectively paid `debt_amount` icUSD for collateral
+        // worth less, and the protocol now records the outstanding loss.
+        let seized_usd = crate::numeric::collateral_usd_value(
+            total_to_seize.to_u64(),
+            collateral_price,
+            config_decimals,
+        );
+        let shortfall = if seized_usd < debt_amount {
+            debt_amount - seized_usd
+        } else {
+            ICUSD::new(0)
+        };
+        if shortfall.0 > 0 {
+            crate::event::record_deficit_accrued(
+                s,
+                vault_id,
+                shortfall,
+                ic_cdk::api::time(),
+            );
+            if s.check_deficit_readonly_latch() {
+                log!(INFO,
+                    "[LIQ-005] deficit threshold {} crossed by vault #{} shortfall {}; auto-latched ReadOnly",
+                    s.deficit_readonly_threshold_e8s, vault_id, shortfall.to_u64()
+                );
+            }
+        }
 
         // Record the liquidation event
         let event = crate::event::Event::LiquidateVault {
@@ -3459,6 +3620,32 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
             vault.borrowed_icusd_amount -= liquidator_payment;
             vault.collateral_amount -= total_to_seize.to_u64();
             vault.accrued_interest -= interest_share;
+        }
+
+        // Wave-8e LIQ-005: per-call deficit accrual.
+        let seized_usd = crate::numeric::collateral_usd_value(
+            total_to_seize.to_u64(),
+            collateral_price,
+            config_decimals,
+        );
+        let shortfall = if seized_usd < liquidator_payment {
+            liquidator_payment - seized_usd
+        } else {
+            ICUSD::new(0)
+        };
+        if shortfall.0 > 0 {
+            crate::event::record_deficit_accrued(
+                s,
+                arg.vault_id,
+                shortfall,
+                ic_cdk::api::time(),
+            );
+            if s.check_deficit_readonly_latch() {
+                log!(INFO,
+                    "[LIQ-005] deficit threshold {} crossed by partial_liquidate_vault #{} shortfall {}; auto-latched ReadOnly",
+                    s.deficit_readonly_threshold_e8s, arg.vault_id, shortfall.to_u64()
+                );
+            }
         }
 
         // Record the partial liquidation event
