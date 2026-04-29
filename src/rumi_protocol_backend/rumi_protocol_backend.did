@@ -573,6 +573,10 @@ type ProtocolStatus = record {
   reserve_redemptions_enabled : bool;
   global_icusd_mint_cap : nat64;
   last_icp_rate : float64;
+  protocol_deficit_icusd : nat64;
+  total_deficit_repaid_icusd : nat64;
+  deficit_repayment_fraction : float64;
+  deficit_readonly_threshold_e8s : nat64;
 };
 type RateCurve = record {
   method : InterpolationMethod;
@@ -808,6 +812,8 @@ service : (ProtocolArg) -> {
   set_collateral_redemption_fee_ceiling : (principal, float64) -> (Result);
   set_collateral_redemption_fee_floor : (principal, float64) -> (Result);
   set_collateral_status : (principal, CollateralStatus) -> (Result);
+  set_deficit_readonly_threshold_e8s : (nat64) -> (Result);
+  set_deficit_repayment_fraction : (float64) -> (Result);
   set_global_icusd_mint_cap : (nat64) -> (Result);
   set_healthy_cr : (principal, opt float64) -> (Result);
   set_icpswap_routing_enabled : (bool) -> (Result);

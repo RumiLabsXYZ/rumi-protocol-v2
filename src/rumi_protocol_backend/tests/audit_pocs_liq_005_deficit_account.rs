@@ -410,3 +410,31 @@ fn liq_005_zero_fee_is_noop() {
     assert_eq!(outcome.to_remainder, ICUSD::new(0));
     assert_eq!(s.protocol_deficit_icusd, ICUSD::new(1_000));
 }
+
+// ─── Task 11: admin event round-trip fences ───
+
+#[test]
+fn liq_005_admin_event_set_repayment_fraction_round_trip() {
+    let e = Event::SetDeficitRepaymentFraction {
+        fraction: Ratio::from(dec!(0.25)),
+        timestamp: 1_000,
+    };
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&e, &mut bytes).expect("encode");
+    let decoded: Event =
+        ciborium::de::from_reader(bytes.as_slice()).expect("decode");
+    assert_eq!(decoded, e);
+}
+
+#[test]
+fn liq_005_admin_event_set_readonly_threshold_round_trip() {
+    let e = Event::SetDeficitReadonlyThresholdE8s {
+        threshold_e8s: 1_000_000_000,
+        timestamp: 1_001,
+    };
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&e, &mut bytes).expect("encode");
+    let decoded: Event =
+        ciborium::de::from_reader(bytes.as_slice()).expect("decode");
+    assert_eq!(decoded, e);
+}
