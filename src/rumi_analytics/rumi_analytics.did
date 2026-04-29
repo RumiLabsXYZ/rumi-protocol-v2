@@ -276,6 +276,7 @@ type RangeQuery = record {
   offset : opt nat64;
   limit : opt nat32;
 };
+type ResetErrorCountersArgs = record { sources : opt vec text };
 type StabilitySeriesResponse = record {
   rows : vec DailyStabilityRow;
   next_from_ts : opt nat64;
@@ -425,5 +426,6 @@ service : (InitArgs) -> {
   get_volatility : (VolatilityQuery) -> (VolatilityResponse) query;
   http_request : (HttpRequest) -> (HttpResponse) query;
   ping : () -> (text) query;
+  reset_error_counters : (ResetErrorCountersArgs) -> (variant { Ok; Err : text });
   start_backfill : (principal) -> (text);
 }

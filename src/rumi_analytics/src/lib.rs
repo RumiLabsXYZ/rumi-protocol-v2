@@ -288,4 +288,24 @@ fn start_backfill(token: Principal) -> String {
     }
 }
 
+#[ic_cdk_macros::update]
+fn reset_error_counters(args: types::ResetErrorCountersArgs) -> Result<(), String> {
+    let admin = state::read_state(|s| s.admin);
+    let caller = ic_cdk::caller();
+    if caller != admin {
+        return Err(format!("unauthorized: caller {} is not admin", caller));
+    }
+    state::mutate_state(|s| {
+        let reset_all = args.sources.is_none();
+        let sources = args.sources.unwrap_or_default();
+        let touch = |name: &str| reset_all || sources.iter().any(|src| src == name);
+        if touch("backend") { s.error_counters.backend = 0; }
+        if touch("stability_pool") { s.error_counters.stability_pool = 0; }
+        if touch("three_pool") { s.error_counters.three_pool = 0; }
+        if touch("icusd_ledger") { s.error_counters.icusd_ledger = 0; }
+        if touch("amm") { s.error_counters.amm = 0; }
+    });
+    Ok(())
+}
+
 ic_cdk::export_candid!();

@@ -393,6 +393,15 @@ pub struct PoolRoutesResponse {
     pub routes: Vec<PoolRoute>,
 }
 
+// --- Admin reset error counters (Task 3.3) ---
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct ResetErrorCountersArgs {
+    /// null = reset all sources; else only the listed source names.
+    /// Valid names: "backend", "stability_pool", "three_pool", "icusd_ledger", "amm".
+    pub sources: Option<Vec<String>>,
+}
+
 // --- Fee breakdown window (Task 3.1) ---
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
