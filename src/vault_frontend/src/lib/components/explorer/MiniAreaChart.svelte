@@ -130,8 +130,22 @@
           {@const si = points.findIndex((p) => p.v > 0)}
           {@const sx = x(points[si].t)}
           {@const sv = points[si].v}
-          <line x1={sx} y1={0} x2={sx} y2={height} stroke="rgb(45 212 191 / 0.4)" stroke-dasharray="2 2" />
-          <circle cx={sx} cy={y(sv)} r="3.5" fill="rgb(45 212 191)" />
+          {@const sy = y(sv)}
+          {@const baselineY = height - padY}
+          <!-- Render the same baseline (y=0) the multi-point path would draw, so
+               the chart has visual presence instead of looking empty. -->
+          <line x1={padX} y1={baselineY} x2={width - padX} y2={baselineY}
+                stroke={color} stroke-width="1.5" stroke-opacity="0.5" />
+          <!-- Vertical guide from baseline to the spike, plus a flag for the
+               value so a single non-zero bucket reads at a glance. -->
+          <line x1={sx} y1={baselineY} x2={sx} y2={sy}
+                stroke={color} stroke-width="1.5" stroke-dasharray="3 3" />
+          <circle cx={sx} cy={sy} r="4" fill={color} />
+          <text x={sx} y={Math.max(12, sy - 8)} text-anchor="middle"
+                font-size="11" font-family="ui-monospace, SFMono-Regular, monospace"
+                fill={color} style="paint-order: stroke; stroke: rgba(0,0,0,0.6); stroke-width: 3;">
+            {valueFormat ? valueFormat(sv) : sv.toLocaleString()}
+          </text>
         {:else}
           <path d={fillD} fill={fillColor} stroke="none" />
           <path d={pathD} fill="none" stroke={color} stroke-width="1.5" stroke-linejoin="round" />
