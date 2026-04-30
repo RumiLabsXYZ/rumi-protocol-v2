@@ -10,8 +10,8 @@
 
 mod common;
 
-use candid::Nat;
-use rumi_3pool::icrc3::{BlockWithId, Icrc3Value};
+use candid::{encode_one, Nat};
+use rumi_3pool::icrc3::{BlockWithId, GetBlocksArgs, Icrc3Value};
 
 use common::{deploy_pool_with_liquidity_and_swaps, ThreePoolHarness};
 
@@ -121,4 +121,58 @@ fn icrc3_get_blocks_matches_reference_for_all_windows() {
             );
         }
     }
+}
+
+#[test]
+fn icrc3_get_blocks_cycle_cost_is_constant_in_log_length() {
+    // We measure cycles burned per `icrc3_get_blocks` UPDATE call
+    // (replicated execution, i.e. the production polling path). With
+    // 200 blocks vs 50 blocks, the per-call cost should be approximately
+    // constant -- the hallmark of an O(range) algorithm. Without the
+    // cache, cost would be ~4x higher at 200 blocks.
+
+    fn cycles_per_call(harness: &common::ThreePoolHarness, n_calls: u32) -> u128 {
+        let log_length = harness.icrc3_log_length();
+        let last = log_length.saturating_sub(1);
+        let arg = encode_one(vec![GetBlocksArgs {
+            start: Nat::from(last),
+            length: Nat::from(1u64),
+        }]).unwrap();
+
+        let before = harness.pic.cycle_balance(harness.three_pool);
+        for _ in 0..n_calls {
+            let _ = harness.pic
+                .update_call(harness.three_pool, candid::Principal::anonymous(),
+                             "icrc3_get_blocks", arg.clone())
+                .expect("icrc3_get_blocks update failed");
+        }
+        let after = harness.pic.cycle_balance(harness.three_pool);
+        let burned = before.saturating_sub(after);
+        burned / (n_calls as u128)
+    }
+
+    // Build two harnesses with different block counts.
+    let small = common::deploy_pool_with_liquidity_and_swaps(50);
+    let large = common::deploy_pool_with_liquidity_and_swaps(200);
+
+    let small_per_call = cycles_per_call(&small, 50);
+    let large_per_call = cycles_per_call(&large, 50);
+
+    eprintln!(
+        "icrc3_get_blocks cycles/call: 50 blocks={small_per_call}, 200 blocks={large_per_call}"
+    );
+
+    // With the cache, cost is dominated by the per-update message base
+    // plus a single block encode + hash. We expect the ratio to stay
+    // well under 2x even though log_length grew 4x. Without the cache,
+    // ratio would approach 4x.
+    assert!(
+        large_per_call < small_per_call * 2,
+        "icrc3_get_blocks cycles per call grew super-linearly with log_length: \
+         50 blocks: {small_per_call}, 200 blocks: {large_per_call}. \
+         The hash-chain cache is not effective."
+    );
+
+    // Sanity floor: at minimum the call costs more than a no-op message.
+    assert!(small_per_call > 100_000, "suspiciously low: {small_per_call}");
 }
