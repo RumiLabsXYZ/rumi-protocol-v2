@@ -13,7 +13,7 @@ use crate::types::{Icrc3Block, Icrc3Transaction};
 
 /// Generic value type used by ICRC-3 to encode blocks as nested maps.
 /// The index-ng expects this exact Candid structure.
-#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum Icrc3Value {
     Blob(Vec<u8>),
     Text(String),
@@ -31,7 +31,7 @@ pub struct GetBlocksArgs {
     pub length: Nat,
 }
 
-#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct BlockWithId {
     pub id: Nat,
     pub block: Icrc3Value,

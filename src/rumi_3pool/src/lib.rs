@@ -2101,6 +2101,15 @@ pub fn icrc3_supported_block_types() -> Vec<icrc3::SupportedBlockType> {
     icrc3::icrc3_supported_block_types()
 }
 
+/// Test-only: return a raw `Icrc3Block` by id, bypassing ICRC-3 encoding.
+/// Used by the equivalence integration test as the ground truth for
+/// hash-chain comparisons. Never enabled in mainnet builds.
+#[cfg(any(feature = "test_endpoints", test))]
+#[query]
+pub fn test_get_raw_block(id: u64) -> Option<types::Icrc3Block> {
+    storage::blocks::get(id)
+}
+
 #[cfg(test)]
 mod bot_endpoint_tests {
     use super::*;
