@@ -149,7 +149,10 @@ impl ThreePoolState {
     /// recomputing the chain from block 0.
     ///
     /// Both writes happen inside this single message; IC message-level
-    /// atomicity guarantees they cannot diverge.
+    /// atomicity guarantees they cannot diverge for blocks logged after
+    /// this code ships. Pre-existing blocks (logged before the cache was
+    /// introduced) are populated by the post_upgrade backfill in
+    /// `storage::migration::backfill_hash_chain`.
     pub fn log_block(&mut self, tx: crate::types::Icrc3Transaction) -> u64 {
         let id = crate::storage::blocks::len();
         let block = crate::types::Icrc3Block {
