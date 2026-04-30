@@ -219,9 +219,11 @@ export const idlFactory = ({ IDL }) => {
     'subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
   });
   const EventTypeFilter = IDL.Variant({
+    'BreakerTripped' : IDL.Null,
     'StabilityPoolDeposit' : IDL.Null,
     'AdminSweepToTreasury' : IDL.Null,
     'AdminMint' : IDL.Null,
+    'BotClaimReconciliationNeeded' : IDL.Null,
     'AdjustVault' : IDL.Null,
     'PartialLiquidation' : IDL.Null,
     'OpenVault' : IDL.Null,
@@ -229,10 +231,12 @@ export const idlFactory = ({ IDL }) => {
     'AccrueInterest' : IDL.Null,
     'ReserveRedemption' : IDL.Null,
     'Repay' : IDL.Null,
+    'DeficitAccrued' : IDL.Null,
     'Liquidation' : IDL.Null,
     'Borrow' : IDL.Null,
     'PriceUpdate' : IDL.Null,
     'Admin' : IDL.Null,
+    'DeficitRepaid' : IDL.Null,
     'Redemption' : IDL.Null,
     'CloseVault' : IDL.Null,
   });
@@ -268,6 +272,10 @@ export const idlFactory = ({ IDL }) => {
     'icusd_redeemed_e8s' : IDL.Nat64,
     'vault_id' : IDL.Nat64,
     'collateral_seized' : IDL.Nat64,
+  });
+  const FeeSource = IDL.Variant({
+    'BorrowingFee' : IDL.Null,
+    'RedemptionFee' : IDL.Null,
   });
   const Event = IDL.Variant({
     'set_borrowing_fee' : IDL.Record({ 'rate' : IDL.Text }),
@@ -314,6 +322,11 @@ export const idlFactory = ({ IDL }) => {
     'set_treasury_principal' : IDL.Record({ 'principal' : IDL.Principal }),
     'accrue_interest' : IDL.Record({ 'timestamp' : IDL.Nat64 }),
     'set_max_partial_liquidation_ratio' : IDL.Record({ 'rate' : IDL.Text }),
+    'breaker_tripped' : IDL.Record({
+      'total_e8s' : IDL.Nat64,
+      'timestamp' : IDL.Nat64,
+      'ceiling_e8s' : IDL.Nat64,
+    }),
     'withdraw_and_close_vault' : IDL.Record({
       'block_index' : IDL.Opt(IDL.Nat64),
       'vault_id' : IDL.Nat64,
@@ -332,6 +345,12 @@ export const idlFactory = ({ IDL }) => {
       'collateral_type' : IDL.Principal,
     }),
     'set_recovery_target_cr' : IDL.Record({ 'rate' : IDL.Text }),
+    'bot_claim_reconciliation_needed' : IDL.Record({
+      'required_balance' : IDL.Nat64,
+      'vault_id' : IDL.Nat64,
+      'timestamp' : IDL.Nat64,
+      'observed_balance' : IDL.Nat64,
+    }),
     'set_collateral_redemption_fee_floor' : IDL.Record({
       'redemption_fee_floor' : IDL.Text,
       'collateral_type' : IDL.Principal,
@@ -405,6 +424,10 @@ export const idlFactory = ({ IDL }) => {
       'caller' : IDL.Opt(IDL.Principal),
       'borrowed_amount' : IDL.Nat64,
     }),
+    'set_breaker_window_debt_ceiling_e8s' : IDL.Record({
+      'timestamp' : IDL.Nat64,
+      'ceiling_e8s' : IDL.Nat64,
+    }),
     'set_bot_allowed_collateral_types' : IDL.Record({
       'collateral_types' : IDL.Vec(IDL.Principal),
     }),
@@ -448,6 +471,10 @@ export const idlFactory = ({ IDL }) => {
       'vault_id' : IDL.Nat64,
       'timestamp' : IDL.Opt(IDL.Nat64),
       'amount' : IDL.Nat64,
+    }),
+    'set_breaker_window_ns' : IDL.Record({
+      'window_ns' : IDL.Nat64,
+      'timestamp' : IDL.Nat64,
     }),
     'partial_liquidate_vault' : IDL.Record({
       'protocol_fee_collateral' : IDL.Opt(IDL.Nat64),
@@ -493,6 +520,10 @@ export const idlFactory = ({ IDL }) => {
       'min_collateral_deposit' : IDL.Nat64,
       'collateral_type' : IDL.Principal,
     }),
+    'breaker_cleared' : IDL.Record({
+      'remaining_total_e8s' : IDL.Nat64,
+      'timestamp' : IDL.Nat64,
+    }),
     'update_collateral_status' : IDL.Record({
       'status' : CollateralStatus,
       'collateral_type' : IDL.Principal,
@@ -501,7 +532,15 @@ export const idlFactory = ({ IDL }) => {
       'healthy_cr' : IDL.Opt(IDL.Text),
       'collateral_type' : IDL.Text,
     }),
+    'set_deficit_repayment_fraction' : IDL.Record({
+      'fraction' : IDL.Vec(IDL.Nat8),
+      'timestamp' : IDL.Nat64,
+    }),
     'set_redemption_fee_ceiling' : IDL.Record({ 'rate' : IDL.Text }),
+    'set_deficit_readonly_threshold_e8s' : IDL.Record({
+      'threshold_e8s' : IDL.Nat64,
+      'timestamp' : IDL.Nat64,
+    }),
     'add_margin_to_vault' : IDL.Record({
       'block_index' : IDL.Nat64,
       'vault_id' : IDL.Nat64,
@@ -525,6 +564,13 @@ export const idlFactory = ({ IDL }) => {
       'interest_rate_apr' : IDL.Text,
     }),
     'set_reserve_redemption_fee' : IDL.Record({ 'fee' : IDL.Text }),
+    'deficit_repaid' : IDL.Record({
+      'remaining_deficit' : IDL.Nat64,
+      'source' : FeeSource,
+      'timestamp' : IDL.Nat64,
+      'anchor_block_index' : IDL.Opt(IDL.Nat64),
+      'amount' : IDL.Nat64,
+    }),
     'redemption_transfered' : IDL.Record({
       'icusd_block_index' : IDL.Nat64,
       'icp_block_index' : IDL.Nat64,
@@ -532,6 +578,12 @@ export const idlFactory = ({ IDL }) => {
     }),
     'set_liquidation_bot_principal' : IDL.Record({
       'principal' : IDL.Principal,
+    }),
+    'deficit_accrued' : IDL.Record({
+      'new_deficit' : IDL.Nat64,
+      'vault_id' : IDL.Nat64,
+      'timestamp' : IDL.Nat64,
+      'amount' : IDL.Nat64,
     }),
     'liquidate_vault' : IDL.Record({
       'mode' : Mode,
