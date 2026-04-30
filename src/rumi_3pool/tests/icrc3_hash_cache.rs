@@ -187,6 +187,44 @@ fn icrc3_get_blocks_cycle_cost_is_constant_in_log_length() {
 }
 
 #[test]
+fn post_upgrade_traps_on_hash_cache_length_mismatch() {
+    let harness = deploy_pool_with_liquidity_and_swaps(10);
+    assert_test_endpoints_built(&harness);
+
+    // Corrupt the cache by appending a bogus 32-byte hash. block_hashes::len()
+    // is now blocks::len() + 1, which both `backfill_hash_chain` and the
+    // post_upgrade integrity check should detect.
+    let bogus = vec![0xFFu8; 32];
+    let _ = harness.pic
+        .update_call(harness.three_pool, harness.admin, "test_corrupt_hash_cache_tip",
+                     candid::encode_one(bogus).unwrap())
+        .expect("test_corrupt_hash_cache_tip failed");
+
+    // Trigger an upgrade. post_upgrade traps; PocketIC reports the trap and
+    // rolls back stable memory atomically per IC spec, leaving the canister
+    // on the prior wasm.
+    let wasm = include_bytes!(
+        "../../../target/wasm32-unknown-unknown/release/rumi_3pool.wasm"
+    ).to_vec();
+    let result = harness.pic.upgrade_canister(harness.three_pool, wasm, vec![], None);
+
+    assert!(
+        result.is_err(),
+        "expected upgrade to trap on hash cache corruption, but it succeeded"
+    );
+
+    // Verify the trap message identifies the failure mode. We accept either
+    // the backfill_hash_chain trap ("block_hashes ... exceeds blocks ...")
+    // or the post_upgrade integrity-check trap ("hash cache length mismatch").
+    let err_str = format!("{:?}", result.err().unwrap());
+    let mentions_hash = err_str.contains("hash") || err_str.contains("block_hashes");
+    assert!(
+        mentions_hash,
+        "expected trap message to mention the hash cache, got: {err_str}"
+    );
+}
+
+#[test]
 fn post_upgrade_backfills_empty_hash_cache() {
     let harness = deploy_pool_with_liquidity_and_swaps(30);
     assert_test_endpoints_built(&harness);

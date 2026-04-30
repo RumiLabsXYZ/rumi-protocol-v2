@@ -2120,6 +2120,18 @@ pub fn test_clear_hash_cache() {
     storage::clear_block_hashes_for_test();
 }
 
+/// Test-only: append a bogus 32-byte entry to `block_hashes`, making it
+/// strictly longer than `blocks`. The next `post_upgrade` should trap
+/// on the length-mismatch integrity check (Task 5).
+#[cfg(any(feature = "test_endpoints", test))]
+#[update]
+pub fn test_corrupt_hash_cache_tip(bogus_hash: Vec<u8>) {
+    assert_eq!(bogus_hash.len(), 32, "bogus hash must be 32 bytes");
+    let mut h = [0u8; 32];
+    h.copy_from_slice(&bogus_hash);
+    storage::push_bogus_hash_for_test(h);
+}
+
 #[cfg(test)]
 mod bot_endpoint_tests {
     use super::*;

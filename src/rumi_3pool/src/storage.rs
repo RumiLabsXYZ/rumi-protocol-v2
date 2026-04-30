@@ -569,6 +569,19 @@ pub fn clear_block_hashes_for_test() {
     });
 }
 
+/// Test-only: append a bogus hash entry to `block_hashes`, making
+/// `block_hashes::len() == blocks::len() + 1`. Used by integration tests
+/// to verify the post_upgrade integrity check traps on cache corruption.
+///
+/// NEVER call from production code.
+#[cfg(any(feature = "test_endpoints", test))]
+pub fn push_bogus_hash_for_test(bogus: [u8; 32]) {
+    BLOCK_HASHES_LOG.with(|l| {
+        let mut log = l.borrow_mut();
+        log.append(&StorableHash(bogus)).expect("append bogus hash");
+    });
+}
+
 // ─── Migration: one-shot drain from the legacy raw-offset-0 blob ─────────────
 
 pub mod migration {
