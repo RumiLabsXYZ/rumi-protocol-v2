@@ -164,10 +164,12 @@ fn icrc3_get_blocks_cycle_cost_is_constant_in_log_length() {
 
     // With the cache, cost is dominated by the per-update message base
     // plus a single block encode + hash. We expect the ratio to stay
-    // well under 2x even though log_length grew 4x. Without the cache,
-    // ratio would approach 4x.
+    // well under 1.5x even though log_length grew 4x. Without the cache,
+    // ratio would approach 4x. (Measured on the optimized branch: ratio
+    // is ~1.001x, so the 1.5x bound has ample margin against drift while
+    // catching subtler regressions than a looser 2x bound would.)
     assert!(
-        large_per_call < small_per_call * 2,
+        large_per_call * 2 < small_per_call * 3,
         "icrc3_get_blocks cycles per call grew super-linearly with log_length: \
          50 blocks: {small_per_call}, 200 blocks: {large_per_call}. \
          The hash-chain cache is not effective."
