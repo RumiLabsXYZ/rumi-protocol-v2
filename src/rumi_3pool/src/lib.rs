@@ -2121,8 +2121,11 @@ pub fn test_clear_hash_cache() {
 }
 
 /// Test-only: append a bogus 32-byte entry to `block_hashes`, making it
-/// strictly longer than `blocks`. The next `post_upgrade` should trap
-/// on the length-mismatch integrity check (Task 5).
+/// strictly longer than `blocks`. The next upgrade will trap. In practice
+/// `backfill_hash_chain` catches the inversion first (defense-in-depth
+/// added in the Task 4 fixup); the post_upgrade parity check (Task 5)
+/// is the secondary catcher for any case where backfill returns without
+/// detecting it.
 #[cfg(any(feature = "test_endpoints", test))]
 #[update]
 pub fn test_corrupt_hash_cache_tip(bogus_hash: Vec<u8>) {
