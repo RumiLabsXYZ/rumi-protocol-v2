@@ -632,6 +632,42 @@ pub enum Event {
         threshold_e8s: u64,
         timestamp: u64,
     },
+
+    /// Wave-10 LIQ-008: circuit breaker auto-tripped because the rolling-
+    /// window cumulative liquidation debt crossed the configured ceiling.
+    /// `total_e8s` is the windowed sum at the moment of tripping;
+    /// `ceiling_e8s` is the configured trip threshold for audit purposes.
+    #[serde(rename = "breaker_tripped")]
+    BreakerTripped {
+        total_e8s: u64,
+        ceiling_e8s: u64,
+        timestamp: u64,
+    },
+
+    /// Wave-10 LIQ-008: admin manually cleared the breaker latch and
+    /// resumed `check_vaults` auto-publishing. `remaining_total_e8s` is the
+    /// windowed sum at the moment of clearing (informational; admins inspect
+    /// it before deciding to clear).
+    #[serde(rename = "breaker_cleared")]
+    BreakerCleared {
+        remaining_total_e8s: u64,
+        timestamp: u64,
+    },
+
+    /// Wave-10 LIQ-008: admin tuned the rolling-window length.
+    #[serde(rename = "set_breaker_window_ns")]
+    SetBreakerWindowNs {
+        window_ns: u64,
+        timestamp: u64,
+    },
+
+    /// Wave-10 LIQ-008: admin tuned the cumulative-debt ceiling. 0 disables
+    /// the breaker.
+    #[serde(rename = "set_breaker_window_debt_ceiling_e8s")]
+    SetBreakerWindowDebtCeilingE8s {
+        ceiling_e8s: u64,
+        timestamp: u64,
+    },
 }
 
 impl Event {
@@ -723,6 +759,11 @@ impl Event {
             Event::DeficitRepaid { .. } => false,
             Event::SetDeficitRepaymentFraction { .. } => false,
             Event::SetDeficitReadonlyThresholdE8s { .. } => false,
+            // Wave-10 LIQ-008
+            Event::BreakerTripped { .. } => false,
+            Event::BreakerCleared { .. } => false,
+            Event::SetBreakerWindowNs { .. } => false,
+            Event::SetBreakerWindowDebtCeilingE8s { .. } => false,
         }
     }
 
@@ -765,6 +806,9 @@ impl Event {
             Event::AccrueInterest { .. } => EventTypeFilter::AccrueInterest,
             Event::DeficitAccrued { .. } => EventTypeFilter::DeficitAccrued,
             Event::DeficitRepaid { .. } => EventTypeFilter::DeficitRepaid,
+            // Wave-10 LIQ-008: BreakerTripped is auto-emitted; BreakerCleared
+            // and the two Set* tunables collapse to Admin via the catch-all.
+            Event::BreakerTripped { .. } => EventTypeFilter::BreakerTripped,
             _ => EventTypeFilter::Admin,
         }
     }
@@ -831,6 +875,10 @@ impl Event {
             Event::SetCollateralDisplayColor { .. } => Some("SetCollateralDisplayColor"),
             Event::SetDeficitRepaymentFraction { .. } => Some("SetDeficitRepaymentFraction"),
             Event::SetDeficitReadonlyThresholdE8s { .. } => Some("SetDeficitReadonlyThresholdE8s"),
+            // Wave-10 LIQ-008
+            Event::BreakerCleared { .. } => Some("BreakerCleared"),
+            Event::SetBreakerWindowNs { .. } => Some("SetBreakerWindowNs"),
+            Event::SetBreakerWindowDebtCeilingE8s { .. } => Some("SetBreakerWindowDebtCeilingE8s"),
             // Any variant that surfaces `Admin` via `type_filter` but isn't
             // enumerated here still matches `Admin` type filters; it just
             // carries no fine-grained label.
@@ -868,6 +916,12 @@ impl Event {
             Event::PriceUpdate { timestamp, .. } => Some(*timestamp),
             Event::AccrueInterest { timestamp } => Some(*timestamp),
             Event::SetBotBudget { start_timestamp, .. } => Some(*start_timestamp),
+            // Wave-10 LIQ-008: surface breaker events in time-range queries so
+            // operators can audit "every trip in the last 24h" and admin sets.
+            Event::BreakerTripped { timestamp, .. } => Some(*timestamp),
+            Event::BreakerCleared { timestamp, .. } => Some(*timestamp),
+            Event::SetBreakerWindowNs { timestamp, .. } => Some(*timestamp),
+            Event::SetBreakerWindowDebtCeilingE8s { timestamp, .. } => Some(*timestamp),
             _ => None,
         }
     }
@@ -1598,6 +1652,23 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             Event::SetDeficitReadonlyThresholdE8s { threshold_e8s, .. } => {
                 state.deficit_readonly_threshold_e8s = threshold_e8s;
             },
+            // Wave-10 LIQ-008: rebuild the breaker latch + admin tunables from
+            // the event log. `recent_liquidations` is intentionally NOT
+            // populated here — the rolling window is transient and any entries
+            // older than 30 minutes (the default window) would be evicted on
+            // the first record after replay anyway.
+            Event::BreakerTripped { .. } => {
+                state.liquidation_breaker_tripped = true;
+            },
+            Event::BreakerCleared { .. } => {
+                state.liquidation_breaker_tripped = false;
+            },
+            Event::SetBreakerWindowNs { window_ns, .. } => {
+                state.breaker_window_ns = window_ns;
+            },
+            Event::SetBreakerWindowDebtCeilingE8s { ceiling_e8s, .. } => {
+                state.breaker_window_debt_ceiling_e8s = ceiling_e8s;
+            },
         }
     }
     state.next_available_vault_id = vault_id;
@@ -1747,6 +1818,65 @@ pub fn record_set_deficit_readonly_threshold_e8s(state: &mut State, threshold_e8
     state.deficit_readonly_threshold_e8s = threshold_e8s;
     record_event(&Event::SetDeficitReadonlyThresholdE8s {
         threshold_e8s,
+        timestamp: now(),
+    });
+}
+
+/// Wave-10 LIQ-008: production wrapper called from each vault.rs liquidation
+/// site. Delegates the rolling-window state mutation to
+/// `state::record_recent_liquidation`; if that returns `true` (latch just
+/// flipped), logs the trip and emits a `BreakerTripped` event so the
+/// explorer audit trail captures it. No-op when the breaker is disabled or
+/// already tripped — vault.rs sites can call this unconditionally.
+pub fn record_liquidation_for_breaker(state: &mut State, debt_e8s: u64) {
+    let now_ns = now();
+    let just_tripped =
+        crate::state::record_recent_liquidation(state, debt_e8s, now_ns);
+    if just_tripped {
+        let total = state.windowed_liquidation_total(now_ns);
+        let ceiling = state.breaker_window_debt_ceiling_e8s;
+        ic_canister_log::log!(
+            crate::INFO,
+            "[LIQ-008] circuit breaker tripped: windowed total {} e8s >= ceiling {} e8s (window {} ns, log size {})",
+            total,
+            ceiling,
+            state.breaker_window_ns,
+            state.recent_liquidations.len()
+        );
+        record_event(&Event::BreakerTripped {
+            total_e8s: total,
+            ceiling_e8s: ceiling,
+            timestamp: now_ns,
+        });
+    }
+}
+
+/// Wave-10 LIQ-008: admin clears the breaker latch and resumes auto-publishing.
+/// Records `BreakerCleared` with the windowed total at the moment of clearing
+/// so the audit trail captures what state the operator was looking at when
+/// they decided to resume.
+pub fn record_breaker_cleared(state: &mut State, remaining_total_e8s: u64) {
+    state.liquidation_breaker_tripped = false;
+    record_event(&Event::BreakerCleared {
+        remaining_total_e8s,
+        timestamp: now(),
+    });
+}
+
+/// Wave-10 LIQ-008: admin tunes the rolling-window length. 0 disables the breaker.
+pub fn record_set_breaker_window_ns(state: &mut State, window_ns: u64) {
+    state.breaker_window_ns = window_ns;
+    record_event(&Event::SetBreakerWindowNs {
+        window_ns,
+        timestamp: now(),
+    });
+}
+
+/// Wave-10 LIQ-008: admin tunes the cumulative-debt ceiling. 0 disables tripping.
+pub fn record_set_breaker_window_debt_ceiling_e8s(state: &mut State, ceiling_e8s: u64) {
+    state.breaker_window_debt_ceiling_e8s = ceiling_e8s;
+    record_event(&Event::SetBreakerWindowDebtCeilingE8s {
+        ceiling_e8s,
         timestamp: now(),
     });
 }

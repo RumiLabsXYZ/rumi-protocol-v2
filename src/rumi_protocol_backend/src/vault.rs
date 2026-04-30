@@ -2223,6 +2223,11 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
             vault.accrued_interest -= interest_share;
         }
 
+        // Wave-10 LIQ-008: append the gross debt cleared to the rolling-
+        // window log. Records all liquidations (healthy and underwater) so
+        // the circuit breaker can pause auto-publishing during cascades.
+        crate::event::record_liquidation_for_breaker(s, max_liquidatable_debt.to_u64());
+
         // Wave-8e LIQ-005: per-call deficit accrual. `max_liquidatable_debt`
         // is the icUSD amount the vault's debt was reduced by;
         // `total_to_seize` is the collateral seized. Predicate: seized USD <
@@ -2514,6 +2519,10 @@ pub async fn liquidate_vault_partial_with_stable(
             vault.collateral_amount -= total_to_seize.to_u64();
             vault.accrued_interest -= interest_share;
         }
+
+        // Wave-10 LIQ-008: append the gross debt cleared to the rolling-
+        // window log for the mass-liquidation circuit breaker.
+        crate::event::record_liquidation_for_breaker(s, max_liquidatable_debt.to_u64());
 
         // Wave-8e LIQ-005: per-call deficit accrual. The stablecoin path
         // pulls ckUSDT/ckUSDC from the liquidator (1:1 with icUSD plus a
@@ -2902,6 +2911,12 @@ pub async fn liquidate_vault_debt_already_burned(
             vault.accrued_interest -= interest_share;
         }
 
+        // Wave-10 LIQ-008: append the gross debt cleared to the rolling-
+        // window log. SP writedowns count toward the breaker — a flood of
+        // SP-absorbed liquidations is still a stress signal worth pausing
+        // bot/SP auto-publishing on.
+        crate::event::record_liquidation_for_breaker(s, max_liquidatable_debt.to_u64());
+
         // Wave-8e LIQ-005: per-call deficit accrual on the SP writedown
         // path. Even though icUSD was burned externally (legacy 3pool burn)
         // or 3USD reserves were credited (reserves path), the protocol's
@@ -3158,6 +3173,10 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         // Execute the liquidation in state first (this must happen)
         // liquidate_vault returns the interest share of the debt reduction
         let interest_share = s.liquidate_vault(vault_id, mode, collateral_price_usd);
+
+        // Wave-10 LIQ-008: append the gross debt cleared to the rolling-
+        // window log for the mass-liquidation circuit breaker.
+        crate::event::record_liquidation_for_breaker(s, debt_amount.to_u64());
 
         // Wave-8e LIQ-005: if seized USD < debt cleared, the protocol
         // absorbed bad debt. Track the shortfall in `protocol_deficit_icusd`
@@ -3621,6 +3640,10 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
             vault.collateral_amount -= total_to_seize.to_u64();
             vault.accrued_interest -= interest_share;
         }
+
+        // Wave-10 LIQ-008: append the gross debt cleared to the rolling-
+        // window log for the mass-liquidation circuit breaker.
+        crate::event::record_liquidation_for_breaker(s, liquidator_payment.to_u64());
 
         // Wave-8e LIQ-005: per-call deficit accrual.
         let seized_usd = crate::numeric::collateral_usd_value(

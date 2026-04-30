@@ -111,6 +111,15 @@ fn default_deficit_repayment_fraction() -> Ratio {
     DEFAULT_DEFICIT_REPAYMENT_FRACTION
 }
 
+/// Wave-10 LIQ-008: default rolling-window length for the mass-liquidation
+/// circuit breaker. 30 minutes (in nanoseconds). Pre-Wave-10 CBOR snapshots
+/// get this value via `serde(default)`.
+pub const DEFAULT_BREAKER_WINDOW_NS: u64 = 30 * 60 * 1_000_000_000;
+
+fn default_breaker_window_ns() -> u64 {
+    DEFAULT_BREAKER_WINDOW_NS
+}
+
 /// Default Layer 1 multipliers at each CR marker
 pub const DEFAULT_RATE_MULTIPLIER_HEALTHY: Ratio = Ratio::new(dec!(1.0));
 pub const DEFAULT_RATE_MULTIPLIER_WARNING: Ratio = Ratio::new(dec!(1.75));
@@ -1001,6 +1010,45 @@ pub struct State {
     /// deficit accrual.
     #[serde(default)]
     pub deficit_readonly_threshold_e8s: u64,
+
+    // ─── Wave-10 LIQ-008: mass-liquidation circuit breaker ───
+    //
+    // Bounds the auto-publishing path (check_vaults → bot / stability pool)
+    // once cumulative liquidated debt within a rolling window crosses a
+    // configurable ceiling. Manual liquidation endpoints stay open. Once
+    // tripped, the latch is sticky — admin must call clear_liquidation_breaker
+    // to resume auto-publishing.
+    //
+    // serde(default) on every field — pre-Wave-10 snapshots decode to an
+    // empty log, the 30-minute default window, a disabled ceiling (0), and
+    // a not-tripped flag.
+
+    /// Rolling-window log of liquidations for circuit-breaker gating.
+    /// Each entry is `(timestamp_ns, debt_cleared_icusd_e8s)`. Pruned in
+    /// place inside `record_recent_liquidation` to keep entries within
+    /// `breaker_window_ns`. Reads sum without mutation.
+    #[serde(default)]
+    pub recent_liquidations: Vec<(u64, u64)>,
+
+    /// Rolling window length in nanoseconds. Default 30 minutes. 0 disables
+    /// the breaker entirely (no recording, no tripping). Admin-tunable via
+    /// `set_breaker_window_ns`.
+    #[serde(default = "default_breaker_window_ns")]
+    pub breaker_window_ns: u64,
+
+    /// Cumulative-debt-cleared ceiling within the window, in icUSD e8s.
+    /// 0 disables tripping (operator should leave at 0 for the first 24-48h
+    /// post-deploy and set after observing baseline `windowed_liquidation_total`).
+    /// Admin-tunable via `set_breaker_window_debt_ceiling_e8s`.
+    #[serde(default)]
+    pub breaker_window_debt_ceiling_e8s: u64,
+
+    /// Sticky latch. Set to true the first time the windowed debt total
+    /// crosses the ceiling. Cleared by admin via `clear_liquidation_breaker`.
+    /// While true, `check_vaults` skips both bot and SP `notify_liquidatable_vaults`
+    /// pushes; manual liquidation endpoints are unaffected.
+    #[serde(default)]
+    pub liquidation_breaker_tripped: bool,
 }
 
 /// Serde-only fallback: provides zero/empty/None defaults for fields missing from
@@ -1108,6 +1156,10 @@ impl Default for State {
             total_deficit_repaid_icusd: ICUSD::new(0),
             deficit_repayment_fraction: DEFAULT_DEFICIT_REPAYMENT_FRACTION,
             deficit_readonly_threshold_e8s: 0,
+            recent_liquidations: Vec::new(),
+            breaker_window_ns: DEFAULT_BREAKER_WINDOW_NS,
+            breaker_window_debt_ceiling_e8s: 0,
+            liquidation_breaker_tripped: false,
         }
     }
 }
@@ -1307,6 +1359,10 @@ impl From<InitArg> for State {
             total_deficit_repaid_icusd: ICUSD::new(0),
             deficit_repayment_fraction: DEFAULT_DEFICIT_REPAYMENT_FRACTION,
             deficit_readonly_threshold_e8s: 0,
+            recent_liquidations: Vec::new(),
+            breaker_window_ns: DEFAULT_BREAKER_WINDOW_NS,
+            breaker_window_debt_ceiling_e8s: 0,
+            liquidation_breaker_tripped: false,
         }
     }
 }
@@ -2952,6 +3008,22 @@ impl State {
         true
     }
 
+    /// Wave-10 LIQ-008: pure-read sum of liquidation debt cleared in the
+    /// rolling window ending at `now_ns`. Filters without mutation. Returns
+    /// 0 when the window is disabled (`breaker_window_ns == 0`) or the log
+    /// is empty.
+    pub fn windowed_liquidation_total(&self, now_ns: u64) -> u64 {
+        if self.breaker_window_ns == 0 {
+            return 0;
+        }
+        let cutoff = now_ns.saturating_sub(self.breaker_window_ns);
+        self.recent_liquidations
+            .iter()
+            .filter(|(ts, _)| *ts >= cutoff)
+            .map(|(_, debt)| *debt)
+            .sum()
+    }
+
     /// Liquidate a vault. Returns the interest share of the debt reduction
     /// so callers can route it to treasury.
     pub fn liquidate_vault(&mut self, vault_id: u64, mode: Mode, collateral_price: UsdIcp) -> ICUSD {
@@ -3390,6 +3462,38 @@ impl State {
     // that could silently exit Recovery mode based on a timeout. Mode transitions are now
     // handled exclusively by update_mode() (automatic, based on collateral ratio) or by
     // admin functions (enter_recovery_mode / exit_recovery_mode).
+}
+
+/// Wave-10 LIQ-008: append a successful liquidation to the rolling-window
+/// log, prune entries past `breaker_window_ns`, and trip the latch if the
+/// windowed total crosses the ceiling. Free function (not method) so the
+/// 5 vault.rs liquidation sites can call it directly via
+/// `crate::state::record_recent_liquidation(s, debt_e8s, ic_cdk::api::time())`.
+///
+/// Returns `true` iff this call flipped `liquidation_breaker_tripped` from
+/// `false` to `true` — callers (vault.rs / event::record_liquidation_for_breaker)
+/// emit the `BreakerTripped` event when this returns `true`.
+///
+/// No-ops (returns `false`) if the window is disabled (`window_ns == 0`),
+/// the recorded debt is zero, the ceiling is disabled (`ceiling == 0`), or
+/// the latch is already tripped.
+pub fn record_recent_liquidation(state: &mut State, debt_e8s: u64, now_ns: u64) -> bool {
+    if debt_e8s == 0 || state.breaker_window_ns == 0 {
+        return false;
+    }
+    state.recent_liquidations.push((now_ns, debt_e8s));
+    let cutoff = now_ns.saturating_sub(state.breaker_window_ns);
+    state.recent_liquidations.retain(|(ts, _)| *ts >= cutoff);
+
+    if state.breaker_window_debt_ceiling_e8s == 0 || state.liquidation_breaker_tripped {
+        return false;
+    }
+    let total = state.windowed_liquidation_total(now_ns);
+    if total >= state.breaker_window_debt_ceiling_e8s {
+        state.liquidation_breaker_tripped = true;
+        return true;
+    }
+    false
 }
 
 pub(crate) struct DistributeToVaultEntry {
