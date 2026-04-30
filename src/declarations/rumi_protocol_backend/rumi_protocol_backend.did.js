@@ -663,17 +663,21 @@ export const idlFactory = ({ IDL }) => {
     'total_collateral_ratio' : IDL.Float64,
     'deficit_repayment_fraction' : IDL.Float64,
     'ckstable_repay_fee' : IDL.Float64,
+    'windowed_liquidation_total_e8s' : IDL.Nat64,
     'total_icp_margin' : IDL.Nat64,
     'recovery_target_cr' : IDL.Float64,
     'frozen' : IDL.Bool,
     'weighted_average_interest_rate' : IDL.Float64,
+    'liquidation_breaker_tripped' : IDL.Bool,
     'protocol_deficit_icusd' : IDL.Nat64,
+    'breaker_window_ns' : IDL.Nat64,
     'manual_mode_override' : IDL.Bool,
     'liquidation_bonus' : IDL.Float64,
     'per_collateral_rate_curves' : IDL.Vec(PerCollateralRateCurve),
     'reserve_redemptions_enabled' : IDL.Bool,
     'total_deficit_repaid_icusd' : IDL.Nat64,
     'global_icusd_mint_cap' : IDL.Nat64,
+    'breaker_window_debt_ceiling_e8s' : IDL.Nat64,
     'last_icp_rate' : IDL.Float64,
   });
   const Result_6 = IDL.Variant({ 'Ok' : IDL.Nat8, 'Err' : ProtocolError });
@@ -821,6 +825,7 @@ export const idlFactory = ({ IDL }) => {
     'bot_claim_liquidation' : IDL.Func([IDL.Nat64], [Result_4], []),
     'bot_confirm_liquidation' : IDL.Func([IDL.Nat64], [Result], []),
     'claim_liquidity_returns' : IDL.Func([], [Result_1], []),
+    'clear_liquidation_breaker' : IDL.Func([], [Result], []),
     'clear_stuck_operations' : IDL.Func(
         [IDL.Opt(IDL.Principal)],
         [Result_1],
@@ -1020,6 +1025,8 @@ export const idlFactory = ({ IDL }) => {
         [Result],
         [],
       ),
+    'set_breaker_window_debt_ceiling_e8s' : IDL.Func([IDL.Nat64], [Result], []),
+    'set_breaker_window_ns' : IDL.Func([IDL.Nat64], [Result], []),
     'set_ckstable_repay_fee' : IDL.Func([IDL.Float64], [Result], []),
     'set_collateral_borrow_threshold' : IDL.Func(
         [IDL.Principal, IDL.Float64],
