@@ -66,7 +66,16 @@ pub const SRC_THREEUSD: &str = "threeusd";
 /// `VaultPositionState` for the approximations that make this a flagged
 /// `approximate_sources` entry.
 pub const SRC_VAULT_EQUITY: &str = "vault_equity";
+/// Per-(principal, pool) LP shares × USD value of the pool's reserves.
+/// Approximate: historical points use the LATEST pool composition (we don't
+/// snapshot AMM reserves to a stable log) — drift bounded by rebalances
+/// since the user's LP position was opened.
+pub const SRC_AMM_LP: &str = "amm_lp";
 pub const SRC_SP_DEPOSIT: &str = "sp_deposit";
+/// Retained as a constant so historical breakdowns and tests that still
+/// reference the legacy source string compile; no longer pushed into live
+/// breakdowns (3USD = 3pool LP, see compute_address_value_series).
+#[allow(dead_code)]
 pub const SRC_3POOL_LP: &str = "three_pool_lp";
 
 thread_local! {
@@ -131,14 +140,16 @@ pub fn get_address_value_series(query: types::AddressValueSeriesQuery) -> types:
     let liq_evs = storage::events::evt_liquidations::range(0, now, MAX_EVENT_LOAD);
     let sp_evs = storage::events::evt_stability::range(0, now, MAX_EVENT_LOAD);
     let liquidity_evs = storage::events::evt_liquidity::range(0, now, MAX_EVENT_LOAD);
+    let amm_liq_evs = storage::events::evt_amm_liquidity::range(0, now, MAX_EVENT_LOAD);
     let price_snaps = storage::fast::fast_prices::range(0, now, MAX_EVENT_LOAD);
     let three_pool_snaps = storage::fast::fast_3pool::range(0, now, MAX_EVENT_LOAD);
 
-    let (icusd_ledger, three_pool, collateral_decimals) = state::read_state(|s| {
+    let (icusd_ledger, three_pool, collateral_decimals, amm_pools) = state::read_state(|s| {
         (
             s.sources.icusd_ledger,
             s.sources.three_pool,
             s.collateral_decimals.clone().unwrap_or_default(),
+            s.amm_pools.clone().unwrap_or_default(),
         )
     });
     let icusd_balance = storage::balance_tracker::all_balances(storage::balance_tracker::Token::IcUsd)
@@ -167,6 +178,7 @@ pub fn get_address_value_series(query: types::AddressValueSeriesQuery) -> types:
         &liq_evs,
         &sp_evs,
         &liquidity_evs,
+        &amm_liq_evs,
         &price_snaps,
         &three_pool_snaps,
         icusd_balance,
@@ -176,6 +188,7 @@ pub fn get_address_value_series(query: types::AddressValueSeriesQuery) -> types:
         icusd_ledger,
         three_pool,
         &collateral_decimals,
+        &amm_pools,
     );
 
     let approximate_sources = vec![
@@ -187,10 +200,12 @@ pub fn get_address_value_series(query: types::AddressValueSeriesQuery) -> types:
         // emits AccrueInterest with no per-vault breakdown). See
         // VaultPositionState docs for the precise drift bounds.
         SRC_VAULT_EQUITY.to_string(),
-        // AMM LP is absent from the output entirely in v1; no source string
-        // surfaces here because the breakdown never contains an "amm_lp"
-        // entry. Documented in the module header so the UI can set
-        // expectations without reading the backend.
+        // AMM LP is approximated: historical points are valued with the
+        // CURRENT pool composition (we cache the latest reserves in heap
+        // and don't snapshot them to a stable log). Drift is bounded by
+        // pool rebalancing since the position was opened; for stable-stable
+        // pools it's negligible, for volatile pools it can be material.
+        SRC_AMM_LP.to_string(),
     ];
 
     let resp = types::AddressValueSeriesResponse {
@@ -245,6 +260,7 @@ pub fn compute_address_value_series(
     liquidation_events: &[storage::events::AnalyticsLiquidationEvent],
     stability_events: &[storage::events::AnalyticsStabilityEvent],
     liquidity_3pool_events: &[storage::events::AnalyticsLiquidityEvent],
+    amm_liquidity_events: &[storage::events::AnalyticsAmmLiquidityEvent],
     price_snaps: &[storage::fast::FastPriceSnapshot],
     three_pool_snaps: &[storage::fast::Fast3PoolSnapshot],
     icusd_current_balance_e8s: u64,
@@ -254,6 +270,7 @@ pub fn compute_address_value_series(
     icusd_ledger: Principal,
     three_pool: Principal,
     collateral_decimals: &HashMap<Principal, u8>,
+    amm_pools: &[storage::AmmPoolSnapshot],
 ) -> Vec<types::AddressValuePoint> {
     let timestamps = sample_timestamps(from_ns, to_ns, resolution_ns);
 
@@ -262,7 +279,13 @@ pub fn compute_address_value_series(
     // at the largest ts <= sample_ts.
     let vault_timeline = build_vault_position_timeline(principal, vault_events, liquidation_events);
     let sp_timeline = build_sp_deposit_timeline(principal, stability_events);
-    let three_pool_lp_timeline = build_three_pool_lp_timeline(principal, liquidity_3pool_events);
+    let amm_lp_timeline = build_amm_lp_timeline(principal, amm_liquidity_events);
+    // Note: build_three_pool_lp_timeline is still exposed for tests + future
+    // historical 3USD-balance reconstruction work, but the live breakdown
+    // path no longer uses it (3USD ledger balance now stands in for 3pool LP
+    // exposure to avoid double-counting AMM-locked 3USD).
+    let _ = liquidity_3pool_events;
+    let _ = three_pool_snaps;
 
     let mut points = Vec::with_capacity(timestamps.len());
     for ts in timestamps {
@@ -327,22 +350,36 @@ pub fn compute_address_value_series(
             total = total.saturating_add(sp_balance);
         }
 
-        // 3pool LP balance × historical virtual price.
-        let lp_amount = lookup_timeline_scalar_at(&three_pool_lp_timeline, ts);
-        if lp_amount > 0 {
-            let vp = virtual_price_at(ts, three_pool_snaps);
-            let lp_value = apply_virtual_price(lp_amount, vp);
-            if lp_value > 0 {
-                breakdown.push(types::AddressValueSourceBreakdown {
-                    source: SRC_3POOL_LP.to_string(),
-                    value_usd_e8s: lp_value,
-                });
-                total = total.saturating_add(lp_value);
-            }
-        }
+        // 3pool LP exposure is intentionally NOT a separate source: 3USD IS
+        // the rumi_3pool LP token, so a user's 3pool position equals their
+        // 3USD ledger balance — already counted under SRC_THREEUSD above. The
+        // earlier `three_pool_lp` line tracked cumulative add/remove events
+        // and double-counted any 3USD that had been transferred elsewhere
+        // (e.g. deposited as AMM liquidity), inflating portfolio totals. The
+        // AMM-locked portion is now represented inside SRC_AMM_LP via pool
+        // reserves, which is also where the user's true 3pool exposure
+        // surfaces when they're an LP rather than holding 3USD directly.
 
-        let _ = icusd_ledger;
-        let _ = three_pool;
+        // AMM LP positions across all pools the principal has touched.
+        // Approximation: the latest pool composition is applied at every
+        // sample ts since reserves aren't snapshotted to a stable log.
+        let amm_lp_state = amm_lp_lookup_at(&amm_lp_timeline, ts);
+        let amm_lp_value = price_amm_lp_state(
+            &amm_lp_state,
+            ts,
+            amm_pools,
+            price_snaps,
+            collateral_decimals,
+            icusd_ledger,
+            three_pool,
+        );
+        if amm_lp_value > 0 {
+            breakdown.push(types::AddressValueSourceBreakdown {
+                source: SRC_AMM_LP.to_string(),
+                value_usd_e8s: amm_lp_value,
+            });
+            total = total.saturating_add(amm_lp_value);
+        }
 
         points.push(types::AddressValuePoint {
             ts_ns: ts,
@@ -606,6 +643,7 @@ pub fn build_sp_deposit_timeline(
 
 /// 3pool LP holdings reconstructed from Add / Remove / RemoveOneCoin events.
 /// Donate events don't mint LP tokens, so they're skipped.
+#[allow(dead_code)]
 pub fn build_three_pool_lp_timeline(
     principal: Principal,
     liquidity_events: &[storage::events::AnalyticsLiquidityEvent],
@@ -646,6 +684,118 @@ pub fn lookup_timeline_scalar_at(timeline: &[(u64, u64)], ts: u64) -> u64 {
     last
 }
 
+/// Per-pool LP shares held by a principal at one timeline event.
+pub type AmmLpState = HashMap<String, u64>;
+
+/// Reconstruct LP-share holdings per pool over time from AddLiquidity /
+/// RemoveLiquidity events. Each timeline entry carries a full state snapshot
+/// so pricing at a sample ts is one map lookup per pool.
+pub fn build_amm_lp_timeline(
+    principal: Principal,
+    events: &[storage::events::AnalyticsAmmLiquidityEvent],
+) -> Vec<(u64, AmmLpState)> {
+    use storage::events::LiquidityAction;
+    let mut running: AmmLpState = HashMap::new();
+    let mut timeline: Vec<(u64, AmmLpState)> = Vec::new();
+    for e in events {
+        if e.caller != principal {
+            continue;
+        }
+        let entry = running.entry(e.pool_id.clone()).or_insert(0);
+        let before = *entry;
+        match e.action {
+            LiquidityAction::Add => *entry = entry.saturating_add(e.lp_shares),
+            LiquidityAction::Remove | LiquidityAction::RemoveOneCoin => {
+                *entry = entry.saturating_sub(e.lp_shares)
+            }
+            LiquidityAction::Donate => {}
+        }
+        if *entry != before {
+            timeline.push((e.timestamp_ns, running.clone()));
+        }
+    }
+    timeline
+}
+
+/// Latest LP-state at or before `ts`. Empty map if the timeline doesn't cover
+/// the timestamp.
+pub fn amm_lp_lookup_at(timeline: &[(u64, AmmLpState)], ts: u64) -> AmmLpState {
+    let mut last: Option<&AmmLpState> = None;
+    for (event_ts, state) in timeline {
+        if *event_ts > ts {
+            break;
+        }
+        last = Some(state);
+    }
+    last.cloned().unwrap_or_default()
+}
+
+/// Convert a raw token amount into USD e8s using the given decimals.
+fn raw_to_usd_e8s(raw: u128, price_usd: f64, decimals: u8) -> u128 {
+    if raw == 0 || price_usd <= 0.0 {
+        return 0;
+    }
+    let price_e8s = (price_usd * 1e8) as u128;
+    let scaled = raw.saturating_mul(price_e8s);
+    let divisor = 10u128.pow(decimals as u32);
+    if divisor == 0 { return 0; }
+    scaled / divisor
+}
+
+/// Sum the user's USD value across every AMM pool they hold LP in.
+///
+/// Per-pool valuation: `(lp_shares / total_lp_shares) × (reserve_a × price_a +
+/// reserve_b × price_b)`. Stablecoins (icUSD, 3USD-LP) are pinned to $1
+/// because the spot-price log doesn't carry them. Any pool whose composition
+/// can't be priced (missing snapshot or both legs unpriced) contributes 0.
+#[allow(clippy::too_many_arguments)]
+pub fn price_amm_lp_state(
+    state: &AmmLpState,
+    ts: u64,
+    pools: &[storage::AmmPoolSnapshot],
+    price_snaps: &[storage::fast::FastPriceSnapshot],
+    decimals_map: &HashMap<Principal, u8>,
+    icusd_ledger: Principal,
+    three_pool: Principal,
+) -> u64 {
+    if state.is_empty() {
+        return 0;
+    }
+    let mut total_e8s: u128 = 0;
+    for (pool_id, lp_shares) in state {
+        if *lp_shares == 0 { continue; }
+        let pool = match pools.iter().find(|p| &p.pool_id == pool_id) {
+            Some(p) => p,
+            None => continue,
+        };
+        if pool.total_lp_shares == 0 { continue; }
+
+        // Per-leg USD value of the full pool reserves.
+        let leg_usd = |token: Principal, reserve: u128| -> u128 {
+            let dec = decimals_map.get(&token).copied().unwrap_or(8);
+            let price = if token == icusd_ledger || token == three_pool {
+                1.0
+            } else {
+                match price_usd_at(token, ts, price_snaps) {
+                    Some(p) => p,
+                    None => return 0,
+                }
+            };
+            raw_to_usd_e8s(reserve, price, dec)
+        };
+        let pool_usd = leg_usd(pool.token_a, pool.reserve_a)
+            .saturating_add(leg_usd(pool.token_b, pool.reserve_b));
+        if pool_usd == 0 { continue; }
+
+        // user_share = lp_shares / total_lp_shares; user_usd = pool_usd × share.
+        let user_usd = pool_usd
+            .saturating_mul(*lp_shares as u128)
+            / pool.total_lp_shares;
+        total_e8s = total_e8s.saturating_add(user_usd);
+    }
+    total_e8s.min(u64::MAX as u128) as u64
+}
+
 // ─── Pricing helpers ───────────────────────────────────────────────────────
 
 /// Latest USD price for `token` recorded at or before `ts`. Returns `None`
@@ -673,6 +823,7 @@ pub fn price_usd_at(
 /// multiplier on the LP share value. Defaults to 1.0 when no snapshot covers
 /// the range (bootstrap period, or principal's first activity predates any
 /// recorded Fast3PoolSnapshot).
+#[allow(dead_code)]
 pub fn virtual_price_at(
     ts: u64,
     snapshots: &[storage::fast::Fast3PoolSnapshot],
@@ -692,6 +843,7 @@ pub fn virtual_price_at(
 
 /// Apply an 18-decimal-ish virtual price multiplier to an 8-decimal LP amount.
 /// Result is clamped into u64 to avoid overflow surprises on degenerate inputs.
+#[allow(dead_code)]
 pub fn apply_virtual_price(lp_amount_e8s: u64, virtual_price: f64) -> u64 {
     if lp_amount_e8s == 0 || virtual_price <= 0.0 {
         return 0;
@@ -1129,6 +1281,80 @@ mod tests {
         assert_eq!(v2, 10_000_000_000);
     }
 
+    // ─── AMM LP timeline + pricing ───────────────────────────────────────
+
+    fn amm_evt(
+        ts: u64,
+        caller: Principal,
+        pool: &str,
+        action: storage::events::LiquidityAction,
+        lp: u64,
+    ) -> storage::events::AnalyticsAmmLiquidityEvent {
+        storage::events::AnalyticsAmmLiquidityEvent {
+            timestamp_ns: ts,
+            source_event_id: 0,
+            caller,
+            pool_id: pool.to_string(),
+            action,
+            lp_shares: lp,
+        }
+    }
+
+    #[test]
+    fn amm_lp_timeline_runs_per_pool_balances() {
+        let me = p(1);
+        let events = vec![
+            amm_evt(100, me, "pool_a", storage::events::LiquidityAction::Add, 1_000),
+            amm_evt(200, me, "pool_b", storage::events::LiquidityAction::Add, 500),
+            amm_evt(300, me, "pool_a", storage::events::LiquidityAction::Remove, 200),
+            // Other principal — should not contribute to my timeline.
+            amm_evt(400, p(2), "pool_a", storage::events::LiquidityAction::Add, 9_999),
+        ];
+        let timeline = build_amm_lp_timeline(me, &events);
+        assert_eq!(timeline.len(), 3);
+        assert_eq!(timeline[0].1.get("pool_a").copied(), Some(1_000));
+        assert_eq!(timeline[1].1.get("pool_a").copied(), Some(1_000));
+        assert_eq!(timeline[1].1.get("pool_b").copied(), Some(500));
+        assert_eq!(timeline[2].1.get("pool_a").copied(), Some(800));
+        assert_eq!(timeline[2].1.get("pool_b").copied(), Some(500));
+    }
+
+    #[test]
+    fn amm_lp_pricing_uses_user_share_of_pool_reserves() {
+        let me = p(1);
+        let icp = icp_ledger();
+        let icusd = icusd_ledger();
+        // Pool: 100 ICP @ $5 + 500 icUSD @ $1 = $1000 of reserves, 1000 LP shares total.
+        let pools = vec![storage::AmmPoolSnapshot {
+            pool_id: "icp_icusd".to_string(),
+            token_a: icp,
+            token_b: icusd,
+            reserve_a: 100 * 1_0000_0000,
+            reserve_b: 500 * 1_0000_0000,
+            total_lp_shares: 1_000,
+        }];
+        let snaps = vec![price_snap(100, vec![(icp, 5.0)])];
+        let decimals: HashMap<Principal, u8> = HashMap::from([(icp, 8), (icusd, 8)]);
+        let mut state: AmmLpState = HashMap::new();
+        state.insert("icp_icusd".to_string(), 250); // 25 % of pool
+
+        let v = price_amm_lp_state(&state, 200, &pools, &snaps, &decimals, icusd, three_pool());
+        // 25 % of $1000 = $250 → 25_000_000_000 e8s.
+        assert_eq!(v, 25_000_000_000);
+    }
+
+    #[test]
+    fn amm_lp_pricing_skips_pool_with_no_snapshot() {
+        let me = p(1);
+        let _ = me;
+        let pools: Vec<storage::AmmPoolSnapshot> = vec![]; // pool snapshot missing
+        let mut state: AmmLpState = HashMap::new();
+        state.insert("ghost_pool".to_string(), 100);
+
+        let v = price_amm_lp_state(&state, 200, &pools, &[], &HashMap::new(), icusd_ledger(), three_pool());
+        assert_eq!(v, 0);
+    }
+
     // ─── Series composition ─────────────────────────────────────────────
 
     #[test]
@@ -1139,6 +1365,7 @@ mod tests {
             me,
             0, 400, 100,
             &[], &[], &[], &[],
+            &[], // amm_liquidity_events
             &[],
             &[],
             100_000_000_000u64, // $100 in e8s
@@ -1146,6 +1373,7 @@ mod tests {
             0, None,
             icusd_ledger(), three_pool(),
             &HashMap::new(),
+            &[],
         );
         // Points at t=0, 100, 200, 300, 400.
         assert_eq!(points.len(), 5);
@@ -1183,11 +1411,13 @@ mod tests {
             me,
             0, 400, 100,
             &vault_evs, &[], &sp_evs, &lp_evs,
+            &[], // amm_liquidity_events
             &prices, &tp_snaps,
             0, None,
             0, None,
             icusd_ledger(), three_pool(),
             &HashMap::from([(icp_ledger(), 8)]),
+            &[],
         );
         // t=0: nothing yet.
         assert_eq!(points[0].value_usd_e8s, 0);
@@ -1200,12 +1430,12 @@ mod tests {
         let t200 = &points[2];
         assert_eq!(t200.breakdown.len(), 2);
         assert_eq!(t200.value_usd_e8s, 5_000_000_000 + 50_00_000_000);
-        // t=300: vault + SP + LP. LP = 20e8 * 1.02 ≈ 20.4e8.
+        // t=300: vault + SP only. The legacy three_pool_lp source was dropped
+        // because 3USD = 3pool LP and is already counted via SRC_THREEUSD,
+        // and it double-counted any 3USD redeployed into AMM liquidity.
         let t300 = &points[3];
-        assert_eq!(t300.breakdown.len(), 3);
-        let lp_src = t300.breakdown.iter().find(|b| b.source == SRC_3POOL_LP).unwrap();
-        // 20_00_000_000 * 1.02 = 20_40_000_000.
-        assert!((lp_src.value_usd_e8s as i64 - 20_40_000_000).abs() <= 1);
+        assert_eq!(t300.breakdown.len(), 2);
+        assert!(t300.breakdown.iter().all(|b| b.source != SRC_3POOL_LP));
     }
 
     #[test]
@@ -1225,10 +1455,12 @@ mod tests {
             me,
             0, 400, 100,
             &vault_evs, &[], &[], &[],
+            &[], // amm_liquidity_events
             &prices, &[],
             0, None, 0, None,
             icusd_ledger(), three_pool(),
             &HashMap::from([(icp_ledger(), 8)]),
+            &[],
         );
         assert_eq!(points.len(), 5);
         assert_eq!(points[1].value_usd_e8s, 5_000_000_000);  // $50 @ t=100
@@ -1244,10 +1476,12 @@ mod tests {
             me,
             0, 200, 100,
             &[], &[], &[], &[],
+            &[], // amm_liquidity_events
             &[], &[],
             0, None, 0, None,
             icusd_ledger(), three_pool(),
             &HashMap::new(),
+            &[],
         );
         for p in &points {
             assert_eq!(p.value_usd_e8s, 0);

@@ -5,6 +5,7 @@ pub mod backend_events;
 pub mod three_pool_swaps;
 pub mod three_pool_liquidity;
 pub mod amm_swaps;
+pub mod amm_liquidity;
 pub mod icrc3;
 pub mod stability_pool;
 

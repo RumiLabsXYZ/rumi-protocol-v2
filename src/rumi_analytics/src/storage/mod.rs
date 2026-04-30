@@ -100,6 +100,11 @@ pub const MEM_BAL_3USD: MemoryId = MemoryId::new(57);
 pub const MEM_FIRSTSEEN_ICUSD: MemoryId = MemoryId::new(58);
 pub const MEM_FIRSTSEEN_3USD: MemoryId = MemoryId::new(59);
 
+// AMM liquidity event mirror + cursor (added 2026-04-30 with vault_equity work).
+pub const MEM_EVT_AMM_LIQUIDITY_IDX: MemoryId = MemoryId::new(60);
+pub const MEM_EVT_AMM_LIQUIDITY_DATA: MemoryId = MemoryId::new(61);
+pub const MEM_CURSOR_AMM_LIQUIDITY: MemoryId = MemoryId::new(62);
+
 // --- SlimState ---
 // Bounded residual heap state. Written to MemoryId 0 via StableCell. Holds
 // only small fixed-size values; never any unbounded collections.
@@ -145,6 +150,27 @@ pub struct SlimState {
     /// backfill has not run yet on this canister.
     #[serde(default)]
     pub add_margin_backfill_cursor: Option<u64>,
+    /// Latest AMM pool composition (reserves + LP supply + token pair),
+    /// refreshed every fast-collector cycle. Used by `address_value` to
+    /// price each LP position as `(lp_shares / total_lp_shares) ×
+    /// (reserve_a × price_a + reserve_b × price_b)`. Heap-only because
+    /// queries can't make inter-canister calls — the cache is wiped on
+    /// upgrade and re-populated on the first fast tick (which the post_
+    /// upgrade hook fires immediately, see timers.rs). `None` until the
+    /// first successful AMM `get_pools` after upgrade.
+    #[serde(default)]
+    pub amm_pools: Option<Vec<AmmPoolSnapshot>>,
+}
+
+/// Snapshot of one AMM pool's composition for portfolio LP valuation.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct AmmPoolSnapshot {
+    pub pool_id: String,
+    pub token_a: Principal,
+    pub token_b: Principal,
+    pub reserve_a: u128,
+    pub reserve_b: u128,
+    pub total_lp_shares: u128,
 }
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
@@ -188,6 +214,7 @@ impl Default for SlimState {
             last_pull_cycle_ns: None,
             collateral_decimals: None,
             add_margin_backfill_cursor: None,
+            amm_pools: None,
         }
     }
 }

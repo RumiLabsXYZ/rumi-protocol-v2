@@ -50,6 +50,7 @@ async fn pull_cycle() {
         tailing::three_pool_swaps::run(),
         tailing::three_pool_liquidity::run(),
         tailing::amm_swaps::run(),
+        tailing::amm_liquidity::run(),
         tailing::icrc3::tail_icusd_blocks(),
         tailing::icrc3::tail_3pool_blocks(),
         tailing::stability_pool::run(),

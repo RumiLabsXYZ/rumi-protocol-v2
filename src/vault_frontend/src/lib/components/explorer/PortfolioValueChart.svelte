@@ -107,9 +107,13 @@
 
   const SOURCE_STYLES: readonly SourceStyle[] = [
     { key: 'vault_equity',     label: 'Vault equity',     color: '#d176e8', fill: 'rgba(209, 118, 232, 0.22)' },
-    { key: 'three_pool_lp',    label: '3pool LP',         color: '#fbbf24', fill: 'rgba(251, 191, 36, 0.22)' },
+    { key: 'amm_lp',           label: 'AMM LP',           color: '#f87171', fill: 'rgba(248, 113, 113, 0.22)' },
     { key: 'sp_deposit',       label: 'Stability pool',   color: '#34d399', fill: 'rgba(52, 211, 153, 0.22)' },
     { key: 'icusd',            label: 'icUSD',            color: '#2DD4BF', fill: 'rgba(45, 212, 191, 0.22)' },
+    // 3USD ledger balance also represents the user's 3pool LP exposure
+    // (3USD = rumi_3pool LP token). The separate `three_pool_lp` source was
+    // removed analytics-side because it double-counted 3USD redeployed as
+    // AMM liquidity (which now surfaces under `amm_lp` via pool reserves).
     { key: 'threeusd',         label: '3USD',             color: '#818cf8', fill: 'rgba(129, 140, 248, 0.22)' },
   ] as const;
 
@@ -118,6 +122,8 @@
     threeusd: '3USD ledger balance shown as current value (approximation).',
     vault_equity:
       'Vault equity = collateral USD − icUSD debt. Debt excludes accrued interest and per-vault redemption seizure (timeline approximation).',
+    amm_lp:
+      'AMM LP positions priced with the latest pool composition at every historical point (reserves are not snapshotted; drift bounded by pool rebalancing since open).',
   };
 
   // ── Derived series ─────────────────────────────────────────────────────
