@@ -53,6 +53,18 @@ fn pre_upgrade() {
     storage::set_slim(slim);
 }
 
+/// Lower-case hex of a 32-byte hash. Used in trap messages for ICRC-3
+/// hash-chain integrity checks so on-call output matches block-explorer
+/// formatting rather than the default `{:?}` decimal-byte rendering.
+fn hex_lower(bytes: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(&mut s, "{:02x}", b);
+    }
+    s
+}
+
 #[post_upgrade]
 fn post_upgrade() {
     // Step 1: BEFORE touching any storage::* thread-local, try to read a
@@ -143,6 +155,7 @@ fn post_upgrade() {
     // First post_upgrade after this change ships will backfill all
     // pre-existing blocks. Every subsequent upgrade hits the early-return
     // inside backfill and the checks below run cheaply.
+    let hashes_before_backfill = storage::block_hashes::len();
     storage::migration::backfill_hash_chain();
 
     let blocks_len = storage::blocks::len();
@@ -162,14 +175,19 @@ fn post_upgrade() {
         if Some(cached_tip) != state_tip {
             ic_cdk::trap(&format!(
                 "post_upgrade: ICRC-3 cached tip != state.last_block_hash. \
-                 cached={:?} state={:?}",
-                cached_tip, state_tip
+                 cached={} state={}",
+                hex_lower(&cached_tip),
+                state_tip.map(|h| hex_lower(&h)).unwrap_or_else(|| "None".to_string()),
             ));
         }
     }
 
-    log!(INFO,
-        "Rumi 3pool post-upgrade: hash cache OK. blocks={blocks_len} hashes={hashes_len}");
+    let backfilled = blocks_len.saturating_sub(hashes_before_backfill);
+    if backfilled > 0 {
+        log!(INFO,
+            "Rumi 3pool post-upgrade: backfilled {backfilled} ICRC-3 hashes. \
+             blocks={blocks_len} hashes={hashes_len}");
+    }
 
     setup_timers();
 }
