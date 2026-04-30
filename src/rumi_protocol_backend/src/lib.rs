@@ -133,6 +133,18 @@ pub struct ProtocolStatus {
     /// Wave-8e LIQ-005: e8s threshold above which the protocol auto-latches
     /// to ReadOnly. 0 disables the latch.
     pub deficit_readonly_threshold_e8s: u64,
+    /// Wave-10 LIQ-008: rolling window length for the mass-liquidation
+    /// circuit breaker, in nanoseconds. 0 disables the breaker.
+    pub breaker_window_ns: u64,
+    /// Wave-10 LIQ-008: cumulative-debt ceiling within the window, in icUSD
+    /// e8s. 0 disables tripping.
+    pub breaker_window_debt_ceiling_e8s: u64,
+    /// Wave-10 LIQ-008: live windowed sum of debt cleared (icUSD e8s).
+    /// Compares to `breaker_window_debt_ceiling_e8s` to project breaker headroom.
+    pub windowed_liquidation_total_e8s: u64,
+    /// Wave-10 LIQ-008: true once the breaker has tripped on the current
+    /// window total. Cleared by admin via `clear_liquidation_breaker`.
+    pub liquidation_breaker_tripped: bool,
 }
 
 /// Per-collateral debt and weighted interest rate for APR calculations.
@@ -502,6 +514,20 @@ pub fn check_vaults() {
             s.bot_budget_remaining_e8s += claim.debt_amount;
             s.bot_claims.remove(vault_id);
         });
+    }
+
+    // Wave-10 LIQ-008: short-circuit the auto-publishing path when the
+    // mass-liquidation circuit breaker is tripped. Bot-claim auto-cancel
+    // above runs unconditionally because it is hygiene, not auto-publishing.
+    // Manual liquidation endpoints (`liquidate_vault`, `liquidate_vault_partial`,
+    // `liquidate_vault_partial_with_stable`, `partial_liquidate_vault`,
+    // `liquidate_vault_debt_already_burned`) do not consult the breaker.
+    if read_state(|s| s.liquidation_breaker_tripped) {
+        log!(
+            INFO,
+            "[LIQ-008] check_vaults skipping notify (breaker tripped). Manual liquidation remains available."
+        );
+        return;
     }
 
     let dummy_rate = read_state(|s| {

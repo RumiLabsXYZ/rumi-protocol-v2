@@ -596,6 +596,11 @@ fn get_protocol_status() -> ProtocolStatus {
         total_deficit_repaid_icusd: s.total_deficit_repaid_icusd.to_u64(),
         deficit_repayment_fraction: s.deficit_repayment_fraction.to_f64(),
         deficit_readonly_threshold_e8s: s.deficit_readonly_threshold_e8s,
+        // Wave-10 LIQ-008
+        breaker_window_ns: s.breaker_window_ns,
+        breaker_window_debt_ceiling_e8s: s.breaker_window_debt_ceiling_e8s,
+        windowed_liquidation_total_e8s: s.windowed_liquidation_total(ic_cdk::api::time()),
+        liquidation_breaker_tripped: s.liquidation_breaker_tripped,
     })
 }
 
@@ -3270,6 +3275,84 @@ async fn set_deficit_readonly_threshold_e8s(new_threshold: u64) -> Result<(), Pr
         "[set_deficit_readonly_threshold_e8s] Threshold set to: {} e8s ({})",
         new_threshold,
         if new_threshold == 0 { "latch disabled" } else { "latch armed" }
+    );
+    Ok(())
+}
+
+/// Wave-10 LIQ-008: tune the rolling-window length for the mass-liquidation
+/// circuit breaker, in nanoseconds. 0 disables the breaker entirely (no
+/// recording, no tripping). Admin-only.
+#[candid_method(update)]
+#[update]
+async fn set_breaker_window_ns(new_window_ns: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set breaker window".to_string(),
+        ));
+    }
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_breaker_window_ns(s, new_window_ns);
+    });
+    log!(
+        INFO,
+        "[set_breaker_window_ns] Window set to: {} ns ({})",
+        new_window_ns,
+        if new_window_ns == 0 { "breaker disabled" } else { "breaker armed" }
+    );
+    Ok(())
+}
+
+/// Wave-10 LIQ-008: tune the cumulative-debt ceiling for the mass-liquidation
+/// circuit breaker, in icUSD e8s. 0 disables tripping (operator should leave
+/// at 0 for the first 24-48h post-deploy, then set after observing baseline
+/// `windowed_liquidation_total_e8s`). Admin-only.
+#[candid_method(update)]
+#[update]
+async fn set_breaker_window_debt_ceiling_e8s(new_ceiling: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set breaker debt ceiling".to_string(),
+        ));
+    }
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_breaker_window_debt_ceiling_e8s(s, new_ceiling);
+    });
+    log!(
+        INFO,
+        "[set_breaker_window_debt_ceiling_e8s] Ceiling set to: {} e8s ({})",
+        new_ceiling,
+        if new_ceiling == 0 { "breaker disabled" } else { "breaker armed" }
+    );
+    Ok(())
+}
+
+/// Wave-10 LIQ-008: clear the breaker latch so `check_vaults` resumes
+/// auto-publishing on the next tick. Admin-only. Emits `BreakerCleared`
+/// with the windowed total at clear time so the audit trail captures
+/// what state the operator was looking at when they decided to resume.
+#[candid_method(update)]
+#[update]
+async fn clear_liquidation_breaker() -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can clear the liquidation breaker".to_string(),
+        ));
+    }
+    let now = ic_cdk::api::time();
+    let remaining = read_state(|s| s.windowed_liquidation_total(now));
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_breaker_cleared(s, remaining);
+    });
+    log!(
+        INFO,
+        "[clear_liquidation_breaker] Breaker cleared (windowed total at clear: {} e8s)",
+        remaining
     );
     Ok(())
 }
