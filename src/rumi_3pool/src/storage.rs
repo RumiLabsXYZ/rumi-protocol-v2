@@ -552,8 +552,18 @@ log_api!(block_hashes, BLOCK_HASHES_LOG, StorableHash);
 // ─── Migration: one-shot drain from the legacy raw-offset-0 blob ─────────────
 
 pub mod migration {
-    //! One-shot drain of the legacy pre-Phase-A state layout into the new
-    //! stable structures.
+    //! Post-upgrade migration helpers.
+    //!
+    //! Two functions live here:
+    //!
+    //!   1. `read_legacy_blob` + `drain_legacy_state` are the one-shot
+    //!      Phase A drain that moved heap collections to stable structures.
+    //!      Already shipped on mainnet; subsequent upgrades skip the drain.
+    //!
+    //!   2. `backfill_hash_chain` brings the ICRC-3 `block_hashes` log up
+    //!      to parity with the `blocks` log. Idempotent and called on every
+    //!      upgrade. The first upgrade after the cache shipped fills all
+    //!      pre-existing blocks; subsequent upgrades early-return.
     //!
     //! ## Safety argument
     //!
@@ -755,11 +765,23 @@ pub mod migration {
     /// Trapping inside this function rolls back stable memory atomically per
     /// IC `post_upgrade` semantics, so partial backfills cannot persist.
     pub fn backfill_hash_chain() {
+        // INVARIANT: the hash computation here MUST match
+        // `ThreePoolState::log_block` in state.rs (same encode_block_with_phash
+        // call with the same prev_hash semantics, same hash_value over the
+        // result). If you change the hash representation in either place,
+        // change it in both, or the chain will silently diverge for any
+        // backfilled blocks.
         let blocks_len = crate::storage::blocks::len();
         let hashes_len = crate::storage::block_hashes::len();
-        if hashes_len >= blocks_len {
-            // Already up to date. (`>` would be a logic bug; we tolerate it
-            // here and let the integrity check in post_upgrade trap on it.)
+        if hashes_len > blocks_len {
+            ic_cdk::trap(&format!(
+                "block_hashes ({hashes_len}) exceeds blocks ({blocks_len}): \
+                 hash cache is corrupted. This invariant is also re-checked \
+                 in post_upgrade, but failing fast here makes the failure \
+                 mode local."
+            ));
+        }
+        if hashes_len == blocks_len {
             return;
         }
 
@@ -1031,6 +1053,15 @@ mod tests {
 
     #[test]
     fn backfill_is_idempotent_when_cache_is_full() {
+        // NOTE: This test (and `backfill_fills_missing_hashes_correctly` below)
+        // shares the storage thread_locals with every other test in this binary.
+        // Under `cargo test`'s default parallel execution they may silently
+        // early-out if another test has perturbed the logs first. This is
+        // acceptable here because Task 7's PocketIC integration tests exercise
+        // the full backfill path against a hermetically-isolated canister
+        // instance and provide the load-bearing coverage. These unit tests
+        // are best-effort regression catchers for development iteration.
+        //
         // After Task 3, every push to blocks already pushes to block_hashes.
         // So if both logs have the same length, backfill should be a no-op.
         let blocks_before = blocks::len();
