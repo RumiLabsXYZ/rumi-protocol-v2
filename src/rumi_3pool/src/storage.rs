@@ -226,6 +226,29 @@ impl Storable for StorableU128 {
     };
 }
 
+/// 32-byte hash stored verbatim. Used for the ICRC-3 cumulative hash-chain
+/// cache so that `icrc3_get_blocks` can fetch a block's parent hash in O(1)
+/// instead of recomputing the chain from block 0.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct StorableHash(pub [u8; 32]);
+
+impl Storable for StorableHash {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(self.0.to_vec())
+    }
+
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(bytes.as_ref());
+        StorableHash(arr)
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 32,
+        is_fixed_size: true,
+    };
+}
+
 /// Empty marker for set-style BTreeMaps (`BTreeMap<K, ()>` isn't supported
 /// directly because `()` would need a Storable impl we don't control).
 #[derive(Clone, Copy, Debug, Default)]
@@ -918,5 +941,21 @@ mod tests {
         assert!(back.swap_events_v2.is_none());
         assert!(back.blocks.is_none());
         assert_eq!(back.lp_total_supply, 0);
+    }
+
+    #[test]
+    fn storable_hash_roundtrip() {
+        let original = [0xABu8; 32];
+        let sh = StorableHash(original);
+        let bytes = sh.to_bytes();
+        let back = StorableHash::from_bytes(bytes);
+        assert_eq!(back.0, original);
+    }
+
+    #[test]
+    fn storable_hash_distinct_values() {
+        let a = StorableHash([1u8; 32]);
+        let b = StorableHash([2u8; 32]);
+        assert_ne!(a.to_bytes(), b.to_bytes());
     }
 }
