@@ -158,6 +158,11 @@ type Event = variant {
   set_treasury_principal : record { "principal" : principal };
   accrue_interest : record { timestamp : nat64 };
   set_max_partial_liquidation_ratio : record { rate : text };
+  breaker_tripped : record {
+    total_e8s : nat64;
+    timestamp : nat64;
+    ceiling_e8s : nat64;
+  };
   withdraw_and_close_vault : record {
     block_index : opt nat64;
     vault_id : nat64;
@@ -246,6 +251,10 @@ type Event = variant {
     caller : opt principal;
     borrowed_amount : nat64;
   };
+  set_breaker_window_debt_ceiling_e8s : record {
+    timestamp : nat64;
+    ceiling_e8s : nat64;
+  };
   set_bot_allowed_collateral_types : record {
     collateral_types : vec principal;
   };
@@ -287,6 +296,7 @@ type Event = variant {
     timestamp : opt nat64;
     amount : nat64;
   };
+  set_breaker_window_ns : record { window_ns : nat64; timestamp : nat64 };
   partial_liquidate_vault : record {
     protocol_fee_collateral : opt nat64;
     icp_rate : opt blob;
@@ -331,12 +341,21 @@ type Event = variant {
     min_collateral_deposit : nat64;
     collateral_type : principal;
   };
+  breaker_cleared : record { remaining_total_e8s : nat64; timestamp : nat64 };
   update_collateral_status : record {
     status : CollateralStatus;
     collateral_type : principal;
   };
   set_healthy_cr : record { healthy_cr : opt text; collateral_type : text };
+  set_deficit_repayment_fraction : record {
+    fraction : blob;
+    timestamp : nat64;
+  };
   set_redemption_fee_ceiling : record { rate : text };
+  set_deficit_readonly_threshold_e8s : record {
+    threshold_e8s : nat64;
+    timestamp : nat64;
+  };
   add_margin_to_vault : record {
     block_index : nat64;
     vault_id : nat64;
@@ -355,12 +374,25 @@ type Event = variant {
     interest_rate_apr : text;
   };
   set_reserve_redemption_fee : record { fee : text };
+  deficit_repaid : record {
+    remaining_deficit : nat64;
+    source : FeeSource;
+    timestamp : nat64;
+    anchor_block_index : opt nat64;
+    amount : nat64;
+  };
   redemption_transfered : record {
     icusd_block_index : nat64;
     icp_block_index : nat64;
     timestamp : opt nat64;
   };
   set_liquidation_bot_principal : record { "principal" : principal };
+  deficit_accrued : record {
+    new_deficit : nat64;
+    vault_id : nat64;
+    timestamp : nat64;
+    amount : nat64;
+  };
   liquidate_vault : record {
     mode : Mode;
     icp_rate : blob;
@@ -388,6 +420,7 @@ type Event = variant {
 };
 type EventTimeRange = record { start_ns : nat64; end_ns : nat64 };
 type EventTypeFilter = variant {
+  BreakerTripped;
   StabilityPoolDeposit;
   AdminSweepToTreasury;
   AdminMint;
@@ -398,13 +431,16 @@ type EventTypeFilter = variant {
   AccrueInterest;
   ReserveRedemption;
   Repay;
+  DeficitAccrued;
   Liquidation;
   Borrow;
   PriceUpdate;
   Admin;
+  DeficitRepaid;
   Redemption;
   CloseVault;
 };
+type FeeSource = variant { BorrowingFee; RedemptionFee };
 type Fees = record { redemption_fee : float64; borrowing_fee : float64 };
 type GetEventsArg = record {
   "principal" : opt principal;
@@ -552,6 +588,7 @@ type ProtocolSnapshot = record {
 type ProtocolStatus = record {
   last_icp_timestamp : nat64;
   borrowing_fee_curve_resolved : vec record { float64; float64 };
+  deficit_readonly_threshold_e8s : nat64;
   recovery_mode_threshold : float64;
   per_collateral_interest : vec CollateralInterestInfo;
   reserve_redemption_fee : float64;
@@ -562,25 +599,24 @@ type ProtocolStatus = record {
   total_icusd_borrowed : nat64;
   min_icusd_amount : nat64;
   total_collateral_ratio : float64;
+  deficit_repayment_fraction : float64;
   ckstable_repay_fee : float64;
+  windowed_liquidation_total_e8s : nat64;
   total_icp_margin : nat64;
   recovery_target_cr : float64;
   frozen : bool;
   weighted_average_interest_rate : float64;
+  liquidation_breaker_tripped : bool;
+  protocol_deficit_icusd : nat64;
+  breaker_window_ns : nat64;
   manual_mode_override : bool;
   liquidation_bonus : float64;
   per_collateral_rate_curves : vec PerCollateralRateCurve;
   reserve_redemptions_enabled : bool;
-  global_icusd_mint_cap : nat64;
-  last_icp_rate : float64;
-  protocol_deficit_icusd : nat64;
   total_deficit_repaid_icusd : nat64;
-  deficit_repayment_fraction : float64;
-  deficit_readonly_threshold_e8s : nat64;
-  breaker_window_ns : nat64;
+  global_icusd_mint_cap : nat64;
   breaker_window_debt_ceiling_e8s : nat64;
-  windowed_liquidation_total_e8s : nat64;
-  liquidation_breaker_tripped : bool;
+  last_icp_rate : float64;
 };
 type RateCurve = record {
   method : InterpolationMethod;
@@ -778,7 +814,7 @@ service : (ProtocolArg) -> {
   get_three_pool_canister : () -> (opt principal) query;
   get_treasury_principal : () -> (opt principal) query;
   get_treasury_stats : () -> (TreasuryStats) query;
-  get_vault_history : (nat64) -> (vec Event) query;
+  get_vault_history : (nat64) -> (vec record { nat64; Event }) query;
   get_vault_interest_rate : (nat64) -> (Result_7) query;
   get_vaults : (opt principal) -> (vec CandidVault) query;
   http_request : (HttpRequest) -> (HttpResponse_1) query;
@@ -858,17 +894,12 @@ service : (ProtocolArg) -> {
   set_three_pool_canister : (principal) -> (Result);
   set_treasury_principal : (principal) -> (Result);
   stability_pool_liquidate : (nat64, nat64) -> (Result_12);
-  stability_pool_liquidate_debt_burned : (
-      nat64,
-      nat64,
-      SpWritedownProof,
-    ) -> (Result_12);
-  stability_pool_liquidate_with_reserves : (
-      nat64,
-      nat64,
-      nat64,
-      principal,
-    ) -> (Result_12);
+  stability_pool_liquidate_debt_burned : (nat64, nat64, SpWritedownProof) -> (
+      Result_12,
+    );
+  stability_pool_liquidate_with_reserves : (nat64, nat64, nat64, principal) -> (
+      Result_12,
+    );
   unfreeze_protocol : () -> (Result);
   update_collateral_config : (principal, CollateralConfig) -> (Result);
   withdraw_and_close_vault : (nat64) -> (Result_5);
@@ -876,4 +907,3 @@ service : (ProtocolArg) -> {
   withdraw_liquidity : (nat64) -> (Result_1);
   withdraw_partial_collateral : (VaultArg) -> (Result_1);
 }
-
