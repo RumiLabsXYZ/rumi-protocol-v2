@@ -114,7 +114,7 @@ pub async fn fetch_icp_rate() {
         mutate_state(|s| s.harvest_accrued_interest());
     }
     if read_state(|s| s.mode != crate::Mode::ReadOnly) {
-        crate::check_vaults();
+        crate::check_vaults().await;
     }
 
     // Drain any pending treasury interest/collateral accumulated from sync liquidations
