@@ -975,10 +975,10 @@ mod tests {
 
     #[test]
     fn block_hashes_log_initializes_empty() {
-        // Smoke check: the log API is callable and `len()` returns 0 on a
-        // fresh thread-local. Other tests in this binary may push entries
-        // before this one runs depending on test ordering, so we only
-        // assert non-panic — not strict zero.
-        let _ = block_hashes::len();
+        // At this point in the codebase no test mutates the block_hashes log,
+        // so it must be empty. If a future task adds a test that pushes to
+        // this log, this test may need to be marked #[ignore] or restructured
+        // to check len-equals-blocks::len() instead.
+        assert_eq!(block_hashes::len(), 0);
     }
 }
