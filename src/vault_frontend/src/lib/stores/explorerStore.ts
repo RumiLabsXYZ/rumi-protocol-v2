@@ -132,7 +132,10 @@ export async function fetchAllVaults() {
 
 export async function fetchVaultHistory(vaultId: number) {
 	try {
-		return await publicActor.get_vault_history(BigInt(vaultId));
+		// Backend returns `(global_index, event)` tuples; this legacy entry point
+		// returns the flat event list for back-compat with non-explorer surfaces.
+		const result = await publicActor.get_vault_history(BigInt(vaultId));
+		return (result as any[]).map((pair: any) => pair[1]);
 	} catch (e) {
 		console.error(`Failed to fetch history for vault #${vaultId}:`, e);
 		return [];

@@ -476,14 +476,29 @@ export async function fetchVaultsByOwner(principal: Principal): Promise<any[]> {
 	}
 }
 
-export async function fetchVaultHistory(vaultId: bigint): Promise<any[]> {
+/**
+ * Per-vault event history. The backend now returns `(global_index, event)`
+ * tuples; we expose them as `{ index, event }` so callers can render the
+ * canonical Event #N link on every row without a second query against the
+ * global event log.
+ */
+export interface VaultHistoryEntry {
+	index: bigint;
+	event: any;
+}
+
+export async function fetchVaultHistory(vaultId: bigint): Promise<VaultHistoryEntry[]> {
 	const key = `vaults:history:${vaultId}`;
-	const cached = getCached<any[]>(key, TTL.EVENTS);
+	const cached = getCached<VaultHistoryEntry[]>(key, TTL.EVENTS);
 	if (cached) return cached;
 
 	try {
 		const result = await publicActor.get_vault_history(vaultId);
-		return setCache(key, result);
+		const entries: VaultHistoryEntry[] = (result as any[]).map((pair: any) => ({
+			index: BigInt(pair[0]),
+			event: pair[1],
+		}));
+		return setCache(key, entries);
 	} catch (err) {
 		console.error('[explorerService] fetchVaultHistory failed:', err);
 		return [];

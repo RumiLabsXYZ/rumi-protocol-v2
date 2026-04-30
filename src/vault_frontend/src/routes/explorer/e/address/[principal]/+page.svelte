@@ -1,6 +1,5 @@
 <script lang="ts">
   import { page } from '$app/stores';
-  import { onMount } from 'svelte';
   import { Principal } from '@dfinity/principal';
   import EntityShell from '$components/explorer/entity/EntityShell.svelte';
   import CRDial from '$components/explorer/entity/CRDial.svelte';
@@ -714,7 +713,13 @@
     }
   }
 
-  onMount(loadAddress);
+  // SvelteKit reuses this component when navigating between sibling
+  // /e/address/[principal] routes; an onMount-only load would leave the page
+  // stuck on the prior principal's data.
+  $effect(() => {
+    void principalStr;
+    loadAddress();
+  });
 
   const pageTitle = $derived(
     knownCanister && canisterName ? canisterName : shortenPrincipal(principalStr),

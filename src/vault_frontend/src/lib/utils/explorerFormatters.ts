@@ -874,9 +874,12 @@ export function formatEvent(event: any, vaultCollateralMap?: Map<number, string>
     case 'withdraw_and_close_vault':
     case 'vault_withdrawn_and_closed':
     case 'VaultWithdrawnAndClosed': {
-      const sym = tokenSymbol(d.collateral_type ?? 'unknown');
+      const collType = vaultCollateral(d.vault_id);
+      const sym = tokenSymbol(collType);
+      const dec = tokenDecimals(collType);
       fields.push(vaultField(d.vault_id));
-      if (d.amount !== undefined) fields.push(amountField('Collateral Returned', d.amount, 8, sym || 'ICP'));
+      if (collType !== 'unknown') fields.push(tokenField(collType));
+      if (d.amount !== undefined) fields.push(amountField('Collateral Returned', d.amount, dec, sym));
       pushIfPresent(fields, addressField('Caller', d.caller));
       if (d.block_index !== undefined) fields.push(blockIndexField('Block Index', optValue(d.block_index)));
       const eventTs = optValue<any>(d.timestamp) ?? ts;

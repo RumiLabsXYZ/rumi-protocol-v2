@@ -1,6 +1,5 @@
 <script lang="ts">
   import { page } from '$app/stores';
-  import { onMount } from 'svelte';
   import EntityShell from '$components/explorer/entity/EntityShell.svelte';
   import EntityLink from '$components/explorer/EntityLink.svelte';
   import CopyButton from '$components/explorer/CopyButton.svelte';
@@ -408,7 +407,13 @@
     }
   }
 
-  onMount(loadPool);
+  // Re-run on pool id change so navigating between sibling /e/pool/[id]
+  // routes (which reuse this component) refetches instead of sticking on the
+  // prior pool's data.
+  $effect(() => {
+    void poolIdParam;
+    loadPool();
+  });
 </script>
 
 <svelte:head>

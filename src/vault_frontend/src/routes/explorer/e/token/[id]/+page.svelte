@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
   import { Principal } from '@dfinity/principal';
   import EntityShell from '$components/explorer/entity/EntityShell.svelte';
   import MixedEventsTable from '$components/explorer/MixedEventsTable.svelte';
@@ -627,7 +626,12 @@
     }
   }
 
-  onMount(loadToken);
+  // Re-run on token change so sibling /e/token/[id] navigations refetch
+  // rather than reusing this component with stale state.
+  $effect(() => {
+    void tokenPrincipal;
+    loadToken();
+  });
 </script>
 
 <EntityShell

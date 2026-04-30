@@ -1,6 +1,5 @@
 <script lang="ts">
   import { page } from '$app/stores';
-  import { onMount } from 'svelte';
   import { Principal } from '@dfinity/principal';
   import EntityShell from '$components/explorer/entity/EntityShell.svelte';
   import EntityLink from '$components/explorer/EntityLink.svelte';
@@ -11,7 +10,7 @@
   import { formatTimestamp, shortenPrincipal, getCanisterName } from '$utils/explorerHelpers';
   import {
     fetchAllVaults, fetchEventCount, fetchEvents, fetchDexEvent, fetchDexEventCount,
-    fetchAllDexEvents,
+    fetchAllDexEvents, fetchVaultHistory,
   } from '$services/explorer/explorerService';
   import type { DexEventSource } from '$services/explorer/explorerService';
   import {
@@ -96,6 +95,63 @@
     };
   });
 
+  /**
+   * Pull every vault_id this backend event touches. Most variants carry a
+   * top-level `vault_id`; redemption_on_vaults carries a `vault_redemptions`
+   * array of `{ vault_id, ... }` records.
+   */
+  function extractVaultIds(rawEvent: any): number[] {
+    const out = new Set<number>();
+    const t = rawEvent?.event_type ?? rawEvent;
+    const key = t ? Object.keys(t)[0] : null;
+    if (!key) return [];
+    const data = t[key];
+    if (data?.vault_id != null) out.add(Number(data.vault_id));
+    const vault = data?.vault;
+    if (vault?.vault_id != null) out.add(Number(vault.vault_id));
+    const redemptions = Array.isArray(data?.vault_redemptions)
+      ? (data.vault_redemptions[0] ?? data.vault_redemptions)
+      : null;
+    if (Array.isArray(redemptions)) {
+      for (const r of redemptions) {
+        if (r?.vault_id != null) out.add(Number(r.vault_id));
+      }
+    }
+    return [...out];
+  }
+
+  /**
+   * For each vault_id referenced by the event but missing from the active-vault
+   * map (i.e. the vault has been closed), fetch its history and seed the map
+   * from the open_vault entry. Lets formatters resolve token symbols/decimals
+   * for closed vaults.
+   */
+  async function seedClosedVaultCollateral(rawEvent: any, map: Map<number, string>) {
+    const ids = extractVaultIds(rawEvent).filter((id) => !map.has(id));
+    if (!ids.length) return;
+    await Promise.all(
+      ids.map(async (id) => {
+        try {
+          const hist = await fetchVaultHistory(BigInt(id));
+          for (const entry of hist) {
+            const evt = entry?.event;
+            const et = evt?.event_type ?? evt;
+            const k = Object.keys(et)[0];
+            if (k !== 'open_vault') continue;
+            const v = et[k]?.vault;
+            if (v && Number(v.vault_id) === id) {
+              const ct = v.collateral_type?.toText?.() ?? String(v.collateral_type ?? '');
+              if (ct) map.set(id, ct);
+              break;
+            }
+          }
+        } catch (err) {
+          console.error('[event] seedClosedVaultCollateral failed for', id, err);
+        }
+      }),
+    );
+  }
+
   async function loadEvent() {
     loading = true;
     error = null;
@@ -123,6 +179,12 @@
 
         if (results.length > 0) {
           event = results[0];
+          // Closed vaults are absent from get_all_vaults, so the map is missing
+          // their collateral type and the formatter falls back to "unknown".
+          // Seed any vault_id this event references but the live map didn't
+          // have, by reading the open_vault entry from that vault's history.
+          await seedClosedVaultCollateral(event, map);
+          vaultCollateralMap = new Map(map);
         } else {
           error = `Event #${parsed.id} not found.`;
         }
@@ -191,7 +253,13 @@
     }
   }
 
-  onMount(loadEvent);
+  // SvelteKit reuses this component across sibling /e/event/[id] navigations,
+  // so onMount alone would only fire on the first visit and leave the page
+  // stuck on the prior event.
+  $effect(() => {
+    void rawId;
+    loadEvent();
+  });
 
   const timestampNs = $derived(display?.timestamp ?? 0);
   const blockIndex = $derived.by(() => {

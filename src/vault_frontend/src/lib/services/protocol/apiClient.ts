@@ -1538,9 +1538,11 @@ static async repayToVaultWithStable(
      */
     static async getVaultHistory(vaultId: number): Promise<any[]> {
       try {
-        // Use anonymous actor for read-only queries — avoids Oisy signer popups
+        // Use anonymous actor for read-only queries — avoids Oisy signer popups.
+        // Backend returns `(global_index, event)` tuples; legacy callers want a
+        // flat event list, so drop the index here.
         const history = await publicActor.get_vault_history(BigInt(vaultId));
-        return history.map((event: any) => event);
+        return (history as any[]).map((pair: any) => pair[1]);
       } catch (err) {
         console.error('Error getting vault history:', err);
         return [];

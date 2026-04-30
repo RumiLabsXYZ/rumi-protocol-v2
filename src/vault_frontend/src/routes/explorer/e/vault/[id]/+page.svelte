@@ -1,6 +1,5 @@
 <script lang="ts">
   import { page } from '$app/stores';
-  import { onMount } from 'svelte';
   import { Principal } from '@dfinity/principal';
   import EntityShell from '$components/explorer/entity/EntityShell.svelte';
   import CRDial from '$components/explorer/entity/CRDial.svelte';
@@ -14,6 +13,7 @@
   import {
     fetchVault, fetchVaultInterestRate, fetchCollateralConfigs,
     fetchCollateralPrices, fetchVaultHistory, fetchVaultsByOwner,
+    type VaultHistoryEntry,
   } from '$services/explorer/explorerService';
   import { fetchPriceSeries } from '$services/explorer/analyticsService';
   import {
@@ -27,7 +27,7 @@
   let interestRate = $state<number | null>(null);
   let collateralConfigs = $state<any[]>([]);
   let collateralPrices = $state<Map<string, number>>(new Map());
-  let history = $state<any[]>([]);
+  let history = $state<VaultHistoryEntry[]>([]);
   let ownerVaults = $state<any[]>([]);
   let priceSeries = $state<{ timestamp_ns: bigint; prices: Array<[any, number]> }[]>([]);
 
@@ -101,7 +101,7 @@
 
   const creationTimestamp = $derived.by(() => {
     if (!history.length) return null;
-    const first = history[0];
+    const first = history[0]?.event;
     const eventType = first?.event_type ?? first;
     const key = Object.keys(eventType)[0];
     const data = key ? eventType[key] : null;
@@ -115,7 +115,7 @@
 
   const lastActivityTimestamp = $derived.by(() => {
     if (!history.length) return null;
-    const last = history[history.length - 1];
+    const last = history[history.length - 1]?.event;
     const eventType = last?.event_type ?? last;
     const key = Object.keys(eventType)[0];
     const data = key ? eventType[key] : null;
@@ -129,7 +129,8 @@
   /** Extract every principal referenced by history events (excluding owner). */
   const touchedBy = $derived.by(() => {
     const seen = new Map<string, Set<string>>();
-    for (const evt of history) {
+    for (const entry of history) {
+      const evt = entry?.event;
       const eventType = evt?.event_type ?? evt;
       const key = Object.keys(eventType)[0];
       if (!key) continue;
@@ -222,7 +223,8 @@
     let debtE8s = 0n;
     const points: TimelinePoint[] = [];
 
-    for (const evt of history) {
+    for (const entry of history) {
+      const evt = entry?.event;
       const eventType = evt?.event_type ?? evt;
       const key = Object.keys(eventType)[0];
       if (!key) continue;
@@ -316,20 +318,33 @@
    * identity (owner, collateral_type) and replays events to derive final
    * collateral + debt (which for a closed vault end at zero).
    */
-  function synthesizeVaultFromHistory(id: number, h: any[]): any | null {
+  function synthesizeVaultFromHistory(id: number, h: VaultHistoryEntry[]): any | null {
     if (!h.length) return null;
-    const first = h[0];
-    const firstType = first?.event_type ?? first;
-    const firstKey = Object.keys(firstType)[0];
-    if (firstKey !== 'open_vault') return null;
-    const firstData = firstType[firstKey];
-    const openVault = firstData?.vault;
+    // History can contain owner-keyed events that pre-date this vault (e.g. a
+    // redemption_on_vaults that the same principal performed against other
+    // vaults), so scan forward for the open_vault entry rather than assuming
+    // it sits at index 0.
+    let openIdx = -1;
+    let openVault: any = null;
+    for (let i = 0; i < h.length; i++) {
+      const evt = h[i]?.event;
+      const et = evt?.event_type ?? evt;
+      const key = Object.keys(et)[0];
+      if (key !== 'open_vault') continue;
+      const v = et[key]?.vault;
+      if (v && Number(v.vault_id) === id) {
+        openIdx = i;
+        openVault = v;
+        break;
+      }
+    }
     if (!openVault) return null;
 
     let coll = BigInt(openVault.collateral_amount ?? 0);
     let debt = BigInt(openVault.borrowed_icusd_amount ?? 0);
-    for (let i = 1; i < h.length; i++) {
-      const et = h[i]?.event_type ?? h[i];
+    for (let i = openIdx + 1; i < h.length; i++) {
+      const evt = h[i]?.event;
+      const et = evt?.event_type ?? evt;
       const key = Object.keys(et)[0];
       const d = et[key];
       switch (key) {
@@ -392,8 +407,17 @@
     loadingCore = true;
     loadingHistory = true;
     loadError = null;
-    const id = BigInt(vaultId);
+    // Reset prior-vault state so navigating between /vault/X and /vault/Y
+    // doesn't briefly render Y with X's data while the new fetches resolve.
+    vault = null;
+    history = [];
+    ownerVaults = [];
     try {
+      if (!Number.isFinite(vaultId)) {
+        loadError = `Invalid vault id: "${$page.params.id}"`;
+        return;
+      }
+      const id = BigInt(vaultId);
       const [v, r, configs, prices, h, pseries] = await Promise.all([
         fetchVault(id).catch(() => null),
         fetchVaultInterestRate(id).catch(() => null),
@@ -432,7 +456,13 @@
     }
   }
 
-  onMount(loadVault);
+  // Re-run on every vaultId change. SvelteKit reuses the component when
+  // navigating between sibling /e/vault/[id] routes, so onMount() alone would
+  // only fire on the first visit and leave the page stuck on the prior vault.
+  $effect(() => {
+    void vaultId;
+    loadVault();
+  });
 
   const statusLabel = $derived(isClosed ? 'Closed' : 'Active');
 </script>
@@ -577,8 +607,8 @@
             </tr>
           </thead>
           <tbody>
-            {#each sortedHistory as evt, i (i)}
-              <EventRow event={evt} index={null} vaultCollateralMap={vaultCollateralMap} />
+            {#each sortedHistory as entry (entry.index)}
+              <EventRow event={entry.event} index={Number(entry.index)} vaultCollateralMap={vaultCollateralMap} />
             {/each}
           </tbody>
         </table>
