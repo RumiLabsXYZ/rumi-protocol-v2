@@ -15,6 +15,29 @@ use rumi_3pool::icrc3::{BlockWithId, GetBlocksArgs, Icrc3Value};
 
 use common::{deploy_pool_with_liquidity_and_swaps, ThreePoolHarness};
 
+/// Verify that the WASM running in the harness was built with
+/// `--features test_endpoints`. The two test-only endpoints
+/// (`test_get_raw_block`, `test_clear_hash_cache`) are gated behind that
+/// feature; without it, this whole test file is unrunnable.
+///
+/// Probing here gives a clear, actionable error message rather than
+/// letting individual update / query calls panic with PocketIC's
+/// generic "method not found" rejection deep inside an assertion loop.
+fn assert_test_endpoints_built(harness: &ThreePoolHarness) {
+    let probe = harness.pic.query_call(
+        harness.three_pool,
+        candid::Principal::anonymous(),
+        "test_get_raw_block",
+        candid::encode_one(0u64).unwrap(),
+    );
+    assert!(
+        probe.is_ok(),
+        "test-only endpoints missing from WASM. \
+         Rebuild with: cargo build -p rumi_3pool --release \
+         --target wasm32-unknown-unknown --features test_endpoints"
+    );
+}
+
 /// Reference implementation: rebuild the entire hash chain from block 0,
 /// returning the ICRC-3 Value form of the requested range. This mirrors the
 /// pre-optimization O(N) logic and deliberately does NOT use block_hashes::get.
@@ -56,23 +79,7 @@ fn icrc3_get_blocks_matches_reference_for_all_windows() {
     // Deploy pool and run 50 swaps to produce a meaningful-length ICRC-3 log.
     // Each swap emits at least one block, plus add_liquidity emits blocks too.
     let harness = deploy_pool_with_liquidity_and_swaps(50);
-
-    // Probe the test-only endpoint. If this fails, the WASM was almost
-    // certainly built without `--features test_endpoints`. Fail fast with
-    // a clear message rather than letting the assertion loop produce
-    // confusing "method not found" panics inside reference_get_blocks.
-    let probe_result = harness.pic.query_call(
-        harness.three_pool,
-        candid::Principal::anonymous(),
-        "test_get_raw_block",
-        candid::encode_one(0u64).unwrap(),
-    );
-    assert!(
-        probe_result.is_ok(),
-        "test_get_raw_block endpoint missing from WASM. \
-         Rebuild with: cargo build -p rumi_3pool --release \
-         --target wasm32-unknown-unknown --features test_endpoints"
-    );
+    assert_test_endpoints_built(&harness);
 
     let log_length = harness.icrc3_log_length();
     // 1 Mint (initial AddLiquidity) + 50 Transfers (deploy_pool's loop) = 51.
@@ -182,6 +189,7 @@ fn icrc3_get_blocks_cycle_cost_is_constant_in_log_length() {
 #[test]
 fn post_upgrade_backfills_empty_hash_cache() {
     let harness = deploy_pool_with_liquidity_and_swaps(30);
+    assert_test_endpoints_built(&harness);
 
     let log_length = harness.icrc3_log_length();
     assert!(log_length >= 30, "expected at least 30 blocks, got {log_length}");
