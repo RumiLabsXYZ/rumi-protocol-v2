@@ -207,7 +207,10 @@ pub fn icrc3_get_blocks(args: Vec<GetBlocksArgs>) -> GetBlocksResult {
         } else {
             Some(
                 crate::storage::block_hashes::get(start - 1)
-                    .expect("hash cache must cover all blocks; backfill runs in post_upgrade")
+                    .expect(
+                        "hash cache must cover all blocks: the post_upgrade \
+                         backfill + integrity check enforces this invariant"
+                    )
                     .0,
             )
         };
