@@ -402,6 +402,18 @@ pub struct ResetErrorCountersArgs {
     pub sources: Option<Vec<String>>,
 }
 
+/// Progress report for `admin_backfill_add_margin_events`. The caller drives
+/// the loop: keep calling until `complete = true`.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct BackfillProgress {
+    pub from: u64,
+    pub scanned: u64,
+    pub emitted: u64,
+    pub cursor_after: u64,
+    pub total_events: u64,
+    pub complete: bool,
+}
+
 // --- Fee breakdown window (Task 3.1) ---
 
 #[derive(CandidType, Deserialize, Clone, Debug)]

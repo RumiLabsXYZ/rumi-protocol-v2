@@ -137,6 +137,14 @@ pub struct SlimState {
     /// the first successful fast-collector run after upgrade.
     #[serde(default)]
     pub collateral_decimals: Option<std::collections::HashMap<Principal, u8>>,
+    /// Highest backend event id processed by the AddMarginToVault one-shot
+    /// backfill. The original tailer dropped those events on the floor, so a
+    /// post-fix upgrade needs to walk the historical log to surface them as
+    /// CollateralDeposited analytics rows. `Some(n)` means events 0..n have
+    /// been swept; resume from `n` on the next admin call. `None` means the
+    /// backfill has not run yet on this canister.
+    #[serde(default)]
+    pub add_margin_backfill_cursor: Option<u64>,
 }
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
@@ -179,6 +187,7 @@ impl Default for SlimState {
             backfill_active_3usd: None,
             last_pull_cycle_ns: None,
             collateral_decimals: None,
+            add_margin_backfill_cursor: None,
         }
     }
 }
