@@ -11,18 +11,21 @@ pub enum SetupContext {
 }
 
 pub fn setup_timers(ctx: SetupContext) {
-    // Fire daily + fast snapshots immediately on init only. On post_upgrade
-    // the pre-existing rows already cover the recent period, so re-firing
-    // would create duplicate snapshots for the same day. Intervals reset on
-    // upgrade and resume normally without an immediate fire.
+    // Fire the daily snapshot only on Init — on post_upgrade the pre-existing
+    // row already covers today, so re-firing would create duplicate daily
+    // snapshots. Fast snapshot, however, also seeds heap-only state that's
+    // wiped by upgrade (collateral_decimals map), so we always fire it
+    // immediately. An extra fast row at upgrade time is cheap (5-min log
+    // cadence) and avoids a 5-minute window where pricing falls back to
+    // 8-decimal defaults — the bug that motivated PR #141.
     if ctx == SetupContext::Init {
         ic_cdk_timers::set_timer(Duration::from_secs(0), || {
             ic_cdk::spawn(daily_snapshot());
         });
-        ic_cdk_timers::set_timer(Duration::from_secs(0), || {
-            ic_cdk::spawn(fast_snapshot());
-        });
     }
+    ic_cdk_timers::set_timer(Duration::from_secs(0), || {
+        ic_cdk::spawn(fast_snapshot());
+    });
 
     ic_cdk_timers::set_timer_interval(Duration::from_secs(60), || {
         ic_cdk::spawn(pull_cycle());

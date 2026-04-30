@@ -288,6 +288,73 @@ fn start_backfill(token: Principal) -> String {
     }
 }
 
+/// One-shot backfill for AddMarginToVault → CollateralDeposited. The original
+/// analytics tailer dropped AddMarginToVault on the floor, so vaults that were
+/// topped up after open had their on-chain collateral diverge from what the
+/// timeline reconstructed — the user-facing symptom was vault_equity clamping
+/// to 0 (collateral under-counted, debt full-counted, underwater saturation).
+///
+/// This walks `get_events` from `add_margin_backfill_cursor` (or 0) up to
+/// `min(start + batch_size, get_event_count)` and pushes a CollateralDeposited
+/// analytics row for every AddMarginToVault it finds. The cursor advances
+/// past every event it inspects (admin or otherwise), so the same row never
+/// emits twice across calls. Caller re-invokes until the response shows
+/// `complete = true`.
+#[ic_cdk_macros::update]
+async fn admin_backfill_add_margin_events(batch_size: u64) -> Result<types::BackfillProgress, String> {
+    let admin = state::read_state(|s| s.admin);
+    let caller = ic_cdk::caller();
+    if caller != admin {
+        return Err(format!("unauthorized: caller {} is not admin", caller));
+    }
+    let backend = state::read_state(|s| s.sources.backend);
+    let cursor = state::read_state(|s| s.add_margin_backfill_cursor.unwrap_or(0));
+    let count = sources::backend::get_event_count(backend).await?;
+    if cursor >= count {
+        return Ok(types::BackfillProgress {
+            from: cursor,
+            scanned: 0,
+            emitted: 0,
+            cursor_after: cursor,
+            total_events: count,
+            complete: true,
+        });
+    }
+    let want = batch_size.clamp(1, 5_000).min(count - cursor);
+    let events = sources::backend::get_events(backend, cursor, want).await?;
+    let mut emitted = 0u64;
+    for (i, event) in events.iter().enumerate() {
+        let event_id = cursor + i as u64;
+        if let sources::backend::BackendEvent::AddMarginToVault {
+            vault_id, margin_added, caller: actor, timestamp, ..
+        } = event {
+            storage::events::evt_vaults::push(storage::events::AnalyticsVaultEvent {
+                timestamp_ns: timestamp.unwrap_or(0),
+                source_event_id: event_id,
+                vault_id: *vault_id,
+                owner: actor.unwrap_or(candid::Principal::anonymous()),
+                event_kind: storage::events::VaultEventKind::CollateralDeposited,
+                collateral_type: candid::Principal::anonymous(),
+                amount: *margin_added,
+                fee_amount: None,
+            });
+            emitted += 1;
+        }
+    }
+    let cursor_after = cursor + events.len() as u64;
+    state::mutate_state(|s| {
+        s.add_margin_backfill_cursor = Some(cursor_after);
+    });
+    Ok(types::BackfillProgress {
+        from: cursor,
+        scanned: events.len() as u64,
+        emitted,
+        cursor_after,
+        total_events: count,
+        complete: cursor_after >= count,
+    })
+}
+
 #[ic_cdk_macros::update]
 fn reset_error_counters(args: types::ResetErrorCountersArgs) -> Result<(), String> {
     let admin = state::read_state(|s| s.admin);
