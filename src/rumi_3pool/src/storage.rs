@@ -740,6 +740,53 @@ pub mod migration {
             }
         }
     }
+
+    /// Backfill `block_hashes` to match `blocks` length.
+    ///
+    /// After this function returns:
+    ///   * `block_hashes::len() == blocks::len()`
+    ///   * For every `i in 0..blocks::len()`, `block_hashes::get(i)` equals
+    ///     the SHA-256 of the ICRC-3 encoding of `blocks::get(i)` with the
+    ///     correct parent hash.
+    ///
+    /// Idempotent: a no-op when the lengths already match. Safe to call from
+    /// `post_upgrade` on every upgrade (steady-state cost: 2 stable reads).
+    ///
+    /// Trapping inside this function rolls back stable memory atomically per
+    /// IC `post_upgrade` semantics, so partial backfills cannot persist.
+    pub fn backfill_hash_chain() {
+        let blocks_len = crate::storage::blocks::len();
+        let hashes_len = crate::storage::block_hashes::len();
+        if hashes_len >= blocks_len {
+            // Already up to date. (`>` would be a logic bug; we tolerate it
+            // here and let the integrity check in post_upgrade trap on it.)
+            return;
+        }
+
+        // Recompute the chain from block 0 up to (but not including) the
+        // first missing index. We need the parent hash for the first block
+        // we are about to fill, which is the cached hash of (start - 1) if
+        // any cache exists, or computed from scratch if hashes_len == 0.
+        let start = hashes_len;
+        let mut prev_hash: Option<[u8; 32]> = if start == 0 {
+            None
+        } else {
+            Some(
+                crate::storage::block_hashes::get(start - 1)
+                    .expect("cached hash present below hashes_len")
+                    .0,
+            )
+        };
+
+        for i in start..blocks_len {
+            let block = crate::storage::blocks::get(i)
+                .expect("block present below blocks_len");
+            let encoded = crate::icrc3::encode_block_with_phash(&block, prev_hash.as_ref());
+            let block_hash = crate::certification::hash_value(&encoded);
+            crate::storage::block_hashes::push(crate::storage::StorableHash(block_hash));
+            prev_hash = Some(block_hash);
+        }
+    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -980,5 +1027,74 @@ mod tests {
         // this log, this test may need to be marked #[ignore] or restructured
         // to check len-equals-blocks::len() instead.
         assert_eq!(block_hashes::len(), 0);
+    }
+
+    #[test]
+    fn backfill_is_idempotent_when_cache_is_full() {
+        // After Task 3, every push to blocks already pushes to block_hashes.
+        // So if both logs have the same length, backfill should be a no-op.
+        let blocks_before = blocks::len();
+        let hashes_before = block_hashes::len();
+        if blocks_before != hashes_before {
+            // We cannot run this test in isolation if other tests left the
+            // logs in an inconsistent state. Skip rather than fail.
+            return;
+        }
+        crate::storage::migration::backfill_hash_chain();
+        assert_eq!(blocks::len(), blocks_before);
+        assert_eq!(block_hashes::len(), hashes_before);
+    }
+
+    #[test]
+    fn backfill_fills_missing_hashes_correctly() {
+        use crate::types::{Icrc3Block, Icrc3Transaction};
+        use candid::Principal;
+
+        // Push three blocks via the storage API directly (skipping log_block,
+        // which would also write to block_hashes). This simulates the
+        // "existing mainnet state" scenario where blocks exist but the
+        // hash-chain cache is empty.
+        let baseline = blocks::len();
+        let hash_baseline = block_hashes::len();
+        if baseline != hash_baseline {
+            return;
+        }
+
+        let p = Principal::anonymous();
+        for i in 0..3u64 {
+            let block = Icrc3Block {
+                id: baseline + i,
+                timestamp: 1_000 + i,
+                tx: Icrc3Transaction::Mint {
+                    to: p,
+                    amount: 100 + i as u128,
+                    to_subaccount: None,
+                },
+            };
+            blocks::push(block);
+        }
+
+        assert_eq!(blocks::len(), baseline + 3);
+        assert_eq!(block_hashes::len(), hash_baseline);
+
+        crate::storage::migration::backfill_hash_chain();
+
+        assert_eq!(block_hashes::len(), baseline + 3);
+
+        // Verify every newly added hash is consistent with its block's
+        // ICRC-3 encoding under the correct parent.
+        let mut prev = if baseline == 0 {
+            None
+        } else {
+            Some(block_hashes::get(baseline - 1).unwrap().0)
+        };
+        for i in baseline..baseline + 3 {
+            let block = blocks::get(i).unwrap();
+            let encoded = crate::icrc3::encode_block_with_phash(&block, prev.as_ref());
+            let expected = crate::certification::hash_value(&encoded);
+            let cached = block_hashes::get(i).unwrap().0;
+            assert_eq!(cached, expected, "hash mismatch at index {i}");
+            prev = Some(cached);
+        }
     }
 }
