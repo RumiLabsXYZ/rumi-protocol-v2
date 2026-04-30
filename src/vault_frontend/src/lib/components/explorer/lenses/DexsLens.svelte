@@ -126,8 +126,15 @@
     return total;
   });
 
-  const volumePoints = $derived(
-    volumeSeries.map((p: any) => {
+  // The 3pool's `get_volume_series` only emits buckets that contain swaps.
+  // For a 7d/hourly chart over a low-volume pool that yields just a handful
+  // of points; the line then draws straight between distant non-zero hours
+  // and looks like a perfect linear trend instead of a sparse spike chart.
+  // Pad in explicit zero-value buckets across the full window so the chart
+  // shows what actually happened: brief activity surrounded by zeros.
+  const volumePoints = $derived.by(() => {
+    if (!volumeSeries.length) return [] as { t: number; v: number }[];
+    const valued = volumeSeries.map((p: any) => {
       let total = 0;
       for (let i = 0; i < p.volume_per_token.length; i++) {
         const tok = POOL_TOKENS[i];
@@ -135,8 +142,24 @@
         total += Number(p.volume_per_token[i]) / Math.pow(10, tok.decimals);
       }
       return { t: Number(p.timestamp) * 1000, v: total };
-    })
-  );
+    });
+    valued.sort((a, b) => a.t - b.t);
+    const BUCKET_MS = 3_600_000; // matches the 3600s bucketSecs above
+    const WINDOW_MS = 7 * 24 * 3_600_000;
+    const nowMs = Date.now();
+    const startMs = Math.floor((nowMs - WINDOW_MS) / BUCKET_MS) * BUCKET_MS;
+    const endMs = Math.floor(nowMs / BUCKET_MS) * BUCKET_MS;
+    const valueAt = new Map<number, number>();
+    for (const p of valued) {
+      const bucket = Math.floor(p.t / BUCKET_MS) * BUCKET_MS;
+      valueAt.set(bucket, (valueAt.get(bucket) ?? 0) + p.v);
+    }
+    const out: { t: number; v: number }[] = [];
+    for (let t = startMs; t <= endMs; t += BUCKET_MS) {
+      out.push({ t, v: valueAt.get(t) ?? 0 });
+    }
+    return out;
+  });
 
   const vpPoints = $derived(
     vpSeries.map((p: any) => ({

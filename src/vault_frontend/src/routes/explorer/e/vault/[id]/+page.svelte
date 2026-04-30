@@ -303,7 +303,17 @@
       const debtHuman = Number(debtE8s) / 1e8;
       const p = priceAt(t);
       const crAt = debtHuman > 0 && p > 0 ? (collHuman * p) / debtHuman : Infinity;
-      points.push({ t, cr: crAt, collateral: collHuman, debt: debtHuman, price: p });
+      // Multiple backend events frequently share the same nanosecond timestamp
+      // (e.g. open_vault + borrow_from_vault recorded in the same transaction).
+      // Fold consecutive same-t entries into a single point so charts that
+      // key by timestamp don't blow up with duplicate keys, and so the dot
+      // overlay doesn't paint two circles on top of each other.
+      const last = points.length > 0 ? points[points.length - 1] : null;
+      if (last && last.t === t) {
+        points[points.length - 1] = { t, cr: crAt, collateral: collHuman, debt: debtHuman, price: p };
+      } else {
+        points.push({ t, cr: crAt, collateral: collHuman, debt: debtHuman, price: p });
+      }
     }
 
     return points;

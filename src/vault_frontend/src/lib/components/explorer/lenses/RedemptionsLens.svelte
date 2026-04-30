@@ -4,11 +4,12 @@
   import LensHealthStrip from '../LensHealthStrip.svelte';
   import LensActivityPanel from '../LensActivityPanel.svelte';
   import MiniAreaChart from '../MiniAreaChart.svelte';
-  import { fetchFeeSeries } from '$services/explorer/analyticsService';
+  import { fetchFeeSeries, fetchFeeBreakdownWindow } from '$services/explorer/analyticsService';
   import {
     fetchRedemptionRate, fetchRedemptionFeeFloor, fetchRedemptionFeeCeiling,
     fetchRedemptionTier, fetchCollateralTotals, fetchProtocolConfig, fetchProtocolStatus,
   } from '$services/explorer/explorerService';
+  import { publicActor } from '$lib/services/protocol/apiClient';
   import {
     e8sToNumber, formatCompact, CHART_COLORS, COLLATERAL_SYMBOLS, getCollateralSymbol,
   } from '$utils/explorerChartHelpers';
@@ -25,6 +26,15 @@
   let collateralTotals: any[] = $state([]);
   let tierMap: Map<string, number | null> = $state(new Map());
   let loading = $state(true);
+  // Live 90-day count + fee totals computed from the source-of-truth event
+  // logs (analytics for count, backend event log for fees) instead of from
+  // the daily rollup series. Rollups only see the trailing 24h at scrape time
+  // and don't backfill, so historical redemption events that pre-date a
+  // collector deploy never get a non-zero rollup row. The backend event log
+  // is authoritative for fees because some early AnalyticsVaultEvent rows
+  // were tailed before fee_amount was tracked and decode as None.
+  let live90dRedemptionCount: number | null = $state(null);
+  let live90dRedemptionFeesIcusd: number | null = $state(null);
 
   onMount(async () => {
     try {
@@ -68,12 +78,72 @@
     } finally {
       loading = false;
     }
+
+    // Live 90d redemption totals — fire after the main load so the UI is not
+    // blocked. Count comes from the analytics live query (cheap, single
+    // round-trip). Fees come from the backend event log filtered to
+    // Redemption type, summed client-side, because the AnalyticsVaultEvent
+    // rows for historical redemptions stored fee_amount=None and the rollup
+    // path therefore reports $0 even when there were real fees collected.
+    fetchFeeBreakdownWindow(90)
+      .then((b) => { live90dRedemptionCount = b.redemptionCount; })
+      .catch((err) => console.error('[RedemptionsLens] fee breakdown failed:', err));
+
+    (async () => {
+      try {
+        const cutoffNs = BigInt(Date.now() - 90 * 24 * 60 * 60 * 1000) * 1_000_000n;
+        let total = 0n;
+        const PAGE = 200n;
+        let page = 0n;
+        // get_events_filtered returns newest-first; stop once we cross the 90d boundary.
+        while (true) {
+          const resp = await publicActor.get_events_filtered({
+            start: page,
+            length: PAGE,
+            types: [[{ Redemption: null }]],
+            principal: [],
+            collateral_token: [],
+            time_range: [],
+            min_size_e8s: [],
+            admin_labels: [],
+          });
+          // events: Array<[bigint, Event]>
+          const tuples = (resp as any)?.events ?? [];
+          if (tuples.length === 0) break;
+          let crossed = false;
+          for (const pair of tuples) {
+            const evt = Array.isArray(pair) ? pair[1] : (pair?.event ?? pair);
+            const et = (evt as any)?.event_type ?? evt;
+            const inner = et?.redemption_on_vaults;
+            if (!inner) continue;
+            const tsArr = inner.timestamp;
+            const ts = Array.isArray(tsArr) ? tsArr[0] : tsArr;
+            if (ts != null && BigInt(ts) < cutoffNs) {
+              crossed = true;
+              break;
+            }
+            const fee = inner.fee_amount;
+            if (fee != null) total += BigInt(fee);
+          }
+          if (crossed || tuples.length < Number(PAGE)) break;
+          page += 1n;
+        }
+        live90dRedemptionFeesIcusd = Number(total) / 1e8;
+      } catch (err) {
+        console.error('[RedemptionsLens] backend redemption fee scan failed:', err);
+      }
+    })();
   });
 
-  const redemptions90d = $derived(feeRows.reduce((s, d: any) => s + Number(d.redemption_count ?? 0), 0));
-  const redemptionFees90d = $derived(
+  // Prefer the live total when it has resolved; fall back to the rollup sum
+  // until the live query lands so the card never shows a stale 0 longer than
+  // necessary.
+  const rollupRedemptions90d = $derived(feeRows.reduce((s, d: any) => s + Number(d.redemption_count ?? 0), 0));
+  const rollupRedemptionFees90d = $derived(
     feeRows.reduce((s, d: any) => s + e8sToNumber(d.redemption_fees_e8s?.[0] ?? d.redemption_fees_e8s ?? 0n), 0)
   );
+  const redemptions90d = $derived(live90dRedemptionCount ?? rollupRedemptions90d);
+  const redemptionFees90d = $derived(live90dRedemptionFeesIcusd ?? rollupRedemptionFees90d);
   const redemptionCountPoints = $derived(
     feeRows.map((r: any) => ({ t: Number(r.timestamp_ns) / 1_000_000, v: Number(r.redemption_count ?? 0) }))
   );

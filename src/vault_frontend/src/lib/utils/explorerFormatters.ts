@@ -28,6 +28,7 @@ export type FieldType =
   | 'timestamp'
   | 'json'
   | 'canister'
+  | 'pool'
   | 'block_index'
   | 'ratio';
 
@@ -153,7 +154,7 @@ export function formatAmmSwapEvent(event: any): FormattedEvent {
   const fields: EventField[] = [
     { label: 'Token In', value: `${amountIn} ${tokenInSym}`, type: 'amount' },
     { label: 'Token Out', value: `${amountOut} ${tokenOutSym}`, type: 'amount' },
-    { label: 'Pool', value: String(poolId), type: 'text' },
+    { label: 'Pool', value: String(poolId), type: 'pool', linkTarget: String(poolId) },
   ];
 
   if (tokenInPrincipal) fields.push({ label: 'Token In Ledger', value: shortenPrincipal(tokenInPrincipal), type: 'token', linkTarget: tokenInPrincipal });
@@ -195,7 +196,7 @@ export function formatAmmLiquidityEvent(event: any): FormattedEvent {
     { label: 'Token A', value: `${amtA} ${tokenA}`, type: 'amount' },
     { label: 'Token B', value: `${amtB} ${tokenB}`, type: 'amount' },
     { label: 'LP Shares', value: lpShares, type: 'amount' },
-    { label: 'Pool', value: String(poolId), type: 'text' },
+    { label: 'Pool', value: String(poolId), type: 'pool', linkTarget: String(poolId) },
   ];
 
   if (tokenAPrincipal) fields.push({ label: 'Token A Ledger', value: shortenPrincipal(tokenAPrincipal), type: 'token', linkTarget: tokenAPrincipal });

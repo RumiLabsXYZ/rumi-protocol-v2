@@ -325,6 +325,8 @@
                   </span>
                 {:else if field.type === 'token' && field.linkTarget}
                   <EntityLink type="token" value={field.linkTarget} />
+                {:else if field.type === 'pool' && field.linkTarget}
+                  <EntityLink type="pool" value={field.linkTarget} />
                 {:else if field.type === 'event' && field.linkTarget}
                   <EntityLink type="event" value={field.linkTarget} />
                 {:else if field.type === 'amount'}

@@ -151,7 +151,7 @@
         {:else}
           <path d={fillD} fill={fillColor} stroke="none" />
           <path d={pathD} fill="none" stroke={color} stroke-width="1.5" stroke-linejoin="round" />
-          {#each dotPoints as p (p.t)}
+          {#each dotPoints as p, i (`${p.t}-${i}`)}
             <circle cx={x(p.t).toFixed(2)} cy={y(p.v).toFixed(2)} r="3" fill={color} />
           {/each}
         {/if}

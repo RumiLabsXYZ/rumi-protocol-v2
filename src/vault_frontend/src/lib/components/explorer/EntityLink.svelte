@@ -1,5 +1,6 @@
 <script lang="ts">
   import { shortenPrincipal, getCanisterName, getTokenSymbol, isKnownCanister } from '$utils/explorerHelpers';
+  import { ammPoolShortLabel } from '$utils/ammNaming';
   import { CANISTER_IDS } from '$lib/config';
 
   interface Props {
@@ -53,6 +54,11 @@
       case 'token': return getTokenSymbol(value) ?? (short ? shortenPrincipal(value) : value);
       case 'pool': {
         if (value === '3pool' || value === CANISTER_IDS.THREEPOOL) return '3pool';
+        // AMM pool ids are joined principals like `pA_pB`. Resolve via the
+        // pool registry for "AMM1"-style labels; fall back to the shortened
+        // principal pair if the registry hasn't loaded yet.
+        const ammLabel = ammPoolShortLabel(value);
+        if (ammLabel && ammLabel !== 'AMM') return ammLabel;
         return short ? shortenPrincipal(value) : value;
       }
       case 'event': return `Event #${value}`;

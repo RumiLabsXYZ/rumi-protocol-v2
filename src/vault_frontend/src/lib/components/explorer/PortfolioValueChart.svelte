@@ -2,6 +2,15 @@
   import { onMount } from 'svelte';
   import { Principal } from '@dfinity/principal';
   import { fetchAddressValueSeries } from '$services/explorer/analyticsService';
+  import {
+    fetchAmmPools,
+    fetchAmmLpBalance,
+    fetchCollateralPrices,
+    fetchVaultsByOwner,
+    fetchCollateralConfigs,
+  } from '$services/explorer/explorerService';
+  import { CANISTER_IDS } from '$lib/config';
+  import { getTokenDecimals } from '$utils/explorerHelpers';
   import type {
     AddressValuePoint,
     AddressValueSeriesResponse,
@@ -58,6 +67,26 @@
   let loading = $state(true);
   let errorMessage = $state<string | null>(null);
 
+  // Multiplier we apply to the analytics' `amm_lp` series so the rightmost
+  // chart point matches the live AMM LP value (computed from on-chain pool
+  // reserves + the user's actual lp_balance). The analytics canister
+  // reconstructs the user's per-pool LP shares by replaying AddLiquidity /
+  // RemoveLiquidity events from 0 — but pool *bootstrap* shares (the LP
+  // tokens minted when the pool was first created) are NOT in the event
+  // log, so any user who seeded a pool ends up with an undercount. Scaling
+  // the whole series uniformly is the cheapest fix that keeps the chart
+  // shape but pins the latest point to the truth surfaced by the live
+  // allocation card.
+  let liveAmmLpScale = $state<number>(1);
+
+  // Same idea for vault equity. The analytics timeline subtracts only
+  // borrowed_principal from collateral and ignores accrued_interest because
+  // backend `AccrueInterest` events don't carry per-vault breakdowns. That
+  // makes the chart's vault_equity strictly higher than the truth that the
+  // live allocation card surfaces. Scale all timeline points so the latest
+  // matches the live (collateral_usd − borrowed − accrued_interest) total.
+  let liveVaultEquityScale = $state<number>(1);
+
   async function loadSeries(target: string, range: RangeSpec) {
     let principalObj: Principal;
     try {
@@ -78,6 +107,93 @@
       response = null;
     } finally {
       loading = false;
+    }
+
+    // Compute the live AMM LP USD value and divide by what the analytics
+    // canister reported at the rightmost point. The ratio scales the whole
+    // amm_lp band so the chart's final value matches reality. Failures here
+    // silently fall back to scale=1 — better to render the analytics value
+    // unchanged than to show nothing.
+    try {
+      const principalObjLive = Principal.fromText(target);
+      const [pools, prices] = await Promise.all([
+        fetchAmmPools().catch(() => []),
+        fetchCollateralPrices().catch(() => new Map<string, number>()),
+      ]);
+      let liveTotalUsd = 0;
+      await Promise.all(
+        (pools as any[]).map(async (pool) => {
+          const poolId = String(pool.pool_id ?? '');
+          if (!poolId) return;
+          const balance = await fetchAmmLpBalance(poolId, principalObjLive).catch(() => 0n);
+          if (balance === 0n) return;
+          const totalShares = BigInt(pool.total_lp_shares ?? 0);
+          if (totalShares === 0n) return;
+          const tokenA = pool.token_a?.toText?.() ?? String(pool.token_a ?? '');
+          const tokenB = pool.token_b?.toText?.() ?? String(pool.token_b ?? '');
+          const decA = getTokenDecimals(tokenA);
+          const decB = getTokenDecimals(tokenB);
+          // 3USD pinned to $1 (matches analytics' price_amm_lp_state).
+          const priceA = prices.get(tokenA) ?? (tokenA === CANISTER_IDS.THREEPOOL ? 1 : 0);
+          const priceB = prices.get(tokenB) ?? (tokenB === CANISTER_IDS.THREEPOOL ? 1 : 0);
+          const shareRatio = Number(balance) / Number(totalShares);
+          const valueA = (Number(BigInt(pool.reserve_a ?? 0)) / 10 ** decA) * shareRatio * priceA;
+          const valueB = (Number(BigInt(pool.reserve_b ?? 0)) / 10 ** decB) * shareRatio * priceB;
+          liveTotalUsd += valueA + valueB;
+        }),
+      );
+      const seriesLatest = response?.points?.[response.points.length - 1];
+      const seriesAmmLp = seriesLatest
+        ? Number(
+            seriesLatest.breakdown.find((b) => b.source === 'amm_lp')?.value_usd_e8s ?? 0n,
+          ) / 1e8
+        : 0;
+      if (seriesAmmLp > 0 && liveTotalUsd > 0) {
+        liveAmmLpScale = liveTotalUsd / seriesAmmLp;
+      } else {
+        liveAmmLpScale = 1;
+      }
+    } catch (err) {
+      console.error('[PortfolioValueChart] live AMM LP correction failed:', err);
+      liveAmmLpScale = 1;
+    }
+
+    // Vault equity correction. Mirror the address page's allocation-card math:
+    // (collateral_amount × price) − (borrowed_icusd + accrued_interest).
+    try {
+      const principalObjLive = Principal.fromText(target);
+      const [vaults, prices, configs] = await Promise.all([
+        fetchVaultsByOwner(principalObjLive).catch(() => []),
+        fetchCollateralPrices().catch(() => new Map<string, number>()),
+        fetchCollateralConfigs().catch(() => []),
+      ]);
+      let liveEquityUsd = 0;
+      for (const v of vaults as any[]) {
+        const ct = v.collateral_type?.toText?.() ?? String(v.collateral_type ?? '');
+        if (!ct) continue;
+        const cfg = (configs as any[]).find((c: any) => {
+          const pid = c.ledger_canister_id?.toText?.() ?? String(c.ledger_canister_id ?? '');
+          return pid === ct;
+        });
+        const dec = cfg?.decimals != null ? Number(cfg.decimals) : getTokenDecimals(ct);
+        const collUsd = (Number(BigInt(v.collateral_amount ?? 0)) / 10 ** dec) * (prices.get(ct) ?? 0);
+        const debtUsd = Number(BigInt(v.borrowed_icusd_amount ?? 0) + BigInt(v.accrued_interest ?? 0)) / 1e8;
+        liveEquityUsd += Math.max(0, collUsd - debtUsd);
+      }
+      const seriesLatest = response?.points?.[response.points.length - 1];
+      const seriesEquity = seriesLatest
+        ? Number(
+            seriesLatest.breakdown.find((b) => b.source === 'vault_equity')?.value_usd_e8s ?? 0n,
+          ) / 1e8
+        : 0;
+      if (seriesEquity > 0 && liveEquityUsd >= 0) {
+        liveVaultEquityScale = liveEquityUsd / seriesEquity;
+      } else {
+        liveVaultEquityScale = 1;
+      }
+    } catch (err) {
+      console.error('[PortfolioValueChart] live vault equity correction failed:', err);
+      liveVaultEquityScale = 1;
     }
   }
 
@@ -134,15 +250,30 @@
 
   const hasAnyValue = $derived(points.some((p) => Number(p.value_usd_e8s) > 0));
 
-  /** Value per source at each point, 8-decimal → USD float. */
+  /** Value per source at each point, 8-decimal → USD float. AMM LP and vault
+   * equity get live-correction multipliers so the rightmost chart point
+   * matches the live allocation card (see liveAmmLpScale / liveVaultEquityScale). */
   function sourceValueUsd(pt: AddressValuePoint, sourceKey: string): number {
     for (const b of pt.breakdown) {
-      if (b.source === sourceKey) return Number(b.value_usd_e8s) / 1e8;
+      if (b.source === sourceKey) {
+        const raw = Number(b.value_usd_e8s) / 1e8;
+        if (sourceKey === 'amm_lp') return raw * liveAmmLpScale;
+        if (sourceKey === 'vault_equity') return raw * liveVaultEquityScale;
+        return raw;
+      }
     }
     return 0;
   }
 
-  const totalsUsd = $derived(points.map((p) => Number(p.value_usd_e8s) / 1e8));
+  /**
+   * Re-derive the per-point total because each AMM LP value is scaled by the
+   * live-correction factor — the analytics-reported `value_usd_e8s` doesn't
+   * include that scaling. Without this, the rightmost stack would visually
+   * overshoot the headline total label.
+   */
+  const totalsUsd = $derived(
+    points.map((p) => SOURCE_STYLES.reduce((sum, style) => sum + sourceValueUsd(p, style.key), 0)),
+  );
   const maxTotalUsd = $derived(totalsUsd.reduce((a, b) => Math.max(a, b), 0));
 
   /**
