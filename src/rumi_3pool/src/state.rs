@@ -142,25 +142,27 @@ impl ThreePoolState {
 
     /// Log a transaction block, compute its hash, update certified data,
     /// and return its index.
-    /// Block IDs are sequential starting from 0, matching Vec position,
-    /// so that ICRC-3 `log_length` == `blocks.len()` and `start` indexing works.
+    ///
+    /// Block IDs are sequential starting from 0, matching `StableLog` index.
+    /// The hash of each block is also pushed to `storage::block_hashes` so
+    /// `icrc3_get_blocks` can fetch a parent hash in O(1) rather than
+    /// recomputing the chain from block 0.
+    ///
+    /// Both writes happen inside this single message; IC message-level
+    /// atomicity guarantees they cannot diverge.
     pub fn log_block(&mut self, tx: crate::types::Icrc3Transaction) -> u64 {
-        // Block IDs are sequential starting from 0; the StableLog index
-        // provides the ordering. After the A6 drain, storage::blocks::len()
-        // equals the legacy heap len, so new IDs continue uninterrupted.
         let id = crate::storage::blocks::len();
         let block = crate::types::Icrc3Block {
             id,
             timestamp: ic_cdk::api::time(),
             tx,
         };
-        // Compute hash: encode block with parent hash, then hash the value.
         let prev_hash = self.last_block_hash;
         let encoded = crate::icrc3::encode_block_with_phash(&block, prev_hash.as_ref());
         let block_hash = crate::certification::hash_value(&encoded);
         crate::storage::blocks::push(block);
+        crate::storage::block_hashes::push(crate::storage::StorableHash(block_hash));
         self.last_block_hash = Some(block_hash);
-        // Update IC certified data so index-ng can verify the chain tip
         crate::certification::set_certified_tip(id, &block_hash);
         id
     }
