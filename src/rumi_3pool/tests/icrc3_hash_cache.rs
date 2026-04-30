@@ -178,3 +178,42 @@ fn icrc3_get_blocks_cycle_cost_is_constant_in_log_length() {
     // Sanity floor: at minimum the call costs more than a no-op message.
     assert!(small_per_call > 100_000, "suspiciously low: {small_per_call}");
 }
+
+#[test]
+fn post_upgrade_backfills_empty_hash_cache() {
+    let harness = deploy_pool_with_liquidity_and_swaps(30);
+
+    let log_length = harness.icrc3_log_length();
+    assert!(log_length >= 30, "expected at least 30 blocks, got {log_length}");
+
+    // Snapshot the current view of all blocks via the live optimized endpoint.
+    // After post_upgrade backfills the cleared cache, the response for the
+    // same query must be byte-identical.
+    let pre_upgrade_blocks = harness.icrc3_get_blocks(0, log_length);
+    assert_eq!(pre_upgrade_blocks.len(), log_length as usize);
+
+    // Clear the hash cache, simulating pre-Task-3 mainnet state.
+    let _ = harness.pic
+        .update_call(harness.three_pool, harness.admin, "test_clear_hash_cache",
+                     candid::encode_one(()).unwrap())
+        .expect("test_clear_hash_cache failed");
+
+    // Upgrade with the same wasm. post_upgrade runs backfill_hash_chain,
+    // which should detect hashes_len < blocks_len and refill all entries.
+    // Sender is None (PocketIC provisional mode allows the upgrade without
+    // a controller check, matching how we installed the canister initially).
+    let wasm = include_bytes!(
+        "../../../target/wasm32-unknown-unknown/release/rumi_3pool.wasm"
+    ).to_vec();
+    harness.pic
+        .upgrade_canister(harness.three_pool, wasm, vec![], None)
+        .expect("upgrade failed (post_upgrade likely trapped on integrity check)");
+
+    // After backfill, identical query response.
+    let post_upgrade_blocks = harness.icrc3_get_blocks(0, log_length);
+    assert_eq!(post_upgrade_blocks.len(), pre_upgrade_blocks.len());
+    for (a, b) in pre_upgrade_blocks.iter().zip(post_upgrade_blocks.iter()) {
+        assert_eq!(a.id, b.id);
+        assert_eq!(a.block, b.block, "block content changed across upgrade with backfill");
+    }
+}

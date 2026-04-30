@@ -549,6 +549,26 @@ log_api!(vp_snap, VP_SNAP_LOG, VirtualPriceSnapshot);
 log_api!(blocks, BLOCKS_LOG, Icrc3Block);
 log_api!(block_hashes, BLOCK_HASHES_LOG, StorableHash);
 
+// ─── Test helpers ────────────────────────────────────────────────────────────
+
+/// Test-only: forcibly clear the `block_hashes` log to length 0.
+///
+/// Used by integration tests to simulate the pre-Task-3 mainnet state
+/// where blocks exist but the hash cache is empty. Reinitializes the
+/// `StableLog` over the same memory IDs, which zeros the index header.
+///
+/// NEVER call this from production code. The post_upgrade backfill
+/// (Task 5) repopulates the cache, but until that runs the canister
+/// would serve broken icrc3_get_blocks responses.
+#[cfg(any(feature = "test_endpoints", test))]
+pub fn clear_block_hashes_for_test() {
+    BLOCK_HASHES_LOG.with(|l| {
+        let idx_mem = MM.with(|m| m.borrow().get(MEM_BLOCK_HASHES_INDEX));
+        let dat_mem = MM.with(|m| m.borrow().get(MEM_BLOCK_HASHES_DATA));
+        *l.borrow_mut() = StableLog::new(idx_mem, dat_mem);
+    });
+}
+
 // ─── Migration: one-shot drain from the legacy raw-offset-0 blob ─────────────
 
 pub mod migration {
