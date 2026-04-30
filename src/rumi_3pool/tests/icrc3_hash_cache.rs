@@ -57,11 +57,28 @@ fn icrc3_get_blocks_matches_reference_for_all_windows() {
     // Each swap emits at least one block, plus add_liquidity emits blocks too.
     let harness = deploy_pool_with_liquidity_and_swaps(50);
 
-    let log_length = harness.icrc3_log_length();
-    assert!(
-        log_length >= 5,
-        "expected at least 5 blocks, got {log_length}"
+    // Probe the test-only endpoint. If this fails, the WASM was almost
+    // certainly built without `--features test_endpoints`. Fail fast with
+    // a clear message rather than letting the assertion loop produce
+    // confusing "method not found" panics inside reference_get_blocks.
+    let probe_result = harness.pic.query_call(
+        harness.three_pool,
+        candid::Principal::anonymous(),
+        "test_get_raw_block",
+        candid::encode_one(0u64).unwrap(),
     );
+    assert!(
+        probe_result.is_ok(),
+        "test_get_raw_block endpoint missing from WASM. \
+         Rebuild with: cargo build -p rumi_3pool --release \
+         --target wasm32-unknown-unknown --features test_endpoints"
+    );
+
+    let log_length = harness.icrc3_log_length();
+    // 1 Mint (initial AddLiquidity) + 50 Transfers (deploy_pool's loop) = 51.
+    // Lower than this means LP token operations stopped generating ICRC-3
+    // blocks somewhere -- a regression worth catching here.
+    assert!(log_length >= 51, "expected at least 51 blocks, got {log_length}");
 
     // Adjust window list based on actual log_length.
     let test_windows: Vec<(u64, u64)> = vec![
@@ -69,6 +86,7 @@ fn icrc3_get_blocks_matches_reference_for_all_windows() {
         (0, 10),
         (0, log_length),
         (log_length.saturating_sub(1), 1),
+        (log_length.saturating_sub(1), 2),  // straddle: last valid + one past end
         (log_length / 2, 5),
         (log_length, 10),     // off-the-end -> empty
         (log_length + 1, 5),  // past end -> empty
