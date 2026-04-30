@@ -988,6 +988,9 @@ pub fn get_admin_fees() -> Vec<u128> {
     read_state(|s| s.admin_fees.to_vec())
 }
 
+// PERFORMANCE NOTE: O(N) over all VP snapshots. At 4 snapshots/day this
+// grows ~1500/year. Currently called by explorer charts; not a hot path.
+// Watch threshold: vp_snap::len() > 10_000 (i.e. ~7 years of snapshots).
 /// Returns all virtual_price snapshots for APY calculation and historical charts.
 #[query]
 pub fn get_vp_snapshots() -> Vec<VirtualPriceSnapshot> {

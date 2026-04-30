@@ -218,6 +218,14 @@ impl ThreePoolState {
         self.liquidity_events.get_or_insert_with(Vec::new)
     }
 
+    // PERFORMANCE NOTE: O(N) over all swap events. Used by explorer queries
+    // (`get_top_swappers`, `get_volume_series`). Not currently a hot path
+    // because these are user-driven, not auto-polled. If swap volume grows
+    // or a frontend starts polling these on a short interval, consider:
+    //   1. Adding a windowed cache keyed by `StatsWindow` (heap-only).
+    //   2. Maintaining running aggregates in `state` updated on every swap.
+    // Watch threshold: swap_v2::len() > 50_000 OR per-day query count from
+    // explorer > 1_000 (check threeusd_index logs and replica metrics).
     /// Snapshot every v2 swap event currently stored in `storage::swap_v2`.
     ///
     /// Returns a freshly allocated `Vec` — reads go through the stable log,
@@ -229,6 +237,11 @@ impl ThreePoolState {
         crate::storage::swap_v2::iter_all()
     }
 
+    // PERFORMANCE NOTE: O(N) over all liquidity events. Used by explorer
+    // queries that aggregate AddLiquidity / RemoveLiquidity activity.
+    // Same considerations as `swap_events_v2` apply: this becomes a cycle
+    // burner if event volume grows or polling frequency increases.
+    // Watch threshold: liq_v2::len() > 50_000.
     /// Snapshot every v2 liquidity event. See `swap_events_v2` for notes.
     pub fn liquidity_events_v2(&self) -> Vec<LiquidityEventV2> {
         crate::storage::liq_v2::iter_all()
