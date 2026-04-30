@@ -668,6 +668,22 @@ pub enum Event {
         ceiling_e8s: u64,
         timestamp: u64,
     },
+
+    /// Wave-11 BOT-001: `check_vaults` detected an expired `bot_claims` entry
+    /// whose collateral was not returned (`icrc1_balance_of` < required).
+    /// The auto-cancel was skipped to keep the protocol from clearing the
+    /// claim while the bot still holds the collateral. Admin must reconcile
+    /// manually via `bot_cancel_liquidation` once the collateral is back, or
+    /// via an admin sweep if the bot is genuinely stuck. Re-emitted on every
+    /// `check_vaults` tick the gate fires; the explorer can group by
+    /// `vault_id` to dedupe.
+    #[serde(rename = "bot_claim_reconciliation_needed")]
+    BotClaimReconciliationNeeded {
+        vault_id: u64,
+        observed_balance: u64,
+        required_balance: u64,
+        timestamp: u64,
+    },
 }
 
 impl Event {
@@ -764,6 +780,8 @@ impl Event {
             Event::BreakerCleared { .. } => false,
             Event::SetBreakerWindowNs { .. } => false,
             Event::SetBreakerWindowDebtCeilingE8s { .. } => false,
+            // Wave-11 BOT-001
+            Event::BotClaimReconciliationNeeded { vault_id, .. } => vault_id == filter_vault_id,
         }
     }
 
@@ -809,6 +827,11 @@ impl Event {
             // Wave-10 LIQ-008: BreakerTripped is auto-emitted; BreakerCleared
             // and the two Set* tunables collapse to Admin via the catch-all.
             Event::BreakerTripped { .. } => EventTypeFilter::BreakerTripped,
+            // Wave-11 BOT-001: dedicated filter so operators can query stuck
+            // claims directly without scanning the Admin bucket.
+            Event::BotClaimReconciliationNeeded { .. } => {
+                EventTypeFilter::BotClaimReconciliationNeeded
+            }
             _ => EventTypeFilter::Admin,
         }
     }
@@ -922,6 +945,8 @@ impl Event {
             Event::BreakerCleared { timestamp, .. } => Some(*timestamp),
             Event::SetBreakerWindowNs { timestamp, .. } => Some(*timestamp),
             Event::SetBreakerWindowDebtCeilingE8s { timestamp, .. } => Some(*timestamp),
+            // Wave-11 BOT-001
+            Event::BotClaimReconciliationNeeded { timestamp, .. } => Some(*timestamp),
             _ => None,
         }
     }
@@ -1669,6 +1694,12 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             Event::SetBreakerWindowDebtCeilingE8s { ceiling_e8s, .. } => {
                 state.breaker_window_debt_ceiling_e8s = ceiling_e8s;
             },
+            // Wave-11 BOT-001: informational. The audit trail records that
+            // `check_vaults` skipped an auto-cancel because the bot had not
+            // returned the collateral; no replay-side state mutation is needed
+            // because the underlying `BotClaim` and `vault.bot_processing`
+            // were intentionally left untouched.
+            Event::BotClaimReconciliationNeeded { .. } => {},
         }
     }
     state.next_available_vault_id = vault_id;
@@ -1877,6 +1908,26 @@ pub fn record_set_breaker_window_debt_ceiling_e8s(state: &mut State, ceiling_e8s
     state.breaker_window_debt_ceiling_e8s = ceiling_e8s;
     record_event(&Event::SetBreakerWindowDebtCeilingE8s {
         ceiling_e8s,
+        timestamp: now(),
+    });
+}
+
+/// Wave-11 BOT-001: records that `check_vaults` skipped an auto-cancel of an
+/// expired `bot_claims` entry because the bot had not returned the collateral.
+/// The `BotClaim` is intentionally left in place so admin can reconcile via
+/// `bot_cancel_liquidation` once the collateral is back; this recorder makes
+/// no state mutation. `_state` is taken for consistency with the rest of the
+/// recorder API.
+pub fn record_bot_claim_reconciliation_needed(
+    _state: &mut State,
+    vault_id: u64,
+    observed_balance: u64,
+    required_balance: u64,
+) {
+    record_event(&Event::BotClaimReconciliationNeeded {
+        vault_id,
+        observed_balance,
+        required_balance,
         timestamp: now(),
     });
 }

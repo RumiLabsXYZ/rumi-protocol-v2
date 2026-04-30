@@ -184,6 +184,13 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
   { 'accrue_interest' : { 'timestamp' : bigint } } |
   { 'set_max_partial_liquidation_ratio' : { 'rate' : string } } |
   {
+    'breaker_tripped' : {
+      'total_e8s' : bigint,
+      'timestamp' : bigint,
+      'ceiling_e8s' : bigint,
+    }
+  } |
+  {
     'withdraw_and_close_vault' : {
       'block_index' : [] | [bigint],
       'vault_id' : bigint,
@@ -207,6 +214,14 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     }
   } |
   { 'set_recovery_target_cr' : { 'rate' : string } } |
+  {
+    'bot_claim_reconciliation_needed' : {
+      'required_balance' : bigint,
+      'vault_id' : bigint,
+      'timestamp' : bigint,
+      'observed_balance' : bigint,
+    }
+  } |
   {
     'set_collateral_redemption_fee_floor' : {
       'redemption_fee_floor' : string,
@@ -307,6 +322,12 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     }
   } |
   {
+    'set_breaker_window_debt_ceiling_e8s' : {
+      'timestamp' : bigint,
+      'ceiling_e8s' : bigint,
+    }
+  } |
+  {
     'set_bot_allowed_collateral_types' : {
       'collateral_types' : Array<Principal>,
     }
@@ -363,6 +384,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'amount' : bigint,
     }
   } |
+  { 'set_breaker_window_ns' : { 'window_ns' : bigint, 'timestamp' : bigint } } |
   {
     'partial_liquidate_vault' : {
       'protocol_fee_collateral' : [] | [bigint],
@@ -420,6 +442,9 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     }
   } |
   {
+    'breaker_cleared' : { 'remaining_total_e8s' : bigint, 'timestamp' : bigint }
+  } |
+  {
     'update_collateral_status' : {
       'status' : CollateralStatus,
       'collateral_type' : Principal,
@@ -431,7 +456,19 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'collateral_type' : string,
     }
   } |
+  {
+    'set_deficit_repayment_fraction' : {
+      'fraction' : Uint8Array | number[],
+      'timestamp' : bigint,
+    }
+  } |
   { 'set_redemption_fee_ceiling' : { 'rate' : string } } |
+  {
+    'set_deficit_readonly_threshold_e8s' : {
+      'threshold_e8s' : bigint,
+      'timestamp' : bigint,
+    }
+  } |
   {
     'add_margin_to_vault' : {
       'block_index' : bigint,
@@ -455,6 +492,15 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
   } |
   { 'set_reserve_redemption_fee' : { 'fee' : string } } |
   {
+    'deficit_repaid' : {
+      'remaining_deficit' : bigint,
+      'source' : FeeSource,
+      'timestamp' : bigint,
+      'anchor_block_index' : [] | [bigint],
+      'amount' : bigint,
+    }
+  } |
+  {
     'redemption_transfered' : {
       'icusd_block_index' : bigint,
       'icp_block_index' : bigint,
@@ -462,6 +508,14 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     }
   } |
   { 'set_liquidation_bot_principal' : { 'principal' : Principal } } |
+  {
+    'deficit_accrued' : {
+      'new_deficit' : bigint,
+      'vault_id' : bigint,
+      'timestamp' : bigint,
+      'amount' : bigint,
+    }
+  } |
   {
     'liquidate_vault' : {
       'mode' : Mode,
@@ -497,9 +551,11 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
   } |
   { 'set_recovery_cr_multiplier' : { 'multiplier' : string } };
 export interface EventTimeRange { 'start_ns' : bigint, 'end_ns' : bigint }
-export type EventTypeFilter = { 'StabilityPoolDeposit' : null } |
+export type EventTypeFilter = { 'BreakerTripped' : null } |
+  { 'StabilityPoolDeposit' : null } |
   { 'AdminSweepToTreasury' : null } |
   { 'AdminMint' : null } |
+  { 'BotClaimReconciliationNeeded' : null } |
   { 'AdjustVault' : null } |
   { 'PartialLiquidation' : null } |
   { 'OpenVault' : null } |
@@ -507,12 +563,16 @@ export type EventTypeFilter = { 'StabilityPoolDeposit' : null } |
   { 'AccrueInterest' : null } |
   { 'ReserveRedemption' : null } |
   { 'Repay' : null } |
+  { 'DeficitAccrued' : null } |
   { 'Liquidation' : null } |
   { 'Borrow' : null } |
   { 'PriceUpdate' : null } |
   { 'Admin' : null } |
+  { 'DeficitRepaid' : null } |
   { 'Redemption' : null } |
   { 'CloseVault' : null };
+export type FeeSource = { 'BorrowingFee' : null } |
+  { 'RedemptionFee' : null };
 export interface Fees { 'redemption_fee' : number, 'borrowing_fee' : number }
 export interface GetEventsArg {
   'principal' : [] | [Principal],
