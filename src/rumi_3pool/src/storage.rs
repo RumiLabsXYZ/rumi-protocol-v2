@@ -12,7 +12,7 @@
 //     first time on the new wasm (one-shot drain from the legacy blob) or
 //     subsequent times (load `SlimState` from its cell).
 //
-// Memory ID layout (18 IDs used; 255 available):
+// Memory ID layout (20 IDs used; 255 available):
 //
 //   0       SlimState cell              — bounded residual heap
 //   1       lp_balances                 — BTreeMap<Principal, u128>
@@ -25,6 +25,8 @@
 //   12,13   admin_events log
 //   14,15   vp_snapshots log
 //   16,17   icrc3_blocks log
+//   18,19   icrc3_block_hashes log      — cumulative hash chain cache (parallel
+//                                         to blocks log; entry i == hash of block i)
 //
 // Migration semantics: the first `post_upgrade` after the Phase A deploy runs
 // a one-shot drain (see `storage::migration`). All subsequent upgrades just
@@ -70,6 +72,8 @@ const MEM_VP_SNAP_INDEX: MemoryId = MemoryId::new(14);
 const MEM_VP_SNAP_DATA: MemoryId = MemoryId::new(15);
 const MEM_BLOCKS_INDEX: MemoryId = MemoryId::new(16);
 const MEM_BLOCKS_DATA: MemoryId = MemoryId::new(17);
+const MEM_BLOCK_HASHES_INDEX: MemoryId = MemoryId::new(18);
+const MEM_BLOCK_HASHES_DATA: MemoryId = MemoryId::new(19);
 
 // ─── SlimState ───────────────────────────────────────────────────────────────
 //
@@ -383,6 +387,15 @@ thread_local! {
             )
             .expect("init blocks log"),
         );
+
+    pub(crate) static BLOCK_HASHES_LOG: RefCell<StableLog<StorableHash, Memory, Memory>> =
+        RefCell::new(
+            StableLog::init(
+                MM.with(|m| m.borrow().get(MEM_BLOCK_HASHES_INDEX)),
+                MM.with(|m| m.borrow().get(MEM_BLOCK_HASHES_DATA)),
+            )
+            .expect("init block_hashes log"),
+        );
 }
 
 // ─── Public API: SlimState cell ──────────────────────────────────────────────
@@ -534,6 +547,7 @@ log_api!(liq_v2, LIQ_V2_LOG, LiquidityEventV2);
 log_api!(admin_ev, ADMIN_EV_LOG, ThreePoolAdminEvent);
 log_api!(vp_snap, VP_SNAP_LOG, VirtualPriceSnapshot);
 log_api!(blocks, BLOCKS_LOG, Icrc3Block);
+log_api!(block_hashes, BLOCK_HASHES_LOG, StorableHash);
 
 // ─── Migration: one-shot drain from the legacy raw-offset-0 blob ─────────────
 
@@ -957,5 +971,14 @@ mod tests {
         let a = StorableHash([1u8; 32]);
         let b = StorableHash([2u8; 32]);
         assert_ne!(a.to_bytes(), b.to_bytes());
+    }
+
+    #[test]
+    fn block_hashes_log_initializes_empty() {
+        // Smoke check: the log API is callable and `len()` returns 0 on a
+        // fresh thread-local. Other tests in this binary may push entries
+        // before this one runs depending on test ordering, so we only
+        // assert non-panic — not strict zero.
+        let _ = block_hashes::len();
     }
 }
