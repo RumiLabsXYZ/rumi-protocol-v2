@@ -138,6 +138,39 @@ fn post_upgrade() {
         }
     }
 
+    // ── ICRC-3 hash-chain cache: backfill (if needed) and verify ──
+    //
+    // First post_upgrade after this change ships will backfill all
+    // pre-existing blocks. Every subsequent upgrade hits the early-return
+    // inside backfill and the checks below run cheaply.
+    storage::migration::backfill_hash_chain();
+
+    let blocks_len = storage::blocks::len();
+    let hashes_len = storage::block_hashes::len();
+    if hashes_len != blocks_len {
+        ic_cdk::trap(&format!(
+            "post_upgrade: ICRC-3 hash cache length mismatch. \
+             blocks={blocks_len} hashes={hashes_len}"
+        ));
+    }
+
+    if blocks_len > 0 {
+        let cached_tip = storage::block_hashes::get(blocks_len - 1)
+            .expect("cached tip present when blocks_len > 0")
+            .0;
+        let state_tip = read_state(|s| s.last_block_hash);
+        if Some(cached_tip) != state_tip {
+            ic_cdk::trap(&format!(
+                "post_upgrade: ICRC-3 cached tip != state.last_block_hash. \
+                 cached={:?} state={:?}",
+                cached_tip, state_tip
+            ));
+        }
+    }
+
+    log!(INFO,
+        "Rumi 3pool post-upgrade: hash cache OK. blocks={blocks_len} hashes={hashes_len}");
+
     setup_timers();
 }
 
