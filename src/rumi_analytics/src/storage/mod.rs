@@ -131,6 +131,12 @@ pub struct SlimState {
     pub backfill_active_3usd: Option<bool>,
     // Phase 4: Pull cycle tracking
     pub last_pull_cycle_ns: Option<u64>,
+    /// Per-collateral-token decimal counts, sourced from `get_collateral_totals`
+    /// each fast-collector cycle. Used by USD-pricing helpers for tokens whose
+    /// native decimals differ from 8 (ckETH=18, ckUSDT=6, etc). `None` until
+    /// the first successful fast-collector run after upgrade.
+    #[serde(default)]
+    pub collateral_decimals: Option<std::collections::HashMap<Principal, u8>>,
 }
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
@@ -172,6 +178,7 @@ impl Default for SlimState {
             backfill_active_icusd: None,
             backfill_active_3usd: None,
             last_pull_cycle_ns: None,
+            collateral_decimals: None,
         }
     }
 }

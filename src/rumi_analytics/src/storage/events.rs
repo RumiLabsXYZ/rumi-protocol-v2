@@ -29,6 +29,11 @@ pub enum VaultEventKind {
     Opened,
     Borrowed,
     Repaid,
+    /// Collateral added to an existing vault (e.g. AddMarginToVault). Stored
+    /// rows decoded from a pre-2026-04-30 schema never carry this variant; the
+    /// timeline reconstructor treats unknown variants as no-op so legacy logs
+    /// still decode after upgrade.
+    CollateralDeposited,
     CollateralWithdrawn,
     PartialCollateralWithdrawn,
     WithdrawAndClose,

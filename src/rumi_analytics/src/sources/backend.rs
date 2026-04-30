@@ -287,7 +287,13 @@ pub enum BackendEvent {
     #[serde(rename = "set_redemption_fee_ceiling")]
     SetRedemptionFeeCeiling {},
     #[serde(rename = "add_margin_to_vault")]
-    AddMarginToVault {},
+    AddMarginToVault {
+        vault_id: u64,
+        margin_added: u64,
+        block_index: u64,
+        caller: Option<Principal>,
+        timestamp: Option<u64>,
+    },
     #[serde(rename = "set_stability_pool_principal")]
     SetStabilityPoolPrincipal {},
     #[serde(rename = "set_interest_split")]
@@ -365,7 +371,7 @@ impl BackendEvent {
             | AdminSweepToTreasury {}
             | CloseVault {}
             | MarginTransfer {}
-            | AddMarginToVault {}
+            | AddMarginToVault { .. }
             | AdminVaultCorrection {}
             | AdminDebtCorrection {}
             | ReserveRedemption {} => None,

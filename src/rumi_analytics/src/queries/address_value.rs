@@ -60,7 +60,12 @@ const ICP_LEDGER: &str = "ryjl3-tyaaa-aaaaa-aaaba-cai";
 /// these as keys for its colour palette and legend.
 pub const SRC_ICUSD: &str = "icusd";
 pub const SRC_THREEUSD: &str = "threeusd";
-pub const SRC_VAULT_COLLATERAL: &str = "vault_collateral";
+/// Vault NET equity = (sum of per-token collateral USD) - (icUSD debt e8s).
+/// Renamed from `vault_collateral` (which was gross collateral and double-
+/// counted against borrowed icUSD held in the same wallet); see
+/// `VaultPositionState` for the approximations that make this a flagged
+/// `approximate_sources` entry.
+pub const SRC_VAULT_EQUITY: &str = "vault_equity";
 pub const SRC_SP_DEPOSIT: &str = "sp_deposit";
 pub const SRC_3POOL_LP: &str = "three_pool_lp";
 
@@ -129,7 +134,13 @@ pub fn get_address_value_series(query: types::AddressValueSeriesQuery) -> types:
     let price_snaps = storage::fast::fast_prices::range(0, now, MAX_EVENT_LOAD);
     let three_pool_snaps = storage::fast::fast_3pool::range(0, now, MAX_EVENT_LOAD);
 
-    let (icusd_ledger, three_pool) = state::read_state(|s| (s.sources.icusd_ledger, s.sources.three_pool));
+    let (icusd_ledger, three_pool, collateral_decimals) = state::read_state(|s| {
+        (
+            s.sources.icusd_ledger,
+            s.sources.three_pool,
+            s.collateral_decimals.clone().unwrap_or_default(),
+        )
+    });
     let icusd_balance = storage::balance_tracker::all_balances(storage::balance_tracker::Token::IcUsd)
         .into_iter()
         .filter(|(acct, _)| acct.owner == query.principal)
@@ -164,11 +175,18 @@ pub fn get_address_value_series(query: types::AddressValueSeriesQuery) -> types:
         threeusd_firstseen,
         icusd_ledger,
         three_pool,
+        &collateral_decimals,
     );
 
     let approximate_sources = vec![
         SRC_ICUSD.to_string(),
         SRC_THREEUSD.to_string(),
+        // Vault equity is also approximate: the timeline skips per-vault
+        // redemption seizure (only the redeemer-aggregate row is in the
+        // event log) and does not reconstruct accrued interest (the backend
+        // emits AccrueInterest with no per-vault breakdown). See
+        // VaultPositionState docs for the precise drift bounds.
+        SRC_VAULT_EQUITY.to_string(),
         // AMM LP is absent from the output entirely in v1; no source string
         // surfaces here because the breakdown never contains an "amm_lp"
         // entry. Documented in the module header so the UI can set
@@ -235,13 +253,14 @@ pub fn compute_address_value_series(
     threeusd_firstseen_ns: Option<u64>,
     icusd_ledger: Principal,
     three_pool: Principal,
+    collateral_decimals: &HashMap<Principal, u8>,
 ) -> Vec<types::AddressValuePoint> {
     let timestamps = sample_timestamps(from_ns, to_ns, resolution_ns);
 
     // Build per-source timelines, each a sorted list of (ts, running_value).
     // At query time we binary-search / linear-scan each timeline for the value
     // at the largest ts <= sample_ts.
-    let vault_timeline = build_vault_collateral_timeline(principal, vault_events, liquidation_events);
+    let vault_timeline = build_vault_position_timeline(principal, vault_events, liquidation_events);
     let sp_timeline = build_sp_deposit_timeline(principal, stability_events);
     let three_pool_lp_timeline = build_three_pool_lp_timeline(principal, liquidity_3pool_events);
 
@@ -280,16 +299,19 @@ pub fn compute_address_value_series(
             total = total.saturating_add(threeusd_value);
         }
 
-        // Vault collateral (per-token, priced at historical spot).
+        // Vault equity (collateral USD - debt). Saturates at 0 for vaults
+        // observed underwater so a transient bad-price snapshot can't drag
+        // the total negative.
         let vault_state_at = lookup_timeline_at(&vault_timeline, ts);
-        let vault_usd = price_vault_collateral_at(
-            vault_state_at,
+        let vault_usd = price_vault_equity_at(
+            &vault_state_at,
             ts,
             price_snaps,
+            collateral_decimals,
         );
         if vault_usd > 0 {
             breakdown.push(types::AddressValueSourceBreakdown {
-                source: SRC_VAULT_COLLATERAL.to_string(),
+                source: SRC_VAULT_EQUITY.to_string(),
                 value_usd_e8s: vault_usd,
             });
             total = total.saturating_add(vault_usd);
@@ -332,31 +354,49 @@ pub fn compute_address_value_series(
     points
 }
 
-// ─── Vault collateral reconstruction ───────────────────────────────────────
+// ─── Vault position reconstruction ─────────────────────────────────────────
 
-/// Per-token collateral balance held by a principal across every active vault,
-/// captured at each event timestamp that changes it. The vault key in the
-/// inner map is the `collateral_type` (principal); the value is raw e8s.
+/// Per-token collateral balance held by a principal across every active vault.
+/// The map key is the `collateral_type` (principal); the value is raw e8s.
 pub type VaultCollateralState = HashMap<Principal, u64>;
+
+/// Snapshot of a principal's vault portfolio at one timeline event. Tracks
+/// both per-token collateral and total icUSD-denominated debt so the chart
+/// can show vault EQUITY (collateral_usd - debt) rather than gross
+/// collateral. Debt is in icUSD e8s and pegged at $1 for valuation.
+///
+/// Known approximations (chart marks vault_equity as approximate_source):
+/// - Redemption-induced collateral seizure + debt reduction is not applied
+///   per-vault (the analytics tailer only carries the redeemer-aggregate
+///   form). Both sides drop by ~equal USD at redemption time, so equity is
+///   self-correcting at that moment but drifts as price moves afterward.
+/// - Accrued interest is not reconstructed (AccrueInterest events carry no
+///   per-vault breakdown). Debt = principal only; equity is slightly
+///   over-stated relative to backend-computed debt.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VaultPositionState {
+    pub collateral_by_type: VaultCollateralState,
+    pub debt_e8s: u64,
+}
 
 /// Timeline entries share a full state snapshot to make price application at
 /// a sample timestamp cheap (no re-summation per token per point).
-pub fn build_vault_collateral_timeline(
+pub fn build_vault_position_timeline(
     principal: Principal,
     vault_events: &[storage::events::AnalyticsVaultEvent],
     liquidation_events: &[storage::events::AnalyticsLiquidationEvent],
-) -> Vec<(u64, VaultCollateralState)> {
+) -> Vec<(u64, VaultPositionState)> {
     use storage::events::VaultEventKind;
 
-    // vault_id -> (owner, collateral_type, collateral_e8s, is_ours)
     let mut vaults: HashMap<u64, VaultRecord> = HashMap::new();
-    // Merge-sort vault + liquidation events by timestamp.
+    // Merge-sort vault + liquidation events by timestamp so deltas apply in
+    // chronological order regardless of which evt log they came from.
     let mut merged: Vec<MergedVaultEvent> = Vec::new();
     merged.extend(vault_events.iter().map(|e| MergedVaultEvent::Vault(e.clone())));
     merged.extend(liquidation_events.iter().map(|e| MergedVaultEvent::Liquidation(e.clone())));
     merged.sort_by_key(|e| e.timestamp_ns());
 
-    let mut timeline: Vec<(u64, VaultCollateralState)> = Vec::new();
+    let mut timeline: Vec<(u64, VaultPositionState)> = Vec::new();
     for e in &merged {
         let mut changed = false;
         match e {
@@ -368,9 +408,18 @@ pub fn build_vault_collateral_timeline(
                             owner: v.owner,
                             collateral_type: v.collateral_type,
                             collateral_e8s: if is_ours { v.amount } else { 0 },
+                            debt_e8s: 0,
                             is_ours,
                         });
                         changed = is_ours;
+                    }
+                    VaultEventKind::CollateralDeposited => {
+                        if let Some(r) = vaults.get_mut(&v.vault_id) {
+                            if r.is_ours {
+                                r.collateral_e8s = r.collateral_e8s.saturating_add(v.amount);
+                                changed = true;
+                            }
+                        }
                     }
                     VaultEventKind::CollateralWithdrawn
                     | VaultEventKind::PartialCollateralWithdrawn
@@ -384,17 +433,37 @@ pub fn build_vault_collateral_timeline(
                     }
                     VaultEventKind::Closed => {
                         if let Some(r) = vaults.get_mut(&v.vault_id) {
-                            if r.is_ours && r.collateral_e8s > 0 {
+                            if r.is_ours && (r.collateral_e8s > 0 || r.debt_e8s > 0) {
                                 r.collateral_e8s = 0;
+                                r.debt_e8s = 0;
                                 changed = true;
                             }
                         }
                     }
-                    // Borrowed, Repaid, DustForgiven, Redeemed: no per-vault
-                    // collateral-amount delta we can attribute to an owner.
-                    // Redeemed events are emitted without a vault_id today
-                    // (owner-level summary); see sources::backend for details.
-                    _ => {}
+                    VaultEventKind::Borrowed => {
+                        if let Some(r) = vaults.get_mut(&v.vault_id) {
+                            if r.is_ours {
+                                // Debt grows by principal + borrow fee; both
+                                // accrue against the vault on the backend.
+                                let fee = v.fee_amount.unwrap_or(0);
+                                r.debt_e8s = r.debt_e8s
+                                    .saturating_add(v.amount)
+                                    .saturating_add(fee);
+                                changed = true;
+                            }
+                        }
+                    }
+                    VaultEventKind::Repaid | VaultEventKind::DustForgiven => {
+                        if let Some(r) = vaults.get_mut(&v.vault_id) {
+                            if r.is_ours {
+                                r.debt_e8s = r.debt_e8s.saturating_sub(v.amount);
+                                changed = true;
+                            }
+                        }
+                    }
+                    // Redeemed: aggregate row (vault_id=0, owner=redeemer)
+                    // documented under VaultPositionState approximations.
+                    VaultEventKind::Redeemed => {}
                 }
             }
             MergedVaultEvent::Liquidation(l) => {
@@ -403,8 +472,9 @@ pub fn build_vault_collateral_timeline(
                     if r.is_ours {
                         match l.liquidation_kind {
                             LiquidationKind::Full => {
-                                if r.collateral_e8s > 0 {
+                                if r.collateral_e8s > 0 || r.debt_e8s > 0 {
                                     r.collateral_e8s = 0;
+                                    r.debt_e8s = 0;
                                     changed = true;
                                 }
                             }
@@ -414,9 +484,21 @@ pub fn build_vault_collateral_timeline(
                                         r.collateral_e8s.saturating_sub(l.collateral_amount);
                                     changed = true;
                                 }
+                                if r.debt_e8s > 0 && l.debt_amount > 0 {
+                                    r.debt_e8s = r.debt_e8s.saturating_sub(l.debt_amount);
+                                    changed = true;
+                                }
                             }
-                            // Redistribution: no owner-facing balance change.
-                            LiquidationKind::Redistribution => {}
+                            LiquidationKind::Redistribution => {
+                                // Vault is wiped; debt + collateral migrate
+                                // to other vaults at the protocol level. From
+                                // this owner's perspective, position closes.
+                                if r.collateral_e8s > 0 || r.debt_e8s > 0 {
+                                    r.collateral_e8s = 0;
+                                    r.debt_e8s = 0;
+                                    changed = true;
+                                }
+                            }
                         }
                     }
                 }
@@ -431,10 +513,10 @@ pub fn build_vault_collateral_timeline(
 
 #[derive(Clone, Debug)]
 struct VaultRecord {
-    #[allow(dead_code)]
     owner: Principal,
     collateral_type: Principal,
     collateral_e8s: u64,
+    debt_e8s: u64,
     is_ours: bool,
 }
 
@@ -455,25 +537,33 @@ impl MergedVaultEvent {
 fn state_snapshot(
     vaults: &HashMap<u64, VaultRecord>,
     principal: Principal,
-) -> VaultCollateralState {
-    let mut out: VaultCollateralState = HashMap::new();
+) -> VaultPositionState {
+    let mut collateral_by_type: VaultCollateralState = HashMap::new();
+    let mut debt_e8s: u64 = 0;
     for r in vaults.values() {
-        if r.is_ours && r.collateral_e8s > 0 && r.owner == principal {
-            *out.entry(r.collateral_type).or_insert(0) =
-                out.get(&r.collateral_type).copied().unwrap_or(0).saturating_add(r.collateral_e8s);
+        if !r.is_ours || r.owner != principal {
+            continue;
         }
+        if r.collateral_e8s > 0 {
+            *collateral_by_type.entry(r.collateral_type).or_insert(0) = collateral_by_type
+                .get(&r.collateral_type)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(r.collateral_e8s);
+        }
+        debt_e8s = debt_e8s.saturating_add(r.debt_e8s);
     }
-    out
+    VaultPositionState { collateral_by_type, debt_e8s }
 }
 
-/// Linear scan by timestamp descending — cheap for our expected N (a handful
+/// Linear scan by timestamp ascending — cheap for our expected N (a handful
 /// of event-triggered snapshots per active vault). For high-volume addresses
 /// a binary search would be an easy optimization.
 pub fn lookup_timeline_at(
-    timeline: &[(u64, VaultCollateralState)],
+    timeline: &[(u64, VaultPositionState)],
     ts: u64,
-) -> VaultCollateralState {
-    let mut last: Option<&VaultCollateralState> = None;
+) -> VaultPositionState {
+    let mut last: Option<&VaultPositionState> = None;
     for (event_ts, state) in timeline {
         if *event_ts > ts {
             break;
@@ -613,31 +703,41 @@ pub fn apply_virtual_price(lp_amount_e8s: u64, virtual_price: f64) -> u64 {
     scaled.min(u64::MAX as f64) as u64
 }
 
-/// Price every collateral type in `state` at `ts` and sum. Tokens without an
-/// in-range price are skipped (their contribution is 0 rather than an error).
-pub fn price_vault_collateral_at(
-    state: VaultCollateralState,
+/// Price every collateral type in `state` at `ts`, sum them, and subtract
+/// icUSD debt (pegged at $1) to produce vault EQUITY in USD e8s. Tokens
+/// without an in-range price contribute 0 (rather than an error), which
+/// means a missing-price collateral leg is treated as $0 — equity for that
+/// vault then looks more underwater than reality, never less. Underwater
+/// totals saturate to 0 so a single bad price snapshot can't drag the
+/// portfolio negative.
+///
+/// `decimals_map` provides per-token native decimal counts (ckETH=18,
+/// ckUSDT=6, ICP/BOB/ckBTC/etc=8). Tokens missing from the map fall back to
+/// 8 — that's the dominant case on mainnet, and the only safe default that
+/// doesn't crash the query when a freshly registered collateral hasn't been
+/// observed by the fast collector yet.
+pub fn price_vault_equity_at(
+    state: &VaultPositionState,
     ts: u64,
     snapshots: &[storage::fast::FastPriceSnapshot],
+    decimals_map: &HashMap<Principal, u8>,
 ) -> u64 {
-    let mut total: u64 = 0;
-    for (token, amount) in state {
-        if amount == 0 { continue; }
-        let price = match price_usd_at(token, ts, snapshots) {
+    let mut collateral_total: u64 = 0;
+    for (token, amount) in &state.collateral_by_type {
+        if *amount == 0 { continue; }
+        let price = match price_usd_at(*token, ts, snapshots) {
             Some(p) => p,
             None => continue,
         };
-        // Collateral tokens on IC are 8-decimal across the current set.
-        // Other decimal counts would require a per-token lookup; mirroring
-        // flow.rs::token_decimals(). Keeping 8 here matches the mainnet set
-        // (ICP, BOB, EXE, nICP, ckBTC, ckETH, ckXAUT all use 8).
+        let decimals = decimals_map.get(token).copied().unwrap_or(8);
         let price_e8s = (price * 1e8) as u128;
-        let scaled = (amount as u128).saturating_mul(price_e8s);
-        let divisor = 10u128.pow(8);
+        let scaled = (*amount as u128).saturating_mul(price_e8s);
+        let divisor = 10u128.pow(decimals as u32);
+        if divisor == 0 { continue; }
         let contribution = (scaled / divisor).min(u64::MAX as u128) as u64;
-        total = total.saturating_add(contribution);
+        collateral_total = collateral_total.saturating_add(contribution);
     }
-    total
+    collateral_total.saturating_sub(state.debt_e8s)
 }
 
 /// v1 stable-balance projection: return `current_balance_e8s` for any sample
@@ -761,7 +861,11 @@ mod tests {
         assert_eq!(stamps, vec![500]);
     }
 
-    // ─── Vault collateral ─────────────────────────────────────────────────
+    // ─── Vault position (collateral + debt) ──────────────────────────────
+
+    fn coll(state: &VaultPositionState, token: Principal) -> u64 {
+        state.collateral_by_type.get(&token).copied().unwrap_or(0)
+    }
 
     #[test]
     fn vault_timeline_tracks_opened_and_withdrawals() {
@@ -771,13 +875,12 @@ mod tests {
             vault_event(1, 200, user, VaultEventKind::PartialCollateralWithdrawn, icp_ledger(), 300_000_000),
             vault_event(1, 300, user, VaultEventKind::WithdrawAndClose, icp_ledger(), 700_000_000),
         ];
-        let timeline = build_vault_collateral_timeline(user, &events, &[]);
+        let timeline = build_vault_position_timeline(user, &events, &[]);
         // Three snapshots — one per changing event.
         assert_eq!(timeline.len(), 3);
-        assert_eq!(timeline[0].1.get(&icp_ledger()).copied(), Some(1_000_000_000));
-        assert_eq!(timeline[1].1.get(&icp_ledger()).copied(), Some(700_000_000));
-        assert!(timeline[2].1.get(&icp_ledger()).copied().unwrap_or(0) == 0
-            || timeline[2].1.is_empty());
+        assert_eq!(coll(&timeline[0].1, icp_ledger()), 1_000_000_000);
+        assert_eq!(coll(&timeline[1].1, icp_ledger()), 700_000_000);
+        assert_eq!(coll(&timeline[2].1, icp_ledger()), 0);
     }
 
     #[test]
@@ -788,10 +891,10 @@ mod tests {
             vault_event(1, 100, other, VaultEventKind::Opened, icp_ledger(), 9_999),
             vault_event(2, 200, me, VaultEventKind::Opened, icp_ledger(), 1_000),
         ];
-        let timeline = build_vault_collateral_timeline(me, &events, &[]);
+        let timeline = build_vault_position_timeline(me, &events, &[]);
         assert_eq!(timeline.len(), 1);
         assert_eq!(timeline[0].0, 200);
-        assert_eq!(timeline[0].1.get(&icp_ledger()).copied(), Some(1_000));
+        assert_eq!(coll(&timeline[0].1, icp_ledger()), 1_000);
     }
 
     #[test]
@@ -803,10 +906,72 @@ mod tests {
         let liq_evs = vec![
             liq_event(7, 300, LiquidationKind::Full, 0),
         ];
-        let timeline = build_vault_collateral_timeline(me, &vault_evs, &liq_evs);
+        let timeline = build_vault_position_timeline(me, &vault_evs, &liq_evs);
         assert_eq!(timeline.len(), 2);
-        // Post-liquidation snapshot: no collateral.
-        assert_eq!(timeline[1].1.get(&icp_ledger()).copied().unwrap_or(0), 0);
+        assert_eq!(coll(&timeline[1].1, icp_ledger()), 0);
+        assert_eq!(timeline[1].1.debt_e8s, 0);
+    }
+
+    #[test]
+    fn vault_timeline_tracks_topup_via_collateral_deposited() {
+        // Regression for the AddMarginToVault gap: prior versions of the
+        // analytics tailer dropped these events on the floor, so subsequent
+        // top-ups never widened the timeline's collateral.
+        let me = p(1);
+        let events = vec![
+            vault_event(1, 100, me, VaultEventKind::Opened, icp_ledger(), 1_000_000_000),
+            vault_event(1, 200, me, VaultEventKind::CollateralDeposited, icp_ledger(), 500_000_000),
+            vault_event(1, 300, me, VaultEventKind::CollateralDeposited, icp_ledger(), 250_000_000),
+        ];
+        let timeline = build_vault_position_timeline(me, &events, &[]);
+        assert_eq!(timeline.len(), 3);
+        assert_eq!(coll(&timeline[2].1, icp_ledger()), 1_750_000_000);
+    }
+
+    #[test]
+    fn vault_timeline_tracks_debt_through_borrow_and_repay() {
+        let me = p(1);
+        let mut borrow = vault_event(1, 200, me, VaultEventKind::Borrowed, Principal::anonymous(), 100_000_000);
+        borrow.fee_amount = Some(500_000); // half-percent borrowing fee
+        let events = vec![
+            vault_event(1, 100, me, VaultEventKind::Opened, icp_ledger(), 1_000_000_000),
+            borrow,
+            vault_event(1, 300, me, VaultEventKind::Repaid, Principal::anonymous(), 30_000_000),
+            vault_event(1, 400, me, VaultEventKind::DustForgiven, Principal::anonymous(), 200_000),
+        ];
+        let timeline = build_vault_position_timeline(me, &events, &[]);
+        // Open → borrow → repay → forgive: 4 changing events.
+        assert_eq!(timeline.len(), 4);
+        // After borrow: principal + fee.
+        assert_eq!(timeline[1].1.debt_e8s, 100_000_000 + 500_000);
+        // After repay.
+        assert_eq!(timeline[2].1.debt_e8s, 100_000_000 + 500_000 - 30_000_000);
+        // After dust forgiveness.
+        assert_eq!(timeline[3].1.debt_e8s, 100_000_000 + 500_000 - 30_000_000 - 200_000);
+    }
+
+    #[test]
+    fn vault_timeline_partial_liquidation_reduces_both_collateral_and_debt() {
+        let me = p(1);
+        let mut borrow = vault_event(7, 200, me, VaultEventKind::Borrowed, Principal::anonymous(), 50_000_000);
+        borrow.fee_amount = Some(0);
+        let vault_evs = vec![
+            vault_event(7, 100, me, VaultEventKind::Opened, icp_ledger(), 1_000_000_000),
+            borrow,
+        ];
+        let liq_evs = vec![AnalyticsLiquidationEvent {
+            timestamp_ns: 300,
+            source_event_id: 0,
+            vault_id: 7,
+            collateral_type: icp_ledger(),
+            collateral_amount: 200_000_000,
+            debt_amount: 20_000_000,
+            liquidation_kind: LiquidationKind::Partial,
+        }];
+        let timeline = build_vault_position_timeline(me, &vault_evs, &liq_evs);
+        let post_liq = timeline.last().unwrap();
+        assert_eq!(coll(&post_liq.1, icp_ledger()), 800_000_000);
+        assert_eq!(post_liq.1.debt_e8s, 30_000_000);
     }
 
     // ─── SP deposits ─────────────────────────────────────────────────────
@@ -856,7 +1021,93 @@ mod tests {
     }
 
     #[test]
-    fn vault_collateral_value_moves_with_price_even_when_balance_is_constant() {
+    fn vault_equity_uses_per_token_decimals_for_18dec_token() {
+        // Regression for the explorer "$22.7B portfolio" bug: a ckETH-collateral
+        // vault was getting priced with the hardcoded 8-decimal divisor, so a
+        // single 0.001 ckETH position (1e15 raw e18) at $3000 inflated to
+        // $30B instead of $3.
+        let me = p(1);
+        let cketh = p(7);
+        let vault_evs = vec![
+            vault_event(1, 100, me, VaultEventKind::Opened, cketh, 1_000_000_000_000_000),
+        ];
+        let snaps = vec![price_snap(100, vec![(cketh, 3_000.0)])];
+        let timeline = build_vault_position_timeline(me, &vault_evs, &[]);
+        let state = lookup_timeline_at(&timeline, 200);
+        let decimals: HashMap<Principal, u8> = HashMap::from([(cketh, 18)]);
+
+        let v = price_vault_equity_at(&state, 200, &snaps, &decimals);
+        // 0.001 ckETH * $3000 = $3.00 → 300_000_000 e8s. No debt, so equity
+        // equals collateral.
+        assert_eq!(v, 300_000_000);
+
+        // Sanity: missing decimals fall back to 8 and produce the inflated
+        // value the explorer was showing. This locks in the regression so
+        // future changes can't silently revert to the hardcoded divisor.
+        let no_decimals = HashMap::new();
+        let bug = price_vault_equity_at(&state, 200, &snaps, &no_decimals);
+        assert!(bug > 1_000_000_000_000_000, "expected hardcoded-8 fallback to inflate, got {}", bug);
+    }
+
+    #[test]
+    fn vault_equity_uses_per_token_decimals_for_6dec_token() {
+        let me = p(1);
+        let ckusdt = p(8);
+        let vault_evs = vec![
+            vault_event(1, 100, me, VaultEventKind::Opened, ckusdt, 100_000_000),
+        ];
+        let snaps = vec![price_snap(100, vec![(ckusdt, 1.0)])];
+        let timeline = build_vault_position_timeline(me, &vault_evs, &[]);
+        let state = lookup_timeline_at(&timeline, 200);
+        let decimals: HashMap<Principal, u8> = HashMap::from([(ckusdt, 6)]);
+
+        let v = price_vault_equity_at(&state, 200, &snaps, &decimals);
+        // 100 ckUSDT * $1 = $100 → 10_000_000_000 e8s.
+        assert_eq!(v, 10_000_000_000);
+    }
+
+    #[test]
+    fn vault_equity_subtracts_debt() {
+        // 10 ICP @ $5 = $50 collateral, $30 debt → $20 equity.
+        let me = p(1);
+        let mut borrow = vault_event(1, 150, me, VaultEventKind::Borrowed, Principal::anonymous(), 30_00_000_000);
+        borrow.fee_amount = Some(0);
+        let vault_evs = vec![
+            vault_event(1, 100, me, VaultEventKind::Opened, icp_ledger(), 1_000_000_000),
+            borrow,
+        ];
+        let snaps = vec![price_snap(100, vec![(icp_ledger(), 5.0)])];
+        let timeline = build_vault_position_timeline(me, &vault_evs, &[]);
+        let state = lookup_timeline_at(&timeline, 200);
+        let decimals: HashMap<Principal, u8> = HashMap::from([(icp_ledger(), 8)]);
+
+        let v = price_vault_equity_at(&state, 200, &snaps, &decimals);
+        assert_eq!(v, 5_000_000_000 - 3_000_000_000);
+    }
+
+    #[test]
+    fn vault_equity_clamps_to_zero_when_underwater() {
+        // 10 ICP collateral, $100 debt, ICP price crashes to $1: equity is
+        // -$90 in reality. We saturate to 0 so an outlier price snapshot
+        // can't flip the rest of the chart's totals into nonsense.
+        let me = p(1);
+        let mut borrow = vault_event(1, 150, me, VaultEventKind::Borrowed, Principal::anonymous(), 100_00_000_000);
+        borrow.fee_amount = Some(0);
+        let vault_evs = vec![
+            vault_event(1, 100, me, VaultEventKind::Opened, icp_ledger(), 1_000_000_000),
+            borrow,
+        ];
+        let snaps = vec![price_snap(100, vec![(icp_ledger(), 1.0)])];
+        let timeline = build_vault_position_timeline(me, &vault_evs, &[]);
+        let state = lookup_timeline_at(&timeline, 200);
+        let decimals: HashMap<Principal, u8> = HashMap::from([(icp_ledger(), 8)]);
+
+        let v = price_vault_equity_at(&state, 200, &snaps, &decimals);
+        assert_eq!(v, 0);
+    }
+
+    #[test]
+    fn vault_equity_value_moves_with_price_even_when_balance_is_constant() {
         let me = p(1);
         let vault_evs = vec![
             vault_event(1, 100, me, VaultEventKind::Opened, icp_ledger(), 1_000_000_000),
@@ -865,14 +1116,15 @@ mod tests {
             price_snap(100, vec![(icp_ledger(), 5.0)]),
             price_snap(2_000, vec![(icp_ledger(), 10.0)]),
         ];
-        let timeline = build_vault_collateral_timeline(me, &vault_evs, &[]);
+        let timeline = build_vault_position_timeline(me, &vault_evs, &[]);
         let state_at_t1 = lookup_timeline_at(&timeline, 500);
         let state_at_t2 = lookup_timeline_at(&timeline, 2_500);
 
-        let v1 = price_vault_collateral_at(state_at_t1, 500, &snaps);
-        let v2 = price_vault_collateral_at(state_at_t2, 2_500, &snaps);
+        let decimals: HashMap<Principal, u8> = HashMap::from([(icp_ledger(), 8)]);
+        let v1 = price_vault_equity_at(&state_at_t1, 500, &snaps, &decimals);
+        let v2 = price_vault_equity_at(&state_at_t2, 2_500, &snaps, &decimals);
 
-        // 10 ICP * $5 = $50; 10 ICP * $10 = $100. Values are e8s.
+        // No debt: equity == collateral. 10 ICP * $5 = $50; 10 ICP * $10 = $100.
         assert_eq!(v1, 5_000_000_000);
         assert_eq!(v2, 10_000_000_000);
     }
@@ -893,6 +1145,7 @@ mod tests {
             Some(50),
             0, None,
             icusd_ledger(), three_pool(),
+            &HashMap::new(),
         );
         // Points at t=0, 100, 200, 300, 400.
         assert_eq!(points.len(), 5);
@@ -934,13 +1187,14 @@ mod tests {
             0, None,
             0, None,
             icusd_ledger(), three_pool(),
+            &HashMap::from([(icp_ledger(), 8)]),
         );
         // t=0: nothing yet.
         assert_eq!(points[0].value_usd_e8s, 0);
         // t=100: only vault collateral. 10 ICP * $5 = $50 = 5_000_000_000 e8s.
         let t100 = &points[1];
         assert_eq!(t100.breakdown.len(), 1);
-        assert_eq!(t100.breakdown[0].source, SRC_VAULT_COLLATERAL);
+        assert_eq!(t100.breakdown[0].source, SRC_VAULT_EQUITY);
         assert_eq!(t100.value_usd_e8s, 5_000_000_000);
         // t=200: vault + SP. 50 e8s icUSD == $50.
         let t200 = &points[2];
@@ -974,6 +1228,7 @@ mod tests {
             &prices, &[],
             0, None, 0, None,
             icusd_ledger(), three_pool(),
+            &HashMap::from([(icp_ledger(), 8)]),
         );
         assert_eq!(points.len(), 5);
         assert_eq!(points[1].value_usd_e8s, 5_000_000_000);  // $50 @ t=100
@@ -992,6 +1247,7 @@ mod tests {
             &[], &[],
             0, None, 0, None,
             icusd_ledger(), three_pool(),
+            &HashMap::new(),
         );
         for p in &points {
             assert_eq!(p.value_usd_e8s, 0);

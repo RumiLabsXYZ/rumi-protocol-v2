@@ -16,6 +16,16 @@ pub async fn run() -> Result<(), String> {
 
     match prices_res {
         Ok(totals) => {
+            // Refresh the heap-side decimals lookup before we drop `totals`.
+            // Persistent across upgrades via SlimState; pricing queries read
+            // it to avoid the silently-wrong "all collateral is 8 decimals"
+            // assumption that inflated 18-decimal tokens (ckETH) by 1e10.
+            let decimals_map: std::collections::HashMap<candid::Principal, u8> = totals
+                .iter()
+                .map(|t| (t.collateral_type, t.decimals))
+                .collect();
+            state::mutate_state(|s| s.collateral_decimals = Some(decimals_map));
+
             let prices = totals.into_iter()
                 .map(|t| (t.collateral_type, t.price, t.symbol))
                 .collect();
