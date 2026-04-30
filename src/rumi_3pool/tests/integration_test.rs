@@ -1,68 +1,14 @@
-use candid::{decode_one, encode_args, encode_one, CandidType, Deserialize, Principal};
+mod common;
+
+use candid::{decode_one, encode_args, encode_one, Principal};
+use common::{
+    icrc1_ledger_wasm, three_pool_wasm, ArchiveOptions, FeatureFlags, LedgerArg, LedgerInitArgs,
+};
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc2::approve::ApproveArgs;
 use pocket_ic::{PocketIcBuilder, WasmResult};
 
 use rumi_3pool::types::*;
-
-// ─── Candid types for ICRC-1 ledger initialization ───
-
-#[derive(CandidType, Deserialize)]
-struct FeatureFlags {
-    icrc2: bool,
-}
-
-#[derive(CandidType, Deserialize)]
-struct ArchiveOptions {
-    num_blocks_to_archive: u64,
-    trigger_threshold: u64,
-    controller_id: Principal,
-    max_transactions_per_response: Option<u64>,
-    max_message_size_bytes: Option<u64>,
-    cycles_for_archive_creation: Option<u64>,
-    node_max_memory_size_bytes: Option<u64>,
-    more_controller_ids: Option<Vec<Principal>>,
-}
-
-#[derive(CandidType, Deserialize)]
-enum MetadataValue {
-    Nat(candid::Nat),
-    Int(candid::Int),
-    Text(String),
-    Blob(Vec<u8>),
-}
-
-#[derive(CandidType, Deserialize)]
-struct LedgerInitArgs {
-    minting_account: Account,
-    fee_collector_account: Option<Account>,
-    transfer_fee: candid::Nat,
-    decimals: Option<u8>,
-    max_memo_length: Option<u16>,
-    token_name: String,
-    token_symbol: String,
-    metadata: Vec<(String, MetadataValue)>,
-    initial_balances: Vec<(Account, candid::Nat)>,
-    feature_flags: Option<FeatureFlags>,
-    maximum_number_of_accounts: Option<u64>,
-    accounts_overflow_trim_quantity: Option<u64>,
-    archive_options: ArchiveOptions,
-}
-
-#[derive(CandidType, Deserialize)]
-enum LedgerArg {
-    Init(LedgerInitArgs),
-}
-
-// ─── WASM loaders ───
-
-fn icrc1_ledger_wasm() -> Vec<u8> {
-    include_bytes!("../../ledger/ic-icrc1-ledger.wasm").to_vec()
-}
-
-fn three_pool_wasm() -> Vec<u8> {
-    include_bytes!("../../../target/wasm32-unknown-unknown/release/rumi_3pool.wasm").to_vec()
-}
 
 // ─── Integration Test ───
 

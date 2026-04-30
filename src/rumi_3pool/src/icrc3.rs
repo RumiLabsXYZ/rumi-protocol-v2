@@ -13,7 +13,7 @@ use crate::types::{Icrc3Block, Icrc3Transaction};
 
 /// Generic value type used by ICRC-3 to encode blocks as nested maps.
 /// The index-ng expects this exact Candid structure.
-#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum Icrc3Value {
     Blob(Vec<u8>),
     Text(String),
@@ -31,7 +31,7 @@ pub struct GetBlocksArgs {
     pub length: Nat,
 }
 
-#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct BlockWithId {
     pub id: Nat,
     pub block: Icrc3Value,
@@ -194,25 +194,42 @@ pub fn icrc3_get_blocks(args: Vec<GetBlocksArgs>) -> GetBlocksResult {
         if start >= log_length {
             continue;
         }
-
         let end = std::cmp::min(start.saturating_add(length), log_length);
+        if end <= start {
+            continue;
+        }
 
-        // Rebuild hash chain for the requested range so we can include phash.
-        // We must compute hashes from block 0 up to `end` to get the parent
-        // hash for the first requested block. This is O(end) per request —
-        // acceptable for typical index-ng polling windows; if it becomes a
-        // hot path we can cache cumulative hashes alongside the blocks log.
-        let prefix = crate::storage::blocks::range(0, end);
-        let mut prev_hash: Option<[u8; 32]> = None;
-        for block in &prefix {
+        // Parent hash for the first requested block: cached at index
+        // (start - 1), or None if start == 0. Tasks 4-5 guarantee the
+        // cache covers all blocks via post_upgrade backfill.
+        let mut prev_hash: Option<[u8; 32]> = if start == 0 {
+            None
+        } else {
+            Some(
+                crate::storage::block_hashes::get(start - 1)
+                    .expect(
+                        "hash cache must cover all blocks: the post_upgrade \
+                         backfill + integrity check enforces this invariant"
+                    )
+                    .0,
+            )
+        };
+
+        // Read only the requested range from the blocks log. Encoding +
+        // hashing happens once per returned block, replacing the old
+        // O(end) chain rebuild.
+        let blocks = crate::storage::blocks::range(start, end - start);
+        for block in &blocks {
             let encoded = encode_block_with_phash(block, prev_hash.as_ref());
+            // Compute the running hash so the next iteration has its parent.
+            // For the LAST block in this range, prev_hash is not read again,
+            // but computing it keeps the loop body symmetric and the cost is
+            // a single SHA-256 over the encoded value.
             let block_hash = crate::certification::hash_value(&encoded);
-            if block.id >= start {
-                result_blocks.push(BlockWithId {
-                    id: Nat::from(block.id),
-                    block: encoded,
-                });
-            }
+            result_blocks.push(BlockWithId {
+                id: Nat::from(block.id),
+                block: encoded,
+            });
             prev_hash = Some(block_hash);
         }
     }
@@ -220,7 +237,7 @@ pub fn icrc3_get_blocks(args: Vec<GetBlocksArgs>) -> GetBlocksResult {
     GetBlocksResult {
         log_length: Nat::from(log_length),
         blocks: result_blocks,
-        archived_blocks: vec![], // No archiving
+        archived_blocks: vec![],
     }
 }
 

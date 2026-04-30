@@ -53,6 +53,18 @@ fn pre_upgrade() {
     storage::set_slim(slim);
 }
 
+/// Lower-case hex of a 32-byte hash. Used in trap messages for ICRC-3
+/// hash-chain integrity checks so on-call output matches block-explorer
+/// formatting rather than the default `{:?}` decimal-byte rendering.
+fn hex_lower(bytes: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(&mut s, "{:02x}", b);
+    }
+    s
+}
+
 #[post_upgrade]
 fn post_upgrade() {
     // Step 1: BEFORE touching any storage::* thread-local, try to read a
@@ -136,6 +148,45 @@ fn post_upgrade() {
         if len > 0 {
             certification::set_certified_tip(len - 1, &h);
         }
+    }
+
+    // ── ICRC-3 hash-chain cache: backfill (if needed) and verify ──
+    //
+    // First post_upgrade after this change ships will backfill all
+    // pre-existing blocks. Every subsequent upgrade hits the early-return
+    // inside backfill and the checks below run cheaply.
+    let hashes_before_backfill = storage::block_hashes::len();
+    storage::migration::backfill_hash_chain();
+
+    let blocks_len = storage::blocks::len();
+    let hashes_len = storage::block_hashes::len();
+    if hashes_len != blocks_len {
+        ic_cdk::trap(&format!(
+            "post_upgrade: ICRC-3 hash cache length mismatch. \
+             blocks={blocks_len} hashes={hashes_len}"
+        ));
+    }
+
+    if blocks_len > 0 {
+        let cached_tip = storage::block_hashes::get(blocks_len - 1)
+            .expect("cached tip present when blocks_len > 0")
+            .0;
+        let state_tip = read_state(|s| s.last_block_hash);
+        if Some(cached_tip) != state_tip {
+            ic_cdk::trap(&format!(
+                "post_upgrade: ICRC-3 cached tip != state.last_block_hash. \
+                 cached={} state={}",
+                hex_lower(&cached_tip),
+                state_tip.map(|h| hex_lower(&h)).unwrap_or_else(|| "None".to_string()),
+            ));
+        }
+    }
+
+    let backfilled = blocks_len.saturating_sub(hashes_before_backfill);
+    if backfilled > 0 {
+        log!(INFO,
+            "Rumi 3pool post-upgrade: backfilled {backfilled} ICRC-3 hashes. \
+             blocks={blocks_len} hashes={hashes_len}");
     }
 
     setup_timers();
@@ -937,6 +988,9 @@ pub fn get_admin_fees() -> Vec<u128> {
     read_state(|s| s.admin_fees.to_vec())
 }
 
+// PERFORMANCE NOTE: O(N) over all VP snapshots. At 4 snapshots/day this
+// grows ~1500/year. Currently called by explorer charts; not a hot path.
+// Watch threshold: vp_snap::len() > 10_000 (i.e. ~7 years of snapshots).
 /// Returns all virtual_price snapshots for APY calculation and historical charts.
 #[query]
 pub fn get_vp_snapshots() -> Vec<VirtualPriceSnapshot> {
@@ -2048,6 +2102,40 @@ pub fn icrc3_get_tip_certificate() -> Option<icrc3::Icrc3DataCertificate> {
 #[query]
 pub fn icrc3_supported_block_types() -> Vec<icrc3::SupportedBlockType> {
     icrc3::icrc3_supported_block_types()
+}
+
+/// Test-only: return a raw `Icrc3Block` by id, bypassing ICRC-3 encoding.
+/// Used by the equivalence integration test as the ground truth for
+/// hash-chain comparisons. Never enabled in mainnet builds.
+#[cfg(any(feature = "test_endpoints", test))]
+#[query]
+pub fn test_get_raw_block(id: u64) -> Option<types::Icrc3Block> {
+    storage::blocks::get(id)
+}
+
+/// Test-only: clear the ICRC-3 hash cache. Used by tests to simulate the
+/// pre-Task-3 mainnet state where blocks exist but the cache is empty.
+/// The post_upgrade hook (Task 5) backfills the cache; this endpoint lets
+/// tests force the canister into the pre-backfill state to exercise it.
+#[cfg(any(feature = "test_endpoints", test))]
+#[update]
+pub fn test_clear_hash_cache() {
+    storage::clear_block_hashes_for_test();
+}
+
+/// Test-only: append a bogus 32-byte entry to `block_hashes`, making it
+/// strictly longer than `blocks`. The next upgrade will trap. In practice
+/// `backfill_hash_chain` catches the inversion first (defense-in-depth
+/// added in the Task 4 fixup); the post_upgrade parity check (Task 5)
+/// is the secondary catcher for any case where backfill returns without
+/// detecting it.
+#[cfg(any(feature = "test_endpoints", test))]
+#[update]
+pub fn test_corrupt_hash_cache_tip(bogus_hash: Vec<u8>) {
+    assert_eq!(bogus_hash.len(), 32, "bogus hash must be 32 bytes");
+    let mut h = [0u8; 32];
+    h.copy_from_slice(&bogus_hash);
+    storage::push_bogus_hash_for_test(h);
 }
 
 #[cfg(test)]

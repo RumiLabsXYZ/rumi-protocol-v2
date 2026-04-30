@@ -142,25 +142,30 @@ impl ThreePoolState {
 
     /// Log a transaction block, compute its hash, update certified data,
     /// and return its index.
-    /// Block IDs are sequential starting from 0, matching Vec position,
-    /// so that ICRC-3 `log_length` == `blocks.len()` and `start` indexing works.
+    ///
+    /// Block IDs are sequential starting from 0, matching `StableLog` index.
+    /// The hash of each block is also pushed to `storage::block_hashes` so
+    /// `icrc3_get_blocks` can fetch a parent hash in O(1) rather than
+    /// recomputing the chain from block 0.
+    ///
+    /// Both writes happen inside this single message; IC message-level
+    /// atomicity guarantees they cannot diverge for blocks logged after
+    /// this code ships. Pre-existing blocks (logged before the cache was
+    /// introduced) are populated by the post_upgrade backfill in
+    /// `storage::migration::backfill_hash_chain`.
     pub fn log_block(&mut self, tx: crate::types::Icrc3Transaction) -> u64 {
-        // Block IDs are sequential starting from 0; the StableLog index
-        // provides the ordering. After the A6 drain, storage::blocks::len()
-        // equals the legacy heap len, so new IDs continue uninterrupted.
         let id = crate::storage::blocks::len();
         let block = crate::types::Icrc3Block {
             id,
             timestamp: ic_cdk::api::time(),
             tx,
         };
-        // Compute hash: encode block with parent hash, then hash the value.
         let prev_hash = self.last_block_hash;
         let encoded = crate::icrc3::encode_block_with_phash(&block, prev_hash.as_ref());
         let block_hash = crate::certification::hash_value(&encoded);
         crate::storage::blocks::push(block);
+        crate::storage::block_hashes::push(crate::storage::StorableHash(block_hash));
         self.last_block_hash = Some(block_hash);
-        // Update IC certified data so index-ng can verify the chain tip
         crate::certification::set_certified_tip(id, &block_hash);
         id
     }
@@ -213,6 +218,14 @@ impl ThreePoolState {
         self.liquidity_events.get_or_insert_with(Vec::new)
     }
 
+    // PERFORMANCE NOTE: O(N) over all swap events. Used by explorer queries
+    // (`get_top_swappers`, `get_volume_series`). Not currently a hot path
+    // because these are user-driven, not auto-polled. If swap volume grows
+    // or a frontend starts polling these on a short interval, consider:
+    //   1. Adding a windowed cache keyed by `StatsWindow` (heap-only).
+    //   2. Maintaining running aggregates in `state` updated on every swap.
+    // Watch threshold: swap_v2::len() > 50_000 OR per-day query count from
+    // explorer > 1_000 (check threeusd_index logs and replica metrics).
     /// Snapshot every v2 swap event currently stored in `storage::swap_v2`.
     ///
     /// Returns a freshly allocated `Vec` — reads go through the stable log,
@@ -224,6 +237,11 @@ impl ThreePoolState {
         crate::storage::swap_v2::iter_all()
     }
 
+    // PERFORMANCE NOTE: O(N) over all liquidity events. Used by explorer
+    // queries that aggregate AddLiquidity / RemoveLiquidity activity.
+    // Same considerations as `swap_events_v2` apply: this becomes a cycle
+    // burner if event volume grows or polling frequency increases.
+    // Watch threshold: liq_v2::len() > 50_000.
     /// Snapshot every v2 liquidity event. See `swap_events_v2` for notes.
     pub fn liquidity_events_v2(&self) -> Vec<LiquidityEventV2> {
         crate::storage::liq_v2::iter_all()

@@ -12,7 +12,7 @@
 //     first time on the new wasm (one-shot drain from the legacy blob) or
 //     subsequent times (load `SlimState` from its cell).
 //
-// Memory ID layout (18 IDs used; 255 available):
+// Memory ID layout (20 IDs used; 255 available):
 //
 //   0       SlimState cell              — bounded residual heap
 //   1       lp_balances                 — BTreeMap<Principal, u128>
@@ -25,6 +25,8 @@
 //   12,13   admin_events log
 //   14,15   vp_snapshots log
 //   16,17   icrc3_blocks log
+//   18,19   icrc3_block_hashes log      — cumulative hash chain cache (parallel
+//                                         to blocks log; entry i == hash of block i)
 //
 // Migration semantics: the first `post_upgrade` after the Phase A deploy runs
 // a one-shot drain (see `storage::migration`). All subsequent upgrades just
@@ -70,6 +72,8 @@ const MEM_VP_SNAP_INDEX: MemoryId = MemoryId::new(14);
 const MEM_VP_SNAP_DATA: MemoryId = MemoryId::new(15);
 const MEM_BLOCKS_INDEX: MemoryId = MemoryId::new(16);
 const MEM_BLOCKS_DATA: MemoryId = MemoryId::new(17);
+const MEM_BLOCK_HASHES_INDEX: MemoryId = MemoryId::new(18);
+const MEM_BLOCK_HASHES_DATA: MemoryId = MemoryId::new(19);
 
 // ─── SlimState ───────────────────────────────────────────────────────────────
 //
@@ -226,6 +230,29 @@ impl Storable for StorableU128 {
     };
 }
 
+/// 32-byte hash stored verbatim. Used for the ICRC-3 cumulative hash-chain
+/// cache so that `icrc3_get_blocks` can fetch a block's parent hash in O(1)
+/// instead of recomputing the chain from block 0.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct StorableHash(pub [u8; 32]);
+
+impl Storable for StorableHash {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(self.0.to_vec())
+    }
+
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(bytes.as_ref());
+        StorableHash(arr)
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 32,
+        is_fixed_size: true,
+    };
+}
+
 /// Empty marker for set-style BTreeMaps (`BTreeMap<K, ()>` isn't supported
 /// directly because `()` would need a Storable impl we don't control).
 #[derive(Clone, Copy, Debug, Default)]
@@ -359,6 +386,15 @@ thread_local! {
                 MM.with(|m| m.borrow().get(MEM_BLOCKS_DATA)),
             )
             .expect("init blocks log"),
+        );
+
+    pub(crate) static BLOCK_HASHES_LOG: RefCell<StableLog<StorableHash, Memory, Memory>> =
+        RefCell::new(
+            StableLog::init(
+                MM.with(|m| m.borrow().get(MEM_BLOCK_HASHES_INDEX)),
+                MM.with(|m| m.borrow().get(MEM_BLOCK_HASHES_DATA)),
+            )
+            .expect("init block_hashes log"),
         );
 }
 
@@ -511,12 +547,56 @@ log_api!(liq_v2, LIQ_V2_LOG, LiquidityEventV2);
 log_api!(admin_ev, ADMIN_EV_LOG, ThreePoolAdminEvent);
 log_api!(vp_snap, VP_SNAP_LOG, VirtualPriceSnapshot);
 log_api!(blocks, BLOCKS_LOG, Icrc3Block);
+log_api!(block_hashes, BLOCK_HASHES_LOG, StorableHash);
+
+// ─── Test helpers ────────────────────────────────────────────────────────────
+
+/// Test-only: forcibly clear the `block_hashes` log to length 0.
+///
+/// Used by integration tests to simulate the pre-Task-3 mainnet state
+/// where blocks exist but the hash cache is empty. Reinitializes the
+/// `StableLog` over the same memory IDs, which zeros the index header.
+///
+/// NEVER call this from production code. The post_upgrade backfill
+/// (Task 5) repopulates the cache, but until that runs the canister
+/// would serve broken icrc3_get_blocks responses.
+#[cfg(any(feature = "test_endpoints", test))]
+pub fn clear_block_hashes_for_test() {
+    BLOCK_HASHES_LOG.with(|l| {
+        let idx_mem = MM.with(|m| m.borrow().get(MEM_BLOCK_HASHES_INDEX));
+        let dat_mem = MM.with(|m| m.borrow().get(MEM_BLOCK_HASHES_DATA));
+        *l.borrow_mut() = StableLog::new(idx_mem, dat_mem);
+    });
+}
+
+/// Test-only: append a bogus hash entry to `block_hashes`, making
+/// `block_hashes::len() == blocks::len() + 1`. Used by integration tests
+/// to verify the post_upgrade integrity check traps on cache corruption.
+///
+/// NEVER call from production code.
+#[cfg(any(feature = "test_endpoints", test))]
+pub fn push_bogus_hash_for_test(bogus: [u8; 32]) {
+    BLOCK_HASHES_LOG.with(|l| {
+        let mut log = l.borrow_mut();
+        log.append(&StorableHash(bogus)).expect("append bogus hash");
+    });
+}
 
 // ─── Migration: one-shot drain from the legacy raw-offset-0 blob ─────────────
 
 pub mod migration {
-    //! One-shot drain of the legacy pre-Phase-A state layout into the new
-    //! stable structures.
+    //! Post-upgrade migration helpers.
+    //!
+    //! Two functions live here:
+    //!
+    //!   1. `read_legacy_blob` + `drain_legacy_state` are the one-shot
+    //!      Phase A drain that moved heap collections to stable structures.
+    //!      Already shipped on mainnet; subsequent upgrades skip the drain.
+    //!
+    //!   2. `backfill_hash_chain` brings the ICRC-3 `block_hashes` log up
+    //!      to parity with the `blocks` log. Idempotent and called on every
+    //!      upgrade. The first upgrade after the cache shipped fills all
+    //!      pre-existing blocks; subsequent upgrades early-return.
     //!
     //! ## Safety argument
     //!
@@ -701,6 +781,65 @@ pub mod migration {
             for b in blocks.into_iter() {
                 crate::storage::blocks::push(b);
             }
+        }
+    }
+
+    /// Backfill `block_hashes` to match `blocks` length.
+    ///
+    /// After this function returns:
+    ///   * `block_hashes::len() == blocks::len()`
+    ///   * For every `i in 0..blocks::len()`, `block_hashes::get(i)` equals
+    ///     the SHA-256 of the ICRC-3 encoding of `blocks::get(i)` with the
+    ///     correct parent hash.
+    ///
+    /// Idempotent: a no-op when the lengths already match. Safe to call from
+    /// `post_upgrade` on every upgrade (steady-state cost: 2 stable reads).
+    ///
+    /// Trapping inside this function rolls back stable memory atomically per
+    /// IC `post_upgrade` semantics, so partial backfills cannot persist.
+    pub fn backfill_hash_chain() {
+        // INVARIANT: the hash computation here MUST match
+        // `ThreePoolState::log_block` in state.rs (same encode_block_with_phash
+        // call with the same prev_hash semantics, same hash_value over the
+        // result). If you change the hash representation in either place,
+        // change it in both, or the chain will silently diverge for any
+        // backfilled blocks.
+        let blocks_len = crate::storage::blocks::len();
+        let hashes_len = crate::storage::block_hashes::len();
+        if hashes_len > blocks_len {
+            ic_cdk::trap(&format!(
+                "block_hashes ({hashes_len}) exceeds blocks ({blocks_len}): \
+                 hash cache is corrupted. This invariant is also re-checked \
+                 in post_upgrade, but failing fast here makes the failure \
+                 mode local."
+            ));
+        }
+        if hashes_len == blocks_len {
+            return;
+        }
+
+        // Recompute the chain from block 0 up to (but not including) the
+        // first missing index. We need the parent hash for the first block
+        // we are about to fill, which is the cached hash of (start - 1) if
+        // any cache exists, or computed from scratch if hashes_len == 0.
+        let start = hashes_len;
+        let mut prev_hash: Option<[u8; 32]> = if start == 0 {
+            None
+        } else {
+            Some(
+                crate::storage::block_hashes::get(start - 1)
+                    .expect("cached hash present below hashes_len")
+                    .0,
+            )
+        };
+
+        for i in start..blocks_len {
+            let block = crate::storage::blocks::get(i)
+                .expect("block present below blocks_len");
+            let encoded = crate::icrc3::encode_block_with_phash(&block, prev_hash.as_ref());
+            let block_hash = crate::certification::hash_value(&encoded);
+            crate::storage::block_hashes::push(crate::storage::StorableHash(block_hash));
+            prev_hash = Some(block_hash);
         }
     }
 }
@@ -918,5 +1057,108 @@ mod tests {
         assert!(back.swap_events_v2.is_none());
         assert!(back.blocks.is_none());
         assert_eq!(back.lp_total_supply, 0);
+    }
+
+    #[test]
+    fn storable_hash_roundtrip() {
+        let original = [0xABu8; 32];
+        let sh = StorableHash(original);
+        let bytes = sh.to_bytes();
+        let back = StorableHash::from_bytes(bytes);
+        assert_eq!(back.0, original);
+    }
+
+    #[test]
+    fn storable_hash_distinct_values() {
+        let a = StorableHash([1u8; 32]);
+        let b = StorableHash([2u8; 32]);
+        assert_ne!(a.to_bytes(), b.to_bytes());
+    }
+
+    #[test]
+    fn block_hashes_log_initializes_empty() {
+        // At this point in the codebase no test mutates the block_hashes log,
+        // so it must be empty. If a future task adds a test that pushes to
+        // this log, this test may need to be marked #[ignore] or restructured
+        // to check len-equals-blocks::len() instead.
+        assert_eq!(block_hashes::len(), 0);
+    }
+
+    #[test]
+    fn backfill_is_idempotent_when_cache_is_full() {
+        // NOTE: This test (and `backfill_fills_missing_hashes_correctly` below)
+        // shares the storage thread_locals with every other test in this binary.
+        // Under `cargo test`'s default parallel execution they may silently
+        // early-out if another test has perturbed the logs first. This is
+        // acceptable here because Task 7's PocketIC integration tests exercise
+        // the full backfill path against a hermetically-isolated canister
+        // instance and provide the load-bearing coverage. These unit tests
+        // are best-effort regression catchers for development iteration.
+        //
+        // After Task 3, every push to blocks already pushes to block_hashes.
+        // So if both logs have the same length, backfill should be a no-op.
+        let blocks_before = blocks::len();
+        let hashes_before = block_hashes::len();
+        if blocks_before != hashes_before {
+            // We cannot run this test in isolation if other tests left the
+            // logs in an inconsistent state. Skip rather than fail.
+            return;
+        }
+        crate::storage::migration::backfill_hash_chain();
+        assert_eq!(blocks::len(), blocks_before);
+        assert_eq!(block_hashes::len(), hashes_before);
+    }
+
+    #[test]
+    fn backfill_fills_missing_hashes_correctly() {
+        use crate::types::{Icrc3Block, Icrc3Transaction};
+        use candid::Principal;
+
+        // Push three blocks via the storage API directly (skipping log_block,
+        // which would also write to block_hashes). This simulates the
+        // "existing mainnet state" scenario where blocks exist but the
+        // hash-chain cache is empty.
+        let baseline = blocks::len();
+        let hash_baseline = block_hashes::len();
+        if baseline != hash_baseline {
+            return;
+        }
+
+        let p = Principal::anonymous();
+        for i in 0..3u64 {
+            let block = Icrc3Block {
+                id: baseline + i,
+                timestamp: 1_000 + i,
+                tx: Icrc3Transaction::Mint {
+                    to: p,
+                    amount: 100 + i as u128,
+                    to_subaccount: None,
+                },
+            };
+            blocks::push(block);
+        }
+
+        assert_eq!(blocks::len(), baseline + 3);
+        assert_eq!(block_hashes::len(), hash_baseline);
+
+        crate::storage::migration::backfill_hash_chain();
+
+        assert_eq!(block_hashes::len(), baseline + 3);
+
+        // Verify every newly added hash is consistent with its block's
+        // ICRC-3 encoding under the correct parent.
+        let mut prev = if baseline == 0 {
+            None
+        } else {
+            Some(block_hashes::get(baseline - 1).unwrap().0)
+        };
+        for i in baseline..baseline + 3 {
+            let block = blocks::get(i).unwrap();
+            let encoded = crate::icrc3::encode_block_with_phash(&block, prev.as_ref());
+            let expected = crate::certification::hash_value(&encoded);
+            let cached = block_hashes::get(i).unwrap().0;
+            assert_eq!(cached, expected, "hash mismatch at index {i}");
+            prev = Some(cached);
+        }
     }
 }
