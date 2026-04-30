@@ -230,6 +230,10 @@ pub enum EventTypeFilter {
     DeficitAccrued,
     /// Wave-8e LIQ-005: deficit repaid via fee revenue routing.
     DeficitRepaid,
+    /// Wave-10 LIQ-008: an automatic mass-liquidation circuit-breaker trip.
+    /// Distinct from the admin tunables (which collapse to `Admin`) so
+    /// operators can audit every breaker firing in isolation.
+    BreakerTripped,
 }
 
 /// Inclusive nanosecond timestamp window for the time facet.
