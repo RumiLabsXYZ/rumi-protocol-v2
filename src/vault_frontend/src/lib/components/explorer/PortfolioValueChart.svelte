@@ -106,7 +106,7 @@
   }
 
   const SOURCE_STYLES: readonly SourceStyle[] = [
-    { key: 'vault_collateral', label: 'Vault collateral', color: '#d176e8', fill: 'rgba(209, 118, 232, 0.22)' },
+    { key: 'vault_equity',     label: 'Vault equity',     color: '#d176e8', fill: 'rgba(209, 118, 232, 0.22)' },
     { key: 'three_pool_lp',    label: '3pool LP',         color: '#fbbf24', fill: 'rgba(251, 191, 36, 0.22)' },
     { key: 'sp_deposit',       label: 'Stability pool',   color: '#34d399', fill: 'rgba(52, 211, 153, 0.22)' },
     { key: 'icusd',            label: 'icUSD',            color: '#2DD4BF', fill: 'rgba(45, 212, 191, 0.22)' },
@@ -116,6 +116,8 @@
   const APPROX_LABEL: Record<string, string> = {
     icusd: 'icUSD ledger balance shown as current value (approximation).',
     threeusd: '3USD ledger balance shown as current value (approximation).',
+    vault_equity:
+      'Vault equity = collateral USD − icUSD debt. Debt excludes accrued interest and per-vault redemption seizure (timeline approximation).',
   };
 
   // ── Derived series ─────────────────────────────────────────────────────

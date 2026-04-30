@@ -130,6 +130,21 @@ fn route_backend_event(event_id: u64, event: &sources::backend::BackendEvent) {
                 fee_amount: None,
             });
         }
+        AddMarginToVault { vault_id, margin_added, caller, timestamp, .. } => {
+            // Top-up of an existing vault. The collateral_type field on
+            // AnalyticsVaultEvent is derived from the prior Opened row at
+            // timeline-replay time, so leaving it anonymous here is fine.
+            evt_vaults::push(AnalyticsVaultEvent {
+                timestamp_ns: timestamp.unwrap_or(0),
+                source_event_id: event_id,
+                vault_id: *vault_id,
+                owner: caller.unwrap_or(Principal::anonymous()),
+                event_kind: VaultEventKind::CollateralDeposited,
+                collateral_type: Principal::anonymous(),
+                amount: *margin_added,
+                fee_amount: None,
+            });
+        }
         CollateralWithdrawn { vault_id, amount, caller, timestamp, .. } => {
             evt_vaults::push(AnalyticsVaultEvent {
                 timestamp_ns: timestamp.unwrap_or(0),

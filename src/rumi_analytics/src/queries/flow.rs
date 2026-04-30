@@ -57,16 +57,29 @@ fn ckusdc_principal() -> Principal {
     Principal::from_text(CKUSDC_LEDGER).expect("ckusdc principal parse")
 }
 
-/// Token decimals lookup. Covers the 3pool + AMM token set. Unknown tokens
-/// default to 8, matching `AMM_TOKENS` fallback in `ammService.ts`.
-fn token_decimals(token: Principal, icusd_ledger: Principal, three_pool: Principal) -> u8 {
+/// Token decimals lookup. The fast-collector heap map (`collateral_decimals`)
+/// is the source of truth for collateral tokens — it carries actual values
+/// from the backend's CollateralConfig (ckETH=18, ckXAUT=8, etc). Tokens not
+/// in the map fall back to known constants (icUSD/3pool=8, ckUSDT/ckUSDC=6)
+/// and finally default to 8. Defaulting to 8 for an unknown 18-decimal token
+/// silently inflates its USD volume by 1e10, so the heap map MUST be
+/// populated for any non-8 collateral that surfaces here — see
+/// `collectors::fast::run`.
+fn token_decimals(
+    token: Principal,
+    icusd_ledger: Principal,
+    three_pool: Principal,
+    collateral_decimals: &HashMap<Principal, u8>,
+) -> u8 {
+    if let Some(&d) = collateral_decimals.get(&token) {
+        return d;
+    }
     if token == icusd_ledger || token == three_pool {
         return 8;
     }
     if token == ckusdt_principal() || token == ckusdc_principal() {
         return 6;
     }
-    // ICP and the non-3pool collateral set are all 8-decimal on IC today.
     8
 }
 
@@ -143,6 +156,7 @@ pub fn swap_usd_e8s(
     icusd_ledger: Principal,
     three_pool: Principal,
     latest_snapshot: Option<&storage::fast::FastPriceSnapshot>,
+    collateral_decimals: &HashMap<Principal, u8>,
 ) -> u64 {
     match source {
         storage::events::SwapSource::ThreePool => {
@@ -154,19 +168,19 @@ pub fn swap_usd_e8s(
             let in_stable = is_stablecoin(token_in, icusd_ledger, three_pool);
             let out_stable = is_stablecoin(token_out, icusd_ledger, three_pool);
             if in_stable {
-                let d = token_decimals(token_in, icusd_ledger, three_pool);
+                let d = token_decimals(token_in, icusd_ledger, three_pool, collateral_decimals);
                 return to_usd_e8s(amount_in, d, 1.0);
             }
             if out_stable {
-                let d = token_decimals(token_out, icusd_ledger, three_pool);
+                let d = token_decimals(token_out, icusd_ledger, three_pool, collateral_decimals);
                 return to_usd_e8s(amount_out, d, 1.0);
             }
             if let Some(p) = latest_price_usd(token_in, latest_snapshot) {
-                let d = token_decimals(token_in, icusd_ledger, three_pool);
+                let d = token_decimals(token_in, icusd_ledger, three_pool, collateral_decimals);
                 return to_usd_e8s(amount_in, d, p);
             }
             if let Some(p) = latest_price_usd(token_out, latest_snapshot) {
-                let d = token_decimals(token_out, icusd_ledger, three_pool);
+                let d = token_decimals(token_out, icusd_ledger, three_pool, collateral_decimals);
                 return to_usd_e8s(amount_out, d, p);
             }
             0
@@ -243,7 +257,11 @@ pub fn get_token_flow(query: types::TokenFlowQuery) -> types::TokenFlowResponse 
 
     // Latest price snapshot for AMM non-stable leg pricing.
     let latest_snap = latest_price_snapshot();
-    let (icusd_ledger, three_pool) = state::read_state(|s| (s.sources.icusd_ledger, s.sources.three_pool));
+    let (icusd_ledger, three_pool, decimals) = state::read_state(|s| (
+        s.sources.icusd_ledger,
+        s.sources.three_pool,
+        s.collateral_decimals.clone().unwrap_or_default(),
+    ));
 
     let edges = compute_token_flow(
         &swaps,
@@ -252,6 +270,7 @@ pub fn get_token_flow(query: types::TokenFlowQuery) -> types::TokenFlowResponse 
         three_pool,
         min_volume,
         limit as usize,
+        &decimals,
     );
 
     let resp = types::TokenFlowResponse {
@@ -275,6 +294,7 @@ pub fn compute_token_flow(
     three_pool: Principal,
     min_volume_usd_e8s: u64,
     limit: usize,
+    collateral_decimals: &HashMap<Principal, u8>,
 ) -> Vec<types::TokenFlowEdge> {
     let mut agg: HashMap<(Principal, Principal), (u64, u64)> = HashMap::new();
     for e in swaps {
@@ -287,6 +307,7 @@ pub fn compute_token_flow(
             icusd_ledger,
             three_pool,
             latest_snap,
+            collateral_decimals,
         );
         let entry = agg.entry((e.token_in, e.token_out)).or_insert((0, 0));
         entry.0 = entry.0.saturating_add(vol);
@@ -334,7 +355,11 @@ pub fn get_pool_routes(query: types::PoolRoutesQuery) -> types::PoolRoutesRespon
     let liquidity = storage::events::evt_liquidity::range(from, now, MAX_EVENT_LOAD);
 
     let latest_snap = latest_price_snapshot();
-    let (icusd_ledger, three_pool) = state::read_state(|s| (s.sources.icusd_ledger, s.sources.three_pool));
+    let (icusd_ledger, three_pool, decimals) = state::read_state(|s| (
+        s.sources.icusd_ledger,
+        s.sources.three_pool,
+        s.collateral_decimals.clone().unwrap_or_default(),
+    ));
 
     let routes = compute_pool_routes(
         &query.pool_id,
@@ -344,6 +369,7 @@ pub fn get_pool_routes(query: types::PoolRoutesQuery) -> types::PoolRoutesRespon
         icusd_ledger,
         three_pool,
         limit as usize,
+        &decimals,
     );
 
     let resp = types::PoolRoutesResponse {
@@ -380,6 +406,7 @@ pub fn compute_pool_routes(
     icusd_ledger: Principal,
     three_pool: Principal,
     limit: usize,
+    collateral_decimals: &HashMap<Principal, u8>,
 ) -> Vec<types::PoolRoute> {
     use storage::events::{LiquidityAction, SwapSource};
 
@@ -468,6 +495,7 @@ pub fn compute_pool_routes(
                 icusd_ledger,
                 three_pool,
                 latest_snap,
+                collateral_decimals,
             );
 
             consumed_amm.insert(amm.source_event_id);
@@ -502,6 +530,7 @@ pub fn compute_pool_routes(
             icusd_ledger,
             three_pool,
             latest_snap,
+            collateral_decimals,
         );
         bump(vec![e.token_in, e.token_out], vol, 1);
     }
@@ -684,6 +713,7 @@ mod tests {
             icusd_ledger(),
             three_pool(),
             None,
+            &HashMap::new(),
         );
         assert_eq!(usd, 1_000_000_000);
     }
@@ -701,6 +731,7 @@ mod tests {
             icusd_ledger(),
             three_pool(),
             Some(&price_snap(vec![(icp_ledger(), 4.99)])),
+            &HashMap::new(),
         );
         assert_eq!(usd, 500_000_000);
     }
@@ -720,9 +751,36 @@ mod tests {
             icusd_ledger(),
             three_pool(),
             Some(&price_snap(vec![(icp_ledger(), 6.50)])),
+            &HashMap::new(),
         );
         // 2 ICP * $6.50 = $13.00 → 1_300_000_000 e8s.
         assert_eq!(usd, 1_300_000_000);
+    }
+
+    #[test]
+    fn usd_e8s_amm_uses_18_decimal_token_via_decimals_map() {
+        // ckETH (18-dec) -> ckBTC (8-dec). Neither is a stable, so swap
+        // pricing falls through to the spot-price path and must use the
+        // 18-decimal divisor for the input leg. Default-8 would either
+        // saturate (1e15 * 3e11 = 3e26, /1e8 = 3e18 < u64::MAX so it'd
+        // report $3e10 instead of $3) — exactly the explorer regression.
+        let cketh = actor(101);
+        let ckbtc = actor(102);
+        let e = amm_swap(1, 0, actor(1), cketh, ckbtc, 1_000_000_000_000_000, 5_000);
+        let decimals_map: HashMap<Principal, u8> = HashMap::from([(cketh, 18), (ckbtc, 8)]);
+        let usd = swap_usd_e8s(
+            &e.source,
+            e.token_in,
+            e.token_out,
+            e.amount_in,
+            e.amount_out,
+            icusd_ledger(),
+            three_pool(),
+            Some(&price_snap(vec![(cketh, 3000.0)])),
+            &decimals_map,
+        );
+        // 0.001 ckETH * $3000 = $3.00 → 300_000_000 e8s.
+        assert_eq!(usd, 300_000_000);
     }
 
     // ---- token flow ----
@@ -737,7 +795,7 @@ mod tests {
             // One ICP → ckUSDC on AMM, 1 ICP * $5 = $5 (via stablecoin leg)
             amm_swap(3, 300, actor(3), icp_ledger(), ckusdc(), 100_000_000, 5_000_000),
         ];
-        let edges = compute_token_flow(&swaps, Some(&snap), icusd_ledger(), three_pool(), 0, 10);
+        let edges = compute_token_flow(&swaps, Some(&snap), icusd_ledger(), three_pool(), 0, 10, &HashMap::new());
         assert_eq!(edges.len(), 2);
         assert_eq!(edges[0].from_token, icusd_ledger());
         assert_eq!(edges[0].to_token, ckusdt());
@@ -755,7 +813,7 @@ mod tests {
             three_pool_swap(1, 100, actor(1), icusd_ledger(), ckusdt(), 1_000_000_000, 999_000_000), // $10
             three_pool_swap(2, 200, actor(2), icusd_ledger(), ckusdc(), 50_000_000, 49_000_000),     // $0.50
         ];
-        let edges = compute_token_flow(&swaps, None, icusd_ledger(), three_pool(), 100_000_000, 10);
+        let edges = compute_token_flow(&swaps, None, icusd_ledger(), three_pool(), 100_000_000, 10, &HashMap::new());
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].to_token, ckusdt());
     }
@@ -765,7 +823,7 @@ mod tests {
         // compute_token_flow is a pure aggregator; windowing happens at the
         // storage::range layer before the slice reaches us. This test just
         // confirms that an empty slice yields an empty response.
-        let edges = compute_token_flow(&[], None, icusd_ledger(), three_pool(), 0, 10);
+        let edges = compute_token_flow(&[], None, icusd_ledger(), three_pool(), 0, 10, &HashMap::new());
         assert!(edges.is_empty());
     }
 
@@ -785,7 +843,7 @@ mod tests {
                 i * 99_000_000,
             ));
         }
-        let edges = compute_token_flow(&swaps, None, icusd_ledger(), three_pool(), 0, 2);
+        let edges = compute_token_flow(&swaps, None, icusd_ledger(), three_pool(), 0, 2, &HashMap::new());
         assert_eq!(edges.len(), 2);
     }
 
@@ -806,6 +864,7 @@ mod tests {
             icusd_ledger(),
             three_pool(),
             10,
+            &HashMap::new(),
         );
         assert_eq!(routes.len(), 2);
         // Top edge: icUSD -> ckUSDT, 2 swaps, $8.
@@ -832,6 +891,7 @@ mod tests {
             icusd_ledger(),
             three_pool(),
             10,
+            &HashMap::new(),
         );
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].route, vec![icusd_ledger(), ckusdt()]);
@@ -856,6 +916,7 @@ mod tests {
             icusd_ledger(),
             three_pool(),
             10,
+            &HashMap::new(),
         );
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].route, vec![ckusdt(), three_pool(), icp_ledger()]);
@@ -890,6 +951,7 @@ mod tests {
             icusd_ledger(),
             three_pool(),
             10,
+            &HashMap::new(),
         );
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].route, vec![icp_ledger(), three_pool(), ckusdc()]);
@@ -920,6 +982,7 @@ mod tests {
             icusd_ledger(),
             three_pool(),
             10,
+            &HashMap::new(),
         );
         // No multi-hop reconstructed → the AMM swap surfaces on its own pool
         // only (ICP/3USD). Since the query was "3pool", nothing matches at
@@ -947,6 +1010,7 @@ mod tests {
             icusd_ledger(),
             three_pool(),
             10,
+            &HashMap::new(),
         );
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].route, vec![icusd_ledger(), three_pool(), icp_ledger()]);
