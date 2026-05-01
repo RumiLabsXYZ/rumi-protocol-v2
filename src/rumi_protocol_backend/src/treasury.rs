@@ -188,34 +188,51 @@ pub async fn notify_treasury_deposit(
 // ---------------------------------------------------------------------------
 
 /// Mint icUSD interest revenue to treasury and record the deposit.
-pub async fn mint_interest_to_treasury(interest_share: ICUSD) {
+///
+/// Returns `Ok(())` when the icUSD mint itself succeeded — the
+/// downstream `notify_treasury_deposit` call is bookkeeping and its
+/// failure does not roll back the mint. Returns `Err(interest_share)`
+/// when the mint did not happen (no treasury configured, or the ledger
+/// call failed); the caller is expected to re-queue this amount via
+/// the snapshot-then-decrement restore path so revenue is not lost.
+pub async fn mint_interest_to_treasury(interest_share: ICUSD) -> Result<(), ICUSD> {
     if interest_share.0 == 0 {
-        return;
+        return Ok(());
     }
     let treasury = read_state(|s| s.treasury_principal);
-    if let Some(tp) = treasury {
-        match management::mint_icusd(interest_share, tp).await {
-            Ok(block_index) => {
-                log!(
-                    INFO,
-                    "[treasury] Minted {} icUSD interest revenue (block {})",
-                    interest_share.to_u64(),
-                    block_index
-                );
-                let _ = notify_treasury_deposit(
-                    tp,
-                    DepositType::InterestRevenue,
-                    AssetType::ICUSD,
-                    interest_share.to_u64(),
-                    block_index,
-                )
-                .await;
-            }
-            Err(e) => log!(
+    let Some(tp) = treasury else {
+        log!(
+            INFO,
+            "[treasury] WARNING: no treasury principal configured; {} icUSD interest unminted",
+            interest_share.to_u64()
+        );
+        return Err(interest_share);
+    };
+    match management::mint_icusd(interest_share, tp).await {
+        Ok(block_index) => {
+            log!(
+                INFO,
+                "[treasury] Minted {} icUSD interest revenue (block {})",
+                interest_share.to_u64(),
+                block_index
+            );
+            let _ = notify_treasury_deposit(
+                tp,
+                DepositType::InterestRevenue,
+                AssetType::ICUSD,
+                interest_share.to_u64(),
+                block_index,
+            )
+            .await;
+            Ok(())
+        }
+        Err(e) => {
+            log!(
                 INFO,
                 "[treasury] WARNING: interest mint failed: {:?}",
                 e
-            ),
+            );
+            Err(interest_share)
         }
     }
 }
@@ -225,58 +242,76 @@ pub async fn mint_interest_to_treasury(interest_share: ICUSD) {
 ///
 /// `collateral_type` identifies which collateral's vault generated this interest.
 /// The pool uses it to exclude depositors who opted out of that collateral.
-pub async fn mint_interest_to_stability_pool(interest_share: ICUSD, collateral_type: Principal) {
+///
+/// Returns `Ok(())` when the icUSD mint succeeded — the post-mint
+/// `receive_interest_revenue` notification is bookkeeping and its
+/// failure does not roll back the mint. Returns `Err(interest_share)`
+/// when the mint did not happen (no pool configured, or the ledger
+/// call failed); the caller re-queues this via the snapshot-then-
+/// decrement restore path.
+pub async fn mint_interest_to_stability_pool(
+    interest_share: ICUSD,
+    collateral_type: Principal,
+) -> Result<(), ICUSD> {
     if interest_share.0 == 0 {
-        return;
+        return Ok(());
     }
     let (stability_pool, icusd_ledger) =
         read_state(|s| (s.stability_pool_canister, s.icusd_ledger_principal));
-    if let Some(pool_principal) = stability_pool {
-        match management::mint_icusd(interest_share, pool_principal).await {
-            Ok(block_index) => {
-                log!(
-                    INFO,
-                    "[treasury] Minted {} icUSD interest to stability pool (block {})",
-                    interest_share.to_u64(),
-                    block_index
-                );
+    let Some(pool_principal) = stability_pool else {
+        log!(
+            INFO,
+            "[treasury] WARNING: no stability pool configured; {} icUSD interest unminted",
+            interest_share.to_u64()
+        );
+        return Err(interest_share);
+    };
+    match management::mint_icusd(interest_share, pool_principal).await {
+        Ok(block_index) => {
+            log!(
+                INFO,
+                "[treasury] Minted {} icUSD interest to stability pool (block {})",
+                interest_share.to_u64(),
+                block_index
+            );
 
-                // Notify pool to distribute interest pro-rata to depositors.
-                // Fire-and-forget: failure is logged but does not block repayment.
-                let amount = interest_share.to_u64();
-                let ct: Option<Principal> = Some(collateral_type);
-                let result: Result<(candid::IDLValue,), _> = ic_cdk::call(
-                    pool_principal,
-                    "receive_interest_revenue",
-                    (icusd_ledger, amount, ct),
-                )
-                .await;
-                match result {
-                    Ok(_) => {
-                        log!(
-                            INFO,
-                            "[treasury] Pool acknowledged interest distribution ({} icUSD, collateral {})",
-                            amount,
-                            collateral_type
-                        );
-                    }
-                    Err(e) => {
-                        log!(
-                            INFO,
-                            "[treasury] WARNING: pool interest notification call failed: {:?}",
-                            e
-                        );
-                    }
+            // Notify pool to distribute interest pro-rata to depositors.
+            // Fire-and-forget: failure is logged but does not block repayment.
+            let amount = interest_share.to_u64();
+            let ct: Option<Principal> = Some(collateral_type);
+            let result: Result<(candid::IDLValue,), _> = ic_cdk::call(
+                pool_principal,
+                "receive_interest_revenue",
+                (icusd_ledger, amount, ct),
+            )
+            .await;
+            match result {
+                Ok(_) => {
+                    log!(
+                        INFO,
+                        "[treasury] Pool acknowledged interest distribution ({} icUSD, collateral {})",
+                        amount,
+                        collateral_type
+                    );
+                }
+                Err(e) => {
+                    log!(
+                        INFO,
+                        "[treasury] WARNING: pool interest notification call failed: {:?}",
+                        e
+                    );
                 }
             }
-            Err(e) => {
-                log!(
-                    INFO,
-                    "[treasury] WARNING: stability pool interest mint failed ({} icUSD): {:?}",
-                    interest_share.to_u64(),
-                    e
-                );
-            }
+            Ok(())
+        }
+        Err(e) => {
+            log!(
+                INFO,
+                "[treasury] WARNING: stability pool interest mint failed ({} icUSD): {:?}",
+                interest_share.to_u64(),
+                e
+            );
+            Err(interest_share)
         }
     }
 }
@@ -292,9 +327,14 @@ pub async fn mint_interest_to_stability_pool(interest_share: ICUSD, collateral_t
 /// then calls `donate(0, amount)` to inject yield into the pool.
 ///
 /// `collateral_type` is needed for stability pool interest routing.
-pub async fn distribute_interest(interest: ICUSD, collateral_type: Principal) {
+///
+/// Returns the total icUSD that failed to mint across all recipients.
+/// The caller (e.g. `flush_pending_interest`) re-queues this via the
+/// snapshot-then-decrement restore path so the failed share is replayed
+/// on the next tick rather than silently lost.
+pub async fn distribute_interest(interest: ICUSD, collateral_type: Principal) -> ICUSD {
     if interest.0 == 0 {
-        return;
+        return ICUSD::new(0);
     }
 
     let (split, three_pool) = read_state(|s| {
@@ -302,6 +342,7 @@ pub async fn distribute_interest(interest: ICUSD, collateral_type: Principal) {
     });
 
     let total_e8s = interest.to_u64();
+    let mut unminted_e8s: u64 = 0;
 
     for recipient in &split {
         let share_e8s = ((total_e8s as u128) * (recipient.bps as u128) / 10_000) as u64;
@@ -312,21 +353,32 @@ pub async fn distribute_interest(interest: ICUSD, collateral_type: Principal) {
 
         match &recipient.destination {
             crate::state::InterestDestination::StabilityPool => {
-                mint_interest_to_stability_pool(share, collateral_type).await;
+                if let Err(unsent) =
+                    mint_interest_to_stability_pool(share, collateral_type).await
+                {
+                    unminted_e8s = unminted_e8s.saturating_add(unsent.to_u64());
+                }
             }
             crate::state::InterestDestination::Treasury => {
-                mint_interest_to_treasury(share).await;
+                if let Err(unsent) = mint_interest_to_treasury(share).await {
+                    unminted_e8s = unminted_e8s.saturating_add(unsent.to_u64());
+                }
             }
             crate::state::InterestDestination::ThreePool => {
                 if let Some(pool_canister) = three_pool {
-                    donate_to_three_pool(pool_canister, share_e8s).await;
+                    if let Err(unsent_e8s) = donate_to_three_pool(pool_canister, share_e8s).await {
+                        unminted_e8s = unminted_e8s.saturating_add(unsent_e8s);
+                    }
                 } else {
                     log!(INFO, "[treasury] WARNING: 3pool interest share ({} icUSD) has no target canister configured, sending to treasury instead", share_e8s);
-                    mint_interest_to_treasury(share).await;
+                    if let Err(unsent) = mint_interest_to_treasury(share).await {
+                        unminted_e8s = unminted_e8s.saturating_add(unsent.to_u64());
+                    }
                 }
             }
         }
     }
+    ICUSD::from(unminted_e8s)
 }
 
 /// Distribute stablecoin-denominated interest revenue.
@@ -359,7 +411,11 @@ pub async fn distribute_stablecoin_interest(
         match &recipient.destination {
             crate::state::InterestDestination::StabilityPool => {
                 let pool_icusd = ICUSD::from(share_e8s);
-                mint_interest_to_stability_pool(pool_icusd, collateral_type).await;
+                // Stablecoin path keeps legacy "log + drop" on mint failure.
+                // No bucket to re-queue against (the funds live in
+                // collateral reserves, not a pending field). Audit
+                // INT-002 covered only the icUSD-denominated path.
+                let _ = mint_interest_to_stability_pool(pool_icusd, collateral_type).await;
             }
             crate::state::InterestDestination::Treasury => {
                 // Transfer stablecoins (not icUSD) to treasury
@@ -389,11 +445,11 @@ pub async fn distribute_stablecoin_interest(
             }
             crate::state::InterestDestination::ThreePool => {
                 if let Some(pool_canister) = three_pool {
-                    donate_to_three_pool(pool_canister, share_e8s).await;
+                    let _ = donate_to_three_pool(pool_canister, share_e8s).await;
                 } else {
                     // Fallback: mint icUSD to treasury (same as distribute_interest)
                     log!(INFO, "[treasury] WARNING: 3pool interest share ({} icUSD) has no target canister, sending to treasury instead", share_e8s);
-                    mint_interest_to_treasury(ICUSD::from(share_e8s)).await;
+                    let _ = mint_interest_to_treasury(ICUSD::from(share_e8s)).await;
                 }
             }
         }
@@ -403,7 +459,13 @@ pub async fn distribute_stablecoin_interest(
 /// Mint icUSD directly to the 3pool canister, then call `receive_donation`
 /// so the pool updates its internal balances.
 /// Non-critical: failures are logged but don't block protocol operations.
-async fn donate_to_three_pool(pool_canister: Principal, amount_e8s: u64) {
+///
+/// Returns `Ok(())` when the icUSD mint succeeded — the subsequent
+/// `receive_donation` notification is bookkeeping and its failure does
+/// not roll back the mint. Returns `Err(amount_e8s)` when the mint
+/// itself failed; the caller re-queues this via the snapshot-then-
+/// decrement restore path.
+async fn donate_to_three_pool(pool_canister: Principal, amount_e8s: u64) -> Result<(), u64> {
     // 1. Mint icUSD directly to the 3pool canister
     let icusd = ICUSD::from(amount_e8s);
     match crate::management::mint_icusd(icusd, pool_canister).await {
@@ -412,7 +474,7 @@ async fn donate_to_three_pool(pool_canister: Principal, amount_e8s: u64) {
         }
         Err(e) => {
             log!(INFO, "[treasury] WARNING: 3pool donation mint failed: {:?}", e);
-            return;
+            return Err(amount_e8s);
         }
     }
 
@@ -431,6 +493,7 @@ async fn donate_to_three_pool(pool_canister: Principal, amount_e8s: u64) {
             log!(INFO, "[treasury] WARNING: 3pool receive_donation call failed: {:?} {}", code, msg);
         }
     }
+    Ok(())
 }
 
 /// Mirror of the 3pool ThreePoolError for the donate response.
@@ -554,57 +617,101 @@ pub async fn send_liquidation_fee_to_treasury(
 /// Flush accumulated interest from periodic harvesting to pools/treasury.
 /// For each collateral bucket that has reached the threshold, calls
 /// `distribute_interest` which handles the N-way split (3pool, stability pool, treasury).
+///
+/// Audit INT-002: uses the snapshot-then-decrement pattern so a mint
+/// failure inside `distribute_interest` re-queues the unminted portion
+/// via `restore_pending_interest_for_pool` (saturating_add). Concurrent
+/// harvest credits that land during the await accumulate against zero
+/// rather than against the old snapshot, so neither side is silently
+/// overwritten.
 pub async fn flush_pending_interest() {
     let (pending, threshold) = read_state(|s| {
         (s.pending_interest_for_pools.clone(), s.interest_flush_threshold_e8s)
     });
 
     for (collateral_type, amount) in pending {
-        if amount >= threshold {
-            log!(INFO, "[treasury] Flushing {} icUSD interest for collateral {}", amount, collateral_type);
-            // Zero out this bucket BEFORE the async call to prevent double-flush
+        if amount < threshold {
+            continue;
+        }
+        log!(
+            INFO,
+            "[treasury] Flushing {} icUSD interest for collateral {}",
+            amount,
+            collateral_type
+        );
+        // Atomic snapshot+take. The actual amount taken may be larger
+        // than the cloned `amount` if a concurrent harvest landed
+        // between the clone and this mutate; we mint what is currently
+        // in the bucket regardless.
+        let snapshot_e8s = crate::state::mutate_state(|s| {
+            s.take_pending_interest_for_pool(collateral_type)
+        });
+        if snapshot_e8s == 0 {
+            continue;
+        }
+        let unminted = distribute_interest(
+            ICUSD::from(snapshot_e8s),
+            collateral_type,
+        )
+        .await;
+        if unminted.0 > 0 {
             crate::state::mutate_state(|s| {
-                s.pending_interest_for_pools.remove(&collateral_type);
+                s.restore_pending_interest_for_pool(collateral_type, unminted.to_u64());
             });
-            distribute_interest(ICUSD::from(amount), collateral_type).await;
+            log!(
+                INFO,
+                "[treasury] CRITICAL: re-queued {} icUSD for collateral {} after partial mint failure (snapshot {})",
+                unminted.to_u64(),
+                collateral_type,
+                snapshot_e8s,
+            );
         }
     }
 }
 
 /// Mint pending treasury interest accumulated from sync liquidations.
 /// Called from the XRC timer tick to drain `pending_treasury_interest`.
+///
+/// Audit INT-006: uses the snapshot-then-decrement pattern so a
+/// concurrent credit landing during the await is preserved on both
+/// arms. The pre-await `take` zeroes the field so any concurrent
+/// increment accumulates against zero; on mint failure the snapshot is
+/// restored via `saturating_add`, merging with whatever landed.
 pub async fn drain_pending_treasury_interest() {
-    let pending = read_state(|s| s.pending_treasury_interest);
-    if pending.0 == 0 {
+    let treasury = read_state(|s| s.treasury_principal);
+    let Some(tp) = treasury else {
+        return;
+    };
+    // Atomic snapshot+zero before the await.
+    let snapshot = crate::state::mutate_state(|s| s.take_pending_treasury_interest());
+    if snapshot.0 == 0 {
         return;
     }
-    let treasury = read_state(|s| s.treasury_principal);
-    if let Some(tp) = treasury {
-        match management::mint_icusd(pending, tp).await {
-            Ok(block_index) => {
-                crate::state::mutate_state(|s| {
-                    s.pending_treasury_interest = ICUSD::new(0);
-                });
-                log!(
-                    INFO,
-                    "[treasury] Drained {} pending interest (block {})",
-                    pending.to_u64(),
-                    block_index
-                );
-                let _ = notify_treasury_deposit(
-                    tp,
-                    DepositType::InterestRevenue,
-                    AssetType::ICUSD,
-                    pending.to_u64(),
-                    block_index,
-                )
-                .await;
-            }
-            Err(e) => log!(
+    match management::mint_icusd(snapshot, tp).await {
+        Ok(block_index) => {
+            log!(
                 INFO,
-                "[treasury] WARNING: pending interest drain failed: {:?}",
+                "[treasury] Drained {} pending interest (block {})",
+                snapshot.to_u64(),
+                block_index
+            );
+            let _ = notify_treasury_deposit(
+                tp,
+                DepositType::InterestRevenue,
+                AssetType::ICUSD,
+                snapshot.to_u64(),
+                block_index,
+            )
+            .await;
+        }
+        Err(e) => {
+            crate::state::mutate_state(|s| s.restore_pending_treasury_interest(snapshot));
+            log!(
+                INFO,
+                "[treasury] CRITICAL: pending interest drain failed, re-queued {} icUSD: {:?}",
+                snapshot.to_u64(),
                 e
-            ),
+            );
         }
     }
 }

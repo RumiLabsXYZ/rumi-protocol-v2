@@ -2289,6 +2289,68 @@ impl State {
         }
     }
 
+    // -------------------------------------------------------------------
+    // Audit INT-002 / INT-006: snapshot-then-decrement pair for the
+    // async-mint paths that drain `pending_interest_for_pools` and
+    // `pending_treasury_interest`. The take helper performs the
+    // pre-await snapshot+zero atomically (so a concurrent harvest landing
+    // during the await accumulates against zero, not against the old
+    // snapshot). The restore helper merges an unminted snapshot back via
+    // saturating_add — preserving any concurrent increment instead of
+    // overwriting it.
+    // -------------------------------------------------------------------
+
+    /// Atomic snapshot+take of a `pending_interest_for_pools` bucket.
+    /// Returns the e8s amount that was held; removes the entry.
+    /// Pair with `restore_pending_interest_for_pool` on async failure.
+    pub fn take_pending_interest_for_pool(&mut self, collateral_type: Principal) -> u64 {
+        self.pending_interest_for_pools
+            .remove(&collateral_type)
+            .unwrap_or(0)
+    }
+
+    /// Restore an unminted snapshot to a `pending_interest_for_pools`
+    /// bucket via saturating_add. Use on the failure arm of an async
+    /// distribute so any concurrent harvest that landed during the await
+    /// is preserved. No-op when `amount_e8s == 0`.
+    pub fn restore_pending_interest_for_pool(
+        &mut self,
+        collateral_type: Principal,
+        amount_e8s: u64,
+    ) {
+        if amount_e8s == 0 {
+            return;
+        }
+        let entry = self
+            .pending_interest_for_pools
+            .entry(collateral_type)
+            .or_insert(0);
+        *entry = entry.saturating_add(amount_e8s);
+    }
+
+    /// Atomic snapshot+take of `pending_treasury_interest`. Returns the
+    /// ICUSD amount that was held; sets the field to zero. Pair with
+    /// `restore_pending_treasury_interest` on async failure.
+    pub fn take_pending_treasury_interest(&mut self) -> ICUSD {
+        let snapshot = self.pending_treasury_interest;
+        self.pending_treasury_interest = ICUSD::new(0);
+        snapshot
+    }
+
+    /// Restore an unminted snapshot to `pending_treasury_interest` via
+    /// saturating_add. Preserves any concurrent credit that landed
+    /// during the await. No-op when `amount.0 == 0`.
+    pub fn restore_pending_treasury_interest(&mut self, amount: ICUSD) {
+        if amount.0 == 0 {
+            return;
+        }
+        let combined = self
+            .pending_treasury_interest
+            .to_u64()
+            .saturating_add(amount.to_u64());
+        self.pending_treasury_interest = ICUSD::new(combined);
+    }
+
     /// Compute the debt-weighted average interest rate across all vaults.
     /// Returns 0 if no vaults have outstanding debt.
     pub fn weighted_average_interest_rate(&self) -> Ratio {
