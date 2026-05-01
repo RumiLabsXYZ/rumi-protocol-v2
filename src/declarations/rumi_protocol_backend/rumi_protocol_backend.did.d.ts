@@ -931,6 +931,10 @@ export interface _SERVICE {
   >,
   'get_deposit_account' : ActorMethod<[[] | [Principal]], Account>,
   'get_event_count' : ActorMethod<[], bigint>,
+  'get_event_timestamps' : ActorMethod<
+    [bigint, bigint],
+    BigUint64Array | bigint[]
+  >,
   'get_events' : ActorMethod<[GetEventsArg], Array<Event>>,
   'get_events_by_principal' : ActorMethod<[Principal], Array<[bigint, Event]>>,
   'get_events_filtered' : ActorMethod<

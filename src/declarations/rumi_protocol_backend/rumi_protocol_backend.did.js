@@ -915,6 +915,11 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'get_event_count' : IDL.Func([], [IDL.Nat64], ['query']),
+    'get_event_timestamps' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [IDL.Vec(IDL.Nat64)],
+        ['query'],
+      ),
     'get_events' : IDL.Func([GetEventsArg], [IDL.Vec(Event)], ['query']),
     'get_events_by_principal' : IDL.Func(
         [IDL.Principal],

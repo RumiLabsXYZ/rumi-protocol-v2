@@ -596,7 +596,40 @@ export async function fetchEvents(
 		arg.admin_labels = filters?.admin_labels?.length ? [filters.admin_labels] : [];
 
 		const result = await publicActor.get_events_filtered(arg);
-		const data = { total: result.total, events: result.events ?? [] };
+		const rawEvents: [bigint, any][] = result.events ?? [];
+		let events: [bigint, any][] = rawEvents;
+
+		// Overlay recording-time timestamps from the side log so admin/upgrade
+		// rows (whose payloads have no inline `timestamp` field) get a real
+		// time. The candid-decoded event payloads are sometimes non-extensible,
+		// so we rebuild the [idx, evt] pairs with shallow clones that carry
+		// the side-log timestamp on a `__ts_ns` field. Older indices (before
+		// the side log shipped) come back as 0 and we leave those alone so
+		// the renderer keeps showing "—".
+		if (rawEvents.length > 0) {
+			let minIdx = rawEvents[0][0];
+			let maxIdx = rawEvents[0][0];
+			for (const [idx] of rawEvents) {
+				if (idx < minIdx) minIdx = idx;
+				if (idx > maxIdx) maxIdx = idx;
+			}
+			const span = Number(maxIdx - minIdx) + 1;
+			try {
+				const tsArr = (await publicActor.get_event_timestamps(minIdx, BigInt(span))) as bigint[];
+				events = rawEvents.map(([idx, evt]) => {
+					const offset = Number(idx - minIdx);
+					const ts = tsArr[offset];
+					if (ts && ts !== 0n && evt && typeof evt === 'object') {
+						return [idx, { ...evt, __ts_ns: ts }];
+					}
+					return [idx, evt];
+				});
+			} catch (err) {
+				console.error('[explorerService] get_event_timestamps overlay failed:', err);
+			}
+		}
+
+		const data = { total: result.total, events };
 		return setCache(key, data);
 	} catch (err) {
 		console.error('[explorerService] fetchEvents failed:', err);

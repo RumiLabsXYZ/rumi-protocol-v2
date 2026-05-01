@@ -11,10 +11,23 @@ const LOG_DATA_MEMORY_ID: MemoryId = MemoryId::new(1);
 const SNAPSHOT_INDEX_MEMORY_ID: MemoryId = MemoryId::new(2);
 const SNAPSHOT_DATA_MEMORY_ID: MemoryId = MemoryId::new(3);
 const STATE_MEMORY_ID: MemoryId = MemoryId::new(4);
+// Index-aligned timestamp side log. Most pre-existing event variants
+// (Upgrade, every set_*, admin_mint, admin_*) lack an explicit
+// `timestamp` field, so the explorer renders them with no time
+// indicator. We can't change those variant shapes without breaking the
+// stored CBOR, but we CAN write a timestamp at the same index in a
+// parallel log on every `record_event`. The frontend reads
+// `get_event_timestamps` and falls back to that when an event has no
+// inline timestamp. Pre-existing rows surface as 0 (the timestamp log
+// is empty before this change ships) — those stay timestampless,
+// which matches today's behaviour.
+const EVENT_TS_INDEX_MEMORY_ID: MemoryId = MemoryId::new(5);
+const EVENT_TS_DATA_MEMORY_ID: MemoryId = MemoryId::new(6);
 
 type VMem = VirtualMemory<DefaultMemoryImpl>;
 type EventLog = StableLog<Vec<u8>, VMem, VMem>;
 type SnapshotLog = StableLog<Vec<u8>, VMem, VMem>;
+type TimestampLog = StableLog<u64, VMem, VMem>;
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> = RefCell::new(
@@ -40,6 +53,20 @@ thread_local! {
                       m.borrow().get(SNAPSHOT_INDEX_MEMORY_ID),
                       m.borrow().get(SNAPSHOT_DATA_MEMORY_ID)
                   ).expect("failed to initialize snapshot log")
+              )
+        );
+
+    /// Index-aligned `ic_cdk::api::time()` side log: position N here is the
+    /// recording-time timestamp for `EVENTS[N]`. Empty for events recorded
+    /// before this log shipped — those return 0 and the explorer keeps
+    /// rendering "—" for them.
+    static EVENT_TIMESTAMPS: RefCell<TimestampLog> = MEMORY_MANAGER
+        .with(|m|
+              RefCell::new(
+                  StableLog::init(
+                      m.borrow().get(EVENT_TS_INDEX_MEMORY_ID),
+                      m.borrow().get(EVENT_TS_DATA_MEMORY_ID)
+                  ).expect("failed to initialize event timestamp log")
               )
         );
 }
@@ -99,15 +126,71 @@ pub fn count_events() -> u64 {
     EVENTS.with(|events| events.borrow().len())
 }
 
-/// Records a new minter event.
+/// Records a new minter event. Also stamps the recording-time timestamp into
+/// the parallel `EVENT_TIMESTAMPS` log so explorer surfaces can render a real
+/// time even for variants whose payload has no `timestamp` field (Upgrade,
+/// every set_*, admin_*). The two logs always grow in lock-step from this
+/// point forward — index N in EVENTS aligns with index N in EVENT_TIMESTAMPS.
 pub fn record_event(event: &Event) {
     let bytes = encode_event(event);
+    let now = ic_cdk::api::time();
     EVENTS.with(|events| {
         events
             .borrow()
             .append(&bytes)
             .expect("failed to append an entry to the event log")
     });
+    EVENT_TIMESTAMPS.with(|ts| {
+        ts.borrow()
+            .append(&now)
+            .expect("failed to append to the event timestamp log");
+    });
+}
+
+/// Returns the recording-time timestamp for the event at the given **event-log
+/// index**, or `None` for events that pre-date the side log (returned as 0 by
+/// `get_event_timestamps` to keep the response shape index-aligned).
+///
+/// Index alignment: EVENT_TIMESTAMPS starts empty in the deploy that ships
+/// this side log, but the EVENTS log already has thousands of entries. The
+/// first push to EVENT_TIMESTAMPS therefore sits at side-log index 0 even
+/// though the corresponding event is at EVENTS index `count_events_at_first_push`.
+/// We reconstruct the offset on every read as `events_len - timestamps_len`,
+/// which is invariant once we always push to both logs together.
+pub fn get_event_timestamp(index: u64) -> Option<u64> {
+    let events_len = count_events();
+    EVENT_TIMESTAMPS.with(|ts| {
+        let log = ts.borrow();
+        let ts_len = log.len();
+        let offset = events_len.saturating_sub(ts_len);
+        if index < offset {
+            return None;
+        }
+        log.get(index - offset)
+    })
+}
+
+/// Returns up to `length` consecutive timestamps starting at the given
+/// **event-log index**. Slots before the side log's coverage window or past
+/// the end of EVENTS come back as 0 so the caller can use the returned vec as
+/// a direct index-aligned overlay over an event slice.
+pub fn get_event_timestamps(start: u64, length: u64) -> Vec<u64> {
+    let events_len = count_events();
+    EVENT_TIMESTAMPS.with(|ts| {
+        let log = ts.borrow();
+        let ts_len = log.len();
+        let offset = events_len.saturating_sub(ts_len);
+        let mut out = Vec::with_capacity(length as usize);
+        for i in 0..length {
+            let idx = start.saturating_add(i);
+            if idx < offset || idx >= events_len {
+                out.push(0);
+                continue;
+            }
+            out.push(log.get(idx - offset).unwrap_or(0));
+        }
+        out
+    })
 }
 
 // ── State Serialization (pre/post upgrade) ────────────────────────────────

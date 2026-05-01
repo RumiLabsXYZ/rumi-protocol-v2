@@ -771,6 +771,7 @@ service : (ProtocolArg) -> {
     ) query;
   get_deposit_account : (opt principal) -> (Account) query;
   get_event_count : () -> (nat64) query;
+  get_event_timestamps : (nat64, nat64) -> (vec nat64) query;
   get_events : (GetEventsArg) -> (vec Event) query;
   get_events_by_principal : (principal) -> (vec record { nat64; Event }) query;
   get_events_filtered : (GetEventsArg) -> (GetEventsFilteredResponse) query;

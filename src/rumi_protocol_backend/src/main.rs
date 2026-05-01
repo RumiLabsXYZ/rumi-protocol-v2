@@ -728,6 +728,27 @@ fn get_event_count() -> u64 {
     rumi_protocol_backend::storage::count_events()
 }
 
+/// Recording-time timestamp for `length` consecutive events starting at
+/// `start`. Slots past the end of the side log come back as `0`; the
+/// frontend uses these to fill in a real time on admin/upgrade rows whose
+/// event payloads have no inline `timestamp` field. Pre-existing events
+/// (recorded before this side log shipped) also surface as `0`.
+///
+/// Cap is high enough (80k) to cover the entire current event log in a
+/// single round-trip — at 8 bytes per nat64 that's a 640 KB response,
+/// well under the 2 MB IC reply limit. Without that headroom the
+/// frontend's mixed-feed admin scope (which spans tens of thousands of
+/// indices) misses every event past the first 2k of the requested range.
+#[candid_method(query)]
+#[query]
+fn get_event_timestamps(start: u64, length: u64) -> Vec<u64> {
+    if ic_cdk::api::data_certificate().is_none() {
+        ic_cdk::trap("update call rejected");
+    }
+    const MAX: u64 = 80_000;
+    rumi_protocol_backend::storage::get_event_timestamps(start, length.min(MAX))
+}
+
 /// Server-side filtered event query, paginated newest-first.
 /// `start` is the page number (0-indexed) into the *filtered* result set;
 /// `length` is page size (capped at `MAX_PAGE_SIZE`).
