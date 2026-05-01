@@ -52,3 +52,12 @@ audit-reports/
 # Local design/spec/planning notes (whitepaper and existing tracked docs in this folder
 # stay tracked; this only blocks new untracked additions from being committed)
 docs/
+
+# Superpowers local brainstorm/cache
+.superpowers/
+
+# Loose screenshots at repo root (Claude Preview / browser captures during debugging).
+# Tracked screenshots under docs/screenshots/ are unaffected because they're already
+# in git history.
+/explorer-*.png
+/pr*-*.png
