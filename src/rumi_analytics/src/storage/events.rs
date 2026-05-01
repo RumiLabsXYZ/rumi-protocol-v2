@@ -13,6 +13,7 @@ use super::{
     MEM_EVT_VAULTS_IDX, MEM_EVT_VAULTS_DATA,
     MEM_EVT_STABILITY_IDX, MEM_EVT_STABILITY_DATA,
     MEM_EVT_ADMIN_IDX, MEM_EVT_ADMIN_DATA,
+    MEM_EVT_AMM_LIQUIDITY_IDX, MEM_EVT_AMM_LIQUIDITY_DATA,
 };
 
 // --- Enum types ---
@@ -141,6 +142,18 @@ pub struct AnalyticsAdminEvent {
     pub label: String,
 }
 
+/// AMM Add/RemoveLiquidity event mirror, used to reconstruct per-(principal,
+/// pool_id) LP-share timelines for portfolio valuation.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct AnalyticsAmmLiquidityEvent {
+    pub timestamp_ns: u64,
+    pub source_event_id: u64,
+    pub caller: Principal,
+    pub pool_id: String,
+    pub action: LiquidityAction,
+    pub lp_shares: u64,
+}
+
 // --- Storable impls ---
 
 macro_rules! storable_candid {
@@ -163,6 +176,7 @@ storable_candid!(AnalyticsSwapEvent);
 storable_candid!(AnalyticsLiquidityEvent);
 storable_candid!(AnalyticsStabilityEvent);
 storable_candid!(AnalyticsAdminEvent);
+storable_candid!(AnalyticsAmmLiquidityEvent);
 
 // --- StableLog instances ---
 
@@ -213,6 +227,14 @@ thread_local! {
                 get_memory(MEM_EVT_ADMIN_IDX),
                 get_memory(MEM_EVT_ADMIN_DATA),
             ).expect("init EVT_ADMIN log")
+        });
+
+    static EVT_AMM_LIQUIDITY_LOG: RefCell<ic_stable_structures::StableLog<AnalyticsAmmLiquidityEvent, Memory, Memory>> =
+        RefCell::new({
+            ic_stable_structures::StableLog::init(
+                get_memory(MEM_EVT_AMM_LIQUIDITY_IDX),
+                get_memory(MEM_EVT_AMM_LIQUIDITY_DATA),
+            ).expect("init EVT_AMM_LIQUIDITY log")
         });
 }
 
@@ -269,6 +291,7 @@ evt_accessors!(evt_liquidity, EVT_LIQUIDITY_LOG, AnalyticsLiquidityEvent);
 evt_accessors!(evt_vaults, EVT_VAULTS_LOG, AnalyticsVaultEvent);
 evt_accessors!(evt_stability, EVT_STABILITY_LOG, AnalyticsStabilityEvent);
 evt_accessors!(evt_admin, EVT_ADMIN_LOG, AnalyticsAdminEvent);
+evt_accessors!(evt_amm_liquidity, EVT_AMM_LIQUIDITY_LOG, AnalyticsAmmLiquidityEvent);
 
 // --- Tests ---
 

@@ -330,16 +330,79 @@ export async function fetchThreePoolTopSwappers(
 	}
 }
 
-export async function fetchThreePoolSwapEventsV2(start: bigint, length: bigint): Promise<any[]> {
-	const key = `pool:3pool:swapEventsV2:${start}:${length}`;
+/**
+ * Fetch 3Pool v2 swap events newest-first.
+ * `limit` = max events, `offset` = skip this many most-recent. Matches the canister's v2 contract.
+ * Callers that want "all events newest-first" should pass (totalCount, 0n).
+ *
+ * NOTE: this only returns events written after the v1→v2 dynamic-fee migration.
+ * For full history including pre-migration swaps, use {@link fetchThreePoolSwapEventsCombined}.
+ */
+export async function fetchThreePoolSwapEventsV2(limit: bigint, offset: bigint = 0n): Promise<any[]> {
+	const key = `pool:3pool:swapEventsV2:${limit}:${offset}`;
 	const cached = getCached<any[]>(key, TTL.EVENTS);
 	if (cached) return cached;
 
 	try {
-		const result = await threePoolService.getSwapEventsV2(start, length);
+		const result = await threePoolService.getSwapEventsV2(limit, offset);
 		return setCache(key, result);
 	} catch (err) {
 		console.error('[explorerService] fetchThreePoolSwapEventsV2 failed:', err);
+		return [];
+	}
+}
+
+/**
+ * Combined newest-first stream of 3Pool swap events across BOTH the v2 log
+ * (live writes since the dynamic-fee migration) and the v1 log (frozen
+ * historical entries that never got copied into v2). v1 events are tagged
+ * with `__legacyV1: true` and exposed under synthetic IDs offset by
+ * `LEGACY_V1_OFFSET` so they don't collide with v2 IDs in the URL/display.
+ *
+ * `maxV2` caps the v2 batch (live activity is bounded so this rarely binds).
+ * v1 is always fully read because the log is frozen at 49 events.
+ */
+const LEGACY_V1_OFFSET = 1_000_000n;
+
+export async function fetchThreePoolSwapEventsCombined(maxV2: bigint = 1_000n): Promise<any[]> {
+	const key = `pool:3pool:swapEventsCombined:${maxV2}`;
+	const cached = getCached<any[]>(key, TTL.EVENTS);
+	if (cached) return cached;
+
+	try {
+		const [v2Events, v1Count] = await Promise.all([
+			threePoolService.getSwapEventsV2(maxV2, 0n),
+			threePoolService.getSwapEventCount().catch(() => 0n),
+		]);
+
+		const v1RawEvents = Number(v1Count) > 0
+			? await threePoolService.getSwapEvents(0n, v1Count).catch(() => [])
+			: [];
+
+		// Annotate v1 events: surface the original v1 id under `legacy_id`,
+		// shift the synthetic id into a non-overlapping band, and add the
+		// fields formatters/facet code expect from a v2-shaped event so the
+		// rest of the pipeline (badges, dynamic-fee labels) doesn't NPE.
+		const v1Tagged = v1RawEvents.map((e: any) => ({
+			...e,
+			__legacyV1: true,
+			legacy_id: e.id,
+			id: BigInt(e.id ?? 0) + LEGACY_V1_OFFSET,
+			fee_bps: 30, // pre-migration static fee was 30 bps
+			migrated: false,
+			is_rebalancing: false,
+			imbalance_before: 0n,
+			imbalance_after: 0n,
+			pool_balances_after: [],
+			virtual_price_after: 0n,
+		}));
+
+		const combined = [...v2Events, ...v1Tagged];
+		// Newest-first across the union so consumers don't need to re-sort.
+		combined.sort((a: any, b: any) => Number(BigInt(b.timestamp ?? 0n) - BigInt(a.timestamp ?? 0n)));
+		return setCache(key, combined);
+	} catch (err) {
+		console.error('[explorerService] fetchThreePoolSwapEventsCombined failed:', err);
 		return [];
 	}
 }
@@ -476,14 +539,29 @@ export async function fetchVaultsByOwner(principal: Principal): Promise<any[]> {
 	}
 }
 
-export async function fetchVaultHistory(vaultId: bigint): Promise<any[]> {
+/**
+ * Per-vault event history. The backend now returns `(global_index, event)`
+ * tuples; we expose them as `{ index, event }` so callers can render the
+ * canonical Event #N link on every row without a second query against the
+ * global event log.
+ */
+export interface VaultHistoryEntry {
+	index: bigint;
+	event: any;
+}
+
+export async function fetchVaultHistory(vaultId: bigint): Promise<VaultHistoryEntry[]> {
 	const key = `vaults:history:${vaultId}`;
-	const cached = getCached<any[]>(key, TTL.EVENTS);
+	const cached = getCached<VaultHistoryEntry[]>(key, TTL.EVENTS);
 	if (cached) return cached;
 
 	try {
 		const result = await publicActor.get_vault_history(vaultId);
-		return setCache(key, result);
+		const entries: VaultHistoryEntry[] = (result as any[]).map((pair: any) => ({
+			index: BigInt(pair[0]),
+			event: pair[1],
+		}));
+		return setCache(key, entries);
 	} catch (err) {
 		console.error('[explorerService] fetchVaultHistory failed:', err);
 		return [];
@@ -581,7 +659,40 @@ export async function fetchEvents(
 		arg.admin_labels = filters?.admin_labels?.length ? [filters.admin_labels] : [];
 
 		const result = await publicActor.get_events_filtered(arg);
-		const data = { total: result.total, events: result.events ?? [] };
+		const rawEvents: [bigint, any][] = result.events ?? [];
+		let events: [bigint, any][] = rawEvents;
+
+		// Overlay recording-time timestamps from the side log so admin/upgrade
+		// rows (whose payloads have no inline `timestamp` field) get a real
+		// time. The candid-decoded event payloads are sometimes non-extensible,
+		// so we rebuild the [idx, evt] pairs with shallow clones that carry
+		// the side-log timestamp on a `__ts_ns` field. Older indices (before
+		// the side log shipped) come back as 0 and we leave those alone so
+		// the renderer keeps showing "—".
+		if (rawEvents.length > 0) {
+			let minIdx = rawEvents[0][0];
+			let maxIdx = rawEvents[0][0];
+			for (const [idx] of rawEvents) {
+				if (idx < minIdx) minIdx = idx;
+				if (idx > maxIdx) maxIdx = idx;
+			}
+			const span = Number(maxIdx - minIdx) + 1;
+			try {
+				const tsArr = (await publicActor.get_event_timestamps(minIdx, BigInt(span))) as bigint[];
+				events = rawEvents.map(([idx, evt]) => {
+					const offset = Number(idx - minIdx);
+					const ts = tsArr[offset];
+					if (ts && ts !== 0n && evt && typeof evt === 'object') {
+						return [idx, { ...evt, __ts_ns: ts }];
+					}
+					return [idx, evt];
+				});
+			} catch (err) {
+				console.error('[explorerService] get_event_timestamps overlay failed:', err);
+			}
+		}
+
+		const data = { total: result.total, events };
 		return setCache(key, data);
 	} catch (err) {
 		console.error('[explorerService] fetchEvents failed:', err);
@@ -923,6 +1034,12 @@ export async function fetchThreePoolStatus(): Promise<any | null> {
 	}
 }
 
+/**
+ * @deprecated swap_v1 is frozen at the migration cutoff — live writes only
+ * land in swap_v2. Use {@link fetchThreePoolSwapEventsV2} for any code that
+ * needs to surface recent swap activity. This wrapper stays for migration
+ * tooling; do not call it from the activity feed or pool pages.
+ */
 export async function fetchSwapEvents(start: bigint, length: bigint): Promise<any[]> {
 	const key = `pool:3pool:swaps:${start}:${length}`;
 	const cached = getCached<any[]>(key, TTL.POOL);
@@ -937,6 +1054,11 @@ export async function fetchSwapEvents(start: bigint, length: bigint): Promise<an
 	}
 }
 
+/**
+ * @deprecated Returns the swap_v1 count, frozen at migration. Not the live
+ * total. Don't use to gate paging or visibility. See
+ * {@link fetchThreePoolSwapEventsV2} for current event reads.
+ */
 export async function fetchSwapEventCount(): Promise<bigint> {
 	const key = 'pool:3pool:swapcount';
 	const cached = getCached<bigint>(key, TTL.POOL);
@@ -1205,6 +1327,9 @@ export async function fetchAmmSwapEventsByTimeRange(
  * Fetch 3Pool v2 liquidity events newest-first.
  * `limit` = max events, `offset` = skip this many most-recent. Matches the canister's v2 contract.
  * Callers that want "all events newest-first" should pass (totalCount, 0n).
+ *
+ * NOTE: this only returns events written after the v1→v2 dynamic-fee migration.
+ * For full history including pre-migration entries, use {@link fetch3PoolLiquidityEventsCombined}.
  */
 export async function fetch3PoolLiquidityEvents(limit: bigint, offset: bigint): Promise<any[]> {
 	const key = `pool:3pool:liquidity:${limit}:${offset}`;
@@ -1231,6 +1356,61 @@ export async function fetch3PoolLiquidityEventCount(): Promise<bigint> {
 	} catch (err) {
 		console.error('[explorerService] fetch3PoolLiquidityEventCount failed:', err);
 		return 0n;
+	}
+}
+
+/**
+ * Combined newest-first stream of 3Pool liquidity events across both the v2
+ * log (live writes, dynamic-fee schema) and the v1 log (frozen historical
+ * entries that never got copied into v2). v1 entries are tagged with
+ * `__legacyV1: true` and exposed under synthetic IDs offset by
+ * LEGACY_V1_OFFSET so they don't collide with v2 IDs in the URL/display.
+ *
+ * Same pattern as {@link fetchThreePoolSwapEventsCombined} — see that doc.
+ */
+export async function fetch3PoolLiquidityEventsCombined(): Promise<any[]> {
+	const key = 'pool:3pool:liquidity:combined';
+	const cached = getCached<any[]>(key, TTL.POOL);
+	if (cached) return cached;
+
+	try {
+		const [v2Count, v1Count] = await Promise.all([
+			threePoolService.getLiquidityEventCount().catch(() => 0n),
+			threePoolService.getLiquidityEventCountV1().catch(() => 0n),
+		]);
+
+		const [v2Events, v1RawEvents] = await Promise.all([
+			Number(v2Count) > 0
+				? threePoolService.getLiquidityEvents(v2Count, 0n).catch(() => [])
+				: Promise.resolve([] as any[]),
+			Number(v1Count) > 0
+				? threePoolService.getLiquidityEventsV1(0n, v1Count).catch(() => [])
+				: Promise.resolve([] as any[]),
+		]);
+
+		// Annotate v1 entries with the v2-shaped fields formatters/facets
+		// expect, plus the bookkeeping that lets the UI render "v1·#N" and
+		// route URLs deterministically.
+		const v1Tagged = v1RawEvents.map((e: any) => ({
+			...e,
+			__legacyV1: true,
+			legacy_id: e.id,
+			id: BigInt(e.id ?? 0) + LEGACY_V1_OFFSET,
+			migrated: false,
+			is_rebalancing: false,
+			imbalance_before: 0n,
+			imbalance_after: 0n,
+			pool_balances_after: [],
+			virtual_price_after: 0n,
+			fee_bps: e.fee != null ? [] : [],
+		}));
+
+		const combined = [...v2Events, ...v1Tagged];
+		combined.sort((a: any, b: any) => Number(BigInt(b.timestamp ?? 0n) - BigInt(a.timestamp ?? 0n)));
+		return setCache(key, combined);
+	} catch (err) {
+		console.error('[explorerService] fetch3PoolLiquidityEventsCombined failed:', err);
+		return [];
 	}
 }
 
@@ -1296,7 +1476,12 @@ export async function fetchDexEvent(source: DexEventSource, id: number): Promise
 /** Return the total count of events for a non-backend source. Used to gate "Next" navigation. */
 export async function fetchDexEventCount(source: DexEventSource): Promise<bigint> {
 	switch (source) {
-		case '3pool_swap':       return fetchSwapEventCount();
+		case '3pool_swap': {
+			// No v2 count endpoint — return v1+v2 combined length so the
+			// historical (frozen v1) entries are reflected in the count.
+			const events = await fetchThreePoolSwapEventsCombined();
+			return BigInt(events.length);
+		}
 		case 'amm_swap':         return fetchAmmSwapEventCount();
 		case 'amm_liquidity':    return fetchAmmLiquidityEventCount();
 		case 'amm_admin':        return fetchAmmAdminEventCount();
@@ -1311,8 +1496,14 @@ export async function fetchDexEventCount(source: DexEventSource): Promise<bigint
 export async function fetchAllDexEvents(source: DexEventSource): Promise<any[]> {
 	switch (source) {
 		case '3pool_swap': {
-			const count = await fetchSwapEventCount();
-			return Number(count) > 0 ? fetchSwapEvents(0n, count) : [];
+			// Combine v2 (live) and v1 (frozen historical) so the explorer
+			// surfaces the full swap history, not just post-migration entries.
+			return fetchThreePoolSwapEventsCombined();
+		}
+		case '3pool_liquidity': {
+			// Same v1+v2 split as swaps — pre-migration liquidity entries
+			// would otherwise be invisible in the activity feed.
+			return fetch3PoolLiquidityEventsCombined();
 		}
 		case 'amm_swap': {
 			const count = await fetchAmmSwapEventCount();
@@ -1325,10 +1516,6 @@ export async function fetchAllDexEvents(source: DexEventSource): Promise<any[]> 
 		case 'amm_admin': {
 			const count = await fetchAmmAdminEventCount();
 			return Number(count) > 0 ? fetchAmmAdminEvents(0n, count) : [];
-		}
-		case '3pool_liquidity': {
-			const count = await fetch3PoolLiquidityEventCount();
-			return Number(count) > 0 ? fetch3PoolLiquidityEvents(count, 0n) : [];
 		}
 		case '3pool_admin': {
 			const count = await fetch3PoolAdminEventCount();

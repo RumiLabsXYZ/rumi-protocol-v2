@@ -293,6 +293,19 @@ class ThreePoolService {
     return await actor.get_liquidity_event_count_v2() as bigint;
   }
 
+  // v1 liquidity log: frozen at the dynamic-fee migration but still holds
+  // pre-migration history (oldest-first by index). Use the explorer-side
+  // combined fetcher rather than this method directly when surfacing events.
+  async getLiquidityEventsV1(start: bigint, length: bigint): Promise<any[]> {
+    const actor = await this.getQueryActor();
+    return await actor.get_liquidity_events(start, length) as any[];
+  }
+
+  async getLiquidityEventCountV1(): Promise<bigint> {
+    const actor = await this.getQueryActor();
+    return await actor.get_liquidity_event_count() as bigint;
+  }
+
   async getAdminEvents(start: bigint, length: bigint): Promise<any[]> {
     const actor = await this.getQueryActor();
     return await actor.get_admin_events(start, length) as any[];
@@ -365,9 +378,11 @@ class ThreePoolService {
     return await actor.get_top_swappers({ [window]: null } as any, n) as Array<[Principal, bigint, bigint]>;
   }
 
-  async getSwapEventsV2(start: bigint, length: bigint): Promise<any[]> {
+  // v2 swap endpoint is newest-first: offset skips the N most-recent events, limit takes the next batch.
+  // Mirrors get_liquidity_events_v2 above. The canister returns events[0] = newest in window.
+  async getSwapEventsV2(limit: bigint, offset: bigint = 0n): Promise<any[]> {
     const actor = await this.getQueryActor();
-    return await actor.get_swap_events_v2(start, length) as any[];
+    return await actor.get_swap_events_v2(limit, offset) as any[];
   }
 
   // ── Mutations ──

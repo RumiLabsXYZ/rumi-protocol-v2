@@ -448,7 +448,9 @@ pub struct AddressValueSeriesQuery {
 #[derive(CandidType, Clone, Debug, PartialEq)]
 pub struct AddressValueSourceBreakdown {
     /// Short identifier for the source, e.g. "icusd", "threeusd",
-    /// "vault_collateral", "sp_deposit", "three_pool_lp".
+    /// "vault_equity", "sp_deposit", "amm_lp". (The legacy "three_pool_lp"
+    /// source is no longer emitted; 3USD = rumi_3pool LP, so 3pool exposure
+    /// is captured by "threeusd" plus "amm_lp" for AMM-locked 3USD.)
     pub source: String,
     pub value_usd_e8s: u64,
 }

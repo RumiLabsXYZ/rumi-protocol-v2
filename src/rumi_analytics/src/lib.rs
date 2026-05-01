@@ -204,6 +204,15 @@ fn get_address_value_series(query: types::AddressValueSeriesQuery) -> types::Add
     queries::address_value::get_address_value_series(query)
 }
 
+/// Debug helper — exposes the AMM pool snapshot the address-value query reads
+/// from. Lets us check whether the chart's mismatch with the live allocation
+/// card is caused by stale reserves vs. mispriced reserves vs. a token-side
+/// mix-up. Cheap query, no aggregation, safe to keep behind no flag.
+#[ic_cdk_macros::query]
+fn debug_amm_pool_snapshot() -> Vec<storage::AmmPoolSnapshot> {
+    state::read_state(|s| s.amm_pools.clone().unwrap_or_default())
+}
+
 #[ic_cdk_macros::query]
 fn get_collector_health() -> types::CollectorHealth {
     use storage::cursors;
@@ -214,6 +223,7 @@ fn get_collector_health() -> types::CollectorHealth {
         (cursors::CURSOR_ID_3POOL_LIQUIDITY, "3pool_liquidity", cursors::three_pool_liquidity::get),
         (cursors::CURSOR_ID_3POOL_BLOCKS, "3pool_blocks", cursors::three_pool_blocks::get),
         (cursors::CURSOR_ID_AMM_SWAPS, "amm_swaps", cursors::amm_swaps::get),
+        (cursors::CURSOR_ID_AMM_LIQUIDITY, "amm_liquidity", cursors::amm_liquidity::get),
         (cursors::CURSOR_ID_STABILITY_EVENTS, "stability_events", cursors::stability_events::get),
         (cursors::CURSOR_ID_ICUSD_BLOCKS, "icusd_blocks", cursors::icusd_blocks::get),
     ];

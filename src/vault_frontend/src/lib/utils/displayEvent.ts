@@ -47,10 +47,23 @@ export function extractEventTimestamp(event: any): number {
 	if (event?.timestamp != null) return Number(event.timestamp);
 	const eventType = event?.event_type ?? event;
 	if (!eventType) return 0;
-	const key = Object.keys(eventType)[0];
-	if (!key) return 0;
+	// Skip our `__ts_ns` overlay key when picking the variant tag — the
+	// shallow clone fetchEvents creates places it alongside the variant key.
+	const key = Object.keys(eventType).filter(k => k !== '__ts_ns')[0];
+	if (!key) {
+		return event?.__ts_ns != null ? Number(event.__ts_ns) : 0;
+	}
 	const data = eventType[key];
-	if (data?.timestamp != null) return Number(data.timestamp);
+	if (data?.timestamp != null) {
+		// Backend events use `opt nat64` for timestamps which the JS bindings
+		// surface as either the bare value or a [value]/[]-wrapped option.
+		const t = Array.isArray(data.timestamp) ? data.timestamp[0] : data.timestamp;
+		if (t != null) return Number(t);
+	}
+	// Fallback to the parallel EVENT_TIMESTAMPS side log (see fetchEvents):
+	// admin / upgrade / set_* variants don't carry an inline timestamp, so
+	// the explorer uses the recording-time timestamp from the side log.
+	if (event?.__ts_ns != null) return Number(event.__ts_ns);
 	return 0;
 }
 

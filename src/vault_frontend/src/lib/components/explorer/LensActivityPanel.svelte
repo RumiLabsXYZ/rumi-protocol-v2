@@ -3,11 +3,11 @@
   import MixedEventsTable from './MixedEventsTable.svelte';
   import {
     fetchEvents, fetchAllVaults,
-    fetchSwapEvents, fetchSwapEventCount,
+    fetchThreePoolSwapEventsCombined,
+    fetch3PoolLiquidityEventsCombined,
     fetchAmmSwapEvents, fetchAmmSwapEventCount,
     fetchAmmLiquidityEvents, fetchAmmLiquidityEventCount,
     fetchAmmAdminEvents, fetchAmmAdminEventCount,
-    fetch3PoolLiquidityEvents, fetch3PoolLiquidityEventCount,
     fetch3PoolAdminEvents, fetch3PoolAdminEventCount,
     fetchStabilityPoolEvents, fetchStabilityPoolEventCount,
     type BackendEventFilters,
@@ -74,11 +74,22 @@
     'add_collateral_type', 'update_collateral_status', 'update_collateral_config',
     'set_reserve_redemptions_enabled', 'set_icpswap_routing_enabled',
     'set_reserve_redemption_fee', 'reserve_redemption',
-    'admin_mint', 'admin_vault_correction', 'admin_sweep_to_treasury',
+    'admin_mint', 'admin_vault_correction', 'admin_debt_correction', 'admin_sweep_to_treasury',
     'set_recovery_parameters', 'set_rate_curve_markers', 'set_recovery_rate_curve',
     'set_healthy_cr', 'set_collateral_borrowing_fee', 'set_interest_rate', 'set_interest_pool_share',
     'set_rmr_floor', 'set_rmr_ceiling', 'set_rmr_floor_cr', 'set_rmr_ceiling_cr',
     'set_borrowing_fee_curve', 'set_interest_split', 'set_three_pool_canister',
+    // Per-collateral setters that previously fell through and never made it
+    // into the admin-scoped feed.
+    'set_collateral_borrow_threshold', 'set_collateral_display_color',
+    'set_collateral_ledger_fee', 'set_collateral_liquidation_bonus',
+    'set_collateral_liquidation_ratio', 'set_collateral_min_deposit',
+    'set_collateral_min_vault_debt',
+    'set_collateral_redemption_fee_ceiling', 'set_collateral_redemption_fee_floor',
+    // Wave-10 LIQ-008 mass-liquidation breaker tunables.
+    'set_breaker_window_ns', 'set_breaker_window_debt_ceiling_e8s',
+    // Wave-8e LIQ-005 deficit-routing tunables.
+    'set_deficit_readonly_threshold_e8s', 'set_deficit_repayment_fraction',
   ]);
 
   function backendEventKey(evt: any): string {
@@ -187,18 +198,18 @@
       const needsDexs = scope === 'all' || scope === 'revenue' || scope === 'dexs' || scope === 'admin';
       const needsSp = scope === 'all' || scope === 'stability_pool';
 
-      const swapCountP = needsDexs ? fetchSwapEventCount().catch(() => 0n) : Promise.resolve(0n);
+      // 3pool swap & liquidity reads pull combined v1+v2 streams below;
+      // there's no count endpoint that covers both logs.
       const ammSwapCountP = needsDexs ? fetchAmmSwapEventCount().catch(() => 0n) : Promise.resolve(0n);
       const ammLiqCountP = needsDexs ? fetchAmmLiquidityEventCount().catch(() => 0n) : Promise.resolve(0n);
       const ammAdminCountP = scope === 'all' || scope === 'admin'
         ? fetchAmmAdminEventCount().catch(() => 0n) : Promise.resolve(0n);
-      const threeLiqCountP = needsDexs ? fetch3PoolLiquidityEventCount().catch(() => 0n) : Promise.resolve(0n);
       const threeAdminCountP = scope === 'all' || scope === 'admin'
         ? fetch3PoolAdminEventCount().catch(() => 0n) : Promise.resolve(0n);
       const spCountP = needsSp ? fetchStabilityPoolEventCount().catch(() => 0n) : Promise.resolve(0n);
 
-      const [backend, vaults, swapCount, ammSwapCount, ammLiqCount, ammAdminCount, threeLiqCount, threeAdminCount, spCount] = await Promise.all([
-        backendPromise, vaultsPromise, swapCountP, ammSwapCountP, ammLiqCountP, ammAdminCountP, threeLiqCountP, threeAdminCountP, spCountP,
+      const [backend, vaults, ammSwapCount, ammLiqCount, ammAdminCount, threeAdminCount, spCount] = await Promise.all([
+        backendPromise, vaultsPromise, ammSwapCountP, ammLiqCountP, ammAdminCountP, threeAdminCountP, spCountP,
       ]);
 
       // Populate vault maps
@@ -212,13 +223,16 @@
       vaultCollateralMap = collMap;
       vaultOwnerMap = ownerMap;
 
-      // Pull recent event batches from each source
+      // Pull recent event batches from each source. 3pool swap and liquidity
+      // come from combined v1+v2 readers so frozen pre-migration entries
+      // appear alongside live writes — otherwise the lens panel silently
+      // drops 49 swap + 18 liquidity historical events from the stream.
       const [swaps, ammSwaps, ammLiq, ammAdmin, threeLiq, threeAdmin, sp] = await Promise.all([
-        fetchRecent(swapCount, sampleSize, fetchSwapEvents),
+        needsDexs ? fetchThreePoolSwapEventsCombined(sampleSize).catch(() => []) : Promise.resolve([]),
         fetchRecent(ammSwapCount, sampleSize, fetchAmmSwapEvents),
         fetchRecent(ammLiqCount, sampleSize, fetchAmmLiquidityEvents),
         fetchRecent(ammAdminCount, sampleSize, fetchAmmAdminEvents),
-        threeLiqCount === 0n ? Promise.resolve([]) : fetch3PoolLiquidityEvents(sampleSize < threeLiqCount ? sampleSize : threeLiqCount, 0n).catch(() => []),
+        needsDexs ? fetch3PoolLiquidityEventsCombined().catch(() => []) : Promise.resolve([]),
         fetchRecent(threeAdminCount, sampleSize, fetch3PoolAdminEvents),
         fetchRecent(spCount, sampleSize, fetchStabilityPoolEvents),
       ]);

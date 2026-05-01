@@ -28,12 +28,48 @@
   const extraTokens = $derived(facetsFor.tokens.slice(0, 3));
   const extraPools = $derived(facetsFor.pools.slice(0, 2));
   const extraVaults = $derived(facetsFor.vaultIds.slice(0, 2));
+
+  // Each non-backend source has its own ID counter on the canister, so
+  // "AMM1 #6" (liquidity) sorting after "AMM1 #44" (swap) reads as out of
+  // order even when the timestamps are correct. Append a per-type tag to
+  // the cell so the disambiguation is visible at a glance.
+  const subtypeTag = $derived.by(() => {
+    switch (display.source) {
+      case '3pool_swap':
+      case 'amm_swap':
+      case 'multi_hop_swap':
+        return 'swap';
+      case '3pool_liquidity':
+      case 'amm_liquidity':
+        return 'liq';
+      case '3pool_admin':
+      case 'amm_admin':
+        return 'admin';
+      default:
+        return null;
+    }
+  });
+
+  // 3pool swap reads merge v1 (pre-migration, frozen) and v2 (live) entries.
+  // The combined fetcher offsets v1 ids into a non-overlapping band so
+  // timestamps stay sortable, but the visible id should be the canister's
+  // original v1 id with a "v1·" prefix so the historical context is clear.
+  const isLegacyV1 = $derived(event.event?.__legacyV1 === true);
+  const displayedId = $derived(
+    isLegacyV1 && event.event?.legacy_id != null
+      ? `v1·#${event.event.legacy_id}`
+      : `#${display.globalIndex}`,
+  );
 </script>
 
 <tr class="border-b border-gray-700/50 hover:bg-gray-800/30 transition-colors group">
   <td class="px-4 py-3">
-    <a href={display.detailHref} class="text-xs text-blue-400 hover:text-blue-300 font-mono" title="{display.sourceLabel} Event #{display.globalIndex}">
-      {display.sourceLabel} #{display.globalIndex}
+    <a href={display.detailHref} class="text-xs text-blue-400 hover:text-blue-300 font-mono whitespace-nowrap" title="{display.sourceLabel} {subtypeTag ?? ''} Event {displayedId}">
+      {display.sourceLabel}
+      {#if subtypeTag}
+        <span class="text-gray-500">{subtypeTag}</span>
+      {/if}
+      {displayedId}
     </a>
   </td>
   <td class="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">

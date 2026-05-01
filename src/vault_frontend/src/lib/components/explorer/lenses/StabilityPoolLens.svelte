@@ -60,11 +60,21 @@
   const totalDeposits = $derived(poolStatus ? e8sToNumber(poolStatus.total_deposits_e8s ?? 0n) : 0);
   const depositors = $derived(poolStatus ? Number(poolStatus.total_depositors ?? 0n) : 0);
   const totalLiquidations = $derived(poolStatus ? Number(poolStatus.total_liquidations_executed ?? 0n) : 0);
+  // `eligible_icusd_per_collateral` reports, FOR EACH collateral type, the
+  // share of the pool opted-in to absorb that specific collateral. With all
+  // depositors opted in to every collateral (the default), each entry equals
+  // the total pool — so summing across collaterals N-counts the same dollars
+  // and inflates the headline. Take the minimum (worst-case coverage across
+  // collaterals) — matches what users expect when reading the label.
   const eligibleCoverage = $derived.by(() => {
-    if (!poolStatus?.eligible_icusd_per_collateral) return 0;
-    let sum = 0;
-    for (const [, v] of poolStatus.eligible_icusd_per_collateral) sum += Number(v);
-    return sum / 1e8;
+    const rows = poolStatus?.eligible_icusd_per_collateral;
+    if (!rows || rows.length === 0) return 0;
+    let min = Infinity;
+    for (const [, v] of rows) {
+      const n = Number(v);
+      if (n < min) min = n;
+    }
+    return Number.isFinite(min) ? min / 1e8 : 0;
   });
 
   const depositSeries = $derived(
@@ -109,6 +119,7 @@
       color={CHART_COLORS.teal}
       fillColor={CHART_COLORS.tealDim}
       valueFormat={(v) => `$${formatCompact(v)}`}
+      yAxisMode="data-fit"
       loading={loading}
     />
   </div>
@@ -119,6 +130,7 @@
       color={CHART_COLORS.danger}
       fillColor="rgba(224, 107, 159, 0.15)"
       valueFormat={(v) => v.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+      yAxisMode="data-fit"
       loading={loading}
     />
   </div>

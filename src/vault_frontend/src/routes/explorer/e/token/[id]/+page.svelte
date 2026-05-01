@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
   import { Principal } from '@dfinity/principal';
   import EntityShell from '$components/explorer/entity/EntityShell.svelte';
   import MixedEventsTable from '$components/explorer/MixedEventsTable.svelte';
@@ -16,7 +15,7 @@
     fetchAmmSwapEventCount,
     fetchAmmLiquidityEvents,
     fetchAmmLiquidityEventCount,
-    fetchThreePoolSwapEventsV2,
+    fetchThreePoolSwapEventsCombined,
     fetchThreePoolState,
     fetchStabilityPoolEvents,
     fetchStabilityPoolEventCount,
@@ -592,7 +591,7 @@
         eventLength > 0n
           ? fetchEvents(eventStart, eventLength).catch(() => ({ total: 0n, events: [] as [bigint, any][] }))
           : Promise.resolve({ total: 0n, events: [] as [bigint, any][] }),
-        fetchThreePoolSwapEventsV2(0n, THREE_POOL_SWAP_PULL).catch(() => []),
+        fetchThreePoolSwapEventsCombined(THREE_POOL_SWAP_PULL).catch(() => []),
         ammSwapLen > 0n ? fetchAmmSwapEvents(ammSwapStart, ammSwapLen).catch(() => []) : Promise.resolve([]),
         ammLiqLen > 0n ? fetchAmmLiquidityEvents(ammLiqStart, ammLiqLen).catch(() => []) : Promise.resolve([]),
         spLen > 0n ? fetchStabilityPoolEvents(spStart, spLen).catch(() => []) : Promise.resolve([]),
@@ -627,7 +626,12 @@
     }
   }
 
-  onMount(loadToken);
+  // Re-run on token change so sibling /e/token/[id] navigations refetch
+  // rather than reusing this component with stale state.
+  $effect(() => {
+    void tokenPrincipal;
+    loadToken();
+  });
 </script>
 
 <EntityShell

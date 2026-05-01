@@ -3,13 +3,14 @@
 use crate::{sources, state, storage};
 
 pub async fn run() -> Result<(), String> {
-    let (backend_id, three_pool_id) = state::read_state(|s| {
-        (s.sources.backend, s.sources.three_pool)
+    let (backend_id, three_pool_id, amm_id) = state::read_state(|s| {
+        (s.sources.backend, s.sources.three_pool, s.sources.amm)
     });
 
-    let (prices_res, pool_res) = futures::join!(
+    let (prices_res, pool_res, amm_pools_res) = futures::join!(
         sources::backend::get_collateral_totals(backend_id),
         sources::three_pool::get_pool_status(three_pool_id),
+        sources::amm::get_pools(amm_id),
     );
 
     let now = ic_cdk::api::time();
@@ -53,6 +54,28 @@ pub async fn run() -> Result<(), String> {
         Err(e) => {
             ic_cdk::println!("[fast] get_pool_status error: {}", e);
             state::mutate_state(|s| s.error_counters.three_pool += 1);
+        }
+    }
+
+    match amm_pools_res {
+        Ok(pools) => {
+            use num_traits::ToPrimitive;
+            let snaps: Vec<storage::AmmPoolSnapshot> = pools
+                .into_iter()
+                .map(|p| storage::AmmPoolSnapshot {
+                    pool_id: p.pool_id,
+                    token_a: p.token_a,
+                    token_b: p.token_b,
+                    reserve_a: p.reserve_a.0.to_u128().unwrap_or(0),
+                    reserve_b: p.reserve_b.0.to_u128().unwrap_or(0),
+                    total_lp_shares: p.total_lp_shares.0.to_u128().unwrap_or(0),
+                })
+                .collect();
+            state::mutate_state(|s| s.amm_pools = Some(snaps));
+        }
+        Err(e) => {
+            ic_cdk::println!("[fast] amm get_pools error: {}", e);
+            state::mutate_state(|s| s.error_counters.amm += 1);
         }
     }
 

@@ -8,7 +8,7 @@
   import TvlChart from '../TvlChart.svelte';
   import TokenFlowSankey from '../TokenFlowSankey.svelte';
   import {
-    fetchProtocolSummary, fetchTvlSeries, fetchVaultSeries,
+    fetchProtocolSummary, fetchVaultSeries,
     fetchFeeSeries, fetchPegStatus, fetchApys, fetchTokenFlow,
   } from '$services/explorer/analyticsService';
   import { ProtocolService } from '$services/protocol';
@@ -16,12 +16,10 @@
   import { stabilityPoolService } from '$services/stabilityPoolService';
   import { e8sToNumber, formatCompact, CHART_COLORS } from '$utils/explorerChartHelpers';
   import { liveSpApyPct, liveLpApyPct } from '$utils/liveApy';
-  import type { ProtocolSummary, DailyTvlRow, PegStatus, TokenFlowEdge } from '$declarations/rumi_analytics/rumi_analytics.did';
+  import type { ProtocolSummary, PegStatus, TokenFlowEdge } from '$declarations/rumi_analytics/rumi_analytics.did';
 
   let summary: ProtocolSummary | null = $state(null);
   let summaryLoading = $state(true);
-  let tvlData: DailyTvlRow[] = $state([]);
-  let tvlLoading = $state(true);
   let vaultRows: any[] = $state([]);
   let feeRows: any[] = $state([]);
   let seriesLoading = $state(true);
@@ -62,9 +60,8 @@
   });
 
   onMount(async () => {
-    const [sumR, tvlR, vaultR, feeR, pegR, apyR] = await Promise.allSettled([
+    const [sumR, vaultR, feeR, pegR, apyR] = await Promise.allSettled([
       fetchProtocolSummary(),
-      fetchTvlSeries(365),
       fetchVaultSeries(90),
       fetchFeeSeries(90),
       fetchPegStatus(),
@@ -73,9 +70,6 @@
 
     if (sumR.status === 'fulfilled' && sumR.value) summary = sumR.value;
     summaryLoading = false;
-
-    if (tvlR.status === 'fulfilled') tvlData = tvlR.value ?? [];
-    tvlLoading = false;
 
     if (vaultR.status === 'fulfilled') vaultRows = vaultR.value ?? [];
     if (feeR.status === 'fulfilled') feeRows = feeR.value ?? [];
@@ -178,7 +172,7 @@
   <div class="flex items-center justify-between mb-3">
     <h3 class="text-sm font-medium text-gray-300">Total Value Locked</h3>
   </div>
-  <TvlChart data={tvlData} loading={tvlLoading} />
+  <TvlChart data={vaultRows} loading={seriesLoading} />
 </div>
 
 <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -189,6 +183,7 @@
       color={CHART_COLORS.teal}
       fillColor={CHART_COLORS.tealDim}
       valueFormat={(v) => v.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+      yAxisMode="data-fit"
       loading={seriesLoading}
     />
   </div>
@@ -199,6 +194,7 @@
       color={CHART_COLORS.purple}
       fillColor={CHART_COLORS.purpleDim}
       valueFormat={(v) => `$${formatCompact(v)}`}
+      yAxisMode="data-fit"
       loading={seriesLoading}
     />
   </div>
@@ -211,6 +207,7 @@
     color={CHART_COLORS.action}
     fillColor="rgba(52, 211, 153, 0.15)"
     valueFormat={(v) => `$${formatCompact(v)}`}
+    headlineValue={feePoints.reduce((s, p) => s + p.v, 0)}
     height={160}
     loading={seriesLoading}
   />

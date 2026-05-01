@@ -778,6 +778,7 @@ service : (ProtocolArg) -> {
     ) query;
   get_deposit_account : (opt principal) -> (Account) query;
   get_event_count : () -> (nat64) query;
+  get_event_timestamps : (nat64, nat64) -> (vec nat64) query;
   get_events : (GetEventsArg) -> (vec Event) query;
   get_events_by_principal : (principal) -> (vec record { nat64; Event }) query;
   get_events_filtered : (GetEventsArg) -> (GetEventsFilteredResponse) query;
@@ -821,7 +822,7 @@ service : (ProtocolArg) -> {
   get_three_pool_canister : () -> (opt principal) query;
   get_treasury_principal : () -> (opt principal) query;
   get_treasury_stats : () -> (TreasuryStats) query;
-  get_vault_history : (nat64) -> (vec Event) query;
+  get_vault_history : (nat64) -> (vec record { nat64; Event }) query;
   get_vault_interest_rate : (nat64) -> (Result_7) query;
   get_vaults : (opt principal) -> (vec CandidVault) query;
   http_request : (HttpRequest) -> (HttpResponse_1) query;
@@ -914,4 +915,3 @@ service : (ProtocolArg) -> {
   withdraw_liquidity : (nat64) -> (Result_1);
   withdraw_partial_collateral : (VaultArg) -> (Result_1);
 }
-

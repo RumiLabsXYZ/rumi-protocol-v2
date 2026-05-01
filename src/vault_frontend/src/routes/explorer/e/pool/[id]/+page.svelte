@@ -1,6 +1,5 @@
 <script lang="ts">
   import { page } from '$app/stores';
-  import { onMount } from 'svelte';
   import EntityShell from '$components/explorer/entity/EntityShell.svelte';
   import EntityLink from '$components/explorer/EntityLink.svelte';
   import CopyButton from '$components/explorer/CopyButton.svelte';
@@ -14,10 +13,10 @@
     fetchThreePoolHealth,
     fetchThreePoolTopLps,
     fetchThreePoolTopSwappers,
-    fetchThreePoolSwapEventsV2,
+    fetchThreePoolSwapEventsCombined,
+    fetch3PoolLiquidityEventsCombined,
     fetch3PoolLiquidityEvents,
     fetch3PoolLiquidityEventCount,
-    fetchSwapEventCount,
     fetchThreePoolVolumeSeries,
     fetchThreePoolBalanceSeries,
     fetchThreePoolFeeSeries,
@@ -39,7 +38,8 @@
   import { AMM_TOKENS } from '$services/ammService';
   import type { DisplayEvent } from '$utils/displayEvent';
   import { CANISTER_IDS } from '$lib/config';
-  import { formatCompact } from '$utils/explorerChartHelpers';
+  import { formatCompact, padZeroBuckets, padForwardFill } from '$utils/explorerChartHelpers';
+  import { POOL_TOKENS } from '$services/threePoolService';
 
   const poolIdParam = $derived($page.params.id);
 
@@ -183,30 +183,70 @@
   }
 
   // ── 3pool series points ──────────────────────────────────────────────────
-  const volPoints = $derived(
-    volSeries.map((p: any) => ({
-      t: Number(p.timestamp),
-      v: (p.volume_per_token as bigint[]).reduce((a, b) => a + Number(b) / 1e18, 0),
-    })),
-  );
+  // Canister timestamps are nanoseconds; chart helpers expect ms. The
+  // canister also only emits buckets that contain swaps — pad the full 7d
+  // hourly window so sparse activity reads as spikes against a baseline
+  // instead of a straight line between two distant points.
+  const VOL_BUCKET_MS = 3_600_000;          // 3600s on the canister side
+  const VOL_WINDOW_MS = 7 * 24 * 3_600_000;
 
-  const vpPoints = $derived(
-    vpSeries.map((p: any) => ({ t: Number(p.timestamp), v: Number(p.virtual_price) / 1e18 })),
-  );
+  const volPoints = $derived.by(() => {
+    if (!volSeries.length) return [] as { t: number; v: number }[];
+    const raw = volSeries.map((p: any) => {
+      // volume_per_token[i] is sum of amount_in for token index i, in raw
+      // token units. Stables are ~$1 so summing normalized values yields
+      // a USD figure. The previous /1e18 was wrong: stables use 6/8 dec.
+      let total = 0;
+      const arr = p.volume_per_token as bigint[];
+      for (let i = 0; i < arr.length; i++) {
+        const tok = POOL_TOKENS[i];
+        if (!tok) continue;
+        total += Number(arr[i]) / 10 ** tok.decimals;
+      }
+      return { t: Number(p.timestamp) / 1_000_000, v: total };
+    });
+    return padZeroBuckets(raw, VOL_WINDOW_MS, VOL_BUCKET_MS);
+  });
 
-  const feePoints = $derived(
-    feeSeries.map((p: any) => ({ t: Number(p.timestamp), v: Number(p.avg_fee_bps) / 100 })),
-  );
+  // Virtual price is monotonic-ish around 1.0; data-fit Y axis on the
+  // chart side keeps the slope visible. Forward-fill so a stale snapshot
+  // window still draws as a continuous level instead of a 1-segment line.
+  const vpPoints = $derived.by(() => {
+    if (!vpSeries.length) return [] as { t: number; v: number }[];
+    const raw = vpSeries.map((p: any) => ({
+      t: Number(p.timestamp) / 1_000_000,
+      v: Number(p.virtual_price) / 1e18,
+    }));
+    const liveVp = Number(virtualPrice) / 1e18 || raw[raw.length - 1]?.v || 1;
+    return padForwardFill(raw, VOL_WINDOW_MS, VOL_BUCKET_MS, liveVp);
+  });
+
+  const feePoints = $derived.by(() => {
+    if (!feeSeries.length) return [] as { t: number; v: number }[];
+    const raw = feeSeries.map((p: any) => ({
+      t: Number(p.timestamp) / 1_000_000,
+      v: Number(p.avg_fee_bps) / 100,
+    }));
+    return padZeroBuckets(raw, VOL_WINDOW_MS, VOL_BUCKET_MS);
+  });
 
   const balancePointsByToken = $derived.by(() => {
-    if (!balSeries.length || !tokens.length) return [] as Array<{ symbol: string; points: { t: number; v: number }[] }>;
-    return tokens.map((tok: any, i: number) => ({
-      symbol: tok.symbol,
-      points: balSeries.map((p: any) => ({
-        t: Number(p.timestamp),
+    if (!tokens.length) return [] as Array<{ symbol: string; points: { t: number; v: number }[] }>;
+    return tokens.map((tok: any, i: number) => {
+      const liveBalance = Number(balances[i] ?? 0n) / 10 ** Number(tok.decimals);
+      const raw = balSeries.map((p: any) => ({
+        t: Number(p.timestamp) / 1_000_000,
         v: Number((p.balances as bigint[])[i] ?? 0n) / 10 ** Number(tok.decimals),
-      })),
-    }));
+      }));
+      // Forward-fill so balance reads as a level across the window (the
+      // canister only emits balance points on swap events, which can be
+      // sparse). Default fills with the current live balance when no
+      // historical samples land before the window start.
+      return {
+        symbol: tok.symbol,
+        points: padForwardFill(raw, VOL_WINDOW_MS, VOL_BUCKET_MS, liveBalance),
+      };
+    });
   });
 
   // ── AMM series points ────────────────────────────────────────────────────
@@ -224,30 +264,41 @@
     }));
   });
 
+  // AMM series share the 7d / hourly window used elsewhere on this page.
+  const ammVolPointsPadded = $derived.by(() => {
+    if (!ammTokenA || !ammTokenB) return [] as { t: number; v: number }[];
+    return padZeroBuckets(ammVolPoints, VOL_WINDOW_MS, VOL_BUCKET_MS);
+  });
+
   const ammBalancePointsA = $derived.by(() => {
-    if (!ammBalSeries.length || !ammTokenA) return [];
-    return ammBalSeries.map((p: any) => ({
+    if (!ammTokenA) return [] as { t: number; v: number }[];
+    const liveA = Number(ammReserveA) / 10 ** ammTokenA.decimals;
+    const raw = ammBalSeries.map((p: any) => ({
       t: Number(p.ts_ns) / 1_000_000,
       v: Number(p.reserve_a_e8s) / 10 ** ammTokenA.decimals,
     }));
+    return padForwardFill(raw, VOL_WINDOW_MS, VOL_BUCKET_MS, liveA);
   });
 
   const ammBalancePointsB = $derived.by(() => {
-    if (!ammBalSeries.length || !ammTokenB) return [];
-    return ammBalSeries.map((p: any) => ({
+    if (!ammTokenB) return [] as { t: number; v: number }[];
+    const liveB = Number(ammReserveB) / 10 ** ammTokenB.decimals;
+    const raw = ammBalSeries.map((p: any) => ({
       t: Number(p.ts_ns) / 1_000_000,
       v: Number(p.reserve_b_e8s) / 10 ** ammTokenB.decimals,
     }));
+    return padForwardFill(raw, VOL_WINDOW_MS, VOL_BUCKET_MS, liveB);
   });
 
   const ammFeePoints = $derived.by(() => {
-    if (!ammFeeSeries.length || !ammTokenA || !ammTokenB) return [];
-    return ammFeeSeries.map((p: any) => ({
+    if (!ammTokenA || !ammTokenB) return [] as { t: number; v: number }[];
+    const raw = ammFeeSeries.map((p: any) => ({
       t: Number(p.ts_ns) / 1_000_000,
       v:
         Number(p.fees_a_e8s) / 10 ** ammTokenA.decimals +
         Number(p.fees_b_e8s) / 10 ** ammTokenB.decimals,
     }));
+    return padZeroBuckets(raw, VOL_WINDOW_MS, VOL_BUCKET_MS);
   });
 
   // ── Merged event feeds ───────────────────────────────────────────────────
@@ -316,19 +367,18 @@
 
     if (isThreePool) {
       try {
-        const swapCount = await fetchSwapEventCount().catch(() => 0n);
-        const liqCount = await fetch3PoolLiquidityEventCount().catch(() => 0n);
-
+        // Combined v1+v2 swap and liquidity history; the activity slice
+        // picks the top 40 after merging. Without v1 the panel only shows
+        // ~5 post-migration swaps + 23 post-migration liq events and the
+        // historical context (49 swap + 18 liq) is gone.
         const [s, st, h, lps, swappers, sev, lev, vol, bal, fees, vp, routes] = await Promise.all([
           fetchThreePoolStatus(),
           fetchThreePoolStatsWindow('Last7d'),
           fetchThreePoolHealth(),
           fetchThreePoolTopLps(10n),
           fetchThreePoolTopSwappers('Last7d', 10n),
-          swapCount > 0n
-            ? fetchThreePoolSwapEventsV2(swapCount > 50n ? swapCount - 50n : 0n, swapCount > 50n ? 50n : swapCount)
-            : Promise.resolve([]),
-          liqCount > 0n ? fetch3PoolLiquidityEvents(liqCount > 30n ? 30n : liqCount, 0n) : Promise.resolve([]),
+          fetchThreePoolSwapEventsCombined(),
+          fetch3PoolLiquidityEventsCombined(),
           fetchThreePoolVolumeSeries('Last7d', 3600n),
           fetchThreePoolBalanceSeries('Last7d', 3600n),
           fetchThreePoolFeeSeries('Last7d', 3600n),
@@ -370,7 +420,12 @@
       // Cheap query, runs in parallel with the rest.
       fetchThreePoolStatus().then((s) => { status = s; }).catch(() => {});
 
-      // Seven-day window of swap events for the activity feed.
+      // Seven-day window of swap events for the activity feed. The AMM
+      // time-range endpoint iterates oldest-first and `take`s the first N
+      // matches, so the limit needs to comfortably exceed the expected
+      // weekly volume — otherwise high-volume pools would silently drop
+      // the most recent swaps. 1000 is generous at current activity levels
+      // (~10/wk) and well within the canister response budget.
       const now = BigInt(Date.now()) * 1_000_000n;
       const sevenDaysNs = 7n * 24n * 3_600n * 1_000_000_000n;
       const liqCount = await fetchAmmLiquidityEventCount().catch(() => 0n);
@@ -380,11 +435,10 @@
           fetchAmmPoolStats(poolIdParam, 'Week'),
           fetchAmmTopLps(poolIdParam, 10),
           fetchAmmTopSwappers(poolIdParam, 'Week', 10),
-          fetchAmmSwapEventsByTimeRange(poolIdParam, now - sevenDaysNs, now, 100n),
-          // Liquidity events aren't per-pool yet in the old endpoint; filter client-side.
-          liqCount > 0n
-            ? fetchAmmLiquidityEvents(liqCount > 200n ? liqCount - 200n : 0n, liqCount > 200n ? 200n : liqCount)
-            : Promise.resolve([]),
+          fetchAmmSwapEventsByTimeRange(poolIdParam, now - sevenDaysNs, now, 1000n),
+          // Liquidity events aren't per-pool in the old endpoint; pull the
+          // entire log so client-side filter sees every event for this pool.
+          liqCount > 0n ? fetchAmmLiquidityEvents(0n, liqCount) : Promise.resolve([]),
           fetchAmmVolumeSeries(poolIdParam, 'Week', 60),
           fetchAmmBalanceSeries(poolIdParam, 'Week', 60),
           fetchAmmFeeSeries(poolIdParam, 'Week', 60),
@@ -408,7 +462,13 @@
     }
   }
 
-  onMount(loadPool);
+  // Re-run on pool id change so navigating between sibling /e/pool/[id]
+  // routes (which reuse this component) refetches instead of sticking on the
+  // prior pool's data.
+  $effect(() => {
+    void poolIdParam;
+    loadPool();
+  });
 </script>
 
 <svelte:head>
@@ -762,6 +822,7 @@
             color="#a78bfa"
             fillColor="rgba(167, 139, 250, 0.12)"
             valueFormat={(v) => `$${v.toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
+            headlineValue={volPoints.reduce((s, p) => s + p.v, 0)}
           />
         </div>
         <div class="bg-gray-800/40 border border-gray-700/50 rounded-xl p-5">
@@ -771,6 +832,7 @@
             color="#34d399"
             fillColor="rgba(52, 211, 153, 0.12)"
             valueFormat={(v) => v.toFixed(6)}
+            yAxisMode="data-fit"
           />
         </div>
         <div class="bg-gray-800/40 border border-gray-700/50 rounded-xl p-5">
@@ -790,6 +852,7 @@
               color="#60a5fa"
               fillColor="rgba(96, 165, 250, 0.12)"
               valueFormat={(v) => v.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+              yAxisMode="data-fit"
             />
           </div>
         {/each}
@@ -798,11 +861,12 @@
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
         <div class="bg-gray-800/40 border border-gray-700/50 rounded-xl p-5">
           <MiniAreaChart
-            points={ammVolPoints}
+            points={ammVolPointsPadded}
             label={`Swap volume (7d, ${ammTokenA.symbol}+${ammTokenB.symbol} combined)`}
             color="#a78bfa"
             fillColor="rgba(167, 139, 250, 0.12)"
             valueFormat={(v) => v.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+            headlineValue={ammVolPointsPadded.reduce((s, p) => s + p.v, 0)}
           />
         </div>
         <div class="bg-gray-800/40 border border-gray-700/50 rounded-xl p-5">
@@ -812,6 +876,7 @@
             color="#fbbf24"
             fillColor="rgba(251, 191, 36, 0.12)"
             valueFormat={(v) => v.toLocaleString(undefined, { maximumFractionDigits: 4 })}
+            headlineValue={ammFeePoints.reduce((s, p) => s + p.v, 0)}
           />
         </div>
         <div class="bg-gray-800/40 border border-gray-700/50 rounded-xl p-5">
@@ -821,6 +886,7 @@
             color={ammTokenA.color}
             fillColor={`${ammTokenA.color}22`}
             valueFormat={(v) => v.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+            yAxisMode="data-fit"
           />
         </div>
         <div class="bg-gray-800/40 border border-gray-700/50 rounded-xl p-5">
@@ -830,6 +896,7 @@
             color={ammTokenB.color}
             fillColor={`${ammTokenB.color}22`}
             valueFormat={(v) => v.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+            yAxisMode="data-fit"
           />
         </div>
         {#if ammStats}

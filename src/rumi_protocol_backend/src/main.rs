@@ -694,15 +694,18 @@ fn get_fees(redeemed_amount: u64) -> Fees {
 
 #[candid_method(query)]
 #[query]
-fn get_vault_history(vault_id: u64) -> Vec<Event> {
+fn get_vault_history(vault_id: u64) -> Vec<(u64, Event)> {
     if ic_cdk::api::data_certificate().is_none() {
         ic_cdk::trap("update call rejected");
     }
 
-    let mut vault_events: Vec<Event> = vec![];
-    for event in events() {
+    // Iteration order matches the StableLog index, so enumerate() yields the
+    // global event-log index alongside each event. The explorer surfaces these
+    // ids on per-vault activity rows.
+    let mut vault_events: Vec<(u64, Event)> = vec![];
+    for (idx, event) in events().enumerate() {
         if event.is_vault_related(&vault_id) {
-            vault_events.push(event);
+            vault_events.push((idx as u64, event));
         }
     }
     vault_events
@@ -723,6 +726,27 @@ fn get_events(args: GetEventsArg) -> Vec<Event> {
 #[query]
 fn get_event_count() -> u64 {
     rumi_protocol_backend::storage::count_events()
+}
+
+/// Recording-time timestamp for `length` consecutive events starting at
+/// `start`. Slots past the end of the side log come back as `0`; the
+/// frontend uses these to fill in a real time on admin/upgrade rows whose
+/// event payloads have no inline `timestamp` field. Pre-existing events
+/// (recorded before this side log shipped) also surface as `0`.
+///
+/// Cap is high enough (80k) to cover the entire current event log in a
+/// single round-trip — at 8 bytes per nat64 that's a 640 KB response,
+/// well under the 2 MB IC reply limit. Without that headroom the
+/// frontend's mixed-feed admin scope (which spans tens of thousands of
+/// indices) misses every event past the first 2k of the requested range.
+#[candid_method(query)]
+#[query]
+fn get_event_timestamps(start: u64, length: u64) -> Vec<u64> {
+    if ic_cdk::api::data_certificate().is_none() {
+        ic_cdk::trap("update call rejected");
+    }
+    const MAX: u64 = 80_000;
+    rumi_protocol_backend::storage::get_event_timestamps(start, length.min(MAX))
 }
 
 /// Server-side filtered event query, paginated newest-first.
@@ -5115,14 +5139,21 @@ fn check_candid_interface_compatibility() {
 
     let new_interface = __export_service();
 
-    // check the public interface against the actual one
-    let old_interface =
-        std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("rumi_protocol_backend.did");
+    // Allow regenerating the .did from the live source: `RUMI_REGEN_DID=1
+    // cargo test ... check_candid_interface_compatibility`. Skips the equality
+    // assertion and writes the canonical interface back to the file instead.
+    let manifest_dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let did_path = manifest_dir.join("rumi_protocol_backend.did");
+    if std::env::var("RUMI_REGEN_DID").is_ok() {
+        std::fs::write(&did_path, &new_interface).expect("failed to write .did");
+        eprintln!("Regenerated {}", did_path.display());
+        return;
+    }
 
     check_service_compatible(
         "actual Rumi Protocol candid interface",
         CandidSource::Text(&new_interface),
         "declared candid interface in rumi_protocol_backend.did file",
-        CandidSource::File(old_interface.as_path()),
+        CandidSource::File(did_path.as_path()),
     );
 }

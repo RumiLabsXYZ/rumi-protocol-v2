@@ -28,6 +28,7 @@ export type FieldType =
   | 'timestamp'
   | 'json'
   | 'canister'
+  | 'pool'
   | 'block_index'
   | 'ratio';
 
@@ -153,7 +154,7 @@ export function formatAmmSwapEvent(event: any): FormattedEvent {
   const fields: EventField[] = [
     { label: 'Token In', value: `${amountIn} ${tokenInSym}`, type: 'amount' },
     { label: 'Token Out', value: `${amountOut} ${tokenOutSym}`, type: 'amount' },
-    { label: 'Pool', value: String(poolId), type: 'text' },
+    { label: 'Pool', value: String(poolId), type: 'pool', linkTarget: String(poolId) },
   ];
 
   if (tokenInPrincipal) fields.push({ label: 'Token In Ledger', value: shortenPrincipal(tokenInPrincipal), type: 'token', linkTarget: tokenInPrincipal });
@@ -195,7 +196,7 @@ export function formatAmmLiquidityEvent(event: any): FormattedEvent {
     { label: 'Token A', value: `${amtA} ${tokenA}`, type: 'amount' },
     { label: 'Token B', value: `${amtB} ${tokenB}`, type: 'amount' },
     { label: 'LP Shares', value: lpShares, type: 'amount' },
-    { label: 'Pool', value: String(poolId), type: 'text' },
+    { label: 'Pool', value: String(poolId), type: 'pool', linkTarget: String(poolId) },
   ];
 
   if (tokenAPrincipal) fields.push({ label: 'Token A Ledger', value: shortenPrincipal(tokenAPrincipal), type: 'token', linkTarget: tokenAPrincipal });
@@ -874,9 +875,12 @@ export function formatEvent(event: any, vaultCollateralMap?: Map<number, string>
     case 'withdraw_and_close_vault':
     case 'vault_withdrawn_and_closed':
     case 'VaultWithdrawnAndClosed': {
-      const sym = tokenSymbol(d.collateral_type ?? 'unknown');
+      const collType = vaultCollateral(d.vault_id);
+      const sym = tokenSymbol(collType);
+      const dec = tokenDecimals(collType);
       fields.push(vaultField(d.vault_id));
-      if (d.amount !== undefined) fields.push(amountField('Collateral Returned', d.amount, 8, sym || 'ICP'));
+      if (collType !== 'unknown') fields.push(tokenField(collType));
+      if (d.amount !== undefined) fields.push(amountField('Collateral Returned', d.amount, dec, sym));
       pushIfPresent(fields, addressField('Caller', d.caller));
       if (d.block_index !== undefined) fields.push(blockIndexField('Block Index', optValue(d.block_index)));
       const eventTs = optValue<any>(d.timestamp) ?? ts;
@@ -1160,13 +1164,56 @@ export function formatEvent(event: any, vaultCollateralMap?: Map<number, string>
       const amt = fmtE8s(d.icusd_amount);
       fields.push(amountField('icUSD Redeemed', d.icusd_amount));
       fields.push(amountField('Fee', d.fee_amount));
-      if (d.current_icp_rate !== undefined) {
-        fields.push(textField('ICP Rate', `$${Number(d.current_icp_rate).toFixed(4)}`));
-      }
+      // current_icp_rate is a candid blob (UsdIcp serialized), not a number —
+      // skip the field rather than render "$NaN" until it has a proper decoder.
       if (d.icusd_block_index !== undefined) fields.push(blockIndexField('icUSD Block Index', d.icusd_block_index));
       if (ts) fields.push(timestampField(ts));
+
+      // Per-vault breakdown: surface every vault touched by this redemption
+      // with the amount drained and the collateral seized. The same vault
+      // can appear multiple times when the redemption is iterative — collapse
+      // those into one row per vault so the list stays scannable.
+      //
+      // Labels must be unique because the event detail render uses
+      // `(field.label)` as the keyed-each key — duplicate labels would crash
+      // the page. Embed the vault id directly in the label.
+      if (vaultRedemptions && vaultRedemptions.length > 0) {
+        const ctPrincipalText = optPrincipalToText(d.collateral_type);
+        const collSym = ctPrincipalText ? getTokenSymbol(ctPrincipalText) : '';
+        const byVault = new Map<number, { redeemed: bigint; seized: bigint }>();
+        for (const vr of vaultRedemptions) {
+          const vid = Number(vr.vault_id);
+          const entry = byVault.get(vid) ?? { redeemed: 0n, seized: 0n };
+          entry.redeemed += BigInt(vr.icusd_redeemed_e8s ?? 0);
+          entry.seized += BigInt(vr.collateral_seized ?? 0);
+          byVault.set(vid, entry);
+        }
+        // Sort by largest redemption first so the most-impacted vaults lead.
+        const ordered = [...byVault.entries()].sort(
+          (a, b) => Number(b[1].redeemed - a[1].redeemed),
+        );
+        for (const [vid, agg] of ordered) {
+          const redeemedDisplay = fmtE8s(agg.redeemed);
+          const seizedDisplay = ctPrincipalText
+            ? formatTokenAmount(agg.seized, ctPrincipalText)
+            : (Number(agg.seized) / 1e8).toFixed(4);
+          // Single row per vault, label disambiguated by vault id, value
+          // shows the drain amounts. Linking through `linkTarget` so the
+          // detail page renders a clickable vault chip.
+          fields.push({
+            label: `Vault #${vid}`,
+            value: `${redeemedDisplay} icUSD → ${seizedDisplay}${collSym ? ` ${collSym}` : ''}`,
+            type: 'vault',
+            linkTarget: String(vid),
+          });
+        }
+      }
+
+      const summary = vaultRedemptions && vaultRedemptions.length > 0
+        ? `Redeemed ${amt} icUSD across ${new Set(vaultRedemptions.map((vr: any) => Number(vr.vault_id))).size} vault${new Set(vaultRedemptions.map((vr: any) => Number(vr.vault_id))).size === 1 ? '' : 's'} (fee: ${fee} icUSD)`
+        : `Redeemed ${amt} icUSD (fee: ${fee} icUSD)`;
       return {
-        summary: `Redeemed ${amt} icUSD (fee: ${fee} icUSD)`,
+        summary,
         typeName, category, badgeColor, fields,
       };
     }

@@ -1,11 +1,28 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
+  import { onMount } from 'svelte';
   import SearchBar from '$lib/components/explorer/SearchBar.svelte';
   import {
     isVaultId, isEventIndex, parseEventIndex, isPrincipal, resolveTokenAlias
   } from '$lib/utils/explorerHelpers';
+  import { setAmmPoolRegistry } from '$utils/ammNaming';
+  import { fetchAmmPools } from '$services/explorer/explorerService';
   import type { Snippet } from 'svelte';
+
+  // Seed the AMM pool registry once on layout mount so that every explorer
+  // sub-page (event detail, vault detail, address detail, etc.) can resolve
+  // AMM pool ids to "AMMn"-style labels — not just the lenses that fetch
+  // pools themselves. Failures are silent: pages will fall back to the
+  // shortened-principal pair until the registry catches up.
+  onMount(async () => {
+    try {
+      const pools = await fetchAmmPools();
+      if (Array.isArray(pools) && pools.length > 0) setAmmPoolRegistry(pools);
+    } catch (err) {
+      console.error('[explorer layout] AMM registry seed failed:', err);
+    }
+  });
 
   let { children }: { children: Snippet } = $props();
 

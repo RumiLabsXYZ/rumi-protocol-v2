@@ -16,6 +16,13 @@
     // Assumes positive values; data-fit padding multipliers behave unexpectedly
     // for negative inputs.
     yAxisMode?: 'zero-anchored' | 'data-fit';
+    /**
+     * Override the headline number rendered in the card title. Use for
+     * "daily activity" charts where each bucket is independent (count/fees per
+     * day) and the rightmost bucket alone is misleading — you'd rather show
+     * the sum across the visible window.
+     */
+    headlineValue?: number;
   }
   let {
     points,
@@ -27,6 +34,7 @@
     valueFormat,
     loading = false,
     yAxisMode = 'zero-anchored',
+    headlineValue,
   }: Props = $props();
 
   const padX = 8;
@@ -104,6 +112,7 @@
   });
 
   const latest = $derived(points.length ? points[points.length - 1].v : 0);
+  const headline = $derived(headlineValue ?? latest);
 </script>
 
 <div class="space-y-2">
@@ -112,7 +121,7 @@
       <span class="text-xs font-medium text-gray-400">{label}</span>
       {#if !loading && points.length}
         <span class="text-sm font-semibold tabular-nums" style="color: {color};">
-          {valueFormat ? valueFormat(latest) : latest.toLocaleString()}
+          {valueFormat ? valueFormat(headline) : headline.toLocaleString()}
         </span>
       {/if}
     </div>
@@ -151,7 +160,7 @@
         {:else}
           <path d={fillD} fill={fillColor} stroke="none" />
           <path d={pathD} fill="none" stroke={color} stroke-width="1.5" stroke-linejoin="round" />
-          {#each dotPoints as p (p.t)}
+          {#each dotPoints as p, i (`${p.t}-${i}`)}
             <circle cx={x(p.t).toFixed(2)} cy={y(p.v).toFixed(2)} r="3" fill={color} />
           {/each}
         {/if}

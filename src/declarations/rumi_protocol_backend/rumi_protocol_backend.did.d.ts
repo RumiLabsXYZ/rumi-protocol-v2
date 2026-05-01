@@ -940,6 +940,10 @@ export interface _SERVICE {
   >,
   'get_deposit_account' : ActorMethod<[[] | [Principal]], Account>,
   'get_event_count' : ActorMethod<[], bigint>,
+  'get_event_timestamps' : ActorMethod<
+    [bigint, bigint],
+    BigUint64Array | bigint[]
+  >,
   'get_events' : ActorMethod<[GetEventsArg], Array<Event>>,
   'get_events_by_principal' : ActorMethod<[Principal], Array<[bigint, Event]>>,
   'get_events_filtered' : ActorMethod<
@@ -990,7 +994,7 @@ export interface _SERVICE {
   'get_three_pool_canister' : ActorMethod<[], [] | [Principal]>,
   'get_treasury_principal' : ActorMethod<[], [] | [Principal]>,
   'get_treasury_stats' : ActorMethod<[], TreasuryStats>,
-  'get_vault_history' : ActorMethod<[bigint], Array<Event>>,
+  'get_vault_history' : ActorMethod<[bigint], Array<[bigint, Event]>>,
   'get_vault_interest_rate' : ActorMethod<[bigint], Result_7>,
   'get_vaults' : ActorMethod<[[] | [Principal]], Array<CandidVault>>,
   'http_request' : ActorMethod<[HttpRequest], HttpResponse_1>,

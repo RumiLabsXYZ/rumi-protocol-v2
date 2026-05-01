@@ -922,6 +922,11 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'get_event_count' : IDL.Func([], [IDL.Nat64], ['query']),
+    'get_event_timestamps' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [IDL.Vec(IDL.Nat64)],
+        ['query'],
+      ),
     'get_events' : IDL.Func([GetEventsArg], [IDL.Vec(Event)], ['query']),
     'get_events_by_principal' : IDL.Func(
         [IDL.Principal],
@@ -1007,7 +1012,11 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'get_treasury_stats' : IDL.Func([], [TreasuryStats], ['query']),
-    'get_vault_history' : IDL.Func([IDL.Nat64], [IDL.Vec(Event)], ['query']),
+    'get_vault_history' : IDL.Func(
+        [IDL.Nat64],
+        [IDL.Vec(IDL.Tuple(IDL.Nat64, Event))],
+        ['query'],
+      ),
     'get_vault_interest_rate' : IDL.Func([IDL.Nat64], [Result_7], ['query']),
     'get_vaults' : IDL.Func(
         [IDL.Opt(IDL.Principal)],

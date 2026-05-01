@@ -4,11 +4,12 @@
   import LensHealthStrip from '../LensHealthStrip.svelte';
   import LensActivityPanel from '../LensActivityPanel.svelte';
   import MiniAreaChart from '../MiniAreaChart.svelte';
-  import { fetchFeeSeries } from '$services/explorer/analyticsService';
+  import { fetchFeeSeries, fetchFeeBreakdownWindow } from '$services/explorer/analyticsService';
   import {
     fetchRedemptionRate, fetchRedemptionFeeFloor, fetchRedemptionFeeCeiling,
     fetchRedemptionTier, fetchCollateralTotals, fetchProtocolConfig, fetchProtocolStatus,
   } from '$services/explorer/explorerService';
+  import { publicActor } from '$lib/services/protocol/apiClient';
   import {
     e8sToNumber, formatCompact, CHART_COLORS, COLLATERAL_SYMBOLS, getCollateralSymbol,
   } from '$utils/explorerChartHelpers';
@@ -25,6 +26,21 @@
   let collateralTotals: any[] = $state([]);
   let tierMap: Map<string, number | null> = $state(new Map());
   let loading = $state(true);
+  // Live 90-day count + fee totals computed from the source-of-truth event
+  // logs (analytics for count, backend event log for fees) instead of from
+  // the daily rollup series. Rollups only see the trailing 24h at scrape time
+  // and don't backfill, so historical redemption events that pre-date a
+  // collector deploy never get a non-zero rollup row. The backend event log
+  // is authoritative for fees because some early AnalyticsVaultEvent rows
+  // were tailed before fee_amount was tracked and decode as None.
+  let live90dRedemptionCount: number | null = $state(null);
+  let live90dRedemptionFeesIcusd: number | null = $state(null);
+  // Daily-bucketed live redemption activity (count + fees) over the same 90d
+  // window. Populated alongside the headline numbers so the two chart cards
+  // ("Daily redemption count" / "Daily redemption fees") show real activity
+  // instead of the all-zeros rollup output.
+  let liveDailyCountPoints: { t: number; v: number }[] | null = $state(null);
+  let liveDailyFeePoints: { t: number; v: number }[] | null = $state(null);
 
   onMount(async () => {
     try {
@@ -68,20 +84,115 @@
     } finally {
       loading = false;
     }
+
+    // Live 90d redemption totals — fire after the main load so the UI is not
+    // blocked. Count comes from the analytics live query (cheap, single
+    // round-trip). Fees come from the backend event log filtered to
+    // Redemption type, summed client-side, because the AnalyticsVaultEvent
+    // rows for historical redemptions stored fee_amount=None and the rollup
+    // path therefore reports $0 even when there were real fees collected.
+    fetchFeeBreakdownWindow(90)
+      .then((b) => { live90dRedemptionCount = b.redemptionCount; })
+      .catch((err) => console.error('[RedemptionsLens] fee breakdown failed:', err));
+
+    (async () => {
+      try {
+        const nowMs = Date.now();
+        const cutoffMs = nowMs - 90 * 24 * 60 * 60 * 1000;
+        const cutoffNs = BigInt(cutoffMs) * 1_000_000n;
+        const DAY_MS = 86_400_000;
+        // Bucket day-keyed sums so the chart can render daily granularity even
+        // when the rollup table is all zeros (historic redemptions in the
+        // analytics canister have fee_amount=None so the daily rollup misses
+        // them; backend event log is authoritative).
+        const dayBucket = (tsMs: number) => Math.floor(tsMs / DAY_MS) * DAY_MS;
+        const countByDay = new Map<number, number>();
+        const feeByDay = new Map<number, number>();
+        let totalFee = 0n;
+        const PAGE = 200n;
+        let page = 0n;
+        // get_events_filtered returns newest-first; stop once we cross the 90d boundary.
+        while (true) {
+          const resp = await publicActor.get_events_filtered({
+            start: page,
+            length: PAGE,
+            types: [[{ Redemption: null }]],
+            principal: [],
+            collateral_token: [],
+            time_range: [],
+            min_size_e8s: [],
+            admin_labels: [],
+          });
+          // events: Array<[bigint, Event]>
+          const tuples = (resp as any)?.events ?? [];
+          if (tuples.length === 0) break;
+          let crossed = false;
+          for (const pair of tuples) {
+            const evt = Array.isArray(pair) ? pair[1] : (pair?.event ?? pair);
+            const et = (evt as any)?.event_type ?? evt;
+            const inner = et?.redemption_on_vaults;
+            if (!inner) continue;
+            const tsArr = inner.timestamp;
+            const ts = Array.isArray(tsArr) ? tsArr[0] : tsArr;
+            if (ts != null && BigInt(ts) < cutoffNs) {
+              crossed = true;
+              break;
+            }
+            const fee = inner.fee_amount;
+            if (fee != null) totalFee += BigInt(fee);
+            const tsMs = ts != null ? Number(BigInt(ts) / 1_000_000n) : nowMs;
+            const bucket = dayBucket(tsMs);
+            countByDay.set(bucket, (countByDay.get(bucket) ?? 0) + 1);
+            if (fee != null) {
+              feeByDay.set(bucket, (feeByDay.get(bucket) ?? 0) + Number(fee) / 1e8);
+            }
+          }
+          if (crossed || tuples.length < Number(PAGE)) break;
+          page += 1n;
+        }
+        live90dRedemptionFeesIcusd = Number(totalFee) / 1e8;
+
+        // Pad zero-buckets across the full 90d window so the chart renders a
+        // proper daily bar series instead of just the active days.
+        const startBucket = dayBucket(cutoffMs);
+        const endBucket = dayBucket(nowMs);
+        const cPts: { t: number; v: number }[] = [];
+        const fPts: { t: number; v: number }[] = [];
+        for (let t = startBucket; t <= endBucket; t += DAY_MS) {
+          cPts.push({ t, v: countByDay.get(t) ?? 0 });
+          fPts.push({ t, v: feeByDay.get(t) ?? 0 });
+        }
+        liveDailyCountPoints = cPts;
+        liveDailyFeePoints = fPts;
+      } catch (err) {
+        console.error('[RedemptionsLens] backend redemption fee scan failed:', err);
+      }
+    })();
   });
 
-  const redemptions90d = $derived(feeRows.reduce((s, d: any) => s + Number(d.redemption_count ?? 0), 0));
-  const redemptionFees90d = $derived(
+  // Prefer the live total when it has resolved; fall back to the rollup sum
+  // until the live query lands so the card never shows a stale 0 longer than
+  // necessary.
+  const rollupRedemptions90d = $derived(feeRows.reduce((s, d: any) => s + Number(d.redemption_count ?? 0), 0));
+  const rollupRedemptionFees90d = $derived(
     feeRows.reduce((s, d: any) => s + e8sToNumber(d.redemption_fees_e8s?.[0] ?? d.redemption_fees_e8s ?? 0n), 0)
   );
+  const redemptions90d = $derived(live90dRedemptionCount ?? rollupRedemptions90d);
+  const redemptionFees90d = $derived(live90dRedemptionFeesIcusd ?? rollupRedemptionFees90d);
+  // Use live-scan daily buckets when they've resolved (real activity); fall
+  // back to the rollup-derived points only as a placeholder until then. The
+  // rollup table is all-zeros for redemptions today (see headline-numbers
+  // comment above) so the live points are usually authoritative.
   const redemptionCountPoints = $derived(
-    feeRows.map((r: any) => ({ t: Number(r.timestamp_ns) / 1_000_000, v: Number(r.redemption_count ?? 0) }))
+    liveDailyCountPoints
+      ?? feeRows.map((r: any) => ({ t: Number(r.timestamp_ns) / 1_000_000, v: Number(r.redemption_count ?? 0) }))
   );
   const redemptionFeePoints = $derived(
-    feeRows.map((r: any) => ({
-      t: Number(r.timestamp_ns) / 1_000_000,
-      v: e8sToNumber(r.redemption_fees_e8s?.[0] ?? r.redemption_fees_e8s ?? 0n),
-    }))
+    liveDailyFeePoints
+      ?? feeRows.map((r: any) => ({
+        t: Number(r.timestamp_ns) / 1_000_000,
+        v: e8sToNumber(r.redemption_fees_e8s?.[0] ?? r.redemption_fees_e8s ?? 0n),
+      }))
   );
 
   const formatPct = (v: number | null) =>
@@ -173,6 +284,7 @@
       color={CHART_COLORS.teal}
       fillColor={CHART_COLORS.tealDim}
       valueFormat={(v) => v.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+      headlineValue={redemptions90d}
       loading={loading}
     />
   </div>
@@ -183,6 +295,7 @@
       color={CHART_COLORS.purple}
       fillColor={CHART_COLORS.purpleDim}
       valueFormat={(v) => `$${formatCompact(v)}`}
+      headlineValue={redemptionFees90d}
       loading={loading}
     />
   </div>

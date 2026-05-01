@@ -1,6 +1,8 @@
 <script lang="ts">
   import { shortenPrincipal, getTokenSymbol } from '$utils/explorerHelpers';
   import { typeFacetLabel, hasAnyFacet, type Facets } from '$utils/eventFacets';
+  import { ammPoolLabel } from '$utils/ammNaming';
+  import { CANISTER_IDS } from '$lib/config';
 
   interface Props {
     facets: Facets;
@@ -10,6 +12,21 @@
   }
 
   let { facets, onChange, onClear, onSaveView }: Props = $props();
+
+  // Friendly label for a pool facet value: "Rumi 3Pool" for the literal
+  // 3pool token and "AMM1 · 3USD/ICP" for AMM pools (resolved through the
+  // shared registry that DexsLens seeds at load time). Falls back to a
+  // shortened principal pair for anything still unknown.
+  function poolChipLabel(id: string): string {
+    if (id === '3pool' || id === CANISTER_IDS.THREEPOOL) return 'Rumi 3Pool';
+    const friendly = ammPoolLabel(id);
+    if (friendly && friendly !== 'AMM' && friendly !== id) return friendly;
+    // Last-resort: split principal pair on `_` and shorten each side
+    if (id.includes('_')) {
+      return id.split('_').map(shortenPrincipal).join(' / ');
+    }
+    return shortenPrincipal(id);
+  }
 
   const anyActive = $derived(hasAnyFacet(facets));
 
@@ -73,8 +90,8 @@
     {/each}
 
     {#each facets.pools as id (id)}
-      <span class="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
-        <span>pool:{id}</span>
+      <span class="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30" title={`pool:${id}`}>
+        <span>pool:{poolChipLabel(id)}</span>
         <button type="button" aria-label="Remove pool" class="text-cyan-200 hover:text-white" onclick={() => removePool(id)}>×</button>
       </span>
     {/each}
