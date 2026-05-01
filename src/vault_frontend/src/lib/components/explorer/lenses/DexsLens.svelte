@@ -141,7 +141,8 @@
         if (!tok) continue;
         total += Number(p.volume_per_token[i]) / Math.pow(10, tok.decimals);
       }
-      return { t: Number(p.timestamp) * 1000, v: total };
+      // p.timestamp is in nanoseconds; the chart works in ms.
+      return { t: Number(p.timestamp) / 1_000_000, v: total };
     });
     valued.sort((a, b) => a.t - b.t);
     const BUCKET_MS = 3_600_000; // matches the 3600s bucketSecs above
@@ -330,6 +331,7 @@
       color={CHART_COLORS.teal}
       fillColor={CHART_COLORS.tealDim}
       valueFormat={(v) => `$${formatCompact(v)}`}
+      headlineValue={volumePoints.reduce((s, p) => s + p.v, 0)}
       loading={loading}
     />
   </div>
@@ -343,6 +345,7 @@
       color={CHART_COLORS.purple}
       fillColor={CHART_COLORS.purpleDim}
       valueFormat={(v) => `$${formatCompact(v)}`}
+      headlineValue={swapSeriesPoints.reduce((s, p) => s + p.v, 0)}
       loading={loading}
     />
   </div>

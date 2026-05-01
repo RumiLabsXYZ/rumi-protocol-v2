@@ -35,6 +35,12 @@
   // were tailed before fee_amount was tracked and decode as None.
   let live90dRedemptionCount: number | null = $state(null);
   let live90dRedemptionFeesIcusd: number | null = $state(null);
+  // Daily-bucketed live redemption activity (count + fees) over the same 90d
+  // window. Populated alongside the headline numbers so the two chart cards
+  // ("Daily redemption count" / "Daily redemption fees") show real activity
+  // instead of the all-zeros rollup output.
+  let liveDailyCountPoints: { t: number; v: number }[] | null = $state(null);
+  let liveDailyFeePoints: { t: number; v: number }[] | null = $state(null);
 
   onMount(async () => {
     try {
@@ -91,8 +97,18 @@
 
     (async () => {
       try {
-        const cutoffNs = BigInt(Date.now() - 90 * 24 * 60 * 60 * 1000) * 1_000_000n;
-        let total = 0n;
+        const nowMs = Date.now();
+        const cutoffMs = nowMs - 90 * 24 * 60 * 60 * 1000;
+        const cutoffNs = BigInt(cutoffMs) * 1_000_000n;
+        const DAY_MS = 86_400_000;
+        // Bucket day-keyed sums so the chart can render daily granularity even
+        // when the rollup table is all zeros (historic redemptions in the
+        // analytics canister have fee_amount=None so the daily rollup misses
+        // them; backend event log is authoritative).
+        const dayBucket = (tsMs: number) => Math.floor(tsMs / DAY_MS) * DAY_MS;
+        const countByDay = new Map<number, number>();
+        const feeByDay = new Map<number, number>();
+        let totalFee = 0n;
         const PAGE = 200n;
         let page = 0n;
         // get_events_filtered returns newest-first; stop once we cross the 90d boundary.
@@ -123,12 +139,31 @@
               break;
             }
             const fee = inner.fee_amount;
-            if (fee != null) total += BigInt(fee);
+            if (fee != null) totalFee += BigInt(fee);
+            const tsMs = ts != null ? Number(BigInt(ts) / 1_000_000n) : nowMs;
+            const bucket = dayBucket(tsMs);
+            countByDay.set(bucket, (countByDay.get(bucket) ?? 0) + 1);
+            if (fee != null) {
+              feeByDay.set(bucket, (feeByDay.get(bucket) ?? 0) + Number(fee) / 1e8);
+            }
           }
           if (crossed || tuples.length < Number(PAGE)) break;
           page += 1n;
         }
-        live90dRedemptionFeesIcusd = Number(total) / 1e8;
+        live90dRedemptionFeesIcusd = Number(totalFee) / 1e8;
+
+        // Pad zero-buckets across the full 90d window so the chart renders a
+        // proper daily bar series instead of just the active days.
+        const startBucket = dayBucket(cutoffMs);
+        const endBucket = dayBucket(nowMs);
+        const cPts: { t: number; v: number }[] = [];
+        const fPts: { t: number; v: number }[] = [];
+        for (let t = startBucket; t <= endBucket; t += DAY_MS) {
+          cPts.push({ t, v: countByDay.get(t) ?? 0 });
+          fPts.push({ t, v: feeByDay.get(t) ?? 0 });
+        }
+        liveDailyCountPoints = cPts;
+        liveDailyFeePoints = fPts;
       } catch (err) {
         console.error('[RedemptionsLens] backend redemption fee scan failed:', err);
       }
@@ -144,14 +179,20 @@
   );
   const redemptions90d = $derived(live90dRedemptionCount ?? rollupRedemptions90d);
   const redemptionFees90d = $derived(live90dRedemptionFeesIcusd ?? rollupRedemptionFees90d);
+  // Use live-scan daily buckets when they've resolved (real activity); fall
+  // back to the rollup-derived points only as a placeholder until then. The
+  // rollup table is all-zeros for redemptions today (see headline-numbers
+  // comment above) so the live points are usually authoritative.
   const redemptionCountPoints = $derived(
-    feeRows.map((r: any) => ({ t: Number(r.timestamp_ns) / 1_000_000, v: Number(r.redemption_count ?? 0) }))
+    liveDailyCountPoints
+      ?? feeRows.map((r: any) => ({ t: Number(r.timestamp_ns) / 1_000_000, v: Number(r.redemption_count ?? 0) }))
   );
   const redemptionFeePoints = $derived(
-    feeRows.map((r: any) => ({
-      t: Number(r.timestamp_ns) / 1_000_000,
-      v: e8sToNumber(r.redemption_fees_e8s?.[0] ?? r.redemption_fees_e8s ?? 0n),
-    }))
+    liveDailyFeePoints
+      ?? feeRows.map((r: any) => ({
+        t: Number(r.timestamp_ns) / 1_000_000,
+        v: e8sToNumber(r.redemption_fees_e8s?.[0] ?? r.redemption_fees_e8s ?? 0n),
+      }))
   );
 
   const formatPct = (v: number | null) =>
@@ -243,6 +284,7 @@
       color={CHART_COLORS.teal}
       fillColor={CHART_COLORS.tealDim}
       valueFormat={(v) => v.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+      headlineValue={redemptions90d}
       loading={loading}
     />
   </div>
@@ -253,6 +295,7 @@
       color={CHART_COLORS.purple}
       fillColor={CHART_COLORS.purpleDim}
       valueFormat={(v) => `$${formatCompact(v)}`}
+      headlineValue={redemptionFees90d}
       loading={loading}
     />
   </div>

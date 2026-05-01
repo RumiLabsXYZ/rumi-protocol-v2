@@ -119,6 +119,7 @@
       color={CHART_COLORS.teal}
       fillColor={CHART_COLORS.tealDim}
       valueFormat={(v) => `$${formatCompact(v)}`}
+      yAxisMode="data-fit"
       loading={loading}
     />
   </div>
@@ -129,6 +130,7 @@
       color={CHART_COLORS.danger}
       fillColor="rgba(224, 107, 159, 0.15)"
       valueFormat={(v) => v.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+      yAxisMode="data-fit"
       loading={loading}
     />
   </div>

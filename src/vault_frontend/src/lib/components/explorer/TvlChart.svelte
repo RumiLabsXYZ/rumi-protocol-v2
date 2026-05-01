@@ -4,10 +4,16 @@
     filterByTimeRange, computeYScale,
     CHART_COLORS, TIME_RANGES, type TimeRange
   } from '$utils/explorerChartHelpers';
-  import type { DailyTvlRow } from '$declarations/rumi_analytics/rumi_analytics.did';
+  import type { DailyVaultSnapshotRow } from '$declarations/rumi_analytics/rumi_analytics.did';
 
   interface Props {
-    data: DailyTvlRow[];
+    /**
+     * Vault series rows. Used because they expose `total_collateral_usd_e8s`
+     * (sum across every collateral type, priced via the per-row snapshot)
+     * and `total_debt_e8s`. The legacy `DailyTvlRow` only carried
+     * `total_icp_collateral_e8s` — ICP-only and in raw ICP units, not USD.
+     */
+    data: DailyVaultSnapshotRow[];
     loading?: boolean;
   }
   let { data, loading = false }: Props = $props();
@@ -21,11 +27,24 @@
 
   const filtered = $derived(filterByTimeRange(data, selectedRange));
 
+  // Drop snapshot rows where `total_collateral_usd_e8s` saturated to u64::MAX —
+  // a known pre-PR-#142 bug that left at least one row stamped with the
+  // sentinel value (~$184B in USD when divided by e8s). Without this filter
+  // the y-axis blows up and crushes every legitimate sample to baseline.
+  const SATURATED_U64 = 18_446_744_073_709_551_615n;
+  const cleaned = $derived(
+    filtered.filter((row) => BigInt(row.total_collateral_usd_e8s) !== SATURATED_U64),
+  );
+
   const points = $derived(
-    filtered.map(row => ({
+    cleaned.map(row => ({
       x: Number(row.timestamp_ns),
-      collateral: e8sToNumber(row.total_icp_collateral_e8s),
-      debt: e8sToNumber(row.total_icusd_supply_e8s),
+      // total_collateral_usd_e8s already sums every collateral type (ICP, BOB,
+      // ckBTC, ckETH, nICP, …) priced in USD at the snapshot's spot rate, so
+      // the line shows the protocol's true collateral footprint instead of the
+      // ICP-only raw-units approximation.
+      collateral: e8sToNumber(row.total_collateral_usd_e8s),
+      debt: e8sToNumber(row.total_debt_e8s),
     }))
   );
 
@@ -141,7 +160,7 @@
     <div class="flex items-center gap-4 mt-2 ml-[60px]">
       <div class="flex items-center gap-1.5">
         <div class="w-3 h-0.5 rounded" style="background: {CHART_COLORS.teal}"></div>
-        <span class="text-xs text-gray-500">Collateral (ICP)</span>
+        <span class="text-xs text-gray-500">Collateral (USD)</span>
       </div>
       <div class="flex items-center gap-1.5">
         <div class="w-3 h-0.5 rounded border-b border-dashed" style="border-color: {CHART_COLORS.purple}"></div>
