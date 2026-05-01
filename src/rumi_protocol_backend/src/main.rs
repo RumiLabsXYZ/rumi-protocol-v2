@@ -2147,17 +2147,44 @@ async fn bot_cancel_liquidation(vault_id: u64) -> Result<(), ProtocolError> {
         },),
     ).await;
 
-    match balance_result {
-        Ok((balance,)) => {
-            let balance_u64 = balance.0.to_u64().unwrap_or(0);
-            log!(INFO, "[bot_cancel_liquidation] Backend collateral balance: {} (type {})",
-                balance_u64, claim.collateral_type);
-        }
+    // Wave-12 BOT-001b: gate the explicit cancel on the protocol's collateral
+    // balance having returned to (>=) `claim.collateral_amount - ledger_fee`.
+    // Mirrors the Wave-11 BOT-001 auto-cancel gate in `lib.rs::check_vaults`.
+    // Unlike the auto-cancel (which skips and emits a reconciliation event so
+    // operators can intervene), the explicit cancel rejects: the caller is
+    // the bot itself, so forcing the bot to retry its collateral transfer or
+    // escalate to `admin_resolve_stuck_claim` is the right escape hatch.
+    let observed = match balance_result {
+        Ok((bal,)) => bal.0.to_u64().unwrap_or(0),
         Err((code, msg)) => {
-            log!(INFO, "[bot_cancel_liquidation] WARNING: Could not verify collateral return: {:?} {}",
-                code, msg);
+            log!(INFO, "[BOT-001b] balance query failed for vault #{}: {:?} {}",
+                vault_id, code, msg);
+            return Err(ProtocolError::TemporarilyUnavailable(format!(
+                "Could not verify collateral return for vault #{}: {:?} {}. Retry once the ledger is available.",
+                vault_id, code, msg
+            )));
         }
+    };
+
+    let required = read_state(|s| {
+        let fee = s
+            .get_collateral_config(&claim.collateral_type)
+            .map(|c| c.ledger_fee)
+            .unwrap_or(0);
+        claim.collateral_amount.saturating_sub(fee)
+    });
+
+    if observed < required {
+        log!(INFO, "[BOT-001b] cancel rejected for vault #{}: balance {} < required {} (collateral_amount {})",
+            vault_id, observed, required, claim.collateral_amount);
+        return Err(ProtocolError::GenericError(format!(
+            "Cannot cancel claim for vault #{}: protocol collateral balance {} < required {} (bot must return collateral first; if permanently lost, use admin_resolve_stuck_claim)",
+            vault_id, observed, required
+        )));
     }
+
+    log!(INFO, "[BOT-001b] balance check passed for vault #{}: balance {} >= required {}",
+        vault_id, observed, required);
 
     mutate_state(|s| {
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
