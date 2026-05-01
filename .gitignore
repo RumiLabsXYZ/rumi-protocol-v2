@@ -45,3 +45,10 @@ pocket-ic
 technical-analysis/
 xrc_demo/
 .playwright-mcp/
+
+# Security: audit reports stay local (repo is PUBLIC)
+audit-reports/
+
+# Local design/spec/planning notes (whitepaper and existing tracked docs in this folder
+# stay tracked; this only blocks new untracked additions from being committed)
+docs/
