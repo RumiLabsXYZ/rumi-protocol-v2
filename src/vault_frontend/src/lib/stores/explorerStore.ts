@@ -199,19 +199,31 @@ export async function fetchPoolEvents() {
 			console.error('Failed to fetch SP liquidations:', e);
 		}
 
-		// 3Pool: swap events
+		// 3Pool: swap events. swap_v1 is frozen at migration but still holds
+		// most of the historical activity, so read both logs and merge.
 		try {
-			const swapCount = await threePoolService.getSwapEventCount();
-			if (swapCount > 0n) {
-				const fetchCount = 200n;
-				const start = swapCount > fetchCount ? swapCount - fetchCount : 0n;
-				const swapEvents = await threePoolService.getSwapEvents(start, fetchCount);
-				for (const evt of swapEvents) {
+			const [v2Events, v1Count] = await Promise.all([
+				threePoolService.getSwapEventsV2(200n, 0n),
+				threePoolService.getSwapEventCount().catch(() => 0n),
+			]);
+			for (const evt of v2Events) {
+				results.push({
+					source: '3pool_swap',
+					timestamp: evt.timestamp,
+					event: evt,
+					globalIndex: Number(evt.id),
+				});
+			}
+			if (Number(v1Count) > 0) {
+				const v1Events = await threePoolService.getSwapEvents(0n, v1Count);
+				for (const evt of v1Events) {
 					results.push({
 						source: '3pool_swap',
 						timestamp: evt.timestamp,
 						event: evt,
-						globalIndex: Number(evt.id),
+						// Offset legacy IDs into a non-overlapping band so the
+						// pool-events store key stays unique across v1+v2.
+						globalIndex: Number(evt.id) + 1_000_000,
 					});
 				}
 			}

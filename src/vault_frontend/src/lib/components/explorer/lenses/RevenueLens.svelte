@@ -159,6 +159,7 @@
     color={CHART_COLORS.action}
     fillColor="rgba(52, 211, 153, 0.15)"
     valueFormat={(v) => `$${formatCompact(v)}`}
+    headlineValue={feePoints.reduce((s, p) => s + p.v, 0)}
     height={180}
     loading={loading}
   />

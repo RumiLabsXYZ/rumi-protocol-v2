@@ -137,3 +137,67 @@ export function computeYScale(values: number[]): { min: number; max: number; tic
   const ticks = Array.from({ length: 5 }, (_, i) => min + step * i);
   return { min, max, ticks };
 }
+
+/**
+ * Pad a sparse "flow" series (volume, fees, counts per bucket) to the full
+ * window by inserting zero buckets where the source has no data. Without
+ * this, a single non-zero bucket renders as a straight line between two
+ * disconnected points instead of a clear spike against a zero baseline.
+ *
+ * `points` timestamps must be in milliseconds. Returns ms-keyed buckets.
+ */
+export function padZeroBuckets(
+  points: { t: number; v: number }[],
+  windowMs: number,
+  bucketMs: number,
+): { t: number; v: number }[] {
+  const valueAt = new Map<number, number>();
+  for (const p of points) {
+    const bucket = Math.floor(p.t / bucketMs) * bucketMs;
+    valueAt.set(bucket, (valueAt.get(bucket) ?? 0) + p.v);
+  }
+  const nowMs = Date.now();
+  const startMs = Math.floor((nowMs - windowMs) / bucketMs) * bucketMs;
+  const endMs = Math.floor(nowMs / bucketMs) * bucketMs;
+  const out: { t: number; v: number }[] = [];
+  for (let t = startMs; t <= endMs; t += bucketMs) {
+    out.push({ t, v: valueAt.get(t) ?? 0 });
+  }
+  return out;
+}
+
+/**
+ * Pad a sparse snapshot series (balances, prices, virtual price) to the full
+ * window by forward-filling the most recent known value into each bucket.
+ * Buckets before the first observed value use `defaultValue` (which can be
+ * the current live value, so a bare 1-point series still shows the level).
+ *
+ * `points` timestamps must be in milliseconds.
+ */
+export function padForwardFill(
+  points: { t: number; v: number }[],
+  windowMs: number,
+  bucketMs: number,
+  defaultValue: number,
+): { t: number; v: number }[] {
+  const sorted = [...points].sort((a, b) => a.t - b.t);
+  const valueAt = new Map<number, number>();
+  for (const p of sorted) {
+    const bucket = Math.floor(p.t / bucketMs) * bucketMs;
+    valueAt.set(bucket, p.v);
+  }
+  const nowMs = Date.now();
+  const startMs = Math.floor((nowMs - windowMs) / bucketMs) * bucketMs;
+  const endMs = Math.floor(nowMs / bucketMs) * bucketMs;
+  // Seed forward-fill with the most recent known value before the window.
+  let lastValue = defaultValue;
+  for (const p of sorted) {
+    if (p.t < startMs) lastValue = p.v;
+  }
+  const out: { t: number; v: number }[] = [];
+  for (let t = startMs; t <= endMs; t += bucketMs) {
+    if (valueAt.has(t)) lastValue = valueAt.get(t) as number;
+    out.push({ t, v: lastValue });
+  }
+  return out;
+}

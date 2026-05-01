@@ -10,11 +10,11 @@
 	import ErrorState from '$components/explorer/ErrorState.svelte';
 	import {
 		fetchEvents,
-		fetchSwapEvents, fetchSwapEventCount,
+		fetchThreePoolSwapEventsCombined,
+		fetch3PoolLiquidityEventsCombined,
 		fetchAmmSwapEvents, fetchAmmSwapEventCount,
 		fetchAmmLiquidityEvents, fetchAmmLiquidityEventCount,
 		fetchAmmAdminEvents, fetchAmmAdminEventCount,
-		fetch3PoolLiquidityEvents, fetch3PoolLiquidityEventCount,
 		fetch3PoolAdminEvents, fetch3PoolAdminEventCount,
 		fetchStabilityPoolEvents, fetchStabilityPoolEventCount,
 		fetch3PoolSwapEventsByPrincipal,
@@ -43,7 +43,7 @@
 		toggleAdminLabel,
 		type Facets,
 	} from '$utils/eventFacets';
-	import { setAmmPoolRegistry } from '$utils/ammNaming';
+	import { setAmmPoolRegistry, ammPoolLabel } from '$utils/ammNaming';
 	import { fetchAdminEventBreakdown } from '$services/explorer/analyticsService';
 	import type { AdminEventLabelCount } from '$declarations/rumi_analytics/rumi_analytics.did';
 
@@ -416,16 +416,17 @@
 			const poolSet = new Set<string>();
 			for (const p of knownAmmPools) poolSet.add(p.pool_id);
 			poolSet.add('3pool');
+			// Build friendly labels for the pool dropdown — use the shared AMM
+			// registry so each pool reads as "AMM1 · 3USD/ICP" instead of leaking
+			// the canister principal pair into the chip / dropdown UI.
 			poolOptions = [...poolSet]
 				.map((id) => {
 					if (id === '3pool') return { id, label: 'Rumi 3Pool' };
 					const pool = knownAmmPools.find((p: any) => p.pool_id === id);
 					if (pool) {
-						const a = getTokenSymbol(pool.token_a?.toText?.() ?? '');
-						const b = getTokenSymbol(pool.token_b?.toText?.() ?? '');
-						return { id, label: `AMM · ${a}/${b} (${id})` };
+						return { id, label: ammPoolLabel(id, pool.token_a, pool.token_b) };
 					}
-					return { id, label: id };
+					return { id, label: ammPoolLabel(id) };
 				})
 				.sort((a, b) => a.label.localeCompare(b.label));
 
@@ -493,16 +494,14 @@
 		}
 
 		// time-only or tail: full fetch + client-side post-filter handles
-		// time narrowing. (3pool has a swap_by_time_range endpoint but no
-		// liquidity equivalent — keeping the dispatch symmetric.)
-		const [swapCount, liqCount, adminCount] = await Promise.all([
-			fetchSwapEventCount(),
-			fetch3PoolLiquidityEventCount(),
-			fetch3PoolAdminEventCount(),
-		]);
+		// time narrowing. Swaps and liquidity both come from combined v1+v2
+		// readers so frozen pre-migration history is visible alongside live
+		// writes. (3pool has a swap_by_time_range endpoint but no liquidity
+		// equivalent — keeping the dispatch symmetric.)
+		const adminCount = await fetch3PoolAdminEventCount();
 		const [swaps, liquidity, admin] = await Promise.all([
-			Number(swapCount) > 0 ? fetchSwapEvents(0n, swapCount) : Promise.resolve([]),
-			Number(liqCount) > 0 ? fetch3PoolLiquidityEvents(liqCount, 0n) : Promise.resolve([]),
+			fetchThreePoolSwapEventsCombined(),
+			fetch3PoolLiquidityEventsCombined(),
 			Number(adminCount) > 0 ? fetch3PoolAdminEvents(0n, adminCount) : Promise.resolve([]),
 		]);
 		return { swaps, liquidity, admin };
