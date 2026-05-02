@@ -1,0 +1,16 @@
+canisters:
+  - name: explorer_bff
+    recipe:
+      type: "@dfinity/motoko@v4.1.0"
+      configuration:
+        main: canisters/explorer_bff/src/main.mo
+        candid: canisters/explorer_bff/explorer_bff.did
+
+  - name: explorer_assets
+    recipe:
+      type: "@dfinity/asset-canister@v2.1.0"
+      configuration:
+        dir: frontend/dist
+        build:
+          - npm install
+          - npm run build --workspace=frontend
