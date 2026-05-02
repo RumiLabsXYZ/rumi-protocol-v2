@@ -616,6 +616,7 @@ type ProtocolStatus = record {
   interest_pool_share : float64;
   total_icusd_borrowed : nat64;
   min_icusd_amount : nat64;
+  snapshot_ts_ns : nat64;
   total_collateral_ratio : float64;
   deficit_repayment_fraction : float64;
   ckstable_repay_fee : float64;
@@ -722,6 +723,7 @@ type TransformArgs = record { context : blob; response : HttpResponse };
 type TreasuryStats = record {
   pending_treasury_collateral_entries : nat64;
   liquidation_protocol_share : float64;
+  snapshot_ts_ns : nat64;
   interest_flush_threshold_e8s : nat64;
   pending_treasury_interest : nat64;
   treasury_principal : opt principal;

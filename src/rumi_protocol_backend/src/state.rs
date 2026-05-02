@@ -1049,6 +1049,77 @@ pub struct State {
     /// pushes; manual liquidation endpoints are unaffected.
     #[serde(default)]
     pub liquidation_breaker_tripped: bool,
+
+    // ─── Wave-9b DOS-006/-007: aggregate query snapshots ───
+    //
+    // `get_protocol_status` and `get_treasury_stats` aggregate over
+    // every vault on every call. Per-call cost grows linearly with
+    // vault count; the explorer polls both at high frequency. The
+    // snapshots cache the heavy fields and are refreshed in the
+    // existing 5-minute XRC tick (which already iterates every vault),
+    // so the cache stays warm without a new timer. The 5-second TTL on
+    // the read path covers cold start / first-call-after-upgrade.
+    //
+    // `serde(default)`: pre-Wave-9b snapshots decode `None`, the next
+    // query recomputes and the result is cached.
+
+    /// Wave-9b DOS-006: cached `get_protocol_status` heavy aggregates
+    /// with the nanosecond timestamp at which they were computed.
+    #[serde(default)]
+    pub protocol_status_snapshot: Option<(u64, ProtocolStatusSnapshot)>,
+
+    /// Wave-9b DOS-007: cached `get_treasury_stats` heavy aggregates
+    /// with the nanosecond timestamp at which they were computed.
+    #[serde(default)]
+    pub treasury_stats_snapshot: Option<(u64, TreasuryStatsSnapshot)>,
+}
+
+/// Wave-9b DOS-006: heavy aggregates served from cache for
+/// `get_protocol_status`. Live fields (mode, frozen,
+/// last_icp_rate / last_icp_timestamp, manual_mode_override,
+/// liquidation_breaker_tripped, windowed_liquidation_total_e8s,
+/// protocol_deficit_icusd, total_deficit_repaid_icusd, etc.) are NOT
+/// stored here — `main.rs::get_protocol_status` reads them fresh on
+/// every call and merges with the cached fields below.
+#[derive(Clone, Debug, Serialize, serde::Deserialize, Default)]
+pub struct ProtocolStatusSnapshot {
+    pub total_icp_margin: u64,
+    pub total_icusd_borrowed: u64,
+    pub weighted_average_interest_rate: f64,
+    pub per_collateral_interest: Vec<PerCollateralInterestSnap>,
+    pub per_collateral_rate_curves: Vec<PerCollateralRateCurveSnap>,
+    pub borrowing_fee_curve_resolved: Vec<(f64, f64)>,
+}
+
+/// Wave-9b DOS-006: snapshot mirror of `lib.rs::CollateralInterestInfo`.
+/// Lives in `state.rs` so the snapshot can derive `Serialize` /
+/// `Deserialize` for stable persistence (the candid-side struct only
+/// needs `CandidType + Deserialize`). No `Default` derive because
+/// `Principal` does not implement `Default` — these are only ever
+/// constructed by `compute_protocol_status_snapshot` from real
+/// collateral configs.
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+pub struct PerCollateralInterestSnap {
+    pub collateral_type: Principal,
+    pub total_debt_e8s: u64,
+    pub weighted_interest_rate: f64,
+}
+
+/// Wave-9b DOS-006: snapshot mirror of `lib.rs::PerCollateralRateCurve`.
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+pub struct PerCollateralRateCurveSnap {
+    pub collateral_type: Principal,
+    pub base_rate: f64,
+    pub markers: Vec<(f64, f64)>,
+}
+
+/// Wave-9b DOS-007: heavy aggregate served from cache for
+/// `get_treasury_stats`. Only one field today (
+/// `total_accrued_interest_system`) iterates every vault; the rest are
+/// O(1) or O(small) and read fresh.
+#[derive(Clone, Debug, Serialize, serde::Deserialize, Default)]
+pub struct TreasuryStatsSnapshot {
+    pub total_accrued_interest_system: u64,
 }
 
 /// Serde-only fallback: provides zero/empty/None defaults for fields missing from
@@ -1160,6 +1231,9 @@ impl Default for State {
             breaker_window_ns: DEFAULT_BREAKER_WINDOW_NS,
             breaker_window_debt_ceiling_e8s: 0,
             liquidation_breaker_tripped: false,
+            // Wave-9b DOS-006/-007
+            protocol_status_snapshot: None,
+            treasury_stats_snapshot: None,
         }
     }
 }
@@ -1363,6 +1437,9 @@ impl From<InitArg> for State {
             breaker_window_ns: DEFAULT_BREAKER_WINDOW_NS,
             breaker_window_debt_ceiling_e8s: 0,
             liquidation_breaker_tripped: false,
+            // Wave-9b DOS-006/-007
+            protocol_status_snapshot: None,
+            treasury_stats_snapshot: None,
         }
     }
 }
@@ -3068,6 +3145,81 @@ impl State {
         }
         self.mode = Mode::ReadOnly;
         true
+    }
+
+    /// Wave-9b DOS-006: compute the heavy aggregates that
+    /// `get_protocol_status` would otherwise re-derive on every query
+    /// call. Walks every vault for the global totals and the weighted
+    /// average rate, then walks every collateral config for the per-
+    /// collateral rollups. Pure read; no mutation. Cached by callers
+    /// in `protocol_status_snapshot`.
+    pub fn compute_protocol_status_snapshot(&self) -> ProtocolStatusSnapshot {
+        let total_icp_margin = ICP::from(self.total_collateral_for(&self.icp_ledger_principal)).to_u64();
+        let total_icusd_borrowed = self.total_borrowed_icusd_amount().to_u64();
+        let weighted_average_interest_rate = self.weighted_average_interest_rate().to_f64();
+
+        let per_collateral_interest: Vec<PerCollateralInterestSnap> = self.collateral_configs.keys()
+            .map(|ct| PerCollateralInterestSnap {
+                collateral_type: *ct,
+                total_debt_e8s: self.total_debt_for_collateral(ct).to_u64(),
+                weighted_interest_rate: self.weighted_interest_rate_for_collateral(ct).to_f64(),
+            })
+            .collect();
+
+        let per_collateral_rate_curves: Vec<PerCollateralRateCurveSnap> = self.collateral_configs.keys()
+            .map(|ct| {
+                let markers = self.resolve_layer1_markers(ct);
+                let base = self.collateral_configs.get(ct)
+                    .map(|c| c.interest_rate_apr)
+                    .unwrap_or(DEFAULT_INTEREST_RATE_APR);
+                PerCollateralRateCurveSnap {
+                    collateral_type: *ct,
+                    base_rate: base.to_f64(),
+                    markers: markers.iter().map(|(cr, m)| (cr.to_f64(), m.to_f64())).collect(),
+                }
+            })
+            .collect();
+
+        let borrowing_fee_curve_resolved: Vec<(f64, f64)> = match &self.borrowing_fee_curve {
+            Some(curve) => self.resolve_curve(curve, None).iter()
+                .map(|(cr, mult)| (cr.to_f64(), mult.to_f64()))
+                .collect(),
+            None => vec![],
+        };
+
+        ProtocolStatusSnapshot {
+            total_icp_margin,
+            total_icusd_borrowed,
+            weighted_average_interest_rate,
+            per_collateral_interest,
+            per_collateral_rate_curves,
+            borrowing_fee_curve_resolved,
+        }
+    }
+
+    /// Wave-9b DOS-007: compute the heavy aggregates that
+    /// `get_treasury_stats` would otherwise re-derive on every query
+    /// call. Today only `total_accrued_interest_system` is heavy
+    /// (sum across every vault); the rest of `TreasuryStats` is read
+    /// fresh by the caller.
+    pub fn compute_treasury_stats_snapshot(&self) -> TreasuryStatsSnapshot {
+        let total_accrued_interest_system = self.vault_id_to_vaults.values()
+            .map(|v| v.accrued_interest.to_u64())
+            .sum();
+        TreasuryStatsSnapshot {
+            total_accrued_interest_system,
+        }
+    }
+
+    /// Wave-9b DOS-006/-007: refresh both aggregate snapshots to the
+    /// current state at `now_ns`. Called from the existing 5-minute
+    /// XRC tick after `check_vaults` (which already iterates every
+    /// vault) so the cache stays warm without a new timer.
+    pub fn refresh_aggregate_snapshots(&mut self, now_ns: u64) {
+        let proto = self.compute_protocol_status_snapshot();
+        let treasury = self.compute_treasury_stats_snapshot();
+        self.protocol_status_snapshot = Some((now_ns, proto));
+        self.treasury_stats_snapshot = Some((now_ns, treasury));
     }
 
     /// Wave-10 LIQ-008: pure-read sum of liquidation debt cleared in the

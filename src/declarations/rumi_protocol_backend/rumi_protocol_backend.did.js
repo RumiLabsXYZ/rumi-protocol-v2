@@ -727,6 +727,7 @@ export const idlFactory = ({ IDL }) => {
     'interest_pool_share' : IDL.Float64,
     'total_icusd_borrowed' : IDL.Nat64,
     'min_icusd_amount' : IDL.Nat64,
+    'snapshot_ts_ns' : IDL.Nat64,
     'total_collateral_ratio' : IDL.Float64,
     'deficit_repayment_fraction' : IDL.Float64,
     'ckstable_repay_fee' : IDL.Float64,
@@ -761,6 +762,7 @@ export const idlFactory = ({ IDL }) => {
   const TreasuryStats = IDL.Record({
     'pending_treasury_collateral_entries' : IDL.Nat64,
     'liquidation_protocol_share' : IDL.Float64,
+    'snapshot_ts_ns' : IDL.Nat64,
     'interest_flush_threshold_e8s' : IDL.Nat64,
     'pending_treasury_interest' : IDL.Nat64,
     'treasury_principal' : IDL.Opt(IDL.Principal),

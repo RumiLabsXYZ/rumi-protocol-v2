@@ -123,6 +123,16 @@ pub async fn fetch_icp_rate() {
 
     // Flush accumulated interest to pools/treasury when threshold is reached
     crate::treasury::flush_pending_interest().await;
+
+    // Wave-9b DOS-006/-007: refresh both aggregate query snapshots.
+    // Runs after `check_vaults` (which already iterates every vault),
+    // `drain_pending_treasury_*`, and `flush_pending_interest` so the
+    // snapshot reflects the post-tick view of totals + accrued
+    // interest. Unconditional — keeping the cache warm even in
+    // ReadOnly mode lets `get_protocol_status` and `get_treasury_stats`
+    // serve from cache while the protocol is paused.
+    let now = ic_cdk::api::time();
+    mutate_state(|s| s.refresh_aggregate_snapshots(now));
 }
 
 /// Ensures the price for the given collateral type is fresh enough for
