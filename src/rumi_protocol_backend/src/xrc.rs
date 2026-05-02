@@ -1,6 +1,7 @@
+use crate::event::Event;
 use crate::logs::TRACE_XRC;
 use crate::numeric::UsdIcp;
-use crate::state::{mutate_state, read_state, CollateralStatus};
+use crate::state::{mutate_state, read_state, CollateralStatus, State};
 use crate::Decimal;
 use crate::Mode;
 use candid::Principal;
@@ -9,6 +10,79 @@ use ic_xrc_types::GetExchangeRateResult;
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use rust_decimal_macros::dec;
 use std::time::Duration;
+
+/// Wave-14a CDP-14: minimum number of CEX sources that must contribute to
+/// an XRC `metadata.num_sources_used` for the protocol to accept the
+/// resulting price. A single-source aggregation is cheaper to manipulate
+/// than one drawn from multiple venues; the Wave-5 sanity band catches
+/// implausible *values* but not the *thinness* of the underlying
+/// aggregation.
+pub const MIN_XRC_SOURCES: u32 = 3;
+
+/// Wave-14a CDP-14: pure helper. Returns true iff the sample's source
+/// count meets the protocol-configured floor. `min_required == 0` is a
+/// kill switch that disables the gate entirely (operator setting if XRC
+/// aggregation degrades industry-wide).
+pub fn xrc_metadata_meets_source_floor(num_sources_used: u32, min_required: u32) -> bool {
+    if min_required == 0 {
+        return true;
+    }
+    num_sources_used >= min_required
+}
+
+/// Wave-14a CDP-01: maximum number of consecutive XRC fetch failures the
+/// protocol will tolerate before falling back to ReadOnly. The 300-second
+/// poll cadence and the 10-minute hard staleness gate cover the slow-
+/// degradation case; this counter trips on the fast-degradation case
+/// where multiple consecutive ticks fail in close succession (cycle
+/// pressure, XRC outage, network partition).
+pub const MAX_CONSECUTIVE_XRC_FAILURES: u64 = 3;
+
+/// Wave-14a CDP-01: record an XRC fetch failure. Increments the
+/// consecutive-failure counter; if it reaches the threshold and the
+/// protocol is still in `GeneralAvailability`, switches to `ReadOnly`,
+/// marks the trip as oracle-triggered (so a later success can auto-clear
+/// it), and returns the `OracleCircuitBreaker` event for the caller to
+/// persist.
+pub fn note_xrc_failure(state: &mut State) -> Option<Event> {
+    note_xrc_failure_at(state, ic_cdk::api::time())
+}
+
+/// Pure-state variant taking an explicit `now_ns` for tests. Production
+/// callers go through `note_xrc_failure`.
+pub fn note_xrc_failure_at(state: &mut State, now_ns: u64) -> Option<Event> {
+    state.consecutive_xrc_failures = state.consecutive_xrc_failures.saturating_add(1);
+
+    if state.consecutive_xrc_failures < MAX_CONSECUTIVE_XRC_FAILURES {
+        return None;
+    }
+
+    if state.mode != Mode::GeneralAvailability {
+        // Already ReadOnly (operator-set or oracle-set). Don't emit an
+        // event each subsequent failure — the trip is already in effect.
+        return None;
+    }
+
+    state.mode = Mode::ReadOnly;
+    state.mode_triggered_by_oracle = true;
+    Some(Event::OracleCircuitBreaker {
+        consecutive_failures: state.consecutive_xrc_failures,
+        timestamp: now_ns,
+    })
+}
+
+/// Wave-14a CDP-01: record an XRC fetch success. Resets the consecutive-
+/// failure counter to 0. If ReadOnly was triggered by the oracle path,
+/// clears it back to `GeneralAvailability`. Operator-set ReadOnly is
+/// preserved.
+pub fn note_xrc_success(state: &mut State) {
+    state.consecutive_xrc_failures = 0;
+
+    if state.mode == Mode::ReadOnly && state.mode_triggered_by_oracle {
+        state.mode = Mode::GeneralAvailability;
+        state.mode_triggered_by_oracle = false;
+    }
+}
 
 /// Wave-9d DOS-011: classifies whether a collateral type's periodic
 /// background XRC price refresh is still useful given its lifecycle
@@ -98,9 +172,49 @@ pub async fn fetch_icp_rate() {
         None => return,
     };
 
+    // Wave-14a CDP-01: track whether the call succeeded for the
+    // consecutive-failure counter. We set this to true on the success
+    // path AFTER source-floor / sanity-band acceptance.
+    let mut xrc_call_succeeded = false;
+
     match crate::management::fetch_icp_price().await {
         Ok(call_result) => match call_result {
             GetExchangeRateResult::Ok(exchange_rate_result) => {
+                // Wave-14a CDP-14: refuse to consume a price that is below
+                // the configured aggregation floor. Cached price stays in
+                // place; the staleness gate (or the CDP-01 failure counter
+                // below) will eventually fire if the condition persists.
+                // Source-floor rejection is its own signal class (the call
+                // succeeded but the aggregation is too thin), tracked via
+                // OracleSourceCountInsufficient rather than the
+                // consecutive-failure counter.
+                // ic-xrc-types calls this field `base_asset_num_received_rates`
+                // (the number of CEXs that actually returned a rate for the
+                // base asset — for ICP/USD that's the ICP-side aggregation).
+                let num_sources = exchange_rate_result
+                    .metadata
+                    .base_asset_num_received_rates as u32;
+                let floor = read_state(|s| s.min_xrc_sources_used);
+                if !xrc_metadata_meets_source_floor(num_sources, floor) {
+                    log!(
+                        TRACE_XRC,
+                        "[FetchPrice] rejecting ICP rate {}: only {} XRC sources (floor {})",
+                        exchange_rate_result.rate,
+                        num_sources,
+                        floor
+                    );
+                    let icp_ct = read_state(|s| s.icp_collateral_type());
+                    crate::storage::record_event(&Event::OracleSourceCountInsufficient {
+                        collateral_type: icp_ct,
+                        num_sources,
+                        min_required: floor,
+                        timestamp: ic_cdk::api::time(),
+                    });
+                    // Skip the price-update branch but keep the rest of the
+                    // tick (cached price stays valid; CDP-01 counter NOT
+                    // touched because the XRC call itself succeeded).
+                } else {
+
                 let rate = Decimal::from_u64(exchange_rate_result.rate).unwrap()
                     / Decimal::from_u64(10_u64.pow(exchange_rate_result.metadata.decimals))
                         .unwrap();
@@ -152,8 +266,10 @@ pub async fn fetch_icp_rate() {
                             let icp_ct = s.icp_collateral_type();
                             crate::event::record_price_update(icp_ct, rate, ts_nanos);
                         });
+                        xrc_call_succeeded = true;
                     }
                 }
+                } // end of Wave-14a CDP-14 source-floor `else` block
             }
             GetExchangeRateResult::Err(error) => ic_canister_log::log!(
                 TRACE_XRC,
@@ -164,6 +280,25 @@ pub async fn fetch_icp_rate() {
             TRACE_XRC,
             "[FetchPrice] failed to call XRC canister with error: {error}"
         ),
+    }
+
+    // Wave-14a CDP-01: feed the success/failure into the consecutive-
+    // failure counter. A successful price update resets the counter and
+    // clears any oracle-triggered ReadOnly. Any non-success path (call
+    // Err, GetExchangeRateResult::Err, or source-floor rejection) is
+    // treated as a failure for circuit-breaker purposes; sustained
+    // failures across `MAX_CONSECUTIVE_XRC_FAILURES` ticks trip ReadOnly
+    // and emit `OracleCircuitBreaker`.
+    let oracle_event = mutate_state(|s| {
+        if xrc_call_succeeded {
+            note_xrc_success(s);
+            None
+        } else {
+            note_xrc_failure(s)
+        }
+    });
+    if let Some(ev) = oracle_event {
+        crate::storage::record_event(&ev);
     }
     if let Some(last_icp_rate) = read_state(|s| s.last_icp_rate) {
         mutate_state(|s| s.update_total_collateral_ratio_and_mode(last_icp_rate));

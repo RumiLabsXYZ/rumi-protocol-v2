@@ -1211,6 +1211,7 @@ export const idlFactory = ({ IDL }) => {
     'set_liquidation_protocol_share' : IDL.Func([IDL.Float64], [Result], []),
     'set_lst_haircut' : IDL.Func([IDL.Principal, IDL.Float64], [Result], []),
     'set_min_icusd_amount' : IDL.Func([IDL.Nat64], [Result], []),
+    'set_min_xrc_sources_used' : IDL.Func([IDL.Nat32], [Result], []),
     'set_rate_curve_markers' : IDL.Func(
         [IDL.Opt(IDL.Principal), IDL.Vec(IDL.Tuple(IDL.Float64, IDL.Float64))],
         [Result],

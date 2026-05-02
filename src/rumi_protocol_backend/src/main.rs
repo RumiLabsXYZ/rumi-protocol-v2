@@ -3677,6 +3677,34 @@ async fn set_check_vaults_alert_band_bps(new_band_bps: u64) -> Result<(), Protoc
     Ok(())
 }
 
+/// Wave-14a CDP-14: tune the XRC source-count floor. Default is 3 (set
+/// via `xrc::MIN_XRC_SOURCES`); 0 disables the gate entirely. Used by ops
+/// to slacken the requirement if XRC's aggregation degrades industry-
+/// wide, or to tighten it when more depth is available.
+#[candid_method(update)]
+#[update]
+async fn set_min_xrc_sources_used(value: u32) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set the XRC source-count floor".to_string(),
+        ));
+    }
+    mutate_state(|s| s.min_xrc_sources_used = value);
+    log!(
+        INFO,
+        "[set_min_xrc_sources_used] XRC source-count floor set to: {} ({})",
+        value,
+        if value == 0 {
+            "gate disabled"
+        } else {
+            "gate active"
+        }
+    );
+    Ok(())
+}
+
 /// Wave-9c DOS-005: tune the cadence of the safety-belt full sweep that
 /// walks every vault in `vault_cr_index` regardless of CR band.
 /// Default 12 (one full sweep per hour at the 5-minute XRC cadence).

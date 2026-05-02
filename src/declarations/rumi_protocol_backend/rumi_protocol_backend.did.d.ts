@@ -1098,6 +1098,7 @@ export interface _SERVICE {
   'set_liquidation_protocol_share' : ActorMethod<[number], Result>,
   'set_lst_haircut' : ActorMethod<[Principal, number], Result>,
   'set_min_icusd_amount' : ActorMethod<[bigint], Result>,
+  'set_min_xrc_sources_used' : ActorMethod<[number], Result>,
   'set_rate_curve_markers' : ActorMethod<
     [[] | [Principal], Array<[number, number]>],
     Result

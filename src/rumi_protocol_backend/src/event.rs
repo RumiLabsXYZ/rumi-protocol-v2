@@ -714,6 +714,46 @@ pub enum Event {
         required_balance: u64,
         timestamp: u64,
     },
+
+    /// Wave-14a CDP-10: emitted when the spawned `notify_liquidatable_vaults`
+    /// call to the stability_pool returned a transport `Err` (cycle pressure,
+    /// queue-full during a market crash, etc.). The dispatched vault ids are
+    /// NOT marked `sp_attempted` and remain eligible for retry on the next
+    /// `check_vaults` tick. External liquidators can poll `get_events` and
+    /// react.
+    #[serde(rename = "stability_pool_call_failed")]
+    StabilityPoolCallFailed {
+        vault_ids: Vec<u64>,
+        reject_code: i32,
+        reject_message: String,
+        timestamp: u64,
+    },
+
+    /// Wave-14a CDP-01: emitted on the `check_vaults` tick where the
+    /// consecutive-XRC-failure counter reached
+    /// `xrc::MAX_CONSECUTIVE_XRC_FAILURES` and the protocol transitioned
+    /// from `GeneralAvailability` into `ReadOnly`. Auto-clears on the
+    /// next successful XRC fetch (since the trip is marked
+    /// `mode_triggered_by_oracle`). Operator-set ReadOnly does not emit
+    /// this event.
+    #[serde(rename = "oracle_circuit_breaker")]
+    OracleCircuitBreaker {
+        consecutive_failures: u64,
+        timestamp: u64,
+    },
+
+    /// Wave-14a CDP-14: emitted when the protocol rejects an XRC sample
+    /// because `metadata.num_sources_used` was below `min_required`.
+    /// The cached price stays in place. Operators monitor counts of this
+    /// event over time as a signal for oracle aggregation health and can
+    /// tune `MIN_XRC_SOURCES` via the developer-gated setter.
+    #[serde(rename = "oracle_source_count_insufficient")]
+    OracleSourceCountInsufficient {
+        collateral_type: Principal,
+        num_sources: u32,
+        min_required: u32,
+        timestamp: u64,
+    },
 }
 
 impl Event {
@@ -812,6 +852,13 @@ impl Event {
             Event::SetBreakerWindowDebtCeilingE8s { .. } => false,
             // Wave-11 BOT-001
             Event::BotClaimReconciliationNeeded { vault_id, .. } => vault_id == filter_vault_id,
+            // Wave-14a CDP-10: vault_ids is the list of dispatched vaults; the
+            // event is "related" if the filter id is among them.
+            Event::StabilityPoolCallFailed { vault_ids, .. } => vault_ids.contains(filter_vault_id),
+            // Wave-14a CDP-01: protocol-wide trip, no specific vault.
+            Event::OracleCircuitBreaker { .. } => false,
+            // Wave-14a CDP-14: per-collateral, not per-vault.
+            Event::OracleSourceCountInsufficient { .. } => false,
         }
     }
 
@@ -977,6 +1024,11 @@ impl Event {
             Event::SetBreakerWindowDebtCeilingE8s { timestamp, .. } => Some(*timestamp),
             // Wave-11 BOT-001
             Event::BotClaimReconciliationNeeded { timestamp, .. } => Some(*timestamp),
+            // Wave-14a CDP-10 + CDP-01 + CDP-14: surface in time-range queries
+            // so operators can audit oracle and SP-call failures by window.
+            Event::StabilityPoolCallFailed { timestamp, .. } => Some(*timestamp),
+            Event::OracleCircuitBreaker { timestamp, .. } => Some(*timestamp),
+            Event::OracleSourceCountInsufficient { timestamp, .. } => Some(*timestamp),
             _ => None,
         }
     }
@@ -1730,6 +1782,21 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             // because the underlying `BotClaim` and `vault.bot_processing`
             // were intentionally left untouched.
             Event::BotClaimReconciliationNeeded { .. } => {},
+            // Wave-14a CDP-10: informational. The fact that the SP call
+            // failed is captured in the audit trail; the dispatched vault
+            // ids are intentionally left out of `sp_attempted_vaults` so
+            // they remain eligible for the next tick.
+            Event::StabilityPoolCallFailed { .. } => {},
+            // Wave-14a CDP-01: informational. The mode change to ReadOnly
+            // (and the matching `mode_triggered_by_oracle = true` flip)
+            // happens via direct state mutation in `xrc::note_xrc_failure`,
+            // and the oracle-recovery path mirrors it. No replay-side
+            // mutation is needed because the live mutation already happened
+            // and is captured in the next snapshot.
+            Event::OracleCircuitBreaker { .. } => {},
+            // Wave-14a CDP-14: informational. The protocol simply skips the
+            // sample; cached price stays in place. Nothing to replay.
+            Event::OracleSourceCountInsufficient { .. } => {},
         }
     }
     state.next_available_vault_id = vault_id;

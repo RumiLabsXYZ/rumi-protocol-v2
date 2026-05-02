@@ -80,6 +80,12 @@ pub struct InterestRecipient {
 /// Default interest split: 50% 3pool, 40% stability pool, 10% treasury.
 fn default_flush_threshold() -> u64 { 10_000_000 } // 0.1 icUSD
 
+/// Wave-14a CDP-14: production default for the XRC source-count floor.
+/// Mirrors `xrc::MIN_XRC_SOURCES`. Lives here (not in `xrc.rs`) so the
+/// `#[serde(default = ...)]` attribute on `State::min_xrc_sources_used`
+/// can reference it without a cross-module import dance.
+fn default_min_xrc_sources_used() -> u32 { 3 }
+
 pub fn default_interest_split() -> Vec<InterestRecipient> {
     vec![
         InterestRecipient { destination: InterestDestination::ThreePool, bps: 5000 },
@@ -711,6 +717,31 @@ pub struct State {
     #[serde(default)]
     pub pending_refunds: BTreeMap<u64, PendingRefund>,
     pub mode: Mode,
+    /// Wave-14a CDP-01: count of consecutive XRC fetch failures. Reset
+    /// to 0 on any successful fetch. When this reaches
+    /// `xrc::MAX_CONSECUTIVE_XRC_FAILURES` and `mode == GeneralAvailability`,
+    /// the protocol switches to ReadOnly via the oracle-circuit-breaker
+    /// path. `serde(default)` keeps pre-Wave-14 snapshots decoding cleanly.
+    #[serde(default)]
+    pub consecutive_xrc_failures: u64,
+    /// Wave-14a CDP-01: true iff the current ReadOnly mode was triggered
+    /// by the oracle-circuit-breaker path (CDP-01) rather than by an
+    /// operator setter. Operator-set ReadOnly must NOT auto-clear on
+    /// oracle recovery; only oracle-triggered ReadOnly does.
+    /// `serde(default)` keeps pre-Wave-14 snapshots decoding cleanly
+    /// (the field defaults to false, so any in-flight ReadOnly is
+    /// treated as operator-set, which is the safe default).
+    #[serde(default)]
+    pub mode_triggered_by_oracle: bool,
+    /// Wave-14a CDP-14: minimum number of CEX sources that must contribute
+    /// to an XRC `metadata.base_asset_num_received_rates` for the protocol
+    /// to accept the resulting price. 0 disables the gate (operator
+    /// setting if XRC aggregation degrades industry-wide). Tunable via
+    /// the developer-gated `set_min_xrc_sources_used` endpoint.
+    /// `serde(default)` returns the production default (3) for pre-Wave-14
+    /// snapshots so the gate is on by default after upgrade.
+    #[serde(default = "default_min_xrc_sources_used")]
+    pub min_xrc_sources_used: u32,
     pub fee: Ratio,
     pub developer_principal: Principal,
     pub next_available_vault_id: u64,
@@ -1199,6 +1230,9 @@ impl Default for State {
             pending_redemption_transfer: BTreeMap::new(),
             pending_refunds: BTreeMap::new(),
             mode: Mode::default(),
+            consecutive_xrc_failures: 0,
+            mode_triggered_by_oracle: false,
+            min_xrc_sources_used: default_min_xrc_sources_used(),
             fee: Ratio::from(Decimal::ZERO),
             developer_principal: Principal::anonymous(),
             next_available_vault_id: 1,
@@ -1325,6 +1359,9 @@ impl From<InitArg> for State {
             icp_ledger_principal: args.icp_ledger_principal,
             icp_ledger_fee: ICP_TRANSFER_FEE,
             mode: Mode::GeneralAvailability,
+            consecutive_xrc_failures: 0,
+            mode_triggered_by_oracle: false,
+            min_xrc_sources_used: default_min_xrc_sources_used(),
             total_collateral_ratio: Ratio::from(Decimal::MAX),
             last_icp_timestamp: None,
             last_icp_rate: None,
