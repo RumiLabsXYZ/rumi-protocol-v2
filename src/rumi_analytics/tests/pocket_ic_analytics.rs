@@ -722,11 +722,14 @@ fn collector_health_reports_cursor_positions() {
 
     let health = get_collector_health(&env);
 
-    // Should have 7 cursors. The original 6 (icusd_blocks, threeusd_blocks,
-    // backend_events, 3pool_liquidity_events, amm_swap_events, ThreeUsd icrc3)
-    // plus the stability_pool_events tailer added by commit 2ce0771
-    // ("feat(analytics): tail rumi_stability_pool canister events").
-    assert_eq!(health.cursors.len(), 7, "expected 7 cursors");
+    // Eight cursors total. The first six covered Phase 4 sources:
+    // backend_events, 3pool_swaps, 3pool_liquidity, 3pool_blocks (icrc3),
+    // amm_swaps, icusd_blocks (icrc3). The 2ce0771 SP-events tailer added
+    // stability_events (cursor #7). Commit 559a3d9 (AMM LP collector wiring,
+    // dropping the double-counted three_pool_lp aggregate) added the
+    // amm_liquidity tailer (cursor #8). When new tailers are added, bump
+    // this count and add a sentence describing the new source.
+    assert_eq!(health.cursors.len(), 8, "expected 8 cursors");
 
     // last_pull_cycle_ns should be non-zero after a pull cycle
     assert!(health.last_pull_cycle_ns > 0, "last_pull_cycle_ns should be set");
