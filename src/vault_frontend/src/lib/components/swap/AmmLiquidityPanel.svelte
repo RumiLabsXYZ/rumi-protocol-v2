@@ -1,7 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher, onMount } from 'svelte';
   import { walletStore } from '../../stores/wallet';
-  import { ammService, AMM_TOKENS, parseTokenAmount, formatTokenAmount, getLedgerFee, approvalAmount } from '../../services/ammService';
+  import { ammService, AMM_TOKENS, parseTokenAmount, formatTokenAmount } from '../../services/ammService';
   import type { PoolInfo } from '../../services/ammService';
   import { CANISTER_IDS } from '../../config';
   import { ProtocolService } from '../../services/protocol';

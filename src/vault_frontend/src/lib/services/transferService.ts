@@ -144,17 +144,13 @@ export async function transferICRC1(
 }
 
 /**
- * Query a ledger's ICRC-1 fee (returns raw smallest-unit bigint)
+ * Query a ledger's ICRC-1 fee (returns raw smallest-unit bigint).
+ * Delegates to the shared `ledgerFeeService` so cache + fallback behaviour
+ * stays consistent across the app (audit ICRC-005, frontend half).
  */
 export async function queryICRC1Fee(ledgerCanisterId: string): Promise<bigint> {
-  try {
-    const { TokenService } = await import('./tokenService');
-    const actor = await TokenService.createAnonymousActor(ledgerCanisterId, ICRC1_IDL);
-    return await (actor as any).icrc1_fee();
-  } catch (err) {
-    console.warn('Failed to query fee for', ledgerCanisterId, err);
-    return 10_000n; // fallback
-  }
+  const { fetchLedgerFee } = await import('./ledgerFeeService');
+  return fetchLedgerFee({ ledgerId: ledgerCanisterId });
 }
 
 /** Transfer ICP (convenience wrapper) */

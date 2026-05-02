@@ -1,6 +1,6 @@
 import { Principal } from '@dfinity/principal';
 import { threePoolService, POOL_TOKENS } from './threePoolService';
-import { ammService, AMM_TOKENS, approvalAmount, getLedgerFee, type AmmToken } from './ammService';
+import { ammService, AMM_TOKENS, approvalAmount, tokenFee, type AmmToken } from './ammService';
 import { CANISTER_IDS, CONFIG } from '../config';
 import { isOisyWallet } from './protocol/walletOperations';
 import { getOisySignerAgent, createOisyActor } from './oisySigner';
@@ -8,8 +8,9 @@ import { canisterIDLs } from './pnp';
 import { walletStore } from '../stores/wallet';
 import { get } from 'svelte/store';
 import { RumiAmmProvider } from './providers/rumiAmmProvider';
-import { IcpswapProvider, icrc1Fee } from './providers/icpswapProvider';
+import { IcpswapProvider } from './providers/icpswapProvider';
 import { ProviderRegistry } from './providers/providerRegistry';
+import { fetchLedgerFee } from './ledgerFeeService';
 import type { ProviderQuote } from './providers/types';
 
 // ──────────────────────────────────────────────────────────────
@@ -528,12 +529,13 @@ async function approveIcpswapPool(
   amountIn: bigint,
   poolCanisterId: string,
 ): Promise<void> {
+  const approveAmt = await approvalAmount(amountIn, fromToken);
   const ledgerActor = await walletStore.getActor(
     fromToken.ledgerId, CONFIG.icusd_ledgerIDL
   ) as any;
 
   const approveResult = await ledgerActor.icrc2_approve({
-    amount: approvalAmount(amountIn, fromToken),
+    amount: approveAmt,
     spender: { owner: Principal.fromText(poolCanisterId), subaccount: [] },
     expires_at: [], expected_allowance: [], memo: [], fee: [],
     from_subaccount: [], created_at_time: [],
@@ -613,6 +615,9 @@ async function executeStableToIcpOisy(
   const amounts: [bigint, bigint, bigint] = [0n, 0n, 0n];
   amounts[from.threePoolIndex] = amountIn;
 
+  // Pre-fetch live ICRC-1 fee before entering the signer batch (no awaits allowed mid-batch).
+  const fromFee = await tokenFee(from);
+
   // Signer agent was pre-warmed during quote phase — cached, no popup
   const signerAgent = await getOisySignerAgent(wallet.principal);
 
@@ -623,7 +628,7 @@ async function executeStableToIcpOisy(
   // Step 1: Approve stablecoin → 3pool
   signerAgent.batch();
   const p1 = stableLedger.icrc2_approve({
-    amount: amountIn + getLedgerFee(from) * 2n,
+    amount: amountIn + fromFee * 2n,
     spender: { owner: Principal.fromText(THREEPOOL_ID), subaccount: [] },
     expires_at: [], expected_allowance: [], memo: [], fee: [],
     from_subaccount: [], created_at_time: [],
@@ -690,6 +695,9 @@ async function executeIcpToStableOisy(
   const threeUsdMinOutput = threeUsdEstimate * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
   const stableMinOutput = route.estimatedOutput * BigInt(10000 - slippageBps) / 10000n;
 
+  // Pre-fetch live ICRC-1 fee before entering the signer batch.
+  const icpFee = await tokenFee(icpToken);
+
   // Signer agent was pre-warmed during quote phase — cached, no popup
   const signerAgent = await getOisySignerAgent(wallet.principal);
 
@@ -700,7 +708,7 @@ async function executeIcpToStableOisy(
   // Step 1: Approve ICP → AMM
   signerAgent.batch();
   const p1 = icpLedger.icrc2_approve({
-    amount: amountIn + getLedgerFee(icpToken) * 2n,
+    amount: amountIn + icpFee * 2n,
     spender: { owner: Principal.fromText(AMM_ID), subaccount: [] },
     expires_at: [], expected_allowance: [], memo: [], fee: [],
     from_subaccount: [], created_at_time: [],
@@ -765,6 +773,14 @@ async function executeStableToIcpOisyIcpswap(
   const amounts: [bigint, bigint, bigint] = [0n, 0n, 0n];
   amounts[from.threePoolIndex] = amountIn;
 
+  // Pre-fetch every live ICRC-1 fee the batched signer flow needs before
+  // entering `signerAgent.batch()` (no awaits allowed mid-batch).
+  const [fromFee, threeUsdFee, icpFee] = await Promise.all([
+    tokenFee(from),
+    fetchLedgerFee({ ledgerId: CANISTER_IDS.THREEPOOL, decimals: 8, symbol: '3USD' }),
+    fetchLedgerFee({ ledgerId: CANISTER_IDS.ICP_LEDGER, decimals: 8, symbol: 'ICP' }),
+  ]);
+
   const signerAgent = await getOisySignerAgent(wallet.principal);
 
   const stableLedger = createOisyActor(fromPoolToken.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent);
@@ -774,7 +790,7 @@ async function executeStableToIcpOisyIcpswap(
   // Step 1: approve stablecoin → 3pool
   signerAgent.batch();
   const p1 = stableLedger.icrc2_approve({
-    amount: amountIn + getLedgerFee(from) * 2n,
+    amount: amountIn + fromFee * 2n,
     spender: { owner: Principal.fromText(THREEPOOL_ID), subaccount: [] },
     expires_at: [], expected_allowance: [], memo: [], fee: [],
     from_subaccount: [], created_at_time: [],
@@ -799,7 +815,7 @@ async function executeStableToIcpOisyIcpswap(
   const p4 = icpswapPool.depositFrom({
     token: CANISTER_IDS.THREEPOOL,
     amount: threeUsdEstimate,
-    fee: icrc1Fee(CANISTER_IDS.THREEPOOL),
+    fee: threeUsdFee,
   });
 
   // Step 5: ICPswap swap (uses pre-committed 3USD amount; slippage via amountOutMinimum)
@@ -816,7 +832,7 @@ async function executeStableToIcpOisyIcpswap(
   const p6 = icpswapPool.withdraw({
     token: CANISTER_IDS.ICP_LEDGER,
     amount: icpMinOutput,
-    fee: icrc1Fee(CANISTER_IDS.ICP_LEDGER),
+    fee: icpFee,
   });
 
   await signerAgent.execute();
@@ -867,6 +883,12 @@ async function executeIcpToStableOisyIcpswap(
   const threeUsdMinFromSwap = threeUsdEstimate * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
   const stableMinOutput = route.estimatedOutput * BigInt(10000 - slippageBps) / 10000n;
 
+  // Pre-fetch every live ICRC-1 fee the batched signer flow needs.
+  const [icpFee, threeUsdFee] = await Promise.all([
+    tokenFee(icpToken),
+    fetchLedgerFee({ ledgerId: CANISTER_IDS.THREEPOOL, decimals: 8, symbol: '3USD' }),
+  ]);
+
   const signerAgent = await getOisySignerAgent(wallet.principal);
 
   const icpLedger = createOisyActor(ICP_LEDGER_ID, CONFIG.icusd_ledgerIDL, signerAgent);
@@ -876,7 +898,7 @@ async function executeIcpToStableOisyIcpswap(
   // Step 1: approve ICP → ICPswap pool
   signerAgent.batch();
   const p1 = icpLedger.icrc2_approve({
-    amount: amountIn + getLedgerFee(icpToken) * 2n,
+    amount: amountIn + icpFee * 2n,
     spender: { owner: Principal.fromText(icpswapPoolId), subaccount: [] },
     expires_at: [], expected_allowance: [], memo: [], fee: [],
     from_subaccount: [], created_at_time: [],
@@ -887,7 +909,7 @@ async function executeIcpToStableOisyIcpswap(
   const p2 = icpswapPool.depositFrom({
     token: ICP_LEDGER_ID,
     amount: amountIn,
-    fee: icrc1Fee(ICP_LEDGER_ID),
+    fee: icpFee,
   });
 
   // Step 3: ICPswap swap ICP → 3USD
@@ -903,7 +925,7 @@ async function executeIcpToStableOisyIcpswap(
   const p4 = icpswapPool.withdraw({
     token: CANISTER_IDS.THREEPOOL,
     amount: threeUsdMinFromSwap,
-    fee: icrc1Fee(CANISTER_IDS.THREEPOOL),
+    fee: threeUsdFee,
   });
 
   // Step 5: 3pool remove_one_coin (3USD → target stablecoin)
@@ -960,6 +982,12 @@ async function executeIcpswapDirectOisy(
 
   const minOut = route.estimatedOutput * BigInt(10000 - slippageBps) / 10000n;
 
+  // Pre-fetch every live ICRC-1 fee the batched signer flow needs.
+  const [fromFee, toFee] = await Promise.all([
+    tokenFee(from),
+    tokenFee(to),
+  ]);
+
   const signerAgent = await getOisySignerAgent(wallet.principal);
 
   const fromLedger = createOisyActor(from.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent);
@@ -968,7 +996,7 @@ async function executeIcpswapDirectOisy(
   // Step 1: approve input -> ICPswap pool
   signerAgent.batch();
   const p1 = fromLedger.icrc2_approve({
-    amount: amountIn + getLedgerFee(from) * 2n,
+    amount: amountIn + fromFee * 2n,
     spender: { owner: Principal.fromText(icpswapPoolId), subaccount: [] },
     expires_at: [], expected_allowance: [], memo: [], fee: [],
     from_subaccount: [], created_at_time: [],
@@ -979,7 +1007,7 @@ async function executeIcpswapDirectOisy(
   const p2 = icpswapPool.depositFrom({
     token: from.ledgerId,
     amount: amountIn,
-    fee: icrc1Fee(from.ledgerId),
+    fee: fromFee,
   });
 
   // Step 3: ICPswap swap
@@ -995,7 +1023,7 @@ async function executeIcpswapDirectOisy(
   const p4 = icpswapPool.withdraw({
     token: to.ledgerId,
     amount: minOut,
-    fee: icrc1Fee(to.ledgerId),
+    fee: toFee,
   });
 
   await signerAgent.execute();

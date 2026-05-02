@@ -23,6 +23,19 @@ vi.mock('../../stores/wallet', () => ({
   },
 }));
 
+// Audit ICRC-005 (frontend half): IcpswapProvider.swap now reads ledger
+// fees through ledgerFeeService instead of a hardcoded switch. Stub it so
+// the existing depositFrom/withdraw fee assertions still resolve to the
+// same values per ledger.
+vi.mock('../ledgerFeeService', () => ({
+  fetchLedgerFee: vi.fn(({ ledgerId }: { ledgerId: string }) => {
+    if (ledgerId === 't6bor-paaaa-aaaap-qrd5q-cai') return Promise.resolve(100_000n); // icUSD
+    if (ledgerId === 'ryjl3-tyaaa-aaaaa-aaaba-cai') return Promise.resolve(10_000n);  // ICP
+    return Promise.resolve(10_000n); // default
+  }),
+  getCachedLedgerFee: vi.fn(() => 10_000n),
+}));
+
 import { Actor } from '@dfinity/agent';
 import { IcpswapProvider } from './icpswapProvider';
 import type { AmmToken } from '../ammService';

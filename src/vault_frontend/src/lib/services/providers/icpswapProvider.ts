@@ -1,27 +1,32 @@
 import { Actor, HttpAgent } from '@dfinity/agent';
 import type { _SERVICE as IcpswapPool } from '$declarations/icpswap_pool/icpswap_pool.did';
 import { idlFactory as icpswapPoolIDL } from '$declarations/icpswap_pool/icpswap_pool.did.js';
-import { CONFIG, CANISTER_IDS } from '../../config';
+import { CONFIG } from '../../config';
 import { walletStore } from '../../stores/wallet';
 import { canisterIDLs } from '../pnp';
 import type { AmmToken } from '../ammService';
+import { fetchLedgerFee, getCachedLedgerFee } from '../ledgerFeeService';
 import type { SwapProvider, ProviderQuote, ProviderSwapResult, ProviderId } from './types';
 
 /**
- * Returns the exact ICRC-1 transfer fee for a known ledger.
- * ICPswap pool's depositFrom/withdraw expect this value in the `fee` field
- * to match the pool's internal fee cache.
+ * Returns the live ICRC-1 transfer fee for a ledger (audit ICRC-005).
+ *
+ * Async: queries `icrc1_fee()` on the ledger and caches the result for the
+ * session. ICPswap pool's depositFrom/withdraw require this value in the
+ * `fee` field to match the pool's internal cache.
  */
-export function icrc1Fee(ledgerId: string): bigint {
-  switch (ledgerId) {
-    case CANISTER_IDS.ICP_LEDGER:   return 10_000n;     // 0.0001 ICP
-    case CANISTER_IDS.ICUSD_LEDGER: return 100_000n;    // 0.001 icUSD
-    case CANISTER_IDS.THREEPOOL:    return 0n;           // 3USD has zero fee
-    case CANISTER_IDS.CKUSDT_LEDGER: return 10_000n;    // ckUSDT
-    case CANISTER_IDS.CKUSDC_LEDGER: return 10_000n;    // ckUSDC
-    default:
-      throw new Error(`Unknown ledger fee for ${ledgerId}; add it to icrc1Fee()`);
-  }
+export function icrc1Fee(ledgerId: string): Promise<bigint> {
+  return fetchLedgerFee({ ledgerId });
+}
+
+/**
+ * Synchronous accessor — returns the cached fee if present, else a fallback.
+ * Use only when `fetchLedgerFee(...)` has already been awaited for the same
+ * ledger upstream (e.g., inside Oisy batched signer flows where the cache
+ * is pre-warmed before the batch begins).
+ */
+export function icrc1FeeSync(ledgerId: string): bigint {
+  return getCachedLedgerFee({ ledgerId });
 }
 
 export interface IcpswapProviderConfig {
@@ -97,7 +102,7 @@ export class IcpswapProvider implements SwapProvider {
     const depositResult = await pool.depositFrom({
       token: tokenIn.ledgerId,
       amount: amountIn,
-      fee: icrc1Fee(tokenIn.ledgerId),
+      fee: await icrc1Fee(tokenIn.ledgerId),
     });
     this.unwrapResult(depositResult, 'depositFrom');
 
@@ -121,7 +126,7 @@ export class IcpswapProvider implements SwapProvider {
       const withdrawResult = await pool.withdraw({
         token: tokenOut.ledgerId,
         amount: swapOut,
-        fee: icrc1Fee(tokenOut.ledgerId),
+        fee: await icrc1Fee(tokenOut.ledgerId),
       });
       withdrawn = this.unwrapResult(withdrawResult, 'withdraw');
     } catch (err) {
