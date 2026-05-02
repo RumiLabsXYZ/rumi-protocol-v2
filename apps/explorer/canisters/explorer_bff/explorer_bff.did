@@ -1,4 +1,179 @@
-// Placeholder Candid interface — full interface added in Task 8
-service : {
-  ping : () -> (text) query;
+type ProtocolMode = variant {
+  GeneralAvailability;
+  Recovery;
+  Caution;
+  ReadOnly;
+  Emergency;
 };
+
+type VaultStatus = variant {
+  Open;
+  Closed;
+  Liquidated;
+};
+
+type HealthLevel = variant {
+  Green;
+  Yellow;
+  Red;
+};
+
+type FormattedNumber = record {
+  raw_e8s: nat64;
+  decimals: nat8;
+  formatted: text;
+};
+
+type EventRowDTO = record {
+  source: text;
+  source_event_id: nat64;
+  global_id: text;
+  kind: text;
+  timestamp_ns: nat64;
+  primary_principal: opt principal;
+  primary_amount: opt FormattedNumber;
+  secondary_principal: opt principal;
+  approximate: bool;
+  payload_summary: text;
+};
+
+type HealthSummaryDTO = record {
+  level: HealthLevel;
+  message: text;
+  analytics_cursor_lag_seconds: nat64;
+  any_breaker_tripped: bool;
+  protocol_mode: ProtocolMode;
+  generated_at_ns: nat64;
+};
+
+type OverviewDTO = record {
+  tvl_usd: float64;
+  icusd_supply: FormattedNumber;
+  icusd_peg_usd: float64;
+  protocol_mode: ProtocolMode;
+  vault_count_open: nat64;
+  recent_activity: vec EventRowDTO;
+  health: HealthSummaryDTO;
+  generated_at_ns: nat64;
+  cache_age_ms: nat64;
+};
+
+type ActivityFilter = record {
+  sources: opt vec text;
+  types: opt vec text;
+  principal: opt principal;
+  from_ns: opt nat64;
+  to_ns: opt nat64;
+};
+
+type ActivityCursor = record {
+  before_global_id: opt text;
+  page_size: nat32;
+};
+
+type ActivityFeedDTO = record {
+  events: vec EventRowDTO;
+  next_cursor: opt text;
+  total_estimated: nat64;
+  filters_applied: ActivityFilter;
+};
+
+type VaultSummaryDTO = record {
+  vault_id: nat64;
+  status: VaultStatus;
+  collateral_type: principal;
+  collateral_amount: FormattedNumber;
+  debt_icusd: FormattedNumber;
+  collateral_ratio: opt float64;
+};
+
+type SpDepositDTO = record {
+  total_deposited: FormattedNumber;
+  current_balance: FormattedNumber;
+  earned_collateral: vec record { principal; FormattedNumber };
+};
+
+type AmmLpPositionDTO = record {
+  pool_id: text;
+  pool_label: text;
+  shares: FormattedNumber;
+  share_value_usd: float64;
+  approximate: bool;
+};
+
+type TokenBalanceDTO = record {
+  ledger: principal;
+  symbol: text;
+  balance: FormattedNumber;
+  value_usd: opt float64;
+};
+
+type AddressDTO = record {
+  principal: principal;
+  vaults_owned: vec VaultSummaryDTO;
+  sp_deposits: vec SpDepositDTO;
+  amm_lp_positions: vec AmmLpPositionDTO;
+  token_balances: vec TokenBalanceDTO;
+  recent_events: vec EventRowDTO;
+  total_value_usd: float64;
+  approximate_sources: vec text;
+  generated_at_ns: nat64;
+};
+
+type VaultDetailDTO = record {
+  vault_id: nat64;
+  status: VaultStatus;
+  owner: principal;
+  collateral_type: principal;
+  collateral_amount: FormattedNumber;
+  debt_icusd: FormattedNumber;
+  collateral_ratio: opt float64;
+  history: vec EventRowDTO;
+  closed_synthesized: bool;
+  generated_at_ns: nat64;
+};
+
+type PoolDetailDTO = record {
+  pool_id: text;
+  pool_label: text;
+  pool_kind: text;
+  reserves: vec record { principal; FormattedNumber };
+  lp_total_supply: FormattedNumber;
+  virtual_price: opt float64;
+  recent_events: vec EventRowDTO;
+  generated_at_ns: nat64;
+};
+
+type TokenDetailDTO = record {
+  ledger: principal;
+  symbol: text;
+  decimals: nat8;
+  total_supply: FormattedNumber;
+  fee: FormattedNumber;
+  recent_transfers: vec EventRowDTO;
+  generated_at_ns: nat64;
+};
+
+type EventDetailDTO = record {
+  global_id: text;
+  source: text;
+  source_event_id: nat64;
+  kind: text;
+  timestamp_ns: nat64;
+  payload_summary: text;
+  payload_json: text;
+  related_event_ids: vec text;
+  generated_at_ns: nat64;
+};
+
+service : {
+  get_overview: () -> (OverviewDTO) query;
+  get_activity: (ActivityFilter, ActivityCursor) -> (ActivityFeedDTO) query;
+  get_address: (principal) -> (AddressDTO) query;
+  get_vault: (nat64) -> (VaultDetailDTO) query;
+  get_pool: (text) -> (PoolDetailDTO) query;
+  get_token: (principal) -> (TokenDetailDTO) query;
+  get_event: (text) -> (EventDetailDTO) query;
+  get_health: () -> (HealthSummaryDTO) query;
+  ping: () -> (text) query;
+}
