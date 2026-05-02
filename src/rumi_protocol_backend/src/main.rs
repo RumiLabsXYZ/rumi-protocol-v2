@@ -3650,6 +3650,64 @@ async fn set_breaker_window_debt_ceiling_e8s(new_ceiling: u64) -> Result<(), Pro
     Ok(())
 }
 
+/// Wave-9c DOS-005: tune the alert-band width (in bps) used by
+/// `check_vaults` to bound the sorted-troves walk on band-only ticks.
+/// Default 1000 bps (10% headroom above the worst per-collateral
+/// `min_liquidation_ratio`). 0 disables the band (only vaults strictly
+/// below the worst floor are visited). Wider values trade cycle savings
+/// for safety margin against cross-collateral CR-key drift.
+#[candid_method(update)]
+#[update]
+async fn set_check_vaults_alert_band_bps(new_band_bps: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set check_vaults alert band".to_string(),
+        ));
+    }
+    mutate_state(|s| s.set_check_vaults_alert_band_bps(new_band_bps));
+    log!(
+        INFO,
+        "[set_check_vaults_alert_band_bps] Alert band set to: {} bps ({:.2}% headroom)",
+        new_band_bps,
+        (new_band_bps as f64) / 100.0
+    );
+    Ok(())
+}
+
+/// Wave-9c DOS-005: tune the cadence of the safety-belt full sweep that
+/// walks every vault in `vault_cr_index` regardless of CR band.
+/// Default 12 (one full sweep per hour at the 5-minute XRC cadence).
+/// 0 or 1 forces full sweep every tick (revert path that mirrors
+/// pre-Wave-9c behavior).
+#[candid_method(update)]
+#[update]
+async fn set_check_vaults_full_sweep_every_n_ticks(
+    new_n: u64,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set check_vaults full-sweep cadence"
+                .to_string(),
+        ));
+    }
+    mutate_state(|s| s.set_check_vaults_full_sweep_every_n_ticks(new_n));
+    log!(
+        INFO,
+        "[set_check_vaults_full_sweep_every_n_ticks] Cadence set to: {} ticks ({})",
+        new_n,
+        if new_n <= 1 {
+            "full sweep every tick (Wave-9c effectively disabled)"
+        } else {
+            "Wave-9c band sharding active"
+        }
+    );
+    Ok(())
+}
+
 /// Wave-10 LIQ-008: clear the breaker latch so `check_vaults` resumes
 /// auto-publishing on the next tick. Admin-only. Emits `BreakerCleared`
 /// with the windowed total at clear time so the audit trail captures

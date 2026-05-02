@@ -55,6 +55,19 @@ pub const MINIMUM_COLLATERAL_RATIO: Ratio = Ratio::new(dec!(1.33));  // 133%
 /// Default protocol share of liquidator's bonus profit (3%).
 pub const DEFAULT_LIQUIDATION_PROTOCOL_SHARE: Ratio = Ratio::new(dec!(0.03));
 
+/// Wave-9c DOS-005: default alert band (in basis points) above each
+/// collateral's `min_liquidation_ratio` within which `check_vaults`
+/// walks the sorted-troves index. 1000 bps = 10% headroom. Tuned via
+/// `set_check_vaults_alert_band_bps`.
+pub const DEFAULT_CHECK_VAULTS_ALERT_BAND_BPS: u64 = 1000;
+
+/// Wave-9c DOS-005: default cadence (in 5-minute XRC ticks) for the
+/// safety-belt full sweep that walks every vault regardless of CR
+/// band. 12 = once per hour. 0 or 1 means full sweep every tick
+/// (effectively reverts to pre-Wave-9c behavior). Tuned via
+/// `set_check_vaults_full_sweep_every_n_ticks`.
+pub const DEFAULT_CHECK_VAULTS_FULL_SWEEP_EVERY_N_TICKS: u64 = 12;
+
 /// Stable token types accepted for vault repayment (1:1 with icUSD)
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StableTokenType {
@@ -724,30 +737,26 @@ pub async fn check_vaults() {
     // unchanged; the order is now sorted by CR ascending. This matches the
     // server-side band-gate behavior — the bot/pool see the same vault the
     // band gate would accept first.
-    let (unhealthy_vaults, _healthy_vaults) = read_state(|s| {
-        let mut unhealthy_vaults: Vec<Vault> = vec![];
-        let mut healthy_vaults: Vec<Vault> = vec![];
-        for (_cr_key, bucket) in s.vault_cr_index.iter() {
-            for vid in bucket {
-                let vault = match s.vault_id_to_vaults.get(vid) {
-                    Some(v) => v,
-                    None => continue, // index drift — ignore
-                };
-                if vault.bot_processing {
-                    // Skip — bot is actively processing this vault
-                    continue;
-                }
-                if compute_collateral_ratio(vault, dummy_rate, s)
-                    < s.get_min_liquidation_ratio_for(&vault.collateral_type)
-                {
-                    unhealthy_vaults.push(vault.clone());
-                } else {
-                    healthy_vaults.push(vault.clone())
-                }
-            }
-        }
-        (unhealthy_vaults, healthy_vaults)
-    });
+    //
+    // Wave-9c DOS-005: bound the walk to the at-risk band on most ticks.
+    // `advance_check_vaults_tick` returns true on the Nth tick (default
+    // every 12 = once per hour at the 5-min cadence), making that tick a
+    // full sweep. This is the safety belt for cross-collateral CR-key
+    // drift: a vault whose key is stale-above-threshold is missed by
+    // band-only ticks but caught by the next full sweep. Tunable via
+    // `set_check_vaults_alert_band_bps` and
+    // `set_check_vaults_full_sweep_every_n_ticks`.
+    let do_full_sweep = mutate_state(|s| s.advance_check_vaults_tick());
+    let scan = read_state(|s| s.scan_unhealthy_vaults(dummy_rate, do_full_sweep));
+    log!(
+        INFO,
+        "[check_vaults] {} tick: visited {} vault(s), threshold_key={}, found {} unhealthy",
+        if scan.was_full_sweep { "full-sweep" } else { "band-only" },
+        scan.vaults_visited,
+        scan.threshold_key,
+        scan.unhealthy_vaults.len(),
+    );
+    let unhealthy_vaults = scan.unhealthy_vaults;
 
     // Log unhealthy vaults but don't liquidate them
     if !unhealthy_vaults.is_empty() {
