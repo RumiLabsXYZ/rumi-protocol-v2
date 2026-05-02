@@ -56,6 +56,9 @@ docs/
 # Superpowers local brainstorm/cache
 .superpowers/
 
+# Git worktrees (isolated workspaces for parallel feature work)
+.worktrees/
+
 # Loose screenshots at repo root (Claude Preview / browser captures during debugging).
 # Tracked screenshots under docs/screenshots/ are unaffected because they're already
 # in git history.
