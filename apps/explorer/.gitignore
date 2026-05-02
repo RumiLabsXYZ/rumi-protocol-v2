@@ -1,0 +1,12 @@
+# Build artifacts
+.icp/cache/
+node_modules/
+dist/
+.dccache
+
+# Generated bindings (regenerated from .did)
+frontend/src/bindings/
+
+# OS / editor
+.DS_Store
+*.swp
