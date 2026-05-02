@@ -239,17 +239,34 @@ pub fn get_liquidation_history(limit: Option<u64>) -> Vec<PoolLiquidationRecord>
     })
 }
 
+/// Server-side cap on `length` for `get_pool_events`. Audit Wave 9a
+/// (DOS-008): without this cap a caller could pass `length = u64::MAX`
+/// and force the canister to slice up to the full pool-event log on a
+/// single query — the same cycle-DoS pattern fixed for the backend's
+/// `get_events`.
+pub const MAX_POOL_EVENTS_PAGE: u64 = 500;
+
+/// Pure paging helper for `get_pool_events`. Clamps `length` to
+/// `MAX_POOL_EVENTS_PAGE` before slicing so a single call's reply size
+/// is bounded regardless of caller input. Extracted from the `#[query]`
+/// wrapper so the audit fence can exercise the clamp without spinning
+/// up a canister fixture.
+pub fn pool_events_page(events: &[PoolEvent], start: u64, length: u64) -> Vec<PoolEvent> {
+    let length = length.min(MAX_POOL_EVENTS_PAGE);
+    let total = events.len() as u64;
+    if start >= total {
+        return Vec::new();
+    }
+    let end = (start + length).min(total) as usize;
+    events[start as usize..end].to_vec()
+}
+
+/// Paginated pool-event log. `length` is server-side clamped via
+/// `pool_events_page` so a caller cannot request the entire log in a
+/// single call, regardless of input. Audit Wave 9a (DOS-008).
 #[query]
 pub fn get_pool_events(start: u64, length: u64) -> Vec<PoolEvent> {
-    read_state(|s| {
-        let events = s.pool_events();
-        let total = events.len() as u64;
-        if start >= total {
-            return vec![];
-        }
-        let end = (start + length).min(total) as usize;
-        events[start as usize..end].to_vec()
-    })
+    read_state(|s| pool_events_page(s.pool_events(), start, length))
 }
 
 #[query]

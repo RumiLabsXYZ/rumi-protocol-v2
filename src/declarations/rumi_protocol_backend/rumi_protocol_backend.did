@@ -452,6 +452,12 @@ type EventTypeFilter = variant {
   Redemption;
   CloseVault;
 };
+type EventsByPrincipalPagedResponse = record {
+  scan_end : nat64;
+  exhausted : bool;
+  events : vec record { nat64; Event };
+  total_events : nat64;
+};
 type FeeSource = variant { BorrowingFee; RedemptionFee };
 type Fees = record { redemption_fee : float64; borrowing_fee : float64 };
 type GetEventsArg = record {
@@ -749,6 +755,10 @@ type VaultRedemption = record {
   vault_id : nat64;
   collateral_seized : nat64;
 };
+type VaultsPageResponse = record {
+  vaults : vec CandidVault;
+  next_start_id : opt nat64;
+};
 type XrcAssetClass = variant { Cryptocurrency; FiatCurrency };
 service : (ProtocolArg) -> {
   add_collateral_token : (AddCollateralArg) -> (Result);
@@ -786,6 +796,9 @@ service : (ProtocolArg) -> {
   get_event_timestamps : (nat64, nat64) -> (vec nat64) query;
   get_events : (GetEventsArg) -> (vec Event) query;
   get_events_by_principal : (principal) -> (vec record { nat64; Event }) query;
+  get_events_by_principal_paged : (principal, nat64, nat64) -> (
+      EventsByPrincipalPagedResponse,
+    ) query;
   get_events_filtered : (GetEventsArg) -> (GetEventsFilteredResponse) query;
   get_fees : (nat64) -> (Fees) query;
   get_global_icusd_mint_cap : () -> (nat64) query;
@@ -793,6 +806,7 @@ service : (ProtocolArg) -> {
   get_interest_pool_share : () -> (float64) query;
   get_interest_split : () -> (vec InterestSplitArg) query;
   get_liquidatable_vaults : () -> (vec CandidVault) query;
+  get_liquidatable_vaults_page : (nat64, nat64) -> (VaultsPageResponse) query;
   get_liquidation_bonus : () -> (float64) query;
   get_liquidation_frozen : () -> (bool) query;
   get_liquidation_ordering_tolerance_bps : () -> (nat64) query;
@@ -827,9 +841,14 @@ service : (ProtocolArg) -> {
   get_three_pool_canister : () -> (opt principal) query;
   get_treasury_principal : () -> (opt principal) query;
   get_treasury_stats : () -> (TreasuryStats) query;
+  get_vault_count : () -> (nat64) query;
   get_vault_history : (nat64) -> (vec record { nat64; Event }) query;
+  get_vault_history_paged : (nat64, nat64, nat64) -> (
+      GetEventsFilteredResponse,
+    ) query;
   get_vault_interest_rate : (nat64) -> (Result_7) query;
   get_vaults : (opt principal) -> (vec CandidVault) query;
+  get_vaults_page : (nat64, nat64) -> (VaultsPageResponse) query;
   http_request : (HttpRequest) -> (HttpResponse_1) query;
   icrc10_supported_standards : () -> (vec StandardRecord) query;
   icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (Result_8);

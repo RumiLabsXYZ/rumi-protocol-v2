@@ -301,6 +301,72 @@ pub struct GetEventsFilteredResponse {
     pub events: Vec<(u64, crate::event::Event)>,
 }
 
+/// Output cap on `get_vault_history` (DOS-001 legacy entry point) and
+/// page-size cap on `get_vault_history_paged`. Bounds the per-call
+/// reply size; for full historical access callers page via
+/// `get_vault_history_paged`. Audit Wave 9a (DOS-001).
+pub const MAX_VAULT_HISTORY: usize = 200;
+
+/// Output cap on `get_events_by_principal` (DOS-003 legacy entry point):
+/// the function returns the most recent matches in a bounded ring
+/// buffer of this size. Audit Wave 9a (DOS-003).
+pub const MAX_EVENTS_BY_PRINCIPAL_LEGACY: usize = 500;
+
+/// Per-call scan-window cap on `get_events_by_principal_paged`. A
+/// caller cannot scan more than this many event-log entries in a
+/// single call — pages chain to cover larger ranges. Audit Wave 9a
+/// (DOS-003).
+pub const MAX_EVENTS_BY_PRINCIPAL_SCAN: u64 = 5_000;
+
+/// Output cap on `get_events_by_principal_paged`: matches found in the
+/// scan window beyond this count truncate (the caller resumes from
+/// `scan_end`). Audit Wave 9a (DOS-003).
+pub const MAX_EVENTS_BY_PRINCIPAL_OUTPUT: usize = 500;
+
+/// Output cap on `get_all_vaults`, `get_vaults(None)`, and
+/// `get_liquidatable_vaults` legacy entry points. Bounds the per-call
+/// reply size; for full enumeration callers use the `*_page` paged
+/// variants. Audit Wave 9a (DOS-004).
+pub const MAX_VAULTS_LEGACY_PAGE: usize = 500;
+
+/// Page-size cap on `get_vaults_page` and
+/// `get_liquidatable_vaults_page`. Audit Wave 9a (DOS-004).
+pub const MAX_VAULTS_PAGE_LIMIT: u64 = 500;
+
+/// Paginated response for `get_vault_history_paged`. `events` is the
+/// page of matches in newest-first order within the requested window.
+/// `total` is the total matched-event count for this vault so the
+/// caller can render accurate page indicators. Audit Wave 9a (DOS-001).
+#[derive(candid::CandidType, Clone)]
+pub struct VaultHistoryPagedResponse {
+    pub total: u64,
+    pub events: Vec<(u64, crate::event::Event)>,
+}
+
+/// Paginated response for `get_events_by_principal_paged`. Cursor-based
+/// pagination over the global event log: caller passes `scan_start` and
+/// the response reports `scan_end` (resume offset for the next call)
+/// plus an `exhausted` flag once the scan has reached `total_events`.
+/// `events` are the matches found in the scanned window, in scan order.
+/// Audit Wave 9a (DOS-003).
+#[derive(candid::CandidType, Clone)]
+pub struct EventsByPrincipalPagedResponse {
+    pub events: Vec<(u64, crate::event::Event)>,
+    pub scan_end: u64,
+    pub exhausted: bool,
+    pub total_events: u64,
+}
+
+/// Paginated response for `get_vaults_page` / `get_liquidatable_vaults_page`.
+/// `vaults` is the page slice ordered by ascending `vault_id` starting at
+/// `start_id`. `next_start_id` is `Some(id)` to continue paging, `None`
+/// when the end of the map is reached. Audit Wave 9a (DOS-004).
+#[derive(candid::CandidType, candid::Deserialize, Debug)]
+pub struct VaultsPageResponse {
+    pub vaults: Vec<crate::vault::CandidVault>,
+    pub next_start_id: Option<u64>,
+}
+
 #[derive(CandidType, Deserialize, Debug)]
 pub struct LiquidityStatus {
     pub liquidity_provided: u64,

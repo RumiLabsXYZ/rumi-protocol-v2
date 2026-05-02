@@ -2224,10 +2224,37 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
            lowerMsg.includes('tried to close unknown vault');
   }
 
+    /**
+     * Page size for the cursor-based vault enumeration helpers below. The
+     * backend caps each page at 500 (Wave-9a DOS-004); we ask for that ceiling
+     * so a typical-size protocol comes back in a single call. Pages are
+     * stitched into one array so existing call sites still see the full set.
+     */
+    static readonly VAULT_PAGE_SIZE = 500n;
+
+    /**
+     * Defensive ceiling on the number of paginated calls we'll chain in
+     * `getLiquidatableVaults` / `getAllVaults`. At 500 vaults per page this
+     * caps a single fetch at 50,000 vaults — well above any realistic TVL,
+     * but it stops a buggy `next_start_id` (e.g. cursor that fails to advance)
+     * from spinning forever.
+     */
+    static readonly VAULT_PAGE_MAX_PAGES = 100;
+
     static async getLiquidatableVaults(): Promise<CandidVault[]> {
       try {
-        const vaults = await ApiClient.getPublicData<CandidVault[]>('get_liquidatable_vaults');
-        return vaults;
+        const all: CandidVault[] = [];
+        let startId = 0n;
+        for (let page = 0; page < ApiClient.VAULT_PAGE_MAX_PAGES; page += 1) {
+          const resp = await ApiClient.getPublicData<{
+            vaults: CandidVault[];
+            next_start_id: [] | [bigint];
+          }>('get_liquidatable_vaults_page', startId, ApiClient.VAULT_PAGE_SIZE);
+          all.push(...resp.vaults);
+          if (resp.next_start_id.length === 0) break;
+          startId = resp.next_start_id[0];
+        }
+        return all;
       } catch (err) {
         console.error('Failed to get liquidatable vaults:', err);
         return [];
@@ -2236,8 +2263,18 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
 
     static async getAllVaults(): Promise<CandidVault[]> {
       try {
-        const vaults = await ApiClient.getPublicData<CandidVault[]>('get_all_vaults');
-        return vaults;
+        const all: CandidVault[] = [];
+        let startId = 0n;
+        for (let page = 0; page < ApiClient.VAULT_PAGE_MAX_PAGES; page += 1) {
+          const resp = await ApiClient.getPublicData<{
+            vaults: CandidVault[];
+            next_start_id: [] | [bigint];
+          }>('get_vaults_page', startId, ApiClient.VAULT_PAGE_SIZE);
+          all.push(...resp.vaults);
+          if (resp.next_start_id.length === 0) break;
+          startId = resp.next_start_id[0];
+        }
+        return all;
       } catch (err) {
         console.error('Failed to get all vaults:', err);
         return [];

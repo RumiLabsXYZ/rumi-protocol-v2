@@ -615,6 +615,12 @@ export const idlFactory = ({ IDL }) => {
     }),
     'set_recovery_cr_multiplier' : IDL.Record({ 'multiplier' : IDL.Text }),
   });
+  const EventsByPrincipalPagedResponse = IDL.Record({
+    'scan_end' : IDL.Nat64,
+    'exhausted' : IDL.Bool,
+    'events' : IDL.Vec(IDL.Tuple(IDL.Nat64, Event)),
+    'total_events' : IDL.Nat64,
+  });
   const GetEventsFilteredResponse = IDL.Record({
     'total' : IDL.Nat64,
     'events' : IDL.Vec(IDL.Tuple(IDL.Nat64, Event)),
@@ -626,6 +632,10 @@ export const idlFactory = ({ IDL }) => {
   const InterestSplitArg = IDL.Record({
     'bps' : IDL.Nat64,
     'destination' : IDL.Text,
+  });
+  const VaultsPageResponse = IDL.Record({
+    'vaults' : IDL.Vec(CandidVault),
+    'next_start_id' : IDL.Opt(IDL.Nat64),
   });
   const LiquidityStatus = IDL.Record({
     'liquidity_provided' : IDL.Nat64,
@@ -938,6 +948,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Vec(IDL.Tuple(IDL.Nat64, Event))],
         ['query'],
       ),
+    'get_events_by_principal_paged' : IDL.Func(
+        [IDL.Principal, IDL.Nat64, IDL.Nat64],
+        [EventsByPrincipalPagedResponse],
+        ['query'],
+      ),
     'get_events_filtered' : IDL.Func(
         [GetEventsArg],
         [GetEventsFilteredResponse],
@@ -949,6 +964,11 @@ export const idlFactory = ({ IDL }) => {
     'get_interest_pool_share' : IDL.Func([], [IDL.Float64], ['query']),
     'get_interest_split' : IDL.Func([], [IDL.Vec(InterestSplitArg)], ['query']),
     'get_liquidatable_vaults' : IDL.Func([], [IDL.Vec(CandidVault)], ['query']),
+    'get_liquidatable_vaults_page' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [VaultsPageResponse],
+        ['query'],
+      ),
     'get_liquidation_bonus' : IDL.Func([], [IDL.Float64], ['query']),
     'get_liquidation_frozen' : IDL.Func([], [IDL.Bool], ['query']),
     'get_liquidation_ordering_tolerance_bps' : IDL.Func(
@@ -1017,15 +1037,26 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'get_treasury_stats' : IDL.Func([], [TreasuryStats], ['query']),
+    'get_vault_count' : IDL.Func([], [IDL.Nat64], ['query']),
     'get_vault_history' : IDL.Func(
         [IDL.Nat64],
         [IDL.Vec(IDL.Tuple(IDL.Nat64, Event))],
+        ['query'],
+      ),
+    'get_vault_history_paged' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64, IDL.Nat64],
+        [GetEventsFilteredResponse],
         ['query'],
       ),
     'get_vault_interest_rate' : IDL.Func([IDL.Nat64], [Result_7], ['query']),
     'get_vaults' : IDL.Func(
         [IDL.Opt(IDL.Principal)],
         [IDL.Vec(CandidVault)],
+        ['query'],
+      ),
+    'get_vaults_page' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [VaultsPageResponse],
         ['query'],
       ),
     'http_request' : IDL.Func([HttpRequest], [HttpResponse_1], ['query']),
