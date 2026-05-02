@@ -455,7 +455,27 @@ pub async fn deposit_as_3usd(
 
     let lp_minted = match lp_result {
         Ok((Ok(lp),)) => lp,
-        _ => {
+        Ok((Err(e),)) => {
+            log!(
+                INFO,
+                "deposit_as_3usd: 3pool add_liquidity returned error {:?}; refunding {}",
+                e,
+                amount
+            );
+            refund_user(caller, token_ledger, amount).await;
+            return Err(StabilityPoolError::InterCanisterCallFailed {
+                target: "3pool".to_string(),
+                method: "add_liquidity".to_string(),
+            });
+        }
+        Err((code, msg)) => {
+            log!(
+                INFO,
+                "deposit_as_3usd: 3pool add_liquidity call failed: {:?} {}; refunding {}",
+                code,
+                msg,
+                amount
+            );
             refund_user(caller, token_ledger, amount).await;
             return Err(StabilityPoolError::InterCanisterCallFailed {
                 target: "3pool".to_string(),

@@ -392,6 +392,10 @@ pub enum ThreePoolErrorRemote {
     InsufficientPoolBalance { token: String, required: u128, available: u128 },
     InsufficientLpBalance { required: u128, available: u128 },
     BurnFailed { token: String, reason: String },
+    /// Audit fence B-01 (Wave 14a): rumi_3pool returns this when another
+    /// concurrent operation holds the pool lock. The SP `add_liquidity`
+    /// path will refund the user and surface a transient call failure.
+    PoolLocked,
 }
 
 // ──────────────────────────────────────────────────────────────
