@@ -64,3 +64,9 @@ docs/
 # in git history.
 /explorer-*.png
 /pr*-*.png
+
+# apps/explorer (standalone explorer at apps/explorer/)
+# Local entries also exist in apps/explorer/.gitignore; root entries here aid clarity.
+apps/explorer/.icp/cache/
+apps/explorer/frontend/src/bindings/
+apps/explorer/frontend/dist/

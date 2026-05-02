@@ -1113,6 +1113,7 @@ Would you like me to add more terms or expand on any existing definitions?
 - `src/rumi_protocol_backend`: Contains the Rust smart contracts handling the core logic of icUSD.
 - `src/ledger`: Includes the canisters for handling ledger operations specific to icUSD and ICP interactions.
 - `src/rumi_protocol_frontend`: Svelte application providing a user interface for interacting with icUSD.
+- [`apps/explorer/`](apps/explorer/): Standalone public explorer for browsing vaults, liquidations, and protocol stats. See its [README](apps/explorer/README.md) for local development.
 
 ## Getting Started
 ### Prerequisites
