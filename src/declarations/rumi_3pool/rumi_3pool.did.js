@@ -39,6 +39,7 @@ export const idlFactory = ({ IDL }) => {
     'TransferFailed' : IDL.Record({ 'token' : IDL.Text, 'reason' : IDL.Text }),
     'SlippageExceeded' : IDL.Null,
     'PoolEmpty' : IDL.Null,
+    'PoolLocked' : IDL.Null,
     'InsufficientPoolBalance' : IDL.Record({
       'token' : IDL.Text,
       'available' : IDL.Nat,

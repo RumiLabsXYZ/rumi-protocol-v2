@@ -11,6 +11,7 @@ pub mod swap;
 pub mod liquidity;
 pub mod transfers;
 pub mod admin;
+pub mod pool_guard;
 pub mod icrc21;
 pub mod icrc_token;
 pub mod icrc3;
@@ -336,7 +337,12 @@ pub async fn swap(i: u8, j: u8, dx: u128, min_dy: u128) -> Result<u128, ThreePoo
         return Err(ThreePoolError::SlippageExceeded);
     }
 
-    // 6. Transfer input token from user to pool
+    // 6. Acquire the pool lock BEFORE the first await so a concurrent caller
+    //    cannot price against the same pre-balances. Released on Drop, which
+    //    runs on Ok, Err, or trap. Audit fence B-01.
+    let _pool_guard = pool_guard::PoolGuard::new()?;
+
+    // 7. Transfer input token from user to pool
     let caller = ic_cdk::api::caller();
     let token_i_symbol = read_state(|s| s.config.tokens[i_idx].symbol.clone());
 
@@ -347,7 +353,7 @@ pub async fn swap(i: u8, j: u8, dx: u128, min_dy: u128) -> Result<u128, ThreePoo
             reason,
         })?;
 
-    // 7. Transfer output token from pool to user
+    // 8. Transfer output token from pool to user
     transfer_to_user(token_j_ledger, caller, output)
         .await
         .map_err(|reason| ThreePoolError::TransferFailed {
@@ -443,7 +449,11 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
         return Err(ThreePoolError::SlippageExceeded);
     }
 
-    // 7. Transfer each non-zero amount from user to pool
+    // 7. Acquire the pool lock BEFORE the first await. Released on Drop.
+    //    Audit fence B-01.
+    let _pool_guard = pool_guard::PoolGuard::new()?;
+
+    // 8. Transfer each non-zero amount from user to pool
     let caller = ic_cdk::api::caller();
     for k in 0..3 {
         if amounts_arr[k] > 0 {
@@ -523,6 +533,10 @@ pub async fn remove_liquidity(
     if lp_burn == 0 {
         return Err(ThreePoolError::ZeroAmount);
     }
+
+    // Acquire the pool lock BEFORE reading state so the read/mutate/await
+    // sequence is serialized against concurrent callers. Audit fence B-01.
+    let _pool_guard = pool_guard::PoolGuard::new()?;
 
     let caller = ic_cdk::api::caller();
 
@@ -627,6 +641,9 @@ pub async fn remove_one_coin(
     if idx >= 3 {
         return Err(ThreePoolError::InvalidCoinIndex);
     }
+
+    // Acquire the pool lock BEFORE reading state. Audit fence B-01.
+    let _pool_guard = pool_guard::PoolGuard::new()?;
 
     let caller = ic_cdk::api::caller();
 
@@ -753,6 +770,11 @@ pub async fn donate(token_index: u8, amount: u128) -> Result<(), ThreePoolError>
     if read_state(|s| s.lp_total_supply) == 0 {
         return Err(ThreePoolError::PoolEmpty);
     }
+
+    // Acquire the pool lock BEFORE the transfer await. Donation mutates
+    // pool balances after the await; without the lock a concurrent swap
+    // would price against the pre-donation balances. Audit fence B-01.
+    let _pool_guard = pool_guard::PoolGuard::new()?;
 
     // Transfer token from caller to pool
     let caller = ic_cdk::api::caller();
@@ -1819,6 +1841,12 @@ pub async fn authorized_redeem_and_burn(
     if !storage::burn_caller_contains(&caller) {
         return Err(ThreePoolError::NotAuthorizedBurnCaller);
     }
+
+    // Acquire the pool lock BEFORE reading state. The function reads
+    // balances, mutates them, awaits an external burn call, and may roll
+    // back. Concurrency on this path corrupts both LP supply and pool
+    // balances. Audit fence B-01.
+    let _pool_guard = pool_guard::PoolGuard::new()?;
 
     // 2. Resolve token index
     let (token_idx, token_symbol) = read_state(|s| {
