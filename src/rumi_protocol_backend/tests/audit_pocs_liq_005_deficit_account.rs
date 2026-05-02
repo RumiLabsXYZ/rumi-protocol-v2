@@ -202,7 +202,7 @@ fn liq_005_check_readonly_latch_does_not_fire_below_threshold() {
 
 use rumi_protocol_backend::EventTypeFilter;
 use rumi_protocol_backend::event::{
-    Event, FeeSource, record_deficit_accrued, record_deficit_repaid,
+    DeficitSource, Event, FeeSource, record_deficit_accrued, record_deficit_repaid,
 };
 
 #[test]
@@ -212,6 +212,7 @@ fn liq_005_event_deficit_accrued_round_trip() {
         amount: ICUSD::new(1_500),
         new_deficit: ICUSD::new(1_500),
         timestamp: 1_700_000_000_000_000_000,
+        source: Some(DeficitSource::Liquidation { vault_id: 42 }),
     };
     let mut bytes = Vec::new();
     ciborium::ser::into_writer(&e, &mut bytes).expect("encode");
@@ -257,7 +258,12 @@ fn liq_005_event_deficit_repaid_round_trip_redemption_no_anchor() {
 #[test]
 fn liq_005_record_deficit_accrued_emits_event_and_updates_state() {
     let mut s = State::default();
-    record_deficit_accrued(&mut s, /*vault_id=*/ 7, ICUSD::new(900), /*timestamp=*/ 1_000);
+    record_deficit_accrued(
+        &mut s,
+        DeficitSource::Liquidation { vault_id: 7 },
+        ICUSD::new(900),
+        /*timestamp=*/ 1_000,
+    );
     assert_eq!(s.protocol_deficit_icusd, ICUSD::new(900));
 }
 

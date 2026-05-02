@@ -999,6 +999,13 @@ async fn redeem_icp(icusd_amount: u64) -> Result<SuccessWithFee, ProtocolError> 
 #[update]
 async fn redeem_collateral(collateral_type: Principal, icusd_amount: u64) -> Result<SuccessWithFee, ProtocolError> {
     validate_call().await?;
+    // Wave-9 RED-003: gate redemption on protocol mode. ReadOnly auto-latches
+    // when total collateral ratio drops below 100% (Wave-1) or when the
+    // deficit account crosses the configured threshold (Wave-8e LIQ-005);
+    // both are insolvency signals where further redemption would deepen the
+    // bad-debt position by extracting collateral from a protocol that
+    // already owes more than it holds.
+    validate_mode()?;
     // Wave-5 RED-001: validate_call only refreshes ICP. For non-ICP collaterals
     // (BOB, EXE, ckBTC, ckETH, ckXAUT, nICP) the redeemer would otherwise pay
     // out at whatever last_price is cached, which could be hours stale if the
@@ -3123,6 +3130,10 @@ fn get_liquidation_ordering_tolerance_bps() -> u64 {
 #[update]
 async fn redeem_reserves(amount: u64, preferred_token: Option<Principal>) -> Result<ReserveRedemptionResult, ProtocolError> {
     validate_call().await?;
+    // Wave-9 RED-003: reserve redemption walks the same vault cr-index as
+    // redeem_collateral on its spillover branch, so the same ReadOnly gate
+    // applies. See main.rs::redeem_collateral for the rationale.
+    validate_mode()?;
     rumi_protocol_backend::vault::redeem_reserves(amount, preferred_token).await
 }
 

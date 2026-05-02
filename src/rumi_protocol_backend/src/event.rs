@@ -28,6 +28,25 @@ pub enum FeeSource {
     RedemptionFee,
 }
 
+/// Wave-9 RED-002: identifies which path accrued a shortfall to
+/// `protocol_deficit_icusd`. Persisted on the `DeficitAccrued` event so
+/// the explorer can attribute deficit growth between liquidation and
+/// redemption flows. Pre-Wave-9 events serialize without this field
+/// and decode with `source = None` via `serde(default)`; new events
+/// always populate it.
+///
+/// Liquidation deficits also retain `vault_id` on the parent event for
+/// back-compat with the existing event-log shape; for redemption,
+/// `vault_id` on the parent is set to 0 (the cr-walk touches multiple
+/// vaults, no single id applies) and the redeemer principal lives
+/// inside this enum.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum DeficitSource {
+    Liquidation { vault_id: u64 },
+    Redemption { redeemer: Principal },
+}
+
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Event {
     #[serde(rename = "open_vault")]
@@ -121,18 +140,29 @@ pub enum Event {
         timestamp: Option<u64>,
     },
 
-    /// Wave-8e LIQ-005: an underwater liquidation netted seized USD <
-    /// debt cleared, accruing the shortfall to `protocol_deficit_icusd`.
-    /// Emitted from every liquidation path (`liquidate_vault`,
-    /// `liquidate_vault_partial`, `liquidate_vault_partial_with_stable`,
-    /// `partial_liquidate_vault`, `liquidate_vault_debt_already_burned`)
-    /// when shortfall > 0.
+    /// Wave-8e LIQ-005 + Wave-9 RED-002: a redemption or liquidation
+    /// netted seized USD < debt cleared, accruing the shortfall to
+    /// `protocol_deficit_icusd`. Emitted from every liquidation path
+    /// (`liquidate_vault`, `liquidate_vault_partial`,
+    /// `liquidate_vault_partial_with_stable`, `partial_liquidate_vault`,
+    /// `liquidate_vault_debt_already_burned`) when shortfall > 0, and
+    /// from `record_redemption_on_vaults` when redeemer claim exceeds
+    /// vault collateral at oracle price.
+    ///
+    /// `vault_id` is the originating vault for liquidation and 0 for
+    /// redemption (the cr-walk touches multiple vaults). The new
+    /// `source` field is the canonical attribution: pre-Wave-9 events
+    /// decode with `source = None` (all pre-Wave-9 deficit rows were
+    /// liquidation by definition); post-Wave-9 events always populate
+    /// it.
     #[serde(rename = "deficit_accrued")]
     DeficitAccrued {
         vault_id: u64,
         amount: ICUSD,
         new_deficit: ICUSD,
         timestamp: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<DeficitSource>,
     },
 
     /// Wave-8e LIQ-005: a fee collection routed `amount` icUSD toward
@@ -1802,18 +1832,29 @@ pub fn record_margin_transfer(state: &mut State, vault_id: u64, owner: Principal
 /// Record a `DeficitAccrued` event and increment `protocol_deficit_icusd`.
 /// Caller is responsible for invoking `state.check_deficit_readonly_latch()`
 /// afterwards if the latch threshold is configured.
+///
+/// Wave-9 RED-002: takes a `DeficitSource` so liquidation and redemption
+/// deficits are distinguishable in the event log. The legacy `vault_id`
+/// field on the event is preserved for back-compat and continues to be
+/// populated for liquidation; redemption deficits set `vault_id = 0` on
+/// the parent event because the cr-walk touches multiple vaults.
 pub fn record_deficit_accrued(
     state: &mut State,
-    vault_id: u64,
+    source: DeficitSource,
     amount: ICUSD,
     timestamp: u64,
 ) {
     state.accrue_deficit_shortfall(amount);
+    let vault_id = match source {
+        DeficitSource::Liquidation { vault_id } => vault_id,
+        DeficitSource::Redemption { .. } => 0,
+    };
     record_event(&Event::DeficitAccrued {
         vault_id,
         amount,
         new_deficit: state.protocol_deficit_icusd,
         timestamp,
+        source: Some(source),
     });
 }
 
@@ -2015,6 +2056,20 @@ pub fn record_redemption_on_vaults(
         .map(UsdIcp::from)
         .unwrap_or(collateral_price); // fallback to parameter if no config price
 
+    // Wave-9 RED-002: snapshot price + decimals before mutation so the
+    // shortfall calc below uses the same oracle figures the water-fill
+    // walked. `redeem_on_vaults` mutates state but doesn't touch
+    // `collateral_configs`, so reading after is also safe — we read
+    // here to keep the data flow explicit.
+    let (price_decimal, decimals) = state.get_collateral_config(&redeem_ct)
+        .map(|c| {
+            let p = c.last_price
+                .and_then(rust_decimal::Decimal::from_f64_retain)
+                .unwrap_or(ct_price.0);
+            (p, c.decimals)
+        })
+        .unwrap_or((ct_price.0, 8));
+
     let vault_redemptions = state.redeem_on_vaults(icusd_amount, ct_price, &redeem_ct);
     record_event(&Event::RedemptionOnVaults {
         owner,
@@ -2024,13 +2079,101 @@ pub fn record_redemption_on_vaults(
         icusd_block_index,
         collateral_type: Some(redeem_ct),
         timestamp: Some(now()),
-        vault_redemptions: if vault_redemptions.is_empty() { None } else { Some(vault_redemptions) },
+        vault_redemptions: if vault_redemptions.is_empty() { None } else { Some(vault_redemptions.clone()) },
     });
+
+    // Wave-9 RED-002: route any redemption-side shortfall into the
+    // Wave-8e deficit account. The pure helper takes an explicit
+    // timestamp so unit tests can exercise the predicate without an
+    // `ic_cdk::api::time()` panic — production callers pass `now()`.
+    let _shortfall = accrue_redemption_shortfall_at(
+        state,
+        owner,
+        icusd_amount,
+        &vault_redemptions,
+        price_decimal,
+        decimals,
+        now(),
+    );
+
     let margin: ICP = icusd_amount / ct_price;
     let op_nonce = state.next_op_nonce();
     state
         .pending_redemption_transfer
         .insert(icusd_block_index, PendingMarginTransfer { owner, margin, collateral_type: redeem_ct, retry_count: 0, op_nonce });
+}
+
+/// Wave-9 RED-002: pure-math predicate for the redemption shortfall.
+/// Returns `target - sum(actual_collateral_seized) * price` clamped at
+/// zero, the metric the audit asked for. Pure (no state mutation, no
+/// event recording, no canister-clock read), so unit tests can drive
+/// it directly off `state.redeem_on_vaults` output.
+///
+/// Two silent-shortfall modes are unified by this metric:
+///
+///   * **Mode 1** — vault debt cap fires (water-fill exhausts available
+///     vaults before consuming the full redemption claim);
+///     `collateral_seized` totals to less than `icusd_amount / price`.
+///   * **Mode 2** — underwater vault (saturating-sub on
+///     `vault.collateral_amount` clips an attempted deduction). The
+///     `VaultRedemption.collateral_seized` field is now authoritative
+///     for the post-saturation actual amount (pre-Wave-9 it was the
+///     *requested* amount and silently over-reported).
+pub fn compute_redemption_shortfall(
+    target_icusd: ICUSD,
+    vault_redemptions: &[VaultRedemption],
+    price_decimal: rust_decimal::Decimal,
+    decimals: u8,
+) -> ICUSD {
+    let total_collateral_seized: u64 =
+        vault_redemptions.iter().map(|v| v.collateral_seized).sum();
+    let value_seized_at_oracle =
+        crate::numeric::collateral_usd_value(total_collateral_seized, price_decimal, decimals);
+    target_icusd.saturating_sub(value_seized_at_oracle)
+}
+
+/// Wave-9 RED-002: predicate + accrual + auto-latch check for redemption
+/// shortfalls. Calls `compute_redemption_shortfall` for the math, then
+/// (if non-zero) routes the shortfall through the same accrual helper
+/// that liquidation paths use (LIQ-005). Mirrors the LIQ-005
+/// liquidation accrual predicate inside `vault.rs::liquidate_vault`.
+///
+/// Pure with respect to the canister clock — callers pass the timestamp
+/// explicitly. Returns the shortfall accrued (zero when the redemption
+/// was solvent at oracle price).
+pub fn accrue_redemption_shortfall_at(
+    state: &mut State,
+    redeemer: Principal,
+    target_icusd: ICUSD,
+    vault_redemptions: &[VaultRedemption],
+    price_decimal: rust_decimal::Decimal,
+    decimals: u8,
+    timestamp: u64,
+) -> ICUSD {
+    let shortfall = compute_redemption_shortfall(
+        target_icusd,
+        vault_redemptions,
+        price_decimal,
+        decimals,
+    );
+    if shortfall.0 > 0 {
+        record_deficit_accrued(
+            state,
+            DeficitSource::Redemption { redeemer },
+            shortfall,
+            timestamp,
+        );
+        if state.check_deficit_readonly_latch() {
+            ic_canister_log::log!(
+                crate::logs::INFO,
+                "[RED-002] deficit threshold {} crossed by redemption (redeemer {}) shortfall {}; auto-latched ReadOnly",
+                state.deficit_readonly_threshold_e8s,
+                redeemer,
+                shortfall.to_u64()
+            );
+        }
+    }
+    shortfall
 }
 
 pub fn record_redemption_transfered(

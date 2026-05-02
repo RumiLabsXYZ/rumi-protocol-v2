@@ -108,6 +108,10 @@ type ConsentMessageSpec = record {
   metadata : ConsentMessageMetadata;
   device_spec : opt DeviceSpec;
 };
+type DeficitSource = variant {
+  Liquidation : record { vault_id : nat64 };
+  Redemption : record { redeemer : principal };
+};
 type DeviceSpec = variant {
   GenericDisplay;
   LineDisplay : record { characters_per_line : nat16; lines_per_page : nat16 };
@@ -395,6 +399,7 @@ type Event = variant {
   set_liquidation_bot_principal : record { "principal" : principal };
   deficit_accrued : record {
     new_deficit : nat64;
+    source : opt DeficitSource;
     vault_id : nat64;
     timestamp : nat64;
     amount : nat64;
