@@ -12,6 +12,7 @@ mod queries;
 mod timers;
 mod tailing;
 mod types;
+pub mod pull_schedule;
 
 use crate::storage::{SlimState, SourceCanisterIds};
 

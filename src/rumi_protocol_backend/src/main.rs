@@ -195,6 +195,10 @@ fn setup_timers() {
 
     // Price timers for all non-ICP collateral types (timers don't survive upgrades,
     // so we re-register them here for any collateral added via add_collateral_token).
+    // Wave-9d DOS-011: register through `xrc::register_collateral_price_timer` so
+    // each closure gates the XRC fetch on `CollateralStatus`. Wound-down collateral
+    // (Frozen / Sunset / Deprecated) keeps the timer alive but skips the ~1B-cycle
+    // XRC call until status flips back to Active or Paused.
     let non_icp_collaterals: Vec<candid::Principal> = read_state(|s| {
         let icp = s.icp_collateral_type();
         s.collateral_configs.keys()
@@ -204,10 +208,7 @@ fn setup_timers() {
     });
     for ledger_id in non_icp_collaterals {
         log!(INFO, "[setup_timers] Registering price timer for collateral {}", ledger_id);
-        ic_cdk_timers::set_timer_interval(
-            rumi_protocol_backend::xrc::FETCHING_ICP_RATE_INTERVAL,
-            move || ic_cdk::spawn(rumi_protocol_backend::management::fetch_collateral_price(ledger_id)),
-        );
+        rumi_protocol_backend::xrc::register_collateral_price_timer(ledger_id);
     }
 
     // clean_stale_operations timer removed — the old implementation dangerously
@@ -4632,14 +4633,16 @@ async fn add_collateral_token(arg: rumi_protocol_backend::AddCollateralArg) -> R
     // Register a price-fetching timer for the new collateral type.
     // ICP has its own dedicated timer in setup_timers(); other collateral
     // types use the generic fetch_collateral_price.
+    // Wave-9d DOS-011: registers via `xrc::register_collateral_price_timer`
+    // so the closure gates on `CollateralStatus`. The timer is permanent
+    // for the canister lifetime; status changes flip the gate at the next
+    // tick with no `clear_timer` / `TimerId` bookkeeping (which would not
+    // survive upgrade anyway).
     let ledger_id = arg.ledger_canister_id;
     let is_icp = read_state(|s| s.icp_collateral_type() == ledger_id);
     if !is_icp {
         log!(INFO, "[add_collateral_token] Registering price timer for collateral {}", ledger_id);
-        ic_cdk_timers::set_timer_interval(
-            rumi_protocol_backend::xrc::FETCHING_ICP_RATE_INTERVAL,
-            move || ic_cdk::spawn(rumi_protocol_backend::management::fetch_collateral_price(ledger_id)),
-        );
+        rumi_protocol_backend::xrc::register_collateral_price_timer(ledger_id);
     }
 
     log!(INFO, "[add_collateral_token] Added collateral type: {} (decimals={})", arg.ledger_canister_id, decimals);

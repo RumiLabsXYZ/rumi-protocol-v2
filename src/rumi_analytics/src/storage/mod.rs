@@ -160,6 +160,13 @@ pub struct SlimState {
     /// first successful AMM `get_pools` after upgrade.
     #[serde(default)]
     pub amm_pools: Option<Vec<AmmPoolSnapshot>>,
+    /// Wave-9d DOS-010: per-source `next_pull_at_ns` deadlines for the
+    /// staggered pull cycle. Source ids match `pull_schedule::SOURCE_ID_*`
+    /// (tailers reuse their `cursors::CURSOR_ID_*` value). Persisted so
+    /// staggering offsets survive upgrade. `None` on legacy snapshots →
+    /// re-seeded on `post_upgrade`.
+    #[serde(default)]
+    pub source_next_pull_ns: Option<std::collections::HashMap<u8, u64>>,
 }
 
 /// Snapshot of one AMM pool's composition for portfolio LP valuation.
@@ -215,6 +222,7 @@ impl Default for SlimState {
             collateral_decimals: None,
             add_margin_backfill_cursor: None,
             amm_pools: None,
+            source_next_pull_ns: None,
         }
     }
 }
