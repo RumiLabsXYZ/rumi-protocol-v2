@@ -28,6 +28,14 @@ pub struct InitArgs {
 
 #[ic_cdk_macros::init]
 fn init(args: InitArgs) {
+    // UPG-006: refuse to init with non-empty stable memory. Catches accidental
+    // reinstalls of a canister that already has persisted state. Reinstall mode
+    // would otherwise silently wipe the analytics history; force the operator
+    // to use upgrade mode instead.
+    assert!(
+        ic_cdk::api::stable::stable64_size() == 0,
+        "refusing to init: stable memory non-empty; use upgrade mode not reinstall"
+    );
     let s = SlimState {
         admin: args.admin,
         sources: SourceCanisterIds {
