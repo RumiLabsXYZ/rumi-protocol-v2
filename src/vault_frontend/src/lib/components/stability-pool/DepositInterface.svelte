@@ -6,6 +6,7 @@
   import { formatStableTokenDisplay, formatStableTokenTx } from '../../utils/format';
   import type { PoolStatus, StablecoinConfig, UserPosition } from '../../services/stabilityPoolService';
   import { CANISTER_IDS } from '../../config';
+  import { fetchLedgerFee, getCachedLedgerFee } from '../../services/ledgerFeeService';
 
   export let poolStatus: PoolStatus | null = null;
   export let userPosition: UserPosition | null = null;
@@ -80,27 +81,32 @@
     showDropdown = false;
   }
 
-  // Ledger transfer fee per token (approve + transfer_from both charge a fee).
-  //
-  // TODO(audit ICRC-005): Replace this hardcoded table with a live
-  // `icrc1_fee()` query against `token.ledger`, cached per-ledger with a
-  // ~10-minute TTL. The backend now refreshes its own cache when transfers
-  // come back BadFee (`management::transfer_idempotent`). The frontend
-  // should mirror that — query the ledger directly so a fee bump on chain
-  // doesn't make `getLedgerFee` silently undercharge or overcharge until
-  // we ship a frontend update.
-  function getLedgerFee(token: StablecoinConfig): bigint {
-    // 3USD LP token (8 decimals) = 0.001 = 100_000 e8s (same as icUSD)
-    // icUSD (8 decimals) = 0.001 = 100_000 e8s
-    // ckUSDC / ckUSDT (6 decimals) = 0.01 = 10_000
-    return token.decimals === 8 ? 100_000n : 10_000n;
+  // Audit ICRC-005: per-ledger ICRC-1 fee is queried live (cached for the
+  // session in ledgerFeeService). `setMax` and validation read from the
+  // sync cache; `handleSubmit` does an `await fetchLedgerFee(...)` so the
+  // pre-flight check uses the freshest value before the actual approve.
+
+  function ledgerRefFor(token: StablecoinConfig) {
+    return {
+      ledgerId: token.ledger_id.toText(),
+      decimals: token.decimals,
+      symbol: token.symbol,
+    };
+  }
+
+  // Warm the fee cache for every active stablecoin once `poolStatus` resolves
+  // so `setMax` and validation reads from `getCachedLedgerFee` see live values.
+  $: if (activeStablecoins.length > 0) {
+    for (const token of activeStablecoins) {
+      void fetchLedgerFee(ledgerRefFor(token));
+    }
   }
 
   function setMax() {
     if (!selectedToken) return;
     if (activeTab === 'deposit') {
       // Depositing costs 2 ledger fees: one for icrc2_approve, one for icrc2_transfer_from
-      const totalFees = getLedgerFee(selectedToken) * 2n;
+      const totalFees = getCachedLedgerFee(ledgerRefFor(selectedToken)) * 2n;
       const adjusted = walletBalance > totalFees ? walletBalance - totalFees : 0n;
       amount = formatStableTokenTx(adjusted, selectedToken.decimals);
     } else {
@@ -126,8 +132,10 @@
           error = `Minimum deposit is 1 ${selectedToken.symbol}`;
           return;
         }
-        // User needs amount + 2 fees (approve + transfer_from)
-        const totalFees = getLedgerFee(selectedToken) * 2n;
+        // User needs amount + 2 fees (approve + transfer_from). Refresh the
+        // live fee here so the pre-flight check uses the freshest value.
+        const liveFee = await fetchLedgerFee(ledgerRefFor(selectedToken));
+        const totalFees = liveFee * 2n;
         if (rawAmount + totalFees > walletBalance) {
           error = 'Insufficient balance (amount + fees)';
           return;

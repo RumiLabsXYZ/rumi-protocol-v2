@@ -6,9 +6,20 @@
     POOL_TOKENS,
     parseTokenAmount,
     formatTokenAmount,
-    getLedgerFee,
   } from '../../services/threePoolService';
+  import { fetchLedgerFee, getCachedLedgerFee } from '../../services/ledgerFeeService';
   import { formatStableTokenDisplay } from '../../utils/format';
+
+  function poolLedgerRef(index: number) {
+    const t = POOL_TOKENS[index];
+    return { ledgerId: t.ledgerId, decimals: t.decimals, symbol: t.symbol };
+  }
+
+  // Warm the per-ledger fee cache once on mount so reactive `setAddMax` /
+  // validation reads from `getCachedLedgerFee` see live values. Audit ICRC-005.
+  for (let _idx = 0; _idx < POOL_TOKENS.length; _idx++) {
+    void fetchLedgerFee(poolLedgerRef(_idx));
+  }
 
   const dispatch = createEventDispatcher();
 
@@ -95,7 +106,7 @@
     const val = parseFloat(a);
     if (!val || val <= 0) return false;
     const raw = parseTokenAmount(a, POOL_TOKENS[i].decimals);
-    const fees = getLedgerFee(POOL_TOKENS[i].decimals) * 2n;
+    const fees = getCachedLedgerFee(poolLedgerRef(i)) * 2n;
     return raw + fees > getBalance(i);
   });
 
@@ -189,7 +200,7 @@
   // ── Max buttons ──
   function setAddMax(index: number) {
     const balance = getBalance(index);
-    const totalFees = getLedgerFee(POOL_TOKENS[index].decimals) * 2n;
+    const totalFees = getCachedLedgerFee(poolLedgerRef(index)) * 2n;
     const adjusted = balance > totalFees ? balance - totalFees : 0n;
     const divisor = Math.pow(10, POOL_TOKENS[index].decimals);
     addAmounts[index] = (Number(adjusted) / divisor).toFixed(POOL_TOKENS[index].decimals);
@@ -222,7 +233,8 @@
     for (let k = 0; k < 3; k++) {
       if (amounts[k] > 0n) {
         const balance = getBalance(k);
-        const fees = getLedgerFee(POOL_TOKENS[k].decimals) * 2n;
+        const liveFee = await fetchLedgerFee(poolLedgerRef(k));
+        const fees = liveFee * 2n;
         if (amounts[k] + fees > balance) {
           addError = `Insufficient ${POOL_TOKENS[k].symbol} balance`;
           return;
@@ -343,7 +355,7 @@
             const val = parseFloat(addAmounts[i]);
             if (!val || val <= 0) return false;
             const raw = parseTokenAmount(addAmounts[i], token.decimals);
-            const fees = getLedgerFee(token.decimals) * 2n;
+            const fees = getCachedLedgerFee(poolLedgerRef(i)) * 2n;
             return raw + fees > getBalance(i);
           })()}
         />

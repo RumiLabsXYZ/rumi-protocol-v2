@@ -1,9 +1,14 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import { walletStore } from '../../stores/wallet';
-  import { ammService, AMM_TOKENS, parseTokenAmount, formatTokenAmount, getLedgerFee, type AmmToken } from '../../services/ammService';
+  import { ammService, AMM_TOKENS, parseTokenAmount, formatTokenAmount, type AmmToken } from '../../services/ammService';
   import { resolveRoute, executeRoute, preWarmOisySigner, type SwapRoute } from '../../services/swapRouter';
+  import { fetchLedgerFee, getCachedLedgerFee } from '../../services/ledgerFeeService';
   import { CANISTER_IDS } from '../../config';
+
+  function ammTokenRef(token: AmmToken) {
+    return { ledgerId: token.ledgerId, decimals: token.decimals, symbol: token.symbol };
+  }
 
   const dispatch = createEventDispatcher();
 
@@ -35,6 +40,10 @@
   })();
 
   $: walletBalanceFormatted = formatTokenAmount(walletBalance, fromToken.decimals);
+
+  // Warm the live ledger-fee cache for the selected `from` token so MAX and
+  // validation use the freshest value. Audit ICRC-005 (frontend half).
+  $: void fetchLedgerFee(ammTokenRef(fromToken));
 
   // Formatted output
   $: outputFormatted = currentRoute
@@ -163,7 +172,7 @@
   }
 
   function setMax() {
-    const totalFees = getLedgerFee(fromToken) * 2n;
+    const totalFees = getCachedLedgerFee(ammTokenRef(fromToken)) * 2n;
     const adjusted = walletBalance > totalFees ? walletBalance - totalFees : 0n;
     const divisor = Math.pow(10, fromToken.decimals);
     amount = (Number(adjusted) / divisor).toFixed(fromToken.decimals);
@@ -194,7 +203,9 @@
       error = '';
       const amountRaw = parseTokenAmount(String(amount), fromToken.decimals);
 
-      const totalFees = getLedgerFee(fromToken) * 2n;
+      // Refresh live fee for the pre-flight check before executing the route.
+      const liveFee = await fetchLedgerFee(ammTokenRef(fromToken));
+      const totalFees = liveFee * 2n;
       if (amountRaw + totalFees > walletBalance) {
         error = 'Insufficient balance (amount + fees)';
         return;

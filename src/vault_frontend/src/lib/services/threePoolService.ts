@@ -6,6 +6,7 @@ import { get } from 'svelte/store';
 import { CANISTER_IDS, CONFIG } from '../config';
 import { isOisyWallet } from './protocol/walletOperations';
 import { getOisySignerAgent, createOisyActor } from './oisySigner';
+import { fetchLedgerFee } from './ledgerFeeService';
 
 // ──────────────────────────────────────────────────────────────
 // Types — mirrors the Candid interface
@@ -92,16 +93,19 @@ export function formatTokenAmount(amount: bigint, decimals: number): string {
   return trimmed;
 }
 
-/** Ledger transfer fee per token (approve + transfer_from both charge a fee). */
-export function getLedgerFee(decimals: number): bigint {
-  // icUSD (8 decimals) = 0.001 = 100_000 e8s
-  // ckUSDC / ckUSDT (6 decimals) = 0.01 = 10_000
-  return decimals === 8 ? 100_000n : 10_000n;
+/** Live ICRC-1 fee for a 3pool token (audit ICRC-005). */
+export function poolTokenFee(token: SwapToken): Promise<bigint> {
+  return fetchLedgerFee({
+    ledgerId: token.ledgerId,
+    decimals: token.decimals,
+    symbol: token.symbol,
+  });
 }
 
-/** Compute approval amount: transfer amount + ledger fee (for transfer_from). */
-function approvalAmount(amount: bigint, decimals: number): bigint {
-  return amount + getLedgerFee(decimals);
+/** Compute approval amount: transfer amount + live ledger fee (for transfer_from). */
+async function approvalAmount(amount: bigint, token: SwapToken): Promise<bigint> {
+  const fee = await poolTokenFee(token);
+  return amount + fee;
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -393,6 +397,7 @@ class ThreePoolService {
 
     const fromToken = POOL_TOKENS[fromIndex];
     const oisyDetected = isOisyWallet();
+    const approveAmt = await approvalAmount(dxRaw, fromToken);
 
     if (oisyDetected && wallet.principal) {
       // ─── Oisy ICRC-112 batched path ───
@@ -408,7 +413,7 @@ class ThreePoolService {
       // Sequence 0: approve
       signerAgent.batch();
       const approvePromise = ledgerActor.icrc2_approve({
-        amount: approvalAmount(dxRaw, fromToken.decimals),
+        amount: approveAmt,
         spender: { owner: Principal.fromText(THREEPOOL_CANISTER_ID), subaccount: [] },
         expires_at: [], expected_allowance: [], memo: [], fee: [],
         from_subaccount: [], created_at_time: []
@@ -435,7 +440,7 @@ class ThreePoolService {
       ) as any;
 
       const approveResult = await ledgerActor.icrc2_approve({
-        amount: approvalAmount(dxRaw, fromToken.decimals),
+        amount: approveAmt,
         spender: { owner: Principal.fromText(THREEPOOL_CANISTER_ID), subaccount: [] },
         expires_at: [], expected_allowance: [], memo: [], fee: [],
         from_subaccount: [], created_at_time: []
@@ -466,6 +471,11 @@ class ThreePoolService {
     const oisyDetected = isOisyWallet();
     const spender = { owner: Principal.fromText(THREEPOOL_CANISTER_ID), subaccount: [] };
 
+    // Pre-compute approval amounts so we don't need to await mid-batch.
+    const approveAmounts: bigint[] = await Promise.all(
+      amounts.map((amt, k) => amt > 0n ? approvalAmount(amt, POOL_TOKENS[k]) : Promise.resolve(0n)),
+    );
+
     if (oisyDetected && wallet.principal) {
       // ─── Oisy ICRC-112 batched path ───
       const signerAgent = await getOisySignerAgent(wallet.principal);
@@ -478,7 +488,7 @@ class ThreePoolService {
           const ledgerActor = createOisyActor(token.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent);
           signerAgent.batch();
           approvePromises.push(ledgerActor.icrc2_approve({
-            amount: approvalAmount(amounts[k], POOL_TOKENS[k].decimals),
+            amount: approveAmounts[k],
             spender, expires_at: [], expected_allowance: [], memo: [], fee: [],
             from_subaccount: [], created_at_time: []
           }));
@@ -509,7 +519,7 @@ class ThreePoolService {
           const token = POOL_TOKENS[k];
           const ledgerActor = await walletStore.getActor(token.ledgerId, CONFIG.icusd_ledgerIDL) as any;
           const approveResult = await ledgerActor.icrc2_approve({
-            amount: approvalAmount(amounts[k], POOL_TOKENS[k].decimals),
+            amount: approveAmounts[k],
             spender, expires_at: [], expected_allowance: [], memo: [], fee: [],
             from_subaccount: [], created_at_time: []
           });

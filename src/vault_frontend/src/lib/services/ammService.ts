@@ -6,6 +6,7 @@ import { get } from 'svelte/store';
 import { CANISTER_IDS, CONFIG } from '../config';
 import { isOisyWallet } from './protocol/walletOperations';
 import { getOisySignerAgent, createOisyActor } from './oisySigner';
+import { fetchLedgerFee } from './ledgerFeeService';
 
 // ──────────────────────────────────────────────────────────────
 // Types — mirrors the AMM Candid interface
@@ -102,15 +103,19 @@ export const AMM_TOKENS: AmmToken[] = [
   },
 ];
 
-/** Ledger transfer fee per token. */
-export function getLedgerFee(token: AmmToken): bigint {
-  if (token.symbol === 'ICP') return 10_000n;
-  return token.decimals === 8 ? 100_000n : 10_000n;
+/** Live ledger transfer fee for an AMM token (audit ICRC-005). */
+export function tokenFee(token: AmmToken): Promise<bigint> {
+  return fetchLedgerFee({
+    ledgerId: token.ledgerId,
+    decimals: token.decimals,
+    symbol: token.symbol,
+  });
 }
 
-/** Compute approval amount: transfer amount + ledger fee. */
-export function approvalAmount(amount: bigint, token: AmmToken): bigint {
-  return amount + getLedgerFee(token);
+/** Compute approval amount: transfer amount + the live ledger fee. */
+export async function approvalAmount(amount: bigint, token: AmmToken): Promise<bigint> {
+  const fee = await tokenFee(token);
+  return amount + fee;
 }
 
 export function parseTokenAmount(amount: string, decimals: number): bigint {
@@ -311,6 +316,7 @@ class AmmService {
     if (!wallet.isConnected) throw new Error('Wallet not connected');
 
     const oisyDetected = isOisyWallet();
+    const approveAmt = await approvalAmount(amountIn, inputToken);
 
     if (oisyDetected && wallet.principal) {
       const signerAgent = await getOisySignerAgent(wallet.principal);
@@ -319,7 +325,7 @@ class AmmService {
 
       signerAgent.batch();
       const approvePromise = ledgerActor.icrc2_approve({
-        amount: approvalAmount(amountIn, inputToken),
+        amount: approveAmt,
         spender: { owner: Principal.fromText(AMM_CANISTER_ID), subaccount: [] },
         expires_at: [], expected_allowance: [], memo: [], fee: [],
         from_subaccount: [], created_at_time: [],
@@ -339,7 +345,7 @@ class AmmService {
     } else {
       const ledgerActor = await walletStore.getActor(inputToken.ledgerId, CONFIG.icusd_ledgerIDL) as any;
       const approveResult = await ledgerActor.icrc2_approve({
-        amount: approvalAmount(amountIn, inputToken),
+        amount: approveAmt,
         spender: { owner: Principal.fromText(AMM_CANISTER_ID), subaccount: [] },
         expires_at: [], expected_allowance: [], memo: [], fee: [],
         from_subaccount: [], created_at_time: [],
@@ -371,6 +377,11 @@ class AmmService {
 
     const oisyDetected = isOisyWallet();
 
+    // Pre-compute approval amounts so the batched signer flow doesn't need
+    // to await mid-batch.
+    const approveA = amountA > 0n ? await approvalAmount(amountA, tokenA) : 0n;
+    const approveB = amountB > 0n ? await approvalAmount(amountB, tokenB) : 0n;
+
     if (oisyDetected && wallet.principal) {
       const signerAgent = await getOisySignerAgent(wallet.principal);
       const approvePromises: Promise<any>[] = [];
@@ -379,7 +390,7 @@ class AmmService {
         const ledgerA = createOisyActor(tokenA.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent);
         signerAgent.batch();
         approvePromises.push(ledgerA.icrc2_approve({
-          amount: approvalAmount(amountA, tokenA),
+          amount: approveA,
           spender: { owner: Principal.fromText(AMM_CANISTER_ID), subaccount: [] },
           expires_at: [], expected_allowance: [], memo: [], fee: [],
           from_subaccount: [], created_at_time: [],
@@ -390,7 +401,7 @@ class AmmService {
         const ledgerB = createOisyActor(tokenB.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent);
         signerAgent.batch();
         approvePromises.push(ledgerB.icrc2_approve({
-          amount: approvalAmount(amountB, tokenB),
+          amount: approveB,
           spender: { owner: Principal.fromText(AMM_CANISTER_ID), subaccount: [] },
           expires_at: [], expected_allowance: [], memo: [], fee: [],
           from_subaccount: [], created_at_time: [],
@@ -418,7 +429,7 @@ class AmmService {
       if (amountA > 0n) {
         const ledgerA = await walletStore.getActor(tokenA.ledgerId, CONFIG.icusd_ledgerIDL) as any;
         const r = await ledgerA.icrc2_approve({
-          amount: approvalAmount(amountA, tokenA), spender,
+          amount: approveA, spender,
           expires_at: [], expected_allowance: [], memo: [], fee: [],
           from_subaccount: [], created_at_time: [],
         });
@@ -429,7 +440,7 @@ class AmmService {
       if (amountB > 0n) {
         const ledgerB = await walletStore.getActor(tokenB.ledgerId, CONFIG.icusd_ledgerIDL) as any;
         const r = await ledgerB.icrc2_approve({
-          amount: approvalAmount(amountB, tokenB), spender,
+          amount: approveB, spender,
           expires_at: [], expected_allowance: [], memo: [], fee: [],
           from_subaccount: [], created_at_time: [],
         });

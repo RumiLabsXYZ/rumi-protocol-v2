@@ -44,8 +44,15 @@ vi.mock('./providers/rumiAmmProvider', () => ({
 
 vi.mock('./providers/icpswapProvider', () => ({
   IcpswapProvider: vi.fn(() => mocks.icpswapMock),
-  // Used by the Oisy batched executor for the deposit/withdraw fee field.
-  icrc1Fee: vi.fn(() => 10n),
+}));
+
+// Audit ICRC-005 (frontend half): the Oisy batched executor now pulls fees
+// from the live ledger via ledgerFeeService instead of hardcoded constants.
+// Mock it so tests don't hit a real agent.
+vi.mock('./ledgerFeeService', () => ({
+  fetchLedgerFee: vi.fn().mockResolvedValue(10n),
+  getCachedLedgerFee: vi.fn(() => 10n),
+  _clearLedgerFeeCache: vi.fn(),
 }));
 
 // Neutralise ammService — the provider mocks bypass it, but getAmmPoolId
@@ -59,6 +66,11 @@ vi.mock('./ammService', async () => {
       getQuote: vi.fn(),
       swap: vi.fn(),
     },
+    // approvalAmount and tokenFee are async since the live-fee migration —
+    // override with deterministic stubs so swapRouter's pre-batch awaits
+    // don't reach the network.
+    tokenFee: vi.fn().mockResolvedValue(10n),
+    approvalAmount: vi.fn(async (amount: bigint) => amount + 10n),
   };
 });
 
