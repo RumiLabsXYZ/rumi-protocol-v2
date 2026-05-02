@@ -403,9 +403,17 @@ pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Prin
 
         mutate_state(|s| {
             let spillover_icusd = ICUSD::from(spillover_e8s);
-            let base_fee = s.get_redemption_fee(spillover_icusd);
-            s.current_base_rate = base_fee;
-            s.last_redemption_time = ic_cdk::api::time();
+            // Wave-14b CDP-03: per-collateral fee path (see redeem_collateral
+            // for full rationale). The spillover redeems against `best_ct`,
+            // so the base rate is read from and written back to that
+            // collateral's config alone.
+            let base_fee = s.get_redemption_fee_for(&best_ct, spillover_icusd);
+            crate::record_per_collateral_redemption_fee(
+                s,
+                &best_ct,
+                base_fee,
+                ic_cdk::api::time(),
+            );
             let vault_fee = spillover_icusd * base_fee;
 
             // Note: RMR was already applied when computing spillover_e8s (line 160).
@@ -489,9 +497,18 @@ pub async fn redeem_collateral(collateral_type: Principal, _icusd_amount: u64) -
     match transfer_icusd_from(icusd_amount, caller).await {
         Ok(block_index) => {
             let fee_amount = mutate_state(|s| {
-                let base_fee = s.get_redemption_fee(icusd_amount);
-                s.current_base_rate = base_fee;
-                s.last_redemption_time = ic_cdk::api::time();
+                // Wave-14b CDP-03: price the fee against the per-collateral
+                // base rate, and write the post-redemption rate back to the
+                // per-collateral config (NOT the legacy global fields). A
+                // redemption against one collateral no longer corrupts the
+                // base rate used to price redemptions against any other.
+                let base_fee = s.get_redemption_fee_for(&collateral_type, icusd_amount);
+                crate::record_per_collateral_redemption_fee(
+                    s,
+                    &collateral_type,
+                    base_fee,
+                    ic_cdk::api::time(),
+                );
                 let fee_amount = icusd_amount * base_fee;
 
                 // Apply dynamic Redemption Margin Ratio: redeemers get RMR × face value

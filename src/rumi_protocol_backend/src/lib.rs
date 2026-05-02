@@ -649,6 +649,29 @@ pub fn record_sp_notification_result_at(
     }
 }
 
+/// Wave-14b CDP-03: write the post-redemption base rate and timestamp to
+/// the per-collateral `CollateralConfig` (NOT the legacy global
+/// `s.current_base_rate` / `s.last_redemption_time`).
+///
+/// Pre-Wave-14b the redemption path wrote to the global fields, which
+/// meant a redemption against ckBTC corrupted the rate that subsequently
+/// priced ICP redemptions, leaking value across collateral types.
+///
+/// Pure-state function. Silently no-ops for unknown collateral types
+/// (the surrounding redemption path already validated the collateral via
+/// `get_collateral_price_decimal`, but defense in depth is cheap).
+pub fn record_per_collateral_redemption_fee(
+    state: &mut state::State,
+    collateral_type: &candid::Principal,
+    base_fee: numeric::Ratio,
+    now_ns: u64,
+) {
+    if let Some(config) = state.collateral_configs.get_mut(collateral_type) {
+        config.current_base_rate = base_fee;
+        config.last_redemption_time = now_ns;
+    }
+}
+
 pub async fn check_vaults() {
     // Auto-cancel bot claims that have been pending too long (10 minutes).
     // This prevents vaults from being permanently locked if the bot crashes.
