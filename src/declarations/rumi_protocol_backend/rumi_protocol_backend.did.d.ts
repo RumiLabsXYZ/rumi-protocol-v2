@@ -747,6 +747,7 @@ export interface ProtocolStatus {
   'interest_pool_share' : number,
   'total_icusd_borrowed' : bigint,
   'min_icusd_amount' : bigint,
+  'snapshot_ts_ns' : bigint,
   'total_collateral_ratio' : number,
   'deficit_repayment_fraction' : number,
   'ckstable_repay_fee' : number,
@@ -871,6 +872,7 @@ export interface TransformArgs {
 export interface TreasuryStats {
   'pending_treasury_collateral_entries' : bigint,
   'liquidation_protocol_share' : number,
+  'snapshot_ts_ns' : bigint,
   'interest_flush_threshold_e8s' : bigint,
   'pending_treasury_interest' : bigint,
   'treasury_principal' : [] | [Principal],

@@ -146,6 +146,12 @@ pub struct ProtocolStatus {
     /// Wave-10 LIQ-008: true once the breaker has tripped on the current
     /// window total. Cleared by admin via `clear_liquidation_breaker`.
     pub liquidation_breaker_tripped: bool,
+    /// Wave-9b DOS-006: nanosecond timestamp at which the cached heavy
+    /// aggregates (totals, weighted rates, per-collateral rollups) were
+    /// last computed. Two calls within `PROTOCOL_STATUS_SNAPSHOT_TTL_NANOS`
+    /// observe the same value, proving cache hit. Live fields elsewhere
+    /// in this struct still reflect current state on every call.
+    pub snapshot_ts_ns: u64,
 }
 
 /// Per-collateral debt and weighted interest rate for APR calculations.
@@ -332,6 +338,23 @@ pub const MAX_VAULTS_LEGACY_PAGE: usize = 500;
 /// Page-size cap on `get_vaults_page` and
 /// `get_liquidatable_vaults_page`. Audit Wave 9a (DOS-004).
 pub const MAX_VAULTS_PAGE_LIMIT: u64 = 500;
+
+/// Wave-9b DOS-006: cache TTL for `get_protocol_status` aggregate
+/// snapshot. Two consecutive query calls within this window serve the
+/// same heavy fields (sum-over-vaults, weighted rate, per-collateral
+/// totals) without re-aggregating. The 5-minute XRC tick refreshes
+/// the cache as part of its existing vault walk; this 5-second TTL
+/// covers cold start, post-upgrade, and the gap between ticks. Live
+/// fields (mode, frozen, last_icp_rate, etc.) are NOT served from the
+/// snapshot, see `main.rs::get_protocol_status` for the exact list.
+pub const PROTOCOL_STATUS_SNAPSHOT_TTL_NANOS: u64 = 5_000_000_000;
+
+/// Wave-9b DOS-007: cache TTL for `get_treasury_stats`. Same rationale
+/// as `PROTOCOL_STATUS_SNAPSHOT_TTL_NANOS`. Heavy field cached:
+/// `total_accrued_interest_system` (sum of `accrued_interest` across
+/// every vault). All other fields in `TreasuryStats` are O(1) or
+/// O(small) and read fresh on every call.
+pub const TREASURY_STATS_SNAPSHOT_TTL_NANOS: u64 = 5_000_000_000;
 
 /// Paginated response for `get_vault_history_paged`. `events` is the
 /// page of matches in newest-first order within the requested window.

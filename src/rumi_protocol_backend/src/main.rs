@@ -6,7 +6,7 @@ use rumi_protocol_backend::{
     event::Event,
     logs::INFO,
     numeric::{ICUSD, ICP, Ratio, UsdIcp},
-    state::{read_state, replace_state, Mode, State, RateCurveV2, DEFAULT_INTEREST_RATE_APR},
+    state::{read_state, replace_state, Mode, State, RateCurveV2},
     vault::{CandidVault, OpenVaultSuccess, VaultArg},
     EventTypeFilter, Fees, GetEventsArg, ProtocolArg, ProtocolError, ProtocolStatus, SuccessWithFee,
     ReserveRedemptionResult, ReserveBalance, CollateralTotals, CollateralInterestInfo, PerCollateralRateCurve,
@@ -16,6 +16,7 @@ use rumi_protocol_backend::{
     VaultHistoryPagedResponse, EventsByPrincipalPagedResponse, VaultsPageResponse,
     MAX_VAULT_HISTORY, MAX_EVENTS_BY_PRINCIPAL_LEGACY, MAX_EVENTS_BY_PRINCIPAL_SCAN,
     MAX_EVENTS_BY_PRINCIPAL_OUTPUT, MAX_VAULTS_LEGACY_PAGE, MAX_VAULTS_PAGE_LIMIT,
+    PROTOCOL_STATUS_SNAPSHOT_TTL_NANOS, TREASURY_STATS_SNAPSHOT_TTL_NANOS,
 };
 use rumi_protocol_backend::logs::DEBUG;
 use rumi_protocol_backend::state::mutate_state;
@@ -539,14 +540,53 @@ fn validate_collateral_state(state: &State) {
 #[candid_method(query)]
 #[query]
 fn get_protocol_status() -> ProtocolStatus {
+    let now = ic_cdk::api::time();
+
+    // Wave-9b DOS-006: try the cache first. The cache is filled
+    // exclusively by the XRC tick (`xrc::fetch_icp_rate`, ~5 min
+    // interval). IC queries cannot reliably persist state mutations,
+    // so cache misses recompute inline without writing back — the
+    // next XRC tick will repopulate. The TTL is intentionally short
+    // (5s); within 5s of the last XRC-tick cache fill, queries hit
+    // the cache. Beyond 5s we fall through to live recompute, which
+    // protects against serving aggregates that are arbitrarily old
+    // if the XRC tick is delayed (network outage, frozen mode, etc.).
+    let cached = read_state(|s| {
+        s.protocol_status_snapshot.as_ref().and_then(|(ts, snap)| {
+            if now.saturating_sub(*ts) < PROTOCOL_STATUS_SNAPSHOT_TTL_NANOS {
+                Some((*ts, snap.clone()))
+            } else {
+                None
+            }
+        })
+    });
+    let (snapshot_ts_ns, snapshot) = match cached {
+        Some(hit) => hit,
+        None => {
+            // Cache miss / expired: recompute inline. Do NOT write
+            // back from a query — IC query state mutations are not
+            // persisted across calls. The next XRC tick will refresh
+            // the cache.
+            let snap = read_state(|s| s.compute_protocol_status_snapshot());
+            (now, snap)
+        }
+    };
+
+    // Live fields: read fresh on every call. The cache MUST NOT mask
+    // an admin kill switch (`frozen`, `manual_mode_override`,
+    // `liquidation_breaker_tripped`), the current `mode`, the latest
+    // XRC price (`last_icp_rate`/`last_icp_timestamp`), the running
+    // breaker window total, or the deficit accounting fields. All
+    // other fields below are config-shaped (admin-set, change rarely)
+    // but cheap to read so we read them live too.
     read_state(|s| ProtocolStatus {
         last_icp_rate: s
             .last_icp_rate
             .unwrap_or(UsdIcp::from(Decimal::ZERO))
             .to_f64(),
         last_icp_timestamp: s.last_icp_timestamp.unwrap_or(0),
-        total_icp_margin: s.total_icp_margin_amount().to_u64(),
-        total_icusd_borrowed: s.total_borrowed_icusd_amount().to_u64(),
+        total_icp_margin: snapshot.total_icp_margin,
+        total_icusd_borrowed: snapshot.total_icusd_borrowed,
         total_collateral_ratio: s.total_collateral_ratio.to_f64(),
         mode: s.mode,
         liquidation_bonus: s.liquidation_bonus.to_f64(),
@@ -561,31 +601,22 @@ fn get_protocol_status() -> ProtocolStatus {
         frozen: s.frozen,
         manual_mode_override: s.manual_mode_override,
         interest_pool_share: s.interest_pool_share.to_f64(),
-        weighted_average_interest_rate: s.weighted_average_interest_rate().to_f64(),
-        borrowing_fee_curve_resolved: match &s.borrowing_fee_curve {
-            Some(curve) => s.resolve_curve(curve, None).iter()
-                .map(|(cr, mult)| (cr.to_f64(), mult.to_f64()))
-                .collect(),
-            None => vec![],
-        },
-        per_collateral_interest: s.collateral_configs.keys()
-            .map(|ct| CollateralInterestInfo {
-                collateral_type: *ct,
-                total_debt_e8s: s.total_debt_for_collateral(ct).to_u64(),
-                weighted_interest_rate: s.weighted_interest_rate_for_collateral(ct).to_f64(),
+        weighted_average_interest_rate: snapshot.weighted_average_interest_rate,
+        borrowing_fee_curve_resolved: snapshot.borrowing_fee_curve_resolved.clone(),
+        per_collateral_interest: snapshot.per_collateral_interest.iter()
+            .map(|p| CollateralInterestInfo {
+                collateral_type: p.collateral_type,
+                total_debt_e8s: p.total_debt_e8s,
+                weighted_interest_rate: p.weighted_interest_rate,
             })
             .collect(),
-        per_collateral_rate_curves: s.collateral_configs.keys()
-            .map(|ct| {
-                let markers = s.resolve_layer1_markers(ct);
-                let base = s.collateral_configs.get(ct)
-                    .map(|c| c.interest_rate_apr).unwrap_or(DEFAULT_INTEREST_RATE_APR);
-                PerCollateralRateCurve {
-                    collateral_type: *ct,
-                    base_rate: base.to_f64(),
-                    markers: markers.iter().map(|(cr, m)| (cr.to_f64(), m.to_f64())).collect(),
-                }
-            }).collect(),
+        per_collateral_rate_curves: snapshot.per_collateral_rate_curves.iter()
+            .map(|p| PerCollateralRateCurve {
+                collateral_type: p.collateral_type,
+                base_rate: p.base_rate,
+                markers: p.markers.clone(),
+            })
+            .collect(),
         interest_split: s.interest_split.iter().map(|r| {
             let dest = match &r.destination {
                 rumi_protocol_backend::state::InterestDestination::StabilityPool => "stability_pool".to_string(),
@@ -594,16 +625,19 @@ fn get_protocol_status() -> ProtocolStatus {
             };
             InterestSplitArg { destination: dest, bps: r.bps }
         }).collect(),
-        // Wave-8e LIQ-005
+        // Wave-8e LIQ-005 — live (changes on liquidation/redemption + admin)
         protocol_deficit_icusd: s.protocol_deficit_icusd.to_u64(),
         total_deficit_repaid_icusd: s.total_deficit_repaid_icusd.to_u64(),
         deficit_repayment_fraction: s.deficit_repayment_fraction.to_f64(),
         deficit_readonly_threshold_e8s: s.deficit_readonly_threshold_e8s,
-        // Wave-10 LIQ-008
+        // Wave-10 LIQ-008 — live (windowed total depends on `now`,
+        // breaker_tripped is an admin/auto kill switch).
         breaker_window_ns: s.breaker_window_ns,
         breaker_window_debt_ceiling_e8s: s.breaker_window_debt_ceiling_e8s,
-        windowed_liquidation_total_e8s: s.windowed_liquidation_total(ic_cdk::api::time()),
+        windowed_liquidation_total_e8s: s.windowed_liquidation_total(now),
         liquidation_breaker_tripped: s.liquidation_breaker_tripped,
+        // Wave-9b DOS-006
+        snapshot_ts_ns,
     })
 }
 
@@ -3941,21 +3975,53 @@ pub struct TreasuryStats {
     pub liquidation_protocol_share: f64,
     pub pending_interest_for_pools_total: u64,
     pub interest_flush_threshold_e8s: u64,
+    /// Wave-9b DOS-007: nanosecond timestamp at which the cached
+    /// `total_accrued_interest_system` was last computed.
+    pub snapshot_ts_ns: u64,
 }
 
 /// Get treasury-related statistics including accrued interest across all vaults.
+///
+/// Wave-9b DOS-007: `total_accrued_interest_system` is cached with a
+/// 5-second TTL on the read path (refreshed in the existing 5-minute
+/// XRC tick). Other fields are O(1)/O(small) and read fresh.
 #[candid_method(query)]
 #[query]
 fn get_treasury_stats() -> TreasuryStats {
+    let now = ic_cdk::api::time();
+
+    // See `get_protocol_status` for the full caching rationale. Same
+    // shape: cache filled by XRC tick, queries read or recompute
+    // inline (no write-back from queries).
+    let cached = read_state(|s| {
+        s.treasury_stats_snapshot.as_ref().and_then(|(ts, snap)| {
+            if now.saturating_sub(*ts) < TREASURY_STATS_SNAPSHOT_TTL_NANOS {
+                Some((*ts, snap.clone()))
+            } else {
+                None
+            }
+        })
+    });
+    let (snapshot_ts_ns, snapshot) = match cached {
+        Some(hit) => hit,
+        None => {
+            let snap = read_state(|s| s.compute_treasury_stats_snapshot());
+            (now, snap)
+        }
+    };
+
     read_state(|s| TreasuryStats {
         treasury_principal: s.treasury_principal,
-        total_accrued_interest_system: s.vault_id_to_vaults.values()
-            .map(|v| v.accrued_interest.to_u64()).sum(),
+        // Wave-9b DOS-007: heavy field served from cache.
+        total_accrued_interest_system: snapshot.total_accrued_interest_system,
+        // Live fields below — change on liquidations / harvest, must
+        // never be served stale.
         pending_treasury_interest: s.pending_treasury_interest.to_u64(),
         pending_treasury_collateral_entries: s.pending_treasury_collateral.len() as u64,
         liquidation_protocol_share: s.liquidation_protocol_share.to_f64(),
         pending_interest_for_pools_total: s.pending_interest_for_pools.values().sum(),
         interest_flush_threshold_e8s: s.interest_flush_threshold_e8s,
+        snapshot_ts_ns,
     })
 }
 
