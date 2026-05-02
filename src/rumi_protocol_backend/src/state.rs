@@ -3395,30 +3395,50 @@ impl State {
                 price,
                 decimals,
             );
-            self.deduct_amount_from_vault(collateral_to_deduct, icusd_to_deduct, *vault_id);
+            // Wave-9 RED-002: capture the actual collateral seized (post
+            // saturating-sub). For solvent vaults this equals
+            // `collateral_to_deduct`; for underwater vaults the
+            // saturation clip means the seized amount is less. The
+            // difference (in icUSD-at-oracle) is bad debt routed via
+            // `record_redemption_on_vaults` into the deficit account.
+            let actual_collateral_seized =
+                self.deduct_amount_from_vault(collateral_to_deduct, icusd_to_deduct, *vault_id);
             distributed += actual_share;
 
             results.push(crate::event::VaultRedemption {
                 vault_id: *vault_id,
                 icusd_redeemed_e8s: actual_share as u64,
-                collateral_seized: collateral_to_deduct,
+                collateral_seized: actual_collateral_seized,
             });
         }
     }
 
+    /// Deduct `collateral_to_deduct` collateral and `icusd_amount_to_deduct`
+    /// icUSD-debt from `vault_id`, saturating both subtractions at zero.
+    /// Returns the **actual** collateral deducted (after saturation), which
+    /// equals `collateral_to_deduct` for solvent vaults and
+    /// `vault.collateral_amount` for vaults whose collateral runs short.
+    ///
+    /// Wave-9 RED-002: the actual amount is the load-bearing input to the
+    /// redemption-side deficit accrual — the redeemer was paid out for the
+    /// full claim, but only this much collateral actually came out of the
+    /// vault. The difference is bad debt (now routed via
+    /// `record_deficit_accrued`).
     fn deduct_amount_from_vault(
         &mut self,
         collateral_to_deduct: u64,
         icusd_amount_to_deduct: ICUSD,
         vault_id: VaultId,
-    ) {
-        match self.vault_id_to_vaults.get_mut(&vault_id) {
+    ) -> u64 {
+        let actual_collateral_deducted = match self.vault_id_to_vaults.get_mut(&vault_id) {
             Some(vault) => {
                 // Use saturating arithmetic: during event replay, interest
                 // drift can inflate debt/collateral values, causing the
                 // deduction to exceed the vault's balance.
                 vault.borrowed_icusd_amount = vault.borrowed_icusd_amount.saturating_sub(icusd_amount_to_deduct);
+                let pre_collateral = vault.collateral_amount;
                 vault.collateral_amount = vault.collateral_amount.saturating_sub(collateral_to_deduct);
+                let actual = pre_collateral.saturating_sub(vault.collateral_amount);
                 // INT-001: redemption can shrink `borrowed_icusd_amount` below
                 // `accrued_interest`, breaking the invariant that drives the
                 // proportional interest-share math in `repay_to_vault`.
@@ -3428,13 +3448,15 @@ impl State {
                 if vault.accrued_interest > vault.borrowed_icusd_amount {
                     vault.accrued_interest = vault.borrowed_icusd_amount;
                 }
+                actual
             }
             None => ic_cdk::trap("cannot deduct from unknown vault"),
-        }
+        };
         // Wave-8b LIQ-002: redemption water-fill mutates each touched vault's
         // debt/collateral; re-key its index entry so the next redemption /
         // liquidation sees the updated CR.
         self.reindex_vault_cr(vault_id);
+        actual_collateral_deducted
     }
 
     pub fn check_semantically_eq(&self, other: &Self) -> Result<(), String> {

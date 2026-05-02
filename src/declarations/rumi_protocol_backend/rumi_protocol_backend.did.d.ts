@@ -119,6 +119,8 @@ export interface ConsentMessageSpec {
   'metadata' : ConsentMessageMetadata,
   'device_spec' : [] | [DeviceSpec],
 }
+export type DeficitSource = { 'Liquidation' : { 'vault_id' : bigint } } |
+  { 'Redemption' : { 'redeemer' : Principal } };
 export type DeviceSpec = { 'GenericDisplay' : null } |
   {
     'LineDisplay' : {
@@ -511,6 +513,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
   {
     'deficit_accrued' : {
       'new_deficit' : bigint,
+      'source' : [] | [DeficitSource],
       'vault_id' : bigint,
       'timestamp' : bigint,
       'amount' : bigint,

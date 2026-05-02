@@ -277,6 +277,10 @@ export const idlFactory = ({ IDL }) => {
     'BorrowingFee' : IDL.Null,
     'RedemptionFee' : IDL.Null,
   });
+  const DeficitSource = IDL.Variant({
+    'Liquidation' : IDL.Record({ 'vault_id' : IDL.Nat64 }),
+    'Redemption' : IDL.Record({ 'redeemer' : IDL.Principal }),
+  });
   const Event = IDL.Variant({
     'set_borrowing_fee' : IDL.Record({ 'rate' : IDL.Text }),
     'VaultWithdrawnAndClosed' : IDL.Record({
@@ -581,6 +585,7 @@ export const idlFactory = ({ IDL }) => {
     }),
     'deficit_accrued' : IDL.Record({
       'new_deficit' : IDL.Nat64,
+      'source' : IDL.Opt(DeficitSource),
       'vault_id' : IDL.Nat64,
       'timestamp' : IDL.Nat64,
       'amount' : IDL.Nat64,

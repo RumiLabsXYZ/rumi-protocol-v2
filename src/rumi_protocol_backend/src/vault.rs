@@ -2245,7 +2245,7 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
         if shortfall.0 > 0 {
             crate::event::record_deficit_accrued(
                 s,
-                vault_id,
+                crate::event::DeficitSource::Liquidation { vault_id },
                 shortfall,
                 ic_cdk::api::time(),
             );
@@ -2542,7 +2542,7 @@ pub async fn liquidate_vault_partial_with_stable(
         if shortfall.0 > 0 {
             crate::event::record_deficit_accrued(
                 s,
-                vault_id,
+                crate::event::DeficitSource::Liquidation { vault_id },
                 shortfall,
                 ic_cdk::api::time(),
             );
@@ -2938,7 +2938,7 @@ pub async fn liquidate_vault_debt_already_burned(
         if shortfall.0 > 0 {
             crate::event::record_deficit_accrued(
                 s,
-                vault_id,
+                crate::event::DeficitSource::Liquidation { vault_id },
                 shortfall,
                 ic_cdk::api::time(),
             );
@@ -3198,7 +3198,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         if shortfall.0 > 0 {
             crate::event::record_deficit_accrued(
                 s,
-                vault_id,
+                crate::event::DeficitSource::Liquidation { vault_id },
                 shortfall,
                 ic_cdk::api::time(),
             );
@@ -3659,7 +3659,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         if shortfall.0 > 0 {
             crate::event::record_deficit_accrued(
                 s,
-                arg.vault_id,
+                crate::event::DeficitSource::Liquidation { vault_id: arg.vault_id },
                 shortfall,
                 ic_cdk::api::time(),
             );
