@@ -1,0 +1,4 @@
+// Placeholder Candid interface — full interface added in Task 8
+service : {
+  ping : () -> (text) query;
+};
