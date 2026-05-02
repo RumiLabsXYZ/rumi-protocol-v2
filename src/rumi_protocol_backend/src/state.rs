@@ -14,6 +14,7 @@ use std::cell::RefCell;
 use std::collections::btree_map::Entry::{Occupied, Vacant};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::ops::Bound;
 use crate::guard::OperationState;
 
 // Like assert_eq, but returns an error instead of panicking.
@@ -1072,6 +1073,70 @@ pub struct State {
     /// with the nanosecond timestamp at which they were computed.
     #[serde(default)]
     pub treasury_stats_snapshot: Option<(u64, TreasuryStatsSnapshot)>,
+
+    // ─── Wave-9c DOS-005: shard `check_vaults` to the at-risk band ───
+    //
+    // `check_vaults` runs every 5-minute XRC tick. Pre-Wave-9c it walked
+    // every entry of `vault_cr_index` to identify liquidatable vaults.
+    // Wave-9c bounds that walk to the at-risk band (vaults whose CR-key
+    // is below `max(min_liq_ratio across collaterals) +
+    // alert_band_bps / 10000`). Every Nth tick is a "full sweep" that
+    // walks the entire index as a safety belt for cross-collateral
+    // CR-key drift (the index is not re-keyed on price update).
+    //
+    // `serde(default)`: pre-Wave-9c snapshots decode each field via the
+    // matching `default_*` fn (or 0 for the counter), so the post-
+    // upgrade behavior matches the audit-spec defaults without a
+    // snapshot-format migration.
+
+    /// Wave-9c DOS-005: alert band (in bps) above the worst per-
+    /// collateral `min_liquidation_ratio` within which `check_vaults`
+    /// walks the sorted-troves index on band-only ticks. Default
+    /// `DEFAULT_CHECK_VAULTS_ALERT_BAND_BPS` (1000 bps = 10% headroom).
+    /// Tunable via `set_check_vaults_alert_band_bps`.
+    #[serde(default = "default_check_vaults_alert_band_bps")]
+    pub check_vaults_alert_band_bps: u64,
+
+    /// Wave-9c DOS-005: cadence (in ticks) of the safety-belt full
+    /// sweep. The Nth `check_vaults` tick walks every vault in
+    /// `vault_cr_index` instead of just the at-risk band. Default
+    /// `DEFAULT_CHECK_VAULTS_FULL_SWEEP_EVERY_N_TICKS` (12 = one full
+    /// sweep per hour at the 5-minute XRC cadence). 0 or 1 forces
+    /// full sweep every tick (revert path). Tunable via
+    /// `set_check_vaults_full_sweep_every_n_ticks`.
+    #[serde(default = "default_check_vaults_full_sweep_every_n_ticks")]
+    pub check_vaults_full_sweep_every_n_ticks: u64,
+
+    /// Wave-9c DOS-005: incremented on every band-only tick. When it
+    /// reaches `check_vaults_full_sweep_every_n_ticks`, the next tick
+    /// performs a full sweep and the counter resets to 0. Survives
+    /// upgrade so the cadence is monotone across deploys.
+    #[serde(default)]
+    pub ticks_since_full_sweep: u64,
+}
+
+fn default_check_vaults_alert_band_bps() -> u64 {
+    crate::DEFAULT_CHECK_VAULTS_ALERT_BAND_BPS
+}
+
+fn default_check_vaults_full_sweep_every_n_ticks() -> u64 {
+    crate::DEFAULT_CHECK_VAULTS_FULL_SWEEP_EVERY_N_TICKS
+}
+
+/// Wave-9c DOS-005: result of `State::scan_unhealthy_vaults`. The
+/// caller (production: `lib.rs::check_vaults`; tests: the audit POC)
+/// uses `unhealthy_vaults` as the input to bot/SP routing and reads
+/// `vaults_visited` / `was_full_sweep` for instrumentation.
+///
+/// `vaults_visited` counts every vault entry in iterated buckets,
+/// including those skipped due to `bot_processing` — that read still
+/// burns cycles, so the counter reflects the actual cycle cost paid.
+#[derive(Clone, Debug)]
+pub struct UnhealthyVaultScan {
+    pub unhealthy_vaults: Vec<Vault>,
+    pub vaults_visited: u64,
+    pub was_full_sweep: bool,
+    pub threshold_key: u64,
 }
 
 /// Wave-9b DOS-006: heavy aggregates served from cache for
@@ -1234,6 +1299,11 @@ impl Default for State {
             // Wave-9b DOS-006/-007
             protocol_status_snapshot: None,
             treasury_stats_snapshot: None,
+            // Wave-9c DOS-005
+            check_vaults_alert_band_bps: default_check_vaults_alert_band_bps(),
+            check_vaults_full_sweep_every_n_ticks:
+                default_check_vaults_full_sweep_every_n_ticks(),
+            ticks_since_full_sweep: 0,
         }
     }
 }
@@ -1440,6 +1510,11 @@ impl From<InitArg> for State {
             // Wave-9b DOS-006/-007
             protocol_status_snapshot: None,
             treasury_stats_snapshot: None,
+            // Wave-9c DOS-005
+            check_vaults_alert_band_bps: default_check_vaults_alert_band_bps(),
+            check_vaults_full_sweep_every_n_ticks:
+                default_check_vaults_full_sweep_every_n_ticks(),
+            ticks_since_full_sweep: 0,
         }
     }
 }
@@ -2776,6 +2851,136 @@ impl State {
     /// can widen to effectively-disable the gate during emergencies.
     pub fn set_liquidation_ordering_tolerance(&mut self, tolerance: Ratio) {
         self.liquidation_ordering_tolerance = tolerance;
+    }
+
+    // ---- Wave-9c DOS-005: shard `check_vaults` to the at-risk band -----
+
+    /// Wave-9c DOS-005: resolve the `vault_cr_index` upper-bound key for
+    /// the at-risk-band walk. Vaults whose CR-key is strictly less than
+    /// the returned value are visited on band-only ticks; vaults at or
+    /// above are skipped.
+    ///
+    /// Threshold = `max(min_liquidation_ratio across active collaterals)
+    ///            + alert_band_bps / 10000`.
+    ///
+    /// Using the maximum across collaterals is intentional: the index is
+    /// keyed on raw CR (not on per-collateral CR-relative-to-floor), so
+    /// a single threshold has to cover the worst floor. ICP at
+    /// liquidation_ratio 1.33 is currently the worst; a future
+    /// collateral with a higher floor (e.g., 1.5) would automatically
+    /// widen the band. The trade is a few extra iterations on band ticks
+    /// for vaults below the worst floor but above their own — those
+    /// vaults are filtered by the per-vault CR check inside the scan.
+    ///
+    /// In Recovery mode `get_min_liquidation_ratio_for` returns
+    /// `borrow_threshold_ratio` (a higher floor), so the threshold
+    /// widens automatically — Recovery mode liquidates more vaults, so
+    /// the band-walk must visit more.
+    pub fn check_vaults_alert_threshold_key(&self) -> u64 {
+        let band_decimal =
+            Decimal::from(self.check_vaults_alert_band_bps) / Decimal::from(10_000u64);
+        let max_min_liq: Decimal = self
+            .collateral_configs
+            .values()
+            .map(|c| match self.mode {
+                Mode::Recovery => c.borrow_threshold_ratio.0,
+                _ => c.liquidation_ratio.0,
+            })
+            .max()
+            .unwrap_or_else(|| MINIMUM_COLLATERAL_RATIO.0);
+        let threshold = Ratio::from(max_min_liq + band_decimal);
+        Self::cr_index_key(threshold)
+    }
+
+    /// Wave-9c DOS-005: tick the band-vs-full-sweep cadence counter.
+    /// Returns true when the caller should perform a full sweep.
+    ///
+    /// Behavior:
+    ///   * `check_vaults_full_sweep_every_n_ticks <= 1`: every tick is
+    ///     a full sweep (revert path / pre-Wave-9c behavior). Counter
+    ///     stays at 0.
+    ///   * `n >= 2`: counter increments. When it reaches `n`, the
+    ///     caller performs a full sweep and the counter resets to 0.
+    ///     This makes ticks 1..(n-1) band-only and tick n the sweep.
+    pub fn advance_check_vaults_tick(&mut self) -> bool {
+        let n = self.check_vaults_full_sweep_every_n_ticks;
+        if n <= 1 {
+            self.ticks_since_full_sweep = 0;
+            return true;
+        }
+        self.ticks_since_full_sweep = self.ticks_since_full_sweep.saturating_add(1);
+        if self.ticks_since_full_sweep >= n {
+            self.ticks_since_full_sweep = 0;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Wave-9c DOS-005: admin setter for the alert-band width.
+    pub fn set_check_vaults_alert_band_bps(&mut self, band_bps: u64) {
+        self.check_vaults_alert_band_bps = band_bps;
+    }
+
+    /// Wave-9c DOS-005: admin setter for the full-sweep cadence.
+    /// 0 or 1 reverts to pre-Wave-9c behavior (full sweep every tick).
+    pub fn set_check_vaults_full_sweep_every_n_ticks(&mut self, n: u64) {
+        self.check_vaults_full_sweep_every_n_ticks = n;
+    }
+
+    /// Wave-9c DOS-005: walk `vault_cr_index` and return the unhealthy
+    /// vault list plus instrumentation metadata. The walk is bounded by
+    /// the at-risk threshold when `do_full_sweep == false`, and walks
+    /// the entire index otherwise.
+    ///
+    /// Per-vault classification mirrors the pre-Wave-9c logic in
+    /// `lib.rs::check_vaults`: skip `bot_processing` vaults
+    /// (already claimed) and push the remainder into the `unhealthy`
+    /// vec when `compute_collateral_ratio < min_liquidation_ratio`.
+    /// Healthy vaults inside the band are visited but discarded.
+    ///
+    /// `vaults_visited` increments for every vault entry in iterated
+    /// buckets, including those skipped due to `bot_processing` — that
+    /// read still costs cycles, so the counter reflects actual cost
+    /// paid (useful for production telemetry and the DOS-005 fence).
+    pub fn scan_unhealthy_vaults(&self, rate: UsdIcp, do_full_sweep: bool) -> UnhealthyVaultScan {
+        let threshold_key = self.check_vaults_alert_threshold_key();
+        let upper_bound = if do_full_sweep {
+            Bound::Unbounded
+        } else {
+            Bound::Excluded(threshold_key)
+        };
+
+        let mut unhealthy_vaults: Vec<Vault> = Vec::new();
+        let mut visited: u64 = 0;
+
+        for (_cr_key, bucket) in self
+            .vault_cr_index
+            .range::<u64, _>((Bound::Unbounded, upper_bound))
+        {
+            for vid in bucket {
+                let vault = match self.vault_id_to_vaults.get(vid) {
+                    Some(v) => v,
+                    None => continue, // index drift — ignore
+                };
+                visited += 1;
+                if vault.bot_processing {
+                    continue;
+                }
+                if compute_collateral_ratio(vault, rate, self)
+                    < self.get_min_liquidation_ratio_for(&vault.collateral_type)
+                {
+                    unhealthy_vaults.push(vault.clone());
+                }
+            }
+        }
+
+        UnhealthyVaultScan {
+            unhealthy_vaults,
+            vaults_visited: visited,
+            was_full_sweep: do_full_sweep,
+            threshold_key,
+        }
     }
 
     /// Sync a global fee-setting event to the ICP CollateralConfig (for backward compat during replay)

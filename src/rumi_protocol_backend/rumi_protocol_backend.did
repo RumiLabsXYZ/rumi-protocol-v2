@@ -876,6 +876,8 @@ service : (ProtocolArg) -> {
   set_bot_allowed_collateral_types : (vec principal) -> (Result);
   set_breaker_window_debt_ceiling_e8s : (nat64) -> (Result);
   set_breaker_window_ns : (nat64) -> (Result);
+  set_check_vaults_alert_band_bps : (nat64) -> (Result);
+  set_check_vaults_full_sweep_every_n_ticks : (nat64) -> (Result);
   set_ckstable_repay_fee : (float64) -> (Result);
   set_collateral_borrow_threshold : (principal, float64) -> (Result);
   set_collateral_borrowing_fee : (principal, float64) -> (Result);
