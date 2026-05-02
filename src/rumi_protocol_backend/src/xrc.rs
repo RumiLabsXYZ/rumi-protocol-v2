@@ -303,37 +303,63 @@ pub async fn fetch_icp_rate() {
     if let Some(last_icp_rate) = read_state(|s| s.last_icp_rate) {
         mutate_state(|s| s.update_total_collateral_ratio_and_mode(last_icp_rate));
     }
-    // Accrue interest on all vaults before checking vault health.
-    // This ensures liquidation decisions use up-to-date debt balances.
+    // Wave-14b CDP-12: the post-fetch interest / treasury / vault-check work
+    // moved out of this function and into separate, independently scheduled
+    // timers. See `interest_and_treasury_tick` (Timer B) and
+    // `vault_check_tick` (Timer C) below, wired up in `setup_timers`. A trap
+    // anywhere in fetch_icp_rate (Timer A) no longer skips the downstream
+    // bookkeeping silently.
+}
+
+/// Wave-14b CDP-12 Timer B: per-tick maintenance work that does NOT need a
+/// fresh XRC sample. Runs interest accrual + harvest + treasury drains +
+/// flush. Skipped under `Mode::ReadOnly` for the same reason the chained
+/// version was: no new debt is being created, no new fees to drain.
+///
+/// Cheap in cycles: pure in-memory state walks plus three short
+/// inter-canister calls to the icUSD ledger via the treasury module.
+pub async fn interest_and_treasury_tick() {
     if read_state(|s| s.mode != crate::Mode::ReadOnly) {
         let now = ic_cdk::api::time();
         mutate_state(|s| crate::event::record_accrue_interest(s, now));
         // Harvest accrued interest from vaults into pending distribution map.
-        // This zeroes per-vault accrued_interest so interest won't be double-counted
+        // Zeroes per-vault accrued_interest so interest won't double-count
         // if a repayment happens before the next tick.
         mutate_state(|s| s.harvest_accrued_interest());
     }
-    if read_state(|s| s.mode != crate::Mode::ReadOnly) {
-        crate::check_vaults().await;
-    }
 
-    // Drain any pending treasury interest/collateral accumulated from sync liquidations
+    // Drain pending treasury interest/collateral accumulated from sync
+    // liquidations.
     crate::treasury::drain_pending_treasury_interest().await;
     crate::treasury::drain_pending_treasury_collateral().await;
 
-    // Flush accumulated interest to pools/treasury when threshold is reached
+    // Flush accumulated interest to pools/treasury when threshold is reached.
     crate::treasury::flush_pending_interest().await;
+}
 
-    // Wave-9b DOS-006/-007: refresh both aggregate query snapshots.
-    // Runs after `check_vaults` (which already iterates every vault),
-    // `drain_pending_treasury_*`, and `flush_pending_interest` so the
-    // snapshot reflects the post-tick view of totals + accrued
-    // interest. Unconditional — keeping the cache warm even in
-    // ReadOnly mode lets `get_protocol_status` and `get_treasury_stats`
-    // serve from cache while the protocol is paused.
+/// Wave-14b CDP-12 Timer C: vault health sweep + aggregate-snapshot refresh.
+/// Runs `check_vaults` (which dispatches to bot / SP and handles partial
+/// liquidations) and then refreshes the cached query snapshots so
+/// `get_protocol_status` / `get_treasury_stats` serve fresh totals.
+///
+/// `check_vaults` is gated on `mode != ReadOnly`; the snapshot refresh is
+/// unconditional (keeping the cache warm in ReadOnly lets queries continue
+/// to serve from cache while the protocol is paused).
+pub async fn vault_check_tick() {
+    if read_state(|s| s.mode != crate::Mode::ReadOnly) {
+        crate::check_vaults().await;
+    }
     let now = ic_cdk::api::time();
     mutate_state(|s| s.refresh_aggregate_snapshots(now));
 }
+
+/// Wave-14b CDP-12: cadence for the interest / treasury maintenance timer
+/// (Timer B). Cheaper than Timer A's XRC fetch, so 60s is comfortable.
+pub const INTEREST_AND_TREASURY_TICK_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Wave-14b CDP-12: cadence for the vault-check timer (Timer C). Matches
+/// the legacy 300s `check_vaults` cadence.
+pub const VAULT_CHECK_TICK_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Ensures the price for the given collateral type is fresh enough for
 /// a price-sensitive operation. ICP uses its own dedicated path; other

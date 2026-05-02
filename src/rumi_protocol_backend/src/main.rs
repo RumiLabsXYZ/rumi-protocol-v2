@@ -187,11 +187,26 @@ fn setup_timers() {
         });
     }
 
-    // ── Recurring price fetching timers ─────────────────────────────────────
-    // ICP rate fetching timer
+    // ── Wave-14b CDP-12: three independent timers ────────────────────────
+    // Timer A (300s): XRC fetch + price update + CDP-14 source-floor + CDP-01
+    //   consecutive-failure circuit breaker. Pre-Wave-14b this single timer
+    //   chained the interest/check_vaults/treasury work below; a trap in any
+    //   step skipped everything downstream silently.
     ic_cdk_timers::set_timer_interval(rumi_protocol_backend::xrc::FETCHING_ICP_RATE_INTERVAL, || {
         ic_cdk::spawn(rumi_protocol_backend::xrc::fetch_icp_rate())
     });
+    // Timer B (60s): interest accrual + harvest + treasury drains + flush.
+    //   Independent of XRC freshness; runs on cached state. Cheap.
+    ic_cdk_timers::set_timer_interval(
+        rumi_protocol_backend::xrc::INTEREST_AND_TREASURY_TICK_INTERVAL,
+        || ic_cdk::spawn(rumi_protocol_backend::xrc::interest_and_treasury_tick()),
+    );
+    // Timer C (300s): check_vaults + aggregate-snapshot refresh.
+    //   Matches the pre-Wave-14b cadence so liquidation latency is unchanged.
+    ic_cdk_timers::set_timer_interval(
+        rumi_protocol_backend::xrc::VAULT_CHECK_TICK_INTERVAL,
+        || ic_cdk::spawn(rumi_protocol_backend::xrc::vault_check_tick()),
+    );
 
     // Price timers for all non-ICP collateral types (timers don't survive upgrades,
     // so we re-register them here for any collateral added via add_collateral_token).
