@@ -77,9 +77,22 @@ fn check_postcondition<T>(t: T) -> T {
 }
 
 /// Validates caller identity and ensures a fresh price is available.
-/// If the cached ICP price is older than 30 seconds, triggers an on-demand
-/// XRC fetch before proceeding. This allows the background timer to poll
-/// lazily (every 300s) while guaranteeing fresh prices for actual operations.
+/// If the cached ICP price is older than the freshness threshold, triggers
+/// an on-demand XRC fetch before proceeding. This allows the background
+/// timer to poll lazily (every 300s) while guaranteeing fresh prices for
+/// actual operations.
+///
+/// Wave-14c CDP-16: this function is `async` because the on-demand XRC
+/// fetch (`ensure_fresh_price().await`) is a real `await` suspension point
+/// whenever the cached price misses the freshness window. Callers must NOT
+/// hold a `read_state` snapshot or any in-flight reference across
+/// `validate_call().await`: state can mutate during the suspension (e.g.
+/// the price gets refreshed, mode flips, an admin setter runs). Always
+/// re-read the fields you need AFTER `validate_call().await` returns.
+///
+/// The cache-hit path is also async (no work done other than the conditional)
+/// but yields once to the executor; in either case, treat the call as a
+/// suspension boundary.
 async fn validate_call() -> Result<(), ProtocolError> {
     if ic_cdk::caller() == Principal::anonymous() {
         return Err(ProtocolError::AnonymousCallerNotAllowed);

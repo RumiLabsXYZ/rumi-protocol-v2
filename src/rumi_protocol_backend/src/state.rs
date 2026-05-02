@@ -781,9 +781,15 @@ pub struct State {
     /// Only an admin call to `unfreeze_protocol` can clear this.
     pub frozen: bool,
 
-    // Rate limiting for close_vault operations
+    // Rate limiting for close_vault operations.
+    // Wave-14c CDP-09: `global_close_requests` is a VecDeque so the 24h
+    // cleanup can drop expired entries from the front via `drain(..idx)`
+    // (O(log N + K)) instead of `retain` (O(N)). At 300+ closes/minute
+    // sustained load the linear scan was the dominant cost on this path.
+    // Per-user `close_vault_requests` stays a Vec; per-user lists are
+    // typically tiny (5/min, 60/day) so the constant factor wins.
     pub close_vault_requests: BTreeMap<Principal, Vec<u64>>,
-    pub global_close_requests: Vec<u64>,
+    pub global_close_requests: std::collections::VecDeque<u64>,
     pub concurrent_close_operations: u32,
     pub dust_forgiven_total: ICUSD,
     pub treasury_principal: Option<Principal>,
@@ -1256,7 +1262,7 @@ impl Default for State {
             manual_mode_override: false,
             frozen: false,
             close_vault_requests: BTreeMap::new(),
-            global_close_requests: Vec::new(),
+            global_close_requests: std::collections::VecDeque::new(),
             concurrent_close_operations: 0,
             dust_forgiven_total: ICUSD::new(0),
             treasury_principal: None,
@@ -1380,7 +1386,7 @@ impl From<InitArg> for State {
             frozen: false,
             // Rate limiting initialization
             close_vault_requests: BTreeMap::new(),
-            global_close_requests: Vec::new(),
+            global_close_requests: std::collections::VecDeque::new(),
             concurrent_close_operations: 0,
             dust_forgiven_total: ICUSD::new(0),
 
@@ -1572,8 +1578,14 @@ impl State {
             user_requests.retain(|&timestamp| timestamp > cutoff_time);
         }
         
-        // Clean global timestamps
-        self.global_close_requests.retain(|&timestamp| timestamp > cutoff_time);
+        // Clean global timestamps. Wave-14c CDP-09: timestamps are appended
+        // chronologically, so the deque is sorted ascending. `partition_point`
+        // gives the first index whose timestamp is > cutoff in O(log N), and
+        // `drain(..idx)` removes the prefix in O(K). Old O(N) retain is gone.
+        let expired_until = self
+            .global_close_requests
+            .partition_point(|&timestamp| timestamp <= cutoff_time);
+        self.global_close_requests.drain(..expired_until);
         
         // Check user rate limits (5 per minute, 60 per day)
         let user_recent_requests = self.close_vault_requests
@@ -1598,11 +1610,15 @@ impl State {
             ));
         }
         
-        // Check global rate limits (300 per minute, 30,000 per day)
-        let global_recent_requests = self.global_close_requests
-            .iter()
-            .filter(|&&timestamp| timestamp > current_time - minute_nanos)
-            .count();
+        // Check global rate limits (300 per minute, 30,000 per day).
+        // Wave-14c CDP-09: deque is sorted ascending, so `partition_point`
+        // finds the first index whose timestamp is past the minute cutoff
+        // and the recent count is `len - idx` in O(log N).
+        let minute_cutoff = current_time.saturating_sub(minute_nanos);
+        let recent_start = self
+            .global_close_requests
+            .partition_point(|&timestamp| timestamp <= minute_cutoff);
+        let global_recent_requests = self.global_close_requests.len() - recent_start;
             
         let global_daily_requests = self.global_close_requests.len();
         
@@ -1637,8 +1653,8 @@ impl State {
             .or_insert_with(Vec::new)
             .push(current_time);
             
-        // Record global request
-        self.global_close_requests.push(current_time);
+        // Record global request. Wave-14c CDP-09: VecDeque, append to back.
+        self.global_close_requests.push_back(current_time);
         
         // Increment concurrent operations
         self.concurrent_close_operations += 1;
