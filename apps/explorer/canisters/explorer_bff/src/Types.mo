@@ -65,7 +65,7 @@ module {
   public type ActivityFilter = {
     sources : ?[Text];
     types : ?[Text];
-    principal : ?Principal;
+    filter_principal : ?Principal;
     from_ns : ?Nat64;
     to_ns : ?Nat64;
   };
@@ -113,7 +113,7 @@ module {
   };
 
   public type AddressDTO = {
-    principal : Principal;
+    owner : Principal;
     vaults_owned : [VaultSummaryDTO];
     sp_deposits : [SpDepositDTO];
     amm_lp_positions : [AmmLpPositionDTO];

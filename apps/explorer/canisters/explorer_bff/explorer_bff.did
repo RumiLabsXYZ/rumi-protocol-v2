@@ -61,7 +61,7 @@ type OverviewDTO = record {
 type ActivityFilter = record {
   sources: opt vec text;
   types: opt vec text;
-  principal: opt principal;
+  filter_principal: opt principal;
   from_ns: opt nat64;
   to_ns: opt nat64;
 };
@@ -109,7 +109,7 @@ type TokenBalanceDTO = record {
 };
 
 type AddressDTO = record {
-  principal: principal;
+  owner: principal;
   vaults_owned: vec VaultSummaryDTO;
   sp_deposits: vec SpDepositDTO;
   amm_lp_positions: vec AmmLpPositionDTO;

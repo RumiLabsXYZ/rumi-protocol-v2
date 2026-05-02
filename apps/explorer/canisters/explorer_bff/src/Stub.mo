@@ -75,7 +75,7 @@ module {
 
   public func address(p : Principal) : T.AddressDTO {
     {
-      principal = p;
+      owner = p;
       vaults_owned = [{
         vault_id = 142;
         status = #Open;
