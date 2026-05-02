@@ -116,12 +116,25 @@ export async function fetchSnapshots() {
 	}
 }
 
+// Backend Wave-9a DOS-004: legacy `get_all_vaults` is now capped at 500 vaults
+// per call. Use the paged variant and stitch pages so the explorer continues
+// to see the full vault map at any TVL.
+const VAULT_PAGE_SIZE = 500n;
+const VAULT_PAGE_MAX_PAGES = 100;
+
 export async function fetchAllVaults() {
 	allVaultsLoading.set(true);
 	try {
-		const vaults = await publicActor.get_all_vaults();
-		allVaults.set(vaults);
-		return vaults;
+		const all: any[] = [];
+		let startId = 0n;
+		for (let page = 0; page < VAULT_PAGE_MAX_PAGES; page += 1) {
+			const resp = await publicActor.get_vaults_page(startId, VAULT_PAGE_SIZE);
+			all.push(...resp.vaults);
+			if (resp.next_start_id.length === 0) break;
+			startId = resp.next_start_id[0];
+		}
+		allVaults.set(all);
+		return all;
 	} catch (e) {
 		console.error('Failed to fetch all vaults:', e);
 		return [];
@@ -151,15 +164,33 @@ export async function fetchVaultsByOwner(principal: any) {
 	}
 }
 
+// Backend Wave-9a DOS-003: legacy `get_events_by_principal` still returns the
+// last 500 matches in newest-first order, but the underlying full-log scan
+// remains O(N) per call. Use the paged variant and chain bounded scan windows
+// so an explorer caller paying for full coverage stays under the per-call
+// cycle budget regardless of log size.
+const PRINCIPAL_EVENTS_SCAN_LENGTH = 5_000n;
+const PRINCIPAL_EVENTS_MAX_PAGES = 100;
+
 export async function fetchEventsByPrincipal(principalText: string) {
 	try {
 		const principal = Principal.fromText(principalText);
-		const result = await publicActor.get_events_by_principal(principal);
-		// result is Vec<(u64, Event)>
-		return result.map((tuple: any) => ({
-			event: tuple[1] ?? tuple,
-			globalIndex: Number(tuple[0] ?? 0)
-		}));
+		const matches: { event: any; globalIndex: number }[] = [];
+		let scanStart = 0n;
+		for (let page = 0; page < PRINCIPAL_EVENTS_MAX_PAGES; page += 1) {
+			const resp = await publicActor.get_events_by_principal_paged(
+				principal,
+				scanStart,
+				PRINCIPAL_EVENTS_SCAN_LENGTH,
+			);
+			for (const entry of resp.events) {
+				matches.push({ event: entry[1], globalIndex: Number(entry[0]) });
+			}
+			if (resp.exhausted) break;
+			if (resp.scan_end <= scanStart) break;
+			scanStart = resp.scan_end;
+		}
+		return matches;
 	} catch (e) {
 		console.error('Failed to fetch events by principal:', e);
 		return [];

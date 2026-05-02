@@ -574,6 +574,12 @@ export type EventTypeFilter = { 'BreakerTripped' : null } |
   { 'DeficitRepaid' : null } |
   { 'Redemption' : null } |
   { 'CloseVault' : null };
+export interface EventsByPrincipalPagedResponse {
+  'scan_end' : bigint,
+  'exhausted' : boolean,
+  'events' : Array<[bigint, Event]>,
+  'total_events' : bigint,
+}
 export type FeeSource = { 'BorrowingFee' : null } |
   { 'RedemptionFee' : null };
 export interface Fees { 'redemption_fee' : number, 'borrowing_fee' : number }
@@ -901,6 +907,10 @@ export interface VaultRedemption {
   'vault_id' : bigint,
   'collateral_seized' : bigint,
 }
+export interface VaultsPageResponse {
+  'vaults' : Array<CandidVault>,
+  'next_start_id' : [] | [bigint],
+}
 export type XrcAssetClass = { 'Cryptocurrency' : null } |
   { 'FiatCurrency' : null };
 export interface _SERVICE {
@@ -949,6 +959,10 @@ export interface _SERVICE {
   >,
   'get_events' : ActorMethod<[GetEventsArg], Array<Event>>,
   'get_events_by_principal' : ActorMethod<[Principal], Array<[bigint, Event]>>,
+  'get_events_by_principal_paged' : ActorMethod<
+    [Principal, bigint, bigint],
+    EventsByPrincipalPagedResponse
+  >,
   'get_events_filtered' : ActorMethod<
     [GetEventsArg],
     GetEventsFilteredResponse
@@ -959,6 +973,10 @@ export interface _SERVICE {
   'get_interest_pool_share' : ActorMethod<[], number>,
   'get_interest_split' : ActorMethod<[], Array<InterestSplitArg>>,
   'get_liquidatable_vaults' : ActorMethod<[], Array<CandidVault>>,
+  'get_liquidatable_vaults_page' : ActorMethod<
+    [bigint, bigint],
+    VaultsPageResponse
+  >,
   'get_liquidation_bonus' : ActorMethod<[], number>,
   'get_liquidation_frozen' : ActorMethod<[], boolean>,
   'get_liquidation_ordering_tolerance_bps' : ActorMethod<[], bigint>,
@@ -997,9 +1015,15 @@ export interface _SERVICE {
   'get_three_pool_canister' : ActorMethod<[], [] | [Principal]>,
   'get_treasury_principal' : ActorMethod<[], [] | [Principal]>,
   'get_treasury_stats' : ActorMethod<[], TreasuryStats>,
+  'get_vault_count' : ActorMethod<[], bigint>,
   'get_vault_history' : ActorMethod<[bigint], Array<[bigint, Event]>>,
+  'get_vault_history_paged' : ActorMethod<
+    [bigint, bigint, bigint],
+    GetEventsFilteredResponse
+  >,
   'get_vault_interest_rate' : ActorMethod<[bigint], Result_7>,
   'get_vaults' : ActorMethod<[[] | [Principal]], Array<CandidVault>>,
+  'get_vaults_page' : ActorMethod<[bigint, bigint], VaultsPageResponse>,
   'http_request' : ActorMethod<[HttpRequest], HttpResponse_1>,
   'icrc10_supported_standards' : ActorMethod<[], Array<StandardRecord>>,
   'icrc21_canister_call_consent_message' : ActorMethod<

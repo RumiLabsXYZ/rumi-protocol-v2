@@ -475,14 +475,33 @@ export async function fetchCollateralPrices(): Promise<Map<string, number>> {
 
 // ── Vaults ───────────────────────────────────────────────────────────────────
 
+/**
+ * Page size for cursored vault enumeration. Backend caps each page at 500
+ * (Wave-9a DOS-004 hard limit on `get_vaults_page` / `get_liquidatable_vaults_page`).
+ */
+const VAULT_PAGE_SIZE = 500n;
+/**
+ * Defensive cap on chained pages — at 500 per page that's 50,000 vaults,
+ * comfortably above any realistic TVL. Stops a misbehaving cursor (one that
+ * fails to advance) from looping forever.
+ */
+const VAULT_PAGE_MAX_PAGES = 100;
+
 export async function fetchAllVaults(): Promise<any[]> {
 	const key = 'vaults:all';
 	const cached = getCached<any[]>(key, TTL.VAULTS);
 	if (cached) return cached;
 
 	try {
-		const result = await publicActor.get_all_vaults();
-		return setCache(key, result);
+		const all: any[] = [];
+		let startId = 0n;
+		for (let page = 0; page < VAULT_PAGE_MAX_PAGES; page += 1) {
+			const resp = await publicActor.get_vaults_page(startId, VAULT_PAGE_SIZE);
+			all.push(...resp.vaults);
+			if (resp.next_start_id.length === 0) break;
+			startId = resp.next_start_id[0];
+		}
+		return setCache(key, all);
 	} catch (err) {
 		console.error('[explorerService] fetchAllVaults failed:', err);
 		return [];
@@ -760,14 +779,42 @@ export async function fetchProtocolFeeTotalsFromBackend(
 	return setCache(key, out);
 }
 
+/**
+ * Per-call scan window for the cursored principal-events helper. Backend
+ * caps `scan_length` at 5,000 (Wave-9a DOS-003); we ask for the ceiling so a
+ * typical-size protocol's full log is reachable in a small number of calls.
+ */
+const PRINCIPAL_EVENTS_SCAN_LENGTH = 5_000n;
+/**
+ * Defensive ceiling on chained scan windows. At 5k events per window that's
+ * 500k events of coverage — well above the current log size — but still bounds
+ * a buggy `scan_end` from spinning forever.
+ */
+const PRINCIPAL_EVENTS_MAX_PAGES = 100;
+
 export async function fetchEventsByPrincipal(principal: Principal): Promise<[bigint, any][]> {
 	const key = `events:principal:${principal.toText()}`;
 	const cached = getCached<[bigint, any][]>(key, TTL.EVENTS);
 	if (cached) return cached;
 
 	try {
-		const result = await publicActor.get_events_by_principal(principal);
-		return setCache(key, result);
+		const all: [bigint, any][] = [];
+		let scanStart = 0n;
+		for (let page = 0; page < PRINCIPAL_EVENTS_MAX_PAGES; page += 1) {
+			const resp = await publicActor.get_events_by_principal_paged(
+				principal,
+				scanStart,
+				PRINCIPAL_EVENTS_SCAN_LENGTH,
+			);
+			for (const entry of resp.events) {
+				all.push([entry[0], entry[1]]);
+			}
+			if (resp.exhausted) break;
+			// Defensive: if the cursor doesn't advance, stop rather than loop.
+			if (resp.scan_end <= scanStart) break;
+			scanStart = resp.scan_end;
+		}
+		return setCache(key, all);
 	} catch (err) {
 		console.error('[explorerService] fetchEventsByPrincipal failed:', err);
 		return [];
@@ -787,8 +834,15 @@ export async function fetchLiquidatableVaults(): Promise<any[]> {
 	if (cached) return cached;
 
 	try {
-		const result = await publicActor.get_liquidatable_vaults();
-		return setCache(key, result);
+		const all: any[] = [];
+		let startId = 0n;
+		for (let page = 0; page < VAULT_PAGE_MAX_PAGES; page += 1) {
+			const resp = await publicActor.get_liquidatable_vaults_page(startId, VAULT_PAGE_SIZE);
+			all.push(...resp.vaults);
+			if (resp.next_start_id.length === 0) break;
+			startId = resp.next_start_id[0];
+		}
+		return setCache(key, all);
 	} catch (err) {
 		console.error('[explorerService] fetchLiquidatableVaults failed:', err);
 		return [];

@@ -13,6 +13,9 @@ use rumi_protocol_backend::{
     VaultArgWithToken, StableTokenType, InterestSplitArg,
     GetSnapshotsArg, ProtocolSnapshot, CollateralSnapshot,
     GetEventsFilteredResponse, StabilityPoolLiquidationResult,
+    VaultHistoryPagedResponse, EventsByPrincipalPagedResponse, VaultsPageResponse,
+    MAX_VAULT_HISTORY, MAX_EVENTS_BY_PRINCIPAL_LEGACY, MAX_EVENTS_BY_PRINCIPAL_SCAN,
+    MAX_EVENTS_BY_PRINCIPAL_OUTPUT, MAX_VAULTS_LEGACY_PAGE, MAX_VAULTS_PAGE_LIMIT,
 };
 use rumi_protocol_backend::logs::DEBUG;
 use rumi_protocol_backend::state::mutate_state;
@@ -692,6 +695,17 @@ fn get_fees(redeemed_amount: u64) -> Fees {
     })
 }
 
+/// Legacy entry point for the explorer's per-vault timeline. Kept for
+/// backwards-compat with cached frontend bundles, but now bounded:
+/// returns at most `MAX_VAULT_HISTORY` matches. When a vault has more
+/// than that many events, the newest matches are returned in chronological
+/// order (the frontend reverses for newest-first display). For full
+/// historical access, use `get_vault_history_paged`.
+///
+/// Audit Wave 9a (DOS-001): the previous unbounded scan walked every
+/// stable-log entry and decoded each one for `is_vault_related`. The
+/// per-call cost scaled linearly with total event-log size; this cap
+/// bounds the response to the most relevant slice.
 #[candid_method(query)]
 #[query]
 fn get_vault_history(vault_id: u64) -> Vec<(u64, Event)> {
@@ -699,16 +713,63 @@ fn get_vault_history(vault_id: u64) -> Vec<(u64, Event)> {
         ic_cdk::trap("update call rejected");
     }
 
-    // Iteration order matches the StableLog index, so enumerate() yields the
-    // global event-log index alongside each event. The explorer surfaces these
-    // ids on per-vault activity rows.
-    let mut vault_events: Vec<(u64, Event)> = vec![];
+    // Forward scan with a bounded ring buffer keeps the response size
+    // O(MAX_VAULT_HISTORY) regardless of total log length. Order in
+    // the buffer is chronological (oldest of the latest 200 first),
+    // matching the previous semantic — the frontend already reverses
+    // for newest-first display.
+    let mut buf: std::collections::VecDeque<(u64, Event)> =
+        std::collections::VecDeque::with_capacity(MAX_VAULT_HISTORY);
     for (idx, event) in events().enumerate() {
         if event.is_vault_related(&vault_id) {
-            vault_events.push((idx as u64, event));
+            if buf.len() == MAX_VAULT_HISTORY {
+                buf.pop_front();
+            }
+            buf.push_back((idx as u64, event));
         }
     }
-    vault_events
+    buf.into_iter().collect()
+}
+
+/// Paginated per-vault timeline. `start` indexes into matches sorted
+/// newest-first; `length` is the page size (capped at
+/// `MAX_VAULT_HISTORY_PAGE`). `total` is the total matched-event count
+/// for this vault so the caller can render accurate page indicators.
+///
+/// Audit Wave 9a (DOS-001): bounds response size and gives the
+/// explorer paged access to a vault's full history without forcing a
+/// single round-trip.
+#[candid_method(query)]
+#[query]
+fn get_vault_history_paged(vault_id: u64, start: u64, length: u64) -> VaultHistoryPagedResponse {
+    if ic_cdk::api::data_certificate().is_none() {
+        ic_cdk::trap("update call rejected");
+    }
+
+    let length = length.min(MAX_VAULT_HISTORY as u64);
+
+    let all_matches: Vec<(u64, Event)> = events()
+        .enumerate()
+        .filter(|(_, e)| e.is_vault_related(&vault_id))
+        .map(|(i, e)| (i as u64, e))
+        .collect();
+    let total = all_matches.len() as u64;
+
+    let events_page: Vec<(u64, Event)> = if start >= total {
+        Vec::new()
+    } else {
+        all_matches
+            .into_iter()
+            .rev()
+            .skip(start as usize)
+            .take(length as usize)
+            .collect()
+    };
+
+    VaultHistoryPagedResponse {
+        total,
+        events: events_page,
+    }
 }
 
 #[candid_method(query)]
@@ -901,24 +962,89 @@ fn write_filtered_events_cache(key: u64, now: u64, resp: &GetEventsFilteredRespo
     });
 }
 
-/// Return all events involving a given principal (as owner, caller, or liquidator).
+/// Legacy entry point for the explorer's per-principal activity feed.
+/// Returns up to `MAX_RESULTS` matches in newest-first order. The
+/// previous implementation materialised every match before slicing;
+/// we now use a bounded ring buffer so memory is O(MAX_RESULTS)
+/// regardless of total log length.
+///
+/// Audit Wave 9a (DOS-003): bounds response size and intermediate
+/// memory. The full-log scan complexity is unchanged — for callers
+/// that need to walk a very large log without paying that O(N) cost
+/// per call, use `get_events_by_principal_paged` to scan a bounded
+/// window per call.
 #[candid_method(query)]
 #[query]
 fn get_events_by_principal(principal: Principal) -> Vec<(u64, Event)> {
     if ic_cdk::api::data_certificate().is_none() {
         ic_cdk::trap("update call rejected");
     }
-    const MAX_RESULTS: usize = 500;
 
-    events()
-        .enumerate()
-        .filter(|(_, e)| !e.is_accrue_interest() && e.involves_principal(&principal))
-        .map(|(i, e)| (i as u64, e))
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .take(MAX_RESULTS)
-        .collect()
+    let mut buf: std::collections::VecDeque<(u64, Event)> =
+        std::collections::VecDeque::with_capacity(MAX_EVENTS_BY_PRINCIPAL_LEGACY);
+    for (idx, event) in events().enumerate() {
+        if !event.is_accrue_interest() && event.involves_principal(&principal) {
+            if buf.len() == MAX_EVENTS_BY_PRINCIPAL_LEGACY {
+                buf.pop_front();
+            }
+            buf.push_back((idx as u64, event));
+        }
+    }
+    // Newest-first matches the legacy `.rev().take(MAX_RESULTS)` ordering.
+    buf.into_iter().rev().collect()
+}
+
+/// Cursor-paginated principal activity feed. Caller passes
+/// `scan_start` (event-log index to begin scanning at, inclusive) and
+/// `scan_length` (number of log entries to walk in this call, capped
+/// at `MAX_SCAN_LENGTH`). The response reports the matches found in
+/// that window, the `scan_end` index where the next call should
+/// resume, and an `exhausted` flag set true once the scan reaches
+/// the current end of the event log.
+///
+/// Audit Wave 9a (DOS-003): bounds the per-call scan window so a
+/// caller paging through a very large log can never trigger an
+/// unbounded query — the scan stays under the cycle budget for any
+/// log size. Output is also capped at `MAX_OUTPUT_PER_CALL` matches
+/// to bound the response payload.
+#[candid_method(query)]
+#[query]
+fn get_events_by_principal_paged(
+    principal: Principal,
+    scan_start: u64,
+    scan_length: u64,
+) -> EventsByPrincipalPagedResponse {
+    if ic_cdk::api::data_certificate().is_none() {
+        ic_cdk::trap("update call rejected");
+    }
+
+    let total_events = rumi_protocol_backend::storage::count_events();
+    let scan_length = scan_length.min(MAX_EVENTS_BY_PRINCIPAL_SCAN);
+    let scan_end = scan_start.saturating_add(scan_length).min(total_events);
+
+    let mut events_page: Vec<(u64, Event)> = Vec::new();
+    if scan_start < total_events && scan_length > 0 {
+        for (offset, event) in events()
+            .skip(scan_start as usize)
+            .take(scan_length as usize)
+            .enumerate()
+        {
+            if !event.is_accrue_interest() && event.involves_principal(&principal) {
+                let idx = scan_start.saturating_add(offset as u64);
+                events_page.push((idx, event));
+                if events_page.len() == MAX_EVENTS_BY_PRINCIPAL_OUTPUT {
+                    break;
+                }
+            }
+        }
+    }
+
+    EventsByPrincipalPagedResponse {
+        events: events_page,
+        scan_end,
+        exhausted: scan_end >= total_events,
+        total_events,
+    }
 }
 
 #[candid_method(query)]
@@ -961,6 +1087,17 @@ fn get_liquidity_status(owner: Principal) -> LiquidityStatus {
     })
 }
 
+/// Vault lookup. With `target = Some(principal)` returns every vault
+/// owned by that principal (naturally bounded — typical principals own
+/// 1-2 vaults; the per-principal index walks at most a few entries).
+/// With `target = None` returns the first `MAX_VAULTS_LEGACY_PAGE`
+/// vaults by ascending `vault_id`. For full enumeration use
+/// `get_vaults_page` with cursoring.
+///
+/// Audit Wave 9a (DOS-004): the previous `target = None` branch cloned
+/// every vault and Candid-encoded the full set — at 10k+ vaults that
+/// pushed reply sizes into the megabyte range. The cap bounds the
+/// legacy reply; new callers paginate.
 #[candid_method(query)]
 #[query]
 fn get_vaults(target: Option<Principal>) -> Vec<CandidVault> {
@@ -978,11 +1115,46 @@ fn get_vaults(target: Option<Principal>) -> Vec<CandidVault> {
         None => read_state(|s| {
             s.vault_id_to_vaults
                 .values()
+                .take(MAX_VAULTS_LEGACY_PAGE)
                 .cloned()
                 .map(CandidVault::from)
                 .collect::<Vec<CandidVault>>()
         }),
     }
+}
+
+/// Paginated vault enumeration. Returns vaults with `vault_id >= start_id`
+/// up to `limit` entries (capped at `MAX_VAULTS_PAGE_LIMIT`), ordered
+/// ascending by `vault_id`. `next_start_id` is `Some(id)` when more
+/// vaults remain past this page, `None` when the end of the map is
+/// reached.
+///
+/// Audit Wave 9a (DOS-004): replaces unbounded `get_all_vaults` /
+/// `get_vaults(None)` reads with a cursor-based page so single-call
+/// reply size and instructions stay bounded at any TVL.
+#[candid_method(query)]
+#[query]
+fn get_vaults_page(start_id: u64, limit: u64) -> VaultsPageResponse {
+    let limit = limit.min(MAX_VAULTS_PAGE_LIMIT) as usize;
+
+    read_state(|s| {
+        let mut iter = s.vault_id_to_vaults.range(start_id..);
+        let mut vaults = Vec::with_capacity(limit);
+        for (_, vault) in iter.by_ref().take(limit) {
+            vaults.push(CandidVault::from(vault.clone()));
+        }
+        let next_start_id = iter.next().map(|(id, _)| *id);
+        VaultsPageResponse { vaults, next_start_id }
+    })
+}
+
+/// Total vault count (open + closed). Used by the explorer to size
+/// pagination controls without fetching the full vault list. Audit
+/// Wave 9a (DOS-004) companion to `get_vaults_page`.
+#[candid_method(query)]
+#[query]
+fn get_vault_count() -> u64 {
+    read_state(|s| s.vault_id_to_vaults.len() as u64)
 }
 
 // Vault related operations
@@ -1504,10 +1676,18 @@ async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Protoc
     check_postcondition(rumi_protocol_backend::vault::partial_liquidate_vault(arg).await)
 }
 
-// Add the new get liquidatable vaults endpoint
+/// Legacy entry point used by the layout's at-risk banner and the
+/// liquidator hot path. Returns the first `MAX_LIQUIDATABLE_LEGACY_PAGE`
+/// liquidatable vaults by ascending `vault_id`. New callers should
+/// use `get_liquidatable_vaults_page` for full enumeration.
+///
+/// Audit Wave 9a (DOS-004): bounds reply size and per-call instructions
+/// when a price drop pushes many vaults underwater simultaneously.
 #[candid_method(query)]
 #[query]
 fn get_liquidatable_vaults() -> Vec<CandidVault> {
+    // Wave 9a (DOS-004) shares `MAX_VAULTS_LEGACY_PAGE` with the other
+    // vault enumeration legacy entry points; the cap is the same.
     read_state(|s| {
         // Dummy rate for compute_collateral_ratio parameter (it uses per-collateral price internally)
         let dummy_rate = s.last_icp_rate.unwrap_or(UsdIcp::from(dec!(0.0)));
@@ -1522,18 +1702,62 @@ fn get_liquidatable_vaults() -> Vec<CandidVault> {
                 }
                 ratio < s.get_min_liquidation_ratio_for(&vault.collateral_type)
             })
+            .take(MAX_VAULTS_LEGACY_PAGE)
             .cloned()
             .map(CandidVault::from)
             .collect::<Vec<CandidVault>>()
     })
 }
 
+/// Paginated enumeration of currently-liquidatable vaults, ordered
+/// ascending by `vault_id` starting at `start_id`. `limit` is capped
+/// at `MAX_VAULTS_PAGE_LIMIT` (the same cap as `get_vaults_page`).
+/// `next_start_id` carries the cursor for the next page, or `None`
+/// once the scan has reached the end of the vault map.
+///
+/// Audit Wave 9a (DOS-004): pairs with `get_vaults_page` to give the
+/// liquidations UI bounded-cost paging at any TVL.
+#[candid_method(query)]
+#[query]
+fn get_liquidatable_vaults_page(start_id: u64, limit: u64) -> VaultsPageResponse {
+    let limit = limit.min(MAX_VAULTS_PAGE_LIMIT) as usize;
+
+    read_state(|s| {
+        let dummy_rate = s.last_icp_rate.unwrap_or(UsdIcp::from(dec!(0.0)));
+
+        let mut vaults = Vec::with_capacity(limit);
+        let mut next_start_id: Option<u64> = None;
+        for (id, vault) in s.vault_id_to_vaults.range(start_id..) {
+            let ratio = rumi_protocol_backend::compute_collateral_ratio(vault, dummy_rate, s);
+            if ratio == Ratio::from(Decimal::ZERO) {
+                continue;
+            }
+            if ratio < s.get_min_liquidation_ratio_for(&vault.collateral_type) {
+                if vaults.len() == limit {
+                    next_start_id = Some(*id);
+                    break;
+                }
+                vaults.push(CandidVault::from(vault.clone()));
+            }
+        }
+        VaultsPageResponse { vaults, next_start_id }
+    })
+}
+
+/// Legacy bulk vault enumeration. Returns the first
+/// `MAX_VAULTS_LEGACY_PAGE` vaults by ascending `vault_id`. New
+/// callers should use `get_vaults_page` for full enumeration.
+///
+/// Audit Wave 9a (DOS-004): the unbounded clone+encode path scaled
+/// linearly with `vault_id_to_vaults.len()` — the cap keeps a single
+/// call inside the cycle budget at any TVL.
 #[candid_method(query)]
 #[query]
 fn get_all_vaults() -> Vec<CandidVault> {
     read_state(|s| {
         s.vault_id_to_vaults
             .values()
+            .take(MAX_VAULTS_LEGACY_PAGE)
             .cloned()
             .map(CandidVault::from)
             .collect::<Vec<CandidVault>>()
