@@ -6,7 +6,7 @@ import { get } from 'svelte/store';
 import { CANISTER_IDS, CONFIG } from '../config';
 import { isOisyWallet } from './protocol/walletOperations';
 import { getOisySignerAgent, createOisyActor } from './oisySigner';
-import { fetchLedgerFee } from './ledgerFeeService';
+import { fetchLedgerFee, getCachedLedgerFee } from './ledgerFeeService';
 
 // ──────────────────────────────────────────────────────────────
 // Types — mirrors the AMM Candid interface
@@ -106,6 +106,21 @@ export const AMM_TOKENS: AmmToken[] = [
 /** Live ledger transfer fee for an AMM token (audit ICRC-005). */
 export function tokenFee(token: AmmToken): Promise<bigint> {
   return fetchLedgerFee({
+    ledgerId: token.ledgerId,
+    decimals: token.decimals,
+    symbol: token.symbol,
+  });
+}
+
+/**
+ * Synchronous version of `tokenFee`. Returns the cached fee or the hardcoded
+ * fallback. Use inside Oisy signer-batch code paths where a click-handler
+ * gesture window must be preserved (no `await` between click and
+ * `signerAgent.execute()`). Callers MUST ensure the cache is warmed first via
+ * `preWarmOisyFees()` during the quote phase.
+ */
+export function tokenFeeCached(token: AmmToken): bigint {
+  return getCachedLedgerFee({
     ledgerId: token.ledgerId,
     decimals: token.decimals,
     symbol: token.symbol,
