@@ -2,7 +2,7 @@
   import { createEventDispatcher } from 'svelte';
   import { walletStore } from '../../stores/wallet';
   import { ammService, AMM_TOKENS, parseTokenAmount, formatTokenAmount, type AmmToken } from '../../services/ammService';
-  import { resolveRoute, executeRoute, preWarmOisySigner, type SwapRoute } from '../../services/swapRouter';
+  import { resolveRoute, executeRoute, preWarmOisySigner, preWarmOisyFees, type SwapRoute } from '../../services/swapRouter';
   import { fetchLedgerFee, getCachedLedgerFee } from '../../services/ledgerFeeService';
   import { CANISTER_IDS } from '../../config';
 
@@ -116,10 +116,12 @@
       quoting = true;
       error = '';
       const amountRaw = parseTokenAmount(String(amount), fromToken.decimals);
-      // Run quote + signer pre-warm in parallel so both are ready before click
+      // Run quote + signer/fee pre-warm in parallel so the click handler stays
+      // synchronous all the way to signerAgent.execute() (Oisy popup gate).
       const [route] = await Promise.all([
         resolveRoute(fromToken, toToken, amountRaw),
         preWarmOisySigner(),
+        preWarmOisyFees(),
       ]);
       currentRoute = route;
       midMarketRate = await fetchMidMarketRate(currentRoute);
@@ -203,8 +205,12 @@
       error = '';
       const amountRaw = parseTokenAmount(String(amount), fromToken.decimals);
 
-      // Refresh live fee for the pre-flight check before executing the route.
-      const liveFee = await fetchLedgerFee(ammTokenRef(fromToken));
+      // Pre-flight balance check using the cached live fee. The reactive
+      // `void fetchLedgerFee(...)` above and `preWarmOisyFees()` keep this
+      // warm; awaiting here would burn the click-handler gesture window
+      // and trip Oisy's "Signer window should not be opened outside of click
+      // handler" guard. Backend ledgers also enforce the balance check.
+      const liveFee = getCachedLedgerFee(ammTokenRef(fromToken));
       const totalFees = liveFee * 2n;
       if (amountRaw + totalFees > walletBalance) {
         error = 'Insufficient balance (amount + fees)';

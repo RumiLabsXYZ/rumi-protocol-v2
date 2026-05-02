@@ -1,6 +1,6 @@
 import { Principal } from '@dfinity/principal';
 import { threePoolService, POOL_TOKENS } from './threePoolService';
-import { ammService, AMM_TOKENS, approvalAmount, tokenFee, type AmmToken } from './ammService';
+import { ammService, AMM_TOKENS, approvalAmount, tokenFeeCached, type AmmToken } from './ammService';
 import { CANISTER_IDS, CONFIG } from '../config';
 import { isOisyWallet } from './protocol/walletOperations';
 import { getOisySignerAgent, createOisyActor } from './oisySigner';
@@ -10,7 +10,7 @@ import { get } from 'svelte/store';
 import { RumiAmmProvider } from './providers/rumiAmmProvider';
 import { IcpswapProvider } from './providers/icpswapProvider';
 import { ProviderRegistry } from './providers/providerRegistry';
-import { fetchLedgerFee } from './ledgerFeeService';
+import { fetchLedgerFee, getCachedLedgerFee } from './ledgerFeeService';
 import type { ProviderQuote } from './providers/types';
 
 // ──────────────────────────────────────────────────────────────
@@ -565,6 +565,29 @@ export async function preWarmOisySigner(): Promise<void> {
   await getOisySignerAgent(wallet.principal);
 }
 
+/**
+ * Pre-warm the live ICRC-1 fee cache for every AMM token so the Oisy executors
+ * can read fees synchronously via `tokenFeeCached` / `getCachedLedgerFee`.
+ *
+ * The Oisy executors must not `await` between the user's click and
+ * `signerAgent.execute()` or the browser blocks the popup with a
+ * "Signer window should not be opened outside of click handler" error. By
+ * fetching every relevant fee during the quote phase (5-min cache TTL), the
+ * click-handler path stays fully synchronous.
+ *
+ * No-op for non-Oisy wallets; the standard ICRC-2 paths can `await` freely.
+ */
+export async function preWarmOisyFees(): Promise<void> {
+  if (!isOisyWallet()) return;
+  await Promise.all(
+    AMM_TOKENS.map(t => fetchLedgerFee({
+      ledgerId: t.ledgerId,
+      decimals: t.decimals,
+      symbol: t.symbol,
+    })),
+  );
+}
+
 // ──────────────────────────────────────────────────────────────
 // Oisy-batched multi-hop execution
 //
@@ -615,8 +638,8 @@ async function executeStableToIcpOisy(
   const amounts: [bigint, bigint, bigint] = [0n, 0n, 0n];
   amounts[from.threePoolIndex] = amountIn;
 
-  // Pre-fetch live ICRC-1 fee before entering the signer batch (no awaits allowed mid-batch).
-  const fromFee = await tokenFee(from);
+  // Read live ICRC-1 fee from cache. preWarmOisyFees() warmed it during quote.
+  const fromFee = tokenFeeCached(from);
 
   // Signer agent was pre-warmed during quote phase — cached, no popup
   const signerAgent = await getOisySignerAgent(wallet.principal);
@@ -695,8 +718,8 @@ async function executeIcpToStableOisy(
   const threeUsdMinOutput = threeUsdEstimate * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
   const stableMinOutput = route.estimatedOutput * BigInt(10000 - slippageBps) / 10000n;
 
-  // Pre-fetch live ICRC-1 fee before entering the signer batch.
-  const icpFee = await tokenFee(icpToken);
+  // Read live ICRC-1 fee from cache. preWarmOisyFees() warmed it during quote.
+  const icpFee = tokenFeeCached(icpToken);
 
   // Signer agent was pre-warmed during quote phase — cached, no popup
   const signerAgent = await getOisySignerAgent(wallet.principal);
@@ -773,13 +796,10 @@ async function executeStableToIcpOisyIcpswap(
   const amounts: [bigint, bigint, bigint] = [0n, 0n, 0n];
   amounts[from.threePoolIndex] = amountIn;
 
-  // Pre-fetch every live ICRC-1 fee the batched signer flow needs before
-  // entering `signerAgent.batch()` (no awaits allowed mid-batch).
-  const [fromFee, threeUsdFee, icpFee] = await Promise.all([
-    tokenFee(from),
-    fetchLedgerFee({ ledgerId: CANISTER_IDS.THREEPOOL, decimals: 8, symbol: '3USD' }),
-    fetchLedgerFee({ ledgerId: CANISTER_IDS.ICP_LEDGER, decimals: 8, symbol: 'ICP' }),
-  ]);
+  // Read live ICRC-1 fees from cache. preWarmOisyFees() warmed them during quote.
+  const fromFee = tokenFeeCached(from);
+  const threeUsdFee = getCachedLedgerFee({ ledgerId: CANISTER_IDS.THREEPOOL, decimals: 8, symbol: '3USD' });
+  const icpFee = getCachedLedgerFee({ ledgerId: CANISTER_IDS.ICP_LEDGER, decimals: 8, symbol: 'ICP' });
 
   const signerAgent = await getOisySignerAgent(wallet.principal);
 
@@ -883,11 +903,9 @@ async function executeIcpToStableOisyIcpswap(
   const threeUsdMinFromSwap = threeUsdEstimate * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
   const stableMinOutput = route.estimatedOutput * BigInt(10000 - slippageBps) / 10000n;
 
-  // Pre-fetch every live ICRC-1 fee the batched signer flow needs.
-  const [icpFee, threeUsdFee] = await Promise.all([
-    tokenFee(icpToken),
-    fetchLedgerFee({ ledgerId: CANISTER_IDS.THREEPOOL, decimals: 8, symbol: '3USD' }),
-  ]);
+  // Read live ICRC-1 fees from cache. preWarmOisyFees() warmed them during quote.
+  const icpFee = tokenFeeCached(icpToken);
+  const threeUsdFee = getCachedLedgerFee({ ledgerId: CANISTER_IDS.THREEPOOL, decimals: 8, symbol: '3USD' });
 
   const signerAgent = await getOisySignerAgent(wallet.principal);
 
@@ -982,11 +1000,9 @@ async function executeIcpswapDirectOisy(
 
   const minOut = route.estimatedOutput * BigInt(10000 - slippageBps) / 10000n;
 
-  // Pre-fetch every live ICRC-1 fee the batched signer flow needs.
-  const [fromFee, toFee] = await Promise.all([
-    tokenFee(from),
-    tokenFee(to),
-  ]);
+  // Read live ICRC-1 fees from cache. preWarmOisyFees() warmed them during quote.
+  const fromFee = tokenFeeCached(from);
+  const toFee = tokenFeeCached(to);
 
   const signerAgent = await getOisySignerAgent(wallet.principal);
 
