@@ -34,13 +34,25 @@ Rumi Protocol has been through a structured internal security review at commit `
 
 A public-facing summary of the three-pass review is available on request. Findings, fixes, deployed module hashes, and test fences are all traceable through the commit history of this repository.
 
+## Per-collateral debt ceilings as a risk lever
+
+Each collateral type has a hard per-asset icUSD debt ceiling enforced by the backend canister. The ceiling caps total icUSD borrowable against that collateral and is the operative control for promotional or low-liquidity assets, where structural mitigations like price-source diversification do not yet apply at current scale.
+
+Live ceilings can be inspected on-chain at any time:
+
+```
+dfx canister --network ic call rumi_protocol_backend get_collateral_config '(principal "<collateral-id>")'
+```
+
+Promotional collateral (BOB, EXE) is held at a $500 cap each. nICP is held at $1,500. ICP and the wrapped-asset collaterals (ckBTC, ckETH, ckXAUT) carry production-scale ceilings appropriate to their liquidity and oracle quality. Adjustments are made via the developer-gated `set_collateral_debt_ceiling` endpoint and are recorded in protocol events.
+
 ## Out of scope
 
 The following are intentionally not in scope for current security review:
 
 - Single-controller risk (covered by the SNS migration; see above).
 - Pre-existing low-severity housekeeping items explicitly accepted as deferred (event-log eviction, pre-upgrade serialization layout). These are documented and tracked, with watch thresholds rather than fixes, until protocol scale or operational signals justify the change.
-- Third-party canisters (NNS, ICP ledger, XRC, Internet Identity) — issues there should be reported to their respective maintainers.
+- Third-party canisters (NNS, ICP ledger, XRC, Internet Identity). Issues there should be reported to their respective maintainers.
 
 ## Responsible disclosure
 
