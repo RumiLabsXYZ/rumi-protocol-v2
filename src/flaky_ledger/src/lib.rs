@@ -138,6 +138,18 @@ struct LedgerState {
     bad_fee_failures_remaining: u32,
     /// Recent transfers keyed by their dedup tuple. Retained until reset_dedup().
     dedup: BTreeMap<DedupKey, u64>,
+    /// When set, icrc1_transfer rejects with GenericError if the caller
+    /// matches. Used by audit_pocs_bot_002 to fail the bot's outbound
+    /// return-collateral transfer without breaking the protocol's bot_claim
+    /// transfer (the protocol calls icrc1_transfer with itself as caller).
+    fail_transfers_for_caller: Option<Principal>,
+    /// When set, icrc1_balance_of returns 0 for the matching account owner.
+    /// Used by audit_pocs_bot_002 to force the protocol's BOT-001b cancel
+    /// gate to reject (the gate compares icrc1_balance_of(protocol) against
+    /// `claim.collateral_amount - fee`, and a 0 reading deterministically
+    /// fails the >= check) without having to engineer a specific
+    /// post-claim-and-return on-ledger balance.
+    fake_zero_balance_for: Option<Principal>,
 }
 
 thread_local! {
@@ -163,6 +175,11 @@ fn init() {}
 fn icrc1_balance_of(account: Account) -> Nat {
     STATE.with(|s| {
         let state = s.borrow();
+        if let Some(target) = state.fake_zero_balance_for {
+            if account.owner == target {
+                return Nat::from(0u64);
+            }
+        }
         Nat::from(state.balances.get(&account).copied().unwrap_or(0))
     })
 }
@@ -174,6 +191,7 @@ fn icrc1_fee() -> Nat {
 
 #[update]
 fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
+    let caller = ic_cdk::caller();
     STATE.with(|s| {
         let mut state = s.borrow_mut();
 
@@ -184,6 +202,18 @@ fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
             });
         }
 
+        if let Some(target) = state.fail_transfers_for_caller {
+            if caller == target {
+                return Err(TransferError::GenericError {
+                    error_code: Nat::from(997u64),
+                    message: format!(
+                        "Injected failure: transfers from caller {} disabled",
+                        target
+                    ),
+                });
+            }
+        }
+
         if state.bad_fee_failures_remaining > 0 {
             state.bad_fee_failures_remaining -= 1;
             return Err(TransferError::BadFee {
@@ -191,7 +221,6 @@ fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
             });
         }
 
-        let caller = ic_cdk::caller();
         let from = account_key(caller, args.from_subaccount);
         let amount = nat_to_u128(&args.amount);
         let fee = args.fee.as_ref().map(nat_to_u128);
@@ -413,4 +442,25 @@ fn set_bad_fee_failures(n: u32) {
 #[update]
 fn reset_dedup() {
     STATE.with(|s| s.borrow_mut().dedup.clear());
+}
+
+/// When `Some(p)`, `icrc1_transfer` rejects with `GenericError` if the
+/// caller principal equals `p`. Set to `None` to clear. Lets a test fail
+/// transfers from a specific canister (e.g., the liquidation bot) without
+/// breaking transfers from other callers (e.g., the protocol's bot_claim
+/// transfer to the bot).
+#[update]
+fn set_fail_transfers_for_caller(target: Option<Principal>) {
+    STATE.with(|s| s.borrow_mut().fail_transfers_for_caller = target);
+}
+
+/// When `Some(p)`, `icrc1_balance_of` returns 0 for any account whose
+/// owner equals `p`. Set to `None` to clear. Lets a test deterministically
+/// fail the protocol's BOT-001b cancel gate (which compares
+/// `icrc1_balance_of(protocol)` against `claim.collateral_amount - fee`)
+/// without having to engineer the exact post-claim-and-return on-ledger
+/// balance.
+#[update]
+fn set_fake_zero_balance_for(target: Option<Principal>) {
+    STATE.with(|s| s.borrow_mut().fake_zero_balance_for = target);
 }
