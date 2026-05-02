@@ -598,6 +598,57 @@ pub struct LiquidatableVaultInfo {
     pub collateral_price_e8s: u64,
 }
 
+/// Wave-14a CDP-10: post-spawn handler for the stability_pool
+/// `notify_liquidatable_vaults` call.
+///
+/// On `Ok`: marks every dispatched vault id as SP-attempted so the next
+/// `check_vaults` tick won't re-send it (the SP retry budget is one shot
+/// per unhealthy episode).
+///
+/// On `Err`: leaves `sp_attempted_vaults` unchanged so the next tick can
+/// retry, and returns a `StabilityPoolCallFailed` event so external
+/// liquidators polling `get_events` can react. This closes the pre-fix
+/// regression where a transport `Err` (cycle pressure, queue-full during
+/// a market crash) permanently blacklisted the vault from the SP path
+/// even though no liquidator had actually been notified.
+///
+/// Pure-state function: the caller is responsible for `record_event` if
+/// the return is `Some`.
+pub fn record_sp_notification_result(
+    state: &mut state::State,
+    vault_ids: Vec<u64>,
+    result: Result<(), (i32, String)>,
+) -> Option<event::Event> {
+    record_sp_notification_result_at(state, vault_ids, result, ic_cdk::api::time())
+}
+
+/// Pure-state variant taking an explicit `now_ns` for tests. Production
+/// callers go through `record_sp_notification_result`.
+pub fn record_sp_notification_result_at(
+    state: &mut state::State,
+    vault_ids: Vec<u64>,
+    result: Result<(), (i32, String)>,
+    now_ns: u64,
+) -> Option<event::Event> {
+    if vault_ids.is_empty() {
+        return None;
+    }
+    match result {
+        Ok(()) => {
+            for vid in &vault_ids {
+                state.sp_attempted_vaults.insert(*vid);
+            }
+            None
+        }
+        Err((reject_code, reject_message)) => Some(event::Event::StabilityPoolCallFailed {
+            vault_ids,
+            reject_code,
+            reject_message,
+            timestamp: now_ns,
+        }),
+    }
+}
+
 pub async fn check_vaults() {
     // Auto-cancel bot claims that have been pending too long (10 minutes).
     // This prevents vaults from being permanently locked if the bot crashes.
@@ -882,10 +933,11 @@ pub async fn check_vaults() {
             s.bot_pending_vaults
                 .retain(|vid, ts| unhealthy_ids.contains(vid) && now.saturating_sub(*ts) < bot_timeout_ns);
 
-            // Mark vaults sent to SP — they only get one shot
-            for vid in &pool_vault_ids {
-                s.sp_attempted_vaults.insert(*vid);
-            }
+            // Wave-14a CDP-10: SP-attempted insertion is now done INSIDE the
+            // spawn's Ok arm via `record_sp_notification_result`, not here.
+            // The pre-Wave-14a unconditional insert blacklisted vaults whose
+            // SP transport had failed.
+            //
             // Clear SP tracking for vaults that are now healthy (owner repaid/added collateral)
             s.sp_attempted_vaults.retain(|vid| unhealthy_ids.contains(vid));
         });
@@ -914,10 +966,13 @@ pub async fn check_vaults() {
             }
         }
 
-        // Push to stability pool (fire-and-forget with error logging)
+        // Push to stability pool (fire-and-forget; Wave-14a CDP-10 routes the
+        // result through `record_sp_notification_result` so the SP-attempted
+        // marker is only set when the call actually delivered.)
         if let Some(pool) = pool_canister {
             if !for_pool.is_empty() {
                 let count = for_pool.len();
+                let dispatched_ids = pool_vault_ids.clone();
                 ic_cdk::spawn(async move {
                     let result: Result<(), _> = ic_cdk::call(
                         pool,
@@ -925,8 +980,21 @@ pub async fn check_vaults() {
                         (for_pool,),
                     )
                     .await;
-                    if let Err((code, msg)) = result {
-                        log!(INFO, "[check_vaults] ERROR: stability pool notification failed: {:?} {}", code, msg);
+                    let normalized: Result<(), (i32, String)> =
+                        result.map_err(|(code, msg)| (code as i32, msg));
+                    if let Err((code, msg)) = &normalized {
+                        log!(
+                            INFO,
+                            "[check_vaults] ERROR: stability pool notification failed: {} {}",
+                            code,
+                            msg
+                        );
+                    }
+                    let event = mutate_state(|s| {
+                        record_sp_notification_result(s, dispatched_ids, normalized)
+                    });
+                    if let Some(ev) = event {
+                        crate::storage::record_event(&ev);
                     }
                 });
                 log!(

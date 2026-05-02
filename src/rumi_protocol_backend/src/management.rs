@@ -510,16 +510,44 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
 
     let underlying_rate = match res_xrc {
         Ok((GetExchangeRateResult::Ok(exchange_rate_result),)) => {
-            let rate = rust_decimal::Decimal::from_u64(exchange_rate_result.rate).unwrap()
-                / rust_decimal::Decimal::from_u64(10_u64.pow(exchange_rate_result.metadata.decimals)).unwrap();
+            // Wave-14a CDP-14: source-floor gate for non-ICP collaterals.
+            // Same rationale as the ICP path: a thin aggregation is cheaper
+            // to manipulate. Emits OracleSourceCountInsufficient and skips
+            // the price update; cached price stays in place. The CDP-01
+            // consecutive-failure counter is intentionally NOT mutated here
+            // (it tracks ICP-only). Per-collateral oracle health is observed
+            // via the event count rather than a global circuit breaker.
+            let num_sources =
+                exchange_rate_result.metadata.base_asset_num_received_rates as u32;
+            let floor = read_state(|s| s.min_xrc_sources_used);
+            if !crate::xrc::xrc_metadata_meets_source_floor(num_sources, floor) {
+                log!(
+                    TRACE_XRC,
+                    "[fetch_collateral_price] rejecting {} rate {}: only {} XRC sources (floor {})",
+                    base_asset,
+                    exchange_rate_result.rate,
+                    num_sources,
+                    floor
+                );
+                crate::storage::record_event(&crate::event::Event::OracleSourceCountInsufficient {
+                    collateral_type,
+                    num_sources,
+                    min_required: floor,
+                    timestamp: ic_cdk::api::time(),
+                });
+                None
+            } else {
+                let rate = rust_decimal::Decimal::from_u64(exchange_rate_result.rate).unwrap()
+                    / rust_decimal::Decimal::from_u64(10_u64.pow(exchange_rate_result.metadata.decimals)).unwrap();
 
-            log!(
-                TRACE_XRC,
-                "[fetch_collateral_price] {} rate: {} at timestamp: {}",
-                base_asset, rate, exchange_rate_result.timestamp
-            );
+                log!(
+                    TRACE_XRC,
+                    "[fetch_collateral_price] {} rate: {} at timestamp: {}",
+                    base_asset, rate, exchange_rate_result.timestamp
+                );
 
-            Some((rate, exchange_rate_result.timestamp * 1_000_000_000))
+                Some((rate, exchange_rate_result.timestamp * 1_000_000_000))
+            }
         }
         Ok((GetExchangeRateResult::Err(error),)) => {
             log!(TRACE_XRC, "[fetch_collateral_price] XRC error for {}: {:?}", base_asset, error);
