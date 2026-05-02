@@ -1,13 +1,78 @@
 use crate::logs::TRACE_XRC;
-use crate::numeric::UsdIcp;  
-use crate::state::{mutate_state, read_state};
+use crate::numeric::UsdIcp;
+use crate::state::{mutate_state, read_state, CollateralStatus};
 use crate::Decimal;
 use crate::Mode;
+use candid::Principal;
 use ic_canister_log::log;
 use ic_xrc_types::GetExchangeRateResult;
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use rust_decimal_macros::dec;
 use std::time::Duration;
+
+/// Wave-9d DOS-011: classifies whether a collateral type's periodic
+/// background XRC price refresh is still useful given its lifecycle
+/// status. Returns true for `Active` and `Paused` (both still allow
+/// price-sensitive operations such as liquidation), false for the soft-
+/// delist statuses (`Frozen`, `Sunset`, `Deprecated`) where every code
+/// path that would consume a fresh price is already blocked or read-
+/// only.
+///
+/// Used by the per-collateral 300s timer closures registered in
+/// `setup_timers()` and `add_collateral_token` so that wound-down
+/// collateral no longer burns ~1B cycles per tick on a useless XRC
+/// call.
+pub fn collateral_needs_periodic_price_refresh(status: CollateralStatus) -> bool {
+    match status {
+        CollateralStatus::Active | CollateralStatus::Paused => true,
+        CollateralStatus::Frozen
+        | CollateralStatus::Sunset
+        | CollateralStatus::Deprecated => false,
+    }
+}
+
+/// Wave-9d DOS-011: pure-state gate used by the per-collateral price
+/// timer closure. Returns true if the closure should call XRC for this
+/// collateral, false to early-return without burning the ~1B cycles of
+/// an XRC fetch. Exposed as a module function so unit tests can pin the
+/// composition (status lookup + classification) without spawning a
+/// canister. Returns false for unknown collateral so a stale closure
+/// (collateral removed entirely from `collateral_configs`) doesn't keep
+/// hitting XRC for a deleted ledger.
+pub fn should_fetch_collateral_price(
+    state: &crate::state::State,
+    ledger_id: &Principal,
+) -> bool {
+    state
+        .get_collateral_status(ledger_id)
+        .map(collateral_needs_periodic_price_refresh)
+        .unwrap_or(false)
+}
+
+/// Wave-9d DOS-011: registers the recurring per-collateral XRC price
+/// timer with the status-check gate baked in. Used by both
+/// `setup_timers()` (re-registering after upgrade) and
+/// `add_collateral_token` (registering for a brand-new collateral).
+///
+/// The timer keeps firing every `FETCHING_ICP_RATE_INTERVAL`
+/// regardless of status — that's free. The gate runs synchronously
+/// INSIDE the closure (before any `ic_cdk::spawn`): if the collateral
+/// is wound down, we early-return before allocating an async task and
+/// before the (~1B cycle) XRC call.
+pub fn register_collateral_price_timer(ledger_id: Principal) {
+    ic_cdk_timers::set_timer_interval(FETCHING_ICP_RATE_INTERVAL, move || {
+        let go = read_state(|s| should_fetch_collateral_price(s, &ledger_id));
+        if !go {
+            log!(
+                TRACE_XRC,
+                "[register_collateral_price_timer] skipping fetch for {} (wound-down or removed)",
+                ledger_id
+            );
+            return;
+        }
+        ic_cdk::spawn(crate::management::fetch_collateral_price(ledger_id));
+    });
+}
 
 /// How often to passively fetch ICP price from XRC (background polling).
 /// Each XRC call costs ~1B cycles. At 60s = ~$58/month, at 300s = ~$12/month.
