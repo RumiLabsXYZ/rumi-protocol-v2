@@ -46,6 +46,7 @@ type ThreePoolError = variant {
   InsufficientPoolBalance : record { token : text; required : nat; available : nat };
   InsufficientLpBalance : record { required : nat; available : nat };
   BurnFailed : record { token : text; reason : text };
+  PoolLocked;
 };
 
 type SwapEvent = record {

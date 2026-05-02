@@ -326,6 +326,7 @@ export type ThreePoolError = {
   { 'TransferFailed' : { 'token' : string, 'reason' : string } } |
   { 'SlippageExceeded' : null } |
   { 'PoolEmpty' : null } |
+  { 'PoolLocked' : null } |
   {
     'InsufficientPoolBalance' : {
       'token' : string,

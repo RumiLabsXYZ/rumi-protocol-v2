@@ -389,6 +389,10 @@ pub enum ThreePoolError {
     InsufficientLpBalance { required: u128, available: u128 },
     /// The token burn on the ledger failed.
     BurnFailed { token: String, reason: String },
+    /// Another async operation is currently holding the pool lock. The caller
+    /// should retry. Audit fence B-01 (Wave 14a): prevents two concurrent
+    /// callers from pricing against the same pre-state across an `await`.
+    PoolLocked,
 }
 
 // ─── Authorized Redeem-and-Burn Types ───
