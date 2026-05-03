@@ -22,6 +22,11 @@ export function AddressDetail() {
 
   if (!data) return null;
 
+  const isPending =
+    data.total_value_usd === 0 &&
+    data.recent_events.length === 0 &&
+    data.vaults_owned.length === 0;
+
   return (
     <div>
       <h1 className="text-2xl font-semibold mb-1">Address</h1>
@@ -29,6 +34,18 @@ export function AddressDetail() {
       {data.approximate_sources && data.approximate_sources.length > 0 && (
         <div className="mb-4">
           <ApproximateBadge sources={data.approximate_sources} />
+        </div>
+      )}
+
+      {isPending && (
+        <div className="bg-secondary/50 border border-border rounded-lg p-4 mb-6 text-sm text-muted-foreground">
+          <p className="font-medium text-foreground mb-1">Address detail not yet wired for this canister.</p>
+          <p>
+            Per-address holdings (vaults, SP deposits, balances) require a
+            per-address index on rumi_analytics that is not yet exposed. This
+            lights up in a follow-up once the analytics canister exposes that
+            endpoint.
+          </p>
         </div>
       )}
 

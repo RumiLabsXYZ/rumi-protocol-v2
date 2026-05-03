@@ -8,10 +8,14 @@ export function RedemptionsLens() {
   if (isLoading) return <p className="text-muted-foreground">Loading...</p>;
   if (error || !data) return <p className="text-destructive">Failed to load.</p>;
 
-  const points = data.series.map((p) => ({
-    t: Number(p.timestamp_ns / 1_000_000n),
-    v: p.volume_usd,
-  }));
+  // series comes from DailyFeeRollup.redemption_count (count only; volume = 0).
+  // Use count as the chart value since we don't have redemption volume without the Event variant.
+  const points = data.series
+    .filter((p) => p.count > 0)
+    .map((p) => ({
+      t: Number(p.timestamp_ns / 1_000_000n),
+      v: Number(p.count),
+    }));
 
   return (
     <div>
@@ -25,11 +29,17 @@ export function RedemptionsLens() {
         ]}
       />
 
-      <MiniAreaChart
-        points={points}
-        label="Daily Redemption Volume (30 days)"
-        format={(v) => `$${v.toFixed(2)}`}
-      />
+      {points.length > 0 ? (
+        <MiniAreaChart
+          points={points}
+          label="Daily Redemption Count (30 days)"
+          format={(v) => `${v.toFixed(0)} redemptions`}
+        />
+      ) : (
+        <div className="bg-card border border-border rounded-lg p-4 mb-6 text-sm text-muted-foreground">
+          No redemption activity in the charted period.
+        </div>
+      )}
 
       <h2 className="text-lg font-semibold mb-3">Recent Events</h2>
       {data.recent_events.length === 0 ? (

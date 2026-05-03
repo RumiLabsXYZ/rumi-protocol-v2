@@ -174,7 +174,9 @@ module {
     fee_e8s : Nat64;
   };
 
-  // ── mock_analytics series types ──
+  // ── rumi_analytics series types (real shapes from rumi_analytics.did) ──
+  // These match exactly what mainnet rumi_analytics returns. Keep in sync
+  // with any analytics canister upgrade.
 
   public type RangeQuery = {
     to_ts : ?Nat64;
@@ -183,45 +185,72 @@ module {
     limit : ?Nat32;
   };
 
-  public type TvlPoint = {
+  // Real DailyTvlRow from rumi_analytics
+  public type DailyTvlRow = {
+    three_pool_reserve_0_e8s : ?Nat;
     timestamp_ns : Nat64;
-    total_collateral_usd_e8s : Nat64;
-    vault_count : Nat32;
+    three_pool_reserve_2_e8s : ?Nat;
+    three_pool_virtual_price_e18 : ?Nat;
+    total_icusd_supply_e8s : Nat;
+    system_collateral_ratio_bps : Nat32;
+    total_icp_collateral_e8s : Nat;
+    three_pool_reserve_1_e8s : ?Nat;
+    stability_pool_deposits_e8s : ?Nat64;
+    three_pool_lp_supply_e8s : ?Nat;
   };
 
-  public type TvlSeriesResponse = { rows : [TvlPoint] };
+  // Response wrappers include next_from_ts for pagination
+  public type TvlSeriesResponse = {
+    rows : [DailyTvlRow];
+    next_from_ts : ?Nat64;
+  };
 
-  public type FeePoint = {
+  // Real DailyFeeRollup from rumi_analytics
+  public type DailyFeeRollup = {
+    redemption_count : Nat32;
+    borrow_count : Nat32;
     timestamp_ns : Nat64;
-    borrow_fees_e8s : Nat64;
-    redemption_fees_e8s : Nat64;
     swap_fees_e8s : Nat64;
+    redemption_fees_e8s : ?Nat64;
+    borrowing_fees_e8s : ?Nat64;
   };
 
-  public type FeeSeriesResponse = { rows : [FeePoint] };
-
-  public type RedemptionPoint = {
-    timestamp_ns : Nat64;
-    count : Nat32;
-    volume_e8s : Nat64;
+  public type FeeSeriesResponse = {
+    rows : [DailyFeeRollup];
+    next_from_ts : ?Nat64;
   };
 
-  public type RedemptionSeriesResponse = { rows : [RedemptionPoint] };
-
-  public type SwapPoint = {
+  // Real DailySwapRollup from rumi_analytics
+  public type DailySwapRollup = {
+    three_pool_fees_e8s : Nat64;
     timestamp_ns : Nat64;
-    count : Nat32;
-    volume_e8s : Nat64;
+    three_pool_swap_count : Nat32;
+    amm_volume_e8s : Nat64;
+    three_pool_volume_e8s : Nat64;
+    amm_swap_count : Nat32;
+    amm_fees_e8s : Nat64;
+    unique_swappers : Nat32;
   };
 
-  public type SwapSeriesResponse = { rows : [SwapPoint] };
+  public type SwapSeriesResponse = {
+    rows : [DailySwapRollup];
+    next_from_ts : ?Nat64;
+  };
 
-  public type StabilityPoint = {
+  // Real DailyStabilityRow from rumi_analytics
+  public type DailyStabilityRow = {
+    collateral_gains : [(Principal, Nat64)];
     timestamp_ns : Nat64;
+    total_depositors : Nat64;
+    stablecoin_balances : [(Principal, Nat64)];
     total_deposits_e8s : Nat64;
-    apy_pct : Float;
+    total_interest_received_e8s : Nat64;
+    total_liquidations_executed : Nat64;
   };
 
-  public type StabilitySeriesResponse = { rows : [StabilityPoint] };
+  public type StabilitySeriesResponse = {
+    rows : [DailyStabilityRow];
+    next_from_ts : ?Nat64;
+  };
 
 };

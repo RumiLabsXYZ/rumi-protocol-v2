@@ -49,21 +49,23 @@ export function Overview() {
       </div>
 
       <div>
-        <h2 className="text-lg font-semibold mb-3">Recent activity (stub)</h2>
-        <div className="bg-card border border-border rounded-lg divide-y divide-border">
-          {data.recent_activity.map((e) => (
-            <div key={e.global_id} className="px-4 py-3 text-sm flex items-center justify-between gap-4">
-              <span className="font-mono text-xs text-muted-foreground">{e.global_id}</span>
-              <span className="flex-1">{e.payload_summary}</span>
-              <span className="text-xs text-muted-foreground whitespace-nowrap">{e.kind}</span>
-            </div>
-          ))}
-        </div>
+        <h2 className="text-lg font-semibold mb-3">Recent activity</h2>
+        {data.recent_activity.length === 0 ? (
+          <div className="bg-card border border-border rounded-lg p-4 text-sm text-muted-foreground">
+            No recent activity.
+          </div>
+        ) : (
+          <div className="bg-card border border-border rounded-lg divide-y divide-border">
+            {data.recent_activity.map((e, i) => (
+              <div key={`${e.global_id}-${i}`} className="px-4 py-3 text-sm flex items-center justify-between gap-4">
+                <span className="font-mono text-xs text-muted-foreground">{e.global_id}</span>
+                <span className="flex-1">{e.payload_summary}</span>
+                <span className="text-xs text-muted-foreground whitespace-nowrap">{e.kind}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
-
-      <p className="mt-6 text-xs text-muted-foreground">
-        Currently rendering stub data from the BFF. Real data wires up in Plan 2.
-      </p>
     </div>
   );
 }

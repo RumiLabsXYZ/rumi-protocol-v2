@@ -19,6 +19,22 @@ export function TokenDetail() {
 
   if (!data) return null;
 
+  if (data.symbol === "?") {
+    return (
+      <div>
+        <h1 className="text-2xl font-semibold mb-1">Token</h1>
+        <p className="text-sm font-mono text-muted-foreground mb-4 break-all">{ledger}</p>
+        <div className="bg-secondary/50 border border-border rounded-lg p-4 text-sm text-muted-foreground">
+          <p className="font-medium text-foreground mb-1">Token data not available.</p>
+          <p>
+            Token detail requires get_token_metadata on rumi_analytics, which is not yet
+            exposed on the mainnet canister. This lights up in a follow-up.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div>
       <h1 className="text-2xl font-semibold mb-1">{data.symbol}</h1>

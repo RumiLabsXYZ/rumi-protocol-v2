@@ -19,6 +19,21 @@ export function PoolDetail() {
 
   if (!data) return null;
 
+  if (data.reserves.length === 0) {
+    return (
+      <div>
+        <h1 className="text-2xl font-semibold mb-1">{data.pool_id}</h1>
+        <div className="bg-secondary/50 border border-border rounded-lg p-4 mt-4 text-sm text-muted-foreground">
+          <p className="font-medium text-foreground mb-1">Pool data not available.</p>
+          <p>
+            Pool detail requires get_pool_state on rumi_analytics, which is not yet
+            exposed on the mainnet canister. This lights up in a follow-up.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div>
       <h1 className="text-2xl font-semibold mb-1">{data.pool_label}</h1>

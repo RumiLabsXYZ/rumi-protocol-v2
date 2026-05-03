@@ -19,6 +19,24 @@ export function EventDetail() {
 
   if (!data) return null;
 
+  const isPending = data.payload_summary.includes("not yet available") || data.payload_summary === "Event not found";
+
+  if (isPending) {
+    return (
+      <div>
+        <h1 className="text-2xl font-semibold mb-1">Event</h1>
+        <p className="text-sm font-mono text-muted-foreground mb-4">{data.global_id}</p>
+        <div className="bg-secondary/50 border border-border rounded-lg p-4 text-sm text-muted-foreground">
+          <p className="font-medium text-foreground mb-1">{data.payload_summary}</p>
+          <p>
+            Event detail requires decoding the full Rumi Event variant, which is not yet
+            ported into the BFF shadow types. This lights up in a follow-up.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div>
       <h1 className="text-2xl font-semibold mb-1">Event</h1>

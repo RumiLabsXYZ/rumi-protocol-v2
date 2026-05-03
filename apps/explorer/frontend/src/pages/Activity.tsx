@@ -70,12 +70,28 @@ export function Activity() {
       {isLoading && <p className="text-muted-foreground">Loading...</p>}
 
       {error && (
-        <div className="bg-destructive/10 text-destructive border border-destructive/20 rounded-lg p-4">
-          Failed: {error instanceof Error ? error.message : String(error)}
+        <div className="bg-secondary/50 border border-border rounded-lg p-4 text-sm text-muted-foreground">
+          <p className="font-medium text-foreground mb-1">Activity feed wiring is in progress.</p>
+          <p>
+            The full Event variant from the Rumi backend is not yet ported into the BFF
+            shadow types — this lights up in a follow-up. Other parts of the Explorer
+            (Overview, Lens pages) are already rendering live data.
+          </p>
         </div>
       )}
 
-      {data && (
+      {data && data.events.length === 0 && !error && !isLoading && (
+        <div className="bg-secondary/50 border border-border rounded-lg p-4 text-sm text-muted-foreground">
+          <p className="font-medium text-foreground mb-1">Activity feed wiring is in progress.</p>
+          <p>
+            The full Event variant from the Rumi backend is not yet ported into the BFF
+            shadow types — this lights up in a follow-up. Other parts of the Explorer
+            (Overview, Lens pages) are already rendering live data.
+          </p>
+        </div>
+      )}
+
+      {data && data.events.length > 0 && (
         <>
           <p className="text-xs text-muted-foreground mb-3">
             {String(data.total_estimated)} total · showing {data.events.length}

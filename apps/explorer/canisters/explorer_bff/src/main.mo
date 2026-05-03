@@ -1,5 +1,7 @@
 import Principal "mo:core/Principal";
 import Timer "mo:core/Timer";
+import Time "mo:core/Time";
+import Nat64 "mo:core/Nat64";
 import T "Types";
 import Stub "Stub";
 import SourceConfig "SourceConfig";
@@ -79,27 +81,103 @@ persistent actor class ExplorerBff(initArgs : SourceConfig.SourceCanistersInit) 
   };
 
   public func get_activity(filter : T.ActivityFilter, cursor : T.ActivityCursor) : async T.ActivityFeedDTO {
-    await Activity.fetch(sources, filter, cursor)
+    // Activity calls get_events_filtered which traps on mainnet because the real backend
+    // returns a full Event variant (not EventSummary). Wrapped in try/catch so the
+    // /activity page degrades gracefully instead of showing a raw error.
+    try {
+      await Activity.fetch(sources, filter, cursor)
+    } catch (_e) {
+      {
+        events = [];
+        next_cursor = null;
+        total_estimated = 0;
+        filters_applied = filter;
+      };
+    };
   };
 
   public func get_address(p : Principal) : async T.AddressDTO {
-    await Address.fetch(sources, p)
+    // get_address_holdings does not exist on real rumi_analytics. Returns empty DTO.
+    try { await Address.fetch(sources, p) } catch (_e) {
+      {
+        owner = p;
+        vaults_owned = [];
+        sp_deposits = [];
+        amm_lp_positions = [];
+        token_balances = [];
+        recent_events = [];
+        total_value_usd = 0.0;
+        approximate_sources = ["entity_pages_pending_v2"];
+        generated_at_ns = Nat64.fromIntWrap(Time.now());
+      };
+    };
   };
 
   public func get_vault(vault_id : Nat64) : async T.VaultDetailDTO {
-    await Vault.fetch(sources, vault_id)
+    // get_vault_summary/get_vault_history return full Event variant on real backend.
+    // Returns empty synthesized DTO when calls trap.
+    try { await Vault.fetch(sources, vault_id) } catch (_e) {
+      {
+        vault_id = vault_id;
+        status = #Closed;
+        owner = Principal.fromText("aaaaa-aa");
+        collateral_type = Principal.fromText("aaaaa-aa");
+        collateral_amount = { raw_e8s = 0; decimals = 8; formatted = "0" };
+        debt_icusd = { raw_e8s = 0; decimals = 8; formatted = "0 icUSD" };
+        collateral_ratio = null;
+        history = [];
+        closed_synthesized = true;
+        generated_at_ns = Nat64.fromIntWrap(Time.now());
+      };
+    };
   };
 
   public func get_pool(pool_id : Text) : async T.PoolDetailDTO {
-    await Pool.fetch(sources, pool_id)
+    // get_pool_state does not exist on real rumi_analytics. Returns empty DTO.
+    try { await Pool.fetch(sources, pool_id) } catch (_e) {
+      {
+        pool_id = pool_id;
+        pool_label = "Unknown pool";
+        pool_kind = "unknown";
+        reserves = [];
+        lp_total_supply = { raw_e8s = 0; decimals = 8; formatted = "0" };
+        virtual_price = null;
+        recent_events = [];
+        generated_at_ns = Nat64.fromIntWrap(Time.now());
+      };
+    };
   };
 
   public func get_token(ledger : Principal) : async T.TokenDetailDTO {
-    await Token.fetch(sources, ledger)
+    // get_token_metadata does not exist on real rumi_analytics. Returns empty DTO.
+    try { await Token.fetch(sources, ledger) } catch (_e) {
+      {
+        ledger = ledger;
+        symbol = "?";
+        decimals = 8;
+        total_supply = { raw_e8s = 0; decimals = 8; formatted = "0" };
+        fee = { raw_e8s = 0; decimals = 8; formatted = "0" };
+        recent_transfers = [];
+        generated_at_ns = Nat64.fromIntWrap(Time.now());
+      };
+    };
   };
 
   public func get_event(global_id : Text) : async T.EventDetailDTO {
-    await Event.fetch(sources, global_id)
+    // get_events_filtered traps on mainnet (full Event variant). Returns "not found" DTO.
+    try { await Event.fetch(sources, global_id) } catch (_e) {
+      {
+        global_id = global_id;
+        source = "backend";
+        source_event_id = 0;
+        kind = "unknown";
+        timestamp_ns = 0;
+        payload_summary = "Event detail not yet available (Event variant porting in progress)";
+        payload_json = "{}";
+        related_event_ids = [];
+        generated_at_ns = Nat64.fromIntWrap(Time.now());
+      };
+    };
   };
 
   public query func get_source_canisters() : async { analytics : Principal; backend : Principal } {

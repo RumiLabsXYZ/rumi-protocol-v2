@@ -20,6 +20,26 @@ export function VaultDetail() {
 
   if (!data) return null;
 
+  const isEmptyVault =
+    data.collateral_amount.raw_e8s === 0n &&
+    data.history.length === 0;
+
+  if (isEmptyVault && data.closed_synthesized) {
+    return (
+      <div>
+        <h1 className="text-2xl font-semibold mb-1">Vault #{id}</h1>
+        <div className="bg-secondary/50 border border-border rounded-lg p-4 mt-4 text-sm text-muted-foreground">
+          <p className="font-medium text-foreground mb-1">Vault data not available.</p>
+          <p>
+            Vault detail requires get_vault_summary and get_vault_history from the backend,
+            which currently return a full Event variant not yet decoded by the BFF.
+            This lights up in a follow-up.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   const status = data.status;
   const statusLabel =
     status === VaultStatus.Open ? "Open" :
