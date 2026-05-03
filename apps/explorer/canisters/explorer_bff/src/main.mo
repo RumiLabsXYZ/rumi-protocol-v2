@@ -4,6 +4,7 @@ import T "Types";
 import Stub "Stub";
 import SourceConfig "SourceConfig";
 import Overview "Overview";
+import Activity "Activity";
 import Cache "Cache";
 import Health "Health";
 
@@ -68,8 +69,8 @@ persistent actor class ExplorerBff(initArgs : SourceConfig.SourceCanistersInit) 
     };
   };
 
-  public query func get_activity(filter : T.ActivityFilter, cursor : T.ActivityCursor) : async T.ActivityFeedDTO {
-    Stub.activity(filter, cursor)
+  public func get_activity(filter : T.ActivityFilter, cursor : T.ActivityCursor) : async T.ActivityFeedDTO {
+    await Activity.fetch(sources, filter, cursor)
   };
 
   public query func get_address(p : Principal) : async T.AddressDTO {
