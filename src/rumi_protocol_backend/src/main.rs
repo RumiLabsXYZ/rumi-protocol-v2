@@ -178,6 +178,61 @@ fn inspect_message() {
     }
 }
 
+// Wave-14b CDP-12 follow-up: track the active TimerId for each of the
+// three CDP-12 timers so the developer-gated setters can clear-and-re-
+// register in place. Transient (not persisted): every upgrade re-runs
+// `setup_timers` which assigns fresh ids.
+thread_local! {
+    static XRC_FETCH_TIMER_ID: std::cell::Cell<Option<ic_cdk_timers::TimerId>> =
+        const { std::cell::Cell::new(None) };
+    static INTEREST_TREASURY_TIMER_ID: std::cell::Cell<Option<ic_cdk_timers::TimerId>> =
+        const { std::cell::Cell::new(None) };
+    static VAULT_CHECK_TIMER_ID: std::cell::Cell<Option<ic_cdk_timers::TimerId>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn register_xrc_fetch_timer() {
+    let secs = read_state(|s| s.xrc_fetch_interval_secs);
+    XRC_FETCH_TIMER_ID.with(|cell| {
+        if let Some(old) = cell.get() {
+            ic_cdk_timers::clear_timer(old);
+        }
+        let new_id = ic_cdk_timers::set_timer_interval(
+            std::time::Duration::from_secs(secs),
+            || ic_cdk::spawn(rumi_protocol_backend::xrc::fetch_icp_rate()),
+        );
+        cell.set(Some(new_id));
+    });
+}
+
+fn register_interest_treasury_timer() {
+    let secs = read_state(|s| s.interest_treasury_tick_interval_secs);
+    INTEREST_TREASURY_TIMER_ID.with(|cell| {
+        if let Some(old) = cell.get() {
+            ic_cdk_timers::clear_timer(old);
+        }
+        let new_id = ic_cdk_timers::set_timer_interval(
+            std::time::Duration::from_secs(secs),
+            || ic_cdk::spawn(rumi_protocol_backend::xrc::interest_and_treasury_tick()),
+        );
+        cell.set(Some(new_id));
+    });
+}
+
+fn register_vault_check_timer() {
+    let secs = read_state(|s| s.vault_check_tick_interval_secs);
+    VAULT_CHECK_TIMER_ID.with(|cell| {
+        if let Some(old) = cell.get() {
+            ic_cdk_timers::clear_timer(old);
+        }
+        let new_id = ic_cdk_timers::set_timer_interval(
+            std::time::Duration::from_secs(secs),
+            || ic_cdk::spawn(rumi_protocol_backend::xrc::vault_check_tick()),
+        );
+        cell.set(Some(new_id));
+    });
+}
+
 fn setup_timers() {
     // ── Immediate price fetch (fire on the very next execution round) ───────
     // Prices are ephemeral and not stored as events, so after an upgrade
@@ -201,25 +256,15 @@ fn setup_timers() {
     }
 
     // ── Wave-14b CDP-12: three independent timers ────────────────────────
-    // Timer A (300s): XRC fetch + price update + CDP-14 source-floor + CDP-01
-    //   consecutive-failure circuit breaker. Pre-Wave-14b this single timer
-    //   chained the interest/check_vaults/treasury work below; a trap in any
-    //   step skipped everything downstream silently.
-    ic_cdk_timers::set_timer_interval(rumi_protocol_backend::xrc::FETCHING_ICP_RATE_INTERVAL, || {
-        ic_cdk::spawn(rumi_protocol_backend::xrc::fetch_icp_rate())
-    });
-    // Timer B (60s): interest accrual + harvest + treasury drains + flush.
-    //   Independent of XRC freshness; runs on cached state. Cheap.
-    ic_cdk_timers::set_timer_interval(
-        rumi_protocol_backend::xrc::INTEREST_AND_TREASURY_TICK_INTERVAL,
-        || ic_cdk::spawn(rumi_protocol_backend::xrc::interest_and_treasury_tick()),
-    );
-    // Timer C (300s): check_vaults + aggregate-snapshot refresh.
-    //   Matches the pre-Wave-14b cadence so liquidation latency is unchanged.
-    ic_cdk_timers::set_timer_interval(
-        rumi_protocol_backend::xrc::VAULT_CHECK_TICK_INTERVAL,
-        || ic_cdk::spawn(rumi_protocol_backend::xrc::vault_check_tick()),
-    );
+    // Cadences live in State and are tunable via developer-gated setters
+    // (`set_xrc_fetch_interval_secs`, `set_interest_treasury_tick_interval_secs`,
+    // `set_vault_check_tick_interval_secs`). The setters call into the
+    // `register_*` helpers below to clear and re-register the affected
+    // timer in place, so an interval change takes effect immediately
+    // without a canister upgrade.
+    register_xrc_fetch_timer();
+    register_interest_treasury_timer();
+    register_vault_check_timer();
 
     // Price timers for all non-ICP collateral types (timers don't survive upgrades,
     // so we re-register them here for any collateral added via add_collateral_token).
@@ -3730,6 +3775,96 @@ async fn set_min_xrc_sources_used(value: u32) -> Result<(), ProtocolError> {
             "gate active"
         }
     );
+    Ok(())
+}
+
+/// Wave-14b CDP-12 follow-up: tune the Timer A (XRC fetch) interval in
+/// seconds. Default 300. Re-registers the timer in place; no upgrade
+/// required for the change to take effect.
+///
+/// Trade-offs: lowering this means more XRC calls per minute (~1B cycles
+/// each for the ICP/USD pair). Most callers hit the cached price via the
+/// PRICE_FRESHNESS_THRESHOLD_NANOS gate anyway, so the timer is mainly a
+/// defense-in-depth refresh; 60s would 5x XRC cycle cost. Raising means
+/// staler cached prices, which the staleness gate (10 min hard) and the
+/// CDP-01 consecutive-failure breaker still bound.
+#[candid_method(update)]
+#[update]
+async fn set_xrc_fetch_interval_secs(secs: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set the XRC fetch interval".to_string(),
+        ));
+    }
+    if secs == 0 {
+        return Err(ProtocolError::GenericError(
+            "XRC fetch interval must be > 0 (a 0s timer would saturate the canister)".to_string(),
+        ));
+    }
+    mutate_state(|s| s.xrc_fetch_interval_secs = secs);
+    register_xrc_fetch_timer();
+    log!(INFO, "[set_xrc_fetch_interval_secs] Timer A interval set to {}s", secs);
+    Ok(())
+}
+
+/// Wave-14b CDP-12 follow-up: tune the Timer B (interest accrual +
+/// treasury drains) interval in seconds. Default 60. Re-registers in
+/// place.
+///
+/// Trade-offs: cheap in cycles (pure in-memory work + 3 short ICRC calls).
+/// Lowering tightens interest precision and treasury drain cadence at
+/// negligible cost. Raising makes interest accrual lumpier but doesn't
+/// break anything.
+#[candid_method(update)]
+#[update]
+async fn set_interest_treasury_tick_interval_secs(secs: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set the interest/treasury tick interval".to_string(),
+        ));
+    }
+    if secs == 0 {
+        return Err(ProtocolError::GenericError(
+            "Interest/treasury tick interval must be > 0".to_string(),
+        ));
+    }
+    mutate_state(|s| s.interest_treasury_tick_interval_secs = secs);
+    register_interest_treasury_timer();
+    log!(INFO, "[set_interest_treasury_tick_interval_secs] Timer B interval set to {}s", secs);
+    Ok(())
+}
+
+/// Wave-14b CDP-12 follow-up: tune the Timer C (vault health sweep +
+/// aggregate snapshot refresh) interval in seconds. Default 300.
+/// Re-registers in place.
+///
+/// Trade-offs: this is the liquidation-latency knob. Lowering means
+/// liquidations dispatch faster (bot/SP get notified within seconds of
+/// a vault becoming unhealthy) at the cost of running the Wave-9c
+/// sharded `check_vaults` walk more often. Raising slows liquidation
+/// response but is still bounded by the 10-minute oracle staleness gate.
+#[candid_method(update)]
+#[update]
+async fn set_vault_check_tick_interval_secs(secs: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set the vault check tick interval".to_string(),
+        ));
+    }
+    if secs == 0 {
+        return Err(ProtocolError::GenericError(
+            "Vault check tick interval must be > 0".to_string(),
+        ));
+    }
+    mutate_state(|s| s.vault_check_tick_interval_secs = secs);
+    register_vault_check_timer();
+    log!(INFO, "[set_vault_check_tick_interval_secs] Timer C interval set to {}s", secs);
     Ok(())
 }
 

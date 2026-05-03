@@ -1200,6 +1200,7 @@ export const idlFactory = ({ IDL }) => {
     'set_interest_pool_share' : IDL.Func([IDL.Float64], [Result], []),
     'set_interest_rate' : IDL.Func([IDL.Principal, IDL.Float64], [Result], []),
     'set_interest_split' : IDL.Func([IDL.Vec(InterestSplitArg)], [Result], []),
+    'set_interest_treasury_tick_interval_secs' : IDL.Func([IDL.Nat64], [Result], []),
     'set_liquidation_bonus' : IDL.Func([IDL.Float64], [Result], []),
     'set_liquidation_bot_config' : IDL.Func(
         [IDL.Principal, IDL.Nat64],
@@ -1252,6 +1253,8 @@ export const idlFactory = ({ IDL }) => {
       ),
     'set_three_pool_canister' : IDL.Func([IDL.Principal], [Result], []),
     'set_treasury_principal' : IDL.Func([IDL.Principal], [Result], []),
+    'set_vault_check_tick_interval_secs' : IDL.Func([IDL.Nat64], [Result], []),
+    'set_xrc_fetch_interval_secs' : IDL.Func([IDL.Nat64], [Result], []),
     'stability_pool_liquidate' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
         [Result_12],

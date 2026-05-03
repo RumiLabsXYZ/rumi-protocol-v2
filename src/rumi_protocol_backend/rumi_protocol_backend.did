@@ -900,6 +900,7 @@ service : (ProtocolArg) -> {
   set_interest_pool_share : (float64) -> (Result);
   set_interest_rate : (principal, float64) -> (Result);
   set_interest_split : (vec InterestSplitArg) -> (Result);
+  set_interest_treasury_tick_interval_secs : (nat64) -> (Result);
   set_liquidation_bonus : (float64) -> (Result);
   set_liquidation_bot_config : (principal, nat64) -> (Result);
   set_liquidation_frozen : (bool) -> (Result);
@@ -930,6 +931,8 @@ service : (ProtocolArg) -> {
   set_stable_token_enabled : (StableTokenType, bool) -> (Result);
   set_three_pool_canister : (principal) -> (Result);
   set_treasury_principal : (principal) -> (Result);
+  set_vault_check_tick_interval_secs : (nat64) -> (Result);
+  set_xrc_fetch_interval_secs : (nat64) -> (Result);
   stability_pool_liquidate : (nat64, nat64) -> (Result_12);
   stability_pool_liquidate_debt_burned : (nat64, nat64, SpWritedownProof) -> (
       Result_12,

@@ -6,7 +6,7 @@ members = [
     "src/rumi_3pool",
     "src/rumi_amm",
     "src/rumi_analytics",
-    "xrc_demo/xrc_mock",
+    "src/xrc_demo/xrc_mock",
     "src/liquidation_bot",
     "src/flaky_ledger",
 ]
