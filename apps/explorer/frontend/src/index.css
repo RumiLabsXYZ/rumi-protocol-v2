@@ -2,61 +2,149 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Optional: pull a serif weight for major section titles. Inter is already loaded. */
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Inter:wght@400;500;600;700&display=swap');
+
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 240 10% 4%;
-    --card: 0 0% 100%;
-    --card-foreground: 240 10% 4%;
-    --primary: 142 76% 36%;
-    --primary-foreground: 0 0% 100%;
-    --secondary: 240 5% 96%;
-    --secondary-foreground: 240 6% 10%;
-    --muted: 240 5% 96%;
-    --muted-foreground: 240 4% 46%;
-    --accent: 240 5% 96%;
-    --accent-foreground: 240 6% 10%;
-    --destructive: 0 84% 60%;
-    --destructive-foreground: 0 0% 100%;
-    --warning: 38 92% 50%;
-    --warning-foreground: 240 10% 4%;
-    --success: 142 71% 45%;
-    --success-foreground: 0 0% 100%;
-    --border: 240 6% 90%;
-    --input: 240 6% 90%;
-    --ring: 142 76% 36%;
-    --radius: 0.5rem;
+    /* ── Surface — parchment ground ─────────────────────────────── */
+    --vellum: 40 22% 96%;
+    --vellum-raised: 38 18% 99%;
+    --vellum-inset: 42 20% 93%;
+
+    /* ── Ink — text hierarchy (4 levels) ────────────────────────── */
+    --ink-primary: 220 25% 12%;
+    --ink-secondary: 220 15% 30%;
+    --ink-muted: 220 10% 50%;
+    --ink-disabled: 220 8% 70%;
+
+    /* ── Quartz — borders, low-opacity rgba via slash syntax ────── */
+    --quartz-rule: 220 15% 12% / 0.10;
+    --quartz-rule-soft: 220 15% 12% / 0.06;
+    --quartz-rule-emphasis: 220 15% 12% / 0.18;
+
+    /* ── Verdigris — primary accent, oxidized copper-green ──────── */
+    --verdigris: 158 30% 36%;
+    --verdigris-soft: 158 30% 90%;
+    --verdigris-fg: 0 0% 100%;
+
+    /* ── Sodium — warm warning amber (vapor lamp at night) ──────── */
+    --sodium: 36 75% 48%;
+    --sodium-soft: 40 80% 92%;
+    --sodium-fg: 36 60% 12%;
+
+    /* ── Cinnabar — deep mineral red (breakers, liquidations) ───── */
+    --cinnabar: 8 55% 42%;
+    --cinnabar-soft: 8 70% 94%;
+    --cinnabar-fg: 0 0% 100%;
+
+    /* ── Peg — cool reference blue, used for the meridian ──────── */
+    --peg: 210 38% 42%;
+    --peg-meridian: 210 38% 42% / 0.45;
+
+    /* ── Geometry ───────────────────────────────────────────────── */
+    --radius-sm: 4px;
+    --radius: 6px;
+    --radius-lg: 10px;
   }
 
   .dark {
-    --background: 240 10% 4%;
-    --foreground: 0 0% 98%;
-    --card: 240 10% 6%;
-    --card-foreground: 0 0% 98%;
-    --primary: 142 70% 45%;
-    --primary-foreground: 240 10% 4%;
-    --secondary: 240 4% 16%;
-    --secondary-foreground: 0 0% 98%;
-    --muted: 240 4% 16%;
-    --muted-foreground: 240 5% 64%;
-    --accent: 240 4% 16%;
-    --accent-foreground: 0 0% 98%;
-    --destructive: 0 62% 50%;
-    --destructive-foreground: 0 0% 98%;
-    --warning: 38 92% 50%;
-    --warning-foreground: 240 10% 4%;
-    --success: 142 71% 45%;
-    --success-foreground: 240 10% 4%;
-    --border: 240 4% 16%;
-    --input: 240 4% 16%;
-    --ring: 142 70% 45%;
+    --vellum: 222 25% 8%;
+    --vellum-raised: 222 22% 11%;
+    --vellum-inset: 222 28% 6%;
+
+    --ink-primary: 40 20% 92%;
+    --ink-secondary: 40 12% 75%;
+    --ink-muted: 220 10% 55%;
+    --ink-disabled: 220 12% 35%;
+
+    --quartz-rule: 0 0% 100% / 0.08;
+    --quartz-rule-soft: 0 0% 100% / 0.04;
+    --quartz-rule-emphasis: 0 0% 100% / 0.16;
+
+    --verdigris: 158 35% 50%;
+    --verdigris-soft: 158 30% 16%;
+    --verdigris-fg: 158 90% 6%;
+
+    --sodium: 38 80% 60%;
+    --sodium-soft: 38 50% 16%;
+    --sodium-fg: 38 90% 92%;
+
+    --cinnabar: 8 60% 55%;
+    --cinnabar-soft: 8 50% 16%;
+    --cinnabar-fg: 8 90% 96%;
+
+    --peg: 210 40% 60%;
+    --peg-meridian: 210 40% 60% / 0.40;
   }
 
   * {
-    @apply border-border;
+    border-color: hsl(var(--quartz-rule));
+  }
+
+  html {
+    font-family: 'Inter', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
 
   body {
-    @apply bg-background text-foreground;
+    background-color: hsl(var(--vellum));
+    color: hsl(var(--ink-primary));
+    font-feature-settings: 'cv11', 'ss01';
+  }
+
+  /* Numbers in monospace tabular form throughout */
+  .tabular-num,
+  [data-tabular] {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-feature-settings: 'tnum';
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Parchment grain — extremely subtle. Helps light mode feel like paper. */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: -1;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160' viewBox='0 0 160 160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.04 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+    opacity: 0.6;
+    mix-blend-mode: multiply;
+  }
+  .dark body::before {
+    opacity: 0.3;
+    mix-blend-mode: screen;
+  }
+}
+
+/* Backwards-compat: previous shadcn-named tokens map onto the new palette so
+   we don't have to replace every Tailwind class in one go. The naming layer
+   becomes the design over time. */
+@layer base {
+  :root {
+    --background: var(--vellum);
+    --foreground: var(--ink-primary);
+    --card: var(--vellum-raised);
+    --card-foreground: var(--ink-primary);
+    --primary: var(--verdigris);
+    --primary-foreground: var(--verdigris-fg);
+    --secondary: var(--vellum-inset);
+    --secondary-foreground: var(--ink-secondary);
+    --muted: var(--vellum-inset);
+    --muted-foreground: var(--ink-muted);
+    --accent: var(--vellum-inset);
+    --accent-foreground: var(--ink-secondary);
+    --destructive: var(--cinnabar);
+    --destructive-foreground: var(--cinnabar-fg);
+    --warning: var(--sodium);
+    --warning-foreground: var(--sodium-fg);
+    --success: var(--verdigris);
+    --success-foreground: var(--verdigris-fg);
+    --border: var(--quartz-rule);
+    --input: var(--quartz-rule);
+    --ring: var(--verdigris);
+    --radius: var(--radius);
   }
 }

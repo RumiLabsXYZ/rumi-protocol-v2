@@ -25,8 +25,8 @@ function applyTheme(resolved: ResolvedTheme) {
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<Theme>(() => {
-    if (typeof localStorage === "undefined") return "system";
-    return (localStorage.getItem(STORAGE_KEY) as Theme | null) ?? "system";
+    if (typeof localStorage === "undefined") return "light";
+    return (localStorage.getItem(STORAGE_KEY) as Theme | null) ?? "light";
   });
 
   const [resolved, setResolved] = useState<ResolvedTheme>(() => {
