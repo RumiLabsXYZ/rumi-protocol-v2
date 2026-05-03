@@ -1,0 +1,54 @@
+type Mode = variant { ReadOnly; GeneralAvailability; Recovery };
+
+type ProtocolStatus = record {
+  mode : Mode;
+  total_icusd_borrowed : nat64;
+  total_collateral_ratio : float64;
+  liquidation_breaker_tripped : bool;
+  manual_mode_override : bool;
+  snapshot_ts_ns : nat64;
+};
+
+type EventTypeFilter = variant {
+  OpenVault; CloseVault; AdjustVault;
+  Borrow; Repay;
+  Liquidation; PartialLiquidation;
+  Redemption; ReserveRedemption;
+  StabilityPoolDeposit; StabilityPoolWithdraw;
+  AdminMint; AdminSweepToTreasury;
+  Admin;
+  PriceUpdate; AccrueInterest;
+};
+
+type TimeRange = record { from_ns : nat64; to_ns : nat64 };
+
+type GetEventsFilteredArg = record {
+  start : nat64;
+  length : nat64;
+  types : opt vec EventTypeFilter;
+  principal : opt principal;
+  collateral_token : opt principal;
+  time_range : opt TimeRange;
+  min_size_e8s : opt nat64;
+  admin_labels : opt vec text;
+};
+
+type EventSummary = record {
+  global_index : nat64;
+  kind : text;
+  timestamp_ns : nat64;
+  primary_principal : opt principal;
+  amount_e8s : opt nat64;
+  payload_summary : text;
+};
+
+type GetEventsFilteredResponse = record {
+  total : nat64;
+  events : vec EventSummary;
+};
+
+service : {
+  get_protocol_status : () -> (ProtocolStatus) query;
+  get_vault_count : () -> (nat64) query;
+  get_events_filtered : (GetEventsFilteredArg) -> (GetEventsFilteredResponse) query;
+}
