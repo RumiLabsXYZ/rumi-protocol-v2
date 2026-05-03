@@ -1,7 +1,7 @@
 {
-  "explorer_bff": "0x904b6e6035d679d634cdbdbd060ac9195949c8ef96e995c5e0dabe5d45183833",
+  "explorer_bff": "0xa55699d974de71cb9aa4578c498ff37b61b7b3869e4b932f5e84a6927575a98f",
   "explorer_assets": "0x63d122d0149a29f4e48603efdd7d2bce656a6a83bac1e3207897c68e8e225bb6",
-  "git_sha": "22c1c8a",
-  "deployed_at": "2026-05-03T07:56:04Z",
-  "environment": "local"
+  "git_sha": "dffd22a",
+  "deployed_at": "2026-05-03T09:37:18Z",
+  "environment": "ic"
 }

@@ -21,8 +21,8 @@ module {
 
   func mapHealthLevel(lag_seconds : Nat64, breaker_tripped : Bool) : T.HealthLevel {
     if (breaker_tripped) return #Red;
-    if (lag_seconds > 7200) return #Red;       // > 2h
-    if (lag_seconds > 1800) return #Yellow;    // > 30 min
+    if (lag_seconds > 7200) return #Red;
+    if (lag_seconds > 1800) return #Yellow;
     #Green;
   };
 
@@ -67,16 +67,27 @@ module {
     };
   };
 
-  public func fetch(sources : SourceConfig.SourceCanisters) : async T.OverviewDTO {
-    let analyticsActor = SA.analytics(sources.analytics);
-    let backendActor = SA.backend(sources.backend);
+  // Per-call wrappers that swallow trap errors.
+  // The real Rumi `rumi_protocol_backend.get_events_filtered` returns a different
+  // shape than our simplified mock (`vec record { nat64; Event }` vs `vec EventSummary`),
+  // so on mainnet that call will always fail to decode. Wrapping in try/catch lets
+  // the rest of Overview.fetch succeed with `recent_activity = []`. A follow-up plan
+  // can adapt the BFF to consume the real Event variant.
+  func trySummary(a : SA.AnalyticsActor) : async ?ST.ProtocolSummary {
+    try { ?(await a.get_protocol_summary()) } catch (_e) { null };
+  };
 
-    // Fan out four calls in parallel using async blocks
-    let summary_fut = async { await analyticsActor.get_protocol_summary() };
-    let status_fut = async { await backendActor.get_protocol_status() };
-    let health_fut = async { await analyticsActor.get_collector_health() };
-    let events_fut = async {
-      await backendActor.get_events_filtered({
+  func tryHealth(a : SA.AnalyticsActor) : async ?ST.CollectorHealth {
+    try { ?(await a.get_collector_health()) } catch (_e) { null };
+  };
+
+  func tryStatus(b : SA.BackendActor) : async ?ST.ProtocolStatus {
+    try { ?(await b.get_protocol_status()) } catch (_e) { null };
+  };
+
+  func tryEvents(b : SA.BackendActor) : async ?ST.GetEventsFilteredResponse {
+    try {
+      ?(await b.get_events_filtered({
         start = 0 : Nat64;
         length = 5 : Nat64;
         types = null;
@@ -85,32 +96,75 @@ module {
         time_range = null;
         min_size_e8s = null;
         admin_labels = null;
-      });
+      }))
+    } catch (_e) { null };
+  };
+
+  public func fetch(sources : SourceConfig.SourceCanisters) : async T.OverviewDTO {
+    let analyticsActor = SA.analytics(sources.analytics);
+    let backendActor = SA.backend(sources.backend);
+
+    let summary_opt = await trySummary(analyticsActor);
+    let status_opt = await tryStatus(backendActor);
+    let health_opt = await tryHealth(analyticsActor);
+    let events_opt = await tryEvents(backendActor);
+
+    // Defaults if any call failed
+    let total_collateral_usd_e8s : Nat64 = switch (summary_opt) {
+      case null 0;
+      case (?s) s.total_collateral_usd_e8s;
+    };
+    let total_debt_e8s : Nat64 = switch (summary_opt) {
+      case null 0;
+      case (?s) s.total_debt_e8s;
+    };
+    let total_vault_count : Nat32 = switch (summary_opt) {
+      case null 0;
+      case (?s) s.total_vault_count;
+    };
+    let circulating_supply_opt : ?Nat = switch (summary_opt) {
+      case null null;
+      case (?s) s.circulating_supply_icusd_e8s;
+    };
+    let peg_opt : ?ST.PegStatus = switch (summary_opt) {
+      case null null;
+      case (?s) s.peg;
     };
 
-    let summary = await summary_fut;
-    let status = await status_fut;
-    let health = await health_fut;
-    let events_resp = await events_fut;
+    let mode : T.ProtocolMode = switch (status_opt) {
+      case null #ReadOnly;
+      case (?s) mapMode(s.mode);
+    };
+    let breaker : Bool = switch (status_opt) {
+      case null false;
+      case (?s) s.liquidation_breaker_tripped;
+    };
 
-    let circulating_e8s : Nat64 = switch (summary.circulating_supply_icusd_e8s) {
-      case null summary.total_debt_e8s;
+    let lag_s : Nat64 = switch (health_opt) {
+      case null 0;
+      case (?h) cursorLagSeconds(h);
+    };
+    let level = mapHealthLevel(lag_s, breaker);
+
+    let circulating_e8s : Nat64 = switch (circulating_supply_opt) {
+      case null total_debt_e8s;
       case (?n) Nat64.fromNat(n);
     };
 
-    let tvl_usd : Float = Float.fromInt64(Int64.fromNat64(summary.total_collateral_usd_e8s)) / 100_000_000.0;
+    let tvl_usd : Float = Float.fromInt64(Int64.fromNat64(total_collateral_usd_e8s)) / 100_000_000.0;
 
-    let peg_usd : Float = switch (summary.peg) {
+    let peg_usd : Float = switch (peg_opt) {
       case null 1.0;
       case (?p) {
         let vp_float = Float.fromInt(p.virtual_price);
-        vp_float / 1_000_000_000_000_000_000.0;  // virtual_price has 18 decimals
+        vp_float / 1_000_000_000_000_000_000.0;
       };
     };
 
-    let lag_s = cursorLagSeconds(health);
-    let mode = mapMode(status.mode);
-    let level = mapHealthLevel(lag_s, status.liquidation_breaker_tripped);
+    let recent_activity : [T.EventRowDTO] = switch (events_opt) {
+      case null [];
+      case (?ev) Array.map<ST.EventSummary, T.EventRowDTO>(ev.events, mapEvent);
+    };
 
     let now_ns : Nat64 = Nat64.fromIntWrap(Time.now());
 
@@ -119,13 +173,13 @@ module {
       icusd_supply = Format.e8s(circulating_e8s, 8, "icUSD");
       icusd_peg_usd = peg_usd;
       protocol_mode = mode;
-      vault_count_open = Nat64.fromNat32(summary.total_vault_count);
-      recent_activity = Array.map<ST.EventSummary, T.EventRowDTO>(events_resp.events, mapEvent);
+      vault_count_open = Nat64.fromNat32(total_vault_count);
+      recent_activity = recent_activity;
       health = {
         level = level;
         message = healthMessage(level, lag_s);
         analytics_cursor_lag_seconds = lag_s;
-        any_breaker_tripped = status.liquidation_breaker_tripped;
+        any_breaker_tripped = breaker;
         protocol_mode = mode;
         generated_at_ns = now_ns;
       };

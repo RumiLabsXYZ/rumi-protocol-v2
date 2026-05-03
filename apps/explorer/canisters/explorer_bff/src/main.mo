@@ -16,9 +16,12 @@ import Lens "Lens";
 
 persistent actor class ExplorerBff(initArgs : SourceConfig.SourceCanistersInit) {
 
-  // Anonymous principal as default admin for local development.
-  // Replace with real admin principal in Plan 6's mainnet config.
-  let admin : Principal = Principal.fromText("2vxsx-fae");
+  // Admin principal — read from init args, defaulting to anonymous (2vxsx-fae) for
+  // local development. On mainnet, callers MUST pass `admin = opt principal "<real>"`.
+  let admin : Principal = switch (initArgs.admin) {
+    case (?p) p;
+    case null Principal.fromText("2vxsx-fae");
+  };
 
   var sources : SourceConfig.SourceCanisters = SourceConfig.init(initArgs);
 

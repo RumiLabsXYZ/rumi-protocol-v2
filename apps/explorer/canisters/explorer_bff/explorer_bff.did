@@ -252,6 +252,7 @@ type AdminLensDTO = record {
 type InitArgs = record {
   analytics : principal;
   backend : principal;
+  admin : opt principal;
 };
 
 type SetSourceResult = variant { Ok; Err : text };

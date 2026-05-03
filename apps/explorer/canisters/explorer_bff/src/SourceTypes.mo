@@ -12,10 +12,14 @@ module {
     max_imbalance_pct : Float;
   };
 
+  // Matches real rumi_analytics.did exactly (anti-pattern A2: shadow type drift cost
+  // us a deploy round when this didn't match). Fields are by hash on the wire.
   public type TwapEntry = {
-    asset : Principal;
-    price_usd : Float;
-    window_seconds : Nat32;
+    latest_price : Float;
+    collateral : Principal;
+    sample_count : Nat32;
+    twap_price : Float;
+    symbol : Text;
   };
 
   public type ProtocolSummary = {
@@ -41,18 +45,20 @@ module {
     cursor_position : Nat64;
   };
 
+  // Matches real rumi_analytics.did
   public type ErrorCounters = {
-    backend : Nat64;
-    three_pool : Nat64;
     amm : Nat64;
+    three_pool : Nat64;
+    icusd_ledger : Nat64;
     stability_pool : Nat64;
-    liquidation_bot : Nat64;
+    backend : Nat64;
   };
 
+  // Matches real rumi_analytics.did
   public type BalanceTrackerStats = {
-    ledger : Principal;
-    tracked_principals : Nat64;
-    last_refresh_ns : Nat64;
+    token : Principal;
+    total_tracked_e8s : Nat64;
+    holder_count : Nat64;
   };
 
   public type CollectorHealth = {

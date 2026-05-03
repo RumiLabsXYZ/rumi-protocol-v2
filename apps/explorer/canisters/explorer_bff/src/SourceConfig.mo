@@ -11,6 +11,7 @@ module {
   public type SourceCanistersInit = {
     analytics : Principal;
     backend : Principal;
+    admin : ?Principal;  // optional; defaults to anonymous (2vxsx-fae) when null for local dev
   };
 
   public func init(args : SourceCanistersInit) : SourceCanisters {
