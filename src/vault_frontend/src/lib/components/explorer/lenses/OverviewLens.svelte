@@ -6,7 +6,7 @@
   import ProtocolVitals from '../ProtocolVitals.svelte';
   import PoolHealthStrip from '../PoolHealthStrip.svelte';
   import TvlChart from '../TvlChart.svelte';
-  import TokenFlowSankey from '../TokenFlowSankey.svelte';
+  import TokenFlowChord from '../TokenFlowChord.svelte';
   import {
     fetchProtocolSummary, fetchVaultSeries,
     fetchFeeSeries, fetchPegStatus, fetchApys, fetchTokenFlow,
@@ -231,7 +231,7 @@
       {/each}
     </div>
   </div>
-  <TokenFlowSankey edges={flowEdges} loading={flowLoading} timePreset={flowWindow} />
+  <TokenFlowChord edges={flowEdges} loading={flowLoading} timePreset={flowWindow} />
 </div>
 
 <LensActivityPanel scope="all" title="Recent activity" viewAllHref="/explorer/activity" />
