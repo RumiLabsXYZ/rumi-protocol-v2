@@ -1,4 +1,6 @@
 import Principal "mo:core/Principal";
+import Time "mo:core/Time";
+import Nat64 "mo:core/Nat64";
 
 persistent actor MockAnalytics {
 
@@ -89,6 +91,7 @@ persistent actor MockAnalytics {
   };
 
   public query func get_collector_health() : async CollectorHealth {
+    let now_ns : Nat64 = Nat64.fromIntWrap(Time.now());
     {
       balance_tracker_stats = [];
       backfill_active = [];
@@ -99,13 +102,13 @@ persistent actor MockAnalytics {
         stability_pool = 0;
         liquidation_bot = 0;
       };
-      last_pull_cycle_ns = 1_730_000_000_000_000_000;
+      last_pull_cycle_ns = now_ns;
       cursors = [
         {
           last_error = null;
           source_count = 1234;
           name = "backend";
-          last_success_ns = 1_730_000_000_000_000_000;
+          last_success_ns = now_ns;
           cursor_position = 1234;
         },
       ];
