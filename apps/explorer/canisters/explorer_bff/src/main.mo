@@ -1,7 +1,10 @@
 import Principal "mo:core/Principal";
+import Timer "mo:core/Timer";
 import T "Types";
 import Stub "Stub";
 import SourceConfig "SourceConfig";
+import Overview "Overview";
+import Cache "Cache";
 
 persistent actor class ExplorerBff(initArgs : SourceConfig.SourceCanistersInit) {
 
@@ -10,6 +13,28 @@ persistent actor class ExplorerBff(initArgs : SourceConfig.SourceCanistersInit) 
   let admin : Principal = Principal.fromText("2vxsx-fae");
 
   var sources : SourceConfig.SourceCanisters = SourceConfig.init(initArgs);
+
+  // Cache: 30-second TTL on the overview snapshot.
+  // transient so it is not included in upgrade migration (heap-only; rebuilds on next tick).
+  transient let overview_cache = Cache.TtlCache<T.OverviewDTO>(30_000_000_000);
+
+  // Schedule a recurring refresh every 30 seconds.
+  ignore Timer.recurringTimer<system>(#seconds 30, func() : async () {
+    try {
+      let fresh = await Overview.fetch(sources);
+      overview_cache.set(fresh);
+    } catch (_e) {
+      // Swallow; next tick retries. Stale cache continues serving.
+    };
+  });
+
+  // Seed once on startup so the first user request doesn't wait 30 seconds.
+  ignore Timer.setTimer<system>(#seconds 0, func() : async () {
+    try {
+      let fresh = await Overview.fetch(sources);
+      overview_cache.set(fresh);
+    } catch (_e) {};
+  });
 
   public query func ping() : async Text {
     "explorer_bff is alive"
@@ -20,7 +45,23 @@ persistent actor class ExplorerBff(initArgs : SourceConfig.SourceCanistersInit) 
   };
 
   public query func get_overview() : async T.OverviewDTO {
-    Stub.overview()
+    switch (overview_cache.getStale()) {
+      case null Stub.overview();
+      case (?cached) {
+        let age = overview_cache.ageMs();
+        {
+          tvl_usd = cached.tvl_usd;
+          icusd_supply = cached.icusd_supply;
+          icusd_peg_usd = cached.icusd_peg_usd;
+          protocol_mode = cached.protocol_mode;
+          vault_count_open = cached.vault_count_open;
+          recent_activity = cached.recent_activity;
+          health = cached.health;
+          generated_at_ns = cached.generated_at_ns;
+          cache_age_ms = age;
+        };
+      };
+    };
   };
 
   public query func get_activity(filter : T.ActivityFilter, cursor : T.ActivityCursor) : async T.ActivityFeedDTO {

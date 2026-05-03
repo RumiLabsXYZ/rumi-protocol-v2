@@ -35,7 +35,7 @@ module {
     let now_s = nowSeconds();
     for (cursor in health.cursors.vals()) {
       let last_s = cursor.last_success_ns / 1_000_000_000;
-      let lag = if (now_s > last_s) now_s - last_s else 0;
+      let lag : Nat64 = if (now_s > last_s) now_s - last_s else 0;
       if (lag > max_lag) max_lag := lag;
     };
     max_lag;
