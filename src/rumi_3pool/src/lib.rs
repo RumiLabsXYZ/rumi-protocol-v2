@@ -856,6 +856,13 @@ pub async fn receive_donation(token_index: u8, amount: u128) -> Result<(), Three
         return Err(ThreePoolError::PoolEmpty);
     }
 
+    // Acquire the pool lock BEFORE the icrc1_balance_of await. Without it, a
+    // concurrent swap/donate/add_liquidity could mutate s.balances[idx] between
+    // the on-chain balance read and the internal-balance read used to compute
+    // expected_min, producing a stale comparison. Closes GHSA-62cr-vcj8-663h
+    // Finding 4 (audit fence B-01b).
+    let _pool_guard = pool_guard::PoolGuard::new()?;
+
     // Verify the pool actually holds enough tokens on the ledger
     let (ledger, symbol) = read_state(|s| {
         (s.config.tokens[idx].ledger_id, s.config.tokens[idx].symbol.clone())
