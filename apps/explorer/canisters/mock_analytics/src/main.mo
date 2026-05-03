@@ -4,6 +4,44 @@ import Nat64 "mo:core/Nat64";
 
 persistent actor MockAnalytics {
 
+  type TokenBalance = {
+    ledger : Principal;
+    symbol : Text;
+    balance_e8s : Nat64;
+    decimals : Nat8;
+  };
+
+  type SpDeposit = {
+    total_deposited_e8s : Nat64;
+    current_balance_e8s : Nat64;
+    earned_collateral : [(Principal, Nat64)];
+  };
+
+  type AddressHoldings = {
+    owner : Principal;
+    vaults_owned_ids : [Nat64];
+    sp_deposits : [SpDeposit];
+    token_balances : [TokenBalance];
+    total_value_usd : Float;
+  };
+
+  type PoolState = {
+    pool_id : Text;
+    pool_label : Text;
+    pool_kind : Text;
+    reserves : [(Principal, Nat64, Nat8)];
+    lp_total_supply_e8s : Nat64;
+    virtual_price : ?Float;
+  };
+
+  type TokenMetadata = {
+    ledger : Principal;
+    symbol : Text;
+    decimals : Nat8;
+    total_supply_e8s : Nat64;
+    fee_e8s : Nat64;
+  };
+
   type PegStatus = {
     virtual_price : Nat;
     timestamp_ns : Nat64;
@@ -112,6 +150,89 @@ persistent actor MockAnalytics {
           cursor_position = 1234;
         },
       ];
+    };
+  };
+
+  public query func get_address_holdings(p : Principal) : async AddressHoldings {
+    let known = Principal.fromText("tfesu-vyaaa-aaaap-qrd7a-cai");
+    let icusd_ledger = Principal.fromText("t6bor-paaaa-aaaap-qrd5q-cai");
+    let icp_ledger = Principal.fromText("ryjl3-tyaaa-aaaaa-aaaba-cai");
+    if (p == known) {
+      {
+        owner = p;
+        vaults_owned_ids = [142, 138];
+        sp_deposits = [{
+          total_deposited_e8s = 1000_00000000;
+          current_balance_e8s = 987_50000000;
+          earned_collateral = [(icp_ledger, 5_000_000)];
+        }];
+        token_balances = [{
+          ledger = icusd_ledger;
+          symbol = "icUSD";
+          balance_e8s = 250_00000000;
+          decimals = 8;
+        }];
+        total_value_usd = 1234.56;
+      };
+    } else {
+      {
+        owner = p;
+        vaults_owned_ids = [];
+        sp_deposits = [];
+        token_balances = [];
+        total_value_usd = 0.0;
+      };
+    };
+  };
+
+  public query func get_pool_state(pool_id : Text) : async ?PoolState {
+    let icusd = Principal.fromText("t6bor-paaaa-aaaap-qrd5q-cai");
+    let usdc  = Principal.fromText("xevnm-gaaaa-aaaar-qafnq-cai");
+    let usdt  = Principal.fromText("cngnf-vqaaa-aaaar-qag4q-cai");
+    let threeusd = Principal.fromText("fohh4-yyaaa-aaaap-qtkpa-cai");
+    let icp   = Principal.fromText("ryjl3-tyaaa-aaaaa-aaaba-cai");
+    if (pool_id == "3pool") {
+      ?{
+        pool_id = "3pool";
+        pool_label = "Rumi 3Pool";
+        pool_kind = "stable";
+        reserves = [
+          (icusd, 333_333_00000000, 8),
+          (usdc,  333_333_00000000, 8),
+          (usdt,  333_334_00000000, 8),
+        ];
+        lp_total_supply_e8s = 2_500_000_00000000;
+        virtual_price = ?1.0631;
+      };
+    } else if (pool_id == "amm-3usd-icp") {
+      ?{
+        pool_id = "amm-3usd-icp";
+        pool_label = "AMM 3USD/ICP";
+        pool_kind = "constant-product";
+        reserves = [
+          (threeusd, 50_000_00000000, 8),
+          (icp,      5_000_00000000, 8),
+        ];
+        lp_total_supply_e8s = 100_000_00000000;
+        virtual_price = null;
+      };
+    } else {
+      null;
+    };
+  };
+
+  public query func get_token_metadata(ledger : Principal) : async ?TokenMetadata {
+    let icusd = Principal.fromText("t6bor-paaaa-aaaap-qrd5q-cai");
+    if (ledger == icusd) {
+      ?{
+        ledger = icusd;
+        symbol = "icUSD";
+        decimals = 8;
+        total_supply_e8s = 500_000_00000000;
+        fee_e8s = 10_000;
+      };
+    } else {
+      null;
     };
   };
 

@@ -57,7 +57,48 @@ type CollectorHealth = record {
   cursors : vec CursorStatus;
 };
 
+type TokenBalance = record {
+  ledger : principal;
+  symbol : text;
+  balance_e8s : nat64;
+  decimals : nat8;
+};
+
+type SpDeposit = record {
+  total_deposited_e8s : nat64;
+  current_balance_e8s : nat64;
+  earned_collateral : vec record { principal; nat64 };
+};
+
+type AddressHoldings = record {
+  owner : principal;
+  vaults_owned_ids : vec nat64;
+  sp_deposits : vec SpDeposit;
+  token_balances : vec TokenBalance;
+  total_value_usd : float64;
+};
+
+type PoolState = record {
+  pool_id : text;
+  pool_label : text;
+  pool_kind : text;
+  reserves : vec record { principal; nat64; nat8 };
+  lp_total_supply_e8s : nat64;
+  virtual_price : opt float64;
+};
+
+type TokenMetadata = record {
+  ledger : principal;
+  symbol : text;
+  decimals : nat8;
+  total_supply_e8s : nat64;
+  fee_e8s : nat64;
+};
+
 service : {
   get_protocol_summary : () -> (ProtocolSummary) query;
   get_collector_health : () -> (CollectorHealth) query;
+  get_address_holdings : (principal) -> (AddressHoldings) query;
+  get_pool_state : (text) -> (opt PoolState) query;
+  get_token_metadata : (principal) -> (opt TokenMetadata) query;
 }

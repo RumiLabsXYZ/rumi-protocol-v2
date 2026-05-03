@@ -47,8 +47,22 @@ type GetEventsFilteredResponse = record {
   events : vec EventSummary;
 };
 
+type VaultStatus = variant { Open; Closed; Liquidated };
+
+type VaultSummary = record {
+  vault_id : nat64;
+  status : VaultStatus;
+  owner : principal;
+  collateral_type : principal;
+  collateral_amount_e8s : nat64;
+  debt_icusd_e8s : nat64;
+  collateral_ratio : opt float64;
+};
+
 service : {
   get_protocol_status : () -> (ProtocolStatus) query;
   get_vault_count : () -> (nat64) query;
   get_events_filtered : (GetEventsFilteredArg) -> (GetEventsFilteredResponse) query;
+  get_vault_summary : (nat64) -> (opt VaultSummary) query;
+  get_vault_history : (nat64) -> (vec EventSummary) query;
 }

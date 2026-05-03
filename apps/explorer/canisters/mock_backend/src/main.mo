@@ -1,10 +1,23 @@
 import Principal "mo:core/Principal";
 import Array "mo:core/Array";
 import Nat64 "mo:core/Nat64";
+import Text "mo:core/Text";
 
 persistent actor MockBackend {
 
   type Mode = { #ReadOnly; #GeneralAvailability; #Recovery };
+
+  type VaultStatus = { #Open; #Closed; #Liquidated };
+
+  type VaultSummary = {
+    vault_id : Nat64;
+    status : VaultStatus;
+    owner : Principal;
+    collateral_type : Principal;
+    collateral_amount_e8s : Nat64;
+    debt_icusd_e8s : Nat64;
+    collateral_ratio : ?Float;
+  };
 
   type ProtocolStatus = {
     mode : Mode;
@@ -182,6 +195,65 @@ persistent actor MockBackend {
     {
       total = total;
       events = slice;
+    };
+  };
+
+  // Vault 134 history: hardcoded events for the closed-vault synthesis path.
+  func vault134History() : [EventSummary] {
+    let base_ts : Nat64 = 1_730_000_000_000_000_000;
+    [
+      { global_index = 0; kind = "open_vault"; timestamp_ns = base_ts - 34_200_000_000_000; primary_principal = null; amount_e8s = ?1_75000000; payload_summary = "Vault #134 opened with 1.75 ICP collateral" },
+      { global_index = 2; kind = "borrow"; timestamp_ns = base_ts - 30_600_000_000_000; primary_principal = null; amount_e8s = ?125_00000000; payload_summary = "Borrowed 125 icUSD from Vault #134" },
+      { global_index = 9; kind = "repay"; timestamp_ns = base_ts - 18_000_000_000_000; primary_principal = null; amount_e8s = ?125_00000000; payload_summary = "Repaid 125 icUSD to Vault #134" },
+      { global_index = 16; kind = "close_vault"; timestamp_ns = base_ts - 6_300_000_000_000; primary_principal = null; amount_e8s = null; payload_summary = "Closed Vault #134" },
+    ];
+  };
+
+  // Vault 142 history: 3 recent events from the sample pool referencing vault #142.
+  func vault142History() : [EventSummary] {
+    let base_ts : Nat64 = 1_730_000_000_000_000_000;
+    [
+      { global_index = 29; kind = "open_vault"; timestamp_ns = base_ts; primary_principal = null; amount_e8s = ?1_50000000; payload_summary = "Vault #142 opened with 1.5 ICP collateral" },
+      { global_index = 28; kind = "borrow"; timestamp_ns = base_ts - 60_000_000_000; primary_principal = null; amount_e8s = ?50_00000000; payload_summary = "Borrowed 50 icUSD from vault #142" },
+    ];
+  };
+
+  public query func get_vault_summary(vault_id : Nat64) : async ?VaultSummary {
+    let owner = Principal.fromText("tfesu-vyaaa-aaaap-qrd7a-cai");
+    let collateral_type = Principal.fromText("t6bor-paaaa-aaaap-qrd5q-cai");
+    if (vault_id == 142) {
+      ?{
+        vault_id = 142;
+        status = #Open;
+        owner = owner;
+        collateral_type = collateral_type;
+        collateral_amount_e8s = 1_50000000;
+        debt_icusd_e8s = 50_00000000;
+        collateral_ratio = ?2.85;
+      };
+    } else if (vault_id == 138) {
+      ?{
+        vault_id = 138;
+        status = #Open;
+        owner = owner;
+        collateral_type = collateral_type;
+        collateral_amount_e8s = 5_00000000;
+        debt_icusd_e8s = 125_00000000;
+        collateral_ratio = ?4.0;
+      };
+    } else {
+      // vault 134 is closed — returns null to trigger synthesis path
+      null;
+    };
+  };
+
+  public query func get_vault_history(vault_id : Nat64) : async [EventSummary] {
+    if (vault_id == 134) {
+      vault134History();
+    } else if (vault_id == 142) {
+      vault142History();
+    } else {
+      [];
     };
   };
 
