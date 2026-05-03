@@ -170,4 +170,87 @@ module {
     generated_at_ns : Nat64;
   };
 
+  // ── Lens series point types ──
+
+  public type TvlPoint = {
+    timestamp_ns : Nat64;
+    total_collateral_usd : Float;
+    vault_count : Nat32;
+  };
+
+  public type FeePoint = {
+    timestamp_ns : Nat64;
+    borrow_fees_usd : Float;
+    redemption_fees_usd : Float;
+    swap_fees_usd : Float;
+  };
+
+  public type RedemptionPoint = {
+    timestamp_ns : Nat64;
+    count : Nat32;
+    volume_usd : Float;
+  };
+
+  public type SwapPoint = {
+    timestamp_ns : Nat64;
+    count : Nat32;
+    volume_usd : Float;
+  };
+
+  public type StabilityPoint = {
+    timestamp_ns : Nat64;
+    total_deposits_usd : Float;
+    apy_pct : Float;
+  };
+
+  // ── Lens DTO types ──
+
+  public type CollateralLensDTO = {
+    total_collateral_usd : Float;
+    vault_count : Nat32;
+    system_cr_bps : Nat32;
+    tvl_series : [TvlPoint];
+    recent_events : [EventRowDTO];
+    generated_at_ns : Nat64;
+  };
+
+  public type StabilityPoolLensDTO = {
+    total_deposits_usd : Float;
+    current_apy_pct : Float;
+    series : [StabilityPoint];
+    recent_events : [EventRowDTO];
+    generated_at_ns : Nat64;
+  };
+
+  public type RevenueLensDTO = {
+    total_fees_30d_usd : Float;
+    series : [FeePoint];
+    recent_events : [EventRowDTO];
+    generated_at_ns : Nat64;
+  };
+
+  public type RedemptionsLensDTO = {
+    total_count_30d : Nat32;
+    total_volume_30d_usd : Float;
+    series : [RedemptionPoint];
+    recent_events : [EventRowDTO];
+    generated_at_ns : Nat64;
+  };
+
+  public type DexLensDTO = {
+    swap_count_24h : Nat32;
+    volume_24h_usd : Float;
+    virtual_price : ?Float;
+    series : [SwapPoint];
+    recent_events : [EventRowDTO];
+    generated_at_ns : Nat64;
+  };
+
+  public type AdminLensDTO = {
+    protocol_mode : ProtocolMode;
+    any_breaker_tripped : Bool;
+    recent_admin_events : [EventRowDTO];
+    generated_at_ns : Nat64;
+  };
+
 };

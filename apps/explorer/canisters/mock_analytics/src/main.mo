@@ -1,6 +1,9 @@
 import Principal "mo:core/Principal";
 import Time "mo:core/Time";
+import Nat32 "mo:core/Nat32";
 import Nat64 "mo:core/Nat64";
+import Array "mo:core/Array";
+import Float "mo:core/Float";
 
 persistent actor MockAnalytics {
 
@@ -219,6 +222,132 @@ persistent actor MockAnalytics {
     } else {
       null;
     };
+  };
+
+  // ── Series types ──
+
+  type RangeQuery = {
+    to_ts : ?Nat64;
+    from_ts : ?Nat64;
+    offset : ?Nat64;
+    limit : ?Nat32;
+  };
+
+  type TvlPoint = {
+    timestamp_ns : Nat64;
+    total_collateral_usd_e8s : Nat64;
+    vault_count : Nat32;
+  };
+
+  type TvlSeriesResponse = { rows : [TvlPoint] };
+
+  type FeePoint = {
+    timestamp_ns : Nat64;
+    borrow_fees_e8s : Nat64;
+    redemption_fees_e8s : Nat64;
+    swap_fees_e8s : Nat64;
+  };
+
+  type FeeSeriesResponse = { rows : [FeePoint] };
+
+  type RedemptionPoint = {
+    timestamp_ns : Nat64;
+    count : Nat32;
+    volume_e8s : Nat64;
+  };
+
+  type RedemptionSeriesResponse = { rows : [RedemptionPoint] };
+
+  type SwapPoint = {
+    timestamp_ns : Nat64;
+    count : Nat32;
+    volume_e8s : Nat64;
+  };
+
+  type SwapSeriesResponse = { rows : [SwapPoint] };
+
+  type StabilityPoint = {
+    timestamp_ns : Nat64;
+    total_deposits_e8s : Nat64;
+    apy_pct : Float;
+  };
+
+  type StabilitySeriesResponse = { rows : [StabilityPoint] };
+
+  // ── Series helpers ──
+
+  let DAY_NS : Nat64 = 86_400_000_000_000;
+
+  func dayTs(daysAgo : Nat64) : Nat64 {
+    let now = Nat64.fromIntWrap(Time.now());
+    if (daysAgo * DAY_NS > now) 0 else now - daysAgo * DAY_NS;
+  };
+
+  // ── Series endpoints ──
+
+  public query func get_tvl_series(_q : RangeQuery) : async TvlSeriesResponse {
+    let rows = Array.tabulate<TvlPoint>(30, func(i) {
+      let daysAgo : Nat64 = Nat64.fromNat(29 - i);
+      {
+        timestamp_ns = dayTs(daysAgo);
+        total_collateral_usd_e8s = 800_000_00000000 + Nat64.fromNat(i) * 14_400_000_000_000;
+        vault_count = Nat32.fromNat(120 + i);
+      };
+    });
+    { rows = rows };
+  };
+
+  public query func get_fee_series(_q : RangeQuery) : async FeeSeriesResponse {
+    // borrow: ~80-200 icUSD e8s per day, redemption: ~20-100, swap: ~50-150
+    let rows = Array.tabulate<FeePoint>(30, func(i) {
+      let daysAgo : Nat64 = Nat64.fromNat(29 - i);
+      {
+        timestamp_ns = dayTs(daysAgo);
+        borrow_fees_e8s = 80_00000000 + Nat64.fromNat(i) * 4_00000000;
+        redemption_fees_e8s = 20_00000000 + Nat64.fromNat(i) * 2_66666666;
+        swap_fees_e8s = 50_00000000 + Nat64.fromNat(i) * 3_33333333;
+      };
+    });
+    { rows = rows };
+  };
+
+  public query func get_redemption_series(_q : RangeQuery) : async RedemptionSeriesResponse {
+    // count: 0-3 per day, volume: 0-500 icUSD
+    let rows = Array.tabulate<RedemptionPoint>(30, func(i) {
+      let daysAgo : Nat64 = Nat64.fromNat(29 - i);
+      {
+        timestamp_ns = dayTs(daysAgo);
+        count = Nat32.fromNat(i % 4);
+        volume_e8s = Nat64.fromNat(i % 4) * 166_66666666;
+      };
+    });
+    { rows = rows };
+  };
+
+  public query func get_swap_series(_q : RangeQuery) : async SwapSeriesResponse {
+    // count: 5-15 per day, volume: 200-1000 icUSD
+    let rows = Array.tabulate<SwapPoint>(30, func(i) {
+      let daysAgo : Nat64 = Nat64.fromNat(29 - i);
+      {
+        timestamp_ns = dayTs(daysAgo);
+        count = Nat32.fromNat(5 + (i * 10 / 29));
+        volume_e8s = 200_00000000 + Nat64.fromNat(i) * 26_66666666;
+      };
+    });
+    { rows = rows };
+  };
+
+  public query func get_stability_series(_q : RangeQuery) : async StabilitySeriesResponse {
+    // total_deposits: 4500-6500 icUSD, apy: 6-10%
+    let rows = Array.tabulate<StabilityPoint>(30, func(i) {
+      let daysAgo : Nat64 = Nat64.fromNat(29 - i);
+      {
+        timestamp_ns = dayTs(daysAgo);
+        total_deposits_e8s = 4500_00000000 + Nat64.fromNat(i) * 68_96551724;
+        apy_pct = 6.0 + Float.fromInt(i) * (4.0 / 29.0);
+      };
+    });
+    { rows = rows };
   };
 
   public query func get_token_metadata(ledger : Principal) : async ?TokenMetadata {

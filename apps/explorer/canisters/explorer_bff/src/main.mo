@@ -12,6 +12,7 @@ import Token "Token";
 import Event "Event";
 import Cache "Cache";
 import Health "Health";
+import Lens "Lens";
 
 persistent actor class ExplorerBff(initArgs : SourceConfig.SourceCanistersInit) {
 
@@ -101,6 +102,13 @@ persistent actor class ExplorerBff(initArgs : SourceConfig.SourceCanistersInit) 
   public query func get_source_canisters() : async { analytics : Principal; backend : Principal } {
     { analytics = sources.analytics; backend = sources.backend };
   };
+
+  public func get_lens_collateral() : async T.CollateralLensDTO { await Lens.fetchCollateral(sources) };
+  public func get_lens_stability_pool() : async T.StabilityPoolLensDTO { await Lens.fetchStabilityPool(sources) };
+  public func get_lens_revenue() : async T.RevenueLensDTO { await Lens.fetchRevenue(sources) };
+  public func get_lens_redemptions() : async T.RedemptionsLensDTO { await Lens.fetchRedemptions(sources) };
+  public func get_lens_dex() : async T.DexLensDTO { await Lens.fetchDex(sources) };
+  public func get_lens_admin() : async T.AdminLensDTO { await Lens.fetchAdmin(sources) };
 
   public shared({ caller }) func set_source_canister(name : Text, id : Principal) : async { #Ok; #Err : Text } {
     if (caller != admin) {

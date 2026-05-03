@@ -166,6 +166,89 @@ type EventDetailDTO = record {
   generated_at_ns: nat64;
 };
 
+// ── Lens series point types ──
+
+type TvlPoint = record {
+  timestamp_ns: nat64;
+  total_collateral_usd: float64;
+  vault_count: nat32;
+};
+
+type FeePoint = record {
+  timestamp_ns: nat64;
+  borrow_fees_usd: float64;
+  redemption_fees_usd: float64;
+  swap_fees_usd: float64;
+};
+
+type RedemptionPoint = record {
+  timestamp_ns: nat64;
+  count: nat32;
+  volume_usd: float64;
+};
+
+type SwapPoint = record {
+  timestamp_ns: nat64;
+  count: nat32;
+  volume_usd: float64;
+};
+
+type StabilityPoint = record {
+  timestamp_ns: nat64;
+  total_deposits_usd: float64;
+  apy_pct: float64;
+};
+
+// ── Lens DTO types ──
+
+type CollateralLensDTO = record {
+  total_collateral_usd: float64;
+  vault_count: nat32;
+  system_cr_bps: nat32;
+  tvl_series: vec TvlPoint;
+  recent_events: vec EventRowDTO;
+  generated_at_ns: nat64;
+};
+
+type StabilityPoolLensDTO = record {
+  total_deposits_usd: float64;
+  current_apy_pct: float64;
+  series: vec StabilityPoint;
+  recent_events: vec EventRowDTO;
+  generated_at_ns: nat64;
+};
+
+type RevenueLensDTO = record {
+  total_fees_30d_usd: float64;
+  series: vec FeePoint;
+  recent_events: vec EventRowDTO;
+  generated_at_ns: nat64;
+};
+
+type RedemptionsLensDTO = record {
+  total_count_30d: nat32;
+  total_volume_30d_usd: float64;
+  series: vec RedemptionPoint;
+  recent_events: vec EventRowDTO;
+  generated_at_ns: nat64;
+};
+
+type DexLensDTO = record {
+  swap_count_24h: nat32;
+  volume_24h_usd: float64;
+  virtual_price: opt float64;
+  series: vec SwapPoint;
+  recent_events: vec EventRowDTO;
+  generated_at_ns: nat64;
+};
+
+type AdminLensDTO = record {
+  protocol_mode: ProtocolMode;
+  any_breaker_tripped: bool;
+  recent_admin_events: vec EventRowDTO;
+  generated_at_ns: nat64;
+};
+
 type InitArgs = record {
   analytics : principal;
   backend : principal;
@@ -185,4 +268,10 @@ service : (InitArgs) -> {
   ping: () -> (text) query;
   set_source_canister: (text, principal) -> (SetSourceResult);
   get_source_canisters: () -> (record { analytics : principal; backend : principal }) query;
+  get_lens_collateral: () -> (CollateralLensDTO);
+  get_lens_stability_pool: () -> (StabilityPoolLensDTO);
+  get_lens_revenue: () -> (RevenueLensDTO);
+  get_lens_redemptions: () -> (RedemptionsLensDTO);
+  get_lens_dex: () -> (DexLensDTO);
+  get_lens_admin: () -> (AdminLensDTO);
 }

@@ -95,10 +95,73 @@ type TokenMetadata = record {
   fee_e8s : nat64;
 };
 
+type RangeQuery = record {
+  to_ts : opt nat64;
+  from_ts : opt nat64;
+  offset : opt nat64;
+  limit : opt nat32;
+};
+
+type TvlPoint = record {
+  timestamp_ns : nat64;
+  total_collateral_usd_e8s : nat64;
+  vault_count : nat32;
+};
+
+type TvlSeriesResponse = record {
+  rows : vec TvlPoint;
+};
+
+type FeePoint = record {
+  timestamp_ns : nat64;
+  borrow_fees_e8s : nat64;
+  redemption_fees_e8s : nat64;
+  swap_fees_e8s : nat64;
+};
+
+type FeeSeriesResponse = record {
+  rows : vec FeePoint;
+};
+
+type RedemptionPoint = record {
+  timestamp_ns : nat64;
+  count : nat32;
+  volume_e8s : nat64;
+};
+
+type RedemptionSeriesResponse = record {
+  rows : vec RedemptionPoint;
+};
+
+type SwapPoint = record {
+  timestamp_ns : nat64;
+  count : nat32;
+  volume_e8s : nat64;
+};
+
+type SwapSeriesResponse = record {
+  rows : vec SwapPoint;
+};
+
+type StabilityPoint = record {
+  timestamp_ns : nat64;
+  total_deposits_e8s : nat64;
+  apy_pct : float64;
+};
+
+type StabilitySeriesResponse = record {
+  rows : vec StabilityPoint;
+};
+
 service : {
   get_protocol_summary : () -> (ProtocolSummary) query;
   get_collector_health : () -> (CollectorHealth) query;
   get_address_holdings : (principal) -> (AddressHoldings) query;
   get_pool_state : (text) -> (opt PoolState) query;
   get_token_metadata : (principal) -> (opt TokenMetadata) query;
+  get_tvl_series : (RangeQuery) -> (TvlSeriesResponse) query;
+  get_fee_series : (RangeQuery) -> (FeeSeriesResponse) query;
+  get_redemption_series : (RangeQuery) -> (RedemptionSeriesResponse) query;
+  get_swap_series : (RangeQuery) -> (SwapSeriesResponse) query;
+  get_stability_series : (RangeQuery) -> (StabilitySeriesResponse) query;
 }

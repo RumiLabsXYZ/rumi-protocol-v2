@@ -168,4 +168,54 @@ module {
     fee_e8s : Nat64;
   };
 
+  // ── mock_analytics series types ──
+
+  public type RangeQuery = {
+    to_ts : ?Nat64;
+    from_ts : ?Nat64;
+    offset : ?Nat64;
+    limit : ?Nat32;
+  };
+
+  public type TvlPoint = {
+    timestamp_ns : Nat64;
+    total_collateral_usd_e8s : Nat64;
+    vault_count : Nat32;
+  };
+
+  public type TvlSeriesResponse = { rows : [TvlPoint] };
+
+  public type FeePoint = {
+    timestamp_ns : Nat64;
+    borrow_fees_e8s : Nat64;
+    redemption_fees_e8s : Nat64;
+    swap_fees_e8s : Nat64;
+  };
+
+  public type FeeSeriesResponse = { rows : [FeePoint] };
+
+  public type RedemptionPoint = {
+    timestamp_ns : Nat64;
+    count : Nat32;
+    volume_e8s : Nat64;
+  };
+
+  public type RedemptionSeriesResponse = { rows : [RedemptionPoint] };
+
+  public type SwapPoint = {
+    timestamp_ns : Nat64;
+    count : Nat32;
+    volume_e8s : Nat64;
+  };
+
+  public type SwapSeriesResponse = { rows : [SwapPoint] };
+
+  public type StabilityPoint = {
+    timestamp_ns : Nat64;
+    total_deposits_e8s : Nat64;
+    apy_pct : Float;
+  };
+
+  public type StabilitySeriesResponse = { rows : [StabilityPoint] };
+
 };
