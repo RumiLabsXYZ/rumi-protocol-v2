@@ -5,8 +5,8 @@ export function HealthPill() {
 
   if (isLoading || !data) {
     return (
-      <span className="inline-flex items-center gap-1.5 bg-muted/40 text-muted-foreground rounded-full px-2.5 py-0.5 text-xs font-medium border border-border">
-        <span className="w-1.5 h-1.5 bg-muted-foreground rounded-full"></span>
+      <span className="inline-flex items-center gap-1.5 bg-vellum-inset text-ink-disabled rounded-full px-2.5 py-0.5 text-xs font-medium border border-quartz">
+        <span className="w-1.5 h-1.5 bg-ink-disabled rounded-full"></span>
         Loading
       </span>
     );
@@ -19,24 +19,24 @@ export function HealthPill() {
 
   const styles = {
     green: {
-      bg: "bg-success/10",
-      text: "text-success",
-      dot: "bg-success",
-      border: "border-success/20",
+      bg: "bg-verdigris/10",
+      text: "text-verdigris",
+      dot: "bg-verdigris",
+      border: "border-verdigris/20",
       label: "Healthy",
     },
     yellow: {
-      bg: "bg-warning/10",
-      text: "text-warning",
-      dot: "bg-warning",
-      border: "border-warning/20",
+      bg: "bg-sodium/10",
+      text: "text-sodium",
+      dot: "bg-sodium",
+      border: "border-sodium/20",
       label: "Degraded",
     },
     red: {
-      bg: "bg-destructive/10",
-      text: "text-destructive",
-      dot: "bg-destructive",
-      border: "border-destructive/20",
+      bg: "bg-cinnabar/10",
+      text: "text-cinnabar",
+      dot: "bg-cinnabar",
+      border: "border-cinnabar/20",
       label: "Unhealthy",
     },
   }[levelKey];

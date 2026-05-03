@@ -1,6 +1,7 @@
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { useActivity } from "@/hooks/useBffQueries";
 import { parseFilters, filtersToParams, type ActivityFilters } from "@/lib/activityFilters";
+import { LedgerEntry } from "@/components/design/LedgerEntry";
 
 const ALL_TYPES = [
   "open_vault", "close_vault", "borrow", "repay",
@@ -37,20 +38,22 @@ export function Activity() {
 
   return (
     <div>
-      <h1 className="text-2xl font-semibold mb-2">Activity</h1>
-      <p className="text-muted-foreground mb-6">Filterable feed across every source.</p>
+      <header className="mb-8 pb-4 border-b border-quartz">
+        <h1 className="text-3xl font-semibold tracking-tightest text-ink-primary">Activity</h1>
+        <p className="text-sm text-ink-muted mt-1">Filterable feed across every source.</p>
+      </header>
 
-      <div className="bg-card border border-border rounded-lg p-4 mb-6">
-        <p className="text-xs uppercase text-muted-foreground tracking-wide mb-2">Filter by type</p>
-        <div className="flex flex-wrap gap-2">
+      <div className="bg-vellum-raised border border-quartz rounded-md p-4 mb-6">
+        <p className="text-[10px] uppercase tracking-[0.1em] text-ink-muted font-medium mb-2">Filter by type</p>
+        <div className="flex flex-wrap gap-1.5">
           {ALL_TYPES.map((t) => (
             <button
               key={t}
               onClick={() => toggleType(t)}
-              className={`text-xs px-2 py-1 rounded-md border transition-colors ${
+              className={`text-xs px-2 py-1 rounded-sm border transition-colors ${
                 filters.types.includes(t)
-                  ? "bg-primary text-primary-foreground border-primary"
-                  : "bg-secondary text-secondary-foreground border-border hover:bg-secondary/80"
+                  ? "bg-verdigris-soft text-verdigris border-verdigris/30"
+                  : "bg-vellum-inset border-quartz text-ink-secondary hover:bg-vellum-inset"
               }`}
             >
               {t}
@@ -59,7 +62,7 @@ export function Activity() {
           {filters.types.length > 0 && (
             <button
               onClick={() => updateFilters({ types: [] })}
-              className="text-xs px-2 py-1 rounded-md border border-border text-muted-foreground hover:bg-secondary"
+              className="text-xs px-2 py-1 rounded-sm border border-quartz text-ink-muted hover:bg-vellum-inset"
             >
               Clear
             </button>
@@ -67,11 +70,11 @@ export function Activity() {
         </div>
       </div>
 
-      {isLoading && <p className="text-muted-foreground">Loading...</p>}
+      {isLoading && <p className="text-ink-muted">Loading...</p>}
 
       {error && (
-        <div className="bg-secondary/50 border border-border rounded-lg p-4 text-sm text-muted-foreground">
-          <p className="font-medium text-foreground mb-1">Activity feed wiring is in progress.</p>
+        <div className="bg-vellum-raised border border-quartz rounded-md p-6 text-sm text-ink-muted">
+          <p className="font-medium text-ink-primary mb-1">Activity feed wiring is in progress.</p>
           <p>
             The full Event variant from the Rumi backend is not yet ported into the BFF
             shadow types — this lights up in a follow-up. Other parts of the Explorer
@@ -81,8 +84,8 @@ export function Activity() {
       )}
 
       {data && data.events.length === 0 && !error && !isLoading && (
-        <div className="bg-secondary/50 border border-border rounded-lg p-4 text-sm text-muted-foreground">
-          <p className="font-medium text-foreground mb-1">Activity feed wiring is in progress.</p>
+        <div className="bg-vellum-raised border border-quartz rounded-md p-6 text-sm text-ink-muted">
+          <p className="font-medium text-ink-primary mb-1">Activity feed wiring is in progress.</p>
           <p>
             The full Event variant from the Rumi backend is not yet ported into the BFF
             shadow types — this lights up in a follow-up. Other parts of the Explorer
@@ -93,55 +96,33 @@ export function Activity() {
 
       {data && data.events.length > 0 && (
         <>
-          <p className="text-xs text-muted-foreground mb-3">
+          <p className="text-[11px] text-ink-muted font-mono mb-3 tabular-nums">
             {String(data.total_estimated)} total · showing {data.events.length}
           </p>
 
-          <div className="bg-card border border-border rounded-lg overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-secondary/30">
-                <tr className="text-left text-xs uppercase text-muted-foreground">
-                  <th className="px-4 py-2 font-medium">ID</th>
-                  <th className="px-4 py-2 font-medium">Kind</th>
-                  <th className="px-4 py-2 font-medium">Amount</th>
-                  <th className="px-4 py-2 font-medium">Description</th>
-                  <th className="px-4 py-2 font-medium whitespace-nowrap">Time</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border">
-                {data.events.map((e, i) => (
-                  <tr key={`${e.global_id}-${i}`}>
-                    <td className="px-4 py-2 font-mono text-xs text-muted-foreground whitespace-nowrap">{e.global_id}</td>
-                    <td className="px-4 py-2 whitespace-nowrap">{e.kind}</td>
-                    <td className="px-4 py-2 whitespace-nowrap">
-                      {e.primary_amount?.formatted ?? "—"}
-                    </td>
-                    <td className="px-4 py-2">{e.payload_summary}</td>
-                    <td className="px-4 py-2 text-xs text-muted-foreground whitespace-nowrap">
-                      {formatTimestamp(e.timestamp_ns)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="bg-vellum-raised border border-quartz rounded-md overflow-hidden">
+            {data.events.map((e, i) => (
+              <LedgerEntry
+                key={`${e.global_id}-${i}`}
+                timestampNs={e.timestamp_ns}
+                kind={e.kind}
+                summary={e.payload_summary}
+                amount={e.primary_amount?.formatted ?? null}
+                id={e.global_id}
+              />
+            ))}
           </div>
 
           {data.next_cursor && (
             <button
               onClick={loadMore}
-              className="mt-4 px-4 py-2 bg-secondary text-secondary-foreground rounded-md border border-border text-sm hover:bg-secondary/80"
+              className="mt-4 px-4 py-2 text-sm font-medium text-ink-secondary border border-quartz rounded-md hover:bg-vellum-inset"
             >
-              Load older →
+              Load older entries →
             </button>
           )}
         </>
       )}
     </div>
   );
-}
-
-function formatTimestamp(ns: bigint): string {
-  const ms = Number(ns / 1_000_000n);
-  const d = new Date(ms);
-  return d.toLocaleString("en-US", { dateStyle: "short", timeStyle: "short" });
 }

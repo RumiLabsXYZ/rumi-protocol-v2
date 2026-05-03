@@ -35,8 +35,8 @@ export function SearchBar() {
         type="text"
         value={value}
         onChange={(e) => setValue(e.target.value)}
-        placeholder="Search principal, vault id, or event id..."
-        className="w-full bg-secondary text-secondary-foreground placeholder:text-muted-foreground rounded-md px-3 py-1.5 text-sm border border-border focus:outline-none focus:ring-2 focus:ring-ring"
+        placeholder="search principal, vault id, event id..."
+        className="w-full bg-vellum-inset text-ink-primary placeholder:text-ink-disabled rounded-sm px-3 py-1.5 text-sm font-mono border border-quartz focus:outline-none focus:ring-1 focus:ring-verdigris/40"
         aria-label="Search"
       />
     </form>
