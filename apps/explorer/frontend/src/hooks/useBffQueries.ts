@@ -101,3 +101,51 @@ export function useEvent(globalId: string) {
     staleTime: Infinity,
   });
 }
+
+export function useLensCollateral() {
+  return useQuery({
+    queryKey: ["lens", "collateral"],
+    queryFn: () => getBff().get_lens_collateral(),
+    staleTime: 60_000,
+  });
+}
+
+export function useLensStabilityPool() {
+  return useQuery({
+    queryKey: ["lens", "stability"],
+    queryFn: () => getBff().get_lens_stability_pool(),
+    staleTime: 60_000,
+  });
+}
+
+export function useLensRevenue() {
+  return useQuery({
+    queryKey: ["lens", "revenue"],
+    queryFn: () => getBff().get_lens_revenue(),
+    staleTime: 60_000,
+  });
+}
+
+export function useLensRedemptions() {
+  return useQuery({
+    queryKey: ["lens", "redemptions"],
+    queryFn: () => getBff().get_lens_redemptions(),
+    staleTime: 60_000,
+  });
+}
+
+export function useLensDex() {
+  return useQuery({
+    queryKey: ["lens", "dex"],
+    queryFn: () => getBff().get_lens_dex(),
+    staleTime: 60_000,
+  });
+}
+
+export function useLensAdmin() {
+  return useQuery({
+    queryKey: ["lens", "admin"],
+    queryFn: () => getBff().get_lens_admin(),
+    staleTime: 60_000,
+  });
+}
