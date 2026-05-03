@@ -1091,6 +1091,7 @@ export interface _SERVICE {
   'set_interest_pool_share' : ActorMethod<[number], Result>,
   'set_interest_rate' : ActorMethod<[Principal, number], Result>,
   'set_interest_split' : ActorMethod<[Array<InterestSplitArg>], Result>,
+  'set_interest_treasury_tick_interval_secs' : ActorMethod<[bigint], Result>,
   'set_liquidation_bonus' : ActorMethod<[number], Result>,
   'set_liquidation_bot_config' : ActorMethod<[Principal, bigint], Result>,
   'set_liquidation_frozen' : ActorMethod<[boolean], Result>,
@@ -1128,6 +1129,8 @@ export interface _SERVICE {
   'set_stable_token_enabled' : ActorMethod<[StableTokenType, boolean], Result>,
   'set_three_pool_canister' : ActorMethod<[Principal], Result>,
   'set_treasury_principal' : ActorMethod<[Principal], Result>,
+  'set_vault_check_tick_interval_secs' : ActorMethod<[bigint], Result>,
+  'set_xrc_fetch_interval_secs' : ActorMethod<[bigint], Result>,
   'stability_pool_liquidate' : ActorMethod<[bigint, bigint], Result_12>,
   'stability_pool_liquidate_debt_burned' : ActorMethod<
     [bigint, bigint, SpWritedownProof],

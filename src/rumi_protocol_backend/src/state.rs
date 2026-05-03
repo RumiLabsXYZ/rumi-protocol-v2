@@ -86,6 +86,14 @@ fn default_flush_threshold() -> u64 { 10_000_000 } // 0.1 icUSD
 /// can reference it without a cross-module import dance.
 fn default_min_xrc_sources_used() -> u32 { 3 }
 
+/// Wave-14b CDP-12 follow-up: production defaults for the three timer
+/// cadences. Mirror the consts in `xrc.rs` so legacy snapshots without
+/// these fields hydrate to the same cadence the canister has shipped
+/// with from Wave 14b onward.
+fn default_xrc_fetch_interval_secs() -> u64 { 300 }
+fn default_interest_treasury_tick_interval_secs() -> u64 { 60 }
+fn default_vault_check_tick_interval_secs() -> u64 { 300 }
+
 pub fn default_interest_split() -> Vec<InterestRecipient> {
     vec![
         InterestRecipient { destination: InterestDestination::ThreePool, bps: 5000 },
@@ -742,6 +750,22 @@ pub struct State {
     /// snapshots so the gate is on by default after upgrade.
     #[serde(default = "default_min_xrc_sources_used")]
     pub min_xrc_sources_used: u32,
+    /// Wave-14b CDP-12 follow-up: cadence (seconds) for Timer A
+    /// (`fetch_icp_rate`). Default 300. Tunable via developer endpoint
+    /// `set_xrc_fetch_interval_secs`. Setting to 0 is rejected by the
+    /// setter (a 0s interval would saturate the canister).
+    #[serde(default = "default_xrc_fetch_interval_secs")]
+    pub xrc_fetch_interval_secs: u64,
+    /// Wave-14b CDP-12 follow-up: cadence (seconds) for Timer B
+    /// (`interest_and_treasury_tick`). Default 60. Tunable via
+    /// `set_interest_treasury_tick_interval_secs`.
+    #[serde(default = "default_interest_treasury_tick_interval_secs")]
+    pub interest_treasury_tick_interval_secs: u64,
+    /// Wave-14b CDP-12 follow-up: cadence (seconds) for Timer C
+    /// (`vault_check_tick`). Default 300. Tunable via
+    /// `set_vault_check_tick_interval_secs`.
+    #[serde(default = "default_vault_check_tick_interval_secs")]
+    pub vault_check_tick_interval_secs: u64,
     pub fee: Ratio,
     pub developer_principal: Principal,
     pub next_available_vault_id: u64,
@@ -1239,6 +1263,9 @@ impl Default for State {
             consecutive_xrc_failures: 0,
             mode_triggered_by_oracle: false,
             min_xrc_sources_used: default_min_xrc_sources_used(),
+            xrc_fetch_interval_secs: default_xrc_fetch_interval_secs(),
+            interest_treasury_tick_interval_secs: default_interest_treasury_tick_interval_secs(),
+            vault_check_tick_interval_secs: default_vault_check_tick_interval_secs(),
             fee: Ratio::from(Decimal::ZERO),
             developer_principal: Principal::anonymous(),
             next_available_vault_id: 1,
@@ -1368,6 +1395,9 @@ impl From<InitArg> for State {
             consecutive_xrc_failures: 0,
             mode_triggered_by_oracle: false,
             min_xrc_sources_used: default_min_xrc_sources_used(),
+            xrc_fetch_interval_secs: default_xrc_fetch_interval_secs(),
+            interest_treasury_tick_interval_secs: default_interest_treasury_tick_interval_secs(),
+            vault_check_tick_interval_secs: default_vault_check_tick_interval_secs(),
             total_collateral_ratio: Ratio::from(Decimal::MAX),
             last_icp_timestamp: None,
             last_icp_rate: None,

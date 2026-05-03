@@ -43,7 +43,13 @@ pocket-ic
 
 # analysis/demo directories
 technical-analysis/
-xrc_demo/
+# Top-level xrc_demo/ is the legacy build workspace (gitignored). The
+# tracked mock canister lives at src/xrc_demo/ so the integration tests
+# can `include_bytes!` the wasm without depending on a developer's local
+# build setup. To rebuild the mock wasm:
+#   cargo build --target wasm32-unknown-unknown --release -p xrc-mock-canister
+#   cp target/wasm32-unknown-unknown/release/xrc_mock_canister.wasm src/xrc_demo/xrc/xrc.wasm
+/xrc_demo/
 .playwright-mcp/
 
 # Security: audit reports stay local (repo is PUBLIC)
