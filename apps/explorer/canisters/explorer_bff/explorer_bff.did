@@ -166,7 +166,14 @@ type EventDetailDTO = record {
   generated_at_ns: nat64;
 };
 
-service : {
+type InitArgs = record {
+  analytics : principal;
+  backend : principal;
+};
+
+type SetSourceResult = variant { Ok; Err : text };
+
+service : (InitArgs) -> {
   get_overview: () -> (OverviewDTO) query;
   get_activity: (ActivityFilter, ActivityCursor) -> (ActivityFeedDTO) query;
   get_address: (principal) -> (AddressDTO) query;
@@ -176,4 +183,6 @@ service : {
   get_event: (text) -> (EventDetailDTO) query;
   get_health: () -> (HealthSummaryDTO) query;
   ping: () -> (text) query;
+  set_source_canister: (text, principal) -> (SetSourceResult);
+  get_source_canisters: () -> (record { analytics : principal; backend : principal }) query;
 }

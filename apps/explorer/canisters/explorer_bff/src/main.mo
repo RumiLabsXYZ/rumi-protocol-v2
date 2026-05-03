@@ -1,8 +1,15 @@
 import Principal "mo:core/Principal";
 import T "Types";
 import Stub "Stub";
+import SourceConfig "SourceConfig";
 
-persistent actor ExplorerBff {
+persistent actor class ExplorerBff(initArgs : SourceConfig.SourceCanistersInit) {
+
+  // Anonymous principal as default admin for local development.
+  // Replace with real admin principal in Plan 6's mainnet config.
+  let admin : Principal = Principal.fromText("2vxsx-fae");
+
+  var sources : SourceConfig.SourceCanisters = SourceConfig.init(initArgs);
 
   public query func ping() : async Text {
     "explorer_bff is alive"
@@ -38,6 +45,20 @@ persistent actor ExplorerBff {
 
   public query func get_event(global_id : Text) : async T.EventDetailDTO {
     Stub.event(global_id)
+  };
+
+  public query func get_source_canisters() : async { analytics : Principal; backend : Principal } {
+    { analytics = sources.analytics; backend = sources.backend };
+  };
+
+  public shared({ caller }) func set_source_canister(name : Text, id : Principal) : async { #Ok; #Err : Text } {
+    if (caller != admin) {
+      return #Err("unauthorized: only admin can update source canisters");
+    };
+    switch (SourceConfig.update(sources, name, id)) {
+      case (#ok) #Ok;
+      case (#err msg) #Err msg;
+    };
   };
 
 };
