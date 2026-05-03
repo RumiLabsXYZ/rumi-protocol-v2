@@ -258,12 +258,12 @@ type SetSourceResult = variant { Ok; Err : text };
 
 service : (InitArgs) -> {
   get_overview: () -> (OverviewDTO) query;
-  get_activity: (ActivityFilter, ActivityCursor) -> (ActivityFeedDTO) query;
-  get_address: (principal) -> (AddressDTO) query;
-  get_vault: (nat64) -> (VaultDetailDTO) query;
-  get_pool: (text) -> (PoolDetailDTO) query;
-  get_token: (principal) -> (TokenDetailDTO) query;
-  get_event: (text) -> (EventDetailDTO) query;
+  get_activity: (ActivityFilter, ActivityCursor) -> (ActivityFeedDTO);
+  get_address: (principal) -> (AddressDTO);
+  get_vault: (nat64) -> (VaultDetailDTO);
+  get_pool: (text) -> (PoolDetailDTO);
+  get_token: (principal) -> (TokenDetailDTO);
+  get_event: (text) -> (EventDetailDTO);
   get_health: () -> (HealthSummaryDTO) query;
   ping: () -> (text) query;
   set_source_canister: (text, principal) -> (SetSourceResult);

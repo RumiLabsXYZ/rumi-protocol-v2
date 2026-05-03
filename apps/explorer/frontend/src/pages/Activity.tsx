@@ -98,7 +98,7 @@ export function Activity() {
                     <td className="px-4 py-2 font-mono text-xs text-muted-foreground whitespace-nowrap">{e.global_id}</td>
                     <td className="px-4 py-2 whitespace-nowrap">{e.kind}</td>
                     <td className="px-4 py-2 whitespace-nowrap">
-                      {e.primary_amount ? e.primary_amount.formatted : "—"}
+                      {e.primary_amount?.formatted ?? "—"}
                     </td>
                     <td className="px-4 py-2">{e.payload_summary}</td>
                     <td className="px-4 py-2 text-xs text-muted-foreground whitespace-nowrap">

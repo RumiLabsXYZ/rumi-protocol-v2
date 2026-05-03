@@ -3,6 +3,7 @@ import { BrowserRouter, Route, Routes } from "react-router-dom";
 import { queryClient } from "./lib/queryClient";
 import { ThemeProvider } from "./theme/ThemeProvider";
 import { Layout } from "./components/layout/Layout";
+import { ErrorBoundary } from "./components/common/ErrorBoundary";
 import { Overview } from "./pages/Overview";
 import { Activity } from "./pages/Activity";
 import { Health } from "./pages/Health";
@@ -23,6 +24,7 @@ export default function App() {
     <ThemeProvider>
       <QueryClientProvider client={queryClient}>
         <BrowserRouter>
+          <ErrorBoundary>
           <Routes>
             <Route element={<Layout />}>
               <Route index element={<Overview />} />
@@ -41,6 +43,7 @@ export default function App() {
               <Route path="e/event/:globalId" element={<EventDetail />} />
             </Route>
           </Routes>
+          </ErrorBoundary>
         </BrowserRouter>
       </QueryClientProvider>
     </ThemeProvider>

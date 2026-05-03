@@ -17,8 +17,8 @@ export function DexLens() {
     { label: "24h Swaps", value: String(data.swap_count_24h) },
     { label: "24h Volume", value: `$${data.volume_24h_usd.toFixed(2)}` },
   ];
-  if (data.virtual_price !== undefined && data.virtual_price !== null) {
-    metrics.push({ label: "Virtual Price", value: (data.virtual_price as number).toFixed(6) });
+  if (data.virtual_price !== undefined) {
+    metrics.push({ label: "Virtual Price", value: data.virtual_price.toFixed(6) });
   }
 
   return (
@@ -54,7 +54,7 @@ export function DexLens() {
                   <td className="px-4 py-2 font-mono text-xs text-muted-foreground whitespace-nowrap">{e.global_id}</td>
                   <td className="px-4 py-2 whitespace-nowrap">{e.kind}</td>
                   <td className="px-4 py-2 whitespace-nowrap">
-                    {e.primary_amount ? e.primary_amount.formatted : "—"}
+                    {e.primary_amount?.formatted ?? "—"}
                   </td>
                   <td className="px-4 py-2">{e.payload_summary}</td>
                 </tr>
