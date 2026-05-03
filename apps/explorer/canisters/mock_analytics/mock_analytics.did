@@ -1,0 +1,63 @@
+type PegStatus = record {
+  virtual_price : nat;
+  timestamp_ns : nat64;
+  pool_balances : vec nat;
+  balance_ratios : vec float64;
+  max_imbalance_pct : float64;
+};
+
+type TwapEntry = record {
+  asset : principal;
+  price_usd : float64;
+  window_seconds : nat32;
+};
+
+type ProtocolSummary = record {
+  peg : opt PegStatus;
+  lp_apy_pct : opt float64;
+  timestamp_ns : nat64;
+  sp_apy_pct : opt float64;
+  total_debt_e8s : nat64;
+  circulating_supply_icusd_e8s : opt nat;
+  prices : vec TwapEntry;
+  total_vault_count : nat32;
+  total_collateral_usd_e8s : nat64;
+  system_cr_bps : nat32;
+  swap_count_24h : nat32;
+  volume_24h_e8s : nat64;
+};
+
+type CursorStatus = record {
+  last_error : opt text;
+  source_count : nat64;
+  name : text;
+  last_success_ns : nat64;
+  cursor_position : nat64;
+};
+
+type ErrorCounters = record {
+  backend : nat64;
+  three_pool : nat64;
+  amm : nat64;
+  stability_pool : nat64;
+  liquidation_bot : nat64;
+};
+
+type BalanceTrackerStats = record {
+  ledger : principal;
+  tracked_principals : nat64;
+  last_refresh_ns : nat64;
+};
+
+type CollectorHealth = record {
+  balance_tracker_stats : vec BalanceTrackerStats;
+  backfill_active : vec principal;
+  error_counters : ErrorCounters;
+  last_pull_cycle_ns : nat64;
+  cursors : vec CursorStatus;
+};
+
+service : {
+  get_protocol_summary : () -> (ProtocolSummary) query;
+  get_collector_health : () -> (CollectorHealth) query;
+}
