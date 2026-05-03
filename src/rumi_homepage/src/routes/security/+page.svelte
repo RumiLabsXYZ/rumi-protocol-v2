@@ -63,7 +63,7 @@
       date: 'May 2, 2026',
       authors: 'Internal + AVAI close-out',
       scope: 'Unified close-out of every finding from the internal three-pass review and the AVAI external pre-audit, including the eight net-new findings closed in Wave 14a/b/c.',
-      summary: 'Anchored to backend hash 0xc6b99934 and 3pool hash 0xfcf49d30. Every finding from both reviews resolved, deferred-by-design, or accepted with a documented watch threshold.',
+      summary: 'Anchored to backend hash 0xc6b99934 and 3pool hash 0x63916ab7. Every finding from both reviews resolved, deferred-by-design, or accepted with a documented watch threshold.',
       slug: 'rumi-combined-security-review-2026-05-02',
     },
     {
