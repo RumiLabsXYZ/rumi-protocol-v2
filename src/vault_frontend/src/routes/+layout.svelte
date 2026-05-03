@@ -92,6 +92,7 @@
       <a href="mailto:info@rumiprotocol.com" class="footer-link">Contact</a>
       <a href="https://github.com/RumiLabsXYZ/rumi-protocol-v2" target="_blank" rel="noopener noreferrer" class="footer-link">GitHub</a>
       <a href="/Rumi-Protocol-Whitepaper.pdf" target="_blank" rel="noopener noreferrer" class="footer-link">Whitepaper</a>
+      <a href="https://rumiprotocol.com/security" target="_blank" rel="noopener noreferrer" class="footer-link">Security</a>
     </div>
     <div class="footer-bottom">
       <span>&copy; {new Date().getFullYear()} Rumi Labs LLC</span>
