@@ -20,5 +20,6 @@ export function useHealth() {
       return bff.get_health();
     },
     staleTime: 5_000,
+    refetchInterval: 10_000,
   });
 }
