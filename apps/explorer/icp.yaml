@@ -1,4 +1,18 @@
 canisters:
+  - name: mock_analytics
+    recipe:
+      type: "@dfinity/motoko@v4.1.0"
+      configuration:
+        main: canisters/mock_analytics/src/main.mo
+        candid: canisters/mock_analytics/mock_analytics.did
+
+  - name: mock_backend
+    recipe:
+      type: "@dfinity/motoko@v4.1.0"
+      configuration:
+        main: canisters/mock_backend/src/main.mo
+        candid: canisters/mock_backend/mock_backend.did
+
   - name: explorer_bff
     recipe:
       type: "@dfinity/motoko@v4.1.0"
