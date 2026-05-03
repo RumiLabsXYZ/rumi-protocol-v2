@@ -48,7 +48,7 @@
   const trustSignals = [
     { title: 'Open Source', desc: 'Every line of code is public and verifiable on GitHub.' },
     { title: 'Fully On-Chain', desc: 'No bridges, no off-chain oracles, no custodians. Frontend, backend, ledger, price feeds: all canisters.' },
-    { title: 'Audited', desc: 'Security audit completed by AVAI, with a Code4rena contest planned to further harden the protocol.' },
+    { title: 'Audited', desc: 'Internal three-pass review and external pre-audit by AVAI, both fully remediated. Code4rena contest planned to further harden the protocol.' },
     { title: 'Path to Decentralization', desc: 'All canisters are currently under dev control. The plan is to hand governance to an SNS DAO.' },
   ];
 </script>
@@ -94,7 +94,7 @@
       </div>
       <span class="trust-strip-divider"></span>
       <div class="trust-strip-signals">
-        <span>Audited by AVAI</span>
+        <a href="/security" style="color: inherit; text-decoration: none; border-bottom: 1px dotted currentColor;">Independently Audited</a>
         <span class="trust-sep">·</span>
         <span>Open Source</span>
         <span class="trust-sep">·</span>

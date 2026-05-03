@@ -20,7 +20,7 @@
       <a href="/" class="nav-link" class:active={$page.url.pathname === '/'}>Home</a>
       <a href="/about" class="nav-link" class:active={$page.url.pathname === '/about'}>About</a>
       <a href="/Rumi-Protocol-v2-Whitepaper.pdf" target="_blank" class="nav-link">Whitepaper</a>
-      <a href="/AVAI_Security_Audit_Rumi_Protocol_Professional.pdf" target="_blank" class="nav-link">Audit</a>
+      <a href="/security" class="nav-link" class:active={$page.url.pathname === '/security'}>Security</a>
     </nav>
 
     <div class="top-actions">
@@ -67,7 +67,7 @@
         <span>&copy; 2025–{new Date().getFullYear()} Rumi Labs LLC</span>
         <a href="https://github.com/RumiLabsXYZ/rumi-protocol-v2" target="_blank" rel="noopener" class="footer-link">GitHub</a>
         <a href="/Rumi-Protocol-v2-Whitepaper.pdf" target="_blank" class="footer-link">Whitepaper</a>
-        <a href="/AVAI_Security_Audit_Rumi_Protocol_Professional.pdf" target="_blank" class="footer-link">Audit</a>
+        <a href="/security" class="footer-link">Security</a>
         <a href="/branding" class="footer-link">Branding</a>
         <a href="mailto:info@rumiprotocol.com" class="footer-link">Contact</a>
       </div>

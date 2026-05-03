@@ -68,9 +68,11 @@
 
     <p>
       The entire codebase is public on <a href="https://github.com/RumiLabsXYZ/rumi-protocol-v2" target="_blank" rel="noopener">GitHub</a>.
-      A security audit was completed by AVAI, with a Code4rena audit contest planned to
-      further harden the protocol. All canister IDs are public so anyone can verify the
-      code that's running.
+      The protocol has been through an internal three-pass security review and an external
+      pre-audit by AVAI; both are fully remediated and published on the
+      <a href="/security">security page</a>. A Code4rena audit contest is planned to further
+      harden the protocol. All canister IDs are public so anyone can verify the code that's
+      running.
     </p>
 
     <p>
