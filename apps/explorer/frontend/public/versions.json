@@ -1,7 +1,7 @@
 {
   "explorer_bff": "0xbd2ed21df027e3fbae9850d17aaa4999343203086a991a903c9e4ee0c506581a",
   "explorer_assets": "0x63d122d0149a29f4e48603efdd7d2bce656a6a83bac1e3207897c68e8e225bb6",
-  "git_sha": "604b98b",
-  "deployed_at": "2026-05-03T17:31:01Z",
+  "git_sha": "362dca5",
+  "deployed_at": "2026-05-03T17:34:54Z",
   "environment": "ic"
 }
