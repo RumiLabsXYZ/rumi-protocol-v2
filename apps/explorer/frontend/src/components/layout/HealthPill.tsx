@@ -41,13 +41,27 @@ export function HealthPill() {
     },
   }[levelKey];
 
+  const tooltipText = `${data.message}\nTailer lag: ${formatDuration(data.analytics_cursor_lag_seconds)}`;
+
   return (
     <span
       className={`inline-flex items-center gap-1.5 ${styles.bg} ${styles.text} rounded-full px-2.5 py-0.5 text-xs font-medium border ${styles.border}`}
-      title={data.message}
+      title={tooltipText}
     >
       <span className={`w-1.5 h-1.5 ${styles.dot} rounded-full`}></span>
       {styles.label}
     </span>
   );
+}
+
+function formatDuration(seconds: bigint): string {
+  const s = Number(seconds);
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86400) {
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  }
+  return `${Math.floor(s / 86400)}d`;
 }

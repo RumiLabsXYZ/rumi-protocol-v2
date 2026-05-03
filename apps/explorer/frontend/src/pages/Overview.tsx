@@ -1,7 +1,10 @@
+import { useSearchParams } from "react-router-dom";
 import { useOverview } from "@/hooks/useBffQueries";
 
 export function Overview() {
   const { data, isLoading, error } = useOverview();
+  const [params] = useSearchParams();
+  const unresolved = params.get("q");
 
   if (isLoading) {
     return <p className="text-muted-foreground">Loading overview...</p>;
@@ -27,6 +30,12 @@ export function Overview() {
 
   return (
     <div>
+      {unresolved && (
+        <div className="bg-warning/10 text-warning border border-warning/20 rounded-lg p-3 mb-6 text-sm">
+          Couldn't resolve <span className="font-mono">{unresolved}</span> as a principal, vault id, or event id.
+        </div>
+      )}
+
       <h1 className="text-2xl font-semibold mb-2">Overview</h1>
       <p className="text-muted-foreground mb-6">Protocol-wide health + recent activity.</p>
 

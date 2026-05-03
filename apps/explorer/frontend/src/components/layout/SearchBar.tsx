@@ -8,9 +8,25 @@ export function SearchBar() {
 
   function onSubmit(e: FormEvent) {
     e.preventDefault();
-    const trimmed = value.trim();
-    if (!trimmed) return;
-    navigate(`/?q=${encodeURIComponent(trimmed)}`);
+    const v = value.trim();
+    if (!v) return;
+    // Principal: matches xxxxx-xxxxx-...-cai pattern
+    if (/^[a-z0-9]{5}-[a-z0-9-]+(-cai)?$/.test(v)) {
+      navigate(`/e/address/${v}`);
+      return;
+    }
+    // Vault id: positive integer
+    if (/^\d+$/.test(v)) {
+      navigate(`/e/vault/${v}`);
+      return;
+    }
+    // Event id: source:index
+    if (/^[a-z_]+:\d+$/.test(v)) {
+      navigate(`/e/event/${v}`);
+      return;
+    }
+    // Fallback: bounce to / with the query for the Overview page to surface a "couldn't parse" notice
+    navigate(`/?q=${encodeURIComponent(v)}`);
   }
 
   return (

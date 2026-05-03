@@ -1,6 +1,7 @@
 import { useParams } from "react-router-dom";
 import { useAddress } from "@/hooks/useBffQueries";
 import { VaultStatus } from "@/bindings/explorer_bff/explorer_bff";
+import { ApproximateBadge } from "@/components/common/ApproximateBadge";
 
 export function AddressDetail() {
   const { principal } = useParams<{ principal: string }>();
@@ -24,7 +25,12 @@ export function AddressDetail() {
   return (
     <div>
       <h1 className="text-2xl font-semibold mb-1">Address</h1>
-      <p className="text-sm font-mono text-muted-foreground mb-6 break-all">{principal}</p>
+      <p className="text-sm font-mono text-muted-foreground mb-2 break-all">{principal}</p>
+      {data.approximate_sources && data.approximate_sources.length > 0 && (
+        <div className="mb-4">
+          <ApproximateBadge sources={data.approximate_sources} />
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
         <div className="bg-card border border-border rounded-lg p-4">
