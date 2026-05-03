@@ -5,6 +5,7 @@ import Stub "Stub";
 import SourceConfig "SourceConfig";
 import Overview "Overview";
 import Cache "Cache";
+import Health "Health";
 
 persistent actor class ExplorerBff(initArgs : SourceConfig.SourceCanistersInit) {
 
@@ -41,7 +42,10 @@ persistent actor class ExplorerBff(initArgs : SourceConfig.SourceCanistersInit) 
   };
 
   public query func get_health() : async T.HealthSummaryDTO {
-    Stub.health()
+    switch (overview_cache.getStale()) {
+      case null Health.defaultHealth();
+      case (?cached) cached.health;
+    };
   };
 
   public query func get_overview() : async T.OverviewDTO {
