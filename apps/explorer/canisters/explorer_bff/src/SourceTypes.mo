@@ -114,4 +114,58 @@ module {
     events : [EventSummary];
   };
 
+  // ── mock_backend vault types ──
+
+  public type VaultStatus = { #Open; #Closed; #Liquidated };
+
+  public type VaultSummary = {
+    vault_id : Nat64;
+    status : VaultStatus;
+    owner : Principal;
+    collateral_type : Principal;
+    collateral_amount_e8s : Nat64;
+    debt_icusd_e8s : Nat64;
+    collateral_ratio : ?Float;
+  };
+
+  // ── mock_analytics per-entity types ──
+
+  public type TokenBalance = {
+    ledger : Principal;
+    symbol : Text;
+    balance_e8s : Nat64;
+    decimals : Nat8;
+  };
+
+  public type SpDeposit = {
+    total_deposited_e8s : Nat64;
+    current_balance_e8s : Nat64;
+    earned_collateral : [(Principal, Nat64)];
+  };
+
+  public type AddressHoldings = {
+    owner : Principal;
+    vaults_owned_ids : [Nat64];
+    sp_deposits : [SpDeposit];
+    token_balances : [TokenBalance];
+    total_value_usd : Float;
+  };
+
+  public type PoolState = {
+    pool_id : Text;
+    pool_label : Text;
+    pool_kind : Text;
+    reserves : [(Principal, Nat64, Nat8)];
+    lp_total_supply_e8s : Nat64;
+    virtual_price : ?Float;
+  };
+
+  public type TokenMetadata = {
+    ledger : Principal;
+    symbol : Text;
+    decimals : Nat8;
+    total_supply_e8s : Nat64;
+    fee_e8s : Nat64;
+  };
+
 };

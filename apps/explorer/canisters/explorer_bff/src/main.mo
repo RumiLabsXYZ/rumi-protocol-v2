@@ -5,6 +5,11 @@ import Stub "Stub";
 import SourceConfig "SourceConfig";
 import Overview "Overview";
 import Activity "Activity";
+import Address "Address";
+import Vault "Vault";
+import Pool "Pool";
+import Token "Token";
+import Event "Event";
 import Cache "Cache";
 import Health "Health";
 
@@ -73,24 +78,24 @@ persistent actor class ExplorerBff(initArgs : SourceConfig.SourceCanistersInit) 
     await Activity.fetch(sources, filter, cursor)
   };
 
-  public query func get_address(p : Principal) : async T.AddressDTO {
-    Stub.address(p)
+  public func get_address(p : Principal) : async T.AddressDTO {
+    await Address.fetch(sources, p)
   };
 
-  public query func get_vault(vault_id : Nat64) : async T.VaultDetailDTO {
-    Stub.vault(vault_id)
+  public func get_vault(vault_id : Nat64) : async T.VaultDetailDTO {
+    await Vault.fetch(sources, vault_id)
   };
 
-  public query func get_pool(pool_id : Text) : async T.PoolDetailDTO {
-    Stub.pool(pool_id)
+  public func get_pool(pool_id : Text) : async T.PoolDetailDTO {
+    await Pool.fetch(sources, pool_id)
   };
 
-  public query func get_token(ledger : Principal) : async T.TokenDetailDTO {
-    Stub.token(ledger)
+  public func get_token(ledger : Principal) : async T.TokenDetailDTO {
+    await Token.fetch(sources, ledger)
   };
 
-  public query func get_event(global_id : Text) : async T.EventDetailDTO {
-    Stub.event(global_id)
+  public func get_event(global_id : Text) : async T.EventDetailDTO {
+    await Event.fetch(sources, global_id)
   };
 
   public query func get_source_canisters() : async { analytics : Principal; backend : Principal } {
