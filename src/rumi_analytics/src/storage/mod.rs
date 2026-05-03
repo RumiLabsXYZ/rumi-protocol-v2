@@ -26,7 +26,8 @@ pub type Memory = VirtualMemory<DefaultMemoryImpl>;
 // Slot reservation map (must match docs/plans/2026-04-07-rumi-analytics-design.md):
 //   0       SlimState (StableCell)
 //   1-7     cursor cells (StableCell<u64>) - one per source stream
-//   8-9     reserved
+//   8       3pool v2 swap cursor (added 2026-05-02 with v2-tailing fix)
+//   9       3pool v2 liquidity cursor (added 2026-05-02 with v2-tailing fix)
 //   10-25   daily snapshot logs (paired idx/data, StableLog)
 //   26-29   reserved
 //   30-33   fast (5min) snapshot logs
@@ -49,6 +50,11 @@ pub const MEM_CURSOR_3POOL_BLOCKS: MemoryId = MemoryId::new(4);
 pub const MEM_CURSOR_AMM_SWAPS: MemoryId = MemoryId::new(5);
 pub const MEM_CURSOR_STABILITY_EVENTS: MemoryId = MemoryId::new(6);
 pub const MEM_CURSOR_ICUSD_BLOCKS: MemoryId = MemoryId::new(7);
+// v2 cursors live alongside v1 cursors so the v1 logs (frozen at the
+// dynamic-fee migration cutoff) and the v2 logs (live writes) are tailed
+// independently — each maintains its own next-index-to-fetch.
+pub const MEM_CURSOR_3POOL_SWAPS_V2: MemoryId = MemoryId::new(8);
+pub const MEM_CURSOR_3POOL_LIQUIDITY_V2: MemoryId = MemoryId::new(9);
 
 // Daily snapshot logs
 pub const MEM_DAILY_TVL_IDX: MemoryId = MemoryId::new(10);

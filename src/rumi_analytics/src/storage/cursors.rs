@@ -9,6 +9,7 @@ use super::{
     MEM_CURSOR_3POOL_LIQUIDITY, MEM_CURSOR_3POOL_BLOCKS,
     MEM_CURSOR_AMM_SWAPS, MEM_CURSOR_STABILITY_EVENTS, MEM_CURSOR_ICUSD_BLOCKS,
     MEM_CURSOR_AMM_LIQUIDITY,
+    MEM_CURSOR_3POOL_SWAPS_V2, MEM_CURSOR_3POOL_LIQUIDITY_V2,
 };
 
 thread_local! {
@@ -44,6 +45,14 @@ thread_local! {
         StableCell::init(get_memory(MEM_CURSOR_AMM_LIQUIDITY), 0u64)
             .expect("init cursor amm_liquidity")
     );
+    static CURSOR_3POOL_SWAPS_V2: RefCell<StableCell<u64, Memory>> = RefCell::new(
+        StableCell::init(get_memory(MEM_CURSOR_3POOL_SWAPS_V2), 0u64)
+            .expect("init cursor 3pool_swaps_v2")
+    );
+    static CURSOR_3POOL_LIQUIDITY_V2: RefCell<StableCell<u64, Memory>> = RefCell::new(
+        StableCell::init(get_memory(MEM_CURSOR_3POOL_LIQUIDITY_V2), 0u64)
+            .expect("init cursor 3pool_liquidity_v2")
+    );
 }
 
 /// Cursor identifiers matching MemoryIds. Used as keys in SlimState metadata maps.
@@ -78,3 +87,5 @@ cursor_accessors!(amm_swaps, CURSOR_AMM_SWAPS);
 cursor_accessors!(stability_events, CURSOR_STABILITY_EVENTS);
 cursor_accessors!(icusd_blocks, CURSOR_ICUSD_BLOCKS);
 cursor_accessors!(amm_liquidity, CURSOR_AMM_LIQUIDITY);
+cursor_accessors!(three_pool_swaps_v2, CURSOR_3POOL_SWAPS_V2);
+cursor_accessors!(three_pool_liquidity_v2, CURSOR_3POOL_LIQUIDITY_V2);
