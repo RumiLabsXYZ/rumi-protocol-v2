@@ -24,6 +24,14 @@ export interface VaultOperationResult {
   blockIndex?: number;
   feePaid?: number;
   message?: string;
+  /**
+   * True when the underlying signer (Oisy) returned a false-negative `_arr`
+   * error but on-chain verification confirmed the operation actually landed.
+   * Callers can surface a softer toast ("Submitted, refresh to confirm").
+   * `blockIndex` and `feePaid` are unavailable in this case because the
+   * normal response carrying them was never delivered.
+   */
+  oisyResilient?: boolean;
 }
 
 export interface VaultHistoryEvent {

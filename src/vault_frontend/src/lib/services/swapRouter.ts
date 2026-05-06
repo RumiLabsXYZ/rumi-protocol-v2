@@ -12,6 +12,7 @@ import { IcpswapProvider } from './providers/icpswapProvider';
 import { ProviderRegistry } from './providers/providerRegistry';
 import { fetchLedgerFee, getCachedLedgerFee } from './ledgerFeeService';
 import type { ProviderQuote } from './providers/types';
+import { isOisyLandedSentinel, type OisyLandedSentinel } from './protocol/oisyResilience';
 
 // ──────────────────────────────────────────────────────────────
 // Provider registry for the 3USD <-> ICP hop.
@@ -356,7 +357,7 @@ export async function executeRoute(
   to: AmmToken,
   amountIn: bigint,
   slippageBps: number,
-): Promise<bigint> {
+): Promise<bigint | OisyLandedSentinel> {
   const minOutput = route.estimatedOutput * BigInt(10000 - slippageBps) / 10000n;
 
   // Kill-switch guard: a route quoted while ICPswap routing was enabled must
@@ -430,7 +431,11 @@ export async function executeRoute(
       amounts[from.threePoolIndex] = amountIn;
       const threeUsdEstimate = await threePoolService.calcAddLiquidity(amounts);
       const threeUsdMinOutput = threeUsdEstimate * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
-      const threeUsdReceived = await threePoolService.addLiquidity(amounts, threeUsdMinOutput);
+      const hop1Result = await threePoolService.addLiquidity(amounts, threeUsdMinOutput);
+      // Non-Oisy path: sentinel is unreachable (Oisy case exits above), but
+      // guard the type for safety.
+      if (isOisyLandedSentinel(hop1Result)) return hop1Result;
+      const threeUsdReceived = hop1Result;
 
       // Hop 2: 3USD -> ICP via winning provider. Re-quote with actual received
       // amount so the slippage budget reflects what we really have.

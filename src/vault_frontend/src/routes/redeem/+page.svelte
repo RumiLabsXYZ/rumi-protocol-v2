@@ -277,16 +277,20 @@
         // Use the unified reserve redemption endpoint (reserves first, vault spillover automatic)
         const result = await protocolService.redeemReserves(icusdAmount, preferredTokenPrincipal);
         if (result.success) {
-          const stableReceived = (result.stableAmountSent || 0) / 1e6;
-          let msg = `Redeemed ${formatStableTx(stableReceived, 6)} stablecoins`;
-          if (result.vaultSpillover && result.vaultSpillover > 0) {
-            const spilloverIcusd = result.vaultSpillover / 1e8;
-            msg += ` + ${formatStableTx(spilloverIcusd)} icUSD redeemed from vaults (ICP)`;
+          if (result.oisyResilient) {
+            successMessage = `Redeem confirmed on-chain for ${formatStableTx(icusdAmount)} icUSD. (Wallet returned an error but the operation succeeded.)`;
+          } else {
+            const stableReceived = (result.stableAmountSent || 0) / 1e6;
+            let msg = `Redeemed ${formatStableTx(stableReceived, 6)} stablecoins`;
+            if (result.vaultSpillover && result.vaultSpillover > 0) {
+              const spilloverIcusd = result.vaultSpillover / 1e8;
+              msg += ` + ${formatStableTx(spilloverIcusd)} icUSD redeemed from vaults (ICP)`;
+            }
+            if (result.feePaid) {
+              msg += ` (fee: ${formatStableTx(result.feePaid)} icUSD)`;
+            }
+            successMessage = msg;
           }
-          if (result.feePaid) {
-            msg += ` (fee: ${formatStableTx(result.feePaid)} icUSD)`;
-          }
-          successMessage = msg;
           icusdAmount = 0;
           await wallet.refreshBalance();
           fetchData();
@@ -303,9 +307,13 @@
         // No reserves available — fall back to direct ICP vault redemption
         const result = await protocolService.redeemIcp(icusdAmount);
         if (result.success) {
-          const icpEstimate = icusdAmount > 0 && icpPrice > 0
-            ? (icusdAmount - icusdAmount * vaultRedemptionFee) / icpPrice : 0;
-          successMessage = `Redeemed ~${formatNumber(icpEstimate)} ICP for ${formatStableTx(icusdAmount)} icUSD`;
+          if (result.oisyResilient) {
+            successMessage = `Redeem confirmed on-chain for ${formatStableTx(icusdAmount)} icUSD. (Wallet returned an error but the operation succeeded.)`;
+          } else {
+            const icpEstimate = icusdAmount > 0 && icpPrice > 0
+              ? (icusdAmount - icusdAmount * vaultRedemptionFee) / icpPrice : 0;
+            successMessage = `Redeemed ~${formatNumber(icpEstimate)} ICP for ${formatStableTx(icusdAmount)} icUSD`;
+          }
           icusdAmount = 0;
           await wallet.refreshBalance();
         } else {

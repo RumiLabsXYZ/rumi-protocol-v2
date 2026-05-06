@@ -100,7 +100,9 @@
       const result = await protocolService.provideLiquidity(provideAmount);
       
       if (result.success) {
-        successMessage = `Successfully provided ${formatNumber(provideAmount)} ICP to the liquidity pool`;
+        successMessage = result.oisyResilient
+          ? `Confirmed on-chain: provided ${formatNumber(provideAmount)} ICP. (Wallet glitch ignored.)`
+          : `Successfully provided ${formatNumber(provideAmount)} ICP to the liquidity pool`;
         provideAmount = 0;
         // Refresh data
         await fetchData();
@@ -128,7 +130,9 @@
       const result = await protocolService.withdrawLiquidity(withdrawAmount);
       
       if (result.success) {
-        successMessage = `Successfully withdrew ${formatNumber(withdrawAmount)} ICP from the liquidity pool`;
+        successMessage = result.oisyResilient
+          ? `Confirmed on-chain: withdrew ${formatNumber(withdrawAmount)} ICP. (Wallet glitch ignored.)`
+          : `Successfully withdrew ${formatNumber(withdrawAmount)} ICP from the liquidity pool`;
         withdrawAmount = 0;
         // Refresh data
         await fetchData();
@@ -156,7 +160,9 @@
       const result = await protocolService.claimLiquidityReturns();
       
       if (result.success) {
-        successMessage = `Successfully claimed ${formatStableTx(liquidityStatus.availableLiquidityReward)} icUSD rewards`;
+        successMessage = result.oisyResilient
+          ? `Claim confirmed on-chain. (Wallet glitch ignored — refresh to see updated balance.)`
+          : `Successfully claimed ${formatStableTx(liquidityStatus.availableLiquidityReward)} icUSD rewards`;
         // Refresh data
         await fetchData();
       } else {

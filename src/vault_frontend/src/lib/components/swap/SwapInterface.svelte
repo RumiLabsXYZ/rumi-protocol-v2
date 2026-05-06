@@ -5,6 +5,12 @@
   import { resolveRoute, executeRoute, preWarmOisySigner, preWarmOisyFees, type SwapRoute } from '../../services/swapRouter';
   import { fetchLedgerFee, getCachedLedgerFee } from '../../services/ledgerFeeService';
   import { CANISTER_IDS } from '../../config';
+  import {
+    callWithOisyFalseNegativeGuard,
+    isOisyLandedSentinel,
+  } from '../../services/protocol/oisyResilience';
+  import { TokenService } from '../../services/tokenService';
+  import { get } from 'svelte/store';
 
   function ammTokenRef(token: AmmToken) {
     return { ledgerId: token.ledgerId, decimals: token.decimals, symbol: token.symbol };
@@ -18,6 +24,7 @@
   let loading = false;
   let quoting = false;
   let error = '';
+  let notice = '';
   let currentRoute: SwapRoute | null = null;
   let midMarketRate: number | null = null;
   let slippageBps = 50;
@@ -203,6 +210,7 @@
     try {
       loading = true;
       error = '';
+      notice = '';
       const amountRaw = parseTokenAmount(String(amount), fromToken.decimals);
 
       // Pre-flight balance check using the cached live fee. The reactive
@@ -217,8 +225,35 @@
         return;
       }
 
-      await executeRoute(currentRoute, fromToken, toToken, amountRaw, slippageBps);
-      dispatch('success', { action: 'swap' });
+      // Oisy false-negative resilience: capture pre-swap destination
+      // balance so we can verify the swap landed on-chain even if
+      // Oisy returns its `_arr` error in the JSON-RPC response.
+      const walletState = get(walletStore);
+      const beforeToBalance = walletState.principal
+        ? await TokenService.getTokenBalance(toToken.ledgerId, walletState.principal).catch(() => null)
+        : null;
+
+      const swapResult = await callWithOisyFalseNegativeGuard(
+        () => executeRoute(currentRoute!, fromToken, toToken, amountRaw, slippageBps),
+        async () => {
+          if (beforeToBalance === null || !walletState.principal) return false;
+          const after = await TokenService.getTokenBalance(
+            toToken.ledgerId, walletState.principal
+          ).catch(() => null);
+          if (after === null) return false;
+          // Destination balance should grow by at least 50% of the
+          // route's quoted output (slippage + ledger fees can shave it).
+          const minDelta = (currentRoute!.estimatedOutput * 50n) / 100n;
+          return after - beforeToBalance >= minDelta;
+        },
+        `swap ${fromToken.symbol} -> ${toToken.symbol} amount=${amountRaw}`
+      );
+      const oisyResilient = isOisyLandedSentinel(swapResult);
+      dispatch('success', { action: 'swap', oisyResilient });
+      if (oisyResilient) {
+        error = '';
+        notice = 'Swap confirmed on-chain. (Wallet returned an error but the operation succeeded.)';
+      }
       amount = '';
       currentRoute = null;
     } catch (err: any) {
@@ -419,6 +454,9 @@
         </svg>
         {error}
       </div>
+    {/if}
+    {#if notice}
+      <div class="notice-bar">{notice}</div>
     {/if}
   {/if}
 </div>
@@ -836,6 +874,17 @@
     border: 1px solid rgba(224, 107, 159, 0.2);
     border-radius: 0.375rem;
     color: var(--rumi-danger);
+    font-size: 0.8125rem;
+  }
+
+  /* ── Notice (Oisy resilient success / informational) ── */
+  .notice-bar {
+    margin-top: 0.75rem;
+    padding: 0.625rem 0.75rem;
+    background: rgba(94, 234, 212, 0.08);
+    border: 1px solid rgba(94, 234, 212, 0.25);
+    border-radius: 0.375rem;
+    color: var(--rumi-safe, #5eead4);
     font-size: 0.8125rem;
   }
 </style>

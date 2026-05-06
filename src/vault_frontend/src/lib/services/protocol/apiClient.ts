@@ -33,6 +33,11 @@ import type {
 import { protocolService } from '../protocol';
 import { RequestDeduplicator } from '../RequestDeduplicator';
 import { collateralStore } from '$lib/stores/collateralStore';
+import {
+  callWithOisyFalseNegativeGuard,
+  isOisyLandedSentinel,
+} from './oisyResilience';
+import { TokenService } from '../tokenService';
 
 
 
@@ -442,6 +447,20 @@ private static async refreshVaultData(): Promise<void> {
               ? []  // ICP is the default, no need to pass
               : [Principal.fromText(ctPrincipal)];
 
+            // Pre-open vault-id snapshot for the Oisy false-negative
+            // verifier: if open_vault lands but Oisy mangles the
+            // response, we still find the new vault by diffing IDs.
+            const beforeIds = await ApiClient.snapshotUserVaultIds();
+            const verifyOpenLanded = async () => {
+              if (!beforeIds) return false;
+              const newVault = await ApiClient.findNewlyOpenedVault(beforeIds);
+              if (!newVault) return false;
+              // Sanity check: collateral on the new vault is at least
+              // 95% of what we requested. Below that and something
+              // really odd happened.
+              return newVault.collateralAmount >= (amountRaw * 95n) / 100n;
+            };
+
             // ─── Oisy ICRC-112 batched path ───
             // Batches approve + open_vault into a single signer popup via ICRC-112.
             // The SignerAgent natively handles icrc2_approve consent (Tier 1) so
@@ -476,9 +495,27 @@ private static async refreshVaultData(): Promise<void> {
               const vaultPromise = actor.open_vault(amountRaw, collateralTypeOpt);
 
               // Fire both as a single ICRC-112 batch request → one Oisy popup
-              await signerAgent.execute();
+              const batchResult = await callWithOisyFalseNegativeGuard(
+                async () => {
+                  await signerAgent.execute();
+                  return Promise.all([approvePromise, vaultPromise]);
+                },
+                verifyOpenLanded,
+                `Oisy batched approve+open_vault ${collateralAmount} ${symbol}`
+              );
 
-              const [approveResult, result] = await Promise.all([approvePromise, vaultPromise]);
+              if (isOisyLandedSentinel(batchResult)) {
+                // Look up the newly-opened vault to populate vaultId for the UI.
+                const found = beforeIds ? await ApiClient.findNewlyOpenedVault(beforeIds) : null;
+                return {
+                  success: true,
+                  vaultId: found?.vaultId,
+                  blockIndex: undefined,
+                  oisyResilient: true,
+                };
+              }
+
+              const [approveResult, result] = batchResult;
 
               // Check approve result
               if (approveResult && 'Err' in approveResult) {
@@ -537,10 +574,24 @@ private static async refreshVaultData(): Promise<void> {
             });
 
             // Race between the actual operation and the timeout
-            const result = await Promise.race([
-              actor.open_vault(amountRaw, collateralTypeOpt),
-              timeoutPromise
-            ]);
+            const result = await callWithOisyFalseNegativeGuard(
+              () => Promise.race([
+                actor.open_vault(amountRaw, collateralTypeOpt),
+                timeoutPromise
+              ]),
+              verifyOpenLanded,
+              `open_vault ${collateralAmount} ${symbol}`
+            );
+
+            if (isOisyLandedSentinel(result)) {
+              const found = beforeIds ? await ApiClient.findNewlyOpenedVault(beforeIds) : null;
+              return {
+                success: true,
+                vaultId: found?.vaultId,
+                blockIndex: undefined,
+                oisyResilient: true,
+              };
+            }
 
             if ('Ok' in result) {
               return {
@@ -662,6 +713,18 @@ static async openVaultAndBorrow(
           ? []
           : [Principal.fromText(ctPrincipal)];
 
+        // Pre-open-and-borrow snapshot for the Oisy false-negative
+        // verifier. open_vault_and_borrow creates a new vault AND
+        // borrows in one canister call; we treat "new vault appeared
+        // with the right collateral" as proof the call landed.
+        const beforeIds = await ApiClient.snapshotUserVaultIds();
+        const verifyOpenAndBorrowLanded = async () => {
+          if (!beforeIds) return false;
+          const newVault = await ApiClient.findNewlyOpenedVault(beforeIds);
+          if (!newVault) return false;
+          return newVault.collateralAmount >= (amountRaw * 95n) / 100n;
+        };
+
         // ─── Oisy ICRC-112 batched path ───
         const signerAgent = isOisyWallet() ? pnp.getSignerAgent() : null;
 
@@ -693,9 +756,26 @@ static async openVaultAndBorrow(
           const vaultPromise = actor.open_vault_and_borrow(amountRaw, borrowRaw, collateralTypeOpt);
 
           // Fire both as a single ICRC-112 batch request → one Oisy popup
-          await signerAgent.execute();
+          const batchResult = await callWithOisyFalseNegativeGuard(
+            async () => {
+              await signerAgent.execute();
+              return Promise.all([approvePromise, vaultPromise]);
+            },
+            verifyOpenAndBorrowLanded,
+            `Oisy batched approve+open_vault_and_borrow ${collateralAmount} ${symbol}`
+          );
 
-          const [approveResult, result] = await Promise.all([approvePromise, vaultPromise]);
+          if (isOisyLandedSentinel(batchResult)) {
+            const found = beforeIds ? await ApiClient.findNewlyOpenedVault(beforeIds) : null;
+            return {
+              success: true,
+              vaultId: found?.vaultId,
+              blockIndex: undefined,
+              oisyResilient: true,
+            };
+          }
+
+          const [approveResult, result] = batchResult;
 
           if (approveResult && 'Err' in approveResult) {
             return { success: false, error: `${symbol} approval failed: ${JSON.stringify(approveResult.Err)}` };
@@ -732,10 +812,24 @@ static async openVaultAndBorrow(
           setTimeout(() => reject(new Error("Wallet signature request timed out")), 60000);
         });
 
-        const result = await Promise.race([
-          actor.open_vault_and_borrow(amountRaw, borrowRaw, collateralTypeOpt),
-          timeoutPromise
-        ]);
+        const result = await callWithOisyFalseNegativeGuard(
+          () => Promise.race([
+            actor.open_vault_and_borrow(amountRaw, borrowRaw, collateralTypeOpt),
+            timeoutPromise
+          ]),
+          verifyOpenAndBorrowLanded,
+          `open_vault_and_borrow ${collateralAmount} ${symbol}`
+        );
+
+        if (isOisyLandedSentinel(result)) {
+          const found = beforeIds ? await ApiClient.findNewlyOpenedVault(beforeIds) : null;
+          return {
+            success: true,
+            vaultId: found?.vaultId,
+            blockIndex: undefined,
+            oisyResilient: true,
+          };
+        }
 
         if ('Ok' in result) {
           return {
@@ -799,15 +893,45 @@ static async borrowFromVault(vaultId: number, icusdAmount: number): Promise<Vaul
       
       // Simulate processing delay
       await new Promise(resolve => setTimeout(resolve, 1200));
-      
+
       const actor = await ApiClient.getAuthenticatedActor();
       const vaultArg = {
         vault_id: BigInt(vaultId),
         amount: BigInt(Math.floor(icusdAmount * E8S))
       };
-      
-      const result = await actor.borrow_from_vault(vaultArg);
-      
+
+      // Snapshot pre-borrow state for the Oisy false-negative verifier.
+      // We compare RAW e8s (not the rounded human float on VaultDTO) so a
+      // 0.1 icUSD borrow can't be hidden by display rounding.
+      const before = await ApiClient.getRawBorrowedE8s(vaultId);
+      const expectedDeltaE8s = vaultArg.amount;
+
+      const result = await callWithOisyFalseNegativeGuard(
+        () => actor.borrow_from_vault(vaultArg),
+        async () => {
+          if (before === null) return false;
+          // Allow up to 1 minute for canister state to be observable
+          // post-call (interest accrual + cert propagation). 95% of the
+          // borrow amount lower bound tolerates the rounding from
+          // BigInt(Math.floor(amount * E8S)) on tiny amounts.
+          const after = await ApiClient.getRawBorrowedE8s(vaultId);
+          if (after === null) return false;
+          const delta = after - before;
+          return delta >= (expectedDeltaE8s * 95n) / 100n;
+        },
+        `borrow ${icusdAmount} icUSD from vault #${vaultId}`
+      );
+
+      if (isOisyLandedSentinel(result)) {
+        return {
+          success: true,
+          vaultId,
+          blockIndex: undefined,
+          feePaid: undefined,
+          oisyResilient: true,
+        };
+      }
+
       if ('Ok' in result) {
         return {
           success: true,
@@ -882,6 +1006,10 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
 
       const actor = await ApiClient.getAuthenticatedActor();
 
+      // Snapshot pre-add collateral for the Oisy false-negative verifier.
+      // We read RAW token units so we can compare with BigInt arithmetic.
+      const beforeCollateral = await ApiClient.getRawCollateralAmount(vaultId);
+
       // ─── Oisy ICRC-112 batched path ───
       // Batches approve + add_margin into a single signer popup via ICRC-112.
       const marginSignerAgent = isOisyWallet() ? pnp.getSignerAgent() : null;
@@ -914,10 +1042,33 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
           amount: amountRaw
         });
 
-        // Fire both as a single ICRC-112 batch request → one Oisy popup
-        await marginSignerAgent.execute();
+        // Fire both as a single ICRC-112 batch request → one Oisy popup.
+        // The Oisy `_arr` false-negative can surface from any of these
+        // awaits, so wrap the whole batched-execute in the resilience guard.
+        const batchResult = await callWithOisyFalseNegativeGuard(
+          async () => {
+            await marginSignerAgent.execute();
+            return Promise.all([approvePromise, marginPromise]);
+          },
+          async () => {
+            if (beforeCollateral === null) return false;
+            const after = await ApiClient.getRawCollateralAmount(vaultId);
+            if (after === null) return false;
+            return after - beforeCollateral >= (amountRaw * 95n) / 100n;
+          },
+          `Oisy batched approve+add_margin ${collateralAmount} ${symbol} to vault #${vaultId}`
+        );
 
-        const [approveResult, marginResult] = await Promise.all([approvePromise, marginPromise]);
+        if (isOisyLandedSentinel(batchResult)) {
+          return {
+            success: true,
+            vaultId,
+            blockIndex: undefined,
+            oisyResilient: true,
+          };
+        }
+
+        const [approveResult, marginResult] = batchResult;
 
         if (approveResult && 'Err' in approveResult) {
           return {
@@ -1027,8 +1178,26 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
         amount: vaultArg.amount.toString()
       });
 
-      const result = await actor.add_margin_to_vault(vaultArg);
-      
+      const result = await callWithOisyFalseNegativeGuard(
+        () => actor.add_margin_to_vault(vaultArg),
+        async () => {
+          if (beforeCollateral === null) return false;
+          const after = await ApiClient.getRawCollateralAmount(vaultId);
+          if (after === null) return false;
+          return after - beforeCollateral >= (amountRaw * 95n) / 100n;
+        },
+        `add_margin ${collateralAmount} ${symbol} to vault #${vaultId}`
+      );
+
+      if (isOisyLandedSentinel(result)) {
+        return {
+          success: true,
+          vaultId,
+          blockIndex: undefined,
+          oisyResilient: true,
+        };
+      }
+
       if ('Ok' in result) {
         return {
           success: true,
@@ -1085,6 +1254,24 @@ static async repayToVault(vaultId: number, icusdAmount: number): Promise<VaultOp
         amount: amountE8s
       };
 
+      // Snapshot pre-repay borrowed amount for the Oisy false-negative
+      // verifier. Repay reduces borrowed by `amount`; interest accrual
+      // (timer-driven, slow) can offset the reduction slightly so we
+      // accept any directional decrease >= 50% of expected as a landed
+      // op. Anything smaller would be too noisy.
+      const beforeBorrowed = await ApiClient.getRawBorrowedE8s(vaultId);
+
+      const verifyRepayLanded = async () => {
+        if (beforeBorrowed === null) return false;
+        const after = await ApiClient.getRawBorrowedE8s(vaultId);
+        if (after === null) return false;
+        // Borrowed went down by at least half the requested amount.
+        // (Interest accrual since the snapshot can shrink the visible
+        // delta; full debt close can put `after` at 0.)
+        const drop = beforeBorrowed - after;
+        return drop >= (amountE8s * 50n) / 100n || after === 0n;
+      };
+
       // ─── Oisy ICRC-112 batched path ───
       // Always batch approve+repay — skipping the allowance check eliminates an
       // async canister query that burns the browser user gesture context. The approve
@@ -1108,8 +1295,20 @@ static async repayToVault(vaultId: number, icusdAmount: number): Promise<VaultOp
         signerAgent.batch();
         const repayPromise = actor.repay_to_vault(vaultArg);
 
-        await signerAgent.execute();
-        const [approveResult, result] = await Promise.all([approvePromise, repayPromise]);
+        const batchResult = await callWithOisyFalseNegativeGuard(
+          async () => {
+            await signerAgent.execute();
+            return Promise.all([approvePromise, repayPromise]);
+          },
+          verifyRepayLanded,
+          `Oisy batched approve+repay ${icusdAmount} icUSD to vault #${vaultId}`
+        );
+
+        if (isOisyLandedSentinel(batchResult)) {
+          return { success: true, vaultId, blockIndex: undefined, oisyResilient: true };
+        }
+
+        const [approveResult, result] = batchResult;
 
         if (approveResult && 'Err' in approveResult) {
           return { success: false, error: `icUSD approval failed: ${JSON.stringify(approveResult.Err)}` };
@@ -1122,7 +1321,15 @@ static async repayToVault(vaultId: number, icusdAmount: number): Promise<VaultOp
       }
 
       // ─── Standard path (non-Oisy) ───
-      const result = await actor.repay_to_vault(vaultArg);
+      const result = await callWithOisyFalseNegativeGuard(
+        () => actor.repay_to_vault(vaultArg),
+        verifyRepayLanded,
+        `repay ${icusdAmount} icUSD to vault #${vaultId}`
+      );
+
+      if (isOisyLandedSentinel(result)) {
+        return { success: true, vaultId, blockIndex: undefined, oisyResilient: true };
+      }
 
       if ('Ok' in result) {
         return {
@@ -1185,6 +1392,16 @@ static async repayToVaultWithStable(
         token_type
       };
 
+      // Pre-repay snapshot — same shape as repayToVault.
+      const beforeBorrowed = await ApiClient.getRawBorrowedE8s(vaultId);
+      const verifyRepayLanded = async () => {
+        if (beforeBorrowed === null) return false;
+        const after = await ApiClient.getRawBorrowedE8s(vaultId);
+        if (after === null) return false;
+        const drop = beforeBorrowed - after;
+        return drop >= (amountE8s * 50n) / 100n || after === 0n;
+      };
+
       // ─── Oisy ICRC-112 batched path ───
       // Always batch approve+repay — skipping the allowance check eliminates an
       // async canister query that burns the browser user gesture context.
@@ -1208,8 +1425,20 @@ static async repayToVaultWithStable(
         signerAgent.batch();
         const repayPromise = actor.repay_to_vault_with_stable(vaultArgWithToken);
 
-        await signerAgent.execute();
-        const [approveResult, result] = await Promise.all([approvePromise, repayPromise]);
+        const batchResult = await callWithOisyFalseNegativeGuard(
+          async () => {
+            await signerAgent.execute();
+            return Promise.all([approvePromise, repayPromise]);
+          },
+          verifyRepayLanded,
+          `Oisy batched approve+repay ${amount} ${tokenType} to vault #${vaultId}`
+        );
+
+        if (isOisyLandedSentinel(batchResult)) {
+          return { success: true, vaultId, blockIndex: undefined, oisyResilient: true };
+        }
+
+        const [approveResult, result] = batchResult;
 
         if (approveResult && 'Err' in approveResult) {
           return { success: false, error: `${tokenType} approval failed: ${JSON.stringify(approveResult.Err)}` };
@@ -1222,7 +1451,15 @@ static async repayToVaultWithStable(
       }
 
       // ─── Standard path (non-Oisy, or Oisy with sufficient allowance) ───
-      const result = await actor.repay_to_vault_with_stable(vaultArgWithToken);
+      const result = await callWithOisyFalseNegativeGuard(
+        () => actor.repay_to_vault_with_stable(vaultArgWithToken),
+        verifyRepayLanded,
+        `repay ${amount} ${tokenType} to vault #${vaultId}`
+      );
+
+      if (isOisyLandedSentinel(result)) {
+        return { success: true, vaultId, blockIndex: undefined, oisyResilient: true };
+      }
 
       if ('Ok' in result) {
         return {
@@ -1281,8 +1518,31 @@ static async repayToVaultWithStable(
         }
   
         // Execute close operation
-        const result = await actor.close_vault(BigInt(vaultId));
-        
+        // close_vault deletes the vault from canister state when it has
+        // no collateral and no debt. Verifier: vault no longer present.
+        type CloseVaultResult = { Ok: [] | [bigint] } | { Err: ProtocolError };
+        const result = await callWithOisyFalseNegativeGuard<CloseVaultResult>(
+          () => actor.close_vault(BigInt(vaultId)) as Promise<CloseVaultResult>,
+          async () => {
+            const snap = await ApiClient.fetchVaultRawSnapshot(vaultId);
+            // Either snapshot says vault is gone, or both collateral
+            // and borrowed are now zero (canister may keep a husk).
+            if (!snap) return false;
+            if (!snap.exists) return true;
+            return snap.collateralAmount === 0n && snap.borrowedIcusd === 0n;
+          },
+          `close_vault #${vaultId}`
+        );
+
+        if (isOisyLandedSentinel(result)) {
+          return {
+            success: true,
+            vaultId,
+            message: `Successfully closed vault #${vaultId}`,
+            oisyResilient: true,
+          };
+        }
+
         if ('Ok' in result) {
           return {
             success: true,
@@ -1290,7 +1550,7 @@ static async repayToVaultWithStable(
             message: `Successfully closed vault #${vaultId}`
           };
         }
-        
+
         const errorMsg = ApiClient.formatProtocolError(result.Err);
         return {
           success: false,
@@ -1457,16 +1717,42 @@ static async repayToVaultWithStable(
       
       try {
         console.log(`Withdrawing collateral from vault #${vaultId}`);
-        
+
         // Get the authenticated actor
         const actor = await ApiClient.getAuthenticatedActor();
-        
-        // Call withdraw_collateral
-        const result = await actor.withdraw_collateral(BigInt(vaultId));
-        
+
+        // Snapshot for the Oisy false-negative verifier. Full withdraw
+        // takes collateral to zero (and may auto-close the vault).
+        const beforeCollateral = await ApiClient.getRawCollateralAmount(vaultId);
+
+        const result = await callWithOisyFalseNegativeGuard(
+          () => actor.withdraw_collateral(BigInt(vaultId)),
+          async () => {
+            // Either vault is gone (auto-closed) or collateral dropped
+            // by at least 95% of the pre-call value.
+            const snap = await ApiClient.fetchVaultRawSnapshot(vaultId);
+            if (!snap) return false;
+            if (!snap.exists) return true;
+            if (beforeCollateral === null) return false;
+            const drop = beforeCollateral - snap.collateralAmount;
+            return drop >= (beforeCollateral * 95n) / 100n;
+          },
+          `withdraw_collateral from vault #${vaultId}`
+        );
+
+        if (isOisyLandedSentinel(result)) {
+          return {
+            success: true,
+            blockIndex: undefined,
+            vaultId,
+            message: `Successfully withdrew collateral from vault #${vaultId}. If the vault had no debt, it may have been automatically closed.`,
+            oisyResilient: true,
+          };
+        }
+
         if ('Ok' in result) {
           const blockIndex = Number(result.Ok);
-          
+
           // IMPORTANT: Add a note about the vault possibly being auto-closed
           return {
             success: true,
@@ -1504,12 +1790,35 @@ static async repayToVaultWithStable(
         // Min amount validated by backend (per-collateral min_collateral_deposit)
 
         const actor = await ApiClient.getAuthenticatedActor();
+        const expectedDelta = BigInt(Math.floor(icpAmount * factor));
         const vaultArg = {
           vault_id: BigInt(vaultId),
-          amount: BigInt(Math.floor(icpAmount * factor))
+          amount: expectedDelta
         };
 
-        const result = await actor.withdraw_partial_collateral(vaultArg);
+        // Snapshot for the Oisy false-negative verifier.
+        const beforeCollateral = await ApiClient.getRawCollateralAmount(vaultId);
+
+        const result = await callWithOisyFalseNegativeGuard(
+          () => actor.withdraw_partial_collateral(vaultArg),
+          async () => {
+            if (beforeCollateral === null) return false;
+            const after = await ApiClient.getRawCollateralAmount(vaultId);
+            if (after === null) return false;
+            const drop = beforeCollateral - after;
+            return drop >= (expectedDelta * 95n) / 100n;
+          },
+          `withdraw_partial_collateral ${icpAmount} from vault #${vaultId}`
+        );
+
+        if (isOisyLandedSentinel(result)) {
+          return {
+            success: true,
+            vaultId,
+            blockIndex: undefined,
+            oisyResilient: true,
+          };
+        }
 
         if ('Ok' in result) {
           return {
@@ -1594,6 +1903,21 @@ static async repayToVaultWithStable(
           ? [Principal.fromText(preferredToken)]
           : [];
 
+        // Pre-redeem icUSD balance for the Oisy false-negative
+        // verifier: redeem burns icUSD from the caller.
+        const walletState = get(walletStore);
+        const beforeIcusd = walletState.principal
+          ? await TokenService.getTokenBalance(CONFIG.currentIcusdLedgerId, walletState.principal).catch(() => null)
+          : null;
+        const verifyRedeemLanded = async () => {
+          if (beforeIcusd === null || !walletState.principal) return false;
+          const after = await TokenService.getTokenBalance(
+            CONFIG.currentIcusdLedgerId, walletState.principal
+          ).catch(() => null);
+          if (after === null) return false;
+          return beforeIcusd - after >= (icusdE8s * 95n) / 100n;
+        };
+
         // ─── Oisy ICRC-112 batched path ───
         // Always batch approve+redeem — skipping the allowance check eliminates an
         // async canister query that burns the browser user gesture context.
@@ -1617,8 +1941,25 @@ static async repayToVaultWithStable(
           signerAgent.batch();
           const redeemPromise = actor.redeem_reserves(icusdE8s, preferredOpt);
 
-          await signerAgent.execute();
-          const [approveResult, result] = await Promise.all([approvePromise, redeemPromise]);
+          const batchResult = await callWithOisyFalseNegativeGuard(
+            async () => {
+              await signerAgent.execute();
+              return Promise.all([approvePromise, redeemPromise]);
+            },
+            verifyRedeemLanded,
+            `Oisy batched approve+redeem_reserves ${icusdAmount} icUSD`
+          );
+
+          if (isOisyLandedSentinel(batchResult)) {
+            return {
+              success: true,
+              blockIndex: undefined,
+              feePaid: undefined,
+              oisyResilient: true,
+            };
+          }
+
+          const [approveResult, result] = batchResult;
 
           if (approveResult && 'Err' in approveResult) {
             return { success: false, error: `icUSD approval failed: ${JSON.stringify(approveResult.Err)}` };
@@ -1654,7 +1995,20 @@ static async repayToVaultWithStable(
         }
 
         const actor = await ApiClient.getAuthenticatedActor();
-        const result = await actor.redeem_reserves(icusdE8s, preferredOpt);
+        const result = await callWithOisyFalseNegativeGuard(
+          () => actor.redeem_reserves(icusdE8s, preferredOpt),
+          verifyRedeemLanded,
+          `redeem_reserves ${icusdAmount} icUSD`
+        );
+
+        if (isOisyLandedSentinel(result)) {
+          return {
+            success: true,
+            blockIndex: undefined,
+            feePaid: undefined,
+            oisyResilient: true,
+          };
+        }
 
         if ('Ok' in result) {
           const r = result.Ok;
@@ -1705,17 +2059,46 @@ static async repayToVaultWithStable(
     static async redeemIcp(icusdAmount: number): Promise<VaultOperationResult> {
       try {
         console.log(`Redeeming ${icusdAmount} icUSD for ICP`);
-        
+
         if (icusdAmount * E8S < MIN_ICUSD_AMOUNT) {
           return {
             success: false,
             error: `Amount too low, minimum is ${MIN_ICUSD_AMOUNT / E8S} icUSD`
           };
         }
-        
+
         const actor = await ApiClient.getAuthenticatedActor();
-        const result = await actor.redeem_icp(BigInt(Math.floor(icusdAmount * E8S)));
-        
+        const amountE8s = BigInt(Math.floor(icusdAmount * E8S));
+
+        // Pre-redeem icUSD balance for the Oisy false-negative
+        // verifier: redeem burns icUSD from the caller's balance.
+        const walletState = get(walletStore);
+        const beforeIcusd = walletState.principal
+          ? await TokenService.getTokenBalance(CONFIG.currentIcusdLedgerId, walletState.principal).catch(() => null)
+          : null;
+
+        const result = await callWithOisyFalseNegativeGuard(
+          () => actor.redeem_icp(amountE8s),
+          async () => {
+            if (beforeIcusd === null || !walletState.principal) return false;
+            const after = await TokenService.getTokenBalance(
+              CONFIG.currentIcusdLedgerId, walletState.principal
+            ).catch(() => null);
+            if (after === null) return false;
+            return beforeIcusd - after >= (amountE8s * 95n) / 100n;
+          },
+          `redeem_icp ${icusdAmount} icUSD`
+        );
+
+        if (isOisyLandedSentinel(result)) {
+          return {
+            success: true,
+            blockIndex: undefined,
+            feePaid: undefined,
+            oisyResilient: true,
+          };
+        }
+
         if ('Ok' in result) {
           return {
             success: true,
@@ -1755,7 +2138,36 @@ static async repayToVaultWithStable(
 
         const actor = await ApiClient.getAuthenticatedActor();
         const collateralPrincipal = Principal.fromText(collateralTypePrincipal);
-        const result = await actor.redeem_collateral(collateralPrincipal, BigInt(Math.floor(icusdAmount * E8S)));
+        const amountE8s = BigInt(Math.floor(icusdAmount * E8S));
+
+        // Pre-redeem icUSD balance for the Oisy false-negative
+        // verifier: redeem burns icUSD from the caller.
+        const walletState = get(walletStore);
+        const beforeIcusd = walletState.principal
+          ? await TokenService.getTokenBalance(CONFIG.currentIcusdLedgerId, walletState.principal).catch(() => null)
+          : null;
+
+        const result = await callWithOisyFalseNegativeGuard(
+          () => actor.redeem_collateral(collateralPrincipal, amountE8s),
+          async () => {
+            if (beforeIcusd === null || !walletState.principal) return false;
+            const after = await TokenService.getTokenBalance(
+              CONFIG.currentIcusdLedgerId, walletState.principal
+            ).catch(() => null);
+            if (after === null) return false;
+            return beforeIcusd - after >= (amountE8s * 95n) / 100n;
+          },
+          `redeem_collateral ${icusdAmount} icUSD -> ${collateralTypePrincipal}`
+        );
+
+        if (isOisyLandedSentinel(result)) {
+          return {
+            success: true,
+            blockIndex: undefined,
+            feePaid: undefined,
+            oisyResilient: true,
+          };
+        }
 
         if ('Ok' in result) {
           return {
@@ -1792,6 +2204,130 @@ static async repayToVaultWithStable(
       }
     }
 
+    /**
+     * Cache-bypassing snapshot of a vault's RAW (e8s / token-decimals) state.
+     * Used by the Oisy false-negative verifier — needs precise BigInts, not
+     * the float-rounded values on VaultDTO.
+     *
+     * Returns null if the wallet isn't connected or the canister query fails.
+     * Returns `{ exists: false }` if the user has vaults but vaultId isn't
+     * among them (e.g. closed vault, or open_vault that never landed).
+     */
+    static async fetchVaultRawSnapshot(vaultId: number): Promise<
+      | { exists: true; collateralAmount: bigint; borrowedIcusd: bigint; icpMargin: bigint }
+      | { exists: false }
+      | null
+    > {
+      try {
+        const walletState = get(walletStore);
+        if (!walletState.principal) return null;
+
+        const canisterVaults = await publicActor.get_vaults([walletState.principal]);
+        const v = canisterVaults.find(cv => Number(cv.vault_id) === vaultId);
+        if (!v) return { exists: false };
+        return {
+          exists: true,
+          collateralAmount: BigInt(v.collateral_amount),
+          borrowedIcusd: BigInt(v.borrowed_icusd_amount),
+          icpMargin: BigInt(v.icp_margin_amount),
+        };
+      } catch (err) {
+        console.warn(`fetchVaultRawSnapshot(${vaultId}) failed:`, err);
+        return null;
+      }
+    }
+
+    /**
+     * Convenience wrapper around fetchVaultRawSnapshot returning just
+     * borrowed_icusd_amount in raw e8s. Returns null on any failure or
+     * when the vault doesn't exist.
+     */
+    static async getRawBorrowedE8s(vaultId: number): Promise<bigint | null> {
+      const snap = await ApiClient.fetchVaultRawSnapshot(vaultId);
+      if (!snap || !snap.exists) return null;
+      return snap.borrowedIcusd;
+    }
+
+    /**
+     * Convenience wrapper around fetchVaultRawSnapshot returning just
+     * collateral_amount in raw token units (per collateral decimals).
+     * Returns null on any failure or when the vault doesn't exist.
+     */
+    static async getRawCollateralAmount(vaultId: number): Promise<bigint | null> {
+      const snap = await ApiClient.fetchVaultRawSnapshot(vaultId);
+      if (!snap || !snap.exists) return null;
+      return snap.collateralAmount;
+    }
+
+    /**
+     * Snapshot the set of vault IDs the connected user owns right now.
+     * Used by the open_vault Oisy false-negative verifier (which then
+     * looks for a NEW id post-call). Returns null on any failure.
+     */
+    static async snapshotUserVaultIds(): Promise<Set<number> | null> {
+      try {
+        const walletState = get(walletStore);
+        if (!walletState.principal) return null;
+        const canisterVaults = await publicActor.get_vaults([walletState.principal]);
+        return new Set(canisterVaults.map(v => Number(v.vault_id)));
+      } catch (err) {
+        console.warn('snapshotUserVaultIds failed:', err);
+        return null;
+      }
+    }
+
+    /**
+     * Cache-bypassing snapshot of the connected user's protocol-side
+     * liquidity-pool position (the on-canister stability pool view).
+     * Returns null on any failure.
+     */
+    static async fetchLiquidityStatusSnapshot(): Promise<
+      | {
+          liquidityProvided: bigint;
+          availableReward: bigint;
+        }
+      | null
+    > {
+      try {
+        const walletState = get(walletStore);
+        if (!walletState.principal) return null;
+        const status = await publicActor.get_liquidity_status(walletState.principal);
+        return {
+          liquidityProvided: BigInt(status.liquidity_provided),
+          availableReward: BigInt(status.available_liquidity_reward),
+        };
+      } catch (err) {
+        console.warn('fetchLiquidityStatusSnapshot failed:', err);
+        return null;
+      }
+    }
+
+    /**
+     * Find a vault that is in the user's current set but was NOT in
+     * `beforeIds`. Used by the open_vault verifier to confirm a new
+     * vault landed. Returns null if no new vault is visible yet (or
+     * on any query failure).
+     */
+    static async findNewlyOpenedVault(
+      beforeIds: Set<number>
+    ): Promise<{ vaultId: number; collateralAmount: bigint } | null> {
+      try {
+        const walletState = get(walletStore);
+        if (!walletState.principal) return null;
+        const canisterVaults = await publicActor.get_vaults([walletState.principal]);
+        for (const v of canisterVaults) {
+          const id = Number(v.vault_id);
+          if (!beforeIds.has(id)) {
+            return { vaultId: id, collateralAmount: BigInt(v.collateral_amount) };
+          }
+        }
+        return null;
+      } catch (err) {
+        console.warn('findNewlyOpenedVault failed:', err);
+        return null;
+      }
+    }
+
 
     static async getLiquidityStatus(principal: Principal): Promise<CanisterLiquidityStatus> {
         try {
@@ -1820,30 +2356,52 @@ static async repayToVaultWithStable(
       static async provideLiquidity(amount: number): Promise<VaultOperationResult> {
         try {
           console.log(`Providing ${amount} ICP as liquidity`);
-          
+
           if (amount <= 0) {
             return {
               success: false,
               error: 'Amount must be greater than 0'
             };
           }
-          
+
           // Convert amount to e8s
           const amountE8s = BigInt(Math.floor(amount * E8S));
-          
+
           if (USE_MOCK_DATA) {
             // Simulate processing delay
             await new Promise(resolve => setTimeout(resolve, 1500));
-            
+
             return {
               success: true,
               blockIndex: Math.floor(Math.random() * 1000) + 1
             };
           }
-          
+
           const actor = await ApiClient.getAuthenticatedActor();
-          const result = await actor.provide_liquidity(amountE8s);
-          
+
+          // Pre-provide liquidity snapshot for the Oisy false-negative
+          // verifier. provide_liquidity grows liquidity_provided.
+          const before = await ApiClient.fetchLiquidityStatusSnapshot();
+
+          const result = await callWithOisyFalseNegativeGuard(
+            () => actor.provide_liquidity(amountE8s),
+            async () => {
+              if (!before) return false;
+              const after = await ApiClient.fetchLiquidityStatusSnapshot();
+              if (!after) return false;
+              return after.liquidityProvided - before.liquidityProvided >= (amountE8s * 95n) / 100n;
+            },
+            `provide_liquidity ${amount} ICP`
+          );
+
+          if (isOisyLandedSentinel(result)) {
+            return {
+              success: true,
+              blockIndex: undefined,
+              oisyResilient: true,
+            };
+          }
+
           if (result && typeof result === 'object' && 'Ok' in result) {
             return {
               success: true,
@@ -1868,37 +2426,60 @@ static async repayToVaultWithStable(
           };
         }
       }
-    
+
       /**
        * Withdraw liquidity from the protocol
        */
       static async withdrawLiquidity(amount: number): Promise<VaultOperationResult> {
         try {
           console.log(`Withdrawing ${amount} ICP from liquidity pool`);
-          
+
           if (amount <= 0) {
             return {
               success: false,
               error: 'Amount must be greater than 0'
             };
           }
-          
+
           // Convert amount to e8s
           const amountE8s = BigInt(Math.floor(amount * E8S));
-          
+
           if (USE_MOCK_DATA) {
             // Simulate processing delay
             await new Promise(resolve => setTimeout(resolve, 1500));
-            
+
             return {
               success: true,
               blockIndex: Math.floor(Math.random() * 1000) + 1
             };
           }
-          
+
           const actor = await ApiClient.getAuthenticatedActor();
-          const result = await actor.withdraw_liquidity(amountE8s);
-          
+
+          // Pre-withdraw snapshot. withdraw_liquidity reduces
+          // liquidity_provided by `amount` (or all of it).
+          const before = await ApiClient.fetchLiquidityStatusSnapshot();
+
+          const result = await callWithOisyFalseNegativeGuard(
+            () => actor.withdraw_liquidity(amountE8s),
+            async () => {
+              if (!before) return false;
+              const after = await ApiClient.fetchLiquidityStatusSnapshot();
+              if (!after) return false;
+              const drop = before.liquidityProvided - after.liquidityProvided;
+              return drop >= (amountE8s * 95n) / 100n || after.liquidityProvided === 0n;
+            },
+            `withdraw_liquidity ${amount} ICP`
+          );
+
+          if (isOisyLandedSentinel(result)) {
+            return {
+              success: true,
+              blockIndex: undefined,
+              oisyResilient: true,
+            };
+          }
+
           if ('Ok' in result) {
             return {
               success: true,
@@ -1918,27 +2499,49 @@ static async repayToVaultWithStable(
           };
         }
       }
-    
+
       /**
        * Claim liquidity returns
        */
       static async claimLiquidityReturns(): Promise<VaultOperationResult> {
         try {
           console.log('Claiming liquidity returns');
-          
+
           if (USE_MOCK_DATA) {
             // Simulate processing delay
             await new Promise(resolve => setTimeout(resolve, 1500));
-            
+
             return {
               success: true,
               blockIndex: Math.floor(Math.random() * 1000) + 1
             };
           }
-          
+
           const actor = await ApiClient.getAuthenticatedActor();
-          const result = await actor.claim_liquidity_returns();
-          
+
+          // Pre-claim snapshot. claim_liquidity_returns drops
+          // available_liquidity_reward to 0.
+          const before = await ApiClient.fetchLiquidityStatusSnapshot();
+
+          const result = await callWithOisyFalseNegativeGuard(
+            () => actor.claim_liquidity_returns(),
+            async () => {
+              if (!before || before.availableReward === 0n) return false;
+              const after = await ApiClient.fetchLiquidityStatusSnapshot();
+              if (!after) return false;
+              return after.availableReward < before.availableReward;
+            },
+            `claim_liquidity_returns`
+          );
+
+          if (isOisyLandedSentinel(result)) {
+            return {
+              success: true,
+              blockIndex: undefined,
+              oisyResilient: true,
+            };
+          }
+
           if ('Ok' in result) {
             return {
               success: true,
@@ -2164,12 +2767,36 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
       try {
         // Call the unified backend method
         const actor = await ApiClient.getAuthenticatedActor();
-        const result = await actor.withdraw_and_close_vault(BigInt(vaultId));
-        
+
+        const result = await callWithOisyFalseNegativeGuard(
+          () => actor.withdraw_and_close_vault(BigInt(vaultId)),
+          async () => {
+            // After withdraw_and_close, the vault is gone. The
+            // canister may keep a husk with zeroed fields, so accept
+            // either form as proof.
+            const snap = await ApiClient.fetchVaultRawSnapshot(vaultId);
+            if (!snap) return false;
+            if (!snap.exists) return true;
+            return snap.collateralAmount === 0n && snap.borrowedIcusd === 0n;
+          },
+          `withdraw_and_close_vault #${vaultId}`
+        );
+
+        if (isOisyLandedSentinel(result)) {
+          return {
+            success: true,
+            vaultId,
+            blockIndex: undefined,
+            message: `Successfully withdrew collateral and closed vault #${vaultId}`,
+            vaultClosed: true,
+            oisyResilient: true,
+          };
+        }
+
         if ('Ok' in result) {
           // If we got a block index back, there was an ICP transfer
           const blockIndex = result.Ok.length > 0 ? Number(result.Ok[0]) : undefined;
-          
+
           return {
             success: true,
             vaultId,

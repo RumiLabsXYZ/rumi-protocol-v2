@@ -9,6 +9,7 @@
   } from '../../services/threePoolService';
   import { fetchLedgerFee, getCachedLedgerFee } from '../../services/ledgerFeeService';
   import { formatStableTokenDisplay } from '../../utils/format';
+  import { isOisyLandedSentinel } from '../../services/protocol/oisyResilience';
 
   function poolLedgerRef(index: number) {
     const t = POOL_TOKENS[index];
@@ -36,6 +37,7 @@
   let addLoading = false;
   let addQuoting = false;
   let addError = '';
+  let addNotice = '';
   let addLpEstimate: bigint | null = null;
   let addSlippageBps = 50;
   let showAddSlippage = false;
@@ -47,6 +49,7 @@
   let removeLoading = false;
   let removeQuoting = false;
   let removeError = '';
+  let removeNotice = '';
   let removeEstimates: bigint[] | null = null;
   let removeSingleEstimate: bigint | null = null;
   let removeSingleIndex = 0;
@@ -245,9 +248,14 @@
     try {
       addLoading = true;
       addError = '';
+      addNotice = '';
       const minLp = addLpEstimate * BigInt(10000 - addSlippageBps) / 10000n;
-      await threePoolService.addLiquidity(amounts, minLp);
-      dispatch('success', { action: 'add_liquidity' });
+      const addResult = await threePoolService.addLiquidity(amounts, minLp);
+      const oisyResilient = isOisyLandedSentinel(addResult);
+      if (oisyResilient) {
+        addNotice = 'Mint confirmed on-chain. (Wallet returned an error but the operation succeeded.)';
+      }
+      dispatch('success', { action: 'add_liquidity', oisyResilient });
       addAmounts = ['', '', ''];
       addLpEstimate = null;
       loadLpBalance();
@@ -274,20 +282,26 @@
     try {
       removeLoading = true;
       removeError = '';
+      removeNotice = '';
 
+      let removeResult: unknown;
       if (removeMode === 'proportional') {
         if (!removeEstimates) { removeError = 'Waiting for quote'; return; }
         const minAmounts = removeEstimates.map(a =>
           a * BigInt(10000 - removeSlippageBps) / 10000n
         );
-        await threePoolService.removeLiquidity(lpRaw, minAmounts);
+        removeResult = await threePoolService.removeLiquidity(lpRaw, minAmounts);
       } else {
         if (removeSingleEstimate === null) { removeError = 'Waiting for quote'; return; }
         const minAmount = removeSingleEstimate * BigInt(10000 - removeSlippageBps) / 10000n;
-        await threePoolService.removeOneCoin(lpRaw, removeSingleIndex, minAmount);
+        removeResult = await threePoolService.removeOneCoin(lpRaw, removeSingleIndex, minAmount);
       }
 
-      dispatch('success', { action: 'remove_liquidity' });
+      const oisyResilient = isOisyLandedSentinel(removeResult);
+      if (oisyResilient) {
+        removeNotice = 'Redeem confirmed on-chain. (Wallet returned an error but the operation succeeded.)';
+      }
+      dispatch('success', { action: 'remove_liquidity', oisyResilient });
       removeLpAmount = '';
       removeEstimates = null;
       removeSingleEstimate = null;
@@ -428,6 +442,9 @@
         </svg>
         {addError}
       </div>
+    {/if}
+    {#if addNotice}
+      <div class="notice-bar">{addNotice}</div>
     {/if}
 
   {:else}
@@ -579,6 +596,9 @@
         </svg>
         {removeError}
       </div>
+    {/if}
+    {#if removeNotice}
+      <div class="notice-bar">{removeNotice}</div>
     {/if}
   {/if}
 </div>
@@ -1074,6 +1094,17 @@
     border: 1px solid rgba(224, 107, 159, 0.2);
     border-radius: 0.375rem;
     color: var(--rumi-danger);
+    font-size: 0.8125rem;
+  }
+
+  /* ── Notice bar (Oisy resilient success / informational) ── */
+  .notice-bar {
+    margin-top: 0.75rem;
+    padding: 0.625rem 0.75rem;
+    background: rgba(94, 234, 212, 0.08);
+    border: 1px solid rgba(94, 234, 212, 0.25);
+    border-radius: 0.375rem;
+    color: var(--rumi-safe, #5eead4);
     font-size: 0.8125rem;
   }
 </style>

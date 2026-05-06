@@ -204,7 +204,10 @@
       const result = await protocolService.openVaultAndBorrow(collateralAmount, icusdAmount, selectedCollateralPrincipal);
 
       if (result.success) {
-        successMessage = `Successfully created vault #${result.vaultId} and borrowed ${icusdAmount} icUSD!`;
+        const vaultLabel = result.vaultId !== undefined ? `vault #${result.vaultId}` : 'vault';
+        successMessage = result.oisyResilient
+          ? `Submitted: created ${vaultLabel} and borrowed ${icusdAmount} icUSD. (Wallet glitch ignored — confirmed on-chain.)`
+          : `Successfully created ${vaultLabel} and borrowed ${icusdAmount} icUSD!`;
         if ($principal) await appDataStore.refreshAll($principal);
         collateralAmount = 1; icusdAmount = 5;
       } else { errorMessage = result.error || 'Failed to create vault'; }
