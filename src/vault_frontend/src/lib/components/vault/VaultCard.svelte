@@ -563,7 +563,10 @@
       }
       const result = await protocolService.addMarginToVault(vault.vaultId, amount, vaultCollateralType);
       if (result.success) {
-        toastStore.success(`Added ${amount} ${collateralSymbol}`, 8000); addCollateralAmount = '';
+        const msg = result.oisyResilient
+          ? `Added ${amount} ${collateralSymbol} (wallet glitch ignored — operation confirmed on-chain).`
+          : `Added ${amount} ${collateralSymbol}`;
+        toastStore.success(msg, 8000); addCollateralAmount = '';
         await vaultStore.refreshVault(vault.vaultId); dispatch('updated');
       } else { toastStore.error(result.error || 'Failed', 8000); }
     } catch (err) { toastStore.error(err instanceof Error ? err.message : 'Unknown error', 8000);
@@ -587,7 +590,10 @@
     try {
       const result = await protocolService.withdrawPartialCollateral(vault.vaultId, amount, collateralDecimals);
       if (result.success) {
-        toastStore.success(`Withdrew ${amount} ${collateralSymbol}`, 8000); withdrawAmount = '';
+        const msg = result.oisyResilient
+          ? `Withdrew ${amount} ${collateralSymbol} (wallet glitch ignored — operation confirmed on-chain).`
+          : `Withdrew ${amount} ${collateralSymbol}`;
+        toastStore.success(msg, 8000); withdrawAmount = '';
         await vaultStore.refreshVault(vault.vaultId); dispatch('updated');
       } else { toastStore.error(result.error || 'Failed', 8000); }
     } catch (err) { toastStore.error(err instanceof Error ? err.message : 'Unknown error', 8000);
@@ -605,7 +611,10 @@
     try {
       const result = await protocolService.borrowFromVault(vault.vaultId, amount);
       if (result.success) {
-        toastStore.success(`Borrowed ${amount} icUSD`, 8000); borrowAmount = '';
+        const msg = result.oisyResilient
+          ? `Borrowed ${amount} icUSD (wallet glitch ignored — operation confirmed on-chain).`
+          : `Borrowed ${amount} icUSD`;
+        toastStore.success(msg, 8000); borrowAmount = '';
         await vaultStore.refreshVault(vault.vaultId); dispatch('updated');
       } else { toastStore.error(result.error || 'Failed', 8000); }
     } catch (err) { toastStore.error(err instanceof Error ? err.message : 'Unknown error', 8000);
@@ -626,7 +635,10 @@
         result = await protocolManager.repayToVaultWithStable(vault.vaultId, amount, repayTokenType);
       }
       if (result.success) {
-        toastStore.success(`Repaid ${amount} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`, 8000); repayAmount = '';
+        const msg = result.oisyResilient
+          ? `Repaid ${amount} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType} (wallet glitch ignored — operation confirmed on-chain).`
+          : `Repaid ${amount} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`;
+        toastStore.success(msg, 8000); repayAmount = '';
         await new Promise(r => setTimeout(r, 1000));
         await vaultStore.refreshVault(vault.vaultId); dispatch('updated');
       } else { toastStore.error(result.error || 'Failed', 8000); }
@@ -647,7 +659,10 @@
     try {
       const result = await protocolService.withdrawCollateralAndCloseVault(vault.vaultId);
       if (result.success) {
-        toastStore.success('Vault closed. Collateral returned.', 8000);
+        const msg = result.oisyResilient
+          ? 'Vault closed. Collateral returned. (Wallet glitch ignored — confirmed on-chain.)'
+          : 'Vault closed. Collateral returned.';
+        toastStore.success(msg, 8000);
         await vaultStore.refreshVaults(); dispatch('updated');
       } else { toastStore.error(result.error || 'Failed', 8000); }
     } catch (err) { toastStore.error(err instanceof Error ? err.message : 'Unknown error', 8000);

@@ -7,6 +7,11 @@ import { CANISTER_IDS, CONFIG } from '../config';
 import { isOisyWallet } from './protocol/walletOperations';
 import { getOisySignerAgent, createOisyActor } from './oisySigner';
 import { fetchLedgerFee } from './ledgerFeeService';
+import {
+  callWithOisyFalseNegativeGuard,
+  type OisyLandedSentinel,
+} from './protocol/oisyResilience';
+import { TokenService } from './tokenService';
 
 // ──────────────────────────────────────────────────────────────
 // Types — mirrors the Candid interface
@@ -464,7 +469,7 @@ class ThreePoolService {
     }
   }
 
-  async addLiquidity(amounts: bigint[], minLp: bigint): Promise<bigint> {
+  async addLiquidity(amounts: bigint[], minLp: bigint): Promise<bigint | OisyLandedSentinel> {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
 
@@ -475,6 +480,17 @@ class ThreePoolService {
     const approveAmounts: bigint[] = await Promise.all(
       amounts.map((amt, k) => amt > 0n ? approvalAmount(amt, POOL_TOKENS[k]) : Promise.resolve(0n)),
     );
+
+    // Pre-mint LP balance for the Oisy false-negative verifier.
+    const beforeLp = await this.safeGetLpBalance(wallet.principal);
+    const verifyAddLanded = async () => {
+      if (beforeLp === null) return false;
+      const after = await this.safeGetLpBalance(wallet.principal);
+      if (after === null) return false;
+      // LP minted: balance grew by at least 95% of `minLp` (which is
+      // already the slippage-protected lower bound).
+      return after - beforeLp >= (minLp * 95n) / 100n;
+    };
 
     if (oisyDetected && wallet.principal) {
       // ─── Oisy ICRC-112 batched path ───
@@ -500,18 +516,22 @@ class ThreePoolService {
       signerAgent.batch();
       const addPromise = poolActor.add_liquidity(amounts, minLp);
 
-      await signerAgent.execute();
-      const results = await Promise.all([...approvePromises, addPromise]);
-
-      // Check approve results
-      for (let i = 0; i < approvePromises.length; i++) {
-        const r = results[i];
-        if (r && 'Err' in r) throw new Error(`Approval failed: ${JSON.stringify(r.Err)}`);
-      }
-
-      const addResult = results[results.length - 1] as { Ok: bigint } | { Err: any };
-      if ('Err' in addResult) throw new Error(this.formatError(addResult.Err));
-      return addResult.Ok;
+      const guarded = await callWithOisyFalseNegativeGuard(
+        async () => {
+          await signerAgent.execute();
+          const results = await Promise.all([...approvePromises, addPromise]);
+          for (let i = 0; i < approvePromises.length; i++) {
+            const r = results[i];
+            if (r && 'Err' in r) throw new Error(`Approval failed: ${JSON.stringify(r.Err)}`);
+          }
+          const addResult = results[results.length - 1] as { Ok: bigint } | { Err: any };
+          if ('Err' in addResult) throw new Error(this.formatError(addResult.Err));
+          return addResult.Ok;
+        },
+        verifyAddLanded,
+        `Oisy batched 3pool add_liquidity`
+      );
+      return guarded;
     } else {
       // ─── Non-Oisy path: sequential approvals ───
       for (let k = 0; k < 3; k++) {
@@ -531,30 +551,89 @@ class ThreePoolService {
       }
 
       const poolActor = await walletStore.getActor(THREEPOOL_CANISTER_ID, canisterIDLs.three_pool) as any;
-      const result = await poolActor.add_liquidity(amounts, minLp) as { Ok: bigint } | { Err: any };
-      if ('Err' in result) throw new Error(this.formatError(result.Err));
-      return result.Ok;
+      const result = await callWithOisyFalseNegativeGuard(
+        async () => {
+          const r = await poolActor.add_liquidity(amounts, minLp) as { Ok: bigint } | { Err: any };
+          if ('Err' in r) throw new Error(this.formatError(r.Err));
+          return r.Ok;
+        },
+        verifyAddLanded,
+        `3pool add_liquidity`
+      );
+      return result;
     }
   }
 
-  async removeLiquidity(lpBurn: bigint, minAmounts: bigint[]): Promise<bigint[]> {
-    const wallet = get(walletStore);
-    if (!wallet.isConnected) throw new Error('Wallet not connected');
-
-    const poolActor = await walletStore.getActor(THREEPOOL_CANISTER_ID, canisterIDLs.three_pool) as any;
-    const result = await poolActor.remove_liquidity(lpBurn, minAmounts) as { Ok: bigint[] } | { Err: any };
-    if ('Err' in result) throw new Error(this.formatError(result.Err));
-    return result.Ok;
+  /**
+   * Read the user's current LP (3USD) balance via the pool's ICRC-1
+   * `icrc1_balance_of` for the Oisy false-negative verifier.
+   * Returns null on any failure (caller treats null as "can't verify").
+   */
+  private async safeGetLpBalance(principal: Principal | null | undefined): Promise<bigint | null> {
+    if (!principal) return null;
+    try {
+      return await TokenService.getTokenBalance(THREEPOOL_CANISTER_ID, principal);
+    } catch (err) {
+      console.warn('threePoolService.safeGetLpBalance failed:', err);
+      return null;
+    }
   }
 
-  async removeOneCoin(lpBurn: bigint, coinIndex: number, minAmount: bigint): Promise<bigint> {
+  async removeLiquidity(
+    lpBurn: bigint,
+    minAmounts: bigint[]
+  ): Promise<bigint[] | OisyLandedSentinel> {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
 
+    const beforeLp = await this.safeGetLpBalance(wallet.principal);
+
     const poolActor = await walletStore.getActor(THREEPOOL_CANISTER_ID, canisterIDLs.three_pool) as any;
-    const result = await poolActor.remove_one_coin(lpBurn, coinIndex, minAmount) as { Ok: bigint } | { Err: any };
-    if ('Err' in result) throw new Error(this.formatError(result.Err));
-    return result.Ok;
+    const result = await callWithOisyFalseNegativeGuard(
+      async () => {
+        const r = await poolActor.remove_liquidity(lpBurn, minAmounts) as { Ok: bigint[] } | { Err: any };
+        if ('Err' in r) throw new Error(this.formatError(r.Err));
+        return r.Ok;
+      },
+      async () => {
+        if (beforeLp === null) return false;
+        const after = await this.safeGetLpBalance(wallet.principal);
+        if (after === null) return false;
+        // LP burned: balance dropped by at least 95% of the requested
+        // burn amount (or the user is now empty).
+        return beforeLp - after >= (lpBurn * 95n) / 100n || after === 0n;
+      },
+      `3pool remove_liquidity ${lpBurn} LP`
+    );
+    return result;
+  }
+
+  async removeOneCoin(
+    lpBurn: bigint,
+    coinIndex: number,
+    minAmount: bigint
+  ): Promise<bigint | OisyLandedSentinel> {
+    const wallet = get(walletStore);
+    if (!wallet.isConnected) throw new Error('Wallet not connected');
+
+    const beforeLp = await this.safeGetLpBalance(wallet.principal);
+
+    const poolActor = await walletStore.getActor(THREEPOOL_CANISTER_ID, canisterIDLs.three_pool) as any;
+    const result = await callWithOisyFalseNegativeGuard(
+      async () => {
+        const r = await poolActor.remove_one_coin(lpBurn, coinIndex, minAmount) as { Ok: bigint } | { Err: any };
+        if ('Err' in r) throw new Error(this.formatError(r.Err));
+        return r.Ok;
+      },
+      async () => {
+        if (beforeLp === null) return false;
+        const after = await this.safeGetLpBalance(wallet.principal);
+        if (after === null) return false;
+        return beforeLp - after >= (lpBurn * 95n) / 100n || after === 0n;
+      },
+      `3pool remove_one_coin ${lpBurn} LP -> token ${coinIndex}`
+    );
+    return result;
   }
 
   // ── Error formatting ──
