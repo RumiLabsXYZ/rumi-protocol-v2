@@ -4,7 +4,7 @@
   import { ammService, AMM_TOKENS, parseTokenAmount, formatTokenAmount, type AmmToken } from '../../services/ammService';
   import {
     resolveRoute, executeRoute, preWarmOisySigner, preWarmOisyFees,
-    checkIcpswapUnusedBalances, recoverIcpswapBalance,
+    checkIcpswapUnusedBalances, recoverIcpswapBalance, preWarmRecovery,
     type SwapRoute, type IcpswapUnusedBalance,
   } from '../../services/swapRouter';
   import { fetchLedgerFee, getCachedLedgerFee } from '../../services/ledgerFeeService';
@@ -61,6 +61,9 @@
   $: if (isConnected && $walletStore.principal) {
     checkIcpswapUnusedBalances($walletStore.principal).then(res => {
       unusedBalances = res;
+      // Pre-warm signer agent + fee cache so the Recover button's
+      // click handler stays synchronous (required by Oisy signer-web)
+      if (res.length > 0) preWarmRecovery(res).catch(() => {});
     }).catch(() => {});
   }
 

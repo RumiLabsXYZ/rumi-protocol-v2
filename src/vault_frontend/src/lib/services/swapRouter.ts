@@ -1131,8 +1131,39 @@ export async function checkIcpswapUnusedBalances(
 }
 
 /**
+ * Pre-warm the Oisy signer agent and ledger fee cache for the tokens in
+ * the given unused balances. Call this as soon as recovery banners render,
+ * NOT on the Recover click. This ensures the click-handler path is fully
+ * synchronous (signer agent cached, fees cached) so the browser doesn't
+ * block the signer popup.
+ */
+export async function preWarmRecovery(balances: IcpswapUnusedBalance[]): Promise<void> {
+  if (!isOisyWallet()) return;
+  const wallet = get(walletStore);
+  if (!wallet.principal) return;
+
+  // Pre-warm signer agent (cached for subsequent calls)
+  await getOisySignerAgent(wallet.principal);
+
+  // Pre-warm ledger fees for all tokens in all pools
+  const ledgerIds = new Set<string>();
+  for (const b of balances) {
+    if (b.token0.amount > DUST_THRESHOLD) ledgerIds.add(b.token0.canisterId);
+    if (b.token1.amount > DUST_THRESHOLD) ledgerIds.add(b.token1.canisterId);
+  }
+  await Promise.all(
+    [...ledgerIds].map(id =>
+      fetchLedgerFee({ ledgerId: id } as any).catch(() => {}),
+    ),
+  );
+}
+
+/**
  * Withdraw all non-dust unused balances from an ICPswap pool back to the
  * caller's wallet. Works with both Oisy (signer agent) and II (regular actor).
+ *
+ * For Oisy, the signer agent and fees MUST be pre-warmed via preWarmRecovery()
+ * before this is called, so the click-handler path stays synchronous.
  */
 export async function recoverIcpswapBalance(
   balance: IcpswapUnusedBalance,
@@ -1144,16 +1175,16 @@ export async function recoverIcpswapBalance(
   let token1Recovered = 0n;
 
   if (isOisyWallet() && wallet.principal) {
-    // Oisy path: get the signer agent FIRST (must be synchronous from
-    // click handler) before any other awaits, then batch withdrawals.
+    // Oisy path: signer agent + fees are pre-warmed by preWarmRecovery(),
+    // so these calls resolve from cache synchronously (no real await).
     const signerAgent = await getOisySignerAgent(wallet.principal);
 
-    // Now safe to fetch fees after the signer popup is established.
+    // Synchronous fee reads from cache (pre-warmed, with hardcoded fallback)
     const fee0 = balance.token0.amount > DUST_THRESHOLD
-      ? await fetchLedgerFee({ ledgerId: balance.token0.canisterId } as any).catch(() => 10_000n)
+      ? getCachedLedgerFee({ ledgerId: balance.token0.canisterId, decimals: balance.token0.decimals, symbol: balance.token0.symbol })
       : 0n;
     const fee1 = balance.token1.amount > DUST_THRESHOLD
-      ? await fetchLedgerFee({ ledgerId: balance.token1.canisterId } as any).catch(() => 10_000n)
+      ? getCachedLedgerFee({ ledgerId: balance.token1.canisterId, decimals: balance.token1.decimals, symbol: balance.token1.symbol })
       : 0n;
     const poolActor = createOisyActor(balance.poolId, canisterIDLs.icpswap_pool, signerAgent);
 
