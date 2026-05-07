@@ -118,13 +118,17 @@ export class TokenService {
   /**
    * Get token balance with caching
    */
-  static async getTokenBalance(canisterId: string, principal: Principal): Promise<bigint> {
+  static async getTokenBalance(
+    canisterId: string,
+    principal: Principal,
+    opts?: { skipCache?: boolean },
+  ): Promise<bigint> {
     const cacheKey = `${canisterId}-${principal.toText()}`;
     const now = Date.now();
     const cachedData = this.balanceCache.get(cacheKey);
-    
-    // Return cached balance if it's fresh
-    if (cachedData && (now - cachedData.timestamp < this.CACHE_DURATION)) {
+
+    // Return cached balance if it's fresh (unless caller explicitly bypasses)
+    if (!opts?.skipCache && cachedData && (now - cachedData.timestamp < this.CACHE_DURATION)) {
       console.log(`Using cached balance for ${canisterId}`);
       return cachedData.balance;
     }

@@ -1907,12 +1907,12 @@ static async repayToVaultWithStable(
         // verifier: redeem burns icUSD from the caller.
         const walletState = get(walletStore);
         const beforeIcusd = walletState.principal
-          ? await TokenService.getTokenBalance(CONFIG.currentIcusdLedgerId, walletState.principal).catch(() => null)
+          ? await TokenService.getTokenBalance(CONFIG.currentIcusdLedgerId, walletState.principal, { skipCache: true }).catch(() => null)
           : null;
         const verifyRedeemLanded = async () => {
           if (beforeIcusd === null || !walletState.principal) return false;
           const after = await TokenService.getTokenBalance(
-            CONFIG.currentIcusdLedgerId, walletState.principal
+            CONFIG.currentIcusdLedgerId, walletState.principal, { skipCache: true }
           ).catch(() => null);
           if (after === null) return false;
           return beforeIcusd - after >= (icusdE8s * 95n) / 100n;
@@ -2074,7 +2074,7 @@ static async repayToVaultWithStable(
         // verifier: redeem burns icUSD from the caller's balance.
         const walletState = get(walletStore);
         const beforeIcusd = walletState.principal
-          ? await TokenService.getTokenBalance(CONFIG.currentIcusdLedgerId, walletState.principal).catch(() => null)
+          ? await TokenService.getTokenBalance(CONFIG.currentIcusdLedgerId, walletState.principal, { skipCache: true }).catch(() => null)
           : null;
 
         const result = await callWithOisyFalseNegativeGuard(
@@ -2082,7 +2082,7 @@ static async repayToVaultWithStable(
           async () => {
             if (beforeIcusd === null || !walletState.principal) return false;
             const after = await TokenService.getTokenBalance(
-              CONFIG.currentIcusdLedgerId, walletState.principal
+              CONFIG.currentIcusdLedgerId, walletState.principal, { skipCache: true }
             ).catch(() => null);
             if (after === null) return false;
             return beforeIcusd - after >= (amountE8s * 95n) / 100n;
@@ -2144,7 +2144,7 @@ static async repayToVaultWithStable(
         // verifier: redeem burns icUSD from the caller.
         const walletState = get(walletStore);
         const beforeIcusd = walletState.principal
-          ? await TokenService.getTokenBalance(CONFIG.currentIcusdLedgerId, walletState.principal).catch(() => null)
+          ? await TokenService.getTokenBalance(CONFIG.currentIcusdLedgerId, walletState.principal, { skipCache: true }).catch(() => null)
           : null;
 
         const result = await callWithOisyFalseNegativeGuard(
@@ -2152,7 +2152,7 @@ static async repayToVaultWithStable(
           async () => {
             if (beforeIcusd === null || !walletState.principal) return false;
             const after = await TokenService.getTokenBalance(
-              CONFIG.currentIcusdLedgerId, walletState.principal
+              CONFIG.currentIcusdLedgerId, walletState.principal, { skipCache: true }
             ).catch(() => null);
             if (after === null) return false;
             return beforeIcusd - after >= (amountE8s * 95n) / 100n;

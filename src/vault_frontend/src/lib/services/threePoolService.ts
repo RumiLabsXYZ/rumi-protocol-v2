@@ -572,7 +572,7 @@ class ThreePoolService {
   private async safeGetLpBalance(principal: Principal | null | undefined): Promise<bigint | null> {
     if (!principal) return null;
     try {
-      return await TokenService.getTokenBalance(THREEPOOL_CANISTER_ID, principal);
+      return await TokenService.getTokenBalance(THREEPOOL_CANISTER_ID, principal, { skipCache: true });
     } catch (err) {
       console.warn('threePoolService.safeGetLpBalance failed:', err);
       return null;

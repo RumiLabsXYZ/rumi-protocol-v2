@@ -230,7 +230,7 @@
       // Oisy returns its `_arr` error in the JSON-RPC response.
       const walletState = get(walletStore);
       const beforeToBalance = walletState.principal
-        ? await TokenService.getTokenBalance(toToken.ledgerId, walletState.principal).catch(() => null)
+        ? await TokenService.getTokenBalance(toToken.ledgerId, walletState.principal, { skipCache: true }).catch(() => null)
         : null;
 
       const swapResult = await callWithOisyFalseNegativeGuard(
@@ -238,7 +238,7 @@
         async () => {
           if (beforeToBalance === null || !walletState.principal) return false;
           const after = await TokenService.getTokenBalance(
-            toToken.ledgerId, walletState.principal
+            toToken.ledgerId, walletState.principal, { skipCache: true }
           ).catch(() => null);
           if (after === null) return false;
           // Destination balance should grow by at least 50% of the
