@@ -1092,6 +1092,26 @@ const ICPSWAP_POOLS = [
 ];
 
 /**
+ * Query a single ICPswap pool for a principal's unused balance.
+ * Used for on-chain verification after Oisy _arr false-negative errors.
+ */
+async function queryPoolUnusedBalance(
+  poolId: string,
+  principal: Principal,
+): Promise<{ balance0: bigint; balance1: bigint } | null> {
+  try {
+    const { HttpAgent, Actor } = await import('@dfinity/agent');
+    const agent = new HttpAgent({ host: CONFIG.host });
+    const actor = Actor.createActor(canisterIDLs.icpswap_pool, { agent, canisterId: poolId }) as any;
+    const resp = await actor.getUserUnusedBalance(principal);
+    if ('ok' in resp) return resp.ok;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Check all ICPswap pools we route through for unused deposits belonging
  * to the given principal. Returns only pools with non-dust balances.
  */
@@ -1212,18 +1232,45 @@ export async function recoverIcpswapBalance(
     }
 
     if (promises.length > 0) {
-      await signerAgent.execute();
-      const results = await Promise.all(promises);
-      let idx = 0;
-      if (balance.token0.amount > DUST_THRESHOLD) {
-        const r = results[idx++];
-        if (r && 'ok' in r) token0Recovered = r.ok;
-        else if (r && 'err' in r) console.error('token0 withdraw error:', r.err);
-      }
-      if (balance.token1.amount > DUST_THRESHOLD) {
-        const r = results[idx++];
-        if (r && 'ok' in r) token1Recovered = r.ok;
-        else if (r && 'err' in r) console.error('token1 withdraw error:', r.err);
+      try {
+        await signerAgent.execute();
+        const results = await Promise.all(promises);
+        let idx = 0;
+        if (balance.token0.amount > DUST_THRESHOLD) {
+          const r = results[idx++];
+          if (r && 'ok' in r) token0Recovered = r.ok;
+          else if (r && 'err' in r) console.error('token0 withdraw error:', r.err);
+        }
+        if (balance.token1.amount > DUST_THRESHOLD) {
+          const r = results[idx++];
+          if (r && 'ok' in r) token1Recovered = r.ok;
+          else if (r && 'err' in r) console.error('token1 withdraw error:', r.err);
+        }
+      } catch (executeErr: any) {
+        // Oisy _arr false-negative: the on-chain call often succeeds even
+        // though the signer returns an error. Detect it and verify on-chain.
+        const msg = String(executeErr?.message ?? executeErr ?? '');
+        if (msg.includes('_arr')) {
+          console.warn('Recovery: Oisy _arr error detected, verifying on-chain...');
+          // Re-query unused balances to see if the withdraw actually landed
+          const after = await queryPoolUnusedBalance(balance.poolId, wallet.principal!);
+          if (after) {
+            // If balance dropped, the withdrawal succeeded
+            if (balance.token0.amount > DUST_THRESHOLD && after.balance0 < balance.token0.amount) {
+              token0Recovered = balance.token0.amount - after.balance0;
+            }
+            if (balance.token1.amount > DUST_THRESHOLD && after.balance1 < balance.token1.amount) {
+              token1Recovered = balance.token1.amount - after.balance1;
+            }
+          }
+          // If balances didn't change, the withdrawal genuinely failed
+          if (token0Recovered === 0n && token1Recovered === 0n) {
+            throw new Error('Withdrawal failed (Oisy _arr error, verified on-chain)');
+          }
+          console.log(`Recovery verified on-chain: token0=${token0Recovered}, token1=${token1Recovered}`);
+        } else {
+          throw executeErr;
+        }
       }
     }
   } else {
