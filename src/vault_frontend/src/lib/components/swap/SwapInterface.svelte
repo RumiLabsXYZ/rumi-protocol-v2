@@ -2,7 +2,11 @@
   import { createEventDispatcher } from 'svelte';
   import { walletStore } from '../../stores/wallet';
   import { ammService, AMM_TOKENS, parseTokenAmount, formatTokenAmount, type AmmToken } from '../../services/ammService';
-  import { resolveRoute, executeRoute, preWarmOisySigner, preWarmOisyFees, type SwapRoute } from '../../services/swapRouter';
+  import {
+    resolveRoute, executeRoute, preWarmOisySigner, preWarmOisyFees,
+    checkIcpswapUnusedBalances, recoverIcpswapBalance,
+    type SwapRoute, type IcpswapUnusedBalance,
+  } from '../../services/swapRouter';
   import { fetchLedgerFee, getCachedLedgerFee } from '../../services/ledgerFeeService';
   import { CANISTER_IDS } from '../../config';
   import {
@@ -34,6 +38,11 @@
 
   let quoteTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // ICPswap unused-deposit recovery state
+  let unusedBalances: IcpswapUnusedBalance[] = [];
+  let recovering = false;
+  let recoveryMessage = '';
+
   $: isConnected = $walletStore.isConnected;
   $: fromToken = AMM_TOKENS[fromIdx];
   $: toToken = AMM_TOKENS[toIdx];
@@ -47,6 +56,43 @@
   })();
 
   $: walletBalanceFormatted = formatTokenAmount(walletBalance, fromToken.decimals);
+
+  // Check ICPswap pools for stuck deposits when wallet connects
+  $: if (isConnected && $walletStore.principal) {
+    checkIcpswapUnusedBalances($walletStore.principal).then(res => {
+      unusedBalances = res;
+    }).catch(() => {});
+  }
+
+  function formatE8s(amount: bigint, decimals: number): string {
+    const divisor = 10 ** decimals;
+    return (Number(amount) / divisor).toFixed(4);
+  }
+
+  async function handleRecover(balance: IcpswapUnusedBalance) {
+    recovering = true;
+    recoveryMessage = '';
+    error = '';
+    try {
+      const result = await recoverIcpswapBalance(balance);
+      const parts: string[] = [];
+      if (result.token0Recovered > 0n) parts.push(`${formatE8s(result.token0Recovered, balance.token0.decimals)} ${balance.token0.symbol}`);
+      if (result.token1Recovered > 0n) parts.push(`${formatE8s(result.token1Recovered, balance.token1.decimals)} ${balance.token1.symbol}`);
+      recoveryMessage = parts.length > 0
+        ? `Recovered ${parts.join(' and ')} from ${balance.poolLabel}`
+        : 'Recovery submitted (check your balances)';
+      // Re-check balances
+      if ($walletStore.principal) {
+        unusedBalances = await checkIcpswapUnusedBalances($walletStore.principal).catch(() => []);
+      }
+      // Refresh wallet balances
+      walletStore.refreshBalance();
+    } catch (err: any) {
+      error = `Recovery failed: ${err.message}`;
+    } finally {
+      recovering = false;
+    }
+  }
 
   // Warm the live ledger-fee cache for the selected `from` token so MAX and
   // validation use the freshest value. Audit ICRC-005 (frontend half).
@@ -285,6 +331,38 @@
       <p class="gate-text">Connect your wallet to swap tokens</p>
     </div>
   {:else}
+    <!-- ICPswap stuck deposit recovery banner -->
+    {#each unusedBalances as balance}
+      <div class="recovery-banner">
+        <div class="recovery-icon">&#9888;</div>
+        <div class="recovery-info">
+          <div class="recovery-title">Recoverable funds on {balance.poolLabel}</div>
+          <div class="recovery-amounts">
+            {#if balance.token0.amount > 100_000n}
+              <span>{formatE8s(balance.token0.amount, balance.token0.decimals)} {balance.token0.symbol}</span>
+            {/if}
+            {#if balance.token0.amount > 100_000n && balance.token1.amount > 100_000n}
+              <span class="recovery-sep">+</span>
+            {/if}
+            {#if balance.token1.amount > 100_000n}
+              <span>{formatE8s(balance.token1.amount, balance.token1.decimals)} {balance.token1.symbol}</span>
+            {/if}
+          </div>
+        </div>
+        <button
+          class="recovery-btn"
+          disabled={recovering}
+          on:click={() => handleRecover(balance)}
+        >
+          {recovering ? 'Recovering...' : 'Recover'}
+        </button>
+      </div>
+    {/each}
+
+    {#if recoveryMessage}
+      <div class="notice-bar">{recoveryMessage}</div>
+    {/if}
+
     <!-- FROM section -->
     <div class="section-label">From</div>
     <div class="balance-row">
@@ -886,5 +964,60 @@
     border-radius: 0.375rem;
     color: var(--rumi-safe, #5eead4);
     font-size: 0.8125rem;
+  }
+
+  /* ── ICPswap stuck deposit recovery ── */
+  .recovery-banner {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+    padding: 0.75rem 1rem;
+    background: rgba(251, 191, 36, 0.08);
+    border: 1px solid rgba(251, 191, 36, 0.3);
+    border-radius: 0.5rem;
+  }
+  .recovery-icon {
+    font-size: 1.25rem;
+    flex-shrink: 0;
+  }
+  .recovery-info {
+    flex: 1;
+    min-width: 0;
+  }
+  .recovery-title {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: #fbbf24;
+  }
+  .recovery-amounts {
+    font-size: 0.875rem;
+    font-weight: 700;
+    color: #fde68a;
+    margin-top: 0.125rem;
+  }
+  .recovery-sep {
+    margin: 0 0.25rem;
+    font-weight: 400;
+    opacity: 0.6;
+  }
+  .recovery-btn {
+    flex-shrink: 0;
+    padding: 0.5rem 1rem;
+    background: #fbbf24;
+    color: #1e1e2e;
+    border: none;
+    border-radius: 0.375rem;
+    font-weight: 600;
+    font-size: 0.8125rem;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .recovery-btn:hover:not(:disabled) {
+    background: #f59e0b;
+  }
+  .recovery-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 </style>

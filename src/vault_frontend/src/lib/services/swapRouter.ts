@@ -1056,3 +1056,169 @@ async function executeIcpswapDirectOisy(
   if ('err' in r4) throw new Error(`ICPswap withdraw failed: ${JSON.stringify(r4.err)}`);
   return (r4 as { ok: bigint }).ok;
 }
+
+// ──────────────────────────────────────────────────────────────
+// ICPswap unused-deposit recovery
+//
+// When the Oisy _arr bug interrupts a batched swap midway,
+// tokens can be left as "unused deposits" on the ICPswap pool.
+// These helpers detect and recover them.
+// ──────────────────────────────────────────────────────────────
+
+/** One pool's stuck balances, enriched with human-readable info. */
+export interface IcpswapUnusedBalance {
+  poolId: string;
+  poolLabel: string;
+  token0: { canisterId: string; symbol: string; amount: bigint; decimals: number };
+  token1: { canisterId: string; symbol: string; amount: bigint; decimals: number };
+}
+
+/** Minimum e8s to bother showing (ignore dust < 0.001 tokens). */
+const DUST_THRESHOLD = 100_000n;
+
+const ICPSWAP_POOLS = [
+  {
+    poolId: CANISTER_IDS.ICPSWAP_ICUSD_ICP_POOL,
+    label: 'ICPswap icUSD/ICP',
+    token0: { canisterId: CANISTER_IDS.ICP_LEDGER, symbol: 'ICP', decimals: 8 },
+    token1: { canisterId: CONFIG.currentIcusdLedgerId, symbol: 'icUSD', decimals: 8 },
+  },
+  {
+    poolId: CANISTER_IDS.ICPSWAP_3USD_ICP_POOL,
+    label: 'ICPswap 3USD/ICP',
+    token0: { canisterId: CANISTER_IDS.THREEPOOL, symbol: '3USD', decimals: 8 },
+    token1: { canisterId: CANISTER_IDS.ICP_LEDGER, symbol: 'ICP', decimals: 8 },
+  },
+];
+
+/**
+ * Check all ICPswap pools we route through for unused deposits belonging
+ * to the given principal. Returns only pools with non-dust balances.
+ */
+export async function checkIcpswapUnusedBalances(
+  principal: Principal,
+): Promise<IcpswapUnusedBalance[]> {
+  const { HttpAgent, Actor } = await import('@dfinity/agent');
+  const agent = new HttpAgent({ host: CONFIG.host });
+
+  const results: IcpswapUnusedBalance[] = [];
+
+  for (const pool of ICPSWAP_POOLS) {
+    try {
+      const actor = Actor.createActor(canisterIDLs.icpswap_pool, {
+        agent,
+        canisterId: pool.poolId,
+      }) as any;
+
+      const resp = await actor.getUserUnusedBalance(principal);
+      if ('ok' in resp) {
+        const { balance0, balance1 } = resp.ok;
+        if (balance0 > DUST_THRESHOLD || balance1 > DUST_THRESHOLD) {
+          results.push({
+            poolId: pool.poolId,
+            poolLabel: pool.label,
+            token0: { ...pool.token0, amount: balance0 },
+            token1: { ...pool.token1, amount: balance1 },
+          });
+        }
+      }
+    } catch (err) {
+      console.warn(`checkIcpswapUnusedBalances: ${pool.label} query failed:`, err);
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Withdraw all non-dust unused balances from an ICPswap pool back to the
+ * caller's wallet. Works with both Oisy (signer agent) and II (regular actor).
+ */
+export async function recoverIcpswapBalance(
+  balance: IcpswapUnusedBalance,
+): Promise<{ token0Recovered: bigint; token1Recovered: bigint }> {
+  const wallet = get(walletStore);
+  if (!wallet.principal) throw new Error('Wallet not connected');
+
+  let token0Recovered = 0n;
+  let token1Recovered = 0n;
+
+  // Fetch live ICRC-1 fees for each token we need to withdraw
+  const fee0 = balance.token0.amount > DUST_THRESHOLD
+    ? await fetchLedgerFee({ ledgerId: balance.token0.canisterId } as any).catch(() => 10_000n)
+    : 0n;
+  const fee1 = balance.token1.amount > DUST_THRESHOLD
+    ? await fetchLedgerFee({ ledgerId: balance.token1.canisterId } as any).catch(() => 10_000n)
+    : 0n;
+
+  if (isOisyWallet() && wallet.principal) {
+    // Oisy path: batch both withdrawals in one signer popup
+    const signerAgent = await getOisySignerAgent(wallet.principal);
+    const poolActor = createOisyActor(balance.poolId, canisterIDLs.icpswap_pool, signerAgent);
+
+    const promises: Promise<any>[] = [];
+
+    if (balance.token0.amount > DUST_THRESHOLD) {
+      signerAgent.batch();
+      promises.push(
+        poolActor.withdraw({
+          token: balance.token0.canisterId,
+          amount: balance.token0.amount,
+          fee: fee0,
+        }),
+      );
+    }
+    if (balance.token1.amount > DUST_THRESHOLD) {
+      signerAgent.batch();
+      promises.push(
+        poolActor.withdraw({
+          token: balance.token1.canisterId,
+          amount: balance.token1.amount,
+          fee: fee1,
+        }),
+      );
+    }
+
+    if (promises.length > 0) {
+      await signerAgent.execute();
+      const results = await Promise.all(promises);
+      let idx = 0;
+      if (balance.token0.amount > DUST_THRESHOLD) {
+        const r = results[idx++];
+        if (r && 'ok' in r) token0Recovered = r.ok;
+        else if (r && 'err' in r) console.error('token0 withdraw error:', r.err);
+      }
+      if (balance.token1.amount > DUST_THRESHOLD) {
+        const r = results[idx++];
+        if (r && 'ok' in r) token1Recovered = r.ok;
+        else if (r && 'err' in r) console.error('token1 withdraw error:', r.err);
+      }
+    }
+  } else {
+    // Non-Oisy path: sequential withdrawals
+    const poolActor = await walletStore.getActor(
+      balance.poolId, canisterIDLs.icpswap_pool,
+    ) as any;
+
+    if (balance.token0.amount > DUST_THRESHOLD) {
+      const r = await poolActor.withdraw({
+        token: balance.token0.canisterId,
+        amount: balance.token0.amount,
+        fee: fee0,
+      });
+      if (r && 'ok' in r) token0Recovered = r.ok;
+      else if (r && 'err' in r) throw new Error(`Withdraw ${balance.token0.symbol} failed: ${JSON.stringify(r.err)}`);
+    }
+    if (balance.token1.amount > DUST_THRESHOLD) {
+      const r = await poolActor.withdraw({
+        token: balance.token1.canisterId,
+        amount: balance.token1.amount,
+        fee: fee1,
+      });
+      if (r && 'ok' in r) token1Recovered = r.ok;
+      else if (r && 'err' in r) throw new Error(`Withdraw ${balance.token1.symbol} failed: ${JSON.stringify(r.err)}`);
+    }
+  }
+
+  return { token0Recovered, token1Recovered };
+}
