@@ -797,9 +797,21 @@ fn get_protocol_config() -> rumi_protocol_backend::ProtocolConfig {
 #[candid_method(query)]
 #[query]
 fn get_fees(redeemed_amount: u64) -> Fees {
+    read_state(|s| {
+        let icp_ct = s.icp_collateral_type();
+        Fees {
+            borrowing_fee: s.get_borrowing_fee().to_f64(),
+            redemption_fee: s.get_redemption_fee_for(&icp_ct, redeemed_amount.into()).to_f64(),
+        }
+    })
+}
+
+#[candid_method(query)]
+#[query]
+fn get_fees_for_collateral(collateral_type: Principal, redeemed_amount: u64) -> Fees {
     read_state(|s| Fees {
         borrowing_fee: s.get_borrowing_fee().to_f64(),
-        redemption_fee: s.get_redemption_fee(redeemed_amount.into()).to_f64(),
+        redemption_fee: s.get_redemption_fee_for(&collateral_type, redeemed_amount.into()).to_f64(),
     })
 }
 
@@ -1300,9 +1312,8 @@ async fn redeem_collateral(collateral_type: Principal, icusd_amount: u64) -> Res
 #[query]
 fn get_redemption_rate() -> f64 {
     read_state(|s| {
-        s.get_redemption_fee(
-            ICUSD::from(100_000_000),
-        ).to_f64()
+        let icp_ct = s.icp_collateral_type();
+        s.get_redemption_fee_for(&icp_ct, ICUSD::from(100_000_000)).to_f64()
     })
 }
 
