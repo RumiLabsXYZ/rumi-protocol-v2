@@ -1143,17 +1143,18 @@ export async function recoverIcpswapBalance(
   let token0Recovered = 0n;
   let token1Recovered = 0n;
 
-  // Fetch live ICRC-1 fees for each token we need to withdraw
-  const fee0 = balance.token0.amount > DUST_THRESHOLD
-    ? await fetchLedgerFee({ ledgerId: balance.token0.canisterId } as any).catch(() => 10_000n)
-    : 0n;
-  const fee1 = balance.token1.amount > DUST_THRESHOLD
-    ? await fetchLedgerFee({ ledgerId: balance.token1.canisterId } as any).catch(() => 10_000n)
-    : 0n;
-
   if (isOisyWallet() && wallet.principal) {
-    // Oisy path: batch both withdrawals in one signer popup
+    // Oisy path: get the signer agent FIRST (must be synchronous from
+    // click handler) before any other awaits, then batch withdrawals.
     const signerAgent = await getOisySignerAgent(wallet.principal);
+
+    // Now safe to fetch fees after the signer popup is established.
+    const fee0 = balance.token0.amount > DUST_THRESHOLD
+      ? await fetchLedgerFee({ ledgerId: balance.token0.canisterId } as any).catch(() => 10_000n)
+      : 0n;
+    const fee1 = balance.token1.amount > DUST_THRESHOLD
+      ? await fetchLedgerFee({ ledgerId: balance.token1.canisterId } as any).catch(() => 10_000n)
+      : 0n;
     const poolActor = createOisyActor(balance.poolId, canisterIDLs.icpswap_pool, signerAgent);
 
     const promises: Promise<any>[] = [];
@@ -1196,6 +1197,13 @@ export async function recoverIcpswapBalance(
     }
   } else {
     // Non-Oisy path: sequential withdrawals
+    const fee0 = balance.token0.amount > DUST_THRESHOLD
+      ? await fetchLedgerFee({ ledgerId: balance.token0.canisterId } as any).catch(() => 10_000n)
+      : 0n;
+    const fee1 = balance.token1.amount > DUST_THRESHOLD
+      ? await fetchLedgerFee({ ledgerId: balance.token1.canisterId } as any).catch(() => 10_000n)
+      : 0n;
+
     const poolActor = await walletStore.getActor(
       balance.poolId, canisterIDLs.icpswap_pool,
     ) as any;
