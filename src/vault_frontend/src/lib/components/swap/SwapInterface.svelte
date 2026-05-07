@@ -94,6 +94,13 @@
       error = `Recovery failed: ${err.message}`;
     } finally {
       recovering = false;
+      // Always re-check unused balances so the banner updates even after
+      // partial success or _arr false-negatives
+      if ($walletStore.principal) {
+        unusedBalances = await checkIcpswapUnusedBalances($walletStore.principal).catch(() => []);
+        if (unusedBalances.length > 0) preWarmRecovery(unusedBalances).catch(() => {});
+      }
+      walletStore.refreshBalance();
     }
   }
 
