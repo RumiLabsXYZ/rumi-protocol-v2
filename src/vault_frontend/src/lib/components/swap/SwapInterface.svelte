@@ -12,6 +12,7 @@
   import {
     callWithOisyFalseNegativeGuard,
     isOisyLandedSentinel,
+    isOisyArrFalseNegative,
   } from '../../services/protocol/oisyResilience';
   import { TokenService } from '../../services/tokenService';
   import { get } from 'svelte/store';
@@ -313,9 +314,35 @@
       amount = '';
       currentRoute = null;
     } catch (err: any) {
-      error = err.message || 'Swap failed';
+      // If the Oisy _arr false-negative fired but the outer verifier didn't
+      // confirm the swap landed, funds may be stuck in an ICPswap pool.
+      // Auto-check and surface the recovery banner immediately.
+      if (isOisyArrFalseNegative(err) && $walletStore.principal) {
+        const stuck = await checkIcpswapUnusedBalances($walletStore.principal).catch(() => []);
+        if (stuck.length > 0) {
+          unusedBalances = stuck;
+          preWarmRecovery(stuck).catch(() => {});
+          error = '';
+          notice = 'Swap was interrupted by a wallet error, but your funds are safe. Use the Recover button above to retrieve them.';
+        } else {
+          error = err.message || 'Swap failed';
+        }
+      } else {
+        error = err.message || 'Swap failed';
+      }
     } finally {
       loading = false;
+      // Always refresh wallet balances and check for stuck deposits after swap
+      walletStore.refreshBalance();
+      if ($walletStore.principal) {
+        const stuck = await checkIcpswapUnusedBalances($walletStore.principal).catch(() => []);
+        if (stuck.length > 0) {
+          unusedBalances = stuck;
+          preWarmRecovery(stuck).catch(() => {});
+        } else if (!error) {
+          unusedBalances = [];
+        }
+      }
     }
   }
 
