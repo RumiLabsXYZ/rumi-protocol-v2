@@ -306,14 +306,19 @@ pub async fn swap(i: u8, j: u8, dx: u128, min_dy: u128) -> Result<u128, ThreePoo
         return Err(ThreePoolError::PoolPaused);
     }
 
+    // 2. Acquire the pool lock BEFORE reading balances so a concurrent
+    //    caller cannot price against stale pre-swap state. Released on
+    //    Drop (Ok, Err, or trap). Audit fence B-01.
+    let _pool_guard = pool_guard::PoolGuard::new()?;
+
     let i_idx = i as usize;
     let j_idx = j as usize;
 
-    // 2. Compute current A and precision_muls
+    // 3. Compute current A and precision_muls
     let amp = get_current_a();
     let precision_muls = get_precision_muls();
 
-    // 3. Read current state
+    // 4. Read current state
     let (balances, fee_curve, admin_fee_bps, token_i_ledger, token_j_ledger, token_j_symbol) =
         read_state(|s| {
             (
@@ -326,21 +331,16 @@ pub async fn swap(i: u8, j: u8, dx: u128, min_dy: u128) -> Result<u128, ThreePoo
             )
         });
 
-    // 4. Calculate swap output using the dynamic fee curve
+    // 5. Calculate swap output using the dynamic fee curve
     let outcome =
         calc_swap_output(i_idx, j_idx, dx, &balances, &precision_muls, amp, &fee_curve, admin_fee_bps)?;
     let output = outcome.output_native;
     let fee = outcome.fee_native;
 
-    // 5. Slippage check
+    // 6. Slippage check
     if output < min_dy {
         return Err(ThreePoolError::SlippageExceeded);
     }
-
-    // 6. Acquire the pool lock BEFORE the first await so a concurrent caller
-    //    cannot price against the same pre-balances. Released on Drop, which
-    //    runs on Ok, Err, or trap. Audit fence B-01.
-    let _pool_guard = pool_guard::PoolGuard::new()?;
 
     // 7. Transfer input token from user to pool
     let caller = ic_cdk::api::caller();
@@ -424,16 +424,21 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
     }
     let amounts_arr: [u128; 3] = [amounts[0], amounts[1], amounts[2]];
 
-    // 3. Compute A and precision_muls
+    // 3. Acquire the pool lock BEFORE reading balances so a concurrent
+    //    caller cannot compute LP amounts against stale state. Released
+    //    on Drop (Ok, Err, or trap). Audit fence B-01.
+    let _pool_guard = pool_guard::PoolGuard::new()?;
+
+    // 4. Compute A and precision_muls
     let amp = get_current_a();
     let precision_muls = get_precision_muls();
 
-    // 4. Read current state
+    // 5. Read current state
     let (old_balances, lp_total_supply, fee_curve) = read_state(|s| {
         (s.balances, s.lp_total_supply, s.config.fee_curve.unwrap_or_default())
     });
 
-    // 5. Calculate LP tokens to mint (dynamic fee curve)
+    // 6. Calculate LP tokens to mint (dynamic fee curve)
     let liq_outcome = calc_add_liquidity(
         &amounts_arr,
         &old_balances,
@@ -444,14 +449,10 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
     )?;
     let lp_minted = liq_outcome.lp_minted;
 
-    // 6. Slippage check
+    // 7. Slippage check
     if lp_minted < min_lp {
         return Err(ThreePoolError::SlippageExceeded);
     }
-
-    // 7. Acquire the pool lock BEFORE the first await. Released on Drop.
-    //    Audit fence B-01.
-    let _pool_guard = pool_guard::PoolGuard::new()?;
 
     // 8. Transfer each non-zero amount from user to pool
     let caller = ic_cdk::api::caller();

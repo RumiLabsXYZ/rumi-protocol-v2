@@ -428,6 +428,22 @@ type Event = variant {
     token_type : StableTokenType;
   };
   set_recovery_cr_multiplier : record { multiplier : text };
+  stability_pool_call_failed : record {
+    vault_ids : vec nat64;
+    reject_code : int32;
+    reject_message : text;
+    timestamp : nat64;
+  };
+  oracle_circuit_breaker : record {
+    consecutive_failures : nat64;
+    timestamp : nat64;
+  };
+  oracle_source_count_insufficient : record {
+    collateral_type : principal;
+    num_sources : nat32;
+    min_required : nat32;
+    timestamp : nat64;
+  };
 };
 type EventTimeRange = record { start_ns : nat64; end_ns : nat64 };
 type EventTypeFilter = variant {
@@ -803,6 +819,7 @@ service : (ProtocolArg) -> {
     ) query;
   get_events_filtered : (GetEventsArg) -> (GetEventsFilteredResponse) query;
   get_fees : (nat64) -> (Fees) query;
+  get_fees_for_collateral : (principal, nat64) -> (Fees) query;
   get_global_icusd_mint_cap : () -> (nat64) query;
   get_icpswap_routing_enabled : () -> (bool) query;
   get_interest_pool_share : () -> (float64) query;

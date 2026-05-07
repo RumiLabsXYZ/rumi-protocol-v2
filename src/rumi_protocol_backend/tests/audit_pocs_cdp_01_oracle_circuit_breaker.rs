@@ -146,6 +146,39 @@ fn cdp_01_operator_set_readonly_does_not_auto_clear() {
 }
 
 #[test]
+fn cdp_01_sub_penny_latch_survives_dirty_oracle_flag() {
+    let mut state = fresh_state();
+
+    // Scenario: circuit breaker trips, then a sub-$0.01 price is confirmed.
+    // The sub-$0.01 latch is a price-safety measure that must NOT be cleared
+    // by `note_xrc_success`. But if the circuit breaker left
+    // `mode_triggered_by_oracle = true` and the sub-$0.01 latch didn't
+    // clear it, `note_xrc_success` would incorrectly lift the latch.
+
+    // 1. Trip circuit breaker (sets mode_triggered_by_oracle = true).
+    for _ in 0..MAX_CONSECUTIVE_XRC_FAILURES {
+        note_xrc_failure(&mut state);
+    }
+    assert_eq!(state.mode, Mode::ReadOnly);
+    assert!(state.mode_triggered_by_oracle);
+
+    // 2. Simulate the sub-$0.01 price latch (xrc.rs line ~257).
+    //    After the fix, this also clears mode_triggered_by_oracle.
+    state.mode = Mode::ReadOnly;
+    state.mode_triggered_by_oracle = false;
+
+    // 3. A valid price arrives. note_xrc_success must NOT clear ReadOnly
+    //    because mode_triggered_by_oracle is false (price-driven latch).
+    note_xrc_success(&mut state);
+
+    assert_eq!(
+        state.mode,
+        Mode::ReadOnly,
+        "sub-$0.01 ReadOnly latch must survive note_xrc_success",
+    );
+}
+
+#[test]
 fn cdp_01_failure_after_recovery_starts_counter_fresh() {
     let mut state = fresh_state();
 

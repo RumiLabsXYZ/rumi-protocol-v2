@@ -210,9 +210,9 @@ pub async fn fetch_icp_rate() {
                         min_required: floor,
                         timestamp: ic_cdk::api::time(),
                     });
-                    // Skip the price-update branch but keep the rest of the
-                    // tick (cached price stays valid; CDP-01 counter NOT
-                    // touched because the XRC call itself succeeded).
+                    // Skip the price-update branch. `xrc_call_succeeded`
+                    // stays false so the CDP-01 counter treats this as a
+                    // failure (sustained thin-aggregation should trip ReadOnly).
                 } else {
 
                 let rate = Decimal::from_u64(exchange_rate_result.rate).unwrap()
@@ -254,7 +254,10 @@ pub async fn fetch_icp_rate() {
                                 "[FetchPrice] CONFIRMED sub-$0.01 ICP rate {rate}, switching to ReadOnly at timestamp: {}",
                                 exchange_rate_result.timestamp
                             );
-                            mutate_state(|s| s.mode = Mode::ReadOnly);
+                            mutate_state(|s| {
+                            s.mode = Mode::ReadOnly;
+                            s.mode_triggered_by_oracle = false;
+                        });
                         }
                         log!(
                             TRACE_XRC,

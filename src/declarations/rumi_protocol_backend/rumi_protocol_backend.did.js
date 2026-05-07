@@ -614,6 +614,22 @@ export const idlFactory = ({ IDL }) => {
       'token_type' : StableTokenType,
     }),
     'set_recovery_cr_multiplier' : IDL.Record({ 'multiplier' : IDL.Text }),
+    'stability_pool_call_failed' : IDL.Record({
+      'vault_ids' : IDL.Vec(IDL.Nat64),
+      'reject_code' : IDL.Int32,
+      'reject_message' : IDL.Text,
+      'timestamp' : IDL.Nat64,
+    }),
+    'oracle_circuit_breaker' : IDL.Record({
+      'consecutive_failures' : IDL.Nat64,
+      'timestamp' : IDL.Nat64,
+    }),
+    'oracle_source_count_insufficient' : IDL.Record({
+      'collateral_type' : IDL.Principal,
+      'num_sources' : IDL.Nat32,
+      'min_required' : IDL.Nat32,
+      'timestamp' : IDL.Nat64,
+    }),
   });
   const EventsByPrincipalPagedResponse = IDL.Record({
     'scan_end' : IDL.Nat64,
@@ -961,6 +977,7 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'get_fees' : IDL.Func([IDL.Nat64], [Fees], ['query']),
+    'get_fees_for_collateral' : IDL.Func([IDL.Principal, IDL.Nat64], [Fees], ['query']),
     'get_global_icusd_mint_cap' : IDL.Func([], [IDL.Nat64], ['query']),
     'get_icpswap_routing_enabled' : IDL.Func([], [IDL.Bool], ['query']),
     'get_interest_pool_share' : IDL.Func([], [IDL.Float64], ['query']),

@@ -552,7 +552,26 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'token_type' : StableTokenType,
     }
   } |
-  { 'set_recovery_cr_multiplier' : { 'multiplier' : string } };
+  { 'set_recovery_cr_multiplier' : { 'multiplier' : string } } |
+  { 'stability_pool_call_failed' : {
+      'vault_ids' : Array<bigint>,
+      'reject_code' : number,
+      'reject_message' : string,
+      'timestamp' : bigint,
+    }
+  } |
+  { 'oracle_circuit_breaker' : {
+      'consecutive_failures' : bigint,
+      'timestamp' : bigint,
+    }
+  } |
+  { 'oracle_source_count_insufficient' : {
+      'collateral_type' : Principal,
+      'num_sources' : number,
+      'min_required' : number,
+      'timestamp' : bigint,
+    }
+  };
 export interface EventTimeRange { 'start_ns' : bigint, 'end_ns' : bigint }
 export type EventTypeFilter = { 'BreakerTripped' : null } |
   { 'StabilityPoolDeposit' : null } |
@@ -970,6 +989,7 @@ export interface _SERVICE {
     GetEventsFilteredResponse
   >,
   'get_fees' : ActorMethod<[bigint], Fees>,
+  'get_fees_for_collateral' : ActorMethod<[Principal, bigint], Fees>,
   'get_global_icusd_mint_cap' : ActorMethod<[], bigint>,
   'get_icpswap_routing_enabled' : ActorMethod<[], boolean>,
   'get_interest_pool_share' : ActorMethod<[], number>,
