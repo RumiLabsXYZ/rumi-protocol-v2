@@ -20,11 +20,13 @@
 use candid::Principal;
 
 use rumi_protocol_backend::event::Event;
+use rumi_protocol_backend::numeric::UsdIcp;
 use rumi_protocol_backend::state::{Mode, State};
 use rumi_protocol_backend::xrc::{
     note_xrc_failure_at, note_xrc_success, MAX_CONSECUTIVE_XRC_FAILURES,
 };
 use rumi_protocol_backend::InitArg;
+use rust_decimal_macros::dec;
 
 const TEST_NOW_NS: u64 = 1_700_000_000_000_000_000;
 
@@ -192,4 +194,32 @@ fn cdp_01_failure_after_recovery_starts_counter_fresh() {
 
     assert_eq!(state.consecutive_xrc_failures, 2);
     assert_eq!(state.mode, Mode::GeneralAvailability);
+}
+
+#[test]
+fn cdp_01_circuit_breaker_survives_tcr_recalculation() {
+    let mut state = fresh_state();
+
+    // Trip the circuit breaker.
+    for _ in 0..MAX_CONSECUTIVE_XRC_FAILURES {
+        note_xrc_failure(&mut state);
+    }
+    assert_eq!(state.mode, Mode::ReadOnly);
+    assert!(state.mode_triggered_by_oracle);
+
+    // Simulate the TCR recalculation that runs right after the circuit
+    // breaker in fetch_icp_rate. A healthy cached price would normally
+    // flip mode back to GA, but the circuit breaker must take precedence.
+    let healthy_price = UsdIcp::from(dec!(10.0));
+    state.update_total_collateral_ratio_and_mode(healthy_price);
+
+    assert_eq!(
+        state.mode,
+        Mode::ReadOnly,
+        "circuit breaker ReadOnly must survive update_total_collateral_ratio_and_mode",
+    );
+    assert!(
+        state.mode_triggered_by_oracle,
+        "oracle flag must persist through TCR recalculation",
+    );
 }

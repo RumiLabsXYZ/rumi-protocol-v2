@@ -3112,6 +3112,17 @@ impl State {
             return;
         }
 
+        // Wave-14 CDP-01: if the oracle circuit breaker tripped ReadOnly,
+        // TCR recalculation must not override it. Only note_xrc_success
+        // (a fresh valid price) can clear oracle-triggered ReadOnly.
+        // Exception: TCR < 100% still forces ReadOnly for safety.
+        if self.mode_triggered_by_oracle {
+            if new_total_collateral_ratio < Ratio::from(dec!(1.0)) {
+                self.mode = Mode::ReadOnly;
+            }
+            return;
+        }
+
         if new_total_collateral_ratio < dynamic_threshold {
             self.mode = Mode::Recovery;
         } else {
