@@ -1174,6 +1174,13 @@ pub struct State {
     /// upgrade so the cadence is monotone across deploys.
     #[serde(default)]
     pub ticks_since_full_sweep: u64,
+
+    /// Tolerance (in basis points) added to per-collateral
+    /// `min_liquidation_ratio` when the liquidation bot calls
+    /// `bot_claim_liquidation`. See `DEFAULT_BOT_CR_TOLERANCE_BPS` for
+    /// the rationale. Tunable via `set_bot_cr_tolerance_bps`.
+    #[serde(default = "default_bot_cr_tolerance_bps")]
+    pub bot_cr_tolerance_bps: u64,
 }
 
 fn default_check_vaults_alert_band_bps() -> u64 {
@@ -1182,6 +1189,10 @@ fn default_check_vaults_alert_band_bps() -> u64 {
 
 fn default_check_vaults_full_sweep_every_n_ticks() -> u64 {
     crate::DEFAULT_CHECK_VAULTS_FULL_SWEEP_EVERY_N_TICKS
+}
+
+fn default_bot_cr_tolerance_bps() -> u64 {
+    crate::DEFAULT_BOT_CR_TOLERANCE_BPS
 }
 
 /// Wave-9c DOS-005: result of `State::scan_unhealthy_vaults`. The
@@ -1371,6 +1382,7 @@ impl Default for State {
             check_vaults_full_sweep_every_n_ticks:
                 default_check_vaults_full_sweep_every_n_ticks(),
             ticks_since_full_sweep: 0,
+            bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
         }
     }
 }
@@ -1588,6 +1600,7 @@ impl From<InitArg> for State {
             check_vaults_full_sweep_every_n_ticks:
                 default_check_vaults_full_sweep_every_n_ticks(),
             ticks_since_full_sweep: 0,
+            bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
         }
     }
 }
@@ -3009,6 +3022,25 @@ impl State {
     /// 0 or 1 reverts to pre-Wave-9c behavior (full sweep every tick).
     pub fn set_check_vaults_full_sweep_every_n_ticks(&mut self, n: u64) {
         self.check_vaults_full_sweep_every_n_ticks = n;
+    }
+
+    /// Admin setter for the bot CR tolerance (in basis points). The
+    /// caller in `main.rs` is responsible for clamping to
+    /// `MAX_BOT_CR_TOLERANCE_BPS`.
+    pub fn set_bot_cr_tolerance_bps(&mut self, bps: u64) {
+        self.bot_cr_tolerance_bps = bps;
+    }
+
+    /// Effective bot claim threshold = `min_liquidation_ratio + tolerance`.
+    /// Used by `bot_claim_liquidation` to absorb the scan→claim
+    /// TOCTOU window without widening the strict threshold the manual
+    /// liquidation paths still enforce.
+    pub fn get_bot_claim_max_ratio_for(&self, ct: &CollateralType) -> Ratio {
+        let base = self.get_min_liquidation_ratio_for(ct);
+        let tolerance = Ratio::from(
+            Decimal::from(self.bot_cr_tolerance_bps) / Decimal::from(10_000u64),
+        );
+        base + tolerance
     }
 
     /// Wave-9c DOS-005: walk `vault_cr_index` and return the unhealthy
@@ -5738,5 +5770,60 @@ mod tests {
         } else {
             panic!("expected CBOR map");
         }
+    }
+
+    // ─── Bot CR tolerance ───
+
+    #[test]
+    fn test_bot_cr_tolerance_default_is_two_percent() {
+        let state = test_state();
+        assert_eq!(state.bot_cr_tolerance_bps, crate::DEFAULT_BOT_CR_TOLERANCE_BPS);
+        assert_eq!(crate::DEFAULT_BOT_CR_TOLERANCE_BPS, 200);
+    }
+
+    #[test]
+    fn test_bot_claim_max_ratio_adds_tolerance_to_min_liq() {
+        let mut state = test_state();
+        let icp = state.icp_collateral_type();
+
+        // Default tolerance (200 bps) → 133% + 2% = 135%.
+        let max = state.get_bot_claim_max_ratio_for(&icp);
+        let expected = state.get_min_liquidation_ratio_for(&icp)
+            + Ratio::from(dec!(0.02));
+        assert_eq!(max, expected);
+
+        // 0 bps → no slack; bot threshold collapses to the strict
+        // min_liquidation_ratio (revert path).
+        state.set_bot_cr_tolerance_bps(0);
+        let max_zero = state.get_bot_claim_max_ratio_for(&icp);
+        assert_eq!(max_zero, state.get_min_liquidation_ratio_for(&icp));
+
+        // 500 bps (the configured admin cap) → 133% + 5% = 138%.
+        state.set_bot_cr_tolerance_bps(500);
+        let max_500 = state.get_bot_claim_max_ratio_for(&icp);
+        let expected_500 = state.get_min_liquidation_ratio_for(&icp)
+            + Ratio::from(dec!(0.05));
+        assert_eq!(max_500, expected_500);
+    }
+
+    #[test]
+    fn test_bot_claim_max_ratio_tracks_recovery_mode_threshold() {
+        // In Recovery mode `min_liquidation_ratio` becomes
+        // `borrow_threshold_ratio` (typically 150% for ICP). Tolerance
+        // is additive on whichever base mode dictates.
+        let mut state = test_state();
+        let icp = state.icp_collateral_type();
+        state.mode = crate::Mode::Recovery;
+
+        let max = state.get_bot_claim_max_ratio_for(&icp);
+        let base = state.get_min_liquidation_ratio_for(&icp);
+        let tolerance = Ratio::from(
+            Decimal::from(state.bot_cr_tolerance_bps) / Decimal::from(10_000u64),
+        );
+        assert_eq!(max, base + tolerance);
+
+        // Sanity: in Recovery the base is at or above the borrow threshold.
+        let borrow_threshold = state.get_min_collateral_ratio_for(&icp);
+        assert!(base >= borrow_threshold);
     }
 }

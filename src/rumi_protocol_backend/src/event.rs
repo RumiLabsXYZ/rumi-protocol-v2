@@ -358,6 +358,11 @@ pub enum Event {
         collateral_types: Vec<Principal>,
     },
 
+    #[serde(rename = "set_bot_cr_tolerance_bps")]
+    SetBotCrToleranceBps {
+        bps: u64,
+    },
+
     #[serde(rename = "set_liquidation_bonus")]
     SetLiquidationBonus {
         rate: String,
@@ -796,6 +801,7 @@ impl Event {
             Event::SetLiquidationBotPrincipal { .. } => false,
             Event::SetBotBudget { .. } => false,
             Event::SetBotAllowedCollateralTypes { .. } => false,
+            Event::SetBotCrToleranceBps { .. } => false,
             Event::SetLiquidationBonus { .. } => false,
             Event::SetBorrowingFee { .. } => false,
             Event::SetRedemptionFeeFloor { .. } => false,
@@ -936,6 +942,7 @@ impl Event {
             Event::SetLiquidationBotPrincipal { .. } => Some("SetLiquidationBotPrincipal"),
             Event::SetBotBudget { .. } => Some("SetBotBudget"),
             Event::SetBotAllowedCollateralTypes { .. } => Some("SetBotAllowedCollateralTypes"),
+            Event::SetBotCrToleranceBps { .. } => Some("SetBotCrToleranceBps"),
             Event::SetLiquidationBonus { .. } => Some("SetLiquidationBonus"),
             Event::SetBorrowingFee { .. } => Some("SetBorrowingFee"),
             Event::SetRedemptionFeeFloor { .. } => Some("SetRedemptionFeeFloor"),
@@ -1440,6 +1447,9 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             },
             Event::SetBotAllowedCollateralTypes { collateral_types } => {
                 state.bot_allowed_collateral_types = collateral_types.iter().copied().collect();
+            },
+            Event::SetBotCrToleranceBps { bps } => {
+                state.bot_cr_tolerance_bps = bps;
             },
             Event::SetLiquidationBonus { rate } => {
                 if let Ok(dec) = rate.parse::<Decimal>() {
@@ -2374,6 +2384,11 @@ pub fn record_set_bot_budget(state: &mut State, total_e8s: u64, start_timestamp:
 pub fn record_set_bot_allowed_collateral_types(state: &mut State, collateral_types: Vec<Principal>) {
     record_event(&Event::SetBotAllowedCollateralTypes { collateral_types: collateral_types.clone() });
     state.bot_allowed_collateral_types = collateral_types.into_iter().collect();
+}
+
+pub fn record_set_bot_cr_tolerance_bps(state: &mut State, bps: u64) {
+    record_event(&Event::SetBotCrToleranceBps { bps });
+    state.bot_cr_tolerance_bps = bps;
 }
 
 pub fn record_set_liquidation_bonus(state: &mut State, rate: Ratio) {
