@@ -1376,14 +1376,45 @@ async fn remove_liquidity(
     // if a transfer fails mid-way.
     mutate_state(|s| {
         let pool = s.pools.get_mut(&pool_id).expect("pool exists");
-        let entry = pool.lp_shares.get_mut(&caller).expect("user has shares");
-        *entry -= lp_shares;
-        if *entry == 0 {
-            pool.lp_shares.remove(&caller);
+
+        // Snapshot pre-update state for reward bookkeeping.
+        let existing_caller_shares = pool.lp_shares.get(&caller).copied().unwrap_or(0);
+        let acc = pool.acc_reward_per_share;
+
+        // 1. Settle caller's existing rewards before share change.
+        // Preserves any claimable across this removal (including full
+        // exit), so the caller can still claim_rewards() later.
+        {
+            let entry = pool.lp_rewards.entry(caller).or_default();
+            crate::rewards::settle(entry, existing_caller_shares, acc);
+        }
+
+        // 2. Apply share decrement (existing logic).
+        {
+            let entry = pool.lp_shares.get_mut(&caller).expect("user has shares");
+            *entry -= lp_shares;
+            if *entry == 0 {
+                pool.lp_shares.remove(&caller);
+            }
         }
         pool.total_lp_shares -= lp_shares;
         pool.reserve_a -= amount_a;
         pool.reserve_b -= amount_b;
+
+        // 3. Reset reward_debt to the post-update share count.
+        // Same accumulator (no drain in this path). If both shares and
+        // claimable are zero after settle+reset, prune the entry to
+        // free storage. Otherwise the caller may have pending icUSD
+        // earnings to claim later.
+        let new_caller_shares = pool.lp_shares.get(&caller).copied().unwrap_or(0);
+        let should_prune = {
+            let entry = pool.lp_rewards.entry(caller).or_default();
+            crate::rewards::reset_debt(entry, new_caller_shares, acc);
+            new_caller_shares == 0 && entry.claimable == 0
+        };
+        if should_prune {
+            pool.lp_rewards.remove(&caller);
+        }
     });
 
     // Send tokens to user. If either fails, shares are already burned
