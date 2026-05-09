@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub mod types;
 pub mod state;
 pub mod math;
+pub mod rewards;
 pub mod transfers;
 pub mod icrc21;
 pub mod analytics;
