@@ -1286,8 +1286,13 @@ async fn add_liquidity(
         // This is logically a synthetic donation that occurs AFTER the new
         // shares are recognized, so the standard accumulator math credits
         // the new shareholders pro-rata. (The anonymous burn-share's
-        // pro-rata is permanently stranded — accepted as a tiny rounding
+        // pro-rata is permanently stranded, accepted as a tiny rounding
         // loss since MINIMUM_LIQUIDITY is small.)
+        //
+        // Note: total_rewards_distributed is NOT incremented here.
+        // notify_reward_received already incremented it when the donation
+        // first arrived (regardless of LP presence). Incrementing again
+        // on drain would double-count buffered donations.
         if was_first_liquidity && pool.pending_no_lp > 0 && pool.total_lp_shares > 0 {
             let buffered = pool.pending_no_lp;
             pool.acc_reward_per_share = crate::rewards::accumulate(
@@ -1295,7 +1300,6 @@ async fn add_liquidity(
                 buffered,
                 pool.total_lp_shares,
             );
-            pool.total_rewards_distributed = pool.total_rewards_distributed.saturating_add(buffered);
             pool.pending_no_lp = 0;
             log!(INFO, "[add_liquidity] drained pending_no_lp {} into acc for pool {}", buffered, pool_id);
         }
