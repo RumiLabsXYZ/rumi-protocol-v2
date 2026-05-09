@@ -783,6 +783,7 @@ fn get_protocol_config() -> rumi_protocol_backend::ProtocolConfig {
         bot_budget_total_e8s: s.bot_budget_total_e8s,
         bot_budget_remaining_e8s: s.bot_budget_remaining_e8s,
         bot_allowed_collateral_types: s.bot_allowed_collateral_types.iter().cloned().collect(),
+        bot_cr_tolerance_bps: s.bot_cr_tolerance_bps,
 
         collateral_configs: s.collateral_configs.iter()
             .map(|(ct, config)| {
@@ -2309,6 +2310,44 @@ fn get_bot_allowed_collateral_types() -> Vec<Principal> {
     read_state(|s| s.bot_allowed_collateral_types.iter().copied().collect())
 }
 
+/// Tolerance (in basis points) added to per-collateral
+/// `min_liquidation_ratio` when the bot calls `bot_claim_liquidation`.
+/// Closes the scan→claim TOCTOU window. See `set_bot_cr_tolerance_bps`.
+#[candid_method(update)]
+#[update]
+async fn set_bot_cr_tolerance_bps(bps: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set the bot CR tolerance".to_string(),
+        ));
+    }
+    let max = rumi_protocol_backend::MAX_BOT_CR_TOLERANCE_BPS;
+    if bps > max {
+        return Err(ProtocolError::GenericError(format!(
+            "Bot CR tolerance {} bps exceeds maximum {} bps",
+            bps, max
+        )));
+    }
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_bot_cr_tolerance_bps(s, bps);
+    });
+    log!(
+        INFO,
+        "[set_bot_cr_tolerance_bps] Bot CR tolerance set to: {} bps ({:.2}% above min_liquidation_ratio)",
+        bps,
+        (bps as f64) / 100.0
+    );
+    Ok(())
+}
+
+#[candid_method(query)]
+#[query]
+fn get_bot_cr_tolerance_bps() -> u64 {
+    read_state(|s| s.bot_cr_tolerance_bps)
+}
+
 /// Bot calls this to CLAIM a vault for liquidation (phase 1 of 2).
 /// Transfers collateral to the bot and locks the vault (`bot_processing = true`).
 /// Vault debt and collateral amounts are NOT modified yet.
@@ -2361,15 +2400,44 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
         let collateral_price_usd = UsdIcp::from(price);
         let ratio = rumi_protocol_backend::compute_collateral_ratio(vault, collateral_price_usd, s);
         let min_ratio = s.get_min_liquidation_ratio_for(&vault.collateral_type);
+        // Apply scan→claim TOCTOU tolerance. The scan in `check_vaults`
+        // flagged this vault as below `min_ratio`; an XRC tick between
+        // that scan and this call can recompute CR slightly above
+        // `min_ratio`. Allowing up to `min_ratio + tolerance` here
+        // closes the race without widening the strict threshold the
+        // manual liquidation paths enforce. The `actual > 0` guard
+        // below catches the Recovery-mode case where `min_ratio +
+        // tolerance` exceeds the partial-cap target CR.
+        let bot_max_ratio = s.get_bot_claim_max_ratio_for(&vault.collateral_type);
 
-        if ratio >= min_ratio {
+        if ratio >= bot_max_ratio {
             return Err(ProtocolError::GenericError(format!(
-                "Vault #{} is not liquidatable (CR {:.2}% >= {:.2}%)",
-                vault_id, ratio.to_f64() * 100.0, min_ratio.to_f64() * 100.0
+                "Vault #{} is not liquidatable (CR {:.2}% >= {:.2}%, base {:.2}% + tolerance {} bps)",
+                vault_id,
+                ratio.to_f64() * 100.0,
+                bot_max_ratio.to_f64() * 100.0,
+                min_ratio.to_f64() * 100.0,
+                s.bot_cr_tolerance_bps
             )));
         }
 
         let actual = s.compute_partial_liquidation_cap(vault, collateral_price_usd);
+
+        // Defense-in-depth: with the tolerance applied, `ratio` may sit
+        // above the partial-cap target CR (`borrow_threshold_ratio`),
+        // in which case `compute_partial_liquidation_cap` returns 0.
+        // Reject explicitly rather than claiming a 0-debt liquidation,
+        // which would deduct nothing from the budget and seize 0
+        // collateral — pointless work that would still write a noisy
+        // BotClaim record.
+        if actual.to_u64() == 0 {
+            return Err(ProtocolError::GenericError(format!(
+                "Vault #{} has no liquidatable debt at current CR {:.2}% (target CR {:.2}%)",
+                vault_id,
+                ratio.to_f64() * 100.0,
+                s.get_min_collateral_ratio_for(&vault.collateral_type).to_f64() * 100.0
+            )));
+        }
 
         if s.bot_budget_remaining_e8s < actual.to_u64() {
             return Err(ProtocolError::GenericError(format!(

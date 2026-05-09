@@ -68,6 +68,22 @@ pub const DEFAULT_CHECK_VAULTS_ALERT_BAND_BPS: u64 = 1000;
 /// `set_check_vaults_full_sweep_every_n_ticks`.
 pub const DEFAULT_CHECK_VAULTS_FULL_SWEEP_EVERY_N_TICKS: u64 = 12;
 
+/// Default tolerance (in basis points) added to the per-collateral
+/// `min_liquidation_ratio` when the liquidation bot calls
+/// `bot_claim_liquidation`. Closes the TOCTOU window between the
+/// `scan_unhealthy_vaults` flag (CR < min_ratio) and the bot's
+/// follow-up claim, where an XRC tick between those two moments can
+/// nudge the recomputed CR back above the strict threshold.
+/// 200 bps (2%) covers the typical price moves in a single 30s bot
+/// tick. Tunable via `set_bot_cr_tolerance_bps`.
+pub const DEFAULT_BOT_CR_TOLERANCE_BPS: u64 = 200;
+
+/// Hard cap on the bot CR tolerance an admin may configure. 500 bps
+/// (5%) — beyond this the bot starts liquidating vaults that have
+/// substantially recovered between scan and claim, which is closer to
+/// "near-threshold liquidation" than "race-window absorption".
+pub const MAX_BOT_CR_TOLERANCE_BPS: u64 = 500;
+
 /// Stable token types accepted for vault repayment (1:1 with icUSD)
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StableTokenType {
@@ -477,6 +493,7 @@ pub struct ProtocolConfig {
     pub bot_budget_total_e8s: u64,
     pub bot_budget_remaining_e8s: u64,
     pub bot_allowed_collateral_types: Vec<Principal>,
+    pub bot_cr_tolerance_bps: u64,
 
     // -- Per-collateral configs (all collateral types) --
     pub collateral_configs: Vec<(Principal, state::CollateralConfig)>,

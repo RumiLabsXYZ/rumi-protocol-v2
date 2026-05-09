@@ -268,6 +268,7 @@ type Event = variant {
   set_bot_allowed_collateral_types : record {
     collateral_types : vec principal;
   };
+  set_bot_cr_tolerance_bps : record { bps : nat64 };
   set_reserve_redemptions_enabled : record { enabled : bool };
   set_min_icusd_amount : record { amount : text };
   set_borrowing_fee_curve : record { markers : text };
@@ -569,6 +570,7 @@ type ProtocolConfig = record {
   ckusdc_ledger_principal : opt principal;
   recovery_mode_threshold : float64;
   bot_allowed_collateral_types : vec principal;
+  bot_cr_tolerance_bps : nat64;
   liquidation_bot_principal : opt principal;
   reserve_redemption_fee : float64;
   liquidation_protocol_share : float64;
@@ -802,6 +804,7 @@ service : (ProtocolArg) -> {
   get_all_vaults : () -> (vec CandidVault) query;
   get_borrowing_fee : () -> (float64) query;
   get_bot_allowed_collateral_types : () -> (vec principal) query;
+  get_bot_cr_tolerance_bps : () -> (nat64) query;
   get_bot_stats : () -> (BotStatsResponse) query;
   get_ckstable_repay_fee : () -> (float64) query;
   get_collateral_config : (principal) -> (opt CollateralConfig) query;
@@ -891,6 +894,7 @@ service : (ProtocolArg) -> {
   set_borrowing_fee : (float64) -> (Result);
   set_borrowing_fee_curve : (opt text) -> (Result);
   set_bot_allowed_collateral_types : (vec principal) -> (Result);
+  set_bot_cr_tolerance_bps : (nat64) -> (Result);
   set_breaker_window_debt_ceiling_e8s : (nat64) -> (Result);
   set_breaker_window_ns : (nat64) -> (Result);
   set_check_vaults_alert_band_bps : (nat64) -> (Result);
