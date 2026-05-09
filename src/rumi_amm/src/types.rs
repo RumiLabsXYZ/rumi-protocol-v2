@@ -180,6 +180,7 @@ pub enum AmmAdminAction {
     SetMaintenanceMode { enabled: bool },
     ClaimPending { claim_id: u64, claimant: Principal, amount: u128 },
     ResolvePendingClaim { claim_id: u64 },
+    SetProtocolBackendPrincipal { principal: Principal },
 }
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]

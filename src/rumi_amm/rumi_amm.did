@@ -139,6 +139,7 @@ type AmmAdminAction = variant {
   SetMaintenanceMode : record { enabled : bool };
   ClaimPending : record { claim_id : nat64; claimant : principal; amount : nat };
   ResolvePendingClaim : record { claim_id : nat64 };
+  SetProtocolBackendPrincipal : record { principal : principal };
 };
 
 type AmmAdminEvent = record {
@@ -299,6 +300,7 @@ service : (AmmInitArgs) -> {
   is_maintenance_mode : () -> (bool) query;
   set_admin : (principal) -> (variant { Ok; Err : AmmError });
   set_maintenance_mode : (bool) -> (variant { Ok; Err : AmmError });
+  set_protocol_backend_principal : (principal) -> (variant { Ok; Err : AmmError });
 
   // ── Pool Creation (permissionless when open, otherwise admin-only) ──
   create_pool : (CreatePoolArgs) -> (variant { Ok : text; Err : AmmError });

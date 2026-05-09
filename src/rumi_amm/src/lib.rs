@@ -715,6 +715,23 @@ fn set_maintenance_mode(enabled: bool) -> Result<(), AmmError> {
     Ok(())
 }
 
+/// Configure which principal is allowed to call `notify_reward_received`.
+/// Required before AMM1 earnings distribution can begin. Only callable
+/// by admin. Set to the rumi_protocol_backend canister principal.
+#[update]
+fn set_protocol_backend_principal(principal: Principal) -> Result<(), AmmError> {
+    caller_is_admin()?;
+    mutate_state(|s| s.protocol_backend_principal = Some(principal));
+    log!(INFO, "Protocol backend principal set to: {}", principal);
+    mutate_state(|s| {
+        s.record_admin_event(
+            ic_cdk::caller(),
+            AmmAdminAction::SetProtocolBackendPrincipal { principal },
+        );
+    });
+    Ok(())
+}
+
 // ─── Claims ───
 
 /// Retry a failed outbound transfer. The original claimant or admin can call this.
