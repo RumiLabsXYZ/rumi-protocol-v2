@@ -4,7 +4,13 @@
   import { protocolService } from '$lib/services/protocol';
   import { formatNumber, formatStableDisplay, formatStableTx } from '$lib/utils/format';
   import ProtocolStats from '$lib/components/dashboard/ProtocolStats.svelte';
-  
+  import {
+    getAmm1Apy,
+    getPendingEarnings,
+    claimAmm1Rewards,
+    type Amm1ApyResult,
+  } from '$lib/services/amm1ApyService';
+
   // Component state
   let isConnected = false;
   let icpPrice = 0;
@@ -20,19 +26,71 @@
   let actionInProgress = false;
   let errorMessage = '';
   let successMessage = '';
-  
+
+  // AMM1 (3USD/ICP) APY + pending earnings state
+  let apy: Amm1ApyResult = {
+    total_apy_pct: 0,
+    trading_fee_apy_pct: 0,
+    reward_apy_pct: 0,
+    avg_tvl_7d_usd: 0,
+    fees_7d_usd: 0,
+    rewards_7d_usd: 0,
+    source_window_days: 7,
+  };
+  let pendingE8s: bigint = 0n;
+  let claiming = false;
+  let claimMessage = '';
+  // Matches MIN_CLAIM_E8S in the rumi_amm canister.
+  const MIN_CLAIM_E8S: bigint = 100_000n;
+
   // Form values
   let provideAmount = 0;
   let withdrawAmount = 0;
-  
+
   // Store the current wallet state
   let currentWalletState: any;
-  
+
   // Subscribe to wallet state
   wallet.subscribe(state => {
     isConnected = state.isConnected;
     currentWalletState = state;
   });
+
+  async function refreshAmm1() {
+    try {
+      apy = await getAmm1Apy();
+    } catch (e) {
+      console.warn('Failed to refresh AMM1 APY:', e);
+    }
+    if (isConnected && currentWalletState?.principal) {
+      try {
+        pendingE8s = await getPendingEarnings(currentWalletState.principal.toText());
+      } catch (e) {
+        console.warn('Failed to fetch AMM1 pending earnings:', e);
+        pendingE8s = 0n;
+      }
+    } else {
+      pendingE8s = 0n;
+    }
+  }
+
+  async function handleClaim() {
+    claiming = true;
+    claimMessage = '';
+    try {
+      const result = await claimAmm1Rewards();
+      if ('claimed_e8s' in result) {
+        claimMessage = `Claimed ${(Number(result.claimed_e8s) / 1e8).toFixed(4)} icUSD`;
+        pendingE8s = 0n;
+      } else {
+        claimMessage = `Error: ${result.error}`;
+      }
+    } finally {
+      claiming = false;
+      // Refresh after claim regardless of outcome.
+      await refreshAmm1();
+    }
+  }
   
   // Fetch protocol data and user's liquidity status
   async function fetchData() {
@@ -106,6 +164,10 @@
         provideAmount = 0;
         // Refresh data
         await fetchData();
+        // Refresh AMM1 pending earnings — provide/withdraw auto-settles
+        // pending rewards in the AMM canister, so the displayed value
+        // should drop to 0 immediately after.
+        await refreshAmm1();
       } else {
         errorMessage = result.error || 'Failed to provide liquidity';
       }
@@ -136,6 +198,8 @@
         withdrawAmount = 0;
         // Refresh data
         await fetchData();
+        // Refresh AMM1 pending — see handleProvideLiquidity comment.
+        await refreshAmm1();
       } else {
         errorMessage = result.error || 'Failed to withdraw liquidity';
       }
@@ -185,7 +249,10 @@
      ? liquidityStatus.totalLiquidityProvided * icpPrice 
      : 0;
   
-  onMount(fetchData);
+  onMount(() => {
+    fetchData();
+    refreshAmm1();
+  });
 </script>
 
 <svelte:head>
@@ -205,7 +272,36 @@
     
     <ProtocolStats />
   </section>
-  
+
+  <section class="apy-banner glass-card max-w-4xl mx-auto mb-8">
+    <div class="apy-headline">{apy.total_apy_pct.toFixed(1)}% APY</div>
+    <div class="apy-subtitle">
+      {apy.trading_fee_apy_pct.toFixed(1)}% trading fees +
+      {apy.reward_apy_pct.toFixed(1)}% protocol earnings
+    </div>
+    <div class="apy-source">3USD/ICP pool, 7-day window</div>
+  </section>
+
+  {#if isConnected}
+    <section class="earnings-panel glass-card max-w-4xl mx-auto mb-8">
+      <h3 class="earnings-title">Pending Earnings</h3>
+      <div class="earnings-amount">{(Number(pendingE8s) / 1e8).toFixed(4)} icUSD</div>
+      <button
+        class="claim-button"
+        on:click={handleClaim}
+        disabled={pendingE8s < MIN_CLAIM_E8S || claiming}
+      >
+        {claiming ? 'Claiming...' : 'Claim Earnings'}
+      </button>
+      {#if pendingE8s > 0n && pendingE8s < MIN_CLAIM_E8S}
+        <p class="hint">Minimum claim is 0.001 icUSD.</p>
+      {/if}
+      {#if claimMessage}
+        <p class="claim-message">{claimMessage}</p>
+      {/if}
+    </section>
+  {/if}
+
   {#if isConnected}
     <!-- User Liquidity Status -->
     <section class="mb-12">
@@ -394,13 +490,85 @@
   .glass-card {
     @apply bg-gray-800/40 backdrop-blur-lg border border-gray-700/50 rounded-lg p-6;
   }
-  
+
+  .apy-banner {
+    text-align: center;
+  }
+
+  .apy-headline {
+    font-size: 2.5rem;
+    font-weight: 700;
+    background-image: linear-gradient(to right, #f472b6, #a855f7);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    line-height: 1.1;
+  }
+
+  .apy-subtitle {
+    margin-top: 0.5rem;
+    font-size: 1rem;
+    color: rgb(209 213 219);
+  }
+
+  .apy-source {
+    margin-top: 0.25rem;
+    font-size: 0.75rem;
+    color: rgb(156 163 175);
+  }
+
+  .earnings-panel {
+    text-align: left;
+  }
+
+  .earnings-title {
+    font-size: 1.125rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+  }
+
+  .earnings-amount {
+    font-size: 1.875rem;
+    font-weight: 700;
+    margin-bottom: 1rem;
+  }
+
+  .claim-button {
+    padding: 0.625rem 1.25rem;
+    background-image: linear-gradient(to right, #2563eb, #9333ea);
+    color: white;
+    font-weight: 500;
+    border-radius: 0.5rem;
+    transition: opacity 0.15s;
+  }
+
+  .claim-button:hover:not(:disabled) {
+    opacity: 0.9;
+  }
+
+  .claim-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .hint {
+    margin-top: 0.5rem;
+    font-size: 0.8125rem;
+    color: rgb(156 163 175);
+  }
+
+  .claim-message {
+    margin-top: 0.5rem;
+    font-size: 0.875rem;
+    color: rgb(209 213 219);
+  }
+
   input::-webkit-outer-spin-button,
   input::-webkit-inner-spin-button {
     -webkit-appearance: none;
     margin: 0;
   }
-  
+
   input[type=number] {
     -moz-appearance: textfield;
   }
