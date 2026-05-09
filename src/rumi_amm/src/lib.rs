@@ -1236,12 +1236,25 @@ async fn add_liquidity(
         });
     }
 
-    // Update state
+    // Update state (with reward bookkeeping).
     mutate_state(|s| {
         let pool = s.pools.get_mut(&pool_id).expect("pool exists");
 
-        if pool.total_lp_shares == 0 {
-            // First deposit: lock MINIMUM_LIQUIDITY to zero address
+        // Snapshot pre-update state for reward bookkeeping.
+        let was_first_liquidity = pool.total_lp_shares == 0;
+        let existing_caller_shares = pool.lp_shares.get(&caller).copied().unwrap_or(0);
+        let acc_pre_update = pool.acc_reward_per_share;
+
+        // 1. Settle caller's existing rewards before share change.
+        // No-op for first depositor (existing_caller_shares == 0).
+        {
+            let entry = pool.lp_rewards.entry(caller).or_default();
+            crate::rewards::settle(entry, existing_caller_shares, acc_pre_update);
+        }
+
+        // 2. Apply share update (existing logic).
+        if was_first_liquidity {
+            // First deposit: lock MINIMUM_LIQUIDITY to zero address.
             let user_shares = shares - MINIMUM_LIQUIDITY;
             pool.lp_shares.insert(Principal::anonymous(), MINIMUM_LIQUIDITY);
             *pool.lp_shares.entry(caller).or_insert(0) += user_shares;
@@ -1256,6 +1269,36 @@ async fn add_liquidity(
 
         pool.reserve_a += amount_a;
         pool.reserve_b += amount_b;
+
+        // 3. Reset caller's reward_debt against the PRE-DRAIN accumulator.
+        // Crucial: this positions the caller to RECEIVE their pro-rata of
+        // any subsequent drain (and any future donation) via the standard
+        // accumulator math: pending = shares * (acc_post - acc_pre).
+        // Doing this AFTER the drain instead would zero out their share
+        // of the drain, since reward_debt would equal shares * acc_post.
+        let new_caller_shares = pool.lp_shares.get(&caller).copied().unwrap_or(0);
+        {
+            let entry = pool.lp_rewards.entry(caller).or_default();
+            crate::rewards::reset_debt(entry, new_caller_shares, acc_pre_update);
+        }
+
+        // 4. On first-liquidity transition, drain pending_no_lp into accumulator.
+        // This is logically a synthetic donation that occurs AFTER the new
+        // shares are recognized, so the standard accumulator math credits
+        // the new shareholders pro-rata. (The anonymous burn-share's
+        // pro-rata is permanently stranded — accepted as a tiny rounding
+        // loss since MINIMUM_LIQUIDITY is small.)
+        if was_first_liquidity && pool.pending_no_lp > 0 && pool.total_lp_shares > 0 {
+            let buffered = pool.pending_no_lp;
+            pool.acc_reward_per_share = crate::rewards::accumulate(
+                pool.acc_reward_per_share,
+                buffered,
+                pool.total_lp_shares,
+            );
+            pool.total_rewards_distributed = pool.total_rewards_distributed.saturating_add(buffered);
+            pool.pending_no_lp = 0;
+            log!(INFO, "[add_liquidity] drained pending_no_lp {} into acc for pool {}", buffered, pool_id);
+        }
     });
 
     mutate_state(|s| {
