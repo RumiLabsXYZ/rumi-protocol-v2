@@ -21,6 +21,9 @@ pub const MAX_REWARD_EVENTS: usize = 50_000;
 pub const MAX_CLAIM_EVENTS: usize = 50_000;
 pub const MAX_PROCESSED_NONCES: usize = 1024;
 pub const REWARD_SCALE: u128 = 1_000_000_000_000; // 1e12 fixed-point for acc_reward_per_share
+/// Minimum claimable amount: 10x the icUSD ledger fee (assumed 10000 e8s = 0.0001 icUSD).
+/// Below this threshold a claim would net negative on the user.
+pub const MIN_CLAIM_E8S: u128 = 100_000;
 
 // ─── State ───
 

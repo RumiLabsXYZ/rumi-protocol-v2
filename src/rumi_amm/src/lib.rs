@@ -20,7 +20,7 @@ use crate::types::*;
 use crate::state::{mutate_state, read_state, MAX_PROCESSED_NONCES};
 use crate::math::{compute_swap, compute_initial_lp_shares, compute_proportional_lp_shares,
                    compute_remove_liquidity, MINIMUM_LIQUIDITY};
-use crate::transfers::{transfer_from_user, transfer_to_user};
+use crate::transfers::{transfer_from_user, transfer_reward_icusd, transfer_to_user};
 use crate::logs::INFO;
 
 // ─── Per-pool reentrancy guard ───
@@ -857,6 +857,84 @@ pub async fn notify_reward_received(
     })?;
 
     Ok(())
+}
+
+/// Claim accumulated reward icUSD for the caller. Settles pending into
+/// claimable, transfers claimable, zeroes claimable on success. On
+/// transfer failure, restores claimable so the caller can retry.
+#[update]
+pub async fn claim_rewards(pool_id: PoolId) -> Result<u128, AmmError> {
+    let caller = ic_cdk::caller();
+    if caller == Principal::anonymous() {
+        return Err(AmmError::Unauthorized);
+    }
+
+    let _guard = PoolGuard::new(pool_id.clone())?;
+
+    // Phase 1: settle pending into claimable, snapshot the amount, persist.
+    let amount = mutate_state(|s| -> Result<u128, AmmError> {
+        let pool = s.pools.get_mut(&pool_id).ok_or(AmmError::PoolNotFound)?;
+        let shares = pool.lp_shares.get(&caller).copied().unwrap_or(0);
+        let acc = pool.acc_reward_per_share;
+        let entry = pool.lp_rewards.entry(caller).or_default();
+
+        crate::rewards::settle(entry, shares, acc);
+        crate::rewards::reset_debt(entry, shares, acc);
+
+        let claimable = entry.claimable;
+        if claimable < crate::state::MIN_CLAIM_E8S {
+            return Err(AmmError::BelowMinClaim {
+                claimable,
+                min: crate::state::MIN_CLAIM_E8S,
+            });
+        }
+        // Optimistically zero claimable; will be restored on transfer fail.
+        entry.claimable = 0;
+        Ok(claimable)
+    })?;
+
+    // Phase 2: ICRC-1 transfer to caller from the reward subaccount.
+    let transfer_result = transfer_reward_icusd(&pool_id, caller, amount).await;
+
+    match transfer_result {
+        Ok(_block_index) => {
+            mutate_state(|s| {
+                if let Some(pool) = s.pools.get_mut(&pool_id) {
+                    pool.reward_balance_snapshot =
+                        pool.reward_balance_snapshot.saturating_sub(amount);
+                }
+                s.record_claim_event(pool_id.clone(), caller, amount);
+            });
+            Ok(amount)
+        }
+        Err(e) => {
+            // Restore claimable on failure (the user can retry).
+            mutate_state(|s| {
+                if let Some(pool) = s.pools.get_mut(&pool_id) {
+                    if let Some(entry) = pool.lp_rewards.get_mut(&caller) {
+                        entry.claimable = entry.claimable.saturating_add(amount);
+                    }
+                }
+            });
+            Err(AmmError::RewardLedgerTransferFailed { reason: e })
+        }
+    }
+}
+
+/// Read-only pending reward calculation for UI display.
+#[query]
+pub fn get_pending_rewards(pool_id: PoolId, principal: Principal) -> Nat {
+    read_state(|s| {
+        let Some(pool) = s.pools.get(&pool_id) else {
+            return Nat::from(0u64);
+        };
+        let shares = pool.lp_shares.get(&principal).copied().unwrap_or(0);
+        let entry = pool.lp_rewards.get(&principal);
+        let claimable = entry.map(|e| e.claimable).unwrap_or(0);
+        let debt = entry.map(|e| e.reward_debt).unwrap_or(0);
+        let unsettled = crate::rewards::pending(shares, pool.acc_reward_per_share, debt);
+        Nat::from(claimable.saturating_add(unsettled))
+    })
 }
 
 // ─── Claims ───
