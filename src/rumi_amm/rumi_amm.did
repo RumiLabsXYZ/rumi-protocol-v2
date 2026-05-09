@@ -301,6 +301,7 @@ service : (AmmInitArgs) -> {
   set_admin : (principal) -> (variant { Ok; Err : AmmError });
   set_maintenance_mode : (bool) -> (variant { Ok; Err : AmmError });
   set_protocol_backend_principal : (principal) -> (variant { Ok; Err : AmmError });
+  notify_reward_received : (text, nat, nat64) -> (variant { Ok; Err : AmmError });
 
   // ── Pool Creation (permissionless when open, otherwise admin-only) ──
   create_pool : (CreatePoolArgs) -> (variant { Ok : text; Err : AmmError });

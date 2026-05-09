@@ -17,7 +17,7 @@ pub mod analytics;
 mod logs;
 
 use crate::types::*;
-use crate::state::{mutate_state, read_state};
+use crate::state::{mutate_state, read_state, MAX_PROCESSED_NONCES};
 use crate::math::{compute_swap, compute_initial_lp_shares, compute_proportional_lp_shares,
                    compute_remove_liquidity, MINIMUM_LIQUIDITY};
 use crate::transfers::{transfer_from_user, transfer_to_user};
@@ -732,6 +732,55 @@ fn set_protocol_backend_principal(principal: Principal) -> Result<(), AmmError> 
             AmmAdminAction::SetProtocolBackendPrincipal { principal },
         );
     });
+    Ok(())
+}
+
+/// Receive a reward donation from the protocol backend. The caller is
+/// expected to have already minted/transferred `amount` icUSD to this
+/// canister; this call only updates the accumulator. Idempotent on
+/// duplicate `nonce`.
+///
+/// Phase 1 (this task): auth + nonce dedup only. Balance verification
+/// and accumulator bump arrive in Task 6.
+#[update]
+pub async fn notify_reward_received(
+    pool_id: PoolId,
+    _amount: u128,
+    nonce: u64,
+) -> Result<(), AmmError> {
+    // 1. Caller restriction: only the configured protocol backend principal.
+    let caller = ic_cdk::caller();
+    let authorized = read_state(|s| s.protocol_backend_principal);
+    match authorized {
+        Some(p) if p == caller => {}
+        _ => return Err(AmmError::Unauthorized),
+    }
+
+    // 2. Acquire pool guard before any await. Released via Drop on return.
+    let _guard = PoolGuard::new(pool_id.clone())?;
+
+    // 3. Dedup on nonce. Returning Ok lets the backend treat retries safely.
+    let already_processed = read_state(|s| {
+        s.pools
+            .get(&pool_id)
+            .map(|p| p.processed_donation_nonces.contains(&nonce))
+            .unwrap_or(false)
+    });
+    if already_processed {
+        log!(INFO, "[notify_reward_received] dedup on nonce {} for pool {}", nonce, pool_id);
+        return Ok(());
+    }
+
+    // 4. Record the nonce. Balance check + accumulator bump arrive in Task 6.
+    mutate_state(|s| {
+        let pool = s.pools.get_mut(&pool_id).ok_or(AmmError::PoolNotFound)?;
+        pool.processed_donation_nonces.push_back(nonce);
+        while pool.processed_donation_nonces.len() > MAX_PROCESSED_NONCES {
+            pool.processed_donation_nonces.pop_front();
+        }
+        Ok::<(), AmmError>(())
+    })?;
+
     Ok(())
 }
 
