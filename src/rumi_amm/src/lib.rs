@@ -521,6 +521,12 @@ fn create_pool(args: CreatePoolArgs) -> Result<PoolId, AmmError> {
             paused: false,
             subaccount_a,
             subaccount_b,
+            lp_rewards: BTreeMap::new(),
+            acc_reward_per_share: 0,
+            pending_no_lp: 0,
+            total_rewards_distributed: 0,
+            processed_donation_nonces: std::collections::VecDeque::new(),
+            reward_balance_snapshot: 0,
         };
 
         log!(INFO, "Pool created: {} (fee: {} bps, admin: {})", pool_id, args.fee_bps, is_admin);

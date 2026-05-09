@@ -735,6 +735,12 @@ mod tests {
             paused: false,
             subaccount_a: [0; 32],
             subaccount_b: [0; 32],
+            lp_rewards: BTreeMap::new(),
+            acc_reward_per_share: 0,
+            pending_no_lp: 0,
+            total_rewards_distributed: 0,
+            processed_donation_nonces: std::collections::VecDeque::new(),
+            reward_balance_snapshot: 0,
         };
         pool.lp_shares.insert(alice(), 600_000);
         pool.lp_shares.insert(bob(), 400_000);

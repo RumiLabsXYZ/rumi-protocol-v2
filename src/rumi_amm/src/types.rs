@@ -33,6 +33,32 @@ pub struct Pool {
     pub paused: bool,
     pub subaccount_a: [u8; 32],
     pub subaccount_b: [u8; 32],
+
+    // ─── Reward distribution (added 2026-05-09) ───
+    /// Per-LP reward bookkeeping (parallel to `lp_shares`).
+    #[serde(default)]
+    pub lp_rewards: BTreeMap<Principal, RewardState>,
+    /// Accumulator: total rewards distributed per share, scaled by `REWARD_SCALE` (1e12).
+    #[serde(default)]
+    pub acc_reward_per_share: u128,
+    /// Buffer for donations that arrive while `total_lp_shares == 0`.
+    /// Drained on the next `add_liquidity` that produces positive shares.
+    #[serde(default)]
+    pub pending_no_lp: u128,
+    /// Lifetime sum of rewards distributed to this pool. Analytics only.
+    #[serde(default)]
+    pub total_rewards_distributed: u128,
+    /// Recently processed donation nonces (ring buffer, oldest first).
+    /// Bounded by `MAX_PROCESSED_NONCES` to prevent unbounded growth.
+    #[serde(default)]
+    pub processed_donation_nonces: std::collections::VecDeque<u64>,
+    /// Last verified on-chain icUSD balance held in the per-pool reward
+    /// subaccount. Used by `notify_reward_received` to verify the
+    /// donation amount actually arrived. Updated on every successful
+    /// notify (snapshot += amount) and on every successful claim
+    /// (snapshot -= amount).
+    #[serde(default)]
+    pub reward_balance_snapshot: u128,
 }
 
 // ─── Init Args ───
@@ -291,4 +317,42 @@ pub enum AmmError {
     MaintenanceMode,
     ClaimNotFound,
     PoolBusy,
+    DuplicateNonce,
+    NoLiquidity,
+    BelowMinClaim { claimable: u128, min: u128 },
+    RewardLedgerTransferFailed { reason: String },
+    InsufficientOnChainBalance { expected: u128, actual: u128 },
+}
+
+// ─── Reward state (per LP) ───
+
+/// Per-LP reward bookkeeping. Lives in a parallel map alongside `lp_shares`.
+/// `reward_debt` is `shares * acc_reward_per_share / 1e12` at last settle.
+/// `claimable` accumulates settled rewards that the LP has not yet claimed,
+/// and persists across share changes (including full removal).
+#[derive(CandidType, Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RewardState {
+    pub reward_debt: u128,
+    pub claimable: u128,
+}
+
+// ─── Reward events ───
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct AmmRewardEvent {
+    pub id: u64,
+    pub pool_id: PoolId,
+    pub amount: u128,
+    pub total_shares_at_time: u128,
+    pub nonce: u64,
+    pub timestamp: u64,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct AmmClaimEvent {
+    pub id: u64,
+    pub pool_id: PoolId,
+    pub claimant: Principal,
+    pub amount: u128,
+    pub timestamp: u64,
 }
