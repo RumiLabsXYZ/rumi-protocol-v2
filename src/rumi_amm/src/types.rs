@@ -358,3 +358,26 @@ pub struct AmmClaimEvent {
     pub amount: u128,
     pub timestamp: u64,
 }
+
+// ─── TVL sampling (added 2026-05-09) ───
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct TvlSample {
+    pub pool_id: PoolId,
+    pub timestamp: u64,
+    pub reserve_a: u128,
+    pub reserve_b: u128,
+    /// USD per token_a in e8s (3USD assumed at 1.00).
+    pub price_a_e8s: u128,
+    /// USD per token_b in e8s.
+    pub price_b_e8s: u128,
+    /// Computed: reserve_a * price_a_e8s / 1e8 + reserve_b * price_b_e8s / 1e8.
+    pub tvl_usd_e8s: u128,
+}
+
+/// Lightweight shape for the cross-canister call to rumi_protocol_backend's
+/// `get_icp_usd_price_e8s` query. Only the price field is needed.
+#[derive(CandidType, Clone, Debug, Deserialize)]
+pub struct ProtocolStatusLite {
+    pub price_e8s: u128,
+}

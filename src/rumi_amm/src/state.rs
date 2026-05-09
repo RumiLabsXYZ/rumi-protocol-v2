@@ -29,6 +29,7 @@ pub const MIN_CLAIM_E8S: u128 = 100_000;
 /// ledger and sets `reward_balance_snapshot = on_chain` so any drift between
 /// this constant and the live ledger fee self-heals on the next interaction.
 pub const ICUSD_LEDGER_FEE_E8S: u128 = 10_000;
+pub const MAX_TVL_SAMPLES: usize = 800; // ~30 months at 1/day; ~5.5 months at 4/day
 
 // ─── State ───
 
@@ -71,6 +72,8 @@ pub struct AmmState {
     /// authorized) until configured.
     #[serde(default)]
     pub protocol_backend_principal: Option<Principal>,
+    #[serde(default)]
+    pub tvl_samples: Vec<TvlSample>,
 }
 
 impl Default for AmmState {
@@ -94,6 +97,7 @@ impl Default for AmmState {
             claim_events: Vec::new(),
             next_claim_event_id: 0,
             protocol_backend_principal: None,
+            tvl_samples: Vec::new(),
         }
     }
 }
@@ -323,6 +327,7 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             claim_events: Vec::new(),
             next_claim_event_id: 0,
             protocol_backend_principal: None,
+            tvl_samples: Vec::new(),
         });
     }
     if let Ok(v3) = Decode!(bytes, AmmStateV3) {
@@ -345,6 +350,7 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             claim_events: Vec::new(),
             next_claim_event_id: 0,
             protocol_backend_principal: None,
+            tvl_samples: Vec::new(),
         });
     }
     if let Ok(v2) = Decode!(bytes, AmmStateV2) {
@@ -367,6 +373,7 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             claim_events: Vec::new(),
             next_claim_event_id: 0,
             protocol_backend_principal: None,
+            tvl_samples: Vec::new(),
         });
     }
     if let Ok(v1) = Decode!(bytes, AmmStateV1) {
@@ -389,6 +396,7 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             claim_events: Vec::new(),
             next_claim_event_id: 0,
             protocol_backend_principal: None,
+            tvl_samples: Vec::new(),
         });
     }
     None

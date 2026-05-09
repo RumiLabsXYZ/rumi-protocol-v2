@@ -269,6 +269,16 @@ type DailyRewardPoint = record {
   amount : nat;
 };
 
+type TvlSample = record {
+  pool_id : text;
+  timestamp : nat64;
+  reserve_a : nat;
+  reserve_b : nat;
+  price_a_e8s : nat;
+  price_b_e8s : nat;
+  tvl_usd_e8s : nat;
+};
+
 // ── HTTP Request ──
 
 type HeaderField = record { text; text };
@@ -354,6 +364,7 @@ service : (AmmInitArgs) -> {
   get_amm_liquidity_events_by_principal : (AmmEventsByPrincipalQuery) -> (vec AmmLiquidityEvent) query;
   get_amm_swap_events_by_time_range : (AmmEventsByTimeRangeQuery) -> (vec AmmSwapEvent) query;
   get_amm_reward_series : (text, nat32) -> (vec DailyRewardPoint) query;
+  get_amm_tvl_series : (text, nat32) -> (vec TvlSample) query;
 
   // ── HTTP ──
   http_request : (HttpRequest) -> (HttpResponse) query;

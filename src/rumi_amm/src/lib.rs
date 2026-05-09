@@ -382,6 +382,87 @@ async fn collect_3usd_holders() -> Result<HolderSnapshot, String> {
     })
 }
 
+// ─── TVL Sampler (added 2026-05-09 for amm1ApyService) ───
+
+const TVL_SAMPLE_INTERVAL_SECS: u64 = 6 * 3600; // 4 samples/day
+
+fn setup_tvl_sample_timer() {
+    // First sample 90s after boot (let supply cache + protocol_backend_principal config arrive).
+    ic_cdk_timers::set_timer(std::time::Duration::from_secs(90), || {
+        ic_cdk::spawn(sample_tvl_for_all_pools());
+    });
+    ic_cdk_timers::set_timer_interval(
+        std::time::Duration::from_secs(TVL_SAMPLE_INTERVAL_SECS),
+        || ic_cdk::spawn(sample_tvl_for_all_pools()),
+    );
+}
+
+async fn sample_tvl_for_all_pools() {
+    // Price source: ICP/USD comes from rumi_protocol_backend.get_icp_usd_price_e8s.
+    // 3USD assumed at $1.00 (peg). Documented limitation: if the peg ever depegs,
+    // this sample is inaccurate.
+    let pool_ids: Vec<PoolId> = read_state(|s| s.pools.keys().cloned().collect());
+    if pool_ids.is_empty() {
+        return;
+    }
+
+    let icp_price = match fetch_icp_price_e8s().await {
+        Ok(p) if p > 0 => p,
+        Ok(_) => {
+            log!(INFO, "[tvl_sample] icp price returned 0; skipping sample");
+            return;
+        }
+        Err(e) => {
+            log!(INFO, "[tvl_sample] icp price fetch failed: {}; skipping sample", e);
+            return;
+        }
+    };
+
+    let three_usd_price_e8s: u128 = 100_000_000; // $1.00 in e8s
+
+    for pool_id in pool_ids {
+        mutate_state(|s| {
+            let pool = match s.pools.get(&pool_id) {
+                Some(p) => p,
+                None => return,
+            };
+            // tvl_usd_e8s = reserve_a * price_a / 1e8 + reserve_b * price_b / 1e8
+            let tvl_a = pool.reserve_a.saturating_mul(three_usd_price_e8s) / 100_000_000;
+            let tvl_b = pool.reserve_b.saturating_mul(icp_price) / 100_000_000;
+            let tvl_usd_e8s = tvl_a.saturating_add(tvl_b);
+
+            let sample = TvlSample {
+                pool_id: pool_id.clone(),
+                timestamp: ic_cdk::api::time(),
+                reserve_a: pool.reserve_a,
+                reserve_b: pool.reserve_b,
+                price_a_e8s: three_usd_price_e8s,
+                price_b_e8s: icp_price,
+                tvl_usd_e8s,
+            };
+            s.tvl_samples.push(sample);
+            while s.tvl_samples.len() > crate::state::MAX_TVL_SAMPLES {
+                s.tvl_samples.remove(0);
+            }
+        });
+    }
+}
+
+async fn fetch_icp_price_e8s() -> Result<u128, String> {
+    // Re-uses protocol_backend_principal as the source for the price query.
+    // If the backend hasn't been configured yet, or it doesn't yet have the
+    // get_icp_usd_price_e8s query (deploys can land in either order), the
+    // call fails gracefully and the sampler skips this tick.
+    let backend = read_state(|s| s.protocol_backend_principal)
+        .ok_or_else(|| "protocol_backend_principal not configured".to_string())?;
+    let result: Result<(ProtocolStatusLite,), _> =
+        ic_cdk::call(backend, "get_icp_usd_price_e8s", ()).await;
+    match result {
+        Ok((p,)) => Ok(p.price_e8s),
+        Err((code, msg)) => Err(format!("call failed: {:?} {}", code, msg)),
+    }
+}
+
 // ─── Init / Upgrade ───
 
 #[init]
@@ -397,6 +478,7 @@ fn init(args: AmmInitArgs) {
     mutate_state(|s| s.initialize(args));
     setup_supply_timer();
     setup_snapshot_timer();
+    setup_tvl_sample_timer();
     log!(INFO, "Rumi AMM initialized. Admin: {}", read_state(|s| s.admin));
 }
 
@@ -414,6 +496,7 @@ fn post_upgrade(_args: AmmInitArgs) {
     state::load_from_stable_memory();
     setup_supply_timer();
     setup_snapshot_timer();
+    setup_tvl_sample_timer();
     log!(INFO, "Rumi AMM post-upgrade: state restored. {} pools, {} snapshots",
         read_state(|s| s.pools.len()),
         read_state(|s| s.holder_snapshots.len()));
@@ -1683,6 +1766,19 @@ pub fn get_amm_reward_series(pool_id: PoolId, window_days: u32) -> Vec<crate::an
             window_days,
             ic_cdk::api::time(),
         )
+    })
+}
+
+#[query]
+pub fn get_amm_tvl_series(pool_id: PoolId, window_days: u32) -> Vec<TvlSample> {
+    read_state(|s| {
+        let now = ic_cdk::api::time();
+        let cutoff = now.saturating_sub((window_days as u64).saturating_mul(86_400 * 1_000_000_000));
+        s.tvl_samples
+            .iter()
+            .filter(|s| s.pool_id == pool_id && s.timestamp >= cutoff)
+            .cloned()
+            .collect()
     })
 }
 
