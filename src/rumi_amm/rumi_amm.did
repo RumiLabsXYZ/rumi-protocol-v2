@@ -139,7 +139,7 @@ type AmmAdminAction = variant {
   SetMaintenanceMode : record { enabled : bool };
   ClaimPending : record { claim_id : nat64; claimant : principal; amount : nat };
   ResolvePendingClaim : record { claim_id : nat64 };
-  SetProtocolBackendPrincipal : record { principal : principal };
+  SetProtocolBackendPrincipal : record { backend : principal };
 };
 
 type AmmAdminEvent = record {

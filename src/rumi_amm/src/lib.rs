@@ -848,7 +848,7 @@ fn set_protocol_backend_principal(principal: Principal) -> Result<(), AmmError> 
     mutate_state(|s| {
         s.record_admin_event(
             ic_cdk::caller(),
-            AmmAdminAction::SetProtocolBackendPrincipal { principal },
+            AmmAdminAction::SetProtocolBackendPrincipal { backend: principal },
         );
     });
     Ok(())
