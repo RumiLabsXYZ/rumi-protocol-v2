@@ -264,6 +264,11 @@ type AmmPoolStats = record {
   generated_at_ns : nat64;
 };
 
+type DailyRewardPoint = record {
+  day_start_ns : nat64;
+  amount : nat;
+};
+
 // ── HTTP Request ──
 
 type HeaderField = record { text; text };
@@ -348,6 +353,7 @@ service : (AmmInitArgs) -> {
   get_amm_swap_events_by_principal : (AmmEventsByPrincipalQuery) -> (vec AmmSwapEvent) query;
   get_amm_liquidity_events_by_principal : (AmmEventsByPrincipalQuery) -> (vec AmmLiquidityEvent) query;
   get_amm_swap_events_by_time_range : (AmmEventsByTimeRangeQuery) -> (vec AmmSwapEvent) query;
+  get_amm_reward_series : (text, nat32) -> (vec DailyRewardPoint) query;
 
   // ── HTTP ──
   http_request : (HttpRequest) -> (HttpResponse) query;

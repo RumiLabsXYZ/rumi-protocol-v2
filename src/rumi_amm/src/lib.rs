@@ -1674,6 +1674,18 @@ fn get_amm_swap_events_by_time_range(query: AmmEventsByTimeRangeQuery) -> Vec<Am
     analytics::get_swap_events_by_time_range(query)
 }
 
+#[query]
+pub fn get_amm_reward_series(pool_id: PoolId, window_days: u32) -> Vec<crate::analytics::DailyRewardPoint> {
+    read_state(|s| {
+        crate::analytics::build_reward_series(
+            &s.reward_events,
+            &pool_id,
+            window_days,
+            ic_cdk::api::time(),
+        )
+    })
+}
+
 // ─── ICRC-21 / ICRC-28 / ICRC-10 ───
 
 #[update]
