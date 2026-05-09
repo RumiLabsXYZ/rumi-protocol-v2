@@ -529,6 +529,130 @@ enum ThreePoolDonateError {
     PoolPaused,
 }
 
+/// Mint icUSD directly into the AMM1 canister's per-pool reward
+/// subaccount, then call `notify_reward_received` to bump the
+/// per-share accumulator. Idempotent on the supplied `nonce` —
+/// AMM1 dedups on duplicate nonces and returns Ok, so a re-queue
+/// with the same nonce is safe.
+///
+/// Returns Err(amount_e8s) on any failure so the caller can re-queue.
+/// On notify-only failure (mint succeeded but call failed), the icUSD
+/// is already on AMM1 at the reward subaccount; the next retry uses
+/// the SAME nonce, AMM1 detects duplication and the accumulator is
+/// bumped exactly once.
+#[allow(dead_code)]
+async fn donate_icusd_to_amm1(
+    amm_canister: Principal,
+    amount_e8s: u64,
+    nonce: u64,
+) -> Result<(), u64> {
+    let pool_id = "3USD_ICP".to_string();
+    let donate_amount_u128 = amount_e8s as u128;
+
+    // Compute the AMM's reward subaccount client-side.
+    // Must match rumi_amm::reward_subaccount_for: SHA-256("rumi_amm:rewards:" || pool_id)
+    let reward_sub = compute_amm_reward_subaccount(&pool_id);
+
+    // 1. Mint icUSD into amm_canister at the reward subaccount.
+    let icusd = ICUSD::from(amount_e8s);
+    let mint_result = mint_icusd_to_subaccount(icusd, amm_canister, reward_sub).await;
+
+    match mint_result {
+        Ok(block_index) => {
+            log!(INFO, "[treasury] Minted {} icUSD to AMM1 reward subaccount (block {}, nonce {})", amount_e8s, block_index, nonce);
+        }
+        Err(e) => {
+            log!(INFO, "[treasury] WARNING: AMM1 donation mint failed: {:?}, returning {} for re-queue (nonce {})", e, amount_e8s, nonce);
+            return Err(amount_e8s);
+        }
+    }
+
+    // 2. Call notify_reward_received with the nonce.
+    let notify_result: Result<(Result<(), AmmDonateError>,), _> = ic_cdk::call(
+        amm_canister,
+        "notify_reward_received",
+        (pool_id.clone(), donate_amount_u128, nonce),
+    ).await;
+
+    match notify_result {
+        Ok((Ok(()),)) => {
+            log!(INFO, "[treasury] AMM1 acknowledged donation of {} icUSD (nonce {})", amount_e8s, nonce);
+            Ok(())
+        }
+        Ok((Err(e),)) => {
+            log!(INFO, "[treasury] WARNING: AMM1 notify_reward_received returned err: {:?}; will re-queue with same nonce {}", e, nonce);
+            Err(amount_e8s)
+        }
+        Err((code, msg)) => {
+            log!(INFO, "[treasury] WARNING: AMM1 notify_reward_received call failed: {:?} {}; will re-queue with same nonce {}", code, msg, nonce);
+            Err(amount_e8s)
+        }
+    }
+}
+
+/// Compute the per-pool reward subaccount on AMM1.
+/// Must match rumi_amm::reward_subaccount_for.
+#[allow(dead_code)]
+fn compute_amm_reward_subaccount(pool_id: &str) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"rumi_amm:rewards:");
+    h.update(pool_id.as_bytes());
+    let digest = h.finalize();
+    let mut sub = [0u8; 32];
+    sub.copy_from_slice(&digest);
+    sub
+}
+
+/// Mint icUSD to a specific subaccount of `to`. Used by AMM1 reward
+/// flow to deposit icUSD directly into the per-pool reward subaccount
+/// without an extra transfer hop.
+#[allow(dead_code)]
+async fn mint_icusd_to_subaccount(
+    amount: crate::numeric::ICUSD,
+    to: Principal,
+    subaccount: [u8; 32],
+) -> Result<u64, icrc_ledger_types::icrc1::transfer::TransferError> {
+    use icrc_ledger_types::icrc1::account::Account;
+    let (ledger, op_nonce) = crate::state::mutate_state(|s| (s.icusd_ledger_principal, s.next_op_nonce()));
+    crate::management::transfer_idempotent(
+        ledger,
+        None,
+        Account { owner: to, subaccount: Some(subaccount) },
+        amount.to_u64() as u128,
+        op_nonce,
+        None,
+    )
+    .await
+}
+
+/// Mirror of the AMM's AmmError for the notify response.
+/// Only used for deserialization; we treat any Err the same way (re-queue).
+#[derive(CandidType, Deserialize, Clone, Debug)]
+#[allow(dead_code)]
+enum AmmDonateError {
+    PoolBusy,
+    PoolNotFound,
+    Unauthorized,
+    DuplicateNonce,
+    NoLiquidity,
+    BelowMinClaim { claimable: candid::Nat, min: candid::Nat },
+    RewardLedgerTransferFailed { reason: String },
+    InsufficientOnChainBalance { expected: candid::Nat, actual: candid::Nat },
+    PoolPaused,
+    InsufficientLiquidity,
+    InvalidCoinIndex,
+    ZeroAmount,
+    PoolEmpty,
+    SlippageExceeded,
+    TransferFailed { token: String, reason: String },
+    MathOverflow,
+    InvariantNotConverged,
+    InsufficientOutput { expected_min: candid::Nat, actual: candid::Nat },
+    InsufficientLpShares { required: candid::Nat, available: candid::Nat },
+    MaintenanceMode,
+}
+
 // ---------------------------------------------------------------------------
 // Public helpers — mint/transfer + notify
 // ---------------------------------------------------------------------------
