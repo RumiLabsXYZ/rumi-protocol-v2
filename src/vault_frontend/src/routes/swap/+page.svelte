@@ -67,9 +67,9 @@
     </div>
 
     {#if mode === 'swap'}
-      <a class="lp-cta" href="/liquidity">
+      <button class="lp-cta" type="button" on:click={() => { mode = 'liquidity'; liquidityView = 'list'; }}>
         LPs earn ~{lpApyPct.toFixed(1)}% APY → Provide liquidity
-      </a>
+      </button>
     {/if}
   </div>
 </div>
@@ -135,6 +135,10 @@
     padding: 0.5rem 0.75rem;
     border-radius: 0.5rem;
     transition: background-color 0.15s;
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
   }
 
   .lp-cta:hover {
