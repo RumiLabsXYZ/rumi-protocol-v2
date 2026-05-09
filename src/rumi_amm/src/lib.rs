@@ -59,9 +59,45 @@ impl Drop for PoolGuard {
 // ─── Supply Cache (not persisted to stable memory) ───
 
 /// icUSD ledger canister ID on mainnet.
-const ICUSD_LEDGER: &str = "t6bor-paaaa-aaaap-qrd5q-cai";
+pub const ICUSD_LEDGER: &str = "t6bor-paaaa-aaaap-qrd5q-cai";
 /// 3pool canister ID on mainnet (also the 3USD token ledger).
 const THREEPOOL: &str = "fohh4-yyaaa-aaaap-qtkpa-cai";
+
+/// Per-pool subaccount where reward icUSD is held until claimed.
+/// Derived deterministically from the pool ID so the backend can
+/// compute it client-side and target the correct subaccount in its
+/// mint call.
+pub fn reward_subaccount_for(pool_id: &PoolId) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"rumi_amm:rewards:");
+    hasher.update(pool_id.as_bytes());
+    let digest = hasher.finalize();
+    let mut sub = [0u8; 32];
+    sub.copy_from_slice(&digest);
+    sub
+}
+
+/// Query the icUSD ledger for the AMM's reward-subaccount balance.
+async fn query_reward_subaccount_balance(pool_id: &PoolId) -> Result<u128, AmmError> {
+    use icrc_ledger_types::icrc1::account::Account;
+    let icusd_ledger = Principal::from_text(ICUSD_LEDGER)
+        .expect("invalid icUSD ledger principal");
+    let acct = Account {
+        owner: ic_cdk::id(),
+        subaccount: Some(reward_subaccount_for(pool_id)),
+    };
+    let result: Result<(Nat,), _> = ic_cdk::call(
+        icusd_ledger,
+        "icrc1_balance_of",
+        (acct,),
+    ).await;
+    match result {
+        Ok((bal,)) => Ok(bal.0.try_into().unwrap_or(u128::MAX)),
+        Err((code, msg)) => Err(AmmError::RewardLedgerTransferFailed {
+            reason: format!("balance query rejected: {:?} {}", code, msg),
+        }),
+    }
+}
 
 #[derive(Clone, Default)]
 struct SupplyCache {
@@ -736,16 +772,15 @@ fn set_protocol_backend_principal(principal: Principal) -> Result<(), AmmError> 
 }
 
 /// Receive a reward donation from the protocol backend. The caller is
-/// expected to have already minted/transferred `amount` icUSD to this
-/// canister; this call only updates the accumulator. Idempotent on
-/// duplicate `nonce`.
-///
-/// Phase 1 (this task): auth + nonce dedup only. Balance verification
-/// and accumulator bump arrive in Task 6.
+/// expected to have already minted `amount` icUSD into this canister's
+/// per-pool reward subaccount before invoking this call. This call
+/// verifies the on-chain balance grew by at least `amount` and bumps
+/// `acc_reward_per_share` (or buffers in `pending_no_lp` if there are
+/// no LPs yet). Idempotent on duplicate `nonce`.
 #[update]
 pub async fn notify_reward_received(
     pool_id: PoolId,
-    _amount: u128,
+    amount: u128,
     nonce: u64,
 ) -> Result<(), AmmError> {
     // 1. Caller restriction: only the configured protocol backend principal.
@@ -759,7 +794,7 @@ pub async fn notify_reward_received(
     // 2. Acquire pool guard before any await. Released via Drop on return.
     let _guard = PoolGuard::new(pool_id.clone())?;
 
-    // 3. Dedup on nonce. Returning Ok lets the backend treat retries safely.
+    // 3. Early dedup (avoids unnecessary balance query for repeated nonces).
     let already_processed = read_state(|s| {
         s.pools
             .get(&pool_id)
@@ -771,14 +806,54 @@ pub async fn notify_reward_received(
         return Ok(());
     }
 
-    // 4. Record the nonce. Balance check + accumulator bump arrive in Task 6.
-    mutate_state(|s| {
+    // 4. Verify on-chain balance grew by at least `amount` since last snapshot.
+    let on_chain = query_reward_subaccount_balance(&pool_id).await?;
+
+    // 5. Re-check dedup inside the mutate_state lock (race protection
+    // for the await above), then bump accumulator and record nonce.
+    mutate_state(|s| -> Result<(), AmmError> {
         let pool = s.pools.get_mut(&pool_id).ok_or(AmmError::PoolNotFound)?;
+
+        // Re-check dedup under lock.
+        if pool.processed_donation_nonces.contains(&nonce) {
+            return Ok(());
+        }
+
+        // Verify expected balance growth.
+        let expected = pool.reward_balance_snapshot.saturating_add(amount);
+        if on_chain < expected {
+            return Err(AmmError::InsufficientOnChainBalance {
+                expected,
+                actual: on_chain,
+            });
+        }
+
+        // Bump accumulator (or buffer if no LPs).
+        if pool.total_lp_shares > 0 {
+            pool.acc_reward_per_share = crate::rewards::accumulate(
+                pool.acc_reward_per_share,
+                amount,
+                pool.total_lp_shares,
+            );
+        } else {
+            pool.pending_no_lp = pool.pending_no_lp.saturating_add(amount);
+        }
+        pool.total_rewards_distributed = pool.total_rewards_distributed.saturating_add(amount);
+
+        // Update snapshot to match the new on-chain balance.
+        pool.reward_balance_snapshot = on_chain;
+
+        // Record nonce + ring-buffer prune.
         pool.processed_donation_nonces.push_back(nonce);
         while pool.processed_donation_nonces.len() > MAX_PROCESSED_NONCES {
             pool.processed_donation_nonces.pop_front();
         }
-        Ok::<(), AmmError>(())
+
+        // Emit event.
+        let total_shares = pool.total_lp_shares;
+        s.record_reward_event(pool_id.clone(), amount, total_shares, nonce);
+
+        Ok(())
     })?;
 
     Ok(())
