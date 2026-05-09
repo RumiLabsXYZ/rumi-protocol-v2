@@ -696,6 +696,7 @@ fn get_protocol_status() -> ProtocolStatus {
                 rumi_protocol_backend::state::InterestDestination::StabilityPool => "stability_pool".to_string(),
                 rumi_protocol_backend::state::InterestDestination::Treasury => "treasury".to_string(),
                 rumi_protocol_backend::state::InterestDestination::ThreePool => "three_pool".to_string(),
+                rumi_protocol_backend::state::InterestDestination::Amm1 => "amm1".to_string(),
             };
             InterestSplitArg { destination: dest, bps: r.bps }
         }).collect(),
@@ -750,6 +751,7 @@ fn get_protocol_config() -> rumi_protocol_backend::ProtocolConfig {
                 rumi_protocol_backend::state::InterestDestination::StabilityPool => "stability_pool".to_string(),
                 rumi_protocol_backend::state::InterestDestination::Treasury => "treasury".to_string(),
                 rumi_protocol_backend::state::InterestDestination::ThreePool => "three_pool".to_string(),
+                rumi_protocol_backend::state::InterestDestination::Amm1 => "amm1".to_string(),
             };
             InterestSplitArg { destination: dest, bps: r.bps }
         }).collect(),
@@ -4016,6 +4018,7 @@ async fn set_interest_split(recipients: Vec<InterestSplitArg>) -> Result<(), Pro
             "stability_pool" => rumi_protocol_backend::state::InterestDestination::StabilityPool,
             "treasury" => rumi_protocol_backend::state::InterestDestination::Treasury,
             "three_pool" => rumi_protocol_backend::state::InterestDestination::ThreePool,
+            "amm1" => rumi_protocol_backend::state::InterestDestination::Amm1,
             _ => rumi_protocol_backend::state::InterestDestination::Treasury, // fallback
         };
         rumi_protocol_backend::state::InterestRecipient { destination: dest, bps: r.bps }
@@ -4023,9 +4026,9 @@ async fn set_interest_split(recipients: Vec<InterestSplitArg>) -> Result<(), Pro
 
     // Validate destinations are known
     for r in &recipients {
-        if !["stability_pool", "treasury", "three_pool"].contains(&r.destination.as_str()) {
+        if !["stability_pool", "treasury", "three_pool", "amm1"].contains(&r.destination.as_str()) {
             return Err(ProtocolError::GenericError(
-                format!("Unknown destination: '{}'. Valid: stability_pool, treasury, three_pool", r.destination),
+                format!("Unknown destination: '{}'. Valid: stability_pool, treasury, three_pool, amm1", r.destination),
             ));
         }
     }
@@ -4048,6 +4051,7 @@ fn get_interest_split() -> Vec<InterestSplitArg> {
                 rumi_protocol_backend::state::InterestDestination::StabilityPool => "stability_pool".to_string(),
                 rumi_protocol_backend::state::InterestDestination::Treasury => "treasury".to_string(),
                 rumi_protocol_backend::state::InterestDestination::ThreePool => "three_pool".to_string(),
+                rumi_protocol_backend::state::InterestDestination::Amm1 => "amm1".to_string(),
             };
             InterestSplitArg { destination: dest, bps: r.bps }
         }).collect()

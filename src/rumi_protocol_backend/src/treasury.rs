@@ -376,6 +376,16 @@ pub async fn distribute_interest(interest: ICUSD, collateral_type: Principal) ->
                     }
                 }
             }
+            crate::state::InterestDestination::Amm1 => {
+                // AMM1 routing wired in Task 13. Until then, fall back to
+                // treasury so this share is still captured rather than
+                // silently dropped. Mirrors the no-canister fallback used
+                // for ThreePool above.
+                log!(INFO, "[treasury] AMM1 routing not yet wired; sending {} icUSD interest share to treasury", share_e8s);
+                if let Err(unsent) = mint_interest_to_treasury(share).await {
+                    unminted_e8s = unminted_e8s.saturating_add(unsent.to_u64());
+                }
+            }
         }
     }
     ICUSD::from(unminted_e8s)
@@ -451,6 +461,12 @@ pub async fn distribute_stablecoin_interest(
                     log!(INFO, "[treasury] WARNING: 3pool interest share ({} icUSD) has no target canister, sending to treasury instead", share_e8s);
                     let _ = mint_interest_to_treasury(ICUSD::from(share_e8s)).await;
                 }
+            }
+            crate::state::InterestDestination::Amm1 => {
+                // AMM1 routing wired in Task 13. Until then, fall back to
+                // treasury (icUSD mint) so this share is still captured.
+                log!(INFO, "[treasury] AMM1 routing not yet wired; sending {} icUSD interest share to treasury", share_e8s);
+                let _ = mint_interest_to_treasury(ICUSD::from(share_e8s)).await;
             }
         }
     }
