@@ -54,9 +54,10 @@ pub struct Pool {
     pub processed_donation_nonces: std::collections::VecDeque<u64>,
     /// Last verified on-chain icUSD balance held in the per-pool reward
     /// subaccount. Used by `notify_reward_received` to verify the
-    /// donation amount actually arrived. Updated on every successful
-    /// notify (snapshot += amount) and on every successful claim
-    /// (snapshot -= amount).
+    /// donation amount actually arrived. After a successful notify, this
+    /// is set to the live `icrc1_balance_of` reading (capturing any
+    /// over-funding rather than just `+= amount`). After a successful
+    /// claim, it is decremented by the amount transferred out.
     #[serde(default)]
     pub reward_balance_snapshot: u128,
 }
