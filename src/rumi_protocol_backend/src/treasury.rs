@@ -377,13 +377,27 @@ pub async fn distribute_interest(interest: ICUSD, collateral_type: Principal) ->
                 }
             }
             crate::state::InterestDestination::Amm1 => {
-                // AMM1 routing wired in Task 13. Until then, fall back to
-                // treasury so this share is still captured rather than
-                // silently dropped. Mirrors the no-canister fallback used
-                // for ThreePool above.
-                log!(INFO, "[treasury] AMM1 routing not yet wired; sending {} icUSD interest share to treasury", share_e8s);
-                if let Err(unsent) = mint_interest_to_treasury(share).await {
-                    unminted_e8s = unminted_e8s.saturating_add(unsent.to_u64());
+                let (amm_opt, nonce) = crate::state::mutate_state(|s| {
+                    s.amm1_donation_nonce += 1;
+                    (s.amm1_canister, s.amm1_donation_nonce)
+                });
+                if let Some(amm_canister) = amm_opt {
+                    if let Err(unsent_e8s) = donate_icusd_to_amm1(amm_canister, share_e8s, nonce).await {
+                        // Persist (amount, nonce) so retry uses the same nonce.
+                        crate::state::mutate_state(|s| {
+                            s.pending_amm1_donations.push_back((unsent_e8s, nonce));
+                        });
+                        log!(INFO, "[treasury] AMM1 donation failed; queued ({}, nonce {}) for retry", unsent_e8s, nonce);
+                    }
+                    // Note: do NOT add to unminted_e8s. The Amm1 retry queue
+                    // is independent of pending_interest_for_pools; the latter
+                    // would re-split this amount across all destinations
+                    // on next flush, losing the Amm1 association.
+                } else {
+                    log!(INFO, "[treasury] WARNING: AMM1 interest share ({} icUSD) has no target canister configured, sending to treasury instead", share_e8s);
+                    if let Err(unsent) = mint_interest_to_treasury(share).await {
+                        unminted_e8s = unminted_e8s.saturating_add(unsent.to_u64());
+                    }
                 }
             }
         }
@@ -463,10 +477,22 @@ pub async fn distribute_stablecoin_interest(
                 }
             }
             crate::state::InterestDestination::Amm1 => {
-                // AMM1 routing wired in Task 13. Until then, fall back to
-                // treasury (icUSD mint) so this share is still captured.
-                log!(INFO, "[treasury] AMM1 routing not yet wired; sending {} icUSD interest share to treasury", share_e8s);
-                let _ = mint_interest_to_treasury(ICUSD::from(share_e8s)).await;
+                let (amm_opt, nonce) = crate::state::mutate_state(|s| {
+                    s.amm1_donation_nonce += 1;
+                    (s.amm1_canister, s.amm1_donation_nonce)
+                });
+                if let Some(amm_canister) = amm_opt {
+                    if let Err(unsent_e8s) = donate_icusd_to_amm1(amm_canister, share_e8s, nonce).await {
+                        crate::state::mutate_state(|s| {
+                            s.pending_amm1_donations.push_back((unsent_e8s, nonce));
+                        });
+                        log!(INFO, "[treasury] AMM1 stablecoin-interest donation failed; queued ({}, nonce {}) for retry", unsent_e8s, nonce);
+                    }
+                } else {
+                    log!(INFO, "[treasury] WARNING: AMM1 stablecoin interest share ({} icUSD) has no target canister; routing to treasury", share_e8s);
+                    let pool_icusd = ICUSD::from(share_e8s);
+                    let _ = mint_interest_to_treasury(pool_icusd).await;
+                }
             }
         }
     }
@@ -540,7 +566,6 @@ enum ThreePoolDonateError {
 /// is already on AMM1 at the reward subaccount; the next retry uses
 /// the SAME nonce, AMM1 detects duplication and the accumulator is
 /// bumped exactly once.
-#[allow(dead_code)]
 async fn donate_icusd_to_amm1(
     amm_canister: Principal,
     amount_e8s: u64,
@@ -592,7 +617,6 @@ async fn donate_icusd_to_amm1(
 
 /// Compute the per-pool reward subaccount on AMM1.
 /// Must match rumi_amm::reward_subaccount_for.
-#[allow(dead_code)]
 fn compute_amm_reward_subaccount(pool_id: &str) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
@@ -607,7 +631,6 @@ fn compute_amm_reward_subaccount(pool_id: &str) -> [u8; 32] {
 /// Mint icUSD to a specific subaccount of `to`. Used by AMM1 reward
 /// flow to deposit icUSD directly into the per-pool reward subaccount
 /// without an extra transfer hop.
-#[allow(dead_code)]
 async fn mint_icusd_to_subaccount(
     amount: crate::numeric::ICUSD,
     to: Principal,
@@ -629,7 +652,6 @@ async fn mint_icusd_to_subaccount(
 /// Mirror of the AMM's AmmError for the notify response.
 /// Only used for deserialization; we treat any Err the same way (re-queue).
 #[derive(CandidType, Deserialize, Clone, Debug)]
-#[allow(dead_code)]
 enum AmmDonateError {
     PoolBusy,
     PoolNotFound,
@@ -805,6 +827,49 @@ pub async fn flush_pending_interest() {
                 collateral_type,
                 snapshot_e8s,
             );
+        }
+    }
+}
+
+/// Drain the AMM1 retry queue. Each entry is `(amount_e8s, nonce)`;
+/// retries reuse the original nonce so AMM1 dedups correctly. Failed
+/// retries get re-queued at the back. This function is called from
+/// the same timer tick that calls `flush_pending_interest`.
+pub async fn flush_pending_amm1_donations() {
+    let drained: Vec<(u64, u64)> = crate::state::mutate_state(|s| {
+        s.pending_amm1_donations.drain(..).collect()
+    });
+    if drained.is_empty() {
+        return;
+    }
+
+    let amm_opt = read_state(|s| s.amm1_canister);
+    let amm_canister = match amm_opt {
+        Some(p) => p,
+        None => {
+            // Backend principal not configured; restore drained items.
+            crate::state::mutate_state(|s| {
+                for entry in drained {
+                    s.pending_amm1_donations.push_back(entry);
+                }
+            });
+            log!(INFO, "[treasury] AMM1 retry queue: amm1_canister not configured; restoring {} entries", crate::state::read_state(|s| s.pending_amm1_donations.len()));
+            return;
+        }
+    };
+
+    log!(INFO, "[treasury] AMM1 retry queue: draining {} entries", drained.len());
+    for (amount, nonce) in drained {
+        match donate_icusd_to_amm1(amm_canister, amount, nonce).await {
+            Ok(()) => {
+                log!(INFO, "[treasury] AMM1 retry succeeded for ({}, nonce {})", amount, nonce);
+            }
+            Err(unsent) => {
+                crate::state::mutate_state(|s| {
+                    s.pending_amm1_donations.push_back((unsent, nonce));
+                });
+                log!(INFO, "[treasury] AMM1 retry failed for ({}, nonce {}); re-queued", unsent, nonce);
+            }
         }
     }
 }

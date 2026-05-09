@@ -894,6 +894,15 @@ pub struct State {
     /// Key = collateral_type Principal, Value = total interest in e8s.
     pub pending_interest_for_pools: BTreeMap<Principal, u64>,
 
+    /// AMM1-specific re-queue: (amount_e8s, nonce). Distinct from
+    /// `pending_interest_for_pools` (which is keyed by collateral_type
+    /// and re-splits across all destinations on retry). AMM1's
+    /// idempotency requires the SAME nonce on retry, so failed
+    /// donations are persisted with their original nonce here and
+    /// retried via `flush_pending_amm1_donations`.
+    #[serde(default)]
+    pub pending_amm1_donations: std::collections::VecDeque<(u64, u64)>,
+
     /// Minimum interest (e8s) per collateral bucket before flushing. Admin-settable.
     /// Default = 10_000_000 (0.1 icUSD). At 0.01 the ledger fee eats ~10%.
     pub interest_flush_threshold_e8s: u64,
@@ -1340,6 +1349,7 @@ impl Default for State {
             weighted_avg_healthy_cr: Ratio::from(Decimal::ZERO),
             borrowing_fee_curve: None,
             pending_interest_for_pools: BTreeMap::new(),
+            pending_amm1_donations: std::collections::VecDeque::new(),
             interest_flush_threshold_e8s: default_flush_threshold(),
             pending_treasury_interest: ICUSD::new(0),
             pending_treasury_collateral: Vec::new(),
@@ -1554,6 +1564,7 @@ impl From<InitArg> for State {
 
             // Periodic interest distribution
             pending_interest_for_pools: BTreeMap::new(),
+            pending_amm1_donations: std::collections::VecDeque::new(),
             interest_flush_threshold_e8s: default_flush_threshold(),
 
             // Treasury fee routing
