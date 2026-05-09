@@ -721,6 +721,9 @@ fn set_maintenance_mode(enabled: bool) -> Result<(), AmmError> {
 #[update]
 fn set_protocol_backend_principal(principal: Principal) -> Result<(), AmmError> {
     caller_is_admin()?;
+    if principal == Principal::anonymous() {
+        return Err(AmmError::Unauthorized);
+    }
     mutate_state(|s| s.protocol_backend_principal = Some(principal));
     log!(INFO, "Protocol backend principal set to: {}", principal);
     mutate_state(|s| {
