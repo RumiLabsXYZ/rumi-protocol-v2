@@ -4113,6 +4113,65 @@ fn get_three_pool_canister() -> Option<Principal> {
     read_state(|s| s.three_pool_canister)
 }
 
+/// Set the AMM1 canister principal for interest donations (developer only).
+///
+/// `distribute_interest` routes the `Amm1` arm of the N-way interest split to
+/// this principal. Rejects `Principal::anonymous()` defensively so a misformed
+/// admin call cannot leak interest mints to the anonymous principal.
+#[candid_method(update)]
+#[update]
+async fn set_amm1_canister(canister: Principal) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set AMM1 canister".to_string(),
+        ));
+    }
+    if canister == Principal::anonymous() {
+        return Err(ProtocolError::GenericError(
+            "AMM1 canister cannot be the anonymous principal".to_string(),
+        ));
+    }
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_amm1_canister(s, canister);
+    });
+    log!(INFO, "[set_amm1_canister] Set to: {}", canister);
+    Ok(())
+}
+
+/// Get the configured AMM1 canister principal.
+#[candid_method(query)]
+#[query]
+fn get_amm1_canister() -> Option<Principal> {
+    read_state(|s| s.amm1_canister)
+}
+
+/// Lightweight payload for the AMM TVL sampler (the latest cached XRC ICP/USD
+/// price in e8s). `u128` instead of `u64` so the candid encodes as `nat`,
+/// matching the unbounded TVL math the sampler does in USD.
+#[derive(CandidType, Deserialize, Debug, Clone)]
+pub struct ProtocolStatusLite {
+    pub price_e8s: u128,
+}
+
+/// Lightweight query exposing the cached XRC ICP/USD price as `u128` in e8s.
+///
+/// Used by `rumi_amm`'s TVL sampler so it can compute USD-denominated TVL
+/// without re-fetching from XRC. Reads the same `last_icp_rate` field that
+/// `get_protocol_status` exposes (just narrower payload). Returns `0` when
+/// the price has not been cached yet (e.g. before the first XRC tick).
+#[candid_method(query)]
+#[query]
+fn get_icp_usd_price_e8s() -> ProtocolStatusLite {
+    read_state(|s| ProtocolStatusLite {
+        price_e8s: s
+            .last_icp_rate
+            .map(|p| p.to_e8s() as u128)
+            .unwrap_or(0),
+    })
+}
+
 // ── RMR (Redemption Margin Ratio) configuration ────────────────────────
 
 /// Get the RMR floor (ratio redeemers receive when system is healthy).
