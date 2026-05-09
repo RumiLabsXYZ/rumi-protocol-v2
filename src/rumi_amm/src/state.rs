@@ -24,6 +24,11 @@ pub const REWARD_SCALE: u128 = 1_000_000_000_000; // 1e12 fixed-point for acc_re
 /// Minimum claimable amount: 10x the icUSD ledger fee (assumed 10000 e8s = 0.0001 icUSD).
 /// Below this threshold a claim would net negative on the user.
 pub const MIN_CLAIM_E8S: u128 = 100_000;
+/// Hardcoded icUSD ledger fee used as a fallback when refetching the on-chain
+/// balance fails after a successful transfer. The primary path queries the
+/// ledger and sets `reward_balance_snapshot = on_chain` so any drift between
+/// this constant and the live ledger fee self-heals on the next interaction.
+pub const ICUSD_LEDGER_FEE_E8S: u128 = 10_000;
 
 // ─── State ───
 

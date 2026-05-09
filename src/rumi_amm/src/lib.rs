@@ -898,10 +898,25 @@ pub async fn claim_rewards(pool_id: PoolId) -> Result<u128, AmmError> {
 
     match transfer_result {
         Ok(_block_index) => {
+            // Refetch live balance so the snapshot reflects amount + ledger fee
+            // (and any concurrent third-party transfers). Mirrors the
+            // notify_reward_received pattern of trusting on-chain truth.
+            // On query failure, fall back to subtracting amount + hardcoded fee.
+            let after_balance = query_reward_subaccount_balance(&pool_id).await;
             mutate_state(|s| {
                 if let Some(pool) = s.pools.get_mut(&pool_id) {
-                    pool.reward_balance_snapshot =
-                        pool.reward_balance_snapshot.saturating_sub(amount);
+                    match after_balance {
+                        Ok(on_chain) => {
+                            pool.reward_balance_snapshot = on_chain;
+                        }
+                        Err(_) => {
+                            pool.reward_balance_snapshot = pool
+                                .reward_balance_snapshot
+                                .saturating_sub(
+                                    amount.saturating_add(crate::state::ICUSD_LEDGER_FEE_E8S),
+                                );
+                        }
+                    }
                 }
                 s.record_claim_event(pool_id.clone(), caller, amount);
             });
