@@ -328,6 +328,40 @@ pub enum BackendEvent {
     SetCollateralInterestRate {},
     #[serde(rename = "set_collateral_redemption_tier")]
     SetCollateralRedemptionTier {},
+    // --- Variants added by audit waves 8e/9/10/12/14 ---
+    // Without these, candid decode fails for the entire get_events batch
+    // whenever any post-2026-04-29 event is in range. Empty structs work
+    // because candid skips extra record fields. Cycle drain root cause —
+    // see investigation 2026-05-09.
+    #[serde(rename = "deficit_accrued")]
+    DeficitAccrued {},
+    #[serde(rename = "deficit_repaid")]
+    DeficitRepaid {},
+    #[serde(rename = "breaker_tripped")]
+    BreakerTripped {},
+    #[serde(rename = "breaker_cleared")]
+    BreakerCleared {},
+    #[serde(rename = "set_breaker_window_ns")]
+    SetBreakerWindowNs {},
+    #[serde(rename = "set_breaker_window_debt_ceiling_e8s")]
+    SetBreakerWindowDebtCeilingE8s {},
+    #[serde(rename = "set_deficit_readonly_threshold_e8s")]
+    SetDeficitReadonlyThresholdE8s {},
+    #[serde(rename = "set_deficit_repayment_fraction")]
+    SetDeficitRepaymentFraction {},
+    #[serde(rename = "bot_claim_reconciliation_needed")]
+    BotClaimReconciliationNeeded {},
+    #[serde(rename = "oracle_circuit_breaker")]
+    OracleCircuitBreaker {},
+    #[serde(rename = "oracle_source_count_insufficient")]
+    OracleSourceCountInsufficient {},
+    #[serde(rename = "stability_pool_call_failed")]
+    StabilityPoolCallFailed {},
+    // PR #174 (deployed 2026-05-09). Without this variant, candid decode
+    // fails for any get_events batch containing a SetBotCrToleranceBps row,
+    // breaking analytics ingestion entirely.
+    #[serde(rename = "set_bot_cr_tolerance_bps")]
+    SetBotCrToleranceBps {},
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
@@ -432,6 +466,21 @@ impl BackendEvent {
             SetCollateralDebtCeiling {} => Some("SetCollateralDebtCeiling"),
             SetCollateralInterestRate {} => Some("SetCollateralInterestRate"),
             SetCollateralRedemptionTier {} => Some("SetCollateralRedemptionTier"),
+            // Audit-wave variants added 2026-05-09 to fix decode failures.
+            // Admin/diagnostic labels grouped under existing breakdown buckets.
+            DeficitAccrued {} => None,
+            DeficitRepaid {} => None,
+            BreakerTripped {} => Some("BreakerTripped"),
+            BreakerCleared {} => Some("BreakerCleared"),
+            SetBreakerWindowNs {} => Some("SetBreakerWindowNs"),
+            SetBreakerWindowDebtCeilingE8s {} => Some("SetBreakerWindowDebtCeilingE8s"),
+            SetDeficitReadonlyThresholdE8s {} => Some("SetDeficitReadonlyThresholdE8s"),
+            SetDeficitRepaymentFraction {} => Some("SetDeficitRepaymentFraction"),
+            BotClaimReconciliationNeeded {} => Some("BotClaimReconciliationNeeded"),
+            OracleCircuitBreaker {} => Some("OracleCircuitBreaker"),
+            OracleSourceCountInsufficient {} => Some("OracleSourceCountInsufficient"),
+            StabilityPoolCallFailed {} => Some("StabilityPoolCallFailed"),
+            SetBotCrToleranceBps {} => Some("SetBotCrToleranceBps"),
         }
     }
 }
