@@ -1,13 +1,25 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { walletStore } from '../../lib/stores/wallet';
   import SwapInterface from '../../lib/components/swap/SwapInterface.svelte';
   import SwapLiquidityToggle from '../../lib/components/swap/SwapLiquidityToggle.svelte';
   import PoolListView from '../../lib/components/swap/PoolListView.svelte';
   import AmmLiquidityPanel from '../../lib/components/swap/AmmLiquidityPanel.svelte';
   import LiquidityInterface from '../../lib/components/swap/LiquidityInterface.svelte';
+  import { getAmm1Apy } from '../../lib/services/amm1ApyService';
 
   let mode: 'swap' | 'liquidity' = 'swap';
   let liquidityView: 'list' | 'threepool' | 'amm' = 'list';
+  let lpApyPct = 0;
+
+  onMount(async () => {
+    try {
+      const r = await getAmm1Apy();
+      lpApyPct = r.total_apy_pct;
+    } catch (e) {
+      console.warn('Failed to load AMM1 APY for swap CTA:', e);
+    }
+  });
 
   function handleSuccess() {
     walletStore.refreshBalance();
@@ -53,6 +65,12 @@
         <AmmLiquidityPanel on:success={handleSuccess} on:back={handleBack} />
       {/if}
     </div>
+
+    {#if mode === 'swap'}
+      <button class="lp-cta" type="button" on:click={() => { mode = 'liquidity'; liquidityView = 'list'; }}>
+        LPs earn ~{lpApyPct.toFixed(1)}% APY → Provide liquidity
+      </button>
+    {/if}
   </div>
 </div>
 
@@ -106,6 +124,27 @@
   }
 
   .back-link:hover { text-decoration: underline; }
+
+  .lp-cta {
+    display: block;
+    margin-top: 0.875rem;
+    text-align: center;
+    font-size: 0.8125rem;
+    color: var(--rumi-teal);
+    text-decoration: none;
+    padding: 0.5rem 0.75rem;
+    border-radius: 0.5rem;
+    transition: background-color 0.15s;
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+  }
+
+  .lp-cta:hover {
+    background-color: rgba(255, 255, 255, 0.04);
+    text-decoration: underline;
+  }
 
   .explainer {
     font-size: 0.8125rem;

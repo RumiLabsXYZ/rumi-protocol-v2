@@ -4,7 +4,7 @@
   import { protocolService } from '$lib/services/protocol';
   import { formatNumber, formatStableDisplay, formatStableTx } from '$lib/utils/format';
   import ProtocolStats from '$lib/components/dashboard/ProtocolStats.svelte';
-  
+
   // Component state
   let isConnected = false;
   let icpPrice = 0;
@@ -20,20 +20,20 @@
   let actionInProgress = false;
   let errorMessage = '';
   let successMessage = '';
-  
+
   // Form values
   let provideAmount = 0;
   let withdrawAmount = 0;
-  
+
   // Store the current wallet state
   let currentWalletState: any;
-  
+
   // Subscribe to wallet state
   wallet.subscribe(state => {
     isConnected = state.isConnected;
     currentWalletState = state;
   });
-  
+
   // Fetch protocol data and user's liquidity status
   async function fetchData() {
     isLoading = true;
@@ -185,7 +185,9 @@
      ? liquidityStatus.totalLiquidityProvided * icpPrice 
      : 0;
   
-  onMount(fetchData);
+  onMount(() => {
+    fetchData();
+  });
 </script>
 
 <svelte:head>
@@ -205,7 +207,7 @@
     
     <ProtocolStats />
   </section>
-  
+
   {#if isConnected}
     <!-- User Liquidity Status -->
     <section class="mb-12">
@@ -394,13 +396,13 @@
   .glass-card {
     @apply bg-gray-800/40 backdrop-blur-lg border border-gray-700/50 rounded-lg p-6;
   }
-  
+
   input::-webkit-outer-spin-button,
   input::-webkit-inner-spin-button {
     -webkit-appearance: none;
     margin: 0;
   }
-  
+
   input[type=number] {
     -moz-appearance: textfield;
   }

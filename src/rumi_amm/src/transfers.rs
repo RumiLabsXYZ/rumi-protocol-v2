@@ -100,3 +100,52 @@ pub async fn transfer_to_user(
         Err((code, msg)) => Err(format!("inter-canister call failed: {:?} - {}", code, msg)),
     }
 }
+
+/// Transfer reward icUSD from the per-pool reward subaccount to the caller.
+///
+/// `crate::reward_subaccount_for` and `crate::ICUSD_LEDGER` are `pub` so we
+/// can derive the source subaccount and resolve the icUSD ledger principal
+/// without duplicating constants.
+pub async fn transfer_reward_icusd(
+    pool_id: &str,
+    to: Principal,
+    amount: u128,
+) -> Result<u64, String> {
+    let icusd_ledger = Principal::from_text(crate::ICUSD_LEDGER)
+        .expect("invalid icUSD ledger principal");
+    let from_sub = crate::reward_subaccount_for(&pool_id.to_string());
+    let args = TransferArg {
+        from_subaccount: Some(from_sub),
+        to: Account {
+            owner: to,
+            subaccount: None,
+        },
+        amount: candid::Nat::from(amount),
+        // Pass None so the ledger applies its own fee from `amount` automatically.
+        fee: None,
+        memo: None,
+        // Set created_at_time for ledger-side deduplication; matches the
+        // pattern used by transfer_to_user above.
+        created_at_time: Some(ic_cdk::api::time()),
+    };
+
+    let result: Result<(Result<candid::Nat, TransferError>,), _> =
+        ic_cdk::call(icusd_ledger, "icrc1_transfer", (args,)).await;
+
+    match result {
+        Ok((Ok(block_index),)) => {
+            let idx: u64 = block_index.0.try_into().unwrap_or_else(|_| {
+                ic_cdk::println!("WARN: block index exceeds u64::MAX, returning 0");
+                0
+            });
+            Ok(idx)
+        }
+        // Treat duplicates as success — the prior attempt landed.
+        Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
+            let idx: u64 = duplicate_of.0.try_into().unwrap_or(0);
+            Ok(idx)
+        }
+        Ok((Err(e),)) => Err(format!("icrc1_transfer error: {:?}", e)),
+        Err((code, msg)) => Err(format!("inter-canister call failed: {:?} - {}", code, msg)),
+    }
+}

@@ -332,6 +332,7 @@ type Event = variant {
     reason : text;
   };
   set_three_pool_canister : record { canister : principal };
+  set_amm1_canister : record { canister : principal };
   set_liquidation_bonus : record { rate : text };
   reserve_redemption : record {
     icusd_amount : nat64;
@@ -655,6 +656,7 @@ type ProtocolStatus = record {
   breaker_window_debt_ceiling_e8s : nat64;
   last_icp_rate : float64;
 };
+type ProtocolStatusLite = record { price_e8s : nat };
 type RateCurve = record {
   method : InterpolationMethod;
   markers : vec RateMarker;
@@ -861,6 +863,8 @@ service : (ProtocolArg) -> {
       vec record { principal; CollateralStatus },
     ) query;
   get_three_pool_canister : () -> (opt principal) query;
+  get_amm1_canister : () -> (opt principal) query;
+  get_icp_usd_price_e8s : () -> (ProtocolStatusLite) query;
   get_treasury_principal : () -> (opt principal) query;
   get_treasury_stats : () -> (TreasuryStats) query;
   get_vault_count : () -> (nat64) query;
@@ -951,6 +955,7 @@ service : (ProtocolArg) -> {
   set_stable_ledger_principal : (StableTokenType, principal) -> (Result);
   set_stable_token_enabled : (StableTokenType, bool) -> (Result);
   set_three_pool_canister : (principal) -> (Result);
+  set_amm1_canister : (principal) -> (Result);
   set_treasury_principal : (principal) -> (Result);
   set_vault_check_tick_interval_secs : (nat64) -> (Result);
   set_xrc_fetch_interval_secs : (nat64) -> (Result);

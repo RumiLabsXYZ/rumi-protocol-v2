@@ -338,6 +338,7 @@ pub async fn interest_and_treasury_tick() {
 
     // Flush accumulated interest to pools/treasury when threshold is reached.
     crate::treasury::flush_pending_interest().await;
+    crate::treasury::flush_pending_amm1_donations().await;
 }
 
 /// Wave-14b CDP-12 Timer C: vault health sweep + aggregate-snapshot refresh.

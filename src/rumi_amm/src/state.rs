@@ -17,6 +17,19 @@ pub const MAX_LIQUIDITY_EVENTS: usize = 50_000;
 pub const MAX_ADMIN_EVENTS: usize = 10_000;
 pub const MAX_HOLDER_SNAPSHOTS: usize = 1_000; // ~500 days at 2/day
 pub const MAX_PENDING_CLAIMS: usize = 1_000;
+pub const MAX_REWARD_EVENTS: usize = 50_000;
+pub const MAX_CLAIM_EVENTS: usize = 50_000;
+pub const MAX_PROCESSED_NONCES: usize = 1024;
+pub const REWARD_SCALE: u128 = 1_000_000_000_000; // 1e12 fixed-point for acc_reward_per_share
+/// Minimum claimable amount: 10x the icUSD ledger fee (assumed 10000 e8s = 0.0001 icUSD).
+/// Below this threshold a claim would net negative on the user.
+pub const MIN_CLAIM_E8S: u128 = 100_000;
+/// Hardcoded icUSD ledger fee used as a fallback when refetching the on-chain
+/// balance fails after a successful transfer. The primary path queries the
+/// ledger and sets `reward_balance_snapshot = on_chain` so any drift between
+/// this constant and the live ledger fee self-heals on the next interaction.
+pub const ICUSD_LEDGER_FEE_E8S: u128 = 10_000;
+pub const MAX_TVL_SAMPLES: usize = 800; // ~30 months at 1/day; ~5.5 months at 4/day
 
 // ─── State ───
 
@@ -46,6 +59,21 @@ pub struct AmmState {
     pub next_admin_event_id: u64,
     #[serde(default)]
     pub holder_snapshots: Vec<HolderSnapshot>,
+    #[serde(default)]
+    pub reward_events: Vec<AmmRewardEvent>,
+    #[serde(default)]
+    pub next_reward_event_id: u64,
+    #[serde(default)]
+    pub claim_events: Vec<AmmClaimEvent>,
+    #[serde(default)]
+    pub next_claim_event_id: u64,
+    /// Principal allowed to call `notify_reward_received`. Set by admin via
+    /// `set_protocol_backend_principal`. Defaults to None (no caller
+    /// authorized) until configured.
+    #[serde(default)]
+    pub protocol_backend_principal: Option<Principal>,
+    #[serde(default)]
+    pub tvl_samples: Vec<TvlSample>,
 }
 
 impl Default for AmmState {
@@ -64,6 +92,12 @@ impl Default for AmmState {
             admin_events: Vec::new(),
             next_admin_event_id: 0,
             holder_snapshots: Vec::new(),
+            reward_events: Vec::new(),
+            next_reward_event_id: 0,
+            claim_events: Vec::new(),
+            next_claim_event_id: 0,
+            protocol_backend_principal: None,
+            tvl_samples: Vec::new(),
         }
     }
 }
@@ -134,6 +168,46 @@ impl AmmState {
         };
         self.admin_events.push(event);
         self.next_admin_event_id += 1;
+    }
+
+    pub fn record_reward_event(
+        &mut self,
+        pool_id: PoolId,
+        amount: u128,
+        total_shares_at_time: u128,
+        nonce: u64,
+    ) {
+        if self.reward_events.len() >= MAX_REWARD_EVENTS {
+            self.reward_events.remove(0);
+        }
+        self.reward_events.push(AmmRewardEvent {
+            id: self.next_reward_event_id,
+            pool_id,
+            amount,
+            total_shares_at_time,
+            nonce,
+            timestamp: ic_cdk::api::time(),
+        });
+        self.next_reward_event_id += 1;
+    }
+
+    pub fn record_claim_event(
+        &mut self,
+        pool_id: PoolId,
+        claimant: Principal,
+        amount: u128,
+    ) {
+        if self.claim_events.len() >= MAX_CLAIM_EVENTS {
+            self.claim_events.remove(0);
+        }
+        self.claim_events.push(AmmClaimEvent {
+            id: self.next_claim_event_id,
+            pool_id,
+            claimant,
+            amount,
+            timestamp: ic_cdk::api::time(),
+        });
+        self.next_claim_event_id += 1;
     }
 }
 
@@ -248,6 +322,12 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             admin_events: Vec::new(),
             next_admin_event_id: 0,
             holder_snapshots: Vec::new(),
+            reward_events: Vec::new(),
+            next_reward_event_id: 0,
+            claim_events: Vec::new(),
+            next_claim_event_id: 0,
+            protocol_backend_principal: None,
+            tvl_samples: Vec::new(),
         });
     }
     if let Ok(v3) = Decode!(bytes, AmmStateV3) {
@@ -265,6 +345,12 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             admin_events: Vec::new(),
             next_admin_event_id: 0,
             holder_snapshots: Vec::new(),
+            reward_events: Vec::new(),
+            next_reward_event_id: 0,
+            claim_events: Vec::new(),
+            next_claim_event_id: 0,
+            protocol_backend_principal: None,
+            tvl_samples: Vec::new(),
         });
     }
     if let Ok(v2) = Decode!(bytes, AmmStateV2) {
@@ -282,6 +368,12 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             admin_events: Vec::new(),
             next_admin_event_id: 0,
             holder_snapshots: Vec::new(),
+            reward_events: Vec::new(),
+            next_reward_event_id: 0,
+            claim_events: Vec::new(),
+            next_claim_event_id: 0,
+            protocol_backend_principal: None,
+            tvl_samples: Vec::new(),
         });
     }
     if let Ok(v1) = Decode!(bytes, AmmStateV1) {
@@ -299,6 +391,12 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             admin_events: Vec::new(),
             next_admin_event_id: 0,
             holder_snapshots: Vec::new(),
+            reward_events: Vec::new(),
+            next_reward_event_id: 0,
+            claim_events: Vec::new(),
+            next_claim_event_id: 0,
+            protocol_backend_principal: None,
+            tvl_samples: Vec::new(),
         });
     }
     None

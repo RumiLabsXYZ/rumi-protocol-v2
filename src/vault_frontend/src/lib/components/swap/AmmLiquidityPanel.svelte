@@ -6,6 +6,12 @@
   import { CANISTER_IDS } from '../../config';
   import { ProtocolService } from '../../services/protocol';
   import { threePoolService } from '../../services/threePoolService';
+  import {
+    getAmm1Apy,
+    getPendingEarnings,
+    claimAmm1Rewards,
+    type Amm1ApyResult,
+  } from '../../services/amm1ApyService';
 
   const dispatch = createEventDispatcher();
 
@@ -35,6 +41,22 @@
   // Remove liquidity state
   let removePercent = 0;
   let removeLoading = false;
+
+  // AMM1 APY + pending earnings
+  let apy: Amm1ApyResult = {
+    total_apy_pct: 0,
+    trading_fee_apy_pct: 0,
+    reward_apy_pct: 0,
+    avg_tvl_7d_usd: 0,
+    fees_7d_usd: 0,
+    rewards_7d_usd: 0,
+    source_window_days: 7,
+  };
+  let pendingE8s: bigint = 0n;
+  let claiming = false;
+  let claimMessage = '';
+  // Matches MIN_CLAIM_E8S in the rumi_amm canister.
+  const MIN_CLAIM_E8S: bigint = 100_000n;
 
   $: isConnected = $walletStore.isConnected;
 
@@ -68,7 +90,46 @@
     return icpReserve * sharesToBurn / pool.total_lp_shares;
   })();
 
-  onMount(loadPool);
+  onMount(() => {
+    loadPool();
+    refreshAmm1();
+  });
+
+  async function refreshAmm1() {
+    try {
+      apy = await getAmm1Apy();
+    } catch (e) {
+      console.warn('Failed to refresh AMM1 APY:', e);
+    }
+    if (isConnected && $walletStore.principal) {
+      try {
+        pendingE8s = await getPendingEarnings($walletStore.principal.toText());
+      } catch (e) {
+        console.warn('Failed to fetch AMM1 pending earnings:', e);
+        pendingE8s = 0n;
+      }
+    } else {
+      pendingE8s = 0n;
+    }
+  }
+
+  async function handleClaim() {
+    claiming = true;
+    claimMessage = '';
+    try {
+      const result = await claimAmm1Rewards();
+      if ('claimed_e8s' in result) {
+        claimMessage = `Claimed ${(Number(result.claimed_e8s) / 1e8).toFixed(4)} icUSD`;
+        pendingE8s = 0n;
+      } else {
+        claimMessage = `Error: ${result.error}`;
+      }
+    } finally {
+      claiming = false;
+      // Refresh after claim regardless of outcome.
+      await refreshAmm1();
+    }
+  }
 
   async function loadPool() {
     poolLoading = true;
@@ -211,6 +272,9 @@
       addAmountA = '';
       addAmountB = '';
       await loadPool();
+      // The AMM auto-settles pending rewards on add/remove, so the
+      // displayed value should drop to 0 immediately after.
+      await refreshAmm1();
     } catch (err: any) {
       error = err.message || 'Add liquidity failed';
     } finally {
@@ -234,6 +298,8 @@
       dispatch('success', { action: 'remove_liquidity' });
       removePercent = 0;
       await loadPool();
+      // The AMM auto-settles pending rewards on add/remove.
+      await refreshAmm1();
     } catch (err: any) {
       error = err.message || 'Remove liquidity failed';
     } finally {
@@ -259,6 +325,9 @@
       <span class="pool-dot" style="background:#34d399"></span>
       <span class="pool-dot" style="background:#29abe2"></span>
       <span class="overview-name">3USD / ICP</span>
+      <span class="apy-pill" title="{apy.trading_fee_apy_pct.toFixed(1)}% trading fees + {apy.reward_apy_pct.toFixed(1)}% protocol earnings (7-day)">
+        {apy.total_apy_pct.toFixed(1)}% APY
+      </span>
     </div>
     <div class="overview-stats">
       <span>3USD: {formatTokenAmount(threeUsdReserve, 8)}</span>
@@ -270,6 +339,30 @@
       </div>
     {/if}
   </div>
+
+  {#if isConnected}
+    <div class="earnings-panel">
+      <div class="earnings-row">
+        <div class="earnings-meta">
+          <span class="earnings-label">Pending Earnings</span>
+          <span class="earnings-amount">{(Number(pendingE8s) / 1e8).toFixed(4)} icUSD</span>
+        </div>
+        <button
+          class="claim-btn"
+          on:click={handleClaim}
+          disabled={pendingE8s < MIN_CLAIM_E8S || claiming}
+        >
+          {claiming ? 'Claiming...' : 'Claim'}
+        </button>
+      </div>
+      {#if pendingE8s > 0n && pendingE8s < MIN_CLAIM_E8S}
+        <p class="earnings-hint">Minimum claim is 0.001 icUSD.</p>
+      {/if}
+      {#if claimMessage}
+        <p class="earnings-hint">{claimMessage}</p>
+      {/if}
+    </div>
+  {/if}
 
   <!-- Tabs -->
   <div class="sub-tabs">
@@ -432,6 +525,82 @@
     font-size: 0.9375rem;
     font-weight: 600;
     color: var(--rumi-text-primary);
+  }
+
+  .apy-pill {
+    margin-left: auto;
+    padding: 0.125rem 0.5rem;
+    border-radius: 999px;
+    background: var(--rumi-teal-dim, rgba(52, 211, 153, 0.12));
+    color: var(--rumi-teal);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    cursor: help;
+  }
+
+  .earnings-panel {
+    margin-bottom: 1rem;
+    padding: 0.75rem;
+    background: var(--rumi-bg-surface2);
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.5rem;
+  }
+
+  .earnings-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+
+  .earnings-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+    min-width: 0;
+  }
+
+  .earnings-label {
+    font-size: 0.6875rem;
+    color: var(--rumi-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .earnings-amount {
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--rumi-text-primary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .claim-btn {
+    padding: 0.375rem 0.875rem;
+    background: var(--rumi-action);
+    color: var(--rumi-bg-primary);
+    border: none;
+    border-radius: 0.375rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+    flex-shrink: 0;
+  }
+
+  .claim-btn:hover:not(:disabled) {
+    background: var(--rumi-action-bright);
+  }
+
+  .claim-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .earnings-hint {
+    margin: 0.375rem 0 0;
+    font-size: 0.6875rem;
+    color: var(--rumi-text-muted);
   }
 
   .overview-stats {

@@ -567,6 +567,12 @@ pub enum Event {
         canister: Principal,
     },
 
+    /// Admin set the AMM1 canister principal for interest donations.
+    #[serde(rename = "set_amm1_canister")]
+    SetAmm1Canister {
+        canister: Principal,
+    },
+
     /// Price update from XRC or other oracle. Recorded every time a collateral
     /// price is fetched so we have a complete price history.
     #[serde(rename = "price_update")]
@@ -835,6 +841,7 @@ impl Event {
             Event::SetBorrowingFeeCurve { .. } => false,
             Event::SetInterestSplit { .. } => false,
             Event::SetThreePoolCanister { .. } => false,
+            Event::SetAmm1Canister { .. } => false,
             Event::PriceUpdate { .. } => false,
             Event::SetCollateralLiquidationRatio { .. } => false,
             Event::SetCollateralBorrowThreshold { .. } => false,
@@ -971,6 +978,7 @@ impl Event {
             Event::SetBorrowingFeeCurve { .. } => Some("SetBorrowingFeeCurve"),
             Event::SetInterestSplit { .. } => Some("SetInterestSplit"),
             Event::SetThreePoolCanister { .. } => Some("SetThreePoolCanister"),
+            Event::SetAmm1Canister { .. } => Some("SetAmm1Canister"),
             Event::SetCollateralLiquidationRatio { .. } => Some("SetCollateralLiquidationRatio"),
             Event::SetCollateralBorrowThreshold { .. } => Some("SetCollateralBorrowThreshold"),
             Event::SetCollateralLiquidationBonus { .. } => Some("SetCollateralLiquidationBonus"),
@@ -1678,6 +1686,9 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             },
             Event::SetThreePoolCanister { canister } => {
                 state.three_pool_canister = Some(canister);
+            },
+            Event::SetAmm1Canister { canister } => {
+                state.amm1_canister = Some(canister);
             },
             Event::PriceUpdate { .. } => {
                 // Price history only; no state mutation needed during replay.
@@ -2717,6 +2728,11 @@ pub fn record_set_interest_split(state: &mut State, split: Vec<crate::state::Int
 pub fn record_set_three_pool_canister(state: &mut State, canister: Principal) {
     record_event(&Event::SetThreePoolCanister { canister });
     state.three_pool_canister = Some(canister);
+}
+
+pub fn record_set_amm1_canister(state: &mut State, canister: Principal) {
+    record_event(&Event::SetAmm1Canister { canister });
+    state.amm1_canister = Some(canister);
 }
 
 pub fn record_set_collateral_borrowing_fee(

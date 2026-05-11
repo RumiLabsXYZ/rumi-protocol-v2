@@ -68,6 +68,9 @@ pub enum InterestDestination {
     Treasury,
     /// 3pool AMM (donated as icUSD to grow virtual_price for 3USD holders).
     ThreePool,
+    /// AMM1 (3USD/ICP pool on rumi_amm). Backend mints icUSD into the
+    /// AMM's reward subaccount and notifies via notify_reward_received.
+    Amm1,
 }
 
 /// One slice of the interest split: destination + share in basis points.
@@ -891,6 +894,15 @@ pub struct State {
     /// Key = collateral_type Principal, Value = total interest in e8s.
     pub pending_interest_for_pools: BTreeMap<Principal, u64>,
 
+    /// AMM1-specific re-queue: (amount_e8s, nonce). Distinct from
+    /// `pending_interest_for_pools` (which is keyed by collateral_type
+    /// and re-splits across all destinations on retry). AMM1's
+    /// idempotency requires the SAME nonce on retry, so failed
+    /// donations are persisted with their original nonce here and
+    /// retried via `flush_pending_amm1_donations`.
+    #[serde(default)]
+    pub pending_amm1_donations: std::collections::VecDeque<(u64, u64)>,
+
     /// Minimum interest (e8s) per collateral bucket before flushing. Admin-settable.
     /// Default = 10_000_000 (0.1 icUSD). At 0.01 the ledger fee eats ~10%.
     pub interest_flush_threshold_e8s: u64,
@@ -917,6 +929,17 @@ pub struct State {
 
     /// 3pool AMM canister for interest donations.
     pub three_pool_canister: Option<Principal>,
+
+    /// rumi_amm canister principal. Set via admin call. Required for
+    /// InterestDestination::Amm1 routing; if None, that share falls back
+    /// to treasury (matching existing 3pool fallback pattern).
+    #[serde(default)]
+    pub amm1_canister: Option<Principal>,
+
+    /// Monotonic nonce for AMM1 donation idempotency. Incremented on every
+    /// `donate_icusd_to_amm1` call. Survives upgrades via stable storage.
+    #[serde(default)]
+    pub amm1_donation_nonce: u64,
 
     /// Redemption Margin Ratio parameters.
     /// RMR value when system CR is at or above rmr_floor_cr (e.g. 0.96 = 96%).
@@ -1337,6 +1360,7 @@ impl Default for State {
             weighted_avg_healthy_cr: Ratio::from(Decimal::ZERO),
             borrowing_fee_curve: None,
             pending_interest_for_pools: BTreeMap::new(),
+            pending_amm1_donations: std::collections::VecDeque::new(),
             interest_flush_threshold_e8s: default_flush_threshold(),
             pending_treasury_interest: ICUSD::new(0),
             pending_treasury_collateral: Vec::new(),
@@ -1344,6 +1368,8 @@ impl Default for State {
             interest_pool_share: DEFAULT_INTEREST_POOL_SHARE,
             interest_split: Vec::new(),
             three_pool_canister: None,
+            amm1_canister: None,
+            amm1_donation_nonce: 0,
             rmr_floor: DEFAULT_RMR_FLOOR,
             rmr_ceiling: DEFAULT_RMR_CEILING,
             rmr_floor_cr: DEFAULT_RMR_FLOOR_CR,
@@ -1550,6 +1576,7 @@ impl From<InitArg> for State {
 
             // Periodic interest distribution
             pending_interest_for_pools: BTreeMap::new(),
+            pending_amm1_donations: std::collections::VecDeque::new(),
             interest_flush_threshold_e8s: default_flush_threshold(),
 
             // Treasury fee routing
@@ -1559,6 +1586,8 @@ impl From<InitArg> for State {
             interest_pool_share: DEFAULT_INTEREST_POOL_SHARE,
             interest_split: default_interest_split(),
             three_pool_canister: None,
+            amm1_canister: None,
+            amm1_donation_nonce: 0,
 
             rmr_floor: DEFAULT_RMR_FLOOR,
             rmr_ceiling: DEFAULT_RMR_CEILING,

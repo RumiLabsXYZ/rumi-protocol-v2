@@ -33,6 +33,33 @@ pub struct Pool {
     pub paused: bool,
     pub subaccount_a: [u8; 32],
     pub subaccount_b: [u8; 32],
+
+    // ─── Reward distribution (added 2026-05-09) ───
+    /// Per-LP reward bookkeeping (parallel to `lp_shares`).
+    #[serde(default)]
+    pub lp_rewards: BTreeMap<Principal, RewardState>,
+    /// Accumulator: total rewards distributed per share, scaled by `REWARD_SCALE` (1e12).
+    #[serde(default)]
+    pub acc_reward_per_share: u128,
+    /// Buffer for donations that arrive while `total_lp_shares == 0`.
+    /// Drained on the next `add_liquidity` that produces positive shares.
+    #[serde(default)]
+    pub pending_no_lp: u128,
+    /// Lifetime sum of rewards distributed to this pool. Analytics only.
+    #[serde(default)]
+    pub total_rewards_distributed: u128,
+    /// Recently processed donation nonces (ring buffer, oldest first).
+    /// Bounded by `MAX_PROCESSED_NONCES` to prevent unbounded growth.
+    #[serde(default)]
+    pub processed_donation_nonces: std::collections::VecDeque<u64>,
+    /// Last verified on-chain icUSD balance held in the per-pool reward
+    /// subaccount. Used by `notify_reward_received` to verify the
+    /// donation amount actually arrived. After a successful notify, this
+    /// is set to the live `icrc1_balance_of` reading (capturing any
+    /// over-funding rather than just `+= amount`). After a successful
+    /// claim, it is decremented by the amount transferred out.
+    #[serde(default)]
+    pub reward_balance_snapshot: u128,
 }
 
 // ─── Init Args ───
@@ -154,6 +181,7 @@ pub enum AmmAdminAction {
     SetMaintenanceMode { enabled: bool },
     ClaimPending { claim_id: u64, claimant: Principal, amount: u128 },
     ResolvePendingClaim { claim_id: u64 },
+    SetProtocolBackendPrincipal { backend: Principal },
 }
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
@@ -291,4 +319,65 @@ pub enum AmmError {
     MaintenanceMode,
     ClaimNotFound,
     PoolBusy,
+    DuplicateNonce,
+    NoLiquidity,
+    BelowMinClaim { claimable: u128, min: u128 },
+    RewardLedgerTransferFailed { reason: String },
+    InsufficientOnChainBalance { expected: u128, actual: u128 },
+}
+
+// ─── Reward state (per LP) ───
+
+/// Per-LP reward bookkeeping. Lives in a parallel map alongside `lp_shares`.
+/// `reward_debt` is `shares * acc_reward_per_share / 1e12` at last settle.
+/// `claimable` accumulates settled rewards that the LP has not yet claimed,
+/// and persists across share changes (including full removal).
+#[derive(CandidType, Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RewardState {
+    pub reward_debt: u128,
+    pub claimable: u128,
+}
+
+// ─── Reward events ───
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct AmmRewardEvent {
+    pub id: u64,
+    pub pool_id: PoolId,
+    pub amount: u128,
+    pub total_shares_at_time: u128,
+    pub nonce: u64,
+    pub timestamp: u64,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct AmmClaimEvent {
+    pub id: u64,
+    pub pool_id: PoolId,
+    pub claimant: Principal,
+    pub amount: u128,
+    pub timestamp: u64,
+}
+
+// ─── TVL sampling (added 2026-05-09) ───
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct TvlSample {
+    pub pool_id: PoolId,
+    pub timestamp: u64,
+    pub reserve_a: u128,
+    pub reserve_b: u128,
+    /// USD per token_a in e8s (3USD assumed at 1.00).
+    pub price_a_e8s: u128,
+    /// USD per token_b in e8s.
+    pub price_b_e8s: u128,
+    /// Computed: reserve_a * price_a_e8s / 1e8 + reserve_b * price_b_e8s / 1e8.
+    pub tvl_usd_e8s: u128,
+}
+
+/// Lightweight shape for the cross-canister call to rumi_protocol_backend's
+/// `get_icp_usd_price_e8s` query. Only the price field is needed.
+#[derive(CandidType, Clone, Debug, Deserialize)]
+pub struct ProtocolStatusLite {
+    pub price_e8s: u128,
 }

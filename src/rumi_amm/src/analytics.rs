@@ -8,7 +8,8 @@
 //! Frequently-requested shapes are served from a 60s TTL cache to keep
 //! repeat calls cheap.
 
-use candid::Principal;
+use candid::{CandidType, Principal};
+use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap};
@@ -693,6 +694,42 @@ pub fn get_swap_events_by_time_range(query: AmmEventsByTimeRangeQuery) -> Vec<Am
     })
 }
 
+// ─── Reward series (daily aggregation for APY computation) ───
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct DailyRewardPoint {
+    pub day_start_ns: u64,
+    pub amount: u128,
+}
+
+const NS_PER_DAY: u64 = 86_400 * 1_000_000_000;
+
+/// Build a daily-aggregated reward series for `pool_id` over the last
+/// `window_days` days. Used by the frontend's amm1ApyService to compute
+/// the reward APY component.
+pub fn build_reward_series(
+    events: &[crate::types::AmmRewardEvent],
+    pool_id: &str,
+    window_days: u32,
+    now_ns: u64,
+) -> Vec<DailyRewardPoint> {
+    let window_ns = (window_days as u64) * NS_PER_DAY;
+    let cutoff = now_ns.saturating_sub(window_ns);
+    let mut buckets: std::collections::BTreeMap<u64, u128> = std::collections::BTreeMap::new();
+    for ev in events {
+        if ev.timestamp < cutoff || ev.pool_id != pool_id {
+            continue;
+        }
+        let day = (ev.timestamp / NS_PER_DAY) * NS_PER_DAY;
+        let entry = buckets.entry(day).or_insert(0);
+        *entry = entry.saturating_add(ev.amount);
+    }
+    buckets
+        .into_iter()
+        .map(|(day_start_ns, amount)| DailyRewardPoint { day_start_ns, amount })
+        .collect()
+}
+
 // ─── Tests ───
 
 #[cfg(test)]
@@ -735,6 +772,12 @@ mod tests {
             paused: false,
             subaccount_a: [0; 32],
             subaccount_b: [0; 32],
+            lp_rewards: BTreeMap::new(),
+            acc_reward_per_share: 0,
+            pending_no_lp: 0,
+            total_rewards_distributed: 0,
+            processed_donation_nonces: std::collections::VecDeque::new(),
+            reward_balance_snapshot: 0,
         };
         pool.lp_shares.insert(alice(), 600_000);
         pool.lp_shares.insert(bob(), 400_000);
@@ -1124,5 +1167,63 @@ mod tests {
             points: 10,
         });
         assert_eq!(fresh.len(), 2, "after invalidation, new event appears");
+    }
+}
+
+#[cfg(test)]
+mod reward_series_tests {
+    use super::*;
+    use crate::types::AmmRewardEvent;
+
+    #[test]
+    fn empty_events_returns_empty() {
+        let v: Vec<AmmRewardEvent> = vec![];
+        let result = build_reward_series(&v, "3USD_ICP", 7, 100 * NS_PER_DAY);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn aggregates_by_day_within_window() {
+        let now = 100 * NS_PER_DAY;
+        let events = vec![
+            AmmRewardEvent {
+                id: 0, pool_id: "3USD_ICP".into(),
+                amount: 100, total_shares_at_time: 1000, nonce: 0,
+                timestamp: 99 * NS_PER_DAY,
+            },
+            AmmRewardEvent {
+                id: 1, pool_id: "3USD_ICP".into(),
+                amount: 200, total_shares_at_time: 1000, nonce: 1,
+                timestamp: 99 * NS_PER_DAY + 3600 * 1_000_000_000,
+            },
+            AmmRewardEvent {
+                id: 2, pool_id: "3USD_ICP".into(),
+                amount: 50, total_shares_at_time: 1000, nonce: 2,
+                timestamp: 92 * NS_PER_DAY, // outside 7d window
+            },
+        ];
+        let result = build_reward_series(&events, "3USD_ICP", 7, now);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].amount, 300);
+    }
+
+    #[test]
+    fn filters_by_pool_id() {
+        let now = 100 * NS_PER_DAY;
+        let events = vec![
+            AmmRewardEvent {
+                id: 0, pool_id: "3USD_ICP".into(),
+                amount: 100, total_shares_at_time: 1000, nonce: 0,
+                timestamp: 99 * NS_PER_DAY,
+            },
+            AmmRewardEvent {
+                id: 1, pool_id: "OTHER".into(),
+                amount: 999, total_shares_at_time: 1000, nonce: 1,
+                timestamp: 99 * NS_PER_DAY,
+            },
+        ];
+        let result = build_reward_series(&events, "3USD_ICP", 7, now);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].amount, 100);
     }
 }

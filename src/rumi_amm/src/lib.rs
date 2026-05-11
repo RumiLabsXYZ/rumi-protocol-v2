@@ -10,16 +10,17 @@ use std::collections::{BTreeMap, BTreeSet};
 pub mod types;
 pub mod state;
 pub mod math;
+pub mod rewards;
 pub mod transfers;
 pub mod icrc21;
 pub mod analytics;
 mod logs;
 
 use crate::types::*;
-use crate::state::{mutate_state, read_state};
+use crate::state::{mutate_state, read_state, MAX_PROCESSED_NONCES};
 use crate::math::{compute_swap, compute_initial_lp_shares, compute_proportional_lp_shares,
                    compute_remove_liquidity, MINIMUM_LIQUIDITY};
-use crate::transfers::{transfer_from_user, transfer_to_user};
+use crate::transfers::{transfer_from_user, transfer_reward_icusd, transfer_to_user};
 use crate::logs::INFO;
 
 // ─── Per-pool reentrancy guard ───
@@ -58,9 +59,45 @@ impl Drop for PoolGuard {
 // ─── Supply Cache (not persisted to stable memory) ───
 
 /// icUSD ledger canister ID on mainnet.
-const ICUSD_LEDGER: &str = "t6bor-paaaa-aaaap-qrd5q-cai";
+pub const ICUSD_LEDGER: &str = "t6bor-paaaa-aaaap-qrd5q-cai";
 /// 3pool canister ID on mainnet (also the 3USD token ledger).
 const THREEPOOL: &str = "fohh4-yyaaa-aaaap-qtkpa-cai";
+
+/// Per-pool subaccount where reward icUSD is held until claimed.
+/// Derived deterministically from the pool ID so the backend can
+/// compute it client-side and target the correct subaccount in its
+/// mint call.
+pub fn reward_subaccount_for(pool_id: &PoolId) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"rumi_amm:rewards:");
+    hasher.update(pool_id.as_bytes());
+    let digest = hasher.finalize();
+    let mut sub = [0u8; 32];
+    sub.copy_from_slice(&digest);
+    sub
+}
+
+/// Query the icUSD ledger for the AMM's reward-subaccount balance.
+async fn query_reward_subaccount_balance(pool_id: &PoolId) -> Result<u128, AmmError> {
+    use icrc_ledger_types::icrc1::account::Account;
+    let icusd_ledger = Principal::from_text(ICUSD_LEDGER)
+        .expect("invalid icUSD ledger principal");
+    let acct = Account {
+        owner: ic_cdk::id(),
+        subaccount: Some(reward_subaccount_for(pool_id)),
+    };
+    let result: Result<(Nat,), _> = ic_cdk::call(
+        icusd_ledger,
+        "icrc1_balance_of",
+        (acct,),
+    ).await;
+    match result {
+        Ok((bal,)) => Ok(bal.0.try_into().unwrap_or(u128::MAX)),
+        Err((code, msg)) => Err(AmmError::RewardLedgerTransferFailed {
+            reason: format!("balance query rejected: {:?} {}", code, msg),
+        }),
+    }
+}
 
 #[derive(Clone, Default)]
 struct SupplyCache {
@@ -345,6 +382,87 @@ async fn collect_3usd_holders() -> Result<HolderSnapshot, String> {
     })
 }
 
+// ─── TVL Sampler (added 2026-05-09 for amm1ApyService) ───
+
+const TVL_SAMPLE_INTERVAL_SECS: u64 = 6 * 3600; // 4 samples/day
+
+fn setup_tvl_sample_timer() {
+    // First sample 90s after boot (let supply cache + protocol_backend_principal config arrive).
+    ic_cdk_timers::set_timer(std::time::Duration::from_secs(90), || {
+        ic_cdk::spawn(sample_tvl_for_all_pools());
+    });
+    ic_cdk_timers::set_timer_interval(
+        std::time::Duration::from_secs(TVL_SAMPLE_INTERVAL_SECS),
+        || ic_cdk::spawn(sample_tvl_for_all_pools()),
+    );
+}
+
+async fn sample_tvl_for_all_pools() {
+    // Price source: ICP/USD comes from rumi_protocol_backend.get_icp_usd_price_e8s.
+    // 3USD assumed at $1.00 (peg). Documented limitation: if the peg ever depegs,
+    // this sample is inaccurate.
+    let pool_ids: Vec<PoolId> = read_state(|s| s.pools.keys().cloned().collect());
+    if pool_ids.is_empty() {
+        return;
+    }
+
+    let icp_price = match fetch_icp_price_e8s().await {
+        Ok(p) if p > 0 => p,
+        Ok(_) => {
+            log!(INFO, "[tvl_sample] icp price returned 0; skipping sample");
+            return;
+        }
+        Err(e) => {
+            log!(INFO, "[tvl_sample] icp price fetch failed: {}; skipping sample", e);
+            return;
+        }
+    };
+
+    let three_usd_price_e8s: u128 = 100_000_000; // $1.00 in e8s
+
+    for pool_id in pool_ids {
+        mutate_state(|s| {
+            let pool = match s.pools.get(&pool_id) {
+                Some(p) => p,
+                None => return,
+            };
+            // tvl_usd_e8s = reserve_a * price_a / 1e8 + reserve_b * price_b / 1e8
+            let tvl_a = pool.reserve_a.saturating_mul(three_usd_price_e8s) / 100_000_000;
+            let tvl_b = pool.reserve_b.saturating_mul(icp_price) / 100_000_000;
+            let tvl_usd_e8s = tvl_a.saturating_add(tvl_b);
+
+            let sample = TvlSample {
+                pool_id: pool_id.clone(),
+                timestamp: ic_cdk::api::time(),
+                reserve_a: pool.reserve_a,
+                reserve_b: pool.reserve_b,
+                price_a_e8s: three_usd_price_e8s,
+                price_b_e8s: icp_price,
+                tvl_usd_e8s,
+            };
+            s.tvl_samples.push(sample);
+            while s.tvl_samples.len() > crate::state::MAX_TVL_SAMPLES {
+                s.tvl_samples.remove(0);
+            }
+        });
+    }
+}
+
+async fn fetch_icp_price_e8s() -> Result<u128, String> {
+    // Re-uses protocol_backend_principal as the source for the price query.
+    // If the backend hasn't been configured yet, or it doesn't yet have the
+    // get_icp_usd_price_e8s query (deploys can land in either order), the
+    // call fails gracefully and the sampler skips this tick.
+    let backend = read_state(|s| s.protocol_backend_principal)
+        .ok_or_else(|| "protocol_backend_principal not configured".to_string())?;
+    let result: Result<(ProtocolStatusLite,), _> =
+        ic_cdk::call(backend, "get_icp_usd_price_e8s", ()).await;
+    match result {
+        Ok((p,)) => Ok(p.price_e8s),
+        Err((code, msg)) => Err(format!("call failed: {:?} {}", code, msg)),
+    }
+}
+
 // ─── Init / Upgrade ───
 
 #[init]
@@ -360,6 +478,7 @@ fn init(args: AmmInitArgs) {
     mutate_state(|s| s.initialize(args));
     setup_supply_timer();
     setup_snapshot_timer();
+    setup_tvl_sample_timer();
     log!(INFO, "Rumi AMM initialized. Admin: {}", read_state(|s| s.admin));
 }
 
@@ -377,6 +496,7 @@ fn post_upgrade(_args: AmmInitArgs) {
     state::load_from_stable_memory();
     setup_supply_timer();
     setup_snapshot_timer();
+    setup_tvl_sample_timer();
     log!(INFO, "Rumi AMM post-upgrade: state restored. {} pools, {} snapshots",
         read_state(|s| s.pools.len()),
         read_state(|s| s.holder_snapshots.len()));
@@ -521,6 +641,12 @@ fn create_pool(args: CreatePoolArgs) -> Result<PoolId, AmmError> {
             paused: false,
             subaccount_a,
             subaccount_b,
+            lp_rewards: BTreeMap::new(),
+            acc_reward_per_share: 0,
+            pending_no_lp: 0,
+            total_rewards_distributed: 0,
+            processed_donation_nonces: std::collections::VecDeque::new(),
+            reward_balance_snapshot: 0,
         };
 
         log!(INFO, "Pool created: {} (fee: {} bps, admin: {})", pool_id, args.fee_bps, is_admin);
@@ -706,6 +832,207 @@ fn set_maintenance_mode(enabled: bool) -> Result<(), AmmError> {
         s.record_admin_event(ic_cdk::caller(), AmmAdminAction::SetMaintenanceMode { enabled });
     });
     Ok(())
+}
+
+/// Configure which principal is allowed to call `notify_reward_received`.
+/// Required before AMM1 earnings distribution can begin. Only callable
+/// by admin. Set to the rumi_protocol_backend canister principal.
+#[update]
+fn set_protocol_backend_principal(principal: Principal) -> Result<(), AmmError> {
+    caller_is_admin()?;
+    if principal == Principal::anonymous() {
+        return Err(AmmError::Unauthorized);
+    }
+    mutate_state(|s| s.protocol_backend_principal = Some(principal));
+    log!(INFO, "Protocol backend principal set to: {}", principal);
+    mutate_state(|s| {
+        s.record_admin_event(
+            ic_cdk::caller(),
+            AmmAdminAction::SetProtocolBackendPrincipal { backend: principal },
+        );
+    });
+    Ok(())
+}
+
+/// Receive a reward donation from the protocol backend. The caller is
+/// expected to have already minted `amount` icUSD into this canister's
+/// per-pool reward subaccount before invoking this call. This call
+/// verifies the on-chain balance grew by at least `amount` and bumps
+/// `acc_reward_per_share` (or buffers in `pending_no_lp` if there are
+/// no LPs yet). Idempotent on duplicate `nonce`.
+#[update]
+pub async fn notify_reward_received(
+    pool_id: PoolId,
+    amount: u128,
+    nonce: u64,
+) -> Result<(), AmmError> {
+    // 1. Caller restriction: only the configured protocol backend principal.
+    let caller = ic_cdk::caller();
+    let authorized = read_state(|s| s.protocol_backend_principal);
+    match authorized {
+        Some(p) if p == caller => {}
+        _ => return Err(AmmError::Unauthorized),
+    }
+
+    // 2. Acquire pool guard before any await. Released via Drop on return.
+    let _guard = PoolGuard::new(pool_id.clone())?;
+
+    // 3. Early dedup (avoids unnecessary balance query for repeated nonces).
+    let already_processed = read_state(|s| {
+        s.pools
+            .get(&pool_id)
+            .map(|p| p.processed_donation_nonces.contains(&nonce))
+            .unwrap_or(false)
+    });
+    if already_processed {
+        log!(INFO, "[notify_reward_received] dedup on nonce {} for pool {}", nonce, pool_id);
+        return Ok(());
+    }
+
+    // 4. Verify on-chain balance grew by at least `amount` since last snapshot.
+    let on_chain = query_reward_subaccount_balance(&pool_id).await?;
+
+    // 5. Re-check dedup inside the mutate_state lock (race protection
+    // for the await above), then bump accumulator and record nonce.
+    mutate_state(|s| -> Result<(), AmmError> {
+        let pool = s.pools.get_mut(&pool_id).ok_or(AmmError::PoolNotFound)?;
+
+        // Re-check dedup under lock.
+        if pool.processed_donation_nonces.contains(&nonce) {
+            return Ok(());
+        }
+
+        // Verify expected balance growth.
+        let expected = pool.reward_balance_snapshot.saturating_add(amount);
+        if on_chain < expected {
+            return Err(AmmError::InsufficientOnChainBalance {
+                expected,
+                actual: on_chain,
+            });
+        }
+
+        // Bump accumulator (or buffer if no LPs).
+        if pool.total_lp_shares > 0 {
+            pool.acc_reward_per_share = crate::rewards::accumulate(
+                pool.acc_reward_per_share,
+                amount,
+                pool.total_lp_shares,
+            );
+        } else {
+            pool.pending_no_lp = pool.pending_no_lp.saturating_add(amount);
+        }
+        pool.total_rewards_distributed = pool.total_rewards_distributed.saturating_add(amount);
+
+        // Update snapshot to match the new on-chain balance.
+        pool.reward_balance_snapshot = on_chain;
+
+        // Record nonce + ring-buffer prune.
+        pool.processed_donation_nonces.push_back(nonce);
+        while pool.processed_donation_nonces.len() > MAX_PROCESSED_NONCES {
+            pool.processed_donation_nonces.pop_front();
+        }
+
+        // Emit event.
+        let total_shares = pool.total_lp_shares;
+        s.record_reward_event(pool_id.clone(), amount, total_shares, nonce);
+
+        Ok(())
+    })?;
+
+    Ok(())
+}
+
+/// Claim accumulated reward icUSD for the caller. Settles pending into
+/// claimable, transfers claimable, zeroes claimable on success. On
+/// transfer failure, restores claimable so the caller can retry.
+#[update]
+pub async fn claim_rewards(pool_id: PoolId) -> Result<u128, AmmError> {
+    let caller = ic_cdk::caller();
+    if caller == Principal::anonymous() {
+        return Err(AmmError::Unauthorized);
+    }
+
+    let _guard = PoolGuard::new(pool_id.clone())?;
+
+    // Phase 1: settle pending into claimable, snapshot the amount, persist.
+    let amount = mutate_state(|s| -> Result<u128, AmmError> {
+        let pool = s.pools.get_mut(&pool_id).ok_or(AmmError::PoolNotFound)?;
+        let shares = pool.lp_shares.get(&caller).copied().unwrap_or(0);
+        let acc = pool.acc_reward_per_share;
+        let entry = pool.lp_rewards.entry(caller).or_default();
+
+        crate::rewards::settle(entry, shares, acc);
+        crate::rewards::reset_debt(entry, shares, acc);
+
+        let claimable = entry.claimable;
+        if claimable < crate::state::MIN_CLAIM_E8S {
+            return Err(AmmError::BelowMinClaim {
+                claimable,
+                min: crate::state::MIN_CLAIM_E8S,
+            });
+        }
+        // Optimistically zero claimable; will be restored on transfer fail.
+        entry.claimable = 0;
+        Ok(claimable)
+    })?;
+
+    // Phase 2: ICRC-1 transfer to caller from the reward subaccount.
+    let transfer_result = transfer_reward_icusd(&pool_id, caller, amount).await;
+
+    match transfer_result {
+        Ok(_block_index) => {
+            // Refetch live balance so the snapshot reflects amount + ledger fee
+            // (and any concurrent third-party transfers). Mirrors the
+            // notify_reward_received pattern of trusting on-chain truth.
+            // On query failure, fall back to subtracting amount + hardcoded fee.
+            let after_balance = query_reward_subaccount_balance(&pool_id).await;
+            mutate_state(|s| {
+                if let Some(pool) = s.pools.get_mut(&pool_id) {
+                    match after_balance {
+                        Ok(on_chain) => {
+                            pool.reward_balance_snapshot = on_chain;
+                        }
+                        Err(_) => {
+                            pool.reward_balance_snapshot = pool
+                                .reward_balance_snapshot
+                                .saturating_sub(
+                                    amount.saturating_add(crate::state::ICUSD_LEDGER_FEE_E8S),
+                                );
+                        }
+                    }
+                }
+                s.record_claim_event(pool_id.clone(), caller, amount);
+            });
+            Ok(amount)
+        }
+        Err(e) => {
+            // Restore claimable on failure (the user can retry).
+            mutate_state(|s| {
+                if let Some(pool) = s.pools.get_mut(&pool_id) {
+                    if let Some(entry) = pool.lp_rewards.get_mut(&caller) {
+                        entry.claimable = entry.claimable.saturating_add(amount);
+                    }
+                }
+            });
+            Err(AmmError::RewardLedgerTransferFailed { reason: e })
+        }
+    }
+}
+
+/// Read-only pending reward calculation for UI display.
+#[query]
+pub fn get_pending_rewards(pool_id: PoolId, principal: Principal) -> Nat {
+    read_state(|s| {
+        let Some(pool) = s.pools.get(&pool_id) else {
+            return Nat::from(0u64);
+        };
+        let shares = pool.lp_shares.get(&principal).copied().unwrap_or(0);
+        let entry = pool.lp_rewards.get(&principal);
+        let claimable = entry.map(|e| e.claimable).unwrap_or(0);
+        let debt = entry.map(|e| e.reward_debt).unwrap_or(0);
+        let unsettled = crate::rewards::pending(shares, pool.acc_reward_per_share, debt);
+        Nat::from(claimable.saturating_add(unsettled))
+    })
 }
 
 // ─── Claims ───
@@ -992,12 +1319,25 @@ async fn add_liquidity(
         });
     }
 
-    // Update state
+    // Update state (with reward bookkeeping).
     mutate_state(|s| {
         let pool = s.pools.get_mut(&pool_id).expect("pool exists");
 
-        if pool.total_lp_shares == 0 {
-            // First deposit: lock MINIMUM_LIQUIDITY to zero address
+        // Snapshot pre-update state for reward bookkeeping.
+        let was_first_liquidity = pool.total_lp_shares == 0;
+        let existing_caller_shares = pool.lp_shares.get(&caller).copied().unwrap_or(0);
+        let acc_pre_update = pool.acc_reward_per_share;
+
+        // 1. Settle caller's existing rewards before share change.
+        // No-op for first depositor (existing_caller_shares == 0).
+        {
+            let entry = pool.lp_rewards.entry(caller).or_default();
+            crate::rewards::settle(entry, existing_caller_shares, acc_pre_update);
+        }
+
+        // 2. Apply share update (existing logic).
+        if was_first_liquidity {
+            // First deposit: lock MINIMUM_LIQUIDITY to zero address.
             let user_shares = shares - MINIMUM_LIQUIDITY;
             pool.lp_shares.insert(Principal::anonymous(), MINIMUM_LIQUIDITY);
             *pool.lp_shares.entry(caller).or_insert(0) += user_shares;
@@ -1012,6 +1352,40 @@ async fn add_liquidity(
 
         pool.reserve_a += amount_a;
         pool.reserve_b += amount_b;
+
+        // 3. Reset caller's reward_debt against the PRE-DRAIN accumulator.
+        // Crucial: this positions the caller to RECEIVE their pro-rata of
+        // any subsequent drain (and any future donation) via the standard
+        // accumulator math: pending = shares * (acc_post - acc_pre).
+        // Doing this AFTER the drain instead would zero out their share
+        // of the drain, since reward_debt would equal shares * acc_post.
+        let new_caller_shares = pool.lp_shares.get(&caller).copied().unwrap_or(0);
+        {
+            let entry = pool.lp_rewards.entry(caller).or_default();
+            crate::rewards::reset_debt(entry, new_caller_shares, acc_pre_update);
+        }
+
+        // 4. On first-liquidity transition, drain pending_no_lp into accumulator.
+        // This is logically a synthetic donation that occurs AFTER the new
+        // shares are recognized, so the standard accumulator math credits
+        // the new shareholders pro-rata. (The anonymous burn-share's
+        // pro-rata is permanently stranded, accepted as a tiny rounding
+        // loss since MINIMUM_LIQUIDITY is small.)
+        //
+        // Note: total_rewards_distributed is NOT incremented here.
+        // notify_reward_received already incremented it when the donation
+        // first arrived (regardless of LP presence). Incrementing again
+        // on drain would double-count buffered donations.
+        if was_first_liquidity && pool.pending_no_lp > 0 && pool.total_lp_shares > 0 {
+            let buffered = pool.pending_no_lp;
+            pool.acc_reward_per_share = crate::rewards::accumulate(
+                pool.acc_reward_per_share,
+                buffered,
+                pool.total_lp_shares,
+            );
+            pool.pending_no_lp = 0;
+            log!(INFO, "[add_liquidity] drained pending_no_lp {} into acc for pool {}", buffered, pool_id);
+        }
     });
 
     mutate_state(|s| {
@@ -1085,14 +1459,45 @@ async fn remove_liquidity(
     // if a transfer fails mid-way.
     mutate_state(|s| {
         let pool = s.pools.get_mut(&pool_id).expect("pool exists");
-        let entry = pool.lp_shares.get_mut(&caller).expect("user has shares");
-        *entry -= lp_shares;
-        if *entry == 0 {
-            pool.lp_shares.remove(&caller);
+
+        // Snapshot pre-update state for reward bookkeeping.
+        let existing_caller_shares = pool.lp_shares.get(&caller).copied().unwrap_or(0);
+        let acc = pool.acc_reward_per_share;
+
+        // 1. Settle caller's existing rewards before share change.
+        // Preserves any claimable across this removal (including full
+        // exit), so the caller can still claim_rewards() later.
+        {
+            let entry = pool.lp_rewards.entry(caller).or_default();
+            crate::rewards::settle(entry, existing_caller_shares, acc);
+        }
+
+        // 2. Apply share decrement (existing logic).
+        {
+            let entry = pool.lp_shares.get_mut(&caller).expect("user has shares");
+            *entry -= lp_shares;
+            if *entry == 0 {
+                pool.lp_shares.remove(&caller);
+            }
         }
         pool.total_lp_shares -= lp_shares;
         pool.reserve_a -= amount_a;
         pool.reserve_b -= amount_b;
+
+        // 3. Reset reward_debt to the post-update share count.
+        // Same accumulator (no drain in this path). If both shares and
+        // claimable are zero after settle+reset, prune the entry to
+        // free storage. Otherwise the caller may have pending icUSD
+        // earnings to claim later.
+        let new_caller_shares = pool.lp_shares.get(&caller).copied().unwrap_or(0);
+        let should_prune = {
+            let entry = pool.lp_rewards.entry(caller).or_default();
+            crate::rewards::reset_debt(entry, new_caller_shares, acc);
+            new_caller_shares == 0 && entry.claimable == 0
+        };
+        if should_prune {
+            pool.lp_rewards.remove(&caller);
+        }
     });
 
     // Send tokens to user. If either fails, shares are already burned
@@ -1350,6 +1755,31 @@ fn get_amm_liquidity_events_by_principal(
 #[query]
 fn get_amm_swap_events_by_time_range(query: AmmEventsByTimeRangeQuery) -> Vec<AmmSwapEvent> {
     analytics::get_swap_events_by_time_range(query)
+}
+
+#[query]
+pub fn get_amm_reward_series(pool_id: PoolId, window_days: u32) -> Vec<crate::analytics::DailyRewardPoint> {
+    read_state(|s| {
+        crate::analytics::build_reward_series(
+            &s.reward_events,
+            &pool_id,
+            window_days,
+            ic_cdk::api::time(),
+        )
+    })
+}
+
+#[query]
+pub fn get_amm_tvl_series(pool_id: PoolId, window_days: u32) -> Vec<TvlSample> {
+    read_state(|s| {
+        let now = ic_cdk::api::time();
+        let cutoff = now.saturating_sub((window_days as u64).saturating_mul(86_400 * 1_000_000_000));
+        s.tvl_samples
+            .iter()
+            .filter(|s| s.pool_id == pool_id && s.timestamp >= cutoff)
+            .cloned()
+            .collect()
+    })
 }
 
 // ─── ICRC-21 / ICRC-28 / ICRC-10 ───
