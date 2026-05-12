@@ -90,6 +90,28 @@ fn haircut_at_or_above_one_returns_none() {
 }
 
 #[test]
+fn nan_or_infinite_haircut_returns_none() {
+    // Pre-fix behavior used `Decimal::from_f64(haircut).unwrap_or(ZERO)`,
+    // which silently treated `NaN` and `Infinity` as a 0% haircut and
+    // published an inflated price. The new helper refuses both. (The
+    // admin endpoint `set_lst_haircut` uses `<` / `>` validation that
+    // returns false for `NaN`, so a NaN haircut COULD be stored in
+    // state; the helper is the last line of defense.)
+    assert!(
+        compute_lst_wrapped_price(dec!(3.26), 80_000_000, f64::NAN).is_none(),
+        "NaN haircut must be refused, not silently treated as zero",
+    );
+    assert!(
+        compute_lst_wrapped_price(dec!(3.26), 80_000_000, f64::INFINITY).is_none(),
+        "+infinity haircut must be refused",
+    );
+    assert!(
+        compute_lst_wrapped_price(dec!(3.26), 80_000_000, f64::NEG_INFINITY).is_none(),
+        "-infinity haircut must be refused",
+    );
+}
+
+#[test]
 fn zero_or_negative_underlying_returns_none() {
     // No price means no LST price. A non-positive underlying must not
     // propagate into a non-positive LST price.
