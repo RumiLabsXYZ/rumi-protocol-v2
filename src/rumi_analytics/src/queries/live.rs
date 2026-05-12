@@ -858,12 +858,21 @@ pub fn get_protocol_summary() -> types::ProtocolSummary {
 
     // Latest vault snapshot for TVL/CR/vault count.
     let vault_n = storage::daily_vaults::len();
-    let (tvl, debt, cr, vaults) = if vault_n > 0 {
+    let (tvl, debt, median_cr, vaults) = if vault_n > 0 {
         storage::daily_vaults::get(vault_n - 1)
             .map(|v| (v.total_collateral_usd_e8s, v.total_debt_e8s, v.median_cr_bps, v.total_vault_count))
             .unwrap_or((0, 0, 0, 0))
     } else {
         (0, 0, 0, 0)
+    };
+    // True system CR = aggregate collateral value / aggregate debt, in bps.
+    // The daily_vaults row stores median_cr separately; surface both so callers
+    // can distinguish "where does the typical vault sit" from "how healthy is
+    // the protocol overall."
+    let system_cr_bps = if debt > 0 {
+        ((tvl as u128).saturating_mul(10_000) / debt as u128).min(u32::MAX as u128) as u32
+    } else {
+        0
     };
 
     // Circulating supply from cache.
@@ -892,7 +901,8 @@ pub fn get_protocol_summary() -> types::ProtocolSummary {
         timestamp_ns: now,
         total_collateral_usd_e8s: tvl,
         total_debt_e8s: debt,
-        system_cr_bps: cr,
+        system_cr_bps,
+        median_cr_bps: median_cr,
         total_vault_count: vaults,
         circulating_supply_icusd_e8s: supply,
         volume_24h_e8s: activity.total_volume_e8s,

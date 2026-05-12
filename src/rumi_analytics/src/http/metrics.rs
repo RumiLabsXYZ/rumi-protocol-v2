@@ -61,9 +61,22 @@ pub fn render() -> String {
             );
             gauge(
                 &mut out,
-                "rumi_system_cr_bps",
-                "System-wide median collateral ratio in basis points",
+                "rumi_median_cr_bps",
+                "Median vault collateral ratio in basis points",
                 row.median_cr_bps as f64,
+            );
+            let system_cr_bps = if row.total_debt_e8s > 0 {
+                ((row.total_collateral_usd_e8s as u128).saturating_mul(10_000)
+                    / row.total_debt_e8s as u128)
+                    .min(u32::MAX as u128) as u32
+            } else {
+                0
+            };
+            gauge(
+                &mut out,
+                "rumi_system_cr_bps",
+                "Aggregate system collateral ratio (total collateral / total debt) in basis points",
+                system_cr_bps as f64,
             );
         }
     }

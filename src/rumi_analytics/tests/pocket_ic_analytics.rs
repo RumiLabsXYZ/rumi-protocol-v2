@@ -1076,6 +1076,7 @@ struct TestProtocolSummary {
     total_collateral_usd_e8s: u64,
     total_debt_e8s: u64,
     system_cr_bps: u32,
+    median_cr_bps: u32,
     total_vault_count: u32,
     volume_24h_e8s: u64,
     swap_count_24h: u32,

@@ -221,6 +221,7 @@ export const idlFactory = ({ IDL }) => {
     'total_vault_count' : IDL.Nat32,
     'total_collateral_usd_e8s' : IDL.Nat64,
     'system_cr_bps' : IDL.Nat32,
+    'median_cr_bps' : IDL.Nat32,
     'swap_count_24h' : IDL.Nat32,
     'volume_24h_e8s' : IDL.Nat64,
   });
