@@ -393,6 +393,59 @@ struct LstCanisterInfo {
     exchange_rate: u64,
 }
 
+/// Wave-14a follow-up: compute the final price for an `LstWrapped`
+/// collateral from already-fetched inputs. Pure function — does not call
+/// XRC or the LST canister.
+///
+/// Previously, `fetch_collateral_price` issued its own XRC
+/// `get_exchange_rate` call for the LST's `base_asset` (e.g. ICP/USD for
+/// nICP) even though `xrc::fetch_icp_rate` had just cached the same rate.
+/// That duplicated the ~1B-cycle XRC round-trip per LST collateral per
+/// refresh tick and also doubled every CDP-14 source-count rejection
+/// event (one tagged ICP, a paired one tagged nICP). The duplicated call
+/// produced no extra information: the price of nICP is mechanically
+/// derived from the ICP price, WaterNeuron's redemption rate, and the
+/// configured haircut.
+///
+/// Returns `None` if any input would yield a non-positive / non-finite
+/// price:
+///   * `wn_exchange_rate == 0` (LST canister unhealthy or not yet
+///     initialized — refuse to publish a price; cached value stays in
+///     place).
+///   * `haircut < 0` or `haircut >= 1` (misconfiguration).
+///   * `underlying_rate <= 0` (no upstream price available).
+///
+/// `wn_exchange_rate` is the LST canister's `exchange_rate` field, scaled
+/// by E8S. For WaterNeuron's nICP this represents "nICP minted per ICP
+/// staked", so the multiplier `E8S / wn_exchange_rate` converts an
+/// underlying ICP price into the equivalent nICP price (1 nICP redeems
+/// for `1 / multiplier` ICP).
+pub fn compute_lst_wrapped_price(
+    underlying_rate: rust_decimal::Decimal,
+    wn_exchange_rate: u64,
+    haircut: f64,
+) -> Option<rust_decimal::Decimal> {
+    use rust_decimal::prelude::FromPrimitive;
+    use rust_decimal::Decimal;
+
+    if wn_exchange_rate == 0 {
+        return None;
+    }
+    if underlying_rate <= Decimal::ZERO {
+        return None;
+    }
+    let haircut_dec = Decimal::from_f64(haircut)?;
+    if haircut_dec < Decimal::ZERO || haircut_dec >= Decimal::ONE {
+        return None;
+    }
+    let multiplier = Decimal::from(crate::E8S) / Decimal::from(wn_exchange_rate);
+    let adjusted = underlying_rate * multiplier * (Decimal::ONE - haircut_dec);
+    if adjusted <= Decimal::ZERO {
+        return None;
+    }
+    Some(adjusted)
+}
+
 /// Generic price fetch for any collateral type using its PriceSource config.
 /// Routes to XRC, CoinGecko HTTPS outcall, or LstWrapped depending on config.
 pub async fn fetch_collateral_price(collateral_type: Principal) {
@@ -412,6 +465,131 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
             return;
         }
     };
+
+    // Wave-14a follow-up: LstWrapped derives its price from the cached
+    // underlying-asset rate (currently always ICP/USD, maintained by
+    // Timer A via `xrc::fetch_icp_rate`). No XRC call is issued here —
+    // duplicating that call burned ~1B cycles per refresh per LST
+    // collateral and doubled every source-count rejection event. The
+    // LST canister call (`get_info`) is still required, since the
+    // redemption rate is not cached anywhere else.
+    if let PriceSource::LstWrapped {
+        rate_canister_id,
+        rate_method,
+        haircut,
+        ref base_asset,
+        ..
+    } = price_source
+    {
+        // Today, ICP is the only supported LstWrapped underlying. If a
+        // future config wires up a non-ICP base, route it explicitly here
+        // rather than silently falling through to a stale path.
+        if base_asset != "ICP" {
+            log!(
+                TRACE_XRC,
+                "[fetch_collateral_price] LstWrapped base_asset {:?} for {} not yet supported; skipping",
+                base_asset,
+                collateral_type
+            );
+            return;
+        }
+
+        let cached = read_state(|s| match (s.last_icp_rate, s.last_icp_timestamp) {
+            (Some(rate), Some(ts)) => Some((rate, ts)),
+            _ => None,
+        });
+        let Some((icp_rate, ts_nanos)) = cached else {
+            log!(
+                TRACE_XRC,
+                "[fetch_collateral_price] LstWrapped {}: no cached ICP rate yet (Timer A has not landed); skipping",
+                collateral_type
+            );
+            return;
+        };
+
+        let rate_result: Result<(LstCanisterInfo,), _> =
+            ic_cdk::call(rate_canister_id, rate_method.as_str(), ()).await;
+        let info = match rate_result {
+            Ok((info,)) => info,
+            Err((code, msg)) => {
+                log!(
+                    TRACE_XRC,
+                    "[fetch_collateral_price] LstWrapped rate canister error for {}: {:?} {}",
+                    collateral_type, code, msg
+                );
+                return;
+            }
+        };
+
+        let underlying_decimal = icp_rate.0;
+        let Some(final_rate) =
+            compute_lst_wrapped_price(underlying_decimal, info.exchange_rate, haircut)
+        else {
+            log!(
+                TRACE_XRC,
+                "[fetch_collateral_price] LstWrapped {}: compute returned None (underlying={}, wn_rate={}, haircut={})",
+                collateral_type, underlying_decimal, info.exchange_rate, haircut
+            );
+            return;
+        };
+
+        log!(
+            TRACE_XRC,
+            "[fetch_collateral_price] LstWrapped final: {} (underlying={}, wn_rate={}, haircut={})",
+            final_rate, underlying_decimal, info.exchange_rate, haircut
+        );
+
+        // Honor the same monotonic-timestamp gate as the XRC path: only
+        // publish if the cached underlying timestamp is newer than the
+        // collateral's last stored timestamp. Re-publishing the same
+        // underlying tick would emit a duplicate `price_update` event for
+        // no observable change.
+        let should_update = read_state(|s| {
+            s.get_collateral_config(&collateral_type)
+                .map(|c| match c.last_price_timestamp {
+                    Some(last_ts) => last_ts < ts_nanos,
+                    None => true,
+                })
+                .unwrap_or(false)
+        });
+        if !should_update {
+            return;
+        }
+
+        // Wave-5 LIQ-007: gate the LST-side price through the sanity band
+        // (rejects single outliers; multi-confirmation required to accept).
+        use rust_decimal::prelude::ToPrimitive;
+        let final_rate_f64 = match final_rate.to_f64() {
+            Some(v) if v.is_finite() && v > 0.0 => v,
+            _ => {
+                log!(
+                    TRACE_XRC,
+                    "[fetch_collateral_price] LstWrapped {}: non-positive/non-finite final rate {}; skipping",
+                    collateral_type, final_rate
+                );
+                return;
+            }
+        };
+        let accepted =
+            mutate_state(|s| s.check_price_sanity_band(&collateral_type, final_rate_f64));
+        if !accepted {
+            log!(
+                TRACE_XRC,
+                "[fetch_collateral_price] rejecting outlier LstWrapped rate {} for {}; awaiting confirmation",
+                final_rate_f64, collateral_type
+            );
+            return;
+        }
+
+        mutate_state(|s| {
+            if let Some(config) = s.collateral_configs.get_mut(&collateral_type) {
+                config.last_price = Some(final_rate_f64);
+                config.last_price_timestamp = Some(ts_nanos);
+                crate::event::record_price_update(collateral_type, final_rate, ts_nanos);
+            }
+        });
+        return;
+    }
 
     // CoinGecko variant uses HTTPS outcalls — completely separate path from XRC
     if let PriceSource::CoinGecko { ref coin_id, ref vs_currency } = price_source {
@@ -463,15 +641,17 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
         return;
     }
 
-    // XRC-based path (Xrc and LstWrapped variants)
+    // XRC-based path (only the `Xrc` variant reaches here now —
+    // `LstWrapped` is handled above without an XRC call, and `CoinGecko`
+    // is handled in its own branch).
     const XRC_CALL_COST_CYCLES: u64 = 1_000_000_000;
     const XRC_MARGIN_SEC: u64 = 60;
 
     let (base_asset, base_asset_class, quote_asset, quote_asset_class) = match &price_source {
-        PriceSource::Xrc { base_asset, base_asset_class, quote_asset, quote_asset_class }
-        | PriceSource::LstWrapped { base_asset, base_asset_class, quote_asset, quote_asset_class, .. } => {
+        PriceSource::Xrc { base_asset, base_asset_class, quote_asset, quote_asset_class } => {
             (base_asset.clone(), base_asset_class.clone(), quote_asset.clone(), quote_asset_class.clone())
         }
+        PriceSource::LstWrapped { .. } => unreachable!(), // handled above
         PriceSource::CoinGecko { .. } => unreachable!(), // handled above
     };
 
@@ -561,44 +741,10 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
 
     let Some((rate, ts_nanos)) = underlying_rate else { return };
 
-    // For LstWrapped, multiply by the redemption rate and apply haircut
-    let final_rate = match &price_source {
-        PriceSource::Xrc { .. } => rate,
-        PriceSource::LstWrapped { rate_canister_id, rate_method, haircut, .. } => {
-            let rate_result: Result<(LstCanisterInfo,), _> =
-                ic_cdk::call(*rate_canister_id, rate_method.as_str(), ()).await;
-
-            match rate_result {
-                Ok((info,)) => {
-                    if info.exchange_rate == 0 {
-                        log!(TRACE_XRC, "[fetch_collateral_price] LstWrapped exchange_rate is 0, skipping");
-                        return;
-                    }
-                    let multiplier = rust_decimal::Decimal::from(crate::E8S)
-                        / rust_decimal::Decimal::from(info.exchange_rate);
-                    let haircut_dec = rust_decimal::Decimal::from_f64(*haircut)
-                        .unwrap_or(rust_decimal::Decimal::ZERO);
-                    let adjusted = rate * multiplier * (rust_decimal::Decimal::ONE - haircut_dec);
-
-                    log!(
-                        TRACE_XRC,
-                        "[fetch_collateral_price] LstWrapped final: {} (underlying={}, multiplier={}, haircut={})",
-                        adjusted, rate, multiplier, haircut
-                    );
-                    adjusted
-                }
-                Err((code, msg)) => {
-                    log!(
-                        TRACE_XRC,
-                        "[fetch_collateral_price] LstWrapped rate canister error: {:?} {}",
-                        code, msg
-                    );
-                    return;
-                }
-            }
-        }
-        PriceSource::CoinGecko { .. } => unreachable!(),
-    };
+    // Only the plain `Xrc` variant reaches here — `LstWrapped` is handled
+    // above without re-fetching from XRC, and `CoinGecko` has its own
+    // early-return branch.
+    let final_rate = rate;
 
     let should_update = read_state(|s| {
         s.get_collateral_config(&collateral_type)
