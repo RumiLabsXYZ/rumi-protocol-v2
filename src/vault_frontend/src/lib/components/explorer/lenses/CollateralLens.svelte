@@ -18,7 +18,7 @@
   import { decodeRustDecimal } from '$utils/decimalUtils';
   import { COLLATERAL_DISPLAY_ORDER } from '$stores/collateralStore';
 
-  let systemCrBps = $state(0);
+  let medianCrBps = $state(0);
   let loading = $state(true);
   let collateralRows: CollateralRow[] = $state([]);
   let atRiskVaults: any[] = $state([]);
@@ -46,7 +46,7 @@
       ]);
 
       const summary = summaryR.status === 'fulfilled' ? summaryR.value : null;
-      systemCrBps = summary?.system_cr_bps ? Number(summary.system_cr_bps) : 0;
+      medianCrBps = summary?.median_cr_bps ? Number(summary.median_cr_bps) : 0;
 
       const configs = configsR.status === 'fulfilled' ? configsR.value ?? [] : [];
       const totals = totalsR.status === 'fulfilled' ? totalsR.value ?? [] : [];
@@ -189,10 +189,10 @@
     }
   });
 
-  const systemCrTone = $derived.by(() => {
-    if (systemCrBps === 0) return 'muted' as const;
-    if (systemCrBps < 15000) return 'danger' as const;
-    if (systemCrBps < 20000) return 'caution' as const;
+  const medianCrTone = $derived.by(() => {
+    if (medianCrBps === 0) return 'muted' as const;
+    if (medianCrBps < 15000) return 'danger' as const;
+    if (medianCrBps < 20000) return 'caution' as const;
     return 'good' as const;
   });
 
@@ -202,7 +202,7 @@
   });
 
   const healthMetrics = $derived.by(() => [
-    { label: 'Aggregate CR', value: systemCrBps > 0 ? bpsToPercent(systemCrBps) : '--', tone: systemCrTone },
+    { label: 'Median Vault CR', value: medianCrBps > 0 ? bpsToPercent(medianCrBps) : '--', tone: medianCrTone },
     { label: 'At-risk vaults', value: String(atRiskVaults.length), tone: atRiskVaults.length > 0 ? 'caution' as const : 'good' as const },
     { label: 'Liquidated (7d)', value: String(liq7dCount), sub: liq7dCount > 0 ? 'events' : 'none' },
     { label: 'Global liq threshold', value: '110%', sub: 'min CR' },

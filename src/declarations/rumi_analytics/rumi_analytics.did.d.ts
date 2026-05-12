@@ -274,6 +274,7 @@ export interface ProtocolSummary {
   'total_vault_count' : number,
   'total_collateral_usd_e8s' : bigint,
   'system_cr_bps' : number,
+  'median_cr_bps' : number,
   'swap_count_24h' : number,
   'volume_24h_e8s' : bigint,
 }

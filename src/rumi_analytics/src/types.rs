@@ -215,6 +215,7 @@ pub struct ProtocolSummary {
     pub total_collateral_usd_e8s: u64,
     pub total_debt_e8s: u64,
     pub system_cr_bps: u32,
+    pub median_cr_bps: u32,
     pub total_vault_count: u32,
     pub circulating_supply_icusd_e8s: Option<u128>,
     pub volume_24h_e8s: u64,
