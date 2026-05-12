@@ -4546,11 +4546,8 @@ async fn set_interest_rate(
             "Unknown collateral type".to_string(),
         ));
     }
-    if interest_rate_apr < 0.0 || interest_rate_apr > 1.0 {
-        return Err(ProtocolError::GenericError(
-            "Interest rate APR must be between 0 and 1.0 (100%)".to_string(),
-        ));
-    }
+    rumi_protocol_backend::validate_f64_inclusive("interest_rate_apr", interest_rate_apr, 0.0, 1.0)
+        .map_err(ProtocolError::GenericError)?;
     let rate = Ratio::from(
         Decimal::try_from(interest_rate_apr)
             .map_err(|_| ProtocolError::GenericError("Invalid interest rate value".to_string()))?,
@@ -4588,11 +4585,8 @@ async fn set_collateral_borrowing_fee(
             "Unknown collateral type".to_string(),
         ));
     }
-    if borrowing_fee < 0.0 || borrowing_fee > 0.10 {
-        return Err(ProtocolError::GenericError(
-            "Borrowing fee must be between 0 and 0.10 (10%)".to_string(),
-        ));
-    }
+    rumi_protocol_backend::validate_f64_inclusive("borrowing_fee", borrowing_fee, 0.0, 0.10)
+        .map_err(ProtocolError::GenericError)?;
     let fee = Ratio::from(
         Decimal::try_from(borrowing_fee)
             .map_err(|_| ProtocolError::GenericError("Invalid fee value".to_string()))?,
@@ -4630,8 +4624,13 @@ async fn set_rate_curve_markers(
             "Rate curve must have at least 2 markers".to_string(),
         ));
     }
-    // Validate sorted ascending and positive multipliers
+    // Validate finite values, sorted ascending, and positive multipliers
     for i in 0..markers.len() {
+        if !markers[i].0.is_finite() || !markers[i].1.is_finite() {
+            return Err(ProtocolError::GenericError(
+                format!("Marker at index {} must contain finite numbers, got ({}, {})", i, markers[i].0, markers[i].1),
+            ));
+        }
         if markers[i].1 <= 0.0 {
             return Err(ProtocolError::GenericError(
                 format!("Multiplier at index {} must be positive", i),
@@ -4682,9 +4681,9 @@ async fn set_recovery_rate_curve(
     use rumi_protocol_backend::state::SystemThreshold;
     let mut parsed: Vec<(SystemThreshold, f64)> = Vec::new();
     for (thresh_str, mult) in &markers {
-        if *mult <= 0.0 {
+        if !mult.is_finite() || *mult <= 0.0 {
             return Err(ProtocolError::GenericError(
-                format!("Multiplier for {} must be positive", thresh_str),
+                format!("Multiplier for {} must be a finite positive number, got {}", thresh_str, mult),
             ));
         }
         let threshold = match thresh_str.as_str() {
@@ -4763,6 +4762,11 @@ async fn set_healthy_cr(
     }
     // Validate healthy_cr > borrow_threshold if set
     if let Some(cr) = healthy_cr {
+        if !cr.is_finite() {
+            return Err(ProtocolError::GenericError(format!(
+                "healthy_cr ({}) must be a finite number", cr
+            )));
+        }
         let borrow_threshold = read_state(|s| {
             s.collateral_configs.get(&collateral_type)
                 .map(|c| c.borrow_threshold_ratio.to_f64())
@@ -5092,11 +5096,8 @@ async fn set_lst_haircut(
         return Err(ProtocolError::GenericError("Only developer can set LST haircut".to_string()));
     }
 
-    if haircut < 0.0 || haircut > 0.50 {
-        return Err(ProtocolError::GenericError(
-            format!("Haircut must be between 0.0 and 0.50, got {}", haircut),
-        ));
-    }
+    rumi_protocol_backend::validate_f64_inclusive("haircut", haircut, 0.0, 0.50)
+        .map_err(ProtocolError::GenericError)?;
 
     mutate_state(|s| {
         if let Some(config) = s.collateral_configs.get_mut(&collateral_type) {
@@ -5130,9 +5131,9 @@ async fn set_collateral_liquidation_ratio(
             "Only the developer principal can set liquidation ratio".to_string(),
         ));
     }
-    if liquidation_ratio <= 1.0 || liquidation_ratio > 5.0 {
+    if !liquidation_ratio.is_finite() || liquidation_ratio <= 1.0 || liquidation_ratio > 5.0 {
         return Err(ProtocolError::GenericError(format!(
-            "liquidation_ratio ({}) must be > 1.0 and ≤ 5.0",
+            "liquidation_ratio ({}) must be a finite number > 1.0 and ≤ 5.0",
             liquidation_ratio
         )));
     }
@@ -5178,9 +5179,9 @@ async fn set_collateral_borrow_threshold(
             "Only the developer principal can set borrow threshold".to_string(),
         ));
     }
-    if borrow_threshold_ratio <= 1.0 || borrow_threshold_ratio > 5.0 {
+    if !borrow_threshold_ratio.is_finite() || borrow_threshold_ratio <= 1.0 || borrow_threshold_ratio > 5.0 {
         return Err(ProtocolError::GenericError(format!(
-            "borrow_threshold_ratio ({}) must be > 1.0 and ≤ 5.0",
+            "borrow_threshold_ratio ({}) must be a finite number > 1.0 and ≤ 5.0",
             borrow_threshold_ratio
         )));
     }
@@ -5237,11 +5238,8 @@ async fn set_collateral_liquidation_bonus(
             "Only the developer principal can set liquidation bonus".to_string(),
         ));
     }
-    if liquidation_bonus < 1.0 || liquidation_bonus > 1.5 {
-        return Err(ProtocolError::GenericError(
-            "liquidation_bonus must be between 1.0 and 1.5".to_string(),
-        ));
-    }
+    rumi_protocol_backend::validate_f64_inclusive("liquidation_bonus", liquidation_bonus, 1.0, 1.5)
+        .map_err(ProtocolError::GenericError)?;
     let exists = read_state(|s| s.collateral_configs.contains_key(&collateral_type));
     if !exists {
         return Err(ProtocolError::GenericError("Unknown collateral type".to_string()));
@@ -5325,11 +5323,8 @@ async fn set_collateral_redemption_fee_floor(
             "Only the developer principal can set redemption fee floor".to_string(),
         ));
     }
-    if redemption_fee_floor < 0.0 || redemption_fee_floor > 0.10 {
-        return Err(ProtocolError::GenericError(
-            "redemption_fee_floor must be between 0 and 0.10 (10%)".to_string(),
-        ));
-    }
+    rumi_protocol_backend::validate_f64_inclusive("redemption_fee_floor", redemption_fee_floor, 0.0, 0.10)
+        .map_err(ProtocolError::GenericError)?;
     let ceiling = read_state(|s| {
         s.collateral_configs
             .get(&collateral_type)
@@ -5371,11 +5366,8 @@ async fn set_collateral_redemption_fee_ceiling(
             "Only the developer principal can set redemption fee ceiling".to_string(),
         ));
     }
-    if redemption_fee_ceiling < 0.0 || redemption_fee_ceiling > 0.50 {
-        return Err(ProtocolError::GenericError(
-            "redemption_fee_ceiling must be between 0 and 0.50 (50%)".to_string(),
-        ));
-    }
+    rumi_protocol_backend::validate_f64_inclusive("redemption_fee_ceiling", redemption_fee_ceiling, 0.0, 0.50)
+        .map_err(ProtocolError::GenericError)?;
     let floor = read_state(|s| {
         s.collateral_configs
             .get(&collateral_type)

@@ -107,3 +107,44 @@ mod candid_compat {
         assert!(decoded.min_size_e8s.is_none());
     }
 }
+
+#[cfg(test)]
+mod validate_f64_inclusive {
+    use crate::validate_f64_inclusive;
+
+    #[test]
+    fn accepts_values_inside_range_inclusive() {
+        assert!(validate_f64_inclusive("x", 0.0, 0.0, 0.50).is_ok());
+        assert!(validate_f64_inclusive("x", 0.25, 0.0, 0.50).is_ok());
+        assert!(validate_f64_inclusive("x", 0.50, 0.0, 0.50).is_ok());
+    }
+
+    #[test]
+    fn rejects_nan() {
+        let err = validate_f64_inclusive("haircut", f64::NAN, 0.0, 0.50).unwrap_err();
+        assert!(err.contains("haircut"), "err={}", err);
+        assert!(err.contains("finite"), "err={}", err);
+    }
+
+    #[test]
+    fn rejects_positive_infinity() {
+        let err = validate_f64_inclusive("haircut", f64::INFINITY, 0.0, 0.50).unwrap_err();
+        assert!(err.contains("finite"), "err={}", err);
+    }
+
+    #[test]
+    fn rejects_negative_infinity() {
+        let err = validate_f64_inclusive("haircut", f64::NEG_INFINITY, 0.0, 0.50).unwrap_err();
+        assert!(err.contains("finite"), "err={}", err);
+    }
+
+    #[test]
+    fn rejects_below_min() {
+        assert!(validate_f64_inclusive("x", -0.01, 0.0, 0.50).is_err());
+    }
+
+    #[test]
+    fn rejects_above_max() {
+        assert!(validate_f64_inclusive("x", 0.51, 0.0, 0.50).is_err());
+    }
+}
