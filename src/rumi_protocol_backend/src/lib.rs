@@ -41,6 +41,22 @@ pub mod test_helpers;
 #[cfg(test)]
 mod tests;
 
+/// Reject non-finite (NaN, ±Infinity) or out-of-range f64 admin inputs.
+/// Range is inclusive on both ends. Returns a human-readable error string
+/// suitable for wrapping in `ProtocolError::GenericError`.
+///
+/// Caution: `f64` ordering returns `false` for any comparison with NaN, so
+/// naked `value < min || value > max` checks let NaN slip through.
+pub fn validate_f64_inclusive(name: &str, value: f64, min: f64, max: f64) -> Result<(), String> {
+    if !value.is_finite() || value < min || value > max {
+        return Err(format!(
+            "{} ({}) must be a finite number in [{}, {}]",
+            name, value, min, max
+        ));
+    }
+    Ok(())
+}
+
 pub const SEC_NANOS: u64 = 1_000_000_000;
 pub const E8S: u64 = 100_000_000;
 
