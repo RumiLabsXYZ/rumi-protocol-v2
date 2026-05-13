@@ -362,6 +362,14 @@ pub enum BackendEvent {
     // breaking analytics ingestion entirely.
     #[serde(rename = "set_bot_cr_tolerance_bps")]
     SetBotCrToleranceBps {},
+    // Backend commit 18dd5f1 (2026-05-09) added the `set_amm1_canister`
+    // admin endpoint. Pre-listing the event variant here so analytics
+    // continues decoding cleanly the first time an admin wires the AMM1
+    // canister principal into the backend — without this, the entire
+    // `Vec<BackendEvent>` decode of any batch containing one of these
+    // rows would fail and halt ingestion.
+    #[serde(rename = "set_amm1_canister")]
+    SetAmm1Canister {},
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
@@ -481,6 +489,7 @@ impl BackendEvent {
             OracleSourceCountInsufficient {} => Some("OracleSourceCountInsufficient"),
             StabilityPoolCallFailed {} => Some("StabilityPoolCallFailed"),
             SetBotCrToleranceBps {} => Some("SetBotCrToleranceBps"),
+            SetAmm1Canister {} => Some("SetAmm1Canister"),
         }
     }
 }
