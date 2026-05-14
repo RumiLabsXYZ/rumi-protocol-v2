@@ -136,25 +136,68 @@ fn override_persists_across_collateral_config_serde_roundtrip() {
     // CollateralConfig is serialized to stable memory on pre_upgrade and
     // restored on post_upgrade. The override field must survive the
     // roundtrip; otherwise a backend upgrade silently reverts every
-    // per-collateral floor to None.
+    // per-collateral floor to None. Production uses ciborium (CBOR), not
+    // candid — exercise both.
+
+    // Candid roundtrip
     let original = mock_cfg(Some(2));
-    let bytes = candid::encode_one(&original).expect("encode failed");
-    let decoded: CollateralConfig = candid::decode_one(&bytes).expect("decode failed");
+    let bytes = candid::encode_one(&original).expect("candid encode failed");
+    let decoded: CollateralConfig =
+        candid::decode_one(&bytes).expect("candid decode failed");
     assert_eq!(decoded.min_xrc_sources, Some(2));
     assert_eq!(decoded.effective_min_xrc_sources(3), 2);
+
+    // CBOR roundtrip (matches production stable-memory path)
+    let mut cbor_buf = Vec::new();
+    ciborium::ser::into_writer(&original, &mut cbor_buf)
+        .expect("ciborium encode failed");
+    let cbor_decoded: CollateralConfig = ciborium::de::from_reader(cbor_buf.as_slice())
+        .expect("ciborium decode failed");
+    assert_eq!(cbor_decoded.min_xrc_sources, Some(2));
+    assert_eq!(cbor_decoded.effective_min_xrc_sources(3), 2);
 }
 
 #[test]
-fn legacy_config_decodes_with_default_none() {
-    // Wave-14a follow-up: the field is `#[serde(default)]` so an upgrade
-    // from a snapshot that predates this PR must hydrate `min_xrc_sources`
-    // as `None` (inherit global) rather than failing to decode.
-    let legacy = mock_cfg(None);
-    // We can't easily construct a "before-this-field-existed" payload
-    // via candid::encode_one (which serializes the current schema), so
-    // the canonical fence is the `#[serde(default)]` attribute in the
-    // struct definition. This test acts as a behavior anchor: a default
-    // `None` resolves to the global floor.
-    assert_eq!(legacy.min_xrc_sources, None);
-    assert_eq!(legacy.effective_min_xrc_sources(3), 3);
+fn legacy_cbor_snapshot_without_field_decodes_with_default_none() {
+    // Wave-14a follow-up: simulates a pre-this-PR stable-memory snapshot
+    // by encoding a full CollateralConfig in CBOR, surgically removing
+    // the `min_xrc_sources` field from the resulting map, then re-decoding.
+    // `#[serde(default)]` on the field must fill it with `None` rather
+    // than failing the entire decode.
+    //
+    // Without this fence, deploying this PR would refuse to load the
+    // mainnet stable-memory snapshot and the canister upgrade would trap.
+    let original = mock_cfg(Some(2));
+    let mut buf = Vec::new();
+    ciborium::ser::into_writer(&original, &mut buf).expect("encode failed");
+
+    let value: ciborium::Value =
+        ciborium::de::from_reader(buf.as_slice()).expect("re-decode to Value failed");
+    let ciborium::Value::Map(mut entries) = value else {
+        panic!("expected CBOR map representation of struct")
+    };
+
+    let before = entries.len();
+    entries.retain(|(k, _)| match k {
+        ciborium::Value::Text(s) => s != "min_xrc_sources",
+        _ => true,
+    });
+    assert_eq!(
+        entries.len(),
+        before - 1,
+        "min_xrc_sources field should have been present in the encoded map"
+    );
+
+    let mut modified = Vec::new();
+    ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut modified)
+        .expect("re-encode without field failed");
+
+    let restored: CollateralConfig = ciborium::de::from_reader(modified.as_slice())
+        .expect("ciborium decode of legacy snapshot failed — \
+                 #[serde(default)] guard regressed?");
+    assert_eq!(
+        restored.min_xrc_sources, None,
+        "missing field must hydrate as None (inherit global)"
+    );
+    assert_eq!(restored.effective_min_xrc_sources(3), 3);
 }
