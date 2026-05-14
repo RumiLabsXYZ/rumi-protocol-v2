@@ -699,7 +699,17 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
             // via the event count rather than a global circuit breaker.
             let num_sources =
                 exchange_rate_result.metadata.base_asset_num_received_rates as u32;
-            let floor = read_state(|s| s.min_xrc_sources_used);
+            // Wave-14a CDP-14 follow-up: resolve the per-collateral
+            // override (defaults to the global floor when unset). For
+            // assets with genuinely thin CEX coverage (e.g. XAUT, which
+            // only trades on a handful of exchanges), an admin can drop
+            // the floor to 2 via `set_collateral_min_xrc_sources`
+            // without weakening the gate for other collaterals.
+            let floor = read_state(|s| {
+                s.get_collateral_config(&collateral_type)
+                    .map(|c| c.effective_min_xrc_sources(s.min_xrc_sources_used))
+                    .unwrap_or(s.min_xrc_sources_used)
+            });
             if !crate::xrc::xrc_metadata_meets_source_floor(num_sources, floor) {
                 log!(
                     TRACE_XRC,

@@ -363,6 +363,17 @@ pub enum Event {
         bps: u64,
     },
 
+    /// Wave-14a CDP-14 follow-up: per-collateral override for the XRC
+    /// source-count floor (None = inherit global). Emitted when an admin
+    /// tunes the per-asset floor (typically used to lower the gate for
+    /// collaterals like XAUT whose underlying asset has genuinely thin
+    /// CEX coverage on XRC and can never aggregate 3 sources).
+    #[serde(rename = "set_collateral_min_xrc_sources")]
+    SetCollateralMinXrcSources {
+        collateral_type: Principal,
+        min_xrc_sources: Option<u32>,
+    },
+
     #[serde(rename = "set_liquidation_bonus")]
     SetLiquidationBonus {
         rate: String,
@@ -808,6 +819,7 @@ impl Event {
             Event::SetBotBudget { .. } => false,
             Event::SetBotAllowedCollateralTypes { .. } => false,
             Event::SetBotCrToleranceBps { .. } => false,
+            Event::SetCollateralMinXrcSources { .. } => false,
             Event::SetLiquidationBonus { .. } => false,
             Event::SetBorrowingFee { .. } => false,
             Event::SetRedemptionFeeFloor { .. } => false,
@@ -950,6 +962,7 @@ impl Event {
             Event::SetBotBudget { .. } => Some("SetBotBudget"),
             Event::SetBotAllowedCollateralTypes { .. } => Some("SetBotAllowedCollateralTypes"),
             Event::SetBotCrToleranceBps { .. } => Some("SetBotCrToleranceBps"),
+            Event::SetCollateralMinXrcSources { .. } => Some("SetCollateralMinXrcSources"),
             Event::SetLiquidationBonus { .. } => Some("SetLiquidationBonus"),
             Event::SetBorrowingFee { .. } => Some("SetBorrowingFee"),
             Event::SetRedemptionFeeFloor { .. } => Some("SetRedemptionFeeFloor"),
@@ -1070,6 +1083,7 @@ impl Event {
             | Event::SetCollateralRedemptionFeeCeiling { collateral_type, .. }
             | Event::SetCollateralMinDeposit { collateral_type, .. }
             | Event::SetCollateralDisplayColor { collateral_type, .. }
+            | Event::SetCollateralMinXrcSources { collateral_type, .. }
             | Event::PriceUpdate { collateral_type, .. } => Some(*collateral_type),
             Event::RedemptionOnVaults { collateral_type, .. } => *collateral_type,
             Event::ReserveRedemption { stable_token_ledger, .. } => Some(*stable_token_ledger),
@@ -1458,6 +1472,11 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             },
             Event::SetBotCrToleranceBps { bps } => {
                 state.bot_cr_tolerance_bps = bps;
+            },
+            Event::SetCollateralMinXrcSources { collateral_type, min_xrc_sources } => {
+                if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+                    config.min_xrc_sources = min_xrc_sources;
+                }
             },
             Event::SetLiquidationBonus { rate } => {
                 if let Ok(dec) = rate.parse::<Decimal>() {
@@ -2400,6 +2419,24 @@ pub fn record_set_bot_allowed_collateral_types(state: &mut State, collateral_typ
 pub fn record_set_bot_cr_tolerance_bps(state: &mut State, bps: u64) {
     record_event(&Event::SetBotCrToleranceBps { bps });
     state.bot_cr_tolerance_bps = bps;
+}
+
+/// Wave-14a CDP-14 follow-up: record + apply a per-collateral override
+/// for the XRC source-count floor. Used for collaterals whose underlying
+/// asset has genuinely thin CEX coverage on XRC. Pass `None` to clear
+/// the override and inherit the global floor again.
+pub fn record_set_collateral_min_xrc_sources(
+    state: &mut State,
+    collateral_type: CollateralType,
+    min_xrc_sources: Option<u32>,
+) {
+    record_event(&Event::SetCollateralMinXrcSources {
+        collateral_type,
+        min_xrc_sources,
+    });
+    if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+        config.min_xrc_sources = min_xrc_sources;
+    }
 }
 
 pub fn record_set_liquidation_bonus(state: &mut State, rate: Ratio) {

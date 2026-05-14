@@ -967,6 +967,7 @@ mod multi_collateral_helpers {
             healthy_cr: None,
             rate_curve: None,
             redemption_tier: 1,
+            min_xrc_sources: None,
         }
     }
 

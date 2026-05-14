@@ -194,7 +194,14 @@ pub async fn fetch_icp_rate() {
                 let num_sources = exchange_rate_result
                     .metadata
                     .base_asset_num_received_rates as u32;
-                let floor = read_state(|s| s.min_xrc_sources_used);
+                // Wave-14a CDP-14 follow-up: resolve the per-collateral
+                // override (defaults to the global floor when unset).
+                let floor = read_state(|s| {
+                    let icp_ct = s.icp_collateral_type();
+                    s.get_collateral_config(&icp_ct)
+                        .map(|c| c.effective_min_xrc_sources(s.min_xrc_sources_used))
+                        .unwrap_or(s.min_xrc_sources_used)
+                });
                 if !xrc_metadata_meets_source_floor(num_sources, floor) {
                     log!(
                         TRACE_XRC,

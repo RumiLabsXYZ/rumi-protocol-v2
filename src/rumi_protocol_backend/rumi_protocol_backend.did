@@ -52,6 +52,7 @@ type CollateralConfig = record {
   last_price : opt float64;
   last_price_timestamp : opt nat64;
   redemption_tier : nat8;
+  min_xrc_sources : opt nat32;
   redemption_fee_floor : blob;
   borrow_threshold_ratio : blob;
   ledger_fee : nat64;
@@ -269,6 +270,10 @@ type Event = variant {
     collateral_types : vec principal;
   };
   set_bot_cr_tolerance_bps : record { bps : nat64 };
+  set_collateral_min_xrc_sources : record {
+    collateral_type : principal;
+    min_xrc_sources : opt nat32;
+  };
   set_reserve_redemptions_enabled : record { enabled : bool };
   set_min_icusd_amount : record { amount : text };
   set_borrowing_fee_curve : record { markers : text };
@@ -899,6 +904,7 @@ service : (ProtocolArg) -> {
   set_borrowing_fee_curve : (opt text) -> (Result);
   set_bot_allowed_collateral_types : (vec principal) -> (Result);
   set_bot_cr_tolerance_bps : (nat64) -> (Result);
+  set_collateral_min_xrc_sources : (principal, opt nat32) -> (Result);
   set_breaker_window_debt_ceiling_e8s : (nat64) -> (Result);
   set_breaker_window_ns : (nat64) -> (Result);
   set_check_vaults_alert_band_bps : (nat64) -> (Result);

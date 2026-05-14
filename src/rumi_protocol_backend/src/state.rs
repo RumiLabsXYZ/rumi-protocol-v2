@@ -523,6 +523,26 @@ pub struct CollateralConfig {
     /// Default: 1 (most exposed — safe default for new/unknown collateral).
     #[serde(default = "default_redemption_tier")]
     pub redemption_tier: u8,
+    /// Wave-14a CDP-14 follow-up: per-collateral override for the XRC
+    /// source-count floor. `None` = inherit the global `State.min_xrc_sources_used`
+    /// (default 3). Use this for collaterals whose underlying asset has
+    /// genuinely thin CEX coverage on XRC, such as XAUT (Tether Gold)
+    /// which only trades on a handful of exchanges. A floor of 2 for
+    /// such an asset is the max possible aggregation, not a global
+    /// weakening — other collaterals keep the strict default. `Some(0)`
+    /// disables the gate entirely for this collateral (operator kill
+    /// switch if XRC aggregation degrades for a single asset).
+    #[serde(default)]
+    pub min_xrc_sources: Option<u32>,
+}
+
+impl CollateralConfig {
+    /// Wave-14a CDP-14 follow-up: resolves the effective source-count floor
+    /// for this collateral. Per-collateral override wins over the global
+    /// floor; both `None` and "no override set" inherit the global.
+    pub fn effective_min_xrc_sources(&self, global: u32) -> u32 {
+        self.min_xrc_sources.unwrap_or(global)
+    }
 }
 
 fn default_redemption_tier() -> u8 { 1 }
@@ -555,6 +575,7 @@ impl PartialEq for CollateralConfig {
             && self.healthy_cr == other.healthy_cr
             && self.rate_curve == other.rate_curve
             && self.redemption_tier == other.redemption_tier
+            && self.min_xrc_sources == other.min_xrc_sources
     }
 }
 
@@ -1525,6 +1546,7 @@ impl From<InitArg> for State {
                     healthy_cr: None,
                     rate_curve: None,
                     redemption_tier: 1,
+                    min_xrc_sources: None, // inherit global floor for ICP
                 });
                 configs
             },
