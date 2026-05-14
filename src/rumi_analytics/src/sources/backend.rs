@@ -370,6 +370,13 @@ pub enum BackendEvent {
     // rows would fail and halt ingestion.
     #[serde(rename = "set_amm1_canister")]
     SetAmm1Canister {},
+    // Wave-14a CDP-14 follow-up: per-collateral XRC source-count floor
+    // override. Emitted when an admin tunes the per-asset floor (e.g.
+    // dropping XAUT from the global 3 to 2 because XAUT only trades on
+    // a handful of CEXs). Pre-listed so analytics' get_events decode
+    // stays clean from the moment the backend ships this variant.
+    #[serde(rename = "set_collateral_min_xrc_sources")]
+    SetCollateralMinXrcSources {},
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
@@ -490,6 +497,7 @@ impl BackendEvent {
             StabilityPoolCallFailed {} => Some("StabilityPoolCallFailed"),
             SetBotCrToleranceBps {} => Some("SetBotCrToleranceBps"),
             SetAmm1Canister {} => Some("SetAmm1Canister"),
+            SetCollateralMinXrcSources {} => Some("SetCollateralMinXrcSources"),
         }
     }
 }

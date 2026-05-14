@@ -4961,6 +4961,10 @@ async fn add_collateral_token(arg: rumi_protocol_backend::AddCollateralArg) -> R
         healthy_cr: None,
         rate_curve: None,
         redemption_tier: arg.redemption_tier.unwrap_or(1).clamp(1, 3),
+        // New collateral types start by inheriting the global XRC source-count
+        // floor. Operator can override later via `set_collateral_min_xrc_sources`
+        // if the asset has genuinely thin CEX coverage on XRC.
+        min_xrc_sources: None,
     };
 
     mutate_state(|s| {
@@ -5052,6 +5056,62 @@ async fn set_collateral_status(
     });
 
     log!(INFO, "[set_collateral_status] Collateral {} status set to {:?}", collateral_type, status);
+    Ok(())
+}
+
+/// Wave-14a CDP-14 follow-up: set the per-collateral XRC source-count floor
+/// override. `None` clears the override and the collateral inherits the
+/// global floor (`State.min_xrc_sources_used`, default 3). `Some(0)` is a
+/// per-collateral kill switch (matches the global semantics).
+///
+/// Use case: collaterals whose underlying asset has genuinely thin CEX
+/// coverage on XRC (e.g. XAUT, listed on only a handful of exchanges)
+/// chronically fall short of the strict floor=3 gate even when XRC is
+/// healthy. Dropping the floor to 2 for those specific assets stops the
+/// rejection-event flood without weakening the gate for the rest.
+#[candid_method(update)]
+#[update]
+async fn set_collateral_min_xrc_sources(
+    collateral_type: Principal,
+    min_xrc_sources: Option<u32>,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only developer can change collateral min XRC sources".to_string(),
+        ));
+    }
+
+    // Sanity guard: anything above ~10 is meaningless given XRC's CEX panel size
+    // and would just freeze the collateral's price. Refuse rather than let a typo
+    // create a denial-of-service on a specific asset.
+    if let Some(n) = min_xrc_sources {
+        if n > 10 {
+            return Err(ProtocolError::GenericError(format!(
+                "min_xrc_sources={} exceeds the practical cap of 10",
+                n
+            )));
+        }
+    }
+
+    let exists = read_state(|s| s.collateral_configs.contains_key(&collateral_type));
+    if !exists {
+        return Err(ProtocolError::GenericError(
+            "Collateral type not found".to_string(),
+        ));
+    }
+
+    mutate_state(|s| {
+        event::record_set_collateral_min_xrc_sources(s, collateral_type, min_xrc_sources);
+    });
+
+    log!(
+        INFO,
+        "[set_collateral_min_xrc_sources] Collateral {} min_xrc_sources set to {:?} (None=inherit global)",
+        collateral_type,
+        min_xrc_sources
+    );
     Ok(())
 }
 
