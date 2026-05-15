@@ -2,6 +2,7 @@ use candid::{CandidType, Deserialize, Principal};
 use ic_stable_structures::writer::Writer;
 use serde::Serialize;
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 
 use crate::memory;
 
@@ -116,6 +117,13 @@ pub struct BotState {
     pub admin_events: Vec<BotAdminEvent>,
     #[serde(default)]
     pub migrated_to_stable_structures: bool,
+    /// Per-vault claim-attempt counter. Incremented on each `ClaimFailed`
+    /// returned by `bot_claim_liquidation`, cleared on success or after the
+    /// retry ceiling is hit. Lives in heap state only (not persisted across
+    /// upgrades), because the cascade re-notifies surviving liquidatable
+    /// vaults on its next tick anyway.
+    #[serde(default)]
+    pub claim_retry_counts: BTreeMap<u64, u8>,
 }
 
 thread_local! {
