@@ -1,14 +1,36 @@
-use candid::{Nat, Principal};
+use candid::{CandidType, Nat, Principal};
 use ic_canister_log::log;
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc2::approve::ApproveArgs;
+use serde::Deserialize;
 
 use crate::icpswap;
 use crate::state::BotConfig;
 
+/// Belt-and-suspenders default when `BotConfig.*_fee` is unset. The real fee
+/// for ICP and ckUSDC is 10_000 in their respective base units (e8s for ICP
+/// and e6 for ckUSDC, since ckUSDC has 6 decimals and a fee of $0.01).
+/// Previously this default was 10 for ckUSDC, which is what blew up every
+/// ICPSwap swap with "Wrong fee cache (expected: 10000, received: 10)".
+const FALLBACK_LEDGER_FEE: u64 = 10_000;
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
 pub struct SwapResult {
     pub ckusdc_received_e6: u64,
     pub effective_price_e8s: u64,
+}
+
+/// Fetch a token ledger's current ICRC-1 transfer fee.
+pub async fn fetch_ledger_fee(ledger: Principal) -> Result<u64, String> {
+    let result: Result<(Nat,), _> = ic_cdk::call(ledger, "icrc1_fee", ()).await;
+    match result {
+        Ok((n,)) => n
+            .0
+            .to_string()
+            .parse::<u64>()
+            .map_err(|_| format!("icrc1_fee returned non-u64 value from {}", ledger)),
+        Err((code, msg)) => Err(format!("icrc1_fee call failed ({:?}): {}", code, msg)),
+    }
 }
 
 /// One-time infinite ICRC-2 approve. Amount = u128::MAX, no expiry.
@@ -96,8 +118,8 @@ pub async fn swap_icp_for_ckusdc(
         min_output
     );
 
-    let icp_fee = config.icp_fee_e8s.unwrap_or(10_000);
-    let ckusdc_fee = config.ckusdc_fee_e6.unwrap_or(10);
+    let icp_fee = config.icp_fee_e8s.unwrap_or(FALLBACK_LEDGER_FEE);
+    let ckusdc_fee = config.ckusdc_fee_e6.unwrap_or(FALLBACK_LEDGER_FEE);
 
     let received = icpswap::deposit_and_swap(
         config.icpswap_pool,
@@ -141,7 +163,7 @@ pub async fn return_collateral_to_backend(
     amount_e8s: u64,
     collateral_ledger: Principal,
 ) -> Result<(), String> {
-    let fee = config.icp_fee_e8s.unwrap_or(10_000);
+    let fee = config.icp_fee_e8s.unwrap_or(FALLBACK_LEDGER_FEE);
     let send_amount = amount_e8s.saturating_sub(fee);
     if send_amount == 0 {
         return Err("Collateral amount too small to cover transfer fee".to_string());
@@ -187,7 +209,7 @@ pub async fn transfer_ckusdc_to_backend(
     config: &BotConfig,
     amount_e6: u64,
 ) -> Result<u64, String> {
-    let fee = config.ckusdc_fee_e6.unwrap_or(10);
+    let fee = config.ckusdc_fee_e6.unwrap_or(FALLBACK_LEDGER_FEE);
     let send_amount = amount_e6.saturating_sub(fee);
     if send_amount == 0 {
         return Err("ckUSDC amount too small to cover transfer fee".to_string());
@@ -231,7 +253,7 @@ pub async fn transfer_icp_to_treasury(
     config: &BotConfig,
     amount_e8s: u64,
 ) -> Result<(), String> {
-    let fee = config.icp_fee_e8s.unwrap_or(10_000);
+    let fee = config.icp_fee_e8s.unwrap_or(FALLBACK_LEDGER_FEE);
     let send_amount = amount_e8s.saturating_sub(fee);
     if send_amount == 0 {
         return Ok(());

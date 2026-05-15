@@ -79,6 +79,13 @@ type BotAdminEvent = record {
   action : BotAdminAction;
 };
 
+type SwapResult = record {
+  ckusdc_received_e6 : nat64;
+  effective_price_e8s : nat64;
+};
+
+type TestSwapResult = variant { Ok : SwapResult; Err : text };
+
 service : (BotInitArgs) -> {
   // Core
   notify_liquidatable_vaults : (vec LiquidatableVaultInfo) -> ();
@@ -103,4 +110,10 @@ service : (BotInitArgs) -> {
   admin_approve_pool : () -> ();
   admin_sweep_ckusdc : (principal, opt nat64) -> ();
   admin_retry_stuck_claim : (nat64) -> ();
+  // Returns (icp_fee_e8s, ckusdc_fee_e6) freshly read from each ledger and
+  // also writes them back into BotConfig so future swaps use the live values.
+  admin_refresh_fees : () -> (nat64, nat64);
+  // Runs the live swap path (ICP -> ckUSDC) using `amount_e8s` from the bot's
+  // ICP balance. ckUSDC stays in the bot; retrieve via `admin_sweep_ckusdc`.
+  admin_test_swap : (nat64) -> (TestSwapResult);
 };

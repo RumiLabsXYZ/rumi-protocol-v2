@@ -148,7 +148,8 @@ fn inspect_message() {
     match method.as_str() {
         // Admin/auth methods: reject anonymous to save cycles on Candid decoding
         "set_config" | "admin_resolve_pool_ordering" | "admin_approve_pool"
-        | "admin_sweep_ckusdc" | "admin_retry_stuck_claim" => {
+        | "admin_sweep_ckusdc" | "admin_retry_stuck_claim"
+        | "admin_refresh_fees" | "admin_test_swap" => {
             if ic_cdk::api::caller() != Principal::anonymous() {
                 ic_cdk::api::call::accept_message();
             }
@@ -357,7 +358,13 @@ async fn admin_sweep_ckusdc(target: Principal, record_id: Option<u64>) {
         Err((code, msg)) => ic_cdk::trap(&format!("Balance query failed: {:?} {}", code, msg)),
     };
 
-    let fee = state::read_state(|s| s.config.as_ref().expect("Config not set").ckusdc_fee_e6.unwrap_or(10));
+    let fee = state::read_state(|s| {
+        s.config
+            .as_ref()
+            .expect("Config not set")
+            .ckusdc_fee_e6
+            .unwrap_or(10_000)
+    });
     let send_amount = balance.saturating_sub(fee);
 
     let transfer_args = icrc_ledger_types::icrc1::transfer::TransferArg {
@@ -388,6 +395,75 @@ async fn admin_sweep_ckusdc(target: Principal, record_id: Option<u64>) {
         Ok((Err(e),)) => ic_cdk::trap(&format!("Sweep transfer failed: {:?}", e)),
         Err((code, msg)) => ic_cdk::trap(&format!("Sweep call failed: {:?} {}", code, msg)),
     }
+}
+
+/// Refresh the cached ICRC-1 transfer fees from each ledger and store them on
+/// the in-memory BotConfig. This exists because ICPSwap's `depositFromAndSwap`
+/// requires the caller to pass the exact `tokenInFee` / `tokenOutFee` values
+/// the pool has cached; a stale `BotConfig.ckusdc_fee_e6` is what caused every
+/// swap to fail with "Wrong fee cache (expected: 10000, received: 10)".
+/// Returns the resolved (icp_fee_e8s, ckusdc_fee_e6) pair.
+#[update]
+async fn admin_refresh_fees() -> (u64, u64) {
+    require_admin();
+    let _guard = ProcessingGuard::acquire()
+        .unwrap_or_else(|_| ic_cdk::trap("Another operation is in progress"));
+    let (icp_ledger, ckusdc_ledger) = state::read_state(|s| {
+        let c = s.config.as_ref().expect("Config not set");
+        (c.icp_ledger, c.ckusdc_ledger)
+    });
+
+    let icp_fee = swap::fetch_ledger_fee(icp_ledger)
+        .await
+        .unwrap_or_else(|e| ic_cdk::trap(&format!("Failed to fetch ICP fee: {}", e)));
+    let ckusdc_fee = swap::fetch_ledger_fee(ckusdc_ledger)
+        .await
+        .unwrap_or_else(|e| ic_cdk::trap(&format!("Failed to fetch ckUSDC fee: {}", e)));
+
+    state::mutate_state(|s| {
+        if let Some(ref mut config) = s.config {
+            config.icp_fee_e8s = Some(icp_fee);
+            config.ckusdc_fee_e6 = Some(ckusdc_fee);
+        }
+    });
+
+    log!(
+        INFO,
+        "Refreshed ledger fees: ICP={} e8s, ckUSDC={} e6",
+        icp_fee,
+        ckusdc_fee
+    );
+
+    (icp_fee, ckusdc_fee)
+}
+
+/// Run the live swap path (quote -> apply slippage -> `depositFromAndSwap`)
+/// against the configured ICPSwap pool using `amount_e8s` of ICP from the
+/// bot's own balance. Admin-only. Designed for end-to-end verification of the
+/// swap leg without waiting for an organic liquidation.
+///
+/// The resulting ckUSDC stays in the bot canister; retrieve via
+/// `admin_sweep_ckusdc`.
+#[update]
+async fn admin_test_swap(amount_e8s: u64) -> Result<swap::SwapResult, String> {
+    require_admin();
+    let _guard = ProcessingGuard::acquire()
+        .map_err(|_| "Another operation is in progress".to_string())?;
+    let config = state::read_state(|s| s.config.clone())
+        .ok_or_else(|| "Config not set".to_string())?;
+
+    log!(INFO, "admin_test_swap: attempting to swap {} ICP e8s", amount_e8s);
+    let result = swap::swap_icp_for_ckusdc(&config, amount_e8s).await;
+    match &result {
+        Ok(r) => log!(
+            INFO,
+            "admin_test_swap succeeded: received {} ckUSDC e6 at effective price {} e8s",
+            r.ckusdc_received_e6,
+            r.effective_price_e8s
+        ),
+        Err(e) => log!(INFO, "admin_test_swap failed: {}", e),
+    }
+    result
 }
 
 /// Retry confirm for a stuck claim.

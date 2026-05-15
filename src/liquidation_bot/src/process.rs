@@ -8,6 +8,32 @@ use crate::swap;
 const CONFIRM_ATTEMPTS: u8 = 5;
 const CANCEL_ATTEMPTS: u8 = 3;
 
+/// Max number of times the bot will re-attempt `bot_claim_liquidation` for a
+/// single vault before giving up and letting the cascade escalate to the SP.
+/// Each retry costs ~30s of bot processing time. Three is enough to ride out
+/// the scan→claim oracle TOCTOU window in most cases without burning the full
+/// 300s cascade-timeout budget on a single uncooperative vault.
+pub const CLAIM_RETRY_LIMIT: u8 = 3;
+
+/// Decision tree for what to do after `bot_claim_liquidation` returns Err.
+/// `current_count` is the number of attempts already made (0 = first try just
+/// failed). Returns `GiveUp` when the limit has been reached, otherwise
+/// `Retry` with the incremented count to persist.
+#[derive(Debug, PartialEq)]
+pub(crate) enum ClaimRetryAction {
+    Retry { new_count: u8 },
+    GiveUp,
+}
+
+pub(crate) fn next_claim_retry_action(current_count: u8, max: u8) -> ClaimRetryAction {
+    let attempted = current_count.saturating_add(1);
+    if attempted >= max {
+        ClaimRetryAction::GiveUp
+    } else {
+        ClaimRetryAction::Retry { new_count: attempted }
+    }
+}
+
 /// Outcome of the swap-failure cleanup path. Pure data, produced by
 /// `decide_swap_failure_outcome` and consumed by `process_pending` to write
 /// the LiquidationRecord and emit the STUCK log line if applicable.
@@ -128,24 +154,74 @@ pub async fn process_pending() {
         }
     };
 
-    log!(crate::INFO, "Processing vault #{}", vault.vault_id);
+    let prior_retry_count = state::read_state(|s| {
+        s.claim_retry_counts.get(&vault.vault_id).copied().unwrap_or(0)
+    });
+    log!(
+        crate::INFO,
+        "Processing vault #{} (attempt {}/{})",
+        vault.vault_id,
+        prior_retry_count + 1,
+        CLAIM_RETRY_LIMIT
+    );
     let record_id = history::next_id();
     let timestamp = ic_cdk::api::time();
 
     // -- Phase 1: CLAIM --
     let liq_result = call_bot_claim_liquidation(&config, vault.vault_id).await;
     let (collateral_amount, debt_covered, collateral_price) = match liq_result {
-        Ok(r) => (r.collateral_amount, r.debt_covered, r.collateral_price_e8s),
+        Ok(r) => {
+            state::mutate_state(|s| {
+                s.claim_retry_counts.remove(&vault.vault_id);
+            });
+            (r.collateral_amount, r.debt_covered, r.collateral_price_e8s)
+        }
         Err(e) => {
-            log!(crate::INFO, "Claim failed for vault #{}: {}", vault.vault_id, e);
+            let action = next_claim_retry_action(prior_retry_count, CLAIM_RETRY_LIMIT);
+            let (status, message) = match &action {
+                ClaimRetryAction::Retry { new_count } => (
+                    LiquidationStatus::ClaimFailed,
+                    format!(
+                        "Attempt {}/{}: {}",
+                        new_count, CLAIM_RETRY_LIMIT, e
+                    ),
+                ),
+                ClaimRetryAction::GiveUp => (
+                    LiquidationStatus::ClaimFailed,
+                    format!(
+                        "Final attempt {}/{} (giving up; cascade will escalate to SP): {}",
+                        CLAIM_RETRY_LIMIT, CLAIM_RETRY_LIMIT, e
+                    ),
+                ),
+            };
+            log!(crate::INFO, "Claim failed for vault #{}: {}", vault.vault_id, message);
             write_record(LiquidationRecordV1 {
                 id: record_id, vault_id: vault.vault_id, timestamp,
-                status: LiquidationStatus::ClaimFailed,
+                status,
                 collateral_claimed_e8s: 0, debt_to_cover_e8s: 0, icp_swapped_e8s: 0,
                 ckusdc_received_e6: 0, ckusdc_transferred_e6: 0, icp_to_treasury_e8s: 0,
                 oracle_price_e8s: 0, effective_price_e8s: 0, slippage_bps: 0,
-                error_message: Some(e), confirm_retry_count: 0,
+                error_message: Some(message), confirm_retry_count: 0,
             });
+            match action {
+                ClaimRetryAction::Retry { new_count } => {
+                    let vault_id = vault.vault_id;
+                    state::mutate_state(|s| {
+                        s.claim_retry_counts.insert(vault_id, new_count);
+                        // Re-queue at the front of the Vec so other pending
+                        // vaults pop first (LIFO); skip if a concurrent
+                        // `notify_liquidatable_vaults` already re-added us.
+                        if !s.pending_vaults.iter().any(|v| v.vault_id == vault_id) {
+                            s.pending_vaults.insert(0, vault);
+                        }
+                    });
+                }
+                ClaimRetryAction::GiveUp => {
+                    state::mutate_state(|s| {
+                        s.claim_retry_counts.remove(&vault.vault_id);
+                    });
+                }
+            }
             return;
         }
     };
@@ -426,6 +502,37 @@ mod tests {
         assert!(log.contains("STUCK"));
         assert!(log.contains("vault #7"));
         assert!(log.contains("3 attempts"));
+    }
+
+    #[test]
+    fn claim_retry_first_failure_schedules_retry() {
+        // First failure (count=0) on a 3-attempt limit must reschedule, not drop.
+        let action = next_claim_retry_action(0, 3);
+        assert_eq!(action, ClaimRetryAction::Retry { new_count: 1 });
+    }
+
+    #[test]
+    fn claim_retry_penultimate_failure_still_retries() {
+        // Second failure (count=1) leaves one more shot before the limit.
+        let action = next_claim_retry_action(1, 3);
+        assert_eq!(action, ClaimRetryAction::Retry { new_count: 2 });
+    }
+
+    #[test]
+    fn claim_retry_final_failure_gives_up() {
+        // Third failure (count=2) hits the limit, so the bot must stop trying
+        // and let the 300s cascade escalate to the stability pool.
+        let action = next_claim_retry_action(2, 3);
+        assert_eq!(action, ClaimRetryAction::GiveUp);
+    }
+
+    #[test]
+    fn claim_retry_handles_counter_overflow_safely() {
+        // Defensive: if state somehow got a u8::MAX counter (e.g. legacy data
+        // corruption), saturating_add prevents wraparound to 0, and the
+        // attempted >= max check still pushes us into GiveUp.
+        let action = next_claim_retry_action(u8::MAX, 3);
+        assert_eq!(action, ClaimRetryAction::GiveUp);
     }
 
     #[test]
