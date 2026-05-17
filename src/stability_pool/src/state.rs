@@ -169,18 +169,26 @@ impl StabilityPoolState {
         *self.total_stablecoin_balances.entry(token_ledger).or_insert(0) += amount;
     }
 
-    /// Distribute interest revenue pro-rata to all depositors of a given stablecoin.
+    /// Distribute icUSD interest revenue to eligible icUSD-holding depositors.
     /// Called by the backend after minting interest to the pool canister.
     ///
-    /// Interest is distributed pro-rata based on each depositor's **total USD
-    /// value** across all stablecoins (icUSD, 3USD, ckUSDT, etc.), not just
-    /// their balance of the token being distributed. This ensures all depositors
-    /// earn interest proportional to their total deposit, regardless of which
-    /// stablecoin(s) they deposited.
+    /// Interest is distributed pro-rata based on each depositor's **icUSD balance
+    /// only** (computed via `DepositPosition::icusd_value`). Depositors who hold
+    /// only 3USD, ckUSDC, or ckUSDT do not earn from this stream (they still
+    /// absorb liquidations pro-rata via the separate `compute_token_draw` path,
+    /// but the protocol's borrowing-interest yield goes to icUSD holders only).
     ///
     /// When `collateral_type` is provided, depositors who have opted out of that
-    /// collateral are excluded from the distribution — they should not earn
-    /// interest from vaults backed by collateral they've opted out of.
+    /// collateral are excluded from the distribution (they should not earn
+    /// interest from vaults backed by collateral they've opted out of).
+    ///
+    /// If no eligible depositors hold icUSD when this is called, the function
+    /// logs a warning and returns without crediting anyone. The minted icUSD
+    /// remains in the SP canister's ICRC-1 balance, untracked by
+    /// `total_stablecoin_balances`. This is a known operator-visible edge case:
+    /// the icUSD will be picked up on the next distribution that has eligible
+    /// depositors, or will need manual reconciliation if the no-icUSD-depositors
+    /// state persists.
     pub fn distribute_interest_revenue(&mut self, token_ledger: Principal, amount: u64, collateral_type: Option<Principal>) {
         if amount == 0 {
             return;
@@ -211,7 +219,17 @@ impl StabilityPoolState {
 
         let eligible_total: u64 = holders.iter().map(|(_, b)| *b).sum();
         if eligible_total == 0 {
-            return; // No eligible depositors — nothing to distribute
+            // No icUSD depositors. The minted icUSD remains in the SP canister's
+            // ICRC-1 balance, untracked in total_stablecoin_balances. Surface for
+            // operator visibility: a persistent occurrence indicates the SP has
+            // drifted away from icUSD-only and may need manual reconciliation.
+            log!(
+                INFO,
+                "WARN distribute_interest_revenue: {} of token {} received but no eligible icUSD depositors; amount remains in SP canister",
+                amount,
+                token_ledger
+            );
+            return;
         }
 
         let mut distributed: u64 = 0;
@@ -1813,6 +1831,76 @@ mod tests {
             "icUSD depositor should receive the full 10 icUSD interest");
         assert_eq!(bob_icusd, 0,
             "3USD depositor should receive no icUSD interest");
+    }
+
+    #[test]
+    fn test_distribute_interest_mixed_position() {
+        // Tests the most common real-world scenario: a depositor with both icUSD
+        // and 3USD. Only the icUSD slice should count toward their interest share.
+        //
+        // Setup:
+        //   - user_a: 100 icUSD only
+        //   - user_b: 100 icUSD + 100 3USD (mixed position)
+        // Distribute: 20 icUSD interest, no collateral_type filter
+        // Expected (pro-rata on icUSD-only): each gets 10 icUSD
+        //   - user_a: 100 → 110
+        //   - user_b's icUSD: 100 → 110 (user_b's 3USD unchanged at 100)
+        let mut state = test_state_with_3usd();
+
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 100_00000000);
+        add_deposit_direct(&mut state, user_b(), three_usd_ledger(), 100_00000000);
+
+        state.distribute_interest_revenue(icusd_ledger(), 20_00000000, None);
+
+        let alice_icusd = state.deposits.get(&user_a()).unwrap()
+            .stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0);
+        let bob_icusd = state.deposits.get(&user_b()).unwrap()
+            .stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0);
+        let bob_three_usd = state.deposits.get(&user_b()).unwrap()
+            .stablecoin_balances.get(&three_usd_ledger()).copied().unwrap_or(0);
+
+        assert_eq!(alice_icusd, 110_00000000,
+            "user_a (100 icUSD) earns 10 icUSD on equal-icUSD share");
+        assert_eq!(bob_icusd, 110_00000000,
+            "user_b's icUSD slice (100) earns 10 icUSD (same as user_a)");
+        assert_eq!(bob_three_usd, 100_00000000,
+            "user_b's 3USD balance is not credited and not touched");
+    }
+
+    #[test]
+    fn test_distribute_interest_no_icusd_depositors() {
+        // When the pool has depositors but none hold icUSD, the function should
+        // return without crediting anyone or advancing aggregates. The icUSD
+        // amount remains in the SP canister's ICRC-1 balance (orphaned for
+        // operator visibility; see function docstring).
+        let mut state = test_state_with_3usd();
+
+        // Both depositors hold only 3USD — no icUSD anywhere
+        add_deposit_direct(&mut state, user_a(), three_usd_ledger(), 100_00000000);
+        add_deposit_direct(&mut state, user_b(), three_usd_ledger(), 100_00000000);
+
+        let total_received_before = state.total_interest_received_e8s.unwrap_or(0);
+        let stable_balance_before = state.total_stablecoin_balances
+            .get(&icusd_ledger()).copied().unwrap_or(0);
+
+        state.distribute_interest_revenue(icusd_ledger(), 10_00000000, None);
+
+        // Aggregates unchanged
+        assert_eq!(state.total_interest_received_e8s.unwrap_or(0), total_received_before,
+            "total_interest_received_e8s should not advance when no icUSD depositors");
+        assert_eq!(state.total_stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0),
+            stable_balance_before,
+            "total_stablecoin_balances[icusd] should not advance");
+
+        // Neither depositor's balances changed
+        for user in [user_a(), user_b()] {
+            let pos = state.deposits.get(&user).unwrap();
+            assert_eq!(pos.stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0), 0,
+                "depositor without icUSD should not be credited");
+            assert_eq!(pos.stablecoin_balances.get(&three_usd_ledger()).copied().unwrap_or(0),
+                100_00000000, "3USD balance unchanged");
+        }
     }
 
     // ─── Test: Rounding dust doesn't drift aggregate totals ───
