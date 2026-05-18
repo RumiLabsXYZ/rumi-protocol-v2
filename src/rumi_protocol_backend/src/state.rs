@@ -2964,13 +2964,22 @@ impl State {
     }
 
     /// Returns true if `vault_id` is within `liquidation_ordering_tolerance`
-    /// (in CR units) of the bottom of the index — i.e., one of the worst-CR
-    /// vaults. Liquidator endpoints gate on this BEFORE the per-vault CR
-    /// check.
+    /// (in CR units) of the bottom of the index, i.e., one of the worst-CR
+    /// vaults.
     ///
-    /// Returns false for an unindexed `vault_id` (defensive: the caller must
-    /// have just attempted to liquidate a vault that does not exist or that
-    /// was opened during the call but not re-keyed).
+    /// **Deactivated 2026-05-18.** No production code path calls this; the
+    /// band gate it backed (Wave-8b LIQ-002) was removed because its global,
+    /// cross-collateral, liquidatable-unfiltered floor blocked the SP from
+    /// processing legitimate liquidations whenever the index bottom was
+    /// anchored by an unrelated or unliquidatable vault. The function and
+    /// the underlying `vault_cr_index` are preserved so a future
+    /// MEV-resistance pass can re-enable a properly-scoped variant
+    /// (per-collateral index + liquidatable-filtered floor). See the
+    /// "Layer 2.5 — band gate DEACTIVATION fence" comment in
+    /// `tests/audit_pocs_liq_002_sorted_troves_index.rs` for context.
+    ///
+    /// Returns false for an unindexed `vault_id`.
+    #[allow(dead_code)]
     pub fn is_within_liquidation_band(&self, vault_id: u64) -> bool {
         let mut my_key: Option<u64> = None;
         for (key, bucket) in self.vault_cr_index.iter() {

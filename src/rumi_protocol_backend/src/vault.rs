@@ -2110,13 +2110,13 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_partial_{}", vault_id))?;
 
-    // Wave-8b LIQ-002: reject vaults that are not within the lowest-CR band.
-    // Forces liquidators to process the worst vault first; blocks MEV cherry-
-    // picking that would leave deeply-underwater vaults on the books.
-    if !read_state(|s| s.is_within_liquidation_band(vault_id)) {
-        guard_principal.fail();
-        return Err(ProtocolError::NotLowestCR);
-    }
+    // Wave-8b LIQ-002 band gate deactivated 2026-05-18. The per-vault CR
+    // check below remains the authoritative liquidatability test. See
+    // `tests/audit_pocs_liq_002_sorted_troves_index.rs` ("Layer 2.5 —
+    // band gate DEACTIVATION fence") for background. The helper
+    // `state::is_within_liquidation_band` is preserved as dead code for
+    // future MEV-resistance re-introduction (per-collateral index +
+    // liquidatable-filtered floor).
 
     let liquidation_amount: ICUSD = icusd_amount.into();
 
@@ -2385,11 +2385,8 @@ pub async fn liquidate_vault_partial_with_stable(
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_stable_{}", vault_id))?;
 
-    // Wave-8b LIQ-002: reject vaults that are not within the lowest-CR band.
-    if !read_state(|s| s.is_within_liquidation_band(vault_id)) {
-        guard_principal.fail();
-        return Err(ProtocolError::NotLowestCR);
-    }
+    // Wave-8b LIQ-002 band gate deactivated 2026-05-18 (see
+    // `liquidate_vault_partial` above for rationale).
 
     // Check if the selected stable token is enabled
     let is_enabled = read_state(|s| match token_type {
@@ -2710,16 +2707,14 @@ pub async fn liquidate_vault_debt_already_burned(
     three_usd_received_e8s: Option<u64>,
     proof: crate::icrc3_proof::SpWritedownProof,
 ) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
-    // Wave-8b LIQ-002 SAFETY: this path is intentionally NOT gated on
-    // `is_within_liquidation_band`. It is the stability-pool-triggered
-    // writedown — the caller is gated on `caller == stability_pool_canister`
-    // by the entry point in `main.rs` (`stability_pool_liquidate_*`), and the
-    // SP has already committed icUSD via the 3pool burn. Adding the band gate
-    // here would mean a worst-CR-vault race could block legitimate SP
-    // writedowns and orphan the burned icUSD with no on-chain accounting.
-    // The CR index is still kept fresh by the post-mutation `reindex_vault_cr`
-    // call at the end of this function so subsequent user-initiated
-    // liquidations see the post-writedown CR.
+    // Wave-8b LIQ-002 band gate is deactivated globally as of 2026-05-18.
+    // This path was never gated to begin with: it is the stability-pool-
+    // triggered writedown, with the caller gated on
+    // `caller == stability_pool_canister` by the entry point in `main.rs`
+    // (`stability_pool_liquidate_*`), and the SP has already committed
+    // icUSD via the 3pool burn. The CR index is still kept fresh by the
+    // post-mutation `reindex_vault_cr` call at the end of this function so
+    // any future re-introduction of the band check sees a current CR.
 
     // Wave-8c LIQ-004 (kill switch): admin-toggleable disable of this path.
     // Independent of `frozen` and `liquidation_frozen`. Use during a
@@ -3013,13 +3008,11 @@ pub async fn liquidate_vault_debt_already_burned(
             }
         }
 
-        // Wave-8b LIQ-002: re-key after partial deduction, or unindex if drained.
-        // SAFETY: this path is the SP-triggered writedown, gated on
-        // caller==stability_pool. It intentionally bypasses the
-        // `is_within_liquidation_band` check (the band gate is a
-        // user-input safety net, not an SP one — the SP has already
-        // committed icUSD via the 3pool burn). The index update still
-        // happens so subsequent user-initiated liquidations see fresh CR.
+        // Wave-8b LIQ-002: re-key after partial deduction, or unindex if
+        // drained. The band gate that originally consumed this index was
+        // deactivated 2026-05-18, but `check_vaults`' at-risk-band sharding
+        // (Wave-9c DOS-005) still relies on accurate CR keys, so the index
+        // must stay current.
         if removed {
             s.unindex_vault_cr(vault_id);
         } else {
@@ -3084,11 +3077,8 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_{}", vault_id))?;
 
-    // Wave-8b LIQ-002: reject vaults that are not within the lowest-CR band.
-    if !read_state(|s| s.is_within_liquidation_band(vault_id)) {
-        guard_principal.fail();
-        return Err(ProtocolError::NotLowestCR);
-    }
+    // Wave-8b LIQ-002 band gate deactivated 2026-05-18 (see
+    // `liquidate_vault_partial` above for rationale).
 
     // Step 1: Validate vault is liquidatable
     let (vault, collateral_price, config_decimals, collateral_price_usd, mode) = match read_state(|s| {
@@ -3521,11 +3511,8 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("partial_liquidate_vault_{}", arg.vault_id))?;
 
-    // Wave-8b LIQ-002: reject vaults that are not within the lowest-CR band.
-    if !read_state(|s| s.is_within_liquidation_band(arg.vault_id)) {
-        guard_principal.fail();
-        return Err(ProtocolError::NotLowestCR);
-    }
+    // Wave-8b LIQ-002 band gate deactivated 2026-05-18 (see
+    // `liquidate_vault_partial` above for rationale).
 
     let liquidator_payment: ICUSD = arg.amount.into();
 

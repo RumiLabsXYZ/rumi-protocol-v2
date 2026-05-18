@@ -596,12 +596,12 @@ pub enum ProtocolError {
     CallerNotOwner,
     AmountTooLow { minimum_amount: u64 },
     GenericError(String),
-    /// Wave-8b LIQ-002: rejected because the requested vault is not within
-    /// `liquidation_ordering_tolerance` of the lowest-CR vault. Liquidators
-    /// must process the worst vault first so the protocol cannot be left
-    /// with deeply-underwater bad debt while easy targets are picked off.
-    /// The caller can either pick a worst-or-near-worst vault, or wait until
-    /// admin widens the tolerance band.
+    /// Wave-8b LIQ-002 band-gate rejection. **Deactivated 2026-05-18 — no
+    /// live code path emits this variant.** Retained in the enum so
+    /// historical on-chain events recorded before the deactivation still
+    /// decode cleanly. See `state::is_within_liquidation_band` and the
+    /// "Layer 2.5 — band gate DEACTIVATION fence" comment in
+    /// `tests/audit_pocs_liq_002_sorted_troves_index.rs` for background.
     NotLowestCR,
 }
 

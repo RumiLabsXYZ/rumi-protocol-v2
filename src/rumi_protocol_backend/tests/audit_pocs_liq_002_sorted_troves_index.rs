@@ -1,10 +1,27 @@
-//! LIQ-002 regression fence: sorted-troves index + liquidation ordering.
+//! LIQ-002 regression fence: sorted-troves index + (formerly) liquidation
+//! ordering gate.
 //!
 //! Audit report:
 //!   * `audit-reports/2026-04-22-28e9896/raw-pass-results/liquidation-mechanics.json`
 //!     finding LIQ-002.
 //!
-//! # What the gap was
+//! # Status as of 2026-05-18
+//!
+//! **The band gate is deactivated.** On 2026-05-17 a series of legitimately-
+//! underwater ICP vaults failed liquidation on mainnet because the global
+//! `is_within_liquidation_band` floor was anchored by an unrelated vault
+//! (likely with a stale or missing collateral price, which keys at 0).
+//! The gate's design (single global CR index across all collateral types,
+//! no filtering for liquidatability) made the failure mode unavoidable
+//! during fast price moves, and Rumi currently has no observable
+//! third-party liquidation MEV for the gate to defend against. The four
+//! `vault.rs` call sites were removed on 2026-05-18; see Layer 2.5 below.
+//!
+//! The index, helper, and admin endpoints are preserved so a future
+//! re-introduction can ship with a properly-scoped implementation
+//! (per-collateral index + liquidatable-filtered floor).
+//!
+//! # What the gap was (historical)
 //!
 //! Pre-Wave-8b, every liquidator endpoint accepted any caller-provided
 //! `vault_id` as long as the vault's CR was below `min_liquidation_ratio`.
@@ -14,35 +31,31 @@
 //! headroom) and skip deeply-underwater vaults, leaving the protocol with
 //! unfinished bad debt while harvesting easy wins.
 //!
-//! # How this file tests the fix
+//! # Test layers in this file
 //!
-//! Three layers, mirroring the structure of the LIQ-007 fence:
-//!
-//!  1. **Pure index unit tests (state-level, no canister context)** — confirm
+//!  1. **Pure index unit tests (state-level, no canister context).** Confirm
 //!     that every mutation that moves a vault's debt or collateral re-keys
 //!     the index, that closes/full-liquidations un-index, and that the
-//!     index size invariant holds after each operation.
+//!     index size invariant holds after each operation. **Still active:**
+//!     `check_vaults`' at-risk-band sharding (Wave-9c DOS-005) still
+//!     depends on the index, so these tests pin a live contract.
 //!
-//!  2. **Ordering enforcement at the state layer** — `is_within_liquidation_band`
+//!  2. **Ordering enforcement at the state layer.** `is_within_liquidation_band`
 //!     returns true for the bottom-of-stack vault, false for mid-stack
-//!     vaults, and respects the admin-tunable tolerance.
+//!     vaults, and respects the admin-tunable tolerance. **Helper is now
+//!     dead code in production; tests are retained as documentation of the
+//!     pre-deactivation contract and as a starting point for any future
+//!     re-introduction.**
 //!
-//!  3. **Scale + migration tests** — open 100 vaults via the state mutators,
-//!     assert the band gate rejects mid-stack and accepts worst-CR; simulate
-//!     the post_upgrade rebuild over 50 vaults to pin the migration contract.
+//!  2.5. **Band gate DEACTIVATION fence (2026-05-18).** Structural test
+//!     asserting that no entry point in `vault.rs` returns
+//!     `ProtocolError::NotLowestCR`. Fails loudly if the gate is
+//!     accidentally re-wired without a redesigned helper.
 //!
-//! # Why no dedicated PocketIC file
-//!
-//! The four liquidator entry points each call
-//! `read_state(|s| s.is_within_liquidation_band(vault_id))` BEFORE any other
-//! work. The wiring is verified by the Rust compiler (the call site exists
-//! in each function) and by the state-level fence (the helper returns
-//! the correct result for all interesting scenarios). A full PocketIC test
-//! would replicate all of that at one or two orders of magnitude higher
-//! cost (per-test setup is multi-second; opening 100 vaults via canister
-//! calls takes minutes). The existing `pocket_ic_tests` suite continues to
-//! exercise single-vault liquidation paths, where the band gate trivially
-//! passes — confirming the gate does not regress the existing flow.
+//!  3. **Scale + migration tests.** Open 100 vaults via the state mutators,
+//!     assert the (deactivated) band helper rejects mid-stack and accepts
+//!     worst-CR; simulate the post_upgrade rebuild over 50 vaults to pin
+//!     the migration contract. Retained for the same reason as Layer 2.
 
 use candid::Principal;
 
@@ -420,6 +433,46 @@ fn liq_002_admin_can_widen_tolerance() {
     state.set_liquidation_ordering_tolerance(Ratio::new(dec!(1.0)));
     assert!(state.is_within_liquidation_band(2));
     assert!(state.is_within_liquidation_band(3));
+}
+
+// ============================================================================
+// Layer 2.5 — band gate DEACTIVATION fence (2026-05-18)
+// ============================================================================
+//
+// Background: on 2026-05-17 a series of legitimately-underwater ICP vaults
+// failed liquidation on mainnet because every entry point gated on
+// `is_within_liquidation_band` and the global bottom-of-index was anchored
+// by an unrelated vault. The gate was originally added (Wave-8b LIQ-002) to
+// prevent MEV cherry-picking, but Rumi currently has no observable
+// third-party liquidation MEV — so the gate's only achievement was blocking
+// the protocol's own SP/bot from working.
+//
+// On 2026-05-18 the four gate call sites in `vault.rs` were removed.
+// `is_within_liquidation_band` and the underlying index stay in place for a
+// future, properly-scoped MEV-resistance re-introduction (per-collateral
+// index + liquidatable-filtered floor). Until then, the helper is reachable
+// from tests but is no longer wired into any liquidation entry point.
+//
+// The structural test below pins that contract.
+
+#[test]
+fn liq_002_band_gate_no_longer_wired_into_liquidation_entry_points() {
+    // After the 2026-05-18 band-gate removal, no entry point in `vault.rs`
+    // may return `ProtocolError::NotLowestCR`. The variant itself stays in
+    // the enum so historical on-chain events still decode, but no live code
+    // path emits it. Treat this test as the regression fence for accidental
+    // re-introduction.
+    let src = include_str!("../src/vault.rs");
+    let occurrences = src.matches("ProtocolError::NotLowestCR").count();
+    assert_eq!(
+        occurrences, 0,
+        "vault.rs must not return ProtocolError::NotLowestCR (band gate \
+         deactivated 2026-05-18). Found {} call site(s). If you are \
+         deliberately re-enabling the band, fix the helper first \
+         (per-collateral index + liquidatable-filtered floor) and delete \
+         this test.",
+        occurrences,
+    );
 }
 
 #[test]
