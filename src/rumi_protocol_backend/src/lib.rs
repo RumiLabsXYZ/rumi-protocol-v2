@@ -682,6 +682,46 @@ pub fn record_sp_notification_result_at(
     }
 }
 
+/// Prune routing-state entries (`sp_attempted_vaults`, `bot_pending_vaults`)
+/// for vaults that have either recovered above their liquidation floor or
+/// timed out of their bot window.
+///
+/// Designed to be called from `check_vaults` UNCONDITIONALLY on every
+/// tick, including ticks where no vault is currently liquidatable. On a
+/// quiet tick `unhealthy_ids` is empty, so both `retain` predicates
+/// evaluate false for every entry and both collections are flushed.
+///
+/// # Background (2026-05-18 follow-up)
+///
+/// Pre-fix, this cleanup lived INLINE inside `check_vaults` and only ran
+/// inside the `if !unhealthy_vaults.is_empty()` branch. The 2026-05-17
+/// incident exposed the consequence: vaults #149/#179/#182/#183 were
+/// SP-attempted, the now-deactivated `NotLowestCR` band gate rejected
+/// every call, the SP transport still returned `Ok(())` so
+/// `record_sp_notification_result` blacklisted them, and after price
+/// recovery the blacklist did not clear because the cleanup was skipped
+/// on every quiet tick that followed.
+///
+/// `bot_pending_vaults` entries past `bot_timeout_ns` are dropped here
+/// even if the vault is still unhealthy — the routing logic in
+/// `check_vaults` reads absence-from-map as the signal to fall back from
+/// the bot to the stability pool.
+///
+/// Pure-state. No I/O.
+pub fn prune_recovered_routing_state(
+    state: &mut state::State,
+    unhealthy_ids: &std::collections::BTreeSet<u64>,
+    now_ns: u64,
+    bot_timeout_ns: u64,
+) {
+    state
+        .bot_pending_vaults
+        .retain(|vid, ts| unhealthy_ids.contains(vid) && now_ns.saturating_sub(*ts) < bot_timeout_ns);
+    state
+        .sp_attempted_vaults
+        .retain(|vid| unhealthy_ids.contains(vid));
+}
+
 /// Wave-14b CDP-03: write the post-redemption base rate and timestamp to
 /// the per-collateral `CollateralConfig` (NOT the legacy global
 /// `s.current_base_rate` / `s.last_redemption_time`).
@@ -865,6 +905,24 @@ pub async fn check_vaults() {
     );
     let unhealthy_vaults = scan.unhealthy_vaults;
 
+    // 2026-05-18 follow-up: prune routing state unconditionally on every
+    // tick — even quiet ones — so a vault that was SP-attempted during a
+    // prior unhealthy episode and has since recovered does not stay
+    // blacklisted forever. Pre-fix this cleanup was inline INSIDE the
+    // `if !unhealthy_vaults.is_empty()` branch and was skipped on quiet
+    // ticks; the 5/17 incident exposed the consequence (vaults
+    // #149/#179/#182/#183 stuck on the SP blacklist until manual
+    // liquidation). See `prune_recovered_routing_state` doc.
+    let now = ic_cdk::api::time();
+    let bot_timeout_ns: u64 = 300_000_000_000; // 5 min
+    let scan_unhealthy_ids: std::collections::BTreeSet<u64> = unhealthy_vaults
+        .iter()
+        .map(|v| v.vault_id)
+        .collect();
+    mutate_state(|s| {
+        prune_recovered_routing_state(s, &scan_unhealthy_ids, now, bot_timeout_ns);
+    });
+
     // Log unhealthy vaults but don't liquidate them
     if !unhealthy_vaults.is_empty() {
         log!(
@@ -915,10 +973,10 @@ pub async fn check_vaults() {
         // 1. Bot gets first shot at vaults with bot-eligible collateral
         // 2. Stability pool handles: non-bot-eligible immediately + bot-eligible after timeout
         // 3. Manual liquidation is always available as last resort (via get_liquidatable_vaults)
-
-        let now = ic_cdk::api::time();
-        // Bot gets one check_vaults cycle (5 min = 300s) before fallback
-        let bot_timeout_ns: u64 = 300_000_000_000;
+        //
+        // `now` and `bot_timeout_ns` were established above the `if` block
+        // for the unconditional `prune_recovered_routing_state` call;
+        // re-used here for the cascade decisions.
 
         let (bot_allowed, bot_canister, pool_canister) = read_state(|s| {
             (
@@ -972,30 +1030,21 @@ pub async fn check_vaults() {
             }
         }
 
-        // Update tracking state
-        let unhealthy_ids: std::collections::BTreeSet<u64> = vault_notifications
-            .iter()
-            .map(|v| v.vault_id)
-            .collect();
+        // Update tracking state.
+        //
+        // The `prune_recovered_routing_state` call above already retained
+        // only the entries whose vault is still in the scan's
+        // `unhealthy_ids` set. The remaining work here is to insert the
+        // newly-routed bot vaults so the timeout window starts ticking.
+        // The SP-attempted insertion is done inside the spawn's Ok arm via
+        // `record_sp_notification_result` (Wave-14a CDP-10), not here.
         let bot_vault_ids: Vec<u64> = for_bot.iter().map(|v| v.vault_id).collect();
         let pool_vault_ids: Vec<u64> = for_pool.iter().map(|v| v.vault_id).collect();
 
         mutate_state(|s| {
-            // Record newly-sent bot vaults
             for vid in &bot_vault_ids {
                 s.bot_pending_vaults.entry(*vid).or_insert(now);
             }
-            // Keep bot entries that are still unhealthy AND haven't timed out yet.
-            s.bot_pending_vaults
-                .retain(|vid, ts| unhealthy_ids.contains(vid) && now.saturating_sub(*ts) < bot_timeout_ns);
-
-            // Wave-14a CDP-10: SP-attempted insertion is now done INSIDE the
-            // spawn's Ok arm via `record_sp_notification_result`, not here.
-            // The pre-Wave-14a unconditional insert blacklisted vaults whose
-            // SP transport had failed.
-            //
-            // Clear SP tracking for vaults that are now healthy (owner repaid/added collateral)
-            s.sp_attempted_vaults.retain(|vid| unhealthy_ids.contains(vid));
         });
 
         // Push to bot (fire-and-forget with error logging)
