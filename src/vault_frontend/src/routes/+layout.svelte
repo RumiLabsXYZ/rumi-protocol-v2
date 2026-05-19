@@ -54,11 +54,11 @@
   <a href="/" class="top-brand"><img src="/rumilogo-vector-v2_inset2.png" alt="Rumi" class="top-logo" /><span class="top-wordmark">RUMI</span></a>
   <nav class="top-nav">
     <a href="/" class="nav-link" class:active={currentPath === '/'}><span>Borrow</span></a>
+    <a href="/stability-pool" class="nav-link" class:active={currentPath.startsWith('/stability-pool')}><span>Earn</span></a>
     <a href="/swap" class="nav-link" class:active={currentPath === '/swap'}><span>Swap</span></a>
     <a href="/3usd" class="nav-link" class:active={currentPath === '/3usd'}><span>3USD</span></a>
     {#if isConnected && canViewVaults}<a href="/vaults" class="nav-link" class:active={currentPath.startsWith('/vaults')}><span>Vaults</span></a>{/if}
     {#if isConnected && $permissionStore.isDeveloper}<a href="/treasury" class="nav-link" class:active={currentPath === '/treasury'}><span>Treasury</span></a>{/if}
-    <a href="/docs" class="nav-link" class:active={currentPath.startsWith('/docs')}><span>Docs</span></a>
     <a href="/explorer" class="nav-link" class:active={currentPath.startsWith('/explorer')}><span>Explorer</span></a>
   </nav>
   <div class="top-actions">
@@ -102,6 +102,7 @@
 </footer>
 <nav class="mobile-nav">
   <a href="/" class="mob-item" class:active={currentPath === '/'}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9,22 9,12 15,12 15,22"/></svg><span>Borrow</span></a>
+  <a href="/stability-pool" class="mob-item" class:active={currentPath.startsWith('/stability-pool')}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg><span>Earn</span></a>
   <a href="/swap" class="mob-item" class:active={currentPath === '/swap'}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 1l4 4-4 4"/><path d="M3 9h18"/><path d="M7 23l-4-4 4-4"/><path d="M21 15H3"/></svg><span>Swap</span></a>
   <a href="/3usd" class="mob-item" class:active={currentPath === '/3usd'}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 6v12M9 9.5C9 8.12 10.34 7 12 7s3 1.12 3 2.5c0 1.93-3 2.5-3 4.5M12 17h.01"/></svg><span>3USD</span></a>
   <a href="/vaults" class="mob-item" class:active={currentPath.startsWith('/vaults')}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><span>Vaults</span></a>
@@ -174,7 +175,7 @@
 
   /* ── Mobile bottom nav ── */
   .mobile-nav { display:none;position:fixed;bottom:0;left:0;right:0;height:3.5rem;background:var(--rumi-bg-surface-1);border-top:1px solid var(--rumi-border);z-index:100;justify-content:space-around;align-items:center; }
-  .mob-item { display:flex;flex-direction:column;align-items:center;gap:0.125rem;padding:0.375rem 0.75rem;border-radius:0.375rem;color:var(--rumi-text-muted);text-decoration:none;font-size:0.625rem; }
+  .mob-item { display:flex;flex-direction:column;align-items:center;gap:0.125rem;padding:0.375rem 0.5rem;border-radius:0.375rem;color:var(--rumi-text-muted);text-decoration:none;font-size:0.625rem; }
   .mob-item svg { width:1.125rem;height:1.125rem; }
   .mob-item.active { color:var(--rumi-action); }
   @media (max-width:768px) {
