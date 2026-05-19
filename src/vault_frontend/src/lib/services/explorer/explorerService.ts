@@ -18,6 +18,13 @@ import type { _SERVICE as IcusdLedgerService } from '$declarations/icusd_ledger/
 import type { _SERVICE as IcusdIndexService } from '$declarations/icusd_index/icusd_index.did';
 import type { UserStabilityPosition } from '$declarations/rumi_stability_pool/rumi_stability_pool.did';
 import { idlFactory as stabilityPoolIDL } from '$declarations/rumi_stability_pool/rumi_stability_pool.did.js';
+import type {
+	_SERVICE as LiquidationBotService,
+	LiquidationRecordV1,
+	LiquidationRecordVersioned,
+	BotStats as BotCanisterStats,
+} from '$declarations/liquidation_bot/liquidation_bot.did';
+import { idlFactory as liquidationBotIDL } from '$declarations/liquidation_bot/liquidation_bot.did.js';
 
 // ── TTL constants (ms) ───────────────────────────────────────────────────────
 
@@ -860,6 +867,113 @@ export async function fetchBotStats(): Promise<any | null> {
 	} catch (err) {
 		console.error('[explorerService] fetchBotStats failed:', err);
 		return null;
+	}
+}
+
+// ── Bot canister: liquidation history ───────────────────────────────────────
+//
+// The protocol backend's `get_bot_stats` is an aggregate counter. The
+// per-liquidation log lives on the liquidation_bot canister itself
+// (nygob-3qaaa-aaaap-qttcq-cai). Wire its event log here so the same data
+// can power the Liquidate-page Bot tab and the explorer bot-history route.
+
+let liquidationBotActor: LiquidationBotService | null = null;
+function getLiquidationBotActor(): LiquidationBotService {
+	if (liquidationBotActor) return liquidationBotActor;
+	const agent = new HttpAgent({ host: CONFIG.host });
+	if (CONFIG.isLocal) {
+		agent.fetchRootKey().catch((err) =>
+			console.warn('[explorerService] liquidation_bot fetchRootKey failed:', err),
+		);
+	}
+	liquidationBotActor = Actor.createActor<LiquidationBotService>(liquidationBotIDL as any, {
+		agent,
+		canisterId: CONFIG.liquidationBotCanisterId,
+	});
+	return liquidationBotActor;
+}
+
+function unwrapVersioned(rec: LiquidationRecordVersioned): LiquidationRecordV1 {
+	return ('V1' in rec) ? rec.V1 : (rec as any);
+}
+
+export async function fetchBotCanisterStats(): Promise<BotCanisterStats | null> {
+	const key = 'liquidations:bot:canisterstats';
+	const cached = getCached<BotCanisterStats>(key, TTL.LIQUIDATIONS);
+	if (cached) return cached;
+	try {
+		const result = await getLiquidationBotActor().get_bot_stats();
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchBotCanisterStats failed:', err);
+		return null;
+	}
+}
+
+export async function fetchBotLiquidationCount(): Promise<bigint> {
+	const key = 'liquidations:bot:count';
+	const cached = getCached<bigint>(key, TTL.LIQUIDATIONS);
+	if (cached !== null) return cached;
+	try {
+		const result = await getLiquidationBotActor().get_liquidation_count();
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchBotLiquidationCount failed:', err);
+		return 0n;
+	}
+}
+
+/**
+ * Fetch a slice of the bot's liquidation log, newest-first.
+ *
+ * The bot's `get_liquidations(offset, limit)` returns records indexed
+ * from oldest (id 0) → newest. We translate `page`/`pageSize` into
+ * the offset that yields the newest `pageSize` records on page 0, the
+ * next-oldest on page 1, etc., so callers can scroll back through history.
+ */
+export async function fetchBotLiquidations(
+	page: number,
+	pageSize: number,
+): Promise<{ total: bigint; records: LiquidationRecordV1[] }> {
+	const key = `liquidations:bot:page:${page}:${pageSize}`;
+	const cached = getCached<{ total: bigint; records: LiquidationRecordV1[] }>(
+		key,
+		TTL.LIQUIDATIONS,
+	);
+	if (cached) return cached;
+
+	try {
+		const total = await fetchBotLiquidationCount();
+		if (total === 0n) return setCache(key, { total, records: [] });
+
+		const size = BigInt(pageSize);
+		const pageBig = BigInt(page);
+		// Newest-first paging: take a window ending at `total - page*pageSize`.
+		const endExclusive = total - pageBig * size;
+		if (endExclusive <= 0n) return setCache(key, { total, records: [] });
+		const windowSize = endExclusive < size ? endExclusive : size;
+		const offset = endExclusive - windowSize;
+		const versioned = await getLiquidationBotActor().get_liquidations(offset, windowSize);
+		// Reverse so newest-first within the page.
+		const records = versioned.map(unwrapVersioned).reverse();
+		return setCache(key, { total, records });
+	} catch (err) {
+		console.error('[explorerService] fetchBotLiquidations failed:', err);
+		return { total: 0n, records: [] };
+	}
+}
+
+export async function fetchStuckBotLiquidations(): Promise<LiquidationRecordV1[]> {
+	const key = 'liquidations:bot:stuck';
+	const cached = getCached<LiquidationRecordV1[]>(key, TTL.LIQUIDATIONS);
+	if (cached) return cached;
+	try {
+		const versioned = await getLiquidationBotActor().get_stuck_liquidations();
+		const records = versioned.map(unwrapVersioned);
+		return setCache(key, records);
+	} catch (err) {
+		console.error('[explorerService] fetchStuckBotLiquidations failed:', err);
+		return [];
 	}
 }
 

@@ -3,6 +3,7 @@ import {
   timeAgo, formatTimestamp, getTokenSymbol, getTokenDecimals,
   shortenPrincipal, getCanisterName
 } from '$utils/explorerHelpers';
+import { CANISTER_IDS } from '$lib/config';
 
 // ─── Types ────────────────────────────────────────────────────────────
 
@@ -1023,12 +1024,17 @@ export function formatEvent(event: any, vaultCollateralMap?: Map<number, string>
       const dec = getTokenDecimals(collPrincipal);
       const payment = fmtE8s(d.liquidator_payment);
       const collateral = fmtE8s(d.icp_to_liquidator, dec);
+      const liquidatorText = principalToText(optValue(d.liquidator) ?? d.liquidator);
+      const viaBot = liquidatorText === CANISTER_IDS.LIQUIDATION_BOT;
       fields.push(vaultField(d.vault_id));
       fields.push(amountField('Debt Repaid', d.liquidator_payment));
       fields.push(amountField('Collateral to Liquidator', d.icp_to_liquidator, dec, sym));
       if (d.protocol_fee_collateral !== undefined) {
         const fee = optValue(d.protocol_fee_collateral);
         if (fee !== undefined) fields.push(amountField('Protocol Fee', fee, dec, sym));
+      }
+      if (viaBot) {
+        fields.push(textField('Source', 'Liquidation Bot'));
       }
       pushIfPresent(fields, addressField('Liquidator', d.liquidator));
       if (d.icp_rate !== undefined) {
@@ -1040,8 +1046,11 @@ export function formatEvent(event: any, vaultCollateralMap?: Map<number, string>
       }
       if (ts) fields.push(timestampField(ts));
       return {
-        summary: `Vault #${d.vault_id} partially liquidated — ${payment} icUSD debt repaid, ${collateral} ${sym} seized`,
-        typeName, category, badgeColor, fields,
+        summary: viaBot
+          ? `Bot liquidated Vault #${d.vault_id} — ${payment} icUSD debt repaid, ${collateral} ${sym} seized`
+          : `Vault #${d.vault_id} partially liquidated — ${payment} icUSD debt repaid, ${collateral} ${sym} seized`,
+        typeName: viaBot ? 'Partial Liquidation (Bot)' : typeName,
+        category, badgeColor, fields,
       };
     }
 
