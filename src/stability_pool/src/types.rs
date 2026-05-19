@@ -103,6 +103,24 @@ impl DepositPosition {
         }).sum()
     }
 
+    /// icUSD-only stablecoin value in e8s.
+    /// Identifies the icUSD ledger by symbol from the registry. Returns 0 if
+    /// no icUSD ledger is registered or the depositor holds no icUSD.
+    /// icUSD is 8 decimals, so the raw balance is the e8s value directly.
+    pub fn icusd_value(
+        &self,
+        stablecoin_registry: &BTreeMap<Principal, StablecoinConfig>,
+    ) -> u64 {
+        let icusd_ledger = stablecoin_registry.iter()
+            .find(|(_, c)| c.symbol == "icUSD")
+            .map(|(id, _)| *id);
+
+        match icusd_ledger {
+            Some(ledger) => self.stablecoin_balances.get(&ledger).copied().unwrap_or(0),
+            None => 0,
+        }
+    }
+
     /// Whether this user is opted in for a given collateral type.
     pub fn is_opted_in(&self, collateral_type: &Principal) -> bool {
         !self.opted_out_collateral.contains(collateral_type)
@@ -492,4 +510,71 @@ pub struct RedeemAndBurnResult {
     pub token_amount_burned: u128,
     pub lp_amount_burned: u128,
     pub burn_block_index: u64,
+}
+
+#[cfg(test)]
+mod icusd_value_tests {
+    use super::*;
+    use candid::Principal;
+    use std::collections::BTreeMap;
+
+    fn config(ledger: Principal, symbol: &str, decimals: u8, priority: u8, is_lp: bool) -> StablecoinConfig {
+        StablecoinConfig {
+            ledger_id: ledger,
+            symbol: symbol.to_string(),
+            decimals,
+            priority,
+            is_active: true,
+            transfer_fee: None,
+            is_lp_token: if is_lp { Some(true) } else { None },
+            underlying_pool: None,
+        }
+    }
+
+    #[test]
+    fn icusd_value_returns_only_icusd_balance() {
+        let icusd = Principal::from_text("t6bor-paaaa-aaaap-qrd5q-cai").unwrap();
+        let ckusdc = Principal::from_text("xevnm-gaaaa-aaaar-qafnq-cai").unwrap();
+        let three_usd = Principal::from_text("fohh4-yyaaa-aaaap-qtkpa-cai").unwrap();
+
+        let mut registry = BTreeMap::new();
+        registry.insert(icusd, config(icusd, "icUSD", 8, 1, false));
+        registry.insert(ckusdc, config(ckusdc, "ckUSDC", 6, 1, false));
+        registry.insert(three_usd, config(three_usd, "3USD", 8, 1, true));
+
+        let mut pos = DepositPosition::new(0);
+        pos.stablecoin_balances.insert(icusd, 100_00_000_000); // 100 icUSD (e8s)
+        pos.stablecoin_balances.insert(ckusdc, 200_000_000);   // 200 ckUSDC (e6s)
+        pos.stablecoin_balances.insert(three_usd, 50_00_000_000); // 50 3USD (e8s)
+
+        let v = pos.icusd_value(&registry);
+        assert_eq!(v, 100_00_000_000, "should return only the icUSD balance in e8s");
+    }
+
+    #[test]
+    fn icusd_value_zero_when_no_icusd_balance() {
+        let icusd = Principal::from_text("t6bor-paaaa-aaaap-qrd5q-cai").unwrap();
+        let ckusdc = Principal::from_text("xevnm-gaaaa-aaaar-qafnq-cai").unwrap();
+
+        let mut registry = BTreeMap::new();
+        registry.insert(icusd, config(icusd, "icUSD", 8, 1, false));
+        registry.insert(ckusdc, config(ckusdc, "ckUSDC", 6, 1, false));
+
+        let mut pos = DepositPosition::new(0);
+        pos.stablecoin_balances.insert(ckusdc, 500_000_000);
+
+        assert_eq!(pos.icusd_value(&registry), 0);
+    }
+
+    #[test]
+    fn icusd_value_zero_when_registry_has_no_icusd() {
+        let icusd = Principal::from_text("t6bor-paaaa-aaaap-qrd5q-cai").unwrap();
+        let registry: BTreeMap<Principal, StablecoinConfig> = BTreeMap::new();
+
+        let mut pos = DepositPosition::new(0);
+        pos.stablecoin_balances.insert(icusd, 100_00_000_000);
+
+        assert_eq!(pos.icusd_value(&registry), 0,
+            "registry without icUSD config means we can't identify which ledger is icUSD");
+    }
 }

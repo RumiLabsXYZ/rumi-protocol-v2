@@ -137,9 +137,10 @@
         {#if showApyTooltip}
           <div class="apy-tooltip">
             <div class="apy-tooltip-caret"></div>
-            <p><strong>Interest APY</strong> applies to <strong>icUSD</strong> deposits. icUSD depositors earn a share of all borrowing interest paid by vault owners.</p>
+            <p><strong>Interest APY</strong> applies to <strong>icUSD</strong> deposits only. icUSD depositors earn a share of all borrowing interest paid by vault owners.</p>
             <div class="apy-tooltip-divider"></div>
-            <p><strong>ckUSDC</strong>, <strong>ckUSDT</strong>, and <strong>3USD</strong> deposits don't earn interest directly, but are used <em>first</em> for liquidations, giving priority access to discounted collateral. <strong>3USD</strong> LP tokens also earn yield from swap fees and interest donations in the 3pool.</p>
+            <p><strong>ckUSDC</strong> and <strong>ckUSDT</strong> deposits don't earn interest, but get <em>first</em> priority in liquidations — they're consumed before icUSD and 3USD, giving them earliest access to discounted collateral.</p>
+            <p><strong>3USD</strong> deposits sit at the same priority as icUSD for liquidations. They don't earn interest in the pool, but 3USD LP tokens earn yield from swap fees and interest donations in the 3pool itself.</p>
           </div>
         {/if}
       </div>
