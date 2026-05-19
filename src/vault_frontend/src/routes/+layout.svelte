@@ -14,9 +14,12 @@
   import ToastContainer from "../lib/components/common/ToastContainer.svelte";
   import { ApiClient } from "../lib/services/protocol/apiClient";
   import { initIcpswapRoutingFlag } from "../lib/services/swapRouter";
+  import { stabilityPoolService } from "../lib/services/stabilityPoolService";
+  import { liveSpApyPct } from "../lib/utils/liveApy";
   let permissionInitialized = false;
   let showDebug = false;
   let hasLiquidatableVaults = false;
+  let earnApyPct: number | null = null;
   $: currentPath = $page.url.pathname;
   $: ({ isConnected } = $wallet);
   $: isDeveloperMode = isDevelopment || ($permissionStore.initialized && $permissionStore.isDeveloper);
@@ -42,6 +45,21 @@
       await checkLiquidatable();
       const liqInterval = setInterval(checkLiquidatable, 60_000);
       cleanups.push(() => clearInterval(liqInterval));
+      // Live SP APY pill (refresh every 5 min — SP APY moves slowly)
+      const refreshSpApy = async () => {
+        try {
+          const [psR, spR] = await Promise.allSettled([
+            protocolService.getProtocolStatus(),
+            stabilityPoolService.getPoolStatus(),
+          ]);
+          const ps = psR.status === 'fulfilled' ? psR.value : null;
+          const sp = spR.status === 'fulfilled' ? spR.value : null;
+          earnApyPct = liveSpApyPct(ps as any, sp as any);
+        } catch { earnApyPct = null; }
+      };
+      refreshSpApy();
+      const apyInterval = setInterval(refreshSpApy, 300_000);
+      cleanups.push(() => clearInterval(apyInterval));
     })();
     // Ctrl+D toggles debug panels in dev mode
     const handleKey = (e: KeyboardEvent) => { if (e.ctrlKey && e.key === 'd') { e.preventDefault(); showDebug = !showDebug; } };
@@ -54,7 +72,7 @@
   <a href="/" class="top-brand"><img src="/rumilogo-vector-v2_inset2.png" alt="Rumi" class="top-logo" /><span class="top-wordmark">RUMI</span></a>
   <nav class="top-nav">
     <a href="/" class="nav-link" class:active={currentPath === '/'}><span>Borrow</span></a>
-    <a href="/stability-pool" class="nav-link" class:active={currentPath.startsWith('/stability-pool')}><span>Earn</span></a>
+    <a href="/stability-pool" class="nav-link" class:active={currentPath.startsWith('/stability-pool')} title={earnApyPct !== null ? `Stability Pool ~${earnApyPct.toFixed(1)}% APY (live)` : 'Stability Pool'}><span>Earn</span>{#if earnApyPct !== null && earnApyPct > 0}<span class="apy-pill">{earnApyPct.toFixed(1)}%</span>{/if}</a>
     <a href="/swap" class="nav-link" class:active={currentPath === '/swap'}><span>Swap</span></a>
     <a href="/3usd" class="nav-link" class:active={currentPath === '/3usd'}><span>3USD</span></a>
     {#if isConnected && canViewVaults}<a href="/vaults" class="nav-link" class:active={currentPath.startsWith('/vaults')}><span>Vaults</span></a>{/if}
@@ -121,10 +139,12 @@
 
   /* ── Nav: centered in middle grid column ── */
   .top-nav { display:flex;align-items:center;gap:0.25rem;justify-self:center; }
-  .nav-link { position:relative;display:flex;align-items:center;padding:1rem 1rem;color:var(--rumi-text-muted);text-decoration:none;font-family:'Circular Std','Inter',sans-serif;font-size:0.9375rem;font-weight:500;letter-spacing:0.01em;transition:color 0.15s ease;white-space:nowrap; }
+  .nav-link { position:relative;display:flex;align-items:center;gap:0.4375rem;padding:1rem 1rem;color:var(--rumi-text-muted);text-decoration:none;font-family:'Circular Std','Inter',sans-serif;font-size:0.9375rem;font-weight:500;letter-spacing:0.01em;transition:color 0.15s ease;white-space:nowrap; }
   .nav-link:hover { color:var(--rumi-text-primary); }
   .nav-link.active { color:var(--rumi-text-primary); }
   .nav-link.active::after { content:'';position:absolute;bottom:0;left:1rem;right:1rem;height:2px;background:var(--rumi-action);border-radius:1px 1px 0 0; }
+  .apy-pill { display:inline-flex;align-items:center;padding:0.0625rem 0.4375rem;border-radius:999px;background:var(--rumi-teal-dim);color:var(--rumi-teal);font-size:0.6875rem;font-weight:600;letter-spacing:0.01em;line-height:1.4;font-variant-numeric:tabular-nums;transition:background 0.15s ease; }
+  .nav-link:hover .apy-pill { background:rgba(45,212,191,0.2); }
 
   /* ── Right side: alert + beta + social + wallet ── */
   .top-actions { display:flex;align-items:center;gap:0.75rem;justify-self:end; }
