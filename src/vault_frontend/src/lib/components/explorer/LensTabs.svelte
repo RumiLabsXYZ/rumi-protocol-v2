@@ -11,6 +11,7 @@
     { id: 'overview', label: 'Overview' },
     { id: 'collateral', label: 'Collateral' },
     { id: 'stability', label: 'Stability Pool' },
+    { id: 'liquidations', label: 'Liquidations' },
     { id: 'redemptions', label: 'Redemptions' },
     { id: 'revenue', label: 'Revenue' },
     { id: 'dexs', label: 'DEXs' },
