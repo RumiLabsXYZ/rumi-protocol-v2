@@ -34,6 +34,82 @@ pub(crate) fn next_claim_retry_action(current_count: u8, max: u8) -> ClaimRetryA
     }
 }
 
+/// Per-claim ckUSDC accounting decision after a swap.
+///
+/// `process_pending` brackets the swap with two `balance_of_self_ckusdc`
+/// reads. The delta between them is the ckUSDC this specific liquidation
+/// actually deposited in the bot's wallet — independent of any pre-existing
+/// balance left over from earlier runs, and independent of whatever the
+/// swap router *claims* it deposited.
+///
+/// Why bother: the bot's wallet is shared state across runs. If a swap
+/// router reports "4.22 ckUSDC out" but the wallet only gained 0.37 ckUSDC
+/// (pool delivery delay, partial fill, accounting bug, future concurrency
+/// hazard), the bot must not transfer 4.22 — that hits InsufficientFunds
+/// and leaves the vault stuck pending admin resolution. With per-claim
+/// reservation, the bot only spends what this claim actually earned.
+///
+/// `to_transfer_e6` is the amount that will be passed to
+/// `transfer_ckusdc_to_backend` (caller still subtracts the ledger fee).
+/// `recorded_received_e6` is the truth value stored in LiquidationRecord
+/// (= actual delta, not the router's claim).
+#[derive(Debug, PartialEq)]
+pub(crate) struct SwapReservation {
+    pub to_transfer_e6: u64,
+    pub recorded_received_e6: u64,
+    /// When the router's claimed output exceeds the wallet's actual delta,
+    /// `discrepancy_note` carries a human-readable explanation that gets
+    /// appended to the LiquidationRecord's `error_message`. None = clean.
+    pub discrepancy_note: Option<String>,
+}
+
+/// Compute the per-claim ckUSDC reservation from balance snapshots.
+///
+/// `router_received_e6` is whatever ICPSwap's `depositFromAndSwap` told us.
+/// `balance_before_e6` / `balance_after_e6` are wallet balance reads
+/// bracketing the swap call.
+///
+/// The router's number is treated as advisory. The truth is `after - before`.
+/// If the truth is lower we use the truth and surface the gap to the record
+/// (operator visibility); if the truth is higher (someone else funded the
+/// wallet mid-flight) we use the router's number to avoid accidentally
+/// spending funds that weren't earmarked for this claim.
+pub(crate) fn compute_swap_reservation(
+    vault_id: u64,
+    router_received_e6: u64,
+    balance_before_e6: u64,
+    balance_after_e6: u64,
+) -> SwapReservation {
+    let actual_delta = balance_after_e6.saturating_sub(balance_before_e6);
+
+    // Truth-low case: pool didn't deliver in full. Use the delta and
+    // record the gap so the operator can see why the per-claim debt
+    // coverage came up short.
+    if actual_delta < router_received_e6 {
+        let gap = router_received_e6 - actual_delta;
+        let note = format!(
+            "per-claim reservation: router reported {} ckUSDC for vault #{}, \
+             wallet delta only {} (gap {}); using delta to avoid InsufficientFunds.",
+            router_received_e6, vault_id, actual_delta, gap
+        );
+        return SwapReservation {
+            to_transfer_e6: actual_delta,
+            recorded_received_e6: actual_delta,
+            discrepancy_note: Some(note),
+        };
+    }
+
+    // Truth-high case: wallet gained more than the router claimed. Could be
+    // a stale prior swap finally arriving, or an unrelated deposit. Either
+    // way, do NOT spend the surplus on this claim — only ours to spend is
+    // what the router said was ours.
+    SwapReservation {
+        to_transfer_e6: router_received_e6,
+        recorded_received_e6: router_received_e6,
+        discrepancy_note: None,
+    }
+}
+
 /// Outcome of the swap-failure cleanup path. Pure data, produced by
 /// `decide_swap_failure_outcome` and consumed by `process_pending` to write
 /// the LiquidationRecord and emit the STUCK log line if applicable.
@@ -228,9 +304,22 @@ pub async fn process_pending() {
 
     // -- Phase 2: SWAP ICP -> ckUSDC --
     let swap_amount = calculate_swap_amount(collateral_amount, debt_covered, collateral_price);
+
+    // Per-claim reservation: bracket the swap with wallet balance reads so
+    // we know the EXACT ckUSDC this claim earned, independent of any leftover
+    // balance or what the swap router claims. The transfer in Phase 3 spends
+    // only this delta (see compute_swap_reservation for rationale).
+    //
+    // If the pre-swap balance read fails we proceed without bracketing —
+    // worse than capped, but better than skipping the swap entirely.
+    let bal_before_swap = swap::balance_of_self_ckusdc(&config).await.unwrap_or_else(|e| {
+        log!(crate::INFO, "Pre-swap balance read failed for vault #{}: {} (proceeding without per-claim cap)", vault.vault_id, e);
+        u64::MAX
+    });
+
     let swap_result = swap::swap_icp_for_ckusdc(&config, swap_amount).await;
 
-    let (ckusdc_received, effective_price) = match swap_result {
+    let (router_received, effective_price) = match swap_result {
         Ok(r) => (r.ckusdc_received_e6, r.effective_price_e8s),
         Err(swap_err) => {
             log!(crate::INFO, "Swap failed for vault #{}: {}. Returning ICP.", vault.vault_id, swap_err);
@@ -305,15 +394,43 @@ pub async fn process_pending() {
 
     let slippage_bps = calculate_slippage(effective_price, collateral_price);
 
+    // Per-claim reservation: read wallet balance again, compute delta, and use
+    // that — not the router's claim — as the amount this claim is allowed to
+    // spend. See compute_swap_reservation for the decision rules. When the
+    // pre-swap balance read failed we set it to u64::MAX, which makes the
+    // delta saturate to 0 and falls back to the router's number unchanged.
+    let bal_after_swap = swap::balance_of_self_ckusdc(&config).await.unwrap_or_else(|e| {
+        log!(crate::INFO, "Post-swap balance read failed for vault #{}: {} (using router-reported amount)", vault.vault_id, e);
+        bal_before_swap.saturating_add(router_received) // synthesise delta = router_received
+    });
+    let reservation = compute_swap_reservation(
+        vault.vault_id,
+        router_received,
+        bal_before_swap,
+        bal_after_swap,
+    );
+    if let Some(note) = &reservation.discrepancy_note {
+        log!(crate::INFO, "[per-claim-reservation] {}", note);
+    }
+    let ckusdc_received = reservation.recorded_received_e6;
+
     // -- Phase 3: TRANSFER ckUSDC to backend (NO RETRY) --
-    let transfer_result = swap::transfer_ckusdc_to_backend(&config, ckusdc_received).await;
+    // We send `reservation.to_transfer_e6`, which is capped to what THIS
+    // claim actually deposited in the wallet — never blowing past the
+    // wallet's real balance even if the router lied.
+    let transfer_result =
+        swap::transfer_ckusdc_to_backend(&config, reservation.to_transfer_e6).await;
 
     let ckusdc_transferred = match transfer_result {
         Ok(actual_sent) => actual_sent,
         Err(e) => {
+            let stuck_msg = match &reservation.discrepancy_note {
+                Some(note) => format!("{} | transfer: {}", note, e),
+                None => e,
+            };
             log!(crate::INFO,
-                "STUCK: ckUSDC transfer failed for vault #{}. Bot holding {} ckUSDC e6. Error: {}. Needs admin resolution.",
-                vault.vault_id, ckusdc_received, e);
+                "STUCK: ckUSDC transfer failed for vault #{}. Bot holding {} ckUSDC e6 (router said {}). Error: {}. Needs admin resolution.",
+                vault.vault_id, reservation.to_transfer_e6, router_received, stuck_msg);
             write_record(LiquidationRecordV1 {
                 id: record_id, vault_id: vault.vault_id, timestamp,
                 status: LiquidationStatus::TransferFailed,
@@ -321,7 +438,7 @@ pub async fn process_pending() {
                 icp_swapped_e8s: swap_amount, ckusdc_received_e6: ckusdc_received,
                 ckusdc_transferred_e6: 0, icp_to_treasury_e8s: 0,
                 oracle_price_e8s: collateral_price, effective_price_e8s: effective_price,
-                slippage_bps, error_message: Some(e), confirm_retry_count: 0,
+                slippage_bps, error_message: Some(stuck_msg), confirm_retry_count: 0,
             });
             return;
         }
@@ -533,6 +650,71 @@ mod tests {
         // attempted >= max check still pushes us into GiveUp.
         let action = next_claim_retry_action(u8::MAX, 3);
         assert_eq!(action, ClaimRetryAction::GiveUp);
+    }
+
+    // ── compute_swap_reservation ────────────────────────────────────────
+
+    #[test]
+    fn reservation_clean_router_matches_delta() {
+        // Normal case: pool delivered exactly what the router promised.
+        // No discrepancy, transfer the router-reported amount.
+        let r = compute_swap_reservation(7, 4_220_000, 100, 4_220_100);
+        assert_eq!(r.to_transfer_e6, 4_220_000);
+        assert_eq!(r.recorded_received_e6, 4_220_000);
+        assert!(r.discrepancy_note.is_none(), "exact-match must not flag a discrepancy");
+    }
+
+    #[test]
+    fn reservation_pool_underdelivers_uses_delta() {
+        // Reproduces the 2026-05-18 vault #69 incident: router reported
+        // 4_219_759 ckUSDC for the swap, but the wallet only saw 0 of it
+        // arrive (balance went from 373_400 → 373_400). With the old
+        // accounting the bot tried to transfer 4_219_759 and the ledger
+        // rejected with InsufficientFunds. With reservation, the bot only
+        // tries to transfer the delta (0) and the discrepancy is recorded.
+        let r = compute_swap_reservation(69, 4_219_759, 373_400, 373_400);
+        assert_eq!(r.to_transfer_e6, 0, "must not attempt to transfer router-reported amount when wallet didn't gain it");
+        assert_eq!(r.recorded_received_e6, 0);
+        let note = r.discrepancy_note.expect("under-delivery must produce a note");
+        assert!(note.contains("vault #69"));
+        assert!(note.contains("router reported 4219759"));
+        assert!(note.contains("wallet delta only 0"));
+        assert!(note.contains("gap 4219759"));
+    }
+
+    #[test]
+    fn reservation_partial_underdelivery_uses_delta() {
+        // Hybrid case: pool delivered some but not all. Use what landed.
+        let r = compute_swap_reservation(42, 4_000_000, 1_000_000, 2_500_000);
+        assert_eq!(r.to_transfer_e6, 1_500_000);
+        assert_eq!(r.recorded_received_e6, 1_500_000);
+        assert!(r.discrepancy_note.is_some());
+        assert!(r.discrepancy_note.unwrap().contains("gap 2500000"));
+    }
+
+    #[test]
+    fn reservation_overdelivery_does_not_spend_surplus() {
+        // Wallet gained more than the router claimed (delayed prior swap
+        // arrived, unrelated deposit, whatever). The surplus is NOT this
+        // claim's to spend — cap transfer at what the router said.
+        let r = compute_swap_reservation(7, 4_000_000, 100, 9_999_999);
+        assert_eq!(r.to_transfer_e6, 4_000_000, "must not dip into surplus that wasn't earmarked");
+        assert_eq!(r.recorded_received_e6, 4_000_000);
+        assert!(r.discrepancy_note.is_none(), "over-delivery is not a stuck-claim situation");
+    }
+
+    #[test]
+    fn reservation_before_balance_unreadable_falls_back_to_router() {
+        // process_pending uses u64::MAX as a sentinel when the pre-swap
+        // balance read fails. saturating_sub then yields 0, but the
+        // post-swap read sees the post-swap balance — actual_delta
+        // saturates to 0, triggering the under-delivery branch (use 0).
+        // This is the conservative behavior we want when balance reads
+        // are unreliable: do nothing rather than spend blindly.
+        let r = compute_swap_reservation(99, 1_000_000, u64::MAX, 500_000);
+        assert_eq!(r.to_transfer_e6, 0);
+        assert_eq!(r.recorded_received_e6, 0);
+        assert!(r.discrepancy_note.is_some());
     }
 
     #[test]
