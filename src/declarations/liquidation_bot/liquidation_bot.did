@@ -1,0 +1,119 @@
+type BotConfig = record {
+  backend_principal : principal;
+  treasury_principal : principal;
+  admin : principal;
+  max_slippage_bps : nat16;
+  icp_ledger : principal;
+  ckusdc_ledger : principal;
+  icpswap_pool : principal;
+  icpswap_zero_for_one : opt bool;
+  icp_fee_e8s : opt nat64;
+  ckusdc_fee_e6 : opt nat64;
+  // Legacy fields (ignored, kept for deserialization compat)
+  three_pool_principal : opt principal;
+  kong_swap_principal : opt principal;
+  ckusdt_ledger : opt principal;
+  icusd_ledger : opt principal;
+};
+
+type BotInitArgs = record {
+  config : BotConfig;
+};
+
+type BotStats = record {
+  total_debt_covered_e8s : nat64;
+  total_ckusdc_deposited_e6 : nat64;
+  total_collateral_received_e8s : nat64;
+  total_collateral_to_treasury_e8s : nat64;
+  events_count : nat64;
+};
+
+type LiquidatableVaultInfo = record {
+  vault_id : nat64;
+  collateral_type : principal;
+  debt_amount : nat64;
+  collateral_amount : nat64;
+  recommended_liquidation_amount : nat64;
+  collateral_price_e8s : nat64;
+};
+
+type LiquidationStatus = variant {
+  Completed;
+  SwapFailed;
+  TransferFailed;
+  ConfirmFailed;
+  ClaimFailed;
+  AdminResolved;
+};
+
+type LiquidationRecordV1 = record {
+  id : nat64;
+  vault_id : nat64;
+  timestamp : nat64;
+  status : LiquidationStatus;
+  collateral_claimed_e8s : nat64;
+  debt_to_cover_e8s : nat64;
+  icp_swapped_e8s : nat64;
+  ckusdc_received_e6 : nat64;
+  ckusdc_transferred_e6 : nat64;
+  icp_to_treasury_e8s : nat64;
+  oracle_price_e8s : nat64;
+  effective_price_e8s : nat64;
+  slippage_bps : int32;
+  error_message : opt text;
+  confirm_retry_count : nat8;
+};
+
+type LiquidationRecordVersioned = variant {
+  V1 : LiquidationRecordV1;
+};
+
+type BotAdminAction = variant {
+  ConfigUpdated;
+  VaultsNotified : record { count : nat64 };
+};
+
+type BotAdminEvent = record {
+  timestamp : nat64;
+  caller : text;
+  action : BotAdminAction;
+};
+
+type SwapResult = record {
+  ckusdc_received_e6 : nat64;
+  effective_price_e8s : nat64;
+};
+
+type TestSwapResult = variant { Ok : SwapResult; Err : text };
+
+service : (BotInitArgs) -> {
+  // Core
+  notify_liquidatable_vaults : (vec LiquidatableVaultInfo) -> ();
+  set_config : (BotConfig) -> ();
+
+  // Stats
+  get_bot_stats : () -> (BotStats) query;
+
+  // History
+  get_liquidation : (nat64) -> (opt LiquidationRecordVersioned) query;
+  get_liquidations : (nat64, nat64) -> (vec LiquidationRecordVersioned) query;
+  get_liquidation_count : () -> (nat64) query;
+  get_stuck_liquidations : () -> (vec LiquidationRecordVersioned) query;
+  get_liquidation_events : (nat64, nat64) -> (vec LiquidationRecordVersioned) query;
+
+  // Admin events
+  get_admin_events : (nat64, nat64) -> (vec BotAdminEvent) query;
+  get_admin_event_count : () -> (nat64) query;
+
+  // Admin actions
+  admin_resolve_pool_ordering : () -> ();
+  admin_approve_pool : () -> ();
+  admin_sweep_ckusdc : (principal, opt nat64) -> ();
+  admin_retry_stuck_claim : (nat64) -> ();
+  // Returns (icp_fee_e8s, ckusdc_fee_e6) freshly read from each ledger and
+  // also writes them back into BotConfig so future swaps use the live values.
+  admin_refresh_fees : () -> (nat64, nat64);
+  // Runs the live swap path (ICP -> ckUSDC) using `amount_e8s` from the bot's
+  // ICP balance. ckUSDC stays in the bot; retrieve via `admin_sweep_ckusdc`.
+  admin_test_swap : (nat64) -> (TestSwapResult);
+};

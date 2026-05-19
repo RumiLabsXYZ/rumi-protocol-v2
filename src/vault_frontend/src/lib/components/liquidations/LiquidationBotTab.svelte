@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { ApiClient } from '../../services/protocol/apiClient';
   import LoadingSpinner from '../common/LoadingSpinner.svelte';
+  import BotLiquidationsTable from './BotLiquidationsTable.svelte';
 
   interface BotStats {
     liquidation_bot_principal: string | null;
@@ -11,35 +12,15 @@
     total_debt_covered_e8s: bigint;
   }
 
-  interface BotEvent {
-    timestamp: bigint;
-    vault_id: bigint;
-    debt_covered_e8s: bigint;
-    collateral_received_e8s: bigint;
-    icusd_burned_e8s: bigint;
-    collateral_to_treasury_e8s: bigint;
-    swap_route: string;
-    effective_price_e8s: bigint;
-    slippage_bps: number;
-    success: boolean;
-    error_message: string | null;
-  }
-
   let loading = true;
   let error = '';
   let stats: BotStats | null = null;
-  let events: BotEvent[] = [];
 
   const E8S = 100_000_000;
 
   function formatE8s(val: bigint | number, decimals = 2): string {
     const n = Number(val) / E8S;
     return n.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
-  }
-
-  function formatDate(nanos: bigint): string {
-    const ms = Number(nanos) / 1_000_000;
-    return new Date(ms).toLocaleString();
   }
 
   function daysLeftInBudget(startNanos: bigint): number {
@@ -136,36 +117,13 @@
     <!-- Event Log -->
     <div class="card events-card">
       <h3 class="card-title">Liquidation Events</h3>
-      {#if events.length === 0}
-        <p class="empty-text">No liquidation events recorded yet.</p>
-      {:else}
-        <div class="events-table">
-          <div class="table-header">
-            <span>Time</span>
-            <span>Vault</span>
-            <span>Debt</span>
-            <span>Route</span>
-            <span>Status</span>
-          </div>
-          {#each events as evt}
-            <div class="table-row" class:failed={!evt.success}>
-              <span>{formatDate(evt.timestamp)}</span>
-              <span>#{evt.vault_id.toString()}</span>
-              <span>{formatE8s(evt.debt_covered_e8s)}</span>
-              <span>{evt.swap_route || '—'}</span>
-              <span class:success={evt.success} class:fail={!evt.success}>
-                {evt.success ? 'OK' : 'Failed'}
-              </span>
-            </div>
-          {/each}
-        </div>
-      {/if}
+      <BotLiquidationsTable />
     </div>
   {/if}
 </div>
 
 <style>
-  .bot-container { max-width: 820px; margin: 0 auto; }
+  .bot-container { max-width: 1100px; margin: 0 auto; }
 
   .loading-state, .error-state {
     display: flex;
@@ -251,42 +209,9 @@
     font-weight: 500;
     color: var(--rumi-text-primary, #fff);
   }
-  .stat-value.deficit { color: var(--rumi-warning, #f59e0b); }
   .stat-value.principal {
     font-size: 0.75rem;
     font-family: monospace;
     word-break: break-all;
   }
-
-  .empty-text {
-    color: var(--rumi-text-muted, #6b7280);
-    font-size: 0.875rem;
-    text-align: center;
-    padding: 2rem;
-  }
-
-  .events-table {
-    display: flex;
-    flex-direction: column;
-    font-size: 0.8125rem;
-  }
-  .table-header, .table-row {
-    display: grid;
-    grid-template-columns: 2fr 1fr 1.5fr 1.5fr 1fr;
-    gap: 0.5rem;
-    padding: 0.5rem 0;
-    align-items: center;
-  }
-  .table-header {
-    color: var(--rumi-text-muted, #6b7280);
-    font-weight: 600;
-    border-bottom: 1px solid var(--rumi-border, rgba(255, 255, 255, 0.06));
-  }
-  .table-row {
-    color: var(--rumi-text-primary, #fff);
-    border-bottom: 1px solid var(--rumi-border, rgba(255, 255, 255, 0.03));
-  }
-  .table-row.failed { opacity: 0.6; }
-  .success { color: var(--rumi-success, #22c55e); }
-  .fail { color: var(--rumi-error, #ef4444); }
 </style>

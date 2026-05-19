@@ -23,6 +23,8 @@ export const CANISTER_IDS = {
   THREEPOOL: "fohh4-yyaaa-aaaap-qtkpa-cai",
   // Rumi AMM (3USD/ICP constant-product pool)
   RUMI_AMM: "ijlzs-2yaaa-aaaap-quaaq-cai",
+  // Liquidation Bot (automated CDP liquidator with on-chain event log)
+  LIQUIDATION_BOT: "nygob-3qaaa-aaaap-qttcq-cai",
   // Rumi Analytics (time-series data, protocol metrics)
   ANALYTICS: "dtlu2-uqaaa-aaaap-qugcq-cai",
   // ICPswap pools (external DEX for routing)
@@ -97,6 +99,10 @@ export const CONFIG = {
 
   get ammCanisterId() {
     return CANISTER_IDS.RUMI_AMM;
+  },
+
+  get liquidationBotCanisterId() {
+    return CANISTER_IDS.LIQUIDATION_BOT;
   },
 
   get icpswap3UsdIcpPoolId() {
