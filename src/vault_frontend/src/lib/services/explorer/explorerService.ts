@@ -926,10 +926,10 @@ export async function fetchBotLiquidationCount(): Promise<bigint> {
 /**
  * Fetch a slice of the bot's liquidation log, newest-first.
  *
- * The bot's `get_liquidations(offset, limit)` returns records indexed
- * from oldest (id 0) → newest. We translate `page`/`pageSize` into
- * the offset that yields the newest `pageSize` records on page 0, the
- * next-oldest on page 1, etc., so callers can scroll back through history.
+ * The bot's `get_liquidations(offset, limit)` is "skip `offset` newest,
+ * return next `limit`" (see liquidation_bot/src/history.rs:111). So
+ * page=0 → offset=0, page=1 → offset=pageSize, etc. The bot returns each
+ * page in ascending-id order, so we reverse to display newest-first.
  */
 export async function fetchBotLiquidations(
 	page: number,
@@ -947,14 +947,10 @@ export async function fetchBotLiquidations(
 		if (total === 0n) return setCache(key, { total, records: [] });
 
 		const size = BigInt(pageSize);
-		const pageBig = BigInt(page);
-		// Newest-first paging: take a window ending at `total - page*pageSize`.
-		const endExclusive = total - pageBig * size;
-		if (endExclusive <= 0n) return setCache(key, { total, records: [] });
-		const windowSize = endExclusive < size ? endExclusive : size;
-		const offset = endExclusive - windowSize;
-		const versioned = await getLiquidationBotActor().get_liquidations(offset, windowSize);
-		// Reverse so newest-first within the page.
+		const offset = BigInt(page) * size;
+		if (offset >= total) return setCache(key, { total, records: [] });
+		const versioned = await getLiquidationBotActor().get_liquidations(offset, size);
+		// Bot returns oldest-of-window first; reverse so newest-first within the page.
 		const records = versioned.map(unwrapVersioned).reverse();
 		return setCache(key, { total, records });
 	} catch (err) {
