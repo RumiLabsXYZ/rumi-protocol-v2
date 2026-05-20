@@ -203,6 +203,32 @@ pub async fn return_collateral_to_backend(
     }
 }
 
+/// Read the bot's own ckUSDC main-account balance from the ledger.
+///
+/// Used by `process_pending` to bracket the swap call and compute the
+/// per-claim delta — the ckUSDC this specific liquidation actually deposited
+/// in the bot wallet, regardless of any pre-existing balance left over from
+/// prior runs or the swap router's claimed output.
+pub async fn balance_of_self_ckusdc(config: &BotConfig) -> Result<u64, String> {
+    let result: Result<(Nat,), _> = ic_cdk::call(
+        config.ckusdc_ledger,
+        "icrc1_balance_of",
+        (Account {
+            owner: ic_cdk::id(),
+            subaccount: None,
+        },),
+    )
+    .await;
+    match result {
+        Ok((n,)) => n
+            .0
+            .to_string()
+            .parse::<u64>()
+            .map_err(|_| format!("icrc1_balance_of returned non-u64 from {}", config.ckusdc_ledger)),
+        Err((code, msg)) => Err(format!("icrc1_balance_of call failed ({:?}): {}", code, msg)),
+    }
+}
+
 /// Transfer ckUSDC from bot to backend canister.
 /// Returns the actual amount received by the backend (after fee subtraction).
 pub async fn transfer_ckusdc_to_backend(
