@@ -6,12 +6,13 @@
   import OverviewLens from '$components/explorer/lenses/OverviewLens.svelte';
   import CollateralLens from '$components/explorer/lenses/CollateralLens.svelte';
   import StabilityPoolLens from '$components/explorer/lenses/StabilityPoolLens.svelte';
+  import LiquidationsLens from '$components/explorer/lenses/LiquidationsLens.svelte';
   import RedemptionsLens from '$components/explorer/lenses/RedemptionsLens.svelte';
   import RevenueLens from '$components/explorer/lenses/RevenueLens.svelte';
   import DexsLens from '$components/explorer/lenses/DexsLens.svelte';
   import AdminLens from '$components/explorer/lenses/AdminLens.svelte';
 
-  const VALID_LENSES: LensId[] = ['overview', 'collateral', 'stability', 'redemptions', 'revenue', 'dexs', 'admin'];
+  const VALID_LENSES: LensId[] = ['overview', 'collateral', 'stability', 'liquidations', 'redemptions', 'revenue', 'dexs', 'admin'];
 
   const lens = $derived.by<LensId>(() => {
     const raw = $page.url.searchParams.get('lens') ?? 'overview';
@@ -29,6 +30,7 @@
     overview: 'Overview',
     collateral: 'Collateral',
     stability: 'Stability Pool',
+    liquidations: 'Liquidations',
     redemptions: 'Redemptions',
     revenue: 'Revenue',
     dexs: 'DEXs',
@@ -49,6 +51,8 @@
     <CollateralLens />
   {:else if lens === 'stability'}
     <StabilityPoolLens />
+  {:else if lens === 'liquidations'}
+    <LiquidationsLens />
   {:else if lens === 'redemptions'}
     <RedemptionsLens />
   {:else if lens === 'revenue'}

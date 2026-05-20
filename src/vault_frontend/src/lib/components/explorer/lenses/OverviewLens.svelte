@@ -7,6 +7,7 @@
   import PoolHealthStrip from '../PoolHealthStrip.svelte';
   import TvlChart from '../TvlChart.svelte';
   import TokenFlowBars from '../TokenFlowBars.svelte';
+  import LiquidationsOverviewCard from '../LiquidationsOverviewCard.svelte';
   import {
     fetchProtocolSummary, fetchVaultSeries,
     fetchFeeSeries, fetchPegStatus, fetchApys, fetchTokenFlow,
@@ -214,6 +215,8 @@
 </div>
 
 <PoolHealthStrip {pegStatus} {lpApy} {spApy} loading={poolsLoading} />
+
+<LiquidationsOverviewCard />
 
 <div class="explorer-card">
   <div class="flex items-center justify-between mb-3">

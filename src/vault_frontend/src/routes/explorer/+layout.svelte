@@ -46,6 +46,7 @@
         || p.startsWith('/explorer/risk')
         || p.startsWith('/explorer/stats')
         || p.startsWith('/explorer/holders')
+        || p.startsWith('/explorer/liquidations')
         || p.startsWith('/explorer/token/')
         || p.startsWith('/explorer/e/token/')
     },
@@ -58,7 +59,6 @@
         || p.startsWith('/explorer/event/')
         || p.startsWith('/explorer/e/event/')
         || p.startsWith('/explorer/dex/')
-        || p.startsWith('/explorer/liquidations')
     },
   ];
 
