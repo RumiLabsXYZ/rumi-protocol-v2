@@ -12,6 +12,7 @@
 //   (a) admin burns a stuck balance
 //   (b) non-admin caller is rejected
 //   (c) burn of an empty subaccount returns Ok(0)
+//   (d) burn of a dust balance (<= ledger fee) is a no-op
 
 use candid::{decode_one, encode_args, encode_one, CandidType, Deserialize, Principal};
 use icrc_ledger_types::icrc1::account::Account;
@@ -288,9 +289,6 @@ fn admin_burn_stuck_balance_succeeds() {
         0,
         "subaccount should be empty after burn",
     );
-    // The LEDGER_FEE constant is kept in scope for future expansions of
-    // this test (e.g. dust-amount edge cases below min_burn_amount).
-    let _ = LEDGER_FEE;
 }
 
 /// (b) Non-admin caller is rejected.
@@ -340,5 +338,42 @@ fn admin_burn_empty_subaccount_noop() {
         icusd_balance_of(&env, Some(sub)),
         0,
         "subaccount must remain empty",
+    );
+}
+
+/// (d) Burn of a dust balance (<= ledger fee) is a no-op.
+///
+/// ICRC-1 ledgers enforce `amount >= min_burn_amount` (typically equal
+/// to the transfer fee) on burns, so a balance at or below the fee
+/// cannot be burned cleanly. The endpoint short-circuits to `Ok(0)`
+/// and leaves the dust in place — re-running once the balance grows
+/// past the fee will burn it normally. This test covers the
+/// `balance <= fee` branch that the other tests don't exercise.
+#[test]
+fn admin_burn_dust_balance_below_fee_noop() {
+    let env = setup_burn_env();
+    let pool_id = "dust_pool";
+    let sub = reward_subaccount(pool_id);
+
+    // Seed exactly LEDGER_FEE worth of icUSD: positive balance, but
+    // not strictly greater than the fee, so the burn short-circuits.
+    let dust: u128 = LEDGER_FEE;
+    mint_icusd_to_amm_subaccount(&env, sub, dust);
+    assert_eq!(
+        icusd_balance_of(&env, Some(sub)),
+        dust,
+        "subaccount should hold dust before the no-op call",
+    );
+
+    let burned = call_burn(&env, env.admin, env.icusd_ledger_id, sub.to_vec())
+        .expect("burn of dust balance should be Ok(0) (no-op)");
+    assert_eq!(
+        burned, 0,
+        "dust at-or-below ledger fee must return 0 burned",
+    );
+    assert_eq!(
+        icusd_balance_of(&env, Some(sub)),
+        dust,
+        "dust must stay put — endpoint refuses to attempt an un-burnable transfer",
     );
 }

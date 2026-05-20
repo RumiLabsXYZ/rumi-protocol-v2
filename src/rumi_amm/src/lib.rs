@@ -871,6 +871,10 @@ fn set_protocol_backend_principal(principal: Principal) -> Result<(), AmmError> 
 /// (typical `min_burn_amount`), returns `Ok(0)` (no-op). Otherwise
 /// transfers the full balance to the ledger's minting account and
 /// returns the burned amount on success.
+///
+/// Note: this burns the balance observed at the start of the call. If a
+/// concurrent mint arrives during the inter-canister awaits, the residual
+/// won't be burned — re-run the endpoint to clear it.
 #[update]
 async fn admin_burn_subaccount_balance(
     ledger: Principal,
@@ -881,15 +885,18 @@ async fn admin_burn_subaccount_balance(
 
     caller_is_admin()?;
 
-    // Subaccounts on ICRC-1 are fixed at 32 bytes. InvalidToken is the
-    // closest variant the AMM has for "bad input"; not adding a new
-    // variant keeps this endpoint state-shape-safe (no Candid changes
-    // beyond the new method, no AmmError additions).
+    // Subaccounts on ICRC-1 are fixed at 32 bytes.
     if subaccount.len() != 32 {
-        return Err(AmmError::InvalidToken);
+        return Err(AmmError::InvalidInput {
+            reason: format!("subaccount must be 32 bytes, got {}", subaccount.len()),
+        });
     }
     let mut sub = [0u8; 32];
     sub.copy_from_slice(&subaccount);
+    // Render the subaccount as a 64-char lowercase hex string for the
+    // admin-event audit trail. Avoids pulling in the `hex` crate.
+    let subaccount_hex: String =
+        sub.iter().map(|b| format!("{:02x}", b)).collect();
 
     // 1. Query the canister's balance at the target subaccount.
     let acct = Account {
@@ -902,7 +909,7 @@ async fn admin_burn_subaccount_balance(
         Ok((n,)) => n.0.try_into().unwrap_or(u128::MAX),
         Err((code, msg)) => {
             return Err(AmmError::TransferFailed {
-                token: "icusd".to_string(),
+                token: "icUSD".to_string(),
                 reason: format!(
                     "icrc1_balance_of rejected: {:?} {}",
                     code, msg,
@@ -917,7 +924,7 @@ async fn admin_burn_subaccount_balance(
         Ok((n,)) => n.0.try_into().unwrap_or(u128::MAX),
         Err((code, msg)) => {
             return Err(AmmError::TransferFailed {
-                token: "icusd".to_string(),
+                token: "icUSD".to_string(),
                 reason: format!("icrc1_fee rejected: {:?} {}", code, msg),
             });
         }
@@ -944,13 +951,13 @@ async fn admin_burn_subaccount_balance(
         Ok((Some(a),)) => a,
         Ok((None,)) => {
             return Err(AmmError::TransferFailed {
-                token: "icusd".to_string(),
+                token: "icUSD".to_string(),
                 reason: "ledger has no minting account; cannot burn".to_string(),
             });
         }
         Err((code, msg)) => {
             return Err(AmmError::TransferFailed {
-                token: "icusd".to_string(),
+                token: "icUSD".to_string(),
                 reason: format!(
                     "icrc1_minting_account rejected: {:?} {}",
                     code, msg,
@@ -974,33 +981,60 @@ async fn admin_burn_subaccount_balance(
     let transfer_call: Result<(Result<Nat, TransferError>,), _> =
         ic_cdk::call(ledger, "icrc1_transfer", (args,)).await;
 
+    let caller = ic_cdk::caller();
     match transfer_call {
-        Ok((Ok(_block_index),)) => {
+        Ok((Ok(block_index),)) => {
+            let block_index_u64: u64 = block_index.0.clone().try_into().unwrap_or(u64::MAX);
             log!(
                 INFO,
-                "[admin_burn_subaccount_balance] burned {} from ledger {} subaccount via burn-to-minting-account",
+                "[admin_burn_subaccount_balance] burned {} from ledger {} subaccount via burn-to-minting-account at block {}",
                 amount_to_burn,
                 ledger,
+                block_index_u64,
             );
+            mutate_state(|s| {
+                s.record_admin_event(
+                    caller,
+                    AmmAdminAction::AdminBurnSubaccount {
+                        ledger,
+                        subaccount_hex: subaccount_hex.clone(),
+                        amount_burned: amount_to_burn,
+                        block_index: block_index_u64,
+                    },
+                );
+            });
             Ok(amount_to_burn)
         }
         // A Duplicate from the ledger means the burn already landed at
         // duplicate_of. Treat as success on the canonical amount, matching
         // the pattern used by `transfer_to_user` / `burn_token_on_ledger`.
-        Ok((Err(TransferError::Duplicate { .. }),)) => {
+        Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
+            let block_index_u64: u64 = duplicate_of.0.clone().try_into().unwrap_or(u64::MAX);
             log!(
                 INFO,
-                "[admin_burn_subaccount_balance] burn deduped at ledger {} (previously landed)",
+                "[admin_burn_subaccount_balance] burn deduped at ledger {} (previously landed at block {})",
                 ledger,
+                block_index_u64,
             );
+            mutate_state(|s| {
+                s.record_admin_event(
+                    caller,
+                    AmmAdminAction::AdminBurnSubaccount {
+                        ledger,
+                        subaccount_hex: subaccount_hex.clone(),
+                        amount_burned: amount_to_burn,
+                        block_index: block_index_u64,
+                    },
+                );
+            });
             Ok(amount_to_burn)
         }
         Ok((Err(e),)) => Err(AmmError::TransferFailed {
-            token: "icusd".to_string(),
+            token: "icUSD".to_string(),
             reason: format!("icrc1_transfer error: {:?}", e),
         }),
         Err((code, msg)) => Err(AmmError::TransferFailed {
-            token: "icusd".to_string(),
+            token: "icUSD".to_string(),
             reason: format!("icrc1_transfer call rejected: {:?} {}", code, msg),
         }),
     }
