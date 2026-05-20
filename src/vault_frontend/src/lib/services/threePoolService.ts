@@ -176,14 +176,19 @@ export function calculateApy(
  * @param threePoolShareBps  3pool's share of interest in basis points (e.g. 5000 = 50%)
  * @param perCollateralInterest  Array of { totalDebtE8s, weightedInterestRate } per collateral
  * @param poolTvlIcusd  Total stablecoin balance in the 3pool, in icUSD units (not e8s)
- * @param swapFees7dE8s  Swap fees collected by the 3pool over the trailing 7 days (icUSD e8s)
+ * @param swapFees7dNormalized  Swap fees over the trailing 7 days, in the
+ *   3pool's max-decimal normalized unit (fee * precision_mul). On mainnet
+ *   the pool's precision_muls take 8-dec icUSD (mul=1e10) and 6-dec
+ *   ckUSDT/ckUSDC (mul=1e12) up to a common 18-dec representation, so
+ *   the value here is in 1e18-scaled dollars. Divide by 1e18 to get
+ *   the dollar amount.
  * @returns APY as a decimal (e.g. 0.047 = 4.7%), or null if insufficient data
  */
 export function calculateTotalApy(
   threePoolShareBps: number,
   perCollateralInterest: { totalDebtE8s: number; weightedInterestRate: number }[],
   poolTvlIcusd: number,
-  swapFees7dE8s: bigint,
+  swapFees7dNormalized: bigint,
 ): number | null {
   if (poolTvlIcusd <= 0 || perCollateralInterest.length === 0) return null;
 
@@ -195,7 +200,11 @@ export function calculateTotalApy(
     interestApr += (info.weightedInterestRate * threePoolShare * info.totalDebtE8s) / poolTvlIcusd;
   }
 
-  const fees7dIcusd = Number(swapFees7dE8s) / 1e8;
+  // get_swap_fees_over_window returns fees in the pool's max-decimal
+  // normalized unit (precision_mul-scaled). For mainnet's 8/6/6 decimal
+  // mix that lands at 1e18 scaling. Bigint -> Number is safe because
+  // realistic 7-day fee totals are well under 2^53.
+  const fees7dIcusd = Number(swapFees7dNormalized) / 1e18;
   const swapFeeApr = poolTvlIcusd > 0 ? (fees7dIcusd / poolTvlIcusd) * (365 / 7) : 0;
   const totalApr = interestApr + swapFeeApr;
 
