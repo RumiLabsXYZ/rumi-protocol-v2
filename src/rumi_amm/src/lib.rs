@@ -899,6 +899,12 @@ async fn admin_burn_subaccount_balance(
         sub.iter().map(|b| format!("{:02x}", b)).collect();
 
     // 1. Query the canister's balance at the target subaccount.
+    // Saturation note: ICRC-1 balances are bounded well below u128::MAX in
+    // any realistic scenario (icUSD total supply ~$10^4 e8s as of writing).
+    // Saturating to u128::MAX on overflow is the safer failure mode here:
+    // it would make the `balance <= fee` check below trivially false, so
+    // the transfer attempt itself would surface the impossible value as a
+    // ledger error rather than silently truncating.
     let acct = Account {
         owner: ic_cdk::id(),
         subaccount: Some(sub),
@@ -918,7 +924,7 @@ async fn admin_burn_subaccount_balance(
         }
     };
 
-    // 2. Query the ledger's transfer fee.
+    // 2. Query the ledger's transfer fee. Same saturation rationale as above.
     let fee_call: Result<(Nat,), _> = ic_cdk::call(ledger, "icrc1_fee", ()).await;
     let fee: u128 = match fee_call {
         Ok((n,)) => n.0.try_into().unwrap_or(u128::MAX),
