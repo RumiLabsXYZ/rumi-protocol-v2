@@ -329,6 +329,7 @@ service : (AmmInitArgs) -> {
   resolve_pending_claim : (nat64) -> (variant { Ok; Err : AmmError });
 
   // ── Admin ──
+  admin_burn_subaccount_balance : (principal, blob) -> (variant { Ok : nat; Err : AmmError });
   set_pool_creation_open : (bool) -> (variant { Ok; Err : AmmError });
   set_fee : (text, nat16) -> (variant { Ok; Err : AmmError });
   set_protocol_fee : (text, nat16) -> (variant { Ok; Err : AmmError });

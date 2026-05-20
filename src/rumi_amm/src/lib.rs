@@ -854,6 +854,158 @@ fn set_protocol_backend_principal(principal: Principal) -> Result<(), AmmError> 
     Ok(())
 }
 
+/// Admin recovery endpoint: burn whatever balance the AMM canister holds
+/// at a specific (ledger, subaccount) by transferring it to the ledger's
+/// minting account. ICRC-1 ledgers treat transfers to the minting
+/// account as burns and charge no fee on top.
+///
+/// Built as the recovery path for the 2026-05-19 AMM1 pool_id-mismatch
+/// incident, where `donate_icusd_to_amm1` minted icUSD into the AMM's
+/// `sha256("rumi_amm:rewards:3USD_ICP")` subaccount even though no pool
+/// is keyed off that pool_id (the actual 3USD/ICP pool ID is
+/// `make_pool_id(token_a, token_b)`). The stuck balance is unbacked
+/// icUSD and must be burned, not redirected.
+///
+/// Caller must be admin. `subaccount` must be exactly 32 bytes. If the
+/// canister's balance at the subaccount is at or below the ledger fee
+/// (typical `min_burn_amount`), returns `Ok(0)` (no-op). Otherwise
+/// transfers the full balance to the ledger's minting account and
+/// returns the burned amount on success.
+#[update]
+async fn admin_burn_subaccount_balance(
+    ledger: Principal,
+    subaccount: Vec<u8>,
+) -> Result<u128, AmmError> {
+    use icrc_ledger_types::icrc1::account::Account;
+    use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
+
+    caller_is_admin()?;
+
+    // Subaccounts on ICRC-1 are fixed at 32 bytes. InvalidToken is the
+    // closest variant the AMM has for "bad input"; not adding a new
+    // variant keeps this endpoint state-shape-safe (no Candid changes
+    // beyond the new method, no AmmError additions).
+    if subaccount.len() != 32 {
+        return Err(AmmError::InvalidToken);
+    }
+    let mut sub = [0u8; 32];
+    sub.copy_from_slice(&subaccount);
+
+    // 1. Query the canister's balance at the target subaccount.
+    let acct = Account {
+        owner: ic_cdk::id(),
+        subaccount: Some(sub),
+    };
+    let balance_call: Result<(Nat,), _> =
+        ic_cdk::call(ledger, "icrc1_balance_of", (acct,)).await;
+    let balance: u128 = match balance_call {
+        Ok((n,)) => n.0.try_into().unwrap_or(u128::MAX),
+        Err((code, msg)) => {
+            return Err(AmmError::TransferFailed {
+                token: "icusd".to_string(),
+                reason: format!(
+                    "icrc1_balance_of rejected: {:?} {}",
+                    code, msg,
+                ),
+            });
+        }
+    };
+
+    // 2. Query the ledger's transfer fee.
+    let fee_call: Result<(Nat,), _> = ic_cdk::call(ledger, "icrc1_fee", ()).await;
+    let fee: u128 = match fee_call {
+        Ok((n,)) => n.0.try_into().unwrap_or(u128::MAX),
+        Err((code, msg)) => {
+            return Err(AmmError::TransferFailed {
+                token: "icusd".to_string(),
+                reason: format!("icrc1_fee rejected: {:?} {}", code, msg),
+            });
+        }
+    };
+
+    // 3. No-op if the balance is below `min_burn_amount`. ICRC-1 ledgers
+    // enforce `amount >= min_burn_amount` (typically equal to the transfer
+    // fee) on burns, so a balance at or below the fee cannot be burned.
+    if balance <= fee {
+        log!(
+            INFO,
+            "[admin_burn_subaccount_balance] no-op: balance={} fee={} for ledger {}",
+            balance,
+            fee,
+            ledger,
+        );
+        return Ok(0);
+    }
+
+    // 4. Resolve the ledger's minting account (required to burn).
+    let minting_call: Result<(Option<Account>,), _> =
+        ic_cdk::call(ledger, "icrc1_minting_account", ()).await;
+    let minting_account = match minting_call {
+        Ok((Some(a),)) => a,
+        Ok((None,)) => {
+            return Err(AmmError::TransferFailed {
+                token: "icusd".to_string(),
+                reason: "ledger has no minting account; cannot burn".to_string(),
+            });
+        }
+        Err((code, msg)) => {
+            return Err(AmmError::TransferFailed {
+                token: "icusd".to_string(),
+                reason: format!(
+                    "icrc1_minting_account rejected: {:?} {}",
+                    code, msg,
+                ),
+            });
+        }
+    };
+
+    // 5. Transfer the full balance from {self, sub} to the minting account.
+    // ICRC-1 ledgers treat transfers to the minting account as burns and
+    // charge no fee, so the source subaccount nets to 0.
+    let amount_to_burn = balance;
+    let args = TransferArg {
+        from_subaccount: Some(sub),
+        to: minting_account,
+        amount: Nat::from(amount_to_burn),
+        fee: None,
+        memo: Some(b"amm1_pool_id_recovery_burn".to_vec().into()),
+        created_at_time: Some(ic_cdk::api::time()),
+    };
+    let transfer_call: Result<(Result<Nat, TransferError>,), _> =
+        ic_cdk::call(ledger, "icrc1_transfer", (args,)).await;
+
+    match transfer_call {
+        Ok((Ok(_block_index),)) => {
+            log!(
+                INFO,
+                "[admin_burn_subaccount_balance] burned {} from ledger {} subaccount via burn-to-minting-account",
+                amount_to_burn,
+                ledger,
+            );
+            Ok(amount_to_burn)
+        }
+        // A Duplicate from the ledger means the burn already landed at
+        // duplicate_of. Treat as success on the canonical amount, matching
+        // the pattern used by `transfer_to_user` / `burn_token_on_ledger`.
+        Ok((Err(TransferError::Duplicate { .. }),)) => {
+            log!(
+                INFO,
+                "[admin_burn_subaccount_balance] burn deduped at ledger {} (previously landed)",
+                ledger,
+            );
+            Ok(amount_to_burn)
+        }
+        Ok((Err(e),)) => Err(AmmError::TransferFailed {
+            token: "icusd".to_string(),
+            reason: format!("icrc1_transfer error: {:?}", e),
+        }),
+        Err((code, msg)) => Err(AmmError::TransferFailed {
+            token: "icusd".to_string(),
+            reason: format!("icrc1_transfer call rejected: {:?} {}", code, msg),
+        }),
+    }
+}
+
 /// Receive a reward donation from the protocol backend. The caller is
 /// expected to have already minted `amount` icUSD into this canister's
 /// per-pool reward subaccount before invoking this call. This call
