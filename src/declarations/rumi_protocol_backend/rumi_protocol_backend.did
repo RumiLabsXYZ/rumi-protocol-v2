@@ -802,6 +802,7 @@ service : (ProtocolArg) -> {
   get_all_vaults : () -> (vec CandidVault) query;
   get_borrowing_fee : () -> (float64) query;
   get_bot_allowed_collateral_types : () -> (vec principal) query;
+  get_bot_claim_vault_ids : () -> (vec nat64) query;
   get_bot_stats : () -> (BotStatsResponse) query;
   get_ckstable_repay_fee : () -> (float64) query;
   get_collateral_config : (principal) -> (opt CollateralConfig) query;

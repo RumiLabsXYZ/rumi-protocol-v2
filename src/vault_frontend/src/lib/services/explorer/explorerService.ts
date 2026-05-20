@@ -973,6 +973,29 @@ export async function fetchStuckBotLiquidations(): Promise<LiquidationRecordV1[]
 	}
 }
 
+/**
+ * Vault IDs with an open `BotClaim` on the protocol backend side.
+ *
+ * The bot canister's `get_stuck_liquidations` returns historical records
+ * with `TransferFailed`/`ConfirmFailed` status forever. After Wave-11 BOT-001
+ * (10-min auto-cancel) or `admin_resolve_stuck_claim` clears the protocol-side
+ * claim, the bot record stays — so the "stuck claim" banner should reconcile
+ * against the live protocol set, not the immutable bot log.
+ */
+export async function fetchActiveBotClaimVaultIds(): Promise<Set<bigint>> {
+	const key = 'liquidations:bot:active-claims';
+	const cached = getCached<Set<bigint>>(key, TTL.LIQUIDATIONS);
+	if (cached) return cached;
+	try {
+		const ids = await (publicActor as any).get_bot_claim_vault_ids();
+		const set = new Set<bigint>(Array.from(ids as ArrayLike<bigint>, (v) => BigInt(v)));
+		return setCache(key, set);
+	} catch (err) {
+		console.error('[explorerService] fetchActiveBotClaimVaultIds failed:', err);
+		return new Set();
+	}
+}
+
 // ── Treasury ─────────────────────────────────────────────────────────────────
 
 export async function fetchTreasuryStats(): Promise<any | null> {

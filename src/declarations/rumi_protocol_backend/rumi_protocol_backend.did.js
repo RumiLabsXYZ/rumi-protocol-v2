@@ -932,6 +932,7 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Vec(IDL.Principal)],
         ['query'],
       ),
+    'get_bot_claim_vault_ids' : IDL.Func([], [IDL.Vec(IDL.Nat64)], ['query']),
     'get_bot_stats' : IDL.Func([], [BotStatsResponse], ['query']),
     'get_ckstable_repay_fee' : IDL.Func([], [IDL.Float64], ['query']),
     'get_collateral_config' : IDL.Func(
