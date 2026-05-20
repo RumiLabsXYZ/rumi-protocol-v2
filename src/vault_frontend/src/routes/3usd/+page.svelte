@@ -9,7 +9,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { walletStore } from '../../lib/stores/wallet';
-  import { threePoolService, calculateApy, calculateTheoreticalApy, POOL_TOKENS } from '../../lib/services/threePoolService';
+  import { threePoolService, calculateApy, calculateTotalApy, POOL_TOKENS } from '../../lib/services/threePoolService';
   import { ProtocolService } from '../../lib/services/protocol';
   import { publicActor } from '$lib/services/protocol/apiClient';
   import LiquidityInterface from '../../lib/components/swap/LiquidityInterface.svelte';
@@ -33,11 +33,12 @@
       if (!hasCachedData) loading = true;
       error = '';
 
-      const [status, snapshots, protocolStatus, interestSplit] = await Promise.all([
+      const [status, snapshots, protocolStatus, interestSplit, swapFees7d] = await Promise.all([
         threePoolService.getPoolStatus(),
         threePoolService.getVpSnapshots().catch(() => [] as VirtualPriceSnapshot[]),
         ProtocolService.getProtocolStatus().catch(() => null),
         (publicActor.get_interest_split() as Promise<{ destination: string; bps: bigint }[]>).catch(() => null),
+        threePoolService.getSwapFeesOverWindow(7).catch(() => 0n),
       ]);
       poolStatus = status;
       _poolStatus = status;
@@ -61,10 +62,11 @@
         const threePoolEntry = interestSplit?.find(e => e.destination === 'three_pool');
         const threePoolShareBps = threePoolEntry ? Number(threePoolEntry.bps) : 5000;
 
-        theoreticalApy = calculateTheoreticalApy(
+        theoreticalApy = calculateTotalApy(
           threePoolShareBps,
           protocolStatus.perCollateralInterest,
           poolTvlE8s / 1e8,
+          swapFees7d,
         );
       }
 

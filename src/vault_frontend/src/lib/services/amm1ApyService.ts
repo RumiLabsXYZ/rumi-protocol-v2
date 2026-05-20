@@ -11,10 +11,11 @@
 //     daily DailyRewardPoint records (icUSD e8s).
 //   - rumi_amm exposes `get_amm_tvl_series(pool_id, window_days)` returning
 //     TvlSample records with `tvl_usd_e8s`.
-//   - These three new endpoints are not in the regenerated declarations yet
-//     (the canonical .did has a pre-existing `principal : principal` parser
-//     issue), so we build a small inline IDL fragment with just the methods
-//     this service needs.
+//   - We use an inline IDL fragment for reward methods (`claim_rewards`,
+//     `get_pending_rewards`, reward/tvl series). This was originally added
+//     when those endpoints were missing from the generated declarations; the
+//     declarations now have them, but we keep the inline fragment so this
+//     service is self-contained and resilient to declaration drift.
 
 import { Principal } from '@dfinity/principal';
 import { Actor, HttpAgent, AnonymousIdentity } from '@dfinity/agent';
@@ -59,11 +60,50 @@ interface TvlSample {
 // Constants
 // ──────────────────────────────────────────────────────────────
 
-const POOL_ID = '3USD_ICP';
 const AMM_CANISTER_ID = CANISTER_IDS.RUMI_AMM;
+const THREE_USD_PRINCIPAL = CANISTER_IDS.THREEPOOL;
+const ICP_PRINCIPAL = CANISTER_IDS.ICP_LEDGER;
 const E8S = 1e8;
 const WINDOW_DAYS = 7;
 const APY_CACHE_TTL_MS = 30_000;
+const POOL_ID_CACHE_TTL_MS = 60 * 60 * 1000;
+
+// ──────────────────────────────────────────────────────────────
+// Pool ID resolver (session-cached)
+// ──────────────────────────────────────────────────────────────
+//
+// The AMM stores the 3USD/ICP pool under `make_pool_id(token_a, token_b)`
+// which is `{token_a_principal}_{token_b_principal}`. The frontend used
+// to hardcode '3USD_ICP', which never matched. We resolve the real
+// pool_id at runtime by scanning `get_pools()` for the (3USD, ICP) pair.
+let _poolIdCache: { value: string; expires: number } | null = null;
+
+async function getPoolId(): Promise<string> {
+  if (_poolIdCache && _poolIdCache.expires > Date.now()) {
+    return _poolIdCache.value;
+  }
+  const actor = await getAnonAmmActor();
+  const pools = (await actor.get_pools()) as Array<{
+    pool_id: string;
+    token_a: { toText(): string } | string;
+    token_b: { toText(): string } | string;
+  }>;
+  const principalText = (p: { toText(): string } | string): string =>
+    typeof p === 'string' ? p : p.toText();
+  const match = pools.find(p => {
+    const a = principalText(p.token_a);
+    const b = principalText(p.token_b);
+    return (
+      (a === THREE_USD_PRINCIPAL && b === ICP_PRINCIPAL) ||
+      (a === ICP_PRINCIPAL && b === THREE_USD_PRINCIPAL)
+    );
+  });
+  if (!match) {
+    throw new Error('AMM1 3USD/ICP pool not found via get_pools');
+  }
+  _poolIdCache = { value: match.pool_id, expires: Date.now() + POOL_ID_CACHE_TTL_MS };
+  return match.pool_id;
+}
 
 // ──────────────────────────────────────────────────────────────
 // Inline IDL fragment for endpoints not yet in $declarations/rumi_amm
@@ -257,9 +297,10 @@ async function getWeekPoolStats(): Promise<
   | null
 > {
   try {
+    const poolId = await getPoolId();
     const actor = await getAnonAmmActor();
     const stats = (await actor.get_amm_pool_stats({
-      pool: POOL_ID,
+      pool: poolId,
       window: { Week: null },
     })) as { fees_a_e8s: bigint; fees_b_e8s: bigint };
     return stats;
@@ -271,9 +312,10 @@ async function getWeekPoolStats(): Promise<
 
 async function getRewardSeries(windowDays: number): Promise<DailyRewardPoint[]> {
   try {
+    const poolId = await getPoolId();
     const actor = await getAnonRewardsActor();
     const series = (await actor.get_amm_reward_series(
-      POOL_ID,
+      poolId,
       windowDays,
     )) as DailyRewardPoint[];
     return series;
@@ -285,9 +327,10 @@ async function getRewardSeries(windowDays: number): Promise<DailyRewardPoint[]> 
 
 async function getTvlSeries(windowDays: number): Promise<TvlSample[]> {
   try {
+    const poolId = await getPoolId();
     const actor = await getAnonRewardsActor();
     const series = (await actor.get_amm_tvl_series(
-      POOL_ID,
+      poolId,
       windowDays,
     )) as TvlSample[];
     return series;
@@ -307,8 +350,9 @@ async function getTvlSeries(windowDays: number): Promise<TvlSample[]> {
  */
 export async function getPendingEarnings(principalText: string): Promise<bigint> {
   const principal = Principal.fromText(principalText);
+  const poolId = await getPoolId();
   const actor = await getAnonRewardsActor();
-  return (await actor.get_pending_rewards(POOL_ID, principal)) as bigint;
+  return (await actor.get_pending_rewards(poolId, principal)) as bigint;
 }
 
 /**
@@ -325,6 +369,7 @@ export async function claimAmm1Rewards(): Promise<
     const wallet = get(walletStore);
     if (!wallet.isConnected) return { error: 'Wallet not connected' };
 
+    const poolId = await getPoolId();
     const oisyDetected = isOisyWallet();
 
     if (oisyDetected && wallet.principal) {
@@ -335,7 +380,7 @@ export async function claimAmm1Rewards(): Promise<
         signerAgent,
       );
       signerAgent.batch();
-      const claimPromise = ammActor.claim_rewards(POOL_ID);
+      const claimPromise = ammActor.claim_rewards(poolId);
       await signerAgent.execute();
       const result = (await claimPromise) as
         | { Ok: bigint }
@@ -348,7 +393,7 @@ export async function claimAmm1Rewards(): Promise<
       AMM_CANISTER_ID,
       rewardsIdlFactory,
     )) as any;
-    const result = (await ammActor.claim_rewards(POOL_ID)) as
+    const result = (await ammActor.claim_rewards(poolId)) as
       | { Ok: bigint }
       | { Err: any };
     if ('Err' in result) return { error: formatClaimError(result.Err) };

@@ -1,8 +1,16 @@
 <script lang="ts">
   import { createEventDispatcher, onMount } from 'svelte';
   import { walletStore } from '../../stores/wallet';
-  import { threePoolService, POOL_TOKENS, formatTokenAmount } from '../../services/threePoolService';
+  import {
+    threePoolService,
+    POOL_TOKENS,
+    formatTokenAmount,
+    calculateTotalApy,
+  } from '../../services/threePoolService';
   import { ammService, type PoolInfo } from '../../services/ammService';
+  import { getAmm1Apy, type Amm1ApyResult } from '../../services/amm1ApyService';
+  import { ProtocolService } from '../../services/protocol';
+  import { publicActor } from '../../services/protocol/apiClient';
   import { CANISTER_IDS } from '../../config';
   import type { PoolStatus } from '../../services/threePoolService';
 
@@ -13,6 +21,14 @@
   let userThreePoolLp = 0n;
   let userAmmLp = 0n;
   let loading = true;
+
+  // APY state for both pools (null while loading, number once resolved)
+  let threePoolApyPct: number | null = null;
+  let threePoolInterestAprPct = 0;
+  let threePoolSwapFeeAprPct = 0;
+  let ammApy: Amm1ApyResult | null = null;
+  let showThreePoolTooltip = false;
+  let showAmmTooltip = false;
 
   $: isConnected = $walletStore.isConnected;
 
@@ -46,11 +62,74 @@
         userThreePoolLp = tpLp;
         userAmmLp = ammLpResult ?? 0n;
       }
+
+      // APY queries fire in parallel; never block the cards on them
+      loadThreePoolApy().catch(e => console.warn('3pool APY failed:', e));
+      if (ammPool) {
+        loadAmmApy().catch(e => console.warn('AMM1 APY failed:', e));
+      }
     } catch (e) {
       console.error('Failed to load pool data:', e);
     } finally {
       loading = false;
     }
+  }
+
+  async function loadThreePoolApy() {
+    if (!threePoolStatus) return;
+
+    const [protocolStatus, interestSplit, swapFees7d] = await Promise.all([
+      ProtocolService.getProtocolStatus().catch(() => null),
+      (publicActor.get_interest_split() as Promise<{ destination: string; bps: bigint }[]>).catch(() => null),
+      threePoolService.getSwapFeesOverWindow(7).catch(() => 0n),
+    ]);
+
+    if (!protocolStatus || !threePoolStatus) {
+      threePoolApyPct = 0;
+      return;
+    }
+
+    // TVL in normalized e8s (3pool stores 6/6/8 decimals natively)
+    let poolTvlE8s = 0;
+    for (let i = 0; i < threePoolStatus.balances.length; i++) {
+      const token = POOL_TOKENS[i];
+      if (token) {
+        const normalized = token.decimals === 8
+          ? Number(threePoolStatus.balances[i])
+          : Number(threePoolStatus.balances[i]) * 100;
+        poolTvlE8s += normalized;
+      }
+    }
+    const poolTvlIcusd = poolTvlE8s / 1e8;
+
+    const threePoolEntry = interestSplit?.find(e => e.destination === 'three_pool');
+    const threePoolShareBps = threePoolEntry ? Number(threePoolEntry.bps) : 5000;
+
+    // Break out interest vs swap-fee APR components for the tooltip
+    if (poolTvlIcusd > 0) {
+      const share = threePoolShareBps / 10_000;
+      let interestApr = 0;
+      for (const info of protocolStatus.perCollateralInterest) {
+        if (info.totalDebtE8s === 0 || info.weightedInterestRate === 0) continue;
+        interestApr += (info.weightedInterestRate * share * info.totalDebtE8s) / poolTvlIcusd;
+      }
+      const fees7dIcusd = Number(swapFees7d) / 1e8;
+      const swapFeeApr = (fees7dIcusd / poolTvlIcusd) * (365 / 7);
+      threePoolInterestAprPct = interestApr * 100;
+      threePoolSwapFeeAprPct = swapFeeApr * 100;
+    }
+
+    const apy = calculateTotalApy(
+      threePoolShareBps,
+      protocolStatus.perCollateralInterest,
+      poolTvlIcusd,
+      swapFees7d,
+    );
+    threePoolApyPct = apy !== null ? apy * 100 : 0;
+  }
+
+  async function loadAmmApy() {
+    ammApy = await getAmm1Apy();
   }
 
   function threePoolTvl(): string {
@@ -82,14 +161,41 @@
 {:else}
   <div class="pool-list">
     <button class="pool-card" on:click={() => selectPool('threepool')}>
-      <div class="pool-pair">
-        <div class="pool-dots">
-          {#each POOL_TOKENS as t}
-            <span class="pool-dot" style="background:{t.color}"></span>
-          {/each}
+      <div class="pool-header">
+        <div class="pool-pair">
+          <div class="pool-dots">
+            {#each POOL_TOKENS as t}
+              <span class="pool-dot" style="background:{t.color}"></span>
+            {/each}
+          </div>
+          <span class="pool-name">3pool</span>
+          <span class="pool-tokens">icUSD / ckUSDT / ckUSDC</span>
         </div>
-        <span class="pool-name">3pool</span>
-        <span class="pool-tokens">icUSD / ckUSDT / ckUSDC</span>
+        <!-- svelte-ignore a11y-mouse-events-have-key-events -->
+        <div
+          class="apy-badge"
+          on:mouseover|stopPropagation={() => { showThreePoolTooltip = true; }}
+          on:mouseleave={() => { showThreePoolTooltip = false; }}
+        >
+          {#if threePoolApyPct === null}
+            <span class="apy-loading">… APY</span>
+          {:else}
+            <svg class="apy-arrow" width="9" height="9" viewBox="0 0 10 10" fill="none">
+              <path d="M5 8V2M5 2L2 5M5 2L8 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            {threePoolApyPct.toFixed(1)}% APY
+          {/if}
+
+          {#if showThreePoolTooltip && threePoolApyPct !== null}
+            <div class="apy-tooltip">
+              <div class="apy-tooltip-caret"></div>
+              <p>
+                Interest {threePoolInterestAprPct.toFixed(2)}% + Swap fees {threePoolSwapFeeAprPct.toFixed(2)}%
+                = total {threePoolApyPct.toFixed(2)}%
+              </p>
+            </div>
+          {/if}
+        </div>
       </div>
       <div class="pool-stats">
         <div class="pool-stat">
@@ -112,12 +218,39 @@
 
     {#if ammPool}
       <button class="pool-card" on:click={() => selectPool('amm')}>
-        <div class="pool-pair">
-          <div class="pool-dots">
-            <span class="pool-dot" style="background:#34d399"></span>
-            <span class="pool-dot" style="background:#29abe2"></span>
+        <div class="pool-header">
+          <div class="pool-pair">
+            <div class="pool-dots">
+              <span class="pool-dot" style="background:#34d399"></span>
+              <span class="pool-dot" style="background:#29abe2"></span>
+            </div>
+            <span class="pool-name">3USD / ICP</span>
           </div>
-          <span class="pool-name">3USD / ICP</span>
+          <!-- svelte-ignore a11y-mouse-events-have-key-events -->
+          <div
+            class="apy-badge"
+            on:mouseover|stopPropagation={() => { showAmmTooltip = true; }}
+            on:mouseleave={() => { showAmmTooltip = false; }}
+          >
+            {#if ammApy === null}
+              <span class="apy-loading">… APY</span>
+            {:else}
+              <svg class="apy-arrow" width="9" height="9" viewBox="0 0 10 10" fill="none">
+                <path d="M5 8V2M5 2L2 5M5 2L8 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              {ammApy.total_apy_pct.toFixed(1)}% APY
+            {/if}
+
+            {#if showAmmTooltip && ammApy !== null}
+              <div class="apy-tooltip">
+                <div class="apy-tooltip-caret"></div>
+                <p>
+                  Rewards {ammApy.reward_apy_pct.toFixed(2)}% + Swap fees {ammApy.trading_fee_apy_pct.toFixed(2)}%
+                  = total {ammApy.total_apy_pct.toFixed(2)}%
+                </p>
+              </div>
+            {/if}
+          </div>
         </div>
         <div class="pool-stats">
           <div class="pool-stat">
@@ -143,6 +276,13 @@
         <span class="pool-empty-text">Pool not yet created</span>
       </div>
     {/if}
+
+    <p class="liquidity-explainer">
+      To capture the full combined yield, supply stablecoins (icUSD, ckUSDT, or ckUSDC)
+      to the 3pool — you receive 3USD in return. Pair that 3USD with ICP in 3USD/ICP
+      for a second layer of rewards. Both positions earn protocol interest and swap fees
+      independently.
+    </p>
   </div>
 {/if}
 
@@ -191,10 +331,18 @@
     box-shadow: none;
   }
 
+  .pool-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+
   .pool-pair {
     display: flex;
     align-items: center;
     gap: 0.5rem;
+    min-width: 0;
   }
 
   .pool-dots {
@@ -258,5 +406,77 @@
     font-size: 0.75rem;
     font-weight: 500;
     color: var(--rumi-teal);
+  }
+
+  /* ── APY badge (mirrors /3usd page styling) ── */
+  .apy-badge {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.1875rem 0.625rem;
+    background: rgba(74, 222, 128, 0.1);
+    border: 1px solid rgba(74, 222, 128, 0.3);
+    border-radius: 1rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #4ade80;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .apy-arrow { color: #4ade80; flex-shrink: 0; }
+
+  .apy-loading {
+    color: var(--rumi-text-muted);
+    font-weight: 500;
+  }
+
+  .apy-tooltip {
+    position: absolute;
+    top: calc(100% + 0.5rem);
+    right: 0;
+    z-index: 50;
+    width: 16rem;
+    padding: 0.625rem 0.75rem;
+    background: #1e293b;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 0.5rem;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    font-size: 0.6875rem;
+    font-weight: 400;
+    line-height: 1.5;
+    color: #cbd5e1;
+    text-align: left;
+    white-space: normal;
+    animation: tooltipFade 0.15s ease-out;
+  }
+
+  @keyframes tooltipFade {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .apy-tooltip-caret {
+    position: absolute;
+    top: -5px;
+    right: 0.875rem;
+    transform: rotate(45deg);
+    width: 10px;
+    height: 10px;
+    background: #1e293b;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    border-left: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .apy-tooltip p { margin: 0; }
+
+  /* ── Explainer under the cards ── */
+  .liquidity-explainer {
+    margin: 0.5rem 0 0;
+    max-width: 60ch;
+    font-size: 0.75rem;
+    line-height: 1.6;
+    color: var(--rumi-text-muted);
   }
 </style>
