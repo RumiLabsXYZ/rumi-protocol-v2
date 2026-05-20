@@ -2955,6 +2955,20 @@ fn get_bot_stats() -> BotStatsResponse {
     })
 }
 
+/// Vault IDs with an open `BotClaim` on the protocol side.
+///
+/// Used by the explorer to reconcile the liquidation_bot's
+/// `get_stuck_liquidations` (a permanent history log) against the protocol's
+/// live claim set. A record can be `TransferFailed`/`ConfirmFailed` in the
+/// bot's log forever, but if the matching vault is no longer in `bot_claims`
+/// (e.g. resolved by Wave-11 BOT-001 auto-cancel or `admin_resolve_stuck_claim`),
+/// the explorer should not flag it as awaiting admin action.
+#[candid_method(query)]
+#[query]
+fn get_bot_claim_vault_ids() -> Vec<u64> {
+    read_state(|s| s.bot_claims.keys().copied().collect())
+}
+
 /// Admin-only: force-resolve a stuck bot claim. Used when the bot's ckUSDC transfer
 /// or confirm failed and the vault is stuck with bot_processing=true.
 ///

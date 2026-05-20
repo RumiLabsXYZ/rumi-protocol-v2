@@ -4,6 +4,7 @@
     fetchBotLiquidations,
     fetchBotLiquidationCount,
     fetchStuckBotLiquidations,
+    fetchActiveBotClaimVaultIds,
   } from '$services/explorer/explorerService';
   import type { LiquidationRecordV1, LiquidationStatus } from '$declarations/liquidation_bot/liquidation_bot.did';
   import LoadingSpinner from '../common/LoadingSpinner.svelte';
@@ -116,13 +117,19 @@
     try {
       loading = true;
       error = '';
-      const [first, stuck] = await Promise.all([
+      const [first, stuck, activeClaims] = await Promise.all([
         fetchBotLiquidations(0, pageSize),
         fetchStuckBotLiquidations(),
+        fetchActiveBotClaimVaultIds(),
       ]);
       records = first.records;
       total = first.total;
-      stuckRecords = stuck;
+      // The bot's `get_stuck_liquidations` is its permanent history of
+      // failed records, but the protocol-side claim may have since been
+      // resolved (Wave-11 BOT-001 auto-cancel, or `admin_resolve_stuck_claim`).
+      // Only surface records whose vault is still in the protocol's
+      // active claim set so the banner reflects actionable items.
+      stuckRecords = stuck.filter((r) => activeClaims.has(BigInt(r.vault_id)));
       loadedPages = 1;
     } catch (err: any) {
       console.error('[BotLiquidationsTable] load failed:', err);

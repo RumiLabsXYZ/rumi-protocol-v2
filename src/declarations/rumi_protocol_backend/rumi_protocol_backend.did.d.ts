@@ -964,6 +964,7 @@ export interface _SERVICE {
   'get_all_vaults' : ActorMethod<[], Array<CandidVault>>,
   'get_borrowing_fee' : ActorMethod<[], number>,
   'get_bot_allowed_collateral_types' : ActorMethod<[], Array<Principal>>,
+  'get_bot_claim_vault_ids' : ActorMethod<[], BigUint64Array | bigint[]>,
   'get_bot_stats' : ActorMethod<[], BotStatsResponse>,
   'get_ckstable_repay_fee' : ActorMethod<[], number>,
   'get_collateral_config' : ActorMethod<[Principal], [] | [CollateralConfig]>,
