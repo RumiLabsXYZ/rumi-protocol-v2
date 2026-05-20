@@ -28,10 +28,19 @@ export type AmmAdminAction = { 'SetPoolCreationOpen' : { 'open' : boolean } } |
       'pool_id' : string,
     }
   } |
+  { 'SetProtocolBackendPrincipal' : { 'backend' : Principal } } |
   { 'SetProtocolFee' : { 'pool_id' : string, 'protocol_fee_bps' : number } } |
   { 'SetFee' : { 'fee_bps' : number, 'pool_id' : string } } |
   { 'SetMaintenanceMode' : { 'enabled' : boolean } } |
   { 'UnpausePool' : { 'pool_id' : string } } |
+  {
+    'AdminBurnSubaccount' : {
+      'amount_burned' : bigint,
+      'subaccount_hex' : string,
+      'block_index' : bigint,
+      'ledger' : Principal,
+    }
+  } |
   { 'PausePool' : { 'pool_id' : string } } |
   { 'ResolvePendingClaim' : { 'claim_id' : bigint } };
 export interface AmmAdminEvent {
@@ -53,6 +62,7 @@ export type AmmError = {
   } |
   { 'PoolPaused' : null } |
   { 'PoolCreationClosed' : null } |
+  { 'InvalidInput' : { 'reason' : string } } |
   { 'PoolNotFound' : null } |
   { 'ZeroAmount' : null } |
   { 'DisproportionateLiquidity' : null } |
@@ -182,6 +192,7 @@ export interface CreatePoolArgs {
   'fee_bps' : number,
 }
 export type CurveType = { 'ConstantProduct' : null };
+export interface DailyRewardPoint { 'amount' : bigint, 'day_start_ns' : bigint }
 export type DeviceSpec = { 'GenericDisplay' : null } |
   {
     'LineDisplay' : {
@@ -248,9 +259,26 @@ export interface PoolInfo {
 }
 export interface StandardRecord { 'url' : string, 'name' : string }
 export interface SwapResult { 'fee' : bigint, 'amount_out' : bigint }
+export interface TvlSample {
+  'tvl_usd_e8s' : bigint,
+  'price_a_e8s' : bigint,
+  'reserve_a' : bigint,
+  'reserve_b' : bigint,
+  'timestamp' : bigint,
+  'price_b_e8s' : bigint,
+  'pool_id' : string,
+}
 export interface _SERVICE {
   'add_liquidity' : ActorMethod<
     [string, bigint, bigint, bigint],
+    { 'Ok' : bigint } |
+      { 'Err' : AmmError }
+  >,
+  /**
+   * ── Admin ──
+   */
+  'admin_burn_subaccount_balance' : ActorMethod<
+    [Principal, Uint8Array | number[]],
     { 'Ok' : bigint } |
       { 'Err' : AmmError }
   >,
@@ -260,6 +288,11 @@ export interface _SERVICE {
   'claim_pending' : ActorMethod<
     [bigint],
     { 'Ok' : null } |
+      { 'Err' : AmmError }
+  >,
+  'claim_rewards' : ActorMethod<
+    [string],
+    { 'Ok' : bigint } |
       { 'Err' : AmmError }
   >,
   /**
@@ -293,6 +326,10 @@ export interface _SERVICE {
     Array<AmmLiquidityEvent>
   >,
   'get_amm_pool_stats' : ActorMethod<[AmmStatsQuery], AmmPoolStats>,
+  'get_amm_reward_series' : ActorMethod<
+    [string, number],
+    Array<DailyRewardPoint>
+  >,
   'get_amm_swap_event_count' : ActorMethod<[], bigint>,
   /**
    * ── Swap Event History ──
@@ -314,6 +351,7 @@ export interface _SERVICE {
     [AmmTopSwappersQuery],
     Array<[Principal, bigint, bigint]>
   >,
+  'get_amm_tvl_series' : ActorMethod<[string, number], Array<TvlSample>>,
   /**
    * ── Analytics (parity with rumi_3pool) ──
    */
@@ -332,6 +370,7 @@ export interface _SERVICE {
   'get_latest_holder_snapshot' : ActorMethod<[string], [] | [HolderSnapshot]>,
   'get_lp_balance' : ActorMethod<[string, Principal], bigint>,
   'get_pending_claims' : ActorMethod<[], Array<PendingClaim>>,
+  'get_pending_rewards' : ActorMethod<[string, Principal], bigint>,
   /**
    * ── Queries ──
    */
@@ -362,6 +401,11 @@ export interface _SERVICE {
   'icrc28_trusted_origins' : ActorMethod<[], Icrc28TrustedOriginsResponse>,
   'is_maintenance_mode' : ActorMethod<[], boolean>,
   'is_pool_creation_open' : ActorMethod<[], boolean>,
+  'notify_reward_received' : ActorMethod<
+    [string, bigint, bigint],
+    { 'Ok' : null } |
+      { 'Err' : AmmError }
+  >,
   'pause_pool' : ActorMethod<[string], { 'Ok' : null } | { 'Err' : AmmError }>,
   'remove_liquidity' : ActorMethod<
     [string, bigint, bigint, bigint],
@@ -388,11 +432,13 @@ export interface _SERVICE {
     { 'Ok' : null } |
       { 'Err' : AmmError }
   >,
-  /**
-   * ── Admin ──
-   */
   'set_pool_creation_open' : ActorMethod<
     [boolean],
+    { 'Ok' : null } |
+      { 'Err' : AmmError }
+  >,
+  'set_protocol_backend_principal' : ActorMethod<
+    [Principal],
     { 'Ok' : null } |
       { 'Err' : AmmError }
   >,

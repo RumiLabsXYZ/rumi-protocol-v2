@@ -32,6 +32,7 @@ export const idlFactory = ({ IDL }) => {
       'required' : IDL.Nat,
     }),
     'BurnFailed' : IDL.Record({ 'token' : IDL.Text, 'reason' : IDL.Text }),
+    'PoolLocked' : IDL.Null,
     'MathOverflow' : IDL.Null,
     'Unauthorized' : IDL.Null,
     'InvariantNotConverged' : IDL.Null,
@@ -39,7 +40,6 @@ export const idlFactory = ({ IDL }) => {
     'TransferFailed' : IDL.Record({ 'token' : IDL.Text, 'reason' : IDL.Text }),
     'SlippageExceeded' : IDL.Null,
     'PoolEmpty' : IDL.Null,
-    'PoolLocked' : IDL.Null,
     'InsufficientPoolBalance' : IDL.Record({
       'token' : IDL.Text,
       'available' : IDL.Nat,
@@ -554,6 +554,7 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Vec(SwapEventV2)],
         ['query'],
       ),
+    'get_swap_fees_over_window' : IDL.Func([IDL.Nat32], [IDL.Nat], ['query']),
     'get_top_lps' : IDL.Func(
         [IDL.Nat64],
         [IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat, IDL.Nat32))],

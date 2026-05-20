@@ -319,6 +319,7 @@ export type ThreePoolError = {
   { 'ZeroAmount' : null } |
   { 'InsufficientLpBalance' : { 'available' : bigint, 'required' : bigint } } |
   { 'BurnFailed' : { 'token' : string, 'reason' : string } } |
+  { 'PoolLocked' : null } |
   { 'MathOverflow' : null } |
   { 'Unauthorized' : null } |
   { 'InvariantNotConverged' : null } |
@@ -326,7 +327,6 @@ export type ThreePoolError = {
   { 'TransferFailed' : { 'token' : string, 'reason' : string } } |
   { 'SlippageExceeded' : null } |
   { 'PoolEmpty' : null } |
-  { 'PoolLocked' : null } |
   {
     'InsufficientPoolBalance' : {
       'token' : string,
@@ -489,6 +489,7 @@ export interface _SERVICE {
     Array<SwapEventV2>
   >,
   'get_swap_events_v2' : ActorMethod<[bigint, bigint], Array<SwapEventV2>>,
+  'get_swap_fees_over_window' : ActorMethod<[number], bigint>,
   'get_top_lps' : ActorMethod<[bigint], Array<[Principal, bigint, number]>>,
   'get_top_swappers' : ActorMethod<
     [StatsWindow, bigint],

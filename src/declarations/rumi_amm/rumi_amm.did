@@ -139,6 +139,13 @@ type AmmAdminAction = variant {
   SetMaintenanceMode : record { enabled : bool };
   ClaimPending : record { claim_id : nat64; claimant : principal; amount : nat };
   ResolvePendingClaim : record { claim_id : nat64 };
+  SetProtocolBackendPrincipal : record { backend : principal };
+  AdminBurnSubaccount : record {
+    ledger : principal;
+    subaccount_hex : text;
+    amount_burned : nat;
+    block_index : nat64;
+  };
 };
 
 type AmmAdminEvent = record {
@@ -168,6 +175,7 @@ type AmmError = variant {
   MaintenanceMode;
   ClaimNotFound;
   PoolBusy;
+  InvalidInput : record { reason : text };
 };
 
 // ── Holder Snapshots ──
@@ -263,6 +271,21 @@ type AmmPoolStats = record {
   generated_at_ns : nat64;
 };
 
+type DailyRewardPoint = record {
+  day_start_ns : nat64;
+  amount : nat;
+};
+
+type TvlSample = record {
+  pool_id : text;
+  timestamp : nat64;
+  reserve_a : nat;
+  reserve_b : nat;
+  price_a_e8s : nat;
+  price_b_e8s : nat;
+  tvl_usd_e8s : nat;
+};
+
 // ── HTTP Request ──
 
 type HeaderField = record { text; text };
@@ -299,6 +322,10 @@ service : (AmmInitArgs) -> {
   is_maintenance_mode : () -> (bool) query;
   set_admin : (principal) -> (variant { Ok; Err : AmmError });
   set_maintenance_mode : (bool) -> (variant { Ok; Err : AmmError });
+  set_protocol_backend_principal : (principal) -> (variant { Ok; Err : AmmError });
+  notify_reward_received : (text, nat, nat64) -> (variant { Ok; Err : AmmError });
+  claim_rewards : (text) -> (variant { Ok : nat; Err : AmmError });
+  get_pending_rewards : (text, principal) -> (nat) query;
 
   // ── Pool Creation (permissionless when open, otherwise admin-only) ──
   create_pool : (CreatePoolArgs) -> (variant { Ok : text; Err : AmmError });
@@ -309,6 +336,7 @@ service : (AmmInitArgs) -> {
   resolve_pending_claim : (nat64) -> (variant { Ok; Err : AmmError });
 
   // ── Admin ──
+  admin_burn_subaccount_balance : (principal, blob) -> (variant { Ok : nat; Err : AmmError });
   set_pool_creation_open : (bool) -> (variant { Ok; Err : AmmError });
   set_fee : (text, nat16) -> (variant { Ok; Err : AmmError });
   set_protocol_fee : (text, nat16) -> (variant { Ok; Err : AmmError });
@@ -343,6 +371,8 @@ service : (AmmInitArgs) -> {
   get_amm_swap_events_by_principal : (AmmEventsByPrincipalQuery) -> (vec AmmSwapEvent) query;
   get_amm_liquidity_events_by_principal : (AmmEventsByPrincipalQuery) -> (vec AmmLiquidityEvent) query;
   get_amm_swap_events_by_time_range : (AmmEventsByTimeRangeQuery) -> (vec AmmSwapEvent) query;
+  get_amm_reward_series : (text, nat32) -> (vec DailyRewardPoint) query;
+  get_amm_tvl_series : (text, nat32) -> (vec TvlSample) query;
 
   // ── HTTP ──
   http_request : (HttpRequest) -> (HttpResponse) query;

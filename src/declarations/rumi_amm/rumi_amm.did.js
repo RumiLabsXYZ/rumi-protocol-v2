@@ -7,6 +7,7 @@ export const idlFactory = ({ IDL }) => {
     }),
     'PoolPaused' : IDL.Null,
     'PoolCreationClosed' : IDL.Null,
+    'InvalidInput' : IDL.Record({ 'reason' : IDL.Text }),
     'PoolNotFound' : IDL.Null,
     'ZeroAmount' : IDL.Null,
     'DisproportionateLiquidity' : IDL.Null,
@@ -50,6 +51,7 @@ export const idlFactory = ({ IDL }) => {
       'fee_bps' : IDL.Nat16,
       'pool_id' : IDL.Text,
     }),
+    'SetProtocolBackendPrincipal' : IDL.Record({ 'backend' : IDL.Principal }),
     'SetProtocolFee' : IDL.Record({
       'pool_id' : IDL.Text,
       'protocol_fee_bps' : IDL.Nat16,
@@ -57,6 +59,12 @@ export const idlFactory = ({ IDL }) => {
     'SetFee' : IDL.Record({ 'fee_bps' : IDL.Nat16, 'pool_id' : IDL.Text }),
     'SetMaintenanceMode' : IDL.Record({ 'enabled' : IDL.Bool }),
     'UnpausePool' : IDL.Record({ 'pool_id' : IDL.Text }),
+    'AdminBurnSubaccount' : IDL.Record({
+      'amount_burned' : IDL.Nat,
+      'subaccount_hex' : IDL.Text,
+      'block_index' : IDL.Nat64,
+      'ledger' : IDL.Principal,
+    }),
     'PausePool' : IDL.Record({ 'pool_id' : IDL.Text }),
     'ResolvePendingClaim' : IDL.Record({ 'claim_id' : IDL.Nat64 }),
   });
@@ -126,6 +134,10 @@ export const idlFactory = ({ IDL }) => {
     'fees_b_e8s' : IDL.Nat,
     'unique_swappers' : IDL.Nat32,
   });
+  const DailyRewardPoint = IDL.Record({
+    'amount' : IDL.Nat,
+    'day_start_ns' : IDL.Nat64,
+  });
   const AmmSwapEvent = IDL.Record({
     'id' : IDL.Nat64,
     'fee' : IDL.Nat,
@@ -148,6 +160,15 @@ export const idlFactory = ({ IDL }) => {
     'pool' : IDL.Text,
     'window' : AmmStatsWindow,
     'limit' : IDL.Nat32,
+  });
+  const TvlSample = IDL.Record({
+    'tvl_usd_e8s' : IDL.Nat,
+    'price_a_e8s' : IDL.Nat,
+    'reserve_a' : IDL.Nat,
+    'reserve_b' : IDL.Nat,
+    'timestamp' : IDL.Nat64,
+    'price_b_e8s' : IDL.Nat,
+    'pool_id' : IDL.Text,
   });
   const AmmVolumePoint = IDL.Record({
     'ts_ns' : IDL.Nat64,
@@ -248,9 +269,19 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Nat, 'Err' : AmmError })],
         [],
       ),
+    'admin_burn_subaccount_balance' : IDL.Func(
+        [IDL.Principal, IDL.Vec(IDL.Nat8)],
+        [IDL.Variant({ 'Ok' : IDL.Nat, 'Err' : AmmError })],
+        [],
+      ),
     'claim_pending' : IDL.Func(
         [IDL.Nat64],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : AmmError })],
+        [],
+      ),
+    'claim_rewards' : IDL.Func(
+        [IDL.Text],
+        [IDL.Variant({ 'Ok' : IDL.Nat, 'Err' : AmmError })],
         [],
       ),
     'create_pool' : IDL.Func(
@@ -286,6 +317,11 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'get_amm_pool_stats' : IDL.Func([AmmStatsQuery], [AmmPoolStats], ['query']),
+    'get_amm_reward_series' : IDL.Func(
+        [IDL.Text, IDL.Nat32],
+        [IDL.Vec(DailyRewardPoint)],
+        ['query'],
+      ),
     'get_amm_swap_event_count' : IDL.Func([], [IDL.Nat64], ['query']),
     'get_amm_swap_events' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
@@ -312,6 +348,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64, IDL.Nat))],
         ['query'],
       ),
+    'get_amm_tvl_series' : IDL.Func(
+        [IDL.Text, IDL.Nat32],
+        [IDL.Vec(TvlSample)],
+        ['query'],
+      ),
     'get_amm_volume_series' : IDL.Func(
         [AmmSeriesQuery],
         [IDL.Vec(AmmVolumePoint)],
@@ -334,6 +375,11 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'get_pending_claims' : IDL.Func([], [IDL.Vec(PendingClaim)], ['query']),
+    'get_pending_rewards' : IDL.Func(
+        [IDL.Text, IDL.Principal],
+        [IDL.Nat],
+        ['query'],
+      ),
     'get_pool' : IDL.Func([IDL.Text], [IDL.Opt(PoolInfo)], ['query']),
     'get_pools' : IDL.Func([], [IDL.Vec(PoolInfo)], ['query']),
     'get_quote' : IDL.Func(
@@ -360,6 +406,11 @@ export const idlFactory = ({ IDL }) => {
       ),
     'is_maintenance_mode' : IDL.Func([], [IDL.Bool], ['query']),
     'is_pool_creation_open' : IDL.Func([], [IDL.Bool], ['query']),
+    'notify_reward_received' : IDL.Func(
+        [IDL.Text, IDL.Nat, IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : AmmError })],
+        [],
+      ),
     'pause_pool' : IDL.Func(
         [IDL.Text],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : AmmError })],
@@ -392,6 +443,11 @@ export const idlFactory = ({ IDL }) => {
       ),
     'set_pool_creation_open' : IDL.Func(
         [IDL.Bool],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : AmmError })],
+        [],
+      ),
+    'set_protocol_backend_principal' : IDL.Func(
+        [IDL.Principal],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : AmmError })],
         [],
       ),

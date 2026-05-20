@@ -55,6 +55,7 @@ export interface CollateralConfig {
   'min_vault_debt' : bigint,
   'rate_curve' : [] | [RateCurve],
   'recovery_borrowing_fee' : [] | [Uint8Array | number[]],
+  'min_xrc_sources' : [] | [number],
   'min_collateral_deposit' : bigint,
   'last_price' : [] | [number],
   'last_price_timestamp' : [] | [bigint],
@@ -146,6 +147,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'amount' : bigint,
     }
   } |
+  { 'set_bot_cr_tolerance_bps' : { 'bps' : bigint } } |
   {
     'collateral_withdrawn' : {
       'block_index' : bigint,
@@ -180,6 +182,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     }
   } |
   { 'set_rmr_ceiling_cr' : { 'value' : string } } |
+  { 'set_amm1_canister' : { 'canister' : Principal } } |
   { 'set_recovery_rate_curve' : { 'markers' : string } } |
   { 'set_ckstable_repay_fee' : { 'rate' : string } } |
   { 'set_treasury_principal' : { 'principal' : Principal } } |
@@ -222,6 +225,12 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'vault_id' : bigint,
       'timestamp' : bigint,
       'observed_balance' : bigint,
+    }
+  } |
+  {
+    'oracle_circuit_breaker' : {
+      'timestamp' : bigint,
+      'consecutive_failures' : bigint,
     }
   } |
   {
@@ -306,6 +315,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'liquidation_bonus' : string,
     }
   } |
+  { 'set_amm1_pool_id' : { 'pool_id' : string } } |
   {
     'set_global_icusd_mint_cap' : {
       'cap' : [] | [string],
@@ -368,6 +378,14 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     }
   } |
   {
+    'stability_pool_call_failed' : {
+      'reject_message' : string,
+      'vault_ids' : BigUint64Array | bigint[],
+      'reject_code' : number,
+      'timestamp' : bigint,
+    }
+  } |
+  {
     'set_rate_curve_markers' : {
       'markers' : string,
       'collateral_type' : [] | [string],
@@ -405,6 +423,14 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'timestamp' : [] | [bigint],
       'caller' : Principal,
       'amount' : bigint,
+    }
+  } |
+  {
+    'oracle_source_count_insufficient' : {
+      'num_sources' : number,
+      'min_required' : number,
+      'timestamp' : bigint,
+      'collateral_type' : Principal,
     }
   } |
   {
@@ -480,6 +506,12 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'margin_added' : bigint,
     }
   } |
+  {
+    'set_collateral_min_xrc_sources' : {
+      'min_xrc_sources' : [] | [number],
+      'collateral_type' : Principal,
+    }
+  } |
   { 'set_stability_pool_principal' : { 'principal' : Principal } } |
   { 'set_interest_split' : { 'split' : string } } |
   { 'set_icpswap_routing_enabled' : { 'enabled' : boolean } } |
@@ -552,26 +584,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'token_type' : StableTokenType,
     }
   } |
-  { 'set_recovery_cr_multiplier' : { 'multiplier' : string } } |
-  { 'stability_pool_call_failed' : {
-      'vault_ids' : Array<bigint>,
-      'reject_code' : number,
-      'reject_message' : string,
-      'timestamp' : bigint,
-    }
-  } |
-  { 'oracle_circuit_breaker' : {
-      'consecutive_failures' : bigint,
-      'timestamp' : bigint,
-    }
-  } |
-  { 'oracle_source_count_insufficient' : {
-      'collateral_type' : Principal,
-      'num_sources' : number,
-      'min_required' : number,
-      'timestamp' : bigint,
-    }
-  };
+  { 'set_recovery_cr_multiplier' : { 'multiplier' : string } };
 export interface EventTimeRange { 'start_ns' : bigint, 'end_ns' : bigint }
 export type EventTypeFilter = { 'BreakerTripped' : null } |
   { 'StabilityPoolDeposit' : null } |
@@ -723,6 +736,7 @@ export interface ProtocolConfig {
   'treasury_principal' : [] | [Principal],
   'rmr_ceiling_cr' : number,
   'frozen' : boolean,
+  'bot_cr_tolerance_bps' : bigint,
   'icpswap_routing_enabled' : boolean,
   'ckusdc_enabled' : boolean,
   'ckusdt_enabled' : boolean,
@@ -787,6 +801,7 @@ export interface ProtocolStatus {
   'breaker_window_debt_ceiling_e8s' : bigint,
   'last_icp_rate' : number,
 }
+export interface ProtocolStatusLite { 'price_e8s' : bigint }
 export interface RateCurve {
   'method' : InterpolationMethod,
   'markers' : Array<RateMarker>,
@@ -962,9 +977,12 @@ export interface _SERVICE {
   'exit_recovery_mode' : ActorMethod<[], Result>,
   'freeze_protocol' : ActorMethod<[], Result>,
   'get_all_vaults' : ActorMethod<[], Array<CandidVault>>,
+  'get_amm1_canister' : ActorMethod<[], [] | [Principal]>,
+  'get_amm1_pool_id' : ActorMethod<[], [] | [string]>,
   'get_borrowing_fee' : ActorMethod<[], number>,
   'get_bot_allowed_collateral_types' : ActorMethod<[], Array<Principal>>,
   'get_bot_claim_vault_ids' : ActorMethod<[], BigUint64Array | bigint[]>,
+  'get_bot_cr_tolerance_bps' : ActorMethod<[], bigint>,
   'get_bot_stats' : ActorMethod<[], BotStatsResponse>,
   'get_ckstable_repay_fee' : ActorMethod<[], number>,
   'get_collateral_config' : ActorMethod<[Principal], [] | [CollateralConfig]>,
@@ -992,6 +1010,7 @@ export interface _SERVICE {
   'get_fees' : ActorMethod<[bigint], Fees>,
   'get_fees_for_collateral' : ActorMethod<[Principal, bigint], Fees>,
   'get_global_icusd_mint_cap' : ActorMethod<[], bigint>,
+  'get_icp_usd_price_e8s' : ActorMethod<[], ProtocolStatusLite>,
   'get_icpswap_routing_enabled' : ActorMethod<[], boolean>,
   'get_interest_pool_share' : ActorMethod<[], number>,
   'get_interest_split' : ActorMethod<[], Array<InterestSplitArg>>,
@@ -1006,6 +1025,7 @@ export interface _SERVICE {
   'get_liquidation_protocol_share' : ActorMethod<[], number>,
   'get_liquidity_status' : ActorMethod<[Principal], LiquidityStatus>,
   'get_min_icusd_amount' : ActorMethod<[], bigint>,
+  'get_pending_amm1_donations_count' : ActorMethod<[], bigint>,
   'get_protocol_3usd_reserves' : ActorMethod<[], bigint>,
   'get_protocol_config' : ActorMethod<[], ProtocolConfig>,
   'get_protocol_snapshots' : ActorMethod<
@@ -1076,11 +1096,16 @@ export interface _SERVICE {
   'repay_to_vault' : ActorMethod<[VaultArg], Result_1>,
   'repay_to_vault_with_stable' : ActorMethod<[VaultArgWithToken], Result_1>,
   'reset_bot_budget' : ActorMethod<[bigint], Result>,
+  'set_amm1_canister' : ActorMethod<[Principal], Result>,
+  'set_amm1_pool_id' : ActorMethod<[string], Result>,
   'set_borrowing_fee' : ActorMethod<[number], Result>,
   'set_borrowing_fee_curve' : ActorMethod<[[] | [string]], Result>,
   'set_bot_allowed_collateral_types' : ActorMethod<[Array<Principal>], Result>,
+  'set_bot_cr_tolerance_bps' : ActorMethod<[bigint], Result>,
   'set_breaker_window_debt_ceiling_e8s' : ActorMethod<[bigint], Result>,
   'set_breaker_window_ns' : ActorMethod<[bigint], Result>,
+  'set_check_vaults_alert_band_bps' : ActorMethod<[bigint], Result>,
+  'set_check_vaults_full_sweep_every_n_ticks' : ActorMethod<[bigint], Result>,
   'set_ckstable_repay_fee' : ActorMethod<[number], Result>,
   'set_collateral_borrow_threshold' : ActorMethod<[Principal, number], Result>,
   'set_collateral_borrowing_fee' : ActorMethod<[Principal, number], Result>,
@@ -1094,6 +1119,10 @@ export interface _SERVICE {
   'set_collateral_liquidation_ratio' : ActorMethod<[Principal, number], Result>,
   'set_collateral_min_deposit' : ActorMethod<[Principal, bigint], Result>,
   'set_collateral_min_vault_debt' : ActorMethod<[Principal, bigint], Result>,
+  'set_collateral_min_xrc_sources' : ActorMethod<
+    [Principal, [] | [number]],
+    Result
+  >,
   'set_collateral_redemption_fee_ceiling' : ActorMethod<
     [Principal, number],
     Result
