@@ -571,7 +571,13 @@ async fn donate_icusd_to_amm1(
     amount_e8s: u64,
     nonce: u64,
 ) -> Result<(), u64> {
-    let pool_id = "3USD_ICP".to_string();
+    let pool_id = match crate::state::read_state(|s| s.amm1_pool_id.clone()) {
+        Some(p) => p,
+        None => {
+            log!(INFO, "[treasury] AMM1 pool_id not configured; refusing to donate {} icUSD (nonce {})", amount_e8s, nonce);
+            return Err(amount_e8s);
+        }
+    };
     let donate_amount_u128 = amount_e8s as u128;
 
     // Compute the AMM's reward subaccount client-side.

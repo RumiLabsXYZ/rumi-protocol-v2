@@ -338,6 +338,7 @@ type Event = variant {
   };
   set_three_pool_canister : record { canister : principal };
   set_amm1_canister : record { canister : principal };
+  set_amm1_pool_id : record { pool_id : text };
   set_liquidation_bonus : record { rate : text };
   reserve_redemption : record {
     icusd_amount : nat64;
@@ -870,6 +871,8 @@ service : (ProtocolArg) -> {
     ) query;
   get_three_pool_canister : () -> (opt principal) query;
   get_amm1_canister : () -> (opt principal) query;
+  get_amm1_pool_id : () -> (opt text) query;
+  get_pending_amm1_donations_count : () -> (nat64) query;
   get_icp_usd_price_e8s : () -> (ProtocolStatusLite) query;
   get_treasury_principal : () -> (opt principal) query;
   get_treasury_stats : () -> (TreasuryStats) query;
@@ -963,6 +966,7 @@ service : (ProtocolArg) -> {
   set_stable_token_enabled : (StableTokenType, bool) -> (Result);
   set_three_pool_canister : (principal) -> (Result);
   set_amm1_canister : (principal) -> (Result);
+  set_amm1_pool_id : (text) -> (Result);
   set_treasury_principal : (principal) -> (Result);
   set_vault_check_tick_interval_secs : (nat64) -> (Result);
   set_xrc_fetch_interval_secs : (nat64) -> (Result);

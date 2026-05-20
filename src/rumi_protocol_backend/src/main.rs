@@ -4229,6 +4229,45 @@ fn get_amm1_canister() -> Option<Principal> {
     read_state(|s| s.amm1_canister)
 }
 
+/// Set the canonical AMM1 pool_id used by `donate_icusd_to_amm1`.
+/// Must match the AMM's `make_pool_id(token_a, token_b)` output exactly.
+/// Developer-only.
+#[candid_method(update)]
+#[update]
+async fn set_amm1_pool_id(pool_id: String) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set AMM1 pool_id".to_string(),
+        ));
+    }
+    if pool_id.is_empty() || pool_id.len() > 256 {
+        return Err(ProtocolError::GenericError(
+            "pool_id must be non-empty and <= 256 chars".to_string(),
+        ));
+    }
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_amm1_pool_id(s, pool_id.clone());
+    });
+    log!(INFO, "[set_amm1_pool_id] Updated: {}", pool_id);
+    Ok(())
+}
+
+/// Read the configured AMM1 pool_id, if any.
+#[candid_method(query)]
+#[query]
+fn get_amm1_pool_id() -> Option<String> {
+    read_state(|s| s.amm1_pool_id.clone())
+}
+
+/// Diagnostic: return the length of the AMM1 donation retry queue.
+#[candid_method(query)]
+#[query]
+fn get_pending_amm1_donations_count() -> u64 {
+    read_state(|s| s.pending_amm1_donations.len() as u64)
+}
+
 /// Lightweight payload for the AMM TVL sampler (the latest cached XRC ICP/USD
 /// price in e8s). `u128` instead of `u64` so the candid encodes as `nat`,
 /// matching the unbounded TVL math the sampler does in USD.
