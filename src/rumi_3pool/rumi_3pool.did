@@ -505,6 +505,7 @@ service : (ThreePoolInitArgs) -> {
   simulate_swap_path : (vec record { nat8; nat8; nat }) -> (variant { Ok : vec QuoteSwapResult; Err : ThreePoolError }) query;
   get_imbalance_history : (nat64, nat64) -> (vec ImbalanceSnapshot) query;
   get_swap_events_v2 : (nat64, nat64) -> (vec SwapEventV2) query;
+  get_swap_fees_over_window : (nat32) -> (nat) query;
   get_liquidity_events_v2 : (nat64, nat64) -> (vec LiquidityEventV2) query;
   get_liquidity_event_count_v2 : () -> (nat64) query;
 

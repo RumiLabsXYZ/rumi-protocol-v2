@@ -1485,6 +1485,51 @@ pub fn get_pool_stats(window: StatsWindow) -> PoolStats {
     })
 }
 
+/// Sum every live swap event's fee in the window into a single u128, after
+/// normalizing each fee by its output token's `precision_mul`. The result is
+/// expressed in the pool's normalized units (e8s on mainnet where icUSD has
+/// the max-decimal slot). Migrated v1-backfill entries are skipped.
+///
+/// Extracted as a pure helper so the windowing math is unit-testable without
+/// PocketIC. The `#[query]` wrapper `get_swap_fees_over_window` just feeds it
+/// the live `swap_events_v2` log and current `precision_muls`.
+fn sum_swap_fees_over_window(
+    events: &[SwapEventV2],
+    cutoff: u64,
+    precision_muls: &[u64; 3],
+) -> u128 {
+    events
+        .iter()
+        .filter(|e| !e.migrated && e.timestamp >= cutoff)
+        .map(|e| {
+            let mul = precision_muls[e.token_out as usize] as u128;
+            e.fee.saturating_mul(mul)
+        })
+        .sum()
+}
+
+/// Total live swap fees collected over the trailing `window_days`, normalized
+/// to the pool's max-decimal unit (icUSD e8s on mainnet).
+///
+/// The frontend uses this to compute a trading-fee APY component to display
+/// alongside the borrowing-interest APY for the 3pool, matching the formula
+/// already used for AMM1.
+///
+/// `window_days == 0` returns 0 (degenerate window). For an all-time total,
+/// callers should pick a large value (e.g. `36_500`) rather than overloading
+/// 0 with sentinel semantics; the existing `get_pool_stats(AllTime)` is the
+/// canonical all-time aggregate if that is what the caller wants.
+#[query]
+pub fn get_swap_fees_over_window(window_days: u32) -> u128 {
+    let now = ic_cdk::api::time();
+    let window_ns = (window_days as u64)
+        .saturating_mul(86_400)
+        .saturating_mul(1_000_000_000);
+    let cutoff = now.saturating_sub(window_ns);
+    let precision_muls = get_precision_muls();
+    read_state(|s| sum_swap_fees_over_window(&s.swap_events_v2(), cutoff, &precision_muls))
+}
+
 // ── E6: imbalance stats over a window ──
 #[query]
 pub fn get_imbalance_stats(window: StatsWindow) -> ImbalanceStats {
@@ -2569,5 +2614,99 @@ mod explorer_tests {
             .map(|e| e.id)
             .collect();
         assert_eq!(ids, vec![1, 2]);
+    }
+
+    // ─── sum_swap_fees_over_window (trading-fee APY input) ───
+
+    /// Build a SwapEventV2 with an explicit `fee` value (overriding mk_swap's
+    /// default of `amount_in / 1000`) so tests can pin the expected sum.
+    fn mk_swap_with_fee(
+        id: u64,
+        ts_ns: u64,
+        token_out: u8,
+        fee_native: u128,
+        migrated: bool,
+    ) -> SwapEventV2 {
+        let mut e = mk_swap(id, ts_ns, 0, token_out, 10_000, 5, false, 50);
+        e.fee = fee_native;
+        e.migrated = migrated;
+        e
+    }
+
+    #[test]
+    fn sum_swap_fees_empty_log_is_zero() {
+        let events: Vec<SwapEventV2> = Vec::new();
+        // pool with icUSD-style precision_muls (all 1).
+        let muls = [1u64, 1u64, 1u64];
+        assert_eq!(sum_swap_fees_over_window(&events, 0, &muls), 0);
+    }
+
+    #[test]
+    fn sum_swap_fees_all_outside_window_is_zero() {
+        // Three events at ts=100, 200, 300; cutoff well above all of them.
+        let events = vec![
+            mk_swap_with_fee(0, 100, 1, 50, false),
+            mk_swap_with_fee(1, 200, 2, 75, false),
+            mk_swap_with_fee(2, 300, 0, 125, false),
+        ];
+        let muls = [1u64, 1u64, 1u64];
+        assert_eq!(sum_swap_fees_over_window(&events, 10_000, &muls), 0);
+    }
+
+    #[test]
+    fn sum_swap_fees_mixed_window_sums_only_in_window() {
+        // Two events outside (ts=100, 200), three inside (ts=1_000, 2_000, 3_000).
+        // cutoff = 500 means only events with timestamp >= 500 count.
+        let events = vec![
+            mk_swap_with_fee(0, 100, 1, 11, false), // out
+            mk_swap_with_fee(1, 200, 0, 22, false), // out
+            mk_swap_with_fee(2, 1_000, 1, 30, false), // in, token_out=1
+            mk_swap_with_fee(3, 2_000, 2, 40, false), // in, token_out=2
+            mk_swap_with_fee(4, 3_000, 0, 50, false), // in, token_out=0
+        ];
+        // All precision_muls=1 so fee_native == normalized fee.
+        let muls = [1u64, 1u64, 1u64];
+        assert_eq!(sum_swap_fees_over_window(&events, 500, &muls), 30 + 40 + 50);
+    }
+
+    #[test]
+    fn sum_swap_fees_includes_event_at_cutoff() {
+        // `cutoff` is inclusive: timestamp == cutoff is in-window.
+        let events = vec![
+            mk_swap_with_fee(0, 999, 1, 7, false),    // out
+            mk_swap_with_fee(1, 1_000, 1, 13, false), // in (boundary)
+        ];
+        let muls = [1u64, 1u64, 1u64];
+        assert_eq!(sum_swap_fees_over_window(&events, 1_000, &muls), 13);
+    }
+
+    #[test]
+    fn sum_swap_fees_skips_migrated_events() {
+        // Migrated entries have sentinel data and are excluded from explorer
+        // aggregations. The fee field on a migrated event is preserved but
+        // should NOT count toward live trading-fee APY.
+        let events = vec![
+            mk_swap_with_fee(0, 1_000, 1, 999, true),  // migrated -> skip
+            mk_swap_with_fee(1, 2_000, 1, 7, false),   // live -> count
+        ];
+        let muls = [1u64, 1u64, 1u64];
+        assert_eq!(sum_swap_fees_over_window(&events, 0, &muls), 7);
+    }
+
+    #[test]
+    fn sum_swap_fees_normalizes_by_precision_mul_per_output_token() {
+        // Pool with mainnet-shape precision_muls: icUSD=1 (8 dec), ckUSDT=100
+        // (6 dec scaled to 8), ckUSDC=100 (6 dec scaled to 8). A fee of 1 unit
+        // of ckUSDT (token 1) is normalized to 100 e8s; same for ckUSDC.
+        let events = vec![
+            mk_swap_with_fee(0, 1_000, 0, 10, false), // 10 e8s of icUSD -> 10
+            mk_swap_with_fee(1, 2_000, 1, 1, false),  // 1 ckUSDT (6dec) -> 100 e8s
+            mk_swap_with_fee(2, 3_000, 2, 2, false),  // 2 ckUSDC (6dec) -> 200 e8s
+        ];
+        let muls = [1u64, 100u64, 100u64];
+        assert_eq!(
+            sum_swap_fees_over_window(&events, 0, &muls),
+            10 + 100 + 200
+        );
     }
 }
