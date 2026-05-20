@@ -166,37 +166,61 @@ export function calculateApy(
 }
 
 /**
- * Calculate theoretical APY for 3pool LPs based on protocol borrowing interest.
+ * Calculate total APY for 3pool LPs: protocol borrowing interest + swap fees.
  *
  * Formula:
- *   totalApr = sum over collaterals of (weightedRate × threePoolShare × totalDebt / poolTvl)
- *   apy = (1 + totalApr / 365)^365 - 1
+ *   interestApr = sum over collaterals of (weightedRate × threePoolShare × totalDebt / poolTvl)
+ *   swapFeeApr  = (swapFees7d / poolTvl) × (365 / 7)
+ *   apy         = (1 + (interestApr + swapFeeApr) / 365)^365 - 1
  *
  * @param threePoolShareBps  3pool's share of interest in basis points (e.g. 5000 = 50%)
  * @param perCollateralInterest  Array of { totalDebtE8s, weightedInterestRate } per collateral
- * @param poolTvlE8s  Total stablecoin balance in the 3pool (in e8s, normalized)
+ * @param poolTvlIcusd  Total stablecoin balance in the 3pool, in icUSD units (not e8s)
+ * @param swapFees7dE8s  Swap fees over the trailing 7 days in icUSD e8s.
+ *   The 3pool's `get_swap_fees_over_window` query converts each event's fee
+ *   from its output token's native decimals to 8-dec (icUSD-e8s) before
+ *   summing, so this value is in plain e8s (divide by 1e8 to get dollars).
  * @returns APY as a decimal (e.g. 0.047 = 4.7%), or null if insufficient data
+ */
+export function calculateTotalApy(
+  threePoolShareBps: number,
+  perCollateralInterest: { totalDebtE8s: number; weightedInterestRate: number }[],
+  poolTvlIcusd: number,
+  swapFees7dE8s: bigint,
+): number | null {
+  if (poolTvlIcusd <= 0 || perCollateralInterest.length === 0) return null;
+
+  const threePoolShare = threePoolShareBps / 10_000;
+  let interestApr = 0;
+
+  for (const info of perCollateralInterest) {
+    if (info.totalDebtE8s === 0 || info.weightedInterestRate === 0) continue;
+    interestApr += (info.weightedInterestRate * threePoolShare * info.totalDebtE8s) / poolTvlIcusd;
+  }
+
+  // get_swap_fees_over_window returns icUSD e8s (8-dec). bigint -> Number is
+  // safe because realistic 7-day fee totals are well under 2^53.
+  const fees7dIcusd = Number(swapFees7dE8s) / 1e8;
+  const swapFeeApr = poolTvlIcusd > 0 ? (fees7dIcusd / poolTvlIcusd) * (365 / 7) : 0;
+  const totalApr = interestApr + swapFeeApr;
+
+  if (totalApr === 0) return null;
+
+  // Daily compounding: APY = (1 + APR/365)^365 - 1
+  return Math.pow(1 + totalApr / 365, 365) - 1;
+}
+
+/**
+ * Back-compat alias for `calculateTotalApy` with no swap-fee component.
+ * Pre-dates the per-pool swap-fee APY work. New code should call
+ * `calculateTotalApy` directly with a real `swapFees7dE8s` value.
  */
 export function calculateTheoreticalApy(
   threePoolShareBps: number,
   perCollateralInterest: { totalDebtE8s: number; weightedInterestRate: number }[],
   poolTvlE8s: number,
 ): number | null {
-  if (poolTvlE8s <= 0 || perCollateralInterest.length === 0) return null;
-
-  const threePoolShare = threePoolShareBps / 10_000;
-  let totalApr = 0;
-
-  for (const info of perCollateralInterest) {
-    if (info.totalDebtE8s === 0 || info.weightedInterestRate === 0) continue;
-    totalApr += (info.weightedInterestRate * threePoolShare * info.totalDebtE8s) / poolTvlE8s;
-  }
-
-  if (totalApr === 0) return null;
-
-  // Daily compounding: APY = (1 + APR/365)^365 - 1
-  const apy = Math.pow(1 + totalApr / 365, 365) - 1;
-  return apy;
+  return calculateTotalApy(threePoolShareBps, perCollateralInterest, poolTvlE8s, 0n);
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -278,6 +302,15 @@ class ThreePoolService {
   async getVpSnapshots(): Promise<VirtualPriceSnapshot[]> {
     const actor = await this.getQueryActor();
     return await actor.get_vp_snapshots() as VirtualPriceSnapshot[];
+  }
+
+  /**
+   * Total icUSD-equivalent swap fees collected over the trailing `windowDays`.
+   * Returned as a bigint in e8s (1e8 == 1 icUSD).
+   */
+  async getSwapFeesOverWindow(windowDays: number): Promise<bigint> {
+    const actor = await this.getQueryActor();
+    return await actor.get_swap_fees_over_window(windowDays) as bigint;
   }
 
   async getSwapEvents(start: bigint, length: bigint): Promise<any[]> {

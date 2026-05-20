@@ -365,11 +365,18 @@ pub enum BackendEvent {
     // Backend commit 18dd5f1 (2026-05-09) added the `set_amm1_canister`
     // admin endpoint. Pre-listing the event variant here so analytics
     // continues decoding cleanly the first time an admin wires the AMM1
-    // canister principal into the backend — without this, the entire
+    // canister principal into the backend (without this, the entire
     // `Vec<BackendEvent>` decode of any batch containing one of these
-    // rows would fail and halt ingestion.
+    // rows would fail and halt ingestion).
     #[serde(rename = "set_amm1_canister")]
     SetAmm1Canister {},
+    // 2026-05-19 AMM1 pool_id mismatch fix. Admin sets the canonical AMM1
+    // pool_id (e.g. `<token_a_principal>_<token_b_principal>`) so
+    // donate_icusd_to_amm1 stops minting to a phantom subaccount. Mirrored
+    // here so analytics ingestion doesn't break on the first set_amm1_pool_id
+    // event after the backend upgrade lands.
+    #[serde(rename = "set_amm1_pool_id")]
+    SetAmm1PoolId {},
     // Wave-14a CDP-14 follow-up: per-collateral XRC source-count floor
     // override. Emitted when an admin tunes the per-asset floor (e.g.
     // dropping XAUT from the global 3 to 2 because XAUT only trades on
@@ -498,6 +505,7 @@ impl BackendEvent {
             SetBotCrToleranceBps {} => Some("SetBotCrToleranceBps"),
             SetAmm1Canister {} => Some("SetAmm1Canister"),
             SetCollateralMinXrcSources {} => Some("SetCollateralMinXrcSources"),
+            SetAmm1PoolId {} => Some("SetAmm1PoolId"),
         }
     }
 }

@@ -184,6 +184,7 @@ export const idlFactory = ({ IDL }) => {
     'min_vault_debt' : IDL.Nat64,
     'rate_curve' : IDL.Opt(RateCurve),
     'recovery_borrowing_fee' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'min_xrc_sources' : IDL.Opt(IDL.Nat32),
     'min_collateral_deposit' : IDL.Nat64,
     'last_price' : IDL.Opt(IDL.Float64),
     'last_price_timestamp' : IDL.Opt(IDL.Nat64),
@@ -295,6 +296,7 @@ export const idlFactory = ({ IDL }) => {
       'caller' : IDL.Principal,
       'amount' : IDL.Nat64,
     }),
+    'set_bot_cr_tolerance_bps' : IDL.Record({ 'bps' : IDL.Nat64 }),
     'collateral_withdrawn' : IDL.Record({
       'block_index' : IDL.Nat64,
       'vault_id' : IDL.Nat64,
@@ -321,6 +323,7 @@ export const idlFactory = ({ IDL }) => {
       'price' : IDL.Text,
     }),
     'set_rmr_ceiling_cr' : IDL.Record({ 'value' : IDL.Text }),
+    'set_amm1_canister' : IDL.Record({ 'canister' : IDL.Principal }),
     'set_recovery_rate_curve' : IDL.Record({ 'markers' : IDL.Text }),
     'set_ckstable_repay_fee' : IDL.Record({ 'rate' : IDL.Text }),
     'set_treasury_principal' : IDL.Record({ 'principal' : IDL.Principal }),
@@ -354,6 +357,10 @@ export const idlFactory = ({ IDL }) => {
       'vault_id' : IDL.Nat64,
       'timestamp' : IDL.Nat64,
       'observed_balance' : IDL.Nat64,
+    }),
+    'oracle_circuit_breaker' : IDL.Record({
+      'timestamp' : IDL.Nat64,
+      'consecutive_failures' : IDL.Nat64,
     }),
     'set_collateral_redemption_fee_floor' : IDL.Record({
       'redemption_fee_floor' : IDL.Text,
@@ -415,6 +422,7 @@ export const idlFactory = ({ IDL }) => {
       'collateral_type' : IDL.Principal,
       'liquidation_bonus' : IDL.Text,
     }),
+    'set_amm1_pool_id' : IDL.Record({ 'pool_id' : IDL.Text }),
     'set_global_icusd_mint_cap' : IDL.Record({
       'cap' : IDL.Opt(IDL.Text),
       'amount' : IDL.Opt(IDL.Text),
@@ -463,6 +471,12 @@ export const idlFactory = ({ IDL }) => {
       'timestamp' : IDL.Opt(IDL.Nat64),
       'old_borrowed' : IDL.Nat64,
     }),
+    'stability_pool_call_failed' : IDL.Record({
+      'reject_message' : IDL.Text,
+      'vault_ids' : IDL.Vec(IDL.Nat64),
+      'reject_code' : IDL.Int32,
+      'timestamp' : IDL.Nat64,
+    }),
     'set_rate_curve_markers' : IDL.Record({
       'markers' : IDL.Text,
       'collateral_type' : IDL.Opt(IDL.Text),
@@ -495,6 +509,12 @@ export const idlFactory = ({ IDL }) => {
       'timestamp' : IDL.Opt(IDL.Nat64),
       'caller' : IDL.Principal,
       'amount' : IDL.Nat64,
+    }),
+    'oracle_source_count_insufficient' : IDL.Record({
+      'num_sources' : IDL.Nat32,
+      'min_required' : IDL.Nat32,
+      'timestamp' : IDL.Nat64,
+      'collateral_type' : IDL.Principal,
     }),
     'admin_mint' : IDL.Record({
       'to' : IDL.Principal,
@@ -551,6 +571,10 @@ export const idlFactory = ({ IDL }) => {
       'timestamp' : IDL.Opt(IDL.Nat64),
       'caller' : IDL.Opt(IDL.Principal),
       'margin_added' : IDL.Nat64,
+    }),
+    'set_collateral_min_xrc_sources' : IDL.Record({
+      'min_xrc_sources' : IDL.Opt(IDL.Nat32),
+      'collateral_type' : IDL.Principal,
     }),
     'set_stability_pool_principal' : IDL.Record({
       'principal' : IDL.Principal,
@@ -614,22 +638,6 @@ export const idlFactory = ({ IDL }) => {
       'token_type' : StableTokenType,
     }),
     'set_recovery_cr_multiplier' : IDL.Record({ 'multiplier' : IDL.Text }),
-    'stability_pool_call_failed' : IDL.Record({
-      'vault_ids' : IDL.Vec(IDL.Nat64),
-      'reject_code' : IDL.Int32,
-      'reject_message' : IDL.Text,
-      'timestamp' : IDL.Nat64,
-    }),
-    'oracle_circuit_breaker' : IDL.Record({
-      'consecutive_failures' : IDL.Nat64,
-      'timestamp' : IDL.Nat64,
-    }),
-    'oracle_source_count_insufficient' : IDL.Record({
-      'collateral_type' : IDL.Principal,
-      'num_sources' : IDL.Nat32,
-      'min_required' : IDL.Nat32,
-      'timestamp' : IDL.Nat64,
-    }),
   });
   const EventsByPrincipalPagedResponse = IDL.Record({
     'scan_end' : IDL.Nat64,
@@ -645,6 +653,7 @@ export const idlFactory = ({ IDL }) => {
     'redemption_fee' : IDL.Float64,
     'borrowing_fee' : IDL.Float64,
   });
+  const ProtocolStatusLite = IDL.Record({ 'price_e8s' : IDL.Nat });
   const InterestSplitArg = IDL.Record({
     'bps' : IDL.Nat64,
     'destination' : IDL.Text,
@@ -686,6 +695,7 @@ export const idlFactory = ({ IDL }) => {
     'treasury_principal' : IDL.Opt(IDL.Principal),
     'rmr_ceiling_cr' : IDL.Float64,
     'frozen' : IDL.Bool,
+    'bot_cr_tolerance_bps' : IDL.Nat64,
     'icpswap_routing_enabled' : IDL.Bool,
     'ckusdc_enabled' : IDL.Bool,
     'ckusdt_enabled' : IDL.Bool,
@@ -926,6 +936,8 @@ export const idlFactory = ({ IDL }) => {
     'exit_recovery_mode' : IDL.Func([], [Result], []),
     'freeze_protocol' : IDL.Func([], [Result], []),
     'get_all_vaults' : IDL.Func([], [IDL.Vec(CandidVault)], ['query']),
+    'get_amm1_canister' : IDL.Func([], [IDL.Opt(IDL.Principal)], ['query']),
+    'get_amm1_pool_id' : IDL.Func([], [IDL.Opt(IDL.Text)], ['query']),
     'get_borrowing_fee' : IDL.Func([], [IDL.Float64], ['query']),
     'get_bot_allowed_collateral_types' : IDL.Func(
         [],
@@ -933,6 +945,7 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'get_bot_claim_vault_ids' : IDL.Func([], [IDL.Vec(IDL.Nat64)], ['query']),
+    'get_bot_cr_tolerance_bps' : IDL.Func([], [IDL.Nat64], ['query']),
     'get_bot_stats' : IDL.Func([], [BotStatsResponse], ['query']),
     'get_ckstable_repay_fee' : IDL.Func([], [IDL.Float64], ['query']),
     'get_collateral_config' : IDL.Func(
@@ -978,8 +991,13 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'get_fees' : IDL.Func([IDL.Nat64], [Fees], ['query']),
-    'get_fees_for_collateral' : IDL.Func([IDL.Principal, IDL.Nat64], [Fees], ['query']),
+    'get_fees_for_collateral' : IDL.Func(
+        [IDL.Principal, IDL.Nat64],
+        [Fees],
+        ['query'],
+      ),
     'get_global_icusd_mint_cap' : IDL.Func([], [IDL.Nat64], ['query']),
+    'get_icp_usd_price_e8s' : IDL.Func([], [ProtocolStatusLite], ['query']),
     'get_icpswap_routing_enabled' : IDL.Func([], [IDL.Bool], ['query']),
     'get_interest_pool_share' : IDL.Func([], [IDL.Float64], ['query']),
     'get_interest_split' : IDL.Func([], [IDL.Vec(InterestSplitArg)], ['query']),
@@ -1003,6 +1021,7 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'get_min_icusd_amount' : IDL.Func([], [IDL.Nat64], ['query']),
+    'get_pending_amm1_donations_count' : IDL.Func([], [IDL.Nat64], ['query']),
     'get_protocol_3usd_reserves' : IDL.Func([], [IDL.Nat64], ['query']),
     'get_protocol_config' : IDL.Func([], [ProtocolConfig], ['query']),
     'get_protocol_snapshots' : IDL.Func(
@@ -1135,6 +1154,8 @@ export const idlFactory = ({ IDL }) => {
         [],
       ),
     'reset_bot_budget' : IDL.Func([IDL.Nat64], [Result], []),
+    'set_amm1_canister' : IDL.Func([IDL.Principal], [Result], []),
+    'set_amm1_pool_id' : IDL.Func([IDL.Text], [Result], []),
     'set_borrowing_fee' : IDL.Func([IDL.Float64], [Result], []),
     'set_borrowing_fee_curve' : IDL.Func([IDL.Opt(IDL.Text)], [Result], []),
     'set_bot_allowed_collateral_types' : IDL.Func(
@@ -1142,8 +1163,15 @@ export const idlFactory = ({ IDL }) => {
         [Result],
         [],
       ),
+    'set_bot_cr_tolerance_bps' : IDL.Func([IDL.Nat64], [Result], []),
     'set_breaker_window_debt_ceiling_e8s' : IDL.Func([IDL.Nat64], [Result], []),
     'set_breaker_window_ns' : IDL.Func([IDL.Nat64], [Result], []),
+    'set_check_vaults_alert_band_bps' : IDL.Func([IDL.Nat64], [Result], []),
+    'set_check_vaults_full_sweep_every_n_ticks' : IDL.Func(
+        [IDL.Nat64],
+        [Result],
+        [],
+      ),
     'set_ckstable_repay_fee' : IDL.Func([IDL.Float64], [Result], []),
     'set_collateral_borrow_threshold' : IDL.Func(
         [IDL.Principal, IDL.Float64],
@@ -1190,6 +1218,11 @@ export const idlFactory = ({ IDL }) => {
         [Result],
         [],
       ),
+    'set_collateral_min_xrc_sources' : IDL.Func(
+        [IDL.Principal, IDL.Opt(IDL.Nat32)],
+        [Result],
+        [],
+      ),
     'set_collateral_redemption_fee_ceiling' : IDL.Func(
         [IDL.Principal, IDL.Float64],
         [Result],
@@ -1218,7 +1251,11 @@ export const idlFactory = ({ IDL }) => {
     'set_interest_pool_share' : IDL.Func([IDL.Float64], [Result], []),
     'set_interest_rate' : IDL.Func([IDL.Principal, IDL.Float64], [Result], []),
     'set_interest_split' : IDL.Func([IDL.Vec(InterestSplitArg)], [Result], []),
-    'set_interest_treasury_tick_interval_secs' : IDL.Func([IDL.Nat64], [Result], []),
+    'set_interest_treasury_tick_interval_secs' : IDL.Func(
+        [IDL.Nat64],
+        [Result],
+        [],
+      ),
     'set_liquidation_bonus' : IDL.Func([IDL.Float64], [Result], []),
     'set_liquidation_bot_config' : IDL.Func(
         [IDL.Principal, IDL.Nat64],

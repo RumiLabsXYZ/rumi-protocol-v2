@@ -182,6 +182,12 @@ pub enum AmmAdminAction {
     ClaimPending { claim_id: u64, claimant: Principal, amount: u128 },
     ResolvePendingClaim { claim_id: u64 },
     SetProtocolBackendPrincipal { backend: Principal },
+    AdminBurnSubaccount {
+        ledger: Principal,
+        subaccount_hex: String,
+        amount_burned: u128,
+        block_index: u64,
+    },
 }
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
@@ -324,6 +330,7 @@ pub enum AmmError {
     BelowMinClaim { claimable: u128, min: u128 },
     RewardLedgerTransferFailed { reason: String },
     InsufficientOnChainBalance { expected: u128, actual: u128 },
+    InvalidInput { reason: String },
 }
 
 // ─── Reward state (per LP) ───

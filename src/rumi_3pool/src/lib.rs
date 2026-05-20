@@ -284,6 +284,17 @@ fn get_precision_muls() -> [u64; 3] {
     })
 }
 
+/// Per-token decimals (matches index order of `get_precision_muls`).
+fn get_token_decimals() -> [u8; 3] {
+    read_state(|s| {
+        [
+            s.config.tokens[0].decimals,
+            s.config.tokens[1].decimals,
+            s.config.tokens[2].decimals,
+        ]
+    })
+}
+
 fn get_current_a() -> u64 {
     read_state(|s| {
         let now = ic_cdk::api::time() / 1_000_000_000;
@@ -1485,6 +1496,67 @@ pub fn get_pool_stats(window: StatsWindow) -> PoolStats {
     })
 }
 
+/// Target precision for the `get_swap_fees_over_window` return value: 8 decimals
+/// (i.e. icUSD e8s). Chosen because all live 3pool tokens are <= 8 decimals
+/// (icUSD=8, ckUSDT=6, ckUSDC=6), so converting to e8s is lossless. If a future
+/// 3pool adds a token with > 8 decimals, this conversion would lose precision
+/// and the function should be revisited.
+const SWAP_FEES_TARGET_DECIMALS: u8 = 8;
+
+/// Sum every live swap event's fee in the window, converting each event's
+/// fee from its output token's native decimals into a common target-decimal
+/// representation (`TARGET_DECIMALS = 8`, i.e. icUSD e8s). Migrated v1-backfill
+/// entries are skipped.
+///
+/// Per-token multiplier is `10^(TARGET_DECIMALS - decimals[token_out])`. For
+/// the live 3pool that means icUSD swaps stay as-is and ckUSDT/ckUSDC swaps
+/// are multiplied by 100.
+///
+/// Extracted as a pure helper so the windowing math is unit-testable without
+/// PocketIC. The `#[query]` wrapper `get_swap_fees_over_window` feeds it the
+/// live `swap_events_v2` log and current token decimals.
+fn sum_swap_fees_over_window(
+    events: &[SwapEventV2],
+    cutoff: u64,
+    decimals: &[u8; 3],
+) -> u128 {
+    events
+        .iter()
+        .filter(|e| !e.migrated && e.timestamp >= cutoff)
+        .map(|e| {
+            let token_dec = decimals[e.token_out as usize];
+            // Safe: TARGET_DECIMALS = 8 and all 3pool tokens have decimals <= 8,
+            // so the subtraction never underflows. The pow() result is at most
+            // 10^8, well within u128.
+            let mul = 10u128.pow(SWAP_FEES_TARGET_DECIMALS.saturating_sub(token_dec) as u32);
+            e.fee.saturating_mul(mul)
+        })
+        .sum()
+}
+
+/// Total live swap fees collected over the trailing `window_days`, expressed
+/// in icUSD e8s (8-decimal). Each event's fee is converted from its output
+/// token's native decimals to 8-dec before summing.
+///
+/// The frontend uses this to compute a trading-fee APY component to display
+/// alongside the borrowing-interest APY for the 3pool, matching the formula
+/// already used for AMM1.
+///
+/// `window_days == 0` returns 0 (degenerate window). For an all-time total,
+/// callers should pick a large value (e.g. `36_500`) rather than overloading
+/// 0 with sentinel semantics; the existing `get_pool_stats(AllTime)` is the
+/// canonical all-time aggregate if that is what the caller wants.
+#[query]
+pub fn get_swap_fees_over_window(window_days: u32) -> u128 {
+    let now = ic_cdk::api::time();
+    let window_ns = (window_days as u64)
+        .saturating_mul(86_400)
+        .saturating_mul(1_000_000_000);
+    let cutoff = now.saturating_sub(window_ns);
+    let decimals = get_token_decimals();
+    read_state(|s| sum_swap_fees_over_window(&s.swap_events_v2(), cutoff, &decimals))
+}
+
 // ── E6: imbalance stats over a window ──
 #[query]
 pub fn get_imbalance_stats(window: StatsWindow) -> ImbalanceStats {
@@ -2569,5 +2641,99 @@ mod explorer_tests {
             .map(|e| e.id)
             .collect();
         assert_eq!(ids, vec![1, 2]);
+    }
+
+    // ─── sum_swap_fees_over_window (trading-fee APY input) ───
+
+    /// Build a SwapEventV2 with an explicit `fee` value (overriding mk_swap's
+    /// default of `amount_in / 1000`) so tests can pin the expected sum.
+    fn mk_swap_with_fee(
+        id: u64,
+        ts_ns: u64,
+        token_out: u8,
+        fee_native: u128,
+        migrated: bool,
+    ) -> SwapEventV2 {
+        let mut e = mk_swap(id, ts_ns, 0, token_out, 10_000, 5, false, 50);
+        e.fee = fee_native;
+        e.migrated = migrated;
+        e
+    }
+
+    #[test]
+    fn sum_swap_fees_empty_log_is_zero() {
+        let events: Vec<SwapEventV2> = Vec::new();
+        // All-8-decimal pool: no conversion needed.
+        let dec = [8u8, 8u8, 8u8];
+        assert_eq!(sum_swap_fees_over_window(&events, 0, &dec), 0);
+    }
+
+    #[test]
+    fn sum_swap_fees_all_outside_window_is_zero() {
+        // Three events at ts=100, 200, 300; cutoff well above all of them.
+        let events = vec![
+            mk_swap_with_fee(0, 100, 1, 50, false),
+            mk_swap_with_fee(1, 200, 2, 75, false),
+            mk_swap_with_fee(2, 300, 0, 125, false),
+        ];
+        let dec = [8u8, 8u8, 8u8];
+        assert_eq!(sum_swap_fees_over_window(&events, 10_000, &dec), 0);
+    }
+
+    #[test]
+    fn sum_swap_fees_mixed_window_sums_only_in_window() {
+        // Two events outside (ts=100, 200), three inside (ts=1_000, 2_000, 3_000).
+        // cutoff = 500 means only events with timestamp >= 500 count.
+        let events = vec![
+            mk_swap_with_fee(0, 100, 1, 11, false), // out
+            mk_swap_with_fee(1, 200, 0, 22, false), // out
+            mk_swap_with_fee(2, 1_000, 1, 30, false), // in, token_out=1
+            mk_swap_with_fee(3, 2_000, 2, 40, false), // in, token_out=2
+            mk_swap_with_fee(4, 3_000, 0, 50, false), // in, token_out=0
+        ];
+        // All-8-dec means fee_native == e8s already.
+        let dec = [8u8, 8u8, 8u8];
+        assert_eq!(sum_swap_fees_over_window(&events, 500, &dec), 30 + 40 + 50);
+    }
+
+    #[test]
+    fn sum_swap_fees_includes_event_at_cutoff() {
+        // `cutoff` is inclusive: timestamp == cutoff is in-window.
+        let events = vec![
+            mk_swap_with_fee(0, 999, 1, 7, false),    // out
+            mk_swap_with_fee(1, 1_000, 1, 13, false), // in (boundary)
+        ];
+        let dec = [8u8, 8u8, 8u8];
+        assert_eq!(sum_swap_fees_over_window(&events, 1_000, &dec), 13);
+    }
+
+    #[test]
+    fn sum_swap_fees_skips_migrated_events() {
+        // Migrated entries have sentinel data and are excluded from explorer
+        // aggregations. The fee field on a migrated event is preserved but
+        // should NOT count toward live trading-fee APY.
+        let events = vec![
+            mk_swap_with_fee(0, 1_000, 1, 999, true),  // migrated -> skip
+            mk_swap_with_fee(1, 2_000, 1, 7, false),   // live -> count
+        ];
+        let dec = [8u8, 8u8, 8u8];
+        assert_eq!(sum_swap_fees_over_window(&events, 0, &dec), 7);
+    }
+
+    #[test]
+    fn sum_swap_fees_converts_to_e8s_per_output_token() {
+        // Mainnet-shape decimals: icUSD=8, ckUSDT=6, ckUSDC=6.
+        // A fee of 1 unit of ckUSDT (6dec) converts to 100 e8s (10^(8-6) = 100).
+        // A fee of 2 units of ckUSDC (6dec) converts to 200 e8s.
+        let events = vec![
+            mk_swap_with_fee(0, 1_000, 0, 10, false), // 10 e8s of icUSD -> 10
+            mk_swap_with_fee(1, 2_000, 1, 1, false),  // 1 ckUSDT  -> 100 e8s
+            mk_swap_with_fee(2, 3_000, 2, 2, false),  // 2 ckUSDC  -> 200 e8s
+        ];
+        let dec = [8u8, 6u8, 6u8];
+        assert_eq!(
+            sum_swap_fees_over_window(&events, 0, &dec),
+            10 + 100 + 200
+        );
     }
 }

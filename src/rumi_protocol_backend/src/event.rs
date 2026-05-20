@@ -584,6 +584,15 @@ pub enum Event {
         canister: Principal,
     },
 
+    /// Admin set the canonical AMM1 pool_id used by `donate_icusd_to_amm1`.
+    /// Must match `make_pool_id(token_a, token_b)` on rumi_amm exactly,
+    /// otherwise `notify_reward_received` returns PoolNotFound and donations
+    /// re-queue indefinitely.
+    #[serde(rename = "set_amm1_pool_id")]
+    SetAmm1PoolId {
+        pool_id: String,
+    },
+
     /// Price update from XRC or other oracle. Recorded every time a collateral
     /// price is fetched so we have a complete price history.
     #[serde(rename = "price_update")]
@@ -854,6 +863,7 @@ impl Event {
             Event::SetInterestSplit { .. } => false,
             Event::SetThreePoolCanister { .. } => false,
             Event::SetAmm1Canister { .. } => false,
+            Event::SetAmm1PoolId { .. } => false,
             Event::PriceUpdate { .. } => false,
             Event::SetCollateralLiquidationRatio { .. } => false,
             Event::SetCollateralBorrowThreshold { .. } => false,
@@ -992,6 +1002,7 @@ impl Event {
             Event::SetInterestSplit { .. } => Some("SetInterestSplit"),
             Event::SetThreePoolCanister { .. } => Some("SetThreePoolCanister"),
             Event::SetAmm1Canister { .. } => Some("SetAmm1Canister"),
+            Event::SetAmm1PoolId { .. } => Some("SetAmm1PoolId"),
             Event::SetCollateralLiquidationRatio { .. } => Some("SetCollateralLiquidationRatio"),
             Event::SetCollateralBorrowThreshold { .. } => Some("SetCollateralBorrowThreshold"),
             Event::SetCollateralLiquidationBonus { .. } => Some("SetCollateralLiquidationBonus"),
@@ -1708,6 +1719,9 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             },
             Event::SetAmm1Canister { canister } => {
                 state.amm1_canister = Some(canister);
+            },
+            Event::SetAmm1PoolId { pool_id } => {
+                state.amm1_pool_id = Some(pool_id);
             },
             Event::PriceUpdate { .. } => {
                 // Price history only; no state mutation needed during replay.
@@ -2770,6 +2784,11 @@ pub fn record_set_three_pool_canister(state: &mut State, canister: Principal) {
 pub fn record_set_amm1_canister(state: &mut State, canister: Principal) {
     record_event(&Event::SetAmm1Canister { canister });
     state.amm1_canister = Some(canister);
+}
+
+pub fn record_set_amm1_pool_id(state: &mut State, pool_id: String) {
+    record_event(&Event::SetAmm1PoolId { pool_id: pool_id.clone() });
+    state.amm1_pool_id = Some(pool_id);
 }
 
 pub fn record_set_collateral_borrowing_fee(

@@ -37,6 +37,27 @@ type ApyResponse = record {
   window_days : nat32;
   sp_apy_pct : opt float64;
 };
+type AnalyticsAmmLiquidityEvent = record {
+  timestamp_ns : nat64;
+  source_event_id : nat64;
+  caller : principal;
+  pool_id : text;
+  action : LiquidityAction;
+  lp_shares : nat64;
+};
+type AnalyticsSwapEvent = record {
+  timestamp_ns : nat64;
+  source : SwapSource;
+  source_event_id : nat64;
+  caller : principal;
+  token_in : principal;
+  token_out : principal;
+  amount_in : nat64;
+  amount_out : nat64;
+  fee : nat64;
+};
+type LiquidityAction = variant { Add; Remove; RemoveOneCoin; Donate };
+type SwapSource = variant { ThreePool; Amm };
 type BackfillProgress = record {
   cursor_after : nat64;
   from : nat64;
@@ -399,6 +420,9 @@ type VolatilityResponse = record {
 };
 service : (InitArgs) -> {
   admin_backfill_add_margin_events : (nat64) -> (Result);
+  debug_get_amm_event_counts : () -> (nat64, nat64) query;
+  debug_get_amm_liquidity_events_raw : (nat64, nat64) -> (vec AnalyticsAmmLiquidityEvent) query;
+  debug_get_swap_events_raw : (nat64, nat64) -> (vec AnalyticsSwapEvent) query;
   get_address_value_series : (AddressValueSeriesQuery) -> (
       AddressValueSeriesResponse,
     ) query;

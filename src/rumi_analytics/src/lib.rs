@@ -222,6 +222,55 @@ fn debug_amm_pool_snapshot() -> Vec<storage::AmmPoolSnapshot> {
     state::read_state(|s| s.amm_pools.clone().unwrap_or_default())
 }
 
+/// Debug helper — returns (amm_swap_count, amm_liquidity_count).
+/// AMM swaps are not tracked as a separate log in source (they flow through
+/// the standard evt_swaps log alongside 3pool swaps), so the first value is
+/// always 0 in this stub. Preserved from the prior deployed wasm (2026-05-09
+/// silent rollback orphan) for Candid interface compatibility.
+#[ic_cdk_macros::query]
+fn debug_get_amm_event_counts() -> (u64, u64) {
+    let amm_liquidity_count = storage::events::evt_amm_liquidity::len();
+    (0u64, amm_liquidity_count)
+}
+
+/// Debug helper — returns raw AMM liquidity events from the indexed
+/// stable log starting at `start`, up to `length` entries. Preserved from
+/// the prior deployed wasm for Candid interface compatibility.
+#[ic_cdk_macros::query]
+fn debug_get_amm_liquidity_events_raw(
+    start: u64,
+    length: u64,
+) -> Vec<storage::events::AnalyticsAmmLiquidityEvent> {
+    let mut out = Vec::new();
+    let total = storage::events::evt_amm_liquidity::len();
+    let end = start.saturating_add(length).min(total);
+    for i in start..end {
+        if let Some(row) = storage::events::evt_amm_liquidity::get(i) {
+            out.push(row);
+        }
+    }
+    out
+}
+
+/// Debug helper — returns raw swap events from the indexed stable log
+/// starting at `start`, up to `length` entries. Preserved from the prior
+/// deployed wasm for Candid interface compatibility.
+#[ic_cdk_macros::query]
+fn debug_get_swap_events_raw(
+    start: u64,
+    length: u64,
+) -> Vec<storage::events::AnalyticsSwapEvent> {
+    let mut out = Vec::new();
+    let total = storage::events::evt_swaps::len();
+    let end = start.saturating_add(length).min(total);
+    for i in start..end {
+        if let Some(row) = storage::events::evt_swaps::get(i) {
+            out.push(row);
+        }
+    }
+    out
+}
+
 #[ic_cdk_macros::query]
 fn get_collector_health() -> types::CollectorHealth {
     use storage::cursors;

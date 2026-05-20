@@ -140,6 +140,12 @@ type AmmAdminAction = variant {
   ClaimPending : record { claim_id : nat64; claimant : principal; amount : nat };
   ResolvePendingClaim : record { claim_id : nat64 };
   SetProtocolBackendPrincipal : record { backend : principal };
+  AdminBurnSubaccount : record {
+    ledger : principal;
+    subaccount_hex : text;
+    amount_burned : nat;
+    block_index : nat64;
+  };
 };
 
 type AmmAdminEvent = record {
@@ -169,6 +175,7 @@ type AmmError = variant {
   MaintenanceMode;
   ClaimNotFound;
   PoolBusy;
+  InvalidInput : record { reason : text };
 };
 
 // ── Holder Snapshots ──
@@ -329,6 +336,7 @@ service : (AmmInitArgs) -> {
   resolve_pending_claim : (nat64) -> (variant { Ok; Err : AmmError });
 
   // ── Admin ──
+  admin_burn_subaccount_balance : (principal, blob) -> (variant { Ok : nat; Err : AmmError });
   set_pool_creation_open : (bool) -> (variant { Ok; Err : AmmError });
   set_fee : (text, nat16) -> (variant { Ok; Err : AmmError });
   set_protocol_fee : (text, nat16) -> (variant { Ok; Err : AmmError });

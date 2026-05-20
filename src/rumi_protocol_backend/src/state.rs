@@ -957,6 +957,17 @@ pub struct State {
     #[serde(default)]
     pub amm1_canister: Option<Principal>,
 
+    /// Pool ID the backend uses when calling `notify_reward_received` on
+    /// rumi_amm. MUST match the AMM's internal `make_pool_id(token_a, token_b)`
+    /// output for the 3USD/ICP pool. Set by admin via `set_amm1_pool_id`.
+    ///
+    /// Historical context: the original deploy hardcoded `"3USD_ICP"` here,
+    /// but the AMM stores the pool under the deterministic principal-pair id
+    /// `<icusd_3pool_lp_principal>_<icp_principal>`. The mismatch silently
+    /// minted icUSD into a phantom subaccount until 2026-05-19.
+    #[serde(default)]
+    pub amm1_pool_id: Option<String>,
+
     /// Monotonic nonce for AMM1 donation idempotency. Incremented on every
     /// `donate_icusd_to_amm1` call. Survives upgrades via stable storage.
     #[serde(default)]
@@ -1390,6 +1401,7 @@ impl Default for State {
             interest_split: Vec::new(),
             three_pool_canister: None,
             amm1_canister: None,
+            amm1_pool_id: None,
             amm1_donation_nonce: 0,
             rmr_floor: DEFAULT_RMR_FLOOR,
             rmr_ceiling: DEFAULT_RMR_CEILING,
@@ -1609,6 +1621,7 @@ impl From<InitArg> for State {
             interest_split: default_interest_split(),
             three_pool_canister: None,
             amm1_canister: None,
+            amm1_pool_id: None,
             amm1_donation_nonce: 0,
 
             rmr_floor: DEFAULT_RMR_FLOOR,
