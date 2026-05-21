@@ -47,10 +47,12 @@ let cachedPrincipalText: string | null = null;
  * The agent is cached across mutations within a session. Creating it does NOT
  * open a popup — the popup opens on the first canister call routed through it.
  *
- * Returns a proxy that no-ops `batch()` and `execute()` so un-migrated call
- * sites continue to work during the v4 → v5 migration. The proxy is removed
- * in Phase 4 of the migration once all call sites are converted to plain
- * sequential awaits.
+ * Returns the raw v5 SignerAgent (no Proxy wrapping). The earlier Proxy-based
+ * compat shim that no-op'd batch()/execute() was removed once Phase 2 of the
+ * migration converted all call sites to plain sequential awaits — the Proxy
+ * broke methods that access the class's `#private` fields (the v5 SignerAgent
+ * uses ES private slots internally, and Proxy + `#private` is incompatible
+ * because `this` inside the method becomes the Proxy, not the real instance).
  *
  * @param principal Dfinity Principal of the connected account
  * @returns A SignerAgent compatible with @dfinity/agent Actor.createActor()
@@ -67,12 +69,11 @@ export async function getOisySignerAgent(principal: Principal): Promise<any> {
   // directly causes a `_arr` mismatch (the v4-era bug).
   const sdkPrincipal = IcpSdkPrincipal.fromText(principalText);
 
-  const realAgent = await SignerAgent.create({
+  cachedAgent = await SignerAgent.create({
     signer: oisySigner,
     account: sdkPrincipal,
   });
 
-  cachedAgent = withCompatShim(realAgent);
   cachedPrincipalText = principalText;
   return cachedAgent;
 }
@@ -102,51 +103,4 @@ export function createOisyActor(
 export function clearOisySigner(): void {
   cachedAgent = null;
   cachedPrincipalText = null;
-}
-
-// ─── Migration compat shim ──────────────────────────────────────────────────
-//
-// During the v4 → v5 migration, call sites still invoke
-// `signerAgent.batch()` and `signerAgent.execute()`. The v4 library faked
-// these as sequential ICRC-49 calls under the hood — they were never real
-// atomic batches. v5 has no batch concept at all.
-//
-// We wrap the real v5 agent in a Proxy that no-ops batch/execute, letting
-// us migrate the 91 call sites one file at a time without breaking
-// un-migrated paths. Each call still goes through the v5 agent normally;
-// the batch/execute "ceremony" is just stripped.
-//
-// Once all call sites are migrated (Phase 4), this shim and its logging
-// helper are removed and `getOisySignerAgent` returns the raw agent.
-// ────────────────────────────────────────────────────────────────────────────
-
-let shimLogCount = 0;
-
-function withCompatShim(realAgent: any): any {
-  return new Proxy(realAgent, {
-    get(target, prop, receiver) {
-      if (prop === 'batch') {
-        return () => {
-          if (shimLogCount++ < 3) {
-            console.debug(
-              '[oisySigner v5 shim] batch() called — no-op. ' +
-              'Migrate this call site to sequential awaits (Phase 2 of migration).'
-            );
-          }
-        };
-      }
-      if (prop === 'execute') {
-        return async () => {
-          if (shimLogCount++ < 3) {
-            console.debug(
-              '[oisySigner v5 shim] execute() called — no-op. ' +
-              'Migrate this call site to sequential awaits (Phase 2 of migration).'
-            );
-          }
-        };
-      }
-      // Forward everything else to the real agent
-      return Reflect.get(target, prop, receiver);
-    },
-  });
 }
