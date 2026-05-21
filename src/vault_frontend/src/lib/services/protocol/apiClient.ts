@@ -465,7 +465,7 @@ private static async refreshVaultData(): Promise<void> {
             // Batches approve + open_vault into a single signer popup via ICRC-112.
             // The SignerAgent natively handles icrc2_approve consent (Tier 1) so
             // the ICP ledger's lack of ICRC-21 is not an issue.
-            const signerAgent = isOisyWallet() ? pnp.getSignerAgent() : null;
+            const signerAgent = isOisyWallet() ? await pnp.getSignerAgent() : null;
 
             if (signerAgent) {
               console.log(`[Oisy] Using ICRC-112 batched approve+open_vault`);
@@ -726,7 +726,7 @@ static async openVaultAndBorrow(
         };
 
         // ─── Oisy ICRC-112 batched path ───
-        const signerAgent = isOisyWallet() ? pnp.getSignerAgent() : null;
+        const signerAgent = isOisyWallet() ? await pnp.getSignerAgent() : null;
 
         if (signerAgent) {
           console.log(`[Oisy] Using ICRC-112 batched approve+open_vault_and_borrow`);
@@ -1012,7 +1012,7 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
 
       // ─── Oisy ICRC-112 batched path ───
       // Batches approve + add_margin into a single signer popup via ICRC-112.
-      const marginSignerAgent = isOisyWallet() ? pnp.getSignerAgent() : null;
+      const marginSignerAgent = isOisyWallet() ? await pnp.getSignerAgent() : null;
 
       if (marginSignerAgent) {
         console.log(`[Oisy] Using ICRC-112 batched approve+add_margin for vault #${vaultId}`);
@@ -1276,7 +1276,7 @@ static async repayToVault(vaultId: number, icusdAmount: number): Promise<VaultOp
       // Always batch approve+repay — skipping the allowance check eliminates an
       // async canister query that burns the browser user gesture context. The approve
       // is idempotent (overwrites with a large allowance each time).
-      const signerAgent = isOisyWallet() ? pnp.getSignerAgent() : null;
+      const signerAgent = isOisyWallet() ? await pnp.getSignerAgent() : null;
       if (signerAgent) {
         console.log(`[Oisy] Batching icUSD approve + repay_to_vault`);
         const LARGE_APPROVAL = BigInt(100_000_000_000_000_000); // 1B icUSD in e8s
@@ -1405,7 +1405,7 @@ static async repayToVaultWithStable(
       // ─── Oisy ICRC-112 batched path ───
       // Always batch approve+repay — skipping the allowance check eliminates an
       // async canister query that burns the browser user gesture context.
-      const signerAgent = isOisyWallet() ? pnp.getSignerAgent() : null;
+      const signerAgent = isOisyWallet() ? await pnp.getSignerAgent() : null;
       if (signerAgent) {
         console.log(`[Oisy] Batching ${tokenType} approve + repay_to_vault_with_stable`);
         const LARGE_APPROVAL = BigInt(1_000_000_000_000_000); // 1B in e6s
@@ -1921,7 +1921,7 @@ static async repayToVaultWithStable(
         // ─── Oisy ICRC-112 batched path ───
         // Always batch approve+redeem — skipping the allowance check eliminates an
         // async canister query that burns the browser user gesture context.
-        const signerAgent = isOisyWallet() ? pnp.getSignerAgent() : null;
+        const signerAgent = isOisyWallet() ? await pnp.getSignerAgent() : null;
         if (signerAgent) {
           console.log(`[Oisy] Batching icUSD approve + redeem_reserves`);
           const LARGE_APPROVAL = BigInt(100_000_000_000_000_000); // 1B icUSD in e8s
@@ -2956,7 +2956,7 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
 
           // ─── Oisy ICRC-112 batched path ───
           // Always batch approve+liquidate — skip allowance check to preserve gesture context.
-          const signerAgent = isOisyWallet() ? pnp.getSignerAgent() : null;
+          const signerAgent = isOisyWallet() ? await pnp.getSignerAgent() : null;
           if (signerAgent) {
             console.log(`[Oisy] Batching icUSD approve + liquidate_vault_partial`);
             const LARGE_APPROVAL = BigInt(100_000_000_000_000_000);
@@ -3093,7 +3093,7 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
 
           // ─── Oisy ICRC-112 batched path ───
           // Always batch approve+liquidate — skip allowance check to preserve gesture context.
-          const signerAgent = isOisyWallet() ? pnp.getSignerAgent() : null;
+          const signerAgent = isOisyWallet() ? await pnp.getSignerAgent() : null;
           if (signerAgent) {
             console.log(`[Oisy] Batching ${tokenType} approve + liquidate_vault_partial_with_stable`);
             const LARGE_APPROVAL = BigInt(1_000_000_000_000_000);
@@ -3195,7 +3195,7 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
 
           // ─── Oisy ICRC-112 batched path ───
           // Always batch approve+liquidate — skip allowance check to preserve gesture context.
-          const signerAgent = isOisyWallet() ? pnp.getSignerAgent() : null;
+          const signerAgent = isOisyWallet() ? await pnp.getSignerAgent() : null;
           if (signerAgent) {
             console.log(`[Oisy] Batching icUSD approve + liquidate_vault`);
             const LARGE_APPROVAL = BigInt(100_000_000_000_000_000);
