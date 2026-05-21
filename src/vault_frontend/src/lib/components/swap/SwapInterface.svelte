@@ -181,7 +181,7 @@
       error = '';
       const amountRaw = parseTokenAmount(String(amount), fromToken.decimals);
       // Run quote + signer/fee pre-warm in parallel so the click handler stays
-      // synchronous all the way to signerAgent.execute() (Oisy popup gate).
+      // synchronous all the way to the first Oisy consent screen (popup gate).
       const [route] = await Promise.all([
         resolveRoute(fromToken, toToken, amountRaw),
         preWarmOisySigner(),
