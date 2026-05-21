@@ -294,7 +294,7 @@ function createWalletStore() {
       console.log('Cleaning up any stale operations for newly connected wallet');
 
       if (typeof window !== 'undefined' && window.ic?.plug) {
-        if (typeof window.ic.plug.agent.getPrincipal === 'function') {
+        if (window.ic.plug.agent && typeof window.ic.plug.agent.getPrincipal === 'function') {
           try {
             const dummyPromise = window.ic.plug.agent.getPrincipal() as Promise<unknown>;
             dummyPromise.catch(() => {});
