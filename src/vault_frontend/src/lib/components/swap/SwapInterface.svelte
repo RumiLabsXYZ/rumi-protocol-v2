@@ -44,6 +44,19 @@
   let recovering = false;
   let recoveryMessage = '';
 
+  // Pre-quote snapshot of destination-token balance.
+  //
+  // The Oisy `_arr` false-negative verifier needs the destination balance
+  // BEFORE the swap to compare against the balance AFTER. We must NOT await
+  // this query inside the click handler — it burns the browser's user-gesture
+  // window and trips Oisy's "Signer window should not be opened outside of
+  // click handler" guard.
+  //
+  // Captured during `fetchQuote()` (already an async context, no popup gate
+  // yet). Reset on token-switch / form-clear so a stale snapshot never
+  // carries across a different `toToken`.
+  let beforeToBalanceSnapshot: bigint | null = null;
+
   $: isConnected = $walletStore.isConnected;
   $: fromToken = AMM_TOKENS[fromIdx];
   $: toToken = AMM_TOKENS[toIdx];
@@ -180,17 +193,27 @@
       quoting = true;
       error = '';
       const amountRaw = parseTokenAmount(String(amount), fromToken.decimals);
-      // Run quote + signer/fee pre-warm in parallel so the click handler stays
-      // synchronous all the way to the first Oisy consent screen (popup gate).
-      const [route] = await Promise.all([
+      const walletState = get(walletStore);
+      // Run quote + signer/fee pre-warm + destination-balance snapshot in
+      // parallel so the click handler stays synchronous all the way to the
+      // first Oisy consent screen (popup gate). Awaiting any of these inside
+      // handleSwap would burn the browser's user-gesture window and trip
+      // Oisy's "Signer window should not be opened outside of click handler"
+      // guard.
+      const [route, , , snapshot] = await Promise.all([
         resolveRoute(fromToken, toToken, amountRaw),
         preWarmOisySigner(),
         preWarmOisyFees(),
+        walletState.principal
+          ? TokenService.getTokenBalance(toToken.ledgerId, walletState.principal, { skipCache: true }).catch(() => null)
+          : Promise.resolve(null),
       ]);
       currentRoute = route;
+      beforeToBalanceSnapshot = snapshot as bigint | null;
       midMarketRate = await fetchMidMarketRate(currentRoute);
     } catch (err: any) {
       currentRoute = null;
+      beforeToBalanceSnapshot = null;
       error = `Quote failed: ${err.message}`;
       console.warn('Quote failed:', err.message, err);
     } finally {
@@ -217,6 +240,7 @@
     toIdx = tmp;
     amount = '';
     currentRoute = null;
+    beforeToBalanceSnapshot = null;
     error = '';
   }
 
@@ -226,6 +250,7 @@
     showFromDropdown = false;
     amount = '';
     currentRoute = null;
+    beforeToBalanceSnapshot = null;
     error = '';
   }
 
@@ -234,6 +259,7 @@
     toIdx = index;
     showToDropdown = false;
     currentRoute = null;
+    beforeToBalanceSnapshot = null;
     error = '';
   }
 
@@ -282,13 +308,13 @@
         return;
       }
 
-      // Oisy false-negative resilience: capture pre-swap destination
-      // balance so we can verify the swap landed on-chain even if
-      // Oisy returns its `_arr` error in the JSON-RPC response.
+      // Oisy false-negative resilience: read the pre-swap destination
+      // balance synchronously from the snapshot captured during fetchQuote().
+      // Awaiting a balance query here would burn the gesture window — the
+      // verifier compares against this snapshot if Oisy returns its `_arr`
+      // error.
       const walletState = get(walletStore);
-      const beforeToBalance = walletState.principal
-        ? await TokenService.getTokenBalance(toToken.ledgerId, walletState.principal, { skipCache: true }).catch(() => null)
-        : null;
+      const beforeToBalance = beforeToBalanceSnapshot;
 
       const swapResult = await callWithOisyFalseNegativeGuard(
         () => executeRoute(currentRoute!, fromToken, toToken, amountRaw, slippageBps),
