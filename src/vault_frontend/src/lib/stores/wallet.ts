@@ -46,7 +46,8 @@ function getOwner(principal: any): Principal {
  */
 async function fetchCollateralBalances(
   ownerPrincipal: Principal,
-  collateralPrices: Record<string, number>
+  collateralPrices: Record<string, number>,
+  opts?: { skipCache?: boolean },
 ): Promise<Record<string, TokenBalance>> {
   const { collateralStore } = await import('./collateralStore');
   const collaterals = await collateralStore.fetchSupportedCollateral();
@@ -56,7 +57,7 @@ async function fetchCollateralBalances(
   const nonIcp = collaterals.filter(c => c.ledgerCanisterId !== CANISTER_IDS.ICP_LEDGER);
   const results = await Promise.allSettled(
     nonIcp.map(async (c) => {
-      const raw = await TokenService.getTokenBalance(c.ledgerCanisterId, ownerPrincipal);
+      const raw = await TokenService.getTokenBalance(c.ledgerCanisterId, ownerPrincipal, opts);
       const value = Number(raw) / Math.pow(10, c.decimals);
       const displayDecimals = c.decimals > 6 ? 8 : 6;
       const factor = Math.pow(10, displayDecimals);
@@ -171,7 +172,7 @@ function createWalletStore() {
     }
   }
 
-  async function refreshBalance() {
+  async function refreshBalance(opts?: { skipCache?: boolean }) {
     try {
       const state = get(walletStore);
       if (!state.principal || !state.isConnected) {
@@ -179,7 +180,7 @@ function createWalletStore() {
         return;
       }
 
-      const { icpBalance, icusdBalance } = await appDataStore.fetchBalances(state.principal, true);
+      const { icpBalance, icusdBalance } = await appDataStore.fetchBalances(state.principal, true, opts);
       const protocolStatus = await appDataStore.fetchProtocolStatus();
       const icpPriceValue = protocolStatus?.lastIcpRate || 0;
 
@@ -189,9 +190,9 @@ function createWalletStore() {
       let threeUsdBalance = 0n;
       try {
         [ckusdtBalance, ckusdcBalance, threeUsdBalance] = await Promise.all([
-          TokenService.getTokenBalance(CONFIG.ckusdtLedgerId, state.principal),
-          TokenService.getTokenBalance(CONFIG.ckusdcLedgerId, state.principal),
-          TokenService.getTokenBalance(CONFIG.threePoolCanisterId, state.principal),
+          TokenService.getTokenBalance(CONFIG.ckusdtLedgerId, state.principal, opts),
+          TokenService.getTokenBalance(CONFIG.ckusdcLedgerId, state.principal, opts),
+          TokenService.getTokenBalance(CONFIG.threePoolCanisterId, state.principal, opts),
         ]);
       } catch (e) {
         console.warn('Failed to fetch stablecoin balances:', e);
@@ -205,7 +206,7 @@ function createWalletStore() {
       // Fetch collateral token balances (ckBTC, ckXAUT, etc.)
       let collateralBalances: Record<string, TokenBalance> = {};
       try {
-        collateralBalances = await fetchCollateralBalances(state.principal, {});
+        collateralBalances = await fetchCollateralBalances(state.principal, {}, opts);
       } catch (e) {
         console.warn('Failed to fetch collateral balances:', e);
       }
