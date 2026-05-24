@@ -41,6 +41,37 @@ export interface Amm1ApyResult {
   source_window_days: number;
 }
 
+export interface Amm1EffectiveApy {
+  // AMM1's own earnings (trading fees + icUSD rewards stream).
+  amm1_apy_pct: number;
+  // Pass-through 3pool yield on the 3USD half of the pool.
+  passthrough_3pool_apy_pct: number;
+  // Sum of the above — what an LP actually earns per dollar deployed.
+  total_apy_pct: number;
+}
+
+// A constant-product AMM held near equilibrium by arbitrage keeps ~50% of
+// its value in each side. The 3USD side accrues 3pool yield via virtual-price
+// growth; the ICP side does not. So an LP's effective yield is AMM1's own
+// APY plus half of the 3pool APY.
+export const AMM1_THREEUSD_VALUE_SHARE = 0.5;
+
+/**
+ * Combine AMM1's standalone APY with the 3pool yield embedded in the
+ * 3USD half of the AMM1 reserve. Pure function — no IO.
+ */
+export function computeAmm1EffectiveApy(
+  amm1: Amm1ApyResult,
+  threePoolApyPct: number,
+): Amm1EffectiveApy {
+  const passthrough = threePoolApyPct * AMM1_THREEUSD_VALUE_SHARE;
+  return {
+    amm1_apy_pct: amm1.total_apy_pct,
+    passthrough_3pool_apy_pct: passthrough,
+    total_apy_pct: amm1.total_apy_pct + passthrough,
+  };
+}
+
 interface DailyRewardPoint {
   day_start_ns: bigint;
   amount: bigint;

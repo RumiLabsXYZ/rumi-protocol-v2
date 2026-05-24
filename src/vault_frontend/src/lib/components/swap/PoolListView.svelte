@@ -5,12 +5,15 @@
     threePoolService,
     POOL_TOKENS,
     formatTokenAmount,
-    calculateTotalApy,
   } from '../../services/threePoolService';
   import { ammService, type PoolInfo } from '../../services/ammService';
-  import { getAmm1Apy, type Amm1ApyResult } from '../../services/amm1ApyService';
-  import { ProtocolService } from '../../services/protocol';
-  import { publicActor } from '../../services/protocol/apiClient';
+  import {
+    getAmm1Apy,
+    computeAmm1EffectiveApy,
+    AMM1_THREEUSD_VALUE_SHARE,
+    type Amm1ApyResult,
+  } from '../../services/amm1ApyService';
+  import { getThreePoolApy } from '../../services/threePoolApyService';
   import { CANISTER_IDS } from '../../config';
   import type { PoolStatus } from '../../services/threePoolService';
 
@@ -29,6 +32,13 @@
   let ammApy: Amm1ApyResult | null = null;
   let showThreePoolTooltip = false;
   let showAmmTooltip = false;
+
+  // Effective AMM1 APY = AMM1's own APY + 50% × 3pool APY (pass-through on
+  // the 3USD half of the reserve). Null until both pools' APYs resolve.
+  $: ammEffective =
+    ammApy !== null && threePoolApyPct !== null
+      ? computeAmm1EffectiveApy(ammApy, threePoolApyPct)
+      : null;
 
   $: isConnected = $walletStore.isConnected;
 
@@ -76,56 +86,10 @@
   }
 
   async function loadThreePoolApy() {
-    if (!threePoolStatus) return;
-
-    const [protocolStatus, interestSplit, swapFees7d] = await Promise.all([
-      ProtocolService.getProtocolStatus().catch(() => null),
-      (publicActor.get_interest_split() as Promise<{ destination: string; bps: bigint }[]>).catch(() => null),
-      threePoolService.getSwapFeesOverWindow(7).catch(() => 0n),
-    ]);
-
-    if (!protocolStatus || !threePoolStatus) {
-      threePoolApyPct = 0;
-      return;
-    }
-
-    // TVL in normalized e8s (3pool stores 6/6/8 decimals natively)
-    let poolTvlE8s = 0;
-    for (let i = 0; i < threePoolStatus.balances.length; i++) {
-      const token = POOL_TOKENS[i];
-      if (token) {
-        const normalized = token.decimals === 8
-          ? Number(threePoolStatus.balances[i])
-          : Number(threePoolStatus.balances[i]) * 100;
-        poolTvlE8s += normalized;
-      }
-    }
-    const poolTvlIcusd = poolTvlE8s / 1e8;
-
-    const threePoolEntry = interestSplit?.find(e => e.destination === 'three_pool');
-    const threePoolShareBps = threePoolEntry ? Number(threePoolEntry.bps) : 5000;
-
-    // Break out interest vs swap-fee APR components for the tooltip
-    if (poolTvlIcusd > 0) {
-      const share = threePoolShareBps / 10_000;
-      let interestApr = 0;
-      for (const info of protocolStatus.perCollateralInterest) {
-        if (info.totalDebtE8s === 0 || info.weightedInterestRate === 0) continue;
-        interestApr += (info.weightedInterestRate * share * info.totalDebtE8s) / poolTvlIcusd;
-      }
-      const fees7dIcusd = Number(swapFees7d) / 1e8;
-      const swapFeeApr = (fees7dIcusd / poolTvlIcusd) * (365 / 7);
-      threePoolInterestAprPct = interestApr * 100;
-      threePoolSwapFeeAprPct = swapFeeApr * 100;
-    }
-
-    const apy = calculateTotalApy(
-      threePoolShareBps,
-      protocolStatus.perCollateralInterest,
-      poolTvlIcusd,
-      swapFees7d,
-    );
-    threePoolApyPct = apy !== null ? apy * 100 : 0;
+    const r = await getThreePoolApy();
+    threePoolInterestAprPct = r.interest_apr_pct;
+    threePoolSwapFeeAprPct = r.swap_fee_apr_pct;
+    threePoolApyPct = r.total_apy_pct;
   }
 
   async function loadAmmApy() {
@@ -232,21 +196,27 @@
             on:mouseover|stopPropagation={() => { showAmmTooltip = true; }}
             on:mouseleave={() => { showAmmTooltip = false; }}
           >
-            {#if ammApy === null}
+            {#if ammApy === null || ammEffective === null}
               <span class="apy-loading">… APY</span>
             {:else}
               <svg class="apy-arrow" width="9" height="9" viewBox="0 0 10 10" fill="none">
                 <path d="M5 8V2M5 2L2 5M5 2L8 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
               </svg>
-              {ammApy.total_apy_pct.toFixed(1)}% APY
+              {ammEffective.total_apy_pct.toFixed(1)}% APY
             {/if}
 
-            {#if showAmmTooltip && ammApy !== null}
+            {#if showAmmTooltip && ammApy !== null && ammEffective !== null}
               <div class="apy-tooltip">
                 <div class="apy-tooltip-caret"></div>
                 <p>
                   Rewards {ammApy.reward_apy_pct.toFixed(2)}% + Swap fees {ammApy.trading_fee_apy_pct.toFixed(2)}%
-                  = total {ammApy.total_apy_pct.toFixed(2)}%
+                  + 3USD yield {ammEffective.passthrough_3pool_apy_pct.toFixed(2)}%
+                  = total {ammEffective.total_apy_pct.toFixed(2)}%
+                </p>
+                <p class="apy-tooltip-foot">
+                  3USD yield is {(AMM1_THREEUSD_VALUE_SHARE * 100).toFixed(0)}% of 3pool APY
+                  ({threePoolApyPct !== null ? threePoolApyPct.toFixed(2) : '—'}%) since
+                  the pool holds ~half its value in 3USD.
                 </p>
               </div>
             {/if}
@@ -470,6 +440,14 @@
   }
 
   .apy-tooltip p { margin: 0; }
+
+  .apy-tooltip-foot {
+    margin-top: 0.375rem !important;
+    padding-top: 0.375rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    color: #94a3b8;
+    font-size: 0.625rem;
+  }
 
   /* ── Explainer under the cards ── */
   .liquidity-explainer {
