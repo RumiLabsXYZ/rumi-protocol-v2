@@ -487,7 +487,20 @@
   // When repaying the full debt in icUSD AND the vault has collateral → offer
   // "Repay & Close" via the backend repay_and_close_vault compound method.
   // Saves one Oisy consent screen (3 popups → 2).
-  $: isRepayAndClose = repayTokenType === 'icUSD' && isMaxRepay && vaultCollateralAmount > 0;
+  //
+  // The MIN_ICUSD gate fences off the protocol's "stuck debt zone" — debt
+  // between DUST_DEBT_THRESHOLD (0.0005 icUSD) and MIN_ICUSD_AMOUNT (0.1
+  // icUSD) can't be repaid (backend rejects with AmountTooLow) and can't
+  // be dust-forgiven on close. Without this gate, a user with e.g. 0.05
+  // icUSD debt would see the button promise "Repay & Close" but get a
+  // misleading "Failed" toast when the backend rejected. With the gate,
+  // the button stays as plain "Repay" and the existing rejection-with-
+  // hint path applies (same as today's behavior — no regression).
+  $: isRepayAndClose =
+      repayTokenType === 'icUSD'
+      && isMaxRepay
+      && parseFloat(repayAmount) >= MIN_ICUSD
+      && vaultCollateralAmount > 0;
 
   function clearMessages() { /* toasts auto-dismiss */ }
 
