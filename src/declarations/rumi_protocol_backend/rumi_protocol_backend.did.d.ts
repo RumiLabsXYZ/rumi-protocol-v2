@@ -810,6 +810,10 @@ export interface RateMarker {
   'multiplier' : Uint8Array | number[],
   'cr_level' : Uint8Array | number[],
 }
+export interface RepayAndCloseSuccess {
+  'collateral_return_block_index' : [] | [bigint],
+  'repay_block_index' : bigint,
+}
 export interface ReserveBalance {
   'balance' : bigint,
   'ledger' : Principal,
@@ -831,6 +835,8 @@ export type Result_10 = { 'Ok' : boolean } |
 export type Result_11 = { 'Ok' : ReserveRedemptionResult } |
   { 'Err' : ProtocolError };
 export type Result_12 = { 'Ok' : StabilityPoolLiquidationResult } |
+  { 'Err' : ProtocolError };
+export type Result_13 = { 'Ok' : RepayAndCloseSuccess } |
   { 'Err' : ProtocolError };
 export type Result_2 = { 'Ok' : string } |
   { 'Err' : ProtocolError };
@@ -1093,6 +1099,7 @@ export interface _SERVICE {
   'redeem_collateral' : ActorMethod<[Principal, bigint], Result_3>,
   'redeem_icp' : ActorMethod<[bigint], Result_3>,
   'redeem_reserves' : ActorMethod<[bigint, [] | [Principal]], Result_11>,
+  'repay_and_close_vault' : ActorMethod<[VaultArg], Result_13>,
   'repay_to_vault' : ActorMethod<[VaultArg], Result_1>,
   'repay_to_vault_with_stable' : ActorMethod<[VaultArgWithToken], Result_1>,
   'reset_bot_budget' : ActorMethod<[bigint], Result>,

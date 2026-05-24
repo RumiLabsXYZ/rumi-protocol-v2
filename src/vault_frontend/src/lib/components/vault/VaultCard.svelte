@@ -478,6 +478,17 @@
   // When no debt + max withdraw → this becomes a "Withdraw & Close" action
   $: isWithdrawAndClose = canClose && isMaxWithdraw;
 
+  // Detect if repay amount is the full debt (max). Only icUSD-denominated
+  // repays can be merged with close — the compound backend method takes icUSD.
+  $: isMaxRepay = (() => {
+    const amt = parseFloat(repayAmount);
+    return amt > 0 && maxRepayable > 0 && Math.abs(amt - maxRepayable) < 0.0001;
+  })();
+  // When repaying the full debt in icUSD AND the vault has collateral → offer
+  // "Repay & Close" via the backend repay_and_close_vault compound method.
+  // Saves one Oisy consent screen (3 popups → 2).
+  $: isRepayAndClose = repayTokenType === 'icUSD' && isMaxRepay && vaultCollateralAmount > 0;
+
   function clearMessages() { /* toasts auto-dismiss */ }
 
   function floorTo(val: number, decimals: number): string {
@@ -630,18 +641,30 @@
     clearMessages(); isProcessing = true;
     try {
       let result;
-      if (repayTokenType === 'icUSD') {
+      if (isRepayAndClose) {
+        // Compound: repay full debt + withdraw all collateral + close vault in
+        // one backend call (one Oisy consent screen instead of three).
+        result = await protocolManager.repayAndCloseVault(vault.vaultId, amount);
+      } else if (repayTokenType === 'icUSD') {
         result = await protocolManager.repayToVault(vault.vaultId, amount);
       } else {
         result = await protocolManager.repayToVaultWithStable(vault.vaultId, amount, repayTokenType);
       }
       if (result.success) {
+        const actionLabel = isRepayAndClose ? 'Repaid and closed vault' : `Repaid ${amount} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`;
         const msg = result.oisyResilient
-          ? `Repaid ${amount} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType} (wallet glitch ignored — operation confirmed on-chain).`
-          : `Repaid ${amount} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`;
+          ? `${actionLabel} (wallet glitch ignored — operation confirmed on-chain).`
+          : actionLabel;
         toastStore.success(msg, 8000); repayAmount = '';
         await new Promise(r => setTimeout(r, 1000));
-        await vaultStore.refreshVault(vault.vaultId); dispatch('updated');
+        // For repay-and-close, refresh the full vault list (vault is gone);
+        // for partial repay, refresh just this vault.
+        if (isRepayAndClose) {
+          await vaultStore.refreshVaults();
+        } else {
+          await vaultStore.refreshVault(vault.vaultId);
+        }
+        dispatch('updated');
       } else { toastStore.error(result.error || 'Failed', 8000); }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
@@ -971,7 +994,13 @@
                 {/if}
                 <button class="btn-submit btn-submit-debt" on:click={handleRepay}
                   disabled={isProcessing || !repayAmount || repayOverMax}>
-                  {isProcessing ? '...' : 'Repay'}
+                  {#if isProcessing}
+                    ...
+                  {:else if isRepayAndClose}
+                    Repay & Close
+                  {:else}
+                    Repay
+                  {/if}
                 </button>
               </div>
             {/if}

@@ -1313,6 +1313,140 @@ static async repayToVault(vaultId: number, icusdAmount: number): Promise<VaultOp
 }
 
 /**
+ * Compound repay + close in a single canister call.
+ *
+ * Combines what would otherwise be `repay_to_vault` followed by
+ * `withdraw_and_close_vault` into one call so Oisy wallets see 2 consent
+ * screens (approve icUSD + this call) instead of 4. Use this when the user
+ * wants to close a vault that still has outstanding debt — the backend
+ * pulls the icUSD, zeroes the debt, returns all collateral, and removes
+ * the vault under a single GuardPrincipal.
+ *
+ * Atomicity: if the repay phase fails, no state mutates. If the collateral
+ * return fails after repay succeeded, the vault stays open with debt=0 and
+ * the full collateral — recoverable via the existing
+ * `withdrawCollateralAndCloseVault` call. The error message surfaces this.
+ */
+static async repayAndCloseVault(vaultId: number, icusdAmount: number): Promise<VaultOperationResult> {
+  return ApiClient.executeSequentialOperation(async () => {
+    try {
+      console.log(`Repaying ${icusdAmount} icUSD and closing vault #${vaultId}`);
+
+      if (!isFinite(icusdAmount) || icusdAmount <= 0) {
+        return {
+          success: false,
+          error: `Invalid repayment amount: ${icusdAmount}. Amount must be a finite positive number.`
+        };
+      }
+
+      if (icusdAmount * E8S < MIN_ICUSD_AMOUNT) {
+        return {
+          success: false,
+          error: `Amount too low. Minimum repayment amount: ${MIN_ICUSD_AMOUNT / E8S} icUSD`
+        };
+      }
+
+      const amountE8s = BigInt(Math.floor(icusdAmount * E8S));
+      const actor = await ApiClient.getAuthenticatedActor();
+      const vaultArg = {
+        vault_id: BigInt(vaultId),
+        amount: amountE8s
+      };
+
+      // _arr verifier: the compound succeeded if the vault is gone. We can't
+      // use the borrowed-amount snapshot (vault is removed, snapshot lookup
+      // returns null) — query vault existence directly.
+      const verifyRepayCloseLanded = async () => {
+        const snap = await ApiClient.fetchVaultRawSnapshot(vaultId);
+        if (!snap) return false;
+        // Vault either fully gone, or husk with zero collateral and zero debt.
+        if (!snap.exists) return true;
+        return snap.collateralAmount === 0n && snap.borrowedIcusd === 0n;
+      };
+
+      // ─── Oisy path: sequential approve + repay_and_close_vault ───
+      const signerAgent = isOisyWallet() ? await pnp.getSignerAgent() : null;
+      if (signerAgent) {
+        console.log(`[Oisy] Sequential icUSD approve + repay_and_close_vault`);
+        const LARGE_APPROVAL = BigInt(100_000_000_000_000_000); // 1B icUSD in e8s
+        const icusdLedgerActor = await walletStore.getActor(
+          CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL
+        ) as any;
+
+        // 1) Approve icUSD (first consent screen, Tier 1 native).
+        const approveResult = await icusdLedgerActor.icrc2_approve({
+          amount: LARGE_APPROVAL,
+          spender: { owner: Principal.fromText(CONFIG.currentCanisterId), subaccount: [] },
+          expires_at: [], expected_allowance: [], memo: [], fee: [],
+          from_subaccount: [], created_at_time: []
+        });
+        if (approveResult && 'Err' in approveResult) {
+          return { success: false, error: `icUSD approval failed: ${JSON.stringify(approveResult.Err)}` };
+        }
+
+        // 2) repay_and_close_vault (second consent screen), guarded against _arr.
+        const result = await callWithOisyFalseNegativeGuard(
+          () => actor.repay_and_close_vault(vaultArg),
+          verifyRepayCloseLanded,
+          `Oisy repay_and_close vault #${vaultId} (${icusdAmount} icUSD)`
+        );
+
+        if (isOisyLandedSentinel(result)) {
+          return {
+            success: true,
+            vaultId,
+            message: `Vault #${vaultId} closed (confirmed on-chain after wallet error).`,
+            oisyResilient: true,
+          };
+        }
+
+        if ('Ok' in result) {
+          return {
+            success: true,
+            vaultId,
+            blockIndex: Number(result.Ok.repay_block_index),
+            message: `Vault #${vaultId} closed. Repay block: ${result.Ok.repay_block_index}, collateral return block: ${result.Ok.collateral_return_block_index?.[0] ?? 'none'}.`,
+          };
+        }
+        return { success: false, error: ApiClient.formatProtocolError(result.Err) };
+      }
+
+      // ─── Standard path (non-Oisy): user must have already approved icUSD ───
+      const result = await callWithOisyFalseNegativeGuard(
+        () => actor.repay_and_close_vault(vaultArg),
+        verifyRepayCloseLanded,
+        `repay_and_close vault #${vaultId} (${icusdAmount} icUSD)`
+      );
+
+      if (isOisyLandedSentinel(result)) {
+        return {
+          success: true,
+          vaultId,
+          message: `Vault #${vaultId} closed (confirmed on-chain after wallet error).`,
+          oisyResilient: true,
+        };
+      }
+
+      if ('Ok' in result) {
+        return {
+          success: true,
+          vaultId,
+          blockIndex: Number(result.Ok.repay_block_index),
+          message: `Vault #${vaultId} closed.`,
+        };
+      }
+      return { success: false, error: ApiClient.formatProtocolError(result.Err) };
+    } catch (err) {
+      console.error('Error in repay_and_close_vault:', err);
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : 'Unknown error in repay_and_close_vault'
+      };
+    }
+  }, vaultId);
+}
+
+/**
  * Repay to vault using ckUSDT or ckUSDC (1:1 with icUSD).
  *
  * For Oisy wallets: if the stable allowance is insufficient, batches
