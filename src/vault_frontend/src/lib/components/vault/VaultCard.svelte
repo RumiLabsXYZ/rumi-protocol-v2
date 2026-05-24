@@ -488,18 +488,14 @@
   // "Repay & Close" via the backend repay_and_close_vault compound method.
   // Saves one Oisy consent screen (3 popups → 2).
   //
-  // The MIN_ICUSD gate fences off the protocol's "stuck debt zone" — debt
-  // between DUST_DEBT_THRESHOLD (0.0005 icUSD) and MIN_ICUSD_AMOUNT (0.1
-  // icUSD) can't be repaid (backend rejects with AmountTooLow) and can't
-  // be dust-forgiven on close. Without this gate, a user with e.g. 0.05
-  // icUSD debt would see the button promise "Repay & Close" but get a
-  // misleading "Failed" toast when the backend rejected. With the gate,
-  // the button stays as plain "Repay" and the existing rejection-with-
-  // hint path applies (same as today's behavior — no regression).
+  // `isMaxRepay` already guarantees `repayAmount == maxRepayable` (the live
+  // debt), so the compound method always receives a full-debt amount. The
+  // backend's repay_and_close_vault bypasses MIN_ICUSD_AMOUNT for this path,
+  // which lets vaults stuck in the (DUST_DEBT_THRESHOLD, MIN_ICUSD_AMOUNT)
+  // zone clear here — no separate MIN_ICUSD gate needed on the toggle.
   $: isRepayAndClose =
       repayTokenType === 'icUSD'
       && isMaxRepay
-      && parseFloat(repayAmount) >= MIN_ICUSD
       && vaultCollateralAmount > 0;
 
   function clearMessages() { /* toasts auto-dismiss */ }
@@ -655,7 +651,10 @@
   async function handleRepay() {
     const amount = parseFloat(repayAmount);
     if (!amount || amount <= 0) { toastStore.error('Enter a valid amount', 8000); return; }
-    if (amount < MIN_ICUSD) { toastStore.error(`Minimum repay amount is ${MIN_ICUSD} icUSD`, 8000); return; }
+    // MIN_ICUSD floor still applies to partial repays (anti-spam guarantee on
+    // the backend). The compound `repay_and_close_vault` path bypasses it so
+    // stuck-zone vaults can be cleared — match that here.
+    if (!isRepayAndClose && amount < MIN_ICUSD) { toastStore.error(`Minimum repay amount is ${MIN_ICUSD} icUSD`, 8000); return; }
     if (repayOverMax) { toastStore.error(`Max: ${formatNumber(maxRepayable, 2)} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`, 8000); return; }
     clearMessages(); isProcessing = true;
     try {

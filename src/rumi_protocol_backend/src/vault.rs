@@ -982,7 +982,16 @@ pub async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, Protocol
 /// Performs interest accrual, validates caller/state, pulls icUSD via
 /// `icrc2_transfer_from`, records the repayment, and distributes the interest
 /// share to treasury.
-async fn repay_to_vault_internal(caller: Principal, arg: VaultArg) -> Result<u64, ProtocolError> {
+///
+/// `is_full_close` signals that the caller is the `repay_and_close_vault`
+/// compound endpoint and intends to zero the vault's debt in this call. When
+/// true, the `MIN_ICUSD_AMOUNT` floor is bypassed so vaults stuck in the
+/// `(DUST_DEBT_THRESHOLD, MIN_ICUSD_AMOUNT)` zone can be cleared. The floor
+/// stays in force for the regular `repay_to_vault` path as an anti-spam
+/// guarantee — an explicit flag (rather than `amount == debt` equality) avoids
+/// brittleness from interest accruing between the caller's debt fetch and
+/// this helper's read.
+async fn repay_to_vault_internal(caller: Principal, arg: VaultArg, is_full_close: bool) -> Result<u64, ProtocolError> {
     let amount: ICUSD = arg.amount.into();
 
     // Accrue interest before repayment so the correct debt balance is used.
@@ -1008,7 +1017,7 @@ async fn repay_to_vault_internal(caller: Principal, arg: VaultArg) -> Result<u64
         return Err(ProtocolError::CallerNotOwner);
     }
 
-    if amount < read_state(|s| s.min_icusd_amount) {
+    if !is_full_close && amount < read_state(|s| s.min_icusd_amount) {
         return Err(ProtocolError::AmountTooLow {
             minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
         });
@@ -1048,7 +1057,7 @@ pub async fn repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("repay_vault_{}", arg.vault_id))?;
 
-    match repay_to_vault_internal(caller, arg).await {
+    match repay_to_vault_internal(caller, arg, false).await {
         Ok(block_index) => {
             guard_principal.complete();
             Ok(block_index)
@@ -2152,8 +2161,10 @@ pub async fn repay_and_close_vault(arg: VaultArg) -> Result<RepayAndCloseSuccess
     let guard_principal = GuardPrincipal::new(caller, &format!("repay_and_close_{}", vault_id))?;
 
     // Phase 1: repay. On failure the guard fails and we propagate the error —
-    // no collateral movement attempted.
-    let repay_block_index = match repay_to_vault_internal(caller, arg).await {
+    // no collateral movement attempted. `is_full_close=true` lets vaults stuck
+    // in the (DUST_DEBT_THRESHOLD, MIN_ICUSD_AMOUNT) zone clear their debt
+    // here, since the close phase below will zero the vault entirely.
+    let repay_block_index = match repay_to_vault_internal(caller, arg, true).await {
         Ok(idx) => idx,
         Err(e) => {
             guard_principal.fail();
