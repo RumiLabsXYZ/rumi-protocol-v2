@@ -46,7 +46,7 @@
   }
 
   function handleSuccess() {
-    walletStore.refreshBalance();
+    walletStore.refreshBalance({ skipCache: true });
   }
 
   function handlePoolSelect(e: CustomEvent<{ pool: 'threepool' | 'amm' }>) {
