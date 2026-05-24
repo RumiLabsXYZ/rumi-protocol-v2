@@ -545,6 +545,10 @@ type LiquidityStatus = record {
 };
 type Mode = variant { ReadOnly; GeneralAvailability; Recovery };
 type OpenVaultSuccess = record { block_index : nat64; vault_id : nat64 };
+type RepayAndCloseSuccess = record {
+  repay_block_index : nat64;
+  collateral_return_block_index : opt nat64;
+};
 type PerCollateralRateCurve = record {
   markers : vec record { float64; float64 };
   base_rate : float64;
@@ -696,6 +700,7 @@ type Result_6 = variant { Ok : nat8; Err : ProtocolError };
 type Result_7 = variant { Ok : float64; Err : ProtocolError };
 type Result_8 = variant { Ok : ConsentInfo; Err : Icrc21Error };
 type Result_9 = variant { Ok : OpenVaultSuccess; Err : ProtocolError };
+type Result_13 = variant { Ok : RepayAndCloseSuccess; Err : ProtocolError };
 type SpProofLedger = variant { IcusdBurn; ThreePoolTransfer };
 type SpWritedownProof = record {
   block_index : nat64;
@@ -901,6 +906,7 @@ service : (ProtocolArg) -> {
   redeem_collateral : (principal, nat64) -> (Result_3);
   redeem_icp : (nat64) -> (Result_3);
   redeem_reserves : (nat64, opt principal) -> (Result_11);
+  repay_and_close_vault : (VaultArg) -> (Result_13);
   repay_to_vault : (VaultArg) -> (Result_1);
   repay_to_vault_with_stable : (VaultArgWithToken) -> (Result_1);
   reset_bot_budget : (nat64) -> (Result);

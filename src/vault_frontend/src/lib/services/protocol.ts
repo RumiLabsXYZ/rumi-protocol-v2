@@ -44,6 +44,7 @@ export class ProtocolService {
   static addMarginToVault = ApiClient.addMarginToVault;
   static repayToVault = ApiClient.repayToVault;
   static partialRepayToVault = ApiClient.repayToVault;
+  static repayAndCloseVault = ApiClient.repayAndCloseVault;
   static closeVault = ApiClient.closeVault;
   static getVaultHistory = ApiClient.getVaultHistory;
   static getVaultInterestRate = ApiClient.getVaultInterestRate;
@@ -125,6 +126,7 @@ export const protocolService = {
 
   // Add the new combined operation to the public API
   withdrawCollateralAndCloseVault: ProtocolService.withdrawCollateralAndCloseVault,
+  repayAndCloseVault: ProtocolService.repayAndCloseVault,
 
   // Wallet operations
   approveIcpTransfer: ProtocolService.approveIcpTransfer,

@@ -3877,3 +3877,138 @@ fn test_3usd_reserves_liquidation_non_sp_rejected() {
 
     log("🎉 TEST PASSED: test_3usd_reserves_liquidation_non_sp_rejected");
 }
+
+// ─── Phase 3: repay_and_close_vault compound method ─────────────────────────
+//
+// `repay_and_close_vault(vault_id, repay_amount)` collapses three user
+// actions (repay debt → withdraw collateral → close vault) into one canister
+// call so Oisy wallets see 2 consent screens instead of 4 when closing a
+// borrowed vault. Tests the happy path: a vault with both debt and collateral
+// becomes a fully-removed vault with collateral returned to the user.
+
+#[derive(CandidType, Deserialize, Debug, Clone)]
+struct RepayAndCloseSuccess {
+    repay_block_index: u64,
+    collateral_return_block_index: Option<u64>,
+}
+
+#[test]
+fn test_repay_and_close_vault_full_cycle() {
+    log("🧪 TEST STARTING: test_repay_and_close_vault_full_cycle");
+
+    let (pic, protocol_id, icp_ledger_id, icusd_ledger_id) = setup_protocol();
+
+    if !verify_icp_rate_available(&pic, protocol_id) {
+        log("⚠️ Skipping test due to missing ICP rate");
+        return;
+    }
+
+    let test_user = Principal::self_authenticating(&[1, 2, 3, 4]);
+    log(&format!("👤 Test user: {}", test_user));
+
+    // 1) Create vault with 50 ICP collateral
+    let collateral_amount = 5_000_000_000u64; // 50 ICP
+    let vault_id = create_test_vault(&pic, protocol_id, icp_ledger_id, test_user, collateral_amount)
+        .expect("create_test_vault should succeed");
+    log(&format!("🏦 Created vault #{} with {} ICP", vault_id, collateral_amount));
+
+    // 2) Borrow 20 icUSD against it
+    let borrow_amount = 2_000_000_000u64;
+    call_borrow_from_vault(&pic, protocol_id, test_user, VaultArg { vault_id, amount: borrow_amount })
+        .expect("borrow_from_vault should succeed");
+    log(&format!("💵 Borrowed {} icUSD", borrow_amount));
+
+    let vault_before = get_vault(&pic, protocol_id, test_user, vault_id);
+    assert_eq!(vault_before.borrowed_icusd_amount, borrow_amount, "borrow should be reflected in vault state");
+    assert_eq!(vault_before.icp_margin_amount, collateral_amount, "collateral should still be present");
+
+    // 3) Approve enough icUSD for repayment (use 1.5x as a safety buffer for accrued interest)
+    let approve_amount = borrow_amount * 3 / 2;
+    let approve_args = ApproveArgs {
+        fee: None, memo: None, from_subaccount: None, created_at_time: None,
+        amount: candid::Nat::from(approve_amount),
+        expected_allowance: None, expires_at: None,
+        spender: Account { owner: protocol_id, subaccount: None },
+    };
+    pic.update_call(
+        icusd_ledger_id, test_user, "icrc2_approve",
+        encode_args((approve_args,)).expect("encode icrc2_approve"),
+    ).expect("icrc2_approve call");
+    log("🔐 Approved icUSD for repayment");
+
+    // 4) Snapshot ICP balance before — collateral return should grow it.
+    let icp_balance_before = pic.update_call(
+        icp_ledger_id, test_user, "icrc1_balance_of",
+        encode_args((Account { owner: test_user, subaccount: None },)).expect("encode balance_of"),
+    ).expect("icp balance_of call");
+    let icp_balance_before: candid::Nat = match icp_balance_before {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode balance"),
+        WasmResult::Reject(err) => panic!("balance_of rejected: {}", err),
+    };
+    log(&format!("💰 ICP balance before close: {}", icp_balance_before));
+
+    // 5) Call repay_and_close_vault. This is the not-yet-implemented method —
+    //    the test should fail with "Canister has no update method" until the
+    //    implementation lands. After implementation, it must:
+    //      - pull `borrow_amount` icUSD via icrc2_transfer_from
+    //      - send the 50 ICP collateral (minus ledger fee) back to test_user
+    //      - delete the vault from state
+    let arg = VaultArg { vault_id, amount: borrow_amount };
+    let result = pic.update_call(
+        protocol_id, test_user, "repay_and_close_vault",
+        encode_args((arg,)).expect("encode repay_and_close_vault"),
+    ).expect("repay_and_close_vault call");
+
+    let success: RepayAndCloseSuccess = match result {
+        WasmResult::Reply(bytes) => {
+            match decode_one::<Result<RepayAndCloseSuccess, ProtocolError>>(&bytes) {
+                Ok(Ok(s)) => s,
+                Ok(Err(err)) => panic!("repay_and_close_vault returned error: {:?}", err),
+                Err(err) => panic!("failed to decode repay_and_close_vault response: {}", err),
+            }
+        }
+        WasmResult::Reject(err) => panic!("Canister rejected repay_and_close_vault: {}", err),
+    };
+    log(&format!("✅ repay_and_close_vault returned: {:?}", success));
+    assert!(success.repay_block_index > 0, "repay block index should be set");
+    assert!(success.collateral_return_block_index.is_some(), "collateral return block index should be set when collateral > 0");
+
+    // 6) Assert vault no longer exists. get_vault panics on missing — query
+    //    get_vaults directly and confirm the vault_id is absent.
+    let vaults_after = pic.query_call(
+        protocol_id, test_user, "get_vaults",
+        encode_args((Some(test_user),)).expect("encode get_vaults"),
+    ).expect("get_vaults call");
+    let vaults_after: Vec<CandidVault> = match vaults_after {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode get_vaults"),
+        WasmResult::Reject(err) => panic!("get_vaults rejected: {}", err),
+    };
+    assert!(
+        !vaults_after.iter().any(|v| v.vault_id == vault_id),
+        "vault #{} should be removed after repay_and_close_vault, still found in: {:?}",
+        vault_id, vaults_after.iter().map(|v| v.vault_id).collect::<Vec<_>>()
+    );
+    log(&format!("✅ Vault #{} is gone", vault_id));
+
+    // 7) Assert ICP balance grew. Expected: previous + collateral_amount - icp_fee.
+    //    Use a loose lower bound (95% of collateral) to absorb fee uncertainty.
+    let icp_balance_after = pic.update_call(
+        icp_ledger_id, test_user, "icrc1_balance_of",
+        encode_args((Account { owner: test_user, subaccount: None },)).expect("encode balance_of"),
+    ).expect("icp balance_of call");
+    let icp_balance_after: candid::Nat = match icp_balance_after {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode balance"),
+        WasmResult::Reject(err) => panic!("balance_of rejected: {}", err),
+    };
+    log(&format!("💰 ICP balance after close: {}", icp_balance_after));
+
+    let collateral_min_returned = candid::Nat::from(collateral_amount * 95 / 100);
+    let delta = icp_balance_after.clone() - icp_balance_before.clone();
+    assert!(
+        delta >= collateral_min_returned,
+        "ICP balance should grow by ~{} (got delta {})",
+        collateral_amount, delta
+    );
+
+    log("🎉 TEST PASSED: test_repay_and_close_vault_full_cycle");
+}

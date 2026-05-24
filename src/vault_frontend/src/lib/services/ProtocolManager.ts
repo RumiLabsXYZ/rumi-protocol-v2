@@ -505,6 +505,48 @@ export class ProtocolManager {
   }
 
   /**
+   * Compound repay + close: pulls icUSD, zeroes debt, returns all collateral,
+   * removes vault — all in one backend call. Saves one Oisy consent screen
+   * vs. the separate repay → withdraw_and_close sequence.
+   */
+  async repayAndCloseVault(vaultId: number, icusdAmount: number): Promise<VaultOperationResult> {
+    // Oisy: bypass executeOperation entirely — its async overhead burns the browser
+    // user gesture context needed for the signer popup.
+    if (isOisyWallet()) {
+      return ApiClient.repayAndCloseVault(vaultId, icusdAmount);
+    }
+    return this.executeOperation(
+      `repayAndCloseVault:${vaultId}`,
+      () => ApiClient.repayAndCloseVault(vaultId, icusdAmount),
+      async () => {
+        await walletOperations.checkSufficientBalance(icusdAmount);
+
+        const amountE8s = BigInt(Math.floor(icusdAmount * 100_000_000));
+        const spenderCanisterId = CONFIG.currentCanisterId;
+
+        try {
+          const currentAllowance = await walletOperations.checkIcusdAllowance(spenderCanisterId);
+          const ICUSD_LEDGER_FEE = BigInt(100_000);
+          const requiredAllowance = amountE8s + ICUSD_LEDGER_FEE + ICUSD_LEDGER_FEE;
+
+          if (currentAllowance < requiredAllowance) {
+            processingStore.setStage(ProcessingStage.APPROVING);
+            const LARGE_APPROVAL = BigInt(100_000_000_000_000_000); // 1B icUSD in e8s
+            const approvalResult = await walletOperations.approveIcusdTransfer(LARGE_APPROVAL, spenderCanisterId);
+            if (!approvalResult.success) {
+              throw new Error(approvalResult.error || 'Failed to approve icUSD transfer');
+            }
+            await new Promise(resolve => setTimeout(resolve, 500));
+          }
+        } catch (err) {
+          console.error('icUSD allowance check/approval failed for repay_and_close:', err);
+          throw new Error(`Failed to ensure icUSD allowance: ${err instanceof Error ? err.message : 'Unknown error'}`);
+        }
+      }
+    );
+  }
+
+  /**
    * Repay vault debt using ckUSDT or ckUSDC with proper ICRC-2 approval flow.
    * Mirrors the icUSD repay flow: check allowance → approve if needed → call backend.
    * Amount is in human-readable terms (e.g., 100.0 = 100 USDT).

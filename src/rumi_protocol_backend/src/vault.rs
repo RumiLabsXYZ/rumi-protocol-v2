@@ -973,33 +973,31 @@ pub async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, Protocol
     }
 }
 
-pub async fn repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
-    let caller = ic_cdk::api::caller();
-    let guard_principal = GuardPrincipal::new(caller, &format!("repay_vault_{}", arg.vault_id))?;
+/// Internal repay logic without guard management.
+///
+/// Called by both `repay_to_vault` (which acquires its own `repay_vault_{id}`
+/// guard) and `repay_and_close_vault` (which holds a single
+/// `repay_and_close_{id}` guard spanning repay + withdraw + close).
+///
+/// Performs interest accrual, validates caller/state, pulls icUSD via
+/// `icrc2_transfer_from`, records the repayment, and distributes the interest
+/// share to treasury.
+async fn repay_to_vault_internal(caller: Principal, arg: VaultArg) -> Result<u64, ProtocolError> {
     let amount: ICUSD = arg.amount.into();
 
     // Accrue interest before repayment so the correct debt balance is used.
     let now = ic_cdk::api::time();
     mutate_state(|s| s.accrue_single_vault(arg.vault_id, now));
 
-    let vault = match read_state(|s| s.vault_id_to_vaults.get(&arg.vault_id).cloned()) {
-        Some(v) => v,
-        None => {
-            guard_principal.fail();
-            return Err(ProtocolError::GenericError("Vault not found".to_string()));
-        }
-    };
+    let vault = read_state(|s| s.vault_id_to_vaults.get(&arg.vault_id).cloned())
+        .ok_or_else(|| ProtocolError::GenericError("Vault not found".to_string()))?;
 
-    if let Err(e) = require_vault_not_processing(&vault) {
-        guard_principal.fail();
-        return Err(e);
-    }
+    require_vault_not_processing(&vault)?;
 
     // Check collateral status allows repayment
     let collateral_status = read_state(|s| s.get_collateral_status(&vault.collateral_type));
     if let Some(status) = collateral_status {
         if !status.allows_repay() {
-            guard_principal.fail();
             return Err(ProtocolError::GenericError(
                 "Repayment is not allowed for this collateral type.".to_string(),
             ));
@@ -1007,12 +1005,10 @@ pub async fn repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
     }
 
     if caller != vault.owner {
-        guard_principal.fail();
         return Err(ProtocolError::CallerNotOwner);
     }
 
     if amount < read_state(|s| s.min_icusd_amount) {
-        guard_principal.fail();
         return Err(ProtocolError::AmountTooLow {
             minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
         });
@@ -1033,24 +1029,33 @@ pub async fn repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
         amount
     };
 
-    if let Err(e) = check_min_vault_debt_after_repay(&vault, amount) {
-        guard_principal.fail();
-        return Err(e);
-    }
+    check_min_vault_debt_after_repay(&vault, amount)?;
 
     match transfer_icusd_from(amount, caller).await {
         Ok(block_index) => {
             let interest_share = mutate_state(|s| record_repayed_to_vault(s, arg.vault_id, amount, block_index));
             crate::treasury::distribute_interest(interest_share, vault.collateral_type).await;
-            guard_principal.complete(); // Mark as completed
             Ok(block_index)
         }
-        Err(transfer_from_error) => {
-            guard_principal.fail(); // Mark as failed
-            Err(ProtocolError::TransferFromError(
-                transfer_from_error,
-                amount.to_u64(),
-            ))
+        Err(transfer_from_error) => Err(ProtocolError::TransferFromError(
+            transfer_from_error,
+            amount.to_u64(),
+        )),
+    }
+}
+
+pub async fn repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let guard_principal = GuardPrincipal::new(caller, &format!("repay_vault_{}", arg.vault_id))?;
+
+    match repay_to_vault_internal(caller, arg).await {
+        Ok(block_index) => {
+            guard_principal.complete();
+            Ok(block_index)
+        }
+        Err(e) => {
+            guard_principal.fail();
+            Err(e)
         }
     }
 }
@@ -1925,18 +1930,23 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
     }
 }
 
-pub async fn withdraw_and_close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
-    let caller = ic_cdk::caller();
-    // Use a specific name for better tracking
-    let _guard_principal = GuardPrincipal::new(caller, &format!("withdraw_and_close_{}", vault_id))?;
-    
+/// Internal withdraw-collateral-and-close logic without guard management.
+///
+/// Called by both `withdraw_and_close_vault` (which acquires its own
+/// `withdraw_and_close_{id}` guard) and `repay_and_close_vault` (which holds
+/// a single `repay_and_close_{id}` guard spanning repay + withdraw + close).
+///
+/// Forgives dust debt, validates collateral status, optimistically zeroes the
+/// vault's collateral, transfers it out, and deletes the vault entry. On
+/// transfer failure the collateral amount is restored and the vault stays open.
+async fn withdraw_and_close_vault_internal(caller: Principal, vault_id: u64) -> Result<Option<u64>, ProtocolError> {
     log!(
         INFO,
         "[withdraw_and_close] Request for vault #{} by principal {}",
         vault_id,
         caller
     );
-    
+
     // Check if the vault exists first
     let vault = read_state(|s| {
         s.vault_id_to_vaults
@@ -2104,6 +2114,77 @@ pub async fn withdraw_and_close_vault(vault_id: u64) -> Result<Option<u64>, Prot
     
     // Return the block index if we did a transfer, otherwise None
     Ok(block_index)
+}
+
+pub async fn withdraw_and_close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
+    let caller = ic_cdk::caller();
+    // Use a specific name for better tracking
+    let _guard_principal = GuardPrincipal::new(caller, &format!("withdraw_and_close_{}", vault_id))?;
+
+    withdraw_and_close_vault_internal(caller, vault_id).await
+}
+
+/// Compound repay + withdraw + close in a single canister call.
+///
+/// Pulls icUSD via `icrc2_transfer_from` to zero the vault's debt, then
+/// withdraws all collateral and deletes the vault — all under a single
+/// `repay_and_close_{vault_id}` guard. This lets Oisy / ICRC-49 signer
+/// wallets close a borrowed vault with 2 consent screens (approve + this
+/// call) instead of 4 (approve + repay + approve + withdraw_and_close)
+/// when calling the separate methods sequentially.
+///
+/// `arg.amount` is the icUSD amount to repay. Per `repay_to_vault_internal`,
+/// the amount is capped to actual debt and snaps to full-repayment if within
+/// 1% / 0.01 icUSD dust. If repay leaves any debt, the close phase fails
+/// and the vault stays open (but the partial repay is preserved on-chain).
+///
+/// Returns the icUSD repay block index and the optional collateral-return
+/// block index (None if the vault had no collateral, e.g. due to liquidation).
+#[derive(candid::CandidType, candid::Deserialize, Clone, Debug)]
+pub struct RepayAndCloseSuccess {
+    pub repay_block_index: u64,
+    pub collateral_return_block_index: Option<u64>,
+}
+
+pub async fn repay_and_close_vault(arg: VaultArg) -> Result<RepayAndCloseSuccess, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let vault_id = arg.vault_id;
+    let guard_principal = GuardPrincipal::new(caller, &format!("repay_and_close_{}", vault_id))?;
+
+    // Phase 1: repay. On failure the guard fails and we propagate the error —
+    // no collateral movement attempted.
+    let repay_block_index = match repay_to_vault_internal(caller, arg).await {
+        Ok(idx) => idx,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(e);
+        }
+    };
+
+    // Phase 2: withdraw + close. If this fails (e.g. collateral transfer
+    // bounces), the repay is already on-chain — the vault stays open with
+    // debt=0 and full collateral, recoverable via the existing
+    // `withdraw_and_close_vault` endpoint. Surface a descriptive error.
+    match withdraw_and_close_vault_internal(caller, vault_id).await {
+        Ok(collateral_return_block_index) => {
+            guard_principal.complete();
+            Ok(RepayAndCloseSuccess {
+                repay_block_index,
+                collateral_return_block_index,
+            })
+        }
+        Err(e) => {
+            guard_principal.fail();
+            log!(
+                INFO,
+                "[repay_and_close_vault] Repay succeeded (block {}) but withdraw/close failed for vault #{}: {:?}. Vault is recoverable via withdraw_and_close_vault.",
+                repay_block_index,
+                vault_id,
+                e
+            );
+            Err(e)
+        }
+    }
 }
 
 pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result<SuccessWithFee, ProtocolError> {

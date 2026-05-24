@@ -875,6 +875,14 @@ export const idlFactory = ({ IDL }) => {
     'Ok' : ReserveRedemptionResult,
     'Err' : ProtocolError,
   });
+  const RepayAndCloseSuccess = IDL.Record({
+    'collateral_return_block_index' : IDL.Opt(IDL.Nat64),
+    'repay_block_index' : IDL.Nat64,
+  });
+  const Result_13 = IDL.Variant({
+    'Ok' : RepayAndCloseSuccess,
+    'Err' : ProtocolError,
+  });
   const StabilityPoolLiquidationResult = IDL.Record({
     'fee' : IDL.Nat64,
     'collateral_price_e8s' : IDL.Nat64,
@@ -1147,6 +1155,7 @@ export const idlFactory = ({ IDL }) => {
         [Result_11],
         [],
       ),
+    'repay_and_close_vault' : IDL.Func([VaultArg], [Result_13], []),
     'repay_to_vault' : IDL.Func([VaultArg], [Result_1], []),
     'repay_to_vault_with_stable' : IDL.Func(
         [VaultArgWithToken],
