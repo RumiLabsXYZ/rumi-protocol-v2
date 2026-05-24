@@ -241,7 +241,7 @@
       // (backend query can't do inter-canister calls, so it always returns 0)
       await fetchReserveBalances();
 
-      if (isConnected) await wallet.refreshBalance();
+      if (isConnected) await wallet.refreshBalance({ skipCache: true });
     } catch (error) {
       console.error('Error fetching protocol data:', error);
     } finally {
@@ -292,7 +292,7 @@
             successMessage = msg;
           }
           icusdAmount = 0;
-          await wallet.refreshBalance();
+          await wallet.refreshBalance({ skipCache: true });
           fetchData();
         } else {
           // Oisy two-step: approval succeeded, show as info not error
@@ -315,7 +315,7 @@
             successMessage = `Redeemed ~${formatNumber(icpEstimate)} ICP for ${formatStableTx(icusdAmount)} icUSD`;
           }
           icusdAmount = 0;
-          await wallet.refreshBalance();
+          await wallet.refreshBalance({ skipCache: true });
         } else {
           errorMessage = result.error || 'Failed to redeem ICP';
         }
