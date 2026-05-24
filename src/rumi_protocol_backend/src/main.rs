@@ -1432,6 +1432,15 @@ async fn withdraw_and_close_vault(vault_id: u64) -> Result<Option<u64>, Protocol
     check_postcondition(rumi_protocol_backend::vault::withdraw_and_close_vault(vault_id).await)
 }
 
+/// Compound repay + withdraw + close in a single canister call.
+/// Saves one Oisy consent screen for users closing borrowed vaults.
+#[candid_method(update)]
+#[update]
+async fn repay_and_close_vault(arg: VaultArg) -> Result<rumi_protocol_backend::vault::RepayAndCloseSuccess, ProtocolError> {
+    validate_call().await?;
+    check_postcondition(rumi_protocol_backend::vault::repay_and_close_vault(arg).await)
+}
+
 // Add the new liquidate vault endpoint
 #[candid_method(update)]
 #[update]

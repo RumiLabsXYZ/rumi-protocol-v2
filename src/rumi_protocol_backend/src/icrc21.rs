@@ -297,7 +297,30 @@ fn generate_consent_message(method: &str, arg: &[u8]) -> Result<String, String> 
                 ),
             }
         }
-        
+
+        "repay_and_close_vault" => {
+            match try_decode_vault_arg(arg, "repay_and_close_vault")? {
+                Some(vault_arg) => Ok(format!(
+                    "## Repay and Close Vault\n\n\
+                    You are repaying **{}** to vault #{} and closing it.\n\n\
+                    This will:\n\
+                    - Burn the icUSD from your balance\n\
+                    - Return all remaining collateral to your wallet\n\
+                    - Remove the vault from the protocol",
+                    format_icusd_amount(vault_arg.amount),
+                    vault_arg.vault_id
+                )),
+                None => Ok(
+                    "## Repay and Close Vault\n\n\
+                    You are repaying icUSD to your vault and closing it.\n\n\
+                    This will:\n\
+                    - Burn the icUSD from your balance\n\
+                    - Return all remaining collateral to your wallet\n\
+                    - Remove the vault from the protocol".to_string()
+                ),
+            }
+        }
+
         "close_vault" => {
             match try_decode_u64(arg, "close_vault")? {
                 Some(vault_id) => Ok(format!(
