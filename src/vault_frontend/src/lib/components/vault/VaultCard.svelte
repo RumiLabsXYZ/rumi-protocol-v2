@@ -592,7 +592,9 @@
           ? `Added ${amount} ${collateralSymbol} (wallet glitch ignored — operation confirmed on-chain).`
           : `Added ${amount} ${collateralSymbol}`;
         toastStore.success(msg, 8000); addCollateralAmount = '';
-        await vaultStore.refreshVault(vault.vaultId); dispatch('updated');
+        await vaultStore.refreshVault(vault.vaultId);
+        walletStore.refreshBalance({ skipCache: true });
+        dispatch('updated');
       } else { toastStore.error(result.error || 'Failed', 8000); }
     } catch (err) { toastStore.error(err instanceof Error ? err.message : 'Unknown error', 8000);
     } finally { isProcessing = false; }
@@ -619,7 +621,9 @@
           ? `Withdrew ${amount} ${collateralSymbol} (wallet glitch ignored — operation confirmed on-chain).`
           : `Withdrew ${amount} ${collateralSymbol}`;
         toastStore.success(msg, 8000); withdrawAmount = '';
-        await vaultStore.refreshVault(vault.vaultId); dispatch('updated');
+        await vaultStore.refreshVault(vault.vaultId);
+        walletStore.refreshBalance({ skipCache: true });
+        dispatch('updated');
       } else { toastStore.error(result.error || 'Failed', 8000); }
     } catch (err) { toastStore.error(err instanceof Error ? err.message : 'Unknown error', 8000);
     } finally { isProcessing = false; }
@@ -640,7 +644,9 @@
           ? `Borrowed ${amount} icUSD (wallet glitch ignored — operation confirmed on-chain).`
           : `Borrowed ${amount} icUSD`;
         toastStore.success(msg, 8000); borrowAmount = '';
-        await vaultStore.refreshVault(vault.vaultId); dispatch('updated');
+        await vaultStore.refreshVault(vault.vaultId);
+        walletStore.refreshBalance({ skipCache: true });
+        dispatch('updated');
       } else { toastStore.error(result.error || 'Failed', 8000); }
     } catch (err) { toastStore.error(err instanceof Error ? err.message : 'Unknown error', 8000);
     } finally { isProcessing = false; }
@@ -677,6 +683,7 @@
         } else {
           await vaultStore.refreshVault(vault.vaultId);
         }
+        walletStore.refreshBalance({ skipCache: true });
         dispatch('updated');
       } else { toastStore.error(result.error || 'Failed', 8000); }
     } catch (err) {
@@ -700,7 +707,9 @@
           ? 'Vault closed. Collateral returned. (Wallet glitch ignored — confirmed on-chain.)'
           : 'Vault closed. Collateral returned.';
         toastStore.success(msg, 8000);
-        await vaultStore.refreshVaults(); dispatch('updated');
+        await vaultStore.refreshVaults();
+        walletStore.refreshBalance({ skipCache: true });
+        dispatch('updated');
       } else { toastStore.error(result.error || 'Failed', 8000); }
     } catch (err) { toastStore.error(err instanceof Error ? err.message : 'Unknown error', 8000);
     } finally { isWithdrawingAndClosing = false; }

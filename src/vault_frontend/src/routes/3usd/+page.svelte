@@ -110,7 +110,7 @@
 
   function handleSuccess() {
     loadAllData();
-    walletStore.refreshBalance();
+    walletStore.refreshBalance({ skipCache: true });
   }
 </script>
 
