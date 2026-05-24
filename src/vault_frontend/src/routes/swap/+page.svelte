@@ -6,31 +6,27 @@
   import PoolListView from '../../lib/components/swap/PoolListView.svelte';
   import AmmLiquidityPanel from '../../lib/components/swap/AmmLiquidityPanel.svelte';
   import LiquidityInterface from '../../lib/components/swap/LiquidityInterface.svelte';
-  import { getAmm1Apy } from '../../lib/services/amm1ApyService';
-  import {
-    threePoolService,
-    calculateTotalApy,
-    POOL_TOKENS,
-  } from '../../lib/services/threePoolService';
-  import { ammService, type PoolInfo } from '../../lib/services/ammService';
-  import { ProtocolService } from '../../lib/services/protocol';
-  import { publicActor } from '../../lib/services/protocol/apiClient';
-  import { CANISTER_IDS } from '../../lib/config';
+  import { getAmm1Apy, AMM1_THREEUSD_VALUE_SHARE } from '../../lib/services/amm1ApyService';
+  import { getThreePoolApy } from '../../lib/services/threePoolApyService';
 
   let mode: 'swap' | 'liquidity' = 'swap';
   let liquidityView: 'list' | 'threepool' | 'amm' = 'list';
 
   // APY state for the combined hero. Each null while loading.
   let threePoolApyPct: number | null = null;
-  let threePoolTvlIcusd = 0;
   let ammApyPct: number | null = null;
-  let ammTvlIcusd = 0;
 
-  // TVL-weighted combined APY. Only computed once both pools resolve.
+  // "Earn up to" is the best per-dollar yield available, not a weighted
+  // blend of the two pools. Capital can only be in one position at a time,
+  // and the AMM1 LP path stacks 3pool yield on its 3USD half:
+  //   amm1Effective = amm1Apy + 0.5 * threePoolApy
+  // The advertised number is whichever of the two paths wins per dollar.
   $: combinedApy =
-    threePoolApyPct !== null && ammApyPct !== null && (threePoolTvlIcusd + ammTvlIcusd) > 0
-      ? (threePoolApyPct * threePoolTvlIcusd + ammApyPct * ammTvlIcusd) /
-        (threePoolTvlIcusd + ammTvlIcusd)
+    threePoolApyPct !== null && ammApyPct !== null
+      ? Math.max(
+          threePoolApyPct,
+          ammApyPct + AMM1_THREEUSD_VALUE_SHARE * threePoolApyPct,
+        )
       : null;
 
   onMount(() => {
@@ -40,58 +36,11 @@
   });
 
   async function loadThreePoolApy() {
-    const [status, protocolStatus, interestSplit, swapFees7d] = await Promise.all([
-      threePoolService.getPoolStatus(),
-      ProtocolService.getProtocolStatus().catch(() => null),
-      (publicActor.get_interest_split() as Promise<{ destination: string; bps: bigint }[]>).catch(() => null),
-      threePoolService.getSwapFeesOverWindow(7).catch(() => 0n),
-    ]);
-
-    let poolTvlE8s = 0;
-    for (let i = 0; i < status.balances.length; i++) {
-      const token = POOL_TOKENS[i];
-      if (token) {
-        const normalized = token.decimals === 8
-          ? Number(status.balances[i])
-          : Number(status.balances[i]) * 100;
-        poolTvlE8s += normalized;
-      }
-    }
-    threePoolTvlIcusd = poolTvlE8s / 1e8;
-
-    if (!protocolStatus) {
-      threePoolApyPct = 0;
-      return;
-    }
-    const threePoolEntry = interestSplit?.find(e => e.destination === 'three_pool');
-    const threePoolShareBps = threePoolEntry ? Number(threePoolEntry.bps) : 5000;
-    const apy = calculateTotalApy(
-      threePoolShareBps,
-      protocolStatus.perCollateralInterest,
-      threePoolTvlIcusd,
-      swapFees7d,
-    );
-    threePoolApyPct = apy !== null ? apy * 100 : 0;
+    const r = await getThreePoolApy();
+    threePoolApyPct = r.total_apy_pct;
   }
 
   async function loadAmmApy() {
-    const pools = await ammService.getPools().catch(() => [] as PoolInfo[]);
-    const threePoolId = CANISTER_IDS.THREEPOOL;
-    const icpLedgerId = CANISTER_IDS.ICP_LEDGER;
-    const ammPool = pools.find(p => {
-      const a = p.token_a.toText();
-      const b = p.token_b.toText();
-      return (a === threePoolId && b === icpLedgerId) || (a === icpLedgerId && b === threePoolId);
-    });
-    if (!ammPool) {
-      ammApyPct = 0;
-      ammTvlIcusd = 0;
-      return;
-    }
-    const isTokenA3USD = ammPool.token_a.toText() === threePoolId;
-    const threeUsdReserve = isTokenA3USD ? ammPool.reserve_a : ammPool.reserve_b;
-    // Approximate USD TVL as 2x the 3USD-side reserve (balanced-pool assumption)
-    ammTvlIcusd = (Number(threeUsdReserve) / 1e8) * 2;
     const r = await getAmm1Apy();
     ammApyPct = r.total_apy_pct;
   }

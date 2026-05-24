@@ -10,8 +10,12 @@
     getAmm1Apy,
     getPendingEarnings,
     claimAmm1Rewards,
+    computeAmm1EffectiveApy,
+    AMM1_THREEUSD_VALUE_SHARE,
     type Amm1ApyResult,
+    type Amm1EffectiveApy,
   } from '../../services/amm1ApyService';
+  import { getThreePoolApy } from '../../services/threePoolApyService';
 
   const dispatch = createEventDispatcher();
 
@@ -51,6 +55,14 @@
     fees_7d_usd: 0,
     rewards_7d_usd: 0,
     source_window_days: 7,
+  };
+  // 3pool APY, fetched alongside AMM1's so we can show the effective
+  // (AMM1 + pass-through-3USD) yield instead of AMM1-only.
+  let threePoolApyPct = 0;
+  let effective: Amm1EffectiveApy = {
+    amm1_apy_pct: 0,
+    passthrough_3pool_apy_pct: 0,
+    total_apy_pct: 0,
   };
   let pendingE8s: bigint = 0n;
   let claiming = false;
@@ -97,7 +109,13 @@
 
   async function refreshAmm1() {
     try {
-      apy = await getAmm1Apy();
+      const [ammApy, tpApy] = await Promise.all([
+        getAmm1Apy(),
+        getThreePoolApy().catch(() => ({ total_apy_pct: 0 })),
+      ]);
+      apy = ammApy;
+      threePoolApyPct = tpApy.total_apy_pct;
+      effective = computeAmm1EffectiveApy(ammApy, threePoolApyPct);
     } catch (e) {
       console.warn('Failed to refresh AMM1 APY:', e);
     }
@@ -325,8 +343,11 @@
       <span class="pool-dot" style="background:#34d399"></span>
       <span class="pool-dot" style="background:#29abe2"></span>
       <span class="overview-name">3USD / ICP</span>
-      <span class="apy-pill" title="{apy.trading_fee_apy_pct.toFixed(1)}% trading fees + {apy.reward_apy_pct.toFixed(1)}% protocol earnings (7-day)">
-        {apy.total_apy_pct.toFixed(1)}% APY
+      <span
+        class="apy-pill"
+        title="{apy.trading_fee_apy_pct.toFixed(2)}% trading fees + {apy.reward_apy_pct.toFixed(2)}% protocol rewards + {effective.passthrough_3pool_apy_pct.toFixed(2)}% 3USD yield ({(AMM1_THREEUSD_VALUE_SHARE * 100).toFixed(0)}% of 3pool's {threePoolApyPct.toFixed(2)}%, since ~half the pool's value is 3USD)"
+      >
+        {effective.total_apy_pct.toFixed(1)}% APY
       </span>
     </div>
     <div class="overview-stats">
