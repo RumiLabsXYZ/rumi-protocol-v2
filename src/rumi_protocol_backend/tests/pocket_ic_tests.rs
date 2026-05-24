@@ -4012,3 +4012,196 @@ fn test_repay_and_close_vault_full_cycle() {
 
     log("🎉 TEST PASSED: test_repay_and_close_vault_full_cycle");
 }
+
+// ─── Phase 3 follow-up: repay_and_close_vault clears sub-MIN_ICUSD debt ─────
+//
+// A vault whose debt falls into the "stuck zone" (`DUST_DEBT_THRESHOLD` <
+// debt < `MIN_ICUSD_AMOUNT`, i.e. 0.0005 < debt < 0.1 icUSD) cannot be
+// cleared today:
+//   - `withdraw_and_close_vault` rejects (debt > dust threshold; only debt ≤
+//     threshold is forgiven on close).
+//   - `repay_to_vault` rejects with `AmountTooLow` (amount < MIN_ICUSD).
+//   - `repay_and_close_vault` inherits the same rejection via the shared
+//     `repay_to_vault_internal` helper.
+//
+// Fix: route `repay_and_close_vault` through the internal helper with an
+// explicit "this is a full close" intent flag so the MIN_ICUSD floor is
+// bypassed only for the compound endpoint. Regular `repay_to_vault` keeps
+// the floor as an anti-spam guarantee.
+#[test]
+fn test_repay_and_close_vault_clears_sub_min_debt() {
+    log("🧪 TEST STARTING: test_repay_and_close_vault_clears_sub_min_debt");
+
+    let (pic, protocol_id, icp_ledger_id, icusd_ledger_id) = setup_protocol();
+
+    if !verify_icp_rate_available(&pic, protocol_id) {
+        log("⚠️ Skipping test due to missing ICP rate");
+        return;
+    }
+
+    let test_user = Principal::self_authenticating(&[1, 2, 3, 4]);
+    let developer = Principal::self_authenticating(&[5, 6, 7, 8]);
+
+    // 1) Open a vault and borrow 1 icUSD (well above MIN_ICUSD_AMOUNT).
+    let collateral_amount = 5_000_000_000u64; // 50 ICP
+    let vault_id = create_test_vault(&pic, protocol_id, icp_ledger_id, test_user, collateral_amount)
+        .expect("create_test_vault should succeed");
+
+    let initial_borrow = 100_000_000u64; // 1.0 icUSD
+    call_borrow_from_vault(&pic, protocol_id, test_user, VaultArg { vault_id, amount: initial_borrow })
+        .expect("initial borrow should succeed");
+
+    // 2) As the developer principal, lower this collateral's `min_vault_debt`
+    //    floor so a partial repay can leave sub-MIN_ICUSD debt without
+    //    tripping `check_min_vault_debt_after_repay`. Production paths into
+    //    the stuck zone (admin lowering then re-raising the floor, prior
+    //    looser configs grandfathered in, etc.) all land on the same
+    //    invariant we exercise here: a live vault with debt in (DUST, MIN).
+    let small_min_vault_debt = 100_000u64; // 0.001 icUSD
+    let set_min_vault_debt_result = pic.update_call(
+        protocol_id,
+        developer,
+        "set_collateral_min_vault_debt",
+        encode_args((icp_ledger_id, small_min_vault_debt)).expect("encode set_collateral_min_vault_debt"),
+    ).expect("set_collateral_min_vault_debt call");
+    match set_min_vault_debt_result {
+        WasmResult::Reply(bytes) => {
+            decode_one::<Result<(), ProtocolError>>(&bytes)
+                .expect("decode set_collateral_min_vault_debt response")
+                .expect("set_collateral_min_vault_debt should succeed");
+        }
+        WasmResult::Reject(err) => panic!("set_collateral_min_vault_debt rejected: {}", err),
+    }
+
+    // 3) Approve enough icUSD for both the partial-repay step and the final
+    //    sub-MIN_ICUSD close. Buffer for any accrued interest.
+    let approve_total = initial_borrow * 2;
+    let approve_args = ApproveArgs {
+        fee: None, memo: None, from_subaccount: None, created_at_time: None,
+        amount: candid::Nat::from(approve_total),
+        expected_allowance: None, expires_at: None,
+        spender: Account { owner: protocol_id, subaccount: None },
+    };
+    pic.update_call(
+        icusd_ledger_id, test_user, "icrc2_approve",
+        encode_args((approve_args,)).expect("encode icrc2_approve"),
+    ).expect("icrc2_approve call");
+
+    // 4) Partial repay 0.95 icUSD via the regular path → leaves 0.05 icUSD
+    //    debt (5_000_000 e8s) in the stuck zone.
+    let partial_repay = 95_000_000u64;
+    let partial_repay_result = pic.update_call(
+        protocol_id, test_user, "repay_to_vault",
+        encode_args((VaultArg { vault_id, amount: partial_repay },)).expect("encode repay_to_vault"),
+    ).expect("repay_to_vault call");
+    match partial_repay_result {
+        WasmResult::Reply(bytes) => {
+            decode_one::<Result<u64, ProtocolError>>(&bytes)
+                .expect("decode repay_to_vault response")
+                .expect("partial repay should succeed");
+        }
+        WasmResult::Reject(err) => panic!("repay_to_vault rejected: {}", err),
+    }
+
+    let vault_after_partial = get_vault(&pic, protocol_id, test_user, vault_id);
+    assert!(
+        vault_after_partial.borrowed_icusd_amount > 0
+            && vault_after_partial.borrowed_icusd_amount < 10_000_000,
+        "vault should be in stuck zone (0, MIN_ICUSD), got {}",
+        vault_after_partial.borrowed_icusd_amount
+    );
+    let stuck_debt = vault_after_partial.borrowed_icusd_amount;
+    log(&format!("🪤 Vault #{} now in stuck zone with {} e8s debt", vault_id, stuck_debt));
+
+    // 5) Call repay_and_close_vault with the stuck-zone amount. Before the
+    //    fix this rejects with `AmountTooLow`. After the fix it should
+    //    succeed and remove the vault.
+    let close_result = pic.update_call(
+        protocol_id, test_user, "repay_and_close_vault",
+        encode_args((VaultArg { vault_id, amount: stuck_debt },)).expect("encode repay_and_close_vault"),
+    ).expect("repay_and_close_vault call");
+    let success: RepayAndCloseSuccess = match close_result {
+        WasmResult::Reply(bytes) => {
+            match decode_one::<Result<RepayAndCloseSuccess, ProtocolError>>(&bytes) {
+                Ok(Ok(s)) => s,
+                Ok(Err(err)) => panic!("repay_and_close_vault returned error: {:?}", err),
+                Err(err) => panic!("failed to decode repay_and_close_vault response: {}", err),
+            }
+        }
+        WasmResult::Reject(err) => panic!("repay_and_close_vault rejected: {}", err),
+    };
+    assert!(success.repay_block_index > 0, "repay block index should be set");
+    assert!(success.collateral_return_block_index.is_some(), "collateral return block index should be set");
+
+    // 6) Vault should be gone.
+    let vaults_after = pic.query_call(
+        protocol_id, test_user, "get_vaults",
+        encode_args((Some(test_user),)).expect("encode get_vaults"),
+    ).expect("get_vaults call");
+    let vaults_after: Vec<CandidVault> = match vaults_after {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode get_vaults"),
+        WasmResult::Reject(err) => panic!("get_vaults rejected: {}", err),
+    };
+    assert!(
+        !vaults_after.iter().any(|v| v.vault_id == vault_id),
+        "vault #{} should be removed after repay_and_close_vault", vault_id
+    );
+
+    log("🎉 TEST PASSED: test_repay_and_close_vault_clears_sub_min_debt");
+}
+
+// Regression fence: regular `repay_to_vault` must still reject sub-MIN_ICUSD
+// amounts (anti-spam guarantee). Only the compound `repay_and_close_vault`
+// path bypasses the floor.
+#[test]
+fn test_repay_to_vault_still_rejects_sub_min_amount() {
+    log("🧪 TEST STARTING: test_repay_to_vault_still_rejects_sub_min_amount");
+
+    let (pic, protocol_id, icp_ledger_id, icusd_ledger_id) = setup_protocol();
+
+    if !verify_icp_rate_available(&pic, protocol_id) {
+        log("⚠️ Skipping test due to missing ICP rate");
+        return;
+    }
+
+    let test_user = Principal::self_authenticating(&[1, 2, 3, 4]);
+
+    let collateral_amount = 5_000_000_000u64;
+    let vault_id = create_test_vault(&pic, protocol_id, icp_ledger_id, test_user, collateral_amount)
+        .expect("create_test_vault should succeed");
+    call_borrow_from_vault(&pic, protocol_id, test_user, VaultArg { vault_id, amount: 100_000_000 })
+        .expect("borrow should succeed");
+
+    let approve_args = ApproveArgs {
+        fee: None, memo: None, from_subaccount: None, created_at_time: None,
+        amount: candid::Nat::from(100_000_000u64),
+        expected_allowance: None, expires_at: None,
+        spender: Account { owner: protocol_id, subaccount: None },
+    };
+    pic.update_call(
+        icusd_ledger_id, test_user, "icrc2_approve",
+        encode_args((approve_args,)).expect("encode icrc2_approve"),
+    ).expect("icrc2_approve call");
+
+    let sub_min_amount = 5_000_000u64; // 0.05 icUSD, below MIN_ICUSD_AMOUNT
+    let repay_result = pic.update_call(
+        protocol_id, test_user, "repay_to_vault",
+        encode_args((VaultArg { vault_id, amount: sub_min_amount },)).expect("encode repay_to_vault"),
+    ).expect("repay_to_vault call");
+    match repay_result {
+        WasmResult::Reply(bytes) => {
+            match decode_one::<Result<u64, ProtocolError>>(&bytes) {
+                Ok(Ok(_)) => panic!("repay_to_vault should reject sub-MIN_ICUSD amount on the non-close path"),
+                Ok(Err(ProtocolError::AmountTooLow { minimum_amount })) => {
+                    log(&format!("✅ Correctly rejected with minimum_amount={}", minimum_amount));
+                    assert_eq!(minimum_amount, 10_000_000, "minimum should be MIN_ICUSD_AMOUNT");
+                }
+                Ok(Err(other)) => panic!("expected AmountTooLow, got {:?}", other),
+                Err(err) => panic!("failed to decode repay_to_vault response: {}", err),
+            }
+        }
+        WasmResult::Reject(err) => panic!("repay_to_vault rejected at transport: {}", err),
+    }
+
+    log("🎉 TEST PASSED: test_repay_to_vault_still_rejects_sub_min_amount");
+}
