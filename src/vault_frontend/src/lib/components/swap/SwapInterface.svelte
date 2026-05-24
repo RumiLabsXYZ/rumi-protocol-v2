@@ -89,8 +89,9 @@
       if ($walletStore.principal) {
         unusedBalances = await checkIcpswapUnusedBalances($walletStore.principal).catch(() => []);
       }
-      // Refresh wallet balances
-      walletStore.refreshBalance();
+      // Skip TokenService's 30s cache — recovery moves real funds and the user
+      // is staring at the balance to confirm it.
+      walletStore.refreshBalance({ skipCache: true });
     } catch (err: any) {
       error = `Recovery failed: ${err.message}`;
     } finally {
@@ -101,7 +102,7 @@
         unusedBalances = await checkIcpswapUnusedBalances($walletStore.principal).catch(() => []);
         if (unusedBalances.length > 0) preWarmRecovery(unusedBalances).catch(() => {});
       }
-      walletStore.refreshBalance();
+      walletStore.refreshBalance({ skipCache: true });
     }
   }
 
@@ -332,8 +333,11 @@
       }
     } finally {
       loading = false;
-      // Always refresh wallet balances and check for stuck deposits after swap
-      walletStore.refreshBalance();
+      // Always refresh wallet balances and check for stuck deposits after swap.
+      // skipCache bypasses TokenService's 30s cache so the destination balance
+      // reflects the just-completed swap immediately instead of showing the
+      // pre-swap value until the cache expires.
+      walletStore.refreshBalance({ skipCache: true });
       if ($walletStore.principal) {
         const stuck = await checkIcpswapUnusedBalances($walletStore.principal).catch(() => []);
         if (stuck.length > 0) {

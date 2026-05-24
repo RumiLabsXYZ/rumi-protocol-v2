@@ -219,8 +219,17 @@ function createAppDataStore() {
 
     /**
      * WALLET BALANCES - Single source of truth
+     *
+     * `skipCache` bypasses TokenService's 30s balance cache (separate from this
+     * store's 5s cache controlled by `forceRefresh`). Required after balance-
+     * mutating user actions — otherwise the UI shows the pre-op balance until
+     * the TokenService cache expires.
      */
-    async fetchBalances(principal: Principal, forceRefresh = false): Promise<{ icpBalance: bigint; icusdBalance: bigint }> {
+    async fetchBalances(
+      principal: Principal,
+      forceRefresh = false,
+      opts?: { skipCache?: boolean },
+    ): Promise<{ icpBalance: bigint; icusdBalance: bigint }> {
       return new Promise((resolve, reject) => {
         const requestKey = `balances_${principal.toString()}`; // Move requestKey outside
         
@@ -268,7 +277,7 @@ function createAppDataStore() {
         });
 
         // Make the actual API call
-        this._fetchBalancesFromAPI(principal)
+        this._fetchBalancesFromAPI(principal, opts)
           .then(({ icpBalance, icusdBalance }) => {
             update(state => {
               state.activeRequests.delete(requestKey);
@@ -371,16 +380,19 @@ function createAppDataStore() {
       return ApiClient.getUserVaults(true); // Always force refresh from API
     },
 
-    async _fetchBalancesFromAPI(principal: Principal): Promise<{ icpBalance: bigint; icusdBalance: bigint }> {
+    async _fetchBalancesFromAPI(
+      principal: Principal,
+      opts?: { skipCache?: boolean },
+    ): Promise<{ icpBalance: bigint; icusdBalance: bigint }> {
       // Import here to avoid circular dependencies
       const { TokenService } = await import('../services/tokenService');
       const { CONFIG } = await import('../config');
-      
+
       const [icpBalance, icusdBalance] = await Promise.all([
-        TokenService.getTokenBalance(CONFIG.currentIcpLedgerId, principal),
-        TokenService.getTokenBalance(CONFIG.currentIcusdLedgerId, principal)
+        TokenService.getTokenBalance(CONFIG.currentIcpLedgerId, principal, opts),
+        TokenService.getTokenBalance(CONFIG.currentIcusdLedgerId, principal, opts)
       ]);
-      
+
       return { icpBalance, icusdBalance };
     }
   };
