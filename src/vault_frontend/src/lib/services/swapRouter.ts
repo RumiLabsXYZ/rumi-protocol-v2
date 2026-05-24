@@ -574,8 +574,8 @@ export async function preWarmOisySigner(): Promise<void> {
  * Pre-warm the live ICRC-1 fee cache for every AMM token so the Oisy executors
  * can read fees synchronously via `tokenFeeCached` / `getCachedLedgerFee`.
  *
- * The Oisy executors must not `await` between the user's click and
- * `signerAgent.execute()` or the browser blocks the popup with a
+ * The Oisy executors must not `await` between the user's click and the first
+ * Oisy consent screen or the browser blocks the popup with a
  * "Signer window should not be opened outside of click handler" error. By
  * fetching every relevant fee during the quote phase (5-min cache TTL), the
  * click-handler path stays fully synchronous.
@@ -594,13 +594,19 @@ export async function preWarmOisyFees(): Promise<void> {
 }
 
 // ──────────────────────────────────────────────────────────────
-// Oisy-batched multi-hop execution
+// Oisy sequential multi-hop execution (v5: no batch concept)
 //
-// CRITICAL: These functions must NOT make any async canister calls.
-// All estimates and pool IDs come pre-computed from resolveRoute()
-// (stored on the SwapRoute object). The signer agent is pre-warmed
-// during the quote phase. This ensures signerAgent.execute() opens
-// its popup synchronously within the browser's click handler context.
+// Each hop becomes its own Oisy consent screen. The user sees one popup
+// per `await` against an actor created via `createOisyActor`. We preserve
+// the pre-warming + pre-computed-estimate discipline because the FIRST
+// popup still has to land inside the browser's click-handler gesture
+// window — any pre-popup `await` would burn that window and trip Oisy's
+// "Signer window should not be opened outside of click handler" guard.
+//
+// CRITICAL: These functions must NOT make any async canister calls
+// before the first Oisy consent screen. All estimates and pool IDs come
+// pre-computed from resolveRoute() (stored on the SwapRoute object). The
+// signer agent is pre-warmed during the quote phase.
 // ──────────────────────────────────────────────────────────────
 
 const THREEPOOL_ID = CANISTER_IDS.THREEPOOL;
@@ -608,14 +614,15 @@ const AMM_ID = CANISTER_IDS.RUMI_AMM;
 const ICP_LEDGER_ID = CANISTER_IDS.ICP_LEDGER;
 
 /**
- * Stablecoin → ICP (Oisy batched):
+ * Stablecoin → ICP (Oisy sequential, v5):
  * 1. Approve stablecoin → 3pool
  * 2. Approve 3USD → AMM (pre-approve estimated amount)
  * 3. 3pool.add_liquidity
  * 4. AMM.swap (using estimated 3USD amount)
  *
- * All estimates come from route.intermediateOutput / route.estimatedOutput
- * which were computed during resolveRoute(). No canister queries here.
+ * Each step is its own Oisy consent screen. All estimates come from
+ * route.intermediateOutput / route.estimatedOutput which were computed
+ * during resolveRoute(). No canister queries here before the first popup.
  */
 async function executeStableToIcpOisy(
   route: SwapRoute,
@@ -647,58 +654,51 @@ async function executeStableToIcpOisy(
   const fromFee = tokenFeeCached(from);
 
   // Signer agent was pre-warmed during quote phase — cached, no popup
+  console.log('[Oisy] Sequential stable→ICP route (3pool + AMM) via @icp-sdk/signer v5');
   const signerAgent = await getOisySignerAgent(wallet.principal);
 
   const stableLedger = createOisyActor(fromPoolToken.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent);
   const threeUsdLedger = createOisyActor(THREEPOOL_ID, canisterIDLs.three_pool, signerAgent);
   const ammActor = createOisyActor(AMM_ID, canisterIDLs.rumi_amm, signerAgent);
 
-  // Step 1: Approve stablecoin → 3pool
-  signerAgent.batch();
-  const p1 = stableLedger.icrc2_approve({
+  // Step 1: Approve stablecoin → 3pool (first consent screen, Tier 1 native)
+  const r1 = await stableLedger.icrc2_approve({
     amount: amountIn + fromFee * 2n,
     spender: { owner: Principal.fromText(THREEPOOL_ID), subaccount: [] },
     expires_at: [], expected_allowance: [], memo: [], fee: [],
     from_subaccount: [], created_at_time: [],
   });
+  if (r1 && 'Err' in r1) throw new Error(`Stablecoin approval failed: ${JSON.stringify(r1.Err)}`);
 
   // Step 2: Approve 3USD → AMM (generous: estimate + 1% buffer)
   const threeUsdApprovalAmt = threeUsdEstimate * 101n / 100n;
-  signerAgent.batch();
-  const p2 = threeUsdLedger.icrc2_approve({
+  const r2 = await threeUsdLedger.icrc2_approve({
     amount: threeUsdApprovalAmt,
     spender: { owner: Principal.fromText(AMM_ID), subaccount: [] },
     expires_at: [], expected_allowance: [], memo: [], fee: [],
     from_subaccount: [], created_at_time: [],
   });
+  if (r2 && 'Err' in r2) throw new Error(`3USD approval failed: ${JSON.stringify(r2.Err)}`);
 
-  // Step 3: 3pool deposit
-  signerAgent.batch();
-  const p3 = threeUsdLedger.add_liquidity(amounts, threeUsdMinOutput);
+  // Step 3: 3pool deposit (mints 3USD into caller's account)
+  const r3 = await threeUsdLedger.add_liquidity(amounts, threeUsdMinOutput);
+  if ('Err' in r3) throw new Error(`3pool deposit failed: ${JSON.stringify(r3.Err)}`);
 
   // Step 4: AMM swap (use estimated 3USD amount — slippage protection via minOutput)
-  signerAgent.batch();
-  const p4 = ammActor.swap(poolId, Principal.fromText(THREEPOOL_ID), threeUsdEstimate, icpMinOutput);
-
-  // This opens the signer popup — must happen close to click handler
-  await signerAgent.execute();
-  const [r1, r2, r3, r4] = await Promise.all([p1, p2, p3, p4]);
-
-  if (r1 && 'Err' in r1) throw new Error(`Stablecoin approval failed: ${JSON.stringify(r1.Err)}`);
-  if (r2 && 'Err' in r2) throw new Error(`3USD approval failed: ${JSON.stringify(r2.Err)}`);
-  if ('Err' in r3) throw new Error(`3pool deposit failed: ${JSON.stringify(r3.Err)}`);
+  const r4 = await ammActor.swap(poolId, Principal.fromText(THREEPOOL_ID), threeUsdEstimate, icpMinOutput);
   if ('Err' in r4) throw new Error(`AMM swap failed: ${JSON.stringify(r4.Err)}`);
   return r4.Ok.amount_out;
 }
 
 /**
- * ICP → Stablecoin (Oisy batched):
+ * ICP → Stablecoin (Oisy sequential, v5):
  * 1. Approve ICP → AMM
  * 2. AMM.swap ICP → 3USD
  * 3. 3pool.remove_one_coin (burns 3USD LP, no approval needed)
  *
- * All estimates come from route.intermediateOutput / route.estimatedOutput.
- * No canister queries here.
+ * Each step is its own Oisy consent screen. All estimates come from
+ * route.intermediateOutput / route.estimatedOutput. No canister queries
+ * before the first popup.
  */
 async function executeIcpToStableOisy(
   route: SwapRoute,
@@ -727,41 +727,34 @@ async function executeIcpToStableOisy(
   const icpFee = tokenFeeCached(icpToken);
 
   // Signer agent was pre-warmed during quote phase — cached, no popup
+  console.log('[Oisy] Sequential ICP→stable route (AMM + 3pool) via @icp-sdk/signer v5');
   const signerAgent = await getOisySignerAgent(wallet.principal);
 
   const icpLedger = createOisyActor(ICP_LEDGER_ID, CONFIG.icusd_ledgerIDL, signerAgent);
   const ammActor = createOisyActor(AMM_ID, canisterIDLs.rumi_amm, signerAgent);
   const poolActor = createOisyActor(THREEPOOL_ID, canisterIDLs.three_pool, signerAgent);
 
-  // Step 1: Approve ICP → AMM
-  signerAgent.batch();
-  const p1 = icpLedger.icrc2_approve({
+  // Step 1: Approve ICP → AMM (first consent screen, Tier 1 native)
+  const r1 = await icpLedger.icrc2_approve({
     amount: amountIn + icpFee * 2n,
     spender: { owner: Principal.fromText(AMM_ID), subaccount: [] },
     expires_at: [], expected_allowance: [], memo: [], fee: [],
     from_subaccount: [], created_at_time: [],
   });
+  if (r1 && 'Err' in r1) throw new Error(`ICP approval failed: ${JSON.stringify(r1.Err)}`);
 
   // Step 2: AMM swap ICP → 3USD
-  signerAgent.batch();
-  const p2 = ammActor.swap(poolId, Principal.fromText(ICP_LEDGER_ID), amountIn, threeUsdMinOutput);
+  const r2 = await ammActor.swap(poolId, Principal.fromText(ICP_LEDGER_ID), amountIn, threeUsdMinOutput);
+  if ('Err' in r2) throw new Error(`AMM swap failed: ${JSON.stringify(r2.Err)}`);
 
   // Step 3: 3pool redeem 3USD → stablecoin (no approval: burns caller's LP tokens)
-  signerAgent.batch();
-  const p3 = poolActor.remove_one_coin(threeUsdEstimate, to.threePoolIndex, stableMinOutput);
-
-  // This opens the signer popup — must happen close to click handler
-  await signerAgent.execute();
-  const [r1, r2, r3] = await Promise.all([p1, p2, p3]);
-
-  if (r1 && 'Err' in r1) throw new Error(`ICP approval failed: ${JSON.stringify(r1.Err)}`);
-  if ('Err' in r2) throw new Error(`AMM swap failed: ${JSON.stringify(r2.Err)}`);
+  const r3 = await poolActor.remove_one_coin(threeUsdEstimate, to.threePoolIndex, stableMinOutput);
   if ('Err' in r3) throw new Error(`3pool redeem failed: ${JSON.stringify(r3.Err)}`);
   return r3.Ok;
 }
 
 /**
- * Stablecoin → ICP via ICPswap (Oisy batched):
+ * Stablecoin → ICP via ICPswap (Oisy sequential, v5):
  * 1. Approve stablecoin → 3pool (for add_liquidity)
  * 2. 3pool.add_liquidity (burns stablecoin, mints 3USD)
  * 3. Approve 3USD → ICPswap pool (for depositFrom)
@@ -769,10 +762,12 @@ async function executeIcpToStableOisy(
  * 5. ICPswap.swap 3USD → ICP
  * 6. ICPswap.withdraw ICP to caller
  *
- * Known limitation: ICPswap withdraw amount must be pre-committed (no async
- * query between swap and withdraw in a batch). We use icpMinOutput as the
- * withdraw amount. Any positive slippage (pool pays more than minimum) stays
- * on the pool's internal subaccount and can be recovered manually later.
+ * Each step is its own Oisy consent screen.
+ *
+ * Known limitation: ICPswap withdraw amount is pre-committed to `icpMinOutput`
+ * to keep behavior identical to the v4 fake-batched path. Any positive
+ * slippage (pool pays more than minimum) stays on the pool's internal
+ * subaccount and can be recovered manually via recoverIcpswapBalance.
  */
 async function executeStableToIcpOisyIcpswap(
   route: SwapRoute,
@@ -806,83 +801,78 @@ async function executeStableToIcpOisyIcpswap(
   const threeUsdFee = getCachedLedgerFee({ ledgerId: CANISTER_IDS.THREEPOOL, decimals: 8, symbol: '3USD' });
   const icpFee = getCachedLedgerFee({ ledgerId: CANISTER_IDS.ICP_LEDGER, decimals: 8, symbol: 'ICP' });
 
+  console.log('[Oisy] Sequential stable→ICP via ICPswap (6 hops) via @icp-sdk/signer v5');
   const signerAgent = await getOisySignerAgent(wallet.principal);
 
   const stableLedger = createOisyActor(fromPoolToken.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent);
   const threeUsdLedger = createOisyActor(THREEPOOL_ID, canisterIDLs.three_pool, signerAgent);
   const icpswapPool = createOisyActor(icpswapPoolId, canisterIDLs.icpswap_pool, signerAgent);
 
-  // Step 1: approve stablecoin → 3pool
-  signerAgent.batch();
-  const p1 = stableLedger.icrc2_approve({
+  // Step 1: approve stablecoin → 3pool (first consent screen, Tier 1 native)
+  const r1 = await stableLedger.icrc2_approve({
     amount: amountIn + fromFee * 2n,
     spender: { owner: Principal.fromText(THREEPOOL_ID), subaccount: [] },
     expires_at: [], expected_allowance: [], memo: [], fee: [],
     from_subaccount: [], created_at_time: [],
   });
+  if (r1 && 'Err' in r1) throw new Error(`Stablecoin approval failed: ${JSON.stringify(r1.Err)}`);
 
   // Step 2: 3pool deposit (burns stablecoin, mints 3USD)
-  signerAgent.batch();
-  const p2 = threeUsdLedger.add_liquidity(amounts, threeUsdMinOutput);
+  const r2 = await threeUsdLedger.add_liquidity(amounts, threeUsdMinOutput);
+  if ('Err' in r2) throw new Error(`3pool deposit failed: ${JSON.stringify(r2.Err)}`);
 
   // Step 3: approve 3USD → ICPswap pool (depositFrom is ICRC-2 pull)
   const threeUsdApprovalAmt = threeUsdEstimate * 101n / 100n;
-  signerAgent.batch();
-  const p3 = threeUsdLedger.icrc2_approve({
+  const r3 = await threeUsdLedger.icrc2_approve({
     amount: threeUsdApprovalAmt,
     spender: { owner: Principal.fromText(icpswapPoolId), subaccount: [] },
     expires_at: [], expected_allowance: [], memo: [], fee: [],
     from_subaccount: [], created_at_time: [],
   });
+  if (r3 && 'Err' in r3) throw new Error(`3USD approval failed: ${JSON.stringify(r3.Err)}`);
 
   // Step 4: ICPswap depositFrom (pulls 3USD via ICRC-2)
-  signerAgent.batch();
-  const p4 = icpswapPool.depositFrom({
+  const r4 = await icpswapPool.depositFrom({
     token: CANISTER_IDS.THREEPOOL,
     amount: threeUsdEstimate,
     fee: threeUsdFee,
   });
+  if ('err' in r4) throw new Error(`ICPswap depositFrom failed: ${JSON.stringify(r4.err)}`);
 
   // Step 5: ICPswap swap (uses pre-committed 3USD amount; slippage via amountOutMinimum)
-  signerAgent.batch();
-  const p5 = icpswapPool.swap({
+  const r5 = await icpswapPool.swap({
     amountIn: threeUsdEstimate.toString(),
     zeroForOne,
     amountOutMinimum: icpMinOutput.toString(),
   });
+  if ('err' in r5) throw new Error(`ICPswap swap failed: ${JSON.stringify(r5.err)}`);
 
   // Step 6: ICPswap withdraw to caller's ICP ledger account.
-  // Pre-committed amount; we can't await p5 before building p6 in a batch.
-  signerAgent.batch();
-  const p6 = icpswapPool.withdraw({
+  // Pre-committed amount (matches the v4 fake-batch behavior; recoverIcpswapBalance
+  // is used to claim any positive slippage stranded on the pool's subaccount).
+  const r6 = await icpswapPool.withdraw({
     token: CANISTER_IDS.ICP_LEDGER,
     amount: icpMinOutput,
     fee: icpFee,
   });
-
-  await signerAgent.execute();
-  const [r1, r2, r3, r4, r5, r6] = await Promise.all([p1, p2, p3, p4, p5, p6]);
-
-  if (r1 && 'Err' in r1) throw new Error(`Stablecoin approval failed: ${JSON.stringify(r1.Err)}`);
-  if ('Err' in r2) throw new Error(`3pool deposit failed: ${JSON.stringify(r2.Err)}`);
-  if (r3 && 'Err' in r3) throw new Error(`3USD approval failed: ${JSON.stringify(r3.Err)}`);
-  if ('err' in r4) throw new Error(`ICPswap depositFrom failed: ${JSON.stringify(r4.err)}`);
-  if ('err' in r5) throw new Error(`ICPswap swap failed: ${JSON.stringify(r5.err)}`);
   if ('err' in r6) throw new Error(`ICPswap withdraw failed: ${JSON.stringify(r6.err)}`);
   return (r6 as { ok: bigint }).ok;
 }
 
 /**
- * ICP → Stablecoin via ICPswap (Oisy batched):
+ * ICP → Stablecoin via ICPswap (Oisy sequential, v5):
  * 1. Approve ICP → ICPswap pool (for depositFrom)
  * 2. ICPswap.depositFrom ICP
  * 3. ICPswap.swap ICP → 3USD
  * 4. ICPswap.withdraw 3USD to caller
  * 5. 3pool.remove_one_coin (burns caller's LP, no allowance needed)
  *
+ * Each step is its own Oisy consent screen.
+ *
  * Same withdraw-amount limitation as the stable→ICP case: we pass
- * threeUsdMinFromSwap as the withdraw amount. Positive slippage stays on
- * the pool's internal subaccount for manual recovery.
+ * threeUsdMinFromSwap as the withdraw amount (matches v4 fake-batch
+ * behavior). Positive slippage stays on the pool's internal subaccount
+ * for manual recovery via recoverIcpswapBalance.
  */
 async function executeIcpToStableOisyIcpswap(
   route: SwapRoute,
@@ -912,74 +902,68 @@ async function executeIcpToStableOisyIcpswap(
   const icpFee = tokenFeeCached(icpToken);
   const threeUsdFee = getCachedLedgerFee({ ledgerId: CANISTER_IDS.THREEPOOL, decimals: 8, symbol: '3USD' });
 
+  console.log('[Oisy] Sequential ICP→stable via ICPswap (5 hops) via @icp-sdk/signer v5');
   const signerAgent = await getOisySignerAgent(wallet.principal);
 
   const icpLedger = createOisyActor(ICP_LEDGER_ID, CONFIG.icusd_ledgerIDL, signerAgent);
   const icpswapPool = createOisyActor(icpswapPoolId, canisterIDLs.icpswap_pool, signerAgent);
   const poolActor = createOisyActor(THREEPOOL_ID, canisterIDLs.three_pool, signerAgent);
 
-  // Step 1: approve ICP → ICPswap pool
-  signerAgent.batch();
-  const p1 = icpLedger.icrc2_approve({
+  // Step 1: approve ICP → ICPswap pool (first consent screen, Tier 1 native)
+  const r1 = await icpLedger.icrc2_approve({
     amount: amountIn + icpFee * 2n,
     spender: { owner: Principal.fromText(icpswapPoolId), subaccount: [] },
     expires_at: [], expected_allowance: [], memo: [], fee: [],
     from_subaccount: [], created_at_time: [],
   });
+  if (r1 && 'Err' in r1) throw new Error(`ICP approval failed: ${JSON.stringify(r1.Err)}`);
 
   // Step 2: ICPswap depositFrom (pulls ICP)
-  signerAgent.batch();
-  const p2 = icpswapPool.depositFrom({
+  const r2 = await icpswapPool.depositFrom({
     token: ICP_LEDGER_ID,
     amount: amountIn,
     fee: icpFee,
   });
+  if ('err' in r2) throw new Error(`ICPswap depositFrom failed: ${JSON.stringify(r2.err)}`);
 
   // Step 3: ICPswap swap ICP → 3USD
-  signerAgent.batch();
-  const p3 = icpswapPool.swap({
+  const r3 = await icpswapPool.swap({
     amountIn: amountIn.toString(),
     zeroForOne,
     amountOutMinimum: threeUsdMinFromSwap.toString(),
   });
+  if ('err' in r3) throw new Error(`ICPswap swap failed: ${JSON.stringify(r3.err)}`);
 
   // Step 4: ICPswap withdraw 3USD to caller
-  signerAgent.batch();
-  const p4 = icpswapPool.withdraw({
+  const r4 = await icpswapPool.withdraw({
     token: CANISTER_IDS.THREEPOOL,
     amount: threeUsdMinFromSwap,
     fee: threeUsdFee,
   });
+  if ('err' in r4) throw new Error(`ICPswap withdraw failed: ${JSON.stringify(r4.err)}`);
 
   // Step 5: 3pool remove_one_coin (3USD → target stablecoin)
   // remove_one_coin burns the caller's LP directly (no ICRC-2 allowance required).
   // We pass threeUsdMinFromSwap (conservative) to match the withdraw amount.
-  signerAgent.batch();
-  const p5 = poolActor.remove_one_coin(threeUsdMinFromSwap, to.threePoolIndex, stableMinOutput);
-
-  await signerAgent.execute();
-  const [r1, r2, r3, r4, r5] = await Promise.all([p1, p2, p3, p4, p5]);
-
-  if (r1 && 'Err' in r1) throw new Error(`ICP approval failed: ${JSON.stringify(r1.Err)}`);
-  if ('err' in r2) throw new Error(`ICPswap depositFrom failed: ${JSON.stringify(r2.err)}`);
-  if ('err' in r3) throw new Error(`ICPswap swap failed: ${JSON.stringify(r3.err)}`);
-  if ('err' in r4) throw new Error(`ICPswap withdraw failed: ${JSON.stringify(r4.err)}`);
+  const r5 = await poolActor.remove_one_coin(threeUsdMinFromSwap, to.threePoolIndex, stableMinOutput);
   if ('Err' in r5) throw new Error(`3pool redeem failed: ${JSON.stringify(r5.Err)}`);
   return r5.Ok;
 }
 
 /**
- * Direct ICPswap pool swap (Oisy batched). Used by both `icusd_icp_direct`
- * (icUSD <-> ICP) and `amm_swap` (3USD <-> ICP) when ICPswap wins the quote.
+ * Direct ICPswap pool swap (Oisy sequential, v5). Used by both
+ * `icusd_icp_direct` (icUSD <-> ICP) and `amm_swap` (3USD <-> ICP) when
+ * ICPswap wins the quote.
  *
  * 1. Approve input token -> ICPswap pool
  * 2. ICPswap.depositFrom (pulls input via ICRC-2)
  * 3. ICPswap.swap
  * 4. ICPswap.withdraw (output to caller)
  *
- * Same withdraw-amount limitation as the other ICPswap Oisy helpers:
- * withdraw amount is pre-committed to minOut; positive slippage stays on
- * the pool's internal subaccount until recovered.
+ * Each step is its own Oisy consent screen. Same withdraw-amount
+ * limitation as the other ICPswap Oisy helpers: withdraw amount is
+ * pre-committed to minOut; positive slippage stays on the pool's
+ * internal subaccount until recovered via recoverIcpswapBalance.
  */
 async function executeIcpswapDirectOisy(
   route: SwapRoute,
@@ -1009,50 +993,43 @@ async function executeIcpswapDirectOisy(
   const fromFee = tokenFeeCached(from);
   const toFee = tokenFeeCached(to);
 
+  console.log('[Oisy] Sequential ICPswap direct swap (4 hops) via @icp-sdk/signer v5');
   const signerAgent = await getOisySignerAgent(wallet.principal);
 
   const fromLedger = createOisyActor(from.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent);
   const icpswapPool = createOisyActor(icpswapPoolId, canisterIDLs.icpswap_pool, signerAgent);
 
-  // Step 1: approve input -> ICPswap pool
-  signerAgent.batch();
-  const p1 = fromLedger.icrc2_approve({
+  // Step 1: approve input -> ICPswap pool (first consent screen, Tier 1 native)
+  const r1 = await fromLedger.icrc2_approve({
     amount: amountIn + fromFee * 2n,
     spender: { owner: Principal.fromText(icpswapPoolId), subaccount: [] },
     expires_at: [], expected_allowance: [], memo: [], fee: [],
     from_subaccount: [], created_at_time: [],
   });
+  if (r1 && 'Err' in r1) throw new Error(`${from.symbol} approval failed: ${JSON.stringify(r1.Err)}`);
 
   // Step 2: ICPswap depositFrom
-  signerAgent.batch();
-  const p2 = icpswapPool.depositFrom({
+  const r2 = await icpswapPool.depositFrom({
     token: from.ledgerId,
     amount: amountIn,
     fee: fromFee,
   });
+  if ('err' in r2) throw new Error(`ICPswap depositFrom failed: ${JSON.stringify(r2.err)}`);
 
   // Step 3: ICPswap swap
-  signerAgent.batch();
-  const p3 = icpswapPool.swap({
+  const r3 = await icpswapPool.swap({
     amountIn: amountIn.toString(),
     zeroForOne,
     amountOutMinimum: minOut.toString(),
   });
+  if ('err' in r3) throw new Error(`ICPswap swap failed: ${JSON.stringify(r3.err)}`);
 
   // Step 4: ICPswap withdraw
-  signerAgent.batch();
-  const p4 = icpswapPool.withdraw({
+  const r4 = await icpswapPool.withdraw({
     token: to.ledgerId,
     amount: minOut,
     fee: toFee,
   });
-
-  await signerAgent.execute();
-  const [r1, r2, r3, r4] = await Promise.all([p1, p2, p3, p4]);
-
-  if (r1 && 'Err' in r1) throw new Error(`${from.symbol} approval failed: ${JSON.stringify(r1.Err)}`);
-  if ('err' in r2) throw new Error(`ICPswap depositFrom failed: ${JSON.stringify(r2.err)}`);
-  if ('err' in r3) throw new Error(`ICPswap swap failed: ${JSON.stringify(r3.err)}`);
   if ('err' in r4) throw new Error(`ICPswap withdraw failed: ${JSON.stringify(r4.err)}`);
   return (r4 as { ok: bigint }).ok;
 }
@@ -1197,6 +1174,7 @@ export async function recoverIcpswapBalance(
   if (isOisyWallet() && wallet.principal) {
     // Oisy path: signer agent + fees are pre-warmed by preWarmRecovery(),
     // so these calls resolve from cache synchronously (no real await).
+    console.log('[Oisy] Sequential ICPswap recovery withdraws via @icp-sdk/signer v5');
     const signerAgent = await getOisySignerAgent(wallet.principal);
 
     // Synchronous fee reads from cache (pre-warmed, with hardcoded fallback)
@@ -1208,43 +1186,30 @@ export async function recoverIcpswapBalance(
       : 0n;
     const poolActor = createOisyActor(balance.poolId, canisterIDLs.icpswap_pool, signerAgent);
 
-    const promises: Promise<any>[] = [];
+    const willRecoverToken0 = balance.token0.amount > DUST_THRESHOLD;
+    const willRecoverToken1 = balance.token1.amount > DUST_THRESHOLD;
 
-    if (balance.token0.amount > DUST_THRESHOLD) {
-      signerAgent.batch();
-      promises.push(
-        poolActor.withdraw({
-          token: balance.token0.canisterId,
-          amount: balance.token0.amount,
-          fee: fee0,
-        }),
-      );
-    }
-    if (balance.token1.amount > DUST_THRESHOLD) {
-      signerAgent.batch();
-      promises.push(
-        poolActor.withdraw({
-          token: balance.token1.canisterId,
-          amount: balance.token1.amount,
-          fee: fee1,
-        }),
-      );
-    }
-
-    if (promises.length > 0) {
+    if (willRecoverToken0 || willRecoverToken1) {
       try {
-        await signerAgent.execute();
-        const results = await Promise.all(promises);
-        let idx = 0;
-        if (balance.token0.amount > DUST_THRESHOLD) {
-          const r = results[idx++];
-          if (r && 'ok' in r) token0Recovered = r.ok;
-          else if (r && 'err' in r) console.error('token0 withdraw error:', r.err);
+        if (willRecoverToken0) {
+          // First consent screen: withdraw token0
+          const r0 = await poolActor.withdraw({
+            token: balance.token0.canisterId,
+            amount: balance.token0.amount,
+            fee: fee0,
+          });
+          if (r0 && 'ok' in r0) token0Recovered = r0.ok;
+          else if (r0 && 'err' in r0) console.error('token0 withdraw error:', r0.err);
         }
-        if (balance.token1.amount > DUST_THRESHOLD) {
-          const r = results[idx++];
-          if (r && 'ok' in r) token1Recovered = r.ok;
-          else if (r && 'err' in r) console.error('token1 withdraw error:', r.err);
+        if (willRecoverToken1) {
+          // Second consent screen (if token0 also queued): withdraw token1
+          const r1 = await poolActor.withdraw({
+            token: balance.token1.canisterId,
+            amount: balance.token1.amount,
+            fee: fee1,
+          });
+          if (r1 && 'ok' in r1) token1Recovered = r1.ok;
+          else if (r1 && 'err' in r1) console.error('token1 withdraw error:', r1.err);
         }
       } catch (executeErr: any) {
         // Oisy _arr false-negative: the on-chain call often succeeds even
@@ -1256,10 +1221,10 @@ export async function recoverIcpswapBalance(
           const after = await queryPoolUnusedBalance(balance.poolId, wallet.principal!);
           if (after) {
             // If balance dropped, the withdrawal succeeded
-            if (balance.token0.amount > DUST_THRESHOLD && after.balance0 < balance.token0.amount) {
+            if (willRecoverToken0 && after.balance0 < balance.token0.amount) {
               token0Recovered = balance.token0.amount - after.balance0;
             }
-            if (balance.token1.amount > DUST_THRESHOLD && after.balance1 < balance.token1.amount) {
+            if (willRecoverToken1 && after.balance1 < balance.token1.amount) {
               token1Recovered = balance.token1.amount - after.balance1;
             }
           }

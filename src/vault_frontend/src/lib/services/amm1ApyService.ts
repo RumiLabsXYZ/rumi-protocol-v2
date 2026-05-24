@@ -373,16 +373,14 @@ export async function claimAmm1Rewards(): Promise<
     const oisyDetected = isOisyWallet();
 
     if (oisyDetected && wallet.principal) {
+      console.log(`[Oisy] Sequential AMM1 claim_rewards via @icp-sdk/signer v5`);
       const signerAgent = await getOisySignerAgent(wallet.principal);
       const ammActor = createOisyActor(
         AMM_CANISTER_ID,
         rewardsIdlFactory as any,
         signerAgent,
       );
-      signerAgent.batch();
-      const claimPromise = ammActor.claim_rewards(poolId);
-      await signerAgent.execute();
-      const result = (await claimPromise) as
+      const result = (await ammActor.claim_rewards(poolId)) as
         | { Ok: bigint }
         | { Err: any };
       if ('Err' in result) return { error: formatClaimError(result.Err) };

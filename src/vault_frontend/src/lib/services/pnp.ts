@@ -320,22 +320,50 @@ export const pnp = {
   },
 
   /**
-   * Get the SignerAgent from the current PNP adapter (Oisy/NFID).
+   * Get a SignerAgent for the current wallet, if it's an Oisy/signer-style wallet.
    * Returns null for non-signer wallets (Plug, II) or when not connected.
-   * Used for ICRC-112 batching: approve + action in a single signer popup.
    *
-   * The SignerAgent exposes batch()/execute()/clear() for ICRC-112 batched calls.
-   * Sequential batching: batch() → queue call A → batch() → queue call B → execute()
-   * sends a single signer popup with ordered sequences.
+   * Migrated 2026-05-21 from @slide-computer/signer v4 to @icp-sdk/signer v5.
+   * Per Thomas Gladdines (lib author), ICRC-112 batching was never adopted by
+   * wallets — the v4 batch()/execute() faked it as sequential ICRC-49 calls.
+   * The v5 agent has no batch concept; each call is independent. During the
+   * migration window, call sites that still invoke batch()/execute() get a
+   * Proxy shim from oisySigner.ts that no-ops them.
+   *
+   * This method is now async because the v5 SignerAgent.create() is async.
    */
-  getSignerAgent(): any {
+  async getSignerAgent(): Promise<any> {
     try {
-      const provider = globalPnp?.provider;
-      if (provider && 'getSignerAgent' in provider) {
-        return (provider as any).getSignerAgent();
+      // Only Oisy uses the signer model in our config
+      const lastWallet = typeof window !== 'undefined'
+        ? localStorage.getItem('rumi_last_wallet')
+        : null;
+      if (!lastWallet?.toLowerCase().includes('oisy')) {
+        return null;
       }
-      return null;
-    } catch {
+
+      // Get the connected principal from PNP's account
+      const account = globalPnp?.account;
+      const ownerRaw: any = account?.owner;
+      if (!ownerRaw) return null;
+
+      let principal: Principal;
+      if (ownerRaw instanceof Principal) {
+        principal = ownerRaw;
+      } else if (typeof ownerRaw === 'string') {
+        principal = Principal.fromText(ownerRaw);
+      } else if (typeof ownerRaw?.toText === 'function') {
+        principal = Principal.fromText(ownerRaw.toText());
+      } else if (typeof ownerRaw?.toString === 'function') {
+        principal = Principal.fromText(ownerRaw.toString());
+      } else {
+        return null;
+      }
+
+      const { getOisySignerAgent } = await import('./oisySigner');
+      return await getOisySignerAgent(principal);
+    } catch (err) {
+      console.error('[pnp] getSignerAgent failed:', err);
       return null;
     }
   }

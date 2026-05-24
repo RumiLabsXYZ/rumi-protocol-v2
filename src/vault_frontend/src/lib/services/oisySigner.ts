@@ -1,36 +1,36 @@
 /**
- * Direct Oisy signer integration using @slide-computer/signer v4.
+ * Direct Oisy signer integration using @icp-sdk/signer v5.
  *
- * PNP bundles @slide-computer/signer-agent v3.20.0 internally but doesn't
- * expose the SignerAgent. v3's agent also pre-checks ICRC-21 on target
- * canisters, which fails for canisters that don't implement it.
+ * Migrated from @slide-computer/signer v4 on 2026-05-21. Thomas Gladdines
+ * (author of both libs, now at DFINITY) confirmed that ICRC-112 batching
+ * was never adopted by wallets — @slide-computer faked batch() by issuing
+ * sequential ICRC-49 calls under the hood. This caused the intermittent
+ * `_arr` undefined errors we saw between sequential calls (Principal type
+ * mismatch in Oisy v2.0.0's switch from @icp-sdk/auth v4 to v6).
  *
- * This module creates a v4 SignerAgent that delegates consent to the Oisy
- * signer (Tier 1 for known ICRC methods, Tier 3 blind request for custom
- * methods). This lets us call custom canister methods (stability pool
- * deposit, withdraw, etc.) through Oisy without requiring ICRC-21.
+ * The v5 lib has no batch/commit/execute. Each canister call is independent.
+ * Multiple sequential awaits open one Oisy popup window and surface as
+ * separate consent screens within it.
+ *
+ * The SignerAgent.create() method returns an Agent (drop-in HttpAgent) that
+ * can be passed to @dfinity/agent's Actor.createActor().
  *
  * Usage:
- *   import { getOisySignerAgent, createOisyActor, clearOisySigner } from './oisySigner';
- *
  *   const signerAgent = await getOisySignerAgent(principal);
  *   const actor = createOisyActor(canisterId, idlFactory, signerAgent);
- *
- *   signerAgent.batch();
- *   actor.icrc2_approve(...);
- *   signerAgent.batch();
- *   actor.deposit(...);
- *   await signerAgent.execute();
+ *   await actor.icrc2_approve(...);   // first consent screen
+ *   await actor.deposit(...);          // second consent screen
  */
 
-import { Signer } from '@slide-computer/signer';
-import { SignerAgent } from '@slide-computer/signer-agent';
-import { PostMessageTransport } from '@slide-computer/signer-web';
+import { Signer } from '@icp-sdk/signer';
+import { SignerAgent } from '@icp-sdk/signer/agent';
+import { PostMessageTransport } from '@icp-sdk/signer/web';
+import { Principal as IcpSdkPrincipal } from '@icp-sdk/core/principal';
 import { Actor } from '@dfinity/agent';
 import type { Principal } from '@dfinity/principal';
 
-// Module-level Signer — lightweight, no popup until first signing request.
-// windowOpenerFeatures opens Oisy as a popup instead of a new tab.
+// Module-level Signer. Lightweight — no popup until first signing request.
+// windowOpenerFeatures shapes Oisy as a popup window rather than a tab.
 const oisySigner = new Signer({
   transport: new PostMessageTransport({
     url: 'https://oisy.com/sign',
@@ -42,25 +42,36 @@ let cachedAgent: any = null;
 let cachedPrincipalText: string | null = null;
 
 /**
- * Get or create a v4 SignerAgent for the given principal.
- * The SignerAgent is cached and reused across mutations.
- * Creating it does NOT open a popup — the popup opens on execute().
+ * Get or create a v5 SignerAgent for the given principal.
+ *
+ * The agent is cached across mutations within a session. Creating it does NOT
+ * open a popup — the popup opens on the first canister call routed through it.
+ *
+ * Returns the raw v5 SignerAgent (no Proxy wrapping). The earlier Proxy-based
+ * compat shim that no-op'd batch()/execute() was removed once Phase 2 of the
+ * migration converted all call sites to plain sequential awaits — the Proxy
+ * broke methods that access the class's `#private` fields (the v5 SignerAgent
+ * uses ES private slots internally, and Proxy + `#private` is incompatible
+ * because `this` inside the method becomes the Proxy, not the real instance).
+ *
+ * @param principal Dfinity Principal of the connected account
+ * @returns A SignerAgent compatible with @dfinity/agent Actor.createActor()
  */
 export async function getOisySignerAgent(principal: Principal): Promise<any> {
   const principalText = principal.toText();
 
-  // Reuse cached agent if principal hasn't changed
   if (cachedAgent && cachedPrincipalText === principalText) {
     return cachedAgent;
   }
 
-  // Let SignerAgent create its own @icp-sdk/core HttpAgent internally.
-  // Passing @dfinity/agent's HttpAgent causes a rootKey type mismatch:
-  // @dfinity returns ArrayBuffer but @icp-sdk/core expects Uint8Array,
-  // which breaks certificate validation after signing.
+  // Convert @dfinity/principal → @icp-sdk/core/principal via text representation.
+  // The two libs have separate Principal classes; passing one to the other
+  // directly causes a `_arr` mismatch (the v4-era bug).
+  const sdkPrincipal = IcpSdkPrincipal.fromText(principalText);
+
   cachedAgent = await SignerAgent.create({
-    signer: oisySigner as any,
-    account: principal as any,
+    signer: oisySigner,
+    account: sdkPrincipal,
   });
 
   cachedPrincipalText = principalText;
@@ -68,8 +79,12 @@ export async function getOisySignerAgent(principal: Principal): Promise<any> {
 }
 
 /**
- * Create an actor that routes calls through the Oisy v4 SignerAgent.
- * This actor supports batch()/execute() for ICRC-112 batched signing.
+ * Create an actor that routes calls through the v5 SignerAgent.
+ * Drop-in @dfinity/agent Actor — supports any IDL factory generated by didc.
+ *
+ * The `agent: signerAgent as any` cast is intentional: v5's SignerAgent and
+ * @dfinity/agent's HttpAgent are siblings, not identical types. Same pattern
+ * we used with v4.
  */
 export function createOisyActor(
   canisterId: string,
@@ -77,13 +92,13 @@ export function createOisyActor(
   signerAgent: any,
 ): any {
   return Actor.createActor(idlFactory, {
-    agent: signerAgent,
+    agent: signerAgent as any,
     canisterId,
   });
 }
 
 /**
- * Clear cached signer agent (call on disconnect).
+ * Clear cached signer agent (call on wallet disconnect).
  */
 export function clearOisySigner(): void {
   cachedAgent = null;

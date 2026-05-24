@@ -547,8 +547,9 @@
     if (addOverMax) { toastStore.error(`Exceeds wallet balance (${formatNumber(maxAddCollateral, 4)} ${collateralSymbol})`, 8000); return; }
     clearMessages(); isProcessing = true;
     try {
-      // Oisy: skip pre-approval — ApiClient ICRC-112 batch handles approve+add_margin
-      // in a single popup. Any async work here burns the browser user gesture context.
+      // Oisy: skip pre-approval — ApiClient handles approve+add_margin as two
+      // sequential consent screens. Any async work here burns the browser user
+      // gesture context before the first Oisy popup opens.
       if (!isOisyWallet()) {
         const ledgerCanisterId = vaultCollateralInfo?.ledgerCanisterId ?? CONFIG.currentIcpLedgerId;
         const amountRaw = BigInt(Math.floor(amount * collateralDecimalsFactor));
