@@ -412,7 +412,7 @@
       const result = await transferICRC1(sendCanisterId, sendRecipient.trim(), sendAmountRaw);
       if (result.success) {
         addToast(`Sent ${sendAmount} ${sendToken?.meta.symbol ?? ''} successfully`, 'success');
-        walletStore.refreshBalance();
+        walletStore.refreshBalance({ skipCache: true });
         dropdownView = 'main';
       } else {
         sendError = result.error || 'Transfer failed';
