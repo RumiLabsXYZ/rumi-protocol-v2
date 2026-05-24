@@ -180,7 +180,7 @@ export class TransferReceiptManager {
         this.saveReceipt(receipt);
         
         // Refresh balances
-        await walletStore.refreshBalance();
+        await walletStore.refreshBalance({ skipCache: true });
         
         return { success: true };
       } else {

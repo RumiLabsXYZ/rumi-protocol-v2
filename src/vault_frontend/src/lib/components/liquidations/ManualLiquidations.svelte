@@ -371,7 +371,7 @@
       loadLiquidatableVaults(); loadAllVaults();
     });
     refreshIcpPrice();
-    if ($wallet.isConnected) wallet.refreshBalance().catch(() => {});
+    if ($wallet.isConnected) wallet.refreshBalance({ skipCache: true }).catch(() => {});
     const pi = setInterval(refreshIcpPrice, 30000);
     const vi = setInterval(() => {
       collateralStore.fetchSupportedCollateral(true).then(() => { collateralVersion++; });
@@ -381,7 +381,7 @@
   });
 
   $: if ($wallet.isConnected && !walletIcusd && !walletCkusdt && !walletCkusdc) {
-    wallet.refreshBalance().catch(() => {});
+    wallet.refreshBalance({ skipCache: true }).catch(() => {});
   }
 </script>
 
