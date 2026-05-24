@@ -478,6 +478,30 @@
   // When no debt + max withdraw → this becomes a "Withdraw & Close" action
   $: isWithdrawAndClose = canClose && isMaxWithdraw;
 
+  // Detect if repay amount is the full debt (max). Only icUSD-denominated
+  // repays can be merged with close — the compound backend method takes icUSD.
+  $: isMaxRepay = (() => {
+    const amt = parseFloat(repayAmount);
+    return amt > 0 && maxRepayable > 0 && Math.abs(amt - maxRepayable) < 0.0001;
+  })();
+  // When repaying the full debt in icUSD AND the vault has collateral → offer
+  // "Repay & Close" via the backend repay_and_close_vault compound method.
+  // Saves one Oisy consent screen (3 popups → 2).
+  //
+  // The MIN_ICUSD gate fences off the protocol's "stuck debt zone" — debt
+  // between DUST_DEBT_THRESHOLD (0.0005 icUSD) and MIN_ICUSD_AMOUNT (0.1
+  // icUSD) can't be repaid (backend rejects with AmountTooLow) and can't
+  // be dust-forgiven on close. Without this gate, a user with e.g. 0.05
+  // icUSD debt would see the button promise "Repay & Close" but get a
+  // misleading "Failed" toast when the backend rejected. With the gate,
+  // the button stays as plain "Repay" and the existing rejection-with-
+  // hint path applies (same as today's behavior — no regression).
+  $: isRepayAndClose =
+      repayTokenType === 'icUSD'
+      && isMaxRepay
+      && parseFloat(repayAmount) >= MIN_ICUSD
+      && vaultCollateralAmount > 0;
+
   function clearMessages() { /* toasts auto-dismiss */ }
 
   function floorTo(val: number, decimals: number): string {
@@ -547,8 +571,9 @@
     if (addOverMax) { toastStore.error(`Exceeds wallet balance (${formatNumber(maxAddCollateral, 4)} ${collateralSymbol})`, 8000); return; }
     clearMessages(); isProcessing = true;
     try {
-      // Oisy: skip pre-approval — ApiClient ICRC-112 batch handles approve+add_margin
-      // in a single popup. Any async work here burns the browser user gesture context.
+      // Oisy: skip pre-approval — ApiClient handles approve+add_margin as two
+      // sequential consent screens. Any async work here burns the browser user
+      // gesture context before the first Oisy popup opens.
       if (!isOisyWallet()) {
         const ledgerCanisterId = vaultCollateralInfo?.ledgerCanisterId ?? CONFIG.currentIcpLedgerId;
         const amountRaw = BigInt(Math.floor(amount * collateralDecimalsFactor));
@@ -635,18 +660,29 @@
     clearMessages(); isProcessing = true;
     try {
       let result;
-      if (repayTokenType === 'icUSD') {
+      if (isRepayAndClose) {
+        // Compound: repay full debt + withdraw all collateral + close vault in
+        // one backend call (one Oisy consent screen instead of three).
+        result = await protocolManager.repayAndCloseVault(vault.vaultId, amount);
+      } else if (repayTokenType === 'icUSD') {
         result = await protocolManager.repayToVault(vault.vaultId, amount);
       } else {
         result = await protocolManager.repayToVaultWithStable(vault.vaultId, amount, repayTokenType);
       }
       if (result.success) {
+        const actionLabel = isRepayAndClose ? 'Repaid and closed vault' : `Repaid ${amount} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`;
         const msg = result.oisyResilient
-          ? `Repaid ${amount} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType} (wallet glitch ignored — operation confirmed on-chain).`
-          : `Repaid ${amount} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`;
+          ? `${actionLabel} (wallet glitch ignored — operation confirmed on-chain).`
+          : actionLabel;
         toastStore.success(msg, 8000); repayAmount = '';
         await new Promise(r => setTimeout(r, 1000));
-        await vaultStore.refreshVault(vault.vaultId);
+        // For repay-and-close, refresh the full vault list (vault is gone);
+        // for partial repay, refresh just this vault.
+        if (isRepayAndClose) {
+          await vaultStore.refreshVaults();
+        } else {
+          await vaultStore.refreshVault(vault.vaultId);
+        }
         walletStore.refreshBalance({ skipCache: true });
         dispatch('updated');
       } else { toastStore.error(result.error || 'Failed', 8000); }
@@ -980,7 +1016,13 @@
                 {/if}
                 <button class="btn-submit btn-submit-debt" on:click={handleRepay}
                   disabled={isProcessing || !repayAmount || repayOverMax}>
-                  {isProcessing ? '...' : 'Repay'}
+                  {#if isProcessing}
+                    ...
+                  {:else if isRepayAndClose}
+                    Repay & Close
+                  {:else}
+                    Repay
+                  {/if}
                 </button>
               </div>
             {/if}

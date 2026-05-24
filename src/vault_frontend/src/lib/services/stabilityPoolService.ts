@@ -239,7 +239,8 @@ class StabilityPoolService {
     const oisyDetected = isOisyWallet();
 
     if (oisyDetected && wallet.principal) {
-      // ─── Oisy ICRC-112 batched path (v4 direct signer) ───
+      // ─── Oisy sequential path (v5: no batch concept) ───
+      console.log(`[Oisy] Sequential approve + SP deposit via @icp-sdk/signer v5`);
       const signerAgent = await getOisySignerAgent(wallet.principal);
 
       const ledgerActor = createOisyActor(
@@ -251,26 +252,19 @@ class StabilityPoolService {
 
       const requestedAllowance = amount * 105n / 100n;
 
-      // Sequence 0: approve (Tier 1 — signer handles natively)
-      signerAgent.batch();
-      const approvePromise = ledgerActor.icrc2_approve({
+      // 1) Approve (first Oisy consent screen, Tier 1 native).
+      const approveResult = await ledgerActor.icrc2_approve({
         amount: requestedAllowance,
         spender: { owner: Principal.fromText(STABILITY_POOL_CANISTER_ID), subaccount: [] },
         expires_at: [], expected_allowance: [], memo: [], fee: [],
         from_subaccount: [], created_at_time: []
       });
-
-      // Sequence 1: deposit (Tier 3 — blind request consent)
-      signerAgent.batch();
-      const depositPromise = poolActor.deposit(tokenLedger, amount);
-
-      // Fire both as a single ICRC-112 batch request → one Oisy popup
-      await signerAgent.execute();
-      const [approveResult, result] = await Promise.all([approvePromise, depositPromise]);
-
       if (approveResult && 'Err' in approveResult) {
         throw new Error(`Approval failed: ${JSON.stringify(approveResult.Err)}`);
       }
+
+      // 2) Deposit (second Oisy consent screen, Tier 3 blind-request).
+      const result = await poolActor.deposit(tokenLedger, amount);
       if ('Err' in result) {
         throw new Error(this.formatError(result.Err));
       }
@@ -310,14 +304,12 @@ class StabilityPoolService {
     if (!wallet.isConnected) throw new Error('Wallet not connected');
 
     if (isOisyWallet() && wallet.principal) {
+      console.log(`[Oisy] Sequential SP withdraw via @icp-sdk/signer v5`);
       const signerAgent = await getOisySignerAgent(wallet.principal);
       const poolActor = createOisyActor(
         STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool, signerAgent
       );
-      signerAgent.batch();
-      const withdrawPromise = poolActor.withdraw(tokenLedger, amount);
-      await signerAgent.execute();
-      const result = await withdrawPromise;
+      const result = await poolActor.withdraw(tokenLedger, amount);
       if ('Err' in result) {
         throw new Error(this.formatError(result.Err));
       }
@@ -337,14 +329,12 @@ class StabilityPoolService {
     if (!wallet.isConnected) throw new Error('Wallet not connected');
 
     if (isOisyWallet() && wallet.principal) {
+      console.log(`[Oisy] Sequential SP claim_collateral via @icp-sdk/signer v5`);
       const signerAgent = await getOisySignerAgent(wallet.principal);
       const poolActor = createOisyActor(
         STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool, signerAgent
       );
-      signerAgent.batch();
-      const claimPromise = poolActor.claim_collateral(collateralLedger);
-      await signerAgent.execute();
-      const result = await claimPromise;
+      const result = await poolActor.claim_collateral(collateralLedger);
       if ('Err' in result) {
         throw new Error(this.formatError(result.Err));
       }
@@ -366,14 +356,12 @@ class StabilityPoolService {
     if (!wallet.isConnected) throw new Error('Wallet not connected');
 
     if (isOisyWallet() && wallet.principal) {
+      console.log(`[Oisy] Sequential SP claim_all_collateral via @icp-sdk/signer v5`);
       const signerAgent = await getOisySignerAgent(wallet.principal);
       const poolActor = createOisyActor(
         STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool, signerAgent
       );
-      signerAgent.batch();
-      const claimPromise = poolActor.claim_all_collateral();
-      await signerAgent.execute();
-      const result = await claimPromise;
+      const result = await poolActor.claim_all_collateral();
       if ('Err' in result) {
         throw new Error(this.formatError(result.Err));
       }
@@ -395,14 +383,12 @@ class StabilityPoolService {
     if (!wallet.isConnected) throw new Error('Wallet not connected');
 
     if (isOisyWallet() && wallet.principal) {
+      console.log(`[Oisy] Sequential SP opt_out_collateral via @icp-sdk/signer v5`);
       const signerAgent = await getOisySignerAgent(wallet.principal);
       const poolActor = createOisyActor(
         STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool, signerAgent
       );
-      signerAgent.batch();
-      const optPromise = poolActor.opt_out_collateral(collateralType);
-      await signerAgent.execute();
-      const result = await optPromise;
+      const result = await poolActor.opt_out_collateral(collateralType);
       if ('Err' in result) {
         throw new Error(this.formatError(result.Err));
       }
@@ -422,14 +408,12 @@ class StabilityPoolService {
     if (!wallet.isConnected) throw new Error('Wallet not connected');
 
     if (isOisyWallet() && wallet.principal) {
+      console.log(`[Oisy] Sequential SP opt_in_collateral via @icp-sdk/signer v5`);
       const signerAgent = await getOisySignerAgent(wallet.principal);
       const poolActor = createOisyActor(
         STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool, signerAgent
       );
-      signerAgent.batch();
-      const optPromise = poolActor.opt_in_collateral(collateralType);
-      await signerAgent.execute();
-      const result = await optPromise;
+      const result = await poolActor.opt_in_collateral(collateralType);
       if ('Err' in result) {
         throw new Error(this.formatError(result.Err));
       }
@@ -449,14 +433,12 @@ class StabilityPoolService {
     if (!wallet.isConnected) throw new Error('Wallet not connected');
 
     if (isOisyWallet() && wallet.principal) {
+      console.log(`[Oisy] Sequential SP execute_liquidation via @icp-sdk/signer v5`);
       const signerAgent = await getOisySignerAgent(wallet.principal);
       const poolActor = createOisyActor(
         STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool, signerAgent
       );
-      signerAgent.batch();
-      const liqPromise = poolActor.execute_liquidation(vaultId);
-      await signerAgent.execute();
-      const result = await liqPromise;
+      const result = await poolActor.execute_liquidation(vaultId);
       if ('Err' in result) {
         throw new Error(this.formatError(result.Err));
       }

@@ -114,9 +114,9 @@ export function tokenFee(token: AmmToken): Promise<bigint> {
 
 /**
  * Synchronous version of `tokenFee`. Returns the cached fee or the hardcoded
- * fallback. Use inside Oisy signer-batch code paths where a click-handler
- * gesture window must be preserved (no `await` between click and
- * `signerAgent.execute()`). Callers MUST ensure the cache is warmed first via
+ * fallback. Use inside Oisy signer code paths where a click-handler gesture
+ * window must be preserved (no `await` between click and the first Oisy
+ * popup). Callers MUST ensure the cache is warmed first via
  * `preWarmOisyFees()` during the quote phase.
  */
 export function tokenFeeCached(token: AmmToken): bigint {
@@ -334,27 +334,24 @@ class AmmService {
     const approveAmt = await approvalAmount(amountIn, inputToken);
 
     if (oisyDetected && wallet.principal) {
+      console.log(`[Oisy] Sequential approve + AMM swap via @icp-sdk/signer v5`);
       const signerAgent = await getOisySignerAgent(wallet.principal);
       const ledgerActor = createOisyActor(inputToken.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent);
       const ammActor = createOisyActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm, signerAgent);
 
-      signerAgent.batch();
-      const approvePromise = ledgerActor.icrc2_approve({
+      // 1) Approve (first Oisy consent screen, Tier 1 native).
+      const approveResult = await ledgerActor.icrc2_approve({
         amount: approveAmt,
         spender: { owner: Principal.fromText(AMM_CANISTER_ID), subaccount: [] },
         expires_at: [], expected_allowance: [], memo: [], fee: [],
         from_subaccount: [], created_at_time: [],
       });
-
-      signerAgent.batch();
-      const swapPromise = ammActor.swap(poolId, tokenIn, amountIn, minAmountOut);
-
-      await signerAgent.execute();
-      const [approveResult, swapResult] = await Promise.all([approvePromise, swapPromise]);
-
       if (approveResult && 'Err' in approveResult) {
         throw new Error(`Approval failed: ${JSON.stringify(approveResult.Err)}`);
       }
+
+      // 2) AMM swap (second Oisy consent screen).
+      const swapResult = await ammActor.swap(poolId, tokenIn, amountIn, minAmountOut);
       if ('Err' in swapResult) throw new Error(this.formatError(swapResult.Err));
       return swapResult.Ok;
     } else {
@@ -398,44 +395,40 @@ class AmmService {
     const approveB = amountB > 0n ? await approvalAmount(amountB, tokenB) : 0n;
 
     if (oisyDetected && wallet.principal) {
+      console.log(`[Oisy] Sequential approve(s) + AMM add_liquidity via @icp-sdk/signer v5`);
       const signerAgent = await getOisySignerAgent(wallet.principal);
-      const approvePromises: Promise<any>[] = [];
 
+      // 1) Approve token A (first Oisy consent screen, if needed).
       if (amountA > 0n) {
         const ledgerA = createOisyActor(tokenA.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent);
-        signerAgent.batch();
-        approvePromises.push(ledgerA.icrc2_approve({
+        const approveResultA = await ledgerA.icrc2_approve({
           amount: approveA,
           spender: { owner: Principal.fromText(AMM_CANISTER_ID), subaccount: [] },
           expires_at: [], expected_allowance: [], memo: [], fee: [],
           from_subaccount: [], created_at_time: [],
-        }));
+        });
+        if (approveResultA && 'Err' in approveResultA) {
+          throw new Error(`Approval failed for ${tokenA.symbol}: ${JSON.stringify(approveResultA.Err)}`);
+        }
       }
 
+      // 2) Approve token B (second consent screen, if needed).
       if (amountB > 0n) {
         const ledgerB = createOisyActor(tokenB.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent);
-        signerAgent.batch();
-        approvePromises.push(ledgerB.icrc2_approve({
+        const approveResultB = await ledgerB.icrc2_approve({
           amount: approveB,
           spender: { owner: Principal.fromText(AMM_CANISTER_ID), subaccount: [] },
           expires_at: [], expected_allowance: [], memo: [], fee: [],
           from_subaccount: [], created_at_time: [],
-        }));
+        });
+        if (approveResultB && 'Err' in approveResultB) {
+          throw new Error(`Approval failed for ${tokenB.symbol}: ${JSON.stringify(approveResultB.Err)}`);
+        }
       }
 
+      // 3) add_liquidity (final consent screen).
       const ammActor = createOisyActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm, signerAgent);
-      signerAgent.batch();
-      const addPromise = ammActor.add_liquidity(poolId, amountA, amountB, minLpShares);
-
-      await signerAgent.execute();
-      const results = await Promise.all([...approvePromises, addPromise]);
-
-      for (let i = 0; i < approvePromises.length; i++) {
-        const r = results[i];
-        if (r && 'Err' in r) throw new Error(`Approval failed: ${JSON.stringify(r.Err)}`);
-      }
-
-      const addResult = results[results.length - 1];
+      const addResult = await ammActor.add_liquidity(poolId, amountA, amountB, minLpShares);
       if ('Err' in addResult) throw new Error(this.formatError(addResult.Err));
       return addResult.Ok;
     } else {

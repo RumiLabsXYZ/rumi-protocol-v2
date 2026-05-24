@@ -438,7 +438,8 @@ class ThreePoolService {
     const approveAmt = await approvalAmount(dxRaw, fromToken);
 
     if (oisyDetected && wallet.principal) {
-      // ─── Oisy ICRC-112 batched path ───
+      // ─── Oisy sequential path (v5: no batch concept) ───
+      console.log(`[Oisy] Sequential approve + 3pool swap via @icp-sdk/signer v5`);
       const signerAgent = await getOisySignerAgent(wallet.principal);
 
       const ledgerActor = createOisyActor(
@@ -448,25 +449,19 @@ class ThreePoolService {
         THREEPOOL_CANISTER_ID, canisterIDLs.three_pool, signerAgent
       );
 
-      // Sequence 0: approve
-      signerAgent.batch();
-      const approvePromise = ledgerActor.icrc2_approve({
+      // 1) Approve (first Oisy consent screen, Tier 1 native).
+      const approveResult = await ledgerActor.icrc2_approve({
         amount: approveAmt,
         spender: { owner: Principal.fromText(THREEPOOL_CANISTER_ID), subaccount: [] },
         expires_at: [], expected_allowance: [], memo: [], fee: [],
         from_subaccount: [], created_at_time: []
       });
-
-      // Sequence 1: swap
-      signerAgent.batch();
-      const swapPromise = poolActor.swap(fromIndex, toIndex, dxRaw, minDyRaw);
-
-      await signerAgent.execute();
-      const [approveResult, swapResult] = await Promise.all([approvePromise, swapPromise]);
-
       if (approveResult && 'Err' in approveResult) {
         throw new Error(`Approval failed: ${JSON.stringify(approveResult.Err)}`);
       }
+
+      // 2) Swap (second Oisy consent screen).
+      const swapResult = await poolActor.swap(fromIndex, toIndex, dxRaw, minDyRaw);
       if ('Err' in swapResult) {
         throw new Error(this.formatError(swapResult.Err));
       }
@@ -526,43 +521,36 @@ class ThreePoolService {
     };
 
     if (oisyDetected && wallet.principal) {
-      // ─── Oisy ICRC-112 batched path ───
+      // ─── Oisy sequential path (v5: no batch concept) ───
+      console.log(`[Oisy] Sequential approve(s) + 3pool add_liquidity via @icp-sdk/signer v5`);
       const signerAgent = await getOisySignerAgent(wallet.principal);
 
-      // Queue approvals for each non-zero token
-      const approvePromises: Promise<any>[] = [];
+      // 1) Approve each non-zero token sequentially (Tier 1 native consent screens).
       for (let k = 0; k < 3; k++) {
         if (amounts[k] > 0n) {
           const token = POOL_TOKENS[k];
           const ledgerActor = createOisyActor(token.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent);
-          signerAgent.batch();
-          approvePromises.push(ledgerActor.icrc2_approve({
+          const approveResult = await ledgerActor.icrc2_approve({
             amount: approveAmounts[k],
             spender, expires_at: [], expected_allowance: [], memo: [], fee: [],
             from_subaccount: [], created_at_time: []
-          }));
+          });
+          if (approveResult && 'Err' in approveResult) {
+            throw new Error(`Approval failed for ${token.symbol}: ${JSON.stringify(approveResult.Err)}`);
+          }
         }
       }
 
-      // Queue add_liquidity call
+      // 2) add_liquidity (final consent screen), guarded against _arr false-negative.
       const poolActor = createOisyActor(THREEPOOL_CANISTER_ID, canisterIDLs.three_pool, signerAgent);
-      signerAgent.batch();
-      const addPromise = poolActor.add_liquidity(amounts, minLp);
-
       const guarded = await callWithOisyFalseNegativeGuard(
         async () => {
-          await signerAgent.execute();
-          const results = await Promise.all([...approvePromises, addPromise]);
-          for (let i = 0; i < approvePromises.length; i++) {
-            const r = results[i];
-            if (r && 'Err' in r) throw new Error(`Approval failed: ${JSON.stringify(r.Err)}`);
-          }
-          const addResult = results[results.length - 1] as { Ok: bigint } | { Err: any };
+          const addResult = await poolActor.add_liquidity(amounts, minLp) as { Ok: bigint } | { Err: any };
           if ('Err' in addResult) throw new Error(this.formatError(addResult.Err));
           return addResult.Ok;
         },
         verifyAddLanded,
-        `Oisy batched 3pool add_liquidity`
+        `Oisy 3pool add_liquidity`
       );
       return guarded;
     } else {
