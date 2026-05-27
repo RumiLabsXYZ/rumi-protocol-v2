@@ -121,7 +121,7 @@ For canisters whose `InitArgs` is huge, prefer the `path` form so the yaml stays
 
 ### `rumi_stability_pool` (Pattern B, full InitArgs on upgrade)
 
-Same shape as `rumi_3pool` above — environment-level `init_args` carries the full `InitArgs` record. No special treatment needed beyond ensuring the record fields match the current `InitArgs` definition.
+Same shape as `rumi_3pool` above (environment-level `init_args` carries the full `InitArgs` record). No special treatment needed beyond ensuring the record fields match the current `InitArgs` definition.
 
 ### `rumi_analytics` (Pattern B + post-build shrink/gzip)
 
@@ -151,7 +151,7 @@ The wasm post-processing (`ic-wasm shrink` + `gzip`) is the recipe's job, not in
 
 - **Per-deploy description for `rumi_protocol_backend`**: editing the yaml on every mainnet deploy is friction. Recommended workflow: keep `icp.yaml` set to a generic description, override on the CLI for each real deploy. Less ceremony than editing+committing yaml just for the description string.
 - **Two sources of truth**: canister-level `init_args` and environment-level `init_args.<name>` are easy to mix up. Convention: canister-level = "fresh install on a brand-new replica", environment-level = "the actual mainnet/test reality, including upgrades." On `ic` environment we'll override every canister explicitly.
-- **`icp project show` does not surface environment-level overrides** in its output; only the canister-level `init_args` is printed. This is mildly confusing for verification — the override does take effect on deploy, but you can't easily see it via `project show`. Cross-check with the env yaml directly.
+- **`icp project show` does not surface environment-level overrides** in its output; only the canister-level `init_args` is printed. This is mildly confusing for verification (the override does take effect on deploy, but you can't easily see it via `project show`). Cross-check with the env yaml directly.
 - **Local-network `icp deploy --mode upgrade` is a no-op when the wasm is unchanged.** That's expected and matches dfx behavior, but worth flagging so reviewers don't think their upgrade ran when it actually skipped.
 - **`init_args` is also passed on `install` mode if the canister already exists with a wasm**, but that path is governed by the `--mode` flag, not the yaml structure. Always pass `--mode upgrade` (or `--mode reinstall` if intentional and the canister state is throwaway) explicitly on mainnet deploys.
 
