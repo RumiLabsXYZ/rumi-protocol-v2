@@ -66,7 +66,7 @@ canisters:
   # ---------------------------------------------------------------------------
   # rumi_protocol_backend, rumi_3pool, rumi_amm, rumi_stability_pool,
   # rumi_treasury, rumi_analytics, liquidation_bot, icusd_ledger,
-  # icusd_index, threeusd_index, vault_frontend, rumi_homepage.
+  # threeusd_index, vault_frontend, rumi_homepage.
 
   # Task 8: flaky_ledger (test-only mock ICRC-1/ICRC-2 ledger with configurable
   # transfer failures). Lives in src/flaky_ledger/ as a Rust workspace member;
@@ -84,6 +84,38 @@ canisters:
         package: flaky_ledger
         candid: src/flaky_ledger/flaky_ledger.did
         shrink: true
+
+  # Task 9: icusd_index (mainnet 6niqu-siaaa-aaaap-qrjeq-cai). The official
+  # DFINITY icrc1-index-ng wasm checked into the repo at
+  # src/ledger/ic-icrc1-index-ng.wasm.gz. The local file's sha256 matches the
+  # production module hash exactly (cf3bf8f8...db2d), so this is a pure
+  # pre-built canister - icp-cli only verifies the sha256 before install.
+  # Tracks the icusd_ledger (t6bor-paaaa-aaaap-qrd5q-cai) for account history
+  # queries used by Plug Wallet and the explorer.
+  #
+  # The canister's candid service signature is `(index_arg : opt IndexArg)`:
+  # - Fresh install:  `(opt variant { Init = record { ledger_id = ...; retrieve_blocks_from_ledger_interval_seconds = opt 10; ... } })`
+  # - Upgrade:        `(null)` - leaves all configuration fields unchanged.
+  #
+  # Per the upgrade-args spike (docs/superpowers/notes/2026-05-27-icp-cli-
+  # upgrade-args-spike.md), `icp deploy --mode upgrade` reads the
+  # environment-level override. The mainnet-live override is set to `(null)`
+  # because production already has its state and we never want to clobber it.
+  - name: icusd_index
+    build:
+      steps:
+        - type: pre-built
+          path: src/ledger/ic-icrc1-index-ng.wasm.gz
+          sha256: cf3bf8f87dc908be156f314fae3b83aae56d1f63e74a63c32994c4e02babdb2d
+    init_args: |
+      (opt variant {
+        Init = record {
+          ledger_id = principal "t6bor-paaaa-aaaap-qrd5q-cai";
+          retrieve_blocks_from_ledger_interval_seconds = opt 10 : opt nat64;
+          min_retrieve_blocks_from_ledger_interval_seconds = null;
+          max_retrieve_blocks_from_ledger_interval_seconds = null;
+        }
+      })
 
 networks:
   - name: local
@@ -115,7 +147,14 @@ environments:
   # through the backend's configuration record, not via `icp deploy`.
   - name: mainnet-live
     network: ic
-    canisters: []
+    canisters:
+      - icusd_index
+    init_args:
+      # Upgrade-mode override: `(null)` preserves all existing configuration
+      # (ledger_id and the retrieve-interval fields). The canister is already
+      # synced to icusd_ledger; we never want to re-init or change ledger_id
+      # on an upgrade. See the upgrade-args spike for the override mechanism.
+      icusd_index: '(null)'
 
   # Future staging environment on mainnet (separate canister IDs). Populated
   # by Phase 1 work; intentionally empty here so the project file already
@@ -133,3 +172,4 @@ environments:
       - internet_identity
       - xrc
       - flaky_ledger
+      - icusd_index
