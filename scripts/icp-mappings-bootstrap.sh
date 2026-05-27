@@ -30,7 +30,9 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
-target=".icp/cache/mappings/mainnet-live.ids.json"
+target=".icp/data/mappings/mainnet-live.ids.json"
+# Canonical mapping path per cli.internetcomputer.org/0.2/migration/from-dfx/.
+# .icp/data/ is committed to source control; .icp/cache/ is gitignored.
 mkdir -p "$(dirname "$target")"
 
 python3 -c "

@@ -1,5 +1,7 @@
 # Spike: icp-cli External Canister (deps pull) Equivalent
 
+> **Correction (2026-05-27, post-Task 9):** This spike documented `.icp/cache/mappings/<env>.ids.json` as the canister-ID mapping path. That is only where icp-cli auto-generates mappings during `icp network start` for the LOCAL environment. The canonical, manually-authored mapping path for production environments is `.icp/data/mappings/<env>.ids.json`, per the migration guide at cli.internetcomputer.org/0.2/migration/from-dfx/. `.icp/data/` should be committed to source control; only `.icp/cache/` should be gitignored. See `docs/superpowers/notes/2026-05-27-icp-cli-deploy-pattern.md` for the deploy-pattern implications.
+
 **Date:** 2026-05-27
 **Branch:** `feat/icp-cli-migration`
 **icp-cli version tested:** 0.2.0 (network launcher v12.0.0-2026-03-19-04-43)
