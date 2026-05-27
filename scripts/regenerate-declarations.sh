@@ -82,12 +82,26 @@ to_upper() {
 
 write_did_js() {
   local name="$1" did="$2" out_dir="$3"
-  didc bind --target js "$did" > "$out_dir/$name.did.js"
+  local tmp
+  tmp="$(mktemp)"
+  if didc bind --target js "$did" > "$tmp"; then
+    mv "$tmp" "$out_dir/$name.did.js"
+  else
+    rm -f "$tmp"
+    return 1
+  fi
 }
 
 write_did_ts() {
   local name="$1" did="$2" out_dir="$3"
-  didc bind --target ts "$did" > "$out_dir/$name.did.d.ts"
+  local tmp
+  tmp="$(mktemp)"
+  if didc bind --target ts "$did" > "$tmp"; then
+    mv "$tmp" "$out_dir/$name.did.d.ts"
+  else
+    rm -f "$tmp"
+    return 1
+  fi
 }
 
 write_index_js() {
@@ -217,6 +231,12 @@ regenerate_one() {
     echo "ok: $name"
   fi
 }
+
+if [ "$#" -gt 1 ]; then
+  echo "error: too many arguments (got $#, expected 0 or 1)" >&2
+  echo "usage: $0 [canister_name]" >&2
+  exit 1
+fi
 
 target="${1:-}"
 total=${#canister_names[@]}
