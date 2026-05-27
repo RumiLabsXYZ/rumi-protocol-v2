@@ -7,6 +7,41 @@ export const idlFactory = ({ IDL }) => {
     'stability_pool' : IDL.Principal,
     'backend' : IDL.Principal,
   });
+  const BackfillProgress = IDL.Record({
+    'cursor_after' : IDL.Nat64,
+    'from' : IDL.Nat64,
+    'scanned' : IDL.Nat64,
+    'complete' : IDL.Bool,
+    'emitted' : IDL.Nat64,
+    'total_events' : IDL.Nat64,
+  });
+  const Result = IDL.Variant({ 'Ok' : BackfillProgress, 'Err' : IDL.Text });
+  const LiquidityAction = IDL.Variant({
+    'Add' : IDL.Null,
+    'Remove' : IDL.Null,
+    'Donate' : IDL.Null,
+    'RemoveOneCoin' : IDL.Null,
+  });
+  const AnalyticsAmmLiquidityEvent = IDL.Record({
+    'action' : LiquidityAction,
+    'timestamp_ns' : IDL.Nat64,
+    'source_event_id' : IDL.Nat64,
+    'lp_shares' : IDL.Nat64,
+    'caller' : IDL.Principal,
+    'pool_id' : IDL.Text,
+  });
+  const SwapSource = IDL.Variant({ 'Amm' : IDL.Null, 'ThreePool' : IDL.Null });
+  const AnalyticsSwapEvent = IDL.Record({
+    'fee' : IDL.Nat64,
+    'timestamp_ns' : IDL.Nat64,
+    'token_in' : IDL.Principal,
+    'source' : SwapSource,
+    'source_event_id' : IDL.Nat64,
+    'amount_out' : IDL.Nat64,
+    'caller' : IDL.Principal,
+    'amount_in' : IDL.Nat64,
+    'token_out' : IDL.Principal,
+  });
   const AddressValueSeriesQuery = IDL.Record({
     'principal' : IDL.Principal,
     'resolution_ns' : IDL.Opt(IDL.Nat64),
@@ -214,6 +249,7 @@ export const idlFactory = ({ IDL }) => {
     'peg' : IDL.Opt(PegStatus),
     'lp_apy_pct' : IDL.Opt(IDL.Float64),
     'timestamp_ns' : IDL.Nat64,
+    'median_cr_bps' : IDL.Nat32,
     'sp_apy_pct' : IDL.Opt(IDL.Float64),
     'total_debt_e8s' : IDL.Nat64,
     'circulating_supply_icusd_e8s' : IDL.Opt(IDL.Nat),
@@ -221,7 +257,6 @@ export const idlFactory = ({ IDL }) => {
     'total_vault_count' : IDL.Nat32,
     'total_collateral_usd_e8s' : IDL.Nat64,
     'system_cr_bps' : IDL.Nat32,
-    'median_cr_bps' : IDL.Nat32,
     'swap_count_24h' : IDL.Nat32,
     'volume_24h_e8s' : IDL.Nat64,
   });
@@ -406,7 +441,24 @@ export const idlFactory = ({ IDL }) => {
   const ResetErrorCountersArgs = IDL.Record({
     'sources' : IDL.Opt(IDL.Vec(IDL.Text)),
   });
+  const Result_1 = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text });
   return IDL.Service({
+    'admin_backfill_add_margin_events' : IDL.Func([IDL.Nat64], [Result], []),
+    'debug_get_amm_event_counts' : IDL.Func(
+        [],
+        [IDL.Nat64, IDL.Nat64],
+        ['query'],
+      ),
+    'debug_get_amm_liquidity_events_raw' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [IDL.Vec(AnalyticsAmmLiquidityEvent)],
+        ['query'],
+      ),
+    'debug_get_swap_events_raw' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [IDL.Vec(AnalyticsSwapEvent)],
+        ['query'],
+      ),
     'get_address_value_series' : IDL.Func(
         [AddressValueSeriesQuery],
         [AddressValueSeriesResponse],
@@ -514,11 +566,7 @@ export const idlFactory = ({ IDL }) => {
       ),
     'http_request' : IDL.Func([HttpRequest], [HttpResponse], ['query']),
     'ping' : IDL.Func([], [IDL.Text], ['query']),
-    'reset_error_counters' : IDL.Func(
-        [ResetErrorCountersArgs],
-        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],
-        [],
-      ),
+    'reset_error_counters' : IDL.Func([ResetErrorCountersArgs], [Result_1], []),
     'start_backfill' : IDL.Func([IDL.Principal], [IDL.Text], []),
   });
 };

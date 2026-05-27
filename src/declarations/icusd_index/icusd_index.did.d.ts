@@ -36,16 +36,7 @@ export interface FeeCollectorRanges {
   'ranges' : Array<[Account, Array<[BlockIndex, BlockIndex]>]>,
 }
 export interface GetAccountTransactionsArgs {
-  /**
-   * Maximum number of transactions to fetch.
-   */
   'max_results' : bigint,
-  /**
-   * The txid of the last transaction seen by the client.
-   * If None then the results will start from the most recent
-   * txid. If set then the results will start from the next
-   * most recent txid after start (start won't be included).
-   */
   'start' : [] | [BlockIndex],
   'account' : Account,
 }
@@ -57,9 +48,6 @@ export interface GetBlocksResponse {
 export interface GetTransactions {
   'balance' : Tokens,
   'transactions' : Array<TransactionWithId>,
-  /**
-   * The txid of the oldest transaction the account has
-   */
   'oldest_tx_id' : [] | [BlockIndex],
 }
 export interface GetTransactionsErr { 'message' : string }
@@ -69,20 +57,7 @@ export type IndexArg = { 'Upgrade' : UpgradeArg } |
   { 'Init' : InitArg };
 export interface InitArg {
   'ledger_id' : Principal,
-  /**
-   * The legacy parameter to set a fixed interval in seconds in which to retrieve blocks from the ledger.
-   * If set, the index will set both `min_retrieve_blocks_from_ledger_interval_seconds` and
-   * `max_retrieve_blocks_from_ledger_interval_seconds` to the value of `retrieve_blocks_from_ledger_interval_seconds`.
-   * If either the min or max interval parameters are also set, the index will trap during initialization.
-   */
   'retrieve_blocks_from_ledger_interval_seconds' : [] | [bigint],
-  /**
-   * The minimum and maximum intervals in seconds in which to retrieve blocks from the ledger.
-   * When a request to the ledger returns an empty response, the interval is increased (up to the maximum).
-   * In case of a non-empty response, the interval is decreased (down to the minimum). A lower value makes the index more
-   * responsive in showing new blocks, but increases the consumption of cycles of both the index and ledger canisters.
-   * A higher values means that it takes longer for new blocks to show up in the index.
-   */
   'min_retrieve_blocks_from_ledger_interval_seconds' : [] | [bigint],
   'max_retrieve_blocks_from_ledger_interval_seconds' : [] | [bigint],
 }
@@ -125,20 +100,7 @@ export interface Transfer {
 }
 export interface UpgradeArg {
   'ledger_id' : [] | [Principal],
-  /**
-   * The legacy parameter to set a fixed interval in seconds in which to retrieve blocks from the ledger.
-   * If set, the index will set both `min_retrieve_blocks_from_ledger_interval_seconds` and
-   * `max_retrieve_blocks_from_ledger_interval_seconds` to the value of `retrieve_blocks_from_ledger_interval_seconds`.
-   * If either the min or max interval parameters are also set, the index will trap during post upgrade.
-   */
   'retrieve_blocks_from_ledger_interval_seconds' : [] | [bigint],
-  /**
-   * The minimum and maximum intervals in seconds in which to retrieve blocks from the ledger.
-   * When a request to the ledger returns an empty response, the interval is increased (up to the maximum).
-   * In case of a non-empty response, the interval is decreased (down to the minimum). A lower value makes the index more
-   * responsive in showing new blocks, but increases the consumption of cycles of both the index and ledger canisters.
-   * A higher values means that it takes longer for new blocks to show up in the index.
-   */
   'min_retrieve_blocks_from_ledger_interval_seconds' : [] | [bigint],
   'max_retrieve_blocks_from_ledger_interval_seconds' : [] | [bigint],
 }

@@ -2,9 +2,6 @@ import type { Principal } from '@dfinity/principal';
 import type { ActorMethod } from '@dfinity/agent';
 import type { IDL } from '@dfinity/candid';
 
-/**
- * ── Admin Events ──
- */
 export type AmmAdminAction = { 'SetPoolCreationOpen' : { 'open' : boolean } } |
   {
     'WithdrawProtocolFees' : {
@@ -54,9 +51,6 @@ export interface AmmBalancePoint {
   'reserve_b_e8s' : bigint,
   'reserve_a_e8s' : bigint,
 }
-/**
- * ── AMM Errors ──
- */
 export type AmmError = {
     'InsufficientOutput' : { 'actual' : bigint, 'expected_min' : bigint }
   } |
@@ -95,9 +89,6 @@ export interface AmmFeePoint {
   'fees_b_e8s' : bigint,
 }
 export interface AmmInitArgs { 'admin' : Principal }
-/**
- * ── Liquidity Events ──
- */
 export type AmmLiquidityAction = { 'AddLiquidity' : null } |
   { 'RemoveLiquidity' : null };
 export interface AmmLiquidityEvent {
@@ -130,9 +121,6 @@ export interface AmmSeriesQuery {
   'points' : number,
 }
 export interface AmmStatsQuery { 'pool' : string, 'window' : AmmStatsWindow }
-/**
- * ── Analytics ──
- */
 export type AmmStatsWindow = { 'All' : null } |
   { 'Day' : null } |
   { 'Hour' : null } |
@@ -169,9 +157,6 @@ export type ConsentMessage = {
     'LineDisplayMessage' : { 'pages' : Array<LineDisplayPage> }
   } |
   { 'GenericDisplayMessage' : string };
-/**
- * ── ICRC-21 Consent Messages ──
- */
 export interface ConsentMessageMetadata {
   'utc_offset_minutes' : [] | [number],
   'language' : string,
@@ -200,13 +185,7 @@ export type DeviceSpec = { 'GenericDisplay' : null } |
       'lines_per_page' : number,
     }
   };
-/**
- * ── HTTP Request ──
- */
 export type HeaderField = [string, string];
-/**
- * ── Holder Snapshots ──
- */
 export interface HolderEntry { 'balance' : bigint, 'holder' : Principal }
 export interface HolderSnapshot {
   'top_holders' : Array<HolderEntry>,
@@ -274,17 +253,11 @@ export interface _SERVICE {
     { 'Ok' : bigint } |
       { 'Err' : AmmError }
   >,
-  /**
-   * ── Admin ──
-   */
   'admin_burn_subaccount_balance' : ActorMethod<
     [Principal, Uint8Array | number[]],
     { 'Ok' : bigint } |
       { 'Err' : AmmError }
   >,
-  /**
-   * ── Claims ──
-   */
   'claim_pending' : ActorMethod<
     [bigint],
     { 'Ok' : null } |
@@ -295,18 +268,12 @@ export interface _SERVICE {
     { 'Ok' : bigint } |
       { 'Err' : AmmError }
   >,
-  /**
-   * ── Pool Creation (permissionless when open, otherwise admin-only) ──
-   */
   'create_pool' : ActorMethod<
     [CreatePoolArgs],
     { 'Ok' : string } |
       { 'Err' : AmmError }
   >,
   'get_amm_admin_event_count' : ActorMethod<[], bigint>,
-  /**
-   * ── Admin Event History ──
-   */
   'get_amm_admin_events' : ActorMethod<[bigint, bigint], Array<AmmAdminEvent>>,
   'get_amm_balance_series' : ActorMethod<
     [AmmSeriesQuery],
@@ -314,9 +281,6 @@ export interface _SERVICE {
   >,
   'get_amm_fee_series' : ActorMethod<[AmmSeriesQuery], Array<AmmFeePoint>>,
   'get_amm_liquidity_event_count' : ActorMethod<[], bigint>,
-  /**
-   * ── Liquidity Event History ──
-   */
   'get_amm_liquidity_events' : ActorMethod<
     [bigint, bigint],
     Array<AmmLiquidityEvent>
@@ -331,9 +295,6 @@ export interface _SERVICE {
     Array<DailyRewardPoint>
   >,
   'get_amm_swap_event_count' : ActorMethod<[], bigint>,
-  /**
-   * ── Swap Event History ──
-   */
   'get_amm_swap_events' : ActorMethod<[bigint, bigint], Array<AmmSwapEvent>>,
   'get_amm_swap_events_by_principal' : ActorMethod<
     [AmmEventsByPrincipalQuery],
@@ -352,17 +313,11 @@ export interface _SERVICE {
     Array<[Principal, bigint, bigint]>
   >,
   'get_amm_tvl_series' : ActorMethod<[string, number], Array<TvlSample>>,
-  /**
-   * ── Analytics (parity with rumi_3pool) ──
-   */
   'get_amm_volume_series' : ActorMethod<
     [AmmSeriesQuery],
     Array<AmmVolumePoint>
   >,
   'get_holder_snapshot_count' : ActorMethod<[string], bigint>,
-  /**
-   * ── Holder Snapshots ──
-   */
   'get_holder_snapshots' : ActorMethod<
     [string, bigint, bigint],
     Array<HolderSnapshot>
@@ -371,9 +326,6 @@ export interface _SERVICE {
   'get_lp_balance' : ActorMethod<[string, Principal], bigint>,
   'get_pending_claims' : ActorMethod<[], Array<PendingClaim>>,
   'get_pending_rewards' : ActorMethod<[string, Principal], bigint>,
-  /**
-   * ── Queries ──
-   */
   'get_pool' : ActorMethod<[string], [] | [PoolInfo]>,
   'get_pools' : ActorMethod<[], Array<PoolInfo>>,
   'get_quote' : ActorMethod<
@@ -381,18 +333,9 @@ export interface _SERVICE {
     { 'Ok' : bigint } |
       { 'Err' : AmmError }
   >,
-  /**
-   * ── Health ──
-   */
   'health' : ActorMethod<[], string>,
-  /**
-   * ── HTTP ──
-   */
   'http_request' : ActorMethod<[HttpRequest], HttpResponse>,
   'icrc10_supported_standards' : ActorMethod<[], Array<StandardRecord>>,
-  /**
-   * ── ICRC-21 / ICRC-28 / ICRC-10 ──
-   */
   'icrc21_canister_call_consent_message' : ActorMethod<
     [ConsentMessageRequest],
     { 'Ok' : ConsentInfo } |
@@ -447,9 +390,6 @@ export interface _SERVICE {
     { 'Ok' : null } |
       { 'Err' : AmmError }
   >,
-  /**
-   * ── Core AMM ──
-   */
   'swap' : ActorMethod<
     [string, Principal, bigint, bigint],
     { 'Ok' : SwapResult } |

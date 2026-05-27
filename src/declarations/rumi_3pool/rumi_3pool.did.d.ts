@@ -2,9 +2,6 @@ import type { Principal } from '@dfinity/principal';
 import type { ActorMethod } from '@dfinity/agent';
 import type { IDL } from '@dfinity/candid';
 
-/**
- * ─── ICRC-1 / ICRC-2 Types ───
- */
 export interface Account {
   'owner' : Principal,
   'subaccount' : [] | [Uint8Array | number[]],
@@ -42,7 +39,7 @@ export interface ArchiveInfo {
 }
 export interface ArchivedBlocks {
   'args' : Array<GetBlocksArgs>,
-  'callback' : [Principal, string],
+  'callback' : ArchivedBlocksCallback,
 }
 export type ArchivedBlocksCallback = ActorMethod<
   [Array<GetBlocksArgs>],
@@ -67,9 +64,6 @@ export type ConsentMessage = {
     'LineDisplayMessage' : { 'pages' : Array<LineDisplayPage> }
   } |
   { 'GenericDisplayMessage' : string };
-/**
- * ─── ICRC-21 / ICRC-28 / ICRC-10 Types ───
- */
 export interface ConsentMessageMetadata {
   'utc_offset_minutes' : [] | [number],
   'language' : string,
@@ -128,9 +122,6 @@ export interface Icrc3DataCertificate {
   'certificate' : Uint8Array | number[],
   'hash_tree' : Uint8Array | number[],
 }
-/**
- * ─── ICRC-3 Types ───
- */
 export type Icrc3Value = { 'Int' : bigint } |
   { 'Map' : Array<[string, Icrc3Value]> } |
   { 'Nat' : bigint } |
@@ -254,9 +245,6 @@ export interface RedeemAndBurnResult {
   'token_amount_burned' : bigint,
 }
 export interface StandardRecord { 'url' : string, 'name' : string }
-/**
- * ─── Explorer types ───
- */
 export type StatsWindow = { 'AllTime' : null } |
   { 'Last7d' : null } |
   { 'Last24h' : null } |
@@ -462,9 +450,6 @@ export interface _SERVICE {
   'get_liquidity_event_count' : ActorMethod<[], bigint>,
   'get_liquidity_event_count_v2' : ActorMethod<[], bigint>,
   'get_liquidity_events' : ActorMethod<[bigint, bigint], Array<LiquidityEvent>>,
-  /**
-   * Explorer endpoints (E1-E14)
-   */
   'get_liquidity_events_by_principal' : ActorMethod<
     [Principal, bigint, bigint],
     Array<LiquidityEventV2>
@@ -508,9 +493,6 @@ export interface _SERVICE {
   'icrc1_fee' : ActorMethod<[], bigint>,
   'icrc1_metadata' : ActorMethod<[], Array<[string, MetadataValue]>>,
   'icrc1_minting_account' : ActorMethod<[], [] | [Account]>,
-  /**
-   * ICRC-1 (3USD LP Token)
-   */
   'icrc1_name' : ActorMethod<[], string>,
   'icrc1_supported_standards' : ActorMethod<[], Array<StandardRecord>>,
   'icrc1_symbol' : ActorMethod<[], string>,
@@ -527,9 +509,6 @@ export interface _SERVICE {
   >,
   'icrc28_trusted_origins' : ActorMethod<[], Icrc28TrustedOriginsResponse>,
   'icrc2_allowance' : ActorMethod<[AllowanceArgs], Allowance>,
-  /**
-   * ICRC-2
-   */
   'icrc2_approve' : ActorMethod<
     [ApproveArgs],
     { 'Ok' : bigint } |
@@ -541,9 +520,6 @@ export interface _SERVICE {
       { 'Err' : TransferFromError }
   >,
   'icrc3_get_archives' : ActorMethod<[GetArchivesArgs], GetArchivesResult>,
-  /**
-   * ICRC-3 (Transaction Log)
-   */
   'icrc3_get_blocks' : ActorMethod<[Array<GetBlocksArgs>], GetBlocksResult>,
   'icrc3_get_tip_certificate' : ActorMethod<[], [] | [Icrc3DataCertificate]>,
   'icrc3_supported_block_types' : ActorMethod<[], Array<SupportedBlockType>>,

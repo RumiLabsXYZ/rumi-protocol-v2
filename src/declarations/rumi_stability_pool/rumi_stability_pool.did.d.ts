@@ -22,9 +22,6 @@ export type Icrc21ConsentMessage = {
     'LineDisplayMessage' : { 'pages' : Array<Icrc21LineDisplayPage> }
   } |
   { 'GenericDisplayMessage' : string };
-/**
- * ── ICRC-21: Canister Call Consent Messages ──
- */
 export interface Icrc21ConsentMessageMetadata {
   'utc_offset_minutes' : [] | [number],
   'language' : string,
@@ -61,9 +58,6 @@ export interface Icrc21LineDisplayLine { 'line' : string }
 export interface Icrc21LineDisplayPage {
   'lines' : Array<Icrc21LineDisplayLine>,
 }
-/**
- * ── Liquidation types ──
- */
 export interface LiquidatableVaultInfo {
   'collateral_amount' : bigint,
   'debt_amount' : bigint,
@@ -78,9 +72,6 @@ export interface LiquidationResult {
   'success' : boolean,
   'collateral_type' : Principal,
 }
-/**
- * ── Configuration ──
- */
 export interface PoolConfiguration {
   'emergency_pause' : boolean,
   'min_deposit_e8s' : bigint,
@@ -93,10 +84,6 @@ export interface PoolEvent {
   'caller' : Principal,
   'event_type' : PoolEventType,
 }
-/**
- * ── ICRC-10: Supported Standards ──
- * ── Pool Events ──
- */
 export type PoolEventType = {
     'Withdraw' : { 'amount' : bigint, 'token_ledger' : Principal }
   } |
@@ -152,9 +139,6 @@ export interface PoolLiquidationRecord {
   'timestamp' : bigint,
   'collateral_type' : Principal,
 }
-/**
- * ── Error type ──
- */
 export type StabilityPoolError = {
     'LedgerTransferFailed' : { 'reason' : string }
   } |
@@ -178,19 +162,10 @@ export type StabilityPoolError = {
   { 'AlreadyOptedIn' : { 'collateral' : Principal } } |
   { 'TokenNotAccepted' : { 'ledger' : Principal } } |
   { 'InsufficientPoolBalance' : null };
-/**
- * ──────────────────────────────────────────────────────────────
- * Rumi Stability Pool — Multi-Token Candid Interface
- * ──────────────────────────────────────────────────────────────
- * Init args
- */
 export interface StabilityPoolInitArgs {
   'protocol_canister_id' : Principal,
   'authorized_admins' : Array<Principal>,
 }
-/**
- * ── Pool status / user position ──
- */
 export interface StabilityPoolStatus {
   'collateral_gains' : Array<[Principal, bigint]>,
   'total_depositors' : bigint,
@@ -203,9 +178,6 @@ export interface StabilityPoolStatus {
   'eligible_icusd_per_collateral' : Array<[Principal, bigint]>,
   'total_liquidations_executed' : bigint,
 }
-/**
- * ── Registry types ──
- */
 export interface StablecoinConfig {
   'decimals' : number,
   'transfer_fee' : [] | [bigint],
@@ -225,11 +197,6 @@ export interface UserStabilityPosition {
   'total_usd_value_e8s' : bigint,
   'opted_out_collateral' : Array<Principal>,
 }
-/**
- * ──────────────────────────────────────────────────────────────
- * Service
- * ──────────────────────────────────────────────────────────────
- */
 export interface _SERVICE {
   'admin_correct_balance' : ActorMethod<
     [Principal, Principal, bigint],
@@ -252,9 +219,6 @@ export interface _SERVICE {
     { 'Ok' : bigint } |
       { 'Err' : StabilityPoolError }
   >,
-  /**
-   * ── Deposit / Withdraw / Claim ──
-   */
   'deposit' : ActorMethod<
     [Principal, bigint],
     { 'Ok' : null } |
@@ -281,33 +245,21 @@ export interface _SERVICE {
   >,
   'get_pool_event_count' : ActorMethod<[], bigint>,
   'get_pool_events' : ActorMethod<[bigint, bigint], Array<PoolEvent>>,
-  /**
-   * ── Queries ──
-   */
   'get_pool_status' : ActorMethod<[], StabilityPoolStatus>,
   'get_suspended_tokens' : ActorMethod<[], Array<[Principal, number]>>,
   'get_user_position' : ActorMethod<
     [[] | [Principal]],
     [] | [UserStabilityPosition]
   >,
-  /**
-   * ── ICRC-10: Supported Standards ──
-   */
   'icrc10_supported_standards' : ActorMethod<
     [],
     Array<Icrc10SupportedStandard>
   >,
-  /**
-   * ── ICRC-21: Consent Messages ──
-   */
   'icrc21_canister_call_consent_message' : ActorMethod<
     [Icrc21ConsentMessageRequest],
     Icrc21ConsentMessageResponse
   >,
   'list_depositor_principals' : ActorMethod<[], Array<Principal>>,
-  /**
-   * ── Liquidation ──
-   */
   'notify_liquidatable_vaults' : ActorMethod<
     [Array<LiquidatableVaultInfo>],
     Array<LiquidationResult>
@@ -317,17 +269,11 @@ export interface _SERVICE {
     { 'Ok' : null } |
       { 'Err' : StabilityPoolError }
   >,
-  /**
-   * ── Opt-in / Opt-out ──
-   */
   'opt_out_collateral' : ActorMethod<
     [Principal],
     { 'Ok' : null } |
       { 'Err' : StabilityPoolError }
   >,
-  /**
-   * ── Interest Revenue ──
-   */
   'receive_interest_revenue' : ActorMethod<
     [Principal, bigint, [] | [Principal]],
     { 'Ok' : null } |
@@ -338,9 +284,6 @@ export interface _SERVICE {
     { 'Ok' : null } |
       { 'Err' : StabilityPoolError }
   >,
-  /**
-   * ── Admin: Registry ──
-   */
   'register_stablecoin' : ActorMethod<
     [StablecoinConfig],
     { 'Ok' : null } |
@@ -351,9 +294,6 @@ export interface _SERVICE {
     { 'Ok' : null } |
       { 'Err' : StabilityPoolError }
   >,
-  /**
-   * ── Admin: Configuration ──
-   */
   'update_pool_configuration' : ActorMethod<
     [PoolConfiguration],
     { 'Ok' : null } |

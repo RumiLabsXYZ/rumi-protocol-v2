@@ -9,6 +9,7 @@
     "build": "npm run build --workspaces --if-present",
     "prebuild": "npm run prebuild --workspaces --if-present",
     "pretest": "npm run prebuild --workspaces --if-present",
+    "regenerate-declarations": "bash scripts/regenerate-declarations.sh",
     "start": "npm start --workspace=src/rumi_homepage",
     "test": "npm test --workspaces --if-present"
   },

@@ -35,11 +35,38 @@ export interface AdminEventLabelCount {
   'label' : string,
   'last_at_ns' : [] | [bigint],
 }
+export interface AnalyticsAmmLiquidityEvent {
+  'action' : LiquidityAction,
+  'timestamp_ns' : bigint,
+  'source_event_id' : bigint,
+  'lp_shares' : bigint,
+  'caller' : Principal,
+  'pool_id' : string,
+}
+export interface AnalyticsSwapEvent {
+  'fee' : bigint,
+  'timestamp_ns' : bigint,
+  'token_in' : Principal,
+  'source' : SwapSource,
+  'source_event_id' : bigint,
+  'amount_out' : bigint,
+  'caller' : Principal,
+  'amount_in' : bigint,
+  'token_out' : Principal,
+}
 export interface ApyQuery { 'window_days' : [] | [number] }
 export interface ApyResponse {
   'lp_apy_pct' : [] | [number],
   'window_days' : number,
   'sp_apy_pct' : [] | [number],
+}
+export interface BackfillProgress {
+  'cursor_after' : bigint,
+  'from' : bigint,
+  'scanned' : bigint,
+  'complete' : boolean,
+  'emitted' : bigint,
+  'total_events' : bigint,
 }
 export interface BalanceTrackerStats {
   'token' : Principal,
@@ -215,6 +242,10 @@ export interface LiquidationSeriesResponse {
   'rows' : Array<DailyLiquidationRollup>,
   'next_from_ts' : [] | [bigint],
 }
+export type LiquidityAction = { 'Add' : null } |
+  { 'Remove' : null } |
+  { 'Donate' : null } |
+  { 'RemoveOneCoin' : null };
 export interface OhlcCandle {
   'low' : number,
   'timestamp_ns' : bigint,
@@ -267,6 +298,7 @@ export interface ProtocolSummary {
   'peg' : [] | [PegStatus],
   'lp_apy_pct' : [] | [number],
   'timestamp_ns' : bigint,
+  'median_cr_bps' : number,
   'sp_apy_pct' : [] | [number],
   'total_debt_e8s' : bigint,
   'circulating_supply_icusd_e8s' : [] | [bigint],
@@ -274,7 +306,6 @@ export interface ProtocolSummary {
   'total_vault_count' : number,
   'total_collateral_usd_e8s' : bigint,
   'system_cr_bps' : number,
-  'median_cr_bps' : number,
   'swap_count_24h' : number,
   'volume_24h_e8s' : bigint,
 }
@@ -285,6 +316,10 @@ export interface RangeQuery {
   'limit' : [] | [number],
 }
 export interface ResetErrorCountersArgs { 'sources' : [] | [Array<string>] }
+export type Result = { 'Ok' : BackfillProgress } |
+  { 'Err' : string };
+export type Result_1 = { 'Ok' : null } |
+  { 'Err' : string };
 export interface StabilitySeriesResponse {
   'rows' : Array<DailyStabilityRow>,
   'next_from_ts' : [] | [bigint],
@@ -293,6 +328,8 @@ export interface SwapSeriesResponse {
   'rows' : Array<DailySwapRollup>,
   'next_from_ts' : [] | [bigint],
 }
+export type SwapSource = { 'Amm' : null } |
+  { 'ThreePool' : null };
 export interface ThreePoolSeriesResponse {
   'rows' : Array<Fast3PoolSnapshot>,
   'next_from_ts' : [] | [bigint],
@@ -404,6 +441,16 @@ export interface VolatilityResponse {
   'annualized_vol_pct' : number,
 }
 export interface _SERVICE {
+  'admin_backfill_add_margin_events' : ActorMethod<[bigint], Result>,
+  'debug_get_amm_event_counts' : ActorMethod<[], [bigint, bigint]>,
+  'debug_get_amm_liquidity_events_raw' : ActorMethod<
+    [bigint, bigint],
+    Array<AnalyticsAmmLiquidityEvent>
+  >,
+  'debug_get_swap_events_raw' : ActorMethod<
+    [bigint, bigint],
+    Array<AnalyticsSwapEvent>
+  >,
   'get_address_value_series' : ActorMethod<
     [AddressValueSeriesQuery],
     AddressValueSeriesResponse
@@ -459,11 +506,7 @@ export interface _SERVICE {
   'get_volatility' : ActorMethod<[VolatilityQuery], VolatilityResponse>,
   'http_request' : ActorMethod<[HttpRequest], HttpResponse>,
   'ping' : ActorMethod<[], string>,
-  'reset_error_counters' : ActorMethod<
-    [ResetErrorCountersArgs],
-    { 'Ok' : null } |
-      { 'Err' : string }
-  >,
+  'reset_error_counters' : ActorMethod<[ResetErrorCountersArgs], Result_1>,
   'start_backfill' : ActorMethod<[Principal], string>,
 }
 export declare const idlFactory: IDL.InterfaceFactory;
