@@ -1,0 +1,117 @@
+# yaml-language-server: $schema=https://github.com/dfinity/icp-cli/raw/refs/tags/v0.2.0/docs/schemas/icp-yaml-schema.json
+
+# Rumi Protocol v2 - icp-cli project manifest
+#
+# This file is the baseline skeleton for the dfx-to-icp-cli migration (Phase 0).
+# It establishes the three environments and the external/dependency canisters.
+# Each Rumi-owned Rust canister (rumi_protocol_backend, rumi_3pool, rumi_amm,
+# rumi_stability_pool, rumi_treasury, rumi_analytics, liquidation_bot, and the
+# two ledger/index utilities) is added in its own migration task (Tasks 8-16).
+#
+# Source of truth for syntax:
+#   docs/superpowers/notes/2026-05-27-icp-cli-upgrade-args-spike.md
+#   docs/superpowers/notes/2026-05-27-icp-cli-deps-pull-spike.md
+#
+# Sha256 pins below are reproducible: they match the wasm bytes either in-repo
+# (icp_ledger_canister) or hosted on the upstream GitHub release page (II, XRC).
+
+canisters:
+  # ---------------------------------------------------------------------------
+  # External / dependency canisters
+  # ---------------------------------------------------------------------------
+  # These three replace the `type: pull` entries in dfx.json. The `pre-built`
+  # build step verifies wasm integrity via sha256 before install. They are
+  # installed only on the `local` environment; on `ic` they are reached via
+  # canonical mainnet IDs from the backend's configuration record.
+
+  - name: icp_ledger_canister
+    # Local-wasm form: the wasm already lives in the repo at the path below.
+    build:
+      steps:
+        - type: pre-built
+          path: src/ledger/ic-icrc1-ledger.wasm
+          sha256: cb0c3233ebb137f606d7928e90bfd907fe932a941f11b41c23cf0d6cf9c64802
+    # PLACEHOLDER: the actual local init args file is authored when someone
+    # first runs `icp deploy --environment local`. Phase 0's only deploys are
+    # to mainnet-live, where this canister is not deployed (canonical mainnet
+    # ID ryjl3-tyaaa-aaaaa-aaaba-cai is used instead). A minimal placeholder
+    # at deploy/args/icp_ledger_local_init.did keeps `icp project show` happy.
+    init_args:
+      path: deploy/args/icp_ledger_local_init.did
+      format: candid
+
+  - name: internet_identity
+    # URL form: fetched fresh from the official DFINITY release. Sha256 pin
+    # ensures bit-exact reproducibility across developer machines.
+    build:
+      steps:
+        - type: pre-built
+          url: https://github.com/dfinity/internet-identity/releases/download/release-2026-05-26-be/internet_identity_dev.wasm.gz
+          sha256: 80946901c67705df8c56236d0cb4732d21f4988a655e6662abe7c5d396e3f903
+    init_args: '(null)'
+
+  - name: xrc
+    # URL form: Exchange Rate Canister, fetched from the official DFINITY
+    # release. XRC works on icp-cli's local PocketIC replica without any
+    # subnet-type configuration (the dfx-era `--subnet-type system` is moot).
+    build:
+      steps:
+        - type: pre-built
+          url: https://github.com/dfinity/exchange-rate-canister/releases/download/2026.05.15/xrc.wasm.gz
+          sha256: 084533477b31cd1d2f7394a38acf68d36aa87dcf84c155a961703e1df41b4ddb
+    init_args: '()'
+
+  # ---------------------------------------------------------------------------
+  # Rumi-owned canisters (added in Tasks 8-16, intentionally absent here)
+  # ---------------------------------------------------------------------------
+  # rumi_protocol_backend, rumi_3pool, rumi_amm, rumi_stability_pool,
+  # rumi_treasury, rumi_analytics, liquidation_bot, icusd_ledger,
+  # icusd_index, threeusd_index, vault_frontend, rumi_homepage.
+
+networks:
+  - name: local
+    mode: managed
+    gateway:
+      bind: 127.0.0.1
+      port: 4943
+    # NOT load-bearing: PocketIC ignores subnet-type partitioning for runtime
+    # API gating (HTTPS outcalls, threshold sigs, etc. work on any subnet).
+    # Kept for documentation clarity: this project assumes system-subnet
+    # capabilities in production. See the deps-pull spike's "Why dfx requires
+    # --subnet-type system but icp-cli does not" section.
+    subnets:
+      - application
+      - system
+
+environments:
+  # NOTE: icp-cli auto-creates a phantom environment named after each network
+  # (so an `ic` environment appears in `icp project show` even though it is
+  # not declared here). The auto-created `ic` env contains every canister
+  # without an explicit env restriction, which is harmless because production
+  # deploys explicitly target `mainnet-live` (or `mainnet-staging` in Phase 1).
+  # Do not deploy with `--environment ic`; always pass `mainnet-live`.
+
+  # The production environment Rumi has been running on since launch.
+  # All mainnet deploys target this environment with `--identity rumi_identity`.
+  # External canisters (II, XRC, ICP ledger) are NOT listed here: they are
+  # reached via their canonical mainnet IDs (rdmx6-..., uf6dk-..., ryjl3-...)
+  # through the backend's configuration record, not via `icp deploy`.
+  - name: mainnet-live
+    network: ic
+    canisters: []
+
+  # Future staging environment on mainnet (separate canister IDs). Populated
+  # by Phase 1 work; intentionally empty here so the project file already
+  # carries the slot without binding it to specific canisters.
+  - name: mainnet-staging
+    network: ic
+    canisters: []
+
+  # Local development environment. Installs the three external canisters so
+  # the Rumi-owned canisters added in Tasks 8-16 have something to talk to.
+  - name: local
+    network: local
+    canisters:
+      - icp_ledger_canister
+      - internet_identity
+      - xrc
