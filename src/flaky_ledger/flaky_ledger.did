@@ -1,0 +1,104 @@
+// Flaky Ledger candid interface.
+//
+// Minimal ICRC-1/ICRC-2 surface (transfer, approve, transfer_from, balance_of,
+// fee) plus the test-control endpoints used by Rumi's integration tests and
+// audit_pocs regression fences (ICRC-001..005, BOT-002, etc.). See
+// src/flaky_ledger/src/lib.rs for behavior.
+//
+// This file mirrors the Rust types in lib.rs by hand because flaky_ledger does
+// not call ic_cdk::export_candid!(); the existing tests pass the wasm bytes
+// directly via include_bytes! and never load the .did at runtime. It exists so
+// the icp-cli rust recipe can attach a candid:service metadata section without
+// having to invoke candid-extractor.
+
+type Account = record {
+  owner : principal;
+  subaccount : opt vec nat8;
+};
+
+type TransferArg = record {
+  from_subaccount : opt vec nat8;
+  to : Account;
+  amount : nat;
+  fee : opt nat;
+  memo : opt vec nat8;
+  created_at_time : opt nat64;
+};
+
+type TransferError = variant {
+  BadFee : record { expected_fee : nat };
+  BadBurn : record { min_burn_amount : nat };
+  InsufficientFunds : record { balance : nat };
+  TooOld;
+  CreatedInFuture : record { ledger_time : nat64 };
+  Duplicate : record { duplicate_of : nat };
+  TemporarilyUnavailable;
+  GenericError : record { error_code : nat; message : text };
+};
+
+type TransferFromArgs = record {
+  spender_subaccount : opt vec nat8;
+  from : Account;
+  to : Account;
+  amount : nat;
+  fee : opt nat;
+  memo : opt vec nat8;
+  created_at_time : opt nat64;
+};
+
+type TransferFromError = variant {
+  BadFee : record { expected_fee : nat };
+  BadBurn : record { min_burn_amount : nat };
+  InsufficientFunds : record { balance : nat };
+  InsufficientAllowance : record { allowance : nat };
+  TooOld;
+  CreatedInFuture : record { ledger_time : nat64 };
+  Duplicate : record { duplicate_of : nat };
+  TemporarilyUnavailable;
+  GenericError : record { error_code : nat; message : text };
+};
+
+type ApproveArgs = record {
+  from_subaccount : opt vec nat8;
+  spender : Account;
+  amount : nat;
+  expected_allowance : opt nat;
+  expires_at : opt nat64;
+  fee : opt nat;
+  memo : opt vec nat8;
+  created_at_time : opt nat64;
+};
+
+type ApproveError = variant {
+  BadFee : record { expected_fee : nat };
+  InsufficientFunds : record { balance : nat };
+  AllowanceChanged : record { current_allowance : nat };
+  Expired : record { ledger_time : nat64 };
+  TooOld;
+  CreatedInFuture : record { ledger_time : nat64 };
+  Duplicate : record { duplicate_of : nat };
+  TemporarilyUnavailable;
+  GenericError : record { error_code : nat; message : text };
+};
+
+service : () -> {
+  // ICRC-1
+  icrc1_balance_of : (Account) -> (nat) query;
+  icrc1_fee : () -> (nat) query;
+  icrc1_transfer : (TransferArg) -> (variant { Ok : nat; Err : TransferError });
+
+  // ICRC-2
+  icrc2_approve : (ApproveArgs) -> (variant { Ok : nat; Err : ApproveError });
+  icrc2_transfer_from : (TransferFromArgs) -> (variant { Ok : nat; Err : TransferFromError });
+
+  // Test-only control surface (no auth on purpose)
+  mint : (Account, nat) -> ();
+  set_fail_transfers : (bool) -> ();
+  set_fail_transfer_from : (bool) -> ();
+  set_fee : (nat) -> ();
+  set_phantom_failures : (nat32) -> ();
+  set_bad_fee_failures : (nat32) -> ();
+  reset_dedup : () -> ();
+  set_fail_transfers_for_caller : (opt principal) -> ();
+  set_fake_zero_balance_for : (opt principal) -> ();
+}

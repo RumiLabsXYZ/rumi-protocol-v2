@@ -68,6 +68,23 @@ canisters:
   # rumi_treasury, rumi_analytics, liquidation_bot, icusd_ledger,
   # icusd_index, threeusd_index, vault_frontend, rumi_homepage.
 
+  # Task 8: flaky_ledger (test-only mock ICRC-1/ICRC-2 ledger with configurable
+  # transfer failures). Lives in src/flaky_ledger/ as a Rust workspace member;
+  # it is intentionally NOT in dfx.json because integration tests pull the wasm
+  # directly via `include_bytes!("../../../target/wasm32-unknown-unknown/release/flaky_ledger.wasm")`.
+  # Not deployed to any mainnet environment. Listed under `local` only so that
+  # `icp build flaky_ledger` exercises the same build pipeline used by tests.
+  # The .did file (added alongside lib.rs in the same task) mirrors the
+  # ICRC-1/2 + test-control surface; lib.rs does not call export_candid!()
+  # because integration tests load the wasm via include_bytes!.
+  - name: flaky_ledger
+    recipe:
+      type: "@dfinity/rust@v3.2.0"
+      configuration:
+        package: flaky_ledger
+        candid: src/flaky_ledger/flaky_ledger.did
+        shrink: true
+
 networks:
   - name: local
     mode: managed
@@ -115,3 +132,4 @@ environments:
       - icp_ledger_canister
       - internet_identity
       - xrc
+      - flaky_ledger

@@ -10,6 +10,9 @@
 # dfx temporary files
 .dfx/
 
+# icp-cli local build cache
+.icp/
+
 # generated files — tracked in git so frontend builds from clean clone
 # Run `dfx generate` after changing .did files to update
 # **/declarations/
