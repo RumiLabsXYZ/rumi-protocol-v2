@@ -836,9 +836,9 @@ export type Result_10 = { 'Ok' : boolean } |
   { 'Err' : ProtocolError };
 export type Result_11 = { 'Ok' : ReserveRedemptionResult } |
   { 'Err' : ProtocolError };
-export type Result_12 = { 'Ok' : StabilityPoolLiquidationResult } |
+export type Result_12 = { 'Ok' : RepayAndCloseSuccess } |
   { 'Err' : ProtocolError };
-export type Result_13 = { 'Ok' : RepayAndCloseSuccess } |
+export type Result_13 = { 'Ok' : StabilityPoolLiquidationResult } |
   { 'Err' : ProtocolError };
 export type Result_2 = { 'Ok' : string } |
   { 'Err' : ProtocolError };
@@ -893,7 +893,7 @@ export interface SupplyAudit {
 export interface SupplyAuditEntry {
   'supply_e8s' : bigint,
   'display_name' : string,
-  'chain_id' : bigint,
+  'chain_id' : number,
 }
 export type TransferError = {
     'GenericError' : { 'message' : string, 'error_code' : bigint }
@@ -1112,7 +1112,7 @@ export interface _SERVICE {
   'redeem_collateral' : ActorMethod<[Principal, bigint], Result_3>,
   'redeem_icp' : ActorMethod<[bigint], Result_3>,
   'redeem_reserves' : ActorMethod<[bigint, [] | [Principal]], Result_11>,
-  'repay_and_close_vault' : ActorMethod<[VaultArg], Result_13>,
+  'repay_and_close_vault' : ActorMethod<[VaultArg], Result_12>,
   'repay_to_vault' : ActorMethod<[VaultArg], Result_1>,
   'repay_to_vault_with_stable' : ActorMethod<[VaultArgWithToken], Result_1>,
   'reset_bot_budget' : ActorMethod<[bigint], Result>,
@@ -1201,14 +1201,14 @@ export interface _SERVICE {
   'set_treasury_principal' : ActorMethod<[Principal], Result>,
   'set_vault_check_tick_interval_secs' : ActorMethod<[bigint], Result>,
   'set_xrc_fetch_interval_secs' : ActorMethod<[bigint], Result>,
-  'stability_pool_liquidate' : ActorMethod<[bigint, bigint], Result_12>,
+  'stability_pool_liquidate' : ActorMethod<[bigint, bigint], Result_13>,
   'stability_pool_liquidate_debt_burned' : ActorMethod<
     [bigint, bigint, SpWritedownProof],
-    Result_12
+    Result_13
   >,
   'stability_pool_liquidate_with_reserves' : ActorMethod<
     [bigint, bigint, bigint, Principal],
-    Result_12
+    Result_13
   >,
   'unfreeze_protocol' : ActorMethod<[], Result>,
   'update_collateral_config' : ActorMethod<

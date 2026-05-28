@@ -717,6 +717,42 @@ fn get_protocol_status() -> ProtocolStatus {
     })
 }
 
+/// Phase 1a: canonical multi-chain icUSD supply (sum across all chains).
+/// Equals `sum(state.multi_chain.chain_supplies.values())`. Returns 0 when
+/// no chains are registered (the Phase 1a default state).
+///
+/// Note: this query is read-only and does NOT exercise the invariant
+/// check. Operators investigating drift should call `get_supply_audit`
+/// for the per-chain breakdown.
+#[candid_method(query)]
+#[query]
+fn get_global_icusd_supply() -> u128 {
+    read_state(|s| s.multi_chain.total_supply_all_chains_e8s())
+}
+
+/// Phase 1a: per-chain breakdown for external auditors. Iterates
+/// `multi_chain.chain_configs` in chain-id order so the response shape is
+/// deterministic.
+#[candid_method(query)]
+#[query]
+fn get_supply_audit() -> SupplyAudit {
+    read_state(|s| {
+        let mut per_chain = Vec::with_capacity(s.multi_chain.chain_configs.len());
+        for (chain_id, cfg) in s.multi_chain.chain_configs.iter() {
+            let supply = s.multi_chain.chain_supplies.get(chain_id).copied().unwrap_or(0);
+            per_chain.push(SupplyAuditEntry {
+                chain_id: *chain_id,
+                display_name: cfg.display_name.clone(),
+                supply_e8s: supply,
+            });
+        }
+        SupplyAudit {
+            total_e8s: per_chain.iter().map(|e| e.supply_e8s).sum(),
+            per_chain,
+        }
+    })
+}
+
 #[candid_method(query)]
 #[query]
 fn get_protocol_config() -> rumi_protocol_backend::ProtocolConfig {
@@ -5968,36 +6004,3 @@ fn check_candid_interface_compatibility() {
     );
 }
 
-#[candid_method(query)]
-#[query]
-fn get_global_icusd_supply() -> u128 {
-    read_state(|s| {
-        s.multi_chain
-            .iter()
-            .map(|entry| entry.icusd_supply_e8s)
-            .sum()
-    })
-}
-
-#[candid_method(query)]
-#[query]
-fn get_supply_audit() -> SupplyAudit {
-    read_state(|s| {
-        let per_chain = s.multi_chain
-            .iter()
-            .map(|entry| SupplyAuditEntry {
-                chain_id: entry.chain_id.clone(),
-                display_name: entry.display_name.clone(),
-                supply_e8s: entry.icusd_supply_e8s,
-            })
-            .collect();
-        let total_e8s = s.multi_chain
-            .iter()
-            .map(|entry| entry.icusd_supply_e8s)
-            .sum();
-        SupplyAudit {
-            total_e8s,
-            per_chain,
-        }
-    })
-}

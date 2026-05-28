@@ -48,11 +48,11 @@ type CollateralConfig = record {
   min_vault_debt : nat64;
   rate_curve : opt RateCurve;
   recovery_borrowing_fee : opt blob;
+  min_xrc_sources : opt nat32;
   min_collateral_deposit : nat64;
   last_price : opt float64;
   last_price_timestamp : opt nat64;
   redemption_tier : nat8;
-  min_xrc_sources : opt nat32;
   redemption_fee_floor : blob;
   borrow_threshold_ratio : blob;
   ledger_fee : nat64;
@@ -132,6 +132,7 @@ type Event = variant {
     caller : principal;
     amount : nat64;
   };
+  set_bot_cr_tolerance_bps : record { bps : nat64 };
   collateral_withdrawn : record {
     block_index : nat64;
     vault_id : nat64;
@@ -158,6 +159,7 @@ type Event = variant {
     price : text;
   };
   set_rmr_ceiling_cr : record { value : text };
+  set_amm1_canister : record { canister : principal };
   set_recovery_rate_curve : record { markers : text };
   set_ckstable_repay_fee : record { rate : text };
   set_treasury_principal : record { "principal" : principal };
@@ -191,6 +193,10 @@ type Event = variant {
     vault_id : nat64;
     timestamp : nat64;
     observed_balance : nat64;
+  };
+  oracle_circuit_breaker : record {
+    timestamp : nat64;
+    consecutive_failures : nat64;
   };
   set_collateral_redemption_fee_floor : record {
     redemption_fee_floor : text;
@@ -252,6 +258,7 @@ type Event = variant {
     collateral_type : principal;
     liquidation_bonus : text;
   };
+  set_amm1_pool_id : record { pool_id : text };
   set_global_icusd_mint_cap : record { cap : opt text; amount : opt text };
   upgrade : UpgradeArg;
   borrow_from_vault : record {
@@ -268,11 +275,6 @@ type Event = variant {
   };
   set_bot_allowed_collateral_types : record {
     collateral_types : vec principal;
-  };
-  set_bot_cr_tolerance_bps : record { bps : nat64 };
-  set_collateral_min_xrc_sources : record {
-    collateral_type : principal;
-    min_xrc_sources : opt nat32;
   };
   set_reserve_redemptions_enabled : record { enabled : bool };
   set_min_icusd_amount : record { amount : text };
@@ -298,6 +300,12 @@ type Event = variant {
     vault_id : nat64;
     timestamp : opt nat64;
     old_borrowed : nat64;
+  };
+  stability_pool_call_failed : record {
+    reject_message : text;
+    vault_ids : vec nat64;
+    reject_code : int32;
+    timestamp : nat64;
   };
   set_rate_curve_markers : record {
     markers : text;
@@ -329,6 +337,12 @@ type Event = variant {
     caller : principal;
     amount : nat64;
   };
+  oracle_source_count_insufficient : record {
+    num_sources : nat32;
+    min_required : nat32;
+    timestamp : nat64;
+    collateral_type : principal;
+  };
   admin_mint : record {
     to : principal;
     block_index : nat64;
@@ -337,8 +351,6 @@ type Event = variant {
     reason : text;
   };
   set_three_pool_canister : record { canister : principal };
-  set_amm1_canister : record { canister : principal };
-  set_amm1_pool_id : record { pool_id : text };
   set_liquidation_bonus : record { rate : text };
   reserve_redemption : record {
     icusd_amount : nat64;
@@ -380,6 +392,10 @@ type Event = variant {
     timestamp : opt nat64;
     caller : opt principal;
     margin_added : nat64;
+  };
+  set_collateral_min_xrc_sources : record {
+    min_xrc_sources : opt nat32;
+    collateral_type : principal;
   };
   set_stability_pool_principal : record { "principal" : principal };
   set_interest_split : record { split : text };
@@ -436,22 +452,6 @@ type Event = variant {
     token_type : StableTokenType;
   };
   set_recovery_cr_multiplier : record { multiplier : text };
-  stability_pool_call_failed : record {
-    vault_ids : vec nat64;
-    reject_code : int32;
-    reject_message : text;
-    timestamp : nat64;
-  };
-  oracle_circuit_breaker : record {
-    consecutive_failures : nat64;
-    timestamp : nat64;
-  };
-  oracle_source_count_insufficient : record {
-    collateral_type : principal;
-    num_sources : nat32;
-    min_required : nat32;
-    timestamp : nat64;
-  };
 };
 type EventTimeRange = record { start_ns : nat64; end_ns : nat64 };
 type EventTypeFilter = variant {
@@ -545,10 +545,6 @@ type LiquidityStatus = record {
 };
 type Mode = variant { ReadOnly; GeneralAvailability; Recovery };
 type OpenVaultSuccess = record { block_index : nat64; vault_id : nat64 };
-type RepayAndCloseSuccess = record {
-  repay_block_index : nat64;
-  collateral_return_block_index : opt nat64;
-};
 type PerCollateralRateCurve = record {
   markers : vec record { float64; float64 };
   base_rate : float64;
@@ -581,7 +577,6 @@ type ProtocolConfig = record {
   ckusdc_ledger_principal : opt principal;
   recovery_mode_threshold : float64;
   bot_allowed_collateral_types : vec principal;
-  bot_cr_tolerance_bps : nat64;
   liquidation_bot_principal : opt principal;
   reserve_redemption_fee : float64;
   liquidation_protocol_share : float64;
@@ -600,6 +595,7 @@ type ProtocolConfig = record {
   treasury_principal : opt principal;
   rmr_ceiling_cr : float64;
   frozen : bool;
+  bot_cr_tolerance_bps : nat64;
   icpswap_routing_enabled : bool;
   ckusdc_enabled : bool;
   ckusdt_enabled : bool;
@@ -620,21 +616,12 @@ type ProtocolError = variant {
   TransferError : TransferError;
   AlreadyProcessing;
   NotLowestCR;
+  SupplyInvariantHalted;
   AnonymousCallerNotAllowed;
+  ChainAdmin : text;
   AmountTooLow : record { minimum_amount : nat64 };
   TransferFromError : record { TransferFromError; nat64 };
   CallerNotOwner;
-  SupplyInvariantHalted;
-  ChainAdmin : text;
-};
-type SupplyAuditEntry = record {
-  chain_id : nat64;
-  display_name : text;
-  supply_e8s : nat;
-};
-type SupplyAudit = record {
-  total_e8s : nat;
-  per_chain : vec SupplyAuditEntry;
 };
 type ProtocolSnapshot = record {
   total_debt : nat64;
@@ -683,6 +670,10 @@ type RateCurve = record {
   markers : vec RateMarker;
 };
 type RateMarker = record { multiplier : blob; cr_level : blob };
+type RepayAndCloseSuccess = record {
+  collateral_return_block_index : opt nat64;
+  repay_block_index : nat64;
+};
 type ReserveBalance = record {
   balance : nat64;
   ledger : principal;
@@ -699,7 +690,8 @@ type Result = variant { Ok; Err : ProtocolError };
 type Result_1 = variant { Ok : nat64; Err : ProtocolError };
 type Result_10 = variant { Ok : bool; Err : ProtocolError };
 type Result_11 = variant { Ok : ReserveRedemptionResult; Err : ProtocolError };
-type Result_12 = variant {
+type Result_12 = variant { Ok : RepayAndCloseSuccess; Err : ProtocolError };
+type Result_13 = variant {
   Ok : StabilityPoolLiquidationResult;
   Err : ProtocolError;
 };
@@ -711,7 +703,6 @@ type Result_6 = variant { Ok : nat8; Err : ProtocolError };
 type Result_7 = variant { Ok : float64; Err : ProtocolError };
 type Result_8 = variant { Ok : ConsentInfo; Err : Icrc21Error };
 type Result_9 = variant { Ok : OpenVaultSuccess; Err : ProtocolError };
-type Result_13 = variant { Ok : RepayAndCloseSuccess; Err : ProtocolError };
 type SpProofLedger = variant { IcusdBurn; ThreePoolTransfer };
 type SpWritedownProof = record {
   block_index : nat64;
@@ -739,6 +730,12 @@ type SuccessWithFee = record {
   block_index : nat64;
   fee_amount_paid : nat64;
   collateral_amount_received : opt nat64;
+};
+type SupplyAudit = record { total_e8s : nat; per_chain : vec SupplyAuditEntry };
+type SupplyAuditEntry = record {
+  supply_e8s : nat;
+  display_name : text;
+  chain_id : nat32;
 };
 type TransferError = variant {
   GenericError : record { message : text; error_code : nat };
@@ -826,6 +823,8 @@ service : (ProtocolArg) -> {
   exit_recovery_mode : () -> (Result);
   freeze_protocol : () -> (Result);
   get_all_vaults : () -> (vec CandidVault) query;
+  get_amm1_canister : () -> (opt principal) query;
+  get_amm1_pool_id : () -> (opt text) query;
   get_borrowing_fee : () -> (float64) query;
   get_bot_allowed_collateral_types : () -> (vec principal) query;
   get_bot_claim_vault_ids : () -> (vec nat64) query;
@@ -849,6 +848,8 @@ service : (ProtocolArg) -> {
   get_fees : (nat64) -> (Fees) query;
   get_fees_for_collateral : (principal, nat64) -> (Fees) query;
   get_global_icusd_mint_cap : () -> (nat64) query;
+  get_global_icusd_supply : () -> (nat) query;
+  get_icp_usd_price_e8s : () -> (ProtocolStatusLite) query;
   get_icpswap_routing_enabled : () -> (bool) query;
   get_interest_pool_share : () -> (float64) query;
   get_interest_split : () -> (vec InterestSplitArg) query;
@@ -860,12 +861,11 @@ service : (ProtocolArg) -> {
   get_liquidation_protocol_share : () -> (float64) query;
   get_liquidity_status : (principal) -> (LiquidityStatus) query;
   get_min_icusd_amount : () -> (nat64) query;
+  get_pending_amm1_donations_count : () -> (nat64) query;
   get_protocol_3usd_reserves : () -> (nat64) query;
   get_protocol_config : () -> (ProtocolConfig) query;
   get_protocol_snapshots : (GetSnapshotsArg) -> (vec ProtocolSnapshot) query;
   get_protocol_status : () -> (ProtocolStatus) query;
-  get_global_icusd_supply : () -> (nat) query;
-  get_supply_audit : () -> (SupplyAudit) query;
   get_recovery_cr_multiplier : () -> (float64) query;
   get_recovery_target_cr : () -> (float64) query;
   get_redemption_fee_ceiling : () -> (float64) query;
@@ -884,14 +884,11 @@ service : (ProtocolArg) -> {
   get_stability_pool_config : () -> (StabilityPoolConfig) query;
   get_stability_pool_principal : () -> (opt principal) query;
   get_stable_token_enabled : (StableTokenType) -> (bool) query;
+  get_supply_audit : () -> (SupplyAudit) query;
   get_supported_collateral_types : () -> (
       vec record { principal; CollateralStatus },
     ) query;
   get_three_pool_canister : () -> (opt principal) query;
-  get_amm1_canister : () -> (opt principal) query;
-  get_amm1_pool_id : () -> (opt text) query;
-  get_pending_amm1_donations_count : () -> (nat64) query;
-  get_icp_usd_price_e8s : () -> (ProtocolStatusLite) query;
   get_treasury_principal : () -> (opt principal) query;
   get_treasury_stats : () -> (TreasuryStats) query;
   get_vault_count : () -> (nat64) query;
@@ -919,15 +916,16 @@ service : (ProtocolArg) -> {
   redeem_collateral : (principal, nat64) -> (Result_3);
   redeem_icp : (nat64) -> (Result_3);
   redeem_reserves : (nat64, opt principal) -> (Result_11);
-  repay_and_close_vault : (VaultArg) -> (Result_13);
+  repay_and_close_vault : (VaultArg) -> (Result_12);
   repay_to_vault : (VaultArg) -> (Result_1);
   repay_to_vault_with_stable : (VaultArgWithToken) -> (Result_1);
   reset_bot_budget : (nat64) -> (Result);
+  set_amm1_canister : (principal) -> (Result);
+  set_amm1_pool_id : (text) -> (Result);
   set_borrowing_fee : (float64) -> (Result);
   set_borrowing_fee_curve : (opt text) -> (Result);
   set_bot_allowed_collateral_types : (vec principal) -> (Result);
   set_bot_cr_tolerance_bps : (nat64) -> (Result);
-  set_collateral_min_xrc_sources : (principal, opt nat32) -> (Result);
   set_breaker_window_debt_ceiling_e8s : (nat64) -> (Result);
   set_breaker_window_ns : (nat64) -> (Result);
   set_check_vaults_alert_band_bps : (nat64) -> (Result);
@@ -942,6 +940,7 @@ service : (ProtocolArg) -> {
   set_collateral_liquidation_ratio : (principal, float64) -> (Result);
   set_collateral_min_deposit : (principal, nat64) -> (Result);
   set_collateral_min_vault_debt : (principal, nat64) -> (Result);
+  set_collateral_min_xrc_sources : (principal, opt nat32) -> (Result);
   set_collateral_redemption_fee_ceiling : (principal, float64) -> (Result);
   set_collateral_redemption_fee_floor : (principal, float64) -> (Result);
   set_collateral_status : (principal, CollateralStatus) -> (Result);
@@ -984,17 +983,15 @@ service : (ProtocolArg) -> {
   set_stable_ledger_principal : (StableTokenType, principal) -> (Result);
   set_stable_token_enabled : (StableTokenType, bool) -> (Result);
   set_three_pool_canister : (principal) -> (Result);
-  set_amm1_canister : (principal) -> (Result);
-  set_amm1_pool_id : (text) -> (Result);
   set_treasury_principal : (principal) -> (Result);
   set_vault_check_tick_interval_secs : (nat64) -> (Result);
   set_xrc_fetch_interval_secs : (nat64) -> (Result);
-  stability_pool_liquidate : (nat64, nat64) -> (Result_12);
+  stability_pool_liquidate : (nat64, nat64) -> (Result_13);
   stability_pool_liquidate_debt_burned : (nat64, nat64, SpWritedownProof) -> (
-      Result_12,
+      Result_13,
     );
   stability_pool_liquidate_with_reserves : (nat64, nat64, nat64, principal) -> (
-      Result_12,
+      Result_13,
     );
   unfreeze_protocol : () -> (Result);
   update_collateral_config : (principal, CollateralConfig) -> (Result);
