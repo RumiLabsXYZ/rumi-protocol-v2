@@ -505,7 +505,7 @@
           <button
             class="submit-btn"
             on:click={handleRedeem}
-            disabled={actionInProgress || !isConnected || icusdAmount <= 0 || icusdAmount > icusdBalance || isLoading}
+            disabled={actionInProgress || !isConnected || icusdAmount <= 0 || icusdAmount > icusdBalance || isLoading || swapIsBetter}
           >
             {#if !isConnected}
               Connect Wallet to Continue
@@ -513,6 +513,8 @@
               Processing Redemption...
             {:else if isLoading}
               Loading...
+            {:else if swapIsBetter}
+              Use Swap for Better Rate
             {:else}
               Redeem icUSD
             {/if}
