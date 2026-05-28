@@ -785,6 +785,30 @@ pub enum Event {
         min_required: u32,
         timestamp: u64,
     },
+    // Phase 1a: chain-admin audit trail.
+    #[serde(rename = "chain_registered")]
+    ChainRegistered {
+        chain_id: crate::chains::config::ChainId,
+        display_name: String,
+        timestamp: u64,
+    },
+    #[serde(rename = "chain_disabled")]
+    ChainDisabled {
+        chain_id: crate::chains::config::ChainId,
+        timestamp: u64,
+    },
+    #[serde(rename = "chain_config_updated")]
+    ChainConfigUpdated {
+        chain_id: crate::chains::config::ChainId,
+        timestamp: u64,
+    },
+    // Phase 1a Task 11: Timer B supply-invariant self-check failure.
+    #[serde(rename = "supply_invariant_self_check_failed")]
+    SupplyInvariantSelfCheckFailed {
+        sum_chain_supplies_e8s: u128,
+        total_debt_e8s: u128,
+        timestamp: u64,
+    },
 }
 
 impl Event {
@@ -894,6 +918,12 @@ impl Event {
             Event::OracleCircuitBreaker { .. } => false,
             // Wave-14a CDP-14: per-collateral, not per-vault.
             Event::OracleSourceCountInsufficient { .. } => false,
+            // Phase 1a: chain-admin events are protocol-wide, not vault-scoped.
+            Event::ChainRegistered { .. }
+            | Event::ChainDisabled { .. }
+            | Event::ChainConfigUpdated { .. } => false,
+            // Phase 1a Task 11: supply invariant failure is protocol-wide.
+            Event::SupplyInvariantSelfCheckFailed { .. } => false,
         }
     }
 
@@ -1851,6 +1881,14 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             // Wave-14a CDP-14: informational. The protocol simply skips the
             // sample; cached price stays in place. Nothing to replay.
             Event::OracleSourceCountInsufficient { .. } => {},
+            // Phase 1a: chain-admin endpoints apply changes directly to state
+            // before recording the event; nothing to replay.
+            Event::ChainRegistered { .. }
+            | Event::ChainDisabled { .. }
+            | Event::ChainConfigUpdated { .. } => {},
+            // Phase 1a Task 11: informational audit trail; state mutation
+            // (invariant_halted + mode flip) happens live in the timer tick.
+            Event::SupplyInvariantSelfCheckFailed { .. } => {},
         }
     }
     state.next_available_vault_id = vault_id;

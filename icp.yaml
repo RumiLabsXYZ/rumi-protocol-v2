@@ -727,12 +727,43 @@ environments:
           }
         })
 
-  # Future staging environment on mainnet (separate canister IDs). Populated
-  # by Phase 1 work; intentionally empty here so the project file already
-  # carries the slot without binding it to specific canisters.
+  # Phase 1a staging environment on mainnet. New canister (kvg63-wiaaa-aaaao-bbabq-cai)
+  # provisioned 2026-05-28, funded with 2 ICP (~3.4T cycles), controller = rumi_identity.
+  # Production canister (tfesu-vyaaa-aaaap-qrd7a-cai) is NOT in this environment —
+  # never deploy to staging and accidentally upgrade production. The Phase 1a wasm
+  # exposes the multi-chain public surface but registers no real chain; Phase 1b
+  # (Monad) will exercise the staging canister with a real first chain.
   - name: mainnet-staging
     network: ic
-    canisters: []
+    canisters:
+      - rumi_protocol_backend
+    init_args:
+      # First install on the staging canister uses the full Init variant (not
+      # Upgrade). The icusd_ledger_principal is `aaaaa-aa` (management canister
+      # placeholder) so any accidental icUSD mint traps; treasury / stability_pool /
+      # ckUSDT / ckUSDC are all null. XRC and ICP ledger point at real mainnet
+      # principals because Phase 1b will need both for price fetching + collateral
+      # accounting. `developer_principal` is the rumi_identity principal so the
+      # admin endpoints (register_chain, etc.) only respond to rumi_identity calls.
+      #
+      # NOTE: subsequent upgrades to this canister use --mode upgrade and pass
+      # `(variant { Upgrade = record { mode = null; description = opt "..." } })`
+      # via --args on `icp canister install`. See docs/superpowers/notes/
+      # 2026-05-27-icp-cli-deploy-pattern.md for the locked deploy command shape.
+      rumi_protocol_backend: |
+        (variant {
+          Init = record {
+            xrc_principal = principal "uf6dk-hyaaa-aaaaq-qaaaq-cai";
+            icusd_ledger_principal = principal "aaaaa-aa";
+            icp_ledger_principal = principal "ryjl3-tyaaa-aaaaa-aaaba-cai";
+            fee_e8s = 10_000 : nat64;
+            developer_principal = principal "fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae";
+            treasury_principal = null;
+            stability_pool_principal = null;
+            ckusdt_ledger_principal = null;
+            ckusdc_ledger_principal = null;
+          }
+        })
 
   # Local development environment. Installs the three external canisters so
   # the Rumi-owned canisters added in Tasks 8-16 have something to talk to.

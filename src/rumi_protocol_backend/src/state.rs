@@ -1236,6 +1236,12 @@ pub struct State {
     /// the rationale. Tunable via `set_bot_cr_tolerance_bps`.
     #[serde(default = "default_bot_cr_tolerance_bps")]
     pub bot_cr_tolerance_bps: u64,
+
+    /// Phase 1a: multi-chain accounting + per-chain settlement queues.
+    /// Empty on every pre-1a snapshot via `#[serde(default)]`. See
+    /// `chains::multi_chain_state` for the versioned-snapshot pattern.
+    #[serde(default)]
+    pub multi_chain: crate::chains::MultiChainState,
 }
 
 fn default_check_vaults_alert_band_bps() -> u64 {
@@ -1442,6 +1448,7 @@ impl Default for State {
                 default_check_vaults_full_sweep_every_n_ticks(),
             ticks_since_full_sweep: 0,
             bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
+            multi_chain: crate::chains::MultiChainState::default(),
         }
     }
 }
@@ -1665,6 +1672,7 @@ impl From<InitArg> for State {
                 default_check_vaults_full_sweep_every_n_ticks(),
             ticks_since_full_sweep: 0,
             bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
+            multi_chain: crate::chains::MultiChainState::default(),
         }
     }
 }

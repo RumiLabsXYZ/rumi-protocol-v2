@@ -14,6 +14,7 @@ use rumi_protocol_backend::{
     GetSnapshotsArg, ProtocolSnapshot, CollateralSnapshot,
     GetEventsFilteredResponse, StabilityPoolLiquidationResult,
     VaultHistoryPagedResponse, EventsByPrincipalPagedResponse, VaultsPageResponse,
+    SupplyAudit, SupplyAuditEntry,
     MAX_VAULT_HISTORY, MAX_EVENTS_BY_PRINCIPAL_LEGACY, MAX_EVENTS_BY_PRINCIPAL_SCAN,
     MAX_EVENTS_BY_PRINCIPAL_OUTPUT, MAX_VAULTS_LEGACY_PAGE, MAX_VAULTS_PAGE_LIMIT,
     PROTOCOL_STATUS_SNAPSHOT_TTL_NANOS, TREASURY_STATS_SNAPSHOT_TTL_NANOS,
@@ -714,6 +715,119 @@ fn get_protocol_status() -> ProtocolStatus {
         // Wave-9b DOS-006
         snapshot_ts_ns,
     })
+}
+
+/// Phase 1a: canonical multi-chain icUSD supply (sum across all chains).
+/// Equals `sum(state.multi_chain.chain_supplies.values())`. Returns 0 when
+/// no chains are registered (the Phase 1a default state).
+///
+/// Note: this query is read-only and does NOT exercise the invariant
+/// check. Operators investigating drift should call `get_supply_audit`
+/// for the per-chain breakdown.
+#[candid_method(query)]
+#[query]
+fn get_global_icusd_supply() -> u128 {
+    read_state(|s| s.multi_chain.total_supply_all_chains_e8s())
+}
+
+/// Phase 1a: per-chain breakdown for external auditors. Iterates
+/// `multi_chain.chain_configs` in chain-id order so the response shape is
+/// deterministic.
+#[candid_method(query)]
+#[query]
+fn get_supply_audit() -> SupplyAudit {
+    read_state(|s| {
+        let mut per_chain = Vec::with_capacity(s.multi_chain.chain_configs.len());
+        for (chain_id, cfg) in s.multi_chain.chain_configs.iter() {
+            let supply = s.multi_chain.chain_supplies.get(chain_id).copied().unwrap_or(0);
+            per_chain.push(SupplyAuditEntry {
+                chain_id: *chain_id,
+                display_name: cfg.display_name.clone(),
+                supply_e8s: supply,
+            });
+        }
+        SupplyAudit {
+            total_e8s: per_chain.iter().map(|e| e.supply_e8s).sum(),
+            per_chain,
+        }
+    })
+}
+
+// Phase 1a: developer-gated chain-registry admin endpoints.
+
+#[candid_method(update)]
+#[update]
+fn register_chain(arg: rumi_protocol_backend::chains::config::RegisterChainArg) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let now = ic_cdk::api::time();
+    let chain_id = arg.chain_id;
+    let display_name = arg.display_name.clone();
+    let result = mutate_state(|s| rumi_protocol_backend::chains::admin::register_chain_in_state(&mut s.multi_chain, arg, now));
+    match result {
+        Ok(_) => {
+            rumi_protocol_backend::storage::record_event(&rumi_protocol_backend::event::Event::ChainRegistered {
+                chain_id,
+                display_name,
+                timestamp: now,
+            });
+            log!(INFO, "[register_chain] chain_id={:?} registered", chain_id);
+            Ok(())
+        }
+        Err(e) => Err(ProtocolError::ChainAdmin(format!("{:?}", e))),
+    }
+}
+
+#[candid_method(update)]
+#[update]
+fn disable_chain(chain_id: rumi_protocol_backend::chains::config::ChainId) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let result = mutate_state(|s| rumi_protocol_backend::chains::admin::disable_chain_in_state(&mut s.multi_chain, chain_id));
+    match result {
+        Ok(()) => {
+            let now = ic_cdk::api::time();
+            rumi_protocol_backend::storage::record_event(&rumi_protocol_backend::event::Event::ChainDisabled {
+                chain_id,
+                timestamp: now,
+            });
+            log!(INFO, "[disable_chain] chain_id={:?} disabled", chain_id);
+            Ok(())
+        }
+        Err(e) => Err(ProtocolError::ChainAdmin(format!("{:?}", e))),
+    }
+}
+
+#[candid_method(update)]
+#[update]
+fn set_chain_config(
+    chain_id: rumi_protocol_backend::chains::config::ChainId,
+    update: rumi_protocol_backend::chains::config::UpdateChainConfigArg,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let result = mutate_state(|s| rumi_protocol_backend::chains::admin::update_chain_config_in_state(&mut s.multi_chain, chain_id, update));
+    match result {
+        Ok(()) => {
+            let now = ic_cdk::api::time();
+            rumi_protocol_backend::storage::record_event(&rumi_protocol_backend::event::Event::ChainConfigUpdated {
+                chain_id,
+                timestamp: now,
+            });
+            log!(INFO, "[set_chain_config] chain_id={:?} updated", chain_id);
+            Ok(())
+        }
+        Err(e) => Err(ProtocolError::ChainAdmin(format!("{:?}", e))),
+    }
 }
 
 #[candid_method(query)]
@@ -5966,3 +6080,4 @@ fn check_candid_interface_compatibility() {
         CandidSource::File(did_path.as_path()),
     );
 }
+

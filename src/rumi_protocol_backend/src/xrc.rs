@@ -1,5 +1,5 @@
 use crate::event::Event;
-use crate::logs::TRACE_XRC;
+use crate::logs::{INFO, TRACE_XRC};
 use crate::numeric::UsdIcp;
 use crate::state::{mutate_state, read_state, CollateralStatus, State};
 use crate::Decimal;
@@ -346,6 +346,42 @@ pub async fn interest_and_treasury_tick() {
     // Flush accumulated interest to pools/treasury when threshold is reached.
     crate::treasury::flush_pending_interest().await;
     crate::treasury::flush_pending_amm1_donations().await;
+
+    // Phase 1a: supply-invariant self-check. Runs on every Timer B tick
+    // (default cadence 60s) per spec Section 3. On drift, halt new
+    // debt issuance + supply mutations and flip the protocol into
+    // ReadOnly. Manual recovery requires `clear_invariant_halt` (lands
+    // in Phase 1b operational tooling) plus a developer-gated mode flip.
+    //
+    // In Phase 1a the chain_supplies table is empty and total_debt_e8s
+    // represents only ICP-side icUSD, so sum(chain_supplies) == 0 and
+    // the check always passes UNLESS a future bug somewhere increments
+    // chain_supplies without going through `apply_supply_delta`. That
+    // is the failure mode this check is designed to surface.
+    let total_debt_e8s: u128 = read_state(|s| s.total_borrowed_icusd_amount().to_u64() as u128);
+    let check_outcome = read_state(|s| {
+        crate::chains::supply::check_invariant(&s.multi_chain, total_debt_e8s)
+    });
+    if let Err(err) = check_outcome {
+        let now = ic_cdk::api::time();
+        let (sum, td) = match err {
+            crate::chains::supply::SupplyInvariantError::Divergence { sum_after, total_debt } => (sum_after, total_debt),
+            _ => (0u128, total_debt_e8s),
+        };
+        mutate_state(|s| {
+            s.multi_chain.invariant_halted = true;
+            if matches!(s.mode, Mode::GeneralAvailability) {
+                s.mode = Mode::ReadOnly;
+                s.mode_triggered_by_oracle = false;
+            }
+        });
+        crate::storage::record_event(&Event::SupplyInvariantSelfCheckFailed {
+            sum_chain_supplies_e8s: sum,
+            total_debt_e8s: td,
+            timestamp: now,
+        });
+        log!(INFO, "[supply_invariant] FAILED: sum={} total_debt={}; halting and flipping to ReadOnly", sum, td);
+    }
 }
 
 /// Wave-14b CDP-12 Timer C: vault health sweep + aggregate-snapshot refresh.

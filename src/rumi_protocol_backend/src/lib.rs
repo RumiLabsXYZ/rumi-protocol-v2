@@ -20,6 +20,7 @@ use rust_decimal_macros::dec;
 /// At 5-second intervals, 60 retries = 5 minutes of attempts.
 const MAX_PENDING_RETRIES: u8 = 60;
 
+pub mod chains;
 pub mod dashboard;
 pub mod event;
 pub mod guard;
@@ -205,6 +206,22 @@ pub struct CollateralInterestInfo {
     pub collateral_type: Principal,
     pub total_debt_e8s: u64,
     pub weighted_interest_rate: f64,
+}
+
+/// Phase 1a: per-chain icUSD supply entry for `get_supply_audit()`.
+#[derive(CandidType, Deserialize, Debug, Clone)]
+pub struct SupplyAuditEntry {
+    pub chain_id: crate::chains::config::ChainId,
+    pub display_name: String,
+    pub supply_e8s: u128,
+}
+
+/// Phase 1a: per-chain breakdown of canonical multi-chain icUSD supply.
+/// Returned by `get_supply_audit()` for external auditors and dashboards.
+#[derive(CandidType, Deserialize, Debug, Clone)]
+pub struct SupplyAudit {
+    pub total_e8s: u128,
+    pub per_chain: Vec<SupplyAuditEntry>,
 }
 
 /// Per-collateral Layer 1 interest rate curve for frontend interpolation.
@@ -603,6 +620,16 @@ pub enum ProtocolError {
     /// "Layer 2.5 — band gate DEACTIVATION fence" comment in
     /// `tests/audit_pocs_liq_002_sorted_troves_index.rs` for background.
     NotLowestCR,
+    /// Phase 1a: the periodic supply-invariant self-check (Timer B) caught
+    /// a `sum(chain_supplies) != total_debt` divergence. Every entry that
+    /// touches debt or chain supply returns this error until an operator
+    /// clears `multi_chain.invariant_halted`.
+    SupplyInvariantHalted,
+    /// Phase 1a: admin-endpoint error for `register_chain`, `disable_chain`,
+    /// `set_chain_config`. Wraps a developer-facing message string. The
+    /// structured `ChainAdminError` enum lives in `chains::config` and is
+    /// stringified here so the Candid surface stays append-only.
+    ChainAdmin(String),
 }
 
 impl From<GuardError> for ProtocolError {
