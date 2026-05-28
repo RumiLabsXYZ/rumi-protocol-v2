@@ -20,6 +20,7 @@ use rust_decimal_macros::dec;
 /// At 5-second intervals, 60 retries = 5 minutes of attempts.
 const MAX_PENDING_RETRIES: u8 = 60;
 
+pub mod chains;
 pub mod dashboard;
 pub mod event;
 pub mod guard;
