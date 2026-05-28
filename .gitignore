@@ -10,6 +10,11 @@
 # dfx temporary files
 .dfx/
 
+# icp-cli local build cache (per-developer, regeneratable)
+# Note: .icp/data/ holds canonical canister-ID mappings and IS tracked.
+# Only .icp/cache/ should be gitignored. Per cli.internetcomputer.org/0.2/migration/from-dfx/.
+.icp/cache/
+
 # generated files — tracked in git so frontend builds from clean clone
 # Run `dfx generate` after changing .did files to update
 # **/declarations/

@@ -1,0 +1,751 @@
+# yaml-language-server: $schema=https://github.com/dfinity/icp-cli/raw/refs/tags/v0.2.0/docs/schemas/icp-yaml-schema.json
+
+# Rumi Protocol v2 - icp-cli project manifest
+#
+# This file is the baseline skeleton for the dfx-to-icp-cli migration (Phase 0).
+# It establishes the three environments and the external/dependency canisters.
+# Each Rumi-owned Rust canister (rumi_protocol_backend, rumi_3pool, rumi_amm,
+# rumi_stability_pool, rumi_treasury, rumi_analytics, liquidation_bot, and the
+# two ledger/index utilities) is added in its own migration task (Tasks 8-16).
+#
+# Source of truth for syntax:
+#   docs/superpowers/notes/2026-05-27-icp-cli-upgrade-args-spike.md
+#   docs/superpowers/notes/2026-05-27-icp-cli-deps-pull-spike.md
+#
+# Sha256 pins below are reproducible: they match the wasm bytes either in-repo
+# (icp_ledger_canister) or hosted on the upstream GitHub release page (II, XRC).
+
+canisters:
+  # ---------------------------------------------------------------------------
+  # External / dependency canisters
+  # ---------------------------------------------------------------------------
+  # These three replace the `type: pull` entries in dfx.json. The `pre-built`
+  # build step verifies wasm integrity via sha256 before install. They are
+  # installed only on the `local` environment; on `ic` they are reached via
+  # canonical mainnet IDs from the backend's configuration record.
+
+  - name: icp_ledger_canister
+    # Local-wasm form: the wasm already lives in the repo at the path below.
+    build:
+      steps:
+        - type: pre-built
+          path: src/ledger/ic-icrc1-ledger.wasm
+          sha256: cb0c3233ebb137f606d7928e90bfd907fe932a941f11b41c23cf0d6cf9c64802
+    # PLACEHOLDER: the actual local init args file is authored when someone
+    # first runs `icp deploy --environment local`. Phase 0's only deploys are
+    # to mainnet-live, where this canister is not deployed (canonical mainnet
+    # ID ryjl3-tyaaa-aaaaa-aaaba-cai is used instead). A minimal placeholder
+    # at deploy/args/icp_ledger_local_init.did keeps `icp project show` happy.
+    init_args:
+      path: deploy/args/icp_ledger_local_init.did
+      format: candid
+
+  - name: internet_identity
+    # URL form: fetched fresh from the official DFINITY release. Sha256 pin
+    # ensures bit-exact reproducibility across developer machines.
+    build:
+      steps:
+        - type: pre-built
+          url: https://github.com/dfinity/internet-identity/releases/download/release-2026-05-26-be/internet_identity_dev.wasm.gz
+          sha256: 80946901c67705df8c56236d0cb4732d21f4988a655e6662abe7c5d396e3f903
+    init_args: '(null)'
+
+  - name: xrc
+    # URL form: Exchange Rate Canister, fetched from the official DFINITY
+    # release. XRC works on icp-cli's local PocketIC replica without any
+    # subnet-type configuration (the dfx-era `--subnet-type system` is moot).
+    build:
+      steps:
+        - type: pre-built
+          url: https://github.com/dfinity/exchange-rate-canister/releases/download/2026.05.15/xrc.wasm.gz
+          sha256: 084533477b31cd1d2f7394a38acf68d36aa87dcf84c155a961703e1df41b4ddb
+    init_args: '()'
+
+  # ---------------------------------------------------------------------------
+  # Rumi-owned canisters (added in Tasks 8-16, intentionally absent here)
+  # ---------------------------------------------------------------------------
+  # rumi_protocol_backend, rumi_3pool, rumi_amm, rumi_stability_pool,
+  # rumi_treasury, rumi_analytics, liquidation_bot, icusd_ledger,
+  # threeusd_index, vault_frontend, rumi_homepage.
+
+  # Task 8: flaky_ledger (test-only mock ICRC-1/ICRC-2 ledger with configurable
+  # transfer failures). Lives in src/flaky_ledger/ as a Rust workspace member;
+  # it is intentionally NOT in dfx.json because integration tests pull the wasm
+  # directly via `include_bytes!("../../../target/wasm32-unknown-unknown/release/flaky_ledger.wasm")`.
+  # Not deployed to any mainnet environment. Listed under `local` only so that
+  # `icp build flaky_ledger` exercises the same build pipeline used by tests.
+  # The .did file (added alongside lib.rs in the same task) mirrors the
+  # ICRC-1/2 + test-control surface; lib.rs does not call export_candid!()
+  # because integration tests load the wasm via include_bytes!.
+  - name: flaky_ledger
+    recipe:
+      type: "@dfinity/rust@v3.2.0"
+      configuration:
+        package: flaky_ledger
+        candid: src/flaky_ledger/flaky_ledger.did
+        shrink: true
+
+  # Task 9: icusd_index (mainnet 6niqu-siaaa-aaaap-qrjeq-cai). The official
+  # DFINITY icrc1-index-ng wasm checked into the repo at
+  # src/ledger/ic-icrc1-index-ng.wasm.gz. The local file's sha256 matches the
+  # production module hash exactly (cf3bf8f8...db2d), so this is a pure
+  # pre-built canister - icp-cli only verifies the sha256 before install.
+  # Tracks the icusd_ledger (t6bor-paaaa-aaaap-qrd5q-cai) for account history
+  # queries used by Plug Wallet and the explorer.
+  #
+  # The canister's candid service signature is `(index_arg : opt IndexArg)`:
+  # - Fresh install:  `(opt variant { Init = record { ledger_id = ...; retrieve_blocks_from_ledger_interval_seconds = opt 10; ... } })`
+  # - Upgrade:        `(null)` - leaves all configuration fields unchanged.
+  #
+  # Per the upgrade-args spike (docs/superpowers/notes/2026-05-27-icp-cli-
+  # upgrade-args-spike.md), `icp deploy --mode upgrade` reads the
+  # environment-level override. The mainnet-live override is set to `(null)`
+  # because production already has its state and we never want to clobber it.
+  - name: icusd_index
+    build:
+      steps:
+        - type: pre-built
+          path: src/ledger/ic-icrc1-index-ng.wasm.gz
+          sha256: cf3bf8f87dc908be156f314fae3b83aae56d1f63e74a63c32994c4e02babdb2d
+    init_args: |
+      (opt variant {
+        Init = record {
+          ledger_id = principal "t6bor-paaaa-aaaap-qrd5q-cai";
+          retrieve_blocks_from_ledger_interval_seconds = opt 10 : opt nat64;
+          min_retrieve_blocks_from_ledger_interval_seconds = null;
+          max_retrieve_blocks_from_ledger_interval_seconds = null;
+        }
+      })
+
+  # Task 10: liquidation_bot (mainnet nygob-3qaaa-aaaap-qttcq-cai). Rust canister
+  # built locally via the @dfinity/rust recipe (shrink: true matches dfx.json's
+  # implicit shrink behavior so the locally-built wasm matches production within
+  # build-metadata noise).
+  #
+  # The canister's candid service signature is `service : (BotInitArgs) -> { ... }`,
+  # which forces dfx and icp-cli to type-check every deploy arg against the init
+  # shape EVEN on upgrade. `post_upgrade` has no parameters, so the wasm itself
+  # ignores the bytes during upgrade. This is the "dummy InitArgs on upgrade"
+  # pattern (per MEMORY.md feedback_liquidation_bot_deploy.md).
+  #
+  # The dummy values below mirror the exact shape Rumi has used for every recent
+  # liquidation_bot upgrade (Wave 13 onwards): every principal is `aaaaa-aa`
+  # (the management canister, used as a placeholder), every nullable is `null`,
+  # max_slippage_bps = 0. The wasm decodes these into a BotInitArgs that
+  # post_upgrade never touches.
+  #
+  # Per the upgrade-args spike, `icp canister install --mode upgrade` reads the
+  # environment-level override below. mainnet-live carries the same dummy shape
+  # so re-deploys cannot accidentally reinitialize the bot's persisted config.
+  - name: liquidation_bot
+    recipe:
+      type: "@dfinity/rust@v3.2.0"
+      configuration:
+        package: liquidation_bot
+        candid: src/liquidation_bot/liquidation_bot.did
+        shrink: true
+    init_args: |
+      (record {
+        config = record {
+          backend_principal = principal "aaaaa-aa";
+          treasury_principal = principal "aaaaa-aa";
+          admin = principal "aaaaa-aa";
+          max_slippage_bps = 0 : nat16;
+          icp_ledger = principal "aaaaa-aa";
+          ckusdc_ledger = principal "aaaaa-aa";
+          icpswap_pool = principal "aaaaa-aa";
+          icpswap_zero_for_one = null;
+          icp_fee_e8s = null;
+          ckusdc_fee_e6 = null;
+          three_pool_principal = null;
+          kong_swap_principal = null;
+          ckusdt_ledger = null;
+          icusd_ledger = null;
+        }
+      })
+
+  # Task 11: rumi_3pool (mainnet fohh4-yyaaa-aaaap-qtkpa-cai). Rust canister
+  # built locally via the @dfinity/rust recipe (shrink: true matches dfx.json's
+  # implicit shrink behavior so the locally-built wasm matches production within
+  # build-metadata noise).
+  #
+  # This is a DECISION-GATE canister. rumi_3pool is the Curve-style AMM that
+  # holds real LP shares for real users, and it is the ICRC-1/2/3 ledger for
+  # the 3USD yield-bearing stablecoin (8 decimals, NOT 18). It participates in
+  # the SP interest split (30% routed through 3pool).
+  #
+  # The 2026-05-18 AMM state-wipe incident happened on rumi_amm, not rumi_3pool,
+  # and was caused by source-code changes (adding `#[serde(default)]` fields
+  # without a versioned-snapshot struct), NOT by deploy-tool changes. Phase 0
+  # does NOT change any Rust source, so the state-wipe failure mode is not in
+  # play here. The migration is a pure deploy-tool swap.
+  #
+  # The canister's candid service signature is `service : (ThreePoolInitArgs) -> { ... }`,
+  # which forces dfx and icp-cli to type-check every deploy arg against the init
+  # shape EVEN on upgrade. `post_upgrade()` takes no parameters (lib.rs:70),
+  # so the wasm itself ignores the bytes during upgrade and reads SlimState
+  # from the stable cell. This is the "dummy InitArgs on upgrade" pattern
+  # (per MEMORY.md feedback_3pool_deploy.md).
+  #
+  # The dummy values below mirror the exact shape Rumi has used for every
+  # rumi_3pool upgrade since the 2026-04-29 ICRC-3 hash-cache deploy: three
+  # placeholder TokenConfig entries (all aaaaa-aa, decimals 0, precision_mul
+  # 1), all numeric fields zero, admin = aaaaa-aa. The wasm decodes these
+  # into a ThreePoolInitArgs that post_upgrade never touches.
+  #
+  # Per the upgrade-args spike, `icp canister install --mode upgrade` reads the
+  # environment-level override below. mainnet-live carries the same dummy shape
+  # so re-deploys cannot accidentally reinitialize the pool's persisted state
+  # (LP balances, reserves, virtual price, ICRC-3 archive).
+  - name: rumi_3pool
+    recipe:
+      type: "@dfinity/rust@v3.2.0"
+      configuration:
+        package: rumi_3pool
+        candid: src/rumi_3pool/rumi_3pool.did
+        shrink: true
+    init_args: |
+      (record {
+        tokens = vec {
+          record { ledger_id = principal "aaaaa-aa"; symbol = ""; decimals = 0 : nat8; precision_mul = 1 : nat64 };
+          record { ledger_id = principal "aaaaa-aa"; symbol = ""; decimals = 0 : nat8; precision_mul = 1 : nat64 };
+          record { ledger_id = principal "aaaaa-aa"; symbol = ""; decimals = 0 : nat8; precision_mul = 1 : nat64 }
+        };
+        initial_a = 0 : nat64;
+        swap_fee_bps = 0 : nat64;
+        admin_fee_bps = 0 : nat64;
+        admin = principal "aaaaa-aa"
+      })
+
+  # Task 12: rumi_stability_pool (mainnet tmhzi-dqaaa-aaaap-qrd6q-cai). Rust
+  # canister built locally via the @dfinity/rust recipe (shrink: true matches
+  # dfx.json's implicit shrink behavior so the locally-built wasm matches
+  # production within build-metadata noise).
+  #
+  # NOTE on package name: the Cargo package is `stability_pool` (not
+  # `rumi_stability_pool`); the canister's mainnet/registry name is
+  # `rumi_stability_pool`. The candid file path is `src/stability_pool/...`
+  # because the source directory follows the Cargo package name.
+  #
+  # The SP holds icUSD/3USD deposits used to absorb liquidations. Its stable
+  # state includes depositor balances, total deposits, liquidation events, and
+  # the stablecoin/collateral registries. It received the icUSD-only-interest
+  # update on 2026-05-18.
+  #
+  # The canister's candid service signature is
+  # `service : (StabilityPoolInitArgs) -> { ... }`, which forces dfx and
+  # icp-cli to type-check every deploy arg against the init shape EVEN on
+  # upgrade. `post_upgrade(_args: StabilityPoolInitArgs)` (lib.rs:41) takes
+  # the args by-name with a leading underscore and never reads them; the
+  # body only calls `state::load_from_stable_memory()` plus an in-place
+  # stablecoin transfer_fee correction. This is the "dummy InitArgs on
+  # upgrade" pattern (per MEMORY.md feedback_stability_pool_deploy.md - the
+  # warning that the SP "requires --argument with init args even on upgrade"
+  # refers to the candid type-check, not a real state read).
+  #
+  # The init_args values below are the minimum legal StabilityPoolInitArgs:
+  # protocol_canister_id is set to the real production backend principal
+  # (tfesu-vyaaa-aaaap-qrd7a-cai) for defense-in-depth in case any future
+  # post_upgrade revision ever consumes it; authorized_admins is an empty
+  # vec. `s.initialize()` is only called from `init`, never from
+  # `post_upgrade`, so neither field would be applied on upgrade today.
+  #
+  # Per the upgrade-args spike, `icp canister install --mode upgrade` reads
+  # the environment-level override below. mainnet-live carries the same
+  # shape so re-deploys cannot accidentally reinitialize the pool's
+  # persisted state (depositor balances, stablecoin/collateral registries,
+  # liquidation event log).
+  - name: rumi_stability_pool
+    recipe:
+      type: "@dfinity/rust@v3.2.0"
+      configuration:
+        package: stability_pool
+        candid: src/stability_pool/stability_pool.did
+        shrink: true
+    init_args: |
+      (record {
+        protocol_canister_id = principal "tfesu-vyaaa-aaaap-qrd7a-cai";
+        authorized_admins = vec {}
+      })
+
+  # Task 13: rumi_treasury (mainnet tlg74-oiaaa-aaaap-qrd6a-cai). Rust canister
+  # built locally via the @dfinity/rust recipe (shrink: true matches dfx.json's
+  # implicit shrink behavior so the locally-built wasm matches production within
+  # build-metadata noise).
+  #
+  # The treasury holds and accounts for protocol revenue (borrowing fees,
+  # redemption fees, liquidation fees, interest revenue) across multiple asset
+  # types (icUSD, ICP, ckBTC, ckUSDC, ckUSDT). Persisted state is a deposit
+  # log, an event log, and a `BalancesSnapshot` stable cell (the latter added
+  # in commit 607ae21 to survive upgrades and rollback failed withdrawals).
+  # Authorization is IC-level controller check (commit 607ae21); the
+  # `controller` field in `TreasuryInitArgs` is now informational only.
+  #
+  # The canister's candid service signature is
+  # `service : (TreasuryInitArgs) -> { ... }`, which forces dfx and icp-cli
+  # to type-check every deploy arg against the init shape EVEN on upgrade.
+  # `post_upgrade()` (lib.rs:46) takes NO parameters and only calls
+  # `restore_state()`; the wasm itself ignores the bytes during upgrade.
+  # This is the "dummy InitArgs on upgrade" pattern shared with
+  # rumi_stability_pool, rumi_3pool, and liquidation_bot.
+  #
+  # The dummy values below are minimum-legal: every principal is the
+  # management canister (aaaaa-aa), all optional ledgers are `null`. None
+  # of these fields are read on upgrade. The canister's live state
+  # (deposits, balances snapshot, event log) is preserved by restore_state.
+  #
+  # Per the upgrade-args spike, `icp canister install --mode upgrade` reads
+  # the environment-level override below. mainnet-live carries the same
+  # dummy shape so re-deploys cannot accidentally reinitialize the treasury's
+  # persisted state.
+  - name: rumi_treasury
+    recipe:
+      type: "@dfinity/rust@v3.2.0"
+      configuration:
+        package: rumi_treasury
+        candid: src/rumi_treasury/rumi_treasury.did
+        shrink: true
+    init_args: |
+      (record {
+        controller = principal "aaaaa-aa";
+        icusd_ledger = principal "aaaaa-aa";
+        icp_ledger = principal "aaaaa-aa";
+        ckbtc_ledger = null;
+        ckusdt_ledger = null;
+        ckusdc_ledger = null
+      })
+
+  # Task 14: rumi_amm (mainnet ijlzs-2yaaa-aaaap-quaaq-cai). Rust canister built
+  # locally via the @dfinity/rust recipe (shrink: true matches dfx.json's
+  # implicit shrink behavior so the locally-built wasm matches production within
+  # build-metadata noise).
+  #
+  # DECISION-GATE canister with elevated rigor: rumi_amm holds the AMM1 LP
+  # position (3USD/ICP pool) and was the source of the 2026-05-18 state-wipe
+  # incident (project_amm_state_wipe_2026_05_18.md). The wipe was triggered by
+  # source-code changes (6 new `#[serde(default)]` fields added to AmmState
+  # without using the AmmStateV<N> versioned-snapshot migration pattern), NOT by
+  # deploy-tool changes. Phase 0 does NOT change any Rust source, so the
+  # state-wipe failure mode is not in play here. The migration is a pure
+  # deploy-tool swap.
+  #
+  # Pre-deploy probes (Task 14):
+  #   Probe A (candid surface): 49 methods deployed vs 49 in source - exact match.
+  #   Probe B (PR #193 marker): admin_burn_subaccount_balance present in
+  #     deployed candid - confirms the post-state-wipe recovery code shipped.
+  #   Probe C (live pool data): AMM1 pool exists with total_lp_shares =
+  #     102_811_210_551 (matches the bootstrap value from MEMORY exactly),
+  #     reserve_a = 164_849_934_256 (3USD), reserve_b = 64_214_037_983 (ICP),
+  #     unique_lps = 1 (Rob is sole LP per MEMORY).
+  #
+  # Production module hash at time of migration:
+  #   0x31bde26fbe21feae9a9132a43e4985b79b1bc803f8231305fcb78e355725e93e
+  #   (the post-PR #193 hash that fixed AMM1 pool_id and shipped admin_burn).
+  #
+  # The canister's candid service signature is
+  # `service : (AmmInitArgs) -> { ... }`, which forces dfx and icp-cli to
+  # type-check every deploy arg against the init shape EVEN on upgrade.
+  # `post_upgrade(_args: AmmInitArgs)` (lib.rs:496) takes the arg by-name with
+  # a leading underscore and never reads it; the body only calls
+  # `state::load_from_stable_memory()` and re-arms the timers. The leading
+  # underscore is explicitly documented in lib.rs:493 as "accepted for Candid
+  # interface compatibility with `init` but intentionally ignored; the admin
+  # and all other config come from persisted state." This is the same "dummy
+  # InitArgs on upgrade" pattern as rumi_3pool, liquidation_bot,
+  # rumi_stability_pool, and rumi_treasury.
+  #
+  # The dummy admin value below is the management canister (aaaaa-aa). The
+  # wasm decodes this into an AmmInitArgs that post_upgrade never touches; the
+  # live admin (mi66c-...) is preserved by the stable-memory load path along
+  # with the pool registry, LP balances, swap event log, liquidity event log,
+  # admin event log, and rewards accumulator state.
+  #
+  # Per the upgrade-args spike, `icp canister install --mode upgrade` reads
+  # the environment-level override below. mainnet-live carries the same dummy
+  # shape so re-deploys cannot accidentally reinitialize the AMM's persisted
+  # state (the 102_811_210_551 LP shares, 3USD/ICP reserves, swap history).
+  - name: rumi_amm
+    recipe:
+      type: "@dfinity/rust@v3.2.0"
+      configuration:
+        package: rumi_amm
+        candid: src/rumi_amm/rumi_amm.did
+        shrink: true
+    init_args: |
+      (record {
+        admin = principal "aaaaa-aa"
+      })
+
+  # Task 15: rumi_analytics (mainnet dtlu2-uqaaa-aaaap-qugcq-cai). Read-only
+  # analytics canister that pulls/tails events from the protocol's other
+  # canisters (backend, icusd_ledger, 3pool, SP, AMM) and serves time-series
+  # queries used by the explorer.
+  #
+  # TWO non-obvious deploy quirks (carried over from dfx; see MEMORY.md
+  # feedback_analytics_deploy.md):
+  #
+  #   1. Full InitArgs required on every upgrade. The candid declares
+  #      `service : (InitArgs) -> {...}` (rumi_analytics.did:421) and both
+  #      dfx and icp-cli enforce arg type-checking against this signature
+  #      EVEN on `--mode upgrade`. A bare upgrade with `()` fails with
+  #      "wrong number of argument values".
+  #
+  #   2. Wasm exceeds the 2 MiB ingress limit. The cargo release wasm is
+  #      ~2.4 MB; `ic-wasm shrink` alone drops it to ~1.6 MB which fits;
+  #      gzip -9 brings it to ~488 KB. The default `@dfinity/rust@v3.2.0`
+  #      recipe with `shrink: true` produces a shrunk wasm but does NOT
+  #      gzip; if the shrunk wasm is over 2_097_152 bytes after recipe
+  #      build, we need the custom build:steps form below to add gzip.
+  #
+  # PER-MEASUREMENT FINDING (Task 15 build probes, 2026-05-27):
+  #   raw cargo release wasm                  : 3_356_627 bytes (~3.20 MB)
+  #   @dfinity/rust recipe + shrink: true     : 3_171_287 bytes (~3.02 MB)
+  #   shrink --keep-name-section + candid     : 2_821_426 bytes (~2.69 MB)
+  #   ^ same, then gzip -9 (this entry's out) :   631_557 bytes (~617 KB)
+  #
+  # The 2 MiB ingress limit is 2_097_152 bytes. The default recipe with
+  # `shrink: true` is NOT enough on its own. We need both `ic-wasm shrink`
+  # AND `gzip -9`. The IC strips the gzip server-side at install time.
+  #
+  # That rules out the `recipe:` form (recipe knows how to shrink but does
+  # not gzip), so we use the explicit `build: steps:` form below:
+  #   1. `cargo build --release --target wasm32-unknown-unknown --package rumi_analytics`
+  #   2. copy the artifact to ICP_WASM_OUTPUT_PATH (icp-cli's expected location)
+  #   3. `ic-wasm <out> -o <out> shrink --keep-name-section` (strip debug
+  #      sections but keep the wasm Name section so debugging is still
+  #      possible against the deployed bytes)
+  #   4. `gzip -9 -f <out>` (best compression, force overwrite)
+  #
+  # post_upgrade() (lib.rs:60) takes NO parameters and only calls
+  # state::hydrate_from_slim() + timers::setup_timers(SetupContext::PostUpgrade).
+  # The Candid type-check still requires the InitArgs shape because the
+  # service signature is `(InitArgs) -> ...`, but the wasm never reads any
+  # of the principals on the upgrade path. This is the same "dummy InitArgs
+  # on upgrade" pattern as rumi_3pool, liquidation_bot, rumi_stability_pool,
+  # rumi_treasury, and rumi_amm.
+  #
+  # Dummy admin = aaaaa-aa (management canister) below. The wasm decodes
+  # this into an InitArgs that post_upgrade never touches; the live admin
+  # plus the full SlimState (every protocol source canister ID, every
+  # cached series, the BackendEvent ingestion cursor, every collector log)
+  # is preserved by state::hydrate_from_slim() from the stable cell.
+  #
+  # Production module hash at time of migration:
+  #   0x5514e9e67a9199ec91138a0edfa3dc88847bf5b839227cd784d010acf55d6c41
+  #   (the post-Wave-14 + post-PR #182 hash that fixed BackendEvent decoding
+  #   and shipped the per-collateral XRC source-count floor.)
+  #
+  # The UPG-006 reinstall guard inside `init()` (lib.rs:35) asserts that
+  # `stable64_size() == 0` so any accidental reinstall traps before wiping
+  # state. Upgrades go through `post_upgrade()` which never hits that guard.
+  - name: rumi_analytics
+    build:
+      steps:
+        - type: script
+          commands:
+            - cargo build --release --target wasm32-unknown-unknown --package rumi_analytics
+            - cp target/wasm32-unknown-unknown/release/rumi_analytics.wasm "$ICP_WASM_OUTPUT_PATH"
+            - ic-wasm "$ICP_WASM_OUTPUT_PATH" -o "$ICP_WASM_OUTPUT_PATH" metadata candid:service -f src/rumi_analytics/rumi_analytics.did -v public
+            - ic-wasm "$ICP_WASM_OUTPUT_PATH" -o "$ICP_WASM_OUTPUT_PATH" shrink --keep-name-section
+            - gzip -9 -f "$ICP_WASM_OUTPUT_PATH"
+            - mv "${ICP_WASM_OUTPUT_PATH}.gz" "$ICP_WASM_OUTPUT_PATH"
+    init_args: |
+      (record {
+        admin = principal "aaaaa-aa";
+        backend = principal "aaaaa-aa";
+        icusd_ledger = principal "aaaaa-aa";
+        three_pool = principal "aaaaa-aa";
+        stability_pool = principal "aaaaa-aa";
+        amm = principal "aaaaa-aa"
+      })
+
+  # Task 16: rumi_protocol_backend (mainnet tfesu-vyaaa-aaaap-qrd7a-cai). THE
+  # crown-jewel canister: the CDP engine that holds every vault, every debt
+  # balance, every collateral config, the redemption-tier table, the stability-
+  # pool integration state, the bot integration state, and every admin key for
+  # emergency operations. A botched upgrade affects every protocol user.
+  #
+  # UNIQUE init signature among Rumi canisters: the candid declares
+  # `service : (ProtocolArg) -> {...}` (rumi_protocol_backend.did:796), where
+  # `ProtocolArg = variant { Init : InitArg; Upgrade : UpgradeArg }`. This is
+  # NOT the "single record" shape used by every other Rumi-owned canister; it
+  # is a Candid variant and the canister's `#[post_upgrade]` (main.rs:390)
+  # actively pattern-matches on it:
+  #
+  #   ProtocolArg::Init(_)    => ic_cdk::trap("expected Upgrade got Init")
+  #   ProtocolArg::Upgrade(a) => record_event(Event::Upgrade(a)); state.upgrade(a)
+  #
+  # The Upgrade variant carries TWO fields, both honest:
+  #
+  #   UpgradeArg = record { mode : opt Mode; description : opt text }
+  #
+  #     - `mode` overrides the runtime mode (None | ReadOnly | GeneralAvailability
+  #       | Recovery). `None` (i.e. `mode = null`) preserves the live mode.
+  #     - `description` is a human-readable changelog line. post_upgrade RECORDS
+  #       this string into the on-chain event log as `Event::Upgrade(args)` (so
+  #       the log preserves a chronological audit trail of every upgrade). It is
+  #       NOT a dummy field; use a meaningful string on every deploy.
+  #
+  # Per MEMORY.md feedback_dfx_identity_for_deploys.md: this argument shape is
+  # hard-enforced. Bare `()` will fail Candid type-check; passing the Init
+  # variant will trap. For Phase 0 (deploy-tool migration, no Rust source
+  # change) we ship `mode = null` (preserve live mode) and a description that
+  # documents the icp-cli swap.
+  #
+  # WASM SIZE: the raw cargo release wasm is ~6.7 MB, well over the 2 MiB
+  # ingress limit (2_097_152 bytes). `ic-wasm shrink` alone may not be enough.
+  # Following the rumi_analytics pattern we go straight to the explicit
+  # `build: steps:` form with shrink + gzip -9, which the IC strips server-side
+  # at install time.
+  #
+  # Build pipeline:
+  #   1. `cargo build --release --target wasm32-unknown-unknown --package rumi_protocol_backend`
+  #   2. copy the artifact to ICP_WASM_OUTPUT_PATH (icp-cli's expected location)
+  #   3. embed candid:service metadata so query tools and dashboards see the
+  #      candid interface without a sidecar file
+  #   4. `ic-wasm <out> -o <out> shrink --keep-name-section`
+  #   5. `gzip -9 -f <out>` (best compression)
+  #
+  # The init_args block below pins the Upgrade variant with `mode = null` so
+  # `icp canister install --mode upgrade` cannot accidentally change the
+  # protocol mode. mainnet-live carries a more specific `description` override
+  # noting the icp-cli migration; this baseline string is a fallback used only
+  # if the env override is missing (which would itself be a mistake).
+  #
+  # Production module hash at time of migration:
+  #   0xb3663122eb3b4d712d1e1da00a2f5ab468b12681aec9fd020e5477657f4e7e25
+  - name: rumi_protocol_backend
+    build:
+      steps:
+        - type: script
+          commands:
+            - cargo build --release --target wasm32-unknown-unknown --package rumi_protocol_backend
+            - cp target/wasm32-unknown-unknown/release/rumi_protocol_backend.wasm "$ICP_WASM_OUTPUT_PATH"
+            - ic-wasm "$ICP_WASM_OUTPUT_PATH" -o "$ICP_WASM_OUTPUT_PATH" metadata candid:service -f src/rumi_protocol_backend/rumi_protocol_backend.did -v public
+            - ic-wasm "$ICP_WASM_OUTPUT_PATH" -o "$ICP_WASM_OUTPUT_PATH" shrink --keep-name-section
+            - gzip -9 -f "$ICP_WASM_OUTPUT_PATH"
+            - mv "${ICP_WASM_OUTPUT_PATH}.gz" "$ICP_WASM_OUTPUT_PATH"
+    init_args: |
+      (variant {
+        Upgrade = record {
+          mode = null;
+          description = opt "Phase 0 icp-cli migration: deploy via icp-cli, no code change"
+        }
+      })
+
+networks:
+  - name: local
+    mode: managed
+    gateway:
+      bind: 127.0.0.1
+      port: 4943
+    # NOT load-bearing: PocketIC ignores subnet-type partitioning for runtime
+    # API gating (HTTPS outcalls, threshold sigs, etc. work on any subnet).
+    # Kept for documentation clarity: this project assumes system-subnet
+    # capabilities in production. See the deps-pull spike's "Why dfx requires
+    # --subnet-type system but icp-cli does not" section.
+    subnets:
+      - application
+      - system
+
+environments:
+  # NOTE: icp-cli auto-creates a phantom environment named after each network
+  # (so an `ic` environment appears in `icp project show` even though it is
+  # not declared here). The auto-created `ic` env contains every canister
+  # without an explicit env restriction, which is harmless because production
+  # deploys explicitly target `mainnet-live` (or `mainnet-staging` in Phase 1).
+  # Do not deploy with `--environment ic`; always pass `mainnet-live`.
+
+  # The production environment Rumi has been running on since launch.
+  # All mainnet deploys target this environment with `--identity rumi_identity`.
+  # External canisters (II, XRC, ICP ledger) are NOT listed here: they are
+  # reached via their canonical mainnet IDs (rdmx6-..., uf6dk-..., ryjl3-...)
+  # through the backend's configuration record, not via `icp deploy`.
+  - name: mainnet-live
+    network: ic
+    canisters:
+      - icusd_index
+      - liquidation_bot
+      - rumi_3pool
+      - rumi_stability_pool
+      - rumi_treasury
+      - rumi_amm
+      - rumi_analytics
+      - rumi_protocol_backend
+    init_args:
+      # Upgrade-mode override: `(null)` preserves all existing configuration
+      # (ledger_id and the retrieve-interval fields). The canister is already
+      # synced to icusd_ledger; we never want to re-init or change ledger_id
+      # on an upgrade. See the upgrade-args spike for the override mechanism.
+      icusd_index: '(null)'
+      # liquidation_bot upgrade-mode override: BotInitArgs shape is required by
+      # the candid `service : (BotInitArgs) -> { ... }` declaration, but the
+      # wasm's post_upgrade ignores these bytes. Values are deliberate dummies
+      # (management canister principal everywhere, zeros/nulls otherwise). The
+      # canister's live config is preserved by post_upgrade's stable-memory
+      # load path. See MEMORY.md feedback_liquidation_bot_deploy.md.
+      liquidation_bot: |
+        (record {
+          config = record {
+            backend_principal = principal "aaaaa-aa";
+            treasury_principal = principal "aaaaa-aa";
+            admin = principal "aaaaa-aa";
+            max_slippage_bps = 0 : nat16;
+            icp_ledger = principal "aaaaa-aa";
+            ckusdc_ledger = principal "aaaaa-aa";
+            icpswap_pool = principal "aaaaa-aa";
+            icpswap_zero_for_one = null;
+            icp_fee_e8s = null;
+            ckusdc_fee_e6 = null;
+            three_pool_principal = null;
+            kong_swap_principal = null;
+            ckusdt_ledger = null;
+            icusd_ledger = null;
+          }
+        })
+      # rumi_3pool upgrade-mode override: ThreePoolInitArgs shape is required
+      # by the candid `service : (ThreePoolInitArgs) -> { ... }` declaration,
+      # but the wasm's post_upgrade() takes no parameters (lib.rs:70) and reads
+      # SlimState from the stable cell. Values are deliberate dummies: every
+      # principal is the management canister (aaaaa-aa), every numeric field
+      # is zero, precision_mul is 1 (minimum legal value). The canister's
+      # live pool state (LP balances, reserves, virtual price, ICRC-3 archive,
+      # 3USD total_supply) is preserved by the stable-memory load path. See
+      # MEMORY.md feedback_3pool_deploy.md.
+      rumi_3pool: |
+        (record {
+          tokens = vec {
+            record { ledger_id = principal "aaaaa-aa"; symbol = ""; decimals = 0 : nat8; precision_mul = 1 : nat64 };
+            record { ledger_id = principal "aaaaa-aa"; symbol = ""; decimals = 0 : nat8; precision_mul = 1 : nat64 };
+            record { ledger_id = principal "aaaaa-aa"; symbol = ""; decimals = 0 : nat8; precision_mul = 1 : nat64 }
+          };
+          initial_a = 0 : nat64;
+          swap_fee_bps = 0 : nat64;
+          admin_fee_bps = 0 : nat64;
+          admin = principal "aaaaa-aa"
+        })
+      # rumi_stability_pool upgrade-mode override: StabilityPoolInitArgs shape
+      # is required by the candid `service : (StabilityPoolInitArgs) -> { ... }`
+      # declaration, but the wasm's `post_upgrade(_args)` (lib.rs:41) takes
+      # the arg by-name with a leading underscore and never reads it. The body
+      # only calls `state::load_from_stable_memory()` plus an in-place
+      # stablecoin transfer_fee correction. protocol_canister_id is set to the
+      # real production backend (tfesu-vyaaa-aaaap-qrd7a-cai) for defense-in-
+      # depth; authorized_admins is an empty vec. Either value would only be
+      # written to state via `s.initialize()`, which is only called from
+      # `#[init]`, never from `#[post_upgrade]`. The canister's live state
+      # (depositor balances, stablecoin/collateral registries, liquidation
+      # events) is preserved by the stable-memory load path. See MEMORY.md
+      # feedback_stability_pool_deploy.md.
+      rumi_stability_pool: |
+        (record {
+          protocol_canister_id = principal "tfesu-vyaaa-aaaap-qrd7a-cai";
+          authorized_admins = vec {}
+        })
+      # rumi_treasury upgrade-mode override: TreasuryInitArgs shape is required
+      # by the candid `service : (TreasuryInitArgs) -> { ... }` declaration,
+      # but the wasm's `post_upgrade()` (lib.rs:46) takes no parameters and
+      # only calls `restore_state()`. The wasm ignores these bytes on upgrade.
+      # Values are deliberate dummies (management canister principal for the
+      # three required principals, all optional ledgers null). The canister's
+      # live state (deposit log, BalancesSnapshot stable cell, event log) is
+      # preserved by the stable-memory restore path.
+      rumi_treasury: |
+        (record {
+          controller = principal "aaaaa-aa";
+          icusd_ledger = principal "aaaaa-aa";
+          icp_ledger = principal "aaaaa-aa";
+          ckbtc_ledger = null;
+          ckusdt_ledger = null;
+          ckusdc_ledger = null
+        })
+      # rumi_amm upgrade-mode override: AmmInitArgs shape (a single principal
+      # field `admin`) is required by the candid `service : (AmmInitArgs) -> { ... }`
+      # declaration, but the wasm's `post_upgrade(_args)` (lib.rs:496) takes
+      # the arg by-name with a leading underscore and never reads it. The body
+      # only calls `state::load_from_stable_memory()` and rearms three timers
+      # (supply timer, snapshot timer, TVL sample timer). admin = aaaaa-aa is
+      # a deliberate dummy; the live admin (mi66c-...) is preserved by the
+      # stable-memory load path along with the AMM1 pool registry, LP balances
+      # (102_811_210_551 shares, 100% to zegjz-... per MEMORY), reserves,
+      # swap/liquidity/admin event logs, and rewards accumulator state.
+      # See MEMORY.md project_amm_state_wipe_2026_05_18.md for the incident
+      # this dummy-args pattern was designed not to repeat (and could not
+      # repeat in Phase 0 anyway because no Rust source changes).
+      rumi_amm: |
+        (record {
+          admin = principal "aaaaa-aa"
+        })
+      # rumi_analytics upgrade-mode override: InitArgs shape (six principal
+      # fields: admin, backend, icusd_ledger, three_pool, stability_pool, amm)
+      # is required by the candid `service : (InitArgs) -> { ... }` declaration,
+      # but the wasm's `post_upgrade()` (lib.rs:60) takes no parameters and only
+      # calls `state::hydrate_from_slim()` + timer setup. All six principals
+      # are dummies (management canister). The canister's live state - the full
+      # SlimState including the admin principal, every protocol source canister
+      # ID (backend, icusd_ledger, three_pool, stability_pool, amm), every
+      # cached series, the BackendEvent ingestion cursor, all collector logs -
+      # is preserved by the hydrate_from_slim path from the stable cell. See
+      # MEMORY.md feedback_analytics_deploy.md.
+      #
+      # Additional ops note: this canister's wasm exceeds the 2 MiB single-
+      # message ingress limit when un-gzipped. The recipe runs `ic-wasm shrink`
+      # via `shrink: true`. If the shrunk output is still > 2 MiB after a build,
+      # promote the canister to the `build: steps:` form (cargo + ic-wasm +
+      # gzip -9) so install does not 408 / "Unable to buffer body".
+      rumi_analytics: |
+        (record {
+          admin = principal "aaaaa-aa";
+          backend = principal "aaaaa-aa";
+          icusd_ledger = principal "aaaaa-aa";
+          three_pool = principal "aaaaa-aa";
+          stability_pool = principal "aaaaa-aa";
+          amm = principal "aaaaa-aa"
+        })
+      # rumi_protocol_backend upgrade-mode override: the ProtocolArg variant is
+      # actively read by post_upgrade(). `mode = null` preserves the live
+      # protocol mode (currently GeneralAvailability per pre-deploy snapshot);
+      # `description` is recorded into the on-chain event log as
+      # Event::Upgrade(args) so it must be meaningful, not a dummy. This is the
+      # ONLY canister where the upgrade args are honest fields the wasm reads
+      # and persists, unlike the dummy-shape pattern used for liquidation_bot,
+      # rumi_3pool, rumi_stability_pool, rumi_treasury, rumi_amm, and
+      # rumi_analytics (where post_upgrade ignores the bytes).
+      #
+      # If a future deploy changes the runtime mode, set `mode = opt variant {
+      # ReadOnly | GeneralAvailability | Recovery }` here instead of null. Do
+      # NOT call `set_mode` from a separate update call; the upgrade event log
+      # would not record the change.
+      #
+      # See MEMORY.md feedback_dfx_identity_for_deploys.md for the arg shape
+      # contract and the requirement to deploy with --identity rumi_identity.
+      rumi_protocol_backend: |
+        (variant {
+          Upgrade = record {
+            mode = null;
+            description = opt "Phase 0 icp-cli migration: deploy via icp-cli, no code change"
+          }
+        })
+
+  # Future staging environment on mainnet (separate canister IDs). Populated
+  # by Phase 1 work; intentionally empty here so the project file already
+  # carries the slot without binding it to specific canisters.
+  - name: mainnet-staging
+    network: ic
+    canisters: []
+
+  # Local development environment. Installs the three external canisters so
+  # the Rumi-owned canisters added in Tasks 8-16 have something to talk to.
+  - name: local
+    network: local
+    canisters:
+      - icp_ledger_canister
+      - internet_identity
+      - xrc
+      - flaky_ledger
+      - icusd_index
+      - liquidation_bot
+      - rumi_3pool
+      - rumi_stability_pool
+      - rumi_treasury
+      - rumi_amm

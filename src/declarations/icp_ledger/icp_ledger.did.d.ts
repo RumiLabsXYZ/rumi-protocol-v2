@@ -51,9 +51,7 @@ export interface ArchiveInfo {
 }
 export type Block = Value;
 export type BlockIndex = bigint;
-export interface BlockRange {
-  'blocks' : Array<Block>,
-}
+export interface BlockRange { 'blocks' : Array<Block> }
 export interface Burn {
   'from' : Account,
   'memo' : [] | [Uint8Array | number[]],
@@ -79,20 +77,11 @@ export interface DataCertificate {
 }
 export type Duration = bigint;
 export interface FeatureFlags { 'icrc2' : boolean }
-export interface GetArchivesArgs {
-  'from' : [] | [Principal],
-}
+export interface GetArchivesArgs { 'from' : [] | [Principal] }
 export type GetArchivesResult = Array<
-  {
-    'end' : bigint,
-    'canister_id' : Principal,
-    'start' : bigint,
-  }
+  { 'end' : bigint, 'canister_id' : Principal, 'start' : bigint }
 >;
-export interface GetBlocksArgs {
-  'start' : BlockIndex,
-  'length' : bigint,
-}
+export interface GetBlocksArgs { 'start' : BlockIndex, 'length' : bigint }
 export interface GetBlocksResponse {
   'certificate' : [] | [Uint8Array | number[]],
   'first_index' : BlockIndex,
@@ -100,7 +89,7 @@ export interface GetBlocksResponse {
   'chain_length' : bigint,
   'archived_blocks' : Array<
     {
-      'callback' : [Principal, string],
+      'callback' : QueryBlockArchiveFn,
       'start' : BlockIndex,
       'length' : bigint,
     }
@@ -113,21 +102,25 @@ export interface GetBlocksResult {
     { 'args' : Array<GetBlocksArgs>, 'callback' : [Principal, string] }
   >,
 }
-export interface GetTransactionsRequest {
-  'start' : TxIndex,
-  'length' : bigint,
-}
+export interface GetTransactionsRequest { 'start' : TxIndex, 'length' : bigint }
 export interface GetTransactionsResponse {
   'first_index' : TxIndex,
   'log_length' : bigint,
   'transactions' : Array<Transaction>,
   'archived_transactions' : Array<
-    {
-      'callback' : [Principal, string],
-      'start' : TxIndex,
-      'length' : bigint,
-    }
+    { 'callback' : QueryArchiveFn, 'start' : TxIndex, 'length' : bigint }
   >,
+}
+export interface HttpRequest {
+  'url' : string,
+  'method' : string,
+  'body' : Uint8Array | number[],
+  'headers' : Array<[string, string]>,
+}
+export interface HttpResponse {
+  'body' : Uint8Array | number[],
+  'headers' : Array<[string, string]>,
+  'status_code' : number,
 }
 export interface ICRC3DataCertificate {
   'certificate' : Uint8Array | number[],
@@ -193,9 +186,7 @@ export interface Transaction {
   'timestamp' : Timestamp,
   'transfer' : [] | [Transfer],
 }
-export interface TransactionRange {
-  'transactions' : Array<Transaction>,
-}
+export interface TransactionRange { 'transactions' : Array<Transaction> }
 export interface Transfer {
   'to' : Account,
   'fee' : [] | [bigint],

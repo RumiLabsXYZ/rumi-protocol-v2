@@ -1,0 +1,15 @@
+{
+  "icusd_index": "6niqu-siaaa-aaaap-qrjeq-cai",
+  "icusd_ledger": "t6bor-paaaa-aaaap-qrd5q-cai",
+  "liquidation_bot": "nygob-3qaaa-aaaap-qttcq-cai",
+  "rumi_3pool": "fohh4-yyaaa-aaaap-qtkpa-cai",
+  "rumi_amm": "ijlzs-2yaaa-aaaap-quaaq-cai",
+  "rumi_analytics": "dtlu2-uqaaa-aaaap-qugcq-cai",
+  "rumi_homepage": "t2xrh-2aaaa-aaaap-qreaa-cai",
+  "rumi_protocol_backend": "tfesu-vyaaa-aaaap-qrd7a-cai",
+  "rumi_stability_pool": "tmhzi-dqaaa-aaaap-qrd6q-cai",
+  "rumi_treasury": "tlg74-oiaaa-aaaap-qrd6a-cai",
+  "test_icp_ledger_canister": "pspic-iaaaa-aaaap-qrkna-cai",
+  "threeusd_index": "jagpu-pyaaa-aaaap-qtm6q-cai",
+  "vault_frontend": "tcfua-yaaaa-aaaap-qrd7q-cai"
+}

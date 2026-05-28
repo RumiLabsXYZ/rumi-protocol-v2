@@ -1,0 +1,15 @@
+// PLACEHOLDER: local-only init args for icp_ledger_canister.
+//
+// Phase 0 of the dfx-to-icp-cli migration does not deploy this canister
+// locally. The file exists solely so `icp project show` can load icp.yaml
+// without hitting a missing-file error.
+//
+// When someone first runs `icp deploy --environment local`, replace this
+// stub with the real ICRC-1 ledger init record. The dfx-era init record
+// lives in the icp_ledger_canister entry of the legacy local deploy script
+// (search the repo history for `LedgerArg` or `ledger_init` for prior art).
+//
+// Production deploys target `mainnet-live` where the canonical mainnet
+// ledger (ryjl3-tyaaa-aaaaa-aaaba-cai) is used; this file is never invoked
+// on `ic`.
+(null)

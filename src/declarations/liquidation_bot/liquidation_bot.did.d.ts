@@ -23,9 +23,6 @@ export interface BotConfig {
   'icusd_ledger' : [] | [Principal],
   'max_slippage_bps' : number,
   'ckusdc_fee_e6' : [] | [bigint],
-  /**
-   * Legacy fields (ignored, kept for deserialization compat)
-   */
   'three_pool_principal' : [] | [Principal],
 }
 export interface BotInitArgs { 'config' : BotConfig }
@@ -76,34 +73,14 @@ export type TestSwapResult = { 'Ok' : SwapResult } |
   { 'Err' : string };
 export interface _SERVICE {
   'admin_approve_pool' : ActorMethod<[], undefined>,
-  /**
-   * Returns (icp_fee_e8s, ckusdc_fee_e6) freshly read from each ledger and
-   * also writes them back into BotConfig so future swaps use the live values.
-   */
   'admin_refresh_fees' : ActorMethod<[], [bigint, bigint]>,
-  /**
-   * Admin actions
-   */
   'admin_resolve_pool_ordering' : ActorMethod<[], undefined>,
   'admin_retry_stuck_claim' : ActorMethod<[bigint], undefined>,
   'admin_sweep_ckusdc' : ActorMethod<[Principal, [] | [bigint]], undefined>,
-  /**
-   * Runs the live swap path (ICP -> ckUSDC) using `amount_e8s` from the bot's
-   * ICP balance. ckUSDC stays in the bot; retrieve via `admin_sweep_ckusdc`.
-   */
   'admin_test_swap' : ActorMethod<[bigint], TestSwapResult>,
   'get_admin_event_count' : ActorMethod<[], bigint>,
-  /**
-   * Admin events
-   */
   'get_admin_events' : ActorMethod<[bigint, bigint], Array<BotAdminEvent>>,
-  /**
-   * Stats
-   */
   'get_bot_stats' : ActorMethod<[], BotStats>,
-  /**
-   * History
-   */
   'get_liquidation' : ActorMethod<[bigint], [] | [LiquidationRecordVersioned]>,
   'get_liquidation_count' : ActorMethod<[], bigint>,
   'get_liquidation_events' : ActorMethod<
@@ -115,9 +92,6 @@ export interface _SERVICE {
     Array<LiquidationRecordVersioned>
   >,
   'get_stuck_liquidations' : ActorMethod<[], Array<LiquidationRecordVersioned>>,
-  /**
-   * Core
-   */
   'notify_liquidatable_vaults' : ActorMethod<
     [Array<LiquidatableVaultInfo>],
     undefined
