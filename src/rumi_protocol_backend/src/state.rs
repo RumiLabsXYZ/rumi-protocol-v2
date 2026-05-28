@@ -1242,6 +1242,16 @@ pub struct State {
     /// `chains::multi_chain_state` for the versioned-snapshot pattern.
     #[serde(default)]
     pub multi_chain: crate::chains::MultiChainState,
+
+    /// Phase 1b Task 6: override for the EVM RPC canister principal.
+    /// When `Some`, `chains::monad::evm_rpc::evm_rpc_principal()` uses this
+    /// value instead of the hardcoded production canister
+    /// (`7hfb6-caaaa-aaaar-qadga-cai`). Allows PocketIC / staging to inject
+    /// a mock EVM RPC canister. `#[serde(default)]` so pre-1b snapshots
+    /// decode to `None` (production canister). The developer-gated SETTER
+    /// `set_evm_rpc_principal` is added in Task 14.
+    #[serde(default)]
+    pub evm_rpc_principal_override: Option<candid::Principal>,
 }
 
 fn default_check_vaults_alert_band_bps() -> u64 {
@@ -1449,6 +1459,7 @@ impl Default for State {
             ticks_since_full_sweep: 0,
             bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
             multi_chain: crate::chains::MultiChainState::default(),
+            evm_rpc_principal_override: None,
         }
     }
 }
@@ -1673,6 +1684,7 @@ impl From<InitArg> for State {
             ticks_since_full_sweep: 0,
             bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
             multi_chain: crate::chains::MultiChainState::default(),
+            evm_rpc_principal_override: None,
         }
     }
 }
@@ -3632,6 +3644,16 @@ impl State {
         let treasury = self.compute_treasury_stats_snapshot();
         self.protocol_status_snapshot = Some((now_ns, proto));
         self.treasury_stats_snapshot = Some((now_ns, treasury));
+    }
+
+    /// Phase 1b Task 6: returns the EVM RPC canister principal override, if set.
+    ///
+    /// When `Some`, the multi-chain EVM RPC wrapper uses this principal instead
+    /// of the hardcoded production canister (`7hfb6-caaaa-aaaar-qadga-cai`).
+    /// Enables PocketIC and staging environments to inject a mock. The developer-
+    /// gated setter `set_evm_rpc_principal` is added in Task 14.
+    pub fn evm_rpc_override(&self) -> Option<candid::Principal> {
+        self.evm_rpc_principal_override
     }
 
     /// Wave-10 LIQ-008: pure-read sum of liquidation debt cleared in the

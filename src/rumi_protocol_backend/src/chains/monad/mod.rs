@@ -27,3 +27,6 @@ mod tests_chain_vault;
 
 #[cfg(test)]
 mod tests_tecdsa;
+
+#[cfg(test)]
+mod tests_evm_rpc;
