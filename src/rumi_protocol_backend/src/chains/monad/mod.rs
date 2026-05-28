@@ -21,3 +21,6 @@ pub use config::{monad_default_register_arg, monad_ecdsa_key_name, MONAD_CHAIN_I
 
 #[cfg(test)]
 mod tests_config;
+
+#[cfg(test)]
+mod tests_chain_vault;

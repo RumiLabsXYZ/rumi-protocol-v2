@@ -3,7 +3,7 @@
 //! Task 12.
 
 use super::config::{ChainAdminError, ChainConfigV1, ChainId, ChainStatus, GasStrategy, RegisterChainArg, UpdateChainConfigArg};
-use super::multi_chain_state::MultiChainStateV1;
+use super::multi_chain_state::MultiChainStateV2;
 use crate::chains::admin::{disable_chain_in_state, register_chain_in_state, update_chain_config_in_state};
 
 fn arg() -> RegisterChainArg {
@@ -19,7 +19,7 @@ fn arg() -> RegisterChainArg {
 
 #[test]
 fn register_chain_inserts_config_and_zero_supply() {
-    let mut s = MultiChainStateV1::default();
+    let mut s = MultiChainStateV2::default();
     register_chain_in_state(&mut s, arg(), 1_700_000_000_000_000_000).expect("register");
     assert!(s.chain_configs.contains_key(&ChainId(101)));
     assert_eq!(s.chain_supplies[&ChainId(101)], 0);
@@ -32,7 +32,7 @@ fn register_chain_inserts_config_and_zero_supply() {
 
 #[test]
 fn register_chain_rejects_duplicates() {
-    let mut s = MultiChainStateV1::default();
+    let mut s = MultiChainStateV2::default();
     register_chain_in_state(&mut s, arg(), 0).expect("first");
     let err = register_chain_in_state(&mut s, arg(), 0).expect_err("duplicate");
     assert!(matches!(err, ChainAdminError::ChainAlreadyRegistered(ChainId(101))));
@@ -40,7 +40,7 @@ fn register_chain_rejects_duplicates() {
 
 #[test]
 fn register_chain_rejects_empty_rpc_endpoints() {
-    let mut s = MultiChainStateV1::default();
+    let mut s = MultiChainStateV2::default();
     let mut a = arg();
     a.rpc_endpoints = vec![];
     let err = register_chain_in_state(&mut s, a, 0).expect_err("empty endpoints");
@@ -49,7 +49,7 @@ fn register_chain_rejects_empty_rpc_endpoints() {
 
 #[test]
 fn disable_chain_flips_status_and_preserves_supply() {
-    let mut s = MultiChainStateV1::default();
+    let mut s = MultiChainStateV2::default();
     register_chain_in_state(&mut s, arg(), 0).expect("register");
     s.chain_supplies.insert(ChainId(101), 999);
     disable_chain_in_state(&mut s, ChainId(101)).expect("disable");
@@ -59,7 +59,7 @@ fn disable_chain_flips_status_and_preserves_supply() {
 
 #[test]
 fn set_chain_config_updates_supplied_fields_only() {
-    let mut s = MultiChainStateV1::default();
+    let mut s = MultiChainStateV2::default();
     register_chain_in_state(&mut s, arg(), 0).expect("register");
     let original_name = s.chain_configs[&ChainId(101)].display_name.clone();
     let update = UpdateChainConfigArg {
@@ -76,7 +76,7 @@ fn set_chain_config_updates_supplied_fields_only() {
 
 #[test]
 fn set_chain_config_rejects_unknown_chain() {
-    let mut s = MultiChainStateV1::default();
+    let mut s = MultiChainStateV2::default();
     let err = update_chain_config_in_state(
         &mut s,
         ChainId(404),

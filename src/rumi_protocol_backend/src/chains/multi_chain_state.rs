@@ -16,6 +16,7 @@
 //! incident (MEMORY.md: `project_amm_state_wipe_2026_05_18.md`).
 
 use super::config::{ChainConfigV1, ChainId};
+use super::monad::chain_vault::ChainVaultV1;
 use super::settlement_queue::SettlementQueueV1;
 use candid::{CandidType, Deserialize};
 use serde::Serialize;
@@ -44,4 +45,34 @@ impl MultiChainStateV1 {
     }
 }
 
-pub type MultiChainState = MultiChainStateV1;
+/// Phase 1b snapshot. Carries the four V1 fields verbatim (so the
+/// `#[serde(default)]` in-place decode of `State.multi_chain` maps each by
+/// name straight across) and adds the Monad/foreign-chain working set:
+/// per-vault records, deployed-contract addresses, manual price overrides,
+/// last-observed block cursors, and hot-wallet gas balances. The five new
+/// fields hit serde-default and come up empty on a V1->V2 upgrade.
+///
+/// Add the NEXT field by bumping to `MultiChainStateV3` (keep V2 verbatim),
+/// extending `migrate_multi_chain_state`, and rebinding the alias below.
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, Default)]
+pub struct MultiChainStateV2 {
+    // carried verbatim from V1
+    pub chain_configs: BTreeMap<ChainId, ChainConfigV1>,
+    pub chain_supplies: BTreeMap<ChainId, u128>,
+    pub settlement_queues: BTreeMap<ChainId, SettlementQueueV1>,
+    pub invariant_halted: bool,
+    // new in V2
+    pub chain_vaults: BTreeMap<u64, ChainVaultV1>,
+    pub chain_contracts: BTreeMap<ChainId, String>,
+    pub manual_prices: BTreeMap<(ChainId, String), u64>,
+    pub last_observed_block: BTreeMap<ChainId, u64>,
+    pub hot_wallet_balance_e18: BTreeMap<ChainId, u128>,
+}
+
+impl MultiChainStateV2 {
+    pub fn total_supply_all_chains_e8s(&self) -> u128 {
+        self.chain_supplies.values().copied().sum()
+    }
+}
+
+pub type MultiChainState = MultiChainStateV2;

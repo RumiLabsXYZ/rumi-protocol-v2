@@ -572,6 +572,17 @@ fn post_upgrade(arg: ProtocolArg) {
         s.is_timer_running = false;
     });
 
+    // Phase 1b breadcrumb: confirm the multi_chain root survived the upgrade.
+    // The V1->V2 migration happens automatically via the `#[serde(default)]`
+    // in-place decode of `State.multi_chain` (four V1 fields map across by
+    // name; the five new V2 fields hit serde-default and come up empty). No
+    // explicit migrate call is needed here; `migrate_multi_chain_state` exists
+    // as the unit-tested template for the NEXT version bump.
+    let (chains, chain_vaults) = read_state(|s| {
+        (s.multi_chain.chain_configs.len(), s.multi_chain.chain_vaults.len())
+    });
+    log!(INFO, "[post_upgrade] multi_chain: {} chains, {} chain_vaults", chains, chain_vaults);
+
     setup_timers();
 }
 

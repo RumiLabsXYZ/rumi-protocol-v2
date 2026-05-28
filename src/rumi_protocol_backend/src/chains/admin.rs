@@ -7,11 +7,11 @@ use super::config::{
     ChainAdminError, ChainConfigV1, ChainId, ChainStatus, RegisterChainArg,
     UpdateChainConfigArg,
 };
-use super::multi_chain_state::MultiChainStateV1;
+use super::multi_chain_state::MultiChainStateV2;
 use super::settlement_queue::SettlementQueueV1;
 
 pub fn register_chain_in_state(
-    state: &mut MultiChainStateV1,
+    state: &mut MultiChainStateV2,
     arg: RegisterChainArg,
     now_ns: u64,
 ) -> Result<ChainConfigV1, ChainAdminError> {
@@ -40,7 +40,7 @@ pub fn register_chain_in_state(
 }
 
 pub fn disable_chain_in_state(
-    state: &mut MultiChainStateV1,
+    state: &mut MultiChainStateV2,
     chain_id: ChainId,
 ) -> Result<(), ChainAdminError> {
     let cfg = state
@@ -52,7 +52,7 @@ pub fn disable_chain_in_state(
 }
 
 pub fn update_chain_config_in_state(
-    state: &mut MultiChainStateV1,
+    state: &mut MultiChainStateV2,
     chain_id: ChainId,
     update: UpdateChainConfigArg,
 ) -> Result<(), ChainAdminError> {

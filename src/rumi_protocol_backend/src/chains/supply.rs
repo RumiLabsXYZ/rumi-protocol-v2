@@ -12,9 +12,31 @@
 //! can call it without inventing the invariant under deadline pressure.
 
 use super::config::ChainId;
-use super::multi_chain_state::MultiChainStateV1;
+use super::multi_chain_state::{MultiChainStateV1, MultiChainStateV2};
 use candid::{CandidType, Deserialize};
 use serde::Serialize;
+
+/// Migrate the Phase 1a `MultiChainStateV1` snapshot to `MultiChainStateV2`.
+/// Carries every V1 field verbatim; defaults the V2 additions to empty.
+///
+/// The active V1->V2 upgrade happens automatically via the `#[serde(default)]`
+/// in-place decode of `State.multi_chain` (the four V1 fields map straight
+/// across by name; the five new V2 fields hit serde-default). This function
+/// is the unit-tested template for the NEXT version bump (V2->V3), and the
+/// explicit migration path documented in `multi_chain_state.rs`.
+pub fn migrate_multi_chain_state(v1: MultiChainStateV1) -> MultiChainStateV2 {
+    MultiChainStateV2 {
+        chain_configs: v1.chain_configs,
+        chain_supplies: v1.chain_supplies,
+        settlement_queues: v1.settlement_queues,
+        invariant_halted: v1.invariant_halted,
+        chain_vaults: Default::default(),
+        chain_contracts: Default::default(),
+        manual_prices: Default::default(),
+        last_observed_block: Default::default(),
+        hot_wallet_balance_e18: Default::default(),
+    }
+}
 
 #[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug)]
 pub enum SupplyDelta {
@@ -34,7 +56,7 @@ pub enum SupplyInvariantError {
 /// authoritative `total_debt_e8s` snapshot taken at the same logical
 /// moment; we reject any apply that would leave sum != total_debt.
 pub fn apply_supply_delta(
-    state: &mut MultiChainStateV1,
+    state: &mut MultiChainStateV2,
     chain: ChainId,
     delta: SupplyDelta,
     total_debt_e8s: u128,
@@ -80,7 +102,7 @@ pub fn apply_supply_delta(
 /// On `Err`, the caller flips `state.invariant_halted = true` and emits
 /// an event.
 pub fn check_invariant(
-    state: &MultiChainStateV1,
+    state: &MultiChainStateV2,
     total_debt_e8s: u128,
 ) -> Result<(), SupplyInvariantError> {
     let sum: u128 = state.chain_supplies.values().copied().sum();
