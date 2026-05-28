@@ -4,14 +4,13 @@
 # from the project's canister_ids.json. Run once per workstation.
 #
 # Why this exists: icp-cli does not auto-import canister IDs from dfx-style
-# canister_ids.json. Without the mapping file, `icp canister list
-# --environment mainnet-live` returns nothing and other commands that resolve
-# canister names will fall back to "create" semantics.
+# canister_ids.json. Without the mapping file at .icp/data/mappings/<env>.ids.json,
+# `icp canister install <NAME>` cannot resolve a canister name to its mainnet
+# principal, and `icp canister list --environment <env>` returns nothing.
 #
-# Note: the actual deploy command (`icp canister install <PRINCIPAL>
-# --wasm <PATH> ...`) does NOT read this file; it targets canisters by
-# principal directly. The mapping file is for human-facing read commands
-# (`icp canister list`, `icp project show`, etc.).
+# Note: `icp canister install <PRINCIPAL>` (target by principal directly) does
+# NOT need this file. But `icp canister install <NAME>` does (it reads this
+# file to resolve the name to a principal).
 #
 # See docs/superpowers/notes/2026-05-27-icp-cli-deploy-pattern.md.
 
@@ -35,13 +34,14 @@ target=".icp/data/mappings/mainnet-live.ids.json"
 # .icp/data/ is committed to source control; .icp/cache/ is gitignored.
 mkdir -p "$(dirname "$target")"
 
-python3 -c "
+count="$(python3 -c "
 import json
 src = json.load(open('canister_ids.json'))
 # Flatten dfx's {name: {network: principal}} into icp-cli's flat {name: principal},
 # ic network only.
 out = {name: nets['ic'] for name, nets in src.items() if 'ic' in nets}
 json.dump(out, open('$target', 'w'), indent=2)
-"
+print(len(out))
+")"
 
-echo "wrote $target ($(grep -c '"' "$target" | awk '{print $1/2}') entries)"
+echo "wrote $target ($count entries)"
