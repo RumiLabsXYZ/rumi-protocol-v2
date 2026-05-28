@@ -36,3 +36,6 @@ mod tests_evm_rpc;
 
 #[cfg(test)]
 mod tests_tx;
+
+#[cfg(test)]
+mod tests_deposit_watch;
