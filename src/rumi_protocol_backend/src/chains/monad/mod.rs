@@ -24,3 +24,6 @@ mod tests_config;
 
 #[cfg(test)]
 mod tests_chain_vault;
+
+#[cfg(test)]
+mod tests_tecdsa;

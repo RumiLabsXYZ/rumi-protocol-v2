@@ -45,6 +45,7 @@ ic-icrc1-ledger = { git = "https://github.com/Rumi-Protocol/ic", rev = "fc278709
 ic-ledger-canister-core = { git = "https://github.com/Rumi-Protocol/ic", rev = "fc278709" }
 k256 = { version = "0.13", default-features = false, features = ["ecdsa", "arithmetic"] }
 sha3 = "0.10"
+hex = "0.4"
 alloy-rlp = "0.3"
 # TODO(Task 6): add evm_rpc_client once source confirmed — evm_rpc_client 0.4.0 pulls
 # ic-cdk 0.19 which conflicts with this project's ic-cdk 0.12. Needs a fork/patch
