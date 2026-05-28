@@ -459,6 +459,11 @@ type Event = variant {
     token_type : StableTokenType;
   };
   set_recovery_cr_multiplier : record { multiplier : text };
+  supply_invariant_self_check_failed : record {
+    sum_chain_supplies_e8s : nat;
+    total_debt_e8s : nat;
+    timestamp : nat64;
+  };
 };
 type EventTimeRange = record { start_ns : nat64; end_ns : nat64 };
 type EventTypeFilter = variant {

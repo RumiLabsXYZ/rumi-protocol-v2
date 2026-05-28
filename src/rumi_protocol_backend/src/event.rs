@@ -802,6 +802,13 @@ pub enum Event {
         chain_id: crate::chains::config::ChainId,
         timestamp: u64,
     },
+    // Phase 1a Task 11: Timer B supply-invariant self-check failure.
+    #[serde(rename = "supply_invariant_self_check_failed")]
+    SupplyInvariantSelfCheckFailed {
+        sum_chain_supplies_e8s: u128,
+        total_debt_e8s: u128,
+        timestamp: u64,
+    },
 }
 
 impl Event {
@@ -915,6 +922,8 @@ impl Event {
             Event::ChainRegistered { .. }
             | Event::ChainDisabled { .. }
             | Event::ChainConfigUpdated { .. } => false,
+            // Phase 1a Task 11: supply invariant failure is protocol-wide.
+            Event::SupplyInvariantSelfCheckFailed { .. } => false,
         }
     }
 
@@ -1877,6 +1886,9 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             Event::ChainRegistered { .. }
             | Event::ChainDisabled { .. }
             | Event::ChainConfigUpdated { .. } => {},
+            // Phase 1a Task 11: informational audit trail; state mutation
+            // (invariant_halted + mode flip) happens live in the timer tick.
+            Event::SupplyInvariantSelfCheckFailed { .. } => {},
         }
     }
     state.next_available_vault_id = vault_id;

@@ -41,3 +41,6 @@ mod tests_supply;
 
 #[cfg(test)]
 mod tests_admin;
+
+#[cfg(test)]
+mod tests_self_check;
