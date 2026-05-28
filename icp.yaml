@@ -315,6 +315,67 @@ canisters:
         ckusdc_ledger = null
       })
 
+  # Task 14: rumi_amm (mainnet ijlzs-2yaaa-aaaap-quaaq-cai). Rust canister built
+  # locally via the @dfinity/rust recipe (shrink: true matches dfx.json's
+  # implicit shrink behavior so the locally-built wasm matches production within
+  # build-metadata noise).
+  #
+  # DECISION-GATE canister with elevated rigor: rumi_amm holds the AMM1 LP
+  # position (3USD/ICP pool) and was the source of the 2026-05-18 state-wipe
+  # incident (project_amm_state_wipe_2026_05_18.md). The wipe was triggered by
+  # source-code changes (6 new `#[serde(default)]` fields added to AmmState
+  # without using the AmmStateV<N> versioned-snapshot migration pattern), NOT by
+  # deploy-tool changes. Phase 0 does NOT change any Rust source, so the
+  # state-wipe failure mode is not in play here. The migration is a pure
+  # deploy-tool swap.
+  #
+  # Pre-deploy probes (Task 14):
+  #   Probe A (candid surface): 49 methods deployed vs 49 in source - exact match.
+  #   Probe B (PR #193 marker): admin_burn_subaccount_balance present in
+  #     deployed candid - confirms the post-state-wipe recovery code shipped.
+  #   Probe C (live pool data): AMM1 pool exists with total_lp_shares =
+  #     102_811_210_551 (matches the bootstrap value from MEMORY exactly),
+  #     reserve_a = 164_849_934_256 (3USD), reserve_b = 64_214_037_983 (ICP),
+  #     unique_lps = 1 (Rob is sole LP per MEMORY).
+  #
+  # Production module hash at time of migration:
+  #   0x31bde26fbe21feae9a9132a43e4985b79b1bc803f8231305fcb78e355725e93e
+  #   (the post-PR #193 hash that fixed AMM1 pool_id and shipped admin_burn).
+  #
+  # The canister's candid service signature is
+  # `service : (AmmInitArgs) -> { ... }`, which forces dfx and icp-cli to
+  # type-check every deploy arg against the init shape EVEN on upgrade.
+  # `post_upgrade(_args: AmmInitArgs)` (lib.rs:496) takes the arg by-name with
+  # a leading underscore and never reads it; the body only calls
+  # `state::load_from_stable_memory()` and re-arms the timers. The leading
+  # underscore is explicitly documented in lib.rs:493 as "accepted for Candid
+  # interface compatibility with `init` but intentionally ignored; the admin
+  # and all other config come from persisted state." This is the same "dummy
+  # InitArgs on upgrade" pattern as rumi_3pool, liquidation_bot,
+  # rumi_stability_pool, and rumi_treasury.
+  #
+  # The dummy admin value below is the management canister (aaaaa-aa). The
+  # wasm decodes this into an AmmInitArgs that post_upgrade never touches; the
+  # live admin (mi66c-...) is preserved by the stable-memory load path along
+  # with the pool registry, LP balances, swap event log, liquidity event log,
+  # admin event log, and rewards accumulator state.
+  #
+  # Per the upgrade-args spike, `icp canister install --mode upgrade` reads
+  # the environment-level override below. mainnet-live carries the same dummy
+  # shape so re-deploys cannot accidentally reinitialize the AMM's persisted
+  # state (the 102_811_210_551 LP shares, 3USD/ICP reserves, swap history).
+  - name: rumi_amm
+    recipe:
+      type: "@dfinity/rust@v3.2.0"
+      configuration:
+        package: rumi_amm
+        candid: src/rumi_amm/rumi_amm.did
+        shrink: true
+    init_args: |
+      (record {
+        admin = principal "aaaaa-aa"
+      })
+
 networks:
   - name: local
     mode: managed
@@ -351,6 +412,7 @@ environments:
       - rumi_3pool
       - rumi_stability_pool
       - rumi_treasury
+      - rumi_amm
     init_args:
       # Upgrade-mode override: `(null)` preserves all existing configuration
       # (ledger_id and the retrieve-interval fields). The canister is already
@@ -438,6 +500,23 @@ environments:
           ckusdt_ledger = null;
           ckusdc_ledger = null
         })
+      # rumi_amm upgrade-mode override: AmmInitArgs shape (a single principal
+      # field `admin`) is required by the candid `service : (AmmInitArgs) -> { ... }`
+      # declaration, but the wasm's `post_upgrade(_args)` (lib.rs:496) takes
+      # the arg by-name with a leading underscore and never reads it. The body
+      # only calls `state::load_from_stable_memory()` and rearms three timers
+      # (supply timer, snapshot timer, TVL sample timer). admin = aaaaa-aa is
+      # a deliberate dummy; the live admin (mi66c-...) is preserved by the
+      # stable-memory load path along with the AMM1 pool registry, LP balances
+      # (102_811_210_551 shares, 100% to zegjz-... per MEMORY), reserves,
+      # swap/liquidity/admin event logs, and rewards accumulator state.
+      # See MEMORY.md project_amm_state_wipe_2026_05_18.md for the incident
+      # this dummy-args pattern was designed not to repeat (and could not
+      # repeat in Phase 0 anyway because no Rust source changes).
+      rumi_amm: |
+        (record {
+          admin = principal "aaaaa-aa"
+        })
 
   # Future staging environment on mainnet (separate canister IDs). Populated
   # by Phase 1 work; intentionally empty here so the project file already
@@ -460,3 +539,4 @@ environments:
       - rumi_3pool
       - rumi_stability_pool
       - rumi_treasury
+      - rumi_amm
