@@ -4,6 +4,7 @@
   import LensActivityPanel from '../LensActivityPanel.svelte';
   import MiniAreaChart from '../MiniAreaChart.svelte';
   import TreasuryHoldingsCard from '../TreasuryHoldingsCard.svelte';
+  import ProtocolReservesCard from '../ProtocolReservesCard.svelte';
   import {
     fetchFeeSeries, fetchApys, fetchFeeBreakdownWindow, type FeeBreakdown,
   } from '$services/explorer/analyticsService';
@@ -219,6 +220,8 @@
     {/if}
   </div>
 </div>
+
+<ProtocolReservesCard />
 
 <TreasuryHoldingsCard />
 
