@@ -30,3 +30,6 @@ mod tests_tecdsa;
 
 #[cfg(test)]
 mod tests_evm_rpc;
+
+#[cfg(test)]
+mod tests_tx;

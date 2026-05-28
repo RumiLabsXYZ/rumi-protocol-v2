@@ -1,1 +1,275 @@
-//! Placeholder. Real impl in a later Task.
+//! EIP-1559 (type-0x02) transaction builder, calldata helpers, and tECDSA
+//! signing wrapper for Monad.
+//!
+//! # EIP-1559 encoding
+//! Unsigned (signing payload): `0x02 || rlp([chain_id, nonce,
+//!   max_priority_fee_per_gas, max_fee_per_gas, gas_limit, to, value, data,
+//!   access_list])`.
+//! Signed: same list extended with `[y_parity, r, s]`.
+//! `signing_hash` = keccak256 of the unsigned payload.
+//!
+//! Integer fields are minimal big-endian (no leading zeros; zero = 0x80).
+//! `to` is exactly 20 bytes.  `r` and `s` are minimal big-endian integers
+//! (leading zero bytes stripped) — this is the classic RLP gotcha.
+
+use alloy_rlp::Encodable;
+use sha3::{Digest, Keccak256};
+
+use ic_cdk::api::management_canister::ecdsa::{
+    sign_with_ecdsa, EcdsaCurve, EcdsaKeyId, SignWithEcdsaArgument,
+};
+
+use super::config::monad_ecdsa_key_name;
+
+// ─── public types ────────────────────────────────────────────────────────────
+
+/// All fields required to build an EIP-1559 (type-0x02) transaction.
+pub struct Eip1559Fields {
+    pub chain_id: u64,
+    pub nonce: u64,
+    pub max_priority_fee_per_gas: u128,
+    pub max_fee_per_gas: u128,
+    pub gas_limit: u64,
+    /// "0x…" hex-encoded 20-byte Ethereum address.
+    pub to: String,
+    pub value: u128,
+    pub data: Vec<u8>,
+}
+
+// ─── calldata helpers ─────────────────────────────────────────────────────────
+
+/// Build calldata for `mint(address,uint256,uint64)`.
+/// Signature string: `"mint(address,uint256,uint64)"`.
+/// Layout: 4-byte selector || word(address) || word(amount) || word(vault_id).
+pub fn encode_mint_calldata(to: &str, amount_e8s: u128, vault_id: u64) -> Vec<u8> {
+    let selector = keccak_selector("mint(address,uint256,uint64)");
+    let mut out = Vec::with_capacity(4 + 96);
+    out.extend_from_slice(&selector);
+    out.extend_from_slice(&abi_word_address(to));
+    out.extend_from_slice(&abi_word_u128(amount_e8s));
+    out.extend_from_slice(&abi_word_u128(vault_id as u128));
+    out
+}
+
+/// Build calldata for `transfer(address,uint256)`.
+/// Signature string: `"transfer(address,uint256)"`.
+/// Layout: 4-byte selector || word(address) || word(amount).
+pub fn encode_transfer_calldata(to: &str, amount: u128) -> Vec<u8> {
+    let selector = keccak_selector("transfer(address,uint256)");
+    let mut out = Vec::with_capacity(4 + 64);
+    out.extend_from_slice(&selector);
+    out.extend_from_slice(&abi_word_address(to));
+    out.extend_from_slice(&abi_word_u128(amount));
+    out
+}
+
+// ─── EIP-1559 encoding ───────────────────────────────────────────────────────
+
+/// Compute the signing hash: keccak256(`0x02 || rlp([...fields..., access_list])`).
+pub fn signing_hash(fields: &Eip1559Fields) -> [u8; 32] {
+    let payload = rlp_encode_eip1559(fields, None);
+    Keccak256::digest(&payload).into()
+}
+
+/// Assemble the final signed EIP-1559 transaction bytes:
+/// `0x02 || rlp([...fields..., access_list, y_parity, r, s])`.
+pub fn assemble_signed_tx(
+    fields: &Eip1559Fields,
+    r: &[u8; 32],
+    s: &[u8; 32],
+    y_parity: u8,
+) -> Result<Vec<u8>, String> {
+    if y_parity > 1 {
+        return Err(format!("y_parity must be 0 or 1, got {y_parity}"));
+    }
+    Ok(rlp_encode_eip1559(fields, Some((r, s, y_parity))))
+}
+
+/// Determine which `y_parity` (0 or 1) matches `expected_addr` for the given
+/// (hash, r, s).  Returns `Err` if neither parity recovers the expected address.
+pub fn recover_y_parity(
+    hash: &[u8; 32],
+    r: &[u8; 32],
+    s: &[u8; 32],
+    expected_addr: &str,
+) -> Result<u8, String> {
+    use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+    use super::tecdsa::evm_address_from_pubkey;
+
+    let sig = Signature::from_scalars(*r, *s)
+        .map_err(|e| format!("invalid (r,s): {e}"))?;
+
+    for parity in 0u8..=1 {
+        let rid = RecoveryId::new(parity == 1, false);
+        let Ok(vk) = VerifyingKey::recover_from_prehash(hash, &sig, rid) else {
+            continue;
+        };
+        let pk_bytes = vk.to_encoded_point(false).as_bytes().to_vec();
+        let Ok(addr) = evm_address_from_pubkey(&pk_bytes) else {
+            continue;
+        };
+        if addr.to_lowercase() == expected_addr.to_lowercase() {
+            return Ok(parity);
+        }
+    }
+    Err(format!(
+        "neither y_parity=0 nor y_parity=1 recovers address {expected_addr}"
+    ))
+}
+
+/// High-level helper: compute signing hash, call tECDSA management canister,
+/// split the 64-byte compact signature into (r, s), recover y_parity, assemble
+/// the signed transaction, and return it as `"0x…"` hex.
+pub async fn sign_eip1559(
+    fields: &Eip1559Fields,
+    derivation_path: Vec<Vec<u8>>,
+    signer_addr: &str,
+) -> Result<String, String> {
+    let hash = signing_hash(fields);
+
+    let key_id = EcdsaKeyId { curve: EcdsaCurve::Secp256k1, name: monad_ecdsa_key_name() };
+    let arg = SignWithEcdsaArgument {
+        message_hash: hash.to_vec(),
+        derivation_path,
+        key_id,
+    };
+
+    let (res,) = sign_with_ecdsa(arg)
+        .await
+        .map_err(|(code, msg)| format!("sign_with_ecdsa failed: {code:?}: {msg}"))?;
+
+    if res.signature.len() != 64 {
+        return Err(format!(
+            "expected 64-byte compact signature, got {}",
+            res.signature.len()
+        ));
+    }
+    let r: [u8; 32] = res.signature[..32].try_into().unwrap();
+    let s: [u8; 32] = res.signature[32..].try_into().unwrap();
+
+    let y_parity = recover_y_parity(&hash, &r, &s, signer_addr)?;
+    let signed = assemble_signed_tx(fields, &r, &s, y_parity)?;
+    Ok(format!("0x{}", hex::encode(signed)))
+}
+
+// ─── internal RLP helpers ────────────────────────────────────────────────────
+
+/// Encode the full EIP-1559 transaction, with or without signature.
+/// Returns `0x02 || rlp_list([chain_id, nonce, max_priority_fee,
+///   max_fee, gas_limit, to, value, data, access_list, (y_parity, r, s)?])`.
+fn rlp_encode_eip1559(
+    fields: &Eip1559Fields,
+    sig: Option<(&[u8; 32], &[u8; 32], u8)>,
+) -> Vec<u8> {
+    let to_bytes = parse_address(&fields.to);
+
+    let mut payload = Vec::new();
+    fields.chain_id.encode(&mut payload);
+    fields.nonce.encode(&mut payload);
+    fields.max_priority_fee_per_gas.encode(&mut payload);
+    fields.max_fee_per_gas.encode(&mut payload);
+    fields.gas_limit.encode(&mut payload);
+    // `to`: 20-byte string (not an integer — not minimized).
+    encode_20_byte_string(&to_bytes, &mut payload);
+    fields.value.encode(&mut payload);
+    // `data`: byte string — [u8] implements Encodable as an RLP byte string.
+    fields.data.as_slice().encode(&mut payload);
+    // `access_list`: empty list.
+    payload.push(0xc0u8);
+
+    if let Some((r, s, y_parity)) = sig {
+        // y_parity: 0 => 0x80, 1 => 0x01.
+        (y_parity as u64).encode(&mut payload);
+        // r and s: minimal big-endian integers (strip leading zeros).
+        encode_minimal_uint(r, &mut payload);
+        encode_minimal_uint(s, &mut payload);
+    }
+
+    let mut out = Vec::new();
+    out.push(0x02u8);
+    write_rlp_list_header(payload.len(), &mut out);
+    out.extend_from_slice(&payload);
+    out
+}
+
+/// Encode a 20-byte address as an RLP byte string (NOT an integer).
+/// Header = 0x80 + 20 = 0x94, followed by 20 bytes.
+fn encode_20_byte_string(bytes: &[u8; 20], out: &mut Vec<u8>) {
+    out.push(0x94u8); // 0x80 + 20
+    out.extend_from_slice(bytes);
+}
+
+/// Encode a 32-byte value as an RLP minimal big-endian integer.
+/// Leading zero bytes are stripped.  Zero encodes as 0x80 (empty string).
+fn encode_minimal_uint(bytes: &[u8; 32], out: &mut Vec<u8>) {
+    let stripped = strip_leading_zeros(bytes);
+    if stripped.is_empty() {
+        out.push(0x80u8); // zero
+    } else if stripped.len() == 1 && stripped[0] < 0x80 {
+        out.push(stripped[0]);
+    } else {
+        // Length ≤ 32 so always fits in a single-byte string header.
+        out.push(0x80 + stripped.len() as u8);
+        out.extend_from_slice(stripped);
+    }
+}
+
+fn strip_leading_zeros(b: &[u8; 32]) -> &[u8] {
+    let first = b.iter().position(|&x| x != 0).unwrap_or(32);
+    &b[first..]
+}
+
+/// Write an RLP list header for `payload_len` bytes of list content.
+fn write_rlp_list_header(payload_len: usize, out: &mut Vec<u8>) {
+    if payload_len <= 55 {
+        out.push(0xc0 + payload_len as u8);
+    } else {
+        let lb = minimal_be_bytes(payload_len);
+        out.push(0xf7 + lb.len() as u8);
+        out.extend_from_slice(&lb);
+    }
+}
+
+/// Minimal big-endian byte encoding of a usize (used for RLP length prefixes).
+fn minimal_be_bytes(mut n: usize) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    while n > 0 {
+        bytes.push(n as u8);
+        n >>= 8;
+    }
+    bytes.reverse();
+    bytes
+}
+
+// ─── ABI / calldata helpers ───────────────────────────────────────────────────
+
+/// First 4 bytes of keccak256(function_signature_string).
+fn keccak_selector(sig: &str) -> [u8; 4] {
+    let hash = Keccak256::digest(sig.as_bytes());
+    [hash[0], hash[1], hash[2], hash[3]]
+}
+
+/// ABI-encode an Ethereum address as a 32-byte left-padded word.
+/// Strips the "0x" prefix, pads to 32 bytes.
+fn abi_word_address(addr: &str) -> [u8; 32] {
+    let addr_str = addr.strip_prefix("0x").or_else(|| addr.strip_prefix("0X")).unwrap_or(addr);
+    let addr_bytes = hex::decode(addr_str).expect("invalid address hex");
+    assert_eq!(addr_bytes.len(), 20, "address must be 20 bytes");
+    let mut word = [0u8; 32];
+    word[12..].copy_from_slice(&addr_bytes);
+    word
+}
+
+/// ABI-encode a u128 as a 32-byte big-endian word.
+fn abi_word_u128(n: u128) -> [u8; 32] {
+    let mut word = [0u8; 32];
+    word[16..].copy_from_slice(&n.to_be_bytes());
+    word
+}
+
+/// Parse a "0x…" hex address into 20 bytes.
+fn parse_address(addr: &str) -> [u8; 20] {
+    let hex_str = addr.strip_prefix("0x").or_else(|| addr.strip_prefix("0X")).unwrap_or(addr);
+    let bytes = hex::decode(hex_str).unwrap_or_else(|e| panic!("invalid address '{addr}': {e}"));
+    bytes.try_into().unwrap_or_else(|_| panic!("address '{addr}' is not 20 bytes"))
+}
