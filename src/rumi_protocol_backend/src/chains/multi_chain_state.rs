@@ -6,12 +6,14 @@
 //! happen for any sub-component. Add fields ONLY by:
 //!
 //! 1. Renaming `MultiChainStateV1` -> keep the V1 fields exactly.
-//! 2. Adding `MultiChainStateV2` with the new field plus a `From<V1>` impl.
+//! 2. Adding `MultiChainStateV2` with the new field plus a `From<MultiChainStateV1>` impl.
 //! 3. Updating the `pub type MultiChainState = MultiChainStateV2;` alias.
-//! 4. Adding a one-line entry to `migrate_multi_chain_state` (see `supply.rs`).
+//! 4. Creating `migrate_multi_chain_state` in `chains/supply.rs` that calls
+//!    `MultiChainStateV2::from(old_v1)` and update the canister `post_upgrade`
+//!    hook in `main.rs` to call it after `replace_state(state)`.
 //!
 //! See spec Section 3 ("State wipe on upgrade") and the 2026-05-18 AMM
-//! incident.
+//! incident (MEMORY.md: `project_amm_state_wipe_2026_05_18.md`).
 
 use super::config::{ChainConfigV1, ChainId};
 use super::settlement_queue::SettlementQueueV1;
