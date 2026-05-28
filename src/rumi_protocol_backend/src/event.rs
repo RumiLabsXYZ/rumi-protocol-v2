@@ -809,6 +809,78 @@ pub enum Event {
         total_debt_e8s: u128,
         timestamp: u64,
     },
+
+    // Phase 1b: Monad (and future foreign-chain) audit trail.
+    #[serde(rename = "deposit_observed")]
+    DepositObserved {
+        chain_id: crate::chains::config::ChainId,
+        vault_id: u64,
+        custody_address: String,
+        amount_e18: u128,
+        tx_hash: String,
+        block_number: u64,
+        timestamp: u64,
+    },
+    #[serde(rename = "chain_mint_submitted")]
+    ChainMintSubmitted {
+        chain_id: crate::chains::config::ChainId,
+        vault_id: u64,
+        op_id: u64,
+        recipient: String,
+        amount_e8s: u128,
+        tx_hash: String,
+        timestamp: u64,
+    },
+    #[serde(rename = "chain_mint_confirmed")]
+    ChainMintConfirmed {
+        chain_id: crate::chains::config::ChainId,
+        vault_id: u64,
+        op_id: u64,
+        amount_e8s: u128,
+        tx_hash: String,
+        block_number: u64,
+        timestamp: u64,
+    },
+    #[serde(rename = "chain_burn_observed")]
+    ChainBurnObserved {
+        chain_id: crate::chains::config::ChainId,
+        vault_id: u64,
+        amount_e8s: u128,
+        tx_hash: String,
+        block_number: u64,
+        timestamp: u64,
+    },
+    #[serde(rename = "withdrawal_signed")]
+    WithdrawalSigned {
+        chain_id: crate::chains::config::ChainId,
+        vault_id: u64,
+        op_id: u64,
+        recipient: String,
+        amount_e18: u128,
+        tx_hash: String,
+        timestamp: u64,
+    },
+    #[serde(rename = "chain_settlement_failed")]
+    ChainSettlementFailed {
+        chain_id: crate::chains::config::ChainId,
+        op_id: u64,
+        reason: String,
+        timestamp: u64,
+    },
+    #[serde(rename = "chain_reorg_detected")]
+    ChainReorgDetected {
+        chain_id: crate::chains::config::ChainId,
+        observed_block: u64,
+        reorg_depth: u64,
+        timestamp: u64,
+    },
+    #[serde(rename = "chain_hot_wallet_low")]
+    ChainHotWalletLow {
+        chain_id: crate::chains::config::ChainId,
+        balance_e18: u128,
+        threshold_e18: u128,
+        timestamp: u64,
+    },
 }
 
 impl Event {
@@ -924,6 +996,16 @@ impl Event {
             | Event::ChainConfigUpdated { .. } => false,
             // Phase 1a Task 11: supply invariant failure is protocol-wide.
             Event::SupplyInvariantSelfCheckFailed { .. } => false,
+            // Phase 1b: vault-carrying foreign-chain events surface per-vault history.
+            Event::DepositObserved { vault_id, .. }
+            | Event::ChainMintSubmitted { vault_id, .. }
+            | Event::ChainMintConfirmed { vault_id, .. }
+            | Event::ChainBurnObserved { vault_id, .. }
+            | Event::WithdrawalSigned { vault_id, .. } => vault_id == filter_vault_id,
+            // Phase 1b: protocol-wide or op-scoped events, not vault-specific.
+            Event::ChainSettlementFailed { .. }
+            | Event::ChainReorgDetected { .. }
+            | Event::ChainHotWalletLow { .. } => false,
         }
     }
 
@@ -1889,6 +1971,16 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             // Phase 1a Task 11: informational audit trail; state mutation
             // (invariant_halted + mode flip) happens live in the timer tick.
             Event::SupplyInvariantSelfCheckFailed { .. } => {},
+            // Phase 1b: observability-only events; the actual state mutations
+            // happen in their emitting tasks, not on replay.
+            Event::DepositObserved { .. }
+            | Event::ChainMintSubmitted { .. }
+            | Event::ChainMintConfirmed { .. }
+            | Event::ChainBurnObserved { .. }
+            | Event::WithdrawalSigned { .. }
+            | Event::ChainSettlementFailed { .. }
+            | Event::ChainReorgDetected { .. }
+            | Event::ChainHotWalletLow { .. } => {},
         }
     }
     state.next_available_vault_id = vault_id;
