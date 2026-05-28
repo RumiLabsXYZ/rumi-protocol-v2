@@ -23,3 +23,6 @@ pub use supply::{apply_supply_delta, SupplyDelta, SupplyInvariantError};
 
 #[cfg(test)]
 mod tests_adapter;
+
+#[cfg(test)]
+mod tests_config;
