@@ -13,11 +13,13 @@
 
 pub mod adapter;
 pub mod config;
+pub mod multi_chain_state;
 pub mod settlement_queue;
 pub mod supply;
 
 pub use adapter::ChainAdapter;
 pub use config::{ChainConfig, ChainId, ChainStatus};
+pub use multi_chain_state::{MultiChainState, MultiChainStateV1};
 pub use settlement_queue::{SettlementOp, SettlementQueueV1};
 pub use supply::{apply_supply_delta, SupplyDelta, SupplyInvariantError};
 
@@ -29,3 +31,6 @@ mod tests_config;
 
 #[cfg(test)]
 mod tests_settlement_queue;
+
+#[cfg(test)]
+mod tests_multi_chain_state;
