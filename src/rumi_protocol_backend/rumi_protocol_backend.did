@@ -624,6 +624,8 @@ type ProtocolError = variant {
   AmountTooLow : record { minimum_amount : nat64 };
   TransferFromError : record { TransferFromError; nat64 };
   CallerNotOwner;
+  SupplyInvariantHalted;
+  ChainAdmin : text;
 };
 type ProtocolSnapshot = record {
   total_debt : nat64;

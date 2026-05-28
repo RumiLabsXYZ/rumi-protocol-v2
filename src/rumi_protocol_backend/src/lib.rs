@@ -604,6 +604,16 @@ pub enum ProtocolError {
     /// "Layer 2.5 — band gate DEACTIVATION fence" comment in
     /// `tests/audit_pocs_liq_002_sorted_troves_index.rs` for background.
     NotLowestCR,
+    /// Phase 1a: the periodic supply-invariant self-check (Timer B) caught
+    /// a `sum(chain_supplies) != total_debt` divergence. Every entry that
+    /// touches debt or chain supply returns this error until an operator
+    /// clears `multi_chain.invariant_halted`.
+    SupplyInvariantHalted,
+    /// Phase 1a: admin-endpoint error for `register_chain`, `disable_chain`,
+    /// `set_chain_config`. Wraps a developer-facing message string. The
+    /// structured `ChainAdminError` enum lives in `chains::config` and is
+    /// stringified here so the Candid surface stays append-only.
+    ChainAdmin(String),
 }
 
 impl From<GuardError> for ProtocolError {

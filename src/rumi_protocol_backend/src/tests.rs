@@ -148,3 +148,15 @@ mod validate_f64_inclusive {
         assert!(validate_f64_inclusive("x", 0.51, 0.0, 0.50).is_err());
     }
 }
+
+#[test]
+fn protocol_error_carries_multi_chain_variants() {
+    use candid::{Decode, Encode};
+    use crate::ProtocolError;
+    let halt = ProtocolError::SupplyInvariantHalted;
+    let admin = ProtocolError::ChainAdmin("not developer".to_string());
+    let halt_bytes = Encode!(&halt).expect("encode halt");
+    let admin_bytes = Encode!(&admin).expect("encode admin");
+    let _: ProtocolError = Decode!(&halt_bytes, ProtocolError).expect("decode halt");
+    let _: ProtocolError = Decode!(&admin_bytes, ProtocolError).expect("decode admin");
+}
