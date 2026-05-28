@@ -17,6 +17,7 @@ pub mod config;
 pub mod multi_chain_state;
 pub mod settlement_queue;
 pub mod supply;
+pub mod monad;
 
 pub use adapter::ChainAdapter;
 pub use config::{ChainConfig, ChainId, ChainStatus};
