@@ -217,6 +217,57 @@ canisters:
         admin = principal "aaaaa-aa"
       })
 
+  # Task 12: rumi_stability_pool (mainnet tmhzi-dqaaa-aaaap-qrd6q-cai). Rust
+  # canister built locally via the @dfinity/rust recipe (shrink: true matches
+  # dfx.json's implicit shrink behavior so the locally-built wasm matches
+  # production within build-metadata noise).
+  #
+  # NOTE on package name: the Cargo package is `stability_pool` (not
+  # `rumi_stability_pool`); the canister's mainnet/registry name is
+  # `rumi_stability_pool`. The candid file path is `src/stability_pool/...`
+  # because the source directory follows the Cargo package name.
+  #
+  # The SP holds icUSD/3USD deposits used to absorb liquidations. Its stable
+  # state includes depositor balances, total deposits, liquidation events, and
+  # the stablecoin/collateral registries. It received the icUSD-only-interest
+  # update on 2026-05-18.
+  #
+  # The canister's candid service signature is
+  # `service : (StabilityPoolInitArgs) -> { ... }`, which forces dfx and
+  # icp-cli to type-check every deploy arg against the init shape EVEN on
+  # upgrade. `post_upgrade(_args: StabilityPoolInitArgs)` (lib.rs:41) takes
+  # the args by-name with a leading underscore and never reads them; the
+  # body only calls `state::load_from_stable_memory()` plus an in-place
+  # stablecoin transfer_fee correction. This is the "dummy InitArgs on
+  # upgrade" pattern (per MEMORY.md feedback_stability_pool_deploy.md - the
+  # warning that the SP "requires --argument with init args even on upgrade"
+  # refers to the candid type-check, not a real state read).
+  #
+  # The init_args values below are the minimum legal StabilityPoolInitArgs:
+  # protocol_canister_id is set to the real production backend principal
+  # (tfesu-vyaaa-aaaap-qrd7a-cai) for defense-in-depth in case any future
+  # post_upgrade revision ever consumes it; authorized_admins is an empty
+  # vec. `s.initialize()` is only called from `init`, never from
+  # `post_upgrade`, so neither field would be applied on upgrade today.
+  #
+  # Per the upgrade-args spike, `icp canister install --mode upgrade` reads
+  # the environment-level override below. mainnet-live carries the same
+  # shape so re-deploys cannot accidentally reinitialize the pool's
+  # persisted state (depositor balances, stablecoin/collateral registries,
+  # liquidation event log).
+  - name: rumi_stability_pool
+    recipe:
+      type: "@dfinity/rust@v3.2.0"
+      configuration:
+        package: stability_pool
+        candid: src/stability_pool/stability_pool.did
+        shrink: true
+    init_args: |
+      (record {
+        protocol_canister_id = principal "tfesu-vyaaa-aaaap-qrd7a-cai";
+        authorized_admins = vec {}
+      })
+
 networks:
   - name: local
     mode: managed
@@ -251,6 +302,7 @@ environments:
       - icusd_index
       - liquidation_bot
       - rumi_3pool
+      - rumi_stability_pool
     init_args:
       # Upgrade-mode override: `(null)` preserves all existing configuration
       # (ledger_id and the retrieve-interval fields). The canister is already
@@ -303,6 +355,24 @@ environments:
           admin_fee_bps = 0 : nat64;
           admin = principal "aaaaa-aa"
         })
+      # rumi_stability_pool upgrade-mode override: StabilityPoolInitArgs shape
+      # is required by the candid `service : (StabilityPoolInitArgs) -> { ... }`
+      # declaration, but the wasm's `post_upgrade(_args)` (lib.rs:41) takes
+      # the arg by-name with a leading underscore and never reads it. The body
+      # only calls `state::load_from_stable_memory()` plus an in-place
+      # stablecoin transfer_fee correction. protocol_canister_id is set to the
+      # real production backend (tfesu-vyaaa-aaaap-qrd7a-cai) for defense-in-
+      # depth; authorized_admins is an empty vec. Either value would only be
+      # written to state via `s.initialize()`, which is only called from
+      # `#[init]`, never from `#[post_upgrade]`. The canister's live state
+      # (depositor balances, stablecoin/collateral registries, liquidation
+      # events) is preserved by the stable-memory load path. See MEMORY.md
+      # feedback_stability_pool_deploy.md.
+      rumi_stability_pool: |
+        (record {
+          protocol_canister_id = principal "tfesu-vyaaa-aaaap-qrd7a-cai";
+          authorized_admins = vec {}
+        })
 
   # Future staging environment on mainnet (separate canister IDs). Populated
   # by Phase 1 work; intentionally empty here so the project file already
@@ -323,3 +393,4 @@ environments:
       - icusd_index
       - liquidation_bot
       - rumi_3pool
+      - rumi_stability_pool
