@@ -20,6 +20,9 @@ pub use chain_vault::{ChainVaultStatus, ChainVaultV1};
 pub use config::{monad_default_register_arg, monad_ecdsa_key_name, MONAD_CHAIN_ID, MONAD_ICUSD_DECIMALS};
 
 #[cfg(test)]
+mod tests_adapter;
+
+#[cfg(test)]
 mod tests_config;
 
 #[cfg(test)]
