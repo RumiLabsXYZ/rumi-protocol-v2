@@ -26,3 +26,6 @@ mod tests_adapter;
 
 #[cfg(test)]
 mod tests_config;
+
+#[cfg(test)]
+mod tests_settlement_queue;
