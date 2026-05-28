@@ -117,6 +117,53 @@ canisters:
         }
       })
 
+  # Task 10: liquidation_bot (mainnet nygob-3qaaa-aaaap-qttcq-cai). Rust canister
+  # built locally via the @dfinity/rust recipe (shrink: true matches dfx.json's
+  # implicit shrink behavior so the locally-built wasm matches production within
+  # build-metadata noise).
+  #
+  # The canister's candid service signature is `service : (BotInitArgs) -> { ... }`,
+  # which forces dfx and icp-cli to type-check every deploy arg against the init
+  # shape EVEN on upgrade. `post_upgrade` has no parameters, so the wasm itself
+  # ignores the bytes during upgrade. This is the "dummy InitArgs on upgrade"
+  # pattern (per MEMORY.md feedback_liquidation_bot_deploy.md).
+  #
+  # The dummy values below mirror the exact shape Rumi has used for every recent
+  # liquidation_bot upgrade (Wave 13 onwards): every principal is `aaaaa-aa`
+  # (the management canister, used as a placeholder), every nullable is `null`,
+  # max_slippage_bps = 0. The wasm decodes these into a BotInitArgs that
+  # post_upgrade never touches.
+  #
+  # Per the upgrade-args spike, `icp canister install --mode upgrade` reads the
+  # environment-level override below. mainnet-live carries the same dummy shape
+  # so re-deploys cannot accidentally reinitialize the bot's persisted config.
+  - name: liquidation_bot
+    recipe:
+      type: "@dfinity/rust@v3.2.0"
+      configuration:
+        package: liquidation_bot
+        candid: src/liquidation_bot/liquidation_bot.did
+        shrink: true
+    init_args: |
+      (record {
+        config = record {
+          backend_principal = principal "aaaaa-aa";
+          treasury_principal = principal "aaaaa-aa";
+          admin = principal "aaaaa-aa";
+          max_slippage_bps = 0 : nat16;
+          icp_ledger = principal "aaaaa-aa";
+          ckusdc_ledger = principal "aaaaa-aa";
+          icpswap_pool = principal "aaaaa-aa";
+          icpswap_zero_for_one = null;
+          icp_fee_e8s = null;
+          ckusdc_fee_e6 = null;
+          three_pool_principal = null;
+          kong_swap_principal = null;
+          ckusdt_ledger = null;
+          icusd_ledger = null;
+        }
+      })
+
 networks:
   - name: local
     mode: managed
@@ -149,12 +196,38 @@ environments:
     network: ic
     canisters:
       - icusd_index
+      - liquidation_bot
     init_args:
       # Upgrade-mode override: `(null)` preserves all existing configuration
       # (ledger_id and the retrieve-interval fields). The canister is already
       # synced to icusd_ledger; we never want to re-init or change ledger_id
       # on an upgrade. See the upgrade-args spike for the override mechanism.
       icusd_index: '(null)'
+      # liquidation_bot upgrade-mode override: BotInitArgs shape is required by
+      # the candid `service : (BotInitArgs) -> { ... }` declaration, but the
+      # wasm's post_upgrade ignores these bytes. Values are deliberate dummies
+      # (management canister principal everywhere, zeros/nulls otherwise). The
+      # canister's live config is preserved by post_upgrade's stable-memory
+      # load path. See MEMORY.md feedback_liquidation_bot_deploy.md.
+      liquidation_bot: |
+        (record {
+          config = record {
+            backend_principal = principal "aaaaa-aa";
+            treasury_principal = principal "aaaaa-aa";
+            admin = principal "aaaaa-aa";
+            max_slippage_bps = 0 : nat16;
+            icp_ledger = principal "aaaaa-aa";
+            ckusdc_ledger = principal "aaaaa-aa";
+            icpswap_pool = principal "aaaaa-aa";
+            icpswap_zero_for_one = null;
+            icp_fee_e8s = null;
+            ckusdc_fee_e6 = null;
+            three_pool_principal = null;
+            kong_swap_principal = null;
+            ckusdt_ledger = null;
+            icusd_ledger = null;
+          }
+        })
 
   # Future staging environment on mainnet (separate canister IDs). Populated
   # by Phase 1 work; intentionally empty here so the project file already
@@ -173,3 +246,4 @@ environments:
       - xrc
       - flaky_ledger
       - icusd_index
+      - liquidation_bot
