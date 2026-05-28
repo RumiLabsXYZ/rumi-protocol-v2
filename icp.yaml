@@ -459,6 +459,80 @@ canisters:
         amm = principal "aaaaa-aa"
       })
 
+  # Task 16: rumi_protocol_backend (mainnet tfesu-vyaaa-aaaap-qrd7a-cai). THE
+  # crown-jewel canister: the CDP engine that holds every vault, every debt
+  # balance, every collateral config, the redemption-tier table, the stability-
+  # pool integration state, the bot integration state, and every admin key for
+  # emergency operations. A botched upgrade affects every protocol user.
+  #
+  # UNIQUE init signature among Rumi canisters: the candid declares
+  # `service : (ProtocolArg) -> {...}` (rumi_protocol_backend.did:796), where
+  # `ProtocolArg = variant { Init : InitArg; Upgrade : UpgradeArg }`. This is
+  # NOT the "single record" shape used by every other Rumi-owned canister; it
+  # is a Candid variant and the canister's `#[post_upgrade]` (main.rs:390)
+  # actively pattern-matches on it:
+  #
+  #   ProtocolArg::Init(_)    => ic_cdk::trap("expected Upgrade got Init")
+  #   ProtocolArg::Upgrade(a) => record_event(Event::Upgrade(a)); state.upgrade(a)
+  #
+  # The Upgrade variant carries TWO fields, both honest:
+  #
+  #   UpgradeArg = record { mode : opt Mode; description : opt text }
+  #
+  #     - `mode` overrides the runtime mode (None | ReadOnly | GeneralAvailability
+  #       | Recovery). `None` (i.e. `mode = null`) preserves the live mode.
+  #     - `description` is a human-readable changelog line. post_upgrade RECORDS
+  #       this string into the on-chain event log as `Event::Upgrade(args)` (so
+  #       the log preserves a chronological audit trail of every upgrade). It is
+  #       NOT a dummy field; use a meaningful string on every deploy.
+  #
+  # Per MEMORY.md feedback_dfx_identity_for_deploys.md: this argument shape is
+  # hard-enforced. Bare `()` will fail Candid type-check; passing the Init
+  # variant will trap. For Phase 0 (deploy-tool migration, no Rust source
+  # change) we ship `mode = null` (preserve live mode) and a description that
+  # documents the icp-cli swap.
+  #
+  # WASM SIZE: the raw cargo release wasm is ~6.7 MB, well over the 2 MiB
+  # ingress limit (2_097_152 bytes). `ic-wasm shrink` alone may not be enough.
+  # Following the rumi_analytics pattern we go straight to the explicit
+  # `build: steps:` form with shrink + gzip -9, which the IC strips server-side
+  # at install time.
+  #
+  # Build pipeline:
+  #   1. `cargo build --release --target wasm32-unknown-unknown --package rumi_protocol_backend`
+  #   2. copy the artifact to ICP_WASM_OUTPUT_PATH (icp-cli's expected location)
+  #   3. embed candid:service metadata so query tools and dashboards see the
+  #      candid interface without a sidecar file
+  #   4. `ic-wasm <out> -o <out> shrink --keep-name-section`
+  #   5. `gzip -9 -f <out>` (best compression)
+  #
+  # The init_args block below pins the Upgrade variant with `mode = null` so
+  # `icp canister install --mode upgrade` cannot accidentally change the
+  # protocol mode. mainnet-live carries a more specific `description` override
+  # noting the icp-cli migration; this baseline string is a fallback used only
+  # if the env override is missing (which would itself be a mistake).
+  #
+  # Production module hash at time of migration:
+  #   0xb3663122eb3b4d712d1e1da00a2f5ab468b12681aec9fd020e5477657f4e7e25
+  - name: rumi_protocol_backend
+    build:
+      steps:
+        - type: script
+          commands:
+            - cargo build --release --target wasm32-unknown-unknown --package rumi_protocol_backend
+            - cp target/wasm32-unknown-unknown/release/rumi_protocol_backend.wasm "$ICP_WASM_OUTPUT_PATH"
+            - ic-wasm "$ICP_WASM_OUTPUT_PATH" -o "$ICP_WASM_OUTPUT_PATH" metadata candid:service -f src/rumi_protocol_backend/rumi_protocol_backend.did -v public
+            - ic-wasm "$ICP_WASM_OUTPUT_PATH" -o "$ICP_WASM_OUTPUT_PATH" shrink --keep-name-section
+            - gzip -9 -f "$ICP_WASM_OUTPUT_PATH"
+            - mv "${ICP_WASM_OUTPUT_PATH}.gz" "$ICP_WASM_OUTPUT_PATH"
+    init_args: |
+      (variant {
+        Upgrade = record {
+          mode = null;
+          description = opt "Phase 0 icp-cli migration: deploy via icp-cli, no code change"
+        }
+      })
+
 networks:
   - name: local
     mode: managed
@@ -497,6 +571,7 @@ environments:
       - rumi_treasury
       - rumi_amm
       - rumi_analytics
+      - rumi_protocol_backend
     init_args:
       # Upgrade-mode override: `(null)` preserves all existing configuration
       # (ledger_id and the retrieve-interval fields). The canister is already
@@ -626,6 +701,30 @@ environments:
           three_pool = principal "aaaaa-aa";
           stability_pool = principal "aaaaa-aa";
           amm = principal "aaaaa-aa"
+        })
+      # rumi_protocol_backend upgrade-mode override: the ProtocolArg variant is
+      # actively read by post_upgrade(). `mode = null` preserves the live
+      # protocol mode (currently GeneralAvailability per pre-deploy snapshot);
+      # `description` is recorded into the on-chain event log as
+      # Event::Upgrade(args) so it must be meaningful, not a dummy. This is the
+      # ONLY canister where the upgrade args are honest fields the wasm reads
+      # and persists, unlike the dummy-shape pattern used for liquidation_bot,
+      # rumi_3pool, rumi_stability_pool, rumi_treasury, rumi_amm, and
+      # rumi_analytics (where post_upgrade ignores the bytes).
+      #
+      # If a future deploy changes the runtime mode, set `mode = opt variant {
+      # ReadOnly | GeneralAvailability | Recovery }` here instead of null. Do
+      # NOT call `set_mode` from a separate update call; the upgrade event log
+      # would not record the change.
+      #
+      # See MEMORY.md feedback_dfx_identity_for_deploys.md for the arg shape
+      # contract and the requirement to deploy with --identity rumi_identity.
+      rumi_protocol_backend: |
+        (variant {
+          Upgrade = record {
+            mode = null;
+            description = opt "Phase 0 icp-cli migration: deploy via icp-cli, no code change"
+          }
         })
 
   # Future staging environment on mainnet (separate canister IDs). Populated
