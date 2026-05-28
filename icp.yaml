@@ -268,6 +268,53 @@ canisters:
         authorized_admins = vec {}
       })
 
+  # Task 13: rumi_treasury (mainnet tlg74-oiaaa-aaaap-qrd6a-cai). Rust canister
+  # built locally via the @dfinity/rust recipe (shrink: true matches dfx.json's
+  # implicit shrink behavior so the locally-built wasm matches production within
+  # build-metadata noise).
+  #
+  # The treasury holds and accounts for protocol revenue (borrowing fees,
+  # redemption fees, liquidation fees, interest revenue) across multiple asset
+  # types (icUSD, ICP, ckBTC, ckUSDC, ckUSDT). Persisted state is a deposit
+  # log, an event log, and a `BalancesSnapshot` stable cell (the latter added
+  # in commit 607ae21 to survive upgrades and rollback failed withdrawals).
+  # Authorization is IC-level controller check (commit 607ae21); the
+  # `controller` field in `TreasuryInitArgs` is now informational only.
+  #
+  # The canister's candid service signature is
+  # `service : (TreasuryInitArgs) -> { ... }`, which forces dfx and icp-cli
+  # to type-check every deploy arg against the init shape EVEN on upgrade.
+  # `post_upgrade()` (lib.rs:46) takes NO parameters and only calls
+  # `restore_state()`; the wasm itself ignores the bytes during upgrade.
+  # This is the "dummy InitArgs on upgrade" pattern shared with
+  # rumi_stability_pool, rumi_3pool, and liquidation_bot.
+  #
+  # The dummy values below are minimum-legal: every principal is the
+  # management canister (aaaaa-aa), all optional ledgers are `null`. None
+  # of these fields are read on upgrade. The canister's live state
+  # (deposits, balances snapshot, event log) is preserved by restore_state.
+  #
+  # Per the upgrade-args spike, `icp canister install --mode upgrade` reads
+  # the environment-level override below. mainnet-live carries the same
+  # dummy shape so re-deploys cannot accidentally reinitialize the treasury's
+  # persisted state.
+  - name: rumi_treasury
+    recipe:
+      type: "@dfinity/rust@v3.2.0"
+      configuration:
+        package: rumi_treasury
+        candid: src/rumi_treasury/rumi_treasury.did
+        shrink: true
+    init_args: |
+      (record {
+        controller = principal "aaaaa-aa";
+        icusd_ledger = principal "aaaaa-aa";
+        icp_ledger = principal "aaaaa-aa";
+        ckbtc_ledger = null;
+        ckusdt_ledger = null;
+        ckusdc_ledger = null
+      })
+
 networks:
   - name: local
     mode: managed
@@ -303,6 +350,7 @@ environments:
       - liquidation_bot
       - rumi_3pool
       - rumi_stability_pool
+      - rumi_treasury
     init_args:
       # Upgrade-mode override: `(null)` preserves all existing configuration
       # (ledger_id and the retrieve-interval fields). The canister is already
@@ -373,6 +421,23 @@ environments:
           protocol_canister_id = principal "tfesu-vyaaa-aaaap-qrd7a-cai";
           authorized_admins = vec {}
         })
+      # rumi_treasury upgrade-mode override: TreasuryInitArgs shape is required
+      # by the candid `service : (TreasuryInitArgs) -> { ... }` declaration,
+      # but the wasm's `post_upgrade()` (lib.rs:46) takes no parameters and
+      # only calls `restore_state()`. The wasm ignores these bytes on upgrade.
+      # Values are deliberate dummies (management canister principal for the
+      # three required principals, all optional ledgers null). The canister's
+      # live state (deposit log, BalancesSnapshot stable cell, event log) is
+      # preserved by the stable-memory restore path.
+      rumi_treasury: |
+        (record {
+          controller = principal "aaaaa-aa";
+          icusd_ledger = principal "aaaaa-aa";
+          icp_ledger = principal "aaaaa-aa";
+          ckbtc_ledger = null;
+          ckusdt_ledger = null;
+          ckusdc_ledger = null
+        })
 
   # Future staging environment on mainnet (separate canister IDs). Populated
   # by Phase 1 work; intentionally empty here so the project file already
@@ -394,3 +459,4 @@ environments:
       - liquidation_bot
       - rumi_3pool
       - rumi_stability_pool
+      - rumi_treasury
