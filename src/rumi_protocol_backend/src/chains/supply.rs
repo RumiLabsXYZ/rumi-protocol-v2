@@ -16,14 +16,18 @@ use super::multi_chain_state::{MultiChainStateV1, MultiChainStateV2};
 use candid::{CandidType, Deserialize};
 use serde::Serialize;
 
-/// Migrate the Phase 1a `MultiChainStateV1` snapshot to `MultiChainStateV2`.
-/// Carries every V1 field verbatim; defaults the V2 additions to empty.
+/// DORMANT TEMPLATE — not called on the live upgrade path.
 ///
-/// The active V1->V2 upgrade happens automatically via the `#[serde(default)]`
-/// in-place decode of `State.multi_chain` (the four V1 fields map straight
-/// across by name; the five new V2 fields hit serde-default). This function
-/// is the unit-tested template for the NEXT version bump (V2->V3), and the
-/// explicit migration path documented in `multi_chain_state.rs`.
+/// The V1->V2 upgrade happens automatically via the ciborium in-place decode:
+/// the four V1 fields map across by name; the five new V2 fields carry
+/// `#[serde(default)]` and come up empty. No explicit migration call is
+/// needed in `post_upgrade`.
+///
+/// This function is kept as the unit-tested template for the NEXT version bump
+/// (V2->V3). When V3 lands, rename this to `migrate_v2_to_v3`, add it to the
+/// `post_upgrade` hook, and write a parallel ciborium round-trip test (see
+/// `tests_multi_chain_state_v2::v1_cbor_snapshot_decodes_into_v2_without_wiping_state`
+/// as the model).
 pub fn migrate_multi_chain_state(v1: MultiChainStateV1) -> MultiChainStateV2 {
     MultiChainStateV2 {
         chain_configs: v1.chain_configs,

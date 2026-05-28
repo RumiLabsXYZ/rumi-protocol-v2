@@ -21,14 +21,18 @@ pub enum ChainVaultStatus {
     Closed,
 }
 
-#[derive(CandidType, Deserialize, Serialize, Clone, Debug)]
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct ChainVaultV1 {
     pub vault_id: u64,
     pub owner: Principal,
     pub collateral_chain: ChainId,
+    /// Unvalidated 0x hex string. The deposit-watch task (Task 9) validates
+    /// on-chain before crediting any collateral.
     pub custody_address: String,
     pub collateral_amount_e18: u128,
     pub debt_e8s: u128,
+    /// Unvalidated 0x hex string. The settlement task (Task 10) validates
+    /// before submitting the on-chain mint transaction.
     pub mint_recipient: String,
     pub pending_mint_e8s: u128,
     pub status: ChainVaultStatus,

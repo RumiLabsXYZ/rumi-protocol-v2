@@ -2,15 +2,29 @@
 //!
 //! Lives at `state::State::multi_chain` and carries every chain-aware
 //! piece of state in one struct so the AMM-style state-wipe pattern
-//! (missing field at decode time -> Default applied silently) cannot
-//! happen for any sub-component. Add fields ONLY by:
+//! (missing field at decode time -> fallback wipes state) cannot happen for
+//! any sub-component.
 //!
-//! 1. Renaming `MultiChainStateV1` -> keep the V1 fields exactly.
-//! 2. Adding `MultiChainStateV2` with the new field plus a `From<MultiChainStateV1>` impl.
-//! 3. Updating the `pub type MultiChainState = MultiChainStateV2;` alias.
-//! 4. Creating `migrate_multi_chain_state` in `chains/supply.rs` that calls
-//!    `MultiChainStateV2::from(old_v1)` and update the canister `post_upgrade`
-//!    hook in `main.rs` to call it after `replace_state(state)`.
+//! ## Adding a new field (non-breaking reshape)
+//!
+//! 1. Keep `MultiChainStateVN` exactly as shipped.
+//! 2. Add `MultiChainStateV(N+1)` with the new field(s), each annotated with
+//!    `#[serde(default)]`. The four original V1 fields must NOT be decorated
+//!    because they are always present in any live snapshot.
+//! 3. Rebind `pub type MultiChainState = MultiChainStateV(N+1);`.
+//! 4. That is it. The V1->V2 (or V2->V3, etc.) decode happens in-place via
+//!    ciborium: the old fields map across by name; the new fields hit
+//!    `serde_default` and come up empty. No explicit migration call in
+//!    `post_upgrade` is needed. `migrate_multi_chain_state` in `supply.rs`
+//!    is a unit-tested TEMPLATE for the next version bump, NOT the live path.
+//!
+//! ## Adding a field that requires a BREAKING reshape
+//!
+//! (e.g. a field type change the in-place decode cannot handle)
+//!
+//! 1-3 same as above, then:
+//! 4. Add `migrate_vN_to_v(N+1)` in `chains/supply.rs`.
+//! 5. Call it from `post_upgrade` in `main.rs` after `restore_state`.
 //!
 //! See spec Section 3 ("State wipe on upgrade") and the 2026-05-18 AMM
 //! incident (MEMORY.md: `project_amm_state_wipe_2026_05_18.md`).
@@ -50,22 +64,33 @@ impl MultiChainStateV1 {
 /// name straight across) and adds the Monad/foreign-chain working set:
 /// per-vault records, deployed-contract addresses, manual price overrides,
 /// last-observed block cursors, and hot-wallet gas balances. The five new
-/// fields hit serde-default and come up empty on a V1->V2 upgrade.
+/// fields carry field-level `#[serde(default)]` so a V1 CBOR snapshot (which
+/// lacks these keys entirely) decodes into V2 without error, defaulting the
+/// new fields to empty. The four V1-carried fields are NOT decorated because
+/// V1 always wrote them and they must be present in any valid snapshot.
 ///
 /// Add the NEXT field by bumping to `MultiChainStateV3` (keep V2 verbatim),
-/// extending `migrate_multi_chain_state`, and rebinding the alias below.
+/// adding `#[serde(default)]` on the new field, and rebinding the alias below.
+/// For a BREAKING reshape (field type change that the in-place decode cannot
+/// handle), add a `migrate_v2_to_v3` in `chains/supply.rs` and call it from
+/// `post_upgrade` after `restore_state`.
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug, Default)]
 pub struct MultiChainStateV2 {
-    // carried verbatim from V1
+    // carried verbatim from V1 — always present in any valid snapshot
     pub chain_configs: BTreeMap<ChainId, ChainConfigV1>,
     pub chain_supplies: BTreeMap<ChainId, u128>,
     pub settlement_queues: BTreeMap<ChainId, SettlementQueueV1>,
     pub invariant_halted: bool,
-    // new in V2
+    // new in V2 — field-level serde(default) lets a V1 snapshot decode cleanly
+    #[serde(default)]
     pub chain_vaults: BTreeMap<u64, ChainVaultV1>,
+    #[serde(default)]
     pub chain_contracts: BTreeMap<ChainId, String>,
+    #[serde(default)]
     pub manual_prices: BTreeMap<(ChainId, String), u64>,
+    #[serde(default)]
     pub last_observed_block: BTreeMap<ChainId, u64>,
+    #[serde(default)]
     pub hot_wallet_balance_e18: BTreeMap<ChainId, u128>,
 }
 

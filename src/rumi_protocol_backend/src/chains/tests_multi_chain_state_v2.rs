@@ -3,6 +3,53 @@ use super::config::ChainId;
 use super::supply::migrate_multi_chain_state;
 
 #[test]
+fn v1_cbor_snapshot_decodes_into_v2_without_wiping_state() {
+    // Regression for the Task-3 state-wipe bug: a populated V1-shaped CBOR
+    // snapshot (the shape Phase 1a wrote to stable memory) MUST decode into
+    // MultiChainStateV2 with the four V1 fields preserved and the five new
+    // fields defaulted to empty. This is the exact ciborium decode path
+    // load_state_from_stable() runs on upgrade. WITHOUT field-level
+    // #[serde(default)] on the new V2 fields this decode fails with
+    // "missing field `chain_vaults`", which on a real canister silently
+    // wipes multi_chain state via the event-replay fallback.
+    use super::config::{ChainConfigV1, ChainStatus, GasStrategy};
+    use super::settlement_queue::SettlementQueueV1;
+
+    let mut v1 = MultiChainStateV1::default();
+    v1.chain_configs.insert(ChainId(10143), ChainConfigV1 {
+        chain_id: ChainId(10143),
+        display_name: "MonadTestnet".into(),
+        rpc_endpoints: vec!["https://rpc".into()],
+        finality_depth: 1,
+        gas_strategy: GasStrategy::EvmEip1559 { max_priority_fee_gwei: 2, max_fee_gwei_ceiling: 500 },
+        chain_native_decimals: 18,
+        registered_at_ns: 123,
+        status: ChainStatus::Registered,
+    });
+    v1.chain_supplies.insert(ChainId(10143), 777);
+    v1.settlement_queues.insert(ChainId(10143), SettlementQueueV1::default());
+    v1.invariant_halted = true;
+
+    // Encode as V1 (the bytes Phase 1a wrote), decode as V2 (the new shape).
+    let mut buf = Vec::new();
+    ciborium::ser::into_writer(&v1, &mut buf).expect("cbor encode V1");
+    let v2: MultiChainStateV2 =
+        ciborium::de::from_reader(buf.as_slice()).expect("V1 snapshot MUST decode into V2");
+
+    // V1 fields preserved:
+    assert_eq!(v2.chain_supplies.get(&ChainId(10143)), Some(&777u128));
+    assert!(v2.chain_configs.contains_key(&ChainId(10143)));
+    assert!(v2.settlement_queues.contains_key(&ChainId(10143)));
+    assert!(v2.invariant_halted);
+    // New fields defaulted to empty:
+    assert!(v2.chain_vaults.is_empty());
+    assert!(v2.chain_contracts.is_empty());
+    assert!(v2.manual_prices.is_empty());
+    assert!(v2.last_observed_block.is_empty());
+    assert!(v2.hot_wallet_balance_e18.is_empty());
+}
+
+#[test]
 fn v2_default_is_empty() {
     let s = MultiChainStateV2::default();
     assert!(s.chain_configs.is_empty());
