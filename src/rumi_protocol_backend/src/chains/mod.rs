@@ -12,6 +12,7 @@
 //! and the first non-zero entries.
 
 pub mod adapter;
+pub mod admin;
 pub mod config;
 pub mod multi_chain_state;
 pub mod settlement_queue;
@@ -37,3 +38,6 @@ mod tests_multi_chain_state;
 
 #[cfg(test)]
 mod tests_supply;
+
+#[cfg(test)]
+mod tests_admin;

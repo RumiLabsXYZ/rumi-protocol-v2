@@ -753,6 +753,83 @@ fn get_supply_audit() -> SupplyAudit {
     })
 }
 
+// Phase 1a: developer-gated chain-registry admin endpoints.
+
+#[candid_method(update)]
+#[update]
+fn register_chain(arg: rumi_protocol_backend::chains::config::RegisterChainArg) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let now = ic_cdk::api::time();
+    let chain_id = arg.chain_id;
+    let display_name = arg.display_name.clone();
+    let result = mutate_state(|s| rumi_protocol_backend::chains::admin::register_chain_in_state(&mut s.multi_chain, arg, now));
+    match result {
+        Ok(_) => {
+            rumi_protocol_backend::storage::record_event(&rumi_protocol_backend::event::Event::ChainRegistered {
+                chain_id,
+                display_name,
+                timestamp: now,
+            });
+            log!(INFO, "[register_chain] chain_id={:?} registered", chain_id);
+            Ok(())
+        }
+        Err(e) => Err(ProtocolError::ChainAdmin(format!("{:?}", e))),
+    }
+}
+
+#[candid_method(update)]
+#[update]
+fn disable_chain(chain_id: rumi_protocol_backend::chains::config::ChainId) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let result = mutate_state(|s| rumi_protocol_backend::chains::admin::disable_chain_in_state(&mut s.multi_chain, chain_id));
+    match result {
+        Ok(()) => {
+            let now = ic_cdk::api::time();
+            rumi_protocol_backend::storage::record_event(&rumi_protocol_backend::event::Event::ChainDisabled {
+                chain_id,
+                timestamp: now,
+            });
+            log!(INFO, "[disable_chain] chain_id={:?} disabled", chain_id);
+            Ok(())
+        }
+        Err(e) => Err(ProtocolError::ChainAdmin(format!("{:?}", e))),
+    }
+}
+
+#[candid_method(update)]
+#[update]
+fn set_chain_config(
+    chain_id: rumi_protocol_backend::chains::config::ChainId,
+    update: rumi_protocol_backend::chains::config::UpdateChainConfigArg,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let result = mutate_state(|s| rumi_protocol_backend::chains::admin::update_chain_config_in_state(&mut s.multi_chain, chain_id, update));
+    match result {
+        Ok(()) => {
+            let now = ic_cdk::api::time();
+            rumi_protocol_backend::storage::record_event(&rumi_protocol_backend::event::Event::ChainConfigUpdated {
+                chain_id,
+                timestamp: now,
+            });
+            log!(INFO, "[set_chain_config] chain_id={:?} updated", chain_id);
+            Ok(())
+        }
+        Err(e) => Err(ProtocolError::ChainAdmin(format!("{:?}", e))),
+    }
+}
+
 #[candid_method(query)]
 #[query]
 fn get_protocol_config() -> rumi_protocol_backend::ProtocolConfig {

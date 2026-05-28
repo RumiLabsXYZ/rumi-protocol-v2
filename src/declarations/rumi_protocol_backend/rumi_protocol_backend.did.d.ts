@@ -506,6 +506,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'margin_added' : bigint,
     }
   } |
+  { 'chain_disabled' : { 'chain_id' : number, 'timestamp' : bigint } } |
   {
     'set_collateral_min_xrc_sources' : {
       'min_xrc_sources' : [] | [number],
@@ -542,6 +543,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     }
   } |
   { 'set_liquidation_bot_principal' : { 'principal' : Principal } } |
+  { 'chain_config_updated' : { 'chain_id' : number, 'timestamp' : bigint } } |
   {
     'deficit_accrued' : {
       'new_deficit' : bigint,
@@ -570,6 +572,13 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     'add_collateral_type' : {
       'config' : CollateralConfig,
       'collateral_type' : Principal,
+    }
+  } |
+  {
+    'chain_registered' : {
+      'display_name' : string,
+      'chain_id' : number,
+      'timestamp' : bigint,
     }
   } |
   {
@@ -615,6 +624,15 @@ export interface EventsByPrincipalPagedResponse {
 export type FeeSource = { 'BorrowingFee' : null } |
   { 'RedemptionFee' : null };
 export interface Fees { 'redemption_fee' : number, 'borrowing_fee' : number }
+export type GasStrategy = { 'NotApplicable' : null } |
+  { 'SolanaPriorityFee' : { 'lamports_per_cu_ceiling' : bigint } } |
+  {
+    'EvmEip1559' : {
+      'max_fee_gwei_ceiling' : bigint,
+      'max_priority_fee_gwei' : bigint,
+    }
+  } |
+  { 'EvmLegacy' : { 'gas_price_gwei_ceiling' : bigint } };
 export interface GetEventsArg {
   'principal' : [] | [Principal],
   'types' : [] | [Array<EventTypeFilter>],
@@ -812,6 +830,14 @@ export interface RateMarker {
   'multiplier' : Uint8Array | number[],
   'cr_level' : Uint8Array | number[],
 }
+export interface RegisterChainArg {
+  'rpc_endpoints' : Array<string>,
+  'gas_strategy' : GasStrategy,
+  'finality_depth' : number,
+  'chain_native_decimals' : number,
+  'display_name' : string,
+  'chain_id' : number,
+}
 export interface RepayAndCloseSuccess {
   'collateral_return_block_index' : [] | [bigint],
   'repay_block_index' : bigint,
@@ -930,6 +956,12 @@ export interface TreasuryStats {
   'total_accrued_interest_system' : bigint,
   'pending_interest_for_pools_total' : bigint,
 }
+export interface UpdateChainConfigArg {
+  'rpc_endpoints' : [] | [Array<string>],
+  'gas_strategy' : [] | [GasStrategy],
+  'finality_depth' : [] | [number],
+  'display_name' : [] | [string],
+}
 export interface UpgradeArg {
   'mode' : [] | [Mode],
   'description' : [] | [string],
@@ -990,6 +1022,7 @@ export interface _SERVICE {
   'clear_stuck_operations' : ActorMethod<[[] | [Principal]], Result_1>,
   'close_vault' : ActorMethod<[bigint], Result_5>,
   'coingecko_transform' : ActorMethod<[TransformArgs], HttpResponse>,
+  'disable_chain' : ActorMethod<[number], Result>,
   'enter_recovery_mode' : ActorMethod<[], Result>,
   'exit_recovery_mode' : ActorMethod<[], Result>,
   'freeze_protocol' : ActorMethod<[], Result>,
@@ -1112,6 +1145,7 @@ export interface _SERVICE {
   'redeem_collateral' : ActorMethod<[Principal, bigint], Result_3>,
   'redeem_icp' : ActorMethod<[bigint], Result_3>,
   'redeem_reserves' : ActorMethod<[bigint, [] | [Principal]], Result_11>,
+  'register_chain' : ActorMethod<[RegisterChainArg], Result>,
   'repay_and_close_vault' : ActorMethod<[VaultArg], Result_12>,
   'repay_to_vault' : ActorMethod<[VaultArg], Result_1>,
   'repay_to_vault_with_stable' : ActorMethod<[VaultArgWithToken], Result_1>,
@@ -1124,6 +1158,7 @@ export interface _SERVICE {
   'set_bot_cr_tolerance_bps' : ActorMethod<[bigint], Result>,
   'set_breaker_window_debt_ceiling_e8s' : ActorMethod<[bigint], Result>,
   'set_breaker_window_ns' : ActorMethod<[bigint], Result>,
+  'set_chain_config' : ActorMethod<[number, UpdateChainConfigArg], Result>,
   'set_check_vaults_alert_band_bps' : ActorMethod<[bigint], Result>,
   'set_check_vaults_full_sweep_every_n_ticks' : ActorMethod<[bigint], Result>,
   'set_ckstable_repay_fee' : ActorMethod<[number], Result>,

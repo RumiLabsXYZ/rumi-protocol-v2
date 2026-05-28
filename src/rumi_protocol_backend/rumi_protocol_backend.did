@@ -393,6 +393,7 @@ type Event = variant {
     caller : opt principal;
     margin_added : nat64;
   };
+  chain_disabled : record { chain_id : nat32; timestamp : nat64 };
   set_collateral_min_xrc_sources : record {
     min_xrc_sources : opt nat32;
     collateral_type : principal;
@@ -421,6 +422,7 @@ type Event = variant {
     timestamp : opt nat64;
   };
   set_liquidation_bot_principal : record { "principal" : principal };
+  chain_config_updated : record { chain_id : nat32; timestamp : nat64 };
   deficit_accrued : record {
     new_deficit : nat64;
     source : opt DeficitSource;
@@ -442,6 +444,11 @@ type Event = variant {
   add_collateral_type : record {
     config : CollateralConfig;
     collateral_type : principal;
+  };
+  chain_registered : record {
+    display_name : text;
+    chain_id : nat32;
+    timestamp : nat64;
   };
   set_collateral_ledger_fee : record {
     ledger_fee : nat64;
@@ -484,6 +491,15 @@ type EventsByPrincipalPagedResponse = record {
 };
 type FeeSource = variant { BorrowingFee; RedemptionFee };
 type Fees = record { redemption_fee : float64; borrowing_fee : float64 };
+type GasStrategy = variant {
+  NotApplicable;
+  SolanaPriorityFee : record { lamports_per_cu_ceiling : nat64 };
+  EvmEip1559 : record {
+    max_fee_gwei_ceiling : nat64;
+    max_priority_fee_gwei : nat64;
+  };
+  EvmLegacy : record { gas_price_gwei_ceiling : nat64 };
+};
 type GetEventsArg = record {
   "principal" : opt principal;
   types : opt vec EventTypeFilter;
@@ -670,6 +686,14 @@ type RateCurve = record {
   markers : vec RateMarker;
 };
 type RateMarker = record { multiplier : blob; cr_level : blob };
+type RegisterChainArg = record {
+  rpc_endpoints : vec text;
+  gas_strategy : GasStrategy;
+  finality_depth : nat32;
+  chain_native_decimals : nat8;
+  display_name : text;
+  chain_id : nat32;
+};
 type RepayAndCloseSuccess = record {
   collateral_return_block_index : opt nat64;
   repay_block_index : nat64;
@@ -769,6 +793,12 @@ type TreasuryStats = record {
   total_accrued_interest_system : nat64;
   pending_interest_for_pools_total : nat64;
 };
+type UpdateChainConfigArg = record {
+  rpc_endpoints : opt vec text;
+  gas_strategy : opt GasStrategy;
+  finality_depth : opt nat32;
+  display_name : opt text;
+};
 type UpgradeArg = record { mode : opt Mode; description : opt text };
 type Vault = record {
   collateral_amount : nat64;
@@ -819,6 +849,7 @@ service : (ProtocolArg) -> {
   clear_stuck_operations : (opt principal) -> (Result_1);
   close_vault : (nat64) -> (Result_5);
   coingecko_transform : (TransformArgs) -> (HttpResponse) query;
+  disable_chain : (nat32) -> (Result);
   enter_recovery_mode : () -> (Result);
   exit_recovery_mode : () -> (Result);
   freeze_protocol : () -> (Result);
@@ -916,6 +947,7 @@ service : (ProtocolArg) -> {
   redeem_collateral : (principal, nat64) -> (Result_3);
   redeem_icp : (nat64) -> (Result_3);
   redeem_reserves : (nat64, opt principal) -> (Result_11);
+  register_chain : (RegisterChainArg) -> (Result);
   repay_and_close_vault : (VaultArg) -> (Result_12);
   repay_to_vault : (VaultArg) -> (Result_1);
   repay_to_vault_with_stable : (VaultArgWithToken) -> (Result_1);
@@ -928,6 +960,7 @@ service : (ProtocolArg) -> {
   set_bot_cr_tolerance_bps : (nat64) -> (Result);
   set_breaker_window_debt_ceiling_e8s : (nat64) -> (Result);
   set_breaker_window_ns : (nat64) -> (Result);
+  set_chain_config : (nat32, UpdateChainConfigArg) -> (Result);
   set_check_vaults_alert_band_bps : (nat64) -> (Result);
   set_check_vaults_full_sweep_every_n_ticks : (nat64) -> (Result);
   set_ckstable_repay_fee : (float64) -> (Result);
