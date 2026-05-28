@@ -34,3 +34,6 @@ mod tests_settlement_queue;
 
 #[cfg(test)]
 mod tests_multi_chain_state;
+
+#[cfg(test)]
+mod tests_supply;
