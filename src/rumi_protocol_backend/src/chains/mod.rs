@@ -20,3 +20,6 @@ pub use adapter::ChainAdapter;
 pub use config::{ChainConfig, ChainId, ChainStatus};
 pub use settlement_queue::{SettlementOp, SettlementQueueV1};
 pub use supply::{apply_supply_delta, SupplyDelta, SupplyInvariantError};
+
+#[cfg(test)]
+mod tests_adapter;
