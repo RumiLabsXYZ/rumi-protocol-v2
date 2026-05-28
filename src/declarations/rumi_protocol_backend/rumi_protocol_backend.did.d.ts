@@ -132,6 +132,13 @@ export type DeviceSpec = { 'GenericDisplay' : null } |
 export interface ErrorInfo { 'description' : string }
 export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
   {
+    'supply_invariant_self_check_failed' : {
+      'sum_chain_supplies_e8s' : bigint,
+      'total_debt_e8s' : bigint,
+      'timestamp' : bigint,
+    }
+  } |
+  {
     'VaultWithdrawnAndClosed' : {
       'vault_id' : bigint,
       'timestamp' : bigint,

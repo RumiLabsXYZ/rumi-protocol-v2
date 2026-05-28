@@ -286,6 +286,11 @@ export const idlFactory = ({ IDL }) => {
   });
   const Event = IDL.Variant({
     'set_borrowing_fee' : IDL.Record({ 'rate' : IDL.Text }),
+    'supply_invariant_self_check_failed' : IDL.Record({
+      'sum_chain_supplies_e8s' : IDL.Nat,
+      'total_debt_e8s' : IDL.Nat,
+      'timestamp' : IDL.Nat64,
+    }),
     'VaultWithdrawnAndClosed' : IDL.Record({
       'vault_id' : IDL.Nat64,
       'timestamp' : IDL.Nat64,
