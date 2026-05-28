@@ -37,6 +37,16 @@ icp canister install <CANISTER_NAME> \
 
 icp-cli resolves the canister name to its principal via the mapping file, uses the build output from `icp.yaml` as the wasm, runs the install (no create step), and respects `--mode upgrade`. This is much closer to dfx ergonomics than the principal-and-explicit-wasm fallback used in Task 9.
 
+### Important: `--args` is required for canisters whose post_upgrade has a parameter
+
+Discovered during Task 14 (AMM deploy). The env-level `init_args` override in `icp.yaml` is NOT applied by `icp canister install`. It only applies to `icp deploy` (the create-then-install pipeline we cannot use for existing canisters).
+
+For `icp canister install`:
+- If the canister's `post_upgrade()` takes zero parameters (e.g., rumi_treasury): `--args` can be omitted. Candid never decodes the wire.
+- If the canister's `post_upgrade(_args: SomeType)` has a parameter (e.g., rumi_amm, rumi_3pool, liquidation_bot, rumi_stability_pool): `--args '<candid>'` MUST be passed explicitly. Otherwise Candid decode fails with `No more values on the wire` and the upgrade traps. Atomic upgrade semantics roll the state back, but it is a deploy failure that needs a retry with `--args`.
+
+Always pass `--args` for safety. The IC upgrade is atomic — even if the args are wrong, the state survives via rollback.
+
 ### Fallback (target by principal directly)
 
 If name resolution fails for any reason, target by principal with explicit wasm:
