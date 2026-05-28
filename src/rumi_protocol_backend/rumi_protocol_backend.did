@@ -627,6 +627,15 @@ type ProtocolError = variant {
   SupplyInvariantHalted;
   ChainAdmin : text;
 };
+type SupplyAuditEntry = record {
+  chain_id : nat64;
+  display_name : text;
+  supply_e8s : nat;
+};
+type SupplyAudit = record {
+  total_e8s : nat;
+  per_chain : vec SupplyAuditEntry;
+};
 type ProtocolSnapshot = record {
   total_debt : nat64;
   collateral_snapshots : vec CollateralSnapshot;
@@ -855,6 +864,8 @@ service : (ProtocolArg) -> {
   get_protocol_config : () -> (ProtocolConfig) query;
   get_protocol_snapshots : (GetSnapshotsArg) -> (vec ProtocolSnapshot) query;
   get_protocol_status : () -> (ProtocolStatus) query;
+  get_global_icusd_supply : () -> (nat) query;
+  get_supply_audit : () -> (SupplyAudit) query;
   get_recovery_cr_multiplier : () -> (float64) query;
   get_recovery_target_cr : () -> (float64) query;
   get_redemption_fee_ceiling : () -> (float64) query;

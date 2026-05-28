@@ -160,3 +160,22 @@ fn protocol_error_carries_multi_chain_variants() {
     let _: ProtocolError = Decode!(&halt_bytes, ProtocolError).expect("decode halt");
     let _: ProtocolError = Decode!(&admin_bytes, ProtocolError).expect("decode admin");
 }
+
+#[test]
+fn supply_audit_round_trips_via_candid() {
+    use candid::{Decode, Encode};
+    use crate::{SupplyAudit, SupplyAuditEntry};
+    use crate::chains::config::ChainId;
+
+    let audit = SupplyAudit {
+        total_e8s: 150_000,
+        per_chain: vec![
+            SupplyAuditEntry { chain_id: ChainId(1), display_name: "ICP".into(), supply_e8s: 100_000 },
+            SupplyAuditEntry { chain_id: ChainId(2), display_name: "Monad".into(), supply_e8s: 50_000 },
+        ],
+    };
+    let bytes = Encode!(&audit).expect("encode");
+    let back: SupplyAudit = Decode!(&bytes, SupplyAudit).expect("decode");
+    assert_eq!(back.total_e8s, 150_000);
+    assert_eq!(back.per_chain.len(), 2);
+}

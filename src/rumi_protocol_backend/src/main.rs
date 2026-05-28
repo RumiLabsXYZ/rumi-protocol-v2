@@ -14,6 +14,7 @@ use rumi_protocol_backend::{
     GetSnapshotsArg, ProtocolSnapshot, CollateralSnapshot,
     GetEventsFilteredResponse, StabilityPoolLiquidationResult,
     VaultHistoryPagedResponse, EventsByPrincipalPagedResponse, VaultsPageResponse,
+    SupplyAudit, SupplyAuditEntry,
     MAX_VAULT_HISTORY, MAX_EVENTS_BY_PRINCIPAL_LEGACY, MAX_EVENTS_BY_PRINCIPAL_SCAN,
     MAX_EVENTS_BY_PRINCIPAL_OUTPUT, MAX_VAULTS_LEGACY_PAGE, MAX_VAULTS_PAGE_LIMIT,
     PROTOCOL_STATUS_SNAPSHOT_TTL_NANOS, TREASURY_STATS_SNAPSHOT_TTL_NANOS,
@@ -5965,4 +5966,38 @@ fn check_candid_interface_compatibility() {
         "declared candid interface in rumi_protocol_backend.did file",
         CandidSource::File(did_path.as_path()),
     );
+}
+
+#[candid_method(query)]
+#[query]
+fn get_global_icusd_supply() -> u128 {
+    read_state(|s| {
+        s.multi_chain
+            .iter()
+            .map(|entry| entry.icusd_supply_e8s)
+            .sum()
+    })
+}
+
+#[candid_method(query)]
+#[query]
+fn get_supply_audit() -> SupplyAudit {
+    read_state(|s| {
+        let per_chain = s.multi_chain
+            .iter()
+            .map(|entry| SupplyAuditEntry {
+                chain_id: entry.chain_id.clone(),
+                display_name: entry.display_name.clone(),
+                supply_e8s: entry.icusd_supply_e8s,
+            })
+            .collect();
+        let total_e8s = s.multi_chain
+            .iter()
+            .map(|entry| entry.icusd_supply_e8s)
+            .sum();
+        SupplyAudit {
+            total_e8s,
+            per_chain,
+        }
+    })
 }

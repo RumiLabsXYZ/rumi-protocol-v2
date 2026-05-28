@@ -208,6 +208,22 @@ pub struct CollateralInterestInfo {
     pub weighted_interest_rate: f64,
 }
 
+/// Phase 1a: per-chain icUSD supply entry for `get_supply_audit()`.
+#[derive(CandidType, Deserialize, Debug, Clone)]
+pub struct SupplyAuditEntry {
+    pub chain_id: crate::chains::config::ChainId,
+    pub display_name: String,
+    pub supply_e8s: u128,
+}
+
+/// Phase 1a: per-chain breakdown of canonical multi-chain icUSD supply.
+/// Returned by `get_supply_audit()` for external auditors and dashboards.
+#[derive(CandidType, Deserialize, Debug, Clone)]
+pub struct SupplyAudit {
+    pub total_e8s: u128,
+    pub per_chain: Vec<SupplyAuditEntry>,
+}
+
 /// Per-collateral Layer 1 interest rate curve for frontend interpolation.
 #[derive(CandidType, Deserialize, Debug)]
 pub struct PerCollateralRateCurve {

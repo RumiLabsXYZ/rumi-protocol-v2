@@ -94,7 +94,9 @@ export const idlFactory = ({ IDL }) => {
     'TransferError' : TransferError,
     'AlreadyProcessing' : IDL.Null,
     'NotLowestCR' : IDL.Null,
+    'SupplyInvariantHalted' : IDL.Null,
     'AnonymousCallerNotAllowed' : IDL.Null,
+    'ChainAdmin' : IDL.Text,
     'AmountTooLow' : IDL.Record({ 'minimum_amount' : IDL.Nat64 }),
     'TransferFromError' : IDL.Tuple(TransferFromError, IDL.Nat64),
     'CallerNotOwner' : IDL.Null,
@@ -785,6 +787,15 @@ export const idlFactory = ({ IDL }) => {
     'liquidation_discount' : IDL.Nat64,
     'stability_pool_canister' : IDL.Opt(IDL.Principal),
   });
+  const SupplyAuditEntry = IDL.Record({
+    'supply_e8s' : IDL.Nat,
+    'display_name' : IDL.Text,
+    'chain_id' : IDL.Nat64,
+  });
+  const SupplyAudit = IDL.Record({
+    'total_e8s' : IDL.Nat,
+    'per_chain' : IDL.Vec(SupplyAuditEntry),
+  });
   const TreasuryStats = IDL.Record({
     'pending_treasury_collateral_entries' : IDL.Nat64,
     'liquidation_protocol_share' : IDL.Float64,
@@ -1005,6 +1016,7 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'get_global_icusd_mint_cap' : IDL.Func([], [IDL.Nat64], ['query']),
+    'get_global_icusd_supply' : IDL.Func([], [IDL.Nat], ['query']),
     'get_icp_usd_price_e8s' : IDL.Func([], [ProtocolStatusLite], ['query']),
     'get_icpswap_routing_enabled' : IDL.Func([], [IDL.Bool], ['query']),
     'get_interest_pool_share' : IDL.Func([], [IDL.Float64], ['query']),
@@ -1068,6 +1080,7 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Bool],
         ['query'],
       ),
+    'get_supply_audit' : IDL.Func([], [SupplyAudit], ['query']),
     'get_supported_collateral_types' : IDL.Func(
         [],
         [IDL.Vec(IDL.Tuple(IDL.Principal, CollateralStatus))],

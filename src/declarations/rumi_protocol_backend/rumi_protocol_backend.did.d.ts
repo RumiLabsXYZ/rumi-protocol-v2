@@ -756,7 +756,9 @@ export type ProtocolError = { 'GenericError' : string } |
   { 'TransferError' : TransferError } |
   { 'AlreadyProcessing' : null } |
   { 'NotLowestCR' : null } |
+  { 'SupplyInvariantHalted' : null } |
   { 'AnonymousCallerNotAllowed' : null } |
+  { 'ChainAdmin' : string } |
   { 'AmountTooLow' : { 'minimum_amount' : bigint } } |
   { 'TransferFromError' : [TransferFromError, bigint] } |
   { 'CallerNotOwner' : null };
@@ -883,6 +885,15 @@ export interface SuccessWithFee {
   'block_index' : bigint,
   'fee_amount_paid' : bigint,
   'collateral_amount_received' : [] | [bigint],
+}
+export interface SupplyAudit {
+  'total_e8s' : bigint,
+  'per_chain' : Array<SupplyAuditEntry>,
+}
+export interface SupplyAuditEntry {
+  'supply_e8s' : bigint,
+  'display_name' : string,
+  'chain_id' : bigint,
 }
 export type TransferError = {
     'GenericError' : { 'message' : string, 'error_code' : bigint }
@@ -1016,6 +1027,7 @@ export interface _SERVICE {
   'get_fees' : ActorMethod<[bigint], Fees>,
   'get_fees_for_collateral' : ActorMethod<[Principal, bigint], Fees>,
   'get_global_icusd_mint_cap' : ActorMethod<[], bigint>,
+  'get_global_icusd_supply' : ActorMethod<[], bigint>,
   'get_icp_usd_price_e8s' : ActorMethod<[], ProtocolStatusLite>,
   'get_icpswap_routing_enabled' : ActorMethod<[], boolean>,
   'get_interest_pool_share' : ActorMethod<[], number>,
@@ -1057,6 +1069,7 @@ export interface _SERVICE {
   'get_stability_pool_config' : ActorMethod<[], StabilityPoolConfig>,
   'get_stability_pool_principal' : ActorMethod<[], [] | [Principal]>,
   'get_stable_token_enabled' : ActorMethod<[StableTokenType], boolean>,
+  'get_supply_audit' : ActorMethod<[], SupplyAudit>,
   'get_supported_collateral_types' : ActorMethod<
     [],
     Array<[Principal, CollateralStatus]>
