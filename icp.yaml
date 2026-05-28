@@ -376,6 +376,89 @@ canisters:
         admin = principal "aaaaa-aa"
       })
 
+  # Task 15: rumi_analytics (mainnet dtlu2-uqaaa-aaaap-qugcq-cai). Read-only
+  # analytics canister that pulls/tails events from the protocol's other
+  # canisters (backend, icusd_ledger, 3pool, SP, AMM) and serves time-series
+  # queries used by the explorer.
+  #
+  # TWO non-obvious deploy quirks (carried over from dfx; see MEMORY.md
+  # feedback_analytics_deploy.md):
+  #
+  #   1. Full InitArgs required on every upgrade. The candid declares
+  #      `service : (InitArgs) -> {...}` (rumi_analytics.did:421) and both
+  #      dfx and icp-cli enforce arg type-checking against this signature
+  #      EVEN on `--mode upgrade`. A bare upgrade with `()` fails with
+  #      "wrong number of argument values".
+  #
+  #   2. Wasm exceeds the 2 MiB ingress limit. The cargo release wasm is
+  #      ~2.4 MB; `ic-wasm shrink` alone drops it to ~1.6 MB which fits;
+  #      gzip -9 brings it to ~488 KB. The default `@dfinity/rust@v3.2.0`
+  #      recipe with `shrink: true` produces a shrunk wasm but does NOT
+  #      gzip; if the shrunk wasm is over 2_097_152 bytes after recipe
+  #      build, we need the custom build:steps form below to add gzip.
+  #
+  # PER-MEASUREMENT FINDING (Task 15 build probes, 2026-05-27):
+  #   raw cargo release wasm                  : 3_356_627 bytes (~3.20 MB)
+  #   @dfinity/rust recipe + shrink: true     : 3_171_287 bytes (~3.02 MB)
+  #   shrink --keep-name-section + candid     : 2_821_426 bytes (~2.69 MB)
+  #   ^ same, then gzip -9 (this entry's out) :   631_557 bytes (~617 KB)
+  #
+  # The 2 MiB ingress limit is 2_097_152 bytes. The default recipe with
+  # `shrink: true` is NOT enough on its own. We need both `ic-wasm shrink`
+  # AND `gzip -9`. The IC strips the gzip server-side at install time.
+  #
+  # That rules out the `recipe:` form (recipe knows how to shrink but does
+  # not gzip), so we use the explicit `build: steps:` form below:
+  #   1. `cargo build --release --target wasm32-unknown-unknown --package rumi_analytics`
+  #   2. copy the artifact to ICP_WASM_OUTPUT_PATH (icp-cli's expected location)
+  #   3. `ic-wasm <out> -o <out> shrink --keep-name-section` (strip debug
+  #      sections but keep the wasm Name section so debugging is still
+  #      possible against the deployed bytes)
+  #   4. `gzip -9 -f <out>` (best compression, force overwrite)
+  #
+  # post_upgrade() (lib.rs:60) takes NO parameters and only calls
+  # state::hydrate_from_slim() + timers::setup_timers(SetupContext::PostUpgrade).
+  # The Candid type-check still requires the InitArgs shape because the
+  # service signature is `(InitArgs) -> ...`, but the wasm never reads any
+  # of the principals on the upgrade path. This is the same "dummy InitArgs
+  # on upgrade" pattern as rumi_3pool, liquidation_bot, rumi_stability_pool,
+  # rumi_treasury, and rumi_amm.
+  #
+  # Dummy admin = aaaaa-aa (management canister) below. The wasm decodes
+  # this into an InitArgs that post_upgrade never touches; the live admin
+  # plus the full SlimState (every protocol source canister ID, every
+  # cached series, the BackendEvent ingestion cursor, every collector log)
+  # is preserved by state::hydrate_from_slim() from the stable cell.
+  #
+  # Production module hash at time of migration:
+  #   0x5514e9e67a9199ec91138a0edfa3dc88847bf5b839227cd784d010acf55d6c41
+  #   (the post-Wave-14 + post-PR #182 hash that fixed BackendEvent decoding
+  #   and shipped the per-collateral XRC source-count floor.)
+  #
+  # The UPG-006 reinstall guard inside `init()` (lib.rs:35) asserts that
+  # `stable64_size() == 0` so any accidental reinstall traps before wiping
+  # state. Upgrades go through `post_upgrade()` which never hits that guard.
+  - name: rumi_analytics
+    build:
+      steps:
+        - type: script
+          commands:
+            - cargo build --release --target wasm32-unknown-unknown --package rumi_analytics
+            - cp target/wasm32-unknown-unknown/release/rumi_analytics.wasm "$ICP_WASM_OUTPUT_PATH"
+            - ic-wasm "$ICP_WASM_OUTPUT_PATH" -o "$ICP_WASM_OUTPUT_PATH" metadata candid:service -f src/rumi_analytics/rumi_analytics.did -v public
+            - ic-wasm "$ICP_WASM_OUTPUT_PATH" -o "$ICP_WASM_OUTPUT_PATH" shrink --keep-name-section
+            - gzip -9 -f "$ICP_WASM_OUTPUT_PATH"
+            - mv "${ICP_WASM_OUTPUT_PATH}.gz" "$ICP_WASM_OUTPUT_PATH"
+    init_args: |
+      (record {
+        admin = principal "aaaaa-aa";
+        backend = principal "aaaaa-aa";
+        icusd_ledger = principal "aaaaa-aa";
+        three_pool = principal "aaaaa-aa";
+        stability_pool = principal "aaaaa-aa";
+        amm = principal "aaaaa-aa"
+      })
+
 networks:
   - name: local
     mode: managed
@@ -413,6 +496,7 @@ environments:
       - rumi_stability_pool
       - rumi_treasury
       - rumi_amm
+      - rumi_analytics
     init_args:
       # Upgrade-mode override: `(null)` preserves all existing configuration
       # (ledger_id and the retrieve-interval fields). The canister is already
@@ -516,6 +600,32 @@ environments:
       rumi_amm: |
         (record {
           admin = principal "aaaaa-aa"
+        })
+      # rumi_analytics upgrade-mode override: InitArgs shape (six principal
+      # fields: admin, backend, icusd_ledger, three_pool, stability_pool, amm)
+      # is required by the candid `service : (InitArgs) -> { ... }` declaration,
+      # but the wasm's `post_upgrade()` (lib.rs:60) takes no parameters and only
+      # calls `state::hydrate_from_slim()` + timer setup. All six principals
+      # are dummies (management canister). The canister's live state - the full
+      # SlimState including the admin principal, every protocol source canister
+      # ID (backend, icusd_ledger, three_pool, stability_pool, amm), every
+      # cached series, the BackendEvent ingestion cursor, all collector logs -
+      # is preserved by the hydrate_from_slim path from the stable cell. See
+      # MEMORY.md feedback_analytics_deploy.md.
+      #
+      # Additional ops note: this canister's wasm exceeds the 2 MiB single-
+      # message ingress limit when un-gzipped. The recipe runs `ic-wasm shrink`
+      # via `shrink: true`. If the shrunk output is still > 2 MiB after a build,
+      # promote the canister to the `build: steps:` form (cargo + ic-wasm +
+      # gzip -9) so install does not 408 / "Unable to buffer body".
+      rumi_analytics: |
+        (record {
+          admin = principal "aaaaa-aa";
+          backend = principal "aaaaa-aa";
+          icusd_ledger = principal "aaaaa-aa";
+          three_pool = principal "aaaaa-aa";
+          stability_pool = principal "aaaaa-aa";
+          amm = principal "aaaaa-aa"
         })
 
   # Future staging environment on mainnet (separate canister IDs). Populated
