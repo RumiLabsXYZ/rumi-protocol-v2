@@ -164,6 +164,59 @@ canisters:
         }
       })
 
+  # Task 11: rumi_3pool (mainnet fohh4-yyaaa-aaaap-qtkpa-cai). Rust canister
+  # built locally via the @dfinity/rust recipe (shrink: true matches dfx.json's
+  # implicit shrink behavior so the locally-built wasm matches production within
+  # build-metadata noise).
+  #
+  # This is a DECISION-GATE canister. rumi_3pool is the Curve-style AMM that
+  # holds real LP shares for real users, and it is the ICRC-1/2/3 ledger for
+  # the 3USD yield-bearing stablecoin (8 decimals, NOT 18). It participates in
+  # the SP interest split (30% routed through 3pool).
+  #
+  # The 2026-05-18 AMM state-wipe incident happened on rumi_amm, not rumi_3pool,
+  # and was caused by source-code changes (adding `#[serde(default)]` fields
+  # without a versioned-snapshot struct), NOT by deploy-tool changes. Phase 0
+  # does NOT change any Rust source, so the state-wipe failure mode is not in
+  # play here. The migration is a pure deploy-tool swap.
+  #
+  # The canister's candid service signature is `service : (ThreePoolInitArgs) -> { ... }`,
+  # which forces dfx and icp-cli to type-check every deploy arg against the init
+  # shape EVEN on upgrade. `post_upgrade()` takes no parameters (lib.rs:70),
+  # so the wasm itself ignores the bytes during upgrade and reads SlimState
+  # from the stable cell. This is the "dummy InitArgs on upgrade" pattern
+  # (per MEMORY.md feedback_3pool_deploy.md).
+  #
+  # The dummy values below mirror the exact shape Rumi has used for every
+  # rumi_3pool upgrade since the 2026-04-29 ICRC-3 hash-cache deploy: three
+  # placeholder TokenConfig entries (all aaaaa-aa, decimals 0, precision_mul
+  # 1), all numeric fields zero, admin = aaaaa-aa. The wasm decodes these
+  # into a ThreePoolInitArgs that post_upgrade never touches.
+  #
+  # Per the upgrade-args spike, `icp canister install --mode upgrade` reads the
+  # environment-level override below. mainnet-live carries the same dummy shape
+  # so re-deploys cannot accidentally reinitialize the pool's persisted state
+  # (LP balances, reserves, virtual price, ICRC-3 archive).
+  - name: rumi_3pool
+    recipe:
+      type: "@dfinity/rust@v3.2.0"
+      configuration:
+        package: rumi_3pool
+        candid: src/rumi_3pool/rumi_3pool.did
+        shrink: true
+    init_args: |
+      (record {
+        tokens = vec {
+          record { ledger_id = principal "aaaaa-aa"; symbol = ""; decimals = 0 : nat8; precision_mul = 1 : nat64 };
+          record { ledger_id = principal "aaaaa-aa"; symbol = ""; decimals = 0 : nat8; precision_mul = 1 : nat64 };
+          record { ledger_id = principal "aaaaa-aa"; symbol = ""; decimals = 0 : nat8; precision_mul = 1 : nat64 }
+        };
+        initial_a = 0 : nat64;
+        swap_fee_bps = 0 : nat64;
+        admin_fee_bps = 0 : nat64;
+        admin = principal "aaaaa-aa"
+      })
+
 networks:
   - name: local
     mode: managed
@@ -197,6 +250,7 @@ environments:
     canisters:
       - icusd_index
       - liquidation_bot
+      - rumi_3pool
     init_args:
       # Upgrade-mode override: `(null)` preserves all existing configuration
       # (ledger_id and the retrieve-interval fields). The canister is already
@@ -228,6 +282,27 @@ environments:
             icusd_ledger = null;
           }
         })
+      # rumi_3pool upgrade-mode override: ThreePoolInitArgs shape is required
+      # by the candid `service : (ThreePoolInitArgs) -> { ... }` declaration,
+      # but the wasm's post_upgrade() takes no parameters (lib.rs:70) and reads
+      # SlimState from the stable cell. Values are deliberate dummies: every
+      # principal is the management canister (aaaaa-aa), every numeric field
+      # is zero, precision_mul is 1 (minimum legal value). The canister's
+      # live pool state (LP balances, reserves, virtual price, ICRC-3 archive,
+      # 3USD total_supply) is preserved by the stable-memory load path. See
+      # MEMORY.md feedback_3pool_deploy.md.
+      rumi_3pool: |
+        (record {
+          tokens = vec {
+            record { ledger_id = principal "aaaaa-aa"; symbol = ""; decimals = 0 : nat8; precision_mul = 1 : nat64 };
+            record { ledger_id = principal "aaaaa-aa"; symbol = ""; decimals = 0 : nat8; precision_mul = 1 : nat64 };
+            record { ledger_id = principal "aaaaa-aa"; symbol = ""; decimals = 0 : nat8; precision_mul = 1 : nat64 }
+          };
+          initial_a = 0 : nat64;
+          swap_fee_bps = 0 : nat64;
+          admin_fee_bps = 0 : nat64;
+          admin = principal "aaaaa-aa"
+        })
 
   # Future staging environment on mainnet (separate canister IDs). Populated
   # by Phase 1 work; intentionally empty here so the project file already
@@ -247,3 +322,4 @@ environments:
       - flaky_ledger
       - icusd_index
       - liquidation_bot
+      - rumi_3pool
