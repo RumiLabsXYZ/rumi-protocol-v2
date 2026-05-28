@@ -2249,3 +2249,58 @@ export async function fetchTreasuryHoldings(icpPriceUsd: number): Promise<Treasu
 	const result = balances.filter((b) => b.balanceE8s > 0n);
 	return setCache(key, result);
 }
+
+// ── Protocol reserves (redemption buffer) ────────────────────────────────────
+
+export type ProtocolReserve = {
+	symbol: string;
+	ledger: string;
+	balanceE8s: bigint;
+	decimals: number;
+	usd: number;
+};
+
+/**
+ * Ledgers the protocol holds as a redemption buffer. Populated by:
+ *   - liquidation_bot sweeping ckUSDC swap proceeds to the backend
+ *   - users repaying vault debt with ckUSDC / ckUSDT via repay_to_vault_with_stable
+ *
+ * Matches the on-chain `get_reserve_balances()` set (rumi_protocol_backend main.rs).
+ */
+const PROTOCOL_RESERVE_LEDGERS: Array<{
+	symbol: string;
+	principal: string;
+	decimals: number;
+}> = [
+	{ symbol: 'ckUSDC', principal: CANISTER_IDS.CKUSDC_LEDGER, decimals: 6 },
+	{ symbol: 'ckUSDT', principal: CANISTER_IDS.CKUSDT_LEDGER, decimals: 6 },
+];
+
+const PROTOCOL_PRINCIPAL = Principal.fromText(CANISTER_IDS.PROTOCOL);
+
+/**
+ * Query `icrc1_balance_of` on each reserve ledger using the rumi_protocol_backend
+ * principal as the account owner. Returns only tokens with a non-zero balance.
+ * All reserve assets are USD-pegged stablecoins, so usd === balance.
+ */
+export async function fetchProtocolReserves(): Promise<ProtocolReserve[]> {
+	const key = 'protocol:reserves';
+	const cached = getCached<ProtocolReserve[]>(key, TTL.TREASURY);
+	if (cached) return cached;
+
+	const balances = await Promise.all(
+		PROTOCOL_RESERVE_LEDGERS.map(async (l) => {
+			try {
+				const balanceE8s = await fetchIcrc1BalanceOf(l.principal, PROTOCOL_PRINCIPAL);
+				const usd = Number(balanceE8s) / Math.pow(10, l.decimals);
+				return { symbol: l.symbol, ledger: l.principal, balanceE8s, decimals: l.decimals, usd };
+			} catch (err) {
+				console.error(`[explorerService] fetchProtocolReserves ${l.symbol} failed:`, err);
+				return { symbol: l.symbol, ledger: l.principal, balanceE8s: 0n, decimals: l.decimals, usd: 0 };
+			}
+		}),
+	);
+
+	const result = balances.filter((b) => b.balanceE8s > 0n);
+	return setCache(key, result);
+}
