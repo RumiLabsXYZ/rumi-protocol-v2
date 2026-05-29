@@ -190,6 +190,12 @@ thread_local! {
         const { std::cell::Cell::new(None) };
     static VAULT_CHECK_TIMER_ID: std::cell::Cell<Option<ic_cdk_timers::TimerId>> =
         const { std::cell::Cell::new(None) };
+    // Phase 1b Task 15: Monad async loops. Same transient (not-persisted)
+    // lifecycle — re-assigned fresh ids by `setup_timers` on every upgrade.
+    static SETTLEMENT_TIMER_ID: std::cell::Cell<Option<ic_cdk_timers::TimerId>> =
+        const { std::cell::Cell::new(None) };
+    static OBSERVER_TIMER_ID: std::cell::Cell<Option<ic_cdk_timers::TimerId>> =
+        const { std::cell::Cell::new(None) };
 }
 
 fn register_xrc_fetch_timer() {
@@ -229,6 +235,45 @@ fn register_vault_check_timer() {
         let new_id = ic_cdk_timers::set_timer_interval(
             std::time::Duration::from_secs(secs),
             || ic_cdk::spawn(rumi_protocol_backend::xrc::vault_check_tick()),
+        );
+        cell.set(Some(new_id));
+    });
+}
+
+/// Phase 1b Task 15: register Timer D (Monad settlement fan-out). Clears any
+/// existing id and re-registers in place so the setter can re-tune live.
+///
+/// FLOOR: a 0 interval (serde-default-missing on an old snapshot, or a bad
+/// setter value that slipped past validation) is forced to 30s, never 0 — a 0s
+/// `set_timer_interval` is a busy-loop and the #1 cycle burner (this is the
+/// heartbeat-cost regression the protocol removed a heartbeat to avoid).
+fn register_settlement_timer() {
+    let secs = read_state(|s| s.settlement_tick_interval_secs);
+    let secs = if secs == 0 { 30 } else { secs.max(1) };
+    SETTLEMENT_TIMER_ID.with(|cell| {
+        if let Some(old) = cell.get() {
+            ic_cdk_timers::clear_timer(old);
+        }
+        let new_id = ic_cdk_timers::set_timer_interval(
+            std::time::Duration::from_secs(secs),
+            || ic_cdk::spawn(rumi_protocol_backend::chains::monad::settlement::settlement_tick()),
+        );
+        cell.set(Some(new_id));
+    });
+}
+
+/// Phase 1b Task 15: register the Monad inbound observer fan-out. Same
+/// clear-and-re-register-in-place + 0-floor protection as the settlement timer.
+fn register_observer_timer() {
+    let secs = read_state(|s| s.observer_tick_interval_secs);
+    let secs = if secs == 0 { 30 } else { secs.max(1) };
+    OBSERVER_TIMER_ID.with(|cell| {
+        if let Some(old) = cell.get() {
+            ic_cdk_timers::clear_timer(old);
+        }
+        let new_id = ic_cdk_timers::set_timer_interval(
+            std::time::Duration::from_secs(secs),
+            || ic_cdk::spawn(rumi_protocol_backend::chains::monad::deposit_watch::observer_tick()),
         );
         cell.set(Some(new_id));
     });
@@ -297,6 +342,18 @@ fn setup_timers() {
     ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(3600), || {
         capture_protocol_snapshot();
     });
+
+    // ── Phase 1b Task 15: Monad async loops (Timer D + inbound observer) ─────
+    // Both tick fns fan out over registered+enabled chains and are NO-OPS when
+    // no chain is registered, so they are safe to run on the staging canister
+    // before Monad is configured. Cadences live in State (default 30s) and are
+    // tunable via `set_settlement_tick_interval_secs` /
+    // `set_observer_tick_interval_secs`, which re-register in place. The register
+    // helpers FLOOR a 0 interval to 30s (never a busy-loop). Per-chain
+    // re-entrancy guards in run_settlement/run_observer prevent overlapping ticks
+    // from double-processing an op.
+    register_settlement_timer();
+    register_observer_timer();
 }
 
 fn capture_protocol_snapshot() {
@@ -4401,6 +4458,65 @@ async fn set_vault_check_tick_interval_secs(secs: u64) -> Result<(), ProtocolErr
     mutate_state(|s| s.vault_check_tick_interval_secs = secs);
     register_vault_check_timer();
     log!(INFO, "[set_vault_check_tick_interval_secs] Timer C interval set to {}s", secs);
+    Ok(())
+}
+
+/// Phase 1b Task 15: tune the Timer D (Monad outbound settlement fan-out)
+/// interval in seconds. Default 30. Re-registers in place.
+///
+/// Rejects `secs == 0` (belt-and-suspenders with the hard floor in
+/// `register_settlement_timer`, which would coerce a 0 to 30 anyway). Lowering
+/// makes mint/withdrawal settlement land faster (one op per chain per tick) at
+/// the cost of more frequent EVM RPC polling; raising slows settlement
+/// throughput. The per-chain re-entrancy guard means a tick that out-runs the
+/// interval is simply skipped, so a low interval never stacks concurrent runs.
+#[candid_method(update)]
+#[update]
+async fn set_settlement_tick_interval_secs(secs: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set the settlement tick interval".to_string(),
+        ));
+    }
+    if secs == 0 {
+        return Err(ProtocolError::GenericError(
+            "Settlement tick interval must be > 0".to_string(),
+        ));
+    }
+    mutate_state(|s| s.settlement_tick_interval_secs = secs);
+    register_settlement_timer();
+    log!(INFO, "[set_settlement_tick_interval_secs] Timer D interval set to {}s", secs);
+    Ok(())
+}
+
+/// Phase 1b Task 15: tune the Monad inbound observer fan-out interval in
+/// seconds. Default 30. Re-registers in place.
+///
+/// Rejects `secs == 0` (belt-and-suspenders with the hard floor in
+/// `register_observer_timer`). Lowering tightens deposit-detection and
+/// burn-observation latency at the cost of more frequent EVM RPC polling;
+/// raising slows it. Same per-chain re-entrancy-guard skip behavior as the
+/// settlement timer.
+#[candid_method(update)]
+#[update]
+async fn set_observer_tick_interval_secs(secs: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set the observer tick interval".to_string(),
+        ));
+    }
+    if secs == 0 {
+        return Err(ProtocolError::GenericError(
+            "Observer tick interval must be > 0".to_string(),
+        ));
+    }
+    mutate_state(|s| s.observer_tick_interval_secs = secs);
+    register_observer_timer();
+    log!(INFO, "[set_observer_tick_interval_secs] Observer interval set to {}s", secs);
     Ok(())
 }
 

@@ -38,7 +38,7 @@
 
 use ic_canister_log::log;
 
-use crate::chains::config::ChainId;
+use crate::chains::config::{ChainId, ChainStatus};
 use crate::chains::multi_chain_state::MultiChainStateV2;
 use crate::chains::supply::{apply_supply_delta, SupplyDelta};
 use crate::logs::INFO;
@@ -135,6 +135,55 @@ pub fn apply_burn_to_state(
     Ok(())
 }
 
+// ─── Timer A tick (fan-out) ──────────────────────────────────────────────────
+
+/// Timer A entry point: run one observation cycle for every registered+enabled
+/// chain. The per-chain `run_observer` carries its own mode/halt/re-entrancy
+/// guards, so this fan-out just snapshots the chain-id list and calls each in
+/// turn. NO state borrow is held across the awaits — the chain-id Vec is cloned
+/// out of state up front.
+///
+/// No-op when no chain is registered (the Vec is empty), so it is safe to
+/// register on the staging canister before Monad is configured (Task 15 PocketIC
+/// smoke test asserts this).
+pub async fn observer_tick() {
+    let chains: Vec<ChainId> = read_state(|s| {
+        s.multi_chain
+            .chain_configs
+            .iter()
+            .filter(|(_, c)| matches!(c.status, ChainStatus::Registered))
+            .map(|(id, _)| *id)
+            .collect()
+    });
+    for chain in chains {
+        run_observer(chain).await;
+    }
+}
+
+// ─── Per-chain re-entrancy guard (Task 13 review; wired Task 15) ───────────────
+//
+// Once Timer A runs at a short interval, a slow RPC tick can still be awaiting
+// when the next timer fires, which would spawn a SECOND `run_observer(chain)`
+// concurrently. Two concurrent observers could double-apply the same Burn log or
+// double-enqueue a mint for the same AwaitingDeposit vault. This per-chain guard
+// ensures only one `run_observer` per chain runs at a time. The RAII guard is a
+// local held across all awaits, so it releases when the async fn returns on ANY
+// path.
+
+thread_local! {
+    static OBSERVER_INFLIGHT: std::cell::RefCell<std::collections::BTreeSet<ChainId>> =
+        const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
+}
+
+struct ObserverGuard(ChainId);
+impl Drop for ObserverGuard {
+    fn drop(&mut self) {
+        OBSERVER_INFLIGHT.with(|s| {
+            s.borrow_mut().remove(&self.0);
+        });
+    }
+}
+
 // ─── Async observer loop ─────────────────────────────────────────────────────
 
 /// Run one observation cycle for the given chain.
@@ -168,6 +217,21 @@ pub fn apply_burn_to_state(
 /// `fetch_block_numbers` and before the log scan. The structure below
 /// leaves a clear seam for that insertion.
 pub async fn run_observer(chain: ChainId) {
+    // Re-entrancy guard (acquired BEFORE any other work): if a tick for this
+    // chain is still in flight, skip this one entirely. The RAII guard releases
+    // on the future completing (any return path), so the next tick re-acquires.
+    let _guard = match OBSERVER_INFLIGHT.with(|s| {
+        if s.borrow().contains(&chain) {
+            None
+        } else {
+            s.borrow_mut().insert(chain);
+            Some(ObserverGuard(chain))
+        }
+    }) {
+        Some(g) => g,
+        None => return, // a tick for this chain is already running; skip
+    };
+
     // Guard: skip if in read-only mode, the invariant has halted, or this chain
     // is reorg-halted (Task 11). A reorg-halted chain stops BOTH the observer
     // and the settlement worker until `clear_reorg_halt` (Task 14) is called.
@@ -440,11 +504,13 @@ pub async fn run_observer(chain: ChainId) {
 /// cache unpopulated, which the gas gate treats as fail-open). Borrow
 /// discipline: no `read_state`/`mutate_state` borrow is held across an `.await`.
 async fn refresh_hot_wallet_balance(chain: ChainId) {
-    let path = tecdsa::settlement_derivation_path(chain);
-    let addr = match tecdsa::derive_evm_address(path).await {
-        Ok((_pubkey, addr)) => addr,
+    // Resolve the settlement address via the per-chain cache (Task 11 M1) — the
+    // address is deterministic, so we avoid a tECDSA derive on every observer
+    // tick. We only need the address here (not the path).
+    let addr = match tecdsa::cached_settlement_address(chain).await {
+        Ok((_path, addr)) => addr,
         Err(e) => {
-            log!(INFO, "[observer chain={:?}] hot-wallet derive_evm_address failed: {}; skipping balance refresh", chain, e);
+            log!(INFO, "[observer chain={:?}] hot-wallet cached_settlement_address failed: {}; skipping balance refresh", chain, e);
             return;
         }
     };

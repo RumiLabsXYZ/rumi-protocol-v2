@@ -36,7 +36,7 @@
 
 use ic_canister_log::log;
 
-use crate::chains::config::ChainId;
+use crate::chains::config::{ChainId, ChainStatus};
 use crate::chains::monad::chain_vault::ChainVaultStatus;
 use crate::chains::multi_chain_state::MultiChainStateV2;
 use crate::chains::settlement_queue::{SettlementOpKind, SettlementOpStatus, SettlementQueueV1};
@@ -133,6 +133,55 @@ pub fn confirm_mint_in_state(
     Ok(())
 }
 
+// ─── Timer D tick (fan-out) ─────────────────────────────────────────────────
+
+/// Timer D entry point: run one settlement cycle for every registered+enabled
+/// chain. The per-chain `run_settlement` carries its own mode/halt/re-entrancy
+/// guards, so this fan-out just snapshots the chain-id list and calls each in
+/// turn. NO state borrow is held across the awaits — the chain-id Vec is cloned
+/// out of state up front.
+///
+/// No-op when no chain is registered (the Vec is empty), so it is safe to
+/// register on the staging canister before Monad is configured (Task 15 PocketIC
+/// smoke test asserts this).
+pub async fn settlement_tick() {
+    let chains: Vec<ChainId> = read_state(|s| {
+        s.multi_chain
+            .chain_configs
+            .iter()
+            .filter(|(_, c)| matches!(c.status, ChainStatus::Registered))
+            .map(|(id, _)| *id)
+            .collect()
+    });
+    for chain in chains {
+        run_settlement(chain).await;
+    }
+}
+
+// ─── Per-chain re-entrancy guard (Task 13 review; wired Task 15) ───────────────
+//
+// Once Timer D runs at a short interval, a slow RPC tick can still be awaiting
+// when the next timer fires, which would spawn a SECOND `run_settlement(chain)`
+// concurrently. Both would `select_next_op` the SAME op and double-process it
+// (double-submit -> potential double-mint; double-confirm). This per-chain guard
+// ensures only one `run_settlement` per chain runs at a time. The RAII guard is
+// a local held across all awaits, so it releases when the async fn returns on
+// ANY path (success, early return, trap-unwind).
+
+thread_local! {
+    static SETTLEMENT_INFLIGHT: std::cell::RefCell<std::collections::BTreeSet<ChainId>> =
+        const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
+}
+
+struct SettlementGuard(ChainId);
+impl Drop for SettlementGuard {
+    fn drop(&mut self) {
+        SETTLEMENT_INFLIGHT.with(|s| {
+            s.borrow_mut().remove(&self.0);
+        });
+    }
+}
+
 // ─── Async worker ─────────────────────────────────────────────────────────────
 
 /// Run one settlement cycle for the given chain.
@@ -153,6 +202,21 @@ pub fn confirm_mint_in_state(
 /// resulting status back. No `read_state`/`mutate_state` borrow is ever held
 /// across an `.await`.
 pub async fn run_settlement(chain: ChainId) {
+    // Re-entrancy guard (acquired BEFORE any other work): if a tick for this
+    // chain is still in flight, skip this one entirely. The RAII guard releases
+    // on the future completing (any return path), so the next tick re-acquires.
+    let _guard = match SETTLEMENT_INFLIGHT.with(|s| {
+        if s.borrow().contains(&chain) {
+            None
+        } else {
+            s.borrow_mut().insert(chain);
+            Some(SettlementGuard(chain))
+        }
+    }) {
+        Some(g) => g,
+        None => return, // a tick for this chain is already running; skip
+    };
+
     // Guard: skip if in read-only mode, the supply invariant has halted, or this
     // chain is reorg-halted (Task 11). A reorg-halted chain stops BOTH the
     // observer and the settlement worker until `clear_reorg_halt` (Task 14).
@@ -338,12 +402,14 @@ async fn submit_op(
         }
     }
 
-    // 1. Derive the settlement (minter) address.
-    let path = tecdsa::settlement_derivation_path(chain);
-    let settlement_addr = match tecdsa::derive_evm_address(path.clone()).await {
-        Ok((_pubkey, addr)) => addr,
+    // 1. Resolve the settlement (minter) address via the per-chain cache
+    //    (Task 11 M1): the address is deterministic, so we derive it once per
+    //    chain and reuse it every tick instead of paying a signing-subnet call
+    //    each submit. Returns the derivation PATH too, which the signer needs.
+    let (path, settlement_addr) = match tecdsa::cached_settlement_address(chain).await {
+        Ok(pair) => pair,
         Err(e) => {
-            log!(INFO, "[settlement chain={:?}] derive_evm_address failed for op {}: {}; will retry", chain, op_id, e);
+            log!(INFO, "[settlement chain={:?}] cached_settlement_address failed for op {}: {}; will retry", chain, op_id, e);
             return;
         }
     };
@@ -790,12 +856,11 @@ async fn resubmit_if_stuck(
         }
     };
 
-    // Derive the settlement address.
-    let path = tecdsa::settlement_derivation_path(chain);
-    let settlement_addr = match tecdsa::derive_evm_address(path.clone()).await {
-        Ok((_pubkey, addr)) => addr,
+    // Resolve the settlement address via the per-chain cache (Task 11 M1).
+    let (path, settlement_addr) = match tecdsa::cached_settlement_address(chain).await {
+        Ok(pair) => pair,
         Err(e) => {
-            log!(INFO, "[settlement chain={:?}] resubmit derive_evm_address failed for op {}: {}; leaving Inflight", chain, op_id, e);
+            log!(INFO, "[settlement chain={:?}] resubmit cached_settlement_address failed for op {}: {}; leaving Inflight", chain, op_id, e);
             return;
         }
     };

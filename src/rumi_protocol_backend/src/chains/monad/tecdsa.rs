@@ -62,3 +62,36 @@ pub async fn derive_evm_address(derivation_path: Vec<Vec<u8>>) -> Result<(Vec<u8
     let addr = evm_address_from_pubkey(&res.public_key)?;
     Ok((res.public_key, addr))
 }
+
+// ─── Settlement-address cache (Task 11 review M1; wired Task 15) ────────────────
+
+thread_local! {
+    static SETTLEMENT_ADDR_CACHE: std::cell::RefCell<std::collections::BTreeMap<ChainId, String>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+/// Cached settlement (minter) address for `chain`. Derives + caches on first
+/// use; returns the cached value thereafter. The address is deterministic
+/// (`settlement_derivation_path` has no nonce), so caching is always correct;
+/// the cache is a thread_local (not persisted) and simply re-derives once per
+/// chain after an upgrade. Returns (path, address) so callers that also need the
+/// derivation path for signing get both.
+///
+/// SETTLEMENT-ONLY: this caches the SETTLEMENT address exclusively (the key is
+/// `chain`, and the path is always `settlement_derivation_path(chain)`). It must
+/// NEVER be used for a per-vault custody address — those derive from
+/// `custody_derivation_path(chain, user, nonce)` and are per-vault, not per-chain.
+pub async fn cached_settlement_address(chain: ChainId) -> Result<(Vec<Vec<u8>>, String), String> {
+    let path = settlement_derivation_path(chain);
+    // Synchronous cache read — the borrow is dropped before any `.await`.
+    if let Some(addr) = SETTLEMENT_ADDR_CACHE.with(|c| c.borrow().get(&chain).cloned()) {
+        return Ok((path, addr));
+    }
+    let (_pubkey, addr) = derive_evm_address(path.clone()).await?;
+    // Synchronous cache write — borrow dropped before returning, never held
+    // across an `.await`.
+    SETTLEMENT_ADDR_CACHE.with(|c| {
+        c.borrow_mut().insert(chain, addr.clone());
+    });
+    Ok((path, addr))
+}

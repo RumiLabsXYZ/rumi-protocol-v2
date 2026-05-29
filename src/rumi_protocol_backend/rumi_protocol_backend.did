@@ -1092,6 +1092,7 @@ service : (ProtocolArg) -> {
   set_manual_collateral_price : (nat32, text, nat64) -> (Result);
   set_min_icusd_amount : (nat64) -> (Result);
   set_min_xrc_sources_used : (nat32) -> (Result);
+  set_observer_tick_interval_secs : (nat64) -> (Result);
   set_rate_curve_markers : (opt principal, vec record { float64; float64 }) -> (
       Result,
     );
@@ -1108,6 +1109,7 @@ service : (ProtocolArg) -> {
   set_rmr_ceiling_cr : (float64) -> (Result);
   set_rmr_floor : (float64) -> (Result);
   set_rmr_floor_cr : (float64) -> (Result);
+  set_settlement_tick_interval_secs : (nat64) -> (Result);
   set_sp_writedown_disabled : (bool) -> (Result);
   set_stability_pool_principal : (principal) -> (Result);
   set_stable_ledger_principal : (StableTokenType, principal) -> (Result);
