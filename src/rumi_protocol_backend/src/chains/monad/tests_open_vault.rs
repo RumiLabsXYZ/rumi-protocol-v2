@@ -68,6 +68,31 @@ fn cr_is_max_when_debt_zero() {
     assert_eq!(collateral_ratio_e4(5 * ONE_MON_E18, PRICE_2_USD_E8, 0), u64::MAX);
 }
 
+// 1b. Degenerate open: zero debt is rejected (would enqueue a wasted 0-mint).
+#[test]
+fn open_rejects_zero_debt() {
+    let mut s = setup(PRICE_100_USD_E8);
+    let res = open_chain_vault_in_state(
+        &mut s,
+        CHAIN,
+        owner(),
+        "0xcustody".into(),
+        100 * ONE_MON_E18, // plenty of collateral...
+        0,                 // ...but zero debt
+        "0xrecipient".into(),
+        13_000,
+        0,
+        9,
+    );
+    assert!(matches!(res, Err(OpenVaultError::ZeroDebt)));
+    assert!(s.chain_vaults.is_empty());
+    assert!(s
+        .settlement_queues
+        .get(&CHAIN)
+        .map(|q| q.pending.is_empty())
+        .unwrap_or(true));
+}
+
 // 2. open rejects below min CR, creates nothing, enqueues nothing
 #[test]
 fn open_rejects_below_min_cr() {

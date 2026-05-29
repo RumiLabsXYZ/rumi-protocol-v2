@@ -65,6 +65,9 @@ pub enum OpenVaultError {
     NoPrice,
     /// Declared collateral ratio is below the minimum.
     BelowMinCr { cr_e4: u64, min_e4: u64 },
+    /// Declared debt is zero. A zero-debt vault has nothing to mint; allowing it
+    /// would enqueue a wasted zero-value on-chain mint once "deposited".
+    ZeroDebt,
     /// Enqueuing the Mint op failed (e.g. duplicate idempotency key).
     QueueError(String),
     /// `verify_deposit_and_enqueue_mint_in_state` could not find the vault.
@@ -131,6 +134,13 @@ pub fn open_chain_vault_in_state(
     // Reject an unregistered chain before reading anything else.
     if !state.chain_configs.contains_key(&chain) {
         return Err(OpenVaultError::UnknownChain);
+    }
+    // A zero-debt vault has nothing to mint; with debt 0 the CR check is a
+    // no-op (u64::MAX) and deposit-watch would later enqueue a wasted
+    // zero-value on-chain mint. Reject up front. (A zero-collateral vault with
+    // positive debt is already rejected below by the CR check.)
+    if debt_e8s == 0 {
+        return Err(OpenVaultError::ZeroDebt);
     }
     // MON price (USD e8) for the declared-collateral CR check.
     let price_e8 = *state
