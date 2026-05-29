@@ -209,12 +209,22 @@ proptest! {
                         format!("0x{next_vault_id}"),
                         collateral,
                         amt,
-                        "0xr".to_string(),
+                        // Valid EVM address (0x + 40 hex). The open path now
+                        // rejects a malformed mint_recipient; a bad value here
+                        // would make every open fail and the invariant pass
+                        // VACUOUSLY (no vaults ever opened). The prop_assert
+                        // below locks in that opens actually succeed.
+                        "0x000000000000000000000000000000000000c0de".to_string(),
                         0,
                         0,
                         next_vault_id,
                     )
                     .is_ok();
+                    // This open is constructed to always succeed (registered
+                    // chain, price set, huge collateral, min_cr 0, non-zero debt,
+                    // valid recipient). If it ever fails the supply invariant
+                    // would hold vacuously — fail loudly instead.
+                    prop_assert!(opened, "OpenAndConfirm must succeed; open returned Err");
                     if opened {
                         // PRE-mint total is the current total_debt; the helper
                         // adds `amt` internally to derive the post-mint total.

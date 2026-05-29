@@ -79,7 +79,7 @@ fn open_rejects_zero_debt() {
         "0xcustody".into(),
         100 * ONE_MON_E18, // plenty of collateral...
         0,                 // ...but zero debt
-        "0xrecipient".into(),
+        "0x000000000000000000000000000000000000c0de".into(),
         13_000,
         0,
         9,
@@ -106,7 +106,7 @@ fn open_rejects_below_min_cr() {
         "0xcustody".into(),
         ONE_MON_E18,
         100_00000000, // 100 icUSD debt
-        "0xrecipient".into(),
+        "0x000000000000000000000000000000000000c0de".into(),
         13000,
         0,
         1,
@@ -130,7 +130,7 @@ fn open_creates_awaiting_deposit_vault_and_enqueues_nothing() {
         "0xcustody".into(),
         declared,
         100_00000000, // 100 icUSD intended mint
-        "0xrecipient".into(),
+        "0x000000000000000000000000000000000000c0de".into(),
         13000,
         12345,
         7,
@@ -143,7 +143,7 @@ fn open_creates_awaiting_deposit_vault_and_enqueues_nothing() {
     assert_eq!(v.collateral_amount_e18, declared, "declared collateral recorded");
     assert_eq!(v.owner, owner());
     assert_eq!(v.custody_address, "0xcustody");
-    assert_eq!(v.mint_recipient, "0xrecipient");
+    assert_eq!(v.mint_recipient, "0x000000000000000000000000000000000000c0de");
     assert_eq!(v.opened_at_ns, 12345);
     // THE CORE DEVIATION: nothing enqueued at open.
     assert_eq!(
@@ -160,7 +160,7 @@ fn insufficient_deposit_does_not_enqueue() {
     let declared = 100 * ONE_MON_E18;
     open_chain_vault_in_state(
         &mut s, CHAIN, owner(), "0xcustody".into(), declared, 100_00000000,
-        "0xrecipient".into(), 13000, 0, 7,
+        "0x000000000000000000000000000000000000c0de".into(), 13000, 0, 7,
     )
     .expect("open");
 
@@ -182,7 +182,7 @@ fn sufficient_deposit_transitions_and_enqueues_mint() {
     let declared = 100 * ONE_MON_E18;
     open_chain_vault_in_state(
         &mut s, CHAIN, owner(), "0xcustody".into(), declared, 100_00000000,
-        "0xrecipient".into(), 13000, 0, 7,
+        "0x000000000000000000000000000000000000c0de".into(), 13000, 0, 7,
     )
     .expect("open");
 
@@ -198,7 +198,7 @@ fn sufficient_deposit_transitions_and_enqueues_mint() {
     let op = q.pending.values().next().expect("op present");
     match &op.kind {
         SettlementOpKind::Mint { recipient, amount_e8s, vault_id } => {
-            assert_eq!(recipient, "0xrecipient");
+            assert_eq!(recipient, "0x000000000000000000000000000000000000c0de");
             assert_eq!(*amount_e8s, 100_00000000);
             assert_eq!(*vault_id, 7);
         }
@@ -214,7 +214,7 @@ fn reverify_after_transition_is_noop() {
     let declared = 100 * ONE_MON_E18;
     open_chain_vault_in_state(
         &mut s, CHAIN, owner(), "0xcustody".into(), declared, 100_00000000,
-        "0xrecipient".into(), 13000, 0, 7,
+        "0x000000000000000000000000000000000000c0de".into(), 13000, 0, 7,
     )
     .expect("open");
     // First verify transitions + enqueues.
@@ -249,10 +249,57 @@ fn open_rejects_unknown_chain() {
     let mut s = MultiChainStateV2::default(); // no chain registered
     let res = open_chain_vault_in_state(
         &mut s, CHAIN, owner(), "0xcustody".into(), 100 * ONE_MON_E18, 100_00000000,
-        "0xrecipient".into(), 13000, 0, 7,
+        "0x000000000000000000000000000000000000c0de".into(), 13000, 0, 7,
     );
     assert!(matches!(res, Err(OpenVaultError::UnknownChain)), "got {res:?}");
     assert!(s.chain_vaults.is_empty());
+}
+
+// 8b. open rejects a malformed mint_recipient at the boundary, creating nothing
+//     and enqueuing nothing. An unvalidated recipient would later panic the
+//     tx-building helper (tx::abi_word_address) deep on the settlement worker
+//     path, after the re-entrancy guard + awaits, permanently blocking the
+//     chain's worker. Fail-fast here makes that panic unreachable in practice.
+#[test]
+fn open_rejects_invalid_recipient() {
+    let mut s = setup(PRICE_100_USD_E8);
+    // "0x123" is a realistic typo: 0x-prefixed but only 3 hex digits, not 40.
+    let res = open_chain_vault_in_state(
+        &mut s,
+        CHAIN,
+        owner(),
+        "0xcustody".into(), // custody is derived/valid in production; not validated
+        100 * ONE_MON_E18,  // plenty of collateral
+        100_00000000,       // non-zero debt (so we pass the ZeroDebt gate)
+        "0x123".into(),     // malformed recipient: too short
+        13_000,
+        12345,
+        7,
+    );
+    assert!(matches!(res, Err(OpenVaultError::InvalidAddress(_))), "got {res:?}");
+    assert!(s.chain_vaults.is_empty(), "no vault should be created on a bad recipient");
+    assert_eq!(
+        s.settlement_queues[&CHAIN].pending_len(),
+        0,
+        "queue must stay empty — nothing enqueued"
+    );
+
+    // A non-hex body is rejected too.
+    let res = open_chain_vault_in_state(
+        &mut s,
+        CHAIN,
+        owner(),
+        "0xcustody".into(),
+        100 * ONE_MON_E18,
+        100_00000000,
+        "0xnothex".into(), // 0x-prefixed but contains non-hex chars
+        13_000,
+        12345,
+        8,
+    );
+    assert!(matches!(res, Err(OpenVaultError::InvalidAddress(_))), "got {res:?}");
+    assert!(s.chain_vaults.is_empty(), "still no vault");
+    assert_eq!(s.settlement_queues[&CHAIN].pending_len(), 0, "still empty");
 }
 
 // 9. open rejects when no MON price is configured
@@ -271,7 +318,7 @@ fn open_rejects_when_no_price() {
     crate::chains::admin::register_chain_in_state(&mut s, arg, 0).expect("register chain");
     let res = open_chain_vault_in_state(
         &mut s, CHAIN, owner(), "0xcustody".into(), 100 * ONE_MON_E18, 100_00000000,
-        "0xrecipient".into(), 13000, 0, 7,
+        "0x000000000000000000000000000000000000c0de".into(), 13000, 0, 7,
     );
     assert!(matches!(res, Err(OpenVaultError::NoPrice)), "got {res:?}");
     assert!(s.chain_vaults.is_empty());

@@ -49,6 +49,19 @@ pub fn evm_address_from_pubkey(pubkey: &[u8]) -> Result<String, String> {
     Ok(format!("0x{}", hex::encode(addr)))
 }
 
+/// True iff `s` is a well-formed EVM address: a `0x`/`0X` prefix followed by
+/// EXACTLY 40 hex digits (20 bytes), case-insensitive. This is the format the
+/// tx-building helpers (`tx::abi_word_address`/`parse_address`) require; an
+/// address that passes this can never panic those helpers. (Format only — no
+/// EIP-55 checksum; derived addresses are lowercase and RPC responses vary.)
+pub fn is_valid_evm_address(s: &str) -> bool {
+    let hex = match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Some(h) => h,
+        None => return false,
+    };
+    hex.len() == 40 && hex.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// Async: fetch the derived public key from the management canister and return
 /// both the raw pubkey and the EVM address. Used by deposit-address queries and
 /// by the settlement worker to learn its minter address.

@@ -72,6 +72,11 @@ pub enum OpenVaultError {
     QueueError(String),
     /// `verify_deposit_and_enqueue_mint_in_state` could not find the vault.
     UnknownVault,
+    /// The developer-supplied `mint_recipient` is not a well-formed EVM address
+    /// (`0x` + 40 hex). Rejected at the boundary so it can never reach the
+    /// tx-building helpers (`tx::abi_word_address`), which panic on malformed
+    /// hex/length deep on the settlement worker path. Carries the bad address.
+    InvalidAddress(String),
 }
 
 /// Reasons `withdraw_collateral_in_state` / `close_chain_vault_in_state` can
@@ -90,6 +95,11 @@ pub enum WithdrawError {
     QueueError(String),
     /// `close_chain_vault_in_state` was called on a vault with non-zero debt.
     HasDebt,
+    /// The developer-supplied `dest_address` is not a well-formed EVM address
+    /// (`0x` + 40 hex). Rejected at the boundary so it can never reach the
+    /// tx-building helpers (`tx::parse_address`), which panic on malformed
+    /// hex/length deep on the settlement worker path. Carries the bad address.
+    InvalidAddress(String),
     /// Withdraw was attempted on a vault whose status is not `Open`. Only an
     /// `Open` vault has confirmed, on-chain-deposited collateral and confirmed
     /// debt; an `AwaitingDeposit` vault holds DECLARED-but-never-deposited
@@ -166,6 +176,14 @@ pub fn open_chain_vault_in_state(
     // positive debt is already rejected below by the CR check.)
     if debt_e8s == 0 {
         return Err(OpenVaultError::ZeroDebt);
+    }
+    // Reject a malformed developer-supplied mint recipient BEFORE it enters
+    // state. An unvalidated address would later panic the tx-building helpers
+    // (`tx::abi_word_address`) deep on the settlement worker path, after the
+    // re-entrancy guard + awaits, permanently blocking the chain's worker.
+    // (`custody_address` is tECDSA-derived and always valid — do NOT validate it.)
+    if !crate::chains::monad::tecdsa::is_valid_evm_address(&mint_recipient) {
+        return Err(OpenVaultError::InvalidAddress(mint_recipient));
     }
     // MON price (USD e8) for the declared-collateral CR check.
     let price_e8 = *state
@@ -358,6 +376,15 @@ pub fn withdraw_collateral_in_state(
         if cr_e4 < min_cr_e4 {
             return Err(WithdrawError::BelowMinCr { cr_e4, min_e4: min_cr_e4 });
         }
+    }
+
+    // Reject a malformed developer-supplied destination BEFORE enqueuing. An
+    // unvalidated address would later panic the tx-building helper
+    // (`tx::parse_address`) deep on the settlement worker path, after the
+    // re-entrancy guard + awaits, permanently blocking the chain's worker. This
+    // is read-only (still no mutation on this rejection path).
+    if !crate::chains::monad::tecdsa::is_valid_evm_address(&dest_address) {
+        return Err(WithdrawError::InvalidAddress(dest_address));
     }
 
     // Step 2: enqueue FIRST (it can fail on a duplicate idempotency key). The

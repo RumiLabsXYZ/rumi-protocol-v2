@@ -1096,6 +1096,13 @@ fn set_chain_contract(
     if read_state(|s| s.developer_principal != caller) {
         return Err(ProtocolError::ChainAdmin("not developer".into()));
     }
+    // Fail-fast on a malformed contract address: an unvalidated value flows into
+    // the mint calldata's `to` (`tx::abi_word_address`) and panics deep on the
+    // settlement worker path, after the re-entrancy guard + awaits, permanently
+    // blocking the chain's worker. A deploy-time typo is enough.
+    if !rumi_protocol_backend::chains::monad::tecdsa::is_valid_evm_address(&address) {
+        return Err(ProtocolError::ChainAdmin(format!("invalid EVM address: {address}")));
+    }
     mutate_state(|s| {
         s.multi_chain.chain_contracts.insert(chain, address.clone());
     });

@@ -1,4 +1,7 @@
-use super::tecdsa::{custody_derivation_path, evm_address_from_pubkey, settlement_derivation_path};
+use super::tecdsa::{
+    custody_derivation_path, evm_address_from_pubkey, is_valid_evm_address,
+    settlement_derivation_path,
+};
 use crate::chains::config::ChainId;
 use candid::Principal;
 
@@ -38,6 +41,33 @@ fn settlement_path_differs_from_any_custody_path() {
     let s = settlement_derivation_path(ChainId(10143));
     let cust = custody_derivation_path(ChainId(10143), Principal::anonymous(), 0);
     assert_ne!(s, cust);
+}
+
+#[test]
+fn is_valid_evm_address_accepts_well_formed_and_rejects_malformed() {
+    // Valid: 0x + exactly 40 hex digits, case-insensitive (mixed case ok —
+    // format-only, no EIP-55 checksum enforcement).
+    assert!(is_valid_evm_address("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"));
+    assert!(is_valid_evm_address("0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"));
+    assert!(is_valid_evm_address("0X7e5f4552091a69125d5dfcb7b8c2659029395bdf")); // 0X prefix
+    assert!(is_valid_evm_address("0x0000000000000000000000000000000000000000")); // all-zero, 40 hex
+    assert!(is_valid_evm_address("0x000000000000000000000000000000000000c0de"));
+
+    // Missing 0x prefix.
+    assert!(!is_valid_evm_address("7e5f4552091a69125d5dfcb7b8c2659029395bdf"));
+    // Wrong length: 39 hex (one short).
+    assert!(!is_valid_evm_address("0x7e5f4552091a69125d5dfcb7b8c2659029395bd"));
+    // Wrong length: 41 hex (one long).
+    assert!(!is_valid_evm_address("0x7e5f4552091a69125d5dfcb7b8c2659029395bdff"));
+    // Zero-length hex body.
+    assert!(!is_valid_evm_address("0x"));
+    // Empty string.
+    assert!(!is_valid_evm_address(""));
+    // Non-hex characters (40 chars but contains 'g', 'r', etc.).
+    assert!(!is_valid_evm_address("0xgggggggggggggggggggggggggggggggggggggggg"));
+    assert!(!is_valid_evm_address("0xrecipient")); // realistic placeholder typo
+    // 0x followed by a too-short numeric body.
+    assert!(!is_valid_evm_address("0x123"));
 }
 
 fn hex_to_bytes(s: &str) -> Vec<u8> {
