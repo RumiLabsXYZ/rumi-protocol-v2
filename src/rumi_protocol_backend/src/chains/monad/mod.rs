@@ -39,3 +39,6 @@ mod tests_tx;
 
 #[cfg(test)]
 mod tests_deposit_watch;
+
+#[cfg(test)]
+mod tests_settlement;

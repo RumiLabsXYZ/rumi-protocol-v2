@@ -34,6 +34,12 @@ pub struct SettlementOp {
     pub idempotency_key: String,
     pub enqueued_at_ns: u64,
     pub status: SettlementOpStatus,
+    /// Hash of the most recent on-chain submission for this op, set by the
+    /// Phase-1b Timer-D worker when the op goes Inflight. Read back on the
+    /// Confirm path to fetch the receipt. `#[serde(default)]` keeps any
+    /// pre-existing (V1) snapshot decoding cleanly into the V2 state.
+    #[serde(default)]
+    pub last_tx_hash: Option<String>,
 }
 
 impl SettlementOp {
@@ -44,6 +50,7 @@ impl SettlementOp {
             idempotency_key,
             enqueued_at_ns: now_ns,
             status: SettlementOpStatus::Queued,
+            last_tx_hash: None,
         }
     }
 
