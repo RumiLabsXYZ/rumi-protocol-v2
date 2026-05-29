@@ -914,6 +914,7 @@ service : (ProtocolArg) -> {
   claim_liquidity_returns : () -> (Result_1);
   clear_liquidation_breaker : () -> (Result);
   clear_stuck_operations : (opt principal) -> (Result_1);
+  close_chain_vault : (nat64, text) -> (Result);
   close_vault : (nat64) -> (Result_5);
   coingecko_transform : (TransformArgs) -> (HttpResponse) query;
   disable_chain : (nat32) -> (Result);
@@ -1097,6 +1098,7 @@ service : (ProtocolArg) -> {
   unfreeze_protocol : () -> (Result);
   update_collateral_config : (principal, CollateralConfig) -> (Result);
   withdraw_and_close_vault : (nat64) -> (Result_5);
+  withdraw_chain_collateral : (nat64, nat, text) -> (Result);
   withdraw_collateral : (nat64) -> (Result_1);
   withdraw_liquidity : (nat64) -> (Result_1);
   withdraw_partial_collateral : (VaultArg) -> (Result_1);

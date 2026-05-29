@@ -15,7 +15,13 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum SettlementOpKind {
     Mint { recipient: String, amount_e8s: u128, vault_id: u64 },
-    Withdrawal { recipient: String, amount_e8s: u128 },
+    /// Return native gas-asset (MON) collateral to `recipient`. `amount_e18`
+    /// is wei (1e18 scale, NOT e8s — it goes straight into the EIP-1559
+    /// `value`). `vault_id` lets the settlement worker emit `WithdrawalSigned`
+    /// with the real id and flip the vault `Closing -> Closed` on confirmation
+    /// (replaces the old placeholder `Withdrawal { recipient, amount_e8s }`,
+    /// which was never enqueued anywhere and carried the wrong unit + no id).
+    NativeWithdrawal { recipient: String, amount_e18: u128, vault_id: u64 },
     Burn { amount_e8s: u128 },
 }
 

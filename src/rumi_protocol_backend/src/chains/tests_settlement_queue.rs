@@ -55,7 +55,7 @@ fn enqueue_rejects_duplicate_idempotency_key() {
 fn round_trip_via_candid() {
     let mut q = SettlementQueueV1::default();
     let op = SettlementOp::new(
-        SettlementOpKind::Withdrawal { recipient: "0xrecip".to_string(), amount_e8s: 42 },
+        SettlementOpKind::NativeWithdrawal { recipient: "0xrecip".to_string(), amount_e18: 42, vault_id: 3 },
         "k1".to_string(),
         0,
     );

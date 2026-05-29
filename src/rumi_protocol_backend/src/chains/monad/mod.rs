@@ -49,3 +49,6 @@ mod tests_hardening;
 
 #[cfg(test)]
 mod tests_open_vault;
+
+#[cfg(test)]
+mod tests_withdraw;

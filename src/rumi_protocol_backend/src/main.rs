@@ -900,6 +900,71 @@ async fn open_chain_vault(
         .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
 }
 
+/// Phase 1b Task 13: withdraw foreign-chain (Monad) collateral.
+///
+/// CR-checks the REMAINING collateral against `MONAD_MIN_CR_E4` (debt-free
+/// vaults skip the check), RESERVES the withdrawn amount (decrements
+/// `collateral_amount_e18` at enqueue), and enqueues a `NativeWithdrawal` op
+/// that Timer D signs and broadcasts. A vault that becomes empty AND debt-free
+/// flips to `Closing` here and `Closed` once the transfer confirms.
+///
+/// There is NO repay endpoint: the user burns icUSD on Monad and the burn-watch
+/// observer decrements `debt_e8s` + chain supply. This path moves only
+/// collateral. Synchronous — `dest_address` is supplied by the caller, so no
+/// tECDSA derive is needed; signing happens later in Timer D. Developer-gated.
+#[candid_method(update)]
+#[update]
+fn withdraw_chain_collateral(
+    vault_id: u64,
+    amount_e18: u128,
+    dest_address: String,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let now = ic_cdk::api::time();
+    mutate_state(|s| {
+        rumi_protocol_backend::chains::monad::chain_vault::withdraw_collateral_in_state(
+            &mut s.multi_chain,
+            vault_id,
+            amount_e18,
+            dest_address,
+            rumi_protocol_backend::chains::monad::chain_vault::MONAD_MIN_CR_E4,
+            now,
+        )
+    })
+    .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
+}
+
+/// Phase 1b Task 13: close a debt-free foreign-chain (Monad) vault.
+///
+/// Requires the vault's `debt_e8s == 0` (repay first by burning icUSD on
+/// Monad), then withdraws the FULL remaining collateral to `dest_address`
+/// (vault -> `Closing`, then `Closed` on the transfer's confirmation).
+/// Synchronous + developer-gated (mirrors `withdraw_chain_collateral`).
+#[candid_method(update)]
+#[update]
+fn close_chain_vault(vault_id: u64, dest_address: String) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let now = ic_cdk::api::time();
+    mutate_state(|s| {
+        rumi_protocol_backend::chains::monad::chain_vault::close_chain_vault_in_state(
+            &mut s.multi_chain,
+            vault_id,
+            dest_address,
+            rumi_protocol_backend::chains::monad::chain_vault::MONAD_MIN_CR_E4,
+            now,
+        )
+    })
+    .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
+}
+
 #[candid_method(query)]
 #[query]
 fn get_protocol_config() -> rumi_protocol_backend::ProtocolConfig {

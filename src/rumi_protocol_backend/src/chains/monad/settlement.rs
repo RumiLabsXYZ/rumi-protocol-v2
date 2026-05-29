@@ -197,16 +197,25 @@ pub async fn run_settlement(chain: ChainId) {
     });
 }
 
+/// What kind of settlement tx a `TxPlan` carries, so the submit path can emit
+/// the right event (`ChainMintSubmitted` vs `WithdrawalSigned`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TxPlanKind {
+    Mint,
+    NativeWithdrawal,
+}
+
 /// Per-op-kind tx shape mirroring `MonadAdapter`'s choices, so the submit and
 /// the stuck-tx resubmit paths build identical transactions (only nonce + fees
-/// differ on a resubmit). `vault_id`/`recipient`/`amount_e8s` are the values the
-/// submit path needs for the `ChainMintSubmitted` event.
+/// differ on a resubmit). `vault_id`/`recipient`/`amount` are the values the
+/// submit path needs for the `ChainMintSubmitted` / `WithdrawalSigned` event;
+/// `amount` is e8s for a mint and e18 (wei) for a native withdrawal.
 struct TxPlan {
     fields: tx::Eip1559Fields,
     vault_id: u64,
     recipient: String,
-    amount_e8s: u128,
-    is_mint: bool,
+    amount: u128,
+    kind: TxPlanKind,
 }
 
 /// Build the EIP-1559 fields for a settlement op at an EXPLICIT nonce + fees.
@@ -214,8 +223,10 @@ struct TxPlan {
 /// Mirrors `MonadAdapter::sign_mint`/`sign_withdrawal` exactly:
 /// - Mint: `to` = icUSD contract, `value` = 0, calldata =
 ///   `encode_mint_calldata`, gas_limit 120_000.
-/// - Withdrawal: `to` = recipient, `value` = amount (wei wart), empty data,
-///   gas_limit 21_000; vault_id is a 0 placeholder (Task 13 threads the real id).
+/// - NativeWithdrawal: `to` = recipient, `value` = `amount_e18` (wei), empty
+///   data, gas_limit 21_000; the plan carries the op's real `vault_id` so the
+///   submit path can emit `WithdrawalSigned` and the confirm path can finalize
+///   the close.
 /// - Burn: never signed in Phase 1b — returns `Err`.
 ///
 /// The caller supplies `prio`/`max_fee` (a submit uses the live estimate; a
@@ -248,27 +259,26 @@ fn build_tx_plan(
                 fields,
                 vault_id: *vault_id,
                 recipient: recipient.clone(),
-                amount_e8s: *amount_e8s,
-                is_mint: true,
+                amount: *amount_e8s,
+                kind: TxPlanKind::Mint,
             })
         }
-        SettlementOpKind::Withdrawal { recipient, amount_e8s } => {
-            // `amount_e8s` carries the MON amount in wei (the field-name wart
-            // documented on adapter::sign_withdrawal).
+        SettlementOpKind::NativeWithdrawal { recipient, amount_e18, vault_id } => {
+            // `amount_e18` is wei (1e18 scale) — it goes straight into the
+            // EIP-1559 `value` of a native MON transfer.
             let fields = tx::build_eip1559_fields(
                 chain.0 as u64,
-                tx::MonadTxKind::NativeWithdrawal { recipient, amount_wei: *amount_e8s },
+                tx::MonadTxKind::NativeWithdrawal { recipient, amount_wei: *amount_e18 },
                 nonce,
                 prio,
                 max_fee,
             );
             Ok(TxPlan {
                 fields,
-                // vault_id 0 is a placeholder; Task 13 threads the real vault id.
-                vault_id: 0,
+                vault_id: *vault_id,
                 recipient: recipient.clone(),
-                amount_e8s: *amount_e8s,
-                is_mint: false,
+                amount: *amount_e18,
+                kind: TxPlanKind::NativeWithdrawal,
             })
         }
         SettlementOpKind::Burn { .. } => Err("burn not signable in Phase 1b".to_string()),
@@ -367,7 +377,7 @@ async fn submit_op(
             return;
         }
     };
-    let TxPlan { fields, vault_id, recipient, amount_e8s, is_mint } = plan;
+    let TxPlan { fields, vault_id, recipient, amount, kind } = plan;
 
     // 5. Sign.
     let raw_hex = match tx::sign_eip1559(&fields, path, &settlement_addr).await {
@@ -414,19 +424,31 @@ async fn submit_op(
         }
     });
 
-    if is_mint {
-        crate::storage::record_event(&crate::event::Event::ChainMintSubmitted {
-            chain_id: chain,
-            vault_id,
-            op_id,
-            recipient,
-            amount_e8s,
-            tx_hash: tx_hash.clone(),
-            timestamp: now,
-        });
-        log!(INFO, "[settlement chain={:?}] mint submitted: op={} vault={} amount_e8s={} tx={}", chain, op_id, vault_id, amount_e8s, tx_hash);
-    } else {
-        log!(INFO, "[settlement chain={:?}] op {} submitted inflight tx={}", chain, op_id, tx_hash);
+    match kind {
+        TxPlanKind::Mint => {
+            crate::storage::record_event(&crate::event::Event::ChainMintSubmitted {
+                chain_id: chain,
+                vault_id,
+                op_id,
+                recipient,
+                amount_e8s: amount,
+                tx_hash: tx_hash.clone(),
+                timestamp: now,
+            });
+            log!(INFO, "[settlement chain={:?}] mint submitted: op={} vault={} amount_e8s={} tx={}", chain, op_id, vault_id, amount, tx_hash);
+        }
+        TxPlanKind::NativeWithdrawal => {
+            crate::storage::record_event(&crate::event::Event::WithdrawalSigned {
+                chain_id: chain,
+                vault_id,
+                op_id,
+                recipient,
+                amount_e18: amount,
+                tx_hash: tx_hash.clone(),
+                timestamp: now,
+            });
+            log!(INFO, "[settlement chain={:?}] withdrawal submitted: op={} vault={} amount_e18={} tx={}", chain, op_id, vault_id, amount, tx_hash);
+        }
     }
 }
 
@@ -507,27 +529,46 @@ async fn confirm_op(
 
     let now = ic_cdk::api::time();
 
-    // 2. Reverted tx: mark the op Failed. Under Design B no debt was counted, so
-    //    there is NO supply reversal. Clear the vault's pending mint (the mint
-    //    will not happen). Do NOT advance the vault status: per the plan (Task
-    //    10) a reverted mint changes no vault status, and `Closed` in this
-    //    codebase means "fully repaid + collateral returned" — stamping it here
-    //    would mislabel a vault that still holds deposited collateral as
-    //    returned, and the Task-13 close path (which returns collateral by
-    //    enqueuing a Withdrawal and going Closing -> Closed) keys off `Closing`,
-    //    not `Closed`, so the collateral would be stranded. The failed-mint
-    //    resolution (return collateral, then close) is defined by the Task 12/13
-    //    flow design; the vault is left in its current (MintPending) status with
-    //    a Failed op + a ChainSettlementFailed event for that path to act on.
+    // 2. Reverted tx: mark the op Failed. The per-op-kind state reversal differs:
+    //
+    //    - Mint (Design B): no debt was counted, so NO supply reversal. Clear the
+    //      vault's pending mint (the mint will not happen). Do NOT advance the
+    //      vault status — `Closed` here means "fully repaid + collateral returned",
+    //      so stamping it would mislabel a vault that still holds deposited
+    //      collateral; the failed-mint resolution (return collateral, then close)
+    //      is the Task 12/13 flow's job. The vault is left MintPending with a
+    //      Failed op + a ChainSettlementFailed event for that path to act on.
+    //
+    //    - NativeWithdrawal: the transfer did NOT happen, so the reserved
+    //      collateral never left the custody address. ADD it back to
+    //      `collateral_amount_e18` (undo the reserve-at-enqueue) and, if the vault
+    //      had gone `Closing` (full withdrawal / close), revert it to `Open` — it
+    //      is no longer empty. Never touches debt/supply (withdraw moves only
+    //      collateral).
     if !status_ok {
         let reason = "tx reverted".to_string();
-        if let SettlementOpKind::Mint { vault_id, .. } = &op.kind {
-            let vid = *vault_id;
-            mutate_state(|s| {
-                if let Some(v) = s.multi_chain.chain_vaults.get_mut(&vid) {
-                    v.pending_mint_e8s = 0;
-                }
-            });
+        match &op.kind {
+            SettlementOpKind::Mint { vault_id, .. } => {
+                let vid = *vault_id;
+                mutate_state(|s| {
+                    if let Some(v) = s.multi_chain.chain_vaults.get_mut(&vid) {
+                        v.pending_mint_e8s = 0;
+                    }
+                });
+            }
+            SettlementOpKind::NativeWithdrawal { vault_id, amount_e18, .. } => {
+                let vid = *vault_id;
+                let amt = *amount_e18;
+                mutate_state(|s| {
+                    if let Some(v) = s.multi_chain.chain_vaults.get_mut(&vid) {
+                        v.collateral_amount_e18 = v.collateral_amount_e18.saturating_add(amt);
+                        if v.status == ChainVaultStatus::Closing {
+                            v.status = ChainVaultStatus::Open;
+                        }
+                    }
+                });
+            }
+            SettlementOpKind::Burn { .. } => {}
         }
         mutate_state(|s| {
             if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
@@ -655,18 +696,27 @@ async fn confirm_op(
                 }
             }
         }
-        SettlementOpKind::Withdrawal { .. } => {
-            // Task 13: a confirmed withdrawal finalizes the vault close +
-            // emits WithdrawalSigned bookkeeping. The mechanism (receipt +
-            // finality check above) is in place; the close logic lands there.
+        SettlementOpKind::NativeWithdrawal { vault_id, .. } => {
+            // A confirmed (mined + ok + final) native transfer-out: the
+            // collateral has left the custody address. Mark the op Succeeded,
+            // then if the vault is `Closing` (a full withdrawal / close) flip it
+            // to `Closed` — collateral is gone and (close required) debt is 0, so
+            // the vault is fully settled. A partial withdrawal leaves the vault
+            // `Open` (it still holds collateral); nothing extra to do there.
+            let vid = *vault_id;
             mutate_state(|s| {
                 if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
                     if let Some(o) = q.pending.get_mut(&op_id) {
                         o.mark_succeeded(tx_hash.clone(), now);
                     }
                 }
+                if let Some(v) = s.multi_chain.chain_vaults.get_mut(&vid) {
+                    if v.status == ChainVaultStatus::Closing {
+                        v.status = ChainVaultStatus::Closed;
+                    }
+                }
             });
-            log!(INFO, "[settlement chain={:?}] withdrawal op {} confirmed tx={} (Task 13 finalizes the close)", chain, op_id, tx_hash);
+            log!(INFO, "[settlement chain={:?}] withdrawal op {} vault {} confirmed tx={} (Closing->Closed if applicable)", chain, op_id, vid, tx_hash);
         }
         SettlementOpKind::Burn { .. } => {
             // Unreachable: a Burn op is marked Failed on the submit path and

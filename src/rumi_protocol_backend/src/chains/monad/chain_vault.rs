@@ -74,6 +74,24 @@ pub enum OpenVaultError {
     UnknownVault,
 }
 
+/// Reasons `withdraw_collateral_in_state` / `close_chain_vault_in_state` can
+/// reject. No mutation occurs on any error path.
+#[derive(Debug, PartialEq, Eq)]
+pub enum WithdrawError {
+    /// No such vault.
+    UnknownVault,
+    /// No manual MON price is set for the chain (`manual_prices[(chain,"MON")]`).
+    NoPrice,
+    /// Requested amount exceeds the vault's `collateral_amount_e18`.
+    InsufficientCollateral,
+    /// The post-withdrawal collateral ratio would fall below `min_cr_e4`.
+    BelowMinCr { cr_e4: u64, min_e4: u64 },
+    /// Enqueuing the `NativeWithdrawal` op failed (e.g. duplicate idempotency key).
+    QueueError(String),
+    /// `close_chain_vault_in_state` was called on a vault with non-zero debt.
+    HasDebt,
+}
+
 /// Compute the collateral ratio (e4: 25000 == 250.00%) for a foreign-chain vault.
 ///
 /// `collateral_e18` is the native-gas-asset amount in wei (1e18 scale).
@@ -243,4 +261,148 @@ pub fn verify_deposit_and_enqueue_mint_in_state(
         .expect("vault present: checked above");
     v.status = ChainVaultStatus::MintPending;
     Ok(true)
+}
+
+/// Withdraw foreign-chain collateral, enqueuing a native MON transfer-out.
+///
+/// ## Repay is observer-driven, NOT here
+///
+/// There is no separate repay path: the user burns icUSD on Monad
+/// (`IcUSD.burn`) and the Task-9 burn-watch (`deposit_watch::run_observer` ->
+/// `apply_burn_to_state`) decrements `debt_e8s` + chain supply at finality.
+/// This helper only moves COLLATERAL out; it never touches `debt_e8s`,
+/// `chain_supplies`, or `pending_mint_e8s`.
+///
+/// ## Semantics
+///
+/// - `UnknownVault` if the vault is absent.
+/// - `InsufficientCollateral` if `amount_e18 > collateral_amount_e18`.
+/// - `NoPrice` if no `manual_prices[(chain,"MON")]` is set.
+/// - When `debt_e8s > 0`, the REMAINING collateral
+///   (`collateral_amount_e18 - amount_e18`) is CR-checked against `min_cr_e4`;
+///   below it -> `BelowMinCr`. A debt-free vault skips the CR check (any
+///   remainder is trivially over-collateralized).
+///
+/// On success: enqueues a `NativeWithdrawal { recipient: dest_address,
+/// amount_e18, vault_id }` op (idempotency key
+/// `withdraw-{chain}-{vault_id}-{now_ns}`), RESERVES the collateral by
+/// decrementing `collateral_amount_e18` to the remainder, and flips the vault
+/// to `Closing` iff `remaining == 0 && debt_e8s == 0`. The settlement worker
+/// flips `Closing -> Closed` once the on-chain transfer confirms (and ADDS the
+/// reserved collateral back if the transfer reverts).
+///
+/// ## Reserve-at-enqueue
+///
+/// Decrementing `collateral_amount_e18` at enqueue time is the standard CDP
+/// reserve-on-request pattern: a second withdraw cannot double-spend the same
+/// collateral while the first is still in flight. A reverted transfer restores
+/// the reserve in `settlement::confirm_op`.
+///
+/// ## Mutation ordering (no-mutation-on-rejection guarantee)
+///
+/// 1. Validate (vault lookup, balance, price, CR) — no mutation on any reject.
+/// 2. Enqueue FIRST (can fail on a duplicate idempotency key -> `QueueError`,
+///    no collateral mutation).
+/// 3. Only after a successful enqueue: decrement collateral + set `Closing`.
+///
+/// So a rejected enqueue leaves the vault and its collateral untouched.
+pub fn withdraw_collateral_in_state(
+    state: &mut MultiChainStateV2,
+    vault_id: u64,
+    amount_e18: u128,
+    dest_address: String,
+    min_cr_e4: u64,
+    now_ns: u64,
+) -> Result<(), WithdrawError> {
+    // Step 1: read-only validation. No mutation on any rejection path.
+    let (chain, remaining, debt_e8s) = {
+        let v = state
+            .chain_vaults
+            .get(&vault_id)
+            .ok_or(WithdrawError::UnknownVault)?;
+        if amount_e18 > v.collateral_amount_e18 {
+            return Err(WithdrawError::InsufficientCollateral);
+        }
+        let remaining = v.collateral_amount_e18 - amount_e18;
+        (v.collateral_chain, remaining, v.debt_e8s)
+    };
+
+    // Price is needed for the post-withdrawal CR check (only when debt remains).
+    let price_e8 = *state
+        .manual_prices
+        .get(&(chain, "MON".to_string()))
+        .ok_or(WithdrawError::NoPrice)?;
+
+    // A debt-free vault is trivially over-collateralized; skip the CR check.
+    if debt_e8s > 0 {
+        let cr_e4 = collateral_ratio_e4(remaining, price_e8, debt_e8s);
+        if cr_e4 < min_cr_e4 {
+            return Err(WithdrawError::BelowMinCr { cr_e4, min_e4: min_cr_e4 });
+        }
+    }
+
+    // Step 2: enqueue FIRST (it can fail on a duplicate idempotency key). The
+    // key is per (chain, vault, now_ns) so distinct withdraws never collide.
+    let op = SettlementOp::new(
+        SettlementOpKind::NativeWithdrawal {
+            recipient: dest_address,
+            amount_e18,
+            vault_id,
+        },
+        format!("withdraw-{}-{}-{}", chain.0, vault_id, now_ns),
+        now_ns,
+    );
+    state
+        .settlement_queues
+        .entry(chain)
+        .or_default()
+        .enqueue(op)
+        .map_err(|e| WithdrawError::QueueError(format!("{e:?}")))?;
+
+    // Step 3: only after a successful enqueue — reserve the collateral and flip
+    // to Closing when the vault is now empty AND debt-free.
+    let v = state
+        .chain_vaults
+        .get_mut(&vault_id)
+        .expect("vault present: checked above");
+    v.collateral_amount_e18 = remaining;
+    if remaining == 0 && debt_e8s == 0 {
+        v.status = ChainVaultStatus::Closing;
+    }
+    Ok(())
+}
+
+/// Close a debt-free vault by withdrawing the FULL remaining collateral.
+///
+/// Requires `debt_e8s == 0` (`HasDebt` otherwise) — debt must first be repaid
+/// by burning icUSD on Monad (observer-driven, see
+/// `withdraw_collateral_in_state`). Then delegates to
+/// `withdraw_collateral_in_state` for the full `collateral_amount_e18`, which
+/// reserves the collateral and flips the vault to `Closing` (the worker flips
+/// it to `Closed` on the transfer's confirmation).
+///
+/// If the remaining collateral is already 0, this enqueues a zero-value
+/// `NativeWithdrawal` and flips the vault to `Closing` immediately — a clean
+/// no-collateral close. (A zero-value native transfer is harmless on-chain and
+/// keeps the close path uniform; the worker still confirms it and stamps
+/// `Closed`.)
+pub fn close_chain_vault_in_state(
+    state: &mut MultiChainStateV2,
+    vault_id: u64,
+    dest_address: String,
+    min_cr_e4: u64,
+    now_ns: u64,
+) -> Result<(), WithdrawError> {
+    // Validate debt-free + capture the full remaining collateral (no mutation).
+    let full = {
+        let v = state
+            .chain_vaults
+            .get(&vault_id)
+            .ok_or(WithdrawError::UnknownVault)?;
+        if v.debt_e8s != 0 {
+            return Err(WithdrawError::HasDebt);
+        }
+        v.collateral_amount_e18
+    };
+    withdraw_collateral_in_state(state, vault_id, full, dest_address, min_cr_e4, now_ns)
 }
