@@ -51,6 +51,46 @@ pub fn disable_chain_in_state(
     Ok(())
 }
 
+/// Remove a chain entirely. Only permitted when the chain carries ZERO supply
+/// and NO chain_vaults reference it (so deletion cannot orphan debt/collateral).
+///
+/// Purges the chain from EVERY per-chain map (a stale entry left in any of them
+/// would be a silent state leak). All-or-nothing: every rejection path returns
+/// before the first mutation, so a refused delete leaves the chain fully intact.
+pub fn delete_chain_in_state(
+    state: &mut MultiChainStateV2,
+    chain_id: ChainId,
+) -> Result<(), ChainAdminError> {
+    if !state.chain_configs.contains_key(&chain_id) {
+        return Err(ChainAdminError::ChainNotRegistered(chain_id));
+    }
+    let supply = state.chain_supplies.get(&chain_id).copied().unwrap_or(0);
+    if supply != 0 {
+        return Err(ChainAdminError::InvalidConfig(format!(
+            "chain {} has nonzero supply {}",
+            chain_id.0, supply
+        )));
+    }
+    if state.chain_vaults.values().any(|v| v.collateral_chain == chain_id) {
+        return Err(ChainAdminError::InvalidConfig(format!(
+            "chain {} still has vaults",
+            chain_id.0
+        )));
+    }
+    // Remove from EVERY per-chain map (a stale entry in any of these is a leak).
+    state.chain_configs.remove(&chain_id);
+    state.chain_supplies.remove(&chain_id);
+    state.settlement_queues.remove(&chain_id);
+    state.chain_contracts.remove(&chain_id);
+    state.last_observed_block.remove(&chain_id);
+    state.hot_wallet_balance_e18.remove(&chain_id);
+    state.reorg_halted.remove(&chain_id);
+    state.reorg_suspect_streak.remove(&chain_id); // Task-11 reorg-debounce streak
+    // manual_prices is keyed by (ChainId, String) — drop all entries for this chain.
+    state.manual_prices.retain(|(c, _), _| *c != chain_id);
+    Ok(())
+}
+
 pub fn update_chain_config_in_state(
     state: &mut MultiChainStateV2,
     chain_id: ChainId,

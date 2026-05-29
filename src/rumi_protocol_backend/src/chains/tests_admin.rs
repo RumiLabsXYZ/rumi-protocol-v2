@@ -3,8 +3,10 @@
 //! Task 12.
 
 use super::config::{ChainAdminError, ChainConfigV1, ChainId, ChainStatus, GasStrategy, RegisterChainArg, UpdateChainConfigArg};
+use super::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
 use super::multi_chain_state::MultiChainStateV2;
-use crate::chains::admin::{disable_chain_in_state, register_chain_in_state, update_chain_config_in_state};
+use crate::chains::admin::{delete_chain_in_state, disable_chain_in_state, register_chain_in_state, update_chain_config_in_state};
+use candid::Principal;
 
 fn arg() -> RegisterChainArg {
     RegisterChainArg {
@@ -14,6 +16,32 @@ fn arg() -> RegisterChainArg {
         finality_depth: 1,
         gas_strategy: GasStrategy::EvmEip1559 { max_priority_fee_gwei: 2, max_fee_gwei_ceiling: 200 },
         chain_native_decimals: 18,
+    }
+}
+
+fn config_arg_999() -> RegisterChainArg {
+    RegisterChainArg {
+        chain_id: ChainId(999),
+        display_name: "ScratchChain".into(),
+        rpc_endpoints: vec!["https://rpc.scratch".into()],
+        finality_depth: 1,
+        gas_strategy: GasStrategy::EvmEip1559 { max_priority_fee_gwei: 2, max_fee_gwei_ceiling: 200 },
+        chain_native_decimals: 18,
+    }
+}
+
+fn dummy_vault(vault_id: u64, chain: ChainId) -> ChainVaultV1 {
+    ChainVaultV1 {
+        vault_id,
+        owner: Principal::anonymous(),
+        collateral_chain: chain,
+        custody_address: "0x0000000000000000000000000000000000000000".into(),
+        collateral_amount_e18: 0,
+        debt_e8s: 0,
+        mint_recipient: "0x0000000000000000000000000000000000000000".into(),
+        pending_mint_e8s: 0,
+        status: ChainVaultStatus::AwaitingDeposit,
+        opened_at_ns: 0,
     }
 }
 
@@ -83,4 +111,67 @@ fn set_chain_config_rejects_unknown_chain() {
         UpdateChainConfigArg::default(),
     ).expect_err("unknown chain");
     assert!(matches!(err, ChainAdminError::ChainNotRegistered(_)));
+}
+
+#[test]
+fn delete_chain_removes_zero_supply_chain() {
+    let mut s = MultiChainStateV2::default();
+    let c = ChainId(999);
+    register_chain_in_state(&mut s, config_arg_999(), 0).expect("register");
+    // Populate EVERY per-chain map so the purge can be observed.
+    s.chain_contracts.insert(c, "0xabc".into());
+    s.manual_prices.insert((c, "MON".to_string()), 2_0000_0000);
+    s.last_observed_block.insert(c, 42);
+    s.hot_wallet_balance_e18.insert(c, 1_000);
+    s.reorg_halted.insert(c, true);
+    s.reorg_suspect_streak.insert(c, 2);
+    // An unrelated chain's manual_prices entry must SURVIVE the delete.
+    s.manual_prices.insert((ChainId(7), "MON".to_string()), 3_0000_0000);
+
+    delete_chain_in_state(&mut s, c).expect("delete");
+
+    assert!(!s.chain_configs.contains_key(&c), "chain_configs retained");
+    assert!(!s.chain_supplies.contains_key(&c), "chain_supplies retained");
+    assert!(!s.settlement_queues.contains_key(&c), "settlement_queues retained");
+    assert!(!s.chain_contracts.contains_key(&c), "chain_contracts retained");
+    assert!(!s.last_observed_block.contains_key(&c), "last_observed_block retained");
+    assert!(!s.hot_wallet_balance_e18.contains_key(&c), "hot_wallet_balance_e18 retained");
+    assert!(!s.reorg_halted.contains_key(&c), "reorg_halted retained");
+    assert!(!s.reorg_suspect_streak.contains_key(&c), "reorg_suspect_streak retained");
+    assert!(!s.manual_prices.contains_key(&(c, "MON".to_string())), "manual_prices retained");
+    // The unrelated chain's price survives.
+    assert_eq!(s.manual_prices[&(ChainId(7), "MON".to_string())], 3_0000_0000);
+}
+
+#[test]
+fn delete_chain_refuses_when_supply_nonzero() {
+    let mut s = MultiChainStateV2::default();
+    let c = ChainId(999);
+    register_chain_in_state(&mut s, config_arg_999(), 0).expect("register");
+    s.chain_supplies.insert(c, 1);
+    let err = delete_chain_in_state(&mut s, c).expect_err("nonzero supply");
+    assert!(matches!(err, ChainAdminError::InvalidConfig(_)));
+    // No partial delete: the chain is STILL registered with its supply intact.
+    assert!(s.chain_configs.contains_key(&c), "chain dropped despite refusal");
+    assert_eq!(s.chain_supplies[&c], 1);
+}
+
+#[test]
+fn delete_chain_refuses_when_open_vaults_reference_it() {
+    let mut s = MultiChainStateV2::default();
+    let c = ChainId(999);
+    register_chain_in_state(&mut s, config_arg_999(), 0).expect("register");
+    s.chain_vaults.insert(1, dummy_vault(1, c));
+    let err = delete_chain_in_state(&mut s, c).expect_err("referencing vault");
+    assert!(matches!(err, ChainAdminError::InvalidConfig(_)));
+    // No partial delete: the chain is STILL registered and the vault remains.
+    assert!(s.chain_configs.contains_key(&c), "chain dropped despite refusal");
+    assert!(s.chain_vaults.contains_key(&1));
+}
+
+#[test]
+fn delete_chain_unknown_is_rejected() {
+    let mut s = MultiChainStateV2::default();
+    let err = delete_chain_in_state(&mut s, ChainId(404)).expect_err("unknown chain");
+    assert!(matches!(err, ChainAdminError::ChainNotRegistered(ChainId(404))));
 }

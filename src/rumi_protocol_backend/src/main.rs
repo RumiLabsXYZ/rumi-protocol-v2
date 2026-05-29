@@ -965,6 +965,189 @@ fn close_chain_vault(vault_id: u64, dest_address: String) -> Result<(), Protocol
     .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
 }
 
+// Phase 1b Task 14: query + admin surface for the foreign-chain working set.
+//
+// NOTE: `get_user_deposit_address` is intentionally omitted. Custody is
+// PER-VAULT (the address is derived with nonce = vault_id inside
+// `open_chain_vault`), so a user's deposit address is the vault's
+// `custody_address`, returned by `get_chain_vault` after open. A nonce=0
+// per-user address would be one NO vault ever uses — surfacing it would be
+// misleading. Use `get_chain_vault(vault_id)` for the deposit address.
+
+/// Derive the per-chain SETTLEMENT (minter) address — the tECDSA-derived EVM
+/// address whose private share the canister controls for that chain. Operators
+/// grant `MINTER_ROLE` on `IcUSD.sol` to this address. Async (the derive hits
+/// the management/signing subnet). Developer-gated: derivation costs cycles and
+/// a signing-subnet call, so it is not exposed to arbitrary callers even though
+/// it is read-only. No state borrow is held across the `.await`.
+#[candid_method(update)]
+#[update]
+async fn get_chain_settlement_address(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Result<String, ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let path = rumi_protocol_backend::chains::monad::tecdsa::settlement_derivation_path(chain);
+    rumi_protocol_backend::chains::monad::tecdsa::derive_evm_address(path)
+        .await
+        .map(|(_pubkey, addr)| addr)
+        .map_err(|e| ProtocolError::ChainAdmin(format!("derive: {e}")))
+}
+
+/// Return a single foreign-chain vault by id (the `custody_address` field is the
+/// user's deposit address). Public read-only query; no gate.
+#[candid_method(query)]
+#[query]
+fn get_chain_vault(
+    vault_id: u64,
+) -> Option<rumi_protocol_backend::chains::monad::chain_vault::ChainVaultV1> {
+    read_state(|s| s.multi_chain.chain_vaults.get(&vault_id).cloned())
+}
+
+/// List the foreign-chain vaults whose `collateral_chain == chain`, CLAMPED to
+/// at most 500 entries. The clamp follows the Wave-9a DOS-pagination convention:
+/// an unbounded query over a growing map is a cycle-DoS vector. A caller needing
+/// the full set past 500 must page via a future cursor endpoint. Public query.
+#[candid_method(query)]
+#[query]
+fn list_chain_vaults(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Vec<rumi_protocol_backend::chains::monad::chain_vault::ChainVaultV1> {
+    const MAX_CHAIN_VAULTS_RETURNED: usize = 500;
+    read_state(|s| {
+        s.multi_chain
+            .chain_vaults
+            .values()
+            .filter(|v| v.collateral_chain == chain)
+            .take(MAX_CHAIN_VAULTS_RETURNED)
+            .cloned()
+            .collect()
+    })
+}
+
+/// Record the deployed `IcUSD.sol` (or equivalent) contract address for a chain.
+/// Developer-gated.
+#[candid_method(update)]
+#[update]
+fn set_chain_contract(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    address: String,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    mutate_state(|s| {
+        s.multi_chain.chain_contracts.insert(chain, address.clone());
+    });
+    log!(INFO, "[set_chain_contract] chain={:?} address={}", chain, address);
+    Ok(())
+}
+
+/// Set a manual collateral price override for `(chain, symbol)` as a USD e8
+/// value (e.g. $2.00 == 2_0000_0000). Phase 1b uses manual prices for foreign
+/// collateral; a real oracle is a later task. Developer-gated.
+#[candid_method(update)]
+#[update]
+fn set_manual_collateral_price(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    symbol: String,
+    price_e8: u64,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    mutate_state(|s| {
+        s.multi_chain.manual_prices.insert((chain, symbol.clone()), price_e8);
+    });
+    log!(INFO, "[set_manual_collateral_price] chain={:?} symbol={} price_e8={}", chain, symbol, price_e8);
+    Ok(())
+}
+
+/// Override the EVM RPC canister principal the Monad wrapper talks to. This is
+/// the PocketIC/staging override read via `State::evm_rpc_override()`; on
+/// mainnet it points at the production EVM RPC canister. Developer-gated.
+#[candid_method(update)]
+#[update]
+fn set_evm_rpc_principal(principal: candid::Principal) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    mutate_state(|s| {
+        s.evm_rpc_principal_override = Some(principal);
+    });
+    log!(INFO, "[set_evm_rpc_principal] principal={}", principal);
+    Ok(())
+}
+
+/// Clear the global supply-invariant halt (set by the Timer-B self-check on
+/// drift). Use only AFTER manually confirming `total_supply_all_chains_e8s`
+/// matches `total_chain_vault_debt_e8s`. Developer-gated.
+#[candid_method(update)]
+#[update]
+fn clear_invariant_halt() -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    mutate_state(|s| {
+        s.multi_chain.invariant_halted = false;
+    });
+    log!(INFO, "[clear_invariant_halt] global invariant halt cleared");
+    Ok(())
+}
+
+/// Clear a chain's reorg circuit breaker. Resets BOTH `reorg_halted` AND the
+/// `reorg_suspect_streak` debounce counter (Task 11): clearing the halt without
+/// also zeroing the streak would let the very next suspect observer tick push
+/// the streak back over `REORG_CONFIRM_TICKS` and re-halt the chain.
+/// Developer-gated.
+#[candid_method(update)]
+#[update]
+fn clear_reorg_halt(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    mutate_state(|s| {
+        s.multi_chain.reorg_halted.remove(&chain);
+        s.multi_chain.reorg_suspect_streak.remove(&chain);
+    });
+    log!(INFO, "[clear_reorg_halt] chain={:?} reorg halt + suspect streak cleared", chain);
+    Ok(())
+}
+
+/// Delete a chain entirely. Permitted only when the chain carries ZERO supply
+/// and NO chain_vaults reference it (so deletion cannot orphan debt/collateral);
+/// purges every per-chain map. Developer-gated. This DELETES (not disables) a
+/// chain, so it does not record `Event::ChainDisabled`.
+#[candid_method(update)]
+#[update]
+fn delete_chain(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let result = mutate_state(|s| {
+        rumi_protocol_backend::chains::admin::delete_chain_in_state(&mut s.multi_chain, chain)
+    });
+    match result {
+        Ok(()) => {
+            log!(INFO, "[delete_chain] chain={:?} deleted (all per-chain state purged)", chain);
+            Ok(())
+        }
+        Err(e) => Err(ProtocolError::ChainAdmin(format!("{e:?}"))),
+    }
+}
+
 #[candid_method(query)]
 #[query]
 fn get_protocol_config() -> rumi_protocol_backend::ProtocolConfig {
