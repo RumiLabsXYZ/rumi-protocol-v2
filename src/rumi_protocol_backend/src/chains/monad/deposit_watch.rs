@@ -46,6 +46,7 @@ use crate::state::{mutate_state, read_state};
 use crate::Mode;
 
 use super::evm_rpc::{decode_burn_log, fetch_block_numbers, get_balance, get_logs, BURN_EVENT_TOPIC0};
+use super::{hardening, tecdsa};
 
 // ─── Pure helpers ─────────────────────────────────────────────────────────────
 
@@ -166,8 +167,14 @@ pub fn apply_burn_to_state(
 /// `fetch_block_numbers` and before the log scan. The structure below
 /// leaves a clear seam for that insertion.
 pub async fn run_observer(chain: ChainId) {
-    // Guard: skip if in read-only mode or invariant has halted.
-    let should_skip = read_state(|s| s.mode == Mode::ReadOnly || s.multi_chain.invariant_halted);
+    // Guard: skip if in read-only mode, the invariant has halted, or this chain
+    // is reorg-halted (Task 11). A reorg-halted chain stops BOTH the observer
+    // and the settlement worker until `clear_reorg_halt` (Task 14) is called.
+    let should_skip = read_state(|s| {
+        s.mode == Mode::ReadOnly
+            || s.multi_chain.invariant_halted
+            || s.multi_chain.reorg_halted.get(&chain).copied().unwrap_or(false)
+    });
     if should_skip {
         return;
     }
@@ -182,13 +189,21 @@ pub async fn run_observer(chain: ChainId) {
         }
     };
 
+    // ── Hot-wallet gas-balance refresh (Task 11) ─────────────────────────────
+    //
+    // Derive the settlement (minter) address and cache its native MON balance so
+    // the submit-path gas gate (`hardening::hot_wallet_ok`) has data and the
+    // Task-14 query surface can report it. Keeping the tECDSA + RPC cost here
+    // (once per observer tick) avoids paying it on every settlement submit.
+    // Tolerant of errors: a failed derive or balance read logs and continues —
+    // it must NOT abort the observer (reads/burn-watch must still run).
+    refresh_hot_wallet_balance(chain).await;
+
     let last_observed = read_state(|s| {
         s.multi_chain.last_observed_block.get(&chain).copied().unwrap_or(0)
     });
 
     // Fetch finalized block number.
-    // TASK 11 SEAM: insert reorg check here, between fetch_block_numbers and
-    // the log scan below.
     let finalized = match fetch_block_numbers(chain).await {
         Ok((_latest, fin)) => fin,
         Err(e) => {
@@ -196,6 +211,36 @@ pub async fn run_observer(chain: ChainId) {
             return;
         }
     };
+
+    // ── Reorg check (Task 11) ────────────────────────────────────────────────
+    //
+    // A finalized-block regression deeper than this chain's `finality_depth` is
+    // a reorg past finality: halt the chain (observer + settlement) and emit
+    // ChainReorgDetected. The cursor is NOT advanced; recovery is operator-gated
+    // via `clear_reorg_halt` (Task 14). Default depth to the Monad testnet
+    // value (1) if the config is somehow unreadable.
+    let finality_depth = read_state(|s| {
+        s.multi_chain.chain_configs.get(&chain).map(|c| c.finality_depth)
+    })
+    .unwrap_or(1);
+    if hardening::is_reorg(last_observed, finalized, finality_depth) {
+        let depth = last_observed.saturating_sub(finalized);
+        mutate_state(|s| {
+            s.multi_chain.reorg_halted.insert(chain, true);
+        });
+        crate::storage::record_event(&crate::event::Event::ChainReorgDetected {
+            chain_id: chain,
+            observed_block: finalized,
+            reorg_depth: depth,
+            timestamp: ic_cdk::api::time(),
+        });
+        log!(
+            INFO,
+            "[observer chain={:?}] REORG: finalized {} < last_observed {} by {} (> finality {}); halting chain",
+            chain, finalized, last_observed, depth, finality_depth
+        );
+        return;
+    }
 
     if finalized <= last_observed {
         // Nothing new to observe.
@@ -277,8 +322,7 @@ pub async fn run_observer(chain: ChainId) {
     // on each `custody_address`, computing the delta, and calling
     // `credit_deposit_to_state` + emitting `DepositObserved`.
     //
-    // The `get_balance` function is already available from `evm_rpc`.
-    let _ = get_balance; // suppress unused-import warning until Task 23
+    // (`get_balance` is now exercised by `refresh_hot_wallet_balance` above.)
 
     // ── Advance cursor (only on full success) ───────────────────────────────
 
@@ -286,5 +330,42 @@ pub async fn run_observer(chain: ChainId) {
         mutate_state(|s| {
             s.multi_chain.last_observed_block.insert(chain, finalized);
         });
+    }
+}
+
+/// Refresh the cached settlement-address MON balance for `chain` (Task 11).
+///
+/// Derives the settlement (minter) address via `settlement_derivation_path` +
+/// `derive_evm_address`, reads its native balance via `get_balance`, and caches
+/// it in `hot_wallet_balance_e18`. Used by the submit-path gas gate and the
+/// Task-14 query surface. Errors are logged and swallowed — a failed refresh
+/// leaves the previous cached value in place (or, on a fresh chain, leaves the
+/// cache unpopulated, which the gas gate treats as fail-open). Borrow
+/// discipline: no `read_state`/`mutate_state` borrow is held across an `.await`.
+async fn refresh_hot_wallet_balance(chain: ChainId) {
+    let path = tecdsa::settlement_derivation_path(chain);
+    let addr = match tecdsa::derive_evm_address(path).await {
+        Ok((_pubkey, addr)) => addr,
+        Err(e) => {
+            log!(INFO, "[observer chain={:?}] hot-wallet derive_evm_address failed: {}; skipping balance refresh", chain, e);
+            return;
+        }
+    };
+    match get_balance(chain, &addr).await {
+        Ok(bal) => {
+            mutate_state(|s| {
+                s.multi_chain.hot_wallet_balance_e18.insert(chain, bal);
+            });
+            if !hardening::hot_wallet_ok(bal) {
+                log!(
+                    INFO,
+                    "[observer chain={:?}] hot-wallet balance {} e18 below threshold {} e18 (settlement={})",
+                    chain, bal, hardening::HOT_WALLET_MIN_E18, addr
+                );
+            }
+        }
+        Err(e) => {
+            log!(INFO, "[observer chain={:?}] hot-wallet get_balance failed: {}; keeping cached value", chain, e);
+        }
     }
 }

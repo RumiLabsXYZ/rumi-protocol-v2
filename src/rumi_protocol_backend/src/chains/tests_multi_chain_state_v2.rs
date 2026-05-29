@@ -47,6 +47,7 @@ fn v1_cbor_snapshot_decodes_into_v2_without_wiping_state() {
     assert!(v2.manual_prices.is_empty());
     assert!(v2.last_observed_block.is_empty());
     assert!(v2.hot_wallet_balance_e18.is_empty());
+    assert!(v2.reorg_halted.is_empty());
 }
 
 #[test]
@@ -59,6 +60,7 @@ fn v2_default_is_empty() {
     assert!(s.manual_prices.is_empty());
     assert!(s.last_observed_block.is_empty());
     assert!(s.hot_wallet_balance_e18.is_empty());
+    assert!(s.reorg_halted.is_empty());
     assert_eq!(s.total_supply_all_chains_e8s(), 0u128);
 }
 

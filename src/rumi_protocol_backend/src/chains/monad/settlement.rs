@@ -36,7 +36,6 @@
 
 use ic_canister_log::log;
 
-use crate::chains::adapter::{ChainAdapter, MintInstruction, WithdrawalRequest};
 use crate::chains::config::ChainId;
 use crate::chains::monad::chain_vault::ChainVaultStatus;
 use crate::chains::multi_chain_state::MultiChainStateV2;
@@ -46,8 +45,7 @@ use crate::logs::INFO;
 use crate::state::{mutate_state, read_state};
 use crate::Mode;
 
-use super::evm_rpc;
-use super::MonadAdapter;
+use super::{evm_rpc, hardening, tecdsa, tx};
 
 // ─── Pure helpers ─────────────────────────────────────────────────────────────
 
@@ -155,8 +153,14 @@ pub fn confirm_mint_in_state(
 /// resulting status back. No `read_state`/`mutate_state` borrow is ever held
 /// across an `.await`.
 pub async fn run_settlement(chain: ChainId) {
-    // Guard: skip if in read-only mode or the supply invariant has halted.
-    let should_skip = read_state(|s| s.mode == Mode::ReadOnly || s.multi_chain.invariant_halted);
+    // Guard: skip if in read-only mode, the supply invariant has halted, or this
+    // chain is reorg-halted (Task 11). A reorg-halted chain stops BOTH the
+    // observer and the settlement worker until `clear_reorg_halt` (Task 14).
+    let should_skip = read_state(|s| {
+        s.mode == Mode::ReadOnly
+            || s.multi_chain.invariant_halted
+            || s.multi_chain.reorg_halted.get(&chain).copied().unwrap_or(false)
+    });
     if should_skip {
         return;
     }
@@ -181,101 +185,211 @@ pub async fn run_settlement(chain: ChainId) {
         OpAction::Submit => submit_op(chain, op_id, op).await,
         OpAction::Confirm => confirm_op(chain, op_id, op).await,
     }
+
+    // Reap terminal (Succeeded/Failed) ops so `pending` does not grow
+    // monotonically (Task-10 review follow-up). Live ops are untouched, so the
+    // next tick's `select_next_op` is unaffected; `seen_idempotency_keys` is
+    // preserved as the dup guard.
+    mutate_state(|s| {
+        if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
+            q.prune_terminal();
+        }
+    });
+}
+
+/// Per-op-kind tx shape mirroring `MonadAdapter`'s choices, so the submit and
+/// the stuck-tx resubmit paths build identical transactions (only nonce + fees
+/// differ on a resubmit). `vault_id`/`recipient`/`amount_e8s` are the values the
+/// submit path needs for the `ChainMintSubmitted` event.
+struct TxPlan {
+    fields: tx::Eip1559Fields,
+    vault_id: u64,
+    recipient: String,
+    amount_e8s: u128,
+    is_mint: bool,
+}
+
+/// Build the EIP-1559 fields for a settlement op at an EXPLICIT nonce + fees.
+///
+/// Mirrors `MonadAdapter::sign_mint`/`sign_withdrawal` exactly:
+/// - Mint: `to` = icUSD contract, `value` = 0, calldata =
+///   `encode_mint_calldata`, gas_limit 120_000.
+/// - Withdrawal: `to` = recipient, `value` = amount (wei wart), empty data,
+///   gas_limit 21_000; vault_id is a 0 placeholder (Task 13 threads the real id).
+/// - Burn: never signed in Phase 1b — returns `Err`.
+///
+/// The caller supplies `prio`/`max_fee` (a submit uses the live estimate; a
+/// resubmit uses the bumped values) and the contract address for mints.
+fn build_tx_plan(
+    chain: ChainId,
+    kind: &SettlementOpKind,
+    nonce: u64,
+    prio: u128,
+    max_fee: u128,
+    contract: Option<&str>,
+) -> Result<TxPlan, String> {
+    match kind {
+        SettlementOpKind::Mint { recipient, amount_e8s, vault_id } => {
+            let contract = contract
+                .ok_or_else(|| "icUSD contract not set".to_string())?
+                .to_string();
+            let data = tx::encode_mint_calldata(recipient, *amount_e8s, *vault_id);
+            Ok(TxPlan {
+                fields: tx::Eip1559Fields {
+                    chain_id: chain.0 as u64,
+                    nonce,
+                    max_priority_fee_per_gas: prio,
+                    max_fee_per_gas: max_fee,
+                    gas_limit: 120_000,
+                    to: contract,
+                    value: 0,
+                    data,
+                },
+                vault_id: *vault_id,
+                recipient: recipient.clone(),
+                amount_e8s: *amount_e8s,
+                is_mint: true,
+            })
+        }
+        SettlementOpKind::Withdrawal { recipient, amount_e8s } => Ok(TxPlan {
+            fields: tx::Eip1559Fields {
+                chain_id: chain.0 as u64,
+                nonce,
+                max_priority_fee_per_gas: prio,
+                max_fee_per_gas: max_fee,
+                gas_limit: 21_000,
+                to: recipient.clone(),
+                value: *amount_e8s, // wei wart (see adapter::sign_withdrawal)
+                data: vec![],
+            },
+            // vault_id 0 is a placeholder; Task 13 threads the real vault id.
+            vault_id: 0,
+            recipient: recipient.clone(),
+            amount_e8s: *amount_e8s,
+            is_mint: false,
+        }),
+        SettlementOpKind::Burn { .. } => Err("burn not signable in Phase 1b".to_string()),
+    }
 }
 
 /// Submit path: sign + broadcast a `Queued` op, then mark it `Inflight`.
+///
+/// Approach A (Task 11): the worker fetches the nonce itself and builds/signs
+/// the tx directly via `build_tx_plan` + `tx::sign_eip1559` (NOT through the
+/// adapter), so it KNOWS the exact nonce used and can store it on the op. The
+/// stuck-tx resubmit (`confirm_op`) re-signs on this stored nonce, making a
+/// bumped-gas resubmit a true replace-by-fee rather than a second mint.
 async fn submit_op(
     chain: ChainId,
     op_id: u64,
     op: crate::chains::settlement_queue::SettlementOp,
 ) {
-    // TASK 11 SEAM: gas-gate (hot_wallet_ok) check goes here before signing/submitting.
-
-    let adapter = MonadAdapter::new(chain);
-
-    // 1. Sign the op into a 0x-hex signed-tx string (the adapter returns the
-    //    hex bytes in `raw_tx`; `tx_hash` is empty until the broadcaster fills
-    //    it). The mint vault_id is carried so the Confirm path can match the log.
-    let (signed_bytes, vault_id, recipient, amount_e8s) = match &op.kind {
-        SettlementOpKind::Mint { recipient, amount_e8s, vault_id } => {
-            let instr = MintInstruction {
-                recipient: recipient.clone(),
-                amount_e8s: *amount_e8s,
-                vault_id: *vault_id,
-                idempotency_key: op.idempotency_key.clone(),
-            };
-            match adapter.sign_mint(instr).await {
-                Ok(signed) => (signed.raw_tx, *vault_id, recipient.clone(), *amount_e8s),
-                Err(e) => {
-                    log!(INFO, "[settlement chain={:?}] sign_mint failed for op {}: {:?}; will retry", chain, op_id, e);
-                    return;
+    // A Burn op is never signable in Phase 1b — fail it up front (no RPC).
+    if matches!(op.kind, SettlementOpKind::Burn { .. }) {
+        let now = ic_cdk::api::time();
+        let reason = "burn not signable in Phase 1b".to_string();
+        mutate_state(|s| {
+            if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
+                if let Some(o) = q.pending.get_mut(&op_id) {
+                    o.mark_failed(reason.clone(), now);
                 }
             }
-        }
-        SettlementOpKind::Withdrawal { recipient, amount_e8s } => {
-            // Task 13: withdrawal ops are not enqueued until close-vault lands;
-            // the close/WithdrawalSigned-with-vault_id bookkeeping is built
-            // there. The signing/broadcast mechanism below is reused as-is.
-            let req = WithdrawalRequest {
-                recipient: recipient.clone(),
-                amount_e8s: *amount_e8s,
-                idempotency_key: op.idempotency_key.clone(),
-            };
-            match adapter.sign_withdrawal(req).await {
-                // vault_id 0 is a placeholder; Task 13 threads the real vault id.
-                Ok(signed) => (signed.raw_tx, 0u64, recipient.clone(), *amount_e8s),
-                Err(e) => {
-                    log!(INFO, "[settlement chain={:?}] sign_withdrawal failed for op {}: {:?}; will retry", chain, op_id, e);
-                    return;
-                }
-            }
-        }
-        SettlementOpKind::Burn { .. } => {
-            // The canister never signs burns in Phase 1b (burns are
-            // user-initiated on-chain). Mark this op Failed rather than panic.
+        });
+        crate::storage::record_event(&crate::event::Event::ChainSettlementFailed {
+            chain_id: chain,
+            op_id,
+            reason,
+            timestamp: now,
+        });
+        log!(INFO, "[settlement chain={:?}] op {} is a Burn; marked Failed (burns are user-initiated in Phase 1b)", chain, op_id);
+        return;
+    }
+
+    // GAS GATE (Task 11): refuse a new outbound op when the cached settlement
+    // balance is below the hot-wallet floor. FAIL OPEN when the cache is unset
+    // (`None`): an unpopulated cache (fresh chain / observer hasn't run yet)
+    // must NEVER block a legitimate mint. The observer refreshes the cache each
+    // tick (deposit_watch::refresh_hot_wallet_balance).
+    let cached = read_state(|s| s.multi_chain.hot_wallet_balance_e18.get(&chain).copied());
+    if let Some(bal) = cached {
+        if !hardening::hot_wallet_ok(bal) {
             let now = ic_cdk::api::time();
-            let reason = "burn not signable in Phase 1b".to_string();
-            mutate_state(|s| {
-                if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
-                    if let Some(o) = q.pending.get_mut(&op_id) {
-                        o.mark_failed(reason.clone(), now);
-                    }
-                }
-            });
-            crate::storage::record_event(&crate::event::Event::ChainSettlementFailed {
+            crate::storage::record_event(&crate::event::Event::ChainHotWalletLow {
                 chain_id: chain,
-                op_id,
-                reason,
+                balance_e18: bal,
+                threshold_e18: hardening::HOT_WALLET_MIN_E18,
                 timestamp: now,
             });
-            log!(INFO, "[settlement chain={:?}] op {} is a Burn; marked Failed (burns are user-initiated in Phase 1b)", chain, op_id);
+            log!(INFO, "[settlement chain={:?}] hot-wallet balance {} e18 < threshold {} e18; skipping submit of op {} (reads/observer continue)", chain, bal, hardening::HOT_WALLET_MIN_E18, op_id);
+            return;
+        }
+    }
+
+    // 1. Derive the settlement (minter) address.
+    let path = tecdsa::settlement_derivation_path(chain);
+    let settlement_addr = match tecdsa::derive_evm_address(path.clone()).await {
+        Ok((_pubkey, addr)) => addr,
+        Err(e) => {
+            log!(INFO, "[settlement chain={:?}] derive_evm_address failed for op {}: {}; will retry", chain, op_id, e);
             return;
         }
     };
 
-    // 2. Reconstruct the 0x-hex string from the signed-tx UTF-8 bytes.
-    let raw_hex = match String::from_utf8(signed_bytes) {
+    // 2. Fetch the nonce ("latest") — we store it on the op so a stuck-tx
+    //    resubmit can replace-by-fee on the SAME nonce.
+    let nonce = match evm_rpc::get_transaction_count(chain, &settlement_addr).await {
+        Ok(n) => n,
+        Err(e) => {
+            log!(INFO, "[settlement chain={:?}] get_transaction_count failed for op {}: {}; will retry", chain, op_id, e);
+            return;
+        }
+    };
+
+    // 3. Fetch fee estimate; max_fee mirrors the adapter (2*base + prio).
+    let (base_fee, prio) = match evm_rpc::fetch_fees(chain).await {
+        Ok(pair) => pair,
+        Err(e) => {
+            log!(INFO, "[settlement chain={:?}] fetch_fees failed for op {}: {}; will retry", chain, op_id, e);
+            return;
+        }
+    };
+    let max_fee = base_fee.saturating_mul(2).saturating_add(prio);
+
+    // 4. Resolve the contract (mints only) and build the tx plan.
+    let contract = read_state(|s| s.multi_chain.chain_contracts.get(&chain).cloned());
+    let plan = match build_tx_plan(chain, &op.kind, nonce, prio, max_fee, contract.as_deref()) {
+        Ok(p) => p,
+        Err(e) => {
+            log!(INFO, "[settlement chain={:?}] build_tx_plan failed for op {}: {}; will retry", chain, op_id, e);
+            return;
+        }
+    };
+    let TxPlan { fields, vault_id, recipient, amount_e8s, is_mint } = plan;
+
+    // 5. Sign.
+    let raw_hex = match tx::sign_eip1559(&fields, path, &settlement_addr).await {
         Ok(h) => h,
         Err(e) => {
-            log!(INFO, "[settlement chain={:?}] op {} signed tx not valid UTF-8: {}; will retry", chain, op_id, e);
+            log!(INFO, "[settlement chain={:?}] sign_eip1559 failed for op {}: {}; will retry", chain, op_id, e);
             return;
         }
     };
 
-    // 3. Broadcast. A transient send error is logged and retried next tick — we
+    // 6. Broadcast. A transient send error is logged and retried next tick — we
     //    do NOT mark the op Failed (it may yet be re-signable / re-broadcastable).
     //
     //    ON-CHAIN DOUBLE-MINT DEPENDENCY: if send_raw_transaction returns Err but
-    //    the tx actually landed (an RPC false negative), the next tick re-reads
-    //    the "latest" nonce (adapter.rs::sign_mint), so it signs a NEW tx at
-    //    nonce+1 — a genuine second on-chain mint, not a replacement. The
+    //    the tx actually landed (an RPC false negative), this op stays Queued
+    //    with no submit_nonce recorded, so the next tick re-reads "latest" and
+    //    signs a NEW tx at nonce+1 — a genuine second on-chain mint. The
     //    canister's supply accounting stays correct (confirm requires
     //    observed_e8s == pending_mint_e8s and credits exactly once), but on-chain
     //    icUSD could be minted twice. Protection lives OUTSIDE this function:
     //    (a) IcUSD.mint MUST guard per vault_id (Task 19: `mapping(uint64 => bool)
-    //    minted`, revert on repeat — asserted by a Task 20 test), and (b) Task
-    //    11's stuck-tx path resubmits on the SAME stored nonce. Until both land,
-    //    the resubmit-after-transient-error case is unguarded at the canister layer.
+    //    minted`, revert on repeat — asserted by a Task 20 test), and (b) once an
+    //    op IS Inflight, Task-11's stuck-tx path resubmits on the SAME stored
+    //    nonce (true replace-by-fee). The unguarded window is only the
+    //    transient-error-before-Inflight case.
     let tx_hash = match evm_rpc::send_raw_transaction(chain, &raw_hex).await {
         Ok(h) => h,
         Err(e) => {
@@ -284,14 +398,15 @@ async fn submit_op(
         }
     };
 
-    // 4. Mark Inflight + record the tx hash. Emit ChainMintSubmitted for mints.
+    // 7. Mark Inflight + record the tx hash AND the submit nonce. Emit
+    //    ChainMintSubmitted for mints.
     let now = ic_cdk::api::time();
-    let is_mint = matches!(op.kind, SettlementOpKind::Mint { .. });
     mutate_state(|s| {
         if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
             if let Some(o) = q.pending.get_mut(&op_id) {
                 o.mark_inflight(now);
                 o.last_tx_hash = Some(tx_hash.clone());
+                o.submit_nonce = Some(nonce);
             }
         }
     });
@@ -340,8 +455,11 @@ async fn confirm_op(
     let (status_ok, block_number) = match receipt {
         Some(pair) => pair,
         None => {
-            // Not mined yet — leave Inflight and retry next tick.
-            // TASK 11 SEAM: is_stuck + bump_gas + resubmit on same nonce goes here.
+            // Not mined yet — leave Inflight and retry next tick, UNLESS the op
+            // is stuck (tries past the finality-depth threshold). When stuck and
+            // we know the original nonce, replace-by-fee: bump gas +25% and
+            // re-sign/rebroadcast on the SAME stored nonce (Task 11).
+            resubmit_if_stuck(chain, op_id, &op, &tx_hash).await;
             return;
         }
     };
@@ -515,4 +633,122 @@ async fn confirm_op(
             log!(INFO, "[settlement chain={:?}] inflight Burn op {} reached confirm path unexpectedly", chain, op_id);
         }
     }
+}
+
+/// Stuck-tx replace-by-fee (Task 11). Called from the `confirm_op` NOT-MINED
+/// branch. When an inflight op has been retried past its stuck threshold
+/// (`hardening::is_stuck(tries, finality_depth)`) AND we recorded the nonce it
+/// was first submitted at (`submit_nonce`), re-sign and rebroadcast the SAME
+/// transaction on the SAME nonce with fees bumped +25% — a true EVM
+/// replace-by-fee, NOT a second mint.
+///
+/// On a successful rebroadcast: `mark_inflight` (bumps `tries`) and update
+/// `last_tx_hash` to the new hash. On any error (derive/nonce/fees/sign/send):
+/// log and leave the op Inflight as-is for the next tick. When NOT stuck, or
+/// when `submit_nonce` is `None`, this is a no-op (op stays Inflight, retried
+/// next tick) — matching the prior behavior.
+///
+/// Borrow discipline mirrors `submit_op`: read → clone → await → mutate; no
+/// `read_state`/`mutate_state` borrow is held across an `.await`.
+async fn resubmit_if_stuck(
+    chain: ChainId,
+    op_id: u64,
+    op: &crate::chains::settlement_queue::SettlementOp,
+    tx_hash: &str,
+) {
+    // Read tries from the op's Inflight status (it must be Inflight to be here).
+    let tries = match &op.status {
+        SettlementOpStatus::Inflight { tries, .. } => *tries,
+        _ => return, // not inflight — nothing to resubmit
+    };
+
+    // Finality depth from config (default to the Monad testnet value of 1).
+    let finality_depth = read_state(|s| {
+        s.multi_chain.chain_configs.get(&chain).map(|c| c.finality_depth)
+    })
+    .unwrap_or(1);
+
+    if !hardening::is_stuck(tries, finality_depth) {
+        // Not stuck yet — leave Inflight, retry next tick.
+        return;
+    }
+
+    // We can only replace-by-fee if we know the nonce the op was first submitted
+    // at. Without it, a resubmit would risk a fresh nonce (a second mint), so we
+    // do NOT resubmit — leave Inflight for the next tick.
+    let nonce = match op.submit_nonce {
+        Some(n) => n,
+        None => {
+            log!(INFO, "[settlement chain={:?}] op {} stuck (tries={}, finality_depth={}) but no submit_nonce; leaving Inflight (cannot safely replace-by-fee)", chain, op_id, tries, finality_depth);
+            return;
+        }
+    };
+
+    // Derive the settlement address.
+    let path = tecdsa::settlement_derivation_path(chain);
+    let settlement_addr = match tecdsa::derive_evm_address(path.clone()).await {
+        Ok((_pubkey, addr)) => addr,
+        Err(e) => {
+            log!(INFO, "[settlement chain={:?}] resubmit derive_evm_address failed for op {}: {}; leaving Inflight", chain, op_id, e);
+            return;
+        }
+    };
+
+    // Recompute fees and bump +25%. Mirror the adapter's max-fee formula
+    // (2*base + prio) before bumping, so the bumped ceiling tracks current gas.
+    let (base_fee, prio) = match evm_rpc::fetch_fees(chain).await {
+        Ok(pair) => pair,
+        Err(e) => {
+            log!(INFO, "[settlement chain={:?}] resubmit fetch_fees failed for op {}: {}; leaving Inflight", chain, op_id, e);
+            return;
+        }
+    };
+    let base_max_fee = base_fee.saturating_mul(2).saturating_add(prio);
+    let (bumped_prio, bumped_max) = hardening::bump_gas(prio, base_max_fee);
+
+    // Resolve the contract (mints only) and rebuild the SAME tx at the stored
+    // nonce with the bumped fees.
+    let contract = read_state(|s| s.multi_chain.chain_contracts.get(&chain).cloned());
+    let plan = match build_tx_plan(chain, &op.kind, nonce, bumped_prio, bumped_max, contract.as_deref()) {
+        Ok(p) => p,
+        Err(e) => {
+            log!(INFO, "[settlement chain={:?}] resubmit build_tx_plan failed for op {}: {}; leaving Inflight", chain, op_id, e);
+            return;
+        }
+    };
+
+    // Re-sign on the stored nonce.
+    let raw_hex = match tx::sign_eip1559(&plan.fields, path, &settlement_addr).await {
+        Ok(h) => h,
+        Err(e) => {
+            log!(INFO, "[settlement chain={:?}] resubmit sign_eip1559 failed for op {}: {}; leaving Inflight", chain, op_id, e);
+            return;
+        }
+    };
+
+    // Rebroadcast.
+    let new_tx_hash = match evm_rpc::send_raw_transaction(chain, &raw_hex).await {
+        Ok(h) => h,
+        Err(e) => {
+            log!(INFO, "[settlement chain={:?}] resubmit send_raw_transaction failed for op {}: {}; leaving Inflight", chain, op_id, e);
+            return;
+        }
+    };
+
+    // Success: bump tries (mark_inflight) and record the new tx hash. The nonce
+    // is unchanged (the whole point of replace-by-fee).
+    let now = ic_cdk::api::time();
+    mutate_state(|s| {
+        if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
+            if let Some(o) = q.pending.get_mut(&op_id) {
+                o.mark_inflight(now);
+                o.last_tx_hash = Some(new_tx_hash.clone());
+            }
+        }
+    });
+    log!(
+        INFO,
+        "[settlement chain={:?}] STUCK op {} (tries={}, finality_depth={}) replaced-by-fee on nonce {}: prio {}->{}, max_fee {}->{}, old_tx={} new_tx={}",
+        chain, op_id, tries, finality_depth, nonce, prio, bumped_prio, base_max_fee, bumped_max, tx_hash, new_tx_hash
+    );
 }

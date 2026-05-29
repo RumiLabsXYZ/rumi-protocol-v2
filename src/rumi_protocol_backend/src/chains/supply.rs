@@ -19,7 +19,7 @@ use serde::Serialize;
 /// DORMANT TEMPLATE — not called on the live upgrade path.
 ///
 /// The V1->V2 upgrade happens automatically via the ciborium in-place decode:
-/// the four V1 fields map across by name; the five new V2 fields carry
+/// the four V1 fields map across by name; the new-in-V2 fields carry
 /// `#[serde(default)]` and come up empty. No explicit migration call is
 /// needed in `post_upgrade`.
 ///
@@ -39,6 +39,7 @@ pub fn migrate_multi_chain_state(v1: MultiChainStateV1) -> MultiChainStateV2 {
         manual_prices: Default::default(),
         last_observed_block: Default::default(),
         hot_wallet_balance_e18: Default::default(),
+        reorg_halted: Default::default(),
     }
 }
 

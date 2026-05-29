@@ -65,11 +65,13 @@ impl MultiChainStateV1 {
 /// `#[serde(default)]` in-place decode of `State.multi_chain` maps each by
 /// name straight across) and adds the Monad/foreign-chain working set:
 /// per-vault records, deployed-contract addresses, manual price overrides,
-/// last-observed block cursors, and hot-wallet gas balances. The five new
-/// fields carry field-level `#[serde(default)]` so a V1 CBOR snapshot (which
-/// lacks these keys entirely) decodes into V2 without error, defaulting the
-/// new fields to empty. The four V1-carried fields are NOT decorated because
-/// V1 always wrote them and they must be present in any valid snapshot.
+/// last-observed block cursors, hot-wallet gas balances, and per-chain reorg
+/// halt flags. The new-in-V2 fields carry field-level `#[serde(default)]` so a
+/// V1 CBOR snapshot (which lacks these keys entirely) decodes into V2 without
+/// error, defaulting the new fields to empty. The four V1-carried fields are
+/// NOT decorated because V1 always wrote them and they must be present in any
+/// valid snapshot. (`reorg_halted` was added to V2 in Task 11, before V2 had
+/// ever been persisted, so it is an in-V2 field rather than a V3 bump.)
 ///
 /// Add the NEXT field by bumping to `MultiChainStateV3` (keep V2 verbatim),
 /// adding `#[serde(default)]` on the new field, and rebinding the alias below.
@@ -94,6 +96,15 @@ pub struct MultiChainStateV2 {
     pub last_observed_block: BTreeMap<ChainId, u64>,
     #[serde(default)]
     pub hot_wallet_balance_e18: BTreeMap<ChainId, u128>,
+    /// Per-chain reorg circuit breaker. Set `true` by the observer when a
+    /// finalized-block regression deeper than `finality_depth` is detected
+    /// (`hardening::is_reorg`); halts BOTH the observer and the settlement
+    /// worker for that chain until cleared by `clear_reorg_halt` (Task 14).
+    /// Added directly to V2 (not a new V3) because V2 is brand-new this phase
+    /// and has never been persisted, so no live snapshot lacks this key; the
+    /// `#[serde(default)]` is still mandatory state-wipe defense.
+    #[serde(default)]
+    pub reorg_halted: BTreeMap<ChainId, bool>,
 }
 
 impl MultiChainStateV2 {

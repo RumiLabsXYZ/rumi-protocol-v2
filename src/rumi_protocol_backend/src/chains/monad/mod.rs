@@ -11,6 +11,7 @@ pub mod chain_vault;
 pub mod config;
 pub mod deposit_watch;
 pub mod evm_rpc;
+pub mod hardening;
 pub mod settlement;
 pub mod tecdsa;
 pub mod tx;
@@ -42,3 +43,6 @@ mod tests_deposit_watch;
 
 #[cfg(test)]
 mod tests_settlement;
+
+#[cfg(test)]
+mod tests_hardening;
