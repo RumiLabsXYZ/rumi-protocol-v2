@@ -6,7 +6,7 @@ use super::supply::migrate_multi_chain_state;
 fn v1_cbor_snapshot_decodes_into_v2_without_wiping_state() {
     // Regression for the Task-3 state-wipe bug: a populated V1-shaped CBOR
     // snapshot (the shape Phase 1a wrote to stable memory) MUST decode into
-    // MultiChainStateV2 with the four V1 fields preserved and the five new
+    // MultiChainStateV2 with the four V1 fields preserved and the new-in-V2
     // fields defaulted to empty. This is the exact ciborium decode path
     // load_state_from_stable() runs on upgrade. WITHOUT field-level
     // #[serde(default)] on the new V2 fields this decode fails with
@@ -48,6 +48,7 @@ fn v1_cbor_snapshot_decodes_into_v2_without_wiping_state() {
     assert!(v2.last_observed_block.is_empty());
     assert!(v2.hot_wallet_balance_e18.is_empty());
     assert!(v2.reorg_halted.is_empty());
+    assert!(v2.reorg_suspect_streak.is_empty());
 }
 
 #[test]
@@ -61,6 +62,7 @@ fn v2_default_is_empty() {
     assert!(s.last_observed_block.is_empty());
     assert!(s.hot_wallet_balance_e18.is_empty());
     assert!(s.reorg_halted.is_empty());
+    assert!(s.reorg_suspect_streak.is_empty());
     assert_eq!(s.total_supply_all_chains_e8s(), 0u128);
 }
 

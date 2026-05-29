@@ -230,44 +230,47 @@ fn build_tx_plan(
 ) -> Result<TxPlan, String> {
     match kind {
         SettlementOpKind::Mint { recipient, amount_e8s, vault_id } => {
-            let contract = contract
-                .ok_or_else(|| "icUSD contract not set".to_string())?
-                .to_string();
-            let data = tx::encode_mint_calldata(recipient, *amount_e8s, *vault_id);
-            Ok(TxPlan {
-                fields: tx::Eip1559Fields {
-                    chain_id: chain.0 as u64,
-                    nonce,
-                    max_priority_fee_per_gas: prio,
-                    max_fee_per_gas: max_fee,
-                    gas_limit: 120_000,
-                    to: contract,
-                    value: 0,
-                    data,
+            let contract = contract.ok_or_else(|| "icUSD contract not set".to_string())?;
+            // Delegate the per-op-kind field shape to the single source of truth.
+            let fields = tx::build_eip1559_fields(
+                chain.0 as u64,
+                tx::MonadTxKind::Mint {
+                    contract,
+                    recipient,
+                    amount_e8s: *amount_e8s,
+                    vault_id: *vault_id,
                 },
+                nonce,
+                prio,
+                max_fee,
+            );
+            Ok(TxPlan {
+                fields,
                 vault_id: *vault_id,
                 recipient: recipient.clone(),
                 amount_e8s: *amount_e8s,
                 is_mint: true,
             })
         }
-        SettlementOpKind::Withdrawal { recipient, amount_e8s } => Ok(TxPlan {
-            fields: tx::Eip1559Fields {
-                chain_id: chain.0 as u64,
+        SettlementOpKind::Withdrawal { recipient, amount_e8s } => {
+            // `amount_e8s` carries the MON amount in wei (the field-name wart
+            // documented on adapter::sign_withdrawal).
+            let fields = tx::build_eip1559_fields(
+                chain.0 as u64,
+                tx::MonadTxKind::NativeWithdrawal { recipient, amount_wei: *amount_e8s },
                 nonce,
-                max_priority_fee_per_gas: prio,
-                max_fee_per_gas: max_fee,
-                gas_limit: 21_000,
-                to: recipient.clone(),
-                value: *amount_e8s, // wei wart (see adapter::sign_withdrawal)
-                data: vec![],
-            },
-            // vault_id 0 is a placeholder; Task 13 threads the real vault id.
-            vault_id: 0,
-            recipient: recipient.clone(),
-            amount_e8s: *amount_e8s,
-            is_mint: false,
-        }),
+                prio,
+                max_fee,
+            );
+            Ok(TxPlan {
+                fields,
+                // vault_id 0 is a placeholder; Task 13 threads the real vault id.
+                vault_id: 0,
+                recipient: recipient.clone(),
+                amount_e8s: *amount_e8s,
+                is_mint: false,
+            })
+        }
         SettlementOpKind::Burn { .. } => Err("burn not signable in Phase 1b".to_string()),
     }
 }
@@ -455,11 +458,49 @@ async fn confirm_op(
     let (status_ok, block_number) = match receipt {
         Some(pair) => pair,
         None => {
-            // Not mined yet — leave Inflight and retry next tick, UNLESS the op
-            // is stuck (tries past the finality-depth threshold). When stuck and
-            // we know the original nonce, replace-by-fee: bump gas +25% and
-            // re-sign/rebroadcast on the SAME stored nonce (Task 11).
-            resubmit_if_stuck(chain, op_id, &op, &tx_hash).await;
+            // Not mined yet. ADVANCE `tries` on EVERY not-mined tick (the prior
+            // code only advanced on submit / successful-resubmit, so `is_stuck`
+            // (>= 2) was unreachable and replace-by-fee never fired). The pure
+            // `on_not_mined_tick` decides the new tries count and whether to
+            // replace-by-fee THIS tick (only when stuck AND we stored the submit
+            // nonce — resubmitting without it would risk a fresh-nonce 2nd mint).
+            let tries = match &op.status {
+                SettlementOpStatus::Inflight { tries, .. } => *tries,
+                _ => {
+                    // Defensive: confirm_op is only entered for an Inflight op.
+                    log!(INFO, "[settlement chain={:?}] confirm op {} not Inflight on not-mined tick; skipping", chain, op_id);
+                    return;
+                }
+            };
+            let finality_depth = read_state(|s| {
+                s.multi_chain.chain_configs.get(&chain).map(|c| c.finality_depth)
+            })
+            .unwrap_or(1);
+            let has_nonce = op.submit_nonce.is_some();
+            let (new_tries, do_resubmit) =
+                hardening::on_not_mined_tick(tries, finality_depth, has_nonce);
+
+            // Persist the advanced tries directly onto the Inflight status so the
+            // stuck threshold is actually reachable across ticks. Keep
+            // last_attempt_ns as-is here (a non-resubmit tick is not an attempt);
+            // the resubmit path updates last_tx_hash on a successful rebroadcast.
+            mutate_state(|s| {
+                if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
+                    if let Some(o) = q.pending.get_mut(&op_id) {
+                        if let SettlementOpStatus::Inflight { tries, .. } = &mut o.status {
+                            *tries = new_tries;
+                        }
+                    }
+                }
+            });
+
+            // Once on_not_mined_tick says so, replace-by-fee on the STORED nonce
+            // (NOT a fresh `latest` read). resubmit_if_stuck does the bumped-gas
+            // re-sign + rebroadcast and does NOT advance tries again (confirm_op
+            // owns the per-tick advance now), avoiding a double-advance.
+            if do_resubmit {
+                resubmit_if_stuck(chain, op_id, &op, &tx_hash, new_tries, finality_depth).await;
+            }
             return;
         }
     };
@@ -635,18 +676,20 @@ async fn confirm_op(
     }
 }
 
-/// Stuck-tx replace-by-fee (Task 11). Called from the `confirm_op` NOT-MINED
-/// branch. When an inflight op has been retried past its stuck threshold
-/// (`hardening::is_stuck(tries, finality_depth)`) AND we recorded the nonce it
-/// was first submitted at (`submit_nonce`), re-sign and rebroadcast the SAME
-/// transaction on the SAME nonce with fees bumped +25% — a true EVM
+/// Stuck-tx replace-by-fee broadcast (Task 11). Called from the `confirm_op`
+/// NOT-MINED branch ONLY when `hardening::on_not_mined_tick` has already decided
+/// this op is stuck and a resubmit is warranted (the caller advanced and
+/// persisted `tries` first). Re-signs and rebroadcasts the SAME transaction on
+/// the SAME stored nonce (`submit_nonce`) with fees bumped +25% — a true EVM
 /// replace-by-fee, NOT a second mint.
 ///
-/// On a successful rebroadcast: `mark_inflight` (bumps `tries`) and update
-/// `last_tx_hash` to the new hash. On any error (derive/nonce/fees/sign/send):
-/// log and leave the op Inflight as-is for the next tick. When NOT stuck, or
-/// when `submit_nonce` is `None`, this is a no-op (op stays Inflight, retried
-/// next tick) — matching the prior behavior.
+/// `tries`/`finality_depth` are passed for logging only — the stuck decision is
+/// the caller's. On a successful rebroadcast: update `last_tx_hash` (and
+/// `last_attempt_ns`) but do NOT advance `tries` (confirm_op already advanced it
+/// once for this tick; advancing again would double-count). On any error
+/// (derive/fees/sign/send): log and leave the op Inflight as-is for the next
+/// tick. When `submit_nonce` is `None`, this refuses to resubmit (a resubmit
+/// would risk a fresh nonce — a second mint) and leaves the op Inflight.
 ///
 /// Borrow discipline mirrors `submit_op`: read → clone → await → mutate; no
 /// `read_state`/`mutate_state` borrow is held across an `.await`.
@@ -655,24 +698,9 @@ async fn resubmit_if_stuck(
     op_id: u64,
     op: &crate::chains::settlement_queue::SettlementOp,
     tx_hash: &str,
+    tries: u32,
+    finality_depth: u32,
 ) {
-    // Read tries from the op's Inflight status (it must be Inflight to be here).
-    let tries = match &op.status {
-        SettlementOpStatus::Inflight { tries, .. } => *tries,
-        _ => return, // not inflight — nothing to resubmit
-    };
-
-    // Finality depth from config (default to the Monad testnet value of 1).
-    let finality_depth = read_state(|s| {
-        s.multi_chain.chain_configs.get(&chain).map(|c| c.finality_depth)
-    })
-    .unwrap_or(1);
-
-    if !hardening::is_stuck(tries, finality_depth) {
-        // Not stuck yet — leave Inflight, retry next tick.
-        return;
-    }
-
     // We can only replace-by-fee if we know the nonce the op was first submitted
     // at. Without it, a resubmit would risk a fresh nonce (a second mint), so we
     // do NOT resubmit — leave Inflight for the next tick.
@@ -735,14 +763,19 @@ async fn resubmit_if_stuck(
         }
     };
 
-    // Success: bump tries (mark_inflight) and record the new tx hash. The nonce
-    // is unchanged (the whole point of replace-by-fee).
+    // Success: record the new tx hash and refresh last_attempt_ns. Do NOT bump
+    // `tries` here — confirm_op already advanced it once for this tick (this
+    // function is only called after on_not_mined_tick decided to resubmit), so
+    // bumping again would double-advance per tick. The nonce is unchanged (the
+    // whole point of replace-by-fee).
     let now = ic_cdk::api::time();
     mutate_state(|s| {
         if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
             if let Some(o) = q.pending.get_mut(&op_id) {
-                o.mark_inflight(now);
                 o.last_tx_hash = Some(new_tx_hash.clone());
+                if let SettlementOpStatus::Inflight { last_attempt_ns, .. } = &mut o.status {
+                    *last_attempt_ns = now;
+                }
             }
         }
     });

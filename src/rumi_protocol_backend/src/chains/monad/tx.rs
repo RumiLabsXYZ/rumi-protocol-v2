@@ -36,6 +36,58 @@ pub struct Eip1559Fields {
     pub data: Vec<u8>,
 }
 
+/// The per-op-kind shape of a Monad settlement transaction (what varies between
+/// a mint and a native withdrawal: `to`, `value`, calldata, gas_limit).
+pub enum MonadTxKind<'a> {
+    /// `mint(address,uint256,uint64)` on the icUSD EVM contract.
+    Mint { contract: &'a str, recipient: &'a str, amount_e8s: u128, vault_id: u64 },
+    /// A native MON transfer (`amount_wei` carried in the EIP-1559 `value`).
+    NativeWithdrawal { recipient: &'a str, amount_wei: u128 },
+}
+
+/// Single source of truth for the per-op-kind EIP-1559 field shape (gas_limit,
+/// calldata, to, value). Both the settlement worker (`build_tx_plan`) and
+/// `MonadAdapter::sign_*` call this so a submit and a replace-by-fee resubmit
+/// build byte-identical transactions (only nonce + fees differ). Two
+/// independent builders that MUST stay identical are a latent double-mint
+/// hazard: if one drifts (e.g. a gas_limit change), a replace-by-fee resubmit
+/// stops replacing and becomes a second on-chain mint.
+///
+/// - Mint: `to` = icUSD contract, `value` = 0, calldata = `encode_mint_calldata`,
+///   gas_limit 120_000.
+/// - Native withdrawal: `to` = recipient, `value` = amount (wei), empty data,
+///   gas_limit 21_000.
+pub fn build_eip1559_fields(
+    chain_id: u64,
+    kind: MonadTxKind,
+    nonce: u64,
+    prio: u128,
+    max_fee: u128,
+) -> Eip1559Fields {
+    match kind {
+        MonadTxKind::Mint { contract, recipient, amount_e8s, vault_id } => Eip1559Fields {
+            chain_id,
+            nonce,
+            max_priority_fee_per_gas: prio,
+            max_fee_per_gas: max_fee,
+            gas_limit: 120_000,
+            to: contract.to_string(),
+            value: 0,
+            data: encode_mint_calldata(recipient, amount_e8s, vault_id),
+        },
+        MonadTxKind::NativeWithdrawal { recipient, amount_wei } => Eip1559Fields {
+            chain_id,
+            nonce,
+            max_priority_fee_per_gas: prio,
+            max_fee_per_gas: max_fee,
+            gas_limit: 21_000,
+            to: recipient.to_string(),
+            value: amount_wei,
+            data: vec![],
+        },
+    }
+}
+
 // ─── calldata helpers ─────────────────────────────────────────────────────────
 
 /// Build calldata for `mint(address,uint256,uint64)`.

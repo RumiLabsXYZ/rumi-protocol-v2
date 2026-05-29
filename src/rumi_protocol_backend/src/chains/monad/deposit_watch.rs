@@ -215,15 +215,31 @@ pub async fn run_observer(chain: ChainId) {
     // ── Reorg check (Task 11) ────────────────────────────────────────────────
     //
     // A finalized-block regression deeper than this chain's `finality_depth` is
-    // a reorg past finality: halt the chain (observer + settlement) and emit
-    // ChainReorgDetected. The cursor is NOT advanced; recovery is operator-gated
-    // via `clear_reorg_halt` (Task 14). Default depth to the Monad testnet
-    // value (1) if the config is somehow unreadable.
+    // SUSPECTED to be a reorg past finality. But `fetch_block_numbers` queries
+    // ONE provider at a time (no quorum), so a single stale/lagging read could
+    // regress the finalized block transiently. We therefore require the
+    // suspicion to PERSIST across `hardening::REORG_CONFIRM_TICKS` consecutive
+    // observer ticks before halting; a single non-suspect tick resets the streak
+    // (`hardening::on_reorg_tick`), so a transient blip self-heals. Only on the
+    // K-th consecutive suspect tick do we halt the chain (observer + settlement)
+    // and emit ChainReorgDetected; the cursor is NOT advanced. Recovery is
+    // operator-gated via `clear_reorg_halt` (Task 14), which MUST reset BOTH
+    // `reorg_halted` AND `reorg_suspect_streak` for the chain. Default depth to
+    // the Monad testnet value (1) if the config is somehow unreadable.
     let finality_depth = read_state(|s| {
         s.multi_chain.chain_configs.get(&chain).map(|c| c.finality_depth)
     })
     .unwrap_or(1);
-    if hardening::is_reorg(last_observed, finalized, finality_depth) {
+    let suspected = hardening::is_reorg(last_observed, finalized, finality_depth);
+    let streak = read_state(|s| {
+        s.multi_chain.reorg_suspect_streak.get(&chain).copied().unwrap_or(0)
+    });
+    let (new_streak, should_halt) = hardening::on_reorg_tick(streak, suspected);
+    mutate_state(|s| {
+        s.multi_chain.reorg_suspect_streak.insert(chain, new_streak);
+    });
+
+    if should_halt {
         let depth = last_observed.saturating_sub(finalized);
         mutate_state(|s| {
             s.multi_chain.reorg_halted.insert(chain, true);
@@ -236,11 +252,23 @@ pub async fn run_observer(chain: ChainId) {
         });
         log!(
             INFO,
-            "[observer chain={:?}] REORG: finalized {} < last_observed {} by {} (> finality {}); halting chain",
-            chain, finalized, last_observed, depth, finality_depth
+            "[observer chain={:?}] REORG CONFIRMED ({}/{} ticks): finalized {} < last_observed {} by {} (> finality {}); halting chain",
+            chain, new_streak, hardening::REORG_CONFIRM_TICKS, finalized, last_observed, depth, finality_depth
+        );
+        return;
+    } else if suspected {
+        // Below the confirmation threshold: do NOT halt and do NOT advance the
+        // cursor (finalized < last_observed means there is nothing new to scan
+        // anyway). Wait for the next tick to confirm or clear the suspicion.
+        log!(
+            INFO,
+            "[observer chain={:?}] suspected reorg, streak {}/{}, not halting yet (finalized {} < last_observed {})",
+            chain, new_streak, hardening::REORG_CONFIRM_TICKS, finalized, last_observed
         );
         return;
     }
+    // Not suspected: the streak was reset to 0 above, so a real reorg needs K
+    // CONSECUTIVE suspect ticks. Fall through to the normal nothing-new check.
 
     if finalized <= last_observed {
         // Nothing new to observe.

@@ -98,13 +98,26 @@ pub struct MultiChainStateV2 {
     pub hot_wallet_balance_e18: BTreeMap<ChainId, u128>,
     /// Per-chain reorg circuit breaker. Set `true` by the observer when a
     /// finalized-block regression deeper than `finality_depth` is detected
-    /// (`hardening::is_reorg`); halts BOTH the observer and the settlement
+    /// (`hardening::is_reorg`) and CONFIRMED across `REORG_CONFIRM_TICKS`
+    /// consecutive observer ticks; halts BOTH the observer and the settlement
     /// worker for that chain until cleared by `clear_reorg_halt` (Task 14).
     /// Added directly to V2 (not a new V3) because V2 is brand-new this phase
     /// and has never been persisted, so no live snapshot lacks this key; the
     /// `#[serde(default)]` is still mandatory state-wipe defense.
     #[serde(default)]
     pub reorg_halted: BTreeMap<ChainId, bool>,
+    /// Per-chain count of CONSECUTIVE observer ticks that suspected a reorg
+    /// (a finalized-block regression deeper than `finality_depth`). The observer
+    /// only flips `reorg_halted` once this streak reaches
+    /// `hardening::REORG_CONFIRM_TICKS`; a single non-suspect tick resets it to 0
+    /// (`hardening::on_reorg_tick`). This debounces a transient single-provider
+    /// RPC lag (fetch_block_numbers is un-quorumed) so one stale read cannot
+    /// permanently halt the chain. NOTE: Task 14's `clear_reorg_halt` MUST reset
+    /// BOTH `reorg_halted` AND this streak for the cleared chain. Same V2
+    /// rationale as `reorg_halted`; `#[serde(default)]` is mandatory state-wipe
+    /// defense.
+    #[serde(default)]
+    pub reorg_suspect_streak: BTreeMap<ChainId, u32>,
 }
 
 impl MultiChainStateV2 {

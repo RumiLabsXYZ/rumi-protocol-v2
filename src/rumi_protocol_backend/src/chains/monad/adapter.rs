@@ -129,22 +129,26 @@ impl ChainAdapter for MonadAdapter {
         // 3. Fetch fee estimates.
         let (base_fee, prio) = self.build_fees().await?;
 
-        // 4. Build EIP-1559 fields for a plain native transfer.
+        // 4. Build EIP-1559 fields for a plain native transfer via the shared
+        //    builder (tx::build_eip1559_fields) — the single source of truth for
+        //    the per-op-kind field shape, so the settlement worker's submit and a
+        //    replace-by-fee resubmit build byte-identical transactions.
         //    gas_limit = 21_000 (standard ETH/EVM native transfer).
         //    max_fee = 2 * base_fee + priority_fee (headroom for base-fee spikes).
         //
         //    NOTE: `value` carries req.amount_e8s, which is the MON amount in
         //    wei (e18).  The field name is a known wart; see doc comment above.
-        let fields = tx::Eip1559Fields {
-            chain_id: self.chain_id.0 as u64,
+        let max_fee = base_fee.saturating_mul(2).saturating_add(prio);
+        let fields = tx::build_eip1559_fields(
+            self.chain_id.0 as u64,
+            tx::MonadTxKind::NativeWithdrawal {
+                recipient: &req.recipient,
+                amount_wei: req.amount_e8s, // wart: see doc comment above
+            },
             nonce,
-            max_priority_fee_per_gas: prio,
-            max_fee_per_gas: base_fee.saturating_mul(2).saturating_add(prio),
-            gas_limit: 21_000,
-            to: req.recipient,
-            value: req.amount_e8s, // wart: see doc comment above
-            data: vec![],
-        };
+            prio,
+            max_fee,
+        );
 
         // 5. Sign.
         let raw = tx::sign_eip1559(&fields, path, &settlement_addr)
@@ -182,23 +186,26 @@ impl ChainAdapter for MonadAdapter {
         // 4. Fetch fee estimates.
         let (base_fee, prio) = self.build_fees().await?;
 
-        // 5. Build calldata for mint(address to, uint256 amount, uint64 vault_id).
-        let data =
-            tx::encode_mint_calldata(&instr.recipient, instr.amount_e8s, instr.vault_id);
-
-        // 6. Build EIP-1559 fields.
-        let fields = tx::Eip1559Fields {
-            chain_id: self.chain_id.0 as u64,
+        // 5. Build EIP-1559 fields (calldata + gas + to + value) via the shared
+        //    builder (tx::build_eip1559_fields) — the single source of truth for
+        //    the per-op-kind field shape, shared with the settlement worker so a
+        //    submit and a replace-by-fee resubmit are byte-identical.
+        //    gas_limit = 120_000; max_fee = 2 * base_fee + priority_fee.
+        let max_fee = base_fee.saturating_mul(2).saturating_add(prio);
+        let fields = tx::build_eip1559_fields(
+            self.chain_id.0 as u64,
+            tx::MonadTxKind::Mint {
+                contract: &contract,
+                recipient: &instr.recipient,
+                amount_e8s: instr.amount_e8s,
+                vault_id: instr.vault_id,
+            },
             nonce,
-            max_priority_fee_per_gas: prio,
-            max_fee_per_gas: base_fee.saturating_mul(2).saturating_add(prio),
-            gas_limit: 120_000,
-            to: contract,
-            value: 0,
-            data,
-        };
+            prio,
+            max_fee,
+        );
 
-        // 7. Sign.
+        // 6. Sign.
         let raw = tx::sign_eip1559(&fields, path, &settlement_addr)
             .await
             .map_err(ChainAdapterError::SignatureFailed)?;

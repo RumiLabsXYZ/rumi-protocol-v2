@@ -1,4 +1,6 @@
 use super::hardening::{is_stuck, is_reorg, hot_wallet_ok, bump_gas, HOT_WALLET_MIN_E18};
+use super::hardening::on_not_mined_tick;
+use super::hardening::{on_reorg_tick, REORG_CONFIRM_TICKS};
 
 #[test]
 fn detects_stuck_tx_after_threshold() {
@@ -28,4 +30,31 @@ fn bump_gas_increases_fees_by_at_least_125_percent() {
     let (new_prio, new_max) = bump_gas(2_000_000_000, 50_000_000_000);
     assert!(new_prio >= 2_000_000_000 * 125 / 100);
     assert!(new_max >= 50_000_000_000 * 125 / 100);
+}
+
+#[test]
+fn not_mined_tick_advances_tries_and_resubmits_at_threshold() {
+    // finality_depth 1 -> stuck threshold 2. Start at tries=1 (just submitted).
+    // First not-mined tick -> tries 2 -> stuck -> resubmit (have nonce).
+    assert_eq!(on_not_mined_tick(1, 1, true), (2, true));
+    // Without a stored nonce we must NEVER resubmit (would risk a fresh-nonce 2nd mint).
+    assert_eq!(on_not_mined_tick(1, 1, false), (2, false));
+    // Deeper finality: threshold 10. tries 1 -> 2, not stuck yet.
+    assert_eq!(on_not_mined_tick(1, 5, true), (2, false));
+    // tries 9 -> 10 == threshold -> resubmit.
+    assert_eq!(on_not_mined_tick(9, 5, true), (10, true));
+    // Saturates, never panics.
+    assert_eq!(on_not_mined_tick(u32::MAX, 1, true), (u32::MAX, true));
+}
+
+#[test]
+fn reorg_halts_only_after_consecutive_confirmations() {
+    assert_eq!(REORG_CONFIRM_TICKS, 3);
+    // Suspect ticks accumulate; halt only when the streak reaches K.
+    assert_eq!(on_reorg_tick(0, true), (1, false));
+    assert_eq!(on_reorg_tick(1, true), (2, false));
+    assert_eq!(on_reorg_tick(2, true), (3, true)); // K-th consecutive -> halt
+    // A non-suspect tick resets the streak (transient blip self-heals).
+    assert_eq!(on_reorg_tick(2, false), (0, false));
+    assert_eq!(on_reorg_tick(0, false), (0, false));
 }

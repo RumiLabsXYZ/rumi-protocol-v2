@@ -40,6 +40,7 @@ pub fn migrate_multi_chain_state(v1: MultiChainStateV1) -> MultiChainStateV2 {
         last_observed_block: Default::default(),
         hot_wallet_balance_e18: Default::default(),
         reorg_halted: Default::default(),
+        reorg_suspect_streak: Default::default(),
     }
 }
 
