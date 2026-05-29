@@ -264,6 +264,18 @@ async fn submit_op(
 
     // 3. Broadcast. A transient send error is logged and retried next tick — we
     //    do NOT mark the op Failed (it may yet be re-signable / re-broadcastable).
+    //
+    //    ON-CHAIN DOUBLE-MINT DEPENDENCY: if send_raw_transaction returns Err but
+    //    the tx actually landed (an RPC false negative), the next tick re-reads
+    //    the "latest" nonce (adapter.rs::sign_mint), so it signs a NEW tx at
+    //    nonce+1 — a genuine second on-chain mint, not a replacement. The
+    //    canister's supply accounting stays correct (confirm requires
+    //    observed_e8s == pending_mint_e8s and credits exactly once), but on-chain
+    //    icUSD could be minted twice. Protection lives OUTSIDE this function:
+    //    (a) IcUSD.mint MUST guard per vault_id (Task 19: `mapping(uint64 => bool)
+    //    minted`, revert on repeat — asserted by a Task 20 test), and (b) Task
+    //    11's stuck-tx path resubmits on the SAME stored nonce. Until both land,
+    //    the resubmit-after-transient-error case is unguarded at the canister layer.
     let tx_hash = match evm_rpc::send_raw_transaction(chain, &raw_hex).await {
         Ok(h) => h,
         Err(e) => {
@@ -336,12 +348,18 @@ async fn confirm_op(
 
     let now = ic_cdk::api::time();
 
-    // 2. Reverted tx: mark Failed. Under Design B no debt was counted, so there
-    //    is NO supply reversal — but clear the vault's pending mint (the mint
-    //    will not happen) so the vault is not left dangling in MintPending.
-    //    Status -> Closed marks the vault terminal: it can never mint now (its
-    //    op is Failed). Any collateral already deposited is returned by the
-    //    Task-13 close path, which keys off this terminal state.
+    // 2. Reverted tx: mark the op Failed. Under Design B no debt was counted, so
+    //    there is NO supply reversal. Clear the vault's pending mint (the mint
+    //    will not happen). Do NOT advance the vault status: per the plan (Task
+    //    10) a reverted mint changes no vault status, and `Closed` in this
+    //    codebase means "fully repaid + collateral returned" — stamping it here
+    //    would mislabel a vault that still holds deposited collateral as
+    //    returned, and the Task-13 close path (which returns collateral by
+    //    enqueuing a Withdrawal and going Closing -> Closed) keys off `Closing`,
+    //    not `Closed`, so the collateral would be stranded. The failed-mint
+    //    resolution (return collateral, then close) is defined by the Task 12/13
+    //    flow design; the vault is left in its current (MintPending) status with
+    //    a Failed op + a ChainSettlementFailed event for that path to act on.
     if !status_ok {
         let reason = "tx reverted".to_string();
         if let SettlementOpKind::Mint { vault_id, .. } = &op.kind {
@@ -349,7 +367,6 @@ async fn confirm_op(
             mutate_state(|s| {
                 if let Some(v) = s.multi_chain.chain_vaults.get_mut(&vid) {
                     v.pending_mint_e8s = 0;
-                    v.status = ChainVaultStatus::Closed;
                 }
             });
         }
