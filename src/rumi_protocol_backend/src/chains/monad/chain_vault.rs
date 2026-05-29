@@ -90,6 +90,13 @@ pub enum WithdrawError {
     QueueError(String),
     /// `close_chain_vault_in_state` was called on a vault with non-zero debt.
     HasDebt,
+    /// Withdraw was attempted on a vault whose status is not `Open`. Only an
+    /// `Open` vault has confirmed, on-chain-deposited collateral and confirmed
+    /// debt; an `AwaitingDeposit` vault holds DECLARED-but-never-deposited
+    /// collateral (paying it out would drain the settlement hot wallet for
+    /// phantom collateral), and a `MintPending` vault has a mint in flight
+    /// against its collateral. Carries the offending status.
+    WrongStatus { status: ChainVaultStatus },
 }
 
 /// Compute the collateral ratio (e4: 25000 == 250.00%) for a foreign-chain vault.
@@ -320,6 +327,18 @@ pub fn withdraw_collateral_in_state(
             .chain_vaults
             .get(&vault_id)
             .ok_or(WithdrawError::UnknownVault)?;
+        // CRITICAL: `Open` is the ONLY state a withdraw can proceed from — the
+        // only state with confirmed, on-chain-deposited collateral AND confirmed
+        // debt. In `AwaitingDeposit` the collateral is DECLARED but never
+        // deposited (debt 0 would skip the CR check below), so paying it out from
+        // the settlement hot wallet would drain protocol funds for phantom
+        // collateral. In `MintPending` a mint is in flight against the collateral.
+        // `Closing`/`Closed` are terminal. Reject before reading balance/price or
+        // mutating anything. (close_chain_vault_in_state delegates here, so it
+        // inherits this gate after its own debt==0 check.)
+        if v.status != ChainVaultStatus::Open {
+            return Err(WithdrawError::WrongStatus { status: v.status.clone() });
+        }
         if amount_e18 > v.collateral_amount_e18 {
             return Err(WithdrawError::InsufficientCollateral);
         }
@@ -378,14 +397,18 @@ pub fn withdraw_collateral_in_state(
 /// by burning icUSD on Monad (observer-driven, see
 /// `withdraw_collateral_in_state`). Then delegates to
 /// `withdraw_collateral_in_state` for the full `collateral_amount_e18`, which
-/// reserves the collateral and flips the vault to `Closing` (the worker flips
-/// it to `Closed` on the transfer's confirmation).
+/// inherits the `status == Open` gate (a non-Open vault rejects with
+/// `WrongStatus`), reserves the collateral, and flips the vault to `Closing`
+/// (the worker flips it to `Closed` on the transfer's confirmation).
 ///
-/// If the remaining collateral is already 0, this enqueues a zero-value
-/// `NativeWithdrawal` and flips the vault to `Closing` immediately — a clean
-/// no-collateral close. (A zero-value native transfer is harmless on-chain and
-/// keeps the close path uniform; the worker still confirms it and stamps
-/// `Closed`.)
+/// ## Zero-collateral short-circuit
+///
+/// If the vault is `Open`, debt-free, AND already holds zero collateral, this
+/// stamps it `Closed` directly and returns `Ok(())` WITHOUT enqueuing a
+/// zero-value `NativeWithdrawal`. A 21k-gas native transfer of value 0 from the
+/// settlement hot wallet is pure waste, and this protocol is gas/cycle-sensitive.
+/// (A non-Open zero-collateral vault is NOT short-circuited — it falls through
+/// to the delegate's gate and rejects with `WrongStatus`.)
 pub fn close_chain_vault_in_state(
     state: &mut MultiChainStateV2,
     vault_id: u64,
@@ -393,8 +416,9 @@ pub fn close_chain_vault_in_state(
     min_cr_e4: u64,
     now_ns: u64,
 ) -> Result<(), WithdrawError> {
-    // Validate debt-free + capture the full remaining collateral (no mutation).
-    let full = {
+    // Validate debt-free + capture the full remaining collateral and status (no
+    // mutation on any rejection path).
+    let (full, status) = {
         let v = state
             .chain_vaults
             .get(&vault_id)
@@ -402,7 +426,21 @@ pub fn close_chain_vault_in_state(
         if v.debt_e8s != 0 {
             return Err(WithdrawError::HasDebt);
         }
-        v.collateral_amount_e18
+        (v.collateral_amount_e18, v.status.clone())
     };
+
+    // Degenerate close: an Open, debt-free vault with no collateral to return.
+    // Stamp Closed directly — enqueuing a zero-value transfer would burn 21k gas
+    // for nothing. Restricted to `Open` so a non-Open (Closing/Closed/etc.)
+    // zero-collateral vault still rejects via the delegate's WrongStatus gate.
+    if full == 0 && status == ChainVaultStatus::Open {
+        let v = state
+            .chain_vaults
+            .get_mut(&vault_id)
+            .expect("vault present: checked above");
+        v.status = ChainVaultStatus::Closed;
+        return Ok(());
+    }
+
     withdraw_collateral_in_state(state, vault_id, full, dest_address, min_cr_e4, now_ns)
 }

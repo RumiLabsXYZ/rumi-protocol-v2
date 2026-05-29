@@ -243,3 +243,152 @@ fn close_debt_free_withdraws_full_and_sets_closing() {
         other => panic!("expected NativeWithdrawal op, got {other:?}"),
     }
 }
+
+// 8. CRITICAL: withdraw from an AwaitingDeposit vault is rejected with no
+//    mutation and no enqueue. The declared collateral was NEVER deposited
+//    on-chain; paying it out from the settlement hot wallet would drain
+//    protocol funds for phantom collateral.
+#[test]
+fn withdraw_from_awaiting_deposit_is_rejected() {
+    let mut s = setup(PRICE_100_USD_E8);
+    // Open a vault: it starts AwaitingDeposit with declared collateral but NO
+    // on-chain deposit and debt 0. Do NOT drive it to Open.
+    open_chain_vault_in_state(
+        &mut s,
+        CHAIN,
+        owner(),
+        "0xcustody".into(),
+        5 * ONE_MON_E18, // declared collateral, never deposited
+        1,               // open requires non-zero debt
+        "0xrecipient".into(),
+        0, // min_cr 0 so open succeeds
+        0,
+        7,
+    )
+    .expect("open for setup");
+    assert!(
+        matches!(s.chain_vaults[&7].status, ChainVaultStatus::AwaitingDeposit),
+        "vault should start AwaitingDeposit"
+    );
+
+    let res = withdraw_collateral_in_state(
+        &mut s,
+        7,
+        5 * ONE_MON_E18,
+        "0xdest".into(),
+        MIN_CR_E4,
+        555,
+    );
+    assert!(
+        matches!(
+            res,
+            Err(WithdrawError::WrongStatus { status: ChainVaultStatus::AwaitingDeposit })
+        ),
+        "withdraw from AwaitingDeposit must reject with WrongStatus, got {res:?}"
+    );
+
+    let v = s.chain_vaults.get(&7).expect("vault present");
+    assert_eq!(
+        v.collateral_amount_e18,
+        5 * ONE_MON_E18,
+        "collateral UNCHANGED on rejection"
+    );
+    assert!(
+        matches!(v.status, ChainVaultStatus::AwaitingDeposit),
+        "status unchanged"
+    );
+    assert!(
+        s.settlement_queues.get(&CHAIN).map(|q| q.pending_len()).unwrap_or(0) == 0,
+        "settlement queue must be EMPTY — no payout enqueued"
+    );
+}
+
+// 9. CRITICAL: withdraw from a MintPending vault is rejected with no mutation
+//    and no enqueue. A mint is in flight authorized against this collateral;
+//    pulling it out from under the in-flight mint must be impossible.
+#[test]
+fn withdraw_from_mint_pending_is_rejected() {
+    let mut s = setup(PRICE_100_USD_E8);
+    open_and_fund(&mut s, 7, 5 * ONE_MON_E18, 0);
+    // Force MintPending directly (pure-state test).
+    s.chain_vaults.get_mut(&7).unwrap().status = ChainVaultStatus::MintPending;
+
+    let res = withdraw_collateral_in_state(
+        &mut s,
+        7,
+        ONE_MON_E18,
+        "0xdest".into(),
+        MIN_CR_E4,
+        100,
+    );
+    assert!(
+        matches!(
+            res,
+            Err(WithdrawError::WrongStatus { status: ChainVaultStatus::MintPending })
+        ),
+        "withdraw from MintPending must reject with WrongStatus, got {res:?}"
+    );
+
+    let v = s.chain_vaults.get(&7).expect("vault present");
+    assert_eq!(v.collateral_amount_e18, 5 * ONE_MON_E18, "collateral UNCHANGED");
+    assert!(matches!(v.status, ChainVaultStatus::MintPending), "status unchanged");
+    assert_eq!(
+        s.settlement_queues.get(&CHAIN).map(|q| q.pending_len()).unwrap_or(0),
+        0,
+        "settlement queue must be EMPTY"
+    );
+}
+
+// 10. close inherits the FIX 1 gate via delegation: a close on a non-Open,
+//     debt-free vault (here Closing) rejects with WrongStatus AFTER the
+//     debt==0 check, with no mutation and no enqueue. (Closing is reached via
+//     a prior full withdraw; a reverted close returns the vault to Open via
+//     the settlement revert path, so retry works without close-from-Closing.)
+#[test]
+fn close_from_closing_is_rejected_via_gate() {
+    let mut s = setup(PRICE_100_USD_E8);
+    open_and_fund(&mut s, 7, 3 * ONE_MON_E18, 0); // debt-free
+    // Force Closing directly (a vault mid-withdrawal). debt is still 0.
+    s.chain_vaults.get_mut(&7).unwrap().status = ChainVaultStatus::Closing;
+
+    let res = close_chain_vault_in_state(&mut s, 7, "0xdest".into(), MIN_CR_E4, 777);
+    assert!(
+        matches!(
+            res,
+            Err(WithdrawError::WrongStatus { status: ChainVaultStatus::Closing })
+        ),
+        "close on a Closing vault must reject with WrongStatus, got {res:?}"
+    );
+    let v = s.chain_vaults.get(&7).expect("vault present");
+    assert_eq!(v.collateral_amount_e18, 3 * ONE_MON_E18, "collateral unchanged");
+    assert!(matches!(v.status, ChainVaultStatus::Closing), "status unchanged");
+    assert_eq!(
+        s.settlement_queues.get(&CHAIN).map(|q| q.pending_len()).unwrap_or(0),
+        0,
+        "queue empty",
+    );
+}
+
+// 11. FIX 3: closing an Open, debt-free, ZERO-collateral vault short-circuits
+//     to Closed WITHOUT enqueuing a wasted zero-value NativeWithdrawal.
+#[test]
+fn close_zero_collateral_short_circuits_to_closed_no_enqueue() {
+    let mut s = setup(PRICE_100_USD_E8);
+    open_and_fund(&mut s, 7, 0, 0); // Open, debt-free, zero collateral
+
+    let res = close_chain_vault_in_state(&mut s, 7, "0xdest".into(), MIN_CR_E4, 888);
+    assert!(res.is_ok(), "zero-collateral close should succeed: {res:?}");
+
+    let v = s.chain_vaults.get(&7).expect("vault present");
+    assert_eq!(v.collateral_amount_e18, 0, "still zero collateral");
+    assert!(
+        matches!(v.status, ChainVaultStatus::Closed),
+        "zero-collateral close goes straight to Closed, got {:?}",
+        v.status
+    );
+    assert_eq!(
+        s.settlement_queues.get(&CHAIN).map(|q| q.pending_len()).unwrap_or(0),
+        0,
+        "NO zero-value NativeWithdrawal enqueued",
+    );
+}

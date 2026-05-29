@@ -22,7 +22,7 @@
 //! ## Async worker (run_settlement)
 //!
 //! `run_settlement` drains one chain's `settlement_queues` entry one op per
-//! tick (Timer D, wired in Task 12). It mirrors `run_observer`'s read → await
+//! tick (Timer D, wired in Task 15). It mirrors `run_observer`'s read → await
 //! RPC → mutate pattern; no `read_state`/`mutate_state` borrow is held across
 //! an `.await`. The async path is NOT unit-tested — PocketIC covers it in
 //! Task 17.
@@ -137,7 +137,7 @@ pub fn confirm_mint_in_state(
 
 /// Run one settlement cycle for the given chain.
 ///
-/// Called by Timer D (configured in Task 12). Acts on at most one op per tick
+/// Called by Timer D (configured in Task 15). Acts on at most one op per tick
 /// (the one chosen by `select_next_op`):
 ///
 /// - **Submit** (a `Queued` op): sign via the adapter and broadcast via
@@ -539,51 +539,78 @@ async fn confirm_op(
     //      is the Task 12/13 flow's job. The vault is left MintPending with a
     //      Failed op + a ChainSettlementFailed event for that path to act on.
     //
-    //    - NativeWithdrawal: the transfer did NOT happen, so the reserved
-    //      collateral never left the custody address. ADD it back to
-    //      `collateral_amount_e18` (undo the reserve-at-enqueue) and, if the vault
-    //      had gone `Closing` (full withdrawal / close), revert it to `Open` — it
-    //      is no longer empty. Never touches debt/supply (withdraw moves only
-    //      collateral).
+    //    - NativeWithdrawal: the transfer did not happen, so the reserved
+    //      collateral was not paid out from the settlement hot wallet. ADD it
+    //      back to `collateral_amount_e18` (undo the reserve-at-enqueue) and, if
+    //      the vault had gone `Closing` (full withdrawal / close), revert it to
+    //      `Open` — it is no longer empty. Never touches debt/supply (withdraw
+    //      moves only collateral).
+    //
+    //    IDEMPOTENCY: the per-kind reversal AND the `mark_failed` run in a SINGLE
+    //    `mutate_state` guarded on the op still being `Inflight` (compare-and-
+    //    swap). If two overlapping `run_settlement` ticks snapshot the same
+    //    Inflight op before either mutates (possible once Timer D runs at a short
+    //    interval — Task 15), only the first to observe it Inflight performs the
+    //    reversal; the second sees the op already Failed and is a no-op. Without
+    //    this CAS the NativeWithdrawal add-back could credit `2 × amount_e18` for
+    //    one reverted withdrawal (phantom collateral). The broader run_settlement
+    //    re-entrancy guard is deferred to Task 15; this per-op CAS is the local
+    //    defense-in-depth.
     if !status_ok {
         let reason = "tx reverted".to_string();
-        match &op.kind {
-            SettlementOpKind::Mint { vault_id, .. } => {
-                let vid = *vault_id;
-                mutate_state(|s| {
-                    if let Some(v) = s.multi_chain.chain_vaults.get_mut(&vid) {
+        let did_revert = mutate_state(|s| {
+            // CAS: only the first tick to observe this op Inflight does the work.
+            let still_inflight = s
+                .multi_chain
+                .settlement_queues
+                .get(&chain)
+                .and_then(|q| q.pending.get(&op_id))
+                .map(|o| matches!(o.status, SettlementOpStatus::Inflight { .. }))
+                .unwrap_or(false);
+            if !still_inflight {
+                return false;
+            }
+            match &op.kind {
+                SettlementOpKind::Mint { vault_id, .. } => {
+                    // Design B: no debt was counted, so NO supply reversal. Clear
+                    // pending mint; do NOT change status (Task-10 behavior).
+                    if let Some(v) = s.multi_chain.chain_vaults.get_mut(vault_id) {
                         v.pending_mint_e8s = 0;
                     }
-                });
-            }
-            SettlementOpKind::NativeWithdrawal { vault_id, amount_e18, .. } => {
-                let vid = *vault_id;
-                let amt = *amount_e18;
-                mutate_state(|s| {
-                    if let Some(v) = s.multi_chain.chain_vaults.get_mut(&vid) {
-                        v.collateral_amount_e18 = v.collateral_amount_e18.saturating_add(amt);
+                }
+                SettlementOpKind::NativeWithdrawal { vault_id, amount_e18, .. } => {
+                    if let Some(v) = s.multi_chain.chain_vaults.get_mut(vault_id) {
+                        v.collateral_amount_e18 =
+                            v.collateral_amount_e18.saturating_add(*amount_e18);
                         if v.status == ChainVaultStatus::Closing {
                             v.status = ChainVaultStatus::Open;
                         }
                     }
-                });
-            }
-            SettlementOpKind::Burn { .. } => {}
-        }
-        mutate_state(|s| {
-            if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
-                if let Some(o) = q.pending.get_mut(&op_id) {
-                    o.mark_failed(reason.clone(), now);
                 }
+                SettlementOpKind::Burn { .. } => {}
             }
+            if let Some(o) = s
+                .multi_chain
+                .settlement_queues
+                .get_mut(&chain)
+                .and_then(|q| q.pending.get_mut(&op_id))
+            {
+                o.mark_failed(reason.clone(), now);
+            }
+            true
         });
-        crate::storage::record_event(&crate::event::Event::ChainSettlementFailed {
-            chain_id: chain,
-            op_id,
-            reason,
-            timestamp: now,
-        });
-        log!(INFO, "[settlement chain={:?}] op {} tx {} reverted; marked Failed", chain, op_id, tx_hash);
+        // Gate the event + log on the CAS so a rare double-tick does not emit a
+        // duplicate failure event (the state mutation is already idempotent; this
+        // just keeps the event log clean).
+        if did_revert {
+            crate::storage::record_event(&crate::event::Event::ChainSettlementFailed {
+                chain_id: chain,
+                op_id,
+                reason,
+                timestamp: now,
+            });
+            log!(INFO, "[settlement chain={:?}] op {} tx {} reverted; marked Failed", chain, op_id, tx_hash);
+        }
         return;
     }
 
@@ -698,7 +725,8 @@ async fn confirm_op(
         }
         SettlementOpKind::NativeWithdrawal { vault_id, .. } => {
             // A confirmed (mined + ok + final) native transfer-out: the
-            // collateral has left the custody address. Mark the op Succeeded,
+            // collateral has been paid out from the settlement hot wallet. Mark
+            // the op Succeeded,
             // then if the vault is `Closing` (a full withdrawal / close) flip it
             // to `Closed` — collateral is gone and (close required) debt is 0, so
             // the vault is fully settled. A partial withdrawal leaves the vault
