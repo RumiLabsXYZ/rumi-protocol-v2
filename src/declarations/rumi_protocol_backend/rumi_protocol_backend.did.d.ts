@@ -44,6 +44,23 @@ export interface CandidVault {
   'icp_margin_amount' : bigint,
   'borrowed_icusd_amount' : bigint,
 }
+export type ChainVaultStatus = { 'MintPending' : null } |
+  { 'Open' : null } |
+  { 'Closed' : null } |
+  { 'Closing' : null } |
+  { 'AwaitingDeposit' : null };
+export interface ChainVaultV1 {
+  'status' : ChainVaultStatus,
+  'owner' : Principal,
+  'pending_mint_e8s' : bigint,
+  'custody_address' : string,
+  'collateral_amount_e18' : bigint,
+  'opened_at_ns' : bigint,
+  'vault_id' : bigint,
+  'collateral_chain' : number,
+  'mint_recipient' : string,
+  'debt_e8s' : bigint,
+}
 export interface CollateralConfig {
   'last_redemption_time' : bigint,
   'status' : CollateralStatus,
@@ -174,6 +191,17 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     }
   } |
   {
+    'withdrawal_signed' : {
+      'op_id' : bigint,
+      'recipient' : string,
+      'vault_id' : bigint,
+      'amount_e18' : bigint,
+      'chain_id' : number,
+      'timestamp' : bigint,
+      'tx_hash' : string,
+    }
+  } |
+  {
     'provide_liquidity' : {
       'block_index' : bigint,
       'timestamp' : [] | [bigint],
@@ -194,6 +222,16 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
   { 'set_ckstable_repay_fee' : { 'rate' : string } } |
   { 'set_treasury_principal' : { 'principal' : Principal } } |
   { 'accrue_interest' : { 'timestamp' : bigint } } |
+  {
+    'chain_burn_observed' : {
+      'vault_id' : bigint,
+      'block_number' : bigint,
+      'amount_e8s' : bigint,
+      'chain_id' : number,
+      'timestamp' : bigint,
+      'tx_hash' : string,
+    }
+  } |
   { 'set_max_partial_liquidation_ratio' : { 'rate' : string } } |
   {
     'breaker_tripped' : {
@@ -244,6 +282,14 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     'set_collateral_redemption_fee_floor' : {
       'redemption_fee_floor' : string,
       'collateral_type' : Principal,
+    }
+  } |
+  {
+    'chain_settlement_failed' : {
+      'op_id' : bigint,
+      'chain_id' : number,
+      'timestamp' : bigint,
+      'reason' : string,
     }
   } |
   { 'init' : InitArg } |
@@ -366,6 +412,25 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     'redistribute_vault' : { 'vault_id' : bigint, 'timestamp' : [] | [bigint] }
   } |
   {
+    'chain_mint_confirmed' : {
+      'op_id' : bigint,
+      'vault_id' : bigint,
+      'block_number' : bigint,
+      'amount_e8s' : bigint,
+      'chain_id' : number,
+      'timestamp' : bigint,
+      'tx_hash' : string,
+    }
+  } |
+  {
+    'chain_reorg_detected' : {
+      'chain_id' : number,
+      'timestamp' : bigint,
+      'reorg_depth' : bigint,
+      'observed_block' : bigint,
+    }
+  } |
+  {
     'partial_collateral_withdrawn' : {
       'block_index' : bigint,
       'vault_id' : bigint,
@@ -402,6 +467,14 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     'set_collateral_liquidation_ratio' : {
       'collateral_type' : Principal,
       'liquidation_ratio' : string,
+    }
+  } |
+  {
+    'chain_hot_wallet_low' : {
+      'chain_id' : number,
+      'threshold_e18' : bigint,
+      'timestamp' : bigint,
+      'balance_e18' : bigint,
     }
   } |
   {
@@ -534,6 +607,17 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
   } |
   { 'set_reserve_redemption_fee' : { 'fee' : string } } |
   {
+    'chain_mint_submitted' : {
+      'op_id' : bigint,
+      'recipient' : string,
+      'vault_id' : bigint,
+      'amount_e8s' : bigint,
+      'chain_id' : number,
+      'timestamp' : bigint,
+      'tx_hash' : string,
+    }
+  } |
+  {
     'deficit_repaid' : {
       'remaining_deficit' : bigint,
       'source' : FeeSource,
@@ -579,6 +663,17 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     'add_collateral_type' : {
       'config' : CollateralConfig,
       'collateral_type' : Principal,
+    }
+  } |
+  {
+    'deposit_observed' : {
+      'custody_address' : string,
+      'vault_id' : bigint,
+      'block_number' : bigint,
+      'amount_e18' : bigint,
+      'chain_id' : number,
+      'timestamp' : bigint,
+      'tx_hash' : string,
     }
   } |
   {
@@ -1025,10 +1120,14 @@ export interface _SERVICE {
   'bot_claim_liquidation' : ActorMethod<[bigint], Result_4>,
   'bot_confirm_liquidation' : ActorMethod<[bigint], Result>,
   'claim_liquidity_returns' : ActorMethod<[], Result_1>,
+  'clear_invariant_halt' : ActorMethod<[], Result>,
   'clear_liquidation_breaker' : ActorMethod<[], Result>,
+  'clear_reorg_halt' : ActorMethod<[number], Result>,
   'clear_stuck_operations' : ActorMethod<[[] | [Principal]], Result_1>,
+  'close_chain_vault' : ActorMethod<[bigint, string], Result>,
   'close_vault' : ActorMethod<[bigint], Result_5>,
   'coingecko_transform' : ActorMethod<[TransformArgs], HttpResponse>,
+  'delete_chain' : ActorMethod<[number], Result>,
   'disable_chain' : ActorMethod<[number], Result>,
   'enter_recovery_mode' : ActorMethod<[], Result>,
   'exit_recovery_mode' : ActorMethod<[], Result>,
@@ -1041,6 +1140,8 @@ export interface _SERVICE {
   'get_bot_claim_vault_ids' : ActorMethod<[], BigUint64Array | bigint[]>,
   'get_bot_cr_tolerance_bps' : ActorMethod<[], bigint>,
   'get_bot_stats' : ActorMethod<[], BotStatsResponse>,
+  'get_chain_settlement_address' : ActorMethod<[number], Result_2>,
+  'get_chain_vault' : ActorMethod<[bigint], [] | [ChainVaultV1]>,
   'get_ckstable_repay_fee' : ActorMethod<[], number>,
   'get_collateral_config' : ActorMethod<[Principal], [] | [CollateralConfig]>,
   'get_collateral_totals' : ActorMethod<[], Array<CollateralTotals>>,
@@ -1139,6 +1240,8 @@ export interface _SERVICE {
     [VaultArgWithToken],
     Result_3
   >,
+  'list_chain_vaults' : ActorMethod<[number], Array<ChainVaultV1>>,
+  'open_chain_vault' : ActorMethod<[number, bigint, bigint, string], Result_1>,
   'open_vault' : ActorMethod<[bigint, [] | [Principal]], Result_9>,
   'open_vault_and_borrow' : ActorMethod<
     [bigint, bigint, [] | [Principal]],
@@ -1166,6 +1269,7 @@ export interface _SERVICE {
   'set_breaker_window_debt_ceiling_e8s' : ActorMethod<[bigint], Result>,
   'set_breaker_window_ns' : ActorMethod<[bigint], Result>,
   'set_chain_config' : ActorMethod<[number, UpdateChainConfigArg], Result>,
+  'set_chain_contract' : ActorMethod<[number, string], Result>,
   'set_check_vaults_alert_band_bps' : ActorMethod<[bigint], Result>,
   'set_check_vaults_full_sweep_every_n_ticks' : ActorMethod<[bigint], Result>,
   'set_ckstable_repay_fee' : ActorMethod<[number], Result>,
@@ -1196,6 +1300,7 @@ export interface _SERVICE {
   'set_collateral_status' : ActorMethod<[Principal, CollateralStatus], Result>,
   'set_deficit_readonly_threshold_e8s' : ActorMethod<[bigint], Result>,
   'set_deficit_repayment_fraction' : ActorMethod<[number], Result>,
+  'set_evm_rpc_principal' : ActorMethod<[Principal], Result>,
   'set_global_icusd_mint_cap' : ActorMethod<[bigint], Result>,
   'set_healthy_cr' : ActorMethod<[Principal, [] | [number]], Result>,
   'set_icpswap_routing_enabled' : ActorMethod<[boolean], Result>,
@@ -1210,8 +1315,10 @@ export interface _SERVICE {
   'set_liquidation_ordering_tolerance' : ActorMethod<[bigint], Result>,
   'set_liquidation_protocol_share' : ActorMethod<[number], Result>,
   'set_lst_haircut' : ActorMethod<[Principal, number], Result>,
+  'set_manual_collateral_price' : ActorMethod<[number, string, bigint], Result>,
   'set_min_icusd_amount' : ActorMethod<[bigint], Result>,
   'set_min_xrc_sources_used' : ActorMethod<[number], Result>,
+  'set_observer_tick_interval_secs' : ActorMethod<[bigint], Result>,
   'set_rate_curve_markers' : ActorMethod<
     [[] | [Principal], Array<[number, number]>],
     Result
@@ -1232,6 +1339,7 @@ export interface _SERVICE {
   'set_rmr_ceiling_cr' : ActorMethod<[number], Result>,
   'set_rmr_floor' : ActorMethod<[number], Result>,
   'set_rmr_floor_cr' : ActorMethod<[number], Result>,
+  'set_settlement_tick_interval_secs' : ActorMethod<[bigint], Result>,
   'set_sp_writedown_disabled' : ActorMethod<[boolean], Result>,
   'set_stability_pool_principal' : ActorMethod<[Principal], Result>,
   'set_stable_ledger_principal' : ActorMethod<
@@ -1258,6 +1366,7 @@ export interface _SERVICE {
     Result
   >,
   'withdraw_and_close_vault' : ActorMethod<[bigint], Result_5>,
+  'withdraw_chain_collateral' : ActorMethod<[bigint, bigint, string], Result>,
   'withdraw_collateral' : ActorMethod<[bigint], Result_1>,
   'withdraw_liquidity' : ActorMethod<[bigint], Result_1>,
   'withdraw_partial_collateral' : ActorMethod<[VaultArg], Result_1>,
