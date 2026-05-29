@@ -78,3 +78,36 @@ fn migration_preserves_v1_fields_and_defaults_new_ones() {
 fn active_alias_points_at_v2() {
     fn _check(x: MultiChainState) -> MultiChainStateV2 { x }
 }
+
+#[test]
+fn chain_vault_debt_total_sums_only_chain_vaults() {
+    use super::monad::chain_vault::{ChainVaultV1, ChainVaultStatus};
+
+    let mut s = MultiChainStateV2::default();
+    assert_eq!(s.total_chain_vault_debt_e8s(), 0);
+    s.chain_vaults.insert(1, ChainVaultV1 {
+        vault_id: 1,
+        owner: candid::Principal::anonymous(),
+        collateral_chain: ChainId(10143),
+        custody_address: "0xa".into(),
+        collateral_amount_e18: 0,
+        debt_e8s: 7_000_000_000,
+        mint_recipient: "0xr".into(),
+        pending_mint_e8s: 0,
+        status: ChainVaultStatus::Open,
+        opened_at_ns: 0,
+    });
+    s.chain_vaults.insert(2, ChainVaultV1 {
+        vault_id: 2,
+        owner: candid::Principal::anonymous(),
+        collateral_chain: ChainId(10143),
+        custody_address: "0xb".into(),
+        collateral_amount_e18: 0,
+        debt_e8s: 3_000_000_000,
+        mint_recipient: "0xr".into(),
+        pending_mint_e8s: 0,
+        status: ChainVaultStatus::Open,
+        opened_at_ns: 0,
+    });
+    assert_eq!(s.total_chain_vault_debt_e8s(), 10_000_000_000);
+}

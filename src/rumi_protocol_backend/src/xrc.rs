@@ -347,26 +347,32 @@ pub async fn interest_and_treasury_tick() {
     crate::treasury::flush_pending_interest().await;
     crate::treasury::flush_pending_amm1_donations().await;
 
-    // Phase 1a: supply-invariant self-check. Runs on every Timer B tick
-    // (default cadence 60s) per spec Section 3. On drift, halt new
-    // debt issuance + supply mutations and flip the protocol into
-    // ReadOnly. Manual recovery requires `clear_invariant_halt` (lands
-    // in Phase 1b operational tooling) plus a developer-gated mode flip.
+    // Phase 1b foreign-chain-only supply-invariant self-check. Runs on every
+    // Timer B tick (default cadence 60s) per spec Section 3. On drift, halt
+    // new debt issuance + supply mutations and flip the protocol into
+    // ReadOnly. Manual recovery requires `clear_invariant_halt` (Phase 1b
+    // operational tooling) plus a developer-gated mode flip.
     //
-    // In Phase 1a the chain_supplies table is empty and total_debt_e8s
-    // represents only ICP-side icUSD, so sum(chain_supplies) == 0 and
-    // the check always passes UNLESS a future bug somewhere increments
-    // chain_supplies without going through `apply_supply_delta`. That
-    // is the failure mode this check is designed to surface.
-    let total_debt_e8s: u128 = read_state(|s| s.total_borrowed_icusd_amount().to_u64() as u128);
+    // The invariant is: sum(chain_supplies) == sum(chain_vault.debt_e8s).
+    // ICP-native debt (total_borrowed_icusd_amount, which sums only
+    // vault_id_to_vaults) is a SEPARATE pool and must NOT be part of this
+    // check — unification to a single global total is a Phase 2 task.
+    // Using total_borrowed_icusd_amount here would cause a false halt on the
+    // very first Monad mint (chain_supplies[Monad] > 0, ICP-side debt == 0
+    // on the staging canister → divergence detected → protocol halts).
+    //
+    // In Phase 1a chain_supplies is empty and total_chain_vault_debt_e8s is
+    // also 0, so the check always passes. The invariant becomes live once
+    // Phase 1b ships the first confirmed Monad mint.
+    let chain_debt_e8s: u128 = read_state(|s| s.multi_chain.total_chain_vault_debt_e8s());
     let check_outcome = read_state(|s| {
-        crate::chains::supply::check_invariant(&s.multi_chain, total_debt_e8s)
+        crate::chains::supply::check_invariant(&s.multi_chain, chain_debt_e8s)
     });
     if let Err(err) = check_outcome {
         let now = ic_cdk::api::time();
         let (sum, td) = match err {
             crate::chains::supply::SupplyInvariantError::Divergence { sum_after, total_debt } => (sum_after, total_debt),
-            _ => (0u128, total_debt_e8s),
+            _ => (0u128, chain_debt_e8s),
         };
         mutate_state(|s| {
             s.multi_chain.invariant_halted = true;

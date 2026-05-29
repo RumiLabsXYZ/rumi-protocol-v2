@@ -39,9 +39,11 @@ use std::collections::BTreeMap;
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug, Default)]
 pub struct MultiChainStateV1 {
     pub chain_configs: BTreeMap<ChainId, ChainConfigV1>,
-    /// Canonical per-chain icUSD supply (e8s). Invariant:
-    /// `sum(chain_supplies.values()) == state.total_borrowed_icusd_amount()`
+    /// Canonical per-chain icUSD supply (e8s). Phase 1b invariant:
+    /// `sum(chain_supplies.values()) == sum(chain_vault.debt_e8s)`
     /// after every state mutation. Enforced by `apply_supply_delta`.
+    /// ICP-native debt (`total_borrowed_icusd_amount`) is a separate pool
+    /// and is NOT part of this invariant (unification is a Phase 2 task).
     pub chain_supplies: BTreeMap<ChainId, u128>,
     pub settlement_queues: BTreeMap<ChainId, SettlementQueueV1>,
     /// `true` iff the periodic invariant self-check on Timer B failed the
@@ -97,6 +99,16 @@ pub struct MultiChainStateV2 {
 impl MultiChainStateV2 {
     pub fn total_supply_all_chains_e8s(&self) -> u128 {
         self.chain_supplies.values().copied().sum()
+    }
+
+    /// Sum of confirmed debt across all foreign-chain vaults (e8s). Under the
+    /// Phase 1b foreign-chain-only supply invariant, this MUST equal
+    /// `total_supply_all_chains_e8s()` at all times; the Timer-B self-check
+    /// compares the two to catch drift. ICP-native debt
+    /// (`State::total_borrowed_icusd_amount`) is a SEPARATE pool, deliberately
+    /// excluded (unification to a single global total is a Phase 2 task).
+    pub fn total_chain_vault_debt_e8s(&self) -> u128 {
+        self.chain_vaults.values().map(|v| v.debt_e8s).sum()
     }
 }
 

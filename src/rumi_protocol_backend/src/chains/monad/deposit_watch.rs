@@ -70,13 +70,15 @@ pub fn credit_deposit_to_state(
 /// Apply a confirmed on-chain Burn event to protocol state.
 ///
 /// Decrements `chain_supplies[chain]` and `vault.debt_e8s` together.
-/// The caller must pass `total_debt_e8s` — the authoritative pre-burn
-/// total debt snapshot (the same value returned by
-/// `state.total_borrowed_icusd_amount()` at the moment of the call).
-/// The function internally computes the expected post-burn total as
-/// `total_debt_e8s - burn.amount_e8s` and passes that to
+/// The caller must pass `total_debt_e8s` — the pre-burn sum of
+/// `chain_vault.debt_e8s` across all foreign-chain vaults (i.e.
+/// `MultiChainStateV2::total_chain_vault_debt_e8s()` at the moment of
+/// the call). The function internally computes the expected post-burn
+/// total as `total_debt_e8s - burn.amount_e8s` and passes that to
 /// `apply_supply_delta` so the invariant check can verify:
 ///   `new_chain_supplies_sum == post_burn_total_debt`.
+/// ICP-native debt (`State::total_borrowed_icusd_amount`) is a separate
+/// pool and must NOT be passed here.
 ///
 /// ## Mutation ordering (correctness guarantee)
 ///
@@ -112,10 +114,8 @@ pub fn apply_burn_to_state(
 
     // Compute the post-burn total debt that apply_supply_delta will compare
     // against the post-delta chain_supplies sum. total_debt_e8s is the
-    // pre-burn authoritative total; after this burn the total drops by
-    // burn.amount_e8s (the vault's ICP-side total_borrowed_icusd_amount
-    // includes chain-vault debt tracked in chain_supplies, so they move
-    // together).
+    // pre-burn sum of foreign-chain vault debts (total_chain_vault_debt_e8s);
+    // after this burn the total drops by burn.amount_e8s.
     let post_burn_total = total_debt_e8s.saturating_sub(burn.amount_e8s);
 
     // Step 3: supply delta — validates and mutates chain_supplies, or rejects
@@ -225,13 +225,14 @@ pub async fn run_observer(chain: ChainId) {
             }
         };
 
-        // Snapshot current total before this burn (each burn changes the total
-        // as debt_e8s is decremented per burn). We pass the pre-burn total;
-        // apply_burn_to_state internally computes post_burn_total for the
-        // invariant check.
-        let current_total: u128 = read_state(|s| {
-            s.total_borrowed_icusd_amount().to_u64() as u128
-        });
+        // Snapshot the pre-burn foreign-chain vault debt total (each burn
+        // decrements one vault's debt_e8s, so we re-read before each burn
+        // to get the correct pre-burn total for the invariant check).
+        // total_chain_vault_debt_e8s sums only chain_vaults, which is the
+        // correct pool for the Phase 1b foreign-chain-only supply invariant.
+        // ICP-native total_borrowed_icusd_amount is a separate pool and is
+        // deliberately excluded here.
+        let current_total: u128 = read_state(|s| s.multi_chain.total_chain_vault_debt_e8s());
 
         let burn_clone = burn.clone();
         let result = mutate_state(|s| {
