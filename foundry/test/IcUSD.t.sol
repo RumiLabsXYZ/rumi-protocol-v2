@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
 import {IcUSD} from "../src/IcUSD.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 
@@ -129,5 +130,61 @@ contract IcUSDTest is Test {
         vm.prank(bob);
         icusd.approve(alice, 100);
         assertEq(icusd.allowance(bob, alice), 100);
+    }
+
+    // --- Task-20 review addition: role management (admin can manage minters) ---
+    function test_admin_can_grant_and_revoke_minter() public {
+        bytes32 minterRole = icusd.MINTER_ROLE();
+        // admin grants alice MINTER_ROLE -> alice can mint
+        vm.prank(admin);
+        icusd.grantRole(minterRole, alice);
+        vm.prank(alice);
+        icusd.mint(bob, 500, 100);
+        assertEq(icusd.balanceOf(bob), 500);
+        // admin revokes -> alice can no longer mint
+        vm.prank(admin);
+        icusd.revokeRole(minterRole, alice);
+        vm.prank(alice);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, alice, minterRole)
+        );
+        icusd.mint(bob, 1, 101);
+    }
+
+    function test_non_admin_cannot_grant_minter() public {
+        bytes32 minterRole = icusd.MINTER_ROLE();
+        bytes32 adminRole = icusd.DEFAULT_ADMIN_ROLE(); // 0x00
+        vm.prank(alice);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, alice, adminRole)
+        );
+        icusd.grantRole(minterRole, alice);
+    }
+
+    // --- Task-20 review addition: byte-level indexed-topic layout ---
+    // vm.expectEmit only matches the test's re-declared event; this is the ONLY
+    // test that proves, at the raw-log byte level, that vault_id lands in
+    // topics[1] + recipient in topics[2] + amount in data — exactly what the
+    // backend MintLog::from_raw decoder reads. Catches an `indexed`-on-the-wrong
+    // -param regression that expectEmit would miss.
+    function test_mint_log_topic_layout_matches_decoder() public {
+        vm.recordLogs();
+        vm.prank(minter);
+        icusd.mint(alice, 10_000_000_000, 42);
+        Vm.Log[] memory entries = vm.getRecordedLogs();
+
+        bytes32 mintTopic0 = keccak256("Mint(uint256,address,uint256)");
+        bool found = false;
+        for (uint256 i = 0; i < entries.length; i++) {
+            if (entries[i].topics[0] == mintTopic0) {
+                // topic0 + vault_id + recipient = 3 topics; amount is in data.
+                assertEq(entries[i].topics.length, 3, "Mint must have 3 topics");
+                assertEq(entries[i].topics[1], bytes32(uint256(42)), "vault_id must be topic1");
+                assertEq(entries[i].topics[2], bytes32(uint256(uint160(alice))), "recipient must be topic2");
+                assertEq(abi.decode(entries[i].data, (uint256)), 10_000_000_000, "amount must be in data");
+                found = true;
+            }
+        }
+        assertTrue(found, "Mint log not emitted");
     }
 }

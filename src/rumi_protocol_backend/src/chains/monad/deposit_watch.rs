@@ -92,6 +92,20 @@ pub fn credit_deposit_to_state(
 ///
 /// Any rejection path returns `Err` with BOTH `chain_supplies` and
 /// `debt_e8s` unchanged.
+///
+/// ## Permissionless payer (intentional; see IcUSD.sol review)
+///
+/// `IcUSD.burn(amount, target_vault_id)` is public: ANY holder can burn their
+/// OWN icUSD citing ANY `vault_id`, and this function decrements THAT vault's
+/// debt without checking the burner owns it. This is a deliberate "anyone can
+/// repay a vault" design, NOT a theft vector: the burner destroys their own
+/// tokens, and the freed collateral is only ever released by the separate,
+/// owner-authorized (status==Open) `withdraw_chain_collateral`/`close_chain_vault`
+/// path — never off the burn. The supply invariant stays balanced (supply and
+/// debt both drop by `amount`). The only effect of a third-party burn is to
+/// over-collateralize the target vault (a gift). A future phase may add a
+/// burner==owner constraint if griefing (uninvited debt repayment) becomes a
+/// concern; for Phase 1b it is accepted.
 pub fn apply_burn_to_state(
     state: &mut MultiChainStateV2,
     burn: &super::evm_rpc::BurnLog,
