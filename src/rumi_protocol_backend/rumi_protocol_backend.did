@@ -120,6 +120,11 @@ type DeviceSpec = variant {
 type ErrorInfo = record { description : text };
 type Event = variant {
   set_borrowing_fee : record { rate : text };
+  supply_invariant_self_check_failed : record {
+    sum_chain_supplies_e8s : nat;
+    total_debt_e8s : nat;
+    timestamp : nat64;
+  };
   VaultWithdrawnAndClosed : record {
     vault_id : nat64;
     timestamp : nat64;
@@ -147,6 +152,15 @@ type Event = variant {
     timestamp : opt nat64;
     caller : opt principal;
   };
+  withdrawal_signed : record {
+    op_id : nat64;
+    recipient : text;
+    vault_id : nat64;
+    amount_e18 : nat;
+    chain_id : nat32;
+    timestamp : nat64;
+    tx_hash : text;
+  };
   provide_liquidity : record {
     block_index : nat64;
     timestamp : opt nat64;
@@ -164,6 +178,14 @@ type Event = variant {
   set_ckstable_repay_fee : record { rate : text };
   set_treasury_principal : record { "principal" : principal };
   accrue_interest : record { timestamp : nat64 };
+  chain_burn_observed : record {
+    vault_id : nat64;
+    block_number : nat64;
+    amount_e8s : nat;
+    chain_id : nat32;
+    timestamp : nat64;
+    tx_hash : text;
+  };
   set_max_partial_liquidation_ratio : record { rate : text };
   breaker_tripped : record {
     total_e8s : nat64;
@@ -201,6 +223,12 @@ type Event = variant {
   set_collateral_redemption_fee_floor : record {
     redemption_fee_floor : text;
     collateral_type : principal;
+  };
+  chain_settlement_failed : record {
+    op_id : nat64;
+    chain_id : nat32;
+    timestamp : nat64;
+    reason : text;
   };
   init : InitArg;
   set_stable_ledger_principal : record {
@@ -286,6 +314,21 @@ type Event = variant {
     collateral_type : principal;
   };
   redistribute_vault : record { vault_id : nat64; timestamp : opt nat64 };
+  chain_mint_confirmed : record {
+    op_id : nat64;
+    vault_id : nat64;
+    block_number : nat64;
+    amount_e8s : nat;
+    chain_id : nat32;
+    timestamp : nat64;
+    tx_hash : text;
+  };
+  chain_reorg_detected : record {
+    chain_id : nat32;
+    timestamp : nat64;
+    reorg_depth : nat64;
+    observed_block : nat64;
+  };
   partial_collateral_withdrawn : record {
     block_index : nat64;
     vault_id : nat64;
@@ -314,6 +357,12 @@ type Event = variant {
   set_collateral_liquidation_ratio : record {
     collateral_type : principal;
     liquidation_ratio : text;
+  };
+  chain_hot_wallet_low : record {
+    chain_id : nat32;
+    threshold_e18 : nat;
+    timestamp : nat64;
+    balance_e18 : nat;
   };
   dust_forgiven : record {
     vault_id : nat64;
@@ -409,6 +458,15 @@ type Event = variant {
     interest_rate_apr : text;
   };
   set_reserve_redemption_fee : record { fee : text };
+  chain_mint_submitted : record {
+    op_id : nat64;
+    recipient : text;
+    vault_id : nat64;
+    amount_e8s : nat;
+    chain_id : nat32;
+    timestamp : nat64;
+    tx_hash : text;
+  };
   deficit_repaid : record {
     remaining_deficit : nat64;
     source : FeeSource;
@@ -445,6 +503,15 @@ type Event = variant {
     config : CollateralConfig;
     collateral_type : principal;
   };
+  deposit_observed : record {
+    custody_address : text;
+    vault_id : nat64;
+    block_number : nat64;
+    amount_e18 : nat;
+    chain_id : nat32;
+    timestamp : nat64;
+    tx_hash : text;
+  };
   chain_registered : record {
     display_name : text;
     chain_id : nat32;
@@ -459,11 +526,6 @@ type Event = variant {
     token_type : StableTokenType;
   };
   set_recovery_cr_multiplier : record { multiplier : text };
-  supply_invariant_self_check_failed : record {
-    sum_chain_supplies_e8s : nat;
-    total_debt_e8s : nat;
-    timestamp : nat64;
-  };
 };
 type EventTimeRange = record { start_ns : nat64; end_ns : nat64 };
 type EventTypeFilter = variant {
@@ -942,6 +1004,7 @@ service : (ProtocolArg) -> {
   liquidate_vault : (nat64) -> (Result_3);
   liquidate_vault_partial : (VaultArg) -> (Result_3);
   liquidate_vault_partial_with_stable : (VaultArgWithToken) -> (Result_3);
+  open_chain_vault : (nat32, nat, nat, text) -> (Result_1);
   open_vault : (nat64, opt principal) -> (Result_9);
   open_vault_and_borrow : (nat64, nat64, opt principal) -> (Result_9);
   open_vault_with_deposit : (nat64, opt principal) -> (Result_9);

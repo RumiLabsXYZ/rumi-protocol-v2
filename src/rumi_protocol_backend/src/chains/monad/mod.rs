@@ -46,3 +46,6 @@ mod tests_settlement;
 
 #[cfg(test)]
 mod tests_hardening;
+
+#[cfg(test)]
+mod tests_open_vault;

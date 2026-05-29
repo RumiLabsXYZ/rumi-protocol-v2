@@ -841,6 +841,65 @@ fn set_chain_config(
     }
 }
 
+/// Phase 1b Task 12: open a foreign-chain (Monad) vault, OPEN-THEN-VERIFY.
+///
+/// Creates the vault in `AwaitingDeposit` with the DECLARED collateral and the
+/// intended mint in `pending_mint_e8s`; enqueues NO mint. The caller then reads
+/// the vault's `custody_address` (Task 14 `get_chain_vault`) and deposits MON
+/// there. deposit-watch verifies the on-chain balance covers the declared
+/// collateral at finality, flips the vault to `MintPending`, and enqueues the
+/// mint. icUSD is only ever minted against a verified on-chain deposit.
+///
+/// Developer-gated for Phase 1b (matches the chain-admin endpoints). Async
+/// because deriving the per-user custody address calls tECDSA. Borrow
+/// discipline: no `read_state`/`mutate_state` borrow is held across the
+/// `derive_evm_address(...).await`.
+#[candid_method(update)]
+#[update]
+async fn open_chain_vault(
+    collateral_chain: rumi_protocol_backend::chains::config::ChainId,
+    collateral_e18: u128,
+    debt_e8s: u128,
+    mint_recipient: String,
+) -> Result<u64, ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    // Reserve the vault id BEFORE the async derive so the derivation path
+    // (chain, caller, vault_id) is unique even across concurrent opens.
+    let vault_id = mutate_state(|s| {
+        s.chain_vault_id_counter += 1;
+        s.chain_vault_id_counter
+    });
+    let path = rumi_protocol_backend::chains::monad::tecdsa::custody_derivation_path(
+        collateral_chain,
+        caller,
+        vault_id,
+    );
+    let (_pubkey, custody) =
+        rumi_protocol_backend::chains::monad::tecdsa::derive_evm_address(path)
+            .await
+            .map_err(|e| ProtocolError::ChainAdmin(format!("derive: {e}")))?;
+    let now = ic_cdk::api::time();
+    let res = mutate_state(|s| {
+        rumi_protocol_backend::chains::monad::chain_vault::open_chain_vault_in_state(
+            &mut s.multi_chain,
+            collateral_chain,
+            caller,
+            custody,
+            collateral_e18,
+            debt_e8s,
+            mint_recipient,
+            rumi_protocol_backend::chains::monad::chain_vault::MONAD_MIN_CR_E4,
+            now,
+            vault_id,
+        )
+    });
+    res.map(|()| vault_id)
+        .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
+}
+
 #[candid_method(query)]
 #[query]
 fn get_protocol_config() -> rumi_protocol_backend::ProtocolConfig {

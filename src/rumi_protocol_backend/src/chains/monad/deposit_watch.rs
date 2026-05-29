@@ -45,6 +45,7 @@ use crate::logs::INFO;
 use crate::state::{mutate_state, read_state};
 use crate::Mode;
 
+use super::chain_vault::{verify_deposit_and_enqueue_mint_in_state, ChainVaultStatus};
 use super::evm_rpc::{decode_burn_log, fetch_block_numbers, get_balance, get_logs, BURN_EVENT_TOPIC0};
 use super::{hardening, tecdsa};
 
@@ -341,16 +342,84 @@ pub async fn run_observer(chain: ChainId) {
         }
     }
 
-    // ── Deposit watch (STUB) ─────────────────────────────────────────────────
+    // ── Deposit watch (open-then-verify, Task 12) ───────────────────────────
     //
-    // The pure helper `credit_deposit_to_state` is implemented and tested.
-    // The async custody-balance poll is deferred to Task 23 (manual
-    // integration with Monad testnet). When Task 23 lands, replace this block
-    // with a loop over open chain_vaults for this chain, calling `get_balance`
-    // on each `custody_address`, computing the delta, and calling
-    // `credit_deposit_to_state` + emitting `DepositObserved`.
+    // Poll each AwaitingDeposit vault's custody-address native (MON) balance.
+    // Once the on-chain balance covers the DECLARED collateral, flip the vault
+    // AwaitingDeposit -> MintPending and enqueue its Mint op (icUSD is only ever
+    // minted against a verified on-chain deposit — the CDP backing invariant).
     //
-    // (`get_balance` is now exercised by `refresh_hot_wallet_balance` above.)
+    // Borrow discipline: snapshot the small per-vault tuples under one
+    // `read_state` BEFORE the await loop; never hold a state borrow across
+    // `get_balance(...).await`.
+    let now = ic_cdk::api::time();
+    let awaiting: Vec<(u64, String, u128)> = read_state(|s| {
+        s.multi_chain
+            .chain_vaults
+            .values()
+            .filter(|v| {
+                v.collateral_chain == chain && v.status == ChainVaultStatus::AwaitingDeposit
+            })
+            .map(|v| (v.vault_id, v.custody_address.clone(), v.collateral_amount_e18))
+            .collect()
+    });
+
+    for (vault_id, custody_address, declared_e18) in awaiting {
+        let balance = match get_balance(chain, &custody_address).await {
+            Ok(bal) => bal,
+            Err(e) => {
+                // A failed balance read must NOT abort the observer — log and
+                // move on; the next tick retries this vault.
+                log!(
+                    INFO,
+                    "[observer chain={:?}] deposit get_balance failed for vault {} ({}): {}; will retry",
+                    chain, vault_id, custody_address, e
+                );
+                continue;
+            }
+        };
+
+        if balance < declared_e18 {
+            // Not enough on-chain collateral yet; nothing to do this tick.
+            continue;
+        }
+
+        let transitioned = mutate_state(|s| {
+            verify_deposit_and_enqueue_mint_in_state(&mut s.multi_chain, vault_id, balance, now)
+        });
+
+        match transitioned {
+            Ok(true) => {
+                crate::storage::record_event(&crate::event::Event::DepositObserved {
+                    chain_id: chain,
+                    vault_id,
+                    custody_address: custody_address.clone(),
+                    amount_e18: balance,
+                    // Balance-poll observation, not a single transfer tx — there
+                    // is no one tx hash to attribute the deposit to.
+                    tx_hash: String::new(),
+                    block_number: finalized,
+                    timestamp: now,
+                });
+                log!(
+                    INFO,
+                    "[observer chain={:?}] deposit verified: vault={} custody={} balance_e18={} >= declared_e18={}; mint enqueued",
+                    chain, vault_id, custody_address, balance, declared_e18
+                );
+            }
+            Ok(false) => {
+                // Idempotent no-op (already transitioned by an earlier tick, or a
+                // concurrent transition). Nothing to emit.
+            }
+            Err(e) => {
+                log!(
+                    INFO,
+                    "[observer chain={:?}] verify_deposit_and_enqueue_mint FAILED for vault {}: {:?}; will retry",
+                    chain, vault_id, e
+                );
+            }
+        }
+    }
 
     // ── Advance cursor (only on full success) ───────────────────────────────
 

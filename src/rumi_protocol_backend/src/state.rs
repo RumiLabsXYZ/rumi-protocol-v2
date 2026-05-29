@@ -1252,6 +1252,13 @@ pub struct State {
     /// `set_evm_rpc_principal` is added in Task 14.
     #[serde(default)]
     pub evm_rpc_principal_override: Option<candid::Principal>,
+
+    /// Phase 1b Task 12: monotonic id source for foreign-chain (`chain_vaults`)
+    /// vault ids. `#[serde(default)]` is safe — `State` is ciborium-encoded
+    /// (storage.rs uses `ciborium::ser/de`, which is serde-based), so an old
+    /// snapshot that lacks this key decodes with the field defaulting to 0.
+    #[serde(default)]
+    pub chain_vault_id_counter: u64,
 }
 
 fn default_check_vaults_alert_band_bps() -> u64 {
@@ -1460,6 +1467,7 @@ impl Default for State {
             bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
             multi_chain: crate::chains::MultiChainState::default(),
             evm_rpc_principal_override: None,
+            chain_vault_id_counter: 0,
         }
     }
 }
@@ -1685,6 +1693,7 @@ impl From<InitArg> for State {
             bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
             multi_chain: crate::chains::MultiChainState::default(),
             evm_rpc_principal_override: None,
+            chain_vault_id_counter: 0,
         }
     }
 }
