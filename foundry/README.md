@@ -39,3 +39,8 @@ forge build
 ```
 
 Compiles on solc 0.8.24 (pinned in `foundry.toml`).
+
+## Deploy
+
+See [`DEPLOY.md`](./DEPLOY.md) for the Monad-testnet deploy runbook (derive the
+canister settlement address first; it is both admin and minter for Phase 1b).
