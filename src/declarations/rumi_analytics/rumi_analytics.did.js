@@ -80,6 +80,7 @@ export const idlFactory = ({ IDL }) => {
   const ApyQuery = IDL.Record({ 'window_days' : IDL.Opt(IDL.Nat32) });
   const ApyResponse = IDL.Record({
     'lp_apy_pct' : IDL.Opt(IDL.Float64),
+    'amm_apy_pct' : IDL.Opt(IDL.Float64),
     'window_days' : IDL.Nat32,
     'sp_apy_pct' : IDL.Opt(IDL.Float64),
   });
@@ -249,6 +250,7 @@ export const idlFactory = ({ IDL }) => {
     'peg' : IDL.Opt(PegStatus),
     'lp_apy_pct' : IDL.Opt(IDL.Float64),
     'timestamp_ns' : IDL.Nat64,
+    'amm_apy_pct' : IDL.Opt(IDL.Float64),
     'median_cr_bps' : IDL.Nat32,
     'sp_apy_pct' : IDL.Opt(IDL.Float64),
     'total_debt_e8s' : IDL.Nat64,

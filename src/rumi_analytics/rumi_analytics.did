@@ -34,6 +34,7 @@ type AdminEventLabelCount = record {
 type ApyQuery = record { window_days : opt nat32 };
 type ApyResponse = record {
   lp_apy_pct : opt float64;
+  amm_apy_pct : opt float64;
   window_days : nat32;
   sp_apy_pct : opt float64;
 };
@@ -288,6 +289,7 @@ type PriceSeriesResponse = record {
 type ProtocolSummary = record {
   peg : opt PegStatus;
   lp_apy_pct : opt float64;
+  amm_apy_pct : opt float64;
   timestamp_ns : nat64;
   sp_apy_pct : opt float64;
   total_debt_e8s : nat64;

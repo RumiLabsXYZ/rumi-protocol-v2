@@ -9,11 +9,12 @@
 use crate::{sources, state, storage};
 
 pub async fn run() -> Result<(), String> {
-    let (backend_id, stability_pool_id, three_pool_id) = state::read_state(|s| {
+    let (backend_id, stability_pool_id, three_pool_id, amm_id) = state::read_state(|s| {
         (
             s.sources.backend,
             s.sources.stability_pool,
             s.sources.three_pool,
+            s.sources.amm,
         )
     });
 
@@ -65,6 +66,44 @@ pub async fn run() -> Result<(), String> {
             }
         };
 
+    // AMM1 (3USD/ICP) TVL + icUSD reward stream. Fully optional: any failure
+    // degrades to None and never aborts the row. The 3USD token IS the rumi_3pool
+    // canister, so we match it against the pool's token pair to find the pool id.
+    let (amm_tvl_usd_e8s, amm_rewards_e8s): (Option<u128>, Option<u128>) =
+        match sources::amm::resolve_amm1_pool_id(amm_id, three_pool_id).await {
+            Ok(pool_id) => {
+                // Latest TVL sample (most recent snapshot in the 1-day window).
+                let amm_tvl =
+                    match sources::amm::get_amm_tvl_series(amm_id, pool_id.clone(), 1).await {
+                        Ok(series) => series.last().map(|s| nat_to_u128(&s.tvl_usd_e8s)),
+                        Err(e) => {
+                            ic_cdk::println!("[tvl] amm tvl series error: {}", e);
+                            state::mutate_state(|s| s.error_counters.amm += 1);
+                            None
+                        }
+                    };
+                // Sum today's reward points (window=1 == current day). upsert_today is
+                // last-write-wins, so we store the running total, not an increment.
+                let amm_rewards =
+                    match sources::amm::get_amm_reward_series(amm_id, pool_id, 1).await {
+                        Ok(points) => {
+                            Some(points.iter().map(|p| nat_to_u128(&p.amount)).sum::<u128>())
+                        }
+                        Err(e) => {
+                            ic_cdk::println!("[tvl] amm reward series error: {}", e);
+                            state::mutate_state(|s| s.error_counters.amm += 1);
+                            None
+                        }
+                    };
+                (amm_tvl, amm_rewards)
+            }
+            Err(e) => {
+                ic_cdk::println!("[tvl] amm pool resolve error: {}", e);
+                state::mutate_state(|s| s.error_counters.amm += 1);
+                (None, None)
+            }
+        };
+
     // Convert f64 CR (e.g. 1.85 = 185%) to basis points (18500).
     // Saturate at u32::MAX to be safe; the source CR is bounded by protocol logic.
     let cr_bps = (status.total_collateral_ratio * 10_000.0)
@@ -81,9 +120,17 @@ pub async fn run() -> Result<(), String> {
         three_pool_reserve_2_e8s: tp_reserve_2,
         three_pool_virtual_price_e18: tp_virtual_price,
         three_pool_lp_supply_e8s: tp_lp_supply,
+        amm_tvl_usd_e8s,
+        amm_rewards_e8s,
     };
     storage::daily_tvl::push(row);
 
     state::mutate_state(|s| s.last_daily_snapshot_ns = ic_cdk::api::time());
     Ok(())
+}
+
+/// Convert a candid `Nat` to `u128`, saturating to 0 on overflow / parse failure.
+/// The decimal form of the inner `BigUint` is always plain digits (no separators).
+fn nat_to_u128(n: &candid::Nat) -> u128 {
+    n.0.to_string().parse::<u128>().unwrap_or(0)
 }

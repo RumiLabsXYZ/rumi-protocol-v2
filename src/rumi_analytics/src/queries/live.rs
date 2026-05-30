@@ -278,10 +278,12 @@ pub fn get_apys(query: types::ApyQuery) -> types::ApyResponse {
     let stability_rows = storage::daily_stability::range(from, now, MAX_SNAPSHOT_LOAD);
 
     let lp_apy = compute_lp_apy(&swap_rollups, &tvl_rows, window_days);
+    let amm_apy = compute_amm_apy(&swap_rollups, &tvl_rows, window_days);
     let sp_apy = compute_sp_apy(&stability_rows, window_days);
 
     types::ApyResponse {
         lp_apy_pct: lp_apy,
+        amm_apy_pct: amm_apy,
         sp_apy_pct: sp_apy,
         window_days,
     }
@@ -328,6 +330,36 @@ pub fn compute_lp_apy(
     let daily_fees = total_fees as f64 / window_days as f64;
     let apy = (daily_fees / avg_tvl) * 365.0 * 100.0;
     Some(apy)
+}
+
+/// AMM1 LP APY: annualized (trading fees + icUSD rewards) yield.
+///
+/// Trading fees come from the swap rollups (`amm_fees_e8s`); the icUSD reward
+/// stream comes from the daily TVL rows (`amm_rewards_e8s`). Both are annualized
+/// against the average AMM1 TVL over the window. Returns `None` when AMM1 TVL is
+/// unavailable (no `amm_tvl_usd_e8s` rows, or it averages <= 0) so callers can
+/// fall back rather than display a bogus number.
+pub fn compute_amm_apy(
+    swap_rollups: &[storage::rollups::DailySwapRollup],
+    tvl_rows: &[storage::DailyTvlRow],
+    window_days: u32,
+) -> Option<f64> {
+    let fees: u128 = swap_rollups.iter().map(|r| r.amm_fees_e8s as u128).sum();
+    let rewards: u128 = tvl_rows.iter().filter_map(|r| r.amm_rewards_e8s).sum();
+    let tvl_vals: Vec<f64> = tvl_rows
+        .iter()
+        .filter_map(|r| r.amm_tvl_usd_e8s)
+        .map(|v| v as f64)
+        .collect();
+    if tvl_vals.is_empty() {
+        return None;
+    }
+    let avg_tvl = tvl_vals.iter().sum::<f64>() / tvl_vals.len() as f64;
+    if avg_tvl <= 0.0 {
+        return None;
+    }
+    let daily = (fees as f64 + rewards as f64) / window_days as f64;
+    Some((daily / avg_tvl) * 365.0 * 100.0)
 }
 
 /// Stability pool APY: annualized interest yield.
@@ -890,6 +922,7 @@ pub fn get_protocol_summary() -> types::ProtocolSummary {
     let tvl_rows = storage::daily_tvl::range(week_ago, now, MAX_SNAPSHOT_LOAD);
     let stability_rows = storage::daily_stability::range(week_ago, now, MAX_SNAPSHOT_LOAD);
     let lp_apy = compute_lp_apy(&swap_rollups, &tvl_rows, 7);
+    let amm_apy = compute_amm_apy(&swap_rollups, &tvl_rows, 7);
     let sp_apy = compute_sp_apy(&stability_rows, 7);
 
     // Price TWAPs over 1 hour.
@@ -909,6 +942,7 @@ pub fn get_protocol_summary() -> types::ProtocolSummary {
         swap_count_24h: activity.total_swaps,
         peg,
         lp_apy_pct: lp_apy,
+        amm_apy_pct: amm_apy,
         sp_apy_pct: sp_apy,
         prices,
     }
@@ -1226,6 +1260,39 @@ mod tests {
             three_pool_reserve_2_e8s: Some(reserve),
             three_pool_virtual_price_e18: None,
             three_pool_lp_supply_e8s: None,
+            amm_tvl_usd_e8s: None,
+            amm_rewards_e8s: None,
+        }
+    }
+
+    fn make_amm_tvl_row(amm_tvl_usd_e8s: u128, amm_rewards_e8s: u128) -> DailyTvlRow {
+        DailyTvlRow {
+            timestamp_ns: 1_000_000_000,
+            total_icp_collateral_e8s: 0,
+            total_icusd_supply_e8s: 0,
+            system_collateral_ratio_bps: 0,
+            stability_pool_deposits_e8s: None,
+            three_pool_reserve_0_e8s: None,
+            three_pool_reserve_1_e8s: None,
+            three_pool_reserve_2_e8s: None,
+            three_pool_virtual_price_e18: None,
+            three_pool_lp_supply_e8s: None,
+            amm_tvl_usd_e8s: Some(amm_tvl_usd_e8s),
+            amm_rewards_e8s: Some(amm_rewards_e8s),
+        }
+    }
+
+    /// Like `make_swap_rollup` but with the AMM1 trading-fee field populated.
+    fn make_amm_swap_rollup(amm_fees: u64) -> DailySwapRollup {
+        DailySwapRollup {
+            timestamp_ns: 1_000_000_000,
+            three_pool_swap_count: 0,
+            amm_swap_count: 10,
+            three_pool_volume_e8s: 0,
+            amm_volume_e8s: 1_000_000,
+            three_pool_fees_e8s: 0,
+            amm_fees_e8s: amm_fees,
+            unique_swappers: 5,
         }
     }
 
@@ -1274,6 +1341,31 @@ mod tests {
         // Need at least 2 rows to compute a delta
         let rows = vec![make_stability_row(100_000, 50)];
         assert!(compute_sp_apy(&rows, 1).is_none());
+    }
+
+    #[test]
+    fn amm_apy_basic() {
+        // amm_fees_e8s = 1_000_000, amm_rewards_e8s = 500_000, amm_tvl = 100_000_000,
+        // window = 1 day.
+        // daily = (1_000_000 + 500_000) / 1 = 1_500_000
+        // APY   = (1_500_000 / 100_000_000) * 365 * 100 = 547.5
+        let rollups = vec![make_amm_swap_rollup(1_000_000)];
+        let tvls = vec![make_amm_tvl_row(100_000_000, 500_000)];
+        let apy = compute_amm_apy(&rollups, &tvls, 1).unwrap();
+        assert!((apy - 547.5).abs() < 1e-6, "expected 547.5, got {}", apy);
+    }
+
+    #[test]
+    fn amm_apy_absent_fields_none() {
+        // TVL rows without amm_tvl_usd_e8s yield None even when fees/rewards exist.
+        let rollups = vec![make_amm_swap_rollup(1_000_000)];
+        let tvls = vec![make_tvl_row(100_000_000)];
+        assert!(compute_amm_apy(&rollups, &tvls, 1).is_none());
+    }
+
+    #[test]
+    fn amm_apy_empty() {
+        assert!(compute_amm_apy(&[], &[], 7).is_none());
     }
 
     #[test]

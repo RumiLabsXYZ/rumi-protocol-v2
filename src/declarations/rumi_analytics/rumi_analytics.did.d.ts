@@ -57,6 +57,7 @@ export interface AnalyticsSwapEvent {
 export interface ApyQuery { 'window_days' : [] | [number] }
 export interface ApyResponse {
   'lp_apy_pct' : [] | [number],
+  'amm_apy_pct' : [] | [number],
   'window_days' : number,
   'sp_apy_pct' : [] | [number],
 }
@@ -298,6 +299,7 @@ export interface ProtocolSummary {
   'peg' : [] | [PegStatus],
   'lp_apy_pct' : [] | [number],
   'timestamp_ns' : bigint,
+  'amm_apy_pct' : [] | [number],
   'median_cr_bps' : number,
   'sp_apy_pct' : [] | [number],
   'total_debt_e8s' : bigint,

@@ -28,6 +28,7 @@
   let seriesLoading = $state(true);
   let pegStatus: PegStatus | null = $state(null);
   let analyticsLpApy: number | null = $state(null);
+  let analyticsAmmApy: number | null = $state(null);
   let analyticsSpApy: number | null = $state(null);
   let liveLp: number | null = $state(null);
   let liveSp: number | null = $state(null);
@@ -84,8 +85,10 @@
     if (pegR.status === 'fulfilled') pegStatus = pegR.value ?? null;
     if (apyR.status === 'fulfilled' && apyR.value) {
       const aLp = apyR.value.lp_apy_pct?.[0];
+      const aAmm = apyR.value.amm_apy_pct?.[0];
       const aSp = apyR.value.sp_apy_pct?.[0];
       if (typeof aLp === 'number') analyticsLpApy = aLp;
+      if (typeof aAmm === 'number') analyticsAmmApy = aAmm;
       if (typeof aSp === 'number') analyticsSpApy = aSp;
     }
 
@@ -134,11 +137,19 @@
   // Headline LP APY = the best per-dollar return across 3pool and AMM1 (AMM1
   // stacks 3pool yield on its 3USD half). Matches the Swap "Earn up to" banner.
   // Falls back to the 3pool-only number when the live inputs are unavailable.
-  const combinedLpApy = $derived.by(() =>
-    liveThreePoolApy != null && liveAmm1Apy != null
-      ? combinedBestLpApyPct(liveThreePoolApy, liveAmm1Apy)
-      : lpApy,
-  );
+  const combinedLpApy = $derived.by(() => {
+    // Live primary: best per-dollar of (3pool-only) vs (AMM1 + half 3pool).
+    if (liveThreePoolApy != null && liveAmm1Apy != null) {
+      return combinedBestLpApyPct(liveThreePoolApy, liveAmm1Apy);
+    }
+    // Analytics fallback: the canister now tracks a faithful AMM1 LP APY (trading
+    // fees + icUSD rewards), so combine it the same way when both values exist;
+    // otherwise fall back to the 3pool-only number (lpApy) as before.
+    if (analyticsLpApy != null && analyticsAmmApy != null) {
+      return combinedBestLpApyPct(analyticsLpApy, analyticsAmmApy);
+    }
+    return lpApy;
+  });
   const combinedLpApySub = $derived(
     liveThreePoolApy != null && liveAmm1Apy != null ? 'best · live' : lpApySub,
   );

@@ -260,6 +260,10 @@ pub struct DailyTvlRow {
     pub three_pool_reserve_2_e8s: Option<u128>,
     pub three_pool_virtual_price_e18: Option<u128>,
     pub three_pool_lp_supply_e8s: Option<u128>,
+    // AMM1 (3USD/ICP) additions (trailing optionals; Candid decodes missing rows
+    // as None, matching the "Phase 3 additions" backward-compat pattern above).
+    pub amm_tvl_usd_e8s: Option<u128>,
+    pub amm_rewards_e8s: Option<u128>,
 }
 
 impl Storable for DailyTvlRow {
