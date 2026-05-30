@@ -17,6 +17,8 @@
   import { stabilityPoolService } from '$services/stabilityPoolService';
   import { e8sToNumber, formatCompact, CHART_COLORS } from '$utils/explorerChartHelpers';
   import { liveSpApyPct, liveLpApyPct } from '$utils/liveApy';
+  import { getThreePoolApy } from '$services/threePoolApyService';
+  import { getAmm1Apy, combinedBestLpApyPct } from '$services/amm1ApyService';
   import type { ProtocolSummary, PegStatus, TokenFlowEdge } from '$declarations/rumi_analytics/rumi_analytics.did';
 
   let summary: ProtocolSummary | null = $state(null);
@@ -29,6 +31,9 @@
   let analyticsSpApy: number | null = $state(null);
   let liveLp: number | null = $state(null);
   let liveSp: number | null = $state(null);
+  // Live 3pool/AMM1 APY inputs for the combined "best LP APY" headline vital.
+  let liveThreePoolApy: number | null = $state(null);
+  let liveAmm1Apy: number | null = $state(null);
   let poolsLoading = $state(true);
 
   type FlowWindowKey = '24h' | '7d' | '30d';
@@ -104,12 +109,39 @@
       console.error('[OverviewLens] live APY compute error:', err);
     }
     poolsLoading = false;
+
+    // Combined "best LP APY" inputs for the headline vital. These reuse the
+    // exact same cached services as the Swap "Earn up to" banner, so the
+    // Explorer and Swap surfaces never disagree. Graceful: each stays null on
+    // failure and the vital falls back to the 3pool-only number.
+    try {
+      const [tpR, ammR] = await Promise.allSettled([
+        getThreePoolApy(),
+        getAmm1Apy(),
+      ]);
+      if (tpR.status === 'fulfilled') liveThreePoolApy = tpR.value.total_apy_pct;
+      if (ammR.status === 'fulfilled') liveAmm1Apy = ammR.value.total_apy_pct;
+    } catch (err) {
+      console.error('[OverviewLens] combined LP APY compute error:', err);
+    }
   });
 
   const lpApy = $derived(liveLp ?? analyticsLpApy);
   const spApy = $derived(liveSp ?? analyticsSpApy);
   const lpApySub = $derived(liveLp != null ? 'live' : '7d');
   const spApySub = $derived(liveSp != null ? 'live' : '7d');
+
+  // Headline LP APY = the best per-dollar return across 3pool and AMM1 (AMM1
+  // stacks 3pool yield on its 3USD half). Matches the Swap "Earn up to" banner.
+  // Falls back to the 3pool-only number when the live inputs are unavailable.
+  const combinedLpApy = $derived.by(() =>
+    liveThreePoolApy != null && liveAmm1Apy != null
+      ? combinedBestLpApyPct(liveThreePoolApy, liveAmm1Apy)
+      : lpApy,
+  );
+  const combinedLpApySub = $derived(
+    liveThreePoolApy != null && liveAmm1Apy != null ? 'best · live' : lpApySub,
+  );
 
   const pegPct = $derived.by(() => {
     if (!pegStatus) return '--';
@@ -137,7 +169,7 @@
       { label: '24h Volume', value: `$${formatCompact(volume24h)}` },
       { label: '24h Swaps', value: Number(summary.swap_count_24h).toLocaleString() },
       { label: 'Peg', value: pegPct, tone: pegTone },
-      { label: 'LP APY', value: lpApy != null ? `${lpApy.toFixed(2)}%` : '--', sub: lpApySub },
+      { label: 'LP APY', value: combinedLpApy != null ? `${combinedLpApy.toFixed(2)}%` : '--', sub: combinedLpApySub },
       { label: 'SP APY', value: spApy != null ? `${spApy.toFixed(2)}%` : '--', sub: spApySub },
     ];
   });

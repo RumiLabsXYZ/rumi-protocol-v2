@@ -72,6 +72,25 @@ export function computeAmm1EffectiveApy(
   };
 }
 
+/**
+ * The protocol's headline "best LP APY": the better per-dollar return of
+ * staying in the 3pool standalone vs. providing AMM1 liquidity (which stacks
+ * 3pool yield on its 3USD half). Capital can only sit in one position at a
+ * time, so this is a max, not a blend.
+ *
+ * Single source of truth for both the Swap "Earn up to" banner and the
+ * Explorer "LP APY" vital so the two surfaces never disagree. Pure function.
+ */
+export function combinedBestLpApyPct(
+  threePoolApyPct: number,
+  amm1ApyPct: number,
+): number {
+  return Math.max(
+    threePoolApyPct,
+    amm1ApyPct + AMM1_THREEUSD_VALUE_SHARE * threePoolApyPct,
+  );
+}
+
 interface DailyRewardPoint {
   day_start_ns: bigint;
   amount: bigint;
