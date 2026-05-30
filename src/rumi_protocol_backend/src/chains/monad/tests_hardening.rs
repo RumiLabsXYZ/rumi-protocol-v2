@@ -1,6 +1,7 @@
 use super::hardening::{is_stuck, is_reorg, hot_wallet_ok, bump_gas, HOT_WALLET_MIN_E18};
 use super::hardening::on_not_mined_tick;
 use super::hardening::{on_reorg_tick, REORG_CONFIRM_TICKS};
+use super::hardening::{inflight_should_acquire, INFLIGHT_STALE_NS};
 
 #[test]
 fn detects_stuck_tx_after_threshold() {
@@ -57,4 +58,41 @@ fn reorg_halts_only_after_consecutive_confirmations() {
     // A non-suspect tick resets the streak (transient blip self-heals).
     assert_eq!(on_reorg_tick(2, false), (0, false));
     assert_eq!(on_reorg_tick(0, false), (0, false));
+}
+
+// ─── inflight_should_acquire (B2 hardening) ─────────────────────────────────
+
+#[test]
+fn inflight_acquire_free_entry() {
+    // Chain not in the map at all (None) -> always acquire.
+    assert!(inflight_should_acquire(None, 1_000_000_000_000, INFLIGHT_STALE_NS));
+    assert!(inflight_should_acquire(None, 0, INFLIGHT_STALE_NS));
+}
+
+#[test]
+fn inflight_acquire_fresh_entry_is_skipped() {
+    // Entry acquired 10 seconds ago (well below the 10-min threshold) -> skip.
+    let now_ns: u64 = 1_000_000_000_000_000_000; // 1 second in ns * 1e9 = ~31 years
+    let acquired_10s_ago = now_ns - 10_000_000_000; // 10 s ago
+    assert!(!inflight_should_acquire(Some(acquired_10s_ago), now_ns, INFLIGHT_STALE_NS));
+}
+
+#[test]
+fn inflight_acquire_stale_entry_is_reclaimed() {
+    // Entry acquired 700 s ago (> 600 s threshold) -> reclaim.
+    let now_ns: u64 = 1_000_000_000_000_000_000;
+    let acquired_700s_ago = now_ns - 700_000_000_000; // 700 s ago
+    assert!(inflight_should_acquire(Some(acquired_700s_ago), now_ns, INFLIGHT_STALE_NS));
+    // Exactly at the threshold boundary (== stale_ns) -> reclaim.
+    let acquired_600s_ago = now_ns - INFLIGHT_STALE_NS;
+    assert!(inflight_should_acquire(Some(acquired_600s_ago), now_ns, INFLIGHT_STALE_NS));
+}
+
+#[test]
+fn inflight_acquire_future_timestamp_treated_as_fresh() {
+    // A future `acquired_at` (clock skew or adversarial state) must NOT panic
+    // (saturating_sub returns 0, which is < stale_ns) -> treated as fresh -> skip.
+    let now_ns: u64 = 1_000_000_000_000;
+    let future_timestamp = now_ns + 999_999_999_999; // well beyond now
+    assert!(!inflight_should_acquire(Some(future_timestamp), now_ns, INFLIGHT_STALE_NS));
 }

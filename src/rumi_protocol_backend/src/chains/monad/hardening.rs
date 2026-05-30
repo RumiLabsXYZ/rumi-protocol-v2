@@ -57,3 +57,46 @@ pub fn hot_wallet_ok(balance_e18: u128) -> bool {
 pub fn bump_gas(prio: u128, max_fee: u128) -> (u128, u128) {
     (prio.saturating_mul(125) / 100, max_fee.saturating_mul(125) / 100)
 }
+
+// ─── Inflight guard self-heal ────────────────────────────────────────────────
+//
+// On the IC, a trap in a post-await continuation does NOT run `Drop`, so a
+// per-chain inflight-guard entry can stick forever if the holder trapped.  To
+// self-heal, each guard stores the timestamp it was acquired at.  A later tick
+// whose `inflight_should_acquire` check finds the entry older than
+// `INFLIGHT_STALE_NS` reclaims it (the previous holder must have trapped; a
+// live slow tick's dedup/idempotency makes an accidental concurrent observer
+// supply-safe anyway).
+
+/// Stale threshold for per-chain inflight guard entries (in nanoseconds).
+///
+/// A healthy observer/settlement tick completes in seconds; the timers fire
+/// every ~30 s. If an in-flight entry is older than this, the previous holder
+/// must have trapped in a post-await continuation (`Drop` never ran), so a
+/// later tick reclaims it. Set well above the worst-case legit tick (several
+/// sequential RPC outcalls) to avoid reclaiming a merely-slow tick (which
+/// dedup/idempotency would make safe anyway). 10 min mirrors the existing
+/// stale-operation threshold convention.
+pub const INFLIGHT_STALE_NS: u64 = 600_000_000_000; // 10 minutes
+
+/// Decide whether a new tick should acquire the inflight guard for a chain.
+///
+/// - `existing`: the timestamp stored in the guard map, or `None` if the
+///   chain is not currently held.
+/// - `now_ns`: `ic_cdk::api::time()` at the start of this tick.
+/// - `stale_ns`: the stale threshold (normally `INFLIGHT_STALE_NS`).
+///
+/// Returns `true` (acquire) when:
+///   - The chain is free (`None`), OR
+///   - The existing entry is stale (`now_ns - acquired_at >= stale_ns`).
+///
+/// Returns `false` (skip) when a fresh tick holds the guard.
+/// `saturating_sub` prevents a panic if `acquired_at > now_ns` (clock skew or
+/// future timestamp in state); the result is 0, which is always < `stale_ns`,
+/// so a spurious future timestamp is treated as "fresh" (safe: skip the tick).
+pub fn inflight_should_acquire(existing: Option<u64>, now_ns: u64, stale_ns: u64) -> bool {
+    match existing {
+        None => true,
+        Some(acquired_at) => now_ns.saturating_sub(acquired_at) >= stale_ns,
+    }
+}
