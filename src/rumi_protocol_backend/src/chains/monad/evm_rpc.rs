@@ -88,7 +88,7 @@ pub enum RpcService {
 }
 
 /// Mirrors the live .did `JsonRpcError` record.
-#[derive(CandidType, Deserialize, Clone, Debug)]
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct JsonRpcError {
     pub code: i64,
     pub message: String,
@@ -96,13 +96,13 @@ pub struct JsonRpcError {
 
 /// Mirrors the live .did `ProviderError` variant.
 /// `TooFewCycles` carries an anonymous record `{ expected: nat; received: nat }`.
-#[derive(CandidType, Deserialize, Clone, Debug)]
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct TooFewCyclesRecord {
     pub expected: candid::Nat,
     pub received: candid::Nat,
 }
 
-#[derive(CandidType, Deserialize, Clone, Debug)]
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum ProviderError {
     TooFewCycles(TooFewCyclesRecord),
     MissingRequiredProvider,
@@ -111,17 +111,33 @@ pub enum ProviderError {
     InvalidRpcConfig(String),
 }
 
+/// Mirrors the live .did `RejectionCode` variant (fieldless).
+///
+/// The EVM RPC canister returns `IcError { code: RejectionCode; ... }` where
+/// `RejectionCode` is a Candid variant.  Previously this was declared as `u32`
+/// which caused a Candid decode trap whenever the canister returned an
+/// `HttpOutcallError::IcError` (e.g. during no-consensus scenarios).
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum RejectionCode {
+    NoError,
+    CanisterError,
+    SysTransient,
+    DestinationInvalid,
+    Unknown,
+    SysFatal,
+    CanisterReject,
+}
+
 /// Mirrors the live .did `HttpOutcallError` variant.
 /// `IcError` carries `{ code: RejectionCode; message: text }`.
 /// `InvalidHttpJsonRpcResponse` carries `{ status: nat16; body: text; parsingError: opt text }`.
-/// We use opaque structs for the payloads since we only need to display them.
-#[derive(CandidType, Deserialize, Clone, Debug)]
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct IcErrorRecord {
-    pub code: u32, // RejectionCode as u32 for simplicity
+    pub code: RejectionCode,
     pub message: String,
 }
 
-#[derive(CandidType, Deserialize, Clone, Debug)]
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct InvalidHttpJsonRpcRecord {
     pub status: u16,
     pub body: String,
@@ -129,20 +145,20 @@ pub struct InvalidHttpJsonRpcRecord {
     pub parsing_error: Option<String>,
 }
 
-#[derive(CandidType, Deserialize, Clone, Debug)]
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum HttpOutcallError {
     IcError(IcErrorRecord),
     InvalidHttpJsonRpcResponse(InvalidHttpJsonRpcRecord),
 }
 
-#[derive(CandidType, Deserialize, Clone, Debug)]
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum ValidationError {
     Custom(String),
     InvalidHex(String),
 }
 
 /// Full `RpcError` as in the live .did.
-#[derive(CandidType, Deserialize, Clone, Debug)]
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum RpcError {
     JsonRpcError(JsonRpcError),
     ProviderError(ProviderError),
@@ -157,7 +173,7 @@ impl std::fmt::Display for RpcError {
 }
 
 /// `RequestResult` from the EVM RPC canister `request` method.
-#[derive(CandidType, Deserialize, Clone, Debug)]
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum RequestResult {
     Ok(String),
     Err(RpcError),
