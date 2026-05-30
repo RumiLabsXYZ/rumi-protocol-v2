@@ -124,6 +124,165 @@ mod ic_error_round_trip {
     }
 }
 
+// ─── Candid round-trip test: typed eth_getBlockByNumber result ───────────────
+//
+// Proves (a) the production typed-method mirror types match the live .did and
+// (b) the minimal production `Block { number }` decodes a RICHER wire `Block`
+// (record subtyping: a reader with FEWER fields decodes a record with more,
+// ignoring the extras).  We define independent "real shape" types here with
+// MANY more fields than just `number` (hash, timestamp, miner, ...), encode a
+// `Consistent(Ok(RealBlock{...}))`, then `Decode!` into the PRODUCTION
+// `MultiGetBlockByNumberResult` and assert the decoded `number` survives.
+//
+// This must fail to compile/decode before the production types exist and pass
+// after.
+
+#[cfg(test)]
+mod block_by_number_round_trip {
+    use candid::{CandidType, Deserialize};
+    use candid::{Encode, Decode};
+
+    // ── "Real" (wire-shape) types — independent mirror of the live .did ──────
+    //
+    // Reuse the RpcError tree shape from the Layer-1 test family; here we only
+    // need the Ok arm, so a minimal RealRpcError stand-in suffices for the
+    // variant's type to line up.
+
+    #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+    struct RealJsonRpcError {
+        pub code: i64,
+        pub message: String,
+    }
+
+    #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+    enum RealRpcError {
+        JsonRpcError(RealJsonRpcError),
+    }
+
+    /// A FULL `Block` record (many more fields than the production `Block`,
+    /// which carries only `number`).  Field order follows the live .did so the
+    /// candid hashes match; only `number` is asserted post-decode.
+    #[derive(CandidType, Deserialize, Clone, Debug)]
+    struct RealBlock {
+        pub miner: String,
+        #[serde(rename = "totalDifficulty")]
+        pub total_difficulty: Option<candid::Nat>,
+        #[serde(rename = "receiptsRoot")]
+        pub receipts_root: String,
+        #[serde(rename = "stateRoot")]
+        pub state_root: String,
+        pub hash: String,
+        pub difficulty: Option<candid::Nat>,
+        pub size: candid::Nat,
+        pub uncles: Vec<String>,
+        #[serde(rename = "baseFeePerGas")]
+        pub base_fee_per_gas: Option<candid::Nat>,
+        #[serde(rename = "extraData")]
+        pub extra_data: String,
+        #[serde(rename = "transactionsRoot")]
+        pub transactions_root: Option<String>,
+        #[serde(rename = "sha3Uncles")]
+        pub sha3_uncles: String,
+        pub nonce: candid::Nat,
+        pub number: candid::Nat,
+        pub timestamp: candid::Nat,
+        pub transactions: Vec<String>,
+        #[serde(rename = "gasLimit")]
+        pub gas_limit: candid::Nat,
+        #[serde(rename = "logsBloom")]
+        pub logs_bloom: String,
+        #[serde(rename = "parentHash")]
+        pub parent_hash: String,
+        #[serde(rename = "gasUsed")]
+        pub gas_used: candid::Nat,
+        #[serde(rename = "mixHash")]
+        pub mix_hash: String,
+    }
+
+    #[derive(CandidType, Deserialize, Clone, Debug)]
+    enum RealGetBlockByNumberResult {
+        Ok(RealBlock),
+        Err(RealRpcError),
+    }
+
+    // The `Inconsistent` arm references the singular RpcService; since this
+    // test only ever encodes `Consistent`, a minimal stand-in keeps the
+    // variant's candid type well-formed without re-mirroring all of RpcService.
+    #[derive(CandidType, Deserialize, Clone, Debug)]
+    struct RealRpcApi {
+        pub url: String,
+        pub headers: Option<Vec<RealHttpHeader>>,
+    }
+    #[derive(CandidType, Deserialize, Clone, Debug)]
+    struct RealHttpHeader {
+        pub name: String,
+        pub value: String,
+    }
+    #[derive(CandidType, Deserialize, Clone, Debug)]
+    enum RealRpcService {
+        Custom(RealRpcApi),
+    }
+
+    #[derive(CandidType, Deserialize, Clone, Debug)]
+    enum RealMultiGetBlockByNumberResult {
+        Consistent(RealGetBlockByNumberResult),
+        Inconsistent(Vec<(RealRpcService, RealGetBlockByNumberResult)>),
+    }
+
+    // ── Production types (import from the module under test) ─────────────────
+    use super::super::evm_rpc::{
+        Block, GetBlockByNumberResult, MultiGetBlockByNumberResult,
+    };
+
+    /// Encode a real-wire-shaped `Consistent(Ok(RealBlock{ number: 12345, ...}))`
+    /// (richer than production `Block`) and decode it into the production
+    /// `MultiGetBlockByNumberResult`.  Asserts the decoded `number` matches —
+    /// proving the mirror is correct AND record-subtyping drops the extra
+    /// fields cleanly.
+    #[test]
+    fn typed_block_result_round_trips_with_subtyping() {
+        let wire = RealMultiGetBlockByNumberResult::Consistent(
+            RealGetBlockByNumberResult::Ok(RealBlock {
+                miner: "0xabc".to_string(),
+                total_difficulty: Some(candid::Nat::from(0u64)),
+                receipts_root: "0xrr".to_string(),
+                state_root: "0xsr".to_string(),
+                hash: "0xdeadbeef".to_string(),
+                difficulty: None,
+                size: candid::Nat::from(1u64),
+                uncles: vec![],
+                base_fee_per_gas: Some(candid::Nat::from(7u64)),
+                extra_data: "0x".to_string(),
+                transactions_root: Some("0xtr".to_string()),
+                sha3_uncles: "0xsu".to_string(),
+                nonce: candid::Nat::from(0u64),
+                number: candid::Nat::from(12_345u64),
+                timestamp: candid::Nat::from(1_700_000_000u64),
+                transactions: vec!["0xtx1".to_string()],
+                gas_limit: candid::Nat::from(30_000_000u64),
+                logs_bloom: "0x00".to_string(),
+                parent_hash: "0xparent".to_string(),
+                gas_used: candid::Nat::from(21_000u64),
+                mix_hash: "0xmix".to_string(),
+            }),
+        );
+
+        let bytes = Encode!(&wire).expect("encode real MultiGetBlockByNumberResult");
+
+        let decoded = Decode!(&bytes, MultiGetBlockByNumberResult)
+            .expect("decode production MultiGetBlockByNumberResult from richer wire bytes");
+
+        match decoded {
+            MultiGetBlockByNumberResult::Consistent(GetBlockByNumberResult::Ok(Block {
+                number,
+            })) => {
+                assert_eq!(number, candid::Nat::from(12_345u64));
+            }
+            other => panic!("expected Consistent(Ok(Block)), got {:?}", other),
+        }
+    }
+}
+
 #[test]
 fn parses_hex_quantity() {
     assert_eq!(parse_hex_quantity("0x0").unwrap(), 0u128);

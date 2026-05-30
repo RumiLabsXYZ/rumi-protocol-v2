@@ -1,10 +1,18 @@
 //! EVM RPC wrapper for Monad chain state reads and signed-tx broadcasting.
 //!
-//! Design: calls the EVM RPC canister (`7hfb6-caaaa-aaaar-qadga-cai`) via the
-//! generic `request` escape-hatch method using `call_with_payment128`.  This
-//! avoids the `evm_rpc_client` crate (which requires ic-cdk 0.19, incompatible
-//! with this project's ic-cdk 0.12 pin).  JSON-RPC responses are parsed with
-//! `serde_json` (already a workspace dep).
+//! Design: most reads call the EVM RPC canister (`7hfb6-caaaa-aaaar-qadga-cai`)
+//! via the generic `request` escape-hatch method using `call_with_payment128`.
+//! This avoids the `evm_rpc_client` crate (which requires ic-cdk 0.19,
+//! incompatible with this project's ic-cdk 0.12 pin).  JSON-RPC responses are
+//! parsed with `serde_json` (already a workspace dep).
+//!
+//! Exception — finalized-height reads (`fetch_block_numbers`): these go through
+//! the TYPED `eth_getBlockByNumber(Number(N))` method (candid types mirrored
+//! below), NOT `request`.  A volatile chain-head read (`eth_blockNumber`, or any
+//! `latest`/`finalized` tag) differs across the EVM RPC canister's subnet
+//! replicas on a fast-finality chain like Monad → IC HTTPS-outcall consensus
+//! never agrees → the call fails every tick.  Probing a SPECIFIC, already-final
+//! block number is byte-identical across replicas, so it reaches consensus.
 //!
 //! Cycle cost: `EVM_RPC_CALL_CYCLES` (2_000_000_000) per request.  This is
 //! intentionally generous — the actual HTTPS-outcall cost depends on response
@@ -46,6 +54,13 @@ pub const EVM_RPC_CALL_CYCLES: u128 = 2_000_000_000;
 /// Sized to cover typical JSON-RPC responses; `eth_getLogs` responses can be
 /// large — callers using a narrow block range stay within this limit.
 const EVM_RPC_MAX_RESPONSE_BYTES: u64 = 8192;
+
+/// Max blocks the burn-watch cursor advances per observer tick. The observer
+/// reads chain head by probing a SPECIFIC block number `last_observed + this`
+/// (consensus-safe), never a volatile `latest`/`finalized` tag. Must exceed
+/// observer_interval_secs × chain_block_rate (~30s × 2 blk/s = 60) to keep pace,
+/// and stay <= the EVM RPC eth_getLogs maxBlockRange (default 500). 256 fits both.
+pub const MAX_BLOCK_SCAN_WINDOW: u64 = 256;
 
 // ─── Topic0 constants ────────────────────────────────────────────────────────
 
@@ -177,6 +192,95 @@ impl std::fmt::Display for RpcError {
 pub enum RequestResult {
     Ok(String),
     Err(RpcError),
+}
+
+// ─── Candid types for the TYPED `eth_getBlockByNumber` method ────────────────
+//
+// Source: live .did of `7hfb6-caaaa-aaaar-qadga-cai` (see
+// `docs/evm_rpc_reference.did`).  Unlike the `request` escape-hatch above,
+// `eth_getBlockByNumber` takes the PLURAL `RpcServices` (multi-provider) and a
+// `BlockTag`, and returns a `MultiGetBlockByNumberResult`.  We use this method
+// (with a SPECIFIC `Number(N)` tag) for the consensus-safe finalized-height
+// probe — a fixed block number is byte-identical across all IC replicas,
+// unlike the volatile `eth_blockNumber` / `latest` / `finalized` reads.
+
+/// PLURAL `RpcServices` (distinct from the singular `RpcService` above).
+/// Only the `Custom` arm is mirrored — Monad is always a single custom
+/// provider keyed by `chainId`.  The other arms (`EthMainnet`, etc.) exist in
+/// the .did but are never encoded here.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub enum RpcServices {
+    Custom {
+        #[serde(rename = "chainId")]
+        chain_id: u64,
+        services: Vec<RpcApi>,
+    },
+}
+
+/// Mirrors the live .did `BlockTag`.  We only ever SEND `Number(N)` (a
+/// specific, already-final block number → consensus-safe).  The other tags are
+/// mirrored for fidelity but never encoded.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum BlockTag {
+    Earliest,
+    Safe,
+    Finalized,
+    Latest,
+    Number(candid::Nat),
+    Pending,
+}
+
+/// `ConsensusStrategy` from the live .did.  Mirrored so `RpcConfig` is
+/// well-formed; the single-provider probe never constructs one (passes
+/// `responseConsensus = null`).
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub enum ConsensusStrategy {
+    Equality,
+    Threshold {
+        total: Option<u8>,
+        min: u8,
+    },
+}
+
+/// `RpcConfig` from the live .did.  The typed `eth_getBlockByNumber` takes
+/// `opt RpcConfig`; we always pass `None` (a single provider needs no
+/// consensus strategy), but the type must exist so the candid arg tuple
+/// `(RpcServices, opt RpcConfig, BlockTag)` is unambiguous.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct RpcConfig {
+    #[serde(rename = "responseSizeEstimate")]
+    pub response_size_estimate: Option<u64>,
+    #[serde(rename = "responseConsensus")]
+    pub response_consensus: Option<ConsensusStrategy>,
+}
+
+/// Mirrors the live .did `Block` record, but with **only the `number` field**.
+///
+/// Candid record-subtyping lets a reader declaring FEWER fields decode the
+/// full wire record (the extra fields — `hash`, `timestamp`, `miner`, etc. —
+/// are ignored).  The round-trip unit test in `tests_evm_rpc` proves this.
+/// `number` is the only field the finalized-height probe reads.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Block {
+    pub number: candid::Nat,
+}
+
+/// `GetBlockByNumberResult = variant { Ok : Block; Err : RpcError }`.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum GetBlockByNumberResult {
+    Ok(Block),
+    Err(RpcError),
+}
+
+/// `MultiGetBlockByNumberResult` from the live .did.  We only ever send ONE
+/// `Custom` provider, so the canister always returns `Consistent`;
+/// `Inconsistent` is never on the wire and never decoded in practice (it
+/// references the singular `RpcService`, which is fine since we never decode
+/// that arm).
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub enum MultiGetBlockByNumberResult {
+    Consistent(GetBlockByNumberResult),
+    Inconsistent(Vec<(RpcService, GetBlockByNumberResult)>),
 }
 
 // ─── Pure parsers ─────────────────────────────────────────────────────────────
@@ -421,64 +525,105 @@ fn next_rpc_id() -> u64 {
 
 // ─── Public async interface ──────────────────────────────────────────────────
 
-/// Returns `(latest_block, finalized_block)` for the given chain.
-///
-/// Tries `eth_getBlockByNumber("finalized", ...)` first.  If the provider
-/// does not support the `finalized` tag (returns an error), falls back to
-/// `latest.saturating_sub(finality_depth)` from the chain config.
-pub async fn fetch_block_numbers(chain: ChainId) -> Result<(u64, u64), String> {
-    // Fetch latest block number
-    let latest_payload = format!(
-        r#"{{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":{}}}"#,
-        next_rpc_id()
-    );
-    let latest_text = call_evm_rpc(chain, &latest_payload).await?;
-    let latest_val: serde_json::Value = serde_json::from_str(&latest_text)
-        .map_err(|e| format!("eth_blockNumber parse error: {}", e))?;
-    let latest_hex = latest_val["result"]
-        .as_str()
-        .ok_or_else(|| format!("eth_blockNumber: missing result in {:?}", latest_text))?;
-    let latest = parse_hex_quantity(latest_hex)? as u64;
+/// Consensus-safe probe: does finalized block `n` exist? Routes through the
+/// TYPED eth_getBlockByNumber(Number(n)) (a specific number is byte-identical
+/// across IC replicas, unlike a volatile block tag). Returns Ok(Some(number))
+/// if present, Ok(None) if not yet reached (benign — caught up / future block),
+/// Err only on a genuine infra failure (call error / Inconsistent).
+async fn eth_get_block_number_at(chain: ChainId, n: u64) -> Result<Option<u64>, String> {
+    // Read the chain's configured endpoints (same source as `call_evm_rpc`).
+    // The typed method needs a single Custom provider; use the first endpoint.
+    let endpoints: Vec<String> = read_state(|s| {
+        s.multi_chain
+            .chain_configs
+            .get(&chain)
+            .map(|c| c.rpc_endpoints.clone())
+            .unwrap_or_default()
+    });
+    let first = endpoints
+        .first()
+        .ok_or_else(|| format!("no RPC endpoints configured for chain {:?}", chain))?
+        .clone();
 
-    // Try "finalized" tag; fall back to latest - finality_depth on failure.
-    let finalized_payload = format!(
-        r#"{{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["finalized",false],"id":{}}}"#,
-        next_rpc_id()
-    );
-    let finalized = match call_evm_rpc(chain, &finalized_payload).await {
-        Ok(text) => {
-            let val: serde_json::Value = serde_json::from_str(&text)
-                .map_err(|e| format!("eth_getBlockByNumber(finalized) parse: {}", e))?;
-            if val["result"].is_null() || val["error"].is_object() {
-                // Provider doesn't support finalized tag; use depth fallback.
-                let depth = read_state(|s| {
-                    s.multi_chain
-                        .chain_configs
-                        .get(&chain)
-                        .map(|c| c.finality_depth as u64)
-                        .unwrap_or(64)
-                });
-                latest.saturating_sub(depth)
-            } else {
-                let number_hex = val["result"]["number"]
-                    .as_str()
-                    .ok_or_else(|| format!("finalized block missing number field"))?;
-                parse_hex_quantity(number_hex)? as u64
-            }
-        }
-        Err(_) => {
-            let depth = read_state(|s| {
-                s.multi_chain
-                    .chain_configs
-                    .get(&chain)
-                    .map(|c| c.finality_depth as u64)
-                    .unwrap_or(64)
-            });
-            latest.saturating_sub(depth)
-        }
+    let rpc_services = RpcServices::Custom {
+        chain_id: chain.0 as u64,
+        services: vec![RpcApi {
+            url: first,
+            headers: None,
+        }],
     };
 
-    Ok((latest, finalized))
+    let canister = evm_rpc_principal();
+    let result: Result<(MultiGetBlockByNumberResult,), _> =
+        ic_cdk::api::call::call_with_payment128(
+            canister,
+            "eth_getBlockByNumber",
+            (
+                rpc_services,
+                Option::<RpcConfig>::None,
+                BlockTag::Number(candid::Nat::from(n)),
+            ),
+            EVM_RPC_CALL_CYCLES,
+        )
+        .await;
+
+    match result {
+        Ok((MultiGetBlockByNumberResult::Consistent(GetBlockByNumberResult::Ok(block)),)) => {
+            // candid::Nat → u64; overflow is a hard error (a block number that
+            // exceeds u64 is impossible in practice and would corrupt the cursor).
+            let num: u64 = u64::try_from(block.number.0.clone())
+                .map_err(|_| format!("block number {} overflows u64", block.number))?;
+            Ok(Some(num))
+        }
+        Ok((MultiGetBlockByNumberResult::Consistent(GetBlockByNumberResult::Err(rpc_err)),)) => {
+            // Block-not-found / future block is the common benign case.
+            log!(
+                DEBUG,
+                "[evm_rpc] eth_getBlockByNumber(Number({})) not found: {:?}",
+                n,
+                rpc_err
+            );
+            Ok(None)
+        }
+        Ok((MultiGetBlockByNumberResult::Inconsistent(_),)) => {
+            Err("unexpected inconsistent eth_getBlockByNumber result".to_string())
+        }
+        Err((code, msg)) => Err(format!(
+            "eth_getBlockByNumber call error ({:?}): {}",
+            code, msg
+        )),
+    }
+}
+
+/// Returns `(latest_block, finalized_block)` for the given chain.
+///
+/// Both elements are the same **consensus-safe** probed height. We do NOT read
+/// the volatile chain head (`eth_blockNumber` or a `latest`/`finalized` tag):
+/// on a fast-finality chain like Monad those differ across the EVM RPC
+/// canister's subnet replicas, so the IC HTTPS-outcall consensus never agrees
+/// and the call fails every tick. Instead we probe a SPECIFIC block number
+/// `last_observed + MAX_BLOCK_SCAN_WINDOW` via the typed
+/// `eth_getBlockByNumber(Number(N))` (a fixed, already-final number is
+/// byte-identical across replicas):
+///   - if that block exists & is final → advance the window up to it
+///   - if not (chain hasn't reached it yet) → return the current cursor (no
+///     new blocks this tick)
+///
+/// `last_observed == 0` means the burn-watch cursor is unseeded; the caller
+/// (`run_observer`) skips burn-watch entirely in that case (no genesis crawl).
+pub async fn fetch_block_numbers(chain: ChainId) -> Result<(u64, u64), String> {
+    let last_observed = read_state(|s| {
+        s.multi_chain
+            .last_observed_block
+            .get(&chain)
+            .copied()
+            .unwrap_or(0)
+    });
+    let candidate = last_observed.saturating_add(MAX_BLOCK_SCAN_WINDOW);
+    match eth_get_block_number_at(chain, candidate).await? {
+        Some(_) => Ok((candidate, candidate)), // block exists & final → advance window
+        None => Ok((last_observed, last_observed)), // not advanced enough yet → nothing new
+    }
 }
 
 /// Returns the ETH/native balance (in wei) of `address` at the latest block.
