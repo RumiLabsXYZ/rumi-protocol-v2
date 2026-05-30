@@ -6,7 +6,7 @@
   import PoolListView from '../../lib/components/swap/PoolListView.svelte';
   import AmmLiquidityPanel from '../../lib/components/swap/AmmLiquidityPanel.svelte';
   import LiquidityInterface from '../../lib/components/swap/LiquidityInterface.svelte';
-  import { getAmm1Apy, AMM1_THREEUSD_VALUE_SHARE } from '../../lib/services/amm1ApyService';
+  import { getAmm1Apy, combinedBestLpApyPct } from '../../lib/services/amm1ApyService';
   import { getThreePoolApy } from '../../lib/services/threePoolApyService';
 
   let mode: 'swap' | 'liquidity' = 'swap';
@@ -21,12 +21,11 @@
   // and the AMM1 LP path stacks 3pool yield on its 3USD half:
   //   amm1Effective = amm1Apy + 0.5 * threePoolApy
   // The advertised number is whichever of the two paths wins per dollar.
+  // `combinedBestLpApyPct` is the shared source of truth (also used by the
+  // Explorer "LP APY" vital) so the two surfaces never disagree.
   $: combinedApy =
     threePoolApyPct !== null && ammApyPct !== null
-      ? Math.max(
-          threePoolApyPct,
-          ammApyPct + AMM1_THREEUSD_VALUE_SHARE * threePoolApyPct,
-        )
+      ? combinedBestLpApyPct(threePoolApyPct, ammApyPct)
       : null;
 
   onMount(() => {

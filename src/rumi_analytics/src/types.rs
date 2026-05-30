@@ -205,6 +205,7 @@ pub struct ApyQuery {
 #[derive(CandidType, Clone, Debug)]
 pub struct ApyResponse {
     pub lp_apy_pct: Option<f64>,
+    pub amm_apy_pct: Option<f64>,
     pub sp_apy_pct: Option<f64>,
     pub window_days: u32,
 }
@@ -222,6 +223,7 @@ pub struct ProtocolSummary {
     pub swap_count_24h: u32,
     pub peg: Option<PegStatus>,
     pub lp_apy_pct: Option<f64>,
+    pub amm_apy_pct: Option<f64>,
     pub sp_apy_pct: Option<f64>,
     pub prices: Vec<TwapEntry>,
 }
