@@ -15,7 +15,10 @@
 
 use alloy_rlp::Encodable;
 
-use super::tx::{assemble_signed_tx, encode_mint_calldata, encode_transfer_calldata, signing_hash, Eip1559Fields};
+use super::tx::{
+    assemble_signed_tx, encode_mint_calldata, encode_transfer_calldata, signing_hash,
+    Eip1559Fields,
+};
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -140,7 +143,8 @@ fn minimal_bytes_for(mut n: usize) -> Vec<u8> {
 fn mint_calldata_has_correct_selector() {
     // mint(address,uint256,uint64): 4-byte selector + 3*32-byte args = 100 bytes.
     let calldata =
-        encode_mint_calldata("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf", 10_000_000_000, 42);
+        encode_mint_calldata("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf", 10_000_000_000, 42)
+            .expect("valid address");
     assert_eq!(calldata.len(), 4 + 32 * 3);
     assert_ne!(&calldata[0..4], &[0u8; 4]);
 }
@@ -150,7 +154,8 @@ fn transfer_calldata_encodes_address_and_amount() {
     let calldata = encode_transfer_calldata(
         "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf",
         5_000_000_000_000_000_000,
-    );
+    )
+    .expect("valid address");
     assert_eq!(calldata.len(), 4 + 32 * 2);
 }
 
@@ -214,7 +219,7 @@ fn signing_hash_matches_reference_byte_for_byte() {
     // Our implementation's signing hash = keccak256(0x02 || rlp([...]))
     use sha3::{Digest, Keccak256};
     let ref_hash: [u8; 32] = Keccak256::digest(&ref_payload).into();
-    let our_hash = signing_hash(&fields);
+    let our_hash = signing_hash(&fields).expect("valid address");
 
     assert_eq!(
         our_hash, ref_hash,
@@ -324,7 +329,7 @@ fn round_trip_sign_and_recover() {
         value: 0,
         data: hex_to_bytes("a9059cbb000000000000000000000000deadbeef"),
     };
-    let hash = signing_hash(&fields);
+    let hash = signing_hash(&fields).expect("valid address");
 
     // Sign with k256 — deterministic (RFC 6979).
     let (sig, _recovery_id): (Signature, _) =
@@ -408,7 +413,7 @@ fn known_vector_signing_hash_matches_geth() {
         "cc270e91ffb8f5a6c2eed711e9a59eb128d857e90ca31600ec51a7dad621178f",
     );
 
-    let our_hash = signing_hash(&fields);
+    let our_hash = signing_hash(&fields).expect("valid address");
     assert_eq!(
         our_hash.as_slice(),
         expected_hash.as_slice(),
@@ -416,4 +421,81 @@ fn known_vector_signing_hash_matches_geth() {
         hex::encode(our_hash),
         hex::encode(&expected_hash)
     );
+}
+
+// ─── error-path tests (B1 hardening) ────────────────────────────────────────
+//
+// Validate that malformed addresses return `Err` (not a panic) from both
+// `abi_word_address` (via `encode_mint_calldata` / `encode_transfer_calldata`)
+// and `parse_address` (via `signing_hash` / `assemble_signed_tx`).  The
+// boundary validation at `set_chain_contract` / `open_chain_vault` / withdraw+
+// close makes these unreachable in production, but a panic in a post-await
+// continuation would permanently block the settlement worker by holding the
+// re-entrancy guard without ever running its `Drop`.  Returning `Err` instead
+// lets the submit/confirm paths log-and-skip normally.
+
+use super::tx::{abi_word_address_test, parse_address_test};
+
+/// `abi_word_address` returns `Err` on bad hex (not a panic).
+#[test]
+fn abi_word_address_rejects_bad_hex() {
+    let result = abi_word_address_test("0xnotvalidhex");
+    assert!(result.is_err(), "expected Err for bad hex, got Ok");
+}
+
+/// `abi_word_address` returns `Err` when the hex is valid but not 20 bytes.
+#[test]
+fn abi_word_address_rejects_wrong_length() {
+    // 19 bytes of valid hex (38 hex chars)
+    let result = abi_word_address_test("0x7e5f4552091a69125d5dfcb7b8c2659029395b");
+    assert!(result.is_err(), "expected Err for 19-byte address, got Ok");
+    // 21 bytes of valid hex (42 hex chars)
+    let result = abi_word_address_test("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf00");
+    assert!(result.is_err(), "expected Err for 21-byte address, got Ok");
+}
+
+/// `parse_address` returns `Err` on bad hex (not a panic).
+#[test]
+fn parse_address_rejects_bad_hex() {
+    let result = parse_address_test("0xnotvalidhex");
+    assert!(result.is_err(), "expected Err for bad hex, got Ok");
+}
+
+/// `parse_address` returns `Err` when the hex is valid but not 20 bytes.
+#[test]
+fn parse_address_rejects_wrong_length() {
+    // 18 bytes (36 hex chars)
+    let result = parse_address_test("0x7e5f4552091a69125d5dfcb7b8c265902939");
+    assert!(result.is_err(), "expected Err for 18-byte address, got Ok");
+}
+
+/// `signing_hash` surfaces `Err` when the `to` address is malformed (no panic).
+#[test]
+fn signing_hash_returns_err_on_malformed_to() {
+    let fields = Eip1559Fields {
+        chain_id: 1,
+        nonce: 0,
+        max_priority_fee_per_gas: 1_000_000_000,
+        max_fee_per_gas: 10_000_000_000,
+        gas_limit: 21_000,
+        to: "not-an-address".into(),
+        value: 0,
+        data: vec![],
+    };
+    let result = signing_hash(&fields);
+    assert!(result.is_err(), "expected Err for malformed to address, got Ok");
+}
+
+/// `encode_mint_calldata` surfaces `Err` on a malformed recipient (no panic).
+#[test]
+fn encode_mint_calldata_returns_err_on_malformed_address() {
+    let result = encode_mint_calldata("0xbadhex!", 1_000_000, 1);
+    assert!(result.is_err(), "expected Err for bad hex recipient, got Ok");
+}
+
+/// `encode_transfer_calldata` surfaces `Err` on a malformed recipient (no panic).
+#[test]
+fn encode_transfer_calldata_returns_err_on_malformed_address() {
+    let result = encode_transfer_calldata("0xbadhex!", 1_000_000);
+    assert!(result.is_err(), "expected Err for bad hex recipient, got Ok");
 }

@@ -57,25 +57,33 @@ pub enum MonadTxKind<'a> {
 ///   gas_limit 120_000.
 /// - Native withdrawal: `to` = recipient, `value` = amount (wei), empty data,
 ///   gas_limit 21_000.
+///
+/// Returns `Err` if any address string is malformed (defense-in-depth: the
+/// boundary validation at `set_chain_contract`/`open_chain_vault`/withdraw+close
+/// makes this unreachable in practice, but a malformed address must never trap
+/// the settlement worker after the re-entrancy guard is held).
 pub fn build_eip1559_fields(
     chain_id: u64,
     kind: MonadTxKind,
     nonce: u64,
     prio: u128,
     max_fee: u128,
-) -> Eip1559Fields {
+) -> Result<Eip1559Fields, String> {
     match kind {
-        MonadTxKind::Mint { contract, recipient, amount_e8s, vault_id } => Eip1559Fields {
-            chain_id,
-            nonce,
-            max_priority_fee_per_gas: prio,
-            max_fee_per_gas: max_fee,
-            gas_limit: 120_000,
-            to: contract.to_string(),
-            value: 0,
-            data: encode_mint_calldata(recipient, amount_e8s, vault_id),
-        },
-        MonadTxKind::NativeWithdrawal { recipient, amount_wei } => Eip1559Fields {
+        MonadTxKind::Mint { contract, recipient, amount_e8s, vault_id } => {
+            let data = encode_mint_calldata(recipient, amount_e8s, vault_id)?;
+            Ok(Eip1559Fields {
+                chain_id,
+                nonce,
+                max_priority_fee_per_gas: prio,
+                max_fee_per_gas: max_fee,
+                gas_limit: 120_000,
+                to: contract.to_string(),
+                value: 0,
+                data,
+            })
+        }
+        MonadTxKind::NativeWithdrawal { recipient, amount_wei } => Ok(Eip1559Fields {
             chain_id,
             nonce,
             max_priority_fee_per_gas: prio,
@@ -84,7 +92,7 @@ pub fn build_eip1559_fields(
             to: recipient.to_string(),
             value: amount_wei,
             data: vec![],
-        },
+        }),
     }
 }
 
@@ -93,38 +101,46 @@ pub fn build_eip1559_fields(
 /// Build calldata for `mint(address,uint256,uint64)`.
 /// Signature string: `"mint(address,uint256,uint64)"`.
 /// Layout: 4-byte selector || word(address) || word(amount) || word(vault_id).
-pub fn encode_mint_calldata(to: &str, amount_e8s: u128, vault_id: u64) -> Vec<u8> {
+///
+/// Returns `Err` if `to` is not a valid 20-byte hex address.
+pub fn encode_mint_calldata(to: &str, amount_e8s: u128, vault_id: u64) -> Result<Vec<u8>, String> {
     let selector = keccak_selector("mint(address,uint256,uint64)");
     let mut out = Vec::with_capacity(4 + 96);
     out.extend_from_slice(&selector);
-    out.extend_from_slice(&abi_word_address(to));
+    out.extend_from_slice(&abi_word_address(to)?);
     out.extend_from_slice(&abi_word_u128(amount_e8s));
     out.extend_from_slice(&abi_word_u128(vault_id as u128));
-    out
+    Ok(out)
 }
 
 /// Build calldata for `transfer(address,uint256)`.
 /// Signature string: `"transfer(address,uint256)"`.
 /// Layout: 4-byte selector || word(address) || word(amount).
-pub fn encode_transfer_calldata(to: &str, amount: u128) -> Vec<u8> {
+///
+/// Returns `Err` if `to` is not a valid 20-byte hex address.
+pub fn encode_transfer_calldata(to: &str, amount: u128) -> Result<Vec<u8>, String> {
     let selector = keccak_selector("transfer(address,uint256)");
     let mut out = Vec::with_capacity(4 + 64);
     out.extend_from_slice(&selector);
-    out.extend_from_slice(&abi_word_address(to));
+    out.extend_from_slice(&abi_word_address(to)?);
     out.extend_from_slice(&abi_word_u128(amount));
-    out
+    Ok(out)
 }
 
 // ─── EIP-1559 encoding ───────────────────────────────────────────────────────
 
 /// Compute the signing hash: keccak256(`0x02 || rlp([...fields..., access_list])`).
-pub fn signing_hash(fields: &Eip1559Fields) -> [u8; 32] {
-    let payload = rlp_encode_eip1559(fields, None);
-    Keccak256::digest(&payload).into()
+///
+/// Returns `Err` if `fields.to` is not a valid 20-byte hex address.
+pub fn signing_hash(fields: &Eip1559Fields) -> Result<[u8; 32], String> {
+    let payload = rlp_encode_eip1559(fields, None)?;
+    Ok(Keccak256::digest(&payload).into())
 }
 
 /// Assemble the final signed EIP-1559 transaction bytes:
 /// `0x02 || rlp([...fields..., access_list, y_parity, r, s])`.
+///
+/// Returns `Err` if `y_parity` is not 0 or 1, or if `fields.to` is malformed.
 pub fn assemble_signed_tx(
     fields: &Eip1559Fields,
     r: &[u8; 32],
@@ -134,7 +150,7 @@ pub fn assemble_signed_tx(
     if y_parity > 1 {
         return Err(format!("y_parity must be 0 or 1, got {y_parity}"));
     }
-    Ok(rlp_encode_eip1559(fields, Some((r, s, y_parity))))
+    rlp_encode_eip1559(fields, Some((r, s, y_parity)))
 }
 
 /// Determine which `y_parity` (0 or 1) matches `expected_addr` for the given
@@ -177,7 +193,7 @@ pub async fn sign_eip1559(
     derivation_path: Vec<Vec<u8>>,
     signer_addr: &str,
 ) -> Result<String, String> {
-    let hash = signing_hash(fields);
+    let hash = signing_hash(fields)?;
 
     let key_id = EcdsaKeyId { curve: EcdsaCurve::Secp256k1, name: monad_ecdsa_key_name() };
     let arg = SignWithEcdsaArgument {
@@ -209,11 +225,13 @@ pub async fn sign_eip1559(
 /// Encode the full EIP-1559 transaction, with or without signature.
 /// Returns `0x02 || rlp_list([chain_id, nonce, max_priority_fee,
 ///   max_fee, gas_limit, to, value, data, access_list, (y_parity, r, s)?])`.
+///
+/// Returns `Err` if `fields.to` is not a valid 20-byte hex address.
 fn rlp_encode_eip1559(
     fields: &Eip1559Fields,
     sig: Option<(&[u8; 32], &[u8; 32], u8)>,
-) -> Vec<u8> {
-    let to_bytes = parse_address(&fields.to);
+) -> Result<Vec<u8>, String> {
+    let to_bytes = parse_address(&fields.to)?;
 
     let mut payload = Vec::new();
     fields.chain_id.encode(&mut payload);
@@ -241,7 +259,7 @@ fn rlp_encode_eip1559(
     out.push(0x02u8);
     write_rlp_list_header(payload.len(), &mut out);
     out.extend_from_slice(&payload);
-    out
+    Ok(out)
 }
 
 /// Encode a 20-byte address as an RLP byte string (NOT an integer).
@@ -303,13 +321,22 @@ fn keccak_selector(sig: &str) -> [u8; 4] {
 
 /// ABI-encode an Ethereum address as a 32-byte left-padded word.
 /// Strips the "0x" prefix, pads to 32 bytes.
-fn abi_word_address(addr: &str) -> [u8; 32] {
+///
+/// Returns `Err` if `addr` is not valid hex or not exactly 20 bytes.
+fn abi_word_address(addr: &str) -> Result<[u8; 32], String> {
     let addr_str = addr.strip_prefix("0x").or_else(|| addr.strip_prefix("0X")).unwrap_or(addr);
-    let addr_bytes = hex::decode(addr_str).expect("invalid address hex");
-    assert_eq!(addr_bytes.len(), 20, "address must be 20 bytes");
+    let addr_bytes = hex::decode(addr_str)
+        .map_err(|e| format!("abi_word_address: invalid hex in '{}': {}", addr, e))?;
+    if addr_bytes.len() != 20 {
+        return Err(format!(
+            "abi_word_address: '{}' is {} bytes, expected 20",
+            addr,
+            addr_bytes.len()
+        ));
+    }
     let mut word = [0u8; 32];
     word[12..].copy_from_slice(&addr_bytes);
-    word
+    Ok(word)
 }
 
 /// ABI-encode a u128 as a 32-byte big-endian word.
@@ -320,8 +347,29 @@ fn abi_word_u128(n: u128) -> [u8; 32] {
 }
 
 /// Parse a "0x…" hex address into 20 bytes.
-fn parse_address(addr: &str) -> [u8; 20] {
+///
+/// Returns `Err` if `addr` is not valid hex or not exactly 20 bytes.
+fn parse_address(addr: &str) -> Result<[u8; 20], String> {
     let hex_str = addr.strip_prefix("0x").or_else(|| addr.strip_prefix("0X")).unwrap_or(addr);
-    let bytes = hex::decode(hex_str).unwrap_or_else(|e| panic!("invalid address '{addr}': {e}"));
-    bytes.try_into().unwrap_or_else(|_| panic!("address '{addr}' is not 20 bytes"))
+    let bytes = hex::decode(hex_str)
+        .map_err(|e| format!("parse_address: invalid hex in '{}': {}", addr, e))?;
+    bytes.try_into().map_err(|v: Vec<u8>| {
+        format!("parse_address: '{}' is {} bytes, expected 20", addr, v.len())
+    })
+}
+
+// ─── test-only re-exports of private helpers ─────────────────────────────────
+//
+// `abi_word_address` and `parse_address` are private (module-internal). To
+// let `tests_tx` assert their error-return behaviour without changing their
+// visibility, we expose thin wrappers under `#[cfg(test)]`.
+
+#[cfg(test)]
+pub fn abi_word_address_test(addr: &str) -> Result<[u8; 32], String> {
+    abi_word_address(addr)
+}
+
+#[cfg(test)]
+pub fn parse_address_test(addr: &str) -> Result<[u8; 20], String> {
+    parse_address(addr)
 }

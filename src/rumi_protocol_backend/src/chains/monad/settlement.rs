@@ -167,10 +167,16 @@ pub async fn settlement_tick() {
 // ensures only one `run_settlement` per chain runs at a time. The RAII guard is
 // a local held across all awaits, so it releases when the async fn returns on
 // ANY path (success, early return, trap-unwind).
+//
+// Self-healing (B2 hardening): the map stores the nanosecond timestamp the
+// guard was acquired at. On the IC, a trap in a post-await continuation does
+// NOT run `Drop`, so a stale entry would otherwise block that chain forever.
+// `hardening::inflight_should_acquire` reclaims entries older than
+// `hardening::INFLIGHT_STALE_NS` (10 min), self-healing after a trapped tick.
 
 thread_local! {
-    static SETTLEMENT_INFLIGHT: std::cell::RefCell<std::collections::BTreeSet<ChainId>> =
-        const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
+    static SETTLEMENT_INFLIGHT: std::cell::RefCell<std::collections::BTreeMap<ChainId, u64>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
 }
 
 struct SettlementGuard(ChainId);
@@ -203,18 +209,23 @@ impl Drop for SettlementGuard {
 /// across an `.await`.
 pub async fn run_settlement(chain: ChainId) {
     // Re-entrancy guard (acquired BEFORE any other work): if a tick for this
-    // chain is still in flight, skip this one entirely. The RAII guard releases
-    // on the future completing (any return path), so the next tick re-acquires.
+    // chain is still in flight (and not stale), skip this one entirely. The
+    // RAII guard releases on the future completing (any return path). A stale
+    // entry (> INFLIGHT_STALE_NS old) means the previous holder trapped in a
+    // post-await continuation and its `Drop` never ran — the later tick
+    // reclaims it, self-healing the permanent-block scenario.
+    let now_ns = ic_cdk::api::time();
     let _guard = match SETTLEMENT_INFLIGHT.with(|s| {
-        if s.borrow().contains(&chain) {
-            None
-        } else {
-            s.borrow_mut().insert(chain);
+        let existing = s.borrow().get(&chain).copied();
+        if hardening::inflight_should_acquire(existing, now_ns, hardening::INFLIGHT_STALE_NS) {
+            s.borrow_mut().insert(chain, now_ns);
             Some(SettlementGuard(chain))
+        } else {
+            None
         }
     }) {
         Some(g) => g,
-        None => return, // a tick for this chain is already running; skip
+        None => return, // a fresh tick for this chain is already running; skip
     };
 
     // Guard: skip if in read-only mode, the supply invariant has halted, or this
@@ -318,7 +329,7 @@ fn build_tx_plan(
                 nonce,
                 prio,
                 max_fee,
-            );
+            )?;
             Ok(TxPlan {
                 fields,
                 vault_id: *vault_id,
@@ -336,7 +347,7 @@ fn build_tx_plan(
                 nonce,
                 prio,
                 max_fee,
-            );
+            )?;
             Ok(TxPlan {
                 fields,
                 vault_id: *vault_id,

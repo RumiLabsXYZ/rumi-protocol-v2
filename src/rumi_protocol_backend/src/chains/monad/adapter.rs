@@ -148,7 +148,8 @@ impl ChainAdapter for MonadAdapter {
             nonce,
             prio,
             max_fee,
-        );
+        )
+        .map_err(ChainAdapterError::SignatureFailed)?;
 
         // 5. Sign.
         let raw = tx::sign_eip1559(&fields, path, &settlement_addr)
@@ -203,7 +204,8 @@ impl ChainAdapter for MonadAdapter {
             nonce,
             prio,
             max_fee,
-        );
+        )
+        .map_err(ChainAdapterError::SignatureFailed)?;
 
         // 6. Sign.
         let raw = tx::sign_eip1559(&fields, path, &settlement_addr)
