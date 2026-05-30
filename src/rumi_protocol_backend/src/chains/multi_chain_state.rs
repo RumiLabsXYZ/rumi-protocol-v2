@@ -121,7 +121,10 @@ pub struct MultiChainStateV2 {
     pub reorg_suspect_streak: BTreeMap<ChainId, u32>,
     /// Persisted idempotency set for the burn-watch observer (C-1
     /// supply-divergence fix). Maps `block_number -> { burn-identity key }`,
-    /// where the key is `"{tx_hash}:{vault_id}:{amount_e8s}"`. A burn whose key
+    /// where the key is `"{tx_hash}:{log_index}"`, the canonical on-chain
+    /// identity of an EVM log, so two identical `Burn`s emitted in one tx (same
+    /// vault and amount, different log indices) are credited separately rather
+    /// than collapsed into one entry. A burn whose key
     /// is already present at its block has ALREADY been applied to
     /// `chain_supplies`/`debt_e8s` and MUST be skipped on any re-scan — this is
     /// what kills the silent double-apply (the pre-fix loop re-applied the
