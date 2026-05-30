@@ -682,7 +682,19 @@ pub async fn get_transaction_count(chain: ChainId, address: &str) -> Result<u64,
 
 /// Returns logs matching `(contract, topic0, fromBlock..toBlock)`.
 ///
-/// Each entry in the returned `Vec` is `(topics, data, txHash, blockNumber)`.
+/// Each entry in the returned `Vec` is
+/// `(topics, data, txHash, blockNumber, logIndex)`.
+///
+/// `logIndex` is the EVM log index within the transaction — the canonical
+/// on-chain identity of a log is `(tx_hash, log_index)`, not
+/// `(tx_hash, vault_id, amount)`. Two identical Burn events emitted in the
+/// same transaction (same tx_hash, same vault, same amount) have DIFFERENT
+/// log indices and must both be credited.
+///
+/// If the JSON entry has no `logIndex` field (should not happen for real finalized
+/// logs), the entry's position in the returned array is used as a stable fallback,
+/// ensuring two distinct logs still get distinct indices.
+///
 /// The caller is responsible for decoding via `decode_burn_log` /
 /// `decode_mint_log` etc.
 pub async fn get_logs(
@@ -691,7 +703,7 @@ pub async fn get_logs(
     topic0: &str,
     from_block: u64,
     to_block: u64,
-) -> Result<Vec<(Vec<String>, String, String, u64)>, String> {
+) -> Result<Vec<(Vec<String>, String, String, u64, u64)>, String> {
     let payload = format!(
         r#"{{"jsonrpc":"2.0","method":"eth_getLogs","params":[{{"address":{:?},"topics":[{:?}],"fromBlock":"0x{:x}","toBlock":"0x{:x}"}}],"id":{}}}"#,
         contract,
@@ -713,7 +725,7 @@ pub async fn get_logs(
         .ok_or_else(|| format!("eth_getLogs: result is not an array in {:?}", text))?;
 
     let mut out = Vec::with_capacity(logs.len());
-    for entry in logs {
+    for (position, entry) in logs.iter().enumerate() {
         let topics: Vec<String> = entry["topics"]
             .as_array()
             .map(|arr| {
@@ -726,7 +738,15 @@ pub async fn get_logs(
         let tx_hash = entry["transactionHash"].as_str().unwrap_or("0x").to_string();
         let block_number_hex = entry["blockNumber"].as_str().unwrap_or("0x0");
         let block_number = parse_hex_quantity(block_number_hex)? as u64;
-        out.push((topics, data, tx_hash, block_number));
+        // The log_index is the authoritative per-log identity within a tx.
+        // Fall back to the array position if the field is absent (should not
+        // happen for real finalized logs, but ensures distinct indices even in
+        // that edge case).
+        let log_index = match entry["logIndex"].as_str() {
+            Some(hex) => parse_hex_quantity(hex)? as u64,
+            None => position as u64,
+        };
+        out.push((topics, data, tx_hash, block_number, log_index));
     }
     Ok(out)
 }

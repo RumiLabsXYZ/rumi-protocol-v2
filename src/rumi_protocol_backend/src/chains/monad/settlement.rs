@@ -729,8 +729,11 @@ async fn confirm_op(
 
             // Find the Mint log for this vault, preferring the one whose tx hash
             // matches this op's submission (case-insensitive).
+            // `log_index` is threaded through from get_logs but not needed here
+            // (the settlement path selects by vault_id + tx_hash, not by log
+            // identity — each mint op maps to exactly one Mint event).
             let mut matched: Option<u128> = None;
-            for (topics, data, log_tx, log_block) in &logs {
+            for (topics, data, log_tx, log_block, _log_index) in &logs {
                 match evm_rpc::decode_mint_log(topics, data, log_tx, *log_block) {
                     Ok(m) if m.vault_id == vault_id => {
                         let exact = log_tx.eq_ignore_ascii_case(&tx_hash);

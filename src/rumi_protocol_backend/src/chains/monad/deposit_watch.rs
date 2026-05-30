@@ -569,14 +569,22 @@ pub async fn run_observer(chain: ChainId) {
     // InvalidBurn): those advance past their offending log so a single poison
     // burn can never stall the cursor (the silent-double-apply trigger).
     //
-    // Idempotency: every burn carries an on-chain identity key
-    // (`{tx_hash}:{vault_id}:{amount_e8s}`) recorded in `processed_burn_keys`
+    // Idempotency: every burn is keyed by its CANONICAL on-chain identity
+    // `format!("{tx_hash}:{log_index}")` and recorded in `processed_burn_keys`
     // once handled (applied OR permanently skipped). On any re-scan of the same
     // range, an already-keyed burn is `continue`-d BEFORE `apply_burn_to_state`,
     // so the already-applied prefix is NEVER re-applied — this is the core fix
     // for the C-1 supply-divergence (debt_e8s + chain_supplies double-decrement).
+    //
+    // Using `(tx_hash, log_index)` rather than the old `(tx_hash, vault_id,
+    // amount_e8s)` key fixes Minor #1 (review): IcUSD.burn() is permissionless,
+    // so a wrapper contract can emit two identical Burn events in one tx with
+    // the same vault_id and amount. Those two burns have DIFFERENT log indices
+    // and must both be credited. The old key collapsed them into one entry,
+    // silently dropping the second burn and leaving the vault's debt and chain
+    // supply over-stated.
     let mut burn_ok = true;
-    for (topics, data, tx_hash, block_number) in &raw_burn_logs {
+    for (topics, data, tx_hash, block_number, log_index) in &raw_burn_logs {
         let burn = match decode_burn_log(topics, data, tx_hash, *block_number) {
             Ok(b) => b,
             Err(e) => {
@@ -592,11 +600,10 @@ pub async fn run_observer(chain: ChainId) {
             }
         };
 
-        // Idempotency key: tx_hash uniquely identifies the tx; vault_id+amount
-        // disambiguate the (unlikely) multi-burn tx. If already processed at this
-        // block, this burn's debt/supply decrement already happened — skip it so
-        // a re-scan never double-applies.
-        let key = format!("{}:{}:{}", burn.tx_hash, burn.vault_id, burn.amount_e8s);
+        // Canonical on-chain identity: (tx_hash, log_index). The log_index
+        // uniquely identifies a log within a transaction, so two Burn events
+        // in the same tx (same vault, same amount) are never collapsed.
+        let key = format!("{}:{}", burn.tx_hash, log_index);
         let already_processed = read_state(|s| {
             s.multi_chain
                 .processed_burn_keys
@@ -706,6 +713,15 @@ pub async fn run_observer(chain: ChainId) {
             // longer needed for dedup. This keeps `processed_burn_keys` bounded.
             // On a halt-break (above), we DO NOT prune — the un-halt re-scan
             // restarts from the same `last_observed + 1` and must stay idempotent.
+            //
+            // PHASE-1C NOTE: This prune assumes no other observer tick is
+            // concurrently alive and still holding captured `get_logs` results
+            // for a now-pruned block. That is safe for Phase 1b: single-slot
+            // finality + bounded outcall timeouts + a handful of vaults make a
+            // tick running longer than MAX_BLOCK_SCAN_WINDOW blocks unreachable
+            // in practice. Revisit for Phase 1c (deeper finality / higher vault
+            // counts) where a self-heal reclaim could race the prune and a
+            // stale tick might re-apply a burn whose key was already pruned.
             let stale: Vec<u64> = s
                 .multi_chain
                 .processed_burn_keys

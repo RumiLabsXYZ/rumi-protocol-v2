@@ -336,6 +336,31 @@ fn push_burn_log(
     );
 }
 
+/// Push a Burn log with an explicit log_index (for the same-tx-different-log-index test).
+fn push_burn_log_at(
+    pic: &PocketIc,
+    mock: Principal,
+    vault_id: u64,
+    burner: &str,
+    amount_e8s: u128,
+    tx_hash: &str,
+    block: u64,
+    log_index: u64,
+) {
+    let topics = vec![
+        BURN_EVENT_TOPIC0.to_string(),
+        word_u128(vault_id as u128),
+        word_addr(burner),
+    ];
+    let data = word_u128(amount_e8s);
+    update_any(
+        pic,
+        mock,
+        "push_log_at",
+        Encode!(&topics, &data, &tx_hash.to_string(), &block, &log_index).unwrap(),
+    );
+}
+
 // ─── The test ────────────────────────────────────────────────────────────────
 
 #[test]
@@ -580,4 +605,221 @@ fn phase1b_burn_idempotency_skips_poison_and_never_double_applies() {
     );
 
     eprintln!("[phase1b burn-idempotency] FULL C-1 guard PASSED: good burn applied once (debt 60e8), poison skipped, cursor advanced, supply == on-chain truth 60e8");
+}
+
+// ─── Review Minor #1: same-tx different-log-index dedup ──────────────────────
+//
+// Two Burn logs in the SAME transaction (same tx_hash) for the SAME vault and
+// SAME amount are TWO DISTINCT on-chain burns. The canonical on-chain identity
+// of a log is (tx_hash, log_index) — not (tx_hash, vault_id, amount). The old
+// C-1 key `format!("{tx_hash}:{vault_id}:{amount_e8s}")` collapses them into
+// one dedup entry, so the second real burn is silently dropped (vault's debt
+// and chain supply are over-stated; the user loses credit).
+//
+// This test asserts BOTH burns applied → debt == 100e8 − 60e8 = 40e8, not 70e8
+// (what the old single-key dedup would give by dropping the second 30e8 burn).
+//
+// IcUSD.burn() is permissionless; a wrapper contract CAN emit two identical
+// Burn events in one tx. The fix uses `format!("{tx_hash}:{log_index}")` as the
+// dedup key — the canonical EVM log identity.
+#[test]
+fn phase1b_burn_two_identical_burns_in_same_tx_both_applied() {
+    let (pic, backend, mock) = boot();
+
+    // Point the backend at the mock.
+    decode_result(
+        update_dev(&pic, backend, "set_evm_rpc_principal", Encode!(&mock).unwrap()),
+        "set_evm_rpc_principal",
+    )
+    .expect("set_evm_rpc_principal");
+
+    // Register Monad.
+    let reg = RegisterChainArg {
+        chain_id: ChainId(MONAD_CHAIN_ID),
+        display_name: "MonadTestnet".to_string(),
+        rpc_endpoints: vec!["https://mock-monad-rpc.invalid".to_string()],
+        finality_depth: 1,
+        gas_strategy: GasStrategy::EvmEip1559 {
+            max_priority_fee_gwei: 2,
+            max_fee_gwei_ceiling: 500,
+        },
+        chain_native_decimals: 18,
+    };
+    decode_result(
+        update_dev(&pic, backend, "register_chain", Encode!(&reg).unwrap()),
+        "register_chain",
+    )
+    .expect("register_chain");
+
+    decode_result(
+        update_dev(
+            &pic,
+            backend,
+            "set_chain_contract",
+            Encode!(
+                &ChainId(MONAD_CHAIN_ID),
+                &"0x00000000000000000000000000000000deadbeef".to_string()
+            )
+            .unwrap(),
+        ),
+        "set_chain_contract",
+    )
+    .expect("set_chain_contract");
+
+    decode_result(
+        update_dev(
+            &pic,
+            backend,
+            "set_manual_collateral_price",
+            Encode!(&ChainId(MONAD_CHAIN_ID), &"MON".to_string(), &200_000_000u64).unwrap(),
+        ),
+        "set_manual_collateral_price",
+    )
+    .expect("set_manual_collateral_price");
+
+    // Seed the cursor well above 256 so scan windows stay in a clean range.
+    decode_result(
+        update_dev(
+            &pic,
+            backend,
+            "set_last_observed_block",
+            Encode!(&ChainId(MONAD_CHAIN_ID), &2_000_000u64).unwrap(),
+        ),
+        "set_last_observed_block",
+    )
+    .expect("set_last_observed_block");
+
+    update_any(&pic, mock, "set_blocks", Encode!(&2_000_256u64, &2_000_256u64).unwrap());
+    update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xmint_same_tx".to_string()).unwrap());
+
+    // ── ECDSA probe ──────────────────────────────────────────────────────────
+    let settlement_addr = match update_dev(
+        &pic,
+        backend,
+        "get_chain_settlement_address",
+        Encode!(&ChainId(MONAD_CHAIN_ID)).unwrap(),
+    ) {
+        WasmResult::Reply(b) => match Decode!(&b, Result<String, ProtocolError>) {
+            Ok(Ok(addr)) => Some(addr),
+            _ => None,
+        },
+        WasmResult::Reject(_) => None,
+    };
+
+    let settlement_addr = match settlement_addr {
+        Some(addr) => {
+            eprintln!("[phase1b same-tx-burns] ECDSA AVAILABLE; addr={addr}; running full test");
+            addr
+        }
+        None => {
+            eprintln!("[phase1b same-tx-burns] ECDSA UNAVAILABLE; skipping (needs Open vault with debt)");
+            return;
+        }
+    };
+
+    // Fund hot wallet.
+    update_any(
+        &pic,
+        mock,
+        "set_balance",
+        Encode!(&settlement_addr, &candid::Nat::from(1_000u128 * E18)).unwrap(),
+    );
+
+    // ── Open a vault with debt = 100e8 ───────────────────────────────────────
+    let collateral_e18 = 100u128 * E18;
+    let debt_e8s = 100u128 * E8;
+    let recipient = "0x000000000000000000000000000000000000abcd".to_string();
+    let vault_id: u64 = match update_dev(
+        &pic,
+        backend,
+        "open_chain_vault",
+        Encode!(
+            &ChainId(MONAD_CHAIN_ID),
+            &candid::Nat::from(collateral_e18),
+            &candid::Nat::from(debt_e8s),
+            &recipient
+        )
+        .unwrap(),
+    ) {
+        WasmResult::Reply(b) => Decode!(&b, Result<u64, ProtocolError>)
+            .expect("decode open_chain_vault")
+            .expect("open_chain_vault Ok"),
+        WasmResult::Reject(msg) => panic!("open_chain_vault rejected: {msg}"),
+    };
+
+    let v = get_vault(&pic, backend, vault_id).expect("vault exists after open");
+    let custody = v.custody_address.clone();
+
+    // Deposit confirmed; observer flips to MintPending + enqueues mint.
+    update_any(
+        &pic,
+        mock,
+        "set_balance",
+        Encode!(&custody, &candid::Nat::from(collateral_e18)).unwrap(),
+    );
+    advance_and_tick(&pic, 2);
+
+    // Settlement submits + confirms the mint.
+    push_mint_log(&pic, mock, vault_id, &recipient, debt_e8s, "0xmint_same_tx", 2_000_256);
+    advance_and_tick(&pic, 4);
+
+    let v = get_vault(&pic, backend, vault_id).expect("vault after mint confirm");
+    assert_eq!(v.status, ChainVaultStatus::Open, "mint confirmed => Open");
+    assert_eq!(v.debt_e8s, candid::Nat::from(debt_e8s), "debt == 100e8 after mint");
+
+    // ── Same-tx two-identical-burns scenario ─────────────────────────────────
+    // Advance the mock chain head into the next scan window.
+    update_any(&pic, mock, "clear_logs", Encode!().unwrap());
+    update_any(&pic, mock, "set_blocks", Encode!(&2_000_512u64, &2_000_512u64).unwrap());
+
+    // Push TWO Burn logs with:
+    //   - SAME tx_hash ("0xdualtx")
+    //   - SAME vault_id
+    //   - SAME amount_e8s (30e8 each)
+    //   - DIFFERENT log_index (0 vs 1)
+    // These are two distinct on-chain burns: vault burns 30e8 twice = 60e8 total.
+    // Expected: debt == 100e8 - 60e8 = 40e8.
+    // With the OLD key (tx:vault:amount): both map to the same key → second dropped → debt=70e8.
+    // With the NEW key (tx:log_index): distinct keys → both applied → debt=40e8.
+    push_burn_log_at(
+        &pic, mock, vault_id, &recipient, 30 * E8, "0xdualtx", 2_000_300, 0,
+    );
+    push_burn_log_at(
+        &pic, mock, vault_id, &recipient, 30 * E8, "0xdualtx", 2_000_300, 1,
+    );
+
+    // Multiple ticks to ensure re-scans don't double-apply anything.
+    advance_and_tick(&pic, 6);
+
+    // Both burns must have applied: debt == 40e8.
+    let v = get_vault(&pic, backend, vault_id).expect("vault after dual-burn");
+    assert_eq!(
+        v.debt_e8s,
+        candid::Nat::from(40 * E8),
+        "Minor #1: both same-tx burns applied → debt 40e8 (not 70e8 from dropped second burn)"
+    );
+    assert_eq!(v.status, ChainVaultStatus::Open, "vault stays Open after partial burns");
+
+    // Cursor must have advanced.
+    assert!(
+        cursor(&pic, backend) >= 2_000_512,
+        "cursor advanced past dual-burn block; got {}",
+        cursor(&pic, backend)
+    );
+
+    // Supply must match on-chain truth: 100e8 - 60e8 = 40e8.
+    let global: candid::Nat = query_unit(&pic, backend, "get_global_icusd_supply");
+    assert_eq!(
+        global,
+        candid::Nat::from(40 * E8),
+        "Minor #1: global supply == 40e8 (both burns credited)"
+    );
+    let audit: SupplyAuditWire = query_unit(&pic, backend, "get_supply_audit");
+    assert_eq!(
+        audit.total_e8s,
+        v.debt_e8s,
+        "Minor #1: chain supply == vault debt == 40e8"
+    );
+
+    eprintln!("[phase1b same-tx-burns] PASSED: both same-tx burns applied → debt 40e8, supply 40e8, cursor advanced");
 }

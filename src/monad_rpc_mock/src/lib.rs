@@ -215,6 +215,12 @@ struct ScriptedLog {
     data: String,
     tx_hash: String,
     block: u64,
+    /// Stable EVM log index within the transaction. Assigned explicitly via
+    /// `push_log_at`, or auto-assigned as the total log count at push time by
+    /// `push_log`. The same log always gets the same `logIndex` across
+    /// re-scans, which is required for the dedup key `(tx_hash, log_index)` to
+    /// be stable across observer re-scans of the same block range.
+    log_index: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -485,11 +491,12 @@ fn request(_service: RpcService, json_payload: String, _max_response_bytes: u64)
                         .collect::<Vec<_>>()
                         .join(",");
                     items.push(format!(
-                        r#"{{"topics":[{}],"data":{:?},"transactionHash":{:?},"blockNumber":{:?}}}"#,
+                        r#"{{"topics":[{}],"data":{:?},"transactionHash":{:?},"blockNumber":{:?},"logIndex":{:?}}}"#,
                         topics_json,
                         log.data,
                         log.tx_hash,
-                        hex_u64(log.block)
+                        hex_u64(log.block),
+                        hex_u64(log.log_index)
                     ));
                 }
                 format!(
@@ -562,14 +569,39 @@ fn set_next_send_hash(h: String) {
     });
 }
 
+/// Push a scripted log, auto-assigning `log_index` as the current total log
+/// count. Existing tests use this; the assigned index is stable (logs are never
+/// removed except by `clear_logs`), so re-scans always see the same logIndex
+/// for the same log.
 #[ic_cdk_macros::update]
 fn push_log(topics: Vec<String>, data: String, tx_hash: String, block: u64) {
+    SCRIPT.with(|s| {
+        let mut s = s.borrow_mut();
+        let log_index = s.logs.len() as u64;
+        s.logs.push(ScriptedLog {
+            topics,
+            data,
+            tx_hash,
+            block,
+            log_index,
+        });
+    });
+}
+
+/// Push a scripted log with an explicit `log_index`. Used by the same-tx
+/// different-log-index test to push two Burn logs with the same tx_hash but
+/// distinct log indices. The `log_index` must be provided explicitly so that
+/// re-scans of the same block range always return the same logIndex for the
+/// same log (dedup stability requirement).
+#[ic_cdk_macros::update]
+fn push_log_at(topics: Vec<String>, data: String, tx_hash: String, block: u64, log_index: u64) {
     SCRIPT.with(|s| {
         s.borrow_mut().logs.push(ScriptedLog {
             topics,
             data,
             tx_hash,
             block,
+            log_index,
         });
     });
 }
