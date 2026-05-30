@@ -49,6 +49,43 @@ fn v1_cbor_snapshot_decodes_into_v2_without_wiping_state() {
     assert!(v2.hot_wallet_balance_e18.is_empty());
     assert!(v2.reorg_halted.is_empty());
     assert!(v2.reorg_suspect_streak.is_empty());
+    // C-1: the burn-watch idempotency set must default to empty from a V1 blob
+    // that has no such key (its absence must NOT trip the state-wipe fallback).
+    assert!(v2.processed_burn_keys.is_empty());
+}
+
+#[test]
+fn v2_cbor_round_trip_preserves_processed_burn_keys() {
+    // C-1 state-wipe defense: a populated V2 snapshot (with processed_burn_keys)
+    // must survive a ciborium encode→decode round-trip with the new field intact.
+    // This is the exact path load_state_from_stable() runs on a V2→V2 upgrade.
+    use std::collections::BTreeSet;
+
+    let mut v2 = MultiChainStateV2::default();
+    v2.chain_supplies.insert(ChainId(10143), 6_000_000_000);
+    let mut keys = BTreeSet::new();
+    keys.insert("0xgoodburn:1:4000000000".to_string());
+    keys.insert("0xpoison:1:100000000000".to_string());
+    v2.processed_burn_keys.insert(1_000_300, keys);
+    v2.processed_burn_keys
+        .insert(1_000_301, BTreeSet::from(["0xother:2:50".to_string()]));
+
+    let mut buf = Vec::new();
+    ciborium::ser::into_writer(&v2, &mut buf).expect("cbor encode V2");
+    let decoded: MultiChainStateV2 =
+        ciborium::de::from_reader(buf.as_slice()).expect("V2 snapshot round-trips");
+
+    assert_eq!(decoded.chain_supplies.get(&ChainId(10143)), Some(&6_000_000_000u128));
+    assert_eq!(decoded.processed_burn_keys.len(), 2);
+    let block = decoded.processed_burn_keys.get(&1_000_300).expect("block 1_000_300 present");
+    assert!(block.contains("0xgoodburn:1:4000000000"));
+    assert!(block.contains("0xpoison:1:100000000000"));
+    assert_eq!(block.len(), 2);
+    assert!(decoded
+        .processed_burn_keys
+        .get(&1_000_301)
+        .expect("block 1_000_301 present")
+        .contains("0xother:2:50"));
 }
 
 #[test]
@@ -63,6 +100,7 @@ fn v2_default_is_empty() {
     assert!(s.hot_wallet_balance_e18.is_empty());
     assert!(s.reorg_halted.is_empty());
     assert!(s.reorg_suspect_streak.is_empty());
+    assert!(s.processed_burn_keys.is_empty());
     assert_eq!(s.total_supply_all_chains_e8s(), 0u128);
 }
 
@@ -76,6 +114,7 @@ fn migration_preserves_v1_fields_and_defaults_new_ones() {
     assert!(v2.invariant_halted);
     assert!(v2.chain_vaults.is_empty());
     assert!(v2.chain_contracts.is_empty());
+    assert!(v2.processed_burn_keys.is_empty());
 }
 
 #[test]

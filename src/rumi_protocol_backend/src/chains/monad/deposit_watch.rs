@@ -54,6 +54,41 @@ use super::{hardening, tecdsa};
 
 // ─── Pure helpers ─────────────────────────────────────────────────────────────
 
+/// Classification of an `apply_burn_to_state` failure, so the observer loop can
+/// decide whether to SKIP the burn (advancing the cursor past it) or HALT.
+///
+/// This is the keystone of the C-1 supply-divergence fix. The pre-fix code
+/// returned a flat `Result<(), String>` and the observer `break`-ed on ANY
+/// error, stalling the cursor and forcing the whole range to re-scan. With no
+/// idempotency, that re-applied already-applied partial burns, silently
+/// double-decrementing `debt_e8s` and `chain_supplies` together (so the
+/// Timer-B self-check never fired). The typed error lets the loop:
+///   - SKIP an `InvalidBurn` (permanent-invalid: unknown vault / over-repay) —
+///     it can never succeed, so advancing past it is safe and keeps the
+///     observer + settlement-finality live;
+///   - HALT on a `SupplyInvariant` (halt-class) without advancing the cursor.
+#[derive(Debug)]
+pub enum BurnApplyError {
+    /// Permanent-invalid burn (unknown vault / over-repay beyond remaining
+    /// debt). Skippable: the cursor may advance past it; it will never succeed.
+    /// Carries a human-readable reason for the WARN log.
+    InvalidBurn(String),
+    /// Halt-class supply-invariant failure (`apply_supply_delta` rejected the
+    /// decrement: underflow, divergence, or an already-set self-check halt).
+    /// The protocol must NOT advance the cursor past this; the invariant
+    /// machinery halts.
+    SupplyInvariant(crate::chains::supply::SupplyInvariantError),
+}
+
+impl std::fmt::Display for BurnApplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BurnApplyError::InvalidBurn(msg) => write!(f, "InvalidBurn({})", msg),
+            BurnApplyError::SupplyInvariant(e) => write!(f, "SupplyInvariant({:?})", e),
+        }
+    }
+}
+
 /// Credit a confirmed on-chain deposit to a ChainVaultV1 record.
 ///
 /// Increments `collateral_amount_e18` by `amount_e18` (saturating — overflow
@@ -113,22 +148,25 @@ pub fn apply_burn_to_state(
     state: &mut MultiChainStateV2,
     burn: &super::evm_rpc::BurnLog,
     total_debt_e8s: u128,
-) -> Result<(), String> {
-    // Step 1: vault lookup (read-only — no mutation on failure)
+) -> Result<(), BurnApplyError> {
+    // Step 1: vault lookup (read-only — no mutation on failure).
+    // Unknown vault is a PERMANENT-INVALID burn (e.g. a permissionless Burn
+    // citing a closed/never-existed vault) → InvalidBurn (skippable).
     let (chain, current_debt) = {
-        let vault = state
-            .chain_vaults
-            .get(&burn.vault_id)
-            .ok_or_else(|| format!("apply_burn: unknown vault_id {}", burn.vault_id))?;
+        let vault = state.chain_vaults.get(&burn.vault_id).ok_or_else(|| {
+            BurnApplyError::InvalidBurn(format!("apply_burn: unknown vault_id {}", burn.vault_id))
+        })?;
         (vault.collateral_chain, vault.debt_e8s)
     };
 
-    // Step 2: debt-exceeds check (no mutation on failure)
+    // Step 2: debt-exceeds check (no mutation on failure). Over-repaying a
+    // vault's remaining debt is PERMANENT-INVALID (the on-chain burn already
+    // happened, but it can never be applied here) → InvalidBurn (skippable).
     if burn.amount_e8s > current_debt {
-        return Err(format!(
+        return Err(BurnApplyError::InvalidBurn(format!(
             "apply_burn: burn amount {} exceeds vault {} debt {}",
             burn.amount_e8s, burn.vault_id, current_debt
-        ));
+        )));
     }
 
     // Compute the post-burn total debt that apply_supply_delta will compare
@@ -138,11 +176,17 @@ pub fn apply_burn_to_state(
     let post_burn_total = total_debt_e8s.saturating_sub(burn.amount_e8s);
 
     // Step 3: supply delta — validates and mutates chain_supplies, or rejects
-    // entirely (chain_supplies unchanged on Err)
+    // entirely (chain_supplies unchanged on Err). A failure here is HALT-CLASS
+    // (underflow / divergence / already-halted) → SupplyInvariant: the caller
+    // must NOT advance the cursor.
     apply_supply_delta(state, chain, SupplyDelta::Decrease(burn.amount_e8s), post_burn_total)
-        .map_err(|e| format!("{:?}", e))?;
+        .map_err(BurnApplyError::SupplyInvariant)?;
 
-    // Step 4: only reached when supply delta succeeded — decrement vault debt
+    // Step 4: only reached when supply delta succeeded — decrement vault debt.
+    // No-mutation-on-rejection guarantee is intact: every `return Err`/`?`
+    // above happens BEFORE this point, so a rejected burn leaves BOTH
+    // chain_supplies (untouched by apply_supply_delta on its Err path) and
+    // debt_e8s (untouched, decremented only here) unchanged.
     let vault = state
         .chain_vaults
         .get_mut(&burn.vault_id)
@@ -228,12 +272,23 @@ impl Drop for ObserverGuard {
 ///   (`fetch_block_numbers`); on `Err`, log and skip burn-watch only (deposit
 ///   watch already ran). Run the `is_reorg` debounce; on confirmed reorg, halt
 ///   the chain (cursor not advanced). If `finalized > last_observed`, scan Burn
-///   logs `last_observed+1 ..= finalized` and for each: (1) read the current
-///   foreign-chain debt total (before this burn), (2)
-///   `mutate_state(apply_burn_to_state)` + record `ChainBurnObserved`, (3) on
-///   failure log + stop the range (cursor not advanced; the whole range retries
-///   next tick). The cursor advances to `finalized` only when EVERY burn in the
-///   range applied cleanly.
+///   logs `last_observed+1 ..= finalized` and for each: (1) skip it if its
+///   identity key is already in `processed_burn_keys` (idempotent — already
+///   applied on a prior tick), (2) read the current foreign-chain debt total
+///   (before this burn), (3) `mutate_state(apply_burn_to_state)`. On `Ok`:
+///   record the key + emit `ChainBurnObserved`. On `InvalidBurn` (permanent —
+///   unknown vault / over-repay): WARN-log, record the key as a permanent skip,
+///   and CONTINUE (the cursor must advance past poison). On `SupplyInvariant`
+///   (halt-class): log + stop the range WITHOUT advancing the cursor or
+///   recording the key (the un-halt re-scan re-attempts it).
+///
+///   The cursor advances to `finalized` UNLESS a halt-class failure stopped the
+///   range. After a successful advance, `processed_burn_keys` is pruned of every
+///   entry at `block <= finalized` (those blocks can never be re-scanned), so
+///   the set stays bounded. This combination (persisted dedup + skip-invalid-
+///   continue + halt-without-advance) is the C-1 supply-divergence fix: the
+///   already-applied prefix is never re-applied on any re-scan, a poison burn
+///   no longer stalls the cursor, and a genuine divergence still halts.
 pub async fn run_observer(chain: ChainId) {
     // Re-entrancy guard (acquired BEFORE any other work): if a tick for this
     // chain is still in flight, skip this one entirely. The RAII guard releases
@@ -480,16 +535,56 @@ pub async fn run_observer(chain: ChainId) {
         }
     };
 
+    // ── Per-burn handling: dedup + skip-poison-and-continue (C-1) ────────────
+    //
+    // `burn_ok` now means ONLY "no halt-class failure occurred" — it gates the
+    // cursor advance. It is NOT cleared by a skippable burn (decode failure or
+    // InvalidBurn): those advance past their offending log so a single poison
+    // burn can never stall the cursor (the silent-double-apply trigger).
+    //
+    // Idempotency: every burn carries an on-chain identity key
+    // (`{tx_hash}:{vault_id}:{amount_e8s}`) recorded in `processed_burn_keys`
+    // once handled (applied OR permanently skipped). On any re-scan of the same
+    // range, an already-keyed burn is `continue`-d BEFORE `apply_burn_to_state`,
+    // so the already-applied prefix is NEVER re-applied — this is the core fix
+    // for the C-1 supply-divergence (debt_e8s + chain_supplies double-decrement).
     let mut burn_ok = true;
     for (topics, data, tx_hash, block_number) in &raw_burn_logs {
         let burn = match decode_burn_log(topics, data, tx_hash, *block_number) {
             Ok(b) => b,
             Err(e) => {
-                log!(INFO, "[observer chain={:?}] decode_burn_log failed at block {}: {}", chain, block_number, e);
-                burn_ok = false;
-                break;
+                // SKIP, do not break: in production `get_logs` is topic-filtered
+                // by the real RPC so only Burn logs arrive; a decode failure here
+                // is genuinely anomalous (malformed log) and stalling the cursor
+                // on it would re-introduce the C-1 stall. Log and move past it.
+                // (We cannot dedup-key an undecodable log — it has no parsed
+                // identity — but it is topic-filtered out on re-scan in
+                // production, and even if re-seen it just re-skips harmlessly.)
+                log!(INFO, "[observer chain={:?}] decode_burn_log failed at block {}: {}; skipping (not stalling cursor)", chain, block_number, e);
+                continue;
             }
         };
+
+        // Idempotency key: tx_hash uniquely identifies the tx; vault_id+amount
+        // disambiguate the (unlikely) multi-burn tx. If already processed at this
+        // block, this burn's debt/supply decrement already happened — skip it so
+        // a re-scan never double-applies.
+        let key = format!("{}:{}:{}", burn.tx_hash, burn.vault_id, burn.amount_e8s);
+        let already_processed = read_state(|s| {
+            s.multi_chain
+                .processed_burn_keys
+                .get(&burn.block_number)
+                .map(|set| set.contains(&key))
+                .unwrap_or(false)
+        });
+        if already_processed {
+            log!(
+                INFO,
+                "[observer chain={:?}] burn already processed (dedup): vault={} amount_e8s={} block={} tx={}; skipping",
+                chain, burn.vault_id, burn.amount_e8s, burn.block_number, burn.tx_hash
+            );
+            continue;
+        }
 
         // Snapshot the pre-burn foreign-chain vault debt total (each burn
         // decrements one vault's debt_e8s, so we re-read before each burn
@@ -507,6 +602,19 @@ pub async fn run_observer(chain: ChainId) {
 
         match result {
             Ok(()) => {
+                // Record the dedup key. The entire burn loop runs synchronously
+                // (no `.await` between the apply above and here, nor across loop
+                // iterations), so the apply and this record commit in the SAME
+                // atomic message slice — a trap rolls BOTH back together. Thus
+                // the invariant "key present iff debt/supply already decremented"
+                // always holds, and a re-scan can never re-apply a recorded burn.
+                mutate_state(|s| {
+                    s.multi_chain
+                        .processed_burn_keys
+                        .entry(burn.block_number)
+                        .or_default()
+                        .insert(key.clone());
+                });
                 let now = ic_cdk::api::time();
                 crate::storage::record_event(&crate::event::Event::ChainBurnObserved {
                     chain_id: chain,
@@ -522,10 +630,33 @@ pub async fn run_observer(chain: ChainId) {
                     chain, burn.vault_id, burn.amount_e8s, burn.block_number, burn.tx_hash
                 );
             }
-            Err(e) => {
+            Err(BurnApplyError::InvalidBurn(msg)) => {
+                // PERMANENT-INVALID (unknown vault / over-repay). It can never
+                // succeed, so record its key as a PERMANENT SKIP and continue —
+                // the cursor advances past it. This is what stops a single
+                // poison burn from stalling the cursor (and thus stops the
+                // re-scan that silently double-applied the good prefix).
                 log!(
                     INFO,
-                    "[observer chain={:?}] apply_burn_to_state FAILED for tx {} vault {}: {}",
+                    "[observer chain={:?}] skipping invalid burn (vault={} amount_e8s={} block={} tx={}): {}",
+                    chain, burn.vault_id, burn.amount_e8s, burn.block_number, burn.tx_hash, msg
+                );
+                mutate_state(|s| {
+                    s.multi_chain
+                        .processed_burn_keys
+                        .entry(burn.block_number)
+                        .or_default()
+                        .insert(key.clone());
+                });
+                continue;
+            }
+            Err(BurnApplyError::SupplyInvariant(e)) => {
+                // HALT-CLASS (underflow / divergence / already-halted): do NOT
+                // advance the cursor and do NOT record the key, so the un-halt
+                // re-scan re-attempts this burn. Stop the range here.
+                log!(
+                    INFO,
+                    "[observer chain={:?}] apply_burn_to_state HALT-CLASS failure for tx {} vault {}: {:?}; not advancing cursor",
                     chain, burn.tx_hash, burn.vault_id, e
                 );
                 burn_ok = false;
@@ -534,11 +665,29 @@ pub async fn run_observer(chain: ChainId) {
         }
     }
 
-    // ── Advance cursor (only on full burn success) ──────────────────────────
-
+    // ── Advance cursor (only when no halt-class failure occurred) ────────────
+    //
+    // `burn_ok` is true unless a SupplyInvariant (halt-class) failure broke the
+    // loop. Skippable failures (decode / InvalidBurn) leave it true so the
+    // cursor advances past the poison.
     if burn_ok {
         mutate_state(|s| {
             s.multi_chain.last_observed_block.insert(chain, finalized);
+            // Prune the idempotency set of entries the next scan can never
+            // re-reach. The next scan starts at `finalized + 1`, so any block
+            // <= finalized is permanently behind the cursor and its keys are no
+            // longer needed for dedup. This keeps `processed_burn_keys` bounded.
+            // On a halt-break (above), we DO NOT prune — the un-halt re-scan
+            // restarts from the same `last_observed + 1` and must stay idempotent.
+            let stale: Vec<u64> = s
+                .multi_chain
+                .processed_burn_keys
+                .range(..=finalized)
+                .map(|(&block, _)| block)
+                .collect();
+            for block in stale {
+                s.multi_chain.processed_burn_keys.remove(&block);
+            }
         });
     }
 }

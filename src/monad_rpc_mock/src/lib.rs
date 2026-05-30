@@ -28,6 +28,8 @@
 //!                                     "0x<block>"}} when mined, else null
 //!   - eth_getLogs                  -> {"result":[<log objects>]}, filtered by
 //!                                     the requested fromBlock..toBlock range
+//!                                     AND topics[0] (case-insensitive), matching
+//!                                     the real RPC's topic filter (M-3 fidelity)
 //!
 //! Build:
 //!   cargo build --target wasm32-unknown-unknown --release --package monad_rpc_mock
@@ -409,10 +411,15 @@ fn request(_service: RpcService, json_payload: String, _max_response_bytes: u64)
             }
             "eth_getLogs" => {
                 // params = [{address, topics, fromBlock, toBlock}]. Filter the
-                // scripted logs by the requested block range; the backend
-                // decoders re-check topic0 + vault_id, so we do not strictly
-                // need to filter by topic, but range-filtering keeps the
-                // mint-confirm log scan (single-block range) precise.
+                // scripted logs by BOTH the requested block range AND the
+                // requested topics[0] — the REAL EVM RPC `eth_getLogs` is
+                // topic-filtered, so the mock must be too (M-3 fidelity). Without
+                // the topic filter the observer's BURN scan would also return the
+                // Mint log, which the old happy-path test had to work around with
+                // a `clear_logs` call. The match is case-insensitive (RPC
+                // responses vary in EIP-55 mixed-case vs lowercase). A request
+                // with no/empty topics filter returns all logs in range (the
+                // permissive JSON-RPC default).
                 let filter = params.get(0).cloned().unwrap_or(serde_json::Value::Null);
                 let from = filter
                     .get("fromBlock")
@@ -422,6 +429,13 @@ fn request(_service: RpcService, json_payload: String, _max_response_bytes: u64)
                     .get("toBlock")
                     .and_then(|v| v.as_str())
                     .and_then(parse_hex_u64);
+                // The requested topic0 (first entry of the `topics` array), if any.
+                let want_topic0: Option<String> = filter
+                    .get("topics")
+                    .and_then(|t| t.as_array())
+                    .and_then(|arr| arr.first())
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_lowercase());
 
                 let mut items: Vec<String> = Vec::new();
                 for log in script.logs.iter() {
@@ -433,6 +447,14 @@ fn request(_service: RpcService, json_payload: String, _max_response_bytes: u64)
                     if let Some(t) = to {
                         if log.block > t {
                             continue;
+                        }
+                    }
+                    // Topic-filter: if the request specified topics[0], only
+                    // return logs whose own topics[0] matches (case-insensitive).
+                    if let Some(ref want) = want_topic0 {
+                        match log.topics.first() {
+                            Some(got) if got.to_lowercase() == *want => {}
+                            _ => continue,
                         }
                     }
                     let topics_json = log

@@ -34,7 +34,7 @@ use super::monad::chain_vault::ChainVaultV1;
 use super::settlement_queue::SettlementQueueV1;
 use candid::{CandidType, Deserialize};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug, Default)]
 pub struct MultiChainStateV1 {
@@ -65,8 +65,9 @@ impl MultiChainStateV1 {
 /// `#[serde(default)]` in-place decode of `State.multi_chain` maps each by
 /// name straight across) and adds the Monad/foreign-chain working set:
 /// per-vault records, deployed-contract addresses, manual price overrides,
-/// last-observed block cursors, hot-wallet gas balances, and per-chain reorg
-/// halt flags. The new-in-V2 fields carry field-level `#[serde(default)]` so a
+/// last-observed block cursors, hot-wallet gas balances, per-chain reorg
+/// halt flags, and the burn-watch idempotency set (C-1). The new-in-V2 fields
+/// carry field-level `#[serde(default)]` so a
 /// V1 CBOR snapshot (which lacks these keys entirely) decodes into V2 without
 /// error, defaulting the new fields to empty. The four V1-carried fields are
 /// NOT decorated because V1 always wrote them and they must be present in any
@@ -118,6 +119,23 @@ pub struct MultiChainStateV2 {
     /// defense.
     #[serde(default)]
     pub reorg_suspect_streak: BTreeMap<ChainId, u32>,
+    /// Persisted idempotency set for the burn-watch observer (C-1
+    /// supply-divergence fix). Maps `block_number -> { burn-identity key }`,
+    /// where the key is `"{tx_hash}:{vault_id}:{amount_e8s}"`. A burn whose key
+    /// is already present at its block has ALREADY been applied to
+    /// `chain_supplies`/`debt_e8s` and MUST be skipped on any re-scan — this is
+    /// what kills the silent double-apply (the pre-fix loop re-applied the
+    /// already-applied prefix of a range whenever a later poison burn stalled
+    /// the cursor). The map is BOUNDED: after the cursor advances to `N`, the
+    /// observer prunes every entry with `block <= N` (those blocks can never be
+    /// re-scanned, since the next scan starts at `N+1`). Both InvalidBurn-skips
+    /// and successful applies are recorded so a permanently-poison burn is never
+    /// reprocessed either. Added directly to V2 (same brand-new-this-phase
+    /// rationale as `reorg_halted`); `#[serde(default)]` is mandatory
+    /// state-wipe defense so a pre-existing V1/V2 CBOR snapshot lacking this key
+    /// decodes cleanly to an empty map.
+    #[serde(default)]
+    pub processed_burn_keys: BTreeMap<u64, BTreeSet<String>>,
 }
 
 impl MultiChainStateV2 {

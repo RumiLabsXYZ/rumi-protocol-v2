@@ -543,13 +543,11 @@ fn phase1b_monad_happy_path_supply_invariant() {
     assert_supply(&pic, backend, 100 * E8, "after mint confirm (Open)");
 
     // ── Step 7: burn 40e8 on chain; observer decrements debt + supply ────────
-    // First clear the stale Mint log: the mock's eth_getLogs does NOT filter by
-    // topic (the real RPC does), so the observer's BURN scan would otherwise
-    // re-read the Mint log, fail `decode_burn_log` (wrong topic0), and stall the
-    // cursor. On real Monad the topic filter excludes it. Clearing it here models
-    // that exclusion. (The mint was already confirmed via the settlement worker's
-    // own topic-filtered scan in Step 6, so the log is no longer needed.)
-    update_any(&pic, mock, "clear_logs", Encode!().unwrap());
+    // No `clear_logs` workaround needed: the mock now topic-filters eth_getLogs
+    // (M-3 fidelity), so the observer's BURN scan (topic0 = BURN_EVENT_TOPIC0)
+    // naturally excludes the still-present Mint log — exactly as the real Monad
+    // RPC does. (The mint was confirmed via the settlement worker's own
+    // topic-filtered Mint scan in Step 6.)
     // Advance the chain head another 256 so the cursor climbs 1_000_000 ->
     // 1_000_256 -> 1_000_512 over the next ticks; the burn at 1_000_300 lands in
     // the (1_000_256, 1_000_512] scan window and is observed.

@@ -1,8 +1,9 @@
-use super::deposit_watch::{apply_burn_to_state, credit_deposit_to_state};
+use super::deposit_watch::{apply_burn_to_state, credit_deposit_to_state, BurnApplyError};
 use super::chain_vault::{ChainVaultStatus, ChainVaultV1};
 use crate::chains::config::ChainId;
 use crate::chains::multi_chain_state::MultiChainStateV2;
 use crate::chains::monad::evm_rpc::BurnLog;
+use crate::chains::supply::SupplyInvariantError;
 use candid::Principal;
 
 fn seeded() -> MultiChainStateV2 {
@@ -43,14 +44,61 @@ fn burn_exceeding_debt_is_rejected_without_mutation() {
     s.chain_supplies.insert(ChainId(10143), 1_000_000_000);
     let burn = BurnLog { vault_id: 1, amount_e8s: 9_999_999_999, tx_hash: "0xb".into(), block_number: 1 };
     let res = apply_burn_to_state(&mut s, &burn, 1_000_000_000);
-    assert!(res.is_err());
+    // Over-repay is a PERMANENT-INVALID burn → InvalidBurn (skippable).
+    assert!(matches!(res, Err(BurnApplyError::InvalidBurn(_))), "got {res:?}");
     assert_eq!(s.chain_vaults[&1].debt_e8s, 1_000_000_000); // unchanged
     assert_eq!(s.chain_supplies[&ChainId(10143)], 1_000_000_000); // unchanged
 }
 
 #[test]
-fn burn_for_unknown_vault_is_rejected() {
+fn burn_for_unknown_vault_is_rejected_as_invalid() {
     let mut s = seeded();
     let burn = BurnLog { vault_id: 999, amount_e8s: 1, tx_hash: "0xb".into(), block_number: 1 };
-    assert!(apply_burn_to_state(&mut s, &burn, 0).is_err());
+    let res = apply_burn_to_state(&mut s, &burn, 0);
+    // Unknown vault is a PERMANENT-INVALID burn → InvalidBurn (skippable).
+    assert!(matches!(res, Err(BurnApplyError::InvalidBurn(_))), "got {res:?}");
+}
+
+#[test]
+fn burn_returns_supply_invariant_when_already_halted_without_mutation() {
+    // A burn whose amount equals the vault debt and matches the supply would
+    // normally apply cleanly, but with the self-check halt already set,
+    // apply_supply_delta returns HaltedAfterSelfCheckFailure → the typed error
+    // is SupplyInvariant (HALT-CLASS, not skippable). Both fields stay untouched.
+    let mut s = seeded();
+    s.chain_vaults.get_mut(&1).unwrap().debt_e8s = 5_000_000_000;
+    s.chain_supplies.insert(ChainId(10143), 5_000_000_000);
+    s.invariant_halted = true;
+    let burn = BurnLog { vault_id: 1, amount_e8s: 4_000_000_000, tx_hash: "0xb".into(), block_number: 1 };
+    let res = apply_burn_to_state(&mut s, &burn, 5_000_000_000);
+    assert!(
+        matches!(
+            res,
+            Err(BurnApplyError::SupplyInvariant(SupplyInvariantError::HaltedAfterSelfCheckFailure))
+        ),
+        "got {res:?}"
+    );
+    // No-mutation-on-rejection: both fields unchanged even on the halt path.
+    assert_eq!(s.chain_vaults[&1].debt_e8s, 5_000_000_000);
+    assert_eq!(s.chain_supplies[&ChainId(10143)], 5_000_000_000);
+}
+
+#[test]
+fn burn_returns_supply_invariant_on_supply_divergence_without_mutation() {
+    // debt exists and the per-vault debt check passes, but chain_supplies does
+    // NOT match total_debt at call time → apply_supply_delta returns Divergence
+    // → SupplyInvariant (HALT-CLASS). Confirms a halt-class failure is correctly
+    // classified (NOT InvalidBurn) and leaves both fields untouched.
+    let mut s = seeded();
+    s.chain_vaults.get_mut(&1).unwrap().debt_e8s = 4_000_000_000;
+    // Deliberately mismatched supply (3e9) vs the total_debt we pass (4e9).
+    s.chain_supplies.insert(ChainId(10143), 3_000_000_000);
+    let burn = BurnLog { vault_id: 1, amount_e8s: 1_000_000_000, tx_hash: "0xb".into(), block_number: 1 };
+    let res = apply_burn_to_state(&mut s, &burn, 4_000_000_000);
+    assert!(
+        matches!(res, Err(BurnApplyError::SupplyInvariant(SupplyInvariantError::Divergence { .. }))),
+        "got {res:?}"
+    );
+    assert_eq!(s.chain_vaults[&1].debt_e8s, 4_000_000_000); // unchanged
+    assert_eq!(s.chain_supplies[&ChainId(10143)], 3_000_000_000); // unchanged
 }
