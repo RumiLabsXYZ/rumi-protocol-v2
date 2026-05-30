@@ -1173,6 +1173,7 @@ export interface _SERVICE {
   'get_icpswap_routing_enabled' : ActorMethod<[], boolean>,
   'get_interest_pool_share' : ActorMethod<[], number>,
   'get_interest_split' : ActorMethod<[], Array<InterestSplitArg>>,
+  'get_last_observed_block' : ActorMethod<[number], bigint>,
   'get_liquidatable_vaults' : ActorMethod<[], Array<CandidVault>>,
   'get_liquidatable_vaults_page' : ActorMethod<
     [bigint, bigint],
@@ -1309,6 +1310,7 @@ export interface _SERVICE {
   'set_interest_rate' : ActorMethod<[Principal, number], Result>,
   'set_interest_split' : ActorMethod<[Array<InterestSplitArg>], Result>,
   'set_interest_treasury_tick_interval_secs' : ActorMethod<[bigint], Result>,
+  'set_last_observed_block' : ActorMethod<[number, bigint], Result>,
   'set_liquidation_bonus' : ActorMethod<[number], Result>,
   'set_liquidation_bot_config' : ActorMethod<[Principal, bigint], Result>,
   'set_liquidation_frozen' : ActorMethod<[boolean], Result>,

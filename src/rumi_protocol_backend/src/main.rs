@@ -1187,6 +1187,38 @@ fn clear_reorg_halt(
     Ok(())
 }
 
+/// Seed the burn-watch cursor to the current chain tip when activating a chain
+/// (Gate-4 prerequisite). Events before the seed are not scanned (none exist
+/// pre-activation). 0 = unseeded (burn-watch inert; deposit-watch still runs).
+/// Developer-gated.
+#[candid_method(update)]
+#[update]
+fn set_last_observed_block(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    block: u64,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    mutate_state(|s| {
+        s.multi_chain.last_observed_block.insert(chain, block);
+    });
+    log!(INFO, "[set_last_observed_block] chain={:?} block={}", chain, block);
+    Ok(())
+}
+
+/// Read the burn-watch cursor (`last_observed_block`) for a chain. Returns 0 when
+/// unseeded. Ungated query — used by tests and Task-D staging verification to
+/// confirm the cursor advances.
+#[candid_method(query)]
+#[query]
+fn get_last_observed_block(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> u64 {
+    read_state(|s| s.multi_chain.last_observed_block.get(&chain).copied().unwrap_or(0))
+}
+
 /// Delete a chain entirely. Permitted only when the chain carries ZERO supply
 /// and NO chain_vaults reference it (so deletion cannot orphan debt/collateral);
 /// purges every per-chain map. Developer-gated. This DELETES (not disables) a

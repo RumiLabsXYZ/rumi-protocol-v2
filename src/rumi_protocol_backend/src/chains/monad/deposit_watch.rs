@@ -24,17 +24,20 @@
 //!
 //! ## Async observer loop (run_observer)
 //!
-//! `run_observer` scans Burn events at finality for the given chain and applies
-//! them through `apply_burn_to_state`. Deposit (collateral) watch is
-//! implemented as a minimal stub in Phase 1b: the pure helper
-//! `credit_deposit_to_state` is fully tested and ready; the async balance-check
-//! loop is deferred to the Task 23 manual integration (it requires a stable
-//! EVM RPC connection to Monad testnet). A TODO comment marks the stub clearly.
+//! `run_observer` runs TWO independent watches each tick:
 //!
-//! Reorg handling is NOT implemented here; Task 11 adds the `is_reorg` check
-//! after fetching the finalized block number. The structure of `run_observer`
-//! intentionally leaves a seam for Task 11 to insert between the
-//! `fetch_block_numbers` call and the log-scan loop.
+//! - **Deposit watch** (balance poll → flip `AwaitingDeposit`→`MintPending`,
+//!   enqueue mint) runs UNCONDITIONALLY every tick. It uses only the
+//!   consensus-safe `get_balance(addr, "latest")` read and is fully decoupled
+//!   from the block-height path. A block-height read failure (the Layer-2
+//!   EVM-RPC consensus issue that blocked Gate-4 on staging) must NOT skip
+//!   deposit detection.
+//! - **Burn watch** scans Burn events at finality and applies them through
+//!   `apply_burn_to_state`. It is GATED: it runs only when the burn-watch cursor
+//!   (`last_observed_block[chain]`) is seeded (`!= 0`) AND a fresh finalized
+//!   block height is available. The reorg `is_reorg` check (Task 11) sits
+//!   between `fetch_block_numbers` and the log scan. A block-read failure
+//!   degrades the tick to deposit-only.
 
 use ic_canister_log::log;
 
@@ -202,34 +205,35 @@ impl Drop for ObserverGuard {
 
 /// Run one observation cycle for the given chain.
 ///
-/// Called by Timer A (configured in Task 12). Scans Burn logs from
-/// `last_observed_block + 1` to the current finalized block and applies
-/// them to state. Advances `last_observed_block` to `finalized` at the end.
+/// Called by Timer A (configured in Task 12). Control flow:
+///   1. re-entrancy guard / mode-halt-reorg skip / contract check /
+///      `refresh_hot_wallet_balance` (all unchanged)
+///   2. **deposit watch** — runs EVERY tick (see below), decoupled from blocks
+///   3. **burn watch** — gated on a seeded cursor and fresh finalized height
 ///
-/// ## Burn watch
+/// ## Deposit watch (runs every tick)
 ///
-/// For each raw Burn log decoded via `decode_burn_log`, the observer:
-/// 1. Reads the current total supply (as-of-this-moment, before this burn).
-/// 2. Computes `new_total_debt = current_total - amount_e8s`.
-/// 3. Calls `mutate_state(apply_burn_to_state)` and records a
-///    `ChainBurnObserved` event on success.
-/// 4. On failure: logs the error clearly and continues to the next log.
-///    The block cursor does NOT advance past a failing burn — if any burn
-///    in a range fails, the entire range is retried on the next tick.
-///    (Per Phase 1b spec: "log + continue is acceptable but the error must
-///    be visible". A future hardening pass can add per-burn retry tracking.)
+/// Polls each `AwaitingDeposit` vault's custody-address native balance via the
+/// consensus-safe `get_balance(addr, "latest")`. When the on-chain balance
+/// covers the declared collateral it flips the vault to `MintPending` and
+/// enqueues its mint. This path does NOT depend on `fetch_block_numbers`, so a
+/// block-height read failure (Layer-2 EVM-RPC consensus issue) never skips
+/// deposit detection.
 ///
-/// ## Deposit watch (STUB — Phase 1b)
+/// ## Burn watch (gated)
 ///
-/// The pure helper `credit_deposit_to_state` is fully tested. The async
-/// custody-balance poll loop is deferred to Task 23 (manual integration).
-/// This stub logs that deposit watch is not yet active.
-///
-/// ## Reorg handling
-///
-/// NOT implemented here. Task 11 inserts an `is_reorg` check after
-/// `fetch_block_numbers` and before the log scan. The structure below
-/// leaves a clear seam for that insertion.
+/// - If `last_observed_block[chain] == 0` (unseeded): log an activation hint and
+///   SKIP burn-watch (no genesis crawl — there are no pre-activation events).
+/// - Else fetch the finalized height via the consensus-safe specific-block probe
+///   (`fetch_block_numbers`); on `Err`, log and skip burn-watch only (deposit
+///   watch already ran). Run the `is_reorg` debounce; on confirmed reorg, halt
+///   the chain (cursor not advanced). If `finalized > last_observed`, scan Burn
+///   logs `last_observed+1 ..= finalized` and for each: (1) read the current
+///   foreign-chain debt total (before this burn), (2)
+///   `mutate_state(apply_burn_to_state)` + record `ChainBurnObserved`, (3) on
+///   failure log + stop the range (cursor not advanced; the whole range retries
+///   next tick). The cursor advances to `finalized` only when EVERY burn in the
+///   range applied cleanly.
 pub async fn run_observer(chain: ChainId) {
     // Re-entrancy guard (acquired BEFORE any other work): if a tick for this
     // chain is still in flight, skip this one entirely. The RAII guard releases
@@ -278,15 +282,127 @@ pub async fn run_observer(chain: ChainId) {
     // it must NOT abort the observer (reads/burn-watch must still run).
     refresh_hot_wallet_balance(chain).await;
 
+    // Read the burn-watch cursor BEFORE running deposit-watch. The deposit-watch
+    // path is consensus-safe (balance-only) and runs every tick regardless of
+    // the cursor; it only needs `last_observed` for the cosmetic
+    // `DepositObserved.block_number` (a balance poll has no single tx/block).
     let last_observed = read_state(|s| {
         s.multi_chain.last_observed_block.get(&chain).copied().unwrap_or(0)
     });
 
-    // Fetch finalized block number.
+    // ── Deposit watch (open-then-verify, Task 12) — RUNS EVERY TICK ──────────
+    //
+    // Poll each AwaitingDeposit vault's custody-address native (MON) balance.
+    // Once the on-chain balance covers the DECLARED collateral, flip the vault
+    // AwaitingDeposit -> MintPending and enqueue its Mint op (icUSD is only ever
+    // minted against a verified on-chain deposit — the CDP backing invariant).
+    //
+    // This is DECOUPLED from the block-height path (`fetch_block_numbers`): it
+    // uses ONLY the consensus-safe `get_balance(addr, "latest")` read, never a
+    // volatile block tag. A block-height read failure (Layer-2 EVM-RPC
+    // consensus issue) must NOT skip deposit detection — that was the Gate-4
+    // blocker on staging (the two early-returns below used to sit BEFORE this
+    // loop). Borrow discipline: snapshot the small per-vault tuples under one
+    // `read_state` BEFORE the await loop; never hold a state borrow across
+    // `get_balance(...).await`.
+    let now = ic_cdk::api::time();
+    let awaiting: Vec<(u64, String, u128)> = read_state(|s| {
+        s.multi_chain
+            .chain_vaults
+            .values()
+            .filter(|v| {
+                v.collateral_chain == chain && v.status == ChainVaultStatus::AwaitingDeposit
+            })
+            .map(|v| (v.vault_id, v.custody_address.clone(), v.collateral_amount_e18))
+            .collect()
+    });
+
+    for (vault_id, custody_address, declared_e18) in awaiting {
+        let balance = match get_balance(chain, &custody_address).await {
+            Ok(bal) => bal,
+            Err(e) => {
+                // A failed balance read must NOT abort the observer — log and
+                // move on; the next tick retries this vault.
+                log!(
+                    INFO,
+                    "[observer chain={:?}] deposit get_balance failed for vault {} ({}): {}; will retry",
+                    chain, vault_id, custody_address, e
+                );
+                continue;
+            }
+        };
+
+        if balance < declared_e18 {
+            // Not enough on-chain collateral yet; nothing to do this tick.
+            continue;
+        }
+
+        let transitioned = mutate_state(|s| {
+            verify_deposit_and_enqueue_mint_in_state(&mut s.multi_chain, vault_id, balance, now)
+        });
+
+        match transitioned {
+            Ok(true) => {
+                crate::storage::record_event(&crate::event::Event::DepositObserved {
+                    chain_id: chain,
+                    vault_id,
+                    custody_address: custody_address.clone(),
+                    amount_e18: balance,
+                    // Balance-poll observation, not a single transfer tx — there
+                    // is no one tx hash to attribute the deposit to. The block
+                    // number is cosmetic; use the current cursor (`last_observed`)
+                    // since deposit-watch does not read a fresh block height.
+                    tx_hash: String::new(),
+                    block_number: last_observed,
+                    timestamp: now,
+                });
+                log!(
+                    INFO,
+                    "[observer chain={:?}] deposit verified: vault={} custody={} balance_e18={} >= declared_e18={}; mint enqueued",
+                    chain, vault_id, custody_address, balance, declared_e18
+                );
+            }
+            Ok(false) => {
+                // Idempotent no-op (already transitioned by an earlier tick, or a
+                // concurrent transition). Nothing to emit.
+            }
+            Err(e) => {
+                log!(
+                    INFO,
+                    "[observer chain={:?}] verify_deposit_and_enqueue_mint FAILED for vault {}: {:?}; will retry",
+                    chain, vault_id, e
+                );
+            }
+        }
+    }
+
+    // ── Burn watch — GATED on a seeded cursor + new blocks ───────────────────
+    //
+    // Everything below depends on a finalized block height. It is gated so a
+    // block-read failure (or an unseeded chain) degrades the observer to
+    // deposit-only — deposit-watch already ran above, so deposits still flow.
+
+    // Unseeded sentinel: `last_observed == 0` means the burn-watch cursor was
+    // never seeded to the chain tip. We do NOT crawl from genesis (no
+    // pre-activation events exist). Log the activation hint and skip burn-watch.
+    // (Logging every tick is intentional — staging needs this signal until the
+    // operator seeds the cursor.)
+    if last_observed == 0 {
+        log!(
+            INFO,
+            "[observer chain={:?}] last_observed_block is 0 (unseeded); burn-watch inactive — call set_last_observed_block(chain, <current tip>) to activate",
+            chain
+        );
+        return;
+    }
+
+    // Fetch finalized block number (consensus-safe specific-block probe). A
+    // failure logs and skips burn-watch ONLY — deposit-watch already ran, so we
+    // must NOT abort the whole tick.
     let finalized = match fetch_block_numbers(chain).await {
         Ok((_latest, fin)) => fin,
         Err(e) => {
-            log!(INFO, "[observer chain={:?}] fetch_block_numbers failed: {}", chain, e);
+            log!(INFO, "[observer chain={:?}] fetch_block_numbers failed: {}; skipping burn-watch this tick (deposit-watch ran)", chain, e);
             return;
         }
     };
@@ -350,13 +466,11 @@ pub async fn run_observer(chain: ChainId) {
     // CONSECUTIVE suspect ticks. Fall through to the normal nothing-new check.
 
     if finalized <= last_observed {
-        // Nothing new to observe.
+        // Nothing new to observe (burn-watch). Deposit-watch already ran.
         return;
     }
 
     let from_block = last_observed + 1;
-
-    // ── Burn watch ──────────────────────────────────────────────────────────
 
     let raw_burn_logs = match get_logs(chain, &contract, BURN_EVENT_TOPIC0, from_block, finalized).await {
         Ok(logs) => logs,
@@ -368,7 +482,7 @@ pub async fn run_observer(chain: ChainId) {
 
     let mut burn_ok = true;
     for (topics, data, tx_hash, block_number) in &raw_burn_logs {
-        let burn = match decode_burn_log(topics, &data, &tx_hash, *block_number) {
+        let burn = match decode_burn_log(topics, data, tx_hash, *block_number) {
             Ok(b) => b,
             Err(e) => {
                 log!(INFO, "[observer chain={:?}] decode_burn_log failed at block {}: {}", chain, block_number, e);
@@ -420,86 +534,7 @@ pub async fn run_observer(chain: ChainId) {
         }
     }
 
-    // ── Deposit watch (open-then-verify, Task 12) ───────────────────────────
-    //
-    // Poll each AwaitingDeposit vault's custody-address native (MON) balance.
-    // Once the on-chain balance covers the DECLARED collateral, flip the vault
-    // AwaitingDeposit -> MintPending and enqueue its Mint op (icUSD is only ever
-    // minted against a verified on-chain deposit — the CDP backing invariant).
-    //
-    // Borrow discipline: snapshot the small per-vault tuples under one
-    // `read_state` BEFORE the await loop; never hold a state borrow across
-    // `get_balance(...).await`.
-    let now = ic_cdk::api::time();
-    let awaiting: Vec<(u64, String, u128)> = read_state(|s| {
-        s.multi_chain
-            .chain_vaults
-            .values()
-            .filter(|v| {
-                v.collateral_chain == chain && v.status == ChainVaultStatus::AwaitingDeposit
-            })
-            .map(|v| (v.vault_id, v.custody_address.clone(), v.collateral_amount_e18))
-            .collect()
-    });
-
-    for (vault_id, custody_address, declared_e18) in awaiting {
-        let balance = match get_balance(chain, &custody_address).await {
-            Ok(bal) => bal,
-            Err(e) => {
-                // A failed balance read must NOT abort the observer — log and
-                // move on; the next tick retries this vault.
-                log!(
-                    INFO,
-                    "[observer chain={:?}] deposit get_balance failed for vault {} ({}): {}; will retry",
-                    chain, vault_id, custody_address, e
-                );
-                continue;
-            }
-        };
-
-        if balance < declared_e18 {
-            // Not enough on-chain collateral yet; nothing to do this tick.
-            continue;
-        }
-
-        let transitioned = mutate_state(|s| {
-            verify_deposit_and_enqueue_mint_in_state(&mut s.multi_chain, vault_id, balance, now)
-        });
-
-        match transitioned {
-            Ok(true) => {
-                crate::storage::record_event(&crate::event::Event::DepositObserved {
-                    chain_id: chain,
-                    vault_id,
-                    custody_address: custody_address.clone(),
-                    amount_e18: balance,
-                    // Balance-poll observation, not a single transfer tx — there
-                    // is no one tx hash to attribute the deposit to.
-                    tx_hash: String::new(),
-                    block_number: finalized,
-                    timestamp: now,
-                });
-                log!(
-                    INFO,
-                    "[observer chain={:?}] deposit verified: vault={} custody={} balance_e18={} >= declared_e18={}; mint enqueued",
-                    chain, vault_id, custody_address, balance, declared_e18
-                );
-            }
-            Ok(false) => {
-                // Idempotent no-op (already transitioned by an earlier tick, or a
-                // concurrent transition). Nothing to emit.
-            }
-            Err(e) => {
-                log!(
-                    INFO,
-                    "[observer chain={:?}] verify_deposit_and_enqueue_mint FAILED for vault {}: {:?}; will retry",
-                    chain, vault_id, e
-                );
-            }
-        }
-    }
-
-    // ── Advance cursor (only on full success) ───────────────────────────────
+    // ── Advance cursor (only on full burn success) ──────────────────────────
 
     if burn_ok {
         mutate_state(|s| {

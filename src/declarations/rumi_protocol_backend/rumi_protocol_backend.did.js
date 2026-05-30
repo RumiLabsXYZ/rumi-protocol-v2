@@ -1154,6 +1154,7 @@ export const idlFactory = ({ IDL }) => {
     'get_icpswap_routing_enabled' : IDL.Func([], [IDL.Bool], ['query']),
     'get_interest_pool_share' : IDL.Func([], [IDL.Float64], ['query']),
     'get_interest_split' : IDL.Func([], [IDL.Vec(InterestSplitArg)], ['query']),
+    'get_last_observed_block' : IDL.Func([IDL.Nat32], [IDL.Nat64], ['query']),
     'get_liquidatable_vaults' : IDL.Func([], [IDL.Vec(CandidVault)], ['query']),
     'get_liquidatable_vaults_page' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
@@ -1429,6 +1430,7 @@ export const idlFactory = ({ IDL }) => {
         [Result],
         [],
       ),
+    'set_last_observed_block' : IDL.Func([IDL.Nat32, IDL.Nat64], [Result], []),
     'set_liquidation_bonus' : IDL.Func([IDL.Float64], [Result], []),
     'set_liquidation_bot_config' : IDL.Func(
         [IDL.Principal, IDL.Nat64],

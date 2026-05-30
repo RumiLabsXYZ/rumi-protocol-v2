@@ -377,13 +377,35 @@ fn phase1b_monad_happy_path_supply_invariant() {
     )
     .expect("set_manual_collateral_price");
 
+    // ── Seed the burn-watch cursor (Gate-3 activation) ───────────────────────
+    // After A2a, the observer reads chain head by probing the SPECIFIC block
+    // `last_observed + MAX_BLOCK_SCAN_WINDOW` (=256) via the typed
+    // eth_getBlockByNumber, so the cursor advances by exactly 256 blocks per tick
+    // whenever `last_observed + 256 <= finalized`. The cursor must be seeded
+    // (non-zero) for burn-watch to run at all. Seed it to a tip well above 256 so
+    // the small legacy block numbers (100/101/102) no longer apply. This runs in
+    // BOTH the full and gated subsets (it only writes the map; harmless when
+    // gated). Seed AFTER register_chain so the chain config exists.
+    decode_result(
+        update_dev(
+            &pic,
+            backend,
+            "set_last_observed_block",
+            Encode!(&ChainId(MONAD_CHAIN_ID), &1_000_000u64).unwrap(),
+        ),
+        "set_last_observed_block",
+    )
+    .expect("set_last_observed_block");
+
     // Invariant holds at zero after register/config (Design B: nothing minted).
     assert_supply(&pic, backend, 0, "after register/config");
 
     // ── Step 3: script the mock's chain head ─────────────────────────────────
-    // latest = finalized = 100 (single-slot finality; the wrapper uses the
-    // finalized-block number directly).
-    update_any(&pic, mock, "set_blocks", Encode!(&100u64, &100u64).unwrap());
+    // finalized = seed + 256 = 1_000_256, so the FIRST observer tick advances the
+    // burn-watch cursor 1_000_000 -> 1_000_256 (the probe of block 1_000_256
+    // succeeds because 1_000_256 <= finalized). The mint auto-mines its receipt at
+    // `finalized_block` = 1_000_256.
+    update_any(&pic, mock, "set_blocks", Encode!(&1_000_256u64, &1_000_256u64).unwrap());
     update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xmint1".to_string()).unwrap());
 
     // ── ECDSA probe: decide full vs gated ────────────────────────────────────
@@ -501,9 +523,9 @@ fn phase1b_monad_happy_path_supply_invariant() {
     assert_supply(&pic, backend, 0, "after deposit-verify (MintPending)");
 
     // ── Step 6: settlement submits the mint (mock auto-mines 0xmint1 at
-    //           finalized=100 on send), then confirms it. Push the Mint log at
-    //           block 100 so the confirm path reads the on-chain amount. ───────
-    push_mint_log(&pic, mock, vault_id, &recipient, debt_e8s, "0xmint1", 100);
+    //           finalized=1_000_256 on send), then confirms it. Push the Mint log
+    //           at block 1_000_256 so the confirm path reads the on-chain amount.
+    push_mint_log(&pic, mock, vault_id, &recipient, debt_e8s, "0xmint1", 1_000_256);
 
     // Several windows: window 1 submits (Queued -> Inflight), window 2+ confirms
     // (receipt mined + final, Mint log read, confirm_mint_in_state).
@@ -521,10 +543,19 @@ fn phase1b_monad_happy_path_supply_invariant() {
     assert_supply(&pic, backend, 100 * E8, "after mint confirm (Open)");
 
     // ── Step 7: burn 40e8 on chain; observer decrements debt + supply ────────
-    // Advance the chain head so the new burn log sits in an unobserved block.
-    update_any(&pic, mock, "set_blocks", Encode!(&101u64, &101u64).unwrap());
-    push_burn_log(&pic, mock, vault_id, &recipient, 40 * E8, "0xburn1", 101);
-    advance_and_tick(&pic, 2);
+    // First clear the stale Mint log: the mock's eth_getLogs does NOT filter by
+    // topic (the real RPC does), so the observer's BURN scan would otherwise
+    // re-read the Mint log, fail `decode_burn_log` (wrong topic0), and stall the
+    // cursor. On real Monad the topic filter excludes it. Clearing it here models
+    // that exclusion. (The mint was already confirmed via the settlement worker's
+    // own topic-filtered scan in Step 6, so the log is no longer needed.)
+    update_any(&pic, mock, "clear_logs", Encode!().unwrap());
+    // Advance the chain head another 256 so the cursor climbs 1_000_000 ->
+    // 1_000_256 -> 1_000_512 over the next ticks; the burn at 1_000_300 lands in
+    // the (1_000_256, 1_000_512] scan window and is observed.
+    update_any(&pic, mock, "set_blocks", Encode!(&1_000_512u64, &1_000_512u64).unwrap());
+    push_burn_log(&pic, mock, vault_id, &recipient, 40 * E8, "0xburn1", 1_000_300);
+    advance_and_tick(&pic, 3);
 
     let v = get_vault(&pic, backend, vault_id).expect("vault after burn 40");
     assert_eq!(v.debt_e8s, candid::Nat::from(60 * E8), "after burn40 => debt 60e8");
@@ -532,8 +563,10 @@ fn phase1b_monad_happy_path_supply_invariant() {
     assert_supply(&pic, backend, 60 * E8, "after burn 40e8");
 
     // ── Step 8: burn the remaining 60e8; debt + supply go to 0 ───────────────
-    update_any(&pic, mock, "set_blocks", Encode!(&102u64, &102u64).unwrap());
-    push_burn_log(&pic, mock, vault_id, &recipient, 60 * E8, "0xburn2", 102);
+    // Advance head another 256: cursor 1_000_512 -> 1_000_768; burn at 1_000_600
+    // is within (1_000_512, 1_000_768].
+    update_any(&pic, mock, "set_blocks", Encode!(&1_000_768u64, &1_000_768u64).unwrap());
+    push_burn_log(&pic, mock, vault_id, &recipient, 60 * E8, "0xburn2", 1_000_600);
     advance_and_tick(&pic, 2);
 
     let v = get_vault(&pic, backend, vault_id).expect("vault after burn 60");
@@ -560,8 +593,9 @@ fn phase1b_monad_happy_path_supply_invariant() {
     assert_eq!(v.status, ChainVaultStatus::Closing, "withdraw all => Closing");
     assert_supply(&pic, backend, 0, "after withdraw enqueue (Closing)");
 
-    // Settlement submits 0xwd1 (auto-mined at finalized=102) then confirms it,
-    // flipping Closing -> Closed.
+    // Settlement submits 0xwd1 (auto-mined at finalized=1_000_768) then confirms
+    // it, flipping Closing -> Closed. The burn-watch cursor is already at
+    // 1_000_768, so the receipt is immediately final.
     advance_and_tick(&pic, 4);
     let v = get_vault(&pic, backend, vault_id).expect("vault after withdraw confirm");
     assert_eq!(v.status, ChainVaultStatus::Closed, "withdraw confirmed => Closed");

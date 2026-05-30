@@ -976,6 +976,7 @@ service : (ProtocolArg) -> {
   get_icpswap_routing_enabled : () -> (bool) query;
   get_interest_pool_share : () -> (float64) query;
   get_interest_split : () -> (vec InterestSplitArg) query;
+  get_last_observed_block : (nat32) -> (nat64) query;
   get_liquidatable_vaults : () -> (vec CandidVault) query;
   get_liquidatable_vaults_page : (nat64, nat64) -> (VaultsPageResponse) query;
   get_liquidation_bonus : () -> (float64) query;
@@ -1083,6 +1084,7 @@ service : (ProtocolArg) -> {
   set_interest_rate : (principal, float64) -> (Result);
   set_interest_split : (vec InterestSplitArg) -> (Result);
   set_interest_treasury_tick_interval_secs : (nat64) -> (Result);
+  set_last_observed_block : (nat32, nat64) -> (Result);
   set_liquidation_bonus : (float64) -> (Result);
   set_liquidation_bot_config : (principal, nat64) -> (Result);
   set_liquidation_frozen : (bool) -> (Result);
