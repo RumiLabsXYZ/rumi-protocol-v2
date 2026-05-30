@@ -247,6 +247,14 @@ struct Script {
     /// instead of a canned success, then clears the entry. Lets a test
     /// exercise the IcError decode path end-to-end (the Layer-1 trap).
     fail_next: HashMap<String, String>,
+    /// Persistent failure injection: JSON-RPC `method` -> message. Like
+    /// `fail_next` but NEVER cleared on hit — EVERY subsequent `request` for
+    /// the given method returns the IcError. Overwritten (not merged) by a
+    /// new `fail_always` call for the same method. Cleared by `clear_failures`.
+    /// Used by the consensus-safe regression test to arm a permanent barrier so
+    /// the test reliably catches a revert to the volatile `eth_blockNumber` read
+    /// across ALL observer ticks, not just the first.
+    fail_always: HashMap<String, String>,
 }
 
 thread_local! {
@@ -305,6 +313,19 @@ fn request(_service: RpcService, json_payload: String, _max_response_bytes: u64)
     let method = payload["method"].as_str().unwrap_or("");
     let id = payload["id"].clone();
     let params = &payload["params"];
+
+    // Persistent failure injection: if a test armed `fail_always` for this
+    // method, return a real-wire-shaped IcError WITHOUT clearing the arming —
+    // every subsequent call for this method also fails. Checked BEFORE
+    // `fail_next` so a persistent barrier takes precedence.
+    if let Some(msg) = SCRIPT.with(|s| s.borrow().fail_always.get(method).cloned()) {
+        return RequestResult::Err(RpcError::HttpOutcallError(HttpOutcallError::IcError(
+            IcErrorRecord {
+                code: RejectionCode::SysTransient,
+                message: msg,
+            },
+        )));
+    }
 
     // One-shot failure injection: if a test armed `fail_next` for this method,
     // return a REAL-WIRE-SHAPED IcError (the exact value the live EVM RPC
@@ -569,6 +590,35 @@ fn clear_logs() {
 fn fail_next(method: String, message: String) {
     SCRIPT.with(|s| {
         s.borrow_mut().fail_next.insert(method, message);
+    });
+}
+
+/// Arm a PERSISTENT real-wire IcError for ALL future `request` calls whose
+/// JSON-RPC `method` equals `method`. Unlike `fail_next`, the arming is NEVER
+/// cleared on hit — every call for this method continues to return the IcError.
+/// Calling `fail_always` again for the same method overwrites the message.
+/// Use `clear_failures` to lift the barrier.
+///
+/// Used by the consensus-safe regression test (`phase1b_observer_consensus_safe_pic`)
+/// to ensure every observer tick would fail if the backend reverted to the
+/// volatile `eth_blockNumber` via `request`. The fixed backend never calls
+/// `eth_blockNumber` via `request` (it uses the TYPED `eth_getBlockByNumber`
+/// instead), so the persistent barrier is inert for the correct implementation.
+#[ic_cdk_macros::update]
+fn fail_always(method: String, message: String) {
+    SCRIPT.with(|s| {
+        s.borrow_mut().fail_always.insert(method, message);
+    });
+}
+
+/// Remove all persistent (`fail_always`) and one-shot (`fail_next`) failure
+/// injections. After this call the mock resumes normal scripted responses.
+#[ic_cdk_macros::update]
+fn clear_failures() {
+    SCRIPT.with(|s| {
+        let mut s = s.borrow_mut();
+        s.fail_always.clear();
+        s.fail_next.clear();
     });
 }
 

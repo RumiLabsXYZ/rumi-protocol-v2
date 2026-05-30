@@ -36,7 +36,7 @@ use candid::{CandidType, Deserialize, Principal};
 use ic_canister_log::log;
 use crate::chains::config::ChainId;
 use crate::state::read_state;
-use crate::logs::DEBUG;
+use crate::logs::{DEBUG, INFO};
 
 // ─── Cycle cost ─────────────────────────────────────────────────────────────
 
@@ -277,6 +277,15 @@ pub enum GetBlockByNumberResult {
 /// `Inconsistent` is never on the wire and never decoded in practice (it
 /// references the singular `RpcService`, which is fine since we never decode
 /// that arm).
+///
+/// NOTE (Phase 1b / M-1): `RpcService` above mirrors only the `Custom` variant.
+/// If multi-provider support is ever introduced (e.g. a second `Custom` URL or
+/// a built-in `EthMainnet`-style arm), the EVM RPC canister MAY return an
+/// `Inconsistent` result containing a non-`Custom` `RpcService` variant, which
+/// would TRAP on Candid decode because this enum lacks those arms. Acceptable
+/// for Phase 1b (Monad is always addressed via a single `Custom` provider);
+/// revisit by mirroring the full `RpcService` variant set if multi-provider is
+/// introduced.
 #[derive(CandidType, Deserialize, Clone, Debug)]
 pub enum MultiGetBlockByNumberResult {
     Consistent(GetBlockByNumberResult),
@@ -530,6 +539,13 @@ fn next_rpc_id() -> u64 {
 /// across IC replicas, unlike a volatile block tag). Returns Ok(Some(number))
 /// if present, Ok(None) if not yet reached (benign — caught up / future block),
 /// Err only on a genuine infra failure (call error / Inconsistent).
+///
+/// A one-off Ok(None) is expected when the chain hasn't produced that block yet.
+/// A PERSISTENT stream of Ok(None) in the INFO log (with an rpc_err in the
+/// message) indicates a real provider or consensus problem and means the
+/// burn-watch cursor is stalled — it will not advance until the probe starts
+/// returning Ok(Some(...)). Investigate the RPC endpoint and the EVM RPC
+/// canister's cycle balance if you see this repeating.
 async fn eth_get_block_number_at(chain: ChainId, n: u64) -> Result<Option<u64>, String> {
     // Read the chain's configured endpoints (same source as `call_evm_rpc`).
     // The typed method needs a single Custom provider; use the first endpoint.
@@ -576,11 +592,17 @@ async fn eth_get_block_number_at(chain: ChainId, n: u64) -> Result<Option<u64>, 
             Ok(Some(num))
         }
         Ok((MultiGetBlockByNumberResult::Consistent(GetBlockByNumberResult::Err(rpc_err)),)) => {
-            // Block-not-found / future block is the common benign case.
+            // Block-not-found is the common benign case (chain hasn't reached
+            // block n yet). HOWEVER a rate-limit, TooFewCycles, or IcError also
+            // maps here — both collapse to Ok(None) so the cursor does not advance.
+            // A single occurrence is harmless; a PERSISTENT stream means a real
+            // provider / consensus problem and the cursor is stalled. See the
+            // helper's doc comment for the monitoring note.
             log!(
-                DEBUG,
-                "[evm_rpc] eth_getBlockByNumber(Number({})) not found: {:?}",
+                INFO,
+                "[evm_rpc] eth_getBlockByNumber(Number({})) chain={:?} returned no block ({:?}); treating as not-yet-final (cursor will not advance this tick)",
                 n,
+                chain,
                 rpc_err
             );
             Ok(None)

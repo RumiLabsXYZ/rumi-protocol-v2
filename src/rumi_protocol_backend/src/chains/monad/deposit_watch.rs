@@ -476,6 +476,22 @@ pub async fn run_observer(chain: ChainId) {
     // operator-gated via `clear_reorg_halt` (Task 14), which MUST reset BOTH
     // `reorg_halted` AND `reorg_suspect_streak` for the chain. Default depth to
     // the Monad testnet value (1) if the config is somehow unreadable.
+    //
+    // NOTE (Phase 1b / M-2 — reorg machinery is dormant on the observer path):
+    // `is_reorg` fires only when `finalized < last_observed` by more than
+    // `finality_depth`. But `fetch_block_numbers` uses the consensus-safe
+    // specific-block probe: it returns the current cursor (`last_observed,
+    // last_observed`) when the candidate block doesn't exist yet, and returns
+    // `(candidate, candidate)` — always >= last_observed — when it does.
+    // Therefore `finalized` is MONOTONICALLY >= `last_observed` on this path,
+    // and `is_reorg` (which requires finalized < last_observed) can never fire.
+    // The reorg circuit-breaker (`reorg_halted` / `reorg_suspect_streak` /
+    // `clear_reorg_halt`) is effectively dormant for Phase 1b. This is accepted:
+    // Monad's single-slot (depth-1) finality is the real reorg protection, and
+    // the probe checks block EXISTENCE (not hash), so a finalized-block hash
+    // reorg would be undetected. The reorg code is intentionally preserved —
+    // revisit for deeper-finality chains (Phase 1c) or if the probe is extended
+    // to verify block hashes.
     let finality_depth = read_state(|s| {
         s.multi_chain.chain_configs.get(&chain).map(|c| c.finality_depth)
     })

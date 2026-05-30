@@ -11,11 +11,16 @@
 //! failure degrades the observer to deposit-only instead of aborting the tick.
 //!
 //! To prove the backend never falls back to the volatile read, the mock is armed
-//! with `fail_next("eth_blockNumber", ...)`: IF the backend ever issued an
-//! `eth_blockNumber` via the `request` escape-hatch, the mock returns a
-//! real-wire-shaped `IcError` and the assertions below fail. The test passing
-//! proves the backend ONLY uses the consensus-safe typed probe. Reverting to the
-//! volatile read re-breaks this test.
+//! with `fail_always("eth_blockNumber", ...)`: EVERY `request` call whose
+//! JSON-RPC method is "eth_blockNumber" returns a real-wire-shaped `IcError`
+//! for the entire test run. Using the PERSISTENT `fail_always` (not the
+//! one-shot `fail_next`) is important: a reverted backend would error on tick 1
+//! (one-shot consumed) then succeed on tick 2+ and advance the cursor anyway,
+//! causing a false PASS. With `fail_always`, every tick that calls
+//! `eth_blockNumber` via `request` fails permanently, so the cursor can only
+//! advance via the TYPED `eth_getBlockByNumber` probe. The test passing proves
+//! the backend ONLY uses the consensus-safe typed probe. Reverting to the
+//! volatile read re-breaks this test reliably across all ticks.
 //!
 //! Two subsets (same auto-upgrade pattern as the happy-path test):
 //!   - ECDSA available: open a vault, fund custody, tick → assert the vault
@@ -303,17 +308,24 @@ fn phase1b_observer_consensus_safe_cursor_advances() {
     )
     .expect("set_manual_collateral_price");
 
-    // ── Break the volatile read ──────────────────────────────────────────────
-    // Arm a real-wire IcError for EVERY `eth_blockNumber` the backend might issue
-    // via the `request` escape-hatch. (fail_next is one-shot per arming; we re-arm
-    // each tick is unnecessary because the backend should NEVER call it — if it
-    // did even once, the armed failure trips and the cursor would NOT advance.)
-    // The consensus-safe path uses the TYPED eth_getBlockByNumber instead, which
+    // ── Break the volatile read (persistent barrier) ─────────────────────────
+    // Arm a PERSISTENT real-wire IcError for eth_blockNumber via `fail_always`.
+    // Every `request` call whose JSON-RPC method is "eth_blockNumber" will fail
+    // with IcError(SysTransient) for the lifetime of this test — not just the
+    // first one (which is all `fail_next` would cover).
+    //
+    // Why `fail_always` beats `fail_next` here: a reverted backend (volatile
+    // read) would error on tick 1 from `fail_next`, then succeed on tick 2
+    // (arming already consumed) and advance the cursor anyway — the test would
+    // pass even on the broken implementation. With `fail_always`, EVERY tick
+    // that calls `eth_blockNumber` via `request` fails, so the cursor can NEVER
+    // advance on the broken path. The test ONLY passes when the backend uses the
+    // TYPED `eth_getBlockByNumber` method, which bypasses `request` entirely and
     // is unaffected by this arming.
     update_any(
         &pic,
         mock,
-        "fail_next",
+        "fail_always",
         Encode!(&"eth_blockNumber".to_string(), &"no consensus".to_string()).unwrap(),
     );
 
