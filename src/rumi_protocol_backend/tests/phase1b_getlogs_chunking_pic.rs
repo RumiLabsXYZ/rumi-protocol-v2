@@ -403,6 +403,19 @@ fn configure_chain(pic: &PocketIc, backend: Principal, mock: Principal, seed: u6
         "set_last_observed_block",
     )
     .expect("set_last_observed_block");
+
+    // Phase 1c: the burn-watch poll-scan is OFF by default (notify-then-verify is
+    // the primary path). These tests exercise the POLL mechanism, so opt in.
+    decode_result(
+        update_dev(
+            pic,
+            backend,
+            "set_burn_watch_poll_enabled",
+            Encode!(&ChainId(MONAD_CHAIN_ID), &true).unwrap(),
+        ),
+        "set_burn_watch_poll_enabled",
+    )
+    .expect("set_burn_watch_poll_enabled");
 }
 
 fn ecdsa_settlement_addr(pic: &PocketIc, backend: Principal) -> Option<String> {

@@ -438,6 +438,19 @@ fn phase1b_burn_idempotency_skips_poison_and_never_double_applies() {
     )
     .expect("set_last_observed_block");
 
+    // Phase 1c: burn-watch poll-scan is OFF by default (notify-then-verify is the
+    // primary path). This test exercises the POLL mechanism, so opt in.
+    decode_result(
+        update_dev(
+            &pic,
+            backend,
+            "set_burn_watch_poll_enabled",
+            Encode!(&ChainId(MONAD_CHAIN_ID), &true).unwrap(),
+        ),
+        "set_burn_watch_poll_enabled",
+    )
+    .expect("set_burn_watch_poll_enabled");
+
     // Chain head = seed + 1024 so the first tick advances 1_000_000 -> 1_001_024.
     update_any(&pic, mock, "set_blocks", Encode!(&1_001_024u64, &1_001_024u64).unwrap());
     update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xmint1".to_string()).unwrap());
@@ -695,6 +708,19 @@ fn phase1b_burn_two_identical_burns_in_same_tx_both_applied() {
         "set_last_observed_block",
     )
     .expect("set_last_observed_block");
+
+    // Phase 1c: burn-watch poll-scan is OFF by default (notify-then-verify is the
+    // primary path). This test exercises the POLL mechanism, so opt in.
+    decode_result(
+        update_dev(
+            &pic,
+            backend,
+            "set_burn_watch_poll_enabled",
+            Encode!(&ChainId(MONAD_CHAIN_ID), &true).unwrap(),
+        ),
+        "set_burn_watch_poll_enabled",
+    )
+    .expect("set_burn_watch_poll_enabled");
 
     update_any(&pic, mock, "set_blocks", Encode!(&2_001_024u64, &2_001_024u64).unwrap());
     update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xmint_same_tx".to_string()).unwrap());
