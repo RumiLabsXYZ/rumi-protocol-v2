@@ -49,7 +49,7 @@ use crate::state::{mutate_state, read_state};
 use crate::Mode;
 
 use super::chain_vault::{verify_deposit_and_enqueue_mint_in_state, ChainVaultStatus};
-use super::evm_rpc::{decode_burn_log, fetch_block_numbers, get_balance, get_logs, BURN_EVENT_TOPIC0};
+use super::evm_rpc::{decode_burn_log, erc20_total_supply_at, fetch_block_numbers, get_balance, get_logs, BURN_EVENT_TOPIC0};
 use super::{hardening, tecdsa};
 
 // ─── Pure helpers ─────────────────────────────────────────────────────────────
@@ -604,21 +604,25 @@ pub async fn run_observer(chain: ChainId) {
         return;
     }
 
-    // ── Notify-then-verify gate (Phase 1c) ───────────────────────────────────
+    // ── Notify-then-verify gate + supply-equality backstop (Phase 1c / #215) ──
     //
-    // The continuous block-by-block `eth_getLogs` burn-scan below costs
-    // O(blocks produced) per chain (~1.3T cycles/day on Monad regardless of
-    // burn activity). Phase 1c demotes it to OFF by default: burns are applied
-    // via the pull-based `submit_burn_proof` endpoint (one
-    // `eth_getTransactionReceipt` per ACTUAL burn). The poll-scan is kept only
-    // as a developer-gated emergency catch-up tool (`set_burn_watch_poll_enabled`).
+    // Phase 1c (#214) demotes the continuous block-by-block `eth_getLogs` burn
+    // sweep to OFF by default: burns are applied via the pull-based
+    // `submit_burn_proof` endpoint (one `eth_getTransactionReceipt` per ACTUAL
+    // burn). The dev-gated `burn_watch_poll_enabled` flag re-enables a full
+    // catch-up sweep for emergencies.
     //
-    // When the flag is OFF we STILL advance the cursor to `finalized` (and
-    // prune), exactly like the no-debt fast path: the consensus-safe finality
-    // probe (`fetch_block_numbers` = last_observed + MAX_BLOCK_SCAN_WINDOW)
-    // must stay current so the mint-confirm path can reach finality. A stalled
-    // cursor was the Gate-4 failure mode. No burn is lost — `submit_burn_proof`
-    // verifies each burn's receipt directly and is independent of this cursor.
+    // When the poll is OFF (default) we add a cheap O(1)/tick safety net (the
+    // #215 supply gate, the "Task 8" backstop #214 deferred): probe the icUSD
+    // `totalSupply()` at `finalized` (a specific, consensus-safe block) and
+    // compare it to our recorded `chain_supplies[chain]`. The canister is the
+    // SOLE minter, so with no mint in flight a drop below `recorded` means a
+    // burn landed that `submit_burn_proof` never caught; ONLY then do we run the
+    // (expensive) catch-up sweep to find it. A match, a mint in flight, or a
+    // probe error all stay in the cheap path (advance cursor + return) because
+    // `submit_burn_proof` remains the primary catch, so a flaky probe can never
+    // reintroduce the per-tick sweep cost. The cursor still advances + prunes so
+    // mint-confirm finality stays current (a stalled cursor was the Gate-4 bug).
     let poll_enabled = read_state(|s| {
         s.multi_chain
             .chain_configs
@@ -627,8 +631,50 @@ pub async fn run_observer(chain: ChainId) {
             .unwrap_or(false)
     });
     if !poll_enabled {
-        mutate_state(|s| advance_cursor_and_prune(&mut s.multi_chain, chain, finalized));
-        return;
+        let recorded_supply = read_state(|s| {
+            s.multi_chain.chain_supplies.get(&chain).copied().unwrap_or(0)
+        });
+        let has_inflight_mint = read_state(|s| {
+            s.multi_chain
+                .settlement_queues
+                .get(&chain)
+                .map(|q| q.has_active_mint_op())
+                .unwrap_or(false)
+        });
+        // Run the catch-up sweep ONLY on a proven divergence: no mint in flight
+        // AND a readable totalSupply that fails `can_skip_burn_scan` (it differs
+        // from `recorded`). Mint-in-flight and probe errors fall through to the
+        // cheap advance-and-return path below.
+        let diverged = if has_inflight_mint {
+            false
+        } else {
+            match erc20_total_supply_at(chain, &contract, finalized).await {
+                Ok(onchain_supply) => {
+                    let skip = can_skip_burn_scan(onchain_supply, recorded_supply, has_inflight_mint);
+                    if !skip {
+                        log!(
+                            INFO,
+                            "[observer chain={:?}] backstop: onchain totalSupply {} != recorded {}; running catch-up sweep",
+                            chain, onchain_supply, recorded_supply
+                        );
+                    }
+                    !skip
+                }
+                Err(e) => {
+                    log!(
+                        INFO,
+                        "[observer chain={:?}] backstop: totalSupply probe failed ({}); staying in notify-then-verify cheap path",
+                        chain, e
+                    );
+                    false
+                }
+            }
+        };
+        if !diverged {
+            mutate_state(|s| advance_cursor_and_prune(&mut s.multi_chain, chain, finalized));
+            return;
+        }
+        // diverged: fall through to the catch-up sweep to find the unsubmitted burn.
     }
 
     let from_block = last_observed + 1;
