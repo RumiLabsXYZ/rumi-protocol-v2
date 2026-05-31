@@ -1035,6 +1035,7 @@ export const idlFactory = ({ IDL }) => {
     'ledger_kind' : SpProofLedger,
     'vault_id_memo' : IDL.Nat64,
   });
+  const Result_14 = IDL.Variant({ 'Ok' : IDL.Nat32, 'Err' : ProtocolError });
   return IDL.Service({
     'add_collateral_token' : IDL.Func([AddCollateralArg], [Result], []),
     'add_margin_to_vault' : IDL.Func([VaultArg], [Result_1], []),
@@ -1333,6 +1334,11 @@ export const idlFactory = ({ IDL }) => {
     'set_bot_cr_tolerance_bps' : IDL.Func([IDL.Nat64], [Result], []),
     'set_breaker_window_debt_ceiling_e8s' : IDL.Func([IDL.Nat64], [Result], []),
     'set_breaker_window_ns' : IDL.Func([IDL.Nat64], [Result], []),
+    'set_burn_watch_poll_enabled' : IDL.Func(
+        [IDL.Nat32, IDL.Bool],
+        [Result],
+        [],
+      ),
     'set_chain_config' : IDL.Func(
         [IDL.Nat32, UpdateChainConfigArg],
         [Result],
@@ -1507,6 +1513,7 @@ export const idlFactory = ({ IDL }) => {
         [Result_13],
         [],
       ),
+    'submit_burn_proof' : IDL.Func([IDL.Nat32, IDL.Text], [Result_14], []),
     'unfreeze_protocol' : IDL.Func([], [Result], []),
     'update_collateral_config' : IDL.Func(
         [IDL.Principal, CollateralConfig],
