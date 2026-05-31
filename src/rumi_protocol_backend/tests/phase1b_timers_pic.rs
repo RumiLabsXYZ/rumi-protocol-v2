@@ -116,9 +116,9 @@ where
     }
 }
 
-/// The core no-chain safety assertion: fire the 30s observer + settlement timers
-/// several times (advance 120s in 30s steps, ticking between each) and prove the
-/// canister is still alive and still empty afterward.
+/// The core no-chain safety assertion: fire the observer + settlement timers
+/// several times (advance in steps past the 300s default interval, ticking
+/// between each) and prove the canister is still alive and still empty afterward.
 #[test]
 fn phase1b_timers_safe_with_no_chain_configured() {
     let (pic, cid) = boot();
@@ -130,11 +130,12 @@ fn phase1b_timers_safe_with_no_chain_configured() {
     assert_eq!(audit.total_e8s, candid::Nat::from(0u32));
     assert!(audit.per_chain.is_empty(), "no chains registered -> empty audit");
 
-    // Advance time past several 30s timer firings. With no chain registered,
-    // every observer_tick / settlement_tick is a no-op fan-out over an empty
-    // chain list. If either trapped, the queries below would reject.
+    // Advance time past several timer firings (steps > the 300s default interval).
+    // With no chain registered, every observer_tick / settlement_tick is a no-op
+    // fan-out over an empty chain list. If either trapped, the queries below would
+    // reject.
     for _ in 0..4 {
-        pic.advance_time(Duration::from_secs(30));
+        pic.advance_time(Duration::from_secs(305));
         // Several ticks per step so the spawned async tick futures get scheduled
         // and run to completion (a no-op return) within the step.
         for _ in 0..5 {

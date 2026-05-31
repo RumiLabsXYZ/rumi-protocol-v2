@@ -262,6 +262,13 @@ fn boot() -> (PocketIc, Principal, Principal) {
     for _ in 0..5 {
         pic.tick();
     }
+
+    // Pin observer + settlement cadence to 30s so the 35s advance_and_tick windows
+    // fire one tick each. The code DEFAULT is now 300s (cycle-burn hardening), so
+    // tests declare the cadence they exercise instead of depending on the default.
+    let _ = update_dev(&pic, backend_id, "set_observer_tick_interval_secs", Encode!(&30u64).unwrap());
+    let _ = update_dev(&pic, backend_id, "set_settlement_tick_interval_secs", Encode!(&30u64).unwrap());
+
     (pic, backend_id, mock_id)
 }
 
@@ -556,4 +563,50 @@ fn phase1b_getlogs_chunks_wide_burn_scan_range() {
             eprintln!("[phase1b getlogs-chunking] FULL guard PASSED: far-end burn observed via chunked get_logs, debt 60e8, supply == on-chain truth");
         }
     }
+}
+
+/// #2b cycle-gate: when no chain-vault has debt, the burn-watch must SKIP the
+/// get_logs scan (a Burn can only repay a vault that has debt) while STILL
+/// advancing the cursor (so mint-confirm's finality probe stays current).
+///
+/// The mock is armed with `fail_always("eth_getLogs", ...)` so ANY get_logs call
+/// fails. With no vault (total chain-vault debt == 0):
+///   - PRE-fix: the observer calls get_logs → fails → returns before advancing →
+///     the cursor STALLS at the seed.
+///   - POST-fix: the scan is skipped entirely → the cursor advances to the
+///     probed finalized height. No ECDSA / signing needed.
+#[test]
+fn phase1b_burn_watch_skips_getlogs_when_no_debt() {
+    let (pic, backend, mock) = boot();
+
+    let seed: u64 = 6_000_000;
+    configure_chain(&pic, backend, mock, seed);
+
+    // Arm a PERSISTENT getLogs failure: every eth_getLogs returns an IcError, so
+    // if the observer scans at all the cursor cannot advance.
+    update_any(
+        &pic,
+        mock,
+        "fail_always",
+        Encode!(&"eth_getLogs".to_string(), &"forced getLogs failure (no-debt skip guard)".to_string()).unwrap(),
+    );
+
+    // Chain head one window above the seed; the finality probe (eth_getBlockByNumber,
+    // NOT failed) lets the cursor advance — IF the scan is skipped.
+    let finalized = seed + SCAN_WINDOW;
+    update_any(&pic, mock, "set_blocks", Encode!(&finalized, &finalized).unwrap());
+
+    // No vault opened → total chain-vault debt == 0.
+    advance_and_tick(&pic, 4);
+
+    assert!(
+        cursor(&pic, backend) >= finalized,
+        "no-debt fast path: cursor advanced to {} without scanning (got {}); pre-fix the forced get_logs failure stalls it at seed {}",
+        finalized,
+        cursor(&pic, backend),
+        seed
+    );
+    let global: candid::Nat = query_unit(&pic, backend, "get_global_icusd_supply");
+    assert_eq!(global, candid::Nat::from(0u32), "no mint => supply 0");
+    eprintln!("[phase1b getlogs-chunking] no-debt skip PASSED: cursor advanced with get_logs forced-failing (scan skipped)");
 }

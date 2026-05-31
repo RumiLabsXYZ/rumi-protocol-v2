@@ -253,6 +253,13 @@ fn boot() -> (PocketIc, Principal, Principal) {
     for _ in 0..5 {
         pic.tick();
     }
+
+    // Pin observer + settlement cadence to 30s so the 35s advance_and_tick windows
+    // fire one tick each. The code DEFAULT is now 300s (cycle-burn hardening), so
+    // tests declare the cadence they exercise instead of depending on the default.
+    let _ = update_dev(&pic, backend_id, "set_observer_tick_interval_secs", Encode!(&30u64).unwrap());
+    let _ = update_dev(&pic, backend_id, "set_settlement_tick_interval_secs", Encode!(&30u64).unwrap());
+
     (pic, backend_id, mock_id)
 }
 

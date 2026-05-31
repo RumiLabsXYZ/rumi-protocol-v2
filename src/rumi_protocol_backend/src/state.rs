@@ -98,11 +98,17 @@ fn default_interest_treasury_tick_interval_secs() -> u64 { 60 }
 fn default_vault_check_tick_interval_secs() -> u64 { 300 }
 
 /// Phase 1b Task 15: production defaults for the Monad async-loop cadences.
-/// Timer D (settlement) and the observer both default to 30s. A legacy snapshot
-/// without these fields hydrates to 30; the register fns floor a 0 to 30 anyway
-/// so a busy-loop is impossible even with a corrupt value.
-fn default_settlement_tick_interval_secs() -> u64 { 30 }
-fn default_observer_tick_interval_secs() -> u64 { 30 }
+/// Timer D (settlement) and the observer both default to 300s. The previous 30s
+/// default was a severe cycle-burner: each observer tick makes constant outcalls
+/// (finality probe + hot-wallet balance), so 30s = ~2,880 ticks/day of outcalls,
+/// and the EVM-RPC outcall cost (~764M cycles each, measured 2026-05-31) makes
+/// that multiple T/day for the constants alone. 300s matches the operational
+/// value run on staging and keeps a fresh install (or a legacy snapshot missing
+/// these fields) off the catastrophic 30s cadence. The register fns still floor a
+/// 0 to 30 so a busy-loop is impossible even with a corrupt value, and the
+/// developer-gated setters tune the live cadence without an upgrade.
+fn default_settlement_tick_interval_secs() -> u64 { 300 }
+fn default_observer_tick_interval_secs() -> u64 { 300 }
 
 pub fn default_interest_split() -> Vec<InterestRecipient> {
     vec![

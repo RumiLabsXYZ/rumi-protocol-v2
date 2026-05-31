@@ -126,6 +126,22 @@ impl SettlementQueueV1 {
         self.pending.len()
     }
 
+    /// True iff the queue has any NON-terminal op (`Queued` or `Inflight`) — i.e.
+    /// settlement work the worker will submit or confirm. Terminal ops
+    /// (`Succeeded`/`Failed`, before `prune_terminal` reaps them) do not count.
+    ///
+    /// Used by the observer to gate the per-tick hot-wallet balance refresh: the
+    /// cached balance only feeds the submit-path gas gate, so there is no reason
+    /// to spend an `eth_getBalance` outcall every tick when nothing is in flight.
+    pub fn has_active_op(&self) -> bool {
+        self.pending.values().any(|op| {
+            matches!(
+                op.status,
+                SettlementOpStatus::Queued | SettlementOpStatus::Inflight { .. }
+            )
+        })
+    }
+
     /// Reap terminal (`Succeeded`/`Failed`) ops so `pending` does not grow
     /// monotonically (the Task-10 review flagged `select_next_op`'s per-tick
     /// scan over an ever-growing `pending` as a cycle-cost anti-pattern this
