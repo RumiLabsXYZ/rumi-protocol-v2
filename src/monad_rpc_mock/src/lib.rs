@@ -259,6 +259,9 @@ struct Script {
     next_send_hash: Option<String>,
     /// Scripted logs returned (range-filtered) by eth_getLogs.
     logs: Vec<ScriptedLog>,
+    /// Scripted ERC-20 totalSupply (e8s) returned by `eth_call` of selector
+    /// 0x18160ddd. Defaults to 0; a test sets it via `set_total_supply`.
+    total_supply: u128,
     /// One-shot failure injection: JSON-RPC `method` -> message. When the NEXT
     /// `request` for that method arrives, the mock returns a real-wire-shaped
     /// `RpcError::HttpOutcallError(IcError{ code: SysTransient, message })`
@@ -586,6 +589,16 @@ fn request(_service: RpcService, json_payload: String, _max_response_bytes: u64)
                     items.join(",")
                 )
             }
+            "eth_call" => {
+                // params = [{to, data}, "0x<block>"]. The observer's supply gate
+                // calls totalSupply() (selector 0x18160ddd) at a specific block.
+                // Return the scripted total_supply as a left-padded 32-byte word
+                // (the ABI encoding of a uint256), exactly as a real node would.
+                format!(
+                    r#"{{"jsonrpc":"2.0","id":{},"result":"0x{:064x}"}}"#,
+                    id, script.total_supply
+                )
+            }
             other => {
                 // Unknown method: a JSON-RPC error so an unexpected wrapper call
                 // is loud rather than silently mis-parsed.
@@ -729,6 +742,11 @@ fn clear_logs() {
     SCRIPT.with(|s| {
         s.borrow_mut().logs.clear();
     });
+}
+
+#[ic_cdk_macros::update]
+fn set_total_supply(value: u128) {
+    SCRIPT.with(|s| s.borrow_mut().total_supply = value);
 }
 
 /// Arm a one-shot real-wire IcError for the NEXT `request` whose JSON-RPC
