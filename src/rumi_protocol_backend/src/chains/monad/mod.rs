@@ -7,6 +7,7 @@
 //! mint/burn is observed at finality.
 
 pub mod adapter;
+pub mod burn_proof;
 pub mod chain_vault;
 pub mod config;
 pub mod deposit_watch;
@@ -52,3 +53,6 @@ mod tests_open_vault;
 
 #[cfg(test)]
 mod tests_withdraw;
+
+#[cfg(test)]
+mod tests_burn_proof;

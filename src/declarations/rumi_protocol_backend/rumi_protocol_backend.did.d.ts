@@ -968,6 +968,8 @@ export type Result_12 = { 'Ok' : RepayAndCloseSuccess } |
   { 'Err' : ProtocolError };
 export type Result_13 = { 'Ok' : StabilityPoolLiquidationResult } |
   { 'Err' : ProtocolError };
+export type Result_14 = { 'Ok' : number } |
+  { 'Err' : ProtocolError };
 export type Result_2 = { 'Ok' : string } |
   { 'Err' : ProtocolError };
 export type Result_3 = { 'Ok' : SuccessWithFee } |
@@ -1269,6 +1271,7 @@ export interface _SERVICE {
   'set_bot_cr_tolerance_bps' : ActorMethod<[bigint], Result>,
   'set_breaker_window_debt_ceiling_e8s' : ActorMethod<[bigint], Result>,
   'set_breaker_window_ns' : ActorMethod<[bigint], Result>,
+  'set_burn_watch_poll_enabled' : ActorMethod<[number, boolean], Result>,
   'set_chain_config' : ActorMethod<[number, UpdateChainConfigArg], Result>,
   'set_chain_contract' : ActorMethod<[number, string], Result>,
   'set_check_vaults_alert_band_bps' : ActorMethod<[bigint], Result>,
@@ -1362,6 +1365,7 @@ export interface _SERVICE {
     [bigint, bigint, bigint, Principal],
     Result_13
   >,
+  'submit_burn_proof' : ActorMethod<[number, string], Result_14>,
   'unfreeze_protocol' : ActorMethod<[], Result>,
   'update_collateral_config' : ActorMethod<
     [Principal, CollateralConfig],

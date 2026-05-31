@@ -8,9 +8,9 @@
 //! explicitly so the property test does not depend on the live State.
 
 use rumi_protocol_backend::chains::config::{
-    ChainConfigV1, ChainId, ChainStatus, GasStrategy,
+    ChainConfigV2, ChainId, ChainStatus, GasStrategy,
 };
-use rumi_protocol_backend::chains::multi_chain_state::MultiChainStateV2;
+use rumi_protocol_backend::chains::multi_chain_state::MultiChainStateV3;
 use rumi_protocol_backend::chains::supply::{apply_supply_delta, SupplyDelta};
 use rumi_protocol_backend::chains::monad::chain_vault::open_chain_vault_in_state;
 use rumi_protocol_backend::chains::monad::settlement::confirm_mint_in_state;
@@ -38,12 +38,12 @@ fn arb_op() -> impl Strategy<Value = Op> {
     ]
 }
 
-fn seeded_state() -> MultiChainStateV2 {
-    let mut state = MultiChainStateV2::default();
+fn seeded_state() -> MultiChainStateV3 {
+    let mut state = MultiChainStateV3::default();
     for id in 1u32..=5u32 {
         state.chain_configs.insert(
             ChainId(id),
-            ChainConfigV1 {
+            ChainConfigV2 {
                 chain_id: ChainId(id),
                 display_name: format!("chain-{}", id),
                 rpc_endpoints: vec![],
@@ -52,6 +52,7 @@ fn seeded_state() -> MultiChainStateV2 {
                 chain_native_decimals: 18,
                 registered_at_ns: 0,
                 status: ChainStatus::Registered,
+                burn_watch_poll_enabled: false,
             },
         );
         state.chain_supplies.insert(ChainId(id), 0);

@@ -48,8 +48,51 @@ pub struct ChainConfigV1 {
     pub status: ChainStatus,
 }
 
+/// Phase 1c snapshot. Carries every `ChainConfigV1` field verbatim (so a
+/// V1-shaped CBOR sub-map maps each by name straight across) and adds the
+/// notify-then-verify emergency poll flag.
+///
+/// `burn_watch_poll_enabled` carries `#[serde(default)]` so a `ChainConfigV1`
+/// CBOR sub-map (which lacks this key entirely) decodes into `ChainConfigV2`
+/// without error, defaulting the flag to `false`. The V1-carried fields are
+/// NOT decorated because V1 always wrote them and they must be present in any
+/// valid snapshot. State persists via ciborium (CBOR + serde, see
+/// `storage.rs`), which decodes structs as field-name-keyed maps and fills a
+/// missing key from `#[serde(default)]` rather than failing — this is the SAME
+/// mechanism that makes the `MultiChainStateV1 -> V2` add-a-field decode safe
+/// (proven by `tests_multi_chain_state_v2`). It is NOT a Candid `Decode!` of a
+/// fixed record, so an added serde-default field cannot trip the AMM-style
+/// state-wipe fallback (2026-05-18 incident).
+///
+/// Add the NEXT field by bumping to `ChainConfigV3` (keep V2 verbatim), adding
+/// `#[serde(default)]` on the new field, and rebinding the alias below.
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug)]
+pub struct ChainConfigV2 {
+    // carried verbatim from V1 — always present in any valid snapshot
+    pub chain_id: ChainId,
+    pub display_name: String,
+    pub rpc_endpoints: Vec<String>,
+    /// Blocks past head before a deposit/event is treated as committed.
+    pub finality_depth: u32,
+    pub gas_strategy: GasStrategy,
+    /// Decimals of the chain-native gas asset (18 for EVM, 9 for Solana SOL).
+    pub chain_native_decimals: u8,
+    /// `ic_cdk::api::time()` nanoseconds when this config was first registered.
+    pub registered_at_ns: u64,
+    pub status: ChainStatus,
+    /// Phase 1c: emergency continuous `eth_getLogs` burn-watch poll-scan toggle.
+    /// `false` (default) = notify-then-verify only (the observer advances its
+    /// cursor without scanning logs, and burns are applied via the pull-based
+    /// `submit_burn_proof` endpoint). `true` = re-enable the legacy continuous
+    /// scan for a targeted catch-up. Developer-gated via
+    /// `set_burn_watch_poll_enabled`. New in V2 — `#[serde(default)]` lets a V1
+    /// CBOR sub-map decode cleanly to `false`.
+    #[serde(default)]
+    pub burn_watch_poll_enabled: bool,
+}
+
 /// Active alias. Rebind to a later version when a field is added.
-pub type ChainConfig = ChainConfigV1;
+pub type ChainConfig = ChainConfigV2;
 
 /// Caller-supplied registration payload. Distinct from the persisted
 /// `ChainConfigV1` so the admin endpoint can fill `registered_at_ns` and

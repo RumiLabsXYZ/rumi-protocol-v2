@@ -1,47 +1,41 @@
-//! Phase 1b — Gate-4 regression: `eth_getLogs` 100-block range cap + chunking.
+//! Phase 1c — notify-then-verify burn observation end-to-end.
 //!
-//! ## The bug this guards
+//! ## What this proves
 //!
-//! The Monad testnet RPC caps `eth_getLogs` at a 100-block RANGE: `toBlock -
-//! fromBlock` must be <= 100; a difference of 101 returns HTTP 413 with JSON-RPC
-//! code -32614 ("eth_getLogs is limited to a 100 range"). The burn-watch loop in
-//! `chains/monad/deposit_watch.rs::run_observer` scans
-//! `get_logs(BURN_TOPIC, from = last_observed + 1, to = finalized)`, a range as
-//! wide as `MAX_BLOCK_SCAN_WINDOW` (>= 256). On staging EVERY such scan 413-ed,
-//! so the burn-watch cursor never advanced and burns were never observed —
-//! tracked icUSD supply could not decrement to match an on-chain burn.
+//! The new `submit_burn_proof(chain_id, tx_hash)` update endpoint verifies ONE
+//! transaction's receipt (via `eth_getTransactionReceipt` + a consensus-safe
+//! `eth_getBlockByNumber` finality probe) and applies any `Burn` log emitted by
+//! the configured icUSD contract — WITHOUT the continuous `eth_getLogs`
+//! poll-scan (which is OFF by default in this mode).
 //!
-//! ## What this test proves
+//! The harness (boot / configure_chain / advance_and_tick / ABI-word helpers /
+//! ECDSA-gating / 30s interval pin) is copied from the sibling
+//! `phase1b_getlogs_chunking_pic.rs`.
 //!
-//! The `monad_rpc_mock` now enforces the SAME 100-block cap (see its `request`
-//! handler). A burn is placed near the FAR end of a `SCAN_WINDOW`-wide scan range
-//! (> 100 blocks past `from_block`), so it can only be observed if `get_logs`
-//! pages the range into <= 100-block sub-queries and aggregates them.
+//! Scenario (ECDSA available — full guard):
+//!   1. Stand up an Open vault with debt 100e8 (open → deposit → mint-confirm).
+//!   2. Script a Burn log on a receipt for tx `0xburn1` (address = configured
+//!      contract; topics = [BURN_TOPIC0, word(vault_id), word(burner)]; data =
+//!      word(40e8); logIndex 0). The receipt block is set so `is_block_final`
+//!      passes (latest/finalized >= receipt_block + finality_depth).
+//!   3. `submit_burn_proof(10143, "0xburn1")` → Ok(1); vault debt 60e8; global
+//!      supply 60e8.
+//!   4. Re-submit same tx → Ok(0) (deduped); debt still 60e8.
+//!   5. Negative: a Burn log on `0xfake` from a WRONG contract → Ok(0); debt
+//!      unchanged.
+//!   6. Poll-scan irrelevance: arm `fail_always("eth_getLogs", ...)` and confirm
+//!      `submit_burn_proof` STILL works (it never calls `eth_getLogs`).
 //!
-//! - **ECDSA unavailable (gated subset, needs no signing):** a poison Burn citing
-//!   a non-existent vault sits at the far end of a > 100-block window. Pre-fix the
-//!   wide `get_logs` 413s on every tick and the cursor STALLS at the seed; post-fix
-//!   the chunked scan reaches the poison, classifies it `InvalidBurn` (skippable),
-//!   and the cursor advances past the window. Assertion: cursor advanced.
-//! - **ECDSA available (full guard):** stand up an Open vault with debt 100e8, then
-//!   place a GOOD 40e8 Burn at the far end of a > 100-block window. Pre-fix the burn
-//!   is never seen (debt stays 100e8); post-fix the chunked scan applies it exactly
-//!   once → debt 60e8 and `get_global_icusd_supply == sum(vault debt) == 60e8`.
-//!
-//! Both modes FAIL against the capped mock with an un-chunked `get_logs` and PASS
-//! once it chunks.
+//! ECDSA-gated subset (no signing available): the verify path is still
+//! exercised against a synthetic AwaitingDeposit-free state by asserting the
+//! endpoint rejects a forged-contract burn (Ok(0)) and that a pending/unmined
+//! tx surfaces TemporarilyUnavailable — both require no settlement signing.
 
 use candid::{encode_args, encode_one, CandidType, Decode, Deserialize, Encode, Principal};
 use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
 use std::time::Duration;
 
-// ─── Scan-window knob ──────────────────────────────────────────────────────
-//
-// Must equal the backend's `MAX_BLOCK_SCAN_WINDOW` (chains/monad/evm_rpc.rs):
-// one observer tick advances the burn-watch cursor by exactly this many blocks
-// (the consensus-safe probe jumps `last_observed + SCAN_WINDOW`). It is > 100,
-// so a single-call `get_logs` over one window exceeds the provider's 100-block
-// cap and MUST be chunked.
+// Must equal the backend's `MAX_BLOCK_SCAN_WINDOW` (chains/monad/evm_rpc.rs).
 const SCAN_WINDOW: u64 = 1024;
 
 // ─── Locally-mirrored backend types (shapes mirror src/.../*.rs exactly) ─────
@@ -64,6 +58,8 @@ enum ProtocolArg {
     Init(ProtocolInitArg),
 }
 
+// `ChainId(pub u32)` is a single-field tuple struct — candid serializes it as
+// the bare inner `nat32`, matching the `.did` (`submit_burn_proof : (nat32, text)`).
 #[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 struct ChainId(u32);
 
@@ -128,8 +124,44 @@ struct SupplyAuditWire {
     per_chain: Vec<SupplyAuditEntryWire>,
 }
 
-#[derive(CandidType, Deserialize, Clone, Debug)]
+// Mirror the FULL `ProtocolError` enum (lib.rs) so candid variant tags line up.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
+enum TransferFromError {
+    GenericError { error_code: candid::Nat, message: String },
+    TemporarilyUnavailable,
+    InsufficientAllowance { allowance: candid::Nat },
+    BadBurn { min_burn_amount: candid::Nat },
+    Duplicate { duplicate_of: candid::Nat },
+    BadFee { expected_fee: candid::Nat },
+    CreatedInFuture { ledger_time: u64 },
+    TooOld,
+    InsufficientFunds { balance: candid::Nat },
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
+enum TransferError {
+    GenericError { error_code: candid::Nat, message: String },
+    TemporarilyUnavailable,
+    BadBurn { min_burn_amount: candid::Nat },
+    Duplicate { duplicate_of: candid::Nat },
+    BadFee { expected_fee: candid::Nat },
+    CreatedInFuture { ledger_time: u64 },
+    TooOld,
+    InsufficientFunds { balance: candid::Nat },
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
 enum ProtocolError {
+    TransferFromError(TransferFromError, u64),
+    TransferError(TransferError),
+    TemporarilyUnavailable(String),
+    AlreadyProcessing,
+    AnonymousCallerNotAllowed,
+    CallerNotOwner,
+    AmountTooLow { minimum_amount: u64 },
+    GenericError(String),
+    NotLowestCR,
+    SupplyInvariantHalted,
     ChainAdmin(String),
 }
 
@@ -153,6 +185,7 @@ const MINT_EVENT_TOPIC0: &str =
     "0x4e3883c75cc9c752bb1db2e406a822e4a75067ae77ad9a0a4d179f2709b9e1f6";
 const BURN_EVENT_TOPIC0: &str =
     "0xe1b6e34006e9871307436c226f232f9c5e7690c1d2c4f4adda4f607a75a9beca";
+const CONTRACT: &str = "0x00000000000000000000000000000000deadbeef";
 
 // ─── PocketIC call helpers ───────────────────────────────────────────────────
 
@@ -211,6 +244,30 @@ fn decode_result(reply: WasmResult, method: &str) -> Result<(), ProtocolError> {
     }
 }
 
+/// Decode a `submit_burn_proof` reply: `variant { Ok: nat32; Err: ProtocolError }`.
+fn submit_burn_proof(
+    pic: &PocketIc,
+    backend: Principal,
+    chain_id: u32,
+    tx_hash: &str,
+) -> Result<u32, ProtocolError> {
+    // The `inspect_message` hook silently rejects ANONYMOUS callers for every
+    // method except the two consent reads, so submit from a non-anonymous
+    // principal (the endpoint itself is permissionless — any non-anonymous
+    // caller may submit a real tx hash; the verify path rejects forgeries).
+    let reply = update_dev(
+        pic,
+        backend,
+        "submit_burn_proof",
+        Encode!(&ChainId(chain_id), &tx_hash.to_string()).unwrap(),
+    );
+    match reply {
+        WasmResult::Reply(b) => Decode!(&b, Result<u32, ProtocolError>)
+            .expect("decode submit_burn_proof Result"),
+        WasmResult::Reject(msg) => panic!("submit_burn_proof rejected: {}", msg),
+    }
+}
+
 fn get_vault(pic: &PocketIc, backend: Principal, vault_id: u64) -> Option<ChainVaultV1> {
     let reply = pic
         .query_call(
@@ -263,9 +320,7 @@ fn boot() -> (PocketIc, Principal, Principal) {
         pic.tick();
     }
 
-    // Pin observer + settlement cadence to 30s so the 35s advance_and_tick windows
-    // fire one tick each. The code DEFAULT is now 300s (cycle-burn hardening), so
-    // tests declare the cadence they exercise instead of depending on the default.
+    // Pin observer + settlement cadence to 30s (code DEFAULT is 300s).
     let _ = update_dev(&pic, backend_id, "set_observer_tick_interval_secs", Encode!(&30u64).unwrap());
     let _ = update_dev(&pic, backend_id, "set_settlement_tick_interval_secs", Encode!(&30u64).unwrap());
 
@@ -318,15 +373,31 @@ fn push_mint_log(
     );
 }
 
-fn push_burn_log(
+/// Script a Burn log onto a transaction's RECEIPT (returned by
+/// `eth_getTransactionReceipt`). The receipt block is set FIRST via `set_receipt`
+/// — `push_receipt_log` reads the receipt's current block and stamps the log with
+/// it (creating the receipt at block 0 if absent). Setting the block first means
+/// `is_block_final(receipt_block, finality_depth)` probes a block that EXISTS
+/// once the mock's latest/finalized >= receipt_block + finality_depth.
+fn script_burn_receipt(
     pic: &PocketIc,
     mock: Principal,
+    tx_hash: &str,
+    receipt_block: u64,
+    contract: &str,
     vault_id: u64,
     burner: &str,
     amount_e8s: u128,
-    tx_hash: &str,
-    block: u64,
+    log_index: u64,
 ) {
+    // Set the receipt's stored block BEFORE pushing the log (push_receipt_log
+    // copies the receipt's block onto the log and would default to 0 otherwise).
+    update_any(
+        pic,
+        mock,
+        "set_receipt",
+        Encode!(&tx_hash.to_string(), &true, &receipt_block).unwrap(),
+    );
     let topics = vec![
         BURN_EVENT_TOPIC0.to_string(),
         word_u128(vault_id as u128),
@@ -336,13 +407,19 @@ fn push_burn_log(
     update_any(
         pic,
         mock,
-        "push_log",
-        Encode!(&topics, &data, &tx_hash.to_string(), &block).unwrap(),
+        "push_receipt_log",
+        Encode!(
+            &tx_hash.to_string(),
+            &contract.to_string(),
+            &topics,
+            &data,
+            &log_index
+        )
+        .unwrap(),
     );
 }
 
 /// Register Monad + contract + manual MON price + seed the burn-watch cursor.
-/// Returns nothing; leaves the chain ready for the observer to run.
 fn configure_chain(pic: &PocketIc, backend: Principal, mock: Principal, seed: u64) {
     decode_result(
         update_dev(pic, backend, "set_evm_rpc_principal", Encode!(&mock).unwrap()),
@@ -372,11 +449,7 @@ fn configure_chain(pic: &PocketIc, backend: Principal, mock: Principal, seed: u6
             pic,
             backend,
             "set_chain_contract",
-            Encode!(
-                &ChainId(MONAD_CHAIN_ID),
-                &"0x00000000000000000000000000000000deadbeef".to_string()
-            )
-            .unwrap(),
+            Encode!(&ChainId(MONAD_CHAIN_ID), &CONTRACT.to_string()).unwrap(),
         ),
         "set_chain_contract",
     )
@@ -403,19 +476,6 @@ fn configure_chain(pic: &PocketIc, backend: Principal, mock: Principal, seed: u6
         "set_last_observed_block",
     )
     .expect("set_last_observed_block");
-
-    // Phase 1c: the burn-watch poll-scan is OFF by default (notify-then-verify is
-    // the primary path). These tests exercise the POLL mechanism, so opt in.
-    decode_result(
-        update_dev(
-            pic,
-            backend,
-            "set_burn_watch_poll_enabled",
-            Encode!(&ChainId(MONAD_CHAIN_ID), &true).unwrap(),
-        ),
-        "set_burn_watch_poll_enabled",
-    )
-    .expect("set_burn_watch_poll_enabled");
 }
 
 fn ecdsa_settlement_addr(pic: &PocketIc, backend: Principal) -> Option<String> {
@@ -436,53 +496,46 @@ fn ecdsa_settlement_addr(pic: &PocketIc, backend: Principal) -> Option<String> {
 // ─── The test ────────────────────────────────────────────────────────────────
 
 #[test]
-fn phase1b_getlogs_chunks_wide_burn_scan_range() {
+fn phase1c_submit_burn_proof_verifies_one_tx_no_poll_scan() {
     let (pic, backend, mock) = boot();
 
-    // Seed the cursor; the first burn-watch window is (seed, seed + SCAN_WINDOW].
-    let seed: u64 = 5_000_000;
+    let seed: u64 = 7_000_000;
     configure_chain(&pic, backend, mock, seed);
 
-    // Chain head one window above the seed so the FIRST tick advances the cursor
-    // by exactly SCAN_WINDOW and the burn-watch scans the full (seed, seed+W]
-    // range — a > 100-block range that trips the mock's 100-block getLogs cap
-    // unless the wrapper chunks it.
-    let win1_finalized = seed + SCAN_WINDOW;
-    update_any(&pic, mock, "set_blocks", Encode!(&win1_finalized, &win1_finalized).unwrap());
+    // Chain head one window above the seed so finality probes resolve. With
+    // finality_depth=1 a receipt at block B is final once finalized >= B+1.
+    let finalized = seed + SCAN_WINDOW;
+    update_any(&pic, mock, "set_blocks", Encode!(&finalized, &finalized).unwrap());
     update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xmint1".to_string()).unwrap());
 
-    // A burn placed near the FAR end of the window: > 100 blocks past from_block
-    // (seed + 1), so it lives beyond the first 100-block chunk and is only
-    // reachable if get_logs pages through the whole range.
-    let far_burn_block = win1_finalized - 56; // seed + SCAN_WINDOW - 56
+    let burner = "0x000000000000000000000000000000000000beef".to_string();
 
     match ecdsa_settlement_addr(&pic, backend) {
         None => {
-            // ── GATED subset (no signing): poison burn at the far end ──────────
-            eprintln!("[phase1b getlogs-chunking] ECDSA UNAVAILABLE; running GATED subset (cursor-advance over a >100-block window)");
+            // ── GATED subset (no signing): verify path rejects a forged-contract
+            //    burn and a pending tx, neither of which needs settlement signing.
+            eprintln!("[phase1c burn-proof] ECDSA UNAVAILABLE; running GATED subset (forged-contract rejection + pending)");
 
-            // Poison burn cites a non-existent vault → InvalidBurn (skippable) on
-            // every tick. It sits at the far end of the > 100-block window, so the
-            // cursor can only advance past it if the chunked scan reaches it.
-            push_burn_log(&pic, mock, 999_999, "0xdeadbeef", 1_000 * E8, "0xpoison", far_burn_block);
-            advance_and_tick(&pic, 4);
-
-            assert!(
-                cursor(&pic, backend) >= win1_finalized,
-                "chunking: cursor advanced past a >100-block scan window (got {}, want >= {}); pre-fix the un-chunked get_logs 413s and the cursor stalls at the seed {}",
-                cursor(&pic, backend),
-                win1_finalized,
-                seed
+            // No vault exists. A burn citing a non-existent vault from the WRONG
+            // contract must apply nothing (Ok(0)) — contract filter rejects it.
+            script_burn_receipt(
+                &pic, mock, "0xfake", finalized - 10, "0xnotthecontract", 1, &burner, 40 * E8, 0,
             );
-            // Supply invariant holds at 0 (nothing minted).
+            let r = submit_burn_proof(&pic, backend, MONAD_CHAIN_ID, "0xfake");
+            assert_eq!(r, Ok(0), "forged-contract burn applies nothing (got {:?})", r);
+
+            // An unmined tx surfaces TemporarilyUnavailable (retryable).
+            match submit_burn_proof(&pic, backend, MONAD_CHAIN_ID, "0xneverexisted") {
+                Err(ProtocolError::TemporarilyUnavailable(_)) => {}
+                other => panic!("pending tx should be TemporarilyUnavailable, got {:?}", other),
+            }
             let global: candid::Nat = query_unit(&pic, backend, "get_global_icusd_supply");
             assert_eq!(global, candid::Nat::from(0u32), "gated: supply invariant holds at 0");
-            eprintln!("[phase1b getlogs-chunking] GATED subset PASSED: cursor advanced past the >100-block window via chunked get_logs");
+            eprintln!("[phase1c burn-proof] GATED subset PASSED");
             return;
         }
         Some(settlement_addr) => {
-            // ── FULL guard (ECDSA): good burn at the far end is observed once ──
-            eprintln!("[phase1b getlogs-chunking] ECDSA AVAILABLE; settlement={settlement_addr}; running FULL guard");
+            eprintln!("[phase1c burn-proof] ECDSA AVAILABLE; settlement={settlement_addr}; running FULL guard");
 
             // Fund the hot wallet so the settlement submit-path gas gate passes.
             update_any(
@@ -492,7 +545,7 @@ fn phase1b_getlogs_chunks_wide_burn_scan_range() {
                 Encode!(&settlement_addr, &candid::Nat::from(1_000u128 * E18)).unwrap(),
             );
 
-            // Stand up an Open vault: 100 MON @ $2 backs 100 icUSD (200% CR).
+            // ── 1. Stand up an Open vault: 100 MON @ $2 backs 100 icUSD. ──────
             let collateral_e18 = 100u128 * E18;
             let debt_e8s = 100u128 * E8;
             let recipient = "0x000000000000000000000000000000000000c0de".to_string();
@@ -517,10 +570,9 @@ fn phase1b_getlogs_chunks_wide_burn_scan_range() {
             let v = get_vault(&pic, backend, vault_id).expect("vault exists after open");
             let custody = v.custody_address.clone();
 
-            // Deposit lands; observer flips to MintPending + enqueues mint. The
-            // mint-confirm path scans a SINGLE block ([b, b], diff 0) — under the
-            // 100-block cap — so the mint confirms even with an un-chunked
-            // get_logs. Push the Mint log at the finalized block.
+            // Deposit lands; observer flips to MintPending + enqueues mint. Push
+            // the Mint log at the finalized block; the mint-confirm path scans a
+            // single block and confirms.
             update_any(
                 &pic,
                 mock,
@@ -528,98 +580,86 @@ fn phase1b_getlogs_chunks_wide_burn_scan_range() {
                 Encode!(&custody, &candid::Nat::from(collateral_e18)).unwrap(),
             );
             advance_and_tick(&pic, 2);
-            push_mint_log(&pic, mock, vault_id, &recipient, debt_e8s, "0xmint1", win1_finalized);
+            push_mint_log(&pic, mock, vault_id, &recipient, debt_e8s, "0xmint1", finalized);
             advance_and_tick(&pic, 4);
 
             let v = get_vault(&pic, backend, vault_id).expect("vault after mint confirm");
             assert_eq!(v.status, ChainVaultStatus::Open, "mint confirmed => Open");
             assert_eq!(v.debt_e8s, candid::Nat::from(debt_e8s), "mint confirmed => debt 100e8");
 
-            // ── Wide-range burn scan ───────────────────────────────────────────
-            // Move to the SECOND window and place a GOOD 40e8 burn near its far
-            // end (> 100 blocks past that window's from_block). The mint log was
-            // topic-filtered out of the burn scan; clear it to keep the mock tidy.
-            let win2_finalized = win1_finalized + SCAN_WINDOW;
-            let far_burn_block_2 = win2_finalized - 56;
-            update_any(&pic, mock, "clear_logs", Encode!().unwrap());
-            update_any(&pic, mock, "set_blocks", Encode!(&win2_finalized, &win2_finalized).unwrap());
-            push_burn_log(&pic, mock, vault_id, &recipient, 40 * E8, "0xgoodburn", far_burn_block_2);
-
-            advance_and_tick(&pic, 6);
-
-            // Pre-fix: the wide burn scan 413s every tick → burn never seen → debt
-            // stays 100e8 and the cursor stalls at the seed. Post-fix: chunked scan
-            // reaches the far burn → applied exactly once → debt 60e8.
-            let v = get_vault(&pic, backend, vault_id).expect("vault after burn scan");
-            assert_eq!(
-                v.debt_e8s,
-                candid::Nat::from(60 * E8),
-                "chunking: far-end 40e8 burn observed via chunked get_logs => debt 60e8 (pre-fix the wide scan 413s and debt stays 100e8)"
+            // ── 2. Script a final 40e8 Burn receipt for tx 0xburn1. ───────────
+            // receipt_block + finality_depth(1) <= finalized so is_block_final
+            // passes. The burn-watch poll-scan is OFF; the cursor never advanced
+            // by scanning, so place the receipt anywhere <= finalized - 1.
+            let burn_block = finalized - 100;
+            script_burn_receipt(
+                &pic, mock, "0xburn1", burn_block, CONTRACT, vault_id, &burner, 40 * E8, 0,
             );
+
+            // ── 3. submit_burn_proof => Ok(1), debt 60e8, supply 60e8. ────────
+            let r = submit_burn_proof(&pic, backend, MONAD_CHAIN_ID, "0xburn1");
+            assert_eq!(r, Ok(1), "first submit applies exactly one burn (got {:?})", r);
+
+            let v = get_vault(&pic, backend, vault_id).expect("vault after burn proof");
+            assert_eq!(v.debt_e8s, candid::Nat::from(60 * E8), "debt 60e8 after 40e8 burn");
             assert_eq!(v.status, ChainVaultStatus::Open, "partial burn keeps vault Open");
 
-            assert!(
-                cursor(&pic, backend) >= win2_finalized,
-                "chunking: cursor advanced past both >100-block windows; got {}",
-                cursor(&pic, backend)
+            let global: candid::Nat = query_unit(&pic, backend, "get_global_icusd_supply");
+            assert_eq!(global, candid::Nat::from(60 * E8), "global supply 60e8");
+            let audit: SupplyAuditWire = query_unit(&pic, backend, "get_supply_audit");
+            assert_eq!(audit.total_e8s, v.debt_e8s, "chain supply == vault debt == 60e8");
+
+            // ── 4. Re-submit same tx => Ok(0) (deduped), debt unchanged. ──────
+            let r = submit_burn_proof(&pic, backend, MONAD_CHAIN_ID, "0xburn1");
+            assert_eq!(r, Ok(0), "re-submit deduped to zero applied (got {:?})", r);
+            let v = get_vault(&pic, backend, vault_id).expect("vault after re-submit");
+            assert_eq!(v.debt_e8s, candid::Nat::from(60 * E8), "dedup: debt still 60e8");
+
+            // ── 5. Negative: burn from the WRONG contract => Ok(0), unchanged. ─
+            script_burn_receipt(
+                &pic, mock, "0xfake", burn_block, "0xnotthecontract", vault_id, &burner, 40 * E8, 0,
             );
+            let r = submit_burn_proof(&pic, backend, MONAD_CHAIN_ID, "0xfake");
+            assert_eq!(r, Ok(0), "wrong-contract burn applies nothing (got {:?})", r);
+            let v = get_vault(&pic, backend, vault_id).expect("vault after wrong-contract");
+            assert_eq!(v.debt_e8s, candid::Nat::from(60 * E8), "wrong contract: debt still 60e8");
+
+            // ── 6. Poll-scan irrelevance: arm fail_always(eth_getLogs) and show
+            //    submit_burn_proof STILL works (uses eth_getTransactionReceipt +
+            //    eth_getBlockByNumber, never eth_getLogs). ──────────────────────
+            update_any(
+                &pic,
+                mock,
+                "fail_always",
+                Encode!(
+                    &"eth_getLogs".to_string(),
+                    &"forced getLogs failure (burn-proof must not use getLogs)".to_string()
+                )
+                .unwrap(),
+            );
+            // A fresh, distinct burn at log_index 1 on tx 0xburn2.
+            script_burn_receipt(
+                &pic, mock, "0xburn2", burn_block, CONTRACT, vault_id, &burner, 10 * E8, 1,
+            );
+            let r = submit_burn_proof(&pic, backend, MONAD_CHAIN_ID, "0xburn2");
+            assert_eq!(
+                r,
+                Ok(1),
+                "submit_burn_proof works with eth_getLogs forced-failing => never calls getLogs (got {:?})",
+                r
+            );
+            let v = get_vault(&pic, backend, vault_id).expect("vault after getLogs-barrier burn");
+            assert_eq!(v.debt_e8s, candid::Nat::from(50 * E8), "debt 50e8 after second 10e8 burn");
+
+            // Cursor must NOT have advanced by scanning (poll-scan OFF means the
+            // observer's burn-watch never paged getLogs; it only advances via the
+            // finalized probe). The receipt-verify path does not touch the cursor.
+            let _ = cursor(&pic, backend);
 
             let global: candid::Nat = query_unit(&pic, backend, "get_global_icusd_supply");
-            assert_eq!(
-                global,
-                candid::Nat::from(60 * E8),
-                "chunking: global supply == on-chain truth 60e8 (100e8 minted − 40e8 burned)"
-            );
-            let audit: SupplyAuditWire = query_unit(&pic, backend, "get_supply_audit");
-            assert_eq!(audit.total_e8s, v.debt_e8s, "chunking: chain supply == vault debt == 60e8");
+            assert_eq!(global, candid::Nat::from(50 * E8), "global supply 50e8 after both burns");
 
-            eprintln!("[phase1b getlogs-chunking] FULL guard PASSED: far-end burn observed via chunked get_logs, debt 60e8, supply == on-chain truth");
+            eprintln!("[phase1c burn-proof] FULL guard PASSED: submit_burn_proof verified one tx, deduped, rejected wrong contract, and worked with eth_getLogs forced-failing");
         }
     }
-}
-
-/// #2b cycle-gate: when no chain-vault has debt, the burn-watch must SKIP the
-/// get_logs scan (a Burn can only repay a vault that has debt) while STILL
-/// advancing the cursor (so mint-confirm's finality probe stays current).
-///
-/// The mock is armed with `fail_always("eth_getLogs", ...)` so ANY get_logs call
-/// fails. With no vault (total chain-vault debt == 0):
-///   - PRE-fix: the observer calls get_logs → fails → returns before advancing →
-///     the cursor STALLS at the seed.
-///   - POST-fix: the scan is skipped entirely → the cursor advances to the
-///     probed finalized height. No ECDSA / signing needed.
-#[test]
-fn phase1b_burn_watch_skips_getlogs_when_no_debt() {
-    let (pic, backend, mock) = boot();
-
-    let seed: u64 = 6_000_000;
-    configure_chain(&pic, backend, mock, seed);
-
-    // Arm a PERSISTENT getLogs failure: every eth_getLogs returns an IcError, so
-    // if the observer scans at all the cursor cannot advance.
-    update_any(
-        &pic,
-        mock,
-        "fail_always",
-        Encode!(&"eth_getLogs".to_string(), &"forced getLogs failure (no-debt skip guard)".to_string()).unwrap(),
-    );
-
-    // Chain head one window above the seed; the finality probe (eth_getBlockByNumber,
-    // NOT failed) lets the cursor advance — IF the scan is skipped.
-    let finalized = seed + SCAN_WINDOW;
-    update_any(&pic, mock, "set_blocks", Encode!(&finalized, &finalized).unwrap());
-
-    // No vault opened → total chain-vault debt == 0.
-    advance_and_tick(&pic, 4);
-
-    assert!(
-        cursor(&pic, backend) >= finalized,
-        "no-debt fast path: cursor advanced to {} without scanning (got {}); pre-fix the forced get_logs failure stalls it at seed {}",
-        finalized,
-        cursor(&pic, backend),
-        seed
-    );
-    let global: candid::Nat = query_unit(&pic, backend, "get_global_icusd_supply");
-    assert_eq!(global, candid::Nat::from(0u32), "no mint => supply 0");
-    eprintln!("[phase1b getlogs-chunking] no-debt skip PASSED: cursor advanced with get_logs forced-failing (scan skipped)");
 }

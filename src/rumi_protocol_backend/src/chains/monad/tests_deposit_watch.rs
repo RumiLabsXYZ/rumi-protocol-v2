@@ -1,13 +1,13 @@
 use super::deposit_watch::{advance_cursor_and_prune, apply_burn_to_state, credit_deposit_to_state, BurnApplyError};
 use super::chain_vault::{ChainVaultStatus, ChainVaultV1};
 use crate::chains::config::ChainId;
-use crate::chains::multi_chain_state::MultiChainStateV2;
+use crate::chains::multi_chain_state::MultiChainStateV3;
 use crate::chains::monad::evm_rpc::BurnLog;
 use crate::chains::supply::SupplyInvariantError;
 use candid::Principal;
 
-fn seeded() -> MultiChainStateV2 {
-    let mut s = MultiChainStateV2::default();
+fn seeded() -> MultiChainStateV3 {
+    let mut s = MultiChainStateV3::default();
     s.chain_supplies.insert(ChainId(10143), 0);
     s.chain_vaults.insert(1, ChainVaultV1 {
         vault_id: 1, owner: Principal::anonymous(), collateral_chain: ChainId(10143),

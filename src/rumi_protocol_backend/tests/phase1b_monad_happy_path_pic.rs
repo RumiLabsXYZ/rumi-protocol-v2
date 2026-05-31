@@ -404,6 +404,20 @@ fn phase1b_monad_happy_path_supply_invariant() {
     )
     .expect("set_last_observed_block");
 
+    // Phase 1c: burn-watch poll-scan is OFF by default (notify-then-verify is the
+    // primary path). This happy-path test observes burns via the POLL mechanism, so
+    // opt in.
+    decode_result(
+        update_dev(
+            &pic,
+            backend,
+            "set_burn_watch_poll_enabled",
+            Encode!(&ChainId(MONAD_CHAIN_ID), &true).unwrap(),
+        ),
+        "set_burn_watch_poll_enabled",
+    )
+    .expect("set_burn_watch_poll_enabled");
+
     // Invariant holds at zero after register/config (Design B: nothing minted).
     assert_supply(&pic, backend, 0, "after register/config");
 

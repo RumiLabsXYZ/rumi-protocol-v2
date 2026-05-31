@@ -1,12 +1,12 @@
 use super::supply::{apply_supply_delta, SupplyDelta, SupplyInvariantError};
-use super::config::{ChainConfigV1, ChainId, ChainStatus, GasStrategy};
-use super::multi_chain_state::MultiChainStateV2;
+use super::config::{ChainConfigV2, ChainId, ChainStatus, GasStrategy};
+use super::multi_chain_state::MultiChainStateV3;
 
-fn fixture_state() -> MultiChainStateV2 {
-    let mut s = MultiChainStateV2::default();
+fn fixture_state() -> MultiChainStateV3 {
+    let mut s = MultiChainStateV3::default();
     s.chain_configs.insert(
         ChainId(101),
-        ChainConfigV1 {
+        ChainConfigV2 {
             chain_id: ChainId(101),
             display_name: "TestChain".into(),
             rpc_endpoints: vec![],
@@ -15,6 +15,7 @@ fn fixture_state() -> MultiChainStateV2 {
             chain_native_decimals: 18,
             registered_at_ns: 0,
             status: ChainStatus::Registered,
+            burn_watch_poll_enabled: false,
         },
     );
     s.chain_supplies.insert(ChainId(101), 0);

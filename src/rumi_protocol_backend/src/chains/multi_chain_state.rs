@@ -29,7 +29,7 @@
 //! See spec Section 3 ("State wipe on upgrade") and the 2026-05-18 AMM
 //! incident (MEMORY.md: `project_amm_state_wipe_2026_05_18.md`).
 
-use super::config::{ChainConfigV1, ChainId};
+use super::config::{ChainConfigV1, ChainConfigV2, ChainId};
 use super::monad::chain_vault::ChainVaultV1;
 use super::settlement_queue::SettlementQueueV1;
 use candid::{CandidType, Deserialize};
@@ -157,4 +157,64 @@ impl MultiChainStateV2 {
     }
 }
 
-pub type MultiChainState = MultiChainStateV2;
+/// Phase 1c snapshot. Identical to `MultiChainStateV2` in every field EXCEPT
+/// `chain_configs`, whose value type bumps from `ChainConfigV1` to
+/// `ChainConfigV2` (the latter adds the `burn_watch_poll_enabled` poll-scan
+/// flag). This is a NON-BREAKING reshape under ciborium:
+///
+///  - The eight outer fields are byte-for-byte identical to V2 and map across
+///    by name (NO `#[serde(default)]` needed — V2 always wrote them).
+///  - `chain_configs` is a CBOR map `{ChainId -> {field-map}}`. On decode each
+///    inner field-map decodes as a `ChainConfigV2`; the new
+///    `burn_watch_poll_enabled` key is absent in any V2-written sub-map and is
+///    supplied by its field-level `#[serde(default)]` (=> `false`). So a live
+///    `MultiChainStateV2` CBOR snapshot decodes into `MultiChainStateV3`
+///    without error and without wiping any chain/vault/supply state.
+///
+/// Because the decode is in-place (the four-then-eight fields carry across by
+/// name, the nested config field gains a defaulted bool), NO explicit migration
+/// call is needed in `post_upgrade`; `migrate_multi_chain_state` in `supply.rs`
+/// remains the dormant template for the next BREAKING bump.
+///
+/// Add the NEXT field by bumping to `MultiChainStateV4` (keep V3 verbatim),
+/// `#[serde(default)]` on the new field, and rebinding the alias below.
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, Default)]
+pub struct MultiChainStateV3 {
+    /// Bumped value type vs V2 (`ChainConfigV1` -> `ChainConfigV2`). Always
+    /// present in any valid snapshot; the nested `ChainConfigV2` add-a-field is
+    /// what carries the `#[serde(default)]` (see `ChainConfigV2`).
+    pub chain_configs: BTreeMap<ChainId, ChainConfigV2>,
+    pub chain_supplies: BTreeMap<ChainId, u128>,
+    pub settlement_queues: BTreeMap<ChainId, SettlementQueueV1>,
+    pub invariant_halted: bool,
+    #[serde(default)]
+    pub chain_vaults: BTreeMap<u64, ChainVaultV1>,
+    #[serde(default)]
+    pub chain_contracts: BTreeMap<ChainId, String>,
+    #[serde(default)]
+    pub manual_prices: BTreeMap<(ChainId, String), u64>,
+    #[serde(default)]
+    pub last_observed_block: BTreeMap<ChainId, u64>,
+    #[serde(default)]
+    pub hot_wallet_balance_e18: BTreeMap<ChainId, u128>,
+    #[serde(default)]
+    pub reorg_halted: BTreeMap<ChainId, bool>,
+    #[serde(default)]
+    pub reorg_suspect_streak: BTreeMap<ChainId, u32>,
+    #[serde(default)]
+    pub processed_burn_keys: BTreeMap<u64, BTreeSet<String>>,
+}
+
+impl MultiChainStateV3 {
+    pub fn total_supply_all_chains_e8s(&self) -> u128 {
+        self.chain_supplies.values().copied().sum()
+    }
+
+    /// Sum of confirmed debt across all foreign-chain vaults (e8s). See the
+    /// V2 doc — same foreign-chain-only invariant.
+    pub fn total_chain_vault_debt_e8s(&self) -> u128 {
+        self.chain_vaults.values().map(|v| v.debt_e8s).sum()
+    }
+}
+
+pub type MultiChainState = MultiChainStateV3;

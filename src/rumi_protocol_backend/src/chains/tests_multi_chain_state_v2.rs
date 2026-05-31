@@ -1,4 +1,4 @@
-use super::multi_chain_state::{MultiChainState, MultiChainStateV1, MultiChainStateV2};
+use super::multi_chain_state::{MultiChainState, MultiChainStateV1, MultiChainStateV2, MultiChainStateV3};
 use super::config::ChainId;
 use super::supply::migrate_multi_chain_state;
 
@@ -118,8 +118,81 @@ fn migration_preserves_v1_fields_and_defaults_new_ones() {
 }
 
 #[test]
-fn active_alias_points_at_v2() {
-    fn _check(x: MultiChainState) -> MultiChainStateV2 { x }
+fn active_alias_points_at_v3() {
+    fn _check(x: MultiChainState) -> MultiChainStateV3 { x }
+}
+
+#[test]
+fn v2_cbor_snapshot_decodes_into_v3_without_wiping_state() {
+    // STATE-WIPE REGRESSION (Phase 1c). The live staging canister persists a
+    // `MultiChainStateV2` whose `chain_configs` values are `ChainConfigV1`
+    // field-maps. The Phase 1c upgrade rebinds `MultiChainState` to V3 (whose
+    // `chain_configs` value type is `ChainConfigV2`). A populated V2 CBOR
+    // snapshot MUST decode into V3 with:
+    //   - the eight outer fields carried across by name, and
+    //   - each nested config decoding from `ChainConfigV1` into `ChainConfigV2`
+    //     with `burn_watch_poll_enabled` supplied by its `#[serde(default)]`.
+    // This is the exact ciborium decode path `load_state_from_stable()` runs on
+    // upgrade. Without the nested `#[serde(default)]` the decode would fail with
+    // "missing field `burn_watch_poll_enabled`", silently wiping multi_chain
+    // state on the real canister. (Vault 1 with real debt/supply lives here.)
+    use super::config::{ChainConfigV1, ChainStatus, GasStrategy};
+    use super::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
+    use super::settlement_queue::SettlementQueueV1;
+    use std::collections::BTreeSet;
+
+    let mut v2 = MultiChainStateV2::default();
+    v2.chain_configs.insert(ChainId(10143), ChainConfigV1 {
+        chain_id: ChainId(10143),
+        display_name: "MonadTestnet".into(),
+        rpc_endpoints: vec!["https://rpc".into()],
+        finality_depth: 3,
+        gas_strategy: GasStrategy::EvmEip1559 { max_priority_fee_gwei: 2, max_fee_gwei_ceiling: 500 },
+        chain_native_decimals: 18,
+        registered_at_ns: 123,
+        status: ChainStatus::Registered,
+    });
+    v2.chain_supplies.insert(ChainId(10143), 50_000_000);
+    v2.settlement_queues.insert(ChainId(10143), SettlementQueueV1::default());
+    v2.invariant_halted = false;
+    v2.chain_vaults.insert(1, ChainVaultV1 {
+        vault_id: 1,
+        owner: candid::Principal::anonymous(),
+        collateral_chain: ChainId(10143),
+        custody_address: "0xcustody".into(),
+        collateral_amount_e18: 1_000_000_000_000_000_000,
+        debt_e8s: 50_000_000,
+        mint_recipient: "0xrecipient".into(),
+        pending_mint_e8s: 0,
+        status: ChainVaultStatus::Open,
+        opened_at_ns: 99,
+    });
+    v2.chain_contracts.insert(ChainId(10143), "0xicusd".into());
+    v2.last_observed_block.insert(ChainId(10143), 35_136_248);
+    v2.processed_burn_keys.insert(35_136_200, BTreeSet::from(["0xtx:0".to_string()]));
+
+    // Encode as V2 (the bytes the live canister wrote), decode as V3 (new shape).
+    let mut buf = Vec::new();
+    ciborium::ser::into_writer(&v2, &mut buf).expect("cbor encode V2");
+    let v3: MultiChainStateV3 =
+        ciborium::de::from_reader(buf.as_slice()).expect("V2 snapshot MUST decode into V3");
+
+    // Outer state preserved:
+    assert_eq!(v3.chain_supplies.get(&ChainId(10143)), Some(&50_000_000u128));
+    assert_eq!(v3.chain_vaults.len(), 1);
+    assert_eq!(v3.chain_vaults[&1].debt_e8s, 50_000_000);
+    assert_eq!(v3.chain_contracts.get(&ChainId(10143)), Some(&"0xicusd".to_string()));
+    assert_eq!(v3.last_observed_block.get(&ChainId(10143)), Some(&35_136_248u64));
+    assert!(v3.processed_burn_keys.get(&35_136_200).unwrap().contains("0xtx:0"));
+    // Nested config migrated V1 -> V2: V1 fields preserved, new flag defaulted off.
+    let cfg = v3.chain_configs.get(&ChainId(10143)).expect("config preserved");
+    assert_eq!(cfg.finality_depth, 3);
+    assert_eq!(cfg.display_name, "MonadTestnet");
+    assert!(matches!(cfg.status, ChainStatus::Registered));
+    assert!(!cfg.burn_watch_poll_enabled, "poll-scan defaults OFF after upgrade");
+    // Total debt still reconciles (no state wipe).
+    assert_eq!(v3.total_chain_vault_debt_e8s(), 50_000_000);
+    assert_eq!(v3.total_supply_all_chains_e8s(), 50_000_000);
 }
 
 #[test]
