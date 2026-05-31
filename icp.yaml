@@ -738,30 +738,28 @@ environments:
     canisters:
       - rumi_protocol_backend
     init_args:
-      # First install on the staging canister uses the full Init variant (not
-      # Upgrade). The icusd_ledger_principal is `aaaaa-aa` (management canister
-      # placeholder) so any accidental icUSD mint traps; treasury / stability_pool /
-      # ckUSDT / ckUSDC are all null. XRC and ICP ledger point at real mainnet
-      # principals because Phase 1b will need both for price fetching + collateral
-      # accounting. `developer_principal` is the rumi_identity principal so the
-      # admin endpoints (register_chain, etc.) only respond to rumi_identity calls.
+      # The staging canister was first installed with the full Init variant during
+      # Phase 1a (icusd_ledger_principal = `aaaaa-aa` so any accidental icUSD mint
+      # traps; treasury / stability_pool / ckUSDT / ckUSDC null; XRC + ICP ledger at
+      # real mainnet principals; developer_principal = rumi_identity). That install
+      # is done — the canister now upgrades in place, so the default arg below is the
+      # Upgrade variant (Task 22 Step 9). `mode = null` preserves the live protocol
+      # mode; `description` is recorded into the on-chain event log by post_upgrade.
       #
-      # NOTE: subsequent upgrades to this canister use --mode upgrade and pass
-      # `(variant { Upgrade = record { mode = null; description = opt "..." } })`
-      # via --args on `icp canister install`. See docs/superpowers/notes/
-      # 2026-05-27-icp-cli-deploy-pattern.md for the locked deploy command shape.
+      # Each real deploy still passes an explicit per-deploy `description` via --args
+      # on `icp canister install --mode upgrade` (e.g. the Phase 1b observer EVM-RPC
+      # fix). See docs/superpowers/notes/2026-05-27-icp-cli-deploy-pattern.md for the
+      # locked deploy command shape. This default just matches the upgrade arg shape
+      # so a build/install never falls back to Init and re-initializes (wiping state).
+      #
+      # The historical Init args, for reference if the canister is ever re-provisioned
+      # from scratch: xrc uf6dk-hyaaa-aaaaq-qaaaq-cai, icusd aaaaa-aa, icp
+      # ryjl3-tyaaa-aaaaa-aaaba-cai, fee 10_000, developer fd7h3-...-kae, rest null.
       rumi_protocol_backend: |
         (variant {
-          Init = record {
-            xrc_principal = principal "uf6dk-hyaaa-aaaaq-qaaaq-cai";
-            icusd_ledger_principal = principal "aaaaa-aa";
-            icp_ledger_principal = principal "ryjl3-tyaaa-aaaaa-aaaba-cai";
-            fee_e8s = 10_000 : nat64;
-            developer_principal = principal "fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae";
-            treasury_principal = null;
-            stability_pool_principal = null;
-            ckusdt_ledger_principal = null;
-            ckusdc_ledger_principal = null;
+          Upgrade = record {
+            mode = null;
+            description = opt "Phase 1b: Monad EVM-chain adapter (observer + settlement + supply accounting)"
           }
         })
 

@@ -97,6 +97,13 @@ fn default_xrc_fetch_interval_secs() -> u64 { 300 }
 fn default_interest_treasury_tick_interval_secs() -> u64 { 60 }
 fn default_vault_check_tick_interval_secs() -> u64 { 300 }
 
+/// Phase 1b Task 15: production defaults for the Monad async-loop cadences.
+/// Timer D (settlement) and the observer both default to 30s. A legacy snapshot
+/// without these fields hydrates to 30; the register fns floor a 0 to 30 anyway
+/// so a busy-loop is impossible even with a corrupt value.
+fn default_settlement_tick_interval_secs() -> u64 { 30 }
+fn default_observer_tick_interval_secs() -> u64 { 30 }
+
 pub fn default_interest_split() -> Vec<InterestRecipient> {
     vec![
         InterestRecipient { destination: InterestDestination::ThreePool, bps: 5000 },
@@ -790,6 +797,17 @@ pub struct State {
     /// `set_vault_check_tick_interval_secs`.
     #[serde(default = "default_vault_check_tick_interval_secs")]
     pub vault_check_tick_interval_secs: u64,
+    /// Phase 1b Task 15: cadence (seconds) for Timer D (Monad settlement
+    /// fan-out, `settlement::settlement_tick`). Default 30. Tunable via
+    /// `set_settlement_tick_interval_secs`. The register fn floors a 0 to 30
+    /// so a missing serde-default or bad setter value never busy-loops.
+    #[serde(default = "default_settlement_tick_interval_secs")]
+    pub settlement_tick_interval_secs: u64,
+    /// Phase 1b Task 15: cadence (seconds) for the Monad inbound observer
+    /// fan-out (`deposit_watch::observer_tick`). Default 30. Tunable via
+    /// `set_observer_tick_interval_secs`. Same 0-floor protection as above.
+    #[serde(default = "default_observer_tick_interval_secs")]
+    pub observer_tick_interval_secs: u64,
     pub fee: Ratio,
     pub developer_principal: Principal,
     pub next_available_vault_id: u64,
@@ -1242,6 +1260,23 @@ pub struct State {
     /// `chains::multi_chain_state` for the versioned-snapshot pattern.
     #[serde(default)]
     pub multi_chain: crate::chains::MultiChainState,
+
+    /// Phase 1b Task 6: override for the EVM RPC canister principal.
+    /// When `Some`, `chains::monad::evm_rpc::evm_rpc_principal()` uses this
+    /// value instead of the hardcoded production canister
+    /// (`7hfb6-caaaa-aaaar-qadga-cai`). Allows PocketIC / staging to inject
+    /// a mock EVM RPC canister. `#[serde(default)]` so pre-1b snapshots
+    /// decode to `None` (production canister). The developer-gated SETTER
+    /// `set_evm_rpc_principal` is added in Task 14.
+    #[serde(default)]
+    pub evm_rpc_principal_override: Option<candid::Principal>,
+
+    /// Phase 1b Task 12: monotonic id source for foreign-chain (`chain_vaults`)
+    /// vault ids. `#[serde(default)]` is safe — `State` is ciborium-encoded
+    /// (storage.rs uses `ciborium::ser/de`, which is serde-based), so an old
+    /// snapshot that lacks this key decodes with the field defaulting to 0.
+    #[serde(default)]
+    pub chain_vault_id_counter: u64,
 }
 
 fn default_check_vaults_alert_band_bps() -> u64 {
@@ -1338,6 +1373,8 @@ impl Default for State {
             xrc_fetch_interval_secs: default_xrc_fetch_interval_secs(),
             interest_treasury_tick_interval_secs: default_interest_treasury_tick_interval_secs(),
             vault_check_tick_interval_secs: default_vault_check_tick_interval_secs(),
+            settlement_tick_interval_secs: default_settlement_tick_interval_secs(),
+            observer_tick_interval_secs: default_observer_tick_interval_secs(),
             fee: Ratio::from(Decimal::ZERO),
             developer_principal: Principal::anonymous(),
             next_available_vault_id: 1,
@@ -1449,6 +1486,8 @@ impl Default for State {
             ticks_since_full_sweep: 0,
             bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
             multi_chain: crate::chains::MultiChainState::default(),
+            evm_rpc_principal_override: None,
+            chain_vault_id_counter: 0,
         }
     }
 }
@@ -1476,6 +1515,8 @@ impl From<InitArg> for State {
             xrc_fetch_interval_secs: default_xrc_fetch_interval_secs(),
             interest_treasury_tick_interval_secs: default_interest_treasury_tick_interval_secs(),
             vault_check_tick_interval_secs: default_vault_check_tick_interval_secs(),
+            settlement_tick_interval_secs: default_settlement_tick_interval_secs(),
+            observer_tick_interval_secs: default_observer_tick_interval_secs(),
             total_collateral_ratio: Ratio::from(Decimal::MAX),
             last_icp_timestamp: None,
             last_icp_rate: None,
@@ -1673,6 +1714,8 @@ impl From<InitArg> for State {
             ticks_since_full_sweep: 0,
             bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
             multi_chain: crate::chains::MultiChainState::default(),
+            evm_rpc_principal_override: None,
+            chain_vault_id_counter: 0,
         }
     }
 }
@@ -3632,6 +3675,16 @@ impl State {
         let treasury = self.compute_treasury_stats_snapshot();
         self.protocol_status_snapshot = Some((now_ns, proto));
         self.treasury_stats_snapshot = Some((now_ns, treasury));
+    }
+
+    /// Phase 1b Task 6: returns the EVM RPC canister principal override, if set.
+    ///
+    /// When `Some`, the multi-chain EVM RPC wrapper uses this principal instead
+    /// of the hardcoded production canister (`7hfb6-caaaa-aaaar-qadga-cai`).
+    /// Enables PocketIC and staging environments to inject a mock. The developer-
+    /// gated setter `set_evm_rpc_principal` is added in Task 14.
+    pub fn evm_rpc_override(&self) -> Option<candid::Principal> {
+        self.evm_rpc_principal_override
     }
 
     /// Wave-10 LIQ-008: pure-read sum of liquidation debt cleared in the

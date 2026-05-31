@@ -12,9 +12,38 @@
 //! can call it without inventing the invariant under deadline pressure.
 
 use super::config::ChainId;
-use super::multi_chain_state::MultiChainStateV1;
+use super::multi_chain_state::{MultiChainStateV1, MultiChainStateV2};
 use candid::{CandidType, Deserialize};
 use serde::Serialize;
+
+/// DORMANT TEMPLATE — not called on the live upgrade path.
+///
+/// The V1->V2 upgrade happens automatically via the ciborium in-place decode:
+/// the four V1 fields map across by name; the new-in-V2 fields carry
+/// `#[serde(default)]` and come up empty. No explicit migration call is
+/// needed in `post_upgrade`.
+///
+/// This function is kept as the unit-tested template for the NEXT version bump
+/// (V2->V3). When V3 lands, rename this to `migrate_v2_to_v3`, add it to the
+/// `post_upgrade` hook, and write a parallel ciborium round-trip test (see
+/// `tests_multi_chain_state_v2::v1_cbor_snapshot_decodes_into_v2_without_wiping_state`
+/// as the model).
+pub fn migrate_multi_chain_state(v1: MultiChainStateV1) -> MultiChainStateV2 {
+    MultiChainStateV2 {
+        chain_configs: v1.chain_configs,
+        chain_supplies: v1.chain_supplies,
+        settlement_queues: v1.settlement_queues,
+        invariant_halted: v1.invariant_halted,
+        chain_vaults: Default::default(),
+        chain_contracts: Default::default(),
+        manual_prices: Default::default(),
+        last_observed_block: Default::default(),
+        hot_wallet_balance_e18: Default::default(),
+        reorg_halted: Default::default(),
+        reorg_suspect_streak: Default::default(),
+        processed_burn_keys: Default::default(),
+    }
+}
 
 #[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug)]
 pub enum SupplyDelta {
@@ -34,7 +63,7 @@ pub enum SupplyInvariantError {
 /// authoritative `total_debt_e8s` snapshot taken at the same logical
 /// moment; we reject any apply that would leave sum != total_debt.
 pub fn apply_supply_delta(
-    state: &mut MultiChainStateV1,
+    state: &mut MultiChainStateV2,
     chain: ChainId,
     delta: SupplyDelta,
     total_debt_e8s: u128,
@@ -80,7 +109,7 @@ pub fn apply_supply_delta(
 /// On `Err`, the caller flips `state.invariant_halted = true` and emits
 /// an event.
 pub fn check_invariant(
-    state: &MultiChainStateV1,
+    state: &MultiChainStateV2,
     total_debt_e8s: u128,
 ) -> Result<(), SupplyInvariantError> {
     let sum: u128 = state.chain_supplies.values().copied().sum();

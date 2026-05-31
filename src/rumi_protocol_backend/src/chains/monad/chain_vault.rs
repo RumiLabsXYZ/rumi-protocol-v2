@@ -1,0 +1,473 @@
+//! Monad (and future foreign-chain) vault record.
+//!
+//! Lives in `MultiChainStateV2.chain_vaults`, keyed by the globally-unique
+//! u64 vault_id. The core ICP-native `Vault` struct is untouched in Phase 1b;
+//! unifying the two models is a deliberate Phase 2 task.
+//!
+//! Design B (confirmed-supply): `debt_e8s` is the CONFIRMED debt. While a mint
+//! is in flight, the intended amount lives in `pending_mint_e8s` and does NOT
+//! count toward `total_debt` or `chain_supplies` until the on-chain mint is
+//! observed at finality (settlement worker, Task 10).
+
+use crate::chains::config::ChainId;
+use crate::chains::multi_chain_state::MultiChainStateV2;
+use crate::chains::settlement_queue::{SettlementOp, SettlementOpKind};
+use candid::{CandidType, Deserialize, Principal};
+use serde::Serialize;
+
+/// Minimum collateral ratio (e4: 13000 == 130.00%) required to open a Monad
+/// chain vault. Checked against DECLARED collateral at open time. Per-collateral
+/// configurability is a later refinement (Phase 2 unifies the foreign-chain and
+/// ICP-native CDP parameter models).
+pub const MONAD_MIN_CR_E4: u64 = 13_000;
+
+/// 1e18 — the wei scale of EVM-native (MON) collateral amounts.
+const E18: u128 = 1_000_000_000_000_000_000;
+
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub enum ChainVaultStatus {
+    /// Vault opened; awaiting the on-chain collateral deposit. No mint enqueued
+    /// yet (open-then-verify). deposit-watch flips this to MintPending once the
+    /// custody-address balance covers the declared collateral at finality.
+    AwaitingDeposit,
+    MintPending,
+    Open,
+    Closing,
+    Closed,
+}
+
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct ChainVaultV1 {
+    pub vault_id: u64,
+    pub owner: Principal,
+    pub collateral_chain: ChainId,
+    /// Unvalidated 0x hex string. The deposit-watch task (Task 9) validates
+    /// on-chain before crediting any collateral.
+    pub custody_address: String,
+    pub collateral_amount_e18: u128,
+    pub debt_e8s: u128,
+    /// Unvalidated 0x hex string. The settlement task (Task 10) validates
+    /// before submitting the on-chain mint transaction.
+    pub mint_recipient: String,
+    pub pending_mint_e8s: u128,
+    pub status: ChainVaultStatus,
+    pub opened_at_ns: u64,
+}
+
+/// Reasons `open_chain_vault_in_state` / `verify_deposit_and_enqueue_mint_in_state`
+/// can reject. Kept distinct from `ChainAdminError` so the open path can report
+/// CR-specific failures the caller can surface.
+#[derive(Debug, PartialEq, Eq)]
+pub enum OpenVaultError {
+    /// The collateral chain is not registered in `chain_configs`.
+    UnknownChain,
+    /// No manual MON price is set for the chain (`manual_prices[(chain,"MON")]`).
+    NoPrice,
+    /// Declared collateral ratio is below the minimum.
+    BelowMinCr { cr_e4: u64, min_e4: u64 },
+    /// Declared debt is zero. A zero-debt vault has nothing to mint; allowing it
+    /// would enqueue a wasted zero-value on-chain mint once "deposited".
+    ZeroDebt,
+    /// Enqueuing the Mint op failed (e.g. duplicate idempotency key).
+    QueueError(String),
+    /// `verify_deposit_and_enqueue_mint_in_state` could not find the vault.
+    UnknownVault,
+    /// The developer-supplied `mint_recipient` is not a well-formed EVM address
+    /// (`0x` + 40 hex). Rejected at the boundary so it can never reach the
+    /// tx-building helpers (`tx::abi_word_address`), which panic on malformed
+    /// hex/length deep on the settlement worker path. Carries the bad address.
+    InvalidAddress(String),
+}
+
+/// Reasons `withdraw_collateral_in_state` / `close_chain_vault_in_state` can
+/// reject. No mutation occurs on any error path.
+#[derive(Debug, PartialEq, Eq)]
+pub enum WithdrawError {
+    /// No such vault.
+    UnknownVault,
+    /// No manual MON price is set for the chain (`manual_prices[(chain,"MON")]`).
+    NoPrice,
+    /// Requested amount exceeds the vault's `collateral_amount_e18`.
+    InsufficientCollateral,
+    /// The post-withdrawal collateral ratio would fall below `min_cr_e4`.
+    BelowMinCr { cr_e4: u64, min_e4: u64 },
+    /// Enqueuing the `NativeWithdrawal` op failed (e.g. duplicate idempotency key).
+    QueueError(String),
+    /// `close_chain_vault_in_state` was called on a vault with non-zero debt.
+    HasDebt,
+    /// The developer-supplied `dest_address` is not a well-formed EVM address
+    /// (`0x` + 40 hex). Rejected at the boundary so it can never reach the
+    /// tx-building helpers (`tx::parse_address`), which panic on malformed
+    /// hex/length deep on the settlement worker path. Carries the bad address.
+    InvalidAddress(String),
+    /// Withdraw was attempted on a vault whose status is not `Open`. Only an
+    /// `Open` vault has confirmed, on-chain-deposited collateral and confirmed
+    /// debt; an `AwaitingDeposit` vault holds DECLARED-but-never-deposited
+    /// collateral (paying it out would drain the settlement hot wallet for
+    /// phantom collateral), and a `MintPending` vault has a mint in flight
+    /// against its collateral. Carries the offending status.
+    WrongStatus { status: ChainVaultStatus },
+}
+
+/// Compute the collateral ratio (e4: 25000 == 250.00%) for a foreign-chain vault.
+///
+/// `collateral_e18` is the native-gas-asset amount in wei (1e18 scale).
+/// `price_e8` is the asset's USD price as e8 (e.g. $2.00 == 2_0000_0000).
+/// `debt_e8s` is the icUSD debt as e8s.
+///
+/// Returns `u64::MAX` when `debt_e8s == 0` (an unbounded ratio; a debt-free
+/// vault is trivially over-collateralized). All arithmetic saturates so an
+/// adversarial (or merely huge) input can never panic.
+pub fn collateral_ratio_e4(collateral_e18: u128, price_e8: u64, debt_e8s: u128) -> u64 {
+    if debt_e8s == 0 {
+        return u64::MAX;
+    }
+    // collateral_usd_e8 = collateral_e18 * price_e8 / 1e18. Both operands are
+    // already in their respective fixed-point scales; dividing by 1e18 drops the
+    // wei scale and leaves a USD value in e8. Saturating so a colossal collateral
+    // input cannot overflow.
+    let collateral_usd_e8 = collateral_e18
+        .saturating_mul(price_e8 as u128)
+        / E18;
+    // cr_e4 = collateral_usd_e8 / debt_e8s * 10_000. Multiply first (saturating)
+    // then divide so we keep e4 precision; both are e8 so the e8 scales cancel.
+    let cr = collateral_usd_e8.saturating_mul(10_000) / debt_e8s;
+    cr.min(u64::MAX as u128) as u64
+}
+
+/// Open a foreign-chain vault in the `AwaitingDeposit` state (open-then-verify).
+///
+/// CR-checks the DECLARED collateral against `min_cr_e4`. On success, inserts a
+/// `ChainVaultV1` with:
+/// - `status = AwaitingDeposit`
+/// - `collateral_amount_e18 = collateral_e18` (the declared amount)
+/// - `debt_e8s = 0` (no confirmed debt until the mint is observed at finality)
+/// - `pending_mint_e8s = debt_e8s` (the INTENDED mint amount, surfaced for
+///   deposit-watch to enqueue once the on-chain deposit is verified)
+///
+/// **Enqueues NOTHING.** icUSD is only minted against a verified on-chain
+/// deposit; the mint-enqueue lives in `verify_deposit_and_enqueue_mint_in_state`
+/// (driven by deposit-watch), NOT here.
+///
+/// Rejections (no mutation on any error path):
+/// - chain not in `chain_configs` -> `UnknownChain`
+/// - no `manual_prices[(chain,"MON")]` -> `NoPrice`
+/// - declared CR `< min_cr_e4` -> `BelowMinCr`
+#[allow(clippy::too_many_arguments)]
+pub fn open_chain_vault_in_state(
+    state: &mut MultiChainStateV2,
+    chain: ChainId,
+    owner: Principal,
+    custody_address: String,
+    collateral_e18: u128,
+    debt_e8s: u128,
+    mint_recipient: String,
+    min_cr_e4: u64,
+    now_ns: u64,
+    vault_id: u64,
+) -> Result<(), OpenVaultError> {
+    // Reject an unregistered chain before reading anything else.
+    if !state.chain_configs.contains_key(&chain) {
+        return Err(OpenVaultError::UnknownChain);
+    }
+    // A zero-debt vault has nothing to mint; with debt 0 the CR check is a
+    // no-op (u64::MAX) and deposit-watch would later enqueue a wasted
+    // zero-value on-chain mint. Reject up front. (A zero-collateral vault with
+    // positive debt is already rejected below by the CR check.)
+    if debt_e8s == 0 {
+        return Err(OpenVaultError::ZeroDebt);
+    }
+    // Reject a malformed developer-supplied mint recipient BEFORE it enters
+    // state. An unvalidated address would later panic the tx-building helpers
+    // (`tx::abi_word_address`) deep on the settlement worker path, after the
+    // re-entrancy guard + awaits, permanently blocking the chain's worker.
+    // (`custody_address` is tECDSA-derived and always valid — do NOT validate it.)
+    if !crate::chains::monad::tecdsa::is_valid_evm_address(&mint_recipient) {
+        return Err(OpenVaultError::InvalidAddress(mint_recipient));
+    }
+    // MON price (USD e8) for the declared-collateral CR check.
+    let price_e8 = *state
+        .manual_prices
+        .get(&(chain, "MON".to_string()))
+        .ok_or(OpenVaultError::NoPrice)?;
+
+    let cr_e4 = collateral_ratio_e4(collateral_e18, price_e8, debt_e8s);
+    if cr_e4 < min_cr_e4 {
+        return Err(OpenVaultError::BelowMinCr { cr_e4, min_e4: min_cr_e4 });
+    }
+
+    state.chain_vaults.insert(
+        vault_id,
+        ChainVaultV1 {
+            vault_id,
+            owner,
+            collateral_chain: chain,
+            custody_address,
+            collateral_amount_e18: collateral_e18,
+            // Design B: no confirmed debt until the on-chain mint is observed.
+            debt_e8s: 0,
+            mint_recipient,
+            // The INTENDED mint amount. deposit-watch enqueues exactly this once
+            // the custody-address balance covers the declared collateral.
+            pending_mint_e8s: debt_e8s,
+            status: ChainVaultStatus::AwaitingDeposit,
+            opened_at_ns: now_ns,
+        },
+    );
+    // No mint enqueued — that happens in verify_deposit_and_enqueue_mint_in_state.
+    Ok(())
+}
+
+/// Verify an observed custody-address balance and (if it covers the declared
+/// collateral) flip an `AwaitingDeposit` vault to `MintPending` and enqueue its
+/// `Mint` op. Driven by the deposit-watch loop.
+///
+/// Returns:
+/// - `Ok(true)`  — transitioned + enqueued exactly one Mint.
+/// - `Ok(false)` — no-op: either the vault is not `AwaitingDeposit` (already
+///   processed; idempotent) OR the observed balance does not yet cover the
+///   declared collateral.
+/// - `Err(UnknownVault)` — no such vault.
+/// - `Err(QueueError)`   — enqueue rejected (e.g. duplicate idempotency key).
+///
+/// ## Mutation ordering (no-mutation-on-rejection guarantee)
+///
+/// The enqueue runs FIRST (it can fail on a duplicate idempotency key). Only
+/// after a successful enqueue does the status flip to `MintPending`. So a
+/// rejected enqueue leaves the vault `AwaitingDeposit` and the queue unchanged,
+/// and the next deposit-watch tick retries cleanly.
+pub fn verify_deposit_and_enqueue_mint_in_state(
+    state: &mut MultiChainStateV2,
+    vault_id: u64,
+    observed_balance_e18: u128,
+    now_ns: u64,
+) -> Result<bool, OpenVaultError> {
+    // Read-only validation first — no mutation on any rejection / no-op path.
+    let (chain, recipient, amount_e8s, declared_e18) = {
+        let v = state
+            .chain_vaults
+            .get(&vault_id)
+            .ok_or(OpenVaultError::UnknownVault)?;
+        // Idempotent: anything other than AwaitingDeposit was already processed.
+        if v.status != ChainVaultStatus::AwaitingDeposit {
+            return Ok(false);
+        }
+        (
+            v.collateral_chain,
+            v.mint_recipient.clone(),
+            v.pending_mint_e8s,
+            v.collateral_amount_e18,
+        )
+    };
+
+    // Not enough on-chain collateral yet — no mutation, retry next tick.
+    if observed_balance_e18 < declared_e18 {
+        return Ok(false);
+    }
+
+    // Enqueue FIRST (it can fail on a duplicate idempotency key). The key is
+    // per (chain, vault) so a retried tick cannot double-enqueue.
+    let op = SettlementOp::new(
+        SettlementOpKind::Mint { recipient, amount_e8s, vault_id },
+        format!("mint-{}-{}", chain.0, vault_id),
+        now_ns,
+    );
+    state
+        .settlement_queues
+        .entry(chain)
+        .or_default()
+        .enqueue(op)
+        .map_err(|e| OpenVaultError::QueueError(format!("{e:?}")))?;
+
+    // Only after a successful enqueue: flip the vault to MintPending.
+    let v = state
+        .chain_vaults
+        .get_mut(&vault_id)
+        .expect("vault present: checked above");
+    v.status = ChainVaultStatus::MintPending;
+    Ok(true)
+}
+
+/// Withdraw foreign-chain collateral, enqueuing a native MON transfer-out.
+///
+/// ## Repay is observer-driven, NOT here
+///
+/// There is no separate repay path: the user burns icUSD on Monad
+/// (`IcUSD.burn`) and the Task-9 burn-watch (`deposit_watch::run_observer` ->
+/// `apply_burn_to_state`) decrements `debt_e8s` + chain supply at finality.
+/// This helper only moves COLLATERAL out; it never touches `debt_e8s`,
+/// `chain_supplies`, or `pending_mint_e8s`.
+///
+/// ## Semantics
+///
+/// - `UnknownVault` if the vault is absent.
+/// - `InsufficientCollateral` if `amount_e18 > collateral_amount_e18`.
+/// - `NoPrice` if no `manual_prices[(chain,"MON")]` is set.
+/// - When `debt_e8s > 0`, the REMAINING collateral
+///   (`collateral_amount_e18 - amount_e18`) is CR-checked against `min_cr_e4`;
+///   below it -> `BelowMinCr`. A debt-free vault skips the CR check (any
+///   remainder is trivially over-collateralized).
+///
+/// On success: enqueues a `NativeWithdrawal { recipient: dest_address,
+/// amount_e18, vault_id }` op (idempotency key
+/// `withdraw-{chain}-{vault_id}-{now_ns}`), RESERVES the collateral by
+/// decrementing `collateral_amount_e18` to the remainder, and flips the vault
+/// to `Closing` iff `remaining == 0 && debt_e8s == 0`. The settlement worker
+/// flips `Closing -> Closed` once the on-chain transfer confirms (and ADDS the
+/// reserved collateral back if the transfer reverts).
+///
+/// ## Reserve-at-enqueue
+///
+/// Decrementing `collateral_amount_e18` at enqueue time is the standard CDP
+/// reserve-on-request pattern: a second withdraw cannot double-spend the same
+/// collateral while the first is still in flight. A reverted transfer restores
+/// the reserve in `settlement::confirm_op`.
+///
+/// ## Mutation ordering (no-mutation-on-rejection guarantee)
+///
+/// 1. Validate (vault lookup, balance, price, CR) — no mutation on any reject.
+/// 2. Enqueue FIRST (can fail on a duplicate idempotency key -> `QueueError`,
+///    no collateral mutation).
+/// 3. Only after a successful enqueue: decrement collateral + set `Closing`.
+///
+/// So a rejected enqueue leaves the vault and its collateral untouched.
+pub fn withdraw_collateral_in_state(
+    state: &mut MultiChainStateV2,
+    vault_id: u64,
+    amount_e18: u128,
+    dest_address: String,
+    min_cr_e4: u64,
+    now_ns: u64,
+) -> Result<(), WithdrawError> {
+    // Step 1: read-only validation. No mutation on any rejection path.
+    let (chain, remaining, debt_e8s) = {
+        let v = state
+            .chain_vaults
+            .get(&vault_id)
+            .ok_or(WithdrawError::UnknownVault)?;
+        // CRITICAL: `Open` is the ONLY state a withdraw can proceed from — the
+        // only state with confirmed, on-chain-deposited collateral AND confirmed
+        // debt. In `AwaitingDeposit` the collateral is DECLARED but never
+        // deposited (debt 0 would skip the CR check below), so paying it out from
+        // the settlement hot wallet would drain protocol funds for phantom
+        // collateral. In `MintPending` a mint is in flight against the collateral.
+        // `Closing`/`Closed` are terminal. Reject before reading balance/price or
+        // mutating anything. (close_chain_vault_in_state delegates here, so it
+        // inherits this gate after its own debt==0 check.)
+        if v.status != ChainVaultStatus::Open {
+            return Err(WithdrawError::WrongStatus { status: v.status.clone() });
+        }
+        if amount_e18 > v.collateral_amount_e18 {
+            return Err(WithdrawError::InsufficientCollateral);
+        }
+        let remaining = v.collateral_amount_e18 - amount_e18;
+        (v.collateral_chain, remaining, v.debt_e8s)
+    };
+
+    // Price is needed for the post-withdrawal CR check (only when debt remains).
+    let price_e8 = *state
+        .manual_prices
+        .get(&(chain, "MON".to_string()))
+        .ok_or(WithdrawError::NoPrice)?;
+
+    // A debt-free vault is trivially over-collateralized; skip the CR check.
+    if debt_e8s > 0 {
+        let cr_e4 = collateral_ratio_e4(remaining, price_e8, debt_e8s);
+        if cr_e4 < min_cr_e4 {
+            return Err(WithdrawError::BelowMinCr { cr_e4, min_e4: min_cr_e4 });
+        }
+    }
+
+    // Reject a malformed developer-supplied destination BEFORE enqueuing. An
+    // unvalidated address would later panic the tx-building helper
+    // (`tx::parse_address`) deep on the settlement worker path, after the
+    // re-entrancy guard + awaits, permanently blocking the chain's worker. This
+    // is read-only (still no mutation on this rejection path).
+    if !crate::chains::monad::tecdsa::is_valid_evm_address(&dest_address) {
+        return Err(WithdrawError::InvalidAddress(dest_address));
+    }
+
+    // Step 2: enqueue FIRST (it can fail on a duplicate idempotency key). The
+    // key is per (chain, vault, now_ns) so distinct withdraws never collide.
+    let op = SettlementOp::new(
+        SettlementOpKind::NativeWithdrawal {
+            recipient: dest_address,
+            amount_e18,
+            vault_id,
+        },
+        format!("withdraw-{}-{}-{}", chain.0, vault_id, now_ns),
+        now_ns,
+    );
+    state
+        .settlement_queues
+        .entry(chain)
+        .or_default()
+        .enqueue(op)
+        .map_err(|e| WithdrawError::QueueError(format!("{e:?}")))?;
+
+    // Step 3: only after a successful enqueue — reserve the collateral and flip
+    // to Closing when the vault is now empty AND debt-free.
+    let v = state
+        .chain_vaults
+        .get_mut(&vault_id)
+        .expect("vault present: checked above");
+    v.collateral_amount_e18 = remaining;
+    if remaining == 0 && debt_e8s == 0 {
+        v.status = ChainVaultStatus::Closing;
+    }
+    Ok(())
+}
+
+/// Close a debt-free vault by withdrawing the FULL remaining collateral.
+///
+/// Requires `debt_e8s == 0` (`HasDebt` otherwise) — debt must first be repaid
+/// by burning icUSD on Monad (observer-driven, see
+/// `withdraw_collateral_in_state`). Then delegates to
+/// `withdraw_collateral_in_state` for the full `collateral_amount_e18`, which
+/// inherits the `status == Open` gate (a non-Open vault rejects with
+/// `WrongStatus`), reserves the collateral, and flips the vault to `Closing`
+/// (the worker flips it to `Closed` on the transfer's confirmation).
+///
+/// ## Zero-collateral short-circuit
+///
+/// If the vault is `Open`, debt-free, AND already holds zero collateral, this
+/// stamps it `Closed` directly and returns `Ok(())` WITHOUT enqueuing a
+/// zero-value `NativeWithdrawal`. A 21k-gas native transfer of value 0 from the
+/// settlement hot wallet is pure waste, and this protocol is gas/cycle-sensitive.
+/// (A non-Open zero-collateral vault is NOT short-circuited — it falls through
+/// to the delegate's gate and rejects with `WrongStatus`.)
+pub fn close_chain_vault_in_state(
+    state: &mut MultiChainStateV2,
+    vault_id: u64,
+    dest_address: String,
+    min_cr_e4: u64,
+    now_ns: u64,
+) -> Result<(), WithdrawError> {
+    // Validate debt-free + capture the full remaining collateral and status (no
+    // mutation on any rejection path).
+    let (full, status) = {
+        let v = state
+            .chain_vaults
+            .get(&vault_id)
+            .ok_or(WithdrawError::UnknownVault)?;
+        if v.debt_e8s != 0 {
+            return Err(WithdrawError::HasDebt);
+        }
+        (v.collateral_amount_e18, v.status.clone())
+    };
+
+    // Degenerate close: an Open, debt-free vault with no collateral to return.
+    // Stamp Closed directly — enqueuing a zero-value transfer would burn 21k gas
+    // for nothing. Restricted to `Open` so a non-Open (Closing/Closed/etc.)
+    // zero-collateral vault still rejects via the delegate's WrongStatus gate.
+    if full == 0 && status == ChainVaultStatus::Open {
+        let v = state
+            .chain_vaults
+            .get_mut(&vault_id)
+            .expect("vault present: checked above");
+        v.status = ChainVaultStatus::Closed;
+        return Ok(());
+    }
+
+    withdraw_collateral_in_state(state, vault_id, full, dest_address, min_cr_e4, now_ns)
+}

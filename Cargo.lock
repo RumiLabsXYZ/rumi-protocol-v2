@@ -87,6 +87,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "alloy-rlp"
+version = "0.3.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc90b1e703d3c03f4ff7f48e82dd0bc1c8211ab7d079cd836a06fcfeb06651cb"
+dependencies = [
+ "arrayvec 0.7.6",
+ "bytes",
+]
+
+[[package]]
 name = "android-tzdata"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5763,6 +5773,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "monad_rpc_mock"
+version = "0.1.0"
+dependencies = [
+ "candid",
+ "ic-cdk 0.12.2",
+ "ic-cdk-macros 0.8.4",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "more-asserts"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7196,6 +7217,7 @@ dependencies = [
 name = "rumi_protocol_backend"
 version = "0.1.0"
 dependencies = [
+ "alloy-rlp",
  "assert_matches",
  "async-trait",
  "candid",
@@ -7203,6 +7225,7 @@ dependencies = [
  "ciborium",
  "flate2",
  "futures",
+ "hex",
  "ic-base-types",
  "ic-canister-log 0.2.0 (git+https://github.com/Rumi-Protocol/ic?rev=fc278709)",
  "ic-canisters-http-types",
@@ -7219,6 +7242,7 @@ dependencies = [
  "ic0 0.18.11",
  "icrc-ledger-client-cdk",
  "icrc-ledger-types 0.1.8 (git+https://github.com/Rumi-Protocol/ic?rev=fc278709)",
+ "k256",
  "lazy_static",
  "num-traits",
  "pocket-ic",
@@ -7230,6 +7254,7 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "sha2",
+ "sha3",
  "xrc-mock",
 ]
 

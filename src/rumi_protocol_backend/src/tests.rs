@@ -179,3 +179,47 @@ fn supply_audit_round_trips_via_candid() {
     assert_eq!(back.total_e8s, 150_000);
     assert_eq!(back.per_chain.len(), 2);
 }
+
+#[test]
+fn monad_event_variants_round_trip_via_candid() {
+    use candid::{Decode, Encode};
+    use crate::event::Event;
+    use crate::chains::config::ChainId;
+
+    let events = vec![
+        Event::DepositObserved {
+            chain_id: ChainId(10143), vault_id: 1,
+            custody_address: "0xa".into(), amount_e18: 5, tx_hash: "0xh".into(),
+            block_number: 100, timestamp: 1,
+        },
+        Event::ChainMintSubmitted {
+            chain_id: ChainId(10143), vault_id: 1, op_id: 0,
+            recipient: "0xr".into(), amount_e8s: 10, tx_hash: "0xs".into(), timestamp: 2,
+        },
+        Event::ChainMintConfirmed {
+            chain_id: ChainId(10143), vault_id: 1, op_id: 0,
+            amount_e8s: 10, tx_hash: "0xs".into(), block_number: 102, timestamp: 3,
+        },
+        Event::ChainBurnObserved {
+            chain_id: ChainId(10143), vault_id: 1,
+            amount_e8s: 4, tx_hash: "0xb".into(), block_number: 110, timestamp: 4,
+        },
+        Event::WithdrawalSigned {
+            chain_id: ChainId(10143), vault_id: 1, op_id: 1,
+            recipient: "0xw".into(), amount_e18: 5, tx_hash: "0xt".into(), timestamp: 5,
+        },
+        Event::ChainSettlementFailed {
+            chain_id: ChainId(10143), op_id: 1, reason: "reverted".into(), timestamp: 6,
+        },
+        Event::ChainReorgDetected {
+            chain_id: ChainId(10143), observed_block: 100, reorg_depth: 5, timestamp: 7,
+        },
+        Event::ChainHotWalletLow {
+            chain_id: ChainId(10143), balance_e18: 1, threshold_e18: 100, timestamp: 8,
+        },
+    ];
+    for e in events {
+        let bytes = Encode!(&e).expect("encode");
+        let _: Event = Decode!(&bytes, Event).expect("decode");
+    }
+}

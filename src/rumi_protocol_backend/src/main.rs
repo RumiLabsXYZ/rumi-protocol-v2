@@ -190,6 +190,12 @@ thread_local! {
         const { std::cell::Cell::new(None) };
     static VAULT_CHECK_TIMER_ID: std::cell::Cell<Option<ic_cdk_timers::TimerId>> =
         const { std::cell::Cell::new(None) };
+    // Phase 1b Task 15: Monad async loops. Same transient (not-persisted)
+    // lifecycle — re-assigned fresh ids by `setup_timers` on every upgrade.
+    static SETTLEMENT_TIMER_ID: std::cell::Cell<Option<ic_cdk_timers::TimerId>> =
+        const { std::cell::Cell::new(None) };
+    static OBSERVER_TIMER_ID: std::cell::Cell<Option<ic_cdk_timers::TimerId>> =
+        const { std::cell::Cell::new(None) };
 }
 
 fn register_xrc_fetch_timer() {
@@ -229,6 +235,45 @@ fn register_vault_check_timer() {
         let new_id = ic_cdk_timers::set_timer_interval(
             std::time::Duration::from_secs(secs),
             || ic_cdk::spawn(rumi_protocol_backend::xrc::vault_check_tick()),
+        );
+        cell.set(Some(new_id));
+    });
+}
+
+/// Phase 1b Task 15: register Timer D (Monad settlement fan-out). Clears any
+/// existing id and re-registers in place so the setter can re-tune live.
+///
+/// FLOOR: a 0 interval (serde-default-missing on an old snapshot, or a bad
+/// setter value that slipped past validation) is forced to 30s, never 0 — a 0s
+/// `set_timer_interval` is a busy-loop and the #1 cycle burner (this is the
+/// heartbeat-cost regression the protocol removed a heartbeat to avoid).
+fn register_settlement_timer() {
+    let secs = read_state(|s| s.settlement_tick_interval_secs);
+    let secs = if secs == 0 { 30 } else { secs.max(1) };
+    SETTLEMENT_TIMER_ID.with(|cell| {
+        if let Some(old) = cell.get() {
+            ic_cdk_timers::clear_timer(old);
+        }
+        let new_id = ic_cdk_timers::set_timer_interval(
+            std::time::Duration::from_secs(secs),
+            || ic_cdk::spawn(rumi_protocol_backend::chains::monad::settlement::settlement_tick()),
+        );
+        cell.set(Some(new_id));
+    });
+}
+
+/// Phase 1b Task 15: register the Monad inbound observer fan-out. Same
+/// clear-and-re-register-in-place + 0-floor protection as the settlement timer.
+fn register_observer_timer() {
+    let secs = read_state(|s| s.observer_tick_interval_secs);
+    let secs = if secs == 0 { 30 } else { secs.max(1) };
+    OBSERVER_TIMER_ID.with(|cell| {
+        if let Some(old) = cell.get() {
+            ic_cdk_timers::clear_timer(old);
+        }
+        let new_id = ic_cdk_timers::set_timer_interval(
+            std::time::Duration::from_secs(secs),
+            || ic_cdk::spawn(rumi_protocol_backend::chains::monad::deposit_watch::observer_tick()),
         );
         cell.set(Some(new_id));
     });
@@ -297,6 +342,18 @@ fn setup_timers() {
     ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(3600), || {
         capture_protocol_snapshot();
     });
+
+    // ── Phase 1b Task 15: Monad async loops (Timer D + inbound observer) ─────
+    // Both tick fns fan out over registered+enabled chains and are NO-OPS when
+    // no chain is registered, so they are safe to run on the staging canister
+    // before Monad is configured. Cadences live in State (default 30s) and are
+    // tunable via `set_settlement_tick_interval_secs` /
+    // `set_observer_tick_interval_secs`, which re-register in place. The register
+    // helpers FLOOR a 0 interval to 30s (never a busy-loop). Per-chain
+    // re-entrancy guards in run_settlement/run_observer prevent overlapping ticks
+    // from double-processing an op.
+    register_settlement_timer();
+    register_observer_timer();
 }
 
 fn capture_protocol_snapshot() {
@@ -572,6 +629,17 @@ fn post_upgrade(arg: ProtocolArg) {
         s.is_timer_running = false;
     });
 
+    // Phase 1b breadcrumb: confirm the multi_chain root survived the upgrade.
+    // The V1->V2 migration happens automatically via the `#[serde(default)]`
+    // in-place decode of `State.multi_chain` (four V1 fields map across by
+    // name; the five new V2 fields hit serde-default and come up empty). No
+    // explicit migrate call is needed here; `migrate_multi_chain_state` exists
+    // as the unit-tested template for the NEXT version bump.
+    let (chains, chain_vaults) = read_state(|s| {
+        (s.multi_chain.chain_configs.len(), s.multi_chain.chain_vaults.len())
+    });
+    log!(INFO, "[post_upgrade] multi_chain: {} chains, {} chain_vaults", chains, chain_vaults);
+
     setup_timers();
 }
 
@@ -827,6 +895,352 @@ fn set_chain_config(
             Ok(())
         }
         Err(e) => Err(ProtocolError::ChainAdmin(format!("{:?}", e))),
+    }
+}
+
+/// Phase 1b Task 12: open a foreign-chain (Monad) vault, OPEN-THEN-VERIFY.
+///
+/// Creates the vault in `AwaitingDeposit` with the DECLARED collateral and the
+/// intended mint in `pending_mint_e8s`; enqueues NO mint. The caller then reads
+/// the vault's `custody_address` (Task 14 `get_chain_vault`) and deposits MON
+/// there. deposit-watch verifies the on-chain balance covers the declared
+/// collateral at finality, flips the vault to `MintPending`, and enqueues the
+/// mint. icUSD is only ever minted against a verified on-chain deposit.
+///
+/// Developer-gated for Phase 1b (matches the chain-admin endpoints). Async
+/// because deriving the per-user custody address calls tECDSA. Borrow
+/// discipline: no `read_state`/`mutate_state` borrow is held across the
+/// `derive_evm_address(...).await`.
+#[candid_method(update)]
+#[update]
+async fn open_chain_vault(
+    collateral_chain: rumi_protocol_backend::chains::config::ChainId,
+    collateral_e18: u128,
+    debt_e8s: u128,
+    mint_recipient: String,
+) -> Result<u64, ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    // Reserve the vault id BEFORE the async derive so the derivation path
+    // (chain, caller, vault_id) is unique even across concurrent opens.
+    let vault_id = mutate_state(|s| {
+        s.chain_vault_id_counter += 1;
+        s.chain_vault_id_counter
+    });
+    let path = rumi_protocol_backend::chains::monad::tecdsa::custody_derivation_path(
+        collateral_chain,
+        caller,
+        vault_id,
+    );
+    let (_pubkey, custody) =
+        rumi_protocol_backend::chains::monad::tecdsa::derive_evm_address(path)
+            .await
+            .map_err(|e| ProtocolError::ChainAdmin(format!("derive: {e}")))?;
+    let now = ic_cdk::api::time();
+    let res = mutate_state(|s| {
+        rumi_protocol_backend::chains::monad::chain_vault::open_chain_vault_in_state(
+            &mut s.multi_chain,
+            collateral_chain,
+            caller,
+            custody,
+            collateral_e18,
+            debt_e8s,
+            mint_recipient,
+            rumi_protocol_backend::chains::monad::chain_vault::MONAD_MIN_CR_E4,
+            now,
+            vault_id,
+        )
+    });
+    res.map(|()| vault_id)
+        .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
+}
+
+/// Phase 1b Task 13: withdraw foreign-chain (Monad) collateral.
+///
+/// CR-checks the REMAINING collateral against `MONAD_MIN_CR_E4` (debt-free
+/// vaults skip the check), RESERVES the withdrawn amount (decrements
+/// `collateral_amount_e18` at enqueue), and enqueues a `NativeWithdrawal` op
+/// that Timer D signs and broadcasts. A vault that becomes empty AND debt-free
+/// flips to `Closing` here and `Closed` once the transfer confirms.
+///
+/// There is NO repay endpoint: the user burns icUSD on Monad and the burn-watch
+/// observer decrements `debt_e8s` + chain supply. This path moves only
+/// collateral. Synchronous — `dest_address` is supplied by the caller, so no
+/// tECDSA derive is needed; signing happens later in Timer D. Developer-gated.
+#[candid_method(update)]
+#[update]
+fn withdraw_chain_collateral(
+    vault_id: u64,
+    amount_e18: u128,
+    dest_address: String,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let now = ic_cdk::api::time();
+    mutate_state(|s| {
+        rumi_protocol_backend::chains::monad::chain_vault::withdraw_collateral_in_state(
+            &mut s.multi_chain,
+            vault_id,
+            amount_e18,
+            dest_address,
+            rumi_protocol_backend::chains::monad::chain_vault::MONAD_MIN_CR_E4,
+            now,
+        )
+    })
+    .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
+}
+
+/// Phase 1b Task 13: close a debt-free foreign-chain (Monad) vault.
+///
+/// Requires the vault's `debt_e8s == 0` (repay first by burning icUSD on
+/// Monad), then withdraws the FULL remaining collateral to `dest_address`
+/// (vault -> `Closing`, then `Closed` on the transfer's confirmation).
+/// Synchronous + developer-gated (mirrors `withdraw_chain_collateral`).
+#[candid_method(update)]
+#[update]
+fn close_chain_vault(vault_id: u64, dest_address: String) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let now = ic_cdk::api::time();
+    mutate_state(|s| {
+        rumi_protocol_backend::chains::monad::chain_vault::close_chain_vault_in_state(
+            &mut s.multi_chain,
+            vault_id,
+            dest_address,
+            rumi_protocol_backend::chains::monad::chain_vault::MONAD_MIN_CR_E4,
+            now,
+        )
+    })
+    .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
+}
+
+// Phase 1b Task 14: query + admin surface for the foreign-chain working set.
+//
+// NOTE: `get_user_deposit_address` is intentionally omitted. Custody is
+// PER-VAULT (the address is derived with nonce = vault_id inside
+// `open_chain_vault`), so a user's deposit address is the vault's
+// `custody_address`, returned by `get_chain_vault` after open. A nonce=0
+// per-user address would be one NO vault ever uses — surfacing it would be
+// misleading. Use `get_chain_vault(vault_id)` for the deposit address.
+
+/// Derive the per-chain SETTLEMENT (minter) address — the tECDSA-derived EVM
+/// address whose private share the canister controls for that chain. Operators
+/// grant `MINTER_ROLE` on `IcUSD.sol` to this address. Async (the derive hits
+/// the management/signing subnet). Developer-gated: derivation costs cycles and
+/// a signing-subnet call, so it is not exposed to arbitrary callers even though
+/// it is read-only. No state borrow is held across the `.await`.
+#[candid_method(update)]
+#[update]
+async fn get_chain_settlement_address(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Result<String, ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let path = rumi_protocol_backend::chains::monad::tecdsa::settlement_derivation_path(chain);
+    rumi_protocol_backend::chains::monad::tecdsa::derive_evm_address(path)
+        .await
+        .map(|(_pubkey, addr)| addr)
+        .map_err(|e| ProtocolError::ChainAdmin(format!("derive: {e}")))
+}
+
+/// Return a single foreign-chain vault by id (the `custody_address` field is the
+/// user's deposit address). Public read-only query; no gate.
+#[candid_method(query)]
+#[query]
+fn get_chain_vault(
+    vault_id: u64,
+) -> Option<rumi_protocol_backend::chains::monad::chain_vault::ChainVaultV1> {
+    read_state(|s| s.multi_chain.chain_vaults.get(&vault_id).cloned())
+}
+
+/// List the foreign-chain vaults whose `collateral_chain == chain`, CLAMPED to
+/// at most 500 entries. The clamp follows the Wave-9a DOS-pagination convention:
+/// an unbounded query over a growing map is a cycle-DoS vector. A caller needing
+/// the full set past 500 must page via a future cursor endpoint. Public query.
+#[candid_method(query)]
+#[query]
+fn list_chain_vaults(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Vec<rumi_protocol_backend::chains::monad::chain_vault::ChainVaultV1> {
+    const MAX_CHAIN_VAULTS_RETURNED: usize = 500;
+    read_state(|s| {
+        s.multi_chain
+            .chain_vaults
+            .values()
+            .filter(|v| v.collateral_chain == chain)
+            .take(MAX_CHAIN_VAULTS_RETURNED)
+            .cloned()
+            .collect()
+    })
+}
+
+/// Record the deployed `IcUSD.sol` (or equivalent) contract address for a chain.
+/// Developer-gated.
+#[candid_method(update)]
+#[update]
+fn set_chain_contract(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    address: String,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    // Fail-fast on a malformed contract address: an unvalidated value flows into
+    // the mint calldata's `to` (`tx::abi_word_address`) and panics deep on the
+    // settlement worker path, after the re-entrancy guard + awaits, permanently
+    // blocking the chain's worker. A deploy-time typo is enough.
+    if !rumi_protocol_backend::chains::monad::tecdsa::is_valid_evm_address(&address) {
+        return Err(ProtocolError::ChainAdmin(format!("invalid EVM address: {address}")));
+    }
+    mutate_state(|s| {
+        s.multi_chain.chain_contracts.insert(chain, address.clone());
+    });
+    log!(INFO, "[set_chain_contract] chain={:?} address={}", chain, address);
+    Ok(())
+}
+
+/// Set a manual collateral price override for `(chain, symbol)` as a USD e8
+/// value (e.g. $2.00 == 2_0000_0000). Phase 1b uses manual prices for foreign
+/// collateral; a real oracle is a later task. Developer-gated.
+#[candid_method(update)]
+#[update]
+fn set_manual_collateral_price(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    symbol: String,
+    price_e8: u64,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    mutate_state(|s| {
+        s.multi_chain.manual_prices.insert((chain, symbol.clone()), price_e8);
+    });
+    log!(INFO, "[set_manual_collateral_price] chain={:?} symbol={} price_e8={}", chain, symbol, price_e8);
+    Ok(())
+}
+
+/// Override the EVM RPC canister principal the Monad wrapper talks to. This is
+/// the PocketIC/staging override read via `State::evm_rpc_override()`; on
+/// mainnet it points at the production EVM RPC canister. Developer-gated.
+#[candid_method(update)]
+#[update]
+fn set_evm_rpc_principal(principal: candid::Principal) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    mutate_state(|s| {
+        s.evm_rpc_principal_override = Some(principal);
+    });
+    log!(INFO, "[set_evm_rpc_principal] principal={}", principal);
+    Ok(())
+}
+
+/// Clear the global supply-invariant halt (set by the Timer-B self-check on
+/// drift). Use only AFTER manually confirming `total_supply_all_chains_e8s`
+/// matches `total_chain_vault_debt_e8s`. Developer-gated.
+#[candid_method(update)]
+#[update]
+fn clear_invariant_halt() -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    mutate_state(|s| {
+        s.multi_chain.invariant_halted = false;
+    });
+    log!(INFO, "[clear_invariant_halt] global invariant halt cleared");
+    Ok(())
+}
+
+/// Clear a chain's reorg circuit breaker. Resets BOTH `reorg_halted` AND the
+/// `reorg_suspect_streak` debounce counter (Task 11): clearing the halt without
+/// also zeroing the streak would let the very next suspect observer tick push
+/// the streak back over `REORG_CONFIRM_TICKS` and re-halt the chain.
+/// Developer-gated.
+#[candid_method(update)]
+#[update]
+fn clear_reorg_halt(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    mutate_state(|s| {
+        s.multi_chain.reorg_halted.remove(&chain);
+        s.multi_chain.reorg_suspect_streak.remove(&chain);
+    });
+    log!(INFO, "[clear_reorg_halt] chain={:?} reorg halt + suspect streak cleared", chain);
+    Ok(())
+}
+
+/// Seed the burn-watch cursor to the current chain tip when activating a chain
+/// (Gate-4 prerequisite). Events before the seed are not scanned (none exist
+/// pre-activation). 0 = unseeded (burn-watch inert; deposit-watch still runs).
+/// Developer-gated.
+#[candid_method(update)]
+#[update]
+fn set_last_observed_block(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    block: u64,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    mutate_state(|s| {
+        s.multi_chain.last_observed_block.insert(chain, block);
+    });
+    log!(INFO, "[set_last_observed_block] chain={:?} block={}", chain, block);
+    Ok(())
+}
+
+/// Read the burn-watch cursor (`last_observed_block`) for a chain. Returns 0 when
+/// unseeded. Ungated query — used by tests and Task-D staging verification to
+/// confirm the cursor advances.
+#[candid_method(query)]
+#[query]
+fn get_last_observed_block(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> u64 {
+    read_state(|s| s.multi_chain.last_observed_block.get(&chain).copied().unwrap_or(0))
+}
+
+/// Delete a chain entirely. Permitted only when the chain carries ZERO supply
+/// and NO chain_vaults reference it (so deletion cannot orphan debt/collateral);
+/// purges every per-chain map. Developer-gated. This DELETES (not disables) a
+/// chain, so it does not record `Event::ChainDisabled`.
+#[candid_method(update)]
+#[update]
+fn delete_chain(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let result = mutate_state(|s| {
+        rumi_protocol_backend::chains::admin::delete_chain_in_state(&mut s.multi_chain, chain)
+    });
+    match result {
+        Ok(()) => {
+            log!(INFO, "[delete_chain] chain={:?} deleted (all per-chain state purged)", chain);
+            Ok(())
+        }
+        Err(e) => Err(ProtocolError::ChainAdmin(format!("{e:?}"))),
     }
 }
 
@@ -4083,6 +4497,65 @@ async fn set_vault_check_tick_interval_secs(secs: u64) -> Result<(), ProtocolErr
     mutate_state(|s| s.vault_check_tick_interval_secs = secs);
     register_vault_check_timer();
     log!(INFO, "[set_vault_check_tick_interval_secs] Timer C interval set to {}s", secs);
+    Ok(())
+}
+
+/// Phase 1b Task 15: tune the Timer D (Monad outbound settlement fan-out)
+/// interval in seconds. Default 30. Re-registers in place.
+///
+/// Rejects `secs == 0` (belt-and-suspenders with the hard floor in
+/// `register_settlement_timer`, which would coerce a 0 to 30 anyway). Lowering
+/// makes mint/withdrawal settlement land faster (one op per chain per tick) at
+/// the cost of more frequent EVM RPC polling; raising slows settlement
+/// throughput. The per-chain re-entrancy guard means a tick that out-runs the
+/// interval is simply skipped, so a low interval never stacks concurrent runs.
+#[candid_method(update)]
+#[update]
+async fn set_settlement_tick_interval_secs(secs: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set the settlement tick interval".to_string(),
+        ));
+    }
+    if secs == 0 {
+        return Err(ProtocolError::GenericError(
+            "Settlement tick interval must be > 0".to_string(),
+        ));
+    }
+    mutate_state(|s| s.settlement_tick_interval_secs = secs);
+    register_settlement_timer();
+    log!(INFO, "[set_settlement_tick_interval_secs] Timer D interval set to {}s", secs);
+    Ok(())
+}
+
+/// Phase 1b Task 15: tune the Monad inbound observer fan-out interval in
+/// seconds. Default 30. Re-registers in place.
+///
+/// Rejects `secs == 0` (belt-and-suspenders with the hard floor in
+/// `register_observer_timer`). Lowering tightens deposit-detection and
+/// burn-observation latency at the cost of more frequent EVM RPC polling;
+/// raising slows it. Same per-chain re-entrancy-guard skip behavior as the
+/// settlement timer.
+#[candid_method(update)]
+#[update]
+async fn set_observer_tick_interval_secs(secs: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set the observer tick interval".to_string(),
+        ));
+    }
+    if secs == 0 {
+        return Err(ProtocolError::GenericError(
+            "Observer tick interval must be > 0".to_string(),
+        ));
+    }
+    mutate_state(|s| s.observer_tick_interval_secs = secs);
+    register_observer_timer();
+    log!(INFO, "[set_observer_tick_interval_secs] Observer interval set to {}s", secs);
     Ok(())
 }
 
