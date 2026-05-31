@@ -279,6 +279,15 @@ fn init() {
     });
 }
 
+// ─── Provider limits ─────────────────────────────────────────────────────────
+
+/// Max `eth_getLogs` block range the Monad testnet RPC accepts: `toBlock -
+/// fromBlock` must be <= this. A difference of 101 returns HTTP 413 / JSON-RPC
+/// -32614. Must match `MONAD_GETLOGS_MAX_RANGE` in the backend's
+/// `chains/monad/evm_rpc.rs` so the mock's cap and the wrapper's chunk size
+/// agree (a chunk produced at exactly the wrapper's max must pass here).
+const MONAD_GETLOGS_MAX_RANGE: u64 = 100;
+
 // ─── JSON helpers ───────────────────────────────────────────────────────────
 
 fn hex_u128(v: u128) -> String {
@@ -343,6 +352,41 @@ fn request(_service: RpcService, json_payload: String, _max_response_bytes: u64)
                 message: msg,
             },
         )));
+    }
+
+    // Provider fidelity (Gate-4 getLogs bug): the Monad testnet RPC caps
+    // `eth_getLogs` at a 100-block RANGE — `toBlock - fromBlock` must be <= 100;
+    // a difference of 101 returns HTTP 413 with JSON-RPC code -32614
+    // ("eth_getLogs is limited to a 100 range"). Empirically confirmed against
+    // https://testnet-rpc.monad.xyz on 2026-05-31. The EVM RPC canister surfaces
+    // that 413 to the backend as `HttpOutcallError::InvalidHttpJsonRpcResponse`.
+    // The mock enforces the SAME cap so the wrapper's `get_logs` chunking is
+    // exercised: an un-chunked wide-range scan fails here exactly as it does on
+    // staging, and only succeeds once `get_logs` pages the range into <=100-block
+    // sub-queries. (Mint-confirm scans a single block `[b, b]` — diff 0 — and is
+    // unaffected.)
+    if method == "eth_getLogs" {
+        let filter = params.get(0).cloned().unwrap_or(serde_json::Value::Null);
+        let from = filter
+            .get("fromBlock")
+            .and_then(|v| v.as_str())
+            .and_then(parse_hex_u64);
+        let to = filter
+            .get("toBlock")
+            .and_then(|v| v.as_str())
+            .and_then(parse_hex_u64);
+        if let (Some(f), Some(t)) = (from, to) {
+            if t.saturating_sub(f) > MONAD_GETLOGS_MAX_RANGE {
+                return RequestResult::Err(RpcError::HttpOutcallError(
+                    HttpOutcallError::InvalidHttpJsonRpcResponse(InvalidHttpJsonRpcRecord {
+                        status: 413,
+                        body: r#"{"jsonrpc":"2.0","id":0,"error":{"code":-32614,"message":"eth_getLogs is limited to a 100 range"}}"#
+                            .to_string(),
+                        parsing_error: None,
+                    }),
+                ));
+            }
+        }
     }
 
     let response_json: String = SCRIPT.with(|s| {
