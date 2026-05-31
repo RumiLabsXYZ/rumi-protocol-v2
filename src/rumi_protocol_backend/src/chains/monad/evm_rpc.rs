@@ -682,6 +682,14 @@ pub async fn fetch_block_numbers(chain: ChainId) -> Result<(u64, u64), String> {
     }
 }
 
+/// True iff block `block + finality_depth` exists & is final on `chain` — i.e.
+/// `block` is buried under at least `finality_depth` confirmations. Consensus-safe
+/// (probes a SPECIFIC number). On a probe error, propagates Err (caller retries).
+pub async fn is_block_final(chain: ChainId, block: u64, finality_depth: u64) -> Result<bool, String> {
+    let target = block.saturating_add(finality_depth);
+    Ok(eth_get_block_number_at(chain, target).await?.is_some())
+}
+
 /// Returns the ETH/native balance (in wei) of `address` at the latest block.
 pub async fn get_balance(chain: ChainId, address: &str) -> Result<u128, String> {
     let payload = format!(
