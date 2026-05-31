@@ -338,15 +338,30 @@ pub async fn run_observer(chain: ChainId) {
         }
     };
 
-    // ── Hot-wallet gas-balance refresh (Task 11) ─────────────────────────────
+    // ── Hot-wallet gas-balance refresh (Task 11; cycle-gated) ────────────────
     //
     // Derive the settlement (minter) address and cache its native MON balance so
     // the submit-path gas gate (`hardening::hot_wallet_ok`) has data and the
-    // Task-14 query surface can report it. Keeping the tECDSA + RPC cost here
-    // (once per observer tick) avoids paying it on every settlement submit.
-    // Tolerant of errors: a failed derive or balance read logs and continues —
-    // it must NOT abort the observer (reads/burn-watch must still run).
-    refresh_hot_wallet_balance(chain).await;
+    // Task-14 query surface can report it. Tolerant of errors: a failed derive or
+    // balance read logs and continues — it must NOT abort the observer.
+    //
+    // CYCLE GATE: the cached balance ONLY feeds the submit-path gas gate, so we
+    // refresh it only when this chain has a non-terminal settlement op (a mint /
+    // withdraw about to submit or confirm). On idle ticks (nothing queued) this
+    // saves one `eth_getBalance` outcall per tick (~764M cycles each, measured).
+    // An unpopulated cache is treated as fail-open by `hot_wallet_ok`, so skipping
+    // the refresh never blocks a future submit; the first tick that sees a queued
+    // op refreshes before the worker needs it.
+    let has_settlement_work = read_state(|s| {
+        s.multi_chain
+            .settlement_queues
+            .get(&chain)
+            .map(|q| q.has_active_op())
+            .unwrap_or(false)
+    });
+    if has_settlement_work {
+        refresh_hot_wallet_balance(chain).await;
+    }
 
     // Read the burn-watch cursor BEFORE running deposit-watch. The deposit-watch
     // path is consensus-safe (balance-only) and runs every tick regardless of
@@ -552,6 +567,24 @@ pub async fn run_observer(chain: ChainId) {
         return;
     }
 
+    // ── No-debt fast path (cycle gate) ───────────────────────────────────────
+    //
+    // A Burn can only ever apply to a chain-vault that HAS debt. When the total
+    // foreign-chain vault debt is 0 there is nothing any Burn in this range could
+    // decrement, so skip the (expensive) get_logs scan entirely — that is
+    // ceil(window / MONAD_GETLOGS_MAX_RANGE) EVM-RPC outcalls per advancing tick
+    // (~764M cycles each, measured 2026-05-31). We STILL advance the cursor to
+    // `finalized` (and prune) so the consensus-safe finality probe
+    // `fetch_block_numbers` (= last_observed + MAX_BLOCK_SCAN_WINDOW) stays
+    // current: a stalled cursor would leave the next mint unable to reach
+    // finality — the Gate-4 failure mode. No burn is missed: with zero
+    // chain-vault debt there is no vault a burn in this range could have repaid.
+    let total_chain_debt = read_state(|s| s.multi_chain.total_chain_vault_debt_e8s());
+    if total_chain_debt == 0 {
+        mutate_state(|s| advance_cursor_and_prune(&mut s.multi_chain, chain, finalized));
+        return;
+    }
+
     let from_block = last_observed + 1;
 
     let raw_burn_logs = match get_logs(chain, &contract, BURN_EVENT_TOPIC0, from_block, finalized).await {
@@ -705,33 +738,35 @@ pub async fn run_observer(chain: ChainId) {
     // loop. Skippable failures (decode / InvalidBurn) leave it true so the
     // cursor advances past the poison.
     if burn_ok {
-        mutate_state(|s| {
-            s.multi_chain.last_observed_block.insert(chain, finalized);
-            // Prune the idempotency set of entries the next scan can never
-            // re-reach. The next scan starts at `finalized + 1`, so any block
-            // <= finalized is permanently behind the cursor and its keys are no
-            // longer needed for dedup. This keeps `processed_burn_keys` bounded.
-            // On a halt-break (above), we DO NOT prune — the un-halt re-scan
-            // restarts from the same `last_observed + 1` and must stay idempotent.
-            //
-            // PHASE-1C NOTE: This prune assumes no other observer tick is
-            // concurrently alive and still holding captured `get_logs` results
-            // for a now-pruned block. That is safe for Phase 1b: single-slot
-            // finality + bounded outcall timeouts + a handful of vaults make a
-            // tick running longer than MAX_BLOCK_SCAN_WINDOW blocks unreachable
-            // in practice. Revisit for Phase 1c (deeper finality / higher vault
-            // counts) where a self-heal reclaim could race the prune and a
-            // stale tick might re-apply a burn whose key was already pruned.
-            let stale: Vec<u64> = s
-                .multi_chain
-                .processed_burn_keys
-                .range(..=finalized)
-                .map(|(&block, _)| block)
-                .collect();
-            for block in stale {
-                s.multi_chain.processed_burn_keys.remove(&block);
-            }
-        });
+        mutate_state(|s| advance_cursor_and_prune(&mut s.multi_chain, chain, finalized));
+    }
+}
+
+/// Advance the burn-watch cursor for `chain` to `finalized` and prune
+/// `processed_burn_keys` of every entry at `block <= finalized`. Those blocks are
+/// permanently behind the cursor (the next scan starts at `finalized + 1`), so
+/// their dedup keys are no longer needed; pruning keeps the idempotency set
+/// bounded.
+///
+/// Called on the no-halt advance path AND the no-debt fast path. It is NOT called
+/// on a halt-break: the un-halt re-scan restarts from the same `last_observed + 1`
+/// and must stay idempotent, so those keys are retained.
+///
+/// PHASE-1C NOTE: the prune assumes no other observer tick is concurrently alive
+/// still holding captured `get_logs` results for a now-pruned block. Safe for
+/// Phase 1b (single-slot finality + bounded outcall timeouts + a handful of
+/// vaults make a tick outliving MAX_BLOCK_SCAN_WINDOW blocks unreachable in
+/// practice). Revisit for deeper finality / higher vault counts where a self-heal
+/// reclaim could race the prune.
+pub(crate) fn advance_cursor_and_prune(state: &mut MultiChainStateV2, chain: ChainId, finalized: u64) {
+    state.last_observed_block.insert(chain, finalized);
+    let stale: Vec<u64> = state
+        .processed_burn_keys
+        .range(..=finalized)
+        .map(|(&block, _)| block)
+        .collect();
+    for block in stale {
+        state.processed_burn_keys.remove(&block);
     }
 }
 

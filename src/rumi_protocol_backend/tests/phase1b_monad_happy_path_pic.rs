@@ -253,6 +253,13 @@ fn boot() -> (PocketIc, Principal, Principal) {
     for _ in 0..5 {
         pic.tick();
     }
+
+    // Pin observer + settlement cadence to 30s so the 35s advance_and_tick windows
+    // fire one tick each. The code DEFAULT is now 300s (cycle-burn hardening), so
+    // tests declare the cadence they exercise instead of depending on the default.
+    let _ = update_dev(&pic, backend_id, "set_observer_tick_interval_secs", Encode!(&30u64).unwrap());
+    let _ = update_dev(&pic, backend_id, "set_settlement_tick_interval_secs", Encode!(&30u64).unwrap());
+
     (pic, backend_id, mock_id)
 }
 
@@ -379,10 +386,10 @@ fn phase1b_monad_happy_path_supply_invariant() {
 
     // ── Seed the burn-watch cursor (Gate-3 activation) ───────────────────────
     // After A2a, the observer reads chain head by probing the SPECIFIC block
-    // `last_observed + MAX_BLOCK_SCAN_WINDOW` (=256) via the typed
-    // eth_getBlockByNumber, so the cursor advances by exactly 256 blocks per tick
-    // whenever `last_observed + 256 <= finalized`. The cursor must be seeded
-    // (non-zero) for burn-watch to run at all. Seed it to a tip well above 256 so
+    // `last_observed + MAX_BLOCK_SCAN_WINDOW` (=1024) via the typed
+    // eth_getBlockByNumber, so the cursor advances by exactly 1024 blocks per tick
+    // whenever `last_observed + 1024 <= finalized`. The cursor must be seeded
+    // (non-zero) for burn-watch to run at all. Seed it to a tip well above 1024 so
     // the small legacy block numbers (100/101/102) no longer apply. This runs in
     // BOTH the full and gated subsets (it only writes the map; harmless when
     // gated). Seed AFTER register_chain so the chain config exists.
@@ -401,11 +408,11 @@ fn phase1b_monad_happy_path_supply_invariant() {
     assert_supply(&pic, backend, 0, "after register/config");
 
     // ── Step 3: script the mock's chain head ─────────────────────────────────
-    // finalized = seed + 256 = 1_000_256, so the FIRST observer tick advances the
-    // burn-watch cursor 1_000_000 -> 1_000_256 (the probe of block 1_000_256
-    // succeeds because 1_000_256 <= finalized). The mint auto-mines its receipt at
-    // `finalized_block` = 1_000_256.
-    update_any(&pic, mock, "set_blocks", Encode!(&1_000_256u64, &1_000_256u64).unwrap());
+    // finalized = seed + 1024 = 1_001_024, so the FIRST observer tick advances the
+    // burn-watch cursor 1_000_000 -> 1_001_024 (the probe of block 1_001_024
+    // succeeds because 1_001_024 <= finalized). The mint auto-mines its receipt at
+    // `finalized_block` = 1_001_024.
+    update_any(&pic, mock, "set_blocks", Encode!(&1_001_024u64, &1_001_024u64).unwrap());
     update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xmint1".to_string()).unwrap());
 
     // ── ECDSA probe: decide full vs gated ────────────────────────────────────
@@ -523,9 +530,9 @@ fn phase1b_monad_happy_path_supply_invariant() {
     assert_supply(&pic, backend, 0, "after deposit-verify (MintPending)");
 
     // ── Step 6: settlement submits the mint (mock auto-mines 0xmint1 at
-    //           finalized=1_000_256 on send), then confirms it. Push the Mint log
-    //           at block 1_000_256 so the confirm path reads the on-chain amount.
-    push_mint_log(&pic, mock, vault_id, &recipient, debt_e8s, "0xmint1", 1_000_256);
+    //           finalized=1_001_024 on send), then confirms it. Push the Mint log
+    //           at block 1_001_024 so the confirm path reads the on-chain amount.
+    push_mint_log(&pic, mock, vault_id, &recipient, debt_e8s, "0xmint1", 1_001_024);
 
     // Several windows: window 1 submits (Queued -> Inflight), window 2+ confirms
     // (receipt mined + final, Mint log read, confirm_mint_in_state).
@@ -548,11 +555,11 @@ fn phase1b_monad_happy_path_supply_invariant() {
     // naturally excludes the still-present Mint log — exactly as the real Monad
     // RPC does. (The mint was confirmed via the settlement worker's own
     // topic-filtered Mint scan in Step 6.)
-    // Advance the chain head another 256 so the cursor climbs 1_000_000 ->
-    // 1_000_256 -> 1_000_512 over the next ticks; the burn at 1_000_300 lands in
-    // the (1_000_256, 1_000_512] scan window and is observed.
-    update_any(&pic, mock, "set_blocks", Encode!(&1_000_512u64, &1_000_512u64).unwrap());
-    push_burn_log(&pic, mock, vault_id, &recipient, 40 * E8, "0xburn1", 1_000_300);
+    // Advance the chain head another 1024 so the cursor climbs 1_000_000 ->
+    // 1_001_024 -> 1_002_048 over the next ticks; the burn at 1_001_068 lands in
+    // the (1_001_024, 1_002_048] scan window and is observed.
+    update_any(&pic, mock, "set_blocks", Encode!(&1_002_048u64, &1_002_048u64).unwrap());
+    push_burn_log(&pic, mock, vault_id, &recipient, 40 * E8, "0xburn1", 1_001_068);
     advance_and_tick(&pic, 3);
 
     let v = get_vault(&pic, backend, vault_id).expect("vault after burn 40");
@@ -561,10 +568,10 @@ fn phase1b_monad_happy_path_supply_invariant() {
     assert_supply(&pic, backend, 60 * E8, "after burn 40e8");
 
     // ── Step 8: burn the remaining 60e8; debt + supply go to 0 ───────────────
-    // Advance head another 256: cursor 1_000_512 -> 1_000_768; burn at 1_000_600
-    // is within (1_000_512, 1_000_768].
-    update_any(&pic, mock, "set_blocks", Encode!(&1_000_768u64, &1_000_768u64).unwrap());
-    push_burn_log(&pic, mock, vault_id, &recipient, 60 * E8, "0xburn2", 1_000_600);
+    // Advance head another 1024: cursor 1_002_048 -> 1_003_072; burn at 1_002_136
+    // is within (1_002_048, 1_003_072].
+    update_any(&pic, mock, "set_blocks", Encode!(&1_003_072u64, &1_003_072u64).unwrap());
+    push_burn_log(&pic, mock, vault_id, &recipient, 60 * E8, "0xburn2", 1_002_136);
     advance_and_tick(&pic, 2);
 
     let v = get_vault(&pic, backend, vault_id).expect("vault after burn 60");
@@ -591,9 +598,9 @@ fn phase1b_monad_happy_path_supply_invariant() {
     assert_eq!(v.status, ChainVaultStatus::Closing, "withdraw all => Closing");
     assert_supply(&pic, backend, 0, "after withdraw enqueue (Closing)");
 
-    // Settlement submits 0xwd1 (auto-mined at finalized=1_000_768) then confirms
+    // Settlement submits 0xwd1 (auto-mined at finalized=1_003_072) then confirms
     // it, flipping Closing -> Closed. The burn-watch cursor is already at
-    // 1_000_768, so the receipt is immediately final.
+    // 1_003_072, so the receipt is immediately final.
     advance_and_tick(&pic, 4);
     let v = get_vault(&pic, backend, vault_id).expect("vault after withdraw confirm");
     assert_eq!(v.status, ChainVaultStatus::Closed, "withdraw confirmed => Closed");

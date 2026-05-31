@@ -25,9 +25,9 @@
 //! Two subsets (same auto-upgrade pattern as the happy-path test):
 //!   - ECDSA available: open a vault, fund custody, tick → assert the vault
 //!     reaches `MintPending` (deposit-watch ran despite `eth_blockNumber` being
-//!     "broken") AND the burn-watch cursor advanced to seed+256 via the typed
+//!     "broken") AND the burn-watch cursor advanced to seed+1024 via the typed
 //!     probe.
-//!   - ECDSA unavailable: assert the burn-watch cursor advances to seed+256 anyway
+//!   - ECDSA unavailable: assert the burn-watch cursor advances to seed+1024 anyway
 //!     (the cursor advance needs no signing) and the supply invariant holds at 0.
 
 use candid::{encode_args, encode_one, CandidType, Decode, Deserialize, Encode, Principal};
@@ -128,10 +128,10 @@ fn mock_wasm() -> Vec<u8> {
 const MONAD_CHAIN_ID: u32 = 10143;
 const E18: u128 = 1_000_000_000_000_000_000;
 const E8: u128 = 100_000_000;
-/// The cursor is seeded here; finalized = SEED + 256 (MAX_BLOCK_SCAN_WINDOW), so
-/// one observer tick advances the cursor to SEED_PLUS_256 via the typed probe.
+/// The cursor is seeded here; finalized = SEED + 1024 (MAX_BLOCK_SCAN_WINDOW), so
+/// one observer tick advances the cursor to SEED_PLUS_WINDOW via the typed probe.
 const SEED_BLOCK: u64 = 2_000_000;
-const SEED_PLUS_256: u64 = 2_000_256;
+const SEED_PLUS_WINDOW: u64 = 2_001_024;
 
 // ─── PocketIC call helpers ───────────────────────────────────────────────────
 
@@ -242,6 +242,13 @@ fn boot() -> (PocketIc, Principal, Principal) {
     for _ in 0..5 {
         pic.tick();
     }
+
+    // Pin observer + settlement cadence to 30s so the 35s advance_and_tick windows
+    // fire one tick each. The code DEFAULT is now 300s (cycle-burn hardening), so
+    // tests declare the cadence they exercise instead of depending on the default.
+    let _ = update_dev(&pic, backend_id, "set_observer_tick_interval_secs", Encode!(&30u64).unwrap());
+    let _ = update_dev(&pic, backend_id, "set_settlement_tick_interval_secs", Encode!(&30u64).unwrap());
+
     (pic, backend_id, mock_id)
 }
 
@@ -329,7 +336,7 @@ fn phase1b_observer_consensus_safe_cursor_advances() {
         Encode!(&"eth_blockNumber".to_string(), &"no consensus".to_string()).unwrap(),
     );
 
-    // Seed the burn-watch cursor and set the chain head one window (256) above it.
+    // Seed the burn-watch cursor and set the chain head one window (1024) above it.
     decode_result(
         update_dev(
             &pic,
@@ -340,7 +347,7 @@ fn phase1b_observer_consensus_safe_cursor_advances() {
         "set_last_observed_block",
     )
     .expect("set_last_observed_block");
-    update_any(&pic, mock, "set_blocks", Encode!(&SEED_PLUS_256, &SEED_PLUS_256).unwrap());
+    update_any(&pic, mock, "set_blocks", Encode!(&SEED_PLUS_WINDOW, &SEED_PLUS_WINDOW).unwrap());
 
     assert_eq!(cursor(&pic, backend), SEED_BLOCK, "cursor seeded to SEED_BLOCK");
 
@@ -418,8 +425,8 @@ fn phase1b_observer_consensus_safe_cursor_advances() {
         // the volatile eth_blockNumber, which is armed to fail).
         assert_eq!(
             cursor(&pic, backend),
-            SEED_PLUS_256,
-            "cursor advanced to SEED+256 via consensus-safe typed probe"
+            SEED_PLUS_WINDOW,
+            "cursor advanced to SEED+1024 via consensus-safe typed probe"
         );
     } else {
         eprintln!("[phase1b consensus-safe] ECDSA UNAVAILABLE; running GATED subset (cursor advance only — needs no signing)");
@@ -430,8 +437,8 @@ fn phase1b_observer_consensus_safe_cursor_advances() {
 
         assert_eq!(
             cursor(&pic, backend),
-            SEED_PLUS_256,
-            "cursor advanced to SEED+256 via consensus-safe typed probe (no signing needed)"
+            SEED_PLUS_WINDOW,
+            "cursor advanced to SEED+1024 via consensus-safe typed probe (no signing needed)"
         );
 
         // Supply invariant holds at 0 (nothing minted).

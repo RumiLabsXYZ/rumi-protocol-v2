@@ -57,10 +57,44 @@ const EVM_RPC_MAX_RESPONSE_BYTES: u64 = 8192;
 
 /// Max blocks the burn-watch cursor advances per observer tick. The observer
 /// reads chain head by probing a SPECIFIC block number `last_observed + this`
-/// (consensus-safe), never a volatile `latest`/`finalized` tag. Must exceed
-/// observer_interval_secs × chain_block_rate (~30s × 2 blk/s = 60) to keep pace,
-/// and stay <= the EVM RPC eth_getLogs maxBlockRange (default 500). 256 fits both.
-pub const MAX_BLOCK_SCAN_WINDOW: u64 = 256;
+/// (consensus-safe), never a volatile `latest`/`finalized` tag.
+///
+/// ## Sizing (must be >= blocks-produced-per-observer-interval)
+///
+/// The probe jumps exactly this many blocks whenever block `last_observed +
+/// this` exists and is final; otherwise the cursor waits. Over the long run the
+/// cursor therefore advances at most `this` blocks per tick, so to keep pace with
+/// the chain it MUST be >= the number of blocks Monad produces per observer
+/// interval. Falling below that makes the cursor lag unboundedly (burns observed
+/// with ever-growing delay).
+///
+/// Measured 2026-05-31: Monad testnet produces ~1.93 blocks/s, and the staging
+/// observer interval is 300s (set live for cycle-burn mitigation), i.e. ~578
+/// blocks/tick. The previous value (256) was sized for a 30s interval (~60
+/// blocks/tick) and could NOT keep pace at 300s — that, together with the
+/// 100-block getLogs cap, is why the Gate-4 cursor stalled. 1024 comfortably
+/// exceeds 578 (1.77x margin, covers up to ~3.4 blocks/s at 300s) and bounds the
+/// observation lag at roughly one window (~512s). It also stays correct at the
+/// 30s default interval (the cursor advances in 1024-block bursts rather than
+/// every tick, but still keeps pace). If the observer interval is raised well
+/// beyond 300s, or Monad's block rate rises substantially, raise this too.
+///
+/// `get_logs` chunks the per-tick scan into <= `MONAD_GETLOGS_MAX_RANGE`-block
+/// sub-queries, so this window is NOT bounded by the provider's per-query
+/// getLogs cap (a 1024-block window scans as ceil(1024/100) = 11 sub-queries).
+/// Note: the total getLogs volume per day is set by blocks/day ÷ 100 regardless
+/// of this window — a larger window only changes burst size and lag, not cost.
+pub const MAX_BLOCK_SCAN_WINDOW: u64 = 1024;
+
+/// Maximum `eth_getLogs` block range (`toBlock - fromBlock`) the Monad testnet
+/// RPC accepts in a SINGLE query. A difference of 101 returns HTTP 413 with
+/// JSON-RPC code -32614 ("eth_getLogs is limited to a 100 range"); a difference
+/// of 100 (a 101-block span) is accepted. Empirically confirmed against
+/// `https://testnet-rpc.monad.xyz` on 2026-05-31. `get_logs` pages any wider
+/// range into sequential sub-queries each respecting this cap, so callers (the
+/// burn-watch loop and mint-confirm scan) never need to know about it. Kept in
+/// sync with the same-named constant in `src/monad_rpc_mock/src/lib.rs`.
+pub const MONAD_GETLOGS_MAX_RANGE: u64 = 100;
 
 // ─── Topic0 constants ────────────────────────────────────────────────────────
 
@@ -697,7 +731,55 @@ pub async fn get_transaction_count(chain: ChainId, address: &str) -> Result<u64,
 ///
 /// The caller is responsible for decoding via `decode_burn_log` /
 /// `decode_mint_log` etc.
+///
+/// ## Chunking (Gate-4 fix)
+///
+/// The Monad testnet RPC caps a single `eth_getLogs` at a 100-block range
+/// (`toBlock - fromBlock` <= `MONAD_GETLOGS_MAX_RANGE`); a wider range returns
+/// HTTP 413 / JSON-RPC -32614. This function pages `[from_block, to_block]` into
+/// sequential sub-queries each within that cap and concatenates their results in
+/// block order. Single-block scans (mint-confirm passes `from == to`) collapse to
+/// exactly one sub-query, unchanged.
+///
+/// Error policy: a sub-query RPC error fails the WHOLE call (the `?` below
+/// propagates it and no partial `Vec` is returned). This is deliberate — the
+/// burn-watch loop must retry the full range and must NOT advance its cursor past
+/// a range that was only partially scanned, or it would silently miss the burns
+/// in the un-scanned chunks (a supply-accounting hole). Ordering and the
+/// `(tx_hash, log_index)` dedup are unaffected: chunks cover disjoint, ascending
+/// block ranges, so concatenating them yields the same flat, block-ordered Vec a
+/// single wide query would have, and every log keeps its own block + log_index.
 pub async fn get_logs(
+    chain: ChainId,
+    contract: &str,
+    topic0: &str,
+    from_block: u64,
+    to_block: u64,
+) -> Result<Vec<(Vec<String>, String, String, u64, u64)>, String> {
+    // Defensive: an empty/inverted range has no logs (callers pass from <= to).
+    if from_block > to_block {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    let mut start = from_block;
+    loop {
+        // `to - from <= MONAD_GETLOGS_MAX_RANGE` per sub-query (the provider cap).
+        let chunk_to = start.saturating_add(MONAD_GETLOGS_MAX_RANGE).min(to_block);
+        let mut chunk = get_logs_single_range(chain, contract, topic0, start, chunk_to).await?;
+        out.append(&mut chunk);
+        if chunk_to >= to_block {
+            break;
+        }
+        start = chunk_to + 1;
+    }
+    Ok(out)
+}
+
+/// Single `eth_getLogs` query over `[from_block, to_block]` (caller must keep the
+/// range within the provider's `MONAD_GETLOGS_MAX_RANGE` cap — `get_logs` does
+/// the chunking). Parses the JSON-RPC response into
+/// `(topics, data, txHash, blockNumber, logIndex)` tuples.
+async fn get_logs_single_range(
     chain: ChainId,
     contract: &str,
     topic0: &str,

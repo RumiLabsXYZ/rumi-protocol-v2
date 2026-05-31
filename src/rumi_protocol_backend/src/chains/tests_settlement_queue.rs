@@ -34,6 +34,35 @@ fn enqueue_assigns_increasing_op_ids() {
 }
 
 #[test]
+fn has_active_op_tracks_non_terminal_ops_only() {
+    let mut q = SettlementQueueV1::default();
+    // Empty queue: no active op (so the observer skips the hot-wallet refresh).
+    assert!(!q.has_active_op(), "empty queue has no active op");
+
+    let id = q
+        .enqueue(SettlementOp::new(
+            SettlementOpKind::Mint { recipient: "0xabc".to_string(), amount_e8s: 100, vault_id: 1 },
+            "key-a".to_string(),
+            0,
+        ))
+        .expect("enqueue");
+    // Queued → active.
+    assert!(q.has_active_op(), "Queued op is active");
+
+    // Inflight → still active.
+    q.pending.get_mut(&id).unwrap().mark_inflight(1);
+    assert!(q.has_active_op(), "Inflight op is active");
+
+    // Succeeded (terminal) → no longer active.
+    q.pending.get_mut(&id).unwrap().mark_succeeded("0xtx".to_string(), 2);
+    assert!(!q.has_active_op(), "Succeeded op is terminal, not active");
+
+    // Failed (terminal) → not active either.
+    q.pending.get_mut(&id).unwrap().mark_failed("nope".to_string(), 3);
+    assert!(!q.has_active_op(), "Failed op is terminal, not active");
+}
+
+#[test]
 fn enqueue_rejects_duplicate_idempotency_key() {
     let mut q = SettlementQueueV1::default();
     let op_a = SettlementOp::new(

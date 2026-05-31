@@ -1,4 +1,4 @@
-use super::deposit_watch::{apply_burn_to_state, credit_deposit_to_state, BurnApplyError};
+use super::deposit_watch::{advance_cursor_and_prune, apply_burn_to_state, credit_deposit_to_state, BurnApplyError};
 use super::chain_vault::{ChainVaultStatus, ChainVaultV1};
 use crate::chains::config::ChainId;
 use crate::chains::multi_chain_state::MultiChainStateV2;
@@ -101,4 +101,25 @@ fn burn_returns_supply_invariant_on_supply_divergence_without_mutation() {
     );
     assert_eq!(s.chain_vaults[&1].debt_e8s, 4_000_000_000); // unchanged
     assert_eq!(s.chain_supplies[&ChainId(10143)], 3_000_000_000); // unchanged
+}
+
+#[test]
+fn advance_cursor_and_prune_sets_cursor_and_drops_keys_at_or_below_finalized() {
+    use std::collections::BTreeSet;
+    let mut s = seeded();
+    // Seed processed_burn_keys at three blocks: 100, 150, 250.
+    for b in [100u64, 150, 250] {
+        let mut set = BTreeSet::new();
+        set.insert(format!("0xtx{b}:0"));
+        s.processed_burn_keys.insert(b, set);
+    }
+
+    advance_cursor_and_prune(&mut s, ChainId(10143), 200);
+
+    // Cursor advanced to finalized.
+    assert_eq!(s.last_observed_block.get(&ChainId(10143)).copied(), Some(200));
+    // Keys at block <= 200 pruned (100, 150 gone); keys above 200 retained (250).
+    assert!(!s.processed_burn_keys.contains_key(&100), "block 100 pruned");
+    assert!(!s.processed_burn_keys.contains_key(&150), "block 150 pruned");
+    assert!(s.processed_burn_keys.contains_key(&250), "block 250 > finalized retained");
 }
