@@ -42,7 +42,7 @@ use std::time::Duration;
 // (the consensus-safe probe jumps `last_observed + SCAN_WINDOW`). It is > 100,
 // so a single-call `get_logs` over one window exceeds the provider's 100-block
 // cap and MUST be chunked.
-const SCAN_WINDOW: u64 = 256;
+const SCAN_WINDOW: u64 = 1024;
 
 // ─── Locally-mirrored backend types (shapes mirror src/.../*.rs exactly) ─────
 

@@ -418,8 +418,8 @@ fn phase1b_burn_idempotency_skips_poison_and_never_double_applies() {
     )
     .expect("set_manual_collateral_price");
 
-    // Seed the burn-watch cursor well above 256 so the small legacy block numbers
-    // never apply; one tick advances the cursor by MAX_BLOCK_SCAN_WINDOW (256).
+    // Seed the burn-watch cursor well above 1024 so the small legacy block numbers
+    // never apply; one tick advances the cursor by MAX_BLOCK_SCAN_WINDOW (1024).
     decode_result(
         update_dev(
             &pic,
@@ -431,8 +431,8 @@ fn phase1b_burn_idempotency_skips_poison_and_never_double_applies() {
     )
     .expect("set_last_observed_block");
 
-    // Chain head = seed + 256 so the first tick advances 1_000_000 -> 1_000_256.
-    update_any(&pic, mock, "set_blocks", Encode!(&1_000_256u64, &1_000_256u64).unwrap());
+    // Chain head = seed + 1024 so the first tick advances 1_000_000 -> 1_001_024.
+    update_any(&pic, mock, "set_blocks", Encode!(&1_001_024u64, &1_001_024u64).unwrap());
     update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xmint1".to_string()).unwrap());
 
     // ── ECDSA probe: decide full vs gated ────────────────────────────────────
@@ -474,7 +474,7 @@ fn phase1b_burn_idempotency_skips_poison_and_never_double_applies() {
             advance_and_tick(&pic, 4);
 
             assert!(
-                cursor(&pic, backend) >= 1_000_256,
+                cursor(&pic, backend) >= 1_001_024,
                 "gated: cursor advanced past poison-only range (skip-poison-and-continue); got {}",
                 cursor(&pic, backend)
             );
@@ -535,7 +535,7 @@ fn phase1b_burn_idempotency_skips_poison_and_never_double_applies() {
 
     // Settlement submits + confirms the mint. Push the Mint log at the finalized
     // block so the confirm path reads the on-chain amount.
-    push_mint_log(&pic, mock, vault_id, &recipient, debt_e8s, "0xmint1", 1_000_256);
+    push_mint_log(&pic, mock, vault_id, &recipient, debt_e8s, "0xmint1", 1_001_024);
     advance_and_tick(&pic, 4);
 
     let v = get_vault(&pic, backend, vault_id).expect("vault after mint confirm");
@@ -549,15 +549,15 @@ fn phase1b_burn_idempotency_skips_poison_and_never_double_applies() {
     // model that exclusion). Then push TWO burns at the SAME finalized block:
     //   1. GOOD partial burn 40e8 (valid)
     //   2. POISON burn 1_000e8 (over-repay: ≫ remaining 60e8) — InvalidBurn forever
-    // Both land in the (1_000_256, 1_000_512] scan window. The poison sits AFTER
+    // Both land in the (1_001_024, 1_002_048] scan window. The poison sits AFTER
     // the good burn in block/log order, so the pre-fix loop applies the good burn,
     // then hits the poison, sets burn_ok=false, and breaks WITHOUT advancing the
     // cursor — forcing the whole range to re-scan every tick and re-apply the 40e8.
     update_any(&pic, mock, "clear_logs", Encode!().unwrap());
-    update_any(&pic, mock, "set_blocks", Encode!(&1_000_512u64, &1_000_512u64).unwrap());
-    // Same block (1_000_300) for both; the good burn first, poison second.
-    push_burn_log(&pic, mock, vault_id, &recipient, 40 * E8, "0xgoodburn", 1_000_300);
-    push_burn_log(&pic, mock, vault_id, "0xattacker", 1_000 * E8, "0xpoisonburn", 1_000_300);
+    update_any(&pic, mock, "set_blocks", Encode!(&1_002_048u64, &1_002_048u64).unwrap());
+    // Same block (1_001_500) for both; the good burn first, poison second.
+    push_burn_log(&pic, mock, vault_id, &recipient, 40 * E8, "0xgoodburn", 1_001_500);
+    push_burn_log(&pic, mock, vault_id, "0xattacker", 1_000 * E8, "0xpoisonburn", 1_001_500);
 
     // Advance SEVERAL ticks so the range is (re-)scanned multiple times. On the
     // PRE-FIX code, each re-scan re-applies the 40e8 good burn and double-decrements
@@ -576,7 +576,7 @@ fn phase1b_burn_idempotency_skips_poison_and_never_double_applies() {
 
     // (b) The burn-watch cursor ADVANCED past the poison block (no longer stalls).
     assert!(
-        cursor(&pic, backend) >= 1_000_512,
+        cursor(&pic, backend) >= 1_002_048,
         "C-1: cursor advanced past the poison burn (skip-poison-and-continue); got {}",
         cursor(&pic, backend)
     );
@@ -677,7 +677,7 @@ fn phase1b_burn_two_identical_burns_in_same_tx_both_applied() {
     )
     .expect("set_manual_collateral_price");
 
-    // Seed the cursor well above 256 so scan windows stay in a clean range.
+    // Seed the cursor well above 1024 so scan windows stay in a clean range.
     decode_result(
         update_dev(
             &pic,
@@ -689,7 +689,7 @@ fn phase1b_burn_two_identical_burns_in_same_tx_both_applied() {
     )
     .expect("set_last_observed_block");
 
-    update_any(&pic, mock, "set_blocks", Encode!(&2_000_256u64, &2_000_256u64).unwrap());
+    update_any(&pic, mock, "set_blocks", Encode!(&2_001_024u64, &2_001_024u64).unwrap());
     update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xmint_same_tx".to_string()).unwrap());
 
     // ── ECDSA probe ──────────────────────────────────────────────────────────
@@ -760,7 +760,7 @@ fn phase1b_burn_two_identical_burns_in_same_tx_both_applied() {
     advance_and_tick(&pic, 2);
 
     // Settlement submits + confirms the mint.
-    push_mint_log(&pic, mock, vault_id, &recipient, debt_e8s, "0xmint_same_tx", 2_000_256);
+    push_mint_log(&pic, mock, vault_id, &recipient, debt_e8s, "0xmint_same_tx", 2_001_024);
     advance_and_tick(&pic, 4);
 
     let v = get_vault(&pic, backend, vault_id).expect("vault after mint confirm");
@@ -770,7 +770,7 @@ fn phase1b_burn_two_identical_burns_in_same_tx_both_applied() {
     // ── Same-tx two-identical-burns scenario ─────────────────────────────────
     // Advance the mock chain head into the next scan window.
     update_any(&pic, mock, "clear_logs", Encode!().unwrap());
-    update_any(&pic, mock, "set_blocks", Encode!(&2_000_512u64, &2_000_512u64).unwrap());
+    update_any(&pic, mock, "set_blocks", Encode!(&2_002_048u64, &2_002_048u64).unwrap());
 
     // Push TWO Burn logs with:
     //   - SAME tx_hash ("0xdualtx")
@@ -782,10 +782,10 @@ fn phase1b_burn_two_identical_burns_in_same_tx_both_applied() {
     // With the OLD key (tx:vault:amount): both map to the same key → second dropped → debt=70e8.
     // With the NEW key (tx:log_index): distinct keys → both applied → debt=40e8.
     push_burn_log_at(
-        &pic, mock, vault_id, &recipient, 30 * E8, "0xdualtx", 2_000_300, 0,
+        &pic, mock, vault_id, &recipient, 30 * E8, "0xdualtx", 2_001_500, 0,
     );
     push_burn_log_at(
-        &pic, mock, vault_id, &recipient, 30 * E8, "0xdualtx", 2_000_300, 1,
+        &pic, mock, vault_id, &recipient, 30 * E8, "0xdualtx", 2_001_500, 1,
     );
 
     // Multiple ticks to ensure re-scans don't double-apply anything.
@@ -802,7 +802,7 @@ fn phase1b_burn_two_identical_burns_in_same_tx_both_applied() {
 
     // Cursor must have advanced.
     assert!(
-        cursor(&pic, backend) >= 2_000_512,
+        cursor(&pic, backend) >= 2_002_048,
         "cursor advanced past dual-burn block; got {}",
         cursor(&pic, backend)
     );

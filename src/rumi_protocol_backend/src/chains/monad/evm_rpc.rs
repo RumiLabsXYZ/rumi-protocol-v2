@@ -57,12 +57,34 @@ const EVM_RPC_MAX_RESPONSE_BYTES: u64 = 8192;
 
 /// Max blocks the burn-watch cursor advances per observer tick. The observer
 /// reads chain head by probing a SPECIFIC block number `last_observed + this`
-/// (consensus-safe), never a volatile `latest`/`finalized` tag. Must exceed
-/// observer_interval_secs × chain_block_rate (~30s × 2 blk/s = 60) to keep pace,
-/// and exceed observer_interval_secs × chain_block_rate so the cursor keeps pace
-/// (see the sizing note). `get_logs` chunks the scan internally, so this is NOT
-/// bounded by the provider's per-query getLogs cap.
-pub const MAX_BLOCK_SCAN_WINDOW: u64 = 256;
+/// (consensus-safe), never a volatile `latest`/`finalized` tag.
+///
+/// ## Sizing (must be >= blocks-produced-per-observer-interval)
+///
+/// The probe jumps exactly this many blocks whenever block `last_observed +
+/// this` exists and is final; otherwise the cursor waits. Over the long run the
+/// cursor therefore advances at most `this` blocks per tick, so to keep pace with
+/// the chain it MUST be >= the number of blocks Monad produces per observer
+/// interval. Falling below that makes the cursor lag unboundedly (burns observed
+/// with ever-growing delay).
+///
+/// Measured 2026-05-31: Monad testnet produces ~1.93 blocks/s, and the staging
+/// observer interval is 300s (set live for cycle-burn mitigation), i.e. ~578
+/// blocks/tick. The previous value (256) was sized for a 30s interval (~60
+/// blocks/tick) and could NOT keep pace at 300s — that, together with the
+/// 100-block getLogs cap, is why the Gate-4 cursor stalled. 1024 comfortably
+/// exceeds 578 (1.77x margin, covers up to ~3.4 blocks/s at 300s) and bounds the
+/// observation lag at roughly one window (~512s). It also stays correct at the
+/// 30s default interval (the cursor advances in 1024-block bursts rather than
+/// every tick, but still keeps pace). If the observer interval is raised well
+/// beyond 300s, or Monad's block rate rises substantially, raise this too.
+///
+/// `get_logs` chunks the per-tick scan into <= `MONAD_GETLOGS_MAX_RANGE`-block
+/// sub-queries, so this window is NOT bounded by the provider's per-query
+/// getLogs cap (a 1024-block window scans as ceil(1024/100) = 11 sub-queries).
+/// Note: the total getLogs volume per day is set by blocks/day ÷ 100 regardless
+/// of this window — a larger window only changes burst size and lag, not cost.
+pub const MAX_BLOCK_SCAN_WINDOW: u64 = 1024;
 
 /// Maximum `eth_getLogs` block range (`toBlock - fromBlock`) the Monad testnet
 /// RPC accepts in a SINGLE query. A difference of 101 returns HTTP 413 with
