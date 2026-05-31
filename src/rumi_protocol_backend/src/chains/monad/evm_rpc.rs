@@ -861,6 +861,70 @@ pub async fn get_transaction_receipt(
     Ok(Some((success, block_number)))
 }
 
+/// A transaction receipt plus its logs. `logs` entries are
+/// `(address_lowercased, topics, data, log_index)`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TxReceiptWithLogs {
+    pub success: bool,
+    pub block_number: u64,
+    pub logs: Vec<(String, Vec<String>, String, u64)>,
+}
+
+/// Pure parser for an `eth_getTransactionReceipt` JSON-RPC response string.
+/// Returns Ok(None) if the receipt is null (tx still pending).
+pub fn parse_receipt_with_logs(text: &str) -> Result<Option<TxReceiptWithLogs>, String> {
+    let val: serde_json::Value = serde_json::from_str(text)
+        .map_err(|e| format!("eth_getTransactionReceipt parse: {}", e))?;
+    if let Some(err) = val.get("error") {
+        return Err(format!("eth_getTransactionReceipt RPC error: {}", err));
+    }
+    if val["result"].is_null() {
+        return Ok(None);
+    }
+    let res = &val["result"];
+    let success = parse_hex_quantity(res["status"].as_str().unwrap_or("0x0"))? == 1;
+    let block_number = parse_hex_quantity(
+        res["blockNumber"]
+            .as_str()
+            .ok_or_else(|| format!("receipt missing blockNumber in {:?}", text))?,
+    )? as u64;
+    let mut logs = Vec::new();
+    if let Some(arr) = res["logs"].as_array() {
+        for (position, entry) in arr.iter().enumerate() {
+            let address = entry["address"].as_str().unwrap_or("").to_lowercase();
+            let topics: Vec<String> = entry["topics"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let data = entry["data"].as_str().unwrap_or("0x").to_string();
+            let log_index = match entry["logIndex"].as_str() {
+                Some(hex) => parse_hex_quantity(hex)? as u64,
+                None => position as u64,
+            };
+            logs.push((address, topics, data, log_index));
+        }
+    }
+    Ok(Some(TxReceiptWithLogs {
+        success,
+        block_number,
+        logs,
+    }))
+}
+
+/// Fetch a receipt (with logs) for `tx_hash`. Ok(None) = still pending.
+pub async fn get_transaction_receipt_with_logs(
+    chain: ChainId,
+    tx_hash: &str,
+) -> Result<Option<TxReceiptWithLogs>, String> {
+    let payload = format!(
+        r#"{{"jsonrpc":"2.0","method":"eth_getTransactionReceipt","params":[{:?}],"id":{}}}"#,
+        tx_hash,
+        next_rpc_id()
+    );
+    let text = call_evm_rpc(chain, &payload).await?;
+    parse_receipt_with_logs(&text)
+}
+
 /// Broadcasts a signed raw transaction.  Returns the transaction hash on
 /// success.
 pub async fn send_raw_transaction(chain: ChainId, raw_tx_hex: &str) -> Result<String, String> {

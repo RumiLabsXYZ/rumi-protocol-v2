@@ -208,9 +208,17 @@ pub enum MultiGetBlockByNumberResult {
 
 // ─── Scripted state ───────────────────────────────────────────────────────
 
-/// A scripted log entry the mock returns from `eth_getLogs`.
+/// A scripted log entry the mock returns from `eth_getLogs` and (when stored on
+/// a `Receipt`) from `eth_getTransactionReceipt`.
 #[derive(Clone, Debug)]
 struct ScriptedLog {
+    /// Emitting contract address (lowercased). Empty for logs pushed via
+    /// `push_log`/`push_log_at` (the `eth_getLogs` path filters by the request's
+    /// `address` field, not the log's own, so it does not need this). Set by
+    /// `push_receipt_log` so the rendered `eth_getTransactionReceipt` log JSON
+    /// includes an `"address"` field — burn-proof verification rejects logs not
+    /// emitted by the configured icUSD contract.
+    address: String,
     topics: Vec<String>,
     data: String,
     tx_hash: String,
@@ -228,6 +236,10 @@ struct Receipt {
     /// status 0x1 (true) vs 0x0 (false, reverted).
     ok: bool,
     block: u64,
+    /// Logs emitted by this transaction, rendered into the
+    /// `eth_getTransactionReceipt` `"logs"` array. Empty for receipts created by
+    /// `set_receipt` / the `eth_sendRawTransaction` auto-mine path.
+    logs: Vec<ScriptedLog>,
 }
 
 #[derive(Default)]
@@ -456,7 +468,7 @@ fn request(_service: RpcService, json_payload: String, _max_response_bytes: u64)
                 let fin = script.finalized_block;
                 script.receipts.insert(
                     tx_hash.to_lowercase(),
-                    Receipt { ok: true, block: fin },
+                    Receipt { ok: true, block: fin, logs: vec![] },
                 );
                 format!(
                     r#"{{"jsonrpc":"2.0","id":{},"result":{:?}}}"#,
@@ -471,12 +483,37 @@ fn request(_service: RpcService, json_payload: String, _max_response_bytes: u64)
                     .unwrap_or("")
                     .to_lowercase();
                 match script.receipts.get(&txhash) {
-                    Some(r) => format!(
-                        r#"{{"jsonrpc":"2.0","id":{},"result":{{"status":{:?},"blockNumber":{:?}}}}}"#,
-                        id,
-                        if r.ok { "0x1" } else { "0x0" },
-                        hex_u64(r.block)
-                    ),
+                    Some(r) => {
+                        let logs_json = r
+                            .logs
+                            .iter()
+                            .map(|log| {
+                                let topics_json = log
+                                    .topics
+                                    .iter()
+                                    .map(|t| format!("{:?}", t))
+                                    .collect::<Vec<_>>()
+                                    .join(",");
+                                format!(
+                                    r#"{{"address":{:?},"topics":[{}],"data":{:?},"transactionHash":{:?},"blockNumber":{:?},"logIndex":{:?}}}"#,
+                                    log.address,
+                                    topics_json,
+                                    log.data,
+                                    log.tx_hash,
+                                    hex_u64(log.block),
+                                    hex_u64(log.log_index)
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        format!(
+                            r#"{{"jsonrpc":"2.0","id":{},"result":{{"status":{:?},"blockNumber":{:?},"logs":[{}]}}}}"#,
+                            id,
+                            if r.ok { "0x1" } else { "0x0" },
+                            hex_u64(r.block),
+                            logs_json
+                        )
+                    }
                     None => format!(r#"{{"jsonrpc":"2.0","id":{},"result":null}}"#, id),
                 }
             }
@@ -602,7 +639,7 @@ fn set_receipt(txhash: String, ok: bool, block: u64) {
     SCRIPT.with(|s| {
         s.borrow_mut()
             .receipts
-            .insert(txhash.to_lowercase(), Receipt { ok, block });
+            .insert(txhash.to_lowercase(), Receipt { ok, block, logs: vec![] });
     });
 }
 
@@ -623,6 +660,7 @@ fn push_log(topics: Vec<String>, data: String, tx_hash: String, block: u64) {
         let mut s = s.borrow_mut();
         let log_index = s.logs.len() as u64;
         s.logs.push(ScriptedLog {
+            address: String::new(),
             topics,
             data,
             tx_hash,
@@ -641,6 +679,42 @@ fn push_log(topics: Vec<String>, data: String, tx_hash: String, block: u64) {
 fn push_log_at(topics: Vec<String>, data: String, tx_hash: String, block: u64, log_index: u64) {
     SCRIPT.with(|s| {
         s.borrow_mut().logs.push(ScriptedLog {
+            address: String::new(),
+            topics,
+            data,
+            tx_hash,
+            block,
+            log_index,
+        });
+    });
+}
+
+/// Push a scripted log onto a transaction's RECEIPT (returned by
+/// `eth_getTransactionReceipt`, NOT `eth_getLogs`). Creates the receipt if it
+/// does not yet exist (mined+ok at block 0; raise its block with `set_receipt`
+/// or `set_blocks` + a fresh push as needed). The log's `address` is rendered
+/// into the receipt JSON so burn-proof verification can reject logs from a
+/// non-icUSD contract. The `log_index` is stored verbatim so the dedup key
+/// `(tx_hash, log_index)` is stable across re-submits.
+#[ic_cdk_macros::update]
+fn push_receipt_log(
+    tx_hash: String,
+    address: String,
+    topics: Vec<String>,
+    data: String,
+    log_index: u64,
+) {
+    SCRIPT.with(|s| {
+        let mut s = s.borrow_mut();
+        let key = tx_hash.to_lowercase();
+        let r = s.receipts.entry(key).or_insert(Receipt {
+            ok: true,
+            block: 0,
+            logs: vec![],
+        });
+        let block = r.block;
+        r.logs.push(ScriptedLog {
+            address: address.to_lowercase(),
             topics,
             data,
             tx_hash,
