@@ -1219,6 +1219,90 @@ fn get_last_observed_block(
     read_state(|s| s.multi_chain.last_observed_block.get(&chain).copied().unwrap_or(0))
 }
 
+/// Phase 1c notify-then-verify: submit a burn transaction hash for verification.
+///
+/// PERMISSIONLESS: anyone may submit a REAL on-chain tx hash. The verify path
+/// (`verify_and_apply_burn_proof`) fetches the receipt via ONE
+/// `eth_getTransactionReceipt`, rejects forgeries (only Burn logs emitted by the
+/// configured icUSD contract count, and the amount/vault come FROM the log, never
+/// from the caller), requires finality, and dedups on `(tx_hash, log_index)` via
+/// the existing `processed_burn_keys` set — so a re-submit of an already-applied
+/// burn returns Ok(0) and changes nothing. Returns the number of burns NEWLY
+/// applied from the tx. This replaces the continuous `eth_getLogs` burn-scan as
+/// the PRIMARY burn-observation path (one outcall per actual burn instead of
+/// O(blocks produced)).
+///
+/// Finality lag is surfaced as `TemporarilyUnavailable` so the caller (the
+/// frontend, per plan Task 7) can poll-and-retry until the receipt is final.
+///
+/// FUTURE ROBUSTNESS (flagged per Rob 2026-05-31): v1 liveness depends on the
+/// submitter (the dApp). Harden later with a relayer or an incentivized
+/// permissionless submitter; add a per-caller rate-limit when that lands.
+#[candid_method(update)]
+#[update]
+async fn submit_burn_proof(
+    chain_id: rumi_protocol_backend::chains::config::ChainId,
+    tx_hash: String,
+) -> Result<u32, ProtocolError> {
+    use rumi_protocol_backend::chains::monad::burn_proof::{
+        verify_and_apply_burn_proof, BurnProofError,
+    };
+    match verify_and_apply_burn_proof(chain_id, &tx_hash).await {
+        Ok(n) => {
+            if n > 0 {
+                log!(
+                    INFO,
+                    "[submit_burn_proof] chain={:?} tx={} applied {} burn(s)",
+                    chain_id, tx_hash, n
+                );
+            }
+            Ok(n)
+        }
+        // Transient: the receipt is not yet mined or not yet buried under
+        // finality_depth confirmations. The caller should retry.
+        Err(BurnProofError::Pending) | Err(BurnProofError::NotFinal) => Err(
+            ProtocolError::TemporarilyUnavailable("receipt not yet final; retry".into()),
+        ),
+        // A transport/RPC failure is also retryable.
+        Err(BurnProofError::Rpc(e)) => Err(ProtocolError::TemporarilyUnavailable(format!(
+            "burn-proof RPC error; retry: {}",
+            e
+        ))),
+        // Terminal: reverted tx, unknown chain/contract, or a halt-class
+        // supply-invariant failure. None of these is fixed by retrying.
+        Err(e) => Err(ProtocolError::ChainAdmin(format!("burn proof rejected: {:?}", e))),
+    }
+}
+
+/// Phase 1c: developer-gated toggle for the EMERGENCY continuous `eth_getLogs`
+/// burn-watch poll-scan on a chain. Default OFF (notify-then-verify only, via
+/// `submit_burn_proof`). Flip ON only for a targeted catch-up — the scan costs
+/// O(blocks produced), so leave it OFF in steady state. No-op (Ok) if the chain
+/// is not registered. Persisted in `ChainConfigV2.burn_watch_poll_enabled`.
+#[candid_method(update)]
+#[update]
+fn set_burn_watch_poll_enabled(
+    chain_id: rumi_protocol_backend::chains::config::ChainId,
+    enabled: bool,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    mutate_state(|s| {
+        if let Some(c) = s.multi_chain.chain_configs.get_mut(&chain_id) {
+            c.burn_watch_poll_enabled = enabled;
+        }
+    });
+    log!(
+        INFO,
+        "[set_burn_watch_poll_enabled] chain={:?} burn-watch poll-scan {}",
+        chain_id,
+        if enabled { "ENABLED" } else { "disabled" }
+    );
+    Ok(())
+}
+
 /// Delete a chain entirely. Permitted only when the chain carries ZERO supply
 /// and NO chain_vaults reference it (so deletion cannot orphan debt/collateral);
 /// purges every per-chain map. Developer-gated. This DELETES (not disables) a

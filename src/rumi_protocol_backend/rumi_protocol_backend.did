@@ -805,6 +805,7 @@ type Result_13 = variant {
   Ok : StabilityPoolLiquidationResult;
   Err : ProtocolError;
 };
+type Result_14 = variant { Ok : nat32; Err : ProtocolError };
 type Result_2 = variant { Ok : text; Err : ProtocolError };
 type Result_3 = variant { Ok : SuccessWithFee; Err : ProtocolError };
 type Result_4 = variant { Ok : BotLiquidationResult; Err : ProtocolError };
@@ -1055,6 +1056,7 @@ service : (ProtocolArg) -> {
   set_bot_cr_tolerance_bps : (nat64) -> (Result);
   set_breaker_window_debt_ceiling_e8s : (nat64) -> (Result);
   set_breaker_window_ns : (nat64) -> (Result);
+  set_burn_watch_poll_enabled : (nat32, bool) -> (Result);
   set_chain_config : (nat32, UpdateChainConfigArg) -> (Result);
   set_chain_contract : (nat32, text) -> (Result);
   set_check_vaults_alert_band_bps : (nat64) -> (Result);
@@ -1127,6 +1129,7 @@ service : (ProtocolArg) -> {
   stability_pool_liquidate_with_reserves : (nat64, nat64, nat64, principal) -> (
       Result_13,
     );
+  submit_burn_proof : (nat32, text) -> (Result_14);
   unfreeze_protocol : () -> (Result);
   update_collateral_config : (principal, CollateralConfig) -> (Result);
   withdraw_and_close_vault : (nat64) -> (Result_5);

@@ -4,17 +4,17 @@
 //! state-shape rules without spinning up PocketIC.
 
 use super::config::{
-    ChainAdminError, ChainConfigV1, ChainId, ChainStatus, RegisterChainArg,
+    ChainAdminError, ChainConfigV2, ChainId, ChainStatus, RegisterChainArg,
     UpdateChainConfigArg,
 };
-use super::multi_chain_state::MultiChainStateV2;
+use super::multi_chain_state::MultiChainStateV3;
 use super::settlement_queue::SettlementQueueV1;
 
 pub fn register_chain_in_state(
-    state: &mut MultiChainStateV2,
+    state: &mut MultiChainStateV3,
     arg: RegisterChainArg,
     now_ns: u64,
-) -> Result<ChainConfigV1, ChainAdminError> {
+) -> Result<ChainConfigV2, ChainAdminError> {
     if arg.rpc_endpoints.is_empty() {
         return Err(ChainAdminError::InvalidConfig(
             "rpc_endpoints must contain at least one URL".into(),
@@ -23,7 +23,7 @@ pub fn register_chain_in_state(
     if state.chain_configs.contains_key(&arg.chain_id) {
         return Err(ChainAdminError::ChainAlreadyRegistered(arg.chain_id));
     }
-    let cfg = ChainConfigV1 {
+    let cfg = ChainConfigV2 {
         chain_id: arg.chain_id,
         display_name: arg.display_name,
         rpc_endpoints: arg.rpc_endpoints,
@@ -32,6 +32,9 @@ pub fn register_chain_in_state(
         chain_native_decimals: arg.chain_native_decimals,
         registered_at_ns: now_ns,
         status: ChainStatus::Registered,
+        // Phase 1c: notify-then-verify is the default; the continuous poll-scan
+        // starts OFF and is enabled per-chain only via set_burn_watch_poll_enabled.
+        burn_watch_poll_enabled: false,
     };
     state.chain_configs.insert(arg.chain_id, cfg.clone());
     state.chain_supplies.insert(arg.chain_id, 0);
@@ -40,7 +43,7 @@ pub fn register_chain_in_state(
 }
 
 pub fn disable_chain_in_state(
-    state: &mut MultiChainStateV2,
+    state: &mut MultiChainStateV3,
     chain_id: ChainId,
 ) -> Result<(), ChainAdminError> {
     let cfg = state
@@ -58,7 +61,7 @@ pub fn disable_chain_in_state(
 /// would be a silent state leak). All-or-nothing: every rejection path returns
 /// before the first mutation, so a refused delete leaves the chain fully intact.
 pub fn delete_chain_in_state(
-    state: &mut MultiChainStateV2,
+    state: &mut MultiChainStateV3,
     chain_id: ChainId,
 ) -> Result<(), ChainAdminError> {
     if !state.chain_configs.contains_key(&chain_id) {
@@ -92,7 +95,7 @@ pub fn delete_chain_in_state(
 }
 
 pub fn update_chain_config_in_state(
-    state: &mut MultiChainStateV2,
+    state: &mut MultiChainStateV3,
     chain_id: ChainId,
     update: UpdateChainConfigArg,
 ) -> Result<(), ChainAdminError> {

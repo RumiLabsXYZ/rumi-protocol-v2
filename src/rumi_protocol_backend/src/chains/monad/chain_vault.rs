@@ -10,7 +10,7 @@
 //! observed at finality (settlement worker, Task 10).
 
 use crate::chains::config::ChainId;
-use crate::chains::multi_chain_state::MultiChainStateV2;
+use crate::chains::multi_chain_state::MultiChainStateV3;
 use crate::chains::settlement_queue::{SettlementOp, SettlementOpKind};
 use candid::{CandidType, Deserialize, Principal};
 use serde::Serialize;
@@ -155,7 +155,7 @@ pub fn collateral_ratio_e4(collateral_e18: u128, price_e8: u64, debt_e8s: u128) 
 /// - declared CR `< min_cr_e4` -> `BelowMinCr`
 #[allow(clippy::too_many_arguments)]
 pub fn open_chain_vault_in_state(
-    state: &mut MultiChainStateV2,
+    state: &mut MultiChainStateV3,
     chain: ChainId,
     owner: Principal,
     custody_address: String,
@@ -237,7 +237,7 @@ pub fn open_chain_vault_in_state(
 /// rejected enqueue leaves the vault `AwaitingDeposit` and the queue unchanged,
 /// and the next deposit-watch tick retries cleanly.
 pub fn verify_deposit_and_enqueue_mint_in_state(
-    state: &mut MultiChainStateV2,
+    state: &mut MultiChainStateV3,
     vault_id: u64,
     observed_balance_e18: u128,
     now_ns: u64,
@@ -332,7 +332,7 @@ pub fn verify_deposit_and_enqueue_mint_in_state(
 ///
 /// So a rejected enqueue leaves the vault and its collateral untouched.
 pub fn withdraw_collateral_in_state(
-    state: &mut MultiChainStateV2,
+    state: &mut MultiChainStateV3,
     vault_id: u64,
     amount_e18: u128,
     dest_address: String,
@@ -437,7 +437,7 @@ pub fn withdraw_collateral_in_state(
 /// (A non-Open zero-collateral vault is NOT short-circuited — it falls through
 /// to the delegate's gate and rejects with `WrongStatus`.)
 pub fn close_chain_vault_in_state(
-    state: &mut MultiChainStateV2,
+    state: &mut MultiChainStateV3,
     vault_id: u64,
     dest_address: String,
     min_cr_e4: u64,

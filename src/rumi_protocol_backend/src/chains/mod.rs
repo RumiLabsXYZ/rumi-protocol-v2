@@ -21,7 +21,7 @@ pub mod monad;
 
 pub use adapter::ChainAdapter;
 pub use config::{ChainConfig, ChainId, ChainStatus};
-pub use multi_chain_state::{MultiChainState, MultiChainStateV1, MultiChainStateV2};
+pub use multi_chain_state::{MultiChainState, MultiChainStateV1, MultiChainStateV2, MultiChainStateV3};
 pub use settlement_queue::{SettlementOp, SettlementQueueV1};
 pub use supply::{apply_supply_delta, SupplyDelta, SupplyInvariantError};
 
