@@ -123,3 +123,20 @@ fn advance_cursor_and_prune_sets_cursor_and_drops_keys_at_or_below_finalized() {
     assert!(!s.processed_burn_keys.contains_key(&150), "block 150 pruned");
     assert!(s.processed_burn_keys.contains_key(&250), "block 250 > finalized retained");
 }
+
+#[test]
+fn supply_gate_skips_only_on_exact_match_and_no_inflight_mint() {
+    use super::deposit_watch::can_skip_burn_scan;
+    // Equal + no mint in flight -> skip (no unobserved burn possible).
+    assert!(can_skip_burn_scan(1_000, 1_000, false));
+    // Equal but a mint is in flight -> scan (a mint could mask a burn).
+    assert!(!can_skip_burn_scan(1_000, 1_000, true));
+    // On-chain below recorded -> a burn happened -> scan.
+    assert!(!can_skip_burn_scan(900, 1_000, false));
+    // On-chain above recorded (anomaly under sole-minter) -> scan.
+    assert!(!can_skip_burn_scan(1_100, 1_000, false));
+    // Below + in-flight mint -> scan.
+    assert!(!can_skip_burn_scan(900, 1_000, true));
+    // Zero/zero, no mint -> skip (degenerate but valid).
+    assert!(can_skip_burn_scan(0, 0, false));
+}

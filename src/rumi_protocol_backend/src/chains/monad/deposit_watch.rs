@@ -89,6 +89,25 @@ impl std::fmt::Display for BurnApplyError {
     }
 }
 
+/// Decide whether the burn-watch `eth_getLogs` sweep can be SKIPPED this tick.
+///
+/// Returns `true` (skip) ONLY when the chain's on-chain icUSD `totalSupply`
+/// EXACTLY equals the canister's confirmed `chain_supplies[chain]` AND no mint
+/// op is in flight. The canister is the SOLE minter, so with no mint in flight
+/// the on-chain supply can differ from `recorded` only via a burn the canister
+/// has not yet applied; equality therefore means there is nothing for the sweep
+/// to find. A mint in flight could mask a burn (mint +X, burn -X net to zero
+/// supply delta), so any in-flight mint forces a scan. Any inequality
+/// (including the "impossible" on-chain > recorded anomaly) also forces a scan;
+/// the Timer-B `check_invariant` self-check is the divergence backstop.
+pub fn can_skip_burn_scan(
+    onchain_total_supply_e8s: u128,
+    recorded_supply_e8s: u128,
+    has_inflight_mint: bool,
+) -> bool {
+    !has_inflight_mint && onchain_total_supply_e8s == recorded_supply_e8s
+}
+
 /// Credit a confirmed on-chain deposit to a ChainVaultV1 record.
 ///
 /// Increments `collateral_amount_e18` by `amount_e18` (saturating — overflow
