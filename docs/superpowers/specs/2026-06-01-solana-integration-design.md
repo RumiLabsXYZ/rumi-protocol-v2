@@ -70,14 +70,17 @@ states each foreign chain "implements this trait in its own module
   subnet, per the repo) and `2xib7-jqaaa-aaaar-qai6q-cai` (older docs). Verify
   before wiring. The playbook discipline applies: pull the live candid, never
   hand-type from memory.
-- **Official Rust crates exist:** `sol_rpc_client` and `sol_rpc_types`. Typed
-  methods (`getBalance`, `getAccountInfo`, `getSignaturesForAddress`,
-  `getTransaction`, `getLatestBlockhash`, `getSlot`, `sendTransaction`), the
-  `RpcSources` / `RpcConfig` / `ConsensusStrategy::Equality` pattern, and
-  `MultiRpcResult` returns. Using these is strictly safer than Monad's
-  hand-rolled `serde_json` wrapper: it eliminates the playbook's worst bug class
-  (hand-typed candid decode-traps, including the decode-trap-after-broadcast
-  hazard) because the crate authors mirror the live candid.
+- **Typed Rust crates exist but are unusable here:** `sol_rpc_client 6.0.0` /
+  `sol_rpc_types 3.1.2` require **ic-cdk 0.20**, a hard conflict with the
+  project's deliberate **ic-cdk 0.12** pin. This is the same wall Monad hit
+  (`evm_rpc_client` -> ic-cdk 0.19), which is why Monad hand-rolls its EVM RPC.
+  DECISION (2026-06-01, Rob): hand-roll the Solana seam on ic-cdk 0.12, mirroring
+  Monad, rather than undertake a large, high-risk ic-cdk 0.20 migration for a
+  build we are not taking live. Consequence: the playbook's decode-safety
+  discipline (#1-#4: mirror exact candid widths, tolerate inconsistent sends,
+  mutate only after a good decode, treat decode-fail as "maybe sent") applies in
+  full, because we own the candid types now. The typed methods and consensus
+  pattern remain the reference for what to mirror by hand.
 - **Threshold Ed25519** via the management canister's `sign_with_schnorr`
   (algorithm `Ed25519`). Key names: `test_key_1` (testing, on mainnet) and
   `key_1` (production). Ed25519 has NO local dfx dev key.
@@ -164,10 +167,13 @@ chains/
 ## 6. Component design (new Solana submodules)
 
 ### 6.1 `sol_rpc.rs`
-Thin typed wrapper over `sol_rpc_client`. Strict consensus
-(`ConsensusStrategy::Equality`) on all reads; lenient on `sendTransaction`
-(first provider `#Ok` wins, because a signed Solana tx signature is
-deterministic from the signed bytes). Methods needed:
+Hand-rolled wrapper over raw inter-canister calls to the SOL RPC canister
+(mirror `monad/evm_rpc.rs`): `ic_cdk::api::call::call_with_payment128` with
+hand-defined candid request/response types mirroring the live candid; JSON-RPC
+payloads parsed with `serde_json`. Strict consensus on all reads (demand
+agreement); lenient on `sendTransaction` (first provider Ok wins, because a
+signed Solana tx signature is deterministic from the signed bytes). Methods
+needed:
 - `get_balance(addr, commitment)` — custody/settlement balances (deposit detect,
   gas gate).
 - `get_account_info(mint)` — read the SPL mint account, decode its `supply`
@@ -180,9 +186,13 @@ deterministic from the signed bytes). Methods needed:
 - `send_transaction(raw_tx)` — broadcast.
 
 ### 6.2 `ted25519.rs`
-Mirrors `tecdsa.rs` but for Ed25519:
-- `derive_solana_address(path)` — `sign_with_schnorr` public-key call, then
-  base58-encode the 32-byte pubkey (no hashing).
+Mirrors `tecdsa.rs` but for Ed25519. ic-cdk 0.12 has no
+`management_canister::schnorr` module (only `ecdsa`), so we call the management
+canister directly via `call_with_payment128` with hand-defined
+`SchnorrPublicKeyArgument` / `SignWithSchnorrArgument` candid structs (algorithm
+`Ed25519`):
+- `derive_solana_address(path)` — `schnorr_public_key` call, then base58-encode
+  the 32-byte pubkey (no hashing).
 - Settlement (mint-authority) derivation path: `[chain_id_le, b"settlement"]`,
   one address per chain, cached per upgrade.
 - Custody derivation path: `[chain_id_le, principal_bytes, nonce_le]`, one per
@@ -198,8 +208,12 @@ Build and sign Solana transactions. Instruction builders:
 Plus: legacy message assembly (header, account keys, durable-nonce as the
 "recent blockhash", instructions), serialize the message, sign the message bytes
 with `sign_with_schnorr`, assemble the wire transaction (signatures + message).
-Build instruction encoders by hand or via the wasm-compatible subset of
-`solana-program`; verify wasm32 build compatibility in M1 (Section 12).
+Build instructions via the lightweight pure-Solana primitive crates
+(`solana-instruction`, `solana-pubkey`, `solana-message`, `spl-token`,
+`spl-associated-token-account`) if they compile to wasm32 and pull no ic-cdk
+(they should not; `sol_rpc_types` depends on them for a canister target). Fall
+back to hand-encoded instructions if not. Verify wasm32 build compatibility in
+M1 (Section 12).
 
 ### 6.4 `adapter.rs` (`SolanaAdapter`)
 Implements the six `ChainAdapter` methods, wiring `sol_rpc`, `ted25519`, `tx`:
@@ -295,10 +309,12 @@ e8s everywhere. Only the native collateral asset differs in decimals (handled in
 
 ## 9. Error handling and safety
 
-- **Decode safety:** typed `sol_rpc_types` eliminates the hand-typed candid
-  decode-trap class. We still treat `sendTransaction` decode-failure as "maybe
-  sent" and reconcile, never blind-retry (durable nonce makes a resend
-  idempotent only after a confirmed-good decode).
+- **Decode safety (we own it now):** because we hand-roll the candid types, the
+  playbook's decode-trap class is live. Mirror exact int widths (lamports = u64,
+  slots = the live width), tolerate inconsistent sends, and treat a
+  `sendTransaction` decode-failure as "maybe sent" (reconcile, never
+  blind-retry; the durable nonce makes a resend idempotent only after a
+  confirmed-good decode). Pull the live SOL RPC candid before hand-typing.
 - **At-least-once + no-mutation-on-rejection:** preserved from the Monad helpers
   (enqueue first, mutate after; cursor/state advance only after success).
 - **Supply invariant halt:** reused; a `SupplyInvariant` error halts the chain's
@@ -364,8 +380,13 @@ chains.
 
 ## 14. Open items to verify during implementation
 - SOL RPC canister principal (pull live; resolve the two candidates).
-- `sol_rpc_client` / `sol_rpc_types` versions and their wasm32 build.
-- `solana-program` (or hand-rolled instruction encoders) wasm32 compatibility.
+- RESOLVED: typed sol_rpc crates need ic-cdk 0.20 (conflict); seam is hand-rolled
+  on ic-cdk 0.12. Reconsider an ic-cdk upgrade only if we later go to mainnet and
+  want the typed decode safety.
+- Which lightweight `solana-*` primitive crates compile to wasm32-unknown-unknown
+  without pulling ic-cdk (for `tx.rs`), or whether to hand-encode instructions.
+- Whether the fork's `ic-management-canister-types` carries Schnorr types, else
+  hand-define the candid structs in `ted25519.rs`.
 - PocketIC Ed25519 key provisioning in this repo's pinned PocketIC build.
 - Devnet RPC endpoints with adequate rate limits.
 - SPL token program choice: classic SPL Token (recommended for simplicity and
