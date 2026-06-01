@@ -695,5 +695,66 @@ fn phase1b_supply_gate_skips_on_match_scans_on_drop() {
         PHASE_B_FINALIZED
     );
 
-    eprintln!("[supply-gate] FULL two-phase gate proof PASSED");
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Phase C: onchain totalSupply > chain_supplies (a mint EXCESS) => sweep SKIPPED
+    // ═══════════════════════════════════════════════════════════════════════════
+    //
+    // Regression for the backstop fix: an on-chain supply ABOVE recorded
+    // chain_supplies is a mint excess (e.g. an RPC-false-negative mint that
+    // landed but was never credited), NOT a burn. It is permanent, so the
+    // backstop must NOT scan on it (scanning would repeat every tick forever and
+    // reintroduce the per-tick sweep cost). We set onchain supply ABOVE recorded
+    // and plant a trap burn in the window; the backstop must skip (trap NOT
+    // applied) yet still advance the cursor.
+    const PHASE_C_FINALIZED: u64 = PHASE_B_FINALIZED + MAX_BLOCK_SCAN_WINDOW;
+    let recorded_after_b = DEBT_E8S - REAL_BURN_AMOUNT; // chain_supplies now
+    let onchain_excess = recorded_after_b + 10 * E8; // mint excess above recorded
+
+    update_any(&pic, mock, "clear_logs", Encode!().unwrap());
+    decode_result(
+        update_dev(
+            &pic,
+            backend,
+            "set_last_observed_block",
+            Encode!(&ChainId(MONAD_CHAIN_ID), &PHASE_B_FINALIZED).unwrap(),
+        ),
+        "set_last_observed_block (Phase C re-seed)",
+    )
+    .expect("set_last_observed_block Phase C");
+    update_any(&pic, mock, "set_total_supply", Encode!(&onchain_excess).unwrap());
+    push_burn_log(
+        &pic,
+        mock,
+        vault_id,
+        &recipient,
+        REAL_BURN_AMOUNT,
+        "0xburnC_trap",
+        PHASE_B_FINALIZED + 50,
+    );
+    update_any(&pic, mock, "set_blocks", Encode!(&PHASE_C_FINALIZED, &PHASE_C_FINALIZED).unwrap());
+    advance_and_tick(&pic, 1);
+
+    let v_c = get_vault(&pic, backend, vault_id).expect("vault in Phase C");
+    assert_eq!(
+        v_c.debt_e8s,
+        candid::Nat::from(recorded_after_b),
+        "Phase C: debt unchanged (a mint excess must NOT trigger a scan)"
+    );
+    let global_c: candid::Nat = query_unit(&pic, backend, "get_global_icusd_supply");
+    assert_eq!(
+        global_c,
+        candid::Nat::from(recorded_after_b),
+        "Phase C: chain_supplies unchanged on a mint excess"
+    );
+    assert_eq!(
+        cursor(&pic, backend),
+        PHASE_C_FINALIZED,
+        "Phase C: cursor still advanced (skip path ran advance_cursor_and_prune)"
+    );
+    eprintln!(
+        "[supply-gate] Phase C PASSED: mint excess (onchain {} > recorded {}), trap burn NOT applied, cursor advanced to {}",
+        onchain_excess, recorded_after_b, PHASE_C_FINALIZED
+    );
+
+    eprintln!("[supply-gate] FULL three-phase gate proof PASSED");
 }

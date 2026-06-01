@@ -89,23 +89,27 @@ impl std::fmt::Display for BurnApplyError {
     }
 }
 
-/// Decide whether the burn-watch `eth_getLogs` sweep can be SKIPPED this tick.
+/// Decide whether the burn-watch catch-up sweep should run this tick (the
+/// notify-then-verify backstop). Returns `true` (scan) ONLY when no mint op is
+/// in flight AND the chain's on-chain icUSD `totalSupply` has dropped BELOW the
+/// canister's confirmed `chain_supplies[chain]`.
 ///
-/// Returns `true` (skip) ONLY when the chain's on-chain icUSD `totalSupply`
-/// EXACTLY equals the canister's confirmed `chain_supplies[chain]` AND no mint
-/// op is in flight. The canister is the SOLE minter, so with no mint in flight
-/// the on-chain supply can differ from `recorded` only via a burn the canister
-/// has not yet applied; equality therefore means there is nothing for the sweep
-/// to find. A mint in flight could mask a burn (mint +X, burn -X net to zero
-/// supply delta), so any in-flight mint forces a scan. Any inequality
-/// (including the "impossible" on-chain > recorded anomaly) also forces a scan;
-/// the Timer-B `check_invariant` self-check is the divergence backstop.
-pub fn can_skip_burn_scan(
+/// The canister is the SOLE minter, so a burn (the only thing the sweep finds)
+/// strictly LOWERS supply. `onchain >= recorded` therefore means no unsubmitted
+/// burn: equal = in sync; GREATER = a mint EXCESS (e.g. an RPC-false-negative
+/// mint that landed on-chain but was never credited to `chain_supplies`). A
+/// mint excess is NOT a burn and must NOT trigger the sweep: it is permanent, so
+/// scanning on `!=` would scan the full window every tick forever, silently
+/// reintroducing the per-tick `eth_getLogs` cost the backstop exists to avoid.
+/// A mint in flight could mask a burn in the supply delta, so we stay in the
+/// cheap path during the (short, infrequent) mint window; `submit_burn_proof`
+/// plus the next post-confirm tick reconcile any burn then.
+pub fn backstop_should_scan(
     onchain_total_supply_e8s: u128,
     recorded_supply_e8s: u128,
     has_inflight_mint: bool,
 ) -> bool {
-    !has_inflight_mint && onchain_total_supply_e8s == recorded_supply_e8s
+    !has_inflight_mint && onchain_total_supply_e8s < recorded_supply_e8s
 }
 
 /// Credit a confirmed on-chain deposit to a ChainVaultV1 record.
@@ -642,23 +646,24 @@ pub async fn run_observer(chain: ChainId) {
                 .unwrap_or(false)
         });
         // Run the catch-up sweep ONLY on a proven divergence: no mint in flight
-        // AND a readable totalSupply that fails `can_skip_burn_scan` (it differs
-        // from `recorded`). Mint-in-flight and probe errors fall through to the
-        // cheap advance-and-return path below.
-        let diverged = if has_inflight_mint {
+        // AND a readable totalSupply that has DROPPED below `recorded` (an
+        // unsubmitted burn). Mint-in-flight, probe errors, and a mint EXCESS
+        // (onchain > recorded) all fall through to the cheap advance-and-return
+        // path below.
+        let should_scan = if has_inflight_mint {
             false
         } else {
             match erc20_total_supply_at(chain, &contract, finalized).await {
                 Ok(onchain_supply) => {
-                    let skip = can_skip_burn_scan(onchain_supply, recorded_supply, has_inflight_mint);
-                    if !skip {
+                    let scan = backstop_should_scan(onchain_supply, recorded_supply, has_inflight_mint);
+                    if scan {
                         log!(
                             INFO,
-                            "[observer chain={:?}] backstop: onchain totalSupply {} != recorded {}; running catch-up sweep",
+                            "[observer chain={:?}] backstop: onchain totalSupply {} < recorded {}; unsubmitted burn, running catch-up sweep",
                             chain, onchain_supply, recorded_supply
                         );
                     }
-                    !skip
+                    scan
                 }
                 Err(e) => {
                     log!(
@@ -670,7 +675,7 @@ pub async fn run_observer(chain: ChainId) {
                 }
             }
         };
-        if !diverged {
+        if !should_scan {
             mutate_state(|s| advance_cursor_and_prune(&mut s.multi_chain, chain, finalized));
             return;
         }

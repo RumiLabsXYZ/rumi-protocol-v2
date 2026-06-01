@@ -145,8 +145,8 @@ impl SettlementQueueV1 {
     /// True iff the queue has a NON-terminal `Mint` op (`Queued` or `Inflight`).
     /// Distinct from `has_active_op` (which also counts `NativeWithdrawal`):
     /// only a `Mint` changes on-chain icUSD `totalSupply`, so only a live mint
-    /// can mask a burn from the observer's supply-equality gate
-    /// (`can_skip_burn_scan`). Terminal (`Succeeded`/`Failed`) ops never count.
+    /// can mask a burn from the observer's supply-equality backstop
+    /// (`backstop_should_scan`). Terminal (`Succeeded`/`Failed`) ops never count.
     pub fn has_active_mint_op(&self) -> bool {
         self.pending.values().any(|op| {
             matches!(op.kind, SettlementOpKind::Mint { .. })
