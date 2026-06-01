@@ -333,3 +333,20 @@ fn receipt_with_logs_parses_status_block_and_logs() {
     assert_eq!(data, "0x2a");
     assert_eq!(*idx, 3);
 }
+
+#[test]
+fn parse_eth_call_u128_decodes_padded_word() {
+    use crate::chains::monad::evm_rpc::parse_eth_call_u128;
+    // A 32-byte ABI word for 1_000_000, left-padded to 64 hex chars.
+    let word = format!("0x{:064x}", 1_000_000u128);
+    assert_eq!(parse_eth_call_u128(&word).unwrap(), 1_000_000u128);
+    // Zero supply.
+    assert_eq!(parse_eth_call_u128(&format!("0x{:064x}", 0u128)).unwrap(), 0u128);
+    // Empty result ("0x") -> error, NOT 0.
+    assert!(parse_eth_call_u128("0x").is_err());
+    // Non-hex -> error.
+    assert!(parse_eth_call_u128("0xzz").is_err());
+    // A value exceeding u128 (full 32-byte max) -> error rather than silent wrap.
+    let too_big = format!("0x{}", "f".repeat(64));
+    assert!(parse_eth_call_u128(&too_big).is_err());
+}

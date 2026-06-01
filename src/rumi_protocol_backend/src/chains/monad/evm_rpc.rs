@@ -108,6 +108,11 @@ pub const BURN_EVENT_TOPIC0: &str =
 pub const MINT_EVENT_TOPIC0: &str =
     "0x4e3883c75cc9c752bb1db2e406a822e4a75067ae77ad9a0a4d179f2709b9e1f6";
 
+/// `keccak256("totalSupply()")[:4]`, the ERC-20 `totalSupply()` selector.
+/// `IcUSD.sol` uses 8 decimals, so the returned value is e8s (1:1 with the
+/// ICP-side `chain_supplies` accounting, no scaling needed).
+pub const TOTAL_SUPPLY_SELECTOR: &str = "0x18160ddd";
+
 // ─── Candid types for the EVM RPC canister `request` method ─────────────────
 //
 // Source: live .did of `7hfb6-caaaa-aaaar-qadga-cai` (fetched 2026-05-28).
@@ -339,6 +344,23 @@ pub fn parse_hex_quantity(s: &str) -> Result<u128, String> {
         .ok_or_else(|| format!("missing 0x prefix: {:?}", s))?;
     u128::from_str_radix(hex, 16)
         .map_err(|e| format!("invalid hex quantity {:?}: {}", s, e))
+}
+
+/// Decode an `eth_call` result word (a 0x-prefixed 32-byte ABI uint) into a
+/// `u128`. Rejects an empty `"0x"` (a revert/empty return, which must NOT be
+/// read as 0, or the supply gate would wrongly believe supply dropped to zero)
+/// and any value exceeding `u128::MAX` (icUSD supply cannot approach that, so a
+/// larger value signals a malformed response, fail loudly rather than wrap).
+pub fn parse_eth_call_u128(result_hex: &str) -> Result<u128, String> {
+    let hex = result_hex
+        .strip_prefix("0x")
+        .or_else(|| result_hex.strip_prefix("0X"))
+        .ok_or_else(|| format!("eth_call result missing 0x prefix: {:?}", result_hex))?;
+    if hex.is_empty() {
+        return Err(format!("eth_call returned empty result {:?} (revert/empty)", result_hex));
+    }
+    u128::from_str_radix(hex, 16)
+        .map_err(|e| format!("eth_call result {:?} not a u128: {}", result_hex, e))
 }
 
 // ─── BurnLog ─────────────────────────────────────────────────────────────────
@@ -704,6 +726,36 @@ pub async fn get_balance(chain: ChainId, address: &str) -> Result<u128, String> 
         .as_str()
         .ok_or_else(|| format!("eth_getBalance: missing result in {:?}", text))?;
     parse_hex_quantity(hex)
+}
+
+/// Returns the ERC-20 `totalSupply()` of `contract` at a SPECIFIC block number
+/// (e8s for icUSD). Issued via `eth_call` at the fixed block `block`, a
+/// specific number is byte-identical across the EVM RPC canister's replicas, so
+/// HTTPS-outcall consensus is reached (the same reason `fetch_block_numbers`
+/// probes a fixed number, never `latest`). Used by the observer's supply gate
+/// to decide whether a burn could have occurred since the last scan.
+pub async fn erc20_total_supply_at(
+    chain: ChainId,
+    contract: &str,
+    block: u64,
+) -> Result<u128, String> {
+    let payload = format!(
+        r#"{{"jsonrpc":"2.0","method":"eth_call","params":[{{"to":{:?},"data":{:?}}},"0x{:x}"],"id":{}}}"#,
+        contract,
+        TOTAL_SUPPLY_SELECTOR,
+        block,
+        next_rpc_id()
+    );
+    let text = call_evm_rpc(chain, &payload).await?;
+    let val: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("eth_call(totalSupply) parse: {}", e))?;
+    if let Some(err) = val.get("error") {
+        return Err(format!("eth_call(totalSupply) RPC error: {}", err));
+    }
+    let hex = val["result"]
+        .as_str()
+        .ok_or_else(|| format!("eth_call(totalSupply): missing result in {:?}", text))?;
+    parse_eth_call_u128(hex)
 }
 
 /// Returns the transaction count (nonce) of `address` at the latest block.

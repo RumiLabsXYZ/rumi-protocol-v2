@@ -108,3 +108,36 @@ fn op_status_transitions_only_to_terminal_states() {
     op.mark_succeeded("0xdeadbeef".to_string(), 1_700_000_000_001_000_000);
     assert!(matches!(op.status, SettlementOpStatus::Succeeded { .. }));
 }
+
+#[test]
+fn has_active_mint_op_true_only_for_live_mint() {
+    let mut q = SettlementQueueV1::default();
+    assert!(!q.has_active_mint_op(), "empty queue has no active mint");
+
+    // A live (Queued) NativeWithdrawal must NOT count, it does not change supply.
+    q.enqueue(SettlementOp::new(
+        SettlementOpKind::NativeWithdrawal { recipient: "0xabc".into(), amount_e18: 1, vault_id: 1 },
+        "w1".into(),
+        0,
+    ))
+    .unwrap();
+    assert!(!q.has_active_mint_op(), "withdrawal-only queue has no active mint");
+
+    // A Queued Mint counts.
+    let mint_id = q
+        .enqueue(SettlementOp::new(
+            SettlementOpKind::Mint { recipient: "0xabc".into(), amount_e8s: 100, vault_id: 2 },
+            "m1".into(),
+            0,
+        ))
+        .unwrap();
+    assert!(q.has_active_mint_op(), "queued mint counts");
+
+    // An Inflight Mint counts.
+    q.pending.get_mut(&mint_id).unwrap().mark_inflight(1);
+    assert!(q.has_active_mint_op(), "inflight mint counts");
+
+    // A terminal (Succeeded) Mint does NOT count.
+    q.pending.get_mut(&mint_id).unwrap().mark_succeeded("0xhash".into(), 2);
+    assert!(!q.has_active_mint_op(), "succeeded mint does not count");
+}

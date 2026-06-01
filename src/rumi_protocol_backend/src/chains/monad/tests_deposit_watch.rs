@@ -123,3 +123,23 @@ fn advance_cursor_and_prune_sets_cursor_and_drops_keys_at_or_below_finalized() {
     assert!(!s.processed_burn_keys.contains_key(&150), "block 150 pruned");
     assert!(s.processed_burn_keys.contains_key(&250), "block 250 > finalized retained");
 }
+
+#[test]
+fn backstop_scans_only_on_supply_drop_and_no_inflight_mint() {
+    use super::deposit_watch::backstop_should_scan;
+    // On-chain BELOW recorded + no mint in flight -> an unsubmitted burn -> scan.
+    assert!(backstop_should_scan(900, 1_000, false));
+    // Equal -> in sync, nothing for the sweep to find -> skip.
+    assert!(!backstop_should_scan(1_000, 1_000, false));
+    // On-chain ABOVE recorded -> a mint EXCESS (e.g. an RPC-false-negative mint
+    // that landed but was never credited), NOT a burn -> skip. Scanning here
+    // would repeat every tick forever; this is the bug the backstop fix closes.
+    assert!(!backstop_should_scan(1_100, 1_000, false));
+    // Below but a mint is in flight -> stay cheap (submit_burn_proof + the
+    // post-confirm tick reconcile) -> skip.
+    assert!(!backstop_should_scan(900, 1_000, true));
+    // Equal + in-flight -> skip.
+    assert!(!backstop_should_scan(1_000, 1_000, true));
+    // Zero/zero -> skip.
+    assert!(!backstop_should_scan(0, 0, false));
+}
