@@ -105,7 +105,7 @@ Durable nonce makes build->sign(slow)->broadcast deterministic (playbook #7). Th
 
 - [ ] **Step 3 (advance-nonce-led messages):** Add `build_*_message_with_nonce(...)` variants whose recent_blockhash = the durable nonce and whose FIRST instruction is `solana_system_interface::instruction::advance_nonce_account(&nonce_pubkey, &authority)`. Apply to both transfer and mint builders. Pure test: first instruction targets the System program + nonce account.
 
-- [ ] **Step 4 (bootstrap, idempotent):** Add `async fn bootstrap_nonce_account(chain) -> Result<(), String>`: if `get_durable_nonce` succeeds, return Ok (already bootstrapped). Else build a create+initialize-nonce tx (`solana_system_interface::instruction::create_nonce_account(payer, nonce, authority, lamports_for_rent)`), sign with the settlement key (+ the nonce key for the create), broadcast. Dev-gated endpoint `solana_bootstrap_nonce()`. Operator runs it once on devnet.
+- [ ] **Step 4 (bootstrap, idempotent):** Add `async fn bootstrap_nonce_account(chain, blockhash_override: Option<Hash>) -> Result<(), String>`: if `get_durable_nonce` succeeds, return Ok (already bootstrapped). Else build a create+initialize-nonce tx (`solana_system_interface::instruction::create_nonce_account(payer, nonce, authority, lamports_for_rent)`), sign with the settlement key (+ the nonce key for the create), broadcast. Dev-gated endpoint `solana_bootstrap_nonce(opt text)`. Operator runs it once on devnet. **PLAYBOOK #4 (load-bearing):** `getLatestBlockhash` is a per-slot value that the sol-rpc canister cannot reach multi-provider consensus on (chronic `#Inconsistent`), so the consensus auto-fetch (`None`) fails on real clusters and only works in PocketIC. On devnet/mainnet the operator passes one fresh finalized blockhash as the override (fetched and handed in within ~60s before it expires). Proven by `tests/solana_bootstrap_pic.rs` (None fails under modeled `#Inconsistent`, override succeeds).
 
 - [ ] **Step 5:** Commit: `feat(solana): durable nonce (advance + idempotent bootstrap)`.
 
@@ -164,7 +164,7 @@ Durable nonce makes build->sign(slow)->broadcast deterministic (playbook #7). Th
 
 ## Task 10: Staging deploy + devnet runbook (operator-gated)
 
-- [ ] Invoke the cycles-management skill; confirm headroom. Solana timers stay OFF by default. Deploy backend (upgrade only) to staging. Register Solana chain (devnet), bootstrap nonce, deploy the icUSD SPL mint on devnet with the settlement address as mint authority (8 decimals), `set_chain_contract`. Exercise open->deposit->mint->withdraw on real devnet. Document results. (Operator-run; not agent-executed.)
+- [ ] Invoke the cycles-management skill; confirm headroom. Solana timers stay OFF by default. Deploy backend (upgrade only) to staging. Register Solana chain (devnet); bootstrap the nonce via `solana_bootstrap_nonce(opt "<fresh finalized blockhash>")` (PLAYBOOK #4: the blockhash override is REQUIRED on real devnet because `getLatestBlockhash` chronically returns `#Inconsistent`; the no-override/`None` path will fail there. Fetch a fresh finalized blockhash, e.g. `solana blockhash` or a single-provider getLatestBlockhash, and call within ~60s before it expires); deploy the icUSD SPL mint on devnet with the settlement address as mint authority (8 decimals), `set_chain_contract`. Exercise open->deposit->mint->withdraw on real devnet. Document results. (Operator-run; not agent-executed.) See also `docs/icp-solana-integration-playbook.md` #4 and the cutover runbook #24.
 
 ---
 
