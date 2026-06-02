@@ -23,6 +23,8 @@ fn main() {}
 #[ic_cdk::init]
 fn init(args: Option<InitArgs>) {
     state::init_state(args, ic_cdk::caller());
+    // No-op while the poll timer is off by default; consistent entry point.
+    poll::setup_poll_timer();
     let cfg = state::points_config();
     log!(
         INFO,
@@ -42,6 +44,8 @@ fn pre_upgrade() {
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
     state::restore_from_stable_or_trap();
+    // Timers do not survive upgrades: re-register from the persisted config.
+    poll::setup_poll_timer();
     let cfg = state::points_config();
     log!(
         INFO,
@@ -129,13 +133,30 @@ fn set_source_canister(source_tag: u8, canister: Principal) -> Result<(), Points
 }
 
 /// Admin-only manual poll of all configured sources. Returns the number of events
-/// applied. (No periodic timer in Phase 2; the production cadence is a follow-up.)
+/// applied. Works regardless of the periodic timer (used for the E2E and backfill).
 #[ic_cdk::update]
 async fn trigger_poll() -> Result<u64, PointsError> {
     if !state::is_admin(ic_cdk::caller()) {
         return Err(PointsError::Unauthorized);
     }
     Ok(poll::poll_all().await as u64)
+}
+
+/// Admin: turn the periodic poll timer on/off (Phase 2b). Off by default. Enable
+/// during the season after configuring sources; disable after season end.
+#[ic_cdk::update]
+fn set_poll_enabled(enabled: bool) -> Result<(), PointsError> {
+    state::set_poll_enabled(ic_cdk::caller(), enabled)?;
+    poll::setup_poll_timer();
+    Ok(())
+}
+
+/// Admin: set the poll cadence in seconds (clamped to a floor to bound cycle burn).
+#[ic_cdk::update]
+fn set_poll_interval_secs(secs: u64) -> Result<(), PointsError> {
+    state::set_poll_interval(ic_cdk::caller(), secs)?;
+    poll::setup_poll_timer();
+    Ok(())
 }
 
 #[ic_cdk::query]
@@ -151,6 +172,8 @@ fn get_ingest_status() -> IngestStatus {
     IngestStatus {
         sources,
         registered_count: state::registered_count(),
+        poll_enabled: state::poll_enabled(),
+        poll_interval_secs: state::poll_interval_secs(),
     }
 }
 

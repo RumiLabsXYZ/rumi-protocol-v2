@@ -231,6 +231,9 @@ pub struct SourceStatus {
 pub struct IngestStatus {
     pub sources: Vec<SourceStatus>,
     pub registered_count: u64,
+    /// Whether the periodic poll timer is running (Phase 2b).
+    pub poll_enabled: bool,
+    pub poll_interval_secs: u64,
 }
 
 /// Error surface for the admin / registration update endpoints.

@@ -69,6 +69,8 @@ const CURSORS_MEM_ID: MemoryId = MemoryId::new(8);
 // Phase 2: per-source canister principal (source tag -> canister id). Configurable
 // per environment (mainnet defaults seeded at init; admin overrides for local).
 const SOURCE_CANISTERS_MEM_ID: MemoryId = MemoryId::new(9);
+// Phase 2b: poll-timer config (key 0 = enabled 0/1, key 1 = interval seconds).
+const POLL_CONFIG_MEM_ID: MemoryId = MemoryId::new(10);
 
 const WASM_PAGE_SIZE: u64 = 65_536; // 64 KiB
 
@@ -244,6 +246,12 @@ thread_local! {
     /// local replica ids) via `set_source_canister`. Persists across upgrades.
     static SOURCE_CANISTERS: RefCell<StableBTreeMap<u8, StorablePrincipal, VMem>> =
         MEMORY_MANAGER.with(|m| RefCell::new(StableBTreeMap::init(m.borrow().get(SOURCE_CANISTERS_MEM_ID))));
+
+    /// Phase 2b: poll-timer config (key 0 = enabled, key 1 = interval seconds).
+    /// Persists across upgrades; the timer itself is re-registered in
+    /// `post_upgrade` from this config (timers do not survive upgrades).
+    static POLL_CONFIG: RefCell<StableBTreeMap<u8, u64, VMem>> =
+        MEMORY_MANAGER.with(|m| RefCell::new(StableBTreeMap::init(m.borrow().get(POLL_CONFIG_MEM_ID))));
 }
 
 // ── Excluded-principals seed (spec Section 11) ──────────────────────────────
@@ -669,6 +677,44 @@ pub fn source_canisters() -> Vec<(u8, Principal)> {
     SOURCE_CANISTERS.with(|m| m.borrow().iter().map(|(tag, p)| (tag, p.0)).collect())
 }
 
+// ── Phase 2b: poll-timer config ─────────────────────────────────────────────
+
+/// Default poll cadence. Conservative to bound cycle burn (each tick does up to
+/// four bounded inter-canister query calls); admin-tunable. 300s = 288 ticks/day.
+pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 300;
+/// Floor on the admin-set cadence, so it can never be turned into a cycle-burning
+/// near-heartbeat.
+pub const MIN_POLL_INTERVAL_SECS: u64 = 60;
+
+/// Is the periodic poll timer enabled? Defaults to OFF, so a fresh deploy never
+/// auto-polls (and burns no cycles) until an operator configures sources and
+/// enables it for the season.
+pub fn poll_enabled() -> bool {
+    POLL_CONFIG.with(|c| c.borrow().get(&0).unwrap_or(0) != 0)
+}
+
+pub fn poll_interval_secs() -> u64 {
+    POLL_CONFIG.with(|c| c.borrow().get(&1).unwrap_or(DEFAULT_POLL_INTERVAL_SECS))
+}
+
+pub fn set_poll_enabled(caller: Principal, enabled: bool) -> Result<(), PointsError> {
+    require_admin(caller)?;
+    POLL_CONFIG.with(|c| {
+        c.borrow_mut().insert(0, enabled as u64);
+    });
+    Ok(())
+}
+
+/// Admin-set the poll cadence (clamped to `MIN_POLL_INTERVAL_SECS`).
+pub fn set_poll_interval(caller: Principal, secs: u64) -> Result<(), PointsError> {
+    require_admin(caller)?;
+    let clamped = secs.max(MIN_POLL_INTERVAL_SECS);
+    POLL_CONFIG.with(|c| {
+        c.borrow_mut().insert(1, clamped);
+    });
+    Ok(())
+}
+
 /// Acquire the single-poll guard. Returns `true` if acquired (no poll was in
 /// flight); `false` means a poll is already running and the caller must abort.
 /// Pairs with `end_poll` (call it on every exit path, including errors).
@@ -947,5 +993,42 @@ mod tests {
     fn load_state_returns_none_when_nothing_saved() {
         // Fresh thread -> blob region never written -> None (no silent default).
         assert_eq!(load_state_from_stable(), None);
+    }
+
+    #[test]
+    fn poll_config_defaults_off_at_300s() {
+        init_default(tp(99));
+        assert!(!poll_enabled(), "poll timer is OFF by default");
+        assert_eq!(poll_interval_secs(), DEFAULT_POLL_INTERVAL_SECS);
+    }
+
+    #[test]
+    fn admin_can_enable_and_set_interval() {
+        let admin = tp(99);
+        init_default(admin);
+        assert_eq!(set_poll_enabled(admin, true), Ok(()));
+        assert!(poll_enabled());
+        assert_eq!(set_poll_interval(admin, 600), Ok(()));
+        assert_eq!(poll_interval_secs(), 600);
+        assert_eq!(set_poll_enabled(admin, false), Ok(()));
+        assert!(!poll_enabled());
+    }
+
+    #[test]
+    fn poll_interval_is_floored() {
+        let admin = tp(99);
+        init_default(admin);
+        assert_eq!(set_poll_interval(admin, 5), Ok(())); // below the floor
+        assert_eq!(poll_interval_secs(), MIN_POLL_INTERVAL_SECS);
+    }
+
+    #[test]
+    fn non_admin_cannot_change_poll_config() {
+        init_default(tp(99));
+        let intruder = tp(8);
+        assert_eq!(set_poll_enabled(intruder, true), Err(PointsError::Unauthorized));
+        assert_eq!(set_poll_interval(intruder, 120), Err(PointsError::Unauthorized));
+        assert!(!poll_enabled());
+        assert_eq!(poll_interval_secs(), DEFAULT_POLL_INTERVAL_SECS);
     }
 }
