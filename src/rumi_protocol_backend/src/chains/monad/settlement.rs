@@ -618,7 +618,7 @@ async fn confirm_op(
     //
     //    - NativeWithdrawal: the transfer did not happen, so the reserved
     //      collateral was not paid out from the settlement hot wallet. ADD it
-    //      back to `collateral_amount_e18` (undo the reserve-at-enqueue) and, if
+    //      back to `collateral_amount_native` (undo the reserve-at-enqueue) and, if
     //      the vault had gone `Closing` (full withdrawal / close), revert it to
     //      `Open` — it is no longer empty. Never touches debt/supply (withdraw
     //      moves only collateral).
@@ -657,8 +657,8 @@ async fn confirm_op(
                 }
                 SettlementOpKind::NativeWithdrawal { vault_id, amount_e18, .. } => {
                     if let Some(v) = s.multi_chain.chain_vaults.get_mut(vault_id) {
-                        v.collateral_amount_e18 =
-                            v.collateral_amount_e18.saturating_add(*amount_e18);
+                        v.collateral_amount_native =
+                            v.collateral_amount_native.saturating_add(*amount_e18);
                         if v.status == ChainVaultStatus::Closing {
                             v.status = ChainVaultStatus::Open;
                         }

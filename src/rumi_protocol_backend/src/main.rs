@@ -961,7 +961,7 @@ async fn open_chain_vault(
 ///
 /// CR-checks the REMAINING collateral against `MONAD_MIN_CR_E4` (debt-free
 /// vaults skip the check), RESERVES the withdrawn amount (decrements
-/// `collateral_amount_e18` at enqueue), and enqueues a `NativeWithdrawal` op
+/// `collateral_amount_native` at enqueue), and enqueues a `NativeWithdrawal` op
 /// that Timer D signs and broadcasts. A vault that becomes empty AND debt-free
 /// flips to `Closing` here and `Closed` once the transfer confirms.
 ///

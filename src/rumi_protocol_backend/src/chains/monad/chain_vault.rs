@@ -41,7 +41,14 @@ pub struct ChainVaultV1 {
     /// Unvalidated 0x hex string. The deposit-watch task (Task 9) validates
     /// on-chain before crediting any collateral.
     pub custody_address: String,
-    pub collateral_amount_e18: u128,
+    /// Collateral in the chain's NATIVE base units (wei for 18-decimal MON,
+    /// lamports for 9-decimal SOL). `#[serde(rename)]` keeps the on-wire and
+    /// candid field name as the legacy `collateral_amount_e18`, so existing state
+    /// snapshots and the candid interface stay byte-compatible (no migration);
+    /// only the Rust-visible name is corrected. Pair with
+    /// `ChainConfig.chain_native_decimals` for any USD/CR math.
+    #[serde(rename = "collateral_amount_e18")]
+    pub collateral_amount_native: u128,
     pub debt_e8s: u128,
     /// Unvalidated 0x hex string. The settlement task (Task 10) validates
     /// before submitting the on-chain mint transaction.
@@ -84,7 +91,7 @@ pub enum WithdrawError {
     UnknownVault,
     /// No manual MON price is set for the chain (`manual_prices[(chain,"MON")]`).
     NoPrice,
-    /// Requested amount exceeds the vault's `collateral_amount_e18`.
+    /// Requested amount exceeds the vault's `collateral_amount_native`.
     InsufficientCollateral,
     /// The post-withdrawal collateral ratio would fall below `min_cr_e4`.
     BelowMinCr { cr_e4: u64, min_e4: u64 },
@@ -145,7 +152,7 @@ pub fn collateral_ratio_e4(
 /// CR-checks the DECLARED collateral against `min_cr_e4`. On success, inserts a
 /// `ChainVaultV1` with:
 /// - `status = AwaitingDeposit`
-/// - `collateral_amount_e18 = collateral_e18` (the declared amount)
+/// - `collateral_amount_native = collateral_e18` (the declared amount)
 /// - `debt_e8s = 0` (no confirmed debt until the mint is observed at finality)
 /// - `pending_mint_e8s = debt_e8s` (the INTENDED mint amount, surfaced for
 ///   deposit-watch to enqueue once the on-chain deposit is verified)
@@ -215,7 +222,7 @@ pub fn open_chain_vault_in_state(
             owner,
             collateral_chain: chain,
             custody_address,
-            collateral_amount_e18: collateral_e18,
+            collateral_amount_native: collateral_e18,
             // Design B: no confirmed debt until the on-chain mint is observed.
             debt_e8s: 0,
             mint_recipient,
@@ -268,7 +275,7 @@ pub fn verify_deposit_and_enqueue_mint_in_state(
             v.collateral_chain,
             v.mint_recipient.clone(),
             v.pending_mint_e8s,
-            v.collateral_amount_e18,
+            v.collateral_amount_native,
         )
     };
 
@@ -313,24 +320,24 @@ pub fn verify_deposit_and_enqueue_mint_in_state(
 /// ## Semantics
 ///
 /// - `UnknownVault` if the vault is absent.
-/// - `InsufficientCollateral` if `amount_e18 > collateral_amount_e18`.
+/// - `InsufficientCollateral` if `amount_e18 > collateral_amount_native`.
 /// - `NoPrice` if no `manual_prices[(chain,"MON")]` is set.
 /// - When `debt_e8s > 0`, the REMAINING collateral
-///   (`collateral_amount_e18 - amount_e18`) is CR-checked against `min_cr_e4`;
+///   (`collateral_amount_native - amount_e18`) is CR-checked against `min_cr_e4`;
 ///   below it -> `BelowMinCr`. A debt-free vault skips the CR check (any
 ///   remainder is trivially over-collateralized).
 ///
 /// On success: enqueues a `NativeWithdrawal { recipient: dest_address,
 /// amount_e18, vault_id }` op (idempotency key
 /// `withdraw-{chain}-{vault_id}-{now_ns}`), RESERVES the collateral by
-/// decrementing `collateral_amount_e18` to the remainder, and flips the vault
+/// decrementing `collateral_amount_native` to the remainder, and flips the vault
 /// to `Closing` iff `remaining == 0 && debt_e8s == 0`. The settlement worker
 /// flips `Closing -> Closed` once the on-chain transfer confirms (and ADDS the
 /// reserved collateral back if the transfer reverts).
 ///
 /// ## Reserve-at-enqueue
 ///
-/// Decrementing `collateral_amount_e18` at enqueue time is the standard CDP
+/// Decrementing `collateral_amount_native` at enqueue time is the standard CDP
 /// reserve-on-request pattern: a second withdraw cannot double-spend the same
 /// collateral while the first is still in flight. A reverted transfer restores
 /// the reserve in `settlement::confirm_op`.
@@ -369,10 +376,10 @@ pub fn withdraw_collateral_in_state(
         if v.status != ChainVaultStatus::Open {
             return Err(WithdrawError::WrongStatus { status: v.status.clone() });
         }
-        if amount_e18 > v.collateral_amount_e18 {
+        if amount_e18 > v.collateral_amount_native {
             return Err(WithdrawError::InsufficientCollateral);
         }
-        let remaining = v.collateral_amount_e18 - amount_e18;
+        let remaining = v.collateral_amount_native - amount_e18;
         (v.collateral_chain, remaining, v.debt_e8s)
     };
 
@@ -428,7 +435,7 @@ pub fn withdraw_collateral_in_state(
         .chain_vaults
         .get_mut(&vault_id)
         .expect("vault present: checked above");
-    v.collateral_amount_e18 = remaining;
+    v.collateral_amount_native = remaining;
     if remaining == 0 && debt_e8s == 0 {
         v.status = ChainVaultStatus::Closing;
     }
@@ -440,7 +447,7 @@ pub fn withdraw_collateral_in_state(
 /// Requires `debt_e8s == 0` (`HasDebt` otherwise) — debt must first be repaid
 /// by burning icUSD on Monad (observer-driven, see
 /// `withdraw_collateral_in_state`). Then delegates to
-/// `withdraw_collateral_in_state` for the full `collateral_amount_e18`, which
+/// `withdraw_collateral_in_state` for the full `collateral_amount_native`, which
 /// inherits the `status == Open` gate (a non-Open vault rejects with
 /// `WrongStatus`), reserves the collateral, and flips the vault to `Closing`
 /// (the worker flips it to `Closed` on the transfer's confirmation).
@@ -470,7 +477,7 @@ pub fn close_chain_vault_in_state(
         if v.debt_e8s != 0 {
             return Err(WithdrawError::HasDebt);
         }
-        (v.collateral_amount_e18, v.status.clone())
+        (v.collateral_amount_native, v.status.clone())
     };
 
     // Degenerate close: an Open, debt-free vault with no collateral to return.

@@ -140,7 +140,7 @@ fn open_creates_awaiting_deposit_vault_and_enqueues_nothing() {
     assert!(matches!(v.status, ChainVaultStatus::AwaitingDeposit), "status {:?}", v.status);
     assert_eq!(v.pending_mint_e8s, 100_00000000, "intended mint stored in pending");
     assert_eq!(v.debt_e8s, 0, "no debt until verified deposit + confirmed mint");
-    assert_eq!(v.collateral_amount_e18, declared, "declared collateral recorded");
+    assert_eq!(v.collateral_amount_native, declared, "declared collateral recorded");
     assert_eq!(v.owner, owner());
     assert_eq!(v.custody_address, "0xcustody");
     assert_eq!(v.mint_recipient, "0x000000000000000000000000000000000000c0de");

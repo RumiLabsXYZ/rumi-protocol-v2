@@ -3,7 +3,7 @@
 //! ## Pure helpers (unit-tested)
 //!
 //! - `credit_deposit_to_state`: credits on-chain collateral deposits to a
-//!   ChainVaultV1 record (increments `collateral_amount_e18`).
+//!   ChainVaultV1 record (increments `collateral_amount_native`).
 //! - `apply_burn_to_state`: atomically decrements `chain_supplies` and vault
 //!   `debt_e8s` when an on-chain Burn event is observed at finality.
 //!
@@ -114,7 +114,7 @@ pub fn backstop_should_scan(
 
 /// Credit a confirmed on-chain deposit to a ChainVaultV1 record.
 ///
-/// Increments `collateral_amount_e18` by `amount_e18` (saturating — overflow
+/// Increments `collateral_amount_native` by `amount_e18` (saturating — overflow
 /// of a u128 collateral balance is not a realistic failure mode but we guard
 /// it anyway). Returns `Err` if the vault is not found.
 pub fn credit_deposit_to_state(
@@ -126,7 +126,7 @@ pub fn credit_deposit_to_state(
         .chain_vaults
         .get_mut(&vault_id)
         .ok_or_else(|| format!("credit_deposit: unknown vault_id {}", vault_id))?;
-    vault.collateral_amount_e18 = vault.collateral_amount_e18.saturating_add(amount_e18);
+    vault.collateral_amount_native = vault.collateral_amount_native.saturating_add(amount_e18);
     Ok(())
 }
 
@@ -417,7 +417,7 @@ pub async fn run_observer(chain: ChainId) {
             .filter(|v| {
                 v.collateral_chain == chain && v.status == ChainVaultStatus::AwaitingDeposit
             })
-            .map(|v| (v.vault_id, v.custody_address.clone(), v.collateral_amount_e18))
+            .map(|v| (v.vault_id, v.custody_address.clone(), v.collateral_amount_native))
             .collect()
     });
 

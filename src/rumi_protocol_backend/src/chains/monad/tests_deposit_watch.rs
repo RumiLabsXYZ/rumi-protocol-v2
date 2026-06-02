@@ -11,7 +11,7 @@ fn seeded() -> MultiChainStateV3 {
     s.chain_supplies.insert(ChainId(10143), 0);
     s.chain_vaults.insert(1, ChainVaultV1 {
         vault_id: 1, owner: Principal::anonymous(), collateral_chain: ChainId(10143),
-        custody_address: "0xcustody".into(), collateral_amount_e18: 0, debt_e8s: 0,
+        custody_address: "0xcustody".into(), collateral_amount_native: 0, debt_e8s: 0,
         mint_recipient: "0xr".into(), pending_mint_e8s: 0,
         status: ChainVaultStatus::Open, opened_at_ns: 0,
     });
@@ -22,7 +22,7 @@ fn seeded() -> MultiChainStateV3 {
 fn credit_deposit_increments_collateral() {
     let mut s = seeded();
     credit_deposit_to_state(&mut s, 1, 5_000_000_000_000_000_000).expect("credit");
-    assert_eq!(s.chain_vaults[&1].collateral_amount_e18, 5_000_000_000_000_000_000);
+    assert_eq!(s.chain_vaults[&1].collateral_amount_native, 5_000_000_000_000_000_000);
 }
 
 #[test]

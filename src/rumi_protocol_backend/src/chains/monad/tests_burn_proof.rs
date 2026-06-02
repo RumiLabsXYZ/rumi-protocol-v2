@@ -19,7 +19,7 @@ fn state_with_open_vault(debt: u128) -> MultiChainStateV3 {
             owner: Principal::anonymous(),
             collateral_chain: ChainId(10143),
             custody_address: "0xc".into(),
-            collateral_amount_e18: 0,
+            collateral_amount_native: 0,
             debt_e8s: debt,
             mint_recipient: "0xr".into(),
             pending_mint_e8s: 0,

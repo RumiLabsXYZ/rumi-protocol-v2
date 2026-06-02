@@ -28,7 +28,7 @@ fn chain_vault_round_trips_via_candid() {
         owner: candid::Principal::anonymous(),
         collateral_chain: ChainId(10143),
         custody_address: "0xabc0000000000000000000000000000000000001".into(),
-        collateral_amount_e18: 5_000_000_000_000_000_000, // 5 MON
+        collateral_amount_native: 5_000_000_000_000_000_000, // 5 MON
         debt_e8s: 0,
         mint_recipient: "0xrecipient".into(),
         pending_mint_e8s: 10_000_000_000, // 100 icUSD pending
@@ -48,7 +48,7 @@ fn chain_vault_round_trips_via_cbor() {
         owner: candid::Principal::anonymous(),
         collateral_chain: ChainId(10143),
         custody_address: "0xa".into(),
-        collateral_amount_e18: 1,
+        collateral_amount_native: 1,
         debt_e8s: 2,
         mint_recipient: "0xb".into(),
         pending_mint_e8s: 0,
