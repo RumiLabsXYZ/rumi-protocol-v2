@@ -18,6 +18,14 @@ pub const SOLANA_ICUSD_DECIMALS: u8 = 8;
 /// Native SOL is 9 decimals (lamports).
 pub const SOL_NATIVE_DECIMALS: u8 = 9;
 
+/// Minimum collateral ratio (e4: 13000 == 130.00%) required to open a Solana
+/// chain vault. Checked against DECLARED collateral at open time. Matches Monad's
+/// `MONAD_MIN_CR_E4` (130%) for launch; per-collateral configurability is a later
+/// refinement (Phase 2 unifies the foreign-chain and ICP-native CDP parameter
+/// models). Passed to `chains::vault::open_chain_vault_in_state` by the Solana
+/// vault endpoints (Task 6).
+pub const SOLANA_MIN_CR_E4: u64 = 13_000;
+
 /// Threshold-Ed25519 key name. `test_key_1` is the mainnet test key (Ed25519 has
 /// NO local dfx key); switch to `key_1` for the production rollout. Derived
 /// addresses differ per key, so the SPL mint authority must be derived with this
