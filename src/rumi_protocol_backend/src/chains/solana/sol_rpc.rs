@@ -252,6 +252,83 @@ pub fn parse_latest_blockhash(json: &str) -> Result<[u8; 32], String> {
     Ok(arr)
 }
 
+/// Outcome of a `getTransaction` lookup, distilled to what `verify_deposit`
+/// needs: is the tx on-chain, and did it succeed.
+///
+/// - `NotFound`: a null `result` (the signature is unknown at the requested
+///   commitment, i.e. not yet finalized or never landed).
+/// - `Confirmed { slot }`: a non-null result whose `meta.err` is null (the tx
+///   landed and executed successfully); `slot` is the confirmation slot.
+/// - `Failed`: a non-null result whose `meta.err` is non-null (the tx landed
+///   but its execution reverted on-chain). We surface this as a DISTINCT signal
+///   (rather than folding it into `NotFound`) so `verify_deposit` can return a
+///   "deposit failed" error rather than a "not finalized" one, mirroring the
+///   Monad adapter's reverted-vs-not-mined distinction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TxStatus {
+    NotFound,
+    Confirmed { slot: u64 },
+    Failed,
+}
+
+/// Parse a `getTransaction` JSON-RPC response into a `TxStatus`.
+///
+/// A null `result` => `NotFound`. A non-null result reads `result.slot` (a bare
+/// u64) and `result.meta.err`: a null `err` => `Confirmed { slot }`, a non-null
+/// `err` => `Failed`. A JSON-RPC `error` member is a transport/provider failure,
+/// surfaced as `Err`. A non-null result missing `slot` is malformed => `Err`.
+pub fn parse_get_transaction(json: &str) -> Result<TxStatus, String> {
+    let v: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("bad json: {e}"))?;
+    if let Some(err) = v.get("error") {
+        return Err(format!("json-rpc error: {err}"));
+    }
+    let result = match v.get("result") {
+        // A null result, or no result member at all, means the signature is not
+        // known at the requested commitment.
+        None => return Ok(TxStatus::NotFound),
+        Some(r) if r.is_null() => return Ok(TxStatus::NotFound),
+        Some(r) => r,
+    };
+    // meta.err == null => success; a non-null err means the tx reverted.
+    let failed = result
+        .pointer("/meta/err")
+        .map(|e| !e.is_null())
+        .unwrap_or(false);
+    if failed {
+        return Ok(TxStatus::Failed);
+    }
+    let slot = result
+        .get("slot")
+        .and_then(|s| s.as_u64())
+        .ok_or_else(|| format!("missing result.slot in getTransaction response: {json}"))?;
+    Ok(TxStatus::Confirmed { slot })
+}
+
+/// Extract the slot number from a `getSlot` JSON-RPC response, where `result` is
+/// a bare u64 (NOT nested under `result.value`).
+pub fn parse_slot(json: &str) -> Result<u64, String> {
+    let v: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("bad json: {e}"))?;
+    if let Some(err) = v.get("error") {
+        return Err(format!("json-rpc error: {err}"));
+    }
+    v.get("result")
+        .and_then(|r| r.as_u64())
+        .ok_or_else(|| format!("missing result (slot) in getSlot response: {json}"))
+}
+
+/// True iff `sig` base58-decodes to a plausible Ed25519 signature length (64
+/// bytes). A Solana transaction signature is a 64-byte Ed25519 signature encoded
+/// in base58, NOT a 32-byte pubkey, so this is intentionally distinct from
+/// `ted25519::is_valid_solana_address` (which checks for 32 bytes). Used to
+/// reject a caller-supplied signature before it is interpolated into the
+/// `getTransaction` JSON payload, so a malformed value cannot inject.
+pub fn is_valid_tx_signature(sig: &str) -> bool {
+    bs58::decode(sig)
+        .into_vec()
+        .map(|b| b.len() == 64)
+        .unwrap_or(false)
+}
+
 // ─── Async network calls ─────────────────────────────────────────────────────
 
 fn sol_rpc_principal() -> Principal {
@@ -348,4 +425,48 @@ pub async fn get_latest_blockhash() -> Result<Hash, String> {
     let text = json_request(payload).await?;
     let blockhash = parse_latest_blockhash(&text)?;
     Ok(Hash::new_from_array(blockhash))
+}
+
+/// Look up a transaction by signature at `finalized` via `getTransaction` and
+/// distill the result to a `TxStatus` (not-found / confirmed-with-slot /
+/// failed). Used by the adapter's `verify_deposit` to confirm a deposit landed
+/// and succeeded.
+///
+/// `signature` is validated as a 64-byte base58 Ed25519 signature before
+/// interpolation (the value reaches `verify_deposit` from a caller, so we never
+/// trust it to be injection-safe), erroring early on a malformed value rather
+/// than building a payload that could break the JSON.
+///
+/// `maxSupportedTransactionVersion: 0` tells the provider to return versioned
+/// (v0) transactions rather than erroring on them; `encoding: json` is the
+/// default object form (we only read `slot` and `meta.err`, not the inner
+/// instructions, so we do not need `jsonParsed`).
+pub async fn get_transaction(signature: &str) -> Result<TxStatus, String> {
+    if !is_valid_tx_signature(signature) {
+        return Err(format!(
+            "invalid transaction signature (must be 64-byte base58): {signature}"
+        ));
+    }
+    let payload = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"getTransaction","params":["{}",{{"encoding":"json","commitment":"finalized","maxSupportedTransactionVersion":0}}]}}"#,
+        signature
+    );
+    let text = json_request(&payload).await?;
+    parse_get_transaction(&text)
+}
+
+/// Read the current slot at the given commitment via `getSlot`. `verify_deposit`
+/// uses the confirmation slot from `getTransaction`; `fetch_finality` uses this
+/// to report the chain's latest/finalized slot. On Solana the commitment level
+/// (`finalized` / `confirmed`) replaces EVM block depth as the finality knob.
+///
+/// `commitment` is a fixed string supplied by this crate's callers (never user
+/// input), so interpolating it is safe.
+pub async fn get_slot(commitment: &str) -> Result<u64, String> {
+    let payload = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[{{"commitment":"{}"}}]}}"#,
+        commitment
+    );
+    let text = json_request(&payload).await?;
+    parse_slot(&text)
 }

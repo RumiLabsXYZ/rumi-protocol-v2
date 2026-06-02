@@ -7,11 +7,14 @@
 //! project's pin, the same wall Monad hit with `evm_rpc_client`). See
 //! `docs/superpowers/specs/2026-06-01-solana-integration-design.md`.
 
+pub mod adapter;
 pub mod config;
 pub mod sol_rpc;
 pub mod ted25519;
 pub mod tx;
 
+#[cfg(test)]
+mod tests_adapter;
 #[cfg(test)]
 mod tests_config;
 #[cfg(test)]

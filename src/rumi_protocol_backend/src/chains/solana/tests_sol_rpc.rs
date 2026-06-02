@@ -197,3 +197,98 @@ fn parse_send_signature_reports_rpc_error() {
 fn parse_send_signature_missing_result_errs() {
     assert!(parse_send_transaction_signature(r#"{"jsonrpc":"2.0","id":1}"#).is_err());
 }
+
+// ─── getTransaction (verify_deposit) ─────────────────────────────────────────
+
+#[test]
+fn parse_get_transaction_null_result_is_not_found() {
+    // A confirmed-at-finalized lookup of an unknown/unconfirmed signature.
+    let json = r#"{"jsonrpc":"2.0","result":null,"id":1}"#;
+    assert_eq!(parse_get_transaction(json).unwrap(), TxStatus::NotFound);
+}
+
+#[test]
+fn parse_get_transaction_missing_result_is_not_found() {
+    // Some providers omit the member entirely instead of returning null.
+    let json = r#"{"jsonrpc":"2.0","id":1}"#;
+    assert_eq!(parse_get_transaction(json).unwrap(), TxStatus::NotFound);
+}
+
+#[test]
+fn parse_get_transaction_success_returns_slot() {
+    // Non-null result, meta.err == null => confirmed at result.slot.
+    let json = r#"{"jsonrpc":"2.0","result":{"slot":123456789,"meta":{"err":null,"fee":5000},"transaction":{}},"id":1}"#;
+    assert_eq!(
+        parse_get_transaction(json).unwrap(),
+        TxStatus::Confirmed { slot: 123_456_789 }
+    );
+}
+
+#[test]
+fn parse_get_transaction_failed_meta_is_failed() {
+    // Non-null result with a non-null meta.err => the tx reverted on-chain.
+    let json = r#"{"jsonrpc":"2.0","result":{"slot":555,"meta":{"err":{"InstructionError":[0,{"Custom":1}]},"fee":5000},"transaction":{}},"id":1}"#;
+    assert_eq!(parse_get_transaction(json).unwrap(), TxStatus::Failed);
+}
+
+#[test]
+fn parse_get_transaction_reports_rpc_error() {
+    let json = r#"{"jsonrpc":"2.0","error":{"code":-32004,"message":"Block not available"},"id":1}"#;
+    assert!(parse_get_transaction(json).is_err());
+}
+
+#[test]
+fn parse_get_transaction_missing_slot_errs() {
+    // A non-null, non-failed result that omits slot is malformed.
+    let json = r#"{"jsonrpc":"2.0","result":{"meta":{"err":null}},"id":1}"#;
+    assert!(parse_get_transaction(json).is_err());
+}
+
+// ─── getSlot (fetch_finality) ────────────────────────────────────────────────
+
+#[test]
+fn parse_slot_extracts_bare_u64() {
+    // getSlot's result is a bare number, NOT nested under result.value.
+    let json = r#"{"jsonrpc":"2.0","result":341078412,"id":1}"#;
+    assert_eq!(parse_slot(json).unwrap(), 341_078_412);
+}
+
+#[test]
+fn parse_slot_reports_rpc_error() {
+    let json = r#"{"jsonrpc":"2.0","error":{"code":-32000,"message":"x"},"id":1}"#;
+    assert!(parse_slot(json).is_err());
+}
+
+#[test]
+fn parse_slot_missing_result_errs() {
+    assert!(parse_slot(r#"{"jsonrpc":"2.0","id":1}"#).is_err());
+}
+
+#[test]
+fn parse_slot_rejects_nested_value_shape() {
+    // Guard against accidentally parsing a getBalance-shaped response.
+    let json = r#"{"jsonrpc":"2.0","result":{"value":123},"id":1}"#;
+    assert!(parse_slot(json).is_err());
+}
+
+// ─── tx-signature validation (getTransaction injection guard) ────────────────
+
+#[test]
+fn valid_tx_signature_accepts_64_byte_base58() {
+    let sig = bs58::encode([7u8; 64]).into_string();
+    assert!(is_valid_tx_signature(&sig));
+}
+
+#[test]
+fn valid_tx_signature_rejects_32_byte_pubkey_length() {
+    // A 32-byte value is a pubkey, not a signature.
+    let pk = bs58::encode([7u8; 32]).into_string();
+    assert!(!is_valid_tx_signature(&pk));
+}
+
+#[test]
+fn valid_tx_signature_rejects_non_base58() {
+    // '0', 'O', 'I', 'l' are outside the base58 alphabet.
+    assert!(!is_valid_tx_signature("not valid base58 0OIl"));
+    assert!(!is_valid_tx_signature(""));
+}
