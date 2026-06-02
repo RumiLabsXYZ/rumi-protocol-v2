@@ -4706,6 +4706,53 @@ async fn solana_get_mint_supply() -> Result<u64, ProtocolError> {
         .map_err(ProtocolError::GenericError)
 }
 
+/// M2 sign-seam probe: build, threshold-Ed25519 sign, and return the legacy wire
+/// bytes of a System Transfer from the Solana settlement address to `to` for
+/// `lamports`. Developer-gated. Uses a dummy (all-zero) blockhash, so the bytes
+/// are NOT broadcastable (sign-validity is what we prove here); the real broadcast
+/// path fetches a fresh blockhash and calls `sol_rpc::send_transaction`. The
+/// returned bytes are `[compact-u16 sig count][64-byte sig][serialized message]`.
+#[candid_method(update)]
+#[update]
+async fn solana_sign_test_transfer(to: String, lamports: u64) -> Result<Vec<u8>, ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can call solana_sign_test_transfer".to_string(),
+        ));
+    }
+    use rumi_protocol_backend::chains::solana::{config::SOLANA_CHAIN_ID, ted25519, tx};
+    use solana_message::Hash;
+    use solana_pubkey::Pubkey;
+
+    if !ted25519::is_valid_solana_address(&to) {
+        return Err(ProtocolError::GenericError(format!(
+            "invalid Solana address: {to}"
+        )));
+    }
+    // Decode the validated recipient (exactly 32 bytes) into a Pubkey.
+    let to_bytes = bs58::decode(&to)
+        .into_vec()
+        .map_err(|e| ProtocolError::GenericError(format!("bad base58 recipient: {e}")))?;
+    let mut to_arr = [0u8; 32];
+    to_arr.copy_from_slice(&to_bytes);
+    let to_pk = Pubkey::new_from_array(to_arr);
+
+    // Derive the settlement (mint-authority) signer address + its path.
+    let from_path = ted25519::settlement_derivation_path(SOLANA_CHAIN_ID);
+    let (from_pubkey, _from_addr) = ted25519::derive_solana_address(from_path.clone())
+        .await
+        .map_err(ProtocolError::GenericError)?;
+
+    // Dummy blockhash: sign-validity does not depend on blockhash freshness.
+    let blockhash = Hash::new_from_array([0u8; 32]);
+
+    tx::sign_transfer(from_path, &from_pubkey, &to_pk, lamports, blockhash)
+        .await
+        .map_err(ProtocolError::GenericError)
+}
+
 /// Developer-gated: set the SOL RPC canister principal override (mock/staging).
 #[candid_method(update)]
 #[update]

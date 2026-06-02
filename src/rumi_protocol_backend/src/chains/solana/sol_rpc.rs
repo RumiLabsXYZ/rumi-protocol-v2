@@ -142,6 +142,31 @@ pub fn parse_mint_supply_jsonparsed(json: &str) -> Result<u64, String> {
         .map_err(|e| format!("bad supply '{supply_str}': {e}"))
 }
 
+/// Build the `sendTransaction` JSON-RPC payload for a base64-encoded wire tx.
+/// `skipPreflight=false` keeps the provider's pre-flight simulation (catches a
+/// bad blockhash / insufficient funds before the tx is forwarded). `b64` is the
+/// canister's own deterministic base64 of bytes it produced, so interpolating it
+/// into the JSON cannot inject (base64's alphabet has no JSON-breaking chars).
+pub fn build_send_transaction_payload(b64: &str) -> String {
+    format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"sendTransaction","params":["{}",{{"encoding":"base64","skipPreflight":false}}]}}"#,
+        b64
+    )
+}
+
+/// Extract the transaction signature (a base58 string) from a `sendTransaction`
+/// JSON-RPC response, where the signature is `result` itself (not nested).
+pub fn parse_send_transaction_signature(json: &str) -> Result<String, String> {
+    let v: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("bad json: {e}"))?;
+    if let Some(err) = v.get("error") {
+        return Err(format!("json-rpc error: {err}"));
+    }
+    v.get("result")
+        .and_then(|r| r.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| format!("missing result (signature) in sendTransaction response: {json}"))
+}
+
 // ─── Async network calls ─────────────────────────────────────────────────────
 
 fn sol_rpc_principal() -> Principal {
@@ -191,4 +216,22 @@ pub async fn get_mint_supply(mint_pubkey: &str) -> Result<u64, String> {
     );
     let text = json_request(&payload).await?;
     parse_mint_supply_jsonparsed(&text)
+}
+
+/// Broadcast a legacy wire transaction via `sendTransaction` and return the
+/// transaction signature (a base58 string).
+///
+/// Consensus: this reuses the shared `json_request` path (devnet, `Equality`).
+/// A `sendTransaction` response is the transaction's first signature, which is
+/// deterministic from the signed bytes, so honest providers return the SAME
+/// string and `Equality` agrees (the "first Ok wins" outcome the M2 plan calls
+/// for, with a built-in cross-provider sanity check). If providers disagree
+/// (one accepted, another rejected with a different body), `json_request`
+/// surfaces `Inconsistent` as an error rather than silently picking one.
+pub async fn send_transaction(wire_tx: &[u8]) -> Result<String, String> {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(wire_tx);
+    let payload = build_send_transaction_payload(&b64);
+    let text = json_request(&payload).await?;
+    parse_send_transaction_signature(&text)
 }

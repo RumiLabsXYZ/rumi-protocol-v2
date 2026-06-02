@@ -10,6 +10,7 @@
 pub mod config;
 pub mod sol_rpc;
 pub mod ted25519;
+pub mod tx;
 
 #[cfg(test)]
 mod tests_config;
@@ -17,3 +18,5 @@ mod tests_config;
 mod tests_sol_rpc;
 #[cfg(test)]
 mod tests_ted25519;
+#[cfg(test)]
+mod tests_tx;

@@ -801,11 +801,12 @@ type Result_1 = variant { Ok : nat64; Err : ProtocolError };
 type Result_10 = variant { Ok : bool; Err : ProtocolError };
 type Result_11 = variant { Ok : ReserveRedemptionResult; Err : ProtocolError };
 type Result_12 = variant { Ok : RepayAndCloseSuccess; Err : ProtocolError };
-type Result_13 = variant {
+type Result_13 = variant { Ok : blob; Err : ProtocolError };
+type Result_14 = variant {
   Ok : StabilityPoolLiquidationResult;
   Err : ProtocolError;
 };
-type Result_14 = variant { Ok : nat32; Err : ProtocolError };
+type Result_15 = variant { Ok : nat32; Err : ProtocolError };
 type Result_2 = variant { Ok : text; Err : ProtocolError };
 type Result_3 = variant { Ok : SuccessWithFee; Err : ProtocolError };
 type Result_4 = variant { Ok : BotLiquidationResult; Err : ProtocolError };
@@ -1126,14 +1127,15 @@ service : (ProtocolArg) -> {
   solana_get_balance : (text) -> (Result_1);
   solana_get_mint_supply : () -> (Result_1);
   solana_settlement_address : () -> (Result_2);
-  stability_pool_liquidate : (nat64, nat64) -> (Result_13);
+  solana_sign_test_transfer : (text, nat64) -> (Result_13);
+  stability_pool_liquidate : (nat64, nat64) -> (Result_14);
   stability_pool_liquidate_debt_burned : (nat64, nat64, SpWritedownProof) -> (
-      Result_13,
+      Result_14,
     );
   stability_pool_liquidate_with_reserves : (nat64, nat64, nat64, principal) -> (
-      Result_13,
+      Result_14,
     );
-  submit_burn_proof : (nat32, text) -> (Result_14);
+  submit_burn_proof : (nat32, text) -> (Result_15);
   unfreeze_protocol : () -> (Result);
   update_collateral_config : (principal, CollateralConfig) -> (Result);
   withdraw_and_close_vault : (nat64) -> (Result_5);
