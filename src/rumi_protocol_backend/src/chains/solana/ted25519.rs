@@ -40,12 +40,24 @@ pub fn solana_address_from_pubkey(pubkey: &[u8]) -> Result<String, String> {
     Ok(bs58::encode(pubkey).into_string())
 }
 
+/// Decode a base58 Solana address into its raw 32-byte Ed25519 public key.
+/// Errs if `s` is not valid base58 or does not decode to exactly 32 bytes.
+/// This is the single decode point; `is_valid_solana_address` is its boolean view.
+pub fn decode_solana_address(s: &str) -> Result<[u8; 32], String> {
+    let bytes = bs58::decode(s)
+        .into_vec()
+        .map_err(|e| format!("bad base58 address: {e}"))?;
+    if bytes.len() != 32 {
+        return Err(format!("expected 32-byte address, got {}", bytes.len()));
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    Ok(arr)
+}
+
 /// True iff `s` base58-decodes to exactly 32 bytes.
 pub fn is_valid_solana_address(s: &str) -> bool {
-    match bs58::decode(s).into_vec() {
-        Ok(bytes) => bytes.len() == 32,
-        Err(_) => false,
-    }
+    decode_solana_address(s).is_ok()
 }
 
 // ─── Management-canister Schnorr candid structs (hand-mirrored) ──────────────

@@ -57,6 +57,30 @@ fn is_valid_solana_address_rejects_evm_and_junk() {
 }
 
 #[test]
+fn decode_solana_address_roundtrips_and_rejects_bad_input() {
+    // Valid 32-byte base58 decodes back to the original bytes.
+    let pk = [42u8; 32];
+    let addr = solana_address_from_pubkey(&pk).unwrap();
+    assert_eq!(decode_solana_address(&addr).unwrap(), pk);
+    // System Program address (32 zero bytes).
+    assert_eq!(
+        decode_solana_address("11111111111111111111111111111111").unwrap(),
+        [0u8; 32]
+    );
+    // Non-base58 junk is rejected.
+    assert!(decode_solana_address("not base58 !!!").is_err());
+    // Wrong length (31 bytes of base58) is rejected.
+    let short = bs58::encode([1u8; 31]).into_string();
+    assert!(decode_solana_address(&short).is_err());
+    // is_valid_solana_address agrees with the decoder on each case.
+    assert_eq!(is_valid_solana_address(&addr), decode_solana_address(&addr).is_ok());
+    assert_eq!(
+        is_valid_solana_address("not base58 !!!"),
+        decode_solana_address("not base58 !!!").is_ok()
+    );
+}
+
+#[test]
 fn derivation_paths_are_distinct_and_structured() {
     let chain = crate::chains::config::ChainId(501);
     let settle = settlement_derivation_path(chain);

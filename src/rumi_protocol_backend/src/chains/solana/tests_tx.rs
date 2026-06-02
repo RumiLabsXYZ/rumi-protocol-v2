@@ -14,6 +14,9 @@ fn compact_u16_matches_canonical_vectors() {
     assert_eq!(encode_compact_u16(0x80), vec![0x80, 0x01]);
     assert_eq!(encode_compact_u16(0xff), vec![0xff, 0x01]);
     assert_eq!(encode_compact_u16(0x100), vec![0x80, 0x02]);
+    // 0x4000 is the lower 3-byte boundary: the exact value where the SECOND
+    // continuation byte first appears (0x3fff still fits in two bytes).
+    assert_eq!(encode_compact_u16(0x4000), vec![0x80, 0x80, 0x01]);
     assert_eq!(encode_compact_u16(0x7fff), vec![0xff, 0xff, 0x01]);
     assert_eq!(encode_compact_u16(0xffff), vec![0xff, 0xff, 0x03]);
 }
@@ -121,4 +124,60 @@ fn serialized_message_layout_is_well_formed() {
 
     // Total length is internally consistent: re-serializing is deterministic.
     assert_eq!(serialize_legacy_message(&msg), bytes);
+}
+
+#[test]
+fn serialized_message_emits_two_byte_length_prefix_for_large_instruction_data() {
+    // The well-formed test above only exercises 1-byte compact-u16 prefixes (a
+    // 3-key System Transfer with 12 bytes of data). Here we force the multi-byte
+    // length path through serialize_legacy_message by hand-building a Message with
+    // a single CompiledInstruction whose data is 200 bytes long. 200 (0xc8)
+    // exceeds 127, so its short_vec length prefix is the 2-byte [0xc8, 0x01].
+    use solana_message::compiled_instruction::CompiledInstruction;
+    use solana_message::{Message, MessageHeader};
+
+    // Anchor: confirm the expected 2-byte prefix for length 200 up front.
+    assert_eq!(encode_compact_u16(200), vec![0xc8, 0x01]);
+
+    let program = Pubkey::new_from_array([5u8; 32]);
+    let data = vec![0xABu8; 200];
+    let ix = CompiledInstruction {
+        program_id_index: 0,
+        accounts: vec![], // empty accounts -> single 0x00 length byte, keeps offsets simple
+        data: data.clone(),
+    };
+    let msg = Message {
+        header: MessageHeader {
+            num_required_signatures: 1,
+            num_readonly_signed_accounts: 0,
+            num_readonly_unsigned_accounts: 1,
+        },
+        account_keys: vec![program], // one key (the program); 1 fits in a single prefix byte
+        recent_blockhash: Hash::new_from_array([6u8; 32]),
+        instructions: vec![ix],
+    };
+
+    let bytes = serialize_legacy_message(&msg);
+
+    // Walk the layout to the data-length prefix offset:
+    //   [0..3]   header (3 bytes)
+    //   [3]      account_keys len prefix (1 key -> single byte 0x01)
+    //   [4..36]  the one account key (32 bytes)
+    //   [36..68] recent_blockhash (32 bytes)
+    //   [68]     instructions len prefix (1 ix -> single byte 0x01)
+    //   [69]     program_id_index (u8)
+    //   [70]     accounts len prefix (0 accounts -> single byte 0x00)
+    //   [71..73] data len prefix -> the 2-byte [0xc8, 0x01] we are proving
+    //   [73..]   the 200 data bytes
+    let data_len_prefix_off = 3 + 1 + 32 + 32 + 1 + 1 + 1;
+    assert_eq!(
+        &bytes[data_len_prefix_off..data_len_prefix_off + 2],
+        &[0xc8, 0x01],
+        "200-byte instruction data must serialize a 2-byte compact-u16 length prefix"
+    );
+    // The data bytes follow the 2-byte prefix verbatim.
+    let data_off = data_len_prefix_off + 2;
+    assert_eq!(&bytes[data_off..data_off + 200], &data[..], "data follows its prefix");
+    // And the message ends exactly there (no trailing bytes).
+    assert_eq!(bytes.len(), data_off + 200, "no trailing bytes after the instruction data");
 }

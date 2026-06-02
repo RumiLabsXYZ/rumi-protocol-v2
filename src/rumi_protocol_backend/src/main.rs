@@ -4726,17 +4726,11 @@ async fn solana_sign_test_transfer(to: String, lamports: u64) -> Result<Vec<u8>,
     use solana_message::Hash;
     use solana_pubkey::Pubkey;
 
-    if !ted25519::is_valid_solana_address(&to) {
-        return Err(ProtocolError::GenericError(format!(
-            "invalid Solana address: {to}"
-        )));
-    }
-    // Decode the validated recipient (exactly 32 bytes) into a Pubkey.
-    let to_bytes = bs58::decode(&to)
-        .into_vec()
-        .map_err(|e| ProtocolError::GenericError(format!("bad base58 recipient: {e}")))?;
-    let mut to_arr = [0u8; 32];
-    to_arr.copy_from_slice(&to_bytes);
+    // Decode the recipient once: this both validates (32-byte base58) and yields
+    // the raw bytes. A non-32-byte or non-base58 `to` still returns the same
+    // "invalid Solana address" rejection as the prior explicit validity check.
+    let to_arr = ted25519::decode_solana_address(&to)
+        .map_err(|_| ProtocolError::GenericError(format!("invalid Solana address: {to}")))?;
     let to_pk = Pubkey::new_from_array(to_arr);
 
     // Derive the settlement (mint-authority) signer address + its path.
