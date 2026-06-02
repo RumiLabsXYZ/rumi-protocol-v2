@@ -1022,6 +1022,150 @@ fn close_chain_vault(vault_id: u64, dest_address: String) -> Result<(), Protocol
     .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
 }
 
+// ─── Solana M2 vault endpoints (developer-gated) ─────────────────────────────
+//
+// These mirror the Monad vault endpoints above (`open_chain_vault`,
+// `withdraw_chain_collateral`, `close_chain_vault`) one-for-one, swapping the
+// Monad primitives for Solana: threshold-Ed25519 custody derivation instead of
+// tECDSA, the base58 address validator (`is_valid_solana_address`) instead of
+// the EVM one, and the `"SOL"` manual-price key instead of `"MON"`. They call
+// the chain-agnostic helpers in `chains::vault` directly (the Monad endpoints go
+// through the `chains::monad::chain_vault` wrappers, which bake in the EVM
+// validator + `"MON"`). The collateral/amount fields carry LAMPORTS (u128) here;
+// the field is generic native base units (`ChainVaultV1.collateral_amount_native`).
+
+/// Open a Solana chain vault, OPEN-THEN-VERIFY (mirrors `open_chain_vault`).
+///
+/// Creates the vault in `AwaitingDeposit` with the DECLARED collateral
+/// (lamports) and the intended mint in `pending_mint_e8s`; enqueues NO mint. The
+/// caller then reads the vault's `custody_address` (`get_chain_vault`) and
+/// deposits SOL there. deposit-watch (Task 9) verifies the on-chain balance
+/// covers the declared collateral at finality, flips the vault to `MintPending`,
+/// and enqueues the mint. icUSD is only ever minted against a verified on-chain
+/// deposit.
+///
+/// Developer-gated. Async because deriving the per-user custody address calls
+/// threshold Ed25519. Borrow discipline: the `vault_id` is reserved in one
+/// `mutate_state`, the custody derive is `.await`ed with NO state borrow held,
+/// then the vault is opened + cloned out in a second `mutate_state`.
+#[candid_method(update)]
+#[update]
+async fn open_solana_vault(
+    collateral_lamports: u128,
+    debt_e8s: u128,
+    mint_recipient_base58: String,
+) -> Result<rumi_protocol_backend::chains::monad::chain_vault::ChainVaultV1, ProtocolError> {
+    use rumi_protocol_backend::chains::solana::{config, ted25519};
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    // Reserve the vault id BEFORE the async derive so the derivation path
+    // (chain, caller, vault_id) is unique even across concurrent opens.
+    let vault_id = mutate_state(|s| {
+        s.chain_vault_id_counter += 1;
+        s.chain_vault_id_counter
+    });
+    let path = ted25519::custody_derivation_path(config::SOLANA_CHAIN_ID, caller, vault_id);
+    let (_pubkey, custody) = ted25519::derive_solana_address(path)
+        .await
+        .map_err(|e| ProtocolError::ChainAdmin(format!("derive: {e}")))?;
+    let now = ic_cdk::api::time();
+    mutate_state(|s| {
+        rumi_protocol_backend::chains::vault::open_chain_vault_in_state(
+            &mut s.multi_chain,
+            config::SOLANA_CHAIN_ID,
+            caller,
+            custody,
+            collateral_lamports,
+            debt_e8s,
+            mint_recipient_base58,
+            ted25519::is_valid_solana_address,
+            "SOL",
+            config::SOLANA_MIN_CR_E4,
+            now,
+            vault_id,
+        )
+        .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))?;
+        // Return the inserted vault. `open_chain_vault_in_state` inserts it on
+        // success, so the lookup cannot miss.
+        Ok(s
+            .multi_chain
+            .chain_vaults
+            .get(&vault_id)
+            .cloned()
+            .expect("vault present: just inserted"))
+    })
+}
+
+/// Withdraw Solana collateral (mirrors `withdraw_chain_collateral`).
+///
+/// CR-checks the REMAINING collateral against `SOLANA_MIN_CR_E4` (debt-free
+/// vaults skip the check), RESERVES the withdrawn lamports, and enqueues a
+/// `NativeWithdrawal` op for the Task-8 settlement worker to sign + broadcast. A
+/// vault that becomes empty AND debt-free flips to `Closing` here. There is NO
+/// repay endpoint: the user burns icUSD on Solana and burn-watch decrements
+/// `debt_e8s` + chain supply. Synchronous (the `dest_address` is supplied by the
+/// caller; signing happens later in the settlement worker). Developer-gated.
+#[candid_method(update)]
+#[update]
+fn withdraw_solana_collateral(
+    vault_id: u64,
+    amount_lamports: u128,
+    dest_address: String,
+) -> Result<(), ProtocolError> {
+    use rumi_protocol_backend::chains::solana::{config, ted25519};
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let now = ic_cdk::api::time();
+    mutate_state(|s| {
+        rumi_protocol_backend::chains::vault::withdraw_collateral_in_state(
+            &mut s.multi_chain,
+            vault_id,
+            amount_lamports,
+            dest_address,
+            ted25519::is_valid_solana_address,
+            "SOL",
+            config::SOLANA_MIN_CR_E4,
+            now,
+        )
+    })
+    .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
+}
+
+/// Close a debt-free Solana chain vault (mirrors `close_chain_vault`).
+///
+/// Requires the vault's `debt_e8s == 0` (repay first by burning icUSD on
+/// Solana), then withdraws the FULL remaining collateral to `dest_address`
+/// (vault -> `Closing`, then `Closed` on the transfer's confirmation).
+/// Synchronous + developer-gated.
+#[candid_method(update)]
+#[update]
+fn close_solana_vault(vault_id: u64, dest_address: String) -> Result<(), ProtocolError> {
+    use rumi_protocol_backend::chains::solana::{config, ted25519};
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let now = ic_cdk::api::time();
+    mutate_state(|s| {
+        rumi_protocol_backend::chains::vault::close_chain_vault_in_state(
+            &mut s.multi_chain,
+            vault_id,
+            dest_address,
+            ted25519::is_valid_solana_address,
+            "SOL",
+            config::SOLANA_MIN_CR_E4,
+            now,
+        )
+    })
+    .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
+}
+
 // Phase 1b Task 14: query + admin surface for the foreign-chain working set.
 //
 // NOTE: `get_user_deposit_address` is intentionally omitted. Custody is
@@ -1100,7 +1244,15 @@ fn set_chain_contract(
     // the mint calldata's `to` (`tx::abi_word_address`) and panics deep on the
     // settlement worker path, after the re-entrancy guard + awaits, permanently
     // blocking the chain's worker. A deploy-time typo is enough.
-    if !rumi_protocol_backend::chains::monad::tecdsa::is_valid_evm_address(&address) {
+    //
+    // Chain-aware: Solana's SPL mint is a base58 32-byte address, not an EVM
+    // 0x-hex one. Validate it with the Solana base58 check; every other chain
+    // (Monad + any EVM chain) keeps the original EVM validation unchanged.
+    if chain == rumi_protocol_backend::chains::solana::config::SOLANA_CHAIN_ID {
+        if !rumi_protocol_backend::chains::solana::ted25519::is_valid_solana_address(&address) {
+            return Err(ProtocolError::ChainAdmin(format!("invalid Solana address: {address}")));
+        }
+    } else if !rumi_protocol_backend::chains::monad::tecdsa::is_valid_evm_address(&address) {
         return Err(ProtocolError::ChainAdmin(format!("invalid EVM address: {address}")));
     }
     mutate_state(|s| {
