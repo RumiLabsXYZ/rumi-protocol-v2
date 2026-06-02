@@ -1,8 +1,30 @@
 # rumi_points — status
 
-**Phase 1 (scaffold): COMPLETE.** **Phase 2/3 (ingestion + auto-registration): IN PROGRESS.**
-Branch `feat/airdrop-points-canister` (off `main`). Local-only; not deployed to
-mainnet, no mainnet canister id reserved.
+**Phase 1 (scaffold): COMPLETE.** **Phase 2/3 (ingestion + auto-registration):
+COMPLETE and PocketIC-E2E-validated.** Merged to `main` (PR #217). Not yet deployed
+to mainnet; no mainnet canister id reserved.
+
+## Deploy posture (why nothing is on mainnet yet)
+Deploying `rumi_points` to mainnet now would be premature and gains nothing:
+  - There is no periodic poll timer yet (Phase 2b), so it would not auto-ingest.
+  - There is no accrual yet (Phase 5), so it would register but award no points.
+  - A LATER deploy loses no data: the cursor starts at 0 and the source event logs
+    are unbounded (backend/3pool) or trim far above Season-1 volume (SP/AMM), so the
+    first poll backfills all in-season activity. So there is no "deploy early to
+    capture registrations" urgency.
+Deploy the backend + 3pool endpoint upgrades together with `rumi_points` once the
+timer (and ideally Phase 5 accrual) exist. Backend upgrade = ProtocolArg Upgrade
+variant + description; 3pool = dummy ThreePoolInitArgs; `rumi_points` = reserve a
+fresh mainnet id + add to `mainnet-live`. The pre-deploy hook runs the full suite.
+
+## Next phases (fresh focused sessions)
+- Phase 2b: periodic poll timer (`setup_timers`), admin-tunable cadence.
+- Phase 4: 3USD verification (`min(recorded, wallet+SP+AMM)`), needs the
+  `repayment_asset` upstream field for the 5x repayment window.
+- Phase 5: epoch driver + multiplier table + two-snapshot `min()` + the
+  commit-reveal snapshot scheduler (`epoch.rs`, `valuation.rs`, `snapshot_seed.rs`
+  are documented skeletons today).
+- Phases 7-8: the claim canister (liquid + lock-tier haircut ladder).
 
 Spec: `docs/specs/rumi-airdrop-spec-v2.md` (Section 7 data model, Section 11 excluded
 principals). Plan: `docs/plans/2026-05-03-airdrop-implementation-plan.md`.
@@ -35,14 +57,20 @@ unreachable sources gracefully (Ok 0, cursors unchanged) and the poll guard rele
 (a second poll is not blocked); source config (MemoryId 9), cursors, registered
 principals, and excluded set all survive a real upgrade.
 
-### The ONLY remaining Phase 2 step: PocketIC E2E (live validation)
-Deploy the sources (backend+3pool with their forward endpoints, SP, AMM, ledgers) +
-rumi_points, generate real events (mint a vault, add 3pool liquidity, SP deposit),
-`trigger_poll`, assert auto-registration + correct cursor advance. This needs BOTH
-branches' code together (the project's PocketIC tests `include_bytes!` prebuilt
-wasms), so it requires a branch-combination decision (combine into one integration
-PR, or merge both to main first). The inter-canister poll is the one piece unit
-tests cannot cover; the E2E is its validation.
+### PocketIC E2E: DONE (green, merged)
+`src/rumi_points/tests/pocket_ic_ingest.rs` + the `rumi_points_e2e_source` mock
+canister validate the live path end to end: `trigger_poll` -> `ic_cdk::call` ->
+candid decode -> normalize -> auto-register -> cursor advance, with a no-op second
+poll. Build + run:
+```
+cargo build --release --target wasm32-unknown-unknown -p rumi_points -p rumi_points_e2e_source
+POCKET_IC_BIN=$PWD/pocket-ic cargo test -p rumi_points --test pocket_ic_ingest
+```
+This E2E caught and fixed a real bug: the backend forward endpoint had the
+`data_certificate().is_none() -> trap` guard, which rejects inter-canister calls;
+removed (the endpoint is meant to be polled). A future hardening could swap the
+mock for the real backend (mint a vault, poll) to exercise the true 95-variant
+wire, though the `source_types` canary already pins the superset-decode rule.
 
 ## What is real (and tested)
 - Stable-storage layout via `MemoryManager` (mirrors `rumi_protocol_backend::storage`).
