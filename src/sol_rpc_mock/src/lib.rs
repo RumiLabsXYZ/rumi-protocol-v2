@@ -100,13 +100,20 @@ pub enum RequestResult {
     Err(RpcError),
 }
 
-/// The `Inconsistent` arm's per-provider vector is `Reserved` (mirrors
-/// `sol_rpc.rs`): the mock always returns `Consistent`, but the type must define
-/// both arms in the same order so the backend's `Decode!` subtype-check passes.
+/// The `Inconsistent` arm carries a per-provider `vec record { text;
+/// RequestResult }` (provider label -> that provider's result), modeling the real
+/// sol-rpc canister's multi-provider divergence. The backend's `sol_rpc.rs` types
+/// this same arm as `candid::Reserved` (the candid top type) and treats ANY
+/// `Inconsistent` as a consensus failure without inspecting it; since every type
+/// is a subtype of `reserved`, this concrete `vec record { text; variant {..} }`
+/// payload decodes into the backend's `Reserved` arm cleanly. The `Consistent` arm
+/// and shared `RequestResult` are byte-identical to the backend, so the whole
+/// `jsonRequest` type table still structurally matches and the call decodes either
+/// way. Used to model playbook #4: `getLatestBlockhash` cannot reach consensus.
 #[derive(CandidType, Deserialize, Clone, Debug)]
 pub enum MultiRequestResult {
     Consistent(RequestResult),
-    Inconsistent(Reserved),
+    Inconsistent(Vec<(String, RequestResult)>),
 }
 
 // ─── Durable-nonce account layout (mirrors sol_rpc.rs) ───────────────────────
@@ -170,6 +177,12 @@ struct Script {
     /// The base58 blockhash returned by `getLatestBlockhash` (completeness; the
     /// happy path uses the durable nonce, not this).
     latest_blockhash_b58: String,
+    /// When true, `getLatestBlockhash` returns `MultiRequestResult::Inconsistent`
+    /// (two providers reporting different blockhashes) instead of a
+    /// `Consistent(Ok)`, modeling playbook #4: a per-slot value cannot reach
+    /// multi-provider consensus on real clusters, so the consensus-demanding
+    /// auto-fetch chronically fails. Defaults false (the happy-path mock agrees).
+    latest_blockhash_inconsistent: bool,
 }
 
 impl Default for Script {
@@ -195,6 +208,7 @@ impl Default for Script {
                 "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi2NJ1JJJ1JJJ1JJJ1JJJ1JJJ1JJJ1JJJ1JJJ1JJJ1JJJ1"
                     .to_string(),
             latest_blockhash_b58: "11111111111111111111111111111111".to_string(),
+            latest_blockhash_inconsistent: false,
         }
     }
 }
@@ -234,6 +248,28 @@ fn jsonRequest(_sources: RpcSources, _config: Option<RpcConfig>, payload: String
     let method = parsed["method"].as_str().unwrap_or("");
     let id = parsed["id"].clone();
     let params = &parsed["params"];
+
+    // Playbook #4: when scripted inconsistent, `getLatestBlockhash` returns an
+    // `Inconsistent` multi-result (two providers reporting DIFFERENT blockhashes),
+    // modeling the per-slot value that multi-provider consensus cannot agree on.
+    // The backend's `get_latest_blockhash` (Equality consensus) rejects this as an
+    // error, so the bootstrap auto-fetch fails - exactly the production bug. (Other
+    // methods are unaffected; only `getLatestBlockhash` diverges per slot.)
+    let inconsistent = SCRIPT.with(|s| s.borrow().latest_blockhash_inconsistent);
+    if method == "getLatestBlockhash" && inconsistent {
+        let provider_a = RequestResult::Ok(format!(
+            r#"{{"jsonrpc":"2.0","id":{},"result":{{"value":{{"blockhash":"11111111111111111111111111111111"}}}}}}"#,
+            id
+        ));
+        let provider_b = RequestResult::Ok(format!(
+            r#"{{"jsonrpc":"2.0","id":{},"result":{{"value":{{"blockhash":"So11111111111111111111111111111111111111112"}}}}}}"#,
+            id
+        ));
+        return MultiRequestResult::Inconsistent(vec![
+            ("providerA".to_string(), provider_a),
+            ("providerB".to_string(), provider_b),
+        ]);
+    }
 
     let response_json: String = SCRIPT.with(|s| {
         let script = s.borrow();
@@ -395,5 +431,18 @@ fn set_tx_confirmed(confirmed: bool) {
 fn set_slot(slot: u64) {
     SCRIPT.with(|s| {
         s.borrow_mut().slot = slot;
+    });
+}
+
+/// Toggle whether `getLatestBlockhash` returns an `Inconsistent` multi-result
+/// (playbook #4). When `true`, the call reports two providers with DIFFERENT
+/// blockhashes, modeling the per-slot value that multi-provider consensus cannot
+/// agree on, so the backend's consensus-demanding `get_latest_blockhash` rejects
+/// it and the durable-nonce bootstrap auto-fetch fails. Default false (the mock
+/// agrees, as it must to model a single-provider/consensus-capable environment).
+#[ic_cdk_macros::update]
+fn set_latest_blockhash_inconsistent(v: bool) {
+    SCRIPT.with(|s| {
+        s.borrow_mut().latest_blockhash_inconsistent = v;
     });
 }

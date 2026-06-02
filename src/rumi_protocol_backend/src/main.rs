@@ -4992,14 +4992,25 @@ async fn solana_sign_test_transfer(to: String, lamports: u64) -> Result<Vec<u8>,
 /// M2 durable-nonce bootstrap: idempotently create + initialize the settlement
 /// key's durable nonce account on Solana devnet. Developer-gated; the operator
 /// runs this once per settlement key. If the nonce account already holds an
-/// Initialized durable nonce, this is a no-op (returns Ok). Otherwise it fetches a
+/// Initialized durable nonce, this is a no-op (returns Ok). Otherwise it obtains a
 /// real recent blockhash, builds the 2-instruction create+initialize transaction,
 /// multi-signs it (fee payer + new nonce account, both threshold-Ed25519), and
 /// broadcasts it. Subsequent settlement transactions reference the durable nonce
 /// so build->sign(slow)->broadcast stays valid across async gaps.
+///
+/// `blockhash` (playbook #4): `getLatestBlockhash` changes every slot, so the
+/// DFINITY sol-rpc canister's multi-provider consensus almost never agrees on it
+/// and chronically returns `#Inconsistent` - which the canister-side auto-fetch
+/// rejects. So on real devnet/mainnet the operator obtains a fresh finalized
+/// blockhash out-of-band (e.g. `solana blockhash`, or a single-provider
+/// `getLatestBlockhash`) and passes it here as a 32-byte base58 string; it is fed
+/// straight into the create-nonce tx, bypassing the broken consensus fetch. Pass it
+/// promptly: blockhashes expire (~60s). The no-arg/`None` path auto-fetches and
+/// only works where multi-provider consensus on `getLatestBlockhash` is possible
+/// (the PocketIC mock / a consensus-capable environment).
 #[candid_method(update)]
 #[update]
-async fn solana_bootstrap_nonce() -> Result<(), ProtocolError> {
+async fn solana_bootstrap_nonce(blockhash: Option<String>) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
@@ -5007,8 +5018,26 @@ async fn solana_bootstrap_nonce() -> Result<(), ProtocolError> {
             "Only the developer principal can bootstrap the Solana nonce account".to_string(),
         ));
     }
-    use rumi_protocol_backend::chains::solana::{config::SOLANA_CHAIN_ID, tx};
-    tx::bootstrap_nonce_account(SOLANA_CHAIN_ID)
+    use rumi_protocol_backend::chains::solana::{config::SOLANA_CHAIN_ID, ted25519, tx};
+    use solana_message::Hash;
+
+    // Decode the operator-supplied blockhash if present. A Solana blockhash is a
+    // 32-byte base58 value, so `decode_solana_address` is the right decoder; a
+    // non-32-byte / non-base58 value is rejected with a clear error rather than
+    // being fed into the transaction.
+    let blockhash_override = match blockhash {
+        Some(bh) => {
+            let decoded = ted25519::decode_solana_address(&bh).map_err(|e| {
+                ProtocolError::GenericError(format!(
+                    "invalid blockhash (must be a 32-byte base58 value): {e}"
+                ))
+            })?;
+            Some(Hash::new_from_array(decoded))
+        }
+        None => None,
+    };
+
+    tx::bootstrap_nonce_account(SOLANA_CHAIN_ID, blockhash_override)
         .await
         .map_err(ProtocolError::GenericError)
 }

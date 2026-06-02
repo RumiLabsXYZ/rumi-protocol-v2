@@ -418,8 +418,18 @@ pub async fn get_durable_nonce(nonce_pubkey: &str) -> Result<Hash, String> {
 /// Read a fresh recent blockhash (a `Hash`) via `getLatestBlockhash` at
 /// `finalized`. Used by the nonce-account bootstrap (the create+initialize tx
 /// uses a REAL recent blockhash, not the durable nonce, since the nonce does not
-/// exist yet). Public so Task 4/8 can reuse it. Returns `Inconsistent` as an
-/// error like every other read.
+/// exist yet). Public so Task 4/8 can reuse it.
+///
+/// Consensus caveat (playbook #4): this goes through `json_request`, which demands
+/// `Equality` consensus and rejects `#Inconsistent`. But `getLatestBlockhash`
+/// returns a value that CHANGES EVERY SLOT, so the sol-rpc canister's
+/// multi-provider consensus almost never agrees -> on real devnet/mainnet this
+/// call WILL chronically return `#Inconsistent` (surfaced here as an error). It is
+/// retained for PocketIC / consensus-capable environments (where the mock returns a
+/// single `Consistent(Ok)` response) and as the `None` fallback of
+/// `bootstrap_nonce_account`; the production bootstrap path is the operator-supplied
+/// blockhash override, NOT this fetch. Do not add any per-slot value to a
+/// consensus-dependent read for the same reason.
 pub async fn get_latest_blockhash() -> Result<Hash, String> {
     let payload = r#"{"jsonrpc":"2.0","id":1,"method":"getLatestBlockhash","params":[{"commitment":"finalized"}]}"#;
     let text = json_request(payload).await?;

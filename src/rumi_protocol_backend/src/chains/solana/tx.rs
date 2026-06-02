@@ -635,17 +635,41 @@ pub fn order_signatures_by_signer(
 /// `Ok(())` without sending anything. Otherwise it:
 ///   1. derives the settlement (fee payer + nonce authority) and nonce addresses
 ///      (two distinct threshold-Ed25519 paths),
-///   2. fetches a REAL recent blockhash (the nonce cannot self-reference yet),
+///   2. obtains a REAL recent blockhash (the nonce cannot self-reference yet) -
+///      either the operator-supplied `blockhash_override` or, if none, the
+///      consensus-dependent `sol_rpc::get_latest_blockhash` auto-fetch,
 ///   3. builds the 2-instruction create+initialize message,
 ///   4. MULTI-SIGNS it: signs the serialized bytes once per derivation path, then
 ///      orders the two signatures to match the message's required-signer keys, and
 ///   5. broadcasts via `sendTransaction`.
 ///
-/// The operator runs this once per settlement key (on devnet here). The full
-/// create+sign+broadcast round trip is exercised end-to-end only against the Task
-/// 9 mock / live devnet; the pure pieces (message construction, signer ordering,
-/// multi-sig assembly) are unit-tested.
-pub async fn bootstrap_nonce_account(chain: crate::chains::config::ChainId) -> Result<(), String> {
+/// ## The `blockhash_override` escape hatch (playbook #4)
+///
+/// `getLatestBlockhash` returns a value that changes EVERY SLOT, so the DFINITY
+/// sol-rpc canister's multi-provider consensus almost never agrees on it -> it
+/// chronically returns `#Inconsistent`, which `get_latest_blockhash` (Equality
+/// consensus) rejects as an error. On real devnet/mainnet the `None` auto-fetch
+/// therefore RELIABLY FAILS, so the operator must supply a single fresh finalized
+/// blockhash via `blockhash_override`, which is fed straight into the create-nonce
+/// transaction here - bypassing canister-side multi-provider consensus for a value
+/// that cannot reach it. Blockhashes expire (~60s), so the override must be fetched
+/// and passed in the same shell, promptly.
+///
+/// `None` (auto-fetch) is correct only where multi-provider consensus on
+/// `getLatestBlockhash` IS possible - i.e. the PocketIC mock (which returns a
+/// single `Consistent(Ok)` response) and any consensus-capable environment. It is
+/// also retained as the documented fallback. The override is the production path.
+///
+/// The operator runs this once per settlement key. The full create+sign+broadcast
+/// round trip is exercised end-to-end only against the Task 9 mock / live devnet;
+/// the pure pieces (message construction, signer ordering, multi-sig assembly) are
+/// unit-tested, and the override-vs-auto-fetch split is proven in
+/// `tests/solana_bootstrap_pic.rs` (override succeeds where the auto-fetch hits a
+/// modeled `#Inconsistent`).
+pub async fn bootstrap_nonce_account(
+    chain: crate::chains::config::ChainId,
+    blockhash_override: Option<Hash>,
+) -> Result<(), String> {
     use super::sol_rpc;
 
     // Derive both addresses (path + pubkey). settlement = fee payer + authority.
@@ -666,7 +690,14 @@ pub async fn bootstrap_nonce_account(chain: crate::chains::config::ChainId) -> R
 
     // The create+initialize tx uses a REAL recent blockhash (the nonce does not
     // exist yet, so it has no durable value to reference).
-    let recent_blockhash = sol_rpc::get_latest_blockhash().await?;
+    let recent_blockhash = match blockhash_override {
+        // Operator-supplied fresh finalized blockhash (playbook #4 escape hatch):
+        // fed straight in, bypassing canister-side multi-provider consensus.
+        Some(bh) => bh,
+        // Consensus path: works in PocketIC / consensus-capable environments;
+        // chronically `#Inconsistent` (and thus fails) on real clusters.
+        None => sol_rpc::get_latest_blockhash().await?,
+    };
 
     let message = build_create_nonce_account_message(
         &settlement,
