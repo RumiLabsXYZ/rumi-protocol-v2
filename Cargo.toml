@@ -6,6 +6,7 @@ members = [
     "src/rumi_3pool",
     "src/rumi_amm",
     "src/rumi_analytics",
+    "src/rumi_points",
     "src/xrc_demo/xrc_mock",
     "src/monad_rpc_mock",
     "src/liquidation_bot",

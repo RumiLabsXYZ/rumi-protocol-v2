@@ -533,6 +533,27 @@ canisters:
         }
       })
 
+  # rumi_points: Season 1 airdrop points engine (Phase 1 scaffold, NEW canister).
+  # Rust canister built via the @dfinity/rust recipe. Raw release wasm is ~1.1 MB
+  # (well under the 2 MiB ingress limit), so the simple recipe form suffices; no
+  # shrink+gzip build-steps pipeline is needed. `shrink: true` matches the other
+  # recipe-built canisters. init_args is `(null)` so the init defaults apply:
+  # admin = deploying caller, excluded set = the 9 protocol-owned canisters,
+  # season window = the locked June 1 .. Aug 31 2026 defaults.
+  #
+  # DELIBERATELY local-only for now: this canister is NOT in `mainnet-live`.
+  # Reserving a mainnet canister id is irreversible and needs Rob's explicit OK
+  # (implementation plan Phase 1, task 8). It is added to the `local` environment
+  # list below purely for the local deploy + upgrade-survival verification.
+  - name: rumi_points
+    recipe:
+      type: "@dfinity/rust@v3.2.0"
+      configuration:
+        package: rumi_points
+        candid: src/rumi_points/rumi_points.did
+        shrink: true
+    init_args: '(null)'
+
 networks:
   - name: local
     mode: managed
@@ -778,3 +799,4 @@ environments:
       - rumi_stability_pool
       - rumi_treasury
       - rumi_amm
+      - rumi_points

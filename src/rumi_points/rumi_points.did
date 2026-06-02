@@ -1,0 +1,109 @@
+// Candid interface for rumi_points (Season 1 airdrop points engine).
+// Phase 1 scaffold: read endpoints + admin-gated test registration / excluded-set
+// management. Event ingestion, epoch math, and the claim surface are later phases.
+// Kept structurally in sync with the Rust endpoints by the `candid_interface_matches_did_file`
+// test (src/main.rs).
+
+type AssetType = variant { IcUsd; CkUsdc; CkUsdt; ThreeUsd; Icp };
+
+type Venue = variant { Vault; ThreePool; StabilityPool; Amm };
+
+type QualifyingAction = variant {
+  MintIcUsd;
+  RepayVault;
+  Deposit3Pool;
+  DepositStabilityPool;
+  ProvideAmmLiquidity;
+};
+
+type DepositKey = record { venue : Venue; asset : AssetType };
+
+type DepositRecord = record {
+  asset : AssetType;
+  venue : Venue;
+  recorded_value_usd : nat;
+  deposited_at : nat64;
+  last_verified_at : nat64;
+};
+
+type RepaymentEvent = record {
+  asset : AssetType;
+  amount_usd : nat;
+  repaid_at : nat64;
+  window_end : nat64;
+};
+
+type PrincipalState = record {
+  "principal" : principal;
+  total_points : nat;
+  active_deposits : vec record { DepositKey; DepositRecord };
+  repayment_events : vec RepaymentEvent;
+  last_epoch_processed : nat64;
+  registered_at_ns : nat64;
+  first_qualifying_action : QualifyingAction;
+};
+
+type EpochSummary = record {
+  epoch_index : nat64;
+  epoch_start_ns : nat64;
+  epoch_end_ns : nat64;
+  total_points_all : nat;
+  points_accrued_this_epoch : nat;
+  active_principals : nat64;
+  registered_principals : nat64;
+  snapshot_a_ns : nat64;
+  snapshot_b_ns : nat64;
+};
+
+type LeaderboardEntry = record {
+  rank : nat32;
+  "principal" : principal;
+  total_points : nat;
+  estimated_share_bps : nat32;
+};
+
+type RegistrationInfo = record {
+  "principal" : principal;
+  registered_at_ns : nat64;
+  first_qualifying_action : QualifyingAction;
+};
+
+type PointsConfig = record {
+  admin : principal;
+  season_start_ns : nat64;
+  season_end_ns : nat64;
+  excluded_count : nat32;
+  registered_count : nat64;
+  current_epoch_index : nat64;
+  snapshot_seed_committed : bool;
+};
+
+type PointsError = variant { Unauthorized; Excluded };
+
+type InitArgs = record {
+  admin : opt principal;
+  excluded_principals : opt vec principal;
+  season_start_ns : opt nat64;
+  season_end_ns : opt nat64;
+  snapshot_seed_commit : opt blob;
+};
+
+type Result = variant { Ok; Err : PointsError };
+
+service : (opt InitArgs) -> {
+  // Reads
+  get_principal_state : (principal) -> (opt PrincipalState) query;
+  get_leaderboard : (nat32, nat32) -> (vec LeaderboardEntry) query;
+  get_epoch_history : (nat32, nat32) -> (vec EpochSummary) query;
+  is_registered : (principal) -> (bool) query;
+  get_registration_info : (principal) -> (opt RegistrationInfo) query;
+  is_excluded : (principal) -> (bool) query;
+  get_excluded_principals : () -> (vec principal) query;
+  get_points_config : () -> (PointsConfig) query;
+
+  // Admin-gated updates
+  register_test_principal : (principal) -> (Result);
+  add_excluded_principal : (principal) -> (Result);
+  remove_excluded_principal : (principal) -> (Result);
+  set_excluded_principals : (vec principal) -> (Result);
+};
