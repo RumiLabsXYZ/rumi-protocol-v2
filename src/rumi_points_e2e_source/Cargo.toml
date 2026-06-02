@@ -1,0 +1,14 @@
+[package]
+name = "rumi_points_e2e_source"
+version = "0.1.0"
+edition = "2021"
+description = "Test-only mock source canister for the rumi_points ingestion E2E. Serves a synthetic forward-filtered backend event so the live poll -> decode -> normalize -> auto-register path can be exercised in PocketIC without standing up the full backend."
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+candid = "0.10.6"
+ic-cdk = "0.12.0"
+serde = { version = "1.0.210", features = ["derive"] }

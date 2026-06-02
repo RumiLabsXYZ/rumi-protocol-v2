@@ -1,0 +1,41 @@
+[package]
+name = "rumi_points"
+version = "0.1.0"
+edition = "2021"
+
+# rumi_points: Season 1 airdrop points engine (greenfield, Phase 1 scaffold).
+# Accrues dollar-days of qualifying activity per principal during the season,
+# publishes a leaderboard, and freezes a ledger that the LATER claim canister
+# (rumi_airdrop_claim) reads to compute pro_rata_share. This crate holds NO
+# claim / lock-tier / haircut logic; it only accrues total_points.
+#
+# Dependency VERSIONS are pinned to exactly match rumi_protocol_backend so the
+# shared IC-fork crates (rev fc278709) resolve to a single version across the
+# workspace. Do NOT bump these independently (ic-stable-structures 0.6.5 /
+# ic-cdk 0.12.0 are intentional; newer majors change the Storable trait shape).
+
+[[bin]]
+name = "rumi_points"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+# Reserved for later phases (gated test-only endpoints), mirrors the backend.
+test_endpoints = []
+
+[dependencies]
+candid = "0.10.6"
+ic-stable-structures = "0.6.5"
+ic-cdk = "0.12.0"
+ic-cdk-timers = "0.10.0"
+serde = { version = "1.0.210", features = ["derive"] }
+ciborium = "0.2.1"
+sha2 = "0.10.2"
+ic-canister-log = { git = "https://github.com/Rumi-Protocol/ic", rev = "fc278709" }
+icrc-ledger-types = { git = "https://github.com/Rumi-Protocol/ic", rev = "fc278709" }
+
+[dev-dependencies]
+candid_parser = "0.1"
+pocket-ic = "6.0.0"
