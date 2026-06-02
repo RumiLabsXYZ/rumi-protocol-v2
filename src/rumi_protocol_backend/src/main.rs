@@ -240,8 +240,78 @@ fn register_vault_check_timer() {
     });
 }
 
-/// Phase 1b Task 15: register Timer D (Monad settlement fan-out). Clears any
-/// existing id and re-registers in place so the setter can re-tune live.
+/// M2 Task 8: chain-kind timer dispatch. ONE observer fan-out and ONE settlement
+/// fan-out run all registered chains, dispatching each chain to its kind's
+/// `run_observer` / `run_settlement` by `ChainId` (501 == Solana, everything else
+/// Monad). This keeps a SINGLE timer pair total (no per-kind timer proliferation)
+/// while letting the two chains run different worker code.
+///
+/// - Monad chains ALWAYS run (behavior identical to the prior
+///   `monad::observer_tick` / `settlement_tick` fan-out).
+/// - Solana chains run ONLY when `solana_workers_enabled` is true, so Solana
+///   stays DARK by default (no signing-subnet / SOL-RPC cycle burn) until the
+///   operator flips the flag via `set_solana_workers_enabled`.
+///
+/// Borrow discipline: the chain-id list and the `solana_workers_enabled` bool are
+/// snapshotted OUT of state under a synchronous `read_state` BEFORE the await
+/// loop; no state borrow is held across a `run_observer`/`run_settlement` await
+/// (each carries its own re-entrancy + mode/halt guards). No-op when no chain is
+/// registered (the Vec is empty), so it is safe to run on a canister before any
+/// chain is configured.
+
+const SOLANA_CHAIN_ID: rumi_protocol_backend::chains::config::ChainId =
+    rumi_protocol_backend::chains::solana::config::SOLANA_CHAIN_ID;
+
+/// Snapshot the registered chain-id list plus the Solana enable flag (one
+/// synchronous read; nothing held across an await).
+fn registered_chains_and_solana_flag() -> (Vec<rumi_protocol_backend::chains::config::ChainId>, bool)
+{
+    read_state(|s| {
+        let chains = s
+            .multi_chain
+            .chain_configs
+            .iter()
+            .filter(|(_, c)| {
+                matches!(c.status, rumi_protocol_backend::chains::config::ChainStatus::Registered)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        (chains, s.solana_workers_enabled)
+    })
+}
+
+/// Observer fan-out: dispatch each registered chain to its kind's `run_observer`.
+async fn run_all_observers() {
+    let (chains, solana_enabled) = registered_chains_and_solana_flag();
+    for chain in chains {
+        if chain == SOLANA_CHAIN_ID {
+            if solana_enabled {
+                rumi_protocol_backend::chains::solana::deposit_watch::run_observer(chain).await;
+            }
+            // Solana not enabled: skip (stays dark, no cycle burn).
+        } else {
+            rumi_protocol_backend::chains::monad::deposit_watch::run_observer(chain).await;
+        }
+    }
+}
+
+/// Settlement fan-out: dispatch each registered chain to its kind's `run_settlement`.
+async fn run_all_settlements() {
+    let (chains, solana_enabled) = registered_chains_and_solana_flag();
+    for chain in chains {
+        if chain == SOLANA_CHAIN_ID {
+            if solana_enabled {
+                rumi_protocol_backend::chains::solana::settlement::run_settlement(chain).await;
+            }
+            // Solana not enabled: skip (stays dark, no cycle burn).
+        } else {
+            rumi_protocol_backend::chains::monad::settlement::run_settlement(chain).await;
+        }
+    }
+}
+
+/// Phase 1b Task 15: register Timer D (settlement fan-out). Clears any existing
+/// id and re-registers in place so the setter can re-tune live.
 ///
 /// FLOOR: a 0 interval (serde-default-missing on an old snapshot, or a bad
 /// setter value that slipped past validation) is forced to 30s, never 0 — a 0s
@@ -256,13 +326,13 @@ fn register_settlement_timer() {
         }
         let new_id = ic_cdk_timers::set_timer_interval(
             std::time::Duration::from_secs(secs),
-            || ic_cdk::spawn(rumi_protocol_backend::chains::monad::settlement::settlement_tick()),
+            || ic_cdk::spawn(run_all_settlements()),
         );
         cell.set(Some(new_id));
     });
 }
 
-/// Phase 1b Task 15: register the Monad inbound observer fan-out. Same
+/// Phase 1b Task 15: register the inbound observer fan-out. Same
 /// clear-and-re-register-in-place + 0-floor protection as the settlement timer.
 fn register_observer_timer() {
     let secs = read_state(|s| s.observer_tick_interval_secs);
@@ -273,7 +343,7 @@ fn register_observer_timer() {
         }
         let new_id = ic_cdk_timers::set_timer_interval(
             std::time::Duration::from_secs(secs),
-            || ic_cdk::spawn(rumi_protocol_backend::chains::monad::deposit_watch::observer_tick()),
+            || ic_cdk::spawn(run_all_observers()),
         );
         cell.set(Some(new_id));
     });
@@ -4935,6 +5005,27 @@ async fn set_sol_rpc_principal(p: Principal) -> Result<(), ProtocolError> {
         ));
     }
     mutate_state(|s| s.sol_rpc_principal_override = Some(p));
+    Ok(())
+}
+
+/// Developer-gated (M2 Task 8): enable or disable the Solana observer +
+/// settlement workers. While `false` (the default on every existing snapshot),
+/// the chain-kind timer dispatch SKIPS the Solana `run_observer` /
+/// `run_settlement` even when a Solana chain is registered, so Solana burns no
+/// signing-subnet / SOL-RPC cycles until the operator flips this on. Monad chains
+/// are unaffected (they always run). Takes effect on the NEXT timer tick (the
+/// dispatcher reads the flag each tick); no upgrade or timer re-registration
+/// needed.
+#[candid_method(update)]
+#[update]
+async fn set_solana_workers_enabled(enabled: bool) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    mutate_state(|s| s.solana_workers_enabled = enabled);
+    log!(INFO, "[set_solana_workers_enabled] Solana workers {}", if enabled { "ENABLED" } else { "disabled" });
     Ok(())
 }
 

@@ -144,6 +144,12 @@ pub fn confirm_mint_in_state(
 /// No-op when no chain is registered (the Vec is empty), so it is safe to
 /// register on the staging canister before Monad is configured (Task 15 PocketIC
 /// smoke test asserts this).
+///
+/// SUPERSEDED (M2 Task 8): the live settlement timer now calls the chain-kind
+/// dispatcher `main::run_all_settlements`, which calls `run_settlement(chain)`
+/// directly per registered chain (Monad always, Solana when enabled). This
+/// Monad-only fan-out is retained for any direct caller but is no longer on the
+/// timer path; behavior is identical for Monad chains.
 pub async fn settlement_tick() {
     let chains: Vec<ChainId> = read_state(|s| {
         s.multi_chain

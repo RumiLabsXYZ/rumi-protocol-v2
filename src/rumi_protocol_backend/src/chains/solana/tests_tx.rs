@@ -49,6 +49,74 @@ fn wire_tx_empty_message() {
     assert_eq!(wire[0], 1);
 }
 
+// ─── first_signature_base58 (Task 8 durable-nonce idempotency) ───────────────
+//
+// The Solana settlement worker computes the deterministic tx signature LOCALLY
+// from the signed wire bytes (it is the transaction's FIRST signature) and uses
+// that as the op's tracking id. `first_signature_base58` parses the leading
+// compact-u16 signature count, takes the first 64 sig bytes, and base58-encodes
+// them. This MUST equal what `sendTransaction` returns for the same bytes.
+
+#[test]
+fn first_signature_base58_single_sig_wire() {
+    // A single-sig wire tx: count byte 0x01, then 64 known signature bytes, then
+    // an arbitrary message. The returned string is base58 of just those 64 bytes.
+    let sig = [7u8; 64];
+    let message_bytes = vec![0xAB; 40];
+    let wire = assemble_wire_tx(sig, &message_bytes);
+    let got = first_signature_base58(&wire).expect("parse single-sig signature");
+    assert_eq!(got, bs58::encode(sig).into_string());
+}
+
+#[test]
+fn first_signature_base58_distinct_byte_pattern() {
+    // Use a non-uniform 64-byte pattern so the base58 is sensitive to byte order
+    // (a uniform [7u8;64] alone could mask an off-by-one slice bug).
+    let mut sig = [0u8; 64];
+    for (i, b) in sig.iter_mut().enumerate() {
+        *b = i as u8;
+    }
+    let wire = assemble_wire_tx(sig, &[0x01, 0x02, 0x03]);
+    let got = first_signature_base58(&wire).expect("parse");
+    assert_eq!(got, bs58::encode(sig).into_string());
+    // And it must be exactly the FIRST 64 bytes after the 1-byte count, not the
+    // whole wire tx.
+    assert_eq!(got, bs58::encode(&wire[1..65]).into_string());
+}
+
+#[test]
+fn first_signature_base58_multi_sig_takes_first() {
+    // A two-signature wire tx (count byte 0x02): the transaction signature is the
+    // FIRST signature (the fee payer's), so the helper returns sig0, ignoring sig1.
+    let sig0 = [9u8; 64];
+    let sig1 = [3u8; 64];
+    let wire = assemble_wire_tx_multi(&[sig0, sig1], &[0xFF; 8]);
+    let got = first_signature_base58(&wire).expect("parse multi-sig first signature");
+    assert_eq!(got, bs58::encode(sig0).into_string());
+}
+
+#[test]
+fn first_signature_base58_rejects_zero_sig_count() {
+    // A count of 0 means no signatures present: there is no transaction signature
+    // to track, so this is an error (never a panic).
+    let wire = assemble_wire_tx_multi(&[], &[0xAA; 10]);
+    assert!(first_signature_base58(&wire).is_err());
+}
+
+#[test]
+fn first_signature_base58_rejects_truncated_signature() {
+    // count says 1 signature but the buffer holds only 30 bytes after the count:
+    // the slice would be out of bounds, so the helper must error, not panic.
+    let mut wire = vec![0x01u8]; // compact-u16 count = 1
+    wire.extend_from_slice(&[0u8; 30]); // only 30 bytes, not 64
+    assert!(first_signature_base58(&wire).is_err());
+}
+
+#[test]
+fn first_signature_base58_rejects_empty() {
+    assert!(first_signature_base58(&[]).is_err());
+}
+
 // ─── system_transfer_instruction (hand-encoded data layout) ──────────────────
 
 #[test]

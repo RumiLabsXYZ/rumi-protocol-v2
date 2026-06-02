@@ -1119,6 +1119,7 @@ service : (ProtocolArg) -> {
   set_rmr_floor_cr : (float64) -> (Result);
   set_settlement_tick_interval_secs : (nat64) -> (Result);
   set_sol_rpc_principal : (principal) -> (Result);
+  set_solana_workers_enabled : (bool) -> (Result);
   set_sp_writedown_disabled : (bool) -> (Result);
   set_stability_pool_principal : (principal) -> (Result);
   set_stable_ledger_principal : (StableTokenType, principal) -> (Result);

@@ -218,6 +218,63 @@ pub fn assemble_wire_tx_multi(sigs: &[[u8; 64]], message_bytes: &[u8]) -> Vec<u8
     out
 }
 
+/// Decode a Solana compact-u16 (ShortU16 / short_vec length prefix) from the
+/// front of `bytes`, returning `(value, bytes_consumed)`. The inverse of
+/// `encode_compact_u16`: a little-endian base-128 varint, 1-3 bytes, where each
+/// byte carries 7 value bits and the high bit flags continuation.
+///
+/// Errs (never panics) on a truncated varint (continuation bit set on the last
+/// available byte) or a value that would not fit in a u16 (a 4th byte, or a 3rd
+/// byte with bits above the 16th). Pure + unit-tested.
+pub fn decode_compact_u16(bytes: &[u8]) -> Result<(u16, usize), String> {
+    let mut value: u32 = 0;
+    for (i, &byte) in bytes.iter().enumerate().take(3) {
+        let part = (byte & 0x7f) as u32;
+        value |= part << (i * 7);
+        if byte & 0x80 == 0 {
+            // Terminal byte. Reject a value that does not round-trip into a u16
+            // (e.g. a 3rd byte carrying bits above bit 15).
+            if value > u16::MAX as u32 {
+                return Err(format!("compact-u16 value {value} exceeds u16"));
+            }
+            return Ok((value as u16, i + 1));
+        }
+    }
+    Err("compact-u16 is truncated or longer than 3 bytes".to_string())
+}
+
+/// Extract the transaction signature from a legacy wire transaction and return
+/// it base58-encoded.
+///
+/// A Solana transaction's signature is its FIRST signature (the fee payer's),
+/// which is DETERMINISTIC from the signed message bytes. This parses the leading
+/// compact-u16 signature count, takes the first 64 signature bytes, and
+/// base58-encodes them, yielding the exact string `sendTransaction` returns for
+/// the same wire bytes.
+///
+/// The Task-8 settlement worker computes this LOCALLY from the bytes the adapter
+/// produced (before broadcasting) so it can track the op by its deterministic
+/// signature regardless of whether the `sendTransaction` outcall returns Ok or a
+/// "maybe-sent" Err. Because a durable-nonce tx advances the nonce exactly once
+/// on success, re-broadcasting these SAME bytes is idempotent, so confirming by
+/// this fixed signature (never re-signing with a fresh nonce) cannot double-mint.
+///
+/// Errs (never panics) on an empty buffer, a zero signature count (no signature
+/// to track), or a buffer too short to hold the first 64-byte signature.
+pub fn first_signature_base58(wire_tx: &[u8]) -> Result<String, String> {
+    let (count, consumed) = decode_compact_u16(wire_tx)?;
+    if count == 0 {
+        return Err("wire tx has zero signatures".to_string());
+    }
+    let sig_end = consumed
+        .checked_add(64)
+        .ok_or_else(|| "signature offset overflow".to_string())?;
+    let sig = wire_tx
+        .get(consumed..sig_end)
+        .ok_or_else(|| format!("wire tx too short for a 64-byte signature: len {}", wire_tx.len()))?;
+    Ok(bs58::encode(sig).into_string())
+}
+
 /// Hand-encode a `SystemProgram::transfer` instruction.
 ///
 /// `solana_system_interface::instruction::transfer` is gated behind that crate's

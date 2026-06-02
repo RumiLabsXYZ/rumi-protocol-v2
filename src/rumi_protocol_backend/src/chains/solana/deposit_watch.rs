@@ -38,7 +38,7 @@
 
 use ic_canister_log::log;
 
-use crate::chains::config::{ChainId, ChainStatus};
+use crate::chains::config::ChainId;
 use crate::logs::INFO;
 use crate::state::{mutate_state, read_state};
 use crate::Mode;
@@ -277,27 +277,8 @@ pub async fn run_observer(chain: ChainId) {
     }
 }
 
-// ─── Timer dispatch helper (mirrors monad::observer_tick) ────────────────────
-
-/// Fan-out entry point: run one observation cycle for every registered Solana
-/// chain. The per-chain `run_observer` carries its own mode/halt/re-entrancy
-/// guards, so this fan-out just snapshots the chain-id list and calls each in
-/// turn. NO state borrow is held across the awaits (the chain-id Vec is cloned
-/// out of state up front).
-///
-/// Provided for symmetry with Monad's `observer_tick`; the Task-8 timer wiring
-/// decides whether to call this or `run_observer(SOLANA_CHAIN_ID)` directly. No-op
-/// when no chain is registered (the Vec is empty).
-pub async fn observer_tick() {
-    let chains: Vec<ChainId> = read_state(|s| {
-        s.multi_chain
-            .chain_configs
-            .iter()
-            .filter(|(_, c)| matches!(c.status, ChainStatus::Registered))
-            .map(|(id, _)| *id)
-            .collect()
-    });
-    for chain in chains {
-        run_observer(chain).await;
-    }
-}
+// NOTE: a premature per-chain fan-out `observer_tick` lived here in Task 7 but
+// was flagged YAGNI. The Task-8 chain-kind timer dispatcher (`run_all_observers`
+// in `main.rs`) is the single generalized fan-out: it calls
+// `run_observer(chain)` directly for each registered+enabled Solana chain, so a
+// Solana-only `observer_tick` would be dead code. It has been removed.
