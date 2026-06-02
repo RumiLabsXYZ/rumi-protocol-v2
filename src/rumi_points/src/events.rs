@@ -129,19 +129,25 @@ pub fn apply_ingested_event(ev: &IngestedEvent) {
     // and accrual are Phase 4/5 and read the payload carried on `ev.kind`.
 }
 
-/// Apply a decoded batch for a source and advance its cursor to
-/// `max(event_id) + 1`. Returns the number of events applied. This is the
-/// network-free, unit-testable core (the inter-canister fetch is in
-/// `poll_source`). An empty batch leaves the cursor unchanged.
-pub fn ingest_batch(source: SourceId, events: &[IngestedEvent]) -> usize {
-    let mut max_id: Option<u64> = None;
+/// Apply a decoded batch of normalized events (auto-register etc.). Does NOT
+/// touch any cursor. Each poller advances its source cursor from that source's
+/// own resume signal: the forward endpoints (backend, 3pool) return an explicit
+/// `next_start`; the index endpoints (SP, AMM) advance by returned count (see
+/// `ingest_batch`). The network-free, unit-testable core of ingestion.
+pub fn apply_events(events: &[IngestedEvent]) {
     for ev in events {
         apply_ingested_event(ev);
-        max_id = Some(max_id.map_or(ev.event_id, |m| m.max(ev.event_id)));
     }
-    // Advance the cursor past the highest id seen. Only on a non-empty batch, so
-    // an empty fetch (caught up) leaves the cursor where it is.
-    if let Some(m) = max_id {
+}
+
+/// Apply a batch and advance the source cursor to `max(event_id) + 1`. Valid for
+/// the index endpoints (SP, AMM), where `id == index` holds until their logs trim
+/// (far beyond Season-1 volume at current TVL). The forward endpoints (backend,
+/// 3pool) instead set the cursor from the endpoint's returned `next_start`. An
+/// empty batch leaves the cursor unchanged. Returns the number applied.
+pub fn ingest_batch(source: SourceId, events: &[IngestedEvent]) -> usize {
+    apply_events(events);
+    if let Some(m) = events.iter().map(|e| e.event_id).max() {
         state::set_cursor(source.tag(), m + 1);
     }
     events.len()

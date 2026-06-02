@@ -194,6 +194,28 @@ pub mod backend {
             kind,
         }
     }
+
+    /// Mirror of the backend's `get_events_forward_filtered` response (added on
+    /// branch feat/source-forward-event-endpoints). The poller advances its
+    /// backend cursor to `next_start` (a scan position), not `max(event_id)+1`.
+    #[derive(CandidType, Deserialize, Clone, Debug)]
+    pub struct ForwardFilteredEventsResponse {
+        pub events: Vec<(u64, BackendEvent)>,
+        pub next_start: u64,
+        pub reached_end: bool,
+    }
+
+    /// Normalize a forward batch, returning the events plus `(next_start, reached_end)`.
+    pub fn normalize_forward(
+        resp: ForwardFilteredEventsResponse,
+    ) -> (Vec<IngestedEvent>, u64, bool) {
+        let events = resp
+            .events
+            .into_iter()
+            .map(|(id, ev)| normalize(id, ev))
+            .collect();
+        (events, resp.next_start, resp.reached_end)
+    }
 }
 
 // ── rumi_3pool ──────────────────────────────────────────────────────────────
@@ -240,6 +262,23 @@ pub mod three_pool {
             timestamp_ns: ev.timestamp,
             kind,
         }
+    }
+
+    /// Mirror of 3pool's `get_liquidity_events_v2_forward` response (added on
+    /// branch feat/source-forward-event-endpoints). Poller advances to `next_start`.
+    #[derive(CandidType, Deserialize, Clone, Debug)]
+    pub struct ForwardLiquidityEventsV2 {
+        pub events: Vec<(u64, LiquidityEventV2)>,
+        pub next_start: u64,
+        pub reached_end: bool,
+    }
+
+    pub fn normalize_forward(
+        resp: ForwardLiquidityEventsV2,
+    ) -> (Vec<IngestedEvent>, u64, bool) {
+        // The tuple index equals ev.id here; normalize reads ev.id directly.
+        let events = resp.events.into_iter().map(|(_, ev)| normalize(ev)).collect();
+        (events, resp.next_start, resp.reached_end)
     }
 }
 
@@ -588,5 +627,60 @@ mod normalize_tests {
             out.kind,
             IngestKind::AmmAddLiquidity { pool_id: "3usd-icp".into(), lp_shares: 42 }
         );
+    }
+
+    #[test]
+    fn backend_forward_response_roundtrips_and_carries_cursor() {
+        let resp = backend::ForwardFilteredEventsResponse {
+            events: vec![
+                (
+                    10,
+                    backend::BackendEvent::BorrowFromVault {
+                        vault_id: 1,
+                        caller: Some(p(1)),
+                        borrowed_amount: 50,
+                        timestamp: Some(100),
+                    },
+                ),
+                (
+                    11,
+                    backend::BackendEvent::CloseVault { vault_id: 1, timestamp: Some(100) },
+                ),
+            ],
+            next_start: 12,
+            reached_end: true,
+        };
+        let (events, next_start, end) = backend::normalize_forward(roundtrip(&resp));
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event_id, 10);
+        assert_eq!(events[0].kind, IngestKind::VaultBorrow { vault_id: 1, amount_e8s: 50 });
+        assert_eq!(events[1].kind, IngestKind::VaultClose { vault_id: 1 });
+        assert_eq!(next_start, 12); // poller advances backend cursor to next_start
+        assert!(end);
+    }
+
+    #[test]
+    fn three_pool_forward_response_roundtrips_and_carries_cursor() {
+        let resp = three_pool::ForwardLiquidityEventsV2 {
+            events: vec![(
+                5,
+                three_pool::LiquidityEventV2 {
+                    id: 5,
+                    timestamp: 100,
+                    caller: p(2),
+                    action: three_pool::LiquidityAction::AddLiquidity,
+                    amounts: vec![1, 2, 3],
+                    migrated: false,
+                },
+            )],
+            next_start: 6,
+            reached_end: false,
+        };
+        let (events, next_start, end) = three_pool::normalize_forward(roundtrip(&resp));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_id, 5);
+        assert_eq!(events[0].kind, IngestKind::ThreePoolAdd { amounts: [1, 2, 3] });
+        assert_eq!(next_start, 6);
+        assert!(!end);
     }
 }
