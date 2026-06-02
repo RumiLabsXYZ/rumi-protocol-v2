@@ -369,6 +369,25 @@ pub struct GetEventsFilteredResponse {
     pub events: Vec<(u64, crate::event::Event)>,
 }
 
+/// Response for `get_events_forward_filtered`: events matching the type filter
+/// within the forward scan window, each paired with its GLOBAL event-log index,
+/// plus a resume cursor. Drives gap-free, id-cursored incremental ingestion by an
+/// off-chain/inter-canister poller (e.g. `rumi_points`), unlike
+/// `get_events_filtered`, which is newest-first and paged by page number.
+///
+/// A poller ingests every matching event exactly once by passing `start = 0` and
+/// then `start := next_start` on each call until `reached_end`, after which it
+/// resumes from the same cursor as new events append (no gaps, no repeats).
+#[derive(candid::CandidType, Clone)]
+pub struct ForwardFilteredEventsResponse {
+    /// Matching events as `(global_log_index, event)`, oldest-first.
+    pub events: Vec<(u64, crate::event::Event)>,
+    /// Global log index to pass as the next `start`.
+    pub next_start: u64,
+    /// True when the scan reached the tail of the log (poller is caught up).
+    pub reached_end: bool,
+}
+
 /// Output cap on `get_vault_history` (DOS-001 legacy entry point) and
 /// page-size cap on `get_vault_history_paged`. Bounds the per-call
 /// reply size; for full historical access callers page via

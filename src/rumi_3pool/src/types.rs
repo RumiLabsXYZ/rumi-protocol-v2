@@ -308,6 +308,18 @@ pub struct LiquidityEventV2 {
     pub migrated: bool,
 }
 
+/// Response for `get_liquidity_events_v2_forward`: the forward window of v2
+/// liquidity events (oldest-first, each paired with its log index, which equals
+/// its `id` for this unbounded StableLog), plus a resume cursor for gap-free
+/// incremental ingestion (e.g. rumi_points). The poller advances
+/// `start := next_start` until `reached_end`.
+#[derive(CandidType, Clone, Debug)]
+pub struct ForwardLiquidityEventsV2 {
+    pub events: Vec<(u64, LiquidityEventV2)>,
+    pub next_start: u64,
+    pub reached_end: bool,
+}
+
 // ─── Admin Events ───
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]

@@ -1043,6 +1043,31 @@ pub fn get_vp_snapshots() -> Vec<VirtualPriceSnapshot> {
 // Pure helpers below are independently unit-tested. The `#[query]` wrappers
 // just plumb live state into them.
 
+/// Pure forward-window helper: returns entries `[start, start+max_scan)` from a
+/// count-bounded indexed source (oldest-first, each tagged with its index), plus
+/// the resume cursor `next_start` and whether the scan reached the end. Generic
+/// so it is unit-testable without constructing events; `get_liquidity_events_v2_forward`
+/// plumbs the live `liq_v2` log into it. `max_scan` is capped to bound the reply.
+pub fn forward_window<T>(
+    count: u64,
+    start: u64,
+    max_scan: u64,
+    get: impl Fn(u64) -> Option<T>,
+) -> (Vec<(u64, T)>, u64, bool) {
+    const MAX_SCAN: u64 = 2000;
+    let scan = max_scan.min(MAX_SCAN);
+    let end = start.saturating_add(scan).min(count);
+    let mut out = Vec::new();
+    let mut i = start;
+    while i < end {
+        if let Some(e) = get(i) {
+            out.push((i, e));
+        }
+        i += 1;
+    }
+    (out, end, end >= count)
+}
+
 /// Pure quote_swap: simulates a swap against the supplied balances.
 pub fn pure_quote_swap(
     i: u8,
@@ -1326,6 +1351,27 @@ pub fn get_liquidity_events_v2(limit: u64, offset: u64) -> Vec<LiquidityEventV2>
         out.reverse();
         out
     })
+}
+
+/// Forward, id-cursored read of the v2 liquidity event log for incremental
+/// ingestion (e.g. rumi_points). Unlike `get_liquidity_events_v2` (newest-first,
+/// offset-paged), this returns the window `[start, start+max_scan)` OLDEST-FIRST,
+/// each event paired with its log index (which equals its `id` for this unbounded
+/// StableLog), plus a `next_start` / `reached_end` cursor. A poller ingests every
+/// event exactly once by advancing `start := next_start` until `reached_end`.
+#[query]
+pub fn get_liquidity_events_v2_forward(
+    start: u64,
+    max_scan: u64,
+) -> crate::types::ForwardLiquidityEventsV2 {
+    let count = storage::liq_v2::len();
+    let (events, next_start, reached_end) =
+        forward_window(count, start, max_scan, storage::liq_v2::get);
+    crate::types::ForwardLiquidityEventsV2 {
+        events,
+        next_start,
+        reached_end,
+    }
 }
 
 /// Paginated newest-first read of the v2 swap event log.
@@ -2244,6 +2290,41 @@ pub fn test_corrupt_hash_cache_tip(bogus_hash: Vec<u8>) {
     let mut h = [0u8; 32];
     h.copy_from_slice(&bogus_hash);
     storage::push_bogus_hash_for_test(h);
+}
+
+#[cfg(test)]
+mod forward_window_tests {
+    use super::forward_window;
+
+    #[test]
+    fn windows_oldest_first_with_indices_and_cursor() {
+        let count = 3u64;
+        let get = |i: u64| if i < count { Some(i * 10) } else { None };
+
+        // Full scan: all three, tagged with their index, caught up.
+        let (evs, next, end) = forward_window(count, 0, 10, get);
+        assert_eq!(evs, vec![(0, 0), (1, 10), (2, 20)]);
+        assert_eq!(next, 3);
+        assert!(end);
+
+        // Bounded window [0,2): not yet caught up.
+        let (evs, next, end) = forward_window(count, 0, 2, get);
+        assert_eq!(evs, vec![(0, 0), (1, 10)]);
+        assert_eq!(next, 2);
+        assert!(!end);
+
+        // Resume from cursor 2: just the last one, caught up.
+        let (evs, next, end) = forward_window(count, 2, 10, get);
+        assert_eq!(evs, vec![(2, 20)]);
+        assert_eq!(next, 3);
+        assert!(end);
+
+        // Start past the end: empty, clamped to count, caught up.
+        let (evs, next, end) = forward_window(count, 5, 10, get);
+        assert!(evs.is_empty());
+        assert_eq!(next, 3);
+        assert!(end);
+    }
 }
 
 #[cfg(test)]
