@@ -12,7 +12,7 @@ use rumi_protocol_backend::{
     ReserveRedemptionResult, ReserveBalance, CollateralTotals, CollateralInterestInfo, PerCollateralRateCurve,
     VaultArgWithToken, StableTokenType, InterestSplitArg,
     GetSnapshotsArg, ProtocolSnapshot, CollateralSnapshot,
-    GetEventsFilteredResponse, StabilityPoolLiquidationResult,
+    GetEventsFilteredResponse, ForwardFilteredEventsResponse, StabilityPoolLiquidationResult,
     VaultHistoryPagedResponse, EventsByPrincipalPagedResponse, VaultsPageResponse,
     SupplyAudit, SupplyAuditEntry,
     MAX_VAULT_HISTORY, MAX_EVENTS_BY_PRINCIPAL_LEGACY, MAX_EVENTS_BY_PRINCIPAL_SCAN,
@@ -1634,6 +1634,71 @@ fn get_events_filtered(args: GetEventsArg) -> GetEventsFilteredResponse {
     };
     write_filtered_events_cache(cache_key, now, &resp);
     resp
+}
+
+/// Forward, id-cursored, type-filtered event scan for incremental ingestion.
+/// Scans the window `[start, start+max_scan)` of the global event log (oldest
+/// first), returns the events passing the `types` filter paired with their
+/// GLOBAL log index, and a `next_start` cursor to resume from without gaps or
+/// repeats.
+///
+/// Unlike `get_events_filtered` (newest-first, paged by page number, no stable
+/// cursor), this is a forward window keyed on the stable global index. A poller
+/// ingests every matching event exactly once by advancing `start := next_start`
+/// until `reached_end`, then resumes from the same cursor as new events append.
+/// `events().enumerate().skip(start)` seeks in O(1) (`EventIterator::nth`), so
+/// per-call cost is O(max_scan) regardless of how deep `start` is. Only the
+/// `types` facet is applied (principal/collateral/size/time are not), matching
+/// the points-canister ingestion use case. Added for `rumi_points` (airdrop).
+const FORWARD_FILTERED_MAX_SCAN: u64 = 2000;
+
+/// Pure forward-scan + type-filter + cursor logic, generic over the event source
+/// so it is unit-testable with a `Vec<Event>`. `count` is the total event count
+/// (the resume cursor is clamped to it). Production passes `events()` +
+/// `count_events()`; the O(1) seek of `EventIterator::nth` keeps the real scan at
+/// O(max_scan) regardless of `start`.
+fn scan_events_forward_filtered<I: Iterator<Item = Event>>(
+    source: I,
+    start: u64,
+    max_scan: u64,
+    count: u64,
+    types_set: Option<&std::collections::HashSet<EventTypeFilter>>,
+) -> ForwardFilteredEventsResponse {
+    let scan = max_scan.min(FORWARD_FILTERED_MAX_SCAN);
+    let empty_lookup = std::collections::HashMap::new();
+    let matched: Vec<(u64, Event)> = source
+        .enumerate()
+        .skip(start as usize)
+        .take(scan as usize)
+        .filter(|(_, e)| {
+            e.passes_filters(types_set, None, None, None, None, None, &empty_lookup, 0)
+        })
+        .map(|(i, e)| (i as u64, e))
+        .collect();
+    let next_start = start.saturating_add(scan).min(count);
+    ForwardFilteredEventsResponse {
+        events: matched,
+        next_start,
+        reached_end: next_start >= count,
+    }
+}
+
+#[candid_method(query)]
+#[query]
+fn get_events_forward_filtered(
+    start: u64,
+    max_scan: u64,
+    types: Option<Vec<EventTypeFilter>>,
+) -> ForwardFilteredEventsResponse {
+    if ic_cdk::api::data_certificate().is_none() {
+        ic_cdk::trap("update call rejected");
+    }
+    let types_set: Option<std::collections::HashSet<EventTypeFilter>> = types
+        .as_ref()
+        .filter(|v| !v.is_empty())
+        .map(|v| v.iter().cloned().collect());
+    let count = rumi_protocol_backend::storage::count_events();
+    scan_events_forward_filtered(events(), start, max_scan, count, types_set.as_ref())
 }
 
 /// Build `vault_id → collateral_type` by walking `OpenVault` events.
@@ -6575,6 +6640,51 @@ fn icrc28_trusted_origins() -> rumi_protocol_backend::icrc21::Icrc28TrustedOrigi
 #[query]
 fn icrc10_supported_standards() -> Vec<rumi_protocol_backend::icrc21::StandardRecord> {
     rumi_protocol_backend::icrc21::icrc10_supported_standards()
+}
+
+// Validates the forward, id-cursored, type-filtered scan that backs
+// `get_events_forward_filtered` (the rumi_points ingestion endpoint): window
+// bounding, global-index tagging, type filtering, and the resume cursor.
+#[test]
+fn forward_filtered_scan_windows_filters_and_advances_cursor() {
+    use std::collections::HashSet;
+
+    let close = |id: u64| Event::CloseVault {
+        vault_id: id,
+        block_index: None,
+        timestamp: Some(100),
+    };
+    let evs = vec![close(0), close(1), close(2)];
+    let count = evs.len() as u64;
+    let close_filter: HashSet<EventTypeFilter> = HashSet::from([EventTypeFilter::CloseVault]);
+    let borrow_filter: HashSet<EventTypeFilter> = HashSet::from([EventTypeFilter::Borrow]);
+
+    let ids = |r: &ForwardFilteredEventsResponse| r.events.iter().map(|(i, _)| *i).collect::<Vec<_>>();
+
+    // Full scan: all three match, tagged with their global indices, caught up.
+    let r = scan_events_forward_filtered(evs.clone().into_iter(), 0, 10, count, Some(&close_filter));
+    assert_eq!(ids(&r), vec![0, 1, 2]);
+    assert_eq!(r.next_start, 3);
+    assert!(r.reached_end);
+
+    // Bounded window [0,2): only indices 0,1; not yet caught up.
+    let r = scan_events_forward_filtered(evs.clone().into_iter(), 0, 2, count, Some(&close_filter));
+    assert_eq!(ids(&r), vec![0, 1]);
+    assert_eq!(r.next_start, 2);
+    assert!(!r.reached_end);
+
+    // Resume from cursor 2: only index 2, then caught up.
+    let r = scan_events_forward_filtered(evs.clone().into_iter(), 2, 10, count, Some(&close_filter));
+    assert_eq!(ids(&r), vec![2]);
+    assert_eq!(r.next_start, 3);
+    assert!(r.reached_end);
+
+    // A non-matching filter yields no events but still advances the cursor (so a
+    // poller never stalls on a quiet range).
+    let r = scan_events_forward_filtered(evs.into_iter(), 0, 10, count, Some(&borrow_filter));
+    assert!(r.events.is_empty());
+    assert_eq!(r.next_start, 3);
+    assert!(r.reached_end);
 }
 
 // Checks the real candid interface against the one declared in the did file
