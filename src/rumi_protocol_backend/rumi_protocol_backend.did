@@ -577,6 +577,11 @@ type EventsByPrincipalPagedResponse = record {
 };
 type FeeSource = variant { BorrowingFee; RedemptionFee };
 type Fees = record { redemption_fee : float64; borrowing_fee : float64 };
+type ForwardFilteredEventsResponse = record {
+  next_start : nat64;
+  reached_end : bool;
+  events : vec record { nat64; Event };
+};
 type GasStrategy = variant {
   NotApplicable;
   SolanaPriorityFee : record { lamports_per_cu_ceiling : nat64 };
@@ -969,6 +974,9 @@ service : (ProtocolArg) -> {
       EventsByPrincipalPagedResponse,
     ) query;
   get_events_filtered : (GetEventsArg) -> (GetEventsFilteredResponse) query;
+  get_events_forward_filtered : (nat64, nat64, opt vec EventTypeFilter) -> (
+      ForwardFilteredEventsResponse,
+    ) query;
   get_fees : (nat64) -> (Fees) query;
   get_fees_for_collateral : (principal, nat64) -> (Fees) query;
   get_global_icusd_mint_cap : () -> (nat64) query;
