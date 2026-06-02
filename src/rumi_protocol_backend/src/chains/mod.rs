@@ -17,7 +17,9 @@ pub mod config;
 pub mod multi_chain_state;
 pub mod settlement_queue;
 pub mod supply;
+pub mod vault;
 pub mod monad;
+pub mod solana;
 
 pub use adapter::ChainAdapter;
 pub use config::{ChainConfig, ChainId, ChainStatus};
@@ -48,3 +50,6 @@ mod tests_admin;
 
 #[cfg(test)]
 mod tests_self_check;
+
+#[cfg(test)]
+mod tests_vault;

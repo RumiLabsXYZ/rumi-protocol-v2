@@ -36,7 +36,7 @@ fn dummy_vault(vault_id: u64, chain: ChainId) -> ChainVaultV1 {
         owner: Principal::anonymous(),
         collateral_chain: chain,
         custody_address: "0x0000000000000000000000000000000000000000".into(),
-        collateral_amount_e18: 0,
+        collateral_amount_native: 0,
         debt_e8s: 0,
         mint_recipient: "0x0000000000000000000000000000000000000000".into(),
         pending_mint_e8s: 0,

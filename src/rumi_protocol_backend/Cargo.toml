@@ -21,6 +21,12 @@ candid = "0.10.6"
 ic-stable-structures = "0.6.5"
 ic-cdk = "0.12.0"
 ic-cdk-timers = "0.10.0"
+# serde / serde_json are HELD at 1.0.217 / 1.0.135 via the committed Cargo.lock.
+# The IC fork's `ic-types` (dev-dep, rev fc278709) imports a `serde::__private`
+# item removed after serde ~1.0.217, and serde_json >=1.0.150 transitively forces
+# serde >=1.0.220 (which breaks the test build). The Solana tx crates only need
+# serde "1.0", so they accept the pin. Do NOT `cargo update` serde/serde_json past
+# these in this worktree without also updating the ic fork.
 serde = "1.0.210"
 futures = "0.3.28"
 ciborium = "0.2.1"
@@ -46,7 +52,29 @@ ic-ledger-canister-core = { git = "https://github.com/Rumi-Protocol/ic", rev = "
 k256 = { version = "0.13", default-features = false, features = ["ecdsa", "arithmetic"] }
 sha3 = "0.10"
 hex = "0.4"
+bs58 = "0.5"
+# base64 for Solana sendTransaction wire encoding. Resolves to 0.22.1 (already a
+# transitive dep), so adding it as a direct dep does not shift resolution. The
+# `alloc` feature is enough for the canister (no std-only APIs needed).
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 alloy-rlp = "0.3"
+# Solana primitive crates for tx-building (message / instruction / transfer /
+# nonce construction). Verified wasm32-unknown-unknown compatible and coexisting
+# with candid 0.10 / ic-cdk 0.12 (no conflict). The SPL crates (spl-token,
+# spl-associated-token-account) are deliberately NOT used: they pull
+# spl-token-2022's confidential-transfer crypto (aes-gcm-siv, etc.) which is
+# wasm-risky and heavy; the MintTo and ATA-create instructions are hand-encoded
+# in chains/solana/tx.rs instead (simple, well-defined byte layouts).
+# curve25519 feature unlocks Pubkey::find_program_address / create_program_address
+# (PDA derivation, used for SPL Associated Token Account addresses). Off-chain it
+# pulls curve25519-dalek + sha2 for the ed25519 off-curve check; both are already
+# resolved in Cargo.lock, wasm32-unknown-unknown compatible, and do NOT activate
+# the serde feature, so the serde 1.0.217 pin holds.
+solana-pubkey = { version = "4", default-features = false, features = ["curve25519"] }
+solana-instruction = { version = "3", default-features = false }
+solana-message = { version = "4", default-features = false }
+solana-transaction = { version = "4", default-features = false }
+solana-system-interface = { version = "3", default-features = false }
 # TODO(Task 6): add evm_rpc_client once source confirmed — evm_rpc_client 0.4.0 pulls
 # ic-cdk 0.19 which conflicts with this project's ic-cdk 0.12. Needs a fork/patch
 # or a DFINITY-provided wasm-compat shim at the same ic-cdk version.
@@ -61,4 +89,9 @@ rand = "0.8.5"
 pocket-ic = "6.0.0"
 proptest = "1.0"
 flate2 = "1.0"
+# Host-side verification of the threshold-Ed25519 signature in the M2 sign test.
+# 2.1.1 already resolves in the lock transitively; default features (fast/std/
+# zeroize) do NOT activate its optional serde dep, so the serde 1.0.217 pin holds.
+# This is a dev-dependency, so it does not affect the wasm artifact.
+ed25519-dalek = "2.1.1"
 

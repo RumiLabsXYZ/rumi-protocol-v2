@@ -10,6 +10,7 @@ members = [
     "src/rumi_points_e2e_source",
     "src/xrc_demo/xrc_mock",
     "src/monad_rpc_mock",
+    "src/sol_rpc_mock",
     "src/liquidation_bot",
     "src/flaky_ledger",
 ]

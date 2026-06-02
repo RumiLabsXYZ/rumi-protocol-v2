@@ -803,14 +803,16 @@ pub struct State {
     /// `set_vault_check_tick_interval_secs`.
     #[serde(default = "default_vault_check_tick_interval_secs")]
     pub vault_check_tick_interval_secs: u64,
-    /// Phase 1b Task 15: cadence (seconds) for Timer D (Monad settlement
-    /// fan-out, `settlement::settlement_tick`). Default 30. Tunable via
+    /// Phase 1b Task 15: cadence (seconds) for Timer D (the settlement
+    /// fan-out, `main::run_all_settlements`, which dispatches each registered
+    /// chain to its kind's `run_settlement`). Default 30. Tunable via
     /// `set_settlement_tick_interval_secs`. The register fn floors a 0 to 30
     /// so a missing serde-default or bad setter value never busy-loops.
     #[serde(default = "default_settlement_tick_interval_secs")]
     pub settlement_tick_interval_secs: u64,
-    /// Phase 1b Task 15: cadence (seconds) for the Monad inbound observer
-    /// fan-out (`deposit_watch::observer_tick`). Default 30. Tunable via
+    /// Phase 1b Task 15: cadence (seconds) for the inbound observer fan-out
+    /// (`main::run_all_observers`, which dispatches each registered chain to its
+    /// kind's `run_observer`). Default 30. Tunable via
     /// `set_observer_tick_interval_secs`. Same 0-floor protection as above.
     #[serde(default = "default_observer_tick_interval_secs")]
     pub observer_tick_interval_secs: u64,
@@ -1277,6 +1279,26 @@ pub struct State {
     #[serde(default)]
     pub evm_rpc_principal_override: Option<candid::Principal>,
 
+    /// M1: override for the SOL RPC canister principal. When `Some`,
+    /// `chains::solana::sol_rpc::sol_rpc_principal()` uses this instead of the
+    /// hardcoded production canister. Lets PocketIC / staging inject a mock SOL
+    /// RPC canister. `#[serde(default)]` so older snapshots decode to `None`.
+    /// Developer-gated setter: `set_sol_rpc_principal`.
+    #[serde(default)]
+    pub sol_rpc_principal_override: Option<candid::Principal>,
+
+    /// M2 Task 8: gate for the Solana observer + settlement workers. The single
+    /// chain-kind timer dispatcher (`run_all_observers` / `run_all_settlements`
+    /// in `main.rs`) only runs the Solana `run_observer` / `run_settlement` for a
+    /// registered Solana chain when this is `true`. Monad chains ALWAYS run; this
+    /// keeps Solana DARK by default (no signing-subnet / SOL-RPC cycle burn) until
+    /// the operator flips it on. `#[serde(default)]` so older snapshots decode to
+    /// `false` (off). `State` is ciborium-encoded (serde-based), so a snapshot
+    /// missing this key defaults the bool to `false`. Developer-gated setter:
+    /// `set_solana_workers_enabled`.
+    #[serde(default)]
+    pub solana_workers_enabled: bool,
+
     /// Phase 1b Task 12: monotonic id source for foreign-chain (`chain_vaults`)
     /// vault ids. `#[serde(default)]` is safe — `State` is ciborium-encoded
     /// (storage.rs uses `ciborium::ser/de`, which is serde-based), so an old
@@ -1493,6 +1515,8 @@ impl Default for State {
             bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
             multi_chain: crate::chains::MultiChainState::default(),
             evm_rpc_principal_override: None,
+            sol_rpc_principal_override: None,
+            solana_workers_enabled: false,
             chain_vault_id_counter: 0,
         }
     }
@@ -1721,6 +1745,8 @@ impl From<InitArg> for State {
             bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
             multi_chain: crate::chains::MultiChainState::default(),
             evm_rpc_principal_override: None,
+            sol_rpc_principal_override: None,
+            solana_workers_enabled: false,
             chain_vault_id_counter: 0,
         }
     }
@@ -3691,6 +3717,12 @@ impl State {
     /// gated setter `set_evm_rpc_principal` is added in Task 14.
     pub fn evm_rpc_override(&self) -> Option<candid::Principal> {
         self.evm_rpc_principal_override
+    }
+
+    /// When `Some`, the SOL RPC wrapper uses this principal instead of the
+    /// hardcoded production canister. Enables PocketIC / staging to inject a mock.
+    pub fn sol_rpc_override(&self) -> Option<candid::Principal> {
+        self.sol_rpc_principal_override
     }
 
     /// Wave-10 LIQ-008: pure-read sum of liquidation debt cleared in the
@@ -5905,6 +5937,53 @@ mod tests {
             // "frozen" should be false (the Default value), not cause an error
             assert_eq!(restored.frozen, false);
             // Other fields should still be intact
+            assert_eq!(restored.mode, state.mode);
+            assert_eq!(restored.developer_principal, state.developer_principal);
+        } else {
+            panic!("expected CBOR map");
+        }
+    }
+
+    #[test]
+    fn test_solana_workers_enabled_defaults_false_on_old_snapshot() {
+        // An old snapshot predates the Solana M2 workers flag. Prove that a CBOR
+        // map missing `solana_workers_enabled` decodes with the flag defaulting to
+        // `false` (Solana stays DARK on every existing canister after an upgrade,
+        // never accidentally enabled). Mirrors `test_serde_default_handles_missing_fields`.
+        let mut state = test_state();
+        // Set it true in the source state so the test proves the DECODE default
+        // wins (false), not merely that the source happened to be false.
+        state.solana_workers_enabled = true;
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&state, &mut buf).unwrap();
+
+        let value: ciborium::Value = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        if let ciborium::Value::Map(mut entries) = value {
+            let original_len = entries.len();
+            entries.retain(|(k, _)| {
+                if let ciborium::Value::Text(key) = k {
+                    key != "solana_workers_enabled"
+                } else {
+                    true
+                }
+            });
+            assert_eq!(
+                entries.len(),
+                original_len - 1,
+                "should have removed the solana_workers_enabled field"
+            );
+
+            let mut modified_buf = Vec::new();
+            ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut modified_buf).unwrap();
+
+            let restored: State = ciborium::de::from_reader(modified_buf.as_slice()).unwrap();
+            // The missing field defaults to false (Solana dark), regardless of the
+            // source state being true.
+            assert!(
+                !restored.solana_workers_enabled,
+                "missing solana_workers_enabled must default to false"
+            );
+            // Other fields stay intact.
             assert_eq!(restored.mode, state.mode);
             assert_eq!(restored.developer_principal, state.developer_principal);
         } else {

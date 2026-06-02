@@ -8,7 +8,7 @@ use candid::Principal;
 fn vault_pending(s: &mut MultiChainStateV3, vault_id: u64, pending: u128) {
     s.chain_vaults.insert(vault_id, ChainVaultV1 {
         vault_id, owner: Principal::anonymous(), collateral_chain: ChainId(10143),
-        custody_address: "0xc".into(), collateral_amount_e18: 0, debt_e8s: 0,
+        custody_address: "0xc".into(), collateral_amount_native: 0, debt_e8s: 0,
         mint_recipient: "0xr".into(), pending_mint_e8s: pending,
         status: ChainVaultStatus::MintPending, opened_at_ns: 0,
     });
@@ -86,7 +86,7 @@ fn confirm_mint_second_vault_uses_running_total() {
     s.chain_supplies.insert(ChainId(10143), 10_000_000_000);
     s.chain_vaults.insert(1, ChainVaultV1 {
         vault_id: 1, owner: Principal::anonymous(), collateral_chain: ChainId(10143),
-        custody_address: "0xc".into(), collateral_amount_e18: 0, debt_e8s: 10_000_000_000,
+        custody_address: "0xc".into(), collateral_amount_native: 0, debt_e8s: 10_000_000_000,
         mint_recipient: "0xr".into(), pending_mint_e8s: 0,
         status: ChainVaultStatus::Open, opened_at_ns: 0,
     });

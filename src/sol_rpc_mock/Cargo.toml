@@ -1,0 +1,22 @@
+[package]
+name = "sol_rpc_mock"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+candid = "0.10.6"
+ic-cdk = "0.12.0"
+ic-cdk-macros = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# base64 to encode the scripted 80-byte durable-nonce account into the
+# `getAccountInfo` (encoding: base64) response. Resolves to 0.22.1 (already a
+# direct dep of rumi_protocol_backend), so the workspace lock is unchanged.
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+
+[profile.release]
+opt-level = "s"
+lto = true

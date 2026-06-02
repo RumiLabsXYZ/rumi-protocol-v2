@@ -240,8 +240,78 @@ fn register_vault_check_timer() {
     });
 }
 
-/// Phase 1b Task 15: register Timer D (Monad settlement fan-out). Clears any
-/// existing id and re-registers in place so the setter can re-tune live.
+/// M2 Task 8: chain-kind timer dispatch. ONE observer fan-out and ONE settlement
+/// fan-out run all registered chains, dispatching each chain to its kind's
+/// `run_observer` / `run_settlement` by `ChainId` (501 == Solana, everything else
+/// Monad). This keeps a SINGLE timer pair total (no per-kind timer proliferation)
+/// while letting the two chains run different worker code.
+///
+/// - Monad chains ALWAYS run (behavior identical to the prior
+///   `monad::observer_tick` / `settlement_tick` fan-out).
+/// - Solana chains run ONLY when `solana_workers_enabled` is true, so Solana
+///   stays DARK by default (no signing-subnet / SOL-RPC cycle burn) until the
+///   operator flips the flag via `set_solana_workers_enabled`.
+///
+/// Borrow discipline: the chain-id list and the `solana_workers_enabled` bool are
+/// snapshotted OUT of state under a synchronous `read_state` BEFORE the await
+/// loop; no state borrow is held across a `run_observer`/`run_settlement` await
+/// (each carries its own re-entrancy + mode/halt guards). No-op when no chain is
+/// registered (the Vec is empty), so it is safe to run on a canister before any
+/// chain is configured.
+
+const SOLANA_CHAIN_ID: rumi_protocol_backend::chains::config::ChainId =
+    rumi_protocol_backend::chains::solana::config::SOLANA_CHAIN_ID;
+
+/// Snapshot the registered chain-id list plus the Solana enable flag (one
+/// synchronous read; nothing held across an await).
+fn registered_chains_and_solana_flag() -> (Vec<rumi_protocol_backend::chains::config::ChainId>, bool)
+{
+    read_state(|s| {
+        let chains = s
+            .multi_chain
+            .chain_configs
+            .iter()
+            .filter(|(_, c)| {
+                matches!(c.status, rumi_protocol_backend::chains::config::ChainStatus::Registered)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        (chains, s.solana_workers_enabled)
+    })
+}
+
+/// Observer fan-out: dispatch each registered chain to its kind's `run_observer`.
+async fn run_all_observers() {
+    let (chains, solana_enabled) = registered_chains_and_solana_flag();
+    for chain in chains {
+        if chain == SOLANA_CHAIN_ID {
+            if solana_enabled {
+                rumi_protocol_backend::chains::solana::deposit_watch::run_observer(chain).await;
+            }
+            // Solana not enabled: skip (stays dark, no cycle burn).
+        } else {
+            rumi_protocol_backend::chains::monad::deposit_watch::run_observer(chain).await;
+        }
+    }
+}
+
+/// Settlement fan-out: dispatch each registered chain to its kind's `run_settlement`.
+async fn run_all_settlements() {
+    let (chains, solana_enabled) = registered_chains_and_solana_flag();
+    for chain in chains {
+        if chain == SOLANA_CHAIN_ID {
+            if solana_enabled {
+                rumi_protocol_backend::chains::solana::settlement::run_settlement(chain).await;
+            }
+            // Solana not enabled: skip (stays dark, no cycle burn).
+        } else {
+            rumi_protocol_backend::chains::monad::settlement::run_settlement(chain).await;
+        }
+    }
+}
+
+/// Phase 1b Task 15: register Timer D (settlement fan-out). Clears any existing
+/// id and re-registers in place so the setter can re-tune live.
 ///
 /// FLOOR: a 0 interval (serde-default-missing on an old snapshot, or a bad
 /// setter value that slipped past validation) is forced to 30s, never 0 — a 0s
@@ -256,13 +326,13 @@ fn register_settlement_timer() {
         }
         let new_id = ic_cdk_timers::set_timer_interval(
             std::time::Duration::from_secs(secs),
-            || ic_cdk::spawn(rumi_protocol_backend::chains::monad::settlement::settlement_tick()),
+            || ic_cdk::spawn(run_all_settlements()),
         );
         cell.set(Some(new_id));
     });
 }
 
-/// Phase 1b Task 15: register the Monad inbound observer fan-out. Same
+/// Phase 1b Task 15: register the inbound observer fan-out. Same
 /// clear-and-re-register-in-place + 0-floor protection as the settlement timer.
 fn register_observer_timer() {
     let secs = read_state(|s| s.observer_tick_interval_secs);
@@ -273,7 +343,7 @@ fn register_observer_timer() {
         }
         let new_id = ic_cdk_timers::set_timer_interval(
             std::time::Duration::from_secs(secs),
-            || ic_cdk::spawn(rumi_protocol_backend::chains::monad::deposit_watch::observer_tick()),
+            || ic_cdk::spawn(run_all_observers()),
         );
         cell.set(Some(new_id));
     });
@@ -961,7 +1031,7 @@ async fn open_chain_vault(
 ///
 /// CR-checks the REMAINING collateral against `MONAD_MIN_CR_E4` (debt-free
 /// vaults skip the check), RESERVES the withdrawn amount (decrements
-/// `collateral_amount_e18` at enqueue), and enqueues a `NativeWithdrawal` op
+/// `collateral_amount_native` at enqueue), and enqueues a `NativeWithdrawal` op
 /// that Timer D signs and broadcasts. A vault that becomes empty AND debt-free
 /// flips to `Closing` here and `Closed` once the transfer confirms.
 ///
@@ -1016,6 +1086,150 @@ fn close_chain_vault(vault_id: u64, dest_address: String) -> Result<(), Protocol
             vault_id,
             dest_address,
             rumi_protocol_backend::chains::monad::chain_vault::MONAD_MIN_CR_E4,
+            now,
+        )
+    })
+    .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
+}
+
+// ─── Solana M2 vault endpoints (developer-gated) ─────────────────────────────
+//
+// These mirror the Monad vault endpoints above (`open_chain_vault`,
+// `withdraw_chain_collateral`, `close_chain_vault`) one-for-one, swapping the
+// Monad primitives for Solana: threshold-Ed25519 custody derivation instead of
+// tECDSA, the base58 address validator (`is_valid_solana_address`) instead of
+// the EVM one, and the `"SOL"` manual-price key instead of `"MON"`. They call
+// the chain-agnostic helpers in `chains::vault` directly (the Monad endpoints go
+// through the `chains::monad::chain_vault` wrappers, which bake in the EVM
+// validator + `"MON"`). The collateral/amount fields carry LAMPORTS (u128) here;
+// the field is generic native base units (`ChainVaultV1.collateral_amount_native`).
+
+/// Open a Solana chain vault, OPEN-THEN-VERIFY (mirrors `open_chain_vault`).
+///
+/// Creates the vault in `AwaitingDeposit` with the DECLARED collateral
+/// (lamports) and the intended mint in `pending_mint_e8s`; enqueues NO mint. The
+/// caller then reads the vault's `custody_address` (`get_chain_vault`) and
+/// deposits SOL there. deposit-watch (Task 9) verifies the on-chain balance
+/// covers the declared collateral at finality, flips the vault to `MintPending`,
+/// and enqueues the mint. icUSD is only ever minted against a verified on-chain
+/// deposit.
+///
+/// Developer-gated. Async because deriving the per-user custody address calls
+/// threshold Ed25519. Borrow discipline: the `vault_id` is reserved in one
+/// `mutate_state`, the custody derive is `.await`ed with NO state borrow held,
+/// then the vault is opened + cloned out in a second `mutate_state`.
+#[candid_method(update)]
+#[update]
+async fn open_solana_vault(
+    collateral_lamports: u128,
+    debt_e8s: u128,
+    mint_recipient_base58: String,
+) -> Result<rumi_protocol_backend::chains::monad::chain_vault::ChainVaultV1, ProtocolError> {
+    use rumi_protocol_backend::chains::solana::{config, ted25519};
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    // Reserve the vault id BEFORE the async derive so the derivation path
+    // (chain, caller, vault_id) is unique even across concurrent opens.
+    let vault_id = mutate_state(|s| {
+        s.chain_vault_id_counter += 1;
+        s.chain_vault_id_counter
+    });
+    let path = ted25519::custody_derivation_path(config::SOLANA_CHAIN_ID, caller, vault_id);
+    let (_pubkey, custody) = ted25519::derive_solana_address(path)
+        .await
+        .map_err(|e| ProtocolError::ChainAdmin(format!("derive: {e}")))?;
+    let now = ic_cdk::api::time();
+    mutate_state(|s| {
+        rumi_protocol_backend::chains::vault::open_chain_vault_in_state(
+            &mut s.multi_chain,
+            config::SOLANA_CHAIN_ID,
+            caller,
+            custody,
+            collateral_lamports,
+            debt_e8s,
+            mint_recipient_base58,
+            ted25519::is_valid_solana_address,
+            "SOL",
+            config::SOLANA_MIN_CR_E4,
+            now,
+            vault_id,
+        )
+        .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))?;
+        // Return the inserted vault. `open_chain_vault_in_state` inserts it on
+        // success, so the lookup cannot miss.
+        Ok(s
+            .multi_chain
+            .chain_vaults
+            .get(&vault_id)
+            .cloned()
+            .expect("vault present: just inserted"))
+    })
+}
+
+/// Withdraw Solana collateral (mirrors `withdraw_chain_collateral`).
+///
+/// CR-checks the REMAINING collateral against `SOLANA_MIN_CR_E4` (debt-free
+/// vaults skip the check), RESERVES the withdrawn lamports, and enqueues a
+/// `NativeWithdrawal` op for the Task-8 settlement worker to sign + broadcast. A
+/// vault that becomes empty AND debt-free flips to `Closing` here. There is NO
+/// repay endpoint: the user burns icUSD on Solana and burn-watch decrements
+/// `debt_e8s` + chain supply. Synchronous (the `dest_address` is supplied by the
+/// caller; signing happens later in the settlement worker). Developer-gated.
+#[candid_method(update)]
+#[update]
+fn withdraw_solana_collateral(
+    vault_id: u64,
+    amount_lamports: u128,
+    dest_address: String,
+) -> Result<(), ProtocolError> {
+    use rumi_protocol_backend::chains::solana::{config, ted25519};
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let now = ic_cdk::api::time();
+    mutate_state(|s| {
+        rumi_protocol_backend::chains::vault::withdraw_collateral_in_state(
+            &mut s.multi_chain,
+            vault_id,
+            amount_lamports,
+            dest_address,
+            ted25519::is_valid_solana_address,
+            "SOL",
+            config::SOLANA_MIN_CR_E4,
+            now,
+        )
+    })
+    .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
+}
+
+/// Close a debt-free Solana chain vault (mirrors `close_chain_vault`).
+///
+/// Requires the vault's `debt_e8s == 0` (repay first by burning icUSD on
+/// Solana), then withdraws the FULL remaining collateral to `dest_address`
+/// (vault -> `Closing`, then `Closed` on the transfer's confirmation).
+/// Synchronous + developer-gated.
+#[candid_method(update)]
+#[update]
+fn close_solana_vault(vault_id: u64, dest_address: String) -> Result<(), ProtocolError> {
+    use rumi_protocol_backend::chains::solana::{config, ted25519};
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let now = ic_cdk::api::time();
+    mutate_state(|s| {
+        rumi_protocol_backend::chains::vault::close_chain_vault_in_state(
+            &mut s.multi_chain,
+            vault_id,
+            dest_address,
+            ted25519::is_valid_solana_address,
+            "SOL",
+            config::SOLANA_MIN_CR_E4,
             now,
         )
     })
@@ -1084,6 +1298,26 @@ fn list_chain_vaults(
     })
 }
 
+/// True iff `chain`'s settlement queue holds any NON-terminal op (`Queued` or
+/// `Inflight`), false once the worker has drained it (no op, or only terminal
+/// `Succeeded`/`Failed` ops awaiting prune). Lets a caller observe whether a
+/// chain's settlement worker has finished its outbound work without inspecting
+/// individual ops. Returns false for an unregistered chain (no queue). Public
+/// read-only query; no gate (mirrors `get_chain_vault`).
+#[candid_method(query)]
+#[query]
+fn chain_has_active_settlement_op(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> bool {
+    read_state(|s| {
+        s.multi_chain
+            .settlement_queues
+            .get(&chain)
+            .map(|q| q.has_active_op())
+            .unwrap_or(false)
+    })
+}
+
 /// Record the deployed `IcUSD.sol` (or equivalent) contract address for a chain.
 /// Developer-gated.
 #[candid_method(update)]
@@ -1100,7 +1334,15 @@ fn set_chain_contract(
     // the mint calldata's `to` (`tx::abi_word_address`) and panics deep on the
     // settlement worker path, after the re-entrancy guard + awaits, permanently
     // blocking the chain's worker. A deploy-time typo is enough.
-    if !rumi_protocol_backend::chains::monad::tecdsa::is_valid_evm_address(&address) {
+    //
+    // Chain-aware: Solana's SPL mint is a base58 32-byte address, not an EVM
+    // 0x-hex one. Validate it with the Solana base58 check; every other chain
+    // (Monad + any EVM chain) keeps the original EVM validation unchanged.
+    if chain == rumi_protocol_backend::chains::solana::config::SOLANA_CHAIN_ID {
+        if !rumi_protocol_backend::chains::solana::ted25519::is_valid_solana_address(&address) {
+            return Err(ProtocolError::ChainAdmin(format!("invalid Solana address: {address}")));
+        }
+    } else if !rumi_protocol_backend::chains::monad::tecdsa::is_valid_evm_address(&address) {
         return Err(ProtocolError::ChainAdmin(format!("invalid EVM address: {address}")));
     }
     mutate_state(|s| {
@@ -4708,6 +4950,199 @@ async fn set_observer_tick_interval_secs(secs: u64) -> Result<(), ProtocolError>
     mutate_state(|s| s.observer_tick_interval_secs = secs);
     register_observer_timer();
     log!(INFO, "[set_observer_tick_interval_secs] Observer interval set to {}s", secs);
+    Ok(())
+}
+
+// ─── Solana M1 read-seam endpoints (developer-gated) ─────────────────────────
+
+/// M1 read-seam probe: derive and return the Solana settlement (mint-authority)
+/// address. Developer-gated. Exercises threshold Ed25519 on devnet/staging.
+#[candid_method(update)]
+#[update]
+async fn solana_settlement_address() -> Result<String, ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can derive the Solana settlement address".to_string(),
+        ));
+    }
+    use rumi_protocol_backend::chains::solana::{config::SOLANA_CHAIN_ID, ted25519};
+    let path = ted25519::settlement_derivation_path(SOLANA_CHAIN_ID);
+    let (_pk, addr) = ted25519::derive_solana_address(path)
+        .await
+        .map_err(ProtocolError::GenericError)?;
+    Ok(addr)
+}
+
+/// M1 read-seam probe: read a SOL balance (lamports) via the SOL RPC canister.
+#[candid_method(update)]
+#[update]
+async fn solana_get_balance(pubkey: String) -> Result<u64, ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can call solana_get_balance".to_string(),
+        ));
+    }
+    use rumi_protocol_backend::chains::solana::{sol_rpc, ted25519};
+    if !ted25519::is_valid_solana_address(&pubkey) {
+        return Err(ProtocolError::GenericError(format!(
+            "invalid Solana address: {pubkey}"
+        )));
+    }
+    sol_rpc::get_balance(&pubkey)
+        .await
+        .map_err(ProtocolError::GenericError)
+}
+
+/// M1 read-seam probe: read the registered icUSD SPL mint's on-chain supply.
+#[candid_method(update)]
+#[update]
+async fn solana_get_mint_supply() -> Result<u64, ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can call solana_get_mint_supply".to_string(),
+        ));
+    }
+    use rumi_protocol_backend::chains::solana::{config::SOLANA_CHAIN_ID, sol_rpc};
+    let mint = read_state(|s| s.multi_chain.chain_contracts.get(&SOLANA_CHAIN_ID).cloned())
+        .ok_or_else(|| ProtocolError::GenericError("Solana icUSD mint not set".to_string()))?;
+    sol_rpc::get_mint_supply(&mint)
+        .await
+        .map_err(ProtocolError::GenericError)
+}
+
+/// M2 sign-seam probe: build, threshold-Ed25519 sign, and return the legacy wire
+/// bytes of a System Transfer from the Solana settlement address to `to` for
+/// `lamports`. Developer-gated. Uses a dummy (all-zero) blockhash, so the bytes
+/// are NOT broadcastable (sign-validity is what we prove here); the real broadcast
+/// path fetches a fresh blockhash and calls `sol_rpc::send_transaction`. The
+/// returned bytes are `[compact-u16 sig count][64-byte sig][serialized message]`.
+#[candid_method(update)]
+#[update]
+async fn solana_sign_test_transfer(to: String, lamports: u64) -> Result<Vec<u8>, ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can call solana_sign_test_transfer".to_string(),
+        ));
+    }
+    use rumi_protocol_backend::chains::solana::{config::SOLANA_CHAIN_ID, ted25519, tx};
+    use solana_message::Hash;
+    use solana_pubkey::Pubkey;
+
+    // Decode the recipient once: this both validates (32-byte base58) and yields
+    // the raw bytes. A non-32-byte or non-base58 `to` still returns the same
+    // "invalid Solana address" rejection as the prior explicit validity check.
+    let to_arr = ted25519::decode_solana_address(&to)
+        .map_err(|_| ProtocolError::GenericError(format!("invalid Solana address: {to}")))?;
+    let to_pk = Pubkey::new_from_array(to_arr);
+
+    // Derive the settlement (mint-authority) signer address + its path.
+    let from_path = ted25519::settlement_derivation_path(SOLANA_CHAIN_ID);
+    let (from_pubkey, _from_addr) = ted25519::derive_solana_address(from_path.clone())
+        .await
+        .map_err(ProtocolError::GenericError)?;
+
+    // Dummy blockhash: sign-validity does not depend on blockhash freshness.
+    let blockhash = Hash::new_from_array([0u8; 32]);
+
+    tx::sign_transfer(from_path, &from_pubkey, &to_pk, lamports, blockhash)
+        .await
+        .map_err(ProtocolError::GenericError)
+}
+
+/// M2 durable-nonce bootstrap: idempotently create + initialize the settlement
+/// key's durable nonce account on Solana devnet. Developer-gated; the operator
+/// runs this once per settlement key. If the nonce account already holds an
+/// Initialized durable nonce, this is a no-op (returns Ok). Otherwise it obtains a
+/// real recent blockhash, builds the 2-instruction create+initialize transaction,
+/// multi-signs it (fee payer + new nonce account, both threshold-Ed25519), and
+/// broadcasts it. Subsequent settlement transactions reference the durable nonce
+/// so build->sign(slow)->broadcast stays valid across async gaps.
+///
+/// `blockhash` (playbook #4): `getLatestBlockhash` changes every slot, so the
+/// DFINITY sol-rpc canister's multi-provider consensus almost never agrees on it
+/// and chronically returns `#Inconsistent` - which the canister-side auto-fetch
+/// rejects. So on real devnet/mainnet the operator obtains a fresh finalized
+/// blockhash out-of-band (e.g. `solana blockhash`, or a single-provider
+/// `getLatestBlockhash`) and passes it here as a 32-byte base58 string; it is fed
+/// straight into the create-nonce tx, bypassing the broken consensus fetch. Pass it
+/// promptly: blockhashes expire (~60s). The no-arg/`None` path auto-fetches and
+/// only works where multi-provider consensus on `getLatestBlockhash` is possible
+/// (the PocketIC mock / a consensus-capable environment).
+#[candid_method(update)]
+#[update]
+async fn solana_bootstrap_nonce(blockhash: Option<String>) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can bootstrap the Solana nonce account".to_string(),
+        ));
+    }
+    use rumi_protocol_backend::chains::solana::{config::SOLANA_CHAIN_ID, ted25519, tx};
+    use solana_message::Hash;
+
+    // Decode the operator-supplied blockhash if present. A Solana blockhash is a
+    // 32-byte base58 value, so `decode_solana_address` is the right decoder; a
+    // non-32-byte / non-base58 value is rejected with a clear error rather than
+    // being fed into the transaction.
+    let blockhash_override = match blockhash {
+        Some(bh) => {
+            let decoded = ted25519::decode_solana_address(&bh).map_err(|e| {
+                ProtocolError::GenericError(format!(
+                    "invalid blockhash (must be a 32-byte base58 value): {e}"
+                ))
+            })?;
+            Some(Hash::new_from_array(decoded))
+        }
+        None => None,
+    };
+
+    tx::bootstrap_nonce_account(SOLANA_CHAIN_ID, blockhash_override)
+        .await
+        .map_err(ProtocolError::GenericError)
+}
+
+/// Developer-gated: set the SOL RPC canister principal override (mock/staging).
+#[candid_method(update)]
+#[update]
+async fn set_sol_rpc_principal(p: Principal) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set the SOL RPC principal".to_string(),
+        ));
+    }
+    mutate_state(|s| s.sol_rpc_principal_override = Some(p));
+    Ok(())
+}
+
+/// Developer-gated (M2 Task 8): enable or disable the Solana observer +
+/// settlement workers. While `false` (the default on every existing snapshot),
+/// the chain-kind timer dispatch SKIPS the Solana `run_observer` /
+/// `run_settlement` even when a Solana chain is registered, so Solana burns no
+/// signing-subnet / SOL-RPC cycles until the operator flips this on. Monad chains
+/// are unaffected (they always run). Takes effect on the NEXT timer tick (the
+/// dispatcher reads the flag each tick); no upgrade or timer re-registration
+/// needed.
+#[candid_method(update)]
+#[update]
+async fn set_solana_workers_enabled(enabled: bool) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    mutate_state(|s| s.solana_workers_enabled = enabled);
+    log!(INFO, "[set_solana_workers_enabled] Solana workers {}", if enabled { "ENABLED" } else { "disabled" });
     Ok(())
 }
 
