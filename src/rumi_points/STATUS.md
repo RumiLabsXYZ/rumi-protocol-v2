@@ -23,21 +23,32 @@ NOT yet built (the remaining Phase 2 machinery), blocked on a design decision:
   admin trigger/status endpoints.
 - The PocketIC end-to-end ingestion test (the plan's Phase 2 verification).
 
-### Blocker / decision needed: backend event-query pagination
-`rumi_protocol_backend.get_events_filtered` paginates NEWEST-FIRST by PAGE NUMBER
-(not a forward global-id cursor) and returns no `scan_end`, so it cannot drive
-stable incremental forward ingestion. The clean-forward endpoint `get_events`
-returns the full ~95-variant `Event`, which the 9-variant mirror cannot decode
-(candid rejects unknown-variant values; confirmed by canary). Options:
-  1. Mirror all ~95 backend variants and poll `get_events` forward by global id
-     (robust cursor, brittle/large mirror that breaks when upstream adds a variant).
-  2. Page-scan the filtered set each cycle keyed on a cached max global id (more
-     cross-canister work; the filtered set is recomputed O(N) per call).
-  3. Add a small FORWARD-filtered, id-cursored endpoint to the backend (cleanest,
-     but the backend has active Monad branches and a "do not touch" caution -> needs
-     Rob's OK; would ride a separate branch).
-The 3pool/SP/AMM `get_*_events(start,length)` pagination semantics are NOT yet
-verified; do that before wiring their poll cursors (do not assume forward-id).
+### Backend event-query pagination: RESOLVED (Rob chose the backend endpoint)
+`get_events_filtered` paginates newest-first by page number (no stable cursor) and
+`get_events` returns all ~95 variants (a subset mirror cannot decode unknown-variant
+values; confirmed by canary). Rob chose to add a clean forward endpoint.
+
+DONE on branch `feat/backend-forward-filtered-events` (commit `51aa812`, NOT merged,
+local-only): `rumi_protocol_backend.get_events_forward_filtered(start, max_scan,
+opt vec EventTypeFilter) -> record { events: vec record { nat64; Event };
+next_start; reached_end }`. Read-only additive query (no Event/state change, no
+UPG-002 risk), O(max_scan) per call, unit-tested, .did regenerated + candid test
+green. The poller passes `start := next_start` until `reached_end`.
+
+### Remaining Phase 2 work (the poll layer + E2E) — next focused chunk
+1. Verify 3pool/SP/AMM `get_*_events(start,length)` paging (forward global-id window
+   vs newest-first/page). DO NOT assume forward-id after the backend surprise. If any
+   is page-based, it needs the same forward-endpoint treatment on that canister.
+2. Wire the inter-canister poll. IMPORTANT: the backend cursor advances to the
+   endpoint's `next_start` (a scan position), NOT `ingest_batch`'s `max(event_id)+1`.
+   Refactor an `apply_events` (no cursor) out of `ingest_batch` so the backend poll
+   reuses it and sets the cursor from `next_start`.
+3. Source-canister-id config (configurable per env; init args or a stable map +
+   admin setter — local ids differ from mainnet), a poll timer, and admin
+   trigger/status endpoints.
+4. PocketIC E2E (the plan's Phase 2 verification): deploy the sources + rumi_points,
+   generate real events, poll, assert auto-registration + cursor advance. Needs both
+   the rumi_points branch and the backend-endpoint branch together.
 
 ## What is real (and tested)
 - Stable-storage layout via `MemoryManager` (mirrors `rumi_protocol_backend::storage`).
