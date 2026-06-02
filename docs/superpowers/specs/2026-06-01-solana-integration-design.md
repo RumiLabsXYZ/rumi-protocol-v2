@@ -210,10 +210,12 @@ Plus: legacy message assembly (header, account keys, durable-nonce as the
 with `sign_with_schnorr`, assemble the wire transaction (signatures + message).
 Build instructions via the lightweight pure-Solana primitive crates
 (`solana-instruction`, `solana-pubkey`, `solana-message`, `spl-token`,
-`spl-associated-token-account`) if they compile to wasm32 and pull no ic-cdk
-(they should not; `sol_rpc_types` depends on them for a canister target). Fall
-back to hand-encoded instructions if not. Verify wasm32 build compatibility in
-M1 (Section 12).
+`spl-associated-token-account`). VERIFIED 2026-06-01 (M1 Task 3 spike):
+`solana-pubkey 4.2` + `solana-instruction 3.4` (and transitive
+`solana-address`/`solana-program-error`/`solana-sanitize`) compile to
+wasm32-unknown-unknown and coexist with candid 0.10 / ic-cdk 0.12 with no
+conflict. `solana-message` / `spl-token` / `spl-associated-token-account` to be
+confirmed at M2 start (very likely fine since the foundation compiles).
 
 ### 6.4 `adapter.rs` (`SolanaAdapter`)
 Implements the six `ChainAdapter` methods, wiring `sol_rpc`, `ted25519`, `tx`:
