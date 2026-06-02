@@ -20,6 +20,7 @@
 pub mod epoch;
 pub mod events;
 pub mod snapshot_seed;
+pub mod source_types;
 pub mod state;
 pub mod types;
 pub mod valuation;
