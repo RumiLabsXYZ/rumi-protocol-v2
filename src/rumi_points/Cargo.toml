@@ -38,3 +38,4 @@ icrc-ledger-types = { git = "https://github.com/Rumi-Protocol/ic", rev = "fc2787
 
 [dev-dependencies]
 candid_parser = "0.1"
+pocket-ic = "6.0.0"

@@ -7225,8 +7225,18 @@ dependencies = [
  "ic-cdk-timers 0.10.0",
  "ic-stable-structures",
  "icrc-ledger-types 0.1.8 (git+https://github.com/Rumi-Protocol/ic?rev=fc278709)",
+ "pocket-ic",
  "serde",
  "sha2",
+]
+
+[[package]]
+name = "rumi_points_e2e_source"
+version = "0.1.0"
+dependencies = [
+ "candid",
+ "ic-cdk 0.12.2",
+ "serde",
 ]
 
 [[package]]

@@ -1690,9 +1690,12 @@ fn get_events_forward_filtered(
     max_scan: u64,
     types: Option<Vec<EventTypeFilter>>,
 ) -> ForwardFilteredEventsResponse {
-    if ic_cdk::api::data_certificate().is_none() {
-        ic_cdk::trap("update call rejected");
-    }
+    // NOTE: intentionally NO `data_certificate()` "update call rejected" guard
+    // here (unlike `get_events_filtered`). This endpoint is designed to be polled
+    // by another canister (rumi_points) via an inter-canister call, which runs in
+    // replicated context where `data_certificate()` is `None`; the guard would
+    // reject every poll. The scan is O(max_scan)-bounded, so replicated execution
+    // is acceptable.
     let types_set: Option<std::collections::HashSet<EventTypeFilter>> = types
         .as_ref()
         .filter(|v| !v.is_empty())
