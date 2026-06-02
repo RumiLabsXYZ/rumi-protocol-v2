@@ -1,24 +1,27 @@
 # rumi_points — status
 
-**Phase 1 (scaffold): COMPLETE.** **Phase 2/3 (ingestion + auto-registration):
-COMPLETE and PocketIC-E2E-validated.** Merged to `main` (PR #217). Not yet deployed
-to mainnet; no mainnet canister id reserved.
+**Phase 1 (scaffold): COMPLETE.** **Phase 2 / 2b / 3 (ingestion + timer +
+auto-registration): COMPLETE and PocketIC-E2E-validated.** Merged to `main`
+(PR #217; Phase 2b in a follow-up). Not yet deployed to mainnet; no mainnet canister
+id reserved.
+
+Ingestion is now FUNCTIONAL: the off-by-default poll timer (Phase 2b) auto-polls the
+sources and auto-registers principals on their first qualifying in-season action.
+Still missing for a USEFUL airdrop: accrual (Phase 5) and 3USD verification (Phase 4).
 
 ## Deploy posture (why nothing is on mainnet yet)
-Deploying `rumi_points` to mainnet now would be premature and gains nothing:
-  - There is no periodic poll timer yet (Phase 2b), so it would not auto-ingest.
-  - There is no accrual yet (Phase 5), so it would register but award no points.
-  - A LATER deploy loses no data: the cursor starts at 0 and the source event logs
-    are unbounded (backend/3pool) or trim far above Season-1 volume (SP/AMM), so the
-    first poll backfills all in-season activity. So there is no "deploy early to
-    capture registrations" urgency.
-Deploy the backend + 3pool endpoint upgrades together with `rumi_points` once the
-timer (and ideally Phase 5 accrual) exist. Backend upgrade = ProtocolArg Upgrade
-variant + description; 3pool = dummy ThreePoolInitArgs; `rumi_points` = reserve a
-fresh mainnet id + add to `mainnet-live`. The pre-deploy hook runs the full suite.
+Not urgent, because a LATER deploy loses no data: the cursor starts at 0 and the
+source event logs are unbounded (backend/3pool) or trim far above Season-1 volume
+(SP/AMM), so the first poll backfills all in-season activity. There is no awarded
+value until Phase 5 accrual, so there is no rush to go live.
+
+When deploying: do the backend + 3pool endpoint upgrades together with `rumi_points`.
+Backend upgrade = ProtocolArg Upgrade variant + description; 3pool = dummy
+ThreePoolInitArgs; `rumi_points` = reserve a fresh mainnet id + add to `mainnet-live`,
+then admin `set_poll_enabled(true)` once sources are confirmed. The pre-deploy hook
+runs the full suite (including the POCKET_IC_BIN E2E).
 
 ## Next phases (fresh focused sessions)
-- Phase 2b: periodic poll timer (`setup_timers`), admin-tunable cadence.
 - Phase 4: 3USD verification (`min(recorded, wallet+SP+AMM)`), needs the
   `repayment_asset` upstream field for the 5x repayment window.
 - Phase 5: epoch driver + multiplier table + two-snapshot `min()` + the
