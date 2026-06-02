@@ -7,60 +7,55 @@ mainnet, no mainnet canister id reserved.
 Spec: `docs/specs/rumi-airdrop-spec-v2.md` (Section 7 data model, Section 11 excluded
 principals). Plan: `docs/plans/2026-05-03-airdrop-implementation-plan.md`.
 
-## Phase 2/3 progress
-Committed and tested (31 unit tests + candid drift test, all green):
-- `events.rs`: normalized `IngestedEvent`/`IngestKind`, the five Section-8
-  qualifying-action triggers, `apply_ingested_event` (auto-registers on first
-  qualifying in-season action; idempotent; excluded rejected), `ingest_batch`
-  (advances the per-source cursor). Pull-ingestion CORE.
-- `state.rs`: per-source cursors (StableBTreeMap, MemoryId 8), transient poll
-  guard, `in_season` gate.
-- `source_types.rs`: per-source candid mirror types + `normalize_*`, validated at
-  the candid layer (subset-decode, SP all-16-variants, migrated-row exclusion).
+## Phase 2/3: ingestion machinery COMPLETE in code (one E2E step remains)
+Two unmerged branches (both off `main`, NOT merged, NOT deployed):
 
-NOT yet built (the remaining Phase 2 machinery), blocked on a design decision:
-- The inter-canister poll loop, the source-canister-id config, the timer, and the
-  admin trigger/status endpoints.
-- The PocketIC end-to-end ingestion test (the plan's Phase 2 verification).
+**`feat/airdrop-points-canister`** (the points canister): normalized event model +
+the five Section-8 qualifying triggers + `apply_ingested_event`/`apply_events`
+(auto-register on first qualifying in-season action; idempotent; excluded rejected);
+per-source cursors (MemoryId 8) + poll guard + `in_season`; per-source candid mirror
+types + `normalize_*` (validated at the candid layer: subset decode, SP all-16
+variants, migrated-row exclusion, forward-response round-trips); the inter-canister
+`poll.rs` (backend/3pool advance to the endpoint's `next_start`, SP/AMM advance by
+count via `ingest_batch`; single-poll guard; per-source failures logged/skipped, no
+trap); source-canister config (MemoryId 9, mainnet-seeded, admin `set_source_canister`);
+admin `trigger_poll` + `get_ingest_status`. 33 unit tests + candid drift, all green.
 
-### Backend event-query pagination: RESOLVED (Rob chose the backend endpoint)
-`get_events_filtered` paginates newest-first by page number (no stable cursor) and
-`get_events` returns all ~95 variants (a subset mirror cannot decode unknown-variant
-values; confirmed by canary). Rob chose to add a clean forward endpoint.
+**`feat/source-forward-event-endpoints`** (source-side forward read endpoints):
+- backend `get_events_forward_filtered(start, max_scan, opt vec EventTypeFilter)`
+  (commit `51aa812`).
+- 3pool `get_liquidity_events_v2_forward(start, max_scan)` (commit `d35ed70`).
+Both read-only additive (no Event/state change, no UPG-002 risk), O(max_scan),
+unit-tested, .did + candid checks green. SP/AMM keep their existing oldest-first
+index APIs for Season 1 (their logs trim at 10k/50k, far above current volume, so
+`id==index` holds and advance-by-count is gap-free; documented; revisit at scale).
 
-DONE on branch `feat/backend-forward-filtered-events` (commit `51aa812`, NOT merged,
-local-only): `rumi_protocol_backend.get_events_forward_filtered(start, max_scan,
-opt vec EventTypeFilter) -> record { events: vec record { nat64; Event };
-next_start; reached_end }`. Read-only additive query (no Event/state change, no
-UPG-002 risk), O(max_scan) per call, unit-tested, .did regenerated + candid test
-green. The poller passes `start := next_start` until `reached_end`.
+Verified on a local replica: source config seeded; `trigger_poll` handles
+unreachable sources gracefully (Ok 0, cursors unchanged) and the poll guard releases
+(a second poll is not blocked); source config (MemoryId 9), cursors, registered
+principals, and excluded set all survive a real upgrade.
 
-### Remaining Phase 2 work (the poll layer + E2E) — next focused chunk
-1. Verify 3pool/SP/AMM `get_*_events(start,length)` paging (forward global-id window
-   vs newest-first/page). DO NOT assume forward-id after the backend surprise. If any
-   is page-based, it needs the same forward-endpoint treatment on that canister.
-2. Wire the inter-canister poll. IMPORTANT: the backend cursor advances to the
-   endpoint's `next_start` (a scan position), NOT `ingest_batch`'s `max(event_id)+1`.
-   Refactor an `apply_events` (no cursor) out of `ingest_batch` so the backend poll
-   reuses it and sets the cursor from `next_start`.
-3. Source-canister-id config (configurable per env; init args or a stable map +
-   admin setter — local ids differ from mainnet), a poll timer, and admin
-   trigger/status endpoints.
-4. PocketIC E2E (the plan's Phase 2 verification): deploy the sources + rumi_points,
-   generate real events, poll, assert auto-registration + cursor advance. Needs both
-   the rumi_points branch and the backend-endpoint branch together.
+### The ONLY remaining Phase 2 step: PocketIC E2E (live validation)
+Deploy the sources (backend+3pool with their forward endpoints, SP, AMM, ledgers) +
+rumi_points, generate real events (mint a vault, add 3pool liquidity, SP deposit),
+`trigger_poll`, assert auto-registration + correct cursor advance. This needs BOTH
+branches' code together (the project's PocketIC tests `include_bytes!` prebuilt
+wasms), so it requires a branch-combination decision (combine into one integration
+PR, or merge both to main first). The inter-canister poll is the one piece unit
+tests cannot cover; the E2E is its validation.
 
 ## What is real (and tested)
 - Stable-storage layout via `MemoryManager` (mirrors `rumi_protocol_backend::storage`).
 - Data model (`types.rs`), configurable excluded-principals set + admin setters,
   admin-gated `register_test_principal`, leaderboard, epoch-history reads.
 - Versioned-snapshot upgrade-safety pattern from day one (`Stored*` enums; recipe in
-  the `state.rs` module doc). 12 unit tests + a candid drift test, all green.
+  the `state.rs` module doc). 33 unit tests + a candid drift test, all green.
 - Verified on a local replica: every endpoint returns default state; a register +
   exclude survived a real upgrade (module hash changed, state persisted).
+- `events.rs` / `source_types.rs` / `poll.rs` are the real Phase 2/3 ingestion (see
+  the "ingestion machinery" section above), no longer skeleton.
 
 ## What is skeleton (later phases; signatures + doc comments only)
-- `events.rs`  — Phase 2 pull-based ingestion.
 - `epoch.rs`   — Phase 5 weekly two-snapshot `min()` accrual.
 - `valuation.rs` — Phase 4/5 asset valuation + 3USD verification.
 - `snapshot_seed.rs` — Phase 5 commit-reveal algorithm (its STATE types are real
