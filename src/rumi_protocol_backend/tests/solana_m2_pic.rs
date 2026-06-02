@@ -220,6 +220,27 @@ fn get_vault(pic: &PocketIc, backend: Principal, vault_id: u64) -> Option<ChainV
     }
 }
 
+/// Whether the given chain's settlement queue still holds a NON-terminal op
+/// (`Queued`/`Inflight`). False once the worker has drained the queue to a
+/// terminal state. Ungated read-only query (mirrors `get_chain_vault`'s call
+/// shape: a query taking a single argument, here the `nat32` chain id).
+fn chain_has_active_settlement_op(pic: &PocketIc, backend: Principal, chain_id: u32) -> bool {
+    let reply = pic
+        .query_call(
+            backend,
+            Principal::anonymous(),
+            "chain_has_active_settlement_op",
+            Encode!(&ChainId(chain_id)).unwrap(),
+        )
+        .expect("chain_has_active_settlement_op query");
+    match reply {
+        WasmResult::Reply(b) => {
+            Decode!(&b, bool).expect("decode chain_has_active_settlement_op")
+        }
+        WasmResult::Reject(msg) => panic!("chain_has_active_settlement_op rejected: {msg}"),
+    }
+}
+
 /// The Solana chain's audited per-chain supply (e8s), as exposed by
 /// `get_supply_audit`. This IS `chain_supplies[501]`. Returns 0 if no entry.
 fn chain_supply_501(pic: &PocketIc, backend: Principal) -> candid::Nat {
@@ -603,13 +624,42 @@ fn solana_m2_end_to_end_open_deposit_mint_withdraw() {
         candid::Nat::from(debt_e8s),
         "after withdraw enqueue: chain_supplies[501] unchanged at 100e8"
     );
+    // The withdrawal op is enqueued `Queued` (a NON-terminal status) and
+    // `withdraw_solana_collateral` is a synchronous update, so no settlement tick
+    // has run yet: there IS an active op right now. This is the pre-condition the
+    // post-settle drained assertion contrasts against.
+    assert!(
+        chain_has_active_settlement_op(&pic, backend, SOLANA_CHAIN_ID),
+        "after withdraw enqueue: settlement queue has the freshly-enqueued (Queued) withdrawal op"
+    );
 
     // ── Step 2 (withdraw settle): settlement signs + sends + confirms the SOL
-    //    transfer. The withdrawal op completes (Succeeded). A partial withdrawal
-    //    leaves the vault Open. We assert the op drained from the settlement queue
-    //    (no Mint/Withdrawal left pending) by confirming the vault is stable and
-    //    the supply invariant still holds.
+    //    transfer. The withdrawal op confirms (Succeeded) and is pruned. A partial
+    //    withdrawal leaves the vault Open.
+    //
+    //    The withdrawal confirmation is now ASSERTED, not merely logged. Two
+    //    assertions together prove the op confirmed-and-drained (rather than being
+    //    stuck Inflight or reverting):
+    //      (1) `chain_has_active_settlement_op(501) == false`: the queue holds no
+    //          NON-terminal op, so the withdrawal drained to a TERMINAL state
+    //          (Succeeded/Failed) - it is NOT stuck Queued/Inflight.
+    //      (2) collateral is still 0.7 SOL (NOT restored to 1.0 SOL): a REVERTED
+    //          withdrawal adds the reserved lamports back (settlement.rs
+    //          `confirm_reverted`), so unchanged collateral proves it did NOT
+    //          revert.
+    //    Drained-to-terminal AND not-reverted ⇒ the withdrawal SUCCEEDED: it
+    //    confirmed, was marked Succeeded, and was pruned, leaving no active op and
+    //    the collateral correctly reduced. (Each of vault Open / collateral 0.7
+    //    SOL / debt 100e8 is INVARIANT across the settle window for a partial
+    //    withdrawal, so on their own they would also hold for a stuck-Inflight op;
+    //    assertion (1) is what closes that gap.)
     advance_and_tick(&pic, 4);
+
+    // (1) The settlement worker drained the withdrawal op to a terminal state.
+    assert!(
+        !chain_has_active_settlement_op(&pic, backend, SOLANA_CHAIN_ID),
+        "after withdraw settle: settlement queue drained (no Queued/Inflight op) => withdrawal reached a terminal state, not stuck Inflight"
+    );
 
     let v = get_vault(&pic, backend, vault_id).expect("vault after withdraw confirm");
     assert_eq!(
@@ -617,10 +667,14 @@ fn solana_m2_end_to_end_open_deposit_mint_withdraw() {
         ChainVaultStatus::Open,
         "after partial-withdraw settle: vault remains Open"
     );
+    // (2) Collateral stayed at 0.7 SOL. A reverted withdrawal would have restored
+    // it to 1.0 SOL (confirm_reverted re-adds the reserved lamports), so this
+    // proves the withdrawal did NOT revert. With (1) above (drained to terminal),
+    // together they prove the withdrawal CONFIRMED (Succeeded), not reverted.
     assert_eq!(
         v.collateral_amount_e18,
         candid::Nat::from(collateral_lamports - withdraw_lamports),
-        "after withdraw settle: collateral remains 0.7 SOL (transfer paid out from hot wallet)"
+        "after withdraw settle: collateral remains 0.7 SOL (confirmed payout from hot wallet, NOT reverted back to 1.0 SOL)"
     );
     assert_eq!(
         v.debt_e8s,

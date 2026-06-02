@@ -1298,6 +1298,26 @@ fn list_chain_vaults(
     })
 }
 
+/// True iff `chain`'s settlement queue holds any NON-terminal op (`Queued` or
+/// `Inflight`), false once the worker has drained it (no op, or only terminal
+/// `Succeeded`/`Failed` ops awaiting prune). Lets a caller observe whether a
+/// chain's settlement worker has finished its outbound work without inspecting
+/// individual ops. Returns false for an unregistered chain (no queue). Public
+/// read-only query; no gate (mirrors `get_chain_vault`).
+#[candid_method(query)]
+#[query]
+fn chain_has_active_settlement_op(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> bool {
+    read_state(|s| {
+        s.multi_chain
+            .settlement_queues
+            .get(&chain)
+            .map(|q| q.has_active_op())
+            .unwrap_or(false)
+    })
+}
+
 /// Record the deployed `IcUSD.sol` (or equivalent) contract address for a chain.
 /// Developer-gated.
 #[candid_method(update)]
