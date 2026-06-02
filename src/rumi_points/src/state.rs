@@ -66,6 +66,9 @@ const REVEALED_SEEDS_DATA_MEM_ID: MemoryId = MemoryId::new(6);
 const STATE_BLOB_MEM_ID: MemoryId = MemoryId::new(7);
 // Phase 2: per-source ingestion cursors (source tag -> last-processed event id).
 const CURSORS_MEM_ID: MemoryId = MemoryId::new(8);
+// Phase 2: per-source canister principal (source tag -> canister id). Configurable
+// per environment (mainnet defaults seeded at init; admin overrides for local).
+const SOURCE_CANISTERS_MEM_ID: MemoryId = MemoryId::new(9);
 
 const WASM_PAGE_SIZE: u64 = 65_536; // 64 KiB
 
@@ -235,6 +238,12 @@ thread_local! {
     /// double-ingest from the same cursor. NOT persisted (a fresh canister / a
     /// post-upgrade heap always starts with no poll in flight).
     static POLL_IN_PROGRESS: RefCell<bool> = RefCell::new(false);
+
+    /// Phase 2: per-source canister principal (source tag -> canister id). Seeded
+    /// with mainnet defaults at init; the admin overrides per environment (e.g.
+    /// local replica ids) via `set_source_canister`. Persists across upgrades.
+    static SOURCE_CANISTERS: RefCell<StableBTreeMap<u8, StorablePrincipal, VMem>> =
+        MEMORY_MANAGER.with(|m| RefCell::new(StableBTreeMap::init(m.borrow().get(SOURCE_CANISTERS_MEM_ID))));
 }
 
 // ── Excluded-principals seed (spec Section 11) ──────────────────────────────
@@ -286,6 +295,11 @@ fn require_admin(caller: Principal) -> Result<(), PointsError> {
     })
 }
 
+/// Public admin predicate, for endpoints that gate on a bool.
+pub fn is_admin(caller: Principal) -> bool {
+    with_state(|s| s.admin == caller)
+}
+
 // ── Phase 1 logic (TDD targets; implemented after the failing tests) ────────
 
 /// Build the singleton `State` from init args (defaulting admin to `caller`,
@@ -312,6 +326,19 @@ pub fn init_state(args: Option<InitArgs>, caller: Principal) {
         snapshot_seed,
     };
     STATE.with(|cell| *cell.borrow_mut() = Some(state));
+
+    // Seed the source-canister ids with mainnet defaults on a fresh install. The
+    // admin overrides per environment (e.g. local replica ids) via
+    // `set_source_canister`. Only seeds an empty map so it is a no-op if somehow
+    // re-entered with config already present.
+    SOURCE_CANISTERS.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.is_empty() {
+            for (tag, p) in source_canister_seed() {
+                m.insert(tag, StorablePrincipal(p));
+            }
+        }
+    });
 }
 
 /// Is this principal in the configurable excluded set? Checked at the
@@ -602,6 +629,44 @@ pub fn set_cursor(source_tag: u8, next_start_id: u64) {
     CURSORS.with(|c| {
         c.borrow_mut().insert(source_tag, next_start_id);
     });
+}
+
+/// Mainnet source-canister ids seeded at init (source tag -> canister id):
+/// 0 = backend, 1 = 3pool, 2 = stability pool, 3 = AMM (see `events::SourceId`).
+/// Confirmed against canister_ids.json (2026-06-01).
+pub fn source_canister_seed() -> Vec<(u8, Principal)> {
+    [
+        (0u8, "tfesu-vyaaa-aaaap-qrd7a-cai"), // rumi_protocol_backend
+        (1u8, "fohh4-yyaaa-aaaap-qtkpa-cai"), // rumi_3pool
+        (2u8, "tmhzi-dqaaa-aaaap-qrd6q-cai"), // rumi_stability_pool
+        (3u8, "ijlzs-2yaaa-aaaap-quaaq-cai"), // rumi_amm
+    ]
+    .iter()
+    .map(|(tag, s)| (*tag, Principal::from_text(s).expect("invalid source principal literal")))
+    .collect()
+}
+
+/// The configured canister id for a source tag, or `None` if unset.
+pub fn get_source_canister(source_tag: u8) -> Option<Principal> {
+    SOURCE_CANISTERS.with(|m| m.borrow().get(&source_tag).map(|p| p.0))
+}
+
+/// Admin-set a source canister id (e.g. point at local replica ids).
+pub fn set_source_canister(
+    caller: Principal,
+    source_tag: u8,
+    canister: Principal,
+) -> Result<(), PointsError> {
+    require_admin(caller)?;
+    SOURCE_CANISTERS.with(|m| {
+        m.borrow_mut().insert(source_tag, StorablePrincipal(canister));
+    });
+    Ok(())
+}
+
+/// All configured source canisters as `(tag, id)` pairs, for the status query.
+pub fn source_canisters() -> Vec<(u8, Principal)> {
+    SOURCE_CANISTERS.with(|m| m.borrow().iter().map(|(tag, p)| (tag, p.0)).collect())
 }
 
 /// Acquire the single-poll guard. Returns `true` if acquired (no poll was in

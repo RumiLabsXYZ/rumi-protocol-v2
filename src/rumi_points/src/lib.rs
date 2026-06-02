@@ -19,6 +19,7 @@
 
 pub mod epoch;
 pub mod events;
+pub mod poll;
 pub mod snapshot_seed;
 pub mod source_types;
 pub mod state;

@@ -90,6 +90,19 @@ type InitArgs = record {
 
 type Result = variant { Ok; Err : PointsError };
 
+type Result_1 = variant { Ok : nat64; Err : PointsError };
+
+type SourceStatus = record {
+  tag : nat8;
+  canister : principal;
+  cursor : nat64;
+};
+
+type IngestStatus = record {
+  sources : vec SourceStatus;
+  registered_count : nat64;
+};
+
 service : (opt InitArgs) -> {
   // Reads
   get_principal_state : (principal) -> (opt PrincipalState) query;
@@ -106,4 +119,9 @@ service : (opt InitArgs) -> {
   add_excluded_principal : (principal) -> (Result);
   remove_excluded_principal : (principal) -> (Result);
   set_excluded_principals : (vec principal) -> (Result);
+
+  // Phase 2: ingestion control
+  set_source_canister : (nat8, principal) -> (Result);
+  trigger_poll : () -> (Result_1);
+  get_ingest_status : () -> (IngestStatus) query;
 };

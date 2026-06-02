@@ -216,6 +216,23 @@ pub struct PointsConfig {
     pub snapshot_seed_committed: bool,
 }
 
+/// One source's ingestion state (Phase 2 ops observability).
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct SourceStatus {
+    /// Source tag: 0 = backend, 1 = 3pool, 2 = stability pool, 3 = AMM.
+    pub tag: u8,
+    pub canister: Principal,
+    /// Next `start` to poll from (the forward cursor).
+    pub cursor: u64,
+}
+
+/// Pull-ingestion status across all configured sources.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct IngestStatus {
+    pub sources: Vec<SourceStatus>,
+    pub registered_count: u64,
+}
+
 /// Error surface for the admin / registration update endpoints.
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum PointsError {

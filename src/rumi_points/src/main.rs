@@ -6,11 +6,11 @@
 use candid::Principal;
 use ic_canister_log::{declare_log_buffer, log};
 
-use rumi_points::state;
 use rumi_points::types::{
-    EpochSummary, InitArgs, LeaderboardEntry, PointsConfig, PointsError, PrincipalState,
-    RegistrationInfo,
+    EpochSummary, IngestStatus, InitArgs, LeaderboardEntry, PointsConfig, PointsError,
+    PrincipalState, RegistrationInfo, SourceStatus,
 };
+use rumi_points::{poll, state};
 
 // Canister debug-log buffer (retrievable in later phases; for now feeds the
 // replica debug log on lifecycle events).
@@ -116,6 +116,42 @@ fn remove_excluded_principal(principal: Principal) -> Result<(), PointsError> {
 #[ic_cdk::update]
 fn set_excluded_principals(principals: Vec<Principal>) -> Result<(), PointsError> {
     state::set_excluded(ic_cdk::caller(), principals)
+}
+
+// ── Phase 2: ingestion control ──────────────────────────────────────────────
+
+/// Admin-set a source canister id (point the poller at the right canister per
+/// environment, e.g. local replica ids). Tag: 0 = backend, 1 = 3pool, 2 = SP,
+/// 3 = AMM.
+#[ic_cdk::update]
+fn set_source_canister(source_tag: u8, canister: Principal) -> Result<(), PointsError> {
+    state::set_source_canister(ic_cdk::caller(), source_tag, canister)
+}
+
+/// Admin-only manual poll of all configured sources. Returns the number of events
+/// applied. (No periodic timer in Phase 2; the production cadence is a follow-up.)
+#[ic_cdk::update]
+async fn trigger_poll() -> Result<u64, PointsError> {
+    if !state::is_admin(ic_cdk::caller()) {
+        return Err(PointsError::Unauthorized);
+    }
+    Ok(poll::poll_all().await as u64)
+}
+
+#[ic_cdk::query]
+fn get_ingest_status() -> IngestStatus {
+    let sources = state::source_canisters()
+        .into_iter()
+        .map(|(tag, canister)| SourceStatus {
+            tag,
+            canister,
+            cursor: state::get_cursor(tag),
+        })
+        .collect();
+    IngestStatus {
+        sources,
+        registered_count: state::registered_count(),
+    }
 }
 
 ic_cdk::export_candid!();
