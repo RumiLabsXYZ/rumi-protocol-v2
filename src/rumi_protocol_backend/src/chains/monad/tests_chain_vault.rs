@@ -1,6 +1,25 @@
-use super::chain_vault::{ChainVaultStatus, ChainVaultV1};
+use super::chain_vault::{collateral_ratio_e4, ChainVaultStatus, ChainVaultV1};
 use crate::chains::config::ChainId;
 use candid::{Decode, Encode};
+
+#[test]
+fn collateral_ratio_18_decimals_125_percent() {
+    // 5 MON (5e18 wei) at $2.00, 8 icUSD debt -> 5*2/8 = 1.25 = 12500 e4.
+    let cr = collateral_ratio_e4(5_000_000_000_000_000_000, 18, 2_0000_0000, 8_0000_0000);
+    assert_eq!(cr, 12_500);
+}
+
+#[test]
+fn collateral_ratio_9_decimals_solana_150_percent() {
+    // 10 SOL (10e9 lamports) at $150.00, 1000 icUSD debt -> 10*150/1000 = 1.5 = 15000 e4.
+    let cr = collateral_ratio_e4(10_000_000_000, 9, 150_0000_0000, 1000_0000_0000);
+    assert_eq!(cr, 15_000);
+}
+
+#[test]
+fn collateral_ratio_zero_debt_is_unbounded() {
+    assert_eq!(collateral_ratio_e4(1, 9, 1, 0), u64::MAX);
+}
 
 #[test]
 fn chain_vault_round_trips_via_candid() {

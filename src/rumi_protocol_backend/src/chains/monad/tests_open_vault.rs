@@ -58,14 +58,14 @@ fn owner() -> Principal {
 fn cr_computed_from_collateral_price_and_debt() {
     // 5 MON e18 at $2.00 e8, debt $4.00 e8s -> $10 collateral / $4 debt = 250.00% -> 25000.
     assert_eq!(
-        collateral_ratio_e4(5 * ONE_MON_E18, PRICE_2_USD_E8, 4_00000000),
+        collateral_ratio_e4(5 * ONE_MON_E18, 18, PRICE_2_USD_E8, 4_00000000),
         25000
     );
 }
 
 #[test]
 fn cr_is_max_when_debt_zero() {
-    assert_eq!(collateral_ratio_e4(5 * ONE_MON_E18, PRICE_2_USD_E8, 0), u64::MAX);
+    assert_eq!(collateral_ratio_e4(5 * ONE_MON_E18, 18, PRICE_2_USD_E8, 0), u64::MAX);
 }
 
 // 1b. Degenerate open: zero debt is rejected (would enqueue a wasted 0-mint).

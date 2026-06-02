@@ -21,9 +21,6 @@ use serde::Serialize;
 /// ICP-native CDP parameter models).
 pub const MONAD_MIN_CR_E4: u64 = 13_000;
 
-/// 1e18 — the wei scale of EVM-native (MON) collateral amounts.
-const E18: u128 = 1_000_000_000_000_000_000;
-
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum ChainVaultStatus {
     /// Vault opened; awaiting the on-chain collateral deposit. No mint enqueued
@@ -111,24 +108,32 @@ pub enum WithdrawError {
 
 /// Compute the collateral ratio (e4: 25000 == 250.00%) for a foreign-chain vault.
 ///
-/// `collateral_e18` is the native-gas-asset amount in wei (1e18 scale).
+/// `collateral_native` is the collateral amount in the chain's NATIVE base units
+/// (wei for an 18-decimal EVM gas asset, lamports for 9-decimal SOL).
+/// `native_decimals` is that asset's decimal count (18 for MON/ETH, 9 for SOL);
+/// the amount is divided by `10^native_decimals` to recover a whole-unit value.
 /// `price_e8` is the asset's USD price as e8 (e.g. $2.00 == 2_0000_0000).
 /// `debt_e8s` is the icUSD debt as e8s.
 ///
 /// Returns `u64::MAX` when `debt_e8s == 0` (an unbounded ratio; a debt-free
 /// vault is trivially over-collateralized). All arithmetic saturates so an
 /// adversarial (or merely huge) input can never panic.
-pub fn collateral_ratio_e4(collateral_e18: u128, price_e8: u64, debt_e8s: u128) -> u64 {
+pub fn collateral_ratio_e4(
+    collateral_native: u128,
+    native_decimals: u8,
+    price_e8: u64,
+    debt_e8s: u128,
+) -> u64 {
     if debt_e8s == 0 {
         return u64::MAX;
     }
-    // collateral_usd_e8 = collateral_e18 * price_e8 / 1e18. Both operands are
-    // already in their respective fixed-point scales; dividing by 1e18 drops the
-    // wei scale and leaves a USD value in e8. Saturating so a colossal collateral
-    // input cannot overflow.
-    let collateral_usd_e8 = collateral_e18
+    // collateral_usd_e8 = collateral_native * price_e8 / 10^native_decimals.
+    // Dividing by the native scale drops the base-unit scale and leaves a USD
+    // value in e8. Saturating so a colossal collateral input cannot overflow.
+    let native_scale = 10u128.saturating_pow(native_decimals as u32);
+    let collateral_usd_e8 = collateral_native
         .saturating_mul(price_e8 as u128)
-        / E18;
+        / native_scale;
     // cr_e4 = collateral_usd_e8 / debt_e8s * 10_000. Multiply first (saturating)
     // then divide so we keep e4 precision; both are e8 so the e8 scales cancel.
     let cr = collateral_usd_e8.saturating_mul(10_000) / debt_e8s;
@@ -190,8 +195,15 @@ pub fn open_chain_vault_in_state(
         .manual_prices
         .get(&(chain, "MON".to_string()))
         .ok_or(OpenVaultError::NoPrice)?;
+    // Native-asset decimals for the chain (18 for MON; falls back to 18 if the
+    // config is somehow absent, though `chain` was verified registered above).
+    let native_decimals = state
+        .chain_configs
+        .get(&chain)
+        .map(|c| c.chain_native_decimals)
+        .unwrap_or(18);
 
-    let cr_e4 = collateral_ratio_e4(collateral_e18, price_e8, debt_e8s);
+    let cr_e4 = collateral_ratio_e4(collateral_e18, native_decimals, price_e8, debt_e8s);
     if cr_e4 < min_cr_e4 {
         return Err(OpenVaultError::BelowMinCr { cr_e4, min_e4: min_cr_e4 });
     }
@@ -369,10 +381,15 @@ pub fn withdraw_collateral_in_state(
         .manual_prices
         .get(&(chain, "MON".to_string()))
         .ok_or(WithdrawError::NoPrice)?;
+    let native_decimals = state
+        .chain_configs
+        .get(&chain)
+        .map(|c| c.chain_native_decimals)
+        .unwrap_or(18);
 
     // A debt-free vault is trivially over-collateralized; skip the CR check.
     if debt_e8s > 0 {
-        let cr_e4 = collateral_ratio_e4(remaining, price_e8, debt_e8s);
+        let cr_e4 = collateral_ratio_e4(remaining, native_decimals, price_e8, debt_e8s);
         if cr_e4 < min_cr_e4 {
             return Err(WithdrawError::BelowMinCr { cr_e4, min_e4: min_cr_e4 });
         }
