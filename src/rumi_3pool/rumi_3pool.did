@@ -120,6 +120,12 @@ type LiquidityEventV2 = record {
   migrated : bool;
 };
 
+type ForwardLiquidityEventsV2 = record {
+  events : vec record { nat64; LiquidityEventV2 };
+  next_start : nat64;
+  reached_end : bool;
+};
+
 type QuoteSwapResult = record {
   token_in : nat8;
   token_out : nat8;
@@ -507,6 +513,7 @@ service : (ThreePoolInitArgs) -> {
   get_swap_events_v2 : (nat64, nat64) -> (vec SwapEventV2) query;
   get_swap_fees_over_window : (nat32) -> (nat) query;
   get_liquidity_events_v2 : (nat64, nat64) -> (vec LiquidityEventV2) query;
+  get_liquidity_events_v2_forward : (nat64, nat64) -> (ForwardLiquidityEventsV2) query;
   get_liquidity_event_count_v2 : () -> (nat64) query;
 
   // Explorer endpoints (E1-E14)
