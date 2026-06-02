@@ -88,3 +88,28 @@ fn derivation_paths_are_distinct_and_structured() {
     assert_ne!(settle, custody);
     assert_eq!(settle[0], 501u32.to_le_bytes().to_vec());
 }
+
+#[test]
+fn nonce_path_is_distinct_from_settlement_and_custody() {
+    // The nonce account is a second threshold-Ed25519 key under the same chain,
+    // so the canister controls it AND is its authority (no PDA). It must derive a
+    // DIFFERENT key than the settlement and custody paths, else they would collide
+    // on a single key (the settlement key would also be the nonce account).
+    let chain = crate::chains::config::ChainId(501);
+    let nonce = nonce_derivation_path(chain);
+    let settle = settlement_derivation_path(chain);
+    let custody = custody_derivation_path(chain, Principal::anonymous(), 0);
+
+    assert_ne!(nonce, settle, "nonce path must differ from settlement");
+    assert_ne!(nonce, custody, "nonce path must differ from custody");
+
+    // Structure: [chain_id LE, b"nonce"].
+    assert_eq!(nonce.len(), 2);
+    assert_eq!(nonce[0], 501u32.to_le_bytes().to_vec(), "first component is the chain id LE");
+    assert_eq!(nonce[1], b"nonce".to_vec(), "second component is the b\"nonce\" tag");
+
+    // Same chain-id prefix as settlement, but a different second component, which
+    // is exactly what makes the derived key distinct.
+    assert_eq!(nonce[0], settle[0], "both share the chain-id prefix");
+    assert_ne!(nonce[1], settle[1], "the tag distinguishes nonce from settlement");
+}

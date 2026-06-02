@@ -33,6 +33,27 @@ const TOKEN_PROGRAM_B58: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 /// Associated Token Account program id (base58).
 const ATA_PROGRAM_B58: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
 
+/// RecentBlockhashes sysvar id (base58). Referenced (read-only) by both the
+/// AdvanceNonceAccount and InitializeNonceAccount System instructions.
+const RECENT_BLOCKHASHES_SYSVAR_B58: &str = "SysvarRecentB1ockHashes11111111111111111111";
+/// Rent sysvar id (base58). Referenced (read-only) by InitializeNonceAccount.
+const RENT_SYSVAR_B58: &str = "SysvarRent111111111111111111111111111111111";
+
+/// Serialized size of a System nonce account, the `space` allocated when creating
+/// one (matches `solana_system_interface`'s `NONCE_STATE_SIZE`, verified against
+/// the crate source).
+pub const NONCE_STATE_SIZE: u64 = 80;
+
+/// Bincode enum discriminants for the System nonce instructions. Solana
+/// serializes the `SystemInstruction` enum tag as a u32 little-endian (confirmed
+/// via `Instruction::new_with_bincode` -> `bincode::serialize`, whose default
+/// config uses a 4-byte LE variant index for ALL variants). The enum order is
+/// CreateAccount=0, Assign=1, Transfer=2, CreateAccountWithSeed=3,
+/// AdvanceNonceAccount=4, WithdrawNonceAccount=5, InitializeNonceAccount=6, ...
+const SYSTEM_INSTRUCTION_CREATE_ACCOUNT_TAG: u32 = 0;
+const SYSTEM_INSTRUCTION_ADVANCE_NONCE_TAG: u32 = 4;
+const SYSTEM_INSTRUCTION_INITIALIZE_NONCE_TAG: u32 = 6;
+
 /// SPL Token `MintTo` instruction discriminant. SPL Token tags its instruction
 /// enum with a single leading byte; `MintTo` is variant 7.
 const SPL_TOKEN_MINT_TO_TAG: u8 = 7;
@@ -72,6 +93,16 @@ pub fn ata_program_id() -> Pubkey {
 /// The System Program id as a `Pubkey` (32 zero bytes).
 pub fn system_program_id() -> Pubkey {
     Pubkey::new_from_array(SYSTEM_PROGRAM_ID)
+}
+
+/// The RecentBlockhashes sysvar id as a `Pubkey`.
+pub fn recent_blockhashes_sysvar_id() -> Pubkey {
+    pubkey_from_base58(RECENT_BLOCKHASHES_SYSVAR_B58)
+}
+
+/// The Rent sysvar id as a `Pubkey`.
+pub fn rent_sysvar_id() -> Pubkey {
+    pubkey_from_base58(RENT_SYSVAR_B58)
 }
 
 /// Derive the Associated Token Account address for `(owner, mint)` under the
@@ -164,6 +195,25 @@ pub fn assemble_wire_tx(signature: [u8; 64], message_bytes: &[u8]) -> Vec<u8> {
     // Exactly one signature; count fits in 7 bits so this is the single byte 0x01.
     out.extend_from_slice(&encode_compact_u16(1));
     out.extend_from_slice(&signature);
+    out.extend_from_slice(message_bytes);
+    out
+}
+
+/// Assemble a legacy wire transaction with one or more signatures:
+/// `[compact-u16 sig count][sig0][sig1]...[message]`. The single-signature case
+/// is byte-identical to `assemble_wire_tx`.
+///
+/// The signatures MUST be supplied in the SAME ORDER as the message's required
+/// signers, i.e. `account_keys[0..num_required_signatures]` (the on-chain runtime
+/// matches signature `i` against signer key `i`). Callers that sign with threshold
+/// Ed25519 must therefore order the `sigs` to match the compiled message's signer
+/// keys; see `bootstrap_nonce_account` for the create-nonce two-signer ordering.
+pub fn assemble_wire_tx_multi(sigs: &[[u8; 64]], message_bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(3 + sigs.len() * 64 + message_bytes.len());
+    out.extend_from_slice(&encode_compact_u16(sigs.len() as u16));
+    for sig in sigs {
+        out.extend_from_slice(sig);
+    }
     out.extend_from_slice(message_bytes);
     out
 }
@@ -299,6 +349,151 @@ pub fn build_mint_message(
     Message::new_with_blockhash(&[create_ata, mint_to], Some(authority), &recent_blockhash)
 }
 
+// ─── Durable nonce: System instruction builders (Task 3) ─────────────────────
+
+/// Hand-encode a `SystemProgram::AdvanceNonceAccount` instruction.
+///
+/// Consumes the stored durable nonce and replaces it with its successor. Must be
+/// the FIRST instruction of any nonce-backed transaction (the runtime recognizes
+/// a durable-nonce tx by this leading instruction). Matches the gated
+/// `solana_system_interface::instruction::advance_nonce_account`.
+///
+/// Layout (AdvanceNonceAccount is fieldless, so the data is just the u32-LE
+/// discriminant 4):
+///   accounts: [ (nonce, writable, non-signer),
+///               (RecentBlockhashes sysvar, read-only, non-signer),
+///               (authority, read-only, signer) ]
+///   data:     [ tag: u32 LE = 4 ]   (4 bytes)
+pub fn advance_nonce_instruction(nonce: &Pubkey, authority: &Pubkey) -> Instruction {
+    Instruction {
+        program_id: system_program_id(),
+        accounts: vec![
+            AccountMeta::new(*nonce, false),
+            AccountMeta::new_readonly(recent_blockhashes_sysvar_id(), false),
+            AccountMeta::new_readonly(*authority, true),
+        ],
+        data: SYSTEM_INSTRUCTION_ADVANCE_NONCE_TAG.to_le_bytes().to_vec(),
+    }
+}
+
+/// Hand-encode a `SystemProgram::CreateAccount` instruction (System variant 0).
+///
+/// Matches the gated `solana_system_interface::instruction::create_account`: both
+/// `from` and the `new` account are writable signers (the new account must sign
+/// because its key authorizes its own creation).
+///
+/// Layout:
+///   accounts: [ (from, writable, signer), (new, writable, signer) ]
+///   data:     [ tag: u32 LE = 0 ][ lamports u64 LE ][ space u64 LE ][ owner 32 ] (52 bytes)
+pub fn create_account_instruction(
+    from: &Pubkey,
+    new: &Pubkey,
+    lamports: u64,
+    space: u64,
+    owner: &Pubkey,
+) -> Instruction {
+    let mut data = Vec::with_capacity(52);
+    data.extend_from_slice(&SYSTEM_INSTRUCTION_CREATE_ACCOUNT_TAG.to_le_bytes());
+    data.extend_from_slice(&lamports.to_le_bytes());
+    data.extend_from_slice(&space.to_le_bytes());
+    data.extend_from_slice(owner.as_ref());
+    Instruction {
+        program_id: system_program_id(),
+        accounts: vec![
+            AccountMeta::new(*from, true),
+            AccountMeta::new(*new, true),
+        ],
+        data,
+    }
+}
+
+/// Hand-encode a `SystemProgram::InitializeNonceAccount` instruction (variant 6).
+///
+/// Drives an Uninitialized nonce account to Initialized, setting its authority.
+/// Matches the gated `solana_system_interface::instruction`'s use inside
+/// `create_nonce_account`. No signer is required (the authority is a data field,
+/// not a signer), enabling derived nonce account addresses.
+///
+/// Layout:
+///   accounts: [ (nonce, writable, non-signer),
+///               (RecentBlockhashes sysvar, read-only), (Rent sysvar, read-only) ]
+///   data:     [ tag: u32 LE = 6 ][ authority 32 bytes ]   (36 bytes)
+pub fn initialize_nonce_instruction(nonce: &Pubkey, authority: &Pubkey) -> Instruction {
+    let mut data = Vec::with_capacity(36);
+    data.extend_from_slice(&SYSTEM_INSTRUCTION_INITIALIZE_NONCE_TAG.to_le_bytes());
+    data.extend_from_slice(authority.as_ref());
+    Instruction {
+        program_id: system_program_id(),
+        accounts: vec![
+            AccountMeta::new(*nonce, false),
+            AccountMeta::new_readonly(recent_blockhashes_sysvar_id(), false),
+            AccountMeta::new_readonly(rent_sysvar_id(), false),
+        ],
+        data,
+    }
+}
+
+/// Build the two-instruction message that creates AND initializes a durable nonce
+/// account: `[create_account(from, nonce, lamports, 80, system_program),
+/// initialize_nonce(nonce, authority)]`. Mirrors the gated
+/// `create_nonce_account`. The fee payer is `from`; `recent_blockhash` is a REAL
+/// network blockhash (the nonce does not exist yet, so it cannot self-reference).
+///
+/// This message has TWO required signers: the fee payer (`from`) and the new
+/// nonce account (`nonce`), both writable signers in `create_account`. Account
+/// compilation and header math are delegated to `Message::new_with_blockhash`.
+pub fn build_create_nonce_account_message(
+    from: &Pubkey,
+    nonce: &Pubkey,
+    authority: &Pubkey,
+    lamports: u64,
+    recent_blockhash: Hash,
+) -> Message {
+    let create = create_account_instruction(from, nonce, lamports, NONCE_STATE_SIZE, &system_program_id());
+    let init = initialize_nonce_instruction(nonce, authority);
+    Message::new_with_blockhash(&[create, init], Some(from), &recent_blockhash)
+}
+
+/// Build a durable-nonce-backed System Transfer message: the FIRST instruction is
+/// `advance_nonce_account(nonce, from)` and the `recent_blockhash` is the durable
+/// nonce (`durable_nonce`), not a network blockhash. `from` is the fee payer, the
+/// nonce authority, AND the transfer source (all the same settlement key here).
+///
+/// The advance-nonce instruction is simply the first element of the slice passed
+/// to `Message::new_with_blockhash`, so account ordering / header math stays
+/// canonical.
+pub fn build_transfer_message_with_nonce(
+    from: &Pubkey,
+    to: &Pubkey,
+    lamports: u64,
+    nonce: &Pubkey,
+    durable_nonce: Hash,
+) -> Message {
+    let advance = advance_nonce_instruction(nonce, from);
+    let transfer = system_transfer_instruction(from, to, lamports);
+    Message::new_with_blockhash(&[advance, transfer], Some(from), &durable_nonce)
+}
+
+/// Build a durable-nonce-backed mint message: the FIRST instruction is
+/// `advance_nonce_account(nonce, authority)`, then the unchanged
+/// create-ATA-idempotent and MintTo instructions, with `recent_blockhash` set to
+/// the durable nonce. `authority` is the fee payer, the mint authority, AND the
+/// nonce authority (the single settlement key).
+pub fn build_mint_message_with_nonce(
+    authority: &Pubkey,
+    mint: &Pubkey,
+    recipient_owner: &Pubkey,
+    amount: u64,
+    nonce: &Pubkey,
+    durable_nonce: Hash,
+) -> Message {
+    let advance = advance_nonce_instruction(nonce, authority);
+    let dest_ata = derive_ata(recipient_owner, mint);
+    let create_ata = create_ata_idempotent_ix(authority, recipient_owner, mint);
+    let mint_to = mint_to_ix(mint, &dest_ata, authority, amount);
+    Message::new_with_blockhash(&[advance, create_ata, mint_to], Some(authority), &durable_nonce)
+}
+
 /// Build a transfer message, serialize it, threshold-Ed25519 sign the serialized
 /// bytes at `from_path`, and assemble the legacy wire transaction.
 ///
@@ -335,4 +530,125 @@ pub async fn sign_transfer(
     let mut sig_arr = [0u8; 64];
     sig_arr.copy_from_slice(&signature);
     Ok(assemble_wire_tx(sig_arr, &message_bytes))
+}
+
+// ─── Durable nonce: bootstrap (multi-signature create + initialize) ──────────
+
+/// Rent-exempt lamports for an 80-byte nonce account on Solana. At the standard
+/// rent rate this is 1_447_680 lamports (~0.00144768 SOL), computed as
+/// (128 account-overhead + 80 data) bytes * 3480 lamports/byte-year * 2.0 years
+/// (the rent-exemption threshold). The account keeps this balance for its
+/// lifetime; the nonce only needs creating once per settlement key. (Devnet uses
+/// the same rent parameters as mainnet.)
+pub const NONCE_ACCOUNT_RENT_LAMPORTS: u64 = 1_447_680;
+
+/// Resolve the ordered list of signatures for a message's required signers.
+///
+/// The on-chain runtime matches signature `i` against `account_keys[i]` for the
+/// first `num_required_signatures` keys, so the wire tx must carry signatures in
+/// that exact key order. `signers` maps each derived signer pubkey to its already
+/// computed 64-byte signature (order irrelevant). Returns the signatures ordered
+/// to match `account_keys[0..num_required_signatures]`, or an Err naming the first
+/// required-signer key that has no provided signature (a derivation-path / key
+/// mismatch bug). Pure (no async, no I/O) so the ordering logic is unit-tested.
+pub fn order_signatures_by_signer(
+    message: &Message,
+    signers: &[(Pubkey, [u8; 64])],
+) -> Result<Vec<[u8; 64]>, String> {
+    let n = message.header.num_required_signatures as usize;
+    let mut ordered = Vec::with_capacity(n);
+    for key in &message.account_keys[0..n] {
+        let sig = signers
+            .iter()
+            .find(|(pk, _)| pk == key)
+            .map(|(_, sig)| *sig)
+            .ok_or_else(|| {
+                format!(
+                    "no signature provided for required signer {}",
+                    bs58::encode(key.as_ref()).into_string()
+                )
+            })?;
+        ordered.push(sig);
+    }
+    Ok(ordered)
+}
+
+/// Idempotently bootstrap the settlement key's durable nonce account on the given
+/// chain. If the nonce account already holds an Initialized durable nonce, returns
+/// `Ok(())` without sending anything. Otherwise it:
+///   1. derives the settlement (fee payer + nonce authority) and nonce addresses
+///      (two distinct threshold-Ed25519 paths),
+///   2. fetches a REAL recent blockhash (the nonce cannot self-reference yet),
+///   3. builds the 2-instruction create+initialize message,
+///   4. MULTI-SIGNS it: signs the serialized bytes once per derivation path, then
+///      orders the two signatures to match the message's required-signer keys, and
+///   5. broadcasts via `sendTransaction`.
+///
+/// The operator runs this once per settlement key (on devnet here). The full
+/// create+sign+broadcast round trip is exercised end-to-end only against the Task
+/// 9 mock / live devnet; the pure pieces (message construction, signer ordering,
+/// multi-sig assembly) are unit-tested.
+pub async fn bootstrap_nonce_account(chain: crate::chains::config::ChainId) -> Result<(), String> {
+    use super::sol_rpc;
+
+    // Derive both addresses (path + pubkey). settlement = fee payer + authority.
+    let settlement_path = ted25519::settlement_derivation_path(chain);
+    let (settlement_pk_bytes, _settlement_addr) =
+        ted25519::derive_solana_address(settlement_path.clone()).await?;
+    let nonce_path = ted25519::nonce_derivation_path(chain);
+    let (nonce_pk_bytes, nonce_addr) =
+        ted25519::derive_solana_address(nonce_path.clone()).await?;
+
+    // Idempotency: if the nonce already reads back as Initialized, we are done.
+    if sol_rpc::get_durable_nonce(&nonce_addr).await.is_ok() {
+        return Ok(());
+    }
+
+    let settlement = pubkey_from_bytes(&settlement_pk_bytes, "settlement")?;
+    let nonce = pubkey_from_bytes(&nonce_pk_bytes, "nonce")?;
+
+    // The create+initialize tx uses a REAL recent blockhash (the nonce does not
+    // exist yet, so it has no durable value to reference).
+    let recent_blockhash = sol_rpc::get_latest_blockhash().await?;
+
+    let message = build_create_nonce_account_message(
+        &settlement,
+        &nonce,
+        &settlement, // settlement is also the nonce authority
+        NONCE_ACCOUNT_RENT_LAMPORTS,
+        recent_blockhash,
+    );
+    let message_bytes = serialize_legacy_message(&message);
+
+    // Multi-sign: sign the SAME serialized bytes with each required signer's path.
+    // The two required signers are the fee payer (settlement) and the new nonce
+    // account; both sign the identical message. We sign per distinct path, then
+    // order the signatures to match account_keys[0..num_required_signatures].
+    let settlement_sig = sign_64(message_bytes.clone(), settlement_path).await?;
+    let nonce_sig = sign_64(message_bytes.clone(), nonce_path).await?;
+    let signers = [(settlement, settlement_sig), (nonce, nonce_sig)];
+    let ordered = order_signatures_by_signer(&message, &signers)?;
+
+    let wire = assemble_wire_tx_multi(&ordered, &message_bytes);
+    sol_rpc::send_transaction(&wire).await?;
+    Ok(())
+}
+
+/// Decode a 32-byte slice into a `Pubkey`, erroring (rather than panicking) on a
+/// wrong length. `label` names the key for the error message.
+fn pubkey_from_bytes(bytes: &[u8], label: &str) -> Result<Pubkey, String> {
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| format!("{label} pubkey must be 32 bytes, got {}", bytes.len()))?;
+    Ok(Pubkey::new_from_array(arr))
+}
+
+/// Sign `message` at `path` via threshold Ed25519 and return the 64-byte
+/// signature as a fixed array (the management call already guarantees length 64,
+/// but we re-check defensively).
+async fn sign_64(message: Vec<u8>, path: Vec<Vec<u8>>) -> Result<[u8; 64], String> {
+    let sig = ted25519::sign_message(message, path).await?;
+    sig.as_slice()
+        .try_into()
+        .map_err(|_| format!("expected 64-byte Ed25519 signature, got {}", sig.len()))
 }

@@ -378,3 +378,274 @@ fn build_mint_message_has_two_instructions_and_correct_programs() {
     // Blockhash round-trips.
     assert_eq!(msg.recent_blockhash.to_bytes(), [8u8; 32]);
 }
+
+// ─── Task 3: durable-nonce sysvar / program-id constants ─────────────────────
+// Like the Task 2 program ids, each parsed sysvar id must round-trip back to its
+// known base58 string so a typo in the hand-copied literal fails the build, not
+// only on-chain.
+
+#[test]
+fn nonce_sysvar_ids_roundtrip_to_known_base58() {
+    assert_eq!(
+        bs58::encode(recent_blockhashes_sysvar_id().as_ref()).into_string(),
+        "SysvarRecentB1ockHashes11111111111111111111",
+        "RecentBlockhashes sysvar id"
+    );
+    assert_eq!(
+        bs58::encode(rent_sysvar_id().as_ref()).into_string(),
+        "SysvarRent111111111111111111111111111111111",
+        "Rent sysvar id"
+    );
+}
+
+// ─── Task 3: advance_nonce_instruction (System AdvanceNonceAccount) ──────────
+
+#[test]
+fn advance_nonce_instruction_data_and_account_layout() {
+    let nonce = Pubkey::new_from_array([1u8; 32]);
+    let authority = Pubkey::new_from_array([2u8; 32]);
+    let ix = advance_nonce_instruction(&nonce, &authority);
+
+    // Runs on the System program.
+    assert_eq!(ix.program_id, system_program_id(), "AdvanceNonceAccount runs on System");
+    // data = AdvanceNonceAccount discriminant (variant 4) as a fieldless u32 LE.
+    assert_eq!(ix.data, vec![0x04, 0x00, 0x00, 0x00], "data is just the u32-LE discriminant 4");
+
+    // accounts: [nonce (writable, non-signer),
+    //            RecentBlockhashes sysvar (read-only, non-signer),
+    //            authority (read-only, signer)].
+    assert_eq!(ix.accounts.len(), 3);
+    assert_eq!(ix.accounts[0].pubkey, nonce);
+    assert!(ix.accounts[0].is_writable && !ix.accounts[0].is_signer, "nonce: writable, not signer");
+    assert_eq!(ix.accounts[1].pubkey, recent_blockhashes_sysvar_id());
+    assert!(!ix.accounts[1].is_writable && !ix.accounts[1].is_signer, "recent_blockhashes: read-only");
+    assert_eq!(ix.accounts[2].pubkey, authority);
+    assert!(!ix.accounts[2].is_writable && ix.accounts[2].is_signer, "authority: read-only signer");
+}
+
+// ─── Task 3: create_account_instruction (System CreateAccount, variant 0) ────
+
+#[test]
+fn create_account_instruction_data_and_account_layout() {
+    let from = Pubkey::new_from_array([1u8; 32]);
+    let new = Pubkey::new_from_array([2u8; 32]);
+    let owner = Pubkey::new_from_array([3u8; 32]);
+    let ix = create_account_instruction(&from, &new, 0x1122334455667788, 80, &owner);
+
+    assert_eq!(ix.program_id, system_program_id(), "CreateAccount runs on System");
+    // data = [0,0,0,0][lamports u64 LE][space u64 LE][owner 32 bytes] = 52 bytes.
+    let mut expected = Vec::new();
+    expected.extend_from_slice(&[0u8, 0, 0, 0]); // CreateAccount discriminant (variant 0)
+    expected.extend_from_slice(&0x1122334455667788u64.to_le_bytes()); // lamports
+    expected.extend_from_slice(&80u64.to_le_bytes()); // space
+    expected.extend_from_slice(&[3u8; 32]); // owner
+    assert_eq!(ix.data, expected, "CreateAccount data layout");
+    assert_eq!(ix.data.len(), 52, "4 + 8 + 8 + 32");
+
+    // accounts: [from (writable, signer), new (writable, signer)].
+    assert_eq!(ix.accounts.len(), 2);
+    assert_eq!(ix.accounts[0].pubkey, from);
+    assert!(ix.accounts[0].is_writable && ix.accounts[0].is_signer, "from: writable signer");
+    assert_eq!(ix.accounts[1].pubkey, new);
+    assert!(ix.accounts[1].is_writable && ix.accounts[1].is_signer, "new: writable signer");
+}
+
+// ─── Task 3: initialize_nonce_instruction (InitializeNonceAccount, variant 6) ─
+
+#[test]
+fn initialize_nonce_instruction_data_and_account_layout() {
+    let nonce = Pubkey::new_from_array([1u8; 32]);
+    let authority = Pubkey::new_from_array([4u8; 32]);
+    let ix = initialize_nonce_instruction(&nonce, &authority);
+
+    assert_eq!(ix.program_id, system_program_id(), "InitializeNonceAccount runs on System");
+    // data = [6,0,0,0][authority 32 bytes] = 36 bytes.
+    let mut expected = Vec::new();
+    expected.extend_from_slice(&[6u8, 0, 0, 0]); // InitializeNonceAccount discriminant (variant 6)
+    expected.extend_from_slice(&[4u8; 32]); // authority pubkey
+    assert_eq!(ix.data, expected, "InitializeNonceAccount data layout");
+    assert_eq!(ix.data.len(), 36, "4 + 32");
+
+    // accounts: [nonce (writable, non-signer),
+    //            RecentBlockhashes sysvar (read-only), Rent sysvar (read-only)].
+    assert_eq!(ix.accounts.len(), 3);
+    assert_eq!(ix.accounts[0].pubkey, nonce);
+    assert!(ix.accounts[0].is_writable && !ix.accounts[0].is_signer, "nonce: writable, not signer");
+    assert_eq!(ix.accounts[1].pubkey, recent_blockhashes_sysvar_id());
+    assert!(!ix.accounts[1].is_writable && !ix.accounts[1].is_signer, "recent_blockhashes: read-only");
+    assert_eq!(ix.accounts[2].pubkey, rent_sysvar_id());
+    assert!(!ix.accounts[2].is_writable && !ix.accounts[2].is_signer, "rent: read-only");
+}
+
+// ─── Task 3: build_create_nonce_account_message (2 instructions) ─────────────
+
+#[test]
+fn create_nonce_account_message_has_two_instructions_and_signers() {
+    let from = Pubkey::new_from_array([1u8; 32]); // fee payer (settlement)
+    let nonce = Pubkey::new_from_array([2u8; 32]); // new nonce account
+    let authority = from; // settlement is also the nonce authority
+    let real_blockhash = Hash::new_from_array([5u8; 32]);
+
+    let msg = build_create_nonce_account_message(&from, &nonce, &authority, 1_500_000, real_blockhash);
+
+    // Two instructions: [0] CreateAccount, [1] InitializeNonceAccount, both System.
+    assert_eq!(msg.instructions.len(), 2, "create then initialize");
+    let prog0 = msg.account_keys[msg.instructions[0].program_id_index as usize];
+    let prog1 = msg.account_keys[msg.instructions[1].program_id_index as usize];
+    assert_eq!(prog0, system_program_id(), "instruction 0 runs on System");
+    assert_eq!(prog1, system_program_id(), "instruction 1 runs on System");
+
+    // Fee payer is account_keys[0] = from.
+    assert_eq!(msg.account_keys[0], from, "fee payer is `from`");
+    // TWO required signatures: the fee payer AND the new nonce account (both are
+    // writable signers in CreateAccount). With from == authority, the distinct
+    // signers are {from, nonce} => 2.
+    assert_eq!(msg.header.num_required_signatures, 2, "fee payer + new nonce account both sign");
+    // The nonce account must appear among the required signers (the first
+    // num_required_signatures account keys).
+    let signers = &msg.account_keys[0..msg.header.num_required_signatures as usize];
+    assert!(signers.contains(&nonce), "nonce account is a required signer");
+    assert!(signers.contains(&from), "fee payer is a required signer");
+
+    // Uses the REAL recent blockhash (the nonce does not exist yet).
+    assert_eq!(msg.recent_blockhash.to_bytes(), [5u8; 32]);
+}
+
+// ─── Task 3: build_transfer_message_with_nonce (advance-nonce-led) ───────────
+
+#[test]
+fn transfer_message_with_nonce_prepends_advance_and_uses_nonce_blockhash() {
+    let from = Pubkey::new_from_array([1u8; 32]); // fee payer + nonce authority (settlement)
+    let to = Pubkey::new_from_array([2u8; 32]);
+    let nonce = Pubkey::new_from_array([3u8; 32]);
+    let durable_nonce = Hash::new_from_array([7u8; 32]);
+
+    let msg = build_transfer_message_with_nonce(&from, &to, 1_000_000, &nonce, durable_nonce);
+
+    // 1 (advance) + 1 (transfer) instructions.
+    assert_eq!(msg.instructions.len(), 2, "advance-nonce + transfer");
+
+    // The FIRST instruction targets the System program and the nonce account.
+    let prog0 = msg.account_keys[msg.instructions[0].program_id_index as usize];
+    assert_eq!(prog0, system_program_id(), "first instruction runs on System");
+    // First account of the first instruction is the nonce account.
+    let first_ix_first_acct = msg.account_keys[msg.instructions[0].accounts[0] as usize];
+    assert_eq!(first_ix_first_acct, nonce, "advance-nonce's first account is the nonce account");
+    // And its data is the AdvanceNonceAccount discriminant.
+    assert_eq!(msg.instructions[0].data, vec![0x04, 0x00, 0x00, 0x00], "first ix is AdvanceNonceAccount");
+
+    // recent_blockhash equals the durable nonce, NOT a network blockhash.
+    assert_eq!(msg.recent_blockhash.to_bytes(), [7u8; 32], "recent_blockhash is the durable nonce");
+
+    // Fee payer is the authority (account_keys[0]).
+    assert_eq!(msg.account_keys[0], from, "fee payer is the authority");
+}
+
+// ─── Task 3: build_mint_message_with_nonce (advance-nonce-led) ───────────────
+
+#[test]
+fn mint_message_with_nonce_prepends_advance_and_uses_nonce_blockhash() {
+    let authority = pk(ATA_OWNER_B58); // settlement: fee payer + mint authority + nonce authority
+    let mint = pk(ATA_MINT_B58);
+    let recipient_owner = Pubkey::new_from_array([7u8; 32]);
+    let nonce = Pubkey::new_from_array([3u8; 32]);
+    let durable_nonce = Hash::new_from_array([8u8; 32]);
+
+    let msg = build_mint_message_with_nonce(&authority, &mint, &recipient_owner, 1_000_000, &nonce, durable_nonce);
+
+    // 1 (advance) + 2 (create-ATA, MintTo) = 3 instructions.
+    assert_eq!(msg.instructions.len(), 3, "advance-nonce + create-ATA + MintTo");
+
+    // First instruction is advance-nonce on System, targeting the nonce account.
+    let prog0 = msg.account_keys[msg.instructions[0].program_id_index as usize];
+    assert_eq!(prog0, system_program_id(), "first instruction runs on System");
+    let first_ix_first_acct = msg.account_keys[msg.instructions[0].accounts[0] as usize];
+    assert_eq!(first_ix_first_acct, nonce, "advance-nonce's first account is the nonce account");
+    assert_eq!(msg.instructions[0].data, vec![0x04, 0x00, 0x00, 0x00], "first ix is AdvanceNonceAccount");
+
+    // The remaining two instructions are the ATA-create then MintTo (unchanged).
+    let prog1 = msg.account_keys[msg.instructions[1].program_id_index as usize];
+    let prog2 = msg.account_keys[msg.instructions[2].program_id_index as usize];
+    assert_eq!(prog1, ata_program_id(), "second instruction runs on the ATA program");
+    assert_eq!(prog2, token_program_id(), "third instruction runs on the Token program");
+
+    // recent_blockhash equals the durable nonce.
+    assert_eq!(msg.recent_blockhash.to_bytes(), [8u8; 32], "recent_blockhash is the durable nonce");
+    // Fee payer is the authority.
+    assert_eq!(msg.account_keys[0], authority, "fee payer is the authority");
+}
+
+// ─── Task 3: assemble_wire_tx_multi (multi-signature wire assembly) ──────────
+
+#[test]
+fn wire_tx_multi_two_sigs_layout() {
+    let sig0 = [0x11u8; 64];
+    let sig1 = [0x22u8; 64];
+    let message_bytes = vec![0xCD; 150];
+    let wire = assemble_wire_tx_multi(&[sig0, sig1], &message_bytes);
+
+    // [compact-u16 sig count = 2][sig0][sig1][message].
+    // count 2 fits in 7 bits, so the prefix is the single byte 0x02.
+    assert_eq!(encode_compact_u16(2).len(), 1, "count 2 is a single prefix byte");
+    assert_eq!(wire.len(), 1 + 128 + message_bytes.len());
+    assert_eq!(wire[0], 2, "first byte is the compact-u16 signature count (2)");
+    assert_eq!(&wire[1..65], &sig0, "sig0 follows the count");
+    assert_eq!(&wire[65..129], &sig1, "sig1 follows sig0 in order");
+    assert_eq!(&wire[129..], &message_bytes[..], "message follows the signatures");
+}
+
+#[test]
+fn wire_tx_multi_single_sig_matches_assemble_wire_tx() {
+    // A 1-signature multi-assembly must be byte-identical to assemble_wire_tx, so
+    // the two code paths agree on the single-signer case.
+    let sig = [0x55u8; 64];
+    let message_bytes = vec![0xEF; 40];
+    assert_eq!(
+        assemble_wire_tx_multi(&[sig], &message_bytes),
+        assemble_wire_tx(sig, &message_bytes),
+        "single-sig multi-assembly equals the single-sig assembler"
+    );
+}
+
+// ─── Task 3 Step 4: order_signatures_by_signer (multi-sig ordering) ──────────
+
+#[test]
+fn order_signatures_matches_account_key_order() {
+    // Build the real create-nonce message so account_keys[0..2] are the two
+    // required signers (fee payer + nonce account) in their canonical order.
+    let from = Pubkey::new_from_array([1u8; 32]); // fee payer (settlement)
+    let nonce = Pubkey::new_from_array([2u8; 32]); // new nonce account
+    let msg = build_create_nonce_account_message(&from, &nonce, &from, 1_447_680, Hash::new_from_array([5u8; 32]));
+    assert_eq!(msg.header.num_required_signatures, 2);
+
+    // Distinct per-signer signatures so we can prove the ORDER, not just presence.
+    let from_sig = [0xAAu8; 64];
+    let nonce_sig = [0xBBu8; 64];
+
+    // Supply the (pubkey, sig) pairs in the OPPOSITE order to the account keys, to
+    // prove the helper reorders by key rather than echoing input order.
+    let signers = [(nonce, nonce_sig), (from, from_sig)];
+    let ordered = order_signatures_by_signer(&msg, &signers).unwrap();
+
+    assert_eq!(ordered.len(), 2);
+    // ordered[i] must match account_keys[i].
+    let expected: Vec<[u8; 64]> = msg.account_keys[0..2]
+        .iter()
+        .map(|k| if *k == from { from_sig } else { nonce_sig })
+        .collect();
+    assert_eq!(ordered, expected, "signatures are ordered to match account_keys[0..num_required_signatures]");
+}
+
+#[test]
+fn order_signatures_errors_on_missing_signer() {
+    let from = Pubkey::new_from_array([1u8; 32]);
+    let nonce = Pubkey::new_from_array([2u8; 32]);
+    let msg = build_create_nonce_account_message(&from, &nonce, &from, 1_447_680, Hash::new_from_array([5u8; 32]));
+
+    // Provide only the fee payer's signature; the nonce account's is missing.
+    let signers = [(from, [0xAAu8; 64])];
+    assert!(
+        order_signatures_by_signer(&msg, &signers).is_err(),
+        "a required signer with no provided signature must error, not silently drop"
+    );
+}

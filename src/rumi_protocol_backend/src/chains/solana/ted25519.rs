@@ -30,6 +30,19 @@ pub fn settlement_derivation_path(chain: ChainId) -> Vec<Vec<u8>> {
     vec![chain.0.to_le_bytes().to_vec(), b"settlement".to_vec()]
 }
 
+/// Per-chain durable-nonce account address path: `[chain_id LE, b"nonce"]`.
+///
+/// This is a SECOND threshold-Ed25519 path (not a PDA), so the canister holds the
+/// nonce account's private key and is therefore its own nonce authority. Deriving
+/// it from the same chain-id prefix as `settlement_derivation_path` but with a
+/// distinct tag yields a different on-curve key, so the nonce account address is
+/// never the settlement address. The canister signs `advance_nonce_account` (which
+/// needs the authority signature) and `create_nonce_account` (which needs the new
+/// nonce account itself to sign) with this path.
+pub fn nonce_derivation_path(chain: ChainId) -> Vec<Vec<u8>> {
+    vec![chain.0.to_le_bytes().to_vec(), b"nonce".to_vec()]
+}
+
 // ─── Pure encoding helpers ──────────────────────────────────────────────────
 
 /// A Solana address is the base58 of the 32-byte Ed25519 public key (no hashing).

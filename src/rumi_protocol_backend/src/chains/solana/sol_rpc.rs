@@ -22,7 +22,17 @@
 //! (code+message) and `ValidationError` text for diagnostics.
 
 use candid::{CandidType, Deserialize, Principal, Reserved};
+use solana_message::Hash;
 use crate::state::read_state;
+
+/// Serialized byte length of a System nonce account's data (see
+/// `parse_nonce_account_blockhash`). Mirrors `solana_system_interface`'s
+/// `NONCE_STATE_SIZE` (verified against the crate source).
+pub const NONCE_STATE_SIZE: usize = 80;
+
+/// The `Initialized` value of a nonce account's `state` field (`buf[4..8]` as a
+/// u32 LE). 0 is `Uninitialized` (created but not yet initialized).
+const NONCE_STATE_INITIALIZED: u32 = 1;
 
 /// Production SOL RPC canister principal (fiduciary subnet). VERIFY against the
 /// live repo before mainnet; the developer-gated state override
@@ -167,6 +177,81 @@ pub fn parse_send_transaction_signature(json: &str) -> Result<String, String> {
         .ok_or_else(|| format!("missing result (signature) in sendTransaction response: {json}"))
 }
 
+// ─── durable nonce helpers (pure, unit-tested) ───────────────────────────────
+
+/// Extract and base64-decode a `getAccountInfo` (`encoding: base64`) response's
+/// account data buffer: `result.value.data[0]` is the base64 string and
+/// `result.value.data[1]` is the literal `"base64"`. Errs if the account is not
+/// found (`result.value` is null), which for a nonce account means it has not
+/// been bootstrapped yet.
+pub fn parse_account_data_base64(json: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine;
+    let v: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("bad json: {e}"))?;
+    if let Some(err) = v.get("error") {
+        return Err(format!("json-rpc error: {err}"));
+    }
+    if v.pointer("/result/value").map(|x| x.is_null()).unwrap_or(true) {
+        return Err(format!("account not found (value is null): {json}"));
+    }
+    let b64 = v
+        .pointer("/result/value/data/0")
+        .and_then(|s| s.as_str())
+        .ok_or_else(|| format!("missing result.value.data[0] (base64): {json}"))?;
+    base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| format!("bad base64 account data: {e}"))
+}
+
+/// Parse a System nonce account's data buffer and return its durable-nonce
+/// blockhash (the 32 bytes at offset 40). Layout (80 bytes total):
+///   version: u32 LE          [0..4]
+///   state:   u32 LE          [4..8]   (0 = Uninitialized, 1 = Initialized)
+///   authority: Pubkey        [8..40]
+///   durable_nonce/blockhash: [40..72] <- returned here
+///   fee_calculator.lamports_per_signature: u64 LE [72..80]
+///
+/// Errs unless the buffer is exactly 80 bytes AND the state is `Initialized`
+/// (1); an uninitialized account holds no usable nonce.
+pub fn parse_nonce_account_blockhash(buf: &[u8]) -> Result<[u8; 32], String> {
+    if buf.len() != NONCE_STATE_SIZE {
+        return Err(format!(
+            "nonce account data must be {NONCE_STATE_SIZE} bytes, got {}",
+            buf.len()
+        ));
+    }
+    let state = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+    if state != NONCE_STATE_INITIALIZED {
+        return Err(format!(
+            "nonce account is not Initialized (state = {state}, expected {NONCE_STATE_INITIALIZED})"
+        ));
+    }
+    let mut blockhash = [0u8; 32];
+    blockhash.copy_from_slice(&buf[40..72]);
+    Ok(blockhash)
+}
+
+/// Extract `result.value.blockhash` (a base58 string) from a `getLatestBlockhash`
+/// response and decode it to a 32-byte blockhash. Errs on a JSON-RPC error, a
+/// missing field, or a decode that is not exactly 32 bytes.
+pub fn parse_latest_blockhash(json: &str) -> Result<[u8; 32], String> {
+    let v: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("bad json: {e}"))?;
+    if let Some(err) = v.get("error") {
+        return Err(format!("json-rpc error: {err}"));
+    }
+    let b58 = v
+        .pointer("/result/value/blockhash")
+        .and_then(|s| s.as_str())
+        .ok_or_else(|| format!("missing result.value.blockhash: {json}"))?;
+    let bytes = bs58::decode(b58)
+        .into_vec()
+        .map_err(|e| format!("bad base58 blockhash '{b58}': {e}"))?;
+    let arr: [u8; 32] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| format!("blockhash must decode to 32 bytes, got {}", bytes.len()))?;
+    Ok(arr)
+}
+
 // ─── Async network calls ─────────────────────────────────────────────────────
 
 fn sol_rpc_principal() -> Principal {
@@ -234,4 +319,33 @@ pub async fn send_transaction(wire_tx: &[u8]) -> Result<String, String> {
     let payload = build_send_transaction_payload(&b64);
     let text = json_request(&payload).await?;
     parse_send_transaction_signature(&text)
+}
+
+/// Read a System nonce account's current durable nonce (a `Hash`) via
+/// `getAccountInfo` with `base64` encoding at `finalized`. Errs if the account is
+/// not found (not bootstrapped), is not exactly 80 bytes, or is not yet
+/// Initialized. `nonce_pubkey` MUST be a validated/derived base58 address (so
+/// interpolation cannot inject). Public so Tasks 4/8 can read the nonce before
+/// building advance-nonce-led transactions.
+pub async fn get_durable_nonce(nonce_pubkey: &str) -> Result<Hash, String> {
+    let payload = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":["{}",{{"encoding":"base64","commitment":"finalized"}}]}}"#,
+        nonce_pubkey
+    );
+    let text = json_request(&payload).await?;
+    let buf = parse_account_data_base64(&text)?;
+    let blockhash = parse_nonce_account_blockhash(&buf)?;
+    Ok(Hash::new_from_array(blockhash))
+}
+
+/// Read a fresh recent blockhash (a `Hash`) via `getLatestBlockhash` at
+/// `finalized`. Used by the nonce-account bootstrap (the create+initialize tx
+/// uses a REAL recent blockhash, not the durable nonce, since the nonce does not
+/// exist yet). Public so Task 4/8 can reuse it. Returns `Inconsistent` as an
+/// error like every other read.
+pub async fn get_latest_blockhash() -> Result<Hash, String> {
+    let payload = r#"{"jsonrpc":"2.0","id":1,"method":"getLatestBlockhash","params":[{"commitment":"finalized"}]}"#;
+    let text = json_request(payload).await?;
+    let blockhash = parse_latest_blockhash(&text)?;
+    Ok(Hash::new_from_array(blockhash))
 }

@@ -4747,6 +4747,30 @@ async fn solana_sign_test_transfer(to: String, lamports: u64) -> Result<Vec<u8>,
         .map_err(ProtocolError::GenericError)
 }
 
+/// M2 durable-nonce bootstrap: idempotently create + initialize the settlement
+/// key's durable nonce account on Solana devnet. Developer-gated; the operator
+/// runs this once per settlement key. If the nonce account already holds an
+/// Initialized durable nonce, this is a no-op (returns Ok). Otherwise it fetches a
+/// real recent blockhash, builds the 2-instruction create+initialize transaction,
+/// multi-signs it (fee payer + new nonce account, both threshold-Ed25519), and
+/// broadcasts it. Subsequent settlement transactions reference the durable nonce
+/// so build->sign(slow)->broadcast stays valid across async gaps.
+#[candid_method(update)]
+#[update]
+async fn solana_bootstrap_nonce() -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can bootstrap the Solana nonce account".to_string(),
+        ));
+    }
+    use rumi_protocol_backend::chains::solana::{config::SOLANA_CHAIN_ID, tx};
+    tx::bootstrap_nonce_account(SOLANA_CHAIN_ID)
+        .await
+        .map_err(ProtocolError::GenericError)
+}
+
 /// Developer-gated: set the SOL RPC canister principal override (mock/staging).
 #[candid_method(update)]
 #[update]
