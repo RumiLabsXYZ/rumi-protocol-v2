@@ -9,6 +9,8 @@
 
 pub mod adapter;
 pub mod config;
+pub mod deposit_watch;
+pub mod hardening;
 pub mod sol_rpc;
 pub mod ted25519;
 pub mod tx;
@@ -17,6 +19,8 @@ pub mod tx;
 mod tests_adapter;
 #[cfg(test)]
 mod tests_config;
+#[cfg(test)]
+mod tests_deposit_watch;
 #[cfg(test)]
 mod tests_sol_rpc;
 #[cfg(test)]
