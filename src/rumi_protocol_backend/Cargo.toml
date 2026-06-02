@@ -65,7 +65,12 @@ alloy-rlp = "0.3"
 # spl-token-2022's confidential-transfer crypto (aes-gcm-siv, etc.) which is
 # wasm-risky and heavy; the MintTo and ATA-create instructions are hand-encoded
 # in chains/solana/tx.rs instead (simple, well-defined byte layouts).
-solana-pubkey = { version = "4", default-features = false }
+# curve25519 feature unlocks Pubkey::find_program_address / create_program_address
+# (PDA derivation, used for SPL Associated Token Account addresses). Off-chain it
+# pulls curve25519-dalek + sha2 for the ed25519 off-curve check; both are already
+# resolved in Cargo.lock, wasm32-unknown-unknown compatible, and do NOT activate
+# the serde feature, so the serde 1.0.217 pin holds.
+solana-pubkey = { version = "4", default-features = false, features = ["curve25519"] }
 solana-instruction = { version = "3", default-features = false }
 solana-message = { version = "4", default-features = false }
 solana-transaction = { version = "4", default-features = false }
