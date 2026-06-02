@@ -64,6 +64,8 @@ const EPOCH_SUMMARY_DATA_MEM_ID: MemoryId = MemoryId::new(4);
 const REVEALED_SEEDS_INDEX_MEM_ID: MemoryId = MemoryId::new(5);
 const REVEALED_SEEDS_DATA_MEM_ID: MemoryId = MemoryId::new(6);
 const STATE_BLOB_MEM_ID: MemoryId = MemoryId::new(7);
+// Phase 2: per-source ingestion cursors (source tag -> last-processed event id).
+const CURSORS_MEM_ID: MemoryId = MemoryId::new(8);
 
 const WASM_PAGE_SIZE: u64 = 65_536; // 64 KiB
 
@@ -222,6 +224,17 @@ thread_local! {
     /// Singleton config, heap-resident during execution (restored from the blob
     /// in `post_upgrade`, populated fresh in `init`).
     static STATE: RefCell<Option<State>> = RefCell::new(None);
+
+    /// Phase 2: per-source ingestion cursor (source tag -> last-processed event
+    /// id + 1). Persists across upgrades so we never re-ingest from zero. Both
+    /// key and value are primitives with built-in `Storable` impls.
+    static CURSORS: RefCell<StableBTreeMap<u8, u64, VMem>> =
+        MEMORY_MANAGER.with(|m| RefCell::new(StableBTreeMap::init(m.borrow().get(CURSORS_MEM_ID))));
+
+    /// Phase 2: transient re-entrancy guard so two overlapping poll timers do not
+    /// double-ingest from the same cursor. NOT persisted (a fresh canister / a
+    /// post-upgrade heap always starts with no poll in flight).
+    static POLL_IN_PROGRESS: RefCell<bool> = RefCell::new(false);
 }
 
 // ── Excluded-principals seed (spec Section 11) ──────────────────────────────
@@ -575,6 +588,46 @@ pub fn points_config() -> PointsConfig {
         current_epoch_index: s.current_epoch_index,
         snapshot_seed_committed: s.snapshot_seed.is_committed(),
     })
+}
+
+// ── Phase 2: ingestion cursors, poll guard, season gating ───────────────────
+
+/// Last-processed cursor for a source (its next `get_*_events` start id). 0 if
+/// the source has never been polled.
+pub fn get_cursor(source_tag: u8) -> u64 {
+    CURSORS.with(|c| c.borrow().get(&source_tag).unwrap_or(0))
+}
+
+pub fn set_cursor(source_tag: u8, next_start_id: u64) {
+    CURSORS.with(|c| {
+        c.borrow_mut().insert(source_tag, next_start_id);
+    });
+}
+
+/// Acquire the single-poll guard. Returns `true` if acquired (no poll was in
+/// flight); `false` means a poll is already running and the caller must abort.
+/// Pairs with `end_poll` (call it on every exit path, including errors).
+pub fn try_begin_poll() -> bool {
+    POLL_IN_PROGRESS.with(|p| {
+        let mut p = p.borrow_mut();
+        if *p {
+            false
+        } else {
+            *p = true;
+            true
+        }
+    })
+}
+
+pub fn end_poll() {
+    POLL_IN_PROGRESS.with(|p| *p.borrow_mut() = false);
+}
+
+/// Is `ts_ns` within the configured season window (inclusive)? Registration and
+/// accrual only happen for in-season activity; pre-season activity does not
+/// retroactively enroll a principal (spec Section 8).
+pub fn in_season(ts_ns: u64) -> bool {
+    with_state(|s| ts_ns >= s.season_start_ns && ts_ns <= s.season_end_ns)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
