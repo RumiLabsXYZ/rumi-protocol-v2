@@ -8,6 +8,9 @@
 //! `docs/superpowers/specs/2026-06-01-solana-integration-design.md`.
 
 pub mod config;
+pub mod ted25519;
 
 #[cfg(test)]
 mod tests_config;
+#[cfg(test)]
+mod tests_ted25519;
