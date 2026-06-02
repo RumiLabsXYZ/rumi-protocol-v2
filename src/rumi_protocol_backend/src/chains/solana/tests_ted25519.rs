@@ -1,5 +1,23 @@
 use super::ted25519::*;
-use candid::Principal;
+use candid::{Decode, Encode, Principal};
+
+#[test]
+fn sign_with_schnorr_arg_candid_round_trips() {
+    // Proves the hand-mirrored sign_with_schnorr arg (+ key id + Ed25519 algo)
+    // encode/decode cleanly, so the management-canister call is well-formed.
+    let arg = SignWithSchnorrArgument {
+        message: vec![1, 2, 3, 4],
+        derivation_path: vec![vec![0u8], b"settlement".to_vec()],
+        key_id: SchnorrKeyId {
+            algorithm: SchnorrAlgorithm::Ed25519,
+            name: "test_key_1".to_string(),
+        },
+    };
+    let bytes = Encode!(&arg).expect("encode");
+    let back = Decode!(&bytes, SignWithSchnorrArgument).expect("decode");
+    assert_eq!(back.message, vec![1, 2, 3, 4]);
+    assert_eq!(back.key_id.name, "test_key_1");
+}
 
 #[test]
 fn all_zero_pubkey_is_system_program_address() {

@@ -21,6 +21,12 @@ candid = "0.10.6"
 ic-stable-structures = "0.6.5"
 ic-cdk = "0.12.0"
 ic-cdk-timers = "0.10.0"
+# serde / serde_json are HELD at 1.0.217 / 1.0.135 via the committed Cargo.lock.
+# The IC fork's `ic-types` (dev-dep, rev fc278709) imports a `serde::__private`
+# item removed after serde ~1.0.217, and serde_json >=1.0.150 transitively forces
+# serde >=1.0.220 (which breaks the test build). The Solana tx crates only need
+# serde "1.0", so they accept the pin. Do NOT `cargo update` serde/serde_json past
+# these in this worktree without also updating the ic fork.
 serde = "1.0.210"
 futures = "0.3.28"
 ciborium = "0.2.1"

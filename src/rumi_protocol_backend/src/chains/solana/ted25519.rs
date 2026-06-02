@@ -104,3 +104,51 @@ pub async fn derive_solana_address(
     let addr = solana_address_from_pubkey(&res.public_key)?;
     Ok((res.public_key, addr))
 }
+
+// ─── Signing (sign_with_schnorr, Ed25519) ────────────────────────────────────
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct SignWithSchnorrArgument {
+    pub message: Vec<u8>,
+    pub derivation_path: Vec<Vec<u8>>,
+    pub key_id: SchnorrKeyId,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct SignWithSchnorrResponse {
+    pub signature: Vec<u8>,
+}
+
+/// Cycles for one threshold-Ed25519 signature. Published cost is ~26B; attach 30B
+/// of headroom (unused cycles are refunded). Signing is the dominant per-op cost
+/// on Solana settlement, so we sign only on real ops, never on a timer.
+const SIGN_WITH_SCHNORR_CYCLES: u128 = 30_000_000_000;
+
+/// Async: sign `message` with threshold Ed25519 at `derivation_path`, returning
+/// the 64-byte Ed25519 signature. The management-canister arg's `aux` field
+/// (BIP341 taproot tweak only) is optional and omitted for Ed25519.
+pub async fn sign_message(
+    message: Vec<u8>,
+    derivation_path: Vec<Vec<u8>>,
+) -> Result<Vec<u8>, String> {
+    let arg = SignWithSchnorrArgument {
+        message,
+        derivation_path,
+        key_id: key_id(),
+    };
+    let (res,): (SignWithSchnorrResponse,) = ic_cdk::api::call::call_with_payment128(
+        Principal::management_canister(),
+        "sign_with_schnorr",
+        (arg,),
+        SIGN_WITH_SCHNORR_CYCLES,
+    )
+    .await
+    .map_err(|(code, msg)| format!("{code:?}: {msg}"))?;
+    if res.signature.len() != 64 {
+        return Err(format!(
+            "expected 64-byte Ed25519 signature, got {}",
+            res.signature.len()
+        ));
+    }
+    Ok(res.signature)
+}
