@@ -1114,6 +1114,7 @@ service : (ProtocolArg) -> {
   set_rmr_floor : (float64) -> (Result);
   set_rmr_floor_cr : (float64) -> (Result);
   set_settlement_tick_interval_secs : (nat64) -> (Result);
+  set_sol_rpc_principal : (principal) -> (Result);
   set_sp_writedown_disabled : (bool) -> (Result);
   set_stability_pool_principal : (principal) -> (Result);
   set_stable_ledger_principal : (StableTokenType, principal) -> (Result);
@@ -1122,6 +1123,9 @@ service : (ProtocolArg) -> {
   set_treasury_principal : (principal) -> (Result);
   set_vault_check_tick_interval_secs : (nat64) -> (Result);
   set_xrc_fetch_interval_secs : (nat64) -> (Result);
+  solana_get_balance : (text) -> (Result_1);
+  solana_get_mint_supply : () -> (Result_1);
+  solana_settlement_address : () -> (Result_2);
   stability_pool_liquidate : (nat64, nat64) -> (Result_13);
   stability_pool_liquidate_debt_burned : (nat64, nat64, SpWritedownProof) -> (
       Result_13,

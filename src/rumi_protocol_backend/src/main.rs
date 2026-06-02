@@ -4643,6 +4643,84 @@ async fn set_observer_tick_interval_secs(secs: u64) -> Result<(), ProtocolError>
     Ok(())
 }
 
+// ─── Solana M1 read-seam endpoints (developer-gated) ─────────────────────────
+
+/// M1 read-seam probe: derive and return the Solana settlement (mint-authority)
+/// address. Developer-gated. Exercises threshold Ed25519 on devnet/staging.
+#[candid_method(update)]
+#[update]
+async fn solana_settlement_address() -> Result<String, ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can derive the Solana settlement address".to_string(),
+        ));
+    }
+    use rumi_protocol_backend::chains::solana::{config::SOLANA_CHAIN_ID, ted25519};
+    let path = ted25519::settlement_derivation_path(SOLANA_CHAIN_ID);
+    let (_pk, addr) = ted25519::derive_solana_address(path)
+        .await
+        .map_err(ProtocolError::GenericError)?;
+    Ok(addr)
+}
+
+/// M1 read-seam probe: read a SOL balance (lamports) via the SOL RPC canister.
+#[candid_method(update)]
+#[update]
+async fn solana_get_balance(pubkey: String) -> Result<u64, ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can call solana_get_balance".to_string(),
+        ));
+    }
+    use rumi_protocol_backend::chains::solana::{sol_rpc, ted25519};
+    if !ted25519::is_valid_solana_address(&pubkey) {
+        return Err(ProtocolError::GenericError(format!(
+            "invalid Solana address: {pubkey}"
+        )));
+    }
+    sol_rpc::get_balance(&pubkey)
+        .await
+        .map_err(ProtocolError::GenericError)
+}
+
+/// M1 read-seam probe: read the registered icUSD SPL mint's on-chain supply.
+#[candid_method(update)]
+#[update]
+async fn solana_get_mint_supply() -> Result<u64, ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can call solana_get_mint_supply".to_string(),
+        ));
+    }
+    use rumi_protocol_backend::chains::solana::{config::SOLANA_CHAIN_ID, sol_rpc};
+    let mint = read_state(|s| s.multi_chain.chain_contracts.get(&SOLANA_CHAIN_ID).cloned())
+        .ok_or_else(|| ProtocolError::GenericError("Solana icUSD mint not set".to_string()))?;
+    sol_rpc::get_mint_supply(&mint)
+        .await
+        .map_err(ProtocolError::GenericError)
+}
+
+/// Developer-gated: set the SOL RPC canister principal override (mock/staging).
+#[candid_method(update)]
+#[update]
+async fn set_sol_rpc_principal(p: Principal) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set the SOL RPC principal".to_string(),
+        ));
+    }
+    mutate_state(|s| s.sol_rpc_principal_override = Some(p));
+    Ok(())
+}
+
 /// Wave-9c DOS-005: tune the cadence of the safety-belt full sweep that
 /// walks every vault in `vault_cr_index` regardless of CR band.
 /// Default 12 (one full sweep per hour at the 5-minute XRC cadence).
