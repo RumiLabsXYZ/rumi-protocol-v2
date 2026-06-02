@@ -7905,6 +7905,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "sol_rpc_mock"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "candid",
+ "ic-cdk 0.12.2",
+ "ic-cdk-macros 0.8.4",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "solana-address"
 version = "2.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

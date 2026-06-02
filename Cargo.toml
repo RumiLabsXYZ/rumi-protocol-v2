@@ -8,6 +8,7 @@ members = [
     "src/rumi_analytics",
     "src/xrc_demo/xrc_mock",
     "src/monad_rpc_mock",
+    "src/sol_rpc_mock",
     "src/liquidation_bot",
     "src/flaky_ledger",
 ]
