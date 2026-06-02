@@ -1277,6 +1277,14 @@ pub struct State {
     #[serde(default)]
     pub evm_rpc_principal_override: Option<candid::Principal>,
 
+    /// M1: override for the SOL RPC canister principal. When `Some`,
+    /// `chains::solana::sol_rpc::sol_rpc_principal()` uses this instead of the
+    /// hardcoded production canister. Lets PocketIC / staging inject a mock SOL
+    /// RPC canister. `#[serde(default)]` so older snapshots decode to `None`.
+    /// Developer-gated setter: `set_sol_rpc_principal`.
+    #[serde(default)]
+    pub sol_rpc_principal_override: Option<candid::Principal>,
+
     /// Phase 1b Task 12: monotonic id source for foreign-chain (`chain_vaults`)
     /// vault ids. `#[serde(default)]` is safe — `State` is ciborium-encoded
     /// (storage.rs uses `ciborium::ser/de`, which is serde-based), so an old
@@ -1493,6 +1501,7 @@ impl Default for State {
             bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
             multi_chain: crate::chains::MultiChainState::default(),
             evm_rpc_principal_override: None,
+            sol_rpc_principal_override: None,
             chain_vault_id_counter: 0,
         }
     }
@@ -1721,6 +1730,7 @@ impl From<InitArg> for State {
             bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
             multi_chain: crate::chains::MultiChainState::default(),
             evm_rpc_principal_override: None,
+            sol_rpc_principal_override: None,
             chain_vault_id_counter: 0,
         }
     }
@@ -3691,6 +3701,12 @@ impl State {
     /// gated setter `set_evm_rpc_principal` is added in Task 14.
     pub fn evm_rpc_override(&self) -> Option<candid::Principal> {
         self.evm_rpc_principal_override
+    }
+
+    /// When `Some`, the SOL RPC wrapper uses this principal instead of the
+    /// hardcoded production canister. Enables PocketIC / staging to inject a mock.
+    pub fn sol_rpc_override(&self) -> Option<candid::Principal> {
+        self.sol_rpc_principal_override
     }
 
     /// Wave-10 LIQ-008: pure-read sum of liquidation debt cleared in the
