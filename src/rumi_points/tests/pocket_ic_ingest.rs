@@ -15,6 +15,7 @@
 use candid::{CandidType, Decode, Encode, Principal};
 use pocket_ic::{PocketIcBuilder, WasmResult};
 use serde::Deserialize;
+use std::time::Duration;
 
 const RUMI_POINTS_WASM: &[u8] =
     include_bytes!("../../../target/wasm32-unknown-unknown/release/rumi_points.wasm");
@@ -117,6 +118,61 @@ fn poll_ingests_backend_event_and_auto_registers() {
     };
     assert_eq!(applied2, Ok(0), "second poll ingests nothing (caught up)");
     assert!(is_registered(&pic, rp, synthetic_caller()), "still registered");
+}
+
+/// Phase 2b: the periodic timer (not a manual trigger) drives ingestion. Enable
+/// it, advance past one interval, and confirm the timer-driven poll auto-registered
+/// the event's caller.
+#[test]
+fn poll_timer_drives_ingestion() {
+    let pic = PocketIcBuilder::new().with_application_subnet().build();
+
+    let mock = pic.create_canister();
+    pic.add_cycles(mock, 2_000_000_000_000);
+    pic.install_canister(mock, MOCK_SOURCE_WASM.to_vec(), Encode!().unwrap(), None);
+
+    let rp = pic.create_canister();
+    pic.add_cycles(rp, 4_000_000_000_000);
+    let init = InitArgs {
+        admin: Some(admin()),
+        excluded_principals: None,
+        season_start_ns: None,
+        season_end_ns: None,
+        snapshot_seed_commit: None,
+    };
+    pic.install_canister(rp, RUMI_POINTS_WASM.to_vec(), Encode!(&Some(init)).unwrap(), None);
+
+    admin_ok(&pic, rp, "set_source_canister", Encode!(&0u8, &mock).unwrap());
+
+    // Timer off by default; nobody registered, no manual poll.
+    assert!(!is_registered(&pic, rp, synthetic_caller()));
+
+    // Enable the timer at the minimum cadence.
+    admin_ok(&pic, rp, "set_poll_interval_secs", Encode!(&60u64).unwrap());
+    admin_ok(&pic, rp, "set_poll_enabled", Encode!(&true).unwrap());
+
+    // Advance past one interval and let the timer fire + the async poll complete.
+    pic.advance_time(Duration::from_secs(70));
+    for _ in 0..15 {
+        pic.tick();
+    }
+
+    assert!(
+        is_registered(&pic, rp, synthetic_caller()),
+        "the timer-driven poll should have auto-registered the event's caller"
+    );
+}
+
+/// Call an admin update returning `Result<(), PointsError>` and assert Ok.
+fn admin_ok(pic: &pocket_ic::PocketIc, rp: Principal, method: &str, args: Vec<u8>) {
+    let res = pic.update_call(rp, admin(), method, args).expect("admin call failed");
+    match res {
+        WasmResult::Reply(b) => {
+            let r: Result<(), PointsError> = Decode!(&b, Result<(), PointsError>).unwrap();
+            assert_eq!(r, Ok(()), "{method} should succeed for admin");
+        }
+        WasmResult::Reject(m) => panic!("{method} rejected: {m}"),
+    }
 }
 
 fn is_registered(pic: &pocket_ic::PocketIc, rp: Principal, who: Principal) -> bool {

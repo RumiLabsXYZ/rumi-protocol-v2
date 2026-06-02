@@ -18,12 +18,45 @@
 //! tick). Phase 2 exposes an admin `trigger_poll`; the production timer cadence is
 //! a small follow-up (`setup_timers`).
 
+use std::cell::RefCell;
+use std::time::Duration;
+
 use candid::Principal;
 use ic_cdk::api::call::RejectionCode;
+use ic_cdk_timers::TimerId;
 
 use crate::events::{self, SourceId};
 use crate::source_types::{amm, backend, stability_pool, three_pool};
 use crate::state;
+
+thread_local! {
+    /// The live poll-timer id (transient; timers do not survive upgrades).
+    static POLL_TIMER: RefCell<Option<TimerId>> = RefCell::new(None);
+}
+
+/// (Re)register the periodic poll timer from the persisted config (Phase 2b).
+/// Cancels any existing timer first. Called from `init` / `post_upgrade` (timers
+/// must be re-registered after an upgrade) and whenever the admin changes the
+/// poll config. Off by default: registers nothing until an operator enables it,
+/// so a fresh canister burns no cycles polling.
+pub fn setup_poll_timer() {
+    POLL_TIMER.with(|t| {
+        if let Some(id) = t.borrow_mut().take() {
+            ic_cdk_timers::clear_timer(id);
+        }
+    });
+    if state::poll_enabled() {
+        let interval = Duration::from_secs(state::poll_interval_secs());
+        let id = ic_cdk_timers::set_timer_interval(interval, || {
+            // poll_all is async; spawn it. Its single-poll guard handles the case
+            // where a tick fires while the previous poll is still in flight.
+            ic_cdk::spawn(async {
+                let _ = poll_all().await;
+            });
+        });
+        POLL_TIMER.with(|t| *t.borrow_mut() = Some(id));
+    }
+}
 
 // Per-call scan/batch bounds (kept under the source endpoints' own caps).
 const BACKEND_SCAN: u64 = 500;

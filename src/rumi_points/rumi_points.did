@@ -101,6 +101,8 @@ type SourceStatus = record {
 type IngestStatus = record {
   sources : vec SourceStatus;
   registered_count : nat64;
+  poll_enabled : bool;
+  poll_interval_secs : nat64;
 };
 
 service : (opt InitArgs) -> {
@@ -123,5 +125,7 @@ service : (opt InitArgs) -> {
   // Phase 2: ingestion control
   set_source_canister : (nat8, principal) -> (Result);
   trigger_poll : () -> (Result_1);
+  set_poll_enabled : (bool) -> (Result);
+  set_poll_interval_secs : (nat64) -> (Result);
   get_ingest_status : () -> (IngestStatus) query;
 };
