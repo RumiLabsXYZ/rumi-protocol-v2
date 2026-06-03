@@ -17,6 +17,7 @@
 //! Out of scope here: event ingestion, the backend `repayment_asset` change,
 //! 3USD verification, epoch math, and the entire claim / lock-tier surface.
 
+pub mod accrual;
 pub mod epoch;
 pub mod events;
 pub mod poll;

@@ -1,13 +1,22 @@
 # rumi_points — status
 
 **Phase 1 (scaffold): COMPLETE.** **Phase 2 / 2b / 3 (ingestion + timer +
-auto-registration): COMPLETE and PocketIC-E2E-validated.** Merged to `main`
-(PR #217; Phase 2b in a follow-up). Not yet deployed to mainnet; no mainnet canister
-id reserved.
+auto-registration): COMPLETE and PocketIC-E2E-validated, merged to `main`** (PR #217).
+**Phase 4 (3USD verification) + Phase 5 (accrual engine): COMPLETE on branch
+`feat/airdrop-phase5-accrual`** (NOT yet merged, NOT deployed). 126 lib unit tests +
+candid drift + 4 PocketIC E2E (2 ingest + 2 accrual), all green; zero warnings.
 
-Ingestion is now FUNCTIONAL: the off-by-default poll timer (Phase 2b) auto-polls the
-sources and auto-registers principals on their first qualifying in-season action.
-Still missing for a USEFUL airdrop: accrual (Phase 5) and 3USD verification (Phase 4).
+The canister is now a FULL airdrop engine: ingestion auto-registers, the weekly
+epoch driver captures two randomized intra-epoch snapshots of every registered
+principal's balances, takes `min()` (anti-sniping), applies the multiplier table
+with 3USD verification, accrues dollar-days, and reveals the commit-reveal seed.
+Design doc: `docs/notes/2026-06-02-phase5-accrual-design.md` (gitignored, local).
+
+Phase 5 blocker carried forward: the 5x ckUSDC/ckUSDT repayment window is GATED on
+the upstream backend `RepayToVault.repayment_asset` field (not yet built). The full
+window machinery + tests exist; `IngestKind::VaultRepay` carries `repayment_asset:
+Option<Principal>` (normalized to `None` until upstream lands), and the window is
+skipped (logged) while it is `None`. Flip the backend normalizer when it ships.
 
 ## Deploy posture (why nothing is on mainnet yet)
 Not urgent, because a LATER deploy loses no data: the cursor starts at 0 and the
@@ -22,12 +31,21 @@ then admin `set_poll_enabled(true)` once sources are confirmed. The pre-deploy h
 runs the full suite (including the POCKET_IC_BIN E2E).
 
 ## Next phases (fresh focused sessions)
-- Phase 4: 3USD verification (`min(recorded, wallet+SP+AMM)`), needs the
-  `repayment_asset` upstream field for the 5x repayment window.
-- Phase 5: epoch driver + multiplier table + two-snapshot `min()` + the
-  commit-reveal snapshot scheduler (`epoch.rs`, `valuation.rs`, `snapshot_seed.rs`
-  are documented skeletons today).
+- Phase 6: frontend integration (confetti enrollment, personal status, leaderboard).
 - Phases 7-8: the claim canister (liquid + lock-tier haircut ladder).
+- Upstream: add `repayment_asset` to the backend `RepayToVault` event (separate
+  backend branch), then flip `source_types::backend::normalize` to read it and the
+  5x window activates with no other change here.
+
+## Phase 5 review follow-ups (deferred, non-blocking)
+From the 2026-06-02 code review (no critical/high bugs found). Fixed in-branch:
+ICP non-finite-rate guard, repayment-window pruning at close, atomic-trap on the
+(unreachable) seed-close failure, per-principal source-id caching. Still open:
+- `epoch.rs` capture has no STALL counter if a source stays unreachable past a
+  snapshot time (the epoch safely never closes; visible via `get_epoch_status`,
+  recoverable via `force_epoch_tick`). Consider surfacing a stall count.
+- `set_asset_ledger` / `set_source_canister` accept any `u8` tag (admin-only;
+  out-of-range writes a harmless dead entry). Minor range-validation nicety.
 
 Spec: `docs/specs/rumi-airdrop-spec-v2.md` (Section 7 data model, Section 11 excluded
 principals). Plan: `docs/plans/2026-05-03-airdrop-implementation-plan.md`.
@@ -86,11 +104,19 @@ wire, though the `source_types` canary already pins the superset-decode rule.
 - `events.rs` / `source_types.rs` / `poll.rs` are the real Phase 2/3 ingestion (see
   the "ingestion machinery" section above), no longer skeleton.
 
-## What is skeleton (later phases; signatures + doc comments only)
-- `epoch.rs`   — Phase 5 weekly two-snapshot `min()` accrual.
-- `valuation.rs` — Phase 4/5 asset valuation + 3USD verification.
-- `snapshot_seed.rs` — Phase 5 commit-reveal algorithm (its STATE types are real
-  and already in the stable layout).
+## Phase 4/5 modules (now REAL, fully tested; no longer skeleton)
+- `accrual.rs` (new) — pure accrual math: `SnapshotWeights` (the MemoryId-11 value),
+  the multiplier table (`snapshot_weights`), 3USD `apply_verification`, `min_by_total`
+  (keeps the smaller-TOTAL snapshot whole, not field-wise), `scale_by_period`,
+  `accrue_principal` (close-time), `build_snapshot_inputs` (AMM share + vp), and the
+  `repayment_points` window math. ~29 unit tests.
+- `epoch.rs` — the periodic state-machine driver (`next_action`), chunked async
+  snapshot capture with resume cursor, `start_season` bootstrap, epoch close, the
+  commit-reveal `summary_hash`, and all inter-canister `fetch_*` helpers.
+- `valuation.rs` — `value_usd_e8s` (face + ck `*100` + ICP oracle, non-finite-guarded),
+  `value_lp_at_vp`, `value_stable_usd_e8s`.
+- `snapshot_seed.rs` — `derive_snapshot_times` + `SeedManager::start_epoch/close_epoch`
+  implemented per spike 0.3 (13 tests incl. the 3-epoch hash chain).
 
 ## Stable memory map (MemoryId -> structure; never reuse an id)
 | Id | Structure |
@@ -98,8 +124,17 @@ wire, though the `source_types` canary already pins the superset-decode rule.
 | 0  | `StableBTreeMap<Principal, StoredPrincipalState>` (per-principal accrual) |
 | 1/2| `StableLog<StoredPointEntry>` (append-only audit ledger) |
 | 3/4| `StableLog<StoredEpochSummary>` (per-epoch rollups) |
-| 5/6| `StableLog<StoredRevealedSeed>` (commit-reveal audit log; reserved, Phase 5) |
-| 7  | singleton `State` blob (8-byte LE len prefix + CBOR `StoredState::V1`) |
+| 5/6| `StableLog<StoredRevealedSeed>` (commit-reveal audit log; Phase 5, wired) |
+| 7  | singleton `State` blob (8-byte LE len prefix + CBOR `StoredState::V2`) |
+| 8  | per-source ingestion cursors |
+| 9  | per-source canister ids (mainnet-seeded) |
+| 10 | poll-timer config |
+| 11 | `StableBTreeMap<Principal, StoredSnapshotWeights>` (open-epoch min buffer) |
+| 12 | asset-ledger registry (asset tag -> ledger; mainnet-seeded, admin override) |
+| 13 | epoch-driver config (enabled / interval) |
+
+`State` is now `StoredState::{ V1(StateV1), V2(State) }`: V2 adds `open_epoch`. Old
+V1 blob bytes decode via `From<StateV1>` (defaulting `open_epoch=None`); no wipe.
 
 ## Excluded-principals seed (confirmed against canister_ids.json, 2026-06-01)
 9 protocol-owned canisters: rumi_protocol_backend, rumi_3pool, rumi_amm,
@@ -119,4 +154,13 @@ mutable set.
 - Reserve a mainnet canister id + add to `canister_ids.json` / `mainnet-live`
   (irreversible; requires explicit OK).
 
-## Do NOT start Phase 2 from here without re-reading the handoff + spec.
+## Operating the epoch driver (Phase 5)
+OFF by default (like the poll timer). To run a season: enable the poll + confirm
+registrations, then admin `start_season(S0)` (the 32-byte secret seed; commit `H0 =
+sha256(S0)` at init via `snapshot_seed_commit`). `start_season` opens epoch 0 and
+enables the driver. `get_epoch_status` shows the open epoch + driver state;
+`force_epoch_tick` steps the machine manually (ops recovery / E2E);
+`get_revealed_seed(i)` + `get_pending_commit` expose the audit chain. Asset/source
+ids are admin-overridable for local/test (`set_asset_ledger` / `set_source_canister`).
+
+## Next: Phase 6 (frontend) or merge + deploy this branch (needs Rob's OK).

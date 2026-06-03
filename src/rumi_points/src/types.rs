@@ -183,6 +183,26 @@ pub struct EpochSummary {
     pub snapshot_b_ns: u64,
 }
 
+/// In-flight state of the OPEN weekly epoch, persisted inside `State` so the
+/// periodic driver survives upgrades (resume from here, re-derive nothing). `None`
+/// between epochs and before the season starts. The snapshot cursors are the
+/// resume points for the chunked capture (last-processed principal; `None` means
+/// "not started"). `a_complete` / `b_complete` gate the close on both snapshots
+/// having been captured.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct OpenEpoch {
+    pub epoch_index: u64,
+    pub epoch_start_ns: u64,
+    /// `min(epoch_start + EPOCH_DURATION, season_end)` (the last epoch is partial).
+    pub epoch_end_ns: u64,
+    pub snapshot_a_ns: u64,
+    pub snapshot_b_ns: u64,
+    pub a_cursor: Option<Principal>,
+    pub a_complete: bool,
+    pub b_cursor: Option<Principal>,
+    pub b_complete: bool,
+}
+
 // ── Query view types ────────────────────────────────────────────────────────
 
 /// One row of the public leaderboard (spec Section 10). The canister returns the
@@ -213,6 +233,17 @@ pub struct PointsConfig {
     pub excluded_count: u32,
     pub registered_count: u64,
     pub current_epoch_index: u64,
+    pub snapshot_seed_committed: bool,
+}
+
+/// Epoch-driver status for the ops dashboard (Phase 5).
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct EpochStatus {
+    pub current_epoch_index: u64,
+    pub driver_enabled: bool,
+    pub driver_interval_secs: u64,
+    pub open_epoch: Option<OpenEpoch>,
+    pub revealed_seed_count: u64,
     pub snapshot_seed_committed: bool,
 }
 
