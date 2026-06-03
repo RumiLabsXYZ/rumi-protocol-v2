@@ -541,7 +541,11 @@ pub fn leaderboard(offset: u32, limit: u32) -> Vec<LeaderboardEntry> {
     });
     // Highest points first; principal id as a stable tiebreak.
     all.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    let total_points_all: u128 = all.iter().map(|(_, pts)| *pts).sum();
+    // Saturating, consistent with `run_close_accrual` (a non-saturating `.sum()`
+    // would panic in debug on the astronomically unlikely u128 overflow).
+    let total_points_all: u128 = all
+        .iter()
+        .fold(0u128, |acc, (_, pts)| acc.saturating_add(*pts));
 
     all.into_iter()
         .enumerate()
@@ -1224,6 +1228,13 @@ pub fn advance_epoch_index() {
 /// The hash the next epoch's seed must reveal (spike 0.3 public audit value).
 pub fn get_pending_commit() -> [u8; 32] {
     with_state(|s| s.snapshot_seed.pending_commit)
+}
+
+/// Whether the snapshot-seed commitment `H0` was set (at init). `start_season`
+/// requires this so the operator cannot pick the snapshot times after the season
+/// is underway (the commit-reveal anti-sniping guarantee).
+pub fn snapshot_seed_committed() -> bool {
+    with_state(|s| s.snapshot_seed.is_committed())
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────

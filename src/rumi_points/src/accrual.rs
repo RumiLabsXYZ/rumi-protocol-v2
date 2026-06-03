@@ -574,6 +574,33 @@ mod tests {
         assert_eq!(got.verified_3usd, 450);
     }
 
+    /// DESIGN NOTE — INTENTIONAL (Rob confirmed 2026-06-03), NOT a bug. The 3USD/LP
+    /// a user receives from a 3pool deposit, when then staked in the stability pool,
+    /// counts BOTH toward the 3pool verification cap (preserving full 3pool credit)
+    /// AND as a 2x SP position: the same capital is rewarded twice. This is a
+    /// DELIBERATE composability reward (it deepens SP liquidity). The verification
+    /// cap only checks the LP is "still held somewhere"; it does not subtract SP
+    /// usage. Pinned so any FUTURE change to this reward is a conscious choice.
+    #[test]
+    fn doc_sp_held_3usd_lp_stacks_3pool_and_sp_credit() {
+        const D100: u128 = 100 * 100_000_000; // $100 in usd_e8s
+        // Deposited $100 ckUSDC + $100 ckUSDT into the 3pool (recorded), and parks
+        // the resulting ~$200 of 3USD/LP in the stability pool (sp_3usd).
+        let raw = RawSnapshot {
+            recorded_usdc: D100,
+            recorded_usdt: D100,
+            sp_3usd: 2 * D100,
+            ..Default::default()
+        };
+        let inputs = build_snapshot_inputs(&raw, &prices(0.0, VP1));
+        // The SP-held LP fully verifies the $200 recorded 3pool composition.
+        assert_eq!(inputs.verified_3usd, 2 * D100);
+        let w = snapshot_weights(&inputs);
+        // Full 3pool matched credit (5x) AND the same capital earns SP 2x on top.
+        assert_eq!(w.ck_matched, 2 * D100 * 5, "3pool 5x credit preserved");
+        assert_eq!(w.threeusd_sp, 2 * D100 * 2, "SP 2x credit on the same LP");
+    }
+
     #[test]
     fn build_inputs_handles_zero_amm_total_lp() {
         let raw = RawSnapshot {

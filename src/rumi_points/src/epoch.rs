@@ -106,6 +106,26 @@ thread_local! {
 /// seasons span several (the cursor in `OpenEpoch` resumes between ticks).
 const CAPTURE_CHUNK: u64 = 100;
 
+/// Decide the snapshot's next resume cursor and completion flag from one chunk's
+/// outcome. Pure, so the capture book-keeping is unit-testable:
+///   - `done` only when the chunk was short (registered set exhausted) AND no
+///     per-principal fetch errored. An error must never let the snapshot complete
+///     with a transient 0 that the close-time `min()` would lock in.
+///   - the resume cursor is the last principal we actually captured (or the prior
+///     cursor if none were, e.g. the first principal errored), so the next tick
+///     retries the failed principal instead of skipping past it.
+fn next_capture_cursor(
+    chunk_len: usize,
+    last_captured: Option<Principal>,
+    prev_cursor: Option<Principal>,
+    hit_error: bool,
+) -> (Option<Principal>, bool) {
+    let exhausted = (chunk_len as u64) < CAPTURE_CHUNK;
+    let done = exhausted && !hit_error;
+    let next_cursor = if done { None } else { last_captured.or(prev_cursor) };
+    (next_cursor, done)
+}
+
 type CallResult<T> = Result<T, (RejectionCode, String)>;
 
 #[derive(Clone, Copy)]
@@ -157,6 +177,11 @@ pub enum StartSeasonError {
     SeasonInactive,
     /// Epoch 0 is already open or past (the season was already started).
     AlreadyStarted,
+    /// The snapshot-seed commitment `H0` was never set (at init). Opening a season
+    /// against an uncommitted seed would let the operator choose the snapshot times
+    /// after seeing pre-season activity, defeating the commit-reveal anti-sniping
+    /// guarantee. Re-deploy/init with `snapshot_seed_commit = sha256(S0)` first.
+    NotCommitted,
     /// The provided seed did not match the committed `H0`.
     Seed(SeedError),
 }
@@ -189,6 +214,14 @@ pub fn start_season(initial_seed: [u8; 32], now: u64) -> Result<(), StartSeasonE
     }
     if state::current_epoch_index() != 0 || state::get_open_epoch().is_some() {
         return Err(StartSeasonError::AlreadyStarted);
+    }
+    // Commit-reveal integrity: H0 must have been committed at init, BEFORE the
+    // season, so the snapshot times are fixed by a value chosen blind to season
+    // activity. Refuse to open epoch 0 against an uncommitted seed (otherwise the
+    // operator could pick favourable times now). `open_new_epoch` then verifies
+    // `sha256(initial_seed) == H0` via `SeedManager::start_epoch`.
+    if !state::snapshot_seed_committed() {
+        return Err(StartSeasonError::NotCommitted);
     }
     open_new_epoch(0, Some(initial_seed), now).map_err(StartSeasonError::Seed)
 }
@@ -265,27 +298,42 @@ async fn capture(which: Snapshot) {
         Snapshot::B => open.b_cursor,
     };
     let chunk = state::registered_chunk_after(cursor, CAPTURE_CHUNK);
+    let mut last_captured: Option<Principal> = None;
+    let mut hit_error = false;
     for p in &chunk {
         if state::is_excluded(p) {
+            // Excluded principals are not captured but still advance the cursor
+            // past themselves (they are skipped again at close).
+            last_captured = Some(*p);
             continue;
         }
-        let raw = fetch_raw_snapshot(*p, &ctx).await;
+        let raw = match fetch_raw_snapshot(*p, &ctx).await {
+            Some(r) => r,
+            None => {
+                // A per-principal source errored (distinct from a real zero
+                // balance). Stop WITHOUT recording a transient 0: the close-time
+                // min() would otherwise lock that 0 in and zero a held position
+                // for the whole epoch. Resume from the last success next tick and
+                // retry this principal.
+                hit_error = true;
+                break;
+            }
+        };
         let weights = accrual::snapshot_weights(&accrual::build_snapshot_inputs(&raw, &ctx.prices));
         match which {
             Snapshot::A => state::snapshot_buffer_put(*p, weights),
             Snapshot::B => state::snapshot_buffer_merge_min(*p, weights),
         }
+        last_captured = Some(*p);
     }
-    // A short chunk means the registered set is exhausted: this snapshot is done.
-    let done = (chunk.len() as u64) < CAPTURE_CHUNK;
-    let last = chunk.last().copied();
+    let (next_cursor, done) = next_capture_cursor(chunk.len(), last_captured, cursor, hit_error);
     match which {
         Snapshot::A => {
-            open.a_cursor = if done { None } else { last };
+            open.a_cursor = next_cursor;
             open.a_complete = done;
         }
         Snapshot::B => {
-            open.b_cursor = if done { None } else { last };
+            open.b_cursor = next_cursor;
             open.b_complete = done;
         }
     }
@@ -387,15 +435,20 @@ async fn fetch_context() -> Option<SnapshotContext> {
     })
 }
 
-async fn fetch_raw_snapshot(p: Principal, ctx: &SnapshotContext) -> RawSnapshot {
-    let vault_debt = fetch_vault_debt(ctx.backend, p).await;
-    let wallet_3usd = fetch_wallet_3usd(ctx.threepool, p).await;
+/// Capture one principal's raw balances across all sources. Returns `None` if ANY
+/// per-principal inter-canister call ERRORED (transport/canister error), so the
+/// caller can retry rather than record a transient 0 (a genuine zero balance is a
+/// successful `Some(0)`). The snapshot-wide values (prices, AMM pool, reserves)
+/// were already fetched once in `fetch_context`.
+async fn fetch_raw_snapshot(p: Principal, ctx: &SnapshotContext) -> Option<RawSnapshot> {
+    let vault_debt = fetch_vault_debt(ctx.backend, p).await?;
+    let wallet_3usd = fetch_wallet_3usd(ctx.threepool, p).await?;
     let (sp_icusd, sp_3usd) = match ctx.sp {
-        Some(c) => fetch_sp_position(c, p, ctx.icusd_ledger, ctx.threeusd_ledger).await,
+        Some(c) => fetch_sp_position(c, p, ctx.icusd_ledger, ctx.threeusd_ledger).await?,
         None => (0, 0),
     };
     let amm_user_lp = match &ctx.amm {
-        Some(pool) => fetch_amm_lp(ctx.amm_canister, &pool.pool_id, p).await,
+        Some(pool) => fetch_amm_lp(ctx.amm_canister, &pool.pool_id, p).await?,
         None => 0,
     };
 
@@ -404,7 +457,7 @@ async fn fetch_raw_snapshot(p: Principal, ctx: &SnapshotContext) -> RawSnapshot 
         Some(pool) => (pool.total_lp, pool.reserve_3usd, pool.reserve_icp),
         None => (0, 0, 0),
     };
-    RawSnapshot {
+    Some(RawSnapshot {
         vault_debt,
         recorded_icusd,
         recorded_usdc,
@@ -416,7 +469,7 @@ async fn fetch_raw_snapshot(p: Principal, ctx: &SnapshotContext) -> RawSnapshot 
         amm_total_lp,
         amm_reserve_3usd,
         amm_reserve_icp,
-    }
+    })
 }
 
 async fn fetch_icp_rate(backend: Principal) -> Option<f64> {
@@ -460,28 +513,32 @@ async fn fetch_amm_pool(amm: Principal, threeusd: Principal, icp: Principal) -> 
     }
 }
 
-async fn fetch_vault_debt(backend: Principal, p: Principal) -> u128 {
+/// `None` on call error (retry); `Some(debt)` on success (a debt-free principal is
+/// `Some(0)`). Same Option contract for all four per-principal fetch helpers.
+async fn fetch_vault_debt(backend: Principal, p: Principal) -> Option<u128> {
     let res: CallResult<(Vec<balances::CandidVault>,)> =
         ic_cdk::call(backend, "get_vaults", (Some(p),)).await;
     match res {
-        Ok((vaults,)) => vaults
-            .iter()
-            .fold(0u128, |acc, v| acc.saturating_add(v.borrowed_icusd_amount as u128)),
+        Ok((vaults,)) => Some(
+            vaults
+                .iter()
+                .fold(0u128, |acc, v| acc.saturating_add(v.borrowed_icusd_amount as u128)),
+        ),
         Err((c, m)) => {
             ic_cdk::println!("[epoch] get_vaults failed: {:?} {}", c, m);
-            0
+            None
         }
     }
 }
 
-async fn fetch_wallet_3usd(threepool: Principal, p: Principal) -> u128 {
+async fn fetch_wallet_3usd(threepool: Principal, p: Principal) -> Option<u128> {
     let account = Account { owner: p, subaccount: None };
     let res: CallResult<(Nat,)> = ic_cdk::call(threepool, "icrc1_balance_of", (account,)).await;
     match res {
-        Ok((bal,)) => nat_to_u128(&bal),
+        Ok((bal,)) => Some(nat_to_u128(&bal)),
         Err((c, m)) => {
             ic_cdk::println!("[epoch] icrc1_balance_of failed: {:?} {}", c, m);
-            0
+            None
         }
     }
 }
@@ -491,38 +548,41 @@ async fn fetch_sp_position(
     p: Principal,
     icusd: Principal,
     threeusd: Principal,
-) -> (u128, u128) {
+) -> Option<(u128, u128)> {
     let res: CallResult<(Option<balances::UserStabilityPosition>,)> =
         ic_cdk::call(sp, "get_user_position", (Some(p),)).await;
     match res {
         Ok((Some(pos),)) => {
             let bal = |l: &Principal| pos.stablecoin_balances.get(l).copied().unwrap_or(0) as u128;
-            (bal(&icusd), bal(&threeusd))
+            Some((bal(&icusd), bal(&threeusd)))
         }
-        Ok((None,)) => (0, 0),
+        Ok((None,)) => Some((0, 0)),
         Err((c, m)) => {
             ic_cdk::println!("[epoch] get_user_position failed: {:?} {}", c, m);
-            (0, 0)
+            None
         }
     }
 }
 
-async fn fetch_amm_lp(amm: Principal, pool_id: &str, p: Principal) -> u128 {
+async fn fetch_amm_lp(amm: Principal, pool_id: &str, p: Principal) -> Option<u128> {
     let res: CallResult<(u128,)> =
         ic_cdk::call(amm, "get_lp_balance", (pool_id.to_string(), p)).await;
     match res {
-        Ok((lp,)) => lp,
+        Ok((lp,)) => Some(lp),
         Err((c, m)) => {
             ic_cdk::println!("[epoch] get_lp_balance failed: {:?} {}", c, m);
-            0
+            None
         }
     }
 }
 
-/// candid `Nat` -> `u128`, saturating (balances never exceed `u128` in practice).
+/// candid `Nat` -> `u128`, failing CLOSED to 0 if the balance does not fit in
+/// `u128`. Balances never exceed `u128` in practice; a value that does (a corrupt
+/// or hostile ledger) must value to 0, NOT `u128::MAX` — a fail-open MAX would
+/// dwarf every other principal's points and route the whole pool to one reading.
 fn nat_to_u128(n: &Nat) -> u128 {
     let digits: String = n.to_string().chars().filter(|c| c.is_ascii_digit()).collect();
-    digits.parse::<u128>().unwrap_or(u128::MAX)
+    digits.parse::<u128>().unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -620,5 +680,104 @@ mod tests {
     fn pick_amm_pool_none_when_pair_absent() {
         let (three, icp) = (pr(1), pr(2));
         assert!(pick_amm_pool(&[pool("z", pr(3), pr(4), 1, 1, 1)], three, icp).is_none());
+    }
+
+    // ── nat_to_u128: a corrupt/oversized ledger balance must fail CLOSED ──
+
+    #[test]
+    fn nat_to_u128_converts_normal_values() {
+        assert_eq!(nat_to_u128(&Nat::from(0u64)), 0);
+        assert_eq!(nat_to_u128(&Nat::from(12_345u64)), 12_345);
+        assert_eq!(nat_to_u128(&Nat::from(u128::MAX)), u128::MAX);
+    }
+
+    #[test]
+    fn nat_to_u128_saturates_overflow_to_zero_not_max() {
+        // A balance that does not fit in u128 must value to 0 (fail CLOSED), never
+        // u128::MAX: a fail-OPEN MAX would dwarf every other principal's points and
+        // hand the whole airdrop pool to one corrupt reading. Real ledgers never
+        // return this; the guard is defense-in-depth for a corrupt/hostile source.
+        let over = Nat::from(u128::MAX) + Nat::from(1u8);
+        assert_eq!(nat_to_u128(&over), 0);
+    }
+
+    // ── capture cursor/completion decision (the F2 resume-on-error logic) ──
+
+    #[test]
+    fn next_capture_cursor_completes_on_short_chunk_with_no_error() {
+        // A short chunk (fewer than CAPTURE_CHUNK) fully captured -> snapshot done.
+        let (cursor, done) = next_capture_cursor(10, Some(pr(5)), None, false);
+        assert!(done);
+        assert_eq!(cursor, None);
+    }
+
+    #[test]
+    fn next_capture_cursor_advances_on_full_chunk() {
+        // A full chunk with no error -> not done, resume after the last captured.
+        let (cursor, done) =
+            next_capture_cursor(CAPTURE_CHUNK as usize, Some(pr(7)), None, false);
+        assert!(!done);
+        assert_eq!(cursor, Some(pr(7)));
+    }
+
+    #[test]
+    fn next_capture_cursor_does_not_complete_when_an_error_was_hit() {
+        // Even a short chunk must NOT complete if a per-principal fetch errored:
+        // resume after the last success so the failed principal is retried, and a
+        // transient 0 is never locked in by the close-time min().
+        let (cursor, done) = next_capture_cursor(3, Some(pr(2)), None, true);
+        assert!(!done);
+        assert_eq!(cursor, Some(pr(2)));
+    }
+
+    #[test]
+    fn next_capture_cursor_holds_position_when_first_principal_errors() {
+        // No principal captured (first one errored): leave the cursor unchanged so
+        // the same chunk is retried from the start next tick.
+        let (cursor, done) = next_capture_cursor(3, None, Some(pr(9)), true);
+        assert!(!done);
+        assert_eq!(cursor, Some(pr(9)));
+    }
+
+    // ── start_season requires a committed H0 (commit-reveal integrity) ──
+
+    fn init_season(commit: Option<[u8; 32]>) {
+        crate::state::init_state(
+            Some(crate::types::InitArgs {
+                admin: Some(pr(9)),
+                season_start_ns: Some(0),
+                season_end_ns: Some(1_000_000),
+                snapshot_seed_commit: commit,
+                ..Default::default()
+            }),
+            pr(9),
+        );
+    }
+
+    #[test]
+    fn start_season_rejects_uncommitted_seed() {
+        init_season(None); // H0 never committed
+        assert_eq!(start_season([7u8; 32], 1), Err(StartSeasonError::NotCommitted));
+        assert!(state::get_open_epoch().is_none(), "no epoch may open uncommitted");
+    }
+
+    #[test]
+    fn start_season_opens_epoch_zero_against_committed_h0() {
+        let s0 = [7u8; 32];
+        init_season(Some(crate::snapshot_seed::commitment(&s0)));
+        assert_eq!(start_season(s0, 1), Ok(()));
+        assert_eq!(state::get_open_epoch().expect("epoch 0 open").epoch_index, 0);
+    }
+
+    #[test]
+    fn start_season_rejects_seed_not_matching_commit() {
+        let s0 = [7u8; 32];
+        init_season(Some(crate::snapshot_seed::commitment(&s0)));
+        // A seed that does not hash to the committed H0 is rejected (no re-roll).
+        assert_eq!(
+            start_season([8u8; 32], 1),
+            Err(StartSeasonError::Seed(SeedError::CommitMismatch))
+        );
+        assert!(state::get_open_epoch().is_none());
     }
 }
