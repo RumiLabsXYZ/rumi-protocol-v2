@@ -48,10 +48,12 @@ use ic_stable_structures::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::accrual::{self, SnapshotWeights};
 use crate::snapshot_seed::{RevealedSeed, SnapshotSeedSingleton};
 use crate::types::{
-    EpochSummary, InitArgs, LeaderboardEntry, PointEntry, PointSource, PointsConfig, PointsError,
-    PrincipalState, QualifyingAction, RegistrationInfo,
+    AssetType, DepositKey, DepositRecord, EpochStatus, EpochSummary, InitArgs, LeaderboardEntry,
+    OpenEpoch, PointEntry, PointSource, PointsConfig, PointsError, PrincipalState, QualifyingAction,
+    RegistrationInfo, RepaymentEvent, Venue,
 };
 
 // ── Memory ids (never reuse) ────────────────────────────────────────────────
@@ -71,6 +73,13 @@ const CURSORS_MEM_ID: MemoryId = MemoryId::new(8);
 const SOURCE_CANISTERS_MEM_ID: MemoryId = MemoryId::new(9);
 // Phase 2b: poll-timer config (key 0 = enabled 0/1, key 1 = interval seconds).
 const POLL_CONFIG_MEM_ID: MemoryId = MemoryId::new(10);
+// Phase 5: running-min snapshot weights for the OPEN epoch (cleared at close).
+const SNAPSHOT_BUFFER_MEM_ID: MemoryId = MemoryId::new(11);
+// Phase 5: asset-ledger registry (asset tag -> ledger principal), mainnet-seeded,
+// admin-overridable for local/test.
+const ASSET_LEDGERS_MEM_ID: MemoryId = MemoryId::new(12);
+// Phase 5: epoch-driver config (key 0 = enabled 0/1, key 1 = interval seconds).
+const EPOCH_CONFIG_MEM_ID: MemoryId = MemoryId::new(13);
 
 const WASM_PAGE_SIZE: u64 = 65_536; // 64 KiB
 
@@ -137,11 +146,26 @@ impl StoredRevealedSeed {
     }
 }
 
-/// Singleton config (admin, excluded set, season window, epoch counter, in-flight
-/// seed). Held on the heap during execution and serialized to the `STATE_BLOB`
-/// region on `pre_upgrade`, mirroring the backend. NOT candid-facing.
+/// Versioned wrapper for the per-principal running-min snapshot weights (the
+/// MemoryId-11 buffer for the open epoch). See the module doc for the recipe.
+#[derive(Serialize, Deserialize)]
+pub enum StoredSnapshotWeights {
+    V1(SnapshotWeights),
+}
+
+impl StoredSnapshotWeights {
+    fn into_current(self) -> SnapshotWeights {
+        match self {
+            StoredSnapshotWeights::V1(v) => v,
+        }
+    }
+}
+
+/// FROZEN V1 shape of `State` (pre-Phase-5). Old `{"V1": ...}` blob bytes decode
+/// into this, then migrate forward via `From`. NEVER change these fields; add new
+/// state to the current `State` (a new `StoredState` version) instead.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct State {
+pub struct StateV1 {
     pub admin: Principal,
     pub excluded_principals: BTreeSet<Principal>,
     pub season_start_ns: u64,
@@ -150,9 +174,58 @@ pub struct State {
     pub snapshot_seed: SnapshotSeedSingleton,
 }
 
+/// Singleton config (admin, excluded set, season window, epoch counter, in-flight
+/// seed, open-epoch driver state). Held on the heap during execution and
+/// serialized to the `STATE_BLOB` region on `pre_upgrade`, mirroring the backend.
+/// NOT candid-facing.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct State {
+    pub admin: Principal,
+    pub excluded_principals: BTreeSet<Principal>,
+    pub season_start_ns: u64,
+    pub season_end_ns: u64,
+    pub current_epoch_index: u64,
+    pub snapshot_seed: SnapshotSeedSingleton,
+    /// Phase 5: in-flight open epoch (periodic-driver state). `None` between
+    /// epochs and before the season starts.
+    pub open_epoch: Option<OpenEpoch>,
+}
+
+impl From<StateV1> for State {
+    fn from(v: StateV1) -> Self {
+        State {
+            admin: v.admin,
+            excluded_principals: v.excluded_principals,
+            season_start_ns: v.season_start_ns,
+            season_end_ns: v.season_end_ns,
+            current_epoch_index: v.current_epoch_index,
+            snapshot_seed: v.snapshot_seed,
+            open_epoch: None,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub enum StoredState {
-    V1(State),
+    V1(StateV1),
+    V2(State),
+}
+
+impl StoredState {
+    fn into_current(self) -> State {
+        match self {
+            StoredState::V1(old) => old.into(),
+            StoredState::V2(s) => s,
+        }
+    }
+}
+
+/// Decode a singleton-blob payload (either version) into the current `State`. Old
+/// `V1` bytes migrate forward; `None` on a corrupt/undecodable blob.
+fn decode_stored_state(bytes: &[u8]) -> Option<State> {
+    ciborium::de::from_reader::<StoredState, _>(bytes)
+        .ok()
+        .map(StoredState::into_current)
 }
 
 /// CBOR `Storable` impl (ciborium), `Bound::Unbounded` per the stable-memory
@@ -179,6 +252,7 @@ impl_cbor_storable!(StoredPrincipalState);
 impl_cbor_storable!(StoredPointEntry);
 impl_cbor_storable!(StoredEpochSummary);
 impl_cbor_storable!(StoredRevealedSeed);
+impl_cbor_storable!(StoredSnapshotWeights);
 
 /// `StableBTreeMap` key wrapper. ic-stable-structures 0.6.5 does not provide a
 /// `Storable` impl for `Principal`, so we wrap it. A principal is at most 29
@@ -241,6 +315,10 @@ thread_local! {
     /// post-upgrade heap always starts with no poll in flight).
     static POLL_IN_PROGRESS: RefCell<bool> = RefCell::new(false);
 
+    /// Phase 5: transient guard so overlapping epoch-driver ticks never double-run
+    /// a capture or close. NOT persisted (a fresh heap starts with no tick running).
+    static EPOCH_IN_PROGRESS: RefCell<bool> = RefCell::new(false);
+
     /// Phase 2: per-source canister principal (source tag -> canister id). Seeded
     /// with mainnet defaults at init; the admin overrides per environment (e.g.
     /// local replica ids) via `set_source_canister`. Persists across upgrades.
@@ -252,6 +330,22 @@ thread_local! {
     /// `post_upgrade` from this config (timers do not survive upgrades).
     static POLL_CONFIG: RefCell<StableBTreeMap<u8, u64, VMem>> =
         MEMORY_MANAGER.with(|m| RefCell::new(StableBTreeMap::init(m.borrow().get(POLL_CONFIG_MEM_ID))));
+
+    /// Phase 5: running-MIN snapshot weights per principal for the OPEN epoch.
+    /// Snapshot A inserts; snapshot B keeps `min_by_total` vs A; the close consumes
+    /// and clears it. Stable so a mid-epoch upgrade keeps captured snapshots.
+    static SNAPSHOT_BUFFER: RefCell<StableBTreeMap<StorablePrincipal, StoredSnapshotWeights, VMem>> =
+        MEMORY_MANAGER.with(|m| RefCell::new(StableBTreeMap::init(m.borrow().get(SNAPSHOT_BUFFER_MEM_ID))));
+
+    /// Phase 5: asset-ledger registry (asset tag -> ledger principal). Seeded with
+    /// mainnet ids at init; admin overrides per environment (local/test).
+    static ASSET_LEDGERS: RefCell<StableBTreeMap<u8, StorablePrincipal, VMem>> =
+        MEMORY_MANAGER.with(|m| RefCell::new(StableBTreeMap::init(m.borrow().get(ASSET_LEDGERS_MEM_ID))));
+
+    /// Phase 5: epoch-driver config (key 0 = enabled, key 1 = interval seconds).
+    /// Mirrors POLL_CONFIG; the driver timer is re-registered in `post_upgrade`.
+    static EPOCH_CONFIG: RefCell<StableBTreeMap<u8, u64, VMem>> =
+        MEMORY_MANAGER.with(|m| RefCell::new(StableBTreeMap::init(m.borrow().get(EPOCH_CONFIG_MEM_ID))));
 }
 
 // ── Excluded-principals seed (spec Section 11) ──────────────────────────────
@@ -332,6 +426,7 @@ pub fn init_state(args: Option<InitArgs>, caller: Principal) {
         season_end_ns: args.season_end_ns.unwrap_or(crate::DEFAULT_SEASON_END_NS),
         current_epoch_index: 0,
         snapshot_seed,
+        open_epoch: None,
     };
     STATE.with(|cell| *cell.borrow_mut() = Some(state));
 
@@ -343,6 +438,17 @@ pub fn init_state(args: Option<InitArgs>, caller: Principal) {
         let mut m = m.borrow_mut();
         if m.is_empty() {
             for (tag, p) in source_canister_seed() {
+                m.insert(tag, StorablePrincipal(p));
+            }
+        }
+    });
+
+    // Seed the asset-ledger registry with mainnet ids (Phase 5). Admin overrides
+    // per environment via `set_asset_ledger`. No-op if already populated.
+    ASSET_LEDGERS.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.is_empty() {
+            for (tag, p) in asset_ledger_seed() {
                 m.insert(tag, StorablePrincipal(p));
             }
         }
@@ -478,7 +584,7 @@ pub fn epoch_history(offset: u64, limit: u64) -> Vec<EpochSummary> {
 pub fn save_state_to_stable() {
     let bytes = with_state(|s| {
         let mut buf = Vec::new();
-        ciborium::ser::into_writer(&StoredState::V1(s.clone()), &mut buf)
+        ciborium::ser::into_writer(&StoredState::V2(s.clone()), &mut buf)
             .expect("failed to serialize State to CBOR");
         buf
     });
@@ -525,13 +631,11 @@ pub fn load_state_from_stable() -> Option<State> {
         }
         let mut buf = vec![0u8; len as usize];
         mem.read(8, &mut buf);
-        match ciborium::de::from_reader::<StoredState, _>(buf.as_slice()) {
-            Ok(StoredState::V1(s)) => Some(s),
-            Err(e) => {
-                ic_cdk::println!("[upgrade] failed to deserialize State: {:?}", e);
-                None
-            }
+        let decoded = decode_stored_state(&buf);
+        if decoded.is_none() {
+            ic_cdk::println!("[upgrade] failed to deserialize State blob");
         }
+        decoded
     })
 }
 
@@ -621,6 +725,18 @@ pub fn points_config() -> PointsConfig {
         excluded_count: s.excluded_principals.len() as u32,
         registered_count: registered_count(),
         current_epoch_index: s.current_epoch_index,
+        snapshot_seed_committed: s.snapshot_seed.is_committed(),
+    })
+}
+
+/// Epoch-driver status for the ops dashboard (Phase 5).
+pub fn epoch_status() -> EpochStatus {
+    with_state(|s| EpochStatus {
+        current_epoch_index: s.current_epoch_index,
+        driver_enabled: epoch_driver_enabled(),
+        driver_interval_secs: epoch_driver_interval_secs(),
+        open_epoch: s.open_epoch.clone(),
+        revealed_seed_count: revealed_seed_count(),
         snapshot_seed_committed: s.snapshot_seed.is_committed(),
     })
 }
@@ -741,6 +857,375 @@ pub fn in_season(ts_ns: u64) -> bool {
     with_state(|s| ts_ns >= s.season_start_ns && ts_ns <= s.season_end_ns)
 }
 
+// ── Phase 5: snapshot-weights buffer (MemoryId 11) ──────────────────────────
+// Per-principal running-min weights for the open epoch. The capture/merge logic
+// lives in the driver (`epoch.rs`); these are the storage primitives it uses.
+
+/// Store a principal's snapshot weights.
+pub fn snapshot_buffer_put(p: Principal, w: SnapshotWeights) {
+    SNAPSHOT_BUFFER.with(|b| {
+        b.borrow_mut()
+            .insert(StorablePrincipal(p), StoredSnapshotWeights::V1(w));
+    });
+}
+
+/// Read a principal's buffered weights, if any.
+pub fn snapshot_buffer_get(p: &Principal) -> Option<SnapshotWeights> {
+    SNAPSHOT_BUFFER.with(|b| b.borrow().get(&StorablePrincipal(*p)).map(|s| s.into_current()))
+}
+
+/// Drop a principal's buffered weights.
+pub fn snapshot_buffer_remove(p: &Principal) {
+    SNAPSHOT_BUFFER.with(|b| {
+        b.borrow_mut().remove(&StorablePrincipal(*p));
+    });
+}
+
+/// All buffered `(principal, weights)`, for the epoch-close accrual pass.
+pub fn snapshot_buffer_entries() -> Vec<(Principal, SnapshotWeights)> {
+    SNAPSHOT_BUFFER.with(|b| {
+        b.borrow()
+            .iter()
+            .map(|(k, v)| (k.0, v.into_current()))
+            .collect()
+    })
+}
+
+pub fn snapshot_buffer_len() -> u64 {
+    SNAPSHOT_BUFFER.with(|b| b.borrow().len())
+}
+
+/// Empty the buffer (called at epoch close, before the next epoch opens).
+pub fn snapshot_buffer_clear() {
+    SNAPSHOT_BUFFER.with(|b| {
+        let mut map = b.borrow_mut();
+        let keys: Vec<StorablePrincipal> = map.iter().map(|(k, _)| k).collect();
+        for k in keys {
+            map.remove(&k);
+        }
+    });
+}
+
+// ── Phase 5: asset-ledger registry (MemoryId 12) ────────────────────────────
+
+/// Stable tag for an asset's ledger-registry slot. NEVER renumber.
+pub fn asset_tag(asset: AssetType) -> u8 {
+    match asset {
+        AssetType::IcUsd => 0,
+        AssetType::ThreeUsd => 1,
+        AssetType::CkUsdc => 2,
+        AssetType::CkUsdt => 3,
+        AssetType::Icp => 4,
+    }
+}
+
+/// Mainnet ledger principals seeded at init (asset tag -> ledger). 3USD's "ledger"
+/// is the rumi_3pool canister itself (the LP token). Confirmed 2026-06-02.
+pub fn asset_ledger_seed() -> Vec<(u8, Principal)> {
+    [
+        (0u8, "t6bor-paaaa-aaaap-qrd5q-cai"), // icUSD
+        (1u8, "fohh4-yyaaa-aaaap-qtkpa-cai"), // 3USD (= rumi_3pool)
+        (2u8, "xevnm-gaaaa-aaaar-qafnq-cai"), // ckUSDC
+        (3u8, "cngnf-vqaaa-aaaar-qag4q-cai"), // ckUSDT
+        (4u8, "ryjl3-tyaaa-aaaaa-aaaba-cai"), // ICP
+    ]
+    .iter()
+    .map(|(t, s)| (*t, Principal::from_text(s).expect("invalid asset ledger literal")))
+    .collect()
+}
+
+/// The configured ledger principal for an asset, or `None` if unset.
+pub fn get_asset_ledger(asset: AssetType) -> Option<Principal> {
+    ASSET_LEDGERS.with(|m| m.borrow().get(&asset_tag(asset)).map(|p| p.0))
+}
+
+/// Classify a ledger principal to its asset, or `None` if it is not a tracked
+/// stable/ICP ledger (used to type SP deposits and vault-repayment assets).
+pub fn classify_ledger(ledger: &Principal) -> Option<AssetType> {
+    [
+        AssetType::IcUsd,
+        AssetType::ThreeUsd,
+        AssetType::CkUsdc,
+        AssetType::CkUsdt,
+        AssetType::Icp,
+    ]
+    .into_iter()
+    .find(|a| get_asset_ledger(*a).as_ref() == Some(ledger))
+}
+
+/// Admin: override an asset's ledger id (e.g. point at local-replica ledgers).
+pub fn set_asset_ledger(caller: Principal, tag: u8, ledger: Principal) -> Result<(), PointsError> {
+    require_admin(caller)?;
+    ASSET_LEDGERS.with(|m| {
+        m.borrow_mut().insert(tag, StorablePrincipal(ledger));
+    });
+    Ok(())
+}
+
+/// All configured `(tag, ledger)` pairs, for the status query.
+pub fn asset_ledgers() -> Vec<(u8, Principal)> {
+    ASSET_LEDGERS.with(|m| m.borrow().iter().map(|(t, p)| (t, p.0)).collect())
+}
+
+// ── Phase 5: epoch-driver config (MemoryId 13) ──────────────────────────────
+// Mirrors POLL_CONFIG: the weekly epoch state machine is driven by a periodic
+// timer, OFF by default, re-registered from this config in `post_upgrade`.
+
+pub const DEFAULT_EPOCH_DRIVER_INTERVAL_SECS: u64 = 300;
+pub const MIN_EPOCH_DRIVER_INTERVAL_SECS: u64 = 60;
+
+pub fn epoch_driver_enabled() -> bool {
+    EPOCH_CONFIG.with(|c| c.borrow().get(&0).unwrap_or(0) != 0)
+}
+
+pub fn epoch_driver_interval_secs() -> u64 {
+    EPOCH_CONFIG.with(|c| c.borrow().get(&1).unwrap_or(DEFAULT_EPOCH_DRIVER_INTERVAL_SECS))
+}
+
+pub fn set_epoch_driver_enabled(caller: Principal, enabled: bool) -> Result<(), PointsError> {
+    require_admin(caller)?;
+    EPOCH_CONFIG.with(|c| {
+        c.borrow_mut().insert(0, enabled as u64);
+    });
+    Ok(())
+}
+
+pub fn set_epoch_driver_interval(caller: Principal, secs: u64) -> Result<(), PointsError> {
+    require_admin(caller)?;
+    let clamped = secs.max(MIN_EPOCH_DRIVER_INTERVAL_SECS);
+    EPOCH_CONFIG.with(|c| {
+        c.borrow_mut().insert(1, clamped);
+    });
+    Ok(())
+}
+
+// ── Phase 5/4: ingestion-driven per-principal state (events.rs writes these) ──
+
+/// 90-day repayment window length (spec Section 6).
+pub const REPAYMENT_WINDOW_NS: u64 = 90 * crate::NANOS_PER_DAY;
+
+/// Add to (or subtract from) a principal's recorded 3pool deposit for one asset
+/// (the event-tracked composition deciding the 1x/3x/5x split). Subtraction
+/// saturates at 0 and drops the record when it reaches 0. No-op if unregistered.
+pub fn update_3pool_recorded(
+    principal: Principal,
+    asset: AssetType,
+    amount_usd_e8s: u128,
+    add: bool,
+    now_ns: u64,
+) {
+    let mut ps = match get_principal_state(&principal) {
+        Some(p) => p,
+        None => return,
+    };
+    let key = DepositKey { venue: Venue::ThreePool, asset };
+    if add {
+        let rec = ps.active_deposits.entry(key).or_insert_with(|| DepositRecord {
+            asset,
+            venue: Venue::ThreePool,
+            recorded_value_usd: 0,
+            deposited_at: now_ns,
+            last_verified_at: now_ns,
+        });
+        rec.recorded_value_usd = rec.recorded_value_usd.saturating_add(amount_usd_e8s);
+        rec.last_verified_at = now_ns;
+    } else if let Some(rec) = ps.active_deposits.get_mut(&key) {
+        rec.recorded_value_usd = rec.recorded_value_usd.saturating_sub(amount_usd_e8s);
+        rec.last_verified_at = now_ns;
+        if rec.recorded_value_usd == 0 {
+            ps.active_deposits.remove(&key);
+        }
+    }
+    put_principal_state(ps);
+}
+
+/// Record a qualifying ckUSDC/ckUSDT vault repayment, opening a 90-day points
+/// window capped at season end (spec Section 6). No-op if unregistered.
+pub fn record_repayment(
+    principal: Principal,
+    asset: AssetType,
+    amount_usd_e8s: u128,
+    repaid_at: u64,
+) {
+    let mut ps = match get_principal_state(&principal) {
+        Some(p) => p,
+        None => return,
+    };
+    let season_end = with_state(|s| s.season_end_ns);
+    let window_end = repaid_at.saturating_add(REPAYMENT_WINDOW_NS).min(season_end);
+    ps.repayment_events.push(RepaymentEvent {
+        asset,
+        amount_usd: amount_usd_e8s,
+        repaid_at,
+        window_end,
+    });
+    put_principal_state(ps);
+}
+
+// ── Phase 5: open-epoch state + close-time accrual (driven by epoch.rs) ──────
+
+pub fn get_open_epoch() -> Option<OpenEpoch> {
+    with_state(|s| s.open_epoch.clone())
+}
+
+pub fn set_open_epoch(open: Option<OpenEpoch>) {
+    with_state_mut(|s| s.open_epoch = open);
+}
+
+pub fn season_bounds() -> (u64, u64) {
+    with_state(|s| (s.season_start_ns, s.season_end_ns))
+}
+
+/// Aggregate result of an epoch close, used to build the `EpochSummary`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CloseStats {
+    pub total_points_all: u128,
+    pub points_accrued: u128,
+    pub active_principals: u64,
+    pub registered_principals: u64,
+}
+
+/// Close-time accrual over every registered principal: scale each one's min-
+/// snapshot weights over the epoch period, add repayment-window points, write the
+/// per-source `PointEntry` rows, and bump `total_points`. Excluded principals are
+/// skipped (spec Section 11). Clears the snapshot buffer at the end.
+pub fn run_close_accrual(
+    epoch_index: u64,
+    epoch_start: u64,
+    epoch_end_capped: u64,
+    now_ns: u64,
+) -> CloseStats {
+    // Snapshot the principal set first (cannot mutate PRINCIPALS while iterating).
+    let principals: Vec<Principal> =
+        PRINCIPALS.with(|m| m.borrow().iter().map(|(k, _)| k.0).collect());
+    let mut points_accrued = 0u128;
+    let mut active = 0u64;
+    for p in &principals {
+        if is_excluded(p) {
+            continue; // excluded principals never accrue (spec Section 11)
+        }
+        let mut ps = match get_principal_state(p) {
+            Some(s) => s,
+            None => continue,
+        };
+        let min_weights = snapshot_buffer_get(p).unwrap_or_default();
+        let (entries, delta) =
+            accrual::accrue_principal(min_weights, &ps.repayment_events, epoch_start, epoch_end_capped);
+        for (source, pts) in entries {
+            append_point_entry(PointEntry {
+                principal: *p,
+                epoch_index,
+                points_delta: pts,
+                source,
+                recorded_at_ns: now_ns,
+            });
+        }
+        if delta > 0 {
+            ps.total_points = ps.total_points.saturating_add(delta);
+            active += 1;
+        }
+        ps.last_epoch_processed = epoch_index;
+        // Drop repayment windows that can no longer overlap any future epoch, so
+        // the per-principal vec stays bounded (no unbounded growth in the value).
+        ps.repayment_events.retain(|r| r.window_end > epoch_end_capped);
+        put_principal_state(ps);
+        points_accrued = points_accrued.saturating_add(delta);
+    }
+    snapshot_buffer_clear();
+    let total_points_all = PRINCIPALS.with(|m| {
+        m.borrow()
+            .iter()
+            .fold(0u128, |acc, (_, v)| acc.saturating_add(v.into_current().total_points))
+    });
+    CloseStats {
+        total_points_all,
+        points_accrued,
+        active_principals: active,
+        registered_principals: principals.len() as u64,
+    }
+}
+
+/// Snapshot B: keep `min_by_total(A, B)` for a principal already captured at A. A
+/// principal absent at A (registered between snapshots, or zero at A) is left out:
+/// the two-snapshot min is 0, so they earn no balance points this epoch.
+pub fn snapshot_buffer_merge_min(p: Principal, weights: SnapshotWeights) {
+    if let Some(existing) = snapshot_buffer_get(&p) {
+        snapshot_buffer_put(p, accrual::min_by_total(existing, weights));
+    }
+}
+
+/// The next chunk of registered principals (sorted) strictly after `cursor`
+/// (`None` = from the start), up to `limit`. Drives the chunked snapshot capture.
+pub fn registered_chunk_after(cursor: Option<Principal>, limit: u64) -> Vec<Principal> {
+    PRINCIPALS.with(|m| {
+        let map = m.borrow();
+        let keys = map.iter().map(|(k, _)| k.0);
+        match cursor {
+            Some(c) => keys.filter(|p| *p > c).take(limit as usize).collect(),
+            None => keys.take(limit as usize).collect(),
+        }
+    })
+}
+
+/// Acquire the single-tick epoch-driver guard (pairs with `end_epoch_guard`).
+pub fn try_begin_epoch() -> bool {
+    EPOCH_IN_PROGRESS.with(|p| {
+        let mut p = p.borrow_mut();
+        if *p {
+            false
+        } else {
+            *p = true;
+            true
+        }
+    })
+}
+
+pub fn end_epoch_guard() {
+    EPOCH_IN_PROGRESS.with(|p| *p.borrow_mut() = false);
+}
+
+/// A principal's recorded 3pool deposit composition `(icUSD, ckUSDC, ckUSDT)` in
+/// `usd_e8s` (the event-tracked side of the hybrid model). Zero for an unknown
+/// principal or an empty leg.
+pub fn recorded_3pool_composition(p: &Principal) -> (u128, u128, u128) {
+    match get_principal_state(p) {
+        Some(ps) => {
+            let leg = |asset| {
+                ps.active_deposits
+                    .get(&DepositKey { venue: Venue::ThreePool, asset })
+                    .map(|r| r.recorded_value_usd)
+                    .unwrap_or(0)
+            };
+            (leg(AssetType::IcUsd), leg(AssetType::CkUsdc), leg(AssetType::CkUsdt))
+        }
+        None => (0, 0, 0),
+    }
+}
+
+/// Append a revealed seed to the commit-reveal audit log (one row per closed epoch).
+pub fn append_revealed_seed(seed: RevealedSeed) {
+    REVEALED_SEEDS.with(|l| {
+        l.borrow()
+            .append(&StoredRevealedSeed::V1(seed))
+            .expect("failed to append revealed seed");
+    });
+}
+
+/// The revealed seed for a CLOSED epoch (the log index equals the epoch index).
+pub fn get_revealed_seed(epoch_index: u64) -> Option<RevealedSeed> {
+    REVEALED_SEEDS.with(|l| l.borrow().get(epoch_index).map(|s| s.into_current()))
+}
+
+/// Advance `current_epoch_index` (called at epoch close).
+pub fn advance_epoch_index() {
+    with_state_mut(|s| s.current_epoch_index = s.current_epoch_index.saturating_add(1));
+}
+
+/// The hash the next epoch's seed must reveal (spike 0.3 public audit value).
+pub fn get_pending_commit() -> [u8; 32] {
+    with_state(|s| s.snapshot_seed.pending_commit)
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 // Native unit tests exercise the real stable structures: off-wasm,
 // `DefaultMemoryImpl` is a heap-backed `VectorMemory`, and libtest runs each
@@ -751,7 +1236,7 @@ pub fn in_season(ts_ns: u64) -> bool {
 mod tests {
     use super::*;
     use crate::types::{
-        AssetType, DepositKey, DepositRecord, EpochSummary, InitArgs, PrincipalState,
+        AssetType, DepositKey, DepositRecord, EpochSummary, InitArgs, OpenEpoch, PrincipalState,
         QualifyingAction, RepaymentEvent, Venue,
     };
     use std::collections::BTreeMap;
@@ -996,6 +1481,58 @@ mod tests {
     }
 
     #[test]
+    fn state_v1_blob_migrates_to_v2_with_no_open_epoch() {
+        // Simulate a pre-Phase-5 blob: a StoredState::V1 payload from old bytes.
+        let v1 = StateV1 {
+            admin: tp(1),
+            excluded_principals: [tp(2)].into_iter().collect(),
+            season_start_ns: 100,
+            season_end_ns: 200,
+            current_epoch_index: 3,
+            snapshot_seed: SnapshotSeedSingleton {
+                pending_commit: [7u8; 32],
+                current_seed: Some([8u8; 32]),
+            },
+        };
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&StoredState::V1(v1.clone()), &mut bytes).unwrap();
+
+        let migrated = decode_stored_state(&bytes).expect("V1 blob must decode and migrate");
+        assert_eq!(migrated.admin, tp(1));
+        assert!(migrated.excluded_principals.contains(&tp(2)));
+        assert_eq!(migrated.season_start_ns, 100);
+        assert_eq!(migrated.current_epoch_index, 3);
+        assert_eq!(migrated.snapshot_seed, v1.snapshot_seed);
+        assert_eq!(migrated.open_epoch, None); // the new field defaults on migration
+    }
+
+    #[test]
+    fn state_v2_blob_round_trips_with_open_epoch() {
+        let state = State {
+            admin: tp(1),
+            excluded_principals: BTreeSet::new(),
+            season_start_ns: 0,
+            season_end_ns: 0,
+            current_epoch_index: 5,
+            snapshot_seed: SnapshotSeedSingleton::default(),
+            open_epoch: Some(OpenEpoch {
+                epoch_index: 5,
+                epoch_start_ns: 10,
+                epoch_end_ns: 20,
+                snapshot_a_ns: 12,
+                snapshot_b_ns: 18,
+                a_cursor: Some(tp(9)),
+                a_complete: true,
+                b_cursor: None,
+                b_complete: false,
+            }),
+        };
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&StoredState::V2(state.clone()), &mut bytes).unwrap();
+        assert_eq!(decode_stored_state(&bytes), Some(state));
+    }
+
+    #[test]
     fn poll_config_defaults_off_at_300s() {
         init_default(tp(99));
         assert!(!poll_enabled(), "poll timer is OFF by default");
@@ -1030,5 +1567,355 @@ mod tests {
         assert_eq!(set_poll_interval(intruder, 120), Err(PointsError::Unauthorized));
         assert!(!poll_enabled());
         assert_eq!(poll_interval_secs(), DEFAULT_POLL_INTERVAL_SECS);
+    }
+
+    // ── Phase 5: snapshot buffer ──
+
+    fn sw(debt: u128) -> SnapshotWeights {
+        SnapshotWeights { icusd_debt: debt, ..Default::default() }
+    }
+
+    #[test]
+    fn snapshot_buffer_put_get_round_trip() {
+        let p = tp(40);
+        assert_eq!(snapshot_buffer_get(&p), None);
+        snapshot_buffer_put(p, sw(123));
+        assert_eq!(snapshot_buffer_get(&p), Some(sw(123)));
+        assert_eq!(snapshot_buffer_len(), 1);
+    }
+
+    #[test]
+    fn snapshot_buffer_remove_and_clear() {
+        snapshot_buffer_put(tp(1), sw(1));
+        snapshot_buffer_put(tp(2), sw(2));
+        snapshot_buffer_remove(&tp(1));
+        assert_eq!(snapshot_buffer_get(&tp(1)), None);
+        assert_eq!(snapshot_buffer_len(), 1);
+        snapshot_buffer_clear();
+        assert_eq!(snapshot_buffer_len(), 0);
+        assert!(snapshot_buffer_entries().is_empty());
+    }
+
+    #[test]
+    fn snapshot_buffer_entries_lists_all() {
+        snapshot_buffer_put(tp(5), sw(50));
+        snapshot_buffer_put(tp(6), sw(60));
+        let mut got = snapshot_buffer_entries();
+        got.sort_by_key(|(p, _)| *p);
+        assert_eq!(got, vec![(tp(5), sw(50)), (tp(6), sw(60))]);
+    }
+
+    // ── Phase 5: asset-ledger registry ──
+
+    #[test]
+    fn asset_ledger_seed_classifies_mainnet_ledgers() {
+        init_default(tp(99));
+        let icusd = Principal::from_text("t6bor-paaaa-aaaap-qrd5q-cai").unwrap();
+        let threeusd = Principal::from_text("fohh4-yyaaa-aaaap-qtkpa-cai").unwrap();
+        let ckusdc = Principal::from_text("xevnm-gaaaa-aaaar-qafnq-cai").unwrap();
+        let icp = Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap();
+        assert_eq!(classify_ledger(&icusd), Some(AssetType::IcUsd));
+        assert_eq!(classify_ledger(&threeusd), Some(AssetType::ThreeUsd));
+        assert_eq!(classify_ledger(&ckusdc), Some(AssetType::CkUsdc));
+        assert_eq!(get_asset_ledger(AssetType::Icp), Some(icp));
+        // An unknown ledger is not classified.
+        assert_eq!(classify_ledger(&tp(123)), None);
+    }
+
+    #[test]
+    fn admin_can_override_asset_ledger_for_local() {
+        let admin = tp(99);
+        init_default(admin);
+        let local = tp(50);
+        assert_eq!(
+            set_asset_ledger(admin, asset_tag(AssetType::CkUsdc), local),
+            Ok(())
+        );
+        assert_eq!(get_asset_ledger(AssetType::CkUsdc), Some(local));
+        assert_eq!(classify_ledger(&local), Some(AssetType::CkUsdc));
+        // Non-admin rejected.
+        assert_eq!(set_asset_ledger(tp(8), 0, tp(7)), Err(PointsError::Unauthorized));
+    }
+
+    // ── Phase 5: epoch-driver config ──
+
+    #[test]
+    fn epoch_driver_defaults_off_at_300s() {
+        init_default(tp(99));
+        assert!(!epoch_driver_enabled());
+        assert_eq!(epoch_driver_interval_secs(), DEFAULT_EPOCH_DRIVER_INTERVAL_SECS);
+    }
+
+    #[test]
+    fn admin_can_enable_and_floor_epoch_driver_interval() {
+        let admin = tp(99);
+        init_default(admin);
+        assert_eq!(set_epoch_driver_enabled(admin, true), Ok(()));
+        assert!(epoch_driver_enabled());
+        assert_eq!(set_epoch_driver_interval(admin, 5), Ok(())); // below the floor
+        assert_eq!(epoch_driver_interval_secs(), MIN_EPOCH_DRIVER_INTERVAL_SECS);
+        assert_eq!(
+            set_epoch_driver_enabled(tp(8), false),
+            Err(PointsError::Unauthorized)
+        );
+    }
+
+    // ── Phase 5/4: ingestion-driven state ──
+
+    fn key_3pool(asset: AssetType) -> DepositKey {
+        DepositKey { venue: Venue::ThreePool, asset }
+    }
+
+    #[test]
+    fn update_3pool_recorded_adds_subtracts_and_drops_at_zero() {
+        init_default(tp(99));
+        let p = tp(30);
+        register(p, 1, QualifyingAction::Deposit3Pool).unwrap();
+        let key = key_3pool(AssetType::CkUsdc);
+
+        update_3pool_recorded(p, AssetType::CkUsdc, 100, true, 5);
+        assert_eq!(get_principal_state(&p).unwrap().active_deposits[&key].recorded_value_usd, 100);
+
+        update_3pool_recorded(p, AssetType::CkUsdc, 50, true, 6);
+        assert_eq!(get_principal_state(&p).unwrap().active_deposits[&key].recorded_value_usd, 150);
+
+        update_3pool_recorded(p, AssetType::CkUsdc, 60, false, 7);
+        assert_eq!(get_principal_state(&p).unwrap().active_deposits[&key].recorded_value_usd, 90);
+
+        // Subtracting past zero drops the record entirely.
+        update_3pool_recorded(p, AssetType::CkUsdc, 1_000, false, 8);
+        assert!(get_principal_state(&p).unwrap().active_deposits.get(&key).is_none());
+    }
+
+    #[test]
+    fn update_3pool_recorded_is_noop_when_unregistered() {
+        init_default(tp(99));
+        update_3pool_recorded(tp(31), AssetType::IcUsd, 100, true, 5);
+        assert!(get_principal_state(&tp(31)).is_none());
+    }
+
+    #[test]
+    fn record_repayment_caps_window_at_season_end() {
+        init_state(
+            Some(InitArgs {
+                admin: Some(tp(99)),
+                season_start_ns: Some(0),
+                season_end_ns: Some(1_000),
+                ..Default::default()
+            }),
+            Principal::anonymous(),
+        );
+        let p = tp(32);
+        register(p, 1, QualifyingAction::RepayVault).unwrap();
+
+        record_repayment(p, AssetType::CkUsdc, 500, 100);
+        let st = get_principal_state(&p).unwrap();
+        let ev = &st.repayment_events[0];
+        assert_eq!(ev.asset, AssetType::CkUsdc);
+        assert_eq!(ev.amount_usd, 500);
+        assert_eq!(ev.repaid_at, 100);
+        assert_eq!(ev.window_end, 1_000); // 100 + 90d >> 1000, so capped at season end
+    }
+
+    #[test]
+    fn record_repayment_uses_full_window_within_season() {
+        init_state(
+            Some(InitArgs {
+                admin: Some(tp(99)),
+                season_start_ns: Some(0),
+                season_end_ns: Some(u64::MAX),
+                ..Default::default()
+            }),
+            Principal::anonymous(),
+        );
+        let p = tp(33);
+        register(p, 1, QualifyingAction::RepayVault).unwrap();
+        record_repayment(p, AssetType::CkUsdt, 200, 100);
+        let st = get_principal_state(&p).unwrap();
+        assert_eq!(st.repayment_events[0].window_end, 100 + REPAYMENT_WINDOW_NS);
+    }
+
+    // ── Phase 5: open epoch + close accrual ──
+
+    fn open_epoch_at(index: u64) -> OpenEpoch {
+        OpenEpoch {
+            epoch_index: index,
+            epoch_start_ns: 0,
+            epoch_end_ns: 7 * crate::NANOS_PER_DAY,
+            snapshot_a_ns: 1,
+            snapshot_b_ns: 2,
+            a_cursor: None,
+            a_complete: true,
+            b_cursor: None,
+            b_complete: true,
+        }
+    }
+
+    #[test]
+    fn open_epoch_get_set_round_trip() {
+        init_default(tp(99));
+        assert_eq!(get_open_epoch(), None);
+        set_open_epoch(Some(open_epoch_at(3)));
+        assert_eq!(get_open_epoch().unwrap().epoch_index, 3);
+        set_open_epoch(None);
+        assert_eq!(get_open_epoch(), None);
+    }
+
+    #[test]
+    fn run_close_accrual_accrues_balance_and_repayment() {
+        // A long season so the 90-day window is not truncated.
+        init_state(
+            Some(InitArgs {
+                admin: Some(tp(99)),
+                season_start_ns: Some(0),
+                season_end_ns: Some(400 * crate::NANOS_PER_DAY),
+                ..Default::default()
+            }),
+            Principal::anonymous(),
+        );
+        let p1 = tp(60);
+        let p2 = tp(61);
+        register(p1, 1, QualifyingAction::MintIcUsd).unwrap();
+        register(p2, 1, QualifyingAction::RepayVault).unwrap();
+
+        // p1: a balance position captured into the snapshot buffer.
+        snapshot_buffer_put(p1, SnapshotWeights { icusd_debt: 100, ..Default::default() });
+        // p2: an open repayment window, no balance position.
+        record_repayment(p2, AssetType::CkUsdc, 1_000 * 100_000_000, 0);
+
+        let week = 7 * crate::NANOS_PER_DAY;
+        let stats = run_close_accrual(0, 0, week, 9_999);
+
+        let repay = 1_000u128 * 100_000_000 * 5 * 7;
+        assert_eq!(get_principal_state(&p1).unwrap().total_points, 700); // 100 over 7 days
+        assert_eq!(get_principal_state(&p2).unwrap().total_points, repay);
+        assert_eq!(get_principal_state(&p1).unwrap().last_epoch_processed, 0);
+        assert_eq!(stats.active_principals, 2);
+        assert_eq!(stats.registered_principals, 2);
+        assert_eq!(stats.points_accrued, 700 + repay);
+        assert_eq!(stats.total_points_all, 700 + repay);
+        assert_eq!(snapshot_buffer_len(), 0); // drained for the next epoch
+    }
+
+    #[test]
+    fn run_close_accrual_prunes_expired_repayment_windows() {
+        init_state(
+            Some(InitArgs {
+                admin: Some(tp(99)),
+                season_start_ns: Some(0),
+                season_end_ns: Some(400 * crate::NANOS_PER_DAY),
+                ..Default::default()
+            }),
+            Principal::anonymous(),
+        );
+        let p = tp(65);
+        register(p, 1, QualifyingAction::RepayVault).unwrap();
+        let mut ps = get_principal_state(&p).unwrap();
+        ps.repayment_events = vec![
+            // Expires within epoch 0 (window_end 3d <= epoch end 7d): drop after close.
+            RepaymentEvent { asset: AssetType::CkUsdc, amount_usd: 100, repaid_at: 0, window_end: 3 * crate::NANOS_PER_DAY },
+            // Still open past epoch 0: keep.
+            RepaymentEvent { asset: AssetType::CkUsdc, amount_usd: 100, repaid_at: 0, window_end: 50 * crate::NANOS_PER_DAY },
+        ];
+        put_principal_state(ps);
+
+        let week = 7 * crate::NANOS_PER_DAY;
+        run_close_accrual(0, 0, week, 1);
+
+        let after = get_principal_state(&p).unwrap();
+        assert_eq!(after.repayment_events.len(), 1, "the expired window is pruned");
+        assert_eq!(after.repayment_events[0].window_end, 50 * crate::NANOS_PER_DAY);
+    }
+
+    #[test]
+    fn run_close_accrual_skips_excluded_principals() {
+        let admin = tp(99);
+        init_default(admin);
+        let p = tp(62);
+        register(p, 1, QualifyingAction::MintIcUsd).unwrap();
+        snapshot_buffer_put(p, SnapshotWeights { icusd_debt: 100, ..Default::default() });
+        add_excluded(admin, p).unwrap();
+
+        let week = 7 * crate::NANOS_PER_DAY;
+        let stats = run_close_accrual(0, 0, week, 1);
+        assert_eq!(get_principal_state(&p).unwrap().total_points, 0); // excluded: no accrual
+        assert_eq!(stats.active_principals, 0);
+    }
+
+    #[test]
+    fn snapshot_buffer_merge_min_keeps_smaller_total() {
+        let p = tp(70);
+        snapshot_buffer_put(p, SnapshotWeights { icusd_debt: 100, ..Default::default() }); // A total 100
+        snapshot_buffer_merge_min(p, SnapshotWeights { icusd_debt: 40, ..Default::default() }); // B total 40
+        assert_eq!(snapshot_buffer_get(&p).unwrap().icusd_debt, 40);
+
+        let q = tp(71);
+        snapshot_buffer_put(q, SnapshotWeights { icusd_debt: 30, ..Default::default() }); // A 30
+        snapshot_buffer_merge_min(q, SnapshotWeights { icusd_debt: 90, ..Default::default() }); // B 90
+        assert_eq!(snapshot_buffer_get(&q).unwrap().icusd_debt, 30); // keeps A
+    }
+
+    #[test]
+    fn snapshot_buffer_merge_min_skips_principal_absent_at_a() {
+        let p = tp(72);
+        // No A entry: a B-only principal (registered between snapshots) earns nothing.
+        snapshot_buffer_merge_min(p, SnapshotWeights { icusd_debt: 100, ..Default::default() });
+        assert_eq!(snapshot_buffer_get(&p), None);
+    }
+
+    #[test]
+    fn registered_chunk_after_paginates_in_principal_order() {
+        init_default(tp(99));
+        register(tp(1), 1, QualifyingAction::MintIcUsd).unwrap();
+        register(tp(2), 1, QualifyingAction::MintIcUsd).unwrap();
+        register(tp(3), 1, QualifyingAction::MintIcUsd).unwrap();
+        assert_eq!(registered_chunk_after(None, 2), vec![tp(1), tp(2)]);
+        assert_eq!(registered_chunk_after(Some(tp(2)), 2), vec![tp(3)]);
+        assert_eq!(registered_chunk_after(Some(tp(3)), 2), Vec::<Principal>::new());
+    }
+
+    #[test]
+    fn epoch_guard_is_single_entry() {
+        assert!(try_begin_epoch());
+        assert!(!try_begin_epoch()); // already held
+        end_epoch_guard();
+        assert!(try_begin_epoch());
+    }
+
+    #[test]
+    fn recorded_3pool_composition_reads_active_deposits() {
+        init_default(tp(99));
+        let p = tp(80);
+        register(p, 1, QualifyingAction::Deposit3Pool).unwrap();
+        update_3pool_recorded(p, AssetType::IcUsd, 10, true, 1);
+        update_3pool_recorded(p, AssetType::CkUsdc, 20, true, 1);
+        assert_eq!(recorded_3pool_composition(&p), (10, 20, 0));
+        assert_eq!(recorded_3pool_composition(&tp(123)), (0, 0, 0));
+    }
+
+    #[test]
+    fn revealed_seed_log_appends_and_reads_by_index() {
+        let r = |i: u64| RevealedSeed {
+            epoch_index: i,
+            seed: [i as u8; 32],
+            snapshot_time_a_ns: i,
+            snapshot_time_b_ns: i + 1,
+            revealed_at_ns: i + 2,
+        };
+        append_revealed_seed(r(0));
+        append_revealed_seed(r(1));
+        assert_eq!(revealed_seed_count(), 2);
+        assert_eq!(get_revealed_seed(0).unwrap().epoch_index, 0);
+        assert_eq!(get_revealed_seed(1).unwrap().snapshot_time_a_ns, 1);
+        assert_eq!(get_revealed_seed(2), None);
+    }
+
+    #[test]
+    fn advance_epoch_index_increments() {
+        init_default(tp(99));
+        assert_eq!(current_epoch_index(), 0);
+        advance_epoch_index();
+        advance_epoch_index();
+        assert_eq!(current_epoch_index(), 2);
     }
 }

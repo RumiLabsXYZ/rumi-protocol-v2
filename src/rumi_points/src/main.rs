@@ -6,11 +6,12 @@
 use candid::Principal;
 use ic_canister_log::{declare_log_buffer, log};
 
+use rumi_points::snapshot_seed::RevealedSeed;
 use rumi_points::types::{
-    EpochSummary, IngestStatus, InitArgs, LeaderboardEntry, PointsConfig, PointsError,
+    EpochStatus, EpochSummary, IngestStatus, InitArgs, LeaderboardEntry, PointsConfig, PointsError,
     PrincipalState, RegistrationInfo, SourceStatus,
 };
-use rumi_points::{poll, state};
+use rumi_points::{epoch, poll, state};
 
 // Canister debug-log buffer (retrievable in later phases; for now feeds the
 // replica debug log on lifecycle events).
@@ -23,8 +24,9 @@ fn main() {}
 #[ic_cdk::init]
 fn init(args: Option<InitArgs>) {
     state::init_state(args, ic_cdk::caller());
-    // No-op while the poll timer is off by default; consistent entry point.
+    // No-op while both timers are off by default; consistent entry points.
     poll::setup_poll_timer();
+    epoch::setup_epoch_timer();
     let cfg = state::points_config();
     log!(
         INFO,
@@ -44,8 +46,9 @@ fn pre_upgrade() {
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
     state::restore_from_stable_or_trap();
-    // Timers do not survive upgrades: re-register from the persisted config.
+    // Timers do not survive upgrades: re-register both from the persisted config.
     poll::setup_poll_timer();
+    epoch::setup_epoch_timer();
     let cfg = state::points_config();
     log!(
         INFO,
@@ -175,6 +178,82 @@ fn get_ingest_status() -> IngestStatus {
         poll_enabled: state::poll_enabled(),
         poll_interval_secs: state::poll_interval_secs(),
     }
+}
+
+// ── Phase 5: epoch driver + commit-reveal audit ─────────────────────────────
+
+/// Admin: open Season 1's epoch 0 with the secret seed S0 (verified against the
+/// committed H0), then enable the periodic driver. Call once, in-season, after the
+/// poll has registered participants. `initial_seed` is the 32-byte S0.
+#[ic_cdk::update]
+fn start_season(initial_seed: Vec<u8>) -> Result<(), String> {
+    let caller = ic_cdk::caller();
+    if !state::is_admin(caller) {
+        return Err("unauthorized".to_string());
+    }
+    let seed: [u8; 32] = initial_seed
+        .try_into()
+        .map_err(|_| "initial_seed must be exactly 32 bytes".to_string())?;
+    epoch::start_season(seed, ic_cdk::api::time()).map_err(|e| format!("{:?}", e))?;
+    state::set_epoch_driver_enabled(caller, true).map_err(|e| format!("{:?}", e))?;
+    epoch::setup_epoch_timer();
+    Ok(())
+}
+
+/// Admin: turn the epoch driver on/off (off by default; on after `start_season`).
+#[ic_cdk::update]
+fn set_epoch_driver_enabled(enabled: bool) -> Result<(), PointsError> {
+    state::set_epoch_driver_enabled(ic_cdk::caller(), enabled)?;
+    epoch::setup_epoch_timer();
+    Ok(())
+}
+
+/// Admin: set the driver cadence in seconds (clamped to a floor).
+#[ic_cdk::update]
+fn set_epoch_driver_interval_secs(secs: u64) -> Result<(), PointsError> {
+    state::set_epoch_driver_interval(ic_cdk::caller(), secs)?;
+    epoch::setup_epoch_timer();
+    Ok(())
+}
+
+/// Admin: advance the epoch state machine one step now (ops recovery / E2E),
+/// independent of the enabled flag.
+#[ic_cdk::update]
+async fn force_epoch_tick() -> Result<(), PointsError> {
+    if !state::is_admin(ic_cdk::caller()) {
+        return Err(PointsError::Unauthorized);
+    }
+    epoch::run_tick().await;
+    Ok(())
+}
+
+/// Admin: override an asset's ledger id (point at local/test ledgers). Tags:
+/// 0 = icUSD, 1 = 3USD, 2 = ckUSDC, 3 = ckUSDT, 4 = ICP.
+#[ic_cdk::update]
+fn set_asset_ledger(asset_tag: u8, ledger: Principal) -> Result<(), PointsError> {
+    state::set_asset_ledger(ic_cdk::caller(), asset_tag, ledger)
+}
+
+#[ic_cdk::query]
+fn get_asset_ledgers() -> Vec<(u8, Principal)> {
+    state::asset_ledgers()
+}
+
+#[ic_cdk::query]
+fn get_epoch_status() -> EpochStatus {
+    state::epoch_status()
+}
+
+/// The revealed seed for a CLOSED epoch, for post-hoc snapshot-time verification.
+#[ic_cdk::query]
+fn get_revealed_seed(epoch_index: u64) -> Option<RevealedSeed> {
+    state::get_revealed_seed(epoch_index)
+}
+
+/// The hash the next epoch's seed must reveal (record it now, verify after reveal).
+#[ic_cdk::query]
+fn get_pending_commit() -> Vec<u8> {
+    state::get_pending_commit().to_vec()
 }
 
 ic_cdk::export_candid!();

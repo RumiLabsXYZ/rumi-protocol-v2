@@ -164,7 +164,14 @@ pub mod backend {
             BackendEvent::RepayToVault { vault_id, caller, repayed_amount, timestamp } => (
                 caller,
                 timestamp,
-                IngestKind::VaultRepay { vault_id, amount_e8s: repayed_amount },
+                // `repayment_asset` is gated: the upstream backend `RepayToVault`
+                // event does not carry it yet, so it stays `None` and the 5x
+                // ck-stable window is skipped until the field ships.
+                IngestKind::VaultRepay {
+                    vault_id,
+                    amount_e8s: repayed_amount,
+                    repayment_asset: None,
+                },
             ),
             BackendEvent::CloseVault { vault_id, timestamp } => {
                 (None, timestamp, IngestKind::VaultClose { vault_id })
@@ -383,6 +390,53 @@ pub mod amm {
     }
 }
 
+// ── Balance / position queries (Phase 5 snapshot capture) ───────────────────
+// Minimal candid mirrors of each source's READ endpoints. Record width-subtyping
+// lets us declare only the fields the snapshot driver reads; everything else on
+// the wire is ignored.
+pub mod balances {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    /// `rumi_protocol_backend::get_vaults(opt principal) -> vec CandidVault`. The
+    /// debt already includes accrued interest.
+    #[derive(CandidType, Deserialize, Clone, Debug)]
+    pub struct CandidVault {
+        pub borrowed_icusd_amount: u64,
+    }
+
+    /// `rumi_protocol_backend::get_protocol_status() -> ProtocolStatus`.
+    #[derive(CandidType, Deserialize, Clone, Debug)]
+    pub struct ProtocolStatus {
+        pub last_icp_rate: f64,
+    }
+
+    /// `rumi_3pool::get_pool_status() -> PoolStatus` (1e18-scaled virtual price).
+    #[derive(CandidType, Deserialize, Clone, Debug)]
+    pub struct PoolStatus {
+        pub virtual_price: u128,
+    }
+
+    /// `rumi_stability_pool::get_user_position(opt principal) -> opt
+    /// UserStabilityPosition`. Balances are per-ledger native decimals (icUSD and
+    /// 3USD are both 8-dec), already compounded for liquidation draws.
+    #[derive(CandidType, Deserialize, Clone, Debug)]
+    pub struct UserStabilityPosition {
+        pub stablecoin_balances: BTreeMap<Principal, u64>,
+    }
+
+    /// `rumi_amm::get_pools() -> vec PoolInfo`. Reserves are native e8s.
+    #[derive(CandidType, Deserialize, Clone, Debug)]
+    pub struct PoolInfo {
+        pub pool_id: String,
+        pub token_a: Principal,
+        pub token_b: Principal,
+        pub reserve_a: u128,
+        pub reserve_b: u128,
+        pub total_lp_shares: u128,
+    }
+}
+
 #[cfg(test)]
 mod canary {
     use candid::{CandidType, Decode, Encode};
@@ -449,6 +503,81 @@ mod canary {
             decoded.is_err(),
             "if candid ever gains serde(other) support, the SP mirror can be slimmed to a subset"
         );
+    }
+}
+
+#[cfg(test)]
+mod balances_tests {
+    use super::balances::*;
+    use candid::{CandidType, Decode, Encode, Principal};
+    use std::collections::BTreeMap;
+
+    fn p(n: u8) -> Principal {
+        Principal::from_slice(&[n, n, n, n, n])
+    }
+
+    /// The subset vault decodes from a wider on-wire vault (record width subtyping).
+    #[test]
+    fn candid_vault_decodes_from_wider_wire() {
+        #[derive(CandidType)]
+        struct WireVault {
+            owner: Principal,
+            vault_id: u64,
+            borrowed_icusd_amount: u64,
+            collateral_amount: u64,
+            accrued_interest: u64,
+        }
+        let bytes = Encode!(&vec![WireVault {
+            owner: p(1),
+            vault_id: 7,
+            borrowed_icusd_amount: 12_345,
+            collateral_amount: 9,
+            accrued_interest: 3,
+        }])
+        .unwrap();
+        let got = Decode!(&bytes, Vec<CandidVault>).unwrap();
+        assert_eq!(got[0].borrowed_icusd_amount, 12_345);
+    }
+
+    #[test]
+    fn protocol_status_decodes_rate_from_wider_wire() {
+        #[derive(CandidType)]
+        struct WireStatus {
+            last_icp_rate: f64,
+            last_icp_timestamp: u64,
+            total_debt: u64,
+        }
+        let bytes = Encode!(&WireStatus {
+            last_icp_rate: 5.5,
+            last_icp_timestamp: 1,
+            total_debt: 2,
+        })
+        .unwrap();
+        assert_eq!(Decode!(&bytes, ProtocolStatus).unwrap().last_icp_rate, 5.5);
+    }
+
+    #[test]
+    fn user_position_decodes_balance_map() {
+        let mut balances = BTreeMap::new();
+        balances.insert(p(2), 500u64);
+        let bytes = Encode!(&Some(UserStabilityPosition { stablecoin_balances: balances })).unwrap();
+        let got = Decode!(&bytes, Option<UserStabilityPosition>).unwrap().unwrap();
+        assert_eq!(got.stablecoin_balances.get(&p(2)), Some(&500));
+    }
+
+    #[test]
+    fn pool_info_round_trips() {
+        let info = PoolInfo {
+            pool_id: "a_b".into(),
+            token_a: p(1),
+            token_b: p(2),
+            reserve_a: 100,
+            reserve_b: 200,
+            total_lp_shares: 300,
+        };
+        let got = Decode!(&Encode!(&vec![info]).unwrap(), Vec<PoolInfo>).unwrap();
+        assert_eq!(got[0].reserve_a, 100);
+        assert_eq!(got[0].total_lp_shares, 300);
     }
 }
 

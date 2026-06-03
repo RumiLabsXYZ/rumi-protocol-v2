@@ -12,6 +12,7 @@
 
 use candid::{CandidType, Principal};
 use serde::Deserialize;
+use std::cell::RefCell;
 
 /// The subset of the backend's `EventTypeFilter` that rumi_points sends. We only
 /// need to DECODE it (the mock ignores the filter), and the values rumi_points
@@ -90,4 +91,110 @@ fn get_events_forward_filtered(
             reached_end: true,
         }
     }
+}
+
+// ── Balance-query mocks (Phase 5 accrual E2E) ───────────────────────────────
+// The snapshot capture queries all four sources for a principal's current
+// balances. This single mock answers every one. Only the vault debt is settable
+// (so the test can vary a position between snapshots to exercise the min()); the
+// other venues return empty, isolating the accrual to a single contribution.
+
+thread_local! {
+    /// Test-controlled `(owner, debt_e8s)` returned by `get_vaults`.
+    static VAULT_DEBT: RefCell<Option<(Principal, u64)>> = const { RefCell::new(None) };
+}
+
+/// Superset of the backend `CandidVault` (rumi_points mirrors only `borrowed_icusd_amount`).
+#[derive(CandidType, Deserialize, Clone)]
+struct CandidVault {
+    owner: Principal,
+    vault_id: u64,
+    borrowed_icusd_amount: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone)]
+struct ProtocolStatus {
+    last_icp_rate: f64,
+    last_icp_timestamp: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone)]
+struct PoolStatus {
+    balances: [u128; 3],
+    lp_total_supply: u128,
+    virtual_price: u128,
+}
+
+#[derive(CandidType, Deserialize, Clone)]
+struct Account {
+    owner: Principal,
+    subaccount: Option<Vec<u8>>,
+}
+
+#[derive(CandidType, Deserialize, Clone)]
+struct UserStabilityPosition {
+    stablecoin_balances: Vec<(Principal, u64)>,
+}
+
+#[derive(CandidType, Deserialize, Clone)]
+struct PoolInfo {
+    pool_id: String,
+    token_a: Principal,
+    token_b: Principal,
+    reserve_a: u128,
+    reserve_b: u128,
+    total_lp_shares: u128,
+}
+
+/// Test control: set the vault debt returned for `owner`.
+#[ic_cdk::update]
+fn set_vault_debt(owner: Principal, debt: u64) {
+    VAULT_DEBT.with(|v| *v.borrow_mut() = Some((owner, debt)));
+}
+
+#[ic_cdk::query]
+fn get_vaults(target: Option<Principal>) -> Vec<CandidVault> {
+    let stored = VAULT_DEBT.with(|v| v.borrow().clone());
+    match (stored, target) {
+        (Some((owner, debt)), Some(t)) if owner == t => vec![CandidVault {
+            owner,
+            vault_id: 1,
+            borrowed_icusd_amount: debt,
+        }],
+        _ => vec![],
+    }
+}
+
+#[ic_cdk::query]
+fn get_protocol_status() -> ProtocolStatus {
+    ProtocolStatus { last_icp_rate: 1.0, last_icp_timestamp: 0 }
+}
+
+#[ic_cdk::query]
+fn get_pool_status() -> PoolStatus {
+    PoolStatus {
+        balances: [0, 0, 0],
+        lp_total_supply: 0,
+        virtual_price: 1_000_000_000_000_000_000, // vp 1.0
+    }
+}
+
+#[ic_cdk::query]
+fn icrc1_balance_of(_account: Account) -> candid::Nat {
+    candid::Nat::from(0u64)
+}
+
+#[ic_cdk::query]
+fn get_user_position(_target: Option<Principal>) -> Option<UserStabilityPosition> {
+    None
+}
+
+#[ic_cdk::query]
+fn get_pools() -> Vec<PoolInfo> {
+    vec![]
+}
+
+#[ic_cdk::query]
+fn get_lp_balance(_pool_id: String, _user: Principal) -> u128 {
+    0
 }

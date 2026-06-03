@@ -24,7 +24,8 @@
 use candid::Principal;
 
 use crate::state;
-use crate::types::QualifyingAction;
+use crate::types::{AssetType, QualifyingAction};
+use crate::valuation;
 
 /// The four source canisters polled for events. The `tag` is the stable cursor
 /// key (see `state::get_cursor`); never renumber an existing tag.
@@ -70,9 +71,16 @@ pub enum IngestKind {
     VaultOpen { vault_id: u64, borrowed_e8s: u64 },
     /// Borrowed (minted) more icUSD from an existing vault.
     VaultBorrow { vault_id: u64, amount_e8s: u64 },
-    /// Repaid vault debt. Asset is not yet attributable (the `repayment_asset`
-    /// field is a separate upstream branch); the 5x ck-stable window is Phase 5.
-    VaultRepay { vault_id: u64, amount_e8s: u64 },
+    /// Repaid vault debt. `repayment_asset` is the ledger the debt was repaid with,
+    /// needed to tell a qualifying ckUSDC/ckUSDT repayment (5x window, spec Section
+    /// 6) from an icUSD burn or collateral closure. The upstream backend field is
+    /// not live yet, so the normalizer sets it `None` and the 5x window is skipped
+    /// (logged) until it lands.
+    VaultRepay {
+        vault_id: u64,
+        amount_e8s: u64,
+        repayment_asset: Option<candid::Principal>,
+    },
     VaultClose { vault_id: u64 },
     VaultLiquidated { vault_id: u64 },
     VaultRedeemed { amount_e8s: u64 },
@@ -117,16 +125,85 @@ impl IngestKind {
 /// qualifying, in-season action. `register` is idempotent and rejects excluded
 /// principals, so this is safe to call for every matching event.
 pub fn apply_ingested_event(ev: &IngestedEvent) {
-    // Auto-registration on first qualifying, in-season action. `register` is
-    // idempotent and rejects excluded principals, so calling it for every
-    // matching event is safe and cheap.
-    if let (Some(action), Some(caller)) = (ev.kind.qualifying_action(), ev.caller) {
-        if state::in_season(ev.timestamp_ns) {
-            let _ = state::register(caller, ev.timestamp_ns, action);
+    let caller = match ev.caller {
+        Some(c) => c,
+        None => return, // close/liquidate carry no principal; nothing to attribute
+    };
+    // Everything is gated to in-season activity by a non-excluded principal.
+    if !state::in_season(ev.timestamp_ns) || state::is_excluded(&caller) {
+        return;
+    }
+    // Auto-register on the first qualifying action (idempotent).
+    if let Some(action) = ev.kind.qualifying_action() {
+        let _ = state::register(caller, ev.timestamp_ns, action);
+    }
+    // Position / repayment tracking only applies to already-registered principals
+    // (a non-qualifying first event, e.g. a withdraw, never enrolls anyone, and
+    // has no recorded position to adjust).
+    if !state::is_registered(&caller) {
+        return;
+    }
+    match &ev.kind {
+        IngestKind::ThreePoolAdd { amounts } => apply_3pool(caller, amounts, true, ev.timestamp_ns),
+        IngestKind::ThreePoolRemove { amounts } => {
+            apply_3pool(caller, amounts, false, ev.timestamp_ns)
+        }
+        IngestKind::VaultRepay { repayment_asset, amount_e8s, .. } => {
+            apply_repayment(caller, *repayment_asset, *amount_e8s, ev.timestamp_ns)
+        }
+        // Vault debt, SP, and AMM positions are read live at each snapshot (the
+        // hybrid model), so their events only register; they are not tracked here.
+        _ => {}
+    }
+}
+
+/// Update the recorded 3pool composition from an add/remove. `amounts` ordering is
+/// `[icUSD, ckUSDT, ckUSDC]` (3pool wire order), in native decimals; normalized to
+/// `usd_e8s` here so the snapshot accrual reads a common scale.
+fn apply_3pool(caller: Principal, amounts: &[u128; 3], add: bool, now_ns: u64) {
+    let legs = [
+        (AssetType::IcUsd, amounts[0]),
+        (AssetType::CkUsdt, amounts[1]),
+        (AssetType::CkUsdc, amounts[2]),
+    ];
+    for (asset, native) in legs {
+        if native > 0 {
+            let usd = valuation::value_stable_usd_e8s(asset, native);
+            state::update_3pool_recorded(caller, asset, usd, add, now_ns);
         }
     }
-    // Position-value tracking, the repayment 90-day window, 3USD verification,
-    // and accrual are Phase 4/5 and read the payload carried on `ev.kind`.
+}
+
+/// Open a 90-day window for a qualifying ckUSDC/ckUSDT repayment (spec Section 6).
+/// Skips (with a log) when the asset is absent (the upstream `repayment_asset`
+/// field is not live) or is not a ck-stable (an icUSD burn / collateral closure
+/// does not qualify).
+fn apply_repayment(
+    caller: Principal,
+    repayment_asset: Option<Principal>,
+    amount_e8s: u64,
+    now_ns: u64,
+) {
+    let ledger = match repayment_asset {
+        Some(l) => l,
+        None => {
+            log_ingest("vault repay without repayment_asset; skipping 5x window");
+            return;
+        }
+    };
+    if let Some(asset @ (AssetType::CkUsdc | AssetType::CkUsdt)) = state::classify_ledger(&ledger) {
+        let usd = valuation::value_stable_usd_e8s(asset, amount_e8s as u128);
+        state::record_repayment(caller, asset, usd, now_ns);
+    }
+}
+
+/// On-chain log; a no-op in native unit tests (the `ic0` host import is
+/// unavailable off-wasm, where `ic_cdk::println!` would panic).
+fn log_ingest(msg: &str) {
+    #[cfg(target_arch = "wasm32")]
+    ic_cdk::println!("[ingest] {}", msg);
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = msg;
 }
 
 /// Apply a decoded batch of normalized events (auto-register etc.). Does NOT
@@ -157,7 +234,20 @@ pub fn ingest_batch(source: SourceId, events: &[IngestedEvent]) -> usize {
 mod tests {
     use super::*;
     use crate::state;
-    use crate::types::{InitArgs, QualifyingAction};
+    use crate::types::{AssetType, DepositKey, InitArgs, QualifyingAction, Venue};
+
+    fn ckusdc() -> Principal {
+        Principal::from_text("xevnm-gaaaa-aaaar-qafnq-cai").unwrap()
+    }
+    fn icusd() -> Principal {
+        Principal::from_text("t6bor-paaaa-aaaap-qrd5q-cai").unwrap()
+    }
+    fn recorded_3pool(p: &Principal, asset: AssetType) -> Option<u128> {
+        state::get_principal_state(p)?
+            .active_deposits
+            .get(&DepositKey { venue: Venue::ThreePool, asset })
+            .map(|r| r.recorded_value_usd)
+    }
 
     fn tp(n: u8) -> Principal {
         Principal::from_slice(&[n, n, n, n, n])
@@ -203,7 +293,7 @@ mod tests {
             None
         );
         assert_eq!(
-            IngestKind::VaultRepay { vault_id: 1, amount_e8s: 5 }.qualifying_action(),
+            IngestKind::VaultRepay { vault_id: 1, amount_e8s: 5, repayment_asset: None }.qualifying_action(),
             Some(QualifyingAction::RepayVault)
         );
         assert_eq!(
@@ -340,6 +430,94 @@ mod tests {
         assert_eq!(first, second); // no double-register, no timestamp change
         assert_eq!(state::registered_count(), 1);
         assert_eq!(state::get_cursor(SourceId::Backend.tag()), 1);
+    }
+
+    // ── Phase 4/5: position + repayment tracking ──
+
+    #[test]
+    fn threepool_add_records_normalized_composition() {
+        init();
+        let p = tp(40);
+        // amounts are [icUSD (8-dec), ckUSDT (6-dec), ckUSDC (6-dec)].
+        apply_ingested_event(&ev(
+            SourceId::ThreePool,
+            0,
+            Some(p),
+            in_season_ts(),
+            IngestKind::ThreePoolAdd { amounts: [100_000_000, 2_000_000, 3_000_000] },
+        ));
+        assert_eq!(recorded_3pool(&p, AssetType::IcUsd), Some(100_000_000)); // 8-dec, x1
+        assert_eq!(recorded_3pool(&p, AssetType::CkUsdt), Some(200_000_000)); // 6-dec, x100
+        assert_eq!(recorded_3pool(&p, AssetType::CkUsdc), Some(300_000_000)); // 6-dec, x100
+    }
+
+    #[test]
+    fn threepool_remove_decrements_recorded_value() {
+        init();
+        let p = tp(41);
+        apply_ingested_event(&ev(
+            SourceId::ThreePool,
+            0,
+            Some(p),
+            in_season_ts(),
+            IngestKind::ThreePoolAdd { amounts: [0, 0, 5_000_000] }, // $5 ckUSDC
+        ));
+        apply_ingested_event(&ev(
+            SourceId::ThreePool,
+            1,
+            Some(p),
+            in_season_ts(),
+            IngestKind::ThreePoolRemove { amounts: [0, 0, 2_000_000] }, // remove $2
+        ));
+        assert_eq!(recorded_3pool(&p, AssetType::CkUsdc), Some(300_000_000)); // $3 left
+    }
+
+    #[test]
+    fn vault_repay_with_ckusdc_opens_a_window() {
+        init();
+        let p = tp(42);
+        apply_ingested_event(&ev(
+            SourceId::Backend,
+            0,
+            Some(p),
+            in_season_ts(),
+            IngestKind::VaultRepay { vault_id: 1, amount_e8s: 1_000_000, repayment_asset: Some(ckusdc()) },
+        ));
+        let st = state::get_principal_state(&p).unwrap();
+        assert_eq!(st.repayment_events.len(), 1);
+        assert_eq!(st.repayment_events[0].asset, AssetType::CkUsdc);
+        assert_eq!(st.repayment_events[0].amount_usd, 100_000_000); // $1, 6-dec x100
+    }
+
+    #[test]
+    fn vault_repay_without_asset_registers_but_opens_no_window() {
+        init();
+        let p = tp(43);
+        apply_ingested_event(&ev(
+            SourceId::Backend,
+            0,
+            Some(p),
+            in_season_ts(),
+            IngestKind::VaultRepay { vault_id: 1, amount_e8s: 1_000_000, repayment_asset: None },
+        ));
+        assert!(state::is_registered(&p)); // repay is a qualifying action
+        assert!(state::get_principal_state(&p).unwrap().repayment_events.is_empty());
+    }
+
+    #[test]
+    fn vault_repay_with_icusd_opens_no_window() {
+        init();
+        let p = tp(44);
+        apply_ingested_event(&ev(
+            SourceId::Backend,
+            0,
+            Some(p),
+            in_season_ts(),
+            IngestKind::VaultRepay { vault_id: 1, amount_e8s: 1_000_000, repayment_asset: Some(icusd()) },
+        ));
+        assert!(state::is_registered(&p));
+        // An icUSD-burn repayment does not qualify for the 5x window (spec Section 6).
+        assert!(state::get_principal_state(&p).unwrap().repayment_events.is_empty());
     }
 }
 
