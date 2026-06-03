@@ -225,6 +225,10 @@ fn install_mock(pic: &pocket_ic::PocketIc) -> Principal {
     mock
 }
 
+/// The season seed S0 the accrual tests reveal at `start_season`. Its commit
+/// `H0 = sha256(S0)` is set at init so the commit-reveal gate is satisfied.
+const SEASON_SEED: [u8; 32] = [42u8; 32];
+
 fn install_points(pic: &pocket_ic::PocketIc) -> Principal {
     let rp = pic.create_canister();
     pic.add_cycles(rp, 4_000_000_000_000);
@@ -233,7 +237,9 @@ fn install_points(pic: &pocket_ic::PocketIc) -> Principal {
         excluded_principals: None,
         season_start_ns: None,
         season_end_ns: None,
-        snapshot_seed_commit: None, // uncommitted: start_season accepts any seed
+        // Commit H0 = sha256(S0) at init: start_season requires a committed seed
+        // (commit-reveal anti-sniping) and verifies S0 against this.
+        snapshot_seed_commit: Some(rumi_points::snapshot_seed::commitment(&SEASON_SEED)),
     };
     pic.install_canister(rp, RUMI_POINTS_WASM.to_vec(), Encode!(&Some(init)).unwrap(), None);
     rp
@@ -253,6 +259,11 @@ fn set_all_sources(pic: &pocket_ic::PocketIc, rp: Principal, mock: Principal) {
 fn set_vault_debt(pic: &pocket_ic::PocketIc, mock: Principal, owner: Principal, debt: u64) {
     pic.update_call(mock, Principal::anonymous(), "set_vault_debt", Encode!(&owner, &debt).unwrap())
         .expect("set_vault_debt failed");
+}
+
+fn set_fail_get_vaults(pic: &pocket_ic::PocketIc, mock: Principal, fail: bool) {
+    pic.update_call(mock, Principal::anonymous(), "set_fail_get_vaults", Encode!(&fail).unwrap())
+        .expect("set_fail_get_vaults failed");
 }
 
 fn start_season_ok(pic: &pocket_ic::PocketIc, rp: Principal, seed: [u8; 32]) {
@@ -326,9 +337,9 @@ fn epoch_accrues_points_for_a_held_position() {
     const DEBT: u64 = 100_000_000; // $1 of icUSD debt (e8s)
     set_vault_debt(&pic, mock, p, DEBT);
 
-    // Open epoch 0 (uncommitted singleton accepts the seed without verification),
-    // then disable the timer so only force_tick drives the state machine.
-    start_season_ok(&pic, rp, [42u8; 32]);
+    // Open epoch 0 (S0 verified against the committed H0), then disable the timer
+    // so only force_tick drives the state machine.
+    start_season_ok(&pic, rp, SEASON_SEED);
     admin_ok(&pic, rp, "set_epoch_driver_enabled", Encode!(&false).unwrap());
 
     let oe = epoch_status(&pic, rp)
@@ -375,7 +386,7 @@ fn between_snapshot_withdrawal_earns_zero() {
     admin_ok(&pic, rp, "register_test_principal", Encode!(&p).unwrap());
 
     set_vault_debt(&pic, mock, p, 100_000_000); // position present at snapshot A
-    start_season_ok(&pic, rp, [42u8; 32]);
+    start_season_ok(&pic, rp, SEASON_SEED);
     admin_ok(&pic, rp, "set_epoch_driver_enabled", Encode!(&false).unwrap());
     let oe = epoch_status(&pic, rp).open_epoch.unwrap();
 
@@ -394,5 +405,60 @@ fn between_snapshot_withdrawal_earns_zero() {
         total_points(&pic, rp, p),
         0,
         "the two-snapshot min() closes end-of-epoch sniping"
+    );
+}
+
+/// F2: a transient per-principal fetch error during snapshot capture must NOT be
+/// recorded as a 0. With the close-time `min()`, a single transient 0 in either
+/// snapshot would otherwise zero a held position for the whole epoch. Instead the
+/// snapshot stays incomplete and is retried, so the position earns full credit once
+/// the source recovers.
+#[test]
+fn transient_fetch_error_does_not_zero_a_held_position() {
+    let pic = PocketIcBuilder::new().with_application_subnet().build();
+    set_time_ns(&pic, rumi_points::DEFAULT_SEASON_START_NS);
+
+    let mock = install_mock(&pic);
+    let rp = install_points(&pic);
+    set_all_sources(&pic, rp, mock);
+
+    let p = Principal::from_slice(&[7; 5]);
+    admin_ok(&pic, rp, "register_test_principal", Encode!(&p).unwrap());
+
+    const DEBT: u64 = 100_000_000; // $1 of icUSD debt, held all epoch
+    set_vault_debt(&pic, mock, p, DEBT);
+
+    start_season_ok(&pic, rp, SEASON_SEED);
+    admin_ok(&pic, rp, "set_epoch_driver_enabled", Encode!(&false).unwrap());
+    let oe = epoch_status(&pic, rp).open_epoch.unwrap();
+
+    // Snapshot A while the backend `get_vaults` call is failing (forced trap).
+    set_fail_get_vaults(&pic, mock, true);
+    set_time_ns(&pic, oe.snapshot_a_ns);
+    force_tick(&pic, rp);
+    assert!(
+        !epoch_status(&pic, rp).open_epoch.unwrap().a_complete,
+        "snapshot A must NOT complete while a source errors (no transient 0 is recorded)"
+    );
+
+    // Source recovers: the retry captures the real debt and completes snapshot A.
+    set_fail_get_vaults(&pic, mock, false);
+    force_tick(&pic, rp);
+    assert!(
+        epoch_status(&pic, rp).open_epoch.unwrap().a_complete,
+        "snapshot A completes once the source recovers"
+    );
+
+    // Snapshot B and close, debt held throughout.
+    set_time_ns(&pic, oe.snapshot_b_ns);
+    force_tick(&pic, rp);
+    set_time_ns(&pic, oe.epoch_end_ns);
+    force_tick(&pic, rp);
+
+    // Full credit: the transient error under-credited nothing.
+    assert_eq!(
+        total_points(&pic, rp, p),
+        DEBT as u128 * 7,
+        "a recovered transient error yields full credit, not a min()-locked zero"
     );
 }

@@ -102,6 +102,10 @@ fn get_events_forward_filtered(
 thread_local! {
     /// Test-controlled `(owner, debt_e8s)` returned by `get_vaults`.
     static VAULT_DEBT: RefCell<Option<(Principal, u64)>> = const { RefCell::new(None) };
+    /// Test-controlled: when set, `get_vaults` traps, so the caller's
+    /// inter-canister call returns an error (exercises the snapshot resume-on-error
+    /// path: a transient fetch failure must NOT be recorded as a 0).
+    static FAIL_GET_VAULTS: RefCell<bool> = const { RefCell::new(false) };
 }
 
 /// Superset of the backend `CandidVault` (rumi_points mirrors only `borrowed_icusd_amount`).
@@ -152,8 +156,17 @@ fn set_vault_debt(owner: Principal, debt: u64) {
     VAULT_DEBT.with(|v| *v.borrow_mut() = Some((owner, debt)));
 }
 
+/// Test control: force `get_vaults` to trap, simulating a transient source error.
+#[ic_cdk::update]
+fn set_fail_get_vaults(fail: bool) {
+    FAIL_GET_VAULTS.with(|f| *f.borrow_mut() = fail);
+}
+
 #[ic_cdk::query]
 fn get_vaults(target: Option<Principal>) -> Vec<CandidVault> {
+    if FAIL_GET_VAULTS.with(|f| *f.borrow()) {
+        ic_cdk::trap("get_vaults: forced failure (test)");
+    }
     let stored = VAULT_DEBT.with(|v| v.borrow().clone());
     match (stored, target) {
         (Some((owner, debt)), Some(t)) if owner == t => vec![CandidVault {

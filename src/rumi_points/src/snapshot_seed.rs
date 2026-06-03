@@ -32,6 +32,14 @@ pub(crate) fn sha256(parts: &[&[u8]]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// The on-chain commit `H0 = sha256(S0)` for a secret seed `S0`. The operator
+/// computes this OFF-CHAIN from their secret `S0` and passes it as
+/// `InitArgs.snapshot_seed_commit` at init; `start_season` later verifies
+/// `sha256(S0) == H0`. Public so tooling (and the E2E) can derive the commit.
+pub fn commitment(seed: &[u8; 32]) -> [u8; 32] {
+    sha256(&[seed])
+}
+
 /// In-flight seed singleton. Lives inside `state::State` (so it rides the
 /// versioned State blob across upgrades). `current_seed` is held privately until
 /// the epoch closes, then appended to the `RevealedSeed` audit log.
