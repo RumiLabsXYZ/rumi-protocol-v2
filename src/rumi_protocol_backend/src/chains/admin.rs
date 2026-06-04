@@ -4,11 +4,20 @@
 //! state-shape rules without spinning up PocketIC.
 
 use super::config::{
-    ChainAdminError, ChainConfigV2, ChainId, ChainStatus, RegisterChainArg,
+    ChainAdminError, ChainConfigV2, ChainId, ChainStatus, GasStrategy, RegisterChainArg,
     UpdateChainConfigArg,
 };
 use super::multi_chain_state::MultiChainStateV3;
 use super::settlement_queue::SettlementQueueV1;
+
+/// EVM chains need >= 1 confirmation before a block is treated as final. A
+/// `finality_depth` of 0 makes `is_block_final(block, 0)` true for any mined
+/// block, defeating reorg safety on the burn/settlement-confirm paths. Solana
+/// (which reads at the `finalized` commitment) legitimately uses 0, so the floor
+/// applies only to EVM gas strategies.
+fn is_evm(gas: &GasStrategy) -> bool {
+    matches!(gas, GasStrategy::EvmEip1559 { .. } | GasStrategy::EvmLegacy { .. })
+}
 
 pub fn register_chain_in_state(
     state: &mut MultiChainStateV3,
@@ -18,6 +27,24 @@ pub fn register_chain_in_state(
     if arg.rpc_endpoints.is_empty() {
         return Err(ChainAdminError::InvalidConfig(
             "rpc_endpoints must contain at least one URL".into(),
+        ));
+    }
+    // Validate the native-asset decimals. This feeds `collateral_ratio_e4`
+    // (10^chain_native_decimals is the divisor that converts native base units
+    // to whole units); a wrong value silently mis-scales every CR check for the
+    // chain. `0` makes the scale 1 (collateral treated as whole units, CR
+    // inflated ~1e9-1e18x -> under-collateralized opens accepted); an absurdly
+    // large value underflows CR to 0 (fails-closed). Expected: 18 for EVM, 9 for
+    // Solana. Reject anything outside a sane band at registration.
+    if arg.chain_native_decimals == 0 || arg.chain_native_decimals > 36 {
+        return Err(ChainAdminError::InvalidConfig(format!(
+            "chain_native_decimals {} out of range (expected 1..=36; 18 for EVM, 9 for Solana)",
+            arg.chain_native_decimals
+        )));
+    }
+    if is_evm(&arg.gas_strategy) && arg.finality_depth == 0 {
+        return Err(ChainAdminError::InvalidConfig(
+            "finality_depth must be >= 1 for EVM chains (0 treats any mined block as final)".into(),
         ));
     }
     if state.chain_configs.contains_key(&arg.chain_id) {
@@ -103,13 +130,31 @@ pub fn update_chain_config_in_state(
         .chain_configs
         .get_mut(&chain_id)
         .ok_or(ChainAdminError::ChainNotRegistered(chain_id))?;
+
+    // Validate the FULL post-update config before mutating anything
+    // (all-or-nothing). rpc_endpoints must stay non-empty, and an EVM chain must
+    // keep finality_depth >= 1 even if only one of (gas_strategy, finality_depth)
+    // is being changed.
+    if let Some(eps) = &update.rpc_endpoints {
+        if eps.is_empty() {
+            return Err(ChainAdminError::InvalidConfig("rpc_endpoints cannot be empty".into()));
+        }
+    }
+    let effective_finality = update.finality_depth.unwrap_or(cfg.finality_depth);
+    let effective_is_evm = match &update.gas_strategy {
+        Some(g) => is_evm(g),
+        None => is_evm(&cfg.gas_strategy),
+    };
+    if effective_is_evm && effective_finality == 0 {
+        return Err(ChainAdminError::InvalidConfig(
+            "finality_depth must be >= 1 for EVM chains (0 treats any mined block as final)".into(),
+        ));
+    }
+
     if let Some(name) = update.display_name {
         cfg.display_name = name;
     }
     if let Some(eps) = update.rpc_endpoints {
-        if eps.is_empty() {
-            return Err(ChainAdminError::InvalidConfig("rpc_endpoints cannot be empty".into()));
-        }
         cfg.rpc_endpoints = eps;
     }
     if let Some(d) = update.finality_depth {

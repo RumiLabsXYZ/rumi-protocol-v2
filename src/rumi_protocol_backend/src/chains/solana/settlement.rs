@@ -438,18 +438,43 @@ fn confirm_succeeded(
             // `confirm_mint_in_state` re-validates it equals the vault's
             // `pending_mint_e8s` before crediting.
             let pre_total = read_state(|s| s.multi_chain.total_chain_vault_debt_e8s());
-            let result = mutate_state(|s| {
-                confirm_mint_in_state(&mut s.multi_chain, chain, vault_id, amount_e8s, pre_total)
-            });
-            match result {
-                Ok(()) => {
-                    mutate_state(|s| {
+            // CAS: credit + mark Succeeded in ONE mutate_state, gated on the op
+            // still being Inflight. Mirrors the Monad reverted-path CAS so two
+            // overlapping ticks (possible under the 10-min stale-guard reclaim)
+            // cannot both credit: the first flips the op to Succeeded, the second
+            // sees it non-Inflight and no-ops. `confirm_mint_in_state`'s
+            // pending==observed check is the backstop; this makes the guard
+            // explicit and symmetric with `confirm_reverted`.
+            enum MintConfirm {
+                Credited,
+                AlreadyHandled,
+                Failed(String),
+            }
+            let outcome = mutate_state(|s| {
+                let still_inflight = s
+                    .multi_chain
+                    .settlement_queues
+                    .get(&chain)
+                    .and_then(|q| q.pending.get(&op_id))
+                    .map(|o| matches!(o.status, SettlementOpStatus::Inflight { .. }))
+                    .unwrap_or(false);
+                if !still_inflight {
+                    return MintConfirm::AlreadyHandled;
+                }
+                match confirm_mint_in_state(&mut s.multi_chain, chain, vault_id, amount_e8s, pre_total) {
+                    Ok(()) => {
                         if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
                             if let Some(o) = q.pending.get_mut(&op_id) {
                                 o.mark_succeeded(signature.to_string(), now);
                             }
                         }
-                    });
+                        MintConfirm::Credited
+                    }
+                    Err(e) => MintConfirm::Failed(e),
+                }
+            });
+            match outcome {
+                MintConfirm::Credited => {
                     crate::storage::record_event(&crate::event::Event::ChainMintConfirmed {
                         chain_id: chain,
                         vault_id,
@@ -461,7 +486,10 @@ fn confirm_succeeded(
                     });
                     log!(INFO, "[solana settlement chain={:?}] mint confirmed: op={} vault={} amount_e8s={} slot={} sig={}", chain, op_id, vault_id, amount_e8s, slot, signature);
                 }
-                Err(e) => {
+                MintConfirm::AlreadyHandled => {
+                    log!(INFO, "[solana settlement chain={:?}] op {} already finalized by a concurrent tick; skipping double-credit", chain, op_id);
+                }
+                MintConfirm::Failed(e) => {
                     // A confirm failure here is a protocol-level condition
                     // (divergence/halt/amount mismatch), NOT a tx failure. Leave
                     // the op Inflight for retry; do NOT mark it Failed.
