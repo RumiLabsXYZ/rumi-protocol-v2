@@ -3289,8 +3289,15 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         }
     };
 
-    // Step 4: Update protocol state ATOMICALLY (this is the critical section)
-    let interest_share = mutate_state(|s| {
+    // Step 4: Update protocol state ATOMICALLY (this is the critical section).
+    // ASYNC-002: a concurrent full liquidation may have removed this vault between
+    // our pre-await read and the icUSD pull above. Detect it BEFORE any
+    // irreversible state work and refund the liquidator (None branch below)
+    // instead of trapping inside s.liquidate_vault()'s vault lookup.
+    let interest_share = match mutate_state(|s| {
+        if !s.vault_id_to_vaults.contains_key(&vault_id) {
+            return None;
+        }
         // Execute the liquidation in state first (this must happen)
         // liquidate_vault returns the interest share of the debt reduction
         let interest_share = s.liquidate_vault(vault_id, mode, collateral_price_usd);
@@ -3373,8 +3380,51 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
 
         log!(INFO, "[liquidate_vault] Protocol state updated, {} pending transfers created",
              if !is_recovery_partial && excess_collateral > ICP::new(0) { 2 } else { 1 });
-        interest_share
-    });
+        Some(interest_share)
+    }) {
+        Some(share) => share,
+        None => {
+            // ASYNC-002: the vault was liquidated by a concurrent op while our
+            // icUSD pull was in flight. Refund the liquidator (mirrors the
+            // redeem_reserves durable-refund saga) and return a clean error
+            // instead of trapping with the liquidator's icUSD stuck.
+            guard_principal.fail();
+            log!(INFO,
+                "[liquidate_vault] Vault #{} already liquidated by a concurrent op; refunding {} icUSD to {}",
+                vault_id, debt_amount.to_u64(), caller);
+            let refund_nonce = mutate_state(|s| s.next_op_nonce());
+            match management::transfer_icusd_with_nonce(debt_amount, caller, refund_nonce).await {
+                Ok(refund_block) => {
+                    log!(INFO, "[liquidate_vault] Refunded {} icUSD to {} (block {})",
+                        debt_amount.to_u64(), caller, refund_block);
+                }
+                Err(refund_err) => {
+                    log!(INFO,
+                        "[liquidate_vault] Vault gone AND inline icUSD refund failed for {}: {:?}. \
+                         Enqueueing durable refund (block {}).",
+                        caller, refund_err, icusd_block_index);
+                    mutate_state(|s| {
+                        s.pending_refunds.insert(
+                            icusd_block_index,
+                            crate::state::PendingRefund {
+                                user: caller,
+                                amount_e8s: debt_amount.to_u64(),
+                                retry_count: 0,
+                                op_nonce: refund_nonce,
+                            },
+                        );
+                    });
+                    ic_cdk_timers::set_timer(std::time::Duration::from_secs(2), || {
+                        ic_cdk::spawn(crate::process_pending_transfer())
+                    });
+                }
+            }
+            return Err(ProtocolError::GenericError(format!(
+                "Vault #{} was already liquidated by a concurrent operation; your {} icUSD has been refunded",
+                vault_id, debt_amount.to_u64()
+            )));
+        }
+    };
 
     // Route interest share via N-way split
     crate::treasury::distribute_interest(interest_share, vault.collateral_type).await;
