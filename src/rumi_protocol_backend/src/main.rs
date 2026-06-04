@@ -109,11 +109,10 @@ async fn validate_call() -> Result<(), ProtocolError> {
 
 fn validate_mode() -> Result<(), ProtocolError> {
     match read_state(|s| s.mode) {
-        Mode::ReadOnly => {
-            Err(ProtocolError::TemporarilyUnavailable(
-                "protocol temporarly unavailable, please wait for an upgrade or for total collateral ratio to go above 100%".to_string(),
-            ))
-        }
+        // Shared constructor keeps this entry-layer gate byte-identical to the
+        // vault-module gates in vault::redeem_collateral / redeem_reserves
+        // (audit RED-101).
+        Mode::ReadOnly => Err(ProtocolError::read_only_mode()),
         Mode::GeneralAvailability => Ok(()),
         Mode::Recovery => Ok(())
     }
@@ -2207,6 +2206,12 @@ fn get_vault_count() -> u64 {
 #[update]
 async fn redeem_icp(icusd_amount: u64) -> Result<SuccessWithFee, ProtocolError> {
     validate_call().await?;
+    // Wave-9 RED-003 / RED-101: gate the ICP redemption path on protocol mode,
+    // matching redeem_collateral. This endpoint was the RED-003 fix's blind spot
+    // (it reaches the same collateral-seizing path via vault::redeem_icp ->
+    // vault::redeem_collateral). Defense in depth alongside the shared
+    // vault-module gate now in vault::redeem_collateral.
+    validate_mode()?;
     check_postcondition(rumi_protocol_backend::vault::redeem_icp(icusd_amount).await)
 }
 
