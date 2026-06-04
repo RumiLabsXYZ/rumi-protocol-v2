@@ -242,3 +242,35 @@ fn liquidator_a() -> Principal {
 fn liquidator_b() -> Principal {
     Principal::from_slice(&[2])
 }
+
+// ── ASYNC-003 structural fence: recover_pending_transfer must pay with the
+//    entry's PERSISTED op_nonce (ledger dedup vs the timer retry) and hold a
+//    per-caller guard. FAILS on pre-fix main, PASSES post-fix. ──
+#[test]
+fn async_003_recover_pending_transfer_reuses_persisted_nonce_and_guards() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/main.rs");
+    let m = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+    let hdr = "async fn recover_pending_transfer(";
+    let start = m.find(hdr).expect("recover_pending_transfer not found in main.rs");
+    let after = start + hdr.len();
+    let end = ["\nasync fn ", "\nfn ", "\npub async fn "]
+        .iter()
+        .filter_map(|mk| m[after..].find(mk).map(|i| after + i))
+        .min()
+        .unwrap_or(m.len());
+    let body = &m[start..end];
+    assert!(
+        body.contains("transfer_collateral_with_nonce") && body.contains("op_nonce"),
+        "recover_pending_transfer must pay via transfer_collateral_with_nonce(.., transfer.op_nonce) \
+         so it shares the ledger dedup tuple with process_pending_transfer's timer retry (audit \
+         ASYNC-003); a fresh-nonce transfer_collateral double-pays.\n\n{}",
+        body
+    );
+    assert!(
+        body.contains("GuardPrincipal"),
+        "recover_pending_transfer must hold a GuardPrincipal(caller) so two concurrent manual \
+         recoveries cannot both pay the same entry (audit ASYNC-003).\n\n{}",
+        body
+    );
+}

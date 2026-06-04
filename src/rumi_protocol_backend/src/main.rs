@@ -3365,6 +3365,10 @@ fn http_request(req: HttpRequest) -> HttpResponse {
 #[update]
 async fn recover_pending_transfer(vault_id: u64) -> Result<bool, ProtocolError> {
     let caller = ic_cdk::caller();
+    // ASYNC-003: serialize per-caller so two concurrent manual recoveries cannot
+    // both pay out the same pending entry (the entry is only removed AFTER the
+    // await below). Defense-in-depth on top of the nonce-dedup fix.
+    let _guard = rumi_protocol_backend::guard::GuardPrincipal::new(caller, "recover_pending_transfer")?;
 
     // Wave-4 LIQ-001: pending_margin_transfers and pending_excess_transfers are
     // keyed by (vault_id, owner). Look up the entry that belongs to the caller.
@@ -3399,10 +3403,16 @@ async fn recover_pending_transfer(vault_id: u64) -> Result<bool, ProtocolError> 
             ));
         }
 
-        let result = management::transfer_collateral(
+        // ASYNC-003: pay with the entry's PERSISTED op_nonce (not a fresh one) so
+        // this manual recovery shares the ledger dedup tuple (created_at_time +
+        // memo) with process_pending_transfer's timer retry. transfer_idempotent
+        // converts the ledger's Duplicate response to Ok, so a concurrent timer
+        // retry and this manual recovery can never double-pay the owner.
+        let result = management::transfer_collateral_with_nonce(
             (transfer.margin - transfer_fee).to_u64(),
             transfer.owner,
             ledger,
+            transfer.op_nonce,
         ).await;
 
         match result {
