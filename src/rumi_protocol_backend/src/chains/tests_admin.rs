@@ -78,6 +78,52 @@ fn register_chain_rejects_empty_rpc_endpoints() {
 }
 
 #[test]
+fn register_chain_rejects_out_of_range_decimals() {
+    let mut s = MultiChainStateV3::default();
+    // 0 would make the CR native-scale 1 (collateral treated as whole units),
+    // inflating every CR check and admitting under-collateralized opens.
+    let mut zero = arg();
+    zero.chain_native_decimals = 0;
+    let err = register_chain_in_state(&mut s, zero, 0).expect_err("zero decimals");
+    assert!(matches!(err, ChainAdminError::InvalidConfig(_)));
+    assert!(!s.chain_configs.contains_key(&ChainId(101)), "no partial insert on reject");
+
+    // Absurdly large decimals are also rejected.
+    let mut huge = arg();
+    huge.chain_native_decimals = 200;
+    let err = register_chain_in_state(&mut s, huge, 0).expect_err("huge decimals");
+    assert!(matches!(err, ChainAdminError::InvalidConfig(_)));
+
+    // The valid EVM (18) and Solana (9) values still register.
+    let mut sol = arg();
+    sol.chain_id = ChainId(102);
+    sol.chain_native_decimals = 9;
+    register_chain_in_state(&mut s, sol, 0).expect("9 decimals (Solana) ok");
+    assert_eq!(s.chain_configs[&ChainId(102)].chain_native_decimals, 9);
+}
+
+#[test]
+fn register_chain_enforces_evm_finality_floor() {
+    let mut s = MultiChainStateV3::default();
+    // EVM chain with finality_depth 0 is rejected.
+    let mut a = arg(); // EvmEip1559 gas strategy
+    a.finality_depth = 0;
+    let err = register_chain_in_state(&mut s, a, 0).expect_err("evm finality 0");
+    assert!(matches!(err, ChainAdminError::InvalidConfig(_)));
+    assert!(!s.chain_configs.contains_key(&ChainId(101)), "no partial insert on reject");
+
+    // A Solana-style chain (non-EVM gas) MAY use finality_depth 0 (reads at the
+    // `finalized` commitment).
+    let mut sol = arg();
+    sol.chain_id = ChainId(202);
+    sol.chain_native_decimals = 9;
+    sol.gas_strategy = GasStrategy::SolanaPriorityFee { lamports_per_cu_ceiling: 10_000 };
+    sol.finality_depth = 0;
+    register_chain_in_state(&mut s, sol, 0).expect("solana finality 0 ok");
+    assert_eq!(s.chain_configs[&ChainId(202)].finality_depth, 0);
+}
+
+#[test]
 fn disable_chain_flips_status_and_preserves_supply() {
     let mut s = MultiChainStateV3::default();
     register_chain_in_state(&mut s, arg(), 0).expect("register");

@@ -1038,6 +1038,12 @@ async fn open_chain_vault(
 /// observer decrements `debt_e8s` + chain supply. This path moves only
 /// collateral. Synchronous — `dest_address` is supplied by the caller, so no
 /// tECDSA derive is needed; signing happens later in Timer D. Developer-gated.
+///
+/// CONCURRENCY INVARIANT (audit FLAG-16): this MUST stay synchronous. Its
+/// safety against double-withdraw rests on the reserve-at-enqueue happening
+/// atomically within this single message (no `GuardPrincipal` is taken, unlike
+/// the ICP-native vault ops). Adding ANY `.await` here re-opens a read->await->
+/// write race; if you must, acquire a per-vault `GuardPrincipal` first.
 #[candid_method(update)]
 #[update]
 fn withdraw_chain_collateral(
@@ -1070,6 +1076,8 @@ fn withdraw_chain_collateral(
 /// Monad), then withdraws the FULL remaining collateral to `dest_address`
 /// (vault -> `Closing`, then `Closed` on the transfer's confirmation).
 /// Synchronous + developer-gated (mirrors `withdraw_chain_collateral`).
+/// CONCURRENCY INVARIANT (audit FLAG-16): keep synchronous — see
+/// `withdraw_chain_collateral`; adding an `.await` needs a per-vault guard.
 #[candid_method(update)]
 #[update]
 fn close_chain_vault(vault_id: u64, dest_address: String) -> Result<(), ProtocolError> {
@@ -1169,6 +1177,9 @@ async fn open_solana_vault(
 
 /// Withdraw Solana collateral (mirrors `withdraw_chain_collateral`).
 ///
+/// CONCURRENCY INVARIANT (audit FLAG-16): keep synchronous — see
+/// `withdraw_chain_collateral`; adding an `.await` needs a per-vault guard.
+///
 /// CR-checks the REMAINING collateral against `SOLANA_MIN_CR_E4` (debt-free
 /// vaults skip the check), RESERVES the withdrawn lamports, and enqueues a
 /// `NativeWithdrawal` op for the Task-8 settlement worker to sign + broadcast. A
@@ -1210,7 +1221,8 @@ fn withdraw_solana_collateral(
 /// Requires the vault's `debt_e8s == 0` (repay first by burning icUSD on
 /// Solana), then withdraws the FULL remaining collateral to `dest_address`
 /// (vault -> `Closing`, then `Closed` on the transfer's confirmation).
-/// Synchronous + developer-gated.
+/// Synchronous + developer-gated. CONCURRENCY INVARIANT (audit FLAG-16): keep
+/// synchronous — see `withdraw_chain_collateral`; an `.await` needs a guard.
 #[candid_method(update)]
 #[update]
 fn close_solana_vault(vault_id: u64, dest_address: String) -> Result<(), ProtocolError> {
@@ -1365,6 +1377,13 @@ fn set_manual_collateral_price(
     if read_state(|s| s.developer_principal != caller) {
         return Err(ProtocolError::ChainAdmin("not developer".into()));
     }
+    // Reject a zero price. A 0 price drives `collateral_ratio_e4` to 0, which
+    // fails-closed (every open/withdraw with debt rejects with BelowMinCr), so
+    // it cannot mint under-collateralized — but it is never a legitimate value
+    // and silently freezes the chain's vaults. Catch the fat-finger explicitly.
+    if price_e8 == 0 {
+        return Err(ProtocolError::ChainAdmin("price_e8 must be greater than 0".into()));
+    }
     mutate_state(|s| {
         s.multi_chain.manual_prices.insert((chain, symbol.clone()), price_e8);
     });
@@ -1399,11 +1418,29 @@ fn clear_invariant_halt() -> Result<(), ProtocolError> {
     if read_state(|s| s.developer_principal != caller) {
         return Err(ProtocolError::ChainAdmin("not developer".into()));
     }
-    mutate_state(|s| {
-        s.multi_chain.invariant_halted = false;
+    // Refuse to clear into a still-diverged state. The halt exists because the
+    // Timer-B self-check found `sum(chain_supplies) != total_chain_vault_debt`;
+    // clearing it blind would re-enable cross-chain supply mutation on top of a
+    // known-bad invariant. Re-verify against live state and only clear when the
+    // internal invariant actually holds again (the operator is still expected to
+    // have reconciled against on-chain reality first).
+    let result = mutate_state(|s| {
+        let total_debt = s.multi_chain.total_chain_vault_debt_e8s();
+        match rumi_protocol_backend::chains::supply::check_invariant(&s.multi_chain, total_debt) {
+            Ok(()) => {
+                s.multi_chain.invariant_halted = false;
+                Ok(())
+            }
+            Err(e) => Err(ProtocolError::ChainAdmin(format!(
+                "refusing to clear invariant halt: supply invariant still diverged ({e:?}); \
+                 reconcile chain_supplies vs vault debt first"
+            ))),
+        }
     });
-    log!(INFO, "[clear_invariant_halt] global invariant halt cleared");
-    Ok(())
+    if result.is_ok() {
+        log!(INFO, "[clear_invariant_halt] global invariant halt cleared (invariant re-verified)");
+    }
+    result
 }
 
 /// Clear a chain's reorg circuit breaker. Resets BOTH `reorg_halted` AND the
@@ -1477,8 +1514,15 @@ fn get_last_observed_block(
 /// frontend, per plan Task 7) can poll-and-retry until the receipt is final.
 ///
 /// FUTURE ROBUSTNESS (flagged per Rob 2026-05-31): v1 liveness depends on the
-/// submitter (the dApp). Harden later with a relayer or an incentivized
-/// permissionless submitter; add a per-caller rate-limit when that lands.
+/// submitter (the dApp). Proper DoS protection (this is a permissionless
+/// endpoint that spends a ~2B-cycle `eth_getTransactionReceipt` outcall per
+/// call) needs the deferred relayer / incentivized-submitter design (audit
+/// FLAG-7). A naive per-caller wall-clock rate-limit was rejected: it both fails
+/// against principal rotation AND wrongly throttles legitimate back-to-back
+/// submissions (e.g. two distinct burns in the same second). The endpoint does
+/// reject the anonymous principal as basic hygiene (ingress anonymous is also
+/// dropped by `inspect_message`; this is belt-and-suspenders, and covers any
+/// future non-ingress entry that skips that hook).
 #[candid_method(update)]
 #[update]
 async fn submit_burn_proof(
@@ -1488,6 +1532,13 @@ async fn submit_burn_proof(
     use rumi_protocol_backend::chains::monad::burn_proof::{
         verify_and_apply_burn_proof, BurnProofError,
     };
+
+    if ic_cdk::caller() == candid::Principal::anonymous() {
+        return Err(ProtocolError::ChainAdmin(
+            "anonymous caller not allowed for submit_burn_proof".into(),
+        ));
+    }
+
     match verify_and_apply_burn_proof(chain_id, &tx_hash).await {
         Ok(n) => {
             if n > 0 {
@@ -1567,6 +1618,249 @@ fn delete_chain(
         }
         Err(e) => Err(ProtocolError::ChainAdmin(format!("{e:?}"))),
     }
+}
+
+/// Developer-gated recovery for a foreign-chain vault wedged in `MintPending`
+/// after its mint permanently reverted (audit FLAG-4). When a mint reverts at
+/// finality the worker clears `pending_mint_e8s` but leaves the vault
+/// `MintPending`; there is no transition out (withdraw/close require `Open`, and
+/// the mint can never re-confirm with `pending == 0`), so the deposited
+/// collateral would be locked forever. This transitions a genuinely-stuck vault
+/// back to `Open` (debt is 0 under Design B — the mint was never confirmed) so
+/// the existing dev-gated `close_chain_vault` / `withdraw_chain_collateral` can
+/// return the collateral. Rejects unless the vault is on `chain`, is
+/// `MintPending`, has `pending_mint_e8s == 0`, and has NO live (Queued/Inflight)
+/// Mint op left.
+#[candid_method(update)]
+#[update]
+fn recover_stuck_chain_vault(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    vault_id: u64,
+) -> Result<(), ProtocolError> {
+    use rumi_protocol_backend::chains::settlement_queue::{SettlementOpKind, SettlementOpStatus};
+    use rumi_protocol_backend::chains::vault::ChainVaultStatus;
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    mutate_state(|s| {
+        let v = s
+            .multi_chain
+            .chain_vaults
+            .get(&vault_id)
+            .ok_or_else(|| ProtocolError::ChainAdmin(format!("unknown chain vault {vault_id}")))?;
+        if v.collateral_chain != chain {
+            return Err(ProtocolError::ChainAdmin(format!(
+                "vault {vault_id} is not on chain {:?}",
+                chain
+            )));
+        }
+        if v.status != ChainVaultStatus::MintPending || v.pending_mint_e8s != 0 {
+            return Err(ProtocolError::ChainAdmin(format!(
+                "vault {vault_id} is not a recoverable stuck mint (status {:?}, pending_mint_e8s {})",
+                v.status, v.pending_mint_e8s
+            )));
+        }
+        let has_live_mint = s
+            .multi_chain
+            .settlement_queues
+            .get(&chain)
+            .map(|q| {
+                q.pending.values().any(|op| {
+                    matches!(&op.kind, SettlementOpKind::Mint { vault_id: vid, .. } if *vid == vault_id)
+                        && matches!(
+                            op.status,
+                            SettlementOpStatus::Queued | SettlementOpStatus::Inflight { .. }
+                        )
+                })
+            })
+            .unwrap_or(false);
+        if has_live_mint {
+            return Err(ProtocolError::ChainAdmin(format!(
+                "vault {vault_id} still has a live mint op; wait for it to reach a terminal state"
+            )));
+        }
+        let v = s
+            .multi_chain
+            .chain_vaults
+            .get_mut(&vault_id)
+            .expect("vault present: checked above");
+        v.status = ChainVaultStatus::Open;
+        Ok(())
+    })?;
+    log!(INFO, "[recover_stuck_chain_vault] chain={:?} vault={} MintPending->Open (collateral now recoverable via close/withdraw)", chain, vault_id);
+    Ok(())
+}
+
+/// Developer-gated resolution for a settlement op wedged `Inflight` (audit
+/// FLAG-10). `select_next_op` is strictly one-in-flight per chain, so an op whose
+/// tx never confirms blocks EVERY later op for that chain (the Solana path has no
+/// automatic same-bytes rebroadcast yet). This marks the op `Failed` and applies
+/// the SAME per-kind reversal as the confirm-reverted path (clear a Mint's
+/// `pending_mint_e8s`; restore a NativeWithdrawal's reserved collateral and flip
+/// `Closing -> Open`) so the queue can advance.
+///
+/// DANGER: the operator MUST first verify on-chain that the op's tx did NOT land.
+/// Marking a Mint `Failed` after its tx actually minted on-chain would leave
+/// icUSD minted with no recorded debt (an unbacked mint). Rejects unless the op
+/// is currently `Inflight`.
+#[candid_method(update)]
+#[update]
+fn resolve_stuck_settlement_op(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    op_id: u64,
+) -> Result<(), ProtocolError> {
+    use rumi_protocol_backend::chains::settlement_queue::{SettlementOpKind, SettlementOpStatus};
+    use rumi_protocol_backend::chains::vault::ChainVaultStatus;
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let now = ic_cdk::api::time();
+    mutate_state(|s| {
+        // Snapshot the op kind and confirm it is Inflight (CAS).
+        let kind = {
+            let q = s
+                .multi_chain
+                .settlement_queues
+                .get(&chain)
+                .ok_or_else(|| ProtocolError::ChainAdmin(format!("unknown chain {:?}", chain)))?;
+            let op = q.pending.get(&op_id).ok_or_else(|| {
+                ProtocolError::ChainAdmin(format!("unknown op {op_id} on chain {:?}", chain))
+            })?;
+            if !matches!(op.status, SettlementOpStatus::Inflight { .. }) {
+                return Err(ProtocolError::ChainAdmin(format!(
+                    "op {op_id} is not Inflight (status {:?}); nothing to resolve",
+                    op.status
+                )));
+            }
+            op.kind.clone()
+        };
+        // Per-kind reversal, mirroring confirm_reverted.
+        match &kind {
+            SettlementOpKind::Mint { vault_id, .. } => {
+                if let Some(v) = s.multi_chain.chain_vaults.get_mut(vault_id) {
+                    v.pending_mint_e8s = 0; // Design B: no debt counted; leave status MintPending.
+                }
+            }
+            SettlementOpKind::NativeWithdrawal { vault_id, amount_e18, .. } => {
+                if let Some(v) = s.multi_chain.chain_vaults.get_mut(vault_id) {
+                    v.collateral_amount_native =
+                        v.collateral_amount_native.saturating_add(*amount_e18);
+                    if v.status == ChainVaultStatus::Closing {
+                        v.status = ChainVaultStatus::Open;
+                    }
+                }
+            }
+            SettlementOpKind::Burn { .. } => {}
+        }
+        if let Some(o) = s
+            .multi_chain
+            .settlement_queues
+            .get_mut(&chain)
+            .and_then(|q| q.pending.get_mut(&op_id))
+        {
+            o.mark_failed("manually resolved (stuck Inflight)".to_string(), now);
+        }
+        Ok(())
+    })?;
+    log!(INFO, "[resolve_stuck_settlement_op] chain={:?} op={} marked Failed + reversed (operator-confirmed not landed)", chain, op_id);
+    Ok(())
+}
+
+/// On-demand reconciliation report for a chain (audit FLAG-2). Compares the real
+/// on-chain icUSD `totalSupply()` (read at the finalized cursor, consensus-safe
+/// specific block) against the canister's recorded `chain_supplies` plus any
+/// in-flight mints.
+#[derive(candid::CandidType, serde::Deserialize, Clone, Debug)]
+pub struct ChainSupplyReconciliation {
+    pub chain_id: rumi_protocol_backend::chains::config::ChainId,
+    pub finalized_block: u64,
+    pub onchain_total_supply_e8s: u128,
+    pub recorded_supply_e8s: u128,
+    pub in_flight_mint_e8s: u128,
+    /// True iff on-chain supply exceeds recorded + in-flight mints: the
+    /// unbacked-mint signature that the periodic self-check (two internal mirror
+    /// fields) structurally cannot detect.
+    pub unbacked_excess: bool,
+    /// Signed gap = onchain - recorded. Positive => excess (possible unbacked
+    /// mint); negative => deficit (an unsubmitted burn the backstop handles).
+    pub gap_e8s: i128,
+}
+
+/// Developer-gated, on-demand supply reconciliation against the chain (audit
+/// FLAG-2). The Timer-B self-check only compares two INTERNAL mirror fields
+/// (`sum(chain_supplies)` vs `total_chain_vault_debt`), which are kept in
+/// lockstep and so cannot reveal canister-vs-chain drift. This reads the real
+/// on-chain `totalSupply()` at the finalized cursor and reports the gap, so an
+/// unbacked mint (on-chain supply ABOVE recorded, with no in-flight mint) is
+/// detectable even when recorded debt is 0 (which the observer's per-tick alarm
+/// skips on its no-debt fast path).
+#[candid_method(update)]
+#[update]
+async fn reconcile_chain_supply(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Result<ChainSupplyReconciliation, ProtocolError> {
+    use rumi_protocol_backend::chains::settlement_queue::{SettlementOpKind, SettlementOpStatus};
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let (contract, recorded, in_flight, cursor) = read_state(|s| {
+        let contract = s.multi_chain.chain_contracts.get(&chain).cloned();
+        let recorded = s.multi_chain.chain_supplies.get(&chain).copied().unwrap_or(0);
+        let in_flight = s
+            .multi_chain
+            .settlement_queues
+            .get(&chain)
+            .map(|q| {
+                q.pending
+                    .values()
+                    .filter_map(|op| match &op.kind {
+                        SettlementOpKind::Mint { amount_e8s, .. }
+                            if matches!(
+                                op.status,
+                                SettlementOpStatus::Queued | SettlementOpStatus::Inflight { .. }
+                            ) =>
+                        {
+                            Some(*amount_e8s)
+                        }
+                        _ => None,
+                    })
+                    .sum::<u128>()
+            })
+            .unwrap_or(0);
+        let cursor = s.multi_chain.last_observed_block.get(&chain).copied().unwrap_or(0);
+        (contract, recorded, in_flight, cursor)
+    });
+    let contract = contract.ok_or_else(|| {
+        ProtocolError::ChainAdmin(format!("no icUSD contract configured for chain {:?}", chain))
+    })?;
+    if cursor == 0 {
+        return Err(ProtocolError::ChainAdmin(
+            "finalized cursor unseeded; call set_last_observed_block(chain, <tip>) first".into(),
+        ));
+    }
+    let onchain =
+        rumi_protocol_backend::chains::monad::evm_rpc::erc20_total_supply_at(chain, &contract, cursor)
+            .await
+            .map_err(|e| {
+                ProtocolError::TemporarilyUnavailable(format!("totalSupply read failed; retry: {e}"))
+            })?;
+    let gap_e8s = onchain as i128 - recorded as i128;
+    let unbacked_excess = onchain > recorded.saturating_add(in_flight);
+    if unbacked_excess {
+        log!(INFO, "[reconcile_chain_supply] chain={:?} UNBACKED EXCESS: onchain {} > recorded {} + in_flight {} (block {})", chain, onchain, recorded, in_flight, cursor);
+    }
+    Ok(ChainSupplyReconciliation {
+        chain_id: chain,
+        finalized_block: cursor,
+        onchain_total_supply_e8s: onchain,
+        recorded_supply_e8s: recorded,
+        in_flight_mint_e8s: in_flight,
+        unbacked_excess,
+        gap_e8s,
+    })
 }
 
 #[candid_method(query)]

@@ -399,6 +399,55 @@ async fn submit_op(
         return;
     }
 
+    // DEPOSIT FINALITY GATE (Mint ops only): the deposit-watch flips a vault to
+    // MintPending on a `"latest"` (chain-tip, depth-0) custody balance for
+    // liveness (the Gate-4 design keeps DETECTION robust to block-height read
+    // failures). But an icUSD mint is irreversible, so before BROADCASTING the
+    // mint we RE-VERIFY the custody balance still covers the declared collateral
+    // at the observer's finalized cursor (`last_observed_block`, which the
+    // observer advances only to confirmed-final blocks — the same value the mint
+    // CONFIRM path treats as final). If the deposit cannot be shown final yet
+    // (cursor unseeded, balance not yet reflected at the cursor, or the read
+    // fails) we DEFER: leave the op Queued and retry next tick. This is
+    // fail-closed — a deposit that reorgs out after the tip observation can never
+    // back a mint. (Withdrawals/Burns are unaffected.)
+    if let SettlementOpKind::Mint { vault_id, .. } = &op.kind {
+        let vid = *vault_id;
+        let (cursor, vinfo) = read_state(|s| {
+            let cursor = s.multi_chain.last_observed_block.get(&chain).copied().unwrap_or(0);
+            let v = s
+                .multi_chain
+                .chain_vaults
+                .get(&vid)
+                .map(|v| (v.custody_address.clone(), v.collateral_amount_native));
+            (cursor, v)
+        });
+        let (custody, declared) = match vinfo {
+            Some(p) => p,
+            None => {
+                log!(INFO, "[settlement chain={:?}] mint op {}: unknown vault {}; will retry", chain, op_id, vid);
+                return;
+            }
+        };
+        if cursor == 0 {
+            log!(INFO, "[settlement chain={:?}] mint op {} vault {}: finalized cursor unseeded; cannot verify deposit finality — call set_last_observed_block(chain, <current tip>) to enable mints", chain, op_id, vid);
+            return;
+        }
+        match evm_rpc::get_balance_at_block(chain, &custody, cursor).await {
+            Ok(final_balance) if final_balance >= declared => {
+                log!(INFO, "[settlement chain={:?}] mint op {} vault {}: deposit verified final ({} >= declared {} at block {})", chain, op_id, vid, final_balance, declared, cursor);
+            }
+            Ok(final_balance) => {
+                log!(INFO, "[settlement chain={:?}] mint op {} vault {}: deposit not yet final (finalized balance {} < declared {} at block {}); deferring broadcast", chain, op_id, vid, final_balance, declared, cursor);
+                return;
+            }
+            Err(e) => {
+                log!(INFO, "[settlement chain={:?}] mint op {} vault {}: get_balance_at_block failed ({}); deferring broadcast", chain, op_id, vid, e);
+                return;
+            }
+        }
+    }
+
     // GAS GATE (Task 11): refuse a new outbound op when the cached settlement
     // balance is below the hot-wallet floor. FAIL OPEN when the cache is unset
     // (`None`): an unpopulated cache (fresh chain / observer hasn't run yet)
@@ -738,18 +787,19 @@ async fn confirm_op(
             // `log_index` is threaded through from get_logs but not needed here
             // (the settlement path selects by vault_id + tx_hash, not by log
             // identity — each mint op maps to exactly one Mint event).
-            let mut matched: Option<u128> = None;
+            let mut matched: Option<(u128, String)> = None;
             for (topics, data, log_tx, log_block, _log_index) in &logs {
                 match evm_rpc::decode_mint_log(topics, data, log_tx, *log_block) {
                     Ok(m) if m.vault_id == vault_id => {
                         let exact = log_tx.eq_ignore_ascii_case(&tx_hash);
                         // Prefer an exact tx-hash match; otherwise take the first
-                        // vault-id match as a fallback.
+                        // vault-id match as a fallback (safe: IcUSD.mint reverts a
+                        // repeat vault_id, so at most one Mint log per vault exists).
                         if exact {
-                            matched = Some(m.amount_e8s);
+                            matched = Some((m.amount_e8s, m.recipient));
                             break;
                         } else if matched.is_none() {
-                            matched = Some(m.amount_e8s);
+                            matched = Some((m.amount_e8s, m.recipient));
                         }
                     }
                     Ok(_) => {}
@@ -759,13 +809,32 @@ async fn confirm_op(
                 }
             }
 
-            let observed_e8s = match matched {
-                Some(a) => a,
+            let (observed_e8s, observed_recipient) = match matched {
+                Some(pair) => pair,
                 None => {
                     log!(INFO, "[settlement chain={:?}] no Mint log for vault {} in block {} confirming op {}; will retry", chain, vault_id, block_number, op_id);
                     return;
                 }
             };
+
+            // Verify the on-chain Mint recipient matches the vault's intended
+            // `mint_recipient` (case-insensitive). The supply invariant is
+            // recipient-agnostic, so without this check a mint to the WRONG
+            // address would still balance and be marked Succeeded. A mismatch is a
+            // real divergence: leave the op Inflight and do NOT credit.
+            let intended_recipient =
+                read_state(|s| s.multi_chain.chain_vaults.get(&vault_id).map(|v| v.mint_recipient.clone()));
+            match intended_recipient {
+                Some(intended) if intended.eq_ignore_ascii_case(&observed_recipient) => {}
+                Some(intended) => {
+                    log!(INFO, "[settlement chain={:?}] mint-confirm recipient mismatch op {} vault {}: on-chain {} != intended {}; left Inflight (NOT credited)", chain, op_id, vault_id, observed_recipient, intended);
+                    return;
+                }
+                None => {
+                    log!(INFO, "[settlement chain={:?}] mint-confirm: unknown vault {} for op {}; left Inflight", chain, vault_id, op_id);
+                    return;
+                }
+            }
 
             // PRE-mint total: sum of foreign-chain vault debt BEFORE this mint
             // counts (this vault's debt_e8s is still 0 under Design B). NEVER

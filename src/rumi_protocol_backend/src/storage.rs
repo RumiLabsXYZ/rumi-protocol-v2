@@ -222,38 +222,75 @@ pub fn save_state_to_stable(state: &crate::state::State) {
     });
 }
 
-/// Attempts to restore State from stable memory. Returns None if no state was saved.
+/// Attempts to restore State from stable memory.
+///
+/// Returns `None` ONLY when no snapshot has ever been written (the genuine
+/// first-upgrade / no-state case), where `post_upgrade` legitimately rebuilds
+/// from the event log.
+///
+/// If a snapshot IS present but cannot be restored (corrupt length prefix or a
+/// ciborium decode failure, e.g. a `State` schema change the versioned in-place
+/// decode could not absorb) this **traps** instead of returning `None`. Silently
+/// falling back to event replay would be catastrophic: every `chains::` event
+/// (`DepositObserved`, `ChainMintConfirmed`, `ChainBurnObserved`, ...) is a
+/// replay NO-OP (see `event.rs`), so a replay-rebuilt `State` comes back with an
+/// EMPTY `multi_chain` while ICP-native state is reconstructed. That wipes every
+/// foreign-chain vault, supply, and settlement queue while real icUSD stays
+/// minted on Monad/Solana, breaking `sum(chain_supplies) == total_debt` with no
+/// recovery (the 2026-05-18 AMM state-wipe class, with a worse blast radius).
+/// Trapping keeps the canister on the OLD wasm with stable memory intact, so the
+/// operator can fix the schema and retry — a bricked-pending-fix upgrade is
+/// strictly safer than a silent balance wipe.
 pub fn load_state_from_stable() -> Option<crate::state::State> {
     MEMORY_MANAGER.with(|m| {
         let mem = m.borrow().get(STATE_MEMORY_ID);
         if mem.size() == 0 {
-            return None; // No state memory allocated yet
+            return None; // No state memory allocated yet (genuine first upgrade).
         }
         let mut len_bytes = [0u8; 8];
         mem.read(0, &mut len_bytes);
         let len = u64::from_le_bytes(len_bytes);
         if len == 0 {
-            return None; // No state saved yet
+            return None; // No state saved yet (genuine first upgrade).
         }
-        // Sanity check: length must fit within allocated memory (minus 8-byte prefix)
+        // A snapshot IS present from here on. Any failure below is corruption of
+        // a real snapshot, NOT a missing one — trap, never silently fall back to
+        // event replay (which would wipe `multi_chain`; see the fn doc comment).
         let mem_bytes = mem.size() * WASM_PAGE_SIZE;
         if len > mem_bytes.saturating_sub(8) {
-            ic_cdk::println!(
-                "[upgrade]: corrupt state length {} exceeds memory size {}",
+            ic_cdk::trap(&corrupt_snapshot_trap_msg(&format!(
+                "length prefix {} exceeds allocated state memory {} bytes",
                 len, mem_bytes
-            );
-            return None; // Fall back to event replay
+            )));
         }
         let mut buf = vec![0u8; len as usize];
         mem.read(8, &mut buf);
-        match ciborium::de::from_reader::<crate::state::State, _>(buf.as_slice()) {
+        match decode_state_body(&buf) {
             Ok(state) => Some(state),
-            Err(e) => {
-                ic_cdk::println!("[upgrade]: failed to deserialize state from stable memory: {:?}", e);
-                None // Fall back to event replay
-            }
+            Err(e) => ic_cdk::trap(&corrupt_snapshot_trap_msg(&e)),
         }
     })
+}
+
+/// Pure ciborium decode of a `State` snapshot body (the bytes AFTER the 8-byte
+/// length prefix). Extracted from `load_state_from_stable` so the healthy
+/// round-trip and the corrupt-input rejection are unit-testable without
+/// thread-local stable memory.
+pub fn decode_state_body(buf: &[u8]) -> Result<crate::state::State, String> {
+    ciborium::de::from_reader::<crate::state::State, _>(buf)
+        .map_err(|e| format!("ciborium decode failed: {e:?}"))
+}
+
+/// The trap message used when a present `State` snapshot cannot be restored.
+/// See `load_state_from_stable` for why this is a trap, not a replay fallback.
+fn corrupt_snapshot_trap_msg(detail: &str) -> String {
+    format!(
+        "[upgrade] ABORT: a State snapshot is present but could not be restored ({detail}). \
+         Refusing to fall back to event replay: chain events are replay no-ops, so replay \
+         would WIPE all foreign-chain vaults, supplies, and settlement queues (2026-05-18 \
+         AMM state-wipe class). The canister stays on the OLD wasm with stable memory intact; \
+         fix the State schema and retry the upgrade."
+    )
 }
 
 // ── Protocol Snapshots ─────────────────────────────────────────────────────
@@ -310,5 +347,99 @@ impl Iterator for SnapshotIterator {
     fn nth(&mut self, n: usize) -> Option<crate::ProtocolSnapshot> {
         self.pos = self.pos.saturating_add(n as u64);
         self.next()
+    }
+}
+
+#[cfg(test)]
+mod state_snapshot_tests {
+    //! Guards for the upgrade snapshot decode path. `load_state_from_stable`
+    //! traps on a present-but-undecodable snapshot rather than silently
+    //! replaying events (which would wipe `multi_chain`). These tests exercise
+    //! the pure `decode_state_body` half so the healthy round-trip and the
+    //! corrupt-input rejection are covered without a wasm/PocketIC harness.
+    use super::*;
+    use crate::chains::config::ChainId;
+    use crate::chains::vault::{ChainVaultStatus, ChainVaultV1};
+    use candid::Principal;
+
+    fn encode_state(state: &crate::state::State) -> Vec<u8> {
+        // Mirror `save_state_to_stable`'s encoder exactly.
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(state, &mut buf).expect("encode State to CBOR");
+        buf
+    }
+
+    #[test]
+    fn default_state_round_trips() {
+        let state = crate::state::State::default();
+        let bytes = encode_state(&state);
+        let decoded = decode_state_body(&bytes).expect("default State must decode");
+        assert_eq!(decoded.multi_chain.chain_supplies.len(), 0);
+    }
+
+    #[test]
+    fn populated_multi_chain_survives_round_trip() {
+        // The guard the audit asked for: a populated `multi_chain` sub-tree (a
+        // foreign-chain vault + its supply) must survive the exact ciborium
+        // encode/decode the upgrade path uses, so a future `State` field that
+        // breaks CBOR decode fails HERE in CI rather than wiping vaults on a
+        // live upgrade.
+        let mut state = crate::state::State::default();
+        let chain = ChainId(10143);
+        state.multi_chain.chain_supplies.insert(chain, 5_000_000_000);
+        state.multi_chain.chain_vaults.insert(
+            1,
+            ChainVaultV1 {
+                vault_id: 1,
+                owner: Principal::anonymous(),
+                collateral_chain: chain,
+                custody_address: "0xabc0000000000000000000000000000000000001".into(),
+                collateral_amount_native: 1_000_000_000_000_000_000,
+                debt_e8s: 5_000_000_000,
+                mint_recipient: "0xabc0000000000000000000000000000000000002".into(),
+                pending_mint_e8s: 0,
+                status: ChainVaultStatus::Open,
+                opened_at_ns: 42,
+            },
+        );
+
+        let bytes = encode_state(&state);
+        let decoded = decode_state_body(&bytes).expect("populated State must decode");
+
+        assert_eq!(
+            decoded.multi_chain.chain_supplies.get(&chain),
+            Some(&5_000_000_000)
+        );
+        let v = decoded
+            .multi_chain
+            .chain_vaults
+            .get(&1)
+            .expect("vault survives round-trip");
+        assert_eq!(v.debt_e8s, 5_000_000_000);
+        assert_eq!(v.status, ChainVaultStatus::Open);
+        // The whole-State invariant the trap protects: chain supply == vault debt.
+        assert_eq!(
+            decoded.multi_chain.total_supply_all_chains_e8s(),
+            decoded.multi_chain.total_chain_vault_debt_e8s()
+        );
+    }
+
+    #[test]
+    fn corrupt_bytes_are_rejected_not_silently_wiped() {
+        // The real path turns this Err into a trap, never a silent replay/wipe.
+        assert!(
+            decode_state_body(b"\xff\x00not-a-valid-state-snapshot\xde\xad").is_err(),
+            "corrupt bytes must fail to decode"
+        );
+    }
+
+    #[test]
+    fn truncated_snapshot_is_rejected() {
+        let bytes = encode_state(&crate::state::State::default());
+        let truncated = &bytes[..bytes.len() / 2];
+        assert!(
+            decode_state_body(truncated).is_err(),
+            "a truncated snapshot must fail to decode (not silently wipe)"
+        );
     }
 }
