@@ -665,6 +665,27 @@ impl From<GuardError> for ProtocolError {
     }
 }
 
+impl ProtocolError {
+    /// The exact `TemporarilyUnavailable` rejection returned whenever the
+    /// protocol is latched `Mode::ReadOnly` (insolvency: total collateral ratio
+    /// below 100%, or the deficit account over its configured threshold).
+    ///
+    /// Single source of truth so the Candid entry-layer gate
+    /// (`main.rs::validate_mode`) and the shared vault-module redemption gates
+    /// (`vault::redeem_collateral` / `vault::redeem_reserves`) return a
+    /// byte-identical error. Audit RED-101 (regression of RED-003) showed that a
+    /// second entry point (`redeem_icp`) silently bypassed the entry-layer-only
+    /// gate; gating inside the vault module closes any present/future redemption
+    /// surface by construction, and this constructor keeps every layer's message
+    /// in lockstep.
+    pub fn read_only_mode() -> Self {
+        ProtocolError::TemporarilyUnavailable(
+            "protocol temporarly unavailable, please wait for an upgrade or for total collateral ratio to go above 100%"
+                .to_string(),
+        )
+    }
+}
+
 /// Candid-compatible struct matching the stability pool's and bot's `LiquidatableVaultInfo`.
 /// Defined inline to avoid a crate dependency between backend and pool/bot.
 #[derive(CandidType, Clone, Debug, Deserialize)]

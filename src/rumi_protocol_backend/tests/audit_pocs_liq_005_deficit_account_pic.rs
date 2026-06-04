@@ -930,3 +930,141 @@ fn liq_005_pic_upgrade_preserves_deficit_state() {
         "deficit_readonly_threshold_e8s lost on upgrade"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Audit RED-101 (2026-06-03-0c3ceb4): behavioral fence for the redeem_icp
+// ReadOnly bypass. Lives here because this file already owns a proven
+// deficit-threshold ReadOnly-latch fixture; the structural fences live in
+// `audit_pocs_red_003_readonly_redemption.rs`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Call `redeem_icp(icusd_e8s)` as the test user and decode the result.
+fn redeem_icp_call(f: &Fixture, icusd_e8s: u64) -> Result<SuccessWithFee, ProtocolError> {
+    let result = f
+        .pic
+        .update_call(
+            f.protocol_id,
+            f.test_user,
+            "redeem_icp",
+            encode_args((icusd_e8s,)).unwrap(),
+        )
+        .expect("redeem_icp call failed at transport level");
+    match result {
+        WasmResult::Reply(b) => decode_one(&b).expect("decode redeem_icp result"),
+        WasmResult::Reject(m) => panic!("redeem_icp rejected at canister level: {}", m),
+    }
+}
+
+/// Call `redeem_collateral(collateral_type, icusd_e8s)` as the test user.
+fn redeem_collateral_call(
+    f: &Fixture,
+    collateral_type: Principal,
+    icusd_e8s: u64,
+) -> Result<SuccessWithFee, ProtocolError> {
+    let result = f
+        .pic
+        .update_call(
+            f.protocol_id,
+            f.test_user,
+            "redeem_collateral",
+            encode_args((collateral_type, icusd_e8s)).unwrap(),
+        )
+        .expect("redeem_collateral call failed at transport level");
+    match result {
+        WasmResult::Reply(b) => decode_one(&b).expect("decode redeem_collateral result"),
+        WasmResult::Reject(m) => panic!("redeem_collateral rejected at canister level: {}", m),
+    }
+}
+
+/// Assert a redemption result is specifically the `Mode::ReadOnly` rejection
+/// that `validate_mode()` / the vault-module gate return, not some other
+/// `TemporarilyUnavailable` (e.g. a missing price) and not a different error.
+/// Keying on the ReadOnly-specific message text prevents a false pass.
+fn assert_readonly_rejection(result: &Result<SuccessWithFee, ProtocolError>, ctx: &str) {
+    match result {
+        Err(ProtocolError::TemporarilyUnavailable(msg))
+            if msg.contains("total collateral ratio to go above 100%") => {}
+        other => panic!(
+            "{ctx}: expected Err(TemporarilyUnavailable(<ReadOnly message>)), got {:?}",
+            other
+        ),
+    }
+}
+
+/// Audit RED-101: while the protocol is latched `Mode::ReadOnly`, the
+/// `redeem_icp` endpoint must reject. The Wave-9 RED-003 fix gated
+/// `redeem_collateral` / `redeem_reserves` but MISSED the ICP convenience
+/// path (`redeem_icp` -> `vault::redeem_icp` -> `vault::redeem_collateral`).
+/// ICP is the tier-1, highest-TVL collateral and the first asset returned by
+/// `get_collateral_types_by_redemption_priority`, so this is the primary
+/// redemption path the gate was meant to close.
+///
+/// The `redeem_collateral` control already carries the RED-003 gate, so it
+/// rejects on BOTH the pre- and post-fix wasm, proving the ReadOnly latch is
+/// real and observable, and isolating the `redeem_icp` gap. The `redeem_icp`
+/// assertion is the regression fence: it FAILS on the pre-fix wasm (redeem_icp
+/// bypasses the gate) and PASSES once the shared vault-module gate plus the
+/// endpoint defense-in-depth land.
+#[test]
+fn red_101_pic_redeem_icp_rejects_in_readonly() {
+    let f = setup_fixture();
+
+    // ── Latch ReadOnly via the deficit threshold (same path as
+    //    `liq_005_pic_readonly_latch_at_threshold`). ──
+    let _ = f
+        .pic
+        .update_call(
+            f.protocol_id,
+            f.developer,
+            "set_deficit_readonly_threshold_e8s",
+            encode_args((1_000_000_000u64,)).unwrap(), // 10 icUSD
+        )
+        .expect("set_deficit_readonly_threshold_e8s");
+    drop_icp_price(&f, 10_000_000); // $0.10 → vault deeply underwater
+    icrc2_approve_call(
+        &f.pic,
+        f.icusd_ledger,
+        f.test_user,
+        f.protocol_id,
+        100_000_000_000u128,
+    );
+    let _ = f
+        .pic
+        .update_call(
+            f.protocol_id,
+            f.test_user,
+            "liquidate_vault",
+            encode_args((f.vault_id,)).unwrap(),
+        )
+        .expect("liquidate_vault failed");
+
+    // Precondition: the protocol is genuinely latched ReadOnly.
+    let status = protocol_status(&f.pic, f.protocol_id);
+    assert_eq!(
+        status.mode,
+        ProtocolMode::ReadOnly,
+        "fixture precondition: expected mode=ReadOnly after the deficit crossed \
+         its threshold; got {:?}",
+        status.mode
+    );
+
+    // Amount above any min and large enough that, on the pre-fix wasm,
+    // redeem_icp would proceed into the icUSD-pull path rather than reject.
+    // Irrelevant on the fixed path: the gate fires before any icUSD is pulled.
+    let redeem_e8s = 5_000_000_000u64; // 50 icUSD
+
+    // Control: redeem_collateral(ICP, …) already carries the RED-003 gate, so
+    // it rejects with ReadOnly on both the pre- and post-fix wasm.
+    let control = redeem_collateral_call(&f, f.icp_ledger, redeem_e8s);
+    assert_readonly_rejection(
+        &control,
+        "redeem_collateral(ICP) must reject in ReadOnly (RED-003 control)",
+    );
+
+    // RED-101: redeem_icp must reject identically. Fails on the pre-fix wasm.
+    let icp = redeem_icp_call(&f, redeem_e8s);
+    assert_readonly_rejection(
+        &icp,
+        "redeem_icp must reject in ReadOnly (RED-101 regression of RED-003)",
+    );
+}

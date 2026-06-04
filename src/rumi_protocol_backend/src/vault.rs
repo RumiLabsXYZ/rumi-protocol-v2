@@ -207,6 +207,15 @@ pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Prin
     let caller = ic_cdk::api::caller();
     let _guard_principal = GuardPrincipal::new(caller, "redeem_reserves")?;
 
+    // RED-101 / RED-003: gate on protocol mode here too. The endpoint keeps its
+    // own validate_mode() (defense in depth), but the spillover branch below
+    // calls record_redemption_on_vaults DIRECTLY (it does not route through
+    // redeem_collateral), so the redeem_collateral gate does not cover it. Gate
+    // at this entry point so the reserve path is covered by construction as well.
+    if read_state(|s| s.mode) == Mode::ReadOnly {
+        return Err(ProtocolError::read_only_mode());
+    }
+
     let icusd_amount: ICUSD = icusd_amount_raw.into();
 
     if icusd_amount < read_state(|s| s.min_icusd_amount) {
@@ -467,6 +476,19 @@ pub async fn redeem_icp(icusd_amount: u64) -> Result<SuccessWithFee, ProtocolErr
 pub async fn redeem_collateral(collateral_type: Principal, _icusd_amount: u64) -> Result<SuccessWithFee, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let _guard_principal = GuardPrincipal::new(caller, "redeem_collateral")?;
+
+    // RED-101 / RED-003: gate redemption on protocol mode at the shared internal
+    // entry point, not just at the Candid endpoints. ReadOnly auto-latches on
+    // insolvency (total collateral ratio < 100%, or the deficit account over its
+    // threshold); redeeming then extracts collateral at oracle face value from an
+    // already-insolvent protocol, deepening the bad-debt position. Placed after
+    // the guard and before any icUSD is pulled so every redemption surface
+    // (redeem_icp, redeem_collateral) is covered by construction. The Wave-9
+    // fix lived only in main.rs::validate_mode and the redeem_icp endpoint
+    // bypassed it. Same error as that gate via the shared constructor.
+    if read_state(|s| s.mode) == Mode::ReadOnly {
+        return Err(ProtocolError::read_only_mode());
+    }
 
     let icusd_amount: ICUSD = _icusd_amount.into();
 
