@@ -143,6 +143,18 @@ pub fn normalize_to_e8s(amount: u64, decimals: u8) -> u64 {
     }
 }
 
+/// Inverse of `normalize_to_e8s`: convert an e8s (8-decimal) amount back to a
+/// token's native decimals. SP-101 uses this to express the backend's realized
+/// icUSD-denominated debt (always e8s) in the drawn stable token's native units
+/// (e.g. ckUSDT/ckUSDC at 6 decimals).
+pub fn denormalize_from_e8s(amount_e8s: u64, decimals: u8) -> u64 {
+    match decimals.cmp(&8) {
+        std::cmp::Ordering::Equal => amount_e8s,
+        std::cmp::Ordering::Less => amount_e8s / 10u64.pow((8 - decimals) as u32),
+        std::cmp::Ordering::Greater => amount_e8s.saturating_mul(10u64.pow((decimals - 8) as u32)),
+    }
+}
+
 /// Convert a 3USD (LP token) amount to its USD value in e8s using virtual price.
 /// `virtual_price` is scaled by 1e18, LP token has 8 decimals.
 /// Result: amount_e8s = lp_amount * virtual_price / 1e18

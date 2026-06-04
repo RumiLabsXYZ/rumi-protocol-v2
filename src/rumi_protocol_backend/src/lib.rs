@@ -270,6 +270,13 @@ pub struct SuccessWithFee {
     /// proportional share of the actual collateral received, rather than only
     /// the liquidator bonus (`fee_amount_paid`).
     pub collateral_amount_received: Option<u64>,
+    /// SP-101: the icUSD-denominated debt the backend ACTUALLY cleared (in e8s).
+    /// The partial-liquidation paths cap the requested draw to the vault's
+    /// `max_liquidatable_debt`; the stability pool must debit depositors by this
+    /// realized amount, not the (possibly larger) amount it requested, or the
+    /// tracked aggregate drifts above the pool's real balance. `None` on the
+    /// non-liquidation paths (redeem / borrow). Optional for Candid back-compat.
+    pub debt_liquidated_e8s: Option<u64>,
 }
 
 /// Result from stability pool liquidation (both standard and debt-already-burned paths).

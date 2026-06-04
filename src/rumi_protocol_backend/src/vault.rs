@@ -581,6 +581,7 @@ pub async fn redeem_collateral(collateral_type: Principal, _icusd_amount: u64) -
                 block_index,
                 fee_amount_paid: fee_amount.to_u64(),
                 collateral_amount_received: None,
+                debt_liquidated_e8s: None, // SP-101
             })
         }
         Err(transfer_from_error) => Err(ProtocolError::TransferFromError(
@@ -978,6 +979,7 @@ async fn borrow_from_vault_internal(caller: Principal, arg: VaultArg) -> Result<
                 block_index,
                 fee_amount_paid: fee.to_u64(),
                 collateral_amount_received: None,
+                debt_liquidated_e8s: None, // SP-101
             })
         }
         Err(mint_error) => {
@@ -2510,6 +2512,7 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
         block_index: icusd_block_index,
         fee_amount_paid: fee_amount.to_u64(),
         collateral_amount_received: Some(collateral_to_liquidator.to_u64()),
+        debt_liquidated_e8s: Some(max_liquidatable_debt.to_u64()), // SP-101
     })
 }
 
@@ -2828,6 +2831,7 @@ pub async fn liquidate_vault_partial_with_stable(
         block_index: stable_block_index,
         fee_amount_paid: fee_amount.to_u64(),
         collateral_amount_received: Some(collateral_to_liquidator.to_u64()),
+        debt_liquidated_e8s: Some(max_liquidatable_debt.to_u64()), // SP-101
     })
 }
 
@@ -3519,6 +3523,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         block_index: icusd_block_index,
         fee_amount_paid: fee_amount.to_u64(),
         collateral_amount_received: Some(collateral_to_liquidator.to_u64()),
+        debt_liquidated_e8s: None, // SP-101
     })
 }
 
@@ -3970,5 +3975,6 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         block_index: icusd_block_index,
         fee_amount_paid: fee_amount.to_u64(),
         collateral_amount_received: Some(collateral_to_liquidator.to_u64()),
+        debt_liquidated_e8s: None, // SP-101
     })
 }

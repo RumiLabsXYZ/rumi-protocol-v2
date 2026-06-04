@@ -254,9 +254,20 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
                 let collateral = success.collateral_amount_received.unwrap_or(success.fee_amount_paid);
                 log!(INFO, "Liquidation succeeded for vault {} with token {}: collateral={}, fee={}",
                     vault_info.vault_id, token_ledger, collateral, success.fee_amount_paid);
-                // Record the consumption; `process_liquidation_gains` will debit
-                // depositor balances exactly once, after this loop.
-                actual_consumed.insert(*token_ledger, *amount);
+                // SP-101: debit by the REALIZED debt the backend actually cleared
+                // (it caps the requested draw to the vault's max_liquidatable_debt),
+                // not the amount we requested, so the tracked aggregate never falls
+                // by more than the pool truly spent. debt_liquidated_e8s is icUSD
+                // e8s; convert to the drawn token's native units on the non-icUSD
+                // path. Falls back to the requested amount if an older backend wasm
+                // does not report it. `process_liquidation_gains` debits depositor
+                // balances exactly once, after this loop.
+                let realized_consumed = match success.debt_liquidated_e8s {
+                    Some(debt_e8) if is_icusd => debt_e8,
+                    Some(debt_e8) => crate::types::denormalize_from_e8s(debt_e8, token_decimals),
+                    None => *amount,
+                };
+                actual_consumed.insert(*token_ledger, realized_consumed);
                 total_collateral_gained += collateral;
                 // Bug 7: one token per vault per round — vault state changed, remaining draws are stale
                 break;
