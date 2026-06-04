@@ -661,6 +661,23 @@ pub async fn run_observer(chain: ChainId) {
         } else {
             match erc20_total_supply_at(chain, &contract, finalized).await {
                 Ok(onchain_supply) => {
+                    // FLAG-2 positive-divergence alarm: `has_inflight_mint` is
+                    // false in this arm, so an on-chain supply ABOVE recorded is
+                    // unexplained — the unbacked-mint signature (a mint that
+                    // landed but was never credited, or an out-of-band mint). The
+                    // pre-existing backstop only reacts to a DROP (a burn); this
+                    // catches the EXCESS direction. Alarm loudly but do NOT
+                    // auto-halt: this single-provider read can be transiently
+                    // wrong (FLAG-1), so the operator reconciles (reconcile_chain_supply)
+                    // and halts via existing controls rather than a flaky read
+                    // freezing the chain.
+                    if onchain_supply > recorded_supply {
+                        log!(
+                            INFO,
+                            "[observer chain={:?}] SUPPLY DIVERGENCE ALARM: onchain totalSupply {} EXCEEDS recorded {} by {} with no mint in flight (possible unbacked mint); run reconcile_chain_supply",
+                            chain, onchain_supply, recorded_supply, onchain_supply.saturating_sub(recorded_supply)
+                        );
+                    }
                     let scan = backstop_should_scan(onchain_supply, recorded_supply, has_inflight_mint);
                     if scan {
                         log!(

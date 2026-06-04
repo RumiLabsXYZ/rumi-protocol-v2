@@ -525,10 +525,63 @@ fn evm_rpc_principal() -> Principal {
         })
 }
 
-/// Send a raw JSON-RPC payload to the EVM RPC canister using the `request`
-/// escape-hatch method.  Tries each of the chain's configured RPC endpoints in
-/// order and returns the first successful `Ok` inner text.  On all-fail returns
-/// the last error string.
+/// Issue ONE JSON-RPC `request` to a single endpoint. Returns the inner response
+/// text on success, or an error string (provider error or IC call error).
+async fn single_call(canister: Principal, url: &str, json_payload: &str) -> Result<String, String> {
+    let rpc_service = RpcService::Custom(RpcApi {
+        url: url.to_string(),
+        headers: None,
+    });
+    let result: Result<(RequestResult,), _> = ic_cdk::api::call::call_with_payment128(
+        canister,
+        "request",
+        (rpc_service, json_payload.to_string(), EVM_RPC_MAX_RESPONSE_BYTES),
+        EVM_RPC_CALL_CYCLES,
+    )
+    .await;
+    match result {
+        Ok((RequestResult::Ok(text),)) => Ok(text),
+        Ok((RequestResult::Err(rpc_err),)) => Err(format!("RPC error from {}: {:?}", url, rpc_err)),
+        Err((code, msg)) => Err(format!("call error to {} ({:?}): {}", url, code, msg)),
+    }
+}
+
+/// The consensus key of a JSON-RPC response: its semantic `result` value, or its
+/// `error` value if there is no result. `serde_json::Value` equality is
+/// whitespace- and key-order-independent, so two providers that returned the
+/// same logical result agree even when their JSON formatting (or the volatile
+/// `id` field) differs. An unparseable / shape-less response groups only with
+/// itself, so it can never be mistaken for agreement.
+fn response_consensus_key(text: &str) -> serde_json::Value {
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(v) => {
+            if let Some(r) = v.get("result") {
+                r.clone()
+            } else if let Some(e) = v.get("error") {
+                serde_json::json!({ "__error": e })
+            } else {
+                serde_json::json!({ "__raw": text })
+            }
+        }
+        Err(_) => serde_json::json!({ "__raw": text }),
+    }
+}
+
+/// Send a raw JSON-RPC READ to the EVM RPC canister with MULTI-PROVIDER QUORUM
+/// (audit FLAG-1). Queries EVERY configured endpoint and requires a STRICT
+/// MAJORITY of the configured providers to return the same semantic result
+/// before returning it, so a single malicious / compromised / lagging provider
+/// cannot fabricate a balance, block, supply, or receipt the canister credits.
+///
+/// With ONE configured endpoint this degrades to a single-provider read (no
+/// cross-provider quorum is possible). The deployment MUST configure >= 3
+/// independent endpoints to get real 2-of-3 protection (an ops action; see the
+/// pre-permissionless checklist). On no-quorum or all-fail this returns Err so
+/// the caller never credits / advances on disagreement.
+///
+/// READS ONLY. `eth_sendRawTransaction` is a write and uses
+/// `call_evm_rpc_broadcast` (first-Ok: a broadcast lands if ANY provider accepts
+/// it; requiring agreement would wrongly drop a tx that only some providers saw).
 async fn call_evm_rpc(chain: ChainId, json_payload: &str) -> Result<String, String> {
     let endpoints: Vec<String> = read_state(|s| {
         s.multi_chain
@@ -537,45 +590,76 @@ async fn call_evm_rpc(chain: ChainId, json_payload: &str) -> Result<String, Stri
             .map(|c| c.rpc_endpoints.clone())
             .unwrap_or_default()
     });
-
     if endpoints.is_empty() {
         return Err(format!("no RPC endpoints configured for chain {:?}", chain));
     }
-
     let canister = evm_rpc_principal();
+
+    // Single provider: no cross-provider quorum is possible.
+    if endpoints.len() == 1 {
+        log!(DEBUG, "[evm_rpc] single-provider read for chain {:?} (configure >= 3 endpoints for quorum)", chain);
+        return single_call(canister, &endpoints[0], json_payload).await;
+    }
+
+    // Multi-provider: collect every Ok response, then require a strict majority
+    // of the CONFIGURED providers to agree on the semantic result.
+    let mut oks: Vec<String> = Vec::new();
     let mut last_err = String::new();
-
     for url in &endpoints {
-        let rpc_service = RpcService::Custom(RpcApi {
-            url: url.clone(),
-            headers: None,
-        });
-
-        let result: Result<(RequestResult,), _> =
-            ic_cdk::api::call::call_with_payment128(
-                canister,
-                "request",
-                (rpc_service, json_payload.to_string(), EVM_RPC_MAX_RESPONSE_BYTES),
-                EVM_RPC_CALL_CYCLES,
-            )
-            .await;
-
-        match result {
-            Ok((RequestResult::Ok(text),)) => {
-                log!(DEBUG, "[evm_rpc] call ok via {}", url);
-                return Ok(text);
-            }
-            Ok((RequestResult::Err(rpc_err),)) => {
-                last_err = format!("RPC error from {}: {:?}", url, rpc_err);
-                log!(DEBUG, "[evm_rpc] provider error via {}: {:?}", url, rpc_err);
-            }
-            Err((code, msg)) => {
-                last_err = format!("call error to {} ({:?}): {}", url, code, msg);
-                log!(DEBUG, "[evm_rpc] call error via {}: {:?} {}", url, code, msg);
+        match single_call(canister, url, json_payload).await {
+            Ok(text) => oks.push(text),
+            Err(e) => {
+                log!(DEBUG, "[evm_rpc] provider read error via {}: {}", url, e);
+                last_err = e;
             }
         }
     }
+    if oks.is_empty() {
+        return Err(format!("all {} providers failed; last: {}", endpoints.len(), last_err));
+    }
+    let needed = endpoints.len() / 2 + 1; // strict majority of the full provider set
+    let keys: Vec<serde_json::Value> = oks.iter().map(|t| response_consensus_key(t)).collect();
+    let mut best_idx = 0usize;
+    let mut best_count = 0usize;
+    for i in 0..keys.len() {
+        let count = keys.iter().filter(|k| **k == keys[i]).count();
+        if count > best_count {
+            best_count = count;
+            best_idx = i;
+        }
+    }
+    if best_count >= needed {
+        Ok(oks[best_idx].clone())
+    } else {
+        Err(format!(
+            "RPC quorum not reached for chain {:?}: best agreement {}/{} (need {})",
+            chain, best_count, endpoints.len(), needed
+        ))
+    }
+}
 
+/// Broadcast a raw JSON-RPC WRITE (`eth_sendRawTransaction`). Returns the first
+/// provider's Ok — a broadcast propagates if ANY provider accepts it, so quorum
+/// is the wrong model for a write. On all-fail returns the last error.
+async fn call_evm_rpc_broadcast(chain: ChainId, json_payload: &str) -> Result<String, String> {
+    let endpoints: Vec<String> = read_state(|s| {
+        s.multi_chain
+            .chain_configs
+            .get(&chain)
+            .map(|c| c.rpc_endpoints.clone())
+            .unwrap_or_default()
+    });
+    if endpoints.is_empty() {
+        return Err(format!("no RPC endpoints configured for chain {:?}", chain));
+    }
+    let canister = evm_rpc_principal();
+    let mut last_err = String::new();
+    for url in &endpoints {
+        match single_call(canister, url, json_payload).await {
+            Ok(text) => return Ok(text),
+            Err(e) => last_err = e,
+        }
+    }
     Err(last_err)
 }
 
@@ -725,6 +809,33 @@ pub async fn get_balance(chain: ChainId, address: &str) -> Result<u128, String> 
     let hex = val["result"]
         .as_str()
         .ok_or_else(|| format!("eth_getBalance: missing result in {:?}", text))?;
+    parse_hex_quantity(hex)
+}
+
+/// Returns the native balance (in wei) of `address` at a SPECIFIC block number.
+/// Like `erc20_total_supply_at`, a fixed block number is byte-identical across
+/// the EVM RPC canister's replicas (so HTTPS-outcall consensus is reached) AND,
+/// when the number is a finalized block, the read is reorg-safe. The settlement
+/// worker uses this to RE-VERIFY a deposit at finality before broadcasting an
+/// irreversible mint: deposit DETECTION runs on the volatile `"latest"` balance
+/// for liveness (the Gate-4 design), but the mint must only fire against a
+/// deposit that is buried and cannot reorg away.
+pub async fn get_balance_at_block(chain: ChainId, address: &str, block: u64) -> Result<u128, String> {
+    let payload = format!(
+        r#"{{"jsonrpc":"2.0","method":"eth_getBalance","params":[{:?},"0x{:x}"],"id":{}}}"#,
+        address,
+        block,
+        next_rpc_id()
+    );
+    let text = call_evm_rpc(chain, &payload).await?;
+    let val: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("eth_getBalance(at block) parse: {}", e))?;
+    if let Some(err) = val.get("error") {
+        return Err(format!("eth_getBalance(at block) RPC error: {}", err));
+    }
+    let hex = val["result"]
+        .as_str()
+        .ok_or_else(|| format!("eth_getBalance(at block): missing result in {:?}", text))?;
     parse_hex_quantity(hex)
 }
 
@@ -993,7 +1104,8 @@ pub async fn send_raw_transaction(chain: ChainId, raw_tx_hex: &str) -> Result<St
         raw_tx_hex,
         next_rpc_id()
     );
-    let text = call_evm_rpc(chain, &payload).await?;
+    // A broadcast is a write: first-Ok, not quorum (see call_evm_rpc_broadcast).
+    let text = call_evm_rpc_broadcast(chain, &payload).await?;
     let val: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| format!("eth_sendRawTransaction parse: {}", e))?;
 
