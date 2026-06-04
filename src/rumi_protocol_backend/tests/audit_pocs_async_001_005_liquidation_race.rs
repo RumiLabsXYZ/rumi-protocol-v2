@@ -242,3 +242,101 @@ fn liquidator_a() -> Principal {
 fn liquidator_b() -> Principal {
     Principal::from_slice(&[2])
 }
+
+// ── ASYNC-003 structural fence: recover_pending_transfer must pay with the
+//    entry's PERSISTED op_nonce (ledger dedup vs the timer retry) and hold a
+//    per-caller guard. FAILS on pre-fix main, PASSES post-fix. ──
+#[test]
+fn async_003_recover_pending_transfer_reuses_persisted_nonce_and_guards() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/main.rs");
+    let m = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+    let hdr = "async fn recover_pending_transfer(";
+    let start = m.find(hdr).expect("recover_pending_transfer not found in main.rs");
+    let after = start + hdr.len();
+    let end = ["\nasync fn ", "\nfn ", "\npub async fn "]
+        .iter()
+        .filter_map(|mk| m[after..].find(mk).map(|i| after + i))
+        .min()
+        .unwrap_or(m.len());
+    let body = &m[start..end];
+    assert!(
+        body.contains("transfer_collateral_with_nonce") && body.contains("op_nonce"),
+        "recover_pending_transfer must pay via transfer_collateral_with_nonce(.., transfer.op_nonce) \
+         so it shares the ledger dedup tuple with process_pending_transfer's timer retry (audit \
+         ASYNC-003); a fresh-nonce transfer_collateral double-pays.\n\n{}",
+        body
+    );
+    assert!(
+        body.contains("GuardPrincipal"),
+        "recover_pending_transfer must hold a GuardPrincipal(caller) so two concurrent manual \
+         recoveries cannot both pay the same entry (audit ASYNC-003).\n\n{}",
+        body
+    );
+}
+
+// ── ASYNC-002 structural fence: State::liquidate_vault must not .expect-trap on
+//    a missing vault, and vault::liquidate_vault must presence-check + refund on
+//    the concurrent-liquidation race. ──
+#[test]
+fn async_002_liquidate_vault_presence_checks_and_does_not_trap() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let state_rs = std::fs::read_to_string(root.join("src/state.rs")).unwrap();
+    let vault_rs = std::fs::read_to_string(root.join("src/vault.rs")).unwrap();
+
+    // State::liquidate_vault must not trap on a missing vault.
+    let sl_hdr = "pub fn liquidate_vault(";
+    let sl_start = state_rs.find(sl_hdr).expect("State::liquidate_vault not found");
+    let sl_after = sl_start + sl_hdr.len();
+    let sl_end = ["\n    pub fn ", "\n    fn ", "\n    pub async fn ", "\n    async fn "]
+        .iter()
+        .filter_map(|m| state_rs[sl_after..].find(m).map(|i| sl_after + i))
+        .min()
+        .unwrap_or(state_rs.len());
+    let sl_body = &state_rs[sl_start..sl_end];
+    assert!(
+        !sl_body.contains(".expect(\"bug: vault not found\")"),
+        "State::liquidate_vault must not .expect-trap on a missing vault (audit ASYNC-002); \
+         on the live path that is a trap-after-icUSD-transfer. Return ICUSD::new(0) instead.\n\n{}",
+        sl_body
+    );
+
+    // vault::liquidate_vault must presence-check inside the critical section and
+    // refund the liquidator's icUSD if a concurrent op already removed the vault.
+    let vl_hdr = "pub async fn liquidate_vault(";
+    let vl_start = vault_rs.find(vl_hdr).expect("vault::liquidate_vault not found");
+    let vl_after = vl_start + vl_hdr.len();
+    let vl_end = ["\npub async fn ", "\npub fn ", "\nasync fn ", "\nfn "]
+        .iter()
+        .filter_map(|m| vault_rs[vl_after..].find(m).map(|i| vl_after + i))
+        .min()
+        .unwrap_or(vault_rs.len());
+    let vl_body = &vault_rs[vl_start..vl_end];
+    assert!(
+        vl_body.contains("contains_key(&vault_id)") && vl_body.contains("transfer_icusd_with_nonce"),
+        "vault::liquidate_vault must presence-check the vault inside the critical section and \
+         refund the liquidator's icUSD on the concurrent-liquidation race (audit ASYNC-002).\n\n{}",
+        vl_body
+    );
+}
+
+// ── ASYNC-001 structural fence: the partial-liquidation paths must re-cap to the
+//    current vault state and saturating_sub, never raw -= the pre-await amount. ──
+#[test]
+fn async_001_partial_liq_uses_saturating_recap_not_raw_sub() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let vault_rs = std::fs::read_to_string(root.join("src/vault.rs")).unwrap();
+    assert!(
+        !vault_rs.contains("borrowed_icusd_amount -= max_liquidatable_debt")
+            && !vault_rs.contains("borrowed_icusd_amount -= liquidator_payment"),
+        "partial-liquidation paths must not subtract the pre-await liquidation amount with a raw \
+         -= (ICUSD Token::sub panics on underflow / raw u64 collateral wraps); re-cap to the \
+         current vault state and saturating_sub (audit ASYNC-001)."
+    );
+    assert!(
+        vault_rs.contains("max_liquidatable_debt.min(vault.borrowed_icusd_amount)")
+            && vault_rs.contains("vault.collateral_amount.saturating_sub"),
+        "partial-liquidation paths must re-cap to the current vault state with .min(..) and use \
+         saturating_sub (audit ASYNC-001)."
+    );
+}

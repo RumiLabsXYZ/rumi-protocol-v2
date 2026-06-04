@@ -3744,11 +3744,17 @@ impl State {
     /// Liquidate a vault. Returns the interest share of the debt reduction
     /// so callers can route it to treasury.
     pub fn liquidate_vault(&mut self, vault_id: u64, mode: Mode, collateral_price: UsdIcp) -> ICUSD {
-        let vault = self
-            .vault_id_to_vaults
-            .get(&vault_id)
-            .cloned()
-            .expect("bug: vault not found");
+        // ASYNC-002 defense-in-depth: never trap on a missing vault. The
+        // vault-level `vault::liquidate_vault` now presence-checks and refunds
+        // the liquidator before reaching here, but a concurrent liquidation
+        // could still have removed the vault on any path into this function.
+        // No vault means nothing to liquidate, so return a zero interest share
+        // instead of `.expect`-panicking (which, on the live liquidation path,
+        // would be a trap-after-icUSD-transfer).
+        let vault = match self.vault_id_to_vaults.get(&vault_id).cloned() {
+            Some(v) => v,
+            None => return ICUSD::new(0),
+        };
 
         let ct = vault.collateral_type;
         let vault_collateral_ratio = compute_collateral_ratio(&vault, collateral_price, self);

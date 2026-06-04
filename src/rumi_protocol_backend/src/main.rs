@@ -155,6 +155,20 @@ async fn validate_freshness_for_vault(vault_id: u64) -> Result<(), ProtocolError
     }
 }
 
+/// Audit ORACLE-001: refresh a collateral's cached price before a debt-increasing
+/// or collateral-decreasing op whose collateral is given directly (the open-*
+/// endpoints). `None` means ICP (the default collateral). `ensure_fresh_price_for`
+/// delegates to `ensure_fresh_price` for ICP, so this is safe to call
+/// unconditionally and mirrors `validate_freshness_for_vault` for the
+/// by-vault-id endpoints. Without it, a non-ICP collateral whose background
+/// fetch has been failing would let the borrower mint against a stale price.
+async fn validate_freshness_for_collateral(
+    collateral_type: Option<Principal>,
+) -> Result<(), ProtocolError> {
+    let ct = collateral_type.unwrap_or_else(|| read_state(|s| s.icp_collateral_type()));
+    rumi_protocol_backend::xrc::ensure_fresh_price_for(&ct).await
+}
+
 /// Pre-filter to reduce cycle waste from anonymous spam.
 /// Runs on ONE replica without consensus. Can be bypassed by malicious nodes.
 /// NOT a security boundary — all real access control is inside each #[update] method.
@@ -2559,6 +2573,8 @@ async fn open_vault_and_borrow(
 ) -> Result<OpenVaultSuccess, ProtocolError> {
     validate_call().await?;
     validate_mode()?;
+    // ORACLE-001: refresh the (possibly non-ICP) collateral price before minting.
+    validate_freshness_for_collateral(collateral_type).await?;
     check_postcondition(
         rumi_protocol_backend::vault::open_vault_and_borrow(collateral_amount, borrow_amount, collateral_type).await,
     )
@@ -2569,6 +2585,8 @@ async fn open_vault_and_borrow(
 async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {
     validate_call().await?;
     validate_mode()?;
+    // ORACLE-001: refresh this vault's collateral price before minting more debt.
+    validate_freshness_for_vault(arg.vault_id).await?;
     check_postcondition(rumi_protocol_backend::vault::borrow_from_vault(arg).await)
 }
 
@@ -2612,6 +2630,8 @@ fn get_deposit_account(_collateral_type: Option<Principal>) -> icrc_ledger_types
 async fn open_vault_with_deposit(borrow_amount: u64, collateral_type: Option<Principal>) -> Result<OpenVaultSuccess, ProtocolError> {
     validate_call().await?;
     validate_mode()?;
+    // ORACLE-001: refresh the (possibly non-ICP) collateral price before minting.
+    validate_freshness_for_collateral(collateral_type).await?;
     check_postcondition(rumi_protocol_backend::vault::open_vault_with_deposit(borrow_amount, collateral_type).await)
 }
 
@@ -2636,6 +2656,8 @@ async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
 #[update]
 async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
     validate_call().await?;
+    // ORACLE-001: refresh this vault's collateral price before releasing collateral.
+    validate_freshness_for_vault(vault_id).await?;
     check_postcondition(rumi_protocol_backend::vault::withdraw_collateral(vault_id).await)
 }
 
@@ -2643,6 +2665,8 @@ async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
 #[update]
 async fn withdraw_partial_collateral(arg: rumi_protocol_backend::vault::VaultArg) -> Result<u64, ProtocolError> {
     validate_call().await?;
+    // ORACLE-001: refresh this vault's collateral price before releasing collateral.
+    validate_freshness_for_vault(arg.vault_id).await?;
     check_postcondition(rumi_protocol_backend::vault::withdraw_partial_collateral(arg.vault_id, arg.amount).await)
 }
 
@@ -3341,6 +3365,10 @@ fn http_request(req: HttpRequest) -> HttpResponse {
 #[update]
 async fn recover_pending_transfer(vault_id: u64) -> Result<bool, ProtocolError> {
     let caller = ic_cdk::caller();
+    // ASYNC-003: serialize per-caller so two concurrent manual recoveries cannot
+    // both pay out the same pending entry (the entry is only removed AFTER the
+    // await below). Defense-in-depth on top of the nonce-dedup fix.
+    let _guard = rumi_protocol_backend::guard::GuardPrincipal::new(caller, "recover_pending_transfer")?;
 
     // Wave-4 LIQ-001: pending_margin_transfers and pending_excess_transfers are
     // keyed by (vault_id, owner). Look up the entry that belongs to the caller.
@@ -3375,10 +3403,16 @@ async fn recover_pending_transfer(vault_id: u64) -> Result<bool, ProtocolError> 
             ));
         }
 
-        let result = management::transfer_collateral(
+        // ASYNC-003: pay with the entry's PERSISTED op_nonce (not a fresh one) so
+        // this manual recovery shares the ledger dedup tuple (created_at_time +
+        // memo) with process_pending_transfer's timer retry. transfer_idempotent
+        // converts the ledger's Duplicate response to Ok, so a concurrent timer
+        // retry and this manual recovery can never double-pay the owner.
+        let result = management::transfer_collateral_with_nonce(
             (transfer.margin - transfer_fee).to_u64(),
             transfer.owner,
             ledger,
+            transfer.op_nonce,
         ).await;
 
         match result {

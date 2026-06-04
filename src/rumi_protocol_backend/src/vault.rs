@@ -172,6 +172,20 @@ pub fn require_vault_not_processing(vault: &Vault) -> Result<(), ProtocolError> 
     }
 }
 
+/// LIQ-101: vault-id wrapper around `require_vault_not_processing` for the
+/// liquidation entry points (manual + SP), which only fetch the vault later in
+/// their amount-computing read_state. If the liquidation bot has already
+/// claimed this vault (`bot_processing` set, with the write-down deferred until
+/// the bot's swap settles), a manual / stability-pool liquidation here would
+/// seize the same collateral a second time. Mirrors the lock every user op
+/// already honors. Absent vault => Ok (a later check surfaces "not found").
+pub fn reject_if_bot_processing(vault_id: u64) -> Result<(), ProtocolError> {
+    match read_state(|s| s.vault_id_to_vaults.get(&vault_id).cloned()) {
+        Some(vault) => require_vault_not_processing(&vault),
+        None => Ok(()),
+    }
+}
+
 #[derive(CandidType, Serialize, Deserialize, Debug)]
 pub struct CandidVault {
     pub owner: Principal,
@@ -567,6 +581,7 @@ pub async fn redeem_collateral(collateral_type: Principal, _icusd_amount: u64) -
                 block_index,
                 fee_amount_paid: fee_amount.to_u64(),
                 collateral_amount_received: None,
+                debt_liquidated_e8s: None, // SP-101
             })
         }
         Err(transfer_from_error) => Err(ProtocolError::TransferFromError(
@@ -964,6 +979,7 @@ async fn borrow_from_vault_internal(caller: Principal, arg: VaultArg) -> Result<
                 block_index,
                 fee_amount_paid: fee.to_u64(),
                 collateral_amount_received: None,
+                debt_liquidated_e8s: None, // SP-101
             })
         }
         Err(mint_error) => {
@@ -2223,6 +2239,7 @@ pub async fn repay_and_close_vault(arg: VaultArg) -> Result<RepayAndCloseSuccess
 pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result<SuccessWithFee, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_partial_{}", vault_id))?;
+    reject_if_bot_processing(vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault
 
     // Wave-8b LIQ-002 band gate deactivated 2026-05-18. The per-vault CR
     // check below remains the authoritative liquidatability test. See
@@ -2349,9 +2366,17 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
         // Reduce vault debt and collateral directly
         // Vault loses total_to_seize (liquidator + protocol cut)
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
-            vault.borrowed_icusd_amount -= max_liquidatable_debt;
-            vault.collateral_amount -= total_to_seize.to_u64();
-            vault.accrued_interest -= interest_share;
+            // ASYNC-001: cap each reduction to the CURRENT vault state and
+            // saturating_sub. A concurrent partial liquidation may have reduced
+            // this vault between our pre-await read and now; without the cap the
+            // ICUSD Token::sub would underflow-PANIC and the raw u64 collateral
+            // sub would WRAP, both after the liquidator's icUSD was already pulled.
+            let debt_applied = max_liquidatable_debt.min(vault.borrowed_icusd_amount);
+            let collateral_applied = total_to_seize.to_u64().min(vault.collateral_amount);
+            let interest_applied = interest_share.min(vault.accrued_interest);
+            vault.borrowed_icusd_amount = vault.borrowed_icusd_amount.saturating_sub(debt_applied);
+            vault.collateral_amount = vault.collateral_amount.saturating_sub(collateral_applied);
+            vault.accrued_interest = vault.accrued_interest.saturating_sub(interest_applied);
         }
 
         // Wave-10 LIQ-008: append the gross debt cleared to the rolling-
@@ -2487,6 +2512,7 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
         block_index: icusd_block_index,
         fee_amount_paid: fee_amount.to_u64(),
         collateral_amount_received: Some(collateral_to_liquidator.to_u64()),
+        debt_liquidated_e8s: Some(max_liquidatable_debt.to_u64()), // SP-101
     })
 }
 
@@ -2498,6 +2524,7 @@ pub async fn liquidate_vault_partial_with_stable(
 ) -> Result<SuccessWithFee, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_stable_{}", vault_id))?;
+    reject_if_bot_processing(vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault
 
     // Wave-8b LIQ-002 band gate deactivated 2026-05-18 (see
     // `liquidate_vault_partial` above for rationale).
@@ -2643,9 +2670,17 @@ pub async fn liquidate_vault_partial_with_stable(
         // Reduce vault debt and collateral directly
         // Vault loses total_to_seize (liquidator + protocol cut)
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
-            vault.borrowed_icusd_amount -= max_liquidatable_debt;
-            vault.collateral_amount -= total_to_seize.to_u64();
-            vault.accrued_interest -= interest_share;
+            // ASYNC-001: cap each reduction to the CURRENT vault state and
+            // saturating_sub. A concurrent partial liquidation may have reduced
+            // this vault between our pre-await read and now; without the cap the
+            // ICUSD Token::sub would underflow-PANIC and the raw u64 collateral
+            // sub would WRAP, both after the liquidator's icUSD was already pulled.
+            let debt_applied = max_liquidatable_debt.min(vault.borrowed_icusd_amount);
+            let collateral_applied = total_to_seize.to_u64().min(vault.collateral_amount);
+            let interest_applied = interest_share.min(vault.accrued_interest);
+            vault.borrowed_icusd_amount = vault.borrowed_icusd_amount.saturating_sub(debt_applied);
+            vault.collateral_amount = vault.collateral_amount.saturating_sub(collateral_applied);
+            vault.accrued_interest = vault.accrued_interest.saturating_sub(interest_applied);
         }
 
         // Wave-10 LIQ-008: append the gross debt cleared to the rolling-
@@ -2796,6 +2831,7 @@ pub async fn liquidate_vault_partial_with_stable(
         block_index: stable_block_index,
         fee_amount_paid: fee_amount.to_u64(),
         collateral_amount_received: Some(collateral_to_liquidator.to_u64()),
+        debt_liquidated_e8s: Some(max_liquidatable_debt.to_u64()), // SP-101
     })
 }
 
@@ -2840,6 +2876,7 @@ pub async fn liquidate_vault_debt_already_burned(
     }
 
     let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_debt_burned_{}", vault_id))?;
+    reject_if_bot_processing(vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault (SP path)
 
     let liquidation_amount: ICUSD = icusd_burned_e8s.into();
 
@@ -3032,9 +3069,17 @@ pub async fn liquidate_vault_debt_already_burned(
         } else { ICUSD::new(0) };
 
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
-            vault.borrowed_icusd_amount -= max_liquidatable_debt;
-            vault.collateral_amount -= total_to_seize.to_u64();
-            vault.accrued_interest -= interest_share;
+            // ASYNC-001: cap each reduction to the CURRENT vault state and
+            // saturating_sub. A concurrent partial liquidation may have reduced
+            // this vault between our pre-await read and now; without the cap the
+            // ICUSD Token::sub would underflow-PANIC and the raw u64 collateral
+            // sub would WRAP, both after the liquidator's icUSD was already pulled.
+            let debt_applied = max_liquidatable_debt.min(vault.borrowed_icusd_amount);
+            let collateral_applied = total_to_seize.to_u64().min(vault.collateral_amount);
+            let interest_applied = interest_share.min(vault.accrued_interest);
+            vault.borrowed_icusd_amount = vault.borrowed_icusd_amount.saturating_sub(debt_applied);
+            vault.collateral_amount = vault.collateral_amount.saturating_sub(collateral_applied);
+            vault.accrued_interest = vault.accrued_interest.saturating_sub(interest_applied);
         }
 
         // Wave-10 LIQ-008: append the gross debt cleared to the rolling-
@@ -3190,6 +3235,7 @@ pub async fn liquidate_vault_debt_already_burned(
 pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_{}", vault_id))?;
+    reject_if_bot_processing(vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault
 
     // Wave-8b LIQ-002 band gate deactivated 2026-05-18 (see
     // `liquidate_vault_partial` above for rationale).
@@ -3289,8 +3335,15 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         }
     };
 
-    // Step 4: Update protocol state ATOMICALLY (this is the critical section)
-    let interest_share = mutate_state(|s| {
+    // Step 4: Update protocol state ATOMICALLY (this is the critical section).
+    // ASYNC-002: a concurrent full liquidation may have removed this vault between
+    // our pre-await read and the icUSD pull above. Detect it BEFORE any
+    // irreversible state work and refund the liquidator (None branch below)
+    // instead of trapping inside s.liquidate_vault()'s vault lookup.
+    let interest_share = match mutate_state(|s| {
+        if !s.vault_id_to_vaults.contains_key(&vault_id) {
+            return None;
+        }
         // Execute the liquidation in state first (this must happen)
         // liquidate_vault returns the interest share of the debt reduction
         let interest_share = s.liquidate_vault(vault_id, mode, collateral_price_usd);
@@ -3373,8 +3426,51 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
 
         log!(INFO, "[liquidate_vault] Protocol state updated, {} pending transfers created",
              if !is_recovery_partial && excess_collateral > ICP::new(0) { 2 } else { 1 });
-        interest_share
-    });
+        Some(interest_share)
+    }) {
+        Some(share) => share,
+        None => {
+            // ASYNC-002: the vault was liquidated by a concurrent op while our
+            // icUSD pull was in flight. Refund the liquidator (mirrors the
+            // redeem_reserves durable-refund saga) and return a clean error
+            // instead of trapping with the liquidator's icUSD stuck.
+            guard_principal.fail();
+            log!(INFO,
+                "[liquidate_vault] Vault #{} already liquidated by a concurrent op; refunding {} icUSD to {}",
+                vault_id, debt_amount.to_u64(), caller);
+            let refund_nonce = mutate_state(|s| s.next_op_nonce());
+            match management::transfer_icusd_with_nonce(debt_amount, caller, refund_nonce).await {
+                Ok(refund_block) => {
+                    log!(INFO, "[liquidate_vault] Refunded {} icUSD to {} (block {})",
+                        debt_amount.to_u64(), caller, refund_block);
+                }
+                Err(refund_err) => {
+                    log!(INFO,
+                        "[liquidate_vault] Vault gone AND inline icUSD refund failed for {}: {:?}. \
+                         Enqueueing durable refund (block {}).",
+                        caller, refund_err, icusd_block_index);
+                    mutate_state(|s| {
+                        s.pending_refunds.insert(
+                            icusd_block_index,
+                            crate::state::PendingRefund {
+                                user: caller,
+                                amount_e8s: debt_amount.to_u64(),
+                                retry_count: 0,
+                                op_nonce: refund_nonce,
+                            },
+                        );
+                    });
+                    ic_cdk_timers::set_timer(std::time::Duration::from_secs(2), || {
+                        ic_cdk::spawn(crate::process_pending_transfer())
+                    });
+                }
+            }
+            return Err(ProtocolError::GenericError(format!(
+                "Vault #{} was already liquidated by a concurrent operation; your {} icUSD has been refunded",
+                vault_id, debt_amount.to_u64()
+            )));
+        }
+    };
 
     // Route interest share via N-way split
     crate::treasury::distribute_interest(interest_share, vault.collateral_type).await;
@@ -3427,6 +3523,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         block_index: icusd_block_index,
         fee_amount_paid: fee_amount.to_u64(),
         collateral_amount_received: Some(collateral_to_liquidator.to_u64()),
+        debt_liquidated_e8s: None, // SP-101
     })
 }
 
@@ -3624,6 +3721,7 @@ pub async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError>
 pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("partial_liquidate_vault_{}", arg.vault_id))?;
+    reject_if_bot_processing(arg.vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault
 
     // Wave-8b LIQ-002 band gate deactivated 2026-05-18 (see
     // `liquidate_vault_partial` above for rationale).
@@ -3754,9 +3852,14 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         // Reduce the vault's debt by the liquidator payment amount
         // Vault loses total_to_seize (liquidator + protocol cut)
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&arg.vault_id) {
-            vault.borrowed_icusd_amount -= liquidator_payment;
-            vault.collateral_amount -= total_to_seize.to_u64();
-            vault.accrued_interest -= interest_share;
+            // ASYNC-001: cap each reduction to the CURRENT vault state and
+            // saturating_sub (same race as the other partial-liq paths).
+            let debt_applied = liquidator_payment.min(vault.borrowed_icusd_amount);
+            let collateral_applied = total_to_seize.to_u64().min(vault.collateral_amount);
+            let interest_applied = interest_share.min(vault.accrued_interest);
+            vault.borrowed_icusd_amount = vault.borrowed_icusd_amount.saturating_sub(debt_applied);
+            vault.collateral_amount = vault.collateral_amount.saturating_sub(collateral_applied);
+            vault.accrued_interest = vault.accrued_interest.saturating_sub(interest_applied);
         }
 
         // Wave-10 LIQ-008: append the gross debt cleared to the rolling-
@@ -3872,5 +3975,6 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         block_index: icusd_block_index,
         fee_amount_paid: fee_amount.to_u64(),
         collateral_amount_received: Some(collateral_to_liquidator.to_u64()),
+        debt_liquidated_e8s: None, // SP-101
     })
 }
