@@ -69,7 +69,7 @@
   });
 </script>
 <header class="top-bar">
-  <a href="/" class="top-brand"><img src="/rumilogo-vector-v2_inset2.png" alt="Rumi" class="top-logo" /><span class="top-wordmark">RUMI</span></a>
+  <a href="/" class="top-brand"><img src="/rumilogo-vector-v2_inset2.png" alt="Rumi" class="top-logo" /><span class="top-wordmark">RUMI</span><span class="beta-chip" title="This protocol is in beta. Use at your own risk.">Beta</span></a>
   <nav class="top-nav">
     <a href="/" class="nav-link" class:active={currentPath === '/'}><span>Borrow</span></a>
     <a href="/stability-pool" class="nav-link" class:active={currentPath.startsWith('/stability-pool')} title={earnApyPct !== null ? `Stability Pool ~${earnApyPct.toFixed(1)}% APY (live)` : 'Stability Pool'}><span>Earn</span>{#if earnApyPct !== null && earnApyPct > 0}<span class="apy-pill">{earnApyPct.toFixed(1)}%</span>{/if}</a>
@@ -86,7 +86,7 @@
         <span class="liq-dot"></span>
       </a>
     {/if}
-    <span class="beta-chip" title="This protocol is in beta. Use at your own risk.">Beta</span>
+    <a href="/docs" class="docs-chip">Docs</a>
     <div class="top-social">
       <a href="mailto:info@rumiprotocol.com" class="header-icon-link" aria-label="Email"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg></a>
       <a href="https://x.com/rumilabsxyz" target="_blank" rel="noopener noreferrer" class="header-icon-link" aria-label="Twitter"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg></a>
@@ -164,17 +164,25 @@
   }
   .beta-chip {
     font-size:0.625rem;font-weight:500;padding:0.125rem 0.4375rem;border-radius:999px;
-    background:rgba(217,165,60,0.10);color:#c9952a;letter-spacing:0.02em;cursor:default;
+    background:rgba(217,165,60,0.10);color:#c9952a;letter-spacing:0.02em;
     position:relative;line-height:1.4;
   }
   .beta-chip:hover::after {
     content:'This protocol is in beta. Use at your own risk.';
-    position:absolute;top:calc(100% + 6px);right:0;
+    position:absolute;top:calc(100% + 6px);left:0;
     padding:0.375rem 0.625rem;background:var(--rumi-bg-surface3);
     border:1px solid var(--rumi-border);border-radius:0.375rem;
     font-size:0.6875rem;color:var(--rumi-text-secondary);
     white-space:nowrap;z-index:110;pointer-events:none;
   }
+  .docs-chip {
+    font-size:0.6875rem;font-weight:600;padding:0.25rem 0.625rem;border-radius:999px;
+    background:transparent;color:var(--rumi-text-secondary);letter-spacing:0.02em;
+    text-decoration:none;border:1px solid var(--rumi-border-hover);
+    transition:background 0.15s ease,color 0.15s ease,border-color 0.15s ease;
+    line-height:1.4;white-space:nowrap;
+  }
+  .docs-chip:hover { color:var(--rumi-text-primary);border-color:var(--rumi-text-secondary);background:var(--rumi-bg-surface3); }
   .top-social { display:flex;gap:0.25rem;align-items:center; }
   .header-icon-link { display:flex;align-items:center;justify-content:center;width:1.75rem;height:1.75rem;border-radius:0.375rem;color:var(--rumi-text-muted);text-decoration:none;transition:color 0.15s ease; }
   .header-icon-link:hover { color:var(--rumi-text-primary); }
@@ -202,10 +210,10 @@
     .top-nav{display:none}
     .main-content{padding:calc(4.25rem + var(--rumi-strip-height, 0px)) 1rem 5rem}
     .mobile-nav{display:flex}
-    /* Social icons and beta chip duplicate footer content and crowd out the
+    /* Social icons and Docs chip duplicate footer content and crowd out the
        wallet button on narrow screens — hide them here. */
     .top-social{display:none}
-    .beta-chip{display:none}
+    .docs-chip{display:none}
     .top-bar{padding:0 0.75rem}
     .top-actions{gap:0.5rem}
   }
