@@ -319,3 +319,24 @@ fn async_002_liquidate_vault_presence_checks_and_does_not_trap() {
         vl_body
     );
 }
+
+// ── ASYNC-001 structural fence: the partial-liquidation paths must re-cap to the
+//    current vault state and saturating_sub, never raw -= the pre-await amount. ──
+#[test]
+fn async_001_partial_liq_uses_saturating_recap_not_raw_sub() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let vault_rs = std::fs::read_to_string(root.join("src/vault.rs")).unwrap();
+    assert!(
+        !vault_rs.contains("borrowed_icusd_amount -= max_liquidatable_debt")
+            && !vault_rs.contains("borrowed_icusd_amount -= liquidator_payment"),
+        "partial-liquidation paths must not subtract the pre-await liquidation amount with a raw \
+         -= (ICUSD Token::sub panics on underflow / raw u64 collateral wraps); re-cap to the \
+         current vault state and saturating_sub (audit ASYNC-001)."
+    );
+    assert!(
+        vault_rs.contains("max_liquidatable_debt.min(vault.borrowed_icusd_amount)")
+            && vault_rs.contains("vault.collateral_amount.saturating_sub"),
+        "partial-liquidation paths must re-cap to the current vault state with .min(..) and use \
+         saturating_sub (audit ASYNC-001)."
+    );
+}

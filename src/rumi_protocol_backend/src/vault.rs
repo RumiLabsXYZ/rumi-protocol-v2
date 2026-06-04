@@ -2349,9 +2349,17 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
         // Reduce vault debt and collateral directly
         // Vault loses total_to_seize (liquidator + protocol cut)
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
-            vault.borrowed_icusd_amount -= max_liquidatable_debt;
-            vault.collateral_amount -= total_to_seize.to_u64();
-            vault.accrued_interest -= interest_share;
+            // ASYNC-001: cap each reduction to the CURRENT vault state and
+            // saturating_sub. A concurrent partial liquidation may have reduced
+            // this vault between our pre-await read and now; without the cap the
+            // ICUSD Token::sub would underflow-PANIC and the raw u64 collateral
+            // sub would WRAP, both after the liquidator's icUSD was already pulled.
+            let debt_applied = max_liquidatable_debt.min(vault.borrowed_icusd_amount);
+            let collateral_applied = total_to_seize.to_u64().min(vault.collateral_amount);
+            let interest_applied = interest_share.min(vault.accrued_interest);
+            vault.borrowed_icusd_amount = vault.borrowed_icusd_amount.saturating_sub(debt_applied);
+            vault.collateral_amount = vault.collateral_amount.saturating_sub(collateral_applied);
+            vault.accrued_interest = vault.accrued_interest.saturating_sub(interest_applied);
         }
 
         // Wave-10 LIQ-008: append the gross debt cleared to the rolling-
@@ -2643,9 +2651,17 @@ pub async fn liquidate_vault_partial_with_stable(
         // Reduce vault debt and collateral directly
         // Vault loses total_to_seize (liquidator + protocol cut)
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
-            vault.borrowed_icusd_amount -= max_liquidatable_debt;
-            vault.collateral_amount -= total_to_seize.to_u64();
-            vault.accrued_interest -= interest_share;
+            // ASYNC-001: cap each reduction to the CURRENT vault state and
+            // saturating_sub. A concurrent partial liquidation may have reduced
+            // this vault between our pre-await read and now; without the cap the
+            // ICUSD Token::sub would underflow-PANIC and the raw u64 collateral
+            // sub would WRAP, both after the liquidator's icUSD was already pulled.
+            let debt_applied = max_liquidatable_debt.min(vault.borrowed_icusd_amount);
+            let collateral_applied = total_to_seize.to_u64().min(vault.collateral_amount);
+            let interest_applied = interest_share.min(vault.accrued_interest);
+            vault.borrowed_icusd_amount = vault.borrowed_icusd_amount.saturating_sub(debt_applied);
+            vault.collateral_amount = vault.collateral_amount.saturating_sub(collateral_applied);
+            vault.accrued_interest = vault.accrued_interest.saturating_sub(interest_applied);
         }
 
         // Wave-10 LIQ-008: append the gross debt cleared to the rolling-
@@ -3032,9 +3048,17 @@ pub async fn liquidate_vault_debt_already_burned(
         } else { ICUSD::new(0) };
 
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
-            vault.borrowed_icusd_amount -= max_liquidatable_debt;
-            vault.collateral_amount -= total_to_seize.to_u64();
-            vault.accrued_interest -= interest_share;
+            // ASYNC-001: cap each reduction to the CURRENT vault state and
+            // saturating_sub. A concurrent partial liquidation may have reduced
+            // this vault between our pre-await read and now; without the cap the
+            // ICUSD Token::sub would underflow-PANIC and the raw u64 collateral
+            // sub would WRAP, both after the liquidator's icUSD was already pulled.
+            let debt_applied = max_liquidatable_debt.min(vault.borrowed_icusd_amount);
+            let collateral_applied = total_to_seize.to_u64().min(vault.collateral_amount);
+            let interest_applied = interest_share.min(vault.accrued_interest);
+            vault.borrowed_icusd_amount = vault.borrowed_icusd_amount.saturating_sub(debt_applied);
+            vault.collateral_amount = vault.collateral_amount.saturating_sub(collateral_applied);
+            vault.accrued_interest = vault.accrued_interest.saturating_sub(interest_applied);
         }
 
         // Wave-10 LIQ-008: append the gross debt cleared to the rolling-
@@ -3804,9 +3828,14 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         // Reduce the vault's debt by the liquidator payment amount
         // Vault loses total_to_seize (liquidator + protocol cut)
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&arg.vault_id) {
-            vault.borrowed_icusd_amount -= liquidator_payment;
-            vault.collateral_amount -= total_to_seize.to_u64();
-            vault.accrued_interest -= interest_share;
+            // ASYNC-001: cap each reduction to the CURRENT vault state and
+            // saturating_sub (same race as the other partial-liq paths).
+            let debt_applied = liquidator_payment.min(vault.borrowed_icusd_amount);
+            let collateral_applied = total_to_seize.to_u64().min(vault.collateral_amount);
+            let interest_applied = interest_share.min(vault.accrued_interest);
+            vault.borrowed_icusd_amount = vault.borrowed_icusd_amount.saturating_sub(debt_applied);
+            vault.collateral_amount = vault.collateral_amount.saturating_sub(collateral_applied);
+            vault.accrued_interest = vault.accrued_interest.saturating_sub(interest_applied);
         }
 
         // Wave-10 LIQ-008: append the gross debt cleared to the rolling-
