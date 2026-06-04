@@ -172,6 +172,20 @@ pub fn require_vault_not_processing(vault: &Vault) -> Result<(), ProtocolError> 
     }
 }
 
+/// LIQ-101: vault-id wrapper around `require_vault_not_processing` for the
+/// liquidation entry points (manual + SP), which only fetch the vault later in
+/// their amount-computing read_state. If the liquidation bot has already
+/// claimed this vault (`bot_processing` set, with the write-down deferred until
+/// the bot's swap settles), a manual / stability-pool liquidation here would
+/// seize the same collateral a second time. Mirrors the lock every user op
+/// already honors. Absent vault => Ok (a later check surfaces "not found").
+pub fn reject_if_bot_processing(vault_id: u64) -> Result<(), ProtocolError> {
+    match read_state(|s| s.vault_id_to_vaults.get(&vault_id).cloned()) {
+        Some(vault) => require_vault_not_processing(&vault),
+        None => Ok(()),
+    }
+}
+
 #[derive(CandidType, Serialize, Deserialize, Debug)]
 pub struct CandidVault {
     pub owner: Principal,
@@ -2223,6 +2237,7 @@ pub async fn repay_and_close_vault(arg: VaultArg) -> Result<RepayAndCloseSuccess
 pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result<SuccessWithFee, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_partial_{}", vault_id))?;
+    reject_if_bot_processing(vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault
 
     // Wave-8b LIQ-002 band gate deactivated 2026-05-18. The per-vault CR
     // check below remains the authoritative liquidatability test. See
@@ -2506,6 +2521,7 @@ pub async fn liquidate_vault_partial_with_stable(
 ) -> Result<SuccessWithFee, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_stable_{}", vault_id))?;
+    reject_if_bot_processing(vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault
 
     // Wave-8b LIQ-002 band gate deactivated 2026-05-18 (see
     // `liquidate_vault_partial` above for rationale).
@@ -2856,6 +2872,7 @@ pub async fn liquidate_vault_debt_already_burned(
     }
 
     let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_debt_burned_{}", vault_id))?;
+    reject_if_bot_processing(vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault (SP path)
 
     let liquidation_amount: ICUSD = icusd_burned_e8s.into();
 
@@ -3214,6 +3231,7 @@ pub async fn liquidate_vault_debt_already_burned(
 pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_{}", vault_id))?;
+    reject_if_bot_processing(vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault
 
     // Wave-8b LIQ-002 band gate deactivated 2026-05-18 (see
     // `liquidate_vault_partial` above for rationale).
@@ -3698,6 +3716,7 @@ pub async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError>
 pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("partial_liquidate_vault_{}", arg.vault_id))?;
+    reject_if_bot_processing(arg.vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault
 
     // Wave-8b LIQ-002 band gate deactivated 2026-05-18 (see
     // `liquidate_vault_partial` above for rationale).
