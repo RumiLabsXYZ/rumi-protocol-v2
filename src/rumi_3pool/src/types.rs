@@ -405,6 +405,37 @@ pub enum ThreePoolError {
     /// should retry. Audit fence B-01 (Wave 14a): prevents two concurrent
     /// callers from pricing against the same pre-state across an `await`.
     PoolLocked,
+    /// No pending claim exists with the requested id (already resolved, or
+    /// never recorded). Audit 2026-06-05 (3P-01/02/03): pending-claim recovery.
+    ClaimNotFound,
+}
+
+/// A record of tokens the pool owes a user after a value-moving operation
+/// pulled or debited their funds but a subsequent ledger transfer failed.
+///
+/// Created when `swap` / `add_liquidity` / `remove_liquidity` / `remove_one_coin`
+/// cannot complete a payout or refund. The owed tokens physically remain in the
+/// pool's account; the claim lets the user (or admin) recover them later via
+/// `claim_pending`, instead of the funds being silently stranded. Mirrors the
+/// `rumi_amm::PendingClaim` recovery mechanism. Audit 2026-06-05 (3P-01/02/03).
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct ThreePoolPendingClaim {
+    pub id: u64,
+    /// The principal owed the tokens.
+    pub claimant: Principal,
+    /// Which of the pool's three tokens is owed (0, 1, or 2).
+    pub token_index: u8,
+    /// The ledger of the owed token, resolved at record time so a later
+    /// config change cannot redirect the payout.
+    pub ledger: Principal,
+    /// Display symbol of the owed token at record time.
+    pub symbol: String,
+    /// Amount owed in the token's native decimals.
+    pub amount: u128,
+    /// Human-readable reason the claim was recorded.
+    pub reason: String,
+    /// Unix seconds at which the claim was recorded.
+    pub created_at: u64,
 }
 
 // ─── Authorized Redeem-and-Burn Types ───

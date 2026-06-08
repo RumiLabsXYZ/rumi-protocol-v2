@@ -9,6 +9,13 @@ use crate::logs::INFO;
 use crate::types::*;
 use crate::state::{read_state, mutate_state};
 
+/// Conservative fallback for a collateral ledger's transfer fee, used only when
+/// the live `icrc1_fee` query fails (SP-104). Set to the common ICRC fee
+/// (10_000 e8s, as on ICP/ckBTC-class ledgers). Over-estimating the fee
+/// under-credits depositors slightly (solvency-safe) rather than over-crediting
+/// them as a fee=0 fallback would. The next successful liquidation reconciles.
+const FALLBACK_COLLATERAL_FEE_E8S: u64 = 10_000;
+
 /// Called by the backend when it detects liquidatable vaults (push model).
 /// Processes each vault sequentially, consuming stablecoins and distributing collateral.
 pub async fn notify_liquidatable_vaults(vaults: Vec<LiquidatableVaultInfo>) -> Vec<LiquidationResult> {
@@ -16,6 +23,19 @@ pub async fn notify_liquidatable_vaults(vaults: Vec<LiquidatableVaultInfo>) -> V
         log!(INFO, "Pool is paused — ignoring {} liquidatable vaults", vaults.len());
         return vec![];
     }
+
+    // SP-102: hold the per-pool liquidation lock across the whole batch so
+    // deposit/withdraw/claim cannot land between a vault's snapshot and its
+    // burn apportionment (which would let a withdrawer escape their share).
+    // If another liquidation is already running, skip this batch (no retry —
+    // the backend re-notifies on its next tick).
+    let _liq_guard = match crate::pool_guard::SpLiquidationGuard::new() {
+        Ok(g) => g,
+        Err(_) => {
+            log!(INFO, "notify_liquidatable_vaults: a liquidation is already in flight; skipping this batch");
+            return vec![];
+        }
+    };
 
     log!(INFO, "Received push notification: {} liquidatable vaults", vaults.len());
 
@@ -59,9 +79,19 @@ pub async fn notify_liquidatable_vaults(vaults: Vec<LiquidatableVaultInfo>) -> V
     results
 }
 
-/// Public fallback: anyone can call this to trigger a liquidation for a specific vault.
-/// Per-caller guard is enforced at the lib.rs level.
+/// Public fallback: anyone (except the anonymous principal) can call this to
+/// trigger a liquidation for a specific vault.
+///
+/// SP-111 (audit 2026-06-05): the previous comment claimed a per-caller guard
+/// was enforced at the lib.rs level — there was none. Concurrency is now
+/// serialized by the per-pool `SpLiquidationGuard` acquired below (SP-102), and
+/// the anonymous principal is rejected here to keep the permissionless trigger
+/// from being driven by unauthenticated cycle-griefing callers.
 pub async fn execute_liquidation(vault_id: u64) -> Result<LiquidationResult, StabilityPoolError> {
+    if ic_cdk::api::caller() == Principal::anonymous() {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+
     if read_state(|s| s.configuration.emergency_pause) {
         return Err(StabilityPoolError::EmergencyPaused);
     }
@@ -69,6 +99,10 @@ pub async fn execute_liquidation(vault_id: u64) -> Result<LiquidationResult, Sta
     if read_state(|s| s.in_flight_liquidations.contains(&vault_id)) {
         return Err(StabilityPoolError::SystemBusy);
     }
+
+    // SP-102: hold the per-pool liquidation lock across snapshot -> await ->
+    // apportion so deposit/withdraw/claim cannot race the apportionment.
+    let _liq_guard = crate::pool_guard::SpLiquidationGuard::new()?;
 
     // Fetch vault info from backend
     let protocol_id = read_state(|s| s.protocol_canister_id);
@@ -254,18 +288,23 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
                 let collateral = success.collateral_amount_received.unwrap_or(success.fee_amount_paid);
                 log!(INFO, "Liquidation succeeded for vault {} with token {}: collateral={}, fee={}",
                     vault_info.vault_id, token_ledger, collateral, success.fee_amount_paid);
-                // SP-101: debit by the REALIZED debt the backend actually cleared
-                // (it caps the requested draw to the vault's max_liquidatable_debt),
-                // not the amount we requested, so the tracked aggregate never falls
-                // by more than the pool truly spent. debt_liquidated_e8s is icUSD
-                // e8s; convert to the drawn token's native units on the non-icUSD
-                // path. Falls back to the requested amount if an older backend wasm
-                // does not report it. `process_liquidation_gains` debits depositor
-                // balances exactly once, after this loop.
-                let realized_consumed = match success.debt_liquidated_e8s {
-                    Some(debt_e8) if is_icusd => debt_e8,
-                    Some(debt_e8) => crate::types::denormalize_from_e8s(debt_e8, token_decimals),
-                    None => *amount,
+                // SP-101 / SP-110: debit by what the backend ACTUALLY pulled from
+                // the pool, not the amount we requested, so the tracked aggregate
+                // never drifts from the real ledger balance. `process_liquidation_gains`
+                // debits depositor balances exactly once, after this loop.
+                //   - icUSD path: the backend pulled exactly the realized debt
+                //     (`debt_liquidated_e8s`), no surcharge.
+                //   - ckStable path: the backend pulled `base + repay-fee surcharge`
+                //     (`stable_pulled_e6s`). Using only the base-debt conversion
+                //     left the surcharge un-debited and the aggregate above the
+                //     ledger (SP-110). Prefer the exact `stable_pulled_e6s`; fall
+                //     back to the base conversion for an older backend wasm.
+                let realized_consumed = match (success.debt_liquidated_e8s, is_icusd) {
+                    (Some(debt_e8), true) => debt_e8,
+                    (Some(debt_e8), false) => success
+                        .stable_pulled_e6s
+                        .unwrap_or_else(|| crate::types::denormalize_from_e8s(debt_e8, token_decimals)),
+                    (None, _) => *amount,
                 };
                 actual_consumed.insert(*token_ledger, realized_consumed);
                 total_collateral_gained += collateral;
@@ -359,10 +398,24 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
 
         match liq_result {
             Ok((Ok(success),)) => {
-                actual_consumed.insert(*token_ledger, *amount);
+                // VER-002 (audit 2026-06-05): the backend caps the writedown to
+                // the vault's current debt and refunds the proportional excess
+                // 3USD (see stability_pool_liquidate_with_reserves). Record only
+                // the REALIZED 3USD using the SAME floor formula the backend
+                // refund uses, so the SP's tracked aggregate and its ledger
+                // balance both net to exactly the realized amount (no drift).
+                // `icusd_equiv_e8s` here equals the `icusd_debt_covered_e8s` the
+                // backend received, so the two formulas are identical.
+                let realized_3usd = if icusd_equiv_e8s > 0 && success.liquidated_debt < icusd_equiv_e8s {
+                    ((*amount as u128).saturating_mul(success.liquidated_debt as u128)
+                        / icusd_equiv_e8s as u128) as u64
+                } else {
+                    *amount
+                };
+                actual_consumed.insert(*token_ledger, realized_3usd);
                 total_collateral_gained += success.collateral_received;
-                log!(INFO, "3USD reserves liquidation succeeded for vault {}: {} collateral, {} 3USD consumed",
-                    vault_info.vault_id, success.collateral_received, amount);
+                log!(INFO, "3USD reserves liquidation succeeded for vault {}: {} collateral, {} 3USD consumed (requested {})",
+                    vault_info.vault_id, success.collateral_received, realized_3usd, amount);
                 break; // one token per vault per round
             }
             Ok((Err(e),)) => {
@@ -411,7 +464,16 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
                 let fee: u128 = fee_nat.0.try_into().unwrap_or(0);
                 fee as u64
             },
-            Err(_) => 0,
+            Err(e) => {
+                // SP-104 (audit 2026-06-05): do NOT fall back to fee=0. The actual
+                // payout transfer deducts the real ledger fee, so crediting the full
+                // gross over-credits depositors and leaves the pool short by one fee.
+                // Use a conservative fallback so we under- rather than over-credit
+                // (solvency-safe); the next successful interaction reconciles.
+                log!(INFO, "icrc1_fee query failed for collateral {}: {:?}; using conservative fallback {} e8s",
+                    vault_info.collateral_type, e, FALLBACK_COLLATERAL_FEE_E8S);
+                FALLBACK_COLLATERAL_FEE_E8S
+            },
         };
         let net_collateral = total_collateral_gained.saturating_sub(collateral_fee);
 

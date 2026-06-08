@@ -8,7 +8,7 @@ path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-candid = "0.10.6"
+candid = { version = "0.10.6", features = ["value"] }
 ic-cdk = "0.12.0"
 ic-cdk-timers = "0.10.0"
 ic-cdk-macros = "0.8.3"

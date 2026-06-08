@@ -189,6 +189,15 @@ pub struct EpochSummary {
 /// resume points for the chunked capture (last-processed principal; `None` means
 /// "not started"). `a_complete` / `b_complete` gate the close on both snapshots
 /// having been captured.
+///
+/// The `close_*` fields drive the chunked epoch CLOSE (POINTS-002): the close is
+/// no longer a single atomic O(N principals x sources) pass (which can exceed the
+/// 5B-instruction limit and trap, never advancing the epoch index -> permanent
+/// accrual stall). Instead it processes a bounded batch of principals per tick,
+/// persisting the resume cursor and the running totals here, and only finalizes
+/// (seed close + summary + index advance) once the cursor reaches the end. The
+/// cursor advances strictly past each closed principal, so none is double-credited
+/// across resumed batches.
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct OpenEpoch {
     pub epoch_index: u64,
@@ -201,6 +210,19 @@ pub struct OpenEpoch {
     pub a_complete: bool,
     pub b_cursor: Option<Principal>,
     pub b_complete: bool,
+    /// Whether the chunked close pass has begun. Distinguishes "close not started"
+    /// (`false`) from "close in progress with no principal yet closed"
+    /// (`true`, `close_cursor == None`).
+    pub close_started: bool,
+    /// Resume point for the chunked close: the last principal whose accrual was
+    /// committed. `None` = none closed yet. The next batch processes principals
+    /// strictly AFTER this, guaranteeing exactly-once close per principal.
+    pub close_cursor: Option<Principal>,
+    /// Running sum of points accrued across all close batches so far (for the
+    /// `EpochSummary` written at finalization).
+    pub close_points_accrued: u128,
+    /// Running count of principals that accrued > 0 across all close batches.
+    pub close_active: u64,
 }
 
 // ── Query view types ────────────────────────────────────────────────────────
@@ -236,7 +258,12 @@ pub struct PointsConfig {
     pub snapshot_seed_committed: bool,
 }
 
-/// Epoch-driver status for the ops dashboard (Phase 5).
+/// FULL epoch-driver status, including the in-flight capture/close cursors. This
+/// is ADMIN-ONLY (`get_epoch_status_admin`): exposing `a_cursor`/`b_cursor`/
+/// `a_complete`/`b_complete` to the public lets a not-yet-captured principal watch
+/// the capture cursor and flash-inflate its balance right before its snapshot
+/// chunk, defeating the `min(A,B)` anti-snipe defense (POINTS-001). The public
+/// `get_epoch_status` returns `PublicEpochStatus` instead.
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct EpochStatus {
     pub current_epoch_index: u64,
@@ -245,6 +272,49 @@ pub struct EpochStatus {
     pub open_epoch: Option<OpenEpoch>,
     pub revealed_seed_count: u64,
     pub snapshot_seed_committed: bool,
+}
+
+/// PUBLIC epoch-driver status for the ops dashboard (POINTS-001). Mirrors
+/// `EpochStatus` but the open epoch is reduced to its non-sensitive window
+/// (bounds + snapshot times), with the in-flight capture/close cursors and
+/// completion flags OMITTED so an attacker cannot time a flash deposit to a
+/// snapshot it has not yet been captured into.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PublicEpochStatus {
+    pub current_epoch_index: u64,
+    pub driver_enabled: bool,
+    pub driver_interval_secs: u64,
+    /// The open epoch's public window (no capture/close progress). `None` between
+    /// epochs and before the season starts.
+    pub open_epoch: Option<PublicOpenEpoch>,
+    pub revealed_seed_count: u64,
+    pub snapshot_seed_committed: bool,
+}
+
+/// Public view of the open epoch: its bounds and snapshot times only. The snapshot
+/// times are NOT secret once the epoch is open (they were committed via the
+/// commit-reveal seed and a user cannot retroactively change them); what must stay
+/// hidden is HOW FAR the capture/close has progressed, so the cursors and
+/// completion flags are not exposed.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PublicOpenEpoch {
+    pub epoch_index: u64,
+    pub epoch_start_ns: u64,
+    pub epoch_end_ns: u64,
+    pub snapshot_a_ns: u64,
+    pub snapshot_b_ns: u64,
+}
+
+impl From<OpenEpoch> for PublicOpenEpoch {
+    fn from(o: OpenEpoch) -> Self {
+        PublicOpenEpoch {
+            epoch_index: o.epoch_index,
+            epoch_start_ns: o.epoch_start_ns,
+            epoch_end_ns: o.epoch_end_ns,
+            snapshot_a_ns: o.snapshot_a_ns,
+            snapshot_b_ns: o.snapshot_b_ns,
+        }
+    }
 }
 
 /// One source's ingestion state (Phase 2 ops observability).

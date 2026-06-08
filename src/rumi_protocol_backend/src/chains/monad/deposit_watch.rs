@@ -42,7 +42,7 @@
 use ic_canister_log::log;
 
 use crate::chains::config::{ChainId, ChainStatus};
-use crate::chains::multi_chain_state::MultiChainStateV3;
+use crate::chains::multi_chain_state::MultiChainStateV4;
 use crate::chains::supply::{apply_supply_delta, SupplyDelta};
 use crate::logs::INFO;
 use crate::state::{mutate_state, read_state};
@@ -118,7 +118,7 @@ pub fn backstop_should_scan(
 /// of a u128 collateral balance is not a realistic failure mode but we guard
 /// it anyway). Returns `Err` if the vault is not found.
 pub fn credit_deposit_to_state(
-    state: &mut MultiChainStateV3,
+    state: &mut MultiChainStateV4,
     vault_id: u64,
     amount_e18: u128,
 ) -> Result<(), String> {
@@ -168,7 +168,7 @@ pub fn credit_deposit_to_state(
 /// burner==owner constraint if griefing (uninvited debt repayment) becomes a
 /// concern; for Phase 1b it is accepted.
 pub fn apply_burn_to_state(
-    state: &mut MultiChainStateV3,
+    state: &mut MultiChainStateV4,
     burn: &super::evm_rpc::BurnLog,
     total_debt_e8s: u128,
 ) -> Result<(), BurnApplyError> {
@@ -878,7 +878,7 @@ pub async fn run_observer(chain: ChainId) {
 /// vaults make a tick outliving MAX_BLOCK_SCAN_WINDOW blocks unreachable in
 /// practice). Revisit for deeper finality / higher vault counts where a self-heal
 /// reclaim could race the prune.
-pub(crate) fn advance_cursor_and_prune(state: &mut MultiChainStateV3, chain: ChainId, finalized: u64) {
+pub(crate) fn advance_cursor_and_prune(state: &mut MultiChainStateV4, chain: ChainId, finalized: u64) {
     state.last_observed_block.insert(chain, finalized);
     let stale: Vec<u64> = state
         .processed_burn_keys

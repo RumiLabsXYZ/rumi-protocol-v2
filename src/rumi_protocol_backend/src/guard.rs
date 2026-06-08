@@ -163,6 +163,209 @@ impl Drop for GuardPrincipal {
     }
 }
 
+thread_local! {
+    /// Vault ids with a liquidation currently in flight. Transient (heap):
+    /// in-flight liquidations never span a canister upgrade, and ic-cdk's
+    /// `call_on_cleanup` runs this guard's `Drop` even when a post-`await`
+    /// continuation traps, so the entry is always released. Same pattern the
+    /// 3pool/amm `PoolGuard`s use.
+    static LIQUIDATING_VAULTS: std::cell::RefCell<std::collections::HashSet<u64>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// Per-vault liquidation lock. Serializes EVERY liquidator (any caller — two
+/// humans, the stability pool, a human + the SP) on a single vault across the
+/// snapshot -> pull-icUSD -> re-cap -> collateral-payout sequence.
+///
+/// BK-001/002 (audit 2026-06-05): `GuardPrincipal` keys on the CALLER, so two
+/// different liquidators racing the same vault both pass it. Each snapshots the
+/// vault's full collateral before its `await`; the post-`await` re-cap
+/// (ASYNC-001) prevents the vault-accounting underflow/wrap, but the collateral
+/// PAYOUT (`pending_margin_transfers`) still uses the stale per-caller snapshot,
+/// so the loser is paid the full pre-state collateral out of the SHARED
+/// collateral pool — draining other vaults' backing. Keying the lock on
+/// `vault_id` (not the caller) makes the whole sequence atomic per vault and
+/// closes the economic over-seize the re-cap alone left open.
+#[must_use]
+pub struct VaultLiquidationGuard(u64);
+
+impl VaultLiquidationGuard {
+    /// Acquire the liquidation lock for `vault_id`. Returns
+    /// `TemporarilyUnavailable` if another liquidation of the same vault is in
+    /// flight; the caller should back off (the stability pool, per project
+    /// rule, must NOT retry — it falls through to manual, which is correct).
+    pub fn new(vault_id: u64) -> Result<Self, crate::ProtocolError> {
+        LIQUIDATING_VAULTS.with(|set| {
+            let mut set = set.borrow_mut();
+            if set.contains(&vault_id) {
+                return Err(crate::ProtocolError::TemporarilyUnavailable(format!(
+                    "Vault #{vault_id} is already being liquidated; retry shortly"
+                )));
+            }
+            set.insert(vault_id);
+            Ok(Self(vault_id))
+        })
+    }
+}
+
+impl Drop for VaultLiquidationGuard {
+    fn drop(&mut self) {
+        LIQUIDATING_VAULTS.with(|set| {
+            set.borrow_mut().remove(&self.0);
+        });
+    }
+}
+
+thread_local! {
+    /// In-flight borrow reservations per collateral type (icUSD e8s). A borrow
+    /// checks the debt ceiling / global mint cap, then mints icUSD across an
+    /// `await`, then records the debt. Concurrent borrows from DIFFERENT owners
+    /// both pass the pre-await check against the same committed aggregate and
+    /// both mint, blowing past the cap (BK-003). This map bridges the gap: a
+    /// borrow reserves its amount here (counted by every concurrent borrow's
+    /// cap check) before minting, and releases on Drop. Transient/heap; ic-cdk
+    /// `call_on_cleanup` drops the guard on continuation-trap, so reservations
+    /// never leak.
+    static BORROW_RESERVATIONS: std::cell::RefCell<std::collections::HashMap<Principal, u64>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Atomically check-and-reserve borrow headroom against in-flight reservations.
+///
+/// BK-003 (audit 2026-06-05): enforces the per-collateral debt ceiling and the
+/// global icUSD mint cap across the mint `await`, so two distinct owners cannot
+/// each pass the pre-await check and jointly exceed the cap.
+#[must_use]
+pub struct BorrowReservationGuard {
+    collateral: Principal,
+    amount: u64,
+}
+
+impl BorrowReservationGuard {
+    /// Reserve `amount` for `collateral` iff, counting all in-flight
+    /// reservations, the per-collateral ceiling and the global mint cap both
+    /// still hold. The committed aggregates (`current_collateral_debt`,
+    /// `current_global_borrowed`) are read by the caller and passed in. Returns
+    /// `Err` (no reservation taken) when a concurrent in-flight borrow has
+    /// already consumed the headroom.
+    pub fn try_reserve(
+        collateral: Principal,
+        amount: u64,
+        current_collateral_debt: u64,
+        debt_ceiling: u64,
+        current_global_borrowed: u64,
+        global_cap: u64,
+    ) -> Result<Self, String> {
+        BORROW_RESERVATIONS.with(|r| {
+            let mut map = r.borrow_mut();
+            let coll_reserved: u64 = map.get(&collateral).copied().unwrap_or(0);
+            let total_reserved: u64 = map.values().copied().sum();
+
+            if current_collateral_debt
+                .saturating_add(coll_reserved)
+                .saturating_add(amount)
+                > debt_ceiling
+            {
+                return Err(format!(
+                    "Borrow would exceed debt ceiling incl in-flight ({} + {} + {} > {})",
+                    current_collateral_debt, coll_reserved, amount, debt_ceiling
+                ));
+            }
+            if current_global_borrowed
+                .saturating_add(total_reserved)
+                .saturating_add(amount)
+                > global_cap
+            {
+                return Err(format!(
+                    "Borrow would exceed global icUSD mint cap incl in-flight ({} + {} + {} > {})",
+                    current_global_borrowed, total_reserved, amount, global_cap
+                ));
+            }
+
+            *map.entry(collateral).or_insert(0) += amount;
+            Ok(Self { collateral, amount })
+        })
+    }
+}
+
+impl Drop for BorrowReservationGuard {
+    fn drop(&mut self) {
+        BORROW_RESERVATIONS.with(|r| {
+            let mut map = r.borrow_mut();
+            if let Some(v) = map.get_mut(&self.collateral) {
+                *v = v.saturating_sub(self.amount);
+                if *v == 0 {
+                    map.remove(&self.collateral);
+                }
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod vault_liquidation_guard_tests {
+    use super::*;
+
+    #[test]
+    fn vault_liquidation_guard_is_exclusive_per_vault() {
+        // BK-001/002 fence: the lock is per-vault, not per-caller.
+        let g1 = VaultLiquidationGuard::new(42).expect("first acquire for vault 42");
+        // A second liquidator (any caller) racing the SAME vault is rejected.
+        assert!(
+            VaultLiquidationGuard::new(42).is_err(),
+            "second concurrent liquidation of vault 42 must be rejected",
+        );
+        // A different vault is independent and acquires concurrently.
+        let g2 = VaultLiquidationGuard::new(43).expect("different vault acquires independently");
+        drop(g1);
+        // Once vault 42's liquidation finishes (guard dropped), it can be re-acquired.
+        let _g3 = VaultLiquidationGuard::new(42).expect("re-acquire vault 42 after release");
+        drop(g2);
+    }
+
+    #[test]
+    fn borrow_reservation_enforces_ceiling_across_concurrent_inflight() {
+        // BK-003 fence: a second in-flight borrow that would push committed debt
+        // + in-flight reservations over the ceiling is rejected, even though the
+        // committed aggregate alone still has headroom.
+        let coll = Principal::from_slice(&[7]);
+        let ceiling = 1_000u64;
+        let global = u64::MAX;
+
+        // Committed debt 600, ceiling 1000. First borrow of 300 reserves -> 900 headroom used.
+        let g1 = BorrowReservationGuard::try_reserve(coll, 300, 600, ceiling, 600, global)
+            .expect("first in-flight borrow fits (600+0+300<=1000)");
+        // Second concurrent borrow of 300 sees committed 600 + reserved 300 + 300 = 1200 > 1000 -> rejected.
+        assert!(
+            BorrowReservationGuard::try_reserve(coll, 300, 600, ceiling, 600, global).is_err(),
+            "second concurrent borrow must be rejected once in-flight reservations are counted",
+        );
+        // A smaller second borrow that fits (600+300+100=1000) is allowed.
+        let _g2 = BorrowReservationGuard::try_reserve(coll, 100, 600, ceiling, 600, global)
+            .expect("second borrow of 100 fits exactly at the ceiling");
+        drop(g1);
+        // After the first releases, headroom frees up again.
+        let _g3 = BorrowReservationGuard::try_reserve(coll, 300, 600, ceiling, 600, global)
+            .expect("headroom freed after first reservation dropped");
+    }
+
+    #[test]
+    fn borrow_reservation_enforces_global_cap() {
+        // Different collaterals still share the global mint cap.
+        let c1 = Principal::from_slice(&[1]);
+        let c2 = Principal::from_slice(&[2]);
+        let big_ceiling = u64::MAX;
+        let global = 1_000u64;
+        let g1 = BorrowReservationGuard::try_reserve(c1, 700, 0, big_ceiling, 0, global)
+            .expect("first global reservation fits");
+        assert!(
+            BorrowReservationGuard::try_reserve(c2, 400, 0, big_ceiling, 0, global).is_err(),
+            "second collateral's borrow must respect the shared global cap (0+700+400>1000)",
+        );
+        drop(g1);
+    }
+}
+
 #[must_use]
 pub struct TimerLogicGuard(());
 

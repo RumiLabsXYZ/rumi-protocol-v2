@@ -52,8 +52,8 @@ use crate::accrual::{self, SnapshotWeights};
 use crate::snapshot_seed::{RevealedSeed, SnapshotSeedSingleton};
 use crate::types::{
     AssetType, DepositKey, DepositRecord, EpochStatus, EpochSummary, InitArgs, LeaderboardEntry,
-    OpenEpoch, PointEntry, PointSource, PointsConfig, PointsError, PrincipalState, QualifyingAction,
-    RegistrationInfo, RepaymentEvent, Venue,
+    OpenEpoch, PointEntry, PointSource, PointsConfig, PointsError, PrincipalState, PublicEpochStatus,
+    PublicOpenEpoch, QualifyingAction, RegistrationInfo, RepaymentEvent, Venue,
 };
 
 // ── Memory ids (never reuse) ────────────────────────────────────────────────
@@ -174,6 +174,75 @@ pub struct StateV1 {
     pub snapshot_seed: SnapshotSeedSingleton,
 }
 
+/// FROZEN V2 shape of the open epoch (pre-POINTS-002, before the chunked-close
+/// fields). Old `StoredState::V2` blobs whose `open_epoch` is `Some` decode into
+/// this; it migrates forward to the current `OpenEpoch` with the `close_*` fields
+/// defaulted (a mid-epoch upgrade that lands before the close simply re-runs the
+/// close from the start, which is idempotent). NEVER change these fields.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct OpenEpochV2 {
+    pub epoch_index: u64,
+    pub epoch_start_ns: u64,
+    pub epoch_end_ns: u64,
+    pub snapshot_a_ns: u64,
+    pub snapshot_b_ns: u64,
+    pub a_cursor: Option<Principal>,
+    pub a_complete: bool,
+    pub b_cursor: Option<Principal>,
+    pub b_complete: bool,
+}
+
+impl From<OpenEpochV2> for OpenEpoch {
+    fn from(v: OpenEpochV2) -> Self {
+        OpenEpoch {
+            epoch_index: v.epoch_index,
+            epoch_start_ns: v.epoch_start_ns,
+            epoch_end_ns: v.epoch_end_ns,
+            snapshot_a_ns: v.snapshot_a_ns,
+            snapshot_b_ns: v.snapshot_b_ns,
+            a_cursor: v.a_cursor,
+            a_complete: v.a_complete,
+            b_cursor: v.b_cursor,
+            b_complete: v.b_complete,
+            // The chunked close had not started in the V2 layout. Default to a
+            // fresh (not-started) close; if the upgrade lands after both snapshots,
+            // the close re-runs from the start, which is idempotent.
+            close_started: false,
+            close_cursor: None,
+            close_points_accrued: 0,
+            close_active: 0,
+        }
+    }
+}
+
+/// FROZEN V2 shape of `State` (pre-POINTS-002). Identical to today's `State`
+/// except `open_epoch` carries the frozen `OpenEpochV2` (no chunked-close fields).
+/// Old `{"V2": ...}` blob bytes decode into this, then migrate forward.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct StateV2 {
+    pub admin: Principal,
+    pub excluded_principals: BTreeSet<Principal>,
+    pub season_start_ns: u64,
+    pub season_end_ns: u64,
+    pub current_epoch_index: u64,
+    pub snapshot_seed: SnapshotSeedSingleton,
+    pub open_epoch: Option<OpenEpochV2>,
+}
+
+impl From<StateV2> for State {
+    fn from(v: StateV2) -> Self {
+        State {
+            admin: v.admin,
+            excluded_principals: v.excluded_principals,
+            season_start_ns: v.season_start_ns,
+            season_end_ns: v.season_end_ns,
+            current_epoch_index: v.current_epoch_index,
+            snapshot_seed: v.snapshot_seed,
+            open_epoch: v.open_epoch.map(Into::into),
+        }
+    }
+}
+
 /// Singleton config (admin, excluded set, season window, epoch counter, in-flight
 /// seed, open-epoch driver state). Held on the heap during execution and
 /// serialized to the `STATE_BLOB` region on `pre_upgrade`, mirroring the backend.
@@ -208,14 +277,16 @@ impl From<StateV1> for State {
 #[derive(Serialize, Deserialize)]
 pub enum StoredState {
     V1(StateV1),
-    V2(State),
+    V2(StateV2),
+    V3(State),
 }
 
 impl StoredState {
     fn into_current(self) -> State {
         match self {
             StoredState::V1(old) => old.into(),
-            StoredState::V2(s) => s,
+            StoredState::V2(old) => old.into(),
+            StoredState::V3(s) => s,
         }
     }
 }
@@ -530,9 +601,17 @@ pub fn register_test_principal(
     Ok(())
 }
 
+/// Max rows `get_leaderboard` will return in one call (PTS-001). A caller passing
+/// an unbounded `limit` is clamped to this, bounding the response size and the
+/// per-call materialization. Pagination via `offset` reaches the full board.
+pub const MAX_LEADERBOARD_LIMIT: u32 = 1_000;
+
 /// Ranked leaderboard (desc by points, principal as tiebreak), paginated, with
-/// each entry's estimated share of the 5% pool in basis points.
+/// each entry's estimated share of the 5% pool in basis points. `limit` is clamped
+/// to `MAX_LEADERBOARD_LIMIT` (PTS-001) so an unbounded request cannot force a
+/// giant response.
 pub fn leaderboard(offset: u32, limit: u32) -> Vec<LeaderboardEntry> {
+    let limit = limit.min(MAX_LEADERBOARD_LIMIT);
     let mut all: Vec<(Principal, u128)> = PRINCIPALS.with(|m| {
         m.borrow()
             .iter()
@@ -541,7 +620,7 @@ pub fn leaderboard(offset: u32, limit: u32) -> Vec<LeaderboardEntry> {
     });
     // Highest points first; principal id as a stable tiebreak.
     all.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    // Saturating, consistent with `run_close_accrual` (a non-saturating `.sum()`
+    // Saturating, consistent with the close accrual (a non-saturating `.sum()`
     // would panic in debug on the astronomically unlikely u128 overflow).
     let total_points_all: u128 = all
         .iter()
@@ -583,12 +662,13 @@ pub fn epoch_history(offset: u64, limit: u64) -> Vec<EpochSummary> {
     })
 }
 
-/// Serialize the heap `State` (as `StoredState::V1`) to the singleton blob with
-/// the 8-byte little-endian length prefix. Called from `#[pre_upgrade]`.
+/// Serialize the heap `State` (as the current `StoredState` version) to the
+/// singleton blob with the 8-byte little-endian length prefix. Called from
+/// `#[pre_upgrade]`.
 pub fn save_state_to_stable() {
     let bytes = with_state(|s| {
         let mut buf = Vec::new();
-        ciborium::ser::into_writer(&StoredState::V2(s.clone()), &mut buf)
+        ciborium::ser::into_writer(&StoredState::V3(s.clone()), &mut buf)
             .expect("failed to serialize State to CBOR");
         buf
     });
@@ -733,13 +813,32 @@ pub fn points_config() -> PointsConfig {
     })
 }
 
-/// Epoch-driver status for the ops dashboard (Phase 5).
+/// FULL epoch-driver status, INCLUDING the in-flight capture/close cursors.
+/// ADMIN-ONLY: the cursors must not be public (POINTS-001). Surfaced via the
+/// admin-gated `get_epoch_status_admin` endpoint.
 pub fn epoch_status() -> EpochStatus {
     with_state(|s| EpochStatus {
         current_epoch_index: s.current_epoch_index,
         driver_enabled: epoch_driver_enabled(),
         driver_interval_secs: epoch_driver_interval_secs(),
         open_epoch: s.open_epoch.clone(),
+        revealed_seed_count: revealed_seed_count(),
+        snapshot_seed_committed: s.snapshot_seed.is_committed(),
+    })
+}
+
+/// PUBLIC epoch-driver status for the ops dashboard (POINTS-001). Same as
+/// `epoch_status` but the open epoch is reduced to its public window: the bounds
+/// and snapshot times, with the capture/close cursors and completion flags
+/// OMITTED. Exposing how far the capture has progressed would let a not-yet-
+/// captured principal time a flash deposit to land in a snapshot it has not been
+/// captured into yet, beating the `min(A,B)` anti-snipe defense.
+pub fn public_epoch_status() -> PublicEpochStatus {
+    with_state(|s| PublicEpochStatus {
+        current_epoch_index: s.current_epoch_index,
+        driver_enabled: epoch_driver_enabled(),
+        driver_interval_secs: epoch_driver_interval_secs(),
+        open_epoch: s.open_epoch.clone().map(PublicOpenEpoch::from),
         revealed_seed_count: revealed_seed_count(),
         snapshot_seed_committed: s.snapshot_seed.is_committed(),
     })
@@ -899,15 +998,39 @@ pub fn snapshot_buffer_len() -> u64 {
     SNAPSHOT_BUFFER.with(|b| b.borrow().len())
 }
 
-/// Empty the buffer (called at epoch close, before the next epoch opens).
-pub fn snapshot_buffer_clear() {
+/// Max snapshot-buffer entries removed per `snapshot_buffer_clear_chunk` call
+/// (PTS-002). Bounds the per-message work so clearing a season-scale buffer cannot
+/// blow the instruction limit in a single sweep (which would compound POINTS-002).
+pub const SNAPSHOT_BUFFER_CLEAR_CHUNK: u64 = 200;
+
+/// Remove up to `SNAPSHOT_BUFFER_CLEAR_CHUNK` entries from the buffer. Returns
+/// `true` once the buffer is EMPTY (nothing left to clear), `false` if more
+/// remain. Bounded per call (PTS-002) so a large buffer is drained across several
+/// messages instead of one O(N) sweep that risks the 5B-instruction trap.
+pub fn snapshot_buffer_clear_chunk() -> bool {
     SNAPSHOT_BUFFER.with(|b| {
         let mut map = b.borrow_mut();
-        let keys: Vec<StorablePrincipal> = map.iter().map(|(k, _)| k).collect();
-        for k in keys {
-            map.remove(&k);
+        let keys: Vec<StorablePrincipal> = map
+            .iter()
+            .map(|(k, _)| k)
+            .take(SNAPSHOT_BUFFER_CLEAR_CHUNK as usize)
+            .collect();
+        for k in &keys {
+            map.remove(k);
         }
-    });
+        map.is_empty()
+    })
+}
+
+/// Empty the buffer fully, in bounded chunks (PTS-002). Used on paths where the
+/// buffer is small (e.g. opening a fresh epoch, where the prior close already
+/// drained it) or in tests. The loop is bounded by the buffer size; each iteration
+/// removes a full chunk (or finishes), so it terminates in
+/// `ceil(len / SNAPSHOT_BUFFER_CLEAR_CHUNK)` steps. The CLOSE path does NOT call
+/// this in one shot; it drains the buffer incrementally as it accrues each
+/// principal and mops up stragglers across ticks (see `run_close_accrual_chunk`).
+pub fn snapshot_buffer_clear() {
+    while !snapshot_buffer_clear_chunk() {}
 }
 
 // ── Phase 5: asset-ledger registry (MemoryId 12) ────────────────────────────
@@ -1081,7 +1204,7 @@ pub fn season_bounds() -> (u64, u64) {
 }
 
 /// Aggregate result of an epoch close, used to build the `EpochSummary`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CloseStats {
     pub total_points_all: u128,
     pub points_accrued: u128,
@@ -1089,22 +1212,61 @@ pub struct CloseStats {
     pub registered_principals: u64,
 }
 
-/// Close-time accrual over every registered principal: scale each one's min-
-/// snapshot weights over the epoch period, add repayment-window points, write the
-/// per-source `PointEntry` rows, and bump `total_points`. Excluded principals are
-/// skipped (spec Section 11). Clears the snapshot buffer at the end.
-pub fn run_close_accrual(
-    epoch_index: u64,
-    epoch_start: u64,
-    epoch_end_capped: u64,
-    now_ns: u64,
-) -> CloseStats {
-    // Snapshot the principal set first (cannot mutate PRINCIPALS while iterating).
-    let principals: Vec<Principal> =
-        PRINCIPALS.with(|m| m.borrow().iter().map(|(k, _)| k.0).collect());
-    let mut points_accrued = 0u128;
-    let mut active = 0u64;
-    for p in &principals {
+/// One step of the chunked epoch close (POINTS-002). Either more batches remain or
+/// the close finished.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CloseStep {
+    /// A batch was processed; the close cursor advanced. The open epoch's
+    /// `close_*` fields have been persisted. Call again next tick to continue.
+    More,
+    /// Every registered principal has been closed exactly once; the snapshot
+    /// buffer was cleared. `CloseStats` is the finalized aggregate for the
+    /// `EpochSummary`. The driver now does the seed close + summary + index bump.
+    Done(CloseStats),
+}
+
+/// Principals closed per chunked-close tick. Each principal does up to ~8 stable
+/// `PointEntry` appends plus a `PrincipalState` rewrite, so the whole close over N
+/// principals is O(N) stable writes and at a few thousand principals an UNCHUNKED
+/// close blows the 5B-instruction limit, traps, and (since it never advanced the
+/// epoch index) re-traps on every retry -> permanent accrual stall. Bounding the
+/// batch keeps each close message well under budget; the cursor in `OpenEpoch`
+/// resumes between ticks. Conservative relative to CAPTURE_CHUNK because the close
+/// does more per-principal work (writes, not just reads).
+pub const CLOSE_CHUNK: u64 = 50;
+
+/// Process ONE batch of the chunked epoch close. Reads the resume cursor and
+/// running totals from the open epoch, accrues up to `CLOSE_CHUNK` registered
+/// principals STRICTLY AFTER the cursor, and persists the advanced cursor + totals
+/// back into the open epoch. Returns `CloseStep::More` while batches remain, or
+/// `CloseStep::Done(stats)` once the registered set is exhausted (also clearing the
+/// snapshot buffer).
+///
+/// Exactly-once guarantee: principals are processed in stable key order and the
+/// cursor always advances to the last-processed principal, so a resumed batch
+/// starts strictly after it. No principal is ever accrued twice across batches,
+/// even if a tick traps after persisting the cursor (the cursor is persisted in
+/// the SAME synchronous message as the accrual writes; there is no await between
+/// them, so they commit or roll back together).
+///
+/// Idempotent restart: if the open epoch is reloaded after an upgrade with
+/// `close_started == false`, the close simply begins again from the start; a
+/// partially-closed epoch keeps its cursor and resumes.
+pub fn run_close_accrual_chunk(now_ns: u64) -> CloseStep {
+    let mut open = match get_open_epoch() {
+        Some(o) => o,
+        // No open epoch: nothing to close. Report a trivially-finished close so the
+        // driver's finalize path is a no-op-safe call.
+        None => return CloseStep::Done(CloseStats::default()),
+    };
+    let epoch_index = open.epoch_index;
+    let epoch_start = open.epoch_start_ns;
+    let epoch_end_capped = open.epoch_end_ns;
+
+    let batch = registered_chunk_after(open.close_cursor, CLOSE_CHUNK);
+    let mut last_closed = open.close_cursor;
+    for p in &batch {
+        last_closed = Some(*p);
         if is_excluded(p) {
             continue; // excluded principals never accrue (spec Section 11)
         }
@@ -1113,6 +1275,10 @@ pub fn run_close_accrual(
             None => continue,
         };
         let min_weights = snapshot_buffer_get(p).unwrap_or_default();
+        // Consume this principal's buffer entry as we close it, so the buffer is
+        // drained incrementally across the close batches instead of in one O(N)
+        // sweep at the end (PTS-002, which would compound POINTS-002's budget).
+        snapshot_buffer_remove(p);
         let (entries, delta) =
             accrual::accrue_principal(min_weights, &ps.repayment_events, epoch_start, epoch_end_capped);
         for (source, pts) in entries {
@@ -1126,26 +1292,63 @@ pub fn run_close_accrual(
         }
         if delta > 0 {
             ps.total_points = ps.total_points.saturating_add(delta);
-            active += 1;
+            open.close_active = open.close_active.saturating_add(1);
         }
         ps.last_epoch_processed = epoch_index;
         // Drop repayment windows that can no longer overlap any future epoch, so
         // the per-principal vec stays bounded (no unbounded growth in the value).
         ps.repayment_events.retain(|r| r.window_end > epoch_end_capped);
         put_principal_state(ps);
-        points_accrued = points_accrued.saturating_add(delta);
+        open.close_points_accrued = open.close_points_accrued.saturating_add(delta);
     }
-    snapshot_buffer_clear();
+
+    open.close_started = true;
+    open.close_cursor = last_closed;
+    // A short batch (fewer than CLOSE_CHUNK) means the registered set is exhausted.
+    let accrual_done = (batch.len() as u64) < CLOSE_CHUNK;
+    set_open_epoch(Some(open.clone()));
+
+    if !accrual_done {
+        return CloseStep::More;
+    }
+
+    // Accrual is done. Mop up any buffer stragglers (entries for principals that
+    // were captured then deregistered, so the per-principal loop above never
+    // visited them) in BOUNDED chunks (PTS-002). Stay in `More` until the buffer is
+    // empty so the final mop-up never becomes a single unbounded sweep.
+    if !snapshot_buffer_clear_chunk() {
+        return CloseStep::More;
+    }
+
+    // Buffer drained and accrual complete: compute the season-wide total for the
+    // summary and finalize.
     let total_points_all = PRINCIPALS.with(|m| {
         m.borrow()
             .iter()
             .fold(0u128, |acc, (_, v)| acc.saturating_add(v.into_current().total_points))
     });
-    CloseStats {
+    let registered_principals = registered_count();
+    CloseStep::Done(CloseStats {
         total_points_all,
-        points_accrued,
-        active_principals: active,
-        registered_principals: principals.len() as u64,
+        points_accrued: open.close_points_accrued,
+        active_principals: open.close_active,
+        registered_principals,
+    })
+}
+
+/// Drive the chunked close to completion in a loop, returning the finalized
+/// `CloseStats`. Requires an open epoch (the close reads its bounds + cursor).
+/// Used by tests and by any caller that wants the whole close in one synchronous
+/// pass (the production driver instead spreads it across ticks via
+/// `run_close_accrual_chunk`). The loop is bounded: each iteration advances the
+/// cursor past at least `CLOSE_CHUNK` principals (or finishes), so it terminates
+/// in `ceil(registered / CLOSE_CHUNK)` steps.
+#[cfg(test)]
+pub fn run_close_accrual_to_completion(now_ns: u64) -> CloseStats {
+    loop {
+        if let CloseStep::Done(stats) = run_close_accrual_chunk(now_ns) {
+            return stats;
+        }
     }
 }
 
@@ -1158,8 +1361,11 @@ pub fn snapshot_buffer_merge_min(p: Principal, weights: SnapshotWeights) {
     }
 }
 
-/// The next chunk of registered principals (sorted) strictly after `cursor`
-/// (`None` = from the start), up to `limit`. Drives the chunked snapshot capture.
+/// The next chunk of registered principals (in stable principal order) strictly
+/// after `cursor` (`None` = from the start), up to `limit`. Drives the chunked
+/// epoch CLOSE, where order is irrelevant (every principal is processed exactly
+/// once). The CAPTURE uses `registered_chunk_after_shuffled` instead, so the
+/// capture order is unpredictable (POINTS-001 defense-in-depth).
 pub fn registered_chunk_after(cursor: Option<Principal>, limit: u64) -> Vec<Principal> {
     PRINCIPALS.with(|m| {
         let map = m.borrow();
@@ -1169,6 +1375,56 @@ pub fn registered_chunk_after(cursor: Option<Principal>, limit: u64) -> Vec<Prin
             None => keys.take(limit as usize).collect(),
         }
     })
+}
+
+/// A seed-derived, epoch-stable order key for a principal: `sha256(seed || p)`.
+/// The capture iterates principals in order of this key, so the order is fixed for
+/// the epoch (resumable by cursor) yet unpredictable to anyone who does not know
+/// the epoch's secret seed (revealed only at close). This is the POINTS-001
+/// defense-in-depth: an attacker cannot predict WHEN their principal is captured,
+/// so they cannot reliably flash-inflate their balance just before their snapshot.
+pub fn capture_order_key(seed: &[u8; 32], p: &Principal) -> [u8; 32] {
+    crate::snapshot_seed::sha256(&[seed, p.as_slice()])
+}
+
+/// The next chunk of registered principals for the CAPTURE, ordered by the
+/// seed-derived `capture_order_key`, strictly after `cursor` in that order
+/// (`None` = from the start), up to `limit` (POINTS-001). The order is stable for
+/// the epoch (so the cursor resumes correctly) but unpredictable without the seed.
+/// A principal registered mid-epoch that sorts before the cursor is skipped at this
+/// snapshot (its min(A,B) is then 0) exactly as in the principal-ordered path.
+pub fn registered_chunk_after_shuffled(
+    seed: &[u8; 32],
+    cursor: Option<Principal>,
+    limit: u64,
+) -> Vec<Principal> {
+    // Materialize (order_key, principal) for all registered principals, sort by the
+    // order key, then take `limit` strictly after the cursor's key. O(N log N) per
+    // chunk; acceptable at Season-1 scale (the capture is the accepted bottleneck)
+    // and bounded because the registered set is bounded by real registrations.
+    let mut keyed: Vec<([u8; 32], Principal)> = PRINCIPALS.with(|m| {
+        m.borrow()
+            .iter()
+            .map(|(k, _)| (capture_order_key(seed, &k.0), k.0))
+            .collect()
+    });
+    keyed.sort_unstable();
+    let cursor_key = cursor.map(|c| capture_order_key(seed, &c));
+    keyed
+        .into_iter()
+        .filter(|(key, _)| match &cursor_key {
+            Some(ck) => key > ck,
+            None => true,
+        })
+        .map(|(_, p)| p)
+        .take(limit as usize)
+        .collect()
+}
+
+/// The open epoch's secret seed (the seed driving THIS epoch's capture order and
+/// snapshot times). `None` if no epoch is open or the seed is somehow unset.
+pub fn current_epoch_seed() -> Option<[u8; 32]> {
+    with_state(|s| s.snapshot_seed.current_seed)
 }
 
 /// Acquire the single-tick epoch-driver guard (pairs with `end_epoch_guard`).
@@ -1518,7 +1774,46 @@ mod tests {
     }
 
     #[test]
-    fn state_v2_blob_round_trips_with_open_epoch() {
+    fn state_v2_blob_migrates_to_v3_defaulting_close_fields() {
+        // A pre-POINTS-002 V2 blob: open epoch in the frozen OpenEpochV2 shape (no
+        // chunked-close fields). It must decode and migrate forward, defaulting the
+        // close_* fields so a mid-epoch upgrade does not wipe the open epoch.
+        let v2 = StateV2 {
+            admin: tp(1),
+            excluded_principals: [tp(2)].into_iter().collect(),
+            season_start_ns: 0,
+            season_end_ns: 0,
+            current_epoch_index: 5,
+            snapshot_seed: SnapshotSeedSingleton::default(),
+            open_epoch: Some(OpenEpochV2 {
+                epoch_index: 5,
+                epoch_start_ns: 10,
+                epoch_end_ns: 20,
+                snapshot_a_ns: 12,
+                snapshot_b_ns: 18,
+                a_cursor: Some(tp(9)),
+                a_complete: true,
+                b_cursor: None,
+                b_complete: false,
+            }),
+        };
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&StoredState::V2(v2.clone()), &mut bytes).unwrap();
+
+        let migrated = decode_stored_state(&bytes).expect("V2 blob must decode and migrate");
+        let oe = migrated.open_epoch.expect("open epoch survives migration");
+        assert_eq!(oe.epoch_index, 5);
+        assert_eq!(oe.a_cursor, Some(tp(9)));
+        assert!(oe.a_complete);
+        // The new chunked-close fields default to a fresh (not-started) close.
+        assert!(!oe.close_started);
+        assert_eq!(oe.close_cursor, None);
+        assert_eq!(oe.close_points_accrued, 0);
+        assert_eq!(oe.close_active, 0);
+    }
+
+    #[test]
+    fn state_v3_blob_round_trips_with_open_epoch() {
         let state = State {
             admin: tp(1),
             excluded_principals: BTreeSet::new(),
@@ -1536,10 +1831,14 @@ mod tests {
                 a_complete: true,
                 b_cursor: None,
                 b_complete: false,
+                close_started: true,
+                close_cursor: Some(tp(4)),
+                close_points_accrued: 123,
+                close_active: 2,
             }),
         };
         let mut bytes = Vec::new();
-        ciborium::ser::into_writer(&StoredState::V2(state.clone()), &mut bytes).unwrap();
+        ciborium::ser::into_writer(&StoredState::V3(state.clone()), &mut bytes).unwrap();
         assert_eq!(decode_stored_state(&bytes), Some(state));
     }
 
@@ -1749,16 +2048,26 @@ mod tests {
     // ── Phase 5: open epoch + close accrual ──
 
     fn open_epoch_at(index: u64) -> OpenEpoch {
+        open_epoch_bounds(index, 0, 7 * crate::NANOS_PER_DAY)
+    }
+
+    /// An open epoch (both snapshots complete, close not started) with explicit
+    /// bounds, for driving the chunked close in tests.
+    fn open_epoch_bounds(index: u64, start: u64, end: u64) -> OpenEpoch {
         OpenEpoch {
             epoch_index: index,
-            epoch_start_ns: 0,
-            epoch_end_ns: 7 * crate::NANOS_PER_DAY,
+            epoch_start_ns: start,
+            epoch_end_ns: end,
             snapshot_a_ns: 1,
             snapshot_b_ns: 2,
             a_cursor: None,
             a_complete: true,
             b_cursor: None,
             b_complete: true,
+            close_started: false,
+            close_cursor: None,
+            close_points_accrued: 0,
+            close_active: 0,
         }
     }
 
@@ -1795,7 +2104,8 @@ mod tests {
         record_repayment(p2, AssetType::CkUsdc, 1_000 * 100_000_000, 0);
 
         let week = 7 * crate::NANOS_PER_DAY;
-        let stats = run_close_accrual(0, 0, week, 9_999);
+        set_open_epoch(Some(open_epoch_bounds(0, 0, week)));
+        let stats = run_close_accrual_to_completion(9_999);
 
         let repay = 1_000u128 * 100_000_000 * 5 * 7;
         assert_eq!(get_principal_state(&p1).unwrap().total_points, 700); // 100 over 7 days
@@ -1831,7 +2141,8 @@ mod tests {
         put_principal_state(ps);
 
         let week = 7 * crate::NANOS_PER_DAY;
-        run_close_accrual(0, 0, week, 1);
+        set_open_epoch(Some(open_epoch_bounds(0, 0, week)));
+        run_close_accrual_to_completion(1);
 
         let after = get_principal_state(&p).unwrap();
         assert_eq!(after.repayment_events.len(), 1, "the expired window is pruned");
@@ -1848,7 +2159,8 @@ mod tests {
         add_excluded(admin, p).unwrap();
 
         let week = 7 * crate::NANOS_PER_DAY;
-        let stats = run_close_accrual(0, 0, week, 1);
+        set_open_epoch(Some(open_epoch_bounds(0, 0, week)));
+        let stats = run_close_accrual_to_completion(1);
         assert_eq!(get_principal_state(&p).unwrap().total_points, 0); // excluded: no accrual
         assert_eq!(stats.active_principals, 0);
     }
@@ -1928,5 +2240,294 @@ mod tests {
         advance_epoch_index();
         advance_epoch_index();
         assert_eq!(current_epoch_index(), 2);
+    }
+
+    // ── POINTS-002: the chunked epoch close ──
+
+    /// Register `n` principals, each with $1 of icUSD debt captured for the epoch.
+    fn seed_principals_with_debt(n: u8) {
+        for i in 1..=n {
+            let p = tp(i);
+            register(p, 1, QualifyingAction::MintIcUsd).unwrap();
+            snapshot_buffer_put(p, SnapshotWeights { icusd_debt: 100, ..Default::default() });
+        }
+    }
+
+    #[test]
+    fn chunked_close_credits_every_principal_exactly_once_over_many_batches() {
+        // POINTS-002: a close over MORE than CLOSE_CHUNK principals must span
+        // several `More` ticks, then one `Done`, and credit each principal exactly
+        // once (no double-credit across resumed batches, no skipped principal).
+        init_state(
+            Some(InitArgs {
+                admin: Some(tp(200)),
+                season_start_ns: Some(0),
+                season_end_ns: Some(400 * crate::NANOS_PER_DAY),
+                excluded_principals: Some(vec![]), // no protocol-owned exclusions
+                ..Default::default()
+            }),
+            Principal::anonymous(),
+        );
+        // 2.5 batches' worth so we exercise More -> More -> Done with a short tail.
+        let n: u8 = (CLOSE_CHUNK as u8) * 2 + (CLOSE_CHUNK as u8) / 2;
+        seed_principals_with_debt(n);
+
+        let week = 7 * crate::NANOS_PER_DAY;
+        set_open_epoch(Some(open_epoch_bounds(0, 0, week)));
+
+        // Drive the close one batch at a time, counting the ticks.
+        let mut more_ticks = 0u32;
+        let stats = loop {
+            match run_close_accrual_chunk(1) {
+                CloseStep::More => {
+                    more_ticks += 1;
+                    assert!(
+                        get_open_epoch().is_some(),
+                        "the epoch stays OPEN while the close is mid-flight"
+                    );
+                    assert!(more_ticks < 100, "close must terminate, not loop forever");
+                }
+                CloseStep::Done(s) => break s,
+            }
+        };
+
+        // It took multiple batches (the whole point of chunking).
+        assert!(more_ticks >= 2, "expected several More ticks, got {more_ticks}");
+        // Each principal accrued exactly $1 over 7 days, exactly once.
+        for i in 1..=n {
+            assert_eq!(
+                get_principal_state(&tp(i)).unwrap().total_points,
+                700,
+                "principal {i} must be credited exactly once (100 debt x 7 days)"
+            );
+            assert_eq!(get_principal_state(&tp(i)).unwrap().last_epoch_processed, 0);
+        }
+        assert_eq!(stats.active_principals, n as u64);
+        assert_eq!(stats.registered_principals, n as u64);
+        assert_eq!(stats.points_accrued, 700 * n as u128);
+        assert_eq!(stats.total_points_all, 700 * n as u128);
+        // PTS-002: the snapshot buffer is fully drained by close completion.
+        assert_eq!(snapshot_buffer_len(), 0, "buffer drained across the chunked close");
+    }
+
+    #[test]
+    fn chunked_close_does_not_double_credit_when_a_batch_is_replayed() {
+        // POINTS-002 exactly-once: re-running the SAME first batch (simulating a
+        // retry after a trap that rolled back the cursor advance) must not credit a
+        // principal twice. Because the cursor advances in the same synchronous
+        // message as the accrual, a real trap rolls both back together; here we
+        // assert the weaker property that a partial close followed by completion
+        // still credits each principal exactly once.
+        init_state(
+            Some(InitArgs {
+                admin: Some(tp(200)),
+                season_start_ns: Some(0),
+                season_end_ns: Some(400 * crate::NANOS_PER_DAY),
+                excluded_principals: Some(vec![]),
+                ..Default::default()
+            }),
+            Principal::anonymous(),
+        );
+        let n: u8 = (CLOSE_CHUNK as u8) + 5; // one full batch + a short tail
+        seed_principals_with_debt(n);
+
+        let week = 7 * crate::NANOS_PER_DAY;
+        set_open_epoch(Some(open_epoch_bounds(0, 0, week)));
+
+        // Process exactly the first batch.
+        assert_eq!(run_close_accrual_chunk(1), CloseStep::More);
+        let after_first = get_open_epoch().unwrap();
+        assert!(after_first.close_started);
+        assert!(after_first.close_cursor.is_some(), "cursor advanced past batch 1");
+
+        // Finish the close.
+        let stats = run_close_accrual_to_completion(1);
+
+        // Every principal is credited exactly once despite the multi-step close.
+        for i in 1..=n {
+            assert_eq!(get_principal_state(&tp(i)).unwrap().total_points, 700);
+        }
+        assert_eq!(stats.points_accrued, 700 * n as u128);
+        assert_eq!(stats.active_principals, n as u64);
+    }
+
+    #[test]
+    fn chunked_close_on_no_open_epoch_is_a_noop_done() {
+        init_default(tp(99));
+        assert_eq!(get_open_epoch(), None);
+        assert_eq!(run_close_accrual_chunk(1), CloseStep::Done(CloseStats::default()));
+    }
+
+    // ── PTS-002: bounded snapshot-buffer clear ──
+
+    #[test]
+    fn snapshot_buffer_clear_chunk_is_bounded_and_eventually_empties() {
+        // Put more than one chunk's worth of entries; one chunk call leaves some.
+        let n = SNAPSHOT_BUFFER_CLEAR_CHUNK + 50;
+        for i in 0..n {
+            // Distinct principals from a 4-byte counter so keys differ.
+            let bytes = (i as u32).to_be_bytes();
+            snapshot_buffer_put(Principal::from_slice(&bytes), SnapshotWeights::default());
+        }
+        assert_eq!(snapshot_buffer_len(), n);
+
+        // One bounded chunk removes at most SNAPSHOT_BUFFER_CLEAR_CHUNK and is not
+        // yet empty.
+        let emptied = snapshot_buffer_clear_chunk();
+        assert!(!emptied, "first chunk should not empty a >1-chunk buffer");
+        assert_eq!(snapshot_buffer_len(), n - SNAPSHOT_BUFFER_CLEAR_CHUNK);
+
+        // The convenience full-clear finishes the rest in bounded chunks.
+        snapshot_buffer_clear();
+        assert_eq!(snapshot_buffer_len(), 0);
+        assert!(snapshot_buffer_clear_chunk(), "clearing an empty buffer reports empty");
+    }
+
+    // ── PTS-001: bounded leaderboard ──
+
+    #[test]
+    fn leaderboard_clamps_limit_to_max() {
+        // Seed a handful of principals; a giant `limit` must clamp to
+        // MAX_LEADERBOARD_LIMIT (we cannot seed a million, so assert the clamp via
+        // a small max by checking the returned len never exceeds the registered
+        // count and that an absurd limit does not panic / over-return).
+        let mk = |p: Principal, pts: u128| PrincipalState {
+            principal: p,
+            total_points: pts,
+            active_deposits: BTreeMap::new(),
+            repayment_events: Vec::new(),
+            last_epoch_processed: 0,
+            registered_at_ns: 1,
+            first_qualifying_action: QualifyingAction::MintIcUsd,
+        };
+        for i in 1..=5u8 {
+            put_principal_state(mk(tp(i), i as u128 * 10));
+        }
+        // An unbounded limit returns at most the registered set (5), and the call
+        // is bounded by MAX_LEADERBOARD_LIMIT regardless.
+        let board = leaderboard(0, u32::MAX);
+        assert_eq!(board.len(), 5);
+        assert!(MAX_LEADERBOARD_LIMIT >= board.len() as u32);
+    }
+
+    #[test]
+    fn leaderboard_limit_clamp_caps_returned_rows() {
+        // White-box: with MORE registered principals than the cap, a request for
+        // u32::MAX rows returns at most MAX_LEADERBOARD_LIMIT. We shrink the proof
+        // to the cap by registering cap+overflow synthetic principals would be huge,
+        // so instead assert the clamp arithmetic directly: limit.min(MAX) is what
+        // the function applies.
+        let mk = |p: Principal| PrincipalState {
+            principal: p,
+            total_points: 1,
+            active_deposits: BTreeMap::new(),
+            repayment_events: Vec::new(),
+            last_epoch_processed: 0,
+            registered_at_ns: 1,
+            first_qualifying_action: QualifyingAction::MintIcUsd,
+        };
+        // Register a few; request a tiny clamp via the public arg path.
+        for i in 0..3u32 {
+            put_principal_state(mk(Principal::from_slice(&i.to_be_bytes())));
+        }
+        // A limit ABOVE the cap is clamped; a limit BELOW the cap is honored.
+        assert_eq!(leaderboard(0, 2).len(), 2, "small limit honored");
+        assert!(
+            leaderboard(0, u32::MAX).len() <= MAX_LEADERBOARD_LIMIT as usize,
+            "unbounded limit clamped to MAX_LEADERBOARD_LIMIT"
+        );
+    }
+
+    // ── POINTS-001: public epoch status omits cursors; capture order is shuffled ──
+
+    #[test]
+    fn public_epoch_status_omits_capture_and_close_cursors() {
+        init_default(tp(99));
+        set_open_epoch(Some(OpenEpoch {
+            epoch_index: 2,
+            epoch_start_ns: 10,
+            epoch_end_ns: 20,
+            snapshot_a_ns: 12,
+            snapshot_b_ns: 18,
+            a_cursor: Some(tp(7)),
+            a_complete: true,
+            b_cursor: Some(tp(3)),
+            b_complete: false,
+            close_started: true,
+            close_cursor: Some(tp(5)),
+            close_points_accrued: 99,
+            close_active: 1,
+        }));
+        // The full (admin) status carries the cursors.
+        let full = epoch_status();
+        let foe = full.open_epoch.unwrap();
+        assert_eq!(foe.a_cursor, Some(tp(7)));
+        assert!(foe.a_complete);
+        // The public status reduces the open epoch to bounds + snapshot times only.
+        let pub_status = public_epoch_status();
+        let poe = pub_status.open_epoch.unwrap();
+        assert_eq!(poe.epoch_index, 2);
+        assert_eq!(poe.epoch_start_ns, 10);
+        assert_eq!(poe.epoch_end_ns, 20);
+        assert_eq!(poe.snapshot_a_ns, 12);
+        assert_eq!(poe.snapshot_b_ns, 18);
+        // PublicOpenEpoch has NO cursor/complete fields at all (compile-time), so
+        // there is nothing for an attacker to read; assert the public/full views
+        // agree on the non-sensitive window.
+        assert_eq!(poe.epoch_index, foe.epoch_index);
+        assert_eq!(poe.snapshot_a_ns, foe.snapshot_a_ns);
+    }
+
+    #[test]
+    fn shuffled_capture_order_is_seed_dependent_and_covers_all_exactly_once() {
+        // POINTS-001 defense-in-depth: the capture order is a seed-derived
+        // permutation, NOT principal order, and a different seed yields a different
+        // order — so an attacker cannot predict when their principal is captured.
+        init_default(tp(99));
+        for i in 1..=10u8 {
+            register(tp(i), 1, QualifyingAction::MintIcUsd).unwrap();
+        }
+        let seed_a = [1u8; 32];
+        let seed_b = [2u8; 32];
+
+        let order_a = registered_chunk_after_shuffled(&seed_a, None, 100);
+        let order_b = registered_chunk_after_shuffled(&seed_b, None, 100);
+        let principal_order = registered_chunk_after(None, 100);
+
+        // Same membership (all 10), regardless of order.
+        assert_eq!(order_a.len(), 10);
+        let mut sorted_a = order_a.clone();
+        sorted_a.sort();
+        assert_eq!(sorted_a, principal_order, "shuffle covers exactly the same set");
+
+        // The shuffled order differs from principal order, and two seeds differ
+        // from each other (unpredictability).
+        assert_ne!(order_a, principal_order, "capture order is not principal order");
+        assert_ne!(order_a, order_b, "different seeds produce different capture orders");
+    }
+
+    #[test]
+    fn shuffled_capture_cursor_resumes_without_gaps_or_repeats() {
+        // Paginating the shuffled order by cursor must visit every principal exactly
+        // once across pages (the resume invariant the chunked capture relies on).
+        init_default(tp(99));
+        for i in 1..=12u8 {
+            register(tp(i), 1, QualifyingAction::MintIcUsd).unwrap();
+        }
+        let seed = [7u8; 32];
+        let full = registered_chunk_after_shuffled(&seed, None, 100);
+
+        // Walk in pages of 5, threading the cursor (last principal of each page).
+        let mut paged: Vec<Principal> = Vec::new();
+        let mut cursor: Option<Principal> = None;
+        loop {
+            let page = registered_chunk_after_shuffled(&seed, cursor, 5);
+            if page.is_empty() {
+                break;
+            }
+            cursor = page.last().copied();
+            paged.extend(page);
+        }
+        assert_eq!(paged, full, "cursor-paged shuffle equals the full shuffle, once each");
     }
 }

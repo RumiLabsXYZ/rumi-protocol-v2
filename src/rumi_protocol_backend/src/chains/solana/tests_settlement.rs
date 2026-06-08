@@ -5,7 +5,7 @@
 //! RPC + signing-subnet round trip); here we cover only the pure pieces:
 //!
 //! - the REUSE of the chain-agnostic `confirm_mint_in_state` / `select_next_op`
-//!   helpers on a SOLANA-flavored `MultiChainStateV3` (a Solana mint confirm
+//!   helpers on a SOLANA-flavored `MultiChainStateV4` (a Solana mint confirm
 //!   moves pending -> debt, increments `chain_supplies`, and flips the vault to
 //!   `Open` - identical invariant to Monad, exercised here against the Solana
 //!   chain id so the reuse is proven, not assumed);
@@ -14,7 +14,7 @@
 
 use crate::chains::config::ChainId;
 use crate::chains::monad::settlement::{confirm_mint_in_state, select_next_op, OpAction};
-use crate::chains::multi_chain_state::MultiChainStateV3;
+use crate::chains::multi_chain_state::MultiChainStateV4;
 use crate::chains::settlement_queue::{
     SettlementOp, SettlementOpKind, SettlementOpStatus, SettlementQueueV1,
 };
@@ -28,7 +28,7 @@ const SOL: ChainId = ChainId(501);
 /// Insert a Solana `MintPending` vault with the given pending mint amount.
 /// `collateral_amount_native` is in lamports (Solana's 9-decimal base unit); a
 /// confirm does not read it, but we set a realistic value for clarity.
-fn solana_vault_pending(s: &mut MultiChainStateV3, vault_id: u64, pending_e8s: u128) {
+fn solana_vault_pending(s: &mut MultiChainStateV4, vault_id: u64, pending_e8s: u128) {
     s.chain_vaults.insert(
         vault_id,
         ChainVaultV1 {
@@ -48,7 +48,7 @@ fn solana_vault_pending(s: &mut MultiChainStateV3, vault_id: u64, pending_e8s: u
 
 #[test]
 fn solana_confirm_mint_moves_pending_to_debt_and_increments_supply() {
-    let mut s = MultiChainStateV3::default();
+    let mut s = MultiChainStateV4::default();
     s.chain_supplies.insert(SOL, 0);
     solana_vault_pending(&mut s, 1, 10_000_000_000); // 100 icUSD pending (e8s)
                                                      // PRE-mint total_chain_vault_debt_e8s() == 0 (vault debt_e8s is still 0).
@@ -61,7 +61,7 @@ fn solana_confirm_mint_moves_pending_to_debt_and_increments_supply() {
 
 #[test]
 fn solana_confirm_mint_rejects_amount_mismatch_no_mutation() {
-    let mut s = MultiChainStateV3::default();
+    let mut s = MultiChainStateV4::default();
     s.chain_supplies.insert(SOL, 0);
     solana_vault_pending(&mut s, 1, 10_000_000_000);
     // Observed != pending: reject before any supply mutation; nothing changes.
@@ -75,7 +75,7 @@ fn solana_confirm_mint_rejects_amount_mismatch_no_mutation() {
 
 #[test]
 fn solana_confirm_mint_unknown_vault_rejected() {
-    let mut s = MultiChainStateV3::default();
+    let mut s = MultiChainStateV4::default();
     s.chain_supplies.insert(SOL, 0);
     assert!(confirm_mint_in_state(&mut s, SOL, 999, 1, 0).is_err());
 }
@@ -85,7 +85,7 @@ fn solana_confirm_mint_second_vault_uses_running_total() {
     // Two Solana vaults: the first already confirmed (debt 100e8, supply 100e8);
     // confirming the second (pending 50e8) must pass PRE-mint total = 100e8, and
     // the helper computes the post-mint total 150e8 internally.
-    let mut s = MultiChainStateV3::default();
+    let mut s = MultiChainStateV4::default();
     s.chain_supplies.insert(SOL, 10_000_000_000);
     s.chain_vaults.insert(
         1,

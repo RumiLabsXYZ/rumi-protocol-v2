@@ -9,7 +9,7 @@ use ic_canister_log::{declare_log_buffer, log};
 use rumi_points::snapshot_seed::RevealedSeed;
 use rumi_points::types::{
     EpochStatus, EpochSummary, IngestStatus, InitArgs, LeaderboardEntry, PointsConfig, PointsError,
-    PrincipalState, RegistrationInfo, SourceStatus,
+    PrincipalState, PublicEpochStatus, RegistrationInfo, SourceStatus,
 };
 use rumi_points::{epoch, poll, state};
 
@@ -239,8 +239,24 @@ fn get_asset_ledgers() -> Vec<(u8, Principal)> {
     state::asset_ledgers()
 }
 
+/// PUBLIC epoch status (POINTS-001). Returns the open epoch's bounds + snapshot
+/// times only; the in-flight capture/close cursors and completion flags are
+/// withheld so a not-yet-captured principal cannot watch the cursor and time a
+/// flash deposit to beat the `min(A,B)` anti-snipe defense. Admins use
+/// `get_epoch_status_admin` for the full progress view.
 #[ic_cdk::query]
-fn get_epoch_status() -> EpochStatus {
+fn get_epoch_status() -> PublicEpochStatus {
+    state::public_epoch_status()
+}
+
+/// ADMIN-ONLY full epoch status, including the capture/close cursors and
+/// completion flags (POINTS-001). Traps for non-admin callers so the cursor
+/// progress is never disclosed publicly.
+#[ic_cdk::query]
+fn get_epoch_status_admin() -> EpochStatus {
+    if !state::is_admin(ic_cdk::caller()) {
+        ic_cdk::trap("unauthorized: get_epoch_status_admin is admin-only");
+    }
     state::epoch_status()
 }
 

@@ -19,7 +19,7 @@ use super::config::SOLANA_CHAIN_ID;
 use super::deposit_watch::supply_drop_detected;
 use super::ted25519::{is_valid_solana_address, solana_address_from_pubkey};
 use crate::chains::config::{GasStrategy, RegisterChainArg};
-use crate::chains::multi_chain_state::MultiChainStateV3;
+use crate::chains::multi_chain_state::MultiChainStateV4;
 use crate::chains::settlement_queue::{SettlementOpKind, SettlementOpStatus};
 use crate::chains::vault::{
     open_chain_vault_in_state, verify_deposit_and_enqueue_mint_in_state, ChainVaultStatus,
@@ -43,8 +43,8 @@ fn valid_solana_address(byte: u8) -> String {
 /// Register Solana (chain 501) with 9-decimal native units and a manual `"SOL"`
 /// price, then open an `AwaitingDeposit` vault (id 7) declaring `declared_lamports`
 /// collateral and `HUNDRED_ICUSD_E8S` debt. Returns the seeded state.
-fn seeded_awaiting_deposit(declared_lamports: u128) -> MultiChainStateV3 {
-    let mut s = MultiChainStateV3::default();
+fn seeded_awaiting_deposit(declared_lamports: u128) -> MultiChainStateV4 {
+    let mut s = MultiChainStateV4::default();
     let arg = RegisterChainArg {
         chain_id: SOLANA_CHAIN_ID,
         display_name: "SolanaDevnet".into(),
@@ -56,6 +56,7 @@ fn seeded_awaiting_deposit(declared_lamports: u128) -> MultiChainStateV3 {
             lamports_per_cu_ceiling: 10_000,
         },
         chain_native_decimals: 9,
+        min_quorum_providers: None,
     };
     crate::chains::admin::register_chain_in_state(&mut s, arg, 0).expect("register chain");
     s.manual_prices

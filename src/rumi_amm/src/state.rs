@@ -266,7 +266,47 @@ pub fn save_to_stable_memory() {
     });
 }
 
-/// V4 state shape (current on-chain: has pending_claims but no swap_events).
+/// V5 state shape — a frozen snapshot of `AmmState` AS OF the 2026-06-05 audit
+/// (SAT-004 fix). It mirrors every field of the live `AmmState` at this commit.
+///
+/// WHY THIS EXISTS: the live `AmmState` carries ~13 fields beyond V4
+/// (`swap_events`, `liquidity_events`, `admin_events`, `holder_snapshots`,
+/// `reward_events`, `claim_events`, `protocol_backend_principal`,
+/// `tvl_samples`, and their id counters). Before V5, the newest snapshot in
+/// the fallback chain was V4. So the next time anyone added a NON-`Option`
+/// field to `AmmState`, the on-chain bytes would fail `Decode!(_, AmmState)`
+/// and fall through to V4, silently resetting `protocol_backend_principal`
+/// (halting reward distribution) and dropping all post-V4 state WITHOUT a
+/// trap — the exact 2026-05-18 state-wipe incident class (UPG-002).
+///
+/// MAINTENANCE RULE: whenever you add a non-`Option` field to `AmmState`,
+/// FIRST add a new `AmmStateVN` that snapshots the *previous* shape (a copy of
+/// this struct) and wire it into `try_decode_state` ahead of V4. Keep this V5
+/// struct frozen — never edit it to track `AmmState`.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+struct AmmStateV5 {
+    pub admin: Principal,
+    pub pools: BTreeMap<PoolId, Pool>,
+    pub pool_creation_open: bool,
+    pub maintenance_mode: bool,
+    pub pending_claims: Vec<PendingClaim>,
+    pub next_claim_id: u64,
+    pub swap_events: Vec<AmmSwapEvent>,
+    pub next_swap_event_id: u64,
+    pub liquidity_events: Vec<AmmLiquidityEvent>,
+    pub next_liquidity_event_id: u64,
+    pub admin_events: Vec<AmmAdminEvent>,
+    pub next_admin_event_id: u64,
+    pub holder_snapshots: Vec<HolderSnapshot>,
+    pub reward_events: Vec<AmmRewardEvent>,
+    pub next_reward_event_id: u64,
+    pub claim_events: Vec<AmmClaimEvent>,
+    pub next_claim_event_id: u64,
+    pub protocol_backend_principal: Option<Principal>,
+    pub tvl_samples: Vec<TvlSample>,
+}
+
+/// V4 state shape (has pending_claims but no swap_events).
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
 struct AmmStateV4 {
     pub admin: Principal,
@@ -306,6 +346,32 @@ struct AmmStateV1 {
 pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
     if let Ok(state) = Decode!(bytes, AmmState) {
         return Some(state);
+    }
+    // V5: the frozen snapshot of the current shape. This is what protects a
+    // future non-Option field addition from silently falling through to V4 and
+    // wiping post-V4 state (SAT-004). It maps 1:1 onto AmmState today.
+    if let Ok(v5) = Decode!(bytes, AmmStateV5) {
+        return Some(AmmState {
+            admin: v5.admin,
+            pools: v5.pools,
+            pool_creation_open: v5.pool_creation_open,
+            maintenance_mode: v5.maintenance_mode,
+            pending_claims: v5.pending_claims,
+            next_claim_id: v5.next_claim_id,
+            swap_events: v5.swap_events,
+            next_swap_event_id: v5.next_swap_event_id,
+            liquidity_events: v5.liquidity_events,
+            next_liquidity_event_id: v5.next_liquidity_event_id,
+            admin_events: v5.admin_events,
+            next_admin_event_id: v5.next_admin_event_id,
+            holder_snapshots: v5.holder_snapshots,
+            reward_events: v5.reward_events,
+            next_reward_event_id: v5.next_reward_event_id,
+            claim_events: v5.claim_events,
+            next_claim_event_id: v5.next_claim_event_id,
+            protocol_backend_principal: v5.protocol_backend_principal,
+            tvl_samples: v5.tvl_samples,
+        });
     }
     if let Ok(v4) = Decode!(bytes, AmmStateV4) {
         return Some(AmmState {
@@ -404,12 +470,18 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
 
 /// Restore state from stable memory (called from post_upgrade).
 ///
-/// UPG-002 fix: rather than trapping on decode failure (which bricks the
-/// canister until a hotfix wasm ships), walk the V-current..V1 fallback chain
-/// via `try_decode_state`. If every known version fails, log a CRITICAL
-/// diagnostic with the snapshot length and a short hex preview, then fall
-/// back to empty state. AMM positions are reconstructable from underlying
-/// ledger balances, so empty fallback is a defensible last resort here.
+/// Walk the V-current..V1 fallback chain via `try_decode_state`. If a known
+/// version decodes, restore it.
+///
+/// If EVERY known version fails, TRAP (audit 2026-06-05). The previous behavior
+/// fell back to empty state on the theory that "AMM positions are
+/// reconstructable from underlying ledger balances" — but that is false: pool
+/// `reserve_a/reserve_b` are pure internal accounting (never re-synced from
+/// `icrc1_balance_of`) and the per-LP reward state (`acc_reward_per_share`,
+/// `lp_rewards`, `pending_claims`) cannot be reconstructed at all. A silent
+/// wipe of live pools is exactly the 2026-05-18 incident class. Trapping keeps
+/// the canister on its old wasm with state intact until a fix ships, matching
+/// the backend (UPG-001) and the other satellites.
 pub fn load_from_stable_memory() {
     let mut len_bytes = [0u8; 8];
     ic_cdk::api::stable::stable64_read(0, &mut len_bytes);
@@ -435,12 +507,16 @@ pub fn load_from_stable_memory() {
     log!(
         INFO,
         "CRITICAL UPG-002: AMM snapshot decode failed for all known schema versions \
-         (current, V4, V3, V2, V1). snapshot_len={} bytes, first_{}_bytes_hex={}. \
-         Falling back to empty state. AMM positions can be reconstructed from \
-         underlying ledger balances; admin must re-set via admin endpoints.",
+         (current, V5, V4, V3, V2, V1). snapshot_len={} bytes, first_{}_bytes_hex={}. \
+         Trapping to preserve on-chain state (old wasm + stable memory stay intact) \
+         rather than wiping live pools and reward state. Ship a wasm with a matching \
+         AmmStateVN snapshot to recover.",
         bytes.len(),
         preview_len,
         preview_hex
     );
-    replace_state(AmmState::default());
+    ic_cdk::trap(
+        "AMM post_upgrade: stable state did not decode under any known schema version \
+         (current, V5, V4, V3, V2, V1); refusing to wipe live pools — see CRITICAL log",
+    );
 }

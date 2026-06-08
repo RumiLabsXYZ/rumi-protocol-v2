@@ -27,6 +27,8 @@
 //   16,17   icrc3_blocks log
 //   18,19   icrc3_block_hashes log      — cumulative hash chain cache (parallel
 //                                         to blocks log; entry i == hash of block i)
+//   20      pending_claims              — BTreeMap<u64, ThreePoolPendingClaim>
+//   21      next_claim_id cell          — monotonic u64 claim id counter
 //
 // Migration semantics: the first `post_upgrade` after the Phase A deploy runs
 // a one-shot drain (see `storage::migration`). All subsequent upgrades just
@@ -47,7 +49,7 @@ use std::cell::RefCell;
 
 use crate::types::{
     Icrc3Block, LiquidityEventV1, LiquidityEventV2, LpAllowance, PoolConfig, SwapEventV1,
-    SwapEventV2, ThreePoolAdminEvent, VirtualPriceSnapshot,
+    SwapEventV2, ThreePoolAdminEvent, ThreePoolPendingClaim, VirtualPriceSnapshot,
 };
 
 pub type Memory = VirtualMemory<DefaultMemoryImpl>;
@@ -74,6 +76,8 @@ const MEM_BLOCKS_INDEX: MemoryId = MemoryId::new(16);
 const MEM_BLOCKS_DATA: MemoryId = MemoryId::new(17);
 const MEM_BLOCK_HASHES_INDEX: MemoryId = MemoryId::new(18);
 const MEM_BLOCK_HASHES_DATA: MemoryId = MemoryId::new(19);
+const MEM_PENDING_CLAIMS: MemoryId = MemoryId::new(20);
+const MEM_NEXT_CLAIM_ID: MemoryId = MemoryId::new(21);
 
 // ─── SlimState ───────────────────────────────────────────────────────────────
 //
@@ -299,6 +303,7 @@ impl_storable_candid_unbounded!(ThreePoolAdminEvent);
 impl_storable_candid_unbounded!(VirtualPriceSnapshot);
 impl_storable_candid_unbounded!(Icrc3Block);
 impl_storable_candid_unbounded!(LpAllowance);
+impl_storable_candid_unbounded!(ThreePoolPendingClaim);
 
 // ─── MemoryManager + stable structures (thread-local) ────────────────────────
 //
@@ -396,6 +401,18 @@ thread_local! {
             )
             .expect("init block_hashes log"),
         );
+
+    // Pending claims: tokens the pool owes a user after a failed payout/refund.
+    // Keyed by monotonic claim id (StorableU128 holding a u64-range value).
+    // Lives in its own memory region so it is fully upgrade-safe — adding it
+    // touches neither SlimState nor any existing structure. Audit 2026-06-05.
+    pub(crate) static PENDING_CLAIMS: RefCell<StableBTreeMap<StorableU128, ThreePoolPendingClaim, Memory>> =
+        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_PENDING_CLAIMS))));
+
+    pub(crate) static NEXT_CLAIM_ID: RefCell<StableCell<StorableU128, Memory>> = RefCell::new(
+        StableCell::init(MM.with(|m| m.borrow().get(MEM_NEXT_CLAIM_ID)), StorableU128(0))
+            .expect("init next_claim_id cell"),
+    );
 }
 
 // ─── Public API: SlimState cell ──────────────────────────────────────────────
@@ -548,6 +565,58 @@ log_api!(admin_ev, ADMIN_EV_LOG, ThreePoolAdminEvent);
 log_api!(vp_snap, VP_SNAP_LOG, VirtualPriceSnapshot);
 log_api!(blocks, BLOCKS_LOG, Icrc3Block);
 log_api!(block_hashes, BLOCK_HASHES_LOG, StorableHash);
+
+// ─── Public API: pending_claims ──────────────────────────────────────────────
+//
+// Recovery records for tokens the pool owes a user after a failed payout or
+// refund. Insert on failure; remove on successful `claim_pending`. Audit
+// 2026-06-05 (3P-01/02/03): mirrors `rumi_amm`'s pending-claim recovery.
+
+pub mod pending_claims {
+    use super::*;
+
+    /// Allocate the next monotonic claim id and persist the bumped counter.
+    pub fn next_id() -> u64 {
+        NEXT_CLAIM_ID.with(|c| {
+            let cur = c.borrow().get().0;
+            let next = cur.saturating_add(1);
+            c.borrow_mut()
+                .set(StorableU128(next))
+                .expect("set next_claim_id");
+            cur as u64
+        })
+    }
+
+    /// Insert a pending claim under its id.
+    pub fn insert(claim: ThreePoolPendingClaim) {
+        PENDING_CLAIMS.with(|m| {
+            m.borrow_mut()
+                .insert(StorableU128(claim.id as u128), claim);
+        });
+    }
+
+    /// Remove and return the claim with `id`, if present.
+    pub fn remove(id: u64) -> Option<ThreePoolPendingClaim> {
+        PENDING_CLAIMS.with(|m| m.borrow_mut().remove(&StorableU128(id as u128)))
+    }
+
+    /// Number of outstanding pending claims.
+    pub fn len() -> u64 {
+        PENDING_CLAIMS.with(|m| m.borrow().len())
+    }
+
+    /// List a bounded page of pending claims ordered by id.
+    pub fn list(offset: u64, limit: u64) -> Vec<ThreePoolPendingClaim> {
+        PENDING_CLAIMS.with(|m| {
+            m.borrow()
+                .iter()
+                .skip(offset as usize)
+                .take(limit as usize)
+                .map(|(_, v)| v)
+                .collect()
+        })
+    }
+}
 
 // ─── Test helpers ────────────────────────────────────────────────────────────
 
@@ -857,6 +926,45 @@ mod tests {
         let bytes = sp.to_bytes();
         let back = StorablePrincipal::from_bytes(bytes);
         assert_eq!(back.0, p);
+    }
+
+    #[test]
+    fn pending_claims_roundtrip_and_recovery_api() {
+        // Audit 2026-06-05 (3P-01/02/03): the pending-claim recovery store must
+        // allocate monotonic ids, insert/remove/list, and survive read-back.
+        use crate::types::ThreePoolPendingClaim;
+        let claimant = Principal::from_text("2vxsx-fae").unwrap();
+        let ledger = Principal::anonymous();
+
+        let id0 = pending_claims::next_id();
+        let id1 = pending_claims::next_id();
+        assert_eq!(id1, id0 + 1, "ids must be monotonic");
+
+        let claim = ThreePoolPendingClaim {
+            id: id0,
+            claimant,
+            token_index: 1,
+            ledger,
+            symbol: "ckUSDT".to_string(),
+            amount: 5_000_000,
+            reason: "remove_liquidity payout failed".to_string(),
+            created_at: 123,
+        };
+        pending_claims::insert(claim.clone());
+        let before = pending_claims::len();
+        assert!(before >= 1);
+
+        let listed = pending_claims::list(0, 100);
+        assert!(listed.iter().any(|c| c.id == id0 && c.amount == 5_000_000 && c.token_index == 1));
+
+        // Removing returns the stored claim and shrinks the set.
+        let removed = pending_claims::remove(id0).expect("claim must be present");
+        assert_eq!(removed.amount, 5_000_000);
+        assert_eq!(removed.ledger, ledger);
+        assert_eq!(pending_claims::len(), before - 1);
+
+        // Removing a missing id is a clean None (claim_pending -> ClaimNotFound).
+        assert!(pending_claims::remove(id0).is_none());
     }
 
     #[test]

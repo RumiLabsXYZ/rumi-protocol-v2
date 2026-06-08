@@ -12,7 +12,7 @@
 //! can call it without inventing the invariant under deadline pressure.
 
 use super::config::ChainId;
-use super::multi_chain_state::{MultiChainStateV1, MultiChainStateV2, MultiChainStateV3};
+use super::multi_chain_state::{MultiChainStateV1, MultiChainStateV2, MultiChainStateV4};
 use candid::{CandidType, Deserialize};
 use serde::Serialize;
 
@@ -63,7 +63,7 @@ pub enum SupplyInvariantError {
 /// authoritative `total_debt_e8s` snapshot taken at the same logical
 /// moment; we reject any apply that would leave sum != total_debt.
 pub fn apply_supply_delta(
-    state: &mut MultiChainStateV3,
+    state: &mut MultiChainStateV4,
     chain: ChainId,
     delta: SupplyDelta,
     total_debt_e8s: u128,
@@ -109,7 +109,7 @@ pub fn apply_supply_delta(
 /// On `Err`, the caller flips `state.invariant_halted = true` and emits
 /// an event.
 pub fn check_invariant(
-    state: &MultiChainStateV3,
+    state: &MultiChainStateV4,
     total_debt_e8s: u128,
 ) -> Result<(), SupplyInvariantError> {
     let sum: u128 = state.chain_supplies.values().copied().sum();

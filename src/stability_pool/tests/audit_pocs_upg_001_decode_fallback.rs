@@ -23,10 +23,13 @@
 //! 2. Corrupt bytes return None (no trap, no panic).
 //! 3. Empty bytes return None.
 //!
-//! The end-to-end "post_upgrade does not trap on corruption" path is exercised
-//! indirectly: `load_from_stable_memory` calls `try_decode_state` and falls back
-//! to `StabilityPoolState::default()` when None is returned. As long as
-//! `try_decode_state` is total (never panics), `load_from_stable_memory` is total.
+//! UPDATE (audit 2026-06-05, UPG-101): `load_from_stable_memory` now TRAPS when
+//! `try_decode_state` returns None, instead of falling back to
+//! `StabilityPoolState::default()`. Wiping to default zeroes every depositor
+//! position (the 2026-05-18 incident class); trapping preserves stable memory
+//! so an operator can ship a wasm with a matching `StabilityPoolStateVN`
+//! snapshot and recover. `try_decode_state` itself is unchanged and still total
+//! (returns None, never panics) — the contract these tests pin.
 
 use candid::Encode;
 use stability_pool::state::{try_decode_state, StabilityPoolState};

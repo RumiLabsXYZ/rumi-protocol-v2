@@ -40,6 +40,10 @@ enum PointsError {
 
 // Minimal mirrors for the accrual E2E (decode by field name; width subtyping lets
 // TPrincipalState read just `total_points` from the full record).
+// Full (admin) open-epoch view: includes the capture/close cursors and completion
+// flags, read via the admin-only `get_epoch_status_admin` (POINTS-001 moved these
+// off the public `get_epoch_status`). Width subtyping lets this decode the full
+// record while ignoring the close_* fields the tests do not assert on.
 #[derive(CandidType, Deserialize)]
 struct TOpenEpoch {
     epoch_index: u64,
@@ -59,6 +63,27 @@ struct TEpochStatus {
     driver_enabled: bool,
     driver_interval_secs: u64,
     open_epoch: Option<TOpenEpoch>,
+    revealed_seed_count: u64,
+    snapshot_seed_committed: bool,
+}
+
+// Public open-epoch view: bounds + snapshot times only, NO capture/close cursors
+// (POINTS-001). This is what the anonymous `get_epoch_status` returns.
+#[derive(CandidType, Deserialize)]
+struct TPublicOpenEpoch {
+    epoch_index: u64,
+    epoch_start_ns: u64,
+    epoch_end_ns: u64,
+    snapshot_a_ns: u64,
+    snapshot_b_ns: u64,
+}
+
+#[derive(CandidType, Deserialize)]
+struct TPublicEpochStatus {
+    current_epoch_index: u64,
+    driver_enabled: bool,
+    driver_interval_secs: u64,
+    open_epoch: Option<TPublicOpenEpoch>,
     revealed_seed_count: u64,
     snapshot_seed_committed: bool,
 }
@@ -292,12 +317,26 @@ fn force_tick(pic: &pocket_ic::PocketIc, rp: Principal) {
     }
 }
 
+/// Full epoch status with capture/close progress, via the ADMIN-only
+/// `get_epoch_status_admin` (POINTS-001 keeps the cursors off the public query).
 fn epoch_status(pic: &pocket_ic::PocketIc, rp: Principal) -> TEpochStatus {
+    let res = pic
+        .query_call(rp, admin(), "get_epoch_status_admin", Encode!().unwrap())
+        .expect("get_epoch_status_admin call failed");
+    match res {
+        WasmResult::Reply(b) => Decode!(&b, TEpochStatus).unwrap(),
+        WasmResult::Reject(m) => panic!("get_epoch_status_admin rejected: {m}"),
+    }
+}
+
+/// Public epoch status (anonymous caller), via `get_epoch_status`. Used to assert
+/// the cursors are NOT exposed (POINTS-001).
+fn public_epoch_status(pic: &pocket_ic::PocketIc, rp: Principal) -> TPublicEpochStatus {
     let res = pic
         .query_call(rp, Principal::anonymous(), "get_epoch_status", Encode!().unwrap())
         .expect("get_epoch_status call failed");
     match res {
-        WasmResult::Reply(b) => Decode!(&b, TEpochStatus).unwrap(),
+        WasmResult::Reply(b) => Decode!(&b, TPublicEpochStatus).unwrap(),
         WasmResult::Reject(m) => panic!("get_epoch_status rejected: {m}"),
     }
 }
@@ -461,4 +500,144 @@ fn transient_fetch_error_does_not_zero_a_held_position() {
         DEBT as u128 * 7,
         "a recovered transient error yields full credit, not a min()-locked zero"
     );
+}
+
+/// POINTS-001: the PUBLIC `get_epoch_status` must NOT expose the capture/close
+/// cursors (an attacker watching the cursor could time a flash deposit to beat the
+/// `min(A,B)` anti-snipe defense). The full cursor view is admin-only.
+#[test]
+fn public_epoch_status_hides_cursors_and_admin_view_is_gated() {
+    let pic = PocketIcBuilder::new().with_application_subnet().build();
+    set_time_ns(&pic, rumi_points::DEFAULT_SEASON_START_NS);
+
+    let mock = install_mock(&pic);
+    let rp = install_points(&pic);
+    set_all_sources(&pic, rp, mock);
+
+    let p = Principal::from_slice(&[7; 5]);
+    admin_ok(&pic, rp, "register_test_principal", Encode!(&p).unwrap());
+    set_vault_debt(&pic, mock, p, 100_000_000);
+    start_season_ok(&pic, rp, SEASON_SEED);
+    admin_ok(&pic, rp, "set_epoch_driver_enabled", Encode!(&false).unwrap());
+
+    // Capture A so the admin view has a non-trivial cursor to expose.
+    let oe = epoch_status(&pic, rp).open_epoch.unwrap();
+    set_time_ns(&pic, oe.snapshot_a_ns);
+    force_tick(&pic, rp);
+
+    // The PUBLIC query (anonymous caller) decodes into PublicEpochStatus, whose
+    // open epoch has bounds + snapshot times but NO cursor/complete fields. The
+    // decode itself proves the wire shape carries no cursors.
+    let pub_status = public_epoch_status(&pic, rp);
+    let poe = pub_status.open_epoch.expect("epoch 0 is open");
+    assert_eq!(poe.epoch_index, 0);
+    assert_eq!(poe.snapshot_a_ns, oe.snapshot_a_ns);
+    assert_eq!(poe.snapshot_b_ns, oe.snapshot_b_ns);
+
+    // The ADMIN query is admin-gated: an anonymous caller is rejected (trap).
+    let denied = pic.query_call(
+        rp,
+        Principal::anonymous(),
+        "get_epoch_status_admin",
+        Encode!().unwrap(),
+    );
+    match denied {
+        Err(_) => {} // rejected at the call layer
+        Ok(WasmResult::Reject(_)) => {} // trapped: unauthorized
+        Ok(WasmResult::Reply(_)) => {
+            panic!("get_epoch_status_admin must reject a non-admin caller")
+        }
+    }
+
+    // The admin CAN read the full view (with cursors).
+    let admin_view = epoch_status(&pic, rp);
+    assert!(
+        admin_view.open_epoch.unwrap().a_complete,
+        "admin view still exposes capture progress"
+    );
+}
+
+/// POINTS-002: an epoch close that spans MANY principals (more than one close
+/// chunk) must complete through the live driver without trapping, advancing the
+/// epoch index and crediting every held position exactly once. Pre-fix this was a
+/// single unchunked O(N) message that could exceed the instruction limit and trap,
+/// stalling accrual permanently. We register well over CLOSE_CHUNK principals and
+/// drive the state machine to completion.
+#[test]
+fn chunked_close_completes_over_many_principals_end_to_end() {
+    let pic = PocketIcBuilder::new().with_application_subnet().build();
+    set_time_ns(&pic, rumi_points::DEFAULT_SEASON_START_NS);
+
+    let mock = install_mock(&pic);
+    let rp = install_points(&pic);
+    set_all_sources(&pic, rp, mock);
+
+    // Register many principals (> 2 close chunks of 50) so the close MUST span
+    // several batches. The mock tracks one held position; that principal must be
+    // credited exactly once, and every other registered principal must still be
+    // processed for the close to finalize (no permanent stall).
+    const N: u32 = 130;
+    const DEBT: u64 = 100_000_000; // $1
+    let who = |i: u32| Principal::from_slice(&i.to_be_bytes());
+    for i in 0..N {
+        admin_ok(&pic, rp, "register_test_principal", Encode!(&who(i)).unwrap());
+    }
+    // One held principal (the mock returns debt for a single owner). Pick one near
+    // the end so it is processed in a LATE close batch, exercising resume.
+    let held = who(N - 3);
+    set_vault_debt(&pic, mock, held, DEBT);
+
+    start_season_ok(&pic, rp, SEASON_SEED);
+    admin_ok(&pic, rp, "set_epoch_driver_enabled", Encode!(&false).unwrap());
+    let oe = epoch_status(&pic, rp).open_epoch.unwrap();
+
+    // Drive snapshot A to completion (capture is chunked at 100/principals tick).
+    set_time_ns(&pic, oe.snapshot_a_ns);
+    for _ in 0..10 {
+        if epoch_status(&pic, rp).open_epoch.unwrap().a_complete {
+            break;
+        }
+        force_tick(&pic, rp);
+    }
+    assert!(epoch_status(&pic, rp).open_epoch.unwrap().a_complete, "snapshot A completes");
+
+    // Drive snapshot B to completion.
+    set_time_ns(&pic, oe.snapshot_b_ns);
+    for _ in 0..10 {
+        if epoch_status(&pic, rp).open_epoch.unwrap().b_complete {
+            break;
+        }
+        force_tick(&pic, rp);
+    }
+    assert!(epoch_status(&pic, rp).open_epoch.unwrap().b_complete, "snapshot B completes");
+
+    // Drive the CHUNKED close to completion. It spans several ticks (130 principals
+    // / 50 per close chunk = 3 batches); each tick stays in the open state until
+    // the cursor reaches the end.
+    set_time_ns(&pic, oe.epoch_end_ns);
+    let mut closed = false;
+    for _ in 0..20 {
+        force_tick(&pic, rp);
+        if epoch_status(&pic, rp).open_epoch.is_none() {
+            closed = true;
+            break;
+        }
+    }
+    assert!(closed, "the chunked close must finish (no permanent stall)");
+
+    let after = epoch_status(&pic, rp);
+    assert!(after.open_epoch.is_none(), "epoch closed");
+    assert_eq!(after.current_epoch_index, 1, "epoch index advanced exactly once");
+
+    // The held principal is credited EXACTLY once: $1 of debt over the full week.
+    // (Pre-fix, the unchunked close over 130 principals could trap before reaching
+    // this principal's batch and never advance the index.)
+    assert_eq!(
+        total_points(&pic, rp, held),
+        DEBT as u128 * 7,
+        "the held principal is credited exactly once across the chunked close"
+    );
+    // A no-debt principal accrued nothing but was still processed (the close had to
+    // iterate all 130 principals to finalize, so this is implied by closure).
+    assert_eq!(total_points(&pic, rp, who(0)), 0);
 }

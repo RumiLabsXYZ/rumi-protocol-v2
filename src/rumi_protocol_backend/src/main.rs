@@ -1647,62 +1647,23 @@ fn delete_chain(
 /// Mint op left.
 #[candid_method(update)]
 #[update]
-fn recover_stuck_chain_vault(
+async fn recover_stuck_chain_vault(
     chain: rumi_protocol_backend::chains::config::ChainId,
     vault_id: u64,
 ) -> Result<(), ProtocolError> {
-    use rumi_protocol_backend::chains::settlement_queue::{SettlementOpKind, SettlementOpStatus};
-    use rumi_protocol_backend::chains::vault::ChainVaultStatus;
+    // M-09 (RECOV-02): this used to flip MintPending->Open on the unverified
+    // `pending_mint_e8s == 0` alone. It now delegates to the chains recovery
+    // module, which RE-VERIFIES on-chain (via the EVM-RPC quorum) that the mint
+    // did NOT actually land before releasing collateral. Async because the
+    // verification makes inter-canister RPC calls.
     let caller = ic_cdk::caller();
     if read_state(|s| s.developer_principal != caller) {
         return Err(ProtocolError::ChainAdmin("not developer".into()));
     }
-    mutate_state(|s| {
-        let v = s
-            .multi_chain
-            .chain_vaults
-            .get(&vault_id)
-            .ok_or_else(|| ProtocolError::ChainAdmin(format!("unknown chain vault {vault_id}")))?;
-        if v.collateral_chain != chain {
-            return Err(ProtocolError::ChainAdmin(format!(
-                "vault {vault_id} is not on chain {:?}",
-                chain
-            )));
-        }
-        if v.status != ChainVaultStatus::MintPending || v.pending_mint_e8s != 0 {
-            return Err(ProtocolError::ChainAdmin(format!(
-                "vault {vault_id} is not a recoverable stuck mint (status {:?}, pending_mint_e8s {})",
-                v.status, v.pending_mint_e8s
-            )));
-        }
-        let has_live_mint = s
-            .multi_chain
-            .settlement_queues
-            .get(&chain)
-            .map(|q| {
-                q.pending.values().any(|op| {
-                    matches!(&op.kind, SettlementOpKind::Mint { vault_id: vid, .. } if *vid == vault_id)
-                        && matches!(
-                            op.status,
-                            SettlementOpStatus::Queued | SettlementOpStatus::Inflight { .. }
-                        )
-                })
-            })
-            .unwrap_or(false);
-        if has_live_mint {
-            return Err(ProtocolError::ChainAdmin(format!(
-                "vault {vault_id} still has a live mint op; wait for it to reach a terminal state"
-            )));
-        }
-        let v = s
-            .multi_chain
-            .chain_vaults
-            .get_mut(&vault_id)
-            .expect("vault present: checked above");
-        v.status = ChainVaultStatus::Open;
-        Ok(())
-    })?;
-    log!(INFO, "[recover_stuck_chain_vault] chain={:?} vault={} MintPending->Open (collateral now recoverable via close/withdraw)", chain, vault_id);
+    rumi_protocol_backend::chains::recovery::recover_stuck_chain_vault_verified(chain, vault_id)
+        .await
+        .map_err(|e| ProtocolError::ChainAdmin(format!("{e}")))?;
+    log!(INFO, "[recover_stuck_chain_vault] chain={:?} vault={} MintPending->Open (on-chain-verified mint did NOT land; collateral now recoverable via close/withdraw)", chain, vault_id);
     Ok(())
 }
 
@@ -1720,65 +1681,29 @@ fn recover_stuck_chain_vault(
 /// is currently `Inflight`.
 #[candid_method(update)]
 #[update]
-fn resolve_stuck_settlement_op(
+async fn resolve_stuck_settlement_op(
     chain: rumi_protocol_backend::chains::config::ChainId,
     op_id: u64,
 ) -> Result<(), ProtocolError> {
-    use rumi_protocol_backend::chains::settlement_queue::{SettlementOpKind, SettlementOpStatus};
-    use rumi_protocol_backend::chains::vault::ChainVaultStatus;
+    // M-08 (RECOV-01): this used to reverse the op on pure operator assertion
+    // (no `.await`, no on-chain re-read). It now delegates to the chains recovery
+    // module, which RE-READS the op's tx receipt through the EVM-RPC quorum and
+    // REFUSES the reversal if the tx actually landed (reversing a landed Mint
+    // would leave an unbacked mint). Async because the verification makes
+    // inter-canister RPC calls.
     let caller = ic_cdk::caller();
     if read_state(|s| s.developer_principal != caller) {
         return Err(ProtocolError::ChainAdmin("not developer".into()));
     }
-    let now = ic_cdk::api::time();
-    mutate_state(|s| {
-        // Snapshot the op kind and confirm it is Inflight (CAS).
-        let kind = {
-            let q = s
-                .multi_chain
-                .settlement_queues
-                .get(&chain)
-                .ok_or_else(|| ProtocolError::ChainAdmin(format!("unknown chain {:?}", chain)))?;
-            let op = q.pending.get(&op_id).ok_or_else(|| {
-                ProtocolError::ChainAdmin(format!("unknown op {op_id} on chain {:?}", chain))
-            })?;
-            if !matches!(op.status, SettlementOpStatus::Inflight { .. }) {
-                return Err(ProtocolError::ChainAdmin(format!(
-                    "op {op_id} is not Inflight (status {:?}); nothing to resolve",
-                    op.status
-                )));
-            }
-            op.kind.clone()
-        };
-        // Per-kind reversal, mirroring confirm_reverted.
-        match &kind {
-            SettlementOpKind::Mint { vault_id, .. } => {
-                if let Some(v) = s.multi_chain.chain_vaults.get_mut(vault_id) {
-                    v.pending_mint_e8s = 0; // Design B: no debt counted; leave status MintPending.
-                }
-            }
-            SettlementOpKind::NativeWithdrawal { vault_id, amount_e18, .. } => {
-                if let Some(v) = s.multi_chain.chain_vaults.get_mut(vault_id) {
-                    v.collateral_amount_native =
-                        v.collateral_amount_native.saturating_add(*amount_e18);
-                    if v.status == ChainVaultStatus::Closing {
-                        v.status = ChainVaultStatus::Open;
-                    }
-                }
-            }
-            SettlementOpKind::Burn { .. } => {}
-        }
-        if let Some(o) = s
-            .multi_chain
-            .settlement_queues
-            .get_mut(&chain)
-            .and_then(|q| q.pending.get_mut(&op_id))
-        {
-            o.mark_failed("manually resolved (stuck Inflight)".to_string(), now);
-        }
-        Ok(())
-    })?;
-    log!(INFO, "[resolve_stuck_settlement_op] chain={:?} op={} marked Failed + reversed (operator-confirmed not landed)", chain, op_id);
+    let did_reverse =
+        rumi_protocol_backend::chains::recovery::resolve_stuck_settlement_op_verified(chain, op_id)
+            .await
+            .map_err(|e| ProtocolError::ChainAdmin(format!("{e}")))?;
+    if did_reverse {
+        log!(INFO, "[resolve_stuck_settlement_op] chain={:?} op={} marked Failed + reversed (on-chain-verified NOT landed)", chain, op_id);
+    } else {
+        log!(INFO, "[resolve_stuck_settlement_op] chain={:?} op={} no longer Inflight at commit (concurrent confirm); no-op", chain, op_id);
+    }
     Ok(())
 }
 
@@ -2943,7 +2868,30 @@ async fn stability_pool_liquidate_with_reserves(
     match rumi_protocol_backend::vault::liquidate_vault_debt_already_burned(
         vault_id, icusd_debt_covered_e8s, caller, Some(three_usd_amount_e8s), proof,
     ).await {
-        Ok(success) => Ok(success),
+        Ok(success) => {
+            // VER-002 (audit 2026-06-05): the full `three_usd_amount_e8s` was
+            // pulled above, but the writedown is capped to the vault's current
+            // debt, so `success.liquidated_debt` can be < `icusd_debt_covered_e8s`
+            // (e.g. the vault shrank between the SP's read and now). Refund the
+            // PROPORTIONAL excess 3USD so only the realized portion leaves the
+            // SP. The SP records the same realized portion (floor formula) as
+            // consumed, so its tracked aggregate and ledger balance both net to
+            // exactly `realized_3usd` with no drift.
+            if icusd_debt_covered_e8s > 0 && success.liquidated_debt < icusd_debt_covered_e8s {
+                let realized_3usd = (three_usd_amount_e8s as u128)
+                    .saturating_mul(success.liquidated_debt as u128)
+                    / (icusd_debt_covered_e8s as u128);
+                let excess = three_usd_amount_e8s.saturating_sub(realized_3usd as u64);
+                if excess > 0 {
+                    log!(INFO,
+                        "[stability_pool_liquidate_with_reserves] vault #{}: writedown capped \
+                         ({} of {} icUSD realized); refunding {} excess 3USD to SP",
+                        vault_id, success.liquidated_debt, icusd_debt_covered_e8s, excess);
+                    refund_3usd_to_stability_pool(three_usd_ledger, caller, excess, vault_id).await;
+                }
+            }
+            Ok(success)
+        }
         Err(liq_error) => {
             refund_3usd_to_stability_pool(
                 three_usd_ledger, caller, three_usd_amount_e8s, vault_id,
@@ -3634,6 +3582,14 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
             "Caller is not the registered liquidation bot canister".to_string(),
         ));
     }
+
+    // BK-001/002: hold the per-vault liquidation lock across the claim so the
+    // bot's collateral-seizing claim cannot interleave with an in-flight manual
+    // or SP liquidation of the same vault (which would otherwise both seize from
+    // the shared collateral pool). The persistent `bot_processing` flag set
+    // below covers the longer claim->confirm window; this guard covers the claim
+    // message itself. Released on return (incl. continuation-trap via cleanup).
+    let _vault_liq_guard = rumi_protocol_backend::guard::VaultLiquidationGuard::new(vault_id)?;
 
     // Check no existing claim on this vault
     let existing_claim = read_state(|s| s.bot_claims.contains_key(&vault_id));

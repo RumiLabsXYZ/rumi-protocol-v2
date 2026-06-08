@@ -116,6 +116,12 @@ pub fn stop_ramp_a(caller: Principal, now: u64) -> Result<(), ThreePoolError> {
 
 /// Withdraw accumulated admin fees, transferring them to the admin.
 pub async fn withdraw_admin_fees(caller: Principal) -> Result<[u128; 3], ThreePoolError> {
+    // Serialize against concurrent withdrawals and against the swap/liquidity
+    // paths that mutate `admin_fees`. Without this, two concurrent admin calls
+    // both read the same non-zero `fees`, both zero it, and both transfer — a
+    // double payout of accrued fees. Audit 2026-06-05 (3P-04).
+    let _pool_guard = crate::pool_guard::PoolGuard::new()?;
+
     let (admin, fees, tokens) = read_state(|s| {
         (s.config.admin, s.admin_fees, s.config.tokens.clone())
     });
@@ -124,26 +130,38 @@ pub async fn withdraw_admin_fees(caller: Principal) -> Result<[u128; 3], ThreePo
         return Err(ThreePoolError::Unauthorized);
     }
 
-    // Zero out fees first (deduct-before-transfer)
+    // Zero out fees first (deduct-before-transfer).
     mutate_state(|s| {
         s.admin_fees = [0; 3];
     });
 
-    // Transfer each non-zero fee to admin
+    // Transfer each non-zero fee to admin. If a transfer fails, restore that
+    // token's fee (the tokens are still in the pool's account) and continue
+    // with the rest — never bail mid-loop and silently strand the un-sent
+    // fees by leaving them zeroed. Audit 2026-06-05 (3P-04).
+    let mut withdrawn = [0u128; 3];
     for k in 0..3 {
         if fees[k] > 0 {
-            transfer_to_user(tokens[k].ledger_id, admin, fees[k])
-                .await
-                .map_err(|reason| ThreePoolError::TransferFailed {
-                    token: tokens[k].symbol.clone(),
-                    reason,
-                })?;
+            match transfer_to_user(tokens[k].ledger_id, admin, fees[k]).await {
+                Ok(()) => {
+                    withdrawn[k] = fees[k];
+                }
+                Err(reason) => {
+                    mutate_state(|s| {
+                        s.admin_fees[k] = s.admin_fees[k].saturating_add(fees[k]);
+                    });
+                    ic_cdk::println!(
+                        "[withdraw_admin_fees] token {} transfer failed: {}; fee restored",
+                        tokens[k].symbol, reason
+                    );
+                }
+            }
         }
     }
 
-    record_admin_event(caller, ThreePoolAdminAction::WithdrawAdminFees { amounts: fees });
+    record_admin_event(caller, ThreePoolAdminAction::WithdrawAdminFees { amounts: withdrawn });
 
-    Ok(fees)
+    Ok(withdrawn)
 }
 
 /// Pause or unpause the pool.
