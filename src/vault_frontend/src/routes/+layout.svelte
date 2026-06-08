@@ -10,6 +10,7 @@
   import "../app.css";
   import { protocolService } from "../lib/services/protocol";
   import { isDevelopment } from "../lib/config";
+  import { POINTS_ENABLED } from '$lib/config';
   import { developerAccess } from "../lib/stores/developer";
   import ToastContainer from "../lib/components/common/ToastContainer.svelte";
   import { ApiClient } from "../lib/services/protocol/apiClient";
@@ -78,6 +79,7 @@
     {#if isConnected && canViewVaults}<a href="/vaults" class="nav-link" class:active={currentPath.startsWith('/vaults')}><span>Vaults</span></a>{/if}
     {#if isConnected && $permissionStore.isDeveloper}<a href="/treasury" class="nav-link" class:active={currentPath === '/treasury'}><span>Treasury</span></a>{/if}
     <a href="/explorer" class="nav-link" class:active={currentPath.startsWith('/explorer')}><span>Explorer</span></a>
+    {#if POINTS_ENABLED}<a href="/points" class="nav-link" class:active={currentPath.startsWith('/points')}><span>Points</span></a>{/if}
   </nav>
   <div class="top-actions">
     {#if hasLiquidatableVaults}
