@@ -822,3 +822,57 @@ fn full_withdrawal_succeeds_after_fee_drift() {
     assert!(pool_after.reserve_b <= floor,
         "reserve_b should drain to the locked minimum, got {}", pool_after.reserve_b);
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// Test: slippage (`min_amount_out`) is enforced against the NET amount the
+// taker actually receives (gross output minus the ledger fee), not the gross
+// pool output. Otherwise a taker could receive one ledger fee less than the
+// minimum they demanded.
+// ════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn swap_slippage_enforced_on_net_received() {
+    // Pool 1: observe a swap's gross output and confirm the taker receives it
+    // net of exactly one ledger fee.
+    let env = setup_flaky();
+    set_fee(&env, env.token_a_id, 10_000);
+    set_fee(&env, env.token_b_id, 10_000);
+    let pool_id = create_pool(&env);
+    add_initial_liquidity(&env, &pool_id, 100_000_00000000);
+    let pool = get_pool_info(&env, &pool_id).unwrap();
+    let swap_in: u128 = 1_000_00000000;
+
+    let bal_before = get_flaky_balance(&env, pool.token_b, env.user, None);
+    let swap_result = env.pic
+        .update_call(env.amm_id, env.user, "swap",
+            encode_args((pool_id.clone(), pool.token_a, swap_in, 0u128)).unwrap())
+        .expect("swap call failed");
+    let gross_out: u128 = {
+        let res: SwapResult = decode_ok(swap_result);
+        res.amount_out
+    };
+    let bal_after = get_flaky_balance(&env, pool.token_b, env.user, None);
+    assert_eq!(bal_after - bal_before, gross_out - 10_000,
+        "taker should receive the gross output minus exactly one ledger fee");
+
+    // Pool 2: identical reserves. Demanding min_amount_out == the gross output
+    // must be rejected, because the taker would actually receive gross - fee,
+    // below the requested minimum.
+    let env2 = setup_flaky();
+    set_fee(&env2, env2.token_a_id, 10_000);
+    set_fee(&env2, env2.token_b_id, 10_000);
+    let pool_id2 = create_pool(&env2);
+    add_initial_liquidity(&env2, &pool_id2, 100_000_00000000);
+    let pool2 = get_pool_info(&env2, &pool_id2).unwrap();
+
+    let result2 = env2.pic
+        .update_call(env2.amm_id, env2.user, "swap",
+            encode_args((pool_id2.clone(), pool2.token_a, swap_in, gross_out)).unwrap())
+        .expect("swap call failed");
+    let res2: Result<SwapResult, AmmError> = match result2 {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode swap result failed"),
+        WasmResult::Reject(msg) => panic!("swap rejected: {}", msg),
+    };
+    assert!(matches!(res2, Err(AmmError::InsufficientOutput { .. })),
+        "swap demanding min == gross output must reject (taker receives net < min), got {:?}", res2);
+}

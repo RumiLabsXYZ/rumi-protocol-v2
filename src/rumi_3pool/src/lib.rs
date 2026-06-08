@@ -443,8 +443,11 @@ pub async fn swap(i: u8, j: u8, dx: u128, min_dy: u128) -> Result<u128, ThreePoo
     let output = outcome.output_native;
     let fee = outcome.fee_native;
 
-    // 6. Slippage check
-    if output < min_dy {
+    // 6. Slippage check against the NET amount the taker receives. The output
+    //    transfer pays `output - ledger_fee`, so check net so `min_dy` is a true
+    //    minimum received. Fee lookup is cached (the output transfer reuses it).
+    let net_output = output.saturating_sub(crate::transfers::ledger_fee(token_j_ledger).await);
+    if net_output < min_dy {
         return Err(ThreePoolError::SlippageExceeded);
     }
 
@@ -717,9 +720,19 @@ pub async fn remove_liquidity(
     // 3. Calculate withdrawal amounts
     let amounts = calc_remove_liquidity(lp_burn, &balances, lp_total_supply);
 
-    // 4. Check each amount >= min_amounts
+    // 4. Check each NET amount (after the per-leg ledger fee) >= min_amounts.
+    //    transfer_to_user pays `amount - ledger_fee`, so check net so min_amounts
+    //    are true minimums received. Fee lookups are cached (transfers reuse them).
+    let token_ledgers = read_state(|s| {
+        [
+            s.config.tokens[0].ledger_id,
+            s.config.tokens[1].ledger_id,
+            s.config.tokens[2].ledger_id,
+        ]
+    });
     for k in 0..3 {
-        if amounts[k] < min_arr[k] {
+        let net_k = amounts[k].saturating_sub(crate::transfers::ledger_fee(token_ledgers[k]).await);
+        if net_k < min_arr[k] {
             return Err(ThreePoolError::SlippageExceeded);
         }
     }
@@ -859,8 +872,11 @@ pub async fn remove_one_coin(
     let amount = roc_outcome.amount_native;
     let fee = roc_outcome.fee_native;
 
-    // 4. Slippage check
-    if amount < min_amount {
+    // 4. Slippage check against the NET amount the taker receives (the output
+    //    transfer pays `amount - ledger_fee`), so `min_amount` is a true minimum.
+    let out_ledger = read_state(|s| s.config.tokens[idx].ledger_id);
+    let net_amount = amount.saturating_sub(crate::transfers::ledger_fee(out_ledger).await);
+    if net_amount < min_amount {
         return Err(ThreePoolError::SlippageExceeded);
     }
 
