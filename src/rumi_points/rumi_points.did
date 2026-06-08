@@ -46,14 +46,18 @@ type LeaderboardEntry = record {
   estimated_share_bps : nat32;
 };
 type OpenEpoch = record {
+  close_active : nat64;
+  close_cursor : opt principal;
   epoch_index : nat64;
   epoch_start_ns : nat64;
   a_cursor : opt principal;
   b_complete : bool;
   b_cursor : opt principal;
+  close_started : bool;
   a_complete : bool;
   snapshot_a_ns : nat64;
   snapshot_b_ns : nat64;
+  close_points_accrued : nat;
   epoch_end_ns : nat64;
 };
 type PointsConfig = record {
@@ -74,6 +78,21 @@ type PrincipalState = record {
   first_qualifying_action : QualifyingAction;
   active_deposits : vec record { DepositKey; DepositRecord };
   last_epoch_processed : nat64;
+};
+type PublicEpochStatus = record {
+  open_epoch : opt PublicOpenEpoch;
+  snapshot_seed_committed : bool;
+  driver_interval_secs : nat64;
+  revealed_seed_count : nat64;
+  current_epoch_index : nat64;
+  driver_enabled : bool;
+};
+type PublicOpenEpoch = record {
+  epoch_index : nat64;
+  epoch_start_ns : nat64;
+  snapshot_a_ns : nat64;
+  snapshot_b_ns : nat64;
+  epoch_end_ns : nat64;
 };
 type QualifyingAction = variant {
   ProvideAmmLiquidity;
@@ -110,7 +129,8 @@ service : (opt InitArgs) -> {
   force_epoch_tick : () -> (Result);
   get_asset_ledgers : () -> (vec record { nat8; principal }) query;
   get_epoch_history : (nat32, nat32) -> (vec EpochSummary) query;
-  get_epoch_status : () -> (EpochStatus) query;
+  get_epoch_status : () -> (PublicEpochStatus) query;
+  get_epoch_status_admin : () -> (EpochStatus) query;
   get_excluded_principals : () -> (vec principal) query;
   get_ingest_status : () -> (IngestStatus) query;
   get_leaderboard : (nat32, nat32) -> (vec LeaderboardEntry) query;

@@ -245,6 +245,10 @@ fn open_new_epoch(index: u64, seed_arg: Option<[u8; 32]>, _now: u64) -> Result<(
         a_complete: false,
         b_cursor: None,
         b_complete: false,
+        close_started: false,
+        close_cursor: None,
+        close_points_accrued: 0,
+        close_active: 0,
     }));
     Ok(())
 }
@@ -297,7 +301,15 @@ async fn capture(which: Snapshot) {
         Snapshot::A => open.a_cursor,
         Snapshot::B => open.b_cursor,
     };
-    let chunk = state::registered_chunk_after(cursor, CAPTURE_CHUNK);
+    // Capture in a seed-derived, unpredictable order (POINTS-001 defense-in-depth):
+    // an attacker who cannot predict when their principal is captured cannot time a
+    // flash deposit to land just before their snapshot chunk. The order is stable
+    // for the epoch (the cursor resumes correctly). Fall back to principal order
+    // only if no seed is available (should not happen once an epoch is open).
+    let chunk = match state::current_epoch_seed() {
+        Some(seed) => state::registered_chunk_after_shuffled(&seed, cursor, CAPTURE_CHUNK),
+        None => state::registered_chunk_after(cursor, CAPTURE_CHUNK),
+    };
     let mut last_captured: Option<Principal> = None;
     let mut hit_error = false;
     for p in &chunk {
@@ -340,15 +352,33 @@ async fn capture(which: Snapshot) {
     state::set_open_epoch(Some(open));
 }
 
-// ── Epoch close ──
+// ── Epoch close (chunked, POINTS-002) ──
 
+/// One `Close` step. The close is CHUNKED: each call processes a bounded batch of
+/// principals (`run_close_accrual_chunk`) and persists the resume cursor + running
+/// totals into the open epoch. Only once the whole registered set has been closed
+/// (`CloseStep::Done`) does it finalize: reveal the seed, append the summary,
+/// advance the epoch index, and clear the open epoch. While batches remain it
+/// returns early, leaving the epoch open at `DriverAction::Close` so the next tick
+/// resumes. This keeps each message well under the 5B-instruction limit and makes
+/// the close re-entrant-safe (the single-tick `EPOCH_IN_PROGRESS` guard already
+/// serializes ticks) and idempotent (the cursor advances exactly-once per
+/// principal, so a re-run never double-credits).
 fn close_current_epoch(now: u64) {
+    let stats = match state::run_close_accrual_chunk(now) {
+        // Still principals left to close: persist progress (already done inside the
+        // chunk) and return. The epoch stays open; `next_action` returns `Close`
+        // again next tick and we resume from the persisted cursor.
+        state::CloseStep::More => return,
+        state::CloseStep::Done(stats) => stats,
+    };
+    // Re-read the open epoch (the chunk persisted the final cursor/totals into it).
     let open = match state::get_open_epoch() {
         Some(o) => o,
+        // Defensive: the close finished but the epoch vanished (e.g. a concurrent
+        // forced close). Nothing left to finalize.
         None => return,
     };
-    let stats =
-        state::run_close_accrual(open.epoch_index, open.epoch_start_ns, open.epoch_end_ns, now);
     let summary = EpochSummary {
         epoch_index: open.epoch_index,
         epoch_start_ns: open.epoch_start_ns,
@@ -613,6 +643,10 @@ mod tests {
             a_complete,
             b_cursor: None,
             b_complete,
+            close_started: false,
+            close_cursor: None,
+            close_points_accrued: 0,
+            close_active: 0,
         }
     }
 
