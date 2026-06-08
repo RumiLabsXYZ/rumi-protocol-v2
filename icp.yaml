@@ -356,7 +356,9 @@ canisters:
   #
   # The dummy admin value below is the management canister (aaaaa-aa). The
   # wasm decodes this into an AmmInitArgs that post_upgrade never touches; the
-  # live admin (mi66c-...) is preserved by the stable-memory load path along
+  # live admin (fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae,
+  # i.e. the rumi_identity icp-cli identity; verified 2026-06-08 from the AMM
+  # admin event log) is preserved by the stable-memory load path along
   # with the pool registry, LP balances, swap event log, liquidity event log,
   # admin event log, and rewards accumulator state.
   #
