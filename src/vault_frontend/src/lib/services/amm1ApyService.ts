@@ -197,6 +197,11 @@ const rewardsIdlFactory = ({ IDL }: { IDL: typeof import('@dfinity/candid').IDL 
     MaintenanceMode: IDL.Null,
     ClaimNotFound: IDL.Null,
     PoolBusy: IDL.Null,
+    DuplicateNonce: IDL.Null,
+    NoLiquidity: IDL.Null,
+    BelowMinClaim: IDL.Record({ claimable: IDL.Nat, min: IDL.Nat }),
+    RewardLedgerTransferFailed: IDL.Record({ reason: IDL.Text }),
+    InsufficientOnChainBalance: IDL.Record({ expected: IDL.Nat, actual: IDL.Nat }),
   });
   return IDL.Service({
     get_amm_reward_series: IDL.Func(
@@ -465,6 +470,14 @@ function formatClaimError(err: any): string {
     return 'AMM is in maintenance mode — claims are temporarily disabled';
   if ('PoolBusy' in err)
     return 'Pool is busy with another transaction. Please try again in a moment.';
+  if ('RewardLedgerTransferFailed' in err)
+    return `Reward transfer failed (your earnings are safe, please retry): ${err.RewardLedgerTransferFailed.reason}`;
+  if ('BelowMinClaim' in err)
+    return `Below the minimum claim amount (${Number(err.BelowMinClaim.min) / 1e8} icUSD).`;
+  if ('InsufficientOnChainBalance' in err)
+    return 'Reward account is being topped up — please retry shortly.';
+  if ('NoLiquidity' in err) return 'No liquidity in this pool.';
+  if ('DuplicateNonce' in err) return 'Duplicate request — already processed.';
   return 'Unknown AMM error';
 }
 
