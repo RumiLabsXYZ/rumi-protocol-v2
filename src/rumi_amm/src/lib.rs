@@ -868,6 +868,11 @@ async fn swap(
     let (amount_out, total_fee, protocol_fee) =
         compute_swap(reserve_in, reserve_out, amount_in, fee_bps, protocol_fee_bps)?;
 
+    // `min_amount_out` is the minimum GROSS pool output. Per the fee model in
+    // transfer_to_user, the taker receives `amount_out - ledger_fee` (the taker
+    // bears the flat ICRC-1 transfer fee, which the frontend accounts for when
+    // setting `min_amount_out`). The slippage check is about pool price, not the
+    // fixed ledger fee, so it is evaluated on the gross output.
     if amount_out < min_amount_out {
         return Err(AmmError::InsufficientOutput {
             expected_min: min_amount_out,
@@ -1152,6 +1157,9 @@ async fn remove_liquidity(
 
     let (amount_a, amount_b) = compute_remove_liquidity(lp_shares, reserve_a, reserve_b, total_shares)?;
 
+    // `min_amount_a/b` are GROSS pool outputs; the withdrawer bears the flat
+    // ICRC-1 transfer fee on each leg (transfer_to_user pays `amount - fee`),
+    // which the frontend accounts for. Same rationale as the swap path.
     if amount_a < min_amount_a || amount_b < min_amount_b {
         return Err(AmmError::InsufficientOutput {
             expected_min: min_amount_a.max(min_amount_b),
