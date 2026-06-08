@@ -868,10 +868,15 @@ async fn swap(
     let (amount_out, total_fee, protocol_fee) =
         compute_swap(reserve_in, reserve_out, amount_in, fee_bps, protocol_fee_bps)?;
 
-    if amount_out < min_amount_out {
+    // Enforce slippage against the NET amount the taker receives. transfer_to_user
+    // pays `amount_out - ledger_fee`, so checking the gross output could let the
+    // taker receive up to one ledger fee less than `min_amount_out`. The fee
+    // lookup is cached (the transfer below reuses it), so this adds no real cost.
+    let net_out = amount_out.saturating_sub(crate::transfers::ledger_fee(ledger_out).await);
+    if net_out < min_amount_out {
         return Err(AmmError::InsufficientOutput {
             expected_min: min_amount_out,
-            actual: amount_out,
+            actual: net_out,
         });
     }
 
@@ -1152,10 +1157,15 @@ async fn remove_liquidity(
 
     let (amount_a, amount_b) = compute_remove_liquidity(lp_shares, reserve_a, reserve_b, total_shares)?;
 
-    if amount_a < min_amount_a || amount_b < min_amount_b {
+    // Enforce slippage against the NET amounts the withdrawer receives (each leg
+    // pays `amount - ledger_fee`), so min_amount_a/b are true minimums received.
+    // Fee lookups are cached (the transfers below reuse them).
+    let net_a = amount_a.saturating_sub(crate::transfers::ledger_fee(token_a).await);
+    let net_b = amount_b.saturating_sub(crate::transfers::ledger_fee(token_b).await);
+    if net_a < min_amount_a || net_b < min_amount_b {
         return Err(AmmError::InsufficientOutput {
             expected_min: min_amount_a.max(min_amount_b),
-            actual: amount_a.min(amount_b),
+            actual: net_a.min(net_b),
         });
     }
 

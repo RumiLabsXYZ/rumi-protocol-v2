@@ -5,6 +5,36 @@ use candid::Principal;
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
 use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromError};
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+/// Standard ICRC-1 transfer fee (e8s), used as a conservative fallback when a
+/// ledger's `icrc1_fee` query cannot be reached. Erring high keeps the pool
+/// solvent (we send slightly less) rather than risking an over-send.
+const DEFAULT_LEDGER_FEE_E8S: u128 = 10_000;
+
+thread_local! {
+    /// Per-ledger transfer-fee cache, populated lazily from `icrc1_fee` on the
+    /// first outbound transfer to a ledger. Heap-only (not persisted), so it is
+    /// simply re-warmed after an upgrade.
+    static LEDGER_FEES: RefCell<HashMap<Principal, u128>> = RefCell::new(HashMap::new());
+}
+
+/// Fetch a ledger's transfer fee, caching the result per ledger. On query
+/// failure, falls back to the standard ICRC-1 fee (the solvency-safe direction).
+pub async fn ledger_fee(ledger: Principal) -> u128 {
+    if let Some(fee) = LEDGER_FEES.with(|c| c.borrow().get(&ledger).copied()) {
+        return fee;
+    }
+    let result: Result<(candid::Nat,), _> =
+        ic_cdk::call(ledger, "icrc1_fee", ()).await;
+    let fee: u128 = match result {
+        Ok((f,)) => f.0.try_into().unwrap_or(DEFAULT_LEDGER_FEE_E8S),
+        Err(_) => DEFAULT_LEDGER_FEE_E8S,
+    };
+    LEDGER_FEES.with(|c| c.borrow_mut().insert(ledger, fee));
+    fee
+}
 
 /// Transfer tokens FROM a user TO a pool's subaccount (requires prior ICRC-2 approval).
 pub async fn transfer_from_user(
@@ -56,25 +86,36 @@ pub async fn transfer_from_user(
 
 /// Transfer tokens FROM a pool's subaccount TO a user.
 ///
-/// NOTE: The ICRC-1 ledger deducts its transfer fee from the `amount` sent,
-/// so the user receives `amount - ledger_fee`. The reserve bookkeeping in
-/// lib.rs uses the full `amount`, meaning the canister accumulates a small
-/// surplus (one ledger fee per outbound transfer). This surplus stays in the
-/// subaccount and accrues to the protocol — it's safe (protocol has MORE
-/// tokens than reserves track, not fewer).
+/// The ICRC-1 ledger debits `sent + fee` from the source subaccount but credits
+/// the recipient only `sent`. Callers debit their reserve by the full `amount`,
+/// so to keep the tracked reserve exactly in step with the on-chain subaccount
+/// balance we send `amount - fee`: the subaccount then drops by exactly `amount`
+/// and the recipient (taker/withdrawer) bears the fee, as is standard. This is
+/// what lets a 100% withdrawal drain cleanly instead of stranding the final
+/// ledger-fee's worth of tokens. (Historically this sent the full `amount`,
+/// which drifted reserves above the real balance by one fee per transfer and
+/// eventually broke the last withdrawal with InsufficientFunds.)
 pub async fn transfer_to_user(
     ledger: Principal,
     from_subaccount: [u8; 32],
     to: Principal,
     amount: u128,
 ) -> Result<u64, String> {
+    let fee = ledger_fee(ledger).await;
+    if amount <= fee {
+        // Nothing is transferable once the ledger fee is covered. The caller
+        // has already debited `amount` from its reserve, so leaving this dust
+        // in the subaccount keeps reserves <= the real balance (solvency-safe).
+        return Ok(0);
+    }
+    let send = amount - fee;
     let args = TransferArg {
         from_subaccount: Some(from_subaccount),
         to: Account {
             owner: to,
             subaccount: None,
         },
-        amount: candid::Nat::from(amount),
+        amount: candid::Nat::from(send),
         fee: None,
         memo: None,
         // Set created_at_time for ledger-side deduplication.

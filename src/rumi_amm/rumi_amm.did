@@ -175,6 +175,11 @@ type AmmError = variant {
   MaintenanceMode;
   ClaimNotFound;
   PoolBusy;
+  DuplicateNonce;
+  NoLiquidity;
+  BelowMinClaim : record { claimable : nat; min : nat };
+  RewardLedgerTransferFailed : record { reason : text };
+  InsufficientOnChainBalance : record { expected : nat; actual : nat };
   InvalidInput : record { reason : text };
 };
 

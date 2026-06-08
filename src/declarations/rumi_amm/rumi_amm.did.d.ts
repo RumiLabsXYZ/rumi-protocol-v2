@@ -70,7 +70,12 @@ export type AmmError = {
   { 'InsufficientLiquidity' : null } |
   { 'MaintenanceMode' : null } |
   { 'TransferFailed' : { 'token' : string, 'reason' : string } } |
-  { 'ClaimNotFound' : null };
+  { 'ClaimNotFound' : null } |
+  { 'DuplicateNonce' : null } |
+  { 'NoLiquidity' : null } |
+  { 'BelowMinClaim' : { 'claimable' : bigint, 'min' : bigint } } |
+  { 'RewardLedgerTransferFailed' : { 'reason' : string } } |
+  { 'InsufficientOnChainBalance' : { 'expected' : bigint, 'actual' : bigint } };
 export interface AmmEventsByPrincipalQuery {
   'who' : Principal,
   'pool' : string,

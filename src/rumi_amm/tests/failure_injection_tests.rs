@@ -734,3 +734,145 @@ fn test_add_liquidity_real_ledger_unapproved_token_b() {
     assert_eq!(pool_before.reserve_a, pool_after.reserve_a, "reserve_a unchanged");
     assert_eq!(pool_before.reserve_b, pool_after.reserve_b, "reserve_b unchanged");
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// Test: fee-accounting drift — a 100% withdrawal after fee-charging activity
+// must still drain the pool cleanly.
+//
+// Reproduces the 2026-06-08 production incident: every outbound icrc1_transfer
+// costs `amount + fee` on the ledger, but the pool debited its reserves by only
+// `amount`. Over many transfers the tracked reserve drifts ABOVE the real
+// subaccount balance, so claiming the full reserve on a 100% withdrawal fails
+// with InsufficientFunds and strands the funds in a pending claim.
+// ════════════════════════════════════════════════════════════════════════
+
+fn set_fee(env: &FlakyTestEnv, ledger_id: Principal, fee: u128) {
+    env.pic
+        .update_call(ledger_id, Principal::anonymous(), "set_fee", encode_one(Nat::from(fee)).unwrap())
+        .expect("set_fee failed");
+}
+
+fn swap_exact(env: &FlakyTestEnv, pool_id: &str, token_in: Principal, amount_in: u128) {
+    let result = env.pic
+        .update_call(env.amm_id, env.user, "swap",
+            encode_args((pool_id.to_string(), token_in, amount_in, 0u128)).unwrap())
+        .expect("swap call failed");
+    let _: SwapResult = decode_ok(result);
+}
+
+fn pending_claims(env: &FlakyTestEnv) -> Vec<PendingClaim> {
+    let result = env.pic
+        .query_call(env.amm_id, Principal::anonymous(), "get_pending_claims", encode_one(()).unwrap())
+        .expect("get_pending_claims failed");
+    match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode pending claims failed"),
+        WasmResult::Reject(msg) => panic!("get_pending_claims rejected: {}", msg),
+    }
+}
+
+#[test]
+fn full_withdrawal_succeeds_after_fee_drift() {
+    let env = setup_flaky();
+    // Give both ledgers a real, nonzero transfer fee so each outbound transfer costs one fee.
+    set_fee(&env, env.token_a_id, 10_000);
+    set_fee(&env, env.token_b_id, 10_000);
+
+    let pool_id = create_pool(&env);
+    let liq: u128 = 100_000_00000000;
+    add_initial_liquidity(&env, &pool_id, liq);
+
+    // Generate drift: each swap pays out one token and leaks one ledger fee on the
+    // output side that the pool never debited from its reserves.
+    let pool = get_pool_info(&env, &pool_id).unwrap();
+    for _ in 0..5 {
+        swap_exact(&env, &pool_id, pool.token_a, 1_000_00000000);
+        swap_exact(&env, &pool_id, pool.token_b, 1_000_00000000);
+    }
+
+    // The sole LP withdraws 100%. This must succeed and drain the pool — the LP
+    // bears the unavoidable per-transfer ledger fee, nothing gets stranded.
+    let lp = get_user_lp_balance(&env, &pool_id);
+    let result = env.pic
+        .update_call(env.amm_id, env.user, "remove_liquidity",
+            encode_args((pool_id.clone(), lp, 0u128, 0u128)).unwrap())
+        .expect("remove_liquidity call failed");
+    let (amount_a, amount_b) = match result {
+        WasmResult::Reply(bytes) => {
+            let res: Result<(Nat, Nat), AmmError> =
+                decode_one(&bytes).expect("decode remove_liquidity failed");
+            res.expect("100% withdrawal must succeed after fee drift (was: InsufficientFunds)")
+        }
+        WasmResult::Reject(msg) => panic!("remove_liquidity rejected: {}", msg),
+    };
+
+    // The LP actually receives both tokens (net of one ledger fee each).
+    assert!(amount_a > Nat::from(0u64) && amount_b > Nat::from(0u64),
+        "LP must receive both tokens, got ({}, {})", amount_a, amount_b);
+
+    // No funds stranded in a pending claim — this is where the bug stranded them.
+    assert!(pending_claims(&env).is_empty(),
+        "100% withdrawal must not strand funds in a pending claim");
+
+    // Pool drained down to (at most) the permanently-locked minimum-liquidity
+    // floor (~1000 units), not the full reserve.
+    let pool_after = get_pool_info(&env, &pool_id).unwrap();
+    let floor = Nat::from(10_000u64);
+    assert!(pool_after.reserve_a <= floor,
+        "reserve_a should drain to the locked minimum, got {}", pool_after.reserve_a);
+    assert!(pool_after.reserve_b <= floor,
+        "reserve_b should drain to the locked minimum, got {}", pool_after.reserve_b);
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Test: slippage (`min_amount_out`) is enforced against the NET amount the
+// taker actually receives (gross output minus the ledger fee), not the gross
+// pool output. Otherwise a taker could receive one ledger fee less than the
+// minimum they demanded.
+// ════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn swap_slippage_enforced_on_net_received() {
+    // Pool 1: observe a swap's gross output and confirm the taker receives it
+    // net of exactly one ledger fee.
+    let env = setup_flaky();
+    set_fee(&env, env.token_a_id, 10_000);
+    set_fee(&env, env.token_b_id, 10_000);
+    let pool_id = create_pool(&env);
+    add_initial_liquidity(&env, &pool_id, 100_000_00000000);
+    let pool = get_pool_info(&env, &pool_id).unwrap();
+    let swap_in: u128 = 1_000_00000000;
+
+    let bal_before = get_flaky_balance(&env, pool.token_b, env.user, None);
+    let swap_result = env.pic
+        .update_call(env.amm_id, env.user, "swap",
+            encode_args((pool_id.clone(), pool.token_a, swap_in, 0u128)).unwrap())
+        .expect("swap call failed");
+    let gross_out: u128 = {
+        let res: SwapResult = decode_ok(swap_result);
+        res.amount_out
+    };
+    let bal_after = get_flaky_balance(&env, pool.token_b, env.user, None);
+    assert_eq!(bal_after - bal_before, gross_out - 10_000,
+        "taker should receive the gross output minus exactly one ledger fee");
+
+    // Pool 2: identical reserves. Demanding min_amount_out == the gross output
+    // must be rejected, because the taker would actually receive gross - fee,
+    // below the requested minimum.
+    let env2 = setup_flaky();
+    set_fee(&env2, env2.token_a_id, 10_000);
+    set_fee(&env2, env2.token_b_id, 10_000);
+    let pool_id2 = create_pool(&env2);
+    add_initial_liquidity(&env2, &pool_id2, 100_000_00000000);
+    let pool2 = get_pool_info(&env2, &pool_id2).unwrap();
+
+    let result2 = env2.pic
+        .update_call(env2.amm_id, env2.user, "swap",
+            encode_args((pool_id2.clone(), pool2.token_a, swap_in, gross_out)).unwrap())
+        .expect("swap call failed");
+    let res2: Result<SwapResult, AmmError> = match result2 {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode swap result failed"),
+        WasmResult::Reject(msg) => panic!("swap rejected: {}", msg),
+    };
+    assert!(matches!(res2, Err(AmmError::InsufficientOutput { .. })),
+        "swap demanding min == gross output must reject (taker receives net < min), got {:?}", res2);
+}

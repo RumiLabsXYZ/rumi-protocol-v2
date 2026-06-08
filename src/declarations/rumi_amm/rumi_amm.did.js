@@ -25,6 +25,14 @@ export const idlFactory = ({ IDL }) => {
     'MaintenanceMode' : IDL.Null,
     'TransferFailed' : IDL.Record({ 'token' : IDL.Text, 'reason' : IDL.Text }),
     'ClaimNotFound' : IDL.Null,
+    'DuplicateNonce' : IDL.Null,
+    'NoLiquidity' : IDL.Null,
+    'BelowMinClaim' : IDL.Record({ 'claimable' : IDL.Nat, 'min' : IDL.Nat }),
+    'RewardLedgerTransferFailed' : IDL.Record({ 'reason' : IDL.Text }),
+    'InsufficientOnChainBalance' : IDL.Record({
+      'expected' : IDL.Nat,
+      'actual' : IDL.Nat,
+    }),
   });
   const CurveType = IDL.Variant({ 'ConstantProduct' : IDL.Null });
   const CreatePoolArgs = IDL.Record({
