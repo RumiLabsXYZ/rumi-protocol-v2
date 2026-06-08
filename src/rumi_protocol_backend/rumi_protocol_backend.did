@@ -793,6 +793,9 @@ type RegisterChainArg = record {
   chain_native_decimals : nat8;
   display_name : text;
   chain_id : nat32;
+  // M-05: optional per-chain quorum-provider floor override. Omit (or null) to
+  // use the default floor (3 distinct providers).
+  min_quorum_providers : opt nat32;
 };
 type RepayAndCloseSuccess = record {
   collateral_return_block_index : opt nat64;
@@ -862,6 +865,7 @@ type SuccessWithFee = record {
   fee_amount_paid : nat64;
   collateral_amount_received : opt nat64;
   debt_liquidated_e8s : opt nat64;
+  stable_pulled_e6s : opt nat64;
 };
 type SupplyAudit = record { total_e8s : nat; per_chain : vec SupplyAuditEntry };
 type SupplyAuditEntry = record {
@@ -906,6 +910,10 @@ type UpdateChainConfigArg = record {
   gas_strategy : opt GasStrategy;
   finality_depth : opt nat32;
   display_name : opt text;
+  // M-05: set/clear the per-chain quorum-provider floor override. Outer opt
+  // absent/null => leave unchanged; opt (null) => clear back to the default;
+  // opt (opt N) => set the floor to N (must be >= 1).
+  min_quorum_providers : opt opt nat32;
 };
 type UpgradeArg = record { mode : opt Mode; description : opt text };
 type Vault = record {

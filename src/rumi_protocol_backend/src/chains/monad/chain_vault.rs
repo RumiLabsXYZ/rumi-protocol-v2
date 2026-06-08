@@ -19,7 +19,7 @@
 //! Keeps the Monad-only `MONAD_MIN_CR_E4` constant local.
 
 use crate::chains::config::ChainId;
-use crate::chains::multi_chain_state::MultiChainStateV3;
+use crate::chains::multi_chain_state::MultiChainStateV4;
 use candid::Principal;
 
 // Re-export the chain-agnostic types + un-parameterized helpers. Every existing
@@ -43,7 +43,7 @@ pub const MONAD_MIN_CR_E4: u64 = 13_000;
 /// surface are identical to the pre-hoist Monad helper.
 #[allow(clippy::too_many_arguments)]
 pub fn open_chain_vault_in_state(
-    state: &mut MultiChainStateV3,
+    state: &mut MultiChainStateV4,
     chain: ChainId,
     owner: Principal,
     custody_address: String,
@@ -75,7 +75,7 @@ pub fn open_chain_vault_in_state(
 /// address validator and the `"MON"` price key baked in. Signature, behavior,
 /// and error surface are identical to the pre-hoist Monad helper.
 pub fn withdraw_collateral_in_state(
-    state: &mut MultiChainStateV3,
+    state: &mut MultiChainStateV4,
     vault_id: u64,
     amount_e18: u128,
     dest_address: String,
@@ -99,7 +99,7 @@ pub fn withdraw_collateral_in_state(
 /// validator and the `"MON"` price key baked in. Signature, behavior, and error
 /// surface are identical to the pre-hoist Monad helper.
 pub fn close_chain_vault_in_state(
-    state: &mut MultiChainStateV3,
+    state: &mut MultiChainStateV4,
     vault_id: u64,
     dest_address: String,
     min_cr_e4: u64,

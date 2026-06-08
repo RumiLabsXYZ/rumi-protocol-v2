@@ -9,6 +9,7 @@ pub mod state;
 pub mod deposits;
 pub mod liquidation;
 pub mod logs;
+pub mod pool_guard;
 
 use crate::types::*;
 use crate::state::{mutate_state, read_state};

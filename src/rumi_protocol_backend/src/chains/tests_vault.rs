@@ -12,7 +12,7 @@
 //! this file only asserts the parameterization itself.
 
 use super::config::{ChainId, GasStrategy, RegisterChainArg};
-use super::multi_chain_state::MultiChainStateV3;
+use super::multi_chain_state::MultiChainStateV4;
 use super::vault::{open_chain_vault_in_state, OpenVaultError};
 use candid::Principal;
 
@@ -33,8 +33,8 @@ fn only_good(addr: &str) -> bool {
 
 /// Register chain 501 with 9-decimal native units and set its manual `"SOL"`
 /// price. Mirrors what register_chain + a manual price override do.
-fn setup(price_e8: u64) -> MultiChainStateV3 {
-    let mut s = MultiChainStateV3::default();
+fn setup(price_e8: u64) -> MultiChainStateV4 {
+    let mut s = MultiChainStateV4::default();
     let arg = RegisterChainArg {
         chain_id: CHAIN,
         display_name: "SolanaDevnet".into(),
@@ -46,6 +46,7 @@ fn setup(price_e8: u64) -> MultiChainStateV3 {
             lamports_per_cu_ceiling: 10_000,
         },
         chain_native_decimals: 9,
+        min_quorum_providers: None,
     };
     crate::chains::admin::register_chain_in_state(&mut s, arg, 0).expect("register chain");
     s.manual_prices.insert((CHAIN, "SOL".into()), price_e8);

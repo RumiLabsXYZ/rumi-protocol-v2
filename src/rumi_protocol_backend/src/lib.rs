@@ -277,6 +277,15 @@ pub struct SuccessWithFee {
     /// tracked aggregate drifts above the pool's real balance. `None` on the
     /// non-liquidation paths (redeem / borrow). Optional for Candid back-compat.
     pub debt_liquidated_e8s: Option<u64>,
+    /// SP-110 (audit 2026-06-05): on the ckUSDT/ckUSDC liquidation path the
+    /// backend pulls `base + repay-fee surcharge` stable from the caller, but
+    /// `debt_liquidated_e8s` only reflects the base debt. The stability pool
+    /// must debit depositors by the TOTAL stable pulled (this field, in the
+    /// stable token's e6 native units), or the repay-fee surcharge leaves the
+    /// pool un-debited and the tracked aggregate drifts above the real ledger
+    /// balance. `Some` only on the ckStable path; `None` elsewhere. Optional for
+    /// Candid back-compat.
+    pub stable_pulled_e6s: Option<u64>,
 }
 
 /// Result from stability pool liquidation (both standard and debt-already-burned paths).

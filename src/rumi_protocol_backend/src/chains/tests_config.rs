@@ -1,6 +1,8 @@
 //! ChainConfig encode/decode + version-alias invariants.
 
-use super::config::{ChainConfig, ChainConfigV1, ChainConfigV2, ChainId, ChainStatus, GasStrategy};
+use super::config::{
+    ChainConfig, ChainConfigV1, ChainConfigV2, ChainConfigV3, ChainId, ChainStatus, GasStrategy,
+};
 use candid::{Decode, Encode};
 
 #[test]
@@ -42,11 +44,11 @@ fn chain_config_round_trips_via_candid() {
 }
 
 #[test]
-fn chain_config_alias_matches_v2() {
-    // Phase 1c rebound `ChainConfig` from V1 to V2 (added the
-    // `burn_watch_poll_enabled` poll-scan flag). `ChainConfig` is the active
-    // version pointer; the next field add bumps it to V3.
-    fn _check(_x: ChainConfig) -> ChainConfigV2 { _x }
+fn chain_config_alias_matches_v3() {
+    // Phase 1d rebound `ChainConfig` from V2 to V3 (added the M-05
+    // `min_quorum_providers` quorum-provider floor override). `ChainConfig` is
+    // the active version pointer; the next field add bumps it to V4.
+    fn _check(_x: ChainConfig) -> ChainConfigV3 { _x }
 }
 
 #[test]
@@ -120,4 +122,48 @@ fn v2_config_round_trips_with_poll_flag_set() {
         ciborium::de::from_reader(buf.as_slice()).expect("V2 config round-trips");
     assert!(back.burn_watch_poll_enabled);
     assert_eq!(back.finality_depth, 3);
+}
+
+#[test]
+fn v2_cbor_sub_map_decodes_into_v3_defaulting_the_quorum_floor() {
+    // STATE-WIPE REGRESSION (audit M-05 / Phase 1d). On the live staging
+    // canister `chain_configs` VALUES were written as `ChainConfigV2` field-maps
+    // (no `min_quorum_providers` key). After this upgrade those same bytes must
+    // decode into `ChainConfigV3` with every V2 field preserved and the new
+    // `min_quorum_providers` defaulted to `None` via its field-level
+    // `#[serde(default)]`. State persists via ciborium (serde), NOT a Candid
+    // `Decode!` of a fixed record, so a missing key fills from the default
+    // rather than failing — this is what prevents the AMM-style state-wipe
+    // (2026-05-18). Dropping the `#[serde(default)]` would error "missing field"
+    // here and silently wipe multi_chain state on the real canister.
+    let v2 = ChainConfigV2 {
+        chain_id: ChainId(10143),
+        display_name: "MonadTestnet".to_string(),
+        rpc_endpoints: vec!["https://rpc".to_string()],
+        finality_depth: 3,
+        gas_strategy: GasStrategy::EvmEip1559 {
+            max_priority_fee_gwei: 2,
+            max_fee_gwei_ceiling: 500,
+        },
+        chain_native_decimals: 18,
+        registered_at_ns: 7,
+        status: ChainStatus::Registered,
+        burn_watch_poll_enabled: true,
+    };
+    let mut buf = Vec::new();
+    ciborium::ser::into_writer(&v2, &mut buf).expect("cbor encode V2 config");
+    let v3: ChainConfigV3 = ciborium::de::from_reader(buf.as_slice())
+        .expect("V2 config sub-map MUST decode into V3 without wiping state");
+
+    // Every V2 field preserved verbatim:
+    assert_eq!(v3.chain_id, ChainId(10143));
+    assert_eq!(v3.display_name, "MonadTestnet");
+    assert_eq!(v3.rpc_endpoints, vec!["https://rpc".to_string()]);
+    assert_eq!(v3.finality_depth, 3);
+    assert_eq!(v3.chain_native_decimals, 18);
+    assert_eq!(v3.registered_at_ns, 7);
+    assert!(matches!(v3.status, ChainStatus::Registered));
+    assert!(v3.burn_watch_poll_enabled);
+    // The new quorum-floor override defaults to None (=> DEFAULT_MIN_QUORUM_PROVIDERS).
+    assert_eq!(v3.min_quorum_providers, None);
 }

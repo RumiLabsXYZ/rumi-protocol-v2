@@ -1013,11 +1013,15 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<StabilityPoolState> {
 /// UPG-001 fix: rather than trapping on decode failure (which bricks the
 /// canister until a hotfix wasm with a compatible decoder is shipped), walk
 /// the known-version fallback chain via `try_decode_state`. If every known
-/// version fails, log a CRITICAL diagnostic with the snapshot length and a
-/// short hex preview, then fall back to empty state. The empty fallback is a
-/// last resort: it zeroes depositor positions. Operators should treat it as a
-/// recoverable incident (rebuild from event history if possible) rather than
-/// a routine outcome.
+/// version fails, TRAP (audit 2026-06-05, UPG-101).
+///
+/// The previous behavior wiped to empty state, which ZEROES every depositor's
+/// position — the most destructive possible outcome for a stability pool and
+/// exactly the 2026-05-18 silent-state-wipe incident class. Trapping instead
+/// keeps the canister on its old wasm with stable memory intact, so an operator
+/// can ship a wasm with a matching `StabilityPoolStateVN` snapshot and recover
+/// every position. This matches the backend (UPG-001) and the other satellites,
+/// which all trap-not-wipe on an undecodable snapshot.
 pub fn load_from_stable_memory() {
     let mut len_bytes = [0u8; 8];
     ic_cdk::api::stable::stable64_read(0, &mut len_bytes);
@@ -1042,15 +1046,19 @@ pub fn load_from_stable_memory() {
         .collect();
     log!(
         INFO,
-        "CRITICAL UPG-001: stability pool snapshot decode failed for all known schema versions. \
-         snapshot_len={} bytes, first_{}_bytes_hex={}. \
-         Falling back to empty state. Depositor positions are reset; operator must \
-         restore from event history or admin endpoints.",
+        "CRITICAL UPG-001/UPG-101: stability pool snapshot decode failed for all known schema \
+         versions. snapshot_len={} bytes, first_{}_bytes_hex={}. \
+         Trapping to preserve on-chain state (old wasm + stable memory stay intact) rather than \
+         wiping every depositor position. Ship a wasm with a matching StabilityPoolStateVN \
+         snapshot to recover.",
         bytes.len(),
         preview_len,
         preview_hex
     );
-    replace_state(StabilityPoolState::default());
+    ic_cdk::trap(
+        "stability_pool post_upgrade: stable state did not decode under any known schema version; \
+         refusing to wipe depositor positions — see CRITICAL log",
+    );
 }
 
 // ──────────────────────────────────────────────────────────────

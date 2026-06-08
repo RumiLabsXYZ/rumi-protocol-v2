@@ -46,5 +46,12 @@ pub fn monad_default_register_arg() -> RegisterChainArg {
             max_fee_gwei_ceiling: 500,
         },
         chain_native_decimals: MON_NATIVE_DECIMALS,
+        // M-05 (QUORUM-2): use the default floor (DEFAULT_MIN_QUORUM_PROVIDERS =
+        // 3 distinct providers). NOTE: `monad_rpc_endpoints()` ships only ONE URL
+        // today, which is BELOW the floor — the observer/settlement workers fail
+        // closed until the operator adds >= 2 more independent endpoints via
+        // `set_chain_config` before un-gating permissionless mainnet. This is the
+        // intended fail-closed posture, not a regression.
+        min_quorum_providers: None,
     }
 }

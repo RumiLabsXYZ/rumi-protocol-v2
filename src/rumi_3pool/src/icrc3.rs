@@ -183,13 +183,26 @@ pub fn encode_block_with_phash(block: &Icrc3Block, phash: Option<&[u8; 32]>) -> 
 
 // ─── Query implementations ───
 
+/// Maximum number of blocks returned across all `GetBlocksArgs` ranges in a
+/// single `icrc3_get_blocks` call. Without this, a caller could pass many
+/// ranges (or repeat `{0, log_length}`) and force an unbounded reply plus a
+/// per-block SHA-256 over the whole log. The ic-icrc1-index-ng paginates well
+/// below this, so it is invisible to honest callers. Audit 2026-06-05 (SAT-006).
+pub const MAX_GET_BLOCKS_RESPONSE: u64 = 2_000;
+
 pub fn icrc3_get_blocks(args: Vec<GetBlocksArgs>) -> GetBlocksResult {
     let log_length = crate::storage::blocks::len();
 
     let mut result_blocks = Vec::new();
+    let mut remaining = MAX_GET_BLOCKS_RESPONSE;
     for arg in &args {
+        if remaining == 0 {
+            break;
+        }
         let start = nat_to_u64(&arg.start);
-        let length = nat_to_u64(&arg.length);
+        // Cap this range's length to the global response budget so the total
+        // number of blocks (and SHA-256 hashes) stays bounded across all args.
+        let length = nat_to_u64(&arg.length).min(remaining);
 
         if start >= log_length {
             continue;
@@ -219,6 +232,7 @@ pub fn icrc3_get_blocks(args: Vec<GetBlocksArgs>) -> GetBlocksResult {
         // hashing happens once per returned block, replacing the old
         // O(end) chain rebuild.
         let blocks = crate::storage::blocks::range(start, end - start);
+        remaining = remaining.saturating_sub(blocks.len() as u64);
         for block in &blocks {
             let encoded = encode_block_with_phash(block, prev_hash.as_ref());
             // Compute the running hash so the next iteration has its parent.

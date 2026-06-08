@@ -49,5 +49,9 @@ pub fn solana_default_register_arg() -> RegisterChainArg {
             lamports_per_cu_ceiling: 10_000,
         },
         chain_native_decimals: SOL_NATIVE_DECIMALS,
+        // M-05 (QUORUM-2): not consulted for Solana — the SOL-RPC canister
+        // enforces its own Equality/Threshold consensus and rejects
+        // `Inconsistent` responses. Kept `None` for shape completeness.
+        min_quorum_providers: None,
     }
 }

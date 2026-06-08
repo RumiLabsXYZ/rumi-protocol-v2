@@ -1,10 +1,11 @@
 //! Per-chain configuration record.
 //!
 //! Versioned-snapshot pattern (see spec Section 3): the active shape is
-//! `ChainConfigV1`. Adding a field = bump to `ChainConfigV2`, register a
-//! migration in `crate::chains::supply::migrate_multi_chain_state`, and
-//! rebind `pub type ChainConfig = ChainConfigV2;`. Never modify V1 in
-//! place once it has shipped.
+//! `ChainConfigV3`. Adding a field = bump to the next `ChainConfigV(N+1)`
+//! (carry every prior field verbatim, decorate the new one with
+//! `#[serde(default)]`), rebind `pub type ChainConfig = ...;`, and bump the
+//! enclosing `MultiChainState` so its `chain_configs` value type follows. Never
+//! modify a shipped version in place once it has been persisted.
 
 use candid::{CandidType, Deserialize};
 use serde::Serialize;
@@ -91,8 +92,64 @@ pub struct ChainConfigV2 {
     pub burn_watch_poll_enabled: bool,
 }
 
+/// Phase 1d snapshot (audit M-05, QUORUM-2). Carries every `ChainConfigV2`
+/// field verbatim (so a V2-shaped CBOR sub-map maps each by name straight
+/// across) and adds the per-chain quorum-provider floor override.
+///
+/// `min_quorum_providers` carries `#[serde(default)]` so a `ChainConfigV2` CBOR
+/// sub-map (which lacks this key entirely) decodes into `ChainConfigV3` without
+/// error, defaulting the override to `None` (= use `DEFAULT_MIN_QUORUM_PROVIDERS`).
+/// State persists via ciborium (CBOR + serde), which fills a missing key from
+/// `#[serde(default)]` rather than failing — the SAME mechanism that made the
+/// V1->V2 add-a-field decode safe (proven by `tests_config`). It is NOT a Candid
+/// `Decode!` of a fixed record, so the added serde-default field cannot trip the
+/// AMM-style state-wipe fallback (2026-05-18 incident).
+///
+/// Add the NEXT field by bumping to `ChainConfigV4` (keep V3 verbatim), adding
+/// `#[serde(default)]` on the new field, and rebinding the alias below.
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug)]
+pub struct ChainConfigV3 {
+    // carried verbatim from V2 — always present in any valid snapshot
+    pub chain_id: ChainId,
+    pub display_name: String,
+    pub rpc_endpoints: Vec<String>,
+    pub finality_depth: u32,
+    pub gas_strategy: GasStrategy,
+    pub chain_native_decimals: u8,
+    pub registered_at_ns: u64,
+    pub status: ChainStatus,
+    #[serde(default)]
+    pub burn_watch_poll_enabled: bool,
+    /// Audit M-05 (QUORUM-2): per-chain override for the minimum number of
+    /// DISTINCT RPC providers that must agree before a financial read
+    /// (balance / supply / block / receipt) is credited on an EVM chain.
+    /// `None` (default) => use `DEFAULT_MIN_QUORUM_PROVIDERS` (3). A value of
+    /// `Some(n)` lowers/raises the floor for a chain whose viable independent
+    /// provider count differs (must be >= 1). Solana chains do NOT consult this
+    /// (the SOL-RPC canister enforces its own consensus). New in V3 —
+    /// `#[serde(default)]` lets a V2 CBOR sub-map decode cleanly to `None`.
+    #[serde(default)]
+    pub min_quorum_providers: Option<u32>,
+}
+
 /// Active alias. Rebind to a later version when a field is added.
-pub type ChainConfig = ChainConfigV2;
+pub type ChainConfig = ChainConfigV3;
+
+/// Default minimum number of DISTINCT RPC providers that must agree on a
+/// financial read before an EVM chain credits it (audit M-05 / QUORUM-2). A
+/// deployment MUST configure at least this many independent endpoints to run the
+/// observer / settlement workers (or perform a financial read); below the floor
+/// the read FAILS CLOSED. Override per chain via
+/// `ChainConfigV3::min_quorum_providers`.
+pub const DEFAULT_MIN_QUORUM_PROVIDERS: u32 = 3;
+
+/// The effective quorum-provider floor for a config: its override when set
+/// (clamped to >= 1), else `DEFAULT_MIN_QUORUM_PROVIDERS`.
+pub fn effective_min_quorum_providers(cfg: &ChainConfigV3) -> u32 {
+    cfg.min_quorum_providers
+        .map(|n| n.max(1))
+        .unwrap_or(DEFAULT_MIN_QUORUM_PROVIDERS)
+}
 
 /// Caller-supplied registration payload. Distinct from the persisted
 /// `ChainConfigV1` so the admin endpoint can fill `registered_at_ns` and
@@ -105,6 +162,11 @@ pub struct RegisterChainArg {
     pub finality_depth: u32,
     pub gas_strategy: GasStrategy,
     pub chain_native_decimals: u8,
+    /// Audit M-05 (QUORUM-2): optional per-chain quorum-provider floor override.
+    /// `None`/omitted => use `DEFAULT_MIN_QUORUM_PROVIDERS` (3 distinct
+    /// providers). Candid: `opt nat32`.
+    #[serde(default)]
+    pub min_quorum_providers: Option<u32>,
 }
 
 /// Operator-supplied update payload. Every field is optional; omitted
@@ -115,6 +177,12 @@ pub struct UpdateChainConfigArg {
     pub rpc_endpoints: Option<Vec<String>>,
     pub finality_depth: Option<u32>,
     pub gas_strategy: Option<GasStrategy>,
+    /// Audit M-05 (QUORUM-2): set/clear the per-chain quorum-provider floor.
+    /// Candid `opt opt nat32`: outer `None` (absent) => leave unchanged; outer
+    /// `Some(None)` => clear back to the default; outer `Some(Some(n))` => set
+    /// the floor to `n` (clamped to >= 1 at apply time).
+    #[serde(default)]
+    pub min_quorum_providers: Option<Option<u32>>,
 }
 
 /// Reasons a `register_chain`/`set_chain_config` call can be rejected.

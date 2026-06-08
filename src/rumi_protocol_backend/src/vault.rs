@@ -2,7 +2,7 @@ use crate::event::{
     record_add_margin_to_vault, record_borrow_from_vault, record_open_vault,
     record_redemption_on_vaults, record_repayed_to_vault,
 };
-use crate::guard::GuardPrincipal;
+use crate::guard::{GuardPrincipal, VaultLiquidationGuard};
 use crate::GuardError;
 use crate::logs::INFO;
 use crate::management::{mint_icusd, transfer_collateral, transfer_collateral_from, transfer_icusd_from, transfer_stable_from};
@@ -582,6 +582,7 @@ pub async fn redeem_collateral(collateral_type: Principal, _icusd_amount: u64) -
                 fee_amount_paid: fee_amount.to_u64(),
                 collateral_amount_received: None,
                 debt_liquidated_e8s: None, // SP-101
+                stable_pulled_e6s: None, // SP-110
             })
         }
         Err(transfer_from_error) => Err(ProtocolError::TransferFromError(
@@ -902,28 +903,32 @@ async fn borrow_from_vault_internal(caller: Principal, arg: VaultArg) -> Result<
         return Err(ProtocolError::CallerNotOwner);
     }
 
-    // Check debt ceiling
+    // Check debt ceiling + global mint cap AND reserve the headroom atomically.
+    //
+    // BK-003 (audit 2026-06-05): these caps are checked here but the debt is not
+    // recorded until after the `mint_icusd().await` below. Two borrows from
+    // DIFFERENT owners both pass this check against the same committed aggregate,
+    // both mint, and jointly exceed the cap (the per-caller GuardPrincipal does
+    // not serialize distinct owners against the aggregate). The reservation guard
+    // counts every in-flight borrow in the check and is held across the mint, so
+    // a concurrent borrow sees this one's reserved amount. Released on Drop
+    // (return or continuation-trap via ic-cdk cleanup).
     let current_debt = read_state(|s| s.total_debt_for_collateral(&vault.collateral_type));
     let debt_ceiling = read_state(|s| {
         s.get_collateral_config(&vault.collateral_type)
             .map(|c| c.debt_ceiling)
             .unwrap_or(u64::MAX)
     });
-    if current_debt.to_u64() + amount.to_u64() > debt_ceiling {
-        return Err(ProtocolError::GenericError(format!(
-            "Borrow would exceed debt ceiling ({} + {} > {})",
-            current_debt.to_u64(), amount.to_u64(), debt_ceiling
-        )));
-    }
-
-    // Check global icUSD mint cap
     let (global_cap, total_borrowed) = read_state(|s| (s.global_icusd_mint_cap, s.total_borrowed_icusd_amount()));
-    if total_borrowed.to_u64() + amount.to_u64() > global_cap {
-        return Err(ProtocolError::GenericError(format!(
-            "Borrow would exceed global icUSD mint cap ({} + {} > {})",
-            total_borrowed.to_u64(), amount.to_u64(), global_cap
-        )));
-    }
+    let _borrow_reservation = crate::guard::BorrowReservationGuard::try_reserve(
+        vault.collateral_type,
+        amount.to_u64(),
+        current_debt.to_u64(),
+        debt_ceiling,
+        total_borrowed.to_u64(),
+        global_cap,
+    )
+    .map_err(ProtocolError::GenericError)?;
 
     let collateral_value = crate::numeric::collateral_usd_value(vault.collateral_amount, collateral_price, config_decimals);
     let min_ratio = read_state(|s| {
@@ -980,6 +985,7 @@ async fn borrow_from_vault_internal(caller: Principal, arg: VaultArg) -> Result<
                 fee_amount_paid: fee.to_u64(),
                 collateral_amount_received: None,
                 debt_liquidated_e8s: None, // SP-101
+                stable_pulled_e6s: None, // SP-110
             })
         }
         Err(mint_error) => {
@@ -2240,6 +2246,9 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_partial_{}", vault_id))?;
     reject_if_bot_processing(vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault
+    // BK-001/002: per-vault lock so two different callers can't race this vault
+    // and both be paid the full pre-state collateral from the shared pool.
+    let _vault_liq_guard = VaultLiquidationGuard::new(vault_id)?;
 
     // Wave-8b LIQ-002 band gate deactivated 2026-05-18. The per-vault CR
     // check below remains the authoritative liquidatability test. See
@@ -2513,6 +2522,7 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
         fee_amount_paid: fee_amount.to_u64(),
         collateral_amount_received: Some(collateral_to_liquidator.to_u64()),
         debt_liquidated_e8s: Some(max_liquidatable_debt.to_u64()), // SP-101
+        stable_pulled_e6s: None, // SP-110 (icUSD path: no stable surcharge)
     })
 }
 
@@ -2525,6 +2535,7 @@ pub async fn liquidate_vault_partial_with_stable(
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_stable_{}", vault_id))?;
     reject_if_bot_processing(vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault
+    let _vault_liq_guard = VaultLiquidationGuard::new(vault_id)?; // BK-001/002 per-vault lock
 
     // Wave-8b LIQ-002 band gate deactivated 2026-05-18 (see
     // `liquidate_vault_partial` above for rationale).
@@ -2832,6 +2843,7 @@ pub async fn liquidate_vault_partial_with_stable(
         fee_amount_paid: fee_amount.to_u64(),
         collateral_amount_received: Some(collateral_to_liquidator.to_u64()),
         debt_liquidated_e8s: Some(max_liquidatable_debt.to_u64()), // SP-101
+        stable_pulled_e6s: Some(total_pull_e6s), // SP-110: base + repay-fee surcharge
     })
 }
 
@@ -2877,6 +2889,7 @@ pub async fn liquidate_vault_debt_already_burned(
 
     let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_debt_burned_{}", vault_id))?;
     reject_if_bot_processing(vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault (SP path)
+    let _vault_liq_guard = VaultLiquidationGuard::new(vault_id)?; // BK-001/002 per-vault lock
 
     let liquidation_amount: ICUSD = icusd_burned_e8s.into();
 
@@ -3236,6 +3249,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_{}", vault_id))?;
     reject_if_bot_processing(vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault
+    let _vault_liq_guard = VaultLiquidationGuard::new(vault_id)?; // BK-001/002 per-vault lock
 
     // Wave-8b LIQ-002 band gate deactivated 2026-05-18 (see
     // `liquidate_vault_partial` above for rationale).
@@ -3524,6 +3538,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         fee_amount_paid: fee_amount.to_u64(),
         collateral_amount_received: Some(collateral_to_liquidator.to_u64()),
         debt_liquidated_e8s: None, // SP-101
+        stable_pulled_e6s: None, // SP-110
     })
 }
 
@@ -3722,6 +3737,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("partial_liquidate_vault_{}", arg.vault_id))?;
     reject_if_bot_processing(arg.vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault
+    let _vault_liq_guard = VaultLiquidationGuard::new(arg.vault_id)?; // BK-001/002 per-vault lock
 
     // Wave-8b LIQ-002 band gate deactivated 2026-05-18 (see
     // `liquidate_vault_partial` above for rationale).
@@ -3976,5 +3992,6 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         fee_amount_paid: fee_amount.to_u64(),
         collateral_amount_received: Some(collateral_to_liquidator.to_u64()),
         debt_liquidated_e8s: None, // SP-101
+        stable_pulled_e6s: None, // SP-110
     })
 }

@@ -34,7 +34,7 @@
 
 use candid::{CandidType, Deserialize, Principal};
 use ic_canister_log::log;
-use crate::chains::config::ChainId;
+use crate::chains::config::{effective_min_quorum_providers, ChainId};
 use crate::state::read_state;
 use crate::logs::{DEBUG, INFO};
 
@@ -132,13 +132,24 @@ pub struct RpcApi {
     pub headers: Option<Vec<EvmRpcHttpHeader>>,
 }
 
-/// Minimal `RpcService` — only the `Custom` variant is needed for Monad
-/// (all other variants address built-in chains by name).
+/// `RpcService` — we only ever ENCODE `Custom` (Monad is always a custom
+/// provider), but the multi-provider `eth_getBlockByNumber` (M-06) can return an
+/// `Inconsistent` result whose per-provider vector is keyed by `RpcService`. To
+/// avoid a Candid decode TRAP (the FLAG-9 caveat) we mirror the FULL variant set
+/// from the live .did. The built-in provider arms (which we never send, so never
+/// expect on the wire, but might appear if the canister echoes a default
+/// provider) carry `candid::Reserved` payloads — they decode without inspecting
+/// their contents, exactly the idiom the Solana `sol_rpc` mirror uses. Only the
+/// `Custom` arm carries a real `RpcApi` (the one we ever read back).
 #[derive(CandidType, Deserialize, Clone, Debug)]
 pub enum RpcService {
+    Provider(u64),
     Custom(RpcApi),
-    // Other built-in variants exist in the .did but are unused here.
-    // Candid decoding is flexible: we only need to encode Custom.
+    EthMainnet(candid::Reserved),
+    EthSepolia(candid::Reserved),
+    ArbitrumOne(candid::Reserved),
+    BaseMainnet(candid::Reserved),
+    OptimismMainnet(candid::Reserved),
 }
 
 /// Mirrors the live .did `JsonRpcError` record.
@@ -311,20 +322,15 @@ pub enum GetBlockByNumberResult {
     Err(RpcError),
 }
 
-/// `MultiGetBlockByNumberResult` from the live .did.  We only ever send ONE
-/// `Custom` provider, so the canister always returns `Consistent`;
-/// `Inconsistent` is never on the wire and never decoded in practice (it
-/// references the singular `RpcService`, which is fine since we never decode
-/// that arm).
+/// `MultiGetBlockByNumberResult` from the live .did.
 ///
-/// NOTE (Phase 1b / M-1): `RpcService` above mirrors only the `Custom` variant.
-/// If multi-provider support is ever introduced (e.g. a second `Custom` URL or
-/// a built-in `EthMainnet`-style arm), the EVM RPC canister MAY return an
-/// `Inconsistent` result containing a non-`Custom` `RpcService` variant, which
-/// would TRAP on Candid decode because this enum lacks those arms. Acceptable
-/// for Phase 1b (Monad is always addressed via a single `Custom` provider);
-/// revisit by mirroring the full `RpcService` variant set if multi-provider is
-/// introduced.
+/// M-06 (QUORUM-3): the finalized-height probe now passes ALL distinct
+/// configured providers (not just the first), so on disagreement the canister
+/// returns `Inconsistent` carrying a per-provider vector keyed by `RpcService`.
+/// We decode and TALLY that vector by distinct provider rather than trapping.
+/// The FLAG-9 caveat (a non-`Custom` provider variant in that vector would
+/// previously trap the decode) is handled by mirroring the full `RpcService`
+/// variant set above (built-in arms carry `candid::Reserved`).
 #[derive(CandidType, Deserialize, Clone, Debug)]
 pub enum MultiGetBlockByNumberResult {
     Consistent(GetBlockByNumberResult),
@@ -567,47 +573,79 @@ fn response_consensus_key(text: &str) -> serde_json::Value {
     }
 }
 
+/// Read a chain's DISTINCT configured RPC endpoints and its effective
+/// quorum-provider floor (audit M-04/M-05). The endpoints are already deduped at
+/// registration/config time (`chains::admin::dedup_endpoints`); we dedup again
+/// here defensively so a hand-poked state cannot smuggle a repeat past the
+/// distinct-provider tally. Returns `(distinct_endpoints, floor)`.
+fn endpoints_and_floor(chain: ChainId) -> (Vec<String>, u32) {
+    read_state(|s| {
+        s.multi_chain
+            .chain_configs
+            .get(&chain)
+            .map(|c| {
+                let mut seen = std::collections::BTreeSet::new();
+                let distinct: Vec<String> = c
+                    .rpc_endpoints
+                    .iter()
+                    .filter(|u| seen.insert((*u).clone()))
+                    .cloned()
+                    .collect();
+                (distinct, effective_min_quorum_providers(c))
+            })
+            .unwrap_or_else(|| (Vec::new(), crate::chains::config::DEFAULT_MIN_QUORUM_PROVIDERS))
+    })
+}
+
 /// Send a raw JSON-RPC READ to the EVM RPC canister with MULTI-PROVIDER QUORUM
-/// (audit FLAG-1). Queries EVERY configured endpoint and requires a STRICT
-/// MAJORITY of the configured providers to return the same semantic result
-/// before returning it, so a single malicious / compromised / lagging provider
-/// cannot fabricate a balance, block, supply, or receipt the canister credits.
+/// (audit FLAG-1 + M-04/M-05). Queries EVERY DISTINCT configured endpoint and
+/// requires at least the chain's quorum-provider FLOOR of DISTINCT providers to
+/// return the same semantic result before returning it, so a single malicious /
+/// compromised / lagging provider cannot fabricate a balance, block, supply, or
+/// receipt the canister credits.
 ///
-/// With ONE configured endpoint this degrades to a single-provider read (no
-/// cross-provider quorum is possible). The deployment MUST configure >= 3
-/// independent endpoints to get real 2-of-3 protection (an ops action; see the
-/// pre-permissionless checklist). On no-quorum or all-fail this returns Err so
-/// the caller never credits / advances on disagreement.
+/// FAIL-CLOSED FLOOR (M-05, QUORUM-2): if the chain has FEWER distinct configured
+/// endpoints than its floor (`DEFAULT_MIN_QUORUM_PROVIDERS` = 3 unless
+/// overridden), the read is REFUSED outright — no single- or sub-floor-provider
+/// financial read is ever credited. A deployment MUST configure >= floor
+/// independent endpoints (an ops action) before the observer / settlement
+/// workers can read. This is the runtime gate that makes the quorum non-dormant.
+///
+/// DISTINCT-PROVIDER TALLY (M-04, QUORUM-1): agreement is counted by DISTINCT
+/// provider URL, never by list slot or raw response count, so a duplicated
+/// endpoint (already deduped at config time, deduped again here) can never vote
+/// twice toward the quorum. The winning value must be returned by
+/// `max(floor, strict_majority_of_distinct)` distinct providers.
+///
+/// On below-floor, no-quorum, or all-fail this returns Err so the caller never
+/// credits / advances on disagreement.
 ///
 /// READS ONLY. `eth_sendRawTransaction` is a write and uses
 /// `call_evm_rpc_broadcast` (first-Ok: a broadcast lands if ANY provider accepts
 /// it; requiring agreement would wrongly drop a tx that only some providers saw).
 async fn call_evm_rpc(chain: ChainId, json_payload: &str) -> Result<String, String> {
-    let endpoints: Vec<String> = read_state(|s| {
-        s.multi_chain
-            .chain_configs
-            .get(&chain)
-            .map(|c| c.rpc_endpoints.clone())
-            .unwrap_or_default()
-    });
+    let (endpoints, floor) = endpoints_and_floor(chain);
     if endpoints.is_empty() {
         return Err(format!("no RPC endpoints configured for chain {:?}", chain));
     }
+    // M-05 (QUORUM-2): fail closed below the distinct-provider floor. With fewer
+    // than `floor` distinct providers there is no way to reach the required
+    // cross-provider agreement, so a financial read must never be credited.
+    if (endpoints.len() as u32) < floor {
+        return Err(format!(
+            "RPC quorum floor not met for chain {:?}: {} distinct provider(s) configured, need >= {} (configure more endpoints; financial reads fail closed below the floor)",
+            chain, endpoints.len(), floor
+        ));
+    }
     let canister = evm_rpc_principal();
 
-    // Single provider: no cross-provider quorum is possible.
-    if endpoints.len() == 1 {
-        log!(DEBUG, "[evm_rpc] single-provider read for chain {:?} (configure >= 3 endpoints for quorum)", chain);
-        return single_call(canister, &endpoints[0], json_payload).await;
-    }
-
-    // Multi-provider: collect every Ok response, then require a strict majority
-    // of the CONFIGURED providers to agree on the semantic result.
-    let mut oks: Vec<String> = Vec::new();
+    // Collect every Ok response PAIRED with its provider URL, so the tally counts
+    // DISTINCT providers (M-04), not list slots or raw response multiplicity.
+    let mut oks: Vec<(String, String)> = Vec::new(); // (url, response_text)
     let mut last_err = String::new();
     for url in &endpoints {
         match single_call(canister, url, json_payload).await {
-            Ok(text) => oks.push(text),
+            Ok(text) => oks.push((url.clone(), text)),
             Err(e) => {
                 log!(DEBUG, "[evm_rpc] provider read error via {}: {}", url, e);
                 last_err = e;
@@ -617,22 +655,41 @@ async fn call_evm_rpc(chain: ChainId, json_payload: &str) -> Result<String, Stri
     if oks.is_empty() {
         return Err(format!("all {} providers failed; last: {}", endpoints.len(), last_err));
     }
-    let needed = endpoints.len() / 2 + 1; // strict majority of the full provider set
-    let keys: Vec<serde_json::Value> = oks.iter().map(|t| response_consensus_key(t)).collect();
+
+    // Group by semantic consensus key; for each key count the number of DISTINCT
+    // provider URLs that returned it (endpoints are deduped, so each URL appears
+    // at most once in `oks`, but we count distinctly to be explicit and robust).
+    let keyed: Vec<(String, serde_json::Value)> = oks
+        .iter()
+        .map(|(url, text)| (url.clone(), response_consensus_key(text)))
+        .collect();
     let mut best_idx = 0usize;
     let mut best_count = 0usize;
-    for i in 0..keys.len() {
-        let count = keys.iter().filter(|k| **k == keys[i]).count();
+    for i in 0..keyed.len() {
+        let mut providers_for_key = std::collections::BTreeSet::new();
+        for (url, key) in &keyed {
+            if *key == keyed[i].1 {
+                providers_for_key.insert(url.clone());
+            }
+        }
+        let count = providers_for_key.len();
         if count > best_count {
             best_count = count;
             best_idx = i;
         }
     }
+
+    // Required distinct agreement: at least the floor AND a strict majority of the
+    // DISTINCT configured providers (the floor is the audit's primary guard; the
+    // majority preserves the original FLAG-1 protection for larger provider sets).
+    let majority = endpoints.len() / 2 + 1;
+    let needed = (floor as usize).max(majority);
     if best_count >= needed {
-        Ok(oks[best_idx].clone())
+        // Return the winning provider's response text (the consensus value).
+        Ok(oks[best_idx].1.clone())
     } else {
         Err(format!(
-            "RPC quorum not reached for chain {:?}: best agreement {}/{} (need {})",
+            "RPC quorum not reached for chain {:?}: best distinct-provider agreement {}/{} (need {})",
             chain, best_count, endpoints.len(), needed
         ))
     }
@@ -687,27 +744,44 @@ fn next_rpc_id() -> u64 {
 /// returning Ok(Some(...)). Investigate the RPC endpoint and the EVM RPC
 /// canister's cycle balance if you see this repeating.
 async fn eth_get_block_number_at(chain: ChainId, n: u64) -> Result<Option<u64>, String> {
-    // Read the chain's configured endpoints (same source as `call_evm_rpc`).
-    // The typed method needs a single Custom provider; use the first endpoint.
-    let endpoints: Vec<String> = read_state(|s| {
-        s.multi_chain
-            .chain_configs
-            .get(&chain)
-            .map(|c| c.rpc_endpoints.clone())
-            .unwrap_or_default()
-    });
-    let first = endpoints
-        .first()
-        .ok_or_else(|| format!("no RPC endpoints configured for chain {:?}", chain))?
-        .clone();
+    // M-06 (QUORUM-3): route the finality/block-existence probe through the SAME
+    // multi-provider quorum the balance/supply reads use, instead of trusting a
+    // single `endpoints.first()`. Pass ALL distinct configured providers and ask
+    // the EVM-RPC canister for `Threshold` consensus at our floor; below the
+    // floor we fail closed (same as `call_evm_rpc`).
+    let (endpoints, floor) = endpoints_and_floor(chain);
+    if endpoints.is_empty() {
+        return Err(format!("no RPC endpoints configured for chain {:?}", chain));
+    }
+    if (endpoints.len() as u32) < floor {
+        return Err(format!(
+            "RPC quorum floor not met for chain {:?}: {} distinct provider(s) configured, need >= {} (block probe fails closed below the floor)",
+            chain, endpoints.len(), floor
+        ));
+    }
 
+    let services: Vec<RpcApi> = endpoints
+        .iter()
+        .map(|url| RpcApi {
+            url: url.clone(),
+            headers: None,
+        })
+        .collect();
+    let total_providers = services.len() as u8;
     let rpc_services = RpcServices::Custom {
         chain_id: chain.0 as u64,
-        services: vec![RpcApi {
-            url: first,
-            headers: None,
-        }],
+        services,
     };
+    // Ask the canister to enforce a Threshold of `floor`-of-`total` providers.
+    // The canister returns `Consistent` only when at least `min` providers agree;
+    // otherwise `Inconsistent`, which we tally ourselves as a defense-in-depth.
+    let rpc_config = Some(RpcConfig {
+        response_size_estimate: None,
+        response_consensus: Some(ConsensusStrategy::Threshold {
+            total: Some(total_providers),
+            min: floor.min(u8::MAX as u32) as u8,
+        }),
+    });
 
     let canister = evm_rpc_principal();
     let result: Result<(MultiGetBlockByNumberResult,), _> =
@@ -716,7 +790,7 @@ async fn eth_get_block_number_at(chain: ChainId, n: u64) -> Result<Option<u64>, 
             "eth_getBlockByNumber",
             (
                 rpc_services,
-                Option::<RpcConfig>::None,
+                rpc_config,
                 BlockTag::Number(candid::Nat::from(n)),
             ),
             EVM_RPC_CALL_CYCLES,
@@ -734,7 +808,7 @@ async fn eth_get_block_number_at(chain: ChainId, n: u64) -> Result<Option<u64>, 
         Ok((MultiGetBlockByNumberResult::Consistent(GetBlockByNumberResult::Err(rpc_err)),)) => {
             // Block-not-found is the common benign case (chain hasn't reached
             // block n yet). HOWEVER a rate-limit, TooFewCycles, or IcError also
-            // maps here — both collapse to Ok(None) so the cursor does not advance.
+            // maps here — all collapse to Ok(None) so the cursor does not advance.
             // A single occurrence is harmless; a PERSISTENT stream means a real
             // provider / consensus problem and the cursor is stalled. See the
             // helper's doc comment for the monitoring note.
@@ -747,8 +821,47 @@ async fn eth_get_block_number_at(chain: ChainId, n: u64) -> Result<Option<u64>, 
             );
             Ok(None)
         }
-        Ok((MultiGetBlockByNumberResult::Inconsistent(_),)) => {
-            Err("unexpected inconsistent eth_getBlockByNumber result".to_string())
+        Ok((MultiGetBlockByNumberResult::Inconsistent(per_provider),)) => {
+            // Providers disagreed below the canister's threshold. Tally the
+            // per-provider results ourselves by DISTINCT block number: only if at
+            // least `floor` distinct providers report the SAME block number do we
+            // treat the block as confirmed-existing. Otherwise we cannot confirm
+            // it this tick (return Ok(None) → the cursor does NOT advance, which
+            // is the fail-closed behavior — a block we cannot agree exists must
+            // never advance the finalized cursor).
+            use std::collections::BTreeMap;
+            let mut votes: BTreeMap<u64, std::collections::BTreeSet<String>> = BTreeMap::new();
+            let mut undecodable = 0usize;
+            for (svc, res) in &per_provider {
+                if let GetBlockByNumberResult::Ok(block) = res {
+                    match u64::try_from(block.number.0.clone()) {
+                        Ok(num) => {
+                            // Key the voter by a stable provider identity. Custom
+                            // providers carry their URL; built-in arms (which we
+                            // never send) fall back to a debug label so they still
+                            // count as one distinct voter rather than trapping.
+                            let voter = match svc {
+                                RpcService::Custom(api) => api.url.clone(),
+                                other => format!("{:?}", other),
+                            };
+                            votes.entry(num).or_default().insert(voter);
+                        }
+                        Err(_) => undecodable += 1,
+                    }
+                }
+            }
+            let best = votes.iter().max_by_key(|(_, set)| set.len());
+            match best {
+                Some((num, set)) if (set.len() as u32) >= floor => Ok(Some(*num)),
+                _ => {
+                    log!(
+                        INFO,
+                        "[evm_rpc] eth_getBlockByNumber(Number({})) chain={:?} Inconsistent: no block number reached {} distinct-provider agreement ({} undecodable); cursor will not advance this tick",
+                        n, chain, floor, undecodable
+                    );
+                    Ok(None)
+                }
+            }
         }
         Err((code, msg)) => Err(format!(
             "eth_getBlockByNumber call error ({:?}): {}",
@@ -773,6 +886,19 @@ async fn eth_get_block_number_at(chain: ChainId, n: u64) -> Result<Option<u64>, 
 ///
 /// `last_observed == 0` means the burn-watch cursor is unseeded; the caller
 /// (`run_observer`) skips burn-watch entirely in that case (no genesis crawl).
+///
+/// M-07 (FINAL-1): the cursor advances to `candidate` ONLY when `candidate`
+/// satisfies `is_block_final(candidate, finality_depth)` — i.e. block
+/// `candidate + finality_depth` also exists, so `candidate` is buried under at
+/// least `finality_depth` confirmations. The prior code advanced on mere block
+/// EXISTENCE (`is_block_final` was never applied here, unlike `burn_proof.rs`),
+/// so the "finalized" cursor it returned could include a still-reorg-able block.
+/// Both the burn-watch scan and the settlement mint-confirm gate treat this
+/// returned value as final, so advancing it on an unfinalized block let a burn /
+/// mint-confirm act on a block that could still reorg out. Now both the probe
+/// AND the finality bury-check route through the multi-provider quorum
+/// (`eth_get_block_number_at`), so a single lagging provider can neither
+/// fabricate nor prematurely finalize the cursor.
 pub async fn fetch_block_numbers(chain: ChainId) -> Result<(u64, u64), String> {
     let last_observed = read_state(|s| {
         s.multi_chain
@@ -781,10 +907,21 @@ pub async fn fetch_block_numbers(chain: ChainId) -> Result<(u64, u64), String> {
             .copied()
             .unwrap_or(0)
     });
+    let finality_depth = read_state(|s| {
+        s.multi_chain
+            .chain_configs
+            .get(&chain)
+            .map(|c| c.finality_depth as u64)
+    })
+    .unwrap_or(1);
     let candidate = last_observed.saturating_add(MAX_BLOCK_SCAN_WINDOW);
-    match eth_get_block_number_at(chain, candidate).await? {
-        Some(_) => Ok((candidate, candidate)), // block exists & final → advance window
-        None => Ok((last_observed, last_observed)), // not advanced enough yet → nothing new
+    // Advance only when `candidate` is buried under >= finality_depth blocks
+    // (M-07). `is_block_final` itself probes `candidate + finality_depth` through
+    // the quorum path, so existence of the candidate alone is no longer enough.
+    if is_block_final(chain, candidate, finality_depth).await? {
+        Ok((candidate, candidate)) // candidate exists AND is final → advance window
+    } else {
+        Ok((last_observed, last_observed)) // not final yet → nothing new this tick
     }
 }
 

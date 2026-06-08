@@ -30,27 +30,33 @@ pub async fn run() {
     if count <= cursor { return; }
 
     let fetch_len = (count - cursor).min(BATCH_SIZE);
-    let events = match sources::backend::get_events(backend, cursor, fetch_len).await {
-        Ok(e) => e,
-        Err(e) => {
-            ic_cdk::println!("[tail_backend] get_events failed: {}", e);
-            state::mutate_state(|s| {
-                s.error_counters.backend += 1;
-                update_cursor_error(s, cursors::CURSOR_ID_BACKEND_EVENTS, e);
-            });
-            return;
-        }
-    };
+    // Use the resilient per-element decoder so that a single unknown or
+    // undecodable variant does not poison the whole batch.  The cursor is
+    // advanced by `total_fetched` (all elements the backend returned),
+    // regardless of how many were actually decoded, so the tailer always
+    // makes forward progress even when the backend ships a new variant that
+    // analytics does not yet mirror.
+    let (events, total_fetched) =
+        match sources::backend::get_events_resilient(backend, cursor, fetch_len).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                ic_cdk::println!("[tail_backend] get_events failed: {}", e);
+                state::mutate_state(|s| {
+                    s.error_counters.backend += 1;
+                    update_cursor_error(s, cursors::CURSOR_ID_BACKEND_EVENTS, e);
+                });
+                return;
+            }
+        };
 
-    let mut processed = 0u64;
     for (i, event) in events.iter().enumerate() {
         let event_id = cursor + i as u64;
         route_backend_event(event_id, event);
-        processed += 1;
     }
 
-    if processed > 0 {
-        cursors::backend_events::set(cursor + processed);
+    // Advance by total_fetched so unknown-variant events are not re-fetched.
+    if total_fetched > 0 {
+        cursors::backend_events::set(cursor + total_fetched);
         state::mutate_state(|s| {
             update_cursor_success(s, cursors::CURSOR_ID_BACKEND_EVENTS, ic_cdk::api::time());
         });

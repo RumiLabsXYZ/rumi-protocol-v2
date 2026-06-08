@@ -47,6 +47,18 @@ type ThreePoolError = variant {
   InsufficientLpBalance : record { required : nat; available : nat };
   BurnFailed : record { token : text; reason : text };
   PoolLocked;
+  ClaimNotFound;
+};
+
+type ThreePoolPendingClaim = record {
+  id : nat64;
+  claimant : principal;
+  token_index : nat8;
+  ledger : principal;
+  symbol : text;
+  amount : nat;
+  reason : text;
+  created_at : nat64;
 };
 
 type SwapEvent = record {
@@ -118,6 +130,12 @@ type LiquidityEventV2 = record {
   pool_balances_after : vec nat;
   virtual_price_after : nat;
   migrated : bool;
+};
+
+type ForwardLiquidityEventsV2 = record {
+  events : vec record { nat64; LiquidityEventV2 };
+  next_start : nat64;
+  reached_end : bool;
 };
 
 type QuoteSwapResult = record {
@@ -476,6 +494,10 @@ service : (ThreePoolInitArgs) -> {
   get_pool_status : () -> (PoolStatus) query;
   get_lp_balance : (principal) -> (nat) query;
   get_all_lp_holders : () -> (vec record { principal; nat }) query;
+  get_lp_holders : (nat64, nat64) -> (vec record { principal; nat }) query;
+  claim_pending : (nat64) -> (variant { Ok; Err : ThreePoolError });
+  get_pending_claims : (nat64, nat64) -> (vec ThreePoolPendingClaim) query;
+  get_pending_claim_count : () -> (nat64) query;
   calc_swap : (nat8, nat8, nat) -> (variant { Ok : nat; Err : ThreePoolError }) query;
   calc_add_liquidity_query : (vec nat, nat) -> (variant { Ok : nat; Err : ThreePoolError }) query;
   calc_remove_liquidity_query : (nat) -> (variant { Ok : vec nat; Err : ThreePoolError }) query;
@@ -507,6 +529,7 @@ service : (ThreePoolInitArgs) -> {
   get_swap_events_v2 : (nat64, nat64) -> (vec SwapEventV2) query;
   get_swap_fees_over_window : (nat32) -> (nat) query;
   get_liquidity_events_v2 : (nat64, nat64) -> (vec LiquidityEventV2) query;
+  get_liquidity_events_v2_forward : (nat64, nat64) -> (ForwardLiquidityEventsV2) query;
   get_liquidity_event_count_v2 : () -> (nat64) query;
 
   // Explorer endpoints (E1-E14)

@@ -117,12 +117,14 @@ pub fn icrc1_transfer(caller: Principal, args: TransferArg) -> Result<Nat, Trans
         });
     }
 
-    if caller == to_principal {
-        return Err(TransferError::GenericError {
-            error_code: Nat::from(4u64),
-            message: "cannot transfer to self".to_string(),
-        });
-    }
+    // NOTE (audit 2026-06-05, SAT-007): a previous over-broad guard rejected
+    // every transfer where `caller == to.owner`, which broke legitimate wallet
+    // flows (notably the "3USD send with Internet Identity" bug) whenever a
+    // wallet routed a send to the same owning principal under a different
+    // subaccount. Because balances are keyed by owner principal only, a
+    // same-owner transfer is a self-cancelling no-op on the balance (debit then
+    // credit the same key, net zero), so allowing it is safe and matches the
+    // ICP/ICRC-1 ledger convention of permitting self-transfers.
 
     mutate_state(|s| {
         let from_balance = crate::storage::lp_balance_get(&caller);

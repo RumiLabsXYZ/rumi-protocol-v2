@@ -446,17 +446,35 @@ pub async fn ensure_fresh_price_for(
             crate::management::fetch_collateral_price(*collateral_type).await;
         }
 
-        // Verify we have a price now
-        let has_price = read_state(|s| {
-            s.get_collateral_config(collateral_type)
-                .and_then(|c| c.last_price)
-                .is_some()
+        // Fail CLOSED if, after the (best-effort) refresh, the cached price is
+        // missing OR still older than the hard staleness ceiling.
+        //
+        // ORACLE-001 / VER-001 (audit 2026-06-05): this previously checked only
+        // `last_price.is_some()`. `fetch_collateral_price` is best-effort — on a
+        // down feed (XRC source-count rejection, LST canister error, CoinGecko
+        // failure) it returns WITHOUT updating the cache. So a stale cached
+        // `last_price` passed the gate, letting mint/withdraw originate against
+        // an arbitrarily old non-ICP price. We now enforce the same 10-minute
+        // hard ceiling the ICP path applies via `check_price_not_too_old`. nICP
+        // (LstWrapped) inherits the underlying ICP timestamp (see
+        // `fetch_collateral_price`), so this also correctly rejects an nICP
+        // price derived from a stale ICP rate.
+        const MAX_NON_ICP_PRICE_AGE_NANOS: u64 = 10 * 60 * 1_000_000_000;
+        let now = ic_cdk::api::time();
+        let fresh = read_state(|s| match s.get_collateral_config(collateral_type) {
+            Some(c) => match (c.last_price, c.last_price_timestamp) {
+                (Some(price), Some(ts)) if price.is_finite() && price > 0.0 => {
+                    now.saturating_sub(ts) <= MAX_NON_ICP_PRICE_AGE_NANOS
+                }
+                _ => false,
+            },
+            None => false,
         });
-        if has_price {
+        if fresh {
             Ok(())
         } else {
-            Err(crate::ProtocolError::GenericError(format!(
-                "No price available for collateral {}",
+            Err(crate::ProtocolError::TemporarilyUnavailable(format!(
+                "No fresh price available for collateral {} (stale or missing after on-demand refresh)",
                 collateral_type
             )))
         }

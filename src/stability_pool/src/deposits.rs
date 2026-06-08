@@ -12,6 +12,10 @@ use crate::state::{read_state, mutate_state};
 
 /// Deposit a stablecoin into the pool. User must have pre-approved the pool canister.
 pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), StabilityPoolError> {
+    // SP-102: refuse balance-mutating ops while a liquidation is apportioning.
+    if crate::pool_guard::liquidation_in_progress() {
+        return Err(StabilityPoolError::SystemBusy);
+    }
     let caller = ic_cdk::api::caller();
 
     // Validate token is accepted
@@ -94,6 +98,12 @@ pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), Stabili
 /// 2. Transfer tokens to user
 /// 3. If transfer fails, rollback the deduction
 pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), StabilityPoolError> {
+    // SP-102: refuse balance-mutating ops while a liquidation is apportioning,
+    // so a withdraw cannot land between a liquidation's snapshot and its burn
+    // apportionment and escape the depositor's share of the loss.
+    if crate::pool_guard::liquidation_in_progress() {
+        return Err(StabilityPoolError::SystemBusy);
+    }
     let caller = ic_cdk::api::caller();
 
     if read_state(|s| s.configuration.emergency_pause) {
@@ -184,6 +194,10 @@ pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), Stabil
 /// 2. Transfer collateral to user
 /// 3. If transfer fails, rollback the deduction
 pub async fn claim_collateral(collateral_ledger: Principal) -> Result<u64, StabilityPoolError> {
+    // SP-102: refuse balance-mutating ops while a liquidation is apportioning.
+    if crate::pool_guard::liquidation_in_progress() {
+        return Err(StabilityPoolError::SystemBusy);
+    }
     let caller = ic_cdk::api::caller();
 
     if read_state(|s| s.configuration.emergency_pause) {
@@ -302,6 +316,10 @@ pub async fn claim_collateral(collateral_ledger: Principal) -> Result<u64, Stabi
 
 /// Claim all nonzero collateral gains across all collateral types.
 pub async fn claim_all_collateral() -> Result<BTreeMap<Principal, u64>, StabilityPoolError> {
+    // SP-102: refuse balance-mutating ops while a liquidation is apportioning.
+    if crate::pool_guard::liquidation_in_progress() {
+        return Err(StabilityPoolError::SystemBusy);
+    }
     let caller = ic_cdk::api::caller();
 
     if read_state(|s| s.configuration.emergency_pause) {
@@ -339,6 +357,10 @@ pub async fn deposit_as_3usd(
     token_ledger: Principal,
     amount: u64,
 ) -> Result<u64, StabilityPoolError> {
+    // SP-102: refuse balance-mutating ops while a liquidation is apportioning.
+    if crate::pool_guard::liquidation_in_progress() {
+        return Err(StabilityPoolError::SystemBusy);
+    }
     let caller = ic_cdk::api::caller();
 
     let config = read_state(|s| s.get_stablecoin_config(&token_ledger).cloned())

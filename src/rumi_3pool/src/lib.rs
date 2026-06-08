@@ -308,6 +308,93 @@ fn get_current_a() -> u64 {
     })
 }
 
+// ─── Pending-claim recovery (audit 2026-06-05, 3P-01/02/03) ───
+
+/// Upper bound on outstanding pending claims. A claim is only created when a
+/// ledger transfer (and, for swap/add, its refund) fails, which is not caller-
+/// controllable, so this is a memory-safety bound rather than an anti-DoS one.
+const MAX_PENDING_CLAIMS: u64 = 10_000;
+
+/// Record tokens the pool owes `claimant` after a failed payout/refund so the
+/// funds can be recovered via `claim_pending` instead of being stranded.
+fn record_pending_claim(
+    claimant: Principal,
+    token_index: u8,
+    ledger: Principal,
+    symbol: &str,
+    amount: u128,
+    reason: &str,
+) -> u64 {
+    // Bound memory. Dropping the oldest claim is itself a (logged) value loss,
+    // but reaching the cap requires thousands of genuine ledger failures.
+    if storage::pending_claims::len() >= MAX_PENDING_CLAIMS {
+        if let Some(oldest) = storage::pending_claims::list(0, 1).into_iter().next() {
+            log!(INFO, "WARN: pending_claims at capacity; dropping oldest claim #{}", oldest.id);
+            storage::pending_claims::remove(oldest.id);
+        }
+    }
+    let id = storage::pending_claims::next_id();
+    log!(INFO, "Pending claim #{} recorded: {} owes {} of token {} ({}): {}",
+        id, claimant, amount, token_index, symbol, reason);
+    storage::pending_claims::insert(crate::types::ThreePoolPendingClaim {
+        id,
+        claimant,
+        token_index,
+        ledger,
+        symbol: symbol.to_string(),
+        amount,
+        reason: reason.to_string(),
+        created_at: ic_cdk::api::time() / 1_000_000_000,
+    });
+    id
+}
+
+/// Recover tokens the pool owes after a failed payout/refund. The original
+/// claimant or the pool admin may call this. The claim is removed BEFORE the
+/// async transfer (prevents two concurrent calls both paying out) and re-
+/// inserted if the transfer fails. Audit 2026-06-05 (3P-01/02/03).
+#[update]
+pub async fn claim_pending(claim_id: u64) -> Result<(), ThreePoolError> {
+    let caller = ic_cdk::api::caller();
+
+    // Remove first (atomic) to prevent double-claim across the await.
+    let claim = storage::pending_claims::remove(claim_id)
+        .ok_or(ThreePoolError::ClaimNotFound)?;
+
+    let admin = read_state(|s| s.config.admin);
+    if caller != claim.claimant && caller != admin {
+        // Not authorized — re-insert before returning so the claim is not lost.
+        storage::pending_claims::insert(claim);
+        return Err(ThreePoolError::Unauthorized);
+    }
+
+    match transfer_to_user(claim.ledger, claim.claimant, claim.amount).await {
+        Ok(()) => {
+            log!(INFO, "Pending claim #{} resolved: {} received {} of {}",
+                claim_id, claim.claimant, claim.amount, claim.symbol);
+            Ok(())
+        }
+        Err(reason) => {
+            // Transfer failed — re-insert so the user can retry.
+            let symbol = claim.symbol.clone();
+            storage::pending_claims::insert(claim);
+            Err(ThreePoolError::TransferFailed { token: symbol, reason })
+        }
+    }
+}
+
+/// View outstanding pending claims (bounded page; `limit` capped at 1000).
+#[query]
+pub fn get_pending_claims(offset: u64, limit: u64) -> Vec<crate::types::ThreePoolPendingClaim> {
+    storage::pending_claims::list(offset, limit.min(1000))
+}
+
+/// Count of outstanding pending claims.
+#[query]
+pub fn get_pending_claim_count() -> u64 {
+    storage::pending_claims::len()
+}
+
 // ─── Swap ───
 
 #[update]
@@ -324,6 +411,14 @@ pub async fn swap(i: u8, j: u8, dx: u128, min_dy: u128) -> Result<u128, ThreePoo
 
     let i_idx = i as usize;
     let j_idx = j as usize;
+
+    // Validate coin indices BEFORE indexing `s.config.tokens[..]` below.
+    // Otherwise an out-of-range i/j panics on the array index (clean rollback
+    // but an ugly trap) instead of returning a typed InvalidCoinIndex error.
+    // Audit 2026-06-05 (3PT-001).
+    if i_idx >= 3 || j_idx >= 3 || i_idx == j_idx {
+        return Err(ThreePoolError::InvalidCoinIndex);
+    }
 
     // 3. Compute current A and precision_muls
     let amp = get_current_a();
@@ -360,17 +455,36 @@ pub async fn swap(i: u8, j: u8, dx: u128, min_dy: u128) -> Result<u128, ThreePoo
     transfer_from_user(token_i_ledger, caller, dx)
         .await
         .map_err(|reason| ThreePoolError::TransferFailed {
-            token: token_i_symbol,
+            token: token_i_symbol.clone(),
             reason,
         })?;
 
-    // 8. Transfer output token from pool to user
-    transfer_to_user(token_j_ledger, caller, output)
-        .await
-        .map_err(|reason| ThreePoolError::TransferFailed {
+    // 8. Transfer output token from pool to user.
+    //
+    // The input was just pulled into the pool's account, but `s.balances` is
+    // NOT credited until step 8 below (after both transfers succeed). So if the
+    // output transfer fails here, the pulled input would be stranded in the pool
+    // with no accounting and no recourse for the user. Refund the input; if the
+    // refund itself fails, record a pending claim so the user can recover it via
+    // `claim_pending`. Audit 2026-06-05 (3P-01): mirrors rumi_amm's swap path.
+    if let Err(reason) = transfer_to_user(token_j_ledger, caller, output).await {
+        if let Err(refund_err) = transfer_to_user(token_i_ledger, caller, dx).await {
+            record_pending_claim(
+                caller,
+                i,
+                token_i_ledger,
+                &token_i_symbol,
+                dx,
+                &format!(
+                    "swap output transfer failed ({reason}), then input refund failed ({refund_err})"
+                ),
+            );
+        }
+        return Err(ThreePoolError::TransferFailed {
             token: token_j_symbol,
             reason,
-        })?;
+        });
+    }
 
     // 8. Update state
     //
@@ -465,19 +579,51 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
         return Err(ThreePoolError::SlippageExceeded);
     }
 
-    // 8. Transfer each non-zero amount from user to pool
+    // 8. Transfer each non-zero amount from user to pool.
+    //
+    // `s.balances` is not credited until after the whole loop succeeds (step 8
+    // below). If a transfer fails mid-loop, the amounts already pulled (indices
+    // < k) are stranded in the pool with no accounting. Refund each already-
+    // pulled amount; if a refund itself fails, record a pending claim so the
+    // user can recover it via `claim_pending`. Audit 2026-06-05 (3P-03).
     let caller = ic_cdk::api::caller();
+    let token_meta: [(Principal, String); 3] = read_state(|s| {
+        [
+            (s.config.tokens[0].ledger_id, s.config.tokens[0].symbol.clone()),
+            (s.config.tokens[1].ledger_id, s.config.tokens[1].symbol.clone()),
+            (s.config.tokens[2].ledger_id, s.config.tokens[2].symbol.clone()),
+        ]
+    });
     for k in 0..3 {
         if amounts_arr[k] > 0 {
-            let (ledger, symbol) = read_state(|s| {
-                (s.config.tokens[k].ledger_id, s.config.tokens[k].symbol.clone())
-            });
-            transfer_from_user(ledger, caller, amounts_arr[k])
-                .await
-                .map_err(|reason| ThreePoolError::TransferFailed {
-                    token: symbol,
+            let (ledger, symbol) = &token_meta[k];
+            if let Err(reason) = transfer_from_user(*ledger, caller, amounts_arr[k]).await {
+                // Refund everything already pulled (indices 0..k).
+                for r in 0..k {
+                    if amounts_arr[r] > 0 {
+                        let (r_ledger, r_symbol) = &token_meta[r];
+                        if let Err(refund_err) =
+                            transfer_to_user(*r_ledger, caller, amounts_arr[r]).await
+                        {
+                            record_pending_claim(
+                                caller,
+                                r as u8,
+                                *r_ledger,
+                                r_symbol,
+                                amounts_arr[r],
+                                &format!(
+                                    "add_liquidity aborted after token {k} pull failed; \
+                                     refund of token {r} also failed ({refund_err})"
+                                ),
+                            );
+                        }
+                    }
+                }
+                return Err(ThreePoolError::TransferFailed {
+                    token: symbol.clone(),
                     reason,
-                })?;
+                });
+            }
         }
     }
 
@@ -594,18 +740,37 @@ pub async fn remove_liquidity(
         });
     });
 
-    // 6. Transfer each non-zero amount to user
+    // 6. Transfer each non-zero amount to user.
+    //
+    // LP and balances were already deducted in step 5 (deduct-before-transfer),
+    // so the user is owed these tokens unconditionally. If a transfer fails,
+    // record a pending claim for the un-sent amount and CONTINUE with the other
+    // tokens — never bail mid-loop and strand the remaining payouts. The user
+    // recovers any failed leg via `claim_pending`. Audit 2026-06-05 (3P-02).
+    let token_meta: [(Principal, String); 3] = read_state(|s| {
+        [
+            (s.config.tokens[0].ledger_id, s.config.tokens[0].symbol.clone()),
+            (s.config.tokens[1].ledger_id, s.config.tokens[1].symbol.clone()),
+            (s.config.tokens[2].ledger_id, s.config.tokens[2].symbol.clone()),
+        ]
+    });
+    let mut first_failure: Option<(String, String)> = None;
     for k in 0..3 {
         if amounts[k] > 0 {
-            let (ledger, symbol) = read_state(|s| {
-                (s.config.tokens[k].ledger_id, s.config.tokens[k].symbol.clone())
-            });
-            transfer_to_user(ledger, caller, amounts[k])
-                .await
-                .map_err(|reason| ThreePoolError::TransferFailed {
-                    token: symbol,
-                    reason,
-                })?;
+            let (ledger, symbol) = &token_meta[k];
+            if let Err(reason) = transfer_to_user(*ledger, caller, amounts[k]).await {
+                record_pending_claim(
+                    caller,
+                    k as u8,
+                    *ledger,
+                    symbol,
+                    amounts[k],
+                    &format!("remove_liquidity payout of token {k} failed ({reason})"),
+                );
+                if first_failure.is_none() {
+                    first_failure = Some((symbol.clone(), reason));
+                }
+            }
         }
     }
 
@@ -637,6 +802,12 @@ pub async fn remove_liquidity(
     });
 
     log!(INFO, "RemoveLiquidity: {} LP -> {:?} for {}", lp_burn, amounts, caller);
+
+    // Surface a partial-payout failure to the caller (claims persist for
+    // recovery). The LP burn and any successful legs are already committed.
+    if let Some((token, reason)) = first_failure {
+        return Err(ThreePoolError::TransferFailed { token, reason });
+    }
 
     Ok(amounts.to_vec())
 }
@@ -714,17 +885,27 @@ pub async fn remove_one_coin(
         });
     });
 
-    // 6. Transfer to user
+    // 6. Transfer to user.
+    //
+    // LP and balance were already deducted in step 5, so the user is owed
+    // `amount` unconditionally. If the transfer fails, record a pending claim
+    // so the user recovers it via `claim_pending` rather than losing it (the
+    // tokens physically remain in the pool). Audit 2026-06-05 (3P-02).
     let (ledger, symbol) = read_state(|s| {
         (s.config.tokens[idx].ledger_id, s.config.tokens[idx].symbol.clone())
     });
 
-    transfer_to_user(ledger, caller, amount)
-        .await
-        .map_err(|reason| ThreePoolError::TransferFailed {
-            token: symbol,
-            reason,
-        })?;
+    if let Err(reason) = transfer_to_user(ledger, caller, amount).await {
+        record_pending_claim(
+            caller,
+            coin_index,
+            ledger,
+            &symbol,
+            amount,
+            &format!("remove_one_coin payout of token {idx} failed ({reason})"),
+        );
+        return Err(ThreePoolError::TransferFailed { token: symbol, reason });
+    }
 
     // Record liquidity event v2 (dynamic-fee schema).
     mutate_state(|s| {
@@ -945,7 +1126,16 @@ pub fn get_lp_balance(user: Principal) -> u128 {
     storage::lp_balance_get(&user)
 }
 
-/// Returns all LP holders and their balances, sorted by balance descending.
+/// Maximum holders returned by `get_all_lp_holders` / `get_lp_holders`.
+/// 3USD is freely transferable with a zero fee, so an attacker could spread
+/// dust across many principals to inflate the holder set; this bounds the
+/// reply size. Use `get_lp_holders(offset, limit)` to page beyond the top.
+/// Audit 2026-06-05 (SAT-008).
+pub const MAX_HOLDERS_RETURNED: usize = 10_000;
+
+/// Returns LP holders and balances, sorted by balance descending, bounded to
+/// the top `MAX_HOLDERS_RETURNED`. Use `get_lp_holders` to page through the
+/// full set if it ever exceeds the cap.
 #[query]
 pub fn get_all_lp_holders() -> Vec<(Principal, u128)> {
     let mut holders: Vec<(Principal, u128)> = storage::lp_balance_iter()
@@ -953,7 +1143,25 @@ pub fn get_all_lp_holders() -> Vec<(Principal, u128)> {
         .filter(|(_, b)| *b > 0)
         .collect();
     holders.sort_by(|a, b| b.1.cmp(&a.1));
+    holders.truncate(MAX_HOLDERS_RETURNED);
     holders
+}
+
+/// Paginated LP holders, sorted by balance descending. `limit` is capped at
+/// `MAX_HOLDERS_RETURNED`. Audit 2026-06-05 (SAT-008).
+#[query]
+pub fn get_lp_holders(offset: u64, limit: u64) -> Vec<(Principal, u128)> {
+    let mut holders: Vec<(Principal, u128)> = storage::lp_balance_iter()
+        .into_iter()
+        .filter(|(_, b)| *b > 0)
+        .collect();
+    holders.sort_by(|a, b| b.1.cmp(&a.1));
+    let limit = (limit as usize).min(MAX_HOLDERS_RETURNED);
+    holders
+        .into_iter()
+        .skip(offset as usize)
+        .take(limit)
+        .collect()
 }
 
 #[query]
