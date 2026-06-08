@@ -1,0 +1,155 @@
+type AssetType = variant { Icp; IcUsd; CkUsdc; CkUsdt; ThreeUsd };
+type DepositKey = record { asset : AssetType; venue : Venue };
+type DepositRecord = record {
+  asset : AssetType;
+  venue : Venue;
+  last_verified_at : nat64;
+  deposited_at : nat64;
+  recorded_value_usd : nat;
+};
+type EpochStatus = record {
+  open_epoch : opt OpenEpoch;
+  snapshot_seed_committed : bool;
+  driver_interval_secs : nat64;
+  revealed_seed_count : nat64;
+  current_epoch_index : nat64;
+  driver_enabled : bool;
+};
+type EpochSummary = record {
+  epoch_index : nat64;
+  points_accrued_this_epoch : nat;
+  epoch_start_ns : nat64;
+  registered_principals : nat64;
+  active_principals : nat64;
+  total_points_all : nat;
+  snapshot_a_ns : nat64;
+  snapshot_b_ns : nat64;
+  epoch_end_ns : nat64;
+};
+type IngestStatus = record {
+  registered_count : nat64;
+  poll_interval_secs : nat64;
+  poll_enabled : bool;
+  sources : vec SourceStatus;
+};
+type InitArgs = record {
+  admin : opt principal;
+  excluded_principals : opt vec principal;
+  snapshot_seed_commit : opt blob;
+  season_start_ns : opt nat64;
+  season_end_ns : opt nat64;
+};
+type LeaderboardEntry = record {
+  "principal" : principal;
+  total_points : nat;
+  rank : nat32;
+  estimated_share_bps : nat32;
+};
+type OpenEpoch = record {
+  close_active : nat64;
+  close_cursor : opt principal;
+  epoch_index : nat64;
+  epoch_start_ns : nat64;
+  a_cursor : opt principal;
+  b_complete : bool;
+  b_cursor : opt principal;
+  close_started : bool;
+  a_complete : bool;
+  snapshot_a_ns : nat64;
+  snapshot_b_ns : nat64;
+  close_points_accrued : nat;
+  epoch_end_ns : nat64;
+};
+type PointsConfig = record {
+  admin : principal;
+  registered_count : nat64;
+  snapshot_seed_committed : bool;
+  excluded_count : nat32;
+  season_start_ns : nat64;
+  season_end_ns : nat64;
+  current_epoch_index : nat64;
+};
+type PointsError = variant { Unauthorized; Excluded };
+type PrincipalState = record {
+  "principal" : principal;
+  registered_at_ns : nat64;
+  total_points : nat;
+  repayment_events : vec RepaymentEvent;
+  first_qualifying_action : QualifyingAction;
+  active_deposits : vec record { DepositKey; DepositRecord };
+  last_epoch_processed : nat64;
+};
+type PublicEpochStatus = record {
+  open_epoch : opt PublicOpenEpoch;
+  snapshot_seed_committed : bool;
+  driver_interval_secs : nat64;
+  revealed_seed_count : nat64;
+  current_epoch_index : nat64;
+  driver_enabled : bool;
+};
+type PublicOpenEpoch = record {
+  epoch_index : nat64;
+  epoch_start_ns : nat64;
+  snapshot_a_ns : nat64;
+  snapshot_b_ns : nat64;
+  epoch_end_ns : nat64;
+};
+type QualifyingAction = variant {
+  ProvideAmmLiquidity;
+  MintIcUsd;
+  Deposit3Pool;
+  DepositStabilityPool;
+  RepayVault;
+};
+type RegistrationInfo = record {
+  "principal" : principal;
+  registered_at_ns : nat64;
+  first_qualifying_action : QualifyingAction;
+};
+type RepaymentEvent = record {
+  asset : AssetType;
+  repaid_at : nat64;
+  amount_usd : nat;
+  window_end : nat64;
+};
+type Result = variant { Ok; Err : PointsError };
+type Result_1 = variant { Ok; Err : text };
+type Result_2 = variant { Ok : nat64; Err : PointsError };
+type RevealedSeed = record {
+  revealed_at_ns : nat64;
+  epoch_index : nat64;
+  seed : blob;
+  snapshot_time_a_ns : nat64;
+  snapshot_time_b_ns : nat64;
+};
+type SourceStatus = record { tag : nat8; cursor : nat64; canister : principal };
+type Venue = variant { Amm; ThreePool; Vault; StabilityPool };
+service : (opt InitArgs) -> {
+  add_excluded_principal : (principal) -> (Result);
+  force_epoch_tick : () -> (Result);
+  get_asset_ledgers : () -> (vec record { nat8; principal }) query;
+  get_epoch_history : (nat32, nat32) -> (vec EpochSummary) query;
+  get_epoch_status : () -> (PublicEpochStatus) query;
+  get_epoch_status_admin : () -> (EpochStatus) query;
+  get_excluded_principals : () -> (vec principal) query;
+  get_ingest_status : () -> (IngestStatus) query;
+  get_leaderboard : (nat32, nat32) -> (vec LeaderboardEntry) query;
+  get_pending_commit : () -> (blob) query;
+  get_points_config : () -> (PointsConfig) query;
+  get_principal_state : (principal) -> (opt PrincipalState) query;
+  get_registration_info : (principal) -> (opt RegistrationInfo) query;
+  get_revealed_seed : (nat64) -> (opt RevealedSeed) query;
+  is_excluded : (principal) -> (bool) query;
+  is_registered : (principal) -> (bool) query;
+  register_test_principal : (principal) -> (Result);
+  remove_excluded_principal : (principal) -> (Result);
+  set_asset_ledger : (nat8, principal) -> (Result);
+  set_epoch_driver_enabled : (bool) -> (Result);
+  set_epoch_driver_interval_secs : (nat64) -> (Result);
+  set_excluded_principals : (vec principal) -> (Result);
+  set_poll_enabled : (bool) -> (Result);
+  set_poll_interval_secs : (nat64) -> (Result);
+  set_source_canister : (nat8, principal) -> (Result);
+  start_season : (blob) -> (Result_1);
+  trigger_poll : () -> (Result_2);
+}
