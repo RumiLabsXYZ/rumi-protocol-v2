@@ -389,10 +389,13 @@ class AmmService {
 
     const oisyDetected = isOisyWallet();
 
-    // Pre-compute approval amounts so the batched signer flow doesn't need
-    // to await mid-batch.
-    const approveA = amountA > 0n ? await approvalAmount(amountA, tokenA) : 0n;
-    const approveB = amountB > 0n ? await approvalAmount(amountB, tokenB) : 0n;
+    // Pre-compute approval amounts from the WARM fee cache (synchronous). For
+    // Oisy, awaiting a live icrc1_fee() here would burn the browser
+    // user-gesture window before the first consent screen and trip the
+    // "Signer window should not be opened outside of click handler" guard.
+    // AmmLiquidityPanel warms the fee cache on mount.
+    const approveA = amountA > 0n ? amountA + tokenFeeCached(tokenA) : 0n;
+    const approveB = amountB > 0n ? amountB + tokenFeeCached(tokenB) : 0n;
 
     if (oisyDetected && wallet.principal) {
       console.log(`[Oisy] Sequential approve(s) + AMM add_liquidity via @icp-sdk/signer v5`);
