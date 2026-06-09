@@ -17,12 +17,24 @@
   import { initIcpswapRoutingFlag } from "../lib/services/swapRouter";
   import { stabilityPoolService } from "../lib/services/stabilityPoolService";
   import { liveSpApyPct } from "../lib/utils/liveApy";
+  import { preWarmOisySigner } from "../lib/services/oisySigner";
+  import { isOisyWallet } from "../lib/services/protocol/walletOperations";
   let permissionInitialized = false;
   let showDebug = false;
   let hasLiquidatableVaults = false;
   let earnApyPct: number | null = null;
   $: currentPath = $page.url.pathname;
   $: ({ isConnected } = $wallet);
+  // Pre-warm the Oisy signer agent on connect so every write flow (mint,
+  // borrow, repay, deposit, claim, liquidate, etc.) reaches its first consent
+  // screen synchronously. Creating the agent opens no popup; only the first
+  // canister call does. Without this, the cold-cache SignerAgent.create()
+  // handshake runs inside the click path and trips Oisy's "Signer window
+  // should not be opened outside of click handler" guard. Idempotent per
+  // principal; no-op for non-Oisy wallets.
+  $: if (isConnected && $wallet.principal && isOisyWallet()) {
+    preWarmOisySigner($wallet.principal);
+  }
   $: isDeveloperMode = isDevelopment || ($permissionStore.initialized && $permissionStore.isDeveloper);
   $: canViewVaults = isDevelopment || $developerAccess || isConnected || ($permissionStore.initialized && $permissionStore.canViewVaults);
   $: if (isConnected && !permissionInitialized) {
