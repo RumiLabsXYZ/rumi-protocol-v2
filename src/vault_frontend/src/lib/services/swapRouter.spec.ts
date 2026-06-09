@@ -315,21 +315,25 @@ describe('swapRouter — provider registry integration', () => {
 
   // ──────────────────────────────────────────────────────────────
   // Oisy ICPswap direct dispatch (3USD <-> ICP, single-hop ICPswap winner).
-  // Verifies the `amm_swap` case routes through the batched executor when
-  // Oisy is the wallet, and through provider.swap otherwise.
+  // Verifies the `amm_swap` case routes through the sequential Oisy executor
+  // (executeIcpswapDirectOisy) when Oisy is the wallet, and through
+  // provider.swap otherwise.
+  //
+  // @icp-sdk/signer v5 has no batch/commit/execute concept (see the
+  // oisySigner.ts docstring): each canister call is an independent sequential
+  // await. The executor approves the from-ledger, then calls
+  // depositFrom -> swap -> withdraw on the pool actor directly — no execute().
   // ──────────────────────────────────────────────────────────────
 
   describe('Oisy ICPswap direct dispatch (amm_swap)', () => {
-    it('dispatches through the batched executor instead of provider.swap when ICPswap wins', async () => {
+    it('dispatches through the sequential Oisy executor instead of provider.swap when ICPswap wins', async () => {
       isOisyWalletMock.mockReturnValue(true);
 
-      // Wire up Oisy fakes: signer agent collects batched promises and
-      // returns control once execute() resolves. Actors must respond with
-      // shapes the executor unpacks (Ok/ok per call site).
-      const fakeSigner = {
-        batch: vi.fn(),
-        execute: vi.fn().mockResolvedValue(undefined),
-      };
+      // Wire up Oisy fakes. v5: getOisySignerAgent returns a SignerAgent that
+      // is handed to createOisyActor; it has no batch/execute of its own, so a
+      // plain placeholder stands in. The actors do the real work via sequential
+      // awaits and must return the Ok/ok shapes the executor unpacks.
+      const fakeSignerAgent = {};
       const fakeFromLedger = {
         icrc2_approve: vi.fn().mockResolvedValue({ Ok: 1n }),
       };
@@ -339,7 +343,7 @@ describe('swapRouter — provider registry integration', () => {
         withdraw: vi.fn().mockResolvedValue({ ok: 1_499n }),
       };
       const oisySigner = await import('./oisySigner');
-      vi.mocked(oisySigner.getOisySignerAgent).mockResolvedValue(fakeSigner as any);
+      vi.mocked(oisySigner.getOisySignerAgent).mockResolvedValue(fakeSignerAgent as any);
       vi.mocked(oisySigner.createOisyActor).mockImplementation(((canisterId: string) => {
         // Pool ID from icpswapQuote() fixture above
         if (canisterId === 'mu2zw-6iaaa-aaaar-qb56q-cai') return fakePool;
@@ -359,8 +363,8 @@ describe('swapRouter — provider registry integration', () => {
 
       // Provider.swap path was bypassed
       expect(icpswapMock.swap).not.toHaveBeenCalled();
-      // Oisy batched flow ran end to end
-      expect(fakeSigner.execute).toHaveBeenCalledTimes(1);
+      // Oisy v5 sequential flow ran end to end: approve the from-ledger, then
+      // depositFrom -> swap -> withdraw on the pool actor (no execute()).
       expect(fakeFromLedger.icrc2_approve).toHaveBeenCalledTimes(1);
       expect(fakePool.depositFrom).toHaveBeenCalledTimes(1);
       expect(fakePool.swap).toHaveBeenCalledTimes(1);
