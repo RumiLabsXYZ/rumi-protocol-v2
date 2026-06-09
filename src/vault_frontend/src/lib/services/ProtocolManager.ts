@@ -381,6 +381,13 @@ export class ProtocolManager {
    * Create a new vault with ICP collateral
    */
   async createVault(collateralAmount: number): Promise<VaultOperationResult> {
+    // Oisy: bypass executeOperation entirely — its async overhead (queue checks,
+    // processing store, and the pre-op balance/refresh/allowance awaits below)
+    // burns the browser user gesture context needed for the ICRC-112 signer
+    // popup. ApiClient.openVault handles the batched approve + open_vault.
+    if (isOisyWallet()) {
+      return ApiClient.openVault(collateralAmount);
+    }
     return this.executeOperation(
       'createVault',
       () => ApiClient.openVault(collateralAmount),

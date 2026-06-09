@@ -81,6 +81,13 @@ export class ApiClient {
   // Add this property to track if an operation is in progress
 private static operationInProgress = false;
 
+  // Raw-vault-snapshot cache. Populated wherever get_vaults is fetched
+  // (page-load / poll / refresh-after) so the Oisy `_arr` verifiers can read
+  // pre-op ("before") state synchronously instead of awaiting get_vaults inside
+  // the click gesture window.
+  private static rawSnapshotCache = new Map<number, { collateralAmount: bigint; borrowedIcusd: bigint; icpMargin: bigint }>();
+  private static rawVaultIdSet: Set<number> = new Set();
+
 /**
  * Helper for sequential operations with integrated operation tracking
  * @param operation The operation function to execute
@@ -116,7 +123,10 @@ static async executeSequentialOperation<T>(
     ApiClient.operationInProgress = true;
     
     // Refresh vaults at the beginning if enabled
-    if (refreshOptions.refreshBefore) {
+    // Skip for Oisy: any network await between the click and the first signer
+    // call burns the browser's transient-activation window and trips
+    // "Signer window should not be opened outside of click handler".
+    if (refreshOptions.refreshBefore && !isOisyWallet()) {
       console.log('Refreshing vault data before operation');
       try {
         await ApiClient.refreshVaultData();
@@ -450,7 +460,9 @@ private static async refreshVaultData(): Promise<void> {
             // Pre-open vault-id snapshot for the Oisy false-negative
             // verifier: if open_vault lands but Oisy mangles the
             // response, we still find the new vault by diffing IDs.
-            const beforeIds = await ApiClient.snapshotUserVaultIds();
+            // Oisy reads the warm sync cache (no network await inside the
+            // click gesture window); non-Oisy awaits a fresh snapshot.
+            const beforeIds = isOisyWallet() ? ApiClient.getCachedUserVaultIds() : await ApiClient.snapshotUserVaultIds();
             const verifyOpenLanded = async () => {
               if (!beforeIds) return false;
               const newVault = await ApiClient.findNewlyOpenedVault(beforeIds);
@@ -707,7 +719,9 @@ static async openVaultAndBorrow(
         // verifier. open_vault_and_borrow creates a new vault AND
         // borrows in one canister call; we treat "new vault appeared
         // with the right collateral" as proof the call landed.
-        const beforeIds = await ApiClient.snapshotUserVaultIds();
+        // Oisy reads the warm sync cache (no network await inside the
+        // click gesture window); non-Oisy awaits a fresh snapshot.
+        const beforeIds = isOisyWallet() ? ApiClient.getCachedUserVaultIds() : await ApiClient.snapshotUserVaultIds();
         const verifyOpenAndBorrowLanded = async () => {
           if (!beforeIds) return false;
           const newVault = await ApiClient.findNewlyOpenedVault(beforeIds);
@@ -870,8 +884,12 @@ static async borrowFromVault(vaultId: number, icusdAmount: number): Promise<Vaul
         };
       }
       
-      // Simulate processing delay
-      await new Promise(resolve => setTimeout(resolve, 1200));
+      // Simulate processing delay.
+      // Skip for Oisy: this artificial await burns the click gesture window
+      // before the first signer call and trips the popup error.
+      if (!isOisyWallet()) {
+        await new Promise(resolve => setTimeout(resolve, 1200));
+      }
 
       const actor = await ApiClient.getAuthenticatedActor();
       const vaultArg = {
@@ -882,7 +900,9 @@ static async borrowFromVault(vaultId: number, icusdAmount: number): Promise<Vaul
       // Snapshot pre-borrow state for the Oisy false-negative verifier.
       // We compare RAW e8s (not the rounded human float on VaultDTO) so a
       // 0.1 icUSD borrow can't be hidden by display rounding.
-      const before = await ApiClient.getRawBorrowedE8s(vaultId);
+      // Oisy reads the warm sync cache (no network await inside the click
+      // gesture window); non-Oisy awaits a fresh snapshot.
+      const before = isOisyWallet() ? ApiClient.getCachedRawBorrowedE8s(vaultId) : await ApiClient.getRawBorrowedE8s(vaultId);
       const expectedDeltaE8s = vaultArg.amount;
 
       const result = await callWithOisyFalseNegativeGuard(
@@ -987,7 +1007,9 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
 
       // Snapshot pre-add collateral for the Oisy false-negative verifier.
       // We read RAW token units so we can compare with BigInt arithmetic.
-      const beforeCollateral = await ApiClient.getRawCollateralAmount(vaultId);
+      // Oisy reads the warm sync cache (no network await inside the click
+      // gesture window); non-Oisy awaits a fresh snapshot.
+      const beforeCollateral = isOisyWallet() ? ApiClient.getCachedRawCollateralAmount(vaultId) : await ApiClient.getRawCollateralAmount(vaultId);
 
       // ─── Oisy ICRC-112 batched path ───
       // Batches approve + add_margin into a single signer popup via ICRC-112.
@@ -1225,7 +1247,9 @@ static async repayToVault(vaultId: number, icusdAmount: number): Promise<VaultOp
       // (timer-driven, slow) can offset the reduction slightly so we
       // accept any directional decrease >= 50% of expected as a landed
       // op. Anything smaller would be too noisy.
-      const beforeBorrowed = await ApiClient.getRawBorrowedE8s(vaultId);
+      // Oisy reads the warm sync cache (no network await inside the click
+      // gesture window); non-Oisy awaits a fresh snapshot.
+      const beforeBorrowed = isOisyWallet() ? ApiClient.getCachedRawBorrowedE8s(vaultId) : await ApiClient.getRawBorrowedE8s(vaultId);
 
       const verifyRepayLanded = async () => {
         if (beforeBorrowed === null) return false;
@@ -1486,7 +1510,9 @@ static async repayToVaultWithStable(
       };
 
       // Pre-repay snapshot — same shape as repayToVault.
-      const beforeBorrowed = await ApiClient.getRawBorrowedE8s(vaultId);
+      // Oisy reads the warm sync cache (no network await inside the click
+      // gesture window); non-Oisy awaits a fresh snapshot.
+      const beforeBorrowed = isOisyWallet() ? ApiClient.getCachedRawBorrowedE8s(vaultId) : await ApiClient.getRawBorrowedE8s(vaultId);
       const verifyRepayLanded = async () => {
         if (beforeBorrowed === null) return false;
         const after = await ApiClient.getRawBorrowedE8s(vaultId);
@@ -1579,23 +1605,37 @@ static async repayToVaultWithStable(
       try {
         console.log(`Closing vault #${vaultId}`);
         
-        // Verify vault access first
-        const { vault, actor, error } = await ApiClient.verifyVaultAccess(vaultId);
-        
-        if (error) {
-          // Special case for already closed vaults
-          if (error === 'Vault not found') {
-            return {
-              success: true,
-              message: `Vault #${vaultId} is already closed.`,
-              vaultId
-            };
+        // Verify vault access first. Oisy reads the synchronous snapshot cache
+        // and builds the actor directly — verifyVaultAccess does a getVaultById
+        // query that would burn the gesture window and block the signer popup.
+        let actor: any;
+        let isEmpty: boolean;
+        if (isOisyWallet()) {
+          const snap = ApiClient.getCachedRawSnapshot(vaultId);
+          if (!snap) {
+            return { success: true, message: `Vault #${vaultId} is already closed.`, vaultId };
           }
-          return { success: false, error };
+          actor = await ApiClient.getAuthenticatedActor();
+          isEmpty = snap.icpMargin === 0n && snap.borrowedIcusd === 0n;
+        } else {
+          const access = await ApiClient.verifyVaultAccess(vaultId);
+          if (access.error) {
+            // Special case for already closed vaults
+            if (access.error === 'Vault not found') {
+              return {
+                success: true,
+                message: `Vault #${vaultId} is already closed.`,
+                vaultId
+              };
+            }
+            return { success: false, error: access.error };
+          }
+          actor = access.actor;
+          isEmpty = access.vault.icpMargin === 0 && access.vault.borrowedIcusd === 0;
         }
-        
+
         // If vault exists but has no collateral and no debt, treat as already closed
-        if (vault.icpMargin === 0 && vault.borrowedIcusd === 0) {
+        if (isEmpty) {
           return {
             success: true,
             message: `Vault #${vaultId} is empty and will be automatically closed.`,
@@ -1722,6 +1762,11 @@ static async repayToVaultWithStable(
         console.log(`Fetching vaults for principal: ${principalStr}`);
         const canisterVaults = await publicActor.get_vaults([principalForQuery]);
         console.log('Raw canister vaults data:', canisterVaults);
+
+        // Keep the sync raw-snapshot caches warm so the Oisy click-path
+        // verifiers can read pre-op state without a network await.
+        ApiClient.rawVaultIdSet = new Set(canisterVaults.map((cv: any) => Number(cv.vault_id)));
+        ApiClient.rawSnapshotCache = new Map(canisterVaults.map((cv: any) => [Number(cv.vault_id), { collateralAmount: BigInt(cv.collateral_amount), borrowedIcusd: BigInt(cv.borrowed_icusd_amount), icpMargin: BigInt(cv.icp_margin_amount) }]));
         
         // Get protocol status for ICP price calculation
         const status = await QueryOperations.getProtocolStatus();
@@ -1809,7 +1854,9 @@ static async repayToVaultWithStable(
 
         // Snapshot for the Oisy false-negative verifier. Full withdraw
         // takes collateral to zero (and may auto-close the vault).
-        const beforeCollateral = await ApiClient.getRawCollateralAmount(vaultId);
+        // Oisy reads the warm sync cache (no network await inside the click
+        // gesture window); non-Oisy awaits a fresh snapshot.
+        const beforeCollateral = isOisyWallet() ? ApiClient.getCachedRawCollateralAmount(vaultId) : await ApiClient.getRawCollateralAmount(vaultId);
 
         const result = await callWithOisyFalseNegativeGuard(
           () => actor.withdraw_collateral(BigInt(vaultId)),
@@ -1883,7 +1930,9 @@ static async repayToVaultWithStable(
         };
 
         // Snapshot for the Oisy false-negative verifier.
-        const beforeCollateral = await ApiClient.getRawCollateralAmount(vaultId);
+        // Oisy reads the warm sync cache (no network await inside the click
+        // gesture window); non-Oisy awaits a fresh snapshot.
+        const beforeCollateral = isOisyWallet() ? ApiClient.getCachedRawCollateralAmount(vaultId) : await ApiClient.getRawCollateralAmount(vaultId);
 
         const result = await callWithOisyFalseNegativeGuard(
           () => actor.withdraw_partial_collateral(vaultArg),
@@ -1992,9 +2041,15 @@ static async repayToVaultWithStable(
         // Pre-redeem icUSD balance for the Oisy false-negative
         // verifier: redeem burns icUSD from the caller.
         const walletState = get(walletStore);
-        const beforeIcusd = walletState.principal
-          ? await TokenService.getTokenBalance(CONFIG.currentIcusdLedgerId, walletState.principal, { skipCache: true }).catch(() => null)
-          : null;
+        // Oisy: read the pre-redeem icUSD balance SYNCHRONOUSLY from the
+        // already-loaded wallet store (no awaited query in the gesture window,
+        // which would block the signer popup). Non-Oisy uses a fresh skipCache
+        // read for max precision.
+        const beforeIcusd = isOisyWallet()
+          ? (walletState.tokenBalances?.ICUSD?.raw ?? null)
+          : (walletState.principal
+              ? await TokenService.getTokenBalance(CONFIG.currentIcusdLedgerId, walletState.principal, { skipCache: true }).catch(() => null)
+              : null);
         const verifyRedeemLanded = async () => {
           if (beforeIcusd === null || !walletState.principal) return false;
           const after = await TokenService.getTokenBalance(
@@ -2149,12 +2204,15 @@ static async repayToVaultWithStable(
         const actor = await ApiClient.getAuthenticatedActor();
         const amountE8s = BigInt(Math.floor(icusdAmount * E8S));
 
-        // Pre-redeem icUSD balance for the Oisy false-negative
-        // verifier: redeem burns icUSD from the caller's balance.
+        // Pre-redeem icUSD balance for the Oisy false-negative verifier.
+        // Oisy reads it SYNCHRONOUSLY from the wallet store (no gesture-burning
+        // query); non-Oisy uses a fresh skipCache read.
         const walletState = get(walletStore);
-        const beforeIcusd = walletState.principal
-          ? await TokenService.getTokenBalance(CONFIG.currentIcusdLedgerId, walletState.principal, { skipCache: true }).catch(() => null)
-          : null;
+        const beforeIcusd = isOisyWallet()
+          ? (walletState.tokenBalances?.ICUSD?.raw ?? null)
+          : (walletState.principal
+              ? await TokenService.getTokenBalance(CONFIG.currentIcusdLedgerId, walletState.principal, { skipCache: true }).catch(() => null)
+              : null);
 
         const result = await callWithOisyFalseNegativeGuard(
           () => actor.redeem_icp(amountE8s),
@@ -2222,9 +2280,13 @@ static async repayToVaultWithStable(
         // Pre-redeem icUSD balance for the Oisy false-negative
         // verifier: redeem burns icUSD from the caller.
         const walletState = get(walletStore);
-        const beforeIcusd = walletState.principal
-          ? await TokenService.getTokenBalance(CONFIG.currentIcusdLedgerId, walletState.principal, { skipCache: true }).catch(() => null)
-          : null;
+        // Oisy: read the pre-redeem icUSD balance synchronously from the wallet
+        // store (no gesture-burning query); non-Oisy uses a fresh skipCache read.
+        const beforeIcusd = isOisyWallet()
+          ? (walletState.tokenBalances?.ICUSD?.raw ?? null)
+          : (walletState.principal
+              ? await TokenService.getTokenBalance(CONFIG.currentIcusdLedgerId, walletState.principal, { skipCache: true }).catch(() => null)
+              : null);
 
         const result = await callWithOisyFalseNegativeGuard(
           () => actor.redeem_collateral(collateralPrincipal, amountE8s),
@@ -2304,6 +2366,12 @@ static async repayToVaultWithStable(
         const canisterVaults = await publicActor.get_vaults([walletState.principal]);
         const v = canisterVaults.find(cv => Number(cv.vault_id) === vaultId);
         if (!v) return { exists: false };
+        // Keep the sync cache warm for the Oisy click-path verifiers.
+        ApiClient.rawSnapshotCache.set(Number(v.vault_id), {
+          collateralAmount: BigInt(v.collateral_amount),
+          borrowedIcusd: BigInt(v.borrowed_icusd_amount),
+          icpMargin: BigInt(v.icp_margin_amount),
+        });
         return {
           exists: true,
           collateralAmount: BigInt(v.collateral_amount),
@@ -2315,6 +2383,17 @@ static async repayToVaultWithStable(
         return null;
       }
     }
+
+    /**
+     * Synchronous reads of the raw-vault-snapshot cache, used by the Oisy
+     * click-path verifiers to capture pre-op ("before") state WITHOUT a
+     * network await (which would burn the transient-activation window).
+     * The non-Oisy path keeps awaiting the fresh queries above.
+     */
+    static getCachedRawBorrowedE8s(vaultId: number): bigint | null { const s = ApiClient.rawSnapshotCache.get(vaultId); return s ? s.borrowedIcusd : null; }
+    static getCachedRawCollateralAmount(vaultId: number): bigint | null { const s = ApiClient.rawSnapshotCache.get(vaultId); return s ? s.collateralAmount : null; }
+    static getCachedRawSnapshot(vaultId: number): { exists: true; collateralAmount: bigint; borrowedIcusd: bigint; icpMargin: bigint } | null { const s = ApiClient.rawSnapshotCache.get(vaultId); return s ? { exists: true, collateralAmount: s.collateralAmount, borrowedIcusd: s.borrowedIcusd, icpMargin: s.icpMargin } : null; }
+    static getCachedUserVaultIds(): Set<number> | null { return ApiClient.rawVaultIdSet.size > 0 ? new Set(ApiClient.rawVaultIdSet) : null; }
 
     /**
      * Convenience wrapper around fetchVaultRawSnapshot returning just
@@ -2348,7 +2427,10 @@ static async repayToVaultWithStable(
         const walletState = get(walletStore);
         if (!walletState.principal) return null;
         const canisterVaults = await publicActor.get_vaults([walletState.principal]);
-        return new Set(canisterVaults.map(v => Number(v.vault_id)));
+        const ids = new Set(canisterVaults.map(v => Number(v.vault_id)));
+        // Keep the sync vault-id cache warm for the Oisy click-path verifiers.
+        ApiClient.rawVaultIdSet = new Set(ids);
+        return ids;
       } catch (err) {
         console.warn('snapshotUserVaultIds failed:', err);
         return null;
@@ -2822,10 +2904,22 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
     try {
       console.log(`Withdrawing collateral and closing vault #${vaultId} in one operation`);
       
-      // First ensure the vault exists
-      const vault = await ApiClient.getVaultById(vaultId);
-      
-      if (!vault) {
+      // First ensure the vault exists. Oisy reads the synchronous snapshot
+      // cache — a getVaultById query here would burn the gesture window and
+      // block the signer popup; non-Oisy queries fresh.
+      let vaultExists: boolean;
+      let borrowedIcusdHuman: number;
+      if (isOisyWallet()) {
+        const snap = ApiClient.getCachedRawSnapshot(vaultId);
+        vaultExists = !!snap;
+        borrowedIcusdHuman = snap ? Number(snap.borrowedIcusd) / E8S : 0;
+      } else {
+        const vault = await ApiClient.getVaultById(vaultId);
+        vaultExists = !!vault;
+        borrowedIcusdHuman = vault ? vault.borrowedIcusd : 0;
+      }
+
+      if (!vaultExists) {
         console.log(`Vault #${vaultId} not found, it may have already been closed`);
         return {
           success: true,
@@ -2833,13 +2927,13 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
           vaultId
         };
       }
-      
+
       // Verify the vault has no debt (dust below 0.0005 icUSD is forgiven by backend)
       const DUST_THRESHOLD = 0.0005;
-      if (vault.borrowedIcusd > DUST_THRESHOLD) {
+      if (borrowedIcusdHuman > DUST_THRESHOLD) {
         return {
           success: false,
-          error: `Cannot close vault while it has outstanding debt of ${vault.borrowedIcusd} icUSD. Please repay all debt first.`
+          error: `Cannot close vault while it has outstanding debt of ${borrowedIcusdHuman} icUSD. Please repay all debt first.`
         };
       }
       
@@ -2997,36 +3091,40 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
         try {
           console.log(`Partially liquidating vault #${vaultId} with ${icusdAmount} icUSD`);
           
-          // First get the vault to validate the operation
-          const vaults = await ApiClient.getLiquidatableVaults();
-          const vault = vaults.find(v => Number(v.vault_id) === vaultId);
-          
-          if (!vault) {
-            return {
-              success: false,
-              error: "Vault not found or is not liquidatable"
-            };
+          // Non-Oisy: pre-validate against the liquidatable set. Oisy skips this
+          // network query to preserve the gesture window — the backend
+          // re-validates and the UI already validated against its loaded list.
+          if (!isOisyWallet()) {
+            const vaults = await ApiClient.getLiquidatableVaults();
+            const vault = vaults.find(v => Number(v.vault_id) === vaultId);
+
+            if (!vault) {
+              return {
+                success: false,
+                error: "Vault not found or is not liquidatable"
+              };
+            }
+
+            // Validate that partial liquidation amount is reasonable
+            const totalDebt = Number(vault.borrowed_icusd_amount) / E8S;
+            const maxPartialAmount = totalDebt * 0.5; // 50% maximum
+
+            if (icusdAmount > totalDebt) {
+              return {
+                success: false,
+                error: `Cannot liquidate more than total debt (${totalDebt.toFixed(2)} icUSD)`
+              };
+            }
+
+            if (icusdAmount > maxPartialAmount) {
+              return {
+                success: false,
+                error: `Partial liquidation limited to 50% of debt (${maxPartialAmount.toFixed(2)} icUSD maximum)`
+              };
+            }
+
+            console.log(`Vault #${vaultId} partial liquidation: ${icusdAmount} icUSD of ${totalDebt} icUSD total debt`);
           }
-          
-          // Validate that partial liquidation amount is reasonable
-          const totalDebt = Number(vault.borrowed_icusd_amount) / E8S;
-          const maxPartialAmount = totalDebt * 0.5; // 50% maximum
-          
-          if (icusdAmount > totalDebt) {
-            return {
-              success: false,
-              error: `Cannot liquidate more than total debt (${totalDebt.toFixed(2)} icUSD)`
-            };
-          }
-          
-          if (icusdAmount > maxPartialAmount) {
-            return {
-              success: false,
-              error: `Partial liquidation limited to 50% of debt (${maxPartialAmount.toFixed(2)} icUSD maximum)`
-            };
-          }
-          
-          console.log(`Vault #${vaultId} partial liquidation: ${icusdAmount} icUSD of ${totalDebt} icUSD total debt`);
           
           // Check and set allowance for icUSD with a 20% buffer
           const bufferedAmount = BigInt(Math.floor((icusdAmount * 1.2) * E8S));
@@ -3137,28 +3235,36 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
         try {
           console.log(`Partially liquidating vault #${vaultId} with ${icusdAmount} ${tokenType}`);
 
-          const vaults = await ApiClient.getLiquidatableVaults();
-          const vault = vaults.find(v => Number(v.vault_id) === vaultId);
-          if (!vault) {
-            return { success: false, error: "Vault not found or is not liquidatable" };
-          }
-
-          const totalDebt = Number(vault.borrowed_icusd_amount) / E8S;
-          if (icusdAmount > totalDebt) {
-            return { success: false, error: `Cannot liquidate more than total debt (${totalDebt.toFixed(2)} icUSD)` };
-          }
-
-          // Convert icUSD amount (e8s) to ckstable amount (e6s)
-          // ICRC-2 transfer_from deducts (amount + ledger_fee) from allowance
+          // Convert icUSD amount (e8s) to ckstable amount (e6s).
+          // ICRC-2 transfer_from deducts (amount + ledger_fee) from allowance.
           const STABLE_LEDGER_FEE = BigInt(10_000); // 0.01 USDT/USDC
           const amountE8s = Math.floor(icusdAmount * E8S);
           const stableE6s = Math.floor(amountE8s / 100);
-          // Fetch the admin-settable repay fee rate
-          const status = await QueryOperations.getProtocolStatus();
-          const feeRate = status.ckstableRepayFee || 0;
-          const protocolFee = BigInt(Math.ceil(stableE6s * feeRate));
-          const bufferedE6s = BigInt(stableE6s) + protocolFee + STABLE_LEDGER_FEE + STABLE_LEDGER_FEE;
           const spenderCanisterId = CONFIG.currentCanisterId;
+
+          // Non-Oisy: pre-validate + compute the approval buffer (needs the
+          // protocol fee rate). Oisy skips both network queries to preserve the
+          // gesture window — it approves a fixed LARGE_APPROVAL and never uses
+          // bufferedE6s; the backend re-validates.
+          let bufferedE6s = 0n;
+          if (!isOisyWallet()) {
+            const vaults = await ApiClient.getLiquidatableVaults();
+            const vault = vaults.find(v => Number(v.vault_id) === vaultId);
+            if (!vault) {
+              return { success: false, error: "Vault not found or is not liquidatable" };
+            }
+
+            const totalDebt = Number(vault.borrowed_icusd_amount) / E8S;
+            if (icusdAmount > totalDebt) {
+              return { success: false, error: `Cannot liquidate more than total debt (${totalDebt.toFixed(2)} icUSD)` };
+            }
+
+            // Fetch the admin-settable repay fee rate
+            const status = await QueryOperations.getProtocolStatus();
+            const feeRate = status.ckstableRepayFee || 0;
+            const protocolFee = BigInt(Math.ceil(stableE6s * feeRate));
+            bufferedE6s = BigInt(stableE6s) + protocolFee + STABLE_LEDGER_FEE + STABLE_LEDGER_FEE;
+          }
 
           const liq_token_type = tokenType === 'CKUSDT' ? { 'CKUSDT' : null } as const : { 'CKUSDC' : null } as const;
           const vaultArgWithToken = {
@@ -3247,24 +3353,30 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
         try {
           console.log(`Liquidating vault #${vaultId}`);
           
-          // First get the vault to check debt amount
-          const vaults = await ApiClient.getLiquidatableVaults();
-          const vault = vaults.find(v => Number(v.vault_id) === vaultId);
-          
-          if (!vault) {
-            return {
-              success: false,
-              error: "Vault not found or is not liquidatable"
-            };
-          }
-          
-          // Convert debt amount from bigint to number
-          const icusdDebt = Number(vault.borrowed_icusd_amount) / E8S;
-          console.log(`Vault #${vaultId} has debt of ${icusdDebt} icUSD`);
-          
-          // Check and set allowance for icUSD with a 50% buffer
-          const bufferedDebt = BigInt(Math.floor((icusdDebt * 1.5) * E8S));
+          // Non-Oisy: pre-validate + compute the allowance buffer. Oisy skips
+          // the getLiquidatableVaults query to preserve the gesture window (it
+          // approves a fixed LARGE_APPROVAL and never uses bufferedDebt; the
+          // backend re-validates).
           const spenderCanisterId = CONFIG.currentCanisterId;
+          let bufferedDebt = 0n;
+          if (!isOisyWallet()) {
+            const vaults = await ApiClient.getLiquidatableVaults();
+            const vault = vaults.find(v => Number(v.vault_id) === vaultId);
+
+            if (!vault) {
+              return {
+                success: false,
+                error: "Vault not found or is not liquidatable"
+              };
+            }
+
+            // Convert debt amount from bigint to number
+            const icusdDebt = Number(vault.borrowed_icusd_amount) / E8S;
+            console.log(`Vault #${vaultId} has debt of ${icusdDebt} icUSD`);
+
+            // Check and set allowance for icUSD with a 50% buffer
+            bufferedDebt = BigInt(Math.floor((icusdDebt * 1.5) * E8S));
+          }
 
           // ─── Oisy ICRC-112 batched path ───
           // Always batch approve+liquidate — skip allowance check to preserve gesture context.
