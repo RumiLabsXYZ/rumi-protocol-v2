@@ -30,10 +30,9 @@ export const CANISTER_IDS = {
   // ICPswap pools (external DEX for routing)
   ICPSWAP_3USD_ICP_POOL: "mu2zw-6iaaa-aaaar-qb56q-cai",
   ICPSWAP_ICUSD_ICP_POOL: "nqxwe-hiaaa-aaaar-qb5yq-cai",
-  // Rumi Points (airdrop accrual engine). Empty until the canister is reserved
-  // + deployed (trio deploy per src/rumi_points/DEPLOY_RUNBOOK.md); the /points
-  // section stays hidden while this is "".
-  RUMI_POINTS: "",
+  // Rumi Points (airdrop accrual engine). Live on mainnet 2026-06-09; setting
+  // this id flips POINTS_ENABLED true so the /points section renders.
+  RUMI_POINTS: "bfnu3-6aaaa-aaaab-qhanq-cai",
 } as const;
 
 /** The /points airdrop section is shown only once the rumi_points canister id
