@@ -10,6 +10,7 @@
   import { fetchLedgerFee, getCachedLedgerFee } from '../../services/ledgerFeeService';
   import { formatStableTokenDisplay } from '../../utils/format';
   import { isOisyLandedSentinel } from '../../services/protocol/oisyResilience';
+  import { isOisyWallet } from '../../services/protocol/walletOperations';
 
   function poolLedgerRef(index: number) {
     const t = POOL_TOKENS[index];
@@ -60,6 +61,14 @@
   // ── Debounce timers ──
   let addQuoteTimer: ReturnType<typeof setTimeout> | null = null;
   let removeQuoteTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // ── Oisy false-negative verifier snapshots ──
+  // Captured during the quote step (pre-click) for Oisy so the mint/redeem
+  // click handlers never await a balance query inside the browser gesture
+  // window — that would block the Oisy signer popup with a "Signer window
+  // should not be opened outside of click handler" error.
+  let addBeforeLp: bigint | null = null;
+  let removeBeforeLp: bigint | null = null;
 
   $: isConnected = $walletStore.isConnected;
 
@@ -144,6 +153,10 @@
       });
       if (amounts.every(a => a === 0n)) { addLpEstimate = null; return; }
       addLpEstimate = await threePoolService.calcAddLiquidity(amounts);
+      // Capture the verifier snapshot here (pre-click async context) for Oisy.
+      if (isOisyWallet() && $walletStore.principal) {
+        addBeforeLp = await threePoolService.captureLpSnapshot($walletStore.principal);
+      }
     } catch {
       addLpEstimate = null;
     } finally {
@@ -176,6 +189,10 @@
       } else {
         removeSingleEstimate = await threePoolService.calcRemoveOneCoin(lpRaw, removeSingleIndex);
         removeEstimates = null;
+      }
+      // Capture the verifier snapshot here (pre-click async context) for Oisy.
+      if (isOisyWallet() && $walletStore.principal) {
+        removeBeforeLp = await threePoolService.captureLpSnapshot($walletStore.principal);
       }
     } catch {
       removeEstimates = null;
@@ -232,12 +249,13 @@
       return;
     }
 
-    // Check each balance
+    // Check each balance. Read fees synchronously from the warm cache — an
+    // `await fetchLedgerFee` here would burn the user-gesture window and block
+    // the Oisy signer popup. The cache is warmed on mount and during quoting.
     for (let k = 0; k < 3; k++) {
       if (amounts[k] > 0n) {
         const balance = getBalance(k);
-        const liveFee = await fetchLedgerFee(poolLedgerRef(k));
-        const fees = liveFee * 2n;
+        const fees = getCachedLedgerFee(poolLedgerRef(k)) * 2n;
         if (amounts[k] + fees > balance) {
           addError = `Insufficient ${POOL_TOKENS[k].symbol} balance`;
           return;
@@ -250,7 +268,7 @@
       addError = '';
       addNotice = '';
       const minLp = addLpEstimate * BigInt(10000 - addSlippageBps) / 10000n;
-      const addResult = await threePoolService.addLiquidity(amounts, minLp);
+      const addResult = await threePoolService.addLiquidity(amounts, minLp, addBeforeLp);
       const oisyResilient = isOisyLandedSentinel(addResult);
       if (oisyResilient) {
         addNotice = 'Mint confirmed on-chain. (Wallet returned an error but the operation succeeded.)';
@@ -290,11 +308,11 @@
         const minAmounts = removeEstimates.map(a =>
           a * BigInt(10000 - removeSlippageBps) / 10000n
         );
-        removeResult = await threePoolService.removeLiquidity(lpRaw, minAmounts);
+        removeResult = await threePoolService.removeLiquidity(lpRaw, minAmounts, removeBeforeLp);
       } else {
         if (removeSingleEstimate === null) { removeError = 'Waiting for quote'; return; }
         const minAmount = removeSingleEstimate * BigInt(10000 - removeSlippageBps) / 10000n;
-        removeResult = await threePoolService.removeOneCoin(lpRaw, removeSingleIndex, minAmount);
+        removeResult = await threePoolService.removeOneCoin(lpRaw, removeSingleIndex, minAmount, removeBeforeLp);
       }
 
       const oisyResilient = isOisyLandedSentinel(removeResult);

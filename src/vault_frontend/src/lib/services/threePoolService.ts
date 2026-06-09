@@ -6,7 +6,7 @@ import { get } from 'svelte/store';
 import { CANISTER_IDS, CONFIG } from '../config';
 import { isOisyWallet } from './protocol/walletOperations';
 import { getOisySignerAgent, createOisyActor } from './oisySigner';
-import { fetchLedgerFee } from './ledgerFeeService';
+import { fetchLedgerFee, getCachedLedgerFee } from './ledgerFeeService';
 import {
   callWithOisyFalseNegativeGuard,
   type OisyLandedSentinel,
@@ -110,6 +110,20 @@ export function poolTokenFee(token: SwapToken): Promise<bigint> {
 /** Compute approval amount: transfer amount + live ledger fee (for transfer_from). */
 async function approvalAmount(amount: bigint, token: SwapToken): Promise<bigint> {
   const fee = await poolTokenFee(token);
+  return amount + fee;
+}
+
+/**
+ * Synchronous approval amount: transfer amount + CACHED ledger fee.
+ *
+ * Use in click-handler paths (Oisy) that must not await a live `icrc1_fee()`
+ * fetch before the first signer consent screen — awaiting there burns the
+ * browser user-gesture window and trips Oisy's "Signer window should not be
+ * opened outside of click handler" guard. Requires the fee cache to be warm;
+ * LiquidityInterface warms it on mount (audit ICRC-005).
+ */
+function approvalAmountCached(amount: bigint, token: SwapToken): bigint {
+  const fee = getCachedLedgerFee({ ledgerId: token.ledgerId, decimals: token.decimals, symbol: token.symbol });
   return amount + fee;
 }
 
@@ -497,27 +511,39 @@ class ThreePoolService {
     }
   }
 
-  async addLiquidity(amounts: bigint[], minLp: bigint): Promise<bigint | OisyLandedSentinel> {
+  async addLiquidity(
+    amounts: bigint[],
+    minLp: bigint,
+    beforeLp: bigint | null = null,
+  ): Promise<bigint | OisyLandedSentinel> {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
 
     const oisyDetected = isOisyWallet();
     const spender = { owner: Principal.fromText(THREEPOOL_CANISTER_ID), subaccount: [] };
 
-    // Pre-compute approval amounts so we don't need to await mid-batch.
-    const approveAmounts: bigint[] = await Promise.all(
-      amounts.map((amt, k) => amt > 0n ? approvalAmount(amt, POOL_TOKENS[k]) : Promise.resolve(0n)),
+    // Pre-compute approval amounts from the WARM fee cache (synchronous). For
+    // Oisy, awaiting a live `icrc1_fee()` here would burn the browser
+    // user-gesture window before the first consent screen and trip the
+    // "Signer window should not be opened outside of click handler" guard.
+    const approveAmounts: bigint[] = amounts.map((amt, k) =>
+      amt > 0n ? approvalAmountCached(amt, POOL_TOKENS[k]) : 0n,
     );
 
-    // Pre-mint LP balance for the Oisy false-negative verifier.
-    const beforeLp = await this.safeGetLpBalance(wallet.principal);
+    // LP balance snapshot for the Oisy false-negative verifier. For Oisy it is
+    // captured pre-click (passed in as `beforeLp` by LiquidityInterface during
+    // the quote step) so we never await a balance query inside the gesture
+    // window. Non-Oisy can read it inline (the _arr guard never fires there).
+    const beforeLpSnapshot = oisyDetected
+      ? beforeLp
+      : await this.safeGetLpBalance(wallet.principal);
     const verifyAddLanded = async () => {
-      if (beforeLp === null) return false;
+      if (beforeLpSnapshot === null) return false;
       const after = await this.safeGetLpBalance(wallet.principal);
       if (after === null) return false;
       // LP minted: balance grew by at least 95% of `minLp` (which is
       // already the slippage-protected lower bound).
-      return after - beforeLp >= (minLp * 95n) / 100n;
+      return after - beforeLpSnapshot >= (minLp * 95n) / 100n;
     };
 
     if (oisyDetected && wallet.principal) {
@@ -600,14 +626,33 @@ class ThreePoolService {
     }
   }
 
+  /**
+   * Public LP-balance snapshot for the Oisy false-negative verifier.
+   *
+   * LiquidityInterface captures this during the quote step (a pre-click async
+   * context) and passes it into add/remove so those Oisy flows never await a
+   * balance query inside the browser gesture window — which would block the
+   * signer popup. Uses the same skip-cache ICRC-1 read as the verifier's
+   * post-op check, so before/after are measured the same way.
+   */
+  async captureLpSnapshot(principal: Principal | null | undefined): Promise<bigint | null> {
+    return this.safeGetLpBalance(principal);
+  }
+
   async removeLiquidity(
     lpBurn: bigint,
-    minAmounts: bigint[]
+    minAmounts: bigint[],
+    beforeLp: bigint | null = null,
   ): Promise<bigint[] | OisyLandedSentinel> {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
 
-    const beforeLp = await this.safeGetLpBalance(wallet.principal);
+    // For Oisy, `beforeLp` is captured pre-click (during the quote step) so we
+    // never await a balance query inside the browser gesture window, which
+    // would block the Oisy popup. Non-Oisy reads it inline.
+    const beforeLpSnapshot = isOisyWallet()
+      ? beforeLp
+      : await this.safeGetLpBalance(wallet.principal);
 
     const poolActor = await walletStore.getActor(THREEPOOL_CANISTER_ID, canisterIDLs.three_pool) as any;
     const result = await callWithOisyFalseNegativeGuard(
@@ -617,12 +662,12 @@ class ThreePoolService {
         return r.Ok;
       },
       async () => {
-        if (beforeLp === null) return false;
+        if (beforeLpSnapshot === null) return false;
         const after = await this.safeGetLpBalance(wallet.principal);
         if (after === null) return false;
         // LP burned: balance dropped by at least 95% of the requested
         // burn amount (or the user is now empty).
-        return beforeLp - after >= (lpBurn * 95n) / 100n || after === 0n;
+        return beforeLpSnapshot - after >= (lpBurn * 95n) / 100n || after === 0n;
       },
       `3pool remove_liquidity ${lpBurn} LP`
     );
@@ -632,12 +677,18 @@ class ThreePoolService {
   async removeOneCoin(
     lpBurn: bigint,
     coinIndex: number,
-    minAmount: bigint
+    minAmount: bigint,
+    beforeLp: bigint | null = null,
   ): Promise<bigint | OisyLandedSentinel> {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
 
-    const beforeLp = await this.safeGetLpBalance(wallet.principal);
+    // For Oisy, `beforeLp` is captured pre-click (during the quote step) so we
+    // never await a balance query inside the browser gesture window, which
+    // would block the Oisy popup. Non-Oisy reads it inline.
+    const beforeLpSnapshot = isOisyWallet()
+      ? beforeLp
+      : await this.safeGetLpBalance(wallet.principal);
 
     const poolActor = await walletStore.getActor(THREEPOOL_CANISTER_ID, canisterIDLs.three_pool) as any;
     const result = await callWithOisyFalseNegativeGuard(
@@ -647,10 +698,10 @@ class ThreePoolService {
         return r.Ok;
       },
       async () => {
-        if (beforeLp === null) return false;
+        if (beforeLpSnapshot === null) return false;
         const after = await this.safeGetLpBalance(wallet.principal);
         if (after === null) return false;
-        return beforeLp - after >= (lpBurn * 95n) / 100n || after === 0n;
+        return beforeLpSnapshot - after >= (lpBurn * 95n) / 100n || after === 0n;
       },
       `3pool remove_one_coin ${lpBurn} LP -> token ${coinIndex}`
     );
