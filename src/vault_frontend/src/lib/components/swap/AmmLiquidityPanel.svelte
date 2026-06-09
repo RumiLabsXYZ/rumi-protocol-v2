@@ -1,7 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher, onMount } from 'svelte';
   import { walletStore } from '../../stores/wallet';
-  import { ammService, AMM_TOKENS, parseTokenAmount, formatTokenAmount } from '../../services/ammService';
+  import { ammService, AMM_TOKENS, tokenFee, parseTokenAmount, formatTokenAmount } from '../../services/ammService';
   import type { PoolInfo } from '../../services/ammService';
   import { CANISTER_IDS } from '../../config';
   import { ProtocolService } from '../../services/protocol';
@@ -105,6 +105,10 @@
   onMount(() => {
     loadPool();
     refreshAmm1();
+    // Warm the ICRC-1 fee cache so the add-liquidity click handler reads fees
+    // synchronously (Oisy gesture-safety — no live icrc1_fee await before the
+    // first signer consent screen).
+    for (const t of AMM_TOKENS) void tokenFee(t);
   });
 
   async function refreshAmm1() {
@@ -135,7 +139,7 @@
     claiming = true;
     claimMessage = '';
     try {
-      const result = await claimAmm1Rewards();
+      const result = await claimAmm1Rewards(pool?.pool_id);
       if ('claimed_e8s' in result) {
         claimMessage = `Claimed ${(Number(result.claimed_e8s) / 1e8).toFixed(4)} icUSD`;
         pendingE8s = 0n;

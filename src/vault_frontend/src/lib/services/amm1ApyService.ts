@@ -417,14 +417,20 @@ export async function getPendingEarnings(principalText: string): Promise<bigint>
  * Uses the wallet's authenticated agent (Oisy ICRC-25 signer when Oisy
  * is connected, otherwise the standard PNP getActor path).
  */
-export async function claimAmm1Rewards(): Promise<
+export async function claimAmm1Rewards(
+  prefetchedPoolId?: string,
+): Promise<
   { claimed_e8s: bigint } | { error: string }
 > {
   try {
     const wallet = get(walletStore);
     if (!wallet.isConnected) return { error: 'Wallet not connected' };
 
-    const poolId = await getPoolId();
+    // Prefer the caller-supplied pool id (AmmLiquidityPanel already resolved it
+    // in loadPool, pre-click) so the Oisy claim flow never awaits getPoolId()'s
+    // get_pools() query inside the browser gesture window — that would block
+    // the signer popup. Falls back to the cached resolver otherwise.
+    const poolId = prefetchedPoolId ?? await getPoolId();
     const oisyDetected = isOisyWallet();
 
     if (oisyDetected && wallet.principal) {
