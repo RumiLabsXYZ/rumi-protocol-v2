@@ -91,7 +91,7 @@
     {#if isConnected && canViewVaults}<a href="/vaults" class="nav-link" class:active={currentPath.startsWith('/vaults')}><span>Vaults</span></a>{/if}
     {#if isConnected && $permissionStore.isDeveloper}<a href="/treasury" class="nav-link" class:active={currentPath === '/treasury'}><span>Treasury</span></a>{/if}
     <a href="/explorer" class="nav-link" class:active={currentPath.startsWith('/explorer')}><span>Explorer</span></a>
-    {#if POINTS_ENABLED}<a href="/points" class="nav-link" class:active={currentPath.startsWith('/points')}><span>Points</span></a>{/if}
+    {#if POINTS_ENABLED}<a href="/points" class="nav-link nav-airdrop" class:active={currentPath.startsWith('/points')} title="Earn airdrop points"><span class="airdrop-pill">✨ Airdrop</span></a>{/if}
   </nav>
   <div class="top-actions">
     {#if hasLiquidatableVaults}
@@ -139,6 +139,7 @@
   <a href="/3usd" class="mob-item" class:active={currentPath === '/3usd'}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 6v12M9 9.5C9 8.12 10.34 7 12 7s3 1.12 3 2.5c0 1.93-3 2.5-3 4.5M12 17h.01"/></svg><span>3USD</span></a>
   <a href="/vaults" class="mob-item" class:active={currentPath.startsWith('/vaults')}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><span>Vaults</span></a>
   <a href="/explorer" class="mob-item" class:active={currentPath.startsWith('/explorer')}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><span>Explorer</span></a>
+  {#if POINTS_ENABLED}<a href="/points" class="mob-item mob-airdrop" class:active={currentPath.startsWith('/points')}><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 2l2.2 5.8L20 10l-5.8 2.2L12 18l-2.2-5.8L4 10l5.8-2.2z"/></svg><span>Airdrop</span></a>{/if}
 </nav>
 {#if isDevelopment && showDebug}<div class="fixed bottom-4 right-4 z-50"><div class="flex flex-col gap-2"><PriceDebug /><WalletDebug /></div></div>{/if}
 <style>
@@ -159,6 +160,17 @@
   .nav-link.active::after { content:'';position:absolute;bottom:0;left:1rem;right:1rem;height:2px;background:var(--rumi-action);border-radius:1px 1px 0 0; }
   .apy-pill { display:inline-flex;align-items:center;padding:0.0625rem 0.4375rem;border-radius:999px;background:var(--rumi-teal-dim);color:var(--rumi-teal);font-size:0.6875rem;font-weight:600;letter-spacing:0.01em;line-height:1.4;font-variant-numeric:tabular-nums;transition:background 0.15s ease; }
   .nav-link:hover .apy-pill { background:rgba(45,212,191,0.2); }
+
+  /* ── Airdrop: attention-grabbing nav pill (Season 1 live) ── */
+  .nav-airdrop { padding-left:0.5rem;padding-right:0.5rem; }
+  .airdrop-pill { display:inline-flex;align-items:center;gap:0.3rem;padding:0.24rem 0.62rem;border-radius:999px;font-family:'Circular Std','Inter',sans-serif;font-size:0.8125rem;font-weight:700;letter-spacing:0.01em;line-height:1.2;color:#0a0e1a;background:linear-gradient(95deg,var(--rumi-teal) 0%,#a78bfa 55%,#f472b6 100%);box-shadow:0 0 11px rgba(45,212,191,0.45);transition:transform 0.18s ease,box-shadow 0.18s ease;animation:airdrop-glow 2.6s ease-in-out infinite; }
+  .nav-airdrop:hover .airdrop-pill { transform:translateY(-1px);box-shadow:0 0 22px rgba(244,114,182,0.65); }
+  .nav-airdrop.active::after { display:none; }
+  @keyframes airdrop-glow {
+    0%,100% { box-shadow:0 0 9px rgba(45,212,191,0.4); }
+    50% { box-shadow:0 0 19px rgba(167,139,250,0.6),0 0 28px rgba(244,114,182,0.32); }
+  }
+  @media (prefers-reduced-motion: reduce) { .airdrop-pill { animation:none; } }
 
   /* ── Right side: alert + beta + social + wallet ── */
   .top-actions { display:flex;align-items:center;gap:0.75rem;justify-self:end; }
@@ -219,6 +231,10 @@
   .mobile-nav { display:none;position:fixed;bottom:0;left:0;right:0;height:3.5rem;background:var(--rumi-bg-surface-1);border-top:1px solid var(--rumi-border);z-index:100;justify-content:space-around;align-items:center; }
   .mob-item { display:flex;flex-direction:column;align-items:center;gap:0.125rem;padding:0.375rem 0.5rem;border-radius:0.375rem;color:var(--rumi-text-muted);text-decoration:none;font-size:0.625rem; }
   .mob-item svg { width:1.125rem;height:1.125rem; }
+  .mob-airdrop, .mob-airdrop span { color:var(--rumi-teal);font-weight:700; }
+  .mob-airdrop svg { filter:drop-shadow(0 0 5px rgba(45,212,191,0.75));animation:airdrop-glow-mob 2.6s ease-in-out infinite; }
+  @keyframes airdrop-glow-mob { 0%,100% { filter:drop-shadow(0 0 4px rgba(45,212,191,0.55)); } 50% { filter:drop-shadow(0 0 9px rgba(167,139,250,0.85)); } }
+  @media (prefers-reduced-motion: reduce) { .mob-airdrop svg { animation:none; } }
   .mob-item.active { color:var(--rumi-action); }
   @media (max-width:768px) {
     .top-nav{display:none}
