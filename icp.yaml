@@ -117,6 +117,39 @@ canisters:
         }
       })
 
+  # Task 9b: threeusd_index (mainnet jagpu-pyaaa-aaaap-qtm6q-cai). The ICRC-1
+  # index canister for the 3USD token. The 3USD ledger IS rumi_3pool
+  # (fohh4-yyaaa-aaaap-qtkpa-cai) - the Curve-style 3pool that also serves as
+  # the ICRC-1/2/3 ledger for the 3USD yield-bearing stablecoin - so this index
+  # tracks fohh4 for account-history queries used by the explorer and wallets.
+  #
+  # IMPORTANT: threeusd_index uses a DIFFERENT index-ng wasm than icusd_index.
+  # dfx.json points threeusd_index at ic-icrc1-index-ng-latest.wasm.gz (sha256
+  # dab6808d..., a newer index-ng build) while icusd_index uses
+  # ic-icrc1-index-ng.wasm.gz (cf3bf8f8...). The path + sha256 below preserve
+  # that exact wasm so the migration is a byte-identical deploy-tool swap, not a
+  # version change. icp-cli only verifies the sha256 before install.
+  #
+  # Same upgrade-arg contract as icusd_index: the candid signature is
+  # `(index_arg : opt IndexArg)`; a fresh install needs the Init record below,
+  # an upgrade takes `(null)` to leave ledger_id + the retrieve-interval config
+  # untouched. The mainnet-live override is `(null)` so re-deploys never re-init.
+  - name: threeusd_index
+    build:
+      steps:
+        - type: pre-built
+          path: src/ledger/ic-icrc1-index-ng-latest.wasm.gz
+          sha256: dab6808d0dfc06e5e88336d0c3d3e45e5448c6e36c2a781f3e9e09bd450f528c
+    init_args: |
+      (opt variant {
+        Init = record {
+          ledger_id = principal "fohh4-yyaaa-aaaap-qtkpa-cai";
+          retrieve_blocks_from_ledger_interval_seconds = opt 10 : opt nat64;
+          min_retrieve_blocks_from_ledger_interval_seconds = null;
+          max_retrieve_blocks_from_ledger_interval_seconds = null;
+        }
+      })
+
   # Task 10: liquidation_bot (mainnet nygob-3qaaa-aaaap-qttcq-cai). Rust canister
   # built locally via the @dfinity/rust recipe (shrink: true matches dfx.json's
   # implicit shrink behavior so the locally-built wasm matches production within
@@ -556,6 +589,92 @@ canisters:
         shrink: true
     init_args: '(null)'
 
+  # ---------------------------------------------------------------------------
+  # Frontend asset canisters
+  # ---------------------------------------------------------------------------
+  # vault_frontend (mainnet tcfua-yaaaa-aaaap-qrd7q-cai, the app) and
+  # rumi_homepage (mainnet t2xrh-2aaaa-aaaap-qreaa-cai, the marketing site) are
+  # SvelteKit + Vite apps served from the IC asset canister. They migrate from
+  # dfx's `type: assets` to the @dfinity/asset-canister recipe so frontend
+  # deploys go through `icp deploy <name> --environment mainnet-live` instead of
+  # falling back to `dfx deploy <name> --network ic`.
+  #
+  # ASSET PRESERVATION (the one risky part of this migration): swapping dfx's
+  # bundled assetstorage wasm for the recipe's asset-canister wasm is an
+  # UPGRADE, not a fresh install - the canister ids already exist in the
+  # mainnet-live mapping, so `icp deploy`'s default mode (auto) upgrades in
+  # place. Asset-canister upgrades keep every uploaded asset in stable memory.
+  # `configuration.version` is intentionally OMITTED so the recipe installs the
+  # LATEST asset-canister wasm, which is >= whatever dfx shipped - never a
+  # downgrade. A downgrade is the only way an asset-canister upgrade can fail to
+  # parse stable memory, so omitting the pin is the safe choice. (For a forced
+  # version change, use `icp deploy --mode reinstall`, which wipes assets - we
+  # never want that here.)
+  #
+  # ASSET LAYOUT (the real config lives in static/, NOT assets/): the actual
+  # SPA + security config is `src/<name>/static/.ic-assets.json` - it carries
+  # the `**/*` security_policy plus the custom Content-Security-Policy and
+  # Permissions-Policy headers. SvelteKit's adapter-static copies static/ into
+  # dist/ during `vite build`, so that real config is ALREADY in dist/ after the
+  # build (along with the SPA fallback index.html). The separate `assets/` dir
+  # (dfx.json listed it as a second `source`) holds only the things the build
+  # does NOT place in dist/: a redundant 60-byte `.ic-assets.json5` stub (just a
+  # .well-known un-ignore rule), the `.well-known/` dir (ic-domains for the
+  # custom domains + ii-alternative-origins for vault_frontend's cross-origin
+  # II), and `favicon.ico` (static/ only has favicon.png).
+  #
+  # DO NOT copy `assets/.ic-assets.json5` into dist/. dfx tolerated both a
+  # `.ic-assets.json` and a `.ic-assets.json5` in its upload set (it processed
+  # dist/ and assets/ as two separate source roots); icp-cli's asset gatherer
+  # uploads from a single `dir`, and two asset-config files in one directory
+  # makes it fail with "Failed to gather asset descriptors". So the merge below
+  # copies ONLY `.well-known/` and `favicon.ico` from assets/ (the two things
+  # the build does not already place in dist/), leaving static/.ic-assets.json
+  # as the sole config, and deletes the macOS `.DS_Store` that static/ drags
+  # into dist/. This reproduces the exact dfx upload set minus the redundant
+  # json5 stub and the junk dotfile. (Learned the hard way: the first
+  # rumi_homepage deploy synced with both config files present and failed; the
+  # wasm upgrade had already applied, assets were preserved in stable memory,
+  # and an `icp sync` after dropping the stub succeeded.)
+  #
+  # BUILD/SYNC mechanics: `npm ci` installs the hoisted workspace deps from the
+  # root package-lock.json; `npm run build --workspace=<name>` runs that
+  # workspace's prebuild (`@sveltejs/kit sync`) then build (`vite build`) into
+  # src/<name>/dist. The recipe's build steps run in your working tree, and the
+  # asset SYNC uploads from the in-repo `dir` (src/<name>/dist) - so the
+  # .well-known copy and .DS_Store delete must land in the working-tree dist,
+  # which is what the relative paths below do. The `rm -rf dist/.well-known`
+  # before the copy keeps it idempotent (BSD cp would otherwise nest
+  # assets/.well-known inside an existing dist/.well-known on a re-run). Deploy
+  # frontends INDIVIDUALLY (`icp deploy vault_frontend -e mainnet-live`); a bare
+  # full-env `icp deploy -e mainnet-live` would run two `npm ci` against the
+  # shared root node_modules in parallel (and upgrade every Rust canister).
+  - name: vault_frontend
+    recipe:
+      type: "@dfinity/asset-canister@v2.1.0"
+      configuration:
+        dir: src/vault_frontend/dist
+        build:
+          - npm ci
+          - npm run build --workspace=vault_frontend
+          - rm -f src/vault_frontend/dist/.DS_Store
+          - rm -rf src/vault_frontend/dist/.well-known
+          - cp -R src/vault_frontend/assets/.well-known src/vault_frontend/dist/.well-known
+          - cp -f src/vault_frontend/assets/favicon.ico src/vault_frontend/dist/favicon.ico
+
+  - name: rumi_homepage
+    recipe:
+      type: "@dfinity/asset-canister@v2.1.0"
+      configuration:
+        dir: src/rumi_homepage/dist
+        build:
+          - npm ci
+          - npm run build --workspace=rumi_homepage
+          - rm -f src/rumi_homepage/dist/.DS_Store
+          - rm -rf src/rumi_homepage/dist/.well-known
+          - cp -R src/rumi_homepage/assets/.well-known src/rumi_homepage/dist/.well-known
+          - cp -f src/rumi_homepage/assets/favicon.ico src/rumi_homepage/dist/favicon.ico
+
 networks:
   - name: local
     mode: managed
@@ -588,6 +707,7 @@ environments:
     network: ic
     canisters:
       - icusd_index
+      - threeusd_index
       - liquidation_bot
       - rumi_3pool
       - rumi_stability_pool
@@ -595,12 +715,19 @@ environments:
       - rumi_amm
       - rumi_analytics
       - rumi_protocol_backend
+      - vault_frontend
+      - rumi_homepage
     init_args:
       # Upgrade-mode override: `(null)` preserves all existing configuration
       # (ledger_id and the retrieve-interval fields). The canister is already
       # synced to icusd_ledger; we never want to re-init or change ledger_id
       # on an upgrade. See the upgrade-args spike for the override mechanism.
       icusd_index: '(null)'
+      # threeusd_index upgrade-mode override: same `(null)` upgrade contract as
+      # icusd_index - preserves the existing ledger_id (the 3USD ledger, i.e.
+      # rumi_3pool fohh4-yyaaa-aaaap-qtkpa-cai) and the retrieve-interval config.
+      # The index is already synced to its ledger; never re-init on upgrade.
+      threeusd_index: '(null)'
       # liquidation_bot upgrade-mode override: BotInitArgs shape is required by
       # the candid `service : (BotInitArgs) -> { ... }` declaration, but the
       # wasm's post_upgrade ignores these bytes. Values are deliberate dummies
