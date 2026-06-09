@@ -132,10 +132,12 @@
           error = `Minimum deposit is 1 ${selectedToken.symbol}`;
           return;
         }
-        // User needs amount + 2 fees (approve + transfer_from). Refresh the
-        // live fee here so the pre-flight check uses the freshest value.
-        const liveFee = await fetchLedgerFee(ledgerRefFor(selectedToken));
-        const totalFees = liveFee * 2n;
+        // User needs amount + 2 fees (approve + transfer_from). Read fees
+        // synchronously from the warm cache (warmed reactively above) — an
+        // `await fetchLedgerFee` here would burn the browser user-gesture
+        // window and block the Oisy signer popup with a "Signer window should
+        // not be opened outside of click handler" error.
+        const totalFees = getCachedLedgerFee(ledgerRefFor(selectedToken)) * 2n;
         if (rawAmount + totalFees > walletBalance) {
           error = 'Insufficient balance (amount + fees)';
           return;

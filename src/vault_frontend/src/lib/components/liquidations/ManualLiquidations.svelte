@@ -318,7 +318,13 @@
         if (!await checkAndApproveAllowance(inputAmount * 1.20)) { processingVaultId = null; return; }
       }
 
-      await loadLiquidatableVaults();
+      // Non-Oisy: re-fetch to confirm the vault is still liquidatable. For Oisy
+      // this await would burn the browser user-gesture window and block the
+      // signer popup, so we trust the already-loaded list (the backend rejects
+      // a no-longer-liquidatable vault anyway).
+      if (!isOisyWallet()) {
+        await loadLiquidatableVaults();
+      }
       if (!liquidatableVaults.find(v => v.vault_id === vault.vault_id)) {
         liquidationError = "Vault no longer available"; processingVaultId = null; return;
       }
