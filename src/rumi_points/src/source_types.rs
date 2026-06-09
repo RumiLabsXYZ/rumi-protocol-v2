@@ -144,6 +144,27 @@ pub mod backend {
             amount: u64,
             timestamp: Option<u64>,
         },
+        // The backend's `CloseVault` type filter ALSO surfaces these two
+        // alternate close paths (see `Event::type_filter`), so the mirror must
+        // decode them or the whole batch fails. Subset fields only (the wire
+        // carries more); robust to future field changes.
+        #[serde(rename = "withdraw_and_close_vault")]
+        WithdrawAndCloseVault {
+            vault_id: u64,
+            timestamp: Option<u64>,
+        },
+        // NOTE: the backend variant has NO `#[serde(rename)]`, so its candid
+        // label is the variant identifier itself — do NOT rename here.
+        VaultWithdrawnAndClosed {
+            vault_id: u64,
+        },
+        // The backend's `Redemption` type filter ALSO surfaces this redemption
+        // sub-step; decode-and-ignore (the redeemer is already credited by
+        // `RedemptionOnVaults`).
+        #[serde(rename = "redemption_transfered")]
+        RedemptionTransfered {
+            timestamp: Option<u64>,
+        },
     }
 
     pub fn normalize(id: u64, ev: BackendEvent) -> IngestedEvent {
@@ -192,6 +213,17 @@ pub mod backend {
             BackendEvent::ProvideLiquidity { .. } | BackendEvent::WithdrawLiquidity { .. } => {
                 (None, None, IngestKind::Other)
             }
+            // Alternate vault-close paths surfaced by the CloseVault filter.
+            // Accrual is snapshot-based (live debt), so these are informational;
+            // treat as a close for parity with `CloseVault`.
+            BackendEvent::WithdrawAndCloseVault { vault_id, timestamp } => {
+                (None, timestamp, IngestKind::VaultClose { vault_id })
+            }
+            BackendEvent::VaultWithdrawnAndClosed { vault_id } => {
+                (None, None, IngestKind::VaultClose { vault_id })
+            }
+            // Redemption sub-step surfaced by the Redemption filter; ignored.
+            BackendEvent::RedemptionTransfered { .. } => (None, None, IngestKind::Other),
         };
         IngestedEvent {
             source: SourceId::Backend,
@@ -663,6 +695,70 @@ mod normalize_tests {
             backend::normalize(0, ev).kind,
             IngestKind::VaultBorrow { vault_id: 5, amount_e8s: 250 }
         );
+    }
+
+    /// Regression: the backend's `CloseVault` and `Redemption` type filters ALSO
+    /// surface `WithdrawAndCloseVault`, `VaultWithdrawnAndClosed`, and
+    /// `RedemptionTransfered` (see `Event::type_filter`). Before mirroring them, a
+    /// single such event in a forward batch failed the ENTIRE candid decode and
+    /// stalled the backend cursor at 0. Each must decode from the backend's FULL
+    /// wire shape and normalize without error.
+    #[test]
+    fn backend_close_and_redemption_subvariants_decode_from_wire() {
+        #[derive(CandidType, Deserialize)]
+        enum CloseRedeemWire {
+            #[serde(rename = "withdraw_and_close_vault")]
+            WithdrawAndCloseVault {
+                vault_id: u64,
+                amount: u64,
+                block_index: Option<u64>,
+                caller: Option<Principal>,
+                timestamp: Option<u64>,
+            },
+            // No rename — matches the backend variant (candid label = ident).
+            VaultWithdrawnAndClosed {
+                vault_id: u64,
+                caller: Principal,
+                amount: u64,
+                timestamp: u64,
+            },
+            #[serde(rename = "redemption_transfered")]
+            RedemptionTransfered {
+                icusd_block_index: u64,
+                icp_block_index: u64,
+                timestamp: Option<u64>,
+            },
+        }
+
+        let b = Encode!(&CloseRedeemWire::WithdrawAndCloseVault {
+            vault_id: 11,
+            amount: 5,
+            block_index: Some(1),
+            caller: Some(p(1)),
+            timestamp: Some(7),
+        })
+        .unwrap();
+        let ev = Decode!(&b, backend::BackendEvent).unwrap();
+        assert_eq!(backend::normalize(0, ev).kind, IngestKind::VaultClose { vault_id: 11 });
+
+        let b = Encode!(&CloseRedeemWire::VaultWithdrawnAndClosed {
+            vault_id: 12,
+            caller: p(2),
+            amount: 9,
+            timestamp: 8,
+        })
+        .unwrap();
+        let ev = Decode!(&b, backend::BackendEvent).unwrap();
+        assert_eq!(backend::normalize(0, ev).kind, IngestKind::VaultClose { vault_id: 12 });
+
+        let b = Encode!(&CloseRedeemWire::RedemptionTransfered {
+            icusd_block_index: 3,
+            icp_block_index: 4,
+            timestamp: None,
+        })
+        .unwrap();
+        let ev = Decode!(&b, backend::BackendEvent).unwrap();
+        assert_eq!(backend::normalize(0, ev).kind, IngestKind::Other);
     }
 
     #[test]

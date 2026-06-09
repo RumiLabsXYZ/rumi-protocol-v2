@@ -20,6 +20,9 @@
   "rumi_homepage": {
     "ic": "t2xrh-2aaaa-aaaap-qreaa-cai"
   },
+  "rumi_points": {
+    "ic": "bfnu3-6aaaa-aaaab-qhanq-cai"
+  },
   "rumi_protocol_backend": {
     "ic": "tfesu-vyaaa-aaaap-qrd7a-cai",
     "ic-staging": "kvg63-wiaaa-aaaao-bbabq-cai"
