@@ -3659,6 +3659,16 @@ fn schedule_transfer_retry(vault_id: u64, retry_count: u32) {
 pub async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("partial_repay_vault_{}", arg.vault_id))?;
+    // AR-B-003: per-vault op lock; see guard.rs::VaultLiquidationGuard. This
+    // endpoint pulls icUSD across an await then commits via repay_to_vault, so
+    // it needs the same serialization vs liquidation/redemption as its siblings.
+    let _vault_op_guard = match VaultLiquidationGuard::new(arg.vault_id) {
+        Ok(g) => g,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(e);
+        }
+    };
     let amount: ICUSD = arg.amount.into();
 
     // Accrue interest before repayment so the correct debt balance is used.
