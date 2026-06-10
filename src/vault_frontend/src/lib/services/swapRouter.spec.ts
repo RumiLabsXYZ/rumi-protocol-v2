@@ -208,7 +208,9 @@ describe('swapRouter — provider registry integration', () => {
 
       expect(route.type).toBe('amm_swap');
       expect(route.providerQuote?.provider).toBe('icpswap_3usd_icp');
-      expect(route.estimatedOutput).toBe(1_500n);
+      // FE-003: estimatedOutput is NET of the 10n output ledger fee (mocked above)
+      expect(route.estimatedOutput).toBe(1_490n);
+      expect(route.grossOutput).toBe(1_500n);
       // ICPswap winner => poolId not populated (Rumi-only optimisation)
       expect(route.poolId).toBeUndefined();
       expect(route.pathDisplay).toBe('icpswap label');
@@ -221,7 +223,8 @@ describe('swapRouter — provider registry integration', () => {
       const route = await resolveRoute(icp, threeUsd, 100n);
 
       expect(route.providerQuote?.provider).toBe('rumi_amm');
-      expect(route.estimatedOutput).toBe(2_000n);
+      expect(route.estimatedOutput).toBe(1_990n);
+      expect(route.grossOutput).toBe(2_000n);
       expect(route.poolId).toBe('rumi-pool-1');
     });
   });
@@ -241,7 +244,9 @@ describe('swapRouter — provider registry integration', () => {
       expect(route.type).toBe('stable_to_icp');
       expect(route.intermediateOutput).toBe(900n);
       expect(route.hopProviderQuote?.provider).toBe('icpswap_3usd_icp');
-      expect(route.estimatedOutput).toBe(3_000n);
+      // FE-003: NET of the 10n output ledger fee
+      expect(route.estimatedOutput).toBe(2_990n);
+      expect(route.grossOutput).toBe(3_000n);
       // ICPswap winner => poolId undefined
       expect(route.poolId).toBeUndefined();
       // bestQuote was called with (3USD, icp, threeUsdOut=900n)
@@ -268,7 +273,9 @@ describe('swapRouter — provider registry integration', () => {
       expect(route.type).toBe('icp_to_stable');
       expect(route.hopProviderQuote?.provider).toBe('icpswap_3usd_icp');
       expect(route.intermediateOutput).toBe(2_500n);
-      expect(route.estimatedOutput).toBe(2_400n);
+      // FE-003: NET of the 10n output ledger fee
+      expect(route.estimatedOutput).toBe(2_390n);
+      expect(route.grossOutput).toBe(2_400n);
       // calcRemoveOneCoin was called with the winning hop's amountOut
       expect(threePoolMock.calcRemoveOneCoin).toHaveBeenCalledWith(2_500n, ckUsdc.threePoolIndex);
     });
@@ -296,7 +303,8 @@ describe('swapRouter — provider registry integration', () => {
         type: 'amm_swap',
         pathDisplay: 'x',
         hops: 1,
-        estimatedOutput: 1_500n,
+        estimatedOutput: 1_490n,
+        grossOutput: 1_500n,
         feeDisplay: '0.30%',
         providerQuote: winningQuote,
       };
@@ -305,11 +313,177 @@ describe('swapRouter — provider registry integration', () => {
       const out = await executeRoute(route, threeUsd, icp, 100n, 50);
 
       expect(icpswapMock.swap).toHaveBeenCalledTimes(1);
+      // FE-003: ICPswap's amountOutMinimum is a GROSS in-pool bound,
+      // derived from the gross quote (1_500n), not the net estimate.
       expect(icpswapMock.swap).toHaveBeenCalledWith(
-        threeUsd, icp, 100n, expect.any(BigInt), winningQuote,
+        threeUsd, icp, 100n, 1_500n * 9_950n / 10_000n, winningQuote,
       );
       expect(rumiAmmMock.swap).not.toHaveBeenCalled();
       expect(out).toBe(1_499n);
+    });
+
+    it('FE-003: passes a NET min_amount_out to Rumi AMM (backend enforces net, PR #230)', async () => {
+      const winningQuote = rumiQuote(1_500n);
+      const route: SwapRoute = {
+        type: 'amm_swap',
+        pathDisplay: 'x',
+        hops: 1,
+        estimatedOutput: 1_490n, // 1_500n gross - 10n mocked ledger fee
+        grossOutput: 1_500n,
+        feeDisplay: '0.30%',
+        providerQuote: winningQuote,
+      };
+      rumiAmmMock.swap.mockResolvedValue({ amountOut: 1_489n });
+
+      const out = await executeRoute(route, threeUsd, icp, 100n, 50);
+
+      // min = net estimate * (1 - 0.5%) = 1_490 * 9_950 / 10_000 = 1_482n
+      expect(rumiAmmMock.swap).toHaveBeenCalledWith(
+        threeUsd, icp, 100n, 1_490n * 9_950n / 10_000n, winningQuote,
+      );
+      expect(out).toBe(1_489n);
+    });
+  });
+
+  // ──────────────────────────────────────────────────────────────
+  // FE-003: net-of-ledger-fee estimates and min bounds.
+  // The 3pool / Rumi AMM pay `amount - ledger_fee` and enforce min_dy /
+  // min_amount_out against that NET amount (PR #230). The mocked ledger
+  // fee is 10n (see the ledgerFeeService mock above).
+  // ──────────────────────────────────────────────────────────────
+
+  describe('FE-003: net output semantics', () => {
+    it('FE-003: three_pool_swap estimate is net and min_dy derives from it', async () => {
+      threePoolMock.quoteSwap.mockResolvedValue({
+        amount_out: 1_000n, fee_bps: 30, is_rebalancing: false,
+      });
+      const icUsd: AmmToken = { ...ckUsdc, symbol: 'icUSD', threePoolIndex: 0 };
+
+      const route = await resolveRoute(icUsd, ckUsdc, 2_000n);
+      expect(route.type).toBe('three_pool_swap');
+      expect(route.grossOutput).toBe(1_000n);
+      expect(route.estimatedOutput).toBe(990n);
+
+      threePoolMock.swap.mockResolvedValue(989n);
+      await executeRoute(route, icUsd, ckUsdc, 2_000n, 50);
+      // min_dy = 990 * 9_950 / 10_000 = 985n (net bound)
+      expect(threePoolMock.swap).toHaveBeenCalledWith(0, 2, 2_000n, 985n);
+    });
+
+    it('FE-003: three_pool_redeem estimate is net and min_amount derives from it', async () => {
+      threePoolMock.calcRemoveOneCoin.mockResolvedValue(1_000n);
+
+      const route = await resolveRoute(threeUsd, ckUsdc, 2_000n);
+      expect(route.type).toBe('three_pool_redeem');
+      expect(route.grossOutput).toBe(1_000n);
+      expect(route.estimatedOutput).toBe(990n);
+
+      threePoolMock.removeOneCoin.mockResolvedValue(989n);
+      await executeRoute(route, threeUsd, ckUsdc, 2_000n, 50);
+      expect(threePoolMock.removeOneCoin).toHaveBeenCalledWith(2_000n, 2, 985n);
+    });
+
+    it('FE-003: three_pool_deposit stays gross (LP mint pays no ledger fee)', async () => {
+      threePoolMock.calcAddLiquidity.mockResolvedValue(1_000n);
+
+      const route = await resolveRoute(ckUsdc, threeUsd, 2_000n);
+      expect(route.type).toBe('three_pool_deposit');
+      expect(route.grossOutput).toBe(1_000n);
+      expect(route.estimatedOutput).toBe(1_000n);
+
+      threePoolMock.addLiquidity.mockResolvedValue(1_000n);
+      await executeRoute(route, ckUsdc, threeUsd, 2_000n, 50);
+      // min_lp = 1_000 * 9_950 / 10_000 = 995n (gross bound, no fee deduction)
+      expect(threePoolMock.addLiquidity).toHaveBeenCalledWith([0n, 0n, 2_000n], 995n);
+    });
+
+    it('FE-003: clamps the net estimate at zero when the fee exceeds a dust quote', async () => {
+      threePoolMock.calcRemoveOneCoin.mockResolvedValue(7n);
+
+      const route = await resolveRoute(threeUsd, ckUsdc, 10n);
+      expect(route.estimatedOutput).toBe(0n);
+      expect(route.grossOutput).toBe(7n);
+    });
+  });
+
+  // ──────────────────────────────────────────────────────────────
+  // icp_to_stable hop-2: burn the NET 3USD received from hop 1.
+  //
+  // rumi_amm's swap pays out `amount_out - ledger_fee` (transfer_to_user), so
+  // after the ICP->3USD hop the caller's 3USD balance grows by one ledger fee
+  // LESS than the AMM's returned amount_out. The 3pool's remove_one_coin burns
+  // the caller's LP directly and rejects with InsufficientLiquidity when
+  // lp_burn exceeds the held balance, so hop 2 must burn the NET amount
+  // (gross - 3USD ledger fee, mocked to 10n), not the gross. ICPswap's withdraw
+  // already nets the fee, so its returned amountOut is the held amount as-is.
+  // ──────────────────────────────────────────────────────────────
+
+  describe('icp_to_stable hop-2 burns NET 3USD (gross - ledger fee)', () => {
+    it('non-Oisy: removeOneCoin burns gross minus the 3USD ledger fee (Rumi AMM hop)', async () => {
+      // Hop 1 (ICP -> 3USD) returns a GROSS amount_out of 2_000n; the user's
+      // 3USD balance only grows by 2_000n - 10n (one ledger fee).
+      rumiAmmMock.swap.mockResolvedValue({ amountOut: 2_000n });
+      threePoolMock.calcRemoveOneCoin.mockResolvedValue(1_000n);
+      threePoolMock.removeOneCoin.mockResolvedValue(989n);
+
+      const route: SwapRoute = {
+        type: 'icp_to_stable',
+        pathDisplay: 'x',
+        hops: 2,
+        estimatedOutput: 990n,
+        grossOutput: 1_000n,
+        feeDisplay: '0.30%',
+        intermediateOutput: 2_000n,
+        hopProviderQuote: rumiQuote(2_000n),
+        poolId: 'rumi-pool-1',
+      };
+
+      const out = await executeRoute(route, icp, ckUsdc, 10_000n, 50);
+
+      // Both the estimate and the burn use the NET 3USD (2_000n - 10n), never
+      // the gross 2_000n that would over-burn the caller's LP balance.
+      expect(threePoolMock.calcRemoveOneCoin).toHaveBeenCalledWith(1_990n, ckUsdc.threePoolIndex);
+      // stableMinOutput = net(1_000n)=990n * (10000-25)/10000 = 987n
+      expect(threePoolMock.removeOneCoin).toHaveBeenCalledWith(1_990n, ckUsdc.threePoolIndex, 987n);
+      expect(out).toBe(989n);
+    });
+
+    it('Oisy: remove_one_coin burns gross minus the 3USD ledger fee (Rumi AMM hop)', async () => {
+      isOisyWalletMock.mockReturnValue(true);
+
+      const fakeSignerAgent = {};
+      const fakeIcpLedger = { icrc2_approve: vi.fn().mockResolvedValue({ Ok: 1n }) };
+      const fakeAmm = { swap: vi.fn().mockResolvedValue({ Ok: { amount_out: 2_000n } }) };
+      const fakePool = { remove_one_coin: vi.fn().mockResolvedValue({ Ok: 988n }) };
+
+      const oisySigner = await import('./oisySigner');
+      vi.mocked(oisySigner.getOisySignerAgent).mockResolvedValue(fakeSignerAgent as any);
+      // swapRouter's module constants use the mainnet IDs regardless of network.
+      vi.mocked(oisySigner.createOisyActor).mockImplementation(((canisterId: string) => {
+        if (canisterId === 'ijlzs-2yaaa-aaaap-quaaq-cai') return fakeAmm;   // RUMI_AMM
+        if (canisterId === 'fohh4-yyaaa-aaaap-qtkpa-cai') return fakePool;  // THREEPOOL
+        return fakeIcpLedger;                                               // ICP ledger
+      }) as any);
+
+      const route: SwapRoute = {
+        type: 'icp_to_stable',
+        pathDisplay: 'x',
+        hops: 2,
+        estimatedOutput: 990n,
+        grossOutput: 1_000n,
+        feeDisplay: '0.30%',
+        intermediateOutput: 2_000n, // gross 3USD estimate from the AMM hop
+        hopProviderQuote: rumiQuote(2_000n),
+        poolId: 'rumi-pool-1',
+      };
+
+      const out = await executeRoute(route, icp, ckUsdc, 10_000n, 50);
+
+      // remove_one_coin burns 2_000n - 10n, NOT the gross 2_000n. The caller only
+      // holds the net amount, so burning the gross would trip InsufficientLiquidity.
+      // stableMinOutput = estimatedOutput(990n) * (10000-50)/10000 = 985n.
+      expect(fakePool.remove_one_coin).toHaveBeenCalledWith(1_990n, ckUsdc.threePoolIndex, 985n);
+      expect(out).toBe(988n);
     });
   });
 
@@ -354,7 +528,8 @@ describe('swapRouter — provider registry integration', () => {
         type: 'amm_swap',
         pathDisplay: 'x',
         hops: 1,
-        estimatedOutput: 1_500n,
+        estimatedOutput: 1_490n,
+        grossOutput: 1_500n,
         feeDisplay: '0.30%',
         providerQuote: icpswapQuote(1_500n),
       };
@@ -381,7 +556,8 @@ describe('swapRouter — provider registry integration', () => {
         type: 'amm_swap',
         pathDisplay: 'x',
         hops: 1,
-        estimatedOutput: 1_000n,
+        estimatedOutput: 990n,
+        grossOutput: 1_000n,
         feeDisplay: '0.30%',
         providerQuote: rumiQuote(1_000n),
       };
@@ -407,7 +583,9 @@ describe('swapRouter — provider registry integration', () => {
       const route = await resolveRoute(threeUsd, icp, 100n);
 
       expect(route.providerQuote?.provider).toBe('rumi_amm');
-      expect(route.estimatedOutput).toBe(1_000n);
+      // FE-003: NET of the 10n output ledger fee
+      expect(route.estimatedOutput).toBe(990n);
+      expect(route.grossOutput).toBe(1_000n);
       expect(icpswapMock.quote).not.toHaveBeenCalled();
     });
 
@@ -418,7 +596,8 @@ describe('swapRouter — provider registry integration', () => {
         type: 'amm_swap',
         pathDisplay: 'x',
         hops: 1,
-        estimatedOutput: 1_500n,
+        estimatedOutput: 1_490n,
+        grossOutput: 1_500n,
         feeDisplay: '0.30%',
         providerQuote: icpswapQuote(1_500n),
       };
@@ -436,7 +615,8 @@ describe('swapRouter — provider registry integration', () => {
         type: 'amm_swap',
         pathDisplay: 'x',
         hops: 1,
-        estimatedOutput: 1_000n,
+        estimatedOutput: 990n,
+        grossOutput: 1_000n,
         feeDisplay: '0.30%',
         providerQuote: rumiQuote(1_000n),
       };
