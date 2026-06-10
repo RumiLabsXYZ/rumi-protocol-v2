@@ -69,6 +69,7 @@ export interface TreasuryStatus {
 }
 export interface WithdrawArgs {
   'to' : Principal,
+  'request_id' : [] | [bigint],
   'asset_type' : AssetType,
   'memo' : [] | [string],
   'amount' : bigint,

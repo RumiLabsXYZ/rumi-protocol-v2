@@ -14,7 +14,8 @@ use crate::state::{read_state, mutate_state};
 /// (10_000 e8s, as on ICP/ckBTC-class ledgers). Over-estimating the fee
 /// under-credits depositors slightly (solvency-safe) rather than over-crediting
 /// them as a fee=0 fallback would. The next successful liquidation reconciles.
-const FALLBACK_COLLATERAL_FEE_E8S: u64 = 10_000;
+/// Shared with `claim_collateral`'s fee lookup (ICRC-004 / SP-203).
+pub(crate) const FALLBACK_COLLATERAL_FEE_E8S: u64 = 10_000;
 
 /// Called by the backend when it detects liquidatable vaults (push model).
 /// Processes each vault sequentially, consuming stablecoins and distributing collateral.

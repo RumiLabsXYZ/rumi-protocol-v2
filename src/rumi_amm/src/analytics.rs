@@ -652,12 +652,13 @@ pub fn get_top_lps(query: AmmTopLpsQuery) -> Vec<(Principal, u128, u32)> {
 // ─── Events-by-principal (pool-scoped) ───
 
 pub fn get_swap_events_by_principal(query: AmmEventsByPrincipalQuery) -> Vec<AmmSwapEvent> {
+    let length = query.length.min(crate::MAX_EVENT_PAGE);
     read_state(|s| {
         s.swap_events
             .iter()
             .filter(|e| e.pool_id == query.pool && e.caller == query.who)
             .skip(query.start as usize)
-            .take(query.length as usize)
+            .take(length as usize)
             .cloned()
             .collect()
     })
@@ -666,12 +667,13 @@ pub fn get_swap_events_by_principal(query: AmmEventsByPrincipalQuery) -> Vec<Amm
 pub fn get_liquidity_events_by_principal(
     query: AmmEventsByPrincipalQuery,
 ) -> Vec<AmmLiquidityEvent> {
+    let length = query.length.min(crate::MAX_EVENT_PAGE);
     read_state(|s| {
         s.liquidity_events
             .iter()
             .filter(|e| e.pool_id == query.pool && e.caller == query.who)
             .skip(query.start as usize)
-            .take(query.length as usize)
+            .take(length as usize)
             .cloned()
             .collect()
     })
@@ -680,6 +682,7 @@ pub fn get_liquidity_events_by_principal(
 // ─── Events-by-time-range (pool-scoped) ───
 
 pub fn get_swap_events_by_time_range(query: AmmEventsByTimeRangeQuery) -> Vec<AmmSwapEvent> {
+    let limit = query.limit.min(crate::MAX_EVENT_PAGE);
     read_state(|s| {
         s.swap_events
             .iter()
@@ -688,7 +691,7 @@ pub fn get_swap_events_by_time_range(query: AmmEventsByTimeRangeQuery) -> Vec<Am
                     && e.timestamp >= query.start_ns
                     && e.timestamp < query.end_ns
             })
-            .take(query.limit as usize)
+            .take(limit as usize)
             .cloned()
             .collect()
     })

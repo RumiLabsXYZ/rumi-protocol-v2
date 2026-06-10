@@ -223,6 +223,21 @@ pub struct PoolLiquidationRecord {
     pub collateral_price_e8s: Option<u64>,
 }
 
+/// Tokens the pool still owes a user after a failed `deposit_as_3usd` refund,
+/// recoverable via `claim_pending_refund` instead of being silently stranded
+/// (audit IC-S-001). Mirrors rumi_3pool's `ThreePoolPendingClaim` pattern.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingRefund {
+    pub id: u64,
+    pub user: Principal,
+    pub token_ledger: Principal,
+    /// Gross amount still held by the pool (native decimals). The payout
+    /// sends this minus the ledger transfer fee.
+    pub amount: u64,
+    pub reason: String,
+    pub created_at: u64,
+}
+
 // ──────────────────────────────────────────────────────────────
 // Init / Config / API types
 // ──────────────────────────────────────────────────────────────
@@ -290,6 +305,7 @@ pub enum StabilityPoolError {
     SystemBusy,
     AlreadyOptedOut { collateral: Principal },
     AlreadyOptedIn { collateral: Principal },
+    RefundClaimNotFound,
 }
 
 // ──────────────────────────────────────────────────────────────

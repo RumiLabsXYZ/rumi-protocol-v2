@@ -51,12 +51,12 @@ fn ok_or_die(result: Result<(), String>) {
 /// Checks that Elliptic Core Canister state is internally consistent.
 #[cfg(feature = "self_check")]
 fn check_invariants() -> Result<(), String> {
-    use protocol_canister::event::replay;
+    use rumi_protocol_backend::event::replay;
 
     read_state(|s| {
         s.check_invariants()?;
 
-        let events: Vec<_> = protocol_canister::storage::events().collect();
+        let events: Vec<_> = rumi_protocol_backend::storage::events().collect();
         let recovered_state = replay(events.clone().into_iter())
             .unwrap_or_else(|e| panic!("failed to replay log {:?}: {:?}", events, e));
 
@@ -3572,6 +3572,14 @@ fn get_bot_cr_tolerance_bps() -> u64 {
 async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, ProtocolError> {
     validate_call().await?;
     validate_price_for_liquidation()?;
+    // ORC-001 (audit 2026-06-09): mirror the gates every manual/SP liquidation
+    // entry enforces. Without the per-vault freshness gate the bot computes the
+    // CR gate and seizure from a cached non-ICP price with no staleness
+    // ceiling (the VER-001 fail-open class); without the freeze gate the bot
+    // keeps claiming through an admin liquidation halt. Dormant while the bot
+    // allowlist is ICP-only, live the moment a non-ICP collateral is added.
+    validate_liquidation_not_frozen()?;
+    validate_freshness_for_vault(vault_id).await?;
     let caller = ic_cdk::api::caller();
 
     let is_bot = read_state(|s| {
@@ -3746,7 +3754,15 @@ async fn bot_confirm_liquidation(vault_id: u64) -> Result<(), ProtocolError> {
 
     mutate_state(|s| {
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
-            vault.borrowed_icusd_amount -= ICUSD::new(claim.debt_amount);
+            // AR-B-001 (audit 2026-06-09): saturate the debt write-down. A
+            // non-saturating `-=` traps if anything reduced the vault's debt
+            // during the claim->confirm window, permanently sticking the vault
+            // at `bot_processing = true` with the bot's collateral already
+            // paid. The redemption skip + user-op rejection make that window
+            // race-free today; saturating keeps a residual drift from ever
+            // bricking the vault (it degrades to under-reduction instead).
+            vault.borrowed_icusd_amount =
+                vault.borrowed_icusd_amount.saturating_sub(ICUSD::new(claim.debt_amount));
             vault.collateral_amount = vault.collateral_amount.saturating_sub(claim.collateral_amount);
             vault.bot_processing = false;
         }
@@ -4213,7 +4229,12 @@ fn admin_resolve_stuck_claim(vault_id: u64, apply_debt_reduction: bool) -> Resul
     mutate_state(|s| {
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
             if apply_debt_reduction {
-                vault.borrowed_icusd_amount -= ICUSD::new(claim.debt_amount);
+                // AR-B-001 (audit 2026-06-09): saturate, same as
+                // bot_confirm_liquidation. The non-saturating `-=` made this
+                // recovery endpoint trap on exactly the stuck state it exists
+                // to resolve (debt already reduced below the claim amount).
+                vault.borrowed_icusd_amount =
+                    vault.borrowed_icusd_amount.saturating_sub(ICUSD::new(claim.debt_amount));
                 vault.collateral_amount = vault.collateral_amount.saturating_sub(claim.collateral_amount);
                 s.bot_total_debt_covered_e8s += claim.debt_amount;
             }

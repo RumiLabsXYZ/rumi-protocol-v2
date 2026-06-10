@@ -17,7 +17,7 @@ import type {
     ProtocolError,
     OpenVaultSuccess
   } from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did.js';
-import { walletOperations, isOisyWallet } from './walletOperations';
+import { walletOperations, isOisyWallet, largeApprovalExpiry } from './walletOperations';
 import { pnp } from '../pnp';
 import { get } from 'svelte/store';
 import { vaultStore } from '$lib/stores/vaultStore';
@@ -37,6 +37,14 @@ import {
   callWithOisyFalseNegativeGuard,
   isOisyLandedSentinel,
 } from './oisyResilience';
+import {
+  warmRawSnapshots,
+  warmRawSnapshot,
+  warmRawVaultIds,
+  getRawSnapshot,
+  getRawVaultIds,
+  clearRawSnapshots,
+} from './rawSnapshotCache';
 import { TokenService } from '../tokenService';
 
 
@@ -81,12 +89,17 @@ export class ApiClient {
   // Add this property to track if an operation is in progress
 private static operationInProgress = false;
 
-  // Raw-vault-snapshot cache. Populated wherever get_vaults is fetched
-  // (page-load / poll / refresh-after) so the Oisy `_arr` verifiers can read
-  // pre-op ("before") state synchronously instead of awaiting get_vaults inside
-  // the click gesture window.
-  private static rawSnapshotCache = new Map<number, { collateralAmount: bigint; borrowedIcusd: bigint; icpMargin: bigint }>();
-  private static rawVaultIdSet: Set<number> = new Set();
+  // Raw-vault-snapshot cache lives in ./rawSnapshotCache, keyed by wallet
+  // principal (FE-002) so a verifier never reads a snapshot captured under a
+  // different wallet. Warmed wherever get_vaults is fetched so the Oisy `_arr`
+  // verifiers can read pre-op ("before") state synchronously instead of
+  // awaiting get_vaults inside the click gesture window.
+
+  /** Current wallet principal as text, or null when disconnected. Synchronous. */
+  private static currentPrincipalText(): string | null {
+    const p = get(walletStore).principal;
+    return p ? p.toString() : null;
+  }
 
 /**
  * Helper for sequential operations with integrated operation tracking
@@ -1278,7 +1291,7 @@ static async repayToVault(vaultId: number, icusdAmount: number): Promise<VaultOp
         const approveResult = await icusdLedgerActor.icrc2_approve({
           amount: LARGE_APPROVAL,
           spender: { owner: Principal.fromText(CONFIG.currentCanisterId), subaccount: [] },
-          expires_at: [], expected_allowance: [], memo: [], fee: [],
+          expires_at: largeApprovalExpiry(), expected_allowance: [], memo: [], fee: [],
           from_subaccount: [], created_at_time: []
         });
         if (approveResult && 'Err' in approveResult) {
@@ -1401,7 +1414,7 @@ static async repayAndCloseVault(vaultId: number, icusdAmount: number): Promise<V
         const approveResult = await icusdLedgerActor.icrc2_approve({
           amount: LARGE_APPROVAL,
           spender: { owner: Principal.fromText(CONFIG.currentCanisterId), subaccount: [] },
-          expires_at: [], expected_allowance: [], memo: [], fee: [],
+          expires_at: largeApprovalExpiry(), expected_allowance: [], memo: [], fee: [],
           from_subaccount: [], created_at_time: []
         });
         if (approveResult && 'Err' in approveResult) {
@@ -1537,7 +1550,7 @@ static async repayToVaultWithStable(
         const approveResult = await stableLedgerActor.icrc2_approve({
           amount: LARGE_APPROVAL,
           spender: { owner: Principal.fromText(CONFIG.currentCanisterId), subaccount: [] },
-          expires_at: [], expected_allowance: [], memo: [], fee: [],
+          expires_at: largeApprovalExpiry(), expected_allowance: [], memo: [], fee: [],
           from_subaccount: [], created_at_time: []
         });
         if (approveResult && 'Err' in approveResult) {
@@ -1712,6 +1725,10 @@ static async repayToVaultWithStable(
       timestamp: 0,
       loading: false
     };
+    // FE-002: drop the raw snapshots backing the Oisy `_arr` verifiers too,
+    // so wallet connect/disconnect (which both call this) can't leave a
+    // previous wallet's pre-op state behind.
+    clearRawSnapshots();
   }
 
   // Cache to store user vaults data with timestamp
@@ -1765,8 +1782,7 @@ static async repayToVaultWithStable(
 
         // Keep the sync raw-snapshot caches warm so the Oisy click-path
         // verifiers can read pre-op state without a network await.
-        ApiClient.rawVaultIdSet = new Set(canisterVaults.map((cv: any) => Number(cv.vault_id)));
-        ApiClient.rawSnapshotCache = new Map(canisterVaults.map((cv: any) => [Number(cv.vault_id), { collateralAmount: BigInt(cv.collateral_amount), borrowedIcusd: BigInt(cv.borrowed_icusd_amount), icpMargin: BigInt(cv.icp_margin_amount) }]));
+        warmRawSnapshots(principalStr, canisterVaults.map((cv: any) => [Number(cv.vault_id), { collateralAmount: BigInt(cv.collateral_amount), borrowedIcusd: BigInt(cv.borrowed_icusd_amount), icpMargin: BigInt(cv.icp_margin_amount) }]));
         
         // Get protocol status for ICP price calculation
         const status = await QueryOperations.getProtocolStatus();
@@ -2075,7 +2091,7 @@ static async repayToVaultWithStable(
           const approveResult = await icusdLedgerActor.icrc2_approve({
             amount: LARGE_APPROVAL,
             spender: { owner: Principal.fromText(spenderCanisterId), subaccount: [] },
-            expires_at: [], expected_allowance: [], memo: [], fee: [],
+            expires_at: largeApprovalExpiry(), expected_allowance: [], memo: [], fee: [],
             from_subaccount: [], created_at_time: []
           });
           if (approveResult && 'Err' in approveResult) {
@@ -2367,7 +2383,7 @@ static async repayToVaultWithStable(
         const v = canisterVaults.find(cv => Number(cv.vault_id) === vaultId);
         if (!v) return { exists: false };
         // Keep the sync cache warm for the Oisy click-path verifiers.
-        ApiClient.rawSnapshotCache.set(Number(v.vault_id), {
+        warmRawSnapshot(walletState.principal.toString(), Number(v.vault_id), {
           collateralAmount: BigInt(v.collateral_amount),
           borrowedIcusd: BigInt(v.borrowed_icusd_amount),
           icpMargin: BigInt(v.icp_margin_amount),
@@ -2390,10 +2406,10 @@ static async repayToVaultWithStable(
      * network await (which would burn the transient-activation window).
      * The non-Oisy path keeps awaiting the fresh queries above.
      */
-    static getCachedRawBorrowedE8s(vaultId: number): bigint | null { const s = ApiClient.rawSnapshotCache.get(vaultId); return s ? s.borrowedIcusd : null; }
-    static getCachedRawCollateralAmount(vaultId: number): bigint | null { const s = ApiClient.rawSnapshotCache.get(vaultId); return s ? s.collateralAmount : null; }
-    static getCachedRawSnapshot(vaultId: number): { exists: true; collateralAmount: bigint; borrowedIcusd: bigint; icpMargin: bigint } | null { const s = ApiClient.rawSnapshotCache.get(vaultId); return s ? { exists: true, collateralAmount: s.collateralAmount, borrowedIcusd: s.borrowedIcusd, icpMargin: s.icpMargin } : null; }
-    static getCachedUserVaultIds(): Set<number> | null { return ApiClient.rawVaultIdSet.size > 0 ? new Set(ApiClient.rawVaultIdSet) : null; }
+    static getCachedRawBorrowedE8s(vaultId: number): bigint | null { const s = getRawSnapshot(ApiClient.currentPrincipalText(), vaultId); return s ? s.borrowedIcusd : null; }
+    static getCachedRawCollateralAmount(vaultId: number): bigint | null { const s = getRawSnapshot(ApiClient.currentPrincipalText(), vaultId); return s ? s.collateralAmount : null; }
+    static getCachedRawSnapshot(vaultId: number): { exists: true; collateralAmount: bigint; borrowedIcusd: bigint; icpMargin: bigint } | null { const s = getRawSnapshot(ApiClient.currentPrincipalText(), vaultId); return s ? { exists: true, collateralAmount: s.collateralAmount, borrowedIcusd: s.borrowedIcusd, icpMargin: s.icpMargin } : null; }
+    static getCachedUserVaultIds(): Set<number> | null { return getRawVaultIds(ApiClient.currentPrincipalText()); }
 
     /**
      * Convenience wrapper around fetchVaultRawSnapshot returning just
@@ -2429,7 +2445,7 @@ static async repayToVaultWithStable(
         const canisterVaults = await publicActor.get_vaults([walletState.principal]);
         const ids = new Set(canisterVaults.map(v => Number(v.vault_id)));
         // Keep the sync vault-id cache warm for the Oisy click-path verifiers.
-        ApiClient.rawVaultIdSet = new Set(ids);
+        warmRawVaultIds(walletState.principal.toString(), ids);
         return ids;
       } catch (err) {
         console.warn('snapshotUserVaultIds failed:', err);
@@ -3146,7 +3162,7 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
             const approveResult = await icusdLedgerActor.icrc2_approve({
               amount: LARGE_APPROVAL,
               spender: { owner: Principal.fromText(spenderCanisterId), subaccount: [] },
-              expires_at: [], expected_allowance: [], memo: [], fee: [],
+              expires_at: largeApprovalExpiry(), expected_allowance: [], memo: [], fee: [],
               from_subaccount: [], created_at_time: []
             });
             if (approveResult && 'Err' in approveResult) {
@@ -3289,7 +3305,7 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
             const approveResult = await stableLedgerActor.icrc2_approve({
               amount: LARGE_APPROVAL,
               spender: { owner: Principal.fromText(spenderCanisterId), subaccount: [] },
-              expires_at: [], expected_allowance: [], memo: [], fee: [],
+              expires_at: largeApprovalExpiry(), expected_allowance: [], memo: [], fee: [],
               from_subaccount: [], created_at_time: []
             });
             if (approveResult && 'Err' in approveResult) {
@@ -3393,7 +3409,7 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
             const approveResult = await icusdLedgerActor.icrc2_approve({
               amount: LARGE_APPROVAL,
               spender: { owner: Principal.fromText(spenderCanisterId), subaccount: [] },
-              expires_at: [], expected_allowance: [], memo: [], fee: [],
+              expires_at: largeApprovalExpiry(), expected_allowance: [], memo: [], fee: [],
               from_subaccount: [], created_at_time: []
             });
             if (approveResult && 'Err' in approveResult) {

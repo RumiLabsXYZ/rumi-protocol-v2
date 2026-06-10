@@ -90,8 +90,8 @@ type PublicEpochStatus = record {
 type PublicOpenEpoch = record {
   epoch_index : nat64;
   epoch_start_ns : nat64;
-  snapshot_a_ns : nat64;
-  snapshot_b_ns : nat64;
+  snapshot_a_ns : opt nat64;
+  snapshot_b_ns : opt nat64;
   epoch_end_ns : nat64;
 };
 type QualifyingAction = variant {

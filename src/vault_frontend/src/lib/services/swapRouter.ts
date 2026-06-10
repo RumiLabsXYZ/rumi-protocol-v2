@@ -108,8 +108,20 @@ export interface SwapRoute {
   pathDisplay: string;
   /** Number of on-chain hops */
   hops: number;
-  /** Estimated output in raw units of the output token */
+  /**
+   * Estimated receive amount in raw units of the output token, NET of the
+   * output ledger fee (FE-003). The 3pool and Rumi AMM pay out
+   * `amount - ledger_fee` and enforce min_dy / min_amount_out against that
+   * net amount (PR #230); ICPswap's withdraw step deducts the same fee. This
+   * is what the UI displays and what the user-intent min bound derives from.
+   */
   estimatedOutput: bigint;
+  /**
+   * Raw (gross) pool output of the final hop, before the output ledger fee.
+   * Used for mid-market-rate / price-impact math and for ICPswap's
+   * amountOutMinimum, which the pool checks against the GROSS in-pool output.
+   */
+  grossOutput: bigint;
   /** Combined fee display (percentage) */
   feeDisplay: string;
   /** For multi-hop routes: intermediate output (e.g. 3USD amount between hops) */
@@ -173,6 +185,18 @@ function isICP(token: AmmToken): boolean {
 }
 
 /**
+ * FE-003: convert a GROSS pool output into the NET amount the user receives.
+ * Quotes from every provider are gross, but the payout transfer deducts one
+ * output-ledger fee, and the 3pool / Rumi AMM enforce their min bounds
+ * against that net amount (PR #230). Awaiting the live fee here (quote
+ * phase) also warms the fee cache for the synchronous click-path executors.
+ */
+async function netOfOutputLedgerFee(grossOut: bigint, to: AmmToken): Promise<bigint> {
+  const fee = await fetchLedgerFee({ ledgerId: to.ledgerId, decimals: to.decimals, symbol: to.symbol });
+  return grossOut > fee ? grossOut - fee : 0n;
+}
+
+/**
  * Determine the swap route and fetch a combined quote.
  */
 export async function resolveRoute(
@@ -189,7 +213,8 @@ export async function resolveRoute(
       type: 'three_pool_swap',
       pathDisplay: `${from.symbol} → ${to.symbol}`,
       hops: 1,
-      estimatedOutput: quote.amount_out,
+      estimatedOutput: await netOfOutputLedgerFee(quote.amount_out, to),
+      grossOutput: quote.amount_out,
       feeDisplay: `${feePct}%${quote.is_rebalancing ? ' (rebalancing)' : ''}`,
     };
   }
@@ -199,11 +224,14 @@ export async function resolveRoute(
     const amounts = [0n, 0n, 0n];
     amounts[from.threePoolIndex] = amountIn;
     const output = await threePoolService.calcAddLiquidity(amounts);
+    // No net adjustment: add_liquidity mints 3USD directly to the caller's
+    // balance (no ledger transfer fee) and checks min_lp against the gross mint.
     return {
       type: 'three_pool_deposit',
       pathDisplay: `${from.symbol} → 3USD`,
       hops: 1,
       estimatedOutput: output,
+      grossOutput: output,
       feeDisplay: '~0%',
     };
   }
@@ -215,7 +243,8 @@ export async function resolveRoute(
       type: 'three_pool_redeem',
       pathDisplay: `3USD → ${to.symbol}`,
       hops: 1,
-      estimatedOutput: output,
+      estimatedOutput: await netOfOutputLedgerFee(output, to),
+      grossOutput: output,
       feeDisplay: '~0%',
     };
   }
@@ -227,7 +256,8 @@ export async function resolveRoute(
       type: 'amm_swap',
       pathDisplay: quote.label,
       hops: 1,
-      estimatedOutput: quote.amountOut,
+      estimatedOutput: await netOfOutputLedgerFee(quote.amountOut, to),
+      grossOutput: quote.amountOut,
       feeDisplay: quote.feeDisplay,
       providerQuote: quote,
       // Keep poolId populated when Rumi AMM wins so the Oisy helper can
@@ -272,13 +302,15 @@ export async function resolveRoute(
       twoHopOutput = await threePoolService.calcRemoveOneCoin(twoHopIntermediate, to.threePoolIndex);
     }
 
-    // Direct wins on ties (one fewer fee)
+    // Direct wins on ties (one fewer fee). Compare gross outputs: both
+    // options end in the same output token, so the net adjustment cancels.
     if (directQuote && directQuote.amountOut >= twoHopOutput) {
       return {
         type: 'icusd_icp_direct',
         pathDisplay: directQuote.label,
         hops: 1,
-        estimatedOutput: directQuote.amountOut,
+        estimatedOutput: await netOfOutputLedgerFee(directQuote.amountOut, to),
+        grossOutput: directQuote.amountOut,
         feeDisplay: directQuote.feeDisplay,
         providerQuote: directQuote,
       };
@@ -291,7 +323,8 @@ export async function resolveRoute(
         ? `icUSD → 3USD → ICP`
         : `ICP → 3USD → icUSD`,
       hops: 2,
-      estimatedOutput: twoHopOutput,
+      estimatedOutput: await netOfOutputLedgerFee(twoHopOutput, to),
+      grossOutput: twoHopOutput,
       feeDisplay: twoHopQuote.feeDisplay,
       intermediateOutput: twoHopIntermediate,
       hopProviderQuote: twoHopQuote,
@@ -312,7 +345,8 @@ export async function resolveRoute(
       type: 'stable_to_icp',
       pathDisplay: `${from.symbol} → 3USD → ICP`,
       hops: 2,
-      estimatedOutput: hopQuote.amountOut,
+      estimatedOutput: await netOfOutputLedgerFee(hopQuote.amountOut, to),
+      grossOutput: hopQuote.amountOut,
       feeDisplay: hopQuote.feeDisplay,
       intermediateOutput: threeUsdOut,
       hopProviderQuote: hopQuote,
@@ -331,7 +365,8 @@ export async function resolveRoute(
       type: 'icp_to_stable',
       pathDisplay: `ICP → 3USD → ${to.symbol}`,
       hops: 2,
-      estimatedOutput: stableOut,
+      estimatedOutput: await netOfOutputLedgerFee(stableOut, to),
+      grossOutput: stableOut,
       feeDisplay: hopQuote.feeDisplay,
       intermediateOutput: hopQuote.amountOut,
       hopProviderQuote: hopQuote,
@@ -358,6 +393,12 @@ export async function executeRoute(
   amountIn: bigint,
   slippageBps: number,
 ): Promise<bigint | OisyLandedSentinel> {
+  // FE-003: estimatedOutput is NET of the output ledger fee, so this bound is
+  // exactly what the user expects to receive. The 3pool (min_dy / min_amount)
+  // and Rumi AMM (min_amount_out) enforce their bounds against the NET payout
+  // (PR #230), so it is passed through unchanged on those paths. ICPswap
+  // checks amountOutMinimum against the GROSS in-pool output, so its branches
+  // derive the bound from the gross provider quote instead.
   const minOutput = route.estimatedOutput * BigInt(10000 - slippageBps) / 10000n;
 
   // Kill-switch guard: a route quoted while ICPswap routing was enabled must
@@ -415,7 +456,12 @@ export async function executeRoute(
         await approveIcpswapPool(from, amountIn, poolCanisterId);
       }
 
-      const result = await provider.swap(from, to, amountIn, minOutput, quote);
+      // ICPswap's amountOutMinimum is a GROSS in-pool bound; Rumi AMM's
+      // min_amount_out is a NET payout bound. Hand each the bound it expects.
+      const providerMinOut = isIcpswapProvider(quote.provider)
+        ? quote.amountOut * BigInt(10000 - slippageBps) / 10000n
+        : minOutput;
+      const result = await provider.swap(from, to, amountIn, providerMinOut, quote);
       return result.amountOut;
     }
 
@@ -453,7 +499,12 @@ export async function executeRoute(
         await approveIcpswapPool(threeUsdToken, threeUsdReceived, poolCanisterId);
       }
 
-      const icpMinOutput = freshQuote.amountOut * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
+      // Rumi AMM enforces min_amount_out against the NET payout (PR #230);
+      // ICPswap checks the GROSS in-pool output. Non-Oisy path, awaits are fine.
+      const icpHopEstimate = isIcpswapProvider(freshQuote.provider)
+        ? freshQuote.amountOut
+        : await netOfOutputLedgerFee(freshQuote.amountOut, to);
+      const icpMinOutput = icpHopEstimate * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
       const result = await provider.swap(threeUsdToken, to, threeUsdReceived, icpMinOutput, freshQuote);
       return result.amountOut;
     }
@@ -479,13 +530,31 @@ export async function executeRoute(
         await approveIcpswapPool(from, amountIn, poolCanisterId);
       }
 
-      const threeUsdMinOutput = hopQuote.amountOut * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
+      // Rumi AMM enforces its bound against the NET 3USD payout (PR #230);
+      // ICPswap checks the GROSS in-pool output.
+      const threeUsdHopEstimate = isIcpswapProvider(hopQuote.provider)
+        ? hopQuote.amountOut
+        : await netOfOutputLedgerFee(hopQuote.amountOut, threeUsdToken);
+      const threeUsdMinOutput = threeUsdHopEstimate * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
       const hop1 = await provider.swap(from, threeUsdToken, amountIn, threeUsdMinOutput, hopQuote);
 
-      // Hop 2: 3USD -> stablecoin (3pool redeem)
-      const stableEstimate = await threePoolService.calcRemoveOneCoin(hop1.amountOut, to.threePoolIndex);
-      const stableMinOutput = stableEstimate * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
-      return await threePoolService.removeOneCoin(hop1.amountOut, to.threePoolIndex, stableMinOutput);
+      // The caller holds the NET 3USD from hop 1, not the gross provider amountOut.
+      // Rumi AMM's swap pays out `amount_out - ledger_fee` (transfer_to_user), so
+      // the caller's 3USD balance grew by one ledger fee less than hop1.amountOut.
+      // remove_one_coin burns the caller's LP directly and rejects with
+      // InsufficientLiquidity when lp_burn exceeds the held balance, so hop 2 must
+      // burn the NET amount. ICPswap's withdraw already nets the fee, so its
+      // returned amountOut is the held amount as-is.
+      const threeUsdReceived = isIcpswapProvider(hopQuote.provider)
+        ? hop1.amountOut
+        : await netOfOutputLedgerFee(hop1.amountOut, threeUsdToken);
+
+      // Hop 2: 3USD -> stablecoin (3pool redeem). remove_one_coin enforces
+      // min_amount against the NET stable payout, so bound from net.
+      const stableEstimate = await threePoolService.calcRemoveOneCoin(threeUsdReceived, to.threePoolIndex);
+      const stableNetEstimate = await netOfOutputLedgerFee(stableEstimate, to);
+      const stableMinOutput = stableNetEstimate * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
+      return await threePoolService.removeOneCoin(threeUsdReceived, to.threePoolIndex, stableMinOutput);
     }
 
     case 'icusd_icp_direct': {
@@ -505,8 +574,10 @@ export async function executeRoute(
 
       await approveIcpswapPool(from, amountIn, poolCanisterId);
 
+      // ICPswap checks amountOutMinimum against the GROSS in-pool output.
       const provider = _icUsdIcpRegistry.get(q.provider);
-      const result = await provider.swap(from, to, amountIn, minOutput, q);
+      const grossMinOut = q.amountOut * BigInt(10000 - slippageBps) / 10000n;
+      const result = await provider.swap(from, to, amountIn, grossMinOut, q);
       return result.amountOut;
     }
 
@@ -640,7 +711,9 @@ async function executeStableToIcpOisy(
     return await executeStableToIcpOisyIcpswap(route, from, amountIn, slippageBps, hopQuote);
   }
 
-  // All values pre-computed during resolveRoute — no canister calls
+  // All values pre-computed during resolveRoute (no canister calls).
+  // min_lp is checked against the gross LP mint; the AMM's min_amount_out is
+  // checked against the NET ICP payout, which estimatedOutput already is (FE-003).
   const poolId = route.poolId!;
   const threeUsdEstimate = route.intermediateOutput!;
   const threeUsdMinOutput = threeUsdEstimate * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
@@ -716,11 +789,17 @@ async function executeIcpToStableOisy(
     return await executeIcpToStableOisyIcpswap(route, to, amountIn, slippageBps, hopQuote);
   }
 
-  // All values pre-computed during resolveRoute — no canister calls
+  // All values pre-computed during resolveRoute (no canister calls).
+  // stableMinOutput targets remove_one_coin's NET min_amount check, which
+  // estimatedOutput already is (FE-003). The AMM's min for the 3USD hop is
+  // also a NET bound, so subtract the 3USD ledger fee from the gross estimate
+  // (sync cache read, warmed by preWarmOisyFees during the quote phase).
   const poolId = route.poolId!;
   const threeUsdEstimate = route.intermediateOutput!;
   const icpToken = AMM_TOKENS.find(t => t.symbol === 'ICP')!;
-  const threeUsdMinOutput = threeUsdEstimate * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
+  const threeUsdFee = getCachedLedgerFee({ ledgerId: THREEPOOL_ID, decimals: 8, symbol: '3USD' });
+  const threeUsdNetEstimate = threeUsdEstimate > threeUsdFee ? threeUsdEstimate - threeUsdFee : 0n;
+  const threeUsdMinOutput = threeUsdNetEstimate * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
   const stableMinOutput = route.estimatedOutput * BigInt(10000 - slippageBps) / 10000n;
 
   // Read live ICRC-1 fee from cache. preWarmOisyFees() warmed it during quote.
@@ -747,8 +826,11 @@ async function executeIcpToStableOisy(
   const r2 = await ammActor.swap(poolId, Principal.fromText(ICP_LEDGER_ID), amountIn, threeUsdMinOutput);
   if ('Err' in r2) throw new Error(`AMM swap failed: ${JSON.stringify(r2.Err)}`);
 
-  // Step 3: 3pool redeem 3USD → stablecoin (no approval: burns caller's LP tokens)
-  const r3 = await poolActor.remove_one_coin(threeUsdEstimate, to.threePoolIndex, stableMinOutput);
+  // Step 3: 3pool redeem 3USD → stablecoin (no approval: burns caller's LP tokens).
+  // Burn the NET 3USD the AMM actually paid out (gross - ledger_fee). Burning the
+  // gross threeUsdEstimate would exceed the caller's balance and trip
+  // remove_one_coin's InsufficientLiquidity check (or silently eat prior 3USD dust).
+  const r3 = await poolActor.remove_one_coin(threeUsdNetEstimate, to.threePoolIndex, stableMinOutput);
   if ('Err' in r3) throw new Error(`3pool redeem failed: ${JSON.stringify(r3.Err)}`);
   return r3.Ok;
 }
@@ -790,7 +872,9 @@ async function executeStableToIcpOisyIcpswap(
 
   const threeUsdEstimate = route.intermediateOutput!;
   const threeUsdMinOutput = threeUsdEstimate * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
-  const icpMinOutput = route.estimatedOutput * BigInt(10000 - slippageBps) / 10000n;
+  // ICPswap checks amountOutMinimum against the GROSS in-pool output (and the
+  // pre-committed withdraw below reuses the same figure), so bound from gross.
+  const icpMinOutput = route.grossOutput * BigInt(10000 - slippageBps) / 10000n;
   const fromPoolToken = POOL_TOKENS[from.threePoolIndex];
 
   const amounts: [bigint, bigint, bigint] = [0n, 0n, 0n];
@@ -896,6 +980,8 @@ async function executeIcpToStableOisyIcpswap(
   const icpToken = AMM_TOKENS.find(t => t.symbol === 'ICP')!;
   const threeUsdEstimate = route.intermediateOutput!;
   const threeUsdMinFromSwap = threeUsdEstimate * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
+  // remove_one_coin enforces min_amount against the NET stable payout, which
+  // estimatedOutput already is (FE-003).
   const stableMinOutput = route.estimatedOutput * BigInt(10000 - slippageBps) / 10000n;
 
   // Read live ICRC-1 fees from cache. preWarmOisyFees() warmed them during quote.
@@ -987,7 +1073,9 @@ async function executeIcpswapDirectOisy(
     throw new Error('ICPswap direct route has invalid meta.zeroForOne (expected boolean)');
   }
 
-  const minOut = route.estimatedOutput * BigInt(10000 - slippageBps) / 10000n;
+  // ICPswap checks amountOutMinimum against the GROSS in-pool output (and the
+  // pre-committed withdraw below reuses the same figure), so bound from gross.
+  const minOut = route.grossOutput * BigInt(10000 - slippageBps) / 10000n;
 
   // Read live ICRC-1 fees from cache. preWarmOisyFees() warmed them during quote.
   const fromFee = tokenFeeCached(from);

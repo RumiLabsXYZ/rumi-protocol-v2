@@ -1453,16 +1453,37 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                 icusd_amount,
                 fee_amount,
                 icusd_block_index,
+                collateral_type,
+                ref vault_redemptions,
                 ..
             } => {
                 state.provide_liquidity(fee_amount, state.developer_principal);
-                let redeem_ct = state.icp_collateral_type();
-                state.redeem_on_vaults(icusd_amount, current_icp_rate, &redeem_ct);
-                let margin: ICP = icusd_amount / current_icp_rate;
-                let nonce = state.next_op_nonce();
-                state
-                    .pending_redemption_transfer
-                    .insert(icusd_block_index, PendingMarginTransfer { owner, margin, collateral_type: crate::vault::default_collateral_type(), retry_count: 0, op_nonce: nonce });
+                let redeem_ct = collateral_type
+                    .unwrap_or_else(|| state.icp_collateral_type());
+                // AR-B-001/RED-001 (audit 2026-06-09): events that recorded
+                // their per-vault outcomes replay EXACTLY by applying those
+                // outcomes, because the live scan's eligibility depends on
+                // transient facts (per-vault op lock, bot_processing) replay
+                // cannot reconstruct. The consumed-based margin mirrors the
+                // live payout clamp. Pre-Wave-9 events (no stored outcomes)
+                // keep the legacy re-run + full-claim margin.
+                let margin: ICP = match vault_redemptions {
+                    Some(vrs) => {
+                        state.apply_vault_redemptions(vrs);
+                        let consumed: u64 = vrs.iter().map(|v| v.icusd_redeemed_e8s).sum();
+                        ICUSD::from(consumed) / current_icp_rate
+                    }
+                    None => {
+                        state.redeem_on_vaults(icusd_amount, current_icp_rate, &redeem_ct);
+                        icusd_amount / current_icp_rate
+                    }
+                };
+                if margin.to_u64() > 0 {
+                    let nonce = state.next_op_nonce();
+                    state
+                        .pending_redemption_transfer
+                        .insert(icusd_block_index, PendingMarginTransfer { owner, margin, collateral_type: redeem_ct, retry_count: 0, op_nonce: nonce });
+                }
             }
             Event::RedemptionTransfered {
                 icusd_block_index, ..
@@ -2278,6 +2299,15 @@ pub fn record_add_margin_to_vault(
     state.add_margin_to_vault(vault_id, margin_added);
 }
 
+/// Outcome of a redemption's vault water-fill, returned to the caller so the
+/// payout/refund accounting stays consistent with what the fill actually did.
+pub struct RedemptionOutcome {
+    /// icUSD actually retired against vault debt (sum of per-vault shares).
+    pub consumed: ICUSD,
+    /// Collateral payout queued for the redeemer.
+    pub margin: ICP,
+}
+
 pub fn record_redemption_on_vaults(
     state: &mut State,
     owner: Principal,
@@ -2285,18 +2315,16 @@ pub fn record_redemption_on_vaults(
     fee_amount: ICUSD,
     collateral_price: UsdIcp,
     icusd_block_index: u64,
-) {
+    redeem_ct: Principal,
+) -> RedemptionOutcome {
     // Fee is already deducted from icusd_amount before calling redeem_on_vaults,
     // so vault owners effectively keep the fee (less collateral seized for their debt).
     // The fee portion of icUSD stays in the protocol canister (burned).
-
-    // Pick the best collateral type based on redemption tier priority.
-    // Tier 1 (most exposed) is redeemed first; within a tier, the collateral
-    // type whose worst vault has the lowest health score goes first.
-    let priority_types = state.get_collateral_types_by_redemption_priority();
-    let redeem_ct = priority_types.first()
-        .copied()
-        .unwrap_or_else(|| state.icp_collateral_type()); // fallback to ICP
+    //
+    // RED-002 (audit 2026-06-09): `redeem_ct` (the redemption-priority winner)
+    // is now resolved by the caller BEFORE pulling icUSD, so freshness, fee
+    // pricing, and the base-rate bump all key on the collateral actually
+    // seized rather than the caller-supplied type.
 
     // Use the selected collateral type's price for both water-filling and
     // pending transfer amount calculation. The caller's collateral_price
@@ -2333,6 +2361,19 @@ pub fn record_redemption_on_vaults(
         vault_redemptions: if vault_redemptions.is_empty() { None } else { Some(vault_redemptions.clone()) },
     });
 
+    // RED-001 (audit 2026-06-09): the payout is derived from the icUSD the
+    // water-fill ACTUALLY retired, never from the requested claim. When the
+    // fill exhausts eligible vaults early, the unconsumed remainder is
+    // refunded by the caller (`redeem_collateral`) instead of being paid out
+    // in collateral that no vault was debited for (which drained co-collateral
+    // vaults' shared backing). The deficit accrual target shrinks accordingly:
+    // only the consumed-but-undercollateralized gap (underwater vaults) is
+    // genuine bad debt; the unconsumed remainder is not a deficit once it is
+    // refunded.
+    let consumed = ICUSD::from(
+        vault_redemptions.iter().map(|v| v.icusd_redeemed_e8s).sum::<u64>(),
+    );
+
     // Wave-9 RED-002: route any redemption-side shortfall into the
     // Wave-8e deficit account. The pure helper takes an explicit
     // timestamp so unit tests can exercise the predicate without an
@@ -2340,18 +2381,21 @@ pub fn record_redemption_on_vaults(
     let _shortfall = accrue_redemption_shortfall_at(
         state,
         owner,
-        icusd_amount,
+        consumed,
         &vault_redemptions,
         price_decimal,
         decimals,
         now(),
     );
 
-    let margin: ICP = icusd_amount / ct_price;
-    let op_nonce = state.next_op_nonce();
-    state
-        .pending_redemption_transfer
-        .insert(icusd_block_index, PendingMarginTransfer { owner, margin, collateral_type: redeem_ct, retry_count: 0, op_nonce });
+    let margin: ICP = consumed / ct_price;
+    if margin.to_u64() > 0 {
+        let op_nonce = state.next_op_nonce();
+        state
+            .pending_redemption_transfer
+            .insert(icusd_block_index, PendingMarginTransfer { owner, margin, collateral_type: redeem_ct, retry_count: 0, op_nonce });
+    }
+    RedemptionOutcome { consumed, margin }
 }
 
 /// Wave-9 RED-002: pure-math predicate for the redemption shortfall.

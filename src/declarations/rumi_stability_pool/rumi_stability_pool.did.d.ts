@@ -130,6 +130,14 @@ export type PoolEventType = {
       'token_ledger' : Principal,
     }
   };
+export interface PendingRefund {
+  'id' : bigint,
+  'user' : Principal,
+  'token_ledger' : Principal,
+  'amount' : bigint,
+  'reason' : string,
+  'created_at' : bigint,
+}
 export interface PoolLiquidationRecord {
   'collateral_price_e8s' : [] | [bigint],
   'stables_consumed' : Array<[Principal, bigint]>,
@@ -161,7 +169,8 @@ export type StabilityPoolError = {
   { 'SystemBusy' : null } |
   { 'AlreadyOptedIn' : { 'collateral' : Principal } } |
   { 'TokenNotAccepted' : { 'ledger' : Principal } } |
-  { 'InsufficientPoolBalance' : null };
+  { 'InsufficientPoolBalance' : null } |
+  { 'RefundClaimNotFound' : null };
 export interface StabilityPoolInitArgs {
   'protocol_canister_id' : Principal,
   'authorized_admins' : Array<Principal>,
@@ -219,6 +228,11 @@ export interface _SERVICE {
     { 'Ok' : bigint } |
       { 'Err' : StabilityPoolError }
   >,
+  'claim_pending_refund' : ActorMethod<
+    [bigint],
+    { 'Ok' : bigint } |
+      { 'Err' : StabilityPoolError }
+  >,
   'deposit' : ActorMethod<
     [Principal, bigint],
     { 'Ok' : null } |
@@ -242,6 +256,10 @@ export interface _SERVICE {
   'get_liquidation_history' : ActorMethod<
     [[] | [bigint]],
     Array<PoolLiquidationRecord>
+  >,
+  'get_pending_refunds' : ActorMethod<
+    [[] | [Principal]],
+    Array<PendingRefund>
   >,
   'get_pool_event_count' : ActorMethod<[], bigint>,
   'get_pool_events' : ActorMethod<[bigint, bigint], Array<PoolEvent>>,

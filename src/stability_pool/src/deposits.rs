@@ -1,4 +1,5 @@
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap};
 use candid::Principal;
 use ic_canister_log::log;
 use ic_cdk::call;
@@ -9,6 +10,45 @@ use icrc_ledger_types::icrc1::account::Account;
 use crate::logs::INFO;
 use crate::types::*;
 use crate::state::{read_state, mutate_state};
+
+/// Conservative fallback for a stablecoin ledger's transfer fee (native units),
+/// used when the live `icrc1_fee` query fails (IC-S-001). Erring high keeps the
+/// pool solvent (we refund slightly less) rather than risking an over-send.
+/// Mirrors rumi_3pool::transfers::DEFAULT_LEDGER_FEE.
+const DEFAULT_REFUND_LEDGER_FEE: u64 = 10_000;
+
+thread_local! {
+    /// Per-ledger transfer-fee cache for refund math, populated lazily from
+    /// `icrc1_fee`. Heap-only (not persisted), so it is simply re-warmed after
+    /// an upgrade. Mirrors rumi_3pool::transfers::LEDGER_FEES.
+    static REFUND_LEDGER_FEES: RefCell<HashMap<Principal, u64>> = RefCell::new(HashMap::new());
+}
+
+/// Fetch a stablecoin ledger's transfer fee, caching successful lookups per
+/// ledger. On query failure, falls back to the larger of the registry's
+/// configured fee and the standard ICRC-1 fee (the solvency-safe direction),
+/// without caching so the next refund re-queries.
+async fn refund_ledger_fee(ledger: Principal) -> u64 {
+    if let Some(fee) = REFUND_LEDGER_FEES.with(|c| c.borrow().get(&ledger).copied()) {
+        return fee;
+    }
+    match call::<(), (candid::Nat,)>(ledger, "icrc1_fee", ()).await {
+        Ok((fee_nat,)) => {
+            let fee: u64 = fee_nat.0.try_into().unwrap_or(DEFAULT_REFUND_LEDGER_FEE);
+            REFUND_LEDGER_FEES.with(|c| c.borrow_mut().insert(ledger, fee));
+            fee
+        }
+        Err(e) => {
+            let registry_fee = read_state(|s| {
+                s.stablecoin_registry.get(&ledger).and_then(|c| c.transfer_fee).unwrap_or(0)
+            });
+            let fallback = registry_fee.max(DEFAULT_REFUND_LEDGER_FEE);
+            log!(INFO, "icrc1_fee query failed for {}: {:?}; using conservative fallback {}",
+                ledger, e, fallback);
+            fallback
+        }
+    }
+}
 
 /// Deposit a stablecoin into the pool. User must have pre-approved the pool canister.
 pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), StabilityPoolError> {
@@ -227,7 +267,15 @@ pub async fn claim_collateral(collateral_ledger: Principal) -> Result<u64, Stabi
             let fee_u128: u128 = fee_nat.0.try_into().unwrap_or(0);
             fee_u128 as u64
         },
-        Err(_) => 0, // If we can't query the fee, transfer the full amount (old behavior)
+        Err(e) => {
+            // ICRC-004 / SP-203: do NOT fall back to fee=0. The transfer still
+            // deducts the real ledger fee, so a zero fallback over-credits the
+            // claimant and leaves the pool short by one fee. Use the same
+            // conservative fallback as the liquidation gains path (SP-104).
+            log!(INFO, "icrc1_fee query failed for collateral {}: {:?}; using conservative fallback {} e8s",
+                collateral_ledger, e, crate::liquidation::FALLBACK_COLLATERAL_FEE_E8S);
+            crate::liquidation::FALLBACK_COLLATERAL_FEE_E8S
+        },
     };
 
     if gains <= ledger_fee {
@@ -435,7 +483,7 @@ pub async fn deposit_as_3usd(
     ).await;
 
     if let Err(_) | Ok((Err(_),)) = approve_result {
-        refund_user(caller, token_ledger, amount).await;
+        refund_user(caller, token_ledger, amount, "deposit_as_3usd: icrc2_approve failed").await;
         return Err(StabilityPoolError::InterCanisterCallFailed {
             target: format!("{}", token_ledger),
             method: "icrc2_approve".to_string(),
@@ -450,7 +498,7 @@ pub async fn deposit_as_3usd(
     let pool_status = match pool_status_result {
         Ok((status,)) => status,
         Err(_) => {
-            refund_user(caller, token_ledger, amount).await;
+            refund_user(caller, token_ledger, amount, "deposit_as_3usd: get_pool_status failed").await;
             return Err(StabilityPoolError::InterCanisterCallFailed {
                 target: "3pool".to_string(),
                 method: "get_pool_status".to_string(),
@@ -462,7 +510,7 @@ pub async fn deposit_as_3usd(
     let coin_index = match coin_index {
         Some(idx) => idx,
         None => {
-            refund_user(caller, token_ledger, amount).await;
+            refund_user(caller, token_ledger, amount, "deposit_as_3usd: token not in 3pool").await;
             return Err(StabilityPoolError::TokenNotAccepted { ledger: token_ledger });
         }
     };
@@ -484,7 +532,7 @@ pub async fn deposit_as_3usd(
                 e,
                 amount
             );
-            refund_user(caller, token_ledger, amount).await;
+            refund_user(caller, token_ledger, amount, "deposit_as_3usd: add_liquidity rejected").await;
             return Err(StabilityPoolError::InterCanisterCallFailed {
                 target: "3pool".to_string(),
                 method: "add_liquidity".to_string(),
@@ -498,7 +546,7 @@ pub async fn deposit_as_3usd(
                 msg,
                 amount
             );
-            refund_user(caller, token_ledger, amount).await;
+            refund_user(caller, token_ledger, amount, "deposit_as_3usd: add_liquidity call failed").await;
             return Err(StabilityPoolError::InterCanisterCallFailed {
                 target: "3pool".to_string(),
                 method: "add_liquidity".to_string(),
@@ -522,17 +570,124 @@ pub async fn deposit_as_3usd(
     Ok(lp_amount_u64)
 }
 
-/// Best-effort refund of tokens to user after a failed deposit_as_3usd.
-async fn refund_user(user: Principal, token_ledger: Principal, amount: u64) {
+/// Refund the pulled tokens to the user after a failed deposit_as_3usd.
+///
+/// IC-S-001: the refund sends `amount` NET of the ledger transfer fee so the
+/// pool's ledger balance drops by exactly `amount` (a gross refund cost
+/// amount+fee, drifting the pool one fee below its tracked deposits per
+/// refund). If the refund transfer itself fails, the amount is persisted as a
+/// pending refund recoverable via `claim_pending_refund` instead of being
+/// silently stranded.
+async fn refund_user(user: Principal, token_ledger: Principal, amount: u64, reason: &str) {
+    let fee = refund_ledger_fee(token_ledger).await;
+    if amount <= fee {
+        // Nothing transferable once the ledger fee is covered; the dust stays
+        // in the pool (solvency-safe, mirrors rumi_3pool::transfer_to_user).
+        log!(INFO, "refund_user: {} of {} for {} not refundable (<= ledger fee {}); leaving as pool dust",
+            amount, token_ledger, user, fee);
+        return;
+    }
     let transfer_args = TransferArg {
         to: Account { owner: user, subaccount: None },
-        amount: amount.into(),
+        amount: (amount - fee).into(),
         fee: None,
         memo: None,
         created_at_time: Some(ic_cdk::api::time()),
         from_subaccount: None,
     };
-    let _ = call::<_, (Result<candid::Nat, TransferError>,)>(
+    let result: Result<(Result<candid::Nat, TransferError>,), _> = call(
         token_ledger, "icrc1_transfer", (transfer_args,)
     ).await;
+    let failure = match result {
+        Ok((Ok(_),)) => None,
+        // Duplicate: a previous refund attempt already paid the user.
+        Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
+            log!(INFO, "refund_user: Duplicate (block {}); previous refund landed", duplicate_of);
+            None
+        },
+        Ok((Err(e),)) => Some(format!("{}; refund transfer failed: {:?}", reason, e)),
+        Err(e) => Some(format!("{}; refund call failed: {:?}", reason, e)),
+    };
+    if let Some(why) = failure {
+        let id = mutate_state(|s| {
+            s.record_pending_refund(user, token_ledger, amount, why.clone(), ic_cdk::api::time())
+        });
+        log!(INFO, "refund_user: refund of {} {} to {} failed ({}); recorded pending refund #{}",
+            amount, token_ledger, user, why, id);
+    }
+}
+
+/// Recover tokens the pool owes after a failed deposit_as_3usd refund
+/// (IC-S-001). Callable by the original user or a pool admin. The record is
+/// removed BEFORE the async transfer (so two concurrent claims cannot both pay
+/// out) and re-inserted if the transfer fails. Returns the net amount sent
+/// (gross minus the ledger fee). Mirrors rumi_3pool::claim_pending.
+pub async fn claim_pending_refund(refund_id: u64) -> Result<u64, StabilityPoolError> {
+    // SP-102: refuse balance-mutating ops while a liquidation is apportioning.
+    if crate::pool_guard::liquidation_in_progress() {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    let caller = ic_cdk::api::caller();
+
+    let refund = mutate_state(|s| s.take_pending_refund(refund_id))
+        .ok_or(StabilityPoolError::RefundClaimNotFound)?;
+
+    if caller != refund.user && !read_state(|s| s.is_admin(&caller)) {
+        // Not authorized; re-insert before returning so the record is not lost.
+        mutate_state(|s| s.put_pending_refund(refund));
+        return Err(StabilityPoolError::Unauthorized);
+    }
+
+    let fee = refund_ledger_fee(refund.token_ledger).await;
+    if refund.amount <= fee {
+        // Nothing transferable once the fee is covered; drop the record and
+        // leave the dust in the pool (solvency-safe).
+        log!(INFO, "claim_pending_refund: refund #{} of {} {} not payable (<= ledger fee {}); record dropped",
+            refund_id, refund.amount, refund.token_ledger, fee);
+        return Ok(0);
+    }
+    let net = refund.amount - fee;
+
+    let transfer_args = TransferArg {
+        to: Account { owner: refund.user, subaccount: None },
+        amount: net.into(),
+        fee: None,
+        memo: None,
+        created_at_time: Some(ic_cdk::api::time()),
+        from_subaccount: None,
+    };
+    let result: Result<(Result<candid::Nat, TransferError>,), _> = call(
+        refund.token_ledger, "icrc1_transfer", (transfer_args,)
+    ).await;
+
+    match result {
+        Ok((Ok(block_index),)) => {
+            log!(INFO, "claim_pending_refund: refund #{} paid {} (net of fee {}) of {} to {}, block {}",
+                refund_id, net, fee, refund.token_ledger, refund.user, block_index);
+            Ok(net)
+        },
+        // Duplicate: a previous claim attempt already paid the user.
+        Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
+            log!(INFO, "claim_pending_refund: refund #{} Duplicate (block {}); previous attempt landed",
+                refund_id, duplicate_of);
+            Ok(net)
+        },
+        Ok((Err(transfer_error),)) => {
+            log!(INFO, "claim_pending_refund: refund #{} transfer failed, re-inserting: {:?}",
+                refund_id, transfer_error);
+            let reason = format!("{:?}", transfer_error);
+            mutate_state(|s| s.put_pending_refund(refund));
+            Err(StabilityPoolError::LedgerTransferFailed { reason })
+        },
+        Err(call_error) => {
+            log!(INFO, "claim_pending_refund: refund #{} call failed, re-inserting: {:?}",
+                refund_id, call_error);
+            let target = format!("{}", refund.token_ledger);
+            mutate_state(|s| s.put_pending_refund(refund));
+            Err(StabilityPoolError::InterCanisterCallFailed {
+                target,
+                method: "icrc1_transfer".to_string(),
+            })
+        }
+    }
 }

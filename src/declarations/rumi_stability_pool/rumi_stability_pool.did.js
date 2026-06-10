@@ -29,6 +29,15 @@ export const idlFactory = ({ IDL }) => {
     'AlreadyOptedIn' : IDL.Record({ 'collateral' : IDL.Principal }),
     'TokenNotAccepted' : IDL.Record({ 'ledger' : IDL.Principal }),
     'InsufficientPoolBalance' : IDL.Null,
+    'RefundClaimNotFound' : IDL.Null,
+  });
+  const PendingRefund = IDL.Record({
+    'id' : IDL.Nat64,
+    'user' : IDL.Principal,
+    'token_ledger' : IDL.Principal,
+    'amount' : IDL.Nat64,
+    'reason' : IDL.Text,
+    'created_at' : IDL.Nat64,
   });
   const LiquidationResult = IDL.Record({
     'error_message' : IDL.Opt(IDL.Text),
@@ -251,6 +260,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : StabilityPoolError })],
         [],
       ),
+    'claim_pending_refund' : IDL.Func(
+        [IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : StabilityPoolError })],
+        [],
+      ),
     'deposit' : IDL.Func(
         [IDL.Principal, IDL.Nat64],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
@@ -274,6 +288,11 @@ export const idlFactory = ({ IDL }) => {
     'get_liquidation_history' : IDL.Func(
         [IDL.Opt(IDL.Nat64)],
         [IDL.Vec(PoolLiquidationRecord)],
+        ['query'],
+      ),
+    'get_pending_refunds' : IDL.Func(
+        [IDL.Opt(IDL.Principal)],
+        [IDL.Vec(PendingRefund)],
         ['query'],
       ),
     'get_pool_event_count' : IDL.Func([], [IDL.Nat64], ['query']),

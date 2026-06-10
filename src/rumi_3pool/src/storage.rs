@@ -526,6 +526,12 @@ pub fn burn_caller_list() -> Vec<Principal> {
 // receive new writes after the drain completes; the functions exist only so
 // the drain path can populate them and explorer endpoints can read them.
 
+/// Server-side cap on entries returned per range/page call from the event
+/// logs. Matches the SAT-006 `icrc3_get_blocks` bound (`MAX_GET_BLOCKS_RESPONSE`).
+/// Audit 2026-06-09 (DOS-001): query endpoints previously honored an uncapped
+/// caller-supplied length, allowing reply-size DoS.
+pub const MAX_EVENT_PAGE: u64 = 2_000;
+
 macro_rules! log_api {
     ($mod_name:ident, $cell:ident, $ty:ty) => {
         pub mod $mod_name {
@@ -539,12 +545,14 @@ macro_rules! log_api {
             pub fn get(idx: u64) -> Option<$ty> {
                 $cell.with(|l| l.borrow().get(idx))
             }
-            /// Collect `[start, start + count)` into a Vec. Out-of-range
-            /// indices are skipped.
+            /// Collect `[start, start + count)` into a Vec, with `count`
+            /// clamped to `MAX_EVENT_PAGE` (DOS-001). Out-of-range indices
+            /// are skipped.
             pub fn range(start: u64, count: u64) -> Vec<$ty> {
                 $cell.with(|l| {
                     let log = l.borrow();
                     let total = log.len();
+                    let count = count.min(MAX_EVENT_PAGE);
                     let end = start.saturating_add(count).min(total);
                     (start..end).filter_map(|i| log.get(i)).collect()
                 })
@@ -1268,5 +1276,27 @@ mod tests {
             assert_eq!(cached, expected, "hash mismatch at index {i}");
             prev = Some(cached);
         }
+    }
+
+    #[test]
+    fn dos_001_event_range_clamped_to_max_page() {
+        // Audit 2026-06-09 (DOS-001): a huge caller-supplied length must
+        // return at most MAX_EVENT_PAGE entries, not the whole log.
+        use crate::types::{ThreePoolAdminAction, ThreePoolAdminEvent};
+        let baseline = admin_ev::len();
+        let extra = (MAX_EVENT_PAGE + 100).saturating_sub(baseline);
+        for i in 0..extra {
+            admin_ev::push(ThreePoolAdminEvent {
+                id: baseline + i,
+                timestamp: i,
+                caller: Principal::anonymous(),
+                action: ThreePoolAdminAction::SetPaused { paused: false },
+            });
+        }
+        assert!(admin_ev::len() >= MAX_EVENT_PAGE + 100);
+        assert_eq!(admin_ev::range(0, u64::MAX).len() as u64, MAX_EVENT_PAGE);
+        assert_eq!(admin_ev::range(0, MAX_EVENT_PAGE + 1).len() as u64, MAX_EVENT_PAGE);
+        // In-cap requests are unaffected.
+        assert_eq!(admin_ev::range(0, 5).len(), 5);
     }
 }

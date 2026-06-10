@@ -61,6 +61,18 @@ export function isOisyWallet(): boolean {
   }
 }
 
+const THIRTY_DAYS_NS = 30n * 24n * 60n * 60n * 1_000_000_000n;
+
+/**
+ * FE-001: expires_at for the LARGE_APPROVAL icrc2_approve calls. Bounds the
+ * effectively-unlimited allowance to 30 days instead of leaving it open
+ * forever; expiry adds no signer popup, and every flow re-approves (or
+ * re-checks the allowance, which reads 0 once expired) before spending.
+ */
+export function largeApprovalExpiry(): [bigint] {
+  return [BigInt(Date.now()) * 1_000_000n + THIRTY_DAYS_NS];
+}
+
 /**
  * Helper to check if an error is a stale actor/read state error
  */
@@ -266,14 +278,15 @@ export class walletOperations {
         console.log(`Approving ${amount.toString()} e8s icUSD for ${spenderCanisterId}`);
         
         const icusdActor = await walletStore.getActor(CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL) as IcusdLedgerService;
-        
+
         const approvalResult = await icusdActor.icrc2_approve({
           amount,
-          spender: { 
+          spender: {
             owner: Principal.fromText(spenderCanisterId),
-            subaccount: [] 
+            subaccount: []
           },
-          expires_at: [], 
+          // FE-001: bound the large allowance to 30 days
+          expires_at: largeApprovalExpiry(),
           expected_allowance: [],
           memo: [],
           fee: [],
@@ -347,7 +360,8 @@ export class walletOperations {
             owner: Principal.fromText(spenderCanisterId),
             subaccount: []
           },
-          expires_at: [],
+          // FE-001: bound the large allowance to 30 days
+          expires_at: largeApprovalExpiry(),
           expected_allowance: [],
           memo: [],
           fee: [],

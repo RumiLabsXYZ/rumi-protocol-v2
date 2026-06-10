@@ -148,9 +148,51 @@ pub fn init_state(state: BotState) {
     STATE.with(|s| *s.borrow_mut() = Some(state));
 }
 
+/// Trap wrapper: real `ic_cdk::trap` on-canister, plain panic off-canister so
+/// unit tests can exercise trap paths via `std::panic::catch_unwind` (the ic0
+/// host stub panics with a generic message that would swallow ours).
+fn trap(msg: &str) -> ! {
+    #[cfg(target_arch = "wasm32")]
+    ic_cdk::trap(msg);
+    #[cfg(not(target_arch = "wasm32"))]
+    panic!("{}", msg);
+}
+
+/// Which save path `pre_upgrade` must take.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PreUpgradeSavePath {
+    Config,
+    LegacyRaw,
+}
+
+/// UPG-001 fence: the legacy raw-offset-0 save is only legal before the first
+/// MemoryManager migration. Once the MGR layout exists at offset 0, a raw
+/// write there clobbers the header and corrupts every virtual region (config,
+/// history, next-id), so the config path wins even if the in-heap migration
+/// flag was somehow lost.
+pub fn pre_upgrade_save_path(
+    migrated: bool,
+    memory_manager_layout_exists: bool,
+) -> PreUpgradeSavePath {
+    if migrated || memory_manager_layout_exists {
+        PreUpgradeSavePath::Config
+    } else {
+        PreUpgradeSavePath::LegacyRaw
+    }
+}
+
 // ---- Legacy stable memory (raw offset 0, used only for first migration) ----
 
 pub fn save_to_stable_memory() {
+    // UPG-001 fence (defense in depth behind pre_upgrade_save_path): never
+    // raw-write offset 0 once the MemoryManager layout exists. Trapping here
+    // aborts the upgrade with the old wasm and stable memory intact.
+    if memory::memory_manager_layout_exists() {
+        trap(
+            "liquidation_bot UPG-001: legacy raw-offset-0 save blocked, MemoryManager \
+             layout already exists; config must be saved via save_config_to_stable",
+        );
+    }
     STATE.with(|s| {
         let state = s.borrow();
         let state = state.as_ref().expect("State not initialized");
@@ -265,19 +307,201 @@ mod tests {
             "legacy blob has no migration marker, must default to false so post_upgrade runs the StableBTreeMap migration"
         );
     }
+
+    fn test_config() -> BotConfig {
+        BotConfig {
+            backend_principal: Principal::from_text("tfesu-vyaaa-aaaap-qrd7a-cai").unwrap(),
+            treasury_principal: Principal::from_text("tlg74-oiaaa-aaaap-qrd6a-cai").unwrap(),
+            admin: Principal::anonymous(),
+            max_slippage_bps: 200,
+            icp_ledger: Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap(),
+            ckusdc_ledger: Principal::from_text("xevnm-gaaaa-aaaar-qafnq-cai").unwrap(),
+            icpswap_pool: Principal::anonymous(),
+            icpswap_zero_for_one: None,
+            icp_fee_e8s: None,
+            ckusdc_fee_e6: None,
+            three_pool_principal: None,
+            kong_swap_principal: None,
+            ckusdt_ledger: None,
+            icusd_ledger: None,
+        }
+    }
+
+    fn write_config_region(payload: &[u8]) {
+        let mut mem = memory::get_memory(memory::MEM_ID_CONFIG);
+        let mut writer = Writer::new(&mut mem, 0);
+        writer
+            .write(&(payload.len() as u64).to_le_bytes())
+            .expect("write len");
+        writer.write(payload).expect("write payload");
+    }
+
+    fn catch_panic_message<F: FnOnce() + std::panic::UnwindSafe>(f: F) -> Option<String> {
+        std::panic::catch_unwind(f).err().map(|payload| {
+            payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_default()
+        })
+    }
+
+    /// UPG-001(a): a genuine decode failure of the MEM_ID_CONFIG snapshot must
+    /// trap (upgrade rolls back, old wasm + stable memory intact), NOT silently
+    /// wipe heap state to `BotState::default()`.
+    #[test]
+    fn upg_001_decode_failure_traps_instead_of_wiping() {
+        memory::init_memory_manager();
+        write_config_region(b"definitely not json");
+
+        let msg = catch_panic_message(load_config_from_stable)
+            .expect("decode failure must trap, not silently wipe state to default");
+        assert!(
+            msg.contains("UPG-001") && msg.contains("failed to decode"),
+            "trap message must name the finding and the cause, got: {}",
+            msg
+        );
+        STATE.with(|s| {
+            assert!(
+                s.borrow().is_none(),
+                "state must stay uninitialized after the trap (no default wipe)"
+            )
+        });
+    }
+
+    /// UPG-001(a): an implausible snapshot length is corruption, not "no
+    /// data", and must also trap instead of wiping.
+    #[test]
+    fn upg_001_corrupt_length_traps_instead_of_wiping() {
+        memory::init_memory_manager();
+        let mut mem = memory::get_memory(memory::MEM_ID_CONFIG);
+        let mut writer = Writer::new(&mut mem, 0);
+        writer.write(&u64::MAX.to_le_bytes()).expect("write len");
+
+        let msg = catch_panic_message(load_config_from_stable)
+            .expect("corrupt length must trap, not silently wipe state to default");
+        assert!(
+            msg.contains("UPG-001") && msg.contains("implausible"),
+            "trap message must name the finding, got: {}",
+            msg
+        );
+        STATE.with(|s| assert!(s.borrow().is_none(), "state must stay uninitialized"));
+    }
+
+    /// Fresh install / genuinely empty MEM_ID_CONFIG must still default (no
+    /// trap), and the default must keep the legacy raw-offset-0 save disarmed
+    /// (UPG-001(b)): the MemoryManager layout exists by the time this runs.
+    #[test]
+    fn upg_001_no_data_defaults_with_migration_flag_set() {
+        memory::init_memory_manager();
+        load_config_from_stable();
+        read_state(|s| {
+            assert!(s.config.is_none(), "no data means default config");
+            assert!(
+                s.migrated_to_stable_structures,
+                "no-data default must mark migrated so pre_upgrade never re-arms the legacy save"
+            );
+        });
+    }
+
+    /// Sanity: the happy path (valid snapshot written by save_config_to_stable)
+    /// must keep round-tripping, so the new traps are not over-eager.
+    #[test]
+    fn upg_001_valid_snapshot_roundtrips() {
+        memory::init_memory_manager();
+        init_state(BotState {
+            config: Some(test_config()),
+            migrated_to_stable_structures: true,
+            ..Default::default()
+        });
+        save_config_to_stable();
+        STATE.with(|s| *s.borrow_mut() = None);
+
+        load_config_from_stable();
+        read_state(|s| {
+            assert_eq!(
+                s.config.as_ref().expect("config preserved").backend_principal,
+                test_config().backend_principal
+            );
+            assert!(s.migrated_to_stable_structures);
+        });
+    }
+
+    /// UPG-001(b) fence: once the MemoryManager layout exists, the legacy
+    /// raw-offset-0 save must trap instead of clobbering the MGR header, even
+    /// if heap state was somehow reset to default (migrated == false).
+    #[test]
+    fn upg_001_legacy_save_fence_blocks_raw_write_when_layout_exists() {
+        memory::init_memory_manager();
+        init_state(BotState::default()); // migrated_to_stable_structures == false
+
+        let msg = catch_panic_message(save_to_stable_memory)
+            .expect("legacy save must trap once the MemoryManager layout exists");
+        assert!(
+            msg.contains("UPG-001") && msg.contains("raw-offset-0 save blocked"),
+            "fence trap must name the finding, got: {}",
+            msg
+        );
+    }
+
+    /// UPG-001(b): pre_upgrade path selection can only reach the legacy save
+    /// when BOTH the migration flag is unset AND no MemoryManager layout
+    /// exists at offset 0 (a pre-migration canister).
+    #[test]
+    fn upg_001_pre_upgrade_never_takes_legacy_path_once_layout_exists() {
+        assert_eq!(pre_upgrade_save_path(true, true), PreUpgradeSavePath::Config);
+        assert_eq!(pre_upgrade_save_path(true, false), PreUpgradeSavePath::Config);
+        assert_eq!(pre_upgrade_save_path(false, true), PreUpgradeSavePath::Config);
+        assert_eq!(
+            pre_upgrade_save_path(false, false),
+            PreUpgradeSavePath::LegacyRaw
+        );
+    }
+
+    /// UPG-001(b): validate the magic constant against the real crate. A fresh
+    /// MemoryManager must write a header our fence recognizes.
+    #[test]
+    fn upg_001_memory_manager_magic_matches_crate() {
+        use ic_stable_structures::memory_manager::MemoryManager;
+        use ic_stable_structures::{DefaultMemoryImpl, Memory};
+
+        let raw = DefaultMemoryImpl::default();
+        let _mm = MemoryManager::init(raw.clone());
+        assert!(raw.size() > 0, "MemoryManager::init must write its header");
+        let mut first = [0u8; 3];
+        raw.read(0, &mut first);
+        assert!(
+            memory::is_memory_manager_header(&first),
+            "fence must recognize the header MemoryManager actually writes"
+        );
+        assert!(!memory::is_memory_manager_header(&[0u8; 3]));
+        assert!(!memory::is_memory_manager_header(b"MG"));
+        assert!(!memory::is_memory_manager_header(b""));
+    }
+}
+
+/// Default state for the genuine no-data branches of `load_config_from_stable`.
+/// `migrated_to_stable_structures` starts true (not the derived false) because
+/// this only runs after `init_memory_manager`, so the MemoryManager layout
+/// exists and a later legacy raw-offset-0 save would corrupt it (UPG-001).
+fn fresh_migrated_state() -> BotState {
+    BotState {
+        migrated_to_stable_structures: true,
+        ..Default::default()
+    }
 }
 
 pub fn load_config_from_stable() {
     let mem = memory::get_memory(memory::MEM_ID_CONFIG);
 
-    // MemoryManager allocates virtual addresses lazily — on the first upgrade
+    // MemoryManager allocates virtual addresses lazily: on the first upgrade
     // after migration, MEM_ID_CONFIG has zero physical pages until a prior
     // pre_upgrade has called `save_config_to_stable`. Reading at offset 0
     // would panic with "out of bounds" and trap the entire upgrade. Bail out
     // to a default state in that case (post_upgrade's other branches handle
     // legacy rescue, so this is reached only when there genuinely is no data).
     if ic_stable_structures::Memory::size(&mem) == 0 {
-        init_state(BotState::default());
+        init_state(fresh_migrated_state());
         return;
     }
 
@@ -285,9 +509,22 @@ pub fn load_config_from_stable() {
     ic_stable_structures::Memory::read(&mem, 0, &mut len_bytes);
     let len = u64::from_le_bytes(len_bytes) as usize;
 
-    if len == 0 || len > 10_000_000 {
-        init_state(BotState::default());
+    // A zero length is treated as "no data" (region grown but never written).
+    if len == 0 {
+        init_state(fresh_migrated_state());
         return;
+    }
+
+    // save_config_to_stable always writes the real snapshot length first, so
+    // an implausible length means the region is corrupt, not empty. UPG-001:
+    // trap (upgrade rolls back, old wasm + state stay intact) instead of
+    // silently wiping to default.
+    if len > 10_000_000 {
+        trap(&format!(
+            "liquidation_bot UPG-001: implausible config snapshot length {} in MEM_ID_CONFIG; \
+             refusing to wipe state, aborting upgrade",
+            len
+        ));
     }
 
     let mut bytes = vec![0u8; len];
@@ -295,8 +532,19 @@ pub fn load_config_from_stable() {
     match serde_json::from_slice::<BotState>(&bytes) {
         Ok(state) => init_state(state),
         Err(e) => {
-            ic_canister_log::log!(crate::INFO, "Failed to deserialize config from stable: {}", e);
-            init_state(BotState::default());
+            ic_canister_log::log!(
+                crate::INFO,
+                "CRITICAL UPG-001: config snapshot decode failed (len={} bytes): {}. \
+                 Trapping to preserve on-chain state rather than wiping to default.",
+                bytes.len(),
+                e
+            );
+            trap(&format!(
+                "liquidation_bot UPG-001: config snapshot in MEM_ID_CONFIG failed to decode ({}); \
+                 trapping to preserve state (old wasm + stable memory stay intact) instead of \
+                 wiping to default",
+                e
+            ));
         }
     }
 }

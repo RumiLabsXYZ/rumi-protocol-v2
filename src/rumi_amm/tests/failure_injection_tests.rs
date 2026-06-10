@@ -876,3 +876,135 @@ fn swap_slippage_enforced_on_net_received() {
     assert!(matches!(res2, Err(AmmError::InsufficientOutput { .. })),
         "swap demanding min == gross output must reject (taker receives net < min), got {:?}", res2);
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// Audit 2026-06-09 (IC-S-003): transfer_to_user returns Ok and sends nothing
+// when amount <= ledger fee. Swap and remove_liquidity must reject up front
+// when a payable output nets to zero, and claim_pending must reject dust
+// claims with a clear error instead of silently consuming them.
+// ════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn ic_s_003_swap_dust_output_rejected_before_state_debit() {
+    let env = setup_flaky();
+    set_fee(&env, env.token_a_id, 10_000);
+    set_fee(&env, env.token_b_id, 10_000);
+    let pool_id = create_pool(&env);
+    add_initial_liquidity(&env, &pool_id, 100_000_00000000);
+
+    let pool_before = get_pool_info(&env, &pool_id).unwrap();
+    let user_a_before = get_flaky_balance(&env, env.token_a_id, env.user, None);
+
+    // amount_in = 5_000 yields a gross output of ~4_985, below the 10_000
+    // ledger fee: the net output is zero, so the swap must be rejected with
+    // a typed error BEFORE the input is pulled (min_amount_out = 0 must not
+    // bypass the gate).
+    let result = env.pic
+        .update_call(env.amm_id, env.user, "swap",
+            encode_args((pool_id.clone(), env.token_a_id, 5_000u128, 0u128)).unwrap())
+        .expect("swap call failed");
+    let err = decode_amm_err(result);
+    assert!(matches!(err, AmmError::InsufficientOutput { .. }),
+        "dust-output swap must fail with InsufficientOutput, got {:?}", err);
+
+    // No input pulled, no reserve change.
+    assert_eq!(get_flaky_balance(&env, env.token_a_id, env.user, None), user_a_before,
+        "input must not be pulled for a rejected dust swap");
+    let pool_after = get_pool_info(&env, &pool_id).unwrap();
+    assert_eq!(pool_after.reserve_a, pool_before.reserve_a);
+    assert_eq!(pool_after.reserve_b, pool_before.reserve_b);
+}
+
+#[test]
+fn ic_s_003_remove_liquidity_dust_leg_rejected_before_lp_burn() {
+    let env = setup_flaky();
+    set_fee(&env, env.token_a_id, 10_000);
+    set_fee(&env, env.token_b_id, 10_000);
+    let pool_id = create_pool(&env);
+    add_initial_liquidity(&env, &pool_id, 100_000_00000000);
+
+    let lp_before = get_user_lp_balance(&env, &pool_id);
+    let pool_before = get_pool_info(&env, &pool_id).unwrap();
+
+    // 5_000 shares of a balanced pool pay out ~5_000 per leg, below the
+    // 10_000 ledger fee: both legs net to zero, so the removal must be
+    // rejected up front, before shares are burned.
+    let result = env.pic
+        .update_call(env.amm_id, env.user, "remove_liquidity",
+            encode_args((pool_id.clone(), 5_000u128, 0u128, 0u128)).unwrap())
+        .expect("remove_liquidity call failed");
+    let err = decode_amm_err(result);
+    assert!(matches!(err, AmmError::InsufficientOutput { .. }),
+        "removal with dust legs must fail with InsufficientOutput, got {:?}", err);
+
+    assert_eq!(get_user_lp_balance(&env, &pool_id), lp_before,
+        "LP shares must not be burned for a rejected dust removal");
+    let pool_after = get_pool_info(&env, &pool_id).unwrap();
+    assert_eq!(pool_after.reserve_a, pool_before.reserve_a);
+    assert_eq!(pool_after.reserve_b, pool_before.reserve_b);
+    assert!(pending_claims(&env).is_empty(), "no pending claims must be recorded");
+}
+
+#[test]
+fn ic_s_003_claim_of_dust_rejected_at_claim_time() {
+    let env = setup_flaky();
+    // Small fee at claim-record time so the removal passes the up-front gate.
+    set_fee(&env, env.token_a_id, 100);
+    set_fee(&env, env.token_b_id, 100);
+    let pool_id = create_pool(&env);
+    add_initial_liquidity(&env, &pool_id, 100_000_00000000);
+
+    // Fail both output transfers so the removal records pending claims of
+    // ~50_000 per leg (well above the 100 fee, so the up-front gate passes).
+    set_fail_transfers(&env, env.token_a_id, true);
+    set_fail_transfers(&env, env.token_b_id, true);
+    let result = env.pic
+        .update_call(env.amm_id, env.user, "remove_liquidity",
+            encode_args((pool_id.clone(), 50_000u128, 0u128, 0u128)).unwrap())
+        .expect("remove_liquidity call failed");
+    let err = decode_amm_err(result);
+    assert!(matches!(err, AmmError::TransferFailed { .. }), "expected TransferFailed, got {:?}", err);
+    let claims = pending_claims(&env);
+    assert!(!claims.is_empty(), "failed removal must record pending claims");
+    let claim = claims.iter().find(|c| c.token == env.token_a_id)
+        .expect("claim for token_a must exist");
+    assert!(claim.amount > 100, "claim should exceed the record-time fee");
+
+    // The ledger fee rises above the claim amount. The AMM's heap fee cache
+    // only re-reads after an upgrade, so upgrade the canister (same wasm) to
+    // simulate the realistic fee-drift-across-upgrade scenario.
+    set_fail_transfers(&env, env.token_a_id, false);
+    set_fail_transfers(&env, env.token_b_id, false);
+    set_fee(&env, env.token_a_id, 1_000_000);
+    env.pic
+        .upgrade_canister(
+            env.amm_id,
+            amm_wasm(),
+            encode_one(AmmInitArgs { admin: env.admin }).unwrap(),
+            Some(env.admin),
+        )
+        .expect("upgrade failed");
+
+    let user_a_before = get_flaky_balance(&env, env.token_a_id, env.user, None);
+    let claim_id = claim.id;
+    let claim_amount = claim.amount;
+    let result = env.pic
+        .update_call(env.amm_id, env.user, "claim_pending", encode_one(claim_id).unwrap())
+        .expect("claim_pending call failed");
+    let res: Result<(), AmmError> = match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode claim_pending failed"),
+        WasmResult::Reject(msg) => panic!("claim_pending rejected: {}", msg),
+    };
+    match res {
+        Err(AmmError::BelowMinClaim { claimable, min }) => {
+            assert_eq!(claimable, claim_amount);
+            assert_eq!(min, 1_000_001, "min must be ledger fee + 1");
+        }
+        other => panic!("dust claim must fail with BelowMinClaim, got {:?}", other),
+    }
+
+    // Nothing was sent and the claim is NOT consumed.
+    assert_eq!(get_flaky_balance(&env, env.token_a_id, env.user, None), user_a_before);
+    assert!(pending_claims(&env).iter().any(|c| c.id == claim_id),
+        "dust claim must remain pending for recovery if the fee ever drops");
+}

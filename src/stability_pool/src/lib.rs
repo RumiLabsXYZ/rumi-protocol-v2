@@ -134,10 +134,24 @@ pub async fn deposit_as_3usd(token_ledger: Principal, amount: u64) -> Result<u64
     crate::deposits::deposit_as_3usd(token_ledger, amount).await
 }
 
+/// Recover tokens the pool owes after a failed `deposit_as_3usd` refund
+/// (audit IC-S-001). Callable by the original user or a pool admin. Returns
+/// the net amount sent (gross minus the ledger transfer fee).
+#[update]
+pub async fn claim_pending_refund(refund_id: u64) -> Result<u64, StabilityPoolError> {
+    crate::deposits::claim_pending_refund(refund_id).await
+}
+
 // ─── Opt-in / Opt-out ───
 
 #[update]
 pub fn opt_out_collateral(collateral_type: Principal) -> Result<(), StabilityPoolError> {
+    // SP-102 / AR-S-002: opt-in/out changes the apportionment denominator, so
+    // it must not land between a liquidation's snapshot and its apportionment
+    // (escape-the-burn + aggregate drift above the ledger balance).
+    if crate::pool_guard::liquidation_in_progress() {
+        return Err(StabilityPoolError::SystemBusy);
+    }
     let caller = ic_cdk::api::caller();
     let result = mutate_state(|s| s.opt_out_collateral(&caller, collateral_type));
     if result.is_ok() {
@@ -148,6 +162,10 @@ pub fn opt_out_collateral(collateral_type: Principal) -> Result<(), StabilityPoo
 
 #[update]
 pub fn opt_in_collateral(collateral_type: Principal) -> Result<(), StabilityPoolError> {
+    // SP-102 / AR-S-002: see opt_out_collateral.
+    if crate::pool_guard::liquidation_in_progress() {
+        return Err(StabilityPoolError::SystemBusy);
+    }
     let caller = ic_cdk::api::caller();
     let result = mutate_state(|s| s.opt_in_collateral(&caller, collateral_type));
     if result.is_ok() {
@@ -284,6 +302,14 @@ pub fn get_pool_event_count() -> u64 {
 #[query]
 pub fn list_depositor_principals() -> Vec<Principal> {
     read_state(|s| s.deposits.keys().copied().collect())
+}
+
+/// Outstanding failed-refund records for `user` (defaults to the caller).
+/// Audit IC-S-001: pairs with `claim_pending_refund`.
+#[query]
+pub fn get_pending_refunds(user: Option<Principal>) -> Vec<PendingRefund> {
+    let target = user.unwrap_or_else(ic_cdk::api::caller);
+    read_state(|s| s.pending_refunds_for(&target))
 }
 
 #[query]

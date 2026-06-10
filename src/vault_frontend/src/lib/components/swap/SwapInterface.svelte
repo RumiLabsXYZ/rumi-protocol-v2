@@ -136,11 +136,13 @@
     return (outputValue / inputValue).toFixed(6);
   })();
 
-  // Price impact: pure slippage only (excludes swap fee)
+  // Price impact: pure slippage only (excludes swap fee). Uses the GROSS pool
+  // output, because estimatedOutput is net of the flat output ledger fee
+  // (FE-003), which is not price impact and would distort small trades.
   $: priceImpact = (() => {
     if (!currentRoute || !amount || parseFloat(amount) <= 0 || !midMarketRate) return null;
     const inputValue = parseFloat(amount);
-    const outputValue = Number(currentRoute.estimatedOutput) / Math.pow(10, toToken.decimals);
+    const outputValue = Number(currentRoute.grossOutput) / Math.pow(10, toToken.decimals);
     const effectiveRate = outputValue / inputValue;
     // Remove fee component: output already has fee deducted, so divide it out
     const feeBps = parseFloat(currentRoute.feeDisplay.replace(/[~%]/g, '')) * 100;
@@ -225,10 +227,12 @@
   /** Approximate zero-slippage rate by quoting a tiny amount. Works for all route types. */
   async function fetchMidMarketRate(route: SwapRoute): Promise<number | null> {
     try {
-      // Quote 0.01 of the input token — small enough for negligible impact even on thin pools
+      // Quote 0.01 of the input token (small enough for negligible impact even on thin pools).
+      // Use the GROSS output: the flat ledger fee dominates a 0.01-token quote
+      // and would wreck the rate if the net estimate were used (FE-003).
       const tinyAmount = BigInt(Math.pow(10, Math.max(fromToken.decimals - 2, 0)));
       const tinyRoute = await resolveRoute(fromToken, toToken, tinyAmount);
-      const tinyOut = Number(tinyRoute.estimatedOutput) / Math.pow(10, toToken.decimals);
+      const tinyOut = Number(tinyRoute.grossOutput) / Math.pow(10, toToken.decimals);
       return tinyOut * 100; // scale up to per-1-token rate
     } catch {
       return null;
