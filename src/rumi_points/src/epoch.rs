@@ -265,9 +265,12 @@ pub async fn epoch_driver_tick() {
 /// One state-machine step, regardless of the enabled flag (admin `force_epoch_tick`
 /// and the E2E drive this directly). The single-tick guard still applies.
 pub async fn run_tick() {
-    if !state::try_begin_epoch() {
-        return; // a tick is already in flight
-    }
+    // RAII guard (AR-S-001): released on every exit path INCLUDING a trap (the
+    // dropped future runs destructors), so a panicking tick never halts accrual.
+    let _guard = match state::EpochGuard::new() {
+        Some(g) => g,
+        None => return, // a tick is already in flight
+    };
     let now = ic_cdk::api::time();
     let (season_start, season_end) = state::season_bounds();
     let open = state::get_open_epoch();
@@ -283,7 +286,6 @@ pub async fn run_tick() {
         DriverAction::CaptureB => capture(Snapshot::B).await,
         DriverAction::Close => close_current_epoch(now),
     }
-    state::end_epoch_guard();
 }
 
 // ── Snapshot capture (one chunk per tick) ──

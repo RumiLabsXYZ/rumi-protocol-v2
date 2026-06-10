@@ -424,7 +424,7 @@ pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Prin
             .ok_or(ProtocolError::TemporarilyUnavailable("No price for vault spillover collateral".to_string()))?;
         let current_price = UsdIcp::from(collateral_price);
 
-        mutate_state(|s| {
+        let refund_e8s = mutate_state(|s| {
             let spillover_icusd = ICUSD::from(spillover_e8s);
             // Wave-14b CDP-03: per-collateral fee path (see redeem_collateral
             // for full rationale). The spillover redeems against `best_ct`,
@@ -443,13 +443,14 @@ pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Prin
             // Do NOT apply it again here — that would double-discount.
             let effective_spillover = spillover_icusd - vault_fee;
 
-            record_redemption_on_vaults(
+            let outcome = record_redemption_on_vaults(
                 s,
                 caller,
                 effective_spillover,
                 vault_fee,
                 current_price,
                 icusd_block_index,
+                best_ct,
             );
 
             // Wave-8e LIQ-005: route the spillover-portion fee through
@@ -459,7 +460,40 @@ pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Prin
                 vault_fee,
                 crate::event::FeeSource::RedemptionFee,
             );
+
+            // RED-001: unconsumed spillover is refunded (RMR already applied
+            // upstream, so the unconsumed effective amount IS the raw refund;
+            // the fee stays with the protocol as priced).
+            effective_spillover.saturating_sub(outcome.consumed).to_u64()
         });
+        if refund_e8s > 0 {
+            let refund_nonce = mutate_state(|s| s.next_op_nonce());
+            match management::transfer_icusd_with_nonce(ICUSD::from(refund_e8s), caller, refund_nonce).await {
+                Ok(refund_block) => {
+                    log!(crate::INFO,
+                        "[redeem_reserves] Refunded {} unconsumed spillover icUSD to {} (block {})",
+                        refund_e8s, caller, refund_block
+                    );
+                }
+                Err(refund_err) => {
+                    log!(crate::INFO,
+                        "[redeem_reserves] Unconsumed-spillover refund of {} icUSD to {} failed: {:?}. Enqueueing durable refund (block {}).",
+                        refund_e8s, caller, refund_err, icusd_block_index
+                    );
+                    mutate_state(|s| {
+                        s.pending_refunds.insert(
+                            icusd_block_index,
+                            crate::state::PendingRefund {
+                                user: caller,
+                                amount_e8s: refund_e8s,
+                                retry_count: 0,
+                                op_nonce: refund_nonce,
+                            },
+                        );
+                    });
+                }
+            }
+        }
         ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), || {
             ic_cdk::spawn(crate::process_pending_transfer())
         });
@@ -512,36 +546,88 @@ pub async fn redeem_collateral(collateral_type: Principal, _icusd_amount: u64) -
         });
     }
 
-    // Check collateral status allows redemption
-    let collateral_status = read_state(|s| s.get_collateral_status(&collateral_type));
-    if let Some(status) = collateral_status {
-        if !status.allows_redemption() {
-            return Err(ProtocolError::GenericError(
-                format!("Redemption is not allowed for collateral type {}.", collateral_type),
-            ));
-        }
-    } else {
+    // Input sanity: the caller-supplied collateral type must exist. The type
+    // actually seized is the redemption-priority winner resolved below; the
+    // caller's argument cannot target a specific collateral (priority order
+    // is a protocol-level peg defense).
+    if read_state(|s| s.get_collateral_status(&collateral_type)).is_none() {
         return Err(ProtocolError::GenericError(
             format!("Collateral type {} not found.", collateral_type),
         ));
     }
 
-    let collateral_price = read_state(|s| s.get_collateral_price_decimal(&collateral_type))
+    // RED-002 (audit 2026-06-09): resolve the redemption-priority winner
+    // BEFORE pulling icUSD, and key every check on it. Previously freshness,
+    // fee pricing, and the base-rate bump used the caller-supplied type while
+    // the water-fill seized the priority winner, so a redeemer could pass a
+    // deep-debt type to floor the dynamic fee while draining a thin type
+    // against a price with no staleness gate.
+    let redeem_ct = read_state(|s| {
+        s.get_collateral_types_by_redemption_priority()
+            .first()
+            .copied()
+            .unwrap_or_else(|| s.icp_collateral_type())
+    });
+
+    let redeem_status = read_state(|s| s.get_collateral_status(&redeem_ct));
+    if let Some(status) = redeem_status {
+        if !status.allows_redemption() {
+            return Err(ProtocolError::GenericError(
+                format!("Redemption is not allowed for collateral type {}.", redeem_ct),
+            ));
+        }
+    } else {
+        return Err(ProtocolError::GenericError(
+            format!("Collateral type {} not found.", redeem_ct),
+        ));
+    }
+
+    // Fail closed on a stale price for the collateral actually being seized
+    // (VER-001 ceiling applies inside ensure_fresh_price_for).
+    crate::xrc::ensure_fresh_price_for(&redeem_ct).await?;
+
+    let collateral_price = read_state(|s| s.get_collateral_price_decimal(&redeem_ct))
         .ok_or(ProtocolError::TemporarilyUnavailable("No price available for collateral".to_string()))?;
     let current_collateral_price = UsdIcp::from(collateral_price);
 
+    // RED-001 (audit 2026-06-09): reject claims that exceed what the
+    // water-fill can consume. Without this, the full claim was burned and the
+    // payout was computed from the claim rather than the consumed amount,
+    // draining co-collateral vaults' shared backing for debt that was never
+    // redeemed. The estimate uses the pre-pull fee/RMR; any residual gap
+    // (state moving during the icUSD pull) is covered by the unconsumed
+    // refund below.
+    let (estimated_effective, total_redeemable) = read_state(|s| {
+        let base_fee = s.get_redemption_fee_for(&redeem_ct, icusd_amount);
+        let fee_est = icusd_amount * base_fee;
+        let rmr = s.get_redemption_margin_ratio();
+        (
+            (icusd_amount - fee_est) * rmr,
+            s.total_redeemable_debt_for(&redeem_ct),
+        )
+    });
+    if estimated_effective > total_redeemable {
+        return Err(ProtocolError::GenericError(format!(
+            "Redemption exceeds redeemable debt for {}: effective claim {} > redeemable {}. Reduce the amount.",
+            redeem_ct,
+            estimated_effective.to_u64(),
+            total_redeemable.to_u64()
+        )));
+    }
+
     match transfer_icusd_from(icusd_amount, caller).await {
         Ok(block_index) => {
-            let fee_amount = mutate_state(|s| {
+            let (fee_amount, outcome, refund_e8s) = mutate_state(|s| {
                 // Wave-14b CDP-03: price the fee against the per-collateral
                 // base rate, and write the post-redemption rate back to the
                 // per-collateral config (NOT the legacy global fields). A
                 // redemption against one collateral no longer corrupts the
                 // base rate used to price redemptions against any other.
-                let base_fee = s.get_redemption_fee_for(&collateral_type, icusd_amount);
+                // RED-002: keyed on the seized collateral, not the caller's.
+                let base_fee = s.get_redemption_fee_for(&redeem_ct, icusd_amount);
                 crate::record_per_collateral_redemption_fee(
                     s,
-                    &collateral_type,
+                    &redeem_ct,
                     base_fee,
                     ic_cdk::api::time(),
                 );
@@ -551,14 +637,29 @@ pub async fn redeem_collateral(collateral_type: Principal, _icusd_amount: u64) -
                 let rmr = s.get_redemption_margin_ratio();
                 let effective_icusd = (icusd_amount - fee_amount) * rmr;
 
-                record_redemption_on_vaults(
+                let outcome = record_redemption_on_vaults(
                     s,
                     caller,
                     effective_icusd,
                     fee_amount,
                     current_collateral_price,
                     block_index,
+                    redeem_ct,
                 );
+
+                // RED-001: refund the unconsumed remainder of the claim in raw
+                // icUSD (un-scale by RMR; the fee stays with the protocol as
+                // priced). Floor division favors the protocol; capped at the
+                // post-fee pull so a refund can never exceed what was taken.
+                let unconsumed = effective_icusd.saturating_sub(outcome.consumed);
+                let refund_e8s: u64 = if unconsumed.to_u64() == 0 || rmr.0 <= rust_decimal::Decimal::ZERO {
+                    0
+                } else {
+                    let raw = (rust_decimal::Decimal::from(unconsumed.to_u64()) / rmr.0)
+                        .to_u64()
+                        .unwrap_or(0);
+                    raw.min((icusd_amount - fee_amount).to_u64())
+                };
 
                 // Wave-8e LIQ-005: route a configurable fraction of the
                 // redemption fee toward deficit repayment. The redeemer's
@@ -572,15 +673,49 @@ pub async fn redeem_collateral(collateral_type: Principal, _icusd_amount: u64) -
                     crate::event::FeeSource::RedemptionFee,
                 );
 
-                fee_amount
+                (fee_amount, outcome, refund_e8s)
             });
+
+            // RED-001: pay back the unconsumed icUSD. Same saga as
+            // redeem_reserves (Wave-4 ICC-007): inline refund first, durable
+            // `pending_refunds` entry (keyed by the unique burn block index,
+            // nonce reused across retries) if the inline transfer fails.
+            if refund_e8s > 0 {
+                let refund_nonce = mutate_state(|s| s.next_op_nonce());
+                match management::transfer_icusd_with_nonce(ICUSD::from(refund_e8s), caller, refund_nonce).await {
+                    Ok(refund_block) => {
+                        log!(INFO,
+                            "[redeem_collateral] Refunded {} unconsumed icUSD to {} (block {})",
+                            refund_e8s, caller, refund_block
+                        );
+                    }
+                    Err(refund_err) => {
+                        log!(INFO,
+                            "[redeem_collateral] Unconsumed-claim refund of {} icUSD to {} failed: {:?}. Enqueueing durable refund (block {}).",
+                            refund_e8s, caller, refund_err, block_index
+                        );
+                        mutate_state(|s| {
+                            s.pending_refunds.insert(
+                                block_index,
+                                crate::state::PendingRefund {
+                                    user: caller,
+                                    amount_e8s: refund_e8s,
+                                    retry_count: 0,
+                                    op_nonce: refund_nonce,
+                                },
+                            );
+                        });
+                    }
+                }
+            }
+
             ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), || {
                 ic_cdk::spawn(crate::process_pending_transfer())
             });
             Ok(SuccessWithFee {
                 block_index,
                 fee_amount_paid: fee_amount.to_u64(),
-                collateral_amount_received: None,
+                collateral_amount_received: Some(outcome.margin.to_u64()),
                 debt_liquidated_e8s: None, // SP-101
                 stable_pulled_e6s: None, // SP-110
             })
@@ -836,6 +971,17 @@ pub async fn open_vault_and_borrow(
 
     // Borrow icUSD — reuse internal fn to avoid guard conflict
     if borrow_amount_raw > 0 {
+        // AR-B-003: per-vault op lock across the borrow's mint await.
+        let _vault_op_guard = match VaultLiquidationGuard::new(vault_id) {
+            Ok(g) => g,
+            Err(e) => {
+                guard_principal.fail();
+                return Err(ProtocolError::GenericError(format!(
+                    "Vault created (id={}) but borrow of {} failed: {:?}. You can borrow separately.",
+                    vault_id, borrow_amount_raw, e
+                )));
+            }
+        };
         match borrow_from_vault_internal(caller, VaultArg { vault_id, amount: borrow_amount_raw }).await {
             Ok(borrow_result) => {
                 log!(INFO, "[open_vault_and_borrow] vault {} borrow of {} succeeded (fee: {})",
@@ -1005,6 +1151,18 @@ pub async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, Protocol
         Err(err) => return Err(err.into()),
     };
 
+    // AR-B-003 (audit 2026-06-09): per-vault op lock. The per-caller guard
+    // above does not exclude a concurrent liquidation/redemption of this
+    // vault; this lock does (and the redemption water-fill skips locked
+    // vaults). See guard.rs::VaultLiquidationGuard.
+    let _vault_op_guard = match VaultLiquidationGuard::new(arg.vault_id) {
+        Ok(g) => g,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(e);
+        }
+    };
+
     match borrow_from_vault_internal(caller, arg).await {
         Ok(result) => {
             guard_principal.complete();
@@ -1087,7 +1245,12 @@ async fn repay_to_vault_internal(caller: Principal, arg: VaultArg, is_full_close
     match transfer_icusd_from(amount, caller).await {
         Ok(block_index) => {
             let interest_share = mutate_state(|s| record_repayed_to_vault(s, arg.vault_id, amount, block_index));
-            crate::treasury::distribute_interest(interest_share, vault.collateral_type).await;
+            // IC-B-002 (audit 2026-06-09): re-queue any unminted interest share so the
+            // next flush retries it instead of silently dropping treasury revenue.
+            let unminted_interest = crate::treasury::distribute_interest(interest_share, vault.collateral_type).await;
+            if unminted_interest.to_u64() > 0 {
+                mutate_state(|s| s.restore_pending_interest_for_pool(vault.collateral_type, unminted_interest.to_u64()));
+            }
             Ok(block_index)
         }
         Err(transfer_from_error) => Err(ProtocolError::TransferFromError(
@@ -1100,6 +1263,14 @@ async fn repay_to_vault_internal(caller: Principal, arg: VaultArg, is_full_close
 pub async fn repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("repay_vault_{}", arg.vault_id))?;
+    // AR-B-003: per-vault op lock; see guard.rs::VaultLiquidationGuard.
+    let _vault_op_guard = match VaultLiquidationGuard::new(arg.vault_id) {
+        Ok(g) => g,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(e);
+        }
+    };
 
     match repay_to_vault_internal(caller, arg, false).await {
         Ok(block_index) => {
@@ -1117,6 +1288,14 @@ pub async fn repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
 pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("repay_vault_stable_{}", arg.vault_id))?;
+    // AR-B-003: per-vault op lock; see guard.rs::VaultLiquidationGuard.
+    let _vault_op_guard = match VaultLiquidationGuard::new(arg.vault_id) {
+        Ok(g) => g,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(e);
+        }
+    };
 
     // Check if the selected stable token is enabled
     let is_enabled = read_state(|s| match arg.token_type {
@@ -1263,6 +1442,14 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
 pub async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("add_margin_vault_{}", arg.vault_id))?;
+    // AR-B-003: per-vault op lock; see guard.rs::VaultLiquidationGuard.
+    let _vault_op_guard = match VaultLiquidationGuard::new(arg.vault_id) {
+        Ok(g) => g,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(e);
+        }
+    };
     let amount: ICP = arg.amount.into();
 
     let (vault, config_ledger, min_deposit) = match read_state(|s| {
@@ -1418,6 +1605,8 @@ pub async fn open_vault_with_deposit(
     // Use borrow_from_vault_internal to avoid GuardPrincipal conflict —
     // this function already holds the guard for `caller`.
     if borrow_amount_raw > 0 {
+        // AR-B-003: per-vault op lock across the borrow's mint await.
+        let _vault_op_guard = VaultLiquidationGuard::new(vault_id)?;
         match borrow_from_vault_internal(caller, VaultArg { vault_id, amount: borrow_amount_raw }).await {
             Ok(borrow_result) => {
                 log!(INFO, "[open_vault_with_deposit] vault {} initial borrow of {} succeeded (fee: {})",
@@ -1443,6 +1632,14 @@ pub async fn open_vault_with_deposit(
 pub async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("add_margin_deposit_{}", vault_id))?;
+    // AR-B-003: per-vault op lock; see guard.rs::VaultLiquidationGuard.
+    let _vault_op_guard = match VaultLiquidationGuard::new(vault_id) {
+        Ok(g) => g,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(e);
+        }
+    };
 
     let (vault, config_ledger, config_fee, min_deposit) = match read_state(|s| {
         match s.vault_id_to_vaults.get(&vault_id) {
@@ -1513,7 +1710,9 @@ pub async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError
 pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
     let caller = ic_cdk::caller();
     let _guard_principal = GuardPrincipal::new(caller, &format!("close_vault_{}", vault_id))?;
-    
+    // AR-B-003: per-vault op lock; see guard.rs::VaultLiquidationGuard.
+    let _vault_op_guard = VaultLiquidationGuard::new(vault_id)?;
+
     // Check rate limits first
     mutate_state(|s| s.check_close_vault_rate_limit(caller))?;
     
@@ -1671,7 +1870,9 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
 pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
     let caller = ic_cdk::caller();
     let _guard_principal = GuardPrincipal::new(caller, &format!("withdraw_collateral_{}", vault_id))?;
-    
+    // AR-B-003: per-vault op lock; see guard.rs::VaultLiquidationGuard.
+    let _vault_op_guard = VaultLiquidationGuard::new(vault_id)?;
+
     log!(
         INFO,
         "[withdraw_collateral] Request to withdraw collateral from vault #{} by principal {}",
@@ -1810,6 +2011,11 @@ pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
 pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u64, ProtocolError> {
     let caller = ic_cdk::caller();
     let _guard_principal = GuardPrincipal::new(caller, &format!("withdraw_partial_{}", vault_id))?;
+    // AR-B-003: per-vault op lock. The post-await commit debits the vault by
+    // the pre-await withdraw amount; without this lock a concurrent
+    // liquidation/redemption could shrink the vault first, leaving phantom
+    // collateral on the books after the transfer already paid the owner.
+    let _vault_op_guard = VaultLiquidationGuard::new(vault_id)?;
 
     let withdraw_amount: ICP = ICP::new(amount);
 
@@ -2173,6 +2379,8 @@ pub async fn withdraw_and_close_vault(vault_id: u64) -> Result<Option<u64>, Prot
     let caller = ic_cdk::caller();
     // Use a specific name for better tracking
     let _guard_principal = GuardPrincipal::new(caller, &format!("withdraw_and_close_{}", vault_id))?;
+    // AR-B-003: per-vault op lock; see guard.rs::VaultLiquidationGuard.
+    let _vault_op_guard = VaultLiquidationGuard::new(vault_id)?;
 
     withdraw_and_close_vault_internal(caller, vault_id).await
 }
@@ -2203,6 +2411,14 @@ pub async fn repay_and_close_vault(arg: VaultArg) -> Result<RepayAndCloseSuccess
     let caller = ic_cdk::api::caller();
     let vault_id = arg.vault_id;
     let guard_principal = GuardPrincipal::new(caller, &format!("repay_and_close_{}", vault_id))?;
+    // AR-B-003: per-vault op lock spanning repay + withdraw + close.
+    let _vault_op_guard = match VaultLiquidationGuard::new(vault_id) {
+        Ok(g) => g,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(e);
+        }
+    };
 
     // Phase 1: repay. On failure the guard fails and we propagate the error —
     // no collateral movement attempted. `is_full_close=true` lets vaults stuck
@@ -2374,36 +2590,45 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
 
         // Reduce vault debt and collateral directly
         // Vault loses total_to_seize (liquidator + protocol cut)
+        //
+        // AR-B-001/BK-001 (audit 2026-06-09): the applied amounts captured
+        // here also drive the PAYOUT below. Pre-fix, the payout used the
+        // stale pre-await `collateral_to_liquidator`, so any concurrent
+        // reduction of this vault paid the liquidator collateral the vault
+        // no longer had, draining the shared pool. The per-vault op lock
+        // makes such a reduction unreachable; the re-capped payout keeps any
+        // residual drift solvency-safe.
+        let mut debt_applied = max_liquidatable_debt;
+        let mut collateral_applied = total_to_seize.to_u64();
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
             // ASYNC-001: cap each reduction to the CURRENT vault state and
             // saturating_sub. A concurrent partial liquidation may have reduced
             // this vault between our pre-await read and now; without the cap the
             // ICUSD Token::sub would underflow-PANIC and the raw u64 collateral
             // sub would WRAP, both after the liquidator's icUSD was already pulled.
-            let debt_applied = max_liquidatable_debt.min(vault.borrowed_icusd_amount);
-            let collateral_applied = total_to_seize.to_u64().min(vault.collateral_amount);
+            debt_applied = max_liquidatable_debt.min(vault.borrowed_icusd_amount);
+            collateral_applied = total_to_seize.to_u64().min(vault.collateral_amount);
             let interest_applied = interest_share.min(vault.accrued_interest);
             vault.borrowed_icusd_amount = vault.borrowed_icusd_amount.saturating_sub(debt_applied);
             vault.collateral_amount = vault.collateral_amount.saturating_sub(collateral_applied);
             vault.accrued_interest = vault.accrued_interest.saturating_sub(interest_applied);
         }
+        let payout_to_liquidator = ICP::from(collateral_applied.saturating_sub(protocol_cut));
 
         // Wave-10 LIQ-008: append the gross debt cleared to the rolling-
         // window log. Records all liquidations (healthy and underwater) so
         // the circuit breaker can pause auto-publishing during cascades.
         crate::event::record_liquidation_for_breaker(s, max_liquidatable_debt.to_u64());
 
-        // Wave-8e LIQ-005: per-call deficit accrual. `max_liquidatable_debt`
-        // is the icUSD amount the vault's debt was reduced by;
-        // `total_to_seize` is the collateral seized. Predicate: seized USD <
-        // debt cleared.
+        // Wave-8e LIQ-005: per-call deficit accrual against the APPLIED
+        // amounts. Predicate: seized USD < debt cleared.
         let seized_usd = crate::numeric::collateral_usd_value(
-            total_to_seize.to_u64(),
+            collateral_applied,
             collateral_price,
             config_decimals,
         );
-        let shortfall = if seized_usd < max_liquidatable_debt {
-            max_liquidatable_debt - seized_usd
+        let shortfall = if seized_usd < debt_applied {
+            debt_applied - seized_usd
         } else {
             ICUSD::new(0)
         };
@@ -2422,14 +2647,15 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
             }
         }
 
-        // Record the partial liquidation event
+        // Record the partial liquidation event (applied payout, so replay's
+        // per-event deduction mirrors live state exactly)
         let event = crate::event::Event::PartialLiquidateVault {
             vault_id,
             liquidator_payment: max_liquidatable_debt,
-            icp_to_liquidator: collateral_to_liquidator,
+            icp_to_liquidator: payout_to_liquidator,
             liquidator: Some(caller),
             icp_rate: Some(collateral_price_usd),
-            protocol_fee_collateral: if protocol_cut > 0 { Some(protocol_cut) } else { None },
+            protocol_fee_collateral: if protocol_cut > 0 { Some(protocol_cut.min(collateral_applied)) } else { None },
             timestamp: Some(ic_cdk::api::time()),
             three_usd_reserves_e8s: None,
         };
@@ -2441,7 +2667,7 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
             (vault_id, caller),
             PendingMarginTransfer {
                 owner: caller,
-                margin: collateral_to_liquidator,
+                margin: payout_to_liquidator,
                 collateral_type: vault.collateral_type,
                 retry_count: 0,
                 op_nonce: nonce,
@@ -2478,7 +2704,12 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
     });
 
     // Route interest share via N-way split
-    crate::treasury::distribute_interest(interest_share, vault.collateral_type).await;
+    // IC-B-002 (audit 2026-06-09): re-queue any unminted interest share so the
+    // next flush retries it instead of silently dropping treasury revenue.
+    let unminted_interest = crate::treasury::distribute_interest(interest_share, vault.collateral_type).await;
+    if unminted_interest.to_u64() > 0 {
+        mutate_state(|s| s.restore_pending_interest_for_pool(vault.collateral_type, unminted_interest.to_u64()));
+    }
 
     // Send protocol's liquidation fee cut to treasury (fire-and-forget)
     if protocol_cut > 0 {
@@ -2680,36 +2911,40 @@ pub async fn liquidate_vault_partial_with_stable(
 
         // Reduce vault debt and collateral directly
         // Vault loses total_to_seize (liquidator + protocol cut)
+        // AR-B-001/BK-001 (audit 2026-06-09): capture applied amounts and
+        // re-cap the payout, mirroring `liquidate_vault_partial`.
+        let mut debt_applied = max_liquidatable_debt;
+        let mut collateral_applied = total_to_seize.to_u64();
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
             // ASYNC-001: cap each reduction to the CURRENT vault state and
             // saturating_sub. A concurrent partial liquidation may have reduced
             // this vault between our pre-await read and now; without the cap the
             // ICUSD Token::sub would underflow-PANIC and the raw u64 collateral
             // sub would WRAP, both after the liquidator's icUSD was already pulled.
-            let debt_applied = max_liquidatable_debt.min(vault.borrowed_icusd_amount);
-            let collateral_applied = total_to_seize.to_u64().min(vault.collateral_amount);
+            debt_applied = max_liquidatable_debt.min(vault.borrowed_icusd_amount);
+            collateral_applied = total_to_seize.to_u64().min(vault.collateral_amount);
             let interest_applied = interest_share.min(vault.accrued_interest);
             vault.borrowed_icusd_amount = vault.borrowed_icusd_amount.saturating_sub(debt_applied);
             vault.collateral_amount = vault.collateral_amount.saturating_sub(collateral_applied);
             vault.accrued_interest = vault.accrued_interest.saturating_sub(interest_applied);
         }
+        let payout_to_liquidator = ICP::from(collateral_applied.saturating_sub(protocol_cut));
 
         // Wave-10 LIQ-008: append the gross debt cleared to the rolling-
         // window log for the mass-liquidation circuit breaker.
         crate::event::record_liquidation_for_breaker(s, max_liquidatable_debt.to_u64());
 
-        // Wave-8e LIQ-005: per-call deficit accrual. The stablecoin path
-        // pulls ckUSDT/ckUSDC from the liquidator (1:1 with icUSD plus a
-        // surcharge). The icUSD-denominated debt cleared is
-        // `max_liquidatable_debt`; the collateral seized is `total_to_seize`.
-        // Predicate measured in icUSD-equivalent collateral USD value.
+        // Wave-8e LIQ-005: per-call deficit accrual against the APPLIED
+        // amounts. The stablecoin path pulls ckUSDT/ckUSDC from the
+        // liquidator (1:1 with icUSD plus a surcharge). Predicate measured
+        // in icUSD-equivalent collateral USD value.
         let seized_usd = crate::numeric::collateral_usd_value(
-            total_to_seize.to_u64(),
+            collateral_applied,
             collateral_price,
             config_decimals,
         );
-        let shortfall = if seized_usd < max_liquidatable_debt {
-            max_liquidatable_debt - seized_usd
+        let shortfall = if seized_usd < debt_applied {
+            debt_applied - seized_usd
         } else {
             ICUSD::new(0)
         };
@@ -2728,14 +2963,14 @@ pub async fn liquidate_vault_partial_with_stable(
             }
         }
 
-        // Record the partial liquidation event
+        // Record the partial liquidation event (applied payout, replay-exact)
         let event = crate::event::Event::PartialLiquidateVault {
             vault_id,
             liquidator_payment: max_liquidatable_debt,
-            icp_to_liquidator: collateral_to_liquidator,
+            icp_to_liquidator: payout_to_liquidator,
             liquidator: Some(caller),
             icp_rate: Some(collateral_price_usd),
-            protocol_fee_collateral: if protocol_cut > 0 { Some(protocol_cut) } else { None },
+            protocol_fee_collateral: if protocol_cut > 0 { Some(protocol_cut.min(collateral_applied)) } else { None },
             timestamp: Some(ic_cdk::api::time()),
             three_usd_reserves_e8s: None,
         };
@@ -2747,7 +2982,7 @@ pub async fn liquidate_vault_partial_with_stable(
             (vault_id, caller),
             PendingMarginTransfer {
                 owner: caller,
-                margin: collateral_to_liquidator,
+                margin: payout_to_liquidator,
                 collateral_type: vault.collateral_type,
                 retry_count: 0,
                 op_nonce: nonce,
@@ -3081,19 +3316,24 @@ pub async fn liquidate_vault_debt_already_burned(
             } else { ICUSD::new(0) }
         } else { ICUSD::new(0) };
 
+        // AR-B-001/BK-001 (audit 2026-06-09): capture applied amounts and
+        // re-cap the payout, mirroring `liquidate_vault_partial`.
+        let mut debt_applied = max_liquidatable_debt;
+        let mut collateral_applied = total_to_seize.to_u64();
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
             // ASYNC-001: cap each reduction to the CURRENT vault state and
             // saturating_sub. A concurrent partial liquidation may have reduced
             // this vault between our pre-await read and now; without the cap the
             // ICUSD Token::sub would underflow-PANIC and the raw u64 collateral
             // sub would WRAP, both after the liquidator's icUSD was already pulled.
-            let debt_applied = max_liquidatable_debt.min(vault.borrowed_icusd_amount);
-            let collateral_applied = total_to_seize.to_u64().min(vault.collateral_amount);
+            debt_applied = max_liquidatable_debt.min(vault.borrowed_icusd_amount);
+            collateral_applied = total_to_seize.to_u64().min(vault.collateral_amount);
             let interest_applied = interest_share.min(vault.accrued_interest);
             vault.borrowed_icusd_amount = vault.borrowed_icusd_amount.saturating_sub(debt_applied);
             vault.collateral_amount = vault.collateral_amount.saturating_sub(collateral_applied);
             vault.accrued_interest = vault.accrued_interest.saturating_sub(interest_applied);
         }
+        let payout_to_liquidator = ICP::from(collateral_applied.saturating_sub(protocol_cut));
 
         // Wave-10 LIQ-008: append the gross debt cleared to the rolling-
         // window log. SP writedowns count toward the breaker — a flood of
@@ -3102,20 +3342,20 @@ pub async fn liquidate_vault_debt_already_burned(
         crate::event::record_liquidation_for_breaker(s, max_liquidatable_debt.to_u64());
 
         // Wave-8e LIQ-005: per-call deficit accrual on the SP writedown
-        // path. Even though icUSD was burned externally (legacy 3pool burn)
-        // or 3USD reserves were credited (reserves path), the protocol's
-        // solvency invariant is still: seized collateral USD value vs. debt
-        // cleared. If the SP absorbed an underwater vault, the protocol
-        // records the shortfall here so future fee revenue burns it down —
-        // this is what the audit (LIQ-005) prescribes instead of socializing
-        // onto SP depositors.
+        // path, against the APPLIED amounts. Even though icUSD was burned
+        // externally (legacy 3pool burn) or 3USD reserves were credited
+        // (reserves path), the protocol's solvency invariant is still:
+        // seized collateral USD value vs. debt cleared. If the SP absorbed
+        // an underwater vault, the protocol records the shortfall here so
+        // future fee revenue burns it down — this is what the audit
+        // (LIQ-005) prescribes instead of socializing onto SP depositors.
         let seized_usd = crate::numeric::collateral_usd_value(
-            total_to_seize.to_u64(),
+            collateral_applied,
             collateral_price,
             config_decimals,
         );
-        let shortfall = if seized_usd < max_liquidatable_debt {
-            max_liquidatable_debt - seized_usd
+        let shortfall = if seized_usd < debt_applied {
+            debt_applied - seized_usd
         } else {
             ICUSD::new(0)
         };
@@ -3134,13 +3374,14 @@ pub async fn liquidate_vault_debt_already_burned(
             }
         }
 
+        // AR-B-001/BK-001 (audit 2026-06-09): applied payout, replay-exact.
         let event = crate::event::Event::PartialLiquidateVault {
             vault_id,
             liquidator_payment: max_liquidatable_debt,
-            icp_to_liquidator: collateral_to_liquidator,
+            icp_to_liquidator: payout_to_liquidator,
             liquidator: Some(caller),
             icp_rate: Some(collateral_price_usd),
-            protocol_fee_collateral: if protocol_cut > 0 { Some(protocol_cut) } else { None },
+            protocol_fee_collateral: if protocol_cut > 0 { Some(protocol_cut.min(collateral_applied)) } else { None },
             timestamp: Some(ic_cdk::api::time()),
             three_usd_reserves_e8s: three_usd_received_e8s,
         };
@@ -3156,7 +3397,7 @@ pub async fn liquidate_vault_debt_already_burned(
             (vault_id, caller),
             PendingMarginTransfer {
                 owner: caller,
-                margin: collateral_to_liquidator,
+                margin: payout_to_liquidator,
                 collateral_type: vault.collateral_type,
                 retry_count: 0,
                 op_nonce: nonce,
@@ -3195,7 +3436,12 @@ pub async fn liquidate_vault_debt_already_burned(
     });
 
     // Route interest share via N-way split
-    crate::treasury::distribute_interest(interest_share, vault.collateral_type).await;
+    // IC-B-002 (audit 2026-06-09): re-queue any unminted interest share so the
+    // next flush retries it instead of silently dropping treasury revenue.
+    let unminted_interest = crate::treasury::distribute_interest(interest_share, vault.collateral_type).await;
+    if unminted_interest.to_u64() > 0 {
+        mutate_state(|s| s.restore_pending_interest_for_pool(vault.collateral_type, unminted_interest.to_u64()));
+    }
 
     // Send protocol's liquidation fee cut to treasury
     if protocol_cut > 0 {
@@ -3358,6 +3604,31 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         if !s.vault_id_to_vaults.contains_key(&vault_id) {
             return None;
         }
+        // AR-B-001/BK-001 (audit 2026-06-09): re-cap every collateral payout
+        // to the vault's LIVE collateral at commit time. The split below was
+        // computed from the pre-await snapshot; the per-vault op lock makes a
+        // concurrent reduction unreachable, and this clamp keeps any residual
+        // drift solvency-safe (protocol cut first, then liquidator, then the
+        // owner's excess — never more than the vault actually holds).
+        let live_collateral = s
+            .vault_id_to_vaults
+            .get(&vault_id)
+            .map(|v| v.collateral_amount)
+            .unwrap_or(0);
+        let cut_applied = protocol_cut.min(live_collateral);
+        let liquidator_pay = ICP::from(
+            collateral_to_liquidator
+                .to_u64()
+                .min(live_collateral.saturating_sub(cut_applied)),
+        );
+        let excess_pay = ICP::from(
+            excess_collateral.to_u64().min(
+                live_collateral
+                    .saturating_sub(cut_applied)
+                    .saturating_sub(liquidator_pay.to_u64()),
+            ),
+        );
+
         // Execute the liquidation in state first (this must happen)
         // liquidate_vault returns the interest share of the debt reduction
         let interest_share = s.liquidate_vault(vault_id, mode, collateral_price_usd);
@@ -3374,7 +3645,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         // liquidator effectively paid `debt_amount` icUSD for collateral
         // worth less, and the protocol now records the outstanding loss.
         let seized_usd = crate::numeric::collateral_usd_value(
-            total_to_seize.to_u64(),
+            total_to_seize.to_u64().min(live_collateral),
             collateral_price,
             config_decimals,
         );
@@ -3414,7 +3685,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
             (vault_id, caller),
             PendingMarginTransfer {
                 owner: caller,
-                margin: collateral_to_liquidator,
+                margin: liquidator_pay,
                 collateral_type: vault.collateral_type,
                 retry_count: 0,
                 op_nonce: liquidator_nonce,
@@ -3423,14 +3694,14 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
 
         // Create pending transfer for excess collateral to vault owner (if any)
         // (only for full liquidations, not recovery partial)
-        if !is_recovery_partial && excess_collateral > ICP::new(0) {
+        if !is_recovery_partial && excess_pay > ICP::new(0) {
             log!(INFO, "[liquidate_vault] Scheduling excess collateral return to vault owner");
             let excess_nonce = s.next_op_nonce();
             s.pending_excess_transfers.insert(
                 (vault_id, vault.owner),
                 PendingMarginTransfer {
                     owner: vault.owner,
-                    margin: excess_collateral,
+                    margin: excess_pay,
                     collateral_type: vault.collateral_type,
                     retry_count: 0,
                     op_nonce: excess_nonce,
@@ -3439,7 +3710,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         }
 
         log!(INFO, "[liquidate_vault] Protocol state updated, {} pending transfers created",
-             if !is_recovery_partial && excess_collateral > ICP::new(0) { 2 } else { 1 });
+             if !is_recovery_partial && excess_pay > ICP::new(0) { 2 } else { 1 });
         Some(interest_share)
     }) {
         Some(share) => share,
@@ -3487,7 +3758,12 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
     };
 
     // Route interest share via N-way split
-    crate::treasury::distribute_interest(interest_share, vault.collateral_type).await;
+    // IC-B-002 (audit 2026-06-09): re-queue any unminted interest share so the
+    // next flush retries it instead of silently dropping treasury revenue.
+    let unminted_interest = crate::treasury::distribute_interest(interest_share, vault.collateral_type).await;
+    if unminted_interest.to_u64() > 0 {
+        mutate_state(|s| s.restore_pending_interest_for_pool(vault.collateral_type, unminted_interest.to_u64()));
+    }
 
     // Send protocol's liquidation fee cut to treasury (fire-and-forget)
     if protocol_cut > 0 {
@@ -3729,7 +4005,12 @@ pub async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError>
     match transfer_icusd_from(amount, caller).await {
         Ok(block_index) => {
             let interest_share = mutate_state(|s| record_repayed_to_vault(s, arg.vault_id, amount, block_index));
-            crate::treasury::distribute_interest(interest_share, vault.collateral_type).await;
+            // IC-B-002 (audit 2026-06-09): re-queue any unminted interest share so the
+            // next flush retries it instead of silently dropping treasury revenue.
+            let unminted_interest = crate::treasury::distribute_interest(interest_share, vault.collateral_type).await;
+            if unminted_interest.to_u64() > 0 {
+                mutate_state(|s| s.restore_pending_interest_for_pool(vault.collateral_type, unminted_interest.to_u64()));
+            }
             guard_principal.complete(); // Mark as completed
             Ok(block_index)
         }
@@ -3877,29 +4158,35 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
 
         // Reduce the vault's debt by the liquidator payment amount
         // Vault loses total_to_seize (liquidator + protocol cut)
+        //
+        // AR-B-001/BK-001 (audit 2026-06-09): capture applied amounts and
+        // re-cap the payout, mirroring `liquidate_vault_partial`.
+        let mut debt_applied = liquidator_payment;
+        let mut collateral_applied = total_to_seize.to_u64();
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&arg.vault_id) {
             // ASYNC-001: cap each reduction to the CURRENT vault state and
             // saturating_sub (same race as the other partial-liq paths).
-            let debt_applied = liquidator_payment.min(vault.borrowed_icusd_amount);
-            let collateral_applied = total_to_seize.to_u64().min(vault.collateral_amount);
+            debt_applied = liquidator_payment.min(vault.borrowed_icusd_amount);
+            collateral_applied = total_to_seize.to_u64().min(vault.collateral_amount);
             let interest_applied = interest_share.min(vault.accrued_interest);
             vault.borrowed_icusd_amount = vault.borrowed_icusd_amount.saturating_sub(debt_applied);
             vault.collateral_amount = vault.collateral_amount.saturating_sub(collateral_applied);
             vault.accrued_interest = vault.accrued_interest.saturating_sub(interest_applied);
         }
+        let payout_to_liquidator = ICP::from(collateral_applied.saturating_sub(protocol_cut));
 
         // Wave-10 LIQ-008: append the gross debt cleared to the rolling-
         // window log for the mass-liquidation circuit breaker.
         crate::event::record_liquidation_for_breaker(s, liquidator_payment.to_u64());
 
-        // Wave-8e LIQ-005: per-call deficit accrual.
+        // Wave-8e LIQ-005: per-call deficit accrual against the APPLIED amounts.
         let seized_usd = crate::numeric::collateral_usd_value(
-            total_to_seize.to_u64(),
+            collateral_applied,
             collateral_price,
             config_decimals,
         );
-        let shortfall = if seized_usd < liquidator_payment {
-            liquidator_payment - seized_usd
+        let shortfall = if seized_usd < debt_applied {
+            debt_applied - seized_usd
         } else {
             ICUSD::new(0)
         };
@@ -3918,14 +4205,14 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
             }
         }
 
-        // Record the partial liquidation event
+        // Record the partial liquidation event (applied payout, replay-exact)
         let event = crate::event::Event::PartialLiquidateVault {
             vault_id: arg.vault_id,
             liquidator_payment,
-            icp_to_liquidator: collateral_to_liquidator,
+            icp_to_liquidator: payout_to_liquidator,
             liquidator: Some(caller),
             icp_rate: Some(collateral_price_usd),
-            protocol_fee_collateral: if protocol_cut > 0 { Some(protocol_cut) } else { None },
+            protocol_fee_collateral: if protocol_cut > 0 { Some(protocol_cut.min(collateral_applied)) } else { None },
             timestamp: Some(ic_cdk::api::time()),
             three_usd_reserves_e8s: None,
         };
@@ -3937,7 +4224,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
             (arg.vault_id, caller),
             PendingMarginTransfer {
                 owner: caller,
-                margin: collateral_to_liquidator,
+                margin: payout_to_liquidator,
                 collateral_type: vault.collateral_type,
                 retry_count: 0,
                 op_nonce: nonce,
@@ -3954,7 +4241,12 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
     });
 
     // Route interest share via N-way split
-    crate::treasury::distribute_interest(interest_share, vault.collateral_type).await;
+    // IC-B-002 (audit 2026-06-09): re-queue any unminted interest share so the
+    // next flush retries it instead of silently dropping treasury revenue.
+    let unminted_interest = crate::treasury::distribute_interest(interest_share, vault.collateral_type).await;
+    if unminted_interest.to_u64() > 0 {
+        mutate_state(|s| s.restore_pending_interest_for_pool(vault.collateral_type, unminted_interest.to_u64()));
+    }
 
     // Send protocol's liquidation fee cut to treasury (fire-and-forget)
     if protocol_cut > 0 {

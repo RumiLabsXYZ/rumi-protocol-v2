@@ -165,6 +165,16 @@ struct LedgerSpec {
 /// Returns a harness with at least `n_swaps` + a handful of LP-token mint
 /// blocks in the ICRC-3 log.
 pub fn deploy_pool_with_liquidity_and_swaps(n_swaps: u64) -> ThreePoolHarness {
+    deploy_pool_with_liquidity_fee_and_swaps(n_swaps, 0)
+}
+
+/// Same as `deploy_pool_with_liquidity_and_swaps` but with a configurable
+/// ICRC-1 `transfer_fee` on all three underlying ledgers. Audit 2026-06-09
+/// (IC-S-003): dust-output regression tests need a nonzero ledger fee.
+pub fn deploy_pool_with_liquidity_fee_and_swaps(
+    n_swaps: u64,
+    transfer_fee: u128,
+) -> ThreePoolHarness {
     let pic = PocketIcBuilder::new().with_application_subnet().build();
 
     let minting_account = Principal::self_authenticating(&[100, 100, 100]);
@@ -202,7 +212,7 @@ pub fn deploy_pool_with_liquidity_and_swaps(n_swaps: u64) -> ThreePoolHarness {
                 subaccount: None,
             },
             fee_collector_account: None,
-            transfer_fee: candid::Nat::from(0u64),
+            transfer_fee: candid::Nat::from(transfer_fee),
             decimals: Some(spec.decimals),
             max_memo_length: Some(32),
             token_name: spec.name.to_string(),

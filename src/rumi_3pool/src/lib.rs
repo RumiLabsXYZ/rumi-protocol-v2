@@ -368,6 +368,23 @@ pub async fn claim_pending(claim_id: u64) -> Result<(), ThreePoolError> {
         return Err(ThreePoolError::Unauthorized);
     }
 
+    // Audit 2026-06-09 (IC-S-003): transfer_to_user silently skips sends of
+    // amount <= ledger fee, which would consume the claim with nothing
+    // received. Keep the claim and return a clear error; it becomes payable
+    // again if the ledger fee ever drops below the claim amount.
+    let fee = crate::transfers::ledger_fee(claim.ledger).await;
+    if claim.amount <= fee {
+        let err = ThreePoolError::TransferFailed {
+            token: claim.symbol.clone(),
+            reason: format!(
+                "claim amount {} does not exceed the ledger fee {}; nothing would be received",
+                claim.amount, fee
+            ),
+        };
+        storage::pending_claims::insert(claim);
+        return Err(err);
+    }
+
     match transfer_to_user(claim.ledger, claim.claimant, claim.amount).await {
         Ok(()) => {
             log!(INFO, "Pending claim #{} resolved: {} received {} of {}",
@@ -447,6 +464,13 @@ pub async fn swap(i: u8, j: u8, dx: u128, min_dy: u128) -> Result<u128, ThreePoo
     //    transfer pays `output - ledger_fee`, so check net so `min_dy` is a true
     //    minimum received. Fee lookup is cached (the output transfer reuses it).
     let net_output = output.saturating_sub(crate::transfers::ledger_fee(token_j_ledger).await);
+    // Audit 2026-06-09 (IC-S-003): a zero NET output means transfer_to_user
+    // would skip the send entirely (output <= ledger fee) while the pool still
+    // debits balances, silently consuming the input for nothing. Reject before
+    // pulling the input so no value moves.
+    if net_output == 0 {
+        return Err(ThreePoolError::InsufficientOutput { expected_min: 1, actual: 0 });
+    }
     if net_output < min_dy {
         return Err(ThreePoolError::SlippageExceeded);
     }
@@ -732,6 +756,13 @@ pub async fn remove_liquidity(
     });
     for k in 0..3 {
         let net_k = amounts[k].saturating_sub(crate::transfers::ledger_fee(token_ledgers[k]).await);
+        // Audit 2026-06-09 (IC-S-003): a payable leg that nets to zero would be
+        // silently consumed (debited from the pool with nothing sent). Reject
+        // the whole removal up front, before the LP burn; the caller can burn
+        // a larger amount instead.
+        if amounts[k] > 0 && net_k == 0 {
+            return Err(ThreePoolError::InsufficientOutput { expected_min: 1, actual: 0 });
+        }
         if net_k < min_arr[k] {
             return Err(ThreePoolError::SlippageExceeded);
         }
@@ -876,6 +907,12 @@ pub async fn remove_one_coin(
     //    transfer pays `amount - ledger_fee`), so `min_amount` is a true minimum.
     let out_ledger = read_state(|s| s.config.tokens[idx].ledger_id);
     let net_amount = amount.saturating_sub(crate::transfers::ledger_fee(out_ledger).await);
+    // Audit 2026-06-09 (IC-S-003): a zero NET amount means transfer_to_user
+    // would skip the send while LP and balances are still debited. Reject
+    // before any state change.
+    if net_amount == 0 {
+        return Err(ThreePoolError::InsufficientOutput { expected_min: 1, actual: 0 });
+    }
     if net_amount < min_amount {
         return Err(ThreePoolError::SlippageExceeded);
     }
@@ -1524,6 +1561,7 @@ pub fn simulate_swap_path(path: Vec<(u8, u8, u128)>) -> Result<Vec<QuoteSwapResu
 /// imbalance_after, virtual_price_after, kind) tuple.
 #[query]
 pub fn get_imbalance_history(limit: u64, offset: u64) -> Vec<ImbalanceSnapshot> {
+    let limit = limit.min(storage::MAX_EVENT_PAGE);
     read_state(|s| {
         let mut all: Vec<ImbalanceSnapshot> = Vec::new();
         for e in s.swap_events_v2().iter().filter(|e| !e.migrated) {
@@ -1562,6 +1600,7 @@ pub fn get_liquidity_event_count_v2() -> u64 {
 /// Paginated newest-first read of the v2 liquidity event log.
 #[query]
 pub fn get_liquidity_events_v2(limit: u64, offset: u64) -> Vec<LiquidityEventV2> {
+    let limit = limit.min(storage::MAX_EVENT_PAGE);
     read_state(|s| {
         let events = s.liquidity_events_v2();
         let total = events.len() as u64;
@@ -1601,6 +1640,7 @@ pub fn get_liquidity_events_v2_forward(
 /// Paginated newest-first read of the v2 swap event log.
 #[query]
 pub fn get_swap_events_v2(limit: u64, offset: u64) -> Vec<SwapEventV2> {
+    let limit = limit.min(storage::MAX_EVENT_PAGE);
     read_state(|s| {
         let events = s.swap_events_v2();
         let total = events.len() as u64;
@@ -1652,6 +1692,7 @@ pub fn get_liquidity_events_by_principal(
     start: u64,
     length: u64,
 ) -> Vec<LiquidityEventV2> {
+    let length = length.min(storage::MAX_EVENT_PAGE);
     read_state(|s| {
         s.liquidity_events_v2()
             .iter()
@@ -1670,6 +1711,7 @@ pub fn get_swap_events_by_principal(
     start: u64,
     length: u64,
 ) -> Vec<SwapEventV2> {
+    let length = length.min(storage::MAX_EVENT_PAGE);
     read_state(|s| {
         s.swap_events_v2()
             .iter()
@@ -1688,6 +1730,7 @@ pub fn get_swap_events_by_time_range(
     to_ts: u64,
     limit: u64,
 ) -> Vec<SwapEventV2> {
+    let limit = limit.min(storage::MAX_EVENT_PAGE);
     read_state(|s| {
         s.swap_events_v2()
             .iter()
@@ -2514,6 +2557,22 @@ pub fn test_corrupt_hash_cache_tip(bogus_hash: Vec<u8>) {
     let mut h = [0u8; 32];
     h.copy_from_slice(&bogus_hash);
     storage::push_bogus_hash_for_test(h);
+}
+
+/// Test-only: insert a pending claim for the caller directly, so integration
+/// tests can exercise `claim_pending` edge cases (IC-S-003 dust claims)
+/// without orchestrating a real transfer failure. Never enabled in mainnet
+/// builds.
+#[cfg(any(feature = "test_endpoints", test))]
+#[update]
+pub fn test_insert_pending_claim(token_index: u8, amount: u128) -> u64 {
+    assert!(token_index < 3, "token_index out of range");
+    let caller = ic_cdk::api::caller();
+    let (ledger, symbol) = read_state(|s| {
+        let t = &s.config.tokens[token_index as usize];
+        (t.ledger_id, t.symbol.clone())
+    });
+    record_pending_claim(caller, token_index, ledger, &symbol, amount, "test-injected claim")
 }
 
 #[cfg(test)]

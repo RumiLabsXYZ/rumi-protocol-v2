@@ -20,8 +20,9 @@ const P2 = Principal.fromText('2vxsx-fae');
 
 function status(open: boolean, driver: boolean): PublicEpochStatus {
   return {
+    // snapshot_a_ns/snapshot_b_ns are opt: [] until the snapshot fires (PTS-002).
     open_epoch: open
-      ? [{ epoch_index: 0n, epoch_start_ns: 0n, snapshot_a_ns: 0n, snapshot_b_ns: 0n, epoch_end_ns: 0n }]
+      ? [{ epoch_index: 0n, epoch_start_ns: 0n, snapshot_a_ns: [], snapshot_b_ns: [], epoch_end_ns: 0n }]
       : [],
     snapshot_seed_committed: true,
     driver_interval_secs: 604800n,

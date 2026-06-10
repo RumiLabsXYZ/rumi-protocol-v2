@@ -25,8 +25,8 @@ export const idlFactory = ({ IDL }) => {
   const PublicOpenEpoch = IDL.Record({
     'epoch_index' : IDL.Nat64,
     'epoch_start_ns' : IDL.Nat64,
-    'snapshot_a_ns' : IDL.Nat64,
-    'snapshot_b_ns' : IDL.Nat64,
+    'snapshot_a_ns' : IDL.Opt(IDL.Nat64),
+    'snapshot_b_ns' : IDL.Opt(IDL.Nat64),
     'epoch_end_ns' : IDL.Nat64,
   });
   const PublicEpochStatus = IDL.Record({

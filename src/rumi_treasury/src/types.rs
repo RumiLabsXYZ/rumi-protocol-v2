@@ -118,11 +118,12 @@ pub struct WithdrawArgs {
     pub to: Principal,
     /// Optional memo for the transfer
     pub memo: Option<String>,
-    /// Caller-supplied idempotency token. When the controller retries a
-    /// withdrawal that may have failed at the transport layer, supplying the
-    /// same `request_id` lets the ledger deduplicate (audit ICRC-002). If
-    /// omitted, treasury derives one from `(caller, asset_type, amount, to,
-    /// floor(now / 60s))` so a same-minute repeat still dedups.
+    /// Caller-supplied idempotency token. The treasury persists the first
+    /// attempt's `created_at_time` per `request_id` and reuses it on retries,
+    /// so re-submitting with the same `request_id` lets the ledger
+    /// deduplicate (audit ICRC-003). If omitted, treasury derives one from
+    /// `(caller, asset_type, amount, to, floor(now / 60s))` so a same-minute
+    /// repeat still dedups.
     #[serde(default)]
     pub request_id: Option<u64>,
 }

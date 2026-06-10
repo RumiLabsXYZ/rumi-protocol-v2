@@ -54,6 +54,13 @@ pub struct StabilityPoolState {
     pub pool_events: Option<Vec<PoolEvent>>,
     #[serde(default)]
     pub next_event_id: Option<u64>,
+    /// Failed `deposit_as_3usd` refunds awaiting recovery via
+    /// `claim_pending_refund`, keyed by refund id (audit IC-S-001).
+    /// `Option` is required for Candid backward-compatible stable memory upgrades.
+    #[serde(default)]
+    pub pending_refunds: Option<BTreeMap<u64, PendingRefund>>,
+    #[serde(default)]
+    pub next_pending_refund_id: Option<u64>,
 }
 
 impl Default for StabilityPoolState {
@@ -81,12 +88,20 @@ impl Default for StabilityPoolState {
             is_initialized: false,
             pool_events: Some(Vec::new()),
             next_event_id: Some(0),
+            pending_refunds: Some(BTreeMap::new()),
+            next_pending_refund_id: Some(0),
         }
     }
 }
 
 /// Maximum pool events retained in memory.
 const MAX_POOL_EVENTS: usize = 10_000;
+
+/// Maximum outstanding pending refunds (audit IC-S-001). A record is only
+/// created when a refund transfer fails after the user's tokens were pulled,
+/// which is not caller-controllable, so this is a memory-safety bound rather
+/// than an anti-DoS one (mirrors rumi_3pool's MAX_PENDING_CLAIMS).
+pub const MAX_PENDING_REFUNDS: usize = 10_000;
 
 impl StabilityPoolState {
     pub fn initialize(&mut self, args: StabilityPoolInitArgs) {
@@ -444,6 +459,63 @@ impl StabilityPoolState {
             return Err(StabilityPoolError::AlreadyOptedIn { collateral: collateral_type });
         }
         Ok(())
+    }
+
+    // ─── Pending Refunds (audit IC-S-001) ───
+
+    /// Record tokens the pool owes `user` after a failed `deposit_as_3usd`
+    /// refund so they can be recovered via `claim_pending_refund`. `amount` is
+    /// the GROSS amount still held by the pool; the payout nets the ledger fee.
+    /// Returns the refund id. `now` is passed explicitly so the bookkeeping is
+    /// testable without the IC runtime.
+    pub fn record_pending_refund(
+        &mut self,
+        user: Principal,
+        token_ledger: Principal,
+        amount: u64,
+        reason: String,
+        now: u64,
+    ) -> u64 {
+        let refunds = self.pending_refunds.get_or_insert_with(BTreeMap::new);
+        // Bound memory. Ids are monotonic, so the smallest key is the oldest
+        // record; dropping it is a (logged at the call site) value loss, but
+        // reaching the cap requires thousands of genuine ledger failures.
+        if refunds.len() >= MAX_PENDING_REFUNDS {
+            if let Some(oldest) = refunds.keys().next().copied() {
+                refunds.remove(&oldest);
+            }
+        }
+        let id = self.next_pending_refund_id.unwrap_or(0);
+        self.next_pending_refund_id = Some(id + 1);
+        refunds.insert(id, PendingRefund {
+            id,
+            user,
+            token_ledger,
+            amount,
+            reason,
+            created_at: now,
+        });
+        id
+    }
+
+    /// Remove and return a pending refund. Removal happens BEFORE the payout
+    /// transfer so two concurrent claims cannot both pay out; the caller
+    /// re-inserts via `put_pending_refund` if the transfer fails.
+    pub fn take_pending_refund(&mut self, id: u64) -> Option<PendingRefund> {
+        self.pending_refunds.as_mut().and_then(|m| m.remove(&id))
+    }
+
+    pub fn put_pending_refund(&mut self, refund: PendingRefund) {
+        self.pending_refunds
+            .get_or_insert_with(BTreeMap::new)
+            .insert(refund.id, refund);
+    }
+
+    pub fn pending_refunds_for(&self, user: &Principal) -> Vec<PendingRefund> {
+        self.pending_refunds
+            .as_ref()
+            .map(|m| m.values().filter(|r| r.user == *user).cloned().collect())
+            .unwrap_or_default()
     }
 
     // ─── Effective Pool Computation ───
@@ -988,6 +1060,63 @@ pub fn save_to_stable_memory() {
     });
 }
 
+/// Pre-IC-S-001 snapshot of `StabilityPoolState` (before the `pending_refunds`
+/// and `next_pending_refund_id` fields). The new fields are `opt`, so the
+/// current decoder already accepts old bytes; this snapshot is the mandated
+/// versioned fallback (UPG-001 chain) in case that ever changes.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct StabilityPoolStateV1 {
+    pub deposits: BTreeMap<Principal, DepositPosition>,
+    pub total_stablecoin_balances: BTreeMap<Principal, u64>,
+    pub stablecoin_registry: BTreeMap<Principal, StablecoinConfig>,
+    pub collateral_registry: BTreeMap<Principal, CollateralInfo>,
+    pub protocol_canister_id: Principal,
+    pub configuration: PoolConfiguration,
+    pub liquidation_history: Vec<PoolLiquidationRecord>,
+    pub in_flight_liquidations: BTreeSet<u64>,
+    pub total_liquidations_executed: u64,
+    pub pool_creation_timestamp: u64,
+    #[serde(default)]
+    pub total_interest_received_e8s: Option<u64>,
+    #[serde(default)]
+    pub token_consecutive_failures: Option<BTreeMap<Principal, u32>>,
+    #[serde(default)]
+    pub cached_virtual_prices: Option<BTreeMap<Principal, u128>>,
+    #[serde(default)]
+    pub protocol_reserve_address: Option<Principal>,
+    pub is_initialized: bool,
+    #[serde(default)]
+    pub pool_events: Option<Vec<PoolEvent>>,
+    #[serde(default)]
+    pub next_event_id: Option<u64>,
+}
+
+impl From<StabilityPoolStateV1> for StabilityPoolState {
+    fn from(v1: StabilityPoolStateV1) -> Self {
+        Self {
+            deposits: v1.deposits,
+            total_stablecoin_balances: v1.total_stablecoin_balances,
+            stablecoin_registry: v1.stablecoin_registry,
+            collateral_registry: v1.collateral_registry,
+            protocol_canister_id: v1.protocol_canister_id,
+            configuration: v1.configuration,
+            liquidation_history: v1.liquidation_history,
+            in_flight_liquidations: v1.in_flight_liquidations,
+            total_liquidations_executed: v1.total_liquidations_executed,
+            pool_creation_timestamp: v1.pool_creation_timestamp,
+            total_interest_received_e8s: v1.total_interest_received_e8s,
+            token_consecutive_failures: v1.token_consecutive_failures,
+            cached_virtual_prices: v1.cached_virtual_prices,
+            protocol_reserve_address: v1.protocol_reserve_address,
+            is_initialized: v1.is_initialized,
+            pool_events: v1.pool_events,
+            next_event_id: v1.next_event_id,
+            pending_refunds: Some(BTreeMap::new()),
+            next_pending_refund_id: Some(0),
+        }
+    }
+}
+
 /// Try to deserialize a stability pool state snapshot, walking known schema
 /// versions in order. Returns `None` if no version successfully decodes.
 ///
@@ -1001,10 +1130,10 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<StabilityPoolState> {
     if let Ok(state) = Decode!(bytes, StabilityPoolState) {
         return Some(state);
     }
-    // Future: insert prior schema versions here, e.g.
-    //     if let Ok(prev) = Decode!(bytes, StabilityPoolStateVN) {
-    //         return Some(prev.into());
-    //     }
+    // v1: pre-IC-S-001 (no pending_refunds / next_pending_refund_id).
+    if let Ok(prev) = Decode!(bytes, StabilityPoolStateV1) {
+        return Some(prev.into());
+    }
     None
 }
 
@@ -2068,5 +2197,147 @@ mod tests {
         let effective = state.effective_pool_for_collateral(&icp_ledger());
         // 10 * 1.0492 = 10.492 USD = 1_049_200_000 e8s
         assert_eq!(effective, 1_049_200_000);
+    }
+
+    // ─── Test: Pending Refunds (audit IC-S-001) ───
+
+    #[test]
+    fn ic_s_001_pending_refund_bookkeeping() {
+        let mut state = test_state();
+
+        // Record two refunds for user_a and one for user_b.
+        let id0 = state.record_pending_refund(
+            user_a(), icusd_ledger(), 5_00000000, "approve failed".to_string(), 100);
+        let id1 = state.record_pending_refund(
+            user_a(), ckusdt_ledger(), 7_000_000, "add_liquidity failed".to_string(), 200);
+        let id2 = state.record_pending_refund(
+            user_b(), icusd_ledger(), 1_00000000, "approve failed".to_string(), 300);
+        assert_eq!((id0, id1, id2), (0, 1, 2), "refund ids must be monotonic");
+
+        // Per-user listing only returns the owner's records.
+        let a_refunds = state.pending_refunds_for(&user_a());
+        assert_eq!(a_refunds.len(), 2);
+        assert!(a_refunds.iter().all(|r| r.user == user_a()));
+        assert_eq!(state.pending_refunds_for(&user_b()).len(), 1);
+        assert!(state.pending_refunds_for(&user_c()).is_empty());
+
+        // take removes the record (remove-before-transfer): a second take
+        // returns None, so two concurrent claims cannot both pay out.
+        let taken = state.take_pending_refund(id0).expect("first take succeeds");
+        assert_eq!(taken.amount, 5_00000000);
+        assert!(state.take_pending_refund(id0).is_none(), "double-claim must not pay twice");
+
+        // put_pending_refund restores the record after a failed payout transfer.
+        state.put_pending_refund(taken);
+        assert_eq!(state.pending_refunds_for(&user_a()).len(), 2);
+
+        // ids keep growing across take/put cycles.
+        let id3 = state.record_pending_refund(user_c(), icusd_ledger(), 1, "x".to_string(), 400);
+        assert_eq!(id3, 3);
+    }
+
+    #[test]
+    fn ic_s_001_pending_refund_cap_drops_oldest() {
+        let mut state = test_state();
+        for i in 0..MAX_PENDING_REFUNDS {
+            state.record_pending_refund(
+                user_a(), icusd_ledger(), i as u64 + 1, "fail".to_string(), i as u64);
+        }
+        assert_eq!(state.pending_refunds_for(&user_a()).len(), MAX_PENDING_REFUNDS);
+
+        let id = state.record_pending_refund(user_a(), icusd_ledger(), 999, "fail".to_string(), 999);
+        assert_eq!(id as usize, MAX_PENDING_REFUNDS);
+        assert_eq!(
+            state.pending_refunds_for(&user_a()).len(),
+            MAX_PENDING_REFUNDS,
+            "cap must hold",
+        );
+        assert!(state.take_pending_refund(0).is_none(), "oldest record dropped at cap");
+    }
+
+    #[test]
+    fn ic_s_001_state_v1_snapshot_decodes_with_empty_pending_refunds() {
+        // Pre-IC-S-001 snapshot bytes (no pending_refunds / next_pending_refund_id)
+        // must decode without losing positions; pending refunds start empty.
+        let mut current = test_state();
+        add_deposit_direct(&mut current, user_a(), icusd_ledger(), 42_00000000);
+        let v1 = StabilityPoolStateV1 {
+            deposits: current.deposits.clone(),
+            total_stablecoin_balances: current.total_stablecoin_balances.clone(),
+            stablecoin_registry: current.stablecoin_registry.clone(),
+            collateral_registry: current.collateral_registry.clone(),
+            protocol_canister_id: current.protocol_canister_id,
+            configuration: current.configuration.clone(),
+            liquidation_history: current.liquidation_history.clone(),
+            in_flight_liquidations: current.in_flight_liquidations.clone(),
+            total_liquidations_executed: current.total_liquidations_executed,
+            pool_creation_timestamp: current.pool_creation_timestamp,
+            total_interest_received_e8s: current.total_interest_received_e8s,
+            token_consecutive_failures: current.token_consecutive_failures.clone(),
+            cached_virtual_prices: current.cached_virtual_prices.clone(),
+            protocol_reserve_address: current.protocol_reserve_address,
+            is_initialized: current.is_initialized,
+            pool_events: current.pool_events.clone(),
+            next_event_id: current.next_event_id,
+        };
+        let bytes = Encode!(&v1).expect("encode v1 snapshot");
+
+        let decoded = try_decode_state(&bytes).expect("v1 snapshot must decode");
+        assert_eq!(
+            decoded.deposits.get(&user_a())
+                .and_then(|p| p.stablecoin_balances.get(&icusd_ledger()).copied()),
+            Some(42_00000000),
+            "depositor positions must survive the v1 fallback",
+        );
+        assert!(
+            decoded.pending_refunds.clone().unwrap_or_default().is_empty(),
+            "pending refunds must start empty after a v1 upgrade",
+        );
+        assert_eq!(decoded.next_pending_refund_id.unwrap_or(0), 0);
+    }
+
+    // ─── Test: Opt-out mid-liquidation burn escape (audit AR-S-002) ───
+
+    #[test]
+    fn ar_s_002_opt_out_mid_liquidation_escapes_burn() {
+        // Demonstrates WHY opt_in/opt_out must reject while a liquidation holds
+        // the SP guard: an opt-out landing between the draw snapshot and the
+        // burn apportionment escapes its share of the burn entirely while the
+        // opted-in remainder over-absorbs. The endpoint-level fix gates
+        // opt_in_collateral / opt_out_collateral on
+        // pool_guard::liquidation_in_progress() (SystemBusy), so this state
+        // sequence is no longer reachable through the canister interface.
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 50_00000000);
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 50_00000000);
+
+        // Liquidation snapshot: both users opted in, draw 40 icUSD of debt.
+        let draw = state.compute_token_draw(40_00000000, &icp_ledger());
+        assert_eq!(draw.get(&icusd_ledger()).copied(), Some(40_00000000));
+
+        // Mid-flight mutation (what AR-S-002 blocks): user_b opts out while
+        // the liquidation awaits the backend.
+        state.opt_out_collateral(&user_b(), icp_ledger()).unwrap();
+
+        state.process_liquidation_gains_at(
+            1, icp_ledger(), &draw, 10_00000000, 7_50000000, 1_000_000_000,
+        );
+
+        // user_b escaped the burn entirely (balance untouched, no gains)...
+        let pos_b = state.deposits.get(&user_b()).unwrap();
+        assert_eq!(
+            pos_b.stablecoin_balances.get(&icusd_ledger()).copied(),
+            Some(50_00000000),
+            "opt-out mid-liquidation escapes the burn",
+        );
+        assert_eq!(pos_b.collateral_gains.get(&icp_ledger()).copied().unwrap_or(0), 0);
+
+        // ...while user_a absorbed the FULL 40 instead of their fair 20.
+        let pos_a = state.deposits.get(&user_a()).unwrap();
+        assert_eq!(
+            pos_a.stablecoin_balances.get(&icusd_ledger()).copied(),
+            Some(10_00000000),
+            "remaining depositor over-absorbs the escaped share",
+        );
     }
 }

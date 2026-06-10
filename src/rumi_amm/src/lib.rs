@@ -199,6 +199,12 @@ struct GetTransactionsResponse {
     transactions: Vec<Transaction>,
 }
 
+/// Server-side cap on entries returned per event-history page. Matches the
+/// SAT-006 `icrc3_get_blocks` bound. Audit 2026-06-09 (DOS-001): these query
+/// endpoints previously honored an uncapped caller-supplied length, allowing
+/// reply-size DoS.
+pub(crate) const MAX_EVENT_PAGE: u64 = 2_000;
+
 /// 24-hour interval in seconds.
 const SNAPSHOT_INTERVAL_SECS: u64 = 86_400;
 /// Max holders to store per snapshot.
@@ -788,6 +794,19 @@ async fn claim_pending(claim_id: u64) -> Result<(), AmmError> {
     let claim_claimant = claim.claimant;
     let claim_amount = claim.amount;
 
+    // Audit 2026-06-09 (IC-S-003): transfer_to_user silently skips sends of
+    // amount <= ledger fee, which would consume the claim with nothing
+    // received. Keep the claim and return a clear error; it becomes payable
+    // again if the ledger fee ever drops below the claim amount.
+    let fee = crate::transfers::ledger_fee(claim.token).await;
+    if claim.amount <= fee {
+        mutate_state(|s| s.pending_claims.push(claim));
+        return Err(AmmError::BelowMinClaim {
+            claimable: claim_amount,
+            min: fee.saturating_add(1),
+        });
+    }
+
     match transfer_to_user(claim.token, claim.subaccount, claim.claimant, claim.amount).await {
         Ok(_) => {
             log!(INFO, "Pending claim #{} resolved: {} received {} of token {}",
@@ -873,9 +892,13 @@ async fn swap(
     // taker receive up to one ledger fee less than `min_amount_out`. The fee
     // lookup is cached (the transfer below reuses it), so this adds no real cost.
     let net_out = amount_out.saturating_sub(crate::transfers::ledger_fee(ledger_out).await);
-    if net_out < min_amount_out {
+    // Audit 2026-06-09 (IC-S-003): a zero NET output means transfer_to_user
+    // would skip the send entirely (amount_out <= ledger fee) while the input
+    // is still pulled and reserves credited, silently consuming the input for
+    // nothing. Require a positive net output regardless of min_amount_out.
+    if net_out == 0 || net_out < min_amount_out {
         return Err(AmmError::InsufficientOutput {
-            expected_min: min_amount_out,
+            expected_min: min_amount_out.max(1),
             actual: net_out,
         });
     }
@@ -1162,6 +1185,12 @@ async fn remove_liquidity(
     // Fee lookups are cached (the transfers below reuse them).
     let net_a = amount_a.saturating_sub(crate::transfers::ledger_fee(token_a).await);
     let net_b = amount_b.saturating_sub(crate::transfers::ledger_fee(token_b).await);
+    // Audit 2026-06-09 (IC-S-003): a payable leg that nets to zero would be
+    // silently consumed (shares burned, reserves debited, nothing sent).
+    // Reject the whole removal up front, before the LP burn.
+    if (amount_a > 0 && net_a == 0) || (amount_b > 0 && net_b == 0) {
+        return Err(AmmError::InsufficientOutput { expected_min: 1, actual: 0 });
+    }
     if net_a < min_amount_a || net_b < min_amount_b {
         return Err(AmmError::InsufficientOutput {
             expected_min: min_amount_a.max(min_amount_b),
@@ -1326,7 +1355,7 @@ fn health() -> String {
 fn get_amm_swap_events(start: u64, length: u64) -> Vec<AmmSwapEvent> {
     read_state(|s| {
         let start = start as usize;
-        let length = length as usize;
+        let length = length.min(MAX_EVENT_PAGE) as usize;
         if start >= s.swap_events.len() {
             return vec![];
         }
@@ -1346,7 +1375,7 @@ fn get_amm_swap_event_count() -> u64 {
 fn get_amm_liquidity_events(start: u64, length: u64) -> Vec<AmmLiquidityEvent> {
     read_state(|s| {
         let start = start as usize;
-        let length = length as usize;
+        let length = length.min(MAX_EVENT_PAGE) as usize;
         if start >= s.liquidity_events.len() {
             return vec![];
         }
@@ -1366,7 +1395,7 @@ fn get_amm_liquidity_event_count() -> u64 {
 fn get_amm_admin_events(start: u64, length: u64) -> Vec<AmmAdminEvent> {
     read_state(|s| {
         let start = start as usize;
-        let length = length as usize;
+        let length = length.min(MAX_EVENT_PAGE) as usize;
         if start >= s.admin_events.len() {
             return vec![];
         }
@@ -1390,7 +1419,7 @@ fn get_holder_snapshots(token: String, start: u64, length: u64) -> Vec<HolderSna
             .filter(|snap| snap.token == token)
             .collect();
         let start = start as usize;
-        let length = length as usize;
+        let length = length.min(MAX_EVENT_PAGE) as usize;
         if start >= filtered.len() {
             return vec![];
         }
@@ -1571,5 +1600,64 @@ fn http_request(req: HttpRequest) -> HttpResponse {
                 .with_body_and_content_length("Not found")
                 .build()
         }
+    }
+}
+
+// ─── Tests ───
+
+#[cfg(test)]
+mod dos_001_tests {
+    use super::*;
+
+    fn dummy_swap_event(i: u64, pool: &str, who: Principal) -> AmmSwapEvent {
+        AmmSwapEvent {
+            id: i,
+            caller: who,
+            pool_id: pool.to_string(),
+            token_in: Principal::anonymous(),
+            amount_in: 1,
+            token_out: Principal::anonymous(),
+            amount_out: 1,
+            fee: 0,
+            timestamp: i,
+        }
+    }
+
+    #[test]
+    fn dos_001_event_queries_clamped_to_max_page() {
+        // Audit 2026-06-09 (DOS-001): a huge caller-supplied length must
+        // return at most MAX_EVENT_PAGE entries, not the whole history.
+        let who = Principal::self_authenticating(&[42]);
+        let pool = "dos001-pool";
+        let total = MAX_EVENT_PAGE + 100;
+        mutate_state(|s| {
+            for i in 0..total {
+                s.swap_events.push(dummy_swap_event(i, pool, who));
+            }
+        });
+
+        assert_eq!(
+            get_amm_swap_events(0, u64::MAX).len() as u64,
+            MAX_EVENT_PAGE
+        );
+        // In-cap requests are unaffected.
+        assert_eq!(get_amm_swap_events(0, 5).len(), 5);
+
+        // The analytics by-principal and time-range variants share the cap.
+        let by_principal = analytics::get_swap_events_by_principal(AmmEventsByPrincipalQuery {
+            pool: pool.to_string(),
+            who,
+            start: 0,
+            length: u64::MAX,
+        });
+        assert_eq!(by_principal.len() as u64, MAX_EVENT_PAGE);
+
+        let by_time = analytics::get_swap_events_by_time_range(AmmEventsByTimeRangeQuery {
+            pool: pool.to_string(),
+            start_ns: 0,
+            end_ns: u64::MAX,
+            limit: u64::MAX,
+        });
+        assert_eq!(by_time.len() as u64, MAX_EVENT_PAGE);
     }
 }

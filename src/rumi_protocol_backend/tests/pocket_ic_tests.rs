@@ -1691,11 +1691,30 @@ fn test_redeem_icp() {
     log(&format!("👤 Test user: {}", test_user));
     
     // Step 1: Create a vault with ICP collateral and borrow against it
-    // so there's ICP in the protocol to redeem against
+    // so there's ICP in the protocol AND redeemable vault debt to redeem
+    // against. RED-001 (audit 2026-06-09) rejects redemptions that exceed the
+    // protocol's redeemable vault debt, so the vault must actually carry debt
+    // (the original helper opened a zero-debt vault, which is the unbacked
+    // over-payout scenario the fix closes).
     let initial_margin = 10_000_000_000u64; // 100 ICP
     let vault_id = create_test_vault(&pic, protocol_id, icp_ledger_id, test_user, initial_margin).unwrap();
     log(&format!("🏦 Created vault with ID: {}", vault_id));
-    
+
+    // Borrow 100 icUSD so the protocol has >= the 50 icUSD redemption's worth
+    // of redeemable debt.
+    let borrow_arg = VaultArg { vault_id, amount: 10_000_000_000u64 };
+    let borrow_result = pic
+        .update_call(protocol_id, test_user, "borrow_from_vault", encode_args((borrow_arg,)).unwrap())
+        .expect("borrow_from_vault call failed");
+    match borrow_result {
+        WasmResult::Reply(bytes) => {
+            let r: Result<rumi_protocol_backend::SuccessWithFee, ProtocolError> =
+                decode_one(&bytes).expect("decode borrow");
+            r.expect("borrow_from_vault returned error");
+        }
+        WasmResult::Reject(e) => panic!("borrow_from_vault rejected: {}", e),
+    }
+
     // Step 2: Get initial ICP balance for later comparison
     let initial_icp_balance = get_icp_balance(&pic, icp_ledger_id, test_user);
     log(&format!("💰 Initial ICP balance: {}", initial_icp_balance));

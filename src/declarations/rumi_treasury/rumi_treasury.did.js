@@ -68,6 +68,7 @@ export const idlFactory = ({ IDL }) => {
   });
   const WithdrawArgs = IDL.Record({
     'to' : IDL.Principal,
+    'request_id' : IDL.Opt(IDL.Nat64),
     'asset_type' : AssetType,
     'memo' : IDL.Opt(IDL.Text),
     'amount' : IDL.Nat64,

@@ -67,15 +67,16 @@ struct TEpochStatus {
     snapshot_seed_committed: bool,
 }
 
-// Public open-epoch view: bounds + snapshot times only, NO capture/close cursors
-// (POINTS-001). This is what the anonymous `get_epoch_status` returns.
+// Public open-epoch view: bounds only, NO capture/close cursors (POINTS-001);
+// each snapshot time is `None` until it has fired (PTS-002). This is what the
+// anonymous `get_epoch_status` returns.
 #[derive(CandidType, Deserialize)]
 struct TPublicOpenEpoch {
     epoch_index: u64,
     epoch_start_ns: u64,
     epoch_end_ns: u64,
-    snapshot_a_ns: u64,
-    snapshot_b_ns: u64,
+    snapshot_a_ns: Option<u64>,
+    snapshot_b_ns: Option<u64>,
 }
 
 #[derive(CandidType, Deserialize)]
@@ -520,19 +521,28 @@ fn public_epoch_status_hides_cursors_and_admin_view_is_gated() {
     start_season_ok(&pic, rp, SEASON_SEED);
     admin_ok(&pic, rp, "set_epoch_driver_enabled", Encode!(&false).unwrap());
 
-    // Capture A so the admin view has a non-trivial cursor to expose.
     let oe = epoch_status(&pic, rp).open_epoch.unwrap();
+
+    // PTS-002: while both snapshot times are in the FUTURE the public view hides
+    // them (a future time IS the flash-deposit snipe target).
+    let poe = public_epoch_status(&pic, rp).open_epoch.expect("epoch 0 is open");
+    assert_eq!(poe.epoch_index, 0);
+    assert_eq!(poe.snapshot_a_ns, None, "future snapshot A must be hidden");
+    assert_eq!(poe.snapshot_b_ns, None, "future snapshot B must be hidden");
+
+    // Capture A so the admin view has a non-trivial cursor to expose.
     set_time_ns(&pic, oe.snapshot_a_ns);
     force_tick(&pic, rp);
 
     // The PUBLIC query (anonymous caller) decodes into PublicEpochStatus, whose
-    // open epoch has bounds + snapshot times but NO cursor/complete fields. The
-    // decode itself proves the wire shape carries no cursors.
+    // open epoch has bounds but NO cursor/complete fields. The decode itself
+    // proves the wire shape carries no cursors. A has fired (now >= a) so it is
+    // revealed; B is still in the future and stays hidden (PTS-002).
     let pub_status = public_epoch_status(&pic, rp);
     let poe = pub_status.open_epoch.expect("epoch 0 is open");
     assert_eq!(poe.epoch_index, 0);
-    assert_eq!(poe.snapshot_a_ns, oe.snapshot_a_ns);
-    assert_eq!(poe.snapshot_b_ns, oe.snapshot_b_ns);
+    assert_eq!(poe.snapshot_a_ns, Some(oe.snapshot_a_ns), "fired snapshot A is revealed");
+    assert_eq!(poe.snapshot_b_ns, None, "future snapshot B stays hidden");
 
     // The ADMIN query is admin-gated: an anonymous caller is rejected (trap).
     let denied = pic.query_call(

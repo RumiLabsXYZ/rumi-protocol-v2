@@ -98,6 +98,17 @@ type PoolLiquidationRecord = record {
   collateral_price_e8s : opt nat64;
 };
 
+// ── Pending refund recovery (audit IC-S-001) ──
+
+type PendingRefund = record {
+  id : nat64;
+  user : principal;
+  token_ledger : principal;
+  amount : nat64;
+  reason : text;
+  created_at : nat64;
+};
+
 // ── Error type ──
 
 type StabilityPoolError = variant {
@@ -116,6 +127,7 @@ type StabilityPoolError = variant {
   SystemBusy;
   AlreadyOptedOut : record { collateral : principal };
   AlreadyOptedIn : record { collateral : principal };
+  RefundClaimNotFound;
 };
 
 // ── ICRC-21: Canister Call Consent Messages ──
@@ -228,6 +240,7 @@ service : (StabilityPoolInitArgs) -> {
   deposit_as_3usd : (principal, nat64) -> (variant { Ok : nat64; Err : StabilityPoolError });
   claim_collateral : (principal) -> (variant { Ok : nat64; Err : StabilityPoolError });
   claim_all_collateral : () -> (variant { Ok : vec record { principal; nat64 }; Err : StabilityPoolError });
+  claim_pending_refund : (nat64) -> (variant { Ok : nat64; Err : StabilityPoolError });
 
   // ── Opt-in / Opt-out ──
   opt_out_collateral : (principal) -> (variant { Ok; Err : StabilityPoolError });
@@ -267,4 +280,5 @@ service : (StabilityPoolInitArgs) -> {
   get_pool_events : (nat64, nat64) -> (vec PoolEvent) query;
   get_pool_event_count : () -> (nat64) query;
   list_depositor_principals : () -> (vec principal) query;
+  get_pending_refunds : (opt principal) -> (vec PendingRefund) query;
 };

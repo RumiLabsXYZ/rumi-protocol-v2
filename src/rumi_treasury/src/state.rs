@@ -11,6 +11,8 @@ type Memory = VirtualMemory<DefaultMemoryImpl>;
 //   MemoryId 0 → StableBTreeMap<u64, DepositRecord>  (deposit log)
 //   MemoryId 1 → StableCell<TreasuryConfig>           (ledger principals, paused flag)
 //   MemoryId 2 → StableCell<BalancesSnapshot>          (asset balances — survives upgrades)
+//   MemoryId 3 → StableBTreeMap<u64, TreasuryEvent>   (event log)
+//   MemoryId 4 → StableBTreeMap<u64, u64>             (request_id → first-attempt created_at_time)
 
 /// Treasury state that persists across upgrades
 pub struct TreasuryState {
@@ -28,6 +30,10 @@ pub struct TreasuryState {
     pub events: StableBTreeMap<u64, TreasuryEvent, Memory>,
     /// Next available event ID
     pub next_event_id: u64,
+    /// First-attempt `created_at_time` per withdrawal `request_id` (ICRC-003).
+    /// Persisted so a retry after an upgrade still reuses the original
+    /// timestamp and hits the ledger's dedup window.
+    pub withdrawal_created_at: StableBTreeMap<u64, u64, Memory>,
 }
 
 /// Treasury configuration stored in stable memory
@@ -150,6 +156,7 @@ impl TreasuryState {
                 next_deposit_id: 1,
                 events: StableBTreeMap::init(memory_manager.get(MemoryId::new(3))),
                 next_event_id: 1,
+                withdrawal_created_at: StableBTreeMap::init(memory_manager.get(MemoryId::new(4))),
             }
         })
     }
@@ -255,6 +262,40 @@ impl TreasuryState {
             balance.available += amount;
         }
         self.persist_balances();
+    }
+
+    /// ICRC-003: the `created_at_time` to use for this withdrawal request.
+    /// The first attempt's timestamp is persisted per `request_id` and reused
+    /// on retries so the ledger's `(created_at_time, memo, ...)` dedup
+    /// actually fires. Entries older than the ledger dedup window can no
+    /// longer dedup (the original transaction has expired), so they are
+    /// replaced with `now`; expired entries are pruned to bound growth.
+    pub fn created_at_time_for_request(&mut self, request_id: u64, now: u64) -> u64 {
+        // ICP/ICRC ledgers keep transactions for dedup for 24 hours.
+        const LEDGER_DEDUP_WINDOW_NANOS: u64 = 24 * 60 * 60 * 1_000_000_000;
+        let cutoff = now.saturating_sub(LEDGER_DEDUP_WINDOW_NANOS);
+        // Withdrawals are controller-only and rare, so a full scan is cheap.
+        let expired: Vec<u64> = self
+            .withdrawal_created_at
+            .iter()
+            .filter(|(_, t)| *t < cutoff)
+            .map(|(id, _)| id)
+            .collect();
+        for id in expired {
+            self.withdrawal_created_at.remove(&id);
+        }
+        if let Some(t) = self.withdrawal_created_at.get(&request_id) {
+            return t;
+        }
+        self.withdrawal_created_at.insert(request_id, now);
+        now
+    }
+
+    /// Drop the persisted `created_at_time` for a request whose timestamp the
+    /// ledger rejected (TooOld/CreatedInFuture), so the next attempt gets a
+    /// fresh one instead of failing forever.
+    pub fn clear_request_created_at(&mut self, request_id: u64) {
+        self.withdrawal_created_at.remove(&request_id);
     }
 
     // ------------------------------------------------------------------
@@ -375,6 +416,10 @@ pub fn restore_state() {
             let max_event_id = events.iter().map(|(id, _)| id).last().unwrap_or(0);
             let next_event_id = if max_event_id > 0 { max_event_id + 1 } else { 1 };
 
+            // Re-open withdrawal created_at_time map (MemoryId 4)
+            let withdrawal_created_at: StableBTreeMap<u64, u64, Memory> =
+                StableBTreeMap::init(memory_manager.get(MemoryId::new(4)));
+
             *s.borrow_mut() = Some(TreasuryState {
                 deposits,
                 balances,
@@ -383,6 +428,7 @@ pub fn restore_state() {
                 next_deposit_id,
                 events,
                 next_event_id,
+                withdrawal_created_at,
             });
         });
     });

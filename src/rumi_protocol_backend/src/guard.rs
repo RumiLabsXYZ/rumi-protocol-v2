@@ -164,8 +164,9 @@ impl Drop for GuardPrincipal {
 }
 
 thread_local! {
-    /// Vault ids with a liquidation currently in flight. Transient (heap):
-    /// in-flight liquidations never span a canister upgrade, and ic-cdk's
+    /// Vault ids with a vault-mutating operation (liquidation OR owner
+    /// write-op) currently in flight across an `await`. Transient (heap):
+    /// in-flight operations never span a canister upgrade, and ic-cdk's
     /// `call_on_cleanup` runs this guard's `Drop` even when a post-`await`
     /// continuation traps, so the entry is always released. Same pattern the
     /// 3pool/amm `PoolGuard`s use.
@@ -173,9 +174,20 @@ thread_local! {
         std::cell::RefCell::new(std::collections::HashSet::new());
 }
 
-/// Per-vault liquidation lock. Serializes EVERY liquidator (any caller — two
-/// humans, the stability pool, a human + the SP) on a single vault across the
-/// snapshot -> pull-icUSD -> re-cap -> collateral-payout sequence.
+/// True while a `VaultLiquidationGuard` is held for `vault_id`. Used by the
+/// redemption water-fill (AR-B-001, audit 2026-06-09) to skip vaults that a
+/// liquidation or owner write-op is mid-flight on: redemption is synchronous,
+/// so by skipping locked vaults it can never interleave between another
+/// operation's pre-`await` snapshot and its post-`await` commit.
+pub fn is_vault_liquidating(vault_id: u64) -> bool {
+    LIQUIDATING_VAULTS.with(|set| set.borrow().contains(&vault_id))
+}
+
+/// Per-vault operation lock. Serializes EVERY vault-mutating flow that spans
+/// an `await` (any liquidator — two humans, the stability pool, a human + the
+/// SP — and, since the 2026-06-09 audit, owner write-ops: borrow, repay,
+/// partial-withdraw, add-margin, close) on a single vault across the
+/// snapshot -> external-call -> re-cap -> payout/commit sequence.
 ///
 /// BK-001/002 (audit 2026-06-05): `GuardPrincipal` keys on the CALLER, so two
 /// different liquidators racing the same vault both pass it. Each snapshots the
@@ -186,12 +198,20 @@ thread_local! {
 /// collateral pool — draining other vaults' backing. Keying the lock on
 /// `vault_id` (not the caller) makes the whole sequence atomic per vault and
 /// closes the economic over-seize the re-cap alone left open.
+///
+/// AR-B-003 (audit 2026-06-09): the same race exists between a liquidation and
+/// an OWNER write-op (repay / partial-withdraw / borrow), whose post-`await`
+/// commits asserted the pre-`await` snapshot still held — trapping after an
+/// irreversible transfer, or over-paying from the shared pool. Owner write-ops
+/// now hold this lock too, so liquidation-vs-user-op interleavings on one vault
+/// are excluded, and the redemption water-fill skips locked vaults
+/// (`is_vault_liquidating`).
 #[must_use]
 pub struct VaultLiquidationGuard(u64);
 
 impl VaultLiquidationGuard {
-    /// Acquire the liquidation lock for `vault_id`. Returns
-    /// `TemporarilyUnavailable` if another liquidation of the same vault is in
+    /// Acquire the operation lock for `vault_id`. Returns
+    /// `TemporarilyUnavailable` if another operation on the same vault is in
     /// flight; the caller should back off (the stability pool, per project
     /// rule, must NOT retry — it falls through to manual, which is correct).
     pub fn new(vault_id: u64) -> Result<Self, crate::ProtocolError> {
@@ -199,7 +219,7 @@ impl VaultLiquidationGuard {
             let mut set = set.borrow_mut();
             if set.contains(&vault_id) {
                 return Err(crate::ProtocolError::TemporarilyUnavailable(format!(
-                    "Vault #{vault_id} is already being liquidated; retry shortly"
+                    "Another operation on vault #{vault_id} is in flight; retry shortly"
                 )));
             }
             set.insert(vault_id);

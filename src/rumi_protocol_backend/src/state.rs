@@ -2612,11 +2612,26 @@ impl State {
                 let factor = Decimal::ONE
                     + rate.0 * Decimal::from(elapsed)
                         / Decimal::from(crate::numeric::NANOS_PER_YEAR);
-                let new_debt = (debt * factor).to_u64().unwrap_or(vault.borrowed_icusd_amount.0);
-                let interest_delta = new_debt.saturating_sub(vault.borrowed_icusd_amount.0);
-                vault.accrued_interest += ICUSD::from(interest_delta);
-                vault.borrowed_icusd_amount = ICUSD::from(new_debt);
-                vault.last_accrual_time = now_nanos;
+                // DBT-001 (audit 2026-06-09): interest accrues rounded UP
+                // (protocol favor, CDP convention). INT-102: on a Decimal->u64
+                // overflow (unreachable at real debt scales) do NOT advance the
+                // accrual clock, so the interest is retried instead of being
+                // silently dropped while the clock moves on.
+                match (debt * factor).ceil().to_u64() {
+                    Some(new_debt) => {
+                        let interest_delta = new_debt.saturating_sub(vault.borrowed_icusd_amount.0);
+                        vault.accrued_interest += ICUSD::from(interest_delta);
+                        vault.borrowed_icusd_amount = ICUSD::from(new_debt);
+                        vault.last_accrual_time = now_nanos;
+                    }
+                    None => {
+                        log!(
+                            crate::INFO,
+                            "[accrue_single_vault] interest overflow for vault #{}; accrual deferred",
+                            vault_id
+                        );
+                    }
+                }
             }
         }
     }
@@ -2658,11 +2673,23 @@ impl State {
                 let factor = Decimal::ONE
                     + rate.0 * Decimal::from(elapsed)
                         / Decimal::from(crate::numeric::NANOS_PER_YEAR);
-                let new_debt = (debt * factor).to_u64().unwrap_or(vault.borrowed_icusd_amount.0);
-                let interest_delta = new_debt.saturating_sub(vault.borrowed_icusd_amount.0);
-                vault.accrued_interest += ICUSD::from(interest_delta);
-                vault.borrowed_icusd_amount = ICUSD::from(new_debt);
-                vault.last_accrual_time = now_nanos;
+                // DBT-001 / INT-102: round UP, defer on overflow (see
+                // accrue_single_vault).
+                match (debt * factor).ceil().to_u64() {
+                    Some(new_debt) => {
+                        let interest_delta = new_debt.saturating_sub(vault.borrowed_icusd_amount.0);
+                        vault.accrued_interest += ICUSD::from(interest_delta);
+                        vault.borrowed_icusd_amount = ICUSD::from(new_debt);
+                        vault.last_accrual_time = now_nanos;
+                    }
+                    None => {
+                        log!(
+                            crate::INFO,
+                            "[accrue_all_vault_interest] interest overflow for vault #{}; accrual deferred",
+                            vault_id
+                        );
+                    }
+                }
             }
         }
     }
@@ -3411,8 +3438,21 @@ impl State {
     pub fn remove_margin_from_vault(&mut self, vault_id: u64, amount: ICP) {
         match self.vault_id_to_vaults.get_mut(&vault_id) {
             Some(vault) => {
-                assert!(amount.to_u64() <= vault.collateral_amount);
-                vault.collateral_amount -= amount.to_u64();
+                // AR-B-003: this commit runs AFTER the collateral transfer's
+                // `await`, so trapping here would keep the vault books
+                // un-debited while the user already holds the funds (phantom
+                // collateral paid out again on a later seizure). The per-vault
+                // op lock makes a concurrent reduction unreachable; saturate
+                // instead of asserting so any residual drift degrades to
+                // under-reduction, never a trap-after-transfer.
+                if amount.to_u64() > vault.collateral_amount {
+                    log!(
+                        crate::INFO,
+                        "[remove_margin_from_vault] clamp: vault #{} collateral {} < withdraw {}",
+                        vault_id, vault.collateral_amount, amount.to_u64()
+                    );
+                }
+                vault.collateral_amount = vault.collateral_amount.saturating_sub(amount.to_u64());
             }
             None => ic_cdk::trap("removing margin from unknown vault"),
         }
@@ -3425,7 +3465,13 @@ impl State {
     pub fn repay_to_vault(&mut self, vault_id: u64, repayed_amount: ICUSD) -> (ICUSD, ICUSD) {
         let result = match self.vault_id_to_vaults.get_mut(&vault_id) {
             Some(vault) => {
-                assert!(repayed_amount <= vault.borrowed_icusd_amount);
+                // AR-B-003: this commit runs AFTER the icUSD pull's `await`;
+                // trapping here would strand the pulled icUSD with no debt
+                // credit. The per-vault op lock makes a concurrent debt
+                // reduction unreachable (interest accrual only grows debt);
+                // clamp instead of asserting so any residual drift degrades
+                // to a smaller applied repayment, never a trap-after-pull.
+                let repayed_amount = repayed_amount.min(vault.borrowed_icusd_amount);
                 let interest_share = if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
                     let share = (rust_decimal::Decimal::from(repayed_amount.0)
                         * rust_decimal::Decimal::from(vault.accrued_interest.0)
@@ -3444,8 +3490,8 @@ impl State {
                 // `.min(repayed_amount)` cap above this can never under-flow
                 // in practice, but the saturating form documents the contract.
                 let principal_share = repayed_amount.saturating_sub(interest_share);
-                vault.borrowed_icusd_amount -= repayed_amount;
-                vault.accrued_interest -= interest_share;
+                vault.borrowed_icusd_amount = vault.borrowed_icusd_amount.saturating_sub(repayed_amount);
+                vault.accrued_interest = vault.accrued_interest.saturating_sub(interest_share);
                 (interest_share, principal_share)
             }
             None => ic_cdk::trap("repaying to unknown vault"),
@@ -3913,6 +3959,19 @@ impl State {
             if vault.borrowed_icusd_amount == 0 {
                 continue; // skip zero-debt vaults
             }
+            // AR-B-001 (audit 2026-06-09): a vault the liquidation bot has
+            // claimed but not yet confirmed (collateral already paid to the
+            // bot, write-down deferred) or that another operation holds the
+            // per-vault lock on MUST NOT be redeemed against: the water-fill
+            // would seize collateral that was already paid out (double-seize
+            // from the shared pool) or invalidate an in-flight operation's
+            // snapshot. Mirrors the `check_vaults` bot_processing skip.
+            // Replay stays exact because `RedemptionOnVaults` replay applies
+            // the event's stored `vault_redemptions` instead of re-running
+            // this scan (see `apply_vault_redemptions`).
+            if vault.bot_processing || crate::guard::is_vault_liquidating(vault.vault_id) {
+                continue;
+            }
             let vault_ct = if vault.collateral_type == Principal::anonymous() {
                 self.icp_ledger_principal
             } else {
@@ -4085,6 +4144,64 @@ impl State {
     /// full claim, but only this much collateral actually came out of the
     /// vault. The difference is bad debt (now routed via
     /// `record_deficit_accrued`).
+    /// Total debt currently redeemable against `collateral_type`, using the
+    /// SAME eligibility filter as `redeem_on_vaults` (skips zero-debt vaults,
+    /// bot-claimed vaults, and vaults under the per-vault op lock).
+    ///
+    /// RED-001 (audit 2026-06-09): `redeem_collateral` rejects up front any
+    /// claim whose effective amount exceeds this, so a redemption can no
+    /// longer burn icUSD it cannot consume (the residual race between this
+    /// check and the post-pull water-fill is covered by the unconsumed-icUSD
+    /// refund).
+    pub fn total_redeemable_debt_for(&self, collateral_type: &CollateralType) -> ICUSD {
+        let resolved_ct = if collateral_type == &Principal::anonymous() {
+            self.icp_ledger_principal
+        } else {
+            *collateral_type
+        };
+        let mut total = ICUSD::new(0);
+        for vault in self.vault_id_to_vaults.values() {
+            if vault.borrowed_icusd_amount == 0 {
+                continue;
+            }
+            if vault.bot_processing || crate::guard::is_vault_liquidating(vault.vault_id) {
+                continue;
+            }
+            let vault_ct = if vault.collateral_type == Principal::anonymous() {
+                self.icp_ledger_principal
+            } else {
+                vault.collateral_type
+            };
+            if vault_ct != resolved_ct {
+                continue;
+            }
+            total += vault.borrowed_icusd_amount;
+        }
+        total
+    }
+
+    /// Replay-exact application of a redemption's per-vault outcomes.
+    ///
+    /// AR-B-001/RED-001 (audit 2026-06-09): live execution records the actual
+    /// per-vault `VaultRedemption` outcomes in the `RedemptionOnVaults` event.
+    /// Replay applies those stored outcomes directly instead of re-running
+    /// `redeem_on_vaults`, because the live scan's eligibility now depends on
+    /// transient facts (the per-vault op lock, `bot_processing` at that
+    /// moment) that a replay cannot reconstruct. Vaults that vanished from a
+    /// replayed state (later full liquidation) are skipped, matching the
+    /// saturating tolerance of the legacy replay path.
+    pub fn apply_vault_redemptions(&mut self, vault_redemptions: &[crate::event::VaultRedemption]) {
+        for vr in vault_redemptions {
+            if self.vault_id_to_vaults.contains_key(&vr.vault_id) {
+                let _ = self.deduct_amount_from_vault(
+                    vr.collateral_seized,
+                    ICUSD::from(vr.icusd_redeemed_e8s),
+                    vr.vault_id,
+                );
+            }
+        }
+    }
+
     fn deduct_amount_from_vault(
         &mut self,
         collateral_to_deduct: u64,
@@ -4960,13 +5077,14 @@ mod tests {
         let vault_after = state.vault_id_to_vaults.get(&1).unwrap();
         // At 300% CR (above healthy 225%): multiplier = 1.0x
         // rate = 5% × 1.0 = 5%
-        // After 1 year: debt = 500_000_000 × 1.05 = 525_000_000
-        assert_eq!(vault_after.borrowed_icusd_amount.0, 525_000_000,
-            "After 1 year at 5%, 500M should become 525M, got {}",
+        // After 1 year: debt = 500_000_000 × 1.05 = 525_000_000, plus at most
+        // one e8s unit of DBT-001 ceil rounding (protocol favor).
+        assert!((525_000_000..=525_000_001).contains(&vault_after.borrowed_icusd_amount.0),
+            "After 1 year at 5%, 500M should become 525M (+<=1 ceil unit), got {}",
             vault_after.borrowed_icusd_amount.0);
         assert_eq!(vault_after.last_accrual_time, one_year_nanos);
-        assert_eq!(vault_after.accrued_interest.0, 25_000_000,
-            "accrued_interest should track the 25M delta, got {}", vault_after.accrued_interest.0);
+        assert!((25_000_000..=25_000_001).contains(&vault_after.accrued_interest.0),
+            "accrued_interest should track the 25M delta (+<=1 ceil unit), got {}", vault_after.accrued_interest.0);
     }
 
     #[test]
@@ -4989,10 +5107,11 @@ mod tests {
         state.accrue_single_vault(1, crate::numeric::NANOS_PER_YEAR);
 
         let vault = state.vault_id_to_vaults.get(&1).unwrap();
-        assert_eq!(vault.borrowed_icusd_amount.0, 525_000_000);
-        // 10M pre-existing + 25M new delta = 35M
-        assert_eq!(vault.accrued_interest.0, 35_000_000,
-            "accrued_interest should be 10M + 25M = 35M, got {}", vault.accrued_interest.0);
+        // DBT-001: ceil rounding may add one e8s unit (protocol favor).
+        assert!((525_000_000..=525_000_001).contains(&vault.borrowed_icusd_amount.0));
+        // 10M pre-existing + 25M new delta = 35M (+<=1 ceil unit)
+        assert!((35_000_000..=35_000_001).contains(&vault.accrued_interest.0),
+            "accrued_interest should be 10M + 25M = 35M (+<=1), got {}", vault.accrued_interest.0);
     }
 
     #[test]
@@ -5088,15 +5207,16 @@ mod tests {
         state.accrue_all_vault_interest(one_year);
 
         // Vault 1 (300% CR, above healthy): multiplier = 1.0x, rate = 5%
+        // DBT-001: ceil rounding may add one e8s unit (protocol favor).
         let v1 = state.vault_id_to_vaults.get(&1).unwrap();
-        assert_eq!(v1.borrowed_icusd_amount.0, 525_000_000,
-            "Vault 1 expected 525M, got {}", v1.borrowed_icusd_amount.0);
+        assert!((525_000_000..=525_000_001).contains(&v1.borrowed_icusd_amount.0),
+            "Vault 1 expected ~525M (+<=1 ceil unit), got {}", v1.borrowed_icusd_amount.0);
         assert_eq!(v1.last_accrual_time, one_year);
 
         // Vault 2 (400% CR, well above healthy): multiplier = 1.0x, rate = 5%
         let v2 = state.vault_id_to_vaults.get(&2).unwrap();
-        assert_eq!(v2.borrowed_icusd_amount.0, 525_000_000,
-            "Vault 2 expected 525M, got {}", v2.borrowed_icusd_amount.0);
+        assert!((525_000_000..=525_000_001).contains(&v2.borrowed_icusd_amount.0),
+            "Vault 2 expected ~525M (+<=1 ceil unit), got {}", v2.borrowed_icusd_amount.0);
         assert_eq!(v2.last_accrual_time, one_year);
 
         // Vault 3 (zero debt): unchanged
@@ -5418,6 +5538,200 @@ mod tests {
             ckusdt_ledger_principal: None,
             ckusdc_ledger_principal: None,
         })
+    }
+
+    // ---------------------------------------------------------------
+    // Audit 2026-06-09 regression fences (AR-B-001, AR-B-003, RED-001)
+    // ---------------------------------------------------------------
+
+    fn audit_vault(id: u64, ct: Principal, collateral: u64, debt: u64) -> crate::vault::Vault {
+        crate::vault::Vault {
+            owner: Principal::anonymous(),
+            vault_id: id,
+            collateral_amount: collateral,
+            borrowed_icusd_amount: ICUSD::new(debt),
+            collateral_type: ct,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        }
+    }
+
+    #[test]
+    fn arb001_redemption_skips_bot_claimed_vaults() {
+        // AR-B-001: a bot-claimed vault (collateral already paid to the bot,
+        // write-down deferred) must never be water-filled by a redemption.
+        let mut state = test_state();
+        let icp_ct = state.icp_collateral_type();
+        state.open_vault(audit_vault(1, icp_ct, 500_000_000, 300_000_000));
+        state.open_vault(audit_vault(2, icp_ct, 800_000_000, 500_000_000));
+        state.vault_id_to_vaults.get_mut(&1).unwrap().bot_processing = true;
+
+        let price = UsdIcp::from(rust_decimal_macros::dec!(5.0));
+        let results = state.redeem_on_vaults(ICUSD::new(100_000_000), price, &icp_ct);
+
+        assert!(
+            results.iter().all(|r| r.vault_id != 1),
+            "bot-claimed vault must be skipped by the redemption water-fill"
+        );
+        assert_eq!(
+            state.vault_id_to_vaults.get(&1).unwrap().borrowed_icusd_amount,
+            ICUSD::new(300_000_000),
+            "bot-claimed vault untouched"
+        );
+    }
+
+    #[test]
+    fn arb001_redemption_skips_locked_vaults() {
+        // AR-B-001/AR-B-003: a vault under the per-vault op lock (liquidation
+        // or owner write-op mid-flight) must be skipped by redemption.
+        let mut state = test_state();
+        let icp_ct = state.icp_collateral_type();
+        state.open_vault(audit_vault(1, icp_ct, 500_000_000, 300_000_000));
+        state.open_vault(audit_vault(2, icp_ct, 800_000_000, 500_000_000));
+
+        let guard = crate::guard::VaultLiquidationGuard::new(1).expect("lock vault 1");
+        let price = UsdIcp::from(rust_decimal_macros::dec!(5.0));
+        let results = state.redeem_on_vaults(ICUSD::new(100_000_000), price, &icp_ct);
+        drop(guard);
+
+        assert!(
+            results.iter().all(|r| r.vault_id != 1),
+            "locked vault must be skipped by the redemption water-fill"
+        );
+        // After the lock is released the vault is eligible again.
+        let results2 = state.redeem_on_vaults(ICUSD::new(100_000_000), price, &icp_ct);
+        assert!(results2.iter().any(|r| r.vault_id == 1 || r.vault_id == 2));
+    }
+
+    #[test]
+    fn red001_consumed_capped_at_total_vault_debt() {
+        // RED-001: the water-fill can never retire more debt than exists, so
+        // the consumed sum (which now drives the payout) is capped even when
+        // the claim is oversized.
+        let mut state = test_state();
+        let icp_ct = state.icp_collateral_type();
+        state.open_vault(audit_vault(1, icp_ct, 500_000_000, 300_000_000));
+
+        let price = UsdIcp::from(rust_decimal_macros::dec!(5.0));
+        // Claim 10 icUSD against 3 icUSD of total debt.
+        let results = state.redeem_on_vaults(ICUSD::new(1_000_000_000), price, &icp_ct);
+        let consumed: u64 = results.iter().map(|r| r.icusd_redeemed_e8s).sum();
+        assert_eq!(consumed, 300_000_000, "consumed capped at total redeemable debt");
+        let seized: u64 = results.iter().map(|r| r.collateral_seized).sum();
+        assert!(seized <= 500_000_000, "seized cannot exceed vault collateral");
+    }
+
+    #[test]
+    fn red001_total_redeemable_debt_excludes_locked_and_bot_vaults() {
+        let mut state = test_state();
+        let icp_ct = state.icp_collateral_type();
+        state.open_vault(audit_vault(1, icp_ct, 500_000_000, 300_000_000));
+        state.open_vault(audit_vault(2, icp_ct, 800_000_000, 500_000_000));
+        state.open_vault(audit_vault(3, icp_ct, 100_000_000, 200_000_000));
+        state.vault_id_to_vaults.get_mut(&1).unwrap().bot_processing = true;
+        let _guard = crate::guard::VaultLiquidationGuard::new(2).expect("lock vault 2");
+
+        assert_eq!(
+            state.total_redeemable_debt_for(&icp_ct),
+            ICUSD::new(200_000_000),
+            "only the unlocked, non-bot vault counts as redeemable"
+        );
+    }
+
+    #[test]
+    fn arb001_apply_vault_redemptions_is_exact_and_tolerant() {
+        // Replay fidelity: stored outcomes apply exactly; vanished vaults skip.
+        let mut state = test_state();
+        let icp_ct = state.icp_collateral_type();
+        state.open_vault(audit_vault(1, icp_ct, 500_000_000, 300_000_000));
+
+        let vrs = vec![
+            crate::event::VaultRedemption { vault_id: 1, icusd_redeemed_e8s: 100_000_000, collateral_seized: 20_000_000 },
+            crate::event::VaultRedemption { vault_id: 99, icusd_redeemed_e8s: 50_000_000, collateral_seized: 10_000_000 },
+        ];
+        state.apply_vault_redemptions(&vrs);
+
+        let v1 = state.vault_id_to_vaults.get(&1).unwrap();
+        assert_eq!(v1.borrowed_icusd_amount, ICUSD::new(200_000_000));
+        assert_eq!(v1.collateral_amount, 480_000_000);
+        assert!(!state.vault_id_to_vaults.contains_key(&99), "unknown vault skipped, no trap");
+    }
+
+    #[test]
+    fn arb003_repay_clamps_instead_of_trapping() {
+        // AR-B-003: an over-large repay (vault shrank between snapshot and
+        // commit) clamps to the live debt instead of assert-trapping after
+        // the icUSD was already pulled.
+        let mut state = test_state();
+        let icp_ct = state.icp_collateral_type();
+        state.open_vault(audit_vault(1, icp_ct, 500_000_000, 100_000_000));
+
+        let (interest, principal) = state.repay_to_vault(1, ICUSD::new(250_000_000));
+        assert_eq!(interest, ICUSD::new(0));
+        assert_eq!(principal, ICUSD::new(100_000_000), "clamped to live debt");
+        assert_eq!(
+            state.vault_id_to_vaults.get(&1).unwrap().borrowed_icusd_amount,
+            ICUSD::new(0)
+        );
+    }
+
+    #[test]
+    fn arb003_remove_margin_clamps_instead_of_trapping() {
+        let mut state = test_state();
+        let icp_ct = state.icp_collateral_type();
+        state.open_vault(audit_vault(1, icp_ct, 100_000_000, 0));
+
+        state.remove_margin_from_vault(1, ICP::new(250_000_000));
+        assert_eq!(
+            state.vault_id_to_vaults.get(&1).unwrap().collateral_amount,
+            0,
+            "clamped to live collateral, no trap"
+        );
+    }
+
+    #[test]
+    fn red001_shortfall_targets_consumed_not_claim() {
+        // The deficit accrual target is the consumed amount; an underwater
+        // vault's gap is booked, but an unconsumed remainder (refunded to the
+        // redeemer) is NOT.
+        let consumed = ICUSD::new(300_000_000); // 3 icUSD retired
+        // Seized only 0.4 ICP at $5 = $2 of collateral for $3 of debt.
+        let vrs = vec![crate::event::VaultRedemption {
+            vault_id: 1,
+            icusd_redeemed_e8s: 300_000_000,
+            collateral_seized: 40_000_000,
+        }];
+        let shortfall = crate::event::compute_redemption_shortfall(
+            consumed,
+            &vrs,
+            rust_decimal_macros::dec!(5.0),
+            8,
+        );
+        assert_eq!(shortfall, ICUSD::new(100_000_000), "underwater gap booked: $3 - $2 = $1");
+    }
+
+    #[test]
+    fn dbt001_interest_accrual_rounds_up() {
+        // DBT-001: any positive elapsed window accrues at least one e8s unit
+        // (ceil), and the accrual clock advances with the write.
+        let mut state = test_state();
+        let icp_ct = state.icp_collateral_type();
+        state.open_vault(audit_vault(1, icp_ct, 1_000_000_000, 100_000_000));
+        state.last_icp_rate = Some(UsdIcp::from(rust_decimal_macros::dec!(5.0)));
+
+        let one_second = 1_000_000_000u64;
+        state.accrue_single_vault(1, one_second);
+        let v = state.vault_id_to_vaults.get(&1).unwrap();
+        let rate = state.get_dynamic_interest_rate_for(&icp_ct, Ratio::from_f64(50.0));
+        if rate.to_f64() > 0.0 {
+            assert!(
+                v.borrowed_icusd_amount > ICUSD::new(100_000_000),
+                "ceil accrual adds at least 1 unit for any positive window (rate {})",
+                rate.to_f64()
+            );
+            assert_eq!(v.last_accrual_time, one_second);
+        }
     }
 
     #[test]

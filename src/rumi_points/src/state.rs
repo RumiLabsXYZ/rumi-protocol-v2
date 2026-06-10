@@ -828,17 +828,18 @@ pub fn epoch_status() -> EpochStatus {
 }
 
 /// PUBLIC epoch-driver status for the ops dashboard (POINTS-001). Same as
-/// `epoch_status` but the open epoch is reduced to its public window: the bounds
-/// and snapshot times, with the capture/close cursors and completion flags
-/// OMITTED. Exposing how far the capture has progressed would let a not-yet-
-/// captured principal time a flash deposit to land in a snapshot it has not been
-/// captured into yet, beating the `min(A,B)` anti-snipe defense.
-pub fn public_epoch_status() -> PublicEpochStatus {
+/// `epoch_status` but the open epoch is reduced to its public window: the bounds,
+/// with the capture/close cursors and completion flags OMITTED (exposing capture
+/// progress would let a not-yet-captured principal time a flash deposit to land
+/// in a snapshot it has not been captured into yet) and each snapshot time hidden
+/// until it has fired at `now_ns` (PTS-002: a future snapshot time IS the snipe
+/// target the commit-reveal seed exists to hide).
+pub fn public_epoch_status(now_ns: u64) -> PublicEpochStatus {
     with_state(|s| PublicEpochStatus {
         current_epoch_index: s.current_epoch_index,
         driver_enabled: epoch_driver_enabled(),
         driver_interval_secs: epoch_driver_interval_secs(),
-        open_epoch: s.open_epoch.clone().map(PublicOpenEpoch::from),
+        open_epoch: s.open_epoch.as_ref().map(|o| PublicOpenEpoch::redacted(o, now_ns)),
         revealed_seed_count: revealed_seed_count(),
         snapshot_seed_committed: s.snapshot_seed.is_committed(),
     })
@@ -934,23 +935,32 @@ pub fn set_poll_interval(caller: Principal, secs: u64) -> Result<(), PointsError
     Ok(())
 }
 
-/// Acquire the single-poll guard. Returns `true` if acquired (no poll was in
-/// flight); `false` means a poll is already running and the caller must abort.
-/// Pairs with `end_poll` (call it on every exit path, including errors).
-pub fn try_begin_poll() -> bool {
-    POLL_IN_PROGRESS.with(|p| {
-        let mut p = p.borrow_mut();
-        if *p {
-            false
-        } else {
-            *p = true;
-            true
-        }
-    })
+/// RAII single-poll guard (AR-S-001). `new` returns `None` while a poll is in
+/// flight; dropping the guard clears the flag. Because the flag is released in
+/// `Drop`, a trap inside a poll tick releases it too (ic-cdk's cleanup drops the
+/// in-flight future, running destructors), instead of leaving polling stalled
+/// until the next upgrade as the old begin/end function pair did.
+#[must_use]
+pub struct PollGuard(());
+
+impl PollGuard {
+    pub fn new() -> Option<Self> {
+        POLL_IN_PROGRESS.with(|p| {
+            let mut p = p.borrow_mut();
+            if *p {
+                None
+            } else {
+                *p = true;
+                Some(PollGuard(()))
+            }
+        })
+    }
 }
 
-pub fn end_poll() {
-    POLL_IN_PROGRESS.with(|p| *p.borrow_mut() = false);
+impl Drop for PollGuard {
+    fn drop(&mut self) {
+        POLL_IN_PROGRESS.with(|p| *p.borrow_mut() = false);
+    }
 }
 
 /// Is `ts_ns` within the configured season window (inclusive)? Registration and
@@ -1427,21 +1437,30 @@ pub fn current_epoch_seed() -> Option<[u8; 32]> {
     with_state(|s| s.snapshot_seed.current_seed)
 }
 
-/// Acquire the single-tick epoch-driver guard (pairs with `end_epoch_guard`).
-pub fn try_begin_epoch() -> bool {
-    EPOCH_IN_PROGRESS.with(|p| {
-        let mut p = p.borrow_mut();
-        if *p {
-            false
-        } else {
-            *p = true;
-            true
-        }
-    })
+/// RAII single-tick epoch-driver guard (AR-S-001). Same drop-release contract as
+/// `PollGuard`: a trap in a tick releases the flag via the future's destructors,
+/// so the driver is never wedged until an upgrade.
+#[must_use]
+pub struct EpochGuard(());
+
+impl EpochGuard {
+    pub fn new() -> Option<Self> {
+        EPOCH_IN_PROGRESS.with(|p| {
+            let mut p = p.borrow_mut();
+            if *p {
+                None
+            } else {
+                *p = true;
+                Some(EpochGuard(()))
+            }
+        })
+    }
 }
 
-pub fn end_epoch_guard() {
-    EPOCH_IN_PROGRESS.with(|p| *p.borrow_mut() = false);
+impl Drop for EpochGuard {
+    fn drop(&mut self) {
+        EPOCH_IN_PROGRESS.with(|p| *p.borrow_mut() = false);
+    }
 }
 
 /// A principal's recorded 3pool deposit composition `(icUSD, ckUSDC, ckUSDT)` in
@@ -2199,10 +2218,48 @@ mod tests {
 
     #[test]
     fn epoch_guard_is_single_entry() {
-        assert!(try_begin_epoch());
-        assert!(!try_begin_epoch()); // already held
-        end_epoch_guard();
-        assert!(try_begin_epoch());
+        let held = EpochGuard::new().expect("first acquire");
+        assert!(EpochGuard::new().is_none()); // already held
+        drop(held);
+        assert!(EpochGuard::new().is_some());
+    }
+
+    // ── AR-S-001: a panicking tick must release the single-tick guards ──
+    // On the IC a trap drops the in-flight future via ic-cdk's cleanup, running
+    // destructors; catch_unwind simulates that unwind path natively.
+
+    #[test]
+    fn ar_s_001_epoch_guard_released_on_panic() {
+        let result = std::panic::catch_unwind(|| {
+            let _guard = EpochGuard::new().expect("acquire");
+            panic!("simulated trap mid-tick");
+        });
+        assert!(result.is_err());
+        assert!(
+            EpochGuard::new().is_some(),
+            "a trapped tick must not leave the epoch guard stuck"
+        );
+    }
+
+    #[test]
+    fn ar_s_001_poll_guard_released_on_panic() {
+        let result = std::panic::catch_unwind(|| {
+            let _guard = PollGuard::new().expect("acquire");
+            panic!("simulated trap mid-poll");
+        });
+        assert!(result.is_err());
+        assert!(
+            PollGuard::new().is_some(),
+            "a trapped poll must not leave the poll guard stuck"
+        );
+    }
+
+    #[test]
+    fn ar_s_001_poll_guard_is_single_entry() {
+        let held = PollGuard::new().expect("first acquire");
+        assert!(PollGuard::new().is_none()); // already held
+        drop(held);
+        assert!(PollGuard::new().is_some());
     }
 
     #[test]
@@ -2463,19 +2520,62 @@ mod tests {
         let foe = full.open_epoch.unwrap();
         assert_eq!(foe.a_cursor, Some(tp(7)));
         assert!(foe.a_complete);
-        // The public status reduces the open epoch to bounds + snapshot times only.
-        let pub_status = public_epoch_status();
+        // The public status reduces the open epoch to bounds + FIRED snapshot
+        // times only (both have passed at now=20).
+        let pub_status = public_epoch_status(20);
         let poe = pub_status.open_epoch.unwrap();
         assert_eq!(poe.epoch_index, 2);
         assert_eq!(poe.epoch_start_ns, 10);
         assert_eq!(poe.epoch_end_ns, 20);
-        assert_eq!(poe.snapshot_a_ns, 12);
-        assert_eq!(poe.snapshot_b_ns, 18);
+        assert_eq!(poe.snapshot_a_ns, Some(12));
+        assert_eq!(poe.snapshot_b_ns, Some(18));
         // PublicOpenEpoch has NO cursor/complete fields at all (compile-time), so
         // there is nothing for an attacker to read; assert the public/full views
         // agree on the non-sensitive window.
         assert_eq!(poe.epoch_index, foe.epoch_index);
-        assert_eq!(poe.snapshot_a_ns, foe.snapshot_a_ns);
+        assert_eq!(poe.snapshot_a_ns, Some(foe.snapshot_a_ns));
+    }
+
+    // ── PTS-002: future snapshot times stay hidden from the public status ──
+
+    #[test]
+    fn pts_002_public_status_hides_future_snapshot_times() {
+        init_default(tp(99));
+        set_open_epoch(Some(OpenEpoch {
+            epoch_index: 0,
+            epoch_start_ns: 10,
+            epoch_end_ns: 20,
+            snapshot_a_ns: 12,
+            snapshot_b_ns: 18,
+            a_cursor: None,
+            a_complete: false,
+            b_cursor: None,
+            b_complete: false,
+            close_started: false,
+            close_cursor: None,
+            close_points_accrued: 0,
+            close_active: 0,
+        }));
+        // Before snapshot A fires, BOTH times are withheld (revealing a future
+        // time hands an attacker the exact flash-deposit moment).
+        let poe = public_epoch_status(11).open_epoch.unwrap();
+        assert_eq!(poe.snapshot_a_ns, None);
+        assert_eq!(poe.snapshot_b_ns, None);
+        // Once A fires (now >= a) it is history and revealed; B stays hidden.
+        let poe = public_epoch_status(12).open_epoch.unwrap();
+        assert_eq!(poe.snapshot_a_ns, Some(12));
+        assert_eq!(poe.snapshot_b_ns, None);
+        let poe = public_epoch_status(17).open_epoch.unwrap();
+        assert_eq!(poe.snapshot_a_ns, Some(12));
+        assert_eq!(poe.snapshot_b_ns, None);
+        // After B fires, both are revealed.
+        let poe = public_epoch_status(18).open_epoch.unwrap();
+        assert_eq!(poe.snapshot_a_ns, Some(12));
+        assert_eq!(poe.snapshot_b_ns, Some(18));
+        // The ADMIN view is unredacted regardless of time.
+        let foe = epoch_status().open_epoch.unwrap();
+        assert_eq!(foe.snapshot_a_ns, 12);
+        assert_eq!(foe.snapshot_b_ns, 18);
     }
 
     #[test]

@@ -8,12 +8,14 @@
 //! lives in `source_types.rs`; this module holds the normalized model, the
 //! apply/registration logic, and the cursor-advancing batch driver.
 //!
-//! Idempotency: each source has a monotonic cursor (`state::get_cursor`). A poll
-//! fetches `[cursor, cursor+batch)`, applies the batch, and advances the cursor
-//! to `max(event_id)+1` in a single post-await message (atomic on the IC, so a
-//! trap commits nothing). The `state::try_begin_poll` guard prevents two timers
-//! from ingesting the same range concurrently. Events below the cursor are never
-//! refetched, so no per-event dedup set is needed.
+//! Idempotency: each source has a monotonic ID-based cursor (`state::get_cursor`,
+//! the next event id wanted). A poll fetches a window of events at/after the
+//! cursor (the forward endpoints fetch by id directly; SP/AMM fetch by array
+//! position and filter by id, see the PTS-001 notes in `poll.rs`), applies the
+//! batch, and advances the cursor to `max(event_id)+1` in a single post-await
+//! message (atomic on the IC, so a trap commits nothing). The `state::PollGuard`
+//! prevents two timers from ingesting the same range concurrently. Events below
+//! the cursor are filtered out before apply, so no per-event dedup set is needed.
 //!
 //! PHASE BOUNDARY: this increment ingests events and auto-registers. Position /
 //! deposit-value tracking, the repayment 90-day window (which also needs the
@@ -209,19 +211,22 @@ fn log_ingest(msg: &str) {
 /// Apply a decoded batch of normalized events (auto-register etc.). Does NOT
 /// touch any cursor. Each poller advances its source cursor from that source's
 /// own resume signal: the forward endpoints (backend, 3pool) return an explicit
-/// `next_start`; the index endpoints (SP, AMM) advance by returned count (see
-/// `ingest_batch`). The network-free, unit-testable core of ingestion.
+/// `next_start`; the position-indexed endpoints (SP, AMM) advance to the max
+/// ingested id via `ingest_batch` (PTS-001). The network-free, unit-testable
+/// core of ingestion.
 pub fn apply_events(events: &[IngestedEvent]) {
     for ev in events {
         apply_ingested_event(ev);
     }
 }
 
-/// Apply a batch and advance the source cursor to `max(event_id) + 1`. Valid for
-/// the index endpoints (SP, AMM), where `id == index` holds until their logs trim
-/// (far beyond Season-1 volume at current TVL). The forward endpoints (backend,
-/// 3pool) instead set the cursor from the endpoint's returned `next_start`. An
-/// empty batch leaves the cursor unchanged. Returns the number applied.
+/// Apply a batch and advance the source cursor to `max(event_id) + 1`. Used by
+/// the position-indexed endpoints (SP, AMM), whose pollers fetch by array
+/// position and pre-filter the window to `event_id >= cursor` (PTS-001), so the
+/// cursor stays ID-based even after the source log rotates. The forward
+/// endpoints (backend, 3pool) instead set the cursor from the endpoint's
+/// returned `next_start`. An empty batch leaves the cursor unchanged. Returns
+/// the number applied.
 pub fn ingest_batch(source: SourceId, events: &[IngestedEvent]) -> usize {
     apply_events(events);
     if let Some(m) = events.iter().map(|e| e.event_id).max() {

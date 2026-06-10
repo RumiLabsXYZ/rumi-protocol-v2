@@ -99,8 +99,8 @@ export interface PublicEpochStatus {
 export interface PublicOpenEpoch {
   'epoch_index' : bigint,
   'epoch_start_ns' : bigint,
-  'snapshot_a_ns' : bigint,
-  'snapshot_b_ns' : bigint,
+  'snapshot_a_ns' : [] | [bigint],
+  'snapshot_b_ns' : [] | [bigint],
   'epoch_end_ns' : bigint,
 }
 export type QualifyingAction = { 'ProvideAmmLiquidity' : null } |

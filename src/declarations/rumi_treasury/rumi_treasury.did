@@ -58,6 +58,7 @@ type WithdrawArgs = record {
   amount: nat64;
   to: principal;
   memo: opt text;
+  request_id: opt nat64;
 };
 
 type WithdrawResult = record {

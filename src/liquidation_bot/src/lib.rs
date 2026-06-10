@@ -68,11 +68,14 @@ fn init(args: BotInitArgs) {
 
 #[pre_upgrade]
 fn pre_upgrade() {
+    // UPG-001: the legacy raw-offset-0 save must be unreachable once the
+    // MemoryManager layout exists at offset 0 (it would clobber the MGR header
+    // and corrupt every virtual region), even if the heap migration flag was
+    // somehow reset. The raw-magic check does not trust heap state.
     let migrated = state::read_state(|s| s.migrated_to_stable_structures);
-    if migrated {
-        state::save_config_to_stable();
-    } else {
-        state::save_to_stable_memory();
+    match state::pre_upgrade_save_path(migrated, memory::memory_manager_layout_exists()) {
+        state::PreUpgradeSavePath::Config => state::save_config_to_stable(),
+        state::PreUpgradeSavePath::LegacyRaw => state::save_to_stable_memory(),
     }
 }
 
@@ -80,7 +83,7 @@ fn pre_upgrade() {
 fn post_upgrade() {
     // STEP 1: Rescue legacy JSON blob BEFORE MemoryManager::init.
     // Raw stable64_read is safe here because MemoryManager hasn't been initialized yet.
-    // On second+ upgrades, offset 0 contains the MemoryManager header (magic 0x4D474943 + version).
+    // On second+ upgrades, offset 0 contains the MemoryManager header (magic b"MGR" + version).
     // Interpreted as a little-endian u64, this exceeds 10_000_000, so the len check below
     // correctly returns None and we fall through to load_config_from_stable().
     let size = ic_cdk::api::stable::stable64_size();

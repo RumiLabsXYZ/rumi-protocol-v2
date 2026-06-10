@@ -11,6 +11,8 @@ use ic_canister_log::{log, declare_log_buffer};
 use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
 use icrc_ledger_types::icrc1::account::Account;
 use state::{init_state, restore_state, with_state, with_state_mut};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use types::{
     AssetType, DepositArgs, DepositRecord, TreasuryAction, TreasuryEvent,
     TreasuryInitArgs, TreasuryStatus, WithdrawArgs, WithdrawResult
@@ -18,6 +20,49 @@ use types::{
 
 // Declare log buffer for debugging
 declare_log_buffer!(name = LOG, capacity = 1000);
+
+/// Standard ICRC-1 transfer fee (e8s), used as a conservative fallback when a
+/// ledger's `icrc1_fee` query cannot be reached. Erring high keeps the
+/// treasury solvent (we send slightly less) rather than risking an over-send.
+const DEFAULT_LEDGER_FEE_E8S: u64 = 10_000;
+
+thread_local! {
+    /// Per-ledger transfer-fee cache, populated lazily from `icrc1_fee` on the
+    /// first withdrawal against a ledger. Heap-only (not persisted), so it is
+    /// simply re-warmed after an upgrade.
+    static LEDGER_FEES: RefCell<HashMap<Principal, u64>> = RefCell::new(HashMap::new());
+}
+
+/// Fetch a ledger's transfer fee, caching the result per ledger. On query
+/// failure, falls back to the standard ICRC-1 fee (the solvency-safe direction).
+async fn ledger_fee(ledger: Principal) -> u64 {
+    if let Some(fee) = LEDGER_FEES.with(|c| c.borrow().get(&ledger).copied()) {
+        return fee;
+    }
+    let result: Result<(candid::Nat,), _> = ic_cdk::call(ledger, "icrc1_fee", ()).await;
+    let fee: u64 = match result {
+        Ok((f,)) => f.0.try_into().unwrap_or(DEFAULT_LEDGER_FEE_E8S),
+        Err(_) => DEFAULT_LEDGER_FEE_E8S,
+    };
+    LEDGER_FEES.with(|c| c.borrow_mut().insert(ledger, fee));
+    fee
+}
+
+/// ICRC-002: amount to put on the wire for a withdrawal of `amount` given the
+/// ledger `fee`. The recipient bears the fee: the ledger debits `send + fee`
+/// from the canister account, so sending `amount - fee` makes the account drop
+/// by exactly `amount`, keeping tracked balances in step with real holdings.
+/// (Historically the full `amount` was sent, drifting the tracked balance one
+/// fee above the real balance per withdrawal.)
+fn withdrawal_send_amount(amount: u64, fee: u64) -> Result<u64, String> {
+    if amount <= fee {
+        return Err(format!(
+            "Withdrawal amount {} does not exceed the ledger fee {}",
+            amount, fee
+        ));
+    }
+    Ok(amount - fee)
+}
 
 /// Initialize the treasury canister
 #[init]
@@ -105,14 +150,18 @@ async fn deposit(args: DepositArgs) -> Result<u64, String> {
 
 /// Withdraw funds from treasury (controllers only).
 ///
-/// Audit Wave-3 (ICRC-002): the previous implementation passed
-/// `created_at_time: None` and restored the local balance on ANY error,
-/// turning a lost-reply transient into a silent double-spend on retry.
-/// This version sets a deterministic `created_at_time` derived from the
-/// caller-supplied (or auto-derived) `request_id`, treats `Duplicate` as
-/// success, restores the balance ONLY for clear ledger errors, and on a
-/// transport-layer error keeps the balance deducted while logging a
-/// reconciliation hint for the controller.
+/// Audit Wave-3 (ICRC-002/ICRC-003) hardening:
+/// - The recipient bears the ledger fee: bookkeeping is debited `amount` and
+///   `amount - fee` goes on the wire, so the canister account drops by exactly
+///   `amount` (the fee is queried via `icrc1_fee` with a per-ledger cache and
+///   a conservative fallback, mirroring the AMM's PR #230 fix).
+/// - `created_at_time` is the FIRST attempt's timestamp for this `request_id`,
+///   persisted in stable memory and reused on retries, so the ledger's dedup
+///   window actually catches a re-submitted transfer. `Duplicate` is treated
+///   as success.
+/// - The balance is restored ONLY for clear ledger errors; on a
+///   transport-layer error it stays deducted while a reconciliation hint is
+///   logged for the controller.
 #[update]
 #[candid_method(update)]
 async fn withdraw(args: WithdrawArgs) -> Result<WithdrawResult, String> {
@@ -122,8 +171,8 @@ async fn withdraw(args: WithdrawArgs) -> Result<WithdrawResult, String> {
     log!(LOG, "Processing withdrawal: {} {:?} to {}",
          args.amount, args.asset_type, args.to);
 
-    with_state_mut(|s| s.withdraw(args.asset_type.clone(), args.amount))?;
-
+    // Resolve the ledger and fee BEFORE debiting, so an unconfigured ledger
+    // or a dust amount can't leave the bookkeeping debited with no transfer.
     let ledger_principal = with_state(|s| {
         let config = s.get_config();
         match args.asset_type {
@@ -135,10 +184,17 @@ async fn withdraw(args: WithdrawArgs) -> Result<WithdrawResult, String> {
         }
     }).ok_or("Ledger not configured for this asset type")?;
 
+    let fee = ledger_fee(ledger_principal).await;
+    let send_amount = withdrawal_send_amount(args.amount, fee)?;
+
+    with_state_mut(|s| s.withdraw(args.asset_type.clone(), args.amount))?;
+
     let request_id = args.request_id.unwrap_or_else(|| {
         derive_request_id(&caller_principal, &args.asset_type, args.amount, &args.to)
     });
-    let created_at_time = ic_cdk::api::time();
+    let created_at_time = with_state_mut(|s| {
+        s.created_at_time_for_request(request_id, ic_cdk::api::time())
+    });
 
     let transfer_args = TransferArg {
         from_subaccount: None,
@@ -146,7 +202,7 @@ async fn withdraw(args: WithdrawArgs) -> Result<WithdrawResult, String> {
             owner: args.to,
             subaccount: None,
         },
-        amount: args.amount.into(),
+        amount: send_amount.into(),
         fee: None,
         memo: args.memo.clone()
             .map(|m| m.into_bytes().into())
@@ -164,7 +220,15 @@ async fn withdraw(args: WithdrawArgs) -> Result<WithdrawResult, String> {
             duplicate_of
         }
         Err(LedgerError::Ledger(e)) => {
-            with_state_mut(|s| s.restore_balance(&args.asset_type, args.amount));
+            with_state_mut(|s| {
+                // A TooOld/CreatedInFuture rejection means the persisted
+                // timestamp can never be accepted; drop it so the next
+                // attempt gets a fresh one.
+                if matches!(e, TransferError::TooOld | TransferError::CreatedInFuture { .. }) {
+                    s.clear_request_created_at(request_id);
+                }
+                s.restore_balance(&args.asset_type, args.amount)
+            });
             return Err(format!("Transfer failed: {:?}", e));
         }
         Err(LedgerError::Transport(msg)) => {
@@ -191,8 +255,8 @@ async fn withdraw(args: WithdrawArgs) -> Result<WithdrawResult, String> {
 
     Ok(WithdrawResult {
         block_index,
-        amount_transferred: args.amount,
-        fee: 0,
+        amount_transferred: send_amount,
+        fee,
     })
 }
 

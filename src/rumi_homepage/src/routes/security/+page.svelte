@@ -1,26 +1,26 @@
 <script>
   const findings = [
     { sev: 'Critical', count: 0, tone: 'good' },
-    { sev: 'High',     count: 8, tone: 'closed' },
-    { sev: 'Medium',   count: 36, tone: 'closed' },
-    { sev: 'Low',      count: 25, tone: 'closed' },
+    { sev: 'High',     count: 23, tone: 'closed' },
+    { sev: 'Medium',   count: 73, tone: 'closed' },
+    { sev: 'Low',      count: 66, tone: 'closed' },
   ];
 
   const programStats = [
-    { label: 'Unit + integration tests', value: '866' },
-    { label: 'Audit fence test files',   value: '36' },
-    { label: 'Remediation waves',        value: '13' },
+    { label: 'Unit + integration tests', value: '1,440' },
+    { label: 'Audit fence test files',   value: '60' },
+    { label: 'Security review cycles',   value: '6' },
     { label: 'Canisters in scope',       value: '9' },
-    { label: 'Lines of Rust reviewed',   value: '~84k' },
-    { label: 'Lines of TypeScript / Svelte reviewed', value: '~55k' },
+    { label: 'Lines of Rust reviewed',   value: '~89k' },
+    { label: 'Lines of TypeScript / Svelte reviewed', value: '~61k' },
     { label: 'Mainnet pauses during review', value: '0' },
     { label: 'Funds lost during review',     value: '0' },
   ];
 
   const architecturalSecurity = [
     {
-      title: 'Per-user vaults',
-      desc: 'Each borrower owns an isolated CDP. There is no shared collateral pool to drain. A bad actor or buggy interaction can only put their own vault at risk.',
+      title: 'Per-vault isolation and locking',
+      desc: 'Each borrower owns an isolated CDP with its own collateral and debt. Every operation that can move a vault\'s collateral (liquidation, redemption, and the owner\'s own withdrawals and repayments) is serialized under a per-vault lock, so concurrent operations on the same vault cannot interfere or double-spend its backing.',
     },
     {
       title: 'On-chain price feeds',
@@ -57,9 +57,19 @@
 
   const audits = [
     {
-      title: 'Combined Security Review',
+      title: 'Full-Protocol Security Review',
       tag: 'Latest',
       tagTone: 'primary',
+      date: 'June 9, 2026',
+      authors: 'Internal differential re-audit',
+      scope: 'Whole-stack re-audit anchored to commit e49ed10: the CDP backend, 3pool stableswap (3USD token), pair AMM, stability pool, treasury, liquidation bot, the now-live points engine, analytics, and the vault frontend. Sixteen specialist finder passes, three differential passes, and adversarial verification of every medium-and-above finding. Folds in and verifies the interim June 3 and June 5 audit cycles.',
+      summary: 'Three new HIGH findings, all in the redemption path and all rooted in one gap: the per-vault liquidation lock introduced earlier covered liquidations but not redemption or the owner\'s own vault write-ops. Plus 8 medium and 12 low across every canister. All fixed with regression fences and verified in PocketIC; one low stays open at dev-gated severity inside the parked experimental cross-chain module.',
+      slug: 'rumi-security-review-2026-06-09',
+    },
+    {
+      title: 'Combined Security Review',
+      tag: 'Close-out',
+      tagTone: 'neutral',
       date: 'May 2, 2026',
       authors: 'Internal + AVAI close-out',
       scope: 'Unified close-out of every finding from the internal three-pass review and the AVAI external pre-audit, including the eight net-new findings closed in Wave 14a/b/c.',
@@ -120,10 +130,11 @@
     <h1 class="page-title">Security at Rumi Protocol</h1>
     <p class="page-lead">
       Rumi Protocol is a fully on-chain CDP stablecoin running on the Internet Computer.
-      Two independent security reviews, an automated external pre-audit by AVAI, and a
-      thirteen-wave remediation cycle have shipped to mainnet. Every finding from both
-      reviews is in one of three states: resolved with a regression test, deferred-by-design
-      until SNS migration, or accepted as housekeeping with a documented watch threshold.
+      Multiple independent security reviews, an automated external pre-audit by AVAI, and a
+      continuing differential re-audit cycle have shipped to mainnet, most recently the
+      June 2026 full-protocol review. Every finding is in one of three states: resolved with
+      a regression test, deferred-by-design until SNS migration, or accepted as housekeeping
+      with a documented watch threshold.
     </p>
 
     <div class="findings-grid">
@@ -179,8 +190,8 @@
     <div class="test-block">
       <h3 class="test-block-title">Test surface</h3>
       <ul class="test-list">
-        <li><strong>866</strong> Rust unit and integration tests across the workspace</li>
-        <li><strong>36</strong> dedicated audit fence test files (one per finding family)</li>
+        <li><strong>1,440</strong> Rust unit and integration tests across the workspace</li>
+        <li><strong>60</strong> dedicated audit fence test files (one per finding family)</li>
         <li><strong>PocketIC</strong> integration tests exercise full inter-canister flows</li>
         <li><strong>Pre-deploy hook</strong> blocks mainnet installs if any test fails</li>
         <li><strong>24-hour bake-watch</strong> on every wave before the next deploys</li>
