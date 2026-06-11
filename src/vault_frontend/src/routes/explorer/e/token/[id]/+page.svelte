@@ -4,6 +4,7 @@
   import MixedEventsTable from '$components/explorer/MixedEventsTable.svelte';
   import EntityLink from '$components/explorer/EntityLink.svelte';
   import CopyButton from '$components/explorer/CopyButton.svelte';
+  import OhlcChart from '$components/explorer/OhlcChart.svelte';
   import {
     fetchAllVaults,
     fetchAmmPools,
@@ -28,6 +29,7 @@
     fetchThreePoolSeries,
     fetchHolderSeries,
     fetchTokenFlow,
+    fetchOhlc,
   } from '$services/explorer/analyticsService';
   import {
     formatE8s,
@@ -78,6 +80,11 @@
   let threePoolHistory: any[] = $state([]);
   let holderSeries: any[] = $state([]);
   let flowEdges = $state<TokenFlowEdge[]>([]);
+  // Daily price OHLC for collateral tokens — the analytics canister records a
+  // candle per XRC price bucket keyed by collateral principal. Stablecoins
+  // (icUSD/3USD) have no XRC feed, so this stays empty for them.
+  let ohlcCandles: any[] = $state([]);
+  let ohlcLoading = $state(false);
 
   // ── Derived: identity ──────────────────────────────────────────────────────
 
@@ -522,6 +529,7 @@
   async function loadToken() {
     loading = true;
     error = null;
+    ohlcCandles = [];
     let tokenPrincipalObj: Principal;
     try {
       tokenPrincipalObj = Principal.fromText(tokenPrincipal);
@@ -612,11 +620,21 @@
       } else {
         // For unsupported tokens, holder series is the best supply proxy if it
         // exists. For collateral tokens it won't, so the chart will hide.
-        try {
-          holderSeries = await fetchHolderSeries(tokenPrincipalObj, 180);
-        } catch {
-          holderSeries = [];
-        }
+        // Collateral tokens instead get a price OHLC candlestick (keyed by
+        // collateral principal in the analytics canister) — that's the chart
+        // story for a token whose supply analytics don't track.
+        ohlcLoading = true;
+        const [holderRes, ohlcRes] = await Promise.allSettled([
+          fetchHolderSeries(tokenPrincipalObj, 180),
+          // Daily candles, ~180d. Returns empty for tokens with no XRC feed,
+          // and the OhlcChart hides itself on an empty candle set.
+          fetchOhlc(tokenPrincipalObj, 86_400n, undefined, undefined, 180),
+        ]);
+        holderSeries = holderRes.status === 'fulfilled' ? holderRes.value : [];
+        ohlcCandles = ohlcRes.status === 'fulfilled' && ohlcRes.value
+          ? ohlcRes.value.candles
+          : [];
+        ohlcLoading = false;
       }
     } catch (e: any) {
       console.error('[token page] load failed:', e);
@@ -861,6 +879,15 @@
 
   {#snippet analytics()}
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      {#if isCollateral}
+        <!-- Price OHLC candlestick — full width, leads the analytics section
+             for collateral tokens (their price is the headline story; supply
+             analytics aren't collected for them). -->
+        <div class="lg:col-span-2">
+          <OhlcChart candles={ohlcCandles} {symbol} loading={ohlcLoading} />
+        </div>
+      {/if}
+
       <!-- Holder distribution pie -->
       <div class="rounded-lg border border-gray-700/60 bg-gray-900/40 p-4">
         <h3 class="text-sm font-semibold text-white mb-3">Holder distribution</h3>

@@ -25,6 +25,15 @@
 
   let statusFilter: 'all' | 'completed' | 'failed' = initialStatusFilter;
   let hideTests = hideTestRecords;
+  // `ClaimFailed` records are no-op probes: the claim never succeeded, so no
+  // funds moved. They arrive in bursts (3 retries × N borderline vaults per
+  // price dip) and bury the records where money actually moved, so they're
+  // hidden by default behind this toggle.
+  let showClaimAttempts = false;
+
+  function isClaimAttempt(r: LiquidationRecordV1): boolean {
+    return 'ClaimFailed' in r.status;
+  }
 
   const E8S = 100_000_000;
   const E6 = 1_000_000;
@@ -66,14 +75,28 @@
     return msg.includes('test_force_liquidate');
   }
 
+  $: hiddenClaimAttempts = records.filter((r) => isClaimAttempt(r)).length;
+
   $: filtered = records.filter((r) => {
     if (hideTests && isTestRecord(r)) return false;
+    if (!showClaimAttempts && isClaimAttempt(r)) return false;
     if (statusFilter === 'completed' && !isCompleted(r.status)) return false;
     if (statusFilter === 'failed' && !isFailed(r.status)) return false;
     return true;
   });
 
   $: canLoadMore = BigInt(records.length) < total;
+
+  // With claim attempts hidden, a fetched page can be mostly invisible rows.
+  // Keep pulling pages (bounded) until the visible table has some substance,
+  // so the default view isn't a near-empty page with a "Load more" button.
+  let autoFillRounds = 0;
+  $: if (!loading && !loadingMore && !showClaimAttempts
+         && filtered.length < Math.min(10, Number(total))
+         && canLoadMore && autoFillRounds < 6) {
+    autoFillRounds += 1;
+    loadMore();
+  }
 
   function fmtE8s(v: bigint | number, decimals = 4): string {
     return (Number(v) / E8S).toLocaleString(undefined, {
@@ -204,7 +227,11 @@
       <input type="checkbox" bind:checked={hideTests} />
       <span>Hide test entries</span>
     </label>
-    <span class="count">{filtered.length} of {records.length} loaded · {Number(total)} total</span>
+    <label class="hide-tests" title="Failed claim attempts are no-op probes: the vault's CR recovered above the liquidation threshold before the bot could claim it, so no funds moved.">
+      <input type="checkbox" bind:checked={showClaimAttempts} />
+      <span>Show claim attempts{hiddenClaimAttempts > 0 && !showClaimAttempts ? ` (${hiddenClaimAttempts} hidden)` : ''}</span>
+    </label>
+    <span class="count">{filtered.length} shown · {records.length} of {Number(total)} loaded</span>
   </div>
 
   {#if filtered.length === 0}

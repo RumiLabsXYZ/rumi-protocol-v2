@@ -3,8 +3,6 @@
   import LensHealthStrip from '../LensHealthStrip.svelte';
   import LensActivityPanel from '../LensActivityPanel.svelte';
   import MiniAreaChart from '../MiniAreaChart.svelte';
-  import ProtocolVitals from '../ProtocolVitals.svelte';
-  import PoolHealthStrip from '../PoolHealthStrip.svelte';
   import TvlChart from '../TvlChart.svelte';
   import TokenFlowBars from '../TokenFlowBars.svelte';
   import LiquidationsOverviewCard from '../LiquidationsOverviewCard.svelte';
@@ -13,9 +11,10 @@
     fetchFeeSeries, fetchPegStatus, fetchApys, fetchTokenFlow,
   } from '$services/explorer/analyticsService';
   import { ProtocolService } from '$services/protocol';
+  import { fetchProtocolStatus } from '$services/explorer/explorerService';
   import { threePoolService } from '$services/threePoolService';
   import { stabilityPoolService } from '$services/stabilityPoolService';
-  import { e8sToNumber, formatCompact, CHART_COLORS } from '$utils/explorerChartHelpers';
+  import { e8sToNumber, formatCompact, bpsToPercent, CHART_COLORS } from '$utils/explorerChartHelpers';
   import { liveSpApyPct, liveLpApyPct } from '$utils/liveApy';
   import { getThreePoolApy } from '$services/threePoolApyService';
   import { getAmm1Apy, combinedBestLpApyPct } from '$services/amm1ApyService';
@@ -27,6 +26,8 @@
   let feeRows: any[] = $state([]);
   let seriesLoading = $state(true);
   let pegStatus: PegStatus | null = $state(null);
+  // Live backend status — true mode, oracle freshness, bad-debt accounting.
+  let protocolStatus: any = $state(null);
   let analyticsLpApy: number | null = $state(null);
   let analyticsAmmApy: number | null = $state(null);
   let analyticsSpApy: number | null = $state(null);
@@ -35,7 +36,6 @@
   // Live 3pool/AMM1 APY inputs for the combined "best LP APY" headline vital.
   let liveThreePoolApy: number | null = $state(null);
   let liveAmm1Apy: number | null = $state(null);
-  let poolsLoading = $state(true);
 
   type FlowWindowKey = '24h' | '7d' | '30d';
   const FLOW_WINDOW_NS: Record<FlowWindowKey, bigint> = {
@@ -98,20 +98,23 @@
     // from current protocol + pool state and reflects what a depositor would
     // earn right now. Falls back to analytics if any input is missing.
     try {
-      const [psR, poolR, spR] = await Promise.allSettled([
+      const [psR, poolR, spR, rawStatusR] = await Promise.allSettled([
         ProtocolService.getProtocolStatus(),
         threePoolService.getPoolStatus(),
         stabilityPoolService.getPoolStatus(),
+        // Raw (snake_case) backend status — the ProtocolService DTO drops the
+        // deficit/breaker/oracle-timestamp fields the vitals strip needs.
+        fetchProtocolStatus(),
       ]);
       const ps = psR.status === 'fulfilled' ? psR.value : null;
       const pool = poolR.status === 'fulfilled' ? poolR.value : null;
       const sp = spR.status === 'fulfilled' ? spR.value : null;
+      protocolStatus = rawStatusR.status === 'fulfilled' ? rawStatusR.value : null;
       liveLp = liveLpApyPct(ps, pool?.balances);
       liveSp = liveSpApyPct(ps, sp);
     } catch (err) {
       console.error('[OverviewLens] live APY compute error:', err);
     }
-    poolsLoading = false;
 
     // Combined "best LP APY" inputs for the headline vital. These reuse the
     // exact same cached services as the Swap "Earn up to" banner, so the
@@ -129,8 +132,8 @@
     }
   });
 
-  const lpApy = $derived(liveLp ?? analyticsLpApy);
-  const spApy = $derived(liveSp ?? analyticsSpApy);
+  const lpApy: number | null = $derived(liveLp ?? analyticsLpApy);
+  const spApy: number | null = $derived(liveSp ?? analyticsSpApy);
   const lpApySub = $derived(liveLp != null ? 'live' : '7d');
   const spApySub = $derived(liveSp != null ? 'live' : '7d');
 
@@ -154,18 +157,52 @@
     liveThreePoolApy != null && liveAmm1Apy != null ? 'best · live' : lpApySub,
   );
 
-  const pegPct = $derived.by(() => {
+  // 3pool balance skew — % deviation from the 33/33/33 target weighting.
+  // This was previously labeled "Peg", which overstated it: it measures pool
+  // composition imbalance, not a market price deviation from $1.
+  const skewPct = $derived.by(() => {
     if (!pegStatus) return '--';
     const imb = pegStatus.max_imbalance_pct;
     return `${imb >= 0 ? '+' : ''}${imb.toFixed(2)}%`;
   });
 
-  const pegTone = $derived.by(() => {
+  const skewTone = $derived.by(() => {
     if (!pegStatus) return 'muted' as const;
     const imb = pegStatus.max_imbalance_pct;
     if (imb < 2) return 'good' as const;
     if (imb < 5) return 'caution' as const;
     return 'danger' as const;
+  });
+
+  // True protocol mode from the backend (candid variant), falling back to
+  // the CR heuristic until the status call resolves.
+  const protocolMode = $derived.by(() => {
+    const m = protocolStatus?.mode;
+    if (m) {
+      const key = Object.keys(m)[0] ?? '';
+      if (key === 'ReadOnly') return 'ReadOnly';
+      if (key === 'Recovery') return 'Recovery';
+      return 'Normal';
+    }
+    if (!summary) return null;
+    const cr = Number(summary.system_cr_bps);
+    if (cr < 10000) return 'ReadOnly';
+    if (cr < 14100) return 'Recovery';
+    return 'Normal';
+  });
+
+  // Bad debt (Wave-8e deficit accounting), live from the backend.
+  const badDebtIcusd = $derived(
+    protocolStatus ? Number(protocolStatus.protocol_deficit_icusd ?? 0) / 1e8 : null
+  );
+
+  // Oracle freshness — operations reject on prices older than 10 minutes,
+  // so staleness beyond that is a danger signal, not trivia.
+  const oracleAgeMin = $derived.by(() => {
+    const ts = protocolStatus?.last_icp_timestamp;
+    if (!ts) return null;
+    const ageMs = Date.now() - Number(ts) / 1_000_000;
+    return ageMs / 60_000;
   });
 
   const healthMetrics = $derived.by(() => {
@@ -174,15 +211,46 @@
     const supply = summary.circulating_supply_icusd_e8s?.length
       ? e8sToNumber(summary.circulating_supply_icusd_e8s[0]) : 0;
     const volume24h = e8sToNumber(summary.volume_24h_e8s);
-    return [
+    const debt = e8sToNumber(summary.total_debt_e8s);
+    const cr = Number(summary.system_cr_bps);
+    const metrics: { label: string; value: string; sub?: string; tone?: 'normal' | 'good' | 'caution' | 'danger' | 'muted' }[] = [
+      {
+        label: 'System CR',
+        value: bpsToPercent(cr),
+        tone: cr < 14100 ? 'danger' : cr < 15000 ? 'caution' : 'normal',
+      },
       { label: 'TVL', value: `$${formatCompact(tvl)}` },
+      { label: 'Total Debt', value: `${formatCompact(debt)} icUSD` },
       { label: 'icUSD Supply', value: `$${formatCompact(supply)}` },
       { label: '24h Volume', value: `$${formatCompact(volume24h)}` },
       { label: '24h Swaps', value: Number(summary.swap_count_24h).toLocaleString() },
-      { label: 'Peg', value: pegPct, tone: pegTone },
       { label: 'LP APY', value: combinedLpApy != null ? `${combinedLpApy.toFixed(2)}%` : '--', sub: combinedLpApySub },
-      { label: 'SP APY', value: spApy != null ? `${spApy.toFixed(2)}%` : '--', sub: spApySub },
+      { label: 'SP APY', value: spApy != null ? `${Number(spApy).toFixed(2)}%` : '--', sub: spApySub },
+      { label: '3Pool Skew', value: skewPct, sub: 'vs 33/33/33', tone: skewTone },
     ];
+    if (badDebtIcusd != null) {
+      metrics.push({
+        label: 'Bad Debt',
+        value: badDebtIcusd === 0 ? '$0' : `$${formatCompact(badDebtIcusd)}`,
+        sub: badDebtIcusd === 0 ? 'none accrued' : 'repaying via fees',
+        tone: badDebtIcusd === 0 ? 'good' : 'danger',
+      });
+    }
+    if (oracleAgeMin != null) {
+      metrics.push({
+        label: 'Oracle',
+        value: oracleAgeMin < 1 ? '<1m ago' : `${Math.round(oracleAgeMin)}m ago`,
+        sub: 'last price',
+        tone: oracleAgeMin < 10 ? 'good' : oracleAgeMin < 30 ? 'caution' : 'danger',
+      });
+    }
+    if (protocolStatus?.frozen) {
+      metrics.push({ label: 'Liquidations', value: 'Frozen', tone: 'danger' });
+    }
+    if (protocolStatus?.liquidation_breaker_tripped) {
+      metrics.push({ label: 'Liq. Breaker', value: 'Tripped', sub: 'auto-routing paused', tone: 'danger' });
+    }
+    return metrics;
   });
 
   const vaultCountPoints = $derived(
@@ -207,10 +275,9 @@
 <LensHealthStrip
   title="Protocol health"
   metrics={healthMetrics}
+  mode={protocolMode}
   loading={summaryLoading}
 />
-
-<ProtocolVitals {summary} loading={summaryLoading} />
 
 <div class="explorer-card">
   <div class="flex items-center justify-between mb-3">
@@ -223,7 +290,7 @@
   <div class="explorer-card">
     <MiniAreaChart
       points={vaultCountPoints}
-      label="Vaults open (90d)"
+      label="Vaults with debt (90d)"
       color={CHART_COLORS.teal}
       fillColor={CHART_COLORS.tealDim}
       valueFormat={(v) => v.toLocaleString(undefined, { maximumFractionDigits: 0 })}
@@ -249,15 +316,13 @@
     points={feePoints}
     label="Daily protocol fees (90d)"
     color={CHART_COLORS.action}
-    fillColor="rgba(52, 211, 153, 0.15)"
     valueFormat={(v) => `$${formatCompact(v)}`}
     headlineValue={feePoints.reduce((s, p) => s + p.v, 0)}
     height={160}
+    kind="bar"
     loading={seriesLoading}
   />
 </div>
-
-<PoolHealthStrip {pegStatus} {lpApy} {spApy} loading={poolsLoading} />
 
 <LiquidationsOverviewCard />
 

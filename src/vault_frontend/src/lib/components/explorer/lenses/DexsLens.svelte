@@ -8,7 +8,7 @@
   } from '$services/explorer/analyticsService';
   import {
     fetchThreePoolState, fetchThreePoolStats, fetchThreePoolHealth,
-    fetchThreePoolVolumeSeries, fetchThreePoolVirtualPriceSeries,
+    fetchThreePoolVirtualPriceSeries,
     fetchAmmPools, fetchAmmPoolStats, fetchCollateralPrices,
   } from '$services/explorer/explorerService';
   import { CANISTER_IDS } from '$lib/config';
@@ -25,7 +25,6 @@
   let stats: any = $state(null);
   let health: any = $state(null);
   let swapSeries: any[] = $state([]);
-  let volumeSeries: any[] = $state([]);
   let vpSeries: any[] = $state([]);
   let ammPools: any[] = $state([]);
   let ammPoolStats: Record<string, any> = $state({});
@@ -36,13 +35,12 @@
 
   onMount(async () => {
     try {
-      const [pegR, stR, statR, hlR, ssR, vsR, vpR, ammR, apyR, pricesR, psR] = await Promise.allSettled([
+      const [pegR, stR, statR, hlR, ssR, vpR, ammR, apyR, pricesR, psR] = await Promise.allSettled([
         fetchPegStatus(),
         fetchThreePoolState(),
         fetchThreePoolStats('Last24h'),
         fetchThreePoolHealth(),
         fetchSwapSeries(90),
-        fetchThreePoolVolumeSeries('Last7d', 3600n),
         fetchThreePoolVirtualPriceSeries('Last30d', 86400n),
         fetchAmmPools(),
         fetchApys(),
@@ -54,7 +52,6 @@
       if (statR.status === 'fulfilled') stats = statR.value;
       if (hlR.status === 'fulfilled') health = hlR.value;
       if (ssR.status === 'fulfilled') swapSeries = ssR.value ?? [];
-      if (vsR.status === 'fulfilled') volumeSeries = vsR.value ?? [];
       if (vpR.status === 'fulfilled') vpSeries = vpR.value ?? [];
       if (ammR.status === 'fulfilled') {
         ammPools = ammR.value ?? [];
@@ -124,42 +121,6 @@
       total += Number(stats.swap_volume_per_token[i]) / Math.pow(10, tok.decimals);
     }
     return total;
-  });
-
-  // The 3pool's `get_volume_series` only emits buckets that contain swaps.
-  // For a 7d/hourly chart over a low-volume pool that yields just a handful
-  // of points; the line then draws straight between distant non-zero hours
-  // and looks like a perfect linear trend instead of a sparse spike chart.
-  // Pad in explicit zero-value buckets across the full window so the chart
-  // shows what actually happened: brief activity surrounded by zeros.
-  const volumePoints = $derived.by(() => {
-    if (!volumeSeries.length) return [] as { t: number; v: number }[];
-    const valued = volumeSeries.map((p: any) => {
-      let total = 0;
-      for (let i = 0; i < p.volume_per_token.length; i++) {
-        const tok = POOL_TOKENS[i];
-        if (!tok) continue;
-        total += Number(p.volume_per_token[i]) / Math.pow(10, tok.decimals);
-      }
-      // p.timestamp is in nanoseconds; the chart works in ms.
-      return { t: Number(p.timestamp) / 1_000_000, v: total };
-    });
-    valued.sort((a, b) => a.t - b.t);
-    const BUCKET_MS = 3_600_000; // matches the 3600s bucketSecs above
-    const WINDOW_MS = 7 * 24 * 3_600_000;
-    const nowMs = Date.now();
-    const startMs = Math.floor((nowMs - WINDOW_MS) / BUCKET_MS) * BUCKET_MS;
-    const endMs = Math.floor(nowMs / BUCKET_MS) * BUCKET_MS;
-    const valueAt = new Map<number, number>();
-    for (const p of valued) {
-      const bucket = Math.floor(p.t / BUCKET_MS) * BUCKET_MS;
-      valueAt.set(bucket, (valueAt.get(bucket) ?? 0) + p.v);
-    }
-    const out: { t: number; v: number }[] = [];
-    for (let t = startMs; t <= endMs; t += BUCKET_MS) {
-      out.push({ t, v: valueAt.get(t) ?? 0 });
-    }
-    return out;
   });
 
   const vpPoints = $derived(
@@ -326,40 +287,31 @@
 
   <div class="explorer-card">
     <MiniAreaChart
-      points={volumePoints}
-      label="3Pool swap volume (7d / hourly)"
-      color={CHART_COLORS.teal}
-      fillColor={CHART_COLORS.tealDim}
+      points={swapSeriesPoints}
+      label="Daily swap volume (all DEXs, 90d)"
+      color={CHART_COLORS.purple}
       valueFormat={(v) => `$${formatCompact(v)}`}
-      headlineValue={volumePoints.reduce((s, p) => s + p.v, 0)}
+      headlineValue={swapSeriesPoints.reduce((s, p) => s + p.v, 0)}
+      kind="bar"
       loading={loading}
     />
   </div>
 </div>
 
-<div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
-  <div class="explorer-card">
-    <MiniAreaChart
-      points={swapSeriesPoints}
-      label="Daily swap volume (all DEXs, 90d)"
-      color={CHART_COLORS.purple}
-      fillColor={CHART_COLORS.purpleDim}
-      valueFormat={(v) => `$${formatCompact(v)}`}
-      headlineValue={swapSeriesPoints.reduce((s, p) => s + p.v, 0)}
-      loading={loading}
-    />
-  </div>
-  <div class="explorer-card">
-    <MiniAreaChart
-      points={vpPoints}
-      label="3Pool virtual price (30d / daily)"
-      color={CHART_COLORS.action}
-      fillColor="rgba(52, 211, 153, 0.15)"
-      valueFormat={(v) => v.toFixed(6)}
-      loading={loading}
-      yAxisMode="data-fit"
-    />
-  </div>
+<div class="explorer-card">
+  <MiniAreaChart
+    points={vpPoints}
+    label="3Pool virtual price (30d / daily)"
+    color={CHART_COLORS.action}
+    fillColor="rgba(52, 211, 153, 0.15)"
+    valueFormat={(v) => v.toFixed(6)}
+    loading={loading}
+    yAxisMode="data-fit"
+  />
+  <p class="text-xs text-gray-500 mt-2">
+    The 3USD redemption value per LP share — it only climbs, compounding as swap fees
+    and interest donations accrue to the pool.
+  </p>
 </div>
 
 {#if ammSummary.length > 0}
