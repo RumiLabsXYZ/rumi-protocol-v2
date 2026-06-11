@@ -11,7 +11,7 @@ use icrc_ledger_types::icrc2::approve::ApproveArgs;
 // Import necessary types from the codebase
 use rumi_protocol_backend::{
     vault::{OpenVaultSuccess, CandidVault, VaultArg},
-    ProtocolError, SuccessWithFee, Fees, GetEventsArg, LiquidityStatus,
+    CollateralTotals, ProtocolError, SuccessWithFee, Fees, GetEventsArg, LiquidityStatus,
     AddCollateralArg, StabilityPoolLiquidationResult,
 };
 use rumi_protocol_backend::event::Event;
@@ -1499,16 +1499,18 @@ fn test_add_margin_to_vault() {
     log("🎉 TEST PASSED: test_add_margin_to_vault");
 }
 
-// Test for closing a vault after repaying all debt.
+// Test for closing a vault after repaying all debt and withdrawing all
+// collateral (a June-2025 protocol change requires collateral to be
+// withdrawn before close).
 //
-// Pre-existing test failure: a June-2025 protocol change requires vault
-// collateral to be withdrawn before close. This test does not withdraw and
-// fails with "Cannot close vault with remaining collateral. Withdraw collateral
-// first." Marked #[ignore] so the pre-deploy hook can run pocket_ic_tests
-// cleanly. Tracked for follow-up: insert a withdraw_partial_collateral step
-// after the repayment and re-enable.
+// Also a regression fence for two bugs fixed 2026-06-11:
+//  * the endpoint double-removed the vault (inline in vault.rs, then again
+//    via record_close_vault -> state::close_vault) so every bare close_vault
+//    call hit the "tried to close unknown vault" trap and rolled back;
+//  * close paths never removed the vault id from collateral_to_vault_ids,
+//    inflating get_collateral_totals().vault_count (mainnet: 185 indexed ids
+//    vs 82 open vaults).
 #[test]
-#[ignore = "pre-existing: needs collateral-withdraw step before close per Jun-2025 protocol change"]
 fn test_close_vault() {
     log("🧪 TEST STARTING: test_close_vault");
     
@@ -1595,7 +1597,30 @@ fn test_close_vault() {
     // Step 6: Verify vault has no debt
     let vault_after_repay = get_vault(&pic, protocol_id, test_user, vault_id);
     assert_eq!(vault_after_repay.borrowed_icusd_amount, 0, "Vault should have no debt after full repayment");
-    
+
+    // Step 6.5: Withdraw all collateral — close_vault requires an empty vault
+    log("💸 Withdrawing all collateral before close");
+    let encoded_withdraw_args = match encode_args((vault_id,)) {
+        Ok(bytes) => bytes,
+        Err(e) => panic!("Failed to encode withdraw_collateral args: {}", e),
+    };
+    match pic.update_call(
+        protocol_id,
+        test_user,
+        "withdraw_collateral",
+        encoded_withdraw_args
+    ) {
+        Ok(WasmResult::Reply(bytes)) => {
+            match decode_one::<Result<u64, ProtocolError>>(&bytes) {
+                Ok(Ok(block_index)) => log(&format!("✅ Collateral withdrawn, block index: {}", block_index)),
+                Ok(Err(e)) => panic!("Error in withdraw_collateral result: {:?}", e),
+                Err(e) => panic!("Failed to decode withdraw_collateral response: {}", e),
+            }
+        },
+        Ok(WasmResult::Reject(error)) => panic!("Canister rejected withdraw_collateral call: {}", error),
+        Err(e) => panic!("Failed to call withdraw_collateral: {}", e),
+    };
+
     // Step 7: Close the vault
     log("🔒 Closing vault");
     let encoded_close_vault_args = match encode_args((vault_id,)) {
@@ -1661,14 +1686,36 @@ fn test_close_vault() {
         WasmResult::Reject(error) => panic!("Canister rejected get_vaults call: {}", error),
     };
     
-    // Either the vault should be gone or it should have 0 margin and 0 borrowing
-    for vault in &vaults {
-        if vault.vault_id == vault_id {
-            assert_eq!(vault.icp_margin_amount, 0, "Closed vault should have 0 margin");
-            assert_eq!(vault.borrowed_icusd_amount, 0, "Closed vault should have 0 borrowed amount");
-        }
-    }
-    
+    assert!(
+        vaults.iter().all(|v| v.vault_id != vault_id),
+        "Closed vault must be removed, not left as a zero-balance shell",
+    );
+
+    // Step 10: The collateral index must not retain the closed vault's id.
+    // get_collateral_totals counts straight off collateral_to_vault_ids —
+    // this is the count that drifted to 185-vs-82 on mainnet.
+    let totals_result = match pic.query_call(
+        protocol_id,
+        test_user,
+        "get_collateral_totals",
+        encode_args(()).unwrap()
+    ) {
+        Ok(result) => result,
+        Err(e) => panic!("Failed to call get_collateral_totals: {}", e),
+    };
+    let totals: Vec<CollateralTotals> = match totals_result {
+        WasmResult::Reply(bytes) => match decode_one(&bytes) {
+            Ok(decoded) => decoded,
+            Err(e) => panic!("Failed to decode collateral totals: {}", e),
+        },
+        WasmResult::Reject(error) => panic!("Canister rejected get_collateral_totals call: {}", error),
+    };
+    let indexed_vaults: u64 = totals.iter().map(|t| t.vault_count).sum();
+    assert_eq!(
+        indexed_vaults, 0,
+        "collateral_to_vault_ids must not retain ids for closed vaults",
+    );
+
     log("🎉 TEST PASSED: test_close_vault");
 }
 
@@ -2297,15 +2344,12 @@ fn test_borrow_against_cketh_vault() {
     log("🎉 TEST PASSED: test_borrow_against_cketh_vault");
 }
 
-/// Full lifecycle: open ckETH vault -> borrow -> repay -> close.
-/// Verifies all state transitions and that collateral is returned on close.
-//
-// Pre-existing test failure (same root cause as test_close_vault above): the
-// June-2025 close-vault change requires collateral to be withdrawn first.
-// Marked #[ignore] for the pre-deploy hook. Tracked for follow-up: insert a
-// withdraw_partial_collateral step before close_vault and re-enable.
+/// Full lifecycle: open ckETH vault -> borrow -> repay -> withdraw -> close.
+/// Verifies all state transitions, that collateral is returned on withdraw
+/// (the June-2025 close-vault change requires an emptied vault), and that
+/// the closed vault leaves no id behind in collateral_to_vault_ids — for a
+/// non-ICP index bucket.
 #[test]
-#[ignore = "pre-existing: needs collateral-withdraw step before close per Jun-2025 protocol change"]
 fn test_cketh_vault_full_lifecycle() {
     log("🧪 TEST STARTING: test_cketh_vault_full_lifecycle");
     let (pic, protocol_id, _icp_ledger_id, icusd_ledger_id, cketh_ledger_id) =
@@ -2389,10 +2433,32 @@ fn test_cketh_vault_full_lifecycle() {
     let vault = get_vault(&pic, protocol_id, test_user, vault_id);
     assert_eq!(vault.borrowed_icusd_amount, 0, "Vault debt should be zero after full repayment");
 
-    // --- Step 4: Close vault ---
-    // Record ckETH balance before close
+    // --- Step 3.5: Withdraw all collateral (close requires an empty vault) ---
     let cketh_before = get_icp_balance(&pic, cketh_ledger_id, test_user);
 
+    let encoded_withdraw = encode_args((vault_id,)).unwrap();
+    let withdraw_result = pic
+        .update_call(protocol_id, test_user, "withdraw_collateral", encoded_withdraw)
+        .expect("Failed to call withdraw_collateral");
+    match withdraw_result {
+        WasmResult::Reply(bytes) => {
+            let res: Result<u64, ProtocolError> =
+                decode_one(&bytes).expect("Failed to decode withdraw_collateral response");
+            let block_index = res.expect("withdraw_collateral returned error");
+            log(&format!("📌 Step 3.5: Collateral withdrawn, block_index: {}", block_index));
+        }
+        WasmResult::Reject(msg) => panic!("withdraw_collateral rejected: {}", msg),
+    }
+
+    // Check that ckETH was returned by the withdrawal
+    let cketh_after = get_icp_balance(&pic, cketh_ledger_id, test_user);
+    log(&format!("💰 ckETH balance before withdraw: {}, after: {}", cketh_before, cketh_after));
+    assert!(
+        cketh_after > cketh_before,
+        "ckETH balance should increase after withdrawing collateral"
+    );
+
+    // --- Step 4: Close vault ---
     let encoded_close = encode_args((vault_id,)).unwrap();
     let close_result = pic
         .update_call(protocol_id, test_user, "close_vault", encoded_close)
@@ -2412,12 +2478,22 @@ fn test_cketh_vault_full_lifecycle() {
         WasmResult::Reject(msg) => panic!("close_vault rejected: {}", msg),
     }
 
-    // Check that ckETH was returned
-    let cketh_after = get_icp_balance(&pic, cketh_ledger_id, test_user);
-    log(&format!("💰 ckETH balance before close: {}, after close: {}", cketh_before, cketh_after));
-    assert!(
-        cketh_after > cketh_before,
-        "ckETH balance should increase after closing vault (collateral returned)"
+    // --- Step 5: The ckETH index bucket must not retain the closed vault ---
+    let totals_result = pic
+        .query_call(protocol_id, test_user, "get_collateral_totals", encode_args(()).unwrap())
+        .expect("Failed to call get_collateral_totals");
+    let totals: Vec<CollateralTotals> = match totals_result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("Failed to decode collateral totals"),
+        WasmResult::Reject(msg) => panic!("get_collateral_totals rejected: {}", msg),
+    };
+    let cketh_indexed = totals
+        .iter()
+        .find(|t| t.collateral_type == cketh_ledger_id)
+        .map(|t| t.vault_count)
+        .unwrap_or(0);
+    assert_eq!(
+        cketh_indexed, 0,
+        "ckETH collateral index must not retain ids for closed vaults"
     );
 
     log("🎉 TEST PASSED: test_cketh_vault_full_lifecycle");

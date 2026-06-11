@@ -1433,6 +1433,13 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                     vault.collateral_amount = vault.collateral_amount.saturating_sub(total_collateral_seized);
                     vault.accrued_interest = vault.accrued_interest.saturating_sub(interest_share);
                 }
+                // Shared drain rule (see state::cleanup_if_drained): every
+                // runtime path that records PartialLiquidateVault removes the
+                // vault when the liquidation emptied it, so replay must apply
+                // the identical rule — otherwise replayed state keeps shell
+                // vaults and stale secondary-index ids that live state does
+                // not have.
+                state.cleanup_if_drained(vault_id);
                 // Track 3USD reserves from stability pool liquidations
                 if let Some(reserves_e8s) = three_usd_reserves_e8s {
                     state.protocol_3usd_reserves += reserves_e8s;
