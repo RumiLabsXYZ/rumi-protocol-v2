@@ -36,28 +36,23 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">How It Works</h2>
-    <p>The bot uses a <strong>credit-based</strong> liquidation model. Unlike manual liquidators who must have icUSD upfront, the bot receives collateral first and then sells it to generate icUSD:</p>
+    <p>The bot uses a <strong>credit-based</strong> liquidation model. Unlike manual liquidators who must have icUSD upfront, the bot receives collateral first and then sells it to repay the protocol:</p>
     <ol class="flow-list">
       <li><strong>Notification</strong> — The backend detects an unhealthy vault during its price check and sends the vault details to the bot.</li>
       <li><strong>Liquidation on credit</strong> — The bot calls the backend to liquidate the vault. The backend reduces the vault's debt, seizes the proportional collateral (plus the liquidation bonus), and transfers the ICP directly to the bot. No icUSD is needed upfront.</li>
-      <li><strong>Swap ICP for stablecoin</strong> — The bot sells the seized ICP on <a href="https://kongswap.io" class="doc-link" target="_blank" rel="noopener">KongSwap</a> for either ckUSDC or ckUSDT, whichever offers the better rate.</li>
-      <li><strong>Swap stablecoin for icUSD</strong> — The bot swaps the ckStable for icUSD through Rumi's own <a href="/docs/three-pool" class="doc-link">3pool</a>.</li>
-      <li><strong>Deposit to reserves</strong> — The icUSD is deposited back into the protocol's reserves, covering the debt that was erased in step 2.</li>
+      <li><strong>Swap ICP for ckUSDC</strong> — The bot sells the seized ICP for ckUSDC in a single-hop swap on <a href="https://app.icpswap.com" class="doc-link" target="_blank" rel="noopener">ICPSwap</a>, with a configured maximum slippage bound.</li>
+      <li><strong>Deposit to reserves</strong> — The ckUSDC is deposited back into the protocol's stablecoin reserves, covering the debt that was erased in step 2. (Those same reserves back <a href="/docs/redemptions" class="doc-link">reserve redemptions</a>.)</li>
       <li><strong>Surplus to treasury</strong> — Any remaining ICP (from the liquidation bonus exceeding the debt) is sent to the protocol treasury.</li>
     </ol>
   </section>
 
   <section class="doc-section">
-    <h2 class="doc-heading">Best-Rate Selection</h2>
-    <p>Before executing a swap, the bot queries KongSwap for quotes on both ICP/ckUSDC and ICP/ckUSDT pairs. It selects whichever pair yields more stablecoin output, ensuring the protocol gets the best available rate at the time of liquidation.</p>
-  </section>
-
-  <section class="doc-section">
     <h2 class="doc-heading">Failure Escalation</h2>
-    <p>The bot follows a <strong>no-retry</strong> policy. If any step of the liquidation fails (DEX swap reverts, transfer error, etc.), the bot does not retry that vault. Instead, the escalation chain is:</p>
+    <p>The bot makes <strong>one liquidation attempt per vault</strong>. If the DEX swap fails, the bot returns the seized ICP to the backend, verifies the funds actually arrived, and only then cancels the liquidation (restoring the vault's debt and collateral). It does not try to liquidate that vault again. Individual call phases (claiming, confirming, cancelling) have small bounded retries to ride out transient network errors, but a failed liquidation is never re-run.</p>
+    <p>The escalation chain after a bot failure is:</p>
     <ol class="flow-list">
-      <li><strong>Bot fails</strong> — The vault remains undercollateralized.</li>
-      <li><strong>Stability Pool</strong> — On the next price check cycle (up to 5 minutes), the backend notifies the stability pool, which can liquidate using depositors' funds.</li>
+      <li><strong>Bot fails</strong> — The collateral is returned, the liquidation is cancelled, and the vault remains undercollateralized.</li>
+      <li><strong>Stability Pool</strong> — On the next price check cycle (up to 5 minutes), the backend routes the vault to the stability pool, which gets one attempt using depositors' funds.</li>
       <li><strong>Manual liquidation</strong> — If neither the bot nor the stability pool handles it, the vault appears on the <a href="/liquidations" class="doc-link">Manual Liquidation</a> page where any user can liquidate it directly.</li>
     </ol>
     <p>This design avoids compounding failures. If a DEX is down or liquidity is thin, repeatedly retrying the same swap would waste cycles and could leave partial state. Failing fast and escalating is safer.</p>
@@ -65,7 +60,7 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Budget</h2>
-    <p>The bot operates within a configurable monthly budget that limits total debt it can cover. This prevents runaway spending if market conditions cause a cascade of liquidations. The budget is set by the protocol admin and can be reset or adjusted at any time.</p>
+    <p>The bot operates within a configurable budget, enforced by the backend at claim time, that limits the total debt it can cover. This prevents runaway spending if market conditions cause a cascade of liquidations. The budget is set by the protocol admin and can be reset or adjusted at any time.</p>
     {#if loaded && stats}
       <div class="stats-card">
         <div class="stat-row">
@@ -87,11 +82,11 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Liquidation Priority</h2>
-    <p>When the protocol detects undercollateralized vaults, it notifies <strong>both</strong> the liquidation bot and the stability pool simultaneously. The bot processes vaults on a 30-second timer cycle. In practice, the bot typically acts first because it doesn't require human intervention, but the stability pool serves as a reliable backup.</p>
+    <p>When the protocol detects undercollateralized vaults, it notifies the liquidation bot first (for collateral types the bot supports). The bot processes its queue on a 30-second timer cycle. Vaults the bot doesn't handle within a 5-minute window, or can't handle at all, are routed to the stability pool on the next check cycle.</p>
     <p>The priority chain is:</p>
     <ol class="flow-list">
-      <li><strong>Liquidation Bot</strong> — Automated, fastest response. Credit-based (no upfront capital). Limited by budget.</li>
-      <li><strong>Stability Pool</strong> — Automated on next cycle. Uses depositors' stablecoins. No budget limit (constrained by pool size).</li>
+      <li><strong>Liquidation Bot</strong> — Automated, fastest response. Credit-based (no upfront capital). Limited by budget and to admin-approved collateral types.</li>
+      <li><strong>Stability Pool</strong> — Automated fallback, one attempt per vault. Uses depositors' stablecoins. No budget limit (constrained by pool size).</li>
       <li><strong>Manual Liquidators</strong> — Any user with icUSD, ckUSDC, or ckUSDT can liquidate directly. Available 24/7 via the <a href="/liquidations" class="doc-link">Liquidate</a> page.</li>
     </ol>
   </section>
@@ -109,8 +104,8 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Risks</h2>
-    <p><strong>DEX liquidity risk:</strong> The bot relies on KongSwap and the 3pool for swapping collateral. If either pool has insufficient liquidity, the swap may fail or execute with high slippage, reducing the icUSD recovered. A maximum slippage tolerance is configured to prevent unacceptable trades.</p>
-    <p><strong>Price movement during swap:</strong> There is a delay between seizing collateral and completing the swap chain. If the collateral price drops significantly during this window, the bot may recover less icUSD than the debt it covered, creating a deficit.</p>
+    <p><strong>DEX liquidity risk:</strong> The bot relies on ICPSwap's ICP/ckUSDC pool for swapping collateral. If the pool has insufficient liquidity, the swap may fail or execute with high slippage, reducing the value recovered. A maximum slippage tolerance is configured to prevent unacceptable trades.</p>
+    <p><strong>Price movement during swap:</strong> There is a delay between seizing collateral and completing the swap. If the collateral price drops significantly during this window, the bot may recover less than the debt it covered, creating a deficit that is tracked in the protocol's <a href="/docs/liquidation" class="doc-link">deficit account</a>.</p>
     <p><strong>Smart contract risk:</strong> The liquidation bot is a separate canister with its own code. Bugs in the swap logic, amount calculations, or inter-canister calls could result in failed liquidations or lost funds.</p>
     <p><strong>Budget exhaustion:</strong> If many vaults become undercollateralized simultaneously (e.g., a market crash), the bot's budget may run out before all vaults are processed. Remaining vaults fall through to the stability pool and manual liquidators.</p>
   </section>

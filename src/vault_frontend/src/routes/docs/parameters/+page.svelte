@@ -56,6 +56,7 @@
       case 'stability_pool': return 'Stability Pool';
       case 'treasury': return 'Treasury';
       case 'three_pool': return '3pool';
+      case 'amm1': return 'AMM LPs';
       default: return dest;
     }
   }
@@ -441,6 +442,10 @@
         <span class="param-label">Liquidation Protocol Fee <span class="tip" data-tip="A percentage of the liquidation bonus (penalty) that goes to the protocol treasury. For example, if the bonus is 15% and the protocol fee is 3%, the liquidator receives 97% of the bonus and the protocol keeps 3%.">?</span></span>
         <span class="param-val live">{pctRaw(liquidationProtocolShare)} of liquidation bonus</span>
       </div>
+      <div class="param">
+        <span class="param-label">Liquidation Surge Breaker <span class="tip" data-tip="If the total icUSD debt cleared by liquidations within a rolling 30-minute window crosses an admin-set ceiling, automatic routing to the bot and stability pool is paused until an operator resets the breaker. Manual liquidation stays open.">?</span></span>
+        <span class="param-val">30-min window, admin-set ceiling</span>
+      </div>
     </div>
   </section>
 
@@ -478,15 +483,15 @@
     <h2 class="doc-heading">Interest & Revenue</h2>
     <div class="params-table">
       <div class="param">
-        <span class="param-label">Interest Accrual <span class="tip" data-tip="Interest is applied to vault debt before every mutation (borrow, repay, withdraw, liquidation) and ticked forward every 5 minutes by a background timer.">?</span></span>
-        <span class="param-val">Continuous (5-min tick + on-demand)</span>
+        <span class="param-label">Interest Accrual <span class="tip" data-tip="Interest is applied to vault debt before every mutation (borrow, repay, withdraw, liquidation) and ticked forward every 60 seconds by a background timer. The cadence is admin-tunable.">?</span></span>
+        <span class="param-val">Continuous (60s tick + on-demand)</span>
       </div>
       <div class="param">
         <span class="param-label">Interest Rate Layers <span class="tip" data-tip="Layer 1: per-vault multiplier based on how close the vault's CR is to liquidation (higher rate for riskier vaults). Layer 2: system-wide multiplier active during Recovery Mode.">?</span></span>
         <span class="param-val">Per-vault CR curve + Recovery multiplier</span>
       </div>
       <div class="param">
-        <span class="param-label">Interest Revenue Split <span class="tip" data-tip="Interest revenue is split between the 3pool (donated as icUSD, boosting LP token value), stability pool depositors (minted as icUSD), and the protocol treasury. This split is admin-configurable.">?</span></span>
+        <span class="param-label">Interest Revenue Split <span class="tip" data-tip="Interest revenue is split between stability pool icUSD depositors (minted as icUSD), the 3pool (donated, boosting 3USD value), AMM liquidity providers (claimable icUSD rewards), and the protocol treasury. This split is admin-configurable.">?</span></span>
         <span class="param-val live">{#each interestSplit as entry, i}{#if i > 0} / {/if}{(Number(entry.bps) / 100).toFixed(0)}% {destLabel(entry.destination)}{/each}</span>
       </div>
     </div>
@@ -570,7 +575,7 @@
       </div>
       <div class="param">
         <span class="param-label">LP Token</span>
-        <span class="param-val">3USD (ICRC-1)</span>
+        <span class="param-val">3USD (ICRC-1/2/3, 8 decimals)</span>
       </div>
       <div class="param">
         <span class="param-label">Swap Fee <span class="tip" data-tip="Fee charged on each swap, in basis points. For example, 4 bps = 0.04%. Admin-configurable via set_swap_fee.">?</span></span>
@@ -615,7 +620,7 @@
       <div class="param"><span class="param-label">Stablecoin (minted)</span><span class="param-val">icUSD</span></div>
       <div class="param"><span class="param-label">Repayment & Liquidation</span><span class="param-val">icUSD, ckUSDT, ckUSDC</span></div>
       <div class="param">
-        <span class="param-label">ckStable Depeg Rejection <span class="tip" data-tip="If ckUSDT or ckUSDC is trading outside this range, the protocol rejects it for repayment or liquidation to protect against depeg events. Stablecoin prices are cached for up to 60 seconds (vs 30s for collateral).">?</span></span>
+        <span class="param-label">ckStable Depeg Rejection <span class="tip" data-tip="If ckUSDT or ckUSDC is trading outside this range, the protocol rejects it for repayment or liquidation to protect against depeg events. Stablecoin prices are fetched on demand and cached for up to 60 seconds.">?</span></span>
         <span class="param-val">Outside $0.95 – $1.05</span>
       </div>
     </div>
@@ -652,27 +657,35 @@
       </div>
       <div class="param">
         <span class="param-label">On-Demand Freshness <span class="tip" data-tip="Operations like borrowing and liquidation trigger a fresh price fetch if the cached price is older than this. Ensures operations use recent data.">?</span></span>
-        <span class="param-val">30 seconds</span>
+        <span class="param-val">60 seconds</span>
       </div>
       <div class="param">
-        <span class="param-label">Stale Price Rejection <span class="tip" data-tip="If the latest price is older than this, the protocol rejects all state-changing operations until a fresh price is obtained. This prevents operations based on dangerously outdated prices.">?</span></span>
+        <span class="param-label">Stale Price Rejection <span class="tip" data-tip="If the latest price for a collateral type is older than this, the protocol rejects state-changing operations on it until a fresh price is obtained. Applies to every collateral type, including derived prices like nICP.">?</span></span>
         <span class="param-val">10 minutes</span>
+      </div>
+      <div class="param">
+        <span class="param-label">Minimum XRC Sources <span class="tip" data-tip="Prices reported by the XRC from fewer than this many underlying exchange sources are rejected. The floor can be overridden per collateral type for assets with naturally fewer listings.">?</span></span>
+        <span class="param-val">3 sources (per-collateral override)</span>
+      </div>
+      <div class="param">
+        <span class="param-label">Oracle Circuit Breaker <span class="tip" data-tip="Three consecutive failed price fetches (errors or too-few-sources rejections) flip the protocol into Read-Only mode. The breaker clears automatically on the next successful fetch.">?</span></span>
+        <span class="param-val">3 consecutive failures → Read-Only</span>
       </div>
       <div class="param">
         <span class="param-label">Read-Only Price Floor <span class="tip" data-tip="If the oracle reports a price below this level, the protocol enters Read-Only mode and halts all operations as a safety measure.">?</span></span>
         <span class="param-val">$0.01</span>
       </div>
       <div class="param">
-        <span class="param-label">Stuck Transfer Timeout <span class="tip" data-tip="If a collateral or icUSD transfer fails and isn't successfully retried within this time, it may require manual intervention.">?</span></span>
-        <span class="param-val">15 minutes</span>
+        <span class="param-label">Failed Transfer Retries <span class="tip" data-tip="Failed collateral or icUSD transfers are queued and retried every 5 seconds, up to 60 attempts (~5 minutes). Transfers still failing after that are flagged for manual intervention.">?</span></span>
+        <span class="param-val">5s interval, up to 60 attempts</span>
       </div>
       <div class="param">
-        <span class="param-label">Health Monitor Interval <span class="tip" data-tip="A background process that checks for stuck transfers, under-collateralized vaults, and other health issues.">?</span></span>
+        <span class="param-label">Vault Health Sweep <span class="tip" data-tip="A background timer that scans at-risk vaults for liquidation eligibility and refreshes aggregate health snapshots. Admin-tunable cadence.">?</span></span>
         <span class="param-val">5 minutes</span>
       </div>
       <div class="param">
-        <span class="param-label">Operation Concurrency <span class="tip" data-tip="Each user can only have one vault operation in-flight at a time. If you submit a second operation before the first completes, it will fail with 'AlreadyProcessing'. Guards auto-release after 2.5 minutes for the same user, with a hard 5-minute expiry. The system supports up to 100 concurrent operations across all users.">?</span></span>
-        <span class="param-val">1 per user / 100 global (5-min guard timeout)</span>
+        <span class="param-label">Operation Concurrency <span class="tip" data-tip="Each user can only have one vault operation in-flight at a time. If you submit a second operation before the first completes, it will fail with 'AlreadyProcessing'. Guards auto-release after 2.5 minutes for the same user, with a hard 5-minute expiry. The system supports up to 100 concurrent operations across all users. Additionally, all operations touching a given vault (owner ops, liquidations, redemptions) are serialized per vault.">?</span></span>
+        <span class="param-val">1 per user / 100 global / per-vault lock</span>
       </div>
     </div>
   </section>
@@ -689,8 +702,8 @@
         <span class="param-val">Total CR &lt; <span class="live">{crPct(recoveryModeThreshold)}</span></span>
       </div>
       <div class="param">
-        <span class="param-label">Read-Only <span class="tip" data-tip="Emergency mode where all state-changing operations are paused. Triggered by extreme under-collateralization or oracle failure.">?</span></span>
-        <span class="param-val">Total CR &lt; 100% or oracle failure</span>
+        <span class="param-label">Read-Only <span class="tip" data-tip="Emergency mode where all state-changing operations are paused. Triggered by total CR below 100%, an oracle price below $0.01, the oracle circuit breaker (3 consecutive failed fetches), or accumulated bad debt crossing an admin-set threshold.">?</span></span>
+        <span class="param-val">CR &lt; 100%, oracle failure, or bad-debt threshold</span>
       </div>
       <div class="param">
         <span class="param-label">Frozen <span class="tip" data-tip="Emergency kill-switch activated manually by the protocol admin. All state-changing operations are paused until the admin unfreezes the protocol.">?</span></span>

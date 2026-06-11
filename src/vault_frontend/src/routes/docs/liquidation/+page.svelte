@@ -50,17 +50,17 @@
   <section class="doc-section">
     <h2 class="doc-heading">When Liquidation Happens</h2>
     <p>A vault becomes eligible for liquidation when its collateral ratio drops below the <a href="/docs/parameters" class="doc-link">liquidation threshold</a> for that collateral type. Each collateral has its own threshold; see <a href="/docs/parameters" class="doc-link">Protocol Parameters</a> for the current values. In Recovery mode, the threshold rises to the <a href="/docs/parameters" class="doc-link">borrowing threshold</a> for each type.</p>
-    <p>The protocol checks vault health every time collateral prices update, approximately every 5 minutes via background polling. Price-sensitive operations (liquidations, borrows, etc.) also trigger an on-demand price refresh if the cached price is older than 30 seconds. Liquidation is not instant on price movement. It depends on the next price update.</p>
-    <p>Interest accrual also affects vault health. Since interest increases your debt over time, a vault sitting just above the liquidation threshold can drift below it purely from accrued interest, even without any price change. Interest is applied before every vault operation and ticked forward every 5 minutes.</p>
+    <p>The protocol checks vault health every time collateral prices update, approximately every 5 minutes via background polling. Price-sensitive operations (liquidations, borrows, etc.) also trigger an on-demand price refresh if the cached price is older than 60 seconds. Liquidation is not instant on price movement. It depends on the next price update.</p>
+    <p>Interest accrual also affects vault health. Since interest increases your debt over time, a vault sitting just above the liquidation threshold can drift below it purely from accrued interest, even without any price change. Interest is applied before every vault operation and ticked forward every 60 seconds.</p>
   </section>
 
   <section class="doc-section">
     <h2 class="doc-heading">Who Liquidates</h2>
-    <p>The protocol uses a three-tier liquidation system. When an unhealthy vault is detected, all tiers are notified simultaneously, but they typically act in this order:</p>
+    <p>The protocol uses a three-tier liquidation cascade. Each tier gets one attempt per vault, in order:</p>
     <ol class="flow-list">
-      <li><strong><a href="/docs/liquidation-bot" class="doc-link">Liquidation Bot</a></strong> — An autonomous canister that liquidates vaults on credit, swaps collateral for icUSD via DEXes, and deposits the proceeds back to protocol reserves. Handles most liquidations within minutes.</li>
-      <li><strong><a href="/docs/stability-pool" class="doc-link">Stability Pool</a></strong> — Uses depositors' stablecoins to cover vault debt. Acts as backup if the bot fails or runs out of budget.</li>
-      <li><strong>Manual Liquidators</strong> — Any user can liquidate directly via the <a href="/liquidations" class="doc-link">Liquidate</a> page using icUSD, ckUSDC, or ckUSDT.</li>
+      <li><strong><a href="/docs/liquidation-bot" class="doc-link">Liquidation Bot</a></strong> — Notified first for supported collateral types. An autonomous canister that liquidates vaults on credit, sells the seized collateral on a DEX, and deposits the proceeds back to protocol reserves. Handles most liquidations within minutes.</li>
+      <li><strong><a href="/docs/stability-pool" class="doc-link">Stability Pool</a></strong> — Receives vaults the bot can't or doesn't handle: unsupported collateral types, bot failures, exhausted budget, or vaults the bot hasn't processed within its 5-minute window. The pool gets exactly one attempt per vault; if it fails, the vault is not retried.</li>
+      <li><strong>Manual Liquidators</strong> — Vaults that fall through both automated tiers land in the manual queue, where any user can liquidate directly via the <a href="/liquidations" class="doc-link">Liquidate</a> page using icUSD, ckUSDC, or ckUSDT.</li>
     </ol>
     <p>The sections below describe the mechanics that apply to all liquidation methods.</p>
   </section>
@@ -104,20 +104,25 @@
     <p>The protocol operates in one of four modes based on the system-wide total collateral ratio. The Recovery mode threshold (currently <span class="live">{recoveryPct}%</span>) is dynamic: it is a debt-weighted average of all collateral types' borrowing thresholds, so it shifts as the system's collateral composition changes. See <a href="/docs/parameters" class="doc-link">Protocol Parameters</a> for details.</p>
     <p><strong>General Availability:</strong> total CR is above the Recovery mode threshold. Normal operations. Liquidation uses each collateral type's own <a href="/docs/parameters" class="doc-link">liquidation ratio</a>.</p>
     <p><strong>Recovery:</strong> total CR drops below the Recovery mode threshold. Liquidation threshold rises to the <a href="/docs/parameters" class="doc-link">borrowing threshold</a> for each type. The minimum collateral ratio for new borrows and withdrawals is raised to the <a href="/docs/parameters" class="doc-link">Recovery Target CR</a>. Vaults between the liquidation ratio and borrowing threshold get targeted partial liquidation.</p>
-    <p><strong>Read-Only:</strong> total CR drops below 100%, or the oracle reports a price below $0.01. All state-changing operations are paused. No new borrows, no liquidations. The protocol waits for conditions to improve.</p>
+    <p><strong>Read-Only:</strong> all state-changing operations are paused. No new borrows, no liquidations, no redemptions. Read-Only is triggered by any of: total CR dropping below 100%, the oracle reporting a price below $0.01, the oracle circuit breaker (three consecutive failed price fetches; this one clears automatically when the oracle recovers), or accumulated bad debt crossing an admin-set threshold. The protocol waits for conditions to improve.</p>
     <p><strong>Frozen:</strong> emergency kill-switch activated manually by the protocol admin. All state-changing operations are halted until the admin unfreezes the protocol.</p>
   </section>
 
   <section class="doc-section">
-    <h2 class="doc-heading">Redistribution</h2>
-    <p>If a vault is deeply undercollateralized and no liquidator steps in, the protocol can <strong>redistribute</strong> the vault's remaining debt and collateral across all other vaults of the same collateral type. Each surviving vault absorbs a share proportional to its own collateral:</p>
-    <p class="doc-formula">share = your collateral &divide; total other vault collateral</p>
-    <p>Your vault gains both extra collateral and extra debt from the redistributed vault. The net effect is a slight decrease in your collateral ratio. Redistribution is a last resort. It protects the protocol from bad debt but spreads the cost across all vault owners.</p>
+    <h2 class="doc-heading">Liquidation Surge Breaker</h2>
+    <p>The protocol tracks the total icUSD debt cleared by liquidations in a rolling window (30 minutes by default). If that total crosses an admin-set ceiling, a circuit breaker trips: the protocol stops routing new vaults to the liquidation bot and stability pool until an operator reviews the situation and resets the breaker. Manual liquidation stays open the whole time, so genuinely unhealthy vaults can still be cleared.</p>
+    <p>This is a safety backstop against cascading or erroneous mass liquidations (for example, from a bad oracle print). It does not change your vault's liquidation threshold.</p>
+  </section>
+
+  <section class="doc-section">
+    <h2 class="doc-heading">Bad Debt Accounting</h2>
+    <p>If a liquidation or redemption clears more debt than the seized collateral was worth (deep undercollateralization), the shortfall is recorded in a protocol-level <strong>deficit account</strong> rather than being silently absorbed. A configurable fraction of protocol fees is routed to paying this deficit down over time, and if the deficit ever crosses an admin-set threshold, the protocol enters Read-Only mode until operators intervene.</p>
+    <p class="doc-note">An older mechanism that redistributed a failed vault's debt and collateral across all other vaults of the same collateral type still exists in the codebase, but it is not wired to any automatic trigger today. Bad debt is handled through the deficit account instead.</p>
   </section>
 
   <section class="doc-section">
     <h2 class="doc-heading">Transfer Processing</h2>
-    <p>When a liquidation occurs, the protocol attempts to transfer collateral to the liquidator immediately. If the transfer fails (e.g., due to a temporary ledger issue), the transfer is queued and retried with exponential backoff (1s, 2s, 4s, 8s, 16s). A health monitor also checks for stuck transfers every 5 minutes as a fallback.</p>
+    <p>When a liquidation occurs, the protocol attempts to transfer collateral to the liquidator immediately. If the transfer fails (e.g., due to a temporary ledger issue), it is queued and retried every 5 seconds, up to 60 attempts (about 5 minutes of retries). Transfers that still fail after that are flagged in the logs for manual intervention by the protocol admin.</p>
   </section>
 </article>
 
