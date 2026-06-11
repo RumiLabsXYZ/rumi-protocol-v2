@@ -23,6 +23,15 @@
      * the sum across the visible window.
      */
     headlineValue?: number;
+    /**
+     * 'area' draws the usual line+fill — right for levels (TVL, deposits)
+     * where interpolation between points is meaningful. 'bar' draws one bar
+     * per bucket — right for discrete per-bucket sums (daily fees, daily
+     * swap volume, liquidation counts) where a connecting line would imply
+     * continuous accrual that didn't happen. Bar mode is always
+     * zero-anchored.
+     */
+    kind?: 'area' | 'bar';
   }
   let {
     points,
@@ -35,6 +44,7 @@
     loading = false,
     yAxisMode = 'zero-anchored',
     headlineValue,
+    kind = 'area',
   }: Props = $props();
 
   const padX = 8;
@@ -113,6 +123,11 @@
 
   const latest = $derived(points.length ? points[points.length - 1].v : 0);
   const headline = $derived(headlineValue ?? latest);
+
+  // Bar geometry: bars are centered on each bucket's x with a 30% gap.
+  const barW = $derived(
+    points.length ? Math.max(1.5, ((width - padX * 2) / points.length) * 0.7) : 0
+  );
 </script>
 
 <div class="space-y-2">
@@ -137,7 +152,20 @@
       </div>
     {:else}
       <svg viewBox="0 0 {width} {height}" class="w-full h-full" preserveAspectRatio="none">
-        {#if isSingleEvent}
+        {#if kind === 'bar'}
+          {@const baselineY = height - padY}
+          <line x1={padX} y1={baselineY} x2={width - padX} y2={baselineY}
+                stroke={color} stroke-opacity="0.25" stroke-width="1" />
+          {#each points as p, i (`${p.t}-${i}`)}
+            {#if p.v > 0}
+              {@const bx = Math.max(padX, Math.min(x(p.t) - barW / 2, width - padX - barW))}
+              {@const by = y(p.v)}
+              <rect x={bx.toFixed(2)} y={by.toFixed(2)} width={barW.toFixed(2)}
+                    height={Math.max(0.5, baselineY - by).toFixed(2)}
+                    fill={color} fill-opacity="0.75" rx="1" />
+            {/if}
+          {/each}
+        {:else if isSingleEvent}
           {@const si = points.findIndex((p) => p.v > 0)}
           {@const sx = x(points[si].t)}
           {@const sv = points[si].v}

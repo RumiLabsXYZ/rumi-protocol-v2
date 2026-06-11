@@ -638,7 +638,9 @@ export type BackendEventTypeFilter =
 	| 'Redemption' | 'ReserveRedemption'
 	| 'StabilityPoolDeposit' | 'StabilityPoolWithdraw'
 	| 'AdminMint' | 'AdminSweepToTreasury'
-	| 'Admin' | 'PriceUpdate' | 'AccrueInterest';
+	| 'Admin' | 'PriceUpdate' | 'AccrueInterest'
+	| 'DeficitAccrued' | 'DeficitRepaid'
+	| 'BreakerTripped' | 'BotClaimReconciliationNeeded';
 
 function backendFiltersCacheKey(f: BackendEventFilters | undefined): string {
 	if (!f) return 'none';

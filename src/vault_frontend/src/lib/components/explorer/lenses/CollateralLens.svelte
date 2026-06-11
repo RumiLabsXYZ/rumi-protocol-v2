@@ -99,13 +99,19 @@
       ];
       const buckets: CrBucket[] = bucketDefs.map(([lo, hi, label]) => ({ lo, hi, label, count: 0 }));
 
+      // Open-vault counts per collateral, from the live vault list. The
+      // backend's `get_collateral_totals().vault_count` reads the
+      // collateral→vault-id index, which retains ids from some closed
+      // vaults — counting the fetched open vaults is the honest number.
+      const openCountByCollateral = new Map<string, number>();
       for (const v of allVaults) {
+        const collType = v.collateral_type?.toText?.() ?? String(v.collateral_type ?? '');
+        openCountByCollateral.set(collType, (openCountByCollateral.get(collType) ?? 0) + 1);
         const cr = computeVaultCrPct(v, priceMap, decimalsMap);
         if (cr == null) continue;
         for (const b of buckets) {
           if (cr >= b.lo && cr < b.hi) { b.count += 1; break; }
         }
-        const collType = v.collateral_type?.toText?.() ?? String(v.collateral_type ?? '');
         if (!crByCollateral.has(collType)) crByCollateral.set(collType, []);
         crByCollateral.get(collType)!.push(cr);
       }
@@ -155,7 +161,7 @@
         const price = priceMap.get(principal) ?? (tot?.price ? Number(tot.price) : 0);
         const totalColl = tot?.total_collateral != null ? Number(tot.total_collateral) / Math.pow(10, decimals) : 0;
         const debt = tot?.total_debt != null ? e8sToNumber(tot.total_debt) : 0;
-        const vaults = tot?.vault_count != null ? Number(tot.vault_count) : 0;
+        const vaults = openCountByCollateral.get(principal) ?? 0;
         const ceilingRaw = cfg?.debt_ceiling ?? 0n;
         const unlimited = typeof ceilingRaw === 'bigint'
           ? ceilingRaw >= 18446744073709551615n

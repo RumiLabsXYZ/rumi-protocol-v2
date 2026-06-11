@@ -1130,6 +1130,23 @@ impl Event {
             Event::BreakerCleared { .. } => Some("BreakerCleared"),
             Event::SetBreakerWindowNs { .. } => Some("SetBreakerWindowNs"),
             Event::SetBreakerWindowDebtCeilingE8s { .. } => Some("SetBreakerWindowDebtCeilingE8s"),
+            // Protocol-health incidents that collapse into the `Admin` type
+            // filter (no dedicated `EventTypeFilter` variant). Labeled so the
+            // explorer's admin-label narrowing can isolate them server-side,
+            // and so the strings match the rumi_analytics labeler exactly
+            // (sources/backend.rs `admin_label()`), which already emits these
+            // for its breakdown rollup.
+            Event::OracleCircuitBreaker { .. } => Some("OracleCircuitBreaker"),
+            Event::OracleSourceCountInsufficient { .. } => Some("OracleSourceCountInsufficient"),
+            Event::StabilityPoolCallFailed { .. } => Some("StabilityPoolCallFailed"),
+            Event::SupplyInvariantSelfCheckFailed { .. } => Some("SupplyInvariantSelfCheckFailed"),
+            // Cross-chain admin/audit events (Phase 1a/1b, dev-gated).
+            Event::ChainRegistered { .. } => Some("ChainRegistered"),
+            Event::ChainDisabled { .. } => Some("ChainDisabled"),
+            Event::ChainConfigUpdated { .. } => Some("ChainConfigUpdated"),
+            Event::ChainSettlementFailed { .. } => Some("ChainSettlementFailed"),
+            Event::ChainReorgDetected { .. } => Some("ChainReorgDetected"),
+            Event::ChainHotWalletLow { .. } => Some("ChainHotWalletLow"),
             // Any variant that surfaces `Admin` via `type_filter` but isn't
             // enumerated here still matches `Admin` type filters; it just
             // carries no fine-grained label.

@@ -15,7 +15,10 @@
   const VALID_LENSES: LensId[] = ['overview', 'collateral', 'stability', 'liquidations', 'redemptions', 'revenue', 'dexs', 'admin'];
 
   const lens = $derived.by<LensId>(() => {
-    const raw = $page.url.searchParams.get('lens') ?? 'overview';
+    let raw = $page.url.searchParams.get('lens') ?? 'overview';
+    // The Admin lens grew into a System lens (health incidents + admin +
+    // infra); accept both URL spellings, old links keep working.
+    if (raw === 'system') raw = 'admin';
     return (VALID_LENSES as string[]).includes(raw) ? (raw as LensId) : 'overview';
   });
 
@@ -34,7 +37,7 @@
     redemptions: 'Redemptions',
     revenue: 'Revenue',
     dexs: 'DEXs',
-    admin: 'Admin',
+    admin: 'System',
   };
 </script>
 

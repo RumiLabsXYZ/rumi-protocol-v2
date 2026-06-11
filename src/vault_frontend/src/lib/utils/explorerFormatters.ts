@@ -15,6 +15,7 @@ export type EventCategory =
   | 'threepool'
   | 'amm'
   | 'admin'
+  | 'health'
   | 'system';
 
 export type FieldType =
@@ -59,20 +60,9 @@ export const BADGE_COLORS: Record<EventCategory, string> = {
   threepool: 'bg-cyan-500/15 text-cyan-400 border border-cyan-500/30',
   amm: 'bg-indigo-500/15 text-indigo-400 border border-indigo-500/30',
   admin: 'bg-amber-500/15 text-amber-400 border border-amber-500/30',
+  health: 'bg-orange-500/15 text-orange-400 border border-orange-500/30',
   system: 'bg-gray-500/15 text-gray-400 border border-gray-500/30',
 };
-
-// ─── Event Categories ─────────────────────────────────────────────────
-
-export const EVENT_CATEGORIES: { key: EventCategory; label: string }[] = [
-  { key: 'vault_ops', label: 'Vault Operations' },
-  { key: 'liquidation', label: 'Liquidations' },
-  { key: 'redemption', label: 'Redemptions' },
-  { key: 'stability_pool', label: 'Stability Pool' },
-  { key: 'threepool', label: '3Pool' },
-  { key: 'admin', label: 'Admin' },
-  { key: 'system', label: 'System' },
-];
 
 // ─── Category Lookup Tables ───────────────────────────────────────────
 
@@ -86,7 +76,6 @@ const VAULT_OPS_KEYS = new Set([
 
 const LIQUIDATION_KEYS = new Set([
   'liquidate_vault', 'partial_liquidate_vault', 'redistribute_vault',
-  'bot_liquidation_claimed', 'bot_liquidation_confirmed', 'bot_liquidation_canceled',
 ]);
 
 const REDEMPTION_KEYS = new Set([
@@ -98,7 +87,28 @@ const STABILITY_POOL_KEYS = new Set([
 ]);
 
 const SYSTEM_KEYS = new Set([
-  'init', 'upgrade', 'accrue_interest',
+  'init', 'upgrade', 'accrue_interest', 'price_update',
+  // Cross-chain settlement lifecycle (Phase 1b, dev-gated). Rendered so the
+  // feed never shows raw JSON if/when the feature ships; no facet exposure
+  // until then.
+  'deposit_observed', 'chain_mint_submitted', 'chain_mint_confirmed',
+  'chain_burn_observed', 'withdrawal_signed',
+]);
+
+/**
+ * Protocol-health incidents: oracle failures, the mass-liquidation circuit
+ * breaker, bad-debt (deficit) accounting, and operational failures the
+ * protocol self-reports. These are rare, high-signal events — the opposite
+ * of admin/config noise — and get their own badge + facet group so a reader
+ * can audit "has anything gone wrong" in isolation.
+ */
+export const HEALTH_KEYS = new Set([
+  'deficit_accrued', 'deficit_repaid',
+  'breaker_tripped', 'breaker_cleared',
+  'oracle_circuit_breaker', 'oracle_source_count_insufficient',
+  'stability_pool_call_failed', 'bot_claim_reconciliation_needed',
+  'supply_invariant_self_check_failed',
+  'chain_settlement_failed', 'chain_reorg_detected', 'chain_hot_wallet_low',
 ]);
 
 // ─── 3Pool Token Lookup ───────────────────────────────────────────────
@@ -600,6 +610,14 @@ function tokenSymbol(principal: any): string {
   return getTokenSymbol(principalToText(principal));
 }
 
+/** Render a candid ChainId variant ({ monad: null } → "Monad"). */
+function chainLabel(chainId: any): string {
+  if (chainId == null) return 'unknown chain';
+  const key = Object.keys(chainId)[0];
+  if (!key) return String(chainId);
+  return key.charAt(0).toUpperCase() + key.slice(1);
+}
+
 function tokenDecimals(principal: any): number {
   return getTokenDecimals(principalToText(principal));
 }
@@ -729,6 +747,7 @@ export function getEventCategory(event: any): EventCategory {
   if (LIQUIDATION_KEYS.has(key)) return 'liquidation';
   if (REDEMPTION_KEYS.has(key)) return 'redemption';
   if (STABILITY_POOL_KEYS.has(key)) return 'stability_pool';
+  if (HEALTH_KEYS.has(key)) return 'health';
   if (SYSTEM_KEYS.has(key)) return 'system';
   // Admin is the catch-all for Set*, Add*, Update*, Admin* events
   return 'admin';
@@ -752,9 +771,6 @@ const TYPE_NAMES: Record<string, string> = {
   liquidate_vault: 'Full Liquidation',
   partial_liquidate_vault: 'Partial Liquidation',
   redistribute_vault: 'Redistribution',
-  bot_liquidation_claimed: 'Bot Liquidation Claimed',
-  bot_liquidation_confirmed: 'Bot Liquidation Confirmed',
-  bot_liquidation_canceled: 'Bot Liquidation Canceled',
   provide_liquidity: 'Deposit to Stability Pool',
   withdraw_liquidity: 'Withdraw from Stability Pool',
   claim_liquidity_returns: 'Claim SP Returns',
@@ -806,6 +822,40 @@ const TYPE_NAMES: Record<string, string> = {
   accrue_interest: 'Accrue Interest',
   price_update: 'Price Update',
   admin_debt_correction: 'Admin Debt Correction',
+  // Protocol health incidents
+  deficit_accrued: 'Bad Debt Accrued',
+  deficit_repaid: 'Bad Debt Repaid',
+  breaker_tripped: 'Liquidation Breaker Tripped',
+  breaker_cleared: 'Liquidation Breaker Cleared',
+  oracle_circuit_breaker: 'Oracle Circuit Breaker',
+  oracle_source_count_insufficient: 'Oracle Sources Insufficient',
+  stability_pool_call_failed: 'Stability Pool Call Failed',
+  bot_claim_reconciliation_needed: 'Bot Claim Reconciliation Needed',
+  supply_invariant_self_check_failed: 'Supply Invariant Check Failed',
+  // Newer admin setters whose title-case fallback reads poorly
+  set_deficit_repayment_fraction: 'Set Deficit Repayment Fraction',
+  set_deficit_readonly_threshold_e8s: 'Set Deficit Read-Only Threshold',
+  set_breaker_window_ns: 'Set Breaker Window',
+  set_breaker_window_debt_ceiling_e8s: 'Set Breaker Debt Ceiling',
+  set_bot_cr_tolerance_bps: 'Set Bot CR Tolerance',
+  set_collateral_min_xrc_sources: 'Set Min Oracle Sources',
+  set_icpswap_routing_enabled: 'Set ICPSwap Routing',
+  set_amm1_canister: 'Set AMM1 Canister',
+  set_amm1_pool_id: 'Set AMM1 Pool ID',
+  set_collateral_redemption_fee_floor: 'Set Collateral Redemption Fee Floor',
+  set_collateral_redemption_fee_ceiling: 'Set Collateral Redemption Fee Ceiling',
+  // Cross-chain (Phase 1b, dev-gated)
+  chain_registered: 'Chain Registered',
+  chain_disabled: 'Chain Disabled',
+  chain_config_updated: 'Chain Config Updated',
+  deposit_observed: 'Chain Deposit Observed',
+  chain_mint_submitted: 'Chain Mint Submitted',
+  chain_mint_confirmed: 'Chain Mint Confirmed',
+  chain_burn_observed: 'Chain Burn Observed',
+  withdrawal_signed: 'Chain Withdrawal Signed',
+  chain_settlement_failed: 'Chain Settlement Failed',
+  chain_reorg_detected: 'Chain Reorg Detected',
+  chain_hot_wallet_low: 'Chain Hot Wallet Low',
 };
 
 function getTypeName(key: string): string {
@@ -1063,32 +1113,117 @@ export function formatEvent(event: any, vaultCollateralMap?: Map<number, string>
       };
     }
 
-    case 'bot_liquidation_claimed': {
-      if (d.vault_id !== undefined) fields.push(vaultField(d.vault_id));
-      pushIfPresent(fields, addressField('Bot', d.bot));
+    // ── Protocol Health ─────────────────────────────────────────────
+
+    case 'deficit_accrued': {
+      const amt = fmtE8s(d.amount);
+      const srcKey = d.source?.length ? Object.keys(d.source[0] ?? {})[0] : null;
+      const srcData = srcKey ? d.source[0][srcKey] : null;
+      if (srcKey === 'redemption') {
+        pushIfPresent(fields, addressField('Redeemer', srcData?.redeemer));
+      } else if (d.vault_id !== undefined && Number(d.vault_id) > 0) {
+        fields.push(vaultField(d.vault_id));
+      }
+      fields.push(amountField('Shortfall', d.amount));
+      fields.push(amountField('Total Bad Debt', d.new_deficit));
+      if (srcKey) fields.push(textField('Source', srcKey === 'redemption' ? 'Redemption' : 'Liquidation'));
       if (ts) fields.push(timestampField(ts));
       return {
-        summary: `Bot claimed liquidation on Vault #${d.vault_id ?? '?'}`,
+        summary: `Bad debt accrued: ${amt} icUSD shortfall (total ${fmtE8s(d.new_deficit)} icUSD)`,
         typeName, category, badgeColor, fields,
       };
     }
 
-    case 'bot_liquidation_confirmed': {
-      if (d.vault_id !== undefined) fields.push(vaultField(d.vault_id));
-      pushIfPresent(fields, addressField('Bot', d.bot));
+    case 'deficit_repaid': {
+      const amt = fmtE8s(d.amount);
+      const srcKey = Object.keys(d.source ?? {})[0];
+      fields.push(amountField('Repaid', d.amount));
+      fields.push(amountField('Remaining Bad Debt', d.remaining_deficit));
+      if (srcKey) fields.push(textField('Fee Source', srcKey === 'borrowing_fee' ? 'Borrowing fee' : 'Redemption fee'));
+      const anchor = optValue<any>(d.anchor_block_index);
+      if (anchor !== undefined) fields.push(blockIndexField('Block Index', anchor));
       if (ts) fields.push(timestampField(ts));
       return {
-        summary: `Bot liquidation confirmed on Vault #${d.vault_id ?? '?'}`,
+        summary: `Bad debt repaid: ${amt} icUSD from fees (${fmtE8s(d.remaining_deficit)} icUSD remaining)`,
         typeName, category, badgeColor, fields,
       };
     }
 
-    case 'bot_liquidation_canceled': {
-      if (d.vault_id !== undefined) fields.push(vaultField(d.vault_id));
-      pushIfPresent(fields, addressField('Bot', d.bot));
+    case 'breaker_tripped': {
+      fields.push(amountField('Window Debt Cleared', d.total_e8s));
+      fields.push(amountField('Ceiling', d.ceiling_e8s));
       if (ts) fields.push(timestampField(ts));
       return {
-        summary: `Bot liquidation canceled on Vault #${d.vault_id ?? '?'}`,
+        summary: `Mass-liquidation breaker tripped — ${fmtE8s(d.total_e8s)} icUSD cleared in window (ceiling ${fmtE8s(d.ceiling_e8s)})`,
+        typeName, category, badgeColor, fields,
+      };
+    }
+
+    case 'breaker_cleared': {
+      fields.push(amountField('Window Debt at Clear', d.remaining_total_e8s));
+      if (ts) fields.push(timestampField(ts));
+      return {
+        summary: 'Mass-liquidation breaker cleared — automatic liquidation routing resumed',
+        typeName, category, badgeColor, fields,
+      };
+    }
+
+    case 'oracle_circuit_breaker': {
+      fields.push(textField('Consecutive Failures', Number(d.consecutive_failures)));
+      if (ts) fields.push(timestampField(ts));
+      return {
+        summary: `Oracle circuit breaker — ${Number(d.consecutive_failures)} consecutive failed price fetches; protocol entered Read-Only`,
+        typeName, category, badgeColor, fields,
+      };
+    }
+
+    case 'oracle_source_count_insufficient': {
+      const sym = tokenSymbol(d.collateral_type);
+      fields.push(tokenField(d.collateral_type));
+      fields.push(textField('Sources Reported', Number(d.num_sources)));
+      fields.push(textField('Minimum Required', Number(d.min_required)));
+      if (ts) fields.push(timestampField(ts));
+      return {
+        summary: `${sym} price sample rejected — ${Number(d.num_sources)} oracle sources (need ${Number(d.min_required)}); kept last good price`,
+        typeName, category, badgeColor, fields,
+      };
+    }
+
+    case 'stability_pool_call_failed': {
+      const count = Array.isArray(d.vault_ids) ? d.vault_ids.length : 0;
+      if (count > 0) fields.push(textField('Vaults Affected', d.vault_ids.map((v: any) => `#${Number(v)}`).join(', ')));
+      fields.push(textField('Reject Code', Number(d.reject_code)));
+      if (d.reject_message) fields.push(textField('Error', String(d.reject_message)));
+      if (ts) fields.push(timestampField(ts));
+      return {
+        summary: `Stability pool notification failed for ${count} vault${count === 1 ? '' : 's'} — eligible for retry`,
+        typeName, category, badgeColor, fields,
+      };
+    }
+
+    case 'bot_claim_reconciliation_needed': {
+      fields.push(vaultField(d.vault_id));
+      const collPrincipal = vaultCollateral(d.vault_id);
+      if (collPrincipal !== 'unknown') {
+        fields.push(tokenAmountField('Observed Balance', d.observed_balance, collPrincipal));
+        fields.push(tokenAmountField('Required Balance', d.required_balance, collPrincipal));
+      } else {
+        fields.push(textField('Observed Balance (raw)', String(d.observed_balance)));
+        fields.push(textField('Required Balance (raw)', String(d.required_balance)));
+      }
+      if (ts) fields.push(timestampField(ts));
+      return {
+        summary: `Vault #${d.vault_id} bot claim expired with missing collateral — manual reconciliation needed`,
+        typeName, category, badgeColor, fields,
+      };
+    }
+
+    case 'supply_invariant_self_check_failed': {
+      fields.push(amountField('Sum of Chain Supplies', d.sum_chain_supplies_e8s));
+      fields.push(amountField('Total Debt', d.total_debt_e8s));
+      if (ts) fields.push(timestampField(ts));
+      return {
+        summary: 'Supply invariant check failed — chain supplies do not match total debt',
         typeName, category, badgeColor, fields,
       };
     }
@@ -1614,6 +1749,89 @@ export function formatEvent(event: any, vaultCollateralMap?: Map<number, string>
       if (d.timestamp) fields.push(timestampField(d.timestamp));
       return {
         summary: 'Interest accrued across all vaults',
+        typeName, category, badgeColor, fields,
+      };
+    }
+
+    case 'price_update': {
+      const sym = tokenSymbol(d.collateral_type);
+      fields.push(tokenField(d.collateral_type));
+      fields.push({ label: 'Price', value: `$${d.price}`, type: 'usd' });
+      if (ts) fields.push(timestampField(ts));
+      return {
+        summary: `${sym} price updated to $${d.price}`,
+        typeName, category, badgeColor, fields,
+      };
+    }
+
+    // ── Cross-chain (Phase 1b, dev-gated) ───────────────────────────
+
+    case 'chain_registered':
+    case 'chain_disabled':
+    case 'chain_config_updated': {
+      const chain = chainLabel(d.chain_id);
+      fields.push(textField('Chain', chain));
+      if (d.display_name) fields.push(textField('Display Name', String(d.display_name)));
+      if (ts) fields.push(timestampField(ts));
+      const verb = key === 'chain_registered' ? 'registered' : key === 'chain_disabled' ? 'disabled' : 'config updated';
+      return {
+        summary: `Chain ${chain} ${verb}`,
+        typeName, category, badgeColor, fields,
+      };
+    }
+
+    case 'deposit_observed':
+    case 'chain_mint_submitted':
+    case 'chain_mint_confirmed':
+    case 'chain_burn_observed':
+    case 'withdrawal_signed': {
+      const chain = chainLabel(d.chain_id);
+      if (d.vault_id !== undefined) fields.push(vaultField(d.vault_id));
+      fields.push(textField('Chain', chain));
+      if (d.amount_e8s !== undefined) fields.push(amountField('Amount', d.amount_e8s));
+      if (d.amount_e18 !== undefined) fields.push(textField('Amount (native)', String(d.amount_e18)));
+      if (d.recipient) fields.push(textField('Recipient', String(d.recipient)));
+      if (d.tx_hash) fields.push(textField('Tx Hash', String(d.tx_hash)));
+      if (d.block_number !== undefined) fields.push(textField('Block', String(d.block_number)));
+      if (ts) fields.push(timestampField(ts));
+      return {
+        summary: `${typeName} on ${chain}${d.vault_id !== undefined ? ` (Vault #${d.vault_id})` : ''}`,
+        typeName, category, badgeColor, fields,
+      };
+    }
+
+    case 'chain_settlement_failed': {
+      const chain = chainLabel(d.chain_id);
+      fields.push(textField('Chain', chain));
+      if (d.op_id !== undefined) fields.push(textField('Operation', `#${Number(d.op_id)}`));
+      if (d.reason) fields.push(textField('Reason', String(d.reason)));
+      if (ts) fields.push(timestampField(ts));
+      return {
+        summary: `Settlement failed on ${chain} — ${String(d.reason ?? 'unknown reason')}`,
+        typeName, category, badgeColor, fields,
+      };
+    }
+
+    case 'chain_reorg_detected': {
+      const chain = chainLabel(d.chain_id);
+      fields.push(textField('Chain', chain));
+      fields.push(textField('Observed Block', String(d.observed_block)));
+      fields.push(textField('Reorg Depth', String(d.reorg_depth)));
+      if (ts) fields.push(timestampField(ts));
+      return {
+        summary: `Chain reorg detected on ${chain} — depth ${Number(d.reorg_depth)}`,
+        typeName, category, badgeColor, fields,
+      };
+    }
+
+    case 'chain_hot_wallet_low': {
+      const chain = chainLabel(d.chain_id);
+      fields.push(textField('Chain', chain));
+      fields.push(textField('Balance (native)', String(d.balance_e18)));
+      fields.push(textField('Threshold (native)', String(d.threshold_e18)));
+      if (ts) fields.push(timestampField(ts));
+      return {
+        summary: `Hot wallet low on ${chain}`,
         typeName, category, badgeColor, fields,
       };
     }

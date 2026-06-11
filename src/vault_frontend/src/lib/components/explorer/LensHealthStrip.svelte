@@ -1,4 +1,6 @@
 <script lang="ts">
+  import ModePill from './ModePill.svelte';
+
   export interface HealthMetric {
     label: string;
     value: string;
@@ -10,8 +12,10 @@
     title: string;
     metrics: HealthMetric[];
     loading?: boolean;
+    /** Optional protocol mode — renders the mode pill at the row start. */
+    mode?: string | null;
   }
-  let { title, metrics, loading = false }: Props = $props();
+  let { title, metrics, loading = false, mode = null }: Props = $props();
 
   const toneClass: Record<NonNullable<HealthMetric['tone']>, string> = {
     normal: '',
@@ -32,6 +36,9 @@
     </div>
   {:else}
     <div class="flex flex-wrap items-baseline gap-x-8 gap-y-3">
+      {#if mode}
+        <div class="self-center"><ModePill {mode} /></div>
+      {/if}
       {#each metrics as m}
         <div class="flex flex-col min-w-0">
           <span class="text-xs text-gray-500">{m.label}</span>

@@ -14,6 +14,7 @@
   } from '$services/explorer/explorerService';
   import { extractEventTimestamp } from '$utils/displayEvent';
   import type { DisplayEvent } from '$utils/displayEvent';
+  import { HEALTH_KEYS } from '$utils/explorerFormatters';
 
   export type LensScope =
     | 'all'                // Overview: everything
@@ -22,7 +23,8 @@
     | 'redemptions'        // Redemptions: backend Redeem events only
     | 'revenue'            // Revenue: fee-bearing (swaps + redemptions + liquidations)
     | 'dexs'               // DEXs: 3pool swaps/liquidity, AMM swaps/liquidity (no admin)
-    | 'admin';             // Admin: admin events from all sources
+    | 'admin'              // Admin: admin events from all sources
+    | 'health';            // System: protocol-health incidents (oracle, breaker, deficit, ops)
 
   interface Props {
     scope: LensScope;
@@ -116,6 +118,10 @@
     return ADMIN_EVENT_KEYS.has(backendEventKey(evt));
   }
 
+  function isBackendHealth(evt: any): boolean {
+    return HEALTH_KEYS.has(backendEventKey(evt));
+  }
+
   function isAccrueInterest(evt: any): boolean {
     return backendEventKey(evt) === 'accrue_interest';
   }
@@ -176,6 +182,15 @@
         // `rumi_protocol_backend/src/event.rs`) and would otherwise be
         // excluded by a single `Admin` filter.
         return { length: 50n, filters: { types: ['Admin', 'AdminMint', 'AdminSweepToTreasury', 'ReserveRedemption'] } };
+      case 'health':
+        // Deficit + breaker-trip + bot-reconciliation have dedicated filters;
+        // oracle incidents, SP-call failures and supply-invariant failures
+        // collapse into `Admin` server-side, so over-fetch Admin and let the
+        // client-side `isBackendHealth` pass narrow to actual incidents.
+        return {
+          length: 50n,
+          filters: { types: ['DeficitAccrued', 'DeficitRepaid', 'BreakerTripped', 'BotClaimReconciliationNeeded', 'Admin'] },
+        };
       default:
         return { length: BigInt(limit * 6), filters: undefined };
     }
@@ -187,7 +202,7 @@
 
     try {
       // Fetch backend events + vault maps. Always include unless scope is purely DEX/SP/admin.
-      const needsBackend = scope === 'all' || scope === 'vault_ops' || scope === 'redemptions' || scope === 'revenue' || scope === 'admin';
+      const needsBackend = scope === 'all' || scope === 'vault_ops' || scope === 'redemptions' || scope === 'revenue' || scope === 'admin' || scope === 'health';
       const { length: backendLength, filters: backendFilters } = backendQueryForScope(scope);
       const backendPromise = needsBackend
         ? fetchEvents(0n, backendLength, backendFilters).catch(() => ({ total: 0n, events: [] }))
@@ -252,6 +267,8 @@
             return isBackendRevenue(de.event);
           case 'admin':
             return isBackendAdmin(de.event);
+          case 'health':
+            return isBackendHealth(de.event);
           default:
             return false;
         }

@@ -36,9 +36,10 @@ export type TypeFacetKey =
   | 'margin_transfer' | 'dust_forgiven'
   // Liquidations
   | 'full_liquidation' | 'partial_liquidation' | 'redistribute'
-  | 'bot_liquidation_claimed' | 'bot_liquidation_confirmed' | 'bot_liquidation_canceled'
   // Redemptions
   | 'redemption' | 'redemption_transfer' | 'reserve_redemption'
+  // Protocol health incidents
+  | 'oracle_incident' | 'breaker_event' | 'deficit_event' | 'ops_incident'
   // Stability pool
   | 'sp_deposit' | 'sp_withdraw' | 'sp_claim_collateral'
   | 'sp_deposit_as_3usd' | 'sp_liquidation_executed' | 'sp_other'
@@ -74,13 +75,15 @@ export const TYPE_FACET_OPTIONS: TypeFacetOption[] = [
   { key: 'full_liquidation', label: 'Full Liquidation', group: 'Liquidations' },
   { key: 'partial_liquidation', label: 'Partial Liquidation', group: 'Liquidations' },
   { key: 'redistribute', label: 'Redistribution', group: 'Liquidations' },
-  { key: 'bot_liquidation_claimed', label: 'Bot Claimed', group: 'Liquidations' },
-  { key: 'bot_liquidation_confirmed', label: 'Bot Confirmed', group: 'Liquidations' },
-  { key: 'bot_liquidation_canceled', label: 'Bot Canceled', group: 'Liquidations' },
 
   { key: 'redemption', label: 'Redemption', group: 'Redemptions' },
   { key: 'redemption_transfer', label: 'Redemption Transfer', group: 'Redemptions' },
   { key: 'reserve_redemption', label: 'Reserve Redemption', group: 'Redemptions' },
+
+  { key: 'oracle_incident', label: 'Oracle Incident', group: 'Protocol Health' },
+  { key: 'breaker_event', label: 'Liquidation Breaker', group: 'Protocol Health' },
+  { key: 'deficit_event', label: 'Bad Debt', group: 'Protocol Health' },
+  { key: 'ops_incident', label: 'Ops Incident', group: 'Protocol Health' },
 
   { key: 'sp_deposit', label: 'SP Deposit', group: 'Stability Pool' },
   { key: 'sp_withdraw', label: 'SP Withdraw', group: 'Stability Pool' },
@@ -133,14 +136,10 @@ export const TYPE_CATEGORY_ALIASES: Record<string, TypeFacetKey[]> = {
     'add_margin', 'withdraw_collateral', 'partial_withdraw_collateral',
     'margin_transfer', 'dust_forgiven',
   ],
-  liquidation: [
-    'full_liquidation', 'partial_liquidation', 'redistribute',
-    'bot_liquidation_claimed', 'bot_liquidation_confirmed', 'bot_liquidation_canceled',
-  ],
-  liquidations: [
-    'full_liquidation', 'partial_liquidation', 'redistribute',
-    'bot_liquidation_claimed', 'bot_liquidation_confirmed', 'bot_liquidation_canceled',
-  ],
+  liquidation: ['full_liquidation', 'partial_liquidation', 'redistribute'],
+  liquidations: ['full_liquidation', 'partial_liquidation', 'redistribute'],
+  health: ['oracle_incident', 'breaker_event', 'deficit_event', 'ops_incident'],
+  incidents: ['oracle_incident', 'breaker_event', 'deficit_event', 'ops_incident'],
   redemption: ['redemption', 'redemption_transfer', 'reserve_redemption'],
   redemptions: ['redemption', 'redemption_transfer', 'reserve_redemption'],
   stability_pool: [
@@ -245,13 +244,29 @@ export function classifyEventType(de: DisplayEvent): TypeFacetKey {
     case 'liquidate_vault': return 'full_liquidation';
     case 'partial_liquidate_vault': return 'partial_liquidation';
     case 'redistribute_vault': return 'redistribute';
-    case 'bot_liquidation_claimed': return 'bot_liquidation_claimed';
-    case 'bot_liquidation_confirmed': return 'bot_liquidation_confirmed';
-    case 'bot_liquidation_canceled': return 'bot_liquidation_canceled';
 
     case 'redemption_on_vaults': return 'redemption';
     case 'redemption_transfered': return 'redemption_transfer';
     case 'reserve_redemption': return 'reserve_redemption';
+
+    // Protocol health incidents — each maps to a coarse facet so the Type
+    // dropdown stays scannable (4 options, not 12).
+    case 'oracle_circuit_breaker':
+    case 'oracle_source_count_insufficient':
+      return 'oracle_incident';
+    case 'breaker_tripped':
+    case 'breaker_cleared':
+      return 'breaker_event';
+    case 'deficit_accrued':
+    case 'deficit_repaid':
+      return 'deficit_event';
+    case 'stability_pool_call_failed':
+    case 'bot_claim_reconciliation_needed':
+    case 'supply_invariant_self_check_failed':
+    case 'chain_settlement_failed':
+    case 'chain_reorg_detected':
+    case 'chain_hot_wallet_low':
+      return 'ops_incident';
 
     // Canister upgrades and init are admin actions — surface them under 'admin'
     // alongside setter calls. Only accrue_interest stays in 'system' (it's
@@ -262,6 +277,14 @@ export function classifyEventType(de: DisplayEvent): TypeFacetKey {
       return 'admin';
 
     case 'accrue_interest':
+    case 'price_update':
+    // Cross-chain settlement lifecycle (Phase 1b, dev-gated) — automatic
+    // bridge bookkeeping, not user or admin action.
+    case 'deposit_observed':
+    case 'chain_mint_submitted':
+    case 'chain_mint_confirmed':
+    case 'chain_burn_observed':
+    case 'withdrawal_signed':
       return 'system';
 
     default:
@@ -802,7 +825,7 @@ export function parseFacetsFromUrl(url: URL): Facets {
   // Backward-compat with the pre-Step-4 `?filter=...` param.
   const legacy = params.get('filter');
   if (legacy && !params.get('type')) {
-    if (legacy === 'liquidations') f.types.push('full_liquidation', 'partial_liquidation', 'redistribute', 'bot_liquidation_confirmed');
+    if (legacy === 'liquidations') f.types.push('full_liquidation', 'partial_liquidation', 'redistribute');
     else if (legacy === 'vault_ops') f.types.push('open_vault', 'close_vault', 'withdraw_and_close', 'borrow', 'repay', 'add_margin', 'withdraw_collateral', 'partial_withdraw_collateral');
     else if (legacy === 'dex') f.types.push('3pool_swap', 'amm_swap', 'multi_hop_swap', '3pool_add_liquidity', '3pool_remove_liquidity', '3pool_remove_one_coin', 'amm_add_liquidity', 'amm_remove_liquidity');
     else if (legacy === 'stability_pool') f.types.push('sp_deposit', 'sp_withdraw', 'sp_claim_collateral', 'sp_deposit_as_3usd', 'sp_liquidation_executed', 'sp_other');
@@ -996,34 +1019,45 @@ export function toggleAdminLabel(f: Facets, label: string): Facets {
 // ─── Server-side dispatch translation ─────────────────────────────────
 
 /**
- * Map a frontend `TypeFacetKey` to the matching backend `EventTypeFilter`.
- * Returns `null` for keys that don't correspond to a backend event variant
- * (DEX swaps, stability-pool ops — those come from other canisters).
+ * Map a frontend `TypeFacetKey` to the backend `EventTypeFilter`s that can
+ * contain matching events. Returns `[]` for keys that don't correspond to a
+ * backend event variant (DEX swaps, stability-pool ops — those come from
+ * other canisters).
+ *
+ * Health facets may span a dedicated filter AND the `Admin` bucket: oracle
+ * incidents, SP-call failures, supply-invariant failures and `breaker_cleared`
+ * collapse to `Admin` server-side (no dedicated `EventTypeFilter` variant),
+ * so we over-fetch `Admin` and rely on the client-side `matchesFacets`
+ * post-pass to narrow. This stays correct against any deployed backend.
  */
-function frontendTypeToBackend(t: TypeFacetKey): BackendEventTypeFilter | null {
+function frontendTypeToBackend(t: TypeFacetKey): BackendEventTypeFilter[] {
   switch (t) {
-    case 'open_vault': return 'OpenVault';
+    case 'open_vault': return ['OpenVault'];
     case 'close_vault':
     case 'withdraw_and_close':
-      return 'CloseVault';
+      return ['CloseVault'];
     case 'add_margin':
     case 'withdraw_collateral':
     case 'partial_withdraw_collateral':
     case 'margin_transfer':
     case 'dust_forgiven':
-      return 'AdjustVault';
-    case 'borrow': return 'Borrow';
-    case 'repay': return 'Repay';
-    case 'full_liquidation': return 'Liquidation';
-    case 'partial_liquidation': return 'PartialLiquidation';
-    case 'redistribute': return 'AdjustVault';
+      return ['AdjustVault'];
+    case 'borrow': return ['Borrow'];
+    case 'repay': return ['Repay'];
+    case 'full_liquidation': return ['Liquidation'];
+    case 'partial_liquidation': return ['PartialLiquidation'];
+    case 'redistribute': return ['AdjustVault'];
     case 'redemption':
     case 'redemption_transfer':
-      return 'Redemption';
-    case 'reserve_redemption': return 'ReserveRedemption';
-    case 'admin': return 'Admin';
-    case 'system': return 'AccrueInterest';
-    default: return null;
+      return ['Redemption'];
+    case 'reserve_redemption': return ['ReserveRedemption'];
+    case 'oracle_incident': return ['Admin'];
+    case 'breaker_event': return ['BreakerTripped', 'Admin'];
+    case 'deficit_event': return ['DeficitAccrued', 'DeficitRepaid'];
+    case 'ops_incident': return ['BotClaimReconciliationNeeded', 'Admin'];
+    case 'admin': return ['Admin'];
+    case 'system': return ['AccrueInterest', 'PriceUpdate'];
+    default: return [];
   }
 }
 
@@ -1093,8 +1127,7 @@ export function facetsToBackendFilters(facets: Facets): BackendFilterPlan {
   if (facets.types.length > 0) {
     const backendTypes = new Set<BackendEventTypeFilter>();
     for (const t of facets.types) {
-      const b = frontendTypeToBackend(t);
-      if (b) backendTypes.add(b);
+      for (const b of frontendTypeToBackend(t)) backendTypes.add(b);
     }
     if (backendTypes.size === 0) return { filters: undefined, skip: true };
     filters.types = [...backendTypes];
@@ -1166,7 +1199,7 @@ export function sourceExcludedByTypeFacet(
   const has = (key: TypeFacetKey) => facets.types.includes(key);
   switch (source) {
     case 'backend':
-      return facets.types.every((t) => frontendTypeToBackend(t) == null);
+      return facets.types.every((t) => frontendTypeToBackend(t).length === 0);
     case '3pool':
       return !has('3pool_swap') && !has('3pool_add_liquidity') && !has('3pool_remove_liquidity')
         && !has('3pool_remove_one_coin') && !has('3pool_donate') && !has('multi_hop_swap');

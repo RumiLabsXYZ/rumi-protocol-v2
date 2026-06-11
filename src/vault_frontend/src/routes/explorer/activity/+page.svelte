@@ -732,9 +732,13 @@
 
 	<div class="flex items-center justify-between pt-2">
 		<div class="text-sm text-gray-400">
-			{filteredEvents.length.toLocaleString()} {filteredEvents.length === 1 ? 'event' : 'events'}
-			{#if filteredEvents.length > visibleRows}
-				<span class="text-gray-500">· showing {visibleRows.toLocaleString()}</span>
+			{#if loading}
+				<span class="text-gray-500">Loading events…</span>
+			{:else}
+				{filteredEvents.length.toLocaleString()} {filteredEvents.length === 1 ? 'event' : 'events'}
+				{#if filteredEvents.length > visibleRows}
+					<span class="text-gray-500">· showing {visibleRows.toLocaleString()}</span>
+				{/if}
 			{/if}
 		</div>
 		<div class="flex items-center gap-2">
@@ -760,11 +764,18 @@
 	</div>
 
 	{#if loading}
-		<div class="flex items-center justify-center py-20">
-			<div class="flex flex-col items-center gap-3">
-				<div class="w-8 h-8 border-2 border-gray-600 border-t-blue-400 rounded-full animate-spin"></div>
-				<span class="text-sm text-gray-500">Loading activity...</span>
-			</div>
+		<!-- Skeleton rows instead of a bare spinner: the page keeps its shape
+		     while the multi-canister fan-out (backend + 3pool + AMM + SP)
+		     resolves, which reads as "content arriving" rather than "empty". -->
+		<div class="space-y-2 py-2" aria-busy="true" aria-label="Loading activity">
+			{#each Array(10) as _, i (i)}
+				<div class="flex items-center gap-4 px-4 py-3 rounded-lg border border-white/[0.04] bg-white/[0.015]">
+					<div class="h-3 w-16 rounded skeleton-pulse"></div>
+					<div class="h-3 w-12 rounded skeleton-pulse"></div>
+					<div class="h-5 w-24 rounded-full skeleton-pulse"></div>
+					<div class="h-3 flex-1 max-w-md rounded skeleton-pulse"></div>
+				</div>
+			{/each}
 		</div>
 	{:else if error}
 		<ErrorState
@@ -814,3 +825,14 @@
 		{/if}
 	{/if}
 </div>
+
+<style>
+	.skeleton-pulse {
+		background: rgba(255, 255, 255, 0.06);
+		animation: skeleton-pulse 1.4s ease-in-out infinite;
+	}
+	@keyframes skeleton-pulse {
+		0%, 100% { opacity: 1; }
+		50% { opacity: 0.45; }
+	}
+</style>

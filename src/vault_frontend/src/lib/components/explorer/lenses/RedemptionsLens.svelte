@@ -282,9 +282,9 @@
       points={redemptionCountPoints}
       label="Daily redemption count (90d)"
       color={CHART_COLORS.teal}
-      fillColor={CHART_COLORS.tealDim}
       valueFormat={(v) => v.toLocaleString(undefined, { maximumFractionDigits: 0 })}
       headlineValue={redemptions90d}
+      kind="bar"
       loading={loading}
     />
   </div>
@@ -293,9 +293,9 @@
       points={redemptionFeePoints}
       label="Daily redemption fees (90d)"
       color={CHART_COLORS.purple}
-      fillColor={CHART_COLORS.purpleDim}
       valueFormat={(v) => `$${formatCompact(v)}`}
       headlineValue={redemptionFees90d}
+      kind="bar"
       loading={loading}
     />
   </div>

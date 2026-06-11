@@ -15,7 +15,7 @@
     { id: 'redemptions', label: 'Redemptions' },
     { id: 'revenue', label: 'Revenue' },
     { id: 'dexs', label: 'DEXs' },
-    { id: 'admin', label: 'Admin' },
+    { id: 'admin', label: 'System' },
   ];
 </script>
 
