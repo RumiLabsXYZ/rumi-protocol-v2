@@ -35,13 +35,13 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Oracle Failure</h2>
-    <p>The protocol gets collateral prices from the Internet Computer's Exchange Rate Canister (XRC). If the XRC fails to return a price, the protocol continues using the last known price. If the XRC returns a price below $0.01, the protocol switches to Read-Only mode and halts all operations.</p>
+    <p>The protocol gets collateral prices from the Internet Computer's Exchange Rate Canister (XRC). If the XRC fails to return a price, the protocol keeps the last known price, but state-changing operations are rejected once a collateral's price is more than 10 minutes old. Several oracle circuit breakers exist: prices backed by fewer than 3 underlying exchange sources are rejected, three consecutive failed fetches flip the protocol into Read-Only mode (clearing automatically when the oracle recovers), and a reported price below $0.01 also forces Read-Only.</p>
     <p>Risks include: stale prices leading to delayed liquidations (bad for the protocol) or premature liquidations if the XRC reports an incorrect price (bad for vault owners). The XRC is an IC system canister, and Rumi has no control over its availability or accuracy.</p>
   </section>
 
   <section class="doc-section">
     <h2 class="doc-heading">Smart Contract Risk</h2>
-    <p>Rumi's backend canisters are written in Rust and deployed on the Internet Computer. The codebase was reviewed by an AI-powered auditing agent (<a href="https://www.avai.life/" class="doc-link" target="_blank" rel="noopener">AVAI</a>) but has not undergone a formal audit by a traditional human-led security firm. Bugs in the vault logic, liquidation math, or state management could result in loss of funds.</p>
+    <p>Rumi's backend canisters are written in Rust and deployed on the Internet Computer. The codebase undergoes recurring security reviews: an external AI-powered pre-audit by <a href="https://www.avai.life/" class="doc-link" target="_blank" rel="noopener">AVAI</a> and a continuing internal audit cycle whose full reports are published at <a href="https://rumiprotocol.com/security" class="doc-link" target="_blank" rel="noopener">rumiprotocol.com/security</a>. It has not undergone a formal audit by a traditional human-led security firm. Bugs in the vault logic, liquidation math, or state management could still result in loss of funds.</p>
     <p>Canister upgrades are controlled by a set of principals (the development team). An upgrade with a bug could affect all vaults simultaneously. There is currently no time-lock or governance mechanism on upgrades.</p>
   </section>
 
@@ -65,13 +65,13 @@
   </section>
 
   <section class="doc-section">
-    <h2 class="doc-heading">Redistribution Risk</h2>
-    <p>If a vault becomes deeply undercollateralized and is not liquidated by a third party, the protocol can redistribute its remaining debt and collateral across all other vaults of the same collateral type. This means your vault can absorb extra debt from a failed vault, even if your own vault is healthy. The extra debt comes with proportional extra collateral, so the net impact is a slight CR decrease. See <a href="/docs/liquidation" class="doc-link">Liquidation Mechanics</a> for the formula.</p>
+    <h2 class="doc-heading">Bad Debt Risk</h2>
+    <p>If a vault becomes so undercollateralized that liquidating it recovers less value than the debt it carried, the shortfall is recorded in a protocol-level <strong>deficit account</strong>. A share of protocol fees is routed to paying the deficit down, and if it grows past an admin-set threshold the protocol enters Read-Only mode. A surge breaker also pauses automated liquidation routing if an unusually large amount of debt is liquidated within a short window, so an oracle glitch can't cascade unchecked. See <a href="/docs/liquidation" class="doc-link">Liquidation Mechanics</a> for details.</p>
   </section>
 
   <section class="doc-section">
     <h2 class="doc-heading">Liquidation Bot Risk</h2>
-    <p>The <a href="/docs/liquidation-bot" class="doc-link">Liquidation Bot</a> relies on external DEX liquidity (KongSwap and the 3pool) to convert seized collateral into icUSD. If DEX liquidity is thin, swaps may fail or execute with high slippage, reducing the icUSD recovered below the debt covered. This creates a deficit that the protocol absorbs.</p>
+    <p>The <a href="/docs/liquidation-bot" class="doc-link">Liquidation Bot</a> relies on external DEX liquidity (ICPSwap's ICP/ckUSDC pool) to convert seized collateral into stablecoins. If DEX liquidity is thin, swaps may fail or execute with high slippage, reducing the value recovered below the debt covered. This creates a deficit that the protocol absorbs.</p>
     <p>The bot has a configurable monthly budget that limits total exposure. If many vaults become undercollateralized simultaneously (e.g., during a market crash), the budget may be exhausted before all vaults are processed. Remaining vaults fall through to the stability pool and manual liquidators.</p>
     <p>There is also a timing risk: collateral prices can move between when the bot seizes collateral and when the swap completes. A sharp price drop during this window means less icUSD is recovered.</p>
   </section>

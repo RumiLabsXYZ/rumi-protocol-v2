@@ -93,8 +93,8 @@
       <li><strong>Vault CR multiplier:</strong> vaults closer to the liquidation threshold pay a higher rate than well-collateralized vaults.</li>
       <li><strong>Recovery mode multiplier:</strong> if the system enters Recovery mode, a system-wide multiplier increases rates for all vaults.</li>
     </ul>
-    <p>Interest is applied to your debt before every vault mutation (borrow, repay, withdraw, liquidation) and ticked forward every 5 minutes by a background timer. This means your debt grows over time. A vault sitting just above the liquidation threshold can drift into liquidation purely from accrued interest, even without any price movement.</p>
-    <p>Interest revenue is split three ways: <span class="live">{splitPct('three_pool')}</span> is donated to the <a href="/docs/three-pool" class="doc-link">3pool</a> (boosting LP token value), <span class="live">{splitPct('stability_pool')}</span> is distributed to stability pool depositors as icUSD, and <span class="live">{splitPct('treasury')}</span> goes to the protocol treasury.</p>
+    <p>Interest is applied to your debt before every vault mutation (borrow, repay, withdraw, liquidation) and ticked forward every 60 seconds by a background timer. This means your debt grows over time. A vault sitting just above the liquidation threshold can drift into liquidation purely from accrued interest, even without any price movement.</p>
+    <p>Interest revenue is split four ways: <span class="live">{splitPct('stability_pool')}</span> is distributed to <a href="/docs/stability-pool" class="doc-link">stability pool</a> icUSD depositors, <span class="live">{splitPct('three_pool')}</span> is donated to the <a href="/docs/three-pool" class="doc-link">3pool</a> (boosting 3USD value), <span class="live">{splitPct('amm1')}</span> goes to <a href="/docs/swap" class="doc-link">AMM</a> liquidity providers, and <span class="live">{splitPct('treasury')}</span> goes to the protocol treasury.</p>
   </section>
 
   <section class="doc-section">
@@ -110,7 +110,7 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Closing Your Vault</h2>
-    <p>To close a vault, you must first repay all outstanding icUSD debt, then withdraw your collateral. The protocol also offers a <strong>withdraw-and-close</strong> operation that does both steps atomically in a single call. Dust amounts below 0.0005 icUSD are forgiven automatically on close.</p>
+    <p>To close a vault, you must first repay all outstanding icUSD debt, then withdraw your collateral. The protocol offers two compound operations: <strong>withdraw-and-close</strong> (withdraws remaining collateral and closes a zero-debt vault in one call) and <strong>repay-and-close</strong> (repays your full debt, withdraws all collateral, and closes the vault in a single call). Dust amounts below 0.0005 icUSD are forgiven automatically on close.</p>
   </section>
 
   <section class="doc-section">
@@ -118,7 +118,7 @@
     <p>Collateral assets are volatile. A sharp price drop can push your vault below the liquidation threshold faster than you can react. There is no grace period and no notification system. Liquidation is immediate and automated.</p>
     <p>Higher collateral ratios give you more buffer. A vault at 200% can absorb a much larger price drop than one at 140%.</p>
     <p>Your vault's collateral can also be affected by redemptions. When icUSD holders redeem and protocol reserves are insufficient, collateral is taken from the lowest-CR vaults. See <a href="/docs/redemptions" class="doc-link">Redemptions</a> for details.</p>
-    <p>The protocol allows only one operation per user at a time. If you submit a second transaction before the first completes, it will be rejected. Wait for confirmations before taking another action.</p>
+    <p>The protocol allows only one operation per user at a time. If you submit a second transaction before the first completes, it will be rejected. Operations on a single vault are also serialized: if a liquidation or redemption is mid-flight against your vault, your own operation on that vault is briefly rejected as temporarily unavailable. Wait for confirmations before taking another action.</p>
     <p>This protocol is in beta. See the <a href="/docs/beta" class="doc-link">beta disclaimer</a> and <a href="/docs/risks" class="doc-link">risk documentation</a> for full details.</p>
   </section>
 </article>

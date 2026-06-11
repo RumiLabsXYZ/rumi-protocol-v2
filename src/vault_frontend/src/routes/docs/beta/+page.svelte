@@ -5,7 +5,7 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Status</h2>
-    <p>Rumi Protocol is in beta. The software is functional and deployed on the Internet Computer mainnet, but it has not been formally audited and should be considered experimental.</p>
+    <p>Rumi Protocol is in beta. The software is functional and deployed on the Internet Computer mainnet, but it has not been audited by a traditional human-led security firm and should be considered experimental.</p>
   </section>
 
   <section class="doc-section">
@@ -20,13 +20,14 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">No Formal Audit</h2>
-    <p>The Rumi Protocol codebase has not undergone a formal security audit by a traditional human-led auditing firm. An AI-powered review was conducted (see below), but undiscovered vulnerabilities may exist.</p>
+    <p>The Rumi Protocol codebase has not undergone a formal security audit by a traditional human-led auditing firm. AI-powered reviews are conducted on a recurring basis (see below), but undiscovered vulnerabilities may exist.</p>
   </section>
 
   <section class="doc-section">
-    <h2 class="doc-heading">Security Review</h2>
-    <p>The Rumi Protocol codebase was reviewed by <a href="https://www.avai.life/" class="doc-link" target="_blank" rel="noopener">AVAI</a>, an autonomous AI-powered security auditing agent, in December 2025. The review covered 68 Rust source files across all four canisters and found no critical or high-severity issues (3 medium, 5 low). The overall security rating was B+ (83.5/100).</p>
-    <p>This is not a traditional third-party audit conducted by a human security firm. It is an AI-assisted review. You can read the <a href="/AVAI_Security_Audit_Rumi_Protocol_Professional.pdf" class="doc-link" target="_blank">full report (PDF)</a>.</p>
+    <h2 class="doc-heading">Security Reviews</h2>
+    <p>The protocol runs a continuing security review program. Recurring internal AI-driven audit cycles cover the full stack (CDP backend, 3pool, AMM, stability pool, treasury, liquidation bot, points engine, and frontends), with every confirmed finding fixed, fence-tested, and re-verified before deployment. The full reports, including the most recent whole-stack re-audit, are published at <a href="https://rumiprotocol.com/security" class="doc-link" target="_blank" rel="noopener">rumiprotocol.com/security</a>.</p>
+    <p>Separately, the codebase was reviewed by <a href="https://www.avai.life/" class="doc-link" target="_blank" rel="noopener">AVAI</a>, an autonomous AI-powered security auditing agent, in December 2025. That review covered 68 Rust source files and found no critical or high-severity issues (3 medium, 5 low), with an overall rating of B+ (83.5/100). You can read the <a href="/AVAI_Security_Audit_Rumi_Protocol_Professional.pdf" class="doc-link" target="_blank">full report (PDF)</a>.</p>
+    <p>None of these are a traditional third-party audit conducted by a human security firm.</p>
   </section>
 
   <section class="doc-section">

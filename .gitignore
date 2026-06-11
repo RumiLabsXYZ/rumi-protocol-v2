@@ -61,8 +61,10 @@ technical-analysis/
 audit-reports/
 
 # Local design/spec/planning notes (whitepaper and existing tracked docs in this folder
-# stay tracked; this only blocks new untracked additions from being committed)
-docs/
+# stay tracked; this only blocks new untracked additions from being committed).
+# Anchored to the repo root so nested docs dirs (e.g. the app's /docs route under
+# src/vault_frontend/src/routes/docs/) are NOT ignored.
+/docs/
 
 # Superpowers local brainstorm/cache
 .superpowers/

@@ -31,6 +31,9 @@
   $: treasurySplit = interestSplit.length > 0
     ? (Number(interestSplit.find(s => s.destination === 'treasury')?.bps ?? 0) / 100).toFixed(0) + '%'
     : '—';
+  $: ammSplit = interestSplit.length > 0
+    ? (Number(interestSplit.find(s => s.destination === 'amm1')?.bps ?? 0) / 100).toFixed(0) + '%'
+    : '—';
 
   $: rmrFloorPct = (rmrFloor * 100).toFixed(0);
   $: rmrCeilingPct = (rmrCeiling * 100).toFixed(0);
@@ -205,7 +208,7 @@
       </div>
     {/if}
     <p>Reserve redemptions are the cleanest outcome: you burn icUSD and receive ckStables in return. No vaults are affected.</p>
-    <p>Reserves grow when users repay vault debt with ckUSDT or ckUSDC. Note that interest revenue from stablecoin repayments is split according to the protocol's interest split: currently <span class="live">{stabilityPoolSplit}</span> to the stability pool, <span class="live">{threePoolSplit}</span> to the 3pool, and <span class="live">{treasurySplit}</span> to treasury.</p>
+    <p>Reserves grow when users repay vault debt with ckUSDT or ckUSDC, and when the <a href="/docs/liquidation-bot" class="doc-link">liquidation bot</a> deposits swap proceeds. Note that interest revenue from stablecoin repayments is split according to the protocol's interest split: currently <span class="live">{stabilityPoolSplit}</span> to the stability pool, <span class="live">{threePoolSplit}</span> to the 3pool, <span class="live">{ammSplit}</span> to AMM liquidity providers, and <span class="live">{treasurySplit}</span> to treasury.</p>
   </section>
 
   <section class="doc-section">
@@ -223,7 +226,7 @@
     {/if}
     <p>The vault redemption fee is dynamic. It is calculated using a base rate that increases with each redemption and decays over time:</p>
     <p class="doc-formula">fee = base_rate &times; 0.94<sup>hours_since_last_redemption</sup> + (redeemed / total_borrowed) &times; 0.5</p>
-    <p>The base rate starts at zero and increases with each redemption. The 0.94 decay factor means the rate halves roughly every 11 hours of inactivity. The result is clamped between the floor and ceiling shown above. After each redemption, the base rate is updated to the newly computed fee.</p>
+    <p>The base rate starts at zero and increases with each redemption. The 0.94 decay factor means the rate halves roughly every 11 hours of inactivity. The result is clamped between the floor and ceiling shown above. After each redemption, the base rate is updated to the newly computed fee. The base rate and its decay clock are tracked <strong>per collateral type</strong>, so heavy redemption against one asset doesn't raise the fee for the others.</p>
     <p>You receive the vault's collateral asset (not ckStables) from vault redemptions. The collateral is sent directly to your account.</p>
   </section>
 
@@ -261,7 +264,7 @@
   <section class="doc-section">
     <h2 class="doc-heading">How Redemption Flows</h2>
     <ol class="flow-list">
-      <li>You submit icUSD for redemption.</li>
+      <li>You submit icUSD for redemption (minimum 0.1 icUSD). Redemption is available in normal and Recovery modes, but not while the protocol is in Read-Only mode.</li>
       <li>The icUSD is burned (removed from circulation).</li>
       <li><strong>Reserves first:</strong> The protocol checks its ckStable reserves and sends you stablecoins up to the available balance.</li>
       <li><strong>Vault spillover:</strong> Any remaining amount after reserves is filled by taking collateral from the lowest-CR vaults, prioritized by collateral tier (see below).</li>
@@ -275,6 +278,8 @@
     <h2 class="doc-heading">Safety: Failed Transfer Handling</h2>
     <p>On the Internet Computer, cross-canister calls are not atomic, so a transfer can fail after your icUSD has already been burned. If a reserve redemption's ckStable transfer fails, the protocol automatically <strong>refunds your icUSD</strong> by minting it back to your account. You will see an error message, but your funds are safe.</p>
     <p>If both the ckStable transfer and the refund fail (an extremely unlikely scenario), the incident is logged for manual intervention by the protocol admin using the <a href="/transparency" class="doc-link">admin mint</a> function.</p>
+    <p>Vault redemptions have two further safeguards. If the redeemable vaults can't absorb your full amount, the unconsumed portion of your icUSD is <strong>refunded</strong> rather than burned for nothing. And vaults that are mid-liquidation are skipped entirely, so a redemption can never double-take collateral from a vault that is simultaneously being liquidated. If seized collateral ends up worth less than the debt it cleared, the difference is recorded in the protocol's <a href="/docs/liquidation" class="doc-link">deficit account</a>.</p>
+    <p class="doc-note">Before you redeem, check the <a href="/swap" class="doc-link">Swap</a> page. When icUSD trades near or above $1, swapping often returns more than redeeming (redemption pays the RMR-adjusted rate minus fees), and the <a href="/redeem" class="doc-link">Redeem</a> page shows a comparison whenever a swap route would pay out more.</p>
   </section>
 </article>
 
@@ -326,6 +331,16 @@
   }
   .flow-list li {
     font-size: 0.875rem; color: var(--rumi-text-secondary); line-height: 1.5;
+  }
+
+  .doc-note {
+    font-size: 0.8125rem;
+    color: var(--rumi-text-secondary);
+    background: var(--rumi-bg-surface1);
+    border-left: 3px solid var(--rumi-action);
+    border-radius: 0 0.5rem 0.5rem 0;
+    padding: 0.625rem 1rem;
+    margin: 0.5rem 0;
   }
 
   .tier-table {

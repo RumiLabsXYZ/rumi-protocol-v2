@@ -33,12 +33,27 @@
     {
       title: "3pool (Stablecoin AMM)",
       href: "/docs/three-pool",
-      description: "How the stablecoin swap pool works: swapping, adding liquidity, LP tokens, and yield."
+      description: "How the stablecoin swap pool works: swapping, adding liquidity, the 3USD token, and yield."
+    },
+    {
+      title: "Swap & AMM",
+      href: "/docs/swap",
+      description: "How the swap router works, the 3USD/ICP pair AMM, LP rewards, and slippage."
+    },
+    {
+      title: "Points & Airdrop (Season 1)",
+      href: "/docs/points",
+      description: "How airdrop points accrue: qualifying activities, multipliers, epochs, and snapshots."
     },
     {
       title: "Protocol Parameters",
       href: "/docs/parameters",
       description: "Current constants, fees, ratios, and operational thresholds."
+    },
+    {
+      title: "Security & Audits",
+      href: "https://rumiprotocol.com/security",
+      description: "Published security reviews and audit reports, with per-finding fence-test coverage."
     },
     {
       title: "Transparency",
