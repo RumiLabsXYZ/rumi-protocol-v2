@@ -1822,27 +1822,14 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
     mutate_state(|s| {
         // Make sure vault exists before attempting to remove
         if s.vault_id_to_vaults.contains_key(&vault_id) {
-            // Remove from vault_id_to_vaults map
-            s.vault_id_to_vaults.remove(&vault_id);
-
-            // Wave-8b LIQ-002: drop from the sorted-troves CR index. The
-            // dedicated `state::close_vault` already does this; this path
-            // does the removal inline (without going through `close_vault`)
-            // to skip the trap branches, so we mirror the unindex here.
-            s.unindex_vault_cr(vault_id);
-
-            // Remove from principal_to_vault_ids map
-            if let Some(vault_ids) = s.principal_to_vault_ids.get_mut(&vault.owner) {
-                vault_ids.remove(&vault_id);
-                // If this was the user's last vault, remove the principal entry
-                if vault_ids.is_empty() {
-                    s.principal_to_vault_ids.remove(&vault.owner);
-                }
-            }
-
-            // Record the close vault event
+            // The vault must still exist when record_close_vault runs:
+            // state::close_vault inside it performs the removal (primary map
+            // + every secondary index) and traps on an unknown vault. An
+            // earlier version removed the vault inline here first, so the
+            // recorder's close always hit that trap and rolled the whole
+            // call back — the endpoint could never succeed.
             crate::event::record_close_vault(s, vault_id, None);
-            
+
             // Complete the close request
             s.complete_close_vault_request();
             
@@ -2674,29 +2661,10 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
             },
         );
 
-        // Clean up fully liquidated vaults (zero debt and zero collateral)
-        let mut removed = false;
-        if let Some(vault) = s.vault_id_to_vaults.get(&vault_id) {
-            if vault.borrowed_icusd_amount.0 == 0 && vault.collateral_amount == 0 {
-                let owner = vault.owner;
-                s.vault_id_to_vaults.remove(&vault_id);
-                if let Some(ids) = s.principal_to_vault_ids.get_mut(&owner) {
-                    ids.retain(|id| *id != vault_id);
-                    if ids.is_empty() {
-                        s.principal_to_vault_ids.remove(&owner);
-                    }
-                }
-                log!(INFO, "[liquidate_vault_partial] Vault #{} fully liquidated — removed", vault_id);
-                removed = true;
-            }
-        }
-
-        // Wave-8b LIQ-002: re-key after the partial deduction, or unindex if
-        // the vault was drained to zero and removed above.
-        if removed {
-            s.unindex_vault_cr(vault_id);
-        } else {
-            s.reindex_vault_cr(vault_id);
+        // Shared drain rule (see state::cleanup_if_drained): remove the vault
+        // if this liquidation emptied it, else re-key its CR index entry.
+        if s.cleanup_if_drained(vault_id) {
+            log!(INFO, "[liquidate_vault_partial] Vault #{} fully liquidated — removed", vault_id);
         }
 
         log!(INFO, "[liquidate_vault_partial] Partial liquidation completed, {} pending transfers created", 1);
@@ -2989,12 +2957,11 @@ pub async fn liquidate_vault_partial_with_stable(
             },
         );
 
-        // Wave-8b LIQ-002: re-key the index entry after the partial deduction.
-        // (`liquidate_vault_partial_with_stable` does not currently include
-        // the zero-debt-zero-collateral cleanup branch its sibling has, so a
-        // simple reindex is sufficient. If a future cleanup branch is added
-        // here, mirror the unindex path from `liquidate_vault_partial`.)
-        s.reindex_vault_cr(vault_id);
+        // Shared drain rule (see state::cleanup_if_drained): remove the vault
+        // if this liquidation emptied it, else re-key its CR index entry.
+        if s.cleanup_if_drained(vault_id) {
+            log!(INFO, "[liquidate_vault_stable] Vault #{} fully liquidated — removed", vault_id);
+        }
 
         log!(INFO, "[liquidate_vault_stable] Partial liquidation completed, pending transfer created");
         interest_share
@@ -3404,32 +3371,13 @@ pub async fn liquidate_vault_debt_already_burned(
             },
         );
 
-        // Clean up fully liquidated vaults (zero debt and zero collateral)
-        let mut removed = false;
-        if let Some(vault) = s.vault_id_to_vaults.get(&vault_id) {
-            if vault.borrowed_icusd_amount.0 == 0 && vault.collateral_amount == 0 {
-                let owner = vault.owner;
-                s.vault_id_to_vaults.remove(&vault_id);
-                if let Some(ids) = s.principal_to_vault_ids.get_mut(&owner) {
-                    ids.retain(|id| *id != vault_id);
-                    if ids.is_empty() {
-                        s.principal_to_vault_ids.remove(&owner);
-                    }
-                }
-                log!(INFO, "[liquidate_vault_debt_burned] Vault #{} fully liquidated — removed", vault_id);
-                removed = true;
-            }
-        }
-
-        // Wave-8b LIQ-002: re-key after partial deduction, or unindex if
-        // drained. The band gate that originally consumed this index was
-        // deactivated 2026-05-18, but `check_vaults`' at-risk-band sharding
-        // (Wave-9c DOS-005) still relies on accurate CR keys, so the index
-        // must stay current.
-        if removed {
-            s.unindex_vault_cr(vault_id);
-        } else {
-            s.reindex_vault_cr(vault_id);
+        // Shared drain rule (see state::cleanup_if_drained): remove the vault
+        // if this liquidation emptied it, else re-key its CR index entry.
+        // The band gate that originally consumed the CR index was deactivated
+        // 2026-05-18, but `check_vaults`' at-risk-band sharding (Wave-9c
+        // DOS-005) still relies on accurate CR keys.
+        if s.cleanup_if_drained(vault_id) {
+            log!(INFO, "[liquidate_vault_debt_burned] Vault #{} fully liquidated — removed", vault_id);
         }
 
         interest_share
@@ -4231,10 +4179,11 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
             },
         );
 
-        // Wave-8b LIQ-002: re-key after the partial deduction. This endpoint
-        // doesn't include a zero-debt-zero-collateral cleanup branch (unlike
-        // `liquidate_vault_partial`), so a simple reindex is correct.
-        s.reindex_vault_cr(arg.vault_id);
+        // Shared drain rule (see state::cleanup_if_drained): remove the vault
+        // if this liquidation emptied it, else re-key its CR index entry.
+        if s.cleanup_if_drained(arg.vault_id) {
+            log!(INFO, "[partial_liquidate_vault] Vault #{} fully liquidated — removed", arg.vault_id);
+        }
 
         log!(INFO, "[partial_liquidate_vault] Protocol state updated, pending transfer created");
         interest_share

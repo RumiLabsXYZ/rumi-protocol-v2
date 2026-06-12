@@ -659,14 +659,7 @@ fn post_upgrade(arg: ProtocolArg) {
             .map(|(id, _)| *id)
             .collect();
         for vault_id in &empty_vault_ids {
-            if let Some(vault) = s.vault_id_to_vaults.remove(vault_id) {
-                if let Some(ids) = s.principal_to_vault_ids.get_mut(&vault.owner) {
-                    ids.retain(|id| id != vault_id);
-                    if ids.is_empty() {
-                        s.principal_to_vault_ids.remove(&vault.owner);
-                    }
-                }
-            }
+            s.remove_vault_and_unindex(*vault_id);
         }
         if !empty_vault_ids.is_empty() {
             log!(INFO, "[upgrade]: cleaned up {} empty vaults: {:?}", empty_vault_ids.len(), empty_vault_ids);
@@ -691,6 +684,26 @@ fn post_upgrade(arg: ProtocolArg) {
         INFO,
         "[upgrade]: Wave-8b LIQ-002 migration rebuilt vault_cr_index for {} vault(s)",
         reindexed,
+    );
+
+    // Converge the remaining secondary vault indexes with the primary map.
+    // collateral_to_vault_ids accumulated stale ids in the persisted snapshot
+    // (mainnet 2026-06-11: 185 indexed ids vs 82 open vaults) because close
+    // paths never unindexed; the runtime fix stops new drift and this sweep
+    // heals what the snapshot still carries. Idempotent — a no-op once
+    // consistent.
+    let (stale_ids, missing_ids, empty_principals) = mutate_state(|s| {
+        let (stale, missing) = s.rebuild_collateral_index();
+        let empties = s.prune_empty_principal_entries();
+        (stale, missing, empties)
+    });
+    log!(
+        INFO,
+        "[upgrade]: vault-index sweep: dropped {} stale collateral-index id(s), \
+         re-added {} missing id(s), pruned {} empty principal entr(y/ies)",
+        stale_ids,
+        missing_ids,
+        empty_principals,
     );
 
     let end = ic_cdk::api::instruction_counter();
@@ -3781,10 +3794,13 @@ async fn bot_confirm_liquidation(vault_id: u64) -> Result<(), ProtocolError> {
 
         s.bot_total_debt_covered_e8s += claim.debt_amount;
         s.bot_claims.remove(&vault_id);
-        // Wave-8b LIQ-002: bot-confirmed liquidation reduced debt+collateral
-        // → re-key the CR index entry. (No removal: bot path never drains to
-        // zero in a single confirm.)
-        s.reindex_vault_cr(vault_id);
+        // Shared drain rule (see state::cleanup_if_drained): a bot confirm
+        // normally only reduces debt+collateral (re-key the CR entry), but if
+        // the write-down emptied the vault it must be removed like every
+        // other PartialLiquidateVault path, or replay diverges.
+        if s.cleanup_if_drained(vault_id) {
+            log!(INFO, "[bot_confirm_liquidation] Vault #{} fully liquidated — removed", vault_id);
+        }
     });
 
     log!(INFO, "[bot_confirm_liquidation] Confirmed liquidation for vault #{}: debt={}, collateral={}",

@@ -2990,6 +2990,98 @@ impl State {
         }
     }
 
+    /// Single canonical vault-removal path: drops the vault from the primary
+    /// map AND every secondary index (per-principal, per-collateral,
+    /// sorted-troves CR), pruning empty per-principal sets.
+    ///
+    /// Every code path that deletes a vault MUST go through here. Bypassing
+    /// it is how `collateral_to_vault_ids` accumulated ~103 stale ids on
+    /// mainnet (measured 2026-06-11: 185 indexed vs 82 open vaults) — the
+    /// unindex helper existed but no close path called it.
+    ///
+    /// Tolerates missing secondary-index entries instead of trapping so a
+    /// historically inconsistent state heals on removal rather than bricking
+    /// event replay.
+    pub fn remove_vault_and_unindex(&mut self, vault_id: u64) -> Option<Vault> {
+        let vault = self.vault_id_to_vaults.remove(&vault_id)?;
+        if let Some(vault_ids) = self.principal_to_vault_ids.get_mut(&vault.owner) {
+            vault_ids.remove(&vault_id);
+            if vault_ids.is_empty() {
+                self.principal_to_vault_ids.remove(&vault.owner);
+            }
+        }
+        self.unindex_vault_by_collateral(&vault.collateral_type, vault_id);
+        self.unindex_vault_cr(vault_id);
+        Some(vault)
+    }
+
+    /// Shared drain rule for every partial-liquidation path: a vault left
+    /// with zero debt AND zero collateral is removed (primary map + all
+    /// secondary indexes) and `true` is returned; otherwise the vault's CR
+    /// index entry is re-keyed and `false` is returned.
+    ///
+    /// All five runtime recorders of `PartialLiquidateVault` and the event's
+    /// replay handler must call this same helper — if any path applies a
+    /// different rule, replayed state diverges from live state.
+    pub fn cleanup_if_drained(&mut self, vault_id: u64) -> bool {
+        let drained = self
+            .vault_id_to_vaults
+            .get(&vault_id)
+            .is_some_and(|v| v.borrowed_icusd_amount.0 == 0 && v.collateral_amount == 0);
+        if drained {
+            self.remove_vault_and_unindex(vault_id);
+        } else {
+            // Wave-8b LIQ-002: the partial deduction changed debt/collateral;
+            // re-key the CR index entry (self-cleaning if the vault is gone).
+            self.reindex_vault_cr(vault_id);
+        }
+        drained
+    }
+
+    /// Converge `collateral_to_vault_ids` to exactly the vaults present in
+    /// `vault_id_to_vaults`. Returns `(stale_removed, missing_added)`.
+    ///
+    /// Idempotent, O(N log N) over open vaults. Run by post_upgrade so an
+    /// index that drifted in the persisted snapshot (mainnet 2026-06-11:
+    /// ~103 stale ids from close paths that never unindexed) heals on the
+    /// next deploy without a reinstall.
+    pub fn rebuild_collateral_index(&mut self) -> (usize, usize) {
+        let mut fresh: BTreeMap<CollateralType, BTreeSet<u64>> = BTreeMap::new();
+        for (id, vault) in &self.vault_id_to_vaults {
+            fresh.entry(vault.collateral_type).or_default().insert(*id);
+        }
+
+        let in_index = |index: &BTreeMap<CollateralType, BTreeSet<u64>>,
+                        ct: &CollateralType,
+                        id: &u64| index.get(ct).is_some_and(|ids| ids.contains(id));
+        let stale_removed = self
+            .collateral_to_vault_ids
+            .iter()
+            .flat_map(|(ct, ids)| ids.iter().map(move |id| (ct, id)))
+            .filter(|(ct, id)| !in_index(&fresh, ct, id))
+            .count();
+        let missing_added = fresh
+            .iter()
+            .flat_map(|(ct, ids)| ids.iter().map(move |id| (ct, id)))
+            .filter(|(ct, id)| !in_index(&self.collateral_to_vault_ids, ct, id))
+            .count();
+
+        self.collateral_to_vault_ids = fresh;
+        (stale_removed, missing_added)
+    }
+
+    /// Drop per-principal vault-id sets that are empty. Returns how many
+    /// entries were pruned.
+    ///
+    /// Close paths now prune the owner's entry when their last vault goes,
+    /// but snapshots taken before that change still carry empty sets; this
+    /// converges them so live state matches what event replay produces.
+    pub fn prune_empty_principal_entries(&mut self) -> usize {
+        let before = self.principal_to_vault_ids.len();
+        self.principal_to_vault_ids.retain(|_, ids| !ids.is_empty());
+        before - self.principal_to_vault_ids.len()
+    }
+
     // ---- Wave-8b LIQ-002: sorted-troves CR index ---------------------------
 
     /// Convert a CR ratio into the integer key used by `vault_cr_index`.
@@ -3362,17 +3454,25 @@ impl State {
     pub fn open_vault(&mut self, vault: Vault) {
         let vault_id = vault.vault_id;
         let collateral_type = vault.collateral_type;
-        // If this vault_id already exists with a different owner (e.g. duplicate
-        // OpenVault events in the log), remove the stale index entry so
-        // principal_to_vault_ids stays consistent with vault_id_to_vaults.
-        if let Some(old_vault) = self.vault_id_to_vaults.get(&vault_id) {
-            if old_vault.owner != vault.owner {
-                if let Some(old_ids) = self.principal_to_vault_ids.get_mut(&old_vault.owner) {
+        // If this vault_id already exists with a different owner or collateral
+        // type (e.g. duplicate OpenVault events in the log), remove the stale
+        // index entries so the secondary indexes stay consistent with
+        // vault_id_to_vaults.
+        if let Some((old_owner, old_ct)) = self
+            .vault_id_to_vaults
+            .get(&vault_id)
+            .map(|v| (v.owner, v.collateral_type))
+        {
+            if old_owner != vault.owner {
+                if let Some(old_ids) = self.principal_to_vault_ids.get_mut(&old_owner) {
                     old_ids.remove(&vault_id);
                     if old_ids.is_empty() {
-                        self.principal_to_vault_ids.remove(&old_vault.owner);
+                        self.principal_to_vault_ids.remove(&old_owner);
                     }
                 }
+            }
+            if old_ct != collateral_type {
+                self.unindex_vault_by_collateral(&old_ct, vault_id);
             }
         }
         self.vault_id_to_vaults.insert(vault_id, vault.clone());
@@ -3393,22 +3493,13 @@ impl State {
     }
 
     pub fn close_vault(&mut self, vault_id: u64) {
-        if let Some(vault) = self.vault_id_to_vaults.remove(&vault_id) {
-            let owner = vault.owner;
-            // NOTE: We intentionally do NOT create a pending_margin_transfer here.
-            // CloseVault requires collateral=0, and WithdrawAndCloseVault already
-            // transferred collateral directly before calling this. Inserting a
-            // pending entry would be phantom — never cleared by a MarginTransfer event.
-            // Legitimate pending transfers (liquidator rewards) are created directly
-            // by the liquidation code in vault.rs.
-            if let Some(vault_ids) = self.principal_to_vault_ids.get_mut(&owner) {
-                vault_ids.remove(&vault_id);
-            } else {
-                ic_cdk::trap("BUG: tried to close vault with no owner");
-            }
-            // Wave-8b LIQ-002: drop from the sorted-troves CR index.
-            self.unindex_vault_cr(vault_id);
-        } else {
+        // NOTE: We intentionally do NOT create a pending_margin_transfer here.
+        // CloseVault requires collateral=0, and WithdrawAndCloseVault already
+        // transferred collateral directly before calling this. Inserting a
+        // pending entry would be phantom — never cleared by a MarginTransfer event.
+        // Legitimate pending transfers (liquidator rewards) are created directly
+        // by the liquidation code in vault.rs.
+        if self.remove_vault_and_unindex(vault_id).is_none() {
             ic_cdk::trap("BUG: tried to close unknown vault");
         }
     }
@@ -3868,14 +3959,7 @@ impl State {
             // Full liquidation — removes vault entirely
             // All remaining accrued_interest is interest revenue
             let interest_share = vault.accrued_interest;
-            if let Some(vault) = self.vault_id_to_vaults.remove(&vault_id) {
-                if let Some(vault_ids) = self.principal_to_vault_ids.get_mut(&vault.owner) {
-                    vault_ids.remove(&vault_id);
-                }
-            }
-            // Wave-8b LIQ-002: full liquidation removes the vault entirely;
-            // drop its index entry too.
-            self.unindex_vault_cr(vault_id);
+            self.remove_vault_and_unindex(vault_id);
             interest_share
         }
     }
@@ -3897,20 +3981,13 @@ impl State {
                 Vacant(_) => panic!("bug: vault not found"),
             }
         }
-        if let Some(vault) = self.vault_id_to_vaults.remove(&vault_id) {
-            let owner = vault.owner;
-            if let Some(vault_ids) = self.principal_to_vault_ids.get_mut(&owner) {
-                vault_ids.remove(&vault_id);
-            }
-        }
-        // Wave-8b LIQ-002: re-key every vault that received a share, then drop
-        // the source vault from the index. `redistribute_vault` is currently
-        // only reachable from event replay (no #[update] wires it), but the
-        // index contract holds for any caller.
+        self.remove_vault_and_unindex(vault_id);
+        // Wave-8b LIQ-002: re-key every vault that received a share.
+        // `redistribute_vault` is currently only reachable from event replay
+        // (no #[update] wires it), but the index contract holds for any caller.
         for tid in touched_ids {
             self.reindex_vault_cr(tid);
         }
-        self.unindex_vault_cr(vault_id);
     }
     
     /// Water-filling redemption: spread redemptions across vaults to equalize CR.
@@ -4259,6 +4336,11 @@ impl State {
             "principal_to_vault_ids does not match"
         );
         ensure_eq!(
+            self.collateral_to_vault_ids,
+            other.collateral_to_vault_ids,
+            "collateral_to_vault_ids does not match"
+        );
+        ensure_eq!(
             self.xrc_principal,
             other.xrc_principal,
             "xrc_principal does not match"
@@ -4307,6 +4389,39 @@ impl State {
             for vault_id in vault_ids {
                 if self.vault_id_to_vaults.get(vault_id).is_none() {
                     panic!("Not all vault ids are in the id -> Vault map.")
+                }
+            }
+        }
+
+        // The collateral index must mirror vault_id_to_vaults exactly. Stale
+        // ids inflate per-collateral vault counts and cost every index
+        // consumer dead lookups (mainnet 2026-06-11: 185 indexed ids vs 82
+        // open vaults). Size equality plus every-entry-valid implies each
+        // open vault is indexed exactly once under its own collateral type.
+        let indexed_total: usize = self
+            .collateral_to_vault_ids
+            .values()
+            .map(|ids| ids.len())
+            .sum();
+        ensure_eq!(
+            indexed_total,
+            self.vault_id_to_vaults.len(),
+            "collateral_to_vault_ids size does not match open vault count"
+        );
+        for (ct, ids) in &self.collateral_to_vault_ids {
+            for vault_id in ids {
+                match self.vault_id_to_vaults.get(vault_id) {
+                    Some(vault) => ensure_eq!(
+                        vault.collateral_type,
+                        *ct,
+                        "vault {} is indexed under the wrong collateral type",
+                        vault_id
+                    ),
+                    None => ensure!(
+                        false,
+                        "stale vault id {} in collateral_to_vault_ids",
+                        vault_id
+                    ),
                 }
             }
         }
