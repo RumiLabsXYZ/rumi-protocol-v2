@@ -7,12 +7,30 @@ use std::collections::HashMap;
 
 type Memory = VirtualMemory<DefaultMemoryImpl>;
 
-// Stable memory layout:
-//   MemoryId 0 → StableBTreeMap<u64, DepositRecord>  (deposit log)
-//   MemoryId 1 → StableCell<TreasuryConfig>           (ledger principals, paused flag)
-//   MemoryId 2 → StableCell<BalancesSnapshot>          (asset balances — survives upgrades)
-//   MemoryId 3 → StableBTreeMap<u64, TreasuryEvent>   (event log)
-//   MemoryId 4 → StableBTreeMap<u64, u64>             (request_id → first-attempt created_at_time)
+// Stable memory layout.
+//
+// Each stable store owns exactly one MemoryManager slot. These IDs are
+// PERMANENT: once a store is assigned a slot the number must never change or
+// be reused for a different store, or an upgrade will read another store's
+// bytes (silent state corruption). They are declared once here and referenced
+// by both `init` and `restore_state` so the two code paths can never drift out
+// of sync. `MEMORY_LAYOUT` is the single source of truth; `memory_ids_unique`
+// (test) guards against two stores accidentally sharing a slot.
+const MEM_DEPOSITS: u8 = 0; // StableBTreeMap<u64, DepositRecord>  (deposit log)
+const MEM_CONFIG: u8 = 1; // StableCell<TreasuryConfig>          (ledger principals, paused flag)
+const MEM_BALANCES: u8 = 2; // StableCell<BalancesSnapshot>        (asset balances — survives upgrades)
+const MEM_EVENTS: u8 = 3; // StableBTreeMap<u64, TreasuryEvent>  (event log)
+const MEM_WITHDRAWAL_CREATED_AT: u8 = 4; // StableBTreeMap<u64, u64> (request_id → first-attempt created_at_time)
+
+/// Every stable memory slot this canister owns, paired with a human label.
+/// Single source of truth for the layout; iterated by the uniqueness test.
+const MEMORY_LAYOUT: &[(u8, &str)] = &[
+    (MEM_DEPOSITS, "deposits"),
+    (MEM_CONFIG, "config"),
+    (MEM_BALANCES, "balances"),
+    (MEM_EVENTS, "events"),
+    (MEM_WITHDRAWAL_CREATED_AT, "withdrawal_created_at"),
+];
 
 /// Treasury state that persists across upgrades
 pub struct TreasuryState {
@@ -145,18 +163,21 @@ impl TreasuryState {
             let balances = empty_balances();
 
             Self {
-                deposits: StableBTreeMap::init(memory_manager.get(MemoryId::new(0))),
+                deposits: StableBTreeMap::init(memory_manager.get(MemoryId::new(MEM_DEPOSITS))),
                 balances_cell: StableCell::init(
-                    memory_manager.get(MemoryId::new(2)),
+                    memory_manager.get(MemoryId::new(MEM_BALANCES)),
                     BalancesSnapshot::default(),
                 )
                 .unwrap(),
                 balances,
-                config: StableCell::init(memory_manager.get(MemoryId::new(1)), config).unwrap(),
+                config: StableCell::init(memory_manager.get(MemoryId::new(MEM_CONFIG)), config)
+                    .unwrap(),
                 next_deposit_id: 1,
-                events: StableBTreeMap::init(memory_manager.get(MemoryId::new(3))),
+                events: StableBTreeMap::init(memory_manager.get(MemoryId::new(MEM_EVENTS))),
                 next_event_id: 1,
-                withdrawal_created_at: StableBTreeMap::init(memory_manager.get(MemoryId::new(4))),
+                withdrawal_created_at: StableBTreeMap::init(
+                    memory_manager.get(MemoryId::new(MEM_WITHDRAWAL_CREATED_AT)),
+                ),
             }
         })
     }
@@ -360,7 +381,7 @@ pub fn restore_state() {
 
             // Re-open the stable structures — reads existing data from stable memory
             let deposits: StableBTreeMap<u64, DepositRecord, Memory> =
-                StableBTreeMap::init(memory_manager.get(MemoryId::new(0)));
+                StableBTreeMap::init(memory_manager.get(MemoryId::new(MEM_DEPOSITS)));
 
             // Dummy default for StableCell::init — real value is read from stable memory
             let dummy_config = TreasuryConfig {
@@ -372,14 +393,15 @@ pub fn restore_state() {
                 is_paused: true,
             };
             let config =
-                StableCell::init(memory_manager.get(MemoryId::new(1)), dummy_config).unwrap();
+                StableCell::init(memory_manager.get(MemoryId::new(MEM_CONFIG)), dummy_config)
+                    .unwrap();
 
-            // Read persisted balances (MemoryId 2).
+            // Read persisted balances.
             // On first upgrade from old code the cell won't exist yet, so the
             // default is an empty snapshot — we fall back to deposit replay.
             let balances_cell: StableCell<BalancesSnapshot, Memory> =
                 StableCell::init(
-                    memory_manager.get(MemoryId::new(2)),
+                    memory_manager.get(MemoryId::new(MEM_BALANCES)),
                     BalancesSnapshot::default(),
                 )
                 .unwrap();
@@ -410,15 +432,15 @@ pub fn restore_state() {
             let max_id = deposits.iter().map(|(id, _)| id).last().unwrap_or(0);
             let next_deposit_id = if max_id > 0 { max_id + 1 } else { 1 };
 
-            // Re-open events stable map (MemoryId 3)
+            // Re-open events stable map
             let events: StableBTreeMap<u64, TreasuryEvent, Memory> =
-                StableBTreeMap::init(memory_manager.get(MemoryId::new(3)));
+                StableBTreeMap::init(memory_manager.get(MemoryId::new(MEM_EVENTS)));
             let max_event_id = events.iter().map(|(id, _)| id).last().unwrap_or(0);
             let next_event_id = if max_event_id > 0 { max_event_id + 1 } else { 1 };
 
-            // Re-open withdrawal created_at_time map (MemoryId 4)
+            // Re-open withdrawal created_at_time map
             let withdrawal_created_at: StableBTreeMap<u64, u64, Memory> =
-                StableBTreeMap::init(memory_manager.get(MemoryId::new(4)));
+                StableBTreeMap::init(memory_manager.get(MemoryId::new(MEM_WITHDRAWAL_CREATED_AT)));
 
             *s.borrow_mut() = Some(TreasuryState {
                 deposits,
@@ -450,4 +472,24 @@ pub fn with_state_mut<R>(f: impl FnOnce(&mut TreasuryState) -> R) -> R {
         let state = state.as_mut().expect("Treasury state not initialized");
         f(state)
     })
+}
+
+#[cfg(test)]
+mod memory_layout_tests {
+    use super::MEMORY_LAYOUT;
+    use std::collections::HashSet;
+
+    /// No two stable stores may share a MemoryManager slot — a collision would
+    /// make two stores read/write the same bytes and silently corrupt state.
+    /// This fails fast in CI if a future store reuses an existing ID.
+    #[test]
+    fn memory_ids_unique() {
+        let mut seen = HashSet::new();
+        for (id, label) in MEMORY_LAYOUT {
+            assert!(
+                seen.insert(*id),
+                "duplicate stable MemoryId {id} (store {label:?}) — pick an unused slot"
+            );
+        }
+    }
 }
