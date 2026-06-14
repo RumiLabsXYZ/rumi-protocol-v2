@@ -6,10 +6,13 @@
 
   let interestSplit: InterestSplitEntryDTO[] = [];
 
-  function splitPct(dest: string): string {
+  // Reactive so the template re-renders once interestSplit loads in onMount.
+  // A plain function isn't tracked by Svelte (the template only references
+  // splitPct, not interestSplit), so it would stay on the placeholder forever.
+  $: splitPct = (dest: string): string => {
     const entry = interestSplit.find(s => s.destination === dest);
     return entry ? (Number(entry.bps) / 100).toFixed(0) + '%' : '—';
-  }
+  };
 
   // Pool state
   let tokenSymbols: string[] = [];

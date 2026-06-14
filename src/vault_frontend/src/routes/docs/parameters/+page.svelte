@@ -46,10 +46,13 @@
   import type { InterestSplitEntryDTO } from '$lib/services/types';
   let interestSplit: InterestSplitEntryDTO[] = [];
 
-  function splitPct(dest: string): string {
+  // Reactive so template re-renders once interestSplit loads (a plain function
+  // isn't tracked by Svelte). The page already gates on `loaded`, but keeping
+  // this reactive future-proofs any splitPct call moved outside that gate.
+  $: splitPct = (dest: string): string => {
     const entry = interestSplit.find(s => s.destination === dest);
     return entry ? (Number(entry.bps) / 100).toFixed(0) + '%' : '—';
-  }
+  };
 
   function destLabel(dest: string): string {
     switch (dest) {
