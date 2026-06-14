@@ -5,10 +5,13 @@
 
   let interestSplit: InterestSplitEntryDTO[] = [];
 
-  function splitPct(dest: string): string {
+  // Reactive so the template re-renders once interestSplit loads in onMount.
+  // A plain function isn't tracked by Svelte (the template only references
+  // splitPct, not interestSplit), so it would stay on the placeholder forever.
+  $: splitPct = (dest: string): string => {
     const entry = interestSplit.find(s => s.destination === dest);
     return entry ? (Number(entry.bps) / 100).toFixed(0) + '%' : '—';
-  }
+  };
 
   onMount(async () => {
     try {
@@ -27,14 +30,13 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">What the Swap Page Does</h2>
-    <p>The <a href="/swap" class="doc-link">Swap</a> page is a router over Rumi's own liquidity. Depending on the pair you pick, it routes through the <a href="/docs/three-pool" class="doc-link">3pool</a> (stablecoins), Rumi's pair AMM (3USD/ICP), or both in sequence. For the 3USD/ICP and icUSD/ICP legs it also quotes the corresponding ICPSwap pool and uses whichever venue pays out more.</p>
+    <p>The <a href="/swap" class="doc-link">Swap</a> page is a router over Rumi's own liquidity. Depending on the pair you pick, it routes through the <a href="/docs/three-pool" class="doc-link">3pool</a> (stablecoins), Rumi's pair AMM (3USD/ICP), or both in sequence.</p>
     <ul class="doc-list">
       <li><strong>Stablecoin ↔ stablecoin</strong> (icUSD, ckUSDT, ckUSDC): single swap through the 3pool.</li>
       <li><strong>Stablecoin → 3USD</strong>: a one-sided 3pool deposit (mints 3USD).</li>
       <li><strong>3USD → stablecoin</strong>: a single-token 3pool withdrawal (burns 3USD).</li>
-      <li><strong>3USD ↔ ICP</strong>: Rumi's AMM or ICPSwap's 3USD/ICP pool, whichever quotes better.</li>
-      <li><strong>ICP ↔ stablecoin</strong>: two hops through 3USD (AMM leg plus 3pool leg).</li>
-      <li><strong>icUSD ↔ ICP</strong>: routed directly through ICPSwap's icUSD/ICP pool when that beats the two-hop route.</li>
+      <li><strong>3USD ↔ ICP</strong>: a single swap through Rumi's pair AMM.</li>
+      <li><strong>ICP ↔ stablecoin</strong> (including icUSD ↔ ICP): two hops through 3USD (the AMM leg plus the 3pool leg).</li>
     </ul>
     <p>Quotes shown in the UI are net amounts: every outbound transfer pays the output token's ledger fee, and your minimum-output (slippage) bound is enforced against the net amount you actually receive. The default slippage tolerance is 0.5% and you can adjust it per trade.</p>
   </section>
@@ -59,7 +61,6 @@
     <h2 class="doc-heading">Risks</h2>
     <p><strong>Impermanent loss:</strong> unlike the stablecoin 3pool, the 3USD/ICP pair holds a volatile asset. If the ICP price moves significantly after you deposit, the value of your LP position can underperform simply holding the two assets. Fee and reward income may not cover the difference.</p>
     <p><strong>Smart contract risk:</strong> the AMM is its own canister with its own code. It is covered by the protocol's recurring security reviews (reports at <a href="https://rumiprotocol.com/security" class="doc-link" target="_blank" rel="noopener">rumiprotocol.com/security</a>), but it has not been audited by a traditional human-led security firm. See the <a href="/docs/beta" class="doc-link">beta disclaimer</a>.</p>
-    <p><strong>External venue risk:</strong> routes that touch ICPSwap depend on ICPSwap's own contracts and liquidity, which Rumi does not control.</p>
   </section>
 </article>
 
