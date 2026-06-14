@@ -80,6 +80,7 @@ mod fixtures {
             collateral_type: Principal::anonymous(),
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         }
     }
     
@@ -92,6 +93,7 @@ mod fixtures {
             collateral_type: Principal::anonymous(),
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         }
     }
     
@@ -104,6 +106,7 @@ mod fixtures {
             collateral_type: Principal::anonymous(),
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         }
     }
 }
@@ -448,6 +451,7 @@ mod protocol_safety_tests {
             collateral_type: Principal::anonymous(),
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         };
         
         state.vault_id_to_vaults.insert(healthy_vault_id, healthy_vault.clone());
@@ -669,6 +673,7 @@ mod minting_tests {
             collateral_type: Principal::anonymous(),
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         };
         println!("💰 Created vault with {} ICP margin", vault.collateral_amount);
         
@@ -989,6 +994,7 @@ mod multi_collateral_helpers {
             collateral_type: cketh_ledger(),
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         }
     }
 }
@@ -1235,6 +1241,7 @@ mod multi_collateral_tests {
             collateral_type: Principal::anonymous(), // legacy ICP sentinel
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         };
         state.vault_id_to_vaults.insert(1, icp_vault);
         state.principal_to_vault_ids
@@ -1287,6 +1294,7 @@ mod multi_collateral_tests {
             collateral_type: Principal::anonymous(),
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         };
         state.vault_id_to_vaults.insert(1, icp_vault);
 
@@ -1368,6 +1376,7 @@ mod multi_collateral_tests {
             collateral_type: Principal::anonymous(),
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         };
         state.vault_id_to_vaults.insert(1, icp_vault);
 
@@ -1410,6 +1419,7 @@ mod multi_collateral_tests {
             collateral_type: Principal::anonymous(),
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         };
         state.vault_id_to_vaults.insert(1, icp_vault);
 
@@ -1446,6 +1456,7 @@ mod multi_collateral_tests {
             collateral_type: Principal::anonymous(),
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         };
         state.vault_id_to_vaults.insert(1, icp_vault);
 
@@ -1557,6 +1568,7 @@ mod multi_collateral_tests {
             collateral_type: Principal::anonymous(),
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         };
 
         let cr = rumi_protocol_backend::compute_collateral_ratio(
@@ -1569,18 +1581,26 @@ mod multi_collateral_tests {
     }
 
     // ========================================================================
-    // 9. PendingMarginTransfer Carries Collateral Type
+    // 9. close_vault Does Not Create Phantom Pending Transfers
     // ========================================================================
 
     #[test]
-    fn test_close_vault_creates_pending_transfer_with_collateral_type() {
+    fn test_close_vault_does_not_create_phantom_pending_transfer() {
+        // Regression guard for commit 1bdf5c0 ("remove phantom
+        // pending_margin_transfers from close_vault"). CloseVault requires
+        // collateral == 0, and WithdrawAndCloseVault transfers the collateral
+        // directly BEFORE calling close_vault, so a pending entry inserted here
+        // would never be cleared by a MarginTransfer event (a phantom that
+        // double-pays on a later seizure). Legitimate pending transfers
+        // (liquidator rewards) are created by the liquidation code in vault.rs,
+        // not by close_vault.
         let mut state = fixtures::create_test_state();
         state.set_icp_rate(UsdIcp::from(dec!(10.0)), None);
         register_cketh(&mut state, 2000.0);
 
         let user = Principal::from_text("2vxsx-fae").unwrap();
 
-        // Create ckETH vault with zero debt (closeable)
+        // A closeable ckETH (non-ICP) vault with zero debt.
         let vault = create_cketh_vault(user, 1, 1_000_000_000_000_000_000, 0);
         state.vault_id_to_vaults.insert(1, vault);
         state.principal_to_vault_ids
@@ -1588,18 +1608,13 @@ mod multi_collateral_tests {
             .or_default()
             .insert(1);
 
-        // Close the vault
         state.close_vault(1);
 
-        // Verify the pending transfer carries ckETH collateral type
-        assert!(!state.pending_margin_transfers.is_empty(),
-            "Should have a pending margin transfer");
-
-        // pending_margin_transfers is a BTreeMap<VaultId, PendingMarginTransfer>
-        let transfer = state.pending_margin_transfers.values().next().unwrap();
-        assert_eq!(transfer.collateral_type, cketh_ledger(),
-            "Pending transfer should carry ckETH collateral type, not ICP");
-        assert_eq!(transfer.owner, user);
+        // The vault is removed and NO phantom pending transfer is left behind.
+        assert!(!state.vault_id_to_vaults.contains_key(&1),
+            "close_vault must remove the vault");
+        assert!(state.pending_margin_transfers.is_empty(),
+            "close_vault must NOT create a pending margin transfer (phantom)");
     }
 
     // ========================================================================
@@ -1708,6 +1723,7 @@ mod multi_collateral_tests {
             collateral_type: icp_ct,
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         };
         state.open_vault(vault);
 
@@ -1733,6 +1749,7 @@ mod multi_collateral_tests {
             collateral_type: icp_ct,
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         };
         state.open_vault(icp_vault);
 
@@ -1768,6 +1785,7 @@ mod multi_collateral_tests {
             collateral_type: icp_ct,
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         };
         state.open_vault(icp_vault);
 
@@ -1802,6 +1820,7 @@ mod multi_collateral_tests {
             collateral_type: icp_ct,
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         };
         state.open_vault(icp_vault);
 
@@ -2088,6 +2107,7 @@ mod water_filling_tests {
             collateral_type: icp_ct,
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         };
         state.open_vault(v1);
 
@@ -2100,6 +2120,7 @@ mod water_filling_tests {
             collateral_type: icp_ct,
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         };
         state.open_vault(v2);
 
@@ -2112,6 +2133,7 @@ mod water_filling_tests {
             collateral_type: icp_ct,
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         };
         state.open_vault(v3);
 
@@ -2200,6 +2222,7 @@ mod water_filling_tests {
             collateral_type: icp_ct,
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         };
         state.open_vault(v1);
 
@@ -2397,6 +2420,7 @@ mod admin_mint_state_tests {
             to,
             reason: "Refund for failed transfer".to_string(),
             block_index: 42,
+            timestamp: None,
         };
 
         // Verify event is not vault-related
@@ -2404,7 +2428,7 @@ mod admin_mint_state_tests {
             "AdminMint should not be vault-related");
 
         // Verify event data
-        if let Event::AdminMint { amount, to: recipient, reason, block_index } = &event {
+        if let Event::AdminMint { amount, to: recipient, reason, block_index, .. } = &event {
             assert_eq!(amount.to_u64(), 100_000_000);
             assert_eq!(*recipient, Principal::from_text("2vxsx-fae").unwrap());
             assert_eq!(reason, "Refund for failed transfer");
@@ -2423,6 +2447,7 @@ mod admin_mint_state_tests {
             to: Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap(),
             reason: "Test compensation".to_string(),
             block_index: 999,
+            timestamp: None,
         };
 
         let json = serde_json::to_string(&event).expect("Serialization should succeed");
@@ -2505,6 +2530,7 @@ mod reserve_redemption_config_tests {
             stable_amount_sent: 99_700_000, // 99.7 e6s
             fee_stable_amount: 300_000, // 0.3 e6s
             icusd_block_index: 123,
+            timestamp: None,
         };
 
         // Verify it's not vault-related
@@ -2574,6 +2600,7 @@ mod reserve_redemption_config_tests {
             collateral_type: icp,
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(100_000_000), // 1 icUSD interest
+            bot_processing: false,
         });
 
         // Simulate a PartialLiquidateVault event with protocol_fee_collateral
@@ -2588,6 +2615,8 @@ mod reserve_redemption_config_tests {
             liquidator: Some(Principal::anonymous()),
             icp_rate: None,
             protocol_fee_collateral,
+            timestamp: None,
+            three_usd_reserves_e8s: None,
         };
 
         // Apply the event directly (simulates replay)
@@ -2645,6 +2674,7 @@ mod reserve_redemption_config_tests {
             collateral_type: icp,
             last_accrual_time: 0,
             accrued_interest: ICUSD::new(0),
+            bot_processing: false,
         });
 
         // Old-style event: no protocol_fee_collateral field
@@ -2655,6 +2685,8 @@ mod reserve_redemption_config_tests {
             liquidator: None,
             icp_rate: None,
             protocol_fee_collateral: None, // Old events deserialize as None
+            timestamp: None,
+            three_usd_reserves_e8s: None,
         };
 
         match event {
