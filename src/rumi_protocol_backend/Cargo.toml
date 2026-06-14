@@ -52,7 +52,15 @@ ic-ledger-canister-core = { git = "https://github.com/Rumi-Protocol/ic", rev = "
 k256 = { version = "0.13", default-features = false, features = ["ecdsa", "arithmetic"] }
 sha3 = "0.10"
 hex = "0.4"
-bs58 = "0.5"
+# `check` feature enables Base58Check (with_check_version / with_check), which the
+# XRPL classic-address codec needs (chains/xrp/address.rs). It pulls `sha2` (already
+# a direct dep) and no serde, so the serde 1.0.217 pin holds. Plain Solana base58
+# (chains/solana) does not use `check`; enabling it is purely additive.
+bs58 = { version = "0.5", features = ["check"] }
+# RIPEMD-160 for the XRPL AccountID = RIPEMD160(SHA256(0xED ‖ pubkey)) derivation
+# (chains/xrp/address.rs). Tiny, no_std-capable, wasm32 compatible, no serde — the
+# only hash the codebase needs beyond sha2/sha3/k256.
+ripemd = "0.1"
 # base64 for Solana sendTransaction wire encoding. Resolves to 0.22.1 (already a
 # transitive dep), so adding it as a direct dep does not shift resolution. The
 # `alloc` feature is enough for the canister (no std-only APIs needed).
