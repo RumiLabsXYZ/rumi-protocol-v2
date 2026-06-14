@@ -40,6 +40,7 @@ pub mod supply;
 pub mod vault;
 pub mod monad;
 pub mod solana;
+pub mod xrp;
 
 pub use adapter::ChainAdapter;
 pub use config::{ChainConfig, ChainId, ChainStatus};
