@@ -355,12 +355,17 @@
   let isWithdrawingAndClosing = false;
   let showTokenDropdown = false;
   let hasChangedToken = false;
+  // On a full icUSD repay with collateral still in the vault, the user chooses
+  // whether to also withdraw collateral + close (true) or leave the vault open
+  // with zero debt (false). Defaults to close — that's what most people want.
+  let closeOnFullRepay = true;
 
   function selectAction(action: 'add' | 'withdraw' | 'borrow' | 'repay') {
     if (isProcessing) return;
     if (activeAction === action) return; // already selected — do nothing
     clearMessages();
     addCollateralAmount = ''; withdrawAmount = ''; borrowAmount = ''; repayAmount = '';
+    closeOnFullRepay = true; // reset full-repay choice to the default (close)
     activeAction = action;
   }
 
@@ -484,19 +489,27 @@
     const amt = parseFloat(repayAmount);
     return amt > 0 && maxRepayable > 0 && Math.abs(amt - maxRepayable) < 0.0001;
   })();
-  // When repaying the full debt in icUSD AND the vault has collateral → offer
-  // "Repay & Close" via the backend repay_and_close_vault compound method.
-  // Saves one Oisy consent screen (3 popups → 2).
-  //
-  // `isMaxRepay` already guarantees `repayAmount == maxRepayable` (the live
-  // debt), so the compound method always receives a full-debt amount. The
-  // backend's repay_and_close_vault bypasses MIN_ICUSD_AMOUNT for this path,
-  // which lets vaults stuck in the (DUST_DEBT_THRESHOLD, MIN_ICUSD_AMOUNT)
-  // zone clear here — no separate MIN_ICUSD gate needed on the toggle.
-  $: isRepayAndClose =
+  // A full icUSD repay on a vault that still holds collateral can route through
+  // the backend repay_and_close_vault compound method (repay full debt +
+  // withdraw all collateral + close, in one call — one Oisy consent screen
+  // instead of three). `isMaxRepay` guarantees `repayAmount == maxRepayable`
+  // (the live debt), so the compound method always receives a full-debt amount.
+  $: fullIcusdRepayWithCollateral =
       repayTokenType === 'icUSD'
       && isMaxRepay
       && vaultCollateralAmount > 0;
+  // The "keep vault open" alternative routes through plain repay_to_vault, which
+  // zeroes the debt and leaves the collateral deposited. The backend rejects a
+  // plain repay below MIN_ICUSD (vault.rs ~L1222), so this path is only viable
+  // when the full debt is at least the minimum. Stuck-zone vaults (debt in the
+  // (DUST, MIN_ICUSD) band) can ONLY clear via repay_and_close, which bypasses
+  // the floor — so we don't offer them the choice; they always close.
+  $: canKeepVaultOpenOnFullRepay = fullIcusdRepayWithCollateral && maxRepayable >= MIN_ICUSD;
+  // Force-close when keeping-open isn't viable; otherwise honor the user's
+  // choice (defaults to close — what most people want).
+  $: isRepayAndClose =
+      fullIcusdRepayWithCollateral
+      && (closeOnFullRepay || !canKeepVaultOpenOnFullRepay);
 
   function clearMessages() { /* toasts auto-dismiss */ }
 
@@ -1009,6 +1022,27 @@
                   </div>
                 {/if}
               </div>
+              {#if canKeepVaultOpenOnFullRepay}
+                <div class="repay-close-toggle" role="radiogroup" aria-label="After repaying full debt">
+                  <button type="button" class="repay-close-option" class:repay-close-option-active={closeOnFullRepay}
+                    role="radio" aria-checked={closeOnFullRepay}
+                    on:click={() => (closeOnFullRepay = true)} disabled={isProcessing}>
+                    Withdraw &amp; close
+                  </button>
+                  <button type="button" class="repay-close-option" class:repay-close-option-active={!closeOnFullRepay}
+                    role="radio" aria-checked={!closeOnFullRepay}
+                    on:click={() => (closeOnFullRepay = false)} disabled={isProcessing}>
+                    Keep vault open
+                  </button>
+                </div>
+                <span class="repay-close-hint">
+                  {#if closeOnFullRepay}
+                    Repays all debt, returns your {collateralSymbol}, and closes the vault.
+                  {:else}
+                    Repays all debt and leaves the vault open with {collateralSymbol} deposited.
+                  {/if}
+                </span>
+              {/if}
               <div class="input-submit-row">
                 {#if !hasChangedToken}
                   <span class="token-hint">Click token name to pay with ckUSDT or ckUSDC</span>
@@ -1018,7 +1052,7 @@
                   {#if isProcessing}
                     ...
                   {:else if isRepayAndClose}
-                    Repay & Close
+                    Repay &amp; Close
                   {:else}
                     Repay
                   {/if}
@@ -1285,6 +1319,33 @@
   .token-hint {
     font-size: 0.625rem; color: var(--rumi-text-muted);
     opacity: 0.7; margin: 0; white-space: nowrap;
+  }
+
+  /* Full-repay choice: withdraw & close vs keep vault open */
+  .repay-close-toggle {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 0.25rem;
+    margin-top: 0.5rem;
+    padding: 0.1875rem;
+    background: var(--rumi-bg-surface2, rgba(255,255,255,0.03));
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.5rem;
+  }
+  .repay-close-option {
+    padding: 0.375rem 0.5rem;
+    background: none; border: none; border-radius: 0.375rem;
+    color: var(--rumi-text-secondary); font-family: 'Inter',sans-serif;
+    font-size: 0.6875rem; font-weight: 500; cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+  }
+  .repay-close-option:hover:not(:disabled) { color: var(--rumi-text-primary); }
+  .repay-close-option:disabled { cursor: not-allowed; opacity: 0.5; }
+  .repay-close-option-active {
+    background: rgba(209,118,232,0.15);
+    color: #d176e8; font-weight: 600;
+  }
+  .repay-close-hint {
+    display: block; margin-top: 0.375rem;
+    font-size: 0.625rem; color: var(--rumi-text-muted); opacity: 0.8;
   }
 
   /* Max button */
