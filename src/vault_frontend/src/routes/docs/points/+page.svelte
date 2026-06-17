@@ -29,11 +29,13 @@
           <tr><td>icUSD in the stability pool</td><td class="mult">1x</td></tr>
           <tr><td>3USD in the stability pool</td><td class="mult">2x</td></tr>
           <tr><td>3USD/ICP liquidity in the Rumi AMM</td><td class="mult">2x</td></tr>
+          <tr><td>Repay a vault with ckUSDC or ckUSDT <span class="soon">coming soon</span></td><td class="mult">5x</td></tr>
         </tbody>
       </table>
     </div>
     <p>Multipliers stack <strong>across activities</strong>: borrowing against a vault, depositing in the 3pool, and depositing in the stability pool all earn independently at the same time. They do not stack within a single activity.</p>
     <p>For the matched-pair rate, the matched portion is twice the smaller of your ckUSDC and ckUSDT deposits at 5x; whatever is left over on the larger side earns the unmatched 3x rate. Adding a token-sized amount of one coin does not flip your whole position to 5x.</p>
+    <p>The <strong>5x repayment boost</strong> rewards repaying vault debt with ckUSDC or ckUSDT: the repaid amount earns for a 90-day window (capped at season end). It is not live yet and will be enabled in an upcoming backend release.</p>
   </section>
 
   <section class="doc-section">
@@ -86,4 +88,10 @@
   }
   .doc-table tbody tr:last-child td { border-bottom: none; }
   .mult { color: var(--rumi-action); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .soon {
+    display: inline-block; margin-left: 0.375rem; padding: 0.0625rem 0.375rem;
+    font-size: 0.625rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+    color: var(--rumi-text-muted); background: rgba(120,120,140,0.12);
+    border: 1px solid var(--rumi-border); border-radius: 999px; vertical-align: middle;
+  }
 </style>

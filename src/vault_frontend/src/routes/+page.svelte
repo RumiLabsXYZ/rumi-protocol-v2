@@ -12,6 +12,8 @@
   import { collateralStore, activeCollateralTypes } from '$lib/stores/collateralStore';
   import { CANISTER_IDS } from '$lib/config';
   import ProtocolStats from '$lib/components/dashboard/ProtocolStats.svelte';
+  import MultiplierBadge from '$lib/components/points/MultiplierBadge.svelte';
+  import { seasonStore, earningActive } from '$lib/stores/seasonStore';
 
   let collateralAmount = 1;
   let icusdAmount = 5;
@@ -171,6 +173,7 @@
   onMount(() => {
     loadProtocolData();
     refreshPrice();
+    seasonStore.ensureLoaded();
     // Ensure collateral configs are loaded (provides per-asset CR, fees, etc.)
     collateralStore.fetchSupportedCollateral();
     priceRefreshInterval = setInterval(refreshPrice, 30000);
@@ -333,6 +336,13 @@
             {#if errorMessage}<div class="msg-error">{errorMessage}</div>{/if}
             {#if successMessage}<div class="msg-success">{successMessage}</div>{/if}
 
+            {#if $earningActive}
+              <div class="points-hint">
+                <MultiplierBadge multiplier={1} variant="full" />
+                <span>on the icUSD you mint, while the vault is open</span>
+              </div>
+            {/if}
+
             <button
               class="btn-primary cta-button"
               on:click={createVault}
@@ -485,6 +495,12 @@
 
   /* CTA */
   .cta-button { width: 100%; padding: 0.75rem; }
+
+  /* Airdrop points hint above the CTA */
+  .points-hint {
+    display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+    font-size: 0.75rem; color: var(--rumi-text-muted);
+  }
 
   /* Dev gate */
   .dev-gate { text-align: center; padding: 2rem 1rem; }

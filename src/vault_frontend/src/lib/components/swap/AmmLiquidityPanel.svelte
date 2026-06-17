@@ -16,6 +16,10 @@
     type Amm1EffectiveApy,
   } from '../../services/amm1ApyService';
   import { getThreePoolApy } from '../../services/threePoolApyService';
+  import PointsCallout from '../points/PointsCallout.svelte';
+  import { seasonStore, earningActive } from '$lib/stores/seasonStore';
+
+  onMount(() => { seasonStore.ensureLoaded(); });
 
   const dispatch = createEventDispatcher();
 
@@ -439,6 +443,11 @@
         </div>
       {:else if priceLoading}
         <div class="price-info">Loading prices...</div>
+      {/if}
+      {#if $earningActive}
+        <div style="margin-bottom:0.75rem">
+          <PointsCallout headline="Earning 2× points on your 3USD/ICP liquidity" />
+        </div>
       {/if}
       <button class="submit-btn" on:click={handleAdd} disabled={addLoading}>
         {#if addLoading}
