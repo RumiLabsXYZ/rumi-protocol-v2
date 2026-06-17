@@ -124,15 +124,25 @@ uses `global_rate_curve` or a per-asset `rate_curve`/`borrowing_fee_curve`, so
 
 ## Phased plan
 
-- **P1** — extend `xrp_rpc` `tx` parser for `delivered_amount`; add the `#[query]`
-  transform shims; key resolution + custody-address derivation (read-only,
-  observable: can price XRP + hand out deposit addresses).
-- **P2** — `custody_type` on CollateralConfig; branch deposit-in.
-- **P3** — open-then-verify deposit → credit → borrow → mint icUSD on IC.
-- **P4** — claim model: branch liquidation/withdraw/redeem out-paths + XRP claims
-  ledger + settle-via-Payment endpoint; sequence guard.
-- **P5** — register XRP collateral (dev-gated); XRPL-testnet end-to-end via
-  PocketIC + mock rippled; parameters; frontend (deposit-address + tag/claim UX).
+- **P1 ✅ DONE** — `delivered_amount` parsing (partial-payment safe); `#[query]`
+  transform shims; dev-gated address-derivation + balance-read observability.
+- **P2 ✅ DONE** — `CustodyKind` on CollateralConfig (`custody_kind`, serde-safe);
+  every ICRC deposit-in/add-collateral path rejects native-XRP.
+- **P3 ✅ DONE** — `open_xrp_vault` + `confirm_xrp_deposit` (open-then-verify →
+  credit a normal `Vault`, debt 0); borrow→mint reuses `borrow_from_vault`.
+- **P4** — claim model: make the collateral OUT-paths custody-aware —
+  `withdraw_collateral`, `close_vault`, `withdraw_partial_collateral`,
+  `liquidate_vault_partial(_with_stable)`, `redeem_collateral` — routing native-XRP
+  to an XRP-claims ledger + a settle-via-Payment endpoint; per-account sequence
+  guard. (P3 review: these currently fail-closed with rollback / no transfer, so no
+  fund-loss, but they must be made custody-aware here. The `is_native_xrp` gate the
+  IN-paths got in P2 should land on these too.)
+- **P5** — register XRP collateral (dev-gated, the params in "Parameters"); bound
+  the pending-deposit map (per-caller cap + timer prune on `opened_at_ns` — P3
+  review flagged unbounded growth, latent until this milestone activates the rail);
+  XRPL-testnet end-to-end via PocketIC + mock rippled; frontend (deposit-address +
+  tag/claim UX). **Ordering invariant: P5 registration MUST come after P4**, else an
+  XRP vault could borrow icUSD but not be liquidated (bad-debt risk).
 - **P6** — security audit; capped mainnet pilot.
 
 ## Status of decisions
