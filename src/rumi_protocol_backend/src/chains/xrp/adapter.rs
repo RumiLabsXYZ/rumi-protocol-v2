@@ -197,14 +197,21 @@ impl ChainAdapter for XrpAdapter {
     }
 
     /// Confirm `tx_hash` validated and succeeded on the XRPL. Returns a
-    /// `DepositRecord` with `block_number` = the validating ledger index;
-    /// `amount_e8s`/`depositor` are left at defaults (a future observer decodes
-    /// them from the tx with full context, mirroring the Solana adapter).
+    /// `DepositRecord` with `block_number` = the validating ledger index and
+    /// `amount_e8s` = the partial-payment-safe `delivered_amount` in DROPS (the
+    /// field carries native units here, mirroring the lamports/wei wart in the
+    /// Solana/Monad adapters — it is NOT 8-decimal e8s). Crediting
+    /// `delivered_amount` (never the Payment `Amount`) closes the XRPL
+    /// partial-payment drainer. `depositor` is left empty: the per-vault custody
+    /// address identifies the vault; a future observer can fill it.
     async fn verify_deposit(&self, tx_hash: &str) -> Result<DepositRecord, ChainAdapterError> {
         match xrp_rpc::fetch_tx_status(tx_hash).await {
-            Ok(XrpTxStatus::Validated { ledger_index }) => Ok(DepositRecord {
+            Ok(XrpTxStatus::Validated {
+                ledger_index,
+                delivered_drops,
+            }) => Ok(DepositRecord {
                 depositor: String::new(),
-                amount_e8s: 0,
+                amount_e8s: delivered_drops,
                 block_number: u64::from(ledger_index),
                 tx_hash: tx_hash.to_string(),
             }),

@@ -64,7 +64,10 @@ pub struct XrpAccountInfo {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum XrpTxStatus {
     /// Validated into a closed ledger with a `tes*` engine result.
-    Validated { ledger_index: u32 },
+    /// `delivered_drops` is the partial-payment-safe `meta.delivered_amount` in
+    /// drops (0 if the delivery was a non-native issued currency, or rippled
+    /// reports it `"unavailable"`). Deposit crediting MUST use this, never `Amount`.
+    Validated { ledger_index: u32, delivered_drops: u128 },
     /// Not (yet) validated, or `txnNotFound`.
     NotFound,
     /// Validated but the transaction failed (non-`tes*` result).
@@ -213,6 +216,14 @@ pub fn transform_tx(args: TransformArgs) -> HttpResponse {
                 "validated": r.and_then(|r| r.get("validated")),
                 "engine_result": r.and_then(|r| r.pointer("/meta/TransactionResult")),
                 "ledger_index": r.and_then(|r| r.get("ledger_index")),
+                // Partial-payment-safe delivered amount: credit THIS, never the
+                // Payment's `Amount` (tfPartialPayment can make Amount > delivered —
+                // the classic exchange-drainer). rippled synthesizes the top-level
+                // `delivered_amount` for every validated Payment: a drops string when
+                // known, or the literal "unavailable" for pre-2014 txs (which
+                // `parse_delivered_drops` maps to 0 — fail-closed). Deterministic for
+                // a validated tx, so consensus-safe.
+                "delivered_amount": r.and_then(|r| r.pointer("/meta/delivered_amount")),
                 "error": r.and_then(|r| r.get("error")),
             })
         }
@@ -230,6 +241,22 @@ fn as_u128(v: &Value) -> Option<u128> {
     v.as_u64()
         .map(u128::from)
         .or_else(|| v.as_str().and_then(|s| s.parse::<u128>().ok()))
+}
+
+/// Parse the authoritative delivered amount of a native-XRP Payment into drops.
+/// `meta.delivered_amount` is the partial-payment-safe field — it can be LESS than
+/// the Payment's `Amount`, so deposit crediting MUST use this, never `Amount`.
+/// Returns 0 for: a non-native delivery (an issued-currency object), the
+/// `"unavailable"` sentinel (a pre-2014 tx rippled cannot reconstruct), or a
+/// missing/garbage value. The caller treats 0 as "no creditable native XRP".
+fn parse_delivered_drops(v: &Value) -> u128 {
+    match v {
+        // rippled renders XRP amounts as a drops string; "unavailable" -> 0.
+        Value::String(s) => s.parse::<u128>().unwrap_or(0),
+        Value::Number(n) => n.as_u64().map(u128::from).unwrap_or(0),
+        // object (issued currency) or null -> not native XRP.
+        _ => 0,
+    }
 }
 
 pub fn parse_account_info(body: &[u8]) -> Result<XrpAccountInfo, String> {
@@ -317,7 +344,12 @@ pub fn parse_tx_status(body: &[u8]) -> Result<XrpTxStatus, String> {
     if engine.starts_with("tes") {
         let ledger_index = as_u64(v.get("ledger_index").unwrap_or(&Value::Null))
             .ok_or_else(|| "validated tx without ledger_index".to_string())? as u32;
-        Ok(XrpTxStatus::Validated { ledger_index })
+        let delivered_drops =
+            parse_delivered_drops(v.get("delivered_amount").unwrap_or(&Value::Null));
+        Ok(XrpTxStatus::Validated {
+            ledger_index,
+            delivered_drops,
+        })
     } else {
         Ok(XrpTxStatus::Failed)
     }
@@ -442,12 +474,62 @@ mod tests {
 
     #[test]
     fn parse_tx_status_validated_success() {
-        let body =
-            br#"{"validated":true,"engine_result":"tesSUCCESS","ledger_index":9000000,"error":null}"#;
+        let body = br#"{"validated":true,"engine_result":"tesSUCCESS","ledger_index":9000000,"delivered_amount":"1000000","error":null}"#;
         assert_eq!(
             parse_tx_status(body).unwrap(),
-            XrpTxStatus::Validated { ledger_index: 9_000_000 }
+            XrpTxStatus::Validated {
+                ledger_index: 9_000_000,
+                delivered_drops: 1_000_000
+            }
         );
+    }
+
+    #[test]
+    fn parse_delivered_drops_variants() {
+        assert_eq!(parse_delivered_drops(&serde_json::json!("1000000")), 1_000_000);
+        assert_eq!(parse_delivered_drops(&serde_json::json!(1_000_000u64)), 1_000_000);
+        // issued-currency object -> not native XRP -> 0
+        assert_eq!(
+            parse_delivered_drops(
+                &serde_json::json!({"currency":"USD","issuer":"rIssuer","value":"5"})
+            ),
+            0
+        );
+        // rippled "unavailable" sentinel and null -> 0
+        assert_eq!(parse_delivered_drops(&serde_json::json!("unavailable")), 0);
+        assert_eq!(parse_delivered_drops(&Value::Null), 0);
+        // negative / overflow / non-numeric strings -> 0 (fail-closed)
+        assert_eq!(parse_delivered_drops(&serde_json::json!("-500000")), 0);
+        assert_eq!(
+            parse_delivered_drops(&serde_json::json!(
+                "999999999999999999999999999999999999999999"
+            )),
+            0
+        );
+    }
+
+    #[test]
+    fn tx_credits_delivered_amount_not_payment_amount() {
+        // Partial-payment drainer guard: the Payment claims a huge `Amount`, but
+        // only `delivered_amount` actually arrived. Crediting `Amount` would mint
+        // against XRP never received. The transform keeps delivered_amount and the
+        // parser credits ONLY it.
+        let args = TransformArgs {
+            response: HttpResponse {
+                status: candid::Nat::from(200u32),
+                headers: vec![],
+                body: br#"{"result":{"validated":true,"ledger_index":9000000,"Amount":"9999999999","meta":{"TransactionResult":"tesSUCCESS","delivered_amount":"500000"}}}"#.to_vec(),
+            },
+            context: vec![],
+        };
+        let reduced = transform_tx(args);
+        match parse_tx_status(&reduced.body).unwrap() {
+            XrpTxStatus::Validated { delivered_drops, .. } => {
+                assert_eq!(delivered_drops, 500_000, "must credit delivered_amount");
+                assert_ne!(delivered_drops, 9_999_999_999, "must NOT credit Amount");
+            }
+            other => panic!("expected Validated, got {other:?}"),
+        }
     }
 
     #[test]
@@ -556,7 +638,10 @@ mod tests {
         assert_eq!(a.body, b.body, "volatile close_time stripped");
         assert_eq!(
             parse_tx_status(&a.body).unwrap(),
-            XrpTxStatus::Validated { ledger_index: 9_000_000 }
+            XrpTxStatus::Validated {
+                ledger_index: 9_000_000,
+                delivered_drops: 1_000_000
+            }
         );
     }
 

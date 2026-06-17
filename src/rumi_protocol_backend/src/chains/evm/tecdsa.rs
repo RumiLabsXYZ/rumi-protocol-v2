@@ -14,7 +14,7 @@ use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::PublicKey;
 use sha3::{Digest, Keccak256};
 
-use super::config::monad_ecdsa_key_name;
+use crate::chains::monad::config::monad_ecdsa_key_name;
 
 /// Derivation path for a per-user collateral custody address.
 /// `[chain_id (LE u32), principal bytes, nonce (LE u64)]`.
