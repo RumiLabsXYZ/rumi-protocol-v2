@@ -10,6 +10,8 @@ pub mod settlement;
 pub mod tecdsa;
 pub mod tx;
 
+pub mod conflux;
+
 #[cfg(test)]
 mod tests_adapter;
 
