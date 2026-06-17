@@ -32,6 +32,7 @@
 
 pub mod adapter;
 pub mod admin;
+pub mod collateral_config;
 pub mod config;
 pub mod multi_chain_state;
 pub mod recovery;
