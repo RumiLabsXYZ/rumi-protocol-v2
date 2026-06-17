@@ -38,6 +38,7 @@ pub mod recovery;
 pub mod settlement_queue;
 pub mod supply;
 pub mod vault;
+pub mod evm;
 pub mod monad;
 pub mod solana;
 pub mod xrp;
