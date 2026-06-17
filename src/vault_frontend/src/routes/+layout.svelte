@@ -13,6 +13,7 @@
   import { POINTS_ENABLED } from '$lib/config';
   import { developerAccess } from "../lib/stores/developer";
   import ToastContainer from "../lib/components/common/ToastContainer.svelte";
+  import SeasonBar from "$lib/components/points/SeasonBar.svelte";
   import { ApiClient } from "../lib/services/protocol/apiClient";
   import { initIcpswapRoutingFlag } from "../lib/services/swapRouter";
   import { stabilityPoolService } from "../lib/services/stabilityPoolService";
@@ -113,7 +114,7 @@
 </header>
 <PositionStrip />
 <ToastContainer />
-<main class="main-content"><slot /></main>
+<main class="main-content">{#if POINTS_ENABLED && !currentPath.startsWith('/points')}<SeasonBar />{/if}<slot /></main>
 <footer class="app-footer">
   <div class="footer-inner">
     <div class="footer-links">

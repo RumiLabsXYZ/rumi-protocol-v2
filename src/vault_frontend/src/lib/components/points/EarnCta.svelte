@@ -1,13 +1,17 @@
 <script lang="ts">
+  import MultiplierBadge from './MultiplierBadge.svelte';
+
   interface Props {
     heading?: string;
   }
   let { heading = 'Ways to earn points' }: Props = $props();
 
+  // Curated, sorted high → low. Each venue shows its best available multiplier.
   const actions = [
-    { label: 'Mint icUSD', desc: 'Open a vault and borrow icUSD against collateral.', href: '/' },
-    { label: 'Deposit to the stability pool', desc: 'Earn while backstopping liquidations.', href: '/stability-pool' },
-    { label: 'Provide liquidity', desc: 'Add liquidity to the 3pool or AMM.', href: '/liquidity' },
+    { label: 'Provide 3pool liquidity', desc: 'Pair ckUSDC + ckUSDT for the highest boost.', href: '/3usd', mult: 5 },
+    { label: 'Deposit 3USD to the stability pool', desc: 'Backstop liquidations and earn double.', href: '/stability-pool', mult: 2 },
+    { label: 'Add 3USD/ICP to the AMM', desc: 'Provide liquidity to the Rumi AMM.', href: '/swap', mult: 2 },
+    { label: 'Mint icUSD', desc: 'Borrow against ICP, ckBTC, or ckXAUT collateral.', href: '/', mult: 1 },
   ];
 </script>
 
@@ -18,13 +22,13 @@
       <li>
         <a
           href={a.href}
-          class="flex items-center justify-between gap-3 rounded-lg border border-gray-700/40 bg-gray-900/30 px-3 py-2 hover:border-teal-500/40 transition-colors"
+          class="flex items-center justify-between gap-3 rounded-lg border border-gray-700/40 bg-gray-900/30 px-3 py-2 hover:border-emerald-500/40 transition-colors"
         >
-          <span>
+          <span class="min-w-0">
             <span class="block text-sm text-gray-100">{a.label}</span>
             <span class="block text-xs text-gray-500">{a.desc}</span>
           </span>
-          <span class="text-teal-400 text-sm">→</span>
+          <MultiplierBadge multiplier={a.mult} size="md" />
         </a>
       </li>
     {/each}

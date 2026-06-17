@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, onMount } from 'svelte';
   import { Principal } from '@dfinity/principal';
   import { walletStore } from '../../stores/wallet';
   import { stabilityPoolService, formatTokenAmount, parseTokenAmount } from '../../services/stabilityPoolService';
@@ -7,6 +7,13 @@
   import type { PoolStatus, StablecoinConfig, UserPosition } from '../../services/stabilityPoolService';
   import { CANISTER_IDS } from '../../config';
   import { fetchLedgerFee, getCachedLedgerFee } from '../../services/ledgerFeeService';
+  import PointsCallout from '../points/PointsCallout.svelte';
+  import { spMultiplier } from '$lib/utils/pointsRules';
+  import { seasonStore, earningActive } from '$lib/stores/seasonStore';
+
+  onMount(() => { seasonStore.ensureLoaded(); });
+
+  $: spMult = spMultiplier(selectedToken?.symbol);
 
   export let poolStatus: PoolStatus | null = null;
   export let userPosition: UserPosition | null = null;
@@ -243,6 +250,15 @@
         </div>
       {/if}
     </div>
+
+    {#if activeTab === 'deposit' && $earningActive && selectedToken}
+      <div style="margin-bottom:0.75rem">
+        <PointsCallout
+          headline={`Earning ${spMult}× points on your ${selectedToken.symbol} deposit`}
+          hint={spMult === 1 ? 'Deposit 3USD here instead to earn 2× points.' : undefined}
+        />
+      </div>
+    {/if}
 
     <!-- Submit -->
     <button

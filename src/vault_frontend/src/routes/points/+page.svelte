@@ -5,7 +5,7 @@
   import { isConnected, principal } from '$lib/stores/wallet';
   import { myPointsStore } from '$lib/stores/pointsStore';
   import { getEpochStatus, getPointsConfig, getLeaderboard } from '$lib/services/pointsService';
-  import { bodyState, deriveRank } from '$lib/utils/points';
+  import { bodyState } from '$lib/utils/points';
   import type { PublicEpochStatus, PointsConfig } from '$declarations/rumi_points/rumi_points.did';
   import SeasonBanner from '$lib/components/points/SeasonBanner.svelte';
   import EarnCta from '$lib/components/points/EarnCta.svelte';
@@ -14,6 +14,7 @@
   let status = $state<PublicEpochStatus | null>(null);
   let config = $state<PointsConfig | null>(null);
   let rank = $state<number | null>(null);
+  let shareBps = $state<number | null>(null);
 
   onMount(async () => {
     // Route gate: the section is hidden in nav until the canister is configured;
@@ -36,17 +37,21 @@
     const p = $principal;
     if ($isConnected && p) {
       myPointsStore.load(p);
-      // Best-effort rank from the top slice (no get_my_rank endpoint exists).
+      // Best-effort rank + estimated share from the top slice (no get_my_rank endpoint).
       getLeaderboard(0, 1000)
         .then((rows) => {
-          rank = deriveRank(rows, p.toText());
+          const me = rows.find((e) => e.principal.toText() === p.toText());
+          rank = me ? me.rank : null;
+          shareBps = me ? me.estimated_share_bps : null;
         })
         .catch(() => {
           rank = null;
+          shareBps = null;
         });
     } else {
       myPointsStore.reset();
       rank = null;
+      shareBps = null;
     }
   });
 
@@ -92,7 +97,7 @@
       This address is excluded from the airdrop (protocol-owned).
     </div>
   {:else if body === 'enrolled' && $myPointsStore.state}
-    <PointsSummary state={$myPointsStore.state} {rank} />
+    <PointsSummary state={$myPointsStore.state} {rank} {shareBps} />
     <EarnCta heading="Earn more" />
   {:else}
     <div class="rounded-xl bg-gray-800/30 border border-gray-700/50 p-4 text-sm text-gray-300">

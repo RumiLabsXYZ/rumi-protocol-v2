@@ -14,6 +14,8 @@
   import { toastStore } from '../../stores/toast';
   import { isOisyWallet } from '../../services/protocol/walletOperations';
   import { ApiClient } from '../../services/protocol/apiClient';
+  import MultiplierBadge from '../points/MultiplierBadge.svelte';
+  import { seasonStore, earningActive } from '$lib/stores/seasonStore';
 
   export let vault: Vault;
   export let icpPrice: number = 0;
@@ -232,6 +234,7 @@
   let recoveryMultiplier: number = 1;
   let ckstableRepayFee = 0; // Protocol repay fee rate for ckStables (e.g., 0.01 = 1%)
   onMount(async () => {
+    seasonStore.ensureLoaded();
     // Fetch per-vault dynamic rate eagerly so collapsed card shows actual APR
     ApiClient.getVaultInterestRate(vault.vaultId).then(rate => {
       if (rate !== null) dynamicInterestRate = rate;
@@ -953,7 +956,7 @@
 
             {:else if activeAction === 'borrow'}
               <div class="input-header">
-                <span class="input-label">Borrow icUSD</span>
+                <span class="input-label">Borrow icUSD {#if $earningActive}<MultiplierBadge multiplier={1} />{/if}</span>
                 {#if maxBorrowable > 0}
                   <button class="max-text" on:click={setMaxBorrow}>Max: {floorTo(maxBorrowable, 4)}</button>
                 {/if}
@@ -987,7 +990,7 @@
 
             {:else if activeAction === 'repay'}
               <div class="input-header">
-                <span class="input-label">Repay Debt</span>
+                <span class="input-label">Repay Debt {#if $earningActive}<MultiplierBadge multiplier={5} comingSoon label="5× soon" />{/if}</span>
                 {#if maxRepayable > 0}
                   <button class="max-text" on:click={setMaxRepay}>Max: {floorTo(maxRepayable, 4)}</button>
                 {/if}

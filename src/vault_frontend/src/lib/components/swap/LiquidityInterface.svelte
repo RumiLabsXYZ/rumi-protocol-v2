@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, onMount } from 'svelte';
   import { walletStore } from '../../stores/wallet';
   import {
     threePoolService,
@@ -11,6 +11,21 @@
   import { formatStableTokenDisplay } from '../../utils/format';
   import { isOisyLandedSentinel } from '../../services/protocol/oisyResilience';
   import { isOisyWallet } from '../../services/protocol/walletOperations';
+  import PointsCallout from '../points/PointsCallout.svelte';
+  import { compute3poolMultiplier, threePoolHeadline } from '$lib/utils/pointsRules';
+  import { seasonStore, earningActive } from '$lib/stores/seasonStore';
+
+  onMount(() => { seasonStore.ensureLoaded(); });
+
+  // POOL_TOKENS order is [icUSD, ckUSDT, ckUSDC]. Live multiplier mirrors accrual.rs.
+  $: addMultiplier = compute3poolMultiplier({
+    icusd: parseFloat(addAmounts[0]) || 0,
+    ckusdt: parseFloat(addAmounts[1]) || 0,
+    ckusdc: parseFloat(addAmounts[2]) || 0,
+  });
+  $: addPointsHint =
+    (addMultiplier.nudge ? `${addMultiplier.nudge}. ` : '') +
+    'Keep the 3USD you mint (in your wallet, the stability pool, or the AMM) to keep these points.';
 
   function poolLedgerRef(index: number) {
     const t = POOL_TOKENS[index];
@@ -439,6 +454,12 @@
         {/if}
       </div>
     </div>
+
+    {#if $earningActive && addMultiplier.headline > 0}
+      <div style="margin-bottom:0.75rem">
+        <PointsCallout headline={threePoolHeadline(addMultiplier)} hint={addPointsHint} />
+      </div>
+    {/if}
 
     <button
       class="submit-btn"
