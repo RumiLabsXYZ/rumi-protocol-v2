@@ -1183,4 +1183,11 @@ service : (ProtocolArg) -> {
   withdraw_liquidity : (nat64) -> (Result_1);
   withdraw_partial_collateral : (VaultArg) -> (Result_1);
   withdraw_solana_collateral : (nat64, nat, text) -> (Result);
+  xrp_balance : (text) -> (Result_1);
+  xrp_custody_address : (principal, nat64) -> (Result_2);
+  xrp_settlement_address : () -> (Result_2);
+  xrp_transform_account : (TransformArgs) -> (HttpResponse) query;
+  xrp_transform_server : (TransformArgs) -> (HttpResponse) query;
+  xrp_transform_submit : (TransformArgs) -> (HttpResponse) query;
+  xrp_transform_tx : (TransformArgs) -> (HttpResponse) query;
 }

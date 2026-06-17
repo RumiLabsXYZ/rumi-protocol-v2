@@ -3136,6 +3136,99 @@ fn coingecko_transform(
     }
 }
 
+// ─── Native XRP rail (experimental/dormant chains::xrp) — P1 wiring ───────────
+// HTTPS-outcall transforms for the rippled JSON-RPC reads/submit. Each delegates
+// to the consensus-safe reducer in `chains::xrp::xrp_rpc` (HTTP status pinned, body
+// reduced to only the consumed fields) so the rail's outcalls resolve them by
+// name. Registered as plain queries, like `coingecko_transform`.
+
+#[query]
+fn xrp_transform_account(
+    args: ic_cdk::api::management_canister::http_request::TransformArgs,
+) -> ic_cdk::api::management_canister::http_request::HttpResponse {
+    rumi_protocol_backend::chains::xrp::xrp_rpc::transform_account(args)
+}
+
+#[query]
+fn xrp_transform_server(
+    args: ic_cdk::api::management_canister::http_request::TransformArgs,
+) -> ic_cdk::api::management_canister::http_request::HttpResponse {
+    rumi_protocol_backend::chains::xrp::xrp_rpc::transform_server(args)
+}
+
+#[query]
+fn xrp_transform_submit(
+    args: ic_cdk::api::management_canister::http_request::TransformArgs,
+) -> ic_cdk::api::management_canister::http_request::HttpResponse {
+    rumi_protocol_backend::chains::xrp::xrp_rpc::transform_submit(args)
+}
+
+#[query]
+fn xrp_transform_tx(
+    args: ic_cdk::api::management_canister::http_request::TransformArgs,
+) -> ic_cdk::api::management_canister::http_request::HttpResponse {
+    rumi_protocol_backend::chains::xrp::xrp_rpc::transform_tx(args)
+}
+
+/// Developer-only guard for the experimental XRP observability endpoints below.
+fn xrp_require_developer() -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal == caller) {
+        Ok(())
+    } else {
+        Err(ProtocolError::GenericError(
+            "Only the developer may call the experimental XRP endpoints".to_string(),
+        ))
+    }
+}
+
+/// P1 observability (developer-gated, no funds touched): derive the protocol's XRP
+/// settlement (custody) classic address via threshold Ed25519 and return it, so an
+/// operator can see it on XRPL testnet. The chains::xrp module is dormant; this
+/// only derives a public address (derivation is free and idempotent).
+#[update]
+async fn xrp_settlement_address() -> Result<String, ProtocolError> {
+    xrp_require_developer()?;
+    let path = rumi_protocol_backend::chains::xrp::ted25519::settlement_derivation_path(
+        rumi_protocol_backend::chains::xrp::XRP_CHAIN_ID,
+    );
+    rumi_protocol_backend::chains::xrp::ted25519::derive_xrp_address(path)
+        .await
+        .map(|(_pubkey, addr)| addr)
+        .map_err(|e| ProtocolError::GenericError(format!("xrp settlement derive failed: {e}")))
+}
+
+/// P1 observability (developer-gated): derive the per-vault XRP custody address for
+/// `(user, nonce)` via threshold Ed25519 — the address a future XRP vault would
+/// publish for deposits. No state is written (derivation is idempotent).
+#[update]
+async fn xrp_custody_address(user: Principal, nonce: u64) -> Result<String, ProtocolError> {
+    xrp_require_developer()?;
+    let path = rumi_protocol_backend::chains::xrp::ted25519::custody_derivation_path(
+        rumi_protocol_backend::chains::xrp::XRP_CHAIN_ID,
+        user,
+        nonce,
+    );
+    rumi_protocol_backend::chains::xrp::ted25519::derive_xrp_address(path)
+        .await
+        .map(|(_pubkey, addr)| addr)
+        .map_err(|e| ProtocolError::GenericError(format!("xrp custody derive failed: {e}")))
+}
+
+/// P1 observability (developer-gated): read an XRP account's balance in drops from
+/// a public rippled node via the rail's consensus-retry-wrapped outcall. Confirms
+/// the transform shims above resolve and the outcall path works end to end on
+/// testnet. Returns 0 for an unfunded account.
+#[update]
+async fn xrp_balance(address: String) -> Result<u64, ProtocolError> {
+    xrp_require_developer()?;
+    let acct = rumi_protocol_backend::chains::xrp::xrp_rpc::fetch_account_info(&address)
+        .await
+        .map_err(|e| ProtocolError::GenericError(format!("xrp account_info failed: {e}")))?;
+    u64::try_from(acct.balance_drops)
+        .map_err(|_| ProtocolError::GenericError("xrp balance exceeds u64 drops".to_string()))
+}
+
 #[query]
 fn http_request(req: HttpRequest) -> HttpResponse {
     use ic_metrics_encoder::MetricsEncoder;
