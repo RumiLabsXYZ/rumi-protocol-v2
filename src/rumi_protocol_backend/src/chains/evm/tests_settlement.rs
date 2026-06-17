@@ -1,5 +1,5 @@
 use super::settlement::{confirm_mint_in_state, select_next_op, OpAction};
-use super::chain_vault::{ChainVaultStatus, ChainVaultV1};
+use crate::chains::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
 use crate::chains::config::ChainId;
 use crate::chains::multi_chain_state::MultiChainStateV4;
 use crate::chains::settlement_queue::{SettlementOp, SettlementOpKind, SettlementOpStatus};

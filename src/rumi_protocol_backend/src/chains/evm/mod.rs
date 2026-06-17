@@ -1,6 +1,39 @@
 //! Shared EVM rail. Home for the chain-agnostic EVM modules (moved here in
 //! Task 2) plus the per-chain compile-time config that the generic logic reads.
 
+pub mod adapter;
+pub mod burn_proof;
+pub mod deposit_watch;
+pub mod evm_rpc;
+pub mod hardening;
+pub mod settlement;
+pub mod tecdsa;
+pub mod tx;
+
+#[cfg(test)]
+mod tests_adapter;
+
+#[cfg(test)]
+mod tests_burn_proof;
+
+#[cfg(test)]
+mod tests_deposit_watch;
+
+#[cfg(test)]
+mod tests_evm_rpc;
+
+#[cfg(test)]
+mod tests_hardening;
+
+#[cfg(test)]
+mod tests_settlement;
+
+#[cfg(test)]
+mod tests_tecdsa;
+
+#[cfg(test)]
+mod tests_tx;
+
 use crate::chains::config::ChainId;
 
 /// How a chain's "finalized" height is determined.

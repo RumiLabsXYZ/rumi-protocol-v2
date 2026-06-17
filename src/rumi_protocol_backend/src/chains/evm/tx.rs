@@ -19,7 +19,7 @@ use ic_cdk::api::management_canister::ecdsa::{
     sign_with_ecdsa, EcdsaCurve, EcdsaKeyId, SignWithEcdsaArgument,
 };
 
-use super::config::monad_ecdsa_key_name;
+use crate::chains::monad::config::monad_ecdsa_key_name;
 
 // ─── public types ────────────────────────────────────────────────────────────
 

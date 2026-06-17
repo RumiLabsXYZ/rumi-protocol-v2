@@ -1,5 +1,5 @@
 use super::deposit_watch::{advance_cursor_and_prune, apply_burn_to_state, credit_deposit_to_state, BurnApplyError};
-use super::chain_vault::{ChainVaultStatus, ChainVaultV1};
+use crate::chains::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
 use crate::chains::config::ChainId;
 use crate::chains::multi_chain_state::MultiChainStateV4;
 use crate::chains::monad::evm_rpc::BurnLog;
