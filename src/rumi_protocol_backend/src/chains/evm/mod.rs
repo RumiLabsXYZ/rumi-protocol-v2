@@ -24,7 +24,8 @@ pub struct EvmChainConfig {
     pub chain_id: ChainId,
     pub ecdsa_key_name: &'static str,
     pub finality: FinalityMode,
-    pub getlogs_window: u64,
+    /// Max toBlock - fromBlock span for a single eth_getLogs query (NOT the per-tick scan window). Monad provider caps at 100; Conflux eSpace at 1000.
+    pub getlogs_max_range: u64,
     pub native_decimals: u8,
     pub native_symbol: &'static str,
 }
@@ -37,7 +38,7 @@ pub fn evm_chain_config(chain: ChainId) -> Option<EvmChainConfig> {
             chain_id: ChainId(10143),
             ecdsa_key_name: "test_key_1",
             finality: FinalityMode::FixedDepth(1),
-            getlogs_window: 100,
+            getlogs_max_range: 100,
             native_decimals: 18,
             native_symbol: "MON",
         }),
@@ -45,7 +46,7 @@ pub fn evm_chain_config(chain: ChainId) -> Option<EvmChainConfig> {
             chain_id: ChainId(71),
             ecdsa_key_name: "test_key_1",
             finality: FinalityMode::FinalizedTag,
-            getlogs_window: 1000,
+            getlogs_max_range: 1000,
             native_decimals: 18,
             native_symbol: "CFX",
         }),
@@ -62,7 +63,7 @@ mod tests {
     fn monad_config_is_fixed_depth_window_100() {
         let c = evm_chain_config(ChainId(10143)).expect("monad known");
         assert!(matches!(c.finality, FinalityMode::FixedDepth(1)));
-        assert_eq!(c.getlogs_window, 100);
+        assert_eq!(c.getlogs_max_range, 100);
         assert_eq!(c.native_symbol, "MON");
     }
 
@@ -70,7 +71,7 @@ mod tests {
     fn conflux_testnet_is_finalized_tag_window_1000() {
         let c = evm_chain_config(ChainId(71)).expect("conflux known");
         assert!(matches!(c.finality, FinalityMode::FinalizedTag));
-        assert_eq!(c.getlogs_window, 1000);
+        assert_eq!(c.getlogs_max_range, 1000);
         assert_eq!(c.native_symbol, "CFX");
     }
 
