@@ -36,27 +36,20 @@ mod tests_tx;
 
 use crate::chains::config::ChainId;
 
-/// How a chain's "finalized" height is determined.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FinalityMode {
-    /// finalized_height = latest - depth, probed at a specific block number.
-    /// Monad: single-slot finality, depth 1.
-    FixedDepth(u32),
-    /// Query the chain's `finalized` block tag. Conflux: the PoW Tree-Graph
-    /// layer can reorg beyond a small depth; the PoS `finalized` tag is the
-    /// real irreversibility guarantee.
-    FinalizedTag,
-}
-
 /// Compile-time per-chain EVM parameters that are NOT in the persisted
 /// `ChainConfigV3` (rpc_endpoints, gas_strategy, finality_depth,
 /// min_quorum_providers stay there). Collateral risk params are NOT here; they
 /// live per-collateral in `ChainCollateralConfig` (Task 5).
+///
+/// Finality is intentionally NOT modeled here: it is handled by the existing
+/// consensus-safe specific-block probe keyed on `ChainConfigV3.finality_depth`
+/// (Monad uses 1; Conflux uses a large depth to match its deep PoW/PoS
+/// finalization). A volatile `finalized` block tag is deliberately avoided
+/// because a moving value breaks IC HTTPS-outcall consensus across replicas.
 #[derive(Clone, Copy, Debug)]
 pub struct EvmChainConfig {
     pub chain_id: ChainId,
     pub ecdsa_key_name: &'static str,
-    pub finality: FinalityMode,
     /// Max toBlock - fromBlock span for a single eth_getLogs query (NOT the per-tick scan window). Monad provider caps at 100; Conflux eSpace at 1000.
     pub getlogs_max_range: u64,
     pub native_decimals: u8,
@@ -70,7 +63,6 @@ pub fn evm_chain_config(chain: ChainId) -> Option<EvmChainConfig> {
         10143 => Some(EvmChainConfig {
             chain_id: ChainId(10143),
             ecdsa_key_name: "test_key_1",
-            finality: FinalityMode::FixedDepth(1),
             getlogs_max_range: 100,
             native_decimals: 18,
             native_symbol: "MON",
@@ -78,7 +70,6 @@ pub fn evm_chain_config(chain: ChainId) -> Option<EvmChainConfig> {
         71 => Some(EvmChainConfig {
             chain_id: ChainId(71),
             ecdsa_key_name: "test_key_1",
-            finality: FinalityMode::FinalizedTag,
             getlogs_max_range: 1000,
             native_decimals: 18,
             native_symbol: "CFX",
@@ -93,19 +84,19 @@ mod tests {
     use crate::chains::config::ChainId;
 
     #[test]
-    fn monad_config_is_fixed_depth_window_100() {
+    fn monad_config_getlogs_range_100() {
         let c = evm_chain_config(ChainId(10143)).expect("monad known");
-        assert!(matches!(c.finality, FinalityMode::FixedDepth(1)));
         assert_eq!(c.getlogs_max_range, 100);
         assert_eq!(c.native_symbol, "MON");
+        assert_eq!(c.ecdsa_key_name, "test_key_1");
     }
 
     #[test]
-    fn conflux_testnet_is_finalized_tag_window_1000() {
+    fn conflux_testnet_getlogs_range_1000() {
         let c = evm_chain_config(ChainId(71)).expect("conflux known");
-        assert!(matches!(c.finality, FinalityMode::FinalizedTag));
         assert_eq!(c.getlogs_max_range, 1000);
         assert_eq!(c.native_symbol, "CFX");
+        assert_eq!(c.native_decimals, 18);
     }
 
     #[test]
