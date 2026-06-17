@@ -994,14 +994,36 @@ fn set_chain_config(
     }
 }
 
-/// Phase 1b Task 12: open a foreign-chain (Monad) vault, OPEN-THEN-VERIFY.
+/// Resolve the per-chain EVM vault params (native price symbol + min CR) for a
+/// dev-gated chain-vault op. Errors if `chain` is not a known EVM chain or has
+/// no collateral config. For Monad (10143) this returns ("MON", 13_000) and for
+/// Conflux (71) ("CFX", 13_300), so the EVM endpoints are chain-agnostic.
+fn evm_vault_params(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Result<(&'static str, u64), ProtocolError> {
+    let symbol = rumi_protocol_backend::chains::evm::evm_chain_config(chain)
+        .map(|c| c.native_symbol)
+        .ok_or_else(|| {
+            ProtocolError::ChainAdmin(format!("chain {} is not a known EVM chain", chain.0))
+        })?;
+    let min_cr = rumi_protocol_backend::chains::collateral_config::chain_collateral_config(chain)
+        .map(|c| c.min_cr_e4)
+        .ok_or_else(|| {
+            ProtocolError::ChainAdmin(format!("no collateral config for chain {}", chain.0))
+        })?;
+    Ok((symbol, min_cr))
+}
+
+/// Phase 1b Task 12: open a foreign-chain EVM (Monad or Conflux) vault, OPEN-THEN-VERIFY.
 ///
 /// Creates the vault in `AwaitingDeposit` with the DECLARED collateral and the
 /// intended mint in `pending_mint_e8s`; enqueues NO mint. The caller then reads
-/// the vault's `custody_address` (Task 14 `get_chain_vault`) and deposits MON
-/// there. deposit-watch verifies the on-chain balance covers the declared
-/// collateral at finality, flips the vault to `MintPending`, and enqueues the
-/// mint. icUSD is only ever minted against a verified on-chain deposit.
+/// the vault's `custody_address` (Task 14 `get_chain_vault`) and deposits the
+/// native token (MON on Monad, CFX on Conflux) there. deposit-watch verifies the
+/// on-chain balance covers the declared collateral at finality, flips the vault
+/// to `MintPending`, and enqueues the mint. icUSD is only ever minted against a
+/// verified on-chain deposit. The native price symbol and min CR are resolved
+/// per-chain from the compile-time configs (see `evm_vault_params`).
 ///
 /// Developer-gated for Phase 1b (matches the chain-admin endpoints). Async
 /// because deriving the per-user custody address calls tECDSA. Borrow
@@ -1019,24 +1041,26 @@ async fn open_chain_vault(
     if read_state(|s| s.developer_principal != caller) {
         return Err(ProtocolError::ChainAdmin("not developer".into()));
     }
+    // Resolve the per-chain price symbol + min CR early so a non-EVM chain fails
+    // fast (before reserving a vault id or paying for the tECDSA derive).
+    let (symbol, min_cr) = evm_vault_params(collateral_chain)?;
     // Reserve the vault id BEFORE the async derive so the derivation path
     // (chain, caller, vault_id) is unique even across concurrent opens.
     let vault_id = mutate_state(|s| {
         s.chain_vault_id_counter += 1;
         s.chain_vault_id_counter
     });
-    let path = rumi_protocol_backend::chains::monad::tecdsa::custody_derivation_path(
+    let path = rumi_protocol_backend::chains::evm::tecdsa::custody_derivation_path(
         collateral_chain,
         caller,
         vault_id,
     );
-    let (_pubkey, custody) =
-        rumi_protocol_backend::chains::monad::tecdsa::derive_evm_address(path)
-            .await
-            .map_err(|e| ProtocolError::ChainAdmin(format!("derive: {e}")))?;
+    let (_pubkey, custody) = rumi_protocol_backend::chains::evm::tecdsa::derive_evm_address(path)
+        .await
+        .map_err(|e| ProtocolError::ChainAdmin(format!("derive: {e}")))?;
     let now = ic_cdk::api::time();
     let res = mutate_state(|s| {
-        rumi_protocol_backend::chains::monad::chain_vault::open_chain_vault_in_state(
+        rumi_protocol_backend::chains::vault::open_chain_vault_in_state(
             &mut s.multi_chain,
             collateral_chain,
             caller,
@@ -1044,7 +1068,9 @@ async fn open_chain_vault(
             collateral_e18,
             debt_e8s,
             mint_recipient,
-            rumi_protocol_backend::chains::monad::chain_vault::MONAD_MIN_CR_E4,
+            rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address,
+            symbol,
+            min_cr,
             now,
             vault_id,
         )
@@ -1053,15 +1079,16 @@ async fn open_chain_vault(
         .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
 }
 
-/// Phase 1b Task 13: withdraw foreign-chain (Monad) collateral.
+/// Phase 1b Task 13: withdraw foreign-chain EVM (Monad or Conflux) collateral.
 ///
-/// CR-checks the REMAINING collateral against `MONAD_MIN_CR_E4` (debt-free
-/// vaults skip the check), RESERVES the withdrawn amount (decrements
-/// `collateral_amount_native` at enqueue), and enqueues a `NativeWithdrawal` op
-/// that Timer D signs and broadcasts. A vault that becomes empty AND debt-free
-/// flips to `Closing` here and `Closed` once the transfer confirms.
+/// Resolves the vault's chain from state, then CR-checks the REMAINING
+/// collateral against that chain's `min_cr_e4` (debt-free vaults skip the
+/// check), RESERVES the withdrawn amount (decrements `collateral_amount_native`
+/// at enqueue), and enqueues a `NativeWithdrawal` op that Timer D signs and
+/// broadcasts. A vault that becomes empty AND debt-free flips to `Closing` here
+/// and `Closed` once the transfer confirms.
 ///
-/// There is NO repay endpoint: the user burns icUSD on Monad and the burn-watch
+/// There is NO repay endpoint: the user burns icUSD on-chain and the burn-watch
 /// observer decrements `debt_e8s` + chain supply. This path moves only
 /// collateral. Synchronous — `dest_address` is supplied by the caller, so no
 /// tECDSA derive is needed; signing happens later in Timer D. Developer-gated.
@@ -1085,22 +1112,31 @@ fn withdraw_chain_collateral(
     }
     let now = ic_cdk::api::time();
     mutate_state(|s| {
-        rumi_protocol_backend::chains::monad::chain_vault::withdraw_collateral_in_state(
+        let chain = s
+            .multi_chain
+            .chain_vaults
+            .get(&vault_id)
+            .map(|v| v.collateral_chain)
+            .ok_or_else(|| ProtocolError::ChainAdmin("unknown vault".into()))?;
+        let (symbol, min_cr) = evm_vault_params(chain)?;
+        rumi_protocol_backend::chains::vault::withdraw_collateral_in_state(
             &mut s.multi_chain,
             vault_id,
             amount_e18,
             dest_address,
-            rumi_protocol_backend::chains::monad::chain_vault::MONAD_MIN_CR_E4,
+            rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address,
+            symbol,
+            min_cr,
             now,
         )
+        .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
     })
-    .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
 }
 
-/// Phase 1b Task 13: close a debt-free foreign-chain (Monad) vault.
+/// Phase 1b Task 13: close a debt-free foreign-chain EVM (Monad or Conflux) vault.
 ///
-/// Requires the vault's `debt_e8s == 0` (repay first by burning icUSD on
-/// Monad), then withdraws the FULL remaining collateral to `dest_address`
+/// Requires the vault's `debt_e8s == 0` (repay first by burning icUSD on the
+/// foreign chain), then withdraws the FULL remaining collateral to `dest_address`
 /// (vault -> `Closing`, then `Closed` on the transfer's confirmation).
 /// Synchronous + developer-gated (mirrors `withdraw_chain_collateral`).
 /// CONCURRENCY INVARIANT (audit FLAG-16): keep synchronous — see
@@ -1115,15 +1151,24 @@ fn close_chain_vault(vault_id: u64, dest_address: String) -> Result<(), Protocol
     }
     let now = ic_cdk::api::time();
     mutate_state(|s| {
-        rumi_protocol_backend::chains::monad::chain_vault::close_chain_vault_in_state(
+        let chain = s
+            .multi_chain
+            .chain_vaults
+            .get(&vault_id)
+            .map(|v| v.collateral_chain)
+            .ok_or_else(|| ProtocolError::ChainAdmin("unknown vault".into()))?;
+        let (symbol, min_cr) = evm_vault_params(chain)?;
+        rumi_protocol_backend::chains::vault::close_chain_vault_in_state(
             &mut s.multi_chain,
             vault_id,
             dest_address,
-            rumi_protocol_backend::chains::monad::chain_vault::MONAD_MIN_CR_E4,
+            rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address,
+            symbol,
+            min_cr,
             now,
         )
+        .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
     })
-    .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
 }
 
 // ─── Solana M2 vault endpoints (developer-gated) ─────────────────────────────
@@ -7542,6 +7587,23 @@ fn forward_filtered_scan_windows_filters_and_advances_cursor() {
     assert!(r.events.is_empty());
     assert_eq!(r.next_start, 3);
     assert!(r.reached_end);
+}
+
+// Proves `evm_vault_params` resolves the native price symbol + min CR per chain
+// from the compile-time configs, and that Monad (10143) is behavior-preserving
+// (still ("MON", 13_000)) while Conflux (71) mirrors the ICP params ("CFX",
+// 13_300). Non-EVM / unknown chains error rather than silently defaulting.
+#[cfg(test)]
+mod chain_vault_param_tests {
+    use super::evm_vault_params;
+
+    #[test]
+    fn evm_vault_params_resolves_per_chain() {
+        use rumi_protocol_backend::chains::config::ChainId;
+        assert_eq!(evm_vault_params(ChainId(10143)).unwrap(), ("MON", 13_000)); // Monad preserved
+        assert_eq!(evm_vault_params(ChainId(71)).unwrap(), ("CFX", 13_300)); // Conflux = ICP mirror
+        assert!(evm_vault_params(ChainId(999)).is_err());
+    }
 }
 
 // Checks the real candid interface against the one declared in the did file
