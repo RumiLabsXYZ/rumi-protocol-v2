@@ -6620,6 +6620,10 @@ async fn add_collateral_token(arg: rumi_protocol_backend::AddCollateralArg) -> R
         // floor. Operator can override later via `set_collateral_min_xrc_sources`
         // if the asset has genuinely thin CEX coverage on XRC.
         min_xrc_sources: None,
+        // P2: collaterals registered via this admin path are ICRC-custodied.
+        // Native-XRP collateral (custody_kind = NativeXrp) is registered through a
+        // separate path once its deposit flow is wired (spec P5); not settable here.
+        custody_kind: None,
     };
 
     mutate_state(|s| {

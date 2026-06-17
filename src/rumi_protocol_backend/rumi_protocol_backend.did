@@ -65,6 +65,7 @@ type ChainVaultV1 = record {
   mint_recipient : text;
   debt_e8s : nat;
 };
+type CustodyKind = variant { IcrcLedger; NativeXrp };
 type CollateralConfig = record {
   last_redemption_time : nat64;
   status : CollateralStatus;
@@ -93,6 +94,7 @@ type CollateralConfig = record {
   borrowing_fee : blob;
   interest_rate_apr : blob;
   liquidation_ratio : blob;
+  custody_kind : opt CustodyKind;
 };
 type CollateralInterestInfo = record {
   total_debt_e8s : nat64;

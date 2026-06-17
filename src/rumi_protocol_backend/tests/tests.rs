@@ -973,6 +973,7 @@ mod multi_collateral_helpers {
             rate_curve: None,
             redemption_tier: 1,
             min_xrc_sources: None,
+            custody_kind: None,
         }
     }
 

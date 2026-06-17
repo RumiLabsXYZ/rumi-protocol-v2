@@ -547,6 +547,24 @@ pub struct CollateralConfig {
     /// switch if XRC aggregation degrades for a single asset).
     #[serde(default)]
     pub min_xrc_sources: Option<u32>,
+    /// How this collateral is custodied. `None`/absent (every legacy collateral)
+    /// resolves to `IcrcLedger` via `custody()`. `Some(NativeXrp)` routes the
+    /// deposit/withdraw/liquidation custody touchpoints through `chains::xrp`
+    /// (threshold-Ed25519 XRPL addresses) instead of ICRC transfers; for such a
+    /// config `ledger_canister_id` is only a synthetic map key (no IC ledger
+    /// exists). New in P2 — `#[serde(default)]` lets an old ciborium snapshot
+    /// decode cleanly to `None` (State is ciborium/serde-encoded — see storage.rs).
+    #[serde(default)]
+    pub custody_kind: Option<CustodyKind>,
+}
+
+/// How a collateral's underlying asset is custodied. `IcrcLedger` (the legacy /
+/// absent default) is held on an IC ICRC ledger; `NativeXrp` is held on the XRP
+/// Ledger via threshold Ed25519 (`chains::xrp`). See `CollateralConfig::custody_kind`.
+#[derive(candid::CandidType, Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum CustodyKind {
+    IcrcLedger,
+    NativeXrp,
 }
 
 impl CollateralConfig {
@@ -555,6 +573,17 @@ impl CollateralConfig {
     /// floor; both `None` and "no override set" inherit the global.
     pub fn effective_min_xrc_sources(&self, global: u32) -> u32 {
         self.min_xrc_sources.unwrap_or(global)
+    }
+
+    /// Resolved custody kind: `None` (legacy / absent) ⇒ `IcrcLedger`.
+    pub fn custody(&self) -> CustodyKind {
+        self.custody_kind.unwrap_or(CustodyKind::IcrcLedger)
+    }
+
+    /// True iff this collateral is custodied natively on the XRP Ledger, so the
+    /// ICRC deposit/withdraw/liquidation transfer paths do NOT apply to it.
+    pub fn is_native_xrp(&self) -> bool {
+        self.custody() == CustodyKind::NativeXrp
     }
 }
 
@@ -589,6 +618,7 @@ impl PartialEq for CollateralConfig {
             && self.rate_curve == other.rate_curve
             && self.redemption_tier == other.redemption_tier
             && self.min_xrc_sources == other.min_xrc_sources
+            && self.custody_kind == other.custody_kind
     }
 }
 
@@ -1637,6 +1667,7 @@ impl From<InitArg> for State {
                     rate_curve: None,
                     redemption_tier: 1,
                     min_xrc_sources: None, // inherit global floor for ICP
+                    custody_kind: None,    // ICRC (ICP ledger) — legacy default
                 });
                 configs
             },
@@ -6337,6 +6368,55 @@ mod tests {
         assert_eq!(restored.developer_principal, state.developer_principal);
         assert_eq!(restored.icp_ledger_principal, state.icp_ledger_principal);
         assert_eq!(restored.next_available_vault_id, state.next_available_vault_id);
+    }
+
+    #[test]
+    fn custody_defaults_to_icrc_and_resolves_native_xrp() {
+        let st = test_state();
+        let mut cfg = st
+            .get_collateral_config(&st.icp_ledger_principal)
+            .unwrap()
+            .clone();
+        // Legacy/default config: custody_kind None -> IcrcLedger.
+        assert_eq!(cfg.custody_kind, None);
+        assert_eq!(cfg.custody(), CustodyKind::IcrcLedger);
+        assert!(!cfg.is_native_xrp());
+        // Explicit native-XRP.
+        cfg.custody_kind = Some(CustodyKind::NativeXrp);
+        assert_eq!(cfg.custody(), CustodyKind::NativeXrp);
+        assert!(cfg.is_native_xrp());
+    }
+
+    #[test]
+    fn collateral_config_decodes_old_snapshot_without_custody_kind() {
+        // An old ciborium snapshot predates `custody_kind`. Removing the key and
+        // re-decoding must succeed (serde(default) -> None) and resolve to the
+        // legacy IcrcLedger custody — NOT error (which would risk wiping collateral
+        // state on upgrade, the UPG-002 class). Mirrors
+        // `test_serde_default_handles_missing_fields`.
+        let st = test_state();
+        let cfg = st
+            .get_collateral_config(&st.icp_ledger_principal)
+            .unwrap()
+            .clone();
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&cfg, &mut buf).unwrap();
+        let value: ciborium::Value = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        let entries = match value {
+            ciborium::Value::Map(mut e) => {
+                let before = e.len();
+                e.retain(|(k, _)| !matches!(k, ciborium::Value::Text(s) if s == "custody_kind"));
+                assert_eq!(e.len(), before - 1, "custody_kind key should have been present");
+                e
+            }
+            other => panic!("expected a CBOR map, got {other:?}"),
+        };
+        let mut modified = Vec::new();
+        ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut modified).unwrap();
+        let restored: CollateralConfig =
+            ciborium::de::from_reader(modified.as_slice()).expect("old snapshot must decode");
+        assert_eq!(restored.custody_kind, None);
+        assert_eq!(restored.custody(), CustodyKind::IcrcLedger);
     }
 
     #[test]

@@ -749,12 +749,28 @@ pub async fn open_vault(collateral_amount_raw: u64, collateral_type_opt: Option<
     let collateral_type = collateral_type_opt.unwrap_or_else(|| read_state(|s| s.icp_collateral_type()));
 
     // Look up CollateralConfig; check status is Active
-    let (config_ledger, config_status, min_deposit) = read_state(|s| {
+    let (config_ledger, config_status, min_deposit, is_native_xrp) = read_state(|s| {
         match s.get_collateral_config(&collateral_type) {
-            Some(config) => Ok((config.ledger_canister_id, config.status, config.min_collateral_deposit)),
+            Some(config) => Ok((
+                config.ledger_canister_id,
+                config.status,
+                config.min_collateral_deposit,
+                config.is_native_xrp(),
+            )),
             None => Err(ProtocolError::GenericError("Collateral type not supported.".to_string())),
         }
     })?;
+
+    // P2: native-XRP collateral is custodied on the XRP Ledger (chains::xrp), not
+    // pulled via an ICRC `transfer_from`. Its deposit flow (open-then-verify) is
+    // wired in P3; until then reject opens through this ICRC path so XRP collateral
+    // can never be silently mishandled as an ICRC token.
+    if is_native_xrp {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "Native-XRP collateral uses the XRP deposit flow (not yet enabled).".to_string(),
+        ));
+    }
 
     if !config_status.allows_open() {
         guard_principal.fail();
@@ -903,12 +919,28 @@ pub async fn open_vault_and_borrow(
     let collateral_type = collateral_type_opt.unwrap_or_else(|| read_state(|s| s.icp_collateral_type()));
 
     // Look up CollateralConfig; check status is Active
-    let (config_ledger, config_status, min_deposit) = read_state(|s| {
+    let (config_ledger, config_status, min_deposit, is_native_xrp) = read_state(|s| {
         match s.get_collateral_config(&collateral_type) {
-            Some(config) => Ok((config.ledger_canister_id, config.status, config.min_collateral_deposit)),
+            Some(config) => Ok((
+                config.ledger_canister_id,
+                config.status,
+                config.min_collateral_deposit,
+                config.is_native_xrp(),
+            )),
             None => Err(ProtocolError::GenericError("Collateral type not supported.".to_string())),
         }
     })?;
+
+    // P2: native-XRP collateral is custodied on the XRP Ledger (chains::xrp), not
+    // pulled via an ICRC `transfer_from`. Its deposit flow (open-then-verify) is
+    // wired in P3; until then reject opens through this ICRC path so XRP collateral
+    // can never be silently mishandled as an ICRC token.
+    if is_native_xrp {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "Native-XRP collateral uses the XRP deposit flow (not yet enabled).".to_string(),
+        ));
+    }
 
     if !config_status.allows_open() {
         guard_principal.fail();
@@ -1452,12 +1484,17 @@ pub async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
     };
     let amount: ICP = arg.amount.into();
 
-    let (vault, config_ledger, min_deposit) = match read_state(|s| {
+    let (vault, config_ledger, min_deposit, is_native_xrp) = match read_state(|s| {
         match s.vault_id_to_vaults.get(&arg.vault_id) {
             Some(v) => {
                 let config = s.get_collateral_config(&v.collateral_type)
                     .ok_or("Collateral type not configured")?;
-                Ok((v.clone(), config.ledger_canister_id, config.min_collateral_deposit))
+                Ok((
+                    v.clone(),
+                    config.ledger_canister_id,
+                    config.min_collateral_deposit,
+                    config.is_native_xrp(),
+                ))
             },
             None => Err("Vault not found"),
         }
@@ -1468,6 +1505,16 @@ pub async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
             return Err(ProtocolError::GenericError(msg.to_string()));
         }
     };
+
+    // P2: native-XRP collateral is not custodied via ICRC; its add-collateral flow
+    // is wired with the XRP deposit path (P3). Reject so XRP collateral can never be
+    // pulled as an ICRC token. (Latent until P5 enables XRP registration.)
+    if is_native_xrp {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "Native-XRP collateral uses the XRP deposit flow (not yet enabled).".to_string(),
+        ));
+    }
 
     if let Err(e) = require_vault_not_processing(&vault) {
         guard_principal.fail();
@@ -1545,12 +1592,27 @@ pub async fn open_vault_with_deposit(
     let collateral_type = collateral_type_opt.unwrap_or_else(|| read_state(|s| s.icp_collateral_type()));
 
     // Look up CollateralConfig
-    let (config_ledger, config_status, config_fee, min_deposit) = read_state(|s| {
+    let (config_ledger, config_status, config_fee, min_deposit, is_native_xrp) = read_state(|s| {
         match s.get_collateral_config(&collateral_type) {
-            Some(config) => Ok((config.ledger_canister_id, config.status, config.ledger_fee, config.min_collateral_deposit)),
+            Some(config) => Ok((
+                config.ledger_canister_id,
+                config.status,
+                config.ledger_fee,
+                config.min_collateral_deposit,
+                config.is_native_xrp(),
+            )),
             None => Err(ProtocolError::GenericError("Collateral type not supported.".to_string())),
         }
     })?;
+
+    // P2: native-XRP collateral is custodied on the XRP Ledger (chains::xrp), not
+    // swept from an ICRC deposit subaccount. Reject until the XRP deposit flow (P3).
+    if is_native_xrp {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "Native-XRP collateral uses the XRP deposit flow (not yet enabled).".to_string(),
+        ));
+    }
 
     if !config_status.allows_open() {
         guard_principal.fail();
@@ -1641,12 +1703,18 @@ pub async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError
         }
     };
 
-    let (vault, config_ledger, config_fee, min_deposit) = match read_state(|s| {
+    let (vault, config_ledger, config_fee, min_deposit, is_native_xrp) = match read_state(|s| {
         match s.vault_id_to_vaults.get(&vault_id) {
             Some(v) => {
                 let config = s.get_collateral_config(&v.collateral_type)
                     .ok_or("Collateral type not configured")?;
-                Ok((v.clone(), config.ledger_canister_id, config.ledger_fee, config.min_collateral_deposit))
+                Ok((
+                    v.clone(),
+                    config.ledger_canister_id,
+                    config.ledger_fee,
+                    config.min_collateral_deposit,
+                    config.is_native_xrp(),
+                ))
             },
             None => Err("Vault not found"),
         }
@@ -1657,6 +1725,16 @@ pub async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError
             return Err(ProtocolError::GenericError(msg.to_string()));
         }
     };
+
+    // P2: native-XRP collateral is not custodied via ICRC; its add-collateral flow
+    // is wired with the XRP deposit path (P3). Reject so XRP collateral can never be
+    // swept as an ICRC token. (Latent until P5 enables XRP registration.)
+    if is_native_xrp {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "Native-XRP collateral uses the XRP deposit flow (not yet enabled).".to_string(),
+        ));
+    }
 
     if let Err(e) = require_vault_not_processing(&vault) {
         guard_principal.fail();
