@@ -80,6 +80,7 @@ struct RegisterChainArg {
     finality_depth: u32,
     gas_strategy: GasStrategy,
     chain_native_decimals: u8,
+    min_quorum_providers: Option<u32>,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -285,6 +286,9 @@ fn phase1b_observer_consensus_safe_cursor_advances() {
             max_fee_gwei_ceiling: 500,
         },
         chain_native_decimals: 18,
+        // One mock RPC provider: relax the per-chain quorum floor (default 3)
+        // to 1 so the mock-backed financial reads satisfy quorum.
+        min_quorum_providers: Some(1),
     };
     decode_result(
         update_dev(&pic, backend, "register_chain", Encode!(&reg).unwrap()),
@@ -347,7 +351,19 @@ fn phase1b_observer_consensus_safe_cursor_advances() {
         "set_last_observed_block",
     )
     .expect("set_last_observed_block");
-    update_any(&pic, mock, "set_blocks", Encode!(&SEED_PLUS_WINDOW, &SEED_PLUS_WINDOW).unwrap());
+    // M-07 (FINAL-1): fetch_block_numbers advances the cursor to a candidate
+    // block (SEED + MAX_BLOCK_SCAN_WINDOW = SEED_PLUS_WINDOW) ONLY once that
+    // candidate is buried under finality_depth confirmations, i.e. block
+    // `candidate + finality_depth` also exists. finality_depth is 1 here, so the
+    // chain head must sit one block ABOVE SEED_PLUS_WINDOW for the cursor to
+    // advance to SEED_PLUS_WINDOW. Setting the head exactly at SEED_PLUS_WINDOW
+    // (the pre-M-07 expectation) leaves the candidate unfinalized and stalls.
+    update_any(
+        &pic,
+        mock,
+        "set_blocks",
+        Encode!(&(SEED_PLUS_WINDOW + 1), &(SEED_PLUS_WINDOW + 1)).unwrap(),
+    );
 
     assert_eq!(cursor(&pic, backend), SEED_BLOCK, "cursor seeded to SEED_BLOCK");
 

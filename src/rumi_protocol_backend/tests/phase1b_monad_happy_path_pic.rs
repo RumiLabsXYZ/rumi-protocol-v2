@@ -92,6 +92,7 @@ struct RegisterChainArg {
     finality_depth: u32,
     gas_strategy: GasStrategy,
     chain_native_decimals: u8,
+    min_quorum_providers: Option<u32>,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -353,6 +354,9 @@ fn phase1b_monad_happy_path_supply_invariant() {
             max_fee_gwei_ceiling: 500,
         },
         chain_native_decimals: 18,
+        // One mock RPC provider: relax the per-chain quorum floor (default 3)
+        // to 1 so the mock-backed financial reads satisfy quorum.
+        min_quorum_providers: Some(1),
     };
     decode_result(
         update_dev(&pic, backend, "register_chain", Encode!(&reg).unwrap()),
@@ -548,9 +552,21 @@ fn phase1b_monad_happy_path_supply_invariant() {
     //           at block 1_001_024 so the confirm path reads the on-chain amount.
     push_mint_log(&pic, mock, vault_id, &recipient, debt_e8s, "0xmint1", 1_001_024);
 
-    // Several windows: window 1 submits (Queued -> Inflight), window 2+ confirms
-    // (receipt mined + final, Mint log read, confirm_mint_in_state).
-    advance_and_tick(&pic, 4);
+    // Window(s) 1: settlement submits the mint (Queued -> Inflight); the mock
+    // auto-mines 0xmint1. A couple windows so the submit definitely lands.
+    advance_and_tick(&pic, 2);
+    // M-07 (FINAL-1): confirm_op finalizes a mint only once its receipt block is
+    // buried: `receipt_block <= fetch_block_numbers().finalized`, where the
+    // burn-watch finalized candidate (last_observed + 1024 = 1_001_024) is itself
+    // "final" only when `candidate + finality_depth` exists. So (a) pin the mint
+    // receipt to the Mint-log block 1_001_024 (= the candidate) and (b) raise the
+    // chain head one block (finality_depth = 1) above it so the candidate is
+    // buried and the cursor advances onto it. The pre-M-07 setup left the receipt
+    // at the unburied tip, so the mint never confirmed.
+    update_any(&pic, mock, "set_receipt", Encode!(&"0xmint1".to_string(), &true, &1_001_024u64).unwrap());
+    update_any(&pic, mock, "set_blocks", Encode!(&1_001_025u64, &1_001_025u64).unwrap());
+    // window 2+ confirms (receipt mined + final, Mint log read, confirm_mint_in_state).
+    advance_and_tick(&pic, 3);
 
     let v = get_vault(&pic, backend, vault_id).expect("vault after mint confirm");
     assert_eq!(v.status, ChainVaultStatus::Open, "mint confirmed => Open");
@@ -572,7 +588,10 @@ fn phase1b_monad_happy_path_supply_invariant() {
     // Advance the chain head another 1024 so the cursor climbs 1_000_000 ->
     // 1_001_024 -> 1_002_048 over the next ticks; the burn at 1_001_068 lands in
     // the (1_001_024, 1_002_048] scan window and is observed.
-    update_any(&pic, mock, "set_blocks", Encode!(&1_002_048u64, &1_002_048u64).unwrap());
+    // M-07: the head must sit finality_depth (1) above the burn-watch candidate
+    // (1_002_048) so the candidate is buried and the cursor advances onto it,
+    // scanning the (1_001_024, 1_002_048] window where 0xburn1 sits.
+    update_any(&pic, mock, "set_blocks", Encode!(&1_002_049u64, &1_002_049u64).unwrap());
     push_burn_log(&pic, mock, vault_id, &recipient, 40 * E8, "0xburn1", 1_001_068);
     advance_and_tick(&pic, 3);
 
@@ -584,7 +603,9 @@ fn phase1b_monad_happy_path_supply_invariant() {
     // ── Step 8: burn the remaining 60e8; debt + supply go to 0 ───────────────
     // Advance head another 1024: cursor 1_002_048 -> 1_003_072; burn at 1_002_136
     // is within (1_002_048, 1_003_072].
-    update_any(&pic, mock, "set_blocks", Encode!(&1_003_072u64, &1_003_072u64).unwrap());
+    // M-07: head one block above the candidate (1_003_072) so the cursor advances
+    // and scans (1_002_048, 1_003_072] where 0xburn2 sits.
+    update_any(&pic, mock, "set_blocks", Encode!(&1_003_073u64, &1_003_073u64).unwrap());
     push_burn_log(&pic, mock, vault_id, &recipient, 60 * E8, "0xburn2", 1_002_136);
     advance_and_tick(&pic, 2);
 
@@ -612,10 +633,14 @@ fn phase1b_monad_happy_path_supply_invariant() {
     assert_eq!(v.status, ChainVaultStatus::Closing, "withdraw all => Closing");
     assert_supply(&pic, backend, 0, "after withdraw enqueue (Closing)");
 
-    // Settlement submits 0xwd1 (auto-mined at finalized=1_003_072) then confirms
-    // it, flipping Closing -> Closed. The burn-watch cursor is already at
-    // 1_003_072, so the receipt is immediately final.
-    advance_and_tick(&pic, 4);
+    // Window(s) 1: settlement submits 0xwd1 (auto-mined at the tip). M-07: pin its
+    // receipt to the burn-watch cursor (1_003_072), which is already final
+    // (receipt_block <= fetch_block_numbers().finalized), so confirm_op flips
+    // Closing -> Closed. The pre-M-07 setup left the receipt at the unburied tip
+    // and never confirmed.
+    advance_and_tick(&pic, 2);
+    update_any(&pic, mock, "set_receipt", Encode!(&"0xwd1".to_string(), &true, &1_003_072u64).unwrap());
+    advance_and_tick(&pic, 2);
     let v = get_vault(&pic, backend, vault_id).expect("vault after withdraw confirm");
     assert_eq!(v.status, ChainVaultStatus::Closed, "withdraw confirmed => Closed");
 
