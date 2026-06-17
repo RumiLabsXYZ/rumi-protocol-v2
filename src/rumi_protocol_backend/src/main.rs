@@ -3274,6 +3274,24 @@ async fn xrp_balance(address: String) -> Result<u64, ProtocolError> {
         .map_err(|_| ProtocolError::GenericError("xrp balance exceeds u64 drops".to_string()))
 }
 
+/// P3 (native-XRP collateral): open a vault in open-then-verify staging and return
+/// its XRPL custody address to fund. No collateral credited, no icUSD minted.
+/// Errors until native-XRP collateral is registered (P5).
+#[update]
+async fn open_xrp_vault() -> Result<rumi_protocol_backend::vault::XrpVaultOpenInfo, ProtocolError> {
+    validate_call().await?;
+    check_postcondition(rumi_protocol_backend::vault::open_xrp_vault().await)
+}
+
+/// P3 (native-XRP collateral): verify the deposit to a vault's custody address and
+/// credit it as collateral (creating the Vault with zero debt). Owner-only,
+/// idempotent. Borrow icUSD afterwards via the normal `borrow_from_vault`.
+#[update]
+async fn confirm_xrp_deposit(vault_id: u64) -> Result<u64, ProtocolError> {
+    validate_call().await?;
+    check_postcondition(rumi_protocol_backend::vault::confirm_xrp_deposit(vault_id).await)
+}
+
 #[query]
 fn http_request(req: HttpRequest) -> HttpResponse {
     use ic_metrics_encoder::MetricsEncoder;
@@ -6665,6 +6683,10 @@ async fn add_collateral_token(arg: rumi_protocol_backend::AddCollateralArg) -> R
         // floor. Operator can override later via `set_collateral_min_xrc_sources`
         // if the asset has genuinely thin CEX coverage on XRC.
         min_xrc_sources: None,
+        // P2: collaterals registered via this admin path are ICRC-custodied.
+        // Native-XRP collateral (custody_kind = NativeXrp) is registered through a
+        // separate path once its deposit flow is wired (spec P5); not settable here.
+        custody_kind: None,
     };
 
     mutate_state(|s| {

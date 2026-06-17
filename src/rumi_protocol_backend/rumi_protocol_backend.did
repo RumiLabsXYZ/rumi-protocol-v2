@@ -65,6 +65,9 @@ type ChainVaultV1 = record {
   mint_recipient : text;
   debt_e8s : nat;
 };
+type CustodyKind = variant { IcrcLedger; NativeXrp };
+type XrpVaultOpenInfo = record { vault_id : nat64; custody_address : text };
+type XrpVaultOpenResult = variant { Ok : XrpVaultOpenInfo; Err : ProtocolError };
 type CollateralConfig = record {
   last_redemption_time : nat64;
   status : CollateralStatus;
@@ -93,6 +96,7 @@ type CollateralConfig = record {
   borrowing_fee : blob;
   interest_rate_apr : blob;
   liquidation_ratio : blob;
+  custody_kind : opt CustodyKind;
 };
 type CollateralInterestInfo = record {
   total_debt_e8s : nat64;
@@ -1190,4 +1194,6 @@ service : (ProtocolArg) -> {
   xrp_transform_server : (TransformArgs) -> (HttpResponse) query;
   xrp_transform_submit : (TransformArgs) -> (HttpResponse) query;
   xrp_transform_tx : (TransformArgs) -> (HttpResponse) query;
+  open_xrp_vault : () -> (XrpVaultOpenResult);
+  confirm_xrp_deposit : (nat64) -> (Result_1);
 }

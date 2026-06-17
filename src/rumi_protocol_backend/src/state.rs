@@ -547,6 +547,46 @@ pub struct CollateralConfig {
     /// switch if XRC aggregation degrades for a single asset).
     #[serde(default)]
     pub min_xrc_sources: Option<u32>,
+    /// How this collateral is custodied. `None`/absent (every legacy collateral)
+    /// resolves to `IcrcLedger` via `custody()`. `Some(NativeXrp)` routes the
+    /// deposit/withdraw/liquidation custody touchpoints through `chains::xrp`
+    /// (threshold-Ed25519 XRPL addresses) instead of ICRC transfers; for such a
+    /// config `ledger_canister_id` is only a synthetic map key (no IC ledger
+    /// exists). New in P2 — `#[serde(default)]` lets an old ciborium snapshot
+    /// decode cleanly to `None` (State is ciborium/serde-encoded — see storage.rs).
+    #[serde(default)]
+    pub custody_kind: Option<CustodyKind>,
+}
+
+/// How a collateral's underlying asset is custodied. `IcrcLedger` (the legacy /
+/// absent default) is held on an IC ICRC ledger; `NativeXrp` is held on the XRP
+/// Ledger via threshold Ed25519 (`chains::xrp`). See `CollateralConfig::custody_kind`.
+#[derive(candid::CandidType, Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum CustodyKind {
+    IcrcLedger,
+    NativeXrp,
+}
+
+/// P3: a native-XRP vault awaiting its on-chain deposit. Created by
+/// `open_xrp_vault` (no collateral credited, no icUSD minted) and removed by
+/// `confirm_xrp_deposit` once the deposit to `custody_address` is verified and a
+/// real `Vault` is created. `derivation_nonce` (= the reserved vault_id) plus the
+/// owner pin the threshold-Ed25519 custody path, so the address is reproducible.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct XrpPendingDeposit {
+    pub owner: Principal,
+    pub custody_address: String,
+    pub derivation_nonce: u64,
+    pub opened_at_ns: u64,
+}
+
+/// Synthetic `collateral_type` / `CollateralConfig` map key for native XRP. XRP has
+/// no IC ledger, so this reserved principal is only an opaque key (15 bytes — not a
+/// valid 10-byte canister id, so it cannot collide with a real canister). The XRP
+/// `CollateralConfig` (registered in P5) is keyed by this; its `custody_kind` is
+/// `NativeXrp` and its `ledger_canister_id` is this same synthetic value.
+pub fn xrp_collateral_principal() -> Principal {
+    Principal::from_slice(b"rumi-xrp-native")
 }
 
 impl CollateralConfig {
@@ -555,6 +595,17 @@ impl CollateralConfig {
     /// floor; both `None` and "no override set" inherit the global.
     pub fn effective_min_xrc_sources(&self, global: u32) -> u32 {
         self.min_xrc_sources.unwrap_or(global)
+    }
+
+    /// Resolved custody kind: `None` (legacy / absent) ⇒ `IcrcLedger`.
+    pub fn custody(&self) -> CustodyKind {
+        self.custody_kind.unwrap_or(CustodyKind::IcrcLedger)
+    }
+
+    /// True iff this collateral is custodied natively on the XRP Ledger, so the
+    /// ICRC deposit/withdraw/liquidation transfer paths do NOT apply to it.
+    pub fn is_native_xrp(&self) -> bool {
+        self.custody() == CustodyKind::NativeXrp
     }
 }
 
@@ -589,6 +640,7 @@ impl PartialEq for CollateralConfig {
             && self.rate_curve == other.rate_curve
             && self.redemption_tier == other.redemption_tier
             && self.min_xrc_sources == other.min_xrc_sources
+            && self.custody_kind == other.custody_kind
     }
 }
 
@@ -1269,6 +1321,14 @@ pub struct State {
     #[serde(default)]
     pub multi_chain: crate::chains::MultiChainState,
 
+    /// P3: native-XRP collateral open-then-verify staging (keyed by vault_id). A
+    /// vault opened for XRP collateral sits here in AwaitingDeposit until the user's
+    /// XRP deposit to the derived custody address is verified, then a normal `Vault`
+    /// is created and the entry removed. Empty on every pre-P3 snapshot via
+    /// `#[serde(default)]` (State is ciborium/serde-encoded — storage.rs).
+    #[serde(default)]
+    pub xrp_pending_deposits: BTreeMap<u64, XrpPendingDeposit>,
+
     /// Phase 1b Task 6: override for the EVM RPC canister principal.
     /// When `Some`, `chains::monad::evm_rpc::evm_rpc_principal()` uses this
     /// value instead of the hardcoded production canister
@@ -1514,6 +1574,7 @@ impl Default for State {
             ticks_since_full_sweep: 0,
             bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
             multi_chain: crate::chains::MultiChainState::default(),
+            xrp_pending_deposits: BTreeMap::new(),
             evm_rpc_principal_override: None,
             sol_rpc_principal_override: None,
             solana_workers_enabled: false,
@@ -1637,6 +1698,7 @@ impl From<InitArg> for State {
                     rate_curve: None,
                     redemption_tier: 1,
                     min_xrc_sources: None, // inherit global floor for ICP
+                    custody_kind: None,    // ICRC (ICP ledger) — legacy default
                 });
                 configs
             },
@@ -1744,6 +1806,7 @@ impl From<InitArg> for State {
             ticks_since_full_sweep: 0,
             bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
             multi_chain: crate::chains::MultiChainState::default(),
+            xrp_pending_deposits: BTreeMap::new(),
             evm_rpc_principal_override: None,
             sol_rpc_principal_override: None,
             solana_workers_enabled: false,
@@ -6337,6 +6400,102 @@ mod tests {
         assert_eq!(restored.developer_principal, state.developer_principal);
         assert_eq!(restored.icp_ledger_principal, state.icp_ledger_principal);
         assert_eq!(restored.next_available_vault_id, state.next_available_vault_id);
+    }
+
+    #[test]
+    fn custody_defaults_to_icrc_and_resolves_native_xrp() {
+        let st = test_state();
+        let mut cfg = st
+            .get_collateral_config(&st.icp_ledger_principal)
+            .unwrap()
+            .clone();
+        // Legacy/default config: custody_kind None -> IcrcLedger.
+        assert_eq!(cfg.custody_kind, None);
+        assert_eq!(cfg.custody(), CustodyKind::IcrcLedger);
+        assert!(!cfg.is_native_xrp());
+        // Explicit native-XRP.
+        cfg.custody_kind = Some(CustodyKind::NativeXrp);
+        assert_eq!(cfg.custody(), CustodyKind::NativeXrp);
+        assert!(cfg.is_native_xrp());
+    }
+
+    #[test]
+    fn collateral_config_decodes_old_snapshot_without_custody_kind() {
+        // An old ciborium snapshot predates `custody_kind`. Removing the key and
+        // re-decoding must succeed (serde(default) -> None) and resolve to the
+        // legacy IcrcLedger custody — NOT error (which would risk wiping collateral
+        // state on upgrade, the UPG-002 class). Mirrors
+        // `test_serde_default_handles_missing_fields`.
+        let st = test_state();
+        let cfg = st
+            .get_collateral_config(&st.icp_ledger_principal)
+            .unwrap()
+            .clone();
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&cfg, &mut buf).unwrap();
+        let value: ciborium::Value = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        let entries = match value {
+            ciborium::Value::Map(mut e) => {
+                let before = e.len();
+                e.retain(|(k, _)| !matches!(k, ciborium::Value::Text(s) if s == "custody_kind"));
+                assert_eq!(e.len(), before - 1, "custody_kind key should have been present");
+                e
+            }
+            other => panic!("expected a CBOR map, got {other:?}"),
+        };
+        let mut modified = Vec::new();
+        ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut modified).unwrap();
+        let restored: CollateralConfig =
+            ciborium::de::from_reader(modified.as_slice()).expect("old snapshot must decode");
+        assert_eq!(restored.custody_kind, None);
+        assert_eq!(restored.custody(), CustodyKind::IcrcLedger);
+    }
+
+    #[test]
+    fn xrp_pending_deposits_defaults_empty_on_old_snapshot() {
+        // A pre-P3 ciborium snapshot lacks `xrp_pending_deposits`. Removing the key
+        // and re-decoding must succeed with an empty map (serde default), not error.
+        let st = test_state();
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&st, &mut buf).unwrap();
+        let value: ciborium::Value = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        let entries = match value {
+            ciborium::Value::Map(mut e) => {
+                e.retain(
+                    |(k, _)| !matches!(k, ciborium::Value::Text(s) if s == "xrp_pending_deposits"),
+                );
+                e
+            }
+            other => panic!("expected a CBOR map, got {other:?}"),
+        };
+        let mut modified = Vec::new();
+        ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut modified).unwrap();
+        let restored: State =
+            ciborium::de::from_reader(modified.as_slice()).expect("old snapshot must decode");
+        assert!(restored.xrp_pending_deposits.is_empty());
+    }
+
+    #[test]
+    fn xrp_collateral_principal_is_stable_and_not_a_canister_id() {
+        let p = xrp_collateral_principal();
+        assert_eq!(p, xrp_collateral_principal(), "must be deterministic");
+        // 15 bytes != a 10-byte opaque canister id, so it cannot collide with a real
+        // canister principal while still serving as an opaque collateral map key.
+        assert_eq!(p.as_slice().len(), 15);
+    }
+
+    #[test]
+    fn xrp_pending_deposit_round_trips() {
+        let dep = XrpPendingDeposit {
+            owner: Principal::anonymous(),
+            custody_address: "rLUEXYuLiQptky37CqLcm9USQpPiz5rkpD".to_string(),
+            derivation_nonce: 7,
+            opened_at_ns: 123,
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&dep, &mut buf).unwrap();
+        let back: XrpPendingDeposit = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        assert_eq!(dep, back);
     }
 
     #[test]

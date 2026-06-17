@@ -90,6 +90,7 @@ struct RegisterChainArg {
     finality_depth: u32,
     gas_strategy: GasStrategy,
     chain_native_decimals: u8,
+    min_quorum_providers: Option<u32>,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -360,6 +361,9 @@ fn configure_chain(pic: &PocketIc, backend: Principal, mock: Principal, seed: u6
             max_fee_gwei_ceiling: 500,
         },
         chain_native_decimals: 18,
+        // One mock RPC provider: relax the per-chain quorum floor (default 3)
+        // to 1 so the mock-backed financial reads satisfy quorum.
+        min_quorum_providers: Some(1),
     };
     decode_result(
         update_dev(pic, backend, "register_chain", Encode!(&reg).unwrap()),
@@ -443,12 +447,13 @@ fn phase1b_getlogs_chunks_wide_burn_scan_range() {
     let seed: u64 = 5_000_000;
     configure_chain(&pic, backend, mock, seed);
 
-    // Chain head one window above the seed so the FIRST tick advances the cursor
-    // by exactly SCAN_WINDOW and the burn-watch scans the full (seed, seed+W]
-    // range — a > 100-block range that trips the mock's 100-block getLogs cap
-    // unless the wrapper chunks it.
+    // Chain head one window above the seed PLUS finality_depth (M-07): the cursor
+    // advances to the candidate seed + SCAN_WINDOW (win1_finalized) only once that
+    // block is buried, i.e. block win1_finalized + 1 also exists. The first tick
+    // then scans the full (seed, seed+W] range (a > 100-block range) that trips the
+    // mock's 100-block getLogs cap unless the wrapper chunks it.
     let win1_finalized = seed + SCAN_WINDOW;
-    update_any(&pic, mock, "set_blocks", Encode!(&win1_finalized, &win1_finalized).unwrap());
+    update_any(&pic, mock, "set_blocks", Encode!(&(win1_finalized + 1), &(win1_finalized + 1)).unwrap());
     update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xmint1".to_string()).unwrap());
 
     // A burn placed near the FAR end of the window: > 100 blocks past from_block
@@ -529,7 +534,12 @@ fn phase1b_getlogs_chunks_wide_burn_scan_range() {
             );
             advance_and_tick(&pic, 2);
             push_mint_log(&pic, mock, vault_id, &recipient, debt_e8s, "0xmint1", win1_finalized);
-            advance_and_tick(&pic, 4);
+            // M-07: pin the mint receipt to its Mint-log block (win1_finalized = the
+            // candidate, buried by the head) so confirm_op finalizes it; the
+            // auto-mine would otherwise leave the receipt at the unburied tip.
+            advance_and_tick(&pic, 2);
+            update_any(&pic, mock, "set_receipt", Encode!(&"0xmint1".to_string(), &true, &win1_finalized).unwrap());
+            advance_and_tick(&pic, 2);
 
             let v = get_vault(&pic, backend, vault_id).expect("vault after mint confirm");
             assert_eq!(v.status, ChainVaultStatus::Open, "mint confirmed => Open");
@@ -542,7 +552,10 @@ fn phase1b_getlogs_chunks_wide_burn_scan_range() {
             let win2_finalized = win1_finalized + SCAN_WINDOW;
             let far_burn_block_2 = win2_finalized - 56;
             update_any(&pic, mock, "clear_logs", Encode!().unwrap());
-            update_any(&pic, mock, "set_blocks", Encode!(&win2_finalized, &win2_finalized).unwrap());
+            // M-07: head one block above the second candidate (win2_finalized) so
+            // the cursor advances onto it and scans the (win1_finalized,
+            // win2_finalized] window where the far burn sits.
+            update_any(&pic, mock, "set_blocks", Encode!(&(win2_finalized + 1), &(win2_finalized + 1)).unwrap());
             push_burn_log(&pic, mock, vault_id, &recipient, 40 * E8, "0xgoodburn", far_burn_block_2);
 
             advance_and_tick(&pic, 6);
@@ -604,10 +617,13 @@ fn phase1b_burn_watch_skips_getlogs_when_no_debt() {
         Encode!(&"eth_getLogs".to_string(), &"forced getLogs failure (no-debt skip guard)".to_string()).unwrap(),
     );
 
-    // Chain head one window above the seed; the finality probe (eth_getBlockByNumber,
-    // NOT failed) lets the cursor advance — IF the scan is skipped.
+    // Chain head one window above the seed PLUS finality_depth (M-07): the finality
+    // probe (eth_getBlockByNumber, NOT failed) advances the cursor to `finalized`
+    // only once that candidate is buried (block finalized + 1 exists), and only IF
+    // the scan is skipped.
     let finalized = seed + SCAN_WINDOW;
-    update_any(&pic, mock, "set_blocks", Encode!(&finalized, &finalized).unwrap());
+    let head = finalized + 1;
+    update_any(&pic, mock, "set_blocks", Encode!(&head, &head).unwrap());
 
     // No vault opened → total chain-vault debt == 0.
     advance_and_tick(&pic, 4);
